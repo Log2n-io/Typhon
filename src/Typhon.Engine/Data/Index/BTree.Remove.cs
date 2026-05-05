@@ -1,5 +1,6 @@
 // unset
 
+using System.Runtime.CompilerServices;
 using System.Threading;
 
 namespace Typhon.Engine;
@@ -82,7 +83,25 @@ public abstract partial class BTree<TKey, TStore>
             int order = args.Compare(args.Key, firstKey);
             if (order < 0)
             {
-                return OlcRemoveResult.NotFound; // key < first key → definitely not in tree
+                // Issue #297: ll might no longer be the leftmost leaf (concurrent merge moved the head).
+                // Snapshot ll's previous AND validate ll's version after — only conclude NotFound if ll is still leftmost (no previous sibling) AND data is
+                // consistent. Otherwise restart.
+                var llPrev = ll.GetPrevious(ref accessor);
+                if (!llLatch.ValidateVersion(llVersion))
+                {
+                    return OlcRemoveResult.Restart;
+                }
+                if (llPrev.IsValid)
+                {
+                    return OlcRemoveResult.Restart; // ll has a previous sibling → not leftmost; restart with fresh head
+                }
+                if (OlcDescentTrace.OnRemoveNotFound != null && typeof(TKey) == typeof(int))
+                {
+                    var ak = args.Key; var fk = firstKey;
+                    OlcDescentTrace.OnRemoveNotFound(OlcDescentTrace.RemoveBranchBeginFastPathLessThanFirst,
+                        Unsafe.As<TKey, int>(ref ak), ll.ChunkId, Unsafe.As<TKey, int>(ref fk), ll.GetCount(ref accessor));
+                }
+                return OlcRemoveResult.NotFound; // key < first key AND ll is leftmost → definitely not in tree
             }
 
             if (order == 0)
@@ -154,7 +173,25 @@ public abstract partial class BTree<TKey, TStore>
             int order = args.Compare(args.Key, lastKey);
             if (order > 0)
             {
-                return OlcRemoveResult.NotFound; // key > last key → definitely not in tree
+                // Issue #297: rll might no longer be the rightmost leaf (concurrent merge moved the tail, OR concurrent split added a new rightmost).
+                // Snapshot rll's next AND validate rll's version after — only conclude NotFound if rll is still rightmost (no next sibling) AND data is
+                // consistent. Otherwise restart.
+                var rllNext = rll.GetNext(ref accessor);
+                if (!rllLatch.ValidateVersion(rllVersion))
+                {
+                    return OlcRemoveResult.Restart;
+                }
+                if (rllNext.IsValid)
+                {
+                    return OlcRemoveResult.Restart; // rll has a next sibling → not rightmost; restart with fresh tail
+                }
+                if (OlcDescentTrace.OnRemoveNotFound != null && typeof(TKey) == typeof(int))
+                {
+                    var ak = args.Key; var lk = lastKey;
+                    OlcDescentTrace.OnRemoveNotFound(OlcDescentTrace.RemoveBranchEndFastPathGreaterThanLast,
+                        Unsafe.As<TKey, int>(ref ak), rll.ChunkId, Unsafe.As<TKey, int>(ref lk), rllCount);
+                }
+                return OlcRemoveResult.NotFound; // key > last key AND rll is rightmost → definitely not in tree
             }
 
             if (order == 0)
@@ -211,6 +248,19 @@ public abstract partial class BTree<TKey, TStore>
             {
                 return OlcRemoveResult.Restart;
             }
+            if (OlcDescentTrace.OnRemoveNotFound != null && typeof(TKey) == typeof(int))
+            {
+                var nfCount = nfLeaf.GetCount(ref accessor);
+                int firstKeyInt = 0;
+                if (nfCount > 0)
+                {
+                    var fk = nfLeaf.GetFirst(ref accessor).Key;
+                    firstKeyInt = Unsafe.As<TKey, int>(ref fk);
+                }
+                var ak = args.Key;
+                OlcDescentTrace.OnRemoveNotFound(OlcDescentTrace.RemoveBranchGeneralKeyIndexNegative, Unsafe.As<TKey, int>(ref ak), leafChunkId,
+                    firstKeyInt, nfCount);
+            }
             return OlcRemoveResult.NotFound;
         }
 
@@ -243,6 +293,19 @@ public abstract partial class BTree<TKey, TStore>
                 var reIndex = leaf.Find(args.Key, args.Comparer, ref accessor);
                 if (reIndex < 0)
                 {
+                    if (OlcDescentTrace.OnRemoveNotFound != null && typeof(TKey) == typeof(int))
+                    {
+                        var leafCount = leaf.GetCount(ref accessor);
+                        int firstKeyInt = 0;
+                        if (leafCount > 0)
+                        {
+                            var fk = leaf.GetFirst(ref accessor).Key;
+                            firstKeyInt = Unsafe.As<TKey, int>(ref fk);
+                        }
+                        var ak = args.Key;
+                        OlcDescentTrace.OnRemoveNotFound(OlcDescentTrace.RemoveBranchUnderLockReFindNegative, Unsafe.As<TKey, int>(ref ak), leafChunkId,
+                            firstKeyInt, leafCount);
+                    }
                     leafLatch.WriteUnlock();
                     return OlcRemoveResult.NotFound; // concurrent writer already removed it
                 }
@@ -277,27 +340,39 @@ public abstract partial class BTree<TKey, TStore>
                 var ll = _linkList;
                 ll.PreDirtyForWrite(ref accessor);
                 SpinWriteLock(ll.GetLatch(ref accessor));
-                int order = args.Compare(args.Key, ll.GetFirst(ref accessor).Key);
-                if (order < 0)
-                {
-                    ll.GetLatch(ref accessor).AbortWriteLock(); // key not in tree — didn't modify node
-                    return;
-                }
 
-                if (order == 0 && (Root == ll || ll.GetCount(ref accessor) > ll.GetCapacity() / 2))
+                // Issue #297: ll might no longer be the leftmost leaf if a concurrent split inserted a new
+                // left-side leaf, OR if we observed a stale `_linkList` field. If ll has a valid previous,
+                // the key could live in that earlier leaf — fall through to the general path.
+                // Mirrors the symmetric end-fast-path safety at the rll branch below.
+                if (ll.GetPrevious(ref accessor).IsValid)
                 {
-                    args.SetRemovedValue(ll.PopFirstInternal(ref accessor).Value);
-                    ll.GetLatch(ref accessor).WriteUnlock();
-                    _hasCachedLastKey = false;
-                    DecCount();
-                    if (IsEmpty())
-                    {
-                        Root = _linkList = _reverseLinkList = default;
-                        Height--;
-                    }
-                    return;
+                    ll.GetLatch(ref accessor).AbortWriteLock();
                 }
-                ll.GetLatch(ref accessor).AbortWriteLock(); // condition failed — didn't modify node
+                else
+                {
+                    int order = args.Compare(args.Key, ll.GetFirst(ref accessor).Key);
+                    if (order < 0)
+                    {
+                        ll.GetLatch(ref accessor).AbortWriteLock(); // key not in tree — didn't modify node
+                        return;
+                    }
+
+                    if (order == 0 && (Root == ll || ll.GetCount(ref accessor) > ll.GetCapacity() / 2))
+                    {
+                        args.SetRemovedValue(ll.PopFirstInternal(ref accessor).Value);
+                        ll.GetLatch(ref accessor).WriteUnlock();
+                        _hasCachedLastKey = false;
+                        DecCount();
+                        if (IsEmpty())
+                        {
+                            Root = _linkList = _reverseLinkList = default;
+                            Height--;
+                        }
+                        return;
+                    }
+                    ll.GetLatch(ref accessor).AbortWriteLock(); // condition failed — didn't modify node
+                }
             }
 
             // End-remove fast path
@@ -364,9 +439,19 @@ public abstract partial class BTree<TKey, TStore>
                 Height--;
             }
 
-            if (_reverseLinkList.IsValid && _reverseLinkList.GetPrevious(ref accessor).IsValid && _reverseLinkList.GetPrevious(ref accessor).GetNext(ref accessor).IsValid == false)
+            // Issue #297: avoid TOCTOU on `_reverseLinkList`. Snapshot the field once and operate on
+            // the local — without this, four reads of the field could each see a different value
+            // when concurrent removers race here, ending up assigning a stale or non-tail leaf.
             {
-                _reverseLinkList = _reverseLinkList.GetPrevious(ref accessor);
+                var rl = _reverseLinkList;
+                if (rl.IsValid)
+                {
+                    var prev = rl.GetPrevious(ref accessor);
+                    if (prev.IsValid && !prev.GetNext(ref accessor).IsValid)
+                    {
+                        _reverseLinkList = prev;
+                    }
+                }
             }
         }
         finally
@@ -419,6 +504,16 @@ public abstract partial class BTree<TKey, TStore>
                 return false; // node modified between version read and data read — restart
             }
 
+            // Defensive: a torn-but-validated read should be impossible after the version
+            // check above, but treat zero/invalid child as restart rather than crashing
+            // when the next iteration tries to deref it. Issue #297.
+            if (!child.IsValid)
+            {
+                return false;
+            }
+
+            OlcDescentTrace.RecordStep?.Invoke(OlcDescentTrace.OpRemove, node.ChunkId, version, index, child.ChunkId);
+
             NodeRelatives.Create(child, index, node, parentCount, ref relatives, out var childRelatives, ref accessor, ref sibAccessor);
 
             ctx.PathNodes[ctx.Depth] = node;
@@ -453,10 +548,25 @@ public abstract partial class BTree<TKey, TStore>
             return false; // restart — leaf was modified between descent and lock
         }
 
+        // Issue #297: stale-separator detection. Pessimistic descent does NOT follow B-link right-pointers (unlike OptimisticDescendToLeaf at BTree.cs:1700-1738).
+        // Under heavy concurrency, when a leaf has been split but the parent separator hasn't propagated yet, our descent lands at the LEFT half while our key
+        // actually lives in the right sibling. Detect that exact signature (key >= leaf.HighKey AND a right sibling exists) and restart from root rather than
+        // wrongly returning NotFound. Restart is safe (we hold leaf write lock — release via AbortWriteLock without version bump). Liveness: bounded by
+        // parent-separator propagation, which Insert's Phase 3 performs immediately after the split. We do NOT mirror Insert's full move-right loop/ here
+        // because the moved-to leaf would have stale `relatives` (computed for the original leaf), and lock-coupling to nextNode under heavy retry pressure has
+        // surfaced a latent AV in InsertIterative.SpinWriteLock — separate engine investigation.
+        if (node.GetNext(ref accessor).IsValid && args.Compare(args.Key, node.GetHighKey(ref accessor)) >= 0)
+        {
+            leafLatch.AbortWriteLock(); // we held the lock without modifying the node
+            return false; // restart — parent separator hasn't propagated; descent landed at wrong leaf
+        }
+
         // Check if key exists in this leaf
         var keyIndex = node.Find(args.Key, args.Comparer, ref accessor);
         if (keyIndex < 0)
         {
+            // After the stale-separator guard above, a NotFound here means key is genuinely not in the tree (or the tree's rightmost leaf, where
+            // GetNext().IsValid == false).
             node.GetLatch(ref accessor).AbortWriteLock(); // key not found — didn't modify leaf
             completed = true;
             return false; // key not found — no merge

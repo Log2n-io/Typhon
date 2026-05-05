@@ -907,7 +907,11 @@ public abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TKey
     private NodeWrapper Root
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        get => _rootChunkId == 0 ? default : new NodeWrapper(_storage, _rootChunkId, _height == 1);
+        // Issue #297: do NOT cache isLeaf via `_height == 1`. _rootChunkId and _height are written separately during root split/collapse
+        // (e.g., Root = ... ; Height++/--). A concurrent reader that lands between the two writes can observe new _rootChunkId + stale _height, and would cache
+        // the wrong isLeaf value — causing the descent to treat a leaf root as internal, read user values as child chunk-ids, and crash with bogus reads.
+        // Pay the extra chunk read on the descent's first GetIsLeaf instead.
+        get => _rootChunkId == 0 ? default : new NodeWrapper(_storage, _rootChunkId);
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         set => _rootChunkId = value.IsValid ? value.ChunkId : 0;
     }
@@ -984,9 +988,8 @@ public abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TKey
 
                 if (_count > 0)
                 {
-                    // Use the non-caching NodeWrapper constructor: the Root property uses _height == 1
-                    // to determine isLeaf, but _height is not yet established during load bootstrap.
-                    // The 2-param constructor leaves _flags = 0, forcing GetIsLeaf to read from chunk data.
+                    // Equivalent to `Root` (which is also non-caching since #297) — kept explicit because we are about to compute and assign Height inside the
+                    // loop below, so reading the property here (which was the historical cache source) would be misleading.
                     var rootNode = new NodeWrapper(_storage, _rootChunkId);
 
                     // Traverse the leftmost path to find Height and LinkList (leftmost leaf)
@@ -1670,11 +1673,12 @@ public abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TKey
             }
 
             // Move to child
-            node = child;
-            if (!node.IsValid)
+            if (!child.IsValid)
             {
                 return (0, 0, -1); // invalid child — restart
             }
+            OlcDescentTrace.RecordStep?.Invoke(OlcDescentTrace.OpDescend, node.ChunkId, version, index, child.ChunkId);
+            node = child;
             latch = node.GetLatch(ref accessor);
             version = latch.ReadVersion();
             if (version == 0)
@@ -1686,46 +1690,51 @@ public abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TKey
         // At leaf: search for key
         var keyIndex = node.Find(key, Comparer, ref accessor);
 
-        // B-link right-link following: if key not found and beyond this leaf's range, the leaf may have split and the parent separator is stale. Follow
-        // right links until we find the leaf containing the key or exhaust the chain.
-        // Multiple hops may be needed when consecutive forceSplit operations left several unpropagated separators in a row.
-        // Disabled for inserts (followRightLink=false): version validation handles restarts.
+        // B-link right-link following: if key not found in this leaf, walk forward in the chain until we find the key or hit a leaf whose actual content places
+        // key strictly within its range (key <= leaf.GetItem(count-1).Key). This is more robust than relying on the cached HighKey, which can be transiently
+        // out-of-sync with the actual chain ordering/ under concurrent operations.
         if (followRightLink && keyIndex < 0)
         {
             const int maxHops = 16;
             for (int hop = 0; hop < maxHops && node.GetCount(ref accessor) > 0; hop++)
             {
-                if (Comparer.Compare(key, node.GetHighKey(ref accessor)) < 0)
+                int leafCount = node.GetCount(ref accessor);
+                int cmpToLast = leafCount > 0 ? Comparer.Compare(key, node.GetItem(leafCount - 1, ref accessor).Key) : 1; // empty leaf — treat key as beyond
+                if (cmpToLast <= 0)
                 {
-                    break; // key is within this leaf's range (high key is exclusive upper bound)
+                    // key <= leaf's last → key would be in this leaf if anywhere on this side of the chain. Re-validate to guard against torn reads (key/last
+                    // from inconsistent version snapshot), then conclude NotFound.
+                    if (!latch.ValidateVersion(version))
+                    {
+                        return (0, 0, -1);
+                    }
+                    break;
                 }
-
                 if (!latch.ValidateVersion(version))
                 {
-                    return (0, 0, -1); // leaf modified — restart from root
+                    return (0, 0, -1);
                 }
 
                 var nextNode = node.GetNext(ref accessor);
                 if (!nextNode.IsValid)
                 {
-                    break; // no right sibling — key doesn't exist
+                    break; // chain exhausted
                 }
 
                 var nextLatch = nextNode.GetLatch(ref accessor);
                 int nextVersion = nextLatch.ReadVersion();
                 if (nextVersion == 0)
                 {
-                    return (0, 0, -1); // right sibling locked/obsolete — restart
+                    return (0, 0, -1);
                 }
 
                 node = nextNode;
                 latch = nextLatch;
                 version = nextVersion;
                 keyIndex = node.Find(key, Comparer, ref accessor);
-
                 if (keyIndex >= 0)
                 {
-                    break; // found the key
+                    break;
                 }
             }
         }

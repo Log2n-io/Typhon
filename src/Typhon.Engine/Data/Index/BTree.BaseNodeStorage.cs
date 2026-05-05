@@ -71,12 +71,11 @@ public abstract partial class BTree<TKey, TStore>
                 return default;
             }
 
-            var child = index < 0 ? GetLeftNode(node, ref accessor) : new NodeWrapper(this, GetItem(node, index, true, ref accessor).Value);
-            
-            // Read child's StateFlags to cache IsLeaf — the child chunk will be accessed
-            // immediately after (by BinarySearch/Find), so this read is essentially free.
-            bool isLeaf = (GetNodeStates(child, ref accessor) & NodeStates.IsLeaf) != 0;
-            return new NodeWrapper(this, child.ChunkId, isLeaf);
+            // CAUTION: do NOT dereference the child chunk here (e.g., to prefetch isLeaf). OLC readers call this on a parent whose version has not yet been
+            // validated (Find→GetChild happens before ValidateVersion in the descent loops). If the parent is concurrently mid-modification, the child chunk-id
+            // we read can be torn/stale, and dereferencing it would crash before validation can signal "restart". Only read from the parent here; let callers
+            // access the child after they validate the parent's version. Issue #297.
+            return index < 0 ? GetLeftNode(node, ref accessor) : new NodeWrapper(this, GetItem(node, index, true, ref accessor).Value);
         }
         public abstract void IncrementStart(NodeWrapper node, ref ChunkAccessor<TStore> accessor);
         public abstract void DecrementStart(NodeWrapper node, ref ChunkAccessor<TStore> accessor);

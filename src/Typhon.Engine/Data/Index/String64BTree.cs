@@ -26,6 +26,7 @@ unsafe public struct IndexString64Chunk
     public int PrevChunk;
     public int NextChunk;
     public int LeftValue;
+    public fixed byte HighKey[64];                  // B-link upper bound (issue #297) — exclusive; sentinel = all 0xFF
     public fixed int Values[Capacity];
     public fixed byte Keys[64*Capacity];
 
@@ -38,6 +39,24 @@ unsafe public struct IndexString64Chunk
                 var strings = (String64*)k;
                 return new Span<String64>(strings, Capacity);
             }
+        }
+    }
+
+    /// <summary>Reads the explicit B-link HighKey (issue #297). Sentinel "infinity" is all 0xFF bytes.</summary>
+    public readonly String64 GetHighKey()
+    {
+        fixed (byte* h = HighKey)
+        {
+            return new String64(h);
+        }
+    }
+
+    /// <summary>Writes the explicit B-link HighKey (issue #297).</summary>
+    public void SetHighKey(String64 key)
+    {
+        fixed (byte* h = HighKey)
+        {
+            key.AsSpan().CopyTo(new Span<byte>(h, 64));
         }
     }
 
@@ -219,6 +238,12 @@ public abstract class String64BTree<TStore> : BTree<String64, TStore> where TSto
             chunk.PrevChunk = 0;
             chunk.NextChunk = 0;
             chunk.LeftValue = 0;
+            // Issue #297: HighKey = all 0xFF (sentinel "infinity") so move-right gap-check
+            // does not false-fire on freshly allocated rightmost-leaf with no keys yet.
+            fixed (byte* h = chunk.HighKey)
+            {
+                new Span<byte>(h, 64).Fill(0xFF);
+            }
         }
 
         public override int GetNodeCapacity() => IndexString64Chunk.Capacity;
@@ -325,6 +350,23 @@ public abstract class String64BTree<TStore> : BTree<String64, TStore> where TSto
         {
             ref var chunk = ref accessor.GetChunk<IndexString64Chunk>(node.ChunkId, true);
             chunk.ContentionHint = value;
+        }
+
+        // Issue #297: explicit HighKey override (B-link upper bound). Without this override,
+        // BaseNodeStorage.GetHighKey defaults to "last key in node", which makes
+        // node.HighKey != nextNode.firstKey by design — creating a permanent "gap" that
+        // breaks the move-right gap-check restart. With the override, the invariant
+        // node.HighKey == nextNode.firstKey holds across splits, matching L16/L32/L64.
+        public override String64 GetHighKey(NodeWrapper node, ref ChunkAccessor<TStore> accessor)
+        {
+            ref readonly var chunk = ref accessor.GetChunkReadOnly<IndexString64Chunk>(node.ChunkId);
+            return chunk.GetHighKey();
+        }
+
+        public override void SetHighKey(NodeWrapper node, String64 key, ref ChunkAccessor<TStore> accessor)
+        {
+            ref var chunk = ref accessor.GetChunk<IndexString64Chunk>(node.ChunkId, true);
+            chunk.SetHighKey(key);
         }
 
         #endregion
@@ -556,6 +598,8 @@ public abstract class String64BTree<TStore> : BTree<String64, TStore> where TSto
             }
 
             leftChunk.Count += right.GetCount(ref accessor); // correct array length.
+            // Issue #297: merged node inherits right's upper bound (mirrors L32 SplitRight invariant).
+            leftChunk.SetHighKey(rightChunk.GetHighKey());
         }
 
         public override NodeWrapper GetLastChild(NodeWrapper node, ref ChunkAccessor<TStore> accessor)
@@ -708,6 +752,9 @@ public abstract class String64BTree<TStore> : BTree<String64, TStore> where TSto
         private NodeWrapper SplitRight(int leftChunkId, NodeStates states, ref ChunkAccessor<TStore> accessor)
         {
             ref var left = ref accessor.GetChunk<IndexString64Chunk>(leftChunkId, true);
+            // Issue #297: snapshot left's old HighKey BEFORE the split, so right can inherit it.
+            // Capture in a local because span/ref operations below may invalidate inline reads.
+            var oldHighKey = left.GetHighKey();
 
             var rightNode = Owner.AllocNode(states, ref accessor);
 
@@ -753,6 +800,12 @@ public abstract class String64BTree<TStore> : BTree<String64, TStore> where TSto
                 lv.Slice(0, remaining).CopyTo(rv.Slice(length, remaining));
                 lv.Slice(0, remaining).Clear();
             }
+
+            // Issue #297: update HighKeys to maintain the B-link invariant
+            // (left.HighKey == right.firstKey, right.HighKey == old left.HighKey).
+            // Right.Start is 0 after AllocNode, so right.GetKey(0) is its first key.
+            right.SetHighKey(oldHighKey);
+            left.SetHighKey(right.GetKey(0));
 
             return rightNode;
         }

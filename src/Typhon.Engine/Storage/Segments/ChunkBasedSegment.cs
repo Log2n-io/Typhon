@@ -1045,10 +1045,12 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
         var segmentLength = Length;
         if (resultPageIndex >= segmentLength)
         {
-            throw new InvalidOperationException(
-                $"ChunkBasedSegment.GetChunkLocation: Computed page index {resultPageIndex} >= segment length {segmentLength}. " +
+            var msg = $"ChunkBasedSegment.GetChunkLocation: Computed page index {resultPageIndex} >= segment length {segmentLength}. " +
                 $"ChunkId={index}, rootChunkCount={_rootChunkCount}, otherChunkCount={_otherChunkCount}, " +
-                $"Capacity={ChunkCapacity}. This may indicate accessing a chunk ID that was never allocated or segment corruption.");
+                $"Capacity={ChunkCapacity}. This may indicate accessing a chunk ID that was never allocated or segment corruption.";
+            // Issue #297: let tests capture the descent trace that produced this bogus chunk-id BEFORE we throw.
+            OlcDescentTrace.OnInvalidChunkId?.Invoke(index, msg);
+            throw new InvalidOperationException(msg);
         }
 
         return (resultPageIndex, offset);

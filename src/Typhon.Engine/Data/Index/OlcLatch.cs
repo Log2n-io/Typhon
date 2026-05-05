@@ -15,7 +15,7 @@ internal readonly ref struct OlcLatch
 {
     private readonly ref int _version;  // ref to chunk's OlcVersion field
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining)] 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public OlcLatch(ref int olcVersion) => _version = ref olcVersion;
 
     // --- Reader API (zero writes to shared state) ---

@@ -129,6 +129,48 @@ public abstract partial class BTree<TKey, TStore>
         // Insert/Remove dispatch removed — BTree.InsertIterative/RemoveIterative handle
         // the full root-to-leaf descent and upward propagation iteratively.
 
+        // Issue #297: spill-LEFT pushes our smallest to prev's last. For sort to remain valid,/ prev's current last must be < our current first.
+        // If invariant is broken (concurrent op left tree in a transient state), spill would corrupt prev's sort — return false to/ route the operation to
+        // split, which is range-self-contained.
+        internal bool SpillLeftSortInvariantHolds(NodeWrapper prev, ref ChunkAccessor<TStore> sibCa, ref ChunkAccessor<TStore> ca)
+        {
+            if (!prev.IsValid)
+            {
+                return false;
+            }
+
+            int prevCount = prev.GetCount(ref sibCa);
+            int curCount = GetCount(ref ca);
+            if (prevCount == 0 || curCount == 0)
+            {
+                return true; // no comparison possible — let spill proceed
+            }
+
+            var prevLast = prev.GetLast(ref sibCa).Key;
+            var curFirst = GetFirst(ref ca).Key;
+            return _storage.Owner.Comparer.Compare(prevLast, curFirst) < 0;
+        }
+
+        // Issue #297: symmetric check for spill-RIGHT — our last must be < next's first.
+        internal bool SpillRightSortInvariantHolds(NodeWrapper next, ref ChunkAccessor<TStore> sibCa, ref ChunkAccessor<TStore> ca)
+        {
+            if (!next.IsValid)
+            {
+                return false;
+            }
+
+            int nextCount = next.GetCount(ref sibCa);
+            int curCount = GetCount(ref ca);
+            if (nextCount == 0 || curCount == 0)
+            {
+                return true;
+            }
+
+            var curLast = GetLast(ref ca).Key;
+            var nextFirst = next.GetFirst(ref sibCa).Key;
+            return _storage.Owner.Comparer.Compare(curLast, nextFirst) < 0;
+        }
+
         /// <summary>
         /// Splits a leaf right and updates the doubly-linked list pointers.
         /// Used by both regular full-leaf splits and contention splits.
@@ -177,7 +219,16 @@ public abstract partial class BTree<TKey, TStore>
                 else // cant add, spill or split
                 {
                     // Sibling operations use sibAccessor to avoid evicting parent path pages from primary CA
-                    if (!forceSplit && CanSpillTo(GetPrevious(ref accessor), ref sibAccessor))
+                    //
+                    // Issue #297: VerifySpillInvariant — only spill when prev/next ranges are consistent with `this` (i.e., the B-link sort invariant hasn't
+                    // been temporarily violated by a concurrent operation). If broken, fall through to split which is range-self-contained.
+                    var prevForSpill = GetPrevious(ref accessor);
+                    var nextForSpill = GetNext(ref accessor);
+                    bool spillLeftOk = !forceSplit && CanSpillTo(prevForSpill, ref sibAccessor)
+                                       && SpillLeftSortInvariantHolds(prevForSpill, ref sibAccessor, ref accessor);
+                    bool spillRightOk = !forceSplit && CanSpillTo(nextForSpill, ref sibAccessor)
+                                        && SpillRightSortInvariantHolds(nextForSpill, ref sibAccessor, ref accessor);
+                    if (spillLeftOk)
                     {
                         var first = InsertPopFirst(index, item, ref accessor);
                         var prev = GetPrevious(ref accessor);
@@ -207,11 +258,8 @@ public abstract partial class BTree<TKey, TStore>
 
                         // Left's HighKey must match the new separator (spill moved the boundary).
                         prev.SetHighKey(newSeparator, ref sibAccessor);
-
-                        Validate();
-                        Validate();
                     }
-                    else if (!forceSplit && CanSpillTo(GetNext(ref accessor), ref sibAccessor))
+                    else if (spillRightOk)
                     {
                         var last = InsertPopLast(index, item, ref accessor);
                         var next = GetNext(ref accessor);
@@ -238,9 +286,6 @@ public abstract partial class BTree<TKey, TStore>
 
                         // Current's HighKey must match the new separator (spill moved the boundary).
                         SetHighKey(newSeparator, ref accessor);
-
-                        Validate();
-                        Validate();
                     }
                     else // split, then promote middle item
                     {
@@ -259,10 +304,9 @@ public abstract partial class BTree<TKey, TStore>
                         }
 
                         rightLeaf = new KeyValueItem(rightNode.GetFirst(ref accessor).Key, rightNode.ChunkId);
-
-                        Validate();
-                        Validate();
                     }
+
+                    Validate();
                 }
 
                 // splits right side to new node and keeps left side for current node.

@@ -51,12 +51,21 @@ public abstract partial class BTree<TKey, TStore>
         // 1. Empty tree initialization.
         //    An empty tree has no root node, so OLC readers/writers have nothing to latch on.
         //    CAS on _rootChunkId atomically races to claim the init slot; loser sees non-zero root and proceeds.
+        //
+        // Issue #297: hold newRoot's OLC write lock around the initial PushLast and metadata writes. Without the lock, a concurrent thread that observes the
+        // just-published _rootChunkId and races through TryInsertOlc's general path can acquire newRoot's latch (initial OlcVersion=4 reports unlocked) and
+        // concurrently mutate the chunk, producing torn writes / out-of-order keys. SpinWriteLock takes newRoot's bit-0 lock; ReadVersion observes 0 for any
+        // concurrent reader, who restarts; WriteUnlock at the end bumps the version so the next op sees the new state.
         if (IsEmpty())
         {
             var newRoot = AllocNode(NodeStates.IsLeaf, ref accessor);
+            newRoot.PreDirtyForWrite(ref accessor);
+            var newRootLatch = newRoot.GetLatch(ref accessor);
+            SpinWriteLock(newRootLatch);  // exclude any concurrent OLC reader/writer touching newRoot
             if (Interlocked.CompareExchange(ref _rootChunkId, newRoot.ChunkId, 0) == 0)
             {
-                // We won the race — initialize root, LinkList, ReverseLinkList
+                // We won the race — initialize root, LinkList, ReverseLinkList while still holding newRoot's lock. Concurrent threads that observe _rootChunkId
+                // set will spin or restart on newRoot's locked latch until WriteUnlock below.
                 _linkList = newRoot;
                 _reverseLinkList = newRoot;
                 Height++;
@@ -65,12 +74,14 @@ public abstract partial class BTree<TKey, TStore>
                 IncCount();
                 _cachedLastKey = args.Key;
                 _hasCachedLastKey = true;
+                newRootLatch.WriteUnlock();
 
                 // Phase 6: Data:Index:BTree:Root instant (op=0 / Init).
                 Profiler.TyphonEvent.EmitDataIndexBTreeRoot(0, newRoot.ChunkId, (byte)Math.Min(Height, byte.MaxValue));
                 return;
             }
-            // Another thread initialized the root — free our unused node and fall through
+            // Another thread initialized the root — release our lock (no version bump, we didn't mutate anything visible) and free our unused node.
+            newRootLatch.AbortWriteLock();
             _segment.FreeChunk(newRoot.ChunkId);
         }
 
@@ -165,6 +176,16 @@ public abstract partial class BTree<TKey, TStore>
                             latch.AbortWriteLock();
                             return isFull ? OlcInsertResult.LeafFull : OlcInsertResult.Restart;
                         }
+                        // Issue #297: re-verify ordering against the actual leaf content under the lock. The pre-lock check above used `lastKey` which can come
+                        // from `_cachedLastKey` — a per-tree global updated on every successful append, but NOT atomically with `_reverseLinkList`. After a
+                        // split, a concurrent reader can observe the new `_reverseLinkList` while still seeing the old cached last key (or vice versa), making
+                        // the cached `args.Key > lastKey` check pass when actually `args.Key <= rl.GetLast().Key`. Without this guard, PushLast appends out of
+                        // order, and binary-search lookups silently miss the misplaced key.
+                        if (rl.GetCount(ref accessor) > 0 && args.Compare(args.Key, rl.GetLast(ref accessor).Key) <= 0)
+                        {
+                            latch.AbortWriteLock();
+                            return OlcInsertResult.Restart;
+                        }
                         int value = CreateInsertValue(ref args, ref accessor);
                         rl.PushLast(new KeyValueItem(args.Key, value), ref accessor);
                         _cachedLastKey = args.Key;
@@ -188,7 +209,15 @@ public abstract partial class BTree<TKey, TStore>
                                 latch.AbortWriteLock();
                                 return OlcInsertResult.Restart;
                             }
-                            var bufferRootId = rl.GetLast(ref accessor).Value;
+                            // Issue #297: re-verify the duplicate-key claim under the lock — `lastKey` came from `_cachedLastKey` which can be stale after a
+                            // split. Without this, we'd append the value to the wrong buffer (or to a buffer whose key isn't actually the same as args.Key).
+                            var actualLast = rl.GetCount(ref accessor) > 0 ? rl.GetLast(ref accessor) : default;
+                            if (rl.GetCount(ref accessor) == 0 || args.Compare(args.Key, actualLast.Key) != 0)
+                            {
+                                latch.AbortWriteLock();
+                                return OlcInsertResult.Restart;
+                            }
+                            var bufferRootId = actualLast.Value;
                             args.ElementId = _storage.Append(bufferRootId, args.GetValue(), ref args.SiblingAccessor);
                             args.BufferRootId = bufferRootId;
                             latch.WriteUnlock();
@@ -347,95 +376,107 @@ public abstract partial class BTree<TKey, TStore>
             }
 
             // Append fast path: lock the last leaf and insert if key > lastKey and leaf not full.
-            // Bypass when leaf is contended and sufficiently populated — fall through to InsertIterative
-            // which has the path recording needed for contention split propagation.
-            // Capture local refs to avoid races from concurrent ReverseLinkList/LinkList updates.
+            // Bypass when leaf is contended and sufficiently populated — fall through to InsertIterative which has the path recording needed for contention
+            // split propagation. Capture local refs to avoid races from concurrent ReverseLinkList/LinkList updates. Issue #297: skip the append fast-path
+            // entirely when `_reverseLinkList` is not yet published. The OLC empty-tree CAS at AddOrUpdateCore writes _rootChunkId
+            // BEFORE _linkList/_reverseLinkList — a concurrent thread that won the race to enter the pessimistic path can therefore observe `IsEmpty()=false`
+            // (rootChunkId set) while `rl=default`, making `rl.GetLast()` NRE on `_storage`. CAUTION: capture the field into a local FIRST, then test IsValid
+            // on the local. Testing the field directly and assigning separately is a TOCTOU race (concurrent thread can swap _reverseLinkList between the two
+            // reads, leaving `rl=default` even though the if-check passed). The whole block must be guarded.
             {
                 var rl = _reverseLinkList;
-                var bypassAppendFastPath = rl.IsValid && rl.GetContentionHint(ref accessor) >= ContentionSplitThreshold && rl.GetCount(ref accessor) > rl.GetCapacity() / 2;
-                var order = IsEmpty() ? 1 : args.Compare(args.Key, _hasCachedLastKey ? _cachedLastKey : rl.GetLast(ref accessor).Key);
-                if (!bypassAppendFastPath && order > 0 && !rl.GetIsFull(ref accessor))
+                if (rl.IsValid)
                 {
-                    rl.PreDirtyForWrite(ref accessor);
-                    var rlLatch = rl.GetLatch(ref accessor);
-                    SpinWriteLock(rlLatch);
-                    // Re-validate under lock: leaf may now be full, another writer inserted a larger key,
-                    // or a concurrent split made this leaf no longer the rightmost (GetNext becomes valid).
-                    if (!rl.GetIsFull(ref accessor) && !rl.GetNext(ref accessor).IsValid && args.Compare(args.Key, rl.GetLast(ref accessor).Key) > 0)
+                    var bypassAppendFastPath = rl.GetContentionHint(ref accessor) >= ContentionSplitThreshold && rl.GetCount(ref accessor) > rl.GetCapacity() / 2;
+                    var order = IsEmpty() ? 1 : args.Compare(args.Key, _hasCachedLastKey ? _cachedLastKey : rl.GetLast(ref accessor).Key);
+                    if (!bypassAppendFastPath && order > 0 && !rl.GetIsFull(ref accessor))
                     {
-                        int value = CreateInsertValue(ref args, ref accessor);
-                        rl.PushLast(new KeyValueItem(args.Key, value), ref accessor);
-                        _cachedLastKey = args.Key;
-                        _hasCachedLastKey = true;
-                        rlLatch.WriteUnlock();
-                        IncCount();
-                        return;
+                        rl.PreDirtyForWrite(ref accessor);
+                        var rlLatch = rl.GetLatch(ref accessor);
+                        SpinWriteLock(rlLatch);
+                        // Re-validate under lock: leaf may now be full, another writer inserted a larger key,
+                        // or a concurrent split made this leaf no longer the rightmost (GetNext becomes valid).
+                        if (!rl.GetIsFull(ref accessor) && !rl.GetNext(ref accessor).IsValid && args.Compare(args.Key, rl.GetLast(ref accessor).Key) > 0)
+                        {
+                            int value = CreateInsertValue(ref args, ref accessor);
+                            rl.PushLast(new KeyValueItem(args.Key, value), ref accessor);
+                            _cachedLastKey = args.Key;
+                            _hasCachedLastKey = true;
+                            rlLatch.WriteUnlock();
+                            IncCount();
+                            return;
+                        }
+                        rlLatch.AbortWriteLock();
+                        // Fall through to general path
                     }
-                    rlLatch.AbortWriteLock();
-                    // Fall through to general path
-                }
-                else if (order == 0 && AllowMultiple)
-                {
-                    rl.PreDirtyForWrite(ref accessor);
-                    var rlLatch = rl.GetLatch(ref accessor);
-                    SpinWriteLock(rlLatch);
-                    var lastEntry = rl.GetLast(ref accessor);
-                    if (args.Compare(args.Key, lastEntry.Key) == 0)
+                    else if (order == 0 && AllowMultiple)
                     {
-                        args.ElementId = _storage.Append(lastEntry.Value, args.GetValue(), ref args.SiblingAccessor);
-                        args.BufferRootId = lastEntry.Value;
-                        rlLatch.WriteUnlock();
-                        return;
+                        rl.PreDirtyForWrite(ref accessor);
+                        var rlLatch = rl.GetLatch(ref accessor);
+                        SpinWriteLock(rlLatch);
+                        var lastEntry = rl.GetLast(ref accessor);
+                        if (args.Compare(args.Key, lastEntry.Key) == 0)
+                        {
+                            args.ElementId = _storage.Append(lastEntry.Value, args.GetValue(), ref args.SiblingAccessor);
+                            args.BufferRootId = lastEntry.Value;
+                            rlLatch.WriteUnlock();
+                            return;
+                        }
+                        rlLatch.AbortWriteLock();
+                        // Fall through
                     }
-                    rlLatch.AbortWriteLock();
-                    // Fall through
-                }
-                else if (order == 0)
-                {
-                    ThrowHelper.ThrowUniqueConstraintViolation();
+                    else if (order == 0)
+                    {
+                        ThrowHelper.ThrowUniqueConstraintViolation();
+                    }
                 }
             }
 
             // Prepend fast path: lock the first leaf and insert if key < firstKey and leaf not full.
+            // Issue #297: same publication-ordering caveat as the append path above — capture ll into a local first, then test IsValid on the
+            // local (avoiding TOCTOU race).
             if (!IsEmpty())
             {
                 var ll = _linkList;
-                int order = args.Compare(args.Key, ll.GetFirst(ref accessor).Key);
-                if (order < 0 && !ll.GetIsFull(ref accessor))
+                if (ll.IsValid)
                 {
-                    ll.PreDirtyForWrite(ref accessor);
-                    var llLatch = ll.GetLatch(ref accessor);
-                    SpinWriteLock(llLatch);
-                    if (!ll.GetIsFull(ref accessor) && args.Compare(args.Key, ll.GetFirst(ref accessor).Key) < 0)
+                    int order = args.Compare(args.Key, ll.GetFirst(ref accessor).Key);
+                    if (order < 0 && !ll.GetIsFull(ref accessor))
                     {
-                        int value = CreateInsertValue(ref args, ref accessor);
-                        ll.PushFirst(new KeyValueItem(args.Key, value), ref accessor);
-                        llLatch.WriteUnlock();
-                        IncCount();
-                        return;
+                        ll.PreDirtyForWrite(ref accessor);
+                        var llLatch = ll.GetLatch(ref accessor);
+                        SpinWriteLock(llLatch);
+                        if (!ll.GetIsFull(ref accessor) && args.Compare(args.Key, ll.GetFirst(ref accessor).Key) < 0)
+                        {
+                            int value = CreateInsertValue(ref args, ref accessor);
+                            ll.PushFirst(new KeyValueItem(args.Key, value), ref accessor);
+                            llLatch.WriteUnlock();
+                            IncCount();
+                            return;
+                        }
+                        llLatch.AbortWriteLock();
+                        // Fall through
                     }
-                    llLatch.AbortWriteLock();
-                    // Fall through
-                }
-                else if (order == 0 && AllowMultiple)
-                {
-                    ll.PreDirtyForWrite(ref accessor);
-                    var llLatch = ll.GetLatch(ref accessor);
-                    SpinWriteLock(llLatch);
-                    var firstEntry = ll.GetFirst(ref accessor);
-                    if (args.Compare(args.Key, firstEntry.Key) == 0)
+                    else if (order == 0 && AllowMultiple)
                     {
-                        args.ElementId = _storage.Append(firstEntry.Value, args.GetValue(), ref args.SiblingAccessor);
-                        args.BufferRootId = firstEntry.Value;
-                        llLatch.WriteUnlock();
-                        return;
+                        ll.PreDirtyForWrite(ref accessor);
+                        var llLatch = ll.GetLatch(ref accessor);
+                        SpinWriteLock(llLatch);
+                        var firstEntry = ll.GetFirst(ref accessor);
+                        if (args.Compare(args.Key, firstEntry.Key) == 0)
+                        {
+                            args.ElementId = _storage.Append(firstEntry.Value, args.GetValue(), ref args.SiblingAccessor);
+                            args.BufferRootId = firstEntry.Value;
+                            llLatch.WriteUnlock();
+                            return;
+                        }
+                        llLatch.AbortWriteLock();
+                        // Fall through
                     }
-                    llLatch.AbortWriteLock();
-                    // Fall through
-                }
-                else if (order == 0)
-                {
-                    ThrowHelper.ThrowUniqueConstraintViolation();
+                    else if (order == 0)
+                    {
+                        ThrowHelper.ThrowUniqueConstraintViolation();
+                    }
                 }
             }
 
@@ -462,13 +503,23 @@ public abstract partial class BTree<TKey, TStore>
                 ThrowHelper.ThrowUniqueConstraintViolation();
             }
 
-            var next = _reverseLinkList.GetNext(ref accessor);
-            if (next.IsValid)
+            // Issue #297: snapshot the field once and guard on IsValid. AddOrUpdateCore writes _rootChunkId via CAS BEFORE writing _linkList/_reverseLinkList;
+            // on x86 TSO, another thread can observe IsEmpty()=false while still seeing _reverseLinkList=default. Skip the cache update on that race — the
+            // next Add will re-read and refresh.
             {
-                _reverseLinkList = next;
+                var tail = _reverseLinkList;
+                if (tail.IsValid)
+                {
+                    var next = tail.GetNext(ref accessor);
+                    if (next.IsValid)
+                    {
+                        _reverseLinkList = next;
+                        tail = next;
+                    }
+                    _cachedLastKey = tail.GetLast(ref accessor).Key;
+                    _hasCachedLastKey = true;
+                }
             }
-            _cachedLastKey = GetLast(ref accessor).Key;
-            _hasCachedLastKey = true;
         }
         finally
         {
@@ -521,6 +572,15 @@ public abstract partial class BTree<TKey, TStore>
             {
                 return;
             }
+
+            // Defensive: a torn-but-validated read should be impossible after the version check above, but treat zero/invalid child as restart rather than
+            // crashing when the next iteration tries to deref it. Issue #297.
+            if (!child.IsValid)
+            {
+                return;
+            }
+
+            OlcDescentTrace.RecordStep?.Invoke(OlcDescentTrace.OpInsert, node.ChunkId, version, index, child.ChunkId);
 
             NodeRelatives.Create(child, index, node, parentCount, ref relatives, out var childRelatives, ref accessor, ref sibAccessor);
 
@@ -588,7 +648,13 @@ public abstract partial class BTree<TKey, TStore>
                 args.Compare(args.Key, nextNode.GetFirst(ref accessor).Key) < 0)
             {
                 nextNode.GetLatch(ref accessor).AbortWriteLock();
-                break; // Key falls in a gap — belongs in current leaf (will split via slow path)
+                // Issue #297: a gap means K lies between node.HighKey and nextNode.firstKey, i.e., not in EITHER leaf. The historical fix here `break`d and
+                // let the next code path insert K into `node`, which silently violates node.HighKey — future searches use the parent's separator (which still
+                // routes K to the next sibling/ or beyond) and never reach our (now invariant-violating) leaf. The key is lost. Treat the gap as a transient
+                // structural inconsistency (a concurrent split's separator hasn't propagated up yet): release node and restart from the root. NOTE: requires
+                // storage to maintain B-link invariant node.HighKey == nextNode.firstKey across splits/merges — L16/L32/L64 + String64 (since #297) all do.
+                node.GetLatch(ref accessor).AbortWriteLock();
+                return; // completed=false → outer retry, next pass should see a closed-up tree.
             }
 
             node.GetLatch(ref accessor).AbortWriteLock();    // release current
@@ -816,13 +882,21 @@ public abstract partial class BTree<TKey, TStore>
 
         // Phase 4: Root split — create new root while holding old root's write lock.
         // This prevents concurrent InsertIterative calls from racing to create multiple roots.
+        //
+        // Issue #297: hold newRoot's write lock around the structural writes (SetLeft + Insert). Without it, a concurrent thread reading the just-published
+        // `Root` field can observe newRoot with count=0 (Insert(0, promoted) hasn't written yet) and descend through the leftmost child path, missing the
+        // promoted subtree entirely. The lock forces the racer to restart on a locked latch until WriteUnlock publishes a consistent state.
         if (promoted != null)
         {
             var newRoot = AllocNode(NodeStates.None, ref accessor);
+            newRoot.PreDirtyForWrite(ref accessor);
+            var newRootLatch = newRoot.GetLatch(ref accessor);
+            SpinWriteLock(newRootLatch);
             newRoot.SetLeft(Root, ref accessor);
             newRoot.Insert(0, promoted.Value, ref accessor);
             Root = newRoot;
             Height++;
+            newRootLatch.WriteUnlock();
             node.GetLatch(ref accessor).WriteUnlock(); // release old root after publishing new root
         }
 
