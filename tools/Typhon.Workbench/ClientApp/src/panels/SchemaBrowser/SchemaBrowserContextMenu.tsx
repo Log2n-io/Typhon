@@ -8,9 +8,9 @@ import {
 } from '@/components/ui/context-menu';
 import { useSchemaInspectorStore } from '@/stores/useSchemaInspectorStore';
 import {
-  openSchemaArchetypes,
-  openSchemaIndexes,
-  openSchemaRelationships,
+  toggleViewSchemaArchetypes,
+  toggleViewSchemaIndexes,
+  toggleViewSchemaRelationships,
 } from '@/shell/commands/openSchemaBrowser';
 import type { ComponentSummary } from '@/hooks/schema/types';
 
@@ -47,13 +47,13 @@ export default function SchemaBrowserContextMenu({ component, onOpenInLayout, ch
         <ContextMenuItem onSelect={() => onOpenInLayout(component.typeName)}>
           Show Component Layout
         </ContextMenuItem>
-        <ContextMenuItem onSelect={selectAndOpen(openSchemaArchetypes)}>
+        <ContextMenuItem onSelect={selectAndOpen(toggleViewSchemaArchetypes)}>
           Show Component Archetypes
         </ContextMenuItem>
-        <ContextMenuItem onSelect={selectAndOpen(openSchemaIndexes)}>
+        <ContextMenuItem onSelect={selectAndOpen(toggleViewSchemaIndexes)}>
           Show Component Indexes
         </ContextMenuItem>
-        <ContextMenuItem onSelect={selectAndOpen(openSchemaRelationships)}>
+        <ContextMenuItem onSelect={selectAndOpen(toggleViewSchemaRelationships)}>
           Show Component Relationships
         </ContextMenuItem>
         <ContextMenuSeparator />

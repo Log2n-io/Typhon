@@ -41,58 +41,88 @@ export function registerDockApi(api: DockviewApi | null): void {
   }
 }
 
-export function openSchemaBrowser(): void {
+// --- Edge-group (structural) view toggles ---
+
+/** Toggle the left edge group (Resource Tree). No-op in trace/attach sessions (no left edge group). */
+export function toggleViewResourceTree(): void {
   const api = registeredApi;
   if (!api) return;
-  const existing = api.getPanel('schema-browser');
-  if (existing) {
-    existing.focus();
-    return;
+  const eg = api.getEdgeGroup('left');
+  if (!eg) return;
+  if (eg.isCollapsed()) {
+    eg.expand();
+    api.getPanel('resource-tree')?.focus();
+  } else {
+    eg.collapse();
   }
-  api.addPanel({
-    id: 'schema-browser',
-    component: 'SchemaBrowser',
-    title: 'Component Browser',
-  });
 }
 
-export function openArchetypeBrowser(): void {
-  openDockPanel('archetype-browser', 'ArchetypeBrowser', 'Archetype Browser');
-}
-
-export function openSchemaLayout(): void {
-  openDockPanel('schema-layout', 'SchemaLayout', 'Component Layout');
-}
-
-export function openSchemaArchetypes(): void {
-  openDockPanel('schema-archetypes', 'SchemaArchetypes', 'Component Archetypes');
-}
-
-export function openSchemaIndexes(): void {
-  openDockPanel('schema-indexes', 'SchemaIndexes', 'Component Indexes');
-}
-
-export function openSchemaRelationships(): void {
-  openDockPanel('schema-relationships', 'SchemaRelationships', 'Component Relationships');
+/** Toggle the right edge group (Detail panel). */
+export function toggleViewDetail(): void {
+  const api = registeredApi;
+  if (!api) return;
+  const eg = api.getEdgeGroup('right');
+  if (!eg) return;
+  if (eg.isCollapsed()) {
+    eg.expand();
+    api.getPanel('detail')?.focus();
+  } else {
+    eg.collapse();
+  }
 }
 
 /**
- * Open (or focus) the Detail panel — useful when the user closed it and wants it back. In
- * trace/attach sessions the default layout dock this to the right of the Profiler; in open
- * sessions it's already in the default layout, so this is mostly for "I closed it, bring it back".
+ * Toggle the Logs panel inside the bottom edge group.
+ * If the group is collapsed, expand and focus Logs.
+ * If expanded and Logs is already active, collapse the group.
+ * If expanded and another tab is active, switch focus to Logs without collapsing.
  */
-export function openDetailPanel(): void {
-  openDockPanel('detail', 'Detail', 'Detail');
+export function toggleViewLogs(): void {
+  const api = registeredApi;
+  if (!api) return;
+  const eg = api.getEdgeGroup('bottom');
+  if (!eg) return;
+  if (eg.isCollapsed()) {
+    eg.expand();
+    api.getPanel('logs')?.focus();
+    return;
+  }
+  const panel = api.getPanel('logs');
+  if (panel?.api.isActive) eg.collapse();
+  else panel?.focus();
 }
 
-/** #302 Phase 5: open (or focus) the Options panel — editor preference + workspace root. */
-export function openOptions(): void {
-  openDockPanel('options', 'Options', 'Options');
+// --- Dynamic view toggles (close if open, open if closed) ---
+
+export function toggleViewComponentBrowser(): void {
+  toggleDockPanel('schema-browser', 'SchemaBrowser', 'Component Browser');
 }
 
-export function openLogsPanel(): void {
-  openDockPanel('logs', 'Logs', 'Logs');
+export function toggleViewArchetypeBrowser(): void {
+  toggleDockPanel('archetype-browser', 'ArchetypeBrowser', 'Archetype Browser');
 }
+
+export function toggleViewSchemaLayout(): void {
+  toggleDockPanel('schema-layout', 'SchemaLayout', 'Component Layout');
+}
+
+export function toggleViewSchemaArchetypes(): void {
+  toggleDockPanel('schema-archetypes', 'SchemaArchetypes', 'Component Archetypes');
+}
+
+export function toggleViewSchemaIndexes(): void {
+  toggleDockPanel('schema-indexes', 'SchemaIndexes', 'Component Indexes');
+}
+
+export function toggleViewSchemaRelationships(): void {
+  toggleDockPanel('schema-relationships', 'SchemaRelationships', 'Component Relationships');
+}
+
+export function toggleViewOptions(): void {
+  toggleDockPanel('options', 'Options', 'Options');
+}
+
+// --- Source preview (action command, not a view toggle) ---
 
 /**
  * #302 Phase 7: open the inline source-preview panel for a given file:line. Each invocation reuses
@@ -131,12 +161,12 @@ export function openSourcePreviewForCurrentSpan(): void {
   openSourcePreview(loc.file, loc.line);
 }
 
-function openDockPanel(id: string, componentKey: string, title: string): void {
+function toggleDockPanel(id: string, componentKey: string, title: string): void {
   const api = registeredApi;
   if (!api) return;
   const existing = api.getPanel(id);
   if (existing) {
-    existing.focus();
+    api.removePanel(existing);
     return;
   }
   api.addPanel({ id, component: componentKey, title });

@@ -4,7 +4,7 @@ import { usePaletteStore } from '@/stores/usePaletteStore';
 import { useProfilerSessionStore } from '@/stores/useProfilerSessionStore';
 import { useProfilerViewStore } from '@/stores/useProfilerViewStore';
 import { useThemeStore } from '@/stores/useThemeStore';
-import { useTreeVisibilityStore } from '@/stores/useTreeVisibilityStore';
+import { toggleViewResourceTree } from '@/shell/commands/openSchemaBrowser';
 import { useShiftShift } from './useShiftShift';
 
 /**
@@ -26,8 +26,6 @@ export function useKeyboardShortcuts(): void {
   const forward = useNavHistoryStore((s) => s.forward);
   const toggleTheme = useThemeStore((s) => s.toggle);
   const togglePalette = usePaletteStore((s) => s.toggle);
-  const toggleTree = useTreeVisibilityStore((s) => s.toggle);
-
   useShiftShift(togglePalette);
 
   useEffect(() => {
@@ -54,7 +52,7 @@ export function useKeyboardShortcuts(): void {
       }
       if (e.key === '/' && e.ctrlKey && !e.shiftKey && !e.altKey) {
         e.preventDefault();
-        toggleTree();
+        toggleViewResourceTree();
         return;
       }
 
@@ -123,5 +121,5 @@ export function useKeyboardShortcuts(): void {
       window.removeEventListener('mouseup', suppressNavOnly);
       window.removeEventListener('auxclick', suppressNavOnly);
     };
-  }, [togglePalette, back, forward, toggleTheme, toggleTree]);
+  }, [togglePalette, back, forward, toggleTheme]);
 }

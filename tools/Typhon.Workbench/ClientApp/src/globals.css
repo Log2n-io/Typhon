@@ -216,11 +216,11 @@ body {
  * Map dockview's built-in CSS variables to our design tokens so panels match
  * the app chrome instead of shipping with their default gray palette.
  */
-.dockview-theme-dark,
-.dockview-theme-light,
-.dockview-react {
+html .dockview-theme-dark,
+html .dockview-theme-light,
+html .dockview-react {
   /* Shorter tab strip — default is ~35px, this trims ~6px off the header chrome. */
-  --dv-tabs-and-actions-container-height:              28px;
+  --dv-tabs-and-actions-container-height:              22px;
 
   --dv-group-view-background-color:                    var(--background);
   --dv-tabs-and-actions-container-background-color:    var(--card);

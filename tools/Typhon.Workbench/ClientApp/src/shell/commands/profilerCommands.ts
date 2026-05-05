@@ -15,43 +15,32 @@ export function registerProfilerDockApi(api: DockviewApi | null): void {
   registeredApi = api;
 }
 
-/** Opens the Profiler panel, or focuses it if already open. No-op if dock isn't mounted yet. */
-export function openProfilerPanel(): void {
+/** Focuses the Profiler panel. Structural in trace/attach sessions — always present in center. */
+export function toggleViewProfiler(): void {
   const api = registeredApi;
   if (!api) return;
-  const existing = api.getPanel('profiler');
-  if (existing) {
-    existing.focus();
-    return;
-  }
-  api.addPanel({
-    id: 'profiler',
-    component: 'Profiler',
-    title: 'Profiler',
-  });
+  api.getPanel('profiler')?.focus();
 }
 
 /**
- * Opens (or focuses) the Top Spans panel. Tab-stacks with Logs by default — same position the
- * default trace/attach layout uses, so a user that closed the panel and re-opens it ends up with
- * the same dock arrangement. Falls back to the Profiler reference if Logs isn't around either.
- * No-op if the dock api isn't mounted yet.
+ * Toggle the Top Spans panel inside the bottom edge group.
+ * If the group is collapsed, expand and focus Top Spans.
+ * If expanded and Top Spans is already active, collapse the group.
+ * If expanded and another tab is active, switch focus to Top Spans without collapsing.
  */
-export function openTopSpansPanel(): void {
+export function toggleViewTopSpans(): void {
   const api = registeredApi;
   if (!api) return;
-  const existing = api.getPanel('top-spans');
-  if (existing) {
-    existing.focus();
+  const eg = api.getEdgeGroup('bottom');
+  if (!eg) return;
+  if (eg.isCollapsed()) {
+    eg.expand();
+    api.getPanel('top-spans')?.focus();
     return;
   }
-  const ref = api.getPanel('logs') ?? api.getPanel('profiler');
-  api.addPanel({
-    id: 'top-spans',
-    component: 'TopSpans',
-    title: 'Top spans',
-    position: ref ? { referencePanel: ref } : undefined,
-  });
+  const panel = api.getPanel('top-spans');
+  if (panel?.api.isActive) eg.collapse();
+  else panel?.focus();
 }
 
 function zoomToFullTrace(): void {
@@ -114,8 +103,8 @@ export function openSaveReplayDialog(): void {
  */
 export function buildProfilerPaletteCommands(): CommandItem[] {
   return [
-    { id: 'profiler-open',           label: 'Open Profiler Panel',   keywords: 'profiler open show',               action: openProfilerPanel },
-    { id: 'profiler-top-spans',      label: 'Open Top Spans Panel',  keywords: 'profiler top spans table slow expensive sortable', action: openTopSpansPanel },
+    { id: 'toggle-view-profiler',     label: 'Toggle View Profiler',  keywords: 'profiler open show',               action: toggleViewProfiler },
+    { id: 'toggle-view-top-spans',   label: 'Toggle View Top Spans', keywords: 'profiler top spans table slow expensive sortable', action: toggleViewTopSpans },
     { id: 'profiler-save-replay',    label: 'Save Session as .typhon-replay…', keywords: 'save replay export attach session', action: openSaveReplayDialog },
     { id: 'profiler-toggle-gauges',  label: 'Toggle Gauge Region',   keywords: 'gauges canvas profiler g',         action: () => useProfilerViewStore.getState().toggleGaugeRegion() },
     { id: 'profiler-toggle-legends', label: 'Toggle Legends',        keywords: 'legends labels profiler l',        action: () => useProfilerViewStore.getState().toggleLegends() },

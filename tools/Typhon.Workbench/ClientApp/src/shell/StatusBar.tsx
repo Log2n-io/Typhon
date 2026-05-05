@@ -1,7 +1,6 @@
 import { useHeartbeat } from '@/hooks/streams/useHeartbeat';
 import { useSessionStore } from '@/stores/useSessionStore';
 import { useResourceIndex } from '@/hooks/useResourceIndex';
-import { useTreeVisibilityStore } from '@/stores/useTreeVisibilityStore';
 import { activateResource } from './commands/activateResource';
 
 const STORAGE_ID_CANDIDATES = [
@@ -21,9 +20,6 @@ export default function StatusBar() {
  const filePath = useSessionStore((s) => s.filePath);
  const { status, payload } = useHeartbeat();
  const { index } = useResourceIndex();
- const treeVisible = useTreeVisibilityStore((s) => s.visible);
- const setTreeVisible = useTreeVisibilityStore((s) => s.setVisible);
-
  const connected = kind !== 'none';
  const dotColor = connected && status === 'green' ? 'bg-green-500' : 'bg-muted-foreground';
 
@@ -53,19 +49,6 @@ export default function StatusBar() {
  >
  <span className={`h-2 w-2 rounded-full ${dotColor}`} aria-hidden="true" />
  <span>{fileLabel}</span>
- {!treeVisible && (
- <>
- <span>·</span>
- <button
- type="button"
- onClick={() => setTreeVisible(true)}
- title="Restore Resource Tree (Ctrl+/)"
- className="cursor-pointer underline-offset-2 hover:underline hover:text-foreground"
- >
- 📁 hidden
- </button>
- </>
- )}
  {connected && payload && (
  <>
  <span>·</span>

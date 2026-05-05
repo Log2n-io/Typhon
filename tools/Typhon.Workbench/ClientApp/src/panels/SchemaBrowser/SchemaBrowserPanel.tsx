@@ -15,7 +15,7 @@ import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { useComponentList } from '@/hooks/schema/useComponentList';
 import { useSchemaInspectorStore } from '@/stores/useSchemaInspectorStore';
-import { openSchemaLayout } from '@/shell/commands/openSchemaBrowser';
+import { toggleViewSchemaLayout } from '@/shell/commands/openSchemaBrowser';
 import type { ComponentSummary } from '@/hooks/schema/types';
 import SchemaBrowserContextMenu from './SchemaBrowserContextMenu';
 
@@ -87,7 +87,7 @@ export default function SchemaBrowserPanel(_props: IDockviewPanelProps) {
 
   const openLayoutFor = (typeName: string) => {
     selectComponent(typeName);
-    openSchemaLayout();
+    toggleViewSchemaLayout();
   };
 
   const toggleSort = (key: SortKey) => {

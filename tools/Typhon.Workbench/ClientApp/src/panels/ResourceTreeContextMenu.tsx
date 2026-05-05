@@ -10,7 +10,7 @@ import { useRecentFilesStore } from '@/stores/useRecentFilesStore';
 import { useSessionStore } from '@/stores/useSessionStore';
 import { useResourceGraphStore } from '@/stores/useResourceGraphStore';
 import { useSchemaInspectorStore } from '@/stores/useSchemaInspectorStore';
-import { openSchemaLayout } from '@/shell/commands/openSchemaBrowser';
+import { toggleViewSchemaLayout } from '@/shell/commands/openSchemaBrowser';
 
 interface Props {
   resourceId: string;          // synthetic uid — used for pin storage (unique)
@@ -96,7 +96,7 @@ export default function ResourceTreeContextMenu({
             // Definition.Name, so we strip the prefix.
             const typeName = name.startsWith('ComponentTable_') ? name.slice('ComponentTable_'.length) : name;
             selectSchemaComponent(typeName);
-            openSchemaLayout();
+            toggleViewSchemaLayout();
           }}
         >
           Show Component Layout

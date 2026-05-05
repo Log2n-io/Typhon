@@ -18,17 +18,18 @@ import SaveReplayDialog from './dialogs/SaveReplayDialog';
 import NavButtons from './NavButtons';
 import PaletteTrigger from './PaletteTrigger';
 import {
-  openArchetypeBrowser,
-  openDetailPanel,
-  openLogsPanel,
-  openOptions,
-  openSchemaArchetypes,
-  openSchemaBrowser,
-  openSchemaIndexes,
-  openSchemaLayout,
-  openSchemaRelationships,
+  toggleViewArchetypeBrowser,
+  toggleViewComponentBrowser,
+  toggleViewDetail,
+  toggleViewLogs,
+  toggleViewOptions,
+  toggleViewResourceTree,
+  toggleViewSchemaArchetypes,
+  toggleViewSchemaIndexes,
+  toggleViewSchemaLayout,
+  toggleViewSchemaRelationships,
 } from './commands/openSchemaBrowser';
-import { openProfilerPanel, openTopSpansPanel, registerOpenSaveReplay } from './commands/profilerCommands';
+import { toggleViewProfiler, toggleViewTopSpans, registerOpenSaveReplay } from './commands/profilerCommands';
 import { logError, logInfo } from '@/stores/useLogStore';
 
 export default function MenuBar() {
@@ -105,33 +106,33 @@ export default function MenuBar() {
  <MenubarMenu>
  <MenubarTrigger className="h-7 px-2 text-density-sm">View</MenubarTrigger>
  <MenubarContent>
- <MenubarItem onClick={openSchemaBrowser}>Component Browser</MenubarItem>
- <MenubarItem onClick={openArchetypeBrowser}>Archetype Browser</MenubarItem>
+ <MenubarItem onClick={toggleViewComponentBrowser}>Component Browser</MenubarItem>
+ <MenubarItem onClick={toggleViewArchetypeBrowser}>Archetype Browser</MenubarItem>
  <MenubarSeparator />
  <MenubarItem
  disabled={!hasComponentSelection}
- onClick={openSchemaLayout}
+ onClick={toggleViewSchemaLayout}
  title={hasComponentSelection ? undefined : 'Select a component first'}
  >
  Component Layout
  </MenubarItem>
  <MenubarItem
  disabled={!hasComponentSelection}
- onClick={openSchemaArchetypes}
+ onClick={toggleViewSchemaArchetypes}
  title={hasComponentSelection ? undefined : 'Select a component first'}
  >
  Component Archetypes
  </MenubarItem>
  <MenubarItem
  disabled={!hasComponentSelection}
- onClick={openSchemaIndexes}
+ onClick={toggleViewSchemaIndexes}
  title={hasComponentSelection ? undefined : 'Select a component first'}
  >
  Component Indexes
  </MenubarItem>
  <MenubarItem
  disabled={!hasComponentSelection}
- onClick={openSchemaRelationships}
+ onClick={toggleViewSchemaRelationships}
  title={hasComponentSelection ? undefined : 'Select a component first'}
  >
  Component Relationships
@@ -139,22 +140,29 @@ export default function MenuBar() {
  <MenubarSeparator />
  <MenubarItem
  disabled={!isProfilerSession}
- onClick={openProfilerPanel}
+ onClick={toggleViewProfiler}
  title={isProfilerSession ? undefined : 'Open a profiler trace or attach a session first'}
  >
  Profiler
  </MenubarItem>
  <MenubarItem
  disabled={!isProfilerSession}
- onClick={openTopSpansPanel}
+ onClick={toggleViewTopSpans}
  title={isProfilerSession ? undefined : 'Open a profiler trace or attach a session first'}
  >
  Top Spans
  </MenubarItem>
  <MenubarSeparator />
- <MenubarItem onClick={openDetailPanel}>Detail</MenubarItem>
- <MenubarItem onClick={openLogsPanel}>Logs</MenubarItem>
- <MenubarItem onClick={openOptions}>Options</MenubarItem>
+ <MenubarItem
+   disabled={isProfilerSession}
+   onClick={toggleViewResourceTree}
+   title={isProfilerSession ? 'Not available in profiler sessions' : undefined}
+ >
+   Resource Tree
+ </MenubarItem>
+ <MenubarItem onClick={toggleViewDetail}>Detail</MenubarItem>
+ <MenubarItem onClick={toggleViewLogs}>Logs</MenubarItem>
+ <MenubarItem onClick={toggleViewOptions}>Options</MenubarItem>
  <MenubarSeparator />
  <MenubarItem onClick={toggleTheme}>Toggle Dark / Light Mode</MenubarItem>
  </MenubarContent>

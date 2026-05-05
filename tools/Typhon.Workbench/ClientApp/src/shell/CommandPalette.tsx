@@ -3,8 +3,34 @@ import { useEffect, useRef, useState } from 'react';
 import { buildBaseCommands } from './commands/baseCommands';
 import { buildResourceHits, groupHitsByKind } from './commands/resourceCommands';
 import { activateResource } from './commands/activateResource';
+import { humpFilter, matchHighlight } from './camelHumpFilter';
 import { useResourceIndex } from '@/hooks/useResourceIndex';
 import { logInfo } from '@/stores/useLogStore';
+
+function HighlightedLabel({ label, query }: { label: string; query: string }) {
+  const positions = matchHighlight(label, query);
+  if (!positions || positions.length === 0) return <>{label}</>;
+
+  const posSet = new Set(positions);
+  const segments: { text: string; hi: boolean }[] = [];
+  let cur = { text: '', hi: posSet.has(0) };
+  for (let i = 0; i < label.length; i++) {
+    const hi = posSet.has(i);
+    if (hi !== cur.hi) { segments.push(cur); cur = { text: label[i], hi }; }
+    else cur.text += label[i];
+  }
+  segments.push(cur);
+
+  return (
+    <>
+      {segments.map((seg, i) =>
+        seg.hi
+          ? <span key={i} className="font-semibold text-amber-400">{seg.text}</span>
+          : <span key={i}>{seg.text}</span>
+      )}
+    </>
+  );
+}
 
 interface CommandPaletteProps {
  open: boolean;
@@ -70,6 +96,7 @@ export default function CommandPalette({ open, onClose, anchorRef }: CommandPale
  <Command
  className="rounded-md"
  shouldFilter={!isResourceMode}
+ filter={humpFilter}
  value={highlighted}
  onValueChange={setHighlighted}
  >
@@ -129,7 +156,7 @@ export default function CommandPalette({ open, onClose, anchorRef }: CommandPale
  text-density-sm text-foreground
  aria-selected:bg-accent aria-selected:text-accent-foreground"
  >
- {cmd.label}
+ <HighlightedLabel label={cmd.label} query={value} />
  </Command.Item>
  ))}
  </Command.List>

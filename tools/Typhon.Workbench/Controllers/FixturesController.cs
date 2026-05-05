@@ -4,6 +4,7 @@ using System.Runtime.InteropServices;
 using Microsoft.AspNetCore.Mvc;
 using Typhon.Workbench.Fixtures;
 using Typhon.Workbench.Middleware;
+using Typhon.Workbench.Sessions;
 
 namespace Typhon.Workbench.Controllers;
 
@@ -26,7 +27,7 @@ namespace Typhon.Workbench.Controllers;
 [Route("api/fixtures")]
 [Tags("Fixtures")]
 [RequireBootstrapToken]
-public sealed class FixturesController : ControllerBase
+public sealed class FixturesController(SessionManager sessions) : ControllerBase
 {
     /// <summary>
     /// Registry of live mock profiler servers, keyed by bound port. Static because the registry's
@@ -43,7 +44,8 @@ public sealed class FixturesController : ControllerBase
     /// <summary>
     /// Create (or reuse) the Workbench dev fixture database. When <paramref name="req"/>.Force is
     /// <c>false</c> and the database already exists, returns its path without regenerating — the
-    /// Dev Fixture tab default. When <c>true</c>, wipes the output directory and rebuilds.
+    /// Dev Fixture tab default. When <c>true</c>, closes any open session against the fixture
+    /// directory first so Windows releases the memory-mapped file handle before the directory wipe.
     /// </summary>
     [HttpPost("create")]
     public ActionResult<CreateFixtureResponseDto> Create([FromBody] CreateFixtureRequestDto req)
@@ -51,6 +53,14 @@ public sealed class FixturesController : ControllerBase
         var outDir = string.IsNullOrWhiteSpace(req?.OutputDirectory)
             ? DefaultOutputDirectory()
             : req.OutputDirectory;
+
+        if (req?.Force ?? false)
+        {
+            var absOutDir = Path.GetFullPath(outDir);
+            sessions.RemoveWhere(s => !string.IsNullOrEmpty(s.FilePath) &&
+                string.Equals(Path.GetDirectoryName(Path.GetFullPath(s.FilePath)), absOutDir,
+                    StringComparison.OrdinalIgnoreCase));
+        }
 
         var result = FixtureDatabase.CreateOrReuse(outDir, force: req?.Force ?? false);
 

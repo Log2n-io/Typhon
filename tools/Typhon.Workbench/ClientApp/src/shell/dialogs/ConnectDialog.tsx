@@ -18,7 +18,7 @@ import OpenTraceTab from './tabs/OpenTraceTab';
 import AttachTab from './tabs/AttachTab';
 import CachedDataTab from './tabs/CachedDataTab';
 import DevFixtureTab from './tabs/DevFixtureTab';
-import { openProfilerPanel } from '@/shell/commands/profilerCommands';
+import { toggleViewProfiler } from '@/shell/commands/profilerCommands';
 
 export type ConnectTab = 'recent' | 'open' | 'trace' | 'attach' | 'cached' | 'devfixture';
 
@@ -133,7 +133,7 @@ export default function ConnectDialog({ open, initialTab, onOpenChange }: Props)
  });
  logInfo(`Trace session opened`, { sessionId: dto.sessionId, filePath: dto.filePath ?? filePath });
  onOpenChange(false);
- openProfilerPanel();
+ toggleViewProfiler();
  } catch (err) {
  logError(`Failed to open trace: ${filePath}`, {
  filePath,
@@ -151,7 +151,7 @@ export default function ConnectDialog({ open, initialTab, onOpenChange }: Props)
  setSession(dto);
  logInfo(`Attach session opened`, { sessionId: dto.sessionId, endpoint });
  onOpenChange(false);
- openProfilerPanel();
+ toggleViewProfiler();
  } catch (err) {
  logError(`Failed to attach to: ${endpoint}`, {
  endpoint,

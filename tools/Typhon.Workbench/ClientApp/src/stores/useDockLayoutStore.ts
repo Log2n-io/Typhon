@@ -29,6 +29,6 @@ export const useDockLayoutStore = create<DockLayoutState>()(
       get: (key) => get().layouts[key] ?? null,
       clear: () => set({ layouts: {} }),
     }),
-    { name: 'typhon-dock-layouts', storage: safeStorage },
+    { name: 'typhon-dock-layouts-v3', storage: safeStorage },
   ),
 );

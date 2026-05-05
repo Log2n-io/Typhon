@@ -1,8 +1,8 @@
-import { useEffect, useRef } from 'react';
-import { DockviewReact, type DockviewApi, type DockviewReadyEvent, type IDockviewPanelProps } from 'dockview-react';
+import { useRef } from 'react';
+import { useThemeStore } from '@/stores/useThemeStore';
+import { DockviewDefaultTab, DockviewReact, themeDark, themeLight, type DockviewApi, type DockviewReadyEvent, type IDockviewDefaultTabProps, type IDockviewPanelHeaderProps, type IDockviewPanelProps } from 'dockview-react';
 import { useDockLayoutStore } from '@/stores/useDockLayoutStore';
 import { useSessionStore } from '@/stores/useSessionStore';
-import { useTreeVisibilityStore } from '@/stores/useTreeVisibilityStore';
 import DetailPanel from '@/panels/DetailPanel';
 import LogsPanel from '@/panels/LogsPanel';
 import ResourceTreePanel from '@/panels/ResourceTreePanel';
@@ -22,8 +22,20 @@ import { registerProfilerDockApi } from './commands/profilerCommands';
 import MigrationRequiredBanner from './banners/MigrationRequiredBanner';
 import IncompatibleBanner from './banners/IncompatibleBanner';
 
+// Tab component without a close button — applied to structural panels that should not be closable.
+const LockedTab: React.FC<IDockviewPanelHeaderProps> = (props) => (
+  <DockviewDefaultTab {...(props as IDockviewDefaultTabProps)} hideClose />
+);
+
+const tabComponents: Record<string, React.FC<IDockviewPanelHeaderProps>> = {
+  locked: LockedTab,
+};
+
 const LAYOUT_KEY_DEFAULT = 'default';
 const SAVE_DEBOUNCE_MS = 1_500;
+const EDGE_LEFT_ID = 'edge-left';
+const EDGE_RIGHT_ID = 'edge-right';
+const EDGE_BOTTOM_ID = 'edge-bottom';
 
 const components: Record<string, React.FC<IDockviewPanelProps>> = {
   ResourceTree: ResourceTreePanel,
@@ -44,70 +56,68 @@ const components: Record<string, React.FC<IDockviewPanelProps>> = {
 
 function buildDefaultLayout(api: DockviewReadyEvent['api'], kind: 'none' | 'open' | 'attach' | 'trace') {
   if (kind === 'trace' || kind === 'attach') {
-    // Trace + Attach sessions have no resource graph — skip the tree. Profiler takes the center,
-    // Detail docks to the right (so clicking a span/chunk/tick surfaces its metadata), Logs
-    // docks below the profiler for diagnostics.
-    const profiler = api.addPanel({
-      id: 'profiler',
-      component: 'Profiler',
-      title: 'Profiler',
-    });
+    api.addEdgeGroup('right', { id: EDGE_RIGHT_ID, initialSize: 320, minimumSize: 200 });
+    api.addEdgeGroup('bottom', { id: EDGE_BOTTOM_ID, initialSize: 200, minimumSize: 100 });
 
-    const detail = api.addPanel({
+    api.addPanel({ id: 'profiler', component: 'Profiler', title: 'Profiler', tabComponent: 'locked' });
+
+    api.addPanel({
       id: 'detail',
       component: 'Detail',
       title: 'Detail',
-      position: { direction: 'right', referencePanel: profiler },
+      tabComponent: 'locked',
+      position: { referenceGroup: EDGE_RIGHT_ID },
     });
-    detail.api.setSize({ width: 320 });
 
-    const logs = api.addPanel({
+    api.addPanel({
       id: 'logs',
       component: 'Logs',
       title: 'Logs',
-      position: { direction: 'below', referencePanel: profiler },
+      tabComponent: 'locked',
+      position: { referenceGroup: EDGE_BOTTOM_ID },
     });
 
-    // Top spans — wide 7-column table for "what's the slowest in range?". Tab-stacks with Logs
-    // below the profiler so the wide horizontal table has the full bottom-strip width to itself,
-    // and doesn't crowd the more-vertical Detail strip on the right. User can drag it elsewhere.
     api.addPanel({
       id: 'top-spans',
       component: 'TopSpans',
       title: 'Top spans',
-      position: { referencePanel: logs },
+      tabComponent: 'locked',
+      position: { referenceGroup: EDGE_BOTTOM_ID },
     });
     return;
   }
 
-  // Open-mode default.
-  const tree = api.addPanel({
+  // Open / none layout.
+  api.addEdgeGroup('left', { id: EDGE_LEFT_ID, initialSize: 260, minimumSize: 150 });
+  api.addEdgeGroup('right', { id: EDGE_RIGHT_ID, initialSize: 320, minimumSize: 200 });
+  api.addEdgeGroup('bottom', { id: EDGE_BOTTOM_ID, initialSize: 200, minimumSize: 100 });
+
+  // Add start-here before any edge-group panel so it creates the center group while no
+  // edge group is active — otherwise dockview inherits the most-recently-touched group.
+  api.addPanel({ id: 'start-here', component: 'StartHere', title: 'Start Here' });
+
+  api.addPanel({
     id: 'resource-tree',
     component: 'ResourceTree',
     title: 'Resources',
-    position: { direction: 'left' },
-  });
-  tree.api.setSize({ width: 260 });
-
-  api.addPanel({
-    id: 'start-here',
-    component: 'StartHere',
-    title: 'Start Here',
-    position: { direction: 'right', referencePanel: tree },
+    tabComponent: 'locked',
+    position: { referenceGroup: EDGE_LEFT_ID },
   });
 
   api.addPanel({
     id: 'detail',
     component: 'Detail',
     title: 'Detail',
-    position: { direction: 'right' },
+    tabComponent: 'locked',
+    position: { referenceGroup: EDGE_RIGHT_ID },
   });
 
   api.addPanel({
     id: 'logs',
     component: 'Logs',
     title: 'Logs',
-    position: { direction: 'below' },
+    tabComponent: 'locked',
+    position: { referenceGroup: EDGE_BOTTOM_ID },
   });
 }
 
@@ -120,34 +130,6 @@ export default function DockHost() {
   const saveLayout = useDockLayoutStore((s) => s.save);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const apiRef = useRef<DockviewApi | null>(null);
-  const treeVisible = useTreeVisibilityStore((s) => s.visible);
-
-  // Ctrl+/ toggles the Resource Tree panel. Dockview v5.2 has no setVisible/hide or edge-group
-  // collapse primitives yet (the edgeGroups docs on master aren't in a released version), so we
-  // remove on hide and re-add on restore. Panel state re-hydrates from Zustand on remount, so
-  // selection/filter/pins survive the round-trip.
-  const savedWidthRef = useRef<number>(260);
-  useEffect(() => {
-    const api = apiRef.current;
-    if (!api) return;
-    const panel = api.getPanel('resource-tree');
-    if (!treeVisible) {
-      if (panel) {
-        const w = panel.group?.api.width;
-        if (w && w > 10) savedWidthRef.current = w;
-        api.removePanel(panel);
-      }
-    } else if (!panel) {
-      const restored = api.addPanel({
-        id: 'resource-tree',
-        component: 'ResourceTree',
-        title: 'Resources',
-        position: { direction: 'left' },
-      });
-      restored.api.setSize({ width: savedWidthRef.current });
-    }
-  }, [treeVisible]);
-
   function onReady(event: DockviewReadyEvent) {
     apiRef.current = event.api;
     registerDockApi(event.api);
@@ -164,30 +146,20 @@ export default function DockHost() {
       buildDefaultLayout(event.api, kind);
     }
 
-    // Trace-session safety net: if the restored layout predates the Profiler panel's existence (or
-    // the user explicitly closed it in a previous session), force-add it. Without this, reopening a
-    // trace file whose layout was saved under an older build leaves the user staring at an empty dock.
+    // Trace-session safety net: profiler lives in the center area and must always be present.
     if (kind === 'trace' && !event.api.getPanel('profiler')) {
-      event.api.addPanel({
-        id: 'profiler',
-        component: 'Profiler',
-        title: 'Profiler',
-      });
+      event.api.addPanel({ id: 'profiler', component: 'Profiler', title: 'Profiler', tabComponent: 'locked' });
     }
 
-    // Same safety net for the Top spans panel — added in a later build, so older saved layouts
-    // for trace/attach sessions won't have it. Tab-stack with Logs (or any existing panel) so it
-    // shows up without disturbing the rest of the user's layout. The user can drag it elsewhere.
+    // Top spans safety net: panel lives in the bottom edge group.
     if ((kind === 'trace' || kind === 'attach') && !event.api.getPanel('top-spans')) {
-      const ref = event.api.getPanel('logs') ?? event.api.getPanel('profiler');
-      if (ref) {
-        event.api.addPanel({
-          id: 'top-spans',
-          component: 'TopSpans',
-          title: 'Top spans',
-          position: { referencePanel: ref },
-        });
-      }
+      event.api.addPanel({
+        id: 'top-spans',
+        component: 'TopSpans',
+        title: 'Top spans',
+        tabComponent: 'locked',
+        position: { referenceGroup: EDGE_BOTTOM_ID },
+      });
     }
 
     event.api.onDidLayoutChange(() => {
@@ -198,6 +170,7 @@ export default function DockHost() {
     });
   }
 
+  const theme = useThemeStore((s) => s.theme);
   const showMigration = sessionState === 'MigrationRequired';
   const showIncompatible = sessionState === 'Incompatible';
 
@@ -207,8 +180,10 @@ export default function DockHost() {
       {showIncompatible && <IncompatibleBanner />}
       <div className="relative min-h-0 flex-1">
         <DockviewReact
-          className="h-full w-full dockview-theme-dark"
+          theme={theme === 'dark' ? themeDark : themeLight}
+          className="h-full w-full"
           components={components}
+          tabComponents={tabComponents}
           onReady={onReady}
         />
         {showIncompatible && (
