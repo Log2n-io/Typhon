@@ -306,7 +306,7 @@ public static partial class TyphonEvent
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static TraceSpanHeader MakeHeader(int slotIdx, long startTs, ulong spanId, ulong parentSpanId, ulong previousSpanId,
-        ulong traceIdHi, ulong traceIdLo)
+        ulong traceIdHi, ulong traceIdLo, ushort siteId)
         => new()
         {
             ThreadSlot = (byte)slotIdx,
@@ -316,6 +316,7 @@ public static partial class TyphonEvent
             PreviousSpanId = previousSpanId,
             TraceIdHi = traceIdHi,
             TraceIdLo = traceIdLo,
+            SourceLocationId = siteId,
         };
 
     // ═══════════════════════════════════════════════════════════════════════

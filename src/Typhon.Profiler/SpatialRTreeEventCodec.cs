@@ -100,7 +100,8 @@ public static class SpatialRTreeEventCodec
         TraceRecordHeader.ReadSpanHeaderExtension(source[TraceRecordHeader.CommonHeaderSize..],
             out var durationTicks, out _, out _, out var spanFlags);
         var hasTC = (spanFlags & TraceRecordHeader.SpanFlagsHasTraceContext) != 0;
-        var payload = source[TraceRecordHeader.SpanHeaderSize(hasTC)..];
+        var hasSL = (spanFlags & TraceRecordHeader.SpanFlagsHasSourceLocation) != 0;
+        var payload = source[TraceRecordHeader.SpanHeaderSize(hasTC, hasSL)..];
         return new SpatialRTreeInsertData(threadSlot, startTimestamp, durationTicks,
             BinaryPrimitives.ReadInt64LittleEndian(payload),
             payload[8], payload[9], payload[10]);
@@ -112,7 +113,8 @@ public static class SpatialRTreeEventCodec
         TraceRecordHeader.ReadSpanHeaderExtension(source[TraceRecordHeader.CommonHeaderSize..],
             out var durationTicks, out _, out _, out var spanFlags);
         var hasTC = (spanFlags & TraceRecordHeader.SpanFlagsHasTraceContext) != 0;
-        var payload = source[TraceRecordHeader.SpanHeaderSize(hasTC)..];
+        var hasSL = (spanFlags & TraceRecordHeader.SpanFlagsHasSourceLocation) != 0;
+        var payload = source[TraceRecordHeader.SpanHeaderSize(hasTC, hasSL)..];
         return new SpatialRTreeRemoveData(threadSlot, startTimestamp, durationTicks,
             BinaryPrimitives.ReadInt64LittleEndian(payload), payload[8]);
     }
@@ -123,7 +125,8 @@ public static class SpatialRTreeEventCodec
         TraceRecordHeader.ReadSpanHeaderExtension(source[TraceRecordHeader.CommonHeaderSize..],
             out var durationTicks, out _, out _, out var spanFlags);
         var hasTC = (spanFlags & TraceRecordHeader.SpanFlagsHasTraceContext) != 0;
-        var payload = source[TraceRecordHeader.SpanHeaderSize(hasTC)..];
+        var hasSL = (spanFlags & TraceRecordHeader.SpanFlagsHasSourceLocation) != 0;
+        var payload = source[TraceRecordHeader.SpanHeaderSize(hasTC, hasSL)..];
         return new SpatialRTreeNodeSplitData(threadSlot, startTimestamp, durationTicks, payload[0], payload[1], payload[2], payload[3]);
     }
 
@@ -133,7 +136,8 @@ public static class SpatialRTreeEventCodec
         TraceRecordHeader.ReadSpanHeaderExtension(source[TraceRecordHeader.CommonHeaderSize..],
             out var durationTicks, out _, out _, out var spanFlags);
         var hasTC = (spanFlags & TraceRecordHeader.SpanFlagsHasTraceContext) != 0;
-        var payload = source[TraceRecordHeader.SpanHeaderSize(hasTC)..];
+        var hasSL = (spanFlags & TraceRecordHeader.SpanFlagsHasSourceLocation) != 0;
+        var payload = source[TraceRecordHeader.SpanHeaderSize(hasTC, hasSL)..];
         return new SpatialRTreeBulkLoadData(threadSlot, startTimestamp, durationTicks,
             BinaryPrimitives.ReadInt32LittleEndian(payload),
             BinaryPrimitives.ReadInt32LittleEndian(payload[4..]));

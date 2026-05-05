@@ -17,9 +17,10 @@ namespace Typhon.Engine.Profiler;
 /// not eliminate. There is no behavior to encapsulate here — this is data carried between Begin and Dispose.
 /// </para>
 /// <para>
-/// <b>Field order.</b> Fields are declared 8-byte first, 1-byte last so the default sequential layout packs into 49 bytes (six u64/i64 + one
-/// byte) instead of the 56 bytes the natural-reading order would produce (the byte at offset 0 forces 7 bytes of alignment padding). Saves 7
-/// bytes per ref-struct instance on the stack. Wire format is unaffected — the codec methods take individual fields, never the struct as a blob.
+/// <b>Field order.</b> Fields are declared 8-byte first, 2-byte next, 1-byte last so the default sequential layout stays compact. With the
+/// 8-byte fields up front, the trailing <c>SourceLocationId</c> (u16) and <c>ThreadSlot</c> (u8) pack into the tail with 5 bytes of padding to
+/// the next 8-byte alignment — total ~56 bytes vs. the 64 bytes the natural-reading order would produce. Wire format is unaffected — the codec
+/// methods take individual fields, never the struct as a blob.
 /// </para>
 /// </remarks>
 public struct TraceSpanHeader
@@ -41,6 +42,13 @@ public struct TraceSpanHeader
 
     /// <summary>Low 64 bits of the W3C trace context. Zero when no trace context attached.</summary>
     public ulong TraceIdLo;
+
+    /// <summary>
+    /// Compile-time call-site identifier assigned by <c>SourceLocationGenerator</c> via the C# 14 interceptor wrapper. Zero when the call site
+    /// is outside the generator's scope (i.e. anywhere outside <c>Typhon.Engine</c>) or when source attribution is disabled — codecs treat the
+    /// zero value as "no source attribution" and omit the optional 2-byte wire payload. See <c>claude/design/observability/10-profiler-source-attribution.md</c>.
+    /// </summary>
+    public ushort SourceLocationId;
 
     /// <summary>Producer thread slot — index into <c>ThreadSlotRegistry</c>. Set by the <c>BeginX</c> factory.</summary>
     public byte ThreadSlot;

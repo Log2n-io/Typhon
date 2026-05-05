@@ -22,11 +22,12 @@ public ref partial struct TransactionCommitEvent
     [Optional]
     private bool _conflictDetected;
     public readonly int ComputeSize()
-        => TransactionEventCodec.ComputeSize(TraceEventKind.TransactionCommit, Header.TraceIdHi != 0 || Header.TraceIdLo != 0, _optMask);
+        => TransactionEventCodec.ComputeSize(TraceEventKind.TransactionCommit, Header.TraceIdHi != 0 || Header.TraceIdLo != 0, _optMask, Header.SourceLocationId);
 
     public readonly void EncodeTo(Span<byte> destination, long endTimestamp, out int bytesWritten)
         => TransactionEventCodec.Encode(destination, endTimestamp, TraceEventKind.TransactionCommit, Header.ThreadSlot, Header.StartTimestamp,
-            Header.SpanId, Header.ParentSpanId, Header.TraceIdHi, Header.TraceIdLo, Tsn, 0, _optMask, _componentCount, _conflictDetected, out bytesWritten);
+            Header.SpanId, Header.ParentSpanId, Header.TraceIdHi, Header.TraceIdLo, Tsn, 0, _optMask, _componentCount, _conflictDetected, out bytesWritten,
+            sourceLocationId: Header.SourceLocationId);
 }
 
 [TraceEvent(TraceEventKind.TransactionRollback, Codec = typeof(TransactionEventCodec))]
@@ -43,11 +44,12 @@ public ref partial struct TransactionRollbackEvent
     private TransactionRollbackReason _reason;
 
     public readonly int ComputeSize()
-        => TransactionEventCodec.ComputeSize(TraceEventKind.TransactionRollback, Header.TraceIdHi != 0 || Header.TraceIdLo != 0, _optMask);
+        => TransactionEventCodec.ComputeSize(TraceEventKind.TransactionRollback, Header.TraceIdHi != 0 || Header.TraceIdLo != 0, _optMask, Header.SourceLocationId);
 
     public readonly void EncodeTo(Span<byte> destination, long endTimestamp, out int bytesWritten)
         => TransactionEventCodec.Encode(destination, endTimestamp, TraceEventKind.TransactionRollback, Header.ThreadSlot, Header.StartTimestamp,
-            Header.SpanId, Header.ParentSpanId, Header.TraceIdHi, Header.TraceIdLo, Tsn, 0, _optMask, _componentCount, false, out bytesWritten, _reason);
+            Header.SpanId, Header.ParentSpanId, Header.TraceIdHi, Header.TraceIdLo, Tsn, 0, _optMask, _componentCount, false, out bytesWritten, _reason,
+            sourceLocationId: Header.SourceLocationId);
 }
 
 [TraceEvent(TraceEventKind.TransactionCommitComponent, Codec = typeof(TransactionEventCodec))]
@@ -63,12 +65,12 @@ public ref partial struct TransactionCommitComponentEvent
     private int _rowCount;
 
     public readonly int ComputeSize()
-        => TransactionEventCodec.ComputeSize(TraceEventKind.TransactionCommitComponent, Header.TraceIdHi != 0 || Header.TraceIdLo != 0, _optMask);
+        => TransactionEventCodec.ComputeSize(TraceEventKind.TransactionCommitComponent, Header.TraceIdHi != 0 || Header.TraceIdLo != 0, _optMask, Header.SourceLocationId);
 
     public readonly void EncodeTo(Span<byte> destination, long endTimestamp, out int bytesWritten)
         => TransactionEventCodec.Encode(destination, endTimestamp, TraceEventKind.TransactionCommitComponent, Header.ThreadSlot, Header.StartTimestamp,
-            Header.SpanId, Header.ParentSpanId, Header.TraceIdHi, Header.TraceIdLo, Tsn, ComponentTypeId, _optMask, componentCount: 0, conflictDetected: false, 
-            out bytesWritten, rowCount: _rowCount);
+            Header.SpanId, Header.ParentSpanId, Header.TraceIdHi, Header.TraceIdLo, Tsn, ComponentTypeId, _optMask, componentCount: 0, conflictDetected: false,
+            out bytesWritten, rowCount: _rowCount, sourceLocationId: Header.SourceLocationId);
 }
 
 /// <summary>
@@ -85,10 +87,11 @@ public ref partial struct TransactionPersistEvent
     [Optional]
     private long _walLsn;
     public readonly int ComputeSize()
-        => TransactionEventCodec.ComputePersistSize(Header.TraceIdHi != 0 || Header.TraceIdLo != 0, _optMask);
+        => TransactionEventCodec.ComputePersistSize(Header.TraceIdHi != 0 || Header.TraceIdLo != 0, _optMask, Header.SourceLocationId);
 
     public readonly void EncodeTo(Span<byte> destination, long endTimestamp, out int bytesWritten)
         => TransactionEventCodec.EncodePersist(destination, endTimestamp, Header.ThreadSlot, Header.StartTimestamp,
-            Header.SpanId, Header.ParentSpanId, Header.TraceIdHi, Header.TraceIdLo, Tsn, _optMask, _walLsn, out bytesWritten);
+            Header.SpanId, Header.ParentSpanId, Header.TraceIdHi, Header.TraceIdLo, Tsn, _optMask, _walLsn, out bytesWritten,
+            sourceLocationId: Header.SourceLocationId);
 }
 

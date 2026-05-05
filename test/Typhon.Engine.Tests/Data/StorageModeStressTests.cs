@@ -5,7 +5,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
-using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Tests;
 

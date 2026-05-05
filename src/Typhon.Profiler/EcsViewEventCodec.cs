@@ -181,11 +181,13 @@ public static class EcsViewEventCodec
             out dur, out spanId, out parentSpanId, out var spanFlags);
         traceIdHi = 0; traceIdLo = 0;
         var hasTC = (spanFlags & TraceRecordHeader.SpanFlagsHasTraceContext) != 0;
+        var hasSL = (spanFlags & TraceRecordHeader.SpanFlagsHasSourceLocation) != 0;
         if (hasTC)
         {
             TraceRecordHeader.ReadTraceContext(source[TraceRecordHeader.MinSpanHeaderSize..], out traceIdHi, out traceIdLo);
         }
-        return source[TraceRecordHeader.SpanHeaderSize(hasTC)..];
+        // Source-location bytes (#302) are skipped here — Phase 4 will surface siteId in this codec.
+        return source[TraceRecordHeader.SpanHeaderSize(hasTC, hasSL)..];
     }
 
     // ── RefreshPull (span) ──

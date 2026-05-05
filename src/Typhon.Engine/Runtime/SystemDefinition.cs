@@ -58,6 +58,23 @@ public sealed class SystemDefinition
     public Action<int, int> PipelineChunkAction { get; init; }
 
     // ═══════════════════════════════════════════════════════════════
+    // Source attribution (#302 — system-side via PDB sequence points)
+    // ═══════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Repo-relative or absolute path to the source file declaring this system's entry method.
+    /// Resolved from the delegate's PDB at <see cref="DagBuilder"/> registration. Empty/null when
+    /// no PDB was available — the Workbench falls back to "no Source row" for the chunk.
+    /// </summary>
+    public string SourceFilePath { get; init; }
+
+    /// <summary>1-based line number of the entry method's first sequence point. 0 when not resolved.</summary>
+    public int SourceLine { get; init; }
+
+    /// <summary>Containing-method short name (e.g. <c>MoveAllAnts</c>) for display in the Source row.</summary>
+    public string SourceMethod { get; init; }
+
+    // ═══════════════════════════════════════════════════════════════
     // DAG structure (set by DagBuilder.Build)
     // ═══════════════════════════════════════════════════════════════
 

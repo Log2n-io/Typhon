@@ -4,7 +4,6 @@ using System.Collections.Generic;
 using System.IO;
 using System.Threading;
 using NUnit.Framework;
-using Typhon.Engine;
 using Typhon.Engine.Profiler;
 using Typhon.Engine.Profiler.Exporters;
 using Typhon.Profiler;

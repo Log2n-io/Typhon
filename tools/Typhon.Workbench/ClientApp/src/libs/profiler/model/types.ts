@@ -501,6 +501,9 @@ export interface TraceEvent {
   traceIdHi?: string;
   traceIdLo?: string;
 
+  /** #302: compile-time site id from `SourceLocationGenerator`. Resolves via `useSourceLocationStore`. */
+  sourceLocationId?: number;
+
   // Instant-event fields
   phase?: number;
   systemIndex?: number;

@@ -32,13 +32,17 @@ public readonly struct PageCacheEventData
     /// <summary>Phase 5: dirty-bit for <see cref="TraceEventKind.PageEvicted"/> (1 if the displaced page was dirty, 0 otherwise).</summary>
     public byte DirtyBit { get; }
 
+    /// <summary>Source-location id assigned by <c>SourceLocationGenerator</c> (#302). Zero when the wire record didn't carry source attribution.</summary>
+    public ushort SourceLocationId { get; }
+
     public bool HasPageCount => (OptionalFieldMask & PageCacheEventCodec.OptPageCount) != 0;
     public bool HasDirtyBit => (OptionalFieldMask & PageCacheEventCodec.OptDirtyBit) != 0;
     public bool HasTraceContext => TraceIdHi != 0 || TraceIdLo != 0;
+    public bool HasSourceLocation => SourceLocationId != 0;
 
     public PageCacheEventData(TraceEventKind kind, byte threadSlot, long startTimestamp, long durationTicks,
         ulong spanId, ulong parentSpanId, ulong traceIdHi, ulong traceIdLo,
-        int filePageIndex, int pageCount, byte optionalFieldMask, byte dirtyBit = 0)
+        int filePageIndex, int pageCount, byte optionalFieldMask, byte dirtyBit = 0, ushort sourceLocationId = 0)
     {
         Kind = kind;
         ThreadSlot = threadSlot;
@@ -52,6 +56,7 @@ public readonly struct PageCacheEventData
         PageCount = pageCount;
         OptionalFieldMask = optionalFieldMask;
         DirtyBit = dirtyBit;
+        SourceLocationId = sourceLocationId;
     }
 }
 
@@ -68,14 +73,20 @@ public readonly struct PageCacheBackpressureEventData
     public int RetryCount { get; }
     public int DirtyCount { get; }
     public int EpochCount { get; }
+
+    /// <summary>Source-location id assigned by <c>SourceLocationGenerator</c> (#302). Zero when the wire record didn't carry source attribution.</summary>
+    public ushort SourceLocationId { get; }
+
     public bool HasTraceContext => TraceIdHi != 0 || TraceIdLo != 0;
+    public bool HasSourceLocation => SourceLocationId != 0;
 
     public PageCacheBackpressureEventData(byte threadSlot, long startTimestamp, long durationTicks, ulong spanId, ulong parentSpanId,
-        ulong traceIdHi, ulong traceIdLo, int retryCount, int dirtyCount, int epochCount)
+        ulong traceIdHi, ulong traceIdLo, int retryCount, int dirtyCount, int epochCount, ushort sourceLocationId = 0)
     {
         ThreadSlot = threadSlot; StartTimestamp = startTimestamp; DurationTicks = durationTicks;
         SpanId = spanId; ParentSpanId = parentSpanId; TraceIdHi = traceIdHi; TraceIdLo = traceIdLo;
         RetryCount = retryCount; DirtyCount = dirtyCount; EpochCount = epochCount;
+        SourceLocationId = sourceLocationId;
     }
 }
 
@@ -92,16 +103,21 @@ public static class PageCacheBackpressureCodec
         TraceRecordHeader.ReadCommonHeader(source, out _, out _, out var threadSlot, out var startTimestamp);
         TraceRecordHeader.ReadSpanHeaderExtension(source[TraceRecordHeader.CommonHeaderSize..],
             out var durationTicks, out var spanId, out var parentSpanId, out var spanFlags);
+        var hasTraceContext = (spanFlags & TraceRecordHeader.SpanFlagsHasTraceContext) != 0;
+        var hasSourceLocation = (spanFlags & TraceRecordHeader.SpanFlagsHasSourceLocation) != 0;
         ulong traceIdHi = 0, traceIdLo = 0;
-        if ((spanFlags & TraceRecordHeader.SpanFlagsHasTraceContext) != 0)
+        if (hasTraceContext)
             TraceRecordHeader.ReadTraceContext(source[TraceRecordHeader.MinSpanHeaderSize..], out traceIdHi, out traceIdLo);
-        var headerSize = TraceRecordHeader.SpanHeaderSize((spanFlags & TraceRecordHeader.SpanFlagsHasTraceContext) != 0);
+        ushort sourceLocationId = 0;
+        if (hasSourceLocation)
+            sourceLocationId = TraceRecordHeader.ReadSourceLocationId(source[TraceRecordHeader.SourceLocationIdOffset(hasTraceContext)..]);
+        var headerSize = TraceRecordHeader.SpanHeaderSize(hasTraceContext, hasSourceLocation);
         var payload = source[headerSize..];
         var retryCount = BinaryPrimitives.ReadInt32LittleEndian(payload);
         var dirtyCount = BinaryPrimitives.ReadInt32LittleEndian(payload[4..]);
         var epochCount = BinaryPrimitives.ReadInt32LittleEndian(payload[8..]);
         return new PageCacheBackpressureEventData(threadSlot, startTimestamp, durationTicks, spanId, parentSpanId,
-            traceIdHi, traceIdLo, retryCount, dirtyCount, epochCount);
+            traceIdHi, traceIdLo, retryCount, dirtyCount, epochCount, sourceLocationId);
     }
 }
 
@@ -129,9 +145,10 @@ public static class PageCacheEventCodec
     private const int DirtyBitSize = 1;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static int ComputeSize(TraceEventKind kind, bool hasTraceContext, byte optMask)
+    public static int ComputeSize(TraceEventKind kind, bool hasTraceContext, byte optMask, ushort sourceLocationId = 0)
     {
-        var size = TraceRecordHeader.SpanHeaderSize(hasTraceContext) + FilePageIndexSize + OptMaskSize;
+        var hasSourceLocation = sourceLocationId != 0;
+        var size = TraceRecordHeader.SpanHeaderSize(hasTraceContext, hasSourceLocation) + FilePageIndexSize + OptMaskSize;
         if ((optMask & OptPageCount) != 0) size += PageCountSize;
         if ((optMask & OptDirtyBit) != 0) size += DirtyBitSize;
         return size;
@@ -141,24 +158,35 @@ public static class PageCacheEventCodec
     // DiskWrite, AllocatePage, Flush) keeps calling this codec because the generator's standard layout doesn't model
     // the always-on optMask byte or the FilePageIndex slot reuse for Flush. EmitPageEvicted in TyphonEvent.cs also
     // calls it. See PageCacheFlushEvent's <remarks> for the full escape-hatch rationale.
+    //
+    // Source attribution (#302): when sourceLocationId != 0, the SpanFlagsHasSourceLocation bit is set and 2 extra
+    // bytes are written after the optional trace context, before the kind payload. EmitPageEvicted always passes
+    // siteId = 0 (private internal emitter — never targeted by the SourceLocationGenerator interceptor).
     internal static void Encode(Span<byte> destination, long endTimestamp, TraceEventKind kind, byte threadSlot, long startTimestamp,
         ulong spanId, ulong parentSpanId, ulong traceIdHi, ulong traceIdLo,
-        int filePageIndex, int pageCount, byte optMask, out int bytesWritten, byte dirtyBit = 0)
+        int filePageIndex, int pageCount, byte optMask, out int bytesWritten, byte dirtyBit = 0, ushort sourceLocationId = 0)
     {
         var hasTraceContext = traceIdHi != 0 || traceIdLo != 0;
-        var size = ComputeSize(kind, hasTraceContext, optMask);
+        var hasSourceLocation = sourceLocationId != 0;
+        var size = ComputeSize(kind, hasTraceContext, optMask, sourceLocationId);
 
         TraceRecordHeader.WriteCommonHeader(destination, (ushort)size, kind, threadSlot, startTimestamp);
-        var spanFlags = hasTraceContext ? TraceRecordHeader.SpanFlagsHasTraceContext : (byte)0;
+        var spanFlags = (byte)0;
+        if (hasTraceContext) spanFlags |= TraceRecordHeader.SpanFlagsHasTraceContext;
+        if (hasSourceLocation) spanFlags |= TraceRecordHeader.SpanFlagsHasSourceLocation;
         TraceRecordHeader.WriteSpanHeaderExtension(destination[TraceRecordHeader.CommonHeaderSize..],
             endTimestamp - startTimestamp, spanId, parentSpanId, spanFlags);
 
-        var headerSize = TraceRecordHeader.SpanHeaderSize(hasTraceContext);
         if (hasTraceContext)
         {
             TraceRecordHeader.WriteTraceContext(destination[TraceRecordHeader.MinSpanHeaderSize..], traceIdHi, traceIdLo);
         }
+        if (hasSourceLocation)
+        {
+            TraceRecordHeader.WriteSourceLocationId(destination[TraceRecordHeader.SourceLocationIdOffset(hasTraceContext)..], sourceLocationId);
+        }
 
+        var headerSize = TraceRecordHeader.SpanHeaderSize(hasTraceContext, hasSourceLocation);
         var payload = destination[headerSize..];
         BinaryPrimitives.WriteInt32LittleEndian(payload, filePageIndex);
         payload[FilePageIndexSize] = optMask;
@@ -185,13 +213,21 @@ public static class PageCacheEventCodec
         TraceRecordHeader.ReadSpanHeaderExtension(source[TraceRecordHeader.CommonHeaderSize..],
             out var durationTicks, out var spanId, out var parentSpanId, out var spanFlags);
 
+        var hasTraceContext = (spanFlags & TraceRecordHeader.SpanFlagsHasTraceContext) != 0;
+        var hasSourceLocation = (spanFlags & TraceRecordHeader.SpanFlagsHasSourceLocation) != 0;
+
         ulong traceIdHi = 0, traceIdLo = 0;
-        if ((spanFlags & TraceRecordHeader.SpanFlagsHasTraceContext) != 0)
+        if (hasTraceContext)
         {
             TraceRecordHeader.ReadTraceContext(source[TraceRecordHeader.MinSpanHeaderSize..], out traceIdHi, out traceIdLo);
         }
+        ushort sourceLocationId = 0;
+        if (hasSourceLocation)
+        {
+            sourceLocationId = TraceRecordHeader.ReadSourceLocationId(source[TraceRecordHeader.SourceLocationIdOffset(hasTraceContext)..]);
+        }
 
-        var headerSize = TraceRecordHeader.SpanHeaderSize((spanFlags & TraceRecordHeader.SpanFlagsHasTraceContext) != 0);
+        var headerSize = TraceRecordHeader.SpanHeaderSize(hasTraceContext, hasSourceLocation);
         var payload = source[headerSize..];
         var filePageIndex = BinaryPrimitives.ReadInt32LittleEndian(payload);
         var optMask = payload[FilePageIndexSize];
@@ -212,7 +248,7 @@ public static class PageCacheEventCodec
         }
 
         return new PageCacheEventData(kind, threadSlot, startTimestamp, durationTicks, spanId, parentSpanId, traceIdHi, traceIdLo,
-            filePageIndex, pageCount, optMask, dirtyBit);
+            filePageIndex, pageCount, optMask, dirtyBit, sourceLocationId);
     }
 }
 

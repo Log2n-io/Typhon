@@ -18,8 +18,11 @@ public readonly struct BTreeEventData
     public ulong TraceIdHi { get; }
     public ulong TraceIdLo { get; }
 
+    /// <summary>Source-location id assigned by <c>SourceLocationGenerator</c> (#302). Zero when the wire record didn't carry source attribution.</summary>
+    public ushort SourceLocationId { get; }
+
     public BTreeEventData(TraceEventKind kind, byte threadSlot, long startTimestamp, long durationTicks, ulong spanId, ulong parentSpanId,
-        ulong traceIdHi, ulong traceIdLo)
+        ulong traceIdHi, ulong traceIdLo, ushort sourceLocationId = 0)
     {
         Kind = kind;
         ThreadSlot = threadSlot;
@@ -29,10 +32,14 @@ public readonly struct BTreeEventData
         ParentSpanId = parentSpanId;
         TraceIdHi = traceIdHi;
         TraceIdLo = traceIdLo;
+        SourceLocationId = sourceLocationId;
     }
 
     /// <summary><c>true</c> when <see cref="TraceIdHi"/> and <see cref="TraceIdLo"/> are non-zero (the record carried distributed-trace context).</summary>
     public bool HasTraceContext => TraceIdHi != 0 || TraceIdLo != 0;
+
+    /// <summary><c>true</c> when <see cref="SourceLocationId"/> is non-zero (the record carried source attribution from <c>SourceLocationGenerator</c>).</summary>
+    public bool HasSourceLocation => SourceLocationId != 0;
 }
 
 /// <summary>
@@ -53,13 +60,21 @@ public static class BTreeEventCodec
         TraceRecordHeader.ReadSpanHeaderExtension(source[TraceRecordHeader.CommonHeaderSize..],
             out var durationTicks, out var spanId, out var parentSpanId, out var spanFlags);
 
+        var hasTraceContext = (spanFlags & TraceRecordHeader.SpanFlagsHasTraceContext) != 0;
+        var hasSourceLocation = (spanFlags & TraceRecordHeader.SpanFlagsHasSourceLocation) != 0;
+
         ulong traceIdHi = 0, traceIdLo = 0;
-        if ((spanFlags & TraceRecordHeader.SpanFlagsHasTraceContext) != 0)
+        if (hasTraceContext)
         {
             TraceRecordHeader.ReadTraceContext(source[TraceRecordHeader.MinSpanHeaderSize..], out traceIdHi, out traceIdLo);
         }
+        ushort sourceLocationId = 0;
+        if (hasSourceLocation)
+        {
+            sourceLocationId = TraceRecordHeader.ReadSourceLocationId(source[TraceRecordHeader.SourceLocationIdOffset(hasTraceContext)..]);
+        }
 
-        return new BTreeEventData(kind, threadSlot, startTimestamp, durationTicks, spanId, parentSpanId, traceIdHi, traceIdLo);
+        return new BTreeEventData(kind, threadSlot, startTimestamp, durationTicks, spanId, parentSpanId, traceIdHi, traceIdLo, sourceLocationId);
     }
 }
 

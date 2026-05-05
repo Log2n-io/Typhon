@@ -49,7 +49,8 @@ public static class SpatialTierIndexEventCodec
         TraceRecordHeader.ReadSpanHeaderExtension(source[TraceRecordHeader.CommonHeaderSize..],
             out var durationTicks, out _, out _, out var spanFlags);
         var hasTC = (spanFlags & TraceRecordHeader.SpanFlagsHasTraceContext) != 0;
-        var payload = source[TraceRecordHeader.SpanHeaderSize(hasTC)..];
+        var hasSL = (spanFlags & TraceRecordHeader.SpanFlagsHasSourceLocation) != 0;
+        var payload = source[TraceRecordHeader.SpanHeaderSize(hasTC, hasSL)..];
         return new SpatialTierIndexRebuildData(threadSlot, startTimestamp, durationTicks,
             BinaryPrimitives.ReadUInt16LittleEndian(payload),
             BinaryPrimitives.ReadInt32LittleEndian(payload[2..]),

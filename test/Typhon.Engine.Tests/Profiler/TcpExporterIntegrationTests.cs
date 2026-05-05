@@ -5,7 +5,6 @@ using System.IO;
 using System.Net.Sockets;
 using System.Threading;
 using NUnit.Framework;
-using Typhon.Engine;
 using Typhon.Engine.Profiler;
 using Typhon.Engine.Profiler.Exporters;
 using Typhon.Profiler;
@@ -113,14 +112,20 @@ public class TcpExporterIntegrationTests
             var decodedClusterMigration = false;
             var framesRead = 0;
 
-            while (framesRead < 20
+            while (framesRead < 22
                    && (!decodedClusterMigration
                        || kindCounts.GetValueOrDefault(TraceEventKind.BTreeInsert, 0) == 0
                        || kindCounts.GetValueOrDefault(TraceEventKind.BTreeDelete, 0) == 0))
             {
                 var (frameType, framePayload) = ReadFrame(stream);
-                Assert.That(frameType, Is.EqualTo(LiveFrameType.Block), $"Frame {framesRead} after INIT must be a Block");
                 framesRead++;
+                // #302 Phase 4: FileTable + SourceLocationManifest frames are sent during the init handshake,
+                // before the first Block frame. Skip past them — they're optional metadata, not record blocks.
+                if (frameType == LiveFrameType.FileTable || frameType == LiveFrameType.SourceLocationManifest)
+                {
+                    continue;
+                }
+                Assert.That(frameType, Is.EqualTo(LiveFrameType.Block), $"Frame {framesRead} after INIT must be a Block (or FileTable/SourceLocationManifest)");
 
                 var (uncompressedBytes, compressedBytes, recordCount) = TraceBlockEncoder.ReadBlockHeader(framePayload);
                 Assert.That(recordCount, Is.GreaterThan(0), $"Block {framesRead} should carry at least one record");

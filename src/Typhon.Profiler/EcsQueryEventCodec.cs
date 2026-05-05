@@ -51,18 +51,23 @@ public readonly struct EcsQueryEventData
     /// <summary>Phase 7 (D2): variant byte for consolidated kind 32 producers. Valid iff <see cref="HasVariant"/> is <c>true</c>.</summary>
     public EcsQueryVariant Variant { get; }
 
+    /// <summary>Source-location id assigned by <c>SourceLocationGenerator</c> (#302). Zero when the wire record didn't carry source attribution.</summary>
+    public ushort SourceLocationId { get; }
+
     public bool HasResultCount => (OptionalFieldMask & EcsQueryEventCodec.OptResultCount) != 0;
     public bool HasScanMode => (OptionalFieldMask & EcsQueryEventCodec.OptScanMode) != 0;
     public bool HasFound => (OptionalFieldMask & EcsQueryEventCodec.OptFound) != 0;
     public bool HasVariant => (OptionalFieldMask & EcsQueryEventCodec.OptVariant) != 0;
     public bool HasTraceContext => TraceIdHi != 0 || TraceIdLo != 0;
+    public bool HasSourceLocation => SourceLocationId != 0;
 
     public EcsQueryEventData(
         TraceEventKind kind, byte threadSlot, long startTimestamp, long durationTicks,
         ulong spanId, ulong parentSpanId, ulong traceIdHi, ulong traceIdLo,
         ushort archetypeTypeId, byte optionalFieldMask,
         int resultCount, EcsQueryScanMode scanMode, bool found,
-        EcsQueryVariant variant = EcsQueryVariant.Execute)
+        EcsQueryVariant variant = EcsQueryVariant.Execute,
+        ushort sourceLocationId = 0)
     {
         Kind = kind;
         ThreadSlot = threadSlot;
@@ -78,6 +83,7 @@ public readonly struct EcsQueryEventData
         ScanMode = scanMode;
         Found = found;
         Variant = variant;
+        SourceLocationId = sourceLocationId;
     }
 }
 
@@ -124,9 +130,10 @@ public static class EcsQueryEventCodec
     private const int RequiredPayloadSize = 3;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static int ComputeSize(bool hasTraceContext, byte optMask)
+    public static int ComputeSize(bool hasTraceContext, byte optMask, ushort sourceLocationId = 0)
     {
-        var size = TraceRecordHeader.SpanHeaderSize(hasTraceContext) + RequiredPayloadSize;
+        var hasSourceLocation = sourceLocationId != 0;
+        var size = TraceRecordHeader.SpanHeaderSize(hasTraceContext, hasSourceLocation) + RequiredPayloadSize;
         // ResultCount and Found share the same 4 B slot — only one of them is ever set for a given kind.
         if ((optMask & (OptResultCount | OptFound)) != 0)
         {
@@ -145,7 +152,8 @@ public static class EcsQueryEventCodec
 
     /// <summary>
     /// Internal encoder shared by the three ECS query event kinds. Writes the span header, required payload, and any optional fields whose mask
-    /// bit is set.
+    /// bit is set. When <paramref name="sourceLocationId"/> is non-zero, sets <see cref="TraceRecordHeader.SpanFlagsHasSourceLocation"/> and
+    /// writes 2 extra bytes after the optional trace context (#302).
     /// </summary>
     internal static void Encode(
         Span<byte> destination,
@@ -163,26 +171,34 @@ public static class EcsQueryEventCodec
         EcsQueryScanMode scanMode,
         bool found,
         out int bytesWritten,
-        EcsQueryVariant variant = EcsQueryVariant.Execute)
+        EcsQueryVariant variant = EcsQueryVariant.Execute,
+        ushort sourceLocationId = 0)
     {
         var hasTraceContext = traceIdHi != 0 || traceIdLo != 0;
-        var size = ComputeSize(hasTraceContext, optMask);
+        var hasSourceLocation = sourceLocationId != 0;
+        var size = ComputeSize(hasTraceContext, optMask, sourceLocationId);
 
         // ── Common header + span extension ──
         TraceRecordHeader.WriteCommonHeader(destination, (ushort)size, kind, threadSlot, startTimestamp);
-        var spanFlags = hasTraceContext ? TraceRecordHeader.SpanFlagsHasTraceContext : (byte)0;
+        var spanFlags = (byte)0;
+        if (hasTraceContext) spanFlags |= TraceRecordHeader.SpanFlagsHasTraceContext;
+        if (hasSourceLocation) spanFlags |= TraceRecordHeader.SpanFlagsHasSourceLocation;
         TraceRecordHeader.WriteSpanHeaderExtension(destination[TraceRecordHeader.CommonHeaderSize..],
             durationTicks: endTimestamp - startTimestamp,
             spanId: spanId,
             parentSpanId: parentSpanId,
             spanFlags: spanFlags);
 
-        var headerSize = TraceRecordHeader.SpanHeaderSize(hasTraceContext);
         if (hasTraceContext)
         {
             TraceRecordHeader.WriteTraceContext(destination[TraceRecordHeader.MinSpanHeaderSize..], traceIdHi, traceIdLo);
         }
+        if (hasSourceLocation)
+        {
+            TraceRecordHeader.WriteSourceLocationId(destination[TraceRecordHeader.SourceLocationIdOffset(hasTraceContext)..], sourceLocationId);
+        }
 
+        var headerSize = TraceRecordHeader.SpanHeaderSize(hasTraceContext, hasSourceLocation);
         // ── Required payload ──
         var payload = destination[headerSize..];
         BinaryPrimitives.WriteUInt16LittleEndian(payload, archetypeTypeId);
@@ -218,13 +234,21 @@ public static class EcsQueryEventCodec
         TraceRecordHeader.ReadSpanHeaderExtension(source[TraceRecordHeader.CommonHeaderSize..],
             out var durationTicks, out var spanId, out var parentSpanId, out var spanFlags);
 
+        var hasTraceContext = (spanFlags & TraceRecordHeader.SpanFlagsHasTraceContext) != 0;
+        var hasSourceLocation = (spanFlags & TraceRecordHeader.SpanFlagsHasSourceLocation) != 0;
+
         ulong traceIdHi = 0, traceIdLo = 0;
-        if ((spanFlags & TraceRecordHeader.SpanFlagsHasTraceContext) != 0)
+        if (hasTraceContext)
         {
             TraceRecordHeader.ReadTraceContext(source[TraceRecordHeader.MinSpanHeaderSize..], out traceIdHi, out traceIdLo);
         }
+        ushort sourceLocationId = 0;
+        if (hasSourceLocation)
+        {
+            sourceLocationId = TraceRecordHeader.ReadSourceLocationId(source[TraceRecordHeader.SourceLocationIdOffset(hasTraceContext)..]);
+        }
 
-        var headerSize = TraceRecordHeader.SpanHeaderSize((spanFlags & TraceRecordHeader.SpanFlagsHasTraceContext) != 0);
+        var headerSize = TraceRecordHeader.SpanHeaderSize(hasTraceContext, hasSourceLocation);
         var payload = source[headerSize..];
         var archetypeTypeId = BinaryPrimitives.ReadUInt16LittleEndian(payload);
         var optMask = payload[2];
@@ -261,7 +285,7 @@ public static class EcsQueryEventCodec
         }
 
         return new EcsQueryEventData(kind, threadSlot, startTimestamp, durationTicks, spanId, parentSpanId, traceIdHi, traceIdLo,
-            archetypeTypeId, optMask, resultCount, scanMode, found, variant);
+            archetypeTypeId, optMask, resultCount, scanMode, found, variant, sourceLocationId);
     }
 }
 

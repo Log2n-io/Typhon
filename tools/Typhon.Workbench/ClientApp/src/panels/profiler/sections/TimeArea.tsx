@@ -17,6 +17,8 @@ import { useNavHistoryStore } from '@/stores/useNavHistoryStore';
 import { useProfilerSessionStore } from '@/stores/useProfilerSessionStore';
 import { useProfilerSelectionStore } from '@/stores/useProfilerSelectionStore';
 import { useProfilerViewStore } from '@/stores/useProfilerViewStore';
+import { useSourceLocationStore } from '@/stores/useSourceLocationStore';
+import { useOptionsStore } from '@/stores/useOptionsStore';
 import { useThemeStore } from '@/stores/useThemeStore';
 
 /**
@@ -583,6 +585,11 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
   // Double-click a chunk / span / phase / mini-row op → smooth-zoom the viewport to its bounds.
   // Ported verbatim from the old profiler's `onDblClick`. Tick / gutter-chevron hits are ignored —
   // nothing meaningful to zoom to there. The 800 ms ease-out tween lives in `animateToRange`.
+  //
+  // #302: Ctrl+double-click on a span overrides the zoom and instead routes to "Open in editor"
+  // for that span's emission site (when the span carries a sourceLocationId and the manifest has
+  // resolved it). Falls through to the zoom path when source attribution isn't available, so the
+  // gesture is never a dead-end on un-attributed spans (e.g. non-Engine call sites).
   const onDoubleClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>): void => {
     const local = getLocal(e);
     if (!local) return;
@@ -593,6 +600,33 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
       legendsVisible,
     });
     if (!hit) return;
+
+    if (e.ctrlKey && hit.kind === 'span') {
+      // Resolve the span's emission site via the compile-time manifest. getState() is sufficient —
+      // this is a one-shot action, no need to subscribe to store changes.
+      const siteId = hit.span.rawEvent?.sourceLocationId;
+      const loc = useSourceLocationStore.getState().resolve(siteId);
+      if (loc) {
+        // Fire-and-forget; toast handled inside the store mutation. Don't await — the canvas
+        // shouldn't block on the editor launch.
+        void useOptionsStore.getState().openInEditor(loc.file, loc.line);
+        return;
+      }
+      // No attribution for this span → fall through to the zoom-to-span behavior so the gesture
+      // still does something useful instead of feeling broken.
+    }
+
+    if (e.ctrlKey && hit.kind === 'chunk') {
+      // #302 system attribution: chunk source comes from the synthesized system id
+      // (0x8000 | systemIndex) populated by the engine's RuntimeSourceLocationManifest.
+      const loc = useSourceLocationStore.getState().resolveSystem(hit.chunk.systemIndex);
+      if (loc) {
+        void useOptionsStore.getState().openInEditor(loc.file, loc.line);
+        return;
+      }
+      // No PDB attribution → fall through to zoom-to-chunk.
+    }
+
     switch (hit.kind) {
       case 'chunk':       animateToRange({ startUs: hit.chunk.startUs, endUs: hit.chunk.endUs }); return;
       case 'span':        animateToRange({ startUs: hit.span.startUs,  endUs: hit.span.endUs  }); return;

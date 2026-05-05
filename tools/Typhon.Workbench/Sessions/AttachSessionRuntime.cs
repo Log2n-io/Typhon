@@ -108,6 +108,13 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
     /// <summary>Cached metadata snapshot — invalidated on every state change, lazily rebuilt on access.</summary>
     private volatile ProfilerMetadataDto _metadataSnapshot;
 
+    /// <summary>
+    /// Compile-time source-location manifest received from the engine in the init handshake (#302, Phase 4).
+    /// Parsed once per Init and made available via <see cref="SourceLocationManifest"/>. Empty when the
+    /// engine ran without an intercepted call site (e.g. test-only configurations).
+    /// </summary>
+    private SourceLocationManifestDto _sourceLocationManifest = SourceLocationManifestDto.Empty;
+
     private Timer _flushChunkTimer;
     private Timer _trailingTickTimer;
     private Timer _globalMetricsTimer;
@@ -137,6 +144,12 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
 
     /// <summary>Resolves with the metadata DTO once the first Init frame arrives. Faults if the runtime is disposed before that.</summary>
     public Task<ProfilerMetadataDto> MetadataReady => _metadataTcs.Task;
+
+    /// <summary>
+    /// Compile-time source-location manifest from the engine's init handshake (#302).
+    /// Returns an empty manifest until the FileTable + SourceLocationManifest frames have arrived.
+    /// </summary>
+    public SourceLocationManifestDto SourceLocationManifest => _sourceLocationManifest;
 
     /// <summary>Number of finalized ticks currently in the metadata snapshot.</summary>
     public long TickCount
@@ -626,6 +639,17 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
                         HandleBlock(payload, length);
                         break;
 
+                    case LiveFrameType.FileTable:
+                        // #302 Phase 4: parse the engine's compile-time FileTable into the pending manifest.
+                        // Combined with the SourceLocationManifest frame that follows (or has already
+                        // arrived), it lets the client resolve span siteIds.
+                        HandleFileTable(payload, length);
+                        break;
+
+                    case LiveFrameType.SourceLocationManifest:
+                        HandleSourceLocationManifest(payload, length);
+                        break;
+
                     case LiveFrameType.Shutdown:
                         LogShutdownReceived();
                         ShutdownReceived?.Invoke("engine_shutdown");
@@ -716,6 +740,67 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
         // reconnect, so subsequent TickStart records resume the same tickNumber sequence.
         LogInitReceived(reader.Systems.Count, reader.Header.WorkerCount, reader.Header.BaseTickRate);
         return true;
+    }
+
+    /// <summary>
+    /// Parse the engine's FileTable frame payload (#302, Phase 4). Wire layout matches the file-format
+    /// trailer's FileTable section: u32 entryCount, then per-entry u16 fileId, u16 pathLen, UTF-8 bytes.
+    /// Updates the pending manifest's <c>Files</c>; the partner SourceLocationManifest frame fills entries.
+    /// </summary>
+    private void HandleFileTable(byte[] payload, int length)
+    {
+        try
+        {
+            using var ms = new MemoryStream(payload, 0, length, writable: false);
+            using var br = new BinaryReader(ms, System.Text.Encoding.UTF8, leaveOpen: true);
+            var count = br.ReadUInt32();
+            var files = new SourceLocationFileDto[count];
+            for (uint i = 0; i < count; i++)
+            {
+                var fileId = br.ReadUInt16();
+                var pathLen = br.ReadUInt16();
+                var pathBytes = br.ReadBytes(pathLen);
+                files[i] = new SourceLocationFileDto(fileId, System.Text.Encoding.UTF8.GetString(pathBytes));
+            }
+            _sourceLocationManifest = _sourceLocationManifest with { Files = files };
+        }
+        catch (Exception ex)
+        {
+            LogMalformedFrame(LiveFrameType.FileTable.ToString(), ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Parse the engine's SourceLocationManifest frame payload (#302, Phase 4). Wire layout: u32 entryCount,
+    /// then per-entry u16 id, u16 fileId, u32 line, u8 kind, u8 methodLen, UTF-8 method-name bytes.
+    /// Combined with the partner FileTable frame, gives the client a full siteId → (file, line, method, kind)
+    /// lookup.
+    /// </summary>
+    private void HandleSourceLocationManifest(byte[] payload, int length)
+    {
+        try
+        {
+            using var ms = new MemoryStream(payload, 0, length, writable: false);
+            using var br = new BinaryReader(ms, System.Text.Encoding.UTF8, leaveOpen: true);
+            var count = br.ReadUInt32();
+            var entries = new SourceLocationEntryDto[count];
+            for (uint i = 0; i < count; i++)
+            {
+                var id = br.ReadUInt16();
+                var fileId = br.ReadUInt16();
+                var line = br.ReadUInt32();
+                var kind = br.ReadByte();
+                var methodLen = br.ReadByte();
+                var methodBytes = br.ReadBytes(methodLen);
+                entries[i] = new SourceLocationEntryDto(
+                    id, fileId, line, kind, System.Text.Encoding.UTF8.GetString(methodBytes));
+            }
+            _sourceLocationManifest = _sourceLocationManifest with { Entries = entries };
+        }
+        catch (Exception ex)
+        {
+            LogMalformedFrame(LiveFrameType.SourceLocationManifest.ToString(), ex.Message);
+        }
     }
 
     private void HandleBlock(byte[] payload, int length)

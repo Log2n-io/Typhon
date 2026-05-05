@@ -1,7 +1,6 @@
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using System;
-using System.Collections.Concurrent;
 using System.Numerics;
 using System.Threading;
 using Typhon.Schema.Definition;

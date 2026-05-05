@@ -40,6 +40,7 @@
     "react": "^19.1.0",
     "react-arborist": "^3.5.0",
     "react-dom": "^19.1.0",
+    "react-syntax-highlighter": "^16.1.1",
     "tailwind-merge": "^3.5.0",
     "zustand": "^5.0.2"
   },
@@ -50,6 +51,7 @@
     "@types/node": "^22.10.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "@types/react-syntax-highlighter": "^15.5.13",
     "@typescript-eslint/eslint-plugin": "^8.18.0",
     "@typescript-eslint/parser": "^8.18.0",
     "@vitejs/plugin-react": "^5.0.0",

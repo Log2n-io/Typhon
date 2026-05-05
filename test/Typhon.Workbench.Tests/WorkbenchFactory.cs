@@ -1,6 +1,8 @@
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
+using Typhon.Workbench.Hosting;
 using Typhon.Workbench.Security;
 using Typhon.Workbench.Sessions;
 
@@ -26,6 +28,13 @@ public sealed class WorkbenchFactory : WebApplicationFactory<Program>
             // parallel tests. Each factory gets its own in-memory token + its own file.
             services.RemoveAll<BootstrapTokenGate>();
             services.AddSingleton(_ => new BootstrapTokenGate(DemoDirectory));
+
+            // Same isolation for OptionsStore — defaults to %LOCALAPPDATA%\Typhon.Workbench\options.json
+            // which would clobber the real user options file when tests run. Per-factory temp dir.
+            services.RemoveAll<OptionsStore>();
+            services.AddSingleton(sp => new OptionsStore(
+                sp.GetRequiredService<ILogger<OptionsStore>>(),
+                Path.Combine(DemoDirectory, "options")));
         });
     }
 

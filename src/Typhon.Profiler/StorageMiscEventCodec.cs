@@ -16,15 +16,18 @@ public readonly struct StoragePageCacheDirtyWalkData
     public ulong ParentSpanId { get; }
     public ulong TraceIdHi { get; }
     public ulong TraceIdLo { get; }
+    /// <summary>#302 source-location id (0 = no attribution). Resolved through the trace manifest to file:line.</summary>
+    public ushort SourceLocationId { get; }
     public int RangeStart { get; }
     public int RangeLen { get; }
     public int DirtyMs { get; }
     public bool HasTraceContext => TraceIdHi != 0 || TraceIdLo != 0;
     public StoragePageCacheDirtyWalkData(byte threadSlot, long startTimestamp, long durationTicks, ulong spanId, ulong parentSpanId,
-        ulong traceIdHi, ulong traceIdLo, int rangeStart, int rangeLen, int dirtyMs)
+        ulong traceIdHi, ulong traceIdLo, ushort sourceLocationId, int rangeStart, int rangeLen, int dirtyMs)
     {
         ThreadSlot = threadSlot; StartTimestamp = startTimestamp; DurationTicks = durationTicks;
         SpanId = spanId; ParentSpanId = parentSpanId; TraceIdHi = traceIdHi; TraceIdLo = traceIdLo;
+        SourceLocationId = sourceLocationId;
         RangeStart = rangeStart; RangeLen = rangeLen; DirtyMs = dirtyMs;
     }
 }
@@ -86,13 +89,19 @@ public static class StorageMiscEventCodec
             out var durationTicks, out var spanId, out var parentSpanId, out var spanFlags);
         ulong traceIdHi = 0, traceIdLo = 0;
         var hasTC = (spanFlags & TraceRecordHeader.SpanFlagsHasTraceContext) != 0;
+        var hasSL = (spanFlags & TraceRecordHeader.SpanFlagsHasSourceLocation) != 0;
         if (hasTC)
         {
             TraceRecordHeader.ReadTraceContext(source[TraceRecordHeader.MinSpanHeaderSize..], out traceIdHi, out traceIdLo);
         }
-        var p = source[TraceRecordHeader.SpanHeaderSize(hasTC)..];
+        ushort sourceLocationId = 0;
+        if (hasSL)
+        {
+            sourceLocationId = TraceRecordHeader.ReadSourceLocationId(source[TraceRecordHeader.SourceLocationIdOffset(hasTC)..]);
+        }
+        var p = source[TraceRecordHeader.SpanHeaderSize(hasTC, hasSL)..];
         return new StoragePageCacheDirtyWalkData(threadSlot, startTimestamp, durationTicks, spanId, parentSpanId,
-            traceIdHi, traceIdLo,
+            traceIdHi, traceIdLo, sourceLocationId,
             BinaryPrimitives.ReadInt32LittleEndian(p),
             BinaryPrimitives.ReadInt32LittleEndian(p[4..]),
             BinaryPrimitives.ReadInt32LittleEndian(p[8..]));

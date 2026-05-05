@@ -16,13 +16,15 @@ public readonly struct DataTransactionInitData
     public ulong ParentSpanId { get; }
     public ulong TraceIdHi { get; }
     public ulong TraceIdLo { get; }
+    /// <summary>#302 source-location id (0 = no attribution). Resolved through the trace manifest to file:line.</summary>
+    public ushort SourceLocationId { get; }
     public long Tsn { get; }
     public ushort UowId { get; }
     public bool HasTraceContext => TraceIdHi != 0 || TraceIdLo != 0;
     public DataTransactionInitData(byte threadSlot, long startTimestamp, long durationTicks, ulong spanId, ulong parentSpanId,
-        ulong traceIdHi, ulong traceIdLo, long tsn, ushort uowId)
+        ulong traceIdHi, ulong traceIdLo, ushort sourceLocationId, long tsn, ushort uowId)
     { ThreadSlot = threadSlot; StartTimestamp = startTimestamp; DurationTicks = durationTicks; SpanId = spanId; ParentSpanId = parentSpanId;
-      TraceIdHi = traceIdHi; TraceIdLo = traceIdLo; Tsn = tsn; UowId = uowId; }
+      TraceIdHi = traceIdHi; TraceIdLo = traceIdLo; SourceLocationId = sourceLocationId; Tsn = tsn; UowId = uowId; }
 }
 
 /// <summary>Decoded Data:Transaction:Prepare span. Payload: <c>tsn i64</c> (8 B).</summary>
@@ -36,12 +38,14 @@ public readonly struct DataTransactionPrepareData
     public ulong ParentSpanId { get; }
     public ulong TraceIdHi { get; }
     public ulong TraceIdLo { get; }
+    /// <summary>#302 source-location id (0 = no attribution). Resolved through the trace manifest to file:line.</summary>
+    public ushort SourceLocationId { get; }
     public long Tsn { get; }
     public bool HasTraceContext => TraceIdHi != 0 || TraceIdLo != 0;
     public DataTransactionPrepareData(byte threadSlot, long startTimestamp, long durationTicks, ulong spanId, ulong parentSpanId,
-        ulong traceIdHi, ulong traceIdLo, long tsn)
+        ulong traceIdHi, ulong traceIdLo, ushort sourceLocationId, long tsn)
     { ThreadSlot = threadSlot; StartTimestamp = startTimestamp; DurationTicks = durationTicks; SpanId = spanId; ParentSpanId = parentSpanId;
-      TraceIdHi = traceIdHi; TraceIdLo = traceIdLo; Tsn = tsn; }
+      TraceIdHi = traceIdHi; TraceIdLo = traceIdLo; SourceLocationId = sourceLocationId; Tsn = tsn; }
 }
 
 /// <summary>Decoded Data:Transaction:Validate span. Payload: <c>tsn i64, entryCount i32</c> (12 B).</summary>
@@ -55,13 +59,15 @@ public readonly struct DataTransactionValidateData
     public ulong ParentSpanId { get; }
     public ulong TraceIdHi { get; }
     public ulong TraceIdLo { get; }
+    /// <summary>#302 source-location id (0 = no attribution). Resolved through the trace manifest to file:line.</summary>
+    public ushort SourceLocationId { get; }
     public long Tsn { get; }
     public int EntryCount { get; }
     public bool HasTraceContext => TraceIdHi != 0 || TraceIdLo != 0;
     public DataTransactionValidateData(byte threadSlot, long startTimestamp, long durationTicks, ulong spanId, ulong parentSpanId,
-        ulong traceIdHi, ulong traceIdLo, long tsn, int entryCount)
+        ulong traceIdHi, ulong traceIdLo, ushort sourceLocationId, long tsn, int entryCount)
     { ThreadSlot = threadSlot; StartTimestamp = startTimestamp; DurationTicks = durationTicks; SpanId = spanId; ParentSpanId = parentSpanId;
-      TraceIdHi = traceIdHi; TraceIdLo = traceIdLo; Tsn = tsn; EntryCount = entryCount; }
+      TraceIdHi = traceIdHi; TraceIdLo = traceIdLo; SourceLocationId = sourceLocationId; Tsn = tsn; EntryCount = entryCount; }
 }
 
 /// <summary>Decoded Data:Transaction:Conflict instant. Payload: <c>tsn i64, pk i64, componentTypeId i32, conflictType u8</c> (21 B).</summary>
@@ -89,13 +95,15 @@ public readonly struct DataTransactionCleanupData
     public ulong ParentSpanId { get; }
     public ulong TraceIdHi { get; }
     public ulong TraceIdLo { get; }
+    /// <summary>#302 source-location id (0 = no attribution). Resolved through the trace manifest to file:line.</summary>
+    public ushort SourceLocationId { get; }
     public long Tsn { get; }
     public int EntityCount { get; }
     public bool HasTraceContext => TraceIdHi != 0 || TraceIdLo != 0;
     public DataTransactionCleanupData(byte threadSlot, long startTimestamp, long durationTicks, ulong spanId, ulong parentSpanId,
-        ulong traceIdHi, ulong traceIdLo, long tsn, int entityCount)
+        ulong traceIdHi, ulong traceIdLo, ushort sourceLocationId, long tsn, int entityCount)
     { ThreadSlot = threadSlot; StartTimestamp = startTimestamp; DurationTicks = durationTicks; SpanId = spanId; ParentSpanId = parentSpanId;
-      TraceIdHi = traceIdHi; TraceIdLo = traceIdLo; Tsn = tsn; EntityCount = entityCount; }
+      TraceIdHi = traceIdHi; TraceIdLo = traceIdLo; SourceLocationId = sourceLocationId; Tsn = tsn; EntityCount = entityCount; }
 }
 
 /// <summary>Wire codec for Data:Transaction events (kinds 173-177).</summary>
@@ -127,6 +135,18 @@ public static class DataTransactionEventCodec
         }
     }
 
+    /// <summary>
+    /// Read the optional <c>SourceLocationId</c> from the span header. Returns 0 when the
+    /// <c>SpanFlagsHasSourceLocation</c> bit is unset. Centralized so the four <c>Decode*</c>
+    /// methods don't repeat the read-and-conditional-skip dance.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ushort ReadSourceLocationIdIfPresent(ReadOnlySpan<byte> source, byte spanFlags, bool hasTC)
+    {
+        if ((spanFlags & TraceRecordHeader.SpanFlagsHasSourceLocation) == 0) return 0;
+        return TraceRecordHeader.ReadSourceLocationId(source[TraceRecordHeader.SourceLocationIdOffset(hasTC)..]);
+    }
+
     public static DataTransactionInitData DecodeInit(ReadOnlySpan<byte> source)
     {
         TraceRecordHeader.ReadCommonHeader(source, out _, out _, out var threadSlot, out var startTimestamp);
@@ -134,12 +154,14 @@ public static class DataTransactionEventCodec
             out var durationTicks, out var spanId, out var parentSpanId, out var spanFlags);
         ulong traceIdHi = 0, traceIdLo = 0;
         var hasTC = (spanFlags & TraceRecordHeader.SpanFlagsHasTraceContext) != 0;
+        var hasSL = (spanFlags & TraceRecordHeader.SpanFlagsHasSourceLocation) != 0;
         if (hasTC)
         {
             TraceRecordHeader.ReadTraceContext(source[TraceRecordHeader.MinSpanHeaderSize..], out traceIdHi, out traceIdLo);
         }
-        var p = source[TraceRecordHeader.SpanHeaderSize(hasTC)..];
-        return new DataTransactionInitData(threadSlot, startTimestamp, durationTicks, spanId, parentSpanId, traceIdHi, traceIdLo,
+        var sourceLocationId = ReadSourceLocationIdIfPresent(source, spanFlags, hasTC);
+        var p = source[TraceRecordHeader.SpanHeaderSize(hasTC, hasSL)..];
+        return new DataTransactionInitData(threadSlot, startTimestamp, durationTicks, spanId, parentSpanId, traceIdHi, traceIdLo, sourceLocationId,
             BinaryPrimitives.ReadInt64LittleEndian(p),
             BinaryPrimitives.ReadUInt16LittleEndian(p[8..]));
     }
@@ -151,12 +173,14 @@ public static class DataTransactionEventCodec
             out var durationTicks, out var spanId, out var parentSpanId, out var spanFlags);
         ulong traceIdHi = 0, traceIdLo = 0;
         var hasTC = (spanFlags & TraceRecordHeader.SpanFlagsHasTraceContext) != 0;
+        var hasSL = (spanFlags & TraceRecordHeader.SpanFlagsHasSourceLocation) != 0;
         if (hasTC)
         {
             TraceRecordHeader.ReadTraceContext(source[TraceRecordHeader.MinSpanHeaderSize..], out traceIdHi, out traceIdLo);
         }
-        var p = source[TraceRecordHeader.SpanHeaderSize(hasTC)..];
-        return new DataTransactionPrepareData(threadSlot, startTimestamp, durationTicks, spanId, parentSpanId, traceIdHi, traceIdLo,
+        var sourceLocationId = ReadSourceLocationIdIfPresent(source, spanFlags, hasTC);
+        var p = source[TraceRecordHeader.SpanHeaderSize(hasTC, hasSL)..];
+        return new DataTransactionPrepareData(threadSlot, startTimestamp, durationTicks, spanId, parentSpanId, traceIdHi, traceIdLo, sourceLocationId,
             BinaryPrimitives.ReadInt64LittleEndian(p));
     }
 
@@ -167,12 +191,14 @@ public static class DataTransactionEventCodec
             out var durationTicks, out var spanId, out var parentSpanId, out var spanFlags);
         ulong traceIdHi = 0, traceIdLo = 0;
         var hasTC = (spanFlags & TraceRecordHeader.SpanFlagsHasTraceContext) != 0;
+        var hasSL = (spanFlags & TraceRecordHeader.SpanFlagsHasSourceLocation) != 0;
         if (hasTC)
         {
             TraceRecordHeader.ReadTraceContext(source[TraceRecordHeader.MinSpanHeaderSize..], out traceIdHi, out traceIdLo);
         }
-        var p = source[TraceRecordHeader.SpanHeaderSize(hasTC)..];
-        return new DataTransactionValidateData(threadSlot, startTimestamp, durationTicks, spanId, parentSpanId, traceIdHi, traceIdLo,
+        var sourceLocationId = ReadSourceLocationIdIfPresent(source, spanFlags, hasTC);
+        var p = source[TraceRecordHeader.SpanHeaderSize(hasTC, hasSL)..];
+        return new DataTransactionValidateData(threadSlot, startTimestamp, durationTicks, spanId, parentSpanId, traceIdHi, traceIdLo, sourceLocationId,
             BinaryPrimitives.ReadInt64LittleEndian(p),
             BinaryPrimitives.ReadInt32LittleEndian(p[8..]));
     }
@@ -206,12 +232,14 @@ public static class DataTransactionEventCodec
             out var durationTicks, out var spanId, out var parentSpanId, out var spanFlags);
         ulong traceIdHi = 0, traceIdLo = 0;
         var hasTC = (spanFlags & TraceRecordHeader.SpanFlagsHasTraceContext) != 0;
+        var hasSL = (spanFlags & TraceRecordHeader.SpanFlagsHasSourceLocation) != 0;
         if (hasTC)
         {
             TraceRecordHeader.ReadTraceContext(source[TraceRecordHeader.MinSpanHeaderSize..], out traceIdHi, out traceIdLo);
         }
-        var p = source[TraceRecordHeader.SpanHeaderSize(hasTC)..];
-        return new DataTransactionCleanupData(threadSlot, startTimestamp, durationTicks, spanId, parentSpanId, traceIdHi, traceIdLo,
+        var sourceLocationId = ReadSourceLocationIdIfPresent(source, spanFlags, hasTC);
+        var p = source[TraceRecordHeader.SpanHeaderSize(hasTC, hasSL)..];
+        return new DataTransactionCleanupData(threadSlot, startTimestamp, durationTicks, spanId, parentSpanId, traceIdHi, traceIdLo, sourceLocationId,
             BinaryPrimitives.ReadInt64LittleEndian(p),
             BinaryPrimitives.ReadInt32LittleEndian(p[8..]));
     }

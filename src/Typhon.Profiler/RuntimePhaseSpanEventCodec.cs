@@ -14,13 +14,16 @@ public readonly struct RuntimePhaseSpanEventData
     public ulong TraceIdHi { get; }
     public ulong TraceIdLo { get; }
 
+    /// <summary>#302 source-location id (0 = no attribution). Resolved through the trace manifest to file:line.</summary>
+    public ushort SourceLocationId { get; }
+
     /// <summary>Tick lifecycle phase covered by this span (cast to <c>TickPhase</c> at decode time).</summary>
     public byte Phase { get; }
 
     public bool HasTraceContext => TraceIdHi != 0 || TraceIdLo != 0;
 
     public RuntimePhaseSpanEventData(byte threadSlot, long startTimestamp, long durationTicks, ulong spanId, ulong parentSpanId,
-        ulong traceIdHi, ulong traceIdLo, byte phase)
+        ulong traceIdHi, ulong traceIdLo, ushort sourceLocationId, byte phase)
     {
         ThreadSlot = threadSlot;
         StartTimestamp = startTimestamp;
@@ -29,6 +32,7 @@ public readonly struct RuntimePhaseSpanEventData
         ParentSpanId = parentSpanId;
         TraceIdHi = traceIdHi;
         TraceIdLo = traceIdLo;
+        SourceLocationId = sourceLocationId;
         Phase = phase;
     }
 }
@@ -52,15 +56,22 @@ public static class RuntimePhaseSpanEventCodec
         TraceRecordHeader.ReadSpanHeaderExtension(source[TraceRecordHeader.CommonHeaderSize..],
             out var durationTicks, out var spanId, out var parentSpanId, out var spanFlags);
 
+        var hasTraceContext = (spanFlags & TraceRecordHeader.SpanFlagsHasTraceContext) != 0;
+        var hasSourceLocation = (spanFlags & TraceRecordHeader.SpanFlagsHasSourceLocation) != 0;
         ulong traceIdHi = 0, traceIdLo = 0;
-        if ((spanFlags & TraceRecordHeader.SpanFlagsHasTraceContext) != 0)
+        if (hasTraceContext)
         {
             TraceRecordHeader.ReadTraceContext(source[TraceRecordHeader.MinSpanHeaderSize..], out traceIdHi, out traceIdLo);
         }
+        ushort sourceLocationId = 0;
+        if (hasSourceLocation)
+        {
+            sourceLocationId = TraceRecordHeader.ReadSourceLocationId(source[TraceRecordHeader.SourceLocationIdOffset(hasTraceContext)..]);
+        }
 
-        var headerSize = TraceRecordHeader.SpanHeaderSize((spanFlags & TraceRecordHeader.SpanFlagsHasTraceContext) != 0);
+        var headerSize = TraceRecordHeader.SpanHeaderSize(hasTraceContext, hasSourceLocation);
         var phase = source[headerSize];
 
-        return new RuntimePhaseSpanEventData(threadSlot, startTimestamp, durationTicks, spanId, parentSpanId, traceIdHi, traceIdLo, phase);
+        return new RuntimePhaseSpanEventData(threadSlot, startTimestamp, durationTicks, spanId, parentSpanId, traceIdHi, traceIdLo, sourceLocationId, phase);
     }
 }

@@ -19,6 +19,9 @@ public readonly struct CheckpointEventData
     public ulong TraceIdHi { get; }
     public ulong TraceIdLo { get; }
 
+    /// <summary>#302 source-location id (0 = no attribution). Resolved through the trace's manifest to file:line.</summary>
+    public ushort SourceLocationId { get; }
+
     /// <summary>Required for <see cref="TraceEventKind.CheckpointCycle"/> — target WAL LSN the checkpoint is advancing to.</summary>
     public long TargetLsn { get; }
 
@@ -47,7 +50,7 @@ public readonly struct CheckpointEventData
 
     public CheckpointEventData(
         TraceEventKind kind, byte threadSlot, long startTimestamp, long durationTicks,
-        ulong spanId, ulong parentSpanId, ulong traceIdHi, ulong traceIdLo,
+        ulong spanId, ulong parentSpanId, ulong traceIdHi, ulong traceIdLo, ushort sourceLocationId,
         long targetLsn, CheckpointReason reason, byte optionalFieldMask,
         int dirtyPageCount, int writtenCount, int transitionedCount, int recycledCount)
     {
@@ -59,6 +62,7 @@ public readonly struct CheckpointEventData
         ParentSpanId = parentSpanId;
         TraceIdHi = traceIdHi;
         TraceIdLo = traceIdLo;
+        SourceLocationId = sourceLocationId;
         TargetLsn = targetLsn;
         Reason = reason;
         OptionalFieldMask = optionalFieldMask;
@@ -157,13 +161,20 @@ public static class CheckpointEventCodec
         TraceRecordHeader.ReadSpanHeaderExtension(source[TraceRecordHeader.CommonHeaderSize..],
             out var durationTicks, out var spanId, out var parentSpanId, out var spanFlags);
 
+        var hasTraceContext = (spanFlags & TraceRecordHeader.SpanFlagsHasTraceContext) != 0;
+        var hasSourceLocation = (spanFlags & TraceRecordHeader.SpanFlagsHasSourceLocation) != 0;
         ulong traceIdHi = 0, traceIdLo = 0;
-        if ((spanFlags & TraceRecordHeader.SpanFlagsHasTraceContext) != 0)
+        if (hasTraceContext)
         {
             TraceRecordHeader.ReadTraceContext(source[TraceRecordHeader.MinSpanHeaderSize..], out traceIdHi, out traceIdLo);
         }
+        ushort sourceLocationId = 0;
+        if (hasSourceLocation)
+        {
+            sourceLocationId = TraceRecordHeader.ReadSourceLocationId(source[TraceRecordHeader.SourceLocationIdOffset(hasTraceContext)..]);
+        }
 
-        var headerSize = TraceRecordHeader.SpanHeaderSize((spanFlags & TraceRecordHeader.SpanFlagsHasTraceContext) != 0);
+        var headerSize = TraceRecordHeader.SpanHeaderSize(hasTraceContext, hasSourceLocation);
 
         long targetLsn = 0;
         var reason = CheckpointReason.Periodic;
@@ -237,7 +248,7 @@ public static class CheckpointEventCodec
             // CheckpointCollect, CheckpointFsync — no payload
         }
 
-        return new CheckpointEventData(kind, threadSlot, startTimestamp, durationTicks, spanId, parentSpanId, traceIdHi, traceIdLo,
+        return new CheckpointEventData(kind, threadSlot, startTimestamp, durationTicks, spanId, parentSpanId, traceIdHi, traceIdLo, sourceLocationId,
             targetLsn, reason, optMask, dirtyPageCount, writtenCount, transitionedCount, recycledCount);
     }
 }

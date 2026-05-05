@@ -5,6 +5,14 @@
         <Configurations>Debug;Release</Configurations>
         <Platforms>AnyCPU</Platforms>
         <LangVersion>default</LangVersion>
+        <!--
+            #302 — opt in the Typhon.Generators.Generated namespace for C# 14 [InterceptsLocation] attributes.
+            SourceLocationGenerator emits per-call-site interceptor wrappers that redirect TyphonEvent.Begin*
+            calls to the matching Begin*_WithSiteId overload, baking the literal ushort siteId into the IL.
+            Engine-only scope by design (the generator gates on AssemblyName == "Typhon.Engine"); other
+            consumers fall through to siteId = 0 ("unknown source"). See claude/design/observability/10-profiler-source-attribution.md §4.4.
+        -->
+        <InterceptorsNamespaces>$(InterceptorsNamespaces);Typhon.Generators.Generated</InterceptorsNamespaces>
     </PropertyGroup>
 
     <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">

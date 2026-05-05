@@ -346,6 +346,19 @@ public sealed class TcpExporter : ResourceNode, IProfilerExporter
                 socket.SendTimeout = 5000;
                 socket.Send(frameBuffer);
 
+                // #302 Phase 4: send the FileTable + SourceLocationManifest frames once during the init handshake.
+                // No-op when the generated SourceLocations table is empty (zero attributed sites).
+                // Sent BEFORE the catch-up block so the client has the manifest by the time spans start arriving.
+                var (fileTableFrame, slManifestFrame) = BuildSourceLocationFrames();
+                if (fileTableFrame != null)
+                {
+                    socket.Send(fileTableFrame);
+                }
+                if (slManifestFrame != null)
+                {
+                    socket.Send(slManifestFrame);
+                }
+
                 // Before switching to non-blocking (and before exposing _client to ProcessBatch), send a catch-up Block frame
                 // carrying a synthetic ThreadInfo record for every currently-claimed slot. Without this, mid-session live
                 // connections never see the one-shot ThreadInfo records emitted when each worker claimed its slot — those
@@ -376,6 +389,70 @@ public sealed class TcpExporter : ResourceNode, IProfilerExporter
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// #302 Phase 4: build the optional FileTable + SourceLocationManifest frames sent during the init handshake.
+    /// Returns (null, null) when the generated <c>SourceLocations</c> table is empty (zero attributed sites).
+    /// Each frame's payload mirrors the corresponding <c>.typhon-trace</c> trailer section MINUS the magic constants (the LiveFrameType byte already identifies
+    /// the section). See claude/design/observability/10-profiler-source-attribution.md §4.7.
+    /// </summary>
+    private static (byte[] FileTableFrame, byte[] ManifestFrame) BuildSourceLocationFrames()
+    {
+        // Merged manifest: compile-time call sites + runtime-resolved system entries from
+        // RuntimeSourceLocationManifest (populated by DagScheduler's constructor).
+        var (files, entries) = RuntimeSourceLocationManifest.BuildMerged();
+        if (files.Length == 0 || entries.Length == 0)
+        {
+            return (null, null);
+        }
+
+        // FileTable frame payload: [u32 entryCount][per entry: u16 fileId, u16 pathLen, UTF-8 bytes]
+        byte[] fileTableFrame;
+        using (var ms = new MemoryStream())
+        using (var bw = new BinaryWriter(ms, Encoding.UTF8, leaveOpen: false))
+        {
+            bw.Write((uint)files.Length);
+            for (ushort i = 0; i < files.Length; i++)
+            {
+                bw.Write(i);
+                var bytes = Encoding.UTF8.GetBytes(files[i] ?? string.Empty);
+                var len = (ushort)Math.Min(bytes.Length, ushort.MaxValue);
+                bw.Write(len);
+                bw.Write(bytes, 0, len);
+            }
+            bw.Flush();
+            var payload = ms.ToArray();
+            fileTableFrame = new byte[LiveStreamProtocol.FrameHeaderSize + payload.Length];
+            LiveStreamProtocol.WriteFrameHeader(fileTableFrame.AsSpan(), LiveFrameType.FileTable, payload.Length);
+            payload.CopyTo(fileTableFrame.AsSpan(LiveStreamProtocol.FrameHeaderSize));
+        }
+
+        // SourceLocationManifest frame payload: [u32 entryCount][per entry: u16 id, u16 fileId, u32 line, u8 kind, u8 methodLen, UTF-8 method bytes]
+        byte[] manifestFrame;
+        using (var ms = new MemoryStream())
+        using (var bw = new BinaryWriter(ms, Encoding.UTF8, leaveOpen: false))
+        {
+            bw.Write((uint)entries.Length);
+            foreach (var e in entries)
+            {
+                bw.Write(e.Id);
+                bw.Write(e.FileId);
+                bw.Write(e.Line);
+                bw.Write(e.Kind);
+                var bytes = Encoding.UTF8.GetBytes(e.Method ?? string.Empty);
+                var len = (byte)Math.Min(bytes.Length, 255);
+                bw.Write(len);
+                bw.Write(bytes, 0, len);
+            }
+            bw.Flush();
+            var payload = ms.ToArray();
+            manifestFrame = new byte[LiveStreamProtocol.FrameHeaderSize + payload.Length];
+            LiveStreamProtocol.WriteFrameHeader(manifestFrame.AsSpan(), LiveFrameType.SourceLocationManifest, payload.Length);
+            payload.CopyTo(manifestFrame.AsSpan(LiveStreamProtocol.FrameHeaderSize));
+        }
+
+        return (fileTableFrame, manifestFrame);
     }
 
     /// <summary>

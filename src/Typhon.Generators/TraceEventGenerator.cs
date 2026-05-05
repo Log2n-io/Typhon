@@ -460,7 +460,8 @@ namespace Typhon.Engine.Profiler
         sb.Append(indent).AppendLine("    public readonly int ComputeSize()");
         sb.Append(indent).AppendLine("    {");
         sb.Append(indent).AppendLine($"        var hasTraceContext = Header.TraceIdHi != 0 || Header.TraceIdLo != 0;");
-        sb.Append(indent).Append("        var size = ").Append(TR).AppendLine(".SpanHeaderSize(hasTraceContext);");
+        sb.Append(indent).AppendLine($"        var hasSourceLocation = Header.SourceLocationId != 0;");
+        sb.Append(indent).Append("        var size = ").Append(TR).AppendLine(".SpanHeaderSize(hasTraceContext, hasSourceLocation);");
         if (requiredPayloadSize > 0)
         {
             sb.Append(indent).Append("        size += ").Append(requiredPayloadSize).AppendLine(";");
@@ -482,21 +483,28 @@ namespace Typhon.Engine.Profiler
         sb.Append(indent).AppendLine("    public readonly void EncodeTo(global::System.Span<byte> destination, long endTimestamp, out int bytesWritten)");
         sb.Append(indent).AppendLine("    {");
         sb.Append(indent).AppendLine("        var hasTraceContext = Header.TraceIdHi != 0 || Header.TraceIdLo != 0;");
+        sb.Append(indent).AppendLine("        var hasSourceLocation = Header.SourceLocationId != 0;");
         sb.Append(indent).AppendLine("        var size = ComputeSize();");
         sb.Append(indent).Append("        ").Append(TR).Append(".WriteCommonHeader(destination, (ushort)size, TraceEventKind.")
             .Append(model.KindName).AppendLine(", Header.ThreadSlot, Header.StartTimestamp);");
-        sb.Append(indent).Append("        var spanFlags = hasTraceContext ? ").Append(TR).AppendLine(".SpanFlagsHasTraceContext : (byte)0;");
+        sb.Append(indent).Append("        var spanFlags = (byte)0;").AppendLine();
+        sb.Append(indent).Append("        if (hasTraceContext) spanFlags |= ").Append(TR).AppendLine(".SpanFlagsHasTraceContext;");
+        sb.Append(indent).Append("        if (hasSourceLocation) spanFlags |= ").Append(TR).AppendLine(".SpanFlagsHasSourceLocation;");
         sb.Append(indent).Append("        ").Append(TR).Append(".WriteSpanHeaderExtension(destination[").Append(TR).AppendLine(".CommonHeaderSize..],");
         sb.Append(indent).AppendLine("            endTimestamp - Header.StartTimestamp, Header.SpanId, Header.ParentSpanId, spanFlags);");
         sb.Append(indent).AppendLine("        if (hasTraceContext)");
         sb.Append(indent).AppendLine("        {");
         sb.Append(indent).Append("            ").Append(TR).Append(".WriteTraceContext(destination[").Append(TR).AppendLine(".MinSpanHeaderSize..], Header.TraceIdHi, Header.TraceIdLo);");
         sb.Append(indent).AppendLine("        }");
+        sb.Append(indent).AppendLine("        if (hasSourceLocation)");
+        sb.Append(indent).AppendLine("        {");
+        sb.Append(indent).Append("            ").Append(TR).Append(".WriteSourceLocationId(destination[").Append(TR).AppendLine(".SourceLocationIdOffset(hasTraceContext)..], Header.SourceLocationId);");
+        sb.Append(indent).AppendLine("        }");
 
-        // Payload writes (after header).
+        // Payload writes (after header — including the optional source-location id when present).
         if (requiredPayloadSize > 0 || hasOptionals)
         {
-            sb.Append(indent).Append("        var headerSize = ").Append(TR).AppendLine(".SpanHeaderSize(hasTraceContext);");
+            sb.Append(indent).Append("        var headerSize = ").Append(TR).AppendLine(".SpanHeaderSize(hasTraceContext, hasSourceLocation);");
             sb.Append(indent).AppendLine("        var payload = destination[headerSize..];");
             int cursor = 0;
             foreach (var p in model.PayloadFields)
@@ -608,17 +616,40 @@ namespace Typhon.Engine.Profiler
         sb.Append(indent).AppendLine("}");
 
         // Begin factory emitted as a partial half of TyphonEvent (which itself is in this same namespace).
+        // Two factories are emitted side by side per event kind:
+        //   1. The user-facing BeginXxx(args) — a thin pass-through delegating to BeginXxx_WithSiteId(0, args).
+        //   2. BeginXxx_WithSiteId(ushort siteId, args) — does the actual work; receives the literal siteId from
+        //      the SourceLocationGenerator interceptor (or 0 from the pass-through, meaning "unknown source").
+        // The user-facing name is the interception target — never edit user code; the generator owns the pair.
+        // See claude/design/observability/10-profiler-source-attribution.md §4.3.
         if (model.GenerateFactory)
         {
             sb.AppendLine();
             sb.Append(indent).AppendLine("public static partial class TyphonEvent");
             sb.Append(indent).AppendLine("{");
+
+            // ── Factory 1: BeginXxx(args) — pass-through with siteId = 0 ──
             sb.Append(indent).AppendLine("    [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]");
             sb.Append(indent).Append("    public static ").Append(model.StructName).Append(' ').Append(model.FactoryName).Append('(');
             for (int i = 0; i < model.BeginParams.Length; i++)
             {
                 if (i > 0) sb.Append(", ");
                 sb.Append(model.BeginParams[i].ParamTypeFqn).Append(' ').Append(model.BeginParams[i].ParamName);
+            }
+            sb.Append(") => ").Append(model.FactoryName).Append("_WithSiteId(0");
+            foreach (var p in model.BeginParams)
+            {
+                sb.Append(", ").Append(p.ParamName);
+            }
+            sb.AppendLine(");");
+            sb.AppendLine();
+
+            // ── Factory 2: BeginXxx_WithSiteId(siteId, args) — does the work, threads literal siteId into Header ──
+            sb.Append(indent).AppendLine("    [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]");
+            sb.Append(indent).Append("    public static ").Append(model.StructName).Append(' ').Append(model.FactoryName).Append("_WithSiteId(ushort siteId");
+            foreach (var p in model.BeginParams)
+            {
+                sb.Append(", ").Append(p.ParamTypeFqn).Append(' ').Append(p.ParamName);
             }
             sb.AppendLine(")");
             sb.Append(indent).AppendLine("    {");
@@ -629,7 +660,7 @@ namespace Typhon.Engine.Profiler
             sb.Append(indent).AppendLine("        }");
             sb.Append(indent).Append("        return new ").Append(model.StructName).AppendLine();
             sb.Append(indent).AppendLine("        {");
-            sb.Append(indent).AppendLine("            Header = MakeHeader(slotIdx, startTs, spanId, parentSpanId, previousSpanId, traceIdHi, traceIdLo),");
+            sb.Append(indent).AppendLine("            Header = MakeHeader(slotIdx, startTs, spanId, parentSpanId, previousSpanId, traceIdHi, traceIdLo, siteId),");
             foreach (var p in model.BeginParams)
             {
                 sb.Append(indent).Append("            ").Append(p.FieldName).Append(" = ");

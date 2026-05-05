@@ -5,10 +5,12 @@ import { refreshResourceGraph } from '@/hooks/useResourceIndex';
 import {
   openArchetypeBrowser,
   openDetailPanel,
+  openOptions,
   openSchemaArchetypes,
   openSchemaBrowser,
   openSchemaIndexes,
   openSchemaRelationships,
+  openSourcePreviewForCurrentSpan,
 } from './openSchemaBrowser';
 import { buildProfilerPaletteCommands } from './profilerCommands';
 
@@ -41,6 +43,8 @@ export function buildBaseCommands(): CommandItem[] {
     { id: 'schema-indexes', label: 'Open Component Indexes',       keywords: 'schema indexes btree fields',                 action: openSchemaIndexes },
     { id: 'schema-relationships', label: 'Open Component Relationships', keywords: 'schema systems relationships',          action: openSchemaRelationships },
     { id: 'open-detail',   label: 'Open Detail Panel',        keywords: 'detail inspector selection', action: openDetailPanel },
+    { id: 'open-options',  label: 'Open Options',             keywords: 'options preferences settings editor', action: openOptions },
+    { id: 'show-source-current-span', label: 'Show Source for Current Span', keywords: 'source preview profiler span go to attribution', action: openSourcePreviewForCurrentSpan },
     { id: 'toggle-theme',  label: 'Toggle Dark / Light Mode', keywords: 'theme dark light',  action: toggleTheme },
     ...buildProfilerPaletteCommands(),
     { id: 'reload',        label: 'Reload',                   keywords: 'refresh',           action: () => location.reload() },

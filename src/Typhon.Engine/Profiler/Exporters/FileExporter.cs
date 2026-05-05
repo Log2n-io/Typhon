@@ -25,6 +25,7 @@ public sealed class FileExporter : ResourceNode, IProfilerExporter
     private readonly string _filePath;
     private FileStream _stream;
     private TraceFileWriter _writer;
+    private TraceFileHeader _header;  // stashed at Initialize so Dispose can patch the trailer offsets in
     private bool _disposed;
     private long _batchesProcessed;
     private long _recordsProcessed;
@@ -52,10 +53,13 @@ public sealed class FileExporter : ResourceNode, IProfilerExporter
             throw new ArgumentNullException(nameof(metadata));
         }
 
-        _stream = new FileStream(_filePath, FileMode.Create, FileAccess.Write, FileShare.Read, 64 * 1024);
+        // Open with FileAccess.ReadWrite so Dispose can rewind and patch the header with the trailer
+        // (FileTable + SourceLocationManifest) offsets — see WriteSourceLocationManifestAtClose. ReadAccess
+        // is needed for the seek-back; without it the rewrite throws "Stream does not support reading".
+        _stream = new FileStream(_filePath, FileMode.Create, FileAccess.ReadWrite, FileShare.Read, 64 * 1024);
         _writer = new TraceFileWriter(_stream);
 
-        var header = new TraceFileHeader
+        _header = new TraceFileHeader
         {
             Magic = TraceFileHeader.MagicValue,
             Version = TraceFileHeader.CurrentVersion,
@@ -68,11 +72,38 @@ public sealed class FileExporter : ResourceNode, IProfilerExporter
             ComponentTypeCount = (ushort)metadata.ComponentTypes.Length,
             CreatedUtcTicks = metadata.StartedUtc.Ticks,
             SamplingSessionStartQpc = metadata.SamplingSessionStartQpc,
+            // FileTableOffset + SourceLocationManifestOffset are 0 — patched in WriteSourceLocationManifestAtClose.
         };
-        _writer.WriteHeader(in header);
+        _writer.WriteHeader(in _header);
         _writer.WriteSystemDefinitions(metadata.Systems);
         _writer.WriteArchetypes(metadata.Archetypes);
         _writer.WriteComponentTypes(metadata.ComponentTypes);
+    }
+
+    /// <summary>
+    /// Append the source-location manifest as a trailer section and patch the header offsets in.
+    /// Called from <see cref="Dispose(bool)"/> before the writer is closed. No-op if the generated <c>SourceLocations</c> table is empty (zero attributed
+    /// sites). See claude/design/observability/10-profiler-source-attribution.md §4.6.
+    /// </summary>
+    private void WriteSourceLocationManifestAtClose()
+    {
+        if (_writer == null)
+        {
+            return;
+        }
+        // Merged: compile-time call sites + runtime-resolved system entries (DagScheduler populates
+        // the runtime side at construction). Empty manifests skip the trailer write entirely.
+        var (files, manifest) = RuntimeSourceLocationManifest.BuildMerged();
+        if (files.Length == 0 || manifest.Length == 0)
+        {
+            return;
+        }
+
+        var (fileTableOffset, manifestOffset) = _writer.WriteSourceLocationManifest(files, manifest);
+        _header.FileTableOffset = fileTableOffset;
+        _header.SourceLocationManifestOffset = manifestOffset;
+        _writer.RewriteHeader(in _header);
+        _writer.Flush();
     }
 
     /// <inheritdoc />
@@ -106,6 +137,14 @@ public sealed class FileExporter : ResourceNode, IProfilerExporter
 
         if (disposing)
         {
+            // Append the source-location manifest BEFORE disposing the writer (which closes the stream).
+            // Failures here are non-fatal — the trace stays valid without source attribution.
+            try { WriteSourceLocationManifestAtClose(); }
+            catch
+            {
+                // ignored — trace remains usable, just without source attribution.
+            }
+
             try { _writer?.Dispose(); }
             catch
             {

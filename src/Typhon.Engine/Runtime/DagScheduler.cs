@@ -259,6 +259,10 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         ArgumentNullException.ThrowIfNull(options);
 
         Systems = systems;
+        // #302: register PDB-resolved system source locations into the runtime manifest so the
+        // exporters (FileExporter / TcpExporter) ship them alongside the compile-time call-site
+        // attribution. Synthetic ids = 0x8000 | systemIndex distinguish system entries from spans.
+        RuntimeSourceLocationManifest.SetSystems(systems);
         _topologicalOrder = topologicalOrder;
         _systemCount = systems.Length;
         _options = options;

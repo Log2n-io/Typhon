@@ -93,11 +93,15 @@ public static class DurabilityCheckpointEventCodec
             out dur, out spanId, out parentSpanId, out var spanFlags);
         traceIdHi = 0; traceIdLo = 0;
         var hasTC = (spanFlags & TraceRecordHeader.SpanFlagsHasTraceContext) != 0;
+        var hasSL = (spanFlags & TraceRecordHeader.SpanFlagsHasSourceLocation) != 0;
         if (hasTC)
         {
             TraceRecordHeader.ReadTraceContext(source[TraceRecordHeader.MinSpanHeaderSize..], out traceIdHi, out traceIdLo);
         }
-        return source[TraceRecordHeader.SpanHeaderSize(hasTC)..];
+        // Source-location bytes (#302) are skipped here — they're not surfaced in this codec's EventData yet.
+        // Phase 4 will extend the codec when Workbench consumes siteId. The hasSL adjustment to SpanHeaderSize
+        // ensures the payload offset is correct when records carry the optional 2-byte siteId.
+        return source[TraceRecordHeader.SpanHeaderSize(hasTC, hasSL)..];
     }
 
     public static DurabilityCheckpointWriteBatchData DecodeWriteBatch(ReadOnlySpan<byte> source)

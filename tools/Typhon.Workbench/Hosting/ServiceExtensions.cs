@@ -15,6 +15,11 @@ public static class ServiceExtensions
         services.AddSingleton<DemoDataProvider>();
         services.AddSingleton<FileBrowserService>();
         services.AddSingleton<SchemaService>();
+        // #302 Phase 5: file-backed user options (editor preference, workspace root). Singleton because the
+        // FileSystemWatcher hot-reload + atomic-write semantics need a single shared instance.
+        services.AddSingleton<OptionsStore>();
+        // #302 Phase 6: editor handoff dispatcher (per-OS adapters: VS Code / Cursor / Rider / VS / Custom).
+        services.AddSingleton<EditorLauncher>();
         return services;
     }
 
@@ -28,6 +33,8 @@ public static class ServiceExtensions
            .WithTags("Profiler");
         app.MapGet("/api/sessions/{sessionId:guid}/profiler/stream", ProfilerLiveStream.HandleAsync)
            .WithTags("Profiler");
+        app.MapGet("/api/options/stream", OptionsChangedStream.HandleAsync)
+           .WithTags("Options");
         return app;
     }
 

@@ -2,7 +2,6 @@ using System;
 using System.Threading;
 using NUnit.Framework;
 using Typhon.Engine.Profiler.Gc;
-using Typhon.Profiler;
 
 namespace Typhon.Engine.Tests.Profiler;
 

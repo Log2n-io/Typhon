@@ -131,7 +131,8 @@ public static class RuntimeEventCodec
         TraceRecordHeader.ReadSpanHeaderExtension(source[TraceRecordHeader.CommonHeaderSize..],
             out var durationTicks, out _, out _, out var spanFlags);
         var hasTC = (spanFlags & TraceRecordHeader.SpanFlagsHasTraceContext) != 0;
-        var p = source[TraceRecordHeader.SpanHeaderSize(hasTC)..];
+        var hasSL = (spanFlags & TraceRecordHeader.SpanFlagsHasSourceLocation) != 0;
+        var p = source[TraceRecordHeader.SpanHeaderSize(hasTC, hasSL)..];
         return new RuntimeTransactionLifecycleData(threadSlot, startTimestamp, durationTicks,
             BinaryPrimitives.ReadUInt16LittleEndian(p),
             BinaryPrimitives.ReadUInt32LittleEndian(p[2..]),
@@ -144,7 +145,8 @@ public static class RuntimeEventCodec
         TraceRecordHeader.ReadSpanHeaderExtension(source[TraceRecordHeader.CommonHeaderSize..],
             out var durationTicks, out _, out _, out var spanFlags);
         var hasTC = (spanFlags & TraceRecordHeader.SpanFlagsHasTraceContext) != 0;
-        var p = source[TraceRecordHeader.SpanHeaderSize(hasTC)..];
+        var hasSL = (spanFlags & TraceRecordHeader.SpanFlagsHasSourceLocation) != 0;
+        var p = source[TraceRecordHeader.SpanHeaderSize(hasTC, hasSL)..];
         return new RuntimeSubscriptionOutputExecuteData(threadSlot, startTimestamp, durationTicks,
             BinaryPrimitives.ReadInt64LittleEndian(p),
             p[8],

@@ -70,6 +70,37 @@ public sealed class ProfilerController : ControllerBase
     }
 
     /// <summary>
+    /// #302 Phase 4: source-location manifest for the session — maps span <c>siteId</c>s to file/line/method.
+    /// Works for both Attach (received in init handshake) and Trace (read from the file's trailer) sessions.
+    /// Returns an empty manifest when the trace doesn't carry source attribution (engine emitted no
+    /// intercepted call sites). See claude/design/observability/10-profiler-source-attribution.md §4.7.
+    /// </summary>
+    [HttpGet("source-locations")]
+    public ActionResult<SourceLocationManifestDto> GetSourceLocations(Guid sessionId)
+    {
+        var session = HttpContext.Items["Session"];
+
+        if (session is AttachSession attach)
+        {
+            return Ok(attach.Runtime.SourceLocationManifest);
+        }
+
+        if (session is TraceSession trace)
+        {
+            // Manifest was loaded once at build completion in TraceSessionRuntime; we just hand it
+            // back. Pre-feature traces (or traces without attribution) get SourceLocationManifestDto.Empty.
+            return Ok(trace.Runtime.SourceLocationManifest);
+        }
+
+        return Conflict(new ProblemDetails
+        {
+            Title = "session_kind_mismatch",
+            Detail = "Source-location manifest is only available for Trace and Attach sessions.",
+            Status = StatusCodes.Status409Conflict,
+        });
+    }
+
+    /// <summary>
     /// User-initiated disconnect for an Attach session. Drops the TCP connection to the engine and pins the
     /// runtime status to <c>disconnected</c>; the session itself stays alive in the <see cref="SessionManager"/>
     /// so the client can keep inspecting the captured tick buffer. Idempotent — repeated calls are 204 no-ops.

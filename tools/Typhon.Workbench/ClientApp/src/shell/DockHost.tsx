@@ -15,6 +15,8 @@ import SchemaIndexPanel from '@/panels/SchemaInspector/SchemaIndexPanel';
 import SchemaRelationshipsPanel from '@/panels/SchemaInspector/SchemaRelationshipsPanel';
 import ProfilerPanel from '@/panels/profiler/ProfilerPanel';
 import TopSpansPanel from '@/panels/profiler/TopSpansPanel';
+import OptionsPanel from '@/panels/options/OptionsPanel';
+import SourcePreviewPanel from '@/panels/profiler/SourcePreviewPanel';
 import { registerDockApi } from './commands/openSchemaBrowser';
 import { registerProfilerDockApi } from './commands/profilerCommands';
 import MigrationRequiredBanner from './banners/MigrationRequiredBanner';
@@ -36,6 +38,8 @@ const components: Record<string, React.FC<IDockviewPanelProps>> = {
   SchemaRelationships: SchemaRelationshipsPanel,
   Profiler: ProfilerPanel,
   TopSpans: TopSpansPanel,
+  Options: OptionsPanel,
+  SourcePreview: SourcePreviewPanel,
 };
 
 function buildDefaultLayout(api: DockviewReadyEvent['api'], kind: 'none' | 'open' | 'attach' | 'trace') {

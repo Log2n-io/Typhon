@@ -77,24 +77,50 @@ public sealed class TraceFileReader : IDisposable
         _compressedBuffer = new byte[64 * 1024];
     }
 
+    /// <summary>
+    /// Oldest format version this reader still accepts. v4 traces have no source-location manifest
+    /// (their on-disk header is 20 bytes shorter); we synthesize zeroed offset fields and downstream
+    /// code interprets that as "no manifest". Bump this when removing back-compat for an older v.
+    /// </summary>
+    public const ushort MinSupportedVersion = 4;
+
     /// <summary>Reads and validates the file header. Must be called first.</summary>
     /// <exception cref="InvalidDataException">If magic or version is wrong.</exception>
     public TraceFileHeader ReadHeader()
     {
-        Span<byte> headerBytes = stackalloc byte[Unsafe.SizeOf<TraceFileHeader>()];
-        _stream.ReadExactly(headerBytes);
+        // v4 layout ends at SamplingSessionStartQpc (51 bytes); v5 appends FileTableOffset +
+        // SourceLocationManifestOffset + Reserved0/1 (+20 bytes). v4 files transparently use the
+        // shorter read; their absent fields default to 0 ("no manifest").
+        const int V4HeaderSize = 51;
+        var fullSize = Unsafe.SizeOf<TraceFileHeader>();
+
+        Span<byte> headerBytes = stackalloc byte[fullSize];
+        _stream.ReadExactly(headerBytes[..V4HeaderSize]);
+        var version = BinaryPrimitives.ReadUInt16LittleEndian(headerBytes[4..6]);
+
+        if (version == TraceFileHeader.CurrentVersion)
+        {
+            _stream.ReadExactly(headerBytes[V4HeaderSize..fullSize]);
+        }
+        else if (version < MinSupportedVersion || version > TraceFileHeader.CurrentVersion)
+        {
+            throw new InvalidDataException(
+                $"Unsupported trace file version: {version}. This build reads versions "
+                + $"{MinSupportedVersion}..{TraceFileHeader.CurrentVersion}.");
+        }
+        else
+        {
+            // Older-but-supported (currently only v4) — clear the bytes we didn't read, so the
+            // marshalled struct sees zeroed offset fields.
+            headerBytes[V4HeaderSize..fullSize].Clear();
+        }
+
         Header = MemoryMarshal.Read<TraceFileHeader>(headerBytes);
 
         if (Header.Magic != TraceFileHeader.MagicValue)
         {
             throw new InvalidDataException(
                 $"Invalid trace file magic: 0x{Header.Magic:X8} (expected 0x{TraceFileHeader.MagicValue:X8})");
-        }
-        if (Header.Version != TraceFileHeader.CurrentVersion)
-        {
-            throw new InvalidDataException(
-                $"Unsupported trace file version: {Header.Version}. This build only reads version {TraceFileHeader.CurrentVersion}. " +
-                "The .typhon-trace format was rewritten in the typed-event release; older files are unreadable.");
         }
         return Header;
     }
@@ -207,6 +233,14 @@ public sealed class TraceFileReader : IDisposable
             ReadSpanNames();
             return ReadNextBlock(out records, out recordCount);
         }
+        if (firstWord == TraceFileWriter.FileTableMagic ||
+            firstWord == TraceFileWriter.SourceLocationManifestMagic)
+        {
+            // Trailing source-location manifest sections (#302, Phase 3) — not a block. Rewind so a separate
+            // caller can read the trailer via TryReadSourceLocationManifest, and signal end-of-blocks.
+            _stream.Position -= bytesRead;
+            return false;
+        }
 
         if (bytesRead < TraceBlockEncoder.BlockHeaderSize)
         {
@@ -290,5 +324,83 @@ public sealed class TraceFileReader : IDisposable
         var len = _binaryReader.ReadByte();
         var bytes = _binaryReader.ReadBytes(len);
         return Encoding.UTF8.GetString(bytes);
+    }
+
+    private string ReadVarString()
+    {
+        var len = _binaryReader.ReadUInt16();
+        var bytes = _binaryReader.ReadBytes(len);
+        return Encoding.UTF8.GetString(bytes);
+    }
+
+    /// <summary>
+    /// Read the trailing source-location manifest (#302, Phase 3 of profiler-source-attribution).
+    /// Returns <c>false</c> if the trace file doesn't carry one (offsets in the header are zero).
+    /// Uses absolute seeks; requires a seekable stream.
+    /// See claude/design/observability/10-profiler-source-attribution.md §4.6.
+    /// </summary>
+    public bool TryReadSourceLocationManifest(out string[] files, out SourceLocationManifestEntry[] entries)
+    {
+        files = Array.Empty<string>();
+        entries = Array.Empty<SourceLocationManifestEntry>();
+
+        if (Header.FileTableOffset == 0 || Header.SourceLocationManifestOffset == 0)
+        {
+            return false;
+        }
+        if (!_stream.CanSeek)
+        {
+            throw new InvalidOperationException("TryReadSourceLocationManifest requires a seekable stream.");
+        }
+
+        var savedPos = _stream.Position;
+        try
+        {
+            // FileTable
+            _stream.Position = Header.FileTableOffset;
+            var fileMagic = _binaryReader.ReadUInt32();
+            if (fileMagic != TraceFileWriter.FileTableMagic)
+            {
+                throw new InvalidDataException(
+                    $"Bad FileTable magic at offset {Header.FileTableOffset}: 0x{fileMagic:X8} (expected 0x{TraceFileWriter.FileTableMagic:X8})");
+            }
+            var fileCount = _binaryReader.ReadUInt32();
+            files = new string[fileCount];
+            for (uint i = 0; i < fileCount; i++)
+            {
+                var fileId = _binaryReader.ReadUInt16();
+                var path = ReadVarString();
+                if (fileId < files.Length)
+                {
+                    files[fileId] = path;
+                }
+            }
+
+            // SourceLocationManifest
+            _stream.Position = Header.SourceLocationManifestOffset;
+            var manifestMagic = _binaryReader.ReadUInt32();
+            if (manifestMagic != TraceFileWriter.SourceLocationManifestMagic)
+            {
+                throw new InvalidDataException(
+                    $"Bad SourceLocationManifest magic at offset {Header.SourceLocationManifestOffset}: 0x{manifestMagic:X8} "
+                    + $"(expected 0x{TraceFileWriter.SourceLocationManifestMagic:X8})");
+            }
+            var entryCount = _binaryReader.ReadUInt32();
+            entries = new SourceLocationManifestEntry[entryCount];
+            for (uint i = 0; i < entryCount; i++)
+            {
+                var id = _binaryReader.ReadUInt16();
+                var fileId = _binaryReader.ReadUInt16();
+                var line = _binaryReader.ReadUInt32();
+                var kind = _binaryReader.ReadByte();
+                var method = ReadShortString();
+                entries[i] = new SourceLocationManifestEntry(id, fileId, line, kind, method);
+            }
+            return true;
+        }
+        finally
+        {
+            _stream.Position = savedPos;
+        }
     }
 }

@@ -75,7 +75,8 @@ public static class SchedulerWorkerEventCodec
         TraceRecordHeader.ReadSpanHeaderExtension(source[TraceRecordHeader.CommonHeaderSize..],
             out var durationTicks, out _, out _, out var spanFlags);
         var hasTC = (spanFlags & TraceRecordHeader.SpanFlagsHasTraceContext) != 0;
-        var p = source[TraceRecordHeader.SpanHeaderSize(hasTC)..];
+        var hasSL = (spanFlags & TraceRecordHeader.SpanFlagsHasSourceLocation) != 0;
+        var p = source[TraceRecordHeader.SpanHeaderSize(hasTC, hasSL)..];
         return new SchedulerWorkerIdleData(threadSlot, startTimestamp, durationTicks,
             p[0], BinaryPrimitives.ReadUInt16LittleEndian(p[1..]), BinaryPrimitives.ReadUInt32LittleEndian(p[3..]));
     }
@@ -102,7 +103,8 @@ public static class SchedulerWorkerEventCodec
         TraceRecordHeader.ReadSpanHeaderExtension(source[TraceRecordHeader.CommonHeaderSize..],
             out var durationTicks, out _, out _, out var spanFlags);
         var hasTC = (spanFlags & TraceRecordHeader.SpanFlagsHasTraceContext) != 0;
-        var p = source[TraceRecordHeader.SpanHeaderSize(hasTC)..];
+        var hasSL = (spanFlags & TraceRecordHeader.SpanFlagsHasSourceLocation) != 0;
+        var p = source[TraceRecordHeader.SpanHeaderSize(hasTC, hasSL)..];
         return new SchedulerWorkerBetweenTickData(threadSlot, startTimestamp, durationTicks,
             p[0], BinaryPrimitives.ReadUInt32LittleEndian(p[1..]), p[5]);
     }

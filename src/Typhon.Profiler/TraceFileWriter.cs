@@ -149,6 +149,68 @@ public sealed class TraceFileWriter : IDisposable
         _stream.Write(_compressedBuffer.AsSpan(0, compressedSize));
     }
 
+    /// <summary>Magic marker for the trailing FileTable (interned source-file paths). "SFLB" LE.</summary>
+    public const uint FileTableMagic = 0x42_4C_46_53;
+
+    /// <summary>Magic marker for the trailing SourceLocationManifest. "SLMN" LE.</summary>
+    public const uint SourceLocationManifestMagic = 0x4E_4D_4C_53;
+
+    /// <summary>
+    /// Append the source-location manifest to the file. Returns the (fileTableOffset, manifestOffset)
+    /// that the caller MUST patch into the file header via <see cref="RewriteHeader"/>. Phase 3 of the
+    /// profiler-source-attribution feature (see claude/design/observability/10-profiler-source-attribution.md §4.6).
+    /// </summary>
+    public (long fileTableOffset, long manifestOffset) WriteSourceLocationManifest(
+        IReadOnlyList<string> files,
+        IReadOnlyList<SourceLocationManifestEntry> entries)
+    {
+        ArgumentNullException.ThrowIfNull(files);
+        ArgumentNullException.ThrowIfNull(entries);
+
+        _writer.Flush();
+        var fileTableOffset = _stream.Position;
+        _writer.Write(FileTableMagic);
+        _writer.Write((uint)files.Count);
+        for (ushort i = 0; i < files.Count; i++)
+        {
+            _writer.Write(i);
+            WriteVarString(files[i]);
+        }
+
+        _writer.Flush();
+        var manifestOffset = _stream.Position;
+        _writer.Write(SourceLocationManifestMagic);
+        _writer.Write((uint)entries.Count);
+        foreach (var e in entries)
+        {
+            _writer.Write(e.Id);
+            _writer.Write(e.FileId);
+            _writer.Write(e.Line);
+            _writer.Write(e.Kind);
+            WriteShortString(e.Method);
+        }
+        _writer.Flush();
+        return (fileTableOffset, manifestOffset);
+    }
+
+    /// <summary>
+    /// Rewrite the file header at offset 0 with updated trailer offsets. Required to seek; throws on non-seekable streams.
+    /// Used to record the trailing-section offsets after the manifest is appended.
+    /// </summary>
+    public void RewriteHeader(in TraceFileHeader header)
+    {
+        if (!_stream.CanSeek)
+        {
+            throw new InvalidOperationException("RewriteHeader requires a seekable stream.");
+        }
+        _writer.Flush();
+        var savedPos = _stream.Position;
+        _stream.Position = 0;
+        var span = MemoryMarshal.AsBytes(MemoryMarshal.CreateReadOnlySpan(in header, 1));
+        _stream.Write(span);
+        _stream.Position = savedPos;
+    }
+
     public void Flush() => _stream.Flush();
 
     public void Dispose()
@@ -167,6 +229,18 @@ public sealed class TraceFileWriter : IDisposable
     {
         var bytes = Encoding.UTF8.GetBytes(value ?? string.Empty);
         var len = (byte)Math.Min(bytes.Length, 255);
+        _writer.Write(len);
+        _writer.Write(bytes, 0, len);
+    }
+
+    /// <summary>
+    /// Variable-length string with a u16 byte-count prefix. Used for FileTable entries where paths can exceed
+    /// 255 bytes (the WriteShortString limit).
+    /// </summary>
+    private void WriteVarString(string value)
+    {
+        var bytes = Encoding.UTF8.GetBytes(value ?? string.Empty);
+        var len = (ushort)Math.Min(bytes.Length, ushort.MaxValue);
         _writer.Write(len);
         _writer.Write(bytes, 0, len);
     }

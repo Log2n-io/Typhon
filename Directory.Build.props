@@ -1,0 +1,32 @@
+<Project>
+
+  <!--
+    Repo-relative source paths in IL via PathMap (per design doc
+    claude/design/observability/10-profiler-source-attribution.md §4.4).
+
+    Effects:
+    - Profiler source-attribution generator captures repo-relative paths
+      ("/_/src/...") instead of absolute build-machine paths.
+    - Stripped paths are smaller in trace files and portable across
+      machines (no leaked developer home-directory paths).
+
+    The /_/ sentinel is the .NET convention. The Workbench client strips
+    it before joining with the user's workspace root.
+  -->
+  <PropertyGroup>
+    <DeterministicSourcePaths>true</DeterministicSourcePaths>
+    <PathMap>$(MSBuildThisFileDirectory)=/_/</PathMap>
+    <!--
+      Repo root, exposed to source generators via CompilerVisibleProperty below.
+      SourceLocationGenerator uses this to manually rewrite SyntaxTree.FilePath into the
+      repo-relative "/_/..." form (PathMap is applied to PDB / [CallerFilePath] but not to
+      the strings a generator reads from SyntaxTree.FilePath).
+    -->
+    <TyphonRepoRoot>$(MSBuildThisFileDirectory)</TyphonRepoRoot>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <CompilerVisibleProperty Include="TyphonRepoRoot" />
+  </ItemGroup>
+
+</Project>

@@ -21,11 +21,12 @@ public ref partial struct PageCacheFetchEvent
     public int FilePageIndex;
 
     public readonly int ComputeSize()
-        => PageCacheEventCodec.ComputeSize(TraceEventKind.PageCacheFetch, Header.TraceIdHi != 0 || Header.TraceIdLo != 0, 0);
+        => PageCacheEventCodec.ComputeSize(TraceEventKind.PageCacheFetch, Header.TraceIdHi != 0 || Header.TraceIdLo != 0, 0, Header.SourceLocationId);
 
     public readonly void EncodeTo(Span<byte> destination, long endTimestamp, out int bytesWritten)
         => PageCacheEventCodec.Encode(destination, endTimestamp, TraceEventKind.PageCacheFetch, Header.ThreadSlot, Header.StartTimestamp,
-            Header.SpanId, Header.ParentSpanId, Header.TraceIdHi, Header.TraceIdLo, FilePageIndex, pageCount: 0, optMask: 0, out bytesWritten);
+            Header.SpanId, Header.ParentSpanId, Header.TraceIdHi, Header.TraceIdLo, FilePageIndex, pageCount: 0, optMask: 0, out bytesWritten,
+            sourceLocationId: Header.SourceLocationId);
 }
 
 /// <summary>
@@ -39,11 +40,12 @@ public ref partial struct PageCacheDiskReadEvent
     public int FilePageIndex;
 
     public readonly int ComputeSize()
-        => PageCacheEventCodec.ComputeSize(TraceEventKind.PageCacheDiskRead, Header.TraceIdHi != 0 || Header.TraceIdLo != 0, 0);
+        => PageCacheEventCodec.ComputeSize(TraceEventKind.PageCacheDiskRead, Header.TraceIdHi != 0 || Header.TraceIdLo != 0, 0, Header.SourceLocationId);
 
     public readonly void EncodeTo(Span<byte> destination, long endTimestamp, out int bytesWritten)
         => PageCacheEventCodec.Encode(destination, endTimestamp, TraceEventKind.PageCacheDiskRead, Header.ThreadSlot, Header.StartTimestamp,
-            Header.SpanId, Header.ParentSpanId, Header.TraceIdHi, Header.TraceIdLo, FilePageIndex, pageCount: 0, optMask: 0, out bytesWritten);
+            Header.SpanId, Header.ParentSpanId, Header.TraceIdHi, Header.TraceIdLo, FilePageIndex, pageCount: 0, optMask: 0, out bytesWritten,
+            sourceLocationId: Header.SourceLocationId);
 }
 
 [TraceEvent(TraceEventKind.PageCacheDiskWrite, Codec = typeof(PageCacheEventCodec))]
@@ -56,11 +58,12 @@ public ref partial struct PageCacheDiskWriteEvent
     private int _pageCount;
 
     public readonly int ComputeSize()
-        => PageCacheEventCodec.ComputeSize(TraceEventKind.PageCacheDiskWrite, Header.TraceIdHi != 0 || Header.TraceIdLo != 0, _optMask);
+        => PageCacheEventCodec.ComputeSize(TraceEventKind.PageCacheDiskWrite, Header.TraceIdHi != 0 || Header.TraceIdLo != 0, _optMask, Header.SourceLocationId);
 
     public readonly void EncodeTo(Span<byte> destination, long endTimestamp, out int bytesWritten)
         => PageCacheEventCodec.Encode(destination, endTimestamp, TraceEventKind.PageCacheDiskWrite, Header.ThreadSlot, Header.StartTimestamp,
-            Header.SpanId, Header.ParentSpanId, Header.TraceIdHi, Header.TraceIdLo, FilePageIndex, _pageCount, _optMask, out bytesWritten);
+            Header.SpanId, Header.ParentSpanId, Header.TraceIdHi, Header.TraceIdLo, FilePageIndex, _pageCount, _optMask, out bytesWritten,
+            sourceLocationId: Header.SourceLocationId);
 }
 
 [TraceEvent(TraceEventKind.PageCacheAllocatePage)]
@@ -70,11 +73,12 @@ public ref partial struct PageCacheAllocatePageEvent
     public int FilePageIndex;
 
     public readonly int ComputeSize()
-        => PageCacheEventCodec.ComputeSize(TraceEventKind.PageCacheAllocatePage, Header.TraceIdHi != 0 || Header.TraceIdLo != 0, 0);
+        => PageCacheEventCodec.ComputeSize(TraceEventKind.PageCacheAllocatePage, Header.TraceIdHi != 0 || Header.TraceIdLo != 0, 0, Header.SourceLocationId);
 
     public readonly void EncodeTo(Span<byte> destination, long endTimestamp, out int bytesWritten)
         => PageCacheEventCodec.Encode(destination, endTimestamp, TraceEventKind.PageCacheAllocatePage, Header.ThreadSlot, Header.StartTimestamp,
-            Header.SpanId, Header.ParentSpanId, Header.TraceIdHi, Header.TraceIdLo, FilePageIndex, pageCount: 0, optMask: 0, out bytesWritten);
+            Header.SpanId, Header.ParentSpanId, Header.TraceIdHi, Header.TraceIdLo, FilePageIndex, pageCount: 0, optMask: 0, out bytesWritten,
+            sourceLocationId: Header.SourceLocationId);
 }
 
 /// <summary>
@@ -103,12 +107,13 @@ public ref partial struct PageCacheFlushEvent
     public int PageCount;
 
     public readonly int ComputeSize()
-        => PageCacheEventCodec.ComputeSize(TraceEventKind.PageCacheFlush, Header.TraceIdHi != 0 || Header.TraceIdLo != 0, 0);
+        => PageCacheEventCodec.ComputeSize(TraceEventKind.PageCacheFlush, Header.TraceIdHi != 0 || Header.TraceIdLo != 0, 0, Header.SourceLocationId);
 
     public readonly void EncodeTo(Span<byte> destination, long endTimestamp, out int bytesWritten)
         // PageCount intentionally goes into the codec's `filePageIndex` slot — see the <remarks> on this struct.
         => PageCacheEventCodec.Encode(destination, endTimestamp, TraceEventKind.PageCacheFlush, Header.ThreadSlot, Header.StartTimestamp,
-            Header.SpanId, Header.ParentSpanId, Header.TraceIdHi, Header.TraceIdLo, filePageIndex: PageCount, pageCount: 0, optMask: 0, out bytesWritten);
+            Header.SpanId, Header.ParentSpanId, Header.TraceIdHi, Header.TraceIdLo, filePageIndex: PageCount, pageCount: 0, optMask: 0, out bytesWritten,
+            sourceLocationId: Header.SourceLocationId);
 }
 
 /// <summary>

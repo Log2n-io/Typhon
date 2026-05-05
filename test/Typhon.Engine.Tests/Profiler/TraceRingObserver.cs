@@ -3,7 +3,6 @@ using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Threading;
-using Typhon.Engine;
 using Typhon.Engine.Profiler;
 using Typhon.Profiler;
 

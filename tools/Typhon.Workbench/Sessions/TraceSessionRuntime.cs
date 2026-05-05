@@ -76,6 +76,15 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
     /// <summary>Source timestamp frequency (ticks/second from the source header). 0 until build completes.</summary>
     public long TimestampFrequency => _timestampFrequency;
 
+    /// <summary>
+    /// #302 — source-location manifest read from the source <c>.typhon-trace</c>'s trailer at build
+    /// completion. Empty for traces that don't carry attribution (engine emitted no intercepted call
+    /// sites) and for replay files (their source data path differs and isn't wired here yet).
+    /// Mirrors <see cref="AttachSessionRuntime.SourceLocationManifest"/> so the controller can serve
+    /// both session kinds through the same property without re-opening files per request.
+    /// </summary>
+    public SourceLocationManifestDto SourceLocationManifest { get; private set; } = SourceLocationManifestDto.Empty;
+
     /// <summary>Fires every ~200 ms during build with progress counters. Also fires at phase transitions (done / error).</summary>
     public event Action<BuildProgressEventArgs> BuildProgressChanged;
 
@@ -241,6 +250,13 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
                 : ReadSourceTimestampFrequency(_filePath);
             var metadata = BuildMetadataDto(_reader, _filePath, _timestampFrequency, fingerprint, _isReplayFile);
 
+            // #302: load the source-location manifest from the trace trailer once, keep on the runtime
+            // for cheap reuse by the controller. Skipped for replay files (no source trace to read).
+            if (!_isReplayFile)
+            {
+                SourceLocationManifest = TryLoadSourceLocationManifest(_filePath);
+            }
+
             Metadata = metadata;
             _metadataTcs.TrySetResult(metadata);
             BuildCompleted?.Invoke(metadata);
@@ -284,6 +300,42 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
         using var reader = new TraceFileReader(fs);
         var header = reader.ReadHeader();
         return header.TimestampFrequency;
+    }
+
+    /// <summary>
+    /// Reads the <c>FileTable</c> + <c>SourceLocationManifest</c> trailers from the source
+    /// <c>.typhon-trace</c> and projects them into the wire DTO shape. Returns <see cref="SourceLocationManifestDto.Empty"/>
+    /// for traces without attribution (engine emitted no intercepted call sites) and on any read
+    /// failure (we surface absent attribution rather than failing the whole session over it).
+    /// </summary>
+    private static SourceLocationManifestDto TryLoadSourceLocationManifest(string sourcePath)
+    {
+        try
+        {
+            using var fs = File.OpenRead(sourcePath);
+            using var reader = new TraceFileReader(fs);
+            reader.ReadHeader();
+            if (!reader.TryReadSourceLocationManifest(out var files, out var entries))
+            {
+                return SourceLocationManifestDto.Empty;
+            }
+            var fileDtos = new SourceLocationFileDto[files.Length];
+            for (ushort i = 0; i < files.Length; i++)
+            {
+                fileDtos[i] = new SourceLocationFileDto(i, files[i] ?? string.Empty);
+            }
+            var entryDtos = new SourceLocationEntryDto[entries.Length];
+            for (var i = 0; i < entries.Length; i++)
+            {
+                var e = entries[i];
+                entryDtos[i] = new SourceLocationEntryDto(e.Id, e.FileId, e.Line, e.Kind, e.Method);
+            }
+            return new SourceLocationManifestDto(fileDtos, entryDtos);
+        }
+        catch
+        {
+            return SourceLocationManifestDto.Empty;
+        }
     }
 
     /// <summary>

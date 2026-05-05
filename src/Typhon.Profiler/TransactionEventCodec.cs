@@ -60,19 +60,24 @@ public readonly struct TransactionEventData
     /// <summary>Phase 6: row count for CommitComponent (kind 22). Valid iff <see cref="HasRowCount"/>.</summary>
     public int RowCount { get; }
 
+    /// <summary>Source-location id assigned by <c>SourceLocationGenerator</c> (#302). Zero when the wire record didn't carry source attribution.</summary>
+    public ushort SourceLocationId { get; }
+
     public bool HasComponentCount => (OptionalFieldMask & TransactionEventCodec.OptComponentCount) != 0;
     public bool HasConflictDetected => (OptionalFieldMask & TransactionEventCodec.OptConflictDetected) != 0;
     public bool HasWalLsn => Kind == TraceEventKind.TransactionPersist && (OptionalFieldMask & TransactionEventCodec.OptWalLsn) != 0;
     public bool HasReason => (OptionalFieldMask & TransactionEventCodec.OptReason) != 0;
     public bool HasRowCount => (OptionalFieldMask & TransactionEventCodec.OptRowCount) != 0;
     public bool HasTraceContext => TraceIdHi != 0 || TraceIdLo != 0;
+    public bool HasSourceLocation => SourceLocationId != 0;
 
     public TransactionEventData(
         TraceEventKind kind, byte threadSlot, long startTimestamp, long durationTicks,
         ulong spanId, ulong parentSpanId, ulong traceIdHi, ulong traceIdLo,
         long tsn, int componentTypeId, byte optionalFieldMask,
         int componentCount, bool conflictDetected, long walLsn = 0,
-        TransactionRollbackReason reason = TransactionRollbackReason.Explicit, int rowCount = 0)
+        TransactionRollbackReason reason = TransactionRollbackReason.Explicit, int rowCount = 0,
+        ushort sourceLocationId = 0)
     {
         Kind = kind;
         ThreadSlot = threadSlot;
@@ -90,6 +95,7 @@ public readonly struct TransactionEventData
         WalLsn = walLsn;
         Reason = reason;
         RowCount = rowCount;
+        SourceLocationId = sourceLocationId;
     }
 }
 
@@ -143,9 +149,10 @@ public static class TransactionEventCodec
     private const int RowCountSize = 4;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static int ComputeSize(TraceEventKind kind, bool hasTraceContext, byte optMask)
+    public static int ComputeSize(TraceEventKind kind, bool hasTraceContext, byte optMask, ushort sourceLocationId = 0)
     {
-        var size = TraceRecordHeader.SpanHeaderSize(hasTraceContext) + TsnSize + OptMaskSize;
+        var hasSourceLocation = sourceLocationId != 0;
+        var size = TraceRecordHeader.SpanHeaderSize(hasTraceContext, hasSourceLocation) + TsnSize + OptMaskSize;
         if (kind == TraceEventKind.TransactionCommitComponent)
         {
             size += ComponentTypeIdSize;
@@ -186,22 +193,38 @@ public static class TransactionEventCodec
         bool conflictDetected,
         out int bytesWritten,
         TransactionRollbackReason reason = TransactionRollbackReason.Explicit,
-        int rowCount = 0)
+        int rowCount = 0,
+        ushort sourceLocationId = 0)
     {
         var hasTraceContext = traceIdHi != 0 || traceIdLo != 0;
-        var size = ComputeSize(kind, hasTraceContext, optMask);
+        var hasSourceLocation = sourceLocationId != 0;
+        var size = ComputeSize(kind, hasTraceContext, optMask, sourceLocationId);
 
         TraceRecordHeader.WriteCommonHeader(destination, (ushort)size, kind, threadSlot, startTimestamp);
-        var spanFlags = hasTraceContext ? TraceRecordHeader.SpanFlagsHasTraceContext : (byte)0;
+        var spanFlags = (byte)0;
+        if (hasTraceContext)
+        {
+            spanFlags |= TraceRecordHeader.SpanFlagsHasTraceContext;
+        }
+
+        if (hasSourceLocation)
+        {
+            spanFlags |= TraceRecordHeader.SpanFlagsHasSourceLocation;
+        }
+
         TraceRecordHeader.WriteSpanHeaderExtension(destination[TraceRecordHeader.CommonHeaderSize..],
             endTimestamp - startTimestamp, spanId, parentSpanId, spanFlags);
 
-        var headerSize = TraceRecordHeader.SpanHeaderSize(hasTraceContext);
         if (hasTraceContext)
         {
             TraceRecordHeader.WriteTraceContext(destination[TraceRecordHeader.MinSpanHeaderSize..], traceIdHi, traceIdLo);
         }
+        if (hasSourceLocation)
+        {
+            TraceRecordHeader.WriteSourceLocationId(destination[TraceRecordHeader.SourceLocationIdOffset(hasTraceContext)..], sourceLocationId);
+        }
 
+        var headerSize = TraceRecordHeader.SpanHeaderSize(hasTraceContext, hasSourceLocation);
         var payload = destination[headerSize..];
         BinaryPrimitives.WriteInt64LittleEndian(payload, tsn);
         var cursor = TsnSize;
@@ -245,13 +268,21 @@ public static class TransactionEventCodec
         TraceRecordHeader.ReadSpanHeaderExtension(source[TraceRecordHeader.CommonHeaderSize..],
             out var durationTicks, out var spanId, out var parentSpanId, out var spanFlags);
 
+        var hasTraceContext = (spanFlags & TraceRecordHeader.SpanFlagsHasTraceContext) != 0;
+        var hasSourceLocation = (spanFlags & TraceRecordHeader.SpanFlagsHasSourceLocation) != 0;
+
         ulong traceIdHi = 0, traceIdLo = 0;
-        if ((spanFlags & TraceRecordHeader.SpanFlagsHasTraceContext) != 0)
+        if (hasTraceContext)
         {
             TraceRecordHeader.ReadTraceContext(source[TraceRecordHeader.MinSpanHeaderSize..], out traceIdHi, out traceIdLo);
         }
+        ushort sourceLocationId = 0;
+        if (hasSourceLocation)
+        {
+            sourceLocationId = TraceRecordHeader.ReadSourceLocationId(source[TraceRecordHeader.SourceLocationIdOffset(hasTraceContext)..]);
+        }
 
-        var headerSize = TraceRecordHeader.SpanHeaderSize((spanFlags & TraceRecordHeader.SpanFlagsHasTraceContext) != 0);
+        var headerSize = TraceRecordHeader.SpanHeaderSize(hasTraceContext, hasSourceLocation);
         var payload = source[headerSize..];
         var tsn = BinaryPrimitives.ReadInt64LittleEndian(payload);
         var cursor = TsnSize;
@@ -292,38 +323,57 @@ public static class TransactionEventCodec
         }
 
         return new TransactionEventData(kind, threadSlot, startTimestamp, durationTicks, spanId, parentSpanId, traceIdHi, traceIdLo,
-            tsn, componentTypeId, optMask, componentCount, conflictDetected, reason: reason, rowCount: rowCount);
+            tsn, componentTypeId, optMask, componentCount, conflictDetected, 0, reason, rowCount, sourceLocationId);
     }
 
     // ── Persist-specific codec (kind 23) ──
     // Wire layout: [i64 tsn][u8 optMask][i64 walLsn?]
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static int ComputePersistSize(bool hasTraceContext, byte optMask)
+    public static int ComputePersistSize(bool hasTraceContext, byte optMask, ushort sourceLocationId = 0)
     {
-        var size = TraceRecordHeader.SpanHeaderSize(hasTraceContext) + TsnSize + OptMaskSize;
-        if ((optMask & OptWalLsn) != 0) size += WalLsnSize;
+        var hasSourceLocation = sourceLocationId != 0;
+        var size = TraceRecordHeader.SpanHeaderSize(hasTraceContext, hasSourceLocation) + TsnSize + OptMaskSize;
+        if ((optMask & OptWalLsn) != 0)
+        {
+            size += WalLsnSize;
+        }
+
         return size;
     }
 
-    internal static void EncodePersist(Span<byte> destination, long endTimestamp, byte threadSlot, long startTimestamp,
-        ulong spanId, ulong parentSpanId, ulong traceIdHi, ulong traceIdLo,
-        long tsn, byte optMask, long walLsn, out int bytesWritten)
+    internal static void EncodePersist(Span<byte> destination, long endTimestamp, byte threadSlot, long startTimestamp, ulong spanId, ulong parentSpanId,
+        ulong traceIdHi, ulong traceIdLo, long tsn, byte optMask, long walLsn, out int bytesWritten, ushort sourceLocationId = 0)
     {
         var hasTraceContext = traceIdHi != 0 || traceIdLo != 0;
-        var size = ComputePersistSize(hasTraceContext, optMask);
+        var hasSourceLocation = sourceLocationId != 0;
+        var size = ComputePersistSize(hasTraceContext, optMask, sourceLocationId);
 
         TraceRecordHeader.WriteCommonHeader(destination, (ushort)size, TraceEventKind.TransactionPersist, threadSlot, startTimestamp);
-        var spanFlags = hasTraceContext ? TraceRecordHeader.SpanFlagsHasTraceContext : (byte)0;
+        var spanFlags = (byte)0;
+        if (hasTraceContext)
+        {
+            spanFlags |= TraceRecordHeader.SpanFlagsHasTraceContext;
+        }
+
+        if (hasSourceLocation)
+        {
+            spanFlags |= TraceRecordHeader.SpanFlagsHasSourceLocation;
+        }
+
         TraceRecordHeader.WriteSpanHeaderExtension(destination[TraceRecordHeader.CommonHeaderSize..],
             endTimestamp - startTimestamp, spanId, parentSpanId, spanFlags);
 
-        var headerSize = TraceRecordHeader.SpanHeaderSize(hasTraceContext);
         if (hasTraceContext)
         {
             TraceRecordHeader.WriteTraceContext(destination[TraceRecordHeader.MinSpanHeaderSize..], traceIdHi, traceIdLo);
         }
+        if (hasSourceLocation)
+        {
+            TraceRecordHeader.WriteSourceLocationId(destination[TraceRecordHeader.SourceLocationIdOffset(hasTraceContext)..], sourceLocationId);
+        }
 
+        var headerSize = TraceRecordHeader.SpanHeaderSize(hasTraceContext, hasSourceLocation);
         var payload = destination[headerSize..];
         BinaryPrimitives.WriteInt64LittleEndian(payload, tsn);
         var cursor = TsnSize;
@@ -344,13 +394,21 @@ public static class TransactionEventCodec
         TraceRecordHeader.ReadSpanHeaderExtension(source[TraceRecordHeader.CommonHeaderSize..],
             out var durationTicks, out var spanId, out var parentSpanId, out var spanFlags);
 
+        var hasTraceContext = (spanFlags & TraceRecordHeader.SpanFlagsHasTraceContext) != 0;
+        var hasSourceLocation = (spanFlags & TraceRecordHeader.SpanFlagsHasSourceLocation) != 0;
+
         ulong traceIdHi = 0, traceIdLo = 0;
-        if ((spanFlags & TraceRecordHeader.SpanFlagsHasTraceContext) != 0)
+        if (hasTraceContext)
         {
             TraceRecordHeader.ReadTraceContext(source[TraceRecordHeader.MinSpanHeaderSize..], out traceIdHi, out traceIdLo);
         }
+        ushort sourceLocationId = 0;
+        if (hasSourceLocation)
+        {
+            sourceLocationId = TraceRecordHeader.ReadSourceLocationId(source[TraceRecordHeader.SourceLocationIdOffset(hasTraceContext)..]);
+        }
 
-        var headerSize = TraceRecordHeader.SpanHeaderSize((spanFlags & TraceRecordHeader.SpanFlagsHasTraceContext) != 0);
+        var headerSize = TraceRecordHeader.SpanHeaderSize(hasTraceContext, hasSourceLocation);
         var payload = source[headerSize..];
         var tsn = BinaryPrimitives.ReadInt64LittleEndian(payload);
         var cursor = TsnSize;
@@ -365,7 +423,7 @@ public static class TransactionEventCodec
         }
 
         return new TransactionEventData(kind, threadSlot, startTimestamp, durationTicks, spanId, parentSpanId, traceIdHi, traceIdLo,
-            tsn, componentTypeId: 0, optMask, componentCount: 0, conflictDetected: false, walLsn: walLsn);
+            tsn, componentTypeId: 0, optMask, componentCount: 0, conflictDetected: false, walLsn: walLsn, sourceLocationId: sourceLocationId);
     }
 }
 

@@ -193,7 +193,8 @@ public static class SpatialQueryEventCodec
         TraceRecordHeader.ReadSpanHeaderExtension(source[TraceRecordHeader.CommonHeaderSize..],
             out var durationTicks, out var spanId, out var parentSpanId, out var spanFlags);
         var hasTraceContext = (spanFlags & TraceRecordHeader.SpanFlagsHasTraceContext) != 0;
-        var payload = source[TraceRecordHeader.SpanHeaderSize(hasTraceContext)..];
+        var hasSourceLocation = (spanFlags & TraceRecordHeader.SpanFlagsHasSourceLocation) != 0;
+        var payload = source[TraceRecordHeader.SpanHeaderSize(hasTraceContext, hasSourceLocation)..];
         return new SpatialQueryAabbData(threadSlot, startTimestamp, durationTicks, spanId, parentSpanId,
             BinaryPrimitives.ReadUInt16LittleEndian(payload),
             BinaryPrimitives.ReadUInt16LittleEndian(payload[2..]),
@@ -208,7 +209,8 @@ public static class SpatialQueryEventCodec
         TraceRecordHeader.ReadSpanHeaderExtension(source[TraceRecordHeader.CommonHeaderSize..],
             out var durationTicks, out _, out _, out var spanFlags);
         var hasTraceContext = (spanFlags & TraceRecordHeader.SpanFlagsHasTraceContext) != 0;
-        var payload = source[TraceRecordHeader.SpanHeaderSize(hasTraceContext)..];
+        var hasSourceLocation = (spanFlags & TraceRecordHeader.SpanFlagsHasSourceLocation) != 0;
+        var payload = source[TraceRecordHeader.SpanHeaderSize(hasTraceContext, hasSourceLocation)..];
         return new SpatialQueryRadiusData(threadSlot, startTimestamp, durationTicks,
             BinaryPrimitives.ReadUInt16LittleEndian(payload),
             BinaryPrimitives.ReadUInt16LittleEndian(payload[2..]),
@@ -222,7 +224,8 @@ public static class SpatialQueryEventCodec
         TraceRecordHeader.ReadSpanHeaderExtension(source[TraceRecordHeader.CommonHeaderSize..],
             out var durationTicks, out _, out _, out var spanFlags);
         var hasTraceContext = (spanFlags & TraceRecordHeader.SpanFlagsHasTraceContext) != 0;
-        var payload = source[TraceRecordHeader.SpanHeaderSize(hasTraceContext)..];
+        var hasSourceLocation = (spanFlags & TraceRecordHeader.SpanFlagsHasSourceLocation) != 0;
+        var payload = source[TraceRecordHeader.SpanHeaderSize(hasTraceContext, hasSourceLocation)..];
         return new SpatialQueryRayData(threadSlot, startTimestamp, durationTicks,
             BinaryPrimitives.ReadUInt16LittleEndian(payload),
             BinaryPrimitives.ReadUInt16LittleEndian(payload[2..]),
@@ -236,7 +239,8 @@ public static class SpatialQueryEventCodec
         TraceRecordHeader.ReadSpanHeaderExtension(source[TraceRecordHeader.CommonHeaderSize..],
             out var durationTicks, out _, out _, out var spanFlags);
         var hasTraceContext = (spanFlags & TraceRecordHeader.SpanFlagsHasTraceContext) != 0;
-        var payload = source[TraceRecordHeader.SpanHeaderSize(hasTraceContext)..];
+        var hasSourceLocation = (spanFlags & TraceRecordHeader.SpanFlagsHasSourceLocation) != 0;
+        var payload = source[TraceRecordHeader.SpanHeaderSize(hasTraceContext, hasSourceLocation)..];
         return new SpatialQueryFrustumData(threadSlot, startTimestamp, durationTicks,
             BinaryPrimitives.ReadUInt16LittleEndian(payload),
             BinaryPrimitives.ReadUInt16LittleEndian(payload[2..]),
@@ -249,7 +253,8 @@ public static class SpatialQueryEventCodec
         TraceRecordHeader.ReadSpanHeaderExtension(source[TraceRecordHeader.CommonHeaderSize..],
             out var durationTicks, out _, out _, out var spanFlags);
         var hasTraceContext = (spanFlags & TraceRecordHeader.SpanFlagsHasTraceContext) != 0;
-        var payload = source[TraceRecordHeader.SpanHeaderSize(hasTraceContext)..];
+        var hasSourceLocation = (spanFlags & TraceRecordHeader.SpanFlagsHasSourceLocation) != 0;
+        var payload = source[TraceRecordHeader.SpanHeaderSize(hasTraceContext, hasSourceLocation)..];
         return new SpatialQueryKnnData(threadSlot, startTimestamp, durationTicks,
             BinaryPrimitives.ReadUInt16LittleEndian(payload),
             payload[2],
@@ -263,7 +268,8 @@ public static class SpatialQueryEventCodec
         TraceRecordHeader.ReadSpanHeaderExtension(source[TraceRecordHeader.CommonHeaderSize..],
             out var durationTicks, out _, out _, out var spanFlags);
         var hasTraceContext = (spanFlags & TraceRecordHeader.SpanFlagsHasTraceContext) != 0;
-        var payload = source[TraceRecordHeader.SpanHeaderSize(hasTraceContext)..];
+        var hasSourceLocation = (spanFlags & TraceRecordHeader.SpanFlagsHasSourceLocation) != 0;
+        var payload = source[TraceRecordHeader.SpanHeaderSize(hasTraceContext, hasSourceLocation)..];
         return new SpatialQueryCountData(threadSlot, startTimestamp, durationTicks,
             payload[0],
             BinaryPrimitives.ReadUInt16LittleEndian(payload[1..]),

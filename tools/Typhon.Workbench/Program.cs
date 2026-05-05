@@ -22,6 +22,10 @@ builder.Services
     {
         o.JsonSerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
         o.JsonSerializerOptions.DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull;
+        // String-encode enums camelCase (matches the TS client which uses 'vsCode' | 'rider' …).
+        // Without this, PATCH /api/options/editor 400s because the server can't deserialize "rider"
+        // to the EditorKind enum.
+        o.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.CamelCase));
     });
 
 builder.Services.AddOpenApi();

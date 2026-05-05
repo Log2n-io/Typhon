@@ -703,6 +703,20 @@ This means you can jump between issues mid-day without losing your place — eac
 
 ---
 
+### Workbench Dev Server (`wb-dev.ps1`)
+
+A repo-root PowerShell script (`wb-dev.ps1`) starts and stops the Workbench dev stack — Kestrel on `:5200` and Vite on `:5173` — in a single shot. Tracks PIDs in `.claude/state/wb-dev.json` so a follow-up session can stop them even if it didn't start them.
+
+```powershell
+pwsh -NoProfile -Command './wb-dev.ps1 start'    # boot both servers, wait for ports
+pwsh -NoProfile -Command './wb-dev.ps1 status'   # report whether each is listening
+pwsh -NoProfile -Command './wb-dev.ps1 stop'     # tear them down
+```
+
+Equivalent to running `dotnet watch` + `npm run dev` by hand, but tracks the processes properly so a stale Kestrel doesn't lock `Typhon.Workbench.dll` and break the next build. Inside Claude Code, use the `/wb-dev` skill — same script, no manual invocation.
+
+---
+
 ## Developer's Daily Guide
 
 ### Morning Routine

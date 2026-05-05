@@ -69,10 +69,11 @@ public ref partial struct EcsQueryAnyEvent
     private EcsQueryScanMode _scanMode;
 
     public readonly int ComputeSize()
-        => EcsQueryEventCodec.ComputeSize(Header.TraceIdHi != 0 || Header.TraceIdLo != 0, _optMask);
+        => EcsQueryEventCodec.ComputeSize(Header.TraceIdHi != 0 || Header.TraceIdLo != 0, _optMask, Header.SourceLocationId);
 
     public readonly void EncodeTo(Span<byte> destination, long endTimestamp, out int bytesWritten)
         => EcsQueryEventCodec.Encode(destination, endTimestamp, TraceEventKind.EcsQueryAny, Header.ThreadSlot, Header.StartTimestamp,
-            Header.SpanId, Header.ParentSpanId, Header.TraceIdHi, Header.TraceIdLo, ArchetypeTypeId, _optMask, 0, _scanMode, _found, out bytesWritten);
+            Header.SpanId, Header.ParentSpanId, Header.TraceIdHi, Header.TraceIdLo, ArchetypeTypeId, _optMask, 0, _scanMode,
+            _found, out bytesWritten, sourceLocationId: Header.SourceLocationId);
 }
 

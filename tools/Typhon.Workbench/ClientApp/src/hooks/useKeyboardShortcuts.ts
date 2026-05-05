@@ -91,9 +91,11 @@ export function useKeyboardShortcuts(): void {
     // (thumb upper). Shift+Mouse 3 is an alt-forward for lefties / keyboard-heavy users who want a
     // mirrored gesture without reaching for the upper thumb button.
     //
-    // We listen on `mousedown` and preventDefault BEFORE the browser's default back-nav handler
-    // sees the event. Chrome/Edge fire a browser-history back/forward on Mouse 3/4 by default —
-    // without preventDefault the page would navigate away from the Workbench entirely.
+    // The in-app navigation runs on `mousedown`. Chrome / Edge dispatch the BROWSER-history
+    // back/forward on `mouseup` (and `auxclick`) via a non-standard path that doesn't reliably
+    // honour `preventDefault()` from the matching `mousedown` — empirically, with our SPA mounted,
+    // the browser navigates AWAY from the Workbench unless we also `preventDefault()` on those
+    // events. Belt-and-suspenders: suppress on all three.
     function onMouseDown(e: MouseEvent) {
       if (e.button === 3) {
         e.preventDefault();
@@ -105,11 +107,21 @@ export function useKeyboardShortcuts(): void {
       }
     }
 
+    function suppressNavOnly(e: MouseEvent) {
+      if (e.button === 3 || e.button === 4) {
+        e.preventDefault();
+      }
+    }
+
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('mousedown', onMouseDown);
+    window.addEventListener('mouseup', suppressNavOnly);
+    window.addEventListener('auxclick', suppressNavOnly);
     return () => {
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('mousedown', onMouseDown);
+      window.removeEventListener('mouseup', suppressNavOnly);
+      window.removeEventListener('auxclick', suppressNavOnly);
     };
   }, [togglePalette, back, forward, toggleTheme, toggleTree]);
 }

@@ -1,6 +1,7 @@
 using JetBrains.Annotations;
 using System;
 using System.Collections.Generic;
+using Typhon.Engine.Profiler;
 
 namespace Typhon.Engine;
 
@@ -37,6 +38,7 @@ public sealed class DagBuilder
 
         var idx = _systems.Count;
         _nameToIndex[name] = idx;
+        var src = SystemSourceResolver.Resolve(action);
         _systems.Add(new SystemDefinition
         {
             Name = name,
@@ -45,7 +47,10 @@ public sealed class DagBuilder
             Priority = priority,
             CallbackAction = action,
             RunIf = runIf,
-            TotalChunks = 1
+            TotalChunks = 1,
+            SourceFilePath = src?.FilePath,
+            SourceLine = src?.Line ?? 0,
+            SourceMethod = src?.MethodName
         });
         return this;
     }
@@ -69,6 +74,7 @@ public sealed class DagBuilder
 
         var idx = _systems.Count;
         _nameToIndex[name] = idx;
+        var src = SystemSourceResolver.Resolve(action);
         _systems.Add(new SystemDefinition
         {
             Name = name,
@@ -77,7 +83,10 @@ public sealed class DagBuilder
             Priority = priority,
             CallbackAction = action,
             RunIf = runIf,
-            TotalChunks = 1
+            TotalChunks = 1,
+            SourceFilePath = src?.FilePath,
+            SourceLine = src?.Line ?? 0,
+            SourceMethod = src?.MethodName
         });
         return this;
     }
@@ -107,6 +116,7 @@ public sealed class DagBuilder
 
         var idx = _systems.Count;
         _nameToIndex[name] = idx;
+        var src = SystemSourceResolver.Resolve(chunkAction);
         _systems.Add(new SystemDefinition
         {
             Name = name,
@@ -115,7 +125,10 @@ public sealed class DagBuilder
             Priority = priority,
             PipelineChunkAction = chunkAction,
             RunIf = runIf,
-            TotalChunks = totalChunks
+            TotalChunks = totalChunks,
+            SourceFilePath = src?.FilePath,
+            SourceLine = src?.Line ?? 0,
+            SourceMethod = src?.MethodName
         });
         return this;
     }
@@ -149,7 +162,7 @@ public sealed class DagBuilder
     /// <exception cref="InvalidOperationException">The graph contains a cycle.</exception>
     public (SystemDefinition[] Systems, int[] TopologicalOrder) Build()
     {
-        var graphSpan = Profiler.TyphonEvent.BeginSchedulerGraphBuild();
+        var graphSpan = TyphonEvent.BeginSchedulerGraphBuild();
         try
         {
             return BuildCore(ref graphSpan);
@@ -160,7 +173,7 @@ public sealed class DagBuilder
         }
     }
 
-    private (SystemDefinition[] Systems, int[] TopologicalOrder) BuildCore(ref Profiler.SchedulerGraphBuildEvent graphSpan)
+    private (SystemDefinition[] Systems, int[] TopologicalOrder) BuildCore(ref SchedulerGraphBuildEvent graphSpan)
     {
         var count = _systems.Count;
         if (count == 0)

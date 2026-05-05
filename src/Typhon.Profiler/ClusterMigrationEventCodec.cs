@@ -15,6 +15,9 @@ public readonly struct ClusterMigrationEventData
     public ulong TraceIdHi { get; }
     public ulong TraceIdLo { get; }
 
+    /// <summary>#302 source-location id (0 = no attribution). Resolved through the trace manifest to file:line.</summary>
+    public ushort SourceLocationId { get; }
+
     /// <summary>Required — archetype ID whose entities are being migrated between spatial cells.</summary>
     public ushort ArchetypeId { get; }
 
@@ -31,7 +34,7 @@ public readonly struct ClusterMigrationEventData
     public bool HasTraceContext => TraceIdHi != 0 || TraceIdLo != 0;
 
     public ClusterMigrationEventData(byte threadSlot, long startTimestamp, long durationTicks, ulong spanId, ulong parentSpanId,
-        ulong traceIdHi, ulong traceIdLo, ushort archetypeId, int migrationCount, int componentCount)
+        ulong traceIdHi, ulong traceIdLo, ushort sourceLocationId, ushort archetypeId, int migrationCount, int componentCount)
     {
         ThreadSlot = threadSlot;
         StartTimestamp = startTimestamp;
@@ -40,6 +43,7 @@ public readonly struct ClusterMigrationEventData
         ParentSpanId = parentSpanId;
         TraceIdHi = traceIdHi;
         TraceIdLo = traceIdLo;
+        SourceLocationId = sourceLocationId;
         ArchetypeId = archetypeId;
         MigrationCount = migrationCount;
         ComponentCount = componentCount;
@@ -68,13 +72,20 @@ public static class ClusterMigrationEventCodec
         TraceRecordHeader.ReadSpanHeaderExtension(source[TraceRecordHeader.CommonHeaderSize..],
             out var durationTicks, out var spanId, out var parentSpanId, out var spanFlags);
 
+        var hasTraceContext = (spanFlags & TraceRecordHeader.SpanFlagsHasTraceContext) != 0;
+        var hasSourceLocation = (spanFlags & TraceRecordHeader.SpanFlagsHasSourceLocation) != 0;
         ulong traceIdHi = 0, traceIdLo = 0;
-        if ((spanFlags & TraceRecordHeader.SpanFlagsHasTraceContext) != 0)
+        if (hasTraceContext)
         {
             TraceRecordHeader.ReadTraceContext(source[TraceRecordHeader.MinSpanHeaderSize..], out traceIdHi, out traceIdLo);
         }
+        ushort sourceLocationId = 0;
+        if (hasSourceLocation)
+        {
+            sourceLocationId = TraceRecordHeader.ReadSourceLocationId(source[TraceRecordHeader.SourceLocationIdOffset(hasTraceContext)..]);
+        }
 
-        var headerSize = TraceRecordHeader.SpanHeaderSize((spanFlags & TraceRecordHeader.SpanFlagsHasTraceContext) != 0);
+        var headerSize = TraceRecordHeader.SpanHeaderSize(hasTraceContext, hasSourceLocation);
         var payload = source[headerSize..];
         var archetypeId = BinaryPrimitives.ReadUInt16LittleEndian(payload);
         var migrationCount = BinaryPrimitives.ReadInt32LittleEndian(payload[ArchetypeIdSize..]);
@@ -83,7 +94,7 @@ public static class ClusterMigrationEventCodec
             ? BinaryPrimitives.ReadInt32LittleEndian(payload[(ArchetypeIdSize + MigrationCountSize)..])
             : 0;
 
-        return new ClusterMigrationEventData(threadSlot, startTimestamp, durationTicks, spanId, parentSpanId, traceIdHi, traceIdLo,
+        return new ClusterMigrationEventData(threadSlot, startTimestamp, durationTicks, spanId, parentSpanId, traceIdHi, traceIdLo, sourceLocationId,
             archetypeId, migrationCount, componentCount);
     }
 }
