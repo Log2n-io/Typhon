@@ -1,12 +1,11 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { Activity, Blocks, Clock, Crosshair, ExternalLink, FileCode, Layers, Tag } from 'lucide-react';
-import type { ChunkSpan, MarkerSelection, PhaseMarker, PhaseSpan, SpanData, TickData } from '@/libs/profiler/model/traceModel';
+import type { ChunkSpan, MarkerSelection, PhaseMarker, PhaseSpan, SpanData } from '@/libs/profiler/model/traceModel';
 import { TraceEventKind } from '@/libs/profiler/model/types';
-import type { TickSummary } from '@/libs/profiler/model/types';
-import type { TimeRange } from '@/libs/profiler/model/uiTypes';
 import type { ProfilerSelection } from '@/stores/useProfilerSelectionStore';
 import { useProfilerSessionStore } from '@/stores/useProfilerSessionStore';
-import { computeSelectionStats } from '@/libs/profiler/stats/selectionStats';
+import { useProfilerStatsStore } from '@/stores/useProfilerStatsStore';
+import { useProfilerViewStore } from '@/stores/useProfilerViewStore';
 import { useSourceLocationStore } from '@/stores/useSourceLocationStore';
 import { useOptionsStore } from '@/stores/useOptionsStore';
 import { openSourcePreview } from '@/shell/commands/openSchemaBrowser';
@@ -25,25 +24,16 @@ import { openSourcePreview } from '@/shell/commands/openSchemaBrowser';
 
 interface Props {
   /**
-   * Click selection from the profiler panel. When `null` the user hasn't clicked anything specific
-   * — caller should pass the current `ticks` + `tickSummaries` + `viewRange` so this renders the
-   * range-stats fallback (aggregates across the visible viewport instead of one element's metadata).
+   * Click selection from the profiler panel. When `null` the right-pane falls back to the range-
+   * stats view, which reads its data from `useProfilerStatsStore` (populated once per click by
+   * `useProfilerStatsWriter`) — no per-panel ticks/viewRange threading needed.
    */
   selection: ProfilerSelection | null;
-  /** Cache-resident tick data — required for the range-stats fallback. Optional otherwise. */
-  ticks?: TickData[];
-  /** All known tick summaries (cheap header-level data) — used to compute coverage caveats. */
-  tickSummaries?: TickSummary[] | null;
-  /** Current viewport — drives the range-stats aggregation. Required for the fallback. */
-  viewRange?: TimeRange;
 }
 
-export default function ProfilerDetail({ selection, ticks, tickSummaries, viewRange }: Props): React.JSX.Element | null {
+export default function ProfilerDetail({ selection }: Props): React.JSX.Element | null {
   if (selection === null) {
-    if (ticks && viewRange) {
-      return <RangeStatsDetail ticks={ticks} tickSummaries={tickSummaries ?? null} viewRange={viewRange} />;
-    }
-    return null;
+    return <RangeStatsDetail />;
   }
   switch (selection.kind) {
     case 'span':         return <SpanDetail span={selection.span} />;
@@ -106,7 +96,7 @@ function SpanSourceRow({ span }: { span: SpanData }): React.JSX.Element | null {
 
   const pathTitle = `${loc.file}:${loc.line}${loc.method ? ` · ${loc.method}` : ''}`;
   return (
-    <div className="mt-2 flex flex-col gap-1.5 rounded-md border border-border bg-muted/30 p-2 text-[12px]">
+    <div className="flex flex-col gap-1.5 rounded-md border border-border bg-muted/30 p-2 text-[12px]">
       <div className="flex min-w-0 items-center gap-2">
         <FileCode className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
         <span className="min-w-0 flex-1 truncate select-text font-mono text-foreground" title={pathTitle}>
@@ -144,7 +134,7 @@ function SpanSourceRow({ span }: { span: SpanData }): React.JSX.Element | null {
 function SpanDetail({ span }: { span: SpanData }): React.JSX.Element {
   const globalStartUs = useGlobalStartUs();
   return (
-    <div className="flex h-full flex-col bg-background p-3">
+    <div className="flex h-full flex-col gap-2 bg-background p-3">
       <div className="rounded-md border border-border bg-card p-3 text-[12px]">
         <Header icon={<Activity className="h-4 w-4 text-muted-foreground" />} title={span.name} suffix="span" />
         <dl className={DL_CLASS}>
@@ -198,9 +188,6 @@ function SpanDetail({ span }: { span: SpanData }): React.JSX.Element {
             </>
           )}
         </dl>
-
-        {/* #302: source-attribution row — file:line · method + Open in editor / Show inline buttons. */}
-        <SpanSourceRow span={span} />
 
         <dl className={DL_CLASS}>
           {/* Kind-specific payload surfaced from the rawEvent. ClusterMigration carries archetype +
@@ -259,6 +246,8 @@ function SpanDetail({ span }: { span: SpanData }): React.JSX.Element {
           )}
         </dl>
       </div>
+      {/* #302: source-attribution row — file:line · method + Open in editor / Show inline buttons. */}
+      <SpanSourceRow span={span} />
     </div>
   );
 }
@@ -293,7 +282,7 @@ function ChunkSourceRow({ chunk }: { chunk: ChunkSpan }): React.JSX.Element | nu
 
   const pathTitle = `${loc.file}:${loc.line}${loc.method ? ` · ${loc.method}` : ''}`;
   return (
-    <div className="mt-2 flex flex-col gap-1.5 rounded-md border border-border bg-muted/30 p-2 text-[12px]">
+    <div className="flex flex-col gap-1.5 rounded-md border border-border bg-muted/30 p-2 text-[12px]">
       <div className="flex min-w-0 items-center gap-2">
         <FileCode className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
         <span className="min-w-0 flex-1 truncate select-text font-mono text-foreground" title={pathTitle}>
@@ -331,7 +320,7 @@ function ChunkSourceRow({ chunk }: { chunk: ChunkSpan }): React.JSX.Element | nu
 function ChunkDetail({ chunk }: { chunk: ChunkSpan }): React.JSX.Element {
   const globalStartUs = useGlobalStartUs();
   return (
-    <div className="flex h-full flex-col bg-background p-3">
+    <div className="flex h-full flex-col gap-2 bg-background p-3">
       <div className="rounded-md border border-border bg-card p-3 text-[12px]">
         <Header icon={<Blocks className="h-4 w-4 text-muted-foreground" />} title={chunk.systemName || `System ${chunk.systemIndex}`} suffix="chunk" />
         <dl className={DL_CLASS}>
@@ -358,10 +347,9 @@ function ChunkDetail({ chunk }: { chunk: ChunkSpan }): React.JSX.Element {
           <dt className="text-muted-foreground">Entities</dt>
           <dd className="font-mono tabular-nums text-foreground">{chunk.entitiesProcessed.toLocaleString()}</dd>
         </dl>
-
-        {/* #302 system attribution: source row points to the system's entry method (PDB-resolved). */}
-        <ChunkSourceRow chunk={chunk} />
       </div>
+      {/* #302 system attribution: source row points to the system's entry method (PDB-resolved). */}
+      <ChunkSourceRow chunk={chunk} />
     </div>
   );
 }
@@ -542,40 +530,24 @@ function PhaseMarkerDetail({ marker, tickNumber }: { marker: PhaseMarker; tickNu
 /**
  * Aggregates over the current viewport — shown in the right-pane Detail when nothing is clicked.
  * Mirrors the user's mental model "what am I looking at?": stats follow the viewRange, not a frozen
- * drag-selection. Aggregation is debounced 150 ms so wheel-zoom doesn't fire N recomputes per second,
- * and only walks the cache-resident ticks (`ticks` prop) — the cache loader keeps the visible window
- * resident so the resident set normally covers the viewport. When the cache covers only part of the
- * range (whole-trace zoom-out past the budget) we surface that as a "X of Y ticks loaded" caveat.
+ * drag-selection. The aggregation lives in `useProfilerStatsStore`, populated once per click by
+ * `useProfilerStatsWriter` (which `ProfilerPanel` runs). This component just subscribes — keeps the
+ * compute single-producer so it doesn't double up with TopSpansPanel's read of the same store.
  */
-function RangeStatsDetail({
-  ticks,
-  tickSummaries,
-  viewRange,
-}: {
-  ticks: TickData[];
-  tickSummaries: TickSummary[] | null;
-  viewRange: TimeRange;
-}): React.JSX.Element {
+function RangeStatsDetail(): React.JSX.Element {
   // Trace timestamps are absolute QPC-based microseconds (a 64-bit value that's effectively the
   // process's wall-clock counter, not 0). Subtract `globalStartUs` so From/To/Duration display as
   // milliseconds-since-trace-start, matching the ruler's labels.
   const globalStartUs = useGlobalStartUs();
-
-  // Debounce: a wheel-zoom event burst flips viewRange dozens of times per second. Recomputing the
-  // O(events) aggregation on each is wasteful — coalesce to one compute 150 ms after the user
-  // stops interacting. The render still shows the previous stats during the burst so the panel
-  // doesn't flash to "loading" on every wheel notch.
-  const [debounced, setDebounced] = useState<{ ticks: TickData[]; viewRange: TimeRange }>({ ticks, viewRange });
-  useEffect(() => {
-    const id = setTimeout(() => setDebounced({ ticks, viewRange }), 150);
-    return () => clearTimeout(id);
-  }, [ticks, viewRange]);
-
-  const stats = computeSelectionStats(debounced.ticks, tickSummaries, debounced.viewRange);
+  const stats = useProfilerStatsStore((s) => s.stats);
+  const viewRange = useProfilerViewStore((s) => s.viewRange);
+  const hasViewRange = viewRange.endUs > viewRange.startUs;
   if (stats === null) {
     return (
       <div className="flex h-full items-center justify-center bg-background p-3">
-        <p className="text-[11px] text-muted-foreground">Drag a range or pan/zoom to see stats.</p>
+        <p className="text-[11px] text-muted-foreground">
+          {hasViewRange ? 'Computing range stats…' : 'Drag a range or pan/zoom to see stats.'}
+        </p>
       </div>
     );
   }

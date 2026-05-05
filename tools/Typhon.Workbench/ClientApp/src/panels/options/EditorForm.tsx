@@ -24,28 +24,39 @@ export function EditorForm(): React.JSX.Element {
 
   const [pendingKind, setPendingKind] = useState<EditorKind>(editor.kind);
   const [pendingCmd, setPendingCmd] = useState<string>(editor.customCommand);
+  // Compare dirty against committed (last saved), not editor.kind — SSE pushes the current snapshot
+  // on connect and would flip dirty=false before the user has a chance to save.
+  const [committedKind, setCommittedKind] = useState<EditorKind>(editor.kind);
+  const [committedCmd, setCommittedCmd] = useState<string>(editor.customCommand);
   const [testStatus, setTestStatus] = useState<{ ok: boolean; msg: string } | null>(null);
-  const dirty = pendingKind !== editor.kind || pendingCmd !== editor.customCommand;
+  const dirty = pendingKind !== committedKind || pendingCmd !== committedCmd;
 
-  async function handleSave(): Promise<void> {
+  async function handleSave(): Promise<boolean> {
     setTestStatus(null);
     try {
       await setEditor({ kind: pendingKind, customCommand: pendingCmd });
+      setCommittedKind(pendingKind);
+      setCommittedCmd(pendingCmd);
+      setTestStatus({ ok: true, msg: 'Settings saved.' });
+      return true;
     } catch (err) {
       setTestStatus({ ok: false, msg: (err as Error).message });
+      return false;
     }
   }
 
   async function handleTest(): Promise<void> {
     // Save first so the launcher uses the user's intended config.
-    if (dirty) {
-      await handleSave();
+    const wasDirty = dirty;
+    if (wasDirty) {
+      const saved = await handleSave();
+      if (!saved) return;
     }
     // Use a sentinel file the user is likely to have — README at workspace root, line 1.
     const result = await openInEditor('/_/README.md', 1);
     setTestStatus(
       result.ok
-        ? { ok: true, msg: 'Editor launched. Check that the file opened.' }
+        ? { ok: true, msg: `${wasDirty ? 'Settings saved. ' : ''}Editor launched — check that the file opened.` }
         : { ok: false, msg: result.error + (result.hint ? ` — ${result.hint}` : '') },
     );
   }

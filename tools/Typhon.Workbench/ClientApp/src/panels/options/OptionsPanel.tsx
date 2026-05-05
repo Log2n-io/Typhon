@@ -56,10 +56,19 @@ export default function OptionsPanel(): React.JSX.Element {
         </ul>
       </nav>
 
-      {/* Active form. */}
+      {/* Active form — deferred until options are loaded so local pending state
+          initialises from the real server values, not DEFAULT_OPTIONS. Without this gate
+          a pending 'rider' selection made while the fetch is in flight would flip to
+          dirty=false (and disable Save) the moment the fetch resolves with 'rider'. */}
       <main className="flex-1 overflow-auto p-4">
-        {active === 'editor' && <EditorForm />}
-        {active === 'profiler' && <ProfilerForm />}
+        {!loaded ? (
+          <p className="text-[12px] text-muted-foreground">Loading…</p>
+        ) : (
+          <>
+            {active === 'editor' && <EditorForm />}
+            {active === 'profiler' && <ProfilerForm />}
+          </>
+        )}
       </main>
     </div>
   );

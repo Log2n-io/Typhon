@@ -6,8 +6,6 @@ import { useSelectedResourceStore } from '@/stores/useSelectedResourceStore';
 import { useSchemaInspectorStore } from '@/stores/useSchemaInspectorStore';
 import { useProfilerSelectionStore } from '@/stores/useProfilerSelectionStore';
 import { useProfilerSessionStore } from '@/stores/useProfilerSessionStore';
-import { useProfilerViewStore } from '@/stores/useProfilerViewStore';
-import { useProfilerCache } from '@/hooks/profiler/useProfilerCache';
 import { useSessionStore } from '@/stores/useSessionStore';
 import { useComponentSchema } from '@/hooks/schema/useComponentSchema';
 import type { ComponentSchema, Field } from '@/hooks/schema/types';
@@ -36,15 +34,12 @@ export default function DetailPanel() {
 
   // Profiler session signals — used to render the range-stats fallback when no click selection has
   // been made but the user is exploring a profiler trace. The fallback runs through the same
-  // ProfilerDetail entry point with `selection={null}` so the right pane stays consistent.
+  // ProfilerDetail entry point with `selection={null}`; ProfilerDetail reads its data straight from
+  // `useProfilerStatsStore` (populated by `useProfilerStatsWriter` in ProfilerPanel) so we don't
+  // re-instantiate `useProfilerCache` here.
   const profilerMetadata = useProfilerSessionStore((s) => s.metadata);
-  const sessionId = useSessionStore((s) => s.sessionId);
   const sessionKind = useSessionStore((s) => s.kind);
   const isProfilerSession = sessionKind === 'attach' || sessionKind === 'trace';
-  const viewRange = useProfilerViewStore((s) => s.viewRange);
-  // Hook is always called (Rules of Hooks); when not in a profiler session the cache returns empty
-  // arrays — cheap. Only feeds the fallback render path below.
-  const profilerCache = useProfilerCache(isProfilerSession ? sessionId : null, sessionKind === 'attach');
 
   const field: Field | undefined =
     selectedFieldName && schema
@@ -71,14 +66,7 @@ export default function DetailPanel() {
     // current viewport — that way the right pane carries useful info even before the user picks a
     // specific element. Outside profiler land, fall through to the empty prompt.
     if (profilerRangeFallbackAvailable) {
-      return (
-        <ProfilerDetail
-          selection={null}
-          ticks={profilerCache.ticks}
-          tickSummaries={profilerMetadata?.tickSummaries as never}
-          viewRange={viewRange}
-        />
-      );
+      return <ProfilerDetail selection={null} />;
     }
     return (
       <div className="flex h-full items-center justify-center bg-background">

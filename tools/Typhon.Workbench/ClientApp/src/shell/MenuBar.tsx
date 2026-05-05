@@ -19,12 +19,16 @@ import NavButtons from './NavButtons';
 import PaletteTrigger from './PaletteTrigger';
 import {
   openArchetypeBrowser,
+  openDetailPanel,
+  openLogsPanel,
+  openOptions,
   openSchemaArchetypes,
   openSchemaBrowser,
   openSchemaIndexes,
+  openSchemaLayout,
   openSchemaRelationships,
 } from './commands/openSchemaBrowser';
-import { openTopSpansPanel, registerOpenSaveReplay } from './commands/profilerCommands';
+import { openProfilerPanel, openTopSpansPanel, registerOpenSaveReplay } from './commands/profilerCommands';
 import { logError, logInfo } from '@/stores/useLogStore';
 
 export default function MenuBar() {
@@ -106,6 +110,13 @@ export default function MenuBar() {
  <MenubarSeparator />
  <MenubarItem
  disabled={!hasComponentSelection}
+ onClick={openSchemaLayout}
+ title={hasComponentSelection ? undefined : 'Select a component first'}
+ >
+ Component Layout
+ </MenubarItem>
+ <MenubarItem
+ disabled={!hasComponentSelection}
  onClick={openSchemaArchetypes}
  title={hasComponentSelection ? undefined : 'Select a component first'}
  >
@@ -128,11 +139,22 @@ export default function MenuBar() {
  <MenubarSeparator />
  <MenubarItem
  disabled={!isProfilerSession}
+ onClick={openProfilerPanel}
+ title={isProfilerSession ? undefined : 'Open a profiler trace or attach a session first'}
+ >
+ Profiler
+ </MenubarItem>
+ <MenubarItem
+ disabled={!isProfilerSession}
  onClick={openTopSpansPanel}
  title={isProfilerSession ? undefined : 'Open a profiler trace or attach a session first'}
  >
  Top Spans
  </MenubarItem>
+ <MenubarSeparator />
+ <MenubarItem onClick={openDetailPanel}>Detail</MenubarItem>
+ <MenubarItem onClick={openLogsPanel}>Logs</MenubarItem>
+ <MenubarItem onClick={openOptions}>Options</MenubarItem>
  <MenubarSeparator />
  <MenubarItem onClick={toggleTheme}>Toggle Dark / Light Mode</MenubarItem>
  </MenubarContent>

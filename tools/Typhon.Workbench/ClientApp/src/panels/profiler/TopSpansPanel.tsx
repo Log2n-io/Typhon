@@ -1,11 +1,9 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { ArrowDown, ArrowUp } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import type { TickData } from '@/libs/profiler/model/traceModel';
-import type { TimeRange } from '@/libs/profiler/model/uiTypes';
-import { computeSelectionStats, type SpanGroupStats } from '@/libs/profiler/stats/selectionStats';
-import { useProfilerCache } from '@/hooks/profiler/useProfilerCache';
+import type { SpanGroupStats } from '@/libs/profiler/stats/selectionStats';
 import { useProfilerSessionStore } from '@/stores/useProfilerSessionStore';
+import { useProfilerStatsStore } from '@/stores/useProfilerStatsStore';
 import { useProfilerViewStore } from '@/stores/useProfilerViewStore';
 import { useSessionStore } from '@/stores/useSessionStore';
 
@@ -14,39 +12,19 @@ import { useSessionStore } from '@/stores/useSessionStore';
  * the user to widen the right Detail strip just to read it. Lives in its own pane so the columns
  * have room to breathe horizontally without crowding the more-vertical Detail / Logs panels.
  *
- * Same data feed as `RangeStatsDetail`: walks the cache-resident ticks inside the current viewRange
- * via `computeSelectionStats`, debounced 150 ms so wheel-zoom doesn't recompute per frame. Click a
- * row → tween viewport onto the worst-instance span of that group ± 5% padding, pausing live-follow
- * if applicable so the next tick doesn't snap viewRange back to the tail.
+ * Reads pre-aggregated stats from `useProfilerStatsStore` — the producer (`useProfilerStatsWriter`,
+ * called by `ProfilerPanel`) runs `computeSelectionStats` debounced 150 ms after viewRange settles
+ * so the wheel-zoom burst case still coalesces. Click a row → tween viewport onto the worst-instance
+ * span of that group ± 5% padding, pausing live-follow if applicable.
  */
 
 type SpanSortKey = 'name' | 'count' | 'minUs' | 'avgUs' | 'maxUs' | 'p95Us' | 'totalUs';
 const TOP_SPANS_LIMIT = 20;
 
 export default function TopSpansPanel(): React.JSX.Element {
-  const sessionId = useSessionStore((s) => s.sessionId);
   const sessionKind = useSessionStore((s) => s.kind);
   const isProfilerSession = sessionKind === 'attach' || sessionKind === 'trace';
-  const cache = useProfilerCache(isProfilerSession ? sessionId : null, sessionKind === 'attach');
-  const viewRange = useProfilerViewStore((s) => s.viewRange);
-  // Cast through `as never` mirrors the same pattern in DetailPanel — the OpenAPI-generated DTO
-  // types tickNumber as `string | number` because of int64 wire-shape ambiguity, but the helper
-  // only reads the numeric `startUs`/`durationUs` for tick-coverage counts and tolerates the wider
-  // type at runtime. Avoids a duplicate projection layer just for this hook.
-  const tickSummaries = useProfilerSessionStore((s) => (s.metadata?.tickSummaries ?? null) as never);
-
-  // Same debounce contract as RangeStatsDetail: a wheel-zoom event burst flips viewRange dozens
-  // of times per second; coalesce the recompute to one fire 150 ms after the user stops.
-  const [debounced, setDebounced] = useState<{ ticks: TickData[]; viewRange: TimeRange }>({ ticks: cache.ticks, viewRange });
-  useEffect(() => {
-    const id = setTimeout(() => setDebounced({ ticks: cache.ticks, viewRange }), 150);
-    return () => clearTimeout(id);
-  }, [cache.ticks, viewRange]);
-
-  const stats = useMemo(
-    () => computeSelectionStats(debounced.ticks, tickSummaries, debounced.viewRange),
-    [debounced, tickSummaries],
-  );
+  const stats = useProfilerStatsStore((s) => s.stats);
 
   if (!isProfilerSession) {
     return (

@@ -176,62 +176,72 @@ function Invoke-Start {
         New-Item -ItemType Directory -Path $StateDir -Force | Out-Null
     }
 
-    # Kestrel — `dotnet watch` drives hot-reload; killing it cascades to Typhon.Workbench.exe via /T.
-    # Start-Process returns the dotnet pid via -PassThru. Stdout/stderr go to log files via OS-level
-    # file handles (not pipes) so the children survive this script's exit.
-    $kestrel = Start-Process -FilePath 'dotnet' `
-        -ArgumentList @('watch', '--project', $WorkbenchProj) `
+    # Launch via cmd.exe /c with -WindowStyle Hidden so the child processes get their own hidden
+    # console session and are NOT in this terminal's process group. Without this (-NoNewWindow),
+    # Ctrl+C sends CTRL_C_EVENT to the entire group, killing npm/node without console-mode cleanup
+    # and leaving the terminal with VT mode stuck on (the "goes crazy" symptom).
+    $kestrelCmd = "dotnet watch --project `"$WorkbenchProj`" 1>`"$KestrelLog`" 2>`"$KestrelErrLog`""
+    $kestrel = Start-Process 'cmd.exe' `
+        -ArgumentList "/c $kestrelCmd" `
         -WorkingDirectory $RepoRoot `
-        -RedirectStandardOutput $KestrelLog `
-        -RedirectStandardError $KestrelErrLog `
-        -NoNewWindow -PassThru
+        -WindowStyle Hidden `
+        -PassThru
 
-    # Vite — npm.cmd is a batch wrapper around node; killing the cmd tree cascades to the node child.
-    $vite = Start-Process -FilePath 'npm.cmd' `
-        -ArgumentList @('run', 'dev') `
+    $viteCmd = "npm.cmd run dev 1>`"$ViteLog`" 2>`"$ViteErrLog`""
+    $vite = Start-Process 'cmd.exe' `
+        -ArgumentList "/c $viteCmd" `
         -WorkingDirectory $ClientApp `
-        -RedirectStandardOutput $ViteLog `
-        -RedirectStandardError $ViteErrLog `
-        -NoNewWindow -PassThru
+        -WindowStyle Hidden `
+        -PassThru
 
     Write-Host "launching: Kestrel pid $($kestrel.Id) + Vite pid $($vite.Id)"
     Write-Host 'waiting for ports to bind (timeout 30 s)...'
 
-    $kBound = Wait-PortBound 5200 30
-    $vBound = Wait-PortBound 5173 30
+    # try/finally ensures child processes are killed if Ctrl+C is pressed during the wait loop.
+    # The children no longer receive the signal themselves (detached console), so this script
+    # is responsible for cleanup on interruption.
+    $startupComplete = $false
+    try {
+        $kBound = Wait-PortBound 5200 30
+        $vBound = Wait-PortBound 5173 30
 
-    if (-not ($kBound -and $vBound)) {
-        Write-Host 'ERROR: timeout waiting for binding'
-        Write-Host "  :5200 $(if ($kBound) { 'bound' } else { 'NOT BOUND' })"
-        Write-Host "  :5173 $(if ($vBound) { 'bound' } else { 'NOT BOUND' })"
-        Write-Host '--- last 30 lines: Kestrel stdout ---'
-        if (Test-Path $KestrelLog)    { Get-Content $KestrelLog    -Tail 30 }
-        Write-Host '--- last 30 lines: Kestrel stderr ---'
-        if (Test-Path $KestrelErrLog) { Get-Content $KestrelErrLog -Tail 30 }
-        Write-Host '--- last 30 lines: Vite stdout ---'
-        if (Test-Path $ViteLog)    { Get-Content $ViteLog    -Tail 30 }
-        Write-Host '--- last 30 lines: Vite stderr ---'
-        if (Test-Path $ViteErrLog) { Get-Content $ViteErrLog -Tail 30 }
-        # Best-effort cleanup of zombies we just launched.
-        Stop-ProcTree $kestrel.Id
-        Stop-ProcTree $vite.Id
-        exit 1
+        if (-not ($kBound -and $vBound)) {
+            Write-Host 'ERROR: timeout waiting for binding'
+            Write-Host "  :5200 $(if ($kBound) { 'bound' } else { 'NOT BOUND' })"
+            Write-Host "  :5173 $(if ($vBound) { 'bound' } else { 'NOT BOUND' })"
+            Write-Host '--- last 30 lines: Kestrel stdout ---'
+            if (Test-Path $KestrelLog)    { Get-Content $KestrelLog    -Tail 30 }
+            Write-Host '--- last 30 lines: Kestrel stderr ---'
+            if (Test-Path $KestrelErrLog) { Get-Content $KestrelErrLog -Tail 30 }
+            Write-Host '--- last 30 lines: Vite stdout ---'
+            if (Test-Path $ViteLog)    { Get-Content $ViteLog    -Tail 30 }
+            Write-Host '--- last 30 lines: Vite stderr ---'
+            if (Test-Path $ViteErrLog) { Get-Content $ViteErrLog -Tail 30 }
+            exit 1
+        }
+
+        $newState = [pscustomobject]@{
+            kestrelPid = $kestrel.Id
+            vitePid    = $vite.Id
+            startedAt  = (Get-Date).ToString('o')
+            kestrelLog = $KestrelLog
+            viteLog    = $ViteLog
+        }
+        Write-DevState $newState
+        $startupComplete = $true
+
+        Write-Host 'started successfully:'
+        Write-Host "  Kestrel pid $($kestrel.Id)  ->  http://localhost:5200/health"
+        Write-Host "  Vite    pid $($vite.Id)  ->  http://localhost:5173"
+        Write-Host "  Logs:   $KestrelLog"
+        Write-Host "          $ViteLog"
     }
-
-    $newState = [pscustomobject]@{
-        kestrelPid = $kestrel.Id
-        vitePid    = $vite.Id
-        startedAt  = (Get-Date).ToString('o')
-        kestrelLog = $KestrelLog
-        viteLog    = $ViteLog
+    finally {
+        if (-not $startupComplete) {
+            Stop-ProcTree $kestrel.Id
+            Stop-ProcTree $vite.Id
+        }
     }
-    Write-DevState $newState
-
-    Write-Host 'started successfully:'
-    Write-Host "  Kestrel pid $($kestrel.Id)  ->  http://localhost:5200/health"
-    Write-Host "  Vite    pid $($vite.Id)  ->  http://localhost:5173"
-    Write-Host "  Logs:   $KestrelLog"
-    Write-Host "          $ViteLog"
 }
 
 function Invoke-Stop {

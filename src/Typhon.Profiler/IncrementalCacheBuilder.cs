@@ -70,7 +70,6 @@ public sealed class IncrementalCacheBuilder : IDisposable
     private uint _currentEventCount;
     private long _currentMaxSystemDurationTicks;
     private ulong _currentActiveSystemsBitmask;
-
     // ── v9 (issue #289 follow-up) ──
     /// <summary>OverloadDetector level captured from the current tick's <c>TickEnd</c> payload — written into this tick's summary.</summary>
     private byte _currentOverloadLevel;
@@ -95,6 +94,13 @@ public sealed class IncrementalCacheBuilder : IDisposable
     private ushort _currentConsecutiveOverrun;
     /// <summary>OverloadDetector consecutive-underrun counter from the latest kind-242 instant. Same lifecycle.</summary>
     private ushort _currentConsecutiveUnderrun;
+    /// <summary>
+    /// Set when <c>TickEnd</c> or <c>SchedulerMetronomeWait</c> fires. Blocks any subsequent events from updating
+    /// <c>_currentTickLastTs</c>. Prevents next-tick worker spans (e.g. <c>ConcurrencyEpochScopeEnter</c>) from
+    /// bleeding into the current tick's duration window when they arrive in the stream before the next TickStart.
+    /// Reset to <c>false</c> at each TickStart.
+    /// </summary>
+    private bool _tickEndSeen;
 
     private readonly MemoryStream _chunkBuffer = new(capacity: TraceFileCacheConstants.ByteCap);
     private uint _chunkFromTick;
@@ -320,6 +326,7 @@ public sealed class IncrementalCacheBuilder : IDisposable
                 _currentTickMultiplier = 0;
                 _currentConsecutiveOverrun = 0;
                 _currentConsecutiveUnderrun = 0;
+                _tickEndSeen = false;
 
                 if (!_globalStartSet)
                 {
@@ -330,7 +337,26 @@ public sealed class IncrementalCacheBuilder : IDisposable
 
             if (_tickActive)
             {
-                if (kind == TraceEventKind.TickEnd || startTs > _currentTickLastTs)
+                // Root cause of DurationUs inflation: next-tick worker spans (e.g. ConcurrencyEpochScopeEnter) can
+                // arrive in the stream BEFORE the next TickStart marker, while _tickActive is still true for the current
+                // tick. Freezing _currentTickLastTs at TickEnd/SchedulerMetronomeWait prevents their timestamps
+                // (≈ next tick's start) from inflating DurationUs of the current tick.
+                if (kind == TraceEventKind.TickEnd)
+                {
+                    // TickEnd always updates (it's the canonical end marker), then seals.
+                    _currentTickLastTs = startTs;
+                    _tickEndSeen = true;
+                }
+                else if (kind == TraceEventKind.SchedulerMetronomeWait)
+                {
+                    // SchedulerMetronomeWait fires right after TickEnd+GaugeSnapshot. Its startTs = waitStart ≈ T+4ms.
+                    // Allow it to update (it nudges DurationUs to include post-TickEnd setup time), then seal so
+                    // nothing after the wait-start is counted.
+                    if (startTs > _currentTickLastTs)
+                        _currentTickLastTs = startTs;
+                    _tickEndSeen = true;
+                }
+                else if (!_tickEndSeen && startTs > _currentTickLastTs)
                 {
                     _currentTickLastTs = startTs;
                 }

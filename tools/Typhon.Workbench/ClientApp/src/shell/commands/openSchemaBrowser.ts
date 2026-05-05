@@ -90,6 +90,10 @@ export function openOptions(): void {
   openDockPanel('options', 'Options', 'Options');
 }
 
+export function openLogsPanel(): void {
+  openDockPanel('logs', 'Logs', 'Logs');
+}
+
 /**
  * #302 Phase 7: open the inline source-preview panel for a given file:line. Each invocation reuses
  * one panel id so opening a second source from the Source row replaces the contents instead of

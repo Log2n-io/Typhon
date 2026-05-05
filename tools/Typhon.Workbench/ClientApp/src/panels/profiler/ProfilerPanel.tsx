@@ -11,6 +11,8 @@ import { useProfilerBuildProgress } from '@/hooks/profiler/useProfilerBuildProgr
 import { useProfilerLiveStream } from '@/hooks/profiler/useProfilerLiveStream';
 import { useProfilerCache } from '@/hooks/profiler/useProfilerCache';
 import { useProfilerSourceLocations } from '@/hooks/profiler/useProfilerSourceLocations';
+import { useProfilerStatsWriter } from '@/hooks/profiler/useProfilerStatsWriter';
+import { useProfilerStatsStore } from '@/stores/useProfilerStatsStore';
 import TickOverview from './sections/TickOverview';
 import TimeArea from './sections/TimeArea';
 import OverloadStrip from './sections/OverloadStrip';
@@ -81,6 +83,16 @@ export default function ProfilerPanel() {
   // useProfilerCache observes the same expanding manifest in either mode.
   const { ticks: timeAreaTicks, gaugeData, threadInfos, pendingRangesUs } = useProfilerCache(sessionId, isAttach);
 
+  // Single producer for the viewport range-stats. RangeStatsDetail and TopSpansPanel both read the
+  // result from `useProfilerStatsStore` so the O(events-in-range) aggregation runs once per click
+  // rather than once per consuming panel.
+  const viewRangeForStats = useProfilerViewStore((s) => s.viewRange);
+  const tickSummariesForStats = useMemo(
+    () => (metadata?.tickSummaries ?? null) as never,
+    [metadata?.tickSummaries],
+  );
+  useProfilerStatsWriter(timeAreaTicks, tickSummariesForStats, viewRangeForStats);
+
   // Auto-follow viewport: in live mode with Following enabled, keep the viewRange anchored to the
   // last `liveFollowWindowUs` µs of the newest tick. Pausing Follow freezes the viewport at
   // wherever it is, so the user can inspect older ticks without the viewport snapping forward.
@@ -104,8 +116,13 @@ export default function ProfilerPanel() {
   useProfilerBuildProgress(isTrace ? sessionId : null);
   useProfilerLiveStream(isAttach ? sessionId : null);
   // #302 Phase 6: hydrate `useSourceLocationStore` so the Source row in `ProfilerDetail` can
-  // resolve span siteIds. Works for both live-attach (init handshake) and trace (file trailer).
-  useProfilerSourceLocations(isTrace || isAttach ? sessionId : null);
+  // resolve span siteIds. Gated on `metadata` being ready: for trace sessions the server only
+  // populates the manifest after build completion (same moment metadata is set), so querying
+  // earlier returns an empty manifest that gets cached by TanStack Query (retry: false).
+  // For attach sessions metadata arrives after the init handshake which also carries the
+  // FileTable + SourceLocationManifest frames, so by the time metadata lands the server's
+  // manifest is ready too.
+  useProfilerSourceLocations(isTrace || isAttach ? (metadata ? sessionId : null) : null);
 
   // Tell the store which mode we're in; panels and future renderers can branch off `isLive`.
   // The cleanup wipes every profiler-scoped store so switching sessions (or closing the panel)
@@ -116,6 +133,7 @@ export default function ProfilerPanel() {
     return () => {
       useProfilerSessionStore.getState().reset();
       useProfilerSelectionStore.getState().clear();
+      useProfilerStatsStore.getState().clear();
       useNavHistoryStore.getState().clear();
     };
   }, [sessionId, isAttach, setIsLive]);

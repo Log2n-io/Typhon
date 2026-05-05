@@ -140,6 +140,49 @@ cd test/Typhon.Benchmark
 dotnet run -c Release --filter '*PagedMemoryFile*'
 ```
 
+### Quick POC / single-file scripts (.NET 10)
+
+For throwaway experiments, repro cases, or API exploration that don't belong in the test suite, use .NET 10 single-file execution — no `.csproj` required:
+
+```bash
+dotnet run poc.cs
+```
+
+**File structure** — no `Main`, no namespace, no class boilerplate:
+
+```csharp
+// poc.cs  — top-level statements, types below
+Console.WriteLine("hello");
+```
+
+**Directives** — all must be at the top of the file, before any code:
+
+| Directive | Effect | Example |
+|-----------|--------|---------|
+| `#:package` | Pull a NuGet package | `#:package BenchmarkDotNet@0.14.0` |
+| `#:sdk` | Switch SDK (default: `Microsoft.NET.Sdk`) | `#:sdk Microsoft.NET.Sdk.Web` |
+| `#:property` | Set an MSBuild property | `#:property AllowUnsafeBlocks true` |
+| `#:project` | Reference an existing `.csproj` | `#:project src/Typhon.Engine/Typhon.Engine.csproj` |
+
+**Typical Typhon POC skeleton** — references the engine directly:
+
+```csharp
+#:property AllowUnsafeBlocks true
+#:project src/Typhon.Engine/Typhon.Engine.csproj
+
+using Typhon.Engine;
+
+// experiment here — full engine available
+```
+
+**Grow it into a proper project** when the POC needs to live on:
+
+```bash
+dotnet project convert poc.cs   # generates poc.csproj from directives
+```
+
+**Constraints**: single file only; requires .NET 10 SDK (`dotnet --version` ≥ 10.0); not for production. Place throwaway scripts in `scratch/` (gitignored) to avoid polluting the repo root.
+
 ## Important Implementation Details
 
 ### Performance considerations
