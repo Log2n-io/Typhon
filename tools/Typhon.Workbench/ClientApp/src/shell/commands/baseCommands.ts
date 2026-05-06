@@ -11,6 +11,7 @@ import {
   toggleViewSchemaArchetypes,
   toggleViewSchemaIndexes,
   toggleViewSchemaRelationships,
+  toggleViewSystemDag,
   openSourcePreviewForCurrentSpan,
   saveLayoutAsDefault,
 } from './openSchemaBrowser';
@@ -44,6 +45,7 @@ export function buildBaseCommands(): CommandItem[] {
     { id: 'toggle-view-schema-archetypes',    label: 'Toggle View Component Archetypes', keywords: 'schema archetypes cluster storage',           action: toggleViewSchemaArchetypes },
     { id: 'toggle-view-schema-indexes',       label: 'Toggle View Component Indexes',    keywords: 'schema indexes btree fields',                 action: toggleViewSchemaIndexes },
     { id: 'toggle-view-schema-relationships', label: 'Toggle View Component Relationships', keywords: 'schema systems relationships',             action: toggleViewSchemaRelationships },
+    { id: 'toggle-view-system-dag',           label: 'Toggle View System DAG',              keywords: 'system dag scheduler topology phases rfc07', action: toggleViewSystemDag },
     { id: 'toggle-view-resource-tree',        label: 'Toggle View Resource Tree',        keywords: 'resource tree sidebar explorer',              action: toggleViewResourceTree },
     { id: 'toggle-view-detail',               label: 'Toggle View Detail',               keywords: 'detail inspector selection',                  action: toggleViewDetail },
     { id: 'toggle-view-options',              label: 'Toggle View Options',              keywords: 'options preferences settings editor',         action: toggleViewOptions },

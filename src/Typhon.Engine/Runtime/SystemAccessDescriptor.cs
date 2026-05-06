@@ -9,9 +9,10 @@ namespace Typhon.Engine;
 /// </summary>
 /// <remarks>
 /// Unit 2 of the auto-DAG migration: storage only. Conflict detection (W×W errors, R×W-plain errors, derived edges) lands in Unit 3. All sets default to
-/// empty; entries are deduped automatically by the underlying <see cref="HashSet{T}"/>.
+/// empty; entries are deduped automatically by the underlying <see cref="HashSet{T}"/>. Public so tooling (Workbench Schema Inspector, Profiler topology
+/// surfacing — RFC 07 Unit 6) can project the declarations onto its DTO surface without bouncing through reflection.
 /// </remarks>
-internal sealed class SystemAccessDescriptor
+public sealed class SystemAccessDescriptor
 {
     /// <summary>Component types declared with <c>b.Reads&lt;T&gt;()</c>. Ambiguous about same-tick freshness — Unit 3 errors if a same-phase writer of T exists.</summary>
     public readonly HashSet<Type> Reads = [];

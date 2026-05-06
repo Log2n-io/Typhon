@@ -3368,4 +3368,35 @@ public static partial class TyphonEvent
         ring.Publish();
     }
 
+    // ── Scheduler:Queue (kind 244 — #311) ───────────────────────────────────
+
+    /// <summary>
+    /// Emit <see cref="TraceEventKind.QueueTickEnd"/> — per-(tick, queue) rollup at end-of-tick. Captures the queue's
+    /// tick-local accumulators (peak depth, end-of-tick depth, overflow count, produced/consumed counts) for the
+    /// Workbench Data API <c>queue/&lt;name&gt;</c> tracks. Called from <c>DagScheduler.OnTickEnd</c> for each active
+    /// event queue; gated by <see cref="TelemetryConfig.SchedulerQueueTickEndActive"/>.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void EmitQueueTickEnd(uint tickNumber, ushort queueId, uint peakDepth, uint endOfTickDepth, uint overflowCount, uint produced, uint consumed)
+    {
+        if (!TelemetryConfig.SchedulerQueueTickEndActive)
+        {
+            return;
+        }
+
+        var slotIdx = ThreadSlotRegistry.GetOrAssignSlot();
+        if (slotIdx < 0)
+        {
+            return;
+        }
+
+        var ring = ThreadSlotRegistry.GetSlot(slotIdx).Buffer;
+        if (ring == null || !ring.TryReserve(QueueTickEndCodec.Size, out var dst))
+        {
+            return;
+        }
+
+        QueueTickEndCodec.Write(dst, (byte)slotIdx, Stopwatch.GetTimestamp(), tickNumber, queueId, peakDepth, endOfTickDepth, overflowCount, produced, consumed);
+        ring.Publish();
+    }
 }

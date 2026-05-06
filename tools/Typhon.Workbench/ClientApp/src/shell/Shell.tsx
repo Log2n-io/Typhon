@@ -1,4 +1,5 @@
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
+import { useSelectionBootstrap } from '@/hooks/useSelectionBootstrap';
 import { useSessionStore } from '@/stores/useSessionStore';
 import DockHost from './DockHost';
 import MenuBar from './MenuBar';
@@ -10,6 +11,7 @@ export default function Shell() {
   const sessionId = useSessionStore((s) => s.sessionId);
 
   useKeyboardShortcuts();
+  useSelectionBootstrap();
 
   return (
     <div className="flex h-full flex-col bg-background text-foreground">

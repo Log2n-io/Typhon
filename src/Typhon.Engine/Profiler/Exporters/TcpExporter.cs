@@ -503,6 +503,21 @@ public sealed class TcpExporter : ResourceNode, IProfilerExporter
             {
                 bw.Write(succ);
             }
+
+            WriteShortString(bw, sys.PhaseName ?? string.Empty);
+            bw.Write(sys.IsExclusivePhase);
+            WriteStringArray(bw, sys.Reads);
+            WriteStringArray(bw, sys.ReadsFresh);
+            WriteStringArray(bw, sys.ReadsSnapshot);
+            WriteStringArray(bw, sys.AdditionalReads);
+            WriteStringArray(bw, sys.Writes);
+            WriteStringArray(bw, sys.SideWrites);
+            WriteStringArray(bw, sys.WritesEvents);
+            WriteStringArray(bw, sys.ReadsEvents);
+            WriteStringArray(bw, sys.WritesResources);
+            WriteStringArray(bw, sys.ReadsResources);
+            WriteStringArray(bw, sys.ExplicitAfter);
+            WriteStringArray(bw, sys.ExplicitBefore);
         }
 
         // Archetype table
@@ -521,8 +536,29 @@ public sealed class TcpExporter : ResourceNode, IProfilerExporter
             WriteShortString(bw, c.Name);
         }
 
+        // Phases table (v6+) — RuntimeOptions.Phases names in declaration order.
+        bw.Write((ushort)_metadata.Phases.Length);
+        foreach (var p in _metadata.Phases)
+        {
+            WriteShortString(bw, p ?? string.Empty);
+        }
+
         bw.Flush();
         return ms.ToArray();
+    }
+
+    private static void WriteStringArray(BinaryWriter bw, string[] values)
+    {
+        if (values == null)
+        {
+            bw.Write((ushort)0);
+            return;
+        }
+        bw.Write((ushort)values.Length);
+        for (var i = 0; i < values.Length; i++)
+        {
+            WriteShortString(bw, values[i] ?? string.Empty);
+        }
     }
 
     /// <summary>

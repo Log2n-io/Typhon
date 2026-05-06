@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { useSessionStore } from '@/stores/useSessionStore';
 import { useEventSource } from './useEventSource';
 
@@ -32,14 +32,21 @@ export function useHeartbeat(): HeartbeatState {
   // every time the StatusBar mounts under a profiler session. Gate the EventSource accordingly.
   const url = sessionId && kind === 'open' ? `/api/sessions/${sessionId}/heartbeat` : null;
 
-  const onMessage = useCallback((data: HeartbeatPayload) => {
-    setPayload(data);
-    setStatus('green');
-    clearTimeout(timerRef.current);
-    timerRef.current = setTimeout(() => setStatus('grey'), STALE_THRESHOLD_MS);
-  }, []);
+  // Typed-listener shape (#308). The server emits `event: heartbeat\ndata: {...}\n\n` so we listen
+  // for the `heartbeat` event by name rather than the default `message` channel.
+  const listeners = useMemo(
+    () => ({
+      heartbeat: (data: HeartbeatPayload) => {
+        setPayload(data);
+        setStatus('green');
+        clearTimeout(timerRef.current);
+        timerRef.current = setTimeout(() => setStatus('grey'), STALE_THRESHOLD_MS);
+      },
+    }),
+    [],
+  );
 
-  useEventSource<HeartbeatPayload>(url, onMessage);
+  useEventSource(url, listeners);
 
   return { status, payload };
 }

@@ -1,5 +1,3 @@
-using System.Text.Json;
-using System.Text.Json.Serialization;
 using System.Threading.Channels;
 using Typhon.Workbench.Hosting;
 
@@ -10,7 +8,7 @@ namespace Typhon.Workbench.Streams;
 /// The browser opens an <c>EventSource</c> at <c>GET /api/options/stream</c> on app start and stays
 /// connected for the session — when the on-disk options file changes (out-of-band edit, or another
 /// Workbench window <c>PATCH</c>ing) the store's <c>OptionsChanged</c> event fires and we serialize
-/// the new document into a single <c>data:</c> frame.
+/// the new document into a single <c>options-changed</c> typed event (#308).
 /// </summary>
 /// <remarks>
 /// Bootstrap-token-gated via the URL prefix; <c>EventSource</c> can't send custom headers, so the
@@ -22,20 +20,15 @@ public static class OptionsChangedStream
 {
     private static readonly TimeSpan KeepaliveInterval = TimeSpan.FromSeconds(30);
 
-    private static readonly JsonSerializerOptions JsonOpts = new()
-    {
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-        Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) },
-    };
+    /// <summary>SSE event type. Clients listen via <c>addEventListener('options-changed', ...)</c>.</summary>
+    public const string EventType = "options-changed";
 
     public static async Task HandleAsync(
         HttpContext ctx,
         OptionsStore store,
         CancellationToken ct)
     {
-        ctx.Response.Headers.ContentType = "text/event-stream";
-        ctx.Response.Headers.CacheControl = "no-cache";
-        ctx.Response.Headers.Connection = "keep-alive";
+        await SseExtensions.WriteSseHeadersAsync(ctx, ct);
 
         // Buffer changes via a bounded channel — handler awaits ReadAsync and writes one SSE frame
         // per options snapshot. Bounded(1, DropOldest) coalesces bursts: if two PATCHes fire while
@@ -68,15 +61,11 @@ public static class OptionsChangedStream
                 if (winner == readTask)
                 {
                     var snapshot = await readTask;
-                    var payload = JsonSerializer.Serialize(snapshot, JsonOpts);
-                    await ctx.Response.WriteAsync($"data: {payload}\n\n", ct);
-                    await ctx.Response.Body.FlushAsync(ct);
+                    await SseExtensions.WriteEventAsync(ctx, EventType, snapshot, ct);
                 }
                 else
                 {
-                    // Comment-only frame keeps idle proxies from harvesting the connection.
-                    await ctx.Response.WriteAsync(": keepalive\n\n", ct);
-                    await ctx.Response.Body.FlushAsync(ct);
+                    await SseExtensions.WriteCommentAsync(ctx, "keepalive", ct);
                 }
             }
         }

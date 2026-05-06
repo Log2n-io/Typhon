@@ -20,6 +20,7 @@ import { useProfilerSelectionStore } from '@/stores/useProfilerSelectionStore';
 import { useProfilerViewStore } from '@/stores/useProfilerViewStore';
 import { useSourceLocationStore } from '@/stores/useSourceLocationStore';
 import { useThemeStore } from '@/stores/useThemeStore';
+import { useUiPrefsStore } from '@/stores/useUiPrefsStore';
 
 /**
  * Main time area — renders the ruler + phases + thread-slot lanes (chunks + nested spans) +
@@ -69,7 +70,7 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
   const setLiveFollowActive = useProfilerSessionStore((s) => s.setLiveFollowActive);
   const viewRange = useProfilerViewStore((s) => s.viewRange);
   const setViewRange = useProfilerViewStore((s) => s.setViewRange);
-  const legendsVisible = useProfilerViewStore((s) => s.legendsVisible);
+  const legendsVisible = useUiPrefsStore((s) => s.legendsVisible);
 
   // Centralised viewRange mutation. In live mode, any explicit user pan/zoom must pause auto-follow
   // so the next tick batch (≤100 ms) doesn't snap viewRange back to the live tail. Funnel every

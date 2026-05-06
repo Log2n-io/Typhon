@@ -172,6 +172,33 @@ public enum CacheSectionId : ushort
     /// <c>.typhon-trace</c> at open time.
     /// </summary>
     SourceMetadata = 7,
+
+    /// <summary>
+    /// Per-(tick, system) rollup records (<see cref="SystemTickSummary"/>[]) added in v12 for the Workbench Data API per-system
+    /// tracks (RFC 07 surfacing). Sorted by (TickNumber, SystemIndex) for deterministic binary search. Always dense across systems
+    /// in a tick (skipped systems present, with `SkipReason != NotSkipped`). Folded by <see cref="IncrementalCacheBuilder"/> from
+    /// the existing <c>SystemReady</c> / <c>SystemSkipped</c> / <c>SchedulerChunk</c> wire events — no new wire-format kind needed.
+    /// </summary>
+    SystemTickSummaries = 8,
+
+    /// <summary>
+    /// Per-(tick, queue) rollup records (<see cref="QueueTickSummary"/>[]) added in v12. Sorted by (TickNumber, QueueId). Folded
+    /// from a new <c>QueueTickEnd</c> wire event the engine emits at end-of-tick per active event queue.
+    /// </summary>
+    QueueTickSummaries = 9,
+
+    /// <summary>
+    /// Per-tick post-tick serial markers (<see cref="PostTickSummary"/>[]) added in v12 — one record per tick, capturing the durations
+    /// of each <see cref="TickPhase"/> region that runs serially after the system DAG completes. Folded from the existing
+    /// <c>RuntimePhaseSpan</c> wire events (kind 243); no new wire-format kind needed.
+    /// </summary>
+    PostTickSummaries = 10,
+
+    /// <summary>
+    /// Queue-name intern table written in v12. Variable-length: <c>u16 count</c> followed by <c>count × (u16 queueId + short-string name)</c>.
+    /// QueueId is the index assigned at engine startup; readers map <see cref="QueueTickSummary.QueueId"/> → display name through this section.
+    /// </summary>
+    QueueNameTable = 11,
 }
 
 /// <summary>
@@ -440,8 +467,15 @@ public static class TraceFileCacheConstants
     ///      <c>SchedulerOverloadDetector</c> instant (kind 242). Drives the Workbench OverloadStrip tooltip so users can see the
     ///      deescalation streak climb toward 20 (or reset on any overrun) — the answer to "why didn't multiplier go down?".
     ///      v10 caches must rebuild against v11.
+    /// v12 (current): four new sections added (<see cref="CacheSectionId.SystemTickSummaries"/>, <see cref="CacheSectionId.QueueTickSummaries"/>,
+    ///      <see cref="CacheSectionId.PostTickSummaries"/>, <see cref="CacheSectionId.QueueNameTable"/>) populated by
+    ///      <see cref="IncrementalCacheBuilder"/> from existing wire events plus a new <c>QueueTickEnd</c> event for the per-queue path.
+    ///      Drives the Workbench Data API v2 tracks (#311) — <c>system/&lt;name&gt;</c>, <c>queue/&lt;name&gt;</c>, <c>posttick/*</c>.
+    ///      <see cref="TickSummary.ActiveSystemsBitmask"/> is no longer populated in v12 builds (zeroed) — the per-system rows in
+    ///      <see cref="CacheSectionId.SystemTickSummaries"/> are the authoritative answer to "which systems ran in tick T", with no
+    ///      u64 cap. The field is retained on disk for v11 reader back-compat but consumers should migrate. v11 caches must rebuild.
     /// </summary>
-    public const ushort CurrentChunkerVersion = 11;
+    public const ushort CurrentChunkerVersion = 12;
 
     /// <summary>Sidecar file extension, appended to the source path (e.g., <c>foo.typhon-trace</c> → <c>foo.typhon-trace-cache</c>).</summary>
     public const string CacheFileExtension = "-cache";

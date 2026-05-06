@@ -51,7 +51,11 @@ public sealed class FileCacheSink : ICacheChunkSink
         IReadOnlyList<ChunkManifestEntry> chunkManifest,
         IReadOnlyDictionary<int, string> spanNames,
         ReadOnlySpan<byte> sourceMetadataBytes,
-        in CacheHeader headerTemplate)
+        in CacheHeader headerTemplate,
+        IReadOnlyList<SystemTickSummary> systemTickSummaries,
+        IReadOnlyList<QueueTickSummary> queueTickSummaries,
+        IReadOnlyList<PostTickSummary> postTickSummaries,
+        IReadOnlyDictionary<ushort, string> queueIdToName)
     {
         if (_trailerWritten)
         {
@@ -67,16 +71,16 @@ public sealed class FileCacheSink : ICacheChunkSink
 
         _writer.BeginSection(CacheSectionId.TickSummaries);
         var summaryArr = ToArray(tickSummaries);
-        _writer.WriteArray<TickSummary>(summaryArr);
+        _writer.WriteArray(summaryArr);
 
         _writer.BeginSection(CacheSectionId.GlobalMetrics);
         _writer.WriteStruct(globalMetrics);
         var aggArr = ToArray(systemAggregates);
-        _writer.WriteArray<SystemAggregateDuration>(aggArr);
+        _writer.WriteArray(aggArr);
 
         _writer.BeginSection(CacheSectionId.ChunkManifest);
         var manifestArr = ToArray(chunkManifest);
-        _writer.WriteArray<ChunkManifestEntry>(manifestArr);
+        _writer.WriteArray(manifestArr);
 
         _writer.BeginSection(CacheSectionId.SpanNameTable);
         _writer.WriteSpanNameTable(spanNames);
@@ -86,6 +90,19 @@ public sealed class FileCacheSink : ICacheChunkSink
             _writer.BeginSection(CacheSectionId.SourceMetadata);
             _writer.Write(sourceMetadataBytes);
         }
+
+        // v12 sections (#311) — always emit, even if empty, so v12 readers can rely on their presence.
+        _writer.BeginSection(CacheSectionId.SystemTickSummaries);
+        _writer.WriteArray(ToArray(systemTickSummaries));
+
+        _writer.BeginSection(CacheSectionId.QueueTickSummaries);
+        _writer.WriteArray(ToArray(queueTickSummaries));
+
+        _writer.BeginSection(CacheSectionId.PostTickSummaries);
+        _writer.WriteArray(ToArray(postTickSummaries));
+
+        _writer.BeginSection(CacheSectionId.QueueNameTable);
+        _writer.WriteQueueNameTable(queueIdToName);
 
         _writer.Finalize(headerTemplate);
         _trailerWritten = true;

@@ -30,7 +30,7 @@ import {
   toggleViewSchemaRelationships,
   saveLayoutAsDefault,
 } from './commands/openSchemaBrowser';
-import { toggleViewProfiler, toggleViewTopSpans, registerOpenSaveReplay } from './commands/profilerCommands';
+import { toggleViewCriticalPath, toggleViewProfiler, toggleViewTopSpans, registerOpenSaveReplay } from './commands/profilerCommands';
 import { logError, logInfo } from '@/stores/useLogStore';
 
 export default function MenuBar() {
@@ -152,6 +152,13 @@ export default function MenuBar() {
  title={isProfilerSession ? undefined : 'Open a profiler trace or attach a session first'}
  >
  Top Spans
+ </MenubarItem>
+ <MenubarItem
+ disabled={!isProfilerSession}
+ onClick={toggleViewCriticalPath}
+ title={isProfilerSession ? undefined : 'Open a profiler trace or attach a session first'}
+ >
+ Critical Path
  </MenubarItem>
  <MenubarSeparator />
  <MenubarItem

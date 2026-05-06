@@ -83,7 +83,11 @@ public sealed class AppendOnlyChunkSink : ICacheChunkSink
         IReadOnlyList<ChunkManifestEntry> chunkManifest,
         IReadOnlyDictionary<int, string> spanNames,
         ReadOnlySpan<byte> sourceMetadataBytes,
-        in CacheHeader headerTemplate)
+        in CacheHeader headerTemplate,
+        IReadOnlyList<SystemTickSummary> systemTickSummaries,
+        IReadOnlyList<QueueTickSummary> queueTickSummaries,
+        IReadOnlyList<PostTickSummary> postTickSummaries,
+        IReadOnlyDictionary<ushort, string> queueIdToName)
     {
         throw new NotSupportedException("AppendOnlyChunkSink does not support a trailer (live mode keeps metadata in memory).");
     }

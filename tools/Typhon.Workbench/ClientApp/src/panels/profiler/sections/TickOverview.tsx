@@ -20,6 +20,7 @@ import { HelpOverlay } from '@/panels/profiler/components/HelpOverlay';
 import { useProfilerSelectionStore } from '@/stores/useProfilerSelectionStore';
 import { useProfilerSessionStore } from '@/stores/useProfilerSessionStore';
 import { useProfilerViewStore } from '@/stores/useProfilerViewStore';
+import { useUiPrefsStore } from '@/stores/useUiPrefsStore';
 import { useThemeStore } from '@/stores/useThemeStore';
 import type { TimeRange } from '@/libs/profiler/model/uiTypes';
 
@@ -122,7 +123,7 @@ export default function TickOverview({ isLive = false }: Props) {
   const setLiveFollowActive = useProfilerSessionStore((s) => s.setLiveFollowActive);
   const viewRange = useProfilerViewStore((s) => s.viewRange);
   const setViewRange = useProfilerViewStore((s) => s.setViewRange);
-  const legendsVisible = useProfilerViewStore((s) => s.legendsVisible);
+  const legendsVisible = useUiPrefsStore((s) => s.legendsVisible);
   // Range-drag in TickOverview clears any stale span/chunk/marker click selection so the
   // right-pane's range-stats fallback ("Selection") takes over instead of the click-detail card.
   // Without this, an old TimeArea click sticks indefinitely and blocks the range stats from showing.

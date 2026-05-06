@@ -13,10 +13,12 @@ using Typhon.Workbench.Fixtures;
 namespace Typhon.Workbench.Tests;
 
 /// <summary>
-/// End-to-end coverage for the profiler live-stream SSE endpoint. The client's useEventSource
-/// hook branches on the <c>kind</c> discriminant — <c>"metadata"</c> / <c>"tick"</c> /
-/// <c>"heartbeat"</c> — so a regression that drops a field or renames the kind would silently
-/// break the attach-mode panel. These tests pin the exact frame shape emitted for each kind.
+/// End-to-end coverage for the profiler live-stream SSE endpoint. Post-#308 the wire format uses
+/// typed SSE events (<c>event: metadata</c>, <c>event: tickSummaryAdded</c>, etc.) instead of
+/// putting the discriminant inside the payload. Clients install one <c>addEventListener</c> per
+/// kind for clean TypeScript narrowing — a regression that drops a field or renames the event type
+/// would silently break the attach-mode panel. These tests pin the exact event type and per-event
+/// payload shape.
 /// </summary>
 [TestFixture]
 public sealed class ProfilerLiveStreamTests
@@ -74,26 +76,21 @@ public sealed class ProfilerLiveStreamTests
         using var reader = new StreamReader(stream);
         while (!(seenMetadata && seenHeartbeat && seenTickSummaryAdded))
         {
-            var line = await reader.ReadLineAsync(cts.Token);
-            if (line == null) break;
-            if (!line.StartsWith("data:", StringComparison.Ordinal)) continue;
+            var frame = await Fixtures.SseFrameReader.ReadFrameAsync(reader, cts.Token);
+            if (frame is null) break;
 
-            var payload = line[5..].TrimStart();
-            using var doc = JsonDocument.Parse(payload);
-            var kind = doc.RootElement.GetProperty("kind").GetString();
-
-            switch (kind)
+            switch (frame.Value.EventType)
             {
                 case "metadata":
                     seenMetadata = true;
-                    metadataJson = payload;
+                    metadataJson = frame.Value.Data;
                     break;
                 case "heartbeat":
                     seenHeartbeat = true;
                     break;
                 case "tickSummaryAdded":
                     seenTickSummaryAdded = true;
-                    tickJson = payload;
+                    tickJson = frame.Value.Data;
                     break;
             }
         }
@@ -102,9 +99,10 @@ public sealed class ProfilerLiveStreamTests
         Assert.That(seenHeartbeat, Is.True, "client expects a heartbeat frame with the initial connection status");
         Assert.That(seenTickSummaryAdded, Is.True, "client expects at least one tickSummaryAdded delta from block-frame ingest");
 
+        // Post-#308 the kind no longer ships in payload; the SSE event: line above already discriminates. The payload
+        // carries only the per-kind sub-object.
         using (var metaDoc = JsonDocument.Parse(metadataJson!))
         {
-            Assert.That(metaDoc.RootElement.GetProperty("kind").GetString(), Is.EqualTo("metadata"));
             Assert.That(metaDoc.RootElement.TryGetProperty("metadata", out var metaProp), Is.True,
                 "metadata frame must carry a non-null metadata sub-object");
             Assert.That(metaProp.GetProperty("header").GetProperty("timestampFrequency").GetInt64(),
@@ -114,7 +112,6 @@ public sealed class ProfilerLiveStreamTests
 
         using (var tickDoc = JsonDocument.Parse(tickJson!))
         {
-            Assert.That(tickDoc.RootElement.GetProperty("kind").GetString(), Is.EqualTo("tickSummaryAdded"));
             Assert.That(tickDoc.RootElement.TryGetProperty("tickSummary", out var summaryProp), Is.True,
                 "tickSummaryAdded frame must carry a non-null tickSummary sub-object");
             Assert.That(summaryProp.GetProperty("tickNumber").GetUInt32(), Is.GreaterThan(0u));

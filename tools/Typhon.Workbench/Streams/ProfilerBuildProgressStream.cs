@@ -1,4 +1,3 @@
-using System.Text.Json;
 using System.Threading.Channels;
 using Typhon.Workbench.Dtos.Profiler;
 using Typhon.Workbench.Sessions;
@@ -7,12 +6,27 @@ using WbSession = Typhon.Workbench.Sessions.ISession;
 namespace Typhon.Workbench.Streams;
 
 /// <summary>
-/// SSE stream of <see cref="BuildProgressDto"/> frames while a Trace session's sidecar cache is being built.
-/// Emits <c>progress</c> events throttled by the builder's 200 ms interval; emits a terminal <c>done</c> or
-/// <c>error</c> event when the build finishes, then closes the stream.
+/// SSE stream emitting typed events while a Trace session's sidecar cache is being built (#308):
+/// <list type="bullet">
+///   <item><c>progress</c> — throttled by the builder's 200 ms interval; carries bytes / counts.</item>
+///   <item><c>done</c> — terminal success; empty payload.</item>
+///   <item><c>error</c> — terminal failure; carries <see cref="BuildProgressDto.Message"/>.</item>
+/// </list>
+/// After the terminal <c>done</c> or <c>error</c> the server cleanly closes the stream.
 /// </summary>
 public static class ProfilerBuildProgressStream
 {
+    /// <summary>SSE event type for in-progress build frames.</summary>
+    public const string ProgressEvent = "progress";
+
+    /// <summary>SSE event type for the terminal success frame.</summary>
+    public const string DoneEvent = "done";
+
+    /// <summary>SSE event type for the terminal failure frame.</summary>
+    public const string ErrorEvent = "error";
+
+    private record struct Frame(string EventType, BuildProgressDto Payload);
+
     public static async Task HandleAsync(
         Guid sessionId,
         HttpContext ctx,
@@ -38,12 +52,9 @@ public static class ProfilerBuildProgressStream
             return;
         }
 
-        ctx.Response.Headers.ContentType = "text/event-stream";
-        ctx.Response.Headers.CacheControl = "no-cache";
-        ctx.Response.Headers.Connection = "keep-alive";
-        await ctx.Response.Body.FlushAsync(ct);
+        await SseExtensions.WriteSseHeadersAsync(ctx, ct);
 
-        var channel = Channel.CreateUnbounded<BuildProgressDto>(new UnboundedChannelOptions
+        var channel = Channel.CreateUnbounded<Frame>(new UnboundedChannelOptions
         {
             SingleReader = true,
             SingleWriter = false,
@@ -51,23 +62,22 @@ public static class ProfilerBuildProgressStream
 
         Action<TraceSessionRuntime.BuildProgressEventArgs> progressHandler = args =>
         {
-            channel.Writer.TryWrite(new BuildProgressDto(
-                Phase: "building",
+            channel.Writer.TryWrite(new Frame(ProgressEvent, new BuildProgressDto(
                 BytesRead: args.BytesRead,
                 TotalBytes: args.TotalBytes,
                 TickCount: args.TickCount,
-                EventCount: args.EventCount));
+                EventCount: args.EventCount)));
         };
 
         Action<ProfilerMetadataDto> completedHandler = _ =>
         {
-            channel.Writer.TryWrite(new BuildProgressDto(Phase: "done"));
+            channel.Writer.TryWrite(new Frame(DoneEvent, new BuildProgressDto()));
             channel.Writer.TryComplete();
         };
 
         Action<string> failedHandler = msg =>
         {
-            channel.Writer.TryWrite(new BuildProgressDto(Phase: "error", Message: msg));
+            channel.Writer.TryWrite(new Frame(ErrorEvent, new BuildProgressDto(Message: msg)));
             channel.Writer.TryComplete();
         };
 
@@ -91,11 +101,11 @@ public static class ProfilerBuildProgressStream
             {
                 if (trace.Runtime.Metadata != null)
                 {
-                    channel.Writer.TryWrite(new BuildProgressDto(Phase: "done"));
+                    channel.Writer.TryWrite(new Frame(DoneEvent, new BuildProgressDto()));
                 }
                 else
                 {
-                    channel.Writer.TryWrite(new BuildProgressDto(Phase: "error", Message: "Build failed before stream connected."));
+                    channel.Writer.TryWrite(new Frame(ErrorEvent, new BuildProgressDto(Message: "Build failed before stream connected.")));
                 }
                 channel.Writer.TryComplete();
             }
@@ -121,29 +131,21 @@ public static class ProfilerBuildProgressStream
 
     private static async Task FlushLoop(
         HttpContext ctx,
-        ChannelReader<BuildProgressDto> reader,
+        ChannelReader<Frame> reader,
         CancellationToken ct)
     {
-        // All frames ship as default `message` events — the Workbench's generic useEventSource hook only listens to
-        // onmessage. Terminal-state signal lives in the payload's `phase` field, which the client switches on.
+        // Each frame ships as a typed SSE event — clients install one addEventListener per type
+        // (progress / done / error) and narrow the payload by event-type at compile time.
         while (await reader.WaitToReadAsync(ct))
         {
-            while (reader.TryRead(out var evt))
+            while (reader.TryRead(out var frame))
             {
-                var payload = JsonSerializer.Serialize(evt, SseJsonOptions.Web);
-                await WriteDataAsync(ctx, payload, ct);
-                if (evt.Phase is "done" or "error")
+                await SseExtensions.WriteEventAsync(ctx, frame.EventType, frame.Payload, ct);
+                if (frame.EventType is DoneEvent or ErrorEvent)
                 {
                     return;
                 }
             }
-            await ctx.Response.Body.FlushAsync(ct);
         }
-    }
-
-    private static async Task WriteDataAsync(HttpContext ctx, string data, CancellationToken ct)
-    {
-        await ctx.Response.WriteAsync($"data: {data}\n\n", ct);
-        await ctx.Response.Body.FlushAsync(ct);
     }
 }

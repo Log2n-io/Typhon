@@ -49,6 +49,7 @@ public class IncrementalCacheBuilderTests
                 reader.ReadSystemDefinitions();
                 reader.ReadArchetypes();
                 reader.ReadComponentTypes();
+                reader.ReadPhases();
 
                 var sink = FileCacheSink.Create(cachePathB);
                 var profilerHeader = new ProfilerHeader { Version = fileHeader.Version, TimestampFrequency = fileHeader.TimestampFrequency };
@@ -123,6 +124,7 @@ public class IncrementalCacheBuilderTests
                 reader.ReadSystemDefinitions();
                 reader.ReadArchetypes();
                 reader.ReadComponentTypes();
+                reader.ReadPhases();
 
                 var sink = FileCacheSink.Create(cachePath);
                 var profilerHeader = new ProfilerHeader { Version = fileHeader.Version, TimestampFrequency = fileHeader.TimestampFrequency };
@@ -171,6 +173,7 @@ public class IncrementalCacheBuilderTests
                 reader.ReadSystemDefinitions();
                 reader.ReadArchetypes();
                 reader.ReadComponentTypes();
+                reader.ReadPhases();
 
                 var sink = FileCacheSink.Create(cachePath);
                 var profilerHeader = new ProfilerHeader { Version = fileHeader.Version, TimestampFrequency = fileHeader.TimestampFrequency };
@@ -235,6 +238,7 @@ public class IncrementalCacheBuilderTests
                 reader.ReadSystemDefinitions();
                 reader.ReadArchetypes();
                 reader.ReadComponentTypes();
+                reader.ReadPhases();
 
                 var sink = FileCacheSink.Create(cachePath);
                 var profilerHeader = new ProfilerHeader { Version = fileHeader.Version, TimestampFrequency = fileHeader.TimestampFrequency };
@@ -391,7 +395,9 @@ public class IncrementalCacheBuilderTests
             return (off, (uint)copy.Length, (uint)copy.Length);
         }
         public void WriteTrailer(IReadOnlyList<TickSummary> ts, in GlobalMetricsFixed gm, IReadOnlyList<SystemAggregateDuration> sa,
-            IReadOnlyList<ChunkManifestEntry> cm, IReadOnlyDictionary<int, string> sn, ReadOnlySpan<byte> sourceMetadataBytes, in CacheHeader h)
+            IReadOnlyList<ChunkManifestEntry> cm, IReadOnlyDictionary<int, string> sn, ReadOnlySpan<byte> sourceMetadataBytes, in CacheHeader h,
+            IReadOnlyList<SystemTickSummary> sts, IReadOnlyList<QueueTickSummary> qts, IReadOnlyList<PostTickSummary> pts,
+            IReadOnlyDictionary<ushort, string> qIdToName)
             => throw new NotSupportedException("MemorySink does not support trailer.");
         public void Dispose() { }
     }
@@ -450,6 +456,7 @@ public class IncrementalCacheBuilderTests
         writer.WriteSystemDefinitions(ReadOnlySpan<SystemDefinitionRecord>.Empty);
         writer.WriteArchetypes(ReadOnlySpan<ArchetypeRecord>.Empty);
         writer.WriteComponentTypes(ReadOnlySpan<ComponentTypeRecord>.Empty);
+        writer.WritePhases(ReadOnlySpan<string>.Empty);
 
         const int maxRecordsPerBlock = TraceFileWriter.MaxBlockBytes / CommonHeaderSize;
         var blockBuf = new byte[maxRecordsPerBlock * CommonHeaderSize];

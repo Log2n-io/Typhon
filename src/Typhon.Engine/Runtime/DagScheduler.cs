@@ -267,6 +267,12 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         _systemCount = systems.Length;
         _options = options;
         _eventQueues = eventQueues ?? [];
+        // Assign stable queue IDs (#311) so the per-queue telemetry path can carry a small u16 instead of the queue's name on the wire.
+        // QueueId == array index here; the cache builder writes a parallel `QueueNameTable` section so consumers can map index → name.
+        for (var qi = 0; qi < _eventQueues.Length; qi++)
+        {
+            _eventQueues[qi].QueueId = (ushort)qi;
+        }
         _logger = logger ?? NullLogger.Instance;
         _workerCount = options.ResolveWorkerCount();
 

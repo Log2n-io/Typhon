@@ -1,6 +1,7 @@
 using Typhon.Workbench.Fs;
 using Typhon.Workbench.Schema;
 using Typhon.Workbench.Security;
+using Typhon.Workbench.Services;
 using Typhon.Workbench.Sessions;
 using Typhon.Workbench.Streams;
 
@@ -20,6 +21,8 @@ public static class ServiceExtensions
         services.AddSingleton<OptionsStore>();
         // #302 Phase 6: editor handoff dispatcher (per-OS adapters: VS Code / Cursor / Rider / VS / Custom).
         services.AddSingleton<EditorLauncher>();
+        // #308: per-connection event-subscription state for the unified data stream.
+        services.AddSingleton<StreamSubscriptionRegistry>();
         return services;
     }
 
@@ -33,6 +36,8 @@ public static class ServiceExtensions
            .WithTags("Profiler");
         app.MapGet("/api/sessions/{sessionId:guid}/profiler/stream", ProfilerLiveStream.HandleAsync)
            .WithTags("Profiler");
+        app.MapGet("/api/sessions/{sessionId:guid}/stream", UnifiedDataStream.HandleAsync)
+           .WithTags("Data");
         app.MapGet("/api/options/stream", OptionsChangedStream.HandleAsync)
            .WithTags("Options");
         return app;

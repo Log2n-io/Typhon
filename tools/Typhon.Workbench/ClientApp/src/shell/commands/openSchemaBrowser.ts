@@ -120,6 +120,10 @@ export function toggleViewSchemaRelationships(): void {
   toggleDockPanel('schema-relationships', 'SchemaRelationships', 'Component Relationships');
 }
 
+export function toggleViewSystemDag(): void {
+  toggleDockPanel('system-dag', 'SystemDag', 'System DAG');
+}
+
 export function toggleViewOptions(): void {
   toggleDockPanel('options', 'Options', 'Options');
 }

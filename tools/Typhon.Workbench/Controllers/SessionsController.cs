@@ -134,6 +134,14 @@ public sealed partial class SessionsController : ControllerBase
         return Ok(ToDto(session));
     }
 
+    [HttpGet("{id:guid}/state")]
+    [RequireSession]
+    public ActionResult<SessionStateDto> GetState(Guid id)
+    {
+        var session = (WbSession)HttpContext.Items["Session"]!;
+        return Ok(ToStateDto(session));
+    }
+
     [HttpDelete("{id:guid}")]
     [RequireSession]
     public IActionResult DeleteSession(Guid id)
@@ -165,6 +173,13 @@ public sealed partial class SessionsController : ControllerBase
             var diags = os.SchemaDiagnostics?
                 .Select(d => new SessionDiagnosticDto(d.ComponentName, d.Kind, d.Detail))
                 .ToArray();
+            var schemaCompatibility = os.State switch
+            {
+                SessionState.Ready => "Compatible",
+                SessionState.MigrationRequired => "MigrationRequired",
+                SessionState.Incompatible => "Incompatible",
+                _ => "Compatible",
+            };
             return new SessionDto(
                 os.Id,
                 os.Kind.ToString(),
@@ -173,9 +188,85 @@ public sealed partial class SessionsController : ControllerBase
                 os.SchemaDllPaths,
                 os.SchemaStatus,
                 os.LoadedComponentTypes,
-                diags);
+                diags,
+                Lifecycle: "Ready",
+                SchemaCompatibility: schemaCompatibility);
         }
-        return new SessionDto(s.Id, s.Kind.ToString(), s.State.ToString(), s.FilePath);
+        if (s is AttachSession attach)
+        {
+            var isReady = attach.Runtime.Metadata != null;
+            return new SessionDto(
+                attach.Id,
+                attach.Kind.ToString(),
+                attach.State.ToString(),
+                attach.FilePath,
+                Lifecycle: isReady ? "Ready" : "Loading",
+                IsStreaming: isReady);
+        }
+        if (s is TraceSession trace)
+        {
+            var lifecycle = !trace.Runtime.IsBuildComplete ? "Loading"
+                : trace.Runtime.Metadata != null ? "Ready"
+                : "Closed";
+            return new SessionDto(
+                trace.Id,
+                trace.Kind.ToString(),
+                trace.State.ToString(),
+                trace.FilePath,
+                Lifecycle: lifecycle,
+                Reason: lifecycle == "Closed" ? "build-failed" : null);
+        }
+        return new SessionDto(s.Id, s.Kind.ToString(), s.State.ToString(), s.FilePath, Lifecycle: "Ready");
+    }
+
+    private static SessionStateDto ToStateDto(WbSession s)
+    {
+        if (s is OpenSession os)
+        {
+            var schemaCompatibility = os.State switch
+            {
+                SessionState.Ready => "Compatible",
+                SessionState.MigrationRequired => "MigrationRequired",
+                SessionState.Incompatible => "Incompatible",
+                _ => "Compatible",
+            };
+            return new SessionStateDto(
+                os.Kind.ToString(),
+                Lifecycle: "Ready",
+                IsStreaming: false,
+                IsPaused: false,
+                IsReattaching: false,
+                SchemaCompatibility: schemaCompatibility,
+                Reason: null);
+        }
+        if (s is AttachSession attach)
+        {
+            var isReady = attach.Runtime.Metadata != null;
+            return new SessionStateDto(
+                attach.Kind.ToString(),
+                Lifecycle: isReady ? "Ready" : "Loading",
+                IsStreaming: isReady,
+                IsPaused: false,
+                IsReattaching: false,
+                SchemaCompatibility: null,
+                Reason: null);
+        }
+        if (s is TraceSession trace)
+        {
+            var lifecycle = !trace.Runtime.IsBuildComplete ? "Loading"
+                : trace.Runtime.Metadata != null ? "Ready"
+                : "Closed";
+            return new SessionStateDto(
+                trace.Kind.ToString(),
+                Lifecycle: lifecycle,
+                IsStreaming: false,
+                IsPaused: false,
+                IsReattaching: false,
+                SchemaCompatibility: null,
+                Reason: lifecycle == "Closed" ? "build-failed" : null);
+        }
+        return new SessionStateDto(s.Kind.ToString(), Lifecycle: "Ready", IsStreaming: false, IsPaused: false,
+            IsReattaching: false, SchemaCompatibility: null, Reason: null);
     }
 
     [LoggerMessage(Level = LogLevel.Information, Message = "Session {SessionId} created via {Mode}")]

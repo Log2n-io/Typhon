@@ -1,4 +1,3 @@
-using System.Text.Json;
 using System.Threading.Channels;
 using Typhon.Engine;
 using Typhon.Workbench.Dtos.Resources;
@@ -11,11 +10,14 @@ namespace Typhon.Workbench.Streams;
 /// SSE stream pushing <see cref="ResourceGraphEventDto"/> frames whenever the session's engine
 /// reports an <see cref="IResourceRegistry.NodeMutated"/> event. Rate-limited to ~10 frames per
 /// second per session via a 100 ms flush interval that coalesces duplicate (Kind, NodeId) events
-/// inside each window.
+/// inside each window. Each event ships as a typed SSE <c>resource-mutation</c> event (#308).
 /// </summary>
 public static class ResourceGraphStream
 {
     private static readonly TimeSpan FlushInterval = TimeSpan.FromMilliseconds(100);
+
+    /// <summary>SSE event type. Clients listen via <c>addEventListener('resource-mutation', ...)</c>.</summary>
+    public const string EventType = "resource-mutation";
 
     public static async Task HandleAsync(
         Guid sessionId,
@@ -48,12 +50,7 @@ public static class ResourceGraphStream
             return;
         }
 
-        ctx.Response.Headers.ContentType = "text/event-stream";
-        ctx.Response.Headers.CacheControl = "no-cache";
-        ctx.Response.Headers.Connection = "keep-alive";
-
-        // Force headers to flush now so clients don't block awaiting the first event frame.
-        await ctx.Response.Body.FlushAsync(ct);
+        await SseExtensions.WriteSseHeadersAsync(ctx, ct);
 
         var channel = Channel.CreateUnbounded<ResourceMutationEventArgs>(new UnboundedChannelOptions
         {
@@ -113,15 +110,14 @@ public static class ResourceGraphStream
 
             foreach (var evt in pending.Values)
             {
-                var payload = JsonSerializer.Serialize(new ResourceGraphEventDto(
+                var payload = new ResourceGraphEventDto(
                     Kind: evt.Kind.ToString(),
                     NodeId: evt.NodeId,
                     ParentId: evt.ParentId,
                     Type: evt.Type.ToString(),
-                    Timestamp: new DateTimeOffset(evt.Timestamp, TimeSpan.Zero)));
-                await ctx.Response.WriteAsync($"data: {payload}\n\n", ct);
+                    Timestamp: new DateTimeOffset(evt.Timestamp, TimeSpan.Zero));
+                await SseExtensions.WriteEventAsync(ctx, EventType, payload, ct);
             }
-            await ctx.Response.Body.FlushAsync(ct);
             pending.Clear();
 
             // Coalescing window — subsequent events during this delay batch into the next frame.
