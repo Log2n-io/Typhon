@@ -3,7 +3,7 @@ import type { TickData } from '@/libs/profiler/model/traceModel';
 import type { TimeRange, TrackLayout, TrackState, Viewport } from '@/libs/profiler/model/uiTypes';
 import { computeGutterWidth, drawTimeArea } from '@/libs/profiler/canvas/timeArea';
 import { hitTestTimeArea, type TimeAreaHover } from '@/libs/profiler/canvas/timeAreaHitTest';
-import { buildLayout, deriveActiveSystems, deriveSlotInfo, deriveVisibleChunkSlots, deriveVisibleSpanMaxDepthBySlot, getVisibleTicks } from '@/libs/profiler/canvas/timeAreaLayout';
+import { buildLayout, deriveActiveSystems, deriveSlotInfo, deriveVisibleChunkSlots, deriveVisibleSpanMaxDepthBySlot, getVisibleTicks, RULER_HEIGHT, TRACK_GAP } from '@/libs/profiler/canvas/timeAreaLayout';
 import { GAUGE_TRACK_ID_SET, getGaugeGroupSpec } from '@/libs/profiler/canvas/gauges/region';
 import { buildGaugeTooltipLines, type GaugeData } from '@/libs/profiler/canvas/gauges/renderers';
 import { getStudioThemeTokens } from '@/libs/profiler/canvas/theme';
@@ -929,13 +929,14 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
        */}
       <div
         ref={scrollOverlayRef}
-        className="absolute inset-y-0 right-0 w-[14px] overflow-y-auto"
+        className="absolute right-0 bottom-0 w-[14px] overflow-y-auto"
+        style={{ top: RULER_HEIGHT + TRACK_GAP }}
         onScroll={(e) => {
           vpRef.current.scrollY = e.currentTarget.scrollTop;
           scheduleRender();
         }}
       >
-        <div ref={scrollPhantomRef} style={{ height: layout.totalHeight, width: 1 }} aria-hidden />
+        <div ref={scrollPhantomRef} style={{ height: layout.totalHeight - (RULER_HEIGHT + TRACK_GAP), width: 1 }} aria-hidden />
       </div>
       {/*
        * Section-filter icon. Sits at the right edge of the ruler row's gutter band — same horizontal

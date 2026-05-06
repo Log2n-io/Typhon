@@ -28,6 +28,7 @@ import {
   toggleViewSchemaIndexes,
   toggleViewSchemaLayout,
   toggleViewSchemaRelationships,
+  saveLayoutAsDefault,
 } from './commands/openSchemaBrowser';
 import { toggleViewProfiler, toggleViewTopSpans, registerOpenSaveReplay } from './commands/profilerCommands';
 import { logError, logInfo } from '@/stores/useLogStore';
@@ -165,6 +166,8 @@ export default function MenuBar() {
  <MenubarItem onClick={toggleViewOptions}>Options</MenubarItem>
  <MenubarSeparator />
  <MenubarItem onClick={toggleTheme}>Toggle Dark / Light Mode</MenubarItem>
+ <MenubarSeparator />
+ <MenubarItem disabled={kind === 'none'} onClick={saveLayoutAsDefault}>Save Layout as Default</MenubarItem>
  </MenubarContent>
  </MenubarMenu>
 

@@ -24,9 +24,10 @@ export const SUMMARY_STRIP_TOP_PAD = (LABEL_ROW_HEIGHT - SUMMARY_STRIP_HEIGHT) /
 export const MINI_ROW_HEIGHT = 11;
 export const FLAME_ROW_HEIGHT = 14;
 export const SPAN_FONT_SIZE = 12;
-export const SPAN_BAR_MARGIN = 1;                                     // top-only inset
-export const SPAN_BAR_HEIGHT = SPAN_FONT_SIZE - SPAN_BAR_MARGIN;      // 11
-export const SPAN_ROW_HEIGHT = SPAN_FONT_SIZE;                          // 12
+export const SPAN_BAR_MARGIN = 0;                                     // no top inset — bar fills full row + 1 px bleed each side
+export const SPAN_BAR_HEIGHT = SPAN_FONT_SIZE + 1;
+export const SPAN_ROW_HEIGHT = SPAN_BAR_HEIGHT + 1;
+export const SPAN_BAR_TEXT_OFFSET = Math.floor((SPAN_BAR_HEIGHT - SPAN_FONT_SIZE) * 0.5) + 3;
 export const MIN_RECT_WIDTH = 1;
 
 /** Ruler is always first; gauges insert right after it. */

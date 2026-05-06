@@ -12,6 +12,7 @@ import {
   toggleViewSchemaIndexes,
   toggleViewSchemaRelationships,
   openSourcePreviewForCurrentSpan,
+  saveLayoutAsDefault,
 } from './openSchemaBrowser';
 import { buildProfilerPaletteCommands } from './profilerCommands';
 
@@ -47,6 +48,7 @@ export function buildBaseCommands(): CommandItem[] {
     { id: 'toggle-view-detail',               label: 'Toggle View Detail',               keywords: 'detail inspector selection',                  action: toggleViewDetail },
     { id: 'toggle-view-options',              label: 'Toggle View Options',              keywords: 'options preferences settings editor',         action: toggleViewOptions },
     { id: 'show-source-current-span', label: 'Show Source for Current Span', keywords: 'source preview profiler span go to attribution', action: openSourcePreviewForCurrentSpan },
+    { id: 'save-layout-as-default', label: 'Save Layout as Default', keywords: 'layout default template save', action: saveLayoutAsDefault },
     { id: 'toggle-theme',  label: 'Toggle Dark / Light Mode', keywords: 'theme dark light',  action: toggleTheme },
     ...buildProfilerPaletteCommands(),
     { id: 'reload',        label: 'Reload',                   keywords: 'refresh',           action: () => location.reload() },

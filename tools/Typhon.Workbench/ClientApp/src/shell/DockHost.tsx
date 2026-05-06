@@ -31,7 +31,6 @@ const tabComponents: Record<string, React.FC<IDockviewPanelHeaderProps>> = {
   locked: LockedTab,
 };
 
-const LAYOUT_KEY_DEFAULT = 'default';
 const SAVE_DEBOUNCE_MS = 1_500;
 const EDGE_LEFT_ID = 'edge-left';
 const EDGE_RIGHT_ID = 'edge-right';
@@ -125,9 +124,10 @@ export default function DockHost() {
   const filePath = useSessionStore((s) => s.filePath);
   const sessionState = useSessionStore((s) => s.sessionState);
   const kind = useSessionStore((s) => s.kind);
-  const layoutKey = filePath ?? LAYOUT_KEY_DEFAULT;
+  const layoutKey = filePath ? `${kind}:${filePath}` : `${kind}:default`;
   const getLayout = useDockLayoutStore((s) => s.get);
   const saveLayout = useDockLayoutStore((s) => s.save);
+  const getTemplate = useDockLayoutStore((s) => s.getTemplate);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const apiRef = useRef<DockviewApi | null>(null);
   function onReady(event: DockviewReadyEvent) {
@@ -143,7 +143,16 @@ export default function DockHost() {
         buildDefaultLayout(event.api, kind);
       }
     } else {
-      buildDefaultLayout(event.api, kind);
+      const template = getTemplate(kind);
+      if (template) {
+        try {
+          event.api.fromJSON(template as Parameters<typeof event.api.fromJSON>[0]);
+        } catch {
+          buildDefaultLayout(event.api, kind);
+        }
+      } else {
+        buildDefaultLayout(event.api, kind);
+      }
     }
 
     // Trace-session safety net: profiler lives in the center area and must always be present.

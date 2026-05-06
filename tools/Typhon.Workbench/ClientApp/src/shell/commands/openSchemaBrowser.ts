@@ -1,6 +1,8 @@
 import type { DockviewApi } from 'dockview-react';
 import { useProfilerSelectionStore } from '@/stores/useProfilerSelectionStore';
 import { useSourceLocationStore } from '@/stores/useSourceLocationStore';
+import { useDockLayoutStore } from '@/stores/useDockLayoutStore';
+import { useSessionStore } from '@/stores/useSessionStore';
 
 /**
  * Module-level dockview api registration — same pattern as refreshResourceGraph. DockHost publishes
@@ -159,6 +161,14 @@ export function openSourcePreviewForCurrentSpan(): void {
   const loc = useSourceLocationStore.getState().resolve(siteId);
   if (!loc) return;
   openSourcePreview(loc.file, loc.line);
+}
+
+export function saveLayoutAsDefault(): void {
+  const api = registeredApi;
+  if (!api) return;
+  const kind = useSessionStore.getState().kind;
+  if (kind === 'none') return;
+  useDockLayoutStore.getState().saveTemplate(kind, api.toJSON());
 }
 
 function toggleDockPanel(id: string, componentKey: string, title: string): void {

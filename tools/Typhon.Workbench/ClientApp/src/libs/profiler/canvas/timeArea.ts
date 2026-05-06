@@ -14,17 +14,17 @@ import { drawGaugeSummaryStrip, GROUP_RENDERERS, type GaugeData } from './gauges
 import { GAUGE_TRACK_ID_SET, getGaugeGroupSpec } from './gauges/region';
 import type { StudioTheme } from './theme';
 import {
-  LABEL_ROW_HEIGHT,
-  MINI_ROW_HEIGHT,
-  MIN_RECT_WIDTH,
-  PHASE_TRACK_HEIGHT,
-  RULER_HEIGHT,
-  SPAN_BAR_HEIGHT,
-  SPAN_BAR_MARGIN,
-  SPAN_ROW_HEIGHT,
-  SUMMARY_STRIP_HEIGHT,
-  SUMMARY_STRIP_TOP_PAD,
-  TRACK_GAP,
+    LABEL_ROW_HEIGHT,
+    MINI_ROW_HEIGHT,
+    MIN_RECT_WIDTH,
+    PHASE_TRACK_HEIGHT,
+    RULER_HEIGHT,
+    SPAN_BAR_HEIGHT,
+    SPAN_BAR_MARGIN,
+    SPAN_ROW_HEIGHT,
+    SUMMARY_STRIP_HEIGHT,
+    SUMMARY_STRIP_TOP_PAD,
+    TRACK_GAP, SPAN_BAR_TEXT_OFFSET,
 } from './timeAreaLayout';
 
 /**
@@ -231,6 +231,9 @@ export function drawTimeArea(
 
   const { tracks, viewRange, vp, gutterWidth, legendsVisible, visibleTicks, ticks, selection, dragSelection, crosshairX, gaugeData, helpHover, pendingRangesUs, spanColorMode } = inputs;
   const contentWidth = width - gutterWidth;
+  // Height of the pinned ruler band (ruler + gap below it). Everything above this line is always
+  // visible regardless of vertical scroll; tracks below are clipped to this boundary.
+  const rulerStickyBottom = RULER_HEIGHT + TRACK_GAP;
 
   // Sync vp from viewRange if they've drifted — matches old client's eager-sync block so the first
   // paint after an external viewRange change doesn't flicker. Skip when contentWidth is 0 (initial mount).
@@ -266,7 +269,7 @@ export function drawTimeArea(
   // Labels + chevrons + separators + "?" help glyph (when legendsVisible).
   // Glyph position is fixed at the right edge of the gutter, vertically centred in the label row.
   for (const track of tracks) {
-    const ty = track.y - vp.scrollY;
+    const ty = track.id === 'ruler' ? track.y : track.y - vp.scrollY;
     ctx.fillStyle = theme.mutedForeground;
     ctx.font = '10px monospace';
     ctx.textAlign = 'left';
@@ -300,13 +303,32 @@ export function drawTimeArea(
     const trackAdvance = track.state === 'summary'
       ? (stripInsideLabel ? LABEL_ROW_HEIGHT + TRACK_GAP : LABEL_ROW_HEIGHT + 4)
       : (track.height + TRACK_GAP);
-    const sepY = track.y + trackAdvance - vp.scrollY - 0.5;
+    const sepY = track.id === 'ruler' ? rulerStickyBottom - 0.5 : track.y + trackAdvance - vp.scrollY - 0.5;
     ctx.strokeStyle = theme.border;
     ctx.lineWidth = 0.5;
     ctx.beginPath();
     ctx.moveTo(0, sepY);
     ctx.lineTo(width, sepY);
     ctx.stroke();
+  }
+
+  // Pin the ruler gutter: overwrite any scrolled labels that entered the ruler band.
+  ctx.fillStyle = theme.card;
+  ctx.fillRect(0, 0, gutterWidth, rulerStickyBottom);
+  ctx.strokeStyle = theme.border;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(gutterWidth - 0.5, 0);
+  ctx.lineTo(gutterWidth - 0.5, rulerStickyBottom);
+  ctx.stroke();
+  {
+    const rulerTrack = tracks.find(t => t.id === 'ruler');
+    if (rulerTrack) {
+      ctx.fillStyle = theme.mutedForeground;
+      ctx.font = '10px monospace';
+      ctx.textAlign = 'left';
+      ctx.fillText(rulerTrack.label, GUTTER_PAD_LEFT, rulerTrack.y + 12);
+    }
   }
 
   // ─── Content area (clipped) ──────────────────────────────────────────────────────────────────
@@ -332,7 +354,7 @@ export function drawTimeArea(
   }
 
   for (const track of tracks) {
-    const ty = track.y - vp.scrollY;
+    const ty = track.id === 'ruler' ? track.y : track.y - vp.scrollY;
 
     if (track.id === 'ruler') {
       drawRuler(ctx, { visStartUs, visEndUs, contentWidth, gutterWidth, width, height, visibleTicks, vp, ty, pxOfUs }, theme);
@@ -406,6 +428,14 @@ export function drawTimeArea(
     }
   }
 
+  // Pin the ruler content: overwrite any scrolled track content that entered the ruler band.
+  ctx.fillStyle = theme.background;
+  ctx.fillRect(gutterWidth, 0, contentWidth, rulerStickyBottom);
+  for (const track of tracks) {
+    if (track.id !== 'ruler') continue;
+    drawRuler(ctx, { visStartUs, visEndUs, contentWidth, gutterWidth, width, height, visibleTicks, vp, ty: track.y, pxOfUs }, theme);
+  }
+
   // Restore clip before overlays (crosshair + drag selection span full height)
   ctx.restore();
 
@@ -417,12 +447,12 @@ export function drawTimeArea(
   // tint. Drawn AFTER track content (sits on top of bars) but BEFORE crosshair / drag-selection
   // so those interactive overlays still read crisp.
   //
-  // Skips the ruler area (Y < RULER_HEIGHT) so timestamp labels stay legible — same convention
-  // the crosshair uses. X-clipped to the content area so the gutter labels aren't tinted either.
+  // Skips the ruler band so timestamp labels stay legible. X-clipped to the content area so the
+  // gutter labels aren't tinted either.
   if (gaugeData.gcSuspensions.length > 0) {
     ctx.fillStyle = 'rgba(232, 93, 77, 0.13)';  // CACHE_EXCLUSIVE_COLOR @ ~13% alpha
-    const bandTop = RULER_HEIGHT;
-    const bandHeight = height - RULER_HEIGHT;
+    const bandTop = rulerStickyBottom;
+    const bandHeight = height - rulerStickyBottom;
     for (const sus of gaugeData.gcSuspensions) {
       const susEndUs = sus.startUs + sus.durationUs;
       if (susEndUs <= visStartUs || sus.startUs >= visEndUs) continue;
@@ -441,7 +471,14 @@ export function drawTimeArea(
     drawDragSelection(ctx, dragSelection, width, height, gutterWidth, vp, theme);
   }
 
-
+  // Sticky ruler separator — always drawn last so GC bands, crosshair, and drag-selection
+  // never paint over the visual boundary between the pinned ruler and the scrollable area.
+  ctx.strokeStyle = theme.border;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(0, rulerStickyBottom - 0.5);
+  ctx.lineTo(width, rulerStickyBottom - 0.5);
+  ctx.stroke();
 }
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════════
@@ -635,7 +672,7 @@ function drawSlotLane(
           const chunkName = chunk.isParallel ? `${chunk.systemName}[${chunk.chunkIndex}]` : chunk.systemName;
           const label = `${chunkName} (${formatDuration(chunk.endUs - chunk.startUs)})`;
           const textX = Math.max(x1 + 3, gutterWidth + 3);
-          ctx.fillText(label, textX, ty + SPAN_BAR_MARGIN + SPAN_BAR_HEIGHT - 2);
+          ctx.fillText(label, textX, ty + SPAN_BAR_MARGIN + SPAN_BAR_HEIGHT -  SPAN_BAR_TEXT_OFFSET);
           ctx.restore();
         }
       }
@@ -686,7 +723,7 @@ function drawSlotLane(
           ctx.fillStyle = theme.coalescedText;
           ctx.font = '9px monospace';
           ctx.textAlign = 'left';
-          ctx.fillText(`${coalCount[d]} spans — zoom in`, coalX1[d] + 3, coalSy[d] + SPAN_BAR_MARGIN + SPAN_BAR_HEIGHT - 2);
+          ctx.fillText(`${coalCount[d]} spans — zoom in`, coalX1[d] + 3, coalSy[d] + SPAN_BAR_MARGIN + SPAN_BAR_HEIGHT -  SPAN_BAR_TEXT_OFFSET);
           prevFill = theme.coalescedText;
           ctx.font = '12px monospace'; // restore span-label font
         }
@@ -767,7 +804,7 @@ function drawSlotLane(
         // when the bar is off-screen left the text anchors to the gutter at a stable integer
         // offset anyway — readability wins on both sides.
         const textX = Math.max(x1 + 3, gutterWidth + 3);
-        ctx.fillText(`${span.name} (${formatDuration(span.durationUs)})`, textX, sy + SPAN_BAR_MARGIN + SPAN_BAR_HEIGHT - 2);
+        ctx.fillText(`${span.name} (${formatDuration(span.durationUs)})`, textX, sy + SPAN_BAR_MARGIN + SPAN_BAR_HEIGHT - SPAN_BAR_TEXT_OFFSET);
         ctx.restore();
         prevFill = ''; // clip/restore may invalidate cached fill
       }
@@ -877,11 +914,11 @@ function drawPhases(
       if (x2 < gutterWidth || x1 > width) continue;
       const w = Math.max(x2 - x1, MIN_RECT_WIDTH);
       ctx.fillStyle = theme.phaseColor;
-      ctx.fillRect(x1, ty + 1, w, PHASE_TRACK_HEIGHT - 2);
+      ctx.fillRect(x1, ty, w, PHASE_TRACK_HEIGHT);
       if (w > 50) {
         ctx.save();
         ctx.beginPath();
-        ctx.rect(x1, ty + 1, w, PHASE_TRACK_HEIGHT - 2);
+        ctx.rect(x1, ty, w, PHASE_TRACK_HEIGHT);
         ctx.clip();
         // Phase bar fill is always a dark colour (slot 0 of either timeline palette is the deep
         // purple identity), so the label needs the textOnDarkBar token in both themes — the previous
@@ -889,7 +926,7 @@ function drawPhases(
         ctx.fillStyle = theme.textOnDarkBar;
         ctx.font = '9px monospace';
         ctx.textAlign = 'left';
-        ctx.fillText(`${phase.phaseName} (${formatDuration(phase.durationUs)})`, x1 + 3, ty + 12);
+        ctx.fillText(`${phase.phaseName} (${formatDuration(phase.durationUs)})`, x1 + 3, ty + 11);
         ctx.restore();
       }
     }
@@ -1018,7 +1055,7 @@ function drawMiniRowsTrack(
 ): void {
   const rows = miniRowsForTrack(track.id, theme.timelineBands);
   const MRH = MINI_ROW_HEIGHT;
-  const barH = MRH - 1;
+  const barH = MRH + 1;
 
   ctx.font = '9px monospace';
   ctx.textAlign = 'left';
@@ -1029,7 +1066,7 @@ function drawMiniRowsTrack(
     const rowY = ty + r * MRH;
 
     // Draw bars FIRST (so labels overlay them)
-    drawMiniRowBars(ctx, row.getOps, row.getEndMax, rowY, row.barColor, barH, ticks, visibleTicks, visStartUs, visEndUs, gutterWidth, pxOfUs);
+    drawMiniRowBars(ctx, row.getOps, row.getEndMax, rowY - 1, row.barColor, barH, ticks, visibleTicks, visStartUs, visEndUs, gutterWidth, pxOfUs);
 
     // Label pill
     const swatchSize = 7;

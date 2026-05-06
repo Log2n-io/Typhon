@@ -7,6 +7,7 @@ import WelcomeScreen from './WelcomeScreen';
 
 export default function Shell() {
   const kind = useSessionStore((s) => s.kind);
+  const sessionId = useSessionStore((s) => s.sessionId);
 
   useKeyboardShortcuts();
 
@@ -14,7 +15,7 @@ export default function Shell() {
     <div className="flex h-full flex-col bg-background text-foreground">
       <MenuBar />
       <main className="min-h-0 flex-1">
-        {kind === 'none' ? <WelcomeScreen /> : <DockHost />}
+        {kind === 'none' ? <WelcomeScreen /> : <DockHost key={sessionId ?? 'none'} />}
       </main>
       <StatusBar />
     </div>

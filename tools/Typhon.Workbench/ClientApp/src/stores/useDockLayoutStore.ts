@@ -1,10 +1,13 @@
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
+import type { SessionKind } from '@/stores/useSessionStore';
 
 interface DockLayoutState {
   layouts: Record<string, unknown>;
   save: (key: string, layout: unknown) => void;
   get: (key: string) => unknown | null;
+  saveTemplate: (kind: SessionKind, layout: unknown) => void;
+  getTemplate: (kind: SessionKind) => unknown | null;
   clear: () => void;
 }
 
@@ -27,8 +30,11 @@ export const useDockLayoutStore = create<DockLayoutState>()(
       save: (key, layout) =>
         set((s) => ({ layouts: { ...s.layouts, [key]: layout } })),
       get: (key) => get().layouts[key] ?? null,
+      saveTemplate: (kind, layout) =>
+        set((s) => ({ layouts: { ...s.layouts, [`__template__:${kind}`]: layout } })),
+      getTemplate: (kind) => get().layouts[`__template__:${kind}`] ?? null,
       clear: () => set({ layouts: {} }),
     }),
-    { name: 'typhon-dock-layouts-v3', storage: safeStorage },
+    { name: 'typhon-dock-layouts-v4', storage: safeStorage },
   ),
 );

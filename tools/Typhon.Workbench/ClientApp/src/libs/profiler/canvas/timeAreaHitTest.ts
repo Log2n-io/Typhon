@@ -186,7 +186,7 @@ export function hitTestTimeArea(inputs: HitTestInputs): TimeAreaHover {
 
 function findTrackAtY(tracks: readonly TrackLayout[], my: number, scrollY: number): TrackLayout | null {
   for (const t of tracks) {
-    const top = t.y - scrollY;
+    const top = t.id === 'ruler' ? t.y : t.y - scrollY; // ruler is always pinned at its layout y
     const advance = t.state === 'summary'
       ? (t.id.startsWith('slot-') ? LABEL_ROW_HEIGHT + TRACK_GAP : LABEL_ROW_HEIGHT + 4)
       : (t.height + TRACK_GAP);
