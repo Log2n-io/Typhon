@@ -122,6 +122,11 @@ export function computeSelectionStats(
     worstUs: number;
   }>();
   const systemAgg = new Map<number, { systemName: string; count: number; totalDurationUs: number }>();
+  // Per-tick accumulator for chunk wall-clock windows. Reused each tick (clear + fill).
+  // Tracks min(clipped start) and max(clipped end) per system so parallel chunks that execute
+  // concurrently on different threads contribute the wall-clock span of the system's execution
+  // window, not the inflated sum of every thread's duration.
+  const tickSystemWc = new Map<number, { minStart: number; maxEnd: number; count: number; systemName: string }>();
   let gcPauseTotalUs = 0;
   let gcSuspensionCount = 0;
 
@@ -157,16 +162,31 @@ export function computeSelectionStats(
       }
     }
 
-    // Chunks grouped by systemIndex. Same range-clip rule.
+    // Chunks grouped by systemIndex. For each system within this tick we track the wall-clock
+    // execution window (min clipped start → max clipped end) rather than the sum of individual
+    // chunk durations. Summing would inflate parallel systems by N× because their chunks run
+    // concurrently on separate threads; the wall-clock span correctly reflects the critical-path
+    // cost to the tick regardless of whether the system is serial or parallel.
+    tickSystemWc.clear();
     for (const chunk of tick.chunks) {
       if (!(chunk.endUs > rangeStartUs && chunk.startUs < rangeEndUs)) continue;
       const clipStart = Math.max(chunk.startUs, rangeStartUs);
       const clipEnd = Math.min(chunk.endUs, rangeEndUs);
-      const dur = clipEnd - clipStart;
-      if (dur <= 0) continue;
-      const e = systemAgg.get(chunk.systemIndex);
-      if (e === undefined) systemAgg.set(chunk.systemIndex, { systemName: chunk.systemName, count: 1, totalDurationUs: dur });
-      else { e.count++; e.totalDurationUs += dur; }
+      if (clipEnd <= clipStart) continue;
+      const wc = tickSystemWc.get(chunk.systemIndex);
+      if (wc === undefined) {
+        tickSystemWc.set(chunk.systemIndex, { minStart: clipStart, maxEnd: clipEnd, count: 1, systemName: chunk.systemName });
+      } else {
+        wc.count++;
+        if (clipStart < wc.minStart) wc.minStart = clipStart;
+        if (clipEnd > wc.maxEnd) wc.maxEnd = clipEnd;
+      }
+    }
+    for (const [sysIdx, wc] of tickSystemWc) {
+      const wallClockDur = wc.maxEnd - wc.minStart;
+      const e = systemAgg.get(sysIdx);
+      if (e === undefined) systemAgg.set(sysIdx, { systemName: wc.systemName, count: wc.count, totalDurationUs: wallClockDur });
+      else { e.count += wc.count; e.totalDurationUs += wallClockDur; }
     }
 
     // GC pause sum. Same clip — a 5 ms pause that straddles the range start gets credited only

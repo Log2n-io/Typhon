@@ -19,6 +19,8 @@ import {
   MIN_RECT_WIDTH,
   PHASE_TRACK_HEIGHT,
   RULER_HEIGHT,
+  SPAN_BAR_HEIGHT,
+  SPAN_BAR_MARGIN,
   SPAN_ROW_HEIGHT,
   SUMMARY_STRIP_HEIGHT,
   SUMMARY_STRIP_TOP_PAD,
@@ -385,7 +387,7 @@ export function drawTimeArea(
     // the slot-lane chunk row.
     if (track.id.startsWith('system-')) {
       const systemIdx = Number.parseInt(track.id.slice(7), 10);
-      drawSystemLane(ctx, track, systemIdx, visibleTicks, gutterWidth, width, pxOfUs, ty, selection, theme, spanColorMode);
+      drawSystemLane(ctx, systemIdx, visibleTicks, gutterWidth, width, pxOfUs, ty, selection, theme, spanColorMode);
       continue;
     }
 
@@ -399,7 +401,7 @@ export function drawTimeArea(
     // that started in a tick now off-screen but extend INTO the viewport still render. The inner
     // loop cheaply skips ticks whose running-max endUs is before visStartUs.
     if (track.id === 'page-cache' || track.id === 'disk-io' || track.id === 'transactions' || track.id === 'wal' || track.id === 'checkpoint') {
-      drawMiniRowsTrack(ctx, track, ticks, visStartUs, visEndUs, gutterWidth, width, pxOfUs, ty, theme);
+      drawMiniRowsTrack(ctx, track, ticks, visibleTicks, visStartUs, visEndUs, gutterWidth, width, pxOfUs, ty, theme);
       continue;
     }
   }
@@ -439,19 +441,7 @@ export function drawTimeArea(
     drawDragSelection(ctx, dragSelection, width, height, gutterWidth, vp, theme);
   }
 
-  // Empty-viewport fallback — shown AFTER overlays so the cursor still renders over an empty trace.
-  if (visibleTicks.length === 0) {
-    const cx = width / 2;
-    const cy = height / 2;
-    const label = 'No ticks in view';
-    ctx.font = '14px monospace';
-    ctx.textAlign = 'center';
-    const lw = ctx.measureText(label).width;
-    ctx.fillStyle = theme.tooltipBackground;
-    ctx.fillRect(cx - lw / 2 - 12, cy - 12, lw + 24, 24);
-    ctx.fillStyle = theme.mutedForeground;
-    ctx.fillText(label, Math.round(cx), Math.round(cy) + 5);
-  }
+
 }
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════════
@@ -628,31 +618,31 @@ function drawSlotLane(
         if (x2 < gutterWidth || x1 > width) continue;
         const w = Math.max(x2 - x1, MIN_RECT_WIDTH);
         ctx.fillStyle = colorForChunk(chunk, spanColorMode, theme.spans);
-        ctx.fillRect(x1, ty + 1, w, chunkRowHeight - 2);
+        ctx.fillRect(x1, ty + SPAN_BAR_MARGIN, w, SPAN_BAR_HEIGHT);
         if (selection && selection.kind === 'chunk' && isSameChunk(selection.chunk, chunk)) {
           ctx.strokeStyle = theme.selectedOutline;
           ctx.lineWidth = 1.5;
-          ctx.strokeRect(x1 + 0.5, ty + 1.5, w - 1, chunkRowHeight - 3);
+          ctx.strokeRect(x1 + 0.5, ty + SPAN_BAR_MARGIN + 0.5, w - 1, SPAN_BAR_HEIGHT - 1);
         }
-        if (w > 40) {
+        if (x2 - x1 > 10) {
           ctx.save();
           ctx.beginPath();
-          ctx.rect(x1, ty + 1, w, chunkRowHeight - 2);
+          ctx.rect(x1, ty + SPAN_BAR_MARGIN, w, SPAN_BAR_HEIGHT);
           ctx.clip();
           ctx.fillStyle = readableOnBar(colorForChunk(chunk, spanColorMode, theme.spans), theme);
-          ctx.font = '10px monospace';
+          ctx.font = '12px monospace';
           ctx.textAlign = 'left';
-          const label = chunk.isParallel ? `${chunk.systemName}[${chunk.chunkIndex}]` : chunk.systemName;
-          // See note on span-label fillText — keep X fractional to track the bar's AA'd left edge.
-          ctx.fillText(label, x1 + 3, ty + chunkRowHeight / 2 + 3);
+          const chunkName = chunk.isParallel ? `${chunk.systemName}[${chunk.chunkIndex}]` : chunk.systemName;
+          const label = `${chunkName} (${formatDuration(chunk.endUs - chunk.startUs)})`;
+          const textX = Math.max(x1 + 3, gutterWidth + 3);
+          ctx.fillText(label, textX, ty + SPAN_BAR_MARGIN + SPAN_BAR_HEIGHT - 2);
           ctx.restore();
         }
       }
     }
   }
 
-  // Span rows with per-depth coalescing. Span-bar label is 12px monospace (1px bigger than the
-  // old profiler's 11px — reads a touch easier inside the 22 px SPAN_ROW_HEIGHT cell).
+  // Span rows with per-depth coalescing. Span-bar label is 12px monospace.
   //
   // Iterate ALL ticks — a span's `tick.startUs` is NOT a bound on its own `startUs`. Long-running
   // ops (Checkpoint.Cycle, etc.) are recorded when they *complete*, so they live in the tick where
@@ -660,14 +650,20 @@ function drawSlotLane(
   // per-tick skip `endMax[last] < visStartUs` is still valid (running max of endUs bounds every
   // span's endUs in that tick), but the outer `tick.startUs > visEndUs` break would drop exactly
   // the ticks we need.
+  //
+  // Two-pass draw: non-visible ticks first (background), then visibleTicks (foreground). This
+  // ensures spans native to the current viewport always render on top of cross-tick long-running
+  // ops stored in a future tick whose `startUs` falls inside the viewport — without this, a
+  // Checkpoint.Cycle bar from tick 200 would overdraw all spans visible at tick 80.
   ctx.font = '12px monospace';
   ctx.textAlign = 'left';
-  for (const tick of ticks) {
+
+  const drawOneTickSpans = (tick: TickData, nativeOnly: boolean): void => {
     const slotSpans = tick.spansByThreadSlot.get(threadSlot);
-    if (!slotSpans || slotSpans.length === 0) continue;
+    if (!slotSpans || slotSpans.length === 0) return;
     const endMax = tick.spanEndMaxByThreadSlot.get(threadSlot);
-    if (!endMax) continue;
-    if (endMax[endMax.length - 1] < visStartUs) continue;
+    if (!endMax) return;
+    if (endMax[endMax.length - 1] < visStartUs) return;
 
     let lo = 0;
     let hi = slotSpans.length;
@@ -685,12 +681,12 @@ function drawSlotLane(
         const cw = Math.max(coalX2[d] - coalX1[d], 2);
         ctx.fillStyle = getCoalescedPattern(ctx);
         prevFill = '__pattern__';
-        ctx.fillRect(coalX1[d], coalSy[d], cw, SPAN_ROW_HEIGHT - 2);
+        ctx.fillRect(coalX1[d], coalSy[d] + SPAN_BAR_MARGIN, cw, SPAN_BAR_HEIGHT);
         if (cw > 50) {
           ctx.fillStyle = theme.coalescedText;
           ctx.font = '9px monospace';
           ctx.textAlign = 'left';
-          ctx.fillText(`${coalCount[d]} spans — zoom in`, coalX1[d] + 3, coalSy[d] + SPAN_ROW_HEIGHT - 9);
+          ctx.fillText(`${coalCount[d]} spans — zoom in`, coalX1[d] + 3, coalSy[d] + SPAN_BAR_MARGIN + SPAN_BAR_HEIGHT - 2);
           prevFill = theme.coalescedText;
           ctx.font = '12px monospace'; // restore span-label font
         }
@@ -701,6 +697,11 @@ function drawSlotLane(
     for (let i = lo; i < slotSpans.length; i++) {
       const span = slotSpans[i];
       if (span.startUs > visEndUs) break;
+      // In Pass 1 (non-visible ticks) only native spans are drawn. Cross-tick spans — where the
+      // span started before this tick recorded its completion (e.g. Checkpoint.Cycle) — are
+      // skipped here because they can produce full-width bars when panning into a gap. They will
+      // be drawn correctly in Pass 2 once a tick that contains them becomes visible.
+      if (nativeOnly && span.startUs < tick.startUs) continue;
       const x1 = pxOfUs(span.startUs);
       const x2 = pxOfUs(span.endUs);
       if (x2 < gutterWidth) continue;
@@ -711,7 +712,7 @@ function drawSlotLane(
       const depth = span.renderDepth ?? span.depth ?? 0;
       const d = depth < COAL_MAX_DEPTH ? depth : COAL_MAX_DEPTH - 1;
       const sy = spanRegionTop + depth * SPAN_ROW_HEIGHT;
-      if (sy + SPAN_ROW_HEIGHT - 2 > trackBottom) continue;
+      if (sy + SPAN_ROW_HEIGHT > trackBottom) continue;
 
       const actualWidth = x2 - x1;
       const w = actualWidth < MIN_RECT_WIDTH ? MIN_RECT_WIDTH : actualWidth;
@@ -727,7 +728,7 @@ function drawSlotLane(
         flushDepth(d);
         const c = colorForSpan(span, spanColorMode, theme.spans);
         if (c !== prevFill) { ctx.fillStyle = c; prevFill = c; }
-        ctx.fillRect(x1, sy, w, SPAN_ROW_HEIGHT - 2);
+        ctx.fillRect(x1, sy + SPAN_BAR_MARGIN, w, SPAN_BAR_HEIGHT);
         coalX1[d] = x1;
         coalX2[d] = x1 + w;
         coalSy[d] = sy;
@@ -739,18 +740,18 @@ function drawSlotLane(
       flushDepth(d);
       const c = colorForSpan(span, spanColorMode, theme.spans);
       if (c !== prevFill) { ctx.fillStyle = c; prevFill = c; }
-      ctx.fillRect(x1, sy, w, SPAN_ROW_HEIGHT - 2);
+      ctx.fillRect(x1, sy + SPAN_BAR_MARGIN, w, SPAN_BAR_HEIGHT);
 
       if (selection && selection.kind === 'span' && isSameSpan(selection.span, span)) {
         ctx.strokeStyle = theme.selectedOutline;
         ctx.lineWidth = 1.5;
-        ctx.strokeRect(x1 + 0.5, sy + 0.5, w - 1, SPAN_ROW_HEIGHT - 3);
+        ctx.strokeRect(x1 + 0.5, sy + SPAN_BAR_MARGIN + 0.5, w - 1, SPAN_BAR_HEIGHT - 1);
       }
 
       if (actualWidth > 10) {
         ctx.save();
         ctx.beginPath();
-        ctx.rect(x1, sy, actualWidth, SPAN_ROW_HEIGHT - 2);
+        ctx.rect(x1, sy + SPAN_BAR_MARGIN, actualWidth, SPAN_BAR_HEIGHT);
         ctx.clip();
         ctx.fillStyle = readableOnBar(colorForSpan(span, spanColorMode, theme.spans), theme);
         ctx.font = '12px monospace';
@@ -766,14 +767,27 @@ function drawSlotLane(
         // when the bar is off-screen left the text anchors to the gutter at a stable integer
         // offset anyway — readability wins on both sides.
         const textX = Math.max(x1 + 3, gutterWidth + 3);
-        ctx.fillText(`${span.name} (${formatDuration(span.durationUs)})`, textX, sy + SPAN_ROW_HEIGHT - 9);
+        ctx.fillText(`${span.name} (${formatDuration(span.durationUs)})`, textX, sy + SPAN_BAR_MARGIN + SPAN_BAR_HEIGHT - 2);
         ctx.restore();
         prevFill = ''; // clip/restore may invalidate cached fill
       }
     }
 
-    // Flush any leftover runs across all depths
     for (let d = 0; d < COAL_MAX_DEPTH; d++) flushDepth(d);
+  };
+
+  // Pass 1: non-visible ticks, native spans only (background). Native spans may overflow past
+  // their tick's endUs and still overlap the viewport — they draw correctly here. Cross-tick spans
+  // are excluded: they start before the tick and can produce full-width bars in a gap.
+  const visSpanSet = new Set<TickData>(visibleTicks);
+  for (const tick of ticks) {
+    if (!visSpanSet.has(tick)) drawOneTickSpans(tick, true);
+  }
+
+  // Pass 2: visible ticks, all spans (foreground). Spans are sorted by startUs so cross-tick
+  // context (low startUs) naturally draws before native spans — correct z-order within the tick.
+  for (const tick of visibleTicks) {
+    drawOneTickSpans(tick, false);
   }
 }
 
@@ -784,7 +798,6 @@ function drawSlotLane(
  */
 function drawSystemLane(
   ctx: CanvasRenderingContext2D,
-  track: TrackLayout,
   systemIndex: number,
   visibleTicks: TickData[],
   gutterWidth: number,
@@ -795,7 +808,6 @@ function drawSystemLane(
   theme: StudioTheme,
   spanColorMode: SpanColorMode,
 ): void {
-  const rowHeight = track.height;
   for (const tick of visibleTicks) {
     for (const chunk of tick.chunks) {
       if (chunk.systemIndex !== systemIndex) continue;
@@ -804,11 +816,11 @@ function drawSystemLane(
       if (x2 < gutterWidth || x1 > width) continue;
       const w = Math.max(x2 - x1, MIN_RECT_WIDTH);
       ctx.fillStyle = colorForChunk(chunk, spanColorMode, theme.spans);
-      ctx.fillRect(x1, ty + 1, w, rowHeight - 2);
+      ctx.fillRect(x1, ty + SPAN_BAR_MARGIN, w, SPAN_BAR_HEIGHT);
       if (selection && selection.kind === 'chunk' && isSameChunk(selection.chunk, chunk)) {
         ctx.strokeStyle = theme.selectedOutline;
         ctx.lineWidth = 1.5;
-        ctx.strokeRect(x1 + 0.5, ty + 1.5, w - 1, rowHeight - 3);
+        ctx.strokeRect(x1 + 0.5, ty + SPAN_BAR_MARGIN + 0.5, w - 1, SPAN_BAR_HEIGHT - 1);
       }
     }
   }
@@ -995,6 +1007,7 @@ function drawMiniRowsTrack(
   ctx: CanvasRenderingContext2D,
   track: TrackLayout,
   ticks: readonly TickData[],
+  visibleTicks: TickData[],
   visStartUs: number,
   visEndUs: number,
   gutterWidth: number,
@@ -1016,7 +1029,7 @@ function drawMiniRowsTrack(
     const rowY = ty + r * MRH;
 
     // Draw bars FIRST (so labels overlay them)
-    drawMiniRowBars(ctx, row.getOps, row.getEndMax, rowY, row.barColor, barH, ticks, visStartUs, visEndUs, gutterWidth, pxOfUs);
+    drawMiniRowBars(ctx, row.getOps, row.getEndMax, rowY, row.barColor, barH, ticks, visibleTicks, visStartUs, visEndUs, gutterWidth, pxOfUs);
 
     // Label pill
     const swatchSize = 7;
@@ -1046,6 +1059,7 @@ function drawMiniRowBars(
   barColor: string,
   barH: number,
   ticks: readonly TickData[],
+  visibleTicks: TickData[],
   visStartUs: number,
   visEndUs: number,
   gutterWidth: number,
@@ -1061,12 +1075,16 @@ function drawMiniRowBars(
   // ticks but lives in exactly one tick's op list, whose own `startUs` is way past the op's start.
   // So `tick.startUs > visEndUs` cannot be used as a break. The `endMax[last] < visStartUs` skip
   // stays valid (running max of endUs bounds every op's endUs in that tick).
+  //
+  // Two-pass draw (same rationale as drawSlotLane): non-visible ticks first, visibleTicks second,
+  // so native viewport bars are always drawn on top of cross-tick long-running op bars.
   ctx.fillStyle = barColor;
-  for (const tick of ticks) {
+
+  const drawOneTick = (tick: TickData, nativeOnly: boolean): void => {
     const ops = getOps(tick);
-    if (ops.length === 0) continue;
+    if (ops.length === 0) return;
     const endMax = getEndMax(tick);
-    if (endMax[endMax.length - 1] < visStartUs) continue;
+    if (endMax[endMax.length - 1] < visStartUs) return;
     let lo = 0;
     let hi = ops.length;
     while (lo < hi) {
@@ -1076,6 +1094,7 @@ function drawMiniRowBars(
     for (let i = lo; i < ops.length; i++) {
       const op = ops[i];
       if (op.startUs > visEndUs) break;
+      if (nativeOnly && op.startUs < tick.startUs) continue;
       const x1 = pxOfUs(op.startUs);
       const x2 = pxOfUs(op.endUs);
       if (x2 < gutterWidth) continue;
@@ -1083,6 +1102,14 @@ function drawMiniRowBars(
       const w = actualWidth < MIN_RECT_WIDTH ? MIN_RECT_WIDTH : actualWidth;
       ctx.fillRect(x1, rowY, w, barH);
     }
+  };
+
+  const visMiniSet = new Set<TickData>(visibleTicks);
+  for (const tick of ticks) {
+    if (!visMiniSet.has(tick)) drawOneTick(tick, true);
+  }
+  for (const tick of visibleTicks) {
+    drawOneTick(tick, false);
   }
 }
 

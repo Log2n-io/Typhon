@@ -1,4 +1,5 @@
 import { useCallback, useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { useEventSource } from '@/hooks/streams/useEventSource';
 import { useProfilerSessionStore, type BuildProgressPayload } from '@/stores/useProfilerSessionStore';
 
@@ -16,6 +17,7 @@ export function useProfilerBuildProgress(sessionId: string | null) {
   const setBuildProgress = useProfilerSessionStore((s) => s.setBuildProgress);
   const setBuildError = useProfilerSessionStore((s) => s.setBuildError);
   const [terminated, setTerminated] = useState<string | null>(null);
+  const queryClient = useQueryClient();
 
   const onMessage = useCallback(
     (payload: BuildProgressPayload) => {
@@ -27,9 +29,16 @@ export function useProfilerBuildProgress(sessionId: string | null) {
       setBuildProgress(payload);
       if (payload.phase === 'done') {
         setTerminated(sessionId);
+        // The SSE signals build completion faster than the 2s polling interval in useProfilerMetadata.
+        // Invalidate immediately so the overlay clears as soon as the cache is ready instead of
+        // waiting up to 2s for the next scheduled poll — noticeable on files with an existing cache
+        // where the build completes in <200ms but the first /metadata poll already returned 202.
+        if (sessionId) {
+          void queryClient.invalidateQueries({ queryKey: ['profiler', 'metadata', sessionId] });
+        }
       }
     },
-    [setBuildProgress, setBuildError, sessionId],
+    [setBuildProgress, setBuildError, sessionId, queryClient],
   );
 
   // Once the build reaches a terminal phase for THIS session, stop subscribing — the server has

@@ -177,7 +177,7 @@ describe('computeSelectionStats — span aggregation', () => {
 });
 
 describe('computeSelectionStats — chunk + system aggregation', () => {
-  it('groups chunks by systemIndex and sorts descending by total', () => {
+  it('groups chunks by systemIndex and sorts descending by wall-clock span', () => {
     const ticks = [makeTick({
       chunks: [
         chunk(1, 'PheroDecay', 0, 30),
@@ -188,9 +188,37 @@ describe('computeSelectionStats — chunk + system aggregation', () => {
     const stats = computeSelectionStats(ticks, [], { startUs: 0, endUs: 100 });
     expect(stats!.topSystemsByTotal[0].systemIndex).toBe(2);
     expect(stats!.topSystemsByTotal[0].systemName).toBe('FillBuffer');
-    expect(stats!.topSystemsByTotal[0].totalDurationUs).toBe(70); // 50 + 20
+    // Wall-clock span: min(0,60)=0 → max(50,80)=80 → 80µs (not the sum 50+20=70).
+    expect(stats!.topSystemsByTotal[0].totalDurationUs).toBe(80);
     expect(stats!.topSystemsByTotal[0].count).toBe(2);
     expect(stats!.topSystemsByTotal[1].systemIndex).toBe(1);
+  });
+
+  it('uses wall-clock span (not CPU-sum) for overlapping parallel chunks', () => {
+    // 4 parallel chunks all executing concurrently 0..660µs on different threads.
+    // CPU-sum = 4 × 660 = 2640µs; wall-clock span = 660µs.
+    const ticks = [makeTick({
+      chunks: [
+        { ...chunk(1, 'FillRender', 0, 660), threadSlot: 0 },
+        { ...chunk(1, 'FillRender', 0, 660), threadSlot: 1 },
+        { ...chunk(1, 'FillRender', 0, 660), threadSlot: 2 },
+        { ...chunk(1, 'FillRender', 0, 660), threadSlot: 3 },
+      ],
+    })];
+    const stats = computeSelectionStats(ticks, [], { startUs: 0, endUs: 1000 });
+    expect(stats!.topSystemsByTotal[0].totalDurationUs).toBe(660);
+    expect(stats!.topSystemsByTotal[0].count).toBe(4);
+  });
+
+  it('accumulates wall-clock spans across multiple ticks', () => {
+    // Same system runs in two ticks, each contributing a 100µs wall-clock window.
+    const ticks = [
+      makeTick({ tickNumber: 1, startUs: 0,   endUs: 200,  durationUs: 200,  chunks: [chunk(1, 'Sys', 0,   100)] }),
+      makeTick({ tickNumber: 2, startUs: 200,  endUs: 400,  durationUs: 200,  chunks: [chunk(1, 'Sys', 200, 300)] }),
+    ];
+    const stats = computeSelectionStats(ticks, [], { startUs: 0, endUs: 400 });
+    expect(stats!.topSystemsByTotal[0].totalDurationUs).toBe(200); // 100 + 100
+    expect(stats!.topSystemsByTotal[0].count).toBe(2);
   });
 });
 

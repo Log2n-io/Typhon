@@ -23,7 +23,10 @@ export const SUMMARY_STRIP_HEIGHT = 14;
 export const SUMMARY_STRIP_TOP_PAD = (LABEL_ROW_HEIGHT - SUMMARY_STRIP_HEIGHT) / 2;
 export const MINI_ROW_HEIGHT = 11;
 export const FLAME_ROW_HEIGHT = 14;
-export const SPAN_ROW_HEIGHT = 22;
+export const SPAN_FONT_SIZE = 12;
+export const SPAN_BAR_MARGIN = 1;                                     // top-only inset
+export const SPAN_BAR_HEIGHT = SPAN_FONT_SIZE - SPAN_BAR_MARGIN;      // 11
+export const SPAN_ROW_HEIGHT = SPAN_FONT_SIZE;                          // 12
 export const MIN_RECT_WIDTH = 1;
 
 /** Ruler is always first; gauges insert right after it. */
@@ -34,6 +37,12 @@ export interface BuildLayoutInputs {
   activeSlots: number[];
   /** Subset of `activeSlots` that have ≥1 scheduler chunk somewhere in the session. */
   slotsWithChunks: Set<number>;
+  /**
+   * In dynamic-height mode: the committed set of slots that have ≥1 chunk visible in the current
+   * viewport. Replaces `slotsWithChunks` for chunk-row allocation so the row is absent when no
+   * chunks are actually rendered. Missing (undefined) → fall back to session-wide `slotsWithChunks`.
+   */
+  committedChunkSlots?: Set<number>;
   /** slotIdx → deepest observed span depth on that slot. Missing = no spans on this slot. */
   spanMaxDepthBySlot: Map<number, number>;
   /** Optional slot→friendly-name map from trace metadata (ThreadInfo records). */
@@ -75,7 +84,8 @@ export interface LayoutResult {
  * Caller is responsible for caching across renders (React wrapper stores the result in a ref).
  */
 export function buildLayout(inputs: BuildLayoutInputs): LayoutResult {
-  const { activeSlots, slotsWithChunks, spanMaxDepthBySlot, threadNames, collapseState, gaugeRegionVisible, gaugeCollapse, activeSystems, systemNames, perSystemLanesVisible } = inputs;
+  const { activeSlots, slotsWithChunks, committedChunkSlots, spanMaxDepthBySlot, threadNames, collapseState, gaugeRegionVisible, gaugeCollapse, activeSystems, systemNames, perSystemLanesVisible } = inputs;
+  const effectiveChunkSlots = committedChunkSlots ?? slotsWithChunks;
   const slotVisibility = inputs.slotVisibility;
   const systemVisibility = inputs.systemVisibility;
   const gaugeVisibility = inputs.gaugeVisibility;
@@ -117,11 +127,11 @@ export function buildLayout(inputs: BuildLayoutInputs): LayoutResult {
     if (slotVisibility?.[slotIdx] === false) continue;
     const id = `slot-${slotIdx}`;
     const state = nonGaugeState(id);
-    const hasChunks = slotsWithChunks.has(slotIdx);
-    const chunkRowHeight = hasChunks ? TRACK_HEIGHT : 0;
+    const hasChunks = effectiveChunkSlots.has(slotIdx);
+    const chunkRowHeight = hasChunks ? SPAN_ROW_HEIGHT : 0;
     const maxDepth = spanMaxDepthBySlot.get(slotIdx);
-    const spanRegionHeight = maxDepth === undefined ? 0 : (maxDepth + 1) * SPAN_ROW_HEIGHT + 2;
-    const expandedBody = Math.max(TRACK_HEIGHT, chunkRowHeight + spanRegionHeight);
+    const spanRegionHeight = maxDepth === undefined ? 0 : (maxDepth + 1) * SPAN_ROW_HEIGHT;
+    const expandedBody = Math.max(SPAN_ROW_HEIGHT, chunkRowHeight + spanRegionHeight);
     const h = nonGaugeHeight(state, expandedBody, /* stripInsideLabel */ true);
 
     const name = threadNames?.[slotIdx];
@@ -148,7 +158,7 @@ export function buildLayout(inputs: BuildLayoutInputs): LayoutResult {
       const id = `system-${systemIdx}`;
       const stored = collapseState[id];
       const state: TrackState = stored === 'summary' || stored === 'expanded' ? stored : 'summary';
-      const expandedBody = TRACK_HEIGHT;
+      const expandedBody = SPAN_ROW_HEIGHT;
       const h = nonGaugeHeight(state, expandedBody, /* stripInsideLabel */ true);
       const name = systemNames?.[systemIdx];
       tracks.push({
@@ -265,6 +275,44 @@ export function deriveSlotInfo(ticks: TickData[]): {
     slotsWithChunks: withChunks,
     spanMaxDepthBySlot: depthBySlot,
   };
+}
+
+/**
+ * Compute the maximum observed `renderDepth` per slot among spans that intersect the current
+ * viewport. Scans ALL ticks (not just visible ones) because long-running ops are stored in the
+ * tick where they complete, which may lie outside the viewport while the span itself extends into
+ * it. Requires `deriveSlotInfo` to have already run (which writes `renderDepth` onto every span).
+ * Falls back to `span.depth` on the first paint before the memo resolves.
+ */
+export function deriveVisibleSpanMaxDepthBySlot(ticks: readonly TickData[], viewRange: TimeRange): Map<number, number> {
+  const depthBySlot = new Map<number, number>();
+  const { startUs, endUs } = viewRange;
+  for (const tick of ticks) {
+    for (const [slot, spans] of tick.spansByThreadSlot) {
+      for (const span of spans) {
+        if (span.endUs <= startUs || span.startUs >= endUs) continue;
+        const d = span.renderDepth ?? span.depth ?? 0;
+        const cur = depthBySlot.get(slot);
+        if (cur === undefined || d > cur) depthBySlot.set(slot, d);
+      }
+    }
+  }
+  return depthBySlot;
+}
+
+/**
+ * Derive the set of thread-slot indices that have ≥1 chunk bar visible in the current viewport.
+ * Companion to `deriveVisibleSpanMaxDepthBySlot` — both feed the dynamic-height committed state.
+ */
+export function deriveVisibleChunkSlots(ticks: readonly TickData[], viewRange: TimeRange): Set<number> {
+  const result = new Set<number>();
+  const { startUs, endUs } = viewRange;
+  for (const tick of ticks) {
+    for (const chunk of tick.chunks) {
+      if (chunk.endUs > startUs && chunk.startUs < endUs) result.add(chunk.threadSlot);
+    }
+  }
+  return result;
 }
 
 /**

@@ -60,6 +60,11 @@ interface ProfilerViewState {
   /** How spans are coloured on slot lanes. See {@link SpanColorMode}. Persisted UX preference. */
   spanColorMode: SpanColorMode;
 
+  /** When true, each slot track height is sized to the deepest span visible in the current viewport
+   *  rather than the session-wide maximum. Tracks shrink/grow as the user pans. No scroll
+   *  stabilisation — heights change immediately. Persisted UX preference. */
+  dynamicTrackHeight: boolean;
+
   setViewRange: (r: TimeRange) => void;
   setLiveFollowWindowUs: (us: number) => void;
   toggleGaugeRegion: () => void;
@@ -69,6 +74,7 @@ interface ProfilerViewState {
   setManyGaugeCollapse: (updates: Record<string, TrackState>) => void;
 
   setSpanColorMode: (mode: SpanColorMode) => void;
+  toggleDynamicTrackHeight: () => void;
 
   setGaugeVisibility: (id: string, visible: boolean) => void;
   setEngineOpVisibility: (id: string, visible: boolean) => void;
@@ -106,6 +112,7 @@ export const useProfilerViewStore = create<ProfilerViewState>()(
       gaugeVisibility: {},
       engineOpVisibility: {},
       spanColorMode: 'name',
+      dynamicTrackHeight: true,
 
       setViewRange: (r) => set({ viewRange: r }),
       setLiveFollowWindowUs: (us) => set({ liveFollowWindowUs: Math.max(1, us) }),
@@ -124,6 +131,7 @@ export const useProfilerViewStore = create<ProfilerViewState>()(
         }),
 
       setSpanColorMode: (mode) => set({ spanColorMode: mode }),
+      toggleDynamicTrackHeight: () => set((s) => ({ dynamicTrackHeight: !s.dynamicTrackHeight })),
 
       setGaugeVisibility: (id, visible) =>
         set((s) => {
@@ -171,7 +179,7 @@ export const useProfilerViewStore = create<ProfilerViewState>()(
     {
       name: 'workbench-profiler-view',
       storage: safeStorage,
-      version: 2,
+      version: 3,
       // Only persist UX preferences; viewRange is session-scoped and reset on each open.
       partialize: (s) => ({
         liveFollowWindowUs: s.liveFollowWindowUs,
@@ -182,11 +190,13 @@ export const useProfilerViewStore = create<ProfilerViewState>()(
         gaugeVisibility: s.gaugeVisibility,
         engineOpVisibility: s.engineOpVisibility,
         spanColorMode: s.spanColorMode,
+        dynamicTrackHeight: s.dynamicTrackHeight,
       }),
       // v0 → v1: gaugeCollapse changed from `Record<string, boolean>` to `Record<string, TrackState>`.
       // v1 → v2: added gaugeVisibility / engineOpVisibility maps for the section-filter popup.
       //   Defaults are empty maps (= every track visible). Pre-v2 persisted state has neither field,
       //   which the spread initializer in the constructor handles cleanly.
+      // v2 → v3: added dynamicTrackHeight (default true). Missing field defaults to true.
       migrate: (persisted: unknown, fromVersion: number): Partial<ProfilerViewState> | undefined => {
         if (!persisted || typeof persisted !== 'object') return undefined;
         const p = persisted as Partial<ProfilerViewState> & { gaugeCollapse?: Record<string, unknown> };
@@ -205,6 +215,9 @@ export const useProfilerViewStore = create<ProfilerViewState>()(
         if (fromVersion < 2) {
           p.gaugeVisibility = p.gaugeVisibility ?? {};
           p.engineOpVisibility = p.engineOpVisibility ?? {};
+        }
+        if (fromVersion < 3) {
+          p.dynamicTrackHeight = p.dynamicTrackHeight ?? true;
         }
         return p;
       },

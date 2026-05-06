@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
 import type { TickData } from '@/libs/profiler/model/traceModel';
 import type { TimeRange, TrackLayout, TrackState, Viewport } from '@/libs/profiler/model/uiTypes';
 import { computeGutterWidth, drawTimeArea } from '@/libs/profiler/canvas/timeArea';
 import { hitTestTimeArea, type TimeAreaHover } from '@/libs/profiler/canvas/timeAreaHitTest';
-import { buildLayout, deriveActiveSystems, deriveSlotInfo, getVisibleTicks } from '@/libs/profiler/canvas/timeAreaLayout';
+import { buildLayout, deriveActiveSystems, deriveSlotInfo, deriveVisibleChunkSlots, deriveVisibleSpanMaxDepthBySlot, getVisibleTicks } from '@/libs/profiler/canvas/timeAreaLayout';
 import { GAUGE_TRACK_ID_SET, getGaugeGroupSpec } from '@/libs/profiler/canvas/gauges/region';
 import { buildGaugeTooltipLines, type GaugeData } from '@/libs/profiler/canvas/gauges/renderers';
 import { getStudioThemeTokens } from '@/libs/profiler/canvas/theme';
@@ -59,6 +59,7 @@ interface Props {
 
 const DRAG_THRESHOLD_PX = 3;
 const ZOOM_ANIMATION_MS = 800;
+const LERP_FACTOR = 0.15;   // fraction of remaining distance to close per rAF frame (~60 fps)
 
 export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap, threadInfos, pendingRangesUs, isLive = false, onGutterWidthChange }: Props): React.JSX.Element {
 
@@ -92,6 +93,7 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const scrollOverlayRef = useRef<HTMLDivElement>(null);
+  const scrollPhantomRef = useRef<HTMLDivElement>(null);
 
   // Viewport snapshot — mutated imperatively by wheel + drag handlers before the next rAF. `scrollY`
   // is 0 while there's no vertical scrolling; when the layout's total height exceeds the container
@@ -113,6 +115,12 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
   >(null);
   const zoomAnimRef = useRef<{ from: TimeRange; to: TimeRange; startTime: number } | null>(null);
   const rafRef = useRef(0);
+  // Per-slot-track animated heights (float pixels). Lerp toward the committed layout's target
+  // height each rAF frame. Keyed by track id ("slot-N").
+  const animTrackHeightsRef = useRef<Map<string, number>>(new Map());
+  const isAnimatingRef      = useRef(false);
+  // Ref mirror of the dynamicTrackHeight store value so the rAF closure never goes stale.
+  const dynamicTrackHeightRef = useRef(false);
   // Track collapse — session-store, ephemeral. Lives there (not view-store) because slot/system
   // ids aren't stable across sessions; persisting would silently misalign collapse state with
   // a different thread on the same slot index next run. Lifted out of component-local state so
@@ -188,15 +196,43 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
   const gaugeVisibility = useProfilerViewStore((s) => s.gaugeVisibility);
   const engineOpVisibility = useProfilerViewStore((s) => s.engineOpVisibility);
   const spanColorMode = useProfilerViewStore((s) => s.spanColorMode);
+  const dynamicTrackHeight = useProfilerViewStore((s) => s.dynamicTrackHeight);
+  dynamicTrackHeightRef.current = dynamicTrackHeight;
 
-  // Build layout once per (slotInfo, collapseState, visibility maps). `layoutRef` stamps the result
-  // so pointer handlers read the same structure the draw loop saw.
+  // Committed depth — the depth currently reflected in the layout. Grows immediately (before paint)
+  // when the viewport reveals deeper spans; shrinks only after 300 ms of stable viewport so heights
+  // never collapse while the user is actively panning. A useReducer counter (`bumpCommitted`) is
+  // the sole trigger for a layout recompute — layout no longer depends on viewRange directly.
+  const committedDepthRef      = useRef<Map<number, number>>(new Map());
+  const committedChunkSlotsRef = useRef<Set<number>>(new Set());
+  const visibleDepthRef        = useRef<Map<number, number>>(new Map());
+  const visibleChunkSlotsRef   = useRef<Set<number>>(new Set());
+  const shrinkTimerRef         = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [committedVersion, bumpCommitted] = useReducer((c: number) => c + 1, 0);
+
+  // Current viewport depth + visible chunk slots — recomputed on every pan in a single tick pass.
+  // Neither is fed to buildLayout directly; they drive the committed refs (grow/shrink effects).
+  const { visibleDepth, visibleChunkSlots } = useMemo(() => {
+    if (!dynamicTrackHeight) return { visibleDepth: new Map<number, number>(), visibleChunkSlots: new Set<number>() };
+    return { visibleDepth: deriveVisibleSpanMaxDepthBySlot(ticks, viewRange), visibleChunkSlots: deriveVisibleChunkSlots(ticks, viewRange) };
+  }, [dynamicTrackHeight, ticks, viewRange]);
+  // Keep refs in sync so shrink-timer callbacks read freshest values regardless of capture time.
+  visibleDepthRef.current = visibleDepth;
+  visibleChunkSlotsRef.current = visibleChunkSlots;
+
+  // Build layout once per (slotInfo, collapseState, visibility maps, committedVersion). When
+  // dynamicTrackHeight is on, committedDepthRef.current holds the depth to use; layout no longer
+  // depends on viewRange so it does not recompute on every pan frame.
   const layoutRef = useRef<{ tracks: readonly TrackLayout[]; totalHeight: number }>({ tracks: [], totalHeight: 0 });
   const layout = useMemo(() => {
+    const spanMaxDepthBySlot = dynamicTrackHeight
+      ? committedDepthRef.current
+      : slotInfo.spanMaxDepthBySlot;
     const r = buildLayout({
       activeSlots: slotInfo.activeSlots,
       slotsWithChunks: slotInfo.slotsWithChunks,
-      spanMaxDepthBySlot: slotInfo.spanMaxDepthBySlot,
+      committedChunkSlots: dynamicTrackHeight ? committedChunkSlotsRef.current : undefined,
+      spanMaxDepthBySlot,
       threadNames,
       collapseState,
       gaugeRegionVisible,
@@ -211,7 +247,124 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
     });
     layoutRef.current = r;
     return r;
-  }, [slotInfo, collapseState, threadNames, gaugeRegionVisible, gaugeCollapse, activeSystems, systemNames, perSystemLanesVisible, slotVisibility, systemVisibility, gaugeVisibility, engineOpVisibility]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [slotInfo, dynamicTrackHeight, committedVersion, collapseState, threadNames, gaugeRegionVisible, gaugeCollapse, activeSystems, systemNames, perSystemLanesVisible, slotVisibility, systemVisibility, gaugeVisibility, engineOpVisibility]);
+
+  // Grow committed depth + chunk slots immediately (useLayoutEffect = before paint) so track heights
+  // never flash at the wrong size. When dynamicTrackHeight is toggled off, reset refs so the next
+  // toggle-on starts clean.
+  useLayoutEffect(() => {
+    if (!dynamicTrackHeight) {
+      committedDepthRef.current = new Map();
+      committedChunkSlotsRef.current = new Set();
+      animTrackHeightsRef.current = new Map();
+      isAnimatingRef.current = false;
+      return;
+    }
+    let grew = false;
+    const nextDepth = new Map(committedDepthRef.current);
+    for (const [slot, vd] of visibleDepth) {
+      if (vd > (nextDepth.get(slot) ?? -1)) { nextDepth.set(slot, vd); grew = true; }
+    }
+    if (grew) committedDepthRef.current = nextDepth;
+
+    const prevChunk = committedChunkSlotsRef.current;
+    let chunkGrew = false;
+    for (const slot of visibleChunkSlots) {
+      if (!prevChunk.has(slot)) { chunkGrew = true; break; }
+    }
+    if (chunkGrew) {
+      const nextChunk = new Set(prevChunk);
+      for (const slot of visibleChunkSlots) nextChunk.add(slot);
+      committedChunkSlotsRef.current = nextChunk;
+    }
+
+    if (grew || chunkGrew) bumpCommitted();
+  }, [dynamicTrackHeight, visibleDepth, visibleChunkSlots, bumpCommitted]);
+
+  // Shrink committed depth + chunk slots 300 ms after the viewport settles. Cancelled and rescheduled
+  // on every pan so heights never collapse while the user is actively moving. Timer callbacks read
+  // from the *Ref.current variants (not stale closure values) so they always shrink to what is
+  // actually visible at fire time.
+  useEffect(() => {
+    if (!dynamicTrackHeight) return;
+    if (shrinkTimerRef.current !== null) { clearTimeout(shrinkTimerRef.current); shrinkTimerRef.current = null; }
+    let hasShrinks = false;
+    for (const [slot, cd] of committedDepthRef.current) {
+      const vd = visibleDepth.get(slot);
+      if (vd === undefined || vd < cd) { hasShrinks = true; break; }
+    }
+    if (!hasShrinks) {
+      for (const slot of committedChunkSlotsRef.current) {
+        if (!visibleChunkSlots.has(slot)) { hasShrinks = true; break; }
+      }
+    }
+    if (!hasShrinks) return;
+    shrinkTimerRef.current = setTimeout(() => {
+      shrinkTimerRef.current = null;
+      const cv = visibleDepthRef.current;
+      const shrunk = new Map<number, number>();
+      for (const [slot] of committedDepthRef.current) {
+        const vd = cv.get(slot);
+        if (vd !== undefined) shrunk.set(slot, vd);
+      }
+      for (const [slot, vd] of cv) { if (!shrunk.has(slot)) shrunk.set(slot, vd); }
+      committedDepthRef.current = shrunk;
+
+      const cvc = visibleChunkSlotsRef.current;
+      const shrunkChunk = new Set<number>();
+      for (const slot of committedChunkSlotsRef.current) { if (cvc.has(slot)) shrunkChunk.add(slot); }
+      for (const slot of cvc) shrunkChunk.add(slot);
+      committedChunkSlotsRef.current = shrunkChunk;
+
+      bumpCommitted();
+    }, 300);
+    return () => { if (shrinkTimerRef.current !== null) { clearTimeout(shrinkTimerRef.current); shrinkTimerRef.current = null; } };
+  }, [dynamicTrackHeight, visibleDepth, visibleChunkSlots, bumpCommitted]);
+
+  // Scroll anchor compensation — when dynamicTrackHeight is on, track heights change every pan and
+  // the total canvas height shifts. Without compensation the content jumps vertically. We record
+  // which track straddles scrollY in the old layout, find it by id in the new layout, and adjust
+  // scrollY by the delta so the same track edge stays at the same screen position.
+  // useLayoutEffect fires after commit but before paint, so the rAF draw picks up the correction.
+  const prevLayoutForAnchorRef = useRef<{ tracks: readonly TrackLayout[]; totalHeight: number }>({ tracks: [], totalHeight: 0 });
+  useLayoutEffect(() => {
+    const prevLayout = prevLayoutForAnchorRef.current;
+    prevLayoutForAnchorRef.current = layout;
+    if (!dynamicTrackHeight || prevLayout.tracks.length === 0) return;
+    const scrollY = vpRef.current.scrollY;
+    if (scrollY === 0) return;
+
+    // Find anchor: the track whose vertical band contains scrollY. Use the next track's y as the
+    // bottom boundary so we don't need to replicate the advance formula from buildLayout.
+    let anchorId: string | null = null;
+    let anchorOffset = 0;
+    const pt = prevLayout.tracks;
+    for (let i = 0; i < pt.length; i++) {
+      const nextY = i + 1 < pt.length ? pt[i + 1].y : prevLayout.totalHeight;
+      if (nextY > scrollY) {
+        anchorId = pt[i].id;
+        anchorOffset = scrollY - pt[i].y;
+        break;
+      }
+    }
+    if (!anchorId) return;
+
+    const newTrack = layout.tracks.find(t => t.id === anchorId);
+    if (!newTrack) return;
+    const newScrollY = newTrack.y + anchorOffset;
+    if (Math.abs(newScrollY - scrollY) < 0.5) return;
+
+    const canvas = canvasRef.current;
+    const containerH = canvas?.getBoundingClientRect().height ?? 0;
+    const maxScroll = Math.max(0, layout.totalHeight - containerH);
+    const clamped = Math.max(0, Math.min(maxScroll, newScrollY));
+    vpRef.current.scrollY = clamped;
+    const overlay = scrollOverlayRef.current;
+    if (overlay && Math.abs(overlay.scrollTop - clamped) > 0.5) {
+      overlay.scrollTop = clamped;
+    }
+  }, [layout, dynamicTrackHeight]);
 
   const render = useCallback((): void => {
     const canvas = canvasRef.current;
@@ -255,10 +408,58 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
       ? { x1: Math.min(dragRef.current.startX, dragRef.current.currentX), x2: Math.max(dragRef.current.startX, dragRef.current.currentX) }
       : null;
 
+    // Advance track-height animation. Each frame lerps animated heights toward the committed target.
+    // Only expanded slot-N tracks ever change height with dynamic depth; all other tracks are fixed.
+    let frameTracks: readonly TrackLayout[] = layout.tracks;
+    if (dynamicTrackHeightRef.current) {
+      const animH = animTrackHeightsRef.current;
+      let stillAnimating = false;
+      for (const track of layout.tracks) {
+        if (!track.id.startsWith('slot-') || track.state !== 'expanded') continue;
+        const target = track.height;
+        const cur = animH.get(track.id) ?? target;
+        const diff = target - cur;
+        if (Math.abs(diff) < 0.5) {
+          animH.set(track.id, target);
+        } else {
+          animH.set(track.id, cur + diff * LERP_FACTOR);
+          stillAnimating = true;
+        }
+      }
+      if (stillAnimating || isAnimatingRef.current) {
+        // Rebuild track list with animated heights + recalculated Y positions.
+        const patched: TrackLayout[] = [];
+        let yOffset = 0;
+        for (const track of layout.tracks) {
+          if (track.id.startsWith('slot-') && track.state === 'expanded') {
+            const h = animH.get(track.id) ?? track.height;
+            patched.push({ ...track, y: track.y + yOffset, height: h });
+            yOffset += h - track.height;
+          } else {
+            patched.push(yOffset === 0 ? track : { ...track, y: track.y + yOffset });
+          }
+        }
+        frameTracks = patched;
+        const frameTotalH = layout.totalHeight + yOffset;
+        const phantom = scrollPhantomRef.current;
+        if (phantom) phantom.style.height = `${frameTotalH}px`;
+      }
+      if (!stillAnimating && isAnimatingRef.current) {
+        // Animation just settled — snap phantom back to committed height.
+        const phantom = scrollPhantomRef.current;
+        if (phantom) phantom.style.height = `${layout.totalHeight}px`;
+      }
+      isAnimatingRef.current = stillAnimating;
+      if (stillAnimating) {
+        cancelAnimationFrame(rafRef.current);
+        rafRef.current = requestAnimationFrame(() => render());
+      }
+    }
+
     drawTimeArea(canvas, {
       visibleTicks: getVisibleTicks(ticks, viewRange),
       ticks,
-      tracks: layout.tracks,
+      tracks: frameTracks,
       viewRange,
       vp: vpRef.current,
       gutterWidth: gutter,
@@ -734,7 +935,7 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
           scheduleRender();
         }}
       >
-        <div style={{ height: layout.totalHeight, width: 1 }} aria-hidden />
+        <div ref={scrollPhantomRef} style={{ height: layout.totalHeight, width: 1 }} aria-hidden />
       </div>
       {/*
        * Section-filter icon. Sits at the right edge of the ruler row's gutter band — same horizontal
