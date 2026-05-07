@@ -32,6 +32,7 @@ public static class ProfilerSetup
     /// all subsequent events are measured against <c>startTimestamp</c>.
     /// </remarks>
     public static ProfilerSessionMetadata BuildSessionMetadata(SystemDefinition[] systems, int workerCount, float baseTickRate,
+        string[] phases = null,
         Func<long> currentEngineTickProvider = null)
     {
         // currentEngineTickProvider is accepted for forward-compat with callers but the current
@@ -40,52 +41,7 @@ public static class ProfilerSetup
         // has no public enumeration API yet, and the engine emits typed events with numeric IDs only,
         // so the viewer renders them un-resolved for the moment.
         _ = currentEngineTickProvider;
-        return new ProfilerSessionMetadata(BuildSystemRecords(systems), [], [], workerCount, baseTickRate,
-            Stopwatch.GetTimestamp(), Stopwatch.Frequency, DateTime.UtcNow);
-    }
-
-    // SystemDefinition stores successors but not predecessors — invert the edge list once so the
-    // record table is self-describing for the viewer (which renders both directions).
-    private static SystemDefinitionRecord[] BuildSystemRecords(SystemDefinition[] systems)
-    {
-        if (systems == null || systems.Length == 0) return [];
-
-        var predecessors = new System.Collections.Generic.List<ushort>[systems.Length];
-        for (int i = 0; i < systems.Length; i++)
-        {
-            predecessors[i] = new System.Collections.Generic.List<ushort>();
-        }
-        for (int i = 0; i < systems.Length; i++)
-        {
-            foreach (var succ in systems[i].Successors)
-            {
-                predecessors[succ].Add((ushort)i);
-            }
-        }
-
-        var records = new SystemDefinitionRecord[systems.Length];
-        for (int i = 0; i < systems.Length; i++)
-        {
-            var sys = systems[i];
-            var succIndices = sys.Successors;
-            var succUshort = new ushort[succIndices.Length];
-            for (int s = 0; s < succIndices.Length; s++)
-            {
-                succUshort[s] = (ushort)succIndices[s];
-            }
-
-            records[i] = new SystemDefinitionRecord
-            {
-                Index = (ushort)sys.Index,
-                Name = sys.Name,
-                Type = (byte)sys.Type,
-                Priority = (byte)sys.Priority,
-                IsParallel = sys.IsParallelQuery,
-                TierFilter = (byte)sys.TierFilter,
-                Predecessors = predecessors[i].ToArray(),
-                Successors = succUshort,
-            };
-        }
-        return records;
+        return new ProfilerSessionMetadata(SystemDefinitionRecordBuilder.BuildAll(systems), [], [], workerCount, baseTickRate, Stopwatch.GetTimestamp(),
+            Stopwatch.Frequency, DateTime.UtcNow, phases: phases ?? []);
     }
 }

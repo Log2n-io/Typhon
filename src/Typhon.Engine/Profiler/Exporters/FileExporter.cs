@@ -78,6 +78,7 @@ public sealed class FileExporter : ResourceNode, IProfilerExporter
         _writer.WriteSystemDefinitions(metadata.Systems);
         _writer.WriteArchetypes(metadata.Archetypes);
         _writer.WriteComponentTypes(metadata.ComponentTypes);
+        _writer.WritePhases(metadata.Phases);
     }
 
     /// <summary>

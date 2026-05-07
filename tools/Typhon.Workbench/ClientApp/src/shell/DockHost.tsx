@@ -13,6 +13,8 @@ import SchemaLayoutPanel from '@/panels/SchemaInspector/SchemaLayoutPanel';
 import SchemaArchetypePanel from '@/panels/SchemaInspector/SchemaArchetypePanel';
 import SchemaIndexPanel from '@/panels/SchemaInspector/SchemaIndexPanel';
 import SchemaRelationshipsPanel from '@/panels/SchemaInspector/SchemaRelationshipsPanel';
+import SystemDagPanel from '@/panels/SystemDag/SystemDagPanel';
+import CriticalPathPanel from '@/panels/CriticalPath/CriticalPathPanel';
 import ProfilerPanel from '@/panels/profiler/ProfilerPanel';
 import TopSpansPanel from '@/panels/profiler/TopSpansPanel';
 import OptionsPanel from '@/panels/options/OptionsPanel';
@@ -47,6 +49,8 @@ const components: Record<string, React.FC<IDockviewPanelProps>> = {
   SchemaArchetypes: SchemaArchetypePanel,
   SchemaIndexes: SchemaIndexPanel,
   SchemaRelationships: SchemaRelationshipsPanel,
+  SystemDag: SystemDagPanel,
+  CriticalPath: CriticalPathPanel,
   Profiler: ProfilerPanel,
   TopSpans: TopSpansPanel,
   Options: OptionsPanel,

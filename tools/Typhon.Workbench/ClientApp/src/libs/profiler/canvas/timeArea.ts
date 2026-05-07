@@ -1,6 +1,7 @@
 import type { ChunkSpan, SpanData, TickData } from '@/libs/profiler/model/traceModel';
 import type { TimeRange, TrackLayout, Viewport } from '@/libs/profiler/model/uiTypes';
 import type { ProfilerSelection } from '@/stores/useProfilerSelectionStore';
+import { relativeLuminance } from '@/libs/colors';
 import {
   colorForChunk,
   colorForSpan,
@@ -84,24 +85,6 @@ function readableOnBar(barHex: string, theme: StudioTheme): string {
     _textOnBarCache.set(barHex, pick);
   }
   return pick === 'dark' ? theme.textOnLightBar : theme.textOnDarkBar;
-}
-
-/** WCAG 2 relative-luminance (Y) of an sRGB hex colour. Input must be `#rrggbb` or `#rgb`. */
-function relativeLuminance(hex: string): number {
-  let r = 0;
-  let g = 0;
-  let b = 0;
-  if (hex.length === 7) {
-    r = parseInt(hex.slice(1, 3), 16) / 255;
-    g = parseInt(hex.slice(3, 5), 16) / 255;
-    b = parseInt(hex.slice(5, 7), 16) / 255;
-  } else if (hex.length === 4) {
-    r = parseInt(hex[1] + hex[1], 16) / 255;
-    g = parseInt(hex[2] + hex[2], 16) / 255;
-    b = parseInt(hex[3] + hex[3], 16) / 255;
-  }
-  const lin = (c: number): number => (c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4));
-  return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
 }
 
 // Diagonal-stripe pattern painted over tick ranges whose chunk data hasn't arrived yet. Gives the

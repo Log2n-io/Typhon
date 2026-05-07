@@ -29,6 +29,11 @@ function makeMetadata(overrides: Partial<ProfilerMetadataDto> = {}): ProfilerMet
     tickSummaries: [],
     chunkManifest: [],
     gcSuspensions: [],
+    phases: [],
+    systemTickSummaries: [],
+    queueTickSummaries: [],
+    postTickSummaries: [],
+    queueIdToName: {},
     ...overrides,
   };
 }

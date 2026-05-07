@@ -831,6 +831,7 @@ public static class Program
             reader.ReadSystemDefinitions();
             reader.ReadArchetypes();
             reader.ReadComponentTypes();
+            reader.ReadPhases();
 
             var kindCounts = new SortedDictionary<TraceEventKind, int>();
             var threadSlotCounts = new SortedDictionary<int, int>();

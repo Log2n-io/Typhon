@@ -1,4 +1,3 @@
-using System.Text.Json;
 using System.Threading.Channels;
 using Typhon.Workbench.Dtos.Profiler;
 using Typhon.Workbench.Sessions;
@@ -7,15 +6,16 @@ using WbSession = Typhon.Workbench.Sessions.ISession;
 namespace Typhon.Workbench.Streams;
 
 /// <summary>
-/// SSE stream of <see cref="LiveStreamEventDto"/> growth-deltas for an Attach session (#289 unified pipeline).
-/// Emits a full <c>metadata</c> snapshot on connect / reconnect, then per-tick / per-chunk / 1 Hz metrics deltas as the
-/// builder grows the in-memory cache. <c>heartbeat</c> on connection-state changes and on 5 s idle timeouts;
-/// <c>shutdown</c> when the engine ends the session.
+/// SSE stream of growth-deltas for an Attach session (#289 unified pipeline; retyped for #308).
+/// Emits a full <c>metadata</c> snapshot on connect / reconnect, then per-tick / per-chunk / 1 Hz
+/// metrics deltas as the builder grows the in-memory cache. Each delta ships as a typed SSE event
+/// (<c>event: tickSummaryAdded</c> etc.) — clients install one <c>addEventListener</c> per kind for
+/// clean TypeScript narrowing instead of switching on a discriminator inside the JSON payload.
+/// <c>heartbeat</c> on connection-state changes and on 5 s idle timeouts; <c>shutdown</c> when the
+/// engine ends the session.
 /// </summary>
 public static class ProfilerLiveStream
 {
-    private static JsonSerializerOptions WireOpts => SseJsonOptions.Web;
-
     private const int HeartbeatTimeoutMs = 5000;
 
     public static async Task HandleAsync(
@@ -42,10 +42,7 @@ public static class ProfilerLiveStream
             return;
         }
 
-        ctx.Response.Headers.ContentType = "text/event-stream";
-        ctx.Response.Headers.CacheControl = "no-cache";
-        ctx.Response.Headers.Connection = "keep-alive";
-        await ctx.Response.Body.FlushAsync(ct);
+        await SseExtensions.WriteSseHeadersAsync(ctx, ct);
 
         var runtime = attach.Runtime;
         var (subscriberId, reader) = runtime.Subscribe();
@@ -123,10 +120,11 @@ public static class ProfilerLiveStream
         }
     }
 
-    private static async Task WriteEventAsync(HttpContext ctx, LiveStreamEventDto evt, CancellationToken ct)
-    {
-        var json = JsonSerializer.Serialize(evt, WireOpts);
-        await ctx.Response.WriteAsync($"data: {json}\n\n", ct);
-        await ctx.Response.Body.FlushAsync(ct);
-    }
+    /// <summary>
+    /// Emits one <see cref="LiveStreamEventDto"/> as a typed SSE event. The <see cref="LiveStreamEventDto.Kind"/>
+    /// becomes the <c>event:</c> line; <see cref="JsonIgnoreAttribute"/> on <c>Kind</c> keeps it out of the
+    /// payload so the wire stays clean.
+    /// </summary>
+    private static Task WriteEventAsync(HttpContext ctx, LiveStreamEventDto evt, CancellationToken ct)
+        => SseExtensions.WriteEventAsync(ctx, evt.Kind, evt, ct);
 }

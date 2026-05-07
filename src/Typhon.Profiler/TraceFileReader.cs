@@ -88,9 +88,9 @@ public sealed class TraceFileReader : IDisposable
     /// <exception cref="InvalidDataException">If magic or version is wrong.</exception>
     public TraceFileHeader ReadHeader()
     {
-        // v4 layout ends at SamplingSessionStartQpc (51 bytes); v5 appends FileTableOffset +
-        // SourceLocationManifestOffset + Reserved0/1 (+20 bytes). v4 files transparently use the
-        // shorter read; their absent fields default to 0 ("no manifest").
+        // v4 layout ends at SamplingSessionStartQpc (51 bytes); v5+ appends FileTableOffset + SourceLocationManifestOffset + Reserved0/1 (+20 bytes).
+        // v4 files transparently use the shorter read; their absent fields default to 0 ("no manifest").
+        // v6 keeps the same struct shape as v5 — only data sections after the header changed (RFC 07 fields + Phases table).
         const int V4HeaderSize = 51;
         var fullSize = Unsafe.SizeOf<TraceFileHeader>();
 
@@ -98,20 +98,21 @@ public sealed class TraceFileReader : IDisposable
         _stream.ReadExactly(headerBytes[..V4HeaderSize]);
         var version = BinaryPrimitives.ReadUInt16LittleEndian(headerBytes[4..6]);
 
-        if (version == TraceFileHeader.CurrentVersion)
-        {
-            _stream.ReadExactly(headerBytes[V4HeaderSize..fullSize]);
-        }
-        else if (version < MinSupportedVersion || version > TraceFileHeader.CurrentVersion)
+        if (version < MinSupportedVersion || version > TraceFileHeader.CurrentVersion)
         {
             throw new InvalidDataException(
                 $"Unsupported trace file version: {version}. This build reads versions "
                 + $"{MinSupportedVersion}..{TraceFileHeader.CurrentVersion}.");
         }
+
+        if (version >= 5)
+        {
+            // v5+ has the full 71-byte header (FileTable + SourceLocationManifest offsets included).
+            _stream.ReadExactly(headerBytes[V4HeaderSize..fullSize]);
+        }
         else
         {
-            // Older-but-supported (currently only v4) — clear the bytes we didn't read, so the
-            // marshalled struct sees zeroed offset fields.
+            // v4 — clear the bytes we didn't read so the marshalled struct sees zeroed offset fields.
             headerBytes[V4HeaderSize..fullSize].Clear();
         }
 
@@ -126,9 +127,14 @@ public sealed class TraceFileReader : IDisposable
     }
 
     /// <summary>Reads the system definition table. Call after <see cref="ReadHeader"/>.</summary>
+    /// <remarks>
+    /// Format v6+ appends RFC 07 access declarations per system. v5 traces lack the trailing fields;
+    /// the reader returns empty defaults for them.
+    /// </remarks>
     public IReadOnlyList<SystemDefinitionRecord> ReadSystemDefinitions()
     {
         _systems.Clear();
+        var hasAccessDecls = Header.Version >= 6;
         var count = _binaryReader.ReadUInt16();
 
         for (var i = 0; i < count; i++)
@@ -154,6 +160,29 @@ public sealed class TraceFileReader : IDisposable
                 successors[s] = _binaryReader.ReadUInt16();
             }
 
+            var phaseName = string.Empty;
+            var isExclusivePhase = false;
+            string[] reads = [], readsFresh = [], readsSnapshot = [], additionalReads = [], writes = [], sideWrites = [];
+            string[] writesEvents = [], readsEvents = [], writesResources = [], readsResources = [];
+            string[] explicitAfter = [], explicitBefore = [];
+            if (hasAccessDecls)
+            {
+                phaseName = ReadShortString();
+                isExclusivePhase = _binaryReader.ReadBoolean();
+                reads = ReadStringArray();
+                readsFresh = ReadStringArray();
+                readsSnapshot = ReadStringArray();
+                additionalReads = ReadStringArray();
+                writes = ReadStringArray();
+                sideWrites = ReadStringArray();
+                writesEvents = ReadStringArray();
+                readsEvents = ReadStringArray();
+                writesResources = ReadStringArray();
+                readsResources = ReadStringArray();
+                explicitAfter = ReadStringArray();
+                explicitBefore = ReadStringArray();
+            }
+
             _systems.Add(new SystemDefinitionRecord
             {
                 Index = index,
@@ -163,10 +192,51 @@ public sealed class TraceFileReader : IDisposable
                 IsParallel = isParallel,
                 TierFilter = tierFilter,
                 Predecessors = predecessors,
-                Successors = successors
+                Successors = successors,
+                PhaseName = phaseName,
+                IsExclusivePhase = isExclusivePhase,
+                Reads = reads,
+                ReadsFresh = readsFresh,
+                ReadsSnapshot = readsSnapshot,
+                AdditionalReads = additionalReads,
+                Writes = writes,
+                SideWrites = sideWrites,
+                WritesEvents = writesEvents,
+                ReadsEvents = readsEvents,
+                WritesResources = writesResources,
+                ReadsResources = readsResources,
+                ExplicitAfter = explicitAfter,
+                ExplicitBefore = explicitBefore,
             });
         }
         return _systems;
+    }
+
+    /// <summary>
+    /// Phase order list (RFC 07 §Q3 — <c>RuntimeOptions.Phases</c>), available after <see cref="ReadPhases"/>.
+    /// Empty for v5 traces (the section is absent and not read).
+    /// </summary>
+    public IReadOnlyList<string> Phases => _phases;
+    private readonly List<string> _phases = [];
+
+    /// <summary>
+    /// Reads the phases table (v6+). Call after <see cref="ReadComponentTypes"/>. For v5 traces this is a
+    /// no-op — the section does not exist and no bytes are consumed.
+    /// </summary>
+    public IReadOnlyList<string> ReadPhases()
+    {
+        _phases.Clear();
+        if (Header.Version < 6)
+        {
+            return _phases;
+        }
+
+        var count = _binaryReader.ReadUInt16();
+        for (var i = 0; i < count; i++)
+        {
+            _phases.Add(ReadShortString());
+        }
+        return _phases;
     }
 
     /// <summary>Reads the archetype table. Call after <see cref="ReadSystemDefinitions"/>.</summary>
@@ -324,6 +394,21 @@ public sealed class TraceFileReader : IDisposable
         var len = _binaryReader.ReadByte();
         var bytes = _binaryReader.ReadBytes(len);
         return Encoding.UTF8.GetString(bytes);
+    }
+
+    private string[] ReadStringArray()
+    {
+        var count = _binaryReader.ReadUInt16();
+        if (count == 0)
+        {
+            return [];
+        }
+        var arr = new string[count];
+        for (var i = 0; i < count; i++)
+        {
+            arr[i] = ReadShortString();
+        }
+        return arr;
     }
 
     private string ReadVarString()

@@ -267,6 +267,12 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         _systemCount = systems.Length;
         _options = options;
         _eventQueues = eventQueues ?? [];
+        // Assign stable queue IDs (#311) so the per-queue telemetry path can carry a small u16 instead of the queue's name on the wire.
+        // QueueId == array index here; the cache builder writes a parallel `QueueNameTable` section so consumers can map index → name.
+        for (var qi = 0; qi < _eventQueues.Length; qi++)
+        {
+            _eventQueues[qi].QueueId = (ushort)qi;
+        }
         _logger = logger ?? NullLogger.Instance;
         _workerCount = options.ResolveWorkerCount();
 
@@ -645,7 +651,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                                 chunkFailed = true;
                                 _currentTickSystemMetrics[sysIdx].SkipReason = SkipReason.Exception;
                                 _systemFailed[sysIdx] = true;
-                                LogSystemException(sysIdx, sys.Name, ex);
+                                LogSystemException(sysIdx, sys.Name, ex); CaptureSystemException(sysIdx, ex);
                                 foreach (var succ in sys.Successors)
                                 {
                                     _systemFailed[succ] = true;
@@ -677,7 +683,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                         {
                             _currentTickSystemMetrics[sysIdx].SkipReason = SkipReason.Exception;
                             _systemFailed[sysIdx] = true;
-                            LogSystemException(sysIdx, sys.Name, ex);
+                            LogSystemException(sysIdx, sys.Name, ex); CaptureSystemException(sysIdx, ex);
                             foreach (var succ in sys.Successors)
                             {
                                 _systemFailed[succ] = true;
@@ -703,7 +709,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                         success = false;
                         _currentTickSystemMetrics[sysIdx].SkipReason = SkipReason.Exception;
                         _systemFailed[sysIdx] = true;
-                        LogSystemException(sysIdx, sys.Name, ex);
+                        LogSystemException(sysIdx, sys.Name, ex); CaptureSystemException(sysIdx, ex);
                         // Propagate failure to successors
                         foreach (var succ in sys.Successors)
                         {
@@ -965,7 +971,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
             success = false;
             _currentTickSystemMetrics[sysIdx].SkipReason = SkipReason.Exception;
             _systemFailed[sysIdx] = true;
-            LogSystemException(sysIdx, Systems[sysIdx].Name, ex);
+            LogSystemException(sysIdx, Systems[sysIdx].Name, ex); CaptureSystemException(sysIdx, ex);
         }
         finally
         {
@@ -994,10 +1000,18 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
 
         while (true)
         {
-            // Early-exit: stop grabbing chunks if a prior chunk already failed — remaining work would be discarded
+            // Failure-drain: a prior chunk threw. We must NOT just break — `FindReadySystem`
+            // still returns this sysIdx as long as `_nextChunk < TotalChunks` (chunks unclaimed),
+            // so workers would loop into `ProcessPipeline`, hit this branch, break, and spin —
+            // a full-CPU wedge that never fires `OnSystemComplete` and never dispatches successors.
+            // Instead, claim the remaining chunks via `_nextChunk` (advancing it past TotalChunks
+            // closes the FindReadySystem gate) and decrement `_remainingChunks` for each so the
+            // last decrementer can fire `OnSystemComplete`. The chunks themselves stay unrun —
+            // remaining work is discarded as before.
             if (_systemFailed[sysIdx])
             {
-                break;
+                DrainFailedSystemChunks(sysIdx, workerId, trackUtilization);
+                return;
             }
 
             var chunk = Interlocked.Increment(ref _nextChunk[sysIdx].Value) - 1;
@@ -1023,7 +1037,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
             {
                 _systemFailed[sysIdx] = true;
                 _currentTickSystemMetrics[sysIdx].SkipReason = SkipReason.Exception;
-                LogSystemException(sysIdx, sys.Name, ex);
+                LogSystemException(sysIdx, sys.Name, ex); CaptureSystemException(sysIdx, ex);
             }
             finally
             {
@@ -1049,6 +1063,48 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         }
     }
 
+    /// <summary>
+    /// Drain mode for a failed multi-chunk system. Claims every chunk that was never grabbed
+    /// (advances <c>_nextChunk</c> past <c>TotalChunks</c> via repeated <c>Increment</c>), and
+    /// decrements <c>_remainingChunks</c> once per claim — without running the chunk body. The
+    /// last decrementer (whichever worker happens to drive remaining to zero, possibly the same
+    /// worker that hit the original exception) fires <see cref="OnSystemComplete"/> so successors
+    /// get dispatched and the tick can finish.
+    /// </summary>
+    /// <remarks>
+    /// Why drain instead of break-and-bail: <see cref="FindReadySystem"/> uses
+    /// <c>_nextChunk[i].Value &lt; TotalChunks</c> as the "still has work" signal. Without
+    /// advancing <c>_nextChunk</c>, every worker that picks this sysIdx after the failure walks
+    /// into <see cref="ProcessPipeline"/> / <see cref="ProcessParallelQuery"/>, sees
+    /// <c>_systemFailed</c>, breaks, and immediately re-enters the worker loop — a tight
+    /// full-CPU spin that never fires <c>OnSystemComplete</c>. Multiple workers can race here
+    /// concurrently; <c>Interlocked.Increment</c> + <c>Interlocked.Decrement</c> give us a clean
+    /// claim/decrement protocol where exactly one worker observes <c>remaining == 0</c>.
+    /// </remarks>
+    private void DrainFailedSystemChunks(int sysIdx, int workerId, bool trackUtilization)
+    {
+        var totalChunks = Systems[sysIdx].TotalChunks;
+        while (true)
+        {
+            var chunk = Interlocked.Increment(ref _nextChunk[sysIdx].Value) - 1;
+            if (chunk >= totalChunks)
+            {
+                // No more chunks to claim. Either we already drove _remainingChunks to zero
+                // (handled below) or another worker did — either way, this worker's job is done.
+                return;
+            }
+            // Successfully claimed `chunk` without running it. Decrement remaining so the last
+            // claim fires OnSystemComplete and unblocks successor dispatch.
+            var remaining = Interlocked.Decrement(ref _remainingChunks[sysIdx].Value);
+            if (remaining == 0)
+            {
+                RecordSystemDone(sysIdx, Stopwatch.GetTimestamp());
+                OnSystemComplete(sysIdx, workerId, trackUtilization);
+                return;
+            }
+        }
+    }
+
     // ═══════════════════════════════════════════════════════════════
     // Parallel QuerySystem dispatch
     // ═══════════════════════════════════════════════════════════════
@@ -1062,10 +1118,13 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         var sys = Systems[sysIdx];
         while (true)
         {
-            // Early-exit: stop grabbing chunks if a prior chunk already failed — remaining work would be discarded
+            // See `ProcessPipeline` for the full rationale — same wedge applies here. Drain the
+            // remaining chunks so `FindReadySystem` stops returning this sysIdx and the last
+            // decrementer fires `OnSystemComplete` to dispatch successors.
             if (_systemFailed[sysIdx])
             {
-                break;
+                DrainFailedSystemChunks(sysIdx, workerId, trackUtilization);
+                return;
             }
 
             var chunk = Interlocked.Increment(ref _nextChunk[sysIdx].Value) - 1;
@@ -1091,7 +1150,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
             {
                 _systemFailed[sysIdx] = true;
                 _currentTickSystemMetrics[sysIdx].SkipReason = SkipReason.Exception;
-                LogSystemException(sysIdx, sys.Name, ex);
+                LogSystemException(sysIdx, sys.Name, ex); CaptureSystemException(sysIdx, ex);
             }
             finally
             {
@@ -1267,7 +1326,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
             success = false;
             _currentTickSystemMetrics[sysIdx].SkipReason = SkipReason.Exception;
             _systemFailed[sysIdx] = true;
-            LogSystemException(sysIdx, Systems[sysIdx].Name, ex);
+            LogSystemException(sysIdx, Systems[sysIdx].Name, ex); CaptureSystemException(sysIdx, ex);
         }
         finally
         {

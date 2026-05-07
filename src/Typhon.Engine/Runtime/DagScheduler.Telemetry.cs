@@ -83,11 +83,16 @@ public sealed partial class DagScheduler
             }
         }
 
-        // Capture event queue depth for telemetry and overload detection
+        // Capture event queue depth for telemetry and overload detection. Also emit per-(tick, queue)
+        // QueueTickEnd records (#311) so the cache builder can fold them into the v12 QueueTickSummaries
+        // section. Reading the accumulators here happens BEFORE the next tick's Reset() clears them.
         var queueDepth = 0;
         for (var i = 0; i < _eventQueues.Length; i++)
         {
-            queueDepth += _eventQueues[i].Count;
+            var q = _eventQueues[i];
+            var endOfTickDepth = (uint)q.Count;
+            queueDepth += (int)endOfTickDepth;
+            Profiler.TyphonEvent.EmitQueueTickEnd((uint)_currentTickNumber, q.QueueId, q.PeakDepth, endOfTickDepth, q.OverflowCount, q.Produced, q.Consumed);
         }
 
         // Update overload state machine — uses the EFFECTIVE ratio (vs current multiplier-adjusted target) so the detector can recognise headroom at high

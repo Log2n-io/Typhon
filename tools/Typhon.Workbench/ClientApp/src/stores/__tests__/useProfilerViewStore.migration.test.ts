@@ -40,7 +40,6 @@ describe('useProfilerViewStore — v0 → v1 migration', () => {
     useProfilerViewStore.setState({
       gaugeCollapse: {},
       gaugeRegionVisible: true,
-      legendsVisible: true,
       perSystemLanesVisible: true,
     });
   });
@@ -114,6 +113,5 @@ describe('useProfilerViewStore — v0 → v1 migration', () => {
     const state = useProfilerViewStore.getState();
     expect(state.gaugeCollapse).toEqual({});
     expect(state.gaugeRegionVisible).toBe(true);
-    expect(state.legendsVisible).toBe(true);
   });
 });

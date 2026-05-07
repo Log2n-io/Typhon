@@ -158,6 +158,7 @@ public class FileExporterIntegrationTests
         reader.ReadSystemDefinitions();
         reader.ReadArchetypes();
         reader.ReadComponentTypes();
+        reader.ReadPhases();
 
         // Walk all blocks + all records; tally what we saw.
         var kindCounts = new Dictionary<TraceEventKind, int>();

@@ -1,4 +1,3 @@
-using System.Text.Json;
 using Typhon.Workbench.Sessions;
 using WbSession = Typhon.Workbench.Sessions.ISession;
 
@@ -7,6 +6,9 @@ namespace Typhon.Workbench.Streams;
 public static class HeartbeatStream
 {
     private static readonly TimeSpan Interval = TimeSpan.FromSeconds(10);
+
+    /// <summary>SSE event type. Clients listen via <c>addEventListener('heartbeat', ...)</c>.</summary>
+    public const string EventType = "heartbeat";
 
     public static async Task HandleAsync(
         Guid sessionId,
@@ -36,7 +38,7 @@ public static class HeartbeatStream
             return;
         }
 
-        if (session is not OpenSession open)
+        if (session is not OpenSession)
         {
             // Attach/Trace sessions have no heartbeat semantics yet — refuse rather than silently
             // serve zeroed payloads that misrepresent the session state to the UI.
@@ -44,15 +46,13 @@ public static class HeartbeatStream
             return;
         }
 
-        ctx.Response.Headers.ContentType = "text/event-stream";
-        ctx.Response.Headers.CacheControl = "no-cache";
-        ctx.Response.Headers.Connection = "keep-alive";
+        await SseExtensions.WriteSseHeadersAsync(ctx, ct);
 
         try
         {
             while (!ct.IsCancellationRequested)
             {
-                var payload = JsonSerializer.Serialize(new
+                var payload = new
                 {
                     timestamp = DateTimeOffset.UtcNow,
                     // revision: still a placeholder — DatabaseEngine doesn't expose a global monotonic revision yet.
@@ -62,10 +62,9 @@ public static class HeartbeatStream
                     memoryMb = GC.GetTotalMemory(forceFullCollection: false) / 1_000_000,
                     tickRate = (int?)null,
                     activeTransactionCount = (int?)null,
-                    lastTickDurationMs = (float?)null
-                });
-                await ctx.Response.WriteAsync($"data: {payload}\n\n", ct);
-                await ctx.Response.Body.FlushAsync(ct);
+                    lastTickDurationMs = (float?)null,
+                };
+                await SseExtensions.WriteEventAsync(ctx, EventType, payload, ct);
                 await Task.Delay(Interval, ct);
             }
         }

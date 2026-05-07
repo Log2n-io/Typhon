@@ -56,6 +56,7 @@ public partial class Main : Node2D
                 foreach (var exp in _exporters) TyphonProfiler.AttachExporter(exp);
                 var metadata = ProfilerSetup.BuildSessionMetadata(
                     _bridge.Systems, workerCount: 16, baseTickRate: 60f,
+                    phases: _bridge.PhaseNames,
                     currentEngineTickProvider: () => _bridge?.CurrentTick ?? 0);
 
                 if (_profilerConfig.LiveWaitMs > 0 && _profilerConfig.LivePort >= 0)

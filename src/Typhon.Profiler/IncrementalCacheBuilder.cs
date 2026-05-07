@@ -51,6 +51,46 @@ public sealed class IncrementalCacheBuilder : IDisposable
     private readonly Dictionary<int, (uint InvocationCount, double TotalDurationUs)> _systemAggregates = new();
     private readonly List<ChunkManifestEntry> _chunkManifest = new(capacity: 256);
 
+    // ── v12 accumulators (#311) ─────────────────────────────────────────────
+    // Per-tick scratch state for SystemTickSummary[]. Keyed by systemIndex; flushed at FinalizeCurrentTick().
+    private readonly Dictionary<ushort, SystemTickAccumulator> _currentTickSystems = new();
+    private readonly List<SystemTickSummary> _systemTickSummaries = new(capacity: 4096);
+    // Per-tick scratch state for QueueTickSummary[]. Keyed by queueId; flushed at tick-finalize.
+    private readonly Dictionary<ushort, QueueTickEndData> _currentTickQueues = new();
+    private readonly List<QueueTickSummary> _queueTickSummaries = new(capacity: 1024);
+    private readonly Dictionary<ushort, string> _queueIdToName = new();
+    // Per-tick scratch state for PostTickSummary. One row per tick; mutated as each RuntimePhaseSpan arrives.
+    private PostTickSummary _currentTickPostMarkers;
+    private bool _currentTickPostMarkersHasData;
+    private readonly List<PostTickSummary> _postTickSummaries = new(capacity: 4096);
+
+    /// <summary>Per-system per-tick scratch row, accumulated as <c>SystemReady</c> / <c>SystemSkipped</c> / <c>SchedulerChunk</c> events arrive.</summary>
+    private struct SystemTickAccumulator
+    {
+        public long ReadyTs;          // Stopwatch ticks (0 = unobserved)
+        public long FirstChunkStartTs; // 0 = no chunk yet
+        public long LastChunkEndTs;    // 0 = no chunk yet
+        public uint EntitiesProcessed;
+        public ushort ChunksProcessed;
+        public uint WorkersTouchedMask; // bit per threadSlot, capped at 32 (good enough for "distinct workers" diagnostic)
+        public byte SkipReasonCode;     // 0 = NotSkipped
+    }
+
+    /// <summary>Read-only view of finalized per-(tick, system) rows.</summary>
+    public IReadOnlyList<SystemTickSummary> SystemTickSummaries => _systemTickSummaries;
+
+    /// <summary>Read-only view of finalized per-(tick, queue) rows.</summary>
+    public IReadOnlyList<QueueTickSummary> QueueTickSummaries => _queueTickSummaries;
+
+    /// <summary>Read-only view of finalized per-tick post-tick markers.</summary>
+    public IReadOnlyList<PostTickSummary> PostTickSummaries => _postTickSummaries;
+
+    /// <summary>Queue-id → display-name map captured from the engine's Init metadata (set externally by the live / replay paths).</summary>
+    public IReadOnlyDictionary<ushort, string> QueueIdToName => _queueIdToName;
+
+    /// <summary>Register a queue's display name. Called by live / replay paths after parsing the engine Init metadata.</summary>
+    public void RegisterQueueName(ushort queueId, string name) => _queueIdToName[queueId] = name ?? string.Empty;
+
     private bool _tickActive;
     private readonly MemoryStream _preTickBuffer = new(capacity: 4096);
     private uint _preTickEventCount;
@@ -353,7 +393,10 @@ public sealed class IncrementalCacheBuilder : IDisposable
                     // Allow it to update (it nudges DurationUs to include post-TickEnd setup time), then seal so
                     // nothing after the wait-start is counted.
                     if (startTs > _currentTickLastTs)
+                    {
                         _currentTickLastTs = startTs;
+                    }
+
                     _tickEndSeen = true;
                 }
                 else if (!_tickEndSeen && startTs > _currentTickLastTs)
@@ -398,6 +441,9 @@ public sealed class IncrementalCacheBuilder : IDisposable
                     _currentConsecutiveOverrun = BinaryPrimitives.ReadUInt16LittleEndian(records[(p + 12)..]);
                     _currentConsecutiveUnderrun = BinaryPrimitives.ReadUInt16LittleEndian(records[(p + 14)..]);
                 }
+
+                // ── v12 fold (#311) ─────────────────────────────────────────────────
+                FoldV12Event(kind, records, pos, size, startTs);
 
                 if (IsCompletionKind(kind) && size >= CommonHeaderSize + SpanHeaderExtSize)
                 {
@@ -451,8 +497,16 @@ public sealed class IncrementalCacheBuilder : IDisposable
                 if (_preTickBuffer.Length + size <= PreTickBufferCap)
                 {
                     _preTickBuffer.Write(records.Slice(pos, size));
-                    if (startTs < _preTickFirstTs) _preTickFirstTs = startTs;
-                    if (startTs > _preTickLastTs) _preTickLastTs = startTs;
+                    if (startTs < _preTickFirstTs)
+                    {
+                        _preTickFirstTs = startTs;
+                    }
+
+                    if (startTs > _preTickLastTs)
+                    {
+                        _preTickLastTs = startTs;
+                    }
+
                     _preTickEventCount++;
                 }
                 else
@@ -548,29 +602,37 @@ public sealed class IncrementalCacheBuilder : IDisposable
         }
         _disposed = true;
 
-        FinalizePendingState();
-
-        if (_sink.SupportsTrailer)
+        try
         {
-            // Source-derived close path: no embedded SourceMetadata, no IsSelfContained flag, fingerprint from constructor.
-            // (The live save-as-replay flow does NOT go through this; it builds + writes its own trailer against a fresh sink with a
-            //  RELOCATED manifest — see AttachSessionRuntime.SaveSessionCore.)
-            var metrics = BuildGlobalMetricsSnapshot();
-            var aggArr = GetSystemAggregatesSnapshot();
-            var cacheHeader = new CacheHeader
+            FinalizePendingState();
+
+            if (_sink.SupportsTrailer)
             {
-                Flags = 0,
-                SourceVersion = _header.Version,
-                ChunkerVersion = TraceFileCacheConstants.CurrentChunkerVersion,
-                CreatedUtcTicks = DateTime.UtcNow.Ticks,
-            };
-            CacheHeader.SetIdentifier(ref cacheHeader, _fingerprint);
-            _sink.WriteTrailer(_tickSummaries, metrics, aggArr, _chunkManifest, _spanNames, sourceMetadataBytes: default, cacheHeader);
+                // Source-derived close path: no embedded SourceMetadata, no IsSelfContained flag, fingerprint from constructor.
+                // (The live save-as-replay flow does NOT go through this; it builds + writes its own trailer against a fresh sink with a
+                //  RELOCATED manifest — see AttachSessionRuntime.SaveSessionCore.)
+                var metrics = BuildGlobalMetricsSnapshot();
+                var aggArr = GetSystemAggregatesSnapshot();
+                var cacheHeader = new CacheHeader
+                {
+                    Flags = 0,
+                    SourceVersion = _header.Version,
+                    ChunkerVersion = TraceFileCacheConstants.CurrentChunkerVersion,
+                    CreatedUtcTicks = DateTime.UtcNow.Ticks,
+                };
+                CacheHeader.SetIdentifier(ref cacheHeader, _fingerprint);
+                _sink.WriteTrailer(_tickSummaries, metrics, aggArr, _chunkManifest, _spanNames, default, cacheHeader,
+                    _systemTickSummaries, _queueTickSummaries, _postTickSummaries, _queueIdToName);
+            }
         }
-
-        if (_ownsSink)
+        finally
         {
-            _sink.Dispose();
+            // Always release the sink even if trailer-write throws — otherwise the OS file handle leaks and the file stays
+            // locked, masking the real exception with a downstream "file in use" error in the test harness or save flow.
+            if (_ownsSink)
+            {
+                _sink.Dispose();
+            }
         }
     }
 
@@ -619,6 +681,7 @@ public sealed class IncrementalCacheBuilder : IDisposable
         reader.ReadSystemDefinitions();
         reader.ReadArchetypes();
         reader.ReadComponentTypes();
+        reader.ReadPhases(); // v6+ section; reader returns empty for v5 traces without consuming bytes.
 
         var profilerHeader = new ProfilerHeader
         {
@@ -722,7 +785,11 @@ public sealed class IncrementalCacheBuilder : IDisposable
         }
 
         var durationUs = (_currentTickLastTs - _currentTickFirstTs) / _ticksPerUs;
-        if (durationUs < 0) durationUs = 0;
+        if (durationUs < 0)
+        {
+            durationUs = 0;
+        }
+
         var maxSysUs = _currentMaxSystemDurationTicks / _ticksPerUs;
         var startUs = _currentTickFirstTs / _ticksPerUs;
 
@@ -755,7 +822,254 @@ public sealed class IncrementalCacheBuilder : IDisposable
             _globalMaxSystemDurationUs = maxSysUs;
         }
 
+        // v12 (#311): flush per-tick scratch state into the dense rollup lists.
+        FlushV12CurrentTick();
+
         TickFinalized?.Invoke(summary);
+    }
+
+    /// <summary>
+    /// Flush per-tick v12 scratch state — system rows, queue rows, post-tick row — into the cumulative section lists.
+    /// Called from <see cref="FinalizeCurrentTick"/> immediately after the v11 <see cref="TickSummary"/> entry is appended, so the per-tick rows appear in
+    /// tick-monotonic order. Called even when none of the v12-specific events arrived in this tick (e.g. legacy v11 traces replayed against a v12 reader): the
+    /// system/queue/post-tick rows are simply empty for that tick and consumers see zero per-tick records.
+    /// </summary>
+    private void FlushV12CurrentTick()
+    {
+        var ticksPerUs = _ticksPerUs;
+        var tickStartTs = _currentTickFirstTs;
+        var tickNumber = _currentTickNumber;
+
+        // Per-system rows. Order by SystemIndex for deterministic output (binary-search friendly).
+        if (_currentTickSystems.Count > 0)
+        {
+            // Reusable temp list — small (≤ N systems) — populated, sorted, appended.
+            var sysIdxBuf = new ushort[_currentTickSystems.Count];
+            var sk = 0;
+            foreach (var key in _currentTickSystems.Keys)
+            {
+                sysIdxBuf[sk++] = key;
+            }
+
+            Array.Sort(sysIdxBuf);
+            for (var i = 0; i < sysIdxBuf.Length; i++)
+            {
+                var sysIdx = sysIdxBuf[i];
+                var acc = _currentTickSystems[sysIdx];
+
+                var skipped = acc.SkipReasonCode != 0;
+                var startUs = (acc.FirstChunkStartTs > 0) ? (acc.FirstChunkStartTs - tickStartTs) / ticksPerUs : 0;
+                var endUs = (acc.LastChunkEndTs > 0) ? (acc.LastChunkEndTs - tickStartTs) / ticksPerUs : 0;
+                var readyUs = (acc.ReadyTs > 0) ? (acc.ReadyTs - tickStartTs) / ticksPerUs : 0;
+                var durationUs = endUs > startUs ? endUs - startUs : 0;
+                if (skipped)
+                {
+                    startUs = 0; endUs = 0; durationUs = 0;
+                }
+                _systemTickSummaries.Add(new SystemTickSummary
+                {
+                    TickNumber = tickNumber,
+                    SystemIndex = sysIdx,
+                    SkipReasonCode = acc.SkipReasonCode,
+                    Flags = 0,
+                    StartUs = startUs,
+                    EndUs = endUs,
+                    ReadyUs = readyUs,
+                    DurationUs = (float)durationUs,
+                    EntitiesProcessed = acc.EntitiesProcessed,
+                    WorkersTouched = (byte)System.Numerics.BitOperations.PopCount(acc.WorkersTouchedMask),
+                    ChunksProcessed = acc.ChunksProcessed,
+                    _reserved = 0,
+                });
+            }
+            _currentTickSystems.Clear();
+        }
+
+        // Per-queue rows. Order by QueueId.
+        if (_currentTickQueues.Count > 0)
+        {
+            var qIdxBuf = new ushort[_currentTickQueues.Count];
+            var qk = 0;
+            foreach (var key in _currentTickQueues.Keys)
+            {
+                qIdxBuf[qk++] = key;
+            }
+
+            Array.Sort(qIdxBuf);
+            for (var i = 0; i < qIdxBuf.Length; i++)
+            {
+                var qid = qIdxBuf[i];
+                var data = _currentTickQueues[qid];
+                _queueTickSummaries.Add(new QueueTickSummary
+                {
+                    TickNumber = tickNumber,
+                    QueueId = qid,
+                    _reserved = 0,
+                    PeakDepth = data.PeakDepth,
+                    EndOfTickDepth = data.EndOfTickDepth,
+                    OverflowCount = data.OverflowCount,
+                    Produced = data.Produced,
+                    Consumed = data.Consumed,
+                });
+            }
+            _currentTickQueues.Clear();
+        }
+
+        // Post-tick row. Always emit one row per tick — zero µs for phases that didn't fire — so consumers can index by tick.
+        if (_currentTickPostMarkersHasData)
+        {
+            _currentTickPostMarkers.TickNumber = tickNumber;
+            _currentTickPostMarkers._reserved = 0;
+            _postTickSummaries.Add(_currentTickPostMarkers);
+        }
+        _currentTickPostMarkers = default;
+        _currentTickPostMarkersHasData = false;
+    }
+
+    /// <summary>
+    /// Per-event v12 fold (#311). Pure observer — does not mutate the chunk byte stream. Called from the inner dispatch loop
+    /// for every record that lands during an active tick. Cheap: dictionary updates + a few BinaryPrimitives reads. Records that
+    /// fall outside the v12 fold's interest set (most events) hit the default branch and return immediately.
+    /// </summary>
+    private void FoldV12Event(TraceEventKind kind, ReadOnlySpan<byte> records, int pos, int size, long startTs)
+    {
+        switch (kind)
+        {
+            case TraceEventKind.SystemReady:
+            {
+                // Payload: u16 systemIdx (offset 12). Total record = 16 B.
+                if (size < CommonHeaderSize + 2)
+                {
+                    return;
+                }
+
+                var sysIdx = BinaryPrimitives.ReadUInt16LittleEndian(records[(pos + CommonHeaderSize)..]);
+                ref var acc = ref GetOrCreateSystemAcc(sysIdx);
+                if (acc.ReadyTs == 0)
+                {
+                    acc.ReadyTs = startTs; // First observation wins (same-tick re-ready shouldn't happen).
+                }
+
+                break;
+            }
+            case TraceEventKind.SystemSkipped:
+            {
+                // Payload: u16 systemIdx, u8 skipReason (offset 14). Total = 19 B.
+                if (size < CommonHeaderSize + 3)
+                {
+                    return;
+                }
+
+                var sysIdx = BinaryPrimitives.ReadUInt16LittleEndian(records[(pos + CommonHeaderSize)..]);
+                var skipReason = records[pos + CommonHeaderSize + 2];
+                ref var acc = ref GetOrCreateSystemAcc(sysIdx);
+                if (skipReason != 0)
+                {
+                    acc.SkipReasonCode = skipReason;
+                }
+
+                break;
+            }
+            case TraceEventKind.SchedulerChunk:
+            {
+                // Span event. Header: 12 B common + 25 B span ext = 37 B. Payload after that:
+                //   u16 systemIdx, u16 chunkIdx, u16 totalChunks, i32 entitiesProcessed = 10 B.
+                if (size < CommonHeaderSize + SpanHeaderExtSize + 10)
+                {
+                    return;
+                }
+
+                var spanFlags = records[pos + 36];
+                var hasTraceContext = (spanFlags & 0x01) != 0;
+                var payloadOffset = pos + CommonHeaderSize + SpanHeaderExtSize + (hasTraceContext ? TraceContextSize : 0);
+                if (payloadOffset + 10 > pos + size)
+                {
+                    return;
+                }
+
+                var sysIdx = BinaryPrimitives.ReadUInt16LittleEndian(records[payloadOffset..]);
+                var entities = BinaryPrimitives.ReadInt32LittleEndian(records[(payloadOffset + 6)..]);
+                var durationTicks = BinaryPrimitives.ReadInt64LittleEndian(records[(pos + CommonHeaderSize)..]);
+                var threadSlot = records[pos + 3]; // common header byte 3 (after size + kind)
+
+                ref var acc = ref GetOrCreateSystemAcc(sysIdx);
+                var endTs = startTs + durationTicks;
+                if (acc.FirstChunkStartTs == 0 || startTs < acc.FirstChunkStartTs)
+                {
+                    acc.FirstChunkStartTs = startTs;
+                }
+
+                if (endTs > acc.LastChunkEndTs)
+                {
+                    acc.LastChunkEndTs = endTs;
+                }
+
+                acc.EntitiesProcessed += (uint)Math.Max(0, entities);
+                if (acc.ChunksProcessed < ushort.MaxValue)
+                {
+                    acc.ChunksProcessed++;
+                }
+
+                if (threadSlot < 32)
+                {
+                    acc.WorkersTouchedMask |= 1u << threadSlot;
+                }
+
+                break;
+            }
+            case TraceEventKind.QueueTickEnd:
+            {
+                if (size < QueueTickEndCodec.Size)
+                {
+                    return;
+                }
+
+                var data = QueueTickEndCodec.Read(records.Slice(pos, size));
+                _currentTickQueues[data.QueueId] = data;
+                break;
+            }
+            case TraceEventKind.RuntimePhaseSpan:
+            {
+                // Span event with u8 phase payload. Need durationTicks + the trailing phase byte.
+                if (size < CommonHeaderSize + SpanHeaderExtSize + 1)
+                {
+                    return;
+                }
+
+                var spanFlags = records[pos + 36];
+                var hasTraceContext = (spanFlags & 0x01) != 0;
+                var hasSourceLocation = (spanFlags & 0x02) != 0;
+                var headerSize = TraceRecordHeader.SpanHeaderSize(hasTraceContext, hasSourceLocation);
+                if (pos + headerSize + 1 > pos + size)
+                {
+                    return;
+                }
+
+                var phase = records[pos + headerSize];
+                var durationTicks = BinaryPrimitives.ReadInt64LittleEndian(records[(pos + CommonHeaderSize)..]);
+                var durationUs = (float)(durationTicks / _ticksPerUs);
+                _currentTickPostMarkersHasData = true;
+                switch ((TickPhase)phase)
+                {
+                    case TickPhase.WriteTickFence: _currentTickPostMarkers.WriteTickFenceUs += durationUs; break;
+                    case TickPhase.UowFlush:        _currentTickPostMarkers.WalFlushUs += durationUs; break;
+                    case TickPhase.OutputPhase:     _currentTickPostMarkers.SubscriptionOutputUs += durationUs; break;
+                    case TickPhase.TierIndexRebuild:_currentTickPostMarkers.TierIndexRebuildUs += durationUs; break;
+                    case TickPhase.DormancySweep:   _currentTickPostMarkers.DormancySweepUs += durationUs; break;
+                    // SystemDispatch is the system DAG itself — not part of the post-tick serial block.
+                    default: _currentTickPostMarkersHasData = (_currentTickPostMarkers.WriteTickFenceUs + _currentTickPostMarkers.WalFlushUs
+                        + _currentTickPostMarkers.SubscriptionOutputUs + _currentTickPostMarkers.TierIndexRebuildUs
+                        + _currentTickPostMarkers.DormancySweepUs) > 0; break;
+                }
+                break;
+            }
+        }
+    }
+
+    private ref SystemTickAccumulator GetOrCreateSystemAcc(ushort systemIndex)
+    {
+        ref var acc = ref System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault(_currentTickSystems, systemIndex, out _);
+        return ref acc;
     }
 
     private void FlushChunkInternal(uint toTick)

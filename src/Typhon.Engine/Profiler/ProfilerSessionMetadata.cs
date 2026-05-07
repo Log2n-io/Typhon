@@ -44,8 +44,15 @@ public sealed class ProfilerSessionMetadata
     /// </summary>
     public long SamplingSessionStartQpc { get; }
 
+    /// <summary>
+    /// User-defined phase order from <c>RuntimeOptions.Phases</c> (RFC 07 §Q3). Surfaced through the trace v6 PhasesTable section and the
+    /// Workbench Data API <c>/topology</c> endpoint so DAG-view consumers can render phase columns. Empty array when the host runs without a
+    /// scheduler (e.g., standalone profiling) or with no phase declarations.
+    /// </summary>
+    public string[] Phases { get; }
+
     public ProfilerSessionMetadata(SystemDefinitionRecord[] systems, ArchetypeRecord[] archetypes, ComponentTypeRecord[] componentTypes, int workerCount,
-        float baseTickRate, long startTimestamp, long stopwatchFrequency, DateTime startedUtc, long samplingSessionStartQpc = 0)
+        float baseTickRate, long startTimestamp, long stopwatchFrequency, DateTime startedUtc, long samplingSessionStartQpc = 0, string[] phases = null)
     {
         Systems = systems ?? [];
         Archetypes = archetypes ?? [];
@@ -56,5 +63,6 @@ public sealed class ProfilerSessionMetadata
         StopwatchFrequency = stopwatchFrequency;
         StartedUtc = startedUtc;
         SamplingSessionStartQpc = samplingSessionStartQpc;
+        Phases = phases ?? [];
     }
 }

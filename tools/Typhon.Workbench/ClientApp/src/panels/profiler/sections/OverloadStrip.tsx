@@ -2,8 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Expand, X } from 'lucide-react';
 import { useProfilerSessionStore } from '@/stores/useProfilerSessionStore';
-import { useProfilerViewStore } from '@/stores/useProfilerViewStore';
 import { useThemeStore } from '@/stores/useThemeStore';
+import { useUiPrefsStore } from '@/stores/useUiPrefsStore';
 import { setupCanvas } from '@/libs/profiler/canvas/canvasUtils';
 import { getStudioThemeTokens } from '@/libs/profiler/canvas/theme';
 import {
@@ -133,7 +133,7 @@ interface OverloadCanvasProps {
 }
 
 function OverloadCanvas({ rows, targetMsForBaseRate, scrollable, showExpandButton, onExpandClick }: OverloadCanvasProps): React.JSX.Element {
-  const legendsVisible = useProfilerViewStore((s) => s.legendsVisible);
+  const legendsVisible = useUiPrefsStore((s) => s.legendsVisible);
   useThemeStore((s) => s.theme); // subscribe so the component re-renders on theme switch
 
   const canvasRef   = useRef<HTMLCanvasElement>(null);

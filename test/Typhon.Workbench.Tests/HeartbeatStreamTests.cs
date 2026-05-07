@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using NUnit.Framework;
 using Typhon.Workbench.Dtos.Sessions;
+using Typhon.Workbench.Tests.Fixtures;
 
 namespace Typhon.Workbench.Tests;
 
@@ -50,10 +51,11 @@ public sealed class HeartbeatStreamTests
         await using var stream = await response.Content.ReadAsStreamAsync(testCt);
         using var reader = new StreamReader(stream);
 
-        var line = await reader.ReadLineAsync(testCt);
-        Assert.That(line, Does.StartWith("data:"));
-        var json = line!["data:".Length..].Trim();
-        using var doc = JsonDocument.Parse(json);
+        var frame = await SseFrameReader.ReadFrameAsync(reader, testCt);
+        Assert.That(frame, Is.Not.Null, "expected at least one SSE frame");
+        Assert.That(frame.Value.EventType, Is.EqualTo("heartbeat"),
+            "post-#308 wire format: heartbeat frames carry event type on the SSE event: line");
+        using var doc = JsonDocument.Parse(frame.Value.Data);
         Assert.That(doc.RootElement.TryGetProperty("revision", out _), Is.True, "payload missing 'revision'");
         Assert.That(doc.RootElement.TryGetProperty("memoryMb", out _), Is.True, "payload missing 'memoryMb'");
     }

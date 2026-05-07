@@ -14,6 +14,7 @@ export const customFetch = async <T>(url: string, init?: RequestInit): Promise<T
   if (token && !headers.has('X-Session-Token')) {
     headers.set('X-Session-Token', token);
   }
+  headers.set('X-Workbench-Api', '1');
 
   const response = await fetch(url, { ...init, headers });
 

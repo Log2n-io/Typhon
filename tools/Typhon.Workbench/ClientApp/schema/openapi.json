@@ -102,6 +102,377 @@
         }
       }
     },
+    "/api/sessions/{sessionId}/stream": {
+      "get": {
+        "tags": [
+          "Data"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/options/stream": {
+      "get": {
+        "tags": [
+          "Options"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/sessions/{sessionId}/topology": {
+      "get": {
+        "tags": [
+          "Data"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TopologyDto"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{sessionId}/queries/who-writes/{component}": {
+      "get": {
+        "tags": [
+          "Data"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "component",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemListDto"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{sessionId}/queries/who-reads/{component}": {
+      "get": {
+        "tags": [
+          "Data"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "component",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemListDto"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{sessionId}/tracks": {
+      "get": {
+        "tags": [
+          "Data"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TracksResponseDto"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{sessionId}/track/{trackId}": {
+      "get": {
+        "tags": [
+          "Data"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "trackId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "schema": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": [
+                "integer",
+                "string"
+              ],
+              "format": "uint32",
+              "default": 0
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "schema": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": [
+                "integer",
+                "string"
+              ],
+              "format": "uint32",
+              "default": 4294967295
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrackDataResponseDto"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{sessionId}/aggregate": {
+      "post": {
+        "tags": [
+          "Data"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AggregationRequestDto"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AggregationRequestDto"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/AggregationRequestDto"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AggregationResponseDto"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{sessionId}/subscribe": {
+      "post": {
+        "tags": [
+          "Data"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StreamSubscriptionRequestDto"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StreamSubscriptionRequestDto"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/StreamSubscriptionRequestDto"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/sessions/{sessionId}/unsubscribe": {
+      "post": {
+        "tags": [
+          "Data"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StreamSubscriptionRequestDto"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StreamSubscriptionRequestDto"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/StreamSubscriptionRequestDto"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
     "/api/fs/home": {
       "get": {
         "tags": [
@@ -349,6 +720,140 @@
         }
       }
     },
+    "/api/options": {
+      "get": {
+        "tags": [
+          "Options"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkbenchOptions"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "Options"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkbenchOptions"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkbenchOptions"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkbenchOptions"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkbenchOptions"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/options/editor": {
+      "patch": {
+        "tags": [
+          "Options"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EditorOptions"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EditorOptions"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/EditorOptions"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkbenchOptions"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/options/profiler": {
+      "patch": {
+        "tags": [
+          "Options"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProfilerOptions"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProfilerOptions"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProfilerOptions"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkbenchOptions"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/sessions/{sessionId}/profiler/metadata": {
       "get": {
         "tags": [
@@ -372,6 +877,36 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ProfilerMetadataDto"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{sessionId}/profiler/source-locations": {
+      "get": {
+        "tags": [
+          "Profiler"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceLocationManifestDto"
                 }
               }
             }
@@ -481,6 +1016,116 @@
         "responses": {
           "200": {
             "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/profiler/workspace-root": {
+      "get": {
+        "tags": [
+          "Profiler"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceRootDto"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/profiler/open-in-editor": {
+      "post": {
+        "tags": [
+          "Profiler"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OpenInEditorRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OpenInEditorRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/OpenInEditorRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenInEditorResult"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/profiler/source": {
+      "get": {
+        "tags": [
+          "Profiler"
+        ],
+        "parameters": [
+          {
+            "name": "path",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "line",
+            "in": "query",
+            "schema": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": [
+                "integer",
+                "string"
+              ],
+              "format": "int32"
+            }
+          },
+          {
+            "name": "context",
+            "in": "query",
+            "schema": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": [
+                "integer",
+                "string"
+              ],
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceWindowDto"
+                }
+              }
+            }
           }
         }
       }
@@ -954,10 +1599,204 @@
           }
         }
       }
+    },
+    "/api/sessions/{id}/state": {
+      "get": {
+        "tags": [
+          "Sessions"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionStateDto"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/system/os": {
+      "get": {
+        "tags": [
+          "System"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OsInfo"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
     "schemas": {
+      "AggregationQueryDto": {
+        "required": [
+          "trackId",
+          "field",
+          "op",
+          "range"
+        ],
+        "type": "object",
+        "properties": {
+          "trackId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "field": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "op": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "range": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": [
+                "integer",
+                "string"
+              ],
+              "format": "uint32"
+            }
+          },
+          "buckets": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "n": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "samples": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          }
+        }
+      },
+      "AggregationRequestDto": {
+        "required": [
+          "queries"
+        ],
+        "type": "object",
+        "properties": {
+          "queries": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/AggregationQueryDto"
+            }
+          }
+        }
+      },
+      "AggregationResponseDto": {
+        "required": [
+          "results"
+        ],
+        "type": "object",
+        "properties": {
+          "results": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/AggregationResultDto"
+            }
+          }
+        }
+      },
+      "AggregationResultDto": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "null",
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "histogram": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/HistogramBucketDto"
+            }
+          },
+          "topK": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/TopKEntryDto"
+            }
+          },
+          "cdf": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/CdfSampleDto"
+            }
+          }
+        }
+      },
       "ArchetypeDto": {
         "required": [
           "archetypeId",
@@ -1048,6 +1887,31 @@
             "format": "int32"
           },
           "occupancyPct": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          }
+        }
+      },
+      "CdfSampleDto": {
+        "required": [
+          "quantile",
+          "value"
+        ],
+        "type": "object",
+        "properties": {
+          "quantile": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "value": {
             "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
             "type": [
               "number",
@@ -1435,6 +2299,23 @@
           }
         }
       },
+      "EditorKind": {
+        "type": "integer"
+      },
+      "EditorOptions": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/EditorKind"
+          },
+          "customCommand": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
       "FieldDto": {
         "required": [
           "name",
@@ -1680,6 +2561,40 @@
           }
         }
       },
+      "HistogramBucketDto": {
+        "required": [
+          "bucketStart",
+          "bucketEnd",
+          "count"
+        ],
+        "type": "object",
+        "properties": {
+          "bucketStart": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "bucketEnd": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "count": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          }
+        }
+      },
       "IndexInfoDto": {
         "required": [
           "fieldName",
@@ -1722,6 +2637,81 @@
             ]
           }
         }
+      },
+      "OpenInEditorRequest": {
+        "required": [
+          "file",
+          "line",
+          "column"
+        ],
+        "type": "object",
+        "properties": {
+          "file": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "line": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "column": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          }
+        }
+      },
+      "OpenInEditorResult": {
+        "required": [
+          "ok",
+          "error",
+          "hint"
+        ],
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "error": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "hint": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "OsInfo": {
+        "required": [
+          "os"
+        ],
+        "type": "object",
+        "properties": {
+          "os": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "PostTickSummary": {
+        "type": "object"
       },
       "ProfilerHeaderDto": {
         "required": [
@@ -1822,7 +2812,12 @@
           "globalMetrics",
           "tickSummaries",
           "chunkManifest",
-          "gcSuspensions"
+          "gcSuspensions",
+          "phases",
+          "systemTickSummaries",
+          "queueTickSummaries",
+          "postTickSummaries",
+          "queueIdToName"
         ],
         "type": "object",
         "properties": {
@@ -1900,8 +2895,67 @@
             "items": {
               "$ref": "#/components/schemas/GcSuspensionDto"
             }
+          },
+          "phases": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "systemTickSummaries": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/SystemTickSummary"
+            }
+          },
+          "queueTickSummaries": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/QueueTickSummary"
+            }
+          },
+          "postTickSummaries": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/PostTickSummary"
+            }
+          },
+          "queueIdToName": {
+            "type": [
+              "null",
+              "object"
+            ],
+            "additionalProperties": {
+              "type": "string"
+            }
           }
         }
+      },
+      "ProfilerOptions": {
+        "type": "object",
+        "properties": {
+          "workspaceRoot": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "QueueTickSummary": {
+        "type": "object"
       },
       "ResourceGraphDto": {
         "required": [
@@ -2090,6 +3144,234 @@
             "items": {
               "$ref": "#/components/schemas/SessionDiagnosticDto"
             }
+          },
+          "lifecycle": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "isStreaming": {
+            "type": "boolean",
+            "default": false
+          },
+          "isPaused": {
+            "type": "boolean",
+            "default": false
+          },
+          "isReattaching": {
+            "type": "boolean",
+            "default": false
+          },
+          "schemaCompatibility": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "reason": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "SessionStateDto": {
+        "required": [
+          "kind",
+          "lifecycle",
+          "isStreaming",
+          "isPaused",
+          "isReattaching",
+          "schemaCompatibility",
+          "reason"
+        ],
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "lifecycle": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "isStreaming": {
+            "type": "boolean"
+          },
+          "isPaused": {
+            "type": "boolean"
+          },
+          "isReattaching": {
+            "type": "boolean"
+          },
+          "schemaCompatibility": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "reason": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "SourceLocationEntryDto": {
+        "required": [
+          "id",
+          "fileId",
+          "line",
+          "kind",
+          "method"
+        ],
+        "type": "object",
+        "properties": {
+          "id": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint16"
+          },
+          "fileId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint16"
+          },
+          "line": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint32"
+          },
+          "kind": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "method": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "SourceLocationFileDto": {
+        "required": [
+          "fileId",
+          "path"
+        ],
+        "type": "object",
+        "properties": {
+          "fileId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint16"
+          },
+          "path": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "SourceLocationManifestDto": {
+        "required": [
+          "files",
+          "entries"
+        ],
+        "type": "object",
+        "properties": {
+          "files": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/SourceLocationFileDto"
+            }
+          },
+          "entries": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/SourceLocationEntryDto"
+            }
+          }
+        }
+      },
+      "SourceWindowDto": {
+        "required": [
+          "file",
+          "line",
+          "startLine",
+          "endLine",
+          "lines"
+        ],
+        "type": "object",
+        "properties": {
+          "file": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "line": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "startLine": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "endLine": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "lines": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
           }
         }
       },
@@ -2136,6 +3418,28 @@
           }
         }
       },
+      "StreamSubscriptionRequestDto": {
+        "required": [
+          "streamId",
+          "events"
+        ],
+        "type": "object",
+        "properties": {
+          "streamId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "events": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
       "SystemAggregateDto": {
         "required": [
           "systemIndex",
@@ -2179,7 +3483,21 @@
           "isParallel",
           "tierFilter",
           "predecessors",
-          "successors"
+          "successors",
+          "phaseName",
+          "isExclusivePhase",
+          "reads",
+          "readsFresh",
+          "readsSnapshot",
+          "additionalReads",
+          "writes",
+          "sideWrites",
+          "writesEvents",
+          "readsEvents",
+          "writesResources",
+          "readsResources",
+          "explicitAfter",
+          "explicitBefore"
         ],
         "type": "object",
         "properties": {
@@ -2250,6 +3568,147 @@
                 "string"
               ],
               "format": "uint16"
+            }
+          },
+          "phaseName": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "isExclusivePhase": {
+            "type": "boolean"
+          },
+          "reads": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "readsFresh": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "readsSnapshot": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "additionalReads": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "writes": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "sideWrites": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "writesEvents": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "readsEvents": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "writesResources": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "readsResources": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "explicitAfter": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "explicitBefore": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "SystemListDto": {
+        "required": [
+          "query",
+          "systems"
+        ],
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "systems": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/SystemDefinitionDto"
             }
           }
         }
@@ -2322,6 +3781,9 @@
             }
           }
         }
+      },
+      "SystemTickSummary": {
+        "type": "object"
       },
       "TickSummaryDto": {
         "required": [
@@ -2435,6 +3897,200 @@
             "format": "uint16"
           }
         }
+      },
+      "TopKEntryDto": {
+        "required": [
+          "tickNumber",
+          "value"
+        ],
+        "type": "object",
+        "properties": {
+          "tickNumber": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint32"
+          },
+          "value": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          }
+        }
+      },
+      "TopologyDto": {
+        "required": [
+          "systems",
+          "archetypes",
+          "componentTypes",
+          "phases"
+        ],
+        "type": "object",
+        "properties": {
+          "systems": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/SystemDefinitionDto"
+            }
+          },
+          "archetypes": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/ArchetypeDto"
+            }
+          },
+          "componentTypes": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/ComponentTypeDto"
+            }
+          },
+          "phases": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "TrackDataResponseDto": {
+        "required": [
+          "trackId",
+          "records"
+        ],
+        "type": "object",
+        "properties": {
+          "trackId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "records": {
+            "type": [
+              "null",
+              "array"
+            ]
+          }
+        }
+      },
+      "TrackFieldDescriptorDto": {
+        "required": [
+          "name",
+          "type"
+        ],
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "type": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "TrackSchemaDto": {
+        "required": [
+          "id",
+          "kind",
+          "fields"
+        ],
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "kind": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "fields": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/TrackFieldDescriptorDto"
+            }
+          }
+        }
+      },
+      "TracksResponseDto": {
+        "required": [
+          "tracks"
+        ],
+        "type": "object",
+        "properties": {
+          "tracks": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/TrackSchemaDto"
+            }
+          }
+        }
+      },
+      "WorkbenchOptions": {
+        "type": "object",
+        "properties": {
+          "editor": {
+            "$ref": "#/components/schemas/EditorOptions"
+          },
+          "profiler": {
+            "$ref": "#/components/schemas/ProfilerOptions"
+          }
+        }
+      },
+      "WorkspaceRootDto": {
+        "required": [
+          "effective",
+          "source"
+        ],
+        "type": "object",
+        "properties": {
+          "effective": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "source": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
       }
     }
   },
@@ -2449,6 +4105,12 @@
       "name": "Profiler"
     },
     {
+      "name": "Data"
+    },
+    {
+      "name": "Options"
+    },
+    {
       "name": "Files"
     },
     {
@@ -2459,6 +4121,9 @@
     },
     {
       "name": "Schema"
+    },
+    {
+      "name": "System"
     }
   ]
 }

@@ -77,10 +77,15 @@ public struct TraceFileHeader
     /// Current format version.
     /// v3: variable-size typed-record layout (Tracy-style profiler rewrite).
     /// v4: ThreadInfo records gained the trailing <c>ThreadKind</c> byte (#289 follow-up).
-    /// v5 (current): trailer carries <c>FileTable</c> + <c>SourceLocationManifest</c> at offsets in the header
+    /// v5: trailer carries <c>FileTable</c> + <c>SourceLocationManifest</c> at offsets in the header
     ///     (#302 — profiler source attribution). Reader accepts v4 files transparently — their new offset fields
     ///     are absent in the on-disk header (51 bytes vs 71) and default to 0, which downstream readers interpret
     ///     as "no source-location manifest".
+    /// v6 (current): SystemDefinitionTable carries RFC 07 access declarations (Phase, Reads, ReadsFresh,
+    ///     ReadsSnapshot, AdditionalReads, Writes, SideWrites, ReadsEvents, WritesEvents, ReadsResources,
+    ///     WritesResources, ExplicitAfter, ExplicitBefore, IsExclusivePhase). New PhasesTable section follows
+    ///     ComponentTypeTable, listing the RuntimeOptions.Phases names in order. Reader accepts v5 files
+    ///     transparently — RFC 07 fields default to empty arrays and PhasesTable is treated as absent.
     /// </summary>
-    public const ushort CurrentVersion = 5;
+    public const ushort CurrentVersion = 6;
 }

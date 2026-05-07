@@ -1,16 +1,27 @@
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { useEventSource } from '@/hooks/streams/useEventSource';
 import {
   useProfilerSessionStore,
+  type ConnectionStatus,
   type LiveStreamPayload,
+  type LiveThreadInfo,
 } from '@/stores/useProfilerSessionStore';
+import type {
+  ChunkManifestEntryDto,
+  GlobalMetricsDto,
+  ProfilerMetadataDto,
+  TickSummaryDto,
+} from '@/api/generated/model';
 
 /**
- * SSE subscription for the profiler live delta stream (#289 unified pipeline).
+ * SSE subscription for the profiler live delta stream (#289 unified pipeline; retyped for #308).
  *
- * Wraps {@link useEventSource} and dispatches the server's growth deltas into {@link useProfilerSessionStore}:
- * `metadata` (full snapshot on connect), `tickSummaryAdded`, `chunkAdded`, `globalMetricsUpdated`,
- * `heartbeat`, and `shutdown`.
+ * Wraps {@link useEventSource} with typed event listeners — each delta arrives on its own SSE
+ * event channel (`metadata`, `tickSummaryAdded`, `chunkAdded`, `globalMetricsUpdated`,
+ * `threadInfoAdded`, `heartbeat`, `shutdown`) instead of switching on a discriminator inside the
+ * payload. The hook reconstructs the in-store `LiveStreamPayload` union shape (which still carries
+ * `kind`) before pushing into the rAF-batched buffer, so {@link useProfilerSessionStore.applyLiveBatch}
+ * sees the same union it always has.
  *
  * **rAF-coalesced batching.** Each SSE message handler runs synchronously on the main thread; under heavy ingest
  * (many chunkAdded + tickSummaryAdded per second from a busy engine), one-mutation-per-event meant N×O(N)
@@ -18,10 +29,6 @@ import {
  * incoming events in a ref and flush them via `requestAnimationFrame` so each native paint cycle applies AT MOST
  * one batched mutation. The `applyLiveBatch` store action collapses the N appends into a single O(N+batchSize)
  * spread + a single subscriber notification, regardless of how many events landed in the frame.
- *
- * Trade-off: deltas are visible to the UI ≤ one frame (~16 ms) later than they used to be. That's smaller than
- * any human-perceptible cadence and well under the engine's chunk-flush period (200 ms), so user-facing UX is
- * indistinguishable except smoother.
  */
 export function useProfilerLiveStream(sessionId: string | null) {
   const applyLiveBatch = useProfilerSessionStore((s) => s.applyLiveBatch);
@@ -40,14 +47,31 @@ export function useProfilerLiveStream(sessionId: string | null) {
     applyLiveBatch(batch);
   }, [applyLiveBatch]);
 
-  const onMessage = useCallback(
-    (payload: LiveStreamPayload) => {
-      bufferRef.current.push(payload);
+  const enqueue = useCallback(
+    (event: LiveStreamPayload) => {
+      bufferRef.current.push(event);
       if (rafIdRef.current === 0) {
         rafIdRef.current = requestAnimationFrame(flush);
       }
     },
     [flush],
+  );
+
+  const listeners = useMemo(
+    () => ({
+      metadata: (data: { metadata: ProfilerMetadataDto }) => enqueue({ kind: 'metadata', metadata: data.metadata }),
+      tickSummaryAdded: (data: { tickSummary: TickSummaryDto }) =>
+        enqueue({ kind: 'tickSummaryAdded', tickSummary: data.tickSummary }),
+      chunkAdded: (data: { chunkEntry: ChunkManifestEntryDto }) =>
+        enqueue({ kind: 'chunkAdded', chunkEntry: data.chunkEntry }),
+      threadInfoAdded: (data: { threadInfo: LiveThreadInfo }) =>
+        enqueue({ kind: 'threadInfoAdded', threadInfo: data.threadInfo }),
+      globalMetricsUpdated: (data: { globalMetrics: GlobalMetricsDto }) =>
+        enqueue({ kind: 'globalMetricsUpdated', globalMetrics: data.globalMetrics }),
+      heartbeat: (data: { status: ConnectionStatus }) => enqueue({ kind: 'heartbeat', status: data.status }),
+      shutdown: (data: { status: string }) => enqueue({ kind: 'shutdown', status: data.status ?? 'disconnected' }),
+    }),
+    [enqueue],
   );
 
   // Cancel any pending flush on unmount / session change so a late-firing rAF can't hit a stale store.
@@ -62,5 +86,5 @@ export function useProfilerLiveStream(sessionId: string | null) {
   }, [sessionId]);
 
   const url = sessionId ? `/api/sessions/${sessionId}/profiler/stream` : null;
-  return useEventSource<LiveStreamPayload>(url, onMessage);
+  return useEventSource(url, listeners);
 }

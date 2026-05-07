@@ -36,9 +36,10 @@ public sealed class SystemDefinition
 
     /// <summary>
     /// Declared read/write access for this system (RFC 07 — Unit 2). Populated from <see cref="SystemBuilder"/> declaration methods.
-    /// Storage only at the Unit 2 stage — Unit 3 will consume this for conflict detection and DAG-edge derivation.
+    /// Storage only at the Unit 2 stage — Unit 3 consumes this for conflict detection and DAG-edge derivation.
+    /// Public read so tooling (Workbench RFC 07 Unit 6 surfacing) can project declarations into wire records; only the engine sets it.
     /// </summary>
-    internal SystemAccessDescriptor Access { get; set; } = new();
+    public SystemAccessDescriptor Access { get; internal set; } = new();
 
     // ═══════════════════════════════════════════════════════════════
     // Execution delegates

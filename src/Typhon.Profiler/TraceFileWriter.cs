@@ -54,6 +54,10 @@ public sealed class TraceFileWriter : IDisposable
     }
 
     /// <summary>Writes the system definition table. Must be called exactly once after the header.</summary>
+    /// <remarks>
+    /// Format v6 (current) appends RFC 07 access declarations per system. Reader negotiates: v5 traces lack
+    /// the trailing fields and the reader fills them with empty defaults.
+    /// </remarks>
     public void WriteSystemDefinitions(ReadOnlySpan<SystemDefinitionRecord> systems)
     {
         _writer.Write((ushort)systems.Length);
@@ -77,6 +81,36 @@ public sealed class TraceFileWriter : IDisposable
             {
                 _writer.Write(succ);
             }
+
+            // ── RFC 07 access declarations (v6+) ─────────────────────────────
+            WriteShortString(sys.PhaseName ?? string.Empty);
+            _writer.Write(sys.IsExclusivePhase);
+            WriteStringArray(sys.Reads);
+            WriteStringArray(sys.ReadsFresh);
+            WriteStringArray(sys.ReadsSnapshot);
+            WriteStringArray(sys.AdditionalReads);
+            WriteStringArray(sys.Writes);
+            WriteStringArray(sys.SideWrites);
+            WriteStringArray(sys.WritesEvents);
+            WriteStringArray(sys.ReadsEvents);
+            WriteStringArray(sys.WritesResources);
+            WriteStringArray(sys.ReadsResources);
+            WriteStringArray(sys.ExplicitAfter);
+            WriteStringArray(sys.ExplicitBefore);
+        }
+        _writer.Flush();
+    }
+
+    /// <summary>
+    /// Writes the phases table (v6+). One entry per <c>RuntimeOptions.Phases</c> name in declaration order.
+    /// Empty array is valid (legacy session with no phase declarations); the reader returns an empty list.
+    /// </summary>
+    public void WritePhases(ReadOnlySpan<string> phaseNames)
+    {
+        _writer.Write((ushort)phaseNames.Length);
+        foreach (var p in phaseNames)
+        {
+            WriteShortString(p ?? string.Empty);
         }
         _writer.Flush();
     }
@@ -231,6 +265,21 @@ public sealed class TraceFileWriter : IDisposable
         var len = (byte)Math.Min(bytes.Length, 255);
         _writer.Write(len);
         _writer.Write(bytes, 0, len);
+    }
+
+    /// <summary>u16 length prefix followed by that many <see cref="WriteShortString"/> entries.</summary>
+    private void WriteStringArray(string[] values)
+    {
+        if (values == null)
+        {
+            _writer.Write((ushort)0);
+            return;
+        }
+        _writer.Write((ushort)values.Length);
+        for (var i = 0; i < values.Length; i++)
+        {
+            WriteShortString(values[i] ?? string.Empty);
+        }
     }
 
     /// <summary>

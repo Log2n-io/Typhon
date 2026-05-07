@@ -6,6 +6,11 @@ namespace Typhon.Engine;
 /// <summary>
 /// Non-generic base class for typed event queues. Allows the scheduler to reset all queues at tick start without knowing their generic type.
 /// </summary>
+/// <remarks>
+/// Per-tick telemetry accumulators (peak depth, overflow count, produced/consumed counts) live here so the scheduler can read them without
+/// caring about <typeparamref name="T"/>. The accumulators are reset at tick start by <see cref="Reset"/>; readers that want the previous
+/// tick's data must read before <c>Reset</c> runs (the scheduler reads them in its end-of-tick QueueTickEnd emission, then resets).
+/// </remarks>
 [PublicAPI]
 public abstract class EventQueueBase
 {
@@ -18,8 +23,29 @@ public abstract class EventQueueBase
     /// <summary>True if the queue has no items.</summary>
     public abstract bool IsEmpty { get; }
 
-    /// <summary>Resets the queue to empty. Called at the start of each tick.</summary>
+    /// <summary>Resets the queue to empty. Called at the start of each tick. Also clears the per-tick telemetry accumulators.</summary>
     public abstract void Reset();
+
+    // ─── Per-tick telemetry accumulators (#311) ─────────────────────────────────
+
+    /// <summary>Maximum number of items observed in the queue at any point during the current tick (after each <c>Push</c>).</summary>
+    public uint PeakDepth { get; protected set; }
+
+    /// <summary>Number of overflow events during the current tick — each is a <c>Push</c> against a full queue.</summary>
+    public uint OverflowCount { get; protected set; }
+
+    /// <summary>Number of <c>Push</c> calls that succeeded during the current tick.</summary>
+    public uint Produced { get; protected set; }
+
+    /// <summary>Total items returned by <c>Drain</c> calls during the current tick.</summary>
+    public uint Consumed { get; protected set; }
+
+    /// <summary>
+    /// Stable identifier assigned by the runtime at registration. Used as <see cref="QueueTickSummary.QueueId"/> and as the index into
+    /// the <see cref="CacheSectionId.QueueNameTable"/>. Set by the runtime when the queue is registered with the scheduler;
+    /// 0xFFFF means "unassigned" (queue created outside a scheduler context — telemetry not emitted for it).
+    /// </summary>
+    public ushort QueueId { get; internal set; } = ushort.MaxValue;
 }
 
 /// <summary>
@@ -80,10 +106,16 @@ public sealed class EventQueue<T> : EventQueueBase
     {
         if (_count >= _capacity)
         {
+            OverflowCount++;
             throw new InvalidOperationException($"Event queue '{Name}' is full (capacity: {_capacity}).");
         }
 
         _buffer[_count++] = item;
+        Produced++;
+        if ((uint)_count > PeakDepth)
+        {
+            PeakDepth = (uint)_count;
+        }
     }
 
     /// <summary>
@@ -109,6 +141,7 @@ public sealed class EventQueue<T> : EventQueueBase
             Array.Clear(_buffer, 0, count);
         }
 
+        Consumed += (uint)count;
         return count;
     }
 
@@ -126,5 +159,10 @@ public sealed class EventQueue<T> : EventQueueBase
         }
 
         _count = 0;
+        // Clear per-tick telemetry accumulators (#311). Scheduler reads them in OnTickEnd before Reset() is called at the next tick start.
+        PeakDepth = 0;
+        OverflowCount = 0;
+        Produced = 0;
+        Consumed = 0;
     }
 }

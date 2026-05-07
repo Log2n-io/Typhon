@@ -114,9 +114,11 @@ public sealed class ProfilerBuildProgressStreamTests
     }
 
     /// <summary>
-    /// Reads SSE <c>data:</c> frames from <paramref name="resp"/> until one whose JSON body has a
-    /// <c>phase</c> of <c>done</c> or <c>error</c>. Returns that phase string. Throws if the stream
-    /// ends without a terminal frame.
+    /// Reads typed SSE frames from <paramref name="resp"/> until one whose <c>event:</c> line is
+    /// <c>done</c> or <c>error</c>. Returns the event type. Throws if the stream ends without a
+    /// terminal frame. Post-#308 the build-progress stream emits typed events
+    /// (<c>progress</c> / <c>done</c> / <c>error</c>) instead of putting the phase inside the JSON
+    /// payload.
     /// </summary>
     private static async Task<string> ReadFirstTerminalPhaseAsync(HttpResponseMessage resp, CancellationToken ct)
     {
@@ -124,17 +126,13 @@ public sealed class ProfilerBuildProgressStreamTests
         using var reader = new StreamReader(stream);
         while (true)
         {
-            var line = await reader.ReadLineAsync(ct);
-            if (line == null) break; // stream ended
-            if (string.IsNullOrEmpty(line) || !line.StartsWith("data:", StringComparison.Ordinal)) continue;
-            var payload = line[5..].TrimStart();
-            using var doc = JsonDocument.Parse(payload);
-            var phase = doc.RootElement.GetProperty("phase").GetString();
-            if (phase is "done" or "error")
+            var frame = await Fixtures.SseFrameReader.ReadFrameAsync(reader, ct);
+            if (frame is null) break;
+            if (frame.Value.EventType is "done" or "error")
             {
-                return phase;
+                return frame.Value.EventType;
             }
-            // otherwise it's a progress frame; keep reading.
+            // otherwise it's a `progress` frame; keep reading.
         }
         throw new InvalidOperationException("SSE stream ended without a terminal frame.");
     }

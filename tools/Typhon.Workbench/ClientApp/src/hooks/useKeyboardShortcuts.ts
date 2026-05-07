@@ -4,6 +4,7 @@ import { usePaletteStore } from '@/stores/usePaletteStore';
 import { useProfilerSessionStore } from '@/stores/useProfilerSessionStore';
 import { useProfilerViewStore } from '@/stores/useProfilerViewStore';
 import { useThemeStore } from '@/stores/useThemeStore';
+import { useUiPrefsStore } from '@/stores/useUiPrefsStore';
 import { toggleViewResourceTree } from '@/shell/commands/openSchemaBrowser';
 import { useShiftShift } from './useShiftShift';
 
@@ -68,7 +69,7 @@ export function useKeyboardShortcuts(): void {
       if (!e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey && (e.key === 'l' || e.key === 'L')) {
         if (isTypingInText()) return;
         e.preventDefault();
-        useProfilerViewStore.getState().toggleLegends();
+        useUiPrefsStore.getState().toggleLegends();
         return;
       }
       if (e.key === 'Home' && e.ctrlKey && !e.shiftKey && !e.altKey) {

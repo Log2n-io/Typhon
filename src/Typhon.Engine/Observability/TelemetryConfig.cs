@@ -393,6 +393,15 @@ public static class TelemetryConfig
     /// <summary>Combined flag for the SchedulerMetronomeWait span (kind 241).</summary>
     public static readonly bool SchedulerMetronomeWaitActive;
 
+    // Scheduler:Queue subtree (#311 — surfaces per-tick queue depth telemetry)
+    /// <summary>Combined gate for the Scheduler:Queue subtree.</summary>
+    public static readonly bool SchedulerQueueActive;
+    /// <summary>
+    /// Combined flag for the QueueTickEnd instant (kind 244). Per-(tick, queue) rollup emitted at end-of-tick;
+    /// drives the Workbench Data API <c>queue/&lt;name&gt;</c> tracks (#311 / DAG view backpressure edges).
+    /// </summary>
+    public static readonly bool SchedulerQueueTickEndActive;
+
     // Scheduler:Graph leaves (kinds 159-160)
     public static readonly bool SchedulerGraphBuildActive;
     public static readonly bool SchedulerGraphRebuildActive;
@@ -933,6 +942,10 @@ public static class TelemetryConfig
             [
                 new Node("Wait"),
             ]),
+            new Node("Queue",
+            [
+                new Node("TickEnd"),
+            ]),
             new Node("Graph",
             [
                 new Node("Build"),
@@ -976,6 +989,10 @@ public static class TelemetryConfig
         // Metronome subtree (issue #289 follow-up)
         SchedulerMetronomeActive     = schedulerDepthMap["Scheduler:Metronome"];
         SchedulerMetronomeWaitActive = schedulerDepthMap["Scheduler:Metronome:Wait"];
+
+        // Queue subtree (#311 — per-tick queue depth telemetry)
+        SchedulerQueueActive         = schedulerDepthMap["Scheduler:Queue"];
+        SchedulerQueueTickEndActive  = schedulerDepthMap["Scheduler:Queue:TickEnd"];
 
         // Graph leaves
         SchedulerGraphBuildActive   = schedulerDepthMap["Scheduler:Graph:Build"];

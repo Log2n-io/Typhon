@@ -37,14 +37,19 @@ public sealed class TraceFileCacheReader : IDisposable
     /// </summary>
     private readonly object _readFallbackLock = new();
     private readonly Dictionary<CacheSectionId, SectionTableEntry> _sectionsByid = new();
-    private readonly List<TickIndexEntry> _tickIndex = new();
-    private readonly List<TickSummary> _tickSummaries = new();
-    private readonly List<ChunkManifestEntry> _chunkManifest = new();
+    private readonly List<TickIndexEntry> _tickIndex = [];
+    private readonly List<TickSummary> _tickSummaries = [];
+    private readonly List<ChunkManifestEntry> _chunkManifest = [];
     // NOTE: the former `_chunkIndexByFromTick` dictionary was removed in chunker v8 when intra-tick splitting became supported — FromTick is
     // no longer unique across entries (a split tick produces multiple chunks with the same [FromTick, ToTick)). Chunk endpoints now take a
     // `chunkIdx` parameter and index directly into `_chunkManifest` instead, which is both simpler and strictly more expressive.
-    private readonly List<SystemAggregateDuration> _systemAggregates = new();
+    private readonly List<SystemAggregateDuration> _systemAggregates = [];
     private readonly Dictionary<int, string> _spanNames = new();
+    // ── v12 (#311) ──────────────────────────────────────────────────────
+    private readonly List<SystemTickSummary> _systemTickSummaries = [];
+    private readonly List<QueueTickSummary> _queueTickSummaries = [];
+    private readonly List<PostTickSummary> _postTickSummaries = [];
+    private readonly Dictionary<ushort, string> _queueIdToName = new();
     private byte[] _sourceMetadataBytes;
     private GlobalMetricsFixed _globalMetrics;
     private CacheHeader _header;
@@ -105,6 +110,18 @@ public sealed class TraceFileCacheReader : IDisposable
     public IReadOnlyList<SystemAggregateDuration> SystemAggregates => _systemAggregates;
     public IReadOnlyDictionary<int, string> SpanNames => _spanNames;
 
+    /// <summary>v12 per-(tick, system) rollup rows. Empty for v11-or-older caches.</summary>
+    public IReadOnlyList<SystemTickSummary> SystemTickSummaries => _systemTickSummaries;
+
+    /// <summary>v12 per-(tick, queue) rollup rows. Empty for v11-or-older caches.</summary>
+    public IReadOnlyList<QueueTickSummary> QueueTickSummaries => _queueTickSummaries;
+
+    /// <summary>v12 per-tick post-tick markers. Empty for v11-or-older caches.</summary>
+    public IReadOnlyList<PostTickSummary> PostTickSummaries => _postTickSummaries;
+
+    /// <summary>v12 queue-id → display-name map. Empty for v11-or-older caches.</summary>
+    public IReadOnlyDictionary<ushort, string> QueueIdToName => _queueIdToName;
+
     /// <summary>
     /// True when <see cref="CacheHeaderFlags.IsSelfContained"/> is set in the header. A self-contained cache carries the source metadata tables
     /// (header / systems / archetypes / component types) inside its <see cref="CacheSectionId.SourceMetadata"/> section, so the loader does not
@@ -140,7 +157,7 @@ public sealed class TraceFileCacheReader : IDisposable
         var dst = compressedDestination[..(int)entry.CacheByteLength];
         if (_fileHandle is not null)
         {
-            ReadAtExact(_fileHandle, dst, (long)entry.CacheByteOffset);
+            ReadAtExact(_fileHandle, dst, entry.CacheByteOffset);
         }
         else
         {
@@ -190,7 +207,7 @@ public sealed class TraceFileCacheReader : IDisposable
         var compressed = compressedScratch[..(int)entry.CacheByteLength];
         if (_fileHandle is not null)
         {
-            ReadAtExact(_fileHandle, compressed, (long)entry.CacheByteOffset);
+            ReadAtExact(_fileHandle, compressed, entry.CacheByteOffset);
         }
         else
         {
@@ -349,6 +366,43 @@ public sealed class TraceFileCacheReader : IDisposable
         if (_sectionsByid.TryGetValue(CacheSectionId.SourceMetadata, out var sourceMetaSec))
         {
             LoadSourceMetadata(sourceMetaSec);
+        }
+
+        // v12 sections (#311). All optional — older caches simply omit them and the lists stay empty.
+        if (_sectionsByid.TryGetValue(CacheSectionId.SystemTickSummaries, out var sysSec))
+        {
+            LoadStructArray(sysSec, _systemTickSummaries);
+        }
+        if (_sectionsByid.TryGetValue(CacheSectionId.QueueTickSummaries, out var qSec))
+        {
+            LoadStructArray(qSec, _queueTickSummaries);
+        }
+        if (_sectionsByid.TryGetValue(CacheSectionId.PostTickSummaries, out var ptSec))
+        {
+            LoadStructArray(ptSec, _postTickSummaries);
+        }
+        if (_sectionsByid.TryGetValue(CacheSectionId.QueueNameTable, out var qnameSec))
+        {
+            LoadQueueNameTable(qnameSec);
+        }
+    }
+
+    private void LoadQueueNameTable(SectionTableEntry section)
+    {
+        _stream.Position = section.Offset;
+        Span<byte> u16Buf = stackalloc byte[2];
+        Span<byte> lenBuf = stackalloc byte[1];
+        _stream.ReadExactly(u16Buf);
+        var count = BinaryPrimitives.ReadUInt16LittleEndian(u16Buf);
+        for (var i = 0; i < count; i++)
+        {
+            _stream.ReadExactly(u16Buf);
+            var queueId = BinaryPrimitives.ReadUInt16LittleEndian(u16Buf);
+            _stream.ReadExactly(lenBuf);
+            var nameLen = lenBuf[0];
+            var nameBytes = new byte[nameLen];
+            _stream.ReadExactly(nameBytes);
+            _queueIdToName[queueId] = Encoding.UTF8.GetString(nameBytes);
         }
     }
 

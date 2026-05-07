@@ -86,6 +86,49 @@ class ExceptionHandlingTests
     }
 
     [Test]
+    public void ParallelQueryException_TickCompletes_NoFullCpuWedge()
+    {
+        // Repro for the chunk-exception wedge: a parallel QuerySystem where one chunk throws
+        // would never reach `OnSystemComplete` because the failing worker bailed at the top of
+        // `ProcessPipeline` / `ProcessParallelQuery` without claiming + decrementing remaining
+        // chunks. `FindReadySystem` then keeps returning the system (chunks still unclaimed) and
+        // workers loop into `ProcessSystem` → break → repeat — a full-CPU spin that never
+        // advances the tick. Fix: drain remaining chunks on failure (`DrainFailedSystemChunks`).
+        // This test fails (timeout) without the fix; passes within ~1 s with it.
+        var afterCount = 0;
+        var schedule = RuntimeSchedule.Create(new RuntimeOptions
+        {
+            WorkerCount = 4, BaseTickRate = 1000, ParallelQueryMinChunkSize = 64,
+        });
+        schedule
+            .QuerySystem("ThrowingParallel", _ => { }, input: () => null, parallel: true)
+            .CallbackSystem("After", _ => Interlocked.Increment(ref afterCount));
+
+        using var scheduler = schedule.Build(_registry.Runtime);
+        scheduler.ParallelQueryPrepareCallback = _ => 4;
+        scheduler.ParallelQueryChunkCallback = (_, chunk, _, _) =>
+        {
+            if (chunk == 0)
+            {
+                throw new InvalidOperationException("chunk 0 fails");
+            }
+            // Other chunks may run if a worker grabs them BEFORE the failure flag is set —
+            // that's fine, the test only cares that the tick advances.
+        };
+        scheduler.ParallelQueryCleanupCallback = _ => false;
+
+        scheduler.Start();
+        // 2 s budget — without the fix the scheduler wedges and CurrentTickNumber stays at 0,
+        // SpinUntil times out, Assert below fails. With the fix the tick completes in <100 ms.
+        var advanced = SpinWait.SpinUntil(() => scheduler.CurrentTickNumber >= 3, TimeSpan.FromSeconds(2));
+        scheduler.Shutdown();
+
+        Assert.That(advanced, Is.True, "Tick should advance even when a parallel-query chunk throws");
+        Assert.That(afterCount, Is.GreaterThanOrEqualTo(3),
+            "Independent successor should run on every tick after the throwing system");
+    }
+
+    [Test]
     public void SystemException_IndependentBranchContinues()
     {
         var branch1Count = 0;

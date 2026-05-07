@@ -129,6 +129,7 @@ public sealed class MockTcpProfilerServer : IAsyncDisposable
         bw.Write((ushort)0); // system count = 0
         bw.Write((ushort)0); // archetype count = 0
         bw.Write((ushort)0); // component-type count = 0
+        bw.Write((ushort)0); // phase count = 0 (v6+ Phases section)
         bw.Flush();
         return ms.ToArray();
     }

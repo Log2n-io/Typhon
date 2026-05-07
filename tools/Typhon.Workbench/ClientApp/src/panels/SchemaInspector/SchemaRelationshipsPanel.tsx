@@ -1,22 +1,22 @@
 import type { IDockviewPanelProps } from 'dockview-react';
 import { AlertTriangle, Info } from 'lucide-react';
-import { StatusBadge } from '@/components/ui/status-badge';
 import { useSchemaInspectorStore } from '@/stores/useSchemaInspectorStore';
 import { useSystemRelationships } from '@/hooks/schema/useSystemRelationships';
+import AccessChips from './AccessChips';
 import SchemaRelationshipsGraph from './SchemaRelationshipsGraph';
 
 /**
- * Relationships panel for the Schema Inspector. Shows systems that read or reactively trigger on
- * the focused component as a React Flow DAG.
+ * Relationships panel for the Schema Inspector. Two surfaces:
  *
- * <b>Writes are intentionally not tracked</b> — see
- * <c>claude/design/typhon-workbench/modules/03-schema-inspector.md §4.3</c> for the rationale
- * (Typhon's runtime uses manual DAG edges, not declared write sets).
+ *   1. <b>Access chips</b> ({@link AccessChips}) — read/write/snapshot/fresh/side-write
+ *      declarations sourced from the topology endpoint (RFC 07 — Unit 6 surfacing).
+ *   2. <b>Relationships graph</b> — systems that read or reactively trigger on the focused
+ *      component, rendered as a React Flow DAG.
  *
  * <b>Runtime hosting gate</b> — the Workbench does not host a <c>TyphonRuntime</c> in Phase 2.
- * When the server returns <c>runtimeHosted: false</c>, the panel renders a banner above an empty
- * preview of the graph (just the component node). Once runtime hosting lands (tracked separately),
- * the panel will populate with real system data without any client changes.
+ * When the server returns <c>runtimeHosted: false</c>, the relationships graph below renders an
+ * empty preview (just the component node). The access chips work regardless of runtime hosting:
+ * declarations come from the trace v6 wire format / live Init payload, not from a hosted runtime.
  */
 export default function SchemaRelationshipsPanel(_props: IDockviewPanelProps) {
   const selectedType = useSchemaInspectorStore((s) => s.selectedComponentType);
@@ -35,14 +35,9 @@ export default function SchemaRelationshipsPanel(_props: IDockviewPanelProps) {
       <div className="flex items-center gap-2 border-b border-border px-3 py-1.5">
         <h3 className="font-mono text-[12px] font-semibold text-foreground">{selectedType}</h3>
         <span className="text-[11px] text-muted-foreground">system relationships</span>
-        <StatusBadge
-          tone="warn"
-          className="ml-auto"
-          title="System access details (RFC 07) become available once Workbench hosts a live TyphonRuntime — see issue #275"
-        >
-          access details pending runtime hosting
-        </StatusBadge>
       </div>
+
+      <AccessChips componentTypeName={selectedType} />
 
       {!response.runtimeHosted && (
         <div className="flex items-start gap-2 border-b border-amber-700/40 bg-amber-950/30 px-3 py-2 text-[11px] text-amber-200">

@@ -6,7 +6,8 @@ namespace AntHill;
 [Archetype(100)]
 partial class Ant : Archetype<Ant>
 {
-    public static readonly Comp<Position> Position = Register<Position>();
+    public static readonly Comp<WorldBounds> Bounds = Register<WorldBounds>();
+    public static readonly Comp<Velocity> Velocity = Register<Velocity>();
     public static readonly Comp<Genetics> Genetics = Register<Genetics>();
     public static readonly Comp<AntState> State = Register<AntState>();
 }

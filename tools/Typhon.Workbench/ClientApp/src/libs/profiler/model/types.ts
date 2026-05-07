@@ -338,6 +338,10 @@ export const SpanKindNames: Record<number, string> = {
   // Phase 4 follow-up (#289) — answer "why is the engine waiting for nothing".
   241: 'Scheduler.Metronome.Wait',
   242: 'Scheduler.Overload.Detector',
+  // 243 (RuntimePhaseSpan) is a real span but its display name comes from `PHASE_NAMES[evt.phase]`
+  // in `traceModel.ts` — this entry is only the `Kind[N]`-fallback safety net.
+  243: 'Runtime.Phase',
+  244: 'Queue.TickEnd',
 
   // Runtime subtree (161-164, 235-240).
   161: 'Runtime.Phase.UoWCreate',
@@ -617,6 +621,17 @@ export interface TraceEvent {
   consecutiveQueueGrowth?: number;
   /** Total event-queue depth at this tick. */
   queueDepth?: number;
+
+  // QueueTickEnd (kind 244) — per-(tick, queue) rollup at end-of-tick. Folded by the server's
+  // IncrementalCacheBuilder into the v12 QueueTickSummaries cache section; surfaced here so
+  // chunk-decoded traces also expose the rollup (e.g., for queue-tooltip drill-downs). The wire
+  // format is hand-coded by `QueueTickEndCodec` — instant only, no span-header extension.
+  queueId?: number;
+  queuePeakDepth?: number;
+  queueEndOfTickDepth?: number;
+  queueOverflowCount?: number;
+  queueProduced?: number;
+  queueConsumed?: number;
 }
 
 /**

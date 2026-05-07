@@ -15,7 +15,13 @@ public record ProfilerMetadataDto(
     GlobalMetricsDto GlobalMetrics,
     TickSummaryDto[] TickSummaries,
     ChunkManifestEntryDto[] ChunkManifest,
-    GcSuspensionDto[] GcSuspensions);
+    GcSuspensionDto[] GcSuspensions,
+    string[] Phases,
+    // v12 (#311) — per-system / per-queue / post-tick rollups + queue-name table.
+    Typhon.Profiler.SystemTickSummary[] SystemTickSummaries,
+    Typhon.Profiler.QueueTickSummary[] QueueTickSummaries,
+    Typhon.Profiler.PostTickSummary[] PostTickSummaries,
+    System.Collections.Generic.Dictionary<ushort, string> QueueIdToName);
 
 /// <summary>Header fields projected from <c>TraceFileHeader</c>. All primitive types — JSON-friendly.</summary>
 public record ProfilerHeaderDto(
@@ -30,6 +36,12 @@ public record ProfilerHeaderDto(
     long SamplingSessionStartQpc);
 
 /// <summary>One system in the DAG.</summary>
+/// <remarks>
+/// RFC 07 access declaration fields (<paramref name="PhaseName"/>, <paramref name="Reads"/>, <paramref name="Writes"/>, etc.)
+/// are populated from trace v6+ traces and live attach sessions whose engine emits the v6 Init payload. Older v5 traces
+/// surface empty arrays for every access field — the wire reader fills empties on the v5 read path so consumers don't
+/// need a presence bit.
+/// </remarks>
 public record SystemDefinitionDto(
     ushort Index,
     string Name,
@@ -38,7 +50,21 @@ public record SystemDefinitionDto(
     bool IsParallel,
     byte TierFilter,
     ushort[] Predecessors,
-    ushort[] Successors);
+    ushort[] Successors,
+    string PhaseName,
+    bool IsExclusivePhase,
+    string[] Reads,
+    string[] ReadsFresh,
+    string[] ReadsSnapshot,
+    string[] AdditionalReads,
+    string[] Writes,
+    string[] SideWrites,
+    string[] WritesEvents,
+    string[] ReadsEvents,
+    string[] WritesResources,
+    string[] ReadsResources,
+    string[] ExplicitAfter,
+    string[] ExplicitBefore);
 
 /// <summary>Archetype-id → name mapping.</summary>
 public record ArchetypeDto(ushort ArchetypeId, string Name);

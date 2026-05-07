@@ -24,8 +24,14 @@ namespace Typhon.Profiler;
 /// </remarks>
 public sealed class TraceFileCacheWriter : IDisposable
 {
-    /// <summary>Number of distinct section slots reserved in the table. Bumping this requires re-reserving more placeholder space.</summary>
-    public const int MaxSections = 8;
+    /// <summary>
+    /// Number of distinct section slots reserved in the table. Bumping this requires re-reserving more placeholder space —
+    /// the section table sits at a fixed offset (128) and the subsequent <see cref="SectionsStartOffset"/> derives from this
+    /// constant, so changing it shifts where the very first section is written.
+    /// v12 (#311) bumped this from 8 → 16 to accommodate the four new sections (SystemTickSummaries, QueueTickSummaries,
+    /// PostTickSummaries, QueueNameTable) plus headroom for future v13/v14 extensions without another invalidation pass.
+    /// </summary>
+    public const int MaxSections = 16;
 
     /// <summary>
     /// Fixed offset where section writes begin. Header (128) + section table (<see cref="MaxSections"/> × 24 = 192) = 320.
@@ -180,6 +186,41 @@ public sealed class TraceFileCacheWriter : IDisposable
             System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(u16Buf, (ushort)id);
             _stream.Write(u16Buf);
             WriteShortString(name);
+        }
+    }
+
+    /// <summary>
+    /// Write the v12 queue-name intern table — count u16 + entries of (u16 queueId, shortString name). Null or empty input emits a zero count and returns.
+    /// Used by <see cref="CacheSectionId.QueueNameTable"/>.
+    /// </summary>
+    public void WriteQueueNameTable(IReadOnlyDictionary<ushort, string> queueIdToName)
+    {
+        ThrowIfNoSection();
+        if (_currentSection != CacheSectionId.QueueNameTable)
+        {
+            throw new InvalidOperationException($"WriteQueueNameTable only valid within the QueueNameTable section; current is {_currentSection}.");
+        }
+
+        var count = queueIdToName?.Count ?? 0;
+        if (count > ushort.MaxValue)
+        {
+            throw new InvalidOperationException($"QueueNameTable has {count} entries, exceeds u16 limit.");
+        }
+
+        Span<byte> u16Buf = stackalloc byte[2];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(u16Buf, (ushort)count);
+        _stream.Write(u16Buf);
+
+        if (count == 0)
+        {
+            return;
+        }
+
+        foreach (var (id, name) in queueIdToName!)
+        {
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(u16Buf, id);
+            _stream.Write(u16Buf);
+            WriteShortString(name ?? string.Empty);
         }
     }
 

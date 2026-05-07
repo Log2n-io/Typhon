@@ -339,10 +339,10 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
     }
 
     /// <summary>
-    /// Walks a <see cref="TraceFileReader"/> positioned at offset 0 (header + 3 tables) and projects each into the wire DTO shape. Shared
-    /// between the source-file path and the embedded-metadata path so both produce byte-identical metadata DTOs.
+    /// Walks a <see cref="TraceFileReader"/> positioned at offset 0 (header + 3 tables + optional v6 phases table) and projects each into the
+    /// wire DTO shape. Shared between the source-file path and the embedded-metadata path so both produce byte-identical metadata DTOs.
     /// </summary>
-    private static (ProfilerHeaderDto, SystemDefinitionDto[], ArchetypeDto[], ComponentTypeDto[]) ProjectHeaderAndTables(TraceFileReader traceReader)
+    private static (ProfilerHeaderDto, SystemDefinitionDto[], ArchetypeDto[], ComponentTypeDto[], string[]) ProjectHeaderAndTables(TraceFileReader traceReader)
     {
         var h = traceReader.ReadHeader();
         var headerDto = new ProfilerHeaderDto(
@@ -369,7 +369,21 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
                 IsParallel: sr.IsParallel,
                 TierFilter: sr.TierFilter,
                 Predecessors: sr.Predecessors,
-                Successors: sr.Successors);
+                Successors: sr.Successors,
+                PhaseName: sr.PhaseName,
+                IsExclusivePhase: sr.IsExclusivePhase,
+                Reads: sr.Reads,
+                ReadsFresh: sr.ReadsFresh,
+                ReadsSnapshot: sr.ReadsSnapshot,
+                AdditionalReads: sr.AdditionalReads,
+                Writes: sr.Writes,
+                SideWrites: sr.SideWrites,
+                WritesEvents: sr.WritesEvents,
+                ReadsEvents: sr.ReadsEvents,
+                WritesResources: sr.WritesResources,
+                ReadsResources: sr.ReadsResources,
+                ExplicitAfter: sr.ExplicitAfter,
+                ExplicitBefore: sr.ExplicitBefore);
         }
 
         var archetypeRecords = traceReader.ReadArchetypes();
@@ -386,7 +400,10 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
             componentTypes[i] = new ComponentTypeDto(componentRecords[i].ComponentTypeId, componentRecords[i].Name);
         }
 
-        return (headerDto, systems, archetypes, componentTypes);
+        // Phases section — present in v6+ traces only; reader returns empty for v5.
+        var phases = traceReader.ReadPhases().ToArray();
+
+        return (headerDto, systems, archetypes, componentTypes, phases);
     }
 
     /// <summary>
@@ -424,6 +441,7 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
         SystemDefinitionDto[] systems;
         ArchetypeDto[] archetypes;
         ComponentTypeDto[] componentTypes;
+        string[] phases;
 
         if (isReplayFile)
         {
@@ -432,14 +450,14 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
             var metaCopy = reader.SourceMetadataBytes.ToArray();
             using var ms = new MemoryStream(metaCopy, writable: false);
             using var traceReader = new TraceFileReader(ms);
-            (headerDto, systems, archetypes, componentTypes) = ProjectHeaderAndTables(traceReader);
+            (headerDto, systems, archetypes, componentTypes, phases) = ProjectHeaderAndTables(traceReader);
         }
         else
         {
             // Read source tables (header is already read by ReadSourceTimestampFrequency, but we need the tables — re-open and walk).
             using var fs = File.OpenRead(sourcePath);
             using var traceReader = new TraceFileReader(fs);
-            (headerDto, systems, archetypes, componentTypes) = ProjectHeaderAndTables(traceReader);
+            (headerDto, systems, archetypes, componentTypes, phases) = ProjectHeaderAndTables(traceReader);
         }
 
         // Tick summaries, manifest, metrics, aggregates all come from the cache reader (already in memory).
@@ -498,6 +516,12 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
 
         var fingerprintHex = Convert.ToHexString(fingerprint);
 
+        // v12 (#311) — pull per-tick rollups directly off the cache reader. v11-or-older caches return empty lists.
+        var sysTicks = reader.SystemTickSummaries is { Count: > 0 } st ? ((List<Typhon.Profiler.SystemTickSummary>)st).ToArray() : [];
+        var qTicks = reader.QueueTickSummaries is { Count: > 0 } qt ? ((List<Typhon.Profiler.QueueTickSummary>)qt).ToArray() : [];
+        var postTicks = reader.PostTickSummaries is { Count: > 0 } pt ? ((List<Typhon.Profiler.PostTickSummary>)pt).ToArray() : [];
+        var qNames = reader.QueueIdToName is { Count: > 0 } qn ? new Dictionary<ushort, string>(qn) : new Dictionary<ushort, string>();
+
         return new ProfilerMetadataDto(
             Fingerprint: fingerprintHex,
             Header: headerDto,
@@ -508,7 +532,12 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
             GlobalMetrics: globalMetrics,
             TickSummaries: tickSummaries,
             ChunkManifest: manifest,
-            GcSuspensions: gcSuspensions);
+            GcSuspensions: gcSuspensions,
+            Phases: phases,
+            SystemTickSummaries: sysTicks,
+            QueueTickSummaries: qTicks,
+            PostTickSummaries: postTicks,
+            QueueIdToName: qNames);
     }
 
     /// <summary>

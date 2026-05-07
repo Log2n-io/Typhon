@@ -125,6 +125,23 @@ public sealed partial class TyphonRuntime : IDisposable
     /// <summary>Static DAG system definitions (name, type, priority, dependencies).</summary>
     public SystemDefinition[] Systems => Scheduler.Systems;
 
+    /// <summary>
+    /// Phase order from <see cref="RuntimeOptions.Phases"/>. Returned as a fresh string array so
+    /// callers (notably profiler exporters that ship the list to the Workbench) can hand it
+    /// straight to <c>ProfilerSessionMetadata</c> without having to know about the
+    /// <see cref="Phase"/> struct or the underlying options object.
+    /// </summary>
+    public string[] PhaseNames
+    {
+        get
+        {
+            var phases = _options.Phases;
+            var names = new string[phases.Length];
+            for (var i = 0; i < phases.Length; i++) names[i] = phases[i].Name.ToString();
+            return names;
+        }
+    }
+
     /// <summary>Fires when overload reaches <see cref="OverloadLevel.PlayerShedding"/>. Game code decides what to do (migrate, disconnect, split).</summary>
     public event Action<TyphonRuntime> OnCriticalOverload;
 

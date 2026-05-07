@@ -1,6 +1,7 @@
 import type { DockviewApi } from 'dockview-react';
 import { useProfilerSessionStore } from '@/stores/useProfilerSessionStore';
 import { useProfilerViewStore } from '@/stores/useProfilerViewStore';
+import { useUiPrefsStore } from '@/stores/useUiPrefsStore';
 import type { TimeRange } from '@/libs/profiler/model/uiTypes';
 import type { CommandItem } from './baseCommands';
 
@@ -20,6 +21,22 @@ export function toggleViewProfiler(): void {
   const api = registeredApi;
   if (!api) return;
   api.getPanel('profiler')?.focus();
+}
+
+/**
+ * Toggle the Critical-Path panel — a dynamic dock panel (closed by default, no edge-group home).
+ * First call adds it to the center area; subsequent calls remove it. Same shape as
+ * {@link toggleViewComponentBrowser} but without the schema-browser dependencies.
+ */
+export function toggleViewCriticalPath(): void {
+  const api = registeredApi;
+  if (!api) return;
+  const existing = api.getPanel('critical-path');
+  if (existing) {
+    api.removePanel(existing);
+    return;
+  }
+  api.addPanel({ id: 'critical-path', component: 'CriticalPath', title: 'Critical Path' });
 }
 
 /**
@@ -104,10 +121,11 @@ export function openSaveReplayDialog(): void {
 export function buildProfilerPaletteCommands(): CommandItem[] {
   return [
     { id: 'toggle-view-profiler',     label: 'Toggle View Profiler',  keywords: 'profiler open show',               action: toggleViewProfiler },
+    { id: 'toggle-view-critical-path', label: 'Toggle View Critical Path', keywords: 'critical path tape timeline cp wall-clock tick', action: toggleViewCriticalPath },
     { id: 'toggle-view-top-spans',   label: 'Toggle View Top Spans', keywords: 'profiler top spans table slow expensive sortable', action: toggleViewTopSpans },
     { id: 'profiler-save-replay',    label: 'Save Session as .typhon-replay…', keywords: 'save replay export attach session', action: openSaveReplayDialog },
     { id: 'profiler-toggle-gauges',  label: 'Toggle Gauge Region',   keywords: 'gauges canvas profiler g',         action: () => useProfilerViewStore.getState().toggleGaugeRegion() },
-    { id: 'profiler-toggle-legends', label: 'Toggle Legends',        keywords: 'legends labels profiler l',        action: () => useProfilerViewStore.getState().toggleLegends() },
+    { id: 'toggle-legends',          label: 'Toggle Legends',        keywords: 'legends labels help legend l app-wide',        action: () => useUiPrefsStore.getState().toggleLegends() },
     { id: 'profiler-toggle-systems', label: 'Toggle Per-System Lanes', keywords: 'systems lanes profiler',         action: () => useProfilerViewStore.getState().togglePerSystemLanes() },
     { id: 'profiler-zoom-full',      label: 'Zoom to Full Trace',    keywords: 'zoom full profiler reset home',    action: zoomToFullTrace },
     { id: 'profiler-pan-left',       label: 'Pan Left',              keywords: 'pan left profiler',                action: () => panViewport(-1) },

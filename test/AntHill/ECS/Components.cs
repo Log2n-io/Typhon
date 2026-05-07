@@ -4,17 +4,21 @@ using Typhon.Schema.Definition;
 namespace AntHill;
 
 // ── Ant components ─────────────────────────────────────────────────────────
+//
+// Position used to bundle (Bounds, VelocityX, VelocityY) into one component. RFC 07 enforces
+// W×W conflicts at component granularity (Q2) — bundling them meant the velocity-writers
+// (Brain, FoodDetect, Metabolism on respawn) and the position-writers (MoveAll) couldn't run in
+// the same phase even though they touch logically distinct fields. Splitting into WorldBounds
+// (the AABB the spatial index hangs off) and Velocity (the integration delta) makes the
+// dependency graph reflect what actually flows where.
 
-[Component("AntHill.Position", 2, StorageMode = StorageMode.SingleVersion)]
+[Component("AntHill.WorldBounds", 1, StorageMode = StorageMode.SingleVersion)]
 [StructLayout(LayoutKind.Sequential)]
-public struct Position
+public struct WorldBounds
 {
     [Field]
     [SpatialIndex(1.0f)]
     public AABB2F Bounds;
-
-    [Field] public float VelocityX;  // ready-to-use: already includes speed multiplier
-    [Field] public float VelocityY;
 
     public float X
     {
@@ -27,6 +31,14 @@ public struct Position
         readonly get => Bounds.MinY;
         set { Bounds.MinY = value; Bounds.MaxY = value; }
     }
+}
+
+[Component("AntHill.Velocity", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+public struct Velocity
+{
+    [Field] public float X;  // ready-to-use: already includes speed multiplier
+    [Field] public float Y;
 }
 
 [Component("AntHill.Genetics", 1, StorageMode = StorageMode.SingleVersion)]

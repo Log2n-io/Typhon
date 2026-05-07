@@ -26,6 +26,14 @@ builder.Services
         // Without this, PATCH /api/options/editor 400s because the server can't deserialize "rider"
         // to the EditorKind enum.
         o.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.CamelCase));
+        // Cache-format structs (`SystemTickSummary`, `QueueTickSummary`, `PostTickSummary`) are
+        // packed `struct`s with public **fields** — System.Text.Json ignores fields by default and
+        // would emit `[{}, {}, ...]` for them inside `/profiler/metadata`. The aggregation /
+        // per-track endpoints already project to record DTOs (properties) and are unaffected, but
+        // the metadata endpoint hands the raw struct arrays to the client for the CP tape + skip-
+        // rate / CP-rate algorithms. Enable field serialization globally so those arrays are
+        // populated. Localhost dev tool — the "leak unintended fields" risk is bounded.
+        o.JsonSerializerOptions.IncludeFields = true;
     });
 
 builder.Services.AddOpenApi();

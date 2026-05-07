@@ -906,6 +906,16 @@ public enum TraceEventKind : byte
     /// </summary>
     RuntimePhaseSpan = 243,
 
+    /// <summary>
+    /// Per-(tick, queue) rollup emitted at end-of-tick. Captures queue-depth telemetry that's local to the engine's
+    /// <c>EventQueueBase</c> accumulators (peak depth, end-of-tick depth, overflow count, produced/consumed counts).
+    /// Folded by <see cref="IncrementalCacheBuilder"/> into the v12 <see cref="CacheSectionId.QueueTickSummaries"/> section
+    /// for the Workbench Data API <c>queue/&lt;name&gt;</c> tracks (#311).
+    /// Payload: <c>tick: u32, queueId: u16, peakDepth: u32, endOfTickDepth: u32, overflowCount: u32, produced: u32, consumed: u32</c>
+    /// = 26 bytes after the common header.
+    /// </summary>
+    QueueTickEnd = 244,
+
     // ── Fallback ──
 
     /// <summary>User-defined span with inline UTF-8 null-terminated name. Used for dynamic-string call sites (tests, demo code). Payload: null-terminated UTF-8 bytes.</summary>
@@ -1002,7 +1012,13 @@ public static class TraceEventKindExtensions
         // Phase 4 follow-up (#289):
         //   241 (SchedulerMetronomeWait) — span (falls through to `return true`).
         //   242 (SchedulerOverloadDetector) — instant.
-        if (v == 242)
+        //   243 (RuntimePhaseSpan) — span (falls through; replaces the PhaseStart+PhaseEnd instant pair).
+        //   244 (QueueTickEnd) — instant rollup. Hand-coded by `QueueTickEndCodec` with a 28-byte
+        //         payload after the 12-byte common header — NO 25-byte span-header extension. Without
+        //         this carve-out, span-aware decoders read 25 payload bytes as a fake span header,
+        //         producing garbage `durationUs`/`spanId`/`parentSpanId` and rendering the rollup as
+        //         a phantom nested span on the TickDriver thread lane.
+        if (v == 242 || v == 244)
         {
             return false;
         }

@@ -59,7 +59,9 @@ function ensureOptionsStreamSubscription(set: (partial: Partial<OptionsState>) =
   if (typeof EventSource === 'undefined') return;
   if (_optionsStreamHandle) return;
   const es = new EventSource('/api/options/stream');
-  es.onmessage = (event) => {
+  // Server emits typed `options-changed` SSE events (#308); listen by name rather than the default
+  // `message` channel so the wire format matches the rest of the Workbench's typed-event streams.
+  es.addEventListener('options-changed', (event: MessageEvent) => {
     try {
       const next = JSON.parse(event.data) as WorkbenchOptions;
       set({ options: next });
@@ -67,7 +69,7 @@ function ensureOptionsStreamSubscription(set: (partial: Partial<OptionsState>) =
       // Malformed frame — ignore. Server-side serializer is the source of truth; a parse failure
       // here is a developer-time bug, not a runtime user concern.
     }
-  };
+  });
   es.onerror = () => {
     // Browser auto-reconnects on transient failures; reset the handle on permanent close so a
     // future fetch() can re-subscribe.

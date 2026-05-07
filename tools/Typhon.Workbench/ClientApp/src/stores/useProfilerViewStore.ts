@@ -31,8 +31,6 @@ interface ProfilerViewState {
   liveFollowWindowUs: number;
   /** Toggled by the `g` key. Hides the full gauge region. */
   gaugeRegionVisible: boolean;
-  /** Toggled by the `l` key. Hides inline legends across all sections. */
-  legendsVisible: boolean;
   /** Per-system chunk-lanes section visibility. */
   perSystemLanesVisible: boolean;
   /**
@@ -68,7 +66,6 @@ interface ProfilerViewState {
   setViewRange: (r: TimeRange) => void;
   setLiveFollowWindowUs: (us: number) => void;
   toggleGaugeRegion: () => void;
-  toggleLegends: () => void;
   togglePerSystemLanes: () => void;
   setGaugeCollapse: (groupId: string, state: TrackState) => void;
   setManyGaugeCollapse: (updates: Record<string, TrackState>) => void;
@@ -106,7 +103,6 @@ export const useProfilerViewStore = create<ProfilerViewState>()(
       viewRange: INITIAL_VIEW_RANGE,
       liveFollowWindowUs: DEFAULT_LIVE_FOLLOW_WINDOW_US,
       gaugeRegionVisible: true,
-      legendsVisible: true,
       perSystemLanesVisible: true,
       gaugeCollapse: {},
       gaugeVisibility: {},
@@ -117,7 +113,6 @@ export const useProfilerViewStore = create<ProfilerViewState>()(
       setViewRange: (r) => set({ viewRange: r }),
       setLiveFollowWindowUs: (us) => set({ liveFollowWindowUs: Math.max(1, us) }),
       toggleGaugeRegion: () => set((s) => ({ gaugeRegionVisible: !s.gaugeRegionVisible })),
-      toggleLegends: () => set((s) => ({ legendsVisible: !s.legendsVisible })),
       togglePerSystemLanes: () => set((s) => ({ perSystemLanesVisible: !s.perSystemLanesVisible })),
       setGaugeCollapse: (groupId, state) =>
         set((s) => ({ gaugeCollapse: { ...s.gaugeCollapse, [groupId]: state } })),
@@ -184,7 +179,6 @@ export const useProfilerViewStore = create<ProfilerViewState>()(
       partialize: (s) => ({
         liveFollowWindowUs: s.liveFollowWindowUs,
         gaugeRegionVisible: s.gaugeRegionVisible,
-        legendsVisible: s.legendsVisible,
         perSystemLanesVisible: s.perSystemLanesVisible,
         gaugeCollapse: s.gaugeCollapse,
         gaugeVisibility: s.gaugeVisibility,

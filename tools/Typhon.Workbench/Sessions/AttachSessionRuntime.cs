@@ -77,6 +77,7 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
     private SystemDefinitionDto[] _initialSystems = [];
     private ArchetypeDto[] _initialArchetypes = [];
     private ComponentTypeDto[] _initialComponentTypes = [];
+    private string[] _initialPhases = [];
     private string _initialSignature;
 
     /// <summary>
@@ -517,7 +518,13 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
                     relocatedManifest,
                     spanNames,
                     _initialMetadataBytes,
-                    cacheHeader);
+                    cacheHeader,
+                    // v12 (#311): live save flow — the in-memory builder owns the per-(tick, system/queue)/post-tick rollup lists.
+                    // Snapshot them at the same point as the manifest so the saved cache reads identically to a freshly-built one.
+                    systemTickSummaries: _builder?.SystemTickSummaries ?? Array.Empty<Typhon.Profiler.SystemTickSummary>(),
+                    queueTickSummaries: _builder?.QueueTickSummaries ?? Array.Empty<Typhon.Profiler.QueueTickSummary>(),
+                    postTickSummaries: _builder?.PostTickSummaries ?? Array.Empty<Typhon.Profiler.PostTickSummary>(),
+                    queueIdToName: _builder?.QueueIdToName ?? new System.Collections.Generic.Dictionary<ushort, string>());
             }
             finally
             {
@@ -687,11 +694,13 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
         reader.ReadSystemDefinitions();
         reader.ReadArchetypes();
         reader.ReadComponentTypes();
+        reader.ReadPhases();
 
         var headerDto = ProjectHeader(reader);
         var systems = ProjectSystems(reader);
         var archetypes = ProjectArchetypes(reader);
         var componentTypes = ProjectComponentTypes(reader);
+        var phases = reader.Phases.ToArray();
 
         var newSignature = ComputeInitSignature(headerDto, systems, archetypes, componentTypes);
 
@@ -702,6 +711,7 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
             _initialSystems = systems;
             _initialArchetypes = archetypes;
             _initialComponentTypes = componentTypes;
+            _initialPhases = phases;
             _initialSignature = newSignature;
             _timestampFrequency = headerDto.TimestampFrequency;
             // Capture the raw Init payload bytes — needed verbatim for the SourceMetadata section if the user later saves the live session
@@ -1031,6 +1041,13 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
             chunkManifestArr = _chunkManifest.ToArray();
             metrics = _globalMetrics;
         }
+        // v12 (#311) — snapshot the live builder's per-(tick, system/queue) and post-tick rollups so tracks endpoints serve them
+        // immediately. Builder is null on welcome screen / disconnected sessions.
+        var sysTicks = _builder?.SystemTickSummaries is { Count: > 0 } st ? ((List<Typhon.Profiler.SystemTickSummary>)st).ToArray() : [];
+        var qTicks = _builder?.QueueTickSummaries is { Count: > 0 } qt ? ((List<Typhon.Profiler.QueueTickSummary>)qt).ToArray() : [];
+        var postTicks = _builder?.PostTickSummaries is { Count: > 0 } pt ? ((List<Typhon.Profiler.PostTickSummary>)pt).ToArray() : [];
+        var qNames = _builder?.QueueIdToName is { Count: > 0 } qn ? new Dictionary<ushort, string>(qn) : new Dictionary<ushort, string>();
+
         var snap = new ProfilerMetadataDto(
             Fingerprint: string.Empty,
             Header: _initialHeader ?? new ProfilerHeaderDto(0, 0, 0, 0, 0, 0, 0, 0, 0),
@@ -1041,7 +1058,12 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
             GlobalMetrics: metrics,
             TickSummaries: tickSummariesArr,
             ChunkManifest: chunkManifestArr,
-            GcSuspensions: []);
+            GcSuspensions: [],
+            Phases: _initialPhases ?? [],
+            SystemTickSummaries: sysTicks,
+            QueueTickSummaries: qTicks,
+            PostTickSummaries: postTicks,
+            QueueIdToName: qNames);
         _metadataSnapshot = snap;
         return snap;
     }
@@ -1168,7 +1190,21 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
                 IsParallel: sr.IsParallel,
                 TierFilter: sr.TierFilter,
                 Predecessors: sr.Predecessors,
-                Successors: sr.Successors);
+                Successors: sr.Successors,
+                PhaseName: sr.PhaseName,
+                IsExclusivePhase: sr.IsExclusivePhase,
+                Reads: sr.Reads,
+                ReadsFresh: sr.ReadsFresh,
+                ReadsSnapshot: sr.ReadsSnapshot,
+                AdditionalReads: sr.AdditionalReads,
+                Writes: sr.Writes,
+                SideWrites: sr.SideWrites,
+                WritesEvents: sr.WritesEvents,
+                ReadsEvents: sr.ReadsEvents,
+                WritesResources: sr.WritesResources,
+                ReadsResources: sr.ReadsResources,
+                ExplicitAfter: sr.ExplicitAfter,
+                ExplicitBefore: sr.ExplicitBefore);
         }
         return arr;
     }
