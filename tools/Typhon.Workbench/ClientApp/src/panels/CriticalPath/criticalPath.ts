@@ -60,18 +60,41 @@ export function computeCriticalPathParticipation(input: CriticalPathInputs): Cri
   }
 
   // Predecessors map: targetSystemName → [sourceSystemNames]. Restricted to intra-phase edges
-  // (cross-phase pairs use the phase-fence rule instead of an explicit edge).
+  // (cross-phase pairs use the phase-fence rule instead of an explicit edge). Read directly
+  // from `system.predecessors` (engine-built — includes explicit `.After/.Before` chains the
+  // client-side `deriveEdges` can't see). Falls back to `edges` for legacy traces / synthetic
+  // test fixtures that pass edges without populating `system.predecessors`.
   const predecessorsByName = new Map<string, string[]>();
-  for (const e of edges) {
-    const sPhase = nameToPhase.get(e.source);
-    const tPhase = nameToPhase.get(e.target);
-    if (!sPhase || !tPhase || sPhase !== tPhase) continue;
-    let preds = predecessorsByName.get(e.target);
-    if (!preds) {
-      preds = [];
-      predecessorsByName.set(e.target, preds);
+  for (const s of systems) {
+    if (!s.name) continue;
+    const targetPhase = nameToPhase.get(s.name);
+    if (!targetPhase) continue;
+    const predIdxs = (s as { predecessors?: unknown }).predecessors;
+    if (!Array.isArray(predIdxs)) continue;
+    const preds: string[] = [];
+    for (const raw of predIdxs) {
+      const predIdx = numberValue(raw);
+      if (predIdx == null) continue;
+      const predName = indexToName.get(predIdx);
+      if (!predName) continue;
+      const sourcePhase = nameToPhase.get(predName);
+      if (sourcePhase !== targetPhase) continue;
+      preds.push(predName);
     }
-    preds.push(e.source);
+    if (preds.length > 0) predecessorsByName.set(s.name, preds);
+  }
+  if (predecessorsByName.size === 0) {
+    for (const e of edges) {
+      const sPhase = nameToPhase.get(e.source);
+      const tPhase = nameToPhase.get(e.target);
+      if (!sPhase || !tPhase || sPhase !== tPhase) continue;
+      let preds = predecessorsByName.get(e.target);
+      if (!preds) {
+        preds = [];
+        predecessorsByName.set(e.target, preds);
+      }
+      preds.push(e.source);
+    }
   }
 
   // Phase index map for quick "is phase A before phase B" comparisons.
@@ -319,6 +342,14 @@ export interface TickPathPhase {
   /** Bars for systems on the CP within this phase, in forward execution order. */
   bars: TickPathBar[];
   /**
+   * Every system in the phase that ran this tick but is NOT on the critical path, sorted by
+   * `startUs`. Always populated; the renderer decides whether to show them based on the
+   * `fullGantt` toggle. Excluded from `totalUs` — those values stay strictly wall-clock CP-only,
+   * so adding non-CP bars to the view inflates the visual length but doesn't reinterpret the
+   * core metric.
+   */
+  nonCpBars: TickPathBar[];
+  /**
    * Phase-fence wait at the end of the phase: gap between the CP's last system finishing in this
    * phase and the slowest non-CP straggler clearing the phase fence. Zero when the CP holds the
    * straggler position itself.
@@ -351,13 +382,43 @@ export type PathMode = 'critical-path' | 'execution-order';
 export interface TickPathBars {
   tickNumber: number;
   mode: PathMode;
+  /**
+   * Aggregate flag — `true` when the bars carry mean values across a tick range, `false` (or
+   * undefined) when this is a single tick's CP. Drives the toolbar pill ("aggregate of N ticks")
+   * and disables certain tooltip lines that don't make sense across many ticks.
+   */
+  aggregate?: { tickCount: number; range: { from: number; to: number } } | null;
   /** Phases in declared order; phases with no CP entries still appear (with empty bars) so the user sees the structure. */
   phases: TickPathPhase[];
   postTick: TickPathPostTick;
   /** Metronome wait that PRECEDED this tick (µs, saturated at 65535 per TickSummary v9+). */
   metronomeWaitUs: number;
+  /**
+   * intentClass for the metronome wait that preceded this tick. Drives the chip rendered on the
+   * leading metronome stripe / tooltip. `null` when the tick has no recorded TickSummary row
+   * (defensive — the renderer treats null as "unknown / suppress chip").
+   * Mapping: 0=CatchUp, 1=Throttled, 2=Headroom (see DagScheduler comment).
+   */
+  metronomeIntentClass: MetronomeIntentClass | null;
   /** Sum of every bar + wait across all phases + post-tick — the total wall-clock height of the tape. */
   totalUs: number;
+}
+
+export type MetronomeIntentClass = 'CatchUp' | 'Throttled' | 'Headroom';
+
+/**
+ * Decode the wire `intentClass` byte. Out-of-range or missing values return `null` — the renderer
+ * suppresses the chip rather than guessing.
+ */
+export function decodeMetronomeIntentClass(raw: unknown): MetronomeIntentClass | null {
+  const n = typeof raw === 'number' ? raw : Number(raw as string);
+  if (!Number.isFinite(n)) return null;
+  switch (n) {
+    case 0: return 'CatchUp';
+    case 1: return 'Throttled';
+    case 2: return 'Headroom';
+    default: return null;
+  }
 }
 
 /**
@@ -417,17 +478,47 @@ export function computeCriticalPathForTick(input: {
     if (s.name) nameToDef.set(s.name, s);
   }
 
+  // Predecessor map: read directly from the engine-built `predecessors` field on each system.
+  // The previous shape rebuilt this from `deriveEdges(systems)`, but `deriveEdges` only sees
+  // access-declared edges — it can't see explicit `.After()` / `.Before()` chains because the
+  // engine doesn't surface those on the wire (they fold into Successors at Build time and the
+  // RecordBuilder ships ExplicitAfter/Before as empty arrays). For tier-discriminated W×W
+  // chains (Brain_T0..T3, Metabolism_T0..T3, PheroDep_T0..T3) the chain edges are explicit-only,
+  // so the client-side derivation missed them entirely and the CP traceback collapsed to a
+  // single-system path. Using `system.predecessors` (computed engine-side from the full edge
+  // set including explicit) gives the walker the complete graph. Falls back to `edges` for
+  // legacy traces / synthetic test fixtures that pass edges without populating predecessors.
   const predecessorsByName = new Map<string, string[]>();
-  for (const e of edges) {
-    const sPhase = nameToPhase.get(e.source);
-    const tPhase = nameToPhase.get(e.target);
-    if (!sPhase || !tPhase || sPhase !== tPhase) continue;
-    let preds = predecessorsByName.get(e.target);
-    if (!preds) {
-      preds = [];
-      predecessorsByName.set(e.target, preds);
+  for (const s of systems) {
+    if (!s.name) continue;
+    const targetPhase = nameToPhase.get(s.name);
+    if (!targetPhase) continue;
+    const predIdxs = (s as { predecessors?: unknown }).predecessors;
+    if (!Array.isArray(predIdxs)) continue;
+    const preds: string[] = [];
+    for (const raw of predIdxs) {
+      const predIdx = numberValue(raw);
+      if (predIdx == null) continue;
+      const predName = indexToName.get(predIdx);
+      if (!predName) continue;
+      const sourcePhase = nameToPhase.get(predName);
+      if (sourcePhase !== targetPhase) continue; // intra-phase only — phase-fence rule covers cross-phase
+      preds.push(predName);
     }
-    preds.push(e.source);
+    if (preds.length > 0) predecessorsByName.set(s.name, preds);
+  }
+  if (predecessorsByName.size === 0) {
+    for (const e of edges) {
+      const sPhase = nameToPhase.get(e.source);
+      const tPhase = nameToPhase.get(e.target);
+      if (!sPhase || !tPhase || sPhase !== tPhase) continue;
+      let preds = predecessorsByName.get(e.target);
+      if (!preds) {
+        preds = [];
+        predecessorsByName.set(e.target, preds);
+      }
+      preds.push(e.source);
+    }
   }
 
   const phaseIndex = new Map<string, number>();
@@ -463,13 +554,15 @@ export function computeCriticalPathForTick(input: {
   if (rowByName.size === 0) return null;
 
   // Branch on whether we have a dependency graph at all. With RFC 07 declarations on the wire,
-  // `edges` carries the producer→consumer / .After()/.Before() / event / resource graph and the
-  // CP walk traces a real wall-clock-longest path. Without declarations (pre-#310 traces, or
-  // engines whose systems never called SystemBuilder.AddReads/AddWrites) `edges` is empty —
-  // every system is a graph root, the walker would degenerate to "single-system path = the
-  // system with max duration." Fallback: show every system that ran in the tick, sorted by
-  // startUs. Same data structure consumed by the renderer; just no chain semantics.
-  const orderedPath = edges.length === 0
+  // `predecessorsByName` (built from `system.predecessors`) carries the full graph and the CP
+  // walk traces a real wall-clock-longest path. The `edges` parameter is only checked as a
+  // legacy fallback signal — older traces / synthetic test fixtures might pass edges without
+  // populating `system.predecessors`. Either signal having content means we have a graph.
+  // Without either, every system is a graph root and the walker would degenerate to
+  // "single-system path = the system with max duration." Fallback: show every system that ran
+  // in the tick, sorted by startUs.
+  const hasGraph = predecessorsByName.size > 0 || edges.length > 0;
+  const orderedPath = !hasGraph
     ? buildFallbackOrderByStartUs(rowByName)
     : walkOneTick({ durationByName, phasesWithSystems, predecessorsByName }).orderedPath;
   if (orderedPath.length === 0) return null;
@@ -480,16 +573,47 @@ export function computeCriticalPathForTick(input: {
 
   const out: TickPathPhase[] = [];
   for (const p of phases) {
-    out.push({ name: p, bars: [], phaseFenceWaitUs: 0, phaseFenceStraggler: null, totalUs: 0 });
+    out.push({ name: p, bars: [], nonCpBars: [], phaseFenceWaitUs: 0, phaseFenceStraggler: null, totalUs: 0 });
   }
-  const synthRow: TickPathPhase = { name: '(unphased)', bars: [], phaseFenceWaitUs: 0, phaseFenceStraggler: null, totalUs: 0 };
+  const synthRow: TickPathPhase = { name: '(unphased)', bars: [], nonCpBars: [], phaseFenceWaitUs: 0, phaseFenceStraggler: null, totalUs: 0 };
   let synthEverNeeded = false;
+  const cpSet = new Set<string>();
   for (const name of orderedPath) {
     const phase = phaseByName(name);
     const target = phase && phaseIndex.has(phase) ? out[phaseIndex.get(phase)!] : (synthEverNeeded = true, synthRow);
     target.bars.push(makeBar(name, rowByName.get(name)!, nameToDef.get(name)));
+    cpSet.add(name);
   }
   if (synthEverNeeded) out.push(synthRow);
+
+  // Populate non-CP bars per phase — every system that ran this tick and isn't on the CP. Sorted
+  // by startUs so the full-Gantt rendering reads as "execution order within the phase". Skipped
+  // rows (durationUs <= 0) are excluded — same rule as the CP walker.
+  const nonCpEntries = new Map<string, Array<{ name: string; startUs: number }>>();
+  for (const [name, row] of rowByName) {
+    if (cpSet.has(name)) continue;
+    const dur = numberValue((row as { durationUs?: unknown }).durationUs) ?? 0;
+    if (dur <= 0) continue;
+    const phase = phaseByName(name);
+    const phaseKey = phase && phaseIndex.has(phase) ? phase : '';
+    const startUs = numberValue((row as { startUs?: unknown }).startUs) ?? 0;
+    let bucket = nonCpEntries.get(phaseKey);
+    if (!bucket) {
+      bucket = [];
+      nonCpEntries.set(phaseKey, bucket);
+    }
+    bucket.push({ name, startUs });
+  }
+  for (const [phaseKey, entries] of nonCpEntries) {
+    entries.sort((a, b) => (a.startUs - b.startUs) || a.name.localeCompare(b.name));
+    const target = phaseKey === ''
+      ? out.find((p) => p.name === '(unphased)') ?? null
+      : out[phaseIndex.get(phaseKey)!];
+    if (!target) continue;
+    for (const e of entries) {
+      target.nonCpBars.push(makeBar(e.name, rowByName.get(e.name)!, nameToDef.get(e.name)));
+    }
+  }
 
   // Phase-fence wait per phase: max EndUs across ALL systems in the phase (CP or not) minus the
   // CP's last system EndUs in that phase. Zero if the CP terminates at the straggler.
@@ -497,7 +621,7 @@ export function computeCriticalPathForTick(input: {
   // **Skipped in execution-order fallback** — without a dependency graph, the "CP tail" is just
   // "the alphabetically-last system tied at startUs=0", which has no well-defined relationship
   // with the phase max endUs. Reporting a wait would be meaningless.
-  const inFallback = edges.length === 0;
+  const inFallback = !hasGraph;
   for (const phaseRow of out) {
     if (phaseRow.bars.length === 0) continue;
     if (inFallback) {
@@ -562,11 +686,14 @@ export function computeCriticalPathForTick(input: {
   const metronomeWaitUs = tickSummaryRow
     ? numberValue((tickSummaryRow as { metronomeWaitUs?: unknown }).metronomeWaitUs) ?? 0
     : 0;
+  const metronomeIntentClass = tickSummaryRow
+    ? decodeMetronomeIntentClass((tickSummaryRow as { metronomeIntentClass?: unknown }).metronomeIntentClass)
+    : null;
 
   let totalUs = postTick.totalUs + metronomeWaitUs;
   for (const phaseRow of out) totalUs += phaseRow.totalUs;
-  const mode: PathMode = edges.length === 0 ? 'execution-order' : 'critical-path';
-  return { tickNumber, mode, phases: out, postTick, metronomeWaitUs, totalUs };
+  const mode: PathMode = hasGraph ? 'critical-path' : 'execution-order';
+  return { tickNumber, mode, phases: out, postTick, metronomeWaitUs, metronomeIntentClass, totalUs };
 }
 
 /**
@@ -585,6 +712,189 @@ function buildFallbackOrderByStartUs(rowByName: Map<string, SystemTickSummary>):
   }
   entries.sort((a, b) => (a.startUs - b.startUs) || a.name.localeCompare(b.name));
   return entries.map((e) => e.name);
+}
+
+// ── Aggregate (range) tape ────────────────────────────────────────────────
+
+/**
+ * Compute aggregate critical-path bars across a range of ticks. For each system that appeared on
+ * the CP at least once in the range, the bar carries `mean(durationUs over ticks-on-CP)`. Phase
+ * grouping mirrors single-tick mode; bars within a phase are sorted by mean duration descending
+ * (no execution-order is meaningful across many ticks). Wait segments + phase-fence are skipped
+ * — averaging waits across heterogeneous ticks is too noisy to surface in v1. Post-tick / metronome
+ * carry per-key means across the range.
+ *
+ * Returned shape uses `tickNumber = -1` as the "not a real tick" sentinel; the toolbar shows
+ * "aggregate of N ticks" in place of the tick label. `aggregate` carries the participation count
+ * and the actual range used. Returns `null` when no ticks fell in range.
+ */
+export function computeAggregateCriticalPath(input: {
+  systems: SystemDefinitionDto[];
+  rows: SystemTickSummary[];
+  edges: DerivedEdge[];
+  phases: string[];
+  postTickRows: PostTickSummary[];
+  tickSummaries: TickSummaryDto[];
+  range: TickRange | null;
+}): TickPathBars | null {
+  const { systems, rows, edges, phases, postTickRows, tickSummaries, range } = input;
+  if (!range) return null;
+
+  // Collect the set of ticks in range with at least one row. Reuse single-tick CP for each;
+  // accumulate per-system on-CP duration sums + counts.
+  const sumByName = new Map<string, number>();
+  const countByName = new Map<string, number>();
+  const phaseByNameMap = new Map<string, string>();
+  for (const s of systems) {
+    if (s.name) phaseByNameMap.set(s.name, s.phaseName ?? '');
+  }
+
+  const ticksSeen = new Set<number>();
+  for (const r of rows) {
+    const tn = numberValue((r as { tickNumber?: unknown }).tickNumber);
+    if (tn == null || tn < range.from || tn > range.to) continue;
+    ticksSeen.add(tn);
+  }
+  if (ticksSeen.size === 0) return null;
+
+  // Walk each tick's CP. Reuse `computeCriticalPathForTick` so the dependency / phase-fence /
+  // fallback logic stays identical.
+  for (const tickNumber of ticksSeen) {
+    const tickSummaryRow = tickSummaries.find((t) => Number(t.tickNumber) === tickNumber) ?? null;
+    const bars = computeCriticalPathForTick({
+      tickNumber, systems, rows, edges, phases, postTickRows, tickSummaryRow,
+    });
+    if (!bars) continue;
+    for (const phase of bars.phases) {
+      for (const bar of phase.bars) {
+        sumByName.set(bar.systemName, (sumByName.get(bar.systemName) ?? 0) + bar.durationUs);
+        countByName.set(bar.systemName, (countByName.get(bar.systemName) ?? 0) + 1);
+      }
+    }
+  }
+
+  if (sumByName.size === 0) return null;
+
+  // Bucket per phase + sort by mean desc.
+  const phaseIndex = new Map<string, number>();
+  phases.forEach((p, i) => phaseIndex.set(p, i));
+  const phaseRows: TickPathPhase[] = [];
+  for (const p of phases) phaseRows.push({ name: p, bars: [], nonCpBars: [], phaseFenceWaitUs: 0, phaseFenceStraggler: null, totalUs: 0 });
+  const synth: TickPathPhase = { name: '(unphased)', bars: [], nonCpBars: [], phaseFenceWaitUs: 0, phaseFenceStraggler: null, totalUs: 0 };
+  let synthNeeded = false;
+
+  const nameToDef = new Map<string, SystemDefinitionDto>();
+  for (const s of systems) {
+    if (s.name) nameToDef.set(s.name, s);
+  }
+
+  const interim = new Map<string, Array<{ name: string; meanUs: number }>>();
+  for (const [name, sum] of sumByName) {
+    const count = countByName.get(name) ?? 1;
+    const meanUs = sum / count;
+    const phase = phaseByNameMap.get(name) ?? '';
+    const key = phase && phaseIndex.has(phase) ? phase : '';
+    let bucket = interim.get(key);
+    if (!bucket) {
+      bucket = [];
+      interim.set(key, bucket);
+    }
+    bucket.push({ name, meanUs });
+  }
+  for (const [key, entries] of interim) {
+    entries.sort((a, b) => b.meanUs - a.meanUs);
+    const target = key === '' ? (synthNeeded = true, synth) : phaseRows[phaseIndex.get(key)!];
+    for (const e of entries) {
+      const def = nameToDef.get(e.name);
+      target.bars.push({
+        systemName: e.name,
+        durationUs: e.meanUs,
+        workerClaimWaitUs: 0,
+        chunkDispatchWaitUs: 0,
+        isParallel: def?.isParallel ?? false,
+        workersTouched: 0,
+        chunksProcessed: 0,
+      });
+    }
+  }
+  if (synthNeeded) phaseRows.push(synth);
+  for (const phaseRow of phaseRows) {
+    let total = 0;
+    for (const bar of phaseRow.bars) total += bar.durationUs;
+    phaseRow.totalUs = total;
+  }
+
+  // Aggregate post-tick — per-key mean across the range. Skipped tickSummary rows (range filter)
+  // contribute zero; we count tickSummaries IN RANGE for the divisor so partial post-tick coverage
+  // doesn't wildly inflate the mean.
+  const postSums = { writeTickFenceUs: 0, walFlushUs: 0, subscriptionOutputUs: 0, tierIndexRebuildUs: 0, dormancySweepUs: 0, tierBudgetUs: 0 };
+  let postCount = 0;
+  for (const r of postTickRows) {
+    const tn = numberValue((r as { tickNumber?: unknown }).tickNumber);
+    if (tn == null || tn < range.from || tn > range.to) continue;
+    postCount++;
+    postSums.writeTickFenceUs     += numberValue((r as { writeTickFenceUs?: unknown }).writeTickFenceUs)     ?? 0;
+    postSums.walFlushUs           += numberValue((r as { walFlushUs?: unknown }).walFlushUs)                 ?? 0;
+    postSums.subscriptionOutputUs += numberValue((r as { subscriptionOutputUs?: unknown }).subscriptionOutputUs) ?? 0;
+    postSums.tierIndexRebuildUs   += numberValue((r as { tierIndexRebuildUs?: unknown }).tierIndexRebuildUs) ?? 0;
+    postSums.dormancySweepUs      += numberValue((r as { dormancySweepUs?: unknown }).dormancySweepUs)       ?? 0;
+    postSums.tierBudgetUs         += numberValue((r as { tierBudgetUs?: unknown }).tierBudgetUs)             ?? 0;
+  }
+  const div = Math.max(1, postCount);
+  const postTick: TickPathPostTick = {
+    writeTickFenceUs:     postSums.writeTickFenceUs / div,
+    walFlushUs:           postSums.walFlushUs / div,
+    subscriptionOutputUs: postSums.subscriptionOutputUs / div,
+    tierIndexRebuildUs:   postSums.tierIndexRebuildUs / div,
+    dormancySweepUs:      postSums.dormancySweepUs / div,
+    tierBudgetUs:         postSums.tierBudgetUs / div,
+    totalUs: 0,
+  };
+  postTick.totalUs = postTick.writeTickFenceUs + postTick.walFlushUs + postTick.subscriptionOutputUs
+    + postTick.tierIndexRebuildUs + postTick.dormancySweepUs + postTick.tierBudgetUs;
+
+  // Metronome aggregate — mean across in-range tickSummaries. intentClass is the modal value
+  // (most common); ties + mixed buckets degrade to null.
+  let metroSum = 0;
+  let metroCount = 0;
+  const intentTally = new Map<MetronomeIntentClass, number>();
+  for (const t of tickSummaries) {
+    const tn = numberValue((t as { tickNumber?: unknown }).tickNumber);
+    if (tn == null || tn < range.from || tn > range.to) continue;
+    metroSum += numberValue((t as { metronomeWaitUs?: unknown }).metronomeWaitUs) ?? 0;
+    metroCount++;
+    const intent = decodeMetronomeIntentClass((t as { metronomeIntentClass?: unknown }).metronomeIntentClass);
+    if (intent) intentTally.set(intent, (intentTally.get(intent) ?? 0) + 1);
+  }
+  const metronomeWaitUs = metroCount > 0 ? metroSum / metroCount : 0;
+  let topIntent: MetronomeIntentClass | null = null;
+  let topIntentCount = 0;
+  let intentTied = false;
+  for (const [k, v] of intentTally) {
+    if (v > topIntentCount) {
+      topIntent = k;
+      topIntentCount = v;
+      intentTied = false;
+    } else if (v === topIntentCount && k !== topIntent) {
+      intentTied = true;
+    }
+  }
+  const metronomeIntentClass: MetronomeIntentClass | null = intentTied ? null : topIntent;
+
+  let totalUs = postTick.totalUs + metronomeWaitUs;
+  for (const phaseRow of phaseRows) totalUs += phaseRow.totalUs;
+  const mode: PathMode = edges.length > 0 ? 'critical-path' : 'execution-order';
+
+  return {
+    tickNumber: -1,
+    mode,
+    aggregate: { tickCount: ticksSeen.size, range: { from: range.from, to: range.to } },
+    phases: phaseRows,
+    postTick,
+    metronomeWaitUs,
+    metronomeIntentClass,
+    totalUs,
+  };
 }
 
 function makeBar(name: string, row: SystemTickSummary, def: SystemDefinitionDto | undefined): TickPathBar {

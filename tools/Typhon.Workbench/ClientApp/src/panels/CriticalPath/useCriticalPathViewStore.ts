@@ -34,10 +34,33 @@ export interface CriticalPathViewState {
    * scale.
    */
   lockZoom: boolean;
+  /**
+   * When `true`, the tape includes every system that ran in each phase — not just the ones on the
+   * critical path. Non-CP bars render dimmed alongside CP bars so the user can see the rest of
+   * the work without losing the CP focus. Off by default per `09-system-dag.md §5.6` (the CP
+   * focus is the primary diagnostic, full Gantt is the "what else ran" pivot).
+   */
+  fullGantt: boolean;
+  /**
+   * Aggregate vs single-tick. When `true`, the tape shows means across the selected tick range
+   * instead of one representative tick. Per `09-system-dag.md §5.6` — useful for comparing the
+   * "shape of a tick" across a window without scrubbing tick-by-tick.
+   */
+  aggregateMode: boolean;
+  /**
+   * Show the leading metronome-wait stripe in the tape. Off by default per
+   * `09-system-dag.md §5.4` — the metronome wait is "what the engine wasn't doing", noise to most
+   * investigations. Flip on to investigate engine throttling / sleep behaviour, paired with the
+   * intent-class chip surfaced on the stripe.
+   */
+  showMetronome: boolean;
   setOrientation: (orientation: Orientation) => void;
   setScale: (scale: CpScale) => void;
   setPxPerUs: (pxPerUs: number) => void;
   setLockZoom: (lock: boolean) => void;
+  setFullGantt: (full: boolean) => void;
+  setAggregateMode: (agg: boolean) => void;
+  setShowMetronome: (show: boolean) => void;
   /**
    * Multiply zoom by `factor` — used by the wheel handler. Caller is responsible for any scroll
    * compensation needed to keep the cursor anchored.
@@ -69,10 +92,16 @@ export const useCriticalPathViewStore = create<CriticalPathViewState>()(
       scale: 'linear',
       pxPerUs: DEFAULT_PX_PER_US,
       lockZoom: false,
+      fullGantt: false,
+      aggregateMode: false,
+      showMetronome: false,
       setOrientation: (orientation) => set({ orientation }),
       setScale: (scale) => set({ scale }),
       setPxPerUs: (pxPerUs) => set({ pxPerUs: Math.max(1e-6, pxPerUs) }),
       setLockZoom: (lockZoom) => set({ lockZoom }),
+      setFullGantt: (fullGantt) => set({ fullGantt }),
+      setAggregateMode: (aggregateMode) => set({ aggregateMode }),
+      setShowMetronome: (showMetronome) => set({ showMetronome }),
       zoomBy: (factor) => set((state) => ({ pxPerUs: Math.max(1e-6, state.pxPerUs * factor) })),
     }),
     { name: 'typhon-cp-view', storage: safeStorage },

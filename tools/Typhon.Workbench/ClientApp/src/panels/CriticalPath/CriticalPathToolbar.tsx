@@ -22,6 +22,12 @@ export default function CriticalPathToolbar({ bars, onFit }: Props) {
   const pxPerUs = useCriticalPathViewStore((s) => s.pxPerUs);
   const lockZoom = useCriticalPathViewStore((s) => s.lockZoom);
   const setLockZoom = useCriticalPathViewStore((s) => s.setLockZoom);
+  const fullGantt = useCriticalPathViewStore((s) => s.fullGantt);
+  const setFullGantt = useCriticalPathViewStore((s) => s.setFullGantt);
+  const aggregateMode = useCriticalPathViewStore((s) => s.aggregateMode);
+  const setAggregateMode = useCriticalPathViewStore((s) => s.setAggregateMode);
+  const showMetronome = useCriticalPathViewStore((s) => s.showMetronome);
+  const setShowMetronome = useCriticalPathViewStore((s) => s.setShowMetronome);
   // Help glyph follows the app-wide `legendsVisible` flag (toggled via the `l` key or the
   // "Toggle Legends" palette command). Hidden when legends are off so chrome stays minimal.
   const legendsVisible = useUiPrefsStore((s) => s.legendsVisible);
@@ -32,7 +38,11 @@ export default function CriticalPathToolbar({ bars, onFit }: Props) {
   return (
     <div className="flex items-center gap-3 border-b border-border bg-background/80 px-3 py-1.5 font-mono text-[11px]">
       <span className="font-semibold text-foreground">
-        {bars ? `Tick ${bars.tickNumber}` : 'Critical path'}
+        {bars
+          ? bars.aggregate
+            ? `Aggregate · ${bars.aggregate.tickCount} ticks`
+            : `Tick ${bars.tickNumber}`
+          : 'Critical path'}
       </span>
       {isFallback && (
         <span
@@ -45,6 +55,12 @@ export default function CriticalPathToolbar({ bars, onFit }: Props) {
       {bars && <span className="text-muted-foreground">{formatUs(bars.totalUs)}</span>}
 
       <div className="ml-auto flex items-center gap-3">
+        <SegmentedControl<'single' | 'aggregate'>
+          label="mode"
+          value={aggregateMode ? 'aggregate' : 'single'}
+          options={['single', 'aggregate']}
+          onChange={(v) => setAggregateMode(v === 'aggregate')}
+        />
         <SegmentedControl<Orientation>
           label="orientation"
           value={orientation}
@@ -57,6 +73,30 @@ export default function CriticalPathToolbar({ bars, onFit }: Props) {
           options={['linear', 'log']}
           onChange={setScale}
         />
+        <label
+          className="flex cursor-pointer items-center gap-1 text-muted-foreground"
+          title="Append every system that ran (not just the critical path) — non-CP bars render dimmed alongside CP bars. Off by default; flip on to investigate 'what else was running'."
+        >
+          <input
+            type="checkbox"
+            checked={fullGantt}
+            onChange={(e) => setFullGantt(e.target.checked)}
+            className="h-3 w-3"
+          />
+          full Gantt
+        </label>
+        <label
+          className="flex cursor-pointer items-center gap-1 text-muted-foreground"
+          title="Show the leading metronome-wait stripe — the gap from the previous TickEnd to this TickStart. Off by default per spec; flip on to investigate engine throttling / sleep behaviour. The intent-class chip (Headroom / Throttled / CatchUp) is rendered on the stripe when there's room."
+        >
+          <input
+            type="checkbox"
+            checked={showMetronome}
+            onChange={(e) => setShowMetronome(e.target.checked)}
+            className="h-3 w-3"
+          />
+          metronome
+        </label>
         <span className="text-muted-foreground">{formatZoom(pxPerUs)}</span>
         <label
           className="flex cursor-pointer items-center gap-1 text-muted-foreground"

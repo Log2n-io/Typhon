@@ -7,12 +7,24 @@ export default function SystemDagNode({
   data,
   selected,
 }: {
-  data: DagNodeData & { stat?: SystemStat | null; cpRate?: number | null; skipRate?: number | null };
+  data: DagNodeData & { stat?: SystemStat | null; cpRate?: number | null; skipRate?: number | null; isOnDominantCp?: boolean; isHovered?: boolean };
   selected?: boolean;
 }) {
   const kindClass = kindClasses(data.kind);
   const exclusiveBar = data.isExclusivePhase ? 'border-l-4 border-l-amber-500' : '';
-  const ring = selected ? 'ring-2 ring-primary' : '';
+  // Selection wins over hover — once you click the node the primary ring locks in; hover only
+  // illuminates when no harder selection is active. Hover comes from the cross-panel store, so
+  // hovering a tape bar lights this node and vice-versa.
+  const ring = selected
+    ? 'ring-2 ring-primary'
+    : data.isHovered
+      ? 'ring-2 ring-foreground/60'
+      : '';
+  // Per `09-system-dag.md §11 Phase 3`: nodes on the critical path of the dominant tick get a red
+  // outline. We use Tailwind's `outline` (not `border` or `ring`) so it stacks cleanly with the
+  // selection ring + heat border without fighting any of them. `outline-offset-1` keeps the red
+  // halo visually distinct from the heat colour painted on the actual border.
+  const dominantCpOutline = data.isOnDominantCp ? 'outline outline-2 outline-red-500 outline-offset-1' : '';
   const stat = data.stat ?? null;
   const heatStyle = stat ? heatBorder(stat.heat) : undefined;
   const cpRate = data.cpRate ?? null;
@@ -28,9 +40,10 @@ export default function SystemDagNode({
 
   return (
     <div
-      className={`relative flex h-[56px] w-[180px] flex-col rounded border bg-card shadow-sm ${exclusiveBar} ${ring}`}
+      className={`relative flex h-[56px] w-[180px] flex-col rounded border bg-card shadow-sm ${exclusiveBar} ${ring} ${dominantCpOutline}`}
       style={heatStyle}
       data-testid={`system-dag-node-${data.systemName}`}
+      title={data.isOnDominantCp ? 'On the critical path of the dominant tick' : undefined}
     >
       <Handle type="target" position={Position.Left} className="!h-2 !w-2 !border-0 !bg-muted-foreground" />
       <div className="flex items-center justify-between gap-1 px-2 pt-1">

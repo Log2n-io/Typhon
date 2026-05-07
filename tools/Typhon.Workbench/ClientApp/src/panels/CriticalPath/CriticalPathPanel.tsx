@@ -6,7 +6,7 @@ import { useSelectionStore } from '@/stores/useSelectionStore';
 import { useSessionStore } from '@/stores/useSessionStore';
 import { deriveEdges } from '../SystemDag/edgeDerivation';
 import { timeToTickRange } from '../SystemDag/tickRangeMapping';
-import { computeCriticalPathForTick, dominantTickInRange } from './criticalPath';
+import { computeAggregateCriticalPath, computeCriticalPathForTick, dominantTickInRange } from './criticalPath';
 import CriticalPathToolbar from './CriticalPathToolbar';
 import CriticalPathView from './CriticalPathView';
 import { useCriticalPathViewStore } from './useCriticalPathViewStore';
@@ -48,8 +48,23 @@ export default function CriticalPathPanel(_props: IDockviewPanelProps) {
     [topology],
   );
 
+  // In aggregate mode the displayed bars are means across the selected tick range — bypass the
+  // dominant-tick selector entirely. Single-tick (default) keeps the existing behaviour.
+  const aggregateMode = useCriticalPathViewStore((s) => s.aggregateMode);
   const bars = useMemo(() => {
-    if (tapeTick == null || !topology?.systems || !metadata) return null;
+    if (!topology?.systems || !metadata) return null;
+    if (aggregateMode) {
+      return computeAggregateCriticalPath({
+        systems: topology.systems,
+        rows: metadata.systemTickSummaries ?? [],
+        edges: derivedEdges,
+        phases: topology.phases ?? [],
+        postTickRows: metadata.postTickSummaries ?? [],
+        tickSummaries: metadata.tickSummaries ?? [],
+        range,
+      });
+    }
+    if (tapeTick == null) return null;
     const tickRow = (metadata.tickSummaries ?? []).find((t) => Number(t.tickNumber) === tapeTick) ?? null;
     return computeCriticalPathForTick({
       tickNumber: tapeTick,
@@ -60,28 +75,29 @@ export default function CriticalPathPanel(_props: IDockviewPanelProps) {
       postTickRows: metadata.postTickSummaries ?? [],
       tickSummaryRow: tickRow,
     });
-  }, [tapeTick, topology, metadata, derivedEdges]);
+  }, [aggregateMode, tapeTick, topology, metadata, derivedEdges, range]);
 
   // Fit signal — increments per "Fit" press / `0` keybind / middle-click / auto-fit. View
   // watches and recomputes pxPerUs.
   const [fitSignal, setFitSignal] = useState(0);
   const requestFit = () => setFitSignal((n) => n + 1);
 
-  // Auto-fit on selection change — every time the displayed tick changes, refit so the new
-  // tick's work fills the viewport. Without this, the persisted `pxPerUs` from a different tick
-  // (whose wall-clock total may be 100× different) leaves the view either empty or overflowing.
-  // The `lockZoom` toggle in the toolbar disables this so power users can compare phases /
-  // systems across ticks at the same scale.
+  // Auto-fit on selection change — every time the displayed tick changes (single mode) or the
+  // aggregate-mode toggle flips (the totalUs goes from one tick to a range mean), refit so the
+  // new wall-clock total fills the viewport. Without this, the persisted `pxPerUs` from a
+  // different tick / mode leaves the view either empty or overflowing. The `lockZoom` toggle in
+  // the toolbar disables this so power users can compare phases / systems across ticks at the
+  // same scale.
   const lockZoom = useCriticalPathViewStore((s) => s.lockZoom);
   useEffect(() => {
     if (lockZoom) return;
-    if (tapeTick == null) return;
+    if (!bars) return;
     requestFit();
     // requestFit identity is stable enough — it's a closure over the local setter — but we don't
-    // include it in deps to avoid re-firing for unrelated reasons. Only `tapeTick` and the
-    // `lockZoom` flag should drive auto-fit.
+    // include it in deps to avoid re-firing for unrelated reasons. Only the displayed bars and
+    // the `lockZoom` flag should drive auto-fit.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tapeTick, lockZoom]);
+  }, [bars, lockZoom]);
 
   // Keyboard zoom: `+`/`=` zoom in, `-` zoom out, `0` fit. Listens on the whole panel container
   // so it works wherever the user clicks inside it. Doesn't fight inputs because there are none.

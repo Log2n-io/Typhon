@@ -464,3 +464,59 @@ describe('dominantTickInRange', () => {
     expect(dominantTickInRange(ticks, { from: 3, to: 4 })).toBe(3);
   });
 });
+
+// ── Performance — #317 acceptance: 1024 ticks × 200 systems < 50 ms ───────
+
+describe('performance', () => {
+  /**
+   * Synthetic worst-case-ish workload: 200 systems split evenly across 5 phases (40 systems per
+   * phase), each phase forming a linear chain (40 intra-phase edges per phase = 200 edges total),
+   * 1024 ticks of rows. Mirrors the #317 acceptance threshold from `09-system-dag.md §11 Phase 3`.
+   *
+   * The walker is O(systems × ticks) per `computeCriticalPathParticipation`; on a typical dev box
+   * 1024 × 200 lands well under 50 ms. We assert against 200 ms instead of 50 to absorb CI
+   * variance (slow machines, GC pauses) without making the test flaky — the 50 ms target is the
+   * design budget on a typical workstation, not a hard ceiling enforceable in CI.
+   */
+  it('1024 ticks × 200 systems CP participation under 200 ms (target 50 ms)', () => {
+    const PHASE_COUNT = 5;
+    const PHASE_NAMES = Array.from({ length: PHASE_COUNT }, (_, i) => `p${i}`);
+    const SYSTEMS_PER_PHASE = 40;
+    const SYSTEM_COUNT = PHASE_COUNT * SYSTEMS_PER_PHASE;
+    const TICK_COUNT = 1024;
+
+    // Build systems with predecessors[] populated (engine-built path the walker prefers).
+    const systems: SystemDefinitionDto[] = [];
+    for (let p = 0; p < PHASE_COUNT; p++) {
+      for (let i = 0; i < SYSTEMS_PER_PHASE; i++) {
+        const idx = p * SYSTEMS_PER_PHASE + i;
+        const preds = i > 0 ? [idx - 1] : [];
+        systems.push(sys(`s${idx}`, idx, PHASE_NAMES[p], { predecessors: preds }));
+      }
+    }
+
+    // Per-tick rows for every system. Vary durations slightly per tick so different ticks pick
+    // different terminus systems — exercises the traceback path on every tick.
+    const rows: SystemTickSummary[] = [];
+    for (let t = 1; t <= TICK_COUNT; t++) {
+      for (let s = 0; s < SYSTEM_COUNT; s++) {
+        // Duration: hash of (tick, system) so results aren't degenerate (all-equal would let
+        // first-system always win the tie). 1..100 µs.
+        const dur = (((t * 31 + s) * 17) % 100) + 1;
+        rows.push(row(t, s, dur));
+      }
+    }
+
+    const start = performance.now();
+    const result = computeCriticalPathParticipation({
+      systems, rows, edges: [], phases: PHASE_NAMES, range: { from: 1, to: TICK_COUNT },
+    });
+    const elapsedMs = performance.now() - start;
+
+    expect(result.totalTicks).toBe(TICK_COUNT);
+    expect(elapsedMs).toBeLessThan(200);
+    // Sanity: every CP across the range should hit at least one system per phase (linear chain
+    // forces it). So the total perSystem map should have entries for some systems in every phase.
+    expect(result.perSystem.size).toBeGreaterThan(0);
+  });
+});

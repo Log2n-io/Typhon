@@ -63,6 +63,7 @@ public static class Program
                 foreach (var exp in exporters) TyphonProfiler.AttachExporter(exp);
                 var metadata = ProfilerSetup.BuildSessionMetadata(
                     bridge.Systems, workerCount: 16, baseTickRate: 60f,
+                    phases: bridge.PhaseNames,
                     currentEngineTickProvider: () => bridge.CurrentTick);
                 if (profilerConfig.LiveWaitMs > 0 && profilerConfig.LivePort >= 0)
                 {

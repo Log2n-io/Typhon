@@ -84,7 +84,9 @@ function isInstantKind(v: number): boolean {
   // Phase 4 follow-up (#289):
   //   241 (SchedulerMetronomeWait) — SPAN, falls through to false below.
   //   242 (SchedulerOverloadDetector) — instant.
-  if (v === 242) return true;
+  //   243 (RuntimePhaseSpan)        — SPAN, falls through.
+  //   244 (QueueTickEnd)            — instant rollup, hand-coded codec, no span-header extension.
+  if (v === 242 || v === 244) return true;
   return false;
 }
 
@@ -255,6 +257,23 @@ function decodeInstant(
           queueDepth: reader.readI32(payloadOffset + 18),
           overloadLevel: reader.readU8(payloadOffset + 22),
           tickMultiplier: reader.readU8(payloadOffset + 23),
+        };
+      }
+      if ((kind as number) === 244) {
+        // QueueTickEnd — per-(tick, queue) rollup. Wire layout (from `QueueTickEndCodec.Write`):
+        //   tickNumber u32 @ +0, queueId u16 @ +4, padding u16 @ +6,
+        //   peakDepth u32 @ +8, endOfTickDepth u32 @ +12, overflowCount u32 @ +16,
+        //   produced u32 @ +20, consumed u32 @ +24. (28 byte payload.)
+        // Surfacing here makes the rollup available to UI tooltips / queue drill-downs without
+        // round-tripping through the server-side cache section.
+        return {
+          kind, threadSlot, tickNumber, timestampUs,
+          queueId: reader.readU16(payloadOffset + 4),
+          queuePeakDepth: reader.readU32(payloadOffset + 8),
+          queueEndOfTickDepth: reader.readU32(payloadOffset + 12),
+          queueOverflowCount: reader.readU32(payloadOffset + 16),
+          queueProduced: reader.readU32(payloadOffset + 20),
+          queueConsumed: reader.readU32(payloadOffset + 24),
         };
       }
       return null;

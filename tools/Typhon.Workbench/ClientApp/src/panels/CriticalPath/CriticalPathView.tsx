@@ -2,7 +2,8 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { pickTextColorFor } from '@/libs/colors';
 import { TIMELINE_PALETTE } from '@/libs/profiler/canvas/canvasUtils';
-import type { TickPathBar, TickPathBars, TickPathPhase, TickPathPostTick } from './criticalPath';
+import { useHoverStore } from '@/stores/useHoverStore';
+import type { MetronomeIntentClass, TickPathBar, TickPathBars, TickPathPhase, TickPathPostTick } from './criticalPath';
 import { colorForPhase } from './phaseColors';
 import { useCriticalPathViewStore, type CpScale, type Orientation } from './useCriticalPathViewStore';
 
@@ -50,6 +51,12 @@ export default function CriticalPathView({ bars, selectedSystemName, onSelectBar
   const scale = useCriticalPathViewStore((s) => s.scale);
   const pxPerUs = useCriticalPathViewStore((s) => s.pxPerUs);
   const setPxPerUs = useCriticalPathViewStore((s) => s.setPxPerUs);
+  const fullGantt = useCriticalPathViewStore((s) => s.fullGantt);
+  const showMetronome = useCriticalPathViewStore((s) => s.showMetronome);
+  const hoveredSystem = useHoverStore((s) => s.hoveredSystem);
+  const setHoveredSystem = useHoverStore((s) => s.setHoveredSystem);
+  const hoveredPhase = useHoverStore((s) => s.hoveredPhase);
+  const setHoveredPhase = useHoverStore((s) => s.setHoveredPhase);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 });
@@ -89,6 +96,27 @@ export default function CriticalPathView({ bars, selectedSystemName, onSelectBar
     onFit();
   }, [orientation, onFit]);
 
+  // Auto-fit when full-Gantt toggles — the timeline either grows (non-CP bars added) or shrinks
+  // (CP-only) by a large factor, so the previous `pxPerUs` is the wrong scale. `lockZoom` opts
+  // power users out so they can compare CP-only vs full views at the same scale.
+  const previousFullGanttRef = useRef(fullGantt);
+  useEffect(() => {
+    if (previousFullGanttRef.current === fullGantt) return;
+    previousFullGanttRef.current = fullGantt;
+    if (useCriticalPathViewStore.getState().lockZoom) return;
+    onFit();
+  }, [fullGantt, onFit]);
+
+  // Same auto-fit dance for the metronome toggle — turning it on adds a leading stripe (often
+  // larger than the work itself on idle ticks); turning it off shrinks the timeline.
+  const previousShowMetronomeRef = useRef(showMetronome);
+  useEffect(() => {
+    if (previousShowMetronomeRef.current === showMetronome) return;
+    previousShowMetronomeRef.current = showMetronome;
+    if (useCriticalPathViewStore.getState().lockZoom) return;
+    onFit();
+  }, [showMetronome, onFit]);
+
   // Track viewport size so "Fit" / scroll calculations have current numbers. ResizeObserver fires
   // on dock-resize, panel float, etc.
   useEffect(() => {
@@ -113,13 +141,22 @@ export default function CriticalPathView({ bars, selectedSystemName, onSelectBar
     return () => clearTimeout(t);
   }, [viewportSize.width, viewportSize.height]);
 
-  // Build the flat segment list once per `bars` change. Cheap (linear in segments).
-  const segments = useMemo(() => buildSegments(bars), [bars]);
+  // Build the flat segment list — `fullGantt` decides whether non-CP bars are appended into each
+  // phase. Cheap (linear in segments). `effectiveTotalUs` is the SUM of segment durations rather
+  // than `bars.totalUs`, because in full-Gantt mode non-CP additions inflate the timeline above
+  // the strict-wall-clock CP total. We use the effective value everywhere placement / zoom /
+  // fit-anchor calculations would otherwise round-trip through `bars.totalUs`.
+  const segments = useMemo(() => buildSegments(bars, fullGantt, showMetronome), [bars, fullGantt, showMetronome]);
+  const effectiveTotalUs = useMemo(() => {
+    let sum = 0;
+    for (const seg of segments) sum += seg.durationUs;
+    return Math.max(1, sum);
+  }, [segments]);
 
   // Major-axis logical-fraction table — drives both linear and log placement uniformly.
-  const placement = useMemo(() => placeSegments(segments, scale, bars.totalUs), [segments, scale, bars.totalUs]);
+  const placement = useMemo(() => placeSegments(segments, scale, effectiveTotalUs), [segments, scale, effectiveTotalUs]);
 
-  const majorTotalPx = Math.max(1, bars.totalUs * pxPerUs);
+  const majorTotalPx = Math.max(1, effectiveTotalUs * pxPerUs);
 
   // Pending zoom-anchor: written by the wheel handler, applied by the layout effect *after*
   // React commits the new SVG width. Using rAF here is unreliable — React 18's automatic
@@ -166,14 +203,14 @@ export default function CriticalPathView({ bars, selectedSystemName, onSelectBar
       const factor = Math.exp(-e.deltaY * 0.0015);
       const cursorMajor = orient === 'horizontal' ? e.clientX - rect.left : e.clientY - rect.top;
       const scrollMajor = orient === 'horizontal' ? el.scrollLeft : el.scrollTop;
-      const oldMajor = Math.max(1, bars.totalUs * cur);
+      const oldMajor = Math.max(1, effectiveTotalUs * cur);
       const fraction = (scrollMajor + cursorMajor) / oldMajor;
       pendingAnchor.current = { fraction, cursorMajor, orientation: orient };
       useCriticalPathViewStore.getState().setPxPerUs(cur * factor);
     };
     el.addEventListener('wheel', onWheel, { passive: false });
     return () => el.removeEventListener('wheel', onWheel);
-  }, [bars.totalUs]);
+  }, [effectiveTotalUs]);
 
   // Apply the pending anchor right after React commits the SVG resize. useLayoutEffect runs
   // synchronously after the DOM update and before paint — by this point the SVG has its new
@@ -183,12 +220,12 @@ export default function CriticalPathView({ bars, selectedSystemName, onSelectBar
     if (!a) return;
     const el = scrollRef.current;
     if (!el) return;
-    const newMajor = Math.max(1, bars.totalUs * pxPerUs);
+    const newMajor = Math.max(1, effectiveTotalUs * pxPerUs);
     const newScroll = a.fraction * newMajor - a.cursorMajor;
     if (a.orientation === 'horizontal') el.scrollLeft = newScroll;
     else el.scrollTop = newScroll;
     pendingAnchor.current = null;
-  }, [pxPerUs, bars.totalUs]);
+  }, [pxPerUs, effectiveTotalUs]);
 
   // Fit-to-viewport: size the canvas so the *work* (tick + post-tick) fills the major axis —
   // metronome wait is deliberately excluded from the fit budget. On idle ticks the metronome
@@ -200,23 +237,27 @@ export default function CriticalPathView({ bars, selectedSystemName, onSelectBar
   // scrollbar to appear, which shrinks the viewport, fires ResizeObserver, runs the fit effect
   // again, and dispatches `setPxPerUs(viewport / fitUs)` — reverting the user's wheel zoom in
   // a visible flicker.
-  const fitInputsRef = useRef({ orientation, viewportSize, bars });
-  fitInputsRef.current = { orientation, viewportSize, bars };
+  const fitInputsRef = useRef({ orientation, viewportSize, bars, effectiveTotalUs, showMetronome });
+  fitInputsRef.current = { orientation, viewportSize, bars, effectiveTotalUs, showMetronome };
   const lastFitSignalRef = useRef(fitSignal);
   const pendingFitScroll = useRef<number | null>(null);
   useEffect(() => {
     if (fitSignal === lastFitSignalRef.current) return;
     lastFitSignalRef.current = fitSignal;
-    const { orientation: o, viewportSize: v, bars: b } = fitInputsRef.current;
+    const { orientation: o, viewportSize: v, bars: b, effectiveTotalUs: total, showMetronome: showMetro } = fitInputsRef.current;
     const major = o === 'horizontal' ? v.width : v.height;
-    const fitUs = Math.max(1, b.totalUs - b.metronomeWaitUs);
+    // Fit budget = "all the rendered work, minus the leading idle stripe IF the stripe is on".
+    // When `showMetronome` is off the segment isn't in the segment list — `effectiveTotalUs`
+    // already excludes it, so subtracting again would oversize the fit.
+    const metroSubtract = showMetro ? b.metronomeWaitUs : 0;
+    const fitUs = Math.max(1, total - metroSubtract);
     if (major <= 0 || fitUs <= 0) return;
     const newPxPerUs = major / fitUs;
     setPxPerUs(newPxPerUs);
-    // Scroll past the metronome stripe so the work starts at the viewport's leading edge.
-    // Applied in a layout effect so the SVG has resized first — same pattern as wheel zoom.
+    // Scroll past the metronome stripe so the work starts at the viewport's leading edge — but
+    // only when the stripe is rendered. With the toggle off we want scroll position 0.
     pendingAnchor.current = null; // wheel anchor would conflict with fit; clear it.
-    pendingFitScroll.current = b.metronomeWaitUs * newPxPerUs;
+    pendingFitScroll.current = metroSubtract * newPxPerUs;
   }, [fitSignal, setPxPerUs]);
 
   // Apply the pending fit scroll right after the SVG resize commits.
@@ -290,7 +331,10 @@ export default function CriticalPathView({ bars, selectedSystemName, onSelectBar
     <div
       ref={scrollRef}
       className="relative h-full w-full overflow-auto bg-background"
-      onMouseLeave={() => setTooltip(null)}
+      onMouseLeave={() => {
+        setTooltip(null);
+        setHoveredSystem(null);
+      }}
     >
       <svg
         width={svgWidth}
@@ -328,6 +372,15 @@ export default function CriticalPathView({ bars, selectedSystemName, onSelectBar
             orientation={orientation}
             majorTotalPx={majorTotalPx}
             headerBandPx={HEADER_BAND_PX}
+            isHovered={stripe.phaseIndex >= 0 && stripe.phaseName === hoveredPhase}
+            onMouseEnter={() => {
+              // Only sync real phases (post-tick / metronome have synthetic indices < 0). Otherwise
+              // hovering the post-tick stripe would broadcast a phase the DAG canvas can't match.
+              if (stripe.phaseIndex >= 0) setHoveredPhase(stripe.phaseName);
+            }}
+            onMouseLeave={() => {
+              if (stripe.phaseIndex >= 0) setHoveredPhase(null);
+            }}
           />
         ))}
         {/* Bars row. */}
@@ -344,7 +397,8 @@ export default function CriticalPathView({ bars, selectedSystemName, onSelectBar
               orientation={orientation}
               barOffsetPx={HEADER_BAND_PX}
               barHeightPx={BAR_HEIGHT_PX}
-              isSelected={seg.kind === 'system' && seg.bar.systemName === selectedSystemName}
+              isSelected={(seg.kind === 'system' || seg.kind === 'non-cp-system') && seg.bar.systemName === selectedSystemName}
+              isHovered={(seg.kind === 'system' || seg.kind === 'non-cp-system') && seg.bar.systemName === hoveredSystem}
               onMouseEnter={(e) => {
                 const target = e.currentTarget as SVGElement;
                 const rect = target.getBoundingClientRect();
@@ -358,10 +412,38 @@ export default function CriticalPathView({ bars, selectedSystemName, onSelectBar
                   x: rect.left + rect.width / 2,
                   y: rect.top + rect.height / 2,
                 });
+                // Cross-panel hover sync: writing here makes the matching DAG node pulse and
+                // any future panels that subscribe to hover light up too. Phase-fence / wait
+                // segments leave the hover slot alone — there's no "system" to point at.
+                if (seg.kind === 'system' || seg.kind === 'non-cp-system') {
+                  setHoveredSystem(seg.bar.systemName);
+                } else if (seg.kind === 'worker-claim') {
+                  // Hover the wait segment → highlight the system that was waiting. Symmetric
+                  // with the click-through; lets the user trace "this gap is in front of THAT
+                  // node" without having to click first.
+                  setHoveredSystem(seg.systemName);
+                }
               }}
-              onMouseLeave={() => setTooltip(null)}
+              onMouseLeave={() => {
+                setTooltip(null);
+                if (seg.kind === 'system' || seg.kind === 'non-cp-system' || seg.kind === 'worker-claim') {
+                  setHoveredSystem(null);
+                }
+              }}
               onClick={() => {
-                if (seg.kind === 'system') onSelectBar(seg.bar.systemName, bars.tickNumber);
+                if (seg.kind === 'system' || seg.kind === 'non-cp-system') {
+                  onSelectBar(seg.bar.systemName, bars.tickNumber);
+                } else if (seg.kind === 'phase-fence' && seg.straggler != null) {
+                  // Click-through to the straggler — same behaviour as a direct system-bar click,
+                  // so cross-panel selection sync (DAG node highlight, side-panel access) updates
+                  // automatically.
+                  onSelectBar(seg.straggler, bars.tickNumber);
+                } else if (seg.kind === 'worker-claim') {
+                  // Click-through to the system that was waiting on a worker — the natural pivot
+                  // for "why couldn't a worker pick this up?". Selects the system + opens its
+                  // side-panel (access decls, parallelism mode, prior chunks).
+                  onSelectBar(seg.systemName, bars.tickNumber);
+                }
               }}
             />
           );
@@ -377,25 +459,28 @@ export default function CriticalPathView({ bars, selectedSystemName, onSelectBar
 
 type Segment =
   | { kind: 'system';            bar: TickPathBar;                  phaseName: string; phaseIndex: number; durationUs: number }
+  | { kind: 'non-cp-system';     bar: TickPathBar;                  phaseName: string; phaseIndex: number; durationUs: number }
   | { kind: 'worker-claim';      durationUs: number;                phaseName: string; phaseIndex: number; systemName: string }
   | { kind: 'chunk-dispatch';    durationUs: number;                phaseName: string; phaseIndex: number; systemName: string }
   | { kind: 'phase-fence';       durationUs: number;                phaseName: string; phaseIndex: number; straggler: string | null }
   | { kind: 'post-tick';         durationUs: number; label: string; hue: number }
-  | { kind: 'metronome';         durationUs: number };
+  | { kind: 'metronome';         durationUs: number; intentClass: MetronomeIntentClass | null };
 
-function buildSegments(bars: TickPathBars): Segment[] {
+function buildSegments(bars: TickPathBars, fullGantt: boolean, showMetronome: boolean): Segment[] {
   const out: Segment[] = [];
   // Metronome wait that PRECEDED this tick — sits at the start of the timeline (visually before
-  // the tick's first phase). Surface only when non-zero — zero is the steady-state "no jitter".
-  if (bars.metronomeWaitUs > 0) {
-    out.push({ kind: 'metronome', durationUs: bars.metronomeWaitUs });
+  // the tick's first phase). Off by default per design §5.4 ("the metronome is what the engine
+  // wasn't doing — noise to most investigations"); flip the toolbar toggle to inspect throttling
+  // / sleep behaviour. Suppressed at zero either way (steady-state "no jitter").
+  if (showMetronome && bars.metronomeWaitUs > 0) {
+    out.push({ kind: 'metronome', durationUs: bars.metronomeWaitUs, intentClass: bars.metronomeIntentClass });
   }
-  bars.phases.forEach((phase, phaseIndex) => emitPhaseSegments(out, phase, phaseIndex));
+  bars.phases.forEach((phase, phaseIndex) => emitPhaseSegments(out, phase, phaseIndex, fullGantt));
   emitPostTickSegments(out, bars.postTick);
   return out;
 }
 
-function emitPhaseSegments(out: Segment[], phase: TickPathPhase, phaseIndex: number): void {
+function emitPhaseSegments(out: Segment[], phase: TickPathPhase, phaseIndex: number, fullGantt: boolean): void {
   for (const bar of phase.bars) {
     if (bar.workerClaimWaitUs > 0) {
       out.push({ kind: 'worker-claim', durationUs: bar.workerClaimWaitUs, phaseName: phase.name, phaseIndex, systemName: bar.systemName });
@@ -404,6 +489,15 @@ function emitPhaseSegments(out: Segment[], phase: TickPathPhase, phaseIndex: num
       out.push({ kind: 'chunk-dispatch', durationUs: bar.chunkDispatchWaitUs, phaseName: phase.name, phaseIndex, systemName: bar.systemName });
     }
     out.push({ kind: 'system', bar, phaseName: phase.name, phaseIndex, durationUs: bar.durationUs });
+  }
+  if (fullGantt) {
+    // Append non-CP bars after the CP bars in this phase. They render dimmed; their durations
+    // inflate `totalUs` (computed as the sum of segment durations later) so the timeline grows,
+    // but the CP focus stays visually distinct via the lower opacity. This is the v1 trade-off
+    // documented in `09-system-dag.md §5.6`: full-Gantt is "what else ran", not "real wall-clock".
+    for (const bar of phase.nonCpBars) {
+      out.push({ kind: 'non-cp-system', bar, phaseName: phase.name, phaseIndex, durationUs: bar.durationUs });
+    }
   }
   if (phase.phaseFenceWaitUs > 0) {
     out.push({ kind: 'phase-fence', durationUs: phase.phaseFenceWaitUs, phaseName: phase.name, phaseIndex, straggler: phase.phaseFenceStraggler });
@@ -505,6 +599,7 @@ function buildPhaseStripes(segments: Segment[], placement: Placement[], _totalUs
 function segmentPhaseName(seg: Segment): string {
   switch (seg.kind) {
     case 'system':
+    case 'non-cp-system':
     case 'worker-claim':
     case 'chunk-dispatch':
     case 'phase-fence':
@@ -519,6 +614,7 @@ function segmentPhaseName(seg: Segment): string {
 function segmentPhaseIndex(seg: Segment): number {
   switch (seg.kind) {
     case 'system':
+    case 'non-cp-system':
     case 'worker-claim':
     case 'chunk-dispatch':
     case 'phase-fence':
@@ -537,11 +633,17 @@ function PhaseStripe({
   orientation,
   majorTotalPx,
   headerBandPx,
+  isHovered,
+  onMouseEnter,
+  onMouseLeave,
 }: {
   stripe: PhaseStripeData;
   orientation: Orientation;
   majorTotalPx: number;
   headerBandPx: number;
+  isHovered: boolean;
+  onMouseEnter: () => void;
+  onMouseLeave: () => void;
 }) {
   const colour = stripe.phaseIndex === -1
     ? { stroke: 'hsl(220, 8%, 60%)', fill: 'hsl(220, 8%, 25%)' }
@@ -558,10 +660,25 @@ function PhaseStripe({
   const stripeGapPx = 2;
   const stripeEnd = headerBandPx - stripeGapPx;
   const stripeStart = stripeEnd - stripePx;
+  // Hover visual: a slightly thicker, fully-opaque stripe + a faint band tint behind the stripe
+  // so the user can see the matched phase even when squinting at a tiny stripe segment.
+  const stripeFill = isHovered ? colour.stroke : colour.stroke;
+  const stripeOpacity = isHovered ? 1 : 0.95;
+  const stripeThickness = isHovered ? stripePx + 2 : stripePx;
   if (orientation === 'horizontal') {
     return (
       <g>
-        <rect x={startPx} y={stripeStart} width={lengthPx} height={stripePx} fill={colour.stroke} />
+        {isHovered && (
+          <rect x={startPx} y={0} width={lengthPx} height={headerBandPx} fill={colour.stroke} opacity={0.18} />
+        )}
+        <rect
+          x={startPx}
+          y={stripeStart - (stripeThickness - stripePx)}
+          width={lengthPx}
+          height={stripeThickness}
+          fill={stripeFill}
+          opacity={stripeOpacity}
+        />
         {lengthPx >= 40 && (
           <text
             x={startPx + 4}
@@ -574,13 +691,34 @@ function PhaseStripe({
             {stripe.phaseName}
           </text>
         )}
+        {/* Transparent hit-target spanning the full header band so hovering the label or the
+            empty band area also fires the sync, not just the 5 px stripe. */}
+        <rect
+          x={startPx}
+          y={0}
+          width={lengthPx}
+          height={headerBandPx}
+          fill="transparent"
+          onMouseEnter={onMouseEnter}
+          onMouseLeave={onMouseLeave}
+        />
       </g>
     );
   }
   // Vertical.
   return (
     <g>
-      <rect x={stripeStart} y={startPx} width={stripePx} height={lengthPx} fill={colour.stroke} />
+      {isHovered && (
+        <rect x={0} y={startPx} width={headerBandPx} height={lengthPx} fill={colour.stroke} opacity={0.18} />
+      )}
+      <rect
+        x={stripeStart - (stripeThickness - stripePx)}
+        y={startPx}
+        width={stripeThickness}
+        height={lengthPx}
+        fill={stripeFill}
+        opacity={stripeOpacity}
+      />
       {lengthPx >= 40 && (
         <text
           x={stripeStart - 3}
@@ -594,6 +732,15 @@ function PhaseStripe({
           {stripe.phaseName}
         </text>
       )}
+      <rect
+        x={0}
+        y={startPx}
+        width={headerBandPx}
+        height={lengthPx}
+        fill="transparent"
+        onMouseEnter={onMouseEnter}
+        onMouseLeave={onMouseLeave}
+      />
     </g>
   );
 }
@@ -608,6 +755,7 @@ function SegmentShape({
   barOffsetPx,
   barHeightPx,
   isSelected,
+  isHovered,
   onMouseEnter,
   onMouseLeave,
   onClick,
@@ -619,6 +767,7 @@ function SegmentShape({
   barOffsetPx: number;
   barHeightPx: number;
   isSelected: boolean;
+  isHovered: boolean;
   onMouseEnter: (e: React.MouseEvent<SVGElement>) => void;
   onMouseLeave: () => void;
   onClick: () => void;
@@ -630,14 +779,30 @@ function SegmentShape({
   // white ink rather than parsing HSL through the luminance helper. Wait segments are hatched
   // overlays without labels, so they don't need a text colour.
   const textFill =
-    seg.kind === 'system' ? pickTextColorFor(fill) :
+    seg.kind === 'system' || seg.kind === 'non-cp-system' ? pickTextColorFor(fill) :
     seg.kind === 'post-tick' ? '#fff' :
     undefined;
-  // Drop-shadow only on "active work" boxes — system + post-tick. Wait segments stay flat to
-  // visually read as "nothing happening here". `cp-shadow` is defined once at the SVG root.
+  // Drop-shadow only on "active work" boxes — system + post-tick. Wait segments + non-CP stay
+  // flat: non-CP runs are also "real work" but the dim opacity already reads as "supporting cast",
+  // and a shadow on them would compete with the CP-bar shadows for visual focus.
   const hasShadow = seg.kind === 'system' || seg.kind === 'post-tick';
-  const isClickable = seg.kind === 'system';
-  const showText = lengthPx >= 30 && (seg.kind === 'system' || seg.kind === 'post-tick');
+  // System bars (CP and non-CP) are clickable — selection jumps to the system either way. Phase-
+  // fence segments are clickable when a straggler is recorded — clicking jumps the selection to
+  // the straggler. Worker-claim waits are clickable too — they precede the system that was
+  // waiting, so clicking selects THAT system (the user's investigation target: "why couldn't a
+  // worker pick this up?"). Chunk-dispatch wait isn't clickable yet — placeholder kind in v1.
+  const isClickable = seg.kind === 'system'
+    || seg.kind === 'non-cp-system'
+    || (seg.kind === 'phase-fence' && seg.straggler != null)
+    || seg.kind === 'worker-claim';
+  // Metronome bars get a chip when an intentClass is known and there's enough room (~38 px). The
+  // chip text is short — `Headroom` / `Throttled` / `CatchUp` — so the threshold is lower than the
+  // 30 px we use for system / post-tick names. Drawn through the same showText path so it
+  // benefits from the per-orientation rotation logic.
+  const metronomeChip = seg.kind === 'metronome' && seg.intentClass != null && lengthPx >= 38
+    ? seg.intentClass
+    : null;
+  const showText = (lengthPx >= 30 && (seg.kind === 'system' || seg.kind === 'non-cp-system' || seg.kind === 'post-tick')) || metronomeChip != null;
   const showHatch = seg.kind === 'worker-claim' || seg.kind === 'chunk-dispatch' || seg.kind === 'phase-fence' || seg.kind === 'metronome';
 
   // Coordinates per orientation. Major = time axis; minor = bar row, offset by header band.
@@ -657,9 +822,15 @@ function SegmentShape({
         width={width}
         height={height}
         fill={fill}
-        opacity={showHatch ? 0.35 : 1}
-        stroke={isSelected ? 'hsl(var(--primary))' : 'transparent'}
-        strokeWidth={isSelected ? 2 : 0}
+        // Non-CP bars in full-Gantt mode read as "ran but off the critical path" via reduced
+        // opacity. CP bars stay opaque; wait/metronome use 0.35 to blend into the hatch.
+        opacity={showHatch ? 0.35 : seg.kind === 'non-cp-system' ? 0.4 : 1}
+        // Selection outranks hover — when a system is both clicked AND hovered, the primary
+        // ring stays put. Hover supplies a soft theme-foreground stroke at 60 % alpha, dialled
+        // down so it's visible against bright Turbo-palette fills without punching like ink in
+        // light theme.
+        stroke={isSelected ? 'hsl(var(--primary))' : isHovered ? 'hsl(var(--foreground) / 0.6)' : 'transparent'}
+        strokeWidth={isSelected ? 2 : isHovered ? 2 : 0}
         filter={hasShadow ? (orientation === 'horizontal' ? 'url(#cp-shadow-h)' : 'url(#cp-shadow-v)') : undefined}
         pointerEvents="none"
       />
@@ -684,7 +855,13 @@ function SegmentShape({
           textAnchor="middle"
           pointerEvents="none"
         >
-          {clipText(seg.kind === 'system' ? seg.bar.systemName : seg.kind === 'post-tick' ? seg.label : '', width - 8)}
+          {clipText(
+            seg.kind === 'system' ? seg.bar.systemName
+              : seg.kind === 'non-cp-system' ? seg.bar.systemName
+              : seg.kind === 'post-tick' ? seg.label
+              : metronomeChip ?? '',
+            width - 8,
+          )}
         </text>
       )}
       {/*
@@ -710,10 +887,13 @@ function SegmentShape({
 function colourForSegment(seg: Segment): string {
   switch (seg.kind) {
     case 'system':
+    case 'non-cp-system':
       // 13-colour Turbo ramp from the profiler's per-operation overview palette (`Cache Fetch`,
       // `Cache Allocate`, `Cache Evicted`, …). Cycled by a stable hash of `systemName` so a
       // given system always lands on the same hue across ticks / sessions. Phase identity comes
-      // from the header stripe; heat (duration) is conveyed by bar *length*, not colour.
+      // from the header stripe; heat (duration) is conveyed by bar *length*, not colour. Non-CP
+      // bars share the palette but render with reduced opacity (see `SegmentShape`) so they read
+      // as "ran but off the critical path".
       return TIMELINE_PALETTE[hashString(seg.bar.systemName) % TIMELINE_PALETTE.length];
     case 'worker-claim':
     case 'chunk-dispatch':
@@ -801,12 +981,20 @@ function describeSegment(seg: Segment): string[] {
       if (seg.bar.isParallel) lines.push(`parallel: ${seg.bar.workersTouched} workers / ${seg.bar.chunksProcessed} chunks`);
       return lines;
     }
+    case 'non-cp-system': {
+      const lines: string[] = [`${seg.bar.systemName} — ${formatUs(seg.bar.durationUs)}`];
+      lines.push(`phase: ${seg.phaseName || '(unphased)'}`);
+      lines.push('NOT on the critical path (full Gantt mode).');
+      if (seg.bar.isParallel) lines.push(`parallel: ${seg.bar.workersTouched} workers / ${seg.bar.chunksProcessed} chunks`);
+      return lines;
+    }
     case 'worker-claim':
       return [
         `Worker-claim wait — ${formatUs(seg.durationUs)}`,
         `before: ${seg.systemName}`,
         `phase: ${seg.phaseName}`,
         'Gap between deps cleared and a worker picking the system up.',
+        'Click to select the waiting system.',
       ];
     case 'chunk-dispatch':
       return [
@@ -815,17 +1003,32 @@ function describeSegment(seg: Segment): string[] {
         `phase: ${seg.phaseName}`,
         'Work-stealing imbalance across workers.',
       ];
-    case 'phase-fence':
-      return [
+    case 'phase-fence': {
+      const lines = [
         `Phase-fence wait — ${formatUs(seg.durationUs)}`,
         `phase: ${seg.phaseName}`,
         seg.straggler ? `straggler: ${seg.straggler}` : 'no straggler recorded',
         'CP waited for the slowest non-CP system to clear the fence.',
       ];
+      if (seg.straggler) lines.push('Click to jump to the straggler.');
+      return lines;
+    }
     case 'post-tick':
       return [`${seg.label} — ${formatUs(seg.durationUs)}`, 'Post-tick serial work.'];
-    case 'metronome':
-      return [`Metronome wait — ${formatUs(seg.durationUs)}`, 'Idle gap from previous TickEnd to this TickStart.'];
+    case 'metronome': {
+      const lines = [`Metronome wait — ${formatUs(seg.durationUs)}`];
+      if (seg.intentClass) lines.push(`intent: ${seg.intentClass} — ${describeIntent(seg.intentClass)}`);
+      lines.push('Idle gap from previous TickEnd to this TickStart.');
+      return lines;
+    }
+  }
+}
+
+function describeIntent(intent: MetronomeIntentClass): string {
+  switch (intent) {
+    case 'CatchUp':   return 'engine fell behind — wait elided';
+    case 'Throttled': return 'paced down for power / overload';
+    case 'Headroom':  return 'normal idle — work fits within tick budget';
   }
 }
 

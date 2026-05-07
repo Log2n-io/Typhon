@@ -32,6 +32,7 @@ public static class ProfilerSetup
     /// all subsequent events are measured against <c>startTimestamp</c>.
     /// </remarks>
     public static ProfilerSessionMetadata BuildSessionMetadata(SystemDefinition[] systems, int workerCount, float baseTickRate,
+        string[] phases = null,
         Func<long> currentEngineTickProvider = null)
     {
         // currentEngineTickProvider is accepted for forward-compat with callers but the current
@@ -40,7 +41,7 @@ public static class ProfilerSetup
         // has no public enumeration API yet, and the engine emits typed events with numeric IDs only,
         // so the viewer renders them un-resolved for the moment.
         _ = currentEngineTickProvider;
-        return new ProfilerSessionMetadata(SystemDefinitionRecordBuilder.BuildAll(systems), [], [], workerCount, baseTickRate, Stopwatch.GetTimestamp(), 
-            Stopwatch.Frequency, DateTime.UtcNow, phases: []);
+        return new ProfilerSessionMetadata(SystemDefinitionRecordBuilder.BuildAll(systems), [], [], workerCount, baseTickRate, Stopwatch.GetTimestamp(),
+            Stopwatch.Frequency, DateTime.UtcNow, phases: phases ?? []);
     }
 }

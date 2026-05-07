@@ -1012,7 +1012,13 @@ public static class TraceEventKindExtensions
         // Phase 4 follow-up (#289):
         //   241 (SchedulerMetronomeWait) — span (falls through to `return true`).
         //   242 (SchedulerOverloadDetector) — instant.
-        if (v == 242)
+        //   243 (RuntimePhaseSpan) — span (falls through; replaces the PhaseStart+PhaseEnd instant pair).
+        //   244 (QueueTickEnd) — instant rollup. Hand-coded by `QueueTickEndCodec` with a 28-byte
+        //         payload after the 12-byte common header — NO 25-byte span-header extension. Without
+        //         this carve-out, span-aware decoders read 25 payload bytes as a fake span header,
+        //         producing garbage `durationUs`/`spanId`/`parentSpanId` and rendering the rollup as
+        //         a phantom nested span on the TickDriver thread lane.
+        if (v == 242 || v == 244)
         {
             return false;
         }

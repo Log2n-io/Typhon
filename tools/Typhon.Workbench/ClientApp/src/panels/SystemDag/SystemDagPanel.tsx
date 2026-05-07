@@ -5,8 +5,10 @@ import { useProfilerMetadata } from '@/hooks/profiler/useProfilerMetadata';
 import { useSelectionStore } from '@/stores/useSelectionStore';
 import { useSessionStore } from '@/stores/useSessionStore';
 import {
+  computeCriticalPathForTick,
   computeCriticalPathParticipation,
   computeSystemSkipRates,
+  dominantTickInRange,
 } from '../CriticalPath/criticalPath';
 import { toNodeData } from './dagModel';
 import { deriveEdges } from './edgeDerivation';
@@ -123,6 +125,33 @@ export default function SystemDagPanel(_props: IDockviewPanelProps) {
     });
   }, [topology, metadata, range, derivedEdges]);
 
+  // Dominant-tick CP set — drives the red outline on DAG nodes per `09-system-dag.md §11 Phase 3`
+  // ("Critical-path systems also render with a red border in the dominant tick of the range"). The
+  // ★ badge derives from range-wide participation; this cue is per-tick — the longest single tick
+  // in the window is what the user is most likely investigating, so it gets the spotlight. Empty
+  // ranges / tickless metadata leave the set null and the canvas renders without the cue.
+  const dominantCpSystems = useMemo<Set<string> | null>(() => {
+    if (!topology?.systems || !metadata) return null;
+    const tick = dominantTickInRange(metadata.tickSummaries ?? null, range);
+    if (tick == null) return null;
+    const tickRow = (metadata.tickSummaries ?? []).find((t) => Number(t.tickNumber) === tick) ?? null;
+    const bars = computeCriticalPathForTick({
+      tickNumber: tick,
+      systems: topology.systems,
+      rows: metadata.systemTickSummaries ?? [],
+      edges: derivedEdges,
+      phases: topology.phases ?? [],
+      postTickRows: metadata.postTickSummaries ?? [],
+      tickSummaryRow: tickRow,
+    });
+    if (!bars) return null;
+    const out = new Set<string>();
+    for (const phase of bars.phases) {
+      for (const bar of phase.bars) out.add(bar.systemName);
+    }
+    return out;
+  }, [topology, metadata, range, derivedEdges]);
+
   const skipRates = useMemo(() => {
     if (!topology?.systems || !metadata?.systemTickSummaries || metadata.systemTickSummaries.length === 0) {
       return null;
@@ -157,6 +186,7 @@ export default function SystemDagPanel(_props: IDockviewPanelProps) {
             systemStats={range ? stats : null}
             queueStats={range && queueStats.size > 0 ? queueStats : null}
             cpParticipation={cpParticipation}
+            dominantCpSystems={dominantCpSystems}
             skipRates={skipRates}
             onSelectSystem={(name) => {
               setSystem(name);
