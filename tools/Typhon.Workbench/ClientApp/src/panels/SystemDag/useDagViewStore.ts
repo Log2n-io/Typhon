@@ -37,8 +37,26 @@ export interface DagViewState {
   statMode: StatMode;
   /** Node placement strategy — see {@link LayoutMode}. */
   layout: LayoutMode;
+  /**
+   * Hide systems that were 100%-skipped over the selected tick range. When ON, any node whose
+   * <code>skipRate &gt;= 1</code> (no executions at all) drops out of the canvas, along with any
+   * edges that referenced it. Useful for narrowing the DAG to "what actually ran" when zoomed
+   * into a small tick window where high-tier systems with cell-amortise schedules don't fire.
+   * Has no effect when no time range is selected (skip rates are unknown).
+   */
+  hideSkipped: boolean;
+  /**
+   * In the swim-lane layouts (horizontal-lanes / vertical-lanes), draw edges that span phases.
+   * Default OFF because lane order already encodes phase ordering and fully-connected
+   * cross-phase chains are visually noisy. Turn ON when investigating a specific cross-phase
+   * data dependency (e.g. "why is Metabolism_T0 waiting on MoveAll?"). Compact and circular
+   * layouts always show every edge; this toggle is a no-op there.
+   */
+  showCrossPhaseEdges: boolean;
   setStatMode: (mode: StatMode) => void;
   setLayout: (layout: LayoutMode) => void;
+  setHideSkipped: (hide: boolean) => void;
+  setShowCrossPhaseEdges: (show: boolean) => void;
 }
 
 // SSR/test-safe localStorage wrapper — same shape as `useThemeStore`.
@@ -59,8 +77,12 @@ export const useDagViewStore = create<DagViewState>()(
     (set) => ({
       statMode: 'mean',
       layout: 'horizontal-lanes',
+      hideSkipped: false,
+      showCrossPhaseEdges: false,
       setStatMode: (statMode) => set({ statMode }),
       setLayout: (layout) => set({ layout }),
+      setHideSkipped: (hideSkipped) => set({ hideSkipped }),
+      setShowCrossPhaseEdges: (showCrossPhaseEdges) => set({ showCrossPhaseEdges }),
     }),
     { name: 'typhon-dag-view', storage: safeStorage },
   ),

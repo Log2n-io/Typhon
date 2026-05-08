@@ -35,6 +35,16 @@ export interface DagNodeData extends Record<string, unknown> {
   readsSnapshot: string[];
   writes: string[];
   sideWrites: string[];
+  // Event queues this system reads from / writes to. Surfaced as separate sections in the side
+  // panel so the user can see "this system produces AntDied; that system consumes AntDied"
+  // without having to read the edge labels.
+  readsEvents: string[];
+  writesEvents: string[];
+  // Named resources this system reads / writes. Same rationale as events — the topology DTO
+  // already carries them; the previous side panel just didn't surface them. Resources have no
+  // Fresh/Snapshot variant so each side is a single list.
+  readsResources: string[];
+  writesResources: string[];
   changeFilterTypes: string[]; // not in DTO yet — placeholder for future field
   /** True if this system's declarations produced any access — used to dim "blank" tiles. */
   hasAccess: boolean;
@@ -106,9 +116,23 @@ interface ResolvedTopology {
  *
  * `layout` defaults to `'horizontal-lanes'` so existing call sites and tests don't change shape.
  */
+/**
+ * Toggleable model-building options. None of these affect the topology DTO itself; they only
+ * change how nodes/edges are filtered before handing them to the layout engine.
+ */
+export interface BuildDagModelOptions {
+  /**
+   * Default <code>false</code>. When <code>true</code>, swim-lane layouts (horizontal-lanes,
+   * vertical-lanes) include edges whose endpoints sit in different phases. Compact / circular
+   * layouts always show every edge — this flag is a no-op there.
+   */
+  showCrossPhaseEdges?: boolean;
+}
+
 export function buildDagModel(
   topology: TopologyDto | null | undefined,
   layout: LayoutMode = 'horizontal-lanes',
+  options: BuildDagModelOptions = {},
 ): DagModel {
   if (!topology || !topology.systems || topology.systems.length === 0) {
     return { nodes: [], edges: [], lanes: [], width: 0, height: 0 };
@@ -118,11 +142,13 @@ export function buildDagModel(
     phases: topology.phases ?? [],
   };
 
+  const showCrossPhaseEdges = options.showCrossPhaseEdges === true;
+
   switch (layout) {
     case 'horizontal-lanes':
-      return layoutHorizontalLanes(resolved);
+      return layoutHorizontalLanes(resolved, showCrossPhaseEdges);
     case 'vertical-lanes':
-      return layoutVerticalLanes(resolved);
+      return layoutVerticalLanes(resolved, showCrossPhaseEdges);
     case 'compact':
       return layoutCompact(resolved);
     case 'circular':
@@ -183,9 +209,18 @@ function intraPhaseEdgesOnly(derived: DerivedEdge[], orderedPhases: OrderedPhase
   return edges;
 }
 
+/**
+ * All derived edges as React-Flow edges, including ones that span phases. Used by the lane
+ * layouts only when the user opts into cross-phase visibility — otherwise the lane order
+ * suffices and the cross-phase chain is suppressed (see {@link intraPhaseEdgesOnly}).
+ */
+function allEdges(derived: DerivedEdge[]): DagEdge[] {
+  return derived.map(toReactFlowEdge);
+}
+
 // ── horizontal-lanes (default per `09-system-dag.md §4.1`) ───────────────
 
-function layoutHorizontalLanes(topology: ResolvedTopology): DagModel {
+function layoutHorizontalLanes(topology: ResolvedTopology, showCrossPhaseEdges: boolean): DagModel {
   const derived = deriveEdges(topology.systems);
   const orderedPhases = bucketByPhase(topology);
 
@@ -224,7 +259,7 @@ function layoutHorizontalLanes(topology: ResolvedTopology): DagModel {
 
   return {
     nodes,
-    edges: intraPhaseEdgesOnly(derived, orderedPhases),
+    edges: showCrossPhaseEdges ? allEdges(derived) : intraPhaseEdgesOnly(derived, orderedPhases),
     lanes,
     width: maxWidth,
     height: yCursor > 0 ? yCursor - LANE_GAP : 0,
@@ -233,7 +268,7 @@ function layoutHorizontalLanes(topology: ResolvedTopology): DagModel {
 
 // ── vertical-lanes ───────────────────────────────────────────────────────
 
-function layoutVerticalLanes(topology: ResolvedTopology): DagModel {
+function layoutVerticalLanes(topology: ResolvedTopology, showCrossPhaseEdges: boolean): DagModel {
   const derived = deriveEdges(topology.systems);
   const orderedPhases = bucketByPhase(topology);
 
@@ -272,7 +307,7 @@ function layoutVerticalLanes(topology: ResolvedTopology): DagModel {
 
   return {
     nodes,
-    edges: intraPhaseEdgesOnly(derived, orderedPhases),
+    edges: showCrossPhaseEdges ? allEdges(derived) : intraPhaseEdgesOnly(derived, orderedPhases),
     lanes,
     width: xCursor > 0 ? xCursor - LANE_GAP : 0,
     height: maxHeight,
@@ -338,6 +373,8 @@ function layoutCircular(topology: ResolvedTopology): DagModel {
       id: s.name,
       type: 'system',
       position: { x, y },
+      width: NODE_WIDTH,
+      height: NODE_HEIGHT,
       data: toNodeData(s),
     });
   }
@@ -389,6 +426,8 @@ function layoutPhase(
       id: s.name,
       type: 'system',
       position: { x, y },
+      width: NODE_WIDTH,
+      height: NODE_HEIGHT,
       data: toNodeData(s),
     });
     if (x + NODE_WIDTH > maxX) maxX = x + NODE_WIDTH;
@@ -426,6 +465,10 @@ export function toNodeData(s: SystemDefinitionDto): DagNodeData {
     readsSnapshot: s.readsSnapshot ?? [],
     writes: s.writes ?? [],
     sideWrites: s.sideWrites ?? [],
+    readsEvents: s.readsEvents ?? [],
+    writesEvents: s.writesEvents ?? [],
+    readsResources: s.readsResources ?? [],
+    writesResources: s.writesResources ?? [],
     changeFilterTypes: [], // not surfaced through topology DTO yet — placeholder
     hasAccess: access > 0,
   };

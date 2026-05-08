@@ -70,12 +70,20 @@ describe('deriveEdges', () => {
     expect(edges).toEqual([]);
   });
 
-  it('skips edges across phases', () => {
+  it('emits cross-phase edges directed earlier-phase to later-phase', () => {
+    // Pre-2026-05-07 behaviour returned [] here. Post-amendment, cross-phase data-flow
+    // conflicts produce edges (matching engine's `AccessDagDeriver.HasCrossPhaseConflict`).
+    // Direction is always earlier-phase → later-phase regardless of role; phase order is
+    // the disambiguator, so the snapshot-style "reader runs first" flip does NOT apply.
     const edges = deriveEdges([
       sys({ name: 'Movement', writes: ['Position'], phaseName: 'Simulation' }),
       sys({ name: 'Render', readsSnapshot: ['Position'], phaseName: 'Output' }),
     ]);
-    expect(edges).toEqual([]);
+    expect(edges).toHaveLength(1);
+    expect(edges[0].source).toBe('Movement');
+    expect(edges[0].target).toBe('Render');
+    expect(edges[0].kind).toBe('fresh');
+    expect(edges[0].via).toEqual(['Position']);
   });
 
   it('emits a manual After edge', () => {

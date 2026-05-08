@@ -70,6 +70,7 @@ public sealed class SystemDefinitionRecordRoundTripTests
                 writer.WriteArchetypes([]);
                 writer.WriteComponentTypes([]);
                 writer.WritePhases(["Input", "Simulation", "Output"]);
+                writer.WriteEmptyStaticStructures();
                 writer.Flush();
                 bytes = writeStream.ToArray();
             }
@@ -82,6 +83,12 @@ public sealed class SystemDefinitionRecordRoundTripTests
         reader.ReadArchetypes();
         reader.ReadComponentTypes();
         reader.ReadPhases();
+        reader.ReadComponentDefinitions();
+        reader.ReadArchetypeDefinitions();
+        reader.ReadIndexCatalog();
+        reader.ReadRuntimeConfig();
+        reader.ReadEventQueueCatalog();
+        reader.ReadResourceGraphSnapshot();
 
         Assert.That(reader.Systems, Has.Count.EqualTo(1));
         var output = reader.Systems[0];
@@ -108,70 +115,62 @@ public sealed class SystemDefinitionRecordRoundTripTests
         Assert.That(reader.Phases, Is.EqualTo(new[] { "Input", "Simulation", "Output" }));
     }
 
-    [Test]
-    public void V5_BackwardCompat_RfcFieldsDefaultToEmpty()
+    [TestCase((ushort)5)]
+    [TestCase((ushort)6)]
+    public void OldVersionsAreHardRejected(ushort version)
     {
-        // Craft a v5 system-definition table — same byte layout as v6 minus the RFC 07 trailer and
-        // minus the PhasesTable section. The reader must populate empty defaults and not consume bytes
-        // for the missing trailer / phases. We serialize the header through MemoryMarshal so the on-disk
-        // struct shape is whatever the runtime would produce, regardless of packing nuances.
-        var v5Header = DefaultHeaderV6;
-        v5Header.Version = 5;
+        // v7 introduced rich static-structure tables that the Workbench schema panels rely on. Older traces
+        // simply lack the data; rather than synthesising empty defaults (which would silently render "no schema"
+        // for old traces with no indication why), the reader hard-rejects them. Re-record against a current build.
+        //
+        // Critically: we craft a header with VALID magic + the old version. With magic correct, the reader's
+        // magic-check (which fires first per #6 of the v7 review) passes and the version-check is what rejects.
+        // An earlier version of this test relied on zero magic/version and was actually rejected on magic, leaving
+        // the version-rejection path uncovered.
+        var oldHeader = DefaultHeaderV6;
+        oldHeader.Version = version;
+        oldHeader.Magic = TraceFileHeader.MagicValue;
 
         byte[] bytes;
         using (var ms = new MemoryStream())
-        using (var bw = new System.IO.BinaryWriter(ms, System.Text.Encoding.UTF8, leaveOpen: false))
         {
             var headerBytes = System.Runtime.InteropServices.MemoryMarshal.AsBytes(
-                System.Runtime.InteropServices.MemoryMarshal.CreateReadOnlySpan(ref v5Header, 1));
+                System.Runtime.InteropServices.MemoryMarshal.CreateReadOnlySpan(ref oldHeader, 1));
             ms.Write(headerBytes);
-
-            // SystemDefinitionTable — v5 layout (no RFC 07 trailer).
-            bw.Write((ushort)1);                          // count
-            bw.Write((ushort)0);                          // index
-            WriteShortString(bw, "Legacy");                // name
-            bw.Write((byte)0);                             // type
-            bw.Write((byte)0);                             // priority
-            bw.Write(false);                               // isParallel
-            bw.Write((byte)0x0F);                          // tierFilter
-            bw.Write((byte)0);                             // predCount
-            bw.Write((byte)0);                             // succCount
-
-            // Archetypes + ComponentTypes — empty. (No PhasesTable in v5.)
-            bw.Write((ushort)0);
-            bw.Write((ushort)0);
-            bw.Flush();
             bytes = ms.ToArray();
         }
 
         using var readStream = new MemoryStream(bytes, writable: false);
         using var reader = new TraceFileReader(readStream);
-        reader.ReadHeader();
-        reader.ReadSystemDefinitions();
-        reader.ReadArchetypes();
-        reader.ReadComponentTypes();
-        reader.ReadPhases();
 
-        Assert.That(reader.Header.Version, Is.EqualTo(5));
-        Assert.That(reader.Systems, Has.Count.EqualTo(1));
-        var s = reader.Systems[0];
-        Assert.That(s.Name, Is.EqualTo("Legacy"));
-        Assert.That(s.PhaseName, Is.EqualTo(string.Empty));
-        Assert.That(s.IsExclusivePhase, Is.False);
-        Assert.That(s.Reads, Is.Empty);
-        Assert.That(s.Writes, Is.Empty);
-        Assert.That(s.WritesEvents, Is.Empty);
-        Assert.That(s.ReadsEvents, Is.Empty);
-        Assert.That(s.ExplicitAfter, Is.Empty);
-        Assert.That(s.ExplicitBefore, Is.Empty);
-        Assert.That(reader.Phases, Is.Empty);
+        var ex = Assert.Throws<InvalidDataException>(() => reader.ReadHeader());
+        Assert.That(ex.Message, Does.Contain($"version: {version}"));
+        Assert.That(ex.Message, Does.Contain("Re-record"));
     }
 
-    private static void WriteShortString(System.IO.BinaryWriter bw, string value)
+    [Test]
+    public void InvalidMagicIsRejected_BeforeVersionCheck()
     {
-        var bytes = System.Text.Encoding.UTF8.GetBytes(value ?? string.Empty);
-        var len = (byte)System.Math.Min(bytes.Length, 255);
-        bw.Write(len);
-        bw.Write(bytes, 0, len);
+        // Companion to OldVersionsAreHardRejected: a file with wrong magic should fail with a magic-specific error,
+        // not a misleading "Unsupported version" error. Guards the magic-before-version order in ReadHeader.
+        var hdr = DefaultHeaderV6;
+        hdr.Magic = 0xDEADBEEF;
+        hdr.Version = TraceFileHeader.CurrentVersion;
+
+        byte[] bytes;
+        using (var ms = new MemoryStream())
+        {
+            var headerBytes = System.Runtime.InteropServices.MemoryMarshal.AsBytes(
+                System.Runtime.InteropServices.MemoryMarshal.CreateReadOnlySpan(ref hdr, 1));
+            ms.Write(headerBytes);
+            bytes = ms.ToArray();
+        }
+
+        using var readStream = new MemoryStream(bytes, writable: false);
+        using var reader = new TraceFileReader(readStream);
+
+        var ex = Assert.Throws<InvalidDataException>(() => reader.ReadHeader());
+        Assert.That(ex.Message, Does.Contain("magic"));
+        Assert.That(ex.Message, Does.Not.Contain("version"), "magic check must fire before version check");
     }
 }

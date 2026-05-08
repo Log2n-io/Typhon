@@ -327,6 +327,11 @@ export function computeSystemSkipRates(input: {
 export interface TickPathBar {
   systemName: string;
   durationUs: number;
+  /**
+   * Σ chunk durations across all workers (chunker v13+). For parallel systems this can be far
+   * larger than `durationUs` — drives the parallelism-inefficiency band on the tape.
+   */
+  totalCpuUs: number;
   /** Worker-claim wait (startUs - readyUs) — gap before a worker picked the system up. */
   workerClaimWaitUs: number;
   /** Chunk-dispatch wait — placeholder, always 0 in v1 (see comment above). */
@@ -443,6 +448,48 @@ export function dominantTickInRange(
     }
   }
   return bestTick;
+}
+
+/**
+ * Pick the tick the CP tape should focus on, given the current µs window plus its already-converted
+ * tick range.
+ *
+ * Two-tier semantics, in priority order:
+ * 1. **Strict**: at least one tick's `startUs` falls in `[time.start, time.end)`. Returns the
+ *    longest such tick (delegates to {@link dominantTickInRange}). Covers the common case where
+ *    the window spans one or more whole ticks.
+ * 2. **Midpoint fallback**: no tick `startUs` is in window — typical when the user has zoomed
+ *    *inside* one tick or straddled a boundary so the window is narrower than any tick. Returns
+ *    the tick whose body `[startUs, startUs + durationUs)` contains the window's midpoint.
+ *
+ * Returns `null` only when no tick exists or both inputs are missing. `timeToTickRange` correctly
+ * returns `null` for sub-tick windows (its semantic is "tick startUs in window"); this helper
+ * rescues that case for the focus-tick use case where the user expects the tape to keep tracking
+ * whatever tick they're zoomed into.
+ */
+export function focusTickForWindow(
+  tickSummaries: TickSummaryDto[] | null | undefined,
+  range: TickRange | null,
+  time: { start: number; end: number } | null,
+): number | null {
+  const strict = dominantTickInRange(tickSummaries, range);
+  if (strict != null) return strict;
+  if (!time || !tickSummaries || tickSummaries.length === 0) return null;
+  if (!Number.isFinite(time.start) || !Number.isFinite(time.end) || time.end <= time.start) return null;
+  const mid = (time.start + time.end) / 2;
+  // Linear scan (O(N) — N is at most a few thousand ticks; binary search would be faster but the
+  // strict path covers the common case so this fallback is cold). Looking for a tick whose body
+  // includes the midpoint. If durations overlap (shouldn't, but defensively), take the first.
+  for (const t of tickSummaries) {
+    const start = numberValue((t as { startUs?: unknown }).startUs);
+    if (start == null) continue;
+    const dur = numberValue((t as { durationUs?: unknown }).durationUs) ?? 0;
+    if (dur <= 0) continue;
+    if (start <= mid && mid < start + dur) {
+      return numberValue((t as { tickNumber?: unknown }).tickNumber);
+    }
+  }
+  return null;
 }
 
 /**
@@ -809,6 +856,7 @@ export function computeAggregateCriticalPath(input: {
       target.bars.push({
         systemName: e.name,
         durationUs: e.meanUs,
+        totalCpuUs: 0, // aggregate mode skips parallelism band; A1 pill uses range-mean from the same data
         workerClaimWaitUs: 0,
         chunkDispatchWaitUs: 0,
         isParallel: def?.isParallel ?? false,
@@ -904,9 +952,12 @@ function makeBar(name: string, row: SystemTickSummary, def: SystemDefinitionDto 
   // readyUs == 0 in older traces (#311 was the version that started capturing it). Treat zero as
   // "unknown" rather than a real "ready immediately at engine start" — render no claim wait.
   const workerClaimWaitUs = readyUs > 0 ? Math.max(0, startUs - readyUs) : 0;
+  // Cache v13+ ships totalCpuUs (Σ chunk durations across workers); v12 leaves it absent → 0.
+  const totalCpuUs = numberValue((row as { totalCpuUs?: unknown }).totalCpuUs) ?? 0;
   return {
     systemName: name,
     durationUs,
+    totalCpuUs,
     workerClaimWaitUs,
     chunkDispatchWaitUs: 0,
     isParallel: def?.isParallel ?? false,

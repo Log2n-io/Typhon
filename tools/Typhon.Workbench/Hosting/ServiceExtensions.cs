@@ -12,6 +12,7 @@ public static class ServiceExtensions
     public static IServiceCollection AddWorkbenchServices(this IServiceCollection services)
     {
         services.AddSingleton<BootstrapTokenGate>();
+        services.AddSingleton<PersonalAccessTokenStore>();
         services.AddSingleton<SessionManager>();
         services.AddSingleton<DemoDataProvider>();
         services.AddSingleton<FileBrowserService>();

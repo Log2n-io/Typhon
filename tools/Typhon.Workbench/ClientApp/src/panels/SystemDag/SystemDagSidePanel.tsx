@@ -1,10 +1,11 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { X } from 'lucide-react';
 import { useAggregations } from '@/hooks/data/useAggregations';
 import type { AggregationQueryDto } from '@/api/generated/model/aggregationQueryDto';
 import type { HistogramBucketDto } from '@/api/generated/model/histogramBucketDto';
 import type { TopKEntryDto } from '@/api/generated/model/topKEntryDto';
 import type { DagNodeData } from './dagModel';
+import type { GaterEntry, SystemGatingInfo } from './gatingAnalysis';
 import type { TickRange } from './useDagViewStore';
 
 /**
@@ -32,6 +33,8 @@ interface Props {
   cpStat: { onPathTicks: number; rate: number } | null;
   /** Total ticks the CP algorithm examined — used for the "X of Y" display. */
   cpTotalTicks: number | null;
+  /** Gating-predecessor analysis for this system (null when no range / no data). */
+  gatingInfo: SystemGatingInfo | null;
   onClose: () => void;
 }
 
@@ -46,7 +49,7 @@ const TOPK_N = 5;
  * duration distribution histogram and the worst-N overrun ticks, both fetched in one batched
  * /aggregate call. When no range is pinned, only the declared-access view shows.
  */
-export default function SystemDagSidePanel({ node, sessionId, range, cpStat, cpTotalTicks, onClose }: Props) {
+export default function SystemDagSidePanel({ node, sessionId, range, cpStat, cpTotalTicks, gatingInfo, onClose }: Props) {
   const queries = useMemo<AggregationQueryDto[]>(() => {
     if (!range || !node.systemName) return [];
     const trackId = `system/${node.systemName}`;
@@ -104,9 +107,9 @@ export default function SystemDagSidePanel({ node, sessionId, range, cpStat, cpT
         </Section>
         <Section label="Flags">
           <ChipRow>
-            {node.isParallel && <span className="rounded border border-slate-600/50 bg-slate-900/40 px-1.5 py-0.5 font-mono text-[10px] text-slate-200">parallel</span>}
-            {node.isExclusivePhase && <span className="rounded border border-amber-700/50 bg-amber-950/40 px-1.5 py-0.5 font-mono text-[10px] text-amber-200">exclusive</span>}
-            {node.tierFilter !== 0x0F && <span className="rounded border border-slate-600/50 bg-slate-900/40 px-1.5 py-0.5 font-mono text-[10px] text-slate-200">tier {node.tierFilter}</span>}
+            {node.isParallel && <span className="rounded border border-slate-300 bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] text-slate-800 dark:border-slate-600/50 dark:bg-slate-900/40 dark:text-slate-200">parallel</span>}
+            {node.isExclusivePhase && <span className="rounded border border-amber-300 bg-amber-100 px-1.5 py-0.5 font-mono text-[10px] text-amber-800 dark:border-amber-700/50 dark:bg-amber-950/40 dark:text-amber-200">exclusive</span>}
+            {node.tierFilter !== 0x0F && <span className="rounded border border-slate-300 bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] text-slate-800 dark:border-slate-600/50 dark:bg-slate-900/40 dark:text-slate-200">tier {node.tierFilter}</span>}
             {!node.isParallel && !node.isExclusivePhase && node.tierFilter === 0x0F && (
               <span className="font-mono text-[10px] text-muted-foreground">none</span>
             )}
@@ -117,6 +120,10 @@ export default function SystemDagSidePanel({ node, sessionId, range, cpStat, cpT
           <Section label="critical-path participation">
             <CriticalPathRow rate={cpStat.rate} onPathTicks={cpStat.onPathTicks} totalTicks={cpTotalTicks} />
           </Section>
+        )}
+
+        {gatingInfo && gatingInfo.gaters.length > 0 && (
+          <GatedBySection info={gatingInfo} />
         )}
 
         {range && (
@@ -134,8 +141,23 @@ export default function SystemDagSidePanel({ node, sessionId, range, cpStat, cpT
         <AccessGroup label="writes" tone="write" items={node.writes} />
         <AccessGroup label="side-writes" tone="side-write" items={node.sideWrites} />
 
+        {/*
+          Event queues — producer (writesEvents) and consumer (readsEvents) sides shown
+          separately. Same dashed-violet tone as the corresponding edge style on the canvas
+          so the cross-reference reads at a glance.
+        */}
+        <AccessGroup label="reads events" tone="event-read" items={node.readsEvents} />
+        <AccessGroup label="writes events" tone="event-write" items={node.writesEvents} />
+
+        {/*
+          Named resources. Resources have no Fresh/Snapshot distinction in v1 so each side is
+          a flat list. Tone matches the dotted-red resource edges on the canvas.
+        */}
+        <AccessGroup label="reads resources" tone="resource-read" items={node.readsResources} />
+        <AccessGroup label="writes resources" tone="resource-write" items={node.writesResources} />
+
         {!node.hasAccess && (
-          <div className="mt-3 rounded border border-amber-700/40 bg-amber-950/30 px-2 py-1.5 text-[10px] text-amber-200">
+          <div className="mt-3 rounded border border-amber-300 bg-amber-50 px-2 py-1.5 text-[10px] text-amber-900 dark:border-amber-700/40 dark:bg-amber-950/30 dark:text-amber-200">
             This system has no RFC 07 declarations on the wire. The trace may predate v6 of the
             wire format, or the host has not been recompiled after #310.
           </div>
@@ -305,6 +327,197 @@ function formatUs(us: number): string {
   return ms < 10 ? `${ms.toFixed(2)}ms` : `${ms.toFixed(1)}ms`;
 }
 
+/**
+ * "Gated by" panel — answers "why did this system wait, and what for?". Per-predecessor row
+ * shows: who, % of ticks they gated, predecessor's mean duration, the wait gap (mostly = 0
+ * for the dominant gater since `ReadyUs == max(pred.EndUs)` by construction), the edge kind,
+ * and the via list (component / event / resource that justifies the edge). Sorted with the
+ * most-frequent gater first. Trailing mitigation hint maps the edge kind to a likely fix.
+ */
+function GatedBySection({ info }: { info: SystemGatingInfo }) {
+  // Split predecessors into "active" (gated at least one tick) and "silent" (never gated).
+  // Silent predecessors are required for correctness but never the bottleneck — showing all
+  // of them inline floods the panel for systems with many deps (e.g. PrepareRenderBuffer, 14
+  // silent predecessors). Hide them behind a click-to-expand summary so the active gaters
+  // stay prominent.
+  const active = info.gaters.filter((g) => g.ticksGated > 0);
+  const silent = info.gaters.filter((g) => g.ticksGated === 0);
+  const [showSilent, setShowSilent] = useState(false);
+
+  return (
+    <div className="mb-2.5">
+      <div className="mb-0.5 flex items-baseline justify-between">
+        <span className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">gated by</span>
+        <span className="font-mono text-[9px] text-muted-foreground">
+          mean wait {formatUs(info.meanWaitGapUs)} · {info.ticksObserved} ticks
+        </span>
+      </div>
+      <div className="space-y-0.5">
+        {active.length > 0 ? (
+          active.map((g) => <GaterRow key={g.predecessorName} gater={g} />)
+        ) : (
+          <div className="font-mono text-[10px] italic text-muted-foreground">
+            No predecessor was the gater in any observed tick.
+          </div>
+        )}
+      </div>
+      {silent.length > 0 && (
+        <SilentPredecessorsBlock
+          silent={silent}
+          expanded={showSilent}
+          onToggle={() => setShowSilent((s) => !s)}
+        />
+      )}
+      <MitigationHint gaters={info.gaters} />
+    </div>
+  );
+}
+
+/**
+ * Collapsible "+ N other predecessors (never gated)" block. Closed by default so the active
+ * gater(s) stay the focus; expanded reveals the full silent list with the same per-row
+ * styling as the active rows (just consistently in the < 10% tier, since `ticksGated == 0`).
+ */
+function SilentPredecessorsBlock({
+  silent,
+  expanded,
+  onToggle,
+}: {
+  silent: GaterEntry[];
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <>
+      <button
+        type="button"
+        onClick={onToggle}
+        className="mt-1 flex w-full items-center justify-between rounded border border-border/40 bg-card/40 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground hover:bg-muted/40 hover:text-foreground"
+        title={expanded
+          ? 'Collapse — hide predecessors that never gated this system in the range'
+          : 'Expand — show predecessors that exist in the DAG but never gated this system'}
+      >
+        <span>+ {silent.length} other predecessor{silent.length === 1 ? '' : 's'} (never gated)</span>
+        <span className="font-sans text-[9px]">{expanded ? '▾' : '▸'}</span>
+      </button>
+      {expanded && (
+        <div className="mt-0.5 space-y-0.5">
+          {silent.map((g) => (
+            <GaterRow key={g.predecessorName} gater={g} />
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
+function GaterRow({ gater }: { gater: GaterEntry }) {
+  const pctTicks = gater.ticksObserved > 0 ? (gater.ticksGated / gater.ticksObserved) * 100 : 0;
+  // Top gater (≥ 50% of ticks) is the explanation; weak gaters are dimmed.
+  const isPrimary = pctTicks >= 50;
+  // Theme-paired tones — light theme gets dark amber on a soft tint, dark theme gets the
+  // earlier light-amber-on-deep-bg treatment. Without the `dark:` split the text washes out
+  // on the white-ish light theme card.
+  const pctTone = isPrimary
+    ? 'text-amber-700 dark:text-amber-300'
+    : pctTicks >= 10
+      ? 'text-amber-700/70 dark:text-amber-400/70'
+      : 'text-muted-foreground/60';
+  const nameTone = isPrimary ? 'text-foreground' : 'text-muted-foreground';
+  const rowToneClass = isPrimary
+    ? 'border-amber-300 bg-amber-100/60 dark:border-amber-700/40 dark:bg-amber-950/20'
+    : 'border-border/60 bg-card/60';
+  const edge = gater.edge;
+  return (
+    <div className={`rounded border px-1.5 py-1 font-mono text-[10px] ${rowToneClass}`}>
+      <div className="flex items-baseline gap-1.5">
+        <span className={`flex-1 truncate ${nameTone}`} title={gater.predecessorName}>
+          {gater.predecessorName}
+        </span>
+        <span className={`tabular-nums ${pctTone}`}>{pctTicks.toFixed(0)}%</span>
+      </div>
+      <div className="mt-0.5 flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-[9px] text-muted-foreground">
+        <span>pred dur {formatUs(gater.meanPredDurationUs)}</span>
+        {edge ? (
+          <>
+            <span className={edgeKindClasses(edge.kind)}>{edgeKindLabel(edge.kind)}</span>
+            {edge.via.length > 0 && (
+              <span className="truncate" title={edge.via.join(', ')}>via {edge.via.join(', ')}</span>
+            )}
+          </>
+        ) : (
+          <span className="italic">no derived edge</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Kind-driven hint: surfaced under the gater list when one predecessor dominates. The hint maps
+ * the most-frequent edge kind to a typical mitigation. We only show it when the primary gater
+ * gates ≥ 50% of ticks — at lower frequencies the dependency is intermittent and the hint is
+ * more noise than signal.
+ */
+function MitigationHint({ gaters }: { gaters: GaterEntry[] }) {
+  if (gaters.length === 0) return null;
+  const primary = gaters[0];
+  const pctTicks = primary.ticksObserved > 0 ? (primary.ticksGated / primary.ticksObserved) * 100 : 0;
+  if (pctTicks < 50) return null;
+  const edge = primary.edge;
+  if (!edge) return null;
+  const hint = mitigationHintForKind(edge.kind, edge.via);
+  if (!hint) return null;
+  return (
+    <div className="mt-1.5 rounded border border-sky-300 bg-sky-50 px-2 py-1 text-[10px] text-sky-900 dark:border-sky-800/40 dark:bg-sky-950/30 dark:text-sky-200">
+      <span className="mr-1 font-semibold">Mitigation:</span>
+      {hint}
+    </div>
+  );
+}
+
+function mitigationHintForKind(kind: GaterEntry['edge'] extends infer T ? (T extends { kind: infer K } ? K : never) : never, via: string[]): string | null {
+  switch (kind) {
+    case 'fresh':
+      // Fresh covers the standard "writer→reader" within-phase relation AND the cross-phase
+      // case (any access conflict on a component). The actionable response is the same: see
+      // if the write is conditional / rare and could move out of this system.
+      return `Both systems touch ${via.length > 0 ? via.join(', ') : 'a shared component'}. If the write is conditional / rare, consider moving it to a dedicated system or using SideWrites<T>().`;
+    case 'snapshot':
+      return `Snapshot read on ${via.length > 0 ? via.join(', ') : 'this component'}. If the reader doesn't truly need the previous-tick value, downgrading to a fresh read could remove the inversion.`;
+    case 'manual':
+      return 'Explicit `.After()` / `.Before()` ordering. Verify the manual edge is still required — it may have outlived its original constraint.';
+    case 'event':
+    case 'resource':
+      // Event and resource dependencies are usually intentional — no canned hint.
+      return null;
+  }
+}
+
+function edgeKindLabel(kind: GaterEntry['edge'] extends infer T ? (T extends { kind: infer K } ? K : never) : never): string {
+  switch (kind) {
+    case 'fresh': return 'fresh';
+    case 'snapshot': return 'snapshot';
+    case 'manual': return 'manual';
+    case 'event': return 'event';
+    case 'resource': return 'resource';
+  }
+}
+
+function edgeKindClasses(kind: GaterEntry['edge'] extends infer T ? (T extends { kind: infer K } ? K : never) : never): string {
+  // Theme-paired chip tones. Light theme uses a 100-shade tint with 800 text; dark uses the
+  // 950/40 bg with 200 text. Same hue family as the corresponding canvas edge so the visual
+  // pairing between side panel and DAG arrow holds in both modes.
+  const base = 'rounded px-1 py-0.5';
+  switch (kind) {
+    case 'fresh': return `${base} bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-200`;
+    case 'snapshot': return `${base} bg-sky-100 text-sky-800 dark:bg-sky-950/40 dark:text-sky-200`;
+    case 'manual': return `${base} bg-slate-200 text-slate-800 dark:bg-slate-800/50 dark:text-slate-200`;
+    case 'event': return `${base} bg-violet-100 text-violet-800 dark:bg-violet-950/40 dark:text-violet-200`;
+    case 'resource': return `${base} bg-red-100 text-red-800 dark:bg-red-950/40 dark:text-red-200`;
+  }
+}
+
 function Section({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="mb-2.5">
@@ -318,13 +531,24 @@ function ChipRow({ children }: { children: React.ReactNode }) {
   return <div className="flex flex-wrap items-center gap-1">{children}</div>;
 }
 
+type AccessTone =
+  | 'read'
+  | 'fresh'
+  | 'snapshot'
+  | 'write'
+  | 'side-write'
+  | 'event-read'
+  | 'event-write'
+  | 'resource-read'
+  | 'resource-write';
+
 function AccessGroup({
   label,
   tone,
   items,
 }: {
   label: string;
-  tone: 'read' | 'fresh' | 'snapshot' | 'write' | 'side-write';
+  tone: AccessTone;
   items: string[];
 }) {
   if (items.length === 0) return null;
@@ -341,17 +565,31 @@ function AccessGroup({
   );
 }
 
-function toneClasses(tone: 'read' | 'fresh' | 'snapshot' | 'write' | 'side-write'): string {
+function toneClasses(tone: AccessTone): string {
+  // Theme-paired tones. Each chip uses light-bg + dark-text on light theme and dark-bg +
+  // light-text on dark theme. The hue family is preserved so the side-panel chip still
+  // visually pairs with its corresponding canvas edge style. Producer side gets a slightly
+  // bolder tint (200/100 shades) than consumer to keep the two readable at a glance.
   switch (tone) {
     case 'read':
-      return 'border-slate-600/50 bg-slate-900/40 text-slate-200';
+      return 'border-slate-300 bg-slate-100 text-slate-800 dark:border-slate-600/50 dark:bg-slate-900/40 dark:text-slate-200';
     case 'fresh':
-      return 'border-emerald-700/50 bg-emerald-950/40 text-emerald-200';
+      return 'border-emerald-300 bg-emerald-100 text-emerald-800 dark:border-emerald-700/50 dark:bg-emerald-950/40 dark:text-emerald-200';
     case 'snapshot':
-      return 'border-sky-700/50 bg-sky-950/40 text-sky-200';
+      return 'border-sky-300 bg-sky-100 text-sky-800 dark:border-sky-700/50 dark:bg-sky-950/40 dark:text-sky-200';
     case 'write':
-      return 'border-rose-700/50 bg-rose-950/40 text-rose-200';
+      return 'border-rose-300 bg-rose-100 text-rose-800 dark:border-rose-700/50 dark:bg-rose-950/40 dark:text-rose-200';
     case 'side-write':
-      return 'border-orange-700/50 bg-orange-950/40 text-orange-200';
+      return 'border-orange-300 bg-orange-100 text-orange-800 dark:border-orange-700/50 dark:bg-orange-950/40 dark:text-orange-200';
+    // Event tones — violet, matching the dashed event edges on the canvas.
+    case 'event-read':
+      return 'border-violet-300 bg-violet-100 text-violet-800 dark:border-violet-700/50 dark:bg-violet-950/40 dark:text-violet-200';
+    case 'event-write':
+      return 'border-violet-400 bg-violet-200 text-violet-900 dark:border-violet-600/60 dark:bg-violet-900/50 dark:text-violet-100';
+    // Resource tones — red, matching the dotted resource edges.
+    case 'resource-read':
+      return 'border-red-300 bg-red-100 text-red-800 dark:border-red-800/50 dark:bg-red-950/40 dark:text-red-200';
+    case 'resource-write':
+      return 'border-red-400 bg-red-200 text-red-900 dark:border-red-700/60 dark:bg-red-900/50 dark:text-red-100';
   }
 }

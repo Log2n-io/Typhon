@@ -139,6 +139,194 @@ public sealed class TraceFileWriter : IDisposable
         _writer.Flush();
     }
 
+    /// <summary>
+    /// Writes the rich component-definitions table (v7+). One <see cref="ComponentDefinitionRecord"/> per registered component
+    /// type — sits after <c>WritePhases</c> in the on-disk sequence. Empty array is valid (no components → 0 length prefix; the
+    /// reader returns an empty list).
+    /// </summary>
+    public void WriteComponentDefinitions(ReadOnlySpan<ComponentDefinitionRecord> components)
+    {
+        _writer.Write((ushort)components.Length);
+        foreach (var c in components)
+        {
+            _writer.Write(c.ComponentTypeId);
+            WriteShortString(c.Name);
+            _writer.Write(c.Revision);
+            _writer.Write(c.StorageMode);
+            _writer.Write(c.AllowMultiple);
+            _writer.Write(c.ComponentStorageSize);
+            _writer.Write(c.ComponentStorageOverhead);
+            _writer.Write(c.ComponentStorageTotalSize);
+            _writer.Write(c.IndicesCount);
+            _writer.Write(c.MultipleIndicesCount);
+            WriteShortString(c.SpatialField ?? string.Empty);
+
+            var fields = c.Fields ?? [];
+            _writer.Write((ushort)fields.Length);
+            foreach (var f in fields)
+            {
+                _writer.Write(f.FieldId);
+                WriteShortString(f.Name);
+                _writer.Write(f.FieldType);
+                _writer.Write(f.UnderlyingType);
+                _writer.Write(f.Offset);
+                _writer.Write(f.Size);
+                _writer.Write(f.ArrayLength);
+                _writer.Write(f.Flags);
+                // Spatial sub-block — always present on the wire (4 bytes overhead) so the reader can walk records
+                // without a flag-driven branch. Engine ignores the values when Flags & 0x08 is clear.
+                _writer.Write(f.SpatialFieldType);
+                _writer.Write(f.SpatialMode);
+                _writer.Write(f.SpatialCellSize);
+                _writer.Write(f.SpatialMargin);
+                _writer.Write(f.SpatialCategory);
+                WriteShortString(f.ForeignKeyTargetType ?? string.Empty);
+            }
+        }
+        _writer.Flush();
+    }
+
+    /// <summary>
+    /// Writes the rich archetype-definitions table (v7+). Variable-size per record — child id list and component-id list are
+    /// length-prefixed; the cluster-info inline block is gated by the <see cref="ArchetypeDefinitionRecord.Flags"/> 0x01 bit.
+    /// </summary>
+    public void WriteArchetypeDefinitions(ReadOnlySpan<ArchetypeDefinitionRecord> archetypes)
+    {
+        _writer.Write((ushort)archetypes.Length);
+        foreach (var a in archetypes)
+        {
+            _writer.Write(a.ArchetypeId);
+            WriteShortString(a.Name);
+            _writer.Write(a.Revision);
+            _writer.Write(a.ParentArchetypeId);
+
+            var children = a.ChildArchetypeIds ?? [];
+            _writer.Write((ushort)children.Length);
+            foreach (var ch in children) _writer.Write(ch);
+
+            _writer.Write(a.ComponentCount);
+            var componentIds = a.ComponentTypeIds ?? [];
+            _writer.Write((byte)componentIds.Length);
+            foreach (var id in componentIds) _writer.Write(id);
+
+            _writer.Write(a.VersionedSlotMask);
+            _writer.Write(a.TransientSlotMask);
+
+            var cascade = a.CascadeTargets ?? [];
+            _writer.Write((ushort)cascade.Length);
+            foreach (var t in cascade) _writer.Write(t);
+
+            _writer.Write(a.Flags);
+            // Cluster-info presence is dictated by Flags & 0x01 (IsClusterEligible). Writing a one-byte presence
+            // flag keeps the wire format unambiguous when ClusterInfo is null but Flags say cluster-eligible
+            // (defensive — the engine guarantees the invariant but tests can build inconsistent records).
+            var hasCluster = a.ClusterInfo != null;
+            _writer.Write(hasCluster);
+            if (hasCluster)
+            {
+                var ci = a.ClusterInfo;
+                _writer.Write(ci.ClusterSize);
+                _writer.Write(ci.ClusterStride);
+                _writer.Write(ci.HeaderSize);
+                _writer.Write(ci.EntityIdsOffset);
+                _writer.Write(ci.IndexElementIdsBaseOffset);
+                _writer.Write(ci.MultipleIndexedFieldCount);
+            }
+        }
+        _writer.Flush();
+    }
+
+    /// <summary>Writes the flat (componentTypeId, fieldId) → index variant catalog (v7+).</summary>
+    public void WriteIndexCatalog(ReadOnlySpan<IndexCatalogEntry> indexes)
+    {
+        _writer.Write((ushort)indexes.Length);
+        foreach (var i in indexes)
+        {
+            _writer.Write(i.ComponentTypeId);
+            _writer.Write(i.FieldId);
+            _writer.Write(i.Variant);
+            _writer.Write(i.AllowMultiple);
+            _writer.Write(i.IsSpatial);
+            _writer.Write(i.IsAuto);
+        }
+        _writer.Flush();
+    }
+
+    /// <summary>
+    /// Writes the runtime-config record (v7+). Single record. Wire format prefixes with a one-byte presence flag so the reader
+    /// can distinguish "no runtime config available" (flag=0) from "default-valued config" (flag=1, all zero fields).
+    /// </summary>
+    public void WriteRuntimeConfig(RuntimeConfigRecord config)
+    {
+        var present = config != null;
+        _writer.Write(present);
+        if (!present)
+        {
+            _writer.Flush();
+            return;
+        }
+
+        _writer.Write(config.BaseTickRate);
+        _writer.Write(config.WorkerCount);
+        _writer.Write(config.TelemetryRingCapacity);
+        _writer.Write(config.ParallelQueryMinChunkSize);
+        WriteShortString(config.DefaultPhase ?? string.Empty);
+
+        var phases = config.Phases ?? [];
+        _writer.Write((ushort)phases.Length);
+        foreach (var p in phases) WriteShortString(p ?? string.Empty);
+        _writer.Flush();
+    }
+
+    /// <summary>Writes the per-queue static-schema catalog (v7+).</summary>
+    public void WriteEventQueueCatalog(ReadOnlySpan<EventQueueRecord> queues)
+    {
+        _writer.Write((ushort)queues.Length);
+        foreach (var q in queues)
+        {
+            _writer.Write(q.QueueIndex);
+            WriteShortString(q.Name ?? string.Empty);
+            _writer.Write(q.Capacity);
+            WriteShortString(q.EventTypeName ?? string.Empty);
+        }
+        _writer.Flush();
+    }
+
+    /// <summary>
+    /// Writes the resource-graph snapshot (v7+) — a pre-order tree walk; readers reconstruct the tree via
+    /// <see cref="ResourceGraphNodeRecord.ParentId"/> (-1 for root).
+    /// </summary>
+    public void WriteResourceGraphSnapshot(ReadOnlySpan<ResourceGraphNodeRecord> nodes)
+    {
+        _writer.Write(nodes.Length);
+        foreach (var n in nodes)
+        {
+            _writer.Write(n.Id);
+            WriteShortString(n.Name ?? string.Empty);
+            _writer.Write(n.Type);
+            _writer.Write(n.ParentId);
+            _writer.Write(n.CreatedAtUtcTicks);
+            _writer.Write(n.ExhaustionPolicy);
+        }
+        _writer.Flush();
+    }
+
+    /// <summary>
+    /// Convenience helper for fixtures + tests that don't care about populating the v7 static-structure tables — writes empty
+    /// versions of all six (component definitions, archetype definitions, index catalog, runtime config, event queue catalog,
+    /// resource graph snapshot). Production code should call the individual <c>Write...</c> methods with real data; this helper
+    /// exists so test scaffolding stays readable.
+    /// </summary>
+    public void WriteEmptyStaticStructures()
+    {
+        WriteComponentDefinitions(ReadOnlySpan<ComponentDefinitionRecord>.Empty);
+        WriteArchetypeDefinitions(ReadOnlySpan<ArchetypeDefinitionRecord>.Empty);
+        WriteIndexCatalog(ReadOnlySpan<IndexCatalogEntry>.Empty);
+        WriteRuntimeConfig(null);
+        WriteEventQueueCatalog(ReadOnlySpan<EventQueueRecord>.Empty);
+        WriteResourceGraphSnapshot(ReadOnlySpan<ResourceGraphNodeRecord>.Empty);
+    }
+
     /// <summary>Magic marker for the trailing span-name table (distinguishes it from an event block header).</summary>
     public const uint SpanNameTableMagic = 0x4E_41_50_53; // "SPAN" little-endian
 

@@ -128,6 +128,12 @@ export default function TickOverview({ isLive = false }: Props) {
   // right-pane's range-stats fallback ("Selection") takes over instead of the click-detail card.
   // Without this, an old TimeArea click sticks indefinitely and blocks the range stats from showing.
   const clearProfilerSelection = useProfilerSelectionStore((s) => s.clear);
+  // Single-tick click sets a tick-kind selection so the cross-panel `focusTick` slot (via
+  // `selectionBridges.bridgeProfilerSelectionAndFocusTick`) tracks the user's pick. The CP tape
+  // then follows that tick across any subsequent viewport change (zoom, pan) until the user does
+  // a different gesture. Range-drag still clears, since at that point the user is exploring a
+  // window, not pinning a tick.
+  const setProfilerSelection = useProfilerSelectionStore((s) => s.setSelected);
 
   // In live mode, any explicit user interaction (wheel pan, drag-select, overview pan, ...)
   // implicitly turns off live-follow — otherwise the next tick batch (≤100 ms later) would snap
@@ -664,7 +670,8 @@ export default function TickOverview({ isLive = false }: Props) {
         const b = Math.max(drag.startTickIdx, drag.currentTickIdx);
         if (a >= 0 && b < tickRows.length) {
           applyViewRange({ startUs: tickRows[a].startUs, endUs: tickRows[b].endUs });
-          // Clear any stale element click — the user just declared "show me stats for this range".
+          // Range-drag = "show me stats for this window". Drop any pinned tick — the user is
+          // exploring a range, not focusing a specific tick.
           clearProfilerSelection();
         }
       } else {
@@ -672,12 +679,15 @@ export default function TickOverview({ isLive = false }: Props) {
         if (idx >= 0 && idx < tickRows.length) {
           const tick = tickRows[idx];
           applyViewRange({ startUs: tick.startUs, endUs: tick.endUs });
-          clearProfilerSelection();
+          // Pin the tick so downstream surfaces (CP tape, side panels) keep tracking it across
+          // any subsequent viewport change. Cleared by a fresh range-drag (above) or by clicking
+          // a different tick (this same path overwrites with the new tickNumber).
+          setProfilerSelection({ kind: 'tick', tickNumber: Number(tick.tickNumber) });
         }
       }
     }
     scheduleRender();
-  }, [tickRows, applyViewRange, hitTest, scheduleRender, clearProfilerSelection]);
+  }, [tickRows, applyViewRange, hitTest, scheduleRender, clearProfilerSelection, setProfilerSelection]);
 
   const onPointerLeave = useCallback(() => {
     // Only clear hover state on leave — in-flight drags are pointer-captured so pointermove still fires.

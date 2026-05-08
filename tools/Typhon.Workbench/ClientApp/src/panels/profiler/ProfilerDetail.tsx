@@ -493,6 +493,10 @@ function RangeStatsDetail(): React.JSX.Element {
   // milliseconds-since-trace-start, matching the ruler's labels.
   const globalStartUs = useGlobalStartUs();
   const stats = useProfilerStatsStore((s) => s.stats);
+  // Worker count drives the colour-coding on the parallel-width column in the Top Systems table —
+  // without it we don't know what "good" parallelism looks like for this trace. Fall back to 0
+  // (no colour, just the raw ratio) when metadata hasn't loaded yet.
+  const workerCount = useProfilerSessionStore((s) => Number(s.metadata?.header?.workerCount ?? 0));
   const viewRange = useProfilerViewStore((s) => s.viewRange);
   const hasViewRange = viewRange.endUs > viewRange.startUs;
   if (stats === null) {
@@ -552,9 +556,20 @@ function RangeStatsDetail(): React.JSX.Element {
         </dl>
       </div>
 
-      {/* Top systems by total chunk time */}
+      {/* Top systems by total chunk time. Wall-clock time first (latency cost), CPU time second
+          (resource cost), parallel-width ratio (cpu/wall) last with colour coded against the
+          worker pool size — green when the system is using most of the pool, red when it's
+          parallel-but-underused. Single-threaded systems naturally land at ~1.0 → green when
+          worker pool itself is 1, otherwise neutral. */}
       <div className="rounded-md border border-border bg-card p-3 text-[12px]">
-        <h4 className="mb-2 border-b border-border pb-1 text-[12px] font-semibold text-foreground">Top systems</h4>
+        <div className="mb-2 flex items-baseline justify-between border-b border-border pb-1">
+          <h4 className="text-[12px] font-semibold text-foreground">Top systems</h4>
+          {workerCount > 0 && (
+            <span className="font-mono text-[10px] text-muted-foreground" title="Worker pool size — drives the parallel-width colour">
+              pool: {workerCount}
+            </span>
+          )}
+        </div>
         {stats.topSystemsByTotal.length === 0 ? (
           <p className="text-[11px] text-muted-foreground">No chunks in range.</p>
         ) : (
@@ -562,18 +577,30 @@ function RangeStatsDetail(): React.JSX.Element {
             <thead>
               <tr className="text-left text-muted-foreground">
                 <th className="font-normal">System</th>
-                <th className="font-normal text-right">Time</th>
+                <th className="font-normal text-right" title="Σ wall-clock time the system occupied across the range (latency cost)">Wall</th>
+                <th className="font-normal text-right" title="Σ chunk durations across all workers (resource cost)">CPU</th>
+                <th className="font-normal text-right" title="Pool saturation while the system runs: (CPU/Wall) ÷ workerCount. 100% = every worker busy whenever this system runs. — = single-threaded by design.">Eff</th>
                 <th className="font-normal text-right">Count</th>
               </tr>
             </thead>
             <tbody>
-              {stats.topSystemsByTotal.map((s) => (
-                <tr key={s.systemIndex} className="border-t border-border/50">
-                  <td className="truncate font-mono text-foreground" title={s.systemName}>{s.systemName || `System ${s.systemIndex}`}</td>
-                  <td className="text-right font-mono tabular-nums text-foreground">{formatDurationUs(s.totalDurationUs)}</td>
-                  <td className="text-right font-mono tabular-nums text-foreground">{s.count.toLocaleString()}</td>
-                </tr>
-              ))}
+              {stats.topSystemsByTotal.map((s) => {
+                const ratio = s.totalWallUs > 0 ? s.totalCpuUs / s.totalWallUs : 0;
+                return (
+                  <tr key={s.systemIndex} className="border-t border-border/50">
+                    <td className="truncate font-mono text-foreground" title={s.systemName}>{s.systemName || `System ${s.systemIndex}`}</td>
+                    <td className="text-right font-mono tabular-nums text-foreground">{formatDurationUs(s.totalWallUs)}</td>
+                    <td className="text-right font-mono tabular-nums text-foreground">{formatDurationUs(s.totalCpuUs)}</td>
+                    <td
+                      className={`text-right font-mono tabular-nums ${parallelWidthClass(ratio, workerCount)}`}
+                      title={parallelWidthTooltip(ratio, workerCount)}
+                    >
+                      {formatEfficiency(ratio, workerCount)}
+                    </td>
+                    <td className="text-right font-mono tabular-nums text-foreground">{s.count.toLocaleString()}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         )}
@@ -587,6 +614,47 @@ function RangeStatsDetail(): React.JSX.Element {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Colour the parallel-width column against the worker pool size. The ratio is `cpu/wall`:
+ *   - Single-threaded by design: ratio ≈ 1.0 regardless of pool size — render neutral, not red.
+ *     The user isn't trying to parallelize; flagging it red would be a false alarm.
+ *   - Tries to parallelize but underutilized: ratio &gt; 1.5 but well below pool size — render red.
+ *   - Mid: 40-75% of pool → amber.
+ *   - Well-saturated: ≥75% of pool → green.
+ *   - Pool size unknown (workerCount = 0) → neutral; no signal we can trust.
+ */
+function parallelWidthClass(ratio: number, workerCount: number): string {
+  if (workerCount <= 0 || ratio < 0.05) return 'text-foreground';
+  if (ratio < 1.5) return 'text-foreground'; // single-threaded by design — no judgement
+  // Theme-paired tones: 700 weight reads cleanly on a white background, 300 weight on dark slate.
+  // Tailwind's `dark:` prefix flips automatically with the workbench's `darkMode: 'class'` setting.
+  // Plain `text-amber-300` would wash out to nearly invisible on light theme.
+  const pct = ratio / workerCount;
+  if (pct >= 0.75) return 'text-emerald-700 dark:text-emerald-400';
+  if (pct >= 0.40) return 'text-amber-700 dark:text-amber-300';
+  return 'text-red-700 dark:text-red-400';
+}
+
+function parallelWidthTooltip(ratio: number, workerCount: number): string {
+  if (workerCount <= 0) return `Effective parallel width: ${ratio.toFixed(2)} workers (pool size unknown).`;
+  if (ratio < 0.05) return 'No measurable activity in range.';
+  if (ratio < 1.5) return `Single-threaded by design — effective width ${ratio.toFixed(2)} workers (showing 6% pool saturation would be misleading; this system isn't trying to parallelize).`;
+  const pct = (ratio / workerCount) * 100;
+  return `Pool saturation while running: ${pct.toFixed(0)}% — using ${ratio.toFixed(2)} of ${workerCount} workers on average. 100% = every worker busy whenever this system runs.`;
+}
+
+/**
+ * Display formatter for the Eff column. Keeps the deliberate-serial / parallel split visible at a
+ * glance: single-threaded systems show a dash (the percent would be misleading low — they're not
+ * trying to parallelize), parallel systems show pool saturation as a percentage.
+ */
+function formatEfficiency(ratio: number, workerCount: number): string {
+  if (workerCount <= 0 || ratio < 0.05) return '—';
+  if (ratio < 1.5) return '—';
+  const pct = (ratio / workerCount) * 100;
+  return `${pct.toFixed(0)}%`;
+}
 
 function Header({ icon, title, suffix }: { icon: React.ReactNode; title: string; suffix: string }): React.JSX.Element {
   return (

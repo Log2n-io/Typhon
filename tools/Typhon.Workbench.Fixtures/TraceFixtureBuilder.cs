@@ -42,6 +42,7 @@ public static class TraceFixtureBuilder
         writer.WriteArchetypes([]);
         writer.WriteComponentTypes([]);
         writer.WritePhases([]);
+        writer.WriteEmptyStaticStructures();
 
         // One block containing every record. Record sizes follow the production codec:
         //   TickStart = 12 B (header only)
@@ -144,6 +145,7 @@ public static class TraceFixtureBuilder
         writer.WriteArchetypes([]);
         writer.WriteComponentTypes(components);
         writer.WritePhases(["Input", "Simulation", "Output"]);
+        writer.WriteEmptyStaticStructures();
 
         // Same record body as BuildMinimalTrace — 3 ticks of TickStart + Instant + TickEnd. Anything thinner
         // can prevent the cache builder from producing a non-empty manifest, which leaves /topology stuck at 202.
@@ -209,6 +211,7 @@ public static class TraceFixtureBuilder
         writer.WriteArchetypes([]);
         writer.WriteComponentTypes([]);
         writer.WritePhases([]);
+        writer.WriteEmptyStaticStructures();
         // No records, no span-name table → reader sees EOF mid-way through block scan.
         writer.Flush();
         return path;

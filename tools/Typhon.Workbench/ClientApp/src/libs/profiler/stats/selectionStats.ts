@@ -40,8 +40,18 @@ export interface SelectionStats {
    */
   spanGroups: SpanGroupStats[];
 
-  /** Top system chunks (by systemIndex) within range, sorted descending by total duration. Trimmed to {@link TOP_N}. */
-  topSystemsByTotal: Array<{ systemIndex: number; systemName: string; count: number; totalDurationUs: number }>;
+  /**
+   * Top system chunks (by systemIndex) within range, sorted descending by total wall-clock time.
+   * Trimmed to {@link TOP_N}. Each entry exposes both wall-clock and cpu time:
+   *   - `totalWallUs`: Σ (per-tick wall-clock window of the system) across ticks. Critical-path-style
+   *     latency cost. Single-threaded and 16-worker-parallel systems contribute their wall-clock
+   *     span equally — running 16 chunks in 690 µs adds 690 µs, not 11 ms.
+   *   - `totalCpuUs`: Σ chunk durations clipped to range. The actual worker-µs consumed; for the
+   *     same parallel system this would be ~11 ms across the 16 chunks.
+   * Their ratio `totalCpuUs / totalWallUs` is the system's effective parallel width — useful when
+   * compared against the worker pool size (e.g. 8 / 16 → "you're using ~half the pool when this runs").
+   */
+  topSystemsByTotal: Array<{ systemIndex: number; systemName: string; count: number; totalWallUs: number; totalCpuUs: number }>;
 
   /** GC pause time within range (µs). Sourced from per-tick `gcSuspensions[]`. */
   gcPauseTotalUs: number;
@@ -121,12 +131,15 @@ export function computeSelectionStats(
     worstSpan: SpanData;
     worstUs: number;
   }>();
-  const systemAgg = new Map<number, { systemName: string; count: number; totalDurationUs: number }>();
+  const systemAgg = new Map<number, { systemName: string; count: number; totalWallUs: number; totalCpuUs: number }>();
   // Per-tick accumulator for chunk wall-clock windows. Reused each tick (clear + fill).
   // Tracks min(clipped start) and max(clipped end) per system so parallel chunks that execute
   // concurrently on different threads contribute the wall-clock span of the system's execution
   // window, not the inflated sum of every thread's duration.
-  const tickSystemWc = new Map<number, { minStart: number; maxEnd: number; count: number; systemName: string }>();
+  // Per-tick scratch: wall-clock window (min/max), chunk count, and Σ chunk durations (cpu time).
+  // CPU time is summed at chunk grain — reflects the actual worker-µs consumed even when chunks
+  // ran in parallel. Pair with the wall-clock window for the parallel-width derivation downstream.
+  const tickSystemWc = new Map<number, { minStart: number; maxEnd: number; count: number; cpuUs: number; systemName: string }>();
   let gcPauseTotalUs = 0;
   let gcSuspensionCount = 0;
 
@@ -173,11 +186,13 @@ export function computeSelectionStats(
       const clipStart = Math.max(chunk.startUs, rangeStartUs);
       const clipEnd = Math.min(chunk.endUs, rangeEndUs);
       if (clipEnd <= clipStart) continue;
+      const chunkCpu = clipEnd - clipStart;
       const wc = tickSystemWc.get(chunk.systemIndex);
       if (wc === undefined) {
-        tickSystemWc.set(chunk.systemIndex, { minStart: clipStart, maxEnd: clipEnd, count: 1, systemName: chunk.systemName });
+        tickSystemWc.set(chunk.systemIndex, { minStart: clipStart, maxEnd: clipEnd, count: 1, cpuUs: chunkCpu, systemName: chunk.systemName });
       } else {
         wc.count++;
+        wc.cpuUs += chunkCpu;
         if (clipStart < wc.minStart) wc.minStart = clipStart;
         if (clipEnd > wc.maxEnd) wc.maxEnd = clipEnd;
       }
@@ -185,8 +200,8 @@ export function computeSelectionStats(
     for (const [sysIdx, wc] of tickSystemWc) {
       const wallClockDur = wc.maxEnd - wc.minStart;
       const e = systemAgg.get(sysIdx);
-      if (e === undefined) systemAgg.set(sysIdx, { systemName: wc.systemName, count: wc.count, totalDurationUs: wallClockDur });
-      else { e.count += wc.count; e.totalDurationUs += wallClockDur; }
+      if (e === undefined) systemAgg.set(sysIdx, { systemName: wc.systemName, count: wc.count, totalWallUs: wallClockDur, totalCpuUs: wc.cpuUs });
+      else { e.count += wc.count; e.totalWallUs += wallClockDur; e.totalCpuUs += wc.cpuUs; }
     }
 
     // GC pause sum. Same clip — a 5 ms pause that straddles the range start gets credited only
@@ -248,8 +263,8 @@ export function computeSelectionStats(
   }
 
   const topSystemsByTotal = Array.from(systemAgg.entries())
-    .map(([systemIndex, v]) => ({ systemIndex, systemName: v.systemName, count: v.count, totalDurationUs: v.totalDurationUs }))
-    .sort((a, b) => b.totalDurationUs - a.totalDurationUs)
+    .map(([systemIndex, v]) => ({ systemIndex, systemName: v.systemName, count: v.count, totalWallUs: v.totalWallUs, totalCpuUs: v.totalCpuUs }))
+    .sort((a, b) => b.totalWallUs - a.totalWallUs)
     .slice(0, TOP_N);
 
   return {

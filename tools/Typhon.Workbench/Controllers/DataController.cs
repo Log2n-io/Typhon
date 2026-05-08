@@ -61,6 +61,7 @@ public sealed class DataController : ControllerBase
             new TrackFieldDescriptorDto("workersTouched",    "u8"),
             new TrackFieldDescriptorDto("chunksProcessed",   "u16"),
             new TrackFieldDescriptorDto("skipReason",        "u8"),
+            new TrackFieldDescriptorDto("totalCpuUs",        "u32"),
         ]),
         // Per-queue tracks: one logical track per event queue, addressed as `queue/<name>`.
         new TrackSchemaDto("queue/<name>", "perTickPerQueue",
@@ -331,7 +332,7 @@ public sealed class DataController : ControllerBase
             if (r.SystemIndex != sysIdx.Value) continue;
             if (r.TickNumber < from || r.TickNumber > to) continue;
             output.Add(new SystemTickRecordDto(r.TickNumber, r.StartUs, r.EndUs, r.ReadyUs, r.DurationUs,
-                r.EntitiesProcessed, r.WorkersTouched, r.ChunksProcessed, r.SkipReasonCode));
+                r.EntitiesProcessed, r.WorkersTouched, r.ChunksProcessed, r.SkipReasonCode, r.TotalCpuUs));
         }
         return Ok(new TrackDataResponseDto(trackId, output.ToArray()));
     }

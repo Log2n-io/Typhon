@@ -101,6 +101,46 @@ describe('buildDagModel', () => {
     expect(edgeKinds).toEqual(['fresh:Movement->AI']);
   });
 
+  it('with showCrossPhaseEdges=true keeps the cross-phase edges in lane layouts', () => {
+    // Same fixture as the previous test, with the user opting into cross-phase visibility.
+    // Cross-phase edges always point earlier-phase → later-phase (Simulation → Output for
+    // Movement → Render); kind is 'fresh' regardless of whether the reader declared Snapshot
+    // because phase order forces writer-first across phases (see edgeDerivation cross-phase
+    // header for rationale). Within Simulation, the fresh edge Movement → AI is unaffected.
+    const t = topo([
+      sys({ name: 'Movement', writes: ['Position'], phaseName: 'Simulation' }),
+      sys({ name: 'AI', readsFresh: ['Position'], phaseName: 'Simulation' }),
+      sys({ name: 'Render', readsSnapshot: ['Position'], phaseName: 'Output' }),
+    ]);
+    const model = buildDagModel(t, 'horizontal-lanes', { showCrossPhaseEdges: true });
+    const edgeKinds = model.edges.map((e) => `${e.data?.kind}:${e.source}->${e.target}`).sort();
+    expect(edgeKinds).toEqual([
+      'fresh:Movement->AI',
+      'fresh:Movement->Render',
+    ]);
+  });
+
+  it('showCrossPhaseEdges defaults to false (intra-phase-only behaviour preserved)', () => {
+    const t = topo([
+      sys({ name: 'Movement', writes: ['Position'], phaseName: 'Simulation' }),
+      sys({ name: 'Render', readsFresh: ['Position'], phaseName: 'Output' }),
+    ]);
+    // No options object passed → cross-phase suppressed.
+    const model = buildDagModel(t, 'horizontal-lanes');
+    expect(model.edges).toHaveLength(0);
+  });
+
+  it('showCrossPhaseEdges also applies to vertical-lanes layout', () => {
+    const t = topo([
+      sys({ name: 'Movement', writes: ['Position'], phaseName: 'Simulation' }),
+      sys({ name: 'Render', readsFresh: ['Position'], phaseName: 'Output' }),
+    ]);
+    const off = buildDagModel(t, 'vertical-lanes');
+    const on = buildDagModel(t, 'vertical-lanes', { showCrossPhaseEdges: true });
+    expect(off.edges).toHaveLength(0);
+    expect(on.edges.map((e) => `${e.source}->${e.target}`)).toEqual(['Movement->Render']);
+  });
+
   it('translates dagre coordinates so each phase lane sits below its predecessor', () => {
     const t = topo([
       sys({ name: 'In1', phaseName: 'Input' }),

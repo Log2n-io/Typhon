@@ -1,3 +1,5 @@
+using Typhon.Workbench.Schema;
+
 namespace Typhon.Workbench.Sessions;
 
 /// <summary>
@@ -12,6 +14,13 @@ public sealed class TraceSession : ISession, IDisposable
 
     public SessionKind Kind => SessionKind.Trace;
     public SessionState State => SessionState.Trace;
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// Returns the <see cref="TraceSessionRuntime.StaticSchemaProvider"/> populated during trace parse. Null until
+    /// build completes; controller callers (which gate on session readiness) won't hit this in the null window.
+    /// </remarks>
+    public IStaticSchemaProvider StaticSchemaProvider => Runtime.StaticSchemaProvider;
 
     public TraceSession(Guid id, string filePath, TraceSessionRuntime runtime)
     {

@@ -57,7 +57,10 @@ public partial class Main : Node2D
                 var metadata = ProfilerSetup.BuildSessionMetadata(
                     _bridge.Systems, workerCount: 16, baseTickRate: 60f,
                     phases: _bridge.PhaseNames,
-                    currentEngineTickProvider: () => _bridge?.CurrentTick ?? 0);
+                    currentEngineTickProvider: () => _bridge?.CurrentTick ?? 0,
+                    engine: _bridge.DatabaseEngine,
+                    resourceGraphRoot: _bridge.ResourceGraphRoot,
+                    runtime: _bridge.ActiveRuntime);
 
                 if (_profilerConfig.LiveWaitMs > 0 && _profilerConfig.LivePort >= 0)
                 {

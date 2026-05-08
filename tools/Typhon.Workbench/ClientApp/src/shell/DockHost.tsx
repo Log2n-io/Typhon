@@ -87,6 +87,26 @@ function buildDefaultLayout(api: DockviewReadyEvent['api'], kind: 'none' | 'open
       tabComponent: 'locked',
       position: { referenceGroup: EDGE_BOTTOM_ID },
     });
+
+    // Trace-mode schema panels (v7+ static-data tables in the trace file feed these). Stacked behind the Detail
+    // panel in the right edge group so they're discoverable without dominating the layout. Attach mode keeps them
+    // available because the wire layout exists today (empty placeholders) — when the engine starts pushing schema
+    // over the live socket the same panels light up automatically. Each panel handles the "no schema data" empty
+    // state on its own, so showing them costs nothing when the data isn't there.
+    if (kind === 'trace') {
+      api.addPanel({
+        id: 'schema-browser',
+        component: 'SchemaBrowser',
+        title: 'Components',
+        position: { referenceGroup: EDGE_RIGHT_ID },
+      });
+      api.addPanel({
+        id: 'archetype-browser',
+        component: 'ArchetypeBrowser',
+        title: 'Archetypes',
+        position: { referenceGroup: EDGE_RIGHT_ID },
+      });
+    }
     return;
   }
 

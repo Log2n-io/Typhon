@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { pickTextColorFor } from '@/libs/colors';
 import { TIMELINE_PALETTE } from '@/libs/profiler/canvas/canvasUtils';
 import { useHoverStore } from '@/stores/useHoverStore';
+import { computePhaseUtilization, type PhaseUtilization } from '../SystemDag/tickUtilization';
 import type { MetronomeIntentClass, TickPathBar, TickPathBars, TickPathPhase, TickPathPostTick } from './criticalPath';
 import { colorForPhase } from './phaseColors';
 import { useCriticalPathViewStore, type CpScale, type Orientation } from './useCriticalPathViewStore';
@@ -25,6 +26,12 @@ interface Props {
    * without round-tripping through panel state.
    */
   onFit: () => void;
+  /**
+   * Worker pool size. Drives the A2 per-phase parallelism band — capacity = workerCount × phase
+   * wall-clock; work = Σ system durations in the phase (CP + non-CP). Null hides the band (single-
+   * worker traces, missing header, aggregate mode where waits aren't carried per phase).
+   */
+  workerCount: number | null;
 }
 
 /**
@@ -46,7 +53,7 @@ interface Props {
  * **Phase colour.** A 5 px stripe in the phase-header band, spanning each phase's stretch of the
  * timeline. The phase name sits inside that band when there's room.
  */
-export default function CriticalPathView({ bars, selectedSystemName, onSelectBar, fitSignal, onFit }: Props) {
+export default function CriticalPathView({ bars, selectedSystemName, onSelectBar, fitSignal, onFit, workerCount }: Props) {
   const rawOrientation = useCriticalPathViewStore((s) => s.orientation);
   const scale = useCriticalPathViewStore((s) => s.scale);
   const pxPerUs = useCriticalPathViewStore((s) => s.pxPerUs);
@@ -227,10 +234,12 @@ export default function CriticalPathView({ bars, selectedSystemName, onSelectBar
     pendingAnchor.current = null;
   }, [pxPerUs, effectiveTotalUs]);
 
-  // Fit-to-viewport: size the canvas so the *work* (tick + post-tick) fills the major axis —
-  // metronome wait is deliberately excluded from the fit budget. On idle ticks the metronome
-  // can dwarf the work (16 ms idle vs 1 ms tick), so including it would shrink the bars to a
-  // sliver. Metronome still renders as a leading stripe; the user scrolls left to see it.
+  // Fit-to-viewport: size the canvas so the visible timeline fills the major axis. When the
+  // metronome toggle is OFF the leading stripe isn't drawn (it's not in `segments`), so the
+  // budget naturally excludes it via `effectiveTotalUs`. When the toggle is ON the stripe IS
+  // drawn — and the user enabled it precisely because they want to see it — so include it in the
+  // fit budget and start scroll at zero. (Earlier behaviour subtracted it and scrolled past it,
+  // which immediately hid what the toggle was meant to surface.)
   //
   // **Trigger discipline**: only `fitSignal` may dispatch a fit. Viewport / bars are read via
   // refs so their *changes* don't re-trigger the effect. Without this, zoom-in causes the
@@ -244,20 +253,18 @@ export default function CriticalPathView({ bars, selectedSystemName, onSelectBar
   useEffect(() => {
     if (fitSignal === lastFitSignalRef.current) return;
     lastFitSignalRef.current = fitSignal;
-    const { orientation: o, viewportSize: v, bars: b, effectiveTotalUs: total, showMetronome: showMetro } = fitInputsRef.current;
+    const { orientation: o, viewportSize: v, effectiveTotalUs: total } = fitInputsRef.current;
     const major = o === 'horizontal' ? v.width : v.height;
-    // Fit budget = "all the rendered work, minus the leading idle stripe IF the stripe is on".
-    // When `showMetronome` is off the segment isn't in the segment list — `effectiveTotalUs`
-    // already excludes it, so subtracting again would oversize the fit.
-    const metroSubtract = showMetro ? b.metronomeWaitUs : 0;
-    const fitUs = Math.max(1, total - metroSubtract);
-    if (major <= 0 || fitUs <= 0) return;
+    // Fit budget = the full rendered timeline. `effectiveTotalUs` already accounts for the
+    // metronome stripe — present when the toggle is on, absent when off — so we pack everything
+    // visible into the major axis. Scroll position 0 lines up with the leading edge (metronome
+    // when shown, first tick segment otherwise).
+    const fitUs = Math.max(1, total);
+    if (major <= 0) return;
     const newPxPerUs = major / fitUs;
     setPxPerUs(newPxPerUs);
-    // Scroll past the metronome stripe so the work starts at the viewport's leading edge — but
-    // only when the stripe is rendered. With the toggle off we want scroll position 0.
     pendingAnchor.current = null; // wheel anchor would conflict with fit; clear it.
-    pendingFitScroll.current = metroSubtract * newPxPerUs;
+    pendingFitScroll.current = 0;
   }, [fitSignal, setPxPerUs]);
 
   // Apply the pending fit scroll right after the SVG resize commits.
@@ -280,7 +287,34 @@ export default function CriticalPathView({ bars, selectedSystemName, onSelectBar
   // header band shows one stripe per phase rather than many tiny ones.
   const phaseStripes = useMemo(() => buildPhaseStripes(segments, placement, bars.totalUs), [segments, placement, bars.totalUs]);
 
-  const HEADER_BAND_PX = 18;
+  // Per-phase parallelism band (A2) — capacity = workerCount × phase wallTime; work = Σ
+  // `totalCpuUs` across CP and non-CP bars in the phase (chunker v13+; older caches surface 0
+  // and the band stays empty). `durationUs` would under-count parallel work the same way it
+  // did at the toolbar level — see `tickUtilization.ts` for the rationale. Suppressed in
+  // aggregate mode (the bars there carry mean wall-clock only, not cpu time). Map keyed by
+  // phaseIndex matches what `PhaseStripe` already has — synthetic stripes (post-tick /
+  // metronome, indices < 0) intentionally absent.
+  const phaseUtilizations = useMemo<Map<number, PhaseUtilization>>(() => {
+    const map = new Map<number, PhaseUtilization>();
+    if (!workerCount || workerCount < 2) return map;
+    if (bars.aggregate) return map;
+    bars.phases.forEach((phase, phaseIndex) => {
+      let work = 0;
+      for (const b of phase.bars) work += b.totalCpuUs;
+      for (const b of phase.nonCpBars) work += b.totalCpuUs;
+      if (work <= 0) return; // pre-v13 cache or empty phase — no band
+      const u = computePhaseUtilization({ workerCount, phaseWorkUs: work, phaseWallTimeUs: phase.totalUs });
+      if (u) map.set(phaseIndex, u);
+    });
+    return map;
+  }, [bars, workerCount]);
+
+  // Header band budget — color stripe (5 px) + 2 px gap + 3 px parallelism bar + 2 px breathing
+  // room above the system bars + label space above the stripe. Was 18 before A2; now 22 to host
+  // the parallelism bar without crowding the phase name. Synthetic phases (post-tick / metronome,
+  // phaseIndex < 0) skip the parallelism bar so the layout stays consistent — they have no
+  // worker-vs-wallclock concept attached.
+  const HEADER_BAND_PX = 22;
   const BAR_HEIGHT_PX = 64;
   // Minor-axis padding past the bars so the drop-shadow doesn't clip at the SVG edge. Without
   // this, dy=2 on the shadow (horizontal layout) renders into clipped space and looks like
@@ -364,7 +398,7 @@ export default function CriticalPathView({ bars, selectedSystemName, onSelectBar
             <feDropShadow dx="2" dy="0" stdDeviation="2" floodColor="#000" floodOpacity="0.45" />
           </filter>
         </defs>
-        {/* Phase-header band — 5 px stripe + name per phase stretch. */}
+        {/* Phase-header band — 5 px stripe + 3 px parallelism bar + name per phase stretch. */}
         {phaseStripes.map((stripe, i) => (
           <PhaseStripe
             key={i}
@@ -372,6 +406,7 @@ export default function CriticalPathView({ bars, selectedSystemName, onSelectBar
             orientation={orientation}
             majorTotalPx={majorTotalPx}
             headerBandPx={HEADER_BAND_PX}
+            utilization={phaseUtilizations.get(stripe.phaseIndex) ?? null}
             isHovered={stripe.phaseIndex >= 0 && stripe.phaseName === hoveredPhase}
             onMouseEnter={() => {
               // Only sync real phases (post-tick / metronome have synthetic indices < 0). Otherwise
@@ -633,6 +668,7 @@ function PhaseStripe({
   orientation,
   majorTotalPx,
   headerBandPx,
+  utilization,
   isHovered,
   onMouseEnter,
   onMouseLeave,
@@ -641,6 +677,12 @@ function PhaseStripe({
   orientation: Orientation;
   majorTotalPx: number;
   headerBandPx: number;
+  /**
+   * Per-phase parallelism (A2). Splits a 3 px bar below the colour stripe into a green "work"
+   * head and a hatched-grey "wait" tail. `null` skips the band — for synthetic stripes (post-tick
+   * / metronome), single-worker traces, and aggregate-mode bars.
+   */
+  utilization: PhaseUtilization | null;
   isHovered: boolean;
   onMouseEnter: () => void;
   onMouseLeave: () => void;
@@ -652,20 +694,42 @@ function PhaseStripe({
       : colorForPhase(stripe.phaseIndex);
   const startPx = stripe.startFraction * majorTotalPx;
   const lengthPx = (stripe.endFraction - stripe.startFraction) * majorTotalPx;
-  // 5 px stripe + 2 px gap between the stripe and the bar area, so the boxes stand out as a
-  // separate band rather than visually merging with the phase colour. Stripe sits at
-  // `headerBandPx - GAP - stripePx` and ends at `headerBandPx - GAP`; the GAP shows as the
-  // panel background between the two.
+  // Header-band layout (top→bottom in horizontal orientation; same math, swapped axes in vertical):
+  //
+  //   ┌──────────── HEADER_BAND_PX (22) ────────────┐
+  //   │ name label area                              │ stripeStart - 3 (text baseline)
+  //   │ ─── 5 px colour stripe ──────                │ stripeStart .. stripeEnd
+  //   │ 1 px gap                                     │
+  //   │ ━━━ 3 px parallelism bar ━━━━                │ parBarStart .. parBarEnd  (A2)
+  //   │ 2 px breathing gap                           │
+  //   └──────────────────────────────────────────────┘ headerBandPx → system bars start
+  //
+  // Numbers chosen so the original 18 px → 22 px bump only adds the 3 px bar + 1 px gap; everything
+  // else stays where the user is already used to it.
   const stripePx = 5;
-  const stripeGapPx = 2;
-  const stripeEnd = headerBandPx - stripeGapPx;
+  const stripeParBarGapPx = 1;
+  const parBarPx = 3;
+  const parBarBottomGapPx = 2;
+  const parBarEnd = headerBandPx - parBarBottomGapPx;
+  const parBarStart = parBarEnd - parBarPx;
+  const stripeEnd = parBarStart - stripeParBarGapPx;
   const stripeStart = stripeEnd - stripePx;
   // Hover visual: a slightly thicker, fully-opaque stripe + a faint band tint behind the stripe
   // so the user can see the matched phase even when squinting at a tiny stripe segment.
   const stripeFill = isHovered ? colour.stroke : colour.stroke;
   const stripeOpacity = isHovered ? 1 : 0.95;
   const stripeThickness = isHovered ? stripePx + 2 : stripePx;
+  // Parallelism bar (A2). Width split = utilization × lengthPx green head + remainder hatched
+  // grey tail. Hidden when `utilization` is null (synthetic stripes / single-worker / aggregate)
+  // or when the stripe is too narrow to render meaningfully (< 4 px).
+  const parBarTitle = utilization
+    ? `parallelism: ${(utilization.utilization * 100).toFixed(0)}% · wait ${formatUsCompact(utilization.waitUs)} of ${formatUsCompact(utilization.capacityUs)}`
+    : null;
+  const renderParBar = utilization != null && lengthPx >= 4;
+
   if (orientation === 'horizontal') {
+    const workPx = renderParBar ? lengthPx * utilization!.utilization : 0;
+    const waitPx = renderParBar ? lengthPx - workPx : 0;
     return (
       <g>
         {isHovered && (
@@ -679,6 +743,21 @@ function PhaseStripe({
           fill={stripeFill}
           opacity={stripeOpacity}
         />
+        {renderParBar && (
+          <g>
+            {/* Slot background — 3 px hatched grey behind the work head, so even at 0 % utilization
+                the slot reads as "this is where parallelism lives". */}
+            <rect x={startPx} y={parBarStart} width={lengthPx} height={parBarPx} fill="url(#cp-hatch)" opacity={0.6} />
+            {workPx > 0.5 && (
+              <rect x={startPx} y={parBarStart} width={workPx} height={parBarPx} fill={parBarWorkFill(utilization!.utilization)} />
+            )}
+            {/* Hairline tick at the work/wait boundary — improves legibility when work head is short. */}
+            {workPx > 0.5 && waitPx > 0.5 && (
+              <line x1={startPx + workPx} y1={parBarStart} x2={startPx + workPx} y2={parBarEnd} stroke="hsl(var(--background))" strokeWidth={0.5} opacity={0.7} />
+            )}
+            <title>{parBarTitle}</title>
+          </g>
+        )}
         {lengthPx >= 40 && (
           <text
             x={startPx + 4}
@@ -689,6 +768,11 @@ function PhaseStripe({
             className="fill-foreground"
           >
             {stripe.phaseName}
+            {utilization && lengthPx >= 90 && (
+              <tspan dx={6} className="fill-muted-foreground">
+                {(utilization.utilization * 100).toFixed(0)}%
+              </tspan>
+            )}
           </text>
         )}
         {/* Transparent hit-target spanning the full header band so hovering the label or the
@@ -701,7 +785,9 @@ function PhaseStripe({
           fill="transparent"
           onMouseEnter={onMouseEnter}
           onMouseLeave={onMouseLeave}
-        />
+        >
+          {parBarTitle && <title>{parBarTitle}</title>}
+        </rect>
       </g>
     );
   }
@@ -719,6 +805,26 @@ function PhaseStripe({
         fill={stripeFill}
         opacity={stripeOpacity}
       />
+      {renderParBar && (
+        <g>
+          <rect x={parBarStart} y={startPx} width={parBarPx} height={lengthPx} fill="url(#cp-hatch)" opacity={0.6} />
+          {(() => {
+            const workPx = lengthPx * utilization!.utilization;
+            const waitPx = lengthPx - workPx;
+            return (
+              <>
+                {workPx > 0.5 && (
+                  <rect x={parBarStart} y={startPx} width={parBarPx} height={workPx} fill={parBarWorkFill(utilization!.utilization)} />
+                )}
+                {workPx > 0.5 && waitPx > 0.5 && (
+                  <line x1={parBarStart} y1={startPx + workPx} x2={parBarEnd} y2={startPx + workPx} stroke="hsl(var(--background))" strokeWidth={0.5} opacity={0.7} />
+                )}
+              </>
+            );
+          })()}
+          <title>{parBarTitle}</title>
+        </g>
+      )}
       {lengthPx >= 40 && (
         <text
           x={stripeStart - 3}
@@ -730,6 +836,11 @@ function PhaseStripe({
           className="fill-foreground"
         >
           {stripe.phaseName}
+          {utilization && lengthPx >= 90 && (
+            <tspan dx={6} className="fill-muted-foreground">
+              {(utilization.utilization * 100).toFixed(0)}%
+            </tspan>
+          )}
         </text>
       )}
       <rect
@@ -740,9 +851,31 @@ function PhaseStripe({
         fill="transparent"
         onMouseEnter={onMouseEnter}
         onMouseLeave={onMouseLeave}
-      />
+      >
+        {parBarTitle && <title>{parBarTitle}</title>}
+      </rect>
     </g>
   );
+}
+
+/**
+ * Green ramp for the parallelism work-head: low utilization stays green-ish but reads as "more
+ * grey hatched tail showing"; high utilization becomes saturated green. Independent of the pill's
+ * range tone so per-tick spikes stand out even when the range mean looks fine.
+ */
+function parBarWorkFill(utilization: number): string {
+  // Saturation ramps with utilization so 100 % phases punch visually.
+  const sat = 35 + utilization * 30;
+  return `hsl(142, ${sat}%, 45%)`;
+}
+
+function formatUsCompact(us: number): string {
+  if (us < 1) return '0µs';
+  if (us < 1000) return `${Math.round(us)}µs`;
+  const ms = us / 1000;
+  if (ms < 10) return `${ms.toFixed(2)}ms`;
+  if (ms < 100) return `${ms.toFixed(1)}ms`;
+  return `${Math.round(ms)}ms`;
 }
 
 // ── Segment shape (one rect per segment) ──────────────────────────────────

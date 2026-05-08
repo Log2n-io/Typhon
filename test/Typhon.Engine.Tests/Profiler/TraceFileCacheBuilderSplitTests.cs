@@ -139,6 +139,7 @@ public class TraceFileCacheBuilderSplitTests
         writer.WriteArchetypes(ReadOnlySpan<ArchetypeRecord>.Empty);
         writer.WriteComponentTypes(ReadOnlySpan<ComponentTypeRecord>.Empty);
         writer.WritePhases(ReadOnlySpan<string>.Empty);
+        writer.WriteEmptyStaticStructures();
 
         // Build record bytes in blocks no larger than TraceFileWriter.MaxBlockBytes (256 KiB). At 12 B per record that's up to
         // ~21K records per block — chunk the emission into pages.

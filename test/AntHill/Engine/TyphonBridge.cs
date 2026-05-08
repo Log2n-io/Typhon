@@ -1211,6 +1211,27 @@ public sealed class TyphonBridge : IDisposable
     public SystemDefinition[] Systems => _runtime?.Systems;
     public string[] PhaseNames => _runtime?.PhaseNames ?? [];
 
+    /// <summary>
+    /// Active <see cref="DatabaseEngine"/>. Exposed so <see cref="AntHill.ProfilerSetup"/> can build the v7
+    /// static-structure tables (component definitions, archetype definitions, index catalog) into the trace
+    /// file via <see cref="Typhon.Engine.Profiler.ProfilerStaticDataBuilder"/>. Returns null before <see cref="Initialize"/>.
+    /// </summary>
+    public DatabaseEngine DatabaseEngine => _dbe;
+
+    /// <summary>
+    /// Parent resource under which the engine's resource graph hangs. Used by <see cref="AntHill.ProfilerSetup"/>
+    /// to build the <see cref="Typhon.Profiler.ResourceGraphNodeRecord"/> snapshot. Same handle the profiler exporters
+    /// use; aliasing it here lets the static-data builder walk the tree without needing DI.
+    /// </summary>
+    public IResource ResourceGraphRoot => _dbe;
+
+    /// <summary>
+    /// Active <see cref="TyphonRuntime"/>. Exposed for <see cref="AntHill.ProfilerSetup"/> to walk
+    /// <see cref="Typhon.Engine.Runtime.DagScheduler.EventQueues"/> when building the v7 event-queue catalog. Null
+    /// before <see cref="Start"/>.
+    /// </summary>
+    public TyphonRuntime ActiveRuntime => _runtime;
+
     // Parent resource under which profiler exporters (FileExporter / TcpExporter) must be created.
     // Available only after Initialize() has built the service provider.
     public IResource ProfilerParent => _serviceProvider?.GetRequiredService<IResourceRegistry>().Profiler;

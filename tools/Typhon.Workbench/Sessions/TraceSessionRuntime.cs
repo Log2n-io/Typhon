@@ -85,6 +85,13 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
     /// </summary>
     public SourceLocationManifestDto SourceLocationManifest { get; private set; } = SourceLocationManifestDto.Empty;
 
+    /// <summary>
+    /// Static-schema provider populated from the trace's v7 static-structure tables (component definitions, archetype
+    /// definitions, index catalog). Null until the build completes — controllers should gate on <see cref="IsReady"/>
+    /// before reading. Used by <see cref="Schema.SchemaService"/> for trace-mode schema requests.
+    /// </summary>
+    public Schema.IStaticSchemaProvider StaticSchemaProvider { get; private set; }
+
     /// <summary>Fires every ~200 ms during build with progress counters. Also fires at phase transitions (done / error).</summary>
     public event Action<BuildProgressEventArgs> BuildProgressChanged;
 
@@ -248,7 +255,13 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
             _timestampFrequency = _isReplayFile
                 ? ReadTimestampFrequencyFromMetadataBytes(_reader.SourceMetadataBytes)
                 : ReadSourceTimestampFrequency(_filePath);
-            var metadata = BuildMetadataDto(_reader, _filePath, _timestampFrequency, fingerprint, _isReplayFile);
+            var metadata = BuildMetadataDto(
+                _reader,
+                _filePath,
+                _timestampFrequency,
+                fingerprint,
+                _isReplayFile,
+                staticSchemaProviderSink: provider => StaticSchemaProvider = provider);
 
             // #302: load the source-location manifest from the trace trailer once, keep on the runtime
             // for cheap reuse by the controller. Skipped for replay files (no source trace to read).
@@ -339,10 +352,18 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
     }
 
     /// <summary>
-    /// Walks a <see cref="TraceFileReader"/> positioned at offset 0 (header + 3 tables + optional v6 phases table) and projects each into the
-    /// wire DTO shape. Shared between the source-file path and the embedded-metadata path so both produce byte-identical metadata DTOs.
+    /// Walks a <see cref="TraceFileReader"/> positioned at offset 0 (header + 3 tables + optional v6 phases table + v7 static structures)
+    /// and projects each into the wire DTO shape. Shared between the source-file path and the embedded-metadata path so both produce
+    /// byte-identical metadata DTOs.
+    ///
+    /// Side-effect: when <paramref name="staticSchemaProviderSink"/> is non-null, this method also snapshots the v7 static-structure
+    /// records into a <see cref="Schema.TraceSchemaProvider"/> via the sink. Done inline here (rather than re-walking the file later)
+    /// because the reader's internal state is exactly the parsed records right after <c>ReadStaticStructures</c> consumes them — the
+    /// alternative is opening + re-parsing the file, which doubles I/O for no gain.
     /// </summary>
-    private static (ProfilerHeaderDto, SystemDefinitionDto[], ArchetypeDto[], ComponentTypeDto[], string[]) ProjectHeaderAndTables(TraceFileReader traceReader)
+    private static (ProfilerHeaderDto, SystemDefinitionDto[], ArchetypeDto[], ComponentTypeDto[], string[]) ProjectHeaderAndTables(
+        TraceFileReader traceReader,
+        Action<Schema.IStaticSchemaProvider> staticSchemaProviderSink = null)
     {
         var h = traceReader.ReadHeader();
         var headerDto = new ProfilerHeaderDto(
@@ -402,6 +423,21 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
 
         // Phases section — present in v6+ traces only; reader returns empty for v5.
         var phases = traceReader.ReadPhases().ToArray();
+        // v7 static-structure tables. Walk past them so any subsequent block reads land at the right offset.
+        traceReader.ReadStaticStructures();
+
+        // Snapshot the v7 records into a TraceSchemaProvider for the schema panels. Toolist (.ToList()) so the
+        // arrays are independent of the reader's internal state — traceReader is disposed shortly after this call,
+        // and the IReadOnlyList exposed off it would dangle. The provider holds these snapshots for the session's
+        // lifetime; they're a few KB in total.
+        if (staticSchemaProviderSink != null)
+        {
+            var provider = new Schema.TraceSchemaProvider(
+                components: traceReader.ComponentDefinitions.ToList(),
+                archetypes: traceReader.ArchetypeDefinitions.ToList(),
+                indexes: traceReader.IndexCatalog.ToList());
+            staticSchemaProviderSink(provider);
+        }
 
         return (headerDto, systems, archetypes, componentTypes, phases);
     }
@@ -435,7 +471,8 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
         string sourcePath,
         long timestampFrequency,
         byte[] fingerprint,
-        bool isReplayFile)
+        bool isReplayFile,
+        Action<Schema.IStaticSchemaProvider> staticSchemaProviderSink = null)
     {
         ProfilerHeaderDto headerDto;
         SystemDefinitionDto[] systems;
@@ -450,14 +487,14 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
             var metaCopy = reader.SourceMetadataBytes.ToArray();
             using var ms = new MemoryStream(metaCopy, writable: false);
             using var traceReader = new TraceFileReader(ms);
-            (headerDto, systems, archetypes, componentTypes, phases) = ProjectHeaderAndTables(traceReader);
+            (headerDto, systems, archetypes, componentTypes, phases) = ProjectHeaderAndTables(traceReader, staticSchemaProviderSink);
         }
         else
         {
             // Read source tables (header is already read by ReadSourceTimestampFrequency, but we need the tables — re-open and walk).
             using var fs = File.OpenRead(sourcePath);
             using var traceReader = new TraceFileReader(fs);
-            (headerDto, systems, archetypes, componentTypes, phases) = ProjectHeaderAndTables(traceReader);
+            (headerDto, systems, archetypes, componentTypes, phases) = ProjectHeaderAndTables(traceReader, staticSchemaProviderSink);
         }
 
         // Tick summaries, manifest, metrics, aggregates all come from the cache reader (already in memory).

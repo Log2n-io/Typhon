@@ -11,6 +11,10 @@ public sealed class OpenSession : ISession, IDisposable
     public SessionKind Kind => SessionKind.Open;
     public SessionState State { get; }
 
+    /// <inheritdoc />
+    public IStaticSchemaProvider StaticSchemaProvider => _staticSchemaProvider ??= new LiveSchemaProvider(Engine.Engine);
+    private IStaticSchemaProvider _staticSchemaProvider;
+
     /// <summary>"convention" (adjacent *.schema.dll), "user-specified" (explicit paths), or "schemaless" (no DLLs).</summary>
     public string SchemaStatus { get; }
     public string[] SchemaDllPaths { get; }

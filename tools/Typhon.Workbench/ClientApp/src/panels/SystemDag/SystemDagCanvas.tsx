@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ReactFlow,
   Background,
@@ -7,6 +7,7 @@ import {
   ViewportPortal,
   type Edge,
   type Node,
+  type NodeChange,
   type NodeMouseHandler,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
@@ -18,7 +19,9 @@ import SystemDagNode from './SystemDagNode';
 import type { SystemStat } from './useSystemStats';
 import type { QueueBackpressureStat } from './useQueueBackpressure';
 import type { CriticalPathParticipation } from '../CriticalPath/criticalPath';
+import type { SystemGatingInfo } from './gatingAnalysis';
 import { useDagViewStore } from './useDagViewStore';
+import { getOverride, useNodePositionsStore } from './useNodePositionsStore';
 
 interface Props {
   topology: TopologyDto | null | undefined;
@@ -38,6 +41,12 @@ interface Props {
   dominantCpSystems: Set<string> | null;
   /** Optional per-system skip rates ∈ [0, 1]. Drives the ↪ chip on nodes. */
   skipRates: Map<string, number> | null;
+  /**
+   * Per-system gating analysis. Drives (a) the per-node "blocked" indicator (icon when
+   * `meanWaitGapUs` is non-trivial) and (b) the bolded edge from the selected system's
+   * top gating predecessor.
+   */
+  gatingAnalysis: Map<string, SystemGatingInfo> | null;
 }
 
 const NODE_TYPES = { system: SystemDagNode as never };
@@ -51,15 +60,145 @@ export default function SystemDagCanvas({
   cpParticipation,
   dominantCpSystems,
   skipRates,
+  gatingAnalysis,
 }: Props) {
   // Layout is read straight from the store (avoids prop drilling). Switching layouts re-runs
   // `buildDagModel` and `<ReactFlow fitView>` re-fits the viewport to the new bounds.
   const layout = useDagViewStore((s) => s.layout);
-  const model = useMemo(() => buildDagModel(topology, layout), [topology, layout]);
+  const hideSkipped = useDagViewStore((s) => s.hideSkipped);
+  const showCrossPhaseEdges = useDagViewStore((s) => s.showCrossPhaseEdges);
+
+  // "Hide skipped" matches what the user sees on each tile: if the stat chip would read 0.0us
+  // (or is missing entirely), the system contributed nothing to the selected range and we drop
+  // it. We filter the topology *before* buildDagModel so dagre lays out only the surviving
+  // systems — otherwise the canvas leaves holes where the hidden tiles used to be. The
+  // underlying "no contribution" signal covers RunIf-skipped, tier-filtered, and
+  // "scheduled-but-zero-duration" uniformly; matching `systemStats` keeps the toggle behaviour
+  // aligned with the visible "0.0us" on each tile. No-op when no range is selected
+  // (`systemStats` null) since we can't tell what counts as "didn't run" without a range.
+  const visibleTopology = useMemo(() => {
+    if (!hideSkipped || !systemStats || !topology?.systems) return topology;
+    const surviving = topology.systems.filter((s) => {
+      if (!s.name) return false;
+      const stat = systemStats.get(s.name);
+      return stat != null && stat.value > 0;
+    });
+    if (surviving.length === topology.systems.length) return topology;
+    return { ...topology, systems: surviving };
+  }, [topology, hideSkipped, systemStats]);
+
+  const model = useMemo(
+    () => buildDagModel(visibleTopology, layout, { showCrossPhaseEdges }),
+    [visibleTopology, layout, showCrossPhaseEdges],
+  );
+
   const hoveredSystem = useHoverStore((s) => s.hoveredSystem);
   const setHoveredSystem = useHoverStore((s) => s.setHoveredSystem);
   const hoveredPhase = useHoverStore((s) => s.hoveredPhase);
   const setHoveredPhase = useHoverStore((s) => s.setHoveredPhase);
+
+  // Ctrl-gated node dragging. Default behaviour stays "drag pans the canvas, click selects
+  // a tile". When the user holds Ctrl, `nodesDraggable` flips to true and dragging on a
+  // tile moves it instead. The keyboard listener is on `window` so it fires regardless of
+  // focus; the `blur` reset covers the alt-tab case where we'd otherwise miss the keyup.
+  const [ctrlHeld, setCtrlHeld] = useState(false);
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Control' || e.ctrlKey) setCtrlHeld(true);
+    };
+    const onKeyUp = (e: KeyboardEvent) => {
+      // Either explicit Control keyup, or any keyup where ctrl is no longer pressed
+      // (e.g. user released Ctrl while another key was down).
+      if (e.key === 'Control' || !e.ctrlKey) setCtrlHeld(false);
+    };
+    const onBlur = () => setCtrlHeld(false);
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('blur', onBlur);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('blur', onBlur);
+    };
+  }, []);
+
+  // Manual position overrides. The persisted store is keyed by `${layout}|${systemName}` so
+  // dragging a tile in horizontal-lanes doesn't carry over to vertical-lanes / circular.
+  // We read the entire `overrides` map and resolve per-node via `getOverride`. Drag-END
+  // events write to the store, persisting to localStorage so the arrangement survives
+  // reloads.
+  const overrides = useNodePositionsStore((s) => s.overrides);
+  const setOverride = useNodePositionsStore((s) => s.setOverride);
+
+  // Live drag state — separate from the persisted store. React Flow streams `position`
+  // changes with `dragging: true` while a drag is in progress; we mirror them into local
+  // state so `styledNodes` re-renders with the cursor-following position. Without this,
+  // the persisted (pre-drag) position is re-applied on every render and the tile snaps
+  // back to its starting point. On drag-end (`dragging: false`) we persist to the store
+  // and drop the live entry so future renders use the override path.
+  const [livePositions, setLivePositions] = useState<Record<string, { x: number; y: number }>>({});
+  const [draggingId, setDraggingId] = useState<string | null>(null);
+
+  // Hover-scoped cross-phase edge filtering. When "Show cross-phase edges" is ON, the lane
+  // layouts include ALL edges (`allEdges()` in dagModel) and the canvas would otherwise paint
+  // a visually-overwhelming cross-phase mesh. As a temporary clutter reducer, we keep every
+  // intra-phase edge visible but show cross-phase edges only when one of their endpoints is
+  // currently hovered. With nothing hovered the cross-phase set collapses entirely — same as
+  // the toggle being off — so the user opts into seeing a system's cross-phase neighbours by
+  // pointing at it.
+  //
+  // Identification of "cross-phase" relies on the node-level `phaseName`; if either endpoint
+  // is missing from the node map (shouldn't happen, defensive) the edge is treated as
+  // cross-phase and follows the hover rule.
+  const phaseByNode = useMemo(() => {
+    const m = new Map<string, string | undefined>();
+    for (const n of model.nodes) m.set(n.id, n.data.phaseName);
+    return m;
+  }, [model.nodes]);
+
+  // Edge visibility is split into two reference-stable memos so the per-frame "drag" path
+  // never depends on `hoveredSystem`. Why this matters: during a Ctrl+drag, the cursor sweeps
+  // over neighbouring tiles, firing onNodeMouseEnter/Leave on each one. That toggles
+  // `hoveredSystem` continuously. If a single memo had both `hoveredSystem` and `draggingId`
+  // in its deps, every hover toggle would invalidate it — even though the *result* during drag
+  // is identical (all cross-phase edges hidden, regardless of hover). The new ref would
+  // propagate to `styledEdges`, which rebuilds `style` objects on event + gating edges,
+  // restarting their CSS animations every frame → visible flicker.
+  //
+  //   • intraOnlyEdges  — cross-phase stripped, intra-phase kept. Used during drag and when
+  //                       nothing is hovered. Deps exclude `hoveredSystem` and `draggingId`,
+  //                       so it stays stable for the entire drag.
+  //   • hoverGatedEdges — same as intraOnly but additionally lets cross-phase edges through
+  //                       when one of their endpoints is the hovered system. Used in the
+  //                       normal (non-drag) hover-gating path.
+  //
+  // visibleEdges picks between them via a plain ternary on `draggingId`. During drag,
+  // visibleEdges === intraOnlyEdges (stable ref). At rest, visibleEdges === hoverGatedEdges
+  // (stable until hoveredSystem changes). styledEdges memoises off this — so event/gating
+  // edge style objects are not rebuilt mid-drag, and their animations don't flicker.
+  const intraOnlyEdges = useMemo(() => {
+    if (!showCrossPhaseEdges) return model.edges;
+    const filtered = model.edges.filter((e) => {
+      const srcPhase = phaseByNode.get(e.source);
+      const tgtPhase = phaseByNode.get(e.target);
+      return srcPhase === tgtPhase;
+    });
+    return filtered.length === model.edges.length ? model.edges : filtered;
+  }, [model.edges, phaseByNode, showCrossPhaseEdges]);
+
+  const hoverGatedEdges = useMemo(() => {
+    if (!showCrossPhaseEdges) return model.edges;
+    if (!hoveredSystem) return intraOnlyEdges;
+    const filtered = model.edges.filter((e) => {
+      const srcPhase = phaseByNode.get(e.source);
+      const tgtPhase = phaseByNode.get(e.target);
+      if (srcPhase === tgtPhase) return true;
+      return e.source === hoveredSystem || e.target === hoveredSystem;
+    });
+    return filtered.length === model.edges.length ? model.edges : filtered;
+  }, [model.edges, phaseByNode, showCrossPhaseEdges, hoveredSystem, intraOnlyEdges]);
+
+  const visibleEdges = draggingId != null ? intraOnlyEdges : hoverGatedEdges;
 
   // Phase-highlight rects for the lane-less layouts (compact / circular). When a phase is
   // hovered (in the CP tape, here in the lanes layouts, etc.) and we're in a layout that
@@ -80,54 +219,211 @@ export default function SystemDagCanvas({
     return out;
   }, [hoveredPhase, model.lanes.length, model.nodes, topology]);
 
-  // Merge selection state + stats + CP rate + skip rate into node.data in one pass — keeps the
-  // node renderer pure (it just reads what's on data) and lets the canvas re-render only when
-  // these inputs change.
-  const styledNodes = useMemo<
-    Node<DagNodeData & { stat?: SystemStat | null; cpRate?: number | null; skipRate?: number | null; isOnDominantCp?: boolean; isHovered?: boolean }>[]
-  >(() => {
+  // Merge selection state + stats + CP rate + skip rate + gating wait into node.data in one
+  // pass — keeps the node renderer pure (it just reads what's on data) and lets the canvas
+  // re-render only when these inputs change.
+  //
+  // Note: the drag-ghost opacity is intentionally NOT in `data` — it's applied via the
+  // wrapper-level `style` prop in `styledNodes` instead. Putting it in data would force a new
+  // `data` reference on every drag frame (the drag patch spreads `{...n.data, isDragging: true}`),
+  // which makes the inner SystemDagNode re-render every frame, re-runs useThemeStore /
+  // className computation, and forces React Flow to re-measure handles → edge attachment
+  // points briefly invalidate per frame → visible flicker on attached edges. By moving opacity
+  // to the wrapper, the dragged node's `data` ref is preserved and the inner component skips
+  // re-rendering entirely.
+  type EnrichedNode = Node<DagNodeData & {
+    stat?: SystemStat | null;
+    cpRate?: number | null;
+    skipRate?: number | null;
+    isOnDominantCp?: boolean;
+    isHovered?: boolean;
+    /** Mean dispatch wait in selected range (µs). Drives the per-node "blocked" icon on the tile. */
+    waitGapUs?: number | null;
+  }>;
+
+  // ── Base decorated nodes (no hover, no drag state) ─────────────────
+  // Hot stability layer — no per-frame deps, no hover dep. This memo excludes both
+  // `livePositions`/`draggingId` (drag) AND `hoveredSystem` (hover). Why hover too: during a
+  // Ctrl+drag, the cursor sweeps over neighbouring tiles, flipping `hoveredSystem` rapidly.
+  // If hover were in this memo's deps, every flip would re-create the entire node array —
+  // every tile gets a fresh ref → React Flow re-renders all 50 nodes and re-routes every
+  // attached edge → visible flicker. Pulling hover into a thin patch above means only ONE
+  // node ref changes per hover transition.
+  //
+  // Position here uses the persisted-override chain only (no live drag position). The drag
+  // patch below applies the live position to just the dragged node.
+  const baseDecoratedNodes = useMemo<EnrichedNode[]>(() => {
     return model.nodes.map((n) => {
       const stat = systemStats?.get(n.id) ?? null;
       const cpRate = cpParticipation?.perSystem.get(n.id)?.rate ?? null;
       const skipRate = skipRates?.get(n.id) ?? null;
       const isSelected = n.id === selectedSystemName;
       const isOnDominantCp = dominantCpSystems?.has(n.id) ?? false;
-      const isHovered = n.id === hoveredSystem;
+      const waitGapUs = gatingAnalysis?.get(n.id)?.meanWaitGapUs ?? null;
+      const overridePos = getOverride(overrides, layout, n.id);
+      const position = overridePos ?? n.position;
       return {
         ...n,
+        position,
         selected: isSelected,
-        data: { ...n.data, stat, cpRate, skipRate, isOnDominantCp, isHovered },
+        data: { ...n.data, stat, cpRate, skipRate, isOnDominantCp, isHovered: false, waitGapUs },
       };
     });
-  }, [model.nodes, selectedSystemName, systemStats, cpParticipation, dominantCpSystems, skipRates, hoveredSystem]);
+  }, [model.nodes, selectedSystemName, systemStats, cpParticipation, dominantCpSystems, skipRates, gatingAnalysis, overrides, layout]);
+
+  // ── Hover patch — only the hovered tile gets a new ref ─────────────
+  // Maps the base array, replacing exactly one node (the hovered one) with a patched copy
+  // and passing every other node through untouched. The array itself is new on every hover
+  // change, but React Flow's per-node reconciler is keyed by id and ref — non-hovered tiles
+  // skip re-render entirely. Without this split, the entire node list churned every hover.
+  const decoratedNodes = useMemo<EnrichedNode[]>(() => {
+    if (!hoveredSystem) return baseDecoratedNodes;
+    return baseDecoratedNodes.map((n) =>
+      n.id !== hoveredSystem
+        ? n
+        : { ...n, data: { ...n.data, isHovered: true } },
+    );
+  }, [baseDecoratedNodes, hoveredSystem]);
+
+  // ── Live drag patch ────────────────────────────────────────────────
+  // The only memo that depends on per-frame state. When no drag is in flight, returns the
+  // decorated array unchanged (same reference). When a drag IS in flight, replaces ONLY the
+  // dragged node's reference — every other node passes through untouched.
+  //
+  // CRITICAL: the dragged node's `data` ref is PRESERVED here (we don't spread `n.data`).
+  // Only `position` and `style` change. With React Flow's per-node memo + `SystemDagNode`
+  // wrapped in `React.memo`, the inner tile component does NOT re-render mid-drag — its
+  // props are reference-equal. The wrapper still re-renders to apply the new CSS transform
+  // and the `opacity: 0.5` ghost, but that's a cheap inline-style update with no DOM
+  // structural change. Handles inside the tile stay measured, so edge attachment points
+  // are stable, so attached edges don't flicker as they re-route to follow the moving tile.
+  const DRAG_GHOST_STYLE = useMemo(() => ({ opacity: 0.5 }), []);
+  const styledNodes = useMemo<EnrichedNode[]>(() => {
+    if (draggingId == null) return decoratedNodes;
+    const livePos = livePositions[draggingId];
+    if (!livePos) return decoratedNodes;
+    return decoratedNodes.map((n) =>
+      n.id !== draggingId
+        ? n
+        : { ...n, position: livePos, style: DRAG_GHOST_STYLE },
+    );
+  }, [decoratedNodes, draggingId, livePositions, DRAG_GHOST_STYLE]);
+
+  /**
+   * Drag-state plumbing. React Flow emits a `position` NodeChange on every frame of a drag
+   * (with `dragging: true`) and one final change with `dragging: false` when the user
+   * releases. We:
+   *   • mirror every position (with dragging=true) into `livePositions` so styledNodes
+   *     re-renders with the cursor-following position,
+   *   • record the dragging node id in `draggingId` so the styledNodes patch can apply the
+   *     50% opacity ghost via wrapper-level `style` (and so the cross-phase edge filter
+   *     can hide its arrows for the duration of the drag),
+   *   • on drag-END, write the final position to the persisted store, then clear the
+   *     live state so subsequent renders use the override path.
+   * localStorage is only touched on drag-end — the per-frame updates are in-memory only.
+   */
+  const onNodesChange = useCallback((changes: NodeChange<Node<DagNodeData>>[]) => {
+    for (const c of changes) {
+      if (c.type !== 'position' || !c.position) continue;
+      if (c.dragging === true) {
+        setLivePositions((prev) => ({ ...prev, [c.id]: { x: c.position!.x, y: c.position!.y } }));
+        setDraggingId((prev) => (prev === c.id ? prev : c.id));
+      } else if (c.dragging === false) {
+        setOverride(layout, c.id, { x: c.position.x, y: c.position.y });
+        setLivePositions((prev) => {
+          if (!(c.id in prev)) return prev;
+          const next = { ...prev };
+          delete next[c.id];
+          return next;
+        });
+        setDraggingId((prev) => (prev === c.id ? null : prev));
+      }
+    }
+  }, [layout, setOverride]);
 
   // Apply backpressure styling to event-class edges. The first entry of `via` is the primary
   // queue name (event edges almost always cite a single queue; multi-queue edges are degenerate).
   // When the queue isn't in the stats map (no data, range cleared), the edge keeps its default
   // dashed-violet look from `dagModel.toReactFlowEdge`.
+  // Identify the gating edge for the currently-selected system: the edge from its top
+  // gating-predecessor (the one that gated the most ticks). Drives the bolded edge styling
+  // below — the canvas mirrors the side panel's "Gated by ..." answer.
+  const gatingEdgeId = useMemo<string | null>(() => {
+    if (!selectedSystemName || !gatingAnalysis) return null;
+    const info = gatingAnalysis.get(selectedSystemName);
+    const top = info?.gaters[0];
+    if (!top || top.ticksGated === 0) return null;
+    return top.edge?.id ?? null;
+  }, [selectedSystemName, gatingAnalysis]);
+
   const styledEdges = useMemo<Edge<DagEdgeData>[]>(() => {
-    if (!queueStats || queueStats.size === 0) return model.edges;
-    return model.edges.map((e) => {
-      if (e.data?.kind !== 'event') return e;
+    const promoteIfGating = (e: Edge<DagEdgeData>): Edge<DagEdgeData> => {
+      if (gatingEdgeId == null || e.id !== gatingEdgeId) return e;
+      // Bump contrast/thickness without overriding the kind colour. Existing stroke colour
+      // (kind-driven) stays so the user still sees fresh/snapshot/manual/event/resource;
+      // we just make THIS arrow louder.
+      const baseStyle = e.style ?? {};
+      return {
+        ...e,
+        style: {
+          ...baseStyle,
+          strokeWidth: Math.max(typeof baseStyle.strokeWidth === 'number' ? baseStyle.strokeWidth : 1.5, 3.5),
+          opacity: 1,
+          filter: 'drop-shadow(0 0 4px currentColor)',
+        },
+        zIndex: (e.zIndex ?? 0) + 10,
+        animated: true,
+      };
+    };
+    // Edges attached to the dragged node MUST re-route every frame as the source/target moves.
+    // CSS dashoffset (`animated: true`) restarts from 0 on each render, and `drop-shadow(...)`
+    // is GPU-expensive to repaint per frame — both manifest as visible flicker on the
+    // attached edges as they track the moving tile. Strip both for the duration of the drag,
+    // restored on release. Edges NOT attached to the dragged node aren't re-routing, so their
+    // animations are unaffected even when this strip is active (we still pass them through
+    // the regular pipeline below).
+    const stripIfAttachedToDragged = (e: Edge<DagEdgeData>): Edge<DagEdgeData> => {
+      if (draggingId == null) return e;
+      if (e.source !== draggingId && e.target !== draggingId) return e;
+      const baseStyle = e.style ?? {};
+      // Drop just the filter; keep stroke / strokeWidth / opacity (those are visual identity).
+      // Spread carefully so we don't mint a fresh style object when there's nothing to strip.
+      const needsStyleStrip = 'filter' in baseStyle;
+      const needsAnimStrip = e.animated === true;
+      if (!needsStyleStrip && !needsAnimStrip) return e;
+      const next: Edge<DagEdgeData> = { ...e };
+      if (needsAnimStrip) next.animated = false;
+      if (needsStyleStrip) {
+        const { filter: _filter, ...rest } = baseStyle;
+        next.style = rest;
+      }
+      return next;
+    };
+
+    if (!queueStats || queueStats.size === 0) {
+      return visibleEdges.map((e) => stripIfAttachedToDragged(promoteIfGating(e)));
+    }
+    return visibleEdges.map((e) => {
+      if (e.data?.kind !== 'event') return stripIfAttachedToDragged(promoteIfGating(e));
       const queueName = e.data.via?.[0];
-      if (!queueName) return e;
+      if (!queueName) return stripIfAttachedToDragged(promoteIfGating(e));
       const stat = queueStats.get(queueName);
-      if (!stat) return e;
+      if (!stat) return stripIfAttachedToDragged(promoteIfGating(e));
       const stroke = backpressureColour(stat);
       const baseStyle = e.style ?? {};
       const labelPrefix = stat.overflowSum > 0 ? `⚠ ${formatCount(stat.overflowSum)} drops · ` : '';
       // Per design §4.5: stroke colour = peak-driven (worst moment), strokeWidth = end-of-tick-
       // driven (chronic backlog). Two independent channels answering two different questions.
       const strokeWidth = 1.5 + stat.outlineHeat * 1.5;
-      return {
+      return stripIfAttachedToDragged(promoteIfGating({
         ...e,
         animated: stat.overflowSum > 0,
         label: `${labelPrefix}${e.label ?? queueName}`,
         labelStyle: { fontSize: 10, fill: stroke, fontFamily: 'monospace' },
         style: { ...baseStyle, stroke, strokeWidth },
-      };
+      }));
     });
-  }, [model.edges, queueStats]);
+  }, [visibleEdges, queueStats, gatingEdgeId, draggingId]);
 
   const onNodeClick = useMemo<NodeMouseHandler<Node<DagNodeData>>>(() => {
     return (_e, node) => onSelectSystem(node.id);
@@ -156,16 +452,22 @@ export default function SystemDagCanvas({
   }
 
   return (
-    <div className="relative h-full w-full bg-background">
+    <div className={`relative h-full w-full bg-background ${ctrlHeld ? 'cursor-grab' : ''}`}>
       <ReactFlow
         nodes={styledNodes}
         edges={styledEdges}
         nodeTypes={NODE_TYPES}
         fitView
+        // Ctrl-gated dragging: tiles only move when the user holds Ctrl. Without it,
+        // dragging on a tile is treated as a click (so selection still works) and the
+        // canvas itself is panned via `panOnDrag`. The 5px threshold prevents a normal
+        // click-to-select from accidentally triggering a single-pixel drag.
+        nodesDraggable={ctrlHeld}
+        nodeDragThreshold={5}
+        onNodesChange={onNodesChange}
         proOptions={{ hideAttribution: true }}
         minZoom={0.3}
         maxZoom={1.6}
-        nodesDraggable={false}
         nodesConnectable={false}
         elementsSelectable
         onNodeClick={onNodeClick}
@@ -259,7 +561,26 @@ export default function SystemDagCanvas({
         </ViewportPortal>
         <Background color="var(--border)" gap={16} />
         <Controls showInteractive={false} position="bottom-left" />
-        <MiniMap pannable zoomable position="bottom-right" />
+        {/*
+          MiniMap colours via shadcn theme tokens. The project's `--card` / `--background` /
+          `--muted-foreground` etc. are full `oklch(...)` values (not HSL components), so they
+          must be referenced directly with `var(--token)` — wrapping them in `hsl(...)` produces
+          `hsl(oklch(...))` which is invalid CSS and the browser collapses to plain black/white.
+          For the translucent mask we use `color-mix(in oklch, var(--background) 60%, transparent)`
+          which is the modern way to overlay-with-alpha against an oklch base.
+        */}
+        <MiniMap
+          pannable
+          zoomable
+          position="bottom-right"
+          bgColor="var(--card)"
+          nodeColor="var(--muted-foreground)"
+          nodeStrokeColor="var(--border)"
+          nodeStrokeWidth={2}
+          maskColor="color-mix(in oklch, var(--background) 60%, transparent)"
+          maskStrokeColor="var(--primary)"
+          maskStrokeWidth={1}
+        />
       </ReactFlow>
     </div>
   );

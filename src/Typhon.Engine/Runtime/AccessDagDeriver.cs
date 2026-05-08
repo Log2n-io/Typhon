@@ -22,14 +22,36 @@ namespace Typhon.Engine;
 /// </list>
 /// </para>
 /// <para>
-/// Edge derivation:
+/// Edge derivation (intra-phase):
 /// <list type="bullet">
 ///   <item>R×W fresh: writer → reader (reader sees this-tick value).</item>
 ///   <item>R×W snapshot: reader → writer (reader sees previous-tick value, parallelism enabled).</item>
 ///   <item>Event producer → consumer in same phase.</item>
-///   <item>Resource R×W: writer → reader if both fresh-style is implicit (reader after writer). Resource snapshot semantics not yet expressed.</item>
-///   <item>Cross-phase: every system in phase N depends on every system in phase N-1 (transitivity covers non-adjacent pairs).</item>
+///   <item>Resource R×W: writer → reader (resource snapshot semantics not yet expressed).</item>
 /// </list>
+/// </para>
+/// <para>
+/// Cross-phase edges (2026-05-07: switched from all-to-all to conflict-driven). Phases remain a
+/// logical ordering contract, but a phase-(N+1) system that has no read/write/event/resource
+/// conflict with a phase-N system can run concurrently with it. The deriver emits an edge
+/// <c>sys_a → sys_b</c> (where <c>phase(sys_a) &lt; phase(sys_b)</c>) iff:
+/// <list type="bullet">
+///   <item><c>sys_a.Writes&lt;T&gt;</c> intersects <c>sys_b</c>'s reads or writes of T (writer first).</item>
+///   <item><c>sys_a</c> reads T (any flavour) and <c>sys_b.Writes&lt;T&gt;</c> (reader first).</item>
+///   <item><c>sys_a.WritesEvents(Q)</c> intersects <c>sys_b.ReadsEvents(Q)</c> (producer→consumer).</item>
+///   <item>Any resource access pair with at least one writer (no Fresh/Snapshot for resources in v1).</item>
+///   <item>Explicit <c>.After()/.Before()</c> declarations spanning phases — preserved verbatim
+///       by the explicit-edge merge and never elided here.</item>
+/// </list>
+/// W×W across phases needs no AC-01 disambiguation: phase order is the disambiguator. The
+/// previous "all-to-all" cross-phase chain caused stragglers in phase N to gate the entire pool;
+/// see <c>claude/design/runtime/07-system-access-declarations.md</c> §"Amendment 2026-05-07".
+/// </para>
+/// <para>
+/// Semantic note: cross-phase <c>ReadsSnapshot&lt;T&gt;</c> in a later phase observes the
+/// earlier-phase writer's *this-tick* value (not previous-tick), because phase order forces
+/// writer-first. This differs from intra-phase <c>ReadsSnapshot</c> by design — see the same
+/// design doc for the rationale.
 /// </para>
 /// <para>
 /// Systems with <c>PhaseIndex == -1</c> (no phase declared) and no access declarations are ignored — they participate in the DAG only via explicit edges.
@@ -95,25 +117,127 @@ internal static class AccessDagDeriver
             DerivePhase(phaseIdx, phaseSystems, explicitAdjacency, derived);
         }
 
-        // ── Cross-phase edges: chain consecutive populated phases ──
-        // Empty phases between two populated ones don't break the chain — we link them directly. Transitivity handles further pairs.
-        var populatedPhaseIndices = new List<int>(byPhase.Keys);
-        populatedPhaseIndices.Sort();
-        for (var p = 0; p < populatedPhaseIndices.Count - 1; p++)
-        {
-            var fromList = byPhase[populatedPhaseIndices[p]];
-            var toList = byPhase[populatedPhaseIndices[p + 1]];
+        // ── Cross-phase: conflict-driven edges (replaces former all-to-all chain) ──
+        DeriveCrossPhase(byPhase, derived);
 
-            foreach (var fromSys in fromList)
+        return derived;
+    }
+
+    /// <summary>
+    /// Walks every (earlier-phase, later-phase) system pair and emits an edge iff the pair has a real read/write/event/resource conflict. Replaces the former
+    /// all-to-all bipartite chain between consecutive phases — see the class-level remarks for the motivation.
+    ///
+    /// We iterate ordered phase indices and, for each ordered pair (p_a, p_b) with a &lt; b, run the conflict matrix between every (sys_a ∈ p_a) × (sys_b ∈ p_b).
+    /// Quadratic in the system count of each pair of phases, but called once at <c>Build()</c>; cost is irrelevant against the runtime savings of not
+    /// serialising independent phases.
+    /// </summary>
+    private static void DeriveCrossPhase(Dictionary<int, List<SystemInfo>> byPhase, List<(string From, string To)> derived)
+    {
+        var phaseIndices = new List<int>(byPhase.Keys);
+        phaseIndices.Sort();
+
+        for (var i = 0; i < phaseIndices.Count - 1; i++)
+        {
+            var earlier = byPhase[phaseIndices[i]];
+            for (var j = i + 1; j < phaseIndices.Count; j++)
             {
-                foreach (var toSys in toList)
+                var later = byPhase[phaseIndices[j]];
+
+                foreach (var sysA in earlier)
                 {
-                    derived.Add((fromSys.Name, toSys.Name));
+                    foreach (var sysB in later)
+                    {
+                        if (sysA.Access == null || sysB.Access == null)
+                        {
+                            // No access declarations on at least one side — nothing to derive.
+                            // Phase ordering is the only intent the developer expressed; without a declared dependency we let the systems overlap. (Explicit
+                            // .After/.Before edges, if any, are merged separately by RuntimeSchedule.Build and survive verbatim.)
+                            continue;
+                        }
+
+                        if (HasCrossPhaseConflict(sysA.Access, sysB.Access))
+                        {
+                            derived.Add((sysA.Name, sysB.Name));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Returns true iff <paramref name="a"/> (in an earlier phase) and <paramref name="b"/> (in a later phase) have any access pair that requires serialisation.
+    /// The direction of the edge is always earlier-phase → later-phase regardless of which side carries the writer — phase order is the disambiguator
+    /// (see ED-05f in <c>claude/rules/runtime-scheduling.md</c>).
+    ///
+    /// Conflict triggers (any one is sufficient):
+    /// <list type="bullet">
+    ///   <item><b>ED-05a</b>: a.Writes ∩ (b.Writes ∪ b.Reads ∪ b.ReadsFresh ∪ b.ReadsSnapshot) ≠ ∅</item>
+    ///   <item><b>ED-05b</b>: (a.Reads ∪ a.ReadsFresh ∪ a.ReadsSnapshot) ∩ b.Writes ≠ ∅</item>
+    ///   <item><b>ED-05c</b>: a.WritesEvents ∩ b.ReadsEvents ≠ ∅</item>
+    ///   <item><b>ED-05d</b>: any resource access pair with at least one writer</item>
+    /// </list>
+    ///
+    /// Symmetry note: events are inherently directional (producer→consumer) so we do NOT also flag a.ReadsEvents ∩ b.WritesEvents — that would mean the later
+    /// phase produces something the earlier phase already drained, which is fine (the consumer in the earlier phase reads whatever the queue had at the start
+    /// of its run; the later producer writes for next tick).
+    /// </summary>
+    private static bool HasCrossPhaseConflict(SystemAccessDescriptor a, SystemAccessDescriptor b)
+    {
+        // ED-05a: a.Writes vs b.{Writes,Reads,ReadsFresh,ReadsSnapshot}
+        if (a.Writes.Count > 0)
+        {
+            foreach (var t in a.Writes)
+            {
+                if (b.Writes.Contains(t) || b.Reads.Contains(t) ||
+                    b.ReadsFresh.Contains(t) || b.ReadsSnapshot.Contains(t))
+                {
+                    return true;
                 }
             }
         }
 
-        return derived;
+        // ED-05b: a.{Reads,ReadsFresh,ReadsSnapshot} vs b.Writes
+        if (b.Writes.Count > 0)
+        {
+            foreach (var t in b.Writes)
+            {
+                if (a.Reads.Contains(t) || a.ReadsFresh.Contains(t) || a.ReadsSnapshot.Contains(t))
+                {
+                    return true;
+                }
+            }
+        }
+
+        // ED-05c: events — producer in earlier phase, consumer in later phase
+        if (a.WritesEvents.Count > 0 && b.ReadsEvents.Count > 0)
+        {
+            foreach (var q in a.WritesEvents)
+            {
+                if (b.ReadsEvents.Contains(q)) return true;
+            }
+        }
+
+        // ED-05d: resources — any pair with at least one writer
+        if (a.WritesResources.Count > 0)
+        {
+            foreach (var r in a.WritesResources)
+            {
+                if (b.WritesResources.Contains(r) || b.ReadsResources.Contains(r))
+                {
+                    return true;
+                }
+            }
+        }
+        if (b.WritesResources.Count > 0 && a.ReadsResources.Count > 0)
+        {
+            foreach (var r in b.WritesResources)
+            {
+                if (a.ReadsResources.Contains(r)) return true;
+            }
+        }
+
+        return false;
     }
 
     private static void DerivePhase(int phaseIdx, List<SystemInfo> phaseSystems, HashSet<(string, string)> explicitAdjacency, List<(string From, string To)> derived)

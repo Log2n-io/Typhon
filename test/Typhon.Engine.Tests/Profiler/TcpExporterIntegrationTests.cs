@@ -84,6 +84,7 @@ public class TcpExporterIntegrationTests
                 reader.ReadArchetypes();
                 reader.ReadComponentTypes();
                 reader.ReadPhases();
+                reader.ReadStaticStructures();
             }
 
             // ── Emit records on a dedicated fresh thread so the slot buffer starts clean. NUnit reuses the test thread across tests

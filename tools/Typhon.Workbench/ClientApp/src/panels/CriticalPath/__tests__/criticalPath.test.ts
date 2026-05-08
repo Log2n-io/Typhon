@@ -7,6 +7,7 @@ import {
   computeCriticalPathForTick,
   computeCriticalPathParticipation,
   dominantTickInRange,
+  focusTickForWindow,
 } from '../criticalPath';
 import type { DerivedEdge } from '../../SystemDag/edgeDerivation';
 
@@ -462,6 +463,85 @@ describe('dominantTickInRange', () => {
       tickSummary(3, 100),  // ← winner inside range
     ];
     expect(dominantTickInRange(ticks, { from: 3, to: 4 })).toBe(3);
+  });
+});
+
+describe('focusTickForWindow', () => {
+  /**
+   * Build a TickSummaryDto with explicit startUs/durationUs — needed for the midpoint-fallback
+   * tests since the existing `tickSummary` helper hardcodes startUs=0.
+   */
+  function ts(tickNumber: number, startUs: number, durationUs: number): TickSummaryDto {
+    return {
+      tickNumber, durationUs, startUs, metronomeWaitUs: 0,
+      eventCount: 0, maxSystemDurationUs: durationUs,
+      activeSystemsBitmask: '0', overloadLevel: 0, tickMultiplier: 0,
+      metronomeIntentClass: 0, consecutiveOverrun: 0, consecutiveUnderrun: 0,
+    } as unknown as TickSummaryDto;
+  }
+
+  it('returns null on empty inputs', () => {
+    expect(focusTickForWindow(null, { from: 1, to: 1 }, { start: 0, end: 100 })).toBeNull();
+    expect(focusTickForWindow([], { from: 1, to: 1 }, { start: 0, end: 100 })).toBeNull();
+  });
+
+  it('uses strict path when at least one startUs falls in window (delegates to dominantTickInRange)', () => {
+    const ticks = [
+      ts(1, 0,    100),
+      ts(2, 100,  200),  // longest in window
+      ts(3, 300,  150),
+    ];
+    // range covers all three; pick the longest.
+    expect(focusTickForWindow(ticks, { from: 1, to: 3 }, { start: 0, end: 450 })).toBe(2);
+  });
+
+  it('falls back to midpoint when window is entirely inside one tick', () => {
+    // Tick 5: [1000, 1500). Window [1100, 1300] entirely inside it. timeToTickRange would return
+    // null (no startUs in window), so the strict path is null and the midpoint fallback kicks in.
+    const ticks = [
+      ts(4, 500,  500),
+      ts(5, 1000, 500),  // body covers midpoint 1200
+      ts(6, 1500, 500),
+    ];
+    expect(focusTickForWindow(ticks, null, { start: 1100, end: 1300 })).toBe(5);
+  });
+
+  it('falls back to midpoint when window straddles a tick boundary on the slim side', () => {
+    // Window [1490, 1510] straddles tick 5 ↔ 6 boundary at 1500. Midpoint 1500. Tick 6 starts at
+    // 1500 → midpoint is in tick 6's body (start <= mid < start+dur).
+    const ticks = [
+      ts(5, 1000, 500),  // [1000, 1500)
+      ts(6, 1500, 500),  // [1500, 2000) — midpoint here
+    ];
+    expect(focusTickForWindow(ticks, null, { start: 1490, end: 1510 })).toBe(6);
+  });
+
+  it('returns null when the window is before the first tick', () => {
+    const ticks = [ts(1, 1000, 100)];
+    expect(focusTickForWindow(ticks, null, { start: 0, end: 500 })).toBeNull();
+  });
+
+  it('returns null when the window is after the last tick', () => {
+    const ticks = [ts(1, 0, 100)];
+    expect(focusTickForWindow(ticks, null, { start: 500, end: 1000 })).toBeNull();
+  });
+
+  it('returns null when time is missing AND range is empty', () => {
+    expect(focusTickForWindow([ts(1, 0, 100)], null, null)).toBeNull();
+  });
+
+  it('returns null on degenerate window (end <= start)', () => {
+    expect(focusTickForWindow([ts(1, 0, 100)], null, { start: 50, end: 50 })).toBeNull();
+    expect(focusTickForWindow([ts(1, 0, 100)], null, { start: 50, end: 10 })).toBeNull();
+  });
+
+  it('skips zero-duration ticks in the midpoint fallback', () => {
+    // A zero-duration tick should never be picked as the focus.
+    const ticks = [
+      ts(1, 0,    0),     // zero duration — body is empty
+      ts(2, 1000, 1000),  // [1000, 2000) covers midpoint
+    ];
+    expect(focusTickForWindow(ticks, null, { start: 1100, end: 1900 })).toBe(2);
   });
 });
 

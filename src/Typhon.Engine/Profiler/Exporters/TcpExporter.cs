@@ -543,6 +543,18 @@ public sealed class TcpExporter : ResourceNode, IProfilerExporter
             WriteShortString(bw, p ?? string.Empty);
         }
 
+        // v7 static-structure tables. The TCP init frame mirrors the source-file layout exactly so receivers can
+        // wrap the bytes in a TraceFileReader (which now requires v7+). For now the engine doesn't push schema
+        // over the live attach socket — the AttachSession's runtime reads what's here and reports an empty schema
+        // to the Workbench (per plan: AttachSession is out of scope for static-data parity, follow-up). We still
+        // emit the section count prefixes so the wire format is self-consistent.
+        bw.Write((ushort)0); // ComponentDefinitions count
+        bw.Write((ushort)0); // ArchetypeDefinitions count
+        bw.Write((ushort)0); // IndexCatalog count
+        bw.Write(false);     // RuntimeConfig presence flag
+        bw.Write((ushort)0); // EventQueueCatalog count
+        bw.Write(0);         // ResourceGraphSnapshot count (i32)
+
         bw.Flush();
         return ms.ToArray();
     }
