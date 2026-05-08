@@ -81,11 +81,18 @@ public struct TraceFileHeader
     ///     (#302 — profiler source attribution). Reader accepts v4 files transparently — their new offset fields
     ///     are absent in the on-disk header (51 bytes vs 71) and default to 0, which downstream readers interpret
     ///     as "no source-location manifest".
-    /// v6 (current): SystemDefinitionTable carries RFC 07 access declarations (Phase, Reads, ReadsFresh,
+    /// v6: SystemDefinitionTable carries RFC 07 access declarations (Phase, Reads, ReadsFresh,
     ///     ReadsSnapshot, AdditionalReads, Writes, SideWrites, ReadsEvents, WritesEvents, ReadsResources,
     ///     WritesResources, ExplicitAfter, ExplicitBefore, IsExclusivePhase). New PhasesTable section follows
-    ///     ComponentTypeTable, listing the RuntimeOptions.Phases names in order. Reader accepts v5 files
-    ///     transparently — RFC 07 fields default to empty arrays and PhasesTable is treated as absent.
+    ///     ComponentTypeTable, listing the RuntimeOptions.Phases names in order. Reader accepted v5 files
+    ///     transparently — RFC 07 fields default to empty arrays and PhasesTable was treated as absent.
+    /// v7 (current): rich static-structure tables follow PhasesTable so offline analysis (Workbench schema panels
+    ///     against trace sessions) has the same data a live engine offers — component definitions with full field
+    ///     layout, archetype definitions with parent/child + slot map + cluster info, index catalog, runtime config,
+    ///     event-queue catalog, and a resource-graph snapshot. v6 readers simply lacked the data; rather than
+    ///     synthesising empty defaults (which would silently render "no schema" for old traces), the reader now
+    ///     hard-rejects v6 — re-record against a v7-aware build. See the section writers in <see cref="TraceFileWriter"/>
+    ///     and the matching reader methods in <see cref="TraceFileReader"/>.
     /// </summary>
-    public const ushort CurrentVersion = 6;
+    public const ushort CurrentVersion = 7;
 }

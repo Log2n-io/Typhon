@@ -298,4 +298,39 @@ public sealed class SchemaControllerTests
         var resp = await _client.SendAsync(BuildGet(session.SessionId, "components/Does.Not.Exist/systems"));
         Assert.That(resp.StatusCode, Is.EqualTo(HttpStatusCode.NotFound));
     }
+
+    [Test]
+    public async Task SchemaEndpoints_OnSessionWithoutProvider_Return404_SchemaUnavailable()
+    {
+        // Sessions whose StaticSchemaProvider is null (live AttachSession is the canonical case — engine doesn't push
+        // schema over the live attach socket today) must surface as 404 with the "schema_unavailable" ProblemDetails
+        // title, not as a crash. Inject a fake session with null provider directly into the SessionManager so we
+        // exercise the controller without spinning up a real attach socket.
+        var manager = _factory.Services.GetRequiredService<SessionManager>();
+        var fakeId = Guid.NewGuid();
+        manager.Create(new FakeSchemaUnavailableSession(fakeId));
+
+        foreach (var route in new[] { "components", "archetypes", "components/Foo", "components/Foo/indexes", "components/Foo/systems" })
+        {
+            var req = new HttpRequestMessage(HttpMethod.Get, $"/api/sessions/{fakeId}/schema/{route}");
+            req.Headers.Add("X-Session-Token", fakeId.ToString());
+            var resp = await _client.SendAsync(req);
+            Assert.That(resp.StatusCode, Is.EqualTo(HttpStatusCode.NotFound), $"route={route}");
+
+            var body = await resp.Content.ReadAsStringAsync();
+            Assert.That(body, Does.Contain("schema_unavailable"), $"route={route} body={body}");
+        }
+    }
+
+    /// <summary>
+    /// Test fake — minimal ISession implementation with <c>StaticSchemaProvider = null</c>. Mirrors what an
+    /// AttachSession produces today (live engine doesn't push schema over the wire).
+    /// </summary>
+    private sealed record FakeSchemaUnavailableSession(Guid Id) : ISession
+    {
+        public SessionKind Kind => SessionKind.Attach;
+        public SessionState State => SessionState.Attached;
+        public string FilePath => string.Empty;
+        public Typhon.Workbench.Schema.IStaticSchemaProvider StaticSchemaProvider => null;
+    }
 }

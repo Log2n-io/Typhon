@@ -79,5 +79,6 @@ public sealed class SessionManagerTests
         public SessionKind Kind => SessionKind.Attach;
         public SessionState State => SessionState.Attached;
         public string FilePath => string.Empty;
+        public Typhon.Workbench.Schema.IStaticSchemaProvider StaticSchemaProvider => null;
     }
 }

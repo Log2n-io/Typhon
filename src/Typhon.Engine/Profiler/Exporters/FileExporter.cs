@@ -79,6 +79,16 @@ public sealed class FileExporter : ResourceNode, IProfilerExporter
         _writer.WriteArchetypes(metadata.Archetypes);
         _writer.WriteComponentTypes(metadata.ComponentTypes);
         _writer.WritePhases(metadata.Phases);
+
+        // v7 static-structure tables. Order MUST match the reader (see TraceFileReader.Read* methods) — wire-positional, not section-table.
+        // Empty inputs from hosts that don't introspect a live engine are valid: each writer emits a count prefix of 0 (or null
+        // presence flag for RuntimeConfig) and downstream readers return empty lists / null.
+        _writer.WriteComponentDefinitions(metadata.ComponentDefinitions);
+        _writer.WriteArchetypeDefinitions(metadata.ArchetypeDefinitions);
+        _writer.WriteIndexCatalog(metadata.IndexCatalog);
+        _writer.WriteRuntimeConfig(metadata.RuntimeConfig);
+        _writer.WriteEventQueueCatalog(metadata.EventQueues);
+        _writer.WriteResourceGraphSnapshot(metadata.ResourceGraphNodes);
     }
 
     /// <summary>

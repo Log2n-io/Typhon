@@ -1,3 +1,5 @@
+using Typhon.Workbench.Schema;
+
 namespace Typhon.Workbench.Sessions;
 
 /// <summary>
@@ -15,6 +17,15 @@ public sealed class AttachSession : ISession, IDisposable
 
     // ISession.FilePath — DTO compat. For attach sessions the endpoint fills the "where from" slot in the UI.
     public string FilePath => EndpointAddress;
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// Live attach doesn't currently push schema over the socket — TcpExporter's BuildInitPayload writes empty
+    /// placeholder sections (count=0 for each v7 table). Returning null here surfaces the right "schema unavailable
+    /// for this session type" empty state in the UI rather than rendering as "schema present but empty". Surfacing
+    /// real schema for attach sessions is a follow-up — engine needs to publish the static-data tables on the wire.
+    /// </remarks>
+    public IStaticSchemaProvider StaticSchemaProvider => null;
 
     public AttachSession(Guid id, string endpointAddress, AttachSessionRuntime runtime)
     {

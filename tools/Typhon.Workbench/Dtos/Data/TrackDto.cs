@@ -29,7 +29,9 @@ public record SystemTickRecordDto(
     uint EntitiesProcessed,
     byte WorkersTouched,
     ushort ChunksProcessed,
-    byte SkipReason);
+    byte SkipReason,
+    /// <summary>Σ chunk durations across all workers (cache v13+). Pair with <c>DurationUs</c> for parallelism efficiency.</summary>
+    uint TotalCpuUs);
 
 /// <summary>One row in a <c>queue/&lt;name&gt;</c> track. Captures per-tick depth telemetry for a single event queue.</summary>
 public record QueueTickRecordDto(

@@ -2,9 +2,18 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Mvc;
+using Scalar.AspNetCore;
 using Typhon.Workbench.Hosting;
 using Typhon.Workbench.Security;
 using Typhon.Workbench.Sessions;
+
+// Personal Access Token CLI — `--new-token`, `--revoke-token`, `--list-tokens`. Runs to completion
+// and exits before the web host starts, so the user can mint/revoke without a running Workbench.
+var tokenCliExitCode = TokenCli.TryHandle(args, Console.Out, Console.Error);
+if (tokenCliExitCode is { } code)
+{
+    return code;
+}
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -36,7 +45,13 @@ builder.Services
         o.JsonSerializerOptions.IncludeFields = true;
     });
 
-builder.Services.AddOpenApi();
+builder.Services.AddOpenApi(options =>
+{
+    // Document the three credential channels (Bearer PAT, X-Workbench-Token, X-Session-Token) so
+    // the Scalar API explorer can render an Authorize dialog and attach the right header.
+    options.AddDocumentTransformer<WorkbenchSecuritySchemeTransformer>();
+    options.AddOperationTransformer<WorkbenchSecurityRequirementTransformer>();
+});
 builder.Services.AddProblemDetails();
 builder.Services.AddExceptionHandler<WorkbenchExceptionHandler>();
 builder.Services.AddWorkbenchServices();
@@ -48,6 +63,25 @@ app.UseStatusCodePages();
 
 // OpenAPI document at /openapi.json — stable path agreed upon by Orval and the Vite proxy.
 app.MapOpenApi("/openapi.json");
+
+// Browser-based API explorer at /api-explorer (Scalar). Reads /openapi.json and lets the user
+// authenticate (Bearer PAT recommended) before firing requests — see WorkbenchSecuritySchemeTransformer
+// for the auth-channel docs the dialog renders. The page itself is unauthenticated; it's static
+// HTML/JS that performs the requests client-side, so the same trust boundary as the SPA applies.
+app.MapScalarApiReference("/api-explorer", o =>
+{
+    o.WithTitle("Typhon Workbench API")
+     .WithOpenApiRoutePattern("/openapi.json")
+     // Classic layout (Swagger-like) surfaces a global "Authorize" button at the top of the page.
+     // Modern layout buries auth inside each endpoint's "Test Request" panel which is harder to
+     // discover. For a debug/troubleshooting tool, "where do I paste the token?" beats aesthetics.
+     .WithClassicLayout()
+     .AddPreferredSecuritySchemes("Bearer")
+     // Persists the pasted PAT in localStorage so it survives page reloads.
+     .EnablePersistentAuthentication()
+     .WithDefaultHttpClient(ScalarTarget.Shell, ScalarClient.Curl);
+});
+
 app.MapControllers();
 app.MapWorkbenchEndpoints();
 
@@ -64,6 +98,8 @@ app.Logger.LogInformation("Workbench bootstrap token written to {Path}", gate.To
 LiveCacheTempFile.SweepOrphans(app.Logger);
 
 app.Run();
+
+return 0;
 
 /// <summary>
 /// Translates WorkbenchException into RFC 7807 ProblemDetails with the exception's status code and error code.

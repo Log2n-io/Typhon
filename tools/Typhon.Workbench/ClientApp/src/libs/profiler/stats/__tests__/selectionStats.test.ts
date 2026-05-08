@@ -189,12 +189,14 @@ describe('computeSelectionStats — chunk + system aggregation', () => {
     expect(stats!.topSystemsByTotal[0].systemIndex).toBe(2);
     expect(stats!.topSystemsByTotal[0].systemName).toBe('FillBuffer');
     // Wall-clock span: min(0,60)=0 → max(50,80)=80 → 80µs (not the sum 50+20=70).
-    expect(stats!.topSystemsByTotal[0].totalDurationUs).toBe(80);
+    expect(stats!.topSystemsByTotal[0].totalWallUs).toBe(80);
+    // CPU sum: 50 + 20 = 70µs.
+    expect(stats!.topSystemsByTotal[0].totalCpuUs).toBe(70);
     expect(stats!.topSystemsByTotal[0].count).toBe(2);
     expect(stats!.topSystemsByTotal[1].systemIndex).toBe(1);
   });
 
-  it('uses wall-clock span (not CPU-sum) for overlapping parallel chunks', () => {
+  it('uses wall-clock span (not CPU-sum) for the wall column on overlapping parallel chunks', () => {
     // 4 parallel chunks all executing concurrently 0..660µs on different threads.
     // CPU-sum = 4 × 660 = 2640µs; wall-clock span = 660µs.
     const ticks = [makeTick({
@@ -206,18 +208,22 @@ describe('computeSelectionStats — chunk + system aggregation', () => {
       ],
     })];
     const stats = computeSelectionStats(ticks, [], { startUs: 0, endUs: 1000 });
-    expect(stats!.topSystemsByTotal[0].totalDurationUs).toBe(660);
+    expect(stats!.topSystemsByTotal[0].totalWallUs).toBe(660);
+    // CPU column captures all four 660µs chunks → 2640µs. Ratio cpu/wall = 4 → effective parallel
+    // width of 4 workers, exactly what the data describes.
+    expect(stats!.topSystemsByTotal[0].totalCpuUs).toBe(2640);
     expect(stats!.topSystemsByTotal[0].count).toBe(4);
   });
 
-  it('accumulates wall-clock spans across multiple ticks', () => {
-    // Same system runs in two ticks, each contributing a 100µs wall-clock window.
+  it('accumulates wall-clock and cpu independently across ticks', () => {
+    // Single-threaded system across two ticks → wall == cpu (one chunk per tick, no parallelism).
     const ticks = [
       makeTick({ tickNumber: 1, startUs: 0,   endUs: 200,  durationUs: 200,  chunks: [chunk(1, 'Sys', 0,   100)] }),
       makeTick({ tickNumber: 2, startUs: 200,  endUs: 400,  durationUs: 200,  chunks: [chunk(1, 'Sys', 200, 300)] }),
     ];
     const stats = computeSelectionStats(ticks, [], { startUs: 0, endUs: 400 });
-    expect(stats!.topSystemsByTotal[0].totalDurationUs).toBe(200); // 100 + 100
+    expect(stats!.topSystemsByTotal[0].totalWallUs).toBe(200);
+    expect(stats!.topSystemsByTotal[0].totalCpuUs).toBe(200);
     expect(stats!.topSystemsByTotal[0].count).toBe(2);
   });
 });

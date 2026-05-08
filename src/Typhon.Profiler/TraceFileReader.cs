@@ -78,63 +78,57 @@ public sealed class TraceFileReader : IDisposable
     }
 
     /// <summary>
-    /// Oldest format version this reader still accepts. v4 traces have no source-location manifest
-    /// (their on-disk header is 20 bytes shorter); we synthesize zeroed offset fields and downstream
-    /// code interprets that as "no manifest". Bump this when removing back-compat for an older v.
+    /// Oldest format version this reader still accepts. Bumped to 7 alongside the rich static-structure
+    /// tables (component / archetype / index / runtime / event queue / resource graph) — those sections
+    /// carry data the Workbench schema panels rely on for trace sessions, and silently defaulting them to
+    /// empty would render "no schema" for old traces with no indication why. Hard-reject v6 and earlier;
+    /// re-record against a v7 build.
     /// </summary>
-    public const ushort MinSupportedVersion = 4;
+    public const ushort MinSupportedVersion = 7;
 
     /// <summary>Reads and validates the file header. Must be called first.</summary>
     /// <exception cref="InvalidDataException">If magic or version is wrong.</exception>
     public TraceFileHeader ReadHeader()
     {
-        // v4 layout ends at SamplingSessionStartQpc (51 bytes); v5+ appends FileTableOffset + SourceLocationManifestOffset + Reserved0/1 (+20 bytes).
-        // v4 files transparently use the shorter read; their absent fields default to 0 ("no manifest").
-        // v6 keeps the same struct shape as v5 — only data sections after the header changed (RFC 07 fields + Phases table).
-        const int V4HeaderSize = 51;
+        // v7+ always uses the full header layout. Older versions had shorter on-disk headers (v4 stopped at
+        // SamplingSessionStartQpc, 51 bytes; v5 added the trailer offsets); the partial-read code paths are
+        // gone now that MinSupportedVersion == 7.
         var fullSize = Unsafe.SizeOf<TraceFileHeader>();
-
         Span<byte> headerBytes = stackalloc byte[fullSize];
-        _stream.ReadExactly(headerBytes[..V4HeaderSize]);
-        var version = BinaryPrimitives.ReadUInt16LittleEndian(headerBytes[4..6]);
+        _stream.ReadExactly(headerBytes);
 
+        // Validate magic FIRST. A file with wrong magic but plausible-looking bytes at offset 4-6 (where the version
+        // lives) would otherwise emit a misleading "Unsupported version" error; the user's correct read is
+        // "this isn't a Typhon trace file at all". Reading the u32 magic and the u16 version directly from the
+        // span — no MemoryMarshal call needed before validation, so we avoid stamping a half-validated struct
+        // onto Header until both checks pass.
+        var magic = BinaryPrimitives.ReadUInt32LittleEndian(headerBytes[..4]);
+        if (magic != TraceFileHeader.MagicValue)
+        {
+            throw new InvalidDataException(
+                $"Invalid trace file magic: 0x{magic:X8} (expected 0x{TraceFileHeader.MagicValue:X8})");
+        }
+
+        var version = BinaryPrimitives.ReadUInt16LittleEndian(headerBytes[4..6]);
         if (version < MinSupportedVersion || version > TraceFileHeader.CurrentVersion)
         {
             throw new InvalidDataException(
                 $"Unsupported trace file version: {version}. This build reads versions "
-                + $"{MinSupportedVersion}..{TraceFileHeader.CurrentVersion}.");
-        }
-
-        if (version >= 5)
-        {
-            // v5+ has the full 71-byte header (FileTable + SourceLocationManifest offsets included).
-            _stream.ReadExactly(headerBytes[V4HeaderSize..fullSize]);
-        }
-        else
-        {
-            // v4 — clear the bytes we didn't read so the marshalled struct sees zeroed offset fields.
-            headerBytes[V4HeaderSize..fullSize].Clear();
+                + $"{MinSupportedVersion}..{TraceFileHeader.CurrentVersion}. Re-record against a current build.");
         }
 
         Header = MemoryMarshal.Read<TraceFileHeader>(headerBytes);
-
-        if (Header.Magic != TraceFileHeader.MagicValue)
-        {
-            throw new InvalidDataException(
-                $"Invalid trace file magic: 0x{Header.Magic:X8} (expected 0x{TraceFileHeader.MagicValue:X8})");
-        }
         return Header;
     }
 
     /// <summary>Reads the system definition table. Call after <see cref="ReadHeader"/>.</summary>
     /// <remarks>
-    /// Format v6+ appends RFC 07 access declarations per system. v5 traces lack the trailing fields;
-    /// the reader returns empty defaults for them.
+    /// v7+ — RFC 07 access declarations are always present (the v5/v6 partial-read paths were removed alongside
+    /// the version bump in <see cref="MinSupportedVersion"/>).
     /// </remarks>
     public IReadOnlyList<SystemDefinitionRecord> ReadSystemDefinitions()
     {
         _systems.Clear();
-        var hasAccessDecls = Header.Version >= 6;
         var count = _binaryReader.ReadUInt16();
 
         for (var i = 0; i < count; i++)
@@ -160,28 +154,21 @@ public sealed class TraceFileReader : IDisposable
                 successors[s] = _binaryReader.ReadUInt16();
             }
 
-            var phaseName = string.Empty;
-            var isExclusivePhase = false;
-            string[] reads = [], readsFresh = [], readsSnapshot = [], additionalReads = [], writes = [], sideWrites = [];
-            string[] writesEvents = [], readsEvents = [], writesResources = [], readsResources = [];
-            string[] explicitAfter = [], explicitBefore = [];
-            if (hasAccessDecls)
-            {
-                phaseName = ReadShortString();
-                isExclusivePhase = _binaryReader.ReadBoolean();
-                reads = ReadStringArray();
-                readsFresh = ReadStringArray();
-                readsSnapshot = ReadStringArray();
-                additionalReads = ReadStringArray();
-                writes = ReadStringArray();
-                sideWrites = ReadStringArray();
-                writesEvents = ReadStringArray();
-                readsEvents = ReadStringArray();
-                writesResources = ReadStringArray();
-                readsResources = ReadStringArray();
-                explicitAfter = ReadStringArray();
-                explicitBefore = ReadStringArray();
-            }
+            // RFC 07 access declarations — always present in v7+.
+            var phaseName = ReadShortString();
+            var isExclusivePhase = _binaryReader.ReadBoolean();
+            var reads = ReadStringArray();
+            var readsFresh = ReadStringArray();
+            var readsSnapshot = ReadStringArray();
+            var additionalReads = ReadStringArray();
+            var writes = ReadStringArray();
+            var sideWrites = ReadStringArray();
+            var writesEvents = ReadStringArray();
+            var readsEvents = ReadStringArray();
+            var writesResources = ReadStringArray();
+            var readsResources = ReadStringArray();
+            var explicitAfter = ReadStringArray();
+            var explicitBefore = ReadStringArray();
 
             _systems.Add(new SystemDefinitionRecord
             {
@@ -219,24 +206,272 @@ public sealed class TraceFileReader : IDisposable
     public IReadOnlyList<string> Phases => _phases;
     private readonly List<string> _phases = [];
 
-    /// <summary>
-    /// Reads the phases table (v6+). Call after <see cref="ReadComponentTypes"/>. For v5 traces this is a
-    /// no-op — the section does not exist and no bytes are consumed.
-    /// </summary>
+    /// <summary>Rich component-type definitions (v7+), available after <see cref="ReadComponentDefinitions"/>.</summary>
+    public IReadOnlyList<ComponentDefinitionRecord> ComponentDefinitions => _componentDefinitions;
+    private readonly List<ComponentDefinitionRecord> _componentDefinitions = [];
+
+    /// <summary>Rich archetype definitions (v7+), available after <see cref="ReadArchetypeDefinitions"/>.</summary>
+    public IReadOnlyList<ArchetypeDefinitionRecord> ArchetypeDefinitions => _archetypeDefinitions;
+    private readonly List<ArchetypeDefinitionRecord> _archetypeDefinitions = [];
+
+    /// <summary>Flat index catalog (v7+), available after <see cref="ReadIndexCatalog"/>.</summary>
+    public IReadOnlyList<IndexCatalogEntry> IndexCatalog => _indexCatalog;
+    private readonly List<IndexCatalogEntry> _indexCatalog = [];
+
+    /// <summary>Runtime config snapshot (v7+), available after <see cref="ReadRuntimeConfig"/>. Null when the on-disk presence flag was clear.</summary>
+    public RuntimeConfigRecord RuntimeConfig { get; private set; }
+
+    /// <summary>Event-queue catalog (v7+), available after <see cref="ReadEventQueueCatalog"/>.</summary>
+    public IReadOnlyList<EventQueueRecord> EventQueues => _eventQueues;
+    private readonly List<EventQueueRecord> _eventQueues = [];
+
+    /// <summary>Resource-graph snapshot (v7+), available after <see cref="ReadResourceGraphSnapshot"/>.</summary>
+    public IReadOnlyList<ResourceGraphNodeRecord> ResourceGraphNodes => _resourceGraphNodes;
+    private readonly List<ResourceGraphNodeRecord> _resourceGraphNodes = [];
+
+    /// <summary>Reads the phases table. Call after <see cref="ReadComponentTypes"/>. v7+ — always present.</summary>
     public IReadOnlyList<string> ReadPhases()
     {
         _phases.Clear();
-        if (Header.Version < 6)
-        {
-            return _phases;
-        }
-
         var count = _binaryReader.ReadUInt16();
         for (var i = 0; i < count; i++)
         {
             _phases.Add(ReadShortString());
         }
         return _phases;
+    }
+
+    /// <summary>Reads the rich component-definitions table (v7+). Call after <see cref="ReadPhases"/>.</summary>
+    public IReadOnlyList<ComponentDefinitionRecord> ReadComponentDefinitions()
+    {
+        _componentDefinitions.Clear();
+        var count = _binaryReader.ReadUInt16();
+        for (var i = 0; i < count; i++)
+        {
+            var componentTypeId = _binaryReader.ReadInt32();
+            var name = ReadShortString();
+            var revision = _binaryReader.ReadInt32();
+            var storageMode = _binaryReader.ReadByte();
+            var allowMultiple = _binaryReader.ReadBoolean();
+            var storageSize = _binaryReader.ReadInt32();
+            var storageOverhead = _binaryReader.ReadInt32();
+            var storageTotal = _binaryReader.ReadInt32();
+            var indicesCount = _binaryReader.ReadUInt16();
+            var multipleIndicesCount = _binaryReader.ReadUInt16();
+            var spatialField = ReadShortString();
+
+            var fieldCount = _binaryReader.ReadUInt16();
+            var fields = new FieldDefinitionRecord[fieldCount];
+            for (var f = 0; f < fieldCount; f++)
+            {
+                fields[f] = new FieldDefinitionRecord
+                {
+                    FieldId = _binaryReader.ReadInt32(),
+                    Name = ReadShortString(),
+                    FieldType = _binaryReader.ReadByte(),
+                    UnderlyingType = _binaryReader.ReadByte(),
+                    Offset = _binaryReader.ReadInt32(),
+                    Size = _binaryReader.ReadInt32(),
+                    ArrayLength = _binaryReader.ReadInt32(),
+                    Flags = _binaryReader.ReadByte(),
+                    SpatialFieldType = _binaryReader.ReadByte(),
+                    SpatialMode = _binaryReader.ReadByte(),
+                    SpatialCellSize = _binaryReader.ReadSingle(),
+                    SpatialMargin = _binaryReader.ReadSingle(),
+                    SpatialCategory = _binaryReader.ReadUInt32(),
+                    ForeignKeyTargetType = ReadShortString(),
+                };
+            }
+
+            _componentDefinitions.Add(new ComponentDefinitionRecord
+            {
+                ComponentTypeId = componentTypeId,
+                Name = name,
+                Revision = revision,
+                StorageMode = storageMode,
+                AllowMultiple = allowMultiple,
+                ComponentStorageSize = storageSize,
+                ComponentStorageOverhead = storageOverhead,
+                ComponentStorageTotalSize = storageTotal,
+                IndicesCount = indicesCount,
+                MultipleIndicesCount = multipleIndicesCount,
+                SpatialField = spatialField,
+                Fields = fields,
+            });
+        }
+        return _componentDefinitions;
+    }
+
+    /// <summary>Reads the rich archetype-definitions table (v7+). Call after <see cref="ReadComponentDefinitions"/>.</summary>
+    public IReadOnlyList<ArchetypeDefinitionRecord> ReadArchetypeDefinitions()
+    {
+        _archetypeDefinitions.Clear();
+        var count = _binaryReader.ReadUInt16();
+        for (var i = 0; i < count; i++)
+        {
+            var archetypeId = _binaryReader.ReadUInt16();
+            var name = ReadShortString();
+            var revision = _binaryReader.ReadInt32();
+            var parentId = _binaryReader.ReadUInt16();
+
+            var childCount = _binaryReader.ReadUInt16();
+            var children = new ushort[childCount];
+            for (var c = 0; c < childCount; c++) children[c] = _binaryReader.ReadUInt16();
+
+            var componentCount = _binaryReader.ReadByte();
+            var componentIdsLen = _binaryReader.ReadByte();
+            var componentTypeIds = new int[componentIdsLen];
+            for (var c = 0; c < componentIdsLen; c++) componentTypeIds[c] = _binaryReader.ReadInt32();
+
+            var versionedMask = _binaryReader.ReadUInt16();
+            var transientMask = _binaryReader.ReadUInt16();
+
+            var cascadeCount = _binaryReader.ReadUInt16();
+            var cascade = new ushort[cascadeCount];
+            for (var c = 0; c < cascadeCount; c++) cascade[c] = _binaryReader.ReadUInt16();
+
+            var flags = _binaryReader.ReadByte();
+            var hasCluster = _binaryReader.ReadBoolean();
+            ArchetypeClusterInfoRecord clusterInfo = null;
+            if (hasCluster)
+            {
+                clusterInfo = new ArchetypeClusterInfoRecord
+                {
+                    ClusterSize = _binaryReader.ReadUInt16(),
+                    ClusterStride = _binaryReader.ReadUInt32(),
+                    HeaderSize = _binaryReader.ReadUInt32(),
+                    EntityIdsOffset = _binaryReader.ReadUInt32(),
+                    IndexElementIdsBaseOffset = _binaryReader.ReadUInt32(),
+                    MultipleIndexedFieldCount = _binaryReader.ReadUInt16(),
+                };
+            }
+
+            _archetypeDefinitions.Add(new ArchetypeDefinitionRecord
+            {
+                ArchetypeId = archetypeId,
+                Name = name,
+                Revision = revision,
+                ParentArchetypeId = parentId,
+                ChildArchetypeIds = children,
+                ComponentCount = componentCount,
+                ComponentTypeIds = componentTypeIds,
+                VersionedSlotMask = versionedMask,
+                TransientSlotMask = transientMask,
+                CascadeTargets = cascade,
+                Flags = flags,
+                ClusterInfo = clusterInfo,
+            });
+        }
+        return _archetypeDefinitions;
+    }
+
+    /// <summary>Reads the flat index-catalog table (v7+). Call after <see cref="ReadArchetypeDefinitions"/>.</summary>
+    public IReadOnlyList<IndexCatalogEntry> ReadIndexCatalog()
+    {
+        _indexCatalog.Clear();
+        var count = _binaryReader.ReadUInt16();
+        for (var i = 0; i < count; i++)
+        {
+            _indexCatalog.Add(new IndexCatalogEntry
+            {
+                ComponentTypeId = _binaryReader.ReadInt32(),
+                FieldId = _binaryReader.ReadInt32(),
+                Variant = _binaryReader.ReadByte(),
+                AllowMultiple = _binaryReader.ReadBoolean(),
+                IsSpatial = _binaryReader.ReadBoolean(),
+                IsAuto = _binaryReader.ReadBoolean(),
+            });
+        }
+        return _indexCatalog;
+    }
+
+    /// <summary>
+    /// Reads the runtime-config record (v7+). Call after <see cref="ReadIndexCatalog"/>. Returns null when the on-disk
+    /// presence flag was clear (host had no engine-level config to capture, e.g., standalone profiling).
+    /// </summary>
+    public RuntimeConfigRecord ReadRuntimeConfig()
+    {
+        var present = _binaryReader.ReadBoolean();
+        if (!present)
+        {
+            RuntimeConfig = null;
+            return null;
+        }
+
+        var baseTickRate = _binaryReader.ReadInt32();
+        var workerCount = _binaryReader.ReadInt32();
+        var telemetryRingCapacity = _binaryReader.ReadInt32();
+        var parallelMin = _binaryReader.ReadInt32();
+        var defaultPhase = ReadShortString();
+
+        var phaseCount = _binaryReader.ReadUInt16();
+        var phases = new string[phaseCount];
+        for (var i = 0; i < phaseCount; i++) phases[i] = ReadShortString();
+
+        RuntimeConfig = new RuntimeConfigRecord
+        {
+            BaseTickRate = baseTickRate,
+            WorkerCount = workerCount,
+            TelemetryRingCapacity = telemetryRingCapacity,
+            ParallelQueryMinChunkSize = parallelMin,
+            DefaultPhase = defaultPhase,
+            Phases = phases,
+        };
+        return RuntimeConfig;
+    }
+
+    /// <summary>Reads the event-queue catalog (v7+). Call after <see cref="ReadRuntimeConfig"/>.</summary>
+    public IReadOnlyList<EventQueueRecord> ReadEventQueueCatalog()
+    {
+        _eventQueues.Clear();
+        var count = _binaryReader.ReadUInt16();
+        for (var i = 0; i < count; i++)
+        {
+            _eventQueues.Add(new EventQueueRecord
+            {
+                QueueIndex = _binaryReader.ReadUInt16(),
+                Name = ReadShortString(),
+                Capacity = _binaryReader.ReadInt32(),
+                EventTypeName = ReadShortString(),
+            });
+        }
+        return _eventQueues;
+    }
+
+    /// <summary>
+    /// Convenience helper that walks the six v7 static-structure tables in order. Equivalent to calling each
+    /// <c>Read...</c> in sequence; matches the writer's <c>WriteEmptyStaticStructures</c> shape so tests can
+    /// pair them. After the call, the data is available via <see cref="ComponentDefinitions"/> /
+    /// <see cref="ArchetypeDefinitions"/> / etc.
+    /// </summary>
+    public void ReadStaticStructures()
+    {
+        ReadComponentDefinitions();
+        ReadArchetypeDefinitions();
+        ReadIndexCatalog();
+        ReadRuntimeConfig();
+        ReadEventQueueCatalog();
+        ReadResourceGraphSnapshot();
+    }
+
+    /// <summary>Reads the resource-graph snapshot (v7+). Call after <see cref="ReadEventQueueCatalog"/>.</summary>
+    public IReadOnlyList<ResourceGraphNodeRecord> ReadResourceGraphSnapshot()
+    {
+        _resourceGraphNodes.Clear();
+        var count = _binaryReader.ReadInt32();
+        for (var i = 0; i < count; i++)
+        {
+            _resourceGraphNodes.Add(new ResourceGraphNodeRecord
+            {
+                Id = _binaryReader.ReadInt64(),
+                Name = ReadShortString(),
+                Type = _binaryReader.ReadByte(),
+                ParentId = _binaryReader.ReadInt64(),
+                CreatedAtUtcTicks = _binaryReader.ReadInt64(),
+                ExhaustionPolicy = _binaryReader.ReadByte(),
+            });
+        }
+        return _resourceGraphNodes;
     }
 
     /// <summary>Reads the archetype table. Call after <see cref="ReadSystemDefinitions"/>.</summary>

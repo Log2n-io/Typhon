@@ -695,6 +695,10 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
         reader.ReadArchetypes();
         reader.ReadComponentTypes();
         reader.ReadPhases();
+        // v7 static-structure tables. Live attach currently sends empty placeholder sections (TcpExporter's
+        // BuildInitPayload writes count = 0 / present = false for all six). AttachSession schema parity is
+        // out of scope for the v7 rollout — the reader walks past them to keep any future block-reads aligned.
+        reader.ReadStaticStructures();
 
         var headerDto = ProjectHeader(reader);
         var systems = ProjectSystems(reader);

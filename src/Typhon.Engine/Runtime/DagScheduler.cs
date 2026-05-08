@@ -2,6 +2,7 @@ using JetBrains.Annotations;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Threading;
@@ -432,6 +433,12 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
 
     /// <summary>Number of event queues registered.</summary>
     internal int EventQueueCount => _eventQueues.Length;
+
+    /// <summary>
+    /// All registered event queues. Read-only view exposed for static-data introspection (the profiler builds the v7 <see cref="Typhon.Profiler.EventQueueRecord"/>
+    /// catalog from this) — not for hot-path use; system code should go through the pre-allocated <see cref="TickContext.ConsumedQueues"/> array instead.
+    /// </summary>
+    public IReadOnlyList<EventQueueBase> EventQueues => _eventQueues;
 
     /// <summary>Current overload response level.</summary>
     public OverloadLevel CurrentOverloadLevel => _overloadDetector.CurrentLevel;

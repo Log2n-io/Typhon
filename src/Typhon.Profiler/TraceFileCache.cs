@@ -199,6 +199,54 @@ public enum CacheSectionId : ushort
     /// QueueId is the index assigned at engine startup; readers map <see cref="QueueTickSummary.QueueId"/> → display name through this section.
     /// </summary>
     QueueNameTable = 11,
+
+    /// <summary>
+    /// Rich component-type definitions (v14): one record per registered component type, carrying full schema (fields with name +
+    /// <c>FieldType</c> + offset + size + index flags + spatial flag), storage mode (Versioned/SingleVersion/Transient), revision,
+    /// and per-component aggregates (storage size, indices count, multiple-indices count). Forwarded verbatim from the source
+    /// <c>.typhon-trace</c>'s <c>ComponentDefinitionsTable</c> (v7+). Drives the Workbench <c>SchemaBrowser</c> and per-component
+    /// detail panels for trace sessions — the existing thin <see cref="CacheSectionId.SourceMetadata"/>'s ComponentTypeTable carries
+    /// only id→name pairs and isn't enough.
+    /// </summary>
+    ComponentDefinitions = 12,
+
+    /// <summary>
+    /// Rich archetype definitions (v14): one record per archetype with parent/child links, slot-ordered ComponentTypeIds,
+    /// versioned/transient slot bitmasks, cascade-delete targets, cluster eligibility flags, and (when cluster-eligible) inline
+    /// <c>ArchetypeClusterInfo</c> describing on-disk SoA layout. Drives the Workbench <c>ArchetypeBrowser</c> + relationship view.
+    /// </summary>
+    ArchetypeDefinitions = 13,
+
+    /// <summary>
+    /// Index catalog (v14): flat list keyed by (ComponentTypeId, FieldId) of every B+Tree index defined on the schema. Each entry
+    /// carries the variant byte (Single/Multiple × value-type), a key-type byte, and the spatial / allow-multiple flags. Drives the
+    /// <c>SchemaIndexes</c> panel; redundant with the per-field flags in <see cref="ComponentDefinitions"/> but flat-listed here for
+    /// O(1) lookup independent of component selection.
+    /// </summary>
+    IndexCatalog = 14,
+
+    /// <summary>
+    /// Engine runtime configuration snapshot at trace start (v14): BaseTickRate, WorkerCount, TelemetryRingCapacity,
+    /// ParallelQueryMinChunkSize, DefaultPhase name, and the ordered phase-name list from <c>RuntimeOptions</c>. Single record (no
+    /// count prefix). Phase names duplicate the trace's <see cref="CacheSectionId.PostTickSummaries"/> phase axis but include the
+    /// definition order — reader exposes both axes side-by-side in the runtime-config panel.
+    /// </summary>
+    RuntimeConfig = 15,
+
+    /// <summary>
+    /// Event-queue catalog (v14): for each registered queue, QueueIndex (matches <see cref="QueueTickSummary.QueueId"/>), display
+    /// name (mirrors <see cref="QueueNameTable"/>), capacity (power-of-2), and event type's CLR name. Adds the static schema
+    /// (capacity / event-type) on top of the existing name table so the queue panel can show capacity utilisation in % terms
+    /// against per-tick depth from <see cref="QueueTickSummaries"/>.
+    /// </summary>
+    EventQueueCatalog = 16,
+
+    /// <summary>
+    /// Resource graph snapshot (v14): pre-order tree walk of the <c>ResourceGraph</c> at trace start — node id, name, type byte,
+    /// parent id (-1 for root), creation timestamp, and exhaustion-policy byte. Static (resource topology doesn't change at runtime
+    /// in any way the trace cares about). Drives the resource-tree panel for trace sessions.
+    /// </summary>
+    ResourceGraphSnapshot = 17,
 }
 
 /// <summary>
@@ -475,7 +523,18 @@ public static class TraceFileCacheConstants
     ///      <see cref="CacheSectionId.SystemTickSummaries"/> are the authoritative answer to "which systems ran in tick T", with no
     ///      u64 cap. The field is retained on disk for v11 reader back-compat but consumers should migrate. v11 caches must rebuild.
     /// </summary>
-    public const ushort CurrentChunkerVersion = 12;
+    /// <remarks>
+    /// v13: <see cref="SystemTickSummary"/> grew a <c>TotalCpuUs</c> field — total CPU time consumed across all workers (sum of chunk durations),
+    /// distinct from <c>DurationUs</c> (wall-clock). Enables correct parallelism-inefficiency math in the workbench (A1/A2 in `09-system-dag.md`)
+    /// without requiring per-chunk decode. v12 caches must rebuild.
+    /// v14 (current): six new sections forwarded from the source's v7 static-structure tables —
+    /// <see cref="CacheSectionId.ComponentDefinitions"/>, <see cref="CacheSectionId.ArchetypeDefinitions"/>,
+    /// <see cref="CacheSectionId.IndexCatalog"/>, <see cref="CacheSectionId.RuntimeConfig"/>,
+    /// <see cref="CacheSectionId.EventQueueCatalog"/>, <see cref="CacheSectionId.ResourceGraphSnapshot"/>. Drives the Workbench schema
+    /// panels for trace sessions (SchemaBrowser, ArchetypeBrowser, SchemaIndexes, et al.). v13 caches must rebuild — and since the source
+    /// also bumped to v7, the source itself must be re-recorded; v6 source files are hard-rejected by the reader.
+    /// </remarks>
+    public const ushort CurrentChunkerVersion = 14;
 
     /// <summary>Sidecar file extension, appended to the source path (e.g., <c>foo.typhon-trace</c> → <c>foo.typhon-trace-cache</c>).</summary>
     public const string CacheFileExtension = "-cache";

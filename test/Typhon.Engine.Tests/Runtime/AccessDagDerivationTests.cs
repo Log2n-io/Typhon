@@ -147,11 +147,19 @@ public class AccessDagDerivationTests
         Assert.That(readerDef.Successors, Does.Contain(writerDef.Index));
     }
 
-    // ── Cross-phase edges ─────────────────────────────────────────────
+    // ── Cross-phase edges (conflict-driven, post 2026-05-07 amendment) ──
+    //
+    // The deriver no longer chains every system in P_a to every system in P_b. Edges across
+    // phases are emitted ONLY when a real read/write/event/resource conflict exists between
+    // the pair. Independent systems in adjacent phases are allowed to overlap on the worker
+    // pool — see `claude/design/runtime/07-system-access-declarations.md` §"Amendment 2026-05-07".
 
     [Test]
-    public void CrossPhase_AdjacentPhases_DerivesEdges()
+    public void CrossPhase_NoConflict_NoEdgeDerived()
     {
+        // Two systems in adjacent phases with no declared access overlap → no derived edge.
+        // This is the "phase boundaries are not barriers" property: independent systems may run
+        // concurrently across the phase line.
         using var scheduler = RuntimeSchedule.Create(Options())
             .Add(new Sys { ConfigureAction = b => b.Name("InputSys").Phase(Phase.Input) })
             .Add(new Sys { ConfigureAction = b => b.Name("SimSys").Phase(Phase.Simulation) })
@@ -159,14 +167,16 @@ public class AccessDagDerivationTests
 
         var inputDef = scheduler.Systems.First(s => s.Name == "InputSys");
         var simDef = scheduler.Systems.First(s => s.Name == "SimSys");
-        Assert.That(inputDef.Successors, Does.Contain(simDef.Index));
+        Assert.That(inputDef.Successors, Does.Not.Contain(simDef.Index));
+        Assert.That(simDef.PredecessorCount, Is.EqualTo(0));
     }
 
     [Test]
-    public void CrossPhase_NonAdjacent_OrderedByTransitivity()
+    public void CrossPhase_NoConflictChain_AllPredecessorCountsZero()
     {
-        // Input → Simulation → Output → Cleanup. Input and Cleanup are not adjacent.
-        // We assert Input is reachable from Cleanup's predecessor count > 0 indirectly via topological order.
+        // 4-phase chain (Input → Simulation → Output → Cleanup), no declared access on any
+        // system. Result: zero derived edges. Phase order survives only as a logical contract;
+        // the runtime DAG would dispatch all four to free workers concurrently.
         using var scheduler = RuntimeSchedule.Create(Options())
             .Add(new Sys { ConfigureAction = b => b.Name("In").Phase(Phase.Input) })
             .Add(new Sys { ConfigureAction = b => b.Name("Sim").Phase(Phase.Simulation) })
@@ -174,17 +184,124 @@ public class AccessDagDerivationTests
             .Add(new Sys { ConfigureAction = b => b.Name("Clean").Phase(Phase.Cleanup) })
             .Build(_registry.Runtime);
 
-        var inIdx = scheduler.Systems.First(s => s.Name == "In").Index;
-        var cleanIdx = scheduler.Systems.First(s => s.Name == "Clean").Index;
-        // Topological order: In must appear before Clean
-        var topOrder = new System.Collections.Generic.List<int>();
-        for (var i = 0; i < scheduler.Systems.Length; i++)
+        foreach (var sys in scheduler.Systems)
         {
-            topOrder.Add(scheduler.Systems[i].Index);
+            Assert.That(sys.PredecessorCount, Is.EqualTo(0),
+                $"System '{sys.Name}' has unexpected predecessor count {sys.PredecessorCount} — no declared conflicts should produce no derived edges.");
         }
-        // Use the topo info on each definition; simplest check: cleanup has nonzero predecessor count
-        var cleanDef = scheduler.Systems.First(s => s.Name == "Clean");
-        Assert.That(cleanDef.PredecessorCount, Is.GreaterThan(0));
+    }
+
+    [Test]
+    public void CrossPhase_WriteToWriteAcrossPhases_DerivesEarlierToLaterEdge()
+    {
+        // Same component written in two different phases. Phase order disambiguates (no AC-01
+        // error, unlike same-phase W×W); the deriver emits a single earlier→later edge so the
+        // later writer's commit is sequenced after the earlier one's.
+        using var scheduler = RuntimeSchedule.Create(Options())
+            .Add(new Sys { ConfigureAction = b => b.Name("Early").Phase(Phase.Simulation).Writes<CompA>() })
+            .Add(new Sys { ConfigureAction = b => b.Name("Late").Phase(Phase.Output).Writes<CompA>() })
+            .Build(_registry.Runtime);
+
+        var early = scheduler.Systems.First(s => s.Name == "Early");
+        var late = scheduler.Systems.First(s => s.Name == "Late");
+        Assert.That(early.Successors, Does.Contain(late.Index));
+    }
+
+    [Test]
+    public void CrossPhase_WriterToReader_DerivesEdge()
+    {
+        // ED-05a: writer in earlier phase, reader (any flavour) in later phase → edge.
+        using var scheduler = RuntimeSchedule.Create(Options())
+            .Add(new Sys { ConfigureAction = b => b.Name("Writer").Phase(Phase.Simulation).Writes<CompA>() })
+            .Add(new Sys { ConfigureAction = b => b.Name("ReaderFresh").Phase(Phase.Output).ReadsFresh<CompA>() })
+            .Build(_registry.Runtime);
+
+        var writer = scheduler.Systems.First(s => s.Name == "Writer");
+        var reader = scheduler.Systems.First(s => s.Name == "ReaderFresh");
+        Assert.That(writer.Successors, Does.Contain(reader.Index));
+    }
+
+    [Test]
+    public void CrossPhase_ReaderInEarlierPhaseToWriterInLaterPhase_DerivesEdge()
+    {
+        // ED-05b: reader in earlier phase must complete before later-phase writer touches T.
+        // Direction earlier→later regardless of role (phase order is the disambiguator).
+        using var scheduler = RuntimeSchedule.Create(Options())
+            .Add(new Sys { ConfigureAction = b => b.Name("EarlyReader").Phase(Phase.Input).ReadsSnapshot<CompA>() })
+            .Add(new Sys { ConfigureAction = b => b.Name("LateWriter").Phase(Phase.Simulation).Writes<CompA>() })
+            .Build(_registry.Runtime);
+
+        var reader = scheduler.Systems.First(s => s.Name == "EarlyReader");
+        var writer = scheduler.Systems.First(s => s.Name == "LateWriter");
+        Assert.That(reader.Successors, Does.Contain(writer.Index));
+    }
+
+    [Test]
+    public void CrossPhase_EventProducerConsumer_DerivesEdge()
+    {
+        // ED-05c: producer in earlier phase, consumer in later phase. Without an explicit edge
+        // the consumer could drain concurrently with the producer's writes; the deriver inserts
+        // the producer→consumer ordering automatically.
+        var schedule = RuntimeSchedule.Create(Options());
+        var queue = schedule.CreateEventQueue<int>("EmitQ", 16);
+
+        using var scheduler = schedule
+            .Add(new Sys { ConfigureAction = b => b.Name("Producer").Phase(Phase.Simulation).WritesEvents(queue) })
+            .Add(new Sys { ConfigureAction = b => b.Name("Consumer").Phase(Phase.Output).ReadsEvents(queue) })
+            .Build(_registry.Runtime);
+
+        var producer = scheduler.Systems.First(s => s.Name == "Producer");
+        var consumer = scheduler.Systems.First(s => s.Name == "Consumer");
+        Assert.That(producer.Successors, Does.Contain(consumer.Index));
+    }
+
+    [Test]
+    public void CrossPhase_ResourceWriteRead_DerivesEdge()
+    {
+        // ED-05d: any cross-phase resource access pair with at least one writer.
+        using var scheduler = RuntimeSchedule.Create(Options())
+            .Add(new Sys { ConfigureAction = b => b.Name("Writer").Phase(Phase.Input).WritesResource("Physics") })
+            .Add(new Sys { ConfigureAction = b => b.Name("Reader").Phase(Phase.Simulation).ReadsResource("Physics") })
+            .Build(_registry.Runtime);
+
+        var writer = scheduler.Systems.First(s => s.Name == "Writer");
+        var reader = scheduler.Systems.First(s => s.Name == "Reader");
+        Assert.That(writer.Successors, Does.Contain(reader.Index));
+    }
+
+    [Test]
+    public void CrossPhase_DisjointAccess_NoEdgeEvenWithDeclarations()
+    {
+        // The AntHill-shape regression test: MoveAll (writes WorldBounds, Velocity in Movement)
+        // and a hypothetical SoundSystem (writes AudioState in Lifecycle) declare disjoint
+        // component sets. Phase order says SoundSystem comes after MoveAll, but with
+        // conflict-driven cross-phase derivation there's no edge — the runtime can dispatch
+        // SoundSystem on a free worker while MoveAll is still running.
+        using var scheduler = RuntimeSchedule.Create(Options())
+            .Add(new Sys { ConfigureAction = b => b.Name("MoveLike").Phase(Phase.Simulation).Writes<CompA>().Writes<CompB>() })
+            .Add(new Sys { ConfigureAction = b => b.Name("SoundLike").Phase(Phase.Output).Writes<CompC>() })
+            .Build(_registry.Runtime);
+
+        var move = scheduler.Systems.First(s => s.Name == "MoveLike");
+        var sound = scheduler.Systems.First(s => s.Name == "SoundLike");
+        Assert.That(move.Successors, Does.Not.Contain(sound.Index),
+            "MoveLike and SoundLike share no components — they must not be ordered across phases.");
+        Assert.That(sound.PredecessorCount, Is.EqualTo(0));
+    }
+
+    [Test]
+    public void CrossPhase_ExplicitAfterAcrossPhases_PreservedVerbatim()
+    {
+        // ED-05e: explicit `.After("X")` spanning phases must not be elided. Even with no
+        // declared access conflict, the explicit edge survives the conflict-driven pass.
+        using var scheduler = RuntimeSchedule.Create(Options())
+            .Add(new Sys { ConfigureAction = b => b.Name("Up").Phase(Phase.Input) })
+            .Add(new Sys { ConfigureAction = b => b.Name("Down").Phase(Phase.Simulation).After("Up") })
+            .Build(_registry.Runtime);
+
+        var up = scheduler.Systems.First(s => s.Name == "Up");
+        var down = scheduler.Systems.First(s => s.Name == "Down");
+        Assert.That(up.Successors, Does.Contain(down.Index));
     }
 
     // ── Event queue derivation ────────────────────────────────────────

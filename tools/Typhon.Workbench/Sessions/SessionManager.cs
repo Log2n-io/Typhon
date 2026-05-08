@@ -66,6 +66,14 @@ public sealed partial class SessionManager
 
     public int Count => _sessions.Count;
 
+    /// <summary>
+    /// Snapshot of every active session — used by <c>GET /api/sessions</c> for debug tooling so a
+    /// human poking around the API explorer can find which session GUIDs are currently live and
+    /// reuse them in session-scoped routes. Returns a stable point-in-time snapshot; concurrent
+    /// create/remove against the underlying dictionary won't tear the result.
+    /// </summary>
+    public IReadOnlyList<WbSession> Snapshot() => _sessions.Values.ToArray();
+
     [LoggerMessage(Level = LogLevel.Information, Message = "Session {SessionId} created (kind: {Kind})")]
     private partial void LogSessionCreated(Guid sessionId, SessionKind kind);
 

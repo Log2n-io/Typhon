@@ -43,13 +43,16 @@ public sealed class SchemaController : ControllerBase
         {
             return Ok(action());
         }
-        catch (SessionKindException ex)
+        catch (SchemaUnavailableException ex)
         {
-            return Conflict(new ProblemDetails
+            // Distinct ProblemDetails title so the client can render a dedicated "schema unavailable for this session
+            // type" empty state instead of a generic 404 toast. Status is 404 (the resource doesn't exist for THIS
+            // session); the title disambiguates from "component not found" cases below.
+            return NotFound(new ProblemDetails
             {
-                Title = "session_kind_mismatch",
+                Title = "schema_unavailable",
                 Detail = ex.Message,
-                Status = StatusCodes.Status409Conflict,
+                Status = StatusCodes.Status404NotFound,
             });
         }
         catch (SessionNotFoundException)

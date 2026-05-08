@@ -56,7 +56,11 @@ public struct SystemTickSummary
     /// </summary>
     public double ReadyUs;
 
-    /// <summary>Wall-clock execution duration in µs (<c>EndUs - StartUs</c>). Zero if skipped.</summary>
+    /// <summary>
+    /// Wall-clock execution duration in µs (<c>EndUs - StartUs</c>). Zero if skipped. This is the elapsed real-time of the system span,
+    /// independent of how many workers ran chunks in parallel. For latency / critical-path analysis. Pair with <see cref="TotalCpuUs"/>
+    /// to compute parallelization efficiency: <c>TotalCpuUs / (DurationUs * WorkersTouched)</c>.
+    /// </summary>
     public float DurationUs;
 
     /// <summary>Number of entities processed (sum across chunks). Zero for callbacks / skipped systems.</summary>
@@ -68,8 +72,16 @@ public struct SystemTickSummary
     /// <summary>Number of chunks completed (1 for callbacks; >=1 for parallel queries / pipelines).</summary>
     public ushort ChunksProcessed;
 
-    /// <summary>Padding to round the record up to a multiple of 8 bytes on disk.</summary>
+    /// <summary>Padding to keep <see cref="TotalCpuUs"/> on a 4-byte boundary. Zero on disk.</summary>
     public byte _reserved;
+
+    /// <summary>
+    /// Total CPU time in µs consumed by this system across ALL workers — sum of every <c>SchedulerChunk</c> span's duration. Distinct from
+    /// <see cref="DurationUs"/>: a parallel system using 16 workers for 690 µs of wall-clock has <c>DurationUs = 690</c> but
+    /// <c>TotalCpuUs ≈ 16 * chunk_avg ≈ 5,700</c>. Drives parallelism-inefficiency / utilization calculations (workbench A1/A2). Zero if skipped.
+    /// Chunker v13+ field; v12 caches default to zero on read (auto-rebuild expected).
+    /// </summary>
+    public uint TotalCpuUs;
 }
 
 /// <summary>

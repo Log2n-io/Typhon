@@ -12,6 +12,7 @@ import {
 } from '../CriticalPath/criticalPath';
 import { toNodeData } from './dagModel';
 import { deriveEdges } from './edgeDerivation';
+import { computeGatingAnalysis } from './gatingAnalysis';
 import SystemDagCanvas from './SystemDagCanvas';
 import SystemDagSidePanel from './SystemDagSidePanel';
 import SystemDagToolbar from './SystemDagToolbar';
@@ -152,6 +153,21 @@ export default function SystemDagPanel(_props: IDockviewPanelProps) {
     return out;
   }, [topology, metadata, range, derivedEdges]);
 
+  // Gating-predecessor analysis — for each system, identifies which predecessor's completion
+  // determined when the system could start, plus the wait gap and edge metadata. Drives the
+  // side panel's "Gated by" section, the canvas's gating-edge highlight, and the per-node
+  // "blocked" icon. See `gatingAnalysis.ts` for the math (it's exact, not an estimate — the
+  // engine's `ReadyUs` equals `max(predecessor.EndUs)` by construction).
+  const gatingAnalysis = useMemo(() => {
+    if (!topology?.systems || !metadata?.systemTickSummaries) return null;
+    return computeGatingAnalysis({
+      systems: topology.systems,
+      rows: metadata.systemTickSummaries,
+      edges: derivedEdges,
+      range,
+    });
+  }, [topology, metadata, derivedEdges, range]);
+
   const skipRates = useMemo(() => {
     if (!topology?.systems || !metadata?.systemTickSummaries || metadata.systemTickSummaries.length === 0) {
       return null;
@@ -164,6 +180,15 @@ export default function SystemDagPanel(_props: IDockviewPanelProps) {
   }, [topology, metadata, range]);
 
   const tickSummaries = metadata?.tickSummaries ?? null;
+  // Worker count drives the toolbar's parallelism-inefficiency pill (A1 / A6). Header field is
+  // `number | string` per the OpenAPI shape; coerce defensively at the boundary so the toolbar
+  // can hide the pill for missing / < 2 worker traces without a parse step there.
+  const workerCount = useMemo(() => {
+    const raw = metadata?.header?.workerCount;
+    if (raw == null) return null;
+    const n = typeof raw === 'number' ? raw : Number(raw);
+    return Number.isFinite(n) && n >= 1 ? n : null;
+  }, [metadata]);
 
   if (!sessionId) {
     return <EmptyState message="No session attached. Open a trace or attach to a live engine to see the DAG." />;
@@ -177,7 +202,12 @@ export default function SystemDagPanel(_props: IDockviewPanelProps) {
 
   return (
     <div className="flex h-full w-full flex-col overflow-hidden bg-background">
-      <SystemDagToolbar tickSummaries={tickSummaries} autoSnapshotEnabled />
+      <SystemDagToolbar
+        tickSummaries={tickSummaries}
+        autoSnapshotEnabled
+        systemTickSummaries={metadata?.systemTickSummaries ?? null}
+        workerCount={workerCount}
+      />
       <div className="flex flex-1 overflow-hidden">
         <div className="flex-1 min-w-0">
           <SystemDagCanvas
@@ -188,6 +218,7 @@ export default function SystemDagPanel(_props: IDockviewPanelProps) {
             cpParticipation={cpParticipation}
             dominantCpSystems={dominantCpSystems}
             skipRates={skipRates}
+            gatingAnalysis={gatingAnalysis}
             onSelectSystem={(name) => {
               setSystem(name);
               setSidePanelOverride(null);
@@ -201,6 +232,7 @@ export default function SystemDagPanel(_props: IDockviewPanelProps) {
             range={range}
             cpStat={cpParticipation?.perSystem.get(selectedNode.systemName) ?? null}
             cpTotalTicks={cpParticipation?.totalTicks ?? null}
+            gatingInfo={gatingAnalysis?.get(selectedNode.systemName) ?? null}
             onClose={() => setSidePanelOverride(selectedSystemName)}
           />
         )}

@@ -20,6 +20,11 @@ public abstract class EventQueueBase
     /// <summary>Number of items currently in the queue.</summary>
     public abstract int Count { get; }
 
+    /// <summary>Maximum items per tick before <c>Push</c> overflows. Power of 2. Static schema fact — surfaced
+    /// to the trace's <see cref="Typhon.Profiler.EventQueueRecord.Capacity"/> for offline analysis (utilisation %
+    /// against per-tick depth).</summary>
+    public abstract int Capacity { get; }
+
     /// <summary>True if the queue has no items.</summary>
     public abstract bool IsEmpty { get; }
 
@@ -93,6 +98,9 @@ public sealed class EventQueue<T> : EventQueueBase
 
     /// <inheritdoc />
     public override int Count => _count;
+
+    /// <inheritdoc />
+    public override int Capacity => _capacity;
 
     /// <inheritdoc />
     public override bool IsEmpty => _count == 0;

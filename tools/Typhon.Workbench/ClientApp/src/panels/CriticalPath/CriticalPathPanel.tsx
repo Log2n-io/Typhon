@@ -6,7 +6,7 @@ import { useSelectionStore } from '@/stores/useSelectionStore';
 import { useSessionStore } from '@/stores/useSessionStore';
 import { deriveEdges } from '../SystemDag/edgeDerivation';
 import { timeToTickRange } from '../SystemDag/tickRangeMapping';
-import { computeAggregateCriticalPath, computeCriticalPathForTick, dominantTickInRange } from './criticalPath';
+import { computeAggregateCriticalPath, computeCriticalPathForTick, focusTickForWindow } from './criticalPath';
 import CriticalPathToolbar from './CriticalPathToolbar';
 import CriticalPathView from './CriticalPathView';
 import { useCriticalPathViewStore } from './useCriticalPathViewStore';
@@ -38,10 +38,25 @@ export default function CriticalPathPanel(_props: IDockviewPanelProps) {
   const setSystem = useSelectionStore((s) => s.setSystem);
 
   const tickSummaries = metadata?.tickSummaries ?? null;
+  // Fall back to `focusTickForWindow` (not `dominantTickInRange`) so that zooming the TimeArea
+  // inside a single tick still lands on that tick — `timeToTickRange` correctly returns null for
+  // sub-tick windows ("tick startUs in window" is the right semantic for SystemDag aggregations),
+  // and the helper carries a midpoint fallback for the focus-tick case. Keeps the user's "I'm
+  // looking at tick X" mental model intact across zoom gestures even when they didn't explicitly
+  // pin focusTick.
   const tapeTick = useMemo(() => {
     if (focusTick != null) return focusTick;
-    return dominantTickInRange(tickSummaries, range);
-  }, [focusTick, tickSummaries, range]);
+    return focusTickForWindow(tickSummaries, range, time);
+  }, [focusTick, tickSummaries, range, time]);
+
+  // Worker count drives the per-phase parallelism band (A2). Coerced once at the boundary so
+  // the view can render the band unconditionally and bail on null inside.
+  const workerCount = useMemo(() => {
+    const raw = metadata?.header?.workerCount;
+    if (raw == null) return null;
+    const n = typeof raw === 'number' ? raw : Number(raw);
+    return Number.isFinite(n) && n >= 2 ? n : null;
+  }, [metadata]);
 
   const derivedEdges = useMemo(
     () => (topology?.systems ? deriveEdges(topology.systems) : []),
@@ -147,6 +162,7 @@ export default function CriticalPathPanel(_props: IDockviewPanelProps) {
           selectedSystemName={selectedSystemName}
           fitSignal={fitSignal}
           onFit={requestFit}
+          workerCount={workerCount}
           onSelectBar={(name, tickNumber) => {
             setSystem(name);
             setFocusTick(tickNumber);

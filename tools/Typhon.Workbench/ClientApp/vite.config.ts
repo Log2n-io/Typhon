@@ -79,6 +79,10 @@ export default defineConfig({
       },
       '/swagger': BACKEND_URL,
       '/health': BACKEND_URL,
+      // Scalar API explorer — debug/troubleshooting UI served by Kestrel. The page fetches
+      // /openapi.json (already proxied above) and lets the user paste a PAT into its auth dialog.
+      // Proxy both the page and any sub-paths Scalar uses for its bundled assets.
+      '/api-explorer': BACKEND_URL,
     },
   },
   build: {

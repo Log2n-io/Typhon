@@ -50,6 +50,7 @@ public class IncrementalCacheBuilderTests
                 reader.ReadArchetypes();
                 reader.ReadComponentTypes();
                 reader.ReadPhases();
+                reader.ReadStaticStructures();
 
                 var sink = FileCacheSink.Create(cachePathB);
                 var profilerHeader = new ProfilerHeader { Version = fileHeader.Version, TimestampFrequency = fileHeader.TimestampFrequency };
@@ -125,6 +126,7 @@ public class IncrementalCacheBuilderTests
                 reader.ReadArchetypes();
                 reader.ReadComponentTypes();
                 reader.ReadPhases();
+                reader.ReadStaticStructures();
 
                 var sink = FileCacheSink.Create(cachePath);
                 var profilerHeader = new ProfilerHeader { Version = fileHeader.Version, TimestampFrequency = fileHeader.TimestampFrequency };
@@ -174,6 +176,7 @@ public class IncrementalCacheBuilderTests
                 reader.ReadArchetypes();
                 reader.ReadComponentTypes();
                 reader.ReadPhases();
+                reader.ReadStaticStructures();
 
                 var sink = FileCacheSink.Create(cachePath);
                 var profilerHeader = new ProfilerHeader { Version = fileHeader.Version, TimestampFrequency = fileHeader.TimestampFrequency };
@@ -239,6 +242,7 @@ public class IncrementalCacheBuilderTests
                 reader.ReadArchetypes();
                 reader.ReadComponentTypes();
                 reader.ReadPhases();
+                reader.ReadStaticStructures();
 
                 var sink = FileCacheSink.Create(cachePath);
                 var profilerHeader = new ProfilerHeader { Version = fileHeader.Version, TimestampFrequency = fileHeader.TimestampFrequency };
@@ -457,6 +461,7 @@ public class IncrementalCacheBuilderTests
         writer.WriteArchetypes(ReadOnlySpan<ArchetypeRecord>.Empty);
         writer.WriteComponentTypes(ReadOnlySpan<ComponentTypeRecord>.Empty);
         writer.WritePhases(ReadOnlySpan<string>.Empty);
+        writer.WriteEmptyStaticStructures();
 
         const int maxRecordsPerBlock = TraceFileWriter.MaxBlockBytes / CommonHeaderSize;
         var blockBuf = new byte[maxRecordsPerBlock * CommonHeaderSize];

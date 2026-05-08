@@ -1,4 +1,5 @@
 using System.Buffers;
+using K4os.Compression.LZ4;
 using Microsoft.AspNetCore.Mvc;
 using Typhon.Profiler;
 using Typhon.Workbench.Dtos.Profiler;
@@ -288,5 +289,149 @@ public sealed class ProfilerController : ControllerBase
         {
             ArrayPool<byte>.Shared.Return(bytes);
         }
+    }
+
+    /// <summary>
+    /// JSON projection of a single chunk: server-side LZ4 decompresses the chunk, walks the packed
+    /// records via <see cref="RecordDecoder"/>, and returns a <see cref="DecodedChunkDto"/> with a
+    /// fully deserialized event array. Mirrors the binary <see cref="GetChunk"/> endpoint for
+    /// callers that don't have the Typhon profiler codec on hand (curl / scripts / quick-look).
+    ///
+    /// Optional filters scope the response server-side:
+    /// <list type="bullet">
+    ///   <item><c>?kinds=10,20,21</c> — CSV of <see cref="TraceEventKind"/> integer values; only matching events are returned.</item>
+    ///   <item><c>?tick=1768</c> — only events whose <c>TickNumber</c> equals the value (after the decoder's stateful tick derivation).</item>
+    /// </list>
+    /// Both filters compose with AND. Invalid filter values are silently dropped (a malformed
+    /// <c>kinds=</c> token is skipped; a non-integer <c>tick=</c> would 400 via model binding).
+    /// The unfiltered chunk is the worst case (~50K events / few-hundred-KB JSON); filtered
+    /// payloads are typically a few hundred records at most.
+    /// </summary>
+    [HttpGet("chunks/{chunkIdx:int}/decoded")]
+    public async Task<ActionResult<DecodedChunkDto>> GetChunkDecoded(
+        Guid sessionId,
+        int chunkIdx,
+        [FromQuery] string kinds,
+        [FromQuery] int? tick,
+        CancellationToken ct)
+    {
+        var session = HttpContext.Items["Session"];
+        IChunkProvider provider = session switch
+        {
+            TraceSession trace => trace.Runtime,
+            AttachSession attach => attach.Runtime,
+            _ => null,
+        };
+        if (provider == null)
+        {
+            return Conflict();
+        }
+        if (!provider.IsReady)
+        {
+            return Conflict("Runtime not ready — call /profiler/metadata first.");
+        }
+
+        ChunkManifestEntry entry;
+        try
+        {
+            entry = await provider.GetChunkManifestEntryAsync(chunkIdx);
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            return NotFound();
+        }
+
+        var isContinuation = (entry.Flags & TraceFileCacheConstants.FlagIsContinuation) != 0;
+
+        // Pull compressed bytes via the same provider path as the binary endpoint, then inflate
+        // into a pooled buffer. Both buffers are returned in the finally — the JSON serializer
+        // captures the decoded event list before then, so reuse is safe.
+        var uncompressedSize = (int)entry.UncompressedBytes;
+        var (compressedBytes, compressedLength) = await provider.ReadChunkCompressedAsync(chunkIdx);
+        var uncompressedBuffer = ArrayPool<byte>.Shared.Rent(uncompressedSize);
+        try
+        {
+            ct.ThrowIfCancellationRequested();
+            var decoded = LZ4Codec.Decode(
+                compressedBytes.AsSpan(0, compressedLength),
+                uncompressedBuffer.AsSpan(0, uncompressedSize));
+            if (decoded != uncompressedSize)
+            {
+                return Problem(
+                    detail: $"LZ4 decode size mismatch for chunk [{entry.FromTick}, {entry.ToTick}): expected {uncompressedSize}, got {decoded}.",
+                    statusCode: StatusCodes.Status500InternalServerError);
+            }
+
+            var decoder = new RecordDecoder(provider.TimestampFrequency);
+            // Match the client-side seeding pattern: continuation chunks lack a leading TickStart,
+            // so the first event of the block must already be tagged with FromTick. Normal chunks
+            // begin with TickStart which advances the counter from (FromTick - 1) → FromTick.
+            if (isContinuation)
+            {
+                decoder.SetCurrentTickForContinuation((int)entry.FromTick);
+            }
+            else
+            {
+                decoder.SetCurrentTick((int)entry.FromTick - 1);
+            }
+
+            var capacity = entry.EventCount > 0 ? (int)Math.Min(entry.EventCount, int.MaxValue) : 64;
+            var allEvents = new List<LiveTraceEvent>(capacity);
+            decoder.DecodeBlock(uncompressedBuffer.AsSpan(0, uncompressedSize), allEvents);
+
+            var kindsFilter = ParseKindsFilter(kinds);
+            IReadOnlyList<LiveTraceEvent> projected = allEvents;
+            if (kindsFilter != null || tick.HasValue)
+            {
+                projected = ApplyFilters(allEvents, kindsFilter, tick);
+            }
+
+            return new DecodedChunkDto(
+                FromTick: (int)entry.FromTick,
+                ToTick: (int)entry.ToTick,
+                EventCount: allEvents.Count,
+                UncompressedBytes: uncompressedSize,
+                IsContinuation: isContinuation,
+                TimestampFrequency: provider.TimestampFrequency,
+                FilteredEventCount: projected.Count,
+                Events: projected);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(compressedBytes);
+            ArrayPool<byte>.Shared.Return(uncompressedBuffer);
+        }
+    }
+
+    /// <summary>
+    /// Parses a comma-separated list of <see cref="TraceEventKind"/> integer values into a HashSet.
+    /// Returns <c>null</c> when the parameter is null/empty (i.e. no filtering). Tokens that fail
+    /// to parse are silently skipped — a fully-unparseable list returns an empty set, which means
+    /// "no events match" rather than "no filter".
+    /// </summary>
+    private static HashSet<int> ParseKindsFilter(string raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return null;
+        var set = new HashSet<int>();
+        foreach (var token in raw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (int.TryParse(token, out var k))
+            {
+                set.Add(k);
+            }
+        }
+        return set;
+    }
+
+    private static List<LiveTraceEvent> ApplyFilters(List<LiveTraceEvent> source, HashSet<int> kinds, int? tick)
+    {
+        var result = new List<LiveTraceEvent>();
+        foreach (var ev in source)
+        {
+            if (kinds != null && !kinds.Contains(ev.Kind)) continue;
+            if (tick.HasValue && ev.TickNumber != tick.Value) continue;
+            result.Add(ev);
+        }
+        return result;
     }
 }

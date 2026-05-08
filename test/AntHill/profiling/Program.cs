@@ -64,7 +64,10 @@ public static class Program
                 var metadata = ProfilerSetup.BuildSessionMetadata(
                     bridge.Systems, workerCount: 16, baseTickRate: 60f,
                     phases: bridge.PhaseNames,
-                    currentEngineTickProvider: () => bridge.CurrentTick);
+                    currentEngineTickProvider: () => bridge.CurrentTick,
+                    engine: bridge.DatabaseEngine,
+                    resourceGraphRoot: bridge.ResourceGraphRoot,
+                    runtime: bridge.ActiveRuntime);
                 if (profilerConfig.LiveWaitMs > 0 && profilerConfig.LivePort >= 0)
                 {
                     Console.WriteLine($"Waiting up to {profilerConfig.LiveWaitMs} ms for the workbench to attach on :{profilerConfig.LivePort}…");

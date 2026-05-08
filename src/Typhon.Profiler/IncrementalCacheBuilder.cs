@@ -70,6 +70,7 @@ public sealed class IncrementalCacheBuilder : IDisposable
         public long ReadyTs;          // Stopwatch ticks (0 = unobserved)
         public long FirstChunkStartTs; // 0 = no chunk yet
         public long LastChunkEndTs;    // 0 = no chunk yet
+        public long TotalCpuTicks;    // Σ chunk DurationTicks across all workers — populates SystemTickSummary.TotalCpuUs at finalize
         public uint EntitiesProcessed;
         public ushort ChunksProcessed;
         public uint WorkersTouchedMask; // bit per threadSlot, capped at 32 (good enough for "distinct workers" diagnostic)
@@ -682,6 +683,15 @@ public sealed class IncrementalCacheBuilder : IDisposable
         reader.ReadArchetypes();
         reader.ReadComponentTypes();
         reader.ReadPhases(); // v6+ section; reader returns empty for v5 traces without consuming bytes.
+        // v7+ static-structure tables — walk past them so the next ReadNextBlock lands on the first compressed
+        // record block. Reader exposes the data via its public state lists; the cache propagates them through new
+        // CacheSectionId entries (see Phase B reader extensions).
+        reader.ReadComponentDefinitions();
+        reader.ReadArchetypeDefinitions();
+        reader.ReadIndexCatalog();
+        reader.ReadRuntimeConfig();
+        reader.ReadEventQueueCatalog();
+        reader.ReadResourceGraphSnapshot();
 
         var profilerHeader = new ProfilerHeader
         {
@@ -866,6 +876,8 @@ public sealed class IncrementalCacheBuilder : IDisposable
                 {
                     startUs = 0; endUs = 0; durationUs = 0;
                 }
+                // Total cpu µs — converted from accumulated ticks. Skipped systems carry zero (no chunks ran).
+                var totalCpuUs = (skipped || acc.TotalCpuTicks <= 0) ? 0u : (uint)Math.Min(uint.MaxValue, acc.TotalCpuTicks / ticksPerUs);
                 _systemTickSummaries.Add(new SystemTickSummary
                 {
                     TickNumber = tickNumber,
@@ -880,6 +892,7 @@ public sealed class IncrementalCacheBuilder : IDisposable
                     WorkersTouched = (byte)System.Numerics.BitOperations.PopCount(acc.WorkersTouchedMask),
                     ChunksProcessed = acc.ChunksProcessed,
                     _reserved = 0,
+                    TotalCpuUs = totalCpuUs,
                 });
             }
             _currentTickSystems.Clear();
@@ -1014,6 +1027,10 @@ public sealed class IncrementalCacheBuilder : IDisposable
                 {
                     acc.WorkersTouchedMask |= 1u << threadSlot;
                 }
+
+                // Cumulative cpu time across workers (chunker v13). Saturates implicitly via the finalize step's `uint` narrowing — ticks at
+                // 10 MHz × 4.3 billion fits a uint of µs without overflow until ~71 minutes of cpu PER SYSTEM PER TICK, well past any conceivable usage.
+                acc.TotalCpuTicks += durationTicks;
 
                 break;
             }

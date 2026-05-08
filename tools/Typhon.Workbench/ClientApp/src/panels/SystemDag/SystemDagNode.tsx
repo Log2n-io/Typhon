@@ -1,15 +1,32 @@
+import { memo } from 'react';
 import { Handle, Position } from '@xyflow/react';
+import { Hourglass } from 'lucide-react';
+import { useThemeStore } from '@/stores/useThemeStore';
 import type { DagNodeData } from './dagModel';
 import type { SystemStat } from './useSystemStats';
 
+/** Threshold (µs) above which the per-node "blocked" icon appears. Picked low (10µs) because
+ *  the user's interest is "find systems that wait at all" — sub-µs noise is filtered. The
+ *  `Hourglass` glyph deliberately mirrors the existing ★ badge placement: same top-right
+ *  cluster, distinct shape so the two cues don't blend. */
+const BLOCKED_ICON_THRESHOLD_US = 10;
+
 /** Renders a single system tile with kind chip, primary stat (when stats are loaded), CP-rate badge, skip chip, and filter chips. */
-export default function SystemDagNode({
+function SystemDagNodeInner({
   data,
   selected,
 }: {
-  data: DagNodeData & { stat?: SystemStat | null; cpRate?: number | null; skipRate?: number | null; isOnDominantCp?: boolean; isHovered?: boolean };
+  data: DagNodeData & {
+    stat?: SystemStat | null;
+    cpRate?: number | null;
+    skipRate?: number | null;
+    isOnDominantCp?: boolean;
+    isHovered?: boolean;
+    waitGapUs?: number | null;
+  };
   selected?: boolean;
 }) {
+  const theme = useThemeStore((s) => s.theme);
   const kindClass = kindClasses(data.kind);
   const exclusiveBar = data.isExclusivePhase ? 'border-l-4 border-l-amber-500' : '';
   // Selection wins over hover — once you click the node the primary ring locks in; hover only
@@ -37,7 +54,17 @@ export default function SystemDagNode({
   // Per design §4.2: skip-rate chip rendered when skipRate > 50%.
   const skipRate = data.skipRate ?? null;
   const showSkipChip = skipRate != null && skipRate > 0.5;
+  // Hourglass icon when the system has a non-trivial mean dispatch wait — driven by the
+  // gating analysis. Subtle by design: same top-right cluster as the ★ badge so the user
+  // gets a single "this system has interesting dynamics" line without a busy tile.
+  const waitGapUs = data.waitGapUs ?? null;
+  const showBlockedIcon = waitGapUs != null && waitGapUs >= BLOCKED_ICON_THRESHOLD_US;
 
+  // Drag ghost: applied via the wrapper-level `style: { opacity: 0.5 }` set on the node in
+  // `SystemDagCanvas.styledNodes` rather than via a class here. Reading dragging state from
+  // `data` would force this component to re-render on every drag frame (data ref churn) and
+  // make React Flow re-measure the handles → flicker on attached edges. Wrapper-level style
+  // updates skip the inner render path entirely.
   return (
     <div
       className={`relative flex h-[56px] w-[180px] flex-col rounded border bg-card shadow-sm ${exclusiveBar} ${ring} ${dominantCpOutline}`}
@@ -51,9 +78,20 @@ export default function SystemDagNode({
           {data.systemName}
         </span>
         <div className="flex items-center gap-1">
+          {showBlockedIcon && waitGapUs != null && (
+            <Hourglass
+              className="h-2.5 w-2.5 text-slate-700 dark:text-slate-300"
+              aria-label="Blocked by predecessor"
+              data-testid={`system-dag-block-icon-${data.systemName}`}
+            >
+              <title>{`Mean dispatch wait ${formatStat(waitGapUs)} after ready — open the side panel for the gating predecessor`}</title>
+            </Hourglass>
+          )}
           {cpBadge && (
             <span
-              className={`text-[12px] leading-none ${cpBadge.tone === 'solid' ? 'text-amber-300' : 'text-amber-400/40'}`}
+              className={`text-[12px] leading-none ${cpBadge.tone === 'solid'
+                ? 'text-amber-700 dark:text-amber-300'
+                : 'text-amber-700/50 dark:text-amber-400/40'}`}
               title={cpBadge.title}
             >
               {cpBadge.glyph}
@@ -66,7 +104,7 @@ export default function SystemDagNode({
         {stat ? (
           <span
             className="rounded border px-1 py-px font-mono text-[10px]"
-            style={heatChip(stat.heat)}
+            style={heatChip(stat.heat, theme)}
             title={`${stat.value.toFixed(1)} µs`}
           >
             {formatStat(stat.value)}
@@ -86,34 +124,49 @@ export default function SystemDagNode({
   );
 }
 
+/**
+ * Wrap in React.memo so the tile only re-renders when its `data` / `selected` props actually
+ * change identity. Critical during drag: the dragged node's wrapper re-renders every frame to
+ * apply the new CSS transform + opacity ghost, but its `data` ref is preserved (the canvas's
+ * styledNodes drag patch is `{ ...n, position, style }` — `data` passes through). With memo,
+ * the inner tile sees ref-equal props and skips render → handle measurements stay stable →
+ * attached edges re-route smoothly without flicker.
+ */
+export default memo(SystemDagNodeInner);
+
 interface ChipProps {
   children: React.ReactNode;
   tone?: 'default' | 'muted' | 'warn' | 'info';
 }
 
 function Chip({ children, tone = 'default' }: ChipProps) {
+  // Theme-paired tones — light theme uses *-100/*-800, dark theme uses *-950/40 / *-200.
+  // The muted tone is already theme-aware via the shadcn `bg-muted` token, so it's left
+  // as-is.
   const cls =
     tone === 'muted'
       ? 'border-border bg-muted/40 text-muted-foreground'
       : tone === 'warn'
-        ? 'border-amber-700/50 bg-amber-950/40 text-amber-200'
+        ? 'border-amber-300 bg-amber-100 text-amber-800 dark:border-amber-700/50 dark:bg-amber-950/40 dark:text-amber-200'
         : tone === 'info'
-          ? 'border-sky-700/50 bg-sky-950/40 text-sky-200'
-          : 'border-slate-600/50 bg-slate-900/40 text-slate-200';
+          ? 'border-sky-300 bg-sky-100 text-sky-800 dark:border-sky-700/50 dark:bg-sky-950/40 dark:text-sky-200'
+          : 'border-slate-300 bg-slate-100 text-slate-800 dark:border-slate-600/50 dark:bg-slate-900/40 dark:text-slate-200';
   return <span className={`rounded border px-1 py-px text-[9px] font-mono ${cls}`}>{children}</span>;
 }
 
 function kindClasses(kind: DagNodeData['kind']): string {
+  // PIPELINE / QUERY / CALLBACK / UNKNOWN tile-corner badges. Same dual-class shape as the
+  // edge-kind chip in the side panel so the visual vocabulary stays consistent across views.
   switch (kind) {
     case 'Pipeline':
-      return 'bg-emerald-900/40 text-emerald-200';
+      return 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-200';
     case 'Query':
-      return 'bg-sky-900/40 text-sky-200';
+      return 'bg-sky-100 text-sky-800 dark:bg-sky-900/40 dark:text-sky-200';
     case 'Callback':
-      return 'bg-violet-900/40 text-violet-200';
+      return 'bg-violet-100 text-violet-800 dark:bg-violet-900/40 dark:text-violet-200';
     case 'Unknown':
     default:
-      return 'bg-slate-800 text-slate-300';
+      return 'bg-slate-200 text-slate-800 dark:bg-slate-800 dark:text-slate-300';
   }
 }
 
@@ -132,12 +185,30 @@ function heatBorder(heat: number): React.CSSProperties {
   };
 }
 
-function heatChip(heat: number): React.CSSProperties {
+/**
+ * Heat-aware stat chip styling. Inline-styled because the bg/text colours interpolate along a
+ * continuous hue ramp — Tailwind classes can't express a 220→0° gradient — but the chip still
+ * has to read in both themes. We branch on the theme:
+ *
+ * - **Dark theme**: bg is dark (35% L, 40% α) so the card show-through stays subtle, text is
+ *   light (88% L) for high contrast against the deep bg.
+ * - **Light theme**: bg is very light (92% L, 60% α) — a soft tint on the white card — and text
+ *   is dark (28% L) so the µs/ms readout has the same WCAG-AA contrast as on dark theme.
+ *
+ * The border colour stays the mid-tone 55% L either way; it works on both bg shades and keeps
+ * the heat hue identifiable at a glance.
+ */
+function heatChip(heat: number, theme: 'dark' | 'light'): React.CSSProperties {
   const hue = 220 - heat * 220;
+  const isDark = theme === 'dark';
   return {
-    backgroundColor: `hsla(${hue}, 70%, 35%, 0.4)`,
+    backgroundColor: isDark
+      ? `hsla(${hue}, 70%, 35%, 0.4)`
+      : `hsla(${hue}, 70%, 92%, 0.6)`,
     borderColor: `hsla(${hue}, 70%, 55%, 0.7)`,
-    color: `hsla(${hue}, 80%, 88%, 1)`,
+    color: isDark
+      ? `hsla(${hue}, 80%, 88%, 1)`
+      : `hsla(${hue}, 70%, 28%, 1)`,
   };
 }
 

@@ -273,7 +273,12 @@ public class PhaseTests
 
         Assert.That(declared.PhaseIndex, Is.EqualTo(3));   // Cleanup
         Assert.That(undeclared.PhaseIndex, Is.EqualTo(1)); // Default = Simulation
-        // Cross-phase edge: undeclared (Sim) → declared (Cleanup)
-        Assert.That(undeclared.Successors, Does.Contain(declared.Index));
+        // Post 2026-05-07 cross-phase amendment: phases are logical ordering contracts, not
+        // runtime barriers. Two systems with no declared access conflict get no derived edge
+        // even when they sit in different phases — the runtime can dispatch them concurrently.
+        // The PhaseIndex assignments above are the correct half of "both land somewhere"; the
+        // pre-amendment expectation of an unconditional cross-phase edge was an artefact of the
+        // old all-to-all chaining (see runtime-scheduling.md §ED-05).
+        Assert.That(undeclared.Successors, Does.Not.Contain(declared.Index));
     }
 }

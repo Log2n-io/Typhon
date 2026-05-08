@@ -24,12 +24,14 @@ public sealed class V12CacheRoundTripTests
                 TickNumber = 1, SystemIndex = 0, SkipReasonCode = 0, Flags = 0,
                 StartUs = 100, EndUs = 250, ReadyUs = 95, DurationUs = 150f,
                 EntitiesProcessed = 42, WorkersTouched = 4, ChunksProcessed = 8, _reserved = 0,
+                TotalCpuUs = 600,
             },
             new SystemTickSummary
             {
                 TickNumber = 1, SystemIndex = 1, SkipReasonCode = 3, Flags = 0,
                 StartUs = 0, EndUs = 0, ReadyUs = 0, DurationUs = 0f,
                 EntitiesProcessed = 0, WorkersTouched = 0, ChunksProcessed = 0, _reserved = 0,
+                TotalCpuUs = 0,
             },
         };
 
@@ -42,7 +44,9 @@ public sealed class V12CacheRoundTripTests
             Assert.That(reader.SystemTickSummaries[0].DurationUs, Is.EqualTo(150f));
             Assert.That(reader.SystemTickSummaries[0].EntitiesProcessed, Is.EqualTo(42));
             Assert.That(reader.SystemTickSummaries[0].WorkersTouched, Is.EqualTo(4));
+            Assert.That(reader.SystemTickSummaries[0].TotalCpuUs, Is.EqualTo(600));
             Assert.That(reader.SystemTickSummaries[1].SkipReasonCode, Is.EqualTo(3));
+            Assert.That(reader.SystemTickSummaries[1].TotalCpuUs, Is.EqualTo(0));
         }
         finally
         {

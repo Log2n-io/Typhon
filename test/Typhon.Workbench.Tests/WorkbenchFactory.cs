@@ -29,6 +29,12 @@ public sealed class WorkbenchFactory : WebApplicationFactory<Program>
             services.RemoveAll<BootstrapTokenGate>();
             services.AddSingleton(_ => new BootstrapTokenGate(DemoDirectory));
 
+            // Same isolation reasoning as the bootstrap gate: the default PAT directory points at
+            // the real user's %LOCALAPPDATA%, which would persist test-only tokens onto the dev
+            // machine and race with concurrent test hosts.
+            services.RemoveAll<PersonalAccessTokenStore>();
+            services.AddSingleton(_ => new PersonalAccessTokenStore(DemoDirectory));
+
             // Same isolation for OptionsStore — defaults to %LOCALAPPDATA%\Typhon.Workbench\options.json
             // which would clobber the real user options file when tests run. Per-factory temp dir.
             services.RemoveAll<OptionsStore>();

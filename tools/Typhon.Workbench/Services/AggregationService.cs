@@ -145,6 +145,7 @@ public static class AggregationService
     {
         "durationUs", "startUs", "endUs", "readyUs",
         "entitiesProcessed", "workersTouched", "chunksProcessed", "skipReason",
+        "totalCpuUs",
     };
 
     private static readonly HashSet<string> QueueFields = new(StringComparer.Ordinal)
@@ -532,6 +533,7 @@ public static class AggregationService
         "workersTouched"    => r.WorkersTouched,
         "chunksProcessed"   => r.ChunksProcessed,
         "skipReason"        => r.SkipReasonCode,
+        "totalCpuUs"        => r.TotalCpuUs,
         _                   => 0.0,
     };
 

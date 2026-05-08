@@ -1,17 +1,25 @@
 import { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Camera } from 'lucide-react';
+import type { SystemTickSummary } from '@/api/generated/model/systemTickSummary';
 import type { TickSummaryDto } from '@/api/generated/model/tickSummaryDto';
 import { useSelectionStore } from '@/stores/useSelectionStore';
 import { useUiPrefsStore } from '@/stores/useUiPrefsStore';
+import ParallelismPill from './ParallelismPill';
 import { lastNTicksToTime, timeToTickRange } from './tickRangeMapping';
+import { computeRangeUtilization } from './tickUtilization';
 import { useDagViewStore, type LayoutMode, type StatMode } from './useDagViewStore';
+import { useNodePositionsStore } from './useNodePositionsStore';
 
 interface Props {
   /** Profiler-metadata tick rows — used for both the µs↔tick conversion and the auto-snapshot decision. */
   tickSummaries: readonly TickSummaryDto[] | null;
   /** Auto-snapshot once on first arrival of metadata when no time selection exists yet. */
   autoSnapshotEnabled: boolean;
+  /** Per-(tick, system) duration rows — feeds the parallelism-inefficiency pill (A1 + A6). */
+  systemTickSummaries: readonly SystemTickSummary[] | null;
+  /** Worker pool size from the profiler header. Pill stays hidden when null / < 2 (parallelism is undefined). */
+  workerCount: number | null;
 }
 
 const STAT_OPTIONS: Array<{ key: StatMode; label: string }> = [
@@ -49,13 +57,31 @@ const SNAPSHOT_TICK_COUNT = 600;
  * Auto-snapshot fires once on first metadata arrival when the time slot is null AND nothing has
  * been deep-linked from a URL — so a fresh open shows useful colour without a click.
  */
-export default function SystemDagToolbar({ tickSummaries, autoSnapshotEnabled }: Props) {
+export default function SystemDagToolbar({ tickSummaries, autoSnapshotEnabled, systemTickSummaries, workerCount }: Props) {
   const time = useSelectionStore((s) => s.time);
   const setTime = useSelectionStore((s) => s.setTime);
   const statMode = useDagViewStore((s) => s.statMode);
   const setStatMode = useDagViewStore((s) => s.setStatMode);
   const layout = useDagViewStore((s) => s.layout);
   const setLayout = useDagViewStore((s) => s.setLayout);
+  const hideSkipped = useDagViewStore((s) => s.hideSkipped);
+  const setHideSkipped = useDagViewStore((s) => s.setHideSkipped);
+  const showCrossPhaseEdges = useDagViewStore((s) => s.showCrossPhaseEdges);
+  const setShowCrossPhaseEdges = useDagViewStore((s) => s.setShowCrossPhaseEdges);
+  const isLaneLayout = layout === 'horizontal-lanes' || layout === 'vertical-lanes';
+
+  // Manual-position override count for the current layout — drives the "Reset positions"
+  // button visibility. We subscribe to the overrides map (cheap object) rather than calling
+  // `countForLayout()` once, so the button reactively appears/disappears as the user drags
+  // tiles. Memoised to dodge a re-render storm during drag.
+  const overrides = useNodePositionsStore((s) => s.overrides);
+  const clearLayoutPositions = useNodePositionsStore((s) => s.clearLayout);
+  const overrideCount = useMemo(() => {
+    const prefix = `${layout}|`;
+    let n = 0;
+    for (const k of Object.keys(overrides)) if (k.startsWith(prefix)) n++;
+    return n;
+  }, [overrides, layout]);
   // Help glyph follows the app-wide `legendsVisible` flag (toggled via the `l` key or the
   // "Toggle Legends" palette command). Hidden when legends are off so chrome stays minimal.
   const legendsVisible = useUiPrefsStore((s) => s.legendsVisible);
@@ -67,6 +93,20 @@ export default function SystemDagToolbar({ tickSummaries, autoSnapshotEnabled }:
   // round through the converter so the user sees consistent tick numbers regardless of who set
   // the window.
   const tickRange = useMemo(() => timeToTickRange(time, tickSummaries), [time, tickSummaries]);
+
+  // Parallelism inefficiency over the selected range — drives the A1 pill + A6 sparkline. Pill
+  // stays hidden (`null`) when worker count is missing / < 2 or the range has no usable ticks.
+  // Recomputes only on the inputs that actually move; tickSummaries / systemTickSummaries are
+  // referentially stable while the cache is loaded.
+  const utilization = useMemo(
+    () => computeRangeUtilization({
+      workerCount: workerCount != null && workerCount >= 2 ? workerCount : null,
+      tickSummaries,
+      systemTickSummaries,
+      range: tickRange,
+    }),
+    [workerCount, tickSummaries, systemTickSummaries, tickRange],
+  );
 
   // Auto-snapshot once on first arrival when the time slot is unset. After that, snapshot is
   // user-driven (per §7.3 — no continuous live updates).
@@ -137,7 +177,45 @@ export default function SystemDagToolbar({ tickSummaries, autoSnapshotEnabled }:
         </select>
       </div>
 
+      {overrideCount > 0 && (
+        <button
+          type="button"
+          onClick={() => clearLayoutPositions(layout)}
+          className="flex items-center gap-1.5 rounded border border-border bg-card px-2 py-1 font-mono text-[11px] text-foreground hover:bg-muted"
+          title={`Discard ${overrideCount} manual position${overrideCount === 1 ? '' : 's'} for the ${layout} layout — tiles snap back to the auto-computed positions.`}
+        >
+          Reset positions ({overrideCount})
+        </button>
+      )}
+
+      <ToggleChip
+        label="Hide skipped"
+        checked={hideSkipped}
+        onChange={setHideSkipped}
+        title={
+          'Hide systems that never executed in the selected tick range (skip rate ≥ 100%). '
+          + 'Useful for isolating "what actually ran" — e.g. high-tier systems that only fire '
+          + 'every 30/60 ticks drop out when you scope to a small window. No effect when no '
+          + 'range is selected.'
+        }
+      />
+      <ToggleChip
+        label="Cross-phase edges"
+        checked={showCrossPhaseEdges}
+        onChange={setShowCrossPhaseEdges}
+        title={
+          isLaneLayout
+            ? 'Show edges that span phase boundaries in the swim-lane layouts. Off by default '
+              + 'because lane order already encodes phase ordering and the cross-phase chain is '
+              + 'visually noisy.'
+            : 'In compact / circular layouts every edge is already drawn — this toggle only '
+              + 'affects the swim-lane layouts.'
+        }
+        muted={!isLaneLayout}
+      />
+
       <div className="ml-auto flex items-center gap-2 font-mono text-[10px] text-muted-foreground">
+        <ParallelismPill utilization={utilization} />
         {tickRange ? (
           <>
             <span>
@@ -261,16 +339,22 @@ function HelpOverlay({ onClose }: { onClose: () => void }) {
             </li>
             <li>
               <strong>Kind chip</strong> (top-right) — system type:
-              <span className="ml-1 inline-flex items-center gap-1 rounded bg-emerald-900/40 px-1 py-px text-emerald-200">PIPELINE</span>{' '}
-              <span className="inline-flex items-center gap-1 rounded bg-sky-900/40 px-1 py-px text-sky-200">QUERY</span>{' '}
-              <span className="inline-flex items-center gap-1 rounded bg-violet-900/40 px-1 py-px text-violet-200">CALLBACK</span>{' '}
-              <span className="inline-flex items-center gap-1 rounded bg-slate-800 px-1 py-px text-slate-300">UNKNOWN</span>.
+              <span className="ml-1 inline-flex items-center gap-1 rounded bg-emerald-100 px-1 py-px text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-200">PIPELINE</span>{' '}
+              <span className="inline-flex items-center gap-1 rounded bg-sky-100 px-1 py-px text-sky-800 dark:bg-sky-900/40 dark:text-sky-200">QUERY</span>{' '}
+              <span className="inline-flex items-center gap-1 rounded bg-violet-100 px-1 py-px text-violet-800 dark:bg-violet-900/40 dark:text-violet-200">CALLBACK</span>{' '}
+              <span className="inline-flex items-center gap-1 rounded bg-slate-200 px-1 py-px text-slate-800 dark:bg-slate-800 dark:text-slate-300">UNKNOWN</span>.
               Pipeline = chunked sequential, Query = ECS query (often parallel), Callback = single-shot.
             </li>
             <li>
               <strong>★ badge</strong> — critical-path participation rate. <em>Solid amber star</em> when the system is on the
               CP in ≥50 % of ticks in the range; <em>dim star</em> for 10–50 %; nothing below 10 %.
               Hover for the exact percentage.
+            </li>
+            <li>
+              <strong>⌛ hourglass</strong> (small, top-right next to the kind chip) — the system has a non-trivial mean
+              dispatch wait (≥ 10 µs from "all predecessors done" to "worker actually grabbed it") in the current range.
+              Click the tile to see the gating predecessor in the side panel's <strong>Gated by</strong> section. If many
+              tiles carry the icon, your scheduler is paying real fork-join overhead.
             </li>
             <li>
               <strong>Red outline</strong> (around the tile, slightly offset) — system is on the critical path of the
@@ -362,6 +446,8 @@ function HelpOverlay({ onClose }: { onClose: () => void }) {
             ['Snapshot last 600 ticks', 'Pin both DAG aggregations and the profiler TimeArea to the most recent 600 ticks. Auto-fired once on first metadata arrival so a fresh open is useful without a click.'],
             ['stat: mean / p50 / p95 / p99 / max', 'Aggregation function for the per-system primary stat that drives the heat border + chip. mean = average duration; p99 = "the tick where this system was unusually slow"; max = worst single tick.'],
             ['layout', 'Pick one of the four layouts described above. Switching re-runs the layout engine and re-fits the viewport.'],
+            ['☐ Hide skipped', 'Hide systems that contributed nothing to the selected range — RunIf-bailed every tick, tier-filtered out, or scheduled-but-zero-duration. Driven by the same data as the visible "0.0 µs" on the tile. Topology is filtered before layout so dagre packs the surviving systems tightly (no holes). No-op when no range is selected.'],
+            ['☐ Cross-phase edges', 'Surface edges that span phase boundaries in the swim-lane layouts (otherwise hidden because lane order already encodes phase ordering). The current implementation gates them on hover: with the toggle on but no system pointed at, intra-phase edges still render alone; hover any system to reveal its cross-phase neighbours. Compact / circular layouts always show every edge — the chip dims to signal the no-op there.'],
             ['Ticks A–B (N)', 'Range read-out. Shows the tick window currently driving the stats. clear strips the time selection — node stats hide until you snapshot or scrub the profiler.'],
             ['?', 'Open this panel.'],
           ]} />
@@ -374,6 +460,7 @@ function HelpOverlay({ onClose }: { onClose: () => void }) {
             ['Hover node',          'Cross-panel hover sync — matching bar in the CP tape lights up.'],
             ['Hover lane label',    'Hover sync at the phase level — matching CP tape phase stripe brightens.'],
             ['Drag pane',           'Pan the canvas.'],
+            ['Ctrl + drag node',    'Move that tile manually — useful when an edge is hidden behind a system box. Position is persisted per-layout to localStorage and survives reloads. The toolbar shows a "Reset positions (N)" button while overrides exist for the current layout.'],
             ['Wheel',               'Zoom in / out.'],
             ['MiniMap (bottom-right)', 'Click / drag a region to navigate; shows the full canvas at a glance.'],
             ['Controls (bottom-left)', 'Buttons for fit-view + zoom in/out without scrolling.'],
@@ -402,10 +489,45 @@ function HelpOverlay({ onClose }: { onClose: () => void }) {
           <p>
             Clicking a tile opens the side panel. It shows the raw access declarations for the selected system: the
             <code>Reads</code> / <code>ReadsFresh</code> / <code>ReadsSnapshot</code> / <code>Writes</code> components, the
-            event queues it produces / consumes, the resources it touches, the explicit <code>.After/.Before</code> ordering
-            it pinned, plus its phase, priority, parallelism mode, and tier filter. This is the source of truth the engine
-            derived the dependency graph from — if an arrow surprises you, the side panel will tell you which declaration
-            forced it.
+            <strong>event queues</strong> (separate <em>reads events</em> / <em>writes events</em> sections, violet to
+            match the dashed event edges), the <strong>named resources</strong> (separate <em>reads resources</em> /
+            <em>writes resources</em> sections, red to match the dotted resource edges), and any explicit
+            <code>.After/.Before</code> ordering. This is the source of truth the engine derived the dependency graph
+            from — if an arrow surprises you, the side panel will tell you which declaration forced it.
+          </p>
+        </Section>
+
+        <Section title='Side panel — "Gated by" wait analysis'>
+          <p>
+            When a tick range is selected, the side panel adds a <strong>Gated by</strong> section that answers "why
+            does this system wait, and what for?". Per predecessor it shows: who, what % of ticks they were the gating
+            predecessor (the one whose <code>EndUs</code> matched this system's <code>ReadyUs</code>), how long that
+            predecessor took on average, and the edge metadata (kind + via list) that justified the dependency in the
+            first place.
+          </p>
+          <p className="mt-2">
+            The top gater (≥ 50 % of ticks) is highlighted with an amber background. When that primary gater dominates,
+            a sky-coloured <strong>Mitigation</strong> hint appears below the table, suggesting the typical fix for
+            that edge kind:
+          </p>
+          <ul className="mt-1 list-disc space-y-0.5 pl-5 text-muted-foreground">
+            <li><strong>fresh</strong> (incl. cross-phase W×W): if the conflicting write is conditional / rare, move it to a dedicated system or use <code>SideWrites&lt;T&gt;()</code>.</li>
+            <li><strong>snapshot</strong>: if the previous-tick value isn't strictly required, downgrade to a fresh read to remove the inversion.</li>
+            <li><strong>manual</strong>: verify the explicit <code>.After()</code> / <code>.Before()</code> is still required.</li>
+            <li><strong>event</strong> / <strong>resource</strong>: no canned hint — these are usually intentional.</li>
+          </ul>
+          <p className="mt-2 text-muted-foreground">
+            Math note: <code>ReadyUs == max(predecessor.EndUs)</code> by construction, so identifying the gater is
+            exact, not estimated. If you don't see the gating-predecessor edge on the canvas, it's probably cross-phase
+            — flip <em>Cross-phase edges</em> on and hover the system to reveal it.
+          </p>
+        </Section>
+
+        <Section title="Canvas — gating-edge highlight">
+          <p>
+            Selecting a tile bolds the edge from its top gating predecessor (heavier stroke, drop-shadow glow,
+            animated dashes). The kind colour stays the same — only the prominence changes — so the canvas mirrors the
+            "Gated by …" answer in the side panel. With nothing selected, all edges render at their default weight.
           </p>
         </Section>
 
@@ -443,6 +565,45 @@ function KeyTable({ rows }: { rows: Array<[string, string]> }) {
         ))}
       </tbody>
     </table>
+  );
+}
+
+/**
+ * Small checkbox-style chip for boolean view toggles in the toolbar. Native checkbox + label so
+ * keyboard / accessibility behave correctly; the chip styling matches the surrounding toolbar
+ * controls (mono 11px, bordered, hoverable). The `muted` flag dims the chip when the toggle has
+ * no effect under the current layout — the click still works, but the user gets a visual hint
+ * that they need to switch layout to see the result.
+ */
+function ToggleChip({
+  label,
+  checked,
+  onChange,
+  title,
+  muted = false,
+}: {
+  label: string;
+  checked: boolean;
+  onChange: (next: boolean) => void;
+  title: string;
+  muted?: boolean;
+}) {
+  const tone = muted
+    ? 'border-border bg-card text-muted-foreground/70 hover:bg-muted'
+    : 'border-border bg-card text-foreground hover:bg-muted';
+  return (
+    <label
+      className={`flex cursor-pointer select-none items-center gap-1.5 rounded border px-2 py-1 font-mono text-[11px] ${tone}`}
+      title={title}
+    >
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(e) => onChange(e.target.checked)}
+        className="h-3 w-3 cursor-pointer accent-primary"
+      />
+      {label}
+    </label>
   );
 }
 

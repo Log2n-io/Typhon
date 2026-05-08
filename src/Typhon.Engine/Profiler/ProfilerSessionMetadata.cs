@@ -51,8 +51,34 @@ public sealed class ProfilerSessionMetadata
     /// </summary>
     public string[] Phases { get; }
 
+    // ── Static-structure tables (trace format v7+) ───────────────────────────
+    // All optional. Hosts that don't have a live engine to introspect (e.g., the unit-test fixture builder) may pass empty
+    // arrays; the FileExporter still writes the section headers so reader walking stays positionally consistent. Production
+    // hosts (AntHill, embedded engines) populate them via ProfilerSessionMetadataBuilder.FromEngine().
+
+    /// <summary>Rich component-type definitions (fields, types, sizes, indexes). v7+ trace section. Empty when no engine is attached.</summary>
+    public ComponentDefinitionRecord[] ComponentDefinitions { get; }
+
+    /// <summary>Rich archetype definitions (parent/child, slot map, cluster info). v7+ trace section. Empty when no engine is attached.</summary>
+    public ArchetypeDefinitionRecord[] ArchetypeDefinitions { get; }
+
+    /// <summary>Flat per-(component, field) index catalog. v7+ trace section. Empty when no engine is attached.</summary>
+    public IndexCatalogEntry[] IndexCatalog { get; }
+
+    /// <summary>Engine runtime config snapshot (tick rate, worker count, phases). v7+ trace section. Null when no engine config is available.</summary>
+    public RuntimeConfigRecord RuntimeConfig { get; }
+
+    /// <summary>Per-queue static schema (capacity, event type). v7+ trace section. Empty when no queues are registered.</summary>
+    public EventQueueRecord[] EventQueues { get; }
+
+    /// <summary>Resource-graph pre-order tree snapshot. v7+ trace section. Empty when no resource graph is available.</summary>
+    public ResourceGraphNodeRecord[] ResourceGraphNodes { get; }
+
     public ProfilerSessionMetadata(SystemDefinitionRecord[] systems, ArchetypeRecord[] archetypes, ComponentTypeRecord[] componentTypes, int workerCount,
-        float baseTickRate, long startTimestamp, long stopwatchFrequency, DateTime startedUtc, long samplingSessionStartQpc = 0, string[] phases = null)
+        float baseTickRate, long startTimestamp, long stopwatchFrequency, DateTime startedUtc, long samplingSessionStartQpc = 0, string[] phases = null,
+        ComponentDefinitionRecord[] componentDefinitions = null, ArchetypeDefinitionRecord[] archetypeDefinitions = null,
+        IndexCatalogEntry[] indexCatalog = null, RuntimeConfigRecord runtimeConfig = null, EventQueueRecord[] eventQueues = null,
+        ResourceGraphNodeRecord[] resourceGraphNodes = null)
     {
         Systems = systems ?? [];
         Archetypes = archetypes ?? [];
@@ -64,5 +90,11 @@ public sealed class ProfilerSessionMetadata
         StartedUtc = startedUtc;
         SamplingSessionStartQpc = samplingSessionStartQpc;
         Phases = phases ?? [];
+        ComponentDefinitions = componentDefinitions ?? [];
+        ArchetypeDefinitions = archetypeDefinitions ?? [];
+        IndexCatalog = indexCatalog ?? [];
+        RuntimeConfig = runtimeConfig;
+        EventQueues = eventQueues ?? [];
+        ResourceGraphNodes = resourceGraphNodes ?? [];
     }
 }

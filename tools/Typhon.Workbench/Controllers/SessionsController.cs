@@ -126,6 +126,21 @@ public sealed partial class SessionsController : ControllerBase
         return CreatedAtAction(nameof(GetSession), new { id = session.Id }, ToDto(session));
     }
 
+    /// <summary>
+    /// Lists every active session — bootstrap-token-only so the API explorer / debug tools can
+    /// discover which session GUIDs to plug into session-scoped routes. The SPA keeps its session
+    /// in client-side state and never advertises it server-side, so this endpoint exists primarily
+    /// for human troubleshooting.
+    /// </summary>
+    [HttpGet]
+    public ActionResult<SessionDto[]> ListSessions()
+    {
+        var snap = _sessions.Snapshot();
+        var dtos = new SessionDto[snap.Count];
+        for (var i = 0; i < snap.Count; i++) dtos[i] = ToDto(snap[i]);
+        return Ok(dtos);
+    }
+
     [HttpGet("{id:guid}")]
     [RequireSession]
     public ActionResult<SessionDto> GetSession(Guid id)
