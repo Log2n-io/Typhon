@@ -45,4 +45,13 @@ public record QueueTickRecordDto(
 /// <summary>One row in a <c>posttick/*</c> track. Single-field record (the duration of the named phase for a tick).</summary>
 public record PostTickRecordDto(uint TickNumber, float DurationUs);
 
+// ── v3 tracks (#327) — Workbench Data Flow module ───────────────────────────
+
+/// <summary>One row in a <c>system-archetype/&lt;sys&gt;/&lt;arch&gt;</c> track. Direct payload row from the cache section.</summary>
+public record SystemArchetypeRecordDto(uint TickNumber, uint EntitiesProcessed, uint ChunkCount);
+
+/// <summary>One row in an <c>archetype/&lt;label&gt;</c> or <c>component-family/&lt;name&gt;</c> track. Per-tick rollup
+/// summing across every (system, archetype) pair the trackId aggregates.</summary>
+public record ArchetypeRollupRecordDto(uint TickNumber, uint EntitiesProcessed, uint ChunkCount);
+
 public record TrackDataResponseDto(string TrackId, object[] Records);

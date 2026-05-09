@@ -134,7 +134,8 @@ public sealed class DataControllerTests
         using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
         var tracks = doc.RootElement.GetProperty("tracks");
         // v1 had 2 tracks; v2 (#311) added 3 track families: system/<name>, queue/<name>, posttick/<phase>.
-        Assert.That(tracks.GetArrayLength(), Is.EqualTo(5), "v2 exposes 5 tracks (2 v1 + 3 v2 family descriptors)");
+        // v3 (#327) added 3 more for the Workbench Data Flow module: archetype/<label>, system-archetype/<sys>/<arch>, component-family/<name>.
+        Assert.That(tracks.GetArrayLength(), Is.EqualTo(8), "v3 exposes 8 tracks (2 v1 + 3 v2 + 3 v3 family descriptors)");
 
         var ids = Enumerable.Range(0, tracks.GetArrayLength())
             .Select(i => tracks[i].GetProperty("id").GetString())
@@ -143,6 +144,7 @@ public sealed class DataControllerTests
         {
             "tick/summary", "metronome/wait",
             "system/<name>", "queue/<name>", "posttick/<phase>",
+            "archetype/<label>", "system-archetype/<system>/<archetype>", "component-family/<family>",
         }));
 
         var tickSummary = tracks[0];

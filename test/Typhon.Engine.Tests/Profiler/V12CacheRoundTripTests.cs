@@ -160,6 +160,7 @@ public sealed class V12CacheRoundTripTests
             systemTickSummaries: systemRows ?? System.Array.Empty<SystemTickSummary>(),
             queueTickSummaries: queueRows ?? System.Array.Empty<QueueTickSummary>(),
             postTickSummaries: postRows ?? System.Array.Empty<PostTickSummary>(),
-            queueIdToName: queueNames ?? new Dictionary<ushort, string>());
+            queueIdToName: queueNames ?? new Dictionary<ushort, string>(),
+            systemArchetypeTouches: System.Array.Empty<SystemArchetypeTouchSummary>());
     }
 }

@@ -87,10 +87,9 @@ public sealed class AppendOnlyChunkSink : ICacheChunkSink
         IReadOnlyList<SystemTickSummary> systemTickSummaries,
         IReadOnlyList<QueueTickSummary> queueTickSummaries,
         IReadOnlyList<PostTickSummary> postTickSummaries,
-        IReadOnlyDictionary<ushort, string> queueIdToName)
-    {
+        IReadOnlyDictionary<ushort, string> queueIdToName,
+        IReadOnlyList<SystemArchetypeTouchSummary> systemArchetypeTouches) =>
         throw new NotSupportedException("AppendOnlyChunkSink does not support a trailer (live mode keeps metadata in memory).");
-    }
 
     public void Dispose()
     {

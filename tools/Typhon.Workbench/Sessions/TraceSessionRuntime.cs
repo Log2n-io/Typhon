@@ -307,6 +307,47 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
         }
     }
 
+    // Workbench Data Flow module (#327): join slim ArchetypeRecord (id+name) with the v7 rich ArchetypeDefinitions
+    // (carries Revision + ComponentTypeIds[]) and the ComponentType id→name table to produce the rich ArchetypeDto.
+    // Trace sessions cannot recover [Archetype(Alias=...)] (the attribute is gone after recording), so Label = Name.
+    internal static ArchetypeDto[] ProjectArchetypes(
+        IReadOnlyList<ArchetypeRecord> slimRecords,
+        IReadOnlyList<ArchetypeDefinitionRecord> richDefs,
+        IReadOnlyList<ComponentTypeRecord> componentRecords)
+    {
+        var arr = new ArchetypeDto[slimRecords.Count];
+
+        var richById = richDefs.Count > 0
+            ? richDefs.GroupBy(d => d.ArchetypeId).ToDictionary(g => g.Key, g => g.First())
+            : null;
+        var componentNameById = componentRecords.GroupBy(c => c.ComponentTypeId)
+            .ToDictionary(g => g.Key, g => g.First().Name);
+
+        for (var i = 0; i < slimRecords.Count; i++)
+        {
+            var slim = slimRecords[i];
+            var label = slim.Name;
+            var revision = 0;
+            string[] componentTypeNames = [];
+
+            if (richById != null && richById.TryGetValue(slim.ArchetypeId, out var rich))
+            {
+                revision = rich.Revision;
+                componentTypeNames = new string[rich.ComponentTypeIds.Length];
+                for (var j = 0; j < rich.ComponentTypeIds.Length; j++)
+                {
+                    componentTypeNames[j] = componentNameById.TryGetValue(rich.ComponentTypeIds[j], out var n)
+                        ? n
+                        : $"#{rich.ComponentTypeIds[j]}";
+                }
+            }
+
+            arr[i] = new ArchetypeDto(slim.ArchetypeId, slim.Name, label, revision, componentTypeNames);
+        }
+
+        return arr;
+    }
+
     private static long ReadSourceTimestampFrequency(string sourcePath)
     {
         using var fs = File.OpenRead(sourcePath);
@@ -408,11 +449,6 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
         }
 
         var archetypeRecords = traceReader.ReadArchetypes();
-        var archetypes = new ArchetypeDto[archetypeRecords.Count];
-        for (var i = 0; i < archetypeRecords.Count; i++)
-        {
-            archetypes[i] = new ArchetypeDto(archetypeRecords[i].ArchetypeId, archetypeRecords[i].Name);
-        }
 
         var componentRecords = traceReader.ReadComponentTypes();
         var componentTypes = new ComponentTypeDto[componentRecords.Count];
@@ -425,6 +461,11 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
         var phases = traceReader.ReadPhases().ToArray();
         // v7 static-structure tables. Walk past them so any subsequent block reads land at the right offset.
         traceReader.ReadStaticStructures();
+
+        // Workbench Data Flow module (#327): project the slim ArchetypeRecord into the rich ArchetypeDto, joining the
+        // v7 ArchetypeDefinitions table when present. v6 traces (no rich defs) fall back to Label = Name, Revision = 0,
+        // empty ComponentTypeNames — but v6 is rejected at header read so this branch is effectively dead.
+        var archetypes = ProjectArchetypes(archetypeRecords, traceReader.ArchetypeDefinitions, componentRecords);
 
         // Snapshot the v7 records into a TraceSchemaProvider for the schema panels. Toolist (.ToList()) so the
         // arrays are independent of the reader's internal state — traceReader is disposed shortly after this call,
@@ -558,6 +599,9 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
         var qTicks = reader.QueueTickSummaries is { Count: > 0 } qt ? ((List<Typhon.Profiler.QueueTickSummary>)qt).ToArray() : [];
         var postTicks = reader.PostTickSummaries is { Count: > 0 } pt ? ((List<Typhon.Profiler.PostTickSummary>)pt).ToArray() : [];
         var qNames = reader.QueueIdToName is { Count: > 0 } qn ? new Dictionary<ushort, string>(qn) : new Dictionary<ushort, string>();
+        var satTouches = reader.SystemArchetypeTouches is { Count: > 0 } sat
+            ? ((List<Typhon.Profiler.SystemArchetypeTouchSummary>)sat).ToArray()
+            : [];
 
         return new ProfilerMetadataDto(
             Fingerprint: fingerprintHex,
@@ -574,7 +618,8 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
             SystemTickSummaries: sysTicks,
             QueueTickSummaries: qTicks,
             PostTickSummaries: postTicks,
-            QueueIdToName: qNames);
+            QueueIdToName: qNames,
+            SystemArchetypeTouches: satTouches);
     }
 
     /// <summary>

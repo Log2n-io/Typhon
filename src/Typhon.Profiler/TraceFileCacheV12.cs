@@ -117,6 +117,32 @@ public struct QueueTickSummary
 }
 
 /// <summary>
+/// Per-(tick, system, archetype) entity-touch rollup row in <see cref="CacheSectionId.SystemArchetypeTouches"/>. One row per active
+/// (system, archetype) pair per tick — sparse by definition (most systems target one archetype, callbacks emit no rows). Folded from
+/// the new <c>SchedulerSystemArchetype</c> wire event the engine emits at parallel-query completion. Sorted by (TickNumber, SystemIndex,
+/// ArchetypeId) for binary-search range scans. Wire size 16 bytes — packs tightly so a 100k-tick / 200-system trace at one row per
+/// (system, tick) lands at ~320 MB worst case (typical: ~30-50 MB after sparsity).
+/// </summary>
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
+public struct SystemArchetypeTouchSummary
+{
+    /// <summary>Tick number.</summary>
+    public uint TickNumber;
+
+    /// <summary>System index (matches <see cref="SystemTickSummary.SystemIndex"/>).</summary>
+    public ushort SystemIndex;
+
+    /// <summary>Archetype id (matches <c>ArchetypeRecord.ArchetypeId</c>; 0–4095 per the 12-bit allocation).</summary>
+    public ushort ArchetypeId;
+
+    /// <summary>Entities the system processed for this archetype during this tick.</summary>
+    public uint EntityCount;
+
+    /// <summary>Chunks dispatched for the parallel-query bracket (sum across workers).</summary>
+    public uint ChunkCount;
+}
+
+/// <summary>
 /// Per-tick post-tick serial markers in <see cref="CacheSectionId.PostTickSummaries"/>. One row per tick, capturing the duration of each <see cref="TickPhase"/>
 /// region that runs after the system DAG completes — wraps the existing <c>InspectorPhase</c> blocks in <c>TyphonRuntime.OnTickEndInternal</c>. Zero µs means
 /// the phase ran with no measurable work (e.g. no subscriptions active for <see cref="SubscriptionOutputUs"/>).

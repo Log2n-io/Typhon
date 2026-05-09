@@ -21,7 +21,9 @@ public record ProfilerMetadataDto(
     Typhon.Profiler.SystemTickSummary[] SystemTickSummaries,
     Typhon.Profiler.QueueTickSummary[] QueueTickSummaries,
     Typhon.Profiler.PostTickSummary[] PostTickSummaries,
-    System.Collections.Generic.Dictionary<ushort, string> QueueIdToName);
+    System.Collections.Generic.Dictionary<ushort, string> QueueIdToName,
+    // v15 (#327) — Workbench Data Flow per-(tick, system, archetype) entity-touch rollups. Empty for v14-or-older caches.
+    Typhon.Profiler.SystemArchetypeTouchSummary[] SystemArchetypeTouches);
 
 /// <summary>Header fields projected from <c>TraceFileHeader</c>. All primitive types — JSON-friendly.</summary>
 public record ProfilerHeaderDto(
@@ -66,8 +68,18 @@ public record SystemDefinitionDto(
     string[] ExplicitAfter,
     string[] ExplicitBefore);
 
-/// <summary>Archetype-id → name mapping.</summary>
-public record ArchetypeDto(ushort ArchetypeId, string Name);
+/// <summary>
+/// Archetype-id → metadata mapping. Surfaced through <c>TopologyDto.Archetypes</c> and consumed by the Workbench
+/// Data Flow / Access Matrix panels. <c>Label</c> is the user-facing name (<c>ArchetypeAttribute.Alias ?? Name</c>);
+/// <c>SchemaRevision</c> mirrors <c>ArchetypeAttribute.Revision</c>; <c>ComponentTypeNames</c> lists the slot-ordered
+/// component types declared on the archetype.
+/// </summary>
+public record ArchetypeDto(
+    ushort ArchetypeId,
+    string Name,
+    string Label,
+    int SchemaRevision,
+    string[] ComponentTypeNames);
 
 /// <summary>Component-type-id → name mapping.</summary>
 public record ComponentTypeDto(int ComponentTypeId, string Name);

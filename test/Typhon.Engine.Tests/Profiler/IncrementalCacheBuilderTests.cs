@@ -401,7 +401,7 @@ public class IncrementalCacheBuilderTests
         public void WriteTrailer(IReadOnlyList<TickSummary> ts, in GlobalMetricsFixed gm, IReadOnlyList<SystemAggregateDuration> sa,
             IReadOnlyList<ChunkManifestEntry> cm, IReadOnlyDictionary<int, string> sn, ReadOnlySpan<byte> sourceMetadataBytes, in CacheHeader h,
             IReadOnlyList<SystemTickSummary> sts, IReadOnlyList<QueueTickSummary> qts, IReadOnlyList<PostTickSummary> pts,
-            IReadOnlyDictionary<ushort, string> qIdToName)
+            IReadOnlyDictionary<ushort, string> qIdToName, IReadOnlyList<SystemArchetypeTouchSummary> sat)
             => throw new NotSupportedException("MemorySink does not support trailer.");
         public void Dispose() { }
     }

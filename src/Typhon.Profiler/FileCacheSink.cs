@@ -55,7 +55,8 @@ public sealed class FileCacheSink : ICacheChunkSink
         IReadOnlyList<SystemTickSummary> systemTickSummaries,
         IReadOnlyList<QueueTickSummary> queueTickSummaries,
         IReadOnlyList<PostTickSummary> postTickSummaries,
-        IReadOnlyDictionary<ushort, string> queueIdToName)
+        IReadOnlyDictionary<ushort, string> queueIdToName,
+        IReadOnlyList<SystemArchetypeTouchSummary> systemArchetypeTouches)
     {
         if (_trailerWritten)
         {
@@ -103,6 +104,10 @@ public sealed class FileCacheSink : ICacheChunkSink
 
         _writer.BeginSection(CacheSectionId.QueueNameTable);
         _writer.WriteQueueNameTable(queueIdToName);
+
+        // v15 (#327) — always emit, even if empty, so v15 readers can rely on its presence.
+        _writer.BeginSection(CacheSectionId.SystemArchetypeTouches);
+        _writer.WriteArray(ToArray(systemArchetypeTouches));
 
         _writer.Finalize(headerTemplate);
         _trailerWritten = true;

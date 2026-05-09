@@ -110,6 +110,8 @@ public sealed class RecordDecoder
         {
             TraceEventKind.SchedulerChunk => DecodeSchedulerChunk(record),
 
+            TraceEventKind.SchedulerSystemArchetype => DecodeSchedulerSystemArchetype(record),
+
             TraceEventKind.BTreeInsert or TraceEventKind.BTreeDelete
                 or TraceEventKind.BTreeNodeSplit or TraceEventKind.BTreeNodeMerge => DecodeBTree(record),
 
@@ -350,6 +352,27 @@ public sealed class RecordDecoder
             ChunkIndex = data.ChunkIndex,
             TotalChunks = data.TotalChunks,
             EntitiesProcessed = data.EntitiesProcessed,
+        };
+    }
+
+    private LiveTraceEvent DecodeSchedulerSystemArchetype(ReadOnlySpan<byte> record)
+    {
+        var data = SchedulerSystemArchetypeEventCodec.Decode(record);
+        return new LiveTraceEvent
+        {
+            Kind = (int)TraceEventKind.SchedulerSystemArchetype,
+            ThreadSlot = data.ThreadSlot,
+            TickNumber = _currentTick,
+            TimestampUs = data.StartTimestamp / _ticksPerUs,
+            DurationUs = data.DurationTicks / _ticksPerUs,
+            SpanId = Id(data.SpanId),
+            ParentSpanId = Id(data.ParentSpanId),
+            TraceIdHi = data.HasTraceContext ? Id(data.TraceIdHi) : null,
+            TraceIdLo = data.HasTraceContext ? Id(data.TraceIdLo) : null,
+            SystemIndex = data.SystemIndex,
+            ArchetypeId = data.ArchetypeId,
+            EntityCount = data.EntityCount,
+            TotalChunks = (ushort)Math.Min(data.ChunkCount, ushort.MaxValue),
         };
     }
 

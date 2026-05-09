@@ -50,6 +50,8 @@ public sealed class TraceFileCacheReader : IDisposable
     private readonly List<QueueTickSummary> _queueTickSummaries = [];
     private readonly List<PostTickSummary> _postTickSummaries = [];
     private readonly Dictionary<ushort, string> _queueIdToName = new();
+    // ── v15 (#327) ──────────────────────────────────────────────────────
+    private readonly List<SystemArchetypeTouchSummary> _systemArchetypeTouches = [];
     private byte[] _sourceMetadataBytes;
     private GlobalMetricsFixed _globalMetrics;
     private CacheHeader _header;
@@ -121,6 +123,9 @@ public sealed class TraceFileCacheReader : IDisposable
 
     /// <summary>v12 queue-id → display-name map. Empty for v11-or-older caches.</summary>
     public IReadOnlyDictionary<ushort, string> QueueIdToName => _queueIdToName;
+
+    /// <summary>v15 per-(tick, system, archetype) entity-touch rows. Empty for v14-or-older caches.</summary>
+    public IReadOnlyList<SystemArchetypeTouchSummary> SystemArchetypeTouches => _systemArchetypeTouches;
 
     /// <summary>
     /// True when <see cref="CacheHeaderFlags.IsSelfContained"/> is set in the header. A self-contained cache carries the source metadata tables
@@ -384,6 +389,11 @@ public sealed class TraceFileCacheReader : IDisposable
         if (_sectionsByid.TryGetValue(CacheSectionId.QueueNameTable, out var qnameSec))
         {
             LoadQueueNameTable(qnameSec);
+        }
+        // v15 section (#327). Optional — older v14 caches lack it; readers tolerate the absence.
+        if (_sectionsByid.TryGetValue(CacheSectionId.SystemArchetypeTouches, out var satSec))
+        {
+            LoadStructArray(satSec, _systemArchetypeTouches);
         }
     }
 

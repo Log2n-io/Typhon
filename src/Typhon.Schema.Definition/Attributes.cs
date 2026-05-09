@@ -89,10 +89,36 @@ public sealed class ArchetypeAttribute : Attribute
     /// <summary>Schema revision. Increment when the component set changes (add/remove components).</summary>
     public int Revision { get; }
 
-    public ArchetypeAttribute(ushort id, int revision = 1)
+    /// <summary>
+    /// Optional human-readable label used by the Workbench (Data Flow Timeline, Access Matrix, System DAG side panel).
+    /// Falls back to the declaring type name when null. Has no effect on persisted EntityIds.
+    /// </summary>
+    public string Alias { get; }
+
+    public ArchetypeAttribute(ushort id, int revision = 1, string alias = null)
     {
         Id = id;
         Revision = revision;
+        Alias = alias;
+    }
+}
+
+/// <summary>
+/// Marks a component struct as belonging to a named family. The Workbench Data Flow module groups components by family
+/// at the L2 granularity ("Component-family"). When the attribute is absent, a server-side naming heuristic
+/// (Spatial / Combat / AI / Inventory / Rendering / Networking / Input / Misc) classifies the component by its name.
+/// The attribute always wins over the heuristic.
+/// </summary>
+[AttributeUsage(AttributeTargets.Struct, Inherited = false)]
+[PublicAPI]
+public sealed class ComponentFamilyAttribute : Attribute
+{
+    public string Name { get; }
+
+    public ComponentFamilyAttribute(string name)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(name);
+        Name = name;
     }
 }
 

@@ -363,6 +363,48 @@ public class SchedulerRuntimeEventRoundTripTests
         Assert.That(d.Success, Is.EqualTo(1));
     }
 
+    // ─────────────────────────────────────────────────────────────────────
+    // Scheduler:SystemArchetype (kind 245) — Workbench Data Flow module (#327)
+    // ─────────────────────────────────────────────────────────────────────
+
+    [TestCase((ushort)0,   (ushort)0,    0,       0)]
+    [TestCase((ushort)1,   (ushort)100,  1,       1)]
+    [TestCase((ushort)42,  (ushort)256,  12_400,  16)]
+    [TestCase((ushort)999, (ushort)4095, 1_000_000, ushort.MaxValue)]
+    public void SchedulerSystemArchetype_RoundTrip(ushort sysIdx, ushort archetypeId, int entityCount, int chunkCount)
+    {
+        var ev = new SchedulerSystemArchetypeEvent
+        {
+            Header = new TraceSpanHeader
+            {
+                ThreadSlot = ThreadSlot,
+                StartTimestamp = StartTs,
+                SpanId = SpanId,
+                ParentSpanId = ParentSpanId,
+                TraceIdHi = TraceIdHi,
+                TraceIdLo = TraceIdLo,
+            },
+            SystemIndex = sysIdx,
+            ArchetypeId = archetypeId,
+            EntityCount = entityCount,
+            ChunkCount = chunkCount,
+        };
+        Span<byte> buf = stackalloc byte[ev.ComputeSize()];
+        ev.EncodeTo(buf, EndTs, out _);
+
+        var d = SchedulerSystemArchetypeEventCodec.Decode(buf);
+        Assert.That(d.SystemIndex, Is.EqualTo(sysIdx));
+        Assert.That(d.ArchetypeId, Is.EqualTo(archetypeId));
+        Assert.That(d.EntityCount, Is.EqualTo(entityCount));
+        Assert.That(d.ChunkCount, Is.EqualTo(chunkCount));
+        Assert.That(d.DurationTicks, Is.EqualTo(EndTs - StartTs));
+        Assert.That(d.ThreadSlot, Is.EqualTo(ThreadSlot));
+        Assert.That(d.StartTimestamp, Is.EqualTo(StartTs));
+        Assert.That(d.SpanId, Is.EqualTo(SpanId));
+        Assert.That(d.ParentSpanId, Is.EqualTo(ParentSpanId));
+        Assert.That(d.HasTraceContext, Is.False);
+    }
+
     [Test]
     public void RuntimeSubscriptionOutputExecute_RoundTrip()
     {

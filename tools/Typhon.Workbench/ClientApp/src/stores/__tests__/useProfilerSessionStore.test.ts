@@ -34,6 +34,7 @@ function makeMetadata(overrides: Partial<ProfilerMetadataDto> = {}): ProfilerMet
     queueTickSummaries: [],
     postTickSummaries: [],
     queueIdToName: {},
+    systemArchetypeTouches: [],
     ...overrides,
   };
 }

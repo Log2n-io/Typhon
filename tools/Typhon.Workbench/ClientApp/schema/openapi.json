@@ -6,7 +6,7 @@
   },
   "servers": [
     {
-      "url": "http://127.0.0.1:5200/"
+      "url": "http://localhost:5200/"
     }
   ],
   "paths": {
@@ -30,7 +30,12 @@
           "200": {
             "description": "OK"
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
       }
     },
     "/api/sessions/{sessionId}/resources/stream": {
@@ -53,7 +58,12 @@
           "200": {
             "description": "OK"
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
       }
     },
     "/api/sessions/{sessionId}/profiler/build-progress": {
@@ -76,7 +86,12 @@
           "200": {
             "description": "OK"
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
       }
     },
     "/api/sessions/{sessionId}/profiler/stream": {
@@ -99,7 +114,12 @@
           "200": {
             "description": "OK"
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
       }
     },
     "/api/sessions/{sessionId}/stream": {
@@ -122,7 +142,12 @@
           "200": {
             "description": "OK"
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
       }
     },
     "/api/options/stream": {
@@ -134,7 +159,12 @@
           "200": {
             "description": "OK"
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
       }
     },
     "/api/sessions/{sessionId}/topology": {
@@ -164,7 +194,13 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
       }
     },
     "/api/sessions/{sessionId}/queries/who-writes/{component}": {
@@ -202,7 +238,13 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
       }
     },
     "/api/sessions/{sessionId}/queries/who-reads/{component}": {
@@ -240,7 +282,13 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
       }
     },
     "/api/sessions/{sessionId}/tracks": {
@@ -270,7 +318,13 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
       }
     },
     "/api/sessions/{sessionId}/track/{trackId}": {
@@ -334,7 +388,13 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
       }
     },
     "/api/sessions/{sessionId}/aggregate": {
@@ -384,7 +444,13 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
       }
     },
     "/api/sessions/{sessionId}/subscribe": {
@@ -427,7 +493,13 @@
           "200": {
             "description": "OK"
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
       }
     },
     "/api/sessions/{sessionId}/unsubscribe": {
@@ -470,7 +542,13 @@
           "200": {
             "description": "OK"
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
       }
     },
     "/api/fs/home": {
@@ -489,7 +567,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
       }
     },
     "/api/fs/list": {
@@ -517,7 +600,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
       }
     },
     "/api/fs/stat": {
@@ -545,7 +633,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
       }
     },
     "/api/fixtures/capability": {
@@ -564,7 +657,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
       }
     },
     "/api/fixtures/create": {
@@ -603,7 +701,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
       }
     },
     "/api/fixtures/trace": {
@@ -642,7 +745,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
       }
     },
     "/api/fixtures/mock-profiler": {
@@ -681,7 +789,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
       }
     },
     "/api/fixtures/mock-profiler/{port}": {
@@ -705,7 +818,12 @@
           "200": {
             "description": "OK"
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
       }
     },
     "/health": {
@@ -717,7 +835,12 @@
           "200": {
             "description": "OK"
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
       }
     },
     "/api/options": {
@@ -736,7 +859,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
       },
       "put": {
         "tags": [
@@ -773,7 +901,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
       }
     },
     "/api/options/editor": {
@@ -812,7 +945,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
       }
     },
     "/api/options/profiler": {
@@ -851,7 +989,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
       }
     },
     "/api/sessions/{sessionId}/profiler/metadata": {
@@ -881,7 +1024,13 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
       }
     },
     "/api/sessions/{sessionId}/profiler/source-locations": {
@@ -911,7 +1060,13 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
       }
     },
     "/api/sessions/{sessionId}/profiler/disconnect": {
@@ -934,7 +1089,13 @@
           "200": {
             "description": "OK"
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
       }
     },
     "/api/sessions/{sessionId}/profiler/save-replay": {
@@ -984,7 +1145,13 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
       }
     },
     "/api/sessions/{sessionId}/profiler/chunks/{chunkIdx}": {
@@ -1017,7 +1184,78 @@
           "200": {
             "description": "OK"
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
+      }
+    },
+    "/api/sessions/{sessionId}/profiler/chunks/{chunkIdx}/decoded": {
+      "get": {
+        "tags": [
+          "Profiler"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "chunkIdx",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "kinds",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tick",
+            "in": "query",
+            "schema": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": [
+                "integer",
+                "string"
+              ],
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DecodedChunkDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
       }
     },
     "/api/profiler/workspace-root": {
@@ -1036,7 +1274,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
       }
     },
     "/api/profiler/open-in-editor": {
@@ -1075,7 +1318,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
       }
     },
     "/api/profiler/source": {
@@ -1127,7 +1375,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
       }
     },
     "/api/sessions/{sessionId}/resources/root": {
@@ -1164,7 +1417,13 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
       }
     },
     "/api/sessions/{sessionId}/resources/{resourceId}/children": {
@@ -1205,7 +1464,13 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
       }
     },
     "/api/sessions/{sessionId}/schema/components": {
@@ -1238,7 +1503,13 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
       }
     },
     "/api/sessions/{sessionId}/schema/components/{typeName}": {
@@ -1276,7 +1547,13 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
       }
     },
     "/api/sessions/{sessionId}/schema/archetypes": {
@@ -1309,7 +1586,13 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
       }
     },
     "/api/sessions/{sessionId}/schema/components/{typeName}/archetypes": {
@@ -1350,7 +1633,13 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
       }
     },
     "/api/sessions/{sessionId}/schema/components/{typeName}/indexes": {
@@ -1391,7 +1680,13 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
       }
     },
     "/api/sessions/{sessionId}/schema/components/{typeName}/systems": {
@@ -1429,7 +1724,13 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
       }
     },
     "/api/sessions/file": {
@@ -1468,7 +1769,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
       }
     },
     "/api/sessions/attach": {
@@ -1507,7 +1813,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
       }
     },
     "/api/sessions/trace": {
@@ -1546,7 +1857,39 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
+      }
+    },
+    "/api/sessions": {
+      "get": {
+        "tags": [
+          "Sessions"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SessionDto"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
       }
     },
     "/api/sessions/{id}": {
@@ -1576,7 +1919,13 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
       },
       "delete": {
         "tags": [
@@ -1597,7 +1946,13 @@
           "200": {
             "description": "OK"
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
       }
     },
     "/api/sessions/{id}/state": {
@@ -1627,7 +1982,13 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
       }
     },
     "/api/system/os": {
@@ -1646,7 +2007,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
       }
     }
   },
@@ -1800,7 +2166,10 @@
       "ArchetypeDto": {
         "required": [
           "archetypeId",
-          "name"
+          "name",
+          "label",
+          "schemaRevision",
+          "componentTypeNames"
         ],
         "type": "object",
         "properties": {
@@ -1817,6 +2186,29 @@
               "null",
               "string"
             ]
+          },
+          "label": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "schemaRevision": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "componentTypeNames": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
           }
         }
       },
@@ -1956,6 +2348,33 @@
           },
           "isContinuation": {
             "type": "boolean"
+          }
+        }
+      },
+      "ComponentFamilyMapDto": {
+        "required": [
+          "componentToFamily",
+          "familyOrder"
+        ],
+        "type": "object",
+        "properties": {
+          "componentToFamily": {
+            "type": [
+              "null",
+              "object"
+            ],
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "familyOrder": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
           }
         }
       },
@@ -2261,6 +2680,81 @@
               "null",
               "string"
             ]
+          }
+        }
+      },
+      "DecodedChunkDto": {
+        "required": [
+          "fromTick",
+          "toTick",
+          "eventCount",
+          "uncompressedBytes",
+          "isContinuation",
+          "timestampFrequency",
+          "filteredEventCount",
+          "events"
+        ],
+        "type": "object",
+        "properties": {
+          "fromTick": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "toTick": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "eventCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "uncompressedBytes": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "isContinuation": {
+            "type": "boolean"
+          },
+          "timestampFrequency": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "filteredEventCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "events": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/LiveTraceEvent"
+            }
           }
         }
       },
@@ -2638,6 +3132,553 @@
           }
         }
       },
+      "LiveTraceEvent": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "threadSlot": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "tickNumber": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "timestampUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "durationUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "null",
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "spanId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "parentSpanId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "traceIdHi": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "traceIdLo": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "phase": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "systemIndex": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "skipReason": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "overloadLevel": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "tickMultiplier": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "chunkIndex": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "totalChunks": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "entitiesProcessed": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "tsn": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "componentTypeId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "componentCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "conflictDetected": {
+            "type": [
+              "null",
+              "boolean"
+            ]
+          },
+          "archetypeId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "entityId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "cascadeCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "resultCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "scanMode": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "found": {
+            "type": [
+              "null",
+              "boolean"
+            ]
+          },
+          "mode": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "deltaCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "filePageIndex": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "pageCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "migrationCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "walLsn": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "retryCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "dirtyCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "epochCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "batchByteCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "frameCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "highLsn": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "newSegmentIndex": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "targetLsn": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "dirtyPageCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "reason": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "writtenCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "transitionedCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "recycledCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "entityCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "mutationCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "samplingInterval": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "direction": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "sourceTag": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "sizeBytes": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "null",
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "totalAfterBytes": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "null",
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "flags": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "uint32"
+          },
+          "gauges": {
+            "type": [
+              "null",
+              "object"
+            ],
+            "additionalProperties": {
+              "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+              "type": [
+                "number",
+                "string"
+              ],
+              "format": "double"
+            }
+          },
+          "generation": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "gcReason": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "gcType": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "gcCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "uint32"
+          },
+          "gcPauseDurationUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "null",
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "gcPromotedBytes": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "null",
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "managedThreadId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "threadName": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "threadKind": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ThreadKind"
+              }
+            ]
+          }
+        }
+      },
       "OpenInEditorRequest": {
         "required": [
           "file",
@@ -2817,7 +3858,8 @@
           "systemTickSummaries",
           "queueTickSummaries",
           "postTickSummaries",
-          "queueIdToName"
+          "queueIdToName",
+          "systemArchetypeTouches"
         ],
         "type": "object",
         "properties": {
@@ -2939,6 +3981,15 @@
             ],
             "additionalProperties": {
               "type": "string"
+            }
+          },
+          "systemArchetypeTouches": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/SystemArchetypeTouchSummary"
             }
           }
         }
@@ -3474,6 +4525,9 @@
           }
         }
       },
+      "SystemArchetypeTouchSummary": {
+        "type": "object"
+      },
       "SystemDefinitionDto": {
         "required": [
           "index",
@@ -3785,6 +4839,9 @@
       "SystemTickSummary": {
         "type": "object"
       },
+      "ThreadKind": {
+        "type": "integer"
+      },
       "TickSummaryDto": {
         "required": [
           "tickNumber",
@@ -3928,7 +4985,8 @@
           "systems",
           "archetypes",
           "componentTypes",
-          "phases"
+          "phases",
+          "componentFamilies"
         ],
         "type": "object",
         "properties": {
@@ -3967,6 +5025,9 @@
             "items": {
               "type": "string"
             }
+          },
+          "componentFamilies": {
+            "$ref": "#/components/schemas/ComponentFamilyMapDto"
           }
         }
       },
@@ -4091,6 +5152,26 @@
             ]
           }
         }
+      }
+    },
+    "securitySchemes": {
+      "Bearer": {
+        "type": "http",
+        "description": "Personal Access Token minted via the `--new-token <name>` CLI flag. Stored hash at `%LOCALAPPDATA%/Typhon/Workbench/tokens/<name>.token`. Sent as `Authorization: Bearer <token>`.",
+        "scheme": "bearer",
+        "bearerFormat": "PAT (64-char hex)"
+      },
+      "WorkbenchToken": {
+        "type": "apiKey",
+        "description": "Per-process bootstrap token at `%LOCALAPPDATA%/Typhon/Workbench/bootstrap.token`. Equivalent to the Bearer PAT for auth purposes — pick one. Regenerated each time the Workbench restarts.",
+        "name": "X-Workbench-Token",
+        "in": "header"
+      },
+      "SessionToken": {
+        "type": "apiKey",
+        "description": "Session id GUID returned by `POST /api/sessions/file|attach|trace`. Required IN ADDITION to the Bearer / X-Workbench-Token credential on session-scoped routes (those whose path contains `{sessionId}`). Must match the URL's session id.",
+        "name": "X-Session-Token",
+        "in": "header"
       }
     }
   },

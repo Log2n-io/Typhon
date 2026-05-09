@@ -916,6 +916,15 @@ public enum TraceEventKind : byte
     /// </summary>
     QueueTickEnd = 244,
 
+    /// <summary>
+    /// Per-(system, archetype) entity-touch rollup emitted at parallel-query completion. Captures the cross-dimension that
+    /// <see cref="SchedulerChunk"/> (per-system) and <see cref="EcsQueryExecute"/> (per-archetype) leave separate. Feeds the
+    /// Workbench Data Flow module's <c>archetype/*</c>, <c>system-archetype/*</c>, and <c>component-family/*</c> track families.
+    /// Payload: <c>systemIndex: u16, archetypeId: u16, entityCount: i32, chunkCount: i32</c> = 12 bytes after the span header.
+    /// Gated by <see cref="Typhon.Engine.Observability.TelemetryConfig.SchedulerArchetypeTouchesActive"/>.
+    /// </summary>
+    SchedulerSystemArchetype = 245,
+
     // ── Fallback ──
 
     /// <summary>User-defined span with inline UTF-8 null-terminated name. Used for dynamic-string call sites (tests, demo code). Payload: null-terminated UTF-8 bytes.</summary>

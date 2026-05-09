@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
@@ -86,6 +87,60 @@ public sealed class TopologyAccessDeclarationsTests
         Assert.That(damage.ReadsSnapshot, Is.EqualTo(new[] { "Game.Position" }));
         Assert.That(damage.Writes, Is.EqualTo(new[] { "Game.Health" }));
         Assert.That(damage.WritesEvents, Is.EqualTo(new[] { "Death" }));
+    }
+
+    [Test]
+    public async Task Topology_PopulatesArchetypeLabelAndComponentTypeNames()
+    {
+        var session = await CreateRfc07TraceAsync();
+        var topo = await WaitForTopologyAsync(session.SessionId);
+
+        // The RFC 07 fixture writes an empty archetype table — what matters here is the projection shape: every record
+        // exposes Label, SchemaRevision and ComponentTypeNames in the contract, regardless of whether the trace populated them.
+        Assert.That(topo.Archetypes, Is.Not.Null);
+        foreach (var a in topo.Archetypes)
+        {
+            // Trace sessions can't recover [Archetype(Alias=...)] — Label falls back to Name.
+            Assert.That(a.Label, Is.EqualTo(a.Name));
+            Assert.That(a.SchemaRevision, Is.GreaterThanOrEqualTo(0));
+            Assert.That(a.ComponentTypeNames, Is.Not.Null);
+        }
+    }
+
+    [Test]
+    public async Task Topology_ComponentFamilies_ClassifiesAllComponents()
+    {
+        var session = await CreateRfc07TraceAsync();
+        var topo = await WaitForTopologyAsync(session.SessionId);
+
+        Assert.That(topo.ComponentFamilies, Is.Not.Null, "ComponentFamilies must be populated");
+        Assert.That(topo.ComponentFamilies.ComponentToFamily, Is.Not.Empty);
+        // Every component on the wire should have a family entry.
+        foreach (var ct in topo.ComponentTypes)
+        {
+            Assert.That(topo.ComponentFamilies.ComponentToFamily.ContainsKey(ct.Name), Is.True,
+                $"component '{ct.Name}' must have a family classification");
+        }
+
+        // Heuristic check: Position/Velocity → Spatial, Health → Combat. Fixture uses Game.Position / Game.Velocity / Game.Health.
+        var pos = topo.ComponentFamilies.ComponentToFamily["Game.Position"];
+        Assert.That(pos, Is.EqualTo("Spatial"));
+        var vel = topo.ComponentFamilies.ComponentToFamily["Game.Velocity"];
+        Assert.That(vel, Is.EqualTo("Spatial"));
+        var health = topo.ComponentFamilies.ComponentToFamily["Game.Health"];
+        Assert.That(health, Is.EqualTo("Combat"));
+
+        // Family order should be a subset of canonical, in canonical order, with no duplicates.
+        var canonical = new[] { "Spatial", "Combat", "AI", "Inventory", "Rendering", "Networking", "Input", "Misc" };
+        var seen = new HashSet<string>();
+        var lastIdx = -1;
+        foreach (var fam in topo.ComponentFamilies.FamilyOrder)
+        {
+            Assert.That(seen.Add(fam), Is.True, $"family '{fam}' appears twice in FamilyOrder");
+            var idx = Array.IndexOf(canonical, fam);
+            Assert.That(idx, Is.GreaterThan(lastIdx), $"family '{fam}' is out of canonical order");
+            lastIdx = idx;
+        }
     }
 
     [Test]

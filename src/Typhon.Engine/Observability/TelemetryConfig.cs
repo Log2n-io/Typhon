@@ -90,6 +90,13 @@ public static class TelemetryConfig
     public static readonly bool SchedulerTrackStragglerGap;
 
     /// <summary>
+    /// Whether to capture per-(system, archetype) entity-touch counts at parallel-query completion (Workbench Data Flow module).
+    /// Reads from <c>Typhon:Telemetry:Scheduler:ArchetypeTouches</c> (legacy fallback: <c>Typhon:Profiler:Scheduler:ArchetypeTouches:Enabled</c>).
+    /// Default <c>true</c>. JIT dead-code-eliminates the capture path when <c>false</c>.
+    /// </summary>
+    public static readonly bool SchedulerArchetypeTouchesActive;
+
+    /// <summary>
     /// Combined flag: true only if the new master AND scheduler telemetry are enabled.
     /// Gates deep metrics (straggler gap, per-worker utilization). The ring buffer itself is always on.
     /// </summary>
@@ -664,6 +671,10 @@ public static class TelemetryConfig
         SchedulerTrackStragglerGap = ReadBoolFallback(config,
             "Typhon:Profiler:Scheduler:Gauges:StragglerGap:Enabled",
             "Typhon:Telemetry:Scheduler:TrackStragglerGap",
+            true, ref legacyDetected);
+        SchedulerArchetypeTouchesActive = ReadBoolFallback(config,
+            "Typhon:Telemetry:Scheduler:ArchetypeTouches",
+            "Typhon:Profiler:Scheduler:ArchetypeTouches:Enabled",
             true, ref legacyDetected);
 
         // ─── Concurrency subtree (Phase 1 + Phase 2 final shape) ───────────────
@@ -1533,7 +1544,8 @@ public static class TelemetryConfig
 
            Scheduler: Active={SchedulerActive}
              Enabled={SchedulerEnabled}, TransitionLatency={SchedulerTrackTransitionLatency},
-             WorkerUtilization={SchedulerTrackWorkerUtilization}, StragglerGap={SchedulerTrackStragglerGap}
+             WorkerUtilization={SchedulerTrackWorkerUtilization}, StragglerGap={SchedulerTrackStragglerGap},
+             ArchetypeTouches={SchedulerArchetypeTouchesActive}
          """;
 
     /// <summary>

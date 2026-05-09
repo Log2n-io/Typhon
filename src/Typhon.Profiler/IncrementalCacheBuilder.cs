@@ -63,6 +63,19 @@ public sealed class IncrementalCacheBuilder : IDisposable
     private PostTickSummary _currentTickPostMarkers;
     private bool _currentTickPostMarkersHasData;
     private readonly List<PostTickSummary> _postTickSummaries = new(capacity: 4096);
+    // Workbench Data Flow module (#327): per-tick scratch state for SystemArchetypeTouchSummary[]. Keyed by (sysIdx, archetypeId);
+    // flushed at FinalizeCurrentTick. Sparse — only systems that emitted a SchedulerSystemArchetype event this tick land here.
+    private readonly Dictionary<uint, SystemArchetypeTouchAccumulator> _currentTickSystemArchetypeTouches = new();
+    private readonly List<SystemArchetypeTouchSummary> _systemArchetypeTouches = new(capacity: 4096);
+
+    /// <summary>Per-(system, archetype) per-tick scratch entry, accumulated as <c>SchedulerSystemArchetype</c> events arrive.</summary>
+    private struct SystemArchetypeTouchAccumulator
+    {
+        public ushort SystemIndex;
+        public ushort ArchetypeId;
+        public uint EntityCount;
+        public uint ChunkCount;
+    }
 
     /// <summary>Per-system per-tick scratch row, accumulated as <c>SystemReady</c> / <c>SystemSkipped</c> / <c>SchedulerChunk</c> events arrive.</summary>
     private struct SystemTickAccumulator
@@ -82,6 +95,9 @@ public sealed class IncrementalCacheBuilder : IDisposable
 
     /// <summary>Read-only view of finalized per-(tick, queue) rows.</summary>
     public IReadOnlyList<QueueTickSummary> QueueTickSummaries => _queueTickSummaries;
+
+    /// <summary>Read-only view of finalized per-(tick, system, archetype) rows.</summary>
+    public IReadOnlyList<SystemArchetypeTouchSummary> SystemArchetypeTouches => _systemArchetypeTouches;
 
     /// <summary>Read-only view of finalized per-tick post-tick markers.</summary>
     public IReadOnlyList<PostTickSummary> PostTickSummaries => _postTickSummaries;
@@ -623,7 +639,7 @@ public sealed class IncrementalCacheBuilder : IDisposable
                 };
                 CacheHeader.SetIdentifier(ref cacheHeader, _fingerprint);
                 _sink.WriteTrailer(_tickSummaries, metrics, aggArr, _chunkManifest, _spanNames, default, cacheHeader,
-                    _systemTickSummaries, _queueTickSummaries, _postTickSummaries, _queueIdToName);
+                    _systemTickSummaries, _queueTickSummaries, _postTickSummaries, _queueIdToName, _systemArchetypeTouches);
             }
         }
         finally
@@ -928,6 +944,32 @@ public sealed class IncrementalCacheBuilder : IDisposable
             _currentTickQueues.Clear();
         }
 
+        // Per-(system, archetype) rows. Sparse — most ticks emit a handful of rows. Sort by (sysIdx, archetypeId) so the
+        // section is sorted by (TickNumber, SystemIndex, ArchetypeId) once concatenated across ticks (FoldV12 calls per-tick).
+        if (_currentTickSystemArchetypeTouches.Count > 0)
+        {
+            var keys = new uint[_currentTickSystemArchetypeTouches.Count];
+            var k = 0;
+            foreach (var key in _currentTickSystemArchetypeTouches.Keys)
+            {
+                keys[k++] = key;
+            }
+            Array.Sort(keys);
+            for (var i = 0; i < keys.Length; i++)
+            {
+                var acc = _currentTickSystemArchetypeTouches[keys[i]];
+                _systemArchetypeTouches.Add(new SystemArchetypeTouchSummary
+                {
+                    TickNumber = tickNumber,
+                    SystemIndex = acc.SystemIndex,
+                    ArchetypeId = acc.ArchetypeId,
+                    EntityCount = acc.EntityCount,
+                    ChunkCount = acc.ChunkCount,
+                });
+            }
+            _currentTickSystemArchetypeTouches.Clear();
+        }
+
         // Post-tick row. Always emit one row per tick — zero µs for phases that didn't fire — so consumers can index by tick.
         if (_currentTickPostMarkersHasData)
         {
@@ -1043,6 +1085,38 @@ public sealed class IncrementalCacheBuilder : IDisposable
 
                 var data = QueueTickEndCodec.Read(records.Slice(pos, size));
                 _currentTickQueues[data.QueueId] = data;
+                break;
+            }
+            case TraceEventKind.SchedulerSystemArchetype:
+            {
+                // Span event. Header: 12 B common + 25 B span ext (+ optional 16 B trace context). Payload after that:
+                //   u16 systemIdx, u16 archetypeId, i32 entityCount, i32 chunkCount = 12 B.
+                if (size < CommonHeaderSize + SpanHeaderExtSize + 12)
+                {
+                    return;
+                }
+
+                var spanFlags = records[pos + 36];
+                var hasTraceContext = (spanFlags & 0x01) != 0;
+                var payloadOffset = pos + CommonHeaderSize + SpanHeaderExtSize + (hasTraceContext ? TraceContextSize : 0);
+                if (payloadOffset + 12 > pos + size)
+                {
+                    return;
+                }
+
+                var sysIdx = BinaryPrimitives.ReadUInt16LittleEndian(records[payloadOffset..]);
+                var archId = BinaryPrimitives.ReadUInt16LittleEndian(records[(payloadOffset + 2)..]);
+                var entities = BinaryPrimitives.ReadInt32LittleEndian(records[(payloadOffset + 4)..]);
+                var chunks = BinaryPrimitives.ReadInt32LittleEndian(records[(payloadOffset + 8)..]);
+
+                var key = ((uint)sysIdx << 16) | archId;
+                ref var acc = ref System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault(_currentTickSystemArchetypeTouches, key, out _);
+                acc.SystemIndex = sysIdx;
+                acc.ArchetypeId = archId;
+                // The engine emits one event per (system, archetype) pair per tick at system completion, so accumulation is degenerate
+                // (last write wins). Add anyway so a future capture pattern that emits multiple events per pair stays consistent.
+                acc.EntityCount += (uint)Math.Max(0, entities);
+                acc.ChunkCount += (uint)Math.Max(0, chunks);
                 break;
             }
             case TraceEventKind.RuntimePhaseSpan:

@@ -247,6 +247,15 @@ public enum CacheSectionId : ushort
     /// in any way the trace cares about). Drives the resource-tree panel for trace sessions.
     /// </summary>
     ResourceGraphSnapshot = 17,
+
+    /// <summary>
+    /// Per-(tick, system, archetype) entity-touch rollup (<see cref="SystemArchetypeTouchSummary"/>[]) added in v15 for the Workbench
+    /// Data Flow module (#327). Folded from the new <c>SchedulerSystemArchetype</c> wire event the engine emits at parallel-query
+    /// completion. Sparse — most systems target one archetype, and most ticks emit one row per active system. Sorted by
+    /// (TickNumber, SystemIndex, ArchetypeId). Drives the <c>archetype/*</c>, <c>system-archetype/*</c>, and <c>component-family/*</c>
+    /// track families surfaced through <c>AggregationService</c>.
+    /// </summary>
+    SystemArchetypeTouches = 18,
 }
 
 /// <summary>
@@ -527,14 +536,17 @@ public static class TraceFileCacheConstants
     /// v13: <see cref="SystemTickSummary"/> grew a <c>TotalCpuUs</c> field — total CPU time consumed across all workers (sum of chunk durations),
     /// distinct from <c>DurationUs</c> (wall-clock). Enables correct parallelism-inefficiency math in the workbench (A1/A2 in `09-system-dag.md`)
     /// without requiring per-chunk decode. v12 caches must rebuild.
-    /// v14 (current): six new sections forwarded from the source's v7 static-structure tables —
+    /// v14: six new sections forwarded from the source's v7 static-structure tables —
     /// <see cref="CacheSectionId.ComponentDefinitions"/>, <see cref="CacheSectionId.ArchetypeDefinitions"/>,
     /// <see cref="CacheSectionId.IndexCatalog"/>, <see cref="CacheSectionId.RuntimeConfig"/>,
     /// <see cref="CacheSectionId.EventQueueCatalog"/>, <see cref="CacheSectionId.ResourceGraphSnapshot"/>. Drives the Workbench schema
     /// panels for trace sessions (SchemaBrowser, ArchetypeBrowser, SchemaIndexes, et al.). v13 caches must rebuild — and since the source
     /// also bumped to v7, the source itself must be re-recorded; v6 source files are hard-rejected by the reader.
+    /// v15 (current): one new section <see cref="CacheSectionId.SystemArchetypeTouches"/> folded from the new
+    /// <c>SchedulerSystemArchetype</c> wire event (kind 245). Drives the <c>archetype/*</c>, <c>system-archetype/*</c>, and
+    /// <c>component-family/*</c> track families in the Workbench Data Flow module (#327). v14 caches must rebuild.
     /// </remarks>
-    public const ushort CurrentChunkerVersion = 14;
+    public const ushort CurrentChunkerVersion = 15;
 
     /// <summary>Sidecar file extension, appended to the source path (e.g., <c>foo.typhon-trace</c> → <c>foo.typhon-trace-cache</c>).</summary>
     public const string CacheFileExtension = "-cache";

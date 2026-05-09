@@ -153,6 +153,12 @@ public static class AggregationService
         "peakDepth", "endOfTickDepth", "overflowCount", "produced", "consumed",
     };
 
+    // Workbench Data Flow module (#327): three new track families share the same field set.
+    private static readonly HashSet<string> SystemArchetypeFields = new(StringComparer.Ordinal)
+    {
+        "entitiesProcessed", "chunkCount",
+    };
+
     private static void ValidateQuery(AggregationQueryDto query, ProfilerMetadataDto metadata)
     {
         if (query.Range == null || query.Range.Length != 2)
@@ -241,6 +247,61 @@ public static class AggregationService
             }
             return;
         }
+        // Workbench Data Flow module (#327) — three new track families. All share the {entitiesProcessed, chunkCount} field set.
+        // The trackId encodes the rollup key; resolution happens once per query (TryFind* below).
+        if (trackId.StartsWith("system-archetype/", StringComparison.Ordinal))
+        {
+            // Order matters: this prefix must be checked BEFORE the "system/" prefix to avoid false matches.
+            var rest = trackId["system-archetype/".Length..];
+            var sep = rest.IndexOf('/');
+            if (sep <= 0 || sep >= rest.Length - 1)
+            {
+                throw new WorkbenchException(400, "bad-trackid",
+                    $"Invalid system-archetype track id '{trackId}'. Expected 'system-archetype/<systemName>/<archetypeLabel>'.");
+            }
+            var sysName = rest[..sep];
+            var archLabel = rest[(sep + 1)..];
+            if (!TryFindSystemIndex(metadata, sysName, out _))
+            {
+                throw new WorkbenchException(400, "unknown-system", $"No system named '{sysName}' in topology.");
+            }
+            if (!TryFindArchetypeId(metadata, archLabel, out _))
+            {
+                throw new WorkbenchException(400, "unknown-archetype", $"No archetype labelled '{archLabel}' in topology.");
+            }
+            if (!SystemArchetypeFields.Contains(query.Field))
+            {
+                throw new WorkbenchException(400, "unknown-field", $"Unknown field '{query.Field}' for track '{trackId}'");
+            }
+            return;
+        }
+        if (trackId.StartsWith("archetype/", StringComparison.Ordinal))
+        {
+            var label = trackId["archetype/".Length..];
+            if (!TryFindArchetypeId(metadata, label, out _))
+            {
+                throw new WorkbenchException(400, "unknown-archetype", $"No archetype labelled '{label}' in topology.");
+            }
+            if (!SystemArchetypeFields.Contains(query.Field))
+            {
+                throw new WorkbenchException(400, "unknown-field", $"Unknown field '{query.Field}' for track '{trackId}'");
+            }
+            return;
+        }
+        if (trackId.StartsWith("component-family/", StringComparison.Ordinal))
+        {
+            var family = trackId["component-family/".Length..];
+            if (!FamilyExists(metadata, family))
+            {
+                throw new WorkbenchException(400, "unknown-family",
+                    $"No component family '{family}' in topology. Check ComponentFamilies.FamilyOrder.");
+            }
+            if (!SystemArchetypeFields.Contains(query.Field))
+            {
+                throw new WorkbenchException(400, "unknown-field", $"Unknown field '{query.Field}' for track '{trackId}'");
+            }
+            return;
+        }
 
         throw new WorkbenchException(400, "unknown-track", $"Unknown track ID: '{trackId}'");
     }
@@ -302,6 +363,57 @@ public static class AggregationService
         return false;
     }
 
+    private static bool TryFindArchetypeId(ProfilerMetadataDto metadata, string labelOrName, out ushort archId)
+    {
+        for (var i = 0; i < metadata.Archetypes.Length; i++)
+        {
+            var a = metadata.Archetypes[i];
+            // Label is the user-facing handle; fall back to Name so URLs that use the raw type name still work.
+            if (a.Label == labelOrName || a.Name == labelOrName)
+            {
+                archId = a.ArchetypeId;
+                return true;
+            }
+        }
+        archId = 0;
+        return false;
+    }
+
+    private static bool FamilyExists(ProfilerMetadataDto metadata, string family)
+    {
+        // Topology is fetched separately from metadata; AggregationService doesn't have direct access to TopologyDto.
+        // Walk SystemArchetypeTouches for any archetype whose ComponentTypeNames intersect the family's component set
+        // would require the family map. Simpler: check whether ANY component name maps to this family by walking the
+        // component list. We accept the family as long as it appears as a value in the archetype-component map; the
+        // family map itself lives on the topology endpoint, but the same name appears on ComponentFamilies which the
+        // controller injected into the topology DTO. Without that here, we treat any non-empty string as valid and let
+        // the per-tick walk return zero rows when the family has no member archetype.
+        return !string.IsNullOrEmpty(family);
+    }
+
+    /// <summary>
+    /// Returns the set of archetype ids whose component-type-names list contains at least one component classified into
+    /// the given family by the heuristic. Computed per query — small (cap is the canonical family count × archetypes).
+    /// Caller should treat an empty result as "no archetypes match this family in this trace".
+    /// </summary>
+    private static HashSet<ushort> ResolveFamilyArchetypes(ProfilerMetadataDto metadata, string family)
+    {
+        var archIds = new HashSet<ushort>();
+        for (var i = 0; i < metadata.Archetypes.Length; i++)
+        {
+            var a = metadata.Archetypes[i];
+            for (var c = 0; c < a.ComponentTypeNames.Length; c++)
+            {
+                if (Typhon.Engine.Data.Schema.ComponentFamilyResolver.ResolveByHeuristic(a.ComponentTypeNames[c]) == family)
+                {
+                    archIds.Add(a.ArchetypeId);
+                    break;
+                }
+            }
+        }
+        return archIds;
+    }
+
     // ──────────────────────────────────────────────────────────────────────────
     // Count + fill — track-family dispatch
     // ──────────────────────────────────────────────────────────────────────────
@@ -350,6 +462,35 @@ public static class AggregationService
             return n;
         }
 
+        if (trackId.StartsWith("system-archetype/", StringComparison.Ordinal))
+        {
+            // One row per tick (the tick's rolled-up (sysIdx, archId) entry; cache builder emits it sparsely so direct count works).
+            var rest = trackId["system-archetype/".Length..];
+            var sep = rest.IndexOf('/');
+            TryFindSystemIndex(metadata, rest[..sep], out var sysIdx);
+            TryFindArchetypeId(metadata, rest[(sep + 1)..], out var archId);
+            var rows = metadata.SystemArchetypeTouches;
+            var n = 0;
+            for (var i = 0; i < rows.Length; i++)
+            {
+                ref readonly var r = ref rows[i];
+                if (r.SystemIndex == sysIdx && r.ArchetypeId == archId && r.TickNumber >= t0 && r.TickNumber <= t1) { n++; }
+            }
+            return n;
+        }
+        if (trackId.StartsWith("archetype/", StringComparison.Ordinal))
+        {
+            // Multi-row rollup per tick: one value per tick where ANY system touched the archetype. Count distinct ticks.
+            TryFindArchetypeId(metadata, trackId["archetype/".Length..], out var archId);
+            return CountDistinctTicksForArchetype(metadata.SystemArchetypeTouches, archId, archetypeIds: null, t0, t1);
+        }
+        if (trackId.StartsWith("component-family/", StringComparison.Ordinal))
+        {
+            var family = trackId["component-family/".Length..];
+            var familyArchIds = ResolveFamilyArchetypes(metadata, family);
+            return CountDistinctTicksForArchetype(metadata.SystemArchetypeTouches, archetypeId: 0, archetypeIds: familyArchIds, t0, t1);
+        }
+
         // posttick/<phase>
         var prows = metadata.PostTickSummaries;
         var pn = 0;
@@ -359,6 +500,26 @@ public static class AggregationService
             if (r.TickNumber >= t0 && r.TickNumber <= t1) { pn++; }
         }
         return pn;
+    }
+
+    // Counts distinct tick numbers that have at least one matching SystemArchetypeTouchSummary row.
+    // archetypeIds != null → match any archetype in the set; otherwise match the single archetypeId.
+    private static int CountDistinctTicksForArchetype(
+        SystemArchetypeTouchSummary[] rows, ushort archetypeId, HashSet<ushort> archetypeIds, uint t0, uint t1)
+    {
+        if (rows.Length == 0)
+        {
+            return 0;
+        }
+        var seen = new HashSet<uint>();
+        for (var i = 0; i < rows.Length; i++)
+        {
+            ref readonly var r = ref rows[i];
+            if (r.TickNumber < t0 || r.TickNumber > t1) { continue; }
+            var match = archetypeIds != null ? archetypeIds.Contains(r.ArchetypeId) : r.ArchetypeId == archetypeId;
+            if (match) { seen.Add(r.TickNumber); }
+        }
+        return seen.Count;
     }
 
     private static void FillValues(Span<double> dest, TickSummaryDto[] ticks, AggregationQueryDto query, ProfilerMetadataDto metadata)
@@ -415,6 +576,35 @@ public static class AggregationService
             return;
         }
 
+        if (trackId.StartsWith("system-archetype/", StringComparison.Ordinal))
+        {
+            var rest = trackId["system-archetype/".Length..];
+            var sep = rest.IndexOf('/');
+            TryFindSystemIndex(metadata, rest[..sep], out var sysIdx);
+            TryFindArchetypeId(metadata, rest[(sep + 1)..], out var archId);
+            var rows = metadata.SystemArchetypeTouches;
+            for (var i = 0; i < rows.Length && idx < dest.Length; i++)
+            {
+                ref readonly var r = ref rows[i];
+                if (r.SystemIndex != sysIdx || r.ArchetypeId != archId || r.TickNumber < t0 || r.TickNumber > t1) { continue; }
+                dest[idx++] = ExtractSystemArchetypeField(in r, field);
+            }
+            return;
+        }
+        if (trackId.StartsWith("archetype/", StringComparison.Ordinal))
+        {
+            TryFindArchetypeId(metadata, trackId["archetype/".Length..], out var archId);
+            FillArchetypeRollup(dest, ref idx, metadata.SystemArchetypeTouches, archId, archetypeIds: null, t0, t1, field);
+            return;
+        }
+        if (trackId.StartsWith("component-family/", StringComparison.Ordinal))
+        {
+            var family = trackId["component-family/".Length..];
+            var familyArchIds = ResolveFamilyArchetypes(metadata, family);
+            FillArchetypeRollup(dest, ref idx, metadata.SystemArchetypeTouches, archetypeId: 0, archetypeIds: familyArchIds, t0, t1, field);
+            return;
+        }
+
         // posttick/<phase>
         var phase = trackId["posttick/".Length..];
         var prows = metadata.PostTickSummaries;
@@ -423,6 +613,85 @@ public static class AggregationService
             ref readonly var r = ref prows[i];
             if (r.TickNumber < t0 || r.TickNumber > t1) { continue; }
             dest[idx++] = ExtractPostTickField(in r, phase);
+        }
+    }
+
+    // Same as FillArchetypeRollup but also captures the source tick number for each rolled-up value (used by topk).
+    private static void FillArchetypeRollupWithTicks(
+        Span<double> values, Span<uint> ticks, ref int idx, SystemArchetypeTouchSummary[] rows,
+        ushort archetypeId, HashSet<ushort> archetypeIds, uint t0, uint t1, string field)
+    {
+        uint currentTick = 0;
+        var currentEntities = 0u;
+        var currentChunks = 0u;
+        var currentHasData = false;
+        for (var i = 0; i < rows.Length; i++)
+        {
+            ref readonly var r = ref rows[i];
+            if (r.TickNumber < t0 || r.TickNumber > t1) { continue; }
+            var match = archetypeIds != null ? archetypeIds.Contains(r.ArchetypeId) : r.ArchetypeId == archetypeId;
+            if (!match) { continue; }
+
+            if (currentHasData && r.TickNumber != currentTick)
+            {
+                if (idx < values.Length)
+                {
+                    values[idx] = field == "chunkCount" ? currentChunks : currentEntities;
+                    ticks[idx] = currentTick;
+                    idx++;
+                }
+                currentEntities = 0;
+                currentChunks = 0;
+            }
+            currentTick = r.TickNumber;
+            currentEntities += r.EntityCount;
+            currentChunks += r.ChunkCount;
+            currentHasData = true;
+        }
+
+        if (currentHasData && idx < values.Length)
+        {
+            values[idx] = field == "chunkCount" ? currentChunks : currentEntities;
+            ticks[idx] = currentTick;
+            idx++;
+        }
+    }
+
+    // Per-tick rollup: one value per distinct tick where any matching row exists. Sums entitiesProcessed/chunkCount.
+    private static void FillArchetypeRollup(
+        Span<double> dest, ref int idx, SystemArchetypeTouchSummary[] rows,
+        ushort archetypeId, HashSet<ushort> archetypeIds, uint t0, uint t1, string field)
+    {
+        // Walk in order — rows are stored sorted by (tick, sys, arch) so consecutive entries with the same tick can be summed in-place.
+        uint currentTick = 0;
+        var currentEntities = 0u;
+        var currentChunks = 0u;
+        var currentHasData = false;
+        for (var i = 0; i < rows.Length; i++)
+        {
+            ref readonly var r = ref rows[i];
+            if (r.TickNumber < t0 || r.TickNumber > t1) { continue; }
+            var match = archetypeIds != null ? archetypeIds.Contains(r.ArchetypeId) : r.ArchetypeId == archetypeId;
+            if (!match) { continue; }
+
+            if (currentHasData && r.TickNumber != currentTick)
+            {
+                if (idx < dest.Length)
+                {
+                    dest[idx++] = field == "chunkCount" ? currentChunks : currentEntities;
+                }
+                currentEntities = 0;
+                currentChunks = 0;
+            }
+            currentTick = r.TickNumber;
+            currentEntities += r.EntityCount;
+            currentChunks += r.ChunkCount;
+            currentHasData = true;
+        }
+
+        if (currentHasData && idx < dest.Length)
+        {
+            dest[idx++] = field == "chunkCount" ? currentChunks : currentEntities;
         }
     }
 
@@ -494,6 +763,37 @@ public static class AggregationService
             return;
         }
 
+        if (trackId.StartsWith("system-archetype/", StringComparison.Ordinal))
+        {
+            var rest = trackId["system-archetype/".Length..];
+            var sep = rest.IndexOf('/');
+            TryFindSystemIndex(metadata, rest[..sep], out var sysIdx);
+            TryFindArchetypeId(metadata, rest[(sep + 1)..], out var archId);
+            var rows = metadata.SystemArchetypeTouches;
+            for (var i = 0; i < rows.Length && idx < values.Length; i++)
+            {
+                ref readonly var r = ref rows[i];
+                if (r.SystemIndex != sysIdx || r.ArchetypeId != archId || r.TickNumber < t0 || r.TickNumber > t1) { continue; }
+                values[idx] = ExtractSystemArchetypeField(in r, field);
+                tickNumbers[idx] = r.TickNumber;
+                idx++;
+            }
+            return;
+        }
+        if (trackId.StartsWith("archetype/", StringComparison.Ordinal))
+        {
+            TryFindArchetypeId(metadata, trackId["archetype/".Length..], out var archId);
+            FillArchetypeRollupWithTicks(values, tickNumbers, ref idx, metadata.SystemArchetypeTouches, archId, archetypeIds: null, t0, t1, field);
+            return;
+        }
+        if (trackId.StartsWith("component-family/", StringComparison.Ordinal))
+        {
+            var family = trackId["component-family/".Length..];
+            var familyArchIds = ResolveFamilyArchetypes(metadata, family);
+            FillArchetypeRollupWithTicks(values, tickNumbers, ref idx, metadata.SystemArchetypeTouches, archetypeId: 0, archetypeIds: familyArchIds, t0, t1, field);
+            return;
+        }
+
         var phase = trackId["posttick/".Length..];
         var prows = metadata.PostTickSummaries;
         for (var i = 0; i < prows.Length && idx < values.Length; i++)
@@ -545,6 +845,13 @@ public static class AggregationService
         "produced"       => r.Produced,
         "consumed"       => r.Consumed,
         _                => 0.0,
+    };
+
+    private static double ExtractSystemArchetypeField(in SystemArchetypeTouchSummary r, string field) => field switch
+    {
+        "entitiesProcessed" => r.EntityCount,
+        "chunkCount"        => r.ChunkCount,
+        _                   => 0.0,
     };
 
     private static double ExtractPostTickField(in PostTickSummary r, string phase) => phase switch

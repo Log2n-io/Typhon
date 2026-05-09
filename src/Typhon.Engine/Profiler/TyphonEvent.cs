@@ -534,6 +534,54 @@ public static partial class TyphonEvent
     }
 
     /// <summary>
+    /// Scheduler-internal: emit a <see cref="TraceEventKind.SchedulerSystemArchetype"/> span at parallel-query completion. One record per
+    /// (system, archetype) pair per tick, carrying the cross-dimension that <see cref="EmitSchedulerChunk"/> and EcsQuery events leave
+    /// separate. Gated by <see cref="TelemetryConfig.SchedulerArchetypeTouchesActive"/> at the call site (this method itself only checks
+    /// <see cref="TelemetryConfig.ProfilerActive"/>; callers must AND with the archetype-touches gate to keep the dead-code-elim story).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static void EmitSchedulerSystemArchetype(int systemIdx, int archetypeId, int entityCount, int chunkCount, long startTimestamp, long endTimestamp)
+    {
+        if (!TelemetryConfig.ProfilerActive)
+        {
+            return;
+        }
+
+        var slotIdx = ThreadSlotRegistry.GetOrAssignSlot();
+        if (slotIdx < 0)
+        {
+            return;
+        }
+
+        var slot = ThreadSlotRegistry.GetSlot(slotIdx);
+        var spanId = SpanIdGenerator.NextId(slotIdx, slot);
+
+        var evt = new SchedulerSystemArchetypeEvent
+        {
+            Header = new TraceSpanHeader
+            {
+                ThreadSlot = (byte)slotIdx,
+                StartTimestamp = startTimestamp,
+                SpanId = spanId,
+                ParentSpanId = CurrentOpenSpanId,
+            },
+            SystemIndex = (ushort)systemIdx,
+            ArchetypeId = (ushort)archetypeId,
+            EntityCount = entityCount,
+            ChunkCount = chunkCount,
+        };
+
+        var size = evt.ComputeSize();
+        if (!slot.Buffer.TryReserve(size, out var dst))
+        {
+            return;
+        }
+
+        evt.EncodeTo(dst, endTimestamp, out _);
+        slot.Buffer.Publish();
+    }
+
+    /// <summary>
     /// Diagnostic counters for <see cref="EmitTickStart"/> drop paths. Incremented on every path that would silently discard a
     /// TickStart record — slot unavailable (registry full), ring reserve failure (buffer full). Inspected post-mortem via
     /// <see cref="TickStartDroppedNoSlot"/> / <see cref="TickStartDroppedRingFull"/>. Non-zero values in either counter on a run

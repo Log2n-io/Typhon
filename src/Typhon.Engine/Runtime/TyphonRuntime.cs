@@ -39,6 +39,10 @@ public sealed partial class TyphonRuntime : IDisposable
     private readonly ViewBase[] _systemViews;                      // Resolved View per system (null if no input)
     private readonly ComponentTable[][] _systemChangeFilterTables; // ComponentTables for changeFilter types (null if no filter)
     private readonly ArchetypeClusterState[] _systemClusterStates; // Cluster state for single-archetype cluster-eligible systems (null if not applicable)
+    // Workbench Data Flow module (#327): the archetype id this system operates on, parallel to _systemClusterStates.
+    // ushort.MaxValue means "not bound to a single archetype" — used by SchedulerSystemArchetypeEvent emission to skip systems
+    // that don't fit the per-(system, archetype) telemetry model (callbacks, multi-archetype scans).
+    private readonly ushort[] _systemArchetypeIds;
     private readonly PooledEntityList[] _systemEntityLists;        // For returning ArrayPool buffers
     private readonly EventQueueBase[][] _systemConsumedQueues;     // Pre-allocated consumed queue refs per system (null if none)
     private readonly PooledEntityList[] _parallelEntityLists;      // Full entity set for parallel QuerySystem chunk slicing
@@ -137,7 +141,7 @@ public sealed partial class TyphonRuntime : IDisposable
         {
             var phases = _options.Phases;
             var names = new string[phases.Length];
-            for (var i = 0; i < phases.Length; i++) names[i] = phases[i].Name.ToString();
+            for (var i = 0; i < phases.Length; i++) names[i] = phases[i].Name;
             return names;
         }
     }
@@ -183,6 +187,8 @@ public sealed partial class TyphonRuntime : IDisposable
         _systemViews = new ViewBase[scheduler.SystemCount];
         _systemChangeFilterTables = new ComponentTable[scheduler.SystemCount][];
         _systemClusterStates = new ArchetypeClusterState[scheduler.SystemCount];
+        _systemArchetypeIds = new ushort[scheduler.SystemCount];
+        Array.Fill(_systemArchetypeIds, ushort.MaxValue);
         _systemEntityLists = new PooledEntityList[scheduler.SystemCount];
         _systemConsumedQueues = new EventQueueBase[scheduler.SystemCount][];
         _parallelEntityLists = new PooledEntityList[scheduler.SystemCount];
@@ -390,6 +396,7 @@ public sealed partial class TyphonRuntime : IDisposable
                             if (es?.ClusterState is { ActiveClusterCount: > 0 })
                             {
                                 _systemClusterStates[i] = es.ClusterState;
+                                _systemArchetypeIds[i] = meta.ArchetypeId;
                                 break;
                             }
                         }
@@ -1922,6 +1929,8 @@ public sealed partial class TyphonRuntime : IDisposable
 
     private void OnSystemEndInternal(int sysIdx, bool success)
     {
+        EmitSchedulerSystemArchetypeIfActive(sysIdx);
+
         var tx = _systemTransactions[sysIdx];
         if (tx == null)
         {
@@ -1949,5 +1958,40 @@ public sealed partial class TyphonRuntime : IDisposable
             _systemEntityLists[sysIdx].Return();
             _systemEntityLists[sysIdx] = default;
         }
+    }
+
+    // Workbench Data Flow module (#327): per-(system, archetype) entity-touch rollup.
+    // Fires once per system per tick from OnSystemEndInternal, after all parallel-query chunks have completed.
+    // Skip when (a) the gate is off, (b) the system isn't bound to a single archetype (callbacks, multi-archetype scans),
+    // or (c) the system did no useful work this tick (skipped or zero entities).
+    private void EmitSchedulerSystemArchetypeIfActive(int sysIdx)
+    {
+        if (!TelemetryConfig.SchedulerArchetypeTouchesActive)
+        {
+            return;
+        }
+
+        var archetypeId = _systemArchetypeIds[sysIdx];
+        if (archetypeId == ushort.MaxValue)
+        {
+            return;
+        }
+
+        ref var metrics = ref Scheduler.GetCurrentSystemMetrics(sysIdx);
+        var entityCount = metrics.EntitiesProcessed;
+        if (entityCount <= 0)
+        {
+            return;
+        }
+
+        var startTs = metrics.FirstChunkGrabTick;
+        var endTs = metrics.LastChunkDoneTick;
+        if (startTs <= 0 || endTs <= 0 || endTs < startTs)
+        {
+            return;
+        }
+
+        var chunkCount = Scheduler.Systems[sysIdx].TotalChunks;
+        Profiler.TyphonEvent.EmitSchedulerSystemArchetype(sysIdx, archetypeId, entityCount, chunkCount, startTs, endTs);
     }
 }

@@ -524,7 +524,8 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
                     systemTickSummaries: _builder?.SystemTickSummaries ?? Array.Empty<Typhon.Profiler.SystemTickSummary>(),
                     queueTickSummaries: _builder?.QueueTickSummaries ?? Array.Empty<Typhon.Profiler.QueueTickSummary>(),
                     postTickSummaries: _builder?.PostTickSummaries ?? Array.Empty<Typhon.Profiler.PostTickSummary>(),
-                    queueIdToName: _builder?.QueueIdToName ?? new System.Collections.Generic.Dictionary<ushort, string>());
+                    queueIdToName: _builder?.QueueIdToName ?? new System.Collections.Generic.Dictionary<ushort, string>(),
+                    systemArchetypeTouches: _builder?.SystemArchetypeTouches ?? Array.Empty<Typhon.Profiler.SystemArchetypeTouchSummary>());
             }
             finally
             {
@@ -1051,6 +1052,9 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
         var qTicks = _builder?.QueueTickSummaries is { Count: > 0 } qt ? ((List<Typhon.Profiler.QueueTickSummary>)qt).ToArray() : [];
         var postTicks = _builder?.PostTickSummaries is { Count: > 0 } pt ? ((List<Typhon.Profiler.PostTickSummary>)pt).ToArray() : [];
         var qNames = _builder?.QueueIdToName is { Count: > 0 } qn ? new Dictionary<ushort, string>(qn) : new Dictionary<ushort, string>();
+        var satTouches = _builder?.SystemArchetypeTouches is { Count: > 0 } sat
+            ? ((List<Typhon.Profiler.SystemArchetypeTouchSummary>)sat).ToArray()
+            : [];
 
         var snap = new ProfilerMetadataDto(
             Fingerprint: string.Empty,
@@ -1067,7 +1071,8 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
             SystemTickSummaries: sysTicks,
             QueueTickSummaries: qTicks,
             PostTickSummaries: postTicks,
-            QueueIdToName: qNames);
+            QueueIdToName: qNames,
+            SystemArchetypeTouches: satTouches);
         _metadataSnapshot = snap;
         return snap;
     }
@@ -1214,14 +1219,7 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
     }
 
     private static ArchetypeDto[] ProjectArchetypes(TraceFileReader reader)
-    {
-        var arr = new ArchetypeDto[reader.Archetypes.Count];
-        for (var i = 0; i < reader.Archetypes.Count; i++)
-        {
-            arr[i] = new ArchetypeDto(reader.Archetypes[i].ArchetypeId, reader.Archetypes[i].Name);
-        }
-        return arr;
-    }
+        => TraceSessionRuntime.ProjectArchetypes(reader.Archetypes, reader.ArchetypeDefinitions, reader.ComponentTypes);
 
     private static ComponentTypeDto[] ProjectComponentTypes(TraceFileReader reader)
     {

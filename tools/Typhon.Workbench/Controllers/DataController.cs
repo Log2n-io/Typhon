@@ -1,4 +1,8 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
 using Microsoft.AspNetCore.Mvc;
+using Typhon.Engine.Data.Schema;
 using Typhon.Workbench.Dtos.Data;
 using Typhon.Workbench.Dtos.Profiler;
 using Typhon.Workbench.Middleware;
@@ -81,6 +85,32 @@ public sealed class DataController : ControllerBase
             new TrackFieldDescriptorDto("tickNumber", "u32"),
             new TrackFieldDescriptorDto("durationUs", "f32"),
         ]),
+        // ── v3 tracks (#327) — Workbench Data Flow module ────────────────────
+        // Per-archetype rollups: sum of entity touches across every system that targeted the archetype this tick.
+        // Addressed as `archetype/<label>`; <label> is `ArchetypeDto.Label` from the topology endpoint.
+        new TrackSchemaDto("archetype/<label>", "perTickPerArchetype",
+        [
+            new TrackFieldDescriptorDto("tickNumber",        "u32"),
+            new TrackFieldDescriptorDto("entitiesProcessed", "u32"),
+            new TrackFieldDescriptorDto("chunkCount",        "u32"),
+        ]),
+        // Per-(system, archetype) cross-section: the L4 granularity of the Data Flow Timeline.
+        // Addressed as `system-archetype/<systemName>/<archetypeLabel>`.
+        new TrackSchemaDto("system-archetype/<system>/<archetype>", "perTickPerSystemPerArchetype",
+        [
+            new TrackFieldDescriptorDto("tickNumber",        "u32"),
+            new TrackFieldDescriptorDto("entitiesProcessed", "u32"),
+            new TrackFieldDescriptorDto("chunkCount",        "u32"),
+        ]),
+        // Per-component-family rollup (L2 granularity): sums entity counts across every (system, archetype) pair
+        // whose archetype carries at least one component in the family. Addressed as `component-family/<name>`;
+        // <name> matches an entry in `TopologyDto.ComponentFamilies.FamilyOrder`.
+        new TrackSchemaDto("component-family/<family>", "perTickPerFamily",
+        [
+            new TrackFieldDescriptorDto("tickNumber",        "u32"),
+            new TrackFieldDescriptorDto("entitiesProcessed", "u32"),
+            new TrackFieldDescriptorDto("chunkCount",        "u32"),
+        ]),
     ]);
 
     // ──────────────────────────────────────────────────────────────────────────
@@ -107,7 +137,32 @@ public sealed class DataController : ControllerBase
             return StatusCode(StatusCodes.Status202Accepted);
         }
 
-        return Ok(new TopologyDto(metadata.Systems, metadata.Archetypes, metadata.ComponentTypes, metadata.Phases));
+        return Ok(new TopologyDto(
+            metadata.Systems,
+            metadata.Archetypes,
+            metadata.ComponentTypes,
+            metadata.Phases,
+            BuildComponentFamilyMap(metadata.ComponentTypes)));
+    }
+
+    // Workbench Data Flow module (#327): server-side family resolution. Heuristic-only here — the attribute path runs
+    // engine-side at session attach when reflection is available; for trace sessions only the component name survives,
+    // so we run the heuristic once per topology fetch (cheap, runs on a few dozen names) and the result is cached client-side.
+    private static ComponentFamilyMapDto BuildComponentFamilyMap(ComponentTypeDto[] componentTypes)
+    {
+        var map = new Dictionary<string, string>(componentTypes.Length, StringComparer.Ordinal);
+        var familiesUsed = new HashSet<string>(StringComparer.Ordinal);
+        for (var i = 0; i < componentTypes.Length; i++)
+        {
+            var name = componentTypes[i].Name;
+            var family = ComponentFamilyResolver.ResolveByHeuristic(name);
+            map[name] = family;
+            familiesUsed.Add(family);
+        }
+
+        // Stable render order: pick the canonical entries that this session actually has, preserving canonical order.
+        var orderedFamilies = ComponentFamilyResolver.CanonicalFamilyOrder.Where(familiesUsed.Contains).ToArray();
+        return new ComponentFamilyMapDto(map, orderedFamilies);
     }
 
     // ──────────────────────────────────────────────────────────────────────────
@@ -204,14 +259,18 @@ public sealed class DataController : ControllerBase
         [FromQuery] uint to = uint.MaxValue)
     {
         if (trackId != "tick/summary" && trackId != "metronome/wait"
+            // Order matters: system-archetype/* before system/* (the latter is a strict prefix of nothing relevant here, but stay explicit).
+            && !trackId.StartsWith("system-archetype/", StringComparison.Ordinal)
             && !trackId.StartsWith("system/", StringComparison.Ordinal)
             && !trackId.StartsWith("queue/", StringComparison.Ordinal)
-            && !trackId.StartsWith("posttick/", StringComparison.Ordinal))
+            && !trackId.StartsWith("posttick/", StringComparison.Ordinal)
+            && !trackId.StartsWith("archetype/", StringComparison.Ordinal)
+            && !trackId.StartsWith("component-family/", StringComparison.Ordinal))
         {
             return BadRequest(new ProblemDetails
             {
                 Title = "unknown-track",
-                Detail = $"Unknown track: '{trackId}'. Available tracks: tick/summary, metronome/wait, system/<name>, queue/<name>, posttick/*.",
+                Detail = $"Unknown track: '{trackId}'. Available tracks: tick/summary, metronome/wait, system/<name>, queue/<name>, posttick/*, archetype/<label>, system-archetype/<sys>/<arch>, component-family/<name>.",
                 Status = StatusCodes.Status400BadRequest,
             });
         }
@@ -238,7 +297,12 @@ public sealed class DataController : ControllerBase
             return StatusCode(StatusCodes.Status202Accepted);
         }
 
-        // v12 (#311): dispatch to the new track families before the v1 record layout assumes shape.
+        // v12 (#311) + v3 (#327): dispatch to the new track families before the v1 record layout assumes shape.
+        // Order: system-archetype/* must precede system/* (StartsWith would otherwise misroute).
+        if (trackId.StartsWith("system-archetype/", StringComparison.Ordinal))
+        {
+            return GetSystemArchetypeTrackData(metadata, trackId, from, to);
+        }
         if (trackId.StartsWith("system/", StringComparison.Ordinal))
         {
             return GetSystemTrackData(metadata, trackId, from, to);
@@ -250,6 +314,14 @@ public sealed class DataController : ControllerBase
         if (trackId.StartsWith("posttick/", StringComparison.Ordinal))
         {
             return GetPostTickTrackData(metadata, trackId, from, to);
+        }
+        if (trackId.StartsWith("archetype/", StringComparison.Ordinal))
+        {
+            return GetArchetypeTrackData(metadata, trackId, from, to);
+        }
+        if (trackId.StartsWith("component-family/", StringComparison.Ordinal))
+        {
+            return GetComponentFamilyTrackData(metadata, trackId, from, to);
         }
 
         var ticks = metadata.TickSummaries;
@@ -359,6 +431,132 @@ public sealed class DataController : ControllerBase
             output.Add(new QueueTickRecordDto(r.TickNumber, r.PeakDepth, r.EndOfTickDepth, r.OverflowCount, r.Produced, r.Consumed));
         }
         return Ok(new TrackDataResponseDto(trackId, output.ToArray()));
+    }
+
+    private ActionResult<TrackDataResponseDto> GetSystemArchetypeTrackData(ProfilerMetadataDto metadata, string trackId, uint from, uint to)
+    {
+        var rest = trackId["system-archetype/".Length..];
+        var sep = rest.IndexOf('/');
+        if (sep <= 0 || sep >= rest.Length - 1)
+        {
+            return BadRequest(new ProblemDetails
+            {
+                Title = "bad-trackid",
+                Detail = $"Invalid system-archetype track id '{trackId}'. Expected 'system-archetype/<systemName>/<archetypeLabel>'.",
+                Status = StatusCodes.Status400BadRequest,
+            });
+        }
+        var sysName = rest[..sep];
+        var archLabel = rest[(sep + 1)..];
+
+        ushort? sysIdx = null;
+        for (var i = 0; i < metadata.Systems.Length; i++)
+        {
+            if (metadata.Systems[i].Name == sysName) { sysIdx = metadata.Systems[i].Index; break; }
+        }
+        if (sysIdx == null)
+        {
+            return NotFound(new ProblemDetails { Title = "unknown-system", Detail = $"No system named '{sysName}' in topology.", Status = StatusCodes.Status404NotFound });
+        }
+
+        ushort? archId = null;
+        for (var i = 0; i < metadata.Archetypes.Length; i++)
+        {
+            var a = metadata.Archetypes[i];
+            if (a.Label == archLabel || a.Name == archLabel) { archId = a.ArchetypeId; break; }
+        }
+        if (archId == null)
+        {
+            return NotFound(new ProblemDetails { Title = "unknown-archetype", Detail = $"No archetype labelled '{archLabel}' in topology.", Status = StatusCodes.Status404NotFound });
+        }
+
+        var rows = metadata.SystemArchetypeTouches;
+        var output = new List<SystemArchetypeRecordDto>();
+        for (var i = 0; i < rows.Length; i++)
+        {
+            var r = rows[i];
+            if (r.SystemIndex != sysIdx.Value || r.ArchetypeId != archId.Value) continue;
+            if (r.TickNumber < from || r.TickNumber > to) continue;
+            output.Add(new SystemArchetypeRecordDto(r.TickNumber, r.EntityCount, r.ChunkCount));
+        }
+        return Ok(new TrackDataResponseDto(trackId, output.ToArray()));
+    }
+
+    private ActionResult<TrackDataResponseDto> GetArchetypeTrackData(ProfilerMetadataDto metadata, string trackId, uint from, uint to)
+    {
+        var label = trackId["archetype/".Length..];
+        ushort? archId = null;
+        for (var i = 0; i < metadata.Archetypes.Length; i++)
+        {
+            var a = metadata.Archetypes[i];
+            if (a.Label == label || a.Name == label) { archId = a.ArchetypeId; break; }
+        }
+        if (archId == null)
+        {
+            return NotFound(new ProblemDetails { Title = "unknown-archetype", Detail = $"No archetype labelled '{label}' in topology.", Status = StatusCodes.Status404NotFound });
+        }
+
+        var rows = metadata.SystemArchetypeTouches;
+        var output = RollupByTick(rows, archetypeId: archId.Value, archetypeIds: null, from, to);
+        return Ok(new TrackDataResponseDto(trackId, output));
+    }
+
+    private ActionResult<TrackDataResponseDto> GetComponentFamilyTrackData(ProfilerMetadataDto metadata, string trackId, uint from, uint to)
+    {
+        var family = trackId["component-family/".Length..];
+        // Resolve which archetypes have at least one component in the family.
+        var familyArchIds = new HashSet<ushort>();
+        for (var i = 0; i < metadata.Archetypes.Length; i++)
+        {
+            var a = metadata.Archetypes[i];
+            for (var c = 0; c < a.ComponentTypeNames.Length; c++)
+            {
+                if (Typhon.Engine.Data.Schema.ComponentFamilyResolver.ResolveByHeuristic(a.ComponentTypeNames[c]) == family)
+                {
+                    familyArchIds.Add(a.ArchetypeId);
+                    break;
+                }
+            }
+        }
+        var rows = metadata.SystemArchetypeTouches;
+        var output = RollupByTick(rows, archetypeId: 0, archetypeIds: familyArchIds, from, to);
+        return Ok(new TrackDataResponseDto(trackId, output));
+    }
+
+    // Walks the (tick, sys, arch)-sorted SystemArchetypeTouches array, summing matching rows per tick into a single output entry.
+    // archetypeIds != null → match any archetype in the set; otherwise match the single archetypeId.
+    private static object[] RollupByTick(
+        Typhon.Profiler.SystemArchetypeTouchSummary[] rows,
+        ushort archetypeId, HashSet<ushort> archetypeIds, uint from, uint to)
+    {
+        var output = new List<ArchetypeRollupRecordDto>();
+        uint currentTick = 0;
+        var currentEntities = 0u;
+        var currentChunks = 0u;
+        var currentHasData = false;
+        for (var i = 0; i < rows.Length; i++)
+        {
+            var r = rows[i];
+            if (r.TickNumber < from || r.TickNumber > to) continue;
+            var match = archetypeIds != null ? archetypeIds.Contains(r.ArchetypeId) : r.ArchetypeId == archetypeId;
+            if (!match) continue;
+
+            if (currentHasData && r.TickNumber != currentTick)
+            {
+                output.Add(new ArchetypeRollupRecordDto(currentTick, currentEntities, currentChunks));
+                currentEntities = 0;
+                currentChunks = 0;
+            }
+            currentTick = r.TickNumber;
+            currentEntities += r.EntityCount;
+            currentChunks += r.ChunkCount;
+            currentHasData = true;
+        }
+        if (currentHasData)
+        {
+            output.Add(new ArchetypeRollupRecordDto(currentTick, currentEntities, currentChunks));
+        }
+        return output.ToArray();
     }
 
     private ActionResult<TrackDataResponseDto> GetPostTickTrackData(ProfilerMetadataDto metadata, string trackId, uint from, uint to)

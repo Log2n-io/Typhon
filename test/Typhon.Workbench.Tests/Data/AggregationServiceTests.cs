@@ -454,6 +454,111 @@ public sealed class AggregationServiceTests
         Assert.That(results[5].Value, Is.EqualTo(6.0).Within(1e-9));
     }
 
+    // ────────────────────────────────────────────────────────────────────────
+    // v3 track families (#327) — Workbench Data Flow module
+    // ────────────────────────────────────────────────────────────────────────
+
+    private static ProfilerMetadataDto MakeDataFlowFixture()
+    {
+        // Two systems, two archetypes, two ticks. Physics touches Ant (entities 100/200), AI touches Ant + Food per tick.
+        return TestMetadata.WithSystemArchetypeRows(
+            systems: [("Physics", 1), ("AI", 2)],
+            archetypes:
+            [
+                ("Ant",  100, [..new[] { "Game.Position", "Game.Velocity" }]),  // → Spatial
+                ("Food", 101, [..new[] { "Game.Health" }]),                     // → Combat
+            ],
+            // tick 10
+            (10u, 1, 100, 100u, 4u),    // Physics × Ant
+            (10u, 2, 100, 80u, 3u),     // AI × Ant
+            (10u, 2, 101, 50u, 2u),     // AI × Food
+            // tick 11
+            (11u, 1, 100, 200u, 6u),    // Physics × Ant
+            (11u, 2, 100, 90u, 3u),     // AI × Ant
+            (11u, 2, 101, 60u, 2u));    // AI × Food
+    }
+
+    [Test]
+    public void SystemArchetypeTrack_Sum_DirectRowSumming()
+    {
+        var meta = MakeDataFlowFixture();
+        var q = new AggregationQueryDto("system-archetype/Physics/Ant", "entitiesProcessed", "sum", [10, 11]);
+        var result = AggregationService.Compute(meta, [q])[0];
+        // 100 + 200 = 300
+        Assert.That(result.Value, Is.EqualTo(300.0).Within(1e-9));
+    }
+
+    [Test]
+    public void ArchetypeTrack_RolledUp_AcrossAllSystems()
+    {
+        var meta = MakeDataFlowFixture();
+        // Ant is touched by Physics + AI on each tick. Tick 10: 100+80=180; Tick 11: 200+90=290.
+        var sumQ = new AggregationQueryDto("archetype/Ant", "entitiesProcessed", "sum", [10, 11]);
+        var meanQ = new AggregationQueryDto("archetype/Ant", "entitiesProcessed", "mean", [10, 11]);
+        var results = AggregationService.Compute(meta, [sumQ, meanQ]);
+        Assert.That(results[0].Value, Is.EqualTo(470.0).Within(1e-9));   // 180 + 290
+        Assert.That(results[1].Value, Is.EqualTo(235.0).Within(1e-9));   // 470 / 2 ticks
+    }
+
+    [Test]
+    public void ComponentFamilyTrack_RollsUp_FamilyMemberArchetypes()
+    {
+        var meta = MakeDataFlowFixture();
+        // Spatial family contains Ant (Position, Velocity → Spatial). Food has Health → Combat.
+        // Spatial sum = Ant rollup = 470 (180 + 290).
+        var spatial = new AggregationQueryDto("component-family/Spatial", "entitiesProcessed", "sum", [10, 11]);
+        // Combat sum = Food rollup. AI × Food: tick 10 = 50, tick 11 = 60. Sum = 110.
+        var combat = new AggregationQueryDto("component-family/Combat", "entitiesProcessed", "sum", [10, 11]);
+        var results = AggregationService.Compute(meta, [spatial, combat]);
+        Assert.That(results[0].Value, Is.EqualTo(470.0).Within(1e-9));
+        Assert.That(results[1].Value, Is.EqualTo(110.0).Within(1e-9));
+    }
+
+    [Test]
+    public void ArchetypeTrack_ChunkCountField()
+    {
+        var meta = MakeDataFlowFixture();
+        // Ant chunks: tick 10: 4+3=7; tick 11: 6+3=9. Max = 9.
+        var q = new AggregationQueryDto("archetype/Ant", "chunkCount", "max", [10, 11]);
+        Assert.That(AggregationService.Compute(meta, [q])[0].Value, Is.EqualTo(9.0).Within(1e-9));
+    }
+
+    [Test]
+    public void SystemArchetypeTrack_UnknownSystem_ThrowsValidation()
+    {
+        var meta = MakeDataFlowFixture();
+        var q = new AggregationQueryDto("system-archetype/Unknown/Ant", "entitiesProcessed", "sum", [10, 11]);
+        var ex = Assert.Throws<WorkbenchException>(() => AggregationService.Compute(meta, [q]));
+        Assert.That(ex.ErrorCode, Is.EqualTo("unknown-system"));
+    }
+
+    [Test]
+    public void SystemArchetypeTrack_UnknownArchetype_ThrowsValidation()
+    {
+        var meta = MakeDataFlowFixture();
+        var q = new AggregationQueryDto("system-archetype/Physics/Bogus", "entitiesProcessed", "sum", [10, 11]);
+        var ex = Assert.Throws<WorkbenchException>(() => AggregationService.Compute(meta, [q]));
+        Assert.That(ex.ErrorCode, Is.EqualTo("unknown-archetype"));
+    }
+
+    [Test]
+    public void SystemArchetypeTrack_BadTrackId_MissingSlash_ThrowsValidation()
+    {
+        var meta = MakeDataFlowFixture();
+        var q = new AggregationQueryDto("system-archetype/Physics", "entitiesProcessed", "sum", [10, 11]);
+        var ex = Assert.Throws<WorkbenchException>(() => AggregationService.Compute(meta, [q]));
+        Assert.That(ex.ErrorCode, Is.EqualTo("bad-trackid"));
+    }
+
+    [Test]
+    public void ArchetypeTrack_UnknownField_ThrowsValidation()
+    {
+        var meta = MakeDataFlowFixture();
+        var q = new AggregationQueryDto("archetype/Ant", "durationUs", "mean", [10, 11]);
+        var ex = Assert.Throws<WorkbenchException>(() => AggregationService.Compute(meta, [q]));
+        Assert.That(ex.ErrorCode, Is.EqualTo("unknown-field"));
+    }
+
     [Test]
     public void V2Track_OnLegacyOverload_ThrowsUnknownTrack()
     {
@@ -530,6 +635,41 @@ public sealed class AggregationServiceTests
             return Build(queueRows: qRows, queueIdToName: new Dictionary<ushort, string> { [qid] = name });
         }
 
+        // Workbench Data Flow module (#327) helpers.
+        public static ProfilerMetadataDto WithSystemArchetypeRows(
+            (string sysName, ushort sysIdx)[] systems,
+            (string label, ushort archId, string[] componentNames)[] archetypes,
+            params (uint tick, ushort sysIdx, ushort archId, uint entities, uint chunks)[] rows)
+        {
+            var sysDefs = new SystemDefinitionDto[systems.Length];
+            for (var i = 0; i < systems.Length; i++)
+            {
+                sysDefs[i] = MakeSystem(systems[i].sysName, systems[i].sysIdx);
+            }
+
+            var archDefs = new ArchetypeDto[archetypes.Length];
+            for (var i = 0; i < archetypes.Length; i++)
+            {
+                var (label, archId, comps) = archetypes[i];
+                archDefs[i] = new ArchetypeDto(archId, label, label, 1, comps);
+            }
+
+            var satRows = new SystemArchetypeTouchSummary[rows.Length];
+            for (var i = 0; i < rows.Length; i++)
+            {
+                satRows[i] = new SystemArchetypeTouchSummary
+                {
+                    TickNumber = rows[i].tick,
+                    SystemIndex = rows[i].sysIdx,
+                    ArchetypeId = rows[i].archId,
+                    EntityCount = rows[i].entities,
+                    ChunkCount = rows[i].chunks,
+                };
+            }
+
+            return Build(systems: sysDefs, archetypes: archDefs, archetypeTouches: satRows);
+        }
+
         public static ProfilerMetadataDto WithPostTickRows(params (uint tick, float walFlushUs)[] rows)
         {
             var pRows = new PostTickSummary[rows.Length];
@@ -550,13 +690,15 @@ public sealed class AggregationServiceTests
             SystemTickSummary[] systemRows = null,
             QueueTickSummary[] queueRows = null,
             PostTickSummary[] postRows = null,
-            Dictionary<ushort, string> queueIdToName = null)
+            Dictionary<ushort, string> queueIdToName = null,
+            SystemArchetypeTouchSummary[] archetypeTouches = null,
+            ArchetypeDto[] archetypes = null)
         {
             return new ProfilerMetadataDto(
                 Fingerprint: "TEST",
                 Header: new ProfilerHeaderDto(0, 1, 0f, 0, 0, 0, 0, 0, 0),
                 Systems: systems ?? System.Array.Empty<SystemDefinitionDto>(),
-                Archetypes: System.Array.Empty<ArchetypeDto>(),
+                Archetypes: archetypes ?? System.Array.Empty<ArchetypeDto>(),
                 ComponentTypes: System.Array.Empty<ComponentTypeDto>(),
                 SpanNames: new Dictionary<int, string>(),
                 GlobalMetrics: new GlobalMetricsDto(0, 0, 0, 0, 0, 0, 0, System.Array.Empty<SystemAggregateDto>()),
@@ -567,7 +709,8 @@ public sealed class AggregationServiceTests
                 SystemTickSummaries: systemRows ?? System.Array.Empty<SystemTickSummary>(),
                 QueueTickSummaries: queueRows ?? System.Array.Empty<QueueTickSummary>(),
                 PostTickSummaries: postRows ?? System.Array.Empty<PostTickSummary>(),
-                QueueIdToName: queueIdToName ?? new Dictionary<ushort, string>());
+                QueueIdToName: queueIdToName ?? new Dictionary<ushort, string>(),
+                SystemArchetypeTouches: archetypeTouches ?? System.Array.Empty<SystemArchetypeTouchSummary>());
         }
     }
 }

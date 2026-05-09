@@ -31,7 +31,13 @@ function sys(overrides: Partial<SystemDefinitionDto> & { name: string }): System
 }
 
 function topo(systems: SystemDefinitionDto[], phases: string[] = ['Input', 'Simulation', 'Output']): TopologyDto {
-  return { systems, archetypes: [], componentTypes: [], phases };
+  return {
+    systems,
+    archetypes: [],
+    componentTypes: [],
+    phases,
+    componentFamilies: { componentToFamily: {}, familyOrder: [] },
+  };
 }
 
 describe('buildDagModel', () => {

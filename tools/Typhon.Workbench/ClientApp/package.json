@@ -42,6 +42,7 @@
     "react-dom": "^19.1.0",
     "react-syntax-highlighter": "^16.1.1",
     "tailwind-merge": "^3.5.0",
+    "uplot": "^1.6.32",
     "zustand": "^5.0.2"
   },
   "devDependencies": {

@@ -81,6 +81,12 @@ public interface ICacheChunkSink : IDisposable
     /// v12 (#311). QueueId → display-name lookup for the entries in <paramref name="queueTickSummaries"/>. Written to the
     /// <see cref="CacheSectionId.QueueNameTable"/> section. Empty dictionary is valid.
     /// </param>
+    /// <param name="systemArchetypeTouches">
+    /// v15 (#327). Per-(tick, system, archetype) entity-touch rows backing the Workbench Data Flow module's <c>archetype/*</c>,
+    /// <c>system-archetype/*</c>, and <c>component-family/*</c> tracks. Written to the
+    /// <see cref="CacheSectionId.SystemArchetypeTouches"/> section. Empty list is valid (older traces or sessions with
+    /// <c>TelemetryConfig.SchedulerArchetypeTouchesActive = false</c>).
+    /// </param>
     /// <exception cref="NotSupportedException">
     /// Thrown by live sinks (e.g. <c>AppendOnlyChunkSink</c>) — see <see cref="SupportsTrailer"/>. Callers should gate on that
     /// flag rather than catching the exception.
@@ -97,5 +103,7 @@ public interface ICacheChunkSink : IDisposable
         IReadOnlyList<SystemTickSummary> systemTickSummaries,
         IReadOnlyList<QueueTickSummary> queueTickSummaries,
         IReadOnlyList<PostTickSummary> postTickSummaries,
-        IReadOnlyDictionary<ushort, string> queueIdToName);
+        IReadOnlyDictionary<ushort, string> queueIdToName,
+        // v15 (#327) — Workbench Data Flow per-(system, archetype) entity-touch rollups. May be empty.
+        IReadOnlyList<SystemArchetypeTouchSummary> systemArchetypeTouches);
 }
