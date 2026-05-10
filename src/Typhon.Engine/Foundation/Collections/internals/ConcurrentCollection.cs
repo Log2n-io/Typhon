@@ -5,11 +5,11 @@ using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Threading;
 
-namespace Typhon.Engine;
+namespace Typhon.Engine.Internals;
 
 [PublicAPI]
 [ExcludeFromCodeCoverage]
-public class ConcurrentCollection<T> : ICollection<T>
+internal class ConcurrentCollection<T> : ICollection<T>
 {
     private Lock _lock;
     private List<T> _items;

@@ -2,7 +2,7 @@
 
 using System.Runtime.InteropServices;
 
-namespace Typhon.Engine;
+namespace Typhon.Engine.Internals;
 
 /// <summary>
 /// Meta chunk (chunk 0) for a linear hash map. Stores immutable N0, the atomic packed meta (Level:8|Next:24|BucketCount:32), entry count,
@@ -97,7 +97,7 @@ struct PagedHashMapBucketHeader
 /// Diagnostic statistics for a linear hash map.
 /// </summary>
 [StructLayout(LayoutKind.Sequential)]
-public struct PagedHashMapStats
+internal struct PagedHashMapStats
 {
     public int BucketCount;
     public long EntryCount;

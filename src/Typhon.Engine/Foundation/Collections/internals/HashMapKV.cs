@@ -5,7 +5,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics.X86;
 
-namespace Typhon.Engine;
+namespace Typhon.Engine.Internals;
 
 /// <summary>
 /// High-performance in-memory hash map using open addressing with linear probing.
@@ -20,7 +20,7 @@ namespace Typhon.Engine;
 /// </list>
 /// </para>
 /// </summary>
-public unsafe class HashMap<TKey, TValue> : IDisposable where TKey : unmanaged, IEquatable<TKey>
+internal unsafe class HashMap<TKey, TValue> : IDisposable where TKey : unmanaged, IEquatable<TKey>
 {
     private const double MaxLoadFactor = 0.75;
     private const int PrefetchLookahead = 8;

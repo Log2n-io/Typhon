@@ -78,13 +78,12 @@ public sealed class TraceFileReader : IDisposable
     }
 
     /// <summary>
-    /// Oldest format version this reader still accepts. Bumped to 7 alongside the rich static-structure
-    /// tables (component / archetype / index / runtime / event queue / resource graph) — those sections
-    /// carry data the Workbench schema panels rely on for trace sessions, and silently defaulting them to
-    /// empty would render "no schema" for old traces with no indication why. Hard-reject v6 and earlier;
-    /// re-record against a v7 build.
+    /// Oldest format version this reader still accepts. Bumped to 8 (2026-05-10) when
+    /// <see cref="TraceEventKind.NamedSpan"/> was reassigned from value 200 to 246 to break a latent collision with
+    /// <see cref="TraceEventKind.EcsQueryMaskAnd"/>. v7 traces with NamedSpan records would mis-decode under a v8 reader;
+    /// hard-rejecting v7 surfaces the break loudly. Re-record against a v8 build.
     /// </summary>
-    public const ushort MinSupportedVersion = 7;
+    public const ushort MinSupportedVersion = 8;
 
     /// <summary>Reads and validates the file header. Must be called first.</summary>
     /// <exception cref="InvalidDataException">If magic or version is wrong.</exception>

@@ -927,8 +927,17 @@ public enum TraceEventKind : byte
 
     // ── Fallback ──
 
-    /// <summary>User-defined span with inline UTF-8 null-terminated name. Used for dynamic-string call sites (tests, demo code). Payload: null-terminated UTF-8 bytes.</summary>
-    NamedSpan = 200,
+    /// <summary>
+    /// User-defined span with inline UTF-8 null-terminated name. Used for dynamic-string call sites (tests, demo code).
+    /// Payload: null-terminated UTF-8 bytes.
+    /// <para>
+    /// Was <c>200</c> until 2026-05-10, which collided with <see cref="EcsQueryMaskAnd"/>. The collision was latent in
+    /// production because <c>EcsQueryMaskAnd</c> is default-suppressed, but unsuppressing it would have made the two
+    /// kinds indistinguishable on the wire. Reassigned to 246 (next free slot above <see cref="SchedulerSystemArchetype"/>).
+    /// Wire format bumped to v8 in <see cref="TraceFileHeader.CurrentVersion"/> to signal the change.
+    /// </para>
+    /// </summary>
+    NamedSpan = 246,
 }
 
 /// <summary>

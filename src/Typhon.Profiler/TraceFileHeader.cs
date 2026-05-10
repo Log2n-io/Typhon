@@ -86,13 +86,17 @@ public struct TraceFileHeader
     ///     WritesResources, ExplicitAfter, ExplicitBefore, IsExclusivePhase). New PhasesTable section follows
     ///     ComponentTypeTable, listing the RuntimeOptions.Phases names in order. Reader accepted v5 files
     ///     transparently — RFC 07 fields default to empty arrays and PhasesTable was treated as absent.
-    /// v7 (current): rich static-structure tables follow PhasesTable so offline analysis (Workbench schema panels
+    /// v7: rich static-structure tables follow PhasesTable so offline analysis (Workbench schema panels
     ///     against trace sessions) has the same data a live engine offers — component definitions with full field
     ///     layout, archetype definitions with parent/child + slot map + cluster info, index catalog, runtime config,
     ///     event-queue catalog, and a resource-graph snapshot. v6 readers simply lacked the data; rather than
     ///     synthesising empty defaults (which would silently render "no schema" for old traces), the reader now
     ///     hard-rejects v6 — re-record against a v7-aware build. See the section writers in <see cref="TraceFileWriter"/>
     ///     and the matching reader methods in <see cref="TraceFileReader"/>.
+    /// v8 (current, 2026-05-10): <see cref="TraceEventKind.NamedSpan"/> reassigned from value 200 to 246 to break a
+    ///     latent collision with <see cref="TraceEventKind.EcsQueryMaskAnd"/>. v7 traces with NamedSpan records (kind=200)
+    ///     would mis-decode as EcsQueryMaskAnd under a v8 reader; the reader hard-rejects v7 to surface the break loudly.
+    ///     Re-record against a v8-aware build.
     /// </summary>
-    public const ushort CurrentVersion = 7;
+    public const ushort CurrentVersion = 8;
 }

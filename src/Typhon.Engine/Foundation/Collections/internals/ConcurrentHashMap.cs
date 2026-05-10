@@ -4,7 +4,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 
-namespace Typhon.Engine;
+namespace Typhon.Engine.Internals;
 
 /// <summary>
 /// Thread-safe in-memory hash set using striped open addressing with per-stripe OLC.
@@ -20,7 +20,7 @@ namespace Typhon.Engine;
 /// </para>
 /// Uses POH (Pinned Object Heap) allocation — same memory model as <see cref="HashMap{TKey}"/>.
 /// </summary>
-public unsafe class ConcurrentHashMap<TKey> : IDisposable where TKey : unmanaged, IEquatable<TKey>
+internal unsafe class ConcurrentHashMap<TKey> : IDisposable where TKey : unmanaged, IEquatable<TKey>
 {
     private const double MaxLoadFactor = 0.75;
 

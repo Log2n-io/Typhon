@@ -9,7 +9,7 @@ using System.Runtime.InteropServices;
 using System.Threading;
 // ReSharper disable InconsistentNaming
 
-namespace Typhon.Engine;
+namespace Typhon.Engine.Internals;
 
 /// <summary>
 /// Page-backed hash map with unmanaged key and value types. O(1) average-case lookup, insert, delete.

@@ -99,7 +99,7 @@ public class HashMapBenchmarks
 
     [Benchmark(Description = "Map.Add")]
     [BenchmarkCategory("Add")]
-    public HashMap<int, int> Map_Add()
+    public object Map_Add()
     {
         var map = new HashMap<int, int>(64);
         for (int i = 0; i < N; i++)
@@ -127,7 +127,7 @@ public class HashMapBenchmarks
 
     [Benchmark(Description = "Set.Add")]
     [BenchmarkCategory("Add")]
-    public HashMap<int> Set_Add()
+    public object Set_Add()
     {
         var set = new HashMap<int>(64);
         for (int i = 0; i < N; i++)

@@ -6,13 +6,13 @@ using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Threading;
 
-namespace Typhon.Engine;
+namespace Typhon.Engine.Internals;
 
 /// <summary>
 /// Abstract base class for hash maps. Provides meta management, directory addressing, bucket resolution, split lock, and factory scaffolding.
 /// Concrete class <see cref="PagedHashMap{TKey,TValue,TStore}"/> provides JIT-specialized hash functions via sizeof(TKey) branching.
 /// </summary>
-public abstract unsafe partial class PagedHashMapBase<TStore> where TStore : struct, IPageStore
+internal abstract unsafe partial class PagedHashMapBase<TStore> where TStore : struct, IPageStore
 {
     // ═══════════════════════════════════════════════════════════════════════
     // Fields

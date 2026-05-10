@@ -3,7 +3,7 @@ using System.Collections.Concurrent;
 using System.Diagnostics.CodeAnalysis;
 using System.Threading;
 
-namespace Typhon.Engine;
+namespace Typhon.Engine.Internals;
 
 /// <summary>
 /// Fixed size array where multiple concurrent threads can process elements in an exclusive fashion.

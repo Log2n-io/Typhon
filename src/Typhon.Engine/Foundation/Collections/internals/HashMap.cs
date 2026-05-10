@@ -6,7 +6,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics.X86;
 
-namespace Typhon.Engine;
+namespace Typhon.Engine.Internals;
 
 /// <summary>
 /// High-performance in-memory hash set using open addressing with linear probing.
@@ -14,7 +14,7 @@ namespace Typhon.Engine;
 /// Backward-shift deletion avoids tombstone accumulation.
 /// POH (Pinned Object Heap) allocation + software prefetch on resize.
 /// </summary>
-public unsafe class HashMap<TKey> : IDisposable, IEnumerable<TKey> where TKey : unmanaged, IEquatable<TKey>
+internal unsafe class HashMap<TKey> : IDisposable, IEnumerable<TKey> where TKey : unmanaged, IEquatable<TKey>
 {
     private const double MaxLoadFactor = 0.75;
     private const int PrefetchLookahead = 8;

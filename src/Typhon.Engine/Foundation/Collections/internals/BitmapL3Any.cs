@@ -1,29 +1,29 @@
-﻿using System;
+﻿// unset
+
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
-using System.Threading;
 
-namespace Typhon.Engine;
+namespace Typhon.Engine.Internals;
 
 [ExcludeFromCodeCoverage]
-public class ConcurrentBitmapL3Any : IEnumerable<int>
+internal class BitmapL3Any : IEnumerable<int>
 {
-    private volatile int _control;
     private readonly Memory<long>[] _data;
 
-    public ConcurrentBitmapL3Any(int bitCount)
+    public BitmapL3Any(int bitCount)
     {
         _data = new Memory<long>[3];
         Capacity = bitCount;
 
         var length = Math.Max(1, (bitCount + 63) / 64);
         _data[0] = new long[length];
-
+            
         length = Math.Max(1, (length + 63) / 64);
         _data[1] = new long[length];
-
+            
         length = Math.Max(1, (length + 63) / 64);
         _data[2] = new long[length];
     }
@@ -35,53 +35,42 @@ public class ConcurrentBitmapL3Any : IEnumerable<int>
         _data[2].Span.Clear();
     }
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
-    public bool Set(int index)
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void Set(int index)
     {
-        if (Interlocked.CompareExchange(ref _control, 1, 0) != 0)
-        {
-            var sw = new SpinWait();
-            while (Interlocked.CompareExchange(ref _control, 1, 0) != 0)
-            {
-                sw.SpinOnce();
-            }
-        }
-
         var offset = index >> 6;
         var mask = 1L << (index & 0x3F);
-        var prevValue = Interlocked.Or(ref _data[0].Span[offset], mask);
-        if ((prevValue & mask) != 0)
-        {
-            _control = 0;
-            return false;
-        }
-
-        index = offset;
-        offset = index >> 6;
-        mask = 1L << (index & 0x3F);
-        prevValue = Interlocked.Or(ref _data[1].Span[offset], mask);
+        var prevValue = _data[0].Span[offset];
+        _data[0].Span[offset] |= mask;
         if (prevValue != 0)
         {
-            _control = 0;
-            return true;
+            return;
         }
 
         index = offset;
         offset = index >> 6;
         mask = 1L << (index & 0x3F);
-        Interlocked.Or(ref _data[2].Span[offset], mask);
+        prevValue = _data[1].Span[offset];
+        _data[1].Span[offset] |= mask;
+        if (prevValue != 0)
+        {
+            return;
+        }
 
-        _control = 0;
-        return true;
+        index = offset;
+        offset = index >> 6;
+        mask = 1L << (index & 0x3F);
+        _data[2].Span[offset] |= mask;
     }
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void Clear(int index)
     {
         var offset = index >> 6;
         var mask = ~(1L << (index & 0x3F));
-        var prevVal = Interlocked.And(ref _data[0].Span[offset], mask);
-        if (prevVal == 0 || (prevVal & mask) != 0)
+        var prevVal = _data[0].Span[offset];
+        _data[0].Span[offset] &= mask;
+        if (prevVal == 0 || (prevVal&mask) != 0)
         {
             return;
         }
@@ -89,8 +78,9 @@ public class ConcurrentBitmapL3Any : IEnumerable<int>
         index = offset;
         offset = index >> 6;
         mask = ~(1L << (index & 0x3F));
-        prevVal = Interlocked.And(ref _data[1].Span[offset], mask);
-        if (prevVal == 0 || (prevVal & mask) != 0)
+        prevVal = _data[1].Span[offset];
+        _data[1].Span[offset] &= mask;
+        if (prevVal == 0 || (prevVal&mask) != 0)
         {
             return;
         }
@@ -98,7 +88,7 @@ public class ConcurrentBitmapL3Any : IEnumerable<int>
         index = offset;
         offset = index >> 6;
         mask = ~(1L << (index & 0x3F));
-        Interlocked.And(ref _data[1].Span[offset], mask);
+        _data[1].Span[offset] &= mask;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -108,7 +98,7 @@ public class ConcurrentBitmapL3Any : IEnumerable<int>
         var mask = 1L << (index & 0x3F);
         return (_data[0].Span[offset] & mask) != 0L;
     }
-        
+
     public void ForEach(Action<int> action)
     {
         using var e = GetEnumerator();
@@ -126,13 +116,13 @@ public class ConcurrentBitmapL3Any : IEnumerable<int>
 
     public struct Enumerator : IEnumerator<int>
     {
-        private readonly ConcurrentBitmapL3Any _owner;
+        private readonly BitmapL3Any _owner;
 
         private int _c0;
         private long _v0;
         private int _loopCount;
 
-        public Enumerator(ConcurrentBitmapL3Any owner)
+        public Enumerator(BitmapL3Any owner)
         {
             _owner = owner;
             _c0 = -1;
@@ -161,7 +151,7 @@ public class ConcurrentBitmapL3Any : IEnumerable<int>
                     // Check if we can skip the rest of the level 0
                     for (int i0 = c0 >> 6; i0 < ll0; i0 = c0 >> 6, lc++)
                     {
-                        v0 = o._data[0].Span[i0] >> (c0 & 0x3F);
+                        v0 = o._data[0].Span[i0] >> c0;
                         if (v0 != 0)
                         {
                             break;

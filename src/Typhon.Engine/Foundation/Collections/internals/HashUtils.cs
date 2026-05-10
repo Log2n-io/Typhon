@@ -1,6 +1,6 @@
 using System.Runtime.CompilerServices;
 
-namespace Typhon.Engine;
+namespace Typhon.Engine.Internals;
 
 /// <summary>
 /// Shared hash utility functions for in-memory and page-backed hash map implementations.

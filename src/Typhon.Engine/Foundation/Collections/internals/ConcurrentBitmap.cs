@@ -3,10 +3,10 @@ using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using System.Threading;
 
-namespace Typhon.Engine;
+namespace Typhon.Engine.Internals;
 
 [ExcludeFromCodeCoverage]
-public class ConcurrentBitmap
+internal class ConcurrentBitmap
 {
     private readonly Memory<long> _data;
     public ConcurrentBitmap(int bitCount)

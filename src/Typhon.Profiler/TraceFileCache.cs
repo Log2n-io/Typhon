@@ -542,11 +542,15 @@ public static class TraceFileCacheConstants
     /// <see cref="CacheSectionId.EventQueueCatalog"/>, <see cref="CacheSectionId.ResourceGraphSnapshot"/>. Drives the Workbench schema
     /// panels for trace sessions (SchemaBrowser, ArchetypeBrowser, SchemaIndexes, et al.). v13 caches must rebuild — and since the source
     /// also bumped to v7, the source itself must be re-recorded; v6 source files are hard-rejected by the reader.
-    /// v15 (current): one new section <see cref="CacheSectionId.SystemArchetypeTouches"/> folded from the new
+    /// v15: one new section <see cref="CacheSectionId.SystemArchetypeTouches"/> folded from the new
     /// <c>SchedulerSystemArchetype</c> wire event (kind 245). Drives the <c>archetype/*</c>, <c>system-archetype/*</c>, and
     /// <c>component-family/*</c> track families in the Workbench Data Flow module (#327). v14 caches must rebuild.
+    /// v16 (current, 2026-05-10): no schema change, but <see cref="TraceEventKind.NamedSpan"/> reassigned from value 200 to 246
+    /// (was colliding with <see cref="TraceEventKind.EcsQueryMaskAnd"/>). Cached records reference the kind ID directly, so
+    /// v15 caches must rebuild to re-emit NamedSpan records under the new ID. v15 caches load against v8 source files would
+    /// mis-decode kind=200 records; bump enforces rebuild.
     /// </remarks>
-    public const ushort CurrentChunkerVersion = 15;
+    public const ushort CurrentChunkerVersion = 16;
 
     /// <summary>Sidecar file extension, appended to the source path (e.g., <c>foo.typhon-trace</c> → <c>foo.typhon-trace-cache</c>).</summary>
     public const string CacheFileExtension = "-cache";

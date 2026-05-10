@@ -12,6 +12,7 @@ Custom Roslyn analyzers for the Typhon database engine project.
 | TYPHON005 | Error | Type with critical disposable field must implement IDisposable |
 | TYPHON006 | Error | Dispose() must dispose all critical fields |
 | TYPHON007 | Error | Early return in Dispose() must not skip critical field disposal |
+| TYPHON008 | Error | Public-namespace type exposes internal-namespace type on its public surface |
 
 ---
 
@@ -319,6 +320,65 @@ public void Dispose()
     _accessor.Dispose();
 }
 ```
+
+---
+
+## InternalApiLeakAnalyzer (TYPHON008)
+
+**Severity:** Error
+
+Enforces the namespace boundary defined in `claude/research/PublicVsInternalApiClassification.md`: types in the **public** namespace `Typhon.Engine` must not expose types from the **internal** namespace `Typhon.Engine.Internals` on their public/protected surface.
+
+### Why This Rule Exists
+
+Once the big-bang namespace migration lands, the Typhon engine assembly has exactly two namespaces:
+- `Typhon.Engine` — the consumer-facing public surface (~181 types)
+- `Typhon.Engine.Internals` — implementation details, exposed only to friend assemblies via `InternalsVisibleTo` (~424 types)
+
+A public type may freely **use** internal types in its implementation, but it must not **mention** them on its own public surface — doing so re-exports the internal type to consumers and silently re-grows the public API behind the namespace split's back.
+
+Pre-migration the analyzer is dormant (no type lives in `Typhon.Engine.Internals` yet). Post-migration it becomes a build-time guard against accidental drift.
+
+### Detected Surfaces
+
+For every externally visible type in `namespace Typhon.Engine`, the following surfaces are checked for references to `Typhon.Engine.Internals` types:
+
+- Base type and implemented interfaces
+- Field types (public/protected fields)
+- Property types and indexer parameter types
+- Method return types and parameter types
+- Event types
+- Generic type arguments inside any of the above (recursive — e.g. `List<Internals.Foo>` is a leak)
+- Generic type-parameter constraints on the type or its methods
+- Array element types and pointer pointed-at types
+
+Generated code (source-generator output, files matching `.g.cs` / `.generated.cs`, members marked `[CompilerGenerated]` / `[GeneratedCode]`, and implicitly declared symbols) is excluded — leaks in generated code are the producer's responsibility, not the developer's.
+
+### Example
+
+```csharp
+namespace Typhon.Engine;
+
+public class WalManager  // public — consumer surface
+{
+    // ERROR TYPHON008 — exposes internal WalSegment on a public field
+    public Internals.WalSegment ActiveSegment;
+
+    // ERROR TYPHON008 — return type leaks
+    public Internals.WalSegment OpenSegment(int id) => /* ... */;
+
+    // OK — internal type used in implementation, not on the surface
+    private Internals.WalSegment _current;
+    public void Flush() => _current.Flush();
+}
+```
+
+### Resolution
+
+When the analyzer fires, choose one of:
+1. **Promote the internal type** to `Typhon.Engine` — appropriate when it really is part of the consumer contract (and was misclassified as internal).
+2. **Hide the leak behind a public-only abstraction** — return an interface, a snapshot struct, or a public wrapper over the internal type.
+3. **Make the public type internal** — appropriate when the public type was misclassified and is itself an implementation detail.
 
 ---
 

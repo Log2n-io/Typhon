@@ -14,7 +14,7 @@ public abstract class ViewBase : IView, IDisposable, IEnumerable<long>
 {
     private static int _nextViewId;
 
-    protected readonly HashMap<long> _entityIds = new();
+    internal readonly HashMap<long> _entityIds = new();
     private readonly Dictionary<long, DeltaKind> _deltas = new(16);
     private int _addedCount;
     private int _removedCount;
@@ -105,7 +105,7 @@ public abstract class ViewBase : IView, IDisposable, IEnumerable<long>
         _modifiedCount = 0;
     }
 
-    public HashMap<long>.Enumerator GetEnumerator() => _entityIds.GetEnumerator();
+    internal HashMap<long>.Enumerator GetEnumerator() => _entityIds.GetEnumerator();
 
     IEnumerator<long> IEnumerable<long>.GetEnumerator() => ((IEnumerable<long>)_entityIds).GetEnumerator();
 
@@ -231,7 +231,7 @@ public abstract class ViewBase : IView, IDisposable, IEnumerable<long>
     /// Entities present in both sets are NOT reported as Modified — after overflow, granular field-change tracking is lost. Consumers needing field-change
     /// tracking after overflow should treat the overflow event itself as a full invalidation signal via <see cref="HasOverflow"/>.
     /// </summary>
-    protected void ComputeRefreshFullDeltas(HashMap<long> oldEntities)
+    internal void ComputeRefreshFullDeltas(HashMap<long> oldEntities)
     {
         foreach (var pk in _entityIds)
         {

@@ -7,7 +7,7 @@ using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Threading;
 
-namespace Typhon.Engine;
+namespace Typhon.Engine.Internals;
 
 /// <summary>
 /// A lock-free, thread-safe hierarchical bitmap with 3 levels of acceleration structures.
@@ -25,7 +25,7 @@ namespace Typhon.Engine;
 /// - Resize creates a new state with recounted TotalBitSet, then atomically swaps
 /// - TotalBitSet is always exact: each state owns its counter, orphaned states don't matter
 /// </summary>
-public unsafe class ConcurrentBitmapL3All : IResource, IMetricSource, IDebugPropertiesProvider
+internal unsafe class ConcurrentBitmapL3All : IResource, IMetricSource, IDebugPropertiesProvider
 {
     private Bank[] _banks;
     private readonly int _l0Size;

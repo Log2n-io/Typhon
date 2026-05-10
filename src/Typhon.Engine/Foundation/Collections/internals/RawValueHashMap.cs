@@ -6,7 +6,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 
-namespace Typhon.Engine;
+namespace Typhon.Engine.Internals;
 
 /// <summary>
 /// Page-backed hash map with unmanaged key type and runtime-configured value size.
@@ -26,7 +26,7 @@ namespace Typhon.Engine;
 /// stored as fields, so the JIT can devirtualise the <see cref="Update"/> call and inline the body.
 /// </para>
 /// </summary>
-public unsafe interface IRawValueUpdater
+internal unsafe interface IRawValueUpdater
 {
     void Update(byte* valueBytes);
 }
