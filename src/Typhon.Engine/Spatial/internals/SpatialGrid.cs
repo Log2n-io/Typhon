@@ -1,7 +1,6 @@
 using System;
 using System.Runtime.CompilerServices;
 using JetBrains.Annotations;
-using Typhon.Engine.Profiler;
 
 namespace Typhon.Engine.Internals;
 

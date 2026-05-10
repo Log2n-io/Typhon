@@ -52,40 +52,33 @@
     </ItemGroup>
 
     <ItemGroup>
-        <Compile Update="Storage\ManagedPagedMMF.BitmapL3.cs">
+        <!-- IDE folder hints: keep partial halves grouped under their primary file in Solution Explorer.
+             Paths reflect the post-namespace-migration layout (claude/research/PublicVsInternalApiClassification.md). -->
+        <Compile Update="Storage\internals\ManagedPagedMMF.BitmapL3.cs">
             <DependentUpon>ManagedPagedMMF.cs</DependentUpon>
         </Compile>
-        <Compile Update="Storage\PagedMMF.PageInfo.cs">
+        <Compile Update="Storage\internals\PagedMMF.PageInfo.cs">
             <DependentUpon>PagedMMF.cs</DependentUpon>
         </Compile>
-        <Compile Update="Storage\PagedMMFOptions.cs">
+        <Compile Update="Storage\internals\PagedMMF.Metrics.cs">
             <DependentUpon>PagedMMF.cs</DependentUpon>
         </Compile>
-        <Compile Update="Storage\Segments\ChunkBasedSegment.BitmapL3.cs">
-            <DependentUpon>ChunkBasedSegment.cs</DependentUpon>
-        </Compile>
-        <Compile Update="Storage\PagedMMF.Metrics.cs">
-            <DependentUpon>PagedMMF.cs</DependentUpon>
-        </Compile>
-        <Compile Update="Data\Index\BTree.BaseNodeStorage.cs">
+        <Compile Update="Indexing\internals\BTree.BaseNodeStorage.cs">
           <DependentUpon>BTree.cs</DependentUpon>
         </Compile>
-        <Compile Update="Data\Index\BTree.Insert.cs">
+        <Compile Update="Indexing\internals\BTree.Insert.cs">
           <DependentUpon>BTree.cs</DependentUpon>
         </Compile>
-        <Compile Update="Data\Index\BTree.RangeEnumerator.cs">
+        <Compile Update="Indexing\internals\BTree.RangeEnumerator.cs">
           <DependentUpon>BTree.cs</DependentUpon>
         </Compile>
-        <Compile Update="Data\Index\BTree.LookupStatus.cs">
+        <Compile Update="Indexing\internals\BTree.Move.cs">
           <DependentUpon>BTree.cs</DependentUpon>
         </Compile>
-        <Compile Update="Data\Index\BTree.Move.cs">
+        <Compile Update="Indexing\internals\BTree.NodeWrapper.cs">
           <DependentUpon>BTree.cs</DependentUpon>
         </Compile>
-        <Compile Update="Data\Index\BTree.NodeWrapper.cs">
-          <DependentUpon>BTree.cs</DependentUpon>
-        </Compile>
-        <Compile Update="Data\Index\BTree.Remove.cs">
+        <Compile Update="Indexing\internals\BTree.Remove.cs">
           <DependentUpon>BTree.cs</DependentUpon>
         </Compile>
     </ItemGroup>

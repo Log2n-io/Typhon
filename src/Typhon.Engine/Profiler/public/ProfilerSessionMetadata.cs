@@ -1,7 +1,7 @@
 using System;
 using Typhon.Profiler;
 
-namespace Typhon.Engine.Internals;
+namespace Typhon.Engine;
 
 /// <summary>
 /// Static description of the profiling session, passed to each exporter once via <see cref="IProfilerExporter.Initialize"/>. Holds everything

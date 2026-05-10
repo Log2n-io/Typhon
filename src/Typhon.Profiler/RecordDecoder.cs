@@ -149,6 +149,77 @@ public sealed class RecordDecoder
 
             TraceEventKind.StatisticsRebuild => DecodeStatisticsRebuild(record),
 
+            TraceEventKind.SpatialQueryAabb => DecodeSpatialQueryAabb(record),
+            TraceEventKind.SpatialQueryRadius => DecodeSpatialQueryRadius(record),
+            TraceEventKind.SpatialQueryRay => DecodeSpatialQueryRay(record),
+            TraceEventKind.SpatialQueryFrustum => DecodeSpatialQueryFrustum(record),
+            TraceEventKind.SpatialQueryKnn => DecodeSpatialQueryKnn(record),
+            TraceEventKind.SpatialQueryCount => DecodeSpatialQueryCount(record),
+
+            TraceEventKind.SpatialRTreeInsert => DecodeSpatialRTreeInsert(record),
+            TraceEventKind.SpatialRTreeRemove => DecodeSpatialRTreeRemove(record),
+            TraceEventKind.SpatialRTreeNodeSplit => DecodeSpatialRTreeNodeSplit(record),
+            TraceEventKind.SpatialRTreeBulkLoad => DecodeSpatialRTreeBulkLoad(record),
+
+            TraceEventKind.SpatialMaintainInsert => DecodeSpatialMaintainInsert(record),
+            TraceEventKind.SpatialMaintainUpdateSlowPath => DecodeSpatialMaintainUpdateSlowPath(record),
+            TraceEventKind.SpatialTriggerEval => DecodeSpatialTriggerEval(record),
+            TraceEventKind.SpatialTierIndexRebuild => DecodeSpatialTierIndexRebuild(record),
+
+            TraceEventKind.SchedulerSystemSingleThreaded => DecodeSchedulerSystemSingleThreaded(record),
+            TraceEventKind.SchedulerWorkerIdle => DecodeSchedulerWorkerIdle(record),
+            TraceEventKind.SchedulerWorkerBetweenTick => DecodeSchedulerWorkerBetweenTick(record),
+            TraceEventKind.SchedulerDependencyFanOut => DecodeSchedulerDependencyFanOut(record),
+            TraceEventKind.SchedulerGraphBuild => DecodeSchedulerGraphBuild(record),
+            TraceEventKind.SchedulerGraphRebuild => DecodeSchedulerGraphRebuild(record),
+
+            TraceEventKind.RuntimeTransactionLifecycle => DecodeRuntimeTransactionLifecycle(record),
+            TraceEventKind.RuntimeSubscriptionOutputExecute => DecodeRuntimeSubscriptionOutputExecute(record),
+            TraceEventKind.StoragePageCacheDirtyWalk => DecodeStoragePageCacheDirtyWalk(record),
+
+            TraceEventKind.DataTransactionInit => DecodeDataTransactionInit(record),
+            TraceEventKind.DataTransactionPrepare => DecodeDataTransactionPrepare(record),
+            TraceEventKind.DataTransactionValidate => DecodeDataTransactionValidate(record),
+            TraceEventKind.DataTransactionCleanup => DecodeDataTransactionCleanup(record),
+            TraceEventKind.DataMvccVersionCleanup => DecodeDataMvccVersionCleanup(record),
+            TraceEventKind.DataIndexBTreeRangeScan => DecodeDataIndexBTreeRangeScan(record),
+            TraceEventKind.DataIndexBTreeBulkInsert => DecodeDataIndexBTreeBulkInsert(record),
+
+            TraceEventKind.QueryParse => DecodeQueryParse(record),
+            TraceEventKind.QueryParseDnf => DecodeQueryParseDnf(record),
+            TraceEventKind.QueryPlan => DecodeQueryPlan(record),
+            TraceEventKind.QueryEstimate => DecodeQueryEstimate(record),
+            TraceEventKind.QueryPlanSort => DecodeQueryPlanSort(record),
+            TraceEventKind.QueryExecuteIndexScan => DecodeQueryExecuteIndexScan(record),
+            TraceEventKind.QueryExecuteIterate => DecodeQueryExecuteIterate(record),
+            TraceEventKind.QueryExecuteFilter => DecodeQueryExecuteFilter(record),
+            TraceEventKind.QueryExecutePagination => DecodeQueryExecutePagination(record),
+            TraceEventKind.QueryCount => DecodeQueryCount(record),
+
+            TraceEventKind.EcsQueryConstruct => DecodeEcsQueryConstruct(record),
+            TraceEventKind.EcsQuerySubtreeExpand => DecodeEcsQuerySubtreeExpand(record),
+            TraceEventKind.EcsViewRefreshPull => DecodeEcsViewRefreshPull(record),
+            TraceEventKind.EcsViewIncrementalDrain => DecodeEcsViewIncrementalDrain(record),
+            TraceEventKind.EcsViewRefreshFull => DecodeEcsViewRefreshFull(record),
+            TraceEventKind.EcsViewRefreshFullOr => DecodeEcsViewRefreshFullOr(record),
+
+            TraceEventKind.DurabilityRecoveryDiscover => DecodeDurabilityRecoveryDiscover(record),
+            TraceEventKind.DurabilityRecoverySegment => DecodeDurabilityRecoverySegment(record),
+            TraceEventKind.DurabilityRecoveryFpi => DecodeDurabilityRecoveryFpi(record),
+            TraceEventKind.DurabilityRecoveryRedo => DecodeDurabilityRecoveryRedo(record),
+            TraceEventKind.DurabilityRecoveryUndo => DecodeDurabilityRecoveryUndo(record),
+            TraceEventKind.DurabilityRecoveryTickFence => DecodeDurabilityRecoveryTickFence(record),
+
+            TraceEventKind.DurabilityWalQueueDrain => DecodeDurabilityWalQueueDrain(record),
+            TraceEventKind.DurabilityWalOsWrite => DecodeDurabilityWalOsWrite(record),
+            TraceEventKind.DurabilityWalSignal => DecodeDurabilityWalSignal(record),
+            TraceEventKind.DurabilityWalBuffer => DecodeDurabilityWalBuffer(record),
+            TraceEventKind.DurabilityWalBackpressure => DecodeDurabilityWalBackpressure(record),
+
+            TraceEventKind.DurabilityCheckpointWriteBatch => DecodeDurabilityCheckpointWriteBatch(record),
+            TraceEventKind.DurabilityCheckpointBackpressure => DecodeDurabilityCheckpointBackpressure(record),
+            TraceEventKind.DurabilityCheckpointSleep => DecodeDurabilityCheckpointSleep(record),
+
             _ => DecodeGenericSpan(kind, record),
         };
     }
@@ -685,6 +756,922 @@ public sealed class RecordDecoder
             SamplingInterval = data.SamplingInterval,
         };
     }
+
+    // ───────────────────────────────────────────────────────────────────────
+    // Spatial query (kinds 117–122)
+    // ───────────────────────────────────────────────────────────────────────
+
+    private LiveTraceEvent DecodeSpatialQueryAabb(ReadOnlySpan<byte> record)
+    {
+        var data = SpatialQueryEventCodec.DecodeAabb(record);
+        return new LiveTraceEvent
+        {
+            Kind = (int)TraceEventKind.SpatialQueryAabb,
+            ThreadSlot = data.ThreadSlot,
+            TickNumber = _currentTick,
+            TimestampUs = data.StartTimestamp / _ticksPerUs,
+            DurationUs = data.DurationTicks / _ticksPerUs,
+            SpanId = Id(data.SpanId),
+            ParentSpanId = Id(data.ParentSpanId),
+            NodesVisited = data.NodesVisited,
+            LeavesEntered = data.LeavesEntered,
+            ResultCount = data.ResultCount,
+            RestartCount = data.RestartCount,
+            CategoryMask = data.CategoryMask,
+        };
+    }
+
+    private LiveTraceEvent DecodeSpatialQueryRadius(ReadOnlySpan<byte> record)
+    {
+        var data = SpatialQueryEventCodec.DecodeRadius(record);
+        return new LiveTraceEvent
+        {
+            Kind = (int)TraceEventKind.SpatialQueryRadius,
+            ThreadSlot = data.ThreadSlot,
+            TickNumber = _currentTick,
+            TimestampUs = data.StartTimestamp / _ticksPerUs,
+            DurationUs = data.DurationTicks / _ticksPerUs,
+            NodesVisited = data.NodesVisited,
+            ResultCount = data.ResultCount,
+            Radius = data.Radius,
+            RestartCount = data.RestartCount,
+        };
+    }
+
+    private LiveTraceEvent DecodeSpatialQueryRay(ReadOnlySpan<byte> record)
+    {
+        var data = SpatialQueryEventCodec.DecodeRay(record);
+        return new LiveTraceEvent
+        {
+            Kind = (int)TraceEventKind.SpatialQueryRay,
+            ThreadSlot = data.ThreadSlot,
+            TickNumber = _currentTick,
+            TimestampUs = data.StartTimestamp / _ticksPerUs,
+            DurationUs = data.DurationTicks / _ticksPerUs,
+            NodesVisited = data.NodesVisited,
+            ResultCount = data.ResultCount,
+            MaxDist = data.MaxDist,
+            RestartCount = data.RestartCount,
+        };
+    }
+
+    private LiveTraceEvent DecodeSpatialQueryFrustum(ReadOnlySpan<byte> record)
+    {
+        var data = SpatialQueryEventCodec.DecodeFrustum(record);
+        return new LiveTraceEvent
+        {
+            Kind = (int)TraceEventKind.SpatialQueryFrustum,
+            ThreadSlot = data.ThreadSlot,
+            TickNumber = _currentTick,
+            TimestampUs = data.StartTimestamp / _ticksPerUs,
+            DurationUs = data.DurationTicks / _ticksPerUs,
+            NodesVisited = data.NodesVisited,
+            ResultCount = data.ResultCount,
+            PlaneCount = data.PlaneCount,
+            RestartCount = data.RestartCount,
+        };
+    }
+
+    private LiveTraceEvent DecodeSpatialQueryKnn(ReadOnlySpan<byte> record)
+    {
+        var data = SpatialQueryEventCodec.DecodeKnn(record);
+        return new LiveTraceEvent
+        {
+            Kind = (int)TraceEventKind.SpatialQueryKnn,
+            ThreadSlot = data.ThreadSlot,
+            TickNumber = _currentTick,
+            TimestampUs = data.StartTimestamp / _ticksPerUs,
+            DurationUs = data.DurationTicks / _ticksPerUs,
+            K = data.K,
+            IterCount = data.IterCount,
+            FinalRadius = data.FinalRadius,
+            ResultCount = data.ResultCount,
+        };
+    }
+
+    private LiveTraceEvent DecodeSpatialQueryCount(ReadOnlySpan<byte> record)
+    {
+        var data = SpatialQueryEventCodec.DecodeCount(record);
+        return new LiveTraceEvent
+        {
+            Kind = (int)TraceEventKind.SpatialQueryCount,
+            ThreadSlot = data.ThreadSlot,
+            TickNumber = _currentTick,
+            TimestampUs = data.StartTimestamp / _ticksPerUs,
+            DurationUs = data.DurationTicks / _ticksPerUs,
+            Variant = data.Variant,
+            NodesVisited = data.NodesVisited,
+            ResultCount = data.ResultCount,
+        };
+    }
+
+    // ───────────────────────────────────────────────────────────────────────
+    // Spatial R-tree (kinds 123–126)
+    // ───────────────────────────────────────────────────────────────────────
+
+    private LiveTraceEvent DecodeSpatialRTreeInsert(ReadOnlySpan<byte> record)
+    {
+        var data = SpatialRTreeEventCodec.DecodeInsert(record);
+        return new LiveTraceEvent
+        {
+            Kind = (int)TraceEventKind.SpatialRTreeInsert,
+            ThreadSlot = data.ThreadSlot,
+            TickNumber = _currentTick,
+            TimestampUs = data.StartTimestamp / _ticksPerUs,
+            DurationUs = data.DurationTicks / _ticksPerUs,
+            EntityId = SignedId(data.EntityId),
+            Depth = data.Depth,
+            DidSplit = data.DidSplit != 0,
+            RestartCount = data.RestartCount,
+        };
+    }
+
+    private LiveTraceEvent DecodeSpatialRTreeRemove(ReadOnlySpan<byte> record)
+    {
+        var data = SpatialRTreeEventCodec.DecodeRemove(record);
+        return new LiveTraceEvent
+        {
+            Kind = (int)TraceEventKind.SpatialRTreeRemove,
+            ThreadSlot = data.ThreadSlot,
+            TickNumber = _currentTick,
+            TimestampUs = data.StartTimestamp / _ticksPerUs,
+            DurationUs = data.DurationTicks / _ticksPerUs,
+            EntityId = SignedId(data.EntityId),
+            LeafCollapse = data.LeafCollapse != 0,
+        };
+    }
+
+    private LiveTraceEvent DecodeSpatialRTreeNodeSplit(ReadOnlySpan<byte> record)
+    {
+        var data = SpatialRTreeEventCodec.DecodeNodeSplit(record);
+        return new LiveTraceEvent
+        {
+            Kind = (int)TraceEventKind.SpatialRTreeNodeSplit,
+            ThreadSlot = data.ThreadSlot,
+            TickNumber = _currentTick,
+            TimestampUs = data.StartTimestamp / _ticksPerUs,
+            DurationUs = data.DurationTicks / _ticksPerUs,
+            Depth = data.Depth,
+            SplitAxis = data.SplitAxis,
+            LeftCount = data.LeftCount,
+            RightCount = data.RightCount,
+        };
+    }
+
+    private LiveTraceEvent DecodeSpatialRTreeBulkLoad(ReadOnlySpan<byte> record)
+    {
+        var data = SpatialRTreeEventCodec.DecodeBulkLoad(record);
+        return new LiveTraceEvent
+        {
+            Kind = (int)TraceEventKind.SpatialRTreeBulkLoad,
+            ThreadSlot = data.ThreadSlot,
+            TickNumber = _currentTick,
+            TimestampUs = data.StartTimestamp / _ticksPerUs,
+            DurationUs = data.DurationTicks / _ticksPerUs,
+            EntityCount = data.EntityCount,
+            LeafCount = data.LeafCount,
+        };
+    }
+
+    // ───────────────────────────────────────────────────────────────────────
+    // Spatial maintain + trigger eval + tier-index rebuild
+    // ───────────────────────────────────────────────────────────────────────
+
+    private LiveTraceEvent DecodeSpatialMaintainInsert(ReadOnlySpan<byte> record)
+    {
+        var data = SpatialMaintainEventCodec.DecodeInsert(record);
+        return new LiveTraceEvent
+        {
+            Kind = (int)TraceEventKind.SpatialMaintainInsert,
+            ThreadSlot = data.ThreadSlot,
+            TickNumber = _currentTick,
+            TimestampUs = data.StartTimestamp / _ticksPerUs,
+            DurationUs = data.DurationTicks / _ticksPerUs,
+            EntityId = SignedId(data.EntityPK),
+            ComponentTypeId = data.ComponentTypeId,
+            DidDegenerate = data.DidDegenerate != 0,
+        };
+    }
+
+    private LiveTraceEvent DecodeSpatialMaintainUpdateSlowPath(ReadOnlySpan<byte> record)
+    {
+        var data = SpatialMaintainEventCodec.DecodeUpdateSlowPath(record);
+        return new LiveTraceEvent
+        {
+            Kind = (int)TraceEventKind.SpatialMaintainUpdateSlowPath,
+            ThreadSlot = data.ThreadSlot,
+            TickNumber = _currentTick,
+            TimestampUs = data.StartTimestamp / _ticksPerUs,
+            DurationUs = data.DurationTicks / _ticksPerUs,
+            EntityId = SignedId(data.EntityPK),
+            ComponentTypeId = data.ComponentTypeId,
+            EscapeDistSq = data.EscapeDistSq,
+        };
+    }
+
+    private LiveTraceEvent DecodeSpatialTriggerEval(ReadOnlySpan<byte> record)
+    {
+        var data = SpatialTriggerEventCodec.DecodeEval(record);
+        return new LiveTraceEvent
+        {
+            Kind = (int)TraceEventKind.SpatialTriggerEval,
+            ThreadSlot = data.ThreadSlot,
+            TickNumber = _currentTick,
+            TimestampUs = data.StartTimestamp / _ticksPerUs,
+            DurationUs = data.DurationTicks / _ticksPerUs,
+            RegionId = data.RegionId,
+            OccupantCount = data.OccupantCount,
+            EnterCount = data.EnterCount,
+            LeaveCount = data.LeaveCount,
+        };
+    }
+
+    private LiveTraceEvent DecodeSpatialTierIndexRebuild(ReadOnlySpan<byte> record)
+    {
+        var data = SpatialTierIndexEventCodec.DecodeRebuild(record);
+        return new LiveTraceEvent
+        {
+            Kind = (int)TraceEventKind.SpatialTierIndexRebuild,
+            ThreadSlot = data.ThreadSlot,
+            TickNumber = _currentTick,
+            TimestampUs = data.StartTimestamp / _ticksPerUs,
+            DurationUs = data.DurationTicks / _ticksPerUs,
+            ArchetypeId = data.ArchetypeId,
+            ClusterCount = data.ClusterCount,
+            OldVersion = data.OldVersion,
+            NewVersion = data.NewVersion,
+        };
+    }
+
+    // ───────────────────────────────────────────────────────────────────────
+    // Scheduler spans (Phase 4 batch — kinds 149/150/152/155/159/160)
+    // ───────────────────────────────────────────────────────────────────────
+
+    private LiveTraceEvent DecodeSchedulerSystemSingleThreaded(ReadOnlySpan<byte> record)
+    {
+        var data = SchedulerSystemEventCodec.DecodeSingleThreaded(record);
+        return new LiveTraceEvent
+        {
+            Kind = (int)TraceEventKind.SchedulerSystemSingleThreaded,
+            ThreadSlot = data.ThreadSlot,
+            TickNumber = _currentTick,
+            TimestampUs = data.StartTimestamp / _ticksPerUs,
+            DurationUs = data.DurationTicks / _ticksPerUs,
+            SysIdx = data.SysIdx,
+            IsParallelQuery = data.IsParallelQuery != 0,
+            ChunkCount = data.ChunkCount,
+        };
+    }
+
+    private LiveTraceEvent DecodeSchedulerWorkerIdle(ReadOnlySpan<byte> record)
+    {
+        var data = SchedulerWorkerEventCodec.DecodeIdle(record);
+        return new LiveTraceEvent
+        {
+            Kind = (int)TraceEventKind.SchedulerWorkerIdle,
+            ThreadSlot = data.ThreadSlot,
+            TickNumber = _currentTick,
+            TimestampUs = data.StartTimestamp / _ticksPerUs,
+            DurationUs = data.DurationTicks / _ticksPerUs,
+            WorkerId = data.WorkerId,
+            SpinCount = data.SpinCount,
+            IdleUs = data.IdleUs,
+        };
+    }
+
+    private LiveTraceEvent DecodeSchedulerWorkerBetweenTick(ReadOnlySpan<byte> record)
+    {
+        var data = SchedulerWorkerEventCodec.DecodeBetweenTick(record);
+        return new LiveTraceEvent
+        {
+            Kind = (int)TraceEventKind.SchedulerWorkerBetweenTick,
+            ThreadSlot = data.ThreadSlot,
+            TickNumber = _currentTick,
+            TimestampUs = data.StartTimestamp / _ticksPerUs,
+            DurationUs = data.DurationTicks / _ticksPerUs,
+            WorkerId = data.WorkerId,
+            WaitUs = data.WaitUs,
+            WakeReason = data.WakeReason,
+        };
+    }
+
+    private LiveTraceEvent DecodeSchedulerDependencyFanOut(ReadOnlySpan<byte> record)
+    {
+        var data = SchedulerDependencyEventCodec.DecodeFanOut(record);
+        return new LiveTraceEvent
+        {
+            Kind = (int)TraceEventKind.SchedulerDependencyFanOut,
+            ThreadSlot = data.ThreadSlot,
+            TickNumber = _currentTick,
+            TimestampUs = data.StartTimestamp / _ticksPerUs,
+            DurationUs = data.DurationTicks / _ticksPerUs,
+            CompletingSysIdx = data.CompletingSysIdx,
+            SuccCount = data.SuccCount,
+            SkippedCount = data.SkippedCount,
+        };
+    }
+
+    private LiveTraceEvent DecodeSchedulerGraphBuild(ReadOnlySpan<byte> record)
+    {
+        var data = SchedulerGraphEventCodec.DecodeBuild(record);
+        return new LiveTraceEvent
+        {
+            Kind = (int)TraceEventKind.SchedulerGraphBuild,
+            ThreadSlot = data.ThreadSlot,
+            TickNumber = _currentTick,
+            TimestampUs = data.StartTimestamp / _ticksPerUs,
+            DurationUs = data.DurationTicks / _ticksPerUs,
+            SysCount = data.SysCount,
+            EdgeCount = data.EdgeCount,
+            TopoLen = data.TopoLen,
+        };
+    }
+
+    private LiveTraceEvent DecodeSchedulerGraphRebuild(ReadOnlySpan<byte> record)
+    {
+        var data = SchedulerGraphEventCodec.DecodeRebuild(record);
+        return new LiveTraceEvent
+        {
+            Kind = (int)TraceEventKind.SchedulerGraphRebuild,
+            ThreadSlot = data.ThreadSlot,
+            TickNumber = _currentTick,
+            TimestampUs = data.StartTimestamp / _ticksPerUs,
+            DurationUs = data.DurationTicks / _ticksPerUs,
+            OldSysCount = data.OldSysCount,
+            NewSysCount = data.NewSysCount,
+            Reason = data.Reason,
+        };
+    }
+
+    // ───────────────────────────────────────────────────────────────────────
+    // Runtime spans
+    // ───────────────────────────────────────────────────────────────────────
+
+    private LiveTraceEvent DecodeRuntimeTransactionLifecycle(ReadOnlySpan<byte> record)
+    {
+        var data = RuntimeEventCodec.DecodeLifecycle(record);
+        return new LiveTraceEvent
+        {
+            Kind = (int)TraceEventKind.RuntimeTransactionLifecycle,
+            ThreadSlot = data.ThreadSlot,
+            TickNumber = _currentTick,
+            TimestampUs = data.StartTimestamp / _ticksPerUs,
+            DurationUs = data.DurationTicks / _ticksPerUs,
+            SysIdx = data.SysIdx,
+            TxDurUs = data.TxDurUs,
+            Success = data.Success != 0,
+        };
+    }
+
+    private LiveTraceEvent DecodeRuntimeSubscriptionOutputExecute(ReadOnlySpan<byte> record)
+    {
+        var data = RuntimeEventCodec.DecodeOutputExecute(record);
+        return new LiveTraceEvent
+        {
+            Kind = (int)TraceEventKind.RuntimeSubscriptionOutputExecute,
+            ThreadSlot = data.ThreadSlot,
+            TickNumber = _currentTick,
+            TimestampUs = data.StartTimestamp / _ticksPerUs,
+            DurationUs = data.DurationTicks / _ticksPerUs,
+            Tick = data.Tick,
+            Level = data.Level,
+            ClientCount = data.ClientCount,
+            ViewsRefreshed = data.ViewsRefreshed,
+            DeltasPushed = data.DeltasPushed,
+            OverflowCount = data.OverflowCount,
+        };
+    }
+
+    private LiveTraceEvent DecodeStoragePageCacheDirtyWalk(ReadOnlySpan<byte> record)
+    {
+        var data = StorageMiscEventCodec.DecodeDirtyWalk(record);
+        return new LiveTraceEvent
+        {
+            Kind = (int)TraceEventKind.StoragePageCacheDirtyWalk,
+            ThreadSlot = data.ThreadSlot,
+            TickNumber = _currentTick,
+            TimestampUs = data.StartTimestamp / _ticksPerUs,
+            DurationUs = data.DurationTicks / _ticksPerUs,
+            SpanId = Id(data.SpanId),
+            ParentSpanId = Id(data.ParentSpanId),
+            TraceIdHi = data.HasTraceContext ? Id(data.TraceIdHi) : null,
+            TraceIdLo = data.HasTraceContext ? Id(data.TraceIdLo) : null,
+            RangeStart = data.RangeStart,
+            RangeLen = data.RangeLen,
+            DirtyMs = data.DirtyMs,
+        };
+    }
+
+    // ───────────────────────────────────────────────────────────────────────
+    // Data transactions / MVCC / index
+    // ───────────────────────────────────────────────────────────────────────
+
+    private LiveTraceEvent DecodeDataTransactionInit(ReadOnlySpan<byte> record)
+    {
+        var data = DataTransactionEventCodec.DecodeInit(record);
+        return new LiveTraceEvent
+        {
+            Kind = (int)TraceEventKind.DataTransactionInit,
+            ThreadSlot = data.ThreadSlot,
+            TickNumber = _currentTick,
+            TimestampUs = data.StartTimestamp / _ticksPerUs,
+            DurationUs = data.DurationTicks / _ticksPerUs,
+            SpanId = Id(data.SpanId),
+            ParentSpanId = Id(data.ParentSpanId),
+            TraceIdHi = data.HasTraceContext ? Id(data.TraceIdHi) : null,
+            TraceIdLo = data.HasTraceContext ? Id(data.TraceIdLo) : null,
+            Tsn = SignedId(data.Tsn),
+            UowId = data.UowId,
+        };
+    }
+
+    private LiveTraceEvent DecodeDataTransactionPrepare(ReadOnlySpan<byte> record)
+    {
+        var data = DataTransactionEventCodec.DecodePrepare(record);
+        return new LiveTraceEvent
+        {
+            Kind = (int)TraceEventKind.DataTransactionPrepare,
+            ThreadSlot = data.ThreadSlot,
+            TickNumber = _currentTick,
+            TimestampUs = data.StartTimestamp / _ticksPerUs,
+            DurationUs = data.DurationTicks / _ticksPerUs,
+            SpanId = Id(data.SpanId),
+            ParentSpanId = Id(data.ParentSpanId),
+            TraceIdHi = data.HasTraceContext ? Id(data.TraceIdHi) : null,
+            TraceIdLo = data.HasTraceContext ? Id(data.TraceIdLo) : null,
+            Tsn = SignedId(data.Tsn),
+        };
+    }
+
+    private LiveTraceEvent DecodeDataTransactionValidate(ReadOnlySpan<byte> record)
+    {
+        var data = DataTransactionEventCodec.DecodeValidate(record);
+        return new LiveTraceEvent
+        {
+            Kind = (int)TraceEventKind.DataTransactionValidate,
+            ThreadSlot = data.ThreadSlot,
+            TickNumber = _currentTick,
+            TimestampUs = data.StartTimestamp / _ticksPerUs,
+            DurationUs = data.DurationTicks / _ticksPerUs,
+            SpanId = Id(data.SpanId),
+            ParentSpanId = Id(data.ParentSpanId),
+            TraceIdHi = data.HasTraceContext ? Id(data.TraceIdHi) : null,
+            TraceIdLo = data.HasTraceContext ? Id(data.TraceIdLo) : null,
+            Tsn = SignedId(data.Tsn),
+            EntryCount = data.EntryCount,
+        };
+    }
+
+    private LiveTraceEvent DecodeDataTransactionCleanup(ReadOnlySpan<byte> record)
+    {
+        var data = DataTransactionEventCodec.DecodeCleanup(record);
+        return new LiveTraceEvent
+        {
+            Kind = (int)TraceEventKind.DataTransactionCleanup,
+            ThreadSlot = data.ThreadSlot,
+            TickNumber = _currentTick,
+            TimestampUs = data.StartTimestamp / _ticksPerUs,
+            DurationUs = data.DurationTicks / _ticksPerUs,
+            SpanId = Id(data.SpanId),
+            ParentSpanId = Id(data.ParentSpanId),
+            TraceIdHi = data.HasTraceContext ? Id(data.TraceIdHi) : null,
+            TraceIdLo = data.HasTraceContext ? Id(data.TraceIdLo) : null,
+            Tsn = SignedId(data.Tsn),
+            EntityCount = data.EntityCount,
+        };
+    }
+
+    private LiveTraceEvent DecodeDataMvccVersionCleanup(ReadOnlySpan<byte> record)
+    {
+        var data = DataMvccEventCodec.DecodeVersionCleanup(record);
+        return new LiveTraceEvent
+        {
+            Kind = (int)TraceEventKind.DataMvccVersionCleanup,
+            ThreadSlot = data.ThreadSlot,
+            TickNumber = _currentTick,
+            TimestampUs = data.StartTimestamp / _ticksPerUs,
+            DurationUs = data.DurationTicks / _ticksPerUs,
+            SpanId = Id(data.SpanId),
+            ParentSpanId = Id(data.ParentSpanId),
+            TraceIdHi = data.HasTraceContext ? Id(data.TraceIdHi) : null,
+            TraceIdLo = data.HasTraceContext ? Id(data.TraceIdLo) : null,
+            Pk = SignedId(data.Pk),
+            EntriesFreed = data.EntriesFreed,
+        };
+    }
+
+    private LiveTraceEvent DecodeDataIndexBTreeRangeScan(ReadOnlySpan<byte> record)
+    {
+        var data = DataIndexBTreeEventCodec.DecodeRangeScan(record);
+        return new LiveTraceEvent
+        {
+            Kind = (int)TraceEventKind.DataIndexBTreeRangeScan,
+            ThreadSlot = data.ThreadSlot,
+            TickNumber = _currentTick,
+            TimestampUs = data.StartTimestamp / _ticksPerUs,
+            DurationUs = data.DurationTicks / _ticksPerUs,
+            SpanId = Id(data.SpanId),
+            ParentSpanId = Id(data.ParentSpanId),
+            TraceIdHi = data.HasTraceContext ? Id(data.TraceIdHi) : null,
+            TraceIdLo = data.HasTraceContext ? Id(data.TraceIdLo) : null,
+            ResultCount = data.ResultCount,
+            RestartCount = data.RestartCount,
+        };
+    }
+
+    private LiveTraceEvent DecodeDataIndexBTreeBulkInsert(ReadOnlySpan<byte> record)
+    {
+        var data = DataIndexBTreeEventCodec.DecodeBulkInsert(record);
+        return new LiveTraceEvent
+        {
+            Kind = (int)TraceEventKind.DataIndexBTreeBulkInsert,
+            ThreadSlot = data.ThreadSlot,
+            TickNumber = _currentTick,
+            TimestampUs = data.StartTimestamp / _ticksPerUs,
+            DurationUs = data.DurationTicks / _ticksPerUs,
+            SpanId = Id(data.SpanId),
+            ParentSpanId = Id(data.ParentSpanId),
+            TraceIdHi = data.HasTraceContext ? Id(data.TraceIdHi) : null,
+            TraceIdLo = data.HasTraceContext ? Id(data.TraceIdLo) : null,
+            BufferId = data.BufferId,
+            EntryCount = data.EntryCount,
+        };
+    }
+
+    // ───────────────────────────────────────────────────────────────────────
+    // Query pipeline (10 kinds)
+    // ───────────────────────────────────────────────────────────────────────
+
+    private LiveTraceEvent DecodeQueryParse(ReadOnlySpan<byte> record)
+    {
+        var data = QueryEventCodec.DecodeParse(record);
+        return BaseSpan(TraceEventKind.QueryParse, data.ThreadSlot, data.StartTimestamp, data.DurationTicks,
+            data.SpanId, data.ParentSpanId, data.HasTraceContext, data.TraceIdHi, data.TraceIdLo) with
+        {
+            PredicateCount = data.PredicateCount,
+            BranchCount = data.BranchCount,
+        };
+    }
+
+    private LiveTraceEvent DecodeQueryParseDnf(ReadOnlySpan<byte> record)
+    {
+        var data = QueryEventCodec.DecodeParseDnf(record);
+        return BaseSpan(TraceEventKind.QueryParseDnf, data.ThreadSlot, data.StartTimestamp, data.DurationTicks,
+            data.SpanId, data.ParentSpanId, data.HasTraceContext, data.TraceIdHi, data.TraceIdLo) with
+        {
+            InBranches = data.InBranches,
+            OutBranches = data.OutBranches,
+        };
+    }
+
+    private LiveTraceEvent DecodeQueryPlan(ReadOnlySpan<byte> record)
+    {
+        var data = QueryEventCodec.DecodePlan(record);
+        return BaseSpan(TraceEventKind.QueryPlan, data.ThreadSlot, data.StartTimestamp, data.DurationTicks,
+            data.SpanId, data.ParentSpanId, data.HasTraceContext, data.TraceIdHi, data.TraceIdLo) with
+        {
+            EvaluatorCount = data.EvaluatorCount,
+            IndexFieldIdx = data.IndexFieldIdx,
+            RangeMin = SignedId(data.RangeMin),
+            RangeMax = SignedId(data.RangeMax),
+        };
+    }
+
+    private LiveTraceEvent DecodeQueryEstimate(ReadOnlySpan<byte> record)
+    {
+        var data = QueryEventCodec.DecodeEstimate(record);
+        return BaseSpan(TraceEventKind.QueryEstimate, data.ThreadSlot, data.StartTimestamp, data.DurationTicks,
+            data.SpanId, data.ParentSpanId, data.HasTraceContext, data.TraceIdHi, data.TraceIdLo) with
+        {
+            FieldIdx = data.FieldIdx,
+            Cardinality = SignedId(data.Cardinality),
+        };
+    }
+
+    private LiveTraceEvent DecodeQueryPlanSort(ReadOnlySpan<byte> record)
+    {
+        var data = QueryEventCodec.DecodePlanSort(record);
+        return BaseSpan(TraceEventKind.QueryPlanSort, data.ThreadSlot, data.StartTimestamp, data.DurationTicks,
+            data.SpanId, data.ParentSpanId, data.HasTraceContext, data.TraceIdHi, data.TraceIdLo) with
+        {
+            EvaluatorCount = data.EvaluatorCount,
+            SortNs = data.SortNs,
+        };
+    }
+
+    private LiveTraceEvent DecodeQueryExecuteIndexScan(ReadOnlySpan<byte> record)
+    {
+        var data = QueryEventCodec.DecodeIndexScan(record);
+        return BaseSpan(TraceEventKind.QueryExecuteIndexScan, data.ThreadSlot, data.StartTimestamp, data.DurationTicks,
+            data.SpanId, data.ParentSpanId, data.HasTraceContext, data.TraceIdHi, data.TraceIdLo) with
+        {
+            PrimaryFieldIdx = data.PrimaryFieldIdx,
+            Mode = data.Mode,
+        };
+    }
+
+    private LiveTraceEvent DecodeQueryExecuteIterate(ReadOnlySpan<byte> record)
+    {
+        var data = QueryEventCodec.DecodeIterate(record);
+        return BaseSpan(TraceEventKind.QueryExecuteIterate, data.ThreadSlot, data.StartTimestamp, data.DurationTicks,
+            data.SpanId, data.ParentSpanId, data.HasTraceContext, data.TraceIdHi, data.TraceIdLo) with
+        {
+            ChunkCount = data.ChunkCount,
+            EntryCount = data.EntryCount,
+        };
+    }
+
+    private LiveTraceEvent DecodeQueryExecuteFilter(ReadOnlySpan<byte> record)
+    {
+        var data = QueryEventCodec.DecodeFilter(record);
+        return BaseSpan(TraceEventKind.QueryExecuteFilter, data.ThreadSlot, data.StartTimestamp, data.DurationTicks,
+            data.SpanId, data.ParentSpanId, data.HasTraceContext, data.TraceIdHi, data.TraceIdLo) with
+        {
+            FilterCount = data.FilterCount,
+            RejectedCount = data.RejectedCount,
+        };
+    }
+
+    private LiveTraceEvent DecodeQueryExecutePagination(ReadOnlySpan<byte> record)
+    {
+        var data = QueryEventCodec.DecodePagination(record);
+        return BaseSpan(TraceEventKind.QueryExecutePagination, data.ThreadSlot, data.StartTimestamp, data.DurationTicks,
+            data.SpanId, data.ParentSpanId, data.HasTraceContext, data.TraceIdHi, data.TraceIdLo) with
+        {
+            Skip = data.Skip,
+            Take = data.Take,
+            EarlyTerm = data.EarlyTerm != 0,
+        };
+    }
+
+    private LiveTraceEvent DecodeQueryCount(ReadOnlySpan<byte> record)
+    {
+        var data = QueryEventCodec.DecodeCount(record);
+        return BaseSpan(TraceEventKind.QueryCount, data.ThreadSlot, data.StartTimestamp, data.DurationTicks,
+            data.SpanId, data.ParentSpanId, data.HasTraceContext, data.TraceIdHi, data.TraceIdLo) with
+        {
+            ResultCount = data.ResultCount,
+        };
+    }
+
+    // ───────────────────────────────────────────────────────────────────────
+    // ECS query construct + view refresh
+    // ───────────────────────────────────────────────────────────────────────
+
+    private LiveTraceEvent DecodeEcsQueryConstruct(ReadOnlySpan<byte> record)
+    {
+        var data = EcsQueryDepthEventCodec.DecodeConstruct(record);
+        return BaseSpan(TraceEventKind.EcsQueryConstruct, data.ThreadSlot, data.StartTimestamp, data.DurationTicks,
+            data.SpanId, data.ParentSpanId, data.HasTraceContext, data.TraceIdHi, data.TraceIdLo) with
+        {
+            TargetArchId = data.TargetArchId,
+            Polymorphic = data.Polymorphic != 0,
+            MaskSize = data.MaskSize,
+        };
+    }
+
+    private LiveTraceEvent DecodeEcsQuerySubtreeExpand(ReadOnlySpan<byte> record)
+    {
+        var data = EcsQueryDepthEventCodec.DecodeSubtreeExpand(record);
+        return BaseSpan(TraceEventKind.EcsQuerySubtreeExpand, data.ThreadSlot, data.StartTimestamp, data.DurationTicks,
+            data.SpanId, data.ParentSpanId, data.HasTraceContext, data.TraceIdHi, data.TraceIdLo) with
+        {
+            SubtreeCount = data.SubtreeCount,
+            RootId = data.RootId,
+        };
+    }
+
+    private LiveTraceEvent DecodeEcsViewRefreshPull(ReadOnlySpan<byte> record)
+    {
+        var data = EcsViewEventCodec.DecodeRefreshPull(record);
+        return BaseSpan(TraceEventKind.EcsViewRefreshPull, data.ThreadSlot, data.StartTimestamp, data.DurationTicks,
+            data.SpanId, data.ParentSpanId, data.HasTraceContext, data.TraceIdHi, data.TraceIdLo) with
+        {
+            QueryNs = data.QueryNs,
+            ArchetypeMaskBits = data.ArchetypeMaskBits,
+        };
+    }
+
+    private LiveTraceEvent DecodeEcsViewIncrementalDrain(ReadOnlySpan<byte> record)
+    {
+        var data = EcsViewEventCodec.DecodeIncrementalDrain(record);
+        return BaseSpan(TraceEventKind.EcsViewIncrementalDrain, data.ThreadSlot, data.StartTimestamp, data.DurationTicks,
+            data.SpanId, data.ParentSpanId, data.HasTraceContext, data.TraceIdHi, data.TraceIdLo) with
+        {
+            DeltaCount = data.DeltaCount,
+            Overflow = data.Overflow != 0,
+        };
+    }
+
+    private LiveTraceEvent DecodeEcsViewRefreshFull(ReadOnlySpan<byte> record)
+    {
+        var data = EcsViewEventCodec.DecodeRefreshFull(record);
+        return BaseSpan(TraceEventKind.EcsViewRefreshFull, data.ThreadSlot, data.StartTimestamp, data.DurationTicks,
+            data.SpanId, data.ParentSpanId, data.HasTraceContext, data.TraceIdHi, data.TraceIdLo) with
+        {
+            OldCount = data.OldCount,
+            NewCount = data.NewCount,
+            RequeryNs = data.RequeryNs,
+        };
+    }
+
+    private LiveTraceEvent DecodeEcsViewRefreshFullOr(ReadOnlySpan<byte> record)
+    {
+        var data = EcsViewEventCodec.DecodeRefreshFullOr(record);
+        return BaseSpan(TraceEventKind.EcsViewRefreshFullOr, data.ThreadSlot, data.StartTimestamp, data.DurationTicks,
+            data.SpanId, data.ParentSpanId, data.HasTraceContext, data.TraceIdHi, data.TraceIdLo) with
+        {
+            OldCount = data.OldCount,
+            NewCount = data.NewCount,
+            BranchCount = data.BranchCount,
+        };
+    }
+
+    // ───────────────────────────────────────────────────────────────────────
+    // Durability recovery (Phase 8 — kinds 230, 232, 235, 232..)
+    // ───────────────────────────────────────────────────────────────────────
+
+    private LiveTraceEvent DecodeDurabilityRecoveryDiscover(ReadOnlySpan<byte> record)
+    {
+        var data = DurabilityRecoveryEventCodec.DecodeDiscover(record);
+        return BaseSpan(TraceEventKind.DurabilityRecoveryDiscover, data.ThreadSlot, data.StartTimestamp, data.DurationTicks,
+            data.SpanId, data.ParentSpanId, data.HasTraceContext, data.TraceIdHi, data.TraceIdLo) with
+        {
+            SegCount = data.SegCount,
+            TotalBytes = data.TotalBytes,
+            FirstSegId = data.FirstSegId,
+        };
+    }
+
+    private LiveTraceEvent DecodeDurabilityRecoverySegment(ReadOnlySpan<byte> record)
+    {
+        var data = DurabilityRecoveryEventCodec.DecodeSegment(record);
+        return BaseSpan(TraceEventKind.DurabilityRecoverySegment, data.ThreadSlot, data.StartTimestamp, data.DurationTicks,
+            data.SpanId, data.ParentSpanId, data.HasTraceContext, data.TraceIdHi, data.TraceIdLo) with
+        {
+            SegId = data.SegId,
+            RecCount = data.RecCount,
+            Bytes = data.Bytes,
+            Truncated = data.Truncated != 0,
+        };
+    }
+
+    private LiveTraceEvent DecodeDurabilityRecoveryFpi(ReadOnlySpan<byte> record)
+    {
+        var data = DurabilityRecoveryEventCodec.DecodeFpi(record);
+        return BaseSpan(TraceEventKind.DurabilityRecoveryFpi, data.ThreadSlot, data.StartTimestamp, data.DurationTicks,
+            data.SpanId, data.ParentSpanId, data.HasTraceContext, data.TraceIdHi, data.TraceIdLo) with
+        {
+            FpiCount = data.FpiCount,
+            RepairedCount = data.RepairedCount,
+            Mismatches = data.Mismatches,
+        };
+    }
+
+    private LiveTraceEvent DecodeDurabilityRecoveryRedo(ReadOnlySpan<byte> record)
+    {
+        var data = DurabilityRecoveryEventCodec.DecodeRedo(record);
+        return BaseSpan(TraceEventKind.DurabilityRecoveryRedo, data.ThreadSlot, data.StartTimestamp, data.DurationTicks,
+            data.SpanId, data.ParentSpanId, data.HasTraceContext, data.TraceIdHi, data.TraceIdLo) with
+        {
+            RecordsReplayed = data.RecordsReplayed,
+            UowsReplayed = data.UowsReplayed,
+            DurUs = data.DurUs,
+        };
+    }
+
+    private LiveTraceEvent DecodeDurabilityRecoveryUndo(ReadOnlySpan<byte> record)
+    {
+        var data = DurabilityRecoveryEventCodec.DecodeUndo(record);
+        return BaseSpan(TraceEventKind.DurabilityRecoveryUndo, data.ThreadSlot, data.StartTimestamp, data.DurationTicks,
+            data.SpanId, data.ParentSpanId, data.HasTraceContext, data.TraceIdHi, data.TraceIdLo) with
+        {
+            VoidedUowCount = data.VoidedUowCount,
+        };
+    }
+
+    private LiveTraceEvent DecodeDurabilityRecoveryTickFence(ReadOnlySpan<byte> record)
+    {
+        var data = DurabilityRecoveryEventCodec.DecodeTickFence(record);
+        return BaseSpan(TraceEventKind.DurabilityRecoveryTickFence, data.ThreadSlot, data.StartTimestamp, data.DurationTicks,
+            data.SpanId, data.ParentSpanId, data.HasTraceContext, data.TraceIdHi, data.TraceIdLo) with
+        {
+            TickFenceCount = data.TickFenceCount,
+            Entries = data.Entries,
+            // Recovery TickFence carries its own tick number (separate from the global tick); reuse Tick.
+            Tick = data.TickNumber,
+        };
+    }
+
+    // ───────────────────────────────────────────────────────────────────────
+    // Durability WAL depth spans (kinds 220–224 — codec authored 2026-05-10)
+    // ───────────────────────────────────────────────────────────────────────
+
+    private LiveTraceEvent DecodeDurabilityWalQueueDrain(ReadOnlySpan<byte> record)
+    {
+        var data = DurabilityWalEventCodec.DecodeQueueDrain(record);
+        return BaseSpan(TraceEventKind.DurabilityWalQueueDrain, data.ThreadSlot, data.StartTimestamp, data.DurationTicks,
+            data.SpanId, data.ParentSpanId, data.HasTraceContext, data.TraceIdHi, data.TraceIdLo) with
+        {
+            BytesAligned = data.BytesAligned,
+            FrameCount = data.FrameCount,
+        };
+    }
+
+    private LiveTraceEvent DecodeDurabilityWalOsWrite(ReadOnlySpan<byte> record)
+    {
+        var data = DurabilityWalEventCodec.DecodeOsWrite(record);
+        return BaseSpan(TraceEventKind.DurabilityWalOsWrite, data.ThreadSlot, data.StartTimestamp, data.DurationTicks,
+            data.SpanId, data.ParentSpanId, data.HasTraceContext, data.TraceIdHi, data.TraceIdLo) with
+        {
+            BytesAligned = data.BytesAligned,
+            FrameCount = data.FrameCount,
+            HighLsn = SignedId(data.HighLsn),
+        };
+    }
+
+    private LiveTraceEvent DecodeDurabilityWalSignal(ReadOnlySpan<byte> record)
+    {
+        var data = DurabilityWalEventCodec.DecodeSignal(record);
+        return BaseSpan(TraceEventKind.DurabilityWalSignal, data.ThreadSlot, data.StartTimestamp, data.DurationTicks,
+            data.SpanId, data.ParentSpanId, data.HasTraceContext, data.TraceIdHi, data.TraceIdLo) with
+        {
+            HighLsn = SignedId(data.HighLsn),
+        };
+    }
+
+    private LiveTraceEvent DecodeDurabilityWalBuffer(ReadOnlySpan<byte> record)
+    {
+        var data = DurabilityWalEventCodec.DecodeBuffer(record);
+        return BaseSpan(TraceEventKind.DurabilityWalBuffer, data.ThreadSlot, data.StartTimestamp, data.DurationTicks,
+            data.SpanId, data.ParentSpanId, data.HasTraceContext, data.TraceIdHi, data.TraceIdLo) with
+        {
+            BytesAligned = data.BytesAligned,
+        };
+    }
+
+    private LiveTraceEvent DecodeDurabilityWalBackpressure(ReadOnlySpan<byte> record)
+    {
+        var data = DurabilityWalEventCodec.DecodeBackpressure(record);
+        return BaseSpan(TraceEventKind.DurabilityWalBackpressure, data.ThreadSlot, data.StartTimestamp, data.DurationTicks,
+            data.SpanId, data.ParentSpanId, data.HasTraceContext, data.TraceIdHi, data.TraceIdLo) with
+        {
+            WaitUs = data.WaitUs,
+            ProducerThread = data.ProducerThread,
+        };
+    }
+
+    // ───────────────────────────────────────────────────────────────────────
+    // Durability Checkpoint depth spans (kinds 225–227 — codec authored 2026-05-10)
+    // ───────────────────────────────────────────────────────────────────────
+
+    private LiveTraceEvent DecodeDurabilityCheckpointWriteBatch(ReadOnlySpan<byte> record)
+    {
+        var data = DurabilityCheckpointEventCodec.DecodeWriteBatch(record);
+        return BaseSpan(TraceEventKind.DurabilityCheckpointWriteBatch, data.ThreadSlot, data.StartTimestamp, data.DurationTicks,
+            data.SpanId, data.ParentSpanId, data.HasTraceContext, data.TraceIdHi, data.TraceIdLo) with
+        {
+            WriteBatchSize = data.WriteBatchSize,
+            StagingAllocated = data.StagingAllocated,
+        };
+    }
+
+    private LiveTraceEvent DecodeDurabilityCheckpointBackpressure(ReadOnlySpan<byte> record)
+    {
+        var data = DurabilityCheckpointEventCodec.DecodeBackpressure(record);
+        return BaseSpan(TraceEventKind.DurabilityCheckpointBackpressure, data.ThreadSlot, data.StartTimestamp, data.DurationTicks,
+            data.SpanId, data.ParentSpanId, data.HasTraceContext, data.TraceIdHi, data.TraceIdLo) with
+        {
+            WaitMs = data.WaitMs,
+            Exhausted = data.Exhausted != 0,
+        };
+    }
+
+    private LiveTraceEvent DecodeDurabilityCheckpointSleep(ReadOnlySpan<byte> record)
+    {
+        var data = DurabilityCheckpointEventCodec.DecodeSleep(record);
+        return BaseSpan(TraceEventKind.DurabilityCheckpointSleep, data.ThreadSlot, data.StartTimestamp, data.DurationTicks,
+            data.SpanId, data.ParentSpanId, data.HasTraceContext, data.TraceIdHi, data.TraceIdLo) with
+        {
+            SleepMs = data.SleepMs,
+            WakeReason = data.WakeReason,
+        };
+    }
+
+    /// <summary>Common-shape span event helper used by the typed-decoder methods above. Captures all the boilerplate fields shared by every span record.</summary>
+    private LiveTraceEvent BaseSpan(TraceEventKind kind, byte threadSlot, long startTimestamp, long durationTicks,
+        ulong spanId, ulong parentSpanId, bool hasTraceContext, ulong traceIdHi, ulong traceIdLo) => new LiveTraceEvent
+    {
+        Kind = (int)kind,
+        ThreadSlot = threadSlot,
+        TickNumber = _currentTick,
+        TimestampUs = startTimestamp / _ticksPerUs,
+        DurationUs = durationTicks / _ticksPerUs,
+        SpanId = Id(spanId),
+        ParentSpanId = Id(parentSpanId),
+        TraceIdHi = hasTraceContext ? Id(traceIdHi) : null,
+        TraceIdLo = hasTraceContext ? Id(traceIdLo) : null,
+    };
 
     // ID fields emitted as decimal strings — preserves full 64-bit precision for JS clients (Number tops at 2^53).
     private static string Id(ulong value) => value.ToString();

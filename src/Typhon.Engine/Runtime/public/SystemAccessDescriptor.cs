@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 
-namespace Typhon.Engine.Internals;
+namespace Typhon.Engine;
 
 /// <summary>
 /// Accumulator for a system's declared read/write access (RFC 07 — System Access Declarations + Auto-DAG). Populated by <see cref="SystemBuilder"/> declaration

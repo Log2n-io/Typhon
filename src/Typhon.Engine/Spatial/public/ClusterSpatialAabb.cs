@@ -1,6 +1,6 @@
 using System.Runtime.InteropServices;
 
-namespace Typhon.Engine.Internals;
+namespace Typhon.Engine;
 
 /// <summary>
 /// Per-cluster tight AABB plus category mask, used by the per-cell cluster spatial index (issue #230).

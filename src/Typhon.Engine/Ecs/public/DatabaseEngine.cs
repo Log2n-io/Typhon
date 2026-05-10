@@ -10,7 +10,6 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Reflection;
 using System.Linq.Expressions;
-using Typhon.Engine.Profiler;
 using Typhon.Schema.Definition;
 
 namespace Typhon.Engine;

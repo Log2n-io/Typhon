@@ -3,7 +3,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Threading;
 
-namespace Typhon.Engine.Internals;
+namespace Typhon.Engine;
 
 /// <summary>
 /// Bounded handoff queue between the profiler consumer thread and one exporter. Wraps a <see cref="BlockingCollection{T}"/> with explicit

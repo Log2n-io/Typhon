@@ -5,7 +5,6 @@ using System.Linq.Expressions;
 using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics.X86;
 using JetBrains.Annotations;
-using Typhon.Engine.Profiler;
 using Typhon.Profiler;
 
 namespace Typhon.Engine;

@@ -2,7 +2,6 @@
 
 using System;
 using System.Threading;
-using Typhon.Engine.Profiler;
 
 namespace Typhon.Engine.Internals;
 

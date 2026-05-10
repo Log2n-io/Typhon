@@ -1,7 +1,6 @@
 using System;
 using System.Runtime.CompilerServices;
 using Microsoft.Extensions.Logging;
-using Typhon.Engine.Profiler;
 using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Internals;

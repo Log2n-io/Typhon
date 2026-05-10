@@ -197,6 +197,88 @@ public sealed class TraceEventWiringTests
         TraceEventKind.CheckpointRecycle,
 
         TraceEventKind.StatisticsRebuild,
+
+        // Spatial query — typed decoders wired 2026-05-10 via SpatialQueryEventCodec.Decode{Aabb,Radius,Ray,Frustum,Knn,Count}.
+        TraceEventKind.SpatialQueryAabb,
+        TraceEventKind.SpatialQueryRadius,
+        TraceEventKind.SpatialQueryRay,
+        TraceEventKind.SpatialQueryFrustum,
+        TraceEventKind.SpatialQueryKnn,
+        TraceEventKind.SpatialQueryCount,
+
+        // Spatial R-tree — typed decoders wired 2026-05-10 via SpatialRTreeEventCodec.Decode{Insert,Remove,NodeSplit,BulkLoad}.
+        TraceEventKind.SpatialRTreeInsert,
+        TraceEventKind.SpatialRTreeRemove,
+        TraceEventKind.SpatialRTreeNodeSplit,
+        TraceEventKind.SpatialRTreeBulkLoad,
+
+        // Spatial maintenance + trigger eval + tier-index rebuild — typed decoders wired 2026-05-10.
+        TraceEventKind.SpatialMaintainInsert,
+        TraceEventKind.SpatialMaintainUpdateSlowPath,
+        TraceEventKind.SpatialTriggerEval,
+        TraceEventKind.SpatialTierIndexRebuild,
+
+        // Scheduler spans (Phase 4) — typed decoders wired 2026-05-10.
+        TraceEventKind.SchedulerSystemSingleThreaded,
+        TraceEventKind.SchedulerWorkerIdle,
+        TraceEventKind.SchedulerWorkerBetweenTick,
+        TraceEventKind.SchedulerDependencyFanOut,
+        TraceEventKind.SchedulerGraphBuild,
+        TraceEventKind.SchedulerGraphRebuild,
+
+        // Runtime + Storage spans — typed decoders wired 2026-05-10.
+        TraceEventKind.RuntimeTransactionLifecycle,
+        TraceEventKind.RuntimeSubscriptionOutputExecute,
+        TraceEventKind.StoragePageCacheDirtyWalk,
+
+        // Data tx / MVCC / index — typed decoders wired 2026-05-10.
+        TraceEventKind.DataTransactionInit,
+        TraceEventKind.DataTransactionPrepare,
+        TraceEventKind.DataTransactionValidate,
+        TraceEventKind.DataTransactionCleanup,
+        TraceEventKind.DataMvccVersionCleanup,
+        TraceEventKind.DataIndexBTreeRangeScan,
+        TraceEventKind.DataIndexBTreeBulkInsert,
+
+        // Query pipeline (10 kinds) — typed decoders wired 2026-05-10 via QueryEventCodec.Decode{Parse,ParseDnf,Plan,Estimate,PlanSort,IndexScan,Iterate,Filter,Pagination,Count}.
+        TraceEventKind.QueryParse,
+        TraceEventKind.QueryParseDnf,
+        TraceEventKind.QueryPlan,
+        TraceEventKind.QueryEstimate,
+        TraceEventKind.QueryPlanSort,
+        TraceEventKind.QueryExecuteIndexScan,
+        TraceEventKind.QueryExecuteIterate,
+        TraceEventKind.QueryExecuteFilter,
+        TraceEventKind.QueryExecutePagination,
+        TraceEventKind.QueryCount,
+
+        // ECS query construct + view refresh — typed decoders wired 2026-05-10.
+        TraceEventKind.EcsQueryConstruct,
+        TraceEventKind.EcsQuerySubtreeExpand,
+        TraceEventKind.EcsViewRefreshPull,
+        TraceEventKind.EcsViewIncrementalDrain,
+        TraceEventKind.EcsViewRefreshFull,
+        TraceEventKind.EcsViewRefreshFullOr,
+
+        // Durability recovery (Phase 8) — typed decoders wired 2026-05-10.
+        TraceEventKind.DurabilityRecoveryDiscover,
+        TraceEventKind.DurabilityRecoverySegment,
+        TraceEventKind.DurabilityRecoveryFpi,
+        TraceEventKind.DurabilityRecoveryRedo,
+        TraceEventKind.DurabilityRecoveryUndo,
+        TraceEventKind.DurabilityRecoveryTickFence,
+
+        // Durability WAL depth spans — codec authored 2026-05-10 (DurabilityWalDepthEventCodec).
+        TraceEventKind.DurabilityWalQueueDrain,
+        TraceEventKind.DurabilityWalOsWrite,
+        TraceEventKind.DurabilityWalSignal,
+        TraceEventKind.DurabilityWalBuffer,
+        TraceEventKind.DurabilityWalBackpressure,
+
+        // Durability Checkpoint depth spans — codec authored 2026-05-10 (DurabilityCheckpointDepthEventCodec).
+        TraceEventKind.DurabilityCheckpointWriteBatch,
+        TraceEventKind.DurabilityCheckpointBackpressure,
+        TraceEventKind.DurabilityCheckpointSleep,
     ];
 
     /// <summary>
@@ -211,94 +293,6 @@ public sealed class TraceEventWiringTests
     /// </summary>
     private static readonly HashSet<TraceEventKind> KnownEncoderOnlyGaps =
     [
-        // Spatial query — only header decoded today; payloads (target tree, AABB, radius, etc.) lost.
-        TraceEventKind.SpatialQueryAabb,
-        TraceEventKind.SpatialQueryRadius,
-        TraceEventKind.SpatialQueryRay,
-        TraceEventKind.SpatialQueryFrustum,
-        TraceEventKind.SpatialQueryKnn,
-        TraceEventKind.SpatialQueryCount,
-
-        // Spatial R-tree — operation kind decoded, but node/AABB/parent payload lost.
-        TraceEventKind.SpatialRTreeInsert,
-        TraceEventKind.SpatialRTreeRemove,
-        TraceEventKind.SpatialRTreeNodeSplit,
-        TraceEventKind.SpatialRTreeBulkLoad,
-
-        // Spatial maintenance + trigger — header only.
-        TraceEventKind.SpatialTierIndexRebuild,
-        TraceEventKind.SpatialMaintainInsert,
-        TraceEventKind.SpatialMaintainUpdateSlowPath,
-        TraceEventKind.SpatialTriggerEval,
-
-        // Scheduler spans (Phase 4) — most decoders missing.
-        TraceEventKind.SchedulerSystemSingleThreaded,
-        TraceEventKind.SchedulerWorkerIdle,
-        TraceEventKind.SchedulerWorkerBetweenTick,
-        TraceEventKind.SchedulerDependencyFanOut,
-        TraceEventKind.SchedulerGraphBuild,
-        TraceEventKind.SchedulerGraphRebuild,
-
-        // Runtime spans — phase + storage walk.
-        TraceEventKind.RuntimeTransactionLifecycle,
-        TraceEventKind.RuntimeSubscriptionOutputExecute,
-        TraceEventKind.StoragePageCacheDirtyWalk,
-
-        // Data transactions — encoders emit, decoder layer covers only kind 176 (Conflict).
-        TraceEventKind.DataTransactionInit,
-        TraceEventKind.DataTransactionPrepare,
-        TraceEventKind.DataTransactionValidate,
-        TraceEventKind.DataTransactionCleanup,
-
-        // Data MVCC — decoder covers only 178 (ChainWalk).
-        TraceEventKind.DataMvccVersionCleanup,
-
-        // Data index — decoder covers neither range-scan nor bulk-insert today.
-        TraceEventKind.DataIndexBTreeRangeScan,
-        TraceEventKind.DataIndexBTreeBulkInsert,
-
-        // Query pipeline — parse / plan / execute spans, header only.
-        TraceEventKind.QueryParse,
-        TraceEventKind.QueryParseDnf,
-        TraceEventKind.QueryPlan,
-        TraceEventKind.QueryEstimate,
-        TraceEventKind.QueryPlanSort,
-        TraceEventKind.QueryExecuteIndexScan,
-        TraceEventKind.QueryExecuteIterate,
-        TraceEventKind.QueryExecuteFilter,
-        TraceEventKind.QueryExecutePagination,
-        TraceEventKind.QueryCount,
-
-        // ECS query construction — header only.
-        TraceEventKind.EcsQueryConstruct,
-        TraceEventKind.EcsQuerySubtreeExpand,
-
-        // ECS view refresh path — header only.
-        TraceEventKind.EcsViewRefreshPull,
-        TraceEventKind.EcsViewIncrementalDrain,
-        TraceEventKind.EcsViewRefreshFull,
-        TraceEventKind.EcsViewRefreshFullOr,
-
-        // Durability WAL spans — encoders emit, no typed decoders for queue/buffer/signal/backpressure.
-        TraceEventKind.DurabilityWalQueueDrain,
-        TraceEventKind.DurabilityWalOsWrite,
-        TraceEventKind.DurabilityWalSignal,
-        TraceEventKind.DurabilityWalBuffer,
-        TraceEventKind.DurabilityWalBackpressure,
-
-        // Durability checkpoint spans (write batch / backpressure / sleep).
-        TraceEventKind.DurabilityCheckpointWriteBatch,
-        TraceEventKind.DurabilityCheckpointBackpressure,
-        TraceEventKind.DurabilityCheckpointSleep,
-
-        // Durability recovery spans — Phase 8 producer wired ahead of decoder layer.
-        TraceEventKind.DurabilityRecoveryDiscover,
-        TraceEventKind.DurabilityRecoverySegment,
-        TraceEventKind.DurabilityRecoveryFpi,
-        TraceEventKind.DurabilityRecoveryRedo,
-        TraceEventKind.DurabilityRecoveryUndo,
-        TraceEventKind.DurabilityRecoveryTickFence,
-
         // Subscription dispatch (Phase 9) — encoders defined; RuntimeSubscriptionEventCodec is a stub
         // per Phase 9 deferral. See audit §8.1.B.
         TraceEventKind.RuntimeSubscriptionSubscriber,

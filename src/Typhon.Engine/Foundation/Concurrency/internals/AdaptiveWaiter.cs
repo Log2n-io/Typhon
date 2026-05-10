@@ -2,7 +2,6 @@ using JetBrains.Annotations;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
-using Typhon.Engine.Profiler;
 using Typhon.Profiler;
 
 namespace Typhon.Engine.Internals;

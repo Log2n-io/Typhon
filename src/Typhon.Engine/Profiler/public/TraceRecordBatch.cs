@@ -1,6 +1,6 @@
 using System.Threading;
 
-namespace Typhon.Engine.Internals;
+namespace Typhon.Engine;
 
 /// <summary>
 /// A pooled, refcounted batch of raw trace records passed from the consumer drain loop to one or more exporters. Replaces the Phase 1/2
