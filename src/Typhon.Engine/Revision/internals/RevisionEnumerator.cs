@@ -2,7 +2,7 @@ using JetBrains.Annotations;
 using System;
 using System.Runtime.CompilerServices;
 
-namespace Typhon.Engine;
+namespace Typhon.Engine.Internals;
 
 [PublicAPI]
 internal ref struct RevisionEnumerator : IDisposable

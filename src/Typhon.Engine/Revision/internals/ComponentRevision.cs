@@ -1,6 +1,6 @@
 using JetBrains.Annotations;
 
-namespace Typhon.Engine;
+namespace Typhon.Engine.Internals;
 
 [PublicAPI]
 internal ref struct ComponentRevision

@@ -2,7 +2,7 @@ using JetBrains.Annotations;
 using System;
 using System.Diagnostics.CodeAnalysis;
 
-namespace Typhon.Engine;
+namespace Typhon.Engine.Internals;
 
 [PublicAPI]
 [ExcludeFromCodeCoverage]
