@@ -164,7 +164,7 @@ public sealed class EngineLifecycle : IDisposable
                         try
                         {
                             System.Runtime.CompilerServices.RuntimeHelpers.RunClassConstructor(archetypeType.TypeHandle);
-                            Typhon.Engine.ArchetypeRegistry.EnsureFinalized(archetypeType);
+                            Typhon.Engine.Internals.ArchetypeRegistry.EnsureFinalized(archetypeType);
                         }
                         catch (Exception archEx)
                         {
@@ -183,7 +183,7 @@ public sealed class EngineLifecycle : IDisposable
                     // short-circuits on pre-populated archetype slots, leaving _slotToComponentType pointing at the first
                     // ALC's Type instances. RefreshSlotTypes propagates the current ALC's Types into every archetype so
                     // reflection-equality lookups (Workbench's GetArchetypesForComponent, etc.) match the session's engine.
-                    Typhon.Engine.ArchetypeRegistry.RefreshSlotTypes();
+                    Typhon.Engine.Internals.ArchetypeRegistry.RefreshSlotTypes();
                     try
                     {
                         engine.InitializeArchetypes();

@@ -30,7 +30,7 @@ namespace Typhon.Generators;
 [Generator(LanguageNames.CSharp)]
 public class SourceLocationGenerator : IIncrementalGenerator
 {
-    private const string TyphonEventFqn = "Typhon.Engine.Profiler.TyphonEvent";
+    private const string TyphonEventFqn = "Typhon.Engine.Internals.TyphonEvent";
     private const string GeneratedNamespace = "Typhon.Generators.Generated";
     private const string TraceEventAttributeFqn = "Typhon.Engine.Profiler.TraceEventAttribute";
     private const string BeginParamAttributeFqn = "Typhon.Engine.Profiler.BeginParamAttribute";
@@ -276,11 +276,13 @@ public class SourceLocationGenerator : IIncrementalGenerator
             return null;
         }
 
-        // Receiver check — accept "TyphonEvent" or fully-qualified forms.
+        // Receiver check — accept "TyphonEvent" or fully-qualified forms (legacy + post-namespace-migration).
         var receiverText = memberAccess.Expression.ToString();
         if (receiverText != "TyphonEvent"
             && receiverText != "Typhon.Engine.Profiler.TyphonEvent"
-            && receiverText != "global::Typhon.Engine.Profiler.TyphonEvent")
+            && receiverText != "global::Typhon.Engine.Profiler.TyphonEvent"
+            && receiverText != "Typhon.Engine.Internals.TyphonEvent"
+            && receiverText != "global::Typhon.Engine.Internals.TyphonEvent")
         {
             return null;
         }
@@ -471,7 +473,7 @@ public class SourceLocationGenerator : IIncrementalGenerator
               .Append(paramSb)
               .AppendLine(")");
             sb.AppendLine("        {");
-            sb.Append("            return global::Typhon.Engine.Profiler.TyphonEvent.")
+            sb.Append("            return global::Typhon.Engine.Internals.TyphonEvent.")
               .Append(site.BaseName)
               .Append("_WithSiteId(")
               .Append(forwardSb)

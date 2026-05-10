@@ -574,7 +574,7 @@ namespace Typhon.Engine.Profiler
         }
 
         var indent = hasNs ? "    " : "";
-        sb.Append(indent).Append("public ref partial struct ").Append(model.StructName).AppendLine(" : ITraceEventEncoder");
+        sb.Append(indent).Append("internal ref partial struct ").Append(model.StructName).AppendLine(" : ITraceEventEncoder");
         sb.Append(indent).AppendLine("{");
 
         // static byte Kind => (byte)TraceEventKind.X;
@@ -625,7 +625,7 @@ namespace Typhon.Engine.Profiler
         if (model.GenerateFactory)
         {
             sb.AppendLine();
-            sb.Append(indent).AppendLine("public static partial class TyphonEvent");
+            sb.Append(indent).AppendLine("internal static partial class TyphonEvent");
             sb.Append(indent).AppendLine("{");
 
             // ── Factory 1: BeginXxx(args) — pass-through with siteId = 0 ──

@@ -1,7 +1,6 @@
 using System.Collections.Generic;
 using Godot;
 using Typhon.Engine.Profiler;
-using Typhon.Engine.Profiler.Exporters;
 using Typhon.Profiler;
 
 namespace AntHill;

@@ -1,9 +1,5 @@
-// Friend-assembly access to engine internals.
-//
-// The Typhon.Engine assembly grants Typhon.Engine.Tests visibility into Typhon.Engine.Internals
-// via [InternalsVisibleTo] in its AssemblyInfo. This global using makes those internal types
-// visible everywhere in the test project without per-file `using` directives.
-//
-// See claude/research/PublicVsInternalApiClassification.md §3.1 + §8.
+// Friend-assembly access to engine surfaces.
+// See test/Typhon.Engine.Tests/GlobalUsings.cs for rationale.
 
+global using Typhon.Engine;
 global using Typhon.Engine.Internals;

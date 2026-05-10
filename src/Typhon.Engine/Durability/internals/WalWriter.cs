@@ -1,0 +1,686 @@
+using JetBrains.Annotations;
+using Microsoft.Extensions.Logging;
+using System;
+using System.Diagnostics;
+using System.Runtime.CompilerServices;
+using System.Threading;
+using Typhon.Engine.Profiler;
+
+namespace Typhon.Engine.Internals;
+
+/// <summary>
+/// Dedicated background thread that drains the <see cref="WalCommitBuffer"/>, writes WAL records to segment files with durable I/O (FUA), and signals
+/// waiting producers based on durability mode.
+/// </summary>
+/// <remarks>
+/// <para>
+/// The writer is the single consumer of the MPSC commit buffer. It runs on a dedicated OS thread (<c>IsBackground=true</c>,
+/// <see cref="ThreadPriority.AboveNormal"/>, named "Typhon-WAL-Writer").
+/// </para>
+/// <para>
+/// <b>Drain loop:</b>
+/// <list type="number">
+///   <item><see cref="WalCommitBuffer.TryDrain"/> to collect published frames</item>
+///   <item>If no data: <see cref="WalCommitBuffer.WaitForData"/> with GroupCommit timeout, then retry</item>
+///   <item>Walk frames to track LSNs and accumulate data</item>
+///   <item>Copy to 4096-aligned staging buffer, zero-pad tail</item>
+///   <item>Write aligned data to active segment via <see cref="IWalFileIO.WriteAligned"/></item>
+///   <item><see cref="WalCommitBuffer.CompleteDrain"/> to advance buffer position</item>
+///   <item>Advance <see cref="DurableLsn"/> and signal <see cref="_durabilityEvent"/></item>
+///   <item>Check segment rotation threshold (75%)</item>
+/// </list>
+/// </para>
+/// <para>
+/// <b>Error handling:</b> WAL write failure sets <see cref="_fatalError"/>. Subsequent <see cref="WaitForDurable"/> calls
+/// throw <see cref="WalWriteException"/> (fail-fast per ADR-020).
+/// </para>
+/// </remarks>
+[PublicAPI]
+internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
+{
+    // ═══════════════════════════════════════════════════════════════
+    // Constants
+    // ═══════════════════════════════════════════════════════════════
+
+    private const int PageSize = 4096;
+    private const double RotationThreshold = 0.75;
+
+    // ═══════════════════════════════════════════════════════════════
+    // Dependencies
+    // ═══════════════════════════════════════════════════════════════
+
+    private readonly WalCommitBuffer _commitBuffer;
+    private readonly WalSegmentManager _segmentManager;
+    private readonly IWalFileIO _fileIO;
+    private readonly WalWriterOptions _options;
+    private readonly IMemoryAllocator _allocator;
+
+    /// <summary>Optional logger, set post-construction by engine initialization.</summary>
+    internal ILogger Logger { get; set; }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Staging buffer (4096-aligned for O_DIRECT)
+    // ═══════════════════════════════════════════════════════════════
+
+    private readonly PinnedMemoryBlock _stagingBlock;
+    private readonly byte* _stagingBuffer;
+    private readonly int _stagingBufferSize;
+
+    // ═══════════════════════════════════════════════════════════════
+    // Thread lifecycle
+    // ═══════════════════════════════════════════════════════════════
+
+    private Thread _thread;
+    private volatile bool _shutdown;
+    private readonly Lock _lifecycleLock = new();
+
+    // ═══════════════════════════════════════════════════════════════
+    // Durability signaling
+    // ═══════════════════════════════════════════════════════════════
+
+    private long _durableLsn;
+    private readonly ManualResetEventSlim _durabilityEvent = new(false);
+
+    // ═══════════════════════════════════════════════════════════════
+    // CRC chain state (single-threaded — writer thread only)
+    // ═══════════════════════════════════════════════════════════════
+
+    private uint _lastFooterCrc;
+
+    // ═══════════════════════════════════════════════════════════════
+    // Error state
+    // ═══════════════════════════════════════════════════════════════
+
+    private volatile Exception _fatalError;
+
+    // ═══════════════════════════════════════════════════════════════
+    // Flush request (for Deferred mode explicit Flush)
+    // ═══════════════════════════════════════════════════════════════
+
+    private volatile bool _flushRequested;
+
+    // ═══════════════════════════════════════════════════════════════
+    // Metrics
+    // ═══════════════════════════════════════════════════════════════
+
+    private long _totalBytesWritten;
+    private long _totalFlushes;
+    private long _lastFlushUs;
+    private double _meanFlushUs;
+    private long _maxFlushUs;
+
+    // ═══════════════════════════════════════════════════════════════
+    // Constructor
+    // ═══════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Creates a new WAL writer. Call <see cref="Start"/> to begin the writer thread.
+    /// </summary>
+    /// <param name="commitBuffer">The MPSC commit buffer to drain.</param>
+    /// <param name="segmentManager">Manages WAL segment files.</param>
+    /// <param name="fileIO">Platform I/O abstraction.</param>
+    /// <param name="options">Writer configuration.</param>
+    /// <param name="allocator">Memory allocator for the staging buffer.</param>
+    /// <param name="parent">Parent resource node (typically <c>registry.Durability</c>).</param>
+    internal WalWriter(WalCommitBuffer commitBuffer, WalSegmentManager segmentManager, IWalFileIO fileIO, WalWriterOptions options, IMemoryAllocator allocator, 
+        IResource parent) : base("WalWriter", ResourceType.WAL, parent)
+    {
+        ArgumentNullException.ThrowIfNull(commitBuffer);
+        ArgumentNullException.ThrowIfNull(segmentManager);
+        ArgumentNullException.ThrowIfNull(fileIO);
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(allocator);
+
+        _commitBuffer = commitBuffer;
+        _segmentManager = segmentManager;
+        _fileIO = fileIO;
+        _options = options;
+        _allocator = allocator;
+
+        _stagingBufferSize = options.StagingBufferSize;
+        _stagingBlock = allocator.AllocatePinned("WalWriter.Staging", this, _stagingBufferSize, true, PageSize);
+        _stagingBuffer = _stagingBlock.DataAsPointer;
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Public properties
+    // ═══════════════════════════════════════════════════════════════
+
+    /// <summary>The highest LSN that has been durably written to stable media.</summary>
+    public long DurableLsn => Interlocked.Read(ref _durableLsn);
+
+    /// <summary>Whether the writer thread is currently running.</summary>
+    public bool IsRunning => _thread != null && _thread.IsAlive;
+
+    /// <summary>Whether a fatal I/O error has occurred.</summary>
+    public bool HasFatalError => _fatalError != null;
+
+    /// <summary>Total bytes written to WAL segments since startup.</summary>
+    public long TotalBytesWritten => Interlocked.Read(ref _totalBytesWritten);
+
+    /// <summary>Total number of flush operations performed.</summary>
+    public long TotalFlushes => Interlocked.Read(ref _totalFlushes);
+
+    // ═══════════════════════════════════════════════════════════════
+    // Producer API
+    // ═══════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Requests a flush of the current buffer contents. Used by <see cref="DurabilityMode.Deferred"/>
+    /// for explicit <c>Flush()</c> calls.
+    /// </summary>
+    public void RequestFlush()
+    {
+        _flushRequested = true;
+        _commitBuffer.Signal(); // Wake the writer thread so it doesn't wait for the full GroupCommit interval
+    }
+
+    /// <summary>
+    /// Blocks the caller until the specified LSN has been durably written to stable media.
+    /// Used by <see cref="DurabilityMode.Immediate"/> producers and explicit <c>Flush()</c> callers.
+    /// </summary>
+    /// <param name="lsn">The LSN that must be durable before returning.</param>
+    /// <param name="ctx">Wait context with timeout/cancellation.</param>
+    /// <exception cref="WalWriteException">A fatal I/O error occurred — no further durable commits possible.</exception>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WaitForDurable(long lsn, ref WaitContext ctx)
+    {
+        // Fast path: already durable, returns inline. The WalWait span and wait loop live in WaitForDurableSlow so this shim stays EH-free and inlinable into
+        // the per-commit caller (Transaction.PersistAndFinalize).
+        if (Interlocked.Read(ref _durableLsn) >= lsn)
+        {
+            return;
+        }
+        WaitForDurableSlow(lsn, ref ctx);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void WaitForDurableSlow(long lsn, ref WaitContext ctx)
+    {
+        // Check for fatal error
+        if (_fatalError != null)
+        {
+            ThrowHelper.ThrowWalWriteFailure(_fatalError);
+        }
+
+        // Slow path — actual wait. The WalWait span captures how long this thread blocked waiting for the WAL writer to catch up.
+        // Emitted on the CALLING thread (inside TransactionCommit), not the WAL writer thread. Parents under TransactionCommit
+        // via the TLS open-span chain, so the viewer shows "Commit contained a WAL wait of N µs".
+        using var waitScope = TyphonEvent.BeginWalWait(lsn);
+
+        while (Interlocked.Read(ref _durableLsn) < lsn)
+        {
+            if (!Unsafe.IsNullRef(ref ctx) && ctx.ShouldStop)
+            {
+                ThrowHelper.ThrowWalBackPressureTimeout(0, ctx.Deadline.Remaining);
+            }
+
+            if (_fatalError != null)
+            {
+                ThrowHelper.ThrowWalWriteFailure(_fatalError);
+            }
+
+            // Wait for the durability event with a short timeout to re-check conditions
+            _durabilityEvent.Wait(1);
+            _durabilityEvent.Reset();
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Lifecycle
+    // ═══════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Starts the WAL writer thread. Idempotent — does nothing if already running.
+    /// </summary>
+    public void Start()
+    {
+        if (_thread != null && _thread.IsAlive)
+        {
+            return;
+        }
+
+        lock (_lifecycleLock)
+        {
+            if (_thread != null && _thread.IsAlive)
+            {
+                return;
+            }
+
+            _shutdown = false;
+            _thread = new Thread(WriterLoop)
+            {
+                IsBackground = true,
+                Priority = ThreadPriority.AboveNormal,
+                Name = "Typhon-WAL-Writer"
+            };
+            _thread.Start();
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // IMetricSource
+    // ═══════════════════════════════════════════════════════════════
+
+    /// <inheritdoc />
+    public void ReadMetrics(IMetricWriter writer)
+    {
+        writer.WriteThroughput("BytesWritten", _totalBytesWritten);
+        writer.WriteThroughput("Flushes", _totalFlushes);
+        writer.WriteDuration("FlushLatency", _lastFlushUs, (long)_meanFlushUs, _maxFlushUs);
+
+        var segment = _segmentManager.ActiveSegment;
+        if (segment != null)
+        {
+            writer.WriteThroughput("ActiveSegmentId", segment.SegmentId);
+        }
+    }
+
+    /// <inheritdoc />
+    public void ResetPeaks() => _maxFlushUs = _lastFlushUs;
+
+    // ═══════════════════════════════════════════════════════════════
+    // Writer loop (core — runs on dedicated thread)
+    // ═══════════════════════════════════════════════════════════════
+
+    private void WriterLoop()
+    {
+        Logger?.LogDebug("WAL writer thread started");
+        try
+        {
+            while (!_shutdown)
+            {
+                Logger?.LogDebug("WAL writer: loop iter, nextLsn={NextLsn} drain={DrainPos} tail={TailPos} swap={Swap} inflight={Inflight} active={Active}",
+                    _commitBuffer.NextLsn, _commitBuffer.DrainPosition, _commitBuffer.TailPosition,
+                    _commitBuffer.SwapState, _commitBuffer.InflightCount, _commitBuffer.ActiveBufferIndex);
+
+                // 1. Try to drain published frames from the commit buffer
+                if (!_commitBuffer.TryDrain(out var data, out var frameCount))
+                {
+                    // 2. No data — wait with GroupCommit timeout
+                    if (_shutdown)
+                    {
+                        break;
+                    }
+
+                    _commitBuffer.WaitForData(_options.GroupCommitIntervalMs);
+
+                    // Retry drain after waking
+                    if (!_commitBuffer.TryDrain(out data, out frameCount))
+                    {
+                        // Still no data — handle GroupCommit timer flush if needed
+                        if (_flushRequested)
+                        {
+                            // Phase 8: GroupCommit instant — captures the trigger interval + producer thread for latency analysis.
+                            TyphonEvent.EmitDurabilityWalGroupCommit((ushort)Math.Min(_options.GroupCommitIntervalMs, ushort.MaxValue), Environment.CurrentManagedThreadId);
+                            _flushRequested = false;
+                            PerformFlush();
+                        }
+
+                        continue;
+                    }
+                }
+
+                // 3. Walk frames to track the highest LSN in this batch
+                long batchHighLsn = 0;
+                int totalRecordCount = 0;
+                WalCommitBuffer.WalkFrames(data, (payload, recordCount) =>
+                {
+                    totalRecordCount += recordCount;
+                });
+
+                // The highest LSN is: current NextLsn - 1 (since NextLsn has already been advanced by producers)
+                // We compute it from the commit buffer's NextLsn at drain time minus remaining undrained records
+                batchHighLsn = _commitBuffer.NextLsn - 1;
+
+                // WalFlush span: covers the write + signal cycle. The WAL writer thread claims its own ThreadSlotRegistry slot
+                // on first emit, so it appears as a dedicated lane in the viewer.
+                // Phase 8: kind 80 stays as the wrapper; QueueDrain/OsWrite/Signal sub-spans nest inside via the TLS open-span
+                // chain so the viewer renders them as children of the existing WalFlush span.
+                var flushScope = TyphonEvent.BeginWalFlush(data.Length, frameCount, batchHighLsn);
+                try
+                {
+
+                    // 4. Copy to staging buffer with 4096-byte alignment
+                    var bytesToWrite = AlignUp(data.Length, PageSize);
+
+                    // Phase 8: Buffer span — covers the staging-buffer copy + zero-pad + CRC patch.
+                    var bufferScope = TyphonEvent.BeginDurabilityWalBuffer(bytesToWrite, bytesToWrite - data.Length);
+                    try
+                    {
+                        if (bytesToWrite > _stagingBufferSize)
+                        {
+                            // Data exceeds staging buffer — write in chunks
+                            WriteInChunks(data);
+                        }
+                        else
+                        {
+                            // Copy data to staging buffer and zero-pad
+                            data.CopyTo(new Span<byte>(_stagingBuffer, _stagingBufferSize));
+
+                            // Zero-pad the remainder to the 4096 boundary
+                            var padStart = data.Length;
+                            var padLength = bytesToWrite - padStart;
+                            if (padLength > 0)
+                            {
+                                new Span<byte>(_stagingBuffer + padStart, padLength).Clear();
+                            }
+
+                            // Patch chunk CRCs before writing to disk
+                            PatchChunkCrcs(new Span<byte>(_stagingBuffer, _stagingBufferSize), data.Length);
+                        }
+                    }
+                    finally
+                    {
+                        bufferScope.Dispose();
+                    }
+
+                    // Phase 8: OsWrite span — covers the actual disk write (WriteAligned + fsync via direct I/O).
+                    if (bytesToWrite <= _stagingBufferSize)
+                    {
+                        var osWriteScope = TyphonEvent.BeginDurabilityWalOsWrite(bytesToWrite, frameCount, batchHighLsn);
+                        try
+                        {
+                            // 5. Write aligned to active segment
+                            var segment = _segmentManager.ActiveSegment;
+                            var writeSpan = new ReadOnlySpan<byte>(_stagingBuffer, bytesToWrite);
+
+                            var flushStart = Stopwatch.GetTimestamp();
+                            _fileIO.WriteAligned(segment.Handle, segment.WriteOffset, writeSpan);
+                            RecordFlushLatency(flushStart);
+
+                            segment.WriteOffset += bytesToWrite;
+                            Interlocked.Add(ref _totalBytesWritten, bytesToWrite);
+                        }
+                        finally
+                        {
+                            osWriteScope.Dispose();
+                        }
+                    }
+
+                    // 6. Complete drain to advance buffer position. Phase 8: QueueDrain span — covers the drain advance.
+                    var queueDrainScope = TyphonEvent.BeginDurabilityWalQueueDrain(data.Length, frameCount);
+                    try
+                    {
+                        _commitBuffer.CompleteDrain(data.Length);
+                    }
+                    finally
+                    {
+                        queueDrainScope.Dispose();
+                    }
+
+                    // 7. Advance durable LSN and signal waiters. Phase 8: Signal span — LSN advance + waiter wake-up.
+                    if (batchHighLsn > 0)
+                    {
+                        var signalScope = TyphonEvent.BeginDurabilityWalSignal(batchHighLsn);
+                        try
+                        {
+                            Logger?.LogDebug("WAL writer: advancing durable LSN to {DurableLsn}, wrote {BytesWritten} bytes ({FrameCount} frames)",
+                                batchHighLsn, bytesToWrite, frameCount);
+                            Interlocked.Exchange(ref _durableLsn, batchHighLsn);
+                            _durabilityEvent.Set();
+                        }
+                        finally
+                        {
+                            signalScope.Dispose();
+                        }
+                    }
+
+                    Interlocked.Increment(ref _totalFlushes);
+
+                    // 8. Check segment rotation threshold
+                    if (_segmentManager.ActiveSegmentUtilization >= RotationThreshold)
+                    {
+                        Logger?.LogInformation("WAL segment rotation at {Utilization:P0}, rotating after LSN {LastLsn}",
+                            _segmentManager.ActiveSegmentUtilization, batchHighLsn);
+                        using var rotateScope = TyphonEvent.BeginWalSegmentRotate((int)(_segmentManager.ActiveSegment?.SegmentId ?? -1));
+                        try
+                        {
+                            _segmentManager.RotateSegment(batchHighLsn + 1, batchHighLsn);
+                            _lastFooterCrc = 0; // Reset CRC chain for new segment
+                            Logger?.LogInformation("WAL segment rotation complete, new segment {SegmentId}",
+                                _segmentManager.ActiveSegment?.SegmentId ?? -1);
+                        }
+                        catch (Exception rotEx)
+                        {
+                            Logger?.LogError(rotEx, "WAL segment rotation FAILED");
+                            throw; // Let outer catch handle it
+                        }
+                    }
+
+                    // Handle explicit flush request
+                    if (_flushRequested)
+                    {
+                        _flushRequested = false;
+                        PerformFlush();
+                    }
+
+                } // end WalFlush try
+                finally
+                {
+                    flushScope.Dispose();
+                }
+            }
+
+            // Shutdown: drain any remaining data
+            Logger?.LogDebug("WAL writer: shutdown requested, draining remaining");
+            DrainRemaining();
+        }
+        catch (Exception ex)
+        {
+            // Fatal I/O error — set error flag and wake all waiters
+            Logger?.LogCritical(ex, "WAL writer FATAL error — thread terminating");
+            _fatalError = ex;
+            _durabilityEvent.Set();
+        }
+    }
+
+    /// <summary>
+    /// Writes data larger than the staging buffer in aligned chunks.
+    /// </summary>
+    private void WriteInChunks(ReadOnlySpan<byte> data)
+    {
+        var segment = _segmentManager.ActiveSegment;
+        int offset = 0;
+
+        while (offset < data.Length)
+        {
+            var remaining = data.Length - offset;
+            var chunkDataLen = Math.Min(remaining, _stagingBufferSize);
+            var chunkWriteLen = AlignUp(chunkDataLen, PageSize);
+
+            // Copy chunk to staging buffer
+            data.Slice(offset, chunkDataLen).CopyTo(new Span<byte>(_stagingBuffer, _stagingBufferSize));
+
+            // Zero-pad
+            var padLen = chunkWriteLen - chunkDataLen;
+            if (padLen > 0)
+            {
+                new Span<byte>(_stagingBuffer + chunkDataLen, padLen).Clear();
+            }
+
+            // Patch chunk CRCs before writing to disk
+            PatchChunkCrcs(new Span<byte>(_stagingBuffer, _stagingBufferSize), chunkDataLen);
+
+            var writeSpan = new ReadOnlySpan<byte>(_stagingBuffer, chunkWriteLen);
+
+            var flushStart = Stopwatch.GetTimestamp();
+            _fileIO.WriteAligned(segment.Handle, segment.WriteOffset, writeSpan);
+            RecordFlushLatency(flushStart);
+
+            segment.WriteOffset += chunkWriteLen;
+            Interlocked.Add(ref _totalBytesWritten, chunkWriteLen);
+            offset += chunkDataLen;
+        }
+    }
+
+    /// <summary>
+    /// Performs an explicit flush (FlushFileBuffers) for GroupCommit timer or Deferred Flush().
+    /// </summary>
+    private void PerformFlush()
+    {
+        var segment = _segmentManager.ActiveSegment;
+        if (segment?.Handle != null)
+        {
+            _fileIO.FlushBuffers(segment.Handle);
+        }
+    }
+
+    /// <summary>
+    /// Drains any remaining committed frames during shutdown.
+    /// </summary>
+    private void DrainRemaining()
+    {
+        // One final drain attempt
+        if (_commitBuffer.TryDrain(out var data, out var frameCount) && frameCount > 0)
+        {
+            var bytesToWrite = AlignUp(data.Length, PageSize);
+
+            if (bytesToWrite <= _stagingBufferSize)
+            {
+                data.CopyTo(new Span<byte>(_stagingBuffer, _stagingBufferSize));
+
+                var padLen = bytesToWrite - data.Length;
+                if (padLen > 0)
+                {
+                    new Span<byte>(_stagingBuffer + data.Length, padLen).Clear();
+                }
+
+                // Patch chunk CRCs before writing to disk
+                PatchChunkCrcs(new Span<byte>(_stagingBuffer, _stagingBufferSize), data.Length);
+
+                var segment = _segmentManager.ActiveSegment;
+                if (segment?.Handle != null)
+                {
+                    var writeSpan = new ReadOnlySpan<byte>(_stagingBuffer, bytesToWrite);
+                    _fileIO.WriteAligned(segment.Handle, segment.WriteOffset, writeSpan);
+                    segment.WriteOffset += bytesToWrite;
+                    Interlocked.Add(ref _totalBytesWritten, bytesToWrite);
+                }
+            }
+
+            _commitBuffer.CompleteDrain(data.Length);
+
+            // Final durable LSN advance
+            var finalLsn = _commitBuffer.NextLsn - 1;
+            Interlocked.Exchange(ref _durableLsn, finalLsn);
+            _durabilityEvent.Set();
+        }
+
+        // Final flush to ensure everything is on stable media
+        PerformFlush();
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // CRC patching (single-threaded — writer thread only)
+    // ═══════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Patches PrevCRC and footer CRC for all chunks within the staging data.
+    /// Called after data is copied to the staging buffer but before <see cref="IWalFileIO.WriteAligned"/>.
+    /// Walks frame-by-frame, chunk-by-chunk, maintaining the CRC chain in <see cref="_lastFooterCrc"/>.
+    /// </summary>
+    private void PatchChunkCrcs(Span<byte> stagingData, int dataLength)
+    {
+        int frameOffset = 0;
+        while (frameOffset + WalFrameHeader.SizeInBytes <= dataLength)
+        {
+            ref var frameHeader = ref Unsafe.As<byte, WalFrameHeader>(ref stagingData[frameOffset]);
+            if (frameHeader.FrameLength <= 0)
+            {
+                break;
+            }
+
+            var frameEnd = frameOffset + frameHeader.FrameLength;
+            if (frameEnd > dataLength)
+            {
+                break;
+            }
+
+            var chunkOffset = frameOffset + WalFrameHeader.SizeInBytes;
+            for (int i = 0; i < frameHeader.RecordCount; i++)
+            {
+                if (chunkOffset + WalChunkHeader.SizeInBytes > frameEnd)
+                {
+                    break;
+                }
+
+                ref var chunkHeader = ref Unsafe.As<byte, WalChunkHeader>(ref stagingData[chunkOffset]);
+
+                // Validate chunk fits within frame bounds
+                if (chunkHeader.ChunkSize < WalChunkHeader.SizeInBytes + WalChunkFooter.SizeInBytes ||
+                    chunkOffset + chunkHeader.ChunkSize > frameEnd)
+                {
+                    break;
+                }
+
+                // 1. Patch PrevCRC from writer's chain state
+                chunkHeader.PrevCRC = _lastFooterCrc;
+
+                // 2. Compute CRC over [0, ChunkSize - FooterSize) — header + body
+                var crcSpan = stagingData.Slice(chunkOffset, chunkHeader.ChunkSize - WalChunkFooter.SizeInBytes);
+                var crc = WalCrc.Compute(crcSpan);
+
+                // 3. Write footer CRC
+                Unsafe.As<byte, uint>(ref stagingData[chunkOffset + chunkHeader.ChunkSize - WalChunkFooter.SizeInBytes]) = crc;
+
+                // 4. Carry forward
+                _lastFooterCrc = crc;
+                chunkOffset += chunkHeader.ChunkSize;
+            }
+
+            frameOffset += frameHeader.FrameLength;
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Internal helpers
+    // ═══════════════════════════════════════════════════════════════
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static int AlignUp(int value, int alignment) => (value + alignment - 1) & ~(alignment - 1);
+
+    private void RecordFlushLatency(long startTimestamp)
+    {
+        var elapsed = Stopwatch.GetTimestamp() - startTimestamp;
+        var us = (long)((double)elapsed / Stopwatch.Frequency * 1_000_000.0);
+
+        _lastFlushUs = us;
+
+        // EMA with alpha = 0.05 (~20-sample window)
+        _meanFlushUs = _meanFlushUs * 0.95 + us * 0.05;
+
+        if (us > _maxFlushUs)
+        {
+            _maxFlushUs = us;
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Dispose
+    // ═══════════════════════════════════════════════════════════════
+
+    private bool _disposed;
+
+    /// <inheritdoc />
+    protected override void Dispose(bool disposing)
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        if (disposing)
+        {
+            _shutdown = true;
+            _commitBuffer.Signal(); // Wake the writer thread so it sees _shutdown immediately
+            _thread?.Join(TimeSpan.FromSeconds(5));
+
+            _durabilityEvent.Dispose();
+            _stagingBlock.Dispose();
+        }
+
+        base.Dispose(disposing);
+        _disposed = true;
+    }
+}

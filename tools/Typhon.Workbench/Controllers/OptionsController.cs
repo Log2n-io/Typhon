@@ -45,7 +45,7 @@ public sealed class OptionsController : ControllerBase
 
     /// <summary>Patch the profiler category.</summary>
     [HttpPatch("profiler")]
-    public ActionResult<WorkbenchOptions> PatchProfiler([FromBody] ProfilerOptions body)
+    public ActionResult<WorkbenchOptions> PatchProfiler([FromBody] Typhon.Workbench.Hosting.ProfilerOptions body)
     {
         if (body == null) return BadRequest(new { error = "Body required" });
         _store.PatchProfiler(body);

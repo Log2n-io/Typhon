@@ -71,7 +71,7 @@ public sealed class OptionsControllerTests
             new EditorOptions { Kind = EditorKind.Cursor, CustomCommand = "" }, JsonOpts);
 
         await _client.PatchAsJsonAsync("/api/options/profiler",
-            new ProfilerOptions { WorkspaceRoot = "/tmp/ws" }, JsonOpts);
+            new Typhon.Workbench.Hosting.ProfilerOptions { WorkspaceRoot = "/tmp/ws" }, JsonOpts);
 
         var opts = await _client.GetFromJsonAsync<WorkbenchOptions>("/api/options", JsonOpts);
         Assert.That(opts.Editor.Kind, Is.EqualTo(EditorKind.Cursor));
@@ -88,7 +88,7 @@ public sealed class OptionsControllerTests
         var edited = new WorkbenchOptions
         {
             Editor = new EditorOptions { Kind = EditorKind.Custom, CustomCommand = "external" },
-            Profiler = new ProfilerOptions { WorkspaceRoot = "/tmp/edited" },
+            Profiler = new Typhon.Workbench.Hosting.ProfilerOptions { WorkspaceRoot = "/tmp/edited" },
         };
         await File.WriteAllTextAsync(path, JsonSerializer.Serialize(edited, JsonOpts));
 

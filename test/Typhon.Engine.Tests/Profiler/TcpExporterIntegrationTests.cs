@@ -6,7 +6,6 @@ using System.Net.Sockets;
 using System.Threading;
 using NUnit.Framework;
 using Typhon.Engine.Profiler;
-using Typhon.Engine.Profiler.Exporters;
 using Typhon.Profiler;
 
 namespace Typhon.Engine.Tests.Profiler;

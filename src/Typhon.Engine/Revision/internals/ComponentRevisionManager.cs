@@ -203,7 +203,7 @@ internal ref struct ComponentRevisionManager
         ref var firstChunkHeader = ref compRevTableAccessor.GetChunk<CompRevStorageHeader>(firstChunkId);
 
         // Phase 6: Data:MVCC:VersionCleanup span — covers the compaction work for one entity's revision chain.
-        var versionCleanupScope = Profiler.TyphonEvent.BeginDataMvccVersionCleanup(firstChunkHeader.EntityPK);
+        var versionCleanupScope = TyphonEvent.BeginDataMvccVersionCleanup(firstChunkHeader.EntityPK);
 
         // Create a temporary chunk to store the cleaned-up content of the first chunk (we can't overwrite the first chunk right away)
         Span<byte> tempChunk = stackalloc byte[CompRevChunkSize];

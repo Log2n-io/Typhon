@@ -4,7 +4,7 @@ using NUnit.Framework;
 namespace Typhon.Engine.Tests;
 
 [TestFixture]
-public class SpatialNodeDescriptorTests
+internal class SpatialNodeDescriptorTests
 {
     private static IEnumerable<TestCaseData> AllVariants()
     {

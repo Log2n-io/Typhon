@@ -10,7 +10,6 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Typhon.Engine;
 using Typhon.Engine.Profiler;
-using Typhon.Engine.Profiler.Exporters;
 using Typhon.Profiler;
 using Typhon.Schema.Definition;
 

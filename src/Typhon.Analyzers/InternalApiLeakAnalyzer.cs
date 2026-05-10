@@ -183,8 +183,14 @@ public class InternalApiLeakAnalyzer : DiagnosticAnalyzer
     }
 
     /// <summary>
-    /// Yields every internal-namespace named type reachable from <paramref name="type"/>: the type itself if it qualifies,
+    /// Yields every leaked internal-namespace named type reachable from <paramref name="type"/>: the type itself if it qualifies,
     /// then recursively type arguments, array element types, and pointer element types.
+    /// <para>
+    /// A type qualifies as "leaked" only if it is BOTH (a) declared inside <c>Typhon.Engine.Internals</c> (or a sub-namespace) AND
+    /// (b) has internal accessibility. The dual condition lets the analyzer stay dormant during a namespace-only migration
+    /// (when types are temporarily moved into the internal namespace but still public-accessibility) and only fires once the
+    /// accessibility pass also completes — at which point it becomes the standing guard against drift.
+    /// </para>
     /// </summary>
     private static IEnumerable<INamedTypeSymbol> EnumerateInternalNamedTypes(ITypeSymbol type)
     {
@@ -210,7 +216,7 @@ public class InternalApiLeakAnalyzer : DiagnosticAnalyzer
                 break;
 
             case INamedTypeSymbol named:
-                if (IsInInternalNamespace(named))
+                if (IsInInternalNamespace(named) && IsAssemblyInternal(named))
                 {
                     yield return named;
                 }
@@ -223,6 +229,26 @@ public class InternalApiLeakAnalyzer : DiagnosticAnalyzer
                 }
                 break;
         }
+    }
+
+    private static bool IsAssemblyInternal(INamedTypeSymbol type)
+    {
+        // Walk outward through nested types. The effective accessibility is the most restrictive of the chain.
+        // A type is "assembly-internal" if anywhere in the chain we see Internal, ProtectedAndInternal, or Private.
+        // Public/Protected/ProtectedOrInternal are visible to consumers (Protected is reachable via subclass), so
+        // they don't qualify as a leak target.
+        for (var current = type; current != null; current = current.ContainingType)
+        {
+            switch (current.DeclaredAccessibility)
+            {
+                case Accessibility.Internal:
+                case Accessibility.ProtectedAndInternal:
+                case Accessibility.Private:
+                    return true;
+            }
+        }
+
+        return false;
     }
 
     private static bool IsExternallyVisible(ISymbol symbol)
