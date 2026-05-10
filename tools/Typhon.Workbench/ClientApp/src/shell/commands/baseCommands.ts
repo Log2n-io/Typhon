@@ -3,8 +3,10 @@ import { useSessionStore } from '@/stores/useSessionStore';
 import { useThemeStore } from '@/stores/useThemeStore';
 import { refreshResourceGraph } from '@/hooks/useResourceIndex';
 import {
+  toggleViewAccessMatrix,
   toggleViewArchetypeBrowser,
   toggleViewComponentBrowser,
+  toggleViewDataFlow,
   toggleViewDetail,
   toggleViewOptions,
   toggleViewResourceTree,
@@ -46,6 +48,8 @@ export function buildBaseCommands(): CommandItem[] {
     { id: 'toggle-view-schema-indexes',       label: 'Toggle View Component Indexes',    keywords: 'schema indexes btree fields',                 action: toggleViewSchemaIndexes },
     { id: 'toggle-view-schema-relationships', label: 'Toggle View Component Relationships', keywords: 'schema systems relationships',             action: toggleViewSchemaRelationships },
     { id: 'toggle-view-system-dag',           label: 'Toggle View System DAG',              keywords: 'system dag scheduler topology phases rfc07', action: toggleViewSystemDag },
+    { id: 'toggle-view-data-flow',            label: 'Toggle View Data Flow',               keywords: 'data flow timeline marey tracks granularity bars', action: toggleViewDataFlow },
+    { id: 'toggle-view-access-matrix',        label: 'Toggle View Access Matrix',           keywords: 'access matrix heatmap systems components touch grid', action: toggleViewAccessMatrix },
     { id: 'toggle-view-resource-tree',        label: 'Toggle View Resource Tree',        keywords: 'resource tree sidebar explorer',              action: toggleViewResourceTree },
     { id: 'toggle-view-detail',               label: 'Toggle View Detail',               keywords: 'detail inspector selection',                  action: toggleViewDetail },
     { id: 'toggle-view-options',              label: 'Toggle View Options',              keywords: 'options preferences settings editor',         action: toggleViewOptions },

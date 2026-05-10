@@ -49,6 +49,8 @@ public static class ProfilerSetup
         IndexCatalogEntry[] indexCatalog = [];
         EventQueueRecord[] eventQueues = [];
         ResourceGraphNodeRecord[] resourceGraphNodes = [];
+        ArchetypeRecord[] archetypes = [];
+        ComponentTypeRecord[] componentTypes = [];
         if (engine != null)
         {
             var bundle = ProfilerStaticDataBuilder.BuildAll(engine, runtime);
@@ -56,6 +58,22 @@ public static class ProfilerSetup
             archetypeDefinitions = bundle.ArchetypeDefinitions;
             indexCatalog = bundle.IndexCatalog;
             eventQueues = bundle.EventQueues;
+
+            // Derive thin id→name records from the rich definitions: the engine has no public enumeration API for the
+            // thin tables, but the rich tables already cover every registered archetype / component type, so projecting
+            // them here keeps the trace's two parallel tables consistent without a second registry walk.
+            archetypes = new ArchetypeRecord[archetypeDefinitions.Length];
+            for (int i = 0; i < archetypeDefinitions.Length; i++)
+            {
+                var def = archetypeDefinitions[i];
+                archetypes[i] = new ArchetypeRecord { ArchetypeId = def.ArchetypeId, Name = def.Name };
+            }
+            componentTypes = new ComponentTypeRecord[componentDefinitions.Length];
+            for (int i = 0; i < componentDefinitions.Length; i++)
+            {
+                var def = componentDefinitions[i];
+                componentTypes[i] = new ComponentTypeRecord { ComponentTypeId = def.ComponentTypeId, Name = def.Name };
+            }
         }
         if (resourceGraphRoot != null)
         {
@@ -75,7 +93,8 @@ public static class ProfilerSetup
         };
 
         return new ProfilerSessionMetadata(
-            SystemDefinitionRecordBuilder.BuildAll(systems), [], [], workerCount, baseTickRate, Stopwatch.GetTimestamp(), Stopwatch.Frequency, DateTime.UtcNow,
+            SystemDefinitionRecordBuilder.BuildAll(systems), archetypes, componentTypes, workerCount, baseTickRate, Stopwatch.GetTimestamp(), Stopwatch.Frequency,
+            DateTime.UtcNow,
             phases: phases ?? [], componentDefinitions: componentDefinitions, archetypeDefinitions: archetypeDefinitions, indexCatalog: indexCatalog,
             runtimeConfig: runtimeConfig, eventQueues: eventQueues, resourceGraphNodes: resourceGraphNodes);
     }

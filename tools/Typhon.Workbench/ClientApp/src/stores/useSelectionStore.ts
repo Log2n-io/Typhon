@@ -3,18 +3,60 @@ import { create } from 'zustand';
 /**
  * Cross-panel selection state — see `claude/design/workbench/10-internal-data-api.md §9`.
  *
- * Eight independently-observable dimension slots. Panels subscribe via
+ * Independently-observable dimension slots. Panels subscribe via
  * `useSelectionStore(s => s.system)` and only re-render when *that* slot changes.
  *
  * `time` is the TimeArea range in absolute µs timestamps (matches profiler convention).
- * `focusTick` and `worker` are volatile (not URL-synced); the rest are stable and
- * round-trip through the URL via {@link selectionUrlSync}.
+ * `focusTick`, `worker`, `dataTrack`, `phase`, and `hoveredSystemTickKey` are volatile (not URL-synced);
+ * the rest are stable and round-trip through the URL via {@link selectionUrlSync}.
+ *
+ * <b>Phase D additions (#327):</b>
+ * - `dataTrack` — selecting a row in Data Flow / Access Matrix highlights its column / row in the sibling
+ *   panel and every system in the System DAG that touches the row's underlying data.
+ * - `phase` — selecting a phase in any view tints that phase's swim-lane / column tint in all three.
+ * - `hoveredSystemTickKey` — drives the hover-to-isolate effect across panels without coupling the
+ *   underlying renderers to one another.
  */
 export interface TimeSelection {
   /** Inclusive start (µs). */
   start: number;
   /** Exclusive end (µs). */
   end: number;
+}
+
+/**
+ * Identifier for a "data track" — a row in the Data Flow Timeline / Access Matrix that the user clicks to
+ * scope downstream highlights. The `kind` discriminator lets the System DAG resolve which systems touch
+ * it (e.g. `component` → systems that read/write that component name).
+ */
+export interface DataTrackSelection {
+  readonly kind:
+    | 'component'
+    | 'component-family'
+    | 'archetype-component'
+    | 'queue'
+    | 'resource'
+    | 'component-domain'
+    | 'queue-domain'
+    | 'resource-domain';
+  /** The track's stable id, matches `Track.id` in `panels/DataFlow/trackBuilding`. */
+  readonly id: string;
+  /** Component name when relevant — pre-resolved here so consumers don't need to re-parse the id. */
+  readonly componentName?: string;
+  /** Family name when relevant. */
+  readonly familyName?: string;
+  /** Archetype id when relevant. */
+  readonly archetypeId?: number;
+}
+
+/**
+ * Cross-panel hover key. When set, every panel can dim non-matching elements to highlight the
+ * (system, tick) pair under the cursor. Phase D introduces this as the v1 multi-panel unification
+ * mechanism — same pattern as Phase B's local hover-isolate but now panel-spanning.
+ */
+export interface HoveredSystemTickKey {
+  readonly systemName: string;
+  readonly tickNumber: number;
 }
 
 export interface SelectionState {
@@ -26,6 +68,10 @@ export interface SelectionState {
   resource: string | null;
   entity: string | null;
   worker: number | null;
+  // Phase D (#327)
+  dataTrack: DataTrackSelection | null;
+  phase: string | null;
+  hoveredSystemTickKey: HoveredSystemTickKey | null;
 
   setTime: (range: TimeSelection | null) => void;
   setFocusTick: (tick: number | null) => void;
@@ -35,13 +81,17 @@ export interface SelectionState {
   setResource: (id: string | null) => void;
   setEntity: (id: string | null) => void;
   setWorker: (id: number | null) => void;
+  setDataTrack: (track: DataTrackSelection | null) => void;
+  setPhase: (phase: string | null) => void;
+  setHoveredSystemTickKey: (key: HoveredSystemTickKey | null) => void;
 
   clear: () => void;
 }
 
 const INITIAL: Pick<
   SelectionState,
-  'time' | 'focusTick' | 'system' | 'component' | 'queue' | 'resource' | 'entity' | 'worker'
+  | 'time' | 'focusTick' | 'system' | 'component' | 'queue' | 'resource' | 'entity' | 'worker'
+  | 'dataTrack' | 'phase' | 'hoveredSystemTickKey'
 > = {
   time: null,
   focusTick: null,
@@ -51,6 +101,9 @@ const INITIAL: Pick<
   resource: null,
   entity: null,
   worker: null,
+  dataTrack: null,
+  phase: null,
+  hoveredSystemTickKey: null,
 };
 
 /** Value-equality for {@link TimeSelection}. Exported for use in cross-store bridges and URL sync. */
@@ -58,6 +111,20 @@ export function timeEqual(a: TimeSelection | null, b: TimeSelection | null): boo
   if (a === b) return true;
   if (a === null || b === null) return false;
   return a.start === b.start && a.end === b.end;
+}
+
+/** Value-equality for {@link DataTrackSelection}. Used by the value-equal-aware setter. */
+export function dataTrackEqual(a: DataTrackSelection | null, b: DataTrackSelection | null): boolean {
+  if (a === b) return true;
+  if (a === null || b === null) return false;
+  return a.kind === b.kind && a.id === b.id;
+}
+
+/** Value-equality for {@link HoveredSystemTickKey}. */
+export function hoveredKeyEqual(a: HoveredSystemTickKey | null, b: HoveredSystemTickKey | null): boolean {
+  if (a === b) return true;
+  if (a === null || b === null) return false;
+  return a.systemName === b.systemName && a.tickNumber === b.tickNumber;
 }
 
 export const useSelectionStore = create<SelectionState>()((set, get) => ({
@@ -95,6 +162,18 @@ export const useSelectionStore = create<SelectionState>()((set, get) => ({
   setWorker: (id) => {
     if (get().worker === id) return;
     set({ worker: id });
+  },
+  setDataTrack: (track) => {
+    if (dataTrackEqual(get().dataTrack, track)) return;
+    set({ dataTrack: track });
+  },
+  setPhase: (phase) => {
+    if (get().phase === phase) return;
+    set({ phase });
+  },
+  setHoveredSystemTickKey: (key) => {
+    if (hoveredKeyEqual(get().hoveredSystemTickKey, key)) return;
+    set({ hoveredSystemTickKey: key });
   },
   clear: () => set({ ...INITIAL }),
 }));

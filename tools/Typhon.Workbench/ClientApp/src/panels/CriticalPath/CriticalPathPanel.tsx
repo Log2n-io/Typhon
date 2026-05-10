@@ -4,7 +4,7 @@ import { useTopology } from '@/hooks/data/useTopology';
 import { useProfilerMetadata } from '@/hooks/profiler/useProfilerMetadata';
 import { useSelectionStore } from '@/stores/useSelectionStore';
 import { useSessionStore } from '@/stores/useSessionStore';
-import { deriveEdges } from '../SystemDag/edgeDerivation';
+import { deriveEdges } from '@/lib/dag/edgeDerivation';
 import { timeToTickRange } from '../SystemDag/tickRangeMapping';
 import { computeAggregateCriticalPath, computeCriticalPathForTick, focusTickForWindow } from './criticalPath';
 import CriticalPathToolbar from './CriticalPathToolbar';

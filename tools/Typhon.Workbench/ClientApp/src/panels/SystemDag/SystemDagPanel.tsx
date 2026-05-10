@@ -1,7 +1,8 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { IDockviewPanelProps } from 'dockview-react';
 import { useTopology } from '@/hooks/data/useTopology';
 import { useProfilerMetadata } from '@/hooks/profiler/useProfilerMetadata';
+import { useGatingStore } from '@/stores/useGatingStore';
 import { useSelectionStore } from '@/stores/useSelectionStore';
 import { useSessionStore } from '@/stores/useSessionStore';
 import {
@@ -11,8 +12,9 @@ import {
   dominantTickInRange,
 } from '../CriticalPath/criticalPath';
 import { toNodeData } from './dagModel';
-import { deriveEdges } from './edgeDerivation';
-import { computeGatingAnalysis } from './gatingAnalysis';
+import { resolveSystemsForDataTrack } from './dataTrackHighlight';
+import { deriveEdges } from '@/lib/dag/edgeDerivation';
+import { computeGatingAnalysis } from '@/lib/dag/gatingAnalysis';
 import SystemDagCanvas from './SystemDagCanvas';
 import SystemDagSidePanel from './SystemDagSidePanel';
 import SystemDagToolbar from './SystemDagToolbar';
@@ -61,6 +63,11 @@ export default function SystemDagPanel(_props: IDockviewPanelProps) {
 
   const selectedSystemName = useSelectionStore((s) => s.system);
   const setSystem = useSelectionStore((s) => s.setSystem);
+  // Phase D (#327): cross-panel selection slots. The DAG reacts to all three but never writes them — track and
+  // phase clicks originate in the Data Flow / Access Matrix panels; hover originates in the Data Flow Timeline.
+  const dataTrack = useSelectionStore((s) => s.dataTrack);
+  const selectedPhase = useSelectionStore((s) => s.phase);
+  const hoveredKey = useSelectionStore((s) => s.hoveredSystemTickKey);
 
   // Local view of the side-panel close button — the selection store is shared, so we don't want
   // closing here to clear it for other panels. We hide the side panel when this local flag is
@@ -168,6 +175,16 @@ export default function SystemDagPanel(_props: IDockviewPanelProps) {
     });
   }, [topology, metadata, derivedEdges, range]);
 
+  // Publish to the cross-panel store so DataFlow's bar tooltip can render the gating line without
+  // recomputing. Fingerprint covers the inputs that change the result; mismatches force recompute
+  // on the consumer side. Cleared automatically when the panel unmounts.
+  const setGatingStore = useGatingStore((s) => s.setGating);
+  useEffect(() => {
+    if (!gatingAnalysis) return;
+    const fp = `dag|${(metadata?.fingerprint ?? '')}|${range?.from ?? ''}-${range?.to ?? ''}|${derivedEdges.length}`;
+    setGatingStore(gatingAnalysis, fp);
+  }, [gatingAnalysis, metadata?.fingerprint, range?.from, range?.to, derivedEdges.length, setGatingStore]);
+
   const skipRates = useMemo(() => {
     if (!topology?.systems || !metadata?.systemTickSummaries || metadata.systemTickSummaries.length === 0) {
       return null;
@@ -178,6 +195,13 @@ export default function SystemDagPanel(_props: IDockviewPanelProps) {
       range,
     });
   }, [topology, metadata, range]);
+
+  // Phase D (#327): resolve which systems touch the currently-selected dataTrack. Called once per (topology, track)
+  // change; re-renders only fan out when the resolved Set actually differs.
+  const dataTrackSystems = useMemo(
+    () => resolveSystemsForDataTrack(topology ?? null, dataTrack),
+    [topology, dataTrack],
+  );
 
   const tickSummaries = metadata?.tickSummaries ?? null;
   // Worker count drives the toolbar's parallelism-inefficiency pill (A1 / A6). Header field is
@@ -219,6 +243,9 @@ export default function SystemDagPanel(_props: IDockviewPanelProps) {
             dominantCpSystems={dominantCpSystems}
             skipRates={skipRates}
             gatingAnalysis={gatingAnalysis}
+            dataTrackSystems={dataTrack ? dataTrackSystems : null}
+            selectedPhase={selectedPhase}
+            hoveredSystemFromCrossPanel={hoveredKey?.systemName ?? null}
             onSelectSystem={(name) => {
               setSystem(name);
               setSidePanelOverride(null);

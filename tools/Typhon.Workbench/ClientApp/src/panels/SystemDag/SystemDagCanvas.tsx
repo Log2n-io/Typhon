@@ -19,7 +19,7 @@ import SystemDagNode from './SystemDagNode';
 import type { SystemStat } from './useSystemStats';
 import type { QueueBackpressureStat } from './useQueueBackpressure';
 import type { CriticalPathParticipation } from '../CriticalPath/criticalPath';
-import type { SystemGatingInfo } from './gatingAnalysis';
+import type { SystemGatingInfo } from '@/lib/dag/gatingAnalysis';
 import { useDagViewStore } from './useDagViewStore';
 import { getOverride, useNodePositionsStore } from './useNodePositionsStore';
 
@@ -47,6 +47,24 @@ interface Props {
    * top gating predecessor.
    */
   gatingAnalysis: Map<string, SystemGatingInfo> | null;
+  /**
+   * Phase D (#327): set of system names that touch the currently-selected `dataTrack`. Each one gets an amber
+   * halo so the user can see, at a glance, which systems care about the track they clicked in Data Flow / Access
+   * Matrix. Null when no track is selected — nodes render without the halo.
+   */
+  dataTrackSystems: Set<string> | null;
+  /**
+   * Phase D (#327): the currently-selected phase from `useSelectionStore.phase`. When set, the matching swim-lane
+   * brightens. Distinct from the existing `hoveredPhase` (which is volatile, hover-driven) — this one is sticky
+   * until cleared. The two combine: hover takes effect on top of the sticky selection.
+   */
+  selectedPhase: string | null;
+  /**
+   * Phase D (#327): cross-panel hover key. When the user hovers a bar in the Data Flow Timeline, the matching
+   * system's node gets a brightened ring. Null when nothing is hovered. Decoupled from the existing per-DAG
+   * `hoveredSystem` so it doesn't bleed into other DAG-internal hover effects.
+   */
+  hoveredSystemFromCrossPanel: string | null;
 }
 
 const NODE_TYPES = { system: SystemDagNode as never };
@@ -61,6 +79,9 @@ export default function SystemDagCanvas({
   dominantCpSystems,
   skipRates,
   gatingAnalysis,
+  dataTrackSystems,
+  selectedPhase,
+  hoveredSystemFromCrossPanel,
 }: Props) {
   // Layout is read straight from the store (avoids prop drilling). Switching layouts re-runs
   // `buildDagModel` and `<ReactFlow fitView>` re-fits the viewport to the new bounds.
@@ -260,16 +281,34 @@ export default function SystemDagCanvas({
       const isSelected = n.id === selectedSystemName;
       const isOnDominantCp = dominantCpSystems?.has(n.id) ?? false;
       const waitGapUs = gatingAnalysis?.get(n.id)?.meanWaitGapUs ?? null;
+      // Phase D (#327): does this node touch the currently-selected dataTrack? Drives the amber halo.
+      const isOnSelectedDataTrack = dataTrackSystems?.has(n.id) ?? false;
+      // Phase D (#327): is the node's phase the currently-selected phase? Drives the swim-lane tint
+      // (handled at the lane-render level) AND a subtle brightness boost on the node itself.
+      const isOnSelectedPhase = selectedPhase != null && n.data.phaseName === selectedPhase;
+      // Phase D (#327): cross-panel hover ring — Data Flow bar hover lights up this node when the names match.
+      const isHoveredFromCrossPanel = hoveredSystemFromCrossPanel != null && n.id === hoveredSystemFromCrossPanel;
       const overridePos = getOverride(overrides, layout, n.id);
       const position = overridePos ?? n.position;
       return {
         ...n,
         position,
         selected: isSelected,
-        data: { ...n.data, stat, cpRate, skipRate, isOnDominantCp, isHovered: false, waitGapUs },
+        data: {
+          ...n.data,
+          stat,
+          cpRate,
+          skipRate,
+          isOnDominantCp,
+          isHovered: false,
+          waitGapUs,
+          isOnSelectedDataTrack,
+          isOnSelectedPhase,
+          isHoveredFromCrossPanel,
+        },
       };
     });
-  }, [model.nodes, selectedSystemName, systemStats, cpParticipation, dominantCpSystems, skipRates, gatingAnalysis, overrides, layout]);
+  }, [model.nodes, selectedSystemName, systemStats, cpParticipation, dominantCpSystems, skipRates, gatingAnalysis, overrides, layout, dataTrackSystems, selectedPhase, hoveredSystemFromCrossPanel]);
 
   // ── Hover patch — only the hovered tile gets a new ref ─────────────
   // Maps the base array, replacing exactly one node (the hovered one) with a patched copy

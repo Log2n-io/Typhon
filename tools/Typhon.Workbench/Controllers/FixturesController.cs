@@ -82,7 +82,27 @@ public sealed class FixturesController(SessionManager sessions) : ControllerBase
         var outDir = Path.Combine(DefaultOutputDirectory(), "traces");
         var tickCount = (req?.TickCount).GetValueOrDefault(3);
         var instantsPerTick = (req?.InstantsPerTick).GetValueOrDefault(5);
-        var path = TraceFixtureBuilder.BuildMinimalTrace(outDir, tickCount, instantsPerTick);
+
+        // Variants:
+        //   "with-access-declarations" — v6 wire path: 2 systems + 3 components + 3 phases. Drives the static-topology
+        //                                Playwright cases (no bars; archetype tables empty).
+        //   "with-archetype-touches"   — extends the above with 2 archetypes + per-tick SchedulerSystemArchetype events,
+        //                                so the Data Flow timeline can render bars (#327 Phase D bar-click + hover canary).
+        //   default                    — minimal trace (no systems, no archetypes); for the open-trace flow canary.
+        // tickCount/instantsPerTick are ignored for the typed variants; their builders hardcode the layout.
+        string path;
+        if (string.Equals(req?.Variant, "with-archetype-touches", StringComparison.OrdinalIgnoreCase))
+        {
+            path = TraceFixtureBuilder.BuildTraceWithArchetypeTouches(outDir);
+        }
+        else if (string.Equals(req?.Variant, "with-access-declarations", StringComparison.OrdinalIgnoreCase))
+        {
+            path = TraceFixtureBuilder.BuildTraceWithAccessDeclarations(outDir);
+        }
+        else
+        {
+            path = TraceFixtureBuilder.BuildMinimalTrace(outDir, tickCount, instantsPerTick);
+        }
         return Ok(new CreateTraceFixtureResponseDto(TraceFilePath: path, TickCount: tickCount));
     }
 
@@ -157,7 +177,7 @@ public sealed record CreateFixtureResponseDto(
     bool WasCreated);
 
 /// <summary>Request body for <see cref="FixturesController.CreateTrace"/>.</summary>
-public sealed record CreateTraceFixtureRequestDto(int? TickCount, int? InstantsPerTick);
+public sealed record CreateTraceFixtureRequestDto(int? TickCount, int? InstantsPerTick, string Variant = null);
 
 /// <summary>Response body for <see cref="FixturesController.CreateTrace"/>.</summary>
 public sealed record CreateTraceFixtureResponseDto(string TraceFilePath, int TickCount);

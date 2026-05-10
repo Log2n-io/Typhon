@@ -23,6 +23,12 @@ function SystemDagNodeInner({
     isOnDominantCp?: boolean;
     isHovered?: boolean;
     waitGapUs?: number | null;
+    /** Phase D (#327): node's system touches the currently-selected dataTrack — render with amber halo. */
+    isOnSelectedDataTrack?: boolean;
+    /** Phase D (#327): node belongs to the currently-selected phase — subtle brightness boost. */
+    isOnSelectedPhase?: boolean;
+    /** Phase D (#327): cross-panel hover key matches this node's name — bright ring. */
+    isHoveredFromCrossPanel?: boolean;
   };
   selected?: boolean;
 }) {
@@ -32,11 +38,23 @@ function SystemDagNodeInner({
   // Selection wins over hover — once you click the node the primary ring locks in; hover only
   // illuminates when no harder selection is active. Hover comes from the cross-panel store, so
   // hovering a tape bar lights this node and vice-versa.
+  // Selection ring priority (top → bottom):
+  // 1. Local DAG selection (clicked here) — primary
+  // 2. Cross-panel hover (Data Flow bar) — bright foreground
+  // 3. Cross-panel dataTrack — amber halo for "you clicked a track this system touches"
+  // 4. Local hover — dim foreground
+  // Phase D (#327): adds the cross-panel hover + dataTrack rings on top of the existing selection / hover stack.
   const ring = selected
     ? 'ring-2 ring-primary'
-    : data.isHovered
-      ? 'ring-2 ring-foreground/60'
-      : '';
+    : data.isHoveredFromCrossPanel
+      ? 'ring-2 ring-foreground'
+      : data.isOnSelectedDataTrack
+        ? 'ring-2 ring-amber-400'
+        : data.isHovered
+          ? 'ring-2 ring-foreground/60'
+          : '';
+  // Phase D (#327): subtle brightness boost for nodes whose phase is selected. Stacks on top of every other style.
+  const phaseBoost = data.isOnSelectedPhase ? 'brightness-110' : '';
   // Per `09-system-dag.md §11 Phase 3`: nodes on the critical path of the dominant tick get a red
   // outline. We use Tailwind's `outline` (not `border` or `ring`) so it stacks cleanly with the
   // selection ring + heat border without fighting any of them. `outline-offset-1` keeps the red
@@ -67,7 +85,7 @@ function SystemDagNodeInner({
   // updates skip the inner render path entirely.
   return (
     <div
-      className={`relative flex h-[56px] w-[180px] flex-col rounded border bg-card shadow-sm ${exclusiveBar} ${ring} ${dominantCpOutline}`}
+      className={`relative flex h-[56px] w-[180px] flex-col rounded border bg-card shadow-sm ${exclusiveBar} ${ring} ${dominantCpOutline} ${phaseBoost}`}
       style={heatStyle}
       data-testid={`system-dag-node-${data.systemName}`}
       title={data.isOnDominantCp ? 'On the critical path of the dominant tick' : undefined}

@@ -20,13 +20,41 @@ export type GranularityLevel = 'L0' | 'L1' | 'L2' | 'L3' | 'L4';
  */
 export type XAxisMode = 'uniform' | 'equal' | 'log';
 
+/**
+ * Aggregation modes (X axis), orthogonal to {@link GranularityLevel}. Per spec §7.
+ *
+ * - <b>replay</b>   — single-tick replay on the dominant tick of the selection (default per D8).
+ *                     Bars are actual `[startUs, endUs]` of that one tick mapped through the phase axis.
+ * - <b>envelope</b> — p5–p95 envelope over the selected ticks. Per (system, track), the bar is the rectangle
+ *                     covering the 90th-percentile band of `(startUs, endUs)` across the range. Answers
+ *                     "is this stable or jittery across ticks?".
+ * - <b>density</b>  — heat strip per (track, phase) — touch density across the range, no per-system bars.
+ *                     Answers "where in the data is the workload concentrated over time?".
+ */
+export type AggregationMode = 'replay' | 'envelope' | 'density';
+
 export interface DataFlowViewState {
   /** Y-axis altitude. Default L2 (Component-family) per design D9 — right altitude for "what's happening to my data". */
   granularityLevel: GranularityLevel;
   /** Phase column scaling along the X axis. */
   xMode: XAxisMode;
-  /** Phase names that the user has manually collapsed (to a thin summary strip). */
+  /** Aggregation mode along the X axis. Default `replay` per design D8. */
+  aggMode: AggregationMode;
+  /**
+   * Phase names the user has explicitly collapsed (forced thin even when wall-clock-significant). Mutually
+   * exclusive with {@link manuallyExpandedPhases} — clicking a phase toggles between the two states.
+   */
   collapsedPhases: string[];
+  /**
+   * Phase names the user has explicitly expanded (kept wide even when D10 auto-collapse would normally
+   * thin them). Required because auto-collapse fires on every render — without this set, the user couldn't
+   * keep a small phase open across re-renders.
+   */
+  manuallyExpandedPhases: string[];
+  /** When true, tracks with zero bars in the current tick are hidden. Per design §7 filter chips. */
+  hideUntouched: boolean;
+  /** When true, systems whose summary reports skipReason !== None render dimmed. Per design §7 filter chips. */
+  dimSkipped: boolean;
   /**
    * When true, hovering a bar dims every other bar that doesn't share its (system, tick) key. The v1
    * unification mechanism per design D3 — the bridge that makes per-track bars feel unified without
@@ -36,7 +64,11 @@ export interface DataFlowViewState {
   hoverIsolateEnabled: boolean;
   setGranularityLevel: (level: GranularityLevel) => void;
   setXMode: (mode: XAxisMode) => void;
-  togglePhaseCollapsed: (phaseName: string) => void;
+  setAggMode: (mode: AggregationMode) => void;
+  /** Toggle phase between collapsed / expanded / default (auto). Click semantics: 1st click → collapse, 2nd → expand, 3rd → default. */
+  cyclePhaseCollapse: (phaseName: string) => void;
+  setHideUntouched: (hide: boolean) => void;
+  setDimSkipped: (dim: boolean) => void;
   setHoverIsolateEnabled: (enabled: boolean) => void;
 }
 
@@ -58,19 +90,34 @@ export const useDataFlowViewStore = create<DataFlowViewState>()(
     (set, get) => ({
       granularityLevel: 'L2',
       xMode: 'uniform',
+      aggMode: 'replay',
       collapsedPhases: [],
+      manuallyExpandedPhases: [],
+      hideUntouched: false,
+      dimSkipped: false,
       hoverIsolateEnabled: true,
       setGranularityLevel: (granularityLevel) => set({ granularityLevel }),
       setXMode: (xMode) => set({ xMode }),
-      togglePhaseCollapsed: (phaseName) => {
-        const current = get().collapsedPhases;
-        const idx = current.indexOf(phaseName);
-        if (idx === -1) {
-          set({ collapsedPhases: [...current, phaseName] });
+      setAggMode: (aggMode) => set({ aggMode }),
+      cyclePhaseCollapse: (phaseName) => {
+        const { collapsedPhases, manuallyExpandedPhases } = get();
+        const isCollapsed = collapsedPhases.includes(phaseName);
+        const isExpanded = manuallyExpandedPhases.includes(phaseName);
+        // Cycle: default (auto) → collapsed → expanded → default. The user clicks once to collapse a wide phase
+        // (override auto-expand), again to force-expand a thin one, third time to return to D10 auto-collapse.
+        if (!isCollapsed && !isExpanded) {
+          set({ collapsedPhases: [...collapsedPhases, phaseName] });
+        } else if (isCollapsed) {
+          set({
+            collapsedPhases: collapsedPhases.filter((p) => p !== phaseName),
+            manuallyExpandedPhases: [...manuallyExpandedPhases, phaseName],
+          });
         } else {
-          set({ collapsedPhases: current.filter((p) => p !== phaseName) });
+          set({ manuallyExpandedPhases: manuallyExpandedPhases.filter((p) => p !== phaseName) });
         }
       },
+      setHideUntouched: (hideUntouched) => set({ hideUntouched }),
+      setDimSkipped: (dimSkipped) => set({ dimSkipped }),
       setHoverIsolateEnabled: (hoverIsolateEnabled) => set({ hoverIsolateEnabled }),
     }),
     { name: 'typhon-dataflow-view', storage: safeStorage },

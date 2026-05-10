@@ -79,6 +79,44 @@ export function buildTracks(topology: TopologyDto | null, level: GranularityLeve
 }
 
 /**
+ * Resolve the *effective* granularity level for a topology — what {@link buildTracks} actually emitted after
+ * fallbacks (L3→L2 when componentTypes is empty, L2→L1 when fewer than 8 families, L1→L0 when no phases).
+ * Both `buildTracks` and `buildBars` must agree on the effective level, otherwise bars get emitted on track ids
+ * that don't exist (silent drop). Pure, no allocations beyond the level lookup.
+ */
+export function resolveEffectiveLevel(topology: TopologyDto | null, requested: GranularityLevel): GranularityLevel {
+  if (!topology) return requested;
+  const phases = topology.phases ?? [];
+  const families = topology.componentFamilies?.familyOrder ?? [];
+  const componentTypes = topology.componentTypes ?? [];
+  // Walk the same fallback chain buildTracks uses, in order from finest → coarsest.
+  if (requested === 'L3' && componentTypes.length === 0) requested = 'L2';
+  if (requested === 'L2' && families.length < 8) requested = 'L1';
+  if (requested === 'L1' && phases.length === 0) requested = 'L0';
+  // D9 auto-promote (mirrors buildL2): if L2 would be degenerate (each family ↔ 1 component), use L3.
+  if (requested === 'L2' && everyFamilyHasOneComponent(topology)) requested = 'L3';
+  return requested;
+}
+
+/**
+ * D9 helper: returns true when every component-family in the topology contains exactly one component type.
+ * In that case L2's family axis collapses to L3's component axis with worse labels — better to render L3.
+ */
+function everyFamilyHasOneComponent(topology: TopologyDto): boolean {
+  const map = topology.componentFamilies?.componentToFamily;
+  if (!map) return false;
+  const countByFamily = new Map<string, number>();
+  for (const family of Object.values(map)) {
+    countByFamily.set(family, (countByFamily.get(family) ?? 0) + 1);
+  }
+  if (countByFamily.size === 0) return false;
+  for (const count of countByFamily.values()) {
+    if (count > 1) return false;
+  }
+  return true;
+}
+
+/**
  * L0 — three fixed rows: Components / Event Queues / Resources. The broadest "where is the tick spending its time"
  * view. Always present even if a domain is empty (zero bars on that row is itself a useful signal).
  */
@@ -115,6 +153,9 @@ function buildL1(topology: TopologyDto): Track[] {
 function buildL2(topology: TopologyDto): Track[] {
   const familyOrder = topology.componentFamilies?.familyOrder ?? [];
   if (familyOrder.length < 8) return buildL1(topology);
+  // D9 auto-promote: when every family carries exactly one component type, L2 has the same row
+  // count as L3 but with arbitrary "family" names. Drop to L3 — same shape, but honest labels.
+  if (everyFamilyHasOneComponent(topology)) return buildL3(topology);
 
   const tracks: Track[] = [];
   for (const family of familyOrder) {
@@ -176,3 +217,40 @@ function buildL4(topology: TopologyDto): Track[] {
   tracks.push({ id: 'domain:resources', label: 'Resources', kind: 'resource-domain' });
   return tracks;
 }
+
+/**
+ * Project a {@link Track} into the cross-panel {@link DataTrackSelection} shape used by `useSelectionStore`.
+ * Pure conversion — copies kind + id and surfaces the relevant scope fields. Returns null when the track kind
+ * isn't a meaningful selection target (e.g. unimplemented `queue` / `resource` rows from L4 fallback).
+ */
+export function trackToDataTrackSelection(
+  track: Track,
+): {
+  kind: Track['kind'];
+  id: string;
+  componentName?: string;
+  familyName?: string;
+  archetypeId?: number;
+} | null {
+  switch (track.kind) {
+    case 'component':
+    case 'archetype-component':
+      return {
+        kind: track.kind,
+        id: track.id,
+        componentName: track.componentName,
+        archetypeId: track.archetypeId,
+      };
+    case 'component-family':
+      return { kind: track.kind, id: track.id, familyName: track.familyName };
+    case 'component-domain':
+    case 'queue-domain':
+    case 'resource-domain':
+      return { kind: track.kind, id: track.id };
+    case 'queue':
+    case 'resource':
+      // Reserved for future per-instance rows; not selected today.
+      return null;
+  }
+}
+

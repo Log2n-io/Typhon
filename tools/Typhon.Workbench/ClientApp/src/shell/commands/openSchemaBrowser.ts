@@ -124,6 +124,14 @@ export function toggleViewSystemDag(): void {
   toggleDockPanel('system-dag', 'SystemDag', 'System DAG');
 }
 
+export function toggleViewDataFlow(): void {
+  toggleDockPanel('data-flow', 'DataFlow', 'Data Flow');
+}
+
+export function toggleViewAccessMatrix(): void {
+  toggleDockPanel('access-matrix', 'AccessMatrix', 'Access Matrix');
+}
+
 export function toggleViewOptions(): void {
   toggleDockPanel('options', 'Options', 'Options');
 }
@@ -183,5 +191,14 @@ function toggleDockPanel(id: string, componentKey: string, title: string): void 
     api.removePanel(existing);
     return;
   }
-  api.addPanel({ id, component: componentKey, title });
+  // Without a position, dockview drops the new panel into whichever group was last active — which after a
+  // trace-mode auto-build is one of the narrow right-edge groups (Detail / Components / Archetypes), not the
+  // wide center group with Profiler. Prefer planting these toggles next to the Profiler/Start-Here so the
+  // panel mounts at usable width. Falls back to `addPanel` with no position when neither anchor exists.
+  const anchor = api.getPanel('profiler') ?? api.getPanel('start-here');
+  if (anchor) {
+    api.addPanel({ id, component: componentKey, title, position: { referencePanel: anchor.id } });
+  } else {
+    api.addPanel({ id, component: componentKey, title });
+  }
 }

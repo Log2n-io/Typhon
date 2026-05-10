@@ -3,7 +3,7 @@ import type { ArchetypeDto } from '@/api/generated/model/archetypeDto';
 import type { SystemArchetypeTouchSummary } from '@/api/generated/model/systemArchetypeTouchSummary';
 import type { SystemDefinitionDto } from '@/api/generated/model/systemDefinitionDto';
 import type { TopologyDto } from '@/api/generated/model/topologyDto';
-import { accessKindFor, buildBars } from '../barBuilding';
+import { accessKindFor, buildBars, buildDensityCells, buildEnvelopeBars, type Bar } from '../barBuilding';
 import { buildTracks } from '../trackBuilding';
 
 function topo(overrides: Partial<TopologyDto> = {}): TopologyDto {
@@ -176,6 +176,62 @@ describe('buildBars — defensive', () => {
     // archId=200 doesn't exist → no fan-out at L4.
     const bars = buildBars([touch(1, 1, 200)], buildTracks(t, 'L4'), t, 'L4');
     expect(bars).toHaveLength(0);
+  });
+});
+
+describe('buildEnvelopeBars', () => {
+  function bar(trackId: string, systemName: string, tickNumber: number, xStart: number, xEnd: number): Bar {
+    return { trackId, tickNumber, xStart, xEnd, phaseName: 'Sim', systemName, archetypeId: 0, entityCount: 0, chunkCount: 0 };
+  }
+
+  it('collapses replay bars to one envelope bar per (track, system)', () => {
+    const replay: Bar[] = [
+      bar('t1', 'S1', 1, 0.10, 0.20),
+      bar('t1', 'S1', 2, 0.12, 0.22),
+      bar('t1', 'S1', 3, 0.15, 0.25),
+      bar('t1', 'S2', 1, 0.50, 0.55),
+    ];
+    const env = buildEnvelopeBars(replay);
+    expect(env).toHaveLength(2);
+    const s1 = env.find((b) => b.systemName === 'S1');
+    expect(s1).toBeDefined();
+    expect(s1!.tickNumber).toBe(-1);  // -1 marks "envelope" (no specific tick)
+    expect(s1!.xStart).toBeCloseTo(0.10, 5); // p5 of [0.10, 0.12, 0.15] with N=3 → idx round(0.05*2)=0
+    expect(s1!.xEnd).toBeCloseTo(0.25, 5);   // p95 of [0.20, 0.22, 0.25] → idx round(0.95*2)=2
+  });
+
+  it('returns [] for empty input', () => {
+    expect(buildEnvelopeBars([])).toEqual([]);
+  });
+
+  it('drops degenerate envelopes where p95 ≤ p5', () => {
+    const replay: Bar[] = [bar('t1', 'S1', 1, 0.50, 0.50)];  // single bar with zero width
+    const env = buildEnvelopeBars(replay);
+    // With one sample, p5 == p95 == 0.50 ⇒ p95End <= p5Start ⇒ dropped.
+    expect(env).toHaveLength(0);
+  });
+});
+
+describe('buildDensityCells', () => {
+  function bar(trackId: string, phase: string, tickNumber: number): Bar {
+    return { trackId, tickNumber, xStart: 0, xEnd: 0.1, phaseName: phase, systemName: 'S', archetypeId: 0, entityCount: 0, chunkCount: 0 };
+  }
+
+  it('counts touches per (track, phase) pair', () => {
+    const cells = buildDensityCells([
+      bar('t1', 'Sim', 1), bar('t1', 'Sim', 2), bar('t1', 'Sim', 3),
+      bar('t1', 'Render', 1),
+      bar('t2', 'Sim', 1),
+    ]);
+    expect(cells).toContainEqual({ trackId: 't1', phaseName: 'Sim', touchCount: 3 });
+    expect(cells).toContainEqual({ trackId: 't1', phaseName: 'Render', touchCount: 1 });
+    expect(cells).toContainEqual({ trackId: 't2', phaseName: 'Sim', touchCount: 1 });
+  });
+
+  it('skips bars with empty phase name', () => {
+    const cells = buildDensityCells([bar('t1', '', 1), bar('t1', 'Sim', 2)]);
+    expect(cells).toHaveLength(1);
+    expect(cells[0].phaseName).toBe('Sim');
   });
 });
 

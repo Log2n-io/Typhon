@@ -15,6 +15,7 @@ import SchemaIndexPanel from '@/panels/SchemaInspector/SchemaIndexPanel';
 import SchemaRelationshipsPanel from '@/panels/SchemaInspector/SchemaRelationshipsPanel';
 import SystemDagPanel from '@/panels/SystemDag/SystemDagPanel';
 import DataFlowPanel from '@/panels/DataFlow/DataFlowPanel';
+import AccessMatrixPanel from '@/panels/AccessMatrix/AccessMatrixPanel';
 import CriticalPathPanel from '@/panels/CriticalPath/CriticalPathPanel';
 import ProfilerPanel from '@/panels/profiler/ProfilerPanel';
 import TopSpansPanel from '@/panels/profiler/TopSpansPanel';
@@ -52,6 +53,7 @@ const components: Record<string, React.FC<IDockviewPanelProps>> = {
   SchemaRelationships: SchemaRelationshipsPanel,
   SystemDag: SystemDagPanel,
   DataFlow: DataFlowPanel,
+  AccessMatrix: AccessMatrixPanel,
   CriticalPath: CriticalPathPanel,
   Profiler: ProfilerPanel,
   TopSpans: TopSpansPanel,
@@ -108,14 +110,11 @@ function buildDefaultLayout(api: DockviewReadyEvent['api'], kind: 'none' | 'open
         title: 'Archetypes',
         position: { referenceGroup: EDGE_RIGHT_ID },
       });
-      // Workbench Data Flow module (#327): the data-first counterpart to the System DAG. Stacked in the right edge
-      // group alongside the schema panels so users discover it without changing the existing layout's overall shape.
-      api.addPanel({
-        id: 'data-flow',
-        component: 'DataFlow',
-        title: 'Data Flow',
-        position: { referenceGroup: EDGE_RIGHT_ID },
-      });
+      // Workbench Data Flow module (#327): both panels are reachable via View → Data Flow / Access Matrix and the
+      // command palette (Toggle View Data Flow / Toggle View Access Matrix). They stay out of the trace-mode default
+      // layout because piling them into the right edge group with Detail+Components+Archetypes collapses every panel
+      // there into a thin vertical-label tab strip — bars and matrix cells render at sub-pixel widths, invisible. The
+      // toggle commands open them in the center group at a usable width when the user actually wants them.
     }
     return;
   }

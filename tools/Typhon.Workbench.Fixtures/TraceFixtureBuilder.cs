@@ -183,6 +183,169 @@ public static class TraceFixtureBuilder
     }
 
     /// <summary>
+    /// Build a trace that extends <see cref="BuildTraceWithAccessDeclarations"/> with two registered archetypes
+    /// and a handful of <see cref="TraceEventKind.SchedulerSystemArchetype"/> span events per tick — enough to
+    /// drive the Workbench Data Flow timeline's per-tick bar rendering. Used by the cross-panel Playwright
+    /// canary's bar-click + hover cases (#327 Phase D acceptance), which need a tick with at least one
+    /// (system, archetype) touch row to have a clickable bar in the canvas.
+    /// </summary>
+    public static string BuildTraceWithArchetypeTouches(string directory)
+    {
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, $"fixture-archtouches-{Guid.NewGuid():N}.typhon-trace");
+
+        var systems = new[]
+        {
+            new SystemDefinitionRecord
+            {
+                Index = 0,
+                Name = "Movement",
+                Type = 0,
+                Priority = 0,
+                IsParallel = true,
+                TierFilter = 0x0F,
+                Predecessors = [],
+                Successors = [1],
+                PhaseName = "Simulation",
+                IsExclusivePhase = false,
+                Reads = ["Game.Velocity"],
+                Writes = ["Game.Position"],
+                ReadsEvents = ["Damage"],
+                WritesResources = ["world.physics"],
+            },
+            new SystemDefinitionRecord
+            {
+                Index = 1,
+                Name = "Damage",
+                Type = 0,
+                Priority = 0,
+                IsParallel = true,
+                TierFilter = 0x0F,
+                Predecessors = [0],
+                Successors = [],
+                PhaseName = "Simulation",
+                IsExclusivePhase = true,
+                ReadsSnapshot = ["Game.Position"],
+                Writes = ["Game.Health"],
+                WritesEvents = ["Death"],
+            },
+        };
+
+        var archetypes = new[]
+        {
+            new ArchetypeRecord { ArchetypeId = 100, Name = "Player" },
+            new ArchetypeRecord { ArchetypeId = 101, Name = "Enemy" },
+        };
+        var components = new[]
+        {
+            new ComponentTypeRecord { ComponentTypeId = 1, Name = "Game.Position" },
+            new ComponentTypeRecord { ComponentTypeId = 2, Name = "Game.Velocity" },
+            new ComponentTypeRecord { ComponentTypeId = 3, Name = "Game.Health" },
+        };
+
+        // Rich archetype + component definitions so the trace's L4 fan-out has data to enumerate. Slots
+        // mirror the systems' declared writes — Movement writes Position, Damage writes Health — so the
+        // Access Matrix and Data Flow tooltip both light up convincingly when the bar is clicked.
+        var componentDefs = new[]
+        {
+            new ComponentDefinitionRecord { ComponentTypeId = 1, Name = "Game.Position", Revision = 1, StorageMode = 0, AllowMultiple = false, ComponentStorageSize = 16, ComponentStorageOverhead = 0, ComponentStorageTotalSize = 16 },
+            new ComponentDefinitionRecord { ComponentTypeId = 2, Name = "Game.Velocity", Revision = 1, StorageMode = 0, AllowMultiple = false, ComponentStorageSize = 16, ComponentStorageOverhead = 0, ComponentStorageTotalSize = 16 },
+            new ComponentDefinitionRecord { ComponentTypeId = 3, Name = "Game.Health",   Revision = 1, StorageMode = 0, AllowMultiple = false, ComponentStorageSize = 8,  ComponentStorageOverhead = 0, ComponentStorageTotalSize = 8  },
+        };
+        var archetypeDefs = new[]
+        {
+            new ArchetypeDefinitionRecord { ArchetypeId = 100, Name = "Player", Revision = 1, ComponentCount = 2, ComponentTypeIds = [1, 2] },
+            new ArchetypeDefinitionRecord { ArchetypeId = 101, Name = "Enemy",  Revision = 1, ComponentCount = 2, ComponentTypeIds = [1, 3] },
+        };
+
+        using var fs = File.Create(path);
+        using var writer = new TraceFileWriter(fs);
+        writer.WriteHeader(in DefaultHeader);
+        writer.WriteSystemDefinitions(systems);
+        writer.WriteArchetypes(archetypes);
+        writer.WriteComponentTypes(components);
+        writer.WritePhases(["Input", "Simulation", "Output"]);
+        // Replace the "everything-empty" static-structures block with the rich definitions above. The cache
+        // builder folds these into ProfilerMetadataDto.archetypes / componentTypes for the topology endpoint.
+        writer.WriteComponentDefinitions(componentDefs);
+        writer.WriteArchetypeDefinitions(archetypeDefs);
+        writer.WriteIndexCatalog([]);
+        writer.WriteRuntimeConfig(new RuntimeConfigRecord { BaseTickRate = 1_000, WorkerCount = 1, Phases = ["Input", "Simulation", "Output"] });
+        writer.WriteEventQueueCatalog([]);
+        writer.WriteResourceGraphSnapshot([]);
+
+        // Per-tick record layout: TickStart + 2× SchedulerSystemArchetype span events + TickEnd. Span events
+        // are 49 B each (12 B common + 25 B span ext + 12 B payload, no trace context, no source location).
+        // Drives both: SystemArchetypeTouchSummary[] (one row per (sys, arch) per tick) and the dominant-tick
+        // selection (TickEnd defines tick wall-clock; we space `ts` so each tick takes 100 µs of timestamp space).
+        const int tickStartSize = CommonHeaderSize;
+        const int spanArchSize = CommonHeaderSize + 25 + 12; // 49 B
+        const int tickEndSize = CommonHeaderSize + 2;
+        const int tickCount = 3;
+        const int eventsPerTick = 2;
+
+        var totalRecords = tickCount * (1 + eventsPerTick + 1);
+        var blockSize = tickCount * (tickStartSize + eventsPerTick * spanArchSize + tickEndSize);
+        var block = new byte[blockSize];
+        long ts = 100;
+        var offset = 0;
+        for (var t = 0; t < tickCount; t++)
+        {
+            // TickStart anchors the tick's wall-clock. The cache builder uses it as `tickStartTs` to compute
+            // SystemTickSummary.StartUs/EndUs by subtracting from each system's first/last chunk timestamps.
+            // We don't emit chunk events here, so SystemTickSummary won't materialize — the e2e tests only need
+            // SystemArchetypeTouchSummary rows for the bar render path.
+            WriteRecordHeader(block.AsSpan(offset), tickStartSize, TraceEventKind.TickStart, ts);
+            offset += tickStartSize;
+            ts++;
+
+            // (Movement, Player) and (Damage, Enemy) — one event per pair per tick.
+            WriteSchedulerSystemArchetypeEvent(block.AsSpan(offset, spanArchSize), startTs: ts, durationTicks: 30,
+                spanId: 100UL + (ulong)t * 2, systemIdx: 0, archetypeId: 100, entityCount: 8 + t, chunkCount: 2);
+            offset += spanArchSize;
+            ts += 30;
+            WriteSchedulerSystemArchetypeEvent(block.AsSpan(offset, spanArchSize), startTs: ts, durationTicks: 20,
+                spanId: 101UL + (ulong)t * 2, systemIdx: 1, archetypeId: 101, entityCount: 4 + t, chunkCount: 1);
+            offset += spanArchSize;
+            ts += 20;
+
+            WriteRecordHeader(block.AsSpan(offset), tickEndSize, TraceEventKind.TickEnd, ts);
+            block[offset + CommonHeaderSize] = 0;     // overloadLevel
+            block[offset + CommonHeaderSize + 1] = 1; // tickMultiplier
+            offset += tickEndSize;
+            ts++;
+        }
+
+        writer.WriteRecords(block, totalRecords);
+        writer.WriteSpanNames(new Dictionary<int, string>());
+        writer.Flush();
+        return path;
+    }
+
+    /// <summary>
+    /// Encode a single <see cref="TraceEventKind.SchedulerSystemArchetype"/> span event in-place. Layout matches
+    /// <c>SchedulerSystemArchetypeEventCodec.Decode</c>: 12 B common header + 25 B span extension (no trace
+    /// context, no source location) + 12 B payload (u16 sysIdx, u16 archId, i32 entities, i32 chunks).
+    /// </summary>
+    private static void WriteSchedulerSystemArchetypeEvent(Span<byte> dest, long startTs, long durationTicks, ulong spanId,
+        ushort systemIdx, ushort archetypeId, int entityCount, int chunkCount)
+    {
+        // 49 B is the single-record size; caller is expected to pass exactly that slice.
+        WriteRecordHeader(dest, dest.Length, TraceEventKind.SchedulerSystemArchetype, startTs);
+        // Span extension at offset 12.
+        BinaryPrimitives.WriteInt64LittleEndian(dest.Slice(CommonHeaderSize, 8), durationTicks);
+        BinaryPrimitives.WriteUInt64LittleEndian(dest.Slice(CommonHeaderSize + 8, 8), spanId);
+        BinaryPrimitives.WriteUInt64LittleEndian(dest.Slice(CommonHeaderSize + 16, 8), 0UL); // parentSpanId
+        dest[CommonHeaderSize + 24] = 0; // spanFlags — no trace context, no source location
+        // Payload at offset 37.
+        var payload = dest[(CommonHeaderSize + 25)..];
+        BinaryPrimitives.WriteUInt16LittleEndian(payload, systemIdx);
+        BinaryPrimitives.WriteUInt16LittleEndian(payload[2..], archetypeId);
+        BinaryPrimitives.WriteInt32LittleEndian(payload[4..], entityCount);
+        BinaryPrimitives.WriteInt32LittleEndian(payload[8..], chunkCount);
+    }
+
+    /// <summary>
     /// Build a trace with a deliberately wrong magic number. Used for the "malformed file" path in
     /// <c>TraceSessionRuntime</c> tests — the runtime should reject it before reading further.
     /// </summary>

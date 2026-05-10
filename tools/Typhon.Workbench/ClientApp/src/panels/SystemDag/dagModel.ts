@@ -2,7 +2,7 @@ import dagre from 'dagre';
 import type { Edge, Node } from '@xyflow/react';
 import type { SystemDefinitionDto } from '@/api/generated/model/systemDefinitionDto';
 import type { TopologyDto } from '@/api/generated/model/topologyDto';
-import { deriveEdges, type DerivedEdge, type DerivedEdgeKind } from './edgeDerivation';
+import { deriveEdges, type DerivedEdge, type DerivedEdgeKind } from '@/lib/dag/edgeDerivation';
 import type { LayoutMode } from './useDagViewStore';
 
 /**

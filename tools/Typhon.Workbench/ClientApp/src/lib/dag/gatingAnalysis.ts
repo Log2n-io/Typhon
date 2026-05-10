@@ -1,7 +1,7 @@
 import type { SystemDefinitionDto } from '@/api/generated/model/systemDefinitionDto';
 import type { SystemTickSummary } from '@/api/generated/model/systemTickSummary';
 import type { DerivedEdge } from './edgeDerivation';
-import type { TickRange } from './useDagViewStore';
+import type { TickRange } from '@/panels/SystemDag/useDagViewStore';
 
 /**
  * "Why is this system blocked?" analytics. Per-system, over a tick range, identifies which

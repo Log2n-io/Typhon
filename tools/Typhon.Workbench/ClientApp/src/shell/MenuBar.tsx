@@ -18,8 +18,10 @@ import SaveReplayDialog from './dialogs/SaveReplayDialog';
 import NavButtons from './NavButtons';
 import PaletteTrigger from './PaletteTrigger';
 import {
+  toggleViewAccessMatrix,
   toggleViewArchetypeBrowser,
   toggleViewComponentBrowser,
+  toggleViewDataFlow,
   toggleViewDetail,
   toggleViewLogs,
   toggleViewOptions,
@@ -159,6 +161,20 @@ export default function MenuBar() {
  title={isProfilerSession ? undefined : 'Open a profiler trace or attach a session first'}
  >
  Critical Path
+ </MenubarItem>
+ <MenubarItem
+ disabled={!isProfilerSession}
+ onClick={toggleViewDataFlow}
+ title={isProfilerSession ? undefined : 'Open a profiler trace or attach a session first'}
+ >
+ Data Flow
+ </MenubarItem>
+ <MenubarItem
+ disabled={!isProfilerSession}
+ onClick={toggleViewAccessMatrix}
+ title={isProfilerSession ? undefined : 'Open a profiler trace or attach a session first'}
+ >
+ Access Matrix
  </MenubarItem>
  <MenubarSeparator />
  <MenubarItem

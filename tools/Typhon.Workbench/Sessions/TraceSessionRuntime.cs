@@ -451,16 +451,42 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
         var archetypeRecords = traceReader.ReadArchetypes();
 
         var componentRecords = traceReader.ReadComponentTypes();
-        var componentTypes = new ComponentTypeDto[componentRecords.Count];
-        for (var i = 0; i < componentRecords.Count; i++)
-        {
-            componentTypes[i] = new ComponentTypeDto(componentRecords[i].ComponentTypeId, componentRecords[i].Name);
-        }
 
         // Phases section — present in v6+ traces only; reader returns empty for v5.
         var phases = traceReader.ReadPhases().ToArray();
         // v7 static-structure tables. Walk past them so any subsequent block reads land at the right offset.
         traceReader.ReadStaticStructures();
+
+        // #327 fallback: some hosts (AntHill) don't populate the thin id→name tables (they were left empty in
+        // ProfilerSessionMetadata before the May-2026 fix). When the v7 rich definitions ARE populated, project them
+        // back into the thin records so consumers depending on the thin tables (TopologyDto.Archetypes /
+        // .ComponentTypes drives the Workbench Data Flow + Access Matrix panels) still see the full registry.
+        if (archetypeRecords.Count == 0 && traceReader.ArchetypeDefinitions.Count > 0)
+        {
+            var derived = new ArchetypeRecord[traceReader.ArchetypeDefinitions.Count];
+            for (var i = 0; i < traceReader.ArchetypeDefinitions.Count; i++)
+            {
+                var d = traceReader.ArchetypeDefinitions[i];
+                derived[i] = new ArchetypeRecord { ArchetypeId = d.ArchetypeId, Name = d.Name };
+            }
+            archetypeRecords = derived;
+        }
+        if (componentRecords.Count == 0 && traceReader.ComponentDefinitions.Count > 0)
+        {
+            var derived = new ComponentTypeRecord[traceReader.ComponentDefinitions.Count];
+            for (var i = 0; i < traceReader.ComponentDefinitions.Count; i++)
+            {
+                var d = traceReader.ComponentDefinitions[i];
+                derived[i] = new ComponentTypeRecord { ComponentTypeId = d.ComponentTypeId, Name = d.Name };
+            }
+            componentRecords = derived;
+        }
+
+        var componentTypes = new ComponentTypeDto[componentRecords.Count];
+        for (var i = 0; i < componentRecords.Count; i++)
+        {
+            componentTypes[i] = new ComponentTypeDto(componentRecords[i].ComponentTypeId, componentRecords[i].Name);
+        }
 
         // Workbench Data Flow module (#327): project the slim ArchetypeRecord into the rich ArchetypeDto, joining the
         // v7 ArchetypeDefinitions table when present. v6 traces (no rich defs) fall back to Label = Name, Revision = 0,

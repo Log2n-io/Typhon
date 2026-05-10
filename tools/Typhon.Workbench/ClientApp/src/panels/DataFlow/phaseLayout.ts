@@ -1,6 +1,25 @@
 import type { XAxisMode } from './useDataFlowViewStore';
 
 /**
+ * Per-phase wall-clock contribution + per-tick phase span data, computed from SystemTickSummary[] + the
+ * declared phase order + the system→phase map. Drives the X-axis layout (segments) and the per-tick bar
+ * positioning inside each phase column (a bar's sub-tick µs offset becomes a fraction of its phase's
+ * span, which then maps to a position inside the segment's normalized [xStart, xEnd]).
+ *
+ * Computed once per (range, topology) change; reused by both bar building and phase-fence rendering.
+ */
+export interface PhaseAxis {
+  /** Per-phase X segment in [0, 1] (output of {@link computePhaseLayout}). */
+  readonly segments: readonly PhaseSegment[];
+  /**
+   * For each tick in the data slice: per-phase tick-local span. Keyed by tick number → phase name →
+   * `{ startUs, endUs }` where startUs/endUs are TICK-RELATIVE µs (matching SystemTickSummary's convention).
+   * Empty for ticks that have no system summaries; consumers fall back to "spread across the segment".
+   */
+  readonly tickPhaseSpans: ReadonlyMap<number, ReadonlyMap<string, { startUs: number; endUs: number }>>;
+}
+
+/**
  * Pure X-axis layout for the Data Flow Timeline. The Marey chart's X axis is segmented per phase per design §6.1
  * — phases aren't a filter, they're the structural skeleton of the tick. Three modes let the user pick how those
  * phase columns are sized:
@@ -114,4 +133,118 @@ function computeLog(phases: readonly { name: string; wallClockUs: number }[]): P
     cursor = xEnd;
   }
   return out;
+}
+
+/**
+ * Apply auto-collapse (D10): phases contributing less than {@link AUTO_COLLAPSE_THRESHOLD} of total wall-clock
+ * are rendered as thin summary strips so they don't crowd the dominant phases off-screen. Honors a user-supplied
+ * "manually expanded" set (the user has clicked these phase headers explicitly to keep them open). Manually
+ * collapsed phases — explicit click on a wide phase — are also collapsed, regardless of contribution.
+ *
+ * Output preserves segment count and order. Collapsed segments get {@link COLLAPSED_SEGMENT_WIDTH} normalized
+ * width; the remaining width is distributed across the expanded segments proportional to their existing widths.
+ *
+ * Pure transform — does not allocate when no segment changes status (returns the input by reference).
+ */
+export const AUTO_COLLAPSE_THRESHOLD = 0.05;
+export const COLLAPSED_SEGMENT_WIDTH = 0.012;
+
+export function applyPhaseCollapse(
+  segments: readonly PhaseSegment[],
+  totalWallClockUs: number,
+  manuallyCollapsed: ReadonlySet<string>,
+  manuallyExpanded: ReadonlySet<string>,
+): PhaseSegment[] {
+  if (segments.length === 0) return segments as PhaseSegment[];
+
+  // Phase i is collapsed if: user-collapsed it explicitly, OR (auto-collapse triggers AND user has not explicitly
+  // expanded it). Auto-collapse triggers when totalWallClockUs > 0 AND share < AUTO_COLLAPSE_THRESHOLD.
+  const collapsedFlags: boolean[] = new Array(segments.length);
+  let anyCollapsed = false;
+  let expandedTotalWidth = 0;
+  for (let i = 0; i < segments.length; i++) {
+    const s = segments[i];
+    let collapse = false;
+    if (manuallyCollapsed.has(s.name)) {
+      collapse = true;
+    } else if (!manuallyExpanded.has(s.name) && totalWallClockUs > 0) {
+      const share = Math.max(0, s.wallClockUs) / totalWallClockUs;
+      if (share < AUTO_COLLAPSE_THRESHOLD) collapse = true;
+    }
+    collapsedFlags[i] = collapse;
+    if (collapse) anyCollapsed = true;
+    else expandedTotalWidth += s.xEnd - s.xStart;
+  }
+  if (!anyCollapsed) return segments as PhaseSegment[];
+
+  // Total width that collapsed segments will consume; distribute the remainder proportionally to expanded segments
+  // by their current width. Edge case: when EVERY segment is collapsed (degenerate) we just use COLLAPSED_SEGMENT_WIDTH
+  // each and rescale to fill [0, 1].
+  let collapsedCount = 0;
+  for (let i = 0; i < collapsedFlags.length; i++) if (collapsedFlags[i]) collapsedCount++;
+  let collapsedWidth = collapsedCount * COLLAPSED_SEGMENT_WIDTH;
+  let scaleExpanded: number;
+  if (collapsedCount === segments.length) {
+    // All collapsed — give each segment 1/N regardless of COLLAPSED_SEGMENT_WIDTH.
+    collapsedWidth = 1;
+    scaleExpanded = 0;
+  } else if (collapsedWidth >= 1) {
+    // Pathological: too many collapsed segments at the configured width — clamp.
+    collapsedWidth = 0.95;
+    scaleExpanded = 0.05 / Math.max(expandedTotalWidth, 1e-9);
+  } else {
+    scaleExpanded = (1 - collapsedWidth) / Math.max(expandedTotalWidth, 1e-9);
+  }
+  const perCollapsed = collapsedWidth / Math.max(collapsedCount, 1);
+
+  const out: PhaseSegment[] = [];
+  let cursor = 0;
+  for (let i = 0; i < segments.length; i++) {
+    const s = segments[i];
+    const w = collapsedFlags[i] ? perCollapsed : (s.xEnd - s.xStart) * scaleExpanded;
+    const xStart = cursor;
+    const xEnd = i === segments.length - 1 ? 1 : cursor + w;
+    out.push({ name: s.name, wallClockUs: s.wallClockUs, xStart, xEnd });
+    cursor = xEnd;
+  }
+  return out;
+}
+
+/**
+ * Map a tick-relative µs offset (matching SystemTickSummary.startUs convention) to a position in [0, 1] phase-space.
+ * Looks up the phase by `phaseName`, finds the segment in `axis.segments`, and uses `axis.tickPhaseSpans` to
+ * compute the bar's intra-phase fraction.
+ *
+ * When the phase isn't found in segments (unknown phase, or topology has no phases), returns `null` so the caller
+ * can fall back to a default placement. When the phase is found but the tick has no recorded phase span (no system
+ * summaries for that tick × phase pair), spreads the bar across the full segment.
+ */
+export function tickOffsetToNormalizedX(
+  axis: PhaseAxis | null,
+  tickNumber: number,
+  phaseName: string,
+  startUs: number,
+  endUs: number,
+): { xStart: number; xEnd: number } | null {
+  if (!axis) return null;
+  const segment = axis.segments.find((s) => s.name === phaseName);
+  if (!segment) return null;
+  const segWidth = segment.xEnd - segment.xStart;
+  if (segWidth <= 0) {
+    // Collapsed phase — bar sits inside the strip at its start position. xEnd matches xStart so it doesn't bleed
+    // into the next phase; the renderer floors at 2 px so it stays visible as a tick mark.
+    return { xStart: segment.xStart, xEnd: segment.xStart };
+  }
+  const tickPhases = axis.tickPhaseSpans.get(tickNumber);
+  const span = tickPhases?.get(phaseName);
+  if (!span || span.endUs <= span.startUs) {
+    return { xStart: segment.xStart, xEnd: segment.xEnd };
+  }
+  const denom = span.endUs - span.startUs;
+  const relStart = Math.max(0, Math.min(1, (startUs - span.startUs) / denom));
+  const relEnd = Math.max(0, Math.min(1, (endUs - span.startUs) / denom));
+  return {
+    xStart: segment.xStart + relStart * segWidth,
+    xEnd: segment.xStart + relEnd * segWidth,
+  };
 }

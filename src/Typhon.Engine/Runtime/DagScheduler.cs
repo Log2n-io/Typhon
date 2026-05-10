@@ -705,7 +705,6 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                 else // CallbackSystem or non-parallel QuerySystem — single invocation
                 {
                     var ctx = SystemStartCallback?.Invoke(sysIdx) ?? new TickContext { TickNumber = _currentTickNumber, DeltaTime = 0f };
-                    var success = true;
                     SystemAccessValidator.EnterSystem(sys.Access, sys.Name);
                     try
                     {
@@ -713,7 +712,6 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                     }
                     catch (Exception ex)
                     {
-                        success = false;
                         _currentTickSystemMetrics[sysIdx].SkipReason = SkipReason.Exception;
                         _systemFailed[sysIdx] = true;
                         LogSystemException(sysIdx, sys.Name, ex); CaptureSystemException(sysIdx, ex);
@@ -728,7 +726,6 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                         SystemAccessValidator.LeaveSystem();
                     }
 
-                    SystemEndCallback?.Invoke(sysIdx, success);
                 }
 
                 var endTick = Stopwatch.GetTimestamp();
@@ -736,6 +733,12 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                 _currentTickSystemMetrics[sysIdx].WorkersTouched = sys.IsParallelQuery ? sys.TotalChunks : 1;
 
                 stScope.ChunkCount = (ushort)Math.Min(sys.IsParallelQuery ? sys.TotalChunks : 1, ushort.MaxValue);
+
+                // Fire system-end lifecycle for every system kind on the single-threaded path. Earlier this only ran inside
+                // the callback-system `else` branch above, which silently skipped the parallel-query and pipeline branches —
+                // hiding the entire #327 Phase A emit path on real workloads. Placed after LastChunkDoneTick is set so the
+                // emit's `endTs > 0` guard sees a populated timestamp.
+                SystemEndCallback?.Invoke(sysIdx, !_systemFailed[sysIdx]);
             }
             finally
             {
@@ -1106,6 +1109,9 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
             if (remaining == 0)
             {
                 RecordSystemDone(sysIdx, Stopwatch.GetTimestamp());
+                // Mirror the success-path SystemEndCallback so a failed parallel system still gets its lifecycle hook
+                // (e.g. Phase A telemetry, transaction rollback wiring). success=false because we got here by drain.
+                SystemEndCallback?.Invoke(sysIdx, false);
                 OnSystemComplete(sysIdx, workerId, trackUtilization);
                 return;
             }
@@ -1186,6 +1192,11 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                 }
                 else
                 {
+                    // System is genuinely done (no further checkerboard phase). Fire the system-end lifecycle hook so
+                    // #327 Phase A emits its per-(system, archetype) row — this path was missing the call entirely,
+                    // which is why parallel-query systems produced zero `SchedulerSystemArchetypeEvent` records on
+                    // real workloads despite being correctly bound at runtime construction.
+                    SystemEndCallback?.Invoke(sysIdx, !_systemFailed[sysIdx]);
                     OnSystemComplete(sysIdx, workerId, trackUtilization);
                 }
                 break;

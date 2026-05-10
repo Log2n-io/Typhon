@@ -2,7 +2,7 @@ import type { PostTickSummary } from '@/api/generated/model/postTickSummary';
 import type { SystemDefinitionDto } from '@/api/generated/model/systemDefinitionDto';
 import type { SystemTickSummary } from '@/api/generated/model/systemTickSummary';
 import type { TickSummaryDto } from '@/api/generated/model/tickSummaryDto';
-import type { DerivedEdge } from '../SystemDag/edgeDerivation';
+import type { DerivedEdge } from '@/lib/dag/edgeDerivation';
 import type { TickRange } from '../SystemDag/useDagViewStore';
 
 /**

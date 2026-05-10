@@ -9,7 +9,7 @@ import {
   dominantTickInRange,
   focusTickForWindow,
 } from '../criticalPath';
-import type { DerivedEdge } from '../../SystemDag/edgeDerivation';
+import type { DerivedEdge } from '@/lib/dag/edgeDerivation';
 
 /**
  * Synthetic fixtures for the client-side critical-path algorithm. Each test fabricates a tiny

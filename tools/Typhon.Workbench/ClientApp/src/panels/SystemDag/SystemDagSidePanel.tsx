@@ -5,7 +5,7 @@ import type { AggregationQueryDto } from '@/api/generated/model/aggregationQuery
 import type { HistogramBucketDto } from '@/api/generated/model/histogramBucketDto';
 import type { TopKEntryDto } from '@/api/generated/model/topKEntryDto';
 import type { DagNodeData } from './dagModel';
-import type { GaterEntry, SystemGatingInfo } from './gatingAnalysis';
+import type { GaterEntry, SystemGatingInfo } from '@/lib/dag/gatingAnalysis';
 import type { TickRange } from './useDagViewStore';
 
 /**
