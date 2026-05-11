@@ -1,5 +1,4 @@
 using NUnit.Framework;
-using Typhon.Engine.Data.Schema;
 using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Tests;

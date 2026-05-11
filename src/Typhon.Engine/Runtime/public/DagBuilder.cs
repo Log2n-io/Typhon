@@ -26,6 +26,10 @@ public sealed class DagBuilder
     /// <param name="action">Delegate invoked once per tick on a single worker.</param>
     /// <param name="priority">Scheduling priority (enforcement deferred to #201).</param>
     public DagBuilder AddCallbackSystem(string name, Action<TickContext> action, SystemPriority priority = SystemPriority.Normal, Func<bool> runIf = null)
+        => AddCallbackSystemInternal(name, action, priority, runIf, null);
+
+    internal DagBuilder AddCallbackSystemInternal(string name, Action<TickContext> action, SystemPriority priority, Func<bool> runIf,
+        (string FilePath, int Line, string MethodName)? sourceOverride)
     {
         ArgumentNullException.ThrowIfNull(name);
         ArgumentNullException.ThrowIfNull(action);
@@ -37,7 +41,7 @@ public sealed class DagBuilder
 
         var idx = _systems.Count;
         _nameToIndex[name] = idx;
-        var src = SystemSourceResolver.Resolve(action);
+        var src = sourceOverride ?? SystemSourceResolver.Resolve(action);
         _systems.Add(new SystemDefinition
         {
             Name = name,
@@ -62,6 +66,10 @@ public sealed class DagBuilder
     /// <param name="priority">Scheduling priority (enforcement deferred to #201).</param>
     /// <param name="runIf">Optional predicate — if false, system is skipped.</param>
     public DagBuilder AddQuerySystem(string name, Action<TickContext> action, SystemPriority priority = SystemPriority.Normal, Func<bool> runIf = null)
+        => AddQuerySystemInternal(name, action, priority, runIf, null);
+
+    internal DagBuilder AddQuerySystemInternal(string name, Action<TickContext> action, SystemPriority priority, Func<bool> runIf,
+        (string FilePath, int Line, string MethodName)? sourceOverride)
     {
         ArgumentNullException.ThrowIfNull(name);
         ArgumentNullException.ThrowIfNull(action);
@@ -73,7 +81,7 @@ public sealed class DagBuilder
 
         var idx = _systems.Count;
         _nameToIndex[name] = idx;
-        var src = SystemSourceResolver.Resolve(action);
+        var src = sourceOverride ?? SystemSourceResolver.Resolve(action);
         _systems.Add(new SystemDefinition
         {
             Name = name,

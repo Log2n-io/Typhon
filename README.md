@@ -36,7 +36,9 @@ The runtime doesn't sit on top of the database — it runs inside it.
 - **Observability** — Runtime telemetry, metrics, and diagnostics with zero-cost JIT-eliminated toggles
 - **Deep-Trace Profiler** — Per-tick Gantt and flame-graph visualization via a `.typhon-trace` binary format, live TCP streaming to a React/Vite viewer, and optional `dotnet-trace` CPU sampling correlation for full managed-stack profiles
 - **Interactive Shell (tsh)** — Database REPL for inspection and debugging
-- **Roslyn Analyzers** — Custom analyzers detecting undisposed engine resources at compile time
+- **Workbench Dev UI** — Local ASP.NET Core + React/Vite app for data browsing, schema inspection, profiler trace viewing, System DAG and Data Flow timeline panels, Access Matrix, and internal data API for cross-panel cross-linking
+- **Public/Internal API split** — Two namespaces per assembly (`Typhon.Engine` / `Typhon.Engine.Internals`), each subsystem folder split into `public/` + `internals/`, enforced at compile time by the `TYPHON008` Roslyn analyzer
+- **Roslyn Analyzers** — Custom analyzers detecting undisposed engine resources at compile time + the `TYPHON008` internal-API leak detector
 
 ## Quick Start
 
@@ -151,47 +153,64 @@ Typhon is in **active development** targeting an alpha release. Current state:
 - [x] Interactive shell (tsh)
 - [x] Observability and monitoring stack
 - [x] HashMap collections with key-size specialization
+- [x] Workbench dev UI (data browsing, profiler viewer, System DAG view, Data Flow timeline, Access Matrix, internal data API)
+- [x] Public/Internal API namespace split + `TYPHON008` analyzer
 - [ ] Crash recovery testing
 - [ ] Backup and restore
 
 ## Project Structure
 
+Each engine subsystem folder splits into `public/` (consumer surface, namespace `Typhon.Engine`) and `internals/` (implementation, namespace `Typhon.Engine.Internals`) — see the [Public/Internal API classification doc](https://github.com/nockawa/typhon-claude/blob/main/research/PublicVsInternalApiClassification.md) for the methodology.
+
 ```
 Typhon/
 ├── src/
-│   ├── Typhon.Engine/              # Main database engine
-│   │   ├── Collections/            # HashMap, concurrent data structures
-│   │   ├── Concurrency/            # Latches, epoch management, adaptive wait
-│   │   ├── Data/                   # MVCC, ECS, indexes, schema, queries, clusters, spatial
-│   │   ├── Durability/             # WAL, checkpointing, recovery
-│   │   ├── Errors/                 # Error model, resilience
-│   │   ├── Execution/              # UnitOfWork, transaction management
-│   │   ├── Memory/                 # Memory management, allocators
-│   │   ├── Misc/                   # Shared utilities (String64, Variant, etc.)
-│   │   ├── Observability/          # Telemetry, metrics, diagnostics
-│   │   ├── Resources/              # Resource graph, lifecycle
-│   │   ├── Runtime/                # DagScheduler, tick loop, systems, subscriptions, inspectors
-│   │   └── Storage/                # Pages, cache, segments, IPageStore / PersistentStore / TransientStore
-│   ├── Typhon.Analyzers/           # Roslyn analyzers (dispose detection)
+│   ├── Typhon.Engine/              # Main database engine — 17-feature tree
+│   │   ├── Foundation/             # Cross-cutting primitives
+│   │   │   ├── Collections/        # HashMaps, bitmaps, lock-free arrays
+│   │   │   ├── Concurrency/        # Latches, AccessControl, epoch system, deadlines, timer service
+│   │   │   └── Memory/             # Memory allocator + block primitives
+│   │   ├── Ecs/                    # ECS engine, archetypes, entity clusters, accessors
+│   │   ├── Indexing/               # B+Tree variants (key-size specialized, OLC)
+│   │   ├── Querying/               # Query engine, views, navigation joins, predicates
+│   │   ├── Schema/                 # Component & archetype schema, validation, evolution
+│   │   ├── Spatial/                # R-Tree, spatial grid, tier dispatch, trigger zones
+│   │   ├── Storage/                # Pages, cache, segments, PagedMMF / IPageStore / PersistentStore / TransientStore
+│   │   ├── Transactions/           # MVCC transactions, UnitOfWork, change capture
+│   │   ├── Revision/               # Revision chains, deferred cleanup
+│   │   ├── Durability/             # WAL, checkpointing, recovery, FPI capture
+│   │   ├── Runtime/                # DagScheduler, tick loop, systems, overload management, queues
+│   │   ├── Subscriptions/          # TCP delta streaming server, published views
+│   │   ├── Profiler/               # In-engine typed-event profiler (codecs in Typhon.Profiler/)
+│   │   ├── Observability/          # Telemetry config, metrics, diagnostics
+│   │   ├── Resources/              # Resource graph, lifecycle, options
+│   │   ├── Errors/                 # Exception hierarchy, deadline propagation
+│   │   └── Hosting/                # DI extensions, service collection helpers
+│   ├── Typhon.Analyzers/           # Roslyn analyzers (dispose detection + TYPHON008 internal-API leak)
 │   ├── Typhon.Client/              # External client SDK (TCP subscriptions, zero engine deps)
-│   ├── Typhon.Generators/          # Source generators (archetype accessors)
-│   ├── Typhon.Profiler/            # Trace file format, readers/writers, Chrome Trace exporter
+│   ├── Typhon.Generators/          # Source generators (archetype accessors, traced-event encoders, source location)
+│   ├── Typhon.Profiler/            # Trace file format, readers/writers, sidecar cache, Chrome Trace exporter
 │   ├── Typhon.Protocol/            # MemoryPack wire-format types (TickDeltaMessage, etc.)
 │   ├── Typhon.Schema.Definition/   # Component & archetype attributes
 │   ├── Typhon.Shell/               # Interactive database shell (tsh)
 │   └── Typhon.Shell.Extensibility/ # Shell extension points
 ├── test/
-│   ├── Typhon.Engine.Tests/        # NUnit test suite
+│   ├── Typhon.Engine.Tests/        # NUnit test suite (3500+ tests)
 │   ├── Typhon.Client.Tests/        # Client SDK tests
+│   ├── Typhon.Workbench.Tests/     # Workbench server-side tests
 │   ├── Typhon.Benchmark/           # BenchmarkDotNet performance tests
 │   ├── Typhon.ARPG.Schema/         # Example ARPG game schema
 │   ├── Typhon.ARPG.Shell/          # Shell demo with ARPG data
 │   ├── Typhon.MonitoringDemo/      # Observability demo
+│   ├── Typhon.IOProfileRunner/     # Storage I/O profiling sandbox
+│   ├── Typhon.Scheduler.POC/       # DagScheduler POC harness
+│   ├── Typhon.SqliteBenchmark/     # Comparative SQLite benchmark
 │   └── AntHill/                    # Godot-based ant-colony demo (runtime + clusters + spatial tiers)
 ├── tools/
-│   ├── Typhon.Workbench/           # Local dev UI — data browsing, schema, profiler (ASP.NET Core + React/Vite)
-│   └── Typhon.Workbench.Fixtures/  # Dev-only test fixture generators consumed by the Workbench DEBUG tabs
-├── claude/                         # Architecture docs, ADRs, design specs
+│   ├── Typhon.Workbench/           # Local dev UI (ASP.NET Core 10 + React 19/Vite) — data browsing, schema, profiler, System DAG, Data Flow timeline, Access Matrix
+│   ├── Typhon.Workbench.Fixtures/  # Dev-only test fixture generators consumed by the Workbench DEBUG tabs
+│   └── CheckDurations/             # Helper utility for tick-duration analysis
+├── claude/                         # Architecture docs, ADRs, design specs (separate nested git repo)
 └── benchmark/                      # Benchmark results
 ```
 
@@ -204,3 +223,5 @@ This project has had quite a journey:
 - **2025** — Third resurrection with firm intention to reach alpha stage
 - **2025-2026** — Rapid progress: WAL & durability, query engine, ECS archetype system with source generators, schema evolution, observability stack, and interactive shell delivered
 - **Q2 2026 alpha push** — Game-server runtime (`DagScheduler`, parallel system dispatch, overload management), entity clusters with cluster-native SIMD query execution, dual page store abstraction (`PersistentStore` + `TransientStore`), spatial indexing (page-backed R-Tree + spatial grid cluster broadphase), multi-resolution `SimTier` dispatch with cluster dormancy and checkerboard, TCP subscription server with zero-engine-dependency client SDK, and a deep-trace runtime profiler with live-streaming viewer
+- **Q2 2026 Workbench buildout** — Internal Data API + System DAG view (#306, #314, #322), static schema export and Schema Inspector (#326), Data Flow Timeline + Access Matrix panels with cross-panel selection and hover linking (#327)
+- **Q2 2026 API hardening** — Public/Internal namespace migration, accessibility flips, friend-list audit, and leak-tightening pass: ~430 internal types now in `Typhon.Engine.Internals` enforced by the `TYPHON008` analyzer (#329)

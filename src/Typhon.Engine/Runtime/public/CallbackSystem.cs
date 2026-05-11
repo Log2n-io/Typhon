@@ -7,8 +7,14 @@ namespace Typhon.Engine;
 /// Derive from this class, implement <see cref="Configure"/> and <see cref="Execute"/>.
 /// </summary>
 [PublicAPI]
-public abstract class CallbackSystem
+public abstract class CallbackSystem : ISystem
 {
+    /// <inheritdoc />
+    public string Name { get; internal set; }
+
+    /// <inheritdoc />
+    public int Index { get; internal set; } = -1;
+
     /// <summary>Declare the system's name, dependencies, and configuration.</summary>
     protected abstract void Configure(SystemBuilder b);
 

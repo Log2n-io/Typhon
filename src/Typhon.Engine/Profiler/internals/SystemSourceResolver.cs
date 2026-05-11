@@ -35,14 +35,41 @@ internal static class SystemSourceResolver
     /// Resolves the given delegate to <c>(filePath, line, methodName)</c>, or null when the PDB is unavailable or the method has no sequence points (purely
     /// synthesized methods, native, etc.).
     /// </summary>
-    public static (string FilePath, int Line, string MethodName)? Resolve(Delegate del)
+    public static (string FilePath, int Line, string MethodName)? Resolve(Delegate del) => del?.Method == null ? null : ResolveMethod(del.Method);
+
+    /// <summary>
+    /// Resolves a class-based system (any <see cref="ISystem"/>) to the source location of its concrete
+    /// <c>Execute</c> override. Walking the type hierarchy starting at the runtime instance type lets the user click into the override body — e.g.
+    /// <c>AntUpdateSystem.Execute</c> at line 53 — instead of the lambda created at the registration call site in <c>RuntimeSchedule</c>.
+    /// </summary>
+    public static (string FilePath, int Line, string MethodName)? ResolveOverride(ISystem systemInstance, string methodName)
     {
-        if (del?.Method == null)
+        if (systemInstance == null || string.IsNullOrEmpty(methodName))
         {
             return null;
         }
+        // Walk the declared type chain so we land on the most-derived override that actually carries sequence points. The base abstract declaration on
+        // QuerySystem / PipelineSystem has none and would surface as a fallback "<no source>" when the override fails for any reason.
+        var type = systemInstance.GetType();
+        const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly;
+        while (type != null && type != typeof(object))
+        {
+            var method = type.GetMethod(methodName, flags);
+            if (method != null && !method.IsAbstract)
+            {
+                var resolved = ResolveMethod(method);
+                if (resolved.HasValue)
+                {
+                    return resolved;
+                }
+            }
+            type = type.BaseType;
+        }
+        return null;
+    }
 
-        var method = del.Method;
+    private static (string FilePath, int Line, string MethodName)? ResolveMethod(MethodInfo method)
+    {
         var module = method.Module;
 
         if (_pdbMissing.ContainsKey(module))

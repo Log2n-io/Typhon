@@ -39,6 +39,32 @@ internal ref partial struct QueryPlanEvent
     public long RangeMin;
     [BeginParam]
     public long RangeMax;
+
+    // ── Query Definition Export extensions (v9, #335) ──
+    // Identifies the logical query instance (View or EcsQuery) this execution belongs to. The (Kind, LocalId) pair is the dedup key used by the Workbench
+    // catalog to fold N executions into one definition row. Population happens in PlanBuilder via runtime-supplied parameters from the View/EcsQuery caller.
+    //
+    // Wire-format note: fields are [Optional] with always-set masks at v9+ producers so that v8 traces (pre-dating this extension) decode gracefully — the
+    // missing optMask byte reads as 0 and these fields surface as null. v9 producers always set the mask bits, so v9 traces always carry these values.
+    // ExecutionSourceFileId == 0 means "no user execution site" (scheduler-driven View.Refresh) — the Workbench falls back to the owning system attribution
+    // already on the span.
+
+    [Optional(MaskValue = 0x01)]
+    private byte _queryInstanceKind;          // 0 = View, 1 = EcsQuery
+    [Optional(MaskValue = 0x02)]
+    private uint _queryInstanceLocalId;       // ViewId or EcsQueryId
+    [Optional(MaskValue = 0x04)]
+    private ushort _executionSourceFileId;
+    [Optional(MaskValue = 0x08)]
+    private int _executionSourceLine;
+    [Optional(MaskValue = 0x10)]
+    private ushort _executionSourceMethodId;
+
+    // Runtime-emitted system attribution for the per-tick QueryPlan spans bracketed by TyphonRuntime.OnSystemEnd. PlanBuilder-emitted spans leave this unset
+    // (mask bit 0 → decoder surfaces null) and continue to be attributed by their wrapping span tree. Lets the Workbench round-trip from a clicked scheduler
+    // chunk (which carries systemIndex) to the matching per-tick execution, since chunks in multi-threaded mode never share a parent span.
+    [Optional(MaskValue = 0x20)]
+    private ushort _ownerSystemIdx;
 }
 
 [TraceEvent(TraceEventKind.QueryEstimate, EmitEncoder = true)]

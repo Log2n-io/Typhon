@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using Microsoft.AspNetCore.Mvc;
-using Typhon.Engine.Data.Schema;
 using Typhon.Workbench.Dtos.Data;
 using Typhon.Workbench.Dtos.Profiler;
 using Typhon.Workbench.Middleware;
@@ -511,7 +510,7 @@ public sealed class DataController : ControllerBase
             var a = metadata.Archetypes[i];
             for (var c = 0; c < a.ComponentTypeNames.Length; c++)
             {
-                if (Typhon.Engine.Data.Schema.ComponentFamilyResolver.ResolveByHeuristic(a.ComponentTypeNames[c]) == family)
+                if (ComponentFamilyResolver.ResolveByHeuristic(a.ComponentTypeNames[c]) == family)
                 {
                     familyArchIds.Add(a.ArchetypeId);
                     break;

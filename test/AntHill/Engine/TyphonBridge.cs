@@ -204,10 +204,7 @@ public sealed class TyphonBridge : IDisposable
             Phases =
             [
                 Phase.Input,
-                AntPhases.Movement,
-                AntPhases.Lifecycle,
-                AntPhases.Sense,
-                AntPhases.Brain,
+                AntPhases.Simulation,
                 AntPhases.Trail,
                 AntPhases.Render,
             ],
@@ -246,29 +243,13 @@ public sealed class TyphonBridge : IDisposable
         // Input phase
         schedule.Add(new TierAssignmentSystem(this));
 
-        // Movement phase
-        schedule.Add(new MoveAllSystem(this));
+        // Simulation phase — single merged system that walks each Ant cluster once per tick and
+        // runs metabolism+respawn / move / food-interact / brain-steer / phero-deposit in registers.
+        // Per-cluster tier amortization is inside the body (AmortMetab/Brain/Phero tables).
+        schedule.Add(new AntUpdateSystem(this));
 
-        // Lifecycle phase — tier chain (W×W on AntState/WorldBounds/Velocity/NestInventory)
-        schedule.Add(new MetabolismT0System(this));
-        schedule.Add(new MetabolismT1System(this));
-        schedule.Add(new MetabolismT2System(this));
-        schedule.Add(new MetabolismT3System(this));
-
-        // Sense phase
-        schedule.Add(new FoodDetectSystem(this));
-
-        // Brain phase — tier chain (W×W on Velocity)
-        schedule.Add(new BrainT0System(this));
-        schedule.Add(new BrainT1System(this));
-        schedule.Add(new BrainT2System(this));
-        schedule.Add(new BrainT3System(this));
-
-        // Trail phase — tier chain on PheromoneGrid + decay sweep
-        schedule.Add(new PheroDepT0System(this));
-        schedule.Add(new PheroDepT1System(this));
-        schedule.Add(new PheroDepT2System(this));
-        schedule.Add(new PheroDepT3System(this));
+        // Trail phase — pheromone grid evaporation sweep. Single writer of PheromoneGrid alongside
+        // AntUpdate's per-ant deposits; runs after AntUpdate via cross-phase ordering.
         schedule.Add(new PheroDecaySystem(this));
 
         // Render phase — stats sink consumes the three event queues, prepare/fill/publish chain
@@ -321,124 +302,17 @@ public sealed class TyphonBridge : IDisposable
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    // MoveAll — position update from velocity, every frame, all ants
+    // AntUpdate constants (shared across all five logical steps of the merged
+    // simulation tick body — see AntUpdateTick below).
     // ═══════════════════════════════════════════════════════════════════
 
     private const int AntArchetypeId = 100;
-
-    internal void MoveAllAnts(TickContext ctx)
-    {
-        var dt = ctx.DeltaTime * _timeScale;
-        using var clusters = ctx.ClusterIds != null
-            ? ctx.Accessor.GetClusterEnumerator<Ant>(ctx.ClusterIds, ctx.StartClusterIndex, ctx.EndClusterIndex)
-            : ctx.Accessor.GetClusterEnumerator<Ant>(ctx.StartClusterIndex, ctx.EndClusterIndex);
-        foreach (var cluster in clusters)
-        {
-            var bits = cluster.OccupancyBits;
-            var bounds = cluster.GetSpan(Ant.Bounds);
-            var velocities = cluster.GetSpan(Ant.Velocity);
-            while (bits != 0)
-            {
-                var idx = BitOperations.TrailingZeroCount(bits);
-                bits &= bits - 1;
-                ref var pos = ref bounds[idx];
-                ref var vel = ref velocities[idx];
-
-                var x = pos.Bounds.MinX + vel.X * dt;
-                var y = pos.Bounds.MinY + vel.Y * dt;
-                var vx = vel.X;
-                var vy = vel.Y;
-
-                if (x < 0f) { x = -x; vx = -vx; }
-                else if (x > WorldSize) { x = 2f * WorldSize - x; vx = -vx; }
-                if (y < 0f) { y = -y; vy = -vy; }
-                else if (y > WorldSize) { y = 2f * WorldSize - y; vy = -vy; }
-
-                pos.Bounds.MinX = x;
-                pos.Bounds.MaxX = x;
-                pos.Bounds.MinY = y;
-                pos.Bounds.MaxY = y;
-                vel.X = vx;
-                vel.Y = vy;
-            }
-        }
-    }
-
-    // ═══════════════════════════════════════════════════════════════════
-    // Metabolism — energy decay + death/respawn (all tiers)
-    // Reads: AntState, Genetics, Position  |  Writes: AntState, Position (on respawn)
-    // ═══════════════════════════════════════════════════════════════════
-
     private const float BaseDt = 1f / 60f;
+
+    // Step 2 — Metabolism (energy decay + respawn)
     private const float EnergyDrainRate = 0.15f;
 
-    internal void MetabolismTick(TickContext ctx)
-    {
-        var dtScale = ctx.AmortizedDeltaTime / BaseDt * _timeScale;
-        var nests = _nestPositions;
-        var nestStock = _nestFoodStock;
-        var deathQueue = _antDiedQueue;
-
-        using var clusters = ctx.ClusterIds != null
-            ? ctx.Accessor.GetClusterEnumerator<Ant>(ctx.ClusterIds, ctx.StartClusterIndex, ctx.EndClusterIndex)
-            : ctx.Accessor.GetClusterEnumerator<Ant>(ctx.StartClusterIndex, ctx.EndClusterIndex);
-        foreach (var cluster in clusters)
-        {
-            var bits = cluster.OccupancyBits;
-            var bounds = cluster.GetSpan(Ant.Bounds);
-            var velocities = cluster.GetSpan(Ant.Velocity);
-            var states = cluster.GetSpan(Ant.State);
-            var genetics = cluster.GetReadOnlySpan(Ant.Genetics);
-            while (bits != 0)
-            {
-                var idx = BitOperations.TrailingZeroCount(bits);
-                bits &= bits - 1;
-                ref var state = ref states[idx];
-                ref readonly var gen = ref genetics[idx];
-
-                state.Energy -= EnergyDrainRate * dtScale;
-
-                if (state.Energy <= 0f)
-                {
-                    var ni = gen.HomeNestIndex;
-                    deathQueue?.Push(new AntDiedEvent((uint)((cluster.ChunkId << 8) | idx), ni));
-
-                    var freeE = gen.BaseEnergy * 0.5f;
-                    var bonusE = 0f;
-                    if (ni >= 0 && ni < NestCount &&
-                        Interlocked.Add(ref nestStock[ni], -gen.EatAmount) >= 0)
-                    {
-                        bonusE = gen.BaseEnergy * 0.5f;
-                    }
-                    else if (ni >= 0 && ni < NestCount)
-                    {
-                        Interlocked.Add(ref nestStock[ni], gen.EatAmount);
-                    }
-                    state.Energy = freeE + bonusE;
-                    state.State = AntState.Foraging;
-
-                    // Teleport to nest + random heading immediately (same pass, no heuristic)
-                    ref var pos = ref bounds[idx];
-                    ref var vel = ref velocities[idx];
-                    pos.X = nests[ni].x;
-                    pos.Y = nests[ni].y;
-
-                    var h = (uint)(idx * 2654435761 + cluster.ChunkId * 40503 + ctx.TickNumber);
-                    var angle = (h % 6283u) * 0.001f; // 0 to ~2π
-                    var speed = gen.Speed * 40f;
-                    vel.X = MathF.Cos(angle) * speed;
-                    vel.Y = MathF.Sin(angle) * speed;
-                    _dbe.MarkClusterSlotDirty(AntArchetypeId, cluster.ChunkId, idx);
-                }
-            }
-        }
-    }
-
-    // ═══════════════════════════════════════════════════════════════════
-    // FoodDetect — food smell/pickup + nest drop. Every tick, all ants.
-    // Reads: Position, AntState, Genetics  |  Writes: Position (heading), AntState (state)
-    // ═══════════════════════════════════════════════════════════════════
-
+    // Step 3 — Food/nest interaction
     private const float FoodPickupRange = 30f;
     private const float FoodSmellRange = 250f;
     private const float NestDropRange = 40f;
@@ -446,282 +320,19 @@ public sealed class TyphonBridge : IDisposable
     private const float FoodSmellRangeSq = FoodSmellRange * FoodSmellRange;
     private const float NestDropRangeSq = NestDropRange * NestDropRange;
 
-    internal void FoodDetectTick(TickContext ctx)
-    {
-        var food = _foodCache;
-        var foodRemaining = _foodRemainingInt;
-        var foodGrid = _foodGrid;
-        var nests = _nestPositions;
-        var nestStock = _nestFoodStock;
-        var pickedUpQueue = _foodPickedUpQueue;
-        var deliveredQueue = _foodDeliveredQueue;
-
-        using var clusters = ctx.ClusterIds != null
-            ? ctx.Accessor.GetClusterEnumerator<Ant>(ctx.ClusterIds, ctx.StartClusterIndex, ctx.EndClusterIndex)
-            : ctx.Accessor.GetClusterEnumerator<Ant>(ctx.StartClusterIndex, ctx.EndClusterIndex);
-        foreach (var cluster in clusters)
-        {
-            var bits = cluster.OccupancyBits;
-            var bounds = cluster.GetReadOnlySpan(Ant.Bounds);
-            var velocities = cluster.GetSpan(Ant.Velocity);
-            var states = cluster.GetSpan(Ant.State);
-            var genetics = cluster.GetReadOnlySpan(Ant.Genetics);
-            while (bits != 0)
-            {
-                var idx = BitOperations.TrailingZeroCount(bits);
-                bits &= bits - 1;
-                ref readonly var pos = ref bounds[idx];
-                ref var vel = ref velocities[idx];
-                ref var state = ref states[idx];
-
-                if (state.Energy <= 0f) continue;
-
-                if (state.State == AntState.Foraging)
-                {
-                    // Grid lookup: only check food sources in this cell
-                    var gcx = Math.Clamp((int)(pos.X * FoodGridInvCellSize), 0, FoodGridCells - 1);
-                    var gcy = Math.Clamp((int)(pos.Y * FoodGridInvCellSize), 0, FoodGridCells - 1);
-                    var candidates = foodGrid[gcy * FoodGridCells + gcx];
-                    if (candidates == null) continue;
-
-                    var bestDistSq = float.MaxValue;
-                    var bestIdx = -1;
-                    for (var ci = 0; ci < candidates.Length; ci++)
-                    {
-                        var fi = candidates[ci];
-                        if (foodRemaining[fi] <= 0) continue;
-                        var dx = pos.X - food[fi].x;
-                        var dy = pos.Y - food[fi].y;
-                        var distSq = dx * dx + dy * dy;
-
-                        if (distSq < FoodPickupRangeSq)
-                        {
-                            if (Interlocked.Decrement(ref foodRemaining[fi]) >= 0)
-                            {
-                                state.State = AntState.ReturningFrom(fi);
-                                state.Energy = genetics[idx].BaseEnergy;
-                                vel.X = -vel.X;
-                                vel.Y = -vel.Y;
-                                pickedUpQueue?.Push(new FoodPickedUpEvent((uint)((cluster.ChunkId << 8) | idx), fi));
-                            }
-                            else
-                            {
-                                Interlocked.Increment(ref foodRemaining[fi]);
-                            }
-                            bestIdx = -1;
-                            break;
-                        }
-
-                        if (distSq < FoodSmellRangeSq && distSq < bestDistSq)
-                        {
-                            bestDistSq = distSq;
-                            bestIdx = fi;
-                        }
-                    }
-
-                    if (bestIdx >= 0)
-                    {
-                        var heading = MathF.Atan2(food[bestIdx].y - pos.Y, food[bestIdx].x - pos.X);
-                        var speed = MathF.Sqrt(vel.X * vel.X + vel.Y * vel.Y);
-                        ref readonly var gen = ref genetics[idx];
-                        if (speed < 0.01f) speed = gen.Speed * 40f;
-                        vel.X = MathF.Cos(heading) * speed;
-                        vel.Y = MathF.Sin(heading) * speed;
-                    }
-                }
-                else // Returning
-                {
-                    ref readonly var gen = ref genetics[idx];
-                    var ni = gen.HomeNestIndex;
-                    var dx = pos.X - nests[ni].x;
-                    var dy = pos.Y - nests[ni].y;
-                    if (dx * dx + dy * dy < NestDropRangeSq)
-                    {
-                        Interlocked.Add(ref nestStock[ni], 3);
-                        deliveredQueue?.Push(new FoodDeliveredEvent((uint)((cluster.ChunkId << 8) | idx), ni, 3));
-                        state.State = AntState.Foraging;
-                    }
-                }
-            }
-        }
-    }
-
-    // ═══════════════════════════════════════════════════════════════════
-    // AntBrain — pheromone sensing + steering + wander (tier-gated)
-    // Reads: Position, AntState, Genetics + pheromone grid
-    // Writes: Position (velocity)
-    // ═══════════════════════════════════════════════════════════════════
-
+    // Step 4 — Brain (pheromone steering + wander)
     private const float SensorDistance = 40f;
-    private const float SensorAngle = 0.52f;   // ~30 degrees
-    private const float SteerStrength = 0.3f;   // radians per tick toward best sensor
-    private const float WanderJitter = 0.03f;    // tiny per-tick jitter (±1.7°)
-    private const int WanderChangeTicks = 90;     // change direction every ~1.5s
-    private const float WanderTurnMax = 0.8f;     // max turn on direction change (~45°)
+    private const float SensorAngle = 0.52f;        // ~30 degrees
+    private const float SteerStrength = 0.3f;       // radians per tick toward best sensor
+    private const float WanderJitter = 0.03f;       // tiny per-tick jitter (±1.7°)
+    private const int   WanderChangeTicks = 90;     // change direction every ~1.5s
+    private const float WanderTurnMax = 0.8f;       // max turn on direction change (~45°)
 
-    internal void AntBrainTick(TickContext ctx)
-    {
-        var phero = _pheromones;
-        var nests = _nestPositions;
-        var tick = ctx.TickNumber;
-
-        using var clusters = ctx.ClusterIds != null
-            ? ctx.Accessor.GetClusterEnumerator<Ant>(ctx.ClusterIds, ctx.StartClusterIndex, ctx.EndClusterIndex)
-            : ctx.Accessor.GetClusterEnumerator<Ant>(ctx.StartClusterIndex, ctx.EndClusterIndex);
-        foreach (var cluster in clusters)
-        {
-            var bits = cluster.OccupancyBits;
-            var bounds = cluster.GetReadOnlySpan(Ant.Bounds);
-            var velocities = cluster.GetSpan(Ant.Velocity);
-            var states = cluster.GetReadOnlySpan(Ant.State);
-            var genetics = cluster.GetReadOnlySpan(Ant.Genetics);
-            while (bits != 0)
-            {
-                var idx = BitOperations.TrailingZeroCount(bits);
-                bits &= bits - 1;
-                ref readonly var pos = ref bounds[idx];
-                ref var vel = ref velocities[idx];
-                ref readonly var state = ref states[idx];
-                ref readonly var gen = ref genetics[idx];
-
-                if (state.Energy <= 0f) continue;
-
-                var speed = MathF.Sqrt(vel.X * vel.X + vel.Y * vel.Y);
-                if (speed < 0.01f) speed = gen.Speed * 40f;
-                var heading = MathF.Atan2(vel.Y, vel.X);
-
-                var steered = false;
-
-                if (state.State == AntState.Foraging)
-                {
-                    // Pheromone trail following (food trail)
-                    var sL = phero.Food[PheromoneGrid.WorldToIndex(
-                        pos.X + MathF.Cos(heading - SensorAngle) * SensorDistance,
-                        pos.Y + MathF.Sin(heading - SensorAngle) * SensorDistance)];
-                    var sC = phero.Food[PheromoneGrid.WorldToIndex(
-                        pos.X + MathF.Cos(heading) * SensorDistance,
-                        pos.Y + MathF.Sin(heading) * SensorDistance)];
-                    var sR = phero.Food[PheromoneGrid.WorldToIndex(
-                        pos.X + MathF.Cos(heading + SensorAngle) * SensorDistance,
-                        pos.Y + MathF.Sin(heading + SensorAngle) * SensorDistance)];
-
-                    if (sL > sC && sL > sR) { heading -= SteerStrength; steered = true; }
-                    else if (sR > sC && sR > sL) { heading += SteerStrength; steered = true; }
-                    else if (sC > 0.1f) { steered = true; }
-                }
-                else // Returning — pheromone + nest direction validation
-                {
-                    var ni = gen.HomeNestIndex;
-                    var toNestX = nests[ni].x - pos.X;
-                    var toNestY = nests[ni].y - pos.Y;
-                    var nestHeading = MathF.Atan2(toNestY, toNestX);
-
-                    var sL = phero.Home[PheromoneGrid.WorldToIndex(
-                        pos.X + MathF.Cos(heading - SensorAngle) * SensorDistance,
-                        pos.Y + MathF.Sin(heading - SensorAngle) * SensorDistance)];
-                    var sC = phero.Home[PheromoneGrid.WorldToIndex(
-                        pos.X + MathF.Cos(heading) * SensorDistance,
-                        pos.Y + MathF.Sin(heading) * SensorDistance)];
-                    var sR = phero.Home[PheromoneGrid.WorldToIndex(
-                        pos.X + MathF.Cos(heading + SensorAngle) * SensorDistance,
-                        pos.Y + MathF.Sin(heading + SensorAngle) * SensorDistance)];
-
-                    var pheroHeading = heading;
-                    if (sL > sC && sL > sR) pheroHeading -= SteerStrength;
-                    else if (sR > sC && sR > sL) pheroHeading += SteerStrength;
-
-                    // Validate: does pheromone heading take us closer to nest?
-                    var dot = MathF.Cos(pheroHeading) * toNestX + MathF.Sin(pheroHeading) * toNestY;
-                    heading = dot > 0f ? pheroHeading : nestHeading;
-                    steered = true;
-                }
-
-                // Wander: tiny jitter + periodic direction change
-                if (!steered)
-                {
-                    var h = (uint)(idx * 2654435761 + cluster.ChunkId * 40503);
-
-                    var jitter = ((h + (uint)tick * 2246822519u) % 1000u / 1000f - 0.5f) * 2f * WanderJitter;
-                    heading += jitter;
-
-                    var epoch = (uint)(tick / WanderChangeTicks);
-                    var prevEpoch = (uint)((tick - (long)ctx.AmortizedDeltaTime * 60) / WanderChangeTicks);
-                    if (epoch != prevEpoch)
-                    {
-                        var turn = ((h * 48271u + epoch * 16807u) % 1000u / 1000f - 0.5f) * 2f * WanderTurnMax;
-                        heading += turn;
-                    }
-                }
-
-                vel.X = MathF.Cos(heading) * speed;
-                vel.Y = MathF.Sin(heading) * speed;
-            }
-        }
-    }
-
-    // ═══════════════════════════════════════════════════════════════════
-    // PheromoneDeposit — deposit trail markers (T0/T1 only)
-    // Reads: Position, AntState, Genetics  |  Writes: pheromone grid
-    // ═══════════════════════════════════════════════════════════════════
-
+    // Step 5 — PheroDep (deposit) + PheroDecay (evaporate)
     private const float BaseDeposit = 5f;
-    private const float NearFoodMultiplier = 10f;  // deposit more food-pheromone near food
+    private const float NearFoodMultiplier = 10f;   // deposit more food-pheromone near food
     private const float DepositFalloffRange = 200f;
     private const float DepositFalloffRangeSq = DepositFalloffRange * DepositFalloffRange;
-
-    internal void PheromoneDepositTick(TickContext ctx)
-    {
-        var phero = _pheromones;
-        var food = _foodCache;
-        var nests = _nestPositions;
-
-        // Scale deposit by amortization so all tiers produce the same pheromone per second
-        var amortScale = ctx.AmortizedDeltaTime / BaseDt;
-
-        using var clusters = ctx.ClusterIds != null
-            ? ctx.Accessor.GetClusterEnumerator<Ant>(ctx.ClusterIds, ctx.StartClusterIndex, ctx.EndClusterIndex)
-            : ctx.Accessor.GetClusterEnumerator<Ant>(ctx.StartClusterIndex, ctx.EndClusterIndex);
-        foreach (var cluster in clusters)
-        {
-            var bits = cluster.OccupancyBits;
-            var bounds = cluster.GetReadOnlySpan(Ant.Bounds);
-            var states = cluster.GetReadOnlySpan(Ant.State);
-            while (bits != 0)
-            {
-                var idx = BitOperations.TrailingZeroCount(bits);
-                bits &= bits - 1;
-                ref readonly var pos = ref bounds[idx];
-                ref readonly var state = ref states[idx];
-
-                if (state.Energy <= 0f) continue;
-
-                var cellIdx = PheromoneGrid.WorldToIndex(pos.X, pos.Y);
-
-                if (state.State == AntState.Foraging)
-                {
-                    // Foraging ants leave only a faint home trail — strong trails come from successful food runs
-                    PheromoneGrid.Deposit(phero.Home, cellIdx, BaseDeposit * 0.1f * amortScale);
-                }
-                else
-                {
-                    // Returning: deposit food pheromone, stronger near the food source this ant came from
-                    var deposit = BaseDeposit;
-                    var fi = state.FoodSourceIndex;
-                    if (fi >= 0 && fi < food.Length)
-                    {
-                        var dx = pos.X - food[fi].x;
-                        var dy = pos.Y - food[fi].y;
-                        var distSq = dx * dx + dy * dy;
-                        if (distSq < DepositFalloffRangeSq)
-                        {
-                            deposit += (1f - MathF.Sqrt(distSq) / DepositFalloffRange) * NearFoodMultiplier;
-                        }
-                    }
-                    PheromoneGrid.Deposit(phero.Food, cellIdx, deposit * amortScale);
-                }
-            }
-        }
-    }
 
     // ═══════════════════════════════════════════════════════════════════
     // PheromoneDecay — evaporate grid (callback, every tick)
@@ -732,6 +343,325 @@ public sealed class TyphonBridge : IDisposable
     internal void PheromoneDecayTick(TickContext ctx)
     {
         _pheromones.Evaporate(PheroDecayFactor);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // AntUpdate — merged per-ant simulation (replaces MoveAll + Metabolism_T0..T3 +
+    //             FoodDetect + Brain_T0..T3 + PheroDep_T0..T3 = 14 systems → 1).
+    // Walks each Ant cluster once per tick; performs all five logical steps in registers.
+    // Tier amortization is per-cluster gating inside the body (see AmortMetab/Brain/Phero
+    // tables) — preserves the pre-merge CellAmortize(1/8/30/60) for Metabolism+Brain and
+    // CellAmortize(1/2/4/8) for PheroDep. amortScale per step preserves time-integrated
+    // semantics (energy decay totals, pheromone field strength).
+    // ═══════════════════════════════════════════════════════════════════
+
+    // Tier amortization periods (T0..T3) — fire when (tickNumber % rate) == 0.
+    // Unbiased (TierBias = 0 across the board) for exact behavioral match with the pre-merge
+    // topology, where all four Metabolism_Tn / Brain_Tn / PheroDep_Tn systems fired
+    // on `tick % CellAmortize == 0` without per-tier stagger. Stagger can be added later for
+    // CPU load smoothing if needed.
+    private static readonly int[] AmortMetab = { 1, 8, 30, 60 };
+    private static readonly int[] AmortBrain = { 1, 8, 30, 60 };
+    private static readonly int[] AmortPhero = { 1, 2,  4,  8 };
+
+    internal void AntUpdateTick(TickContext ctx)
+    {
+        var tick = ctx.TickNumber;
+        var dt = ctx.DeltaTime * _timeScale;
+        var phero = _pheromones;
+        var food = _foodCache;
+        var foodRemaining = _foodRemainingInt;
+        var foodGrid = _foodGrid;
+        var nests = _nestPositions;
+        var nestStock = _nestFoodStock;
+        var deathQueue = _antDiedQueue;
+        var pickedUpQueue = _foodPickedUpQueue;
+        var deliveredQueue = _foodDeliveredQueue;
+        var tierMirror = _tierMirror;
+
+        using var clusters = ctx.ClusterIds != null
+            ? ctx.Accessor.GetClusterEnumerator<Ant>(ctx.ClusterIds, ctx.StartClusterIndex, ctx.EndClusterIndex)
+            : ctx.Accessor.GetClusterEnumerator<Ant>(ctx.StartClusterIndex, ctx.EndClusterIndex);
+
+        foreach (var cluster in clusters)
+        {
+            var bits0 = cluster.OccupancyBits;
+            if (bits0 == 0)
+            {
+                continue;
+            }
+
+            var bounds = cluster.GetSpan(Ant.Bounds);
+            var velocities = cluster.GetSpan(Ant.Velocity);
+            var states = cluster.GetSpan(Ant.State);
+            var genetics = cluster.GetReadOnlySpan(Ant.Genetics);
+
+            // Tier lookup via first occupied entity's position (same pattern as FillRender lines 894-899).
+            // _tierMirror stores 0/1/2/3 directly (TierAssignment writes TrailingZeroCount(SimTier bit)).
+            var firstIdx = BitOperations.TrailingZeroCount(bits0);
+            var firstX = bounds[firstIdx].Bounds.MinX;
+            var firstY = bounds[firstIdx].Bounds.MinY;
+            var tcx = Math.Clamp((int)(firstX * InvCellSize), 0, GridCells - 1);
+            var tcy = Math.Clamp((int)(firstY * InvCellSize), 0, GridCells - 1);
+            int t = Math.Min((int)tierMirror[tcy * GridCells + tcx], 3);
+
+            bool doMetab = (tick % AmortMetab[t]) == 0;
+            bool doBrain = (tick % AmortBrain[t]) == 0;
+            bool doPhero = (tick % AmortPhero[t]) == 0;
+            // dtScaleMetab matches today's MetabolismTick `dtScale = ctx.AmortizedDeltaTime / BaseDt * _timeScale`.
+            // dt already includes _timeScale (see assignment above); cellAmortize period × dt gives the amortized dt.
+            float dtScaleMetab = AmortMetab[t] * dt / BaseDt;
+            // pheroAmortScale matches today's PheromoneDepositTick `amortScale = ctx.AmortizedDeltaTime / BaseDt`
+            // (no _timeScale — today's deposit code uses ctx.DeltaTime, not dt*_timeScale).
+            float pheroAmortScale = AmortPhero[t] * ctx.DeltaTime / BaseDt;
+            int amortBrainTicks = AmortBrain[t];
+
+            var bits = bits0;
+            while (bits != 0)
+            {
+                var idx = BitOperations.TrailingZeroCount(bits);
+                bits &= bits - 1;
+                ref var pos = ref bounds[idx];
+                ref var vel = ref velocities[idx];
+                ref var state = ref states[idx];
+                ref readonly var gen = ref genetics[idx];
+
+                // ── Step 1: MoveAll — position integration + edge bounce ───────────────
+                // Order matches today's phase ordering: Movement → Lifecycle → Sense → Brain → Trail.
+                {
+                    var x = pos.Bounds.MinX + vel.X * dt;
+                    var y = pos.Bounds.MinY + vel.Y * dt;
+                    var vx = vel.X;
+                    var vy = vel.Y;
+                    if (x < 0f) { x = -x; vx = -vx; }
+                    else if (x > WorldSize) { x = 2f * WorldSize - x; vx = -vx; }
+                    if (y < 0f) { y = -y; vy = -vy; }
+                    else if (y > WorldSize) { y = 2f * WorldSize - y; vy = -vy; }
+                    pos.Bounds.MinX = x;
+                    pos.Bounds.MaxX = x;
+                    pos.Bounds.MinY = y;
+                    pos.Bounds.MaxY = y;
+                    vel.X = vx;
+                    vel.Y = vy;
+                }
+
+                // ── Step 2: Metabolism — energy decay + respawn (gated by doMetab) ─────
+                if (doMetab)
+                {
+                    state.Energy -= EnergyDrainRate * dtScaleMetab;
+
+                    if (state.Energy <= 0f)
+                    {
+                        var ni = gen.HomeNestIndex;
+                        deathQueue?.Push(new AntDiedEvent((uint)((cluster.ChunkId << 8) | idx), ni));
+
+                        var freeE = gen.BaseEnergy * 0.5f;
+                        var bonusE = 0f;
+                        if (ni >= 0 && ni < NestCount &&
+                            Interlocked.Add(ref nestStock[ni], -gen.EatAmount) >= 0)
+                        {
+                            bonusE = gen.BaseEnergy * 0.5f;
+                        }
+                        else if (ni >= 0 && ni < NestCount)
+                        {
+                            Interlocked.Add(ref nestStock[ni], gen.EatAmount);
+                        }
+                        state.Energy = freeE + bonusE;
+                        state.State = AntState.Foraging;
+
+                        // Teleport to nest + random heading immediately.
+                        pos.X = nests[ni].x;
+                        pos.Y = nests[ni].y;
+
+                        var h = (uint)(idx * 2654435761 + cluster.ChunkId * 40503 + tick);
+                        var angle = (h % 6283u) * 0.001f;
+                        var speed = gen.Speed * 40f;
+                        vel.X = MathF.Cos(angle) * speed;
+                        vel.Y = MathF.Sin(angle) * speed;
+                        _dbe.MarkClusterSlotDirty(AntArchetypeId, cluster.ChunkId, idx);
+                    }
+                }
+
+                // Skip downstream steps for dead ants (matches today's per-system `if (state.Energy <= 0f) continue;`).
+                if (state.Energy <= 0f)
+                {
+                    continue;
+                }
+
+                // ── Step 3: Food/nest interaction (every tick) ─────────────────────────
+                if (state.State == AntState.Foraging)
+                {
+                    var gcx = Math.Clamp((int)(pos.X * FoodGridInvCellSize), 0, FoodGridCells - 1);
+                    var gcy = Math.Clamp((int)(pos.Y * FoodGridInvCellSize), 0, FoodGridCells - 1);
+                    var candidates = foodGrid[gcy * FoodGridCells + gcx];
+                    if (candidates != null)
+                    {
+                        var bestDistSq = float.MaxValue;
+                        var bestIdx = -1;
+                        for (var ci = 0; ci < candidates.Length; ci++)
+                        {
+                            var fi = candidates[ci];
+                            if (foodRemaining[fi] <= 0) continue;
+                            var dx = pos.X - food[fi].x;
+                            var dy = pos.Y - food[fi].y;
+                            var distSq = dx * dx + dy * dy;
+
+                            if (distSq < FoodPickupRangeSq)
+                            {
+                                if (Interlocked.Decrement(ref foodRemaining[fi]) >= 0)
+                                {
+                                    state.State = AntState.ReturningFrom(fi);
+                                    state.Energy = gen.BaseEnergy;
+                                    vel.X = -vel.X;
+                                    vel.Y = -vel.Y;
+                                    pickedUpQueue?.Push(new FoodPickedUpEvent((uint)((cluster.ChunkId << 8) | idx), fi));
+                                }
+                                else
+                                {
+                                    Interlocked.Increment(ref foodRemaining[fi]);
+                                }
+                                bestIdx = -1;
+                                break;
+                            }
+
+                            if (distSq < FoodSmellRangeSq && distSq < bestDistSq)
+                            {
+                                bestDistSq = distSq;
+                                bestIdx = fi;
+                            }
+                        }
+
+                        if (bestIdx >= 0)
+                        {
+                            var heading = MathF.Atan2(food[bestIdx].y - pos.Y, food[bestIdx].x - pos.X);
+                            var speed = MathF.Sqrt(vel.X * vel.X + vel.Y * vel.Y);
+                            if (speed < 0.01f) speed = gen.Speed * 40f;
+                            vel.X = MathF.Cos(heading) * speed;
+                            vel.Y = MathF.Sin(heading) * speed;
+                        }
+                    }
+                }
+                else // Returning
+                {
+                    var ni = gen.HomeNestIndex;
+                    var dx = pos.X - nests[ni].x;
+                    var dy = pos.Y - nests[ni].y;
+                    if (dx * dx + dy * dy < NestDropRangeSq)
+                    {
+                        Interlocked.Add(ref nestStock[ni], 3);
+                        deliveredQueue?.Push(new FoodDeliveredEvent((uint)((cluster.ChunkId << 8) | idx), ni, 3));
+                        state.State = AntState.Foraging;
+                    }
+                }
+
+                // ── Step 4: Brain — pheromone steering + wander (gated by doBrain) ─────
+                // Inter-cluster note: this reads phero.Food/Home, which Step 5 writes for OTHER clusters
+                // running on parallel workers. Race is bounded by 0.995/tick decay; documented as
+                // accepted looseness for the cluster-walk cache-locality win.
+                if (doBrain)
+                {
+                    var speed = MathF.Sqrt(vel.X * vel.X + vel.Y * vel.Y);
+                    if (speed < 0.01f) speed = gen.Speed * 40f;
+                    var heading = MathF.Atan2(vel.Y, vel.X);
+
+                    var steered = false;
+
+                    if (state.State == AntState.Foraging)
+                    {
+                        var sL = phero.Food[PheromoneGrid.WorldToIndex(
+                            pos.X + MathF.Cos(heading - SensorAngle) * SensorDistance,
+                            pos.Y + MathF.Sin(heading - SensorAngle) * SensorDistance)];
+                        var sC = phero.Food[PheromoneGrid.WorldToIndex(
+                            pos.X + MathF.Cos(heading) * SensorDistance,
+                            pos.Y + MathF.Sin(heading) * SensorDistance)];
+                        var sR = phero.Food[PheromoneGrid.WorldToIndex(
+                            pos.X + MathF.Cos(heading + SensorAngle) * SensorDistance,
+                            pos.Y + MathF.Sin(heading + SensorAngle) * SensorDistance)];
+
+                        if (sL > sC && sL > sR) { heading -= SteerStrength; steered = true; }
+                        else if (sR > sC && sR > sL) { heading += SteerStrength; steered = true; }
+                        else if (sC > 0.1f) { steered = true; }
+                    }
+                    else // Returning — pheromone + nest direction validation
+                    {
+                        var ni = gen.HomeNestIndex;
+                        var toNestX = nests[ni].x - pos.X;
+                        var toNestY = nests[ni].y - pos.Y;
+                        var nestHeading = MathF.Atan2(toNestY, toNestX);
+
+                        var sL = phero.Home[PheromoneGrid.WorldToIndex(
+                            pos.X + MathF.Cos(heading - SensorAngle) * SensorDistance,
+                            pos.Y + MathF.Sin(heading - SensorAngle) * SensorDistance)];
+                        var sC = phero.Home[PheromoneGrid.WorldToIndex(
+                            pos.X + MathF.Cos(heading) * SensorDistance,
+                            pos.Y + MathF.Sin(heading) * SensorDistance)];
+                        var sR = phero.Home[PheromoneGrid.WorldToIndex(
+                            pos.X + MathF.Cos(heading + SensorAngle) * SensorDistance,
+                            pos.Y + MathF.Sin(heading + SensorAngle) * SensorDistance)];
+
+                        var pheroHeading = heading;
+                        if (sL > sC && sL > sR) pheroHeading -= SteerStrength;
+                        else if (sR > sC && sR > sL) pheroHeading += SteerStrength;
+
+                        var dot = MathF.Cos(pheroHeading) * toNestX + MathF.Sin(pheroHeading) * toNestY;
+                        heading = dot > 0f ? pheroHeading : nestHeading;
+                        steered = true;
+                    }
+
+                    if (!steered)
+                    {
+                        var h = (uint)(idx * 2654435761 + cluster.ChunkId * 40503);
+                        var jitter = ((h + (uint)tick * 2246822519u) % 1000u / 1000f - 0.5f) * 2f * WanderJitter;
+                        heading += jitter;
+
+                        // Today's wander epoch trigger uses (long)ctx.AmortizedDeltaTime which truncates
+                        // to 0 for tiers T0/T1/T2 (their AmortizedDeltaTime < 1.0s). So `epoch != prevEpoch`
+                        // is always false there — direction-change only fires for T3. Preserved here for
+                        // exact behavioral match with the pre-merge topology.
+                        var amortDt = amortBrainTicks * BaseDt;
+                        var epoch = (uint)(tick / WanderChangeTicks);
+                        var prevEpoch = (uint)((tick - (long)amortDt * 60) / WanderChangeTicks);
+                        if (epoch != prevEpoch)
+                        {
+                            var turn = ((h * 48271u + epoch * 16807u) % 1000u / 1000f - 0.5f) * 2f * WanderTurnMax;
+                            heading += turn;
+                        }
+                    }
+
+                    vel.X = MathF.Cos(heading) * speed;
+                    vel.Y = MathF.Sin(heading) * speed;
+                }
+
+                // ── Step 5: PheroDep — deposit at current cell (gated by doPhero) ──────
+                if (doPhero)
+                {
+                    var cellIdx = PheromoneGrid.WorldToIndex(pos.X, pos.Y);
+
+                    if (state.State == AntState.Foraging)
+                    {
+                        // Foraging ants leave only a faint home trail.
+                        PheromoneGrid.Deposit(phero.Home, cellIdx, BaseDeposit * 0.1f * pheroAmortScale);
+                    }
+                    else
+                    {
+                        // Returning: stronger food pheromone, scaled by distance to source.
+                        var deposit = BaseDeposit;
+                        var fi = state.FoodSourceIndex;
+                        if (fi >= 0 && fi < food.Length)
+                        {
+                            var dx = pos.X - food[fi].x;
+                            var dy = pos.Y - food[fi].y;
+                            var distSq = dx * dx + dy * dy;
+                            if (distSq < DepositFalloffRangeSq)
+                            {
+                                deposit += (1f - MathF.Sqrt(distSq) / DepositFalloffRange) * NearFoodMultiplier;
+                            }
+                        }
+                        PheromoneGrid.Deposit(phero.Food, cellIdx, deposit * pheroAmortScale);
+                    }
+                }
+            }
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════

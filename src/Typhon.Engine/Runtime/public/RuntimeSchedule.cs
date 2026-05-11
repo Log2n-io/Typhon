@@ -160,12 +160,14 @@ public sealed class RuntimeSchedule
         var builder = new SystemBuilder();
         Engine.CallbackSystem.InvokeConfigure(system, builder);
         ValidateBuilderName(builder, nameof(Typhon.Engine.CallbackSystem));
+        system.Name = builder._name;
 
         _registrations.Add(new SystemRegistration
         {
             Name = builder._name,
             Type = SystemType.CallbackSystem,
             CallbackAction = ctx => Engine.CallbackSystem.InvokeExecute(system, ctx),
+            SystemInstance = system,
             Priority = builder._priority,
             RunIf = builder._runIf,
             After = builder._after,
@@ -194,12 +196,14 @@ public sealed class RuntimeSchedule
         var builder = new SystemBuilder();
         Engine.QuerySystem.InvokeConfigure(system, builder);
         ValidateBuilderName(builder, nameof(Typhon.Engine.QuerySystem));
+        system.Name = builder._name;
 
         _registrations.Add(new SystemRegistration
         {
             Name = builder._name,
             Type = SystemType.QuerySystem,
             CallbackAction = ctx => Engine.QuerySystem.InvokeExecute(system, ctx),
+            SystemInstance = system,
             Priority = builder._priority,
             RunIf = builder._runIf,
             After = builder._after,
@@ -437,21 +441,42 @@ public sealed class RuntimeSchedule
 
         var dagBuilder = new DagBuilder();
 
-        // Phase 1: Register all systems
+        // Phase 1: Register all systems. The dag-side index matches the loop iteration since DagBuilder appends one
+        // SystemDefinition per registration in order — we mirror that into ISystem.Index so class-based systems can
+        // read their own runtime id from inside Execute.
+        var dagIndex = 0;
         foreach (var reg in _registrations)
         {
+            // Class-based registrations (Add(QuerySystem) / Add(CallbackSystem)) wrap the user's Execute override in a trivial pass-through lambda whose method
+            // group resolves to a synthesized method here in RuntimeSchedule.cs — useless for "click → see code". Redirect to the actual override on the
+            // concrete instance type. Falls back to delegate-based resolution when no instance is present or the override has no sequence points (e.g.,
+            // compiled without symbols).
+            var sourceOverride = reg.SystemInstance != null ? SystemSourceResolver.ResolveOverride(reg.SystemInstance, "Execute") : null;
             switch (reg.Type)
             {
                 case SystemType.CallbackSystem:
-                    dagBuilder.AddCallbackSystem(reg.Name, reg.CallbackAction, reg.Priority, reg.RunIf);
+                    dagBuilder.AddCallbackSystemInternal(reg.Name, reg.CallbackAction, reg.Priority, reg.RunIf, sourceOverride);
+                    if (reg.SystemInstance is CallbackSystem cbInstance)
+                    {
+                        cbInstance.Index = dagIndex;
+                    }
                     break;
                 case SystemType.QuerySystem:
-                    dagBuilder.AddQuerySystem(reg.Name, reg.CallbackAction, reg.Priority, reg.RunIf);
+                    dagBuilder.AddQuerySystemInternal(reg.Name, reg.CallbackAction, reg.Priority, reg.RunIf, sourceOverride);
+                    if (reg.SystemInstance is QuerySystem qsInstance)
+                    {
+                        qsInstance.Index = dagIndex;
+                    }
                     break;
                 case SystemType.PipelineSystem:
                     dagBuilder.AddPipelineSystem(reg.Name, reg.PipelineChunkAction, reg.TotalChunks, reg.Priority, reg.RunIf);
+                    if (reg.SystemInstance is PipelineSystem psInstance)
+                    {
+                        psInstance.Index = dagIndex;
+                    }
                     break;
             }
+            dagIndex++;
         }
 
         // Phase 1b: Resolve each registration's phase index up-front (RFC 07 / Q3 — needed by access-edge derivation).
@@ -685,5 +710,12 @@ public sealed class RuntimeSchedule
         public bool PhaseSet;
         public string Before;
         public SystemAccessDescriptor Access;
+        /// <summary>
+        /// Class-based system instance (subclass of <see cref="QuerySystem"/>, <see cref="CallbackSystem"/>, or <see cref="PipelineSystem"/>) when this
+        /// registration came from the <c>Add(QuerySystem)</c> family rather than the inline delegate <c>AddQuerySystem(name, action, …)</c> path. Null for
+        /// delegate registrations. Used by <see cref="Build"/> to redirect source attribution from the trivial pass-through lambda in this file to the user's
+        /// actual <c>Execute</c> override body, and to write back the engine-assigned <see cref="ISystem.Name"/> / <see cref="ISystem.Index"/>.
+        /// </summary>
+        public ISystem SystemInstance;
     }
 }

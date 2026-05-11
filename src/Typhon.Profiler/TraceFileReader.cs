@@ -85,35 +85,73 @@ public sealed class TraceFileReader : IDisposable
     /// </summary>
     public const ushort MinSupportedVersion = 8;
 
+    /// <summary>
+    /// On-disk size of the v8 header (no query-definition trailer offsets). Computed from the v8 field layout:
+    /// Magic(4) + Version(2) + Flags(2) + TimestampFrequency(8) + BaseTickRate(4) + WorkerCount(1)
+    /// + SystemCount(2) + ArchetypeCount(2) + ComponentTypeCount(2) + CreatedUtcTicks(8)
+    /// + SamplingSessionStartQpc(8) + FileTableOffset(8) + SourceLocationManifestOffset(8)
+    /// + Reserved0(2) + Reserved1(2) = 63 bytes. v9 grows to 79 bytes by inserting two 8-byte trailer
+    /// offsets before the reserved pad.
+    /// </summary>
+    private const int V8HeaderSize = 63;
+
     /// <summary>Reads and validates the file header. Must be called first.</summary>
     /// <exception cref="InvalidDataException">If magic or version is wrong.</exception>
     public TraceFileHeader ReadHeader()
     {
-        // v7+ always uses the full header layout. Older versions had shorter on-disk headers (v4 stopped at
-        // SamplingSessionStartQpc, 51 bytes; v5 added the trailer offsets); the partial-read code paths are
-        // gone now that MinSupportedVersion == 7.
+        // The header is read as raw bytes and decoded based on the on-disk version:
+        //  - v9 (current): full 87-byte layout including QuerySourceStringTableOffset + QueryDefinitionTableOffset.
+        //  - v8: 71-byte layout — the query-definition trailer offsets are absent; we zero them in the returned struct.
+        // Older versions are rejected by MinSupportedVersion.
         var fullSize = Unsafe.SizeOf<TraceFileHeader>();
         Span<byte> headerBytes = stackalloc byte[fullSize];
-        _stream.ReadExactly(headerBytes);
 
-        // Validate magic FIRST. A file with wrong magic but plausible-looking bytes at offset 4-6 (where the version
-        // lives) would otherwise emit a misleading "Unsupported version" error; the user's correct read is
-        // "this isn't a Typhon trace file at all". Reading the u32 magic and the u16 version directly from the
-        // span — no MemoryMarshal call needed before validation, so we avoid stamping a half-validated struct
-        // onto Header until both checks pass.
-        var magic = BinaryPrimitives.ReadUInt32LittleEndian(headerBytes[..4]);
+        // Peek the first 6 bytes to determine version before reading the right number of trailing bytes.
+        Span<byte> peek = stackalloc byte[6];
+        _stream.ReadExactly(peek);
+
+        // Validate magic FIRST. A file with wrong magic but plausible-looking bytes at offset 4-6 (where the version lives) would otherwise emit a misleading
+        // "Unsupported version" error; the user's correct read is "this isn't a Typhon trace file at all".
+        var magic = BinaryPrimitives.ReadUInt32LittleEndian(peek[..4]);
         if (magic != TraceFileHeader.MagicValue)
         {
             throw new InvalidDataException(
                 $"Invalid trace file magic: 0x{magic:X8} (expected 0x{TraceFileHeader.MagicValue:X8})");
         }
 
-        var version = BinaryPrimitives.ReadUInt16LittleEndian(headerBytes[4..6]);
+        var version = BinaryPrimitives.ReadUInt16LittleEndian(peek[4..6]);
         if (version < MinSupportedVersion || version > TraceFileHeader.CurrentVersion)
         {
             throw new InvalidDataException(
                 $"Unsupported trace file version: {version}. This build reads versions "
                 + $"{MinSupportedVersion}..{TraceFileHeader.CurrentVersion}. Re-record against a current build.");
+        }
+
+        // Copy the peek into the header buffer, then read the remaining bytes based on version.
+        peek.CopyTo(headerBytes);
+        if (version == 8)
+        {
+            // v8 on-disk layout (63 bytes total). Beyond the 6-byte prefix we just read, that's 57 more bytes ending with the Reserved0/Reserved1 pair.
+            // The v9 in-memory struct grew by 16 bytes by inserting QuerySourceStringTableOffset + QueryDefinitionTableOffset BEFORE the Reserved pad.
+            // To upcast a v8 header into the v9 in-memory layout we read the v8 tail verbatim, copy the prefix bytes (Flags through SourceLocationManifestOffset)
+            // into the same positions, zero the two new offsets, and shift the trailing reserved bytes into the new reserved position.
+            Span<byte> v8Tail = stackalloc byte[V8HeaderSize - 6]; // 57 bytes
+            _stream.ReadExactly(v8Tail);
+            // v8 tail layout: Flags(2) + TimestampFrequency(8) + BaseTickRate(4) + WorkerCount(1)
+            //   + SystemCount(2) + ArchetypeCount(2) + ComponentTypeCount(2) + CreatedUtcTicks(8)
+            //   + SamplingSessionStartQpc(8) + FileTableOffset(8) + SourceLocationManifestOffset(8)
+            //   = 53 bytes, then Reserved0(2) + Reserved1(2) = 4 bytes. Total = 57.
+            const int v8TailPrefixLen = 53; // bytes [0..53) of v8Tail = bytes [6..59) absolute
+            v8Tail[..v8TailPrefixLen].CopyTo(headerBytes[6..]);
+            // Zero QuerySourceStringTableOffset + QueryDefinitionTableOffset (16 bytes at absolute [59..75)).
+            headerBytes.Slice(6 + v8TailPrefixLen, 16).Clear();
+            // Copy the 4 reserved bytes from v8 into v9 reserved slot (absolute [75..79)).
+            v8Tail.Slice(v8TailPrefixLen, 4).CopyTo(headerBytes[(6 + v8TailPrefixLen + 16)..]);
+        }
+        else
+        {
+            // v9+: read the rest directly.
+            _stream.ReadExactly(headerBytes[6..]);
         }
 
         Header = MemoryMarshal.Read<TraceFileHeader>(headerBytes);
@@ -714,6 +752,51 @@ public sealed class TraceFileReader : IDisposable
                 var kind = _binaryReader.ReadByte();
                 var method = ReadShortString();
                 entries[i] = new SourceLocationManifestEntry(id, fileId, line, kind, method);
+            }
+            return true;
+        }
+        finally
+        {
+            _stream.Position = savedPos;
+        }
+    }
+
+    /// <summary>
+    /// Read the trailing QuerySourceStringTable (#342, v9+). Returns <c>false</c> if the trace file doesn't carry one (offset in the header is zero — e.g.,
+    /// v8 trace, or v9 trace with no Query Definition Export activity). Uses absolute seek; requires a seekable stream.
+    /// </summary>
+    /// <param name="strings">
+    /// Output: array of source strings indexed by ID. Slot 0 is the sentinel ("no string") and is always empty/null. Caller uses these IDs to resolve
+    /// <c>DefinitionSourceFileId</c>, <c>ExecutionSourceFileId</c>, etc. on Query Definition Export events.
+    /// </param>
+    public bool TryReadQuerySourceStringTable(out string[] strings)
+    {
+        strings = Array.Empty<string>();
+        if (Header.QuerySourceStringTableOffset == 0)
+        {
+            return false;
+        }
+        if (!_stream.CanSeek)
+        {
+            throw new InvalidOperationException("TryReadQuerySourceStringTable requires a seekable stream.");
+        }
+
+        var savedPos = _stream.Position;
+        try
+        {
+            _stream.Position = Header.QuerySourceStringTableOffset;
+            var magic = _binaryReader.ReadUInt32();
+            if (magic != TraceFileWriter.QuerySourceStringTableMagic)
+            {
+                throw new InvalidDataException(
+                    $"Bad QuerySourceStringTable magic at offset {Header.QuerySourceStringTableOffset}: 0x{magic:X8} "
+                    + $"(expected 0x{TraceFileWriter.QuerySourceStringTableMagic:X8})");
+            }
+            var count = _binaryReader.ReadUInt32();
+            strings = new string[count];
+            for (uint i = 0; i < count; i++)
+            {
+                strings[i] = ReadVarString();
             }
             return true;
         }

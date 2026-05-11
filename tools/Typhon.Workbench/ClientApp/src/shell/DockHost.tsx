@@ -21,6 +21,9 @@ import ProfilerPanel from '@/panels/profiler/ProfilerPanel';
 import TopSpansPanel from '@/panels/profiler/TopSpansPanel';
 import OptionsPanel from '@/panels/options/OptionsPanel';
 import SourcePreviewPanel from '@/panels/profiler/SourcePreviewPanel';
+import QueryCatalogPanel from '@/panels/QueryCatalog/QueryCatalogPanel';
+import QueryPlanTreePanel from '@/panels/QueryPlanTree/QueryPlanTreePanel';
+import ExecutionInspectorPanel from '@/panels/ExecutionInspector/ExecutionInspectorPanel';
 import { registerDockApi } from './commands/openSchemaBrowser';
 import { registerProfilerDockApi } from './commands/profilerCommands';
 import MigrationRequiredBanner from './banners/MigrationRequiredBanner';
@@ -59,6 +62,9 @@ const components: Record<string, React.FC<IDockviewPanelProps>> = {
   TopSpans: TopSpansPanel,
   Options: OptionsPanel,
   SourcePreview: SourcePreviewPanel,
+  QueryCatalog: QueryCatalogPanel,
+  QueryPlanTree: QueryPlanTreePanel,
+  ExecutionInspector: ExecutionInspectorPanel,
 };
 
 function buildDefaultLayout(api: DockviewReadyEvent['api'], kind: 'none' | 'open' | 'attach' | 'trace') {

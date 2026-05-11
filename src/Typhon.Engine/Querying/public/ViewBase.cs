@@ -12,30 +12,34 @@ namespace Typhon.Engine;
 /// </summary>
 public abstract class ViewBase : IView, IDisposable, IEnumerable<long>
 {
-    private static int _nextViewId;
+    private static int NextViewId;
 
     internal readonly HashMap<long> _entityIds = new();
     private readonly Dictionary<long, DeltaKind> _deltas = new(16);
     private int _addedCount;
     private int _removedCount;
     private int _modifiedCount;
-    protected readonly FieldEvaluator[] _evaluators;
+    protected readonly FieldEvaluator[] Evaluators;
     private long _lastRefreshTSN;
     private int _disposed;
     private bool _overflowDetected;
     private readonly ExecutionPlan[] _cachedPlans;
 
     private protected ViewBase(FieldEvaluator[] evaluators, int[] fieldDependencies, IMemoryAllocator allocator, IResource resourceParent, int bufferCapacity,
-        long baseTSN)
+        long baseTSN, string sourceFile = null, int sourceLine = 0, string sourceMethod = null)
     {
-        _evaluators = evaluators;
+        Evaluators = evaluators;
         FieldDependencies = fieldDependencies;
-        ViewId = Interlocked.Increment(ref _nextViewId);
+        ViewId = Interlocked.Increment(ref NextViewId);
         DeltaBuffer = new ViewDeltaRingBuffer(allocator, resourceParent, bufferCapacity, baseTSN);
+        SourceFile = sourceFile;
+        SourceLine = sourceLine;
+        SourceMethod = sourceMethod;
     }
 
     private protected ViewBase(FieldEvaluator[] evaluators, int[] fieldDependencies, IMemoryAllocator allocator, IResource resourceParent, ExecutionPlan[] plans,
-        int bufferCapacity, long baseTSN) : this(evaluators, fieldDependencies, allocator, resourceParent, bufferCapacity, baseTSN)
+        int bufferCapacity, long baseTSN, string sourceFile = null, int sourceLine = 0, string sourceMethod = null)
+        : this(evaluators, fieldDependencies, allocator, resourceParent, bufferCapacity, baseTSN, sourceFile, sourceLine, sourceMethod)
     {
         _cachedPlans = plans;
     }
@@ -44,6 +48,17 @@ public abstract class ViewBase : IView, IDisposable, IEnumerable<long>
     public int[] FieldDependencies { get; }
     public bool IsDisposed => _disposed != 0;
     internal ViewDeltaRingBuffer DeltaBuffer { get; }
+
+    /// <summary>User source file where this View was constructed. Captured via <c>[CallerFilePath]</c> on the public Query API (e.g., <c>ToView()</c>).
+    /// Null if construction was internal/unattributed. Path form depends on the consuming project's <c>PathMap</c> / <c>DeterministicSourcePaths</c>
+    /// MSBuild configuration — Typhon's own projects produce <c>/_/…</c> repo-relative paths.</summary>
+    public string SourceFile { get; }
+
+    /// <summary>User source line where this View was constructed. Captured via <c>[CallerLineNumber]</c>. Zero if unattributed.</summary>
+    public int SourceLine { get; }
+
+    /// <summary>User source method name where this View was constructed. Captured via <c>[CallerMemberName]</c>. Null if unattributed.</summary>
+    public string SourceMethod { get; }
 
     /// <summary>
     /// Simulation-tier filter for materialization (issue #231). When set to anything other than <see cref="SimTier.All"/>, any system that materializes this
@@ -123,7 +138,44 @@ public abstract class ViewBase : IView, IDisposable, IEnumerable<long>
     protected bool HasCachedPlanInternal => _cachedPlans != null;
 
     /// <summary>Drain the ring buffer, evaluate predicates, and update entity set and delta tracking.</summary>
-    public abstract void Refresh(Transaction tx);
+    /// <remarks>
+    /// The three trailing <c>caller…</c> parameters are populated by <c>[CallerFilePath]</c> / <c>[CallerLineNumber]</c> / <c>[CallerMemberName]</c>
+    /// at user call sites. When the runtime/scheduler invokes a refresh, it must use <see cref="RefreshFromScheduler"/> instead so engine-internal
+    /// paths don't end up as the "user execution site" in the trace.
+    /// </remarks>
+    public abstract void Refresh(
+        Transaction tx,
+        [CallerFilePath]   string callerFile = null,
+        [CallerLineNumber] int    callerLine = 0,
+        [CallerMemberName] string callerMethod = null);
+
+    /// <summary>
+    /// Scheduler / pipeline entry point. Bypasses caller-attribute capture so engine-internal call sites are NOT recorded as user execution sites
+    /// (a scheduler-driven refresh has no user site — the owning system is the relevant attribution and is already on the span).
+    /// </summary>
+    internal void RefreshFromScheduler(Transaction tx) => Refresh(tx, callerFile: null, callerLine: 0, callerMethod: null);
+
+    /// <summary>
+    /// Emit a <see cref="Typhon.Profiler.TraceEventKind.QueryDefinitionDescribe"/> trace event for this view's
+    /// owning query identity. Called once per system-tick from the runtime's per-system dispatch (see
+    /// <c>TyphonRuntime.OnSystemStartInternal</c> / <c>OnParallelQueryPrepare</c>). The underlying tracker
+    /// dedups across the session — only the first call per identity actually writes to the trace.
+    /// Default implementation is a no-op; <see cref="EcsView{T}"/> overrides to emit. Telemetry-gated by
+    /// the caller so this method may assume <c>TelemetryConfig.QueryActive == true</c> on entry.
+    /// </summary>
+    internal virtual void EmitDescriptorIfNeeded() { }
+
+    /// <summary>
+    /// Emit one <see cref="Typhon.Profiler.TraceEventKind.QueryPlan"/> span per system tick for this view's owning
+    /// query identity, using caller-supplied start/end timestamps. Called from <c>TyphonRuntime.OnSystemEndInternal</c>
+    /// after the system body completes. The pair (start, end) brackets the system's view-consumption window so the
+    /// Workbench Execution Inspector can drill into per-execution timings even for pull-mode views that never go through
+    /// <c>PlanBuilder.BuildPlan</c> at consumption time. The <paramref name="ownerSystemIdx"/> attaches the span to the
+    /// owning scheduler system so the Workbench detail pane can round-trip from a clicked chunk to the execution.
+    /// Default implementation is a no-op; <see cref="EcsView{T}"/> overrides to emit. Telemetry-gated by the caller
+    /// (assumes <c>TelemetryConfig.QueryActive == true</c>).
+    /// </summary>
+    internal virtual void EmitPerTickQueryPlan(long startTimestamp, long endTimestamp, ushort ownerSystemIdx) { }
 
     /// <summary>Deregister from all owning ViewRegistries. Called during disposal.</summary>
     protected abstract void DeregisterFromRegistries();

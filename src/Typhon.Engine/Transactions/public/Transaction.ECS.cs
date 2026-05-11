@@ -82,10 +82,20 @@ public unsafe partial class Transaction
     /// Create a polymorphic query matching <typeparamref name="TArchetype"/> and all descendants.
     /// Supports Tier 1 (.With, .Without, .Exclude), Tier 2 (.Enabled, .Disabled), and execution (.Execute, .Count, .Any, foreach).
     /// </summary>
-    public EcsQuery<TArchetype> Query<TArchetype>() where TArchetype : class => new(this, true);
+    public EcsQuery<TArchetype> Query<TArchetype>(
+        [CallerFilePath]   string sourceFile = null,
+        [CallerLineNumber] int    sourceLine = 0,
+        [CallerMemberName] string sourceMethod = null)
+        where TArchetype : class
+        => new(this, true, sourceFile, sourceLine, sourceMethod);
 
     /// <summary>Create an exact query matching only <typeparamref name="TArchetype"/>, no descendants.</summary>
-    public EcsQuery<TArchetype> QueryExact<TArchetype>() where TArchetype : class => new(this, false);
+    public EcsQuery<TArchetype> QueryExact<TArchetype>(
+        [CallerFilePath]   string sourceFile = null,
+        [CallerLineNumber] int    sourceLine = 0,
+        [CallerMemberName] string sourceMethod = null)
+        where TArchetype : class
+        => new(this, false, sourceFile, sourceLine, sourceMethod);
 
     /// <summary>
     /// Create a zero-allocation spatial query handle for component type <typeparamref name="T"/>.

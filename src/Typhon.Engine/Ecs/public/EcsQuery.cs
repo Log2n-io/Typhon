@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Linq.Expressions;
 using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics.X86;
+using System.Threading;
 using JetBrains.Annotations;
 using Typhon.Profiler;
 
@@ -26,6 +27,25 @@ internal enum SpatialQueryType : byte
 #pragma warning disable TYPHON005 // EcsQuery borrows Transaction, doesn't own it
 public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 {
+    private static int NextEcsQueryId;
+
+    /// <summary>
+    /// Monotonic, globally-unique handle for this query struct instance, assigned at construction (mirrors <see cref="ViewBase.ViewId"/>).
+    /// Each <c>tx.Query&lt;T&gt;()</c> / <c>tx.QueryExact&lt;T&gt;()</c> call produces a fresh ID; fluent mutation methods preserve it because the struct
+    /// value carries the field. The profiler consumer thread dedupes multiple instance IDs into "definitions" using <c>(constructionSite, structuralShape)</c>
+    /// — see issue #335 / #336.
+    /// </summary>
+    public int EcsQueryId { get; }
+
+    /// <summary>User source file where this query was constructed (or zeroed when constructed without attribution). See <see cref="ViewBase.SourceFile"/>.</summary>
+    public string SourceFile { get; }
+
+    /// <summary>User source line where this query was constructed. Zero if unattributed.</summary>
+    public int SourceLine { get; }
+
+    /// <summary>User source method name where this query was constructed. Null if unattributed.</summary>
+    public string SourceMethod { get; }
+
     private Transaction _tx;
     private ArchetypeMask256 _mask256;          // used when _useLargeMask == false
     private ArchetypeMaskLarge _maskLarge;       // used when _useLargeMask == true
@@ -54,8 +74,12 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     // AABB: [min0..max0..] in [0]..[5]. Radius: center in [0]..[2], radius in [3]. Ray: origin in [0]..[2], dir in [3]..[5], maxDist in [6].
     private fixed double _spatialParams[7];
 
-    internal EcsQuery(Transaction tx, bool polymorphic)
+    internal EcsQuery(Transaction tx, bool polymorphic, string sourceFile = null, int sourceLine = 0, string sourceMethod = null)
     {
+        EcsQueryId = Interlocked.Increment(ref NextEcsQueryId);
+        SourceFile = sourceFile;
+        SourceLine = sourceLine;
+        SourceMethod = sourceMethod;
         _tx = tx;
         _useLargeMask = !ArchetypeRegistry.UseSmallMask;
 
@@ -487,25 +511,33 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     /// If Expression-based WHERE (WhereField) was used, creates an incremental view with ring buffer delta notifications.
     /// Otherwise, creates a pull-model view (full re-query on each Refresh).
     /// </summary>
-    public EcsView<TArchetype> ToView(int bufferCapacity = ViewDeltaRingBuffer.DefaultCapacity)
+    /// <remarks>
+    /// The three trailing <c>caller…</c> parameters are populated by <c>[CallerFilePath]</c> / <c>[CallerLineNumber]</c> / <c>[CallerMemberName]</c>
+    /// at the user's <c>.ToView()</c> call site and become the View's definition-site source location (see <see cref="ViewBase.SourceFile"/>).
+    /// </remarks>
+    public EcsView<TArchetype> ToView(
+        int bufferCapacity = ViewDeltaRingBuffer.DefaultCapacity,
+        [CallerFilePath]   string callerFile = null,
+        [CallerLineNumber] int    callerLine = 0,
+        [CallerMemberName] string callerMethod = null)
     {
         if (HasFieldPredicates)
         {
-            return ToIncrementalView(bufferCapacity);
+            return ToIncrementalView(bufferCapacity, callerFile, callerLine, callerMethod);
         }
 
         // Pull mode: no field evaluators
-        return ToPullView(bufferCapacity);
+        return ToPullView(bufferCapacity, callerFile, callerLine, callerMethod);
     }
 
-    private EcsView<TArchetype> ToPullView(int bufferCapacity)
+    private EcsView<TArchetype> ToPullView(int bufferCapacity, string callerFile, int callerLine, string callerMethod)
     {
         var initialSet = Execute();
         var meta = ArchetypeRegistry.GetMetadata<TArchetype>();
         var engineState = _tx.DBE._archetypeStates[meta.ArchetypeId];
         var firstTable = engineState.SlotToComponentTable[0];
 
-        var view = new EcsView<TArchetype>(this, firstTable.DBE.MemoryAllocator, firstTable, bufferCapacity, _tx.TSN);
+        var view = new EcsView<TArchetype>(this, firstTable.DBE.MemoryAllocator, firstTable, bufferCapacity, _tx.TSN, callerFile, callerLine, callerMethod);
 
         // Populate initial entity set
         foreach (var id in initialSet)
@@ -516,7 +548,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         return view;
     }
 
-    private EcsView<TArchetype> ToIncrementalView(int bufferCapacity)
+    private EcsView<TArchetype> ToIncrementalView(int bufferCapacity, string callerFile, int callerLine, string callerMethod)
     {
         var ct = _whereComponentTable;
         var branches = _fieldPredicateBranches;
@@ -524,14 +556,17 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         if (branches.Length > 1)
         {
             // OR path: create EcsOrView
-            return ToOrView(ct, branches, bufferCapacity);
+            return ToOrView(ct, branches, bufferCapacity, callerFile, callerLine, callerMethod);
         }
 
         // Single AND branch
         var evaluators = QueryResolverHelper.ResolveEvaluators(branches[0], ct, 0);
-        var plan = PlanBuilder.Instance.BuildPlan(evaluators, ct, AdvancedSelectivityEstimator.Instance);
+        var plan = PlanBuilder.Instance.BuildPlanAttributed(evaluators, ct, AdvancedSelectivityEstimator.Instance, null,
+            queryInstanceKind: 1, queryInstanceLocalId: (uint)EcsQueryId,
+            definitionSourceFile: SourceFile, definitionSourceLine: SourceLine, definitionSourceMethod: SourceMethod,
+            executionSourceFile: callerFile, executionSourceLine: callerLine, executionSourceMethod: callerMethod);
 
-        var view = new EcsView<TArchetype>(this, evaluators, ct, _whereFieldReader, plan, bufferCapacity, _tx.TSN);
+        var view = new EcsView<TArchetype>(this, evaluators, ct, _whereFieldReader, plan, bufferCapacity, _tx.TSN, callerFile, callerLine, callerMethod);
 
         // Register with ViewRegistry for delta notifications
         ct.ViewRegistry.RegisterView(view, view.DeltaBuffer);
@@ -540,27 +575,30 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         _whereFieldReader.ExecuteFullScan(plan, plan.OrderedEvaluators, ct, _tx, view.EntityIdsInternal);
 
         // Process any deltas that arrived during population
-        view.Refresh(_tx);
+        view.RefreshFromScheduler(_tx);
         view.ClearDelta();
 
         return view;
     }
 
-    private EcsView<TArchetype> ToOrView(ComponentTable ct, FieldPredicate[][] branches, int bufferCapacity)
+    private EcsView<TArchetype> ToOrView(ComponentTable ct, FieldPredicate[][] branches, int bufferCapacity, string callerFile, int callerLine, string callerMethod)
     {
         var branchEvaluators = new FieldEvaluator[branches.Length][];
         var plans = new ExecutionPlan[branches.Length];
         for (var b = 0; b < branches.Length; b++)
         {
             branchEvaluators[b] = QueryResolverHelper.ResolveEvaluators(branches[b], ct, 0, (byte)b);
-            plans[b] = PlanBuilder.Instance.BuildPlan(branchEvaluators[b], ct, AdvancedSelectivityEstimator.Instance);
+            plans[b] = PlanBuilder.Instance.BuildPlanAttributed(branchEvaluators[b], ct, AdvancedSelectivityEstimator.Instance, null,
+                queryInstanceKind: 1, queryInstanceLocalId: (uint)EcsQueryId,
+                definitionSourceFile: SourceFile, definitionSourceLine: SourceLine, definitionSourceMethod: SourceMethod,
+                executionSourceFile: callerFile, executionSourceLine: callerLine, executionSourceMethod: callerMethod);
         }
 
-        var view = new EcsView<TArchetype>(this, branchEvaluators, plans, ct, _whereFieldReader, bufferCapacity, _tx.TSN);
+        var view = new EcsView<TArchetype>(this, branchEvaluators, plans, ct, _whereFieldReader, bufferCapacity, _tx.TSN, callerFile, callerLine, callerMethod);
         ct.ViewRegistry.RegisterView(view, view.DeltaBuffer);
 
         view.PopulateInitialOr(_tx);
-        view.Refresh(_tx);
+        view.RefreshFromScheduler(_tx);
         view.ClearDelta();
 
         return view;
@@ -570,8 +608,13 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     internal void UpdateTransaction(Transaction tx) => _tx = tx;
 
     /// <summary>Execute the query and collect matching entity IDs into a HashSet.</summary>
-    public HashSet<EntityId> Execute()
+    public HashSet<EntityId> Execute(
+        [CallerFilePath]   string callerFile = null,
+        [CallerLineNumber] int    callerLine = 0,
+        [CallerMemberName] string callerMethod = null)
     {
+        // callerFile/Line/Method captured at user call site; consumed by trace emission in P2 (issue #335).
+        _ = callerFile; _ = callerLine; _ = callerMethod;
         var scope = TyphonEvent.BeginEcsQueryExecute(0);
         try
         {
@@ -586,7 +629,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             // Targeted scan via PipelineExecutor when field predicates are present
             if (HasFieldPredicates)
             {
-                var targeted = ExecuteTargeted();
+                var targeted = ExecuteTargeted(callerFile, callerLine, callerMethod);
                 scope.ScanMode = EcsQueryScanMode.Targeted;
                 scope.ResultCount = targeted.Count;
                 return targeted;
@@ -622,8 +665,13 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     }
 
     /// <summary>Execute the query with ordering support. Requires <see cref="OrderByField{T,TKey}"/>.</summary>
-    public List<EntityId> ExecuteOrdered()
+    public List<EntityId> ExecuteOrdered(
+        [CallerFilePath]   string callerFile = null,
+        [CallerLineNumber] int    callerLine = 0,
+        [CallerMemberName] string callerMethod = null)
     {
+        // callerFile/Line/Method captured at user call site; consumed by trace emission in P2 (issue #335).
+        _ = callerFile; _ = callerLine; _ = callerMethod;
         if (!_orderBy.HasValue)
         {
             throw new InvalidOperationException("ExecuteOrdered requires OrderByField.");
@@ -639,7 +687,10 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
         var ct = _whereComponentTable;
         var evaluators = QueryResolverHelper.ResolveEvaluators(_fieldPredicateBranches[0], ct, 0);
-        var plan = PlanBuilder.Instance.BuildPlan(evaluators, ct, AdvancedSelectivityEstimator.Instance, _orderBy.Value);
+        var plan = PlanBuilder.Instance.BuildPlanAttributed(evaluators, ct, AdvancedSelectivityEstimator.Instance, _orderBy.Value,
+            queryInstanceKind: 1, queryInstanceLocalId: (uint)EcsQueryId,
+            definitionSourceFile: SourceFile, definitionSourceLine: SourceLine, definitionSourceMethod: SourceMethod,
+            executionSourceFile: callerFile, executionSourceLine: callerLine, executionSourceMethod: callerMethod);
 
         // Detect cluster vs non-cluster archetypes in the mask
         bool hasClusterArchetypes = false;
@@ -1008,12 +1059,15 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     }
 
     /// <summary>Execute targeted scan via PipelineExecutor with archetype mask post-filter.</summary>
-    private HashSet<EntityId> ExecuteTargeted()
+    private HashSet<EntityId> ExecuteTargeted(string callerFile = null, int callerLine = 0, string callerMethod = null)
     {
         var ct = _whereComponentTable;
 
         var evaluators = QueryResolverHelper.ResolveEvaluators(_fieldPredicateBranches[0], ct, 0);
-        var plan = PlanBuilder.Instance.BuildPlan(evaluators, ct, AdvancedSelectivityEstimator.Instance);
+        var plan = PlanBuilder.Instance.BuildPlanAttributed(evaluators, ct, AdvancedSelectivityEstimator.Instance, null,
+            queryInstanceKind: 1, queryInstanceLocalId: (uint)EcsQueryId,
+            definitionSourceFile: SourceFile, definitionSourceLine: SourceLine, definitionSourceMethod: SourceMethod,
+            executionSourceFile: callerFile, executionSourceLine: callerLine, executionSourceMethod: callerMethod);
 
         // Scan for matching entities across all matching archetypes.
         // Cluster archetypes: direct cluster scan with evaluator predicates (bypasses shared B+Tree).
@@ -1957,8 +2011,13 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     }
 
     /// <summary>Count matching entities.</summary>
-    public int Count()
+    public int Count(
+        [CallerFilePath]   string callerFile = null,
+        [CallerLineNumber] int    callerLine = 0,
+        [CallerMemberName] string callerMethod = null)
     {
+        // callerFile/Line/Method captured at user call site; consumed by trace emission in P2 (issue #335).
+        _ = callerFile; _ = callerLine; _ = callerMethod;
         var scope = TyphonEvent.BeginEcsQueryCount(0);
         try
         {
@@ -1993,7 +2052,10 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
                 var ct = _whereComponentTable;
                 var evaluators = QueryResolverHelper.ResolveEvaluators(_fieldPredicateBranches[0], ct, 0);
-                var plan = PlanBuilder.Instance.BuildPlan(evaluators, ct, AdvancedSelectivityEstimator.Instance);
+                var plan = PlanBuilder.Instance.BuildPlanAttributed(evaluators, ct, AdvancedSelectivityEstimator.Instance, null,
+                    queryInstanceKind: 1, queryInstanceLocalId: (uint)EcsQueryId,
+                    definitionSourceFile: SourceFile, definitionSourceLine: SourceLine, definitionSourceMethod: SourceMethod,
+                    executionSourceFile: callerFile, executionSourceLine: callerLine, executionSourceMethod: callerMethod);
                 var scanCount = _whereFieldReader.CountScan(plan, plan.OrderedEvaluators, ct, _tx);
                 scope.ScanMode = EcsQueryScanMode.Targeted;
                 scope.ResultCount = scanCount;
@@ -2022,8 +2084,13 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     }
 
     /// <summary>Test if any entity matches. Short-circuits on first match.</summary>
-    public bool Any()
+    public bool Any(
+        [CallerFilePath]   string callerFile = null,
+        [CallerLineNumber] int    callerLine = 0,
+        [CallerMemberName] string callerMethod = null)
     {
+        // callerFile/Line/Method captured at user call site; consumed by trace emission in P2 (issue #335).
+        _ = callerFile; _ = callerLine; _ = callerMethod;
         var scope = TyphonEvent.BeginEcsQueryAny(0);
         try
         {
@@ -2038,7 +2105,10 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             {
                 var ct = _whereComponentTable;
                 var evaluators = QueryResolverHelper.ResolveEvaluators(_fieldPredicateBranches[0], ct, 0);
-                var plan = PlanBuilder.Instance.BuildPlan(evaluators, ct, AdvancedSelectivityEstimator.Instance);
+                var plan = PlanBuilder.Instance.BuildPlanAttributed(evaluators, ct, AdvancedSelectivityEstimator.Instance, null,
+                    queryInstanceKind: 1, queryInstanceLocalId: (uint)EcsQueryId,
+                    definitionSourceFile: SourceFile, definitionSourceLine: SourceLine, definitionSourceMethod: SourceMethod,
+                    executionSourceFile: callerFile, executionSourceLine: callerLine, executionSourceMethod: callerMethod);
                 var hasMatch = _whereFieldReader.CountScan(plan, plan.OrderedEvaluators, ct, _tx) > 0;
                 scope.ScanMode = EcsQueryScanMode.Targeted;
                 scope.Found = hasMatch;
@@ -2065,7 +2135,15 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         }
     }
 
-    /// <summary>Get an enumerator for foreach support. Pre-collects matching entities then iterates.</summary>
+    /// <summary>
+    /// Get an enumerator for foreach support. Pre-collects matching entities then iterates.
+    /// <para>
+    /// Caller-attribute capture is NOT available here — the C# foreach pattern requires <c>GetEnumerator</c> to have zero parameters
+    /// (optional parameters don't satisfy the pattern). Execution-site attribution for foreach loops falls back to the query's
+    /// construction site (captured at <c>tx.Query&lt;T&gt;()</c>). For explicit execution-site capture, call <c>.Execute()</c>,
+    /// <c>.Count()</c>, etc., instead.
+    /// </para>
+    /// </summary>
     public EcsQueryEnumerator GetEnumerator()
     {
         var entities = new List<(EntityId Id, ArchetypeMetadata Meta, ushort EnabledBits, EntityLocations Locations)>();

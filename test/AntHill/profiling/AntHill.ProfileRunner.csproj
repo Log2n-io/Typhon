@@ -15,14 +15,12 @@
   </ItemGroup>
   <!-- Share source files from the AntHill Godot project (no Godot dependency) -->
   <ItemGroup>
+    <Compile Include="..\GlobalUsings.cs" Link="GlobalUsings.cs" />
     <Compile Include="..\ECS\Components.cs" Link="ECS\Components.cs" />
     <Compile Include="..\ECS\Archetypes.cs" Link="ECS\Archetypes.cs" />
     <Compile Include="..\ECS\AntEvents.cs" Link="ECS\AntEvents.cs" />
     <Compile Include="..\ECS\AntPhases.cs" Link="ECS\AntPhases.cs" />
-    <Compile Include="..\ECS\Systems\BrainSystems.cs" Link="ECS\Systems\BrainSystems.cs" />
-    <Compile Include="..\ECS\Systems\FoodDetectSystem.cs" Link="ECS\Systems\FoodDetectSystem.cs" />
-    <Compile Include="..\ECS\Systems\MetabolismSystems.cs" Link="ECS\Systems\MetabolismSystems.cs" />
-    <Compile Include="..\ECS\Systems\MoveAllSystem.cs" Link="ECS\Systems\MoveAllSystem.cs" />
+    <Compile Include="..\ECS\Systems\AntUpdateSystem.cs" Link="ECS\Systems\AntUpdateSystem.cs" />
     <Compile Include="..\ECS\Systems\RenderSystems.cs" Link="ECS\Systems\RenderSystems.cs" />
     <Compile Include="..\ECS\Systems\TierAssignmentSystem.cs" Link="ECS\Systems\TierAssignmentSystem.cs" />
     <Compile Include="..\ECS\Systems\TrailSystems.cs" Link="ECS\Systems\TrailSystems.cs" />

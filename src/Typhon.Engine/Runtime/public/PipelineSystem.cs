@@ -7,8 +7,14 @@ namespace Typhon.Engine;
 /// Derive from this class and implement <see cref="Configure"/>.
 /// </summary>
 [PublicAPI]
-public abstract class PipelineSystem
+public abstract class PipelineSystem : ISystem
 {
+    /// <inheritdoc />
+    public string Name { get; internal set; }
+
+    /// <inheritdoc />
+    public int Index { get; internal set; } = -1;
+
     /// <summary>Declare the system's name, dependencies, input View, and configuration.</summary>
     protected abstract void Configure(SystemBuilder b);
 

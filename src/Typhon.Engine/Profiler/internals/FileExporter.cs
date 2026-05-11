@@ -92,9 +92,9 @@ internal sealed class FileExporter : ResourceNode, IProfilerExporter
     }
 
     /// <summary>
-    /// Append the source-location manifest as a trailer section and patch the header offsets in.
-    /// Called from <see cref="Dispose(bool)"/> before the writer is closed. No-op if the generated <c>SourceLocations</c> table is empty (zero attributed
-    /// sites). See claude/design/Profiler/10-profiler-source-attribution.md §4.6.
+    /// Append trailing sections (SourceLocationManifest + QuerySourceStringTable for v9) and patch the header offsets in. Called from <see cref="Dispose(bool)"/>
+    /// before the writer is closed. Each section is independently optional — if empty, the section is skipped and the corresponding header offset stays 0.
+    /// See claude/design/Profiler/10-profiler-source-attribution.md §4.6 (SourceLocationManifest) and claude/design/Profiler/11-query-definition-export.md §4.8 (QuerySourceStringTable).
     /// </summary>
     private void WriteSourceLocationManifestAtClose()
     {
@@ -102,19 +102,31 @@ internal sealed class FileExporter : ResourceNode, IProfilerExporter
         {
             return;
         }
-        // Merged: compile-time call sites + runtime-resolved system entries (DagScheduler populates
-        // the runtime side at construction). Empty manifests skip the trailer write entirely.
+
+        // ── SourceLocationManifest (compile-time call sites + runtime-resolved systems) ──
         var (files, manifest) = RuntimeSourceLocationManifest.BuildMerged();
-        if (files.Length == 0 || manifest.Length == 0)
+        var hasManifest = files.Length > 0 && manifest.Length > 0;
+        if (hasManifest)
         {
-            return;
+            var (fileTableOffset, manifestOffset) = _writer.WriteSourceLocationManifest(files, manifest);
+            _header.FileTableOffset = fileTableOffset;
+            _header.SourceLocationManifestOffset = manifestOffset;
         }
 
-        var (fileTableOffset, manifestOffset) = _writer.WriteSourceLocationManifest(files, manifest);
-        _header.FileTableOffset = fileTableOffset;
-        _header.SourceLocationManifestOffset = manifestOffset;
-        _writer.RewriteHeader(in _header);
-        _writer.Flush();
+        // ── QuerySourceStringTable (v9, #342) — deduped query definition/execution source strings ──
+        var queryStrings = QuerySourceStringInterner.SnapshotStrings();
+        if (queryStrings.Length > 1)  // > 1 because index 0 is the always-present sentinel
+        {
+            var offset = _writer.WriteQuerySourceStringTable(queryStrings);
+            _header.QuerySourceStringTableOffset = offset;
+        }
+
+        // Only rewrite the header if at least one trailer section landed.
+        if (hasManifest || queryStrings.Length > 1)
+        {
+            _writer.RewriteHeader(in _header);
+            _writer.Flush();
+        }
     }
 
     /// <inheritdoc />

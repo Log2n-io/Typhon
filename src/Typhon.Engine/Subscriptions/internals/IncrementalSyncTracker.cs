@@ -30,7 +30,9 @@ internal static class IncrementalSyncTracker
 
         var snapshot = new long[count];
         var idx = 0;
-        foreach (var pk in view)
+        // Iterate the typed HashMap to avoid the boxed IEnumerable<long> enumerator that foreach-over-ViewBase would pick (ViewBase.GetEnumerator() is
+        // internal — see comment in TyphonRuntime.BuildEntityList).
+        foreach (var pk in view.EntityIdsInternal)
         {
             snapshot[idx++] = pk;
         }

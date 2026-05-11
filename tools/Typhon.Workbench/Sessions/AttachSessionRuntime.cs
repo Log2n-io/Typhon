@@ -152,6 +152,35 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
     /// </summary>
     public SourceLocationManifestDto SourceLocationManifest => _sourceLocationManifest;
 
+    /// <summary>
+    /// #337 (P4 of #342) — query source-string table. For Attach sessions, the table is built up
+    /// incrementally as <c>QueryDefinitionDescribe</c> events arrive with their referenced strings;
+    /// for the first P4 cut we return an empty array (catalog will show numeric IDs / "&lt;unresolved&gt;"
+    /// for any source references). Live-stream source-string interning is a follow-up.
+    /// </summary>
+    public string[] QuerySourceStrings => [];
+
+    private Services.QueryCatalogService _queryCatalog;
+    private readonly object _queryCatalogInitLock = new();
+
+    /// <summary>
+    /// #337 (P4 of #342) — lazy per-session catalog facade. Constructed on first access, after the
+    /// initial metadata is available. Returns null until <see cref="IsReady"/>.
+    /// </summary>
+    public Services.QueryCatalogService QueryCatalog
+    {
+        get
+        {
+            if (_queryCatalog != null) return _queryCatalog;
+            if (Metadata == null) return null;
+            lock (_queryCatalogInitLock)
+            {
+                _queryCatalog ??= new Services.QueryCatalogService(this, () => Metadata, () => QuerySourceStrings);
+                return _queryCatalog;
+            }
+        }
+    }
+
     /// <summary>Number of finalized ticks currently in the metadata snapshot.</summary>
     public long TickCount
     {

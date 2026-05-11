@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Activity, Blocks, Clock, Crosshair, ExternalLink, FileCode, Layers, Tag } from 'lucide-react';
+import { Activity, Blocks, Clock, Crosshair, ExternalLink, FileCode, Layers, Search, Tag } from 'lucide-react';
 import type { ChunkSpan, MarkerSelection, PhaseMarker, PhaseSpan, SpanData } from '@/libs/profiler/model/traceModel';
 import { TraceEventKind } from '@/libs/profiler/model/types';
 import type { ProfilerSelection } from '@/stores/useProfilerSelectionStore';
@@ -7,8 +7,16 @@ import { useProfilerSessionStore } from '@/stores/useProfilerSessionStore';
 import { useProfilerStatsStore } from '@/stores/useProfilerStatsStore';
 import { useProfilerViewStore } from '@/stores/useProfilerViewStore';
 import { useSourceLocationStore } from '@/stores/useSourceLocationStore';
+import { useSessionStore } from '@/stores/useSessionStore';
 import { useOptionsStore } from '@/stores/useOptionsStore';
 import { openSourcePreview } from '@/shell/commands/openSchemaBrowser';
+import { openViewExecutionInspector } from '@/shell/commands/profilerCommands';
+import { useExecutionInspectorStore } from '@/panels/ExecutionInspector/useExecutionInspectorStore';
+import { useQueryPlanStore } from '@/panels/QueryPlanTree/useQueryPlanStore';
+import {
+  useGetApiSessionsSessionIdProfilerExecutionsByParentParentSpanId,
+  useGetApiSessionsSessionIdProfilerExecutionsBySystemTickSystemIdxTickIndex,
+} from '@/api/generated/profiler/profiler';
 
 /**
  * Profiler selection detail — the fourth DetailPanel render branch (Phase 2e). Mirrors the
@@ -69,8 +77,47 @@ function SpanDetail({ span }: { span: SpanData }): React.JSX.Element {
   const globalStartUs = useGlobalStartUs();
   const resolve = useSourceLocationStore((s) => s.resolve);
   const openInEditor = useOptionsStore((s) => s.openInEditor);
+  const sessionId = useSessionStore((s) => s.sessionId);
+  const sessionKind = useSessionStore((s) => s.kind);
+  const setEiFocus = useExecutionInspectorStore((s) => s.setFocus);
+  const setEiSelected = useExecutionInspectorStore((s) => s.setSelected);
+  const setPlanFocus = useQueryPlanStore((s) => s.setFocus);
+  const setPlanSelectedExecution = useQueryPlanStore((s) => s.setSelectedExecution);
   const [openError, setOpenError] = useState<string | null>(null);
   const loc = resolve(span.rawEvent?.sourceLocationId);
+
+  // Look up the per-tick QueryPlan execution(s) parented under this span. Returns empty for non-system
+  // spans or sessions without a query catalog (Open mode). Two stages because parent linking is only
+  // reliable in single-threaded mode (worker threads in multi-threaded mode have no enclosing Typhon
+  // span at SystemEnd time, so the QueryPlan span lands with parentSpanId = 0 — round-trip via
+  // (systemIdx, tickNumber) instead. Both endpoints stay cheap; staleTime: Infinity makes refetches
+  // free across re-selections of the same span.
+  const parentSpanIdNum = span.spanId ? Number(span.spanId) : 0;
+  const isProfilerSession = sessionKind === 'trace' || sessionKind === 'attach';
+  const byParentQuery = useGetApiSessionsSessionIdProfilerExecutionsByParentParentSpanId(
+    sessionId ?? '',
+    parentSpanIdNum,
+    { query: { enabled: !!sessionId && isProfilerSession && parentSpanIdNum !== 0, staleTime: Infinity } },
+  );
+  const byParentMatches = byParentQuery.data?.data ?? [];
+  // System spans (SchedulerSystemArchetype / SchedulerChunk emitted via the external-timestamp pattern)
+  // carry the systemIndex on their rawEvent payload — surface it as the fallback lookup key when the
+  // by-parent path returns nothing.
+  const rawSystemIdx = (span.rawEvent as { systemIndex?: number | string } | undefined)?.systemIndex;
+  const systemIdxFallback = rawSystemIdx === undefined || rawSystemIdx === null ? -1 : Number(rawSystemIdx);
+  const tickNumber = span.rawEvent ? Number(span.rawEvent.tickNumber) : -1;
+  const bySystemTickEnabled = !!sessionId && isProfilerSession
+    && byParentQuery.isFetched && byParentMatches.length === 0
+    && systemIdxFallback >= 0 && tickNumber >= 0;
+  const bySystemTickQuery = useGetApiSessionsSessionIdProfilerExecutionsBySystemTickSystemIdxTickIndex(
+    sessionId ?? '',
+    Math.max(0, systemIdxFallback),
+    Math.max(0, tickNumber),
+    { query: { enabled: bySystemTickEnabled, staleTime: Infinity } },
+  );
+  const bySystemTickMatches = bySystemTickQuery.data?.data ?? [];
+  const matchedExecutions = byParentMatches.length > 0 ? byParentMatches : bySystemTickMatches;
+  const matchedExecution = matchedExecutions.length > 0 ? matchedExecutions[0] : null;
 
   async function handleOpen(): Promise<void> {
     if (!loc) return;
@@ -81,6 +128,22 @@ function SpanDetail({ span }: { span: SpanData }): React.JSX.Element {
     } catch (err) {
       setOpenError((err as Error).message);
     }
+  }
+
+  function handleInspectExecution(): void {
+    if (!matchedExecution) return;
+    const def = matchedExecution.definitionId;
+    if (!def) return;
+    const kind = Number(def.kind);
+    const localId = Number(def.localId);
+    const tickIndex = Number(matchedExecution.tickIndex);
+    const systemId = Number(matchedExecution.systemId ?? -1);
+    setEiFocus({ kind, localId });
+    setEiSelected({ tickIndex, systemId });
+    // Mirror onto the Plan Tree store so a swap to that panel lands on the same execution view.
+    setPlanFocus({ kind, localId });
+    setPlanSelectedExecution(matchedExecution);
+    openViewExecutionInspector();
   }
 
   return (
@@ -206,16 +269,27 @@ function SpanDetail({ span }: { span: SpanData }): React.JSX.Element {
           )}
         </dl>
 
-        {loc && (
+        {(loc || matchedExecution) && (
           <div className="mt-2 flex flex-wrap gap-2 border-t border-border pt-2">
-            <button type="button" onClick={() => openSourcePreview(loc.file, loc.line)}
-              className="flex items-center gap-1 rounded border border-border bg-background px-2 py-0.5 text-[11px] hover:bg-accent">
-              <FileCode className="h-3 w-3" /> Show inline
-            </button>
-            <button type="button" onClick={handleOpen}
-              className="flex items-center gap-1 rounded border border-border bg-background px-2 py-0.5 text-[11px] hover:bg-accent">
-              <ExternalLink className="h-3 w-3" /> Open in editor
-            </button>
+            {loc && (
+              <>
+                <button type="button" onClick={() => openSourcePreview(loc.file, loc.line)}
+                  className="flex items-center gap-1 rounded border border-border bg-background px-2 py-0.5 text-[11px] hover:bg-accent">
+                  <FileCode className="h-3 w-3" /> Show inline
+                </button>
+                <button type="button" onClick={handleOpen}
+                  className="flex items-center gap-1 rounded border border-border bg-background px-2 py-0.5 text-[11px] hover:bg-accent">
+                  <ExternalLink className="h-3 w-3" /> Open in editor
+                </button>
+              </>
+            )}
+            {matchedExecution && (
+              <button type="button" onClick={handleInspectExecution}
+                title={`Open this tick's execution of EcsQuery #${matchedExecution.definitionId?.localId} in the Execution Inspector`}
+                className="flex items-center gap-1 rounded border border-border bg-background px-2 py-0.5 text-[11px] hover:bg-accent">
+                <Search className="h-3 w-3" /> Inspect query execution
+              </button>
+            )}
             {openError && <span className="w-full truncate text-[11px] text-destructive" title={openError}>{openError.length > 60 ? openError.slice(0, 60) + '…' : openError}</span>}
           </div>
         )}
@@ -230,8 +304,28 @@ function ChunkDetail({ chunk }: { chunk: ChunkSpan }): React.JSX.Element {
   const globalStartUs = useGlobalStartUs();
   const resolveSystem = useSourceLocationStore((s) => s.resolveSystem);
   const openInEditor = useOptionsStore((s) => s.openInEditor);
+  const sessionId = useSessionStore((s) => s.sessionId);
+  const sessionKind = useSessionStore((s) => s.kind);
+  const setEiFocus = useExecutionInspectorStore((s) => s.setFocus);
+  const setEiSelected = useExecutionInspectorStore((s) => s.setSelected);
+  const setPlanFocus = useQueryPlanStore((s) => s.setFocus);
+  const setPlanSelectedExecution = useQueryPlanStore((s) => s.setSelectedExecution);
+  // Look up which tick this chunk belongs to by binary-searching tick summaries against the chunk's startUs.
+  // Required for the (systemIdx, tickIndex) round-trip key — ChunkSpan doesn't carry the tickNumber directly
+  // because chunks are stored under their owning TickData.chunks array, not tagged individually.
+  const tickNumber = useProfilerSessionStore((s) => findTickNumberForUs(s.metadata?.tickSummaries ?? undefined, chunk.startUs));
   const [openError, setOpenError] = useState<string | null>(null);
   const loc = resolveSystem(chunk.systemIndex);
+
+  const isProfilerSession = sessionKind === 'trace' || sessionKind === 'attach';
+  const execsQuery = useGetApiSessionsSessionIdProfilerExecutionsBySystemTickSystemIdxTickIndex(
+    sessionId ?? '',
+    chunk.systemIndex,
+    tickNumber ?? -1,
+    { query: { enabled: !!sessionId && isProfilerSession && tickNumber !== null, staleTime: Infinity } },
+  );
+  const matchedExecutions = execsQuery.data?.data ?? [];
+  const matchedExecution = matchedExecutions.length > 0 ? matchedExecutions[0] : null;
 
   async function handleOpen(): Promise<void> {
     if (!loc) return;
@@ -242,6 +336,21 @@ function ChunkDetail({ chunk }: { chunk: ChunkSpan }): React.JSX.Element {
     } catch (err) {
       setOpenError((err as Error).message);
     }
+  }
+
+  function handleInspectExecution(): void {
+    if (!matchedExecution) return;
+    const def = matchedExecution.definitionId;
+    if (!def) return;
+    const kind = Number(def.kind);
+    const localId = Number(def.localId);
+    const tickIndex = Number(matchedExecution.tickIndex);
+    const systemId = Number(matchedExecution.systemId ?? -1);
+    setEiFocus({ kind, localId });
+    setEiSelected({ tickIndex, systemId });
+    setPlanFocus({ kind, localId });
+    setPlanSelectedExecution(matchedExecution);
+    openViewExecutionInspector();
   }
 
   return (
@@ -289,16 +398,27 @@ function ChunkDetail({ chunk }: { chunk: ChunkSpan }): React.JSX.Element {
           )}
         </dl>
 
-        {loc && (
+        {(loc || matchedExecution) && (
           <div className="mt-2 flex flex-wrap gap-2 border-t border-border pt-2">
-            <button type="button" onClick={() => openSourcePreview(loc.file, loc.line)}
-              className="flex items-center gap-1 rounded border border-border bg-background px-2 py-0.5 text-[11px] hover:bg-accent">
-              <FileCode className="h-3 w-3" /> Show inline
-            </button>
-            <button type="button" onClick={handleOpen}
-              className="flex items-center gap-1 rounded border border-border bg-background px-2 py-0.5 text-[11px] hover:bg-accent">
-              <ExternalLink className="h-3 w-3" /> Open in editor
-            </button>
+            {loc && (
+              <>
+                <button type="button" onClick={() => openSourcePreview(loc.file, loc.line)}
+                  className="flex items-center gap-1 rounded border border-border bg-background px-2 py-0.5 text-[11px] hover:bg-accent">
+                  <FileCode className="h-3 w-3" /> Show inline
+                </button>
+                <button type="button" onClick={handleOpen}
+                  className="flex items-center gap-1 rounded border border-border bg-background px-2 py-0.5 text-[11px] hover:bg-accent">
+                  <ExternalLink className="h-3 w-3" /> Open in editor
+                </button>
+              </>
+            )}
+            {matchedExecution && (
+              <button type="button" onClick={handleInspectExecution}
+                title={`Open this tick's execution of EcsQuery #${matchedExecution.definitionId?.localId} in the Execution Inspector`}
+                className="flex items-center gap-1 rounded border border-border bg-background px-2 py-0.5 text-[11px] hover:bg-accent">
+                <Search className="h-3 w-3" /> Inspect query execution
+              </button>
+            )}
             {openError && <span className="w-full truncate text-[11px] text-destructive" title={openError}>{openError.length > 60 ? openError.slice(0, 60) + '…' : openError}</span>}
           </div>
         )}
@@ -691,6 +811,31 @@ function formatUs(us: number): string {
  * a start-time of "2.5 s" and a duration of "1.2 s" read with matching visual grammar.
  */
 const formatDurationUs = formatUs;
+
+/**
+ * Binary-search a tick that contains <paramref name="startUs"/> in absolute (QPC) microseconds.
+ * Returns <c>null</c> when summaries aren't loaded yet or the point falls outside the trace window.
+ * Used by ChunkDetail to resolve the tick a clicked chunk belongs to so the (systemIdx, tickIndex)
+ * round-trip key can locate the matching query execution.
+ */
+function findTickNumberForUs(
+  summaries: ReadonlyArray<{ tickNumber: number | string; startUs: number | string; durationUs: number | string }> | undefined,
+  startUs: number,
+): number | null {
+  if (!summaries || summaries.length === 0) return null;
+  let lo = 0;
+  let hi = summaries.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >>> 1;
+    const t = summaries[mid];
+    const s = Number(t.startUs);
+    const e = s + Number(t.durationUs);
+    if (startUs < s) hi = mid - 1;
+    else if (startUs >= e) lo = mid + 1;
+    else return Number(t.tickNumber);
+  }
+  return null;
+}
 
 function formatBytes(b: number): string {
   if (b < 1024) return `${b} B`;

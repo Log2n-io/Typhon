@@ -98,8 +98,8 @@ internal static class RuntimeSourceLocationManifest
         {
             if (CachedMerged.HasValue) return CachedMerged.Value;
 
-            var compileFiles = Typhon.Engine.Profiler.Generated.SourceLocations.Files ?? [];
-            var compileEntries = Typhon.Engine.Profiler.Generated.SourceLocations.All ?? [];
+            var compileFiles = Profiler.Generated.SourceLocations.Files ?? [];
+            var compileEntries = Profiler.Generated.SourceLocations.All ?? [];
 
             var files = new string[compileFiles.Length + RuntimeFiles.Count];
             Array.Copy(compileFiles, files, compileFiles.Length);
@@ -125,7 +125,7 @@ internal static class RuntimeSourceLocationManifest
 
     private static ushort InternFile(string path)
     {
-        var compileFiles = Typhon.Engine.Profiler.Generated.SourceLocations.Files ?? [];
+        var compileFiles = Profiler.Generated.SourceLocations.Files ?? [];
         for (ushort i = 0; i < compileFiles.Length; i++)
         {
             if (string.Equals(compileFiles[i], path, StringComparison.Ordinal))

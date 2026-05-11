@@ -118,7 +118,6 @@ public sealed class EngineLifecycle : IDisposable
                     // 65536 pages × 8KB = 512 MiB page cache.
                     opts.DatabaseCacheSize = 65536UL * 8192;
                 })
-                .AddSingleton<IWalFileIO, WalFileIO>()
                 .AddDatabaseEngine(engineOpts =>
                 {
                     engineOpts.Wal = new WalWriterOptions
