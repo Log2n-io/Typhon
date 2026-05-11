@@ -1202,7 +1202,9 @@ public class TraceEventEncodeEquivalenceTests
         Span<byte> bufStruct = stackalloc byte[256];
         ev.EncodeTo(bufStruct, EndTs, out var lenStruct);
 
-        var golden = Convert.FromHexString("4800BD0744443333222211111111000000000000DDDDCCCCBBBBAAAAF0DEBC9A78563412010F0F0F0F0F0F0F0FF0F0F0F0F0F0F0F0110013BB0B000000000000A40F000000000000");
+        // v9 (#342): trailing optMask byte = 0 because none of the new [Optional] fields are set,
+        // so the encoded size grows by 1 byte. The new size prefix is 0x49 = 73 (vs. v8's 72).
+        var golden = Convert.FromHexString("4900BD0744443333222211111111000000000000DDDDCCCCBBBBAAAAF0DEBC9A78563412010F0F0F0F0F0F0F0FF0F0F0F0F0F0F0F0110013BB0B000000000000A40F00000000000000");
         AssertSpanEqualsGolden(bufStruct, lenStruct, golden);
     }
 

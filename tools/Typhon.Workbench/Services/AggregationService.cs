@@ -404,7 +404,7 @@ public static class AggregationService
             var a = metadata.Archetypes[i];
             for (var c = 0; c < a.ComponentTypeNames.Length; c++)
             {
-                if (Typhon.Engine.Data.Schema.ComponentFamilyResolver.ResolveByHeuristic(a.ComponentTypeNames[c]) == family)
+                if (ComponentFamilyResolver.ResolveByHeuristic(a.ComponentTypeNames[c]) == family)
                 {
                     archIds.Add(a.ArchetypeId);
                     break;

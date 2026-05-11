@@ -18,10 +18,12 @@ import { computeGatingAnalysis } from '@/lib/dag/gatingAnalysis';
 import SystemDagCanvas from './SystemDagCanvas';
 import SystemDagSidePanel from './SystemDagSidePanel';
 import SystemDagToolbar from './SystemDagToolbar';
+import { buildQueryCountsBySystem, buildSingleOwnedDefBySystem } from './queryCounts';
 import { timeToTickRange } from './tickRangeMapping';
 import { useDagViewStore } from './useDagViewStore';
 import { useQueueBackpressure } from './useQueueBackpressure';
 import { useSystemStats } from './useSystemStats';
+import { useQueryDefinitions } from '../QueryCatalog/useQueryDefinitions';
 
 /**
  * System DAG view — Phase 1 + Phase 2 (#315 + #316).
@@ -203,6 +205,39 @@ export default function SystemDagPanel(_props: IDockviewPanelProps) {
     [topology, dataTrack],
   );
 
+  // P8 of #342: distinct query-definition counts per owning system. Drives the "Queries" badge on
+  // each DAG tile. We reuse the QueryCatalog data hook (TanStack cache is shared so this is a free
+  // ride) and resolve the numeric ownerSystemIds against the metadata.systems table to keys we can
+  // index by name on the canvas side.
+  const { definitions: queryDefinitions } = useQueryDefinitions();
+  const systemIndexToName = useMemo(() => {
+    const m = new Map<number, string>();
+    for (const s of metadata?.systems ?? []) m.set(Number(s.index), s.name ?? `System[${s.index}]`);
+    return m;
+  }, [metadata]);
+  // Inverse lookup used by the QueriesBadge to navigate to the Catalog with a numeric system filter.
+  // Computed once here so the per-node badge component is hook-free (no useProfilerMetadata /
+  // useSessionStore subscriptions on the hot render path — 50+ nodes would otherwise mount 50+
+  // observers against the shared TanStack cache).
+  const systemNameToIndex = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const s of metadata?.systems ?? []) {
+      if (s.name) m.set(s.name, Number(s.index));
+    }
+    return m;
+  }, [metadata]);
+  const queryCountsBySystem = useMemo(
+    () => buildQueryCountsBySystem(queryDefinitions, systemIndexToName),
+    [queryDefinitions, systemIndexToName],
+  );
+  // When a system owns exactly one query, the badge click auto-expands that row in the Catalog so
+  // the user lands on the relevant detail instead of just a one-row filtered list. Multi-owner
+  // systems leave the choice to the user — the filter alone is enough discovery.
+  const singleOwnedDefBySystem = useMemo(
+    () => buildSingleOwnedDefBySystem(queryDefinitions, systemIndexToName),
+    [queryDefinitions, systemIndexToName],
+  );
+
   const tickSummaries = metadata?.tickSummaries ?? null;
   // Worker count drives the toolbar's parallelism-inefficiency pill (A1 / A6). Header field is
   // `number | string` per the OpenAPI shape; coerce defensively at the boundary so the toolbar
@@ -246,6 +281,9 @@ export default function SystemDagPanel(_props: IDockviewPanelProps) {
             dataTrackSystems={dataTrack ? dataTrackSystems : null}
             selectedPhase={selectedPhase}
             hoveredSystemFromCrossPanel={hoveredKey?.systemName ?? null}
+            queryCountsBySystem={queryCountsBySystem}
+            singleOwnedDefBySystem={singleOwnedDefBySystem}
+            systemNameToIndex={systemNameToIndex}
             onSelectSystem={(name) => {
               setSystem(name);
               setSidePanelOverride(null);

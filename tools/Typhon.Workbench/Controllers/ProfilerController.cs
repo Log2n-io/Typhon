@@ -431,4 +431,145 @@ public sealed class ProfilerController : ControllerBase
         }
         return result;
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════════════════════════
+    // #337 (P4 of #342) — Query Catalog endpoints.
+    // Backed by Services.QueryCatalogService (per-session lazy walker over QueryDefinitionDescribe /
+    // QueryArgs / QueryPlan / Query{Execute*,Plan,Count} spans). First call triggers a one-pass build;
+    // subsequent calls are O(1) on the cached result.
+    // ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Lists all query definitions observed in the trace's catalog. One entry per distinct
+    /// <c>(Kind, LocalId)</c> identity emitted via <see cref="TraceEventKind.QueryDefinitionDescribe"/>.
+    /// </summary>
+    [HttpGet("queries")]
+    public async Task<ActionResult<QueryDefinitionDto[]>> GetQueries(Guid sessionId, CancellationToken ct)
+    {
+        var catalog = ResolveCatalog();
+        if (catalog == null)
+        {
+            return Conflict(new ProblemDetails
+            {
+                Title = "session_not_ready",
+                Detail = "Query catalog is only available after the session metadata is built.",
+                Status = StatusCodes.Status409Conflict,
+            });
+        }
+        var defs = await catalog.GetAllDefinitionsAsync(ct);
+        return Ok(defs);
+    }
+
+    /// <summary>
+    /// Returns a single query definition by its <c>(Kind, LocalId)</c> identity. <c>kind</c> is 0 for
+    /// View-based queries and 1 for EcsQuery-based queries.
+    /// </summary>
+    [HttpGet("queries/{kind:int}/{localId:long}")]
+    public async Task<ActionResult<QueryDefinitionDto>> GetQuery(Guid sessionId, int kind, long localId, CancellationToken ct)
+    {
+        if (kind < 0 || kind > 255 || localId < 0 || localId > uint.MaxValue) return BadRequest();
+        var catalog = ResolveCatalog();
+        if (catalog == null) return Conflict();
+        var def = await catalog.GetDefinitionAsync((byte)kind, (uint)localId, ct);
+        if (def == null) return NotFound();
+        return Ok(def);
+    }
+
+    /// <summary>
+    /// Lists executions for a given definition, with optional filters (<c>from</c>/<c>to</c> tick range
+    /// + <c>system</c> id) and pagination (<c>pageOffset</c>, <c>pageSize</c>; default 100, max 500).
+    /// </summary>
+    [HttpGet("queries/{kind:int}/{localId:long}/executions")]
+    public async Task<ActionResult<QueryExecutionDto[]>> GetQueryExecutions(
+        Guid sessionId,
+        int kind,
+        long localId,
+        [FromQuery] long? from,
+        [FromQuery] long? to,
+        [FromQuery] int? system,
+        [FromQuery] int? pageOffset,
+        [FromQuery] int? pageSize,
+        CancellationToken ct)
+    {
+        if (kind < 0 || kind > 255 || localId < 0 || localId > uint.MaxValue) return BadRequest();
+        var resolvedPageSize = pageSize ?? 100;
+        var resolvedPageOffset = pageOffset ?? 0;
+        if (resolvedPageSize <= 0 || resolvedPageSize > Services.QueryCatalogService.MaxPageSize)
+        {
+            return BadRequest(new { error = "pageSize_out_of_range", min = 1, max = Services.QueryCatalogService.MaxPageSize });
+        }
+        if (resolvedPageOffset < 0)
+        {
+            return BadRequest(new { error = "pageOffset_out_of_range", min = 0 });
+        }
+
+        var catalog = ResolveCatalog();
+        if (catalog == null) return Conflict();
+        var execs = await catalog.GetExecutionsAsync(
+            (byte)kind,
+            (uint)localId,
+            from,
+            to,
+            system,
+            resolvedPageSize,
+            resolvedPageOffset,
+            ct);
+        return Ok(execs);
+    }
+
+    /// <summary>
+    /// Returns a single execution by its <see cref="QueryExecutionDto.SpanId"/>. Indexed lookup against
+    /// the pre-built per-session map in <see cref="QueryCatalogData.ExecutionsBySpanId"/>.
+    /// </summary>
+    [HttpGet("executions/{spanId:long}")]
+    public async Task<ActionResult<QueryExecutionDto>> GetExecution(Guid sessionId, long spanId, CancellationToken ct)
+    {
+        var catalog = ResolveCatalog();
+        if (catalog == null) return Conflict();
+        var exec = await catalog.GetExecutionBySpanIdAsync(spanId, ct);
+        if (exec == null) return NotFound();
+        return Ok(exec);
+    }
+
+    /// <summary>
+    /// Returns the query executions whose parent span id matches <paramref name="parentSpanId"/>. The profiler
+    /// detail pane uses this to round-trip from a selected <c>Scheduler:System:SingleThreaded</c> span to the
+    /// matching per-tick QueryPlan execution(s) — typically one per system tick for a pull-mode view.
+    /// Returns an empty array when no executions are parented under the given span id.
+    /// </summary>
+    [HttpGet("executions/by-parent/{parentSpanId:long}")]
+    public async Task<ActionResult<QueryExecutionDto[]>> GetExecutionsByParent(Guid sessionId, long parentSpanId, CancellationToken ct)
+    {
+        var catalog = ResolveCatalog();
+        if (catalog == null) return Conflict();
+        var execs = await catalog.GetExecutionsByParentSpanIdAsync(parentSpanId, ct);
+        return Ok(execs);
+    }
+
+    /// <summary>
+    /// Returns the query executions for the given (systemIdx, tickIndex) pair. Multi-threaded scheduler
+    /// chunks carry the system index natively; runtime-emitted per-tick QueryPlan spans carry
+    /// <c>OwnerSystemIdx</c> on the wire — together they let the profiler detail pane round-trip from a
+    /// clicked chunk to its matching execution without relying on parent-span linkage (which is null in
+    /// multi-threaded mode worker threads).
+    /// </summary>
+    [HttpGet("executions/by-system-tick/{systemIdx:int}/{tickIndex:long}")]
+    public async Task<ActionResult<QueryExecutionDto[]>> GetExecutionsBySystemTick(Guid sessionId, int systemIdx, long tickIndex, CancellationToken ct)
+    {
+        var catalog = ResolveCatalog();
+        if (catalog == null) return Conflict();
+        var execs = await catalog.GetExecutionsBySystemTickAsync(systemIdx, tickIndex, ct);
+        return Ok(execs);
+    }
+
+    private Services.QueryCatalogService ResolveCatalog()
+    {
+        var session = HttpContext.Items["Session"];
+        return session switch
+        {
+            TraceSession trace => trace.Runtime.IsReady ? trace.Runtime.QueryCatalog : null,
+            AttachSession attach => attach.Runtime.QueryCatalog,
+            _ => null,
+        };
+    }
 }

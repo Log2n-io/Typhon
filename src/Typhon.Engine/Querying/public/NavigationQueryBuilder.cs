@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq.Expressions;
+using System.Runtime.CompilerServices;
 
 namespace Typhon.Engine;
 
@@ -25,7 +26,11 @@ public class NavigationQueryBuilder<TSource, TTarget> where TSource : unmanaged 
         return this;
     }
 
-    public ViewBase ToView(int bufferCapacity = ViewDeltaRingBuffer.DefaultCapacity)
+    public ViewBase ToView(
+        int bufferCapacity = ViewDeltaRingBuffer.DefaultCapacity,
+        [CallerFilePath]   string callerFile = null,
+        [CallerLineNumber] int    callerLine = 0,
+        [CallerMemberName] string callerMethod = null)
     {
         if (_sourcePredicates.Count == 0 && _targetPredicates.Count == 0)
         {
@@ -47,7 +52,8 @@ public class NavigationQueryBuilder<TSource, TTarget> where TSource : unmanaged 
         var targetEvals = _targetPredicates.Count > 0 ? QueryResolverHelper.ResolveEvaluators(_targetPredicates.ToArray(), targetCT, 1) : [];
 
         // Build the NavigationView
-        var view = new NavigationView<TSource, TTarget>(sourceEvals, targetEvals, sourceCT, targetCT, fkFieldIndex, fkField.OffsetInComponentStorage, bufferCapacity);
+        var view = new NavigationView<TSource, TTarget>(sourceEvals, targetEvals, sourceCT, targetCT, fkFieldIndex, fkField.OffsetInComponentStorage,
+            bufferCapacity, 0, callerFile, callerLine, callerMethod);
 
         // Build field dependency arrays for each component table's ViewRegistry
         // Source needs: FK field + any source predicate fields
@@ -78,8 +84,8 @@ public class NavigationQueryBuilder<TSource, TTarget> where TSource : unmanaged 
         using var tx = _dbe.CreateQuickTransaction();
         view.PopulateFromEntityMaps(tx);
 
-        // Drain any concurrent entries that arrived during population
-        view.Refresh(tx);
+        // Drain any concurrent entries that arrived during population (engine-internal — no user execution site)
+        view.RefreshFromScheduler(tx);
         view.ClearDelta();
 
         return view;

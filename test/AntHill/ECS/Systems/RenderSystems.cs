@@ -4,7 +4,9 @@ namespace AntHill;
 
 /// <summary>
 /// Resets per-worker render buffers + pre-computes the food/nest overlay + downsamples the
-/// pheromone grid into the heatmap RGBA buffer. Pure callback.
+/// pheromone grid into the heatmap RGBA buffer. Pure callback. Cross-phase ordering vs <c>AntUpdate</c>
+/// (writes PheromoneGrid) and <c>PheroDecay</c> (writes PheromoneGrid) is derived automatically
+/// from the R/W graph — no explicit edges needed.
 /// </summary>
 internal sealed class PrepareRenderBufferSystem : CallbackSystem
 {
@@ -18,8 +20,7 @@ internal sealed class PrepareRenderBufferSystem : CallbackSystem
         .ReadsResource("FoodInventory")
         .ReadsResource("NestInventory")
         .WritesResource("RenderBuffers")
-        .WritesResource("Heatmap")
-        .AfterAll("Brain_T0", "Brain_T1", "Brain_T2", "Brain_T3", "PheroDecay");
+        .WritesResource("Heatmap");
 
     protected override void Execute(TickContext ctx) => _bridge.PrepareRender(ctx);
 }
@@ -77,7 +78,7 @@ internal sealed class PublishRenderFrameSystem : CallbackSystem
 /// <summary>
 /// Drains the three telemetry queues (deaths, food pickups, food deliveries) and updates the
 /// public counters (<c>DeathCount</c>, <c>FoodDelivered</c>) the UI exposes. Replaces the
-/// previous <c>Interlocked.Increment</c> calls in Metabolism / FoodDetect — same totals, but
+/// previous <c>Interlocked.Increment</c> calls in <c>AntUpdate</c> — same totals, but
 /// the data flow is visible in the System DAG view as queue-edges.
 /// </summary>
 internal sealed class AntStatsAggregatorSystem : CallbackSystem
@@ -91,7 +92,8 @@ internal sealed class AntStatsAggregatorSystem : CallbackSystem
         .ReadsEvents(_bridge._antDiedQueue)
         .ReadsEvents(_bridge._foodPickedUpQueue)
         .ReadsEvents(_bridge._foodDeliveredQueue)
-        .After("FoodDetect")
+        // Cross-phase producer→consumer edge from AntUpdate is derived automatically by the
+        // deriver (WritesEvents on AntUpdate side, ReadsEvents here).
         // Run before the renderer's stats dump so the published counters reflect this tick.
         .Before("PrepareRenderBuffer");
 

@@ -377,6 +377,12 @@ public sealed class TraceFileWriter : IDisposable
     /// <summary>Magic marker for the trailing SourceLocationManifest. "SLMN" LE.</summary>
     public const uint SourceLocationManifestMagic = 0x4E_4D_4C_53;
 
+    /// <summary>Magic marker for the trailing QuerySourceStringTable (deduped query source-file paths + method names). "QSST" LE (#342).</summary>
+    public const uint QuerySourceStringTableMagic = 0x54_53_53_51;
+
+    /// <summary>Magic marker for the trailing QueryDefinitionTable (materialized definition catalog). "QDFT" LE (#342).</summary>
+    public const uint QueryDefinitionTableMagic = 0x54_46_44_51;
+
     /// <summary>
     /// Append the source-location manifest to the file. Returns the (fileTableOffset, manifestOffset)
     /// that the caller MUST patch into the file header via <see cref="RewriteHeader"/>. Phase 3 of the
@@ -413,6 +419,39 @@ public sealed class TraceFileWriter : IDisposable
         }
         _writer.Flush();
         return (fileTableOffset, manifestOffset);
+    }
+
+    /// <summary>
+    /// Append the QuerySourceStringTable trailer section (#342, v9) and return the offset for the header patch. The table is a packed array of length-prefixed
+    /// UTF-8 strings indexed by 16-bit ID. Slot 0 is reserved as the "no source" sentinel and always serializes as the empty string. Empty input → no section
+    /// written (return 0).
+    /// </summary>
+    /// <remarks>
+    /// Wire layout:
+    /// <code>
+    /// u32  Magic ("QSST")
+    /// u32  Count (including the index-0 sentinel)
+    /// for i in 0..Count: u16 length, byte[length] utf8
+    /// </code>
+    /// </remarks>
+    public long WriteQuerySourceStringTable(IReadOnlyList<string> strings)
+    {
+        ArgumentNullException.ThrowIfNull(strings);
+        if (strings.Count == 0)
+        {
+            return 0;
+        }
+
+        _writer.Flush();
+        var offset = _stream.Position;
+        _writer.Write(QuerySourceStringTableMagic);
+        _writer.Write((uint)strings.Count);
+        for (var i = 0; i < strings.Count; i++)
+        {
+            WriteVarString(strings[i] ?? string.Empty);
+        }
+        _writer.Flush();
+        return offset;
     }
 
     /// <summary>

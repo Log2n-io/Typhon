@@ -940,4 +940,162 @@ internal static partial class TyphonEvent
         QueueTickEndCodec.Write(dst, (byte)slotIdx, Stopwatch.GetTimestamp(), tickNumber, queueId, peakDepth, endOfTickDepth, overflowCount, produced, consumed);
         ring.Publish();
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Query Definition Export (v9, #342)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Emit a one-shot <see cref="TraceEventKind.QueryDefinitionDescribe"/> record describing a View or EcsQuery definition. Internally deduplicates against
+    /// <see cref="QueryDefinitionDescribeTracker"/> — the first call per (kind, localId) per profiling session emits, subsequent calls are no-ops. Gated by
+    /// <see cref="TelemetryConfig.QueryActive"/> for hot-path elimination when the profiler's query category is off.
+    /// </summary>
+    /// <remarks>
+    /// Called from <c>PlanBuilder.BuildPlan</c> when the caller (View / EcsQuery) supplies its identity. Skipping the call (passing kind/localId == 0) is valid
+    /// for ad-hoc engine-internal queries with no user-facing identity.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void EmitQueryDefinitionDescribe(byte kind, uint localId, ushort targetComponentType, short primaryIndexFieldIdx, short sortFieldIdx,
+        byte sortDescending, ushort definitionSourceFileId, int definitionSourceLine, ushort definitionSourceMethodId,
+        ReadOnlySpan<byte> evaluatorBlob, ReadOnlySpan<byte> fieldDependenciesBlob)
+    {
+        if (!TelemetryConfig.QueryActive)
+        {
+            return;
+        }
+        if (SuppressedKinds[(int)TraceEventKind.QueryDefinitionDescribe])
+        {
+            return;
+        }
+
+        // Dedup — first time per (kind, localId) we describe; subsequent emits skip.
+        if (!QueryDefinitionDescribeTracker.TryMarkAndCheck(kind, localId))
+        {
+            return;
+        }
+
+        var slotIdx = ThreadSlotRegistry.GetOrAssignSlot();
+        if (slotIdx < 0)
+        {
+            // No slot available — undo the mark so the next caller can retry, otherwise the
+            // descriptor would be permanently silenced for this identity in the session.
+            QueryDefinitionDescribeTracker.Unmark(kind, localId);
+            return;
+        }
+
+        var slot = ThreadSlotRegistry.GetSlot(slotIdx);
+        var size = QueryDefinitionDescribeEventCodec.ComputeSize(
+            evaluatorBlob.Length / QueryDefinitionDescribeEventCodec.EvaluatorEntrySize,
+            fieldDependenciesBlob.Length / QueryDefinitionDescribeEventCodec.FieldDependencyEntrySize);
+        if (!TryReserveOnChain(slot, size, (byte)TraceEventKind.QueryDefinitionDescribe, out var dst, out var ring))
+        {
+            // Ring saturated — undo the mark; subsequent refresh will retry.
+            QueryDefinitionDescribeTracker.Unmark(kind, localId);
+            return;
+        }
+
+        QueryDefinitionDescribeEventCodec.Write(dst, (byte)slotIdx, Stopwatch.GetTimestamp(), kind, localId, targetComponentType,
+            primaryIndexFieldIdx, sortFieldIdx, sortDescending, definitionSourceFileId, definitionSourceLine, definitionSourceMethodId,
+            evaluatorBlob, fieldDependenciesBlob, out _);
+        ring.Publish();
+    }
+
+    /// <summary>
+    /// Emit a <see cref="TraceEventKind.QueryArgs"/> record carrying the widened threshold constants for a single query execution. Should be called immediately
+    /// after <see cref="BeginQueryPlan"/> when the plan has at least one evaluator; callers should skip the call when <c>evaluatorCount == 0</c> for size economy.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void EmitQueryArgs(ReadOnlySpan<byte> thresholdsBlob)
+    {
+        if (!TelemetryConfig.QueryActive)
+        {
+            return;
+        }
+        if (SuppressedKinds[(int)TraceEventKind.QueryArgs])
+        {
+            return;
+        }
+        if (thresholdsBlob.Length == 0)
+        {
+            return;
+        }
+
+        var slotIdx = ThreadSlotRegistry.GetOrAssignSlot();
+        if (slotIdx < 0)
+        {
+            return;
+        }
+
+        var slot = ThreadSlotRegistry.GetSlot(slotIdx);
+        var size = QueryArgsEventCodec.ComputeSize(thresholdsBlob.Length / QueryArgsEventCodec.ThresholdSize);
+        if (!TryReserveOnChain(slot, size, (byte)TraceEventKind.QueryArgs, out var dst, out var ring))
+        {
+            return;
+        }
+
+        QueryArgsEventCodec.Write(dst, (byte)slotIdx, Stopwatch.GetTimestamp(), thresholdsBlob, out _);
+        ring.Publish();
+    }
+
+    /// <summary>
+    /// Emit a <see cref="TraceEventKind.QueryPlan"/> span with caller-supplied start/end timestamps. Used by the runtime to record one execution per system tick
+    /// for system-input views — these views never go through the <c>PlanBuilder.BuildPlan</c> path at consumption time (pull-mode views) yet still need a per-tick
+    /// span so the Workbench Execution Inspector can drill in. The (kind, localId) pair attaches the span to the view's catalog row;
+    /// the <see cref="QueryDefinitionDescribeTracker"/> already emitted the descriptor once via <see cref="ViewBase.EmitDescriptorIfNeeded"/>.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static void EmitQueryPlanExternal(long startTimestamp, long endTimestamp, byte evaluatorCount, ushort indexFieldIdx, long rangeMin, long rangeMax,
+        byte queryInstanceKind, uint queryInstanceLocalId, ushort executionSourceFileId, int executionSourceLine, ushort executionSourceMethodId, ushort ownerSystemIdx)
+    {
+        if (!TelemetryConfig.QueryActive)
+        {
+            return;
+        }
+        if (SuppressedKinds[(int)TraceEventKind.QueryPlan])
+        {
+            return;
+        }
+
+        var slotIdx = ThreadSlotRegistry.GetOrAssignSlot();
+        if (slotIdx < 0)
+        {
+            return;
+        }
+        var slot = ThreadSlotRegistry.GetSlot(slotIdx);
+        var spanId = SpanIdGenerator.NextId(slotIdx, slot);
+        // Parent linking — fall back to whatever Typhon span is open on this thread (typically the System span);
+        // when nothing is open (multi-threaded mode worker threads), parentSpanId = 0 puts the QueryPlan at the
+        // lane root. Round-trip from a clicked scheduler chunk to the matching execution then relies on the
+        // OwnerSystemIdx + tickNumber pair instead of parent-span linkage.
+        var parentSpanId = CurrentOpenSpanId;
+
+        var evt = new QueryPlanEvent
+        {
+            Header = new TraceSpanHeader
+            {
+                ThreadSlot = (byte)slotIdx,
+                StartTimestamp = startTimestamp,
+                SpanId = spanId,
+                ParentSpanId = parentSpanId,
+            },
+            EvaluatorCount = evaluatorCount,
+            IndexFieldIdx = indexFieldIdx,
+            RangeMin = rangeMin,
+            RangeMax = rangeMax,
+            QueryInstanceKind = queryInstanceKind,
+            QueryInstanceLocalId = queryInstanceLocalId,
+            ExecutionSourceFileId = executionSourceFileId,
+            ExecutionSourceLine = executionSourceLine,
+            ExecutionSourceMethodId = executionSourceMethodId,
+            OwnerSystemIdx = ownerSystemIdx,
+        };
+
+        var size = evt.ComputeSize();
+        if (!TryReserveOnChain(slot, size, (byte)TraceEventKind.QueryPlan, out var dst, out var ring))
+        {
+            return;
+        }
+        evt.EncodeTo(dst, endTimestamp, out _);
+        ring.Publish();
+    }
 }

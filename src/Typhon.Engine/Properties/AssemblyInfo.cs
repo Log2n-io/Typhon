@@ -13,6 +13,7 @@ using System.Runtime.CompilerServices;
 
 // Test / sample friend assemblies
 [assembly: InternalsVisibleTo("AntHill")]
+[assembly: InternalsVisibleTo("AntHill.ProfileRunner")]
 [assembly: InternalsVisibleTo("Typhon.Benchmark")]
 [assembly: InternalsVisibleTo("Typhon.Client.Tests")]
 [assembly: InternalsVisibleTo("Typhon.Engine.Tests")]

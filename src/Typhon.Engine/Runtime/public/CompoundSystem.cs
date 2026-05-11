@@ -10,7 +10,7 @@ namespace Typhon.Engine;
 [PublicAPI]
 public abstract class CompoundSystem
 {
-    internal readonly List<object> _systems = [];
+    internal readonly List<ISystem> _systems = [];
 
     /// <summary>Configure the compound by adding sub-systems via <see cref="Add"/>.</summary>
     protected abstract void Configure();

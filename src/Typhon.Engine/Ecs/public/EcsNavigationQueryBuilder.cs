@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq.Expressions;
+using System.Runtime.CompilerServices;
 using JetBrains.Annotations;
 
 namespace Typhon.Engine;
@@ -35,10 +36,23 @@ public unsafe class EcsNavigationQueryBuilder<TSourceArch, TSource, TTarget> whe
     }
 
     /// <summary>Create an incremental navigation view. Registers with both source and target ViewRegistries.</summary>
-    public ViewBase ToView(int bufferCapacity = ViewDeltaRingBuffer.DefaultCapacity) => _inner.ToView(bufferCapacity);
+    public ViewBase ToView(
+        int bufferCapacity = ViewDeltaRingBuffer.DefaultCapacity,
+        [CallerFilePath]   string callerFile = null,
+        [CallerLineNumber] int    callerLine = 0,
+        [CallerMemberName] string callerMethod = null)
+        => _inner.ToView(bufferCapacity, callerFile, callerLine, callerMethod);
 
     /// <summary>Execute the navigation query and return matching source entity IDs.</summary>
-    public HashSet<EntityId> Execute() => ExecuteViaEntityMap();    // All entities use EntityMap-based enumeration (PK B+Tree removed)
+    public HashSet<EntityId> Execute(
+        [CallerFilePath]   string callerFile = null,
+        [CallerLineNumber] int    callerLine = 0,
+        [CallerMemberName] string callerMethod = null)
+    {
+        // callerFile/Line/Method captured at user call site; consumed by trace emission in P2 (issue #335).
+        _ = callerFile; _ = callerLine; _ = callerMethod;
+        return ExecuteViaEntityMap();    // All entities use EntityMap-based enumeration (PK B+Tree removed)
+    }
 
     private HashSet<EntityId> ExecuteViaEntityMap()
     {
@@ -161,8 +175,24 @@ public unsafe class EcsNavigationQueryBuilder<TSourceArch, TSource, TTarget> whe
     }
 
     /// <summary>Count matching source entities.</summary>
-    public int Count() => Execute().Count;
+    public int Count(
+        [CallerFilePath]   string callerFile = null,
+        [CallerLineNumber] int    callerLine = 0,
+        [CallerMemberName] string callerMethod = null)
+    {
+        // callerFile/Line/Method captured at user call site; consumed by trace emission in P2 (issue #335).
+        _ = callerFile; _ = callerLine; _ = callerMethod;
+        return Execute().Count;
+    }
 
     /// <summary>Test if any source entity matches.</summary>
-    public bool Any() => Execute().Count > 0;
+    public bool Any(
+        [CallerFilePath]   string callerFile = null,
+        [CallerLineNumber] int    callerLine = 0,
+        [CallerMemberName] string callerMethod = null)
+    {
+        // callerFile/Line/Method captured at user call site; consumed by trace emission in P2 (issue #335).
+        _ = callerFile; _ = callerLine; _ = callerMethod;
+        return Execute().Count > 0;
+    }
 }

@@ -35,8 +35,10 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
 
     /// <summary>Incremental mode: created with FieldEvaluators from Expression-based WHERE.</summary>
     internal EcsView(EcsQuery<TArchetype> query, FieldEvaluator[] evaluators, ComponentTable componentTable,
-        EcsViewFieldReader fieldReader, int bufferCapacity = ViewDeltaRingBuffer.DefaultCapacity, long baseTSN = 0) :
-        base(evaluators, BuildFieldDependencies(evaluators), componentTable.DBE.MemoryAllocator, componentTable, bufferCapacity, baseTSN)
+        EcsViewFieldReader fieldReader, int bufferCapacity = ViewDeltaRingBuffer.DefaultCapacity, long baseTSN = 0,
+        string sourceFile = null, int sourceLine = 0, string sourceMethod = null) :
+        base(evaluators, BuildFieldDependencies(evaluators), componentTable.DBE.MemoryAllocator, componentTable, bufferCapacity, baseTSN,
+            sourceFile, sourceLine, sourceMethod)
     {
         _query = query;
         _componentTable = componentTable;
@@ -48,8 +50,10 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
     /// <summary>Incremental mode with cached execution plan.</summary>
     internal EcsView(EcsQuery<TArchetype> query, FieldEvaluator[] evaluators, ComponentTable componentTable,
         EcsViewFieldReader fieldReader, ExecutionPlan plan,
-        int bufferCapacity = ViewDeltaRingBuffer.DefaultCapacity, long baseTSN = 0) :
-        base(evaluators, BuildFieldDependencies(evaluators), componentTable.DBE.MemoryAllocator, componentTable, [plan], bufferCapacity, baseTSN)
+        int bufferCapacity = ViewDeltaRingBuffer.DefaultCapacity, long baseTSN = 0,
+        string sourceFile = null, int sourceLine = 0, string sourceMethod = null) :
+        base(evaluators, BuildFieldDependencies(evaluators), componentTable.DBE.MemoryAllocator, componentTable, [plan], bufferCapacity, baseTSN,
+            sourceFile, sourceLine, sourceMethod)
     {
         _query = query;
         _componentTable = componentTable;
@@ -59,10 +63,11 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
     }
 
     /// <summary>OR mode: multiple branches with per-entity branch bitmaps.</summary>
-    internal EcsView(EcsQuery<TArchetype> query, FieldEvaluator[][] branchEvaluators, ExecutionPlan[] plans, ComponentTable componentTable, 
-        EcsViewFieldReader fieldReader, int bufferCapacity = ViewDeltaRingBuffer.DefaultCapacity, long baseTSN = 0) :
-        base(FlattenEvaluators(branchEvaluators), BuildFieldDependenciesMulti(branchEvaluators), componentTable.DBE.MemoryAllocator, 
-            componentTable, plans, bufferCapacity, baseTSN)
+    internal EcsView(EcsQuery<TArchetype> query, FieldEvaluator[][] branchEvaluators, ExecutionPlan[] plans, ComponentTable componentTable,
+        EcsViewFieldReader fieldReader, int bufferCapacity = ViewDeltaRingBuffer.DefaultCapacity, long baseTSN = 0,
+        string sourceFile = null, int sourceLine = 0, string sourceMethod = null) :
+        base(FlattenEvaluators(branchEvaluators), BuildFieldDependenciesMulti(branchEvaluators), componentTable.DBE.MemoryAllocator,
+            componentTable, plans, bufferCapacity, baseTSN, sourceFile, sourceLine, sourceMethod)
     {
         if (branchEvaluators.Length > 16)
         {
@@ -80,8 +85,9 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
     }
 
     /// <summary>Pull mode: created without FieldEvaluators (opaque WHERE or no WHERE).</summary>
-    internal EcsView(EcsQuery<TArchetype> query, IMemoryAllocator allocator, IResource resourceParent, int bufferCapacity = ViewDeltaRingBuffer.DefaultCapacity, 
-        long baseTSN = 0) : base([], [], allocator, resourceParent, bufferCapacity, baseTSN)
+    internal EcsView(EcsQuery<TArchetype> query, IMemoryAllocator allocator, IResource resourceParent, int bufferCapacity = ViewDeltaRingBuffer.DefaultCapacity,
+        long baseTSN = 0, string sourceFile = null, int sourceLine = 0, string sourceMethod = null)
+        : base([], [], allocator, resourceParent, bufferCapacity, baseTSN, sourceFile, sourceLine, sourceMethod)
     {
         _query = query;
     }
@@ -143,12 +149,64 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
     // ═══════════════════════════════════════════════════════════════════════
 
     /// <summary>
-    /// Drain the ring buffer up to the transaction's snapshot TSN, evaluate field predicates,
-    /// and update the entity set and delta tracking.
+    /// Drain the ring buffer up to the transaction's snapshot TSN, evaluate field predicates, and update the entity set and delta tracking.
     /// Falls back to full re-query when no FieldEvaluators are present (pull mode).
     /// </summary>
-    public override void Refresh(Transaction tx)
+    /// <summary>
+    /// P2 of umbrella #342 — emit a QueryDefinitionDescribe for this view's owning EcsQuery. Called per system-tick from the runtime; the producer-side tracker
+    /// dedups so only the first invocation per (Kind, LocalId) actually writes to the trace. Pull-mode views (no evaluators / no component table)
+    /// still emit with an empty evaluator shape — the catalog row shows the EcsQuery's source and target archetype.
+    /// </summary>
+    internal override void EmitDescriptorIfNeeded()
     {
+        // When a cached plan is present (ECS-built incremental views) we know the resolved primary-index field; pass it through so the catalog renders the real
+        // index instead of "—".
+        var primaryIdx = HasCachedPlan ? (short)ExecutionPlan.PrimaryFieldIndex : (short)-1;
+        // Resolve the archetype's id directly from its metadata so pull-mode views (no _componentTable) still carry a meaningful TargetComponentType on the
+        // catalog row. ArchetypeMetadata's ArchetypeId is the same identifier the Workbench Schema panel keys archetypes on.
+        var meta = ArchetypeRegistry.GetMetadata<TArchetype>();
+        var targetComponentType = meta?.ArchetypeId ?? (ushort)0;
+        PlanBuilder.EmitDefinitionDescribe(
+            Evaluators, _componentTable,
+            queryInstanceKind: 1, queryInstanceLocalId: (uint)_query.EcsQueryId,
+            _query.SourceFile, _query.SourceLine, _query.SourceMethod,
+            orderByFieldIndex: int.MinValue, descending: false,
+            primaryIndexFieldIdx: primaryIdx,
+            targetComponentTypeOverride: targetComponentType);
+    }
+
+    /// <summary>
+    /// Per-tick QueryPlan span for system-input views (#342, follow-up to P7). Pull-mode views never go through
+    /// <c>PlanBuilder.BuildPlan</c> at consumption time so the Workbench Execution Inspector would otherwise stay
+    /// permanently empty. The runtime captures the system's start/end timestamps and calls this hook from
+    /// <c>OnSystemEndInternal</c>; we emit one <c>QueryPlan</c> span per (system, tick), tagged with the view's
+    /// <c>(Kind=1, EcsQueryId)</c> identity so the Workbench can fold executions under the catalog row.
+    /// </summary>
+    internal override void EmitPerTickQueryPlan(long startTimestamp, long endTimestamp, ushort ownerSystemIdx)
+    {
+        var hasPlan = HasCachedPlan;
+        var evaluatorCount = (byte)Math.Min(Evaluators?.Length ?? 0, byte.MaxValue);
+        var indexFieldIdx = hasPlan ? (ushort)Math.Max(0, ExecutionPlan.PrimaryFieldIndex) : (ushort)0;
+        var rangeMin = hasPlan ? ExecutionPlan.PrimaryScanMin : long.MinValue;
+        var rangeMax = hasPlan ? ExecutionPlan.PrimaryScanMax : long.MaxValue;
+
+        // Execution-site attribution is zero — the runtime drives consumption, no user call site triggers it. The
+        // OwnerSystemIdx provides system attribution since parent-span linkage is unreliable in multi-threaded mode
+        // (worker threads have no enclosing Typhon span when SystemEndCallback fires).
+        TyphonEvent.EmitQueryPlanExternal(startTimestamp, endTimestamp, evaluatorCount, indexFieldIdx, rangeMin, rangeMax, 1, (uint)_query.EcsQueryId,
+            0, 0, 0, ownerSystemIdx);
+    }
+
+    public override void Refresh(
+        Transaction tx,
+        [CallerFilePath]   string callerFile = null,
+        [CallerLineNumber] int    callerLine = 0,
+        [CallerMemberName] string callerMethod = null)
+    {
+        // callerFile/Line/Method captured at user call site — reserved for future per-refresh execution attribution. The catalog descriptor is emitted from
+        // TyphonRuntime's per-tick system-start path (via EmitDescriptorIfNeeded below), not here, because pull-mode/system-input Views never go through
+        // Refresh — they're consumed as cached entity sets by the runtime.
+        _ = callerFile; _ = callerLine; _ = callerMethod;
         if (IsDisposed)
         {
             throw new ObjectDisposedException(nameof(EcsView<TArchetype>));
@@ -166,7 +224,7 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
             _removedCache.Clear();
 
             // Pull mode: no FieldEvaluators → full re-query every time
-            if (_evaluators.Length == 0)
+            if (Evaluators.Length == 0)
             {
                 RefreshPull(tx);
                 BuildEntityIdCaches();
@@ -307,7 +365,7 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
         var wasInView = !isCreation && EvaluateKey(ref eval, ref entry.BeforeKey);
         var shouldBeInView = !isDeletion && EvaluateKey(ref eval, ref entry.AfterKey);
 
-        if (_evaluators.Length == 1)
+        if (Evaluators.Length == 1)
         {
             ApplyDelta(entry.EntityPK, wasInView, shouldBeInView);
         }
@@ -334,7 +392,7 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
         if (!wasInView)
         {
             // OUT→IN: verify all other fields pass
-            if (_fieldReader != null && _fieldReader.CheckOtherFields(pk, _evaluators, fieldIndex, tx))
+            if (_fieldReader != null && _fieldReader.CheckOtherFields(pk, Evaluators, fieldIndex, tx))
             {
                 ApplyDelta(pk, false, true);
             }
@@ -378,7 +436,7 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
                 foreach (var id in _query.Execute())
                 {
                     var pk = (long)id.RawValue;
-                    if (_fieldReader.EvaluateAllFields(pk, _evaluators, tx))
+                    if (_fieldReader.EvaluateAllFields(pk, Evaluators, tx))
                     {
                         _entityIds.TryAdd(pk);
                     }
@@ -584,7 +642,7 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
             var idx = _evaluatorLookup[fieldIndex];
             if (idx >= 0)
             {
-                return ref _evaluators[idx];
+                return ref Evaluators[idx];
             }
         }
         return ref Unsafe.NullRef<FieldEvaluator>();

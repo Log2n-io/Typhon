@@ -8,8 +8,14 @@ namespace Typhon.Engine;
 /// Derive from this class, implement <see cref="Configure"/> and <see cref="Execute"/>.
 /// </summary>
 [PublicAPI]
-public abstract class QuerySystem
+public abstract class QuerySystem : ISystem
 {
+    /// <inheritdoc />
+    public string Name { get; internal set; }
+
+    /// <inheritdoc />
+    public int Index { get; internal set; } = -1;
+
     /// <summary>Declare the system's name, dependencies, input View, and configuration.</summary>
     protected abstract void Configure(SystemBuilder b);
 

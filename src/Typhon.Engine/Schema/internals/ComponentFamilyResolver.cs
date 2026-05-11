@@ -3,7 +3,7 @@ using System.Reflection;
 using JetBrains.Annotations;
 using Typhon.Schema.Definition;
 
-namespace Typhon.Engine.Data.Schema;
+namespace Typhon.Engine.Internals;
 
 /// <summary>
 /// Resolves the "component family" classification used by the Workbench Data Flow module (L2 granularity).

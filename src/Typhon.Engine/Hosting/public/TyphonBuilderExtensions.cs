@@ -162,7 +162,7 @@ public static class ServiceCollectionExtensions
         return services;
     }
 
-    public static IServiceCollection AddPagedMemoryMappedFiled(
+    public static IServiceCollection AddPagedMemoryMappedFile(
         this IServiceCollection services,
         Action<PagedMMFOptions> configure = null) =>
         services.AddPagedMMF<PagedMMF, PagedMMFOptions>(ServiceLifetime.Singleton, configure);
@@ -240,36 +240,28 @@ public static class ServiceCollectionExtensions
 
     private static TS CreatePagedMemoryMappedFile<TS, TO>(IServiceProvider serviceProvider) where TS : PagedMMF where TO : PagedMMFOptions
     {
-        try
+        var options = serviceProvider.GetRequiredService<IOptions<TO>>();
+        var logger = serviceProvider.GetRequiredService<ILogger<PagedMMF>>();
+        var memoryAllocator = serviceProvider.GetRequiredService<IMemoryAllocator>();
+
+        // Directly instantiate ManagedPagedMMF which requires IResourceRegistry
+        if (typeof(TS) == typeof(ManagedPagedMMF))
         {
-            var options = serviceProvider.GetRequiredService<IOptions<TO>>();
-            var logger = serviceProvider.GetRequiredService<ILogger<PagedMMF>>();
-            var memoryAllocator = serviceProvider.GetRequiredService<IMemoryAllocator>();
-
-            // Directly instantiate ManagedPagedMMF which requires IResourceRegistry
-            if (typeof(TS) == typeof(ManagedPagedMMF))
-            {
-                var resourceRegistry = serviceProvider.GetRequiredService<IResourceRegistry>();
-                var epochManager = serviceProvider.GetRequiredService<EpochManager>();
-                return (TS)(object)new ManagedPagedMMF(resourceRegistry, epochManager, memoryAllocator, options.Value, resourceRegistry.Storage, options.Value.DatabaseName, logger);
-            }
-
-            // For base PagedMMF - doesn't require IResourceRegistry
-            if (typeof(TS) == typeof(PagedMMF))
-            {
-                var resourceRegistry = serviceProvider.GetRequiredService<IResourceRegistry>();
-                var epochManager = serviceProvider.GetRequiredService<EpochManager>();
-                return (TS)new PagedMMF(memoryAllocator, epochManager, options.Value, resourceRegistry.Storage, options.Value.DatabaseName, logger);
-            }
-
-            // Fallback to Activator for other derived types (if any)
-            return (TS)Activator.CreateInstance(typeof(TS), serviceProvider, options.Value, logger);
+            var resourceRegistry = serviceProvider.GetRequiredService<IResourceRegistry>();
+            var epochManager = serviceProvider.GetRequiredService<EpochManager>();
+            return (TS)(object)new ManagedPagedMMF(resourceRegistry, epochManager, memoryAllocator, options.Value, resourceRegistry.Storage, options.Value.DatabaseName, logger);
         }
-        catch (Exception e)
+
+        // For base PagedMMF - doesn't require IResourceRegistry
+        if (typeof(TS) == typeof(PagedMMF))
         {
-            Console.WriteLine(e);
-            throw;
+            var resourceRegistry = serviceProvider.GetRequiredService<IResourceRegistry>();
+            var epochManager = serviceProvider.GetRequiredService<EpochManager>();
+            return (TS)new PagedMMF(memoryAllocator, epochManager, options.Value, resourceRegistry.Storage, options.Value.DatabaseName, logger);
         }
+
+        // Fallback to Activator for other derived types (if any)
+        return (TS)Activator.CreateInstance(typeof(TS), serviceProvider, options.Value, logger);
     }
 
     private static IServiceCollection AddDatabaseEngine(IServiceCollection services, ServiceLifetime lifetime, Action<DatabaseEngineOptions> configure)
@@ -302,23 +294,15 @@ public static class ServiceCollectionExtensions
 
     private static DatabaseEngine CreateDatabaseEngine(IServiceProvider serviceProvider)
     {
-        try
-        {
-            var options = serviceProvider.GetRequiredService<IOptions<DatabaseEngineOptions>>();
-            var mpmmf = serviceProvider.GetRequiredService<ManagedPagedMMF>();
-            var logger = serviceProvider.GetRequiredService<ILogger<DatabaseEngine>>();
-            var resourceRegistry = serviceProvider.GetRequiredService<IResourceRegistry>();
-            var epochManager = serviceProvider.GetRequiredService<EpochManager>();
-            var watchdog = serviceProvider.GetRequiredService<DeadlineWatchdog>();
-            var memoryAllocator = serviceProvider.GetRequiredService<IMemoryAllocator>();
+        var options = serviceProvider.GetRequiredService<IOptions<DatabaseEngineOptions>>();
+        var mpmmf = serviceProvider.GetRequiredService<ManagedPagedMMF>();
+        var logger = serviceProvider.GetRequiredService<ILogger<DatabaseEngine>>();
+        var resourceRegistry = serviceProvider.GetRequiredService<IResourceRegistry>();
+        var epochManager = serviceProvider.GetRequiredService<EpochManager>();
+        var watchdog = serviceProvider.GetRequiredService<DeadlineWatchdog>();
+        var memoryAllocator = serviceProvider.GetRequiredService<IMemoryAllocator>();
 
-            return new DatabaseEngine(resourceRegistry, epochManager, watchdog, mpmmf, memoryAllocator, options.Value, logger);
-        }
-        catch (Exception e)
-        {
-            Console.WriteLine(e);
-            throw;
-        }
+        return new DatabaseEngine(resourceRegistry, epochManager, watchdog, mpmmf, memoryAllocator, options.Value, logger);
     }
     
     public static void EnsureFileDeleted<TO>(this IServiceProvider provider) where TO : PagedMMFOptions

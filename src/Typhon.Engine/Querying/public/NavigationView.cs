@@ -27,8 +27,10 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
     private readonly int _fkFieldOffset;     // Byte offset of FK field within source component struct
 
     internal NavigationView(FieldEvaluator[] sourceEvaluators, FieldEvaluator[] targetEvaluators, ComponentTable sourceTable, ComponentTable targetTable,
-        int fkFieldIndex, int fkFieldOffset, int bufferCapacity = ViewDeltaRingBuffer.DefaultCapacity, long baseTSN = 0) :
-        base(CombineEvaluators(sourceEvaluators, targetEvaluators), [], sourceTable.DBE.MemoryAllocator, sourceTable, bufferCapacity, baseTSN)
+        int fkFieldIndex, int fkFieldOffset, int bufferCapacity = ViewDeltaRingBuffer.DefaultCapacity, long baseTSN = 0, string sourceFile = null, 
+        int sourceLine = 0, string sourceMethod = null) :
+        base(CombineEvaluators(sourceEvaluators, targetEvaluators), [], sourceTable.DBE.MemoryAllocator, sourceTable, bufferCapacity, baseTSN, sourceFile, 
+            sourceLine, sourceMethod)
     {
         _sourceTable = sourceTable;
         _targetTable = targetTable;
@@ -105,8 +107,15 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
         _targetTable.ViewRegistry.DeregisterView(this);
     }
 
-    public override void Refresh(Transaction tx)
+    public override void Refresh(
+        Transaction tx,
+        [CallerFilePath]   string callerFile = null,
+        [CallerLineNumber] int    callerLine = 0,
+        [CallerMemberName] string callerMethod = null)
     {
+        // callerFile/Line/Method captured at user call site; consumed by trace emission in P2 (issue #335).
+        _ = callerFile; _ = callerLine; _ = callerMethod;
+
         if (IsDisposed)
         {
             throw new ObjectDisposedException(nameof(NavigationView<,>));

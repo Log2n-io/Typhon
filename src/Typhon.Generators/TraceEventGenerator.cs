@@ -924,7 +924,9 @@ namespace Typhon.Engine.Profiler
             if (hasOptMaskByte)
             {
                 string maskSpan = cursor == 0 ? "payload" : $"payload[{cursor}..]";
-                sb.Append("        byte optMask = ").Append(maskSpan).AppendLine("[0];");
+                // Backward-compat: older trace versions may not have written the optMask byte (e.g. v8 traces pre-dating an extension that added
+                // trailing [Optional] fields). When the payload buffer is shorter than expected, treat the missing optMask as 0 — all optional fields land as null.
+                sb.Append("        byte optMask = payload.Length > ").Append(cursor).Append(" ? ").Append(maskSpan).AppendLine("[0] : (byte)0;");
                 cursor += 1;
                 sb.Append("        int optCursor = ").Append(cursor).AppendLine(";");
 
@@ -938,7 +940,7 @@ namespace Typhon.Engine.Profiler
                     }
                     int effectiveSz = EffectiveOptSize(opt);
                     sb.Append("        ").Append(opt.TypeFqn).Append("? po_").Append(opt.PropertyName).AppendLine(" = null;");
-                    sb.Append("        if ((optMask & ").Append(MaskExpr(model, opt)).AppendLine(") != 0)");
+                    sb.Append("        if ((optMask & ").Append(MaskExpr(model, opt)).Append(") != 0 && payload.Length >= optCursor + ").Append(effectiveSz).AppendLine(")");
                     sb.AppendLine("        {");
                     string optReadExpr = ReadCall(opt.WireTypeFqn, "payload[optCursor..]");
                     if (opt.IsEnum)

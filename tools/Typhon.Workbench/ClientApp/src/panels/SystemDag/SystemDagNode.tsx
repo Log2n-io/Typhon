@@ -2,6 +2,8 @@ import { memo } from 'react';
 import { Handle, Position } from '@xyflow/react';
 import { Hourglass } from 'lucide-react';
 import { useThemeStore } from '@/stores/useThemeStore';
+import { rowIdOf, useQueryCatalogStore } from '@/panels/QueryCatalog/useQueryCatalogStore';
+import { openViewQueryCatalog } from '@/shell/commands/profilerCommands';
 import type { DagNodeData } from './dagModel';
 import type { SystemStat } from './useSystemStats';
 
@@ -29,6 +31,12 @@ function SystemDagNodeInner({
     isOnSelectedPhase?: boolean;
     /** Phase D (#327): cross-panel hover key matches this node's name — bright ring. */
     isHoveredFromCrossPanel?: boolean;
+    /** P8 of #342: distinct query-definition count owned by this system. Drives the "Queries" badge. */
+    queryCount?: number | null;
+    /** P8: pre-resolved numeric system id (or -1 if unresolved) so the badge can navigate without hooks. */
+    numericSystemId?: number;
+    /** P8 follow-up: lone owned (kind, localId) when queryCount === 1; drives badge-click row expansion. */
+    soleOwnedDefId?: { kind: number; localId: number };
   };
   selected?: boolean;
 }) {
@@ -136,6 +144,9 @@ function SystemDagNodeInner({
         {data.tierFilter !== 0x0F && <Chip tone="muted">tier {data.tierFilter}</Chip>}
         {data.changeFilterTypes.length > 0 && <Chip tone="info">change:{data.changeFilterTypes.length}</Chip>}
         {!data.hasAccess && !stat && <Chip tone="muted">no decls</Chip>}
+        {data.queryCount != null && data.queryCount > 0 && (
+          <QueriesBadge systemName={data.systemName} count={data.queryCount} numericSystemId={data.numericSystemId ?? -1} soleOwnedDefId={data.soleOwnedDefId} />
+        )}
       </div>
       <Handle type="source" position={Position.Right} className="!h-2 !w-2 !border-0 !bg-muted-foreground" />
     </div>
@@ -235,4 +246,50 @@ function formatStat(us: number): string {
   if (us < 1000) return `${Math.round(us)}µs`;
   const ms = us / 1000;
   return ms < 10 ? `${ms.toFixed(2)}ms` : `${ms.toFixed(1)}ms`;
+}
+
+/**
+ * Clickable "Queries" badge — P8 of umbrella #342 (issue #341). The numeric system id is supplied by
+ * the canvas (resolved once from metadata) so the badge stays hook-free — 50+ DAG nodes would
+ * otherwise each spin up a useProfilerMetadata + useSessionStore subscription. Action-only Zustand
+ * selector (stable ref) is fine.
+ */
+function QueriesBadge({
+  systemName,
+  count,
+  numericSystemId,
+  soleOwnedDefId,
+}: {
+  systemName: string;
+  count: number;
+  numericSystemId: number;
+  soleOwnedDefId?: { kind: number; localId: number };
+}) {
+  const setSystemFilter = useQueryCatalogStore((s) => s.setSystemFilter);
+  const setExpanded = useQueryCatalogStore((s) => s.setExpanded);
+
+  function onClick(e: React.MouseEvent): void {
+    e.stopPropagation();
+    if (numericSystemId >= 0) {
+      setSystemFilter(numericSystemId);
+    }
+    // When the system owns exactly one query, expand that row so the user lands on the relevant
+    // detail rather than just a filtered-list view. Multi-owner systems keep the filter only — the
+    // user picks which to expand. Clear any prior expansion otherwise so the caller's intent is
+    // unambiguous.
+    setExpanded(soleOwnedDefId ? rowIdOf(soleOwnedDefId.kind, soleOwnedDefId.localId) : null);
+    openViewQueryCatalog();
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="rounded border border-sky-300 bg-sky-100 px-1 py-px font-mono text-[9px] text-sky-800 hover:bg-sky-200 dark:border-sky-700/50 dark:bg-sky-950/40 dark:text-sky-200 dark:hover:bg-sky-900/60"
+      title={`${count} distinct quer${count === 1 ? 'y' : 'ies'} — open Catalog filtered to ${systemName}`}
+      data-testid={`system-dag-queries-badge-${systemName}`}
+    >
+      Q {count}
+    </button>
+  );
 }

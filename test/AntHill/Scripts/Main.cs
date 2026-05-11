@@ -52,14 +52,12 @@ public partial class Main : Node2D
                 // Dual-attach when both --trace and --live are supplied: records the session to disk AND streams live to the viewer. The engine's
                 // consumer thread fans each batch to every attached exporter, so the CPU/bandwidth cost of having both is near-zero.
                 _exporters = ProfilerLauncher.CreateExporters(_profilerConfig, _bridge.ProfilerParent);
-                foreach (var exp in _exporters) TyphonProfiler.AttachExporter(exp);
-                var metadata = ProfilerSetup.BuildSessionMetadata(
-                    _bridge.Systems, workerCount: 16, baseTickRate: 60f,
-                    phases: _bridge.PhaseNames,
-                    currentEngineTickProvider: () => _bridge?.CurrentTick ?? 0,
-                    engine: _bridge.DatabaseEngine,
-                    resourceGraphRoot: _bridge.ResourceGraphRoot,
-                    runtime: _bridge.ActiveRuntime);
+                foreach (var exp in _exporters)
+                {
+                    TyphonProfiler.AttachExporter(exp);
+                }
+                var metadata = ProfilerSetup.BuildSessionMetadata(_bridge.Systems, 16, 60f, _bridge.PhaseNames, () => _bridge?.CurrentTick ?? 0, 
+                    _bridge.DatabaseEngine, _bridge.ResourceGraphRoot, _bridge.ActiveRuntime);
 
                 if (_profilerConfig.LiveWaitMs > 0 && _profilerConfig.LivePort >= 0)
                 {

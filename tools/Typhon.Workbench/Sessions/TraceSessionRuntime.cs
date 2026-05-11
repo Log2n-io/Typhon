@@ -85,6 +85,21 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
     public SourceLocationManifestDto SourceLocationManifest { get; private set; } = SourceLocationManifestDto.Empty;
 
     /// <summary>
+    /// #337 (P4 of #342) — query source-string table loaded from the v9 trace trailer at build completion.
+    /// Slot 0 is the sentinel ("no source"). Empty array for v8 traces or v9 traces without query data.
+    /// Consumed by <see cref="Services.QueryCatalogBuilder"/> to resolve FileId/MethodId references on
+    /// <c>QueryDefinitionDescribe</c> events.
+    /// </summary>
+    public string[] QuerySourceStrings { get; private set; } = [];
+
+    /// <summary>
+    /// #337 (P4 of #342) — lazy per-session catalog facade. First call triggers a one-pass walk over
+    /// the trace's chunk stream; subsequent calls return the cached result. Returns null until the
+    /// session is ready (<see cref="IsReady"/>). See <see cref="Services.QueryCatalogService"/>.
+    /// </summary>
+    public Services.QueryCatalogService QueryCatalog { get; private set; }
+
+    /// <summary>
     /// Static-schema provider populated from the trace's v7 static-structure tables (component definitions, archetype
     /// definitions, index catalog). Null until the build completes — controllers should gate on <see cref="IsReady"/>
     /// before reading. Used by <see cref="Schema.SchemaService"/> for trace-mode schema requests.
@@ -267,9 +282,16 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
             if (!_isReplayFile)
             {
                 SourceLocationManifest = TryLoadSourceLocationManifest(_filePath);
+                QuerySourceStrings = TryLoadQuerySourceStrings(_filePath);
             }
 
             Metadata = metadata;
+            // #337 (P4): construct the catalog service now that metadata + query-source-strings are
+            // ready. The service is lazy — it doesn't walk the chunks until the first endpoint call.
+            QueryCatalog = new Services.QueryCatalogService(
+                this,
+                () => Metadata,
+                () => QuerySourceStrings);
             _metadataTcs.TrySetResult(metadata);
             BuildCompleted?.Invoke(metadata);
         }
@@ -361,6 +383,30 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
     /// for traces without attribution (engine emitted no intercepted call sites) and on any read
     /// failure (we surface absent attribution rather than failing the whole session over it).
     /// </summary>
+    /// <summary>
+    /// #337 (P4 of #342) — reads the v9 <c>QuerySourceStringTable</c> trailer from the source trace.
+    /// Returns an empty array for v8 traces, v9 traces without query data, or any read failure
+    /// (we surface an empty table rather than failing the whole session over it).
+    /// </summary>
+    private static string[] TryLoadQuerySourceStrings(string sourcePath)
+    {
+        try
+        {
+            using var fs = new FileStream(sourcePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+            using var reader = new TraceFileReader(fs);
+            reader.ReadHeader();
+            if (!reader.TryReadQuerySourceStringTable(out var strings))
+            {
+                return [];
+            }
+            return strings;
+        }
+        catch
+        {
+            return [];
+        }
+    }
+
     private static SourceLocationManifestDto TryLoadSourceLocationManifest(string sourcePath)
     {
         try

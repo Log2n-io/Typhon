@@ -65,6 +65,22 @@ public struct TraceFileHeader
     /// </summary>
     public long SourceLocationManifestOffset;
 
+    /// <summary>
+    /// Byte offset of the trailing <c>QuerySourceStringTable</c> (deduped file paths + method names referenced by
+    /// Query Definition Export events, #342). 0 when no Query Definition Export sections were written
+    /// (e.g., the session emitted no QueryDefinitionDescribe events). v8 traces have this field absent on disk
+    /// (the on-disk header pre-v9 ends after <see cref="SourceLocationManifestOffset"/>) and the reader
+    /// fills it with 0.
+    /// </summary>
+    public long QuerySourceStringTableOffset;
+
+    /// <summary>
+    /// Byte offset of the trailing <c>QueryDefinitionTable</c> (materialized definition catalog accumulated
+    /// from <see cref="TraceEventKind.QueryDefinitionDescribe"/> events, #342). 0 when absent. v8 reader compat:
+    /// pre-v9 traces lack this on-disk field; the reader defaults it to 0.
+    /// </summary>
+    public long QueryDefinitionTableOffset;
+
     /// <summary>Padding to keep on-disk layout future-extension-friendly. Zero-initialized; readers must ignore.</summary>
     public ushort Reserved0;
     /// <summary>Padding (aligning the next field to 4 bytes); zero-initialized.</summary>
@@ -93,10 +109,21 @@ public struct TraceFileHeader
     ///     synthesising empty defaults (which would silently render "no schema" for old traces), the reader now
     ///     hard-rejects v6 — re-record against a v7-aware build. See the section writers in <see cref="TraceFileWriter"/>
     ///     and the matching reader methods in <see cref="TraceFileReader"/>.
-    /// v8 (current, 2026-05-10): <see cref="TraceEventKind.NamedSpan"/> reassigned from value 200 to 246 to break a
+    /// v8 (2026-05-10): <see cref="TraceEventKind.NamedSpan"/> reassigned from value 200 to 246 to break a
     ///     latent collision with <see cref="TraceEventKind.EcsQueryMaskAnd"/>. v7 traces with NamedSpan records (kind=200)
     ///     would mis-decode as EcsQueryMaskAnd under a v8 reader; the reader hard-rejects v7 to surface the break loudly.
     ///     Re-record against a v8-aware build.
+    /// v9 (current, 2026-05-11): Query Definition Export (#342). Adds two trailing sections:
+    ///     <c>QuerySourceStringTable</c> (deduped file paths + method names referenced by query events)
+    ///     at offset <see cref="QuerySourceStringTableOffset"/>, and <c>QueryDefinitionTable</c>
+    ///     (materialized definitions accumulated from <see cref="TraceEventKind.QueryDefinitionDescribe"/>
+    ///     events) at offset <see cref="QueryDefinitionTableOffset"/>. Adds two new instant kinds —
+    ///     <see cref="TraceEventKind.QueryDefinitionDescribe"/> (247) and <see cref="TraceEventKind.QueryArgs"/> (248)
+    ///     — and extends <see cref="TraceEventKind.QueryPlan"/> with 5 trailing fields
+    ///     (QueryInstanceKind, QueryInstanceLocalId, ExecutionSourceFileId, ExecutionSourceLine,
+    ///     ExecutionSourceMethodId). v8 traces continue to load: absent sections produce empty catalogs;
+    ///     v8 QueryPlan records (without the trailing fields) decode with zero/sentinel defaults for the
+    ///     new fields. See claude/design/Profiler/11-query-definition-export.md.
     /// </summary>
-    public const ushort CurrentVersion = 8;
+    public const ushort CurrentVersion = 9;
 }

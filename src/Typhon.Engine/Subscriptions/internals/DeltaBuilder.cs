@@ -32,8 +32,8 @@ internal sealed class DeltaBuilder
     {
         var view = publishedView.SharedView;
 
-        // Refresh the View (drains ring buffer, builds Added/Removed/Modified sets)
-        view.Refresh(tx);
+        // Refresh the View (drains ring buffer, builds Added/Removed/Modified sets) — engine-internal, no user execution site
+        view.RefreshFromScheduler(tx);
         return BuildFromRefreshedView(publishedView.PublishedId, view, tx, engine);
     }
 
@@ -65,7 +65,7 @@ internal sealed class DeltaBuilder
     /// </summary>
     internal ViewDeltaMessage? BuildPerClientViewDelta(PublishedView publishedView, ViewBase clientView, Transaction tx, DatabaseEngine engine)
     {
-        clientView.Refresh(tx);
+        clientView.RefreshFromScheduler(tx);
         var delta = clientView.GetDelta();
 
         SupplementModifiedFromDirtyBitmap(clientView, engine);

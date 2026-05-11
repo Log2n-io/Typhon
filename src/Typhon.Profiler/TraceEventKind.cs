@@ -925,6 +925,36 @@ public enum TraceEventKind : byte
     /// </summary>
     SchedulerSystemArchetype = 245,
 
+    // ── Query Definition Export (issue #342, sub-issues #334/#335/#336) — IDs 247-248. ──
+    //
+    // Both are instant-style records with VARIABLE-LENGTH payloads emitted by the query pipeline once
+    // per distinct View/EcsQuery identity (Describe) and once per execution (Args). Wire layout is owned
+    // by hand-written codecs (QueryDefinitionDescribeEventCodec / QueryArgsEventCodec) — the
+    // [TraceEvent] source generator does not support variable-length payloads. Gated by
+    // <see cref="Typhon.Engine.Observability.TelemetryConfig.QueryActive"/>.
+    //
+    // See claude/design/Profiler/11-query-definition-export.md §4.5, §4.6 for wire shape.
+
+    /// <summary>
+    /// One-shot definition descriptor emitted on first observation of a View/EcsQuery identity within a
+    /// profiling session. Payload (variable-length):
+    /// <c>kind: u8</c> (0=View, 1=EcsQuery), <c>localId: u32</c>, <c>targetComponentType: u16</c>,
+    /// <c>primaryIndexFieldIdx: i16</c>, <c>sortFieldIdx: i16</c>, <c>sortDescending: u8</c>,
+    /// <c>definitionSourceFileId: u16</c>, <c>definitionSourceLine: i32</c>,
+    /// <c>definitionSourceMethodId: u16</c>, <c>evaluatorCount: u16</c>,
+    /// <c>evaluators[evaluatorCount]: { fieldIdx: u16, op: u8, reserved: u8 }</c>,
+    /// <c>fieldDependencyCount: u16</c>, <c>fieldDependencies[fieldDependencyCount]: u16</c>.
+    /// </summary>
+    QueryDefinitionDescribe = 247,
+
+    /// <summary>
+    /// Per-execution arguments payload emitted immediately after each <see cref="QueryPlan"/> when the
+    /// query carries at least one evaluator (skipped when <c>EvaluatorCount == 0</c>). Payload:
+    /// <c>evaluatorCount: u16</c>, <c>thresholds[evaluatorCount]: i64</c> (widened threshold constants
+    /// matching <c>FieldEvaluator.Threshold</c>).
+    /// </summary>
+    QueryArgs = 248,
+
     // ── Fallback ──
 
     /// <summary>
@@ -1037,6 +1067,12 @@ public static class TraceEventKindExtensions
         //         producing garbage `durationUs`/`spanId`/`parentSpanId` and rendering the rollup as
         //         a phantom nested span on the TickDriver thread lane.
         if (v == 242 || v == 244)
+        {
+            return false;
+        }
+        // Query Definition Export (#342, sub-issues #334/#335/#336):
+        //   247 (QueryDefinitionDescribe), 248 (QueryArgs) — instant-style with variable payloads.
+        if (v == 247 || v == 248)
         {
             return false;
         }

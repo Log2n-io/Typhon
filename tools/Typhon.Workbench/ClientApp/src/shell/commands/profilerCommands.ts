@@ -40,6 +40,93 @@ export function toggleViewCriticalPath(): void {
 }
 
 /**
+ * Toggle the Query Catalog panel — a dynamic dock panel (closed by default, no edge-group home).
+ * First call adds it to the center area; subsequent calls remove it. Same shape as
+ * {@link toggleViewCriticalPath}. Issue #338 (P5 of #342).
+ */
+export function toggleViewQueryCatalog(): void {
+  const api = registeredApi;
+  if (!api) return;
+  const existing = api.getPanel('query-catalog');
+  if (existing) {
+    api.removePanel(existing);
+    return;
+  }
+  api.addPanel({ id: 'query-catalog', component: 'QueryCatalog', title: 'Query Catalog' });
+}
+
+/**
+ * Open the Query Catalog panel (focus-when-present variant of {@link toggleViewQueryCatalog}).
+ * Used by cross-panel navigation (e.g., System DAG "Queries" badge in P8) so a click doesn't flip
+ * the panel closed when it's already open. Issue #341 (P8 of #342).
+ */
+export function openViewQueryCatalog(): void {
+  const api = registeredApi;
+  if (!api) return;
+  const existing = api.getPanel('query-catalog');
+  if (existing) {
+    existing.focus();
+    return;
+  }
+  api.addPanel({ id: 'query-catalog', component: 'QueryCatalog', title: 'Query Catalog' });
+}
+
+/**
+ * Open (or focus) the Query Plan Tree panel. The store's <c>focus</c> is set independently before
+ * calling this; the panel reads it via {@link useQueryPlanStore}. Issue #339 (P6 of #342).
+ */
+export function openViewQueryPlanTree(): void {
+  const api = registeredApi;
+  if (!api) return;
+  const existing = api.getPanel('query-plan-tree');
+  if (existing) {
+    existing.focus();
+    return;
+  }
+  api.addPanel({ id: 'query-plan-tree', component: 'QueryPlanTree', title: 'Query Plan' });
+}
+
+/** Toggle (close-when-open) variant of {@link openViewQueryPlanTree} for the command palette. */
+export function toggleViewQueryPlanTree(): void {
+  const api = registeredApi;
+  if (!api) return;
+  const existing = api.getPanel('query-plan-tree');
+  if (existing) {
+    api.removePanel(existing);
+    return;
+  }
+  api.addPanel({ id: 'query-plan-tree', component: 'QueryPlanTree', title: 'Query Plan' });
+}
+
+/**
+ * Open (or focus) the Execution Inspector panel. The store's <c>focus</c> is set independently
+ * before calling this; the panel reads it via {@link useExecutionInspectorStore}. Issue #340
+ * (P7 of #342).
+ */
+export function openViewExecutionInspector(): void {
+  const api = registeredApi;
+  if (!api) return;
+  const existing = api.getPanel('execution-inspector');
+  if (existing) {
+    existing.focus();
+    return;
+  }
+  api.addPanel({ id: 'execution-inspector', component: 'ExecutionInspector', title: 'Execution Inspector' });
+}
+
+/** Toggle (close-when-open) variant of {@link openViewExecutionInspector} for the command palette. */
+export function toggleViewExecutionInspector(): void {
+  const api = registeredApi;
+  if (!api) return;
+  const existing = api.getPanel('execution-inspector');
+  if (existing) {
+    api.removePanel(existing);
+    return;
+  }
+  api.addPanel({ id: 'execution-inspector', component: 'ExecutionInspector', title: 'Execution Inspector' });
+}
+
+/**
  * Toggle the Top Spans panel inside the bottom edge group.
  * If the group is collapsed, expand and focus Top Spans.
  * If expanded and Top Spans is already active, collapse the group.
@@ -122,6 +209,9 @@ export function buildProfilerPaletteCommands(): CommandItem[] {
   return [
     { id: 'toggle-view-profiler',     label: 'Toggle View Profiler',  keywords: 'profiler open show',               action: toggleViewProfiler },
     { id: 'toggle-view-critical-path', label: 'Toggle View Critical Path', keywords: 'critical path tape timeline cp wall-clock tick', action: toggleViewCriticalPath },
+    { id: 'toggle-view-query-catalog', label: 'Toggle View Query Catalog', keywords: 'query catalog definitions filters profiler', action: toggleViewQueryCatalog },
+    { id: 'toggle-view-query-plan-tree', label: 'Toggle View Query Plan Tree', keywords: 'query plan tree graph dagre xyflow profiler', action: toggleViewQueryPlanTree },
+    { id: 'toggle-view-execution-inspector', label: 'Toggle View Execution Inspector', keywords: 'execution inspector phases drill profiler query', action: toggleViewExecutionInspector },
     { id: 'toggle-view-top-spans',   label: 'Toggle View Top Spans', keywords: 'profiler top spans table slow expensive sortable', action: toggleViewTopSpans },
     { id: 'profiler-save-replay',    label: 'Save Session as .typhon-replay…', keywords: 'save replay export attach session', action: openSaveReplayDialog },
     { id: 'profiler-toggle-gauges',  label: 'Toggle Gauge Region',   keywords: 'gauges canvas profiler g',         action: () => useProfilerViewStore.getState().toggleGaugeRegion() },

@@ -41,10 +41,21 @@ public struct FieldEvaluator  // 16 bytes
     public ushort FieldOffset;   // 2B — byte offset within component (max ~64KB, components are small structs)
     public long Threshold;       // 8B — widened constant (reinterpret for float/double)
 
+    /// <summary>
+    /// Evaluate this predicate against a raw field pointer. Returns <c>true</c> if the field satisfies the comparison.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="KeyType.String64"/> is intentionally not handled here — string-typed predicates are rejected upstream by
+    /// <c>QueryResolverHelper.MapFieldTypeToKeyType</c> (which throws <see cref="System.NotSupportedException"/> for <c>FieldType.String</c>), and the
+    /// <c>String64</c> tag is reserved for the index/statistics layer (e.g., <c>IndexStatistics</c> uses it to mark <c>String64BTree</c> indexes as having no
+    /// selectivity statistics). The <c>Threshold</c> slot is only 8 bytes — not large enough to hold a 64-byte <c>String64</c> value — so any
+    /// String64 predicate evaluation would have to happen via the B+Tree index path, not this scalar comparator.
+    /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static unsafe bool Evaluate(ref FieldEvaluator eval, byte* fieldPtr)
     {
-        // Read value from fieldPtr based on KeyType, dispatch to compare helpers
+        // Read value from fieldPtr based on KeyType, dispatch to compare helpers.
+        // String64 is filtered out upstream by MapFieldTypeToKeyType — see remarks above.
         switch (eval.KeyType)
         {
             case KeyType.Bool:

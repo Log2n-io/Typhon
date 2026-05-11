@@ -24,10 +24,18 @@ namespace AntHill;
 /// </summary>
 public static class AntPhases
 {
-    public static readonly Phase Movement  = new("Movement");
-    public static readonly Phase Lifecycle = new("Lifecycle");
-    public static readonly Phase Sense     = new("Sense");
-    public static readonly Phase Brain     = new("Brain");
+    /// <summary>
+    /// Single per-ant simulation phase. <c>AntUpdateSystem</c> performs energy decay + respawn, food/nest
+    /// interaction, pheromone steering, position integration, and pheromone deposit in one cluster walk per
+    /// tick. Tier amortization (formerly four separate systems per phase: Metabolism/Brain/PheroDep × T0..T3)
+    /// is now per-cluster gating inside the system body; per-step <c>amortScale</c> multipliers preserve the
+    /// time-integrated semantics of each step.
+    /// </summary>
+    public static readonly Phase Simulation = new("Simulation");
+
+    /// <summary>Pheromone grid evaporation sweep. Runs after <c>AntUpdate</c> on the W×W on PheromoneGrid.</summary>
     public static readonly Phase Trail     = new("Trail");
+
+    /// <summary>Render-frame assembly pipeline: AntStats → PrepareRenderBuffer → FillRenderBuffer → PublishRenderFrame.</summary>
     public static readonly Phase Render    = new("Render");
 }

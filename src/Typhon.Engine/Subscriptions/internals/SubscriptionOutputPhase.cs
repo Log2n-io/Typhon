@@ -109,7 +109,7 @@ internal sealed partial class SubscriptionOutputPhase
         {
             if (published.IsShared && published.SharedView != null)
             {
-                published.SharedView.Refresh(tx);
+                published.SharedView.RefreshFromScheduler(tx);
             }
         }
 
@@ -238,7 +238,7 @@ internal sealed partial class SubscriptionOutputPhase
         {
             if (published.IsShared && published.SharedView != null)
             {
-                published.SharedView.Refresh(tx);
+                published.SharedView.RefreshFromScheduler(tx);
                 published.SharedView.ClearDelta();
             }
         }
@@ -294,8 +294,8 @@ internal sealed partial class SubscriptionOutputPhase
                 // Create per-client View
                 var clientView = view.ViewFactory(client.Context);
                 state.PerClientView = clientView;
-                // Refresh to populate initial entity set
-                clientView.Refresh(tx);
+                // Refresh to populate initial entity set (engine-internal — no user execution site)
+                clientView.RefreshFromScheduler(tx);
                 IncrementalSyncTracker.BeginSync(state, clientView);
                 clientView.ClearDelta();
             }

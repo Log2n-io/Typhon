@@ -37,6 +37,9 @@ public sealed partial class TyphonRuntime : IDisposable
     private readonly Transaction[] _systemTransactions;
 
     private readonly ViewBase[] _systemViews;                      // Resolved View per system (null if no input)
+    // Per-system Stopwatch start ticks captured at OnSystemStart / OnParallelQueryPrepare; consumed by OnSystemEnd to emit a per-tick QueryPlan span (#342
+    // follow-up). Zero means "no plan tracked this tick" — pull-mode views never produce a QueryPlan from BuildPlan, so the runtime drives the bracket explicitly.
+    private readonly long[] _systemQueryPlanStartTicks;
     private readonly ComponentTable[][] _systemChangeFilterTables; // ComponentTables for changeFilter types (null if no filter)
     private readonly ArchetypeClusterState[] _systemClusterStates; // Cluster state for single-archetype cluster-eligible systems (null if not applicable)
     // Workbench Data Flow module (#327): the archetype id this system operates on, parallel to _systemClusterStates.
@@ -185,6 +188,7 @@ public sealed partial class TyphonRuntime : IDisposable
         _logger = logger ?? NullLogger.Instance;
         _systemTransactions = new Transaction[scheduler.SystemCount];
         _systemViews = new ViewBase[scheduler.SystemCount];
+        _systemQueryPlanStartTicks = new long[scheduler.SystemCount];
         _systemChangeFilterTables = new ComponentTable[scheduler.SystemCount][];
         _systemClusterStates = new ArchetypeClusterState[scheduler.SystemCount];
         _systemArchetypeIds = new ushort[scheduler.SystemCount];
@@ -862,7 +866,9 @@ public sealed partial class TyphonRuntime : IDisposable
         var list = PooledEntityList.Rent(view.Count);
         var span = list.AsSpan();
         var idx = 0;
-        foreach (var pk in view)
+        // Iterate the internal HashMap directly: ViewBase.GetEnumerator() is internal, so foreach over `view` would/ bind to the explicit IEnumerable<long>
+        // interface and box the enumerator. EntityIdsInternal exposes the value-type HashMap<long>.Enumerator (warning CS0279 — no boxing).
+        foreach (var pk in view.EntityIdsInternal)
         {
             span[idx++] = EntityId.FromRaw(pk);
         }
@@ -1029,6 +1035,21 @@ public sealed partial class TyphonRuntime : IDisposable
         var sys = Scheduler.Systems[sysIdx];
         var hasView = _systemViews[sysIdx] != null;
         var hasChangeFilter = hasView && _systemChangeFilterTables[sysIdx] != null;
+
+        // P2 of umbrella #342 — emit the catalog descriptor for this view's query identity. The tracker dedups across the session so only the first call per
+        // (Kind, LocalId) actually writes to the trace; subsequent ticks pay one ConcurrentDictionary.ContainsKey-equivalent lookup inside the emit helper.
+        // Pull-mode/system-input views never go through View.Refresh, so this is the only hot path where the descriptor can be emitted with the profiler gate
+        // definitely open.
+        if (hasView && TelemetryConfig.QueryActive)
+        {
+            _systemViews[sysIdx].EmitDescriptorIfNeeded();
+            // Capture once per tick — Prepare can be called multiple times (checkerboard phases). The first call sets
+            // it; subsequent calls keep the original tick-start ts so the QueryPlan spans the full system body.
+            if (_systemQueryPlanStartTicks[sysIdx] == 0)
+            {
+                _systemQueryPlanStartTicks[sysIdx] = Stopwatch.GetTimestamp();
+            }
+        }
 
         // Issue #231: read the per-archetype tier cluster list. The rebuild itself was hoisted to BuildTierIndexesAtTickStart (runs single-threaded at
         // TickStart, before any parallel system dispatch). Here we only READ the prepared per-tier buffer and, if amortized, slice it into a per-system bucket.
@@ -1885,6 +1906,16 @@ public sealed partial class TyphonRuntime : IDisposable
     {
         TyphonEvent.BeginRuntimeTransactionLifecycleTls((ushort)sysIdx);
 
+        // P2 of umbrella #342 — emit the catalog descriptor for this view's query identity (see OnParallelQueryPrepare for the parallel-path analogue).
+        // Tracker dedups across the session.
+        if (_systemViews[sysIdx] != null && TelemetryConfig.QueryActive)
+        {
+            _systemViews[sysIdx].EmitDescriptorIfNeeded();
+            // Capture the per-tick QueryPlan start ts; OnSystemEndInternal emits the span with this start and Stopwatch.GetTimestamp() as end.
+            // Pull-mode views never go through BuildPlan, so the Execution Inspector would be empty without this synthetic bracket.
+            _systemQueryPlanStartTicks[sysIdx] = Stopwatch.GetTimestamp();
+        }
+
         // Create a Transaction on the CALLING THREAD (worker thread).
         // This respects Transaction's single-thread affinity constraint.
         var tx = _currentUow.CreateTransaction();
@@ -1938,6 +1969,19 @@ public sealed partial class TyphonRuntime : IDisposable
     private void OnSystemEndInternal(int sysIdx, bool success)
     {
         EmitSchedulerSystemArchetypeIfActive(sysIdx);
+
+        // P7 follow-up of umbrella #342 — emit one QueryPlan span per (system, tick) bracketing the system body.
+        // Without this, pull-mode/system-input views (the common AntHill case: tx.Query<Ant>().ToView()) never produce QueryPlan events at consumption time,
+        // and the Workbench Execution Inspector stays empty.
+        var planStart = _systemQueryPlanStartTicks[sysIdx];
+        if (planStart != 0)
+        {
+            if (_systemViews[sysIdx] != null && TelemetryConfig.QueryActive)
+            {
+                _systemViews[sysIdx].EmitPerTickQueryPlan(planStart, Stopwatch.GetTimestamp(), (ushort)sysIdx);
+            }
+            _systemQueryPlanStartTicks[sysIdx] = 0;
+        }
 
         var tx = _systemTransactions[sysIdx];
         if (tx == null)

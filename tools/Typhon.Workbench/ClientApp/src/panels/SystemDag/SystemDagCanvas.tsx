@@ -65,6 +65,23 @@ interface Props {
    * `hoveredSystem` so it doesn't bleed into other DAG-internal hover effects.
    */
   hoveredSystemFromCrossPanel: string | null;
+  /**
+   * P8 of umbrella #342: per-system count of distinct query definitions owned by the system. Drives
+   * the "Queries" badge on each tile. Null is treated as "no data" (badge hidden). Computed by
+   * {@link buildQueryCountsBySystem}.
+   */
+  queryCountsBySystem: Map<string, number> | null;
+  /**
+   * P8 cross-panel nav: system-name → numeric-index lookup so the QueriesBadge can pre-filter the
+   * Query Catalog without re-resolving metadata per node.
+   */
+  systemNameToIndex: Map<string, number>;
+  /**
+   * For systems with exactly one owned query, the (kind, localId) of that query — drives the
+   * "badge click also expands the relevant Catalog row" behaviour. Missing entry = either zero
+   * or multiple owned queries; the badge just applies the filter in that case.
+   */
+  singleOwnedDefBySystem: Map<string, { kind: number; localId: number }>;
 }
 
 const NODE_TYPES = { system: SystemDagNode as never };
@@ -82,6 +99,9 @@ export default function SystemDagCanvas({
   dataTrackSystems,
   selectedPhase,
   hoveredSystemFromCrossPanel,
+  queryCountsBySystem,
+  singleOwnedDefBySystem,
+  systemNameToIndex,
 }: Props) {
   // Layout is read straight from the store (avoids prop drilling). Switching layouts re-runs
   // `buildDagModel` and `<ReactFlow fitView>` re-fits the viewport to the new bounds.
@@ -260,6 +280,16 @@ export default function SystemDagCanvas({
     isHovered?: boolean;
     /** Mean dispatch wait in selected range (µs). Drives the per-node "blocked" icon on the tile. */
     waitGapUs?: number | null;
+    /** P8 of #342: number of distinct query definitions owned by this system. Drives the "Queries" badge. */
+    queryCount?: number | null;
+    /** P8: numeric system index, pre-resolved from metadata so the badge stays hook-free on the hot render path. */
+    numericSystemId?: number;
+    /**
+     * P8 follow-up: when this system owns exactly one query, its (kind, localId) — drives the
+     * badge's "click also expands the relevant Catalog row" behaviour. Undefined for zero or
+     * multi-owner systems (filter alone is enough).
+     */
+    soleOwnedDefId?: { kind: number; localId: number };
   }>;
 
   // ── Base decorated nodes (no hover, no drag state) ─────────────────
@@ -281,6 +311,9 @@ export default function SystemDagCanvas({
       const isSelected = n.id === selectedSystemName;
       const isOnDominantCp = dominantCpSystems?.has(n.id) ?? false;
       const waitGapUs = gatingAnalysis?.get(n.id)?.meanWaitGapUs ?? null;
+      const queryCount = queryCountsBySystem?.get(n.id) ?? null;
+      const numericSystemId = systemNameToIndex.get(n.id) ?? -1;
+      const soleOwnedDefId = singleOwnedDefBySystem.get(n.id);
       // Phase D (#327): does this node touch the currently-selected dataTrack? Drives the amber halo.
       const isOnSelectedDataTrack = dataTrackSystems?.has(n.id) ?? false;
       // Phase D (#327): is the node's phase the currently-selected phase? Drives the swim-lane tint
@@ -305,10 +338,13 @@ export default function SystemDagCanvas({
           isOnSelectedDataTrack,
           isOnSelectedPhase,
           isHoveredFromCrossPanel,
+          queryCount,
+          numericSystemId,
+          soleOwnedDefId,
         },
       };
     });
-  }, [model.nodes, selectedSystemName, systemStats, cpParticipation, dominantCpSystems, skipRates, gatingAnalysis, overrides, layout, dataTrackSystems, selectedPhase, hoveredSystemFromCrossPanel]);
+  }, [model.nodes, selectedSystemName, systemStats, cpParticipation, dominantCpSystems, skipRates, gatingAnalysis, overrides, layout, dataTrackSystems, selectedPhase, hoveredSystemFromCrossPanel, queryCountsBySystem, singleOwnedDefBySystem, systemNameToIndex]);
 
   // ── Hover patch — only the hovered tile gets a new ref ─────────────
   // Maps the base array, replacing exactly one node (the hovered one) with a patched copy

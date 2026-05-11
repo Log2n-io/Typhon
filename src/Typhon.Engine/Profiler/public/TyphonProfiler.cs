@@ -165,6 +165,12 @@ public static class TyphonProfiler
             // the consumer/exporter Init paths above is in theory possible — defensive) sees a populated id.
             MainThreadId = Environment.CurrentManagedThreadId;
 
+            // Reset per-session producer state for Query Definition Export (#342): the source-string interner and
+            // the "have we described this query identity yet" tracker. Multi-session hosts (tests, restart-after-crash)
+            // must start each session with a clean slate so identity → ID mappings are consistent within one trace.
+            QuerySourceStringInterner.Reset();
+            QueryDefinitionDescribeTracker.Reset();
+
             Running = true;
 
             // Register process-exit safety net under the lock so paired Unregister in Stop sees the same instances.

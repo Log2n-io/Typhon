@@ -1,4 +1,3 @@
-using JetBrains.Annotations;
 using Microsoft.Win32.SafeHandles;
 using System;
 
