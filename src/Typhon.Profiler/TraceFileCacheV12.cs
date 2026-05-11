@@ -5,7 +5,7 @@ namespace Typhon.Profiler;
 // ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 // Cache schema v12 — per-system + per-queue + post-tick rollup sections.
 //
-// Drives the Workbench Data API v2 tracks (`system/<name>`, `queue/<name>`, `posttick/*`) per `claude/design/workbench/10-internal-data-api.md §7.3`.
+// Drives the Workbench Data API v2 tracks (`system/<name>`, `queue/<name>`, `posttick/*`) per `claude/design/Apps/Workbench/10-internal-data-api.md §7.3`.
 // Folded by `IncrementalCacheBuilder` from existing wire events plus the new `QueueTickEnd` event for the per-queue path.
 //
 // All structs are [Sequential, Pack=1] and 8-byte-aligned-on-disk. Field ordering chosen so longs/doubles sit on natural alignment (no internal

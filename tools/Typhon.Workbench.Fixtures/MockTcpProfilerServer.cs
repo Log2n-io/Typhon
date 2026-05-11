@@ -19,7 +19,7 @@ namespace Typhon.Workbench.Fixtures;
 /// Every payload matches the real <see cref="Typhon.Profiler"/> wire format exactly (via
 /// <see cref="LiveStreamProtocol.WriteFrameHeader"/> + a hand-assembled minimal
 /// <see cref="TraceFileHeader"/> + empty metadata tables) so the Workbench's real
-/// <c>RecordDecoder</c> processes the frames without any test-only code paths on the client side.
+/// typed-DTO pipeline (<see cref="TraceEventDecoder"/>) processes the frames without any test-only code paths on the client side.
 ///
 /// Usage (NUnit):
 /// <code>

@@ -177,7 +177,7 @@ public class TyphonConnectionIntegrationTests
             // Wait for server to see our connection and push subscriptions
             SpinWait.SpinUntil(() => runtime.ClientConnections.Count > 0, TimeSpan.FromSeconds(2));
             var clientConn = runtime.ClientConnections.GetAll().First();
-            runtime.SetSubscriptions(clientConn, published);
+            runtime.SetSubscriptions(clientConn.Context, published);
 
             // Wait for entity to spawn + arrive via SDK
             SpinWait.SpinUntil(() => spawnedOnTick > 0, TimeSpan.FromSeconds(5));

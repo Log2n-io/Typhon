@@ -45,7 +45,7 @@ namespace Typhon.Engine.Internals;
 /// </list>
 /// W×W across phases needs no AC-01 disambiguation: phase order is the disambiguator. The
 /// previous "all-to-all" cross-phase chain caused stragglers in phase N to gate the entire pool;
-/// see <c>claude/design/runtime/07-system-access-declarations.md</c> §"Amendment 2026-05-07".
+/// see <c>claude/design/Runtime/07-system-access-declarations.md</c> §"Amendment 2026-05-07".
 /// </para>
 /// <para>
 /// Semantic note: cross-phase <c>ReadsSnapshot&lt;T&gt;</c> in a later phase observes the

@@ -21,8 +21,7 @@ namespace Typhon.Engine.Internals;
 /// </list>
 /// </para>
 /// </remarks>
-[PublicAPI]
-public interface IWalFileIO : IDisposable
+internal interface IWalFileIO : IDisposable
 {
     /// <summary>
     /// Opens a WAL segment file with O_DIRECT semantics and optional FUA (Force Unit Access).

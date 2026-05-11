@@ -7,7 +7,7 @@ using System.Runtime.InteropServices;
 namespace Typhon.Engine.Internals;
 
 [PublicAPI]
-public class MemoryBlockArray : MemoryBlockBase
+internal class MemoryBlockArray : MemoryBlockBase
 {
     private int _pinCount;
     private GCHandle _handle;

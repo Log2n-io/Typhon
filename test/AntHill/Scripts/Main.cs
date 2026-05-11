@@ -287,20 +287,14 @@ public partial class Main : Node2D
         }
 
         // Producer-ring drop counters — read AFTER TyphonProfiler.Stop() so the values reflect the full run.
-        // If TickStartDroppedRingFull > 0 we know the per-thread ring overflowed during emit; that matches the
-        // workbench-side "malformed tick" warning (TickStart record never made it into the trace stream, decoder
-        // misattributes the next tick's events). TickStartDroppedNoSlot fires when ThreadSlotRegistry refused to
-        // assign a slot (registry full — 256 worker threads max). Both are monotonic since the first call to
-        // EmitTickStart.
-        var dropRingFull = TyphonEvent.TickStartDroppedRingFull;
-        var dropNoSlot = TyphonEvent.TickStartDroppedNoSlot;
+        // Per-kind TickStart drop counters were retired when EmitTickStart moved to the generator-emitted path;
+        // per-kind drop attribution lives on the ring itself (TraceRecordRing's per-kind drop counter).
         var dropTotal = TyphonEvent.TotalDroppedEvents;
         var exporterDrops = TyphonProfiler.TotalDroppedExporterBatches;
         var spillAcquired = TyphonProfiler.SpilloverPoolAcquiredCount;
         var spillExhausted = TyphonProfiler.SpilloverPoolExhaustedCount;
         GD.Print(
-            $"AntHill: profiler drop counters — TickStart ring-full={dropRingFull:N0}, " +
-            $"TickStart no-slot={dropNoSlot:N0}, total events dropped={dropTotal:N0}, " +
+            $"AntHill: profiler drop counters — total events dropped={dropTotal:N0}, " +
             $"exporter batches dropped={exporterDrops:N0}");
         GD.Print(
             $"AntHill: spillover pool — acquired={spillAcquired:N0} (chain extensions absorbed bursts), " +

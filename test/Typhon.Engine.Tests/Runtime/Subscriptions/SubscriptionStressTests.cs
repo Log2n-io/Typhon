@@ -142,7 +142,7 @@ class SubscriptionStressTests : TestBase<SubscriptionStressTests>
             // Subscribe all clients to the shared View
             foreach (var conn in runtime.ClientConnections.GetAll())
             {
-                runtime.SetSubscriptions(conn, published);
+                runtime.SetSubscriptions(conn.Context, published);
             }
 
             // Let the runtime run ticks with entity spawns
@@ -336,7 +336,7 @@ class SubscriptionStressTests : TestBase<SubscriptionStressTests>
             SpinWait.SpinUntil(() => runtime.ClientConnections.Count > 0, TimeSpan.FromSeconds(2));
             foreach (var conn in runtime.ClientConnections.GetAll())
             {
-                runtime.SetSubscriptions(conn, published);
+                runtime.SetSubscriptions(conn.Context, published);
             }
 
             // Wait for subscription to be processed (at least 2 ticks for transition + sync)
@@ -438,7 +438,7 @@ class SubscriptionStressTests : TestBase<SubscriptionStressTests>
             SpinWait.SpinUntil(() => runtime.ClientConnections.Count > 0, TimeSpan.FromSeconds(2));
             foreach (var conn in runtime.ClientConnections.GetAll())
             {
-                runtime.SetSubscriptions(conn, published);
+                runtime.SetSubscriptions(conn.Context, published);
             }
 
             // Let ticks run without reading — buffer should overflow
@@ -560,7 +560,7 @@ class SubscriptionStressTests : TestBase<SubscriptionStressTests>
             // Initial subscription
             foreach (var conn in runtime.ClientConnections.GetAll())
             {
-                runtime.SetSubscriptions(conn, pubA);
+                runtime.SetSubscriptions(conn.Context, pubA);
             }
 
             SpinWait.SpinUntil(() => runtime.CurrentTickNumber >= ticksToRun, TimeSpan.FromSeconds(10));
@@ -661,7 +661,7 @@ class SubscriptionStressTests : TestBase<SubscriptionStressTests>
 
             foreach (var conn in runtime.ClientConnections.GetAll())
             {
-                runtime.SetSubscriptions(conn, published);
+                runtime.SetSubscriptions(conn.Context, published);
             }
 
             // Wait for spawns to complete

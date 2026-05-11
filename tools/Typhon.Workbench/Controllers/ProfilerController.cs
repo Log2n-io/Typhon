@@ -2,6 +2,7 @@ using System.Buffers;
 using K4os.Compression.LZ4;
 using Microsoft.AspNetCore.Mvc;
 using Typhon.Profiler;
+using Typhon.Profiler.Events;
 using Typhon.Workbench.Dtos.Profiler;
 using Typhon.Workbench.Middleware;
 using Typhon.Workbench.Sessions;
@@ -74,7 +75,7 @@ public sealed class ProfilerController : ControllerBase
     /// #302 Phase 4: source-location manifest for the session — maps span <c>siteId</c>s to file/line/method.
     /// Works for both Attach (received in init handshake) and Trace (read from the file's trailer) sessions.
     /// Returns an empty manifest when the trace doesn't carry source attribution (engine emitted no
-    /// intercepted call sites). See claude/design/observability/10-profiler-source-attribution.md §4.7.
+    /// intercepted call sites). See claude/design/Profiler/10-profiler-source-attribution.md §4.7.
     /// </summary>
     [HttpGet("source-locations")]
     public ActionResult<SourceLocationManifestDto> GetSourceLocations(Guid sessionId)
@@ -293,7 +294,7 @@ public sealed class ProfilerController : ControllerBase
 
     /// <summary>
     /// JSON projection of a single chunk: server-side LZ4 decompresses the chunk, walks the packed
-    /// records via <see cref="RecordDecoder"/>, and returns a <see cref="DecodedChunkDto"/> with a
+    /// records via <see cref="TraceEventDecoder.DecodeBlock"/>, and returns a <see cref="DecodedChunkDto"/> with a
     /// fully deserialized event array. Mirrors the binary <see cref="GetChunk"/> endpoint for
     /// callers that don't have the Typhon profiler codec on hand (curl / scripts / quick-look).
     ///
@@ -362,25 +363,21 @@ public sealed class ProfilerController : ControllerBase
                     statusCode: StatusCodes.Status500InternalServerError);
             }
 
-            var decoder = new RecordDecoder(provider.TimestampFrequency);
-            // Match the client-side seeding pattern: continuation chunks lack a leading TickStart,
-            // so the first event of the block must already be tagged with FromTick. Normal chunks
-            // begin with TickStart which advances the counter from (FromTick - 1) → FromTick.
-            if (isContinuation)
-            {
-                decoder.SetCurrentTickForContinuation((int)entry.FromTick);
-            }
-            else
-            {
-                decoder.SetCurrentTick((int)entry.FromTick - 1);
-            }
+            // Seed the consumer-side tick counter the same way the legacy decoder did. NORMAL chunks
+            // begin with a TickStart record, which the walker increments — seed at (FromTick - 1) so
+            // that increment lands on FromTick. CONTINUATION chunks lack a leading TickStart (the prior
+            // chunk consumed it), so seed directly at FromTick.
+            var seedTick = isContinuation ? (int)entry.FromTick : (int)entry.FromTick - 1;
+            // Stopwatch frequency is ticks/second; ticks-per-µs = freq / 1e6 (rounded; Decode does
+            // double-precision conversion downstream).
+            var ticksPerUs = provider.TimestampFrequency / 1_000_000;
 
             var capacity = entry.EventCount > 0 ? (int)Math.Min(entry.EventCount, int.MaxValue) : 64;
-            var allEvents = new List<LiveTraceEvent>(capacity);
-            decoder.DecodeBlock(uncompressedBuffer.AsSpan(0, uncompressedSize), allEvents);
+            var allEvents = new List<TraceEventDto>(capacity);
+            TraceEventDecoder.DecodeBlock(uncompressedBuffer.AsSpan(0, uncompressedSize), seedTick, ticksPerUs, allEvents);
 
             var kindsFilter = ParseKindsFilter(kinds);
-            IReadOnlyList<LiveTraceEvent> projected = allEvents;
+            IReadOnlyList<TraceEventDto> projected = allEvents;
             if (kindsFilter != null || tick.HasValue)
             {
                 projected = ApplyFilters(allEvents, kindsFilter, tick);
@@ -423,12 +420,12 @@ public sealed class ProfilerController : ControllerBase
         return set;
     }
 
-    private static List<LiveTraceEvent> ApplyFilters(List<LiveTraceEvent> source, HashSet<int> kinds, int? tick)
+    private static List<TraceEventDto> ApplyFilters(List<TraceEventDto> source, HashSet<int> kinds, int? tick)
     {
-        var result = new List<LiveTraceEvent>();
+        var result = new List<TraceEventDto>();
         foreach (var ev in source)
         {
-            if (kinds != null && !kinds.Contains(ev.Kind)) continue;
+            if (kinds != null && !kinds.Contains(ev.KindByte)) continue;
             if (tick.HasValue && ev.TickNumber != tick.Value) continue;
             result.Add(ev);
         }

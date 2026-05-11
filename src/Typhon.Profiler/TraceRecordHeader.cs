@@ -67,7 +67,7 @@ public static class TraceRecordHeader
 
     /// <summary>
     /// <c>SpanFlags</c> bit 1 — set when the record carries a 2-byte source-location id (the compile-time <c>SourceLocationGenerator</c>
-    /// site index) immediately after the optional trace context. See <c>claude/design/observability/10-profiler-source-attribution.md</c>.
+    /// site index) immediately after the optional trace context. See <c>claude/design/Profiler/10-profiler-source-attribution.md</c>.
     /// </summary>
     public const byte SpanFlagsHasSourceLocation = 0x02;
 

@@ -13,15 +13,15 @@ namespace Typhon.Engine.Internals;
 /// Producer-side ref struct for <see cref="TraceEventKind.EcsSpawn"/>. Required at begin: archetype ID. Optional: entity ID (set after
 /// <c>SpawnInternal</c> returns), TSN (set once the transaction is known).
 /// </summary>
-[TraceEvent(TraceEventKind.EcsSpawn, Codec = typeof(EcsSpawnEventCodec), EmitEncoder = true)]
+[TraceEvent(TraceEventKind.EcsSpawn, EmitEncoder = true)]
 internal ref partial struct EcsSpawnEvent
 {
     [BeginParam]
     public ushort ArchetypeId;
 
-    [Optional]
+    [Optional(MaskValue = 0x01)]
     private ulong _entityId;
-    [Optional]
+    [Optional(MaskValue = 0x02)]
     private long _tsn;
 }
 
@@ -32,15 +32,15 @@ internal ref partial struct EcsSpawnEvent
 /// <summary>
 /// Producer-side ref struct for <see cref="TraceEventKind.EcsDestroy"/>. Required: entity ID. Optional: cascade count, TSN.
 /// </summary>
-[TraceEvent(TraceEventKind.EcsDestroy, Codec = typeof(EcsDestroyEventCodec), EmitEncoder = true)]
+[TraceEvent(TraceEventKind.EcsDestroy, EmitEncoder = true)]
 internal ref partial struct EcsDestroyEvent
 {
     [BeginParam]
     public ulong EntityId;
 
-    [Optional]
+    [Optional(MaskValue = 0x01)]
     private int _cascadeCount;
-    [Optional]
+    [Optional(MaskValue = 0x02)]
     private long _tsn;
 
 }
@@ -53,17 +53,17 @@ internal ref partial struct EcsDestroyEvent
 /// Producer-side ref struct for <see cref="TraceEventKind.EcsViewRefresh"/>. Required: archetype type ID. Optional: mode enum, result count,
 /// delta count.
 /// </summary>
-[TraceEvent(TraceEventKind.EcsViewRefresh, Codec = typeof(EcsViewRefreshEventCodec), EmitEncoder = true)]
+[TraceEvent(TraceEventKind.EcsViewRefresh, EmitEncoder = true)]
 internal ref partial struct EcsViewRefreshEvent
 {
     [BeginParam]
     public ushort ArchetypeTypeId;
 
-    [Optional]
+    [Optional(MaskValue = 0x01)]
     private EcsViewRefreshMode _mode;
-    [Optional]
+    [Optional(MaskValue = 0x02)]
     private int _resultCount;
-    [Optional]
+    [Optional(MaskValue = 0x04)]
     private int _deltaCount;
 
 }

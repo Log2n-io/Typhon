@@ -9,7 +9,7 @@ namespace Typhon.Engine.Internals;
 /// Producer-side ref struct for <see cref="TraceEventKind.CheckpointCycle"/>. Required: targetLsn, reason. Optional: dirtyPageCount (set after
 /// dirty-page collection completes).
 /// </summary>
-[TraceEvent(TraceEventKind.CheckpointCycle, Codec = typeof(CheckpointEventCodec), EmitEncoder = true)]
+[TraceEvent(TraceEventKind.CheckpointCycle, EmitEncoder = true)]
 internal ref partial struct CheckpointCycleEvent
 {
     [BeginParam]
@@ -17,7 +17,7 @@ internal ref partial struct CheckpointCycleEvent
     [BeginParam(ParamType = "CheckpointReason")]
     public byte Reason;
 
-    [Optional]
+    [Optional(MaskValue = 0x01)]
     private int _dirtyPageCount;
 
 }
@@ -32,10 +32,10 @@ internal ref partial struct CheckpointCollectEvent
 /// <summary>
 /// Checkpoint write-dirty-pages phase. Optional: writtenCount (set after pages are written).
 /// </summary>
-[TraceEvent(TraceEventKind.CheckpointWrite, Codec = typeof(CheckpointEventCodec), EmitEncoder = true)]
+[TraceEvent(TraceEventKind.CheckpointWrite, EmitEncoder = true)]
 internal ref partial struct CheckpointWriteEvent
 {
-    [Optional]
+    [Optional(MaskValue = 0x01)]
     private int _writtenCount;
 
 }
@@ -50,10 +50,10 @@ internal ref partial struct CheckpointFsyncEvent
 /// <summary>
 /// Checkpoint transition-UoW-entries phase. Optional: transitionedCount (set after transition completes).
 /// </summary>
-[TraceEvent(TraceEventKind.CheckpointTransition, Codec = typeof(CheckpointEventCodec), EmitEncoder = true)]
+[TraceEvent(TraceEventKind.CheckpointTransition, EmitEncoder = true)]
 internal ref partial struct CheckpointTransitionEvent
 {
-    [Optional]
+    [Optional(MaskValue = 0x01)]
     private int _transitionedCount;
 
 }
@@ -61,10 +61,10 @@ internal ref partial struct CheckpointTransitionEvent
 /// <summary>
 /// Checkpoint recycle-WAL-segments phase. Optional: recycledCount (set after recycling completes).
 /// </summary>
-[TraceEvent(TraceEventKind.CheckpointRecycle, Codec = typeof(CheckpointEventCodec), EmitEncoder = true)]
+[TraceEvent(TraceEventKind.CheckpointRecycle, EmitEncoder = true)]
 internal ref partial struct CheckpointRecycleEvent
 {
-    [Optional]
+    [Optional(MaskValue = 0x01)]
     private int _recycledCount;
 
 }

@@ -8,7 +8,7 @@ using Typhon.Profiler;
 namespace Typhon.Engine.Internals;
 
 [PublicAPI]
-public interface IMemoryAllocator
+internal interface IMemoryAllocator
 {
     MemoryBlockArray AllocateArray(string id, IResource parent, int size, bool zeroed = false, ushort sourceTag = 0);
     PinnedMemoryBlock AllocatePinned(string id, IResource parent, int size, bool zeroed = false, int alignment = 0, ushort sourceTag = 0);
@@ -21,7 +21,7 @@ public class MemoryAllocatorOptions
 }
 
 [PublicAPI]
-public class MemoryAllocator : ResourceNode, IMemoryAllocator, IMetricSource, IDebugPropertiesProvider
+internal class MemoryAllocator : ResourceNode, IMemoryAllocator, IMetricSource, IDebugPropertiesProvider
 {
     private ConcurrentCollection<MemoryBlockBase> _blocks;
 
@@ -72,7 +72,7 @@ public class MemoryAllocator : ResourceNode, IMemoryAllocator, IMetricSource, ID
         Interlocked.Increment(ref _cumulativeAllocations);
 
         // Profiler: emit a MemoryAllocEvent (zero cost when ProfilerMemoryAllocationsActive is false — JIT folds the gate away).
-        TyphonEvent.EmitMemoryAlloc(MemoryAllocDirection.Alloc, sourceTag, (ulong)size, (ulong)newTotal);
+        TyphonEvent.EmitMemoryAllocEvent(MemoryAllocDirection.Alloc, sourceTag, (ulong)size, (ulong)newTotal);
 
         return mb;
     }
@@ -134,7 +134,7 @@ public class MemoryAllocator : ResourceNode, IMemoryAllocator, IMetricSource, ID
 
         // Profiler: emit a MemoryAllocEvent (gated). TotalAfterBytes is the unmanaged running total — matches what the
         // MemoryUnmanagedTotalBytes gauge reports, so viewer markers align with the area chart.
-        TyphonEvent.EmitMemoryAlloc(MemoryAllocDirection.Alloc, sourceTag, (ulong)size, (ulong)newPinnedTotal);
+        TyphonEvent.EmitMemoryAllocEvent(MemoryAllocDirection.Alloc, sourceTag, (ulong)size, (ulong)newPinnedTotal);
 
         return mb;
     }
@@ -158,7 +158,7 @@ public class MemoryAllocator : ResourceNode, IMemoryAllocator, IMetricSource, ID
         // Profiler emits the symmetric free event — direction=Free, carries the block's SourceTag so viewer can pair
         // it with its alloc. TotalAfterBytes uses the pinned-only total when it's a pinned block (to stay aligned with
         // the gauge), otherwise the grand total.
-        TyphonEvent.EmitMemoryAlloc(MemoryAllocDirection.Free, block.SourceTag, (ulong)size, (ulong)newPinnedTotal);
+        TyphonEvent.EmitMemoryAllocEvent(MemoryAllocDirection.Free, block.SourceTag, (ulong)size, (ulong)newPinnedTotal);
     }
 
     /// <inheritdoc />

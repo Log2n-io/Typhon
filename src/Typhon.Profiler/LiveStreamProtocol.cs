@@ -56,7 +56,7 @@ public enum LiveFrameType : byte
     /// Sent once during the init handshake before any Block frames; payload is identical to the
     /// FileTable section of <c>.typhon-trace</c> files (u32 entryCount, then per-entry: u16 fileId,
     /// u16 pathLen, UTF-8 path bytes). Absent when the engine has no source attribution to report.
-    /// See claude/design/observability/10-profiler-source-attribution.md §4.7.
+    /// See claude/design/Profiler/10-profiler-source-attribution.md §4.7.
     /// </summary>
     FileTable = 4,
 

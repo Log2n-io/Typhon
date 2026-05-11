@@ -875,7 +875,7 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
 
     /// <summary>
     /// Walk a raw record buffer for <see cref="TraceEventKind.ThreadInfo"/> records and populate
-    /// <see cref="_threadInfos"/>. Mirrors the relevant parts of <see cref="RecordDecoder.DecodeThreadInfo"/>.
+    /// <see cref="_threadInfos"/>. Self-contained ThreadInfo wire walker.
     /// Wire format: u16 size, u8 kind (=ThreadInfo), u8 threadSlot, i64 timestamp, then payload —
     /// i32 managedThreadId, u16 nameByteCount, UTF-8 name bytes, u8 ThreadKind (Main=0/Worker=1/Pool=2/Other=3).
     /// </summary>

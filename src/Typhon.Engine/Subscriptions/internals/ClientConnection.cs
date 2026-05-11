@@ -18,8 +18,7 @@ namespace Typhon.Engine.Internals;
 /// <item>I/O thread reads from <see cref="Buffer"/> (SPSC consumer side).</item>
 /// </list>
 /// </remarks>
-[PublicAPI]
-public sealed class ClientConnection : IDisposable
+internal sealed class ClientConnection : IDisposable
 {
     private static int _nextConnectionId;
 

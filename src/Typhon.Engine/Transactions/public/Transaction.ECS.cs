@@ -1427,7 +1427,7 @@ public unsafe partial class Transaction
 
                                     var newKey = KeyBytes8.FromPointer(fieldPtr, field.FieldSize);
                                     byte flags = (byte)((fi & 0x3F) | 0x40); // isCreation
-                                    reg.View.DeltaBuffer.TryAppend(entry.Id.EntityKey, default, newKey, TSN, flags, reg.ComponentTag);
+                                    reg.DeltaBuffer.TryAppend(entry.Id.EntityKey, default, newKey, TSN, flags, reg.ComponentTag);
                                 }
                             }
                         }
@@ -2194,7 +2194,7 @@ public unsafe partial class Transaction
                                             }
 
                                             byte flags = (byte)((fi & 0x3F) | 0x80); // isDeletion
-                                            reg.View.DeltaBuffer.TryAppend(entityId.EntityKey, key, default, TSN, flags, reg.ComponentTag);
+                                            reg.DeltaBuffer.TryAppend(entityId.EntityKey, key, default, TSN, flags, reg.ComponentTag);
                                         }
                                     }
                                 }
@@ -2470,7 +2470,7 @@ public unsafe partial class Transaction
 
                 var key = KeyBytes8.FromPointer(fieldPtr, ifi.Size);
                 byte flags = (byte)((i & 0x3F) | 0x80); // isDeletion flag
-                reg.View.DeltaBuffer.TryAppend(chunkId, key, default, 0, flags, reg.ComponentTag);
+                reg.DeltaBuffer.TryAppend(chunkId, key, default, 0, flags, reg.ComponentTag);
             }
         }
     }
@@ -2618,7 +2618,7 @@ public unsafe partial class Transaction
 
                     // isDeletion (0x80) for disable, isCreation (0x40) for enable
                     byte flags = wasEnabled ? (byte)((fi & 0x3F) | 0x80) : (byte)((fi & 0x3F) | 0x40);
-                    reg.View.DeltaBuffer.TryAppend(pk, default, default, TSN, flags, reg.ComponentTag);
+                    reg.DeltaBuffer.TryAppend(pk, default, default, TSN, flags, reg.ComponentTag);
                 }
             }
         }

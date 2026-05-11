@@ -152,7 +152,7 @@ public class AccessDagDerivationTests
     // The deriver no longer chains every system in P_a to every system in P_b. Edges across
     // phases are emitted ONLY when a real read/write/event/resource conflict exists between
     // the pair. Independent systems in adjacent phases are allowed to overlap on the worker
-    // pool — see `claude/design/runtime/07-system-access-declarations.md` §"Amendment 2026-05-07".
+    // pool — see `claude/design/Runtime/07-system-access-declarations.md` §"Amendment 2026-05-07".
 
     [Test]
     public void CrossPhase_NoConflict_NoEdgeDerived()

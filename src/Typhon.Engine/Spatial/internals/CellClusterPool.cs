@@ -5,7 +5,7 @@ namespace Typhon.Engine.Internals;
 /// <summary>
 /// Flat-array pool holding per-cell cluster lists for a single archetype. Each cell gets a contiguous segment inside <see cref="_pool"/>; iteration is a
 /// single sequential read, matching the layout the design doc describes as "Option B: Compact array per cell" in
-/// <c>claude/design/spatial-tiers/01-spatial-clusters.md</c>.
+/// <c>claude/design/Spatial/SpatialTiers/01-spatial-clusters.md</c>.
 /// </summary>
 /// <remarks>
 /// <para>Issue #229 Q10 resolution (issue #230 follow-up): this pool was originally owned by <c>SpatialGrid</c> and shared across archetypes, which

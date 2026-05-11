@@ -10,9 +10,7 @@ namespace Typhon.Engine;
 /// Non-generic base class for <see cref="View{T}"/>, <see cref="View{T1,T2}"/>, and <see cref="OrView{T}"/>.
 /// Contains entity set management, delta tracking, disposal, and globally unique ViewId generation.
 /// </summary>
-#pragma warning disable TYPHON008 // Carveout: IView is internal-by-design but ViewBase exposes it on its public surface. Tracked as a §10.3 E "leak-tightening" deferred item.
 public abstract class ViewBase : IView, IDisposable, IEnumerable<long>
-#pragma warning restore TYPHON008
 {
     private static int _nextViewId;
 
@@ -27,7 +25,7 @@ public abstract class ViewBase : IView, IDisposable, IEnumerable<long>
     private bool _overflowDetected;
     private readonly ExecutionPlan[] _cachedPlans;
 
-    protected ViewBase(FieldEvaluator[] evaluators, int[] fieldDependencies, IMemoryAllocator allocator, IResource resourceParent, int bufferCapacity,
+    private protected ViewBase(FieldEvaluator[] evaluators, int[] fieldDependencies, IMemoryAllocator allocator, IResource resourceParent, int bufferCapacity,
         long baseTSN)
     {
         _evaluators = evaluators;
@@ -36,7 +34,7 @@ public abstract class ViewBase : IView, IDisposable, IEnumerable<long>
         DeltaBuffer = new ViewDeltaRingBuffer(allocator, resourceParent, bufferCapacity, baseTSN);
     }
 
-    protected ViewBase(FieldEvaluator[] evaluators, int[] fieldDependencies, IMemoryAllocator allocator, IResource resourceParent, ExecutionPlan[] plans,
+    private protected ViewBase(FieldEvaluator[] evaluators, int[] fieldDependencies, IMemoryAllocator allocator, IResource resourceParent, ExecutionPlan[] plans,
         int bufferCapacity, long baseTSN) : this(evaluators, fieldDependencies, allocator, resourceParent, bufferCapacity, baseTSN)
     {
         _cachedPlans = plans;
@@ -46,7 +44,6 @@ public abstract class ViewBase : IView, IDisposable, IEnumerable<long>
     public int[] FieldDependencies { get; }
     public bool IsDisposed => _disposed != 0;
     internal ViewDeltaRingBuffer DeltaBuffer { get; }
-    ViewDeltaRingBuffer IView.DeltaBuffer => DeltaBuffer;
 
     /// <summary>
     /// Simulation-tier filter for materialization (issue #231). When set to anything other than <see cref="SimTier.All"/>, any system that materializes this

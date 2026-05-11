@@ -6,7 +6,7 @@ namespace Typhon.Engine.Internals;
 /// Per-cell runtime state for the shared spatial grid. 16 bytes, one per cell.
 /// </summary>
 /// <remarks>
-/// <para>All cell state is transient — it is rebuilt at startup from entity positions (Decisions Q2 and Q6 in <c>claude/design/spatial-tiers/01-spatial-clusters.md</c>).
+/// <para>All cell state is transient — it is rebuilt at startup from entity positions (Decisions Q2 and Q6 in <c>claude/design/Spatial/SpatialTiers/01-spatial-clusters.md</c>).
 /// Nothing here is persisted to disk.</para>
 /// <para>For a 100x100 grid (10 000 cells) the descriptor array is 160 KB — fits in L2. For a Morton-padded 128x128 grid (16 384 cells) it's 256 KB.</para>
 /// <para>Issue #229 Q10 resolution: <see cref="ClusterCount"/> and <see cref="EntityCount"/> are global sums across every cluster-spatial archetype

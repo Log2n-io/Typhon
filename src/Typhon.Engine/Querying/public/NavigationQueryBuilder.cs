@@ -68,10 +68,10 @@ public class NavigationQueryBuilder<TSource, TTarget> where TSource : unmanaged 
         }
 
         // Register in BOTH registries BEFORE population
-        sourceCT.ViewRegistry.RegisterView(view, sourceFieldDepsArray, 0);
+        sourceCT.ViewRegistry.RegisterView(view, view.DeltaBuffer, sourceFieldDepsArray, 0);
         if (targetFieldDeps.Length > 0)
         {
-            targetCT.ViewRegistry.RegisterView(view, targetFieldDeps, 1);
+            targetCT.ViewRegistry.RegisterView(view, view.DeltaBuffer, targetFieldDeps, 1);
         }
 
         // Populate initial entity set by scanning all archetype EntityMaps containing TSource

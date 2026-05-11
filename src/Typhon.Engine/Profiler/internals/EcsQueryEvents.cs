@@ -1,7 +1,6 @@
 // CS0282: split-partial-struct field ordering — benign for TraceEvent ref structs (codec encodes per-field, never as a blob). See #294.
 #pragma warning disable CS0282
 
-using System;
 using Typhon.Profiler;
 
 namespace Typhon.Engine.Internals;
@@ -26,54 +25,48 @@ namespace Typhon.Engine.Internals;
 /// context + 2 B archetype + 1 B mask + 4 B result count + 1 B scan mode). Down from the old fixed 64 B struct's wasted space.
 /// </para>
 /// </remarks>
-[TraceEvent(TraceEventKind.EcsQueryExecute, Codec = typeof(EcsQueryEventCodec), EmitEncoder = true)]
+[TraceEvent(TraceEventKind.EcsQueryExecute, EmitEncoder = true)]
 internal ref partial struct EcsQueryExecuteEvent
 {
     /// <summary>Required — archetype type ID.</summary>
     [BeginParam]
     public ushort ArchetypeTypeId;
 
-    [Optional]
+    [Optional(MaskValue = 0x01)]
     private int _resultCount;
-    [Optional]
+    [Optional(MaskValue = 0x02)]
     private EcsQueryScanMode _scanMode;
 
 }
 
-[TraceEvent(TraceEventKind.EcsQueryCount, Codec = typeof(EcsQueryEventCodec), EmitEncoder = true)]
+[TraceEvent(TraceEventKind.EcsQueryCount, EmitEncoder = true)]
 internal ref partial struct EcsQueryCountEvent
 {
     [BeginParam]
     public ushort ArchetypeTypeId;
 
-    [Optional]
+    [Optional(MaskValue = 0x01)]
     private int _resultCount;
-    [Optional]
+    [Optional(MaskValue = 0x02)]
     private EcsQueryScanMode _scanMode;
 
 }
 
-// Escape-hatch from the Phase 3 generator: EcsQueryAny shares EcsQueryEventCodec with Execute / Count, but
-// the codec packs `Found` (bool) and `ResultCount` (i32) into the same 4-byte slot — when OptFound is set
-// the wire reserves 4 bytes (not 1) for the value. The generator's per-field standard layout doesn't model
-// this slot-sharing, so this kind keeps its hand-written codec call.
-[TraceEvent(TraceEventKind.EcsQueryAny, Codec = typeof(EcsQueryEventCodec))]
+/// <summary>
+/// Producer for <see cref="TraceEventKind.EcsQueryAny"/>. Wire layout matches Execute/Count except the
+/// <c>_found</c> bool occupies the same 4-byte slot that <c>_resultCount</c> uses on Execute/Count — the
+/// <c>WireSize = 4</c> override on the optional widens the bool's natural 1-byte slot to 4 bytes (3 trailing
+/// zero pad bytes), preserving the legacy codec's wire shape.
+/// </summary>
+[TraceEvent(TraceEventKind.EcsQueryAny, EmitEncoder = true)]
 internal ref partial struct EcsQueryAnyEvent
 {
     [BeginParam]
     public ushort ArchetypeTypeId;
 
-    [Optional]
+    [Optional(MaskValue = 0x04, WireSize = 4)]
     private bool _found;
-    [Optional]
+    [Optional(MaskValue = 0x02)]
     private EcsQueryScanMode _scanMode;
-
-    public readonly int ComputeSize()
-        => EcsQueryEventCodec.ComputeSize(Header.TraceIdHi != 0 || Header.TraceIdLo != 0, _optMask, Header.SourceLocationId);
-
-    public readonly void EncodeTo(Span<byte> destination, long endTimestamp, out int bytesWritten)
-        => EcsQueryEventCodec.Encode(destination, endTimestamp, TraceEventKind.EcsQueryAny, Header.ThreadSlot, Header.StartTimestamp,
-            Header.SpanId, Header.ParentSpanId, Header.TraceIdHi, Header.TraceIdLo, ArchetypeTypeId, _optMask, 0, _scanMode,
-            _found, out bytesWritten, sourceLocationId: Header.SourceLocationId);
 }
 

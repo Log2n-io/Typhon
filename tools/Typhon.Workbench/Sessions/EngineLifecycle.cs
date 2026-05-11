@@ -17,7 +17,7 @@ public sealed class EngineLifecycle : IDisposable
 
     public DatabaseEngine Engine { get; }
     public IResourceRegistry Registry { get; }
-    public IMemoryAllocator MemoryAllocator { get; }
+    internal IMemoryAllocator MemoryAllocator { get; }
     public string FilePath { get; }
     public SchemaCompatibility.State State { get; }
     public int LoadedComponentTypes { get; }

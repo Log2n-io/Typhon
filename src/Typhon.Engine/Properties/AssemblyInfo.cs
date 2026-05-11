@@ -1,28 +1,27 @@
 using System.Runtime.CompilerServices;
 
-// InternalsVisibleTo policy (per claude/research/PublicVsInternalApiClassification.md §8):
-// "Include any assembly that needs it for the rest of the solution to compile.
-//  No upfront audit — surface the list mechanically as build errors appear during the migration.
-//  A leak-tightening pass (refactor consumers to the public surface so this list shrinks)
-//  is explicitly deferred — fight for another day."
-//
-// All assemblies that have a project reference to Typhon.Engine are listed here so the
-// big-bang public/internal namespace migration doesn't break friend assemblies as types
-// flip from public to internal accessibility.
+// InternalsVisibleTo policy (per claude/research/PublicVsInternalApiClassification.md §8 + §10.3 E):
+// The list below is the minimum set the solution needs to compile, established by a mechanical
+// audit: comment everything out, build, add back only the assemblies the compiler insists on.
+// Last audited 2026-05-11. If you add a new assembly that references Typhon.Engine, do not blindly
+// add a friend declaration — try building first; only add if the build fails AND the failure is
+// driven by genuine internal-implementation reuse (refactor to the public surface if possible).
 
 // Production friend assemblies
-[assembly: InternalsVisibleTo("Typhon.Shell")]
-[assembly: InternalsVisibleTo("Typhon.Shell.Extensibility")]
+[assembly: InternalsVisibleTo("tsh")]                       // Typhon.Shell (AssemblyName=tsh)
 [assembly: InternalsVisibleTo("Typhon.Workbench")]
-[assembly: InternalsVisibleTo("Typhon.Workbench.Fixtures")]
-[assembly: InternalsVisibleTo("tsh")]
 
-// Test friend assemblies
+// Test / sample friend assemblies
 [assembly: InternalsVisibleTo("AntHill")]
-[assembly: InternalsVisibleTo("Typhon.ARPG.Shell")]
 [assembly: InternalsVisibleTo("Typhon.Benchmark")]
 [assembly: InternalsVisibleTo("Typhon.Client.Tests")]
 [assembly: InternalsVisibleTo("Typhon.Engine.Tests")]
 [assembly: InternalsVisibleTo("Typhon.IOProfileRunner")]
 [assembly: InternalsVisibleTo("Typhon.MonitoringDemo")]
-[assembly: InternalsVisibleTo("Typhon.Workbench.Tests")]
+
+// Dropped 2026-05-11 — verified not needed by the mechanical audit (build succeeds without them):
+//   "Typhon.Shell"               — redundant: Shell's AssemblyName is `tsh`, not `Typhon.Shell`.
+//   "Typhon.Shell.Extensibility" — builds clean.
+//   "Typhon.Workbench.Fixtures"  — builds clean.
+//   "Typhon.ARPG.Shell"          — builds clean.
+//   "Typhon.Workbench.Tests"     — builds clean (it goes through Typhon.Workbench's surface only).

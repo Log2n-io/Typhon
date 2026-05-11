@@ -291,12 +291,8 @@ public static class Program
         TyphonProfiler.DetachExporter(exporter);
 
         Console.WriteLine($"Total dropped (producer ring overflow): {TyphonProfiler.TotalDroppedEvents}");
-        // Drop-path diagnostics for TickStart (Item 10 investigation — catches the "48/49 TickStart" case):
-        //   NoSlot = registry full at GetOrAssignSlot. Should be zero; non-zero means >256 threads tried to claim concurrently.
-        //   RingFull = producer ring full at TryReserve. Usually benign unless a single TickStart is missing — if RingFull==1 and the
-        //              trace has N-1 TickStarts for N emitted ticks, this counter pinpoints the loss.
-        Console.WriteLine($"TickStart dropped (no slot): {TyphonEvent.TickStartDroppedNoSlot}");
-        Console.WriteLine($"TickStart dropped (ring full): {TyphonEvent.TickStartDroppedRingFull}");
+        // Per-kind TickStart drop counters retired with the generator-emitted EmitTickStart migration. Equivalent
+        // per-kind drop attribution lives on TraceRecordRing (per-kind drop counter via TryReserve(size, kind, ...)).
         // Exporter-queue drops — consumer produced batches faster than the file writer could drain them. Non-zero means records made
         // it past the producer ring but got dropped by drop-newest when enqueuing to the FileExporter (the "48/49 PerTickSnapshot" case).
         Console.WriteLine($"Exporter batches dropped (queue full): {TyphonProfiler.TotalDroppedExporterBatches}");

@@ -534,7 +534,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         var view = new EcsView<TArchetype>(this, evaluators, ct, _whereFieldReader, plan, bufferCapacity, _tx.TSN);
 
         // Register with ViewRegistry for delta notifications
-        ct.ViewRegistry.RegisterView(view);
+        ct.ViewRegistry.RegisterView(view, view.DeltaBuffer);
 
         // Initial population via PipelineExecutor (uses secondary index if plan selects one)
         _whereFieldReader.ExecuteFullScan(plan, plan.OrderedEvaluators, ct, _tx, view.EntityIdsInternal);
@@ -557,7 +557,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         }
 
         var view = new EcsView<TArchetype>(this, branchEvaluators, plans, ct, _whereFieldReader, bufferCapacity, _tx.TSN);
-        ct.ViewRegistry.RegisterView(view);
+        ct.ViewRegistry.RegisterView(view, view.DeltaBuffer);
 
         view.PopulateInitialOr(_tx);
         view.Refresh(_tx);

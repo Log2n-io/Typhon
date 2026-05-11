@@ -3,6 +3,8 @@ import type { IDockviewPanelProps } from 'dockview-react';
 import type { SystemArchetypeTouchSummary } from '@/api/generated/model/systemArchetypeTouchSummary';
 import { useTopology } from '@/hooks/data/useTopology';
 import { useProfilerMetadata } from '@/hooks/profiler/useProfilerMetadata';
+import { REFRESH_DEBOUNCE_MS, useDebouncedValue, useTickGatedSnapshot } from '@/hooks/useTickGatedSnapshot';
+import { useProfilerSessionStore } from '@/stores/useProfilerSessionStore';
 import { useSelectionStore } from '@/stores/useSelectionStore';
 import { useSessionStore } from '@/stores/useSessionStore';
 import { timeToTickRange } from '@/panels/SystemDag/tickRangeMapping';
@@ -45,7 +47,17 @@ import { type BarTickStats } from './DataFlowTooltip';
 export default function DataFlowPanel(_props: IDockviewPanelProps) {
   const sessionId = useSessionStore((s) => s.sessionId);
   const { data: topology } = useTopology(sessionId);
-  const { data: metadata } = useProfilerMetadata(sessionId);
+  const { data: liveMetadata } = useProfilerMetadata(sessionId);
+  // Tick-gated debounced snapshot — recompute the heavy memos below only when the latest tick advances
+  // OR the user changes the visible time selection, debounced (see REFRESH_DEBOUNCE_MS) to coalesce
+  // live-stream bursts. Other metadata mutations (thread info, chunk manifest, global metrics) are
+  // intentionally ignored.
+  const latestTickNumber = useProfilerSessionStore((s) => s.latestTickNumber);
+  const liveTime = useSelectionStore((s) => s.time);
+  const refreshKey = `${latestTickNumber}|${liveTime?.start ?? '-'}|${liveTime?.end ?? '-'}`;
+  const debouncedRefreshKey = useDebouncedValue(refreshKey, REFRESH_DEBOUNCE_MS);
+  const metadata = useTickGatedSnapshot(liveMetadata, debouncedRefreshKey);
+  const time = useTickGatedSnapshot(liveTime, debouncedRefreshKey);
   const granularityLevel = useDataFlowViewStore((s) => s.granularityLevel);
   const xMode = useDataFlowViewStore((s) => s.xMode);
   const aggMode = useDataFlowViewStore((s) => s.aggMode);
@@ -60,7 +72,6 @@ export default function DataFlowPanel(_props: IDockviewPanelProps) {
   const setXMode = useDataFlowViewStore((s) => s.setXMode);
   const clearSelection = useSelectionStore((s) => s.clear);
 
-  const time = useSelectionStore((s) => s.time);
   const selectedSystem = useSelectionStore((s) => s.system);
   const setSelectedSystem = useSelectionStore((s) => s.setSystem);
   // Phase D (#327): track-row clicks write to the cross-panel dataTrack slot; the AccessMatrix highlights the

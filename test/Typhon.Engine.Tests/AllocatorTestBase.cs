@@ -15,7 +15,7 @@ public abstract class AllocatorTestBase
 {
     protected IServiceProvider ServiceProvider { get; private set; }
     protected IResourceRegistry ResourceRegistry => ServiceProvider.GetRequiredService<IResourceRegistry>();
-    protected IMemoryAllocator MemoryAllocator => ServiceProvider.GetRequiredService<IMemoryAllocator>();
+    private protected IMemoryAllocator MemoryAllocator => ServiceProvider.GetRequiredService<IMemoryAllocator>();
     protected IResource AllocationResource => ResourceRegistry.Allocation;
 
     [SetUp]

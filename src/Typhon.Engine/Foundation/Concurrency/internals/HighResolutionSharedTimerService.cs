@@ -20,7 +20,7 @@ namespace Typhon.Engine.Internals;
 /// contract: target &lt;100µs execution, no blocking calls.
 /// </remarks>
 [PublicAPI]
-public sealed class HighResolutionSharedTimerService : HighResolutionTimerServiceBase
+internal sealed class HighResolutionSharedTimerService : HighResolutionTimerServiceBase
 {
     private static readonly long SlowThresholdTicks = (long)(Stopwatch.Frequency * 0.000_100); // 100µs
 

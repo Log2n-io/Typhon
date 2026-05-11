@@ -85,21 +85,22 @@ public sealed class DecodedChunkEndpointTests
         Assert.That(root.GetProperty("isContinuation").GetBoolean(), Is.False);
         Assert.That(root.GetProperty("timestampFrequency").GetInt64(), Is.EqualTo(10_000_000));
 
-        // Fixture writes 5 ticks × (TickStart + 3 Instant + TickEnd) = 25 records on disk, but the
-        // generic Instant kind (=6) is intentionally ignored by RecordDecoder (no DTO mapping in
-        // its switch arm). What surfaces is therefore 5 ticks × (TickStart + TickEnd) = 10 events.
-        // The endpoint reports the decoder's output, not the on-disk record count.
+        // Fixture writes 5 ticks × (TickStart + 3 Instant + TickEnd) = 25 records on disk. With the typed-DTO
+        // pipeline, TickStart now has a [TraceEvent(Shape=Instant)] declaration so it decodes to the typed
+        // `tickStart` discriminator. TickEnd and the generic Instant still surface as kind:"other" because
+        // they have no [TraceEvent] declaration yet (slated for the next migration batch).
         var totalEvents = root.GetProperty("eventCount").GetInt32();
         var filtered = root.GetProperty("filteredEventCount").GetInt32();
-        Assert.That(totalEvents, Is.EqualTo(10));
-        Assert.That(filtered, Is.EqualTo(10));
+        Assert.That(totalEvents, Is.EqualTo(25));
+        Assert.That(filtered, Is.EqualTo(25));
 
         var events = root.GetProperty("events");
-        Assert.That(events.GetArrayLength(), Is.EqualTo(10));
+        Assert.That(events.GetArrayLength(), Is.EqualTo(25));
 
-        // First event must be TickStart (Kind=0) for tick 1.
+        // First event must be TickStart (TraceEventKind value 0) for tick 1 — now carrying the typed
+        // `tickStart` discriminator via the generator-emitted TickStartEventDto.
         var first = events[0];
-        Assert.That(first.GetProperty("kind").GetInt32(), Is.EqualTo(0));
+        Assert.That(first.GetProperty("kind").GetString(), Is.EqualTo("tickStart"));
         Assert.That(first.GetProperty("tickNumber").GetInt32(), Is.EqualTo(1));
     }
 
@@ -109,12 +110,14 @@ public sealed class DecodedChunkEndpointTests
         var session = await CreateTraceSessionAsync(tickCount: 5, instantsPerTick: 3);
         await WaitForBuildAsync(session.SessionId, TimeSpan.FromSeconds(5));
 
-        // Filter to TickStart (0) only → 5 events (one per tick). All decoded events are already
-        // TickStart/TickEnd (Instants don't surface — see ReturnsJsonProjection_WithCoreFields).
+        // Filter to TickStart (TraceEventKind=0) only → 5 events (one per tick). The ?kinds= filter is
+        // numeric (server-side checks KindByte) so this still works; the JSON wire shape is the typed-DTO
+        // discriminator. TickStart now has a [TraceEvent(Shape=Instant)] declaration so it surfaces with the
+        // typed `tickStart` discriminator.
         using var doc = await FetchDecodedAsync(session.SessionId, 0, "?kinds=0");
         var root = doc.RootElement;
 
-        Assert.That(root.GetProperty("eventCount").GetInt32(), Is.EqualTo(10), "eventCount reports unfiltered total");
+        Assert.That(root.GetProperty("eventCount").GetInt32(), Is.EqualTo(25), "eventCount reports unfiltered total");
         Assert.That(root.GetProperty("filteredEventCount").GetInt32(), Is.EqualTo(5));
 
         var events = root.GetProperty("events");
@@ -122,7 +125,7 @@ public sealed class DecodedChunkEndpointTests
 
         foreach (var ev in events.EnumerateArray())
         {
-            Assert.That(ev.GetProperty("kind").GetInt32(), Is.EqualTo(0));
+            Assert.That(ev.GetProperty("kind").GetString(), Is.EqualTo("tickStart"));
         }
     }
 
@@ -132,11 +135,11 @@ public sealed class DecodedChunkEndpointTests
         var session = await CreateTraceSessionAsync(tickCount: 5, instantsPerTick: 3);
         await WaitForBuildAsync(session.SessionId, TimeSpan.FromSeconds(5));
 
-        // Tick 3 → TickStart + TickEnd surfaced (Instants dropped by decoder) = 2 events.
+        // Tick 3 → TickStart + 3 Instant + TickEnd = 5 events (typed-DTO pipeline preserves all records).
         using var doc = await FetchDecodedAsync(session.SessionId, 0, "?tick=3");
         var root = doc.RootElement;
 
-        Assert.That(root.GetProperty("filteredEventCount").GetInt32(), Is.EqualTo(2));
+        Assert.That(root.GetProperty("filteredEventCount").GetInt32(), Is.EqualTo(5));
         foreach (var ev in root.GetProperty("events").EnumerateArray())
         {
             Assert.That(ev.GetProperty("tickNumber").GetInt32(), Is.EqualTo(3));
@@ -156,7 +159,7 @@ public sealed class DecodedChunkEndpointTests
         Assert.That(root.GetProperty("filteredEventCount").GetInt32(), Is.EqualTo(1));
         var ev = root.GetProperty("events")[0];
         Assert.That(ev.GetProperty("tickNumber").GetInt32(), Is.EqualTo(4));
-        Assert.That(ev.GetProperty("kind").GetInt32(), Is.EqualTo(1));
+        Assert.That(ev.GetProperty("kind").GetString(), Is.EqualTo("tickEnd"));
     }
 
     [Test]
@@ -168,6 +171,26 @@ public sealed class DecodedChunkEndpointTests
         // "0,not-a-number,1" → TickStart + TickEnd kept (10 events), "not-a-number" silently dropped.
         using var doc = await FetchDecodedAsync(session.SessionId, 0, "?kinds=0,not-a-number,1");
         Assert.That(doc.RootElement.GetProperty("filteredEventCount").GetInt32(), Is.EqualTo(10));
+    }
+
+    [Test]
+    public async Task DecodedChunk_NewTypedDtoShape_ExposesPolymorphicDiscriminator()
+    {
+        // Sanity check on the new typed-DTO wire shape: every event MUST have a string `kind` discriminator
+        // (no longer a numeric int). Records without a [TraceEvent] declaration surface with kind:"other"
+        // and the numeric kind in originalKind. Records WITH a [TraceEvent] declaration surface with the
+        // camelCase kind name (e.g. "btreeInsert"). The fixture only writes instants so we exercise the
+        // "other" case here; the more interesting types are covered in TypedDtoRoundTripTests.
+        var session = await CreateTraceSessionAsync(tickCount: 3, instantsPerTick: 1);
+        await WaitForBuildAsync(session.SessionId, TimeSpan.FromSeconds(5));
+
+        using var doc = await FetchDecodedAsync(session.SessionId, 0);
+        var events = doc.RootElement.GetProperty("events");
+        foreach (var ev in events.EnumerateArray())
+        {
+            Assert.That(ev.GetProperty("kind").ValueKind, Is.EqualTo(JsonValueKind.String),
+                "kind must be a string discriminator (typed-DTO wire shape), not an int");
+        }
     }
 
     [Test]

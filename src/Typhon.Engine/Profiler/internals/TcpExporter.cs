@@ -395,7 +395,7 @@ internal sealed class TcpExporter : ResourceNode, IProfilerExporter
     /// #302 Phase 4: build the optional FileTable + SourceLocationManifest frames sent during the init handshake.
     /// Returns (null, null) when the generated <c>SourceLocations</c> table is empty (zero attributed sites).
     /// Each frame's payload mirrors the corresponding <c>.typhon-trace</c> trailer section MINUS the magic constants (the LiveFrameType byte already identifies
-    /// the section). See claude/design/observability/10-profiler-source-attribution.md §4.7.
+    /// the section). See claude/design/Profiler/10-profiler-source-attribution.md §4.7.
     /// </summary>
     private static (byte[] FileTableFrame, byte[] ManifestFrame) BuildSourceLocationFrames()
     {

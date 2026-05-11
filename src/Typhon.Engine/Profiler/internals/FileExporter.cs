@@ -94,7 +94,7 @@ internal sealed class FileExporter : ResourceNode, IProfilerExporter
     /// <summary>
     /// Append the source-location manifest as a trailer section and patch the header offsets in.
     /// Called from <see cref="Dispose(bool)"/> before the writer is closed. No-op if the generated <c>SourceLocations</c> table is empty (zero attributed
-    /// sites). See claude/design/observability/10-profiler-source-attribution.md §4.6.
+    /// sites). See claude/design/Profiler/10-profiler-source-attribution.md §4.6.
     /// </summary>
     private void WriteSourceLocationManifestAtClose()
     {

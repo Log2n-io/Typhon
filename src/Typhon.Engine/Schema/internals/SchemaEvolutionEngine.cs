@@ -54,7 +54,7 @@ internal readonly struct FieldMapEntry
 /// surviving fields, and revision chain pointers remain valid.
 /// </summary>
 /// <remarks>
-/// <para>Design reference: <c>claude/design/schema-versioning/03-compatible-evolution.md</c></para>
+/// <para>Design reference: <c>claude/design/Schema/03-compatible-evolution.md</c></para>
 /// <para>Key decisions: D4 (eager at startup), D7 (HEAD only for revisions), D8 (auto-resolve widenings).</para>
 /// </remarks>
 internal static class SchemaEvolutionEngine

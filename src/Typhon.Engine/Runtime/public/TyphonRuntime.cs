@@ -333,9 +333,17 @@ public sealed partial class TyphonRuntime : IDisposable
 
     /// <summary>
     /// Set a client's subscription set. Replaces the previous set atomically. The transition is applied during the next tick's Output phase.
+    /// Looks up the connection by <see cref="ClientContext.ConnectionId"/> — the public client identity. If the connection has been
+    /// dropped between the caller obtaining the context and this call, the request is silently ignored (the next tick will see no
+    /// pending change for a disposed client anyway).
     /// </summary>
     /// <remarks>If called multiple times within a tick, the last call wins.</remarks>
-    public void SetSubscriptions(ClientConnection client, params PublishedView[] views) => client.SetSubscriptions(views);
+    public void SetSubscriptions(ClientContext client, params PublishedView[] views)
+    {
+        ArgumentNullException.ThrowIfNull(client);
+        var connection = _clientConnectionManager.Get(client.ConnectionId);
+        connection?.SetSubscriptions(views);
+    }
 
     /// <summary>The published View registry (for diagnostics and testing).</summary>
     public PublishedViewRegistry PublishedViews => _publishedViewRegistry;
@@ -1771,7 +1779,7 @@ public sealed partial class TyphonRuntime : IDisposable
         // migration writes durable only at the NEXT tick's flush — a one-tick lag that's acceptable for the original R-Tree maintenance use case but unsafe
         // for persistent cluster content mutation.
         //
-        // See debate decision Q1 in the Phase 3 design notes, and claude/design/spatial-tiers/01-spatial-clusters.md §"Migration fence WAL atomicity".
+        // See debate decision Q1 in the Phase 3 design notes, and claude/design/Spatial/SpatialTiers/01-spatial-clusters.md §"Migration fence WAL atomicity".
         // Pass the per-tick UoW's shared ChangeSet so all dirty pages mutated during the tick fence (migrations, shadow drains, spatial maintenance) flow
         // through one accounting bucket. UoW.Flush below handles the writeback per the configured DurabilityMode (and skips it entirely in WAL mode where
         // WAL records carry durability). Without this, each tick-fence callee would create+commit its own private ChangeSet, doing redundant disk I/O on
@@ -1992,6 +2000,6 @@ public sealed partial class TyphonRuntime : IDisposable
         }
 
         var chunkCount = Scheduler.Systems[sysIdx].TotalChunks;
-        TyphonEvent.EmitSchedulerSystemArchetype(sysIdx, archetypeId, entityCount, chunkCount, startTs, endTs);
+        TyphonEvent.EmitSchedulerSystemArchetype(startTs, endTs, sysIdx, archetypeId, entityCount, chunkCount);
     }
 }

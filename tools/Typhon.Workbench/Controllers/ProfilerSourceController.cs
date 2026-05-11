@@ -8,7 +8,7 @@ namespace Typhon.Workbench.Controllers;
 /// <summary>
 /// Workbench-wide profiler operations that aren't tied to a specific session: the
 /// "Open in editor" handoff and the inline source-preview fetch. See
-/// claude/design/observability/10-profiler-source-attribution.md §5.5 + §5.6.
+/// claude/design/Profiler/10-profiler-source-attribution.md §5.5 + §5.6.
 /// </summary>
 [ApiController]
 [Route("api/profiler")]

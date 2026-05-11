@@ -15,7 +15,7 @@ namespace Typhon.Engine.Internals;
 /// <para>The timer registration is lazy: the 200Hz callback is only registered with the shared timer on the first <see cref="Register"/> call.
 /// If no deadlines are ever registered, no timer overhead is incurred.</para>
 /// </remarks>
-public class DeadlineWatchdog : ResourceNode
+internal class DeadlineWatchdog : ResourceNode
 {
     // ═══════════════════════════════════════════════════════════════
     // Types

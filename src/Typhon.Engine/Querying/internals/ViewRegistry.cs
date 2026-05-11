@@ -7,11 +7,18 @@ namespace Typhon.Engine.Internals;
 internal readonly struct ViewRegistration
 {
     public readonly IView View;
+    /// <summary>
+    /// The view's delta buffer, supplied by the caller at registration time (callers know which concrete view they're
+    /// registering and can read the buffer off the concrete type). Stored alongside the IView reference so hot-path code
+    /// (transaction commit, index maintainer) reads it directly without a per-append cast or interface dispatch.
+    /// </summary>
+    public readonly ViewDeltaRingBuffer DeltaBuffer;
     public readonly byte ComponentTag;
 
-    public ViewRegistration(IView view, byte componentTag)
+    public ViewRegistration(IView view, ViewDeltaRingBuffer deltaBuffer, byte componentTag)
     {
         View = view;
+        DeltaBuffer = deltaBuffer;
         ComponentTag = componentTag;
     }
 }
@@ -46,9 +53,10 @@ internal class ViewRegistry
         return views[fieldIndex];
     }
 
-    public void RegisterView(IView view) => RegisterView(view, view.FieldDependencies, 0);
+    public void RegisterView(IView view, ViewDeltaRingBuffer deltaBuffer)
+        => RegisterView(view, deltaBuffer, view.FieldDependencies, 0);
 
-    public void RegisterView(IView view, int[] fieldIndices, byte componentTag)
+    public void RegisterView(IView view, ViewDeltaRingBuffer deltaBuffer, int[] fieldIndices, byte componentTag)
     {
         lock (_writeLock)
         {
@@ -87,7 +95,7 @@ internal class ViewRegistry
                 // Copy-on-write: create new array +1
                 var newArray = new ViewRegistration[existing.Length + 1];
                 Array.Copy(existing, newArray, existing.Length);
-                newArray[existing.Length] = new ViewRegistration(view, componentTag);
+                newArray[existing.Length] = new ViewRegistration(view, deltaBuffer, componentTag);
                 _viewsByField[fieldIndex] = newArray;
             }
             _viewCount++;

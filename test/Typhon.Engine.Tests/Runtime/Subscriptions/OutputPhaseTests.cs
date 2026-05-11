@@ -84,7 +84,7 @@ class OutputPhaseTests : TestBase<OutputPhaseTests>
 
             SpinWait.SpinUntil(() => runtime.ClientConnections.Count > 0, System.TimeSpan.FromSeconds(2));
             var conn = System.Linq.Enumerable.First(runtime.ClientConnections.GetAll());
-            runtime.SetSubscriptions(conn, published);
+            runtime.SetSubscriptions(conn.Context, published);
 
             // Wait one tick for subscription to be processed
             var tickAtSubscribe = runtime.CurrentTickNumber;
@@ -189,7 +189,7 @@ class OutputPhaseTests : TestBase<OutputPhaseTests>
 
             SpinWait.SpinUntil(() => runtime.ClientConnections.Count > 0, System.TimeSpan.FromSeconds(2));
             var conn = System.Linq.Enumerable.First(runtime.ClientConnections.GetAll());
-            runtime.SetSubscriptions(conn, published);
+            runtime.SetSubscriptions(conn.Context, published);
 
             // Wait for subscription to be processed
             var tickAtSub = runtime.CurrentTickNumber;

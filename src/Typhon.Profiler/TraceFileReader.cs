@@ -656,7 +656,7 @@ public sealed class TraceFileReader : IDisposable
     /// Read the trailing source-location manifest (#302, Phase 3 of profiler-source-attribution).
     /// Returns <c>false</c> if the trace file doesn't carry one (offsets in the header are zero).
     /// Uses absolute seeks; requires a seekable stream.
-    /// See claude/design/observability/10-profiler-source-attribution.md §4.6.
+    /// See claude/design/Profiler/10-profiler-source-attribution.md §4.6.
     /// </summary>
     public bool TryReadSourceLocationManifest(out string[] files, out SourceLocationManifestEntry[] entries)
     {

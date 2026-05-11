@@ -89,7 +89,7 @@ internal class IndexStatistics
     /// <remarks>
     /// <b>Scalability warning:</b> This performs a full O(N) leaf scan. Acceptable for Phase 2 (explicit, infrequent calls)
     /// but must be replaced with a scalable approach (sampling, incremental, or background streaming) before 1.0.
-    /// See Phase 4 note in <c>claude/design/ViewSystem/phase-2.md</c>.
+    /// See Phase 4 note in <c>claude/design/Querying/ViewSystem/phase-2.md</c>.
     /// </remarks>
     public void RebuildHistogram()
     {

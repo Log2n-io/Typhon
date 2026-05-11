@@ -139,7 +139,7 @@ internal sealed class GcIngestionThread
         {
             case GcEventRecordKind.GcStart:
                 TyphonEvent.EmitGcStart(_slot, record.Timestamp,
-                    record.Generation, record.Reason, record.Type, record.Count);
+                    record.Generation, (GcReason)record.Reason, (GcType)record.Type, record.Count);
                 break;
 
             case GcEventRecordKind.GcEnd:
@@ -174,7 +174,7 @@ internal sealed class GcIngestionThread
             case GcEventRecordKind.RestartEnd:
                 if (_suspensionOpen)
                 {
-                    TyphonEvent.EmitGcSuspension(_slot, _suspensionStartTs, record.Timestamp, _suspensionReason);
+                    TyphonEvent.EmitGcSuspension(_slot, _suspensionStartTs, record.Timestamp, (GcSuspendReason)_suspensionReason);
                     _suspensionOpen = false;
                 }
                 break;

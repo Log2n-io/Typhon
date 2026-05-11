@@ -198,7 +198,6 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 {
     private readonly DatabaseEngineOptions      _options;
 
-    private readonly IWalFileIO                 _walFileIO;
     private readonly IResource                  _durabilityNode;
     private WalRecoveryResult                   _lastRecoveryResult;
     internal TransientOptions                   TransientOptions => _options.Transient;
@@ -320,7 +319,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     public DatabaseDefinitions DBD { get; }
     public ManagedPagedMMF MMF { get; }
     public EpochManager EpochManager { get; private set; }
-    public DeadlineWatchdog Watchdog { get; }
+    internal DeadlineWatchdog Watchdog { get; }
 
     internal TransactionChain TransactionChain { get; }
     internal DeferredCleanupManager DeferredCleanupManager { get; }
@@ -478,8 +477,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// </summary>
     public void ForceCheckpoint() => CheckpointManager?.ForceCheckpoint();
 
-    public DatabaseEngine(IResourceRegistry resourceRegistry, EpochManager epochManager, DeadlineWatchdog watchdog, ManagedPagedMMF mmf, 
-        IMemoryAllocator memoryAllocator, DatabaseEngineOptions options, ILogger<DatabaseEngine> log, IWalFileIO walFileIO = null, string name = null) 
+    internal DatabaseEngine(IResourceRegistry resourceRegistry, EpochManager epochManager, DeadlineWatchdog watchdog, ManagedPagedMMF mmf,
+        IMemoryAllocator memoryAllocator, DatabaseEngineOptions options, ILogger<DatabaseEngine> log, string name = null)
         : base(name ?? $"DatabaseEngine_{Guid.NewGuid():N}", ResourceType.Engine, resourceRegistry.DataEngine)
     {
         // Engine initialization
@@ -489,7 +488,6 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         _logger = log;
         _options = options;
         MemoryAllocator = memoryAllocator;
-        _walFileIO = walFileIO;
         _durabilityNode = resourceRegistry.Durability;
         TimeoutOptions.Current = _options.Timeouts;
         _componentCollectionSegmentByStride = new ConcurrentDictionary<int, ChunkBasedSegment<PersistentStore>>();
@@ -565,13 +563,18 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     private void InitializeWalManager()
     {
         var walOptions = _options.Wal;
-        if (walOptions == null || _walFileIO == null)
+        if (walOptions == null)
         {
             return;
         }
 
+        // Engine constructs the production WAL file I/O internally — IWalFileIO is an engine-internal type
+        // (consumers don't plug in their own implementation; the only friend that ever did was the test suite,
+        // which builds a WalManager directly with InMemoryWalFileIO instead of going through DatabaseEngine).
+        IWalFileIO walFileIO = new WalFileIO();
+
         var commitBufferCapacity = _options.Resources.WalRingBufferSizeBytes / 2;
-        WalManager = new WalManager(walOptions, MemoryAllocator, _walFileIO, _durabilityNode, commitBufferCapacity);
+        WalManager = new WalManager(walOptions, MemoryAllocator, walFileIO, _durabilityNode, commitBufferCapacity);
 
         // Determine continuation point from recovery or fresh start
         var lastLSN = _lastRecoveryResult.LastValidLSN;
@@ -1334,7 +1337,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// cell's world bounds and the hysteresis margin are hoisted out of the inner per-slot loop. The per-entity
     /// check is an exit-by-margin axis-aligned bounds test (4 comparisons, early-exit), only falling back to
     /// <see cref="SpatialGrid.WorldToCellKey"/> when the margin is actually exceeded. The hysteresis formulation
-    /// is semantically equivalent to <c>claude/design/spatial-tiers/01-spatial-clusters.md</c> §"Migration
+    /// is semantically equivalent to <c>claude/design/Spatial/SpatialTiers/01-spatial-clusters.md</c> §"Migration
     /// Hysteresis" but reorganized for a fast common-case "entity stayed inside" path.</para>
     ///
     /// <para><b>Non-finite positions throw.</b> If an entity's spatial field contains NaN or Infinity,
@@ -1929,7 +1932,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                                     }
 
                                     byte delFlags = (byte)((f & 0x3F) | 0x80); // isDeletion
-                                    reg.View.DeltaBuffer.TryAppend(entry.EntityPK, entry.OldKey, default, 0, delFlags, reg.ComponentTag);
+                                    reg.DeltaBuffer.TryAppend(entry.EntityPK, entry.OldKey, default, 0, delFlags, reg.ComponentTag);
                                 }
 
                                 continue;
@@ -1964,7 +1967,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                                     }
 
                                     byte flags = (byte)(f & 0x3F);
-                                    reg.View.DeltaBuffer.TryAppend(entry.EntityPK, oldKey, newKey, 0, flags, reg.ComponentTag);
+                                    reg.DeltaBuffer.TryAppend(entry.EntityPK, oldKey, newKey, 0, flags, reg.ComponentTag);
                                 }
                             }
                         }
@@ -2091,7 +2094,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     }
 
                     byte delFlags = (byte)((fieldIdx & 0x3F) | 0x80); // isDeletion
-                    reg.View.DeltaBuffer.TryAppend(entry.EntityPK, entry.OldKey, default, 0, delFlags, reg.ComponentTag);
+                    reg.DeltaBuffer.TryAppend(entry.EntityPK, entry.OldKey, default, 0, delFlags, reg.ComponentTag);
                 }
 
                 continue;
@@ -2133,7 +2136,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 }
 
                 byte flags = (byte)(fieldIdx & 0x3F);
-                reg.View.DeltaBuffer.TryAppend(entry.EntityPK, oldKey, newKey, 0, flags, reg.ComponentTag);
+                reg.DeltaBuffer.TryAppend(entry.EntityPK, oldKey, newKey, 0, flags, reg.ComponentTag);
             }
         }
     }
@@ -2321,11 +2324,12 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             UowRegistry = new UowRegistry(segment, MMF, EpochManager, MemoryAllocator, this);
 
             var walDir = _options.Wal?.WalDirectory;
-            if (walDir != null && _walFileIO != null && System.IO.Directory.Exists(walDir) && System.IO.Directory.GetFiles(walDir, "*.wal").Length > 0)
+            if (walDir != null && System.IO.Directory.Exists(walDir) && System.IO.Directory.GetFiles(walDir, "*.wal").Length > 0)
             {
                 // Two-phase WAL recovery: LoadFromDiskRaw preserves Pending entries for WAL cross-referencing
                 UowRegistry.LoadFromDiskRaw();
-                using var recovery = new WalRecovery(_walFileIO, walDir, MMF);
+                using var recoveryFileIO = new WalFileIO();
+                using var recovery = new WalRecovery(recoveryFileIO, walDir, MMF);
                 // Pass null for dbe: replay is deferred until component tables are registered (system schema auto-loading, #57)
                 _lastRecoveryResult = recovery.Recover(UowRegistry, checkpointLSN, null);
             }

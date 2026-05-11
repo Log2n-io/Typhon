@@ -49,7 +49,7 @@ public partial class DagScheduler
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private void InspectorSystemReady(int sysIdx, long timestamp) => TyphonEvent.EmitSystemReady((ushort)sysIdx, 0, timestamp);
+    private void InspectorSystemReady(int sysIdx, long timestamp) => TyphonEvent.EmitSystemReady(timestamp, (ushort)sysIdx, 0);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void InspectorSystemSkipped(int sysIdx, SkipReason reason, long timestamp)
@@ -62,7 +62,7 @@ public partial class DagScheduler
         var sys = Systems[sysIdx];
         var wouldBe = sys.IsParallelQuery ? sys.TotalChunks : 1;
         var unblocked = sys.Successors.Length;
-        TyphonEvent.EmitSystemSkipped((ushort)sysIdx, (byte)reason, timestamp, (ushort)Math.Min(wouldBe, ushort.MaxValue), (ushort)Math.Min(unblocked, ushort.MaxValue));
+        TyphonEvent.EmitSystemSkipped(timestamp, (ushort)sysIdx, (byte)reason, (ushort)Math.Min(wouldBe, ushort.MaxValue), (ushort)Math.Min(unblocked, ushort.MaxValue));
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -83,7 +83,7 @@ public partial class DagScheduler
             return;  // no pending start — profiler was off or we missed the start
         }
 
-        TyphonEvent.EmitSchedulerChunk(sysIdx, chunkIndex, PendingChunkTotal, startTs, timestamp, entitiesProcessed);
+        TyphonEvent.EmitSchedulerChunk(startTs, timestamp, sysIdx, chunkIndex, PendingChunkTotal, entitiesProcessed);
         PendingChunkStart = 0;
     }
 }

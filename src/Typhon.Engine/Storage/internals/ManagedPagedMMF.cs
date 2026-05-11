@@ -130,7 +130,7 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
     /// <summary>Maximum number of file pages the occupancy bitmap can track (current capacity).</summary>
     public int OccupancyCapacityPages => _occupancyMap?.Capacity ?? 0;
 
-    public ManagedPagedMMF(IResourceRegistry resourceRegistry, EpochManager epochManager, IMemoryAllocator memoryAllocator, PagedMMFOptions options,
+    internal ManagedPagedMMF(IResourceRegistry resourceRegistry, EpochManager epochManager, IMemoryAllocator memoryAllocator, PagedMMFOptions options,
         IResource parent, string resourceName, ILogger<PagedMMF> logger) :
         base(memoryAllocator, epochManager, options, parent, $"ManagedPagedMMF_{options?.DatabaseName ?? Guid.NewGuid().ToString("N")}", logger)
     {

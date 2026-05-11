@@ -241,12 +241,12 @@ public class TraceRecordRingTests
         var drained = ring.Drain(drainBuffer);
         Assert.That(drained, Is.EqualTo(size));
 
-        var decoded = EcsQueryEventCodec.Decode(drainBuffer[..drained]);
-        Assert.That(decoded.Kind, Is.EqualTo(TraceEventKind.EcsQueryExecute));
+        var decoded = (Typhon.Profiler.Events.EcsQueryExecuteEventDto)Typhon.Profiler.Events.TraceEventDecoder.Decode(drainBuffer[..drained], 0, 1);
+        Assert.That(decoded.KindByte, Is.EqualTo((byte)TraceEventKind.EcsQueryExecute));
         Assert.That(decoded.ArchetypeTypeId, Is.EqualTo(77));
         Assert.That(decoded.ResultCount, Is.EqualTo(42));
         Assert.That(decoded.ScanMode, Is.EqualTo(EcsQueryScanMode.Targeted));
-        Assert.That(decoded.DurationTicks, Is.EqualTo(500L));
+        Assert.That(decoded.DurationUs, Is.EqualTo(500.0));
     }
 
     [Test]
@@ -285,23 +285,23 @@ public class TraceRecordRingTests
 
         // Record 1: BTreeInsert
         var size1 = System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(drainBuffer.AsSpan(pos));
-        var btData = BTreeEventCodec.Decode(drainBuffer.AsSpan(pos, size1));
-        Assert.That(btData.Kind, Is.EqualTo(TraceEventKind.BTreeInsert));
-        Assert.That(btData.DurationTicks, Is.EqualTo(100L));
+        var btData = (Typhon.Profiler.Events.BTreeInsertEventDto)Typhon.Profiler.Events.TraceEventDecoder.Decode(drainBuffer.AsSpan(pos, size1), 0, 1);
+        Assert.That(btData.KindByte, Is.EqualTo((byte)TraceEventKind.BTreeInsert));
+        Assert.That(btData.DurationUs, Is.EqualTo(100.0));
         pos += size1;
 
         // Record 2: TransactionCommit
         var size2 = System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(drainBuffer.AsSpan(pos));
-        var txData = TransactionEventCodec.Decode(drainBuffer.AsSpan(pos, size2));
-        Assert.That(txData.Kind, Is.EqualTo(TraceEventKind.TransactionCommit));
+        var txData = (Typhon.Profiler.Events.TransactionCommitEventDto)Typhon.Profiler.Events.TraceEventDecoder.Decode(drainBuffer.AsSpan(pos, size2), 0, 1);
+        Assert.That(txData.KindByte, Is.EqualTo((byte)TraceEventKind.TransactionCommit));
         Assert.That(txData.Tsn, Is.EqualTo(9999L));
         Assert.That(txData.ComponentCount, Is.EqualTo(3));
         pos += size2;
 
         // Record 3: PageCacheFetch
         var size3 = System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(drainBuffer.AsSpan(pos));
-        var pcData = PageCacheEventCodec.Decode(drainBuffer.AsSpan(pos, size3));
-        Assert.That(pcData.Kind, Is.EqualTo(TraceEventKind.PageCacheFetch));
+        var pcData = (Typhon.Profiler.Events.PageCacheFetchEventDto)Typhon.Profiler.Events.TraceEventDecoder.Decode(drainBuffer.AsSpan(pos, size3), 0, 1);
+        Assert.That(pcData.KindByte, Is.EqualTo((byte)TraceEventKind.PageCacheFetch));
         Assert.That(pcData.FilePageIndex, Is.EqualTo(42));
         pos += size3;
 

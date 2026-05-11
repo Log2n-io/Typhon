@@ -6,7 +6,7 @@ using System.Collections.Generic;
 namespace Typhon.Engine.Internals;
 
 [PublicAPI]
-public abstract class MemoryBlockBase : MemoryManager<byte>, IMemoryResource, IDebugPropertiesProvider
+internal abstract class MemoryBlockBase : MemoryManager<byte>, IMemoryResource, IDebugPropertiesProvider
 {
     public MemoryAllocator Allocator { get; }
     public abstract int EstimatedMemorySize { get; }

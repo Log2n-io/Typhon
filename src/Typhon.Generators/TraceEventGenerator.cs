@@ -41,6 +41,15 @@ using Typhon.Profiler;
 
 namespace Typhon.Engine.Profiler
 {
+    /// <summary>Wire-shape of a typed trace event. Determines header layout and the generated producer API.</summary>
+    public enum TraceEventShape : byte
+    {
+        /// <summary>37-byte span header (start+end timestamps, spanId, parent, optional trace context). Producer pattern: <c>using var e = BeginX(...); ... e.Dispose();</c>.</summary>
+        Span = 0,
+        /// <summary>12-byte instant header (single timestamp, no spanId). Producer pattern: <c>EmitX(args)</c> — a single static call, no ref struct at the call site.</summary>
+        Instant = 1,
+    }
+
     /// <summary>
     /// Marks a partial ref struct as a typed event for the Typhon profiler. The generator emits the
     /// header field, kind constant, optional-property accessors, and Dispose method as a partial half;
@@ -61,12 +70,47 @@ namespace Typhon.Engine.Profiler
         /// When true, the generator emits ComputeSize and EncodeTo directly, bypassing the per-kind codec
         /// Encode method. Use only for events whose wire layout is the standard span shape:
         /// header + (optional trace context) + required payload fields in declaration order +
-        /// (optMask byte if any [Optional]) + optional fields in declaration order. Events with
-        /// kind-specific layouts (TransactionCommitComponent's componentTypeId slot, TransactionPersist's
-        /// walLsn-in-componentTypeId-slot, variable-length payloads) must keep EmitEncoder = false and
-        /// retain their hand-written codec call.
+        /// (optMask byte if any [Optional]) + optional fields in declaration order.
         /// </summary>
         public bool EmitEncoder { get; set; }
+
+        /// <summary>
+        /// Wire shape — <see cref=""TraceEventShape.Span""/> (default) or <see cref=""TraceEventShape.Instant""/>.
+        /// Instant uses a 12-byte header and the generator emits a direct <c>EmitX(args)</c> static method
+        /// instead of the Begin/Dispose ref-struct pattern (no per-call ref-struct materialization, no try/finally,
+        /// ~3 ns faster than the legacy hand-written codec path).
+        /// </summary>
+        public TraceEventShape Shape { get; set; }
+
+        /// <summary>
+        /// Override the static gate field name used in the emitted EmitX body. Defaults to
+        /// <c>""ProfilerActive""</c>. When set, the emitted check becomes <c>if (!TelemetryConfig.{Gate}) return;</c>
+        /// — used for kinds with per-kind gating (e.g. <c>ConcurrencyAccessControlSharedAcquireActive</c>).
+        /// </summary>
+        public string Gate { get; set; }
+
+        /// <summary>
+        /// Span kinds with caller-supplied start/end timestamps (no Begin/Dispose timing). When true, the generator
+        /// emits a single static <c>EmitX(long startTs, long endTs, ...payloadParams)</c> method instead of the
+        /// Begin/Dispose factory pair. Internally allocates a fresh spanId and links to <c>CurrentOpenSpanId</c>
+        /// as parent. Used for completion-style spans where the duration is known only at the end.
+        /// </summary>
+        public bool ExternalTimestamps { get; set; }
+
+        /// <summary>
+        /// When combined with <see cref=""ExternalTimestamps""/>, the caller also supplies the spanId (correlation id
+        /// linking back to a prior Begin span). The emitted signature becomes <c>EmitX(long startTs, ulong spanId,
+        /// long endTs, ...payloadParams)</c>; parent is zero. Used for async completion events
+        /// (e.g. PageCacheDiskReadCompleted carrying the originating Read span's id).
+        /// </summary>
+        public bool ExternalSpanId { get; set; }
+
+        /// <summary>
+        /// Instant kinds emitted from a context that already owns a thread slot (GC-ingestion thread, ThreadInfo
+        /// registration). When true the generator emits <c>EmitX(byte slot, long timestamp, ...payloadParams)</c>
+        /// and skips the <c>ThreadSlotRegistry.GetOrAssignSlot()</c> claim.
+        /// </summary>
+        public bool ExternalSlot { get; set; }
     }
 
     /// <summary>
@@ -81,6 +125,19 @@ namespace Typhon.Engine.Profiler
         public string MaskConstant { get; set; }
         /// <summary>Override for the public property name. Defaults to PascalCase(field name without underscore).</summary>
         public string PropertyName { get; set; }
+        /// <summary>
+        /// Inline mask byte. When non-zero the generator emits the literal value at every site that
+        /// references the optional, removing the need for an external <c>Codec.OptX</c> constant.
+        /// Required when the producer ref struct does not pin a <c>Codec = typeof(...)</c> companion.
+        /// </summary>
+        public byte MaskValue { get; set; }
+        /// <summary>
+        /// Override the wire-slot size in bytes. Defaults to the field's natural wire size (1 for byte/bool, 2 for short, 4 for int, 8 for long).
+        /// Use this for slot-sharing cases where the wire format reserves a wider slot than the field itself needs — e.g. <c>EcsQueryAny._found</c>
+        /// shares a 4-byte slot with <c>_resultCount</c>. The generator writes the natural value at the start of the slot and pads the remaining
+        /// bytes with zeroes; the decoder reads the natural type and skips the padding.
+        /// </summary>
+        public byte WireSize { get; set; }
     }
 
     /// <summary>
@@ -113,6 +170,50 @@ namespace Typhon.Engine.Profiler
                 return;
             }
             spc.AddSource($"{model.StructName}.g.cs", Emit(model));
+        });
+
+        // Second emission pass: per-kind DTO record + typed decoder for the consumer side. Emitted
+        // alongside the encoder partial above; lands in a separate file under namespace
+        // `Typhon.Profiler.Events` so the OpenAPI surface picks them up via Microsoft.AspNetCore.OpenApi
+        // polymorphic-union handling. Fires for ALL [TraceEvent] declarations:
+        //  - EmitEncoder = true → DTO record + generated Decode method (wire layout owned by generator)
+        //  - EmitEncoder = false → DTO record only; Decode is hand-glued in user code (1G), wrapping
+        //    the existing per-kind hand-written codec.
+        context.RegisterSourceOutput(pipeline, static (spc, model) =>
+        {
+            if (model == null)
+            {
+                return;
+            }
+            spc.AddSource($"{model.StructName}Dto.g.cs", EmitDto(model));
+        });
+
+        // Third emission pass: collect every model and emit the cross-cutting plumbing once —
+        //  - TraceEventDto.Polymorphism.g.cs: the partial of TraceEventDto carrying all
+        //    [JsonDerivedType(typeof(XxxEventDto), "xxxKindCamelCase")] registrations.
+        //  - TraceEventDecoder.g.cs: the kind-byte → DTO dispatch table. Switch arms call generated
+        //    Decode methods for EmitEncoder=true kinds and hand-glue partial-method extension points
+        //    for the rest (1G defines the partials in user code).
+        var collected = pipeline.Collect();
+        context.RegisterSourceOutput(collected, static (spc, models) =>
+        {
+            // Skip cross-cutting emission when this compilation has no [TraceEvent] declarations. Without this
+            // gate, every assembly that pulls the generator in as an analyzer (e.g., Typhon.Engine.Tests via
+            // ProjectReference + OutputItemType=Analyzer) would emit empty partials of TraceEventDto and
+            // TraceEventDecoder — those conflict with the Typhon.Engine assembly's full versions (CS0436) and
+            // make derived-type casts fail (CS0030). Only the assembly that hosts the [TraceEvent] structs
+            // (Typhon.Engine) needs the polymorphism registration + dispatch.
+            int modelCount = 0;
+            foreach (var m in models)
+            {
+                if (m != null) modelCount++;
+            }
+            if (modelCount == 0)
+            {
+                return;
+            }
+            spc.AddSource("TraceEventDto.Polymorphism.g.cs", EmitPolymorphismRegistration(models));
+            spc.AddSource("TraceEventDecoder.g.cs", EmitTopLevelDispatch(models));
         });
     }
 
@@ -160,6 +261,13 @@ namespace Typhon.Engine.Profiler
         string factoryName = null;
         bool generateFactory = true;
         bool emitEncoder = false;
+        // 0 = Span (default), 1 = Instant. We don't reference the TraceEventShape enum symbol directly because the attribute
+        // is declared via RegisterPostInitializationOutput so the enum may not be a fully-resolved INamedTypeSymbol here.
+        byte shape = 0;
+        string gate = null;
+        bool externalTimestamps = false;
+        bool externalSpanId = false;
+        bool externalSlot = false;
         foreach (var named in attrData.NamedArguments)
         {
             if (named.Key == "Codec" && named.Value.Value is INamedTypeSymbol codecSymbol)
@@ -177,6 +285,26 @@ namespace Typhon.Engine.Profiler
             else if (named.Key == "EmitEncoder" && named.Value.Value is bool ee)
             {
                 emitEncoder = ee;
+            }
+            else if (named.Key == "Shape")
+            {
+                shape = (byte)System.Convert.ToInt32(named.Value.Value ?? 0);
+            }
+            else if (named.Key == "Gate" && named.Value.Value is string g)
+            {
+                gate = g;
+            }
+            else if (named.Key == "ExternalTimestamps" && named.Value.Value is bool et)
+            {
+                externalTimestamps = et;
+            }
+            else if (named.Key == "ExternalSpanId" && named.Value.Value is bool esi)
+            {
+                externalSpanId = esi;
+            }
+            else if (named.Key == "ExternalSlot" && named.Value.Value is bool es)
+            {
+                externalSlot = es;
             }
         }
 
@@ -221,6 +349,8 @@ namespace Typhon.Engine.Profiler
 
                 string propertyName = null;
                 string maskConstant = null;
+                byte maskValue = 0;
+                byte wireSize = 0;
                 foreach (var named in optAttr.NamedArguments)
                 {
                     if (named.Key == "PropertyName" && named.Value.Value is string pn)
@@ -231,11 +361,19 @@ namespace Typhon.Engine.Profiler
                     {
                         maskConstant = mc;
                     }
+                    else if (named.Key == "MaskValue" && named.Value.Value is byte mv)
+                    {
+                        maskValue = mv;
+                    }
+                    else if (named.Key == "WireSize" && named.Value.Value is byte ws)
+                    {
+                        wireSize = ws;
+                    }
                 }
                 propertyName ??= DerivePropertyName(fieldName);
                 maskConstant ??= "Opt" + propertyName;
 
-                optionals.Add(new OptionalFieldModel(fieldName, typeName, wireTypeName, isEnum, propertyName, maskConstant));
+                optionals.Add(new OptionalFieldModel(fieldName, typeName, wireTypeName, isEnum, propertyName, maskConstant, maskValue, wireSize));
             }
 
             if (beginParamAttr != null)
@@ -255,10 +393,18 @@ namespace Typhon.Engine.Profiler
             }
         }
 
-        // If there are optionals, the codec must be specified — that's where the mask constants live.
+        // If there are optionals, every one of them must resolve to a mask reference. Each optional either
+        // carries an inline `MaskValue` (literal byte) or relies on `Codec = typeof(X).MaskConstant`. Mixing is
+        // fine — drop the codec entirely once every optional has its own MaskValue.
         if (optionals.Count > 0 && codecFqn == null)
         {
-            return null;
+            foreach (var o in optionals)
+            {
+                if (o.MaskValue == 0)
+                {
+                    return null;
+                }
+            }
         }
 
         // Walk public payload fields in declaration order — used when EmitEncoder = true. Walk the syntax
@@ -311,7 +457,12 @@ namespace Typhon.Engine.Profiler
             payloadFields: payloadFields.ToArray(),
             factoryName: factoryName ?? ("Begin" + kindName),
             generateFactory: generateFactory,
-            emitEncoder: emitEncoder
+            emitEncoder: emitEncoder,
+            isInstant: shape == 1,
+            gate: gate ?? "ProfilerActive",
+            externalTimestamps: externalTimestamps,
+            externalSpanId: externalSpanId,
+            externalSlot: externalSlot
         );
     }
 
@@ -453,7 +604,8 @@ namespace Typhon.Engine.Profiler
         }
 
         bool hasOptionals = model.Optionals.Length > 0;
-        int optMaskSize = hasOptionals ? 1 : 0;
+        bool hasOptMaskByte = hasOptionals;
+        int optMaskSize = hasOptMaskByte ? 1 : 0;
 
         // ── ComputeSize ──
         sb.AppendLine();
@@ -466,13 +618,16 @@ namespace Typhon.Engine.Profiler
         {
             sb.Append(indent).Append("        size += ").Append(requiredPayloadSize).AppendLine(";");
         }
-        if (hasOptionals)
+        if (hasOptMaskByte)
         {
             sb.Append(indent).AppendLine("        size += 1; // optMask byte");
+        }
+        if (hasOptionals)
+        {
             foreach (var opt in model.Optionals)
             {
-                int optSz = WireSize(opt.WireTypeFqn);
-                sb.Append(indent).Append("        if ((_optMask & ").Append(model.CodecFqn).Append('.').Append(opt.MaskConstant).Append(") != 0) size += ").Append(optSz).AppendLine(";");
+                int optSz = EffectiveOptSize(opt);
+                sb.Append(indent).Append("        if ((_optMask & ").Append(MaskExpr(model, opt)).Append(") != 0) size += ").Append(optSz).AppendLine(";");
             }
         }
         sb.Append(indent).AppendLine("        return size;");
@@ -502,7 +657,7 @@ namespace Typhon.Engine.Profiler
         sb.Append(indent).AppendLine("        }");
 
         // Payload writes (after header — including the optional source-location id when present).
-        if (requiredPayloadSize > 0 || hasOptionals)
+        if (requiredPayloadSize > 0 || hasOptMaskByte)
         {
             sb.Append(indent).Append("        var headerSize = ").Append(TR).AppendLine(".SpanHeaderSize(hasTraceContext, hasSourceLocation);");
             sb.Append(indent).AppendLine("        var payload = destination[headerSize..];");
@@ -515,7 +670,7 @@ namespace Typhon.Engine.Profiler
                 sb.Append(indent).Append("        ").AppendLine(WriteCall(p.WireTypeFqn, spanExpr, valueExpr));
                 cursor += sz;
             }
-            if (hasOptionals)
+            if (hasOptMaskByte)
             {
                 string spanExpr = cursor == 0 ? "payload" : $"payload[{cursor}..]";
                 sb.Append(indent).Append("        ").Append(spanExpr).AppendLine("[0] = _optMask;");
@@ -523,12 +678,22 @@ namespace Typhon.Engine.Profiler
                 sb.Append(indent).Append("        var optCursor = ").Append(cursor).AppendLine(";");
                 foreach (var opt in model.Optionals)
                 {
-                    int optSz = WireSize(opt.WireTypeFqn);
+                    int naturalSz = WireSize(opt.WireTypeFqn);
+                    int effectiveSz = EffectiveOptSize(opt);
                     string valueExpr = opt.IsEnum ? $"({opt.WireTypeFqn}){opt.FieldName}" : opt.FieldName;
-                    sb.Append(indent).Append("        if ((_optMask & ").Append(model.CodecFqn).Append('.').Append(opt.MaskConstant).AppendLine(") != 0)");
+                    sb.Append(indent).Append("        if ((_optMask & ").Append(MaskExpr(model, opt)).AppendLine(") != 0)");
                     sb.Append(indent).AppendLine("        {");
                     sb.Append(indent).Append("            ").AppendLine(WriteCall(opt.WireTypeFqn, "payload[optCursor..]", valueExpr));
-                    sb.Append(indent).Append("            optCursor += ").Append(optSz).AppendLine(";");
+                    if (effectiveSz > naturalSz)
+                    {
+                        // Slot padding: zero-fill the bytes between the natural value and the wider wire slot. The producer's
+                        // ring buffer is reused across records so the bytes here may carry stale data without explicit zeroing.
+                        for (int padIdx = naturalSz; padIdx < effectiveSz; padIdx++)
+                        {
+                            sb.Append(indent).Append("            payload[optCursor + ").Append(padIdx).AppendLine("] = 0;");
+                        }
+                    }
+                    sb.Append(indent).Append("            optCursor += ").Append(effectiveSz).AppendLine(";");
                     sb.Append(indent).AppendLine("        }");
                 }
             }
@@ -536,6 +701,51 @@ namespace Typhon.Engine.Profiler
 
         sb.Append(indent).AppendLine("        bytesWritten = size;");
         sb.Append(indent).AppendLine("    }");
+    }
+
+    /// <summary>Emit the byte-read call for a single field given its type and the cursor expression. Mirror of <see cref="WriteCall"/>.</summary>
+    private static string ReadCall(string typeFqn, string spanExpr)
+    {
+        int idx = typeFqn.LastIndexOf('.');
+        string leaf = idx >= 0 ? typeFqn.Substring(idx + 1) : typeFqn;
+        switch (leaf)
+        {
+            case "byte":
+            case "Byte":
+                return $"{spanExpr}[0]";
+            case "sbyte":
+            case "SByte":
+                return $"(sbyte){spanExpr}[0]";
+            case "bool":
+            case "Boolean":
+                return $"{spanExpr}[0] != 0";
+            case "short":
+            case "Int16":
+                return $"global::System.Buffers.Binary.BinaryPrimitives.ReadInt16LittleEndian({spanExpr})";
+            case "ushort":
+            case "UInt16":
+                return $"global::System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian({spanExpr})";
+            case "int":
+            case "Int32":
+                return $"global::System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian({spanExpr})";
+            case "uint":
+            case "UInt32":
+                return $"global::System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian({spanExpr})";
+            case "float":
+            case "Single":
+                return $"global::System.Buffers.Binary.BinaryPrimitives.ReadSingleLittleEndian({spanExpr})";
+            case "long":
+            case "Int64":
+                return $"global::System.Buffers.Binary.BinaryPrimitives.ReadInt64LittleEndian({spanExpr})";
+            case "ulong":
+            case "UInt64":
+                return $"global::System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian({spanExpr})";
+            case "double":
+            case "Double":
+                return $"global::System.Buffers.Binary.BinaryPrimitives.ReadDoubleLittleEndian({spanExpr})";
+            default:
+                return $"#error TraceEventGenerator: unsupported wire type '{typeFqn}' for read at '{spanExpr}'.";
+        }
     }
 
     /// <summary>Convert "_componentCount" → "ComponentCount". Strips a single leading underscore.</summary>
@@ -553,12 +763,435 @@ namespace Typhon.Engine.Profiler
         return char.ToUpperInvariant(fieldName[start]) + fieldName.Substring(start + 1);
     }
 
+    /// <summary>
+    /// Reserved property names on the consumer-side DTO base hierarchy (<c>TraceEventDto</c> + <c>TraceSpanEventDto</c>).
+    /// A producer-side payload field with one of these names would shadow the base property — instead, the generator
+    /// appends a <c>Payload</c> suffix so the base property keeps its consumer-observed semantics. The base values
+    /// (e.g., <c>TickNumber</c> = consumer-observed tick from the most recent <c>TickStart</c> marker) are more
+    /// useful than payload duplicates so the rename favours the base.
+    /// </summary>
+    private static readonly System.Collections.Generic.HashSet<string> ReservedDtoBaseNames = new(System.StringComparer.Ordinal)
+    {
+        "ThreadSlot", "TickNumber", "TimestampUs", "SourceLocationId",
+        "DurationUs", "SpanId", "ParentSpanId", "TraceIdHi", "TraceIdLo",
+    };
+
+    /// <summary>Returns the DTO property name for a payload field — adds a <c>Payload</c> suffix if it collides with a reserved base name.</summary>
+    private static string DtoPropertyName(string fieldName) => ReservedDtoBaseNames.Contains(fieldName) ? fieldName + "Payload" : fieldName;
+
+    /// <summary>Effective wire-slot size for an optional — overrides natural size when the field carries an explicit <c>WireSize</c>.</summary>
+    private static int EffectiveOptSize(OptionalFieldModel opt)
+    {
+        int natural = WireSize(opt.WireTypeFqn);
+        return opt.WireSize > 0 ? opt.WireSize : natural;
+    }
+
+    /// <summary>
+    /// Render the C# expression that yields an optional field's mask byte at emission time. Prefers the inline
+    /// <see cref="OptionalFieldModel.MaskValue"/> when set (so the generated source has no external dependency on
+    /// a per-codec constants class); otherwise falls back to <c>{Codec}.{MaskConstant}</c>. The model invariant is
+    /// already enforced in <see cref="Transform"/> — we never reach here with both <c>MaskValue == 0</c> and a null codec.
+    /// </summary>
+    private static string MaskExpr(TraceEventModel model, OptionalFieldModel opt)
+    {
+        if (opt.MaskValue != 0)
+        {
+            return "0x" + opt.MaskValue.ToString("X2") + " /* " + opt.MaskConstant + " */";
+        }
+        return model.CodecFqn + "." + opt.MaskConstant;
+    }
+
+    /// <summary>Convert PascalCase kind name to camelCase JSON discriminator value (e.g. "BTreeInsert" → "btreeInsert").</summary>
+    private static string ToCamelCase(string pascal)
+    {
+        if (string.IsNullOrEmpty(pascal))
+        {
+            return pascal;
+        }
+        return char.ToLowerInvariant(pascal[0]) + pascal.Substring(1);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Emit: TraceEventModel → DTO + decoder source code (Phase 1D)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Emit the per-kind sealed record DTO plus its static <c>Decode</c> method. Lands in
+    /// <c>Typhon.Profiler.Events</c>; consumers reach it via the <c>TraceEventDto</c> polymorphic base.
+    /// Phase 1D scope: span-shape events with <c>EmitEncoder = true</c> and no <c>[Optional]</c> fields.
+    /// Optional-payload + instant-shape support land in 1E.
+    /// </summary>
+    private static string EmitDto(TraceEventModel model)
+    {
+        if (model.IsInstant)
+        {
+            return EmitInstantDto(model);
+        }
+
+        const string TR = "global::Typhon.Profiler.TraceRecordHeader";
+        var sb = new StringBuilder(2048);
+        sb.AppendLine("// <auto-generated/>");
+        sb.AppendLine("#nullable disable");
+        sb.AppendLine("using System;");
+        sb.AppendLine();
+        sb.AppendLine("namespace Typhon.Profiler.Events;");
+        sb.AppendLine();
+
+        // ── Record declaration ──
+        sb.Append("/// <summary>Generated DTO for <c>").Append(model.KindName).AppendLine("</c> trace events. Wire format mirrors the encoder partial.</summary>");
+        sb.Append("public sealed record ").Append(model.StructName).AppendLine("Dto : global::Typhon.Profiler.Events.TraceSpanEventDto");
+        sb.AppendLine("{");
+
+        // KindByte override — surfaces the numeric TraceEventKind value for in-process filtering. Marked
+        // [JsonIgnore] on the abstract base so it never ends up on the wire (the JsonPolymorphic discriminator
+        // is the on-wire kind). Override here returns a compile-time constant.
+        sb.Append("    public override byte KindByte => (byte)global::Typhon.Profiler.TraceEventKind.").Append(model.KindName).AppendLine(";");
+        sb.AppendLine();
+
+        // Required payload field properties — preserve original C# type (so enums stay typed).
+        // Property name is the source field name unless it collides with a base member, in which case
+        // we append "Payload" so the consumer-observed base value keeps its semantic.
+        foreach (var p in model.PayloadFields)
+        {
+            sb.Append("    public ").Append(p.TypeFqn).Append(' ').Append(DtoPropertyName(p.FieldName)).AppendLine(" { get; init; }");
+        }
+
+        // Optional payload field properties — Nullable<T> so absent fields surface as null. Wire-presence is
+        // gated by the optMask byte after the required payload (see encoder layout in EmitEncoderMethods).
+        foreach (var opt in model.Optionals)
+        {
+            // Use the encoder-side property name (e.g., _dirtyPageCount → DirtyPageCount). Apply the same
+            // collision-rename that required fields get.
+            string dtoName = DtoPropertyName(opt.PropertyName);
+            sb.Append("    public ").Append(opt.TypeFqn).Append("? ").Append(dtoName).AppendLine(" { get; init; }");
+        }
+
+        // Decoder method — only emitted for EmitEncoder=true kinds (generator owns the wire format).
+        // Custom-encoder kinds get a hand-glue Decode method written alongside the existing codec (1G).
+        if (!model.EmitEncoder)
+        {
+            sb.AppendLine("}");
+            return sb.ToString();
+        }
+
+        sb.AppendLine();
+        sb.Append("    /// <summary>Decode a <c>").Append(model.KindName).AppendLine("</c> wire record into a typed DTO. Mirrors the encoder layout 1:1.</summary>");
+        sb.Append("    public static ").Append(model.StructName).AppendLine("Dto Decode(global::System.ReadOnlySpan<byte> source, int currentTick, long ticksPerUs)");
+        sb.AppendLine("    {");
+        sb.Append("        ").Append(TR).AppendLine(".ReadCommonHeader(source, out _, out _, out var threadSlot, out var startTimestamp);");
+        sb.Append("        ").Append(TR).Append(".ReadSpanHeaderExtension(source[").Append(TR).AppendLine(".CommonHeaderSize..],");
+        sb.AppendLine("            out var durationTicks, out var spanId, out var parentSpanId, out var spanFlags);");
+        sb.Append("        var hasTraceContext = (spanFlags & ").Append(TR).AppendLine(".SpanFlagsHasTraceContext) != 0;");
+        sb.Append("        var hasSourceLocation = (spanFlags & ").Append(TR).AppendLine(".SpanFlagsHasSourceLocation) != 0;");
+        sb.AppendLine("        ulong traceIdHi = 0, traceIdLo = 0;");
+        sb.AppendLine("        if (hasTraceContext)");
+        sb.AppendLine("        {");
+        sb.Append("            ").Append(TR).Append(".ReadTraceContext(source[").Append(TR).AppendLine(".MinSpanHeaderSize..], out traceIdHi, out traceIdLo);");
+        sb.AppendLine("        }");
+        sb.AppendLine("        ushort sourceLocationId = 0;");
+        sb.AppendLine("        if (hasSourceLocation)");
+        sb.AppendLine("        {");
+        sb.Append("            sourceLocationId = ").Append(TR).Append(".ReadSourceLocationId(source[").Append(TR).AppendLine(".SourceLocationIdOffset(hasTraceContext)..]);");
+        sb.AppendLine("        }");
+
+        // Payload reads (if any). Layout: required fields in declaration order, then optMask byte (only if
+        // there are any [Optional] fields), then optional fields gated by mask bits — same order EncodeTo writes.
+        bool hasOptMaskByte = model.Optionals.Length > 0;
+        bool hasPayload = model.PayloadFields.Length > 0 || hasOptMaskByte;
+        if (hasPayload)
+        {
+            sb.Append("        var headerSize = ").Append(TR).AppendLine(".SpanHeaderSize(hasTraceContext, hasSourceLocation);");
+            sb.AppendLine("        var payload = source[headerSize..];");
+            int cursor = 0;
+            foreach (var p in model.PayloadFields)
+            {
+                int sz = WireSize(p.WireTypeFqn);
+                if (sz < 0)
+                {
+                    sb.Append("        #error TraceEventGenerator: unsupported wire type '").Append(p.WireTypeFqn).Append("' for payload field '").Append(p.FieldName).Append("' on ").AppendLine(model.StructName);
+                    return sb.ToString();
+                }
+                string spanExpr = cursor == 0 ? "payload" : $"payload[{cursor}..]";
+                string readExpr = ReadCall(p.WireTypeFqn, spanExpr);
+                if (p.IsEnum)
+                {
+                    readExpr = $"({p.TypeFqn})({readExpr})";
+                }
+                sb.Append("        var p_").Append(p.FieldName).Append(" = ").Append(readExpr).AppendLine(";");
+                cursor += sz;
+            }
+
+            if (hasOptMaskByte)
+            {
+                string maskSpan = cursor == 0 ? "payload" : $"payload[{cursor}..]";
+                sb.Append("        byte optMask = ").Append(maskSpan).AppendLine("[0];");
+                cursor += 1;
+                sb.Append("        int optCursor = ").Append(cursor).AppendLine(";");
+
+                foreach (var opt in model.Optionals)
+                {
+                    int naturalSz = WireSize(opt.WireTypeFqn);
+                    if (naturalSz < 0)
+                    {
+                        sb.Append("        #error TraceEventGenerator: unsupported wire type '").Append(opt.WireTypeFqn).Append("' for optional field '").Append(opt.FieldName).Append("' on ").AppendLine(model.StructName);
+                        return sb.ToString();
+                    }
+                    int effectiveSz = EffectiveOptSize(opt);
+                    sb.Append("        ").Append(opt.TypeFqn).Append("? po_").Append(opt.PropertyName).AppendLine(" = null;");
+                    sb.Append("        if ((optMask & ").Append(MaskExpr(model, opt)).AppendLine(") != 0)");
+                    sb.AppendLine("        {");
+                    string optReadExpr = ReadCall(opt.WireTypeFqn, "payload[optCursor..]");
+                    if (opt.IsEnum)
+                    {
+                        optReadExpr = $"({opt.TypeFqn})({optReadExpr})";
+                    }
+                    sb.Append("            po_").Append(opt.PropertyName).Append(" = ").Append(optReadExpr).AppendLine(";");
+                    sb.Append("            optCursor += ").Append(effectiveSz).AppendLine(";");
+                    sb.AppendLine("        }");
+                }
+            }
+        }
+
+        // Build the DTO.
+        sb.Append("        return new ").Append(model.StructName).AppendLine("Dto");
+        sb.AppendLine("        {");
+        sb.AppendLine("            ThreadSlot = threadSlot,");
+        sb.AppendLine("            TickNumber = currentTick,");
+        sb.AppendLine("            TimestampUs = startTimestamp / (double)ticksPerUs,");
+        sb.AppendLine("            SourceLocationId = sourceLocationId,");
+        sb.AppendLine("            DurationUs = durationTicks / (double)ticksPerUs,");
+        sb.AppendLine("            SpanId = spanId.ToString(global::System.Globalization.CultureInfo.InvariantCulture),");
+        sb.AppendLine("            ParentSpanId = parentSpanId.ToString(global::System.Globalization.CultureInfo.InvariantCulture),");
+        sb.AppendLine("            TraceIdHi = hasTraceContext ? traceIdHi.ToString(global::System.Globalization.CultureInfo.InvariantCulture) : null,");
+        sb.AppendLine("            TraceIdLo = hasTraceContext ? traceIdLo.ToString(global::System.Globalization.CultureInfo.InvariantCulture) : null,");
+        foreach (var p in model.PayloadFields)
+        {
+            sb.Append("            ").Append(DtoPropertyName(p.FieldName)).Append(" = p_").Append(p.FieldName).AppendLine(",");
+        }
+        foreach (var opt in model.Optionals)
+        {
+            sb.Append("            ").Append(DtoPropertyName(opt.PropertyName)).Append(" = po_").Append(opt.PropertyName).AppendLine(",");
+        }
+        sb.AppendLine("        };");
+        sb.AppendLine("    }");
+        sb.AppendLine("}");
+
+        return sb.ToString();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Emit (instant DTO): TraceEventDto-based record with no span fields,
+    // decoder reads 12-byte common header + payload (no span extension).
+    // ═══════════════════════════════════════════════════════════════════════
+
+    private static string EmitInstantDto(TraceEventModel model)
+    {
+        const string TR = "global::Typhon.Profiler.TraceRecordHeader";
+        var sb = new StringBuilder(2048);
+        sb.AppendLine("// <auto-generated/>");
+        sb.AppendLine("#nullable disable");
+        sb.AppendLine("using System;");
+        sb.AppendLine();
+        sb.AppendLine("namespace Typhon.Profiler.Events;");
+        sb.AppendLine();
+
+        sb.Append("/// <summary>Generated instant-event DTO for <c>").Append(model.KindName).AppendLine("</c>. 12-byte header + payload; no span fields.</summary>");
+        sb.Append("public sealed record ").Append(model.StructName).AppendLine("Dto : global::Typhon.Profiler.Events.TraceEventDto");
+        sb.AppendLine("{");
+
+        sb.Append("    public override byte KindByte => (byte)global::Typhon.Profiler.TraceEventKind.").Append(model.KindName).AppendLine(";");
+        sb.AppendLine();
+
+        foreach (var p in model.PayloadFields)
+        {
+            sb.Append("    public ").Append(p.TypeFqn).Append(' ').Append(DtoPropertyName(p.FieldName)).AppendLine(" { get; init; }");
+        }
+
+        sb.AppendLine();
+        sb.Append("    /// <summary>Decode a <c>").Append(model.KindName).AppendLine("</c> instant wire record into a typed DTO.</summary>");
+        sb.Append("    public static ").Append(model.StructName).AppendLine("Dto Decode(global::System.ReadOnlySpan<byte> source, int currentTick, long ticksPerUs)");
+        sb.AppendLine("    {");
+        sb.Append("        ").Append(TR).AppendLine(".ReadCommonHeader(source, out _, out _, out var threadSlot, out var timestamp);");
+
+        if (model.PayloadFields.Length > 0)
+        {
+            sb.Append("        var payload = source[").Append(TR).AppendLine(".CommonHeaderSize..];");
+            int cursor = 0;
+            foreach (var p in model.PayloadFields)
+            {
+                int sz = WireSize(p.WireTypeFqn);
+                if (sz < 0)
+                {
+                    sb.Append("        #error TraceEventGenerator: unsupported wire type '").Append(p.WireTypeFqn).Append("' for instant payload field '").Append(p.FieldName).Append("' on ").AppendLine(model.StructName);
+                    return sb.ToString();
+                }
+                string spanExpr = cursor == 0 ? "payload" : $"payload[{cursor}..]";
+                string readExpr = ReadCall(p.WireTypeFqn, spanExpr);
+                if (p.IsEnum)
+                {
+                    readExpr = $"({p.TypeFqn})({readExpr})";
+                }
+                sb.Append("        var p_").Append(p.FieldName).Append(" = ").Append(readExpr).AppendLine(";");
+                cursor += sz;
+            }
+        }
+
+        sb.Append("        return new ").Append(model.StructName).AppendLine("Dto");
+        sb.AppendLine("        {");
+        sb.AppendLine("            ThreadSlot = threadSlot,");
+        sb.AppendLine("            TickNumber = currentTick,");
+        sb.AppendLine("            TimestampUs = timestamp / (double)ticksPerUs,");
+        sb.AppendLine("            SourceLocationId = 0,");
+        foreach (var p in model.PayloadFields)
+        {
+            sb.Append("            ").Append(DtoPropertyName(p.FieldName)).Append(" = p_").Append(p.FieldName).AppendLine(",");
+        }
+        sb.AppendLine("        };");
+        sb.AppendLine("    }");
+        sb.AppendLine("}");
+        return sb.ToString();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Emit: collected models → polymorphic registration partial (Phase 1F)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Emit the partial of <c>TraceEventDto</c> carrying the <c>[JsonPolymorphic]</c> + per-kind
+    /// <c>[JsonDerivedType]</c> attributes that drive System.Text.Json's discriminated-union serialization.
+    /// The discriminator property name is <c>kind</c> and the value is the camelCase kind name
+    /// (e.g., <c>"btreeInsert"</c> for <c>TraceEventKind.BTreeInsert</c>).
+    /// </summary>
+    private static string EmitPolymorphismRegistration(System.Collections.Immutable.ImmutableArray<TraceEventModel> models)
+    {
+        var sb = new StringBuilder(8192);
+        sb.AppendLine("// <auto-generated/>");
+        sb.AppendLine("#nullable disable");
+        sb.AppendLine("using System.Text.Json.Serialization;");
+        sb.AppendLine();
+        sb.AppendLine("namespace Typhon.Profiler.Events;");
+        sb.AppendLine();
+        sb.AppendLine("[JsonPolymorphic(TypeDiscriminatorPropertyName = \"kind\")]");
+
+        // Stable ordering by kind name → deterministic generator output, easier diffs.
+        var ordered = new System.Collections.Generic.List<TraceEventModel>();
+        foreach (var m in models)
+        {
+            if (m != null) ordered.Add(m);
+        }
+        ordered.Sort((a, b) => System.StringComparer.Ordinal.Compare(a.KindName, b.KindName));
+
+        foreach (var m in ordered)
+        {
+            sb.Append("[JsonDerivedType(typeof(").Append(m.StructName).Append("Dto), \"").Append(ToCamelCase(m.KindName)).AppendLine("\")]");
+        }
+
+        sb.AppendLine("public abstract partial record TraceEventDto;");
+        return sb.ToString();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Emit: collected models → top-level dispatch (Phase 1F)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Emit the static <c>TraceEventDecoder</c> with a single <c>Decode(ReadOnlySpan&lt;byte&gt;, int, long) → TraceEventDto</c>
+    /// entry point that switches on the kind byte (offset 2 of the common header) and dispatches to:
+    /// <list type="bullet">
+    ///   <item>Generated <c>XxxEventDto.Decode(...)</c> for <c>EmitEncoder = true</c> kinds.</item>
+    ///   <item>Hand-glue partial method <c>TraceEventDecoder.HandGlue_DecodeXxx(...)</c> for the rest. The
+    ///         partial declarations are emitted here as method stubs; user code (1G) supplies the bodies that
+    ///         wrap existing hand-written codecs.</item>
+    /// </list>
+    /// </summary>
+    private static string EmitTopLevelDispatch(System.Collections.Immutable.ImmutableArray<TraceEventModel> models)
+    {
+        var sb = new StringBuilder(16384);
+        sb.AppendLine("// <auto-generated/>");
+        sb.AppendLine("#nullable disable");
+        sb.AppendLine("using System;");
+        sb.AppendLine();
+        sb.AppendLine("namespace Typhon.Profiler.Events;");
+        sb.AppendLine();
+        sb.AppendLine("/// <summary>");
+        sb.AppendLine("/// Generator-emitted top-level dispatch — translates a raw wire record's kind byte into the matching");
+        sb.AppendLine("/// <see cref=\"TraceEventDto\"/> subclass. Replaces the hand-written switch in the legacy");
+        sb.AppendLine("/// the wire-buffer walker in <see cref=\"TraceEventDecoder.DecodeBlock\"/>. Hand-glue extension points (partial methods) cover the kinds with custom wire layouts.");
+        sb.AppendLine("/// </summary>");
+        sb.AppendLine("public static partial class TraceEventDecoder");
+        sb.AppendLine("{");
+
+        // Stable order by kind name.
+        var ordered = new System.Collections.Generic.List<TraceEventModel>();
+        foreach (var m in models)
+        {
+            if (m != null) ordered.Add(m);
+        }
+        ordered.Sort((a, b) => System.StringComparer.Ordinal.Compare(a.KindName, b.KindName));
+
+        // ── Hand-glue partial-method declarations (one per non-EmitEncoder kind that is NOT an instant) ──
+        // Instants always own their decoder via the generator's EmitInstantDto path; only span events with
+        // EmitEncoder = false need a hand-glue extension point.
+        foreach (var m in ordered)
+        {
+            if (m.EmitEncoder || m.IsInstant)
+            {
+                continue;
+            }
+            sb.Append("    /// <summary>Hand-glue decoder for <c>").Append(m.KindName).AppendLine("</c> — implementation in 1G user code.</summary>");
+            sb.Append("    internal static partial TraceEventDto HandGlue_Decode").Append(m.KindName).AppendLine("(System.ReadOnlySpan<byte> source, int currentTick, long ticksPerUs);");
+        }
+
+        // Fallback for kinds without a [TraceEvent] declaration (instants like TickStart, TickEnd,
+        // PhaseStart/End that go through InstantEventCodec; or future kinds added after this consumer
+        // was built). User code provides the implementation in the hand-glue file.
+        sb.AppendLine("    /// <summary>Fallback for kinds with no generated dispatch (instants, forward-compat). User code provides the implementation.</summary>");
+        sb.AppendLine("    internal static partial TraceEventDto HandGlue_DecodeFallback(global::Typhon.Profiler.TraceEventKind kind, System.ReadOnlySpan<byte> source, int currentTick, long ticksPerUs);");
+
+        sb.AppendLine();
+        sb.AppendLine("    /// <summary>");
+        sb.AppendLine("    /// Decode a single trace record (size-prefixed, kind byte at offset 2) into a typed <see cref=\"TraceEventDto\"/>.");
+        sb.AppendLine("    /// Returns null when the kind is unknown — caller decides whether to ignore (forward-compat) or throw.");
+        sb.AppendLine("    /// </summary>");
+        sb.AppendLine("    public static TraceEventDto Decode(System.ReadOnlySpan<byte> source, int currentTick, long ticksPerUs)");
+        sb.AppendLine("    {");
+        // Kind byte lives at offset 2 of the common header — see TraceRecordHeader layout (offset 0..1 is Size).
+        sb.AppendLine("        var kind = (global::Typhon.Profiler.TraceEventKind)source[2];");
+        sb.AppendLine("        switch (kind)");
+        sb.AppendLine("        {");
+
+        foreach (var m in ordered)
+        {
+            sb.Append("            case global::Typhon.Profiler.TraceEventKind.").Append(m.KindName).AppendLine(":");
+            if (m.EmitEncoder || m.IsInstant)
+            {
+                sb.Append("                return ").Append(m.StructName).AppendLine("Dto.Decode(source, currentTick, ticksPerUs);");
+            }
+            else
+            {
+                sb.Append("                return HandGlue_Decode").Append(m.KindName).AppendLine("(source, currentTick, ticksPerUs);");
+            }
+        }
+
+        sb.AppendLine("            default:");
+        sb.AppendLine("                return HandGlue_DecodeFallback(kind, source, currentTick, ticksPerUs);");
+        sb.AppendLine("        }");
+        sb.AppendLine("    }");
+        sb.AppendLine("}");
+        return sb.ToString();
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // Emit: TraceEventModel → source code
     // ═══════════════════════════════════════════════════════════════════════
 
     private static string Emit(TraceEventModel model)
     {
+        if (model.IsInstant)
+        {
+            return EmitInstant(model);
+        }
+
         var sb = new StringBuilder(2048);
         sb.AppendLine("// <auto-generated/>");
         sb.AppendLine("#pragma warning disable CS8019 // Unnecessary using directive");
@@ -598,7 +1231,7 @@ namespace Typhon.Engine.Profiler
                 sb.Append(indent).AppendLine("    {");
                 sb.Append(indent).Append("        readonly get => ").Append(opt.FieldName).AppendLine(";");
                 sb.Append(indent).Append("        set { ").Append(opt.FieldName).Append(" = value; _optMask |= ")
-                    .Append(model.CodecFqn).Append('.').Append(opt.MaskConstant).AppendLine("; }");
+                    .Append(MaskExpr(model, opt)).AppendLine("; }");
                 sb.Append(indent).AppendLine("    }");
                 sb.AppendLine();
             }
@@ -615,13 +1248,26 @@ namespace Typhon.Engine.Profiler
 
         sb.Append(indent).AppendLine("}");
 
+        // External-timestamp span: emit a single static EmitX(startTs, endTs, [spanId,] ...payloadParams) method instead
+        // of the Begin/Dispose factory pair. Used by completion-style spans where the duration is known only at the end
+        // (scheduler chunks, page-cache async completions).
+        if (model.ExternalTimestamps)
+        {
+            EmitExternalTimestampSpanEmitter(sb, indent, model);
+            if (hasNs)
+            {
+                sb.AppendLine("}");
+            }
+            return sb.ToString();
+        }
+
         // Begin factory emitted as a partial half of TyphonEvent (which itself is in this same namespace).
         // Two factories are emitted side by side per event kind:
         //   1. The user-facing BeginXxx(args) — a thin pass-through delegating to BeginXxx_WithSiteId(0, args).
         //   2. BeginXxx_WithSiteId(ushort siteId, args) — does the actual work; receives the literal siteId from
         //      the SourceLocationGenerator interceptor (or 0 from the pass-through, meaning "unknown source").
         // The user-facing name is the interception target — never edit user code; the generator owns the pair.
-        // See claude/design/observability/10-profiler-source-attribution.md §4.3.
+        // See claude/design/Profiler/10-profiler-source-attribution.md §4.3.
         if (model.GenerateFactory)
         {
             sb.AppendLine();
@@ -682,6 +1328,251 @@ namespace Typhon.Engine.Profiler
         return sb.ToString();
     }
 
+    /// <summary>
+    /// Emit the external-timestamp span wrapper: a static <c>EmitX([byte slot,] long startTs, long endTs, [ulong spanId,] …payload)</c>
+    /// method on <c>TyphonEvent</c> that builds the producer ref struct with caller-supplied timestamps and publishes.
+    /// </summary>
+    private static void EmitExternalTimestampSpanEmitter(StringBuilder sb, string indent, TraceEventModel model)
+    {
+        sb.AppendLine();
+        sb.Append(indent).AppendLine("internal static partial class TyphonEvent");
+        sb.Append(indent).AppendLine("{");
+        sb.Append(indent).AppendLine("    [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]");
+        sb.Append(indent).Append("    public static void Emit").Append(model.KindName).Append('(');
+        bool firstParam = true;
+        if (model.ExternalSlot)
+        {
+            sb.Append("byte slot");
+            firstParam = false;
+        }
+        if (!firstParam) sb.Append(", ");
+        sb.Append("long startTimestamp, long endTimestamp");
+        if (model.ExternalSpanId)
+        {
+            sb.Append(", ulong spanId");
+        }
+        foreach (var p in model.BeginParams)
+        {
+            sb.Append(", ").Append(p.ParamTypeFqn).Append(' ').Append(p.ParamName);
+        }
+        sb.AppendLine(")");
+        sb.Append(indent).AppendLine("    {");
+        sb.Append(indent).Append("        if (!global::Typhon.Engine.TelemetryConfig.").Append(model.Gate).AppendLine(")");
+        sb.Append(indent).AppendLine("        {");
+        sb.Append(indent).AppendLine("            return;");
+        sb.Append(indent).AppendLine("        }");
+        if (model.ExternalSlot)
+        {
+            // Caller already owns the slot — no claim needed.
+            sb.Append(indent).AppendLine("        var threadSlot = ThreadSlotRegistry.GetSlot(slot);");
+        }
+        else
+        {
+            sb.Append(indent).AppendLine("        var slotIdx = ThreadSlotRegistry.GetOrAssignSlot();");
+            sb.Append(indent).AppendLine("        if (slotIdx < 0)");
+            sb.Append(indent).AppendLine("        {");
+            sb.Append(indent).AppendLine("            return;");
+            sb.Append(indent).AppendLine("        }");
+            sb.Append(indent).AppendLine("        var threadSlot = ThreadSlotRegistry.GetSlot(slotIdx);");
+        }
+        if (!model.ExternalSpanId)
+        {
+            // Internally generate spanId. Parent comes from CurrentOpenSpanId for owned-slot emitters, but
+            // ExternalSlot emitters run on a context-owned thread (GC ingestion) with no Typhon span ambient,
+            // so parent is zero.
+            string slotIdxExpr = model.ExternalSlot ? "slot" : "slotIdx";
+            sb.Append(indent).Append("        var spanId = SpanIdGenerator.NextId(").Append(slotIdxExpr).AppendLine(", threadSlot);");
+            if (model.ExternalSlot)
+            {
+                sb.Append(indent).AppendLine("        const ulong parentSpanId = 0;");
+            }
+            else
+            {
+                sb.Append(indent).AppendLine("        var parentSpanId = CurrentOpenSpanId;");
+            }
+        }
+        else
+        {
+            // Caller-supplied spanId; no parent linking (completion is correlated by spanId only).
+            sb.Append(indent).AppendLine("        const ulong parentSpanId = 0;");
+        }
+        string threadSlotExpr = model.ExternalSlot ? "slot" : "(byte)slotIdx";
+        sb.Append(indent).Append("        var evt = new ").Append(model.StructName).AppendLine();
+        sb.Append(indent).AppendLine("        {");
+        sb.Append(indent).AppendLine("            Header = new TraceSpanHeader");
+        sb.Append(indent).AppendLine("            {");
+        sb.Append(indent).Append("                ThreadSlot = ").Append(threadSlotExpr).AppendLine(",");
+        sb.Append(indent).AppendLine("                StartTimestamp = startTimestamp,");
+        sb.Append(indent).AppendLine("                SpanId = spanId,");
+        sb.Append(indent).AppendLine("                ParentSpanId = parentSpanId,");
+        sb.Append(indent).AppendLine("            },");
+        foreach (var p in model.BeginParams)
+        {
+            sb.Append(indent).Append("            ").Append(p.FieldName).Append(" = ");
+            if (p.NeedsCast)
+            {
+                sb.Append('(').Append(p.FieldTypeFqn).Append(')');
+            }
+            sb.Append(p.ParamName).AppendLine(",");
+        }
+        sb.Append(indent).AppendLine("        };");
+        sb.Append(indent).AppendLine("        var size = evt.ComputeSize();");
+        sb.Append(indent).AppendLine("        var ring = threadSlot.Buffer;");
+        sb.Append(indent).AppendLine("        if (ring == null || !ring.TryReserve(size, out var dst))");
+        sb.Append(indent).AppendLine("        {");
+        sb.Append(indent).AppendLine("            return;");
+        sb.Append(indent).AppendLine("        }");
+        sb.Append(indent).AppendLine("        evt.EncodeTo(dst, endTimestamp, out _);");
+        sb.Append(indent).AppendLine("        ring.Publish();");
+        sb.Append(indent).AppendLine("    }");
+        sb.Append(indent).AppendLine("}");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Emit (instant): direct EmitX(args) static method on TyphonEvent.
+    // No ref struct, no Begin/Dispose — instants don't need timing or optionals,
+    // so the single-shot pattern matches or beats the legacy hand-written codec
+    // path by ~3 ns/call (benchmarked: 45 ns OLD vs 42 ns NEW on TickStart).
+    // ═══════════════════════════════════════════════════════════════════════
+
+    private static string EmitInstant(TraceEventModel model)
+    {
+        const string TR = "global::Typhon.Profiler.TraceRecordHeader";
+        var sb = new StringBuilder(2048);
+
+        // Required payload total size (sum of WireSize for each [BeginParam] field — instants don't support [Optional]).
+        int payloadSize = 0;
+        foreach (var p in model.PayloadFields)
+        {
+            int sz = WireSize(p.WireTypeFqn);
+            if (sz < 0)
+            {
+                sb.AppendLine("// <auto-generated/>");
+                sb.Append("#error TraceEventGenerator: unsupported wire type '").Append(p.WireTypeFqn).Append("' on instant kind ").AppendLine(model.StructName);
+                return sb.ToString();
+            }
+            payloadSize += sz;
+        }
+        int totalSize = 12 + payloadSize;
+
+        sb.AppendLine("// <auto-generated/>");
+        sb.AppendLine("#pragma warning disable CS8019 // Unnecessary using directive");
+        sb.AppendLine("using System;");
+        sb.AppendLine("using System.Diagnostics;");
+        sb.AppendLine("using System.Runtime.CompilerServices;");
+        sb.AppendLine("using Typhon.Profiler;");
+        sb.AppendLine();
+
+        bool hasNs = !string.IsNullOrEmpty(model.Namespace);
+        if (hasNs)
+        {
+            sb.Append("namespace ").AppendLine(model.Namespace);
+            sb.AppendLine("{");
+        }
+        var indent = hasNs ? "    " : "";
+
+        // The producer ref struct still exists (declared by user with [TraceEvent(Shape=Instant)]) but the generator
+        // emits an empty partial body — the wire format is owned by the EmitX method on TyphonEvent, not by the struct.
+        // The struct declaration's role is just metadata (carries [BeginParam] fields the generator reads).
+        sb.Append(indent).Append("internal ref partial struct ").Append(model.StructName).AppendLine(" { }");
+        sb.AppendLine();
+
+        sb.Append(indent).AppendLine("internal static partial class TyphonEvent");
+        sb.Append(indent).AppendLine("{");
+
+        // Param list — used by both overloads except for the leading timestamp + optional caller-supplied slot.
+        string buildParamList(bool withTimestamp)
+        {
+            var psb = new StringBuilder();
+            if (model.ExternalSlot)
+            {
+                psb.Append("byte slot");
+            }
+            if (withTimestamp)
+            {
+                if (psb.Length > 0) psb.Append(", ");
+                psb.Append("long timestamp");
+            }
+            foreach (var p in model.PayloadFields)
+            {
+                if (psb.Length > 0) psb.Append(", ");
+                psb.Append(p.TypeFqn).Append(' ').Append(char.ToLowerInvariant(p.FieldName[0])).Append(p.FieldName.Substring(1));
+            }
+            return psb.ToString();
+        }
+
+        // ── Convenience overload: captures Stopwatch.GetTimestamp() internally. Skipped for ExternalSlot kinds
+        //    because they always pass slot+timestamp explicitly from the owning thread context.
+        if (!model.ExternalSlot)
+        {
+            sb.Append(indent).AppendLine("    [MethodImpl(MethodImplOptions.AggressiveInlining)]");
+            sb.Append(indent).Append("    public static void Emit").Append(model.KindName).Append('(').Append(buildParamList(false)).AppendLine(")");
+            sb.Append(indent).Append("        => Emit").Append(model.KindName).Append("(Stopwatch.GetTimestamp()");
+            foreach (var p in model.PayloadFields)
+            {
+                sb.Append(", ").Append(char.ToLowerInvariant(p.FieldName[0])).Append(p.FieldName.Substring(1));
+            }
+            sb.AppendLine(");");
+            sb.AppendLine();
+        }
+
+        // ── Primary overload: [byte slot,] long timestamp, ...payloadParams ──
+        sb.Append(indent).AppendLine("    [MethodImpl(MethodImplOptions.AggressiveInlining)]");
+        sb.Append(indent).Append("    public static void Emit").Append(model.KindName).Append('(').Append(buildParamList(true)).AppendLine(")");
+        sb.Append(indent).AppendLine("    {");
+        sb.Append(indent).Append("        if (!global::Typhon.Engine.TelemetryConfig.").Append(model.Gate).AppendLine(")");
+        sb.Append(indent).AppendLine("        {");
+        sb.Append(indent).AppendLine("            return;");
+        sb.Append(indent).AppendLine("        }");
+        if (model.ExternalSlot)
+        {
+            // Caller already owns the slot — skip the registry claim. The slot must be a live claimed slot.
+            sb.Append(indent).AppendLine("        var ring = ThreadSlotRegistry.GetSlot(slot).Buffer;");
+        }
+        else
+        {
+            sb.Append(indent).AppendLine("        var slotIdx = ThreadSlotRegistry.GetOrAssignSlot();");
+            sb.Append(indent).AppendLine("        if (slotIdx < 0)");
+            sb.Append(indent).AppendLine("        {");
+            sb.Append(indent).AppendLine("            return;");
+            sb.Append(indent).AppendLine("        }");
+            sb.Append(indent).AppendLine("        var ring = ThreadSlotRegistry.GetSlot(slotIdx).Buffer;");
+        }
+        sb.Append(indent).Append("        if (ring == null || !ring.TryReserve(").Append(totalSize).AppendLine(", out var dst))");
+        sb.Append(indent).AppendLine("        {");
+        sb.Append(indent).AppendLine("            return;");
+        sb.Append(indent).AppendLine("        }");
+        string slotExpr = model.ExternalSlot ? "slot" : "(byte)slotIdx";
+        sb.Append(indent).Append("        ").Append(TR).Append(".WriteCommonHeader(dst, ").Append(totalSize)
+            .Append(", TraceEventKind.").Append(model.KindName).Append(", ").Append(slotExpr).AppendLine(", timestamp);");
+
+        // Payload writes — start at offset 12 (after the common header).
+        if (payloadSize > 0)
+        {
+            sb.Append(indent).AppendLine("        var payload = dst[12..];");
+            int cursor = 0;
+            foreach (var p in model.PayloadFields)
+            {
+                int sz = WireSize(p.WireTypeFqn);
+                string paramName = char.ToLowerInvariant(p.FieldName[0]) + p.FieldName.Substring(1);
+                string spanExpr = cursor == 0 ? "payload" : $"payload[{cursor}..]";
+                string valueExpr = p.IsEnum ? $"({p.WireTypeFqn}){paramName}" : paramName;
+                sb.Append(indent).Append("        ").AppendLine(WriteCall(p.WireTypeFqn, spanExpr, valueExpr));
+                cursor += sz;
+            }
+        }
+
+        sb.Append(indent).AppendLine("        ring.Publish();");
+        sb.Append(indent).AppendLine("    }");
+        sb.Append(indent).AppendLine("}");
+
+        if (hasNs)
+        {
+            sb.AppendLine("}");
+        }
+        return sb.ToString();
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // Models
     // ═══════════════════════════════════════════════════════════════════════
@@ -689,7 +1580,8 @@ namespace Typhon.Engine.Profiler
     private sealed class TraceEventModel
     {
         public TraceEventModel(string ns, string structName, string kindName, string codecFqn, OptionalFieldModel[] optionals,
-            BeginParamModel[] beginParams, PayloadFieldModel[] payloadFields, string factoryName, bool generateFactory, bool emitEncoder)
+            BeginParamModel[] beginParams, PayloadFieldModel[] payloadFields, string factoryName, bool generateFactory, bool emitEncoder, bool isInstant, string gate,
+            bool externalTimestamps, bool externalSpanId, bool externalSlot)
         {
             Namespace = ns;
             StructName = structName;
@@ -701,6 +1593,11 @@ namespace Typhon.Engine.Profiler
             FactoryName = factoryName;
             GenerateFactory = generateFactory;
             EmitEncoder = emitEncoder;
+            IsInstant = isInstant;
+            Gate = gate;
+            ExternalTimestamps = externalTimestamps;
+            ExternalSpanId = externalSpanId;
+            ExternalSlot = externalSlot;
         }
         public string Namespace { get; }
         public string StructName { get; }
@@ -712,6 +1609,16 @@ namespace Typhon.Engine.Profiler
         public string FactoryName { get; }
         public bool GenerateFactory { get; }
         public bool EmitEncoder { get; }
+        /// <summary>True when the kind is declared with <c>Shape = TraceEventShape.Instant</c> — 12-byte header, direct <c>EmitX</c> emit pattern.</summary>
+        public bool IsInstant { get; }
+        /// <summary>Static gate field name on <c>TelemetryConfig</c>.</summary>
+        public string Gate { get; }
+        /// <summary>Span shape with caller-supplied start/end timestamps — see <see cref="TraceEventAttribute.ExternalTimestamps"/>.</summary>
+        public bool ExternalTimestamps { get; }
+        /// <summary>Caller also supplies the spanId (correlation id) — see <see cref="TraceEventAttribute.ExternalSpanId"/>.</summary>
+        public bool ExternalSpanId { get; }
+        /// <summary>Caller already owns a thread slot and passes it as a parameter — see <see cref="TraceEventAttribute.ExternalSlot"/>.</summary>
+        public bool ExternalSlot { get; }
     }
 
     private sealed class PayloadFieldModel
@@ -731,7 +1638,7 @@ namespace Typhon.Engine.Profiler
 
     private sealed class OptionalFieldModel
     {
-        public OptionalFieldModel(string fieldName, string typeFqn, string wireTypeFqn, bool isEnum, string propertyName, string maskConstant)
+        public OptionalFieldModel(string fieldName, string typeFqn, string wireTypeFqn, bool isEnum, string propertyName, string maskConstant, byte maskValue, byte wireSize)
         {
             FieldName = fieldName;
             TypeFqn = typeFqn;
@@ -739,6 +1646,8 @@ namespace Typhon.Engine.Profiler
             IsEnum = isEnum;
             PropertyName = propertyName;
             MaskConstant = maskConstant;
+            MaskValue = maskValue;
+            WireSize = wireSize;
         }
         public string FieldName { get; }
         public string TypeFqn { get; }
@@ -747,6 +1656,10 @@ namespace Typhon.Engine.Profiler
         public bool IsEnum { get; }
         public string PropertyName { get; }
         public string MaskConstant { get; }
+        /// <summary>Inline mask byte — non-zero when set explicitly via <c>[Optional(MaskValue=…)]</c>. Zero means use <see cref="MaskConstant"/> on the codec class.</summary>
+        public byte MaskValue { get; }
+        /// <summary>Override wire-slot size — non-zero means the wire reserves more bytes than the field's natural width (slot-sharing). Zero = use natural wire size.</summary>
+        public byte WireSize { get; }
     }
 
     private sealed class BeginParamModel

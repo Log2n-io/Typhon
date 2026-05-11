@@ -340,7 +340,7 @@ internal static unsafe class IndexMaintainer
             {
                 continue;
             }
-            reg.View.DeltaBuffer.TryAppend(pk, beforeKey, afterKey, tsn, flags, reg.ComponentTag);
+            reg.DeltaBuffer.TryAppend(pk, beforeKey, afterKey, tsn, flags, reg.ComponentTag);
         }
     }
 

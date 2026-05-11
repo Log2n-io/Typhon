@@ -2,7 +2,7 @@ namespace Typhon.Workbench.Hosting;
 
 /// <summary>
 /// User-facing Workbench options, persisted to JSON in the OS user-data folder.
-/// See claude/design/observability/10-profiler-source-attribution.md §5.7 for the design.
+/// See claude/design/Profiler/10-profiler-source-attribution.md §5.7 for the design.
 /// </summary>
 /// <remarks>
 /// Records (immutable + value equality) + sparse JSON: only fields the user has changed are

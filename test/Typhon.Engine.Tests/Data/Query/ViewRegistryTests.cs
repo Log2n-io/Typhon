@@ -71,7 +71,7 @@ class ViewRegistryTests
         var registry = new ViewRegistry(4);
         var view = new MockView(_allocator, _parent) { ViewId = 1, FieldDependencies = [2] };
 
-        registry.RegisterView(view);
+        registry.RegisterView(view, view.DeltaBuffer);
 
         var views = registry.GetViewsForField(2);
         Assert.That(views.Length, Is.EqualTo(1));
@@ -84,7 +84,7 @@ class ViewRegistryTests
         var registry = new ViewRegistry(4);
         var view = new MockView(_allocator, _parent) { ViewId = 1, FieldDependencies = [0, 2, 3] };
 
-        registry.RegisterView(view);
+        registry.RegisterView(view, view.DeltaBuffer);
 
         Assert.That(registry.GetViewsForField(0).Length, Is.EqualTo(1));
         Assert.That(registry.GetViewsForField(0)[0].View, Is.SameAs(view));
@@ -106,9 +106,9 @@ class ViewRegistryTests
         var viewB = new MockView(_allocator, _parent) { ViewId = 2, FieldDependencies = [1] };
         var viewC = new MockView(_allocator, _parent) { ViewId = 3, FieldDependencies = [1] };
 
-        registry.RegisterView(viewA);
-        registry.RegisterView(viewB);
-        registry.RegisterView(viewC);
+        registry.RegisterView(viewA, viewA.DeltaBuffer);
+        registry.RegisterView(viewB, viewB.DeltaBuffer);
+        registry.RegisterView(viewC, viewC.DeltaBuffer);
 
         var views = registry.GetViewsForField(1);
         Assert.That(views.Length, Is.EqualTo(3));
@@ -124,8 +124,8 @@ class ViewRegistryTests
         var viewA = new MockView(_allocator, _parent) { ViewId = 1, FieldDependencies = [0, 1] };
         var viewB = new MockView(_allocator, _parent) { ViewId = 2, FieldDependencies = [0, 1] };
 
-        registry.RegisterView(viewA);
-        registry.RegisterView(viewB);
+        registry.RegisterView(viewA, viewA.DeltaBuffer);
+        registry.RegisterView(viewB, viewB.DeltaBuffer);
 
         registry.DeregisterView(viewA);
 
@@ -157,10 +157,10 @@ class ViewRegistryTests
         var viewA = new MockView(_allocator, _parent) { ViewId = 1, FieldDependencies = [0] };
         var viewB = new MockView(_allocator, _parent) { ViewId = 2, FieldDependencies = [1] };
 
-        registry.RegisterView(viewA);
+        registry.RegisterView(viewA, viewA.DeltaBuffer);
         Assert.That(registry.ViewCount, Is.EqualTo(1));
 
-        registry.RegisterView(viewB);
+        registry.RegisterView(viewB, viewB.DeltaBuffer);
         Assert.That(registry.ViewCount, Is.EqualTo(2));
 
         registry.DeregisterView(viewA);
@@ -176,7 +176,7 @@ class ViewRegistryTests
         var registry = new ViewRegistry(4);
         var view = new MockView(_allocator, _parent) { ViewId = 1, FieldDependencies = [2, 5] };
 
-        var ex = Assert.Throws<ArgumentOutOfRangeException>(() => registry.RegisterView(view));
+        var ex = Assert.Throws<ArgumentOutOfRangeException>(() => registry.RegisterView(view, view.DeltaBuffer));
         Assert.That(ex.Message, Does.Contain("field dependency 5"));
         Assert.That(ex.Message, Does.Contain("4 fields"));
     }
@@ -186,7 +186,7 @@ class ViewRegistryTests
     {
         var registry = new ViewRegistry(4);
         var view = new MockView(_allocator, _parent) { ViewId = 1, FieldDependencies = [0] };
-        registry.RegisterView(view);
+        registry.RegisterView(view, view.DeltaBuffer);
 
         Assert.That(registry.GetViewsForField(-1).Length, Is.EqualTo(0));
         Assert.That(registry.GetViewsForField(4).Length, Is.EqualTo(0));
@@ -199,7 +199,7 @@ class ViewRegistryTests
         var registry = new ViewRegistry(4);
         var view = new MockView(_allocator, _parent) { ViewId = 1, FieldDependencies = [] };
 
-        registry.RegisterView(view, [0, 2], 1);
+        registry.RegisterView(view, view.DeltaBuffer, [0, 2], 1);
 
         var field0 = registry.GetViewsForField(0);
         Assert.That(field0.Length, Is.EqualTo(1));
@@ -221,8 +221,8 @@ class ViewRegistryTests
         var registry = new ViewRegistry(4);
         var view = new MockView(_allocator, _parent) { ViewId = 1, FieldDependencies = [] };
 
-        registry.RegisterView(view, [0], 0);
-        registry.RegisterView(view, [0], 1);
+        registry.RegisterView(view, view.DeltaBuffer, [0], 0);
+        registry.RegisterView(view, view.DeltaBuffer, [0], 1);
 
         var field0 = registry.GetViewsForField(0);
         Assert.That(field0.Length, Is.EqualTo(2));
@@ -253,7 +253,7 @@ class ViewRegistryTests
             {
                 for (var i = 0; i < views.Length; i++)
                 {
-                    registry.RegisterView(views[i]);
+                    registry.RegisterView(views[i], views[i].DeltaBuffer);
                 }
                 for (var i = 0; i < views.Length; i++)
                 {

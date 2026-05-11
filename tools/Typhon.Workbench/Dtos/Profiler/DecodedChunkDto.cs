@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using Typhon.Profiler;
+using Typhon.Profiler.Events;
 
 namespace Typhon.Workbench.Dtos.Profiler;
 
@@ -8,6 +9,11 @@ namespace Typhon.Workbench.Dtos.Profiler;
 /// the LZ4-compressed packed records (cheap on the wire, requires the codec to interpret); this DTO
 /// is what <c>GET /chunks/{idx}/decoded</c> returns — a fully-deserialized event list ready for
 /// inspection from any HTTP client without needing the Typhon profiler library.
+///
+/// Each entry in <see cref="Events"/> is a typed <see cref="TraceEventDto"/> subclass, dispatched at
+/// the wire boundary by System.Text.Json's polymorphic serialization (<c>kind</c> camelCase string
+/// discriminator, e.g. <c>"btreeInsert"</c>). On the TypeScript side this surfaces as a discriminated
+/// union — narrowing on <c>event.kind</c> reveals exactly the payload fields for that variant.
 ///
 /// Filtering happens server-side via <c>?kinds=</c> (CSV of <see cref="TraceEventKind"/> ints) and
 /// <c>?tick=</c> (single tick), so callers can scope a 50K-event chunk down to a workable slice
@@ -18,9 +24,9 @@ namespace Typhon.Workbench.Dtos.Profiler;
 /// <param name="EventCount">Total events in the chunk on disk, regardless of any active filters.</param>
 /// <param name="UncompressedBytes">Decompressed payload size — useful for sizing concerns when paginating manually.</param>
 /// <param name="IsContinuation">True for mid-tick split chunks (no leading TickStart record).</param>
-/// <param name="TimestampFrequency">Source Stopwatch frequency. <see cref="LiveTraceEvent.TimestampUs"/> and <see cref="LiveTraceEvent.DurationUs"/> are already converted; this is provided for cross-checks.</param>
+/// <param name="TimestampFrequency">Source Stopwatch frequency. <see cref="TraceEventDto.TimestampUs"/> and <see cref="TraceSpanEventDto.DurationUs"/> are already converted; this is provided for cross-checks.</param>
 /// <param name="FilteredEventCount">Number of events in <see cref="Events"/> after filters applied. Equals <see cref="EventCount"/> when no filters are passed.</param>
-/// <param name="Events">Decoded event records. Each carries its <see cref="TraceEventKind"/> as <see cref="LiveTraceEvent.Kind"/> plus only the fields relevant for that kind (nulls elided by <c>JsonIgnoreCondition.WhenWritingNull</c>).</param>
+/// <param name="Events">Decoded event records as a polymorphic list. Each subclass carries only the fields relevant for its kind; the wire JSON uses a <c>kind</c> camelCase string as discriminator. Unknown kinds (forward-compat) decode to <c>null</c> and are filtered out before reaching this list.</param>
 public record DecodedChunkDto(
     int FromTick,
     int ToTick,
@@ -29,4 +35,4 @@ public record DecodedChunkDto(
     bool IsContinuation,
     long TimestampFrequency,
     int FilteredEventCount,
-    IReadOnlyList<LiveTraceEvent> Events);
+    IReadOnlyList<TraceEventDto> Events);

@@ -1224,7 +1224,7 @@ internal sealed unsafe class ArchetypeClusterState
         // Max cluster AABB extent guard — issue #230 Phase 3 closing the Phase 1 gap. When the tick-tightened AABB exceeds cellSize × 1.2 on any horizontal
         // axis, accumulated drift from hysteresis-absorbed entities has inflated the cluster beyond the spatial coherence target. Scan the cluster's entities
         // and enqueue migration for any that have drifted outside the raw cell boundary (ignoring the hysteresis dead zone). See design doc
-        // claude/design/spatial-tiers/01-spatial-clusters.md §"Max Cluster AABB Extent". The guard is a no-op when no grid is configured (no cell to
+        // claude/design/Spatial/SpatialTiers/01-spatial-clusters.md §"Max Cluster AABB Extent". The guard is a no-op when no grid is configured (no cell to
         // reference) or when grid.Config.CellSize is zero.
         float maxExtent = 0f;
         float cellSize = 0f;

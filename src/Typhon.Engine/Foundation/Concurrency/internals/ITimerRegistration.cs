@@ -8,7 +8,7 @@ namespace Typhon.Engine.Internals;
 /// Handle returned by <see cref="HighResolutionSharedTimerService.Register"/>. Dispose to unregister the callback from the shared timer.
 /// </summary>
 [PublicAPI]
-public interface ITimerRegistration : IDisposable
+internal interface ITimerRegistration : IDisposable
 {
     /// <summary>Human-readable name for this registration.</summary>
     string Name { get; }

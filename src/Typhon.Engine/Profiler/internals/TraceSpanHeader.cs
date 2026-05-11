@@ -46,7 +46,7 @@ internal struct TraceSpanHeader
     /// <summary>
     /// Compile-time call-site identifier assigned by <c>SourceLocationGenerator</c> via the C# 14 interceptor wrapper. Zero when the call site
     /// is outside the generator's scope (i.e. anywhere outside <c>Typhon.Engine</c>) or when source attribution is disabled — codecs treat the
-    /// zero value as "no source attribution" and omit the optional 2-byte wire payload. See <c>claude/design/observability/10-profiler-source-attribution.md</c>.
+    /// zero value as "no source attribution" and omit the optional 2-byte wire payload. See <c>claude/design/Profiler/10-profiler-source-attribution.md</c>.
     /// </summary>
     public ushort SourceLocationId;
 

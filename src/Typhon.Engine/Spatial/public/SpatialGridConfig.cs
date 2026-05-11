@@ -8,7 +8,7 @@ namespace Typhon.Engine;
 /// Immutable configuration for the engine-wide spatial grid. Set once via <see cref="DatabaseEngine.ConfigureSpatialGrid"/> before archetypes are initialized.
 /// </summary>
 /// <remarks>
-/// <para>All spatial archetypes share a single coarse grid with one cell size (Decision Q1 in <c>claude/design/spatial-tiers/01-spatial-clusters.md</c>).
+/// <para>All spatial archetypes share a single coarse grid with one cell size (Decision Q1 in <c>claude/design/Spatial/SpatialTiers/01-spatial-clusters.md</c>).
 /// Per-archetype differences are expressed at the system level via tier filters, not at the grid level.</para>
 /// <para>Grid dimensions are derived from (WorldMax - WorldMin) / CellSize and rounded up to the nearest power of two when Morton cell keys are enabled — this
 /// keeps the Morton decode well-defined without needing a per-axis width.</para>

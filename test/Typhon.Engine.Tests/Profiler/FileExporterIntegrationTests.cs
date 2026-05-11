@@ -70,13 +70,13 @@ public class FileExporterIntegrationTests
             // Tick + phase boundaries so the file has instant records too.
             TyphonEvent.SetCurrentTickNumber(1);
             TyphonEvent.EmitTickStart(System.Diagnostics.Stopwatch.GetTimestamp());
-            TyphonEvent.EmitPhaseStart(Typhon.Profiler.TickPhase.SystemDispatch, System.Diagnostics.Stopwatch.GetTimestamp());
+            TyphonEvent.EmitPhaseStart(System.Diagnostics.Stopwatch.GetTimestamp(), (byte)Typhon.Profiler.TickPhase.SystemDispatch);
 
             // Scheduler chunk span.
             TyphonEvent.EmitSchedulerChunk(
-                systemIdx: 5, chunkIdx: 0, totalChunks: 1,
                 startTimestamp: System.Diagnostics.Stopwatch.GetTimestamp(),
                 endTimestamp: System.Diagnostics.Stopwatch.GetTimestamp() + 100,
+                systemIndex: 5, chunkIndex: 0, totalChunks: 1,
                 entitiesProcessed: 42);
 
             // BTree span — no payload.
@@ -129,7 +129,7 @@ public class FileExporterIntegrationTests
                 e.Dispose();
             }
 
-            TyphonEvent.EmitPhaseEnd(Typhon.Profiler.TickPhase.SystemDispatch, System.Diagnostics.Stopwatch.GetTimestamp());
+            TyphonEvent.EmitPhaseEnd(System.Diagnostics.Stopwatch.GetTimestamp(), (byte)Typhon.Profiler.TickPhase.SystemDispatch);
             TyphonEvent.EmitTickEnd(System.Diagnostics.Stopwatch.GetTimestamp(), overloadLevel: 0, tickMultiplier: 1);
         })
         {
@@ -227,8 +227,8 @@ public class FileExporterIntegrationTests
 
                 case TraceEventKind.TransactionCommit:
                 {
-                    var data = TransactionEventCodec.Decode(record);
-                    if (data.Tsn == 777 && data.HasComponentCount && data.ComponentCount == 3 && data.HasConflictDetected && !data.ConflictDetected)
+                    var dto = (Typhon.Profiler.Events.TransactionCommitEventDto)Typhon.Profiler.Events.TraceEventDecoder.Decode(record, 0, 1);
+                    if (dto.Tsn == 777 && dto.ComponentCount == 3 && dto.ConflictDetected == false)
                     {
                         decodedCommit = true;
                     }
@@ -237,8 +237,8 @@ public class FileExporterIntegrationTests
 
                 case TraceEventKind.EcsSpawn:
                 {
-                    var data = EcsSpawnEventCodec.Decode(record);
-                    if (data.ArchetypeId == 9 && data.HasEntityId && data.EntityId == 0xDEADBEEFCAFEBABEUL && data.HasTsn && data.Tsn == 777)
+                    var dto = (Typhon.Profiler.Events.EcsSpawnEventDto)Typhon.Profiler.Events.TraceEventDecoder.Decode(record, 0, 1);
+                    if (dto.ArchetypeId == 9 && dto.EntityId == 0xDEADBEEFCAFEBABEUL && dto.Tsn == 777)
                     {
                         decodedSpawn = true;
                     }
@@ -247,8 +247,8 @@ public class FileExporterIntegrationTests
 
                 case TraceEventKind.PageCacheDiskWrite:
                 {
-                    var data = PageCacheEventCodec.Decode(record);
-                    if (data.FilePageIndex == 17 && data.HasPageCount && data.PageCount == 4)
+                    var dto = (Typhon.Profiler.Events.PageCacheDiskWriteEventDto)Typhon.Profiler.Events.TraceEventDecoder.Decode(record, 0, 1);
+                    if (dto.FilePageIndex == 17 && dto.PageCount == 4)
                     {
                         decodedDiskWrite = true;
                     }
@@ -257,8 +257,8 @@ public class FileExporterIntegrationTests
 
                 case TraceEventKind.ClusterMigration:
                 {
-                    var data = ClusterMigrationEventCodec.Decode(record);
-                    if (data.ArchetypeId == 3 && data.MigrationCount == 128)
+                    var dto = (Typhon.Profiler.Events.ClusterMigrationEventDto)Typhon.Profiler.Events.TraceEventDecoder.Decode(record, 0, 1);
+                    if (dto.ArchetypeId == 3 && dto.MigrationCount == 128)
                     {
                         decodedClusterMigration = true;
                     }

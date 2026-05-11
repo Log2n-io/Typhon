@@ -55,7 +55,7 @@ public struct TraceFileHeader
 
     /// <summary>
     /// Byte offset of the trailing <c>FileTable</c> (interned source-file paths). 0 when no source-location manifest was written
-    /// (e.g., the source-attribution generator emitted nothing). See claude/design/observability/10-profiler-source-attribution.md §4.6.
+    /// (e.g., the source-attribution generator emitted nothing). See claude/design/Profiler/10-profiler-source-attribution.md §4.6.
     /// </summary>
     public long FileTableOffset;
 

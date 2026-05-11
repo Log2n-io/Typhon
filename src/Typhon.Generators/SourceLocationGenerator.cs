@@ -14,7 +14,7 @@ namespace Typhon.Generators;
 /// Source generator that attributes every <c>TyphonEvent.BeginXxx(...)</c> call site to a deterministic <c>ushort</c> id and emits per-call-site
 /// <c>[InterceptsLocation]</c> wrappers that forward to the matching <c>BeginXxxWithSiteId</c> overload, baking the literal id into the IL.
 ///
-/// Design: see `claude/design/observability/10-profiler-source-attribution.md`.
+/// Design: see `claude/design/Profiler/10-profiler-source-attribution.md`.
 ///
 /// Output:
 ///   - One generated source unit holding all interceptor methods (file-local class).
@@ -36,7 +36,7 @@ public class SourceLocationGenerator : IIncrementalGenerator
     private const string BeginParamAttributeFqn = "Typhon.Engine.Profiler.BeginParamAttribute";
     
     /// <summary>
-    /// Per design Q3 (claude/design/observability/10-profiler-source-attribution.md §4.1): the generator's interceptor scope is Typhon.Engine *only*.
+    /// Per design Q3 (claude/design/Profiler/10-profiler-source-attribution.md §4.1): the generator's interceptor scope is Typhon.Engine *only*.
     /// Other consumers (tests, tools) pay through siteId=0 ("unknown source"). The SourceLocations table is also engine-only; tests can read it via the
     /// engine's assembly.
     /// </summary>

@@ -380,7 +380,7 @@ public sealed class TraceFileWriter : IDisposable
     /// <summary>
     /// Append the source-location manifest to the file. Returns the (fileTableOffset, manifestOffset)
     /// that the caller MUST patch into the file header via <see cref="RewriteHeader"/>. Phase 3 of the
-    /// profiler-source-attribution feature (see claude/design/observability/10-profiler-source-attribution.md §4.6).
+    /// profiler-source-attribution feature (see claude/design/Profiler/10-profiler-source-attribution.md §4.6).
     /// </summary>
     public (long fileTableOffset, long manifestOffset) WriteSourceLocationManifest(
         IReadOnlyList<string> files,

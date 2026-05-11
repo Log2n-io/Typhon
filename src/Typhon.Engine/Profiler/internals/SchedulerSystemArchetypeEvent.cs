@@ -11,14 +11,11 @@ namespace Typhon.Engine.Internals;
 /// that <see cref="SchedulerChunkEvent"/> (per-system, per-chunk) and the EcsQuery* events (per-archetype) leave separate.
 /// Span duration covers the system's parallel-query bracket (start of first chunk → end of last chunk).
 /// </summary>
-[TraceEvent(TraceEventKind.SchedulerSystemArchetype, GenerateFactory = false, EmitEncoder = true)]
+[TraceEvent(TraceEventKind.SchedulerSystemArchetype, GenerateFactory = false, EmitEncoder = true, ExternalTimestamps = true)]
 internal ref partial struct SchedulerSystemArchetypeEvent
 {
-    public ushort SystemIndex;
-    public ushort ArchetypeId;
-    public int EntityCount;
-    public int ChunkCount;
-
-    // Intentionally no Dispose() method: SchedulerSystemArchetypeEvent is emitted in one shot via TyphonEvent.EmitSchedulerSystemArchetype, never via `using var`.
-    // (See SchedulerChunkEvent for the same rationale: a `using var` scope would silently drop the record if no ring publish happens.)
+    [BeginParam(ParamType = "int")] public ushort SystemIndex;
+    [BeginParam(ParamType = "int")] public ushort ArchetypeId;
+    [BeginParam] public int EntityCount;
+    [BeginParam] public int ChunkCount;
 }

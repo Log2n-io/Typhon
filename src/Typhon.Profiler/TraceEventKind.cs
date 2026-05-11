@@ -248,7 +248,7 @@ public enum TraceEventKind : byte
     // ═══════════════════════════════════════════════════════════════════════════════════════
     // Concurrency tracing (Phase 2, #280) — INSTANT events 90–116, no span header extension.
     // All gated on TelemetryConfig.Concurrency*Active leaf flags (Phase 1 Tier-2 mechanism).
-    // See claude/design/observability/07-tracing-instrumentation/02-concurrency.md for details.
+    // See claude/design/Profiler/07-tracing-instrumentation/02-concurrency.md for details.
     //
     // TODO: per-resource contention metrics regression. The pre-#280 IContentionTarget pathway fed
     // ManagedPagedMMF/ComponentTable counters that surfaced as Contention.* columns in the resource
@@ -364,7 +364,7 @@ public enum TraceEventKind : byte
     // Existing kind 60 (ClusterMigration) is logically retitled to Spatial:ClusterMigration:Execute
     // in codec metadata + Workbench labels — wire ID unchanged.
     //
-    // See claude/design/observability/07-tracing-instrumentation/03-spatial.md for details.
+    // See claude/design/Profiler/07-tracing-instrumentation/03-spatial.md for details.
     // ═══════════════════════════════════════════════════════════════════════════════════════
 
     // ── Spatial Queries (span — one per iterator pass) ──
@@ -480,7 +480,7 @@ public enum TraceEventKind : byte
     // reason u8 + wouldBeChunkCount u16 + successorsUnblocked u16). Decoders that respect the
     // record-size header continue to work; old shorter payloads default the extra fields to 0.
     //
-    // See claude/design/observability/07-tracing-instrumentation/04-scheduler-runtime.md.
+    // See claude/design/Profiler/07-tracing-instrumentation/04-scheduler-runtime.md.
     // ═══════════════════════════════════════════════════════════════════════════════════════
 
     // ── Scheduler:System (instant + span) ──
@@ -567,7 +567,7 @@ public enum TraceEventKind : byte
     // Existing kinds 56/57/58 (DiskRead/Write/Flush Completed) gain a producer-side
     // duration-threshold gate (config-driven, no wire change).
     //
-    // See claude/design/observability/07-tracing-instrumentation/05-storage-memory.md.
+    // See claude/design/Profiler/07-tracing-instrumentation/05-storage-memory.md.
     // ═══════════════════════════════════════════════════════════════════════════════════════
 
     // ── Storage:PageCache (span — joins existing kinds 50-59) ──
@@ -613,7 +613,7 @@ public enum TraceEventKind : byte
     // OptReason mask bit (0x02) + trailing reason u8. Existing kind 22 (TransactionCommitComponent)
     // gets a wire-additive +rowCount i32 via OptRowCount (0x04). Both follow the Phase 5 pattern.
     //
-    // See claude/design/observability/07-tracing-instrumentation/06-data-plane.md.
+    // See claude/design/Profiler/07-tracing-instrumentation/06-data-plane.md.
     // ═══════════════════════════════════════════════════════════════════════════════════════
 
     // ── Data:Transaction (mostly span; Conflict is instant) ──
@@ -674,7 +674,7 @@ public enum TraceEventKind : byte
     //
     // Per-entity field eval is explicitly NOT instrumented (>100 k/sec hot path).
     //
-    // See claude/design/observability/07-tracing-instrumentation/07-query-ecs-view.md.
+    // See claude/design/Profiler/07-tracing-instrumentation/07-query-ecs-view.md.
     // ═══════════════════════════════════════════════════════════════════════════════════════
 
     // ── Query (mostly span; PrimarySelect + StorageMode are instants) ──
@@ -774,7 +774,7 @@ public enum TraceEventKind : byte
     // Recovery:Record (228), UoW:State (233), UoW:Deadline (234) are extreme-frequency and get
     // belt-and-suspenders deny-list entries on top of their leaf gates.
     //
-    // See claude/design/observability/07-tracing-instrumentation/08-durability.md.
+    // See claude/design/Profiler/07-tracing-instrumentation/08-durability.md.
     // ═══════════════════════════════════════════════════════════════════════════════════════
 
     // ── Durability:WAL split + new (mostly span; GroupCommit/Queue/Frame are instants) ──
@@ -855,7 +855,7 @@ public enum TraceEventKind : byte
     // parent. Phase 9 fills in the per-subscriber/per-client children. Producer wiring is
     // deferred per Q4 — dispatch path is still in flux per umbrella sequencing.
     //
-    // See claude/design/observability/07-tracing-instrumentation/09-subscription-dispatch.md.
+    // See claude/design/Profiler/07-tracing-instrumentation/09-subscription-dispatch.md.
     // ═══════════════════════════════════════════════════════════════════════════════════════
 
     /// <summary>Per-subscriber invocation span (high-freq, deny-listed). Payload: <c>subscriberId: u32, viewId: u16, deltaCount: i32</c>.</summary>

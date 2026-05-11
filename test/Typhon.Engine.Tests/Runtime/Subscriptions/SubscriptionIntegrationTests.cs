@@ -129,7 +129,7 @@ class SubscriptionIntegrationTests : TestBase<SubscriptionIntegrationTests>
 
             // Set subscriptions for the connected client
             var clientConn = runtime.ClientConnections.GetAll().First();
-            runtime.SetSubscriptions(clientConn, published);
+            runtime.SetSubscriptions(clientConn.Context, published);
 
             // Wait for entity to be spawned
             SpinWait.SpinUntil(() => spawnedOnTick > 0, TimeSpan.FromSeconds(5));

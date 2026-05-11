@@ -5,7 +5,7 @@ namespace Typhon.Profiler;
 /// Maps a compile-time <see cref="Id"/> (the value carried in span records when <c>SpanFlagsHasSourceLocation</c> is set) to a source location: the file path
 /// (via <see cref="FileId"/> indexing into the parallel <c>FileTable</c>), the line number, the kind of factory the call site invoked, and the containing
 /// method name for display.
-/// See claude/design/observability/10-profiler-source-attribution.md §4.7.2.
+/// See claude/design/Profiler/10-profiler-source-attribution.md §4.7.2.
 /// </summary>
 public readonly struct SourceLocationManifestEntry
 {

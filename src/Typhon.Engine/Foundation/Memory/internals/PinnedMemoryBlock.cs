@@ -6,8 +6,7 @@ using System.Runtime.InteropServices;
 
 namespace Typhon.Engine.Internals;
 
-[PublicAPI]
-public unsafe class PinnedMemoryBlock : MemoryBlockBase
+internal unsafe class PinnedMemoryBlock : MemoryBlockBase
 {
     public int Alignment { get; }
     public byte* DataAsPointer { get; private set; }

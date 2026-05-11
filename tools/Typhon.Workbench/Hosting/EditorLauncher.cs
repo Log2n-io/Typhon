@@ -6,7 +6,7 @@ namespace Typhon.Workbench.Hosting;
 
 /// <summary>
 /// Launches the user's configured editor at a given file:line via <c>Process.Start</c>. Per-OS
-/// dispatch table — see claude/design/observability/10-profiler-source-attribution.md §5.5.
+/// dispatch table — see claude/design/Profiler/10-profiler-source-attribution.md §5.5.
 ///
 /// Officially supported platforms: Windows + macOS (matches the design's scope cut). Linux is
 /// implemented best-effort but documented as untested-on-this-machine.

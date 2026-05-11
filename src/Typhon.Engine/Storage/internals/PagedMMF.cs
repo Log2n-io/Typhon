@@ -244,7 +244,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     protected readonly PagedMMFOptions Options;
     protected readonly ILogger<PagedMMF> Logger;
     
-    protected readonly PinnedMemoryBlock MemPages;
+    private protected readonly PinnedMemoryBlock MemPages;
     private unsafe byte* _memPagesAddr;
 
     protected readonly int MemPagesCount;
@@ -327,7 +327,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// </summary>
     internal FpiBitmap FpiBitmap => _fpiBitmap;
 
-    unsafe public PagedMMF(IMemoryAllocator memoryAllocator, EpochManager epochManager, PagedMMFOptions options, IResource parent, string resourceName,
+    unsafe internal PagedMMF(IMemoryAllocator memoryAllocator, EpochManager epochManager, PagedMMFOptions options, IResource parent, string resourceName,
         ILogger<PagedMMF> logger) : base(resourceName, ResourceType.File, parent)
     {
         if (!options.Validate(true, out var errors))

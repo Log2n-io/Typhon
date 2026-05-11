@@ -4,7 +4,6 @@ using Microsoft.Extensions.Logging;
 using Typhon.Engine.Profiler;
 using Typhon.Profiler;
 using Typhon.Workbench.Dtos.Profiler;
-using ProfilerRecordDecoder = Typhon.Profiler.RecordDecoder;
 using ProfilerCacheBuilder = Typhon.Profiler.TraceFileCacheBuilder;
 
 namespace Typhon.Workbench.Sessions;
@@ -706,10 +705,13 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
             var kind = (TraceEventKind)records[pos + 2];
             if (kind == TraceEventKind.GcSuspension)
             {
-                var data = GcSuspensionEventCodec.Decode(records.Slice(pos, size));
-                var startUs = (data.StartTimestamp - baselineQpc) * 1_000_000.0 / timestampFrequency;
-                var durationUs = data.DurationTicks * 1_000_000.0 / timestampFrequency;
-                sink.Add(new GcSuspensionDto(startUs, durationUs, data.ThreadSlot));
+                // Decode via the typed DTO path (codec retired). DTO ThreadSlot/SpanHeader fields are populated by the
+                // generated GcSuspensionEventDto.Decode reading the same wire bytes the new emitter writes.
+                TraceRecordHeader.ReadCommonHeader(records.Slice(pos, size), out _, out _, out var threadSlot, out var startTs);
+                TraceRecordHeader.ReadSpanHeaderExtension(records.Slice(pos + TraceRecordHeader.CommonHeaderSize), out var durationTicks, out _, out _, out _);
+                var startUs = (startTs - baselineQpc) * 1_000_000.0 / timestampFrequency;
+                var durationUs = durationTicks * 1_000_000.0 / timestampFrequency;
+                sink.Add(new GcSuspensionDto(startUs, durationUs, threadSlot));
             }
             pos += size;
         }

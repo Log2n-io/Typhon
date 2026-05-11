@@ -1001,7 +1001,8 @@ public class TraceEventEncodeEquivalenceTests
         Span<byte> bufStruct = stackalloc byte[256];
         ev.EncodeTo(bufStruct, EndTs, out var lenStruct);
 
-        var golden = Convert.FromHexString("3A00320744443333222211111111000000000000DDDDCCCCBBBBAAAAF0DEBC9A78563412010F0F0F0F0F0F0F0FF0F0F0F0F0F0F0F06500000000");
+        // Generator drops the trailing optMask byte (no [Optional] fields → no mask). Wire is 41 bytes.
+        var golden = Convert.FromHexString("3900320744443333222211111111000000000000DDDDCCCCBBBBAAAAF0DEBC9A78563412010F0F0F0F0F0F0F0FF0F0F0F0F0F0F0F065000000");
         AssertSpanEqualsGolden(bufStruct, lenStruct, golden);
     }
 
@@ -1025,7 +1026,7 @@ public class TraceEventEncodeEquivalenceTests
         Span<byte> bufStruct = stackalloc byte[256];
         ev.EncodeTo(bufStruct, EndTs, out var lenStruct);
 
-        var golden = Convert.FromHexString("3A00330744443333222211111111000000000000DDDDCCCCBBBBAAAAF0DEBC9A78563412010F0F0F0F0F0F0F0FF0F0F0F0F0F0F0F06500000000");
+        var golden = Convert.FromHexString("3900330744443333222211111111000000000000DDDDCCCCBBBBAAAAF0DEBC9A78563412010F0F0F0F0F0F0F0FF0F0F0F0F0F0F0F065000000");
         AssertSpanEqualsGolden(bufStruct, lenStruct, golden);
     }
 
@@ -1074,7 +1075,7 @@ public class TraceEventEncodeEquivalenceTests
         Span<byte> bufStruct = stackalloc byte[256];
         ev.EncodeTo(bufStruct, EndTs, out var lenStruct);
 
-        var golden = Convert.FromHexString("3A00350744443333222211111111000000000000DDDDCCCCBBBBAAAAF0DEBC9A78563412010F0F0F0F0F0F0F0FF0F0F0F0F0F0F0F06500000000");
+        var golden = Convert.FromHexString("3900350744443333222211111111000000000000DDDDCCCCBBBBAAAAF0DEBC9A78563412010F0F0F0F0F0F0F0FF0F0F0F0F0F0F0F065000000");
         AssertSpanEqualsGolden(bufStruct, lenStruct, golden);
     }
 
@@ -1098,7 +1099,7 @@ public class TraceEventEncodeEquivalenceTests
         Span<byte> bufStruct = stackalloc byte[256];
         ev.EncodeTo(bufStruct, EndTs, out var lenStruct);
 
-        var golden = Convert.FromHexString("3A00360744443333222211111111000000000000DDDDCCCCBBBBAAAAF0DEBC9A78563412010F0F0F0F0F0F0F0FF0F0F0F0F0F0F0F06500000000");
+        var golden = Convert.FromHexString("3900360744443333222211111111000000000000DDDDCCCCBBBBAAAAF0DEBC9A78563412010F0F0F0F0F0F0F0FF0F0F0F0F0F0F0F065000000");
         AssertSpanEqualsGolden(bufStruct, lenStruct, golden);
     }
 

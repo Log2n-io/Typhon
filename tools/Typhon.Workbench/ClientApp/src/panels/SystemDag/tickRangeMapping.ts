@@ -12,10 +12,14 @@ import type { TickRange } from './useDagViewStore';
  * conversion is cheap to call on every TimeArea scrub.
  *
  * Semantics:
- * - `[time.start, time.end)` is the µs window. A tick is **in** the window iff `startUs` falls
- *   in that half-open interval. (End-exclusive matches the {@link TimeSelection} contract.)
- * - Returns `null` when no ticks fall in the window — the caller should skip aggregation rather
- *   than fire empty queries.
+ * - A tick is **in** the window iff its `[startUs, startUs + durationUs)` interval overlaps
+ *   `[time.start, time.end)`. Ticks don't overlap each other, so `endUs` is non-decreasing and the
+ *   two bounds can each be located via a single O(log N) probe.
+ * - Zoom-into-a-tick (a window strictly inside one tick's interval) snaps to that tick — the
+ *   Data Flow / Access Matrix panels rely on this so the user can't end up with a "no ticks in
+ *   window" hole and a blank canvas.
+ * - Returns `null` when no tick overlaps — the caller should skip aggregation rather than fire
+ *   empty queries.
  *
  * Edge cases tested in the companion spec.
  */
@@ -25,13 +29,15 @@ export function timeToTickRange(
 ): TickRange | null {
   if (!time || !tickSummaries || tickSummaries.length === 0) return null;
 
-  // First tick with startUs >= time.start (inclusive lower bound).
-  const firstIdx = firstIndexWithStartUsGte(tickSummaries, time.start);
+  // First tick whose right edge exceeds the window's left edge — i.e., the earliest tick that
+  // still overlaps the window. Mid-tick window starts still pick the enclosing tick because
+  // `endUs > time.start` is true for it.
+  const firstIdx = firstIndexWithEndUsGt(tickSummaries, time.start);
   if (firstIdx >= tickSummaries.length) return null; // window starts after every tick.
 
-  // Last tick with startUs < time.end (end is exclusive — first index past it, minus 1).
+  // Last tick whose left edge is strictly inside the window (end is exclusive).
   const lastIdx = firstIndexWithStartUsGte(tickSummaries, time.end) - 1;
-  if (lastIdx < firstIdx) return null; // window contains no tick.
+  if (lastIdx < firstIdx) return null; // window misses every tick (e.g., zero-width at a boundary).
 
   const fromTick = numericValue(tickSummaries[firstIdx].tickNumber);
   const toTick = numericValue(tickSummaries[lastIdx].tickNumber);
@@ -73,9 +79,9 @@ export function lastNTicksToTime(
 // ── internals ────────────────────────────────────────────────────────────
 
 /**
- * Smallest index `i` with `startUs(i) >= value`. Returns `length` if no tick satisfies. Used for
- * both ends of the window: directly for the inclusive lower bound, and `result - 1` gives the
- * largest index with `startUs < value` for the exclusive upper bound.
+ * Smallest index `i` with `startUs(i) >= value`. Returns `length` if no tick satisfies. Used to
+ * locate the exclusive upper bound of the visible window: `result - 1` gives the largest index
+ * with `startUs < value`.
  */
 function firstIndexWithStartUsGte(rows: readonly TickSummaryDto[], value: number): number {
   let lo = 0;
@@ -84,6 +90,31 @@ function firstIndexWithStartUsGte(rows: readonly TickSummaryDto[], value: number
     const mid = (lo + hi) >>> 1;
     const start = numericValue(rows[mid].startUs);
     if (start == null || start < value) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  return lo;
+}
+
+/**
+ * Smallest index `i` with `startUs(i) + durationUs(i) > value`. Returns `length` if no tick satisfies.
+ * Ticks don't overlap, so `endUs` is monotonically non-decreasing across the sorted array — binary
+ * search is safe. Used to locate the earliest tick whose right edge crosses the window's left edge.
+ */
+function firstIndexWithEndUsGt(rows: readonly TickSummaryDto[], value: number): number {
+  let lo = 0;
+  let hi = rows.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    const start = numericValue(rows[mid].startUs);
+    const dur = numericValue(rows[mid].durationUs) ?? 0;
+    // Treat zero-duration ticks as 1 µs wide for overlap purposes — matches the +1 µs epsilon
+    // convention in `lastNTicksToTime` so a `last-1-tick` snapshot roundtrips even when the final
+    // tick has durationUs == 0.
+    const endExclusive = start == null ? null : start + Math.max(dur, 1);
+    if (endExclusive == null || endExclusive <= value) {
       lo = mid + 1;
     } else {
       hi = mid;
