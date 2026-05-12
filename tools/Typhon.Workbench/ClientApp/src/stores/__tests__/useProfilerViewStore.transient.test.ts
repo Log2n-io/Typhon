@@ -122,4 +122,37 @@ describe('useProfilerViewStore — transient/committed split', () => {
     expect(useProfilerViewStore.getState().viewRange).toEqual({ startUs: 1, endUs: 2 });
   });
 
+  it('cross-panel viewRange subscribers do NOT fire during a transient-write burst (fluidity guarantee)', () => {
+    // Subscribe BEFORE the burst — emulates the live, mounted SystemDag / CriticalPath / DataFlow / AccessMatrix
+    // consumers that read `viewRange` (the committed slot). The whole #345 refactor exists to ensure these
+    // consumers don't re-render / re-fetch on every wheel notch — they should only see the post-debounce commit.
+    let viewRangeFires = 0;
+    let transientFires = 0;
+    const unsubView = useProfilerViewStore.subscribe((cur, prev) => {
+      if (cur.viewRange !== prev.viewRange) viewRangeFires++;
+    });
+    const unsubTransient = useProfilerViewStore.subscribe((cur, prev) => {
+      if (cur.transientViewRange !== prev.transientViewRange) transientFires++;
+    });
+    try {
+      const s = useProfilerViewStore.getState();
+      for (let i = 0; i < 20; i++) {
+        s.setTransientViewRange({ startUs: i * 10, endUs: i * 10 + 100 });
+      }
+      // Mid-burst: transient subscriber fires every write, viewRange subscriber fires zero times.
+      // This is the load-bearing invariant — if it ever flips, every cross-panel consumer pays the
+      // gesture-frame cost the refactor was built to remove.
+      expect(transientFires).toBe(20);
+      expect(viewRangeFires).toBe(0);
+
+      // After debounce: viewRange fires exactly once. The 20 transient writes are coalesced into a single
+      // cross-panel notification.
+      vi.advanceTimersByTime(150);
+      expect(viewRangeFires).toBe(1);
+    } finally {
+      unsubView();
+      unsubTransient();
+    }
+  });
+
 });

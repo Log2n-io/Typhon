@@ -51,7 +51,7 @@ public sealed partial class TyphonRuntime : IDisposable
     private readonly PooledEntityList[] _parallelEntityLists;      // Full entity set for parallel QuerySystem chunk slicing
     private readonly HashMap<long>[] _multiTableFilterSets;        // Cached dedup sets for multi-table BuildFilteredEntitySet (avoids per-tick alloc)
     private readonly PointInTimeAccessor[] _parallelAccessors;      // Per-system reusable PTAs — Attach()ed each tick (per-system to avoid race with DAG-concurrent systems)
-    private readonly PartitionEntityView[][] _partitionViews;      // Per-system per-worker partition views [sysIdx][chunkIdx]
+    private readonly PartitionEntityView[][] _partitionViews;      // Per-system per-worker partition views [sysIdx][workerId] — inner index is workerId, NOT chunkIndex (chunks may exceed worker count when ChunksPerWorker > 1)
 
     // Issue #231: per-system cluster-id partition source for tier-filtered dispatch. Non-null only when the system has a tier filter AND has a cluster state.
     // For non-amortized systems this points DIRECTLY at the per-archetype TierClusterIndex's per-tier buffer (zero-copy). For amortized systems

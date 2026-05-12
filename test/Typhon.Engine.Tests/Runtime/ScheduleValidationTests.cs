@@ -161,6 +161,54 @@ class ScheduleValidationTests
     }
 
     [Test]
+    public void Build_ChunksPerWorker_BelowOne_Throws()
+    {
+        // ChunksPerWorker is an oversubscription multiplier — values below 1 would *reduce* parallelism below the
+        // worker count, which is confusing given the name and not a use case the knob was designed for. Reject.
+        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
+        schedule.QuerySystem("Bad", _ => { }, input: () => null, parallel: true, chunksPerWorker: 0.5f);
+
+        var ex = Assert.Throws<InvalidOperationException>(() => schedule.Build(_registry.Runtime));
+        Assert.That(ex.Message, Does.Contain("ChunksPerWorker"));
+        Assert.That(ex.Message, Does.Contain("[1.0, 64.0]"));
+    }
+
+    [Test]
+    public void Build_ChunksPerWorker_AboveUpperBound_Throws()
+    {
+        // Absurd factors like 1e10 cast unchecked to int.MinValue (then Math.Max(1, MIN) = 1), silently collapsing
+        // the chunk cap to 1 chunk — the exact opposite of what the user asked for. The 64 ceiling keeps the (int)
+        // round well clear of overflow and is already past the point where ParallelQueryMinChunkSize kicks in.
+        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
+        schedule.QuerySystem("Bad", _ => { }, input: () => null, parallel: true, chunksPerWorker: 100f);
+
+        var ex = Assert.Throws<InvalidOperationException>(() => schedule.Build(_registry.Runtime));
+        Assert.That(ex.Message, Does.Contain("ChunksPerWorker"));
+        Assert.That(ex.Message, Does.Contain("[1.0, 64.0]"));
+    }
+
+    [Test]
+    public void Build_ChunksPerWorker_AtBoundaries_Succeeds()
+    {
+        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
+        schedule.QuerySystem("Lower", _ => { }, input: () => null, parallel: true, chunksPerWorker: 1f);
+        schedule.QuerySystem("Upper", _ => { }, input: () => null, parallel: true, chunksPerWorker: 64f);
+
+        using var scheduler = schedule.Build(_registry.Runtime);
+        Assert.That(scheduler.SystemCount, Is.EqualTo(2));
+    }
+
+    [Test]
+    public void Build_ChunksPerWorker_PositiveInfinity_Throws()
+    {
+        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
+        schedule.QuerySystem("Bad", _ => { }, input: () => null, parallel: true, chunksPerWorker: float.PositiveInfinity);
+
+        var ex = Assert.Throws<InvalidOperationException>(() => schedule.Build(_registry.Runtime));
+        Assert.That(ex.Message, Does.Contain("ChunksPerWorker"));
+    }
+
+    [Test]
     public void Build_UniqueNames_Succeeds()
     {
         var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });

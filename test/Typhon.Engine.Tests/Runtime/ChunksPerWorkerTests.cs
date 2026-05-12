@@ -1,6 +1,8 @@
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Threading;
 
 namespace Typhon.Engine.Tests.Runtime;
@@ -128,13 +130,14 @@ class ChunksPerWorkerTests : TestBase<ChunksPerWorkerTests>
 
         using var dbe = SetupEngine();
 
+        var spawnedIds = new EntityId[entityCount];
         using (var seedTx = dbe.CreateQuickTransaction())
         {
             var pos = new EcsPosition(0, 0, 0);
             var vel = new EcsVelocity(0, 0, 0);
             for (var i = 0; i < entityCount; i++)
             {
-                seedTx.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos), EcsUnit.Velocity.Set(in vel));
+                spawnedIds[i] = seedTx.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos), EcsUnit.Velocity.Set(in vel));
             }
             seedTx.Commit();
         }
@@ -142,7 +145,7 @@ class ChunksPerWorkerTests : TestBase<ChunksPerWorkerTests>
         using var viewTx = dbe.CreateQuickTransaction();
         var view = viewTx.Query<EcsUnit>().ToView();
 
-        var visited = 0;
+        var seen = new ConcurrentBag<EntityId>();
         var ticksSeen = 0;
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
@@ -150,9 +153,9 @@ class ChunksPerWorkerTests : TestBase<ChunksPerWorkerTests>
             schedule.CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksSeen));
             schedule.QuerySystem("VisitAll", ctx =>
             {
-                foreach (var _ in ctx.Entities)
+                foreach (var id in ctx.Entities)
                 {
-                    Interlocked.Increment(ref visited);
+                    seen.Add(id);
                 }
             }, input: () => view, parallel: true, chunksPerWorker: 2f, after: "Tick");
         }, new RuntimeOptions
@@ -167,9 +170,86 @@ class ChunksPerWorkerTests : TestBase<ChunksPerWorkerTests>
         runtime.Shutdown();
 
         // 4 × 2.0 = 8 chunks (capped at 256 / 16 = 16), so totalChunks = 8.
-        Assert.That(visited, Is.GreaterThanOrEqualTo(entityCount),
-            $"All {entityCount} entities should be visited; got {visited}. " +
-            "If lower, the per-worker view pool indexing collapsed under oversubscription.");
+        // HashSet equality (not >=) — a regression that double-visits some entities while skipping
+        // others survives the raw-count check but fails this one. Set of spawned IDs gives an exact
+        // identity match: every spawned entity must appear in the seen set, no extras.
+        var seenSet = new HashSet<EntityId>(seen);
+        var spawnedSet = new HashSet<EntityId>(spawnedIds);
+        Assert.That(seenSet.SetEquals(spawnedSet), Is.True,
+            $"Visited set should equal the spawned set. Spawned {spawnedSet.Count}, seen-unique {seenSet.Count}, raw-bag-size {seen.Count}. " +
+            "If seen-unique < spawned: the per-worker view pool indexing skipped chunks. " +
+            "If raw-bag > seen-unique: views are aliased across chunks and entities are visited multiple times.");
         view.Dispose();
+    }
+
+    /// <summary>
+    /// Degenerate case: <c>WorkerCount=1</c> + <c>ChunksPerWorker=2</c> → cap=2 chunks, per-worker pool is length-1.
+    /// The single worker must process both chunks in sequence, indexing the pool by its own workerId=0 each time.
+    /// Pre-fix, the buggy <c>chunkIndex</c> would have indexed slot 1 on the second chunk and thrown.
+    /// </summary>
+    [Test]
+    public void WorkerCount1_TwoX_SingleWorkerHandlesBothChunks()
+    {
+        const int entityCount = 8;
+        const int minChunkSize = 4;
+
+        using var dbe = SetupEngine();
+
+        var spawnedIds = new EntityId[entityCount];
+        using (var seedTx = dbe.CreateQuickTransaction())
+        {
+            var pos = new EcsPosition(0, 0, 0);
+            var vel = new EcsVelocity(0, 0, 0);
+            for (var i = 0; i < entityCount; i++)
+            {
+                spawnedIds[i] = seedTx.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos), EcsUnit.Velocity.Set(in vel));
+            }
+            seedTx.Commit();
+        }
+
+        using var viewTx = dbe.CreateQuickTransaction();
+        var view = viewTx.Query<EcsUnit>().ToView();
+
+        var seen = new ConcurrentBag<EntityId>();
+        var ticksSeen = 0;
+
+        using var runtime = TyphonRuntime.Create(dbe, schedule =>
+        {
+            schedule.CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksSeen));
+            schedule.QuerySystem("Single", ctx =>
+            {
+                foreach (var id in ctx.Entities)
+                {
+                    seen.Add(id);
+                }
+            }, input: () => view, parallel: true, chunksPerWorker: 2f, after: "Tick");
+        }, new RuntimeOptions
+        {
+            WorkerCount = 1,
+            BaseTickRate = 1000,
+            ParallelQueryMinChunkSize = minChunkSize,
+        });
+
+        runtime.Start();
+        SpinWait.SpinUntil(() => ticksSeen >= 1, TimeSpan.FromSeconds(5));
+        runtime.Shutdown();
+
+        var seenSet = new HashSet<EntityId>(seen);
+        Assert.That(seenSet.Count, Is.EqualTo(entityCount));
+    }
+
+    /// <summary>
+    /// Pin the rounding behaviour. <c>MathF.Round</c> uses banker's rounding (ToEven): <c>2.5 → 2</c>, not <c>3</c>.
+    /// 2 workers × 1.25 = 2.5 → 2 chunks (not 3). If this ever surprises someone, the fix is to either change
+    /// the runtime to <c>MidpointRounding.AwayFromZero</c> or update this test to reflect a deliberate decision.
+    /// </summary>
+    [Test]
+    public void TieRounding_BankersRound_ToEven()
+    {
+        // 2 workers × 1.25 = 2.5. Banker's rounding to even → 2. entityCount=64 / minChunkSize=8 = 8 maxChunks.
+        // Result: min(2, 8) = 2 chunks.
+        var chunks = RunAndGetTotalChunks(entityCount: 64, workerCount: 2, minChunkSize: 8, chunksPerWorker: 1.25f);
+        Assert.That(chunks, Is.EqualTo(2),
+            "MathF.Round uses banker's rounding (ToEven): 2.5 → 2. If this test fails because the rounding mode was deliberately changed, update the expected value here.");
     }
 }

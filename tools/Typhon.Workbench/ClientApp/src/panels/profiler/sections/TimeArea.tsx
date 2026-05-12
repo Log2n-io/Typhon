@@ -928,6 +928,7 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
     <div ref={containerRef} className="relative h-full w-full overflow-hidden select-none">
       <canvas
         ref={canvasRef}
+        data-testid="profiler-time-area-canvas"
         className="absolute inset-0 h-full w-full touch-none"
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}

@@ -405,10 +405,17 @@ public sealed class RuntimeSchedule
                     $"System '{reg.Name}': WritesVersioned is only meaningful for parallel QuerySystems. Add b.Parallel() or parallel: true.");
             }
 
-            if (reg.ChunksPerWorker <= 0f || !float.IsFinite(reg.ChunksPerWorker))
+            // ChunksPerWorker is an oversubscription multiplier: chunks are capped at round(WorkerCount × factor).
+            // - Below 1f reduces parallelism below the worker count — confusing given the name's intent and not
+            //   a use case the knob was designed for. Reject so the value-space matches the name.
+            // - Above 64f silently collapses to 1 chunk on machines with high worker counts because
+            //   (int)MathF.Round(WorkerCount × factor) overflows to int.MinValue, then Math.Max(1, MIN) = 1.
+            //   The runtime caps chunks at entityCount/MinChunkSize anyway, so values above ~16 are already
+            //   pointless in practice; 64 is a generous ceiling that keeps the overflow well out of reach.
+            if (!float.IsFinite(reg.ChunksPerWorker) || reg.ChunksPerWorker < 1f || reg.ChunksPerWorker > 64f)
             {
                 throw new InvalidOperationException(
-                    $"System '{reg.Name}': ChunksPerWorker must be > 0 and finite, got {reg.ChunksPerWorker}.");
+                    $"System '{reg.Name}': ChunksPerWorker must be finite and in [1.0, 64.0], got {reg.ChunksPerWorker}.");
             }
 
             if (reg.ChunksPerWorker != 1f && !reg.Parallel)

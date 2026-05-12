@@ -167,7 +167,9 @@ public sealed class SystemDefinition
     /// <para>
     /// Use values above 1.0 (e.g. 1.5, 2.0) on parallel systems where worker efficiency suffers because a single slow chunk
     /// holds back the critical path — extra chunks let fast workers steal more work via the existing dynamic <c>_nextChunk</c>
-    /// loop in <see cref="DagScheduler"/>. Values below 1.0 are rejected at <see cref="RuntimeSchedule.Build"/>.
+    /// loop in <see cref="DagScheduler"/>. Values must be in the range <c>[1.0, 64.0]</c>; <see cref="RuntimeSchedule.Build"/>
+    /// rejects values outside that band. The upper bound also guards against the <c>(int)MathF.Round</c> overflow that would
+    /// silently collapse the chunk cap to 1 for absurd factors.
     /// </para>
     /// <para>
     /// The final chunk count is still capped by <c>ceil(entityCount / ParallelQueryMinChunkSize)</c>, so small populations

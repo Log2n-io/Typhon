@@ -12,9 +12,10 @@ import { useSessionStore } from '@/stores/useSessionStore';
  * have room to breathe horizontally without crowding the more-vertical Detail / Logs panels.
  *
  * Reads pre-aggregated stats from `useProfilerStatsStore` — the producer (`useProfilerStatsWriter`,
- * called by `ProfilerPanel`) runs `computeSelectionStats` debounced 150 ms after viewRange settles
- * so the wheel-zoom burst case still coalesces. Click a row → tween viewport onto the worst-instance
- * span of that group ± 5% padding, pausing live-follow if applicable.
+ * called by `ProfilerPanel`) runs `computeSelectionStats` synchronously on each committed `viewRange`
+ * change. Coalescing across a wheel-zoom burst is handled upstream by the transient/committed slot
+ * split in `useProfilerViewStore` (#345), so the writer no longer needs its own debounce. Click a row
+ * → tween viewport onto the worst-instance span of that group ± 5% padding.
  */
 
 type SpanSortKey = 'name' | 'count' | 'minUs' | 'avgUs' | 'maxUs' | 'p95Us' | 'totalUs';

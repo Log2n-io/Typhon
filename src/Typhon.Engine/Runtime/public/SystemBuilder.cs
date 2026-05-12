@@ -137,7 +137,7 @@ public sealed class SystemBuilder
     /// back the critical path — extra chunks let fast workers steal more work via the dynamic dispatch loop. Final chunk count
     /// is still capped by <c>ceil(entityCount / ParallelQueryMinChunkSize)</c>, so small populations don't proliferate chunks.
     /// </para>
-    /// Validated at <see cref="RuntimeSchedule.Build"/>: rejected if &lt;= 0, and rejected on non-parallel systems where it has no effect.
+    /// Validated at <see cref="RuntimeSchedule.Build"/>: must be in <c>[1.0, 64.0]</c>, and rejected on non-parallel systems where it has no effect.
     /// </summary>
     public SystemBuilder ChunksPerWorker(float factor)
     {

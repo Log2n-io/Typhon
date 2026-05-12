@@ -1002,4 +1002,77 @@ class TierDispatchTests : TestBase<TierDispatchTests>
 
         view.Dispose();
     }
+
+    /// <summary>
+    /// Regression for the per-worker tier-range view pool (<c>_tierRangeViews</c>): the pool is sized to
+    /// <c>WorkerCount</c> but was historically indexed by <c>chunkIndex</c>. With <c>ChunksPerWorker &gt; 1</c>
+    /// the chunk count exceeds the worker count, so <c>chunkIndex &gt;= WorkerCount</c> threw
+    /// <c>IndexOutOfRangeException</c> from worker threads on the tier-filtered Path 1 — silently in some
+    /// configurations, skipping entities. The fix indexes by <c>workerId</c>. This test combines both features
+    /// (tier filter + oversubscription) and verifies every Tier0 entity is visited exactly once.
+    /// </summary>
+    [Test]
+    public void TierDispatch_ChunksPerWorker_VisitsAllTierEntities()
+    {
+        using var dbe = SetupEngineWithGrid();
+
+        // 8 cells along x, all tagged Tier0 → 8 single-entity clusters. With WorkerCount=2 +
+        // ChunksPerWorker=2 the cap is 4 chunks; ParallelQueryMinChunkSize=2 with 8 entities gives
+        // maxChunks=4 — so 4 chunks of ~2 clusters each, twice the worker count. Without the fix
+        // chunkIndex 2/3 indexed past the end of _tierRangeViews[sysIdx].
+        const int cellCount = 8;
+        var entityIds = new EntityId[cellCount];
+        var cellKeys = new int[cellCount];
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            for (int i = 0; i < cellCount; i++)
+            {
+                float x = 5f + i * 10f;
+                entityIds[i] = tx.Spawn<TierUnit>(TierUnit.Pos.Set(PointAt(x, 5f)));
+                cellKeys[i] = dbe.SpatialGrid.WorldToCellKey(x, 5f);
+            }
+            tx.Commit();
+        }
+        for (int i = 0; i < cellCount; i++)
+        {
+            dbe.SpatialGrid.SetCellTier(cellKeys[i], SimTier.Tier0);
+        }
+
+        using var viewTx = dbe.CreateQuickTransaction();
+        var view = viewTx.Query<TierUnit>().ToView();
+
+        var seen = new ConcurrentBag<EntityId>();
+        var ticksSeen = 0;
+
+        using var runtime = TyphonRuntime.Create(dbe, schedule =>
+        {
+            schedule.CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksSeen));
+            schedule.QuerySystem("OversubscribedTier0", ctx =>
+            {
+                foreach (var id in ctx.Entities)
+                {
+                    seen.Add(id);
+                }
+            }, input: () => view, parallel: true, tier: SimTier.Tier0, chunksPerWorker: 2f, after: "Tick");
+        }, new RuntimeOptions
+        {
+            WorkerCount = 2,
+            BaseTickRate = 1000,
+            ParallelQueryMinChunkSize = 2,
+        });
+
+        runtime.Start();
+        SpinWait.SpinUntil(() => ticksSeen >= 1, TimeSpan.FromSeconds(5));
+        runtime.Shutdown();
+
+        // HashSet check — equality, not >=. A duplicate-visit regression (same entity processed by multiple
+        // workers via wrong view sharing) would survive a `>= cellCount` assertion but fail this one.
+        var seenSet = new System.Collections.Generic.HashSet<EntityId>(seen);
+        Assert.That(seenSet.Count, Is.EqualTo(cellCount),
+            $"All {cellCount} Tier0 entities should be visited exactly once; got {seenSet.Count} unique (raw bag size {seen.Count}). " +
+            "If lower, the per-worker tier-range view pool indexing collapsed under oversubscription. " +
+            "If raw bag > unique, the views are aliased across chunks and entities are visited multiple times.");
+
+        view.Dispose();
+    }
 }
