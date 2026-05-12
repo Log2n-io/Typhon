@@ -85,8 +85,6 @@ interface ProfilerSessionStoreState {
    * Highest engine tick number seen so far in the live stream. Matches the rightmost bar of the tick overview.
    */
   latestTickNumber: number;
-  /** User's follow/pause state for the live timeline. Default true on new live sessions. */
-  liveFollowActive: boolean;
   /**
    * Server-provided slot → (name, kind) map. Updated via `threadInfoAdded` SSE deltas; persists across
    * chunk-cache eviction so the timeline never reverts to "Slot N" labels just because a chunk got LRU'd.
@@ -135,7 +133,6 @@ interface ProfilerSessionStoreState {
    * monotonically ordered as the server emitted them.
    */
   applyLiveBatch: (events: LiveStreamPayload[]) => void;
-  setLiveFollowActive: (active: boolean) => void;
 
   // ── Filter-popup setters ─────────────────────────────────────────────────────────────
   /** Set / clear visibility for a single slot. Pass `true` to clear (= visible / missing key); `false` to hide. */
@@ -163,7 +160,6 @@ export const useProfilerSessionStore = create<ProfilerSessionStoreState>()((set)
   isLive: false,
   connectionStatus: null,
   latestTickNumber: 0,
-  liveFollowActive: true,
   liveThreadInfos: new Map(),
 
   slotVisibility: {},
@@ -292,7 +288,6 @@ export const useProfilerSessionStore = create<ProfilerSessionStoreState>()((set)
 
       return { metadata, liveThreadInfos, connectionStatus, latestTickNumber };
     }),
-  setLiveFollowActive: (active) => set({ liveFollowActive: active }),
 
   setSlotVisibility: (slot, visible) =>
     set((s) => {
@@ -362,7 +357,6 @@ export const useProfilerSessionStore = create<ProfilerSessionStoreState>()((set)
       isLive: false,
       connectionStatus: null,
       latestTickNumber: 0,
-      liveFollowActive: true,
       liveThreadInfos: new Map(),
       slotVisibility: {},
       systemVisibility: {},

@@ -14,6 +14,11 @@ export interface EditorOptions {
 
 export interface ProfilerOptions {
   workspaceRoot: string;
+  /**
+   * Debounce window (ms) between TimeArea pan/zoom and cross-panel consumer re-aggregation.
+   * See `useProfilerViewStore.setTransientViewRange`. Clamped to [0, 5000] server-side; `0` = sync.
+   */
+  viewRangeDebounceMs: number;
 }
 
 export interface WorkbenchOptions {
@@ -23,7 +28,7 @@ export interface WorkbenchOptions {
 
 const DEFAULT_OPTIONS: WorkbenchOptions = {
   editor: { kind: 'vsCode', customCommand: '' },
-  profiler: { workspaceRoot: '' },
+  profiler: { workspaceRoot: '', viewRangeDebounceMs: 150 },
 };
 
 interface OptionsState {

@@ -1,13 +1,16 @@
 import { create } from 'zustand';
+import { useSchemaInspectorStore } from './useSchemaInspectorStore';
 
 /**
- * Cross-panel selection state — see `claude/design/workbench/10-internal-data-api.md §9`.
+ * Cross-panel selection state — see `claude/design/Apps/Workbench/10-internal-data-api.md §9`.
  *
  * Independently-observable dimension slots. Panels subscribe via
  * `useSelectionStore(s => s.system)` and only re-render when *that* slot changes.
  *
- * `time` is the TimeArea range in absolute µs timestamps (matches profiler convention).
- * `focusTick`, `worker`, `dataTrack`, `phase`, and `hoveredSystemTickKey` are volatile (not URL-synced);
+ * **Post-#345:** `time` and `focusTick` were removed. The viewport canonical home is
+ * `useProfilerViewStore.viewRange` (one source of truth, debounced commit), and `focusTick` is
+ * subsumed by "viewRange spans exactly one tick" — clicking a tick snaps the viewport to its
+ * bounds. `worker`, `dataTrack`, `phase`, `hoveredSystemTickKey` remain volatile (not URL-synced);
  * the rest are stable and round-trip through the URL via {@link selectionUrlSync}.
  *
  * <b>Phase D additions (#327):</b>
@@ -17,12 +20,6 @@ import { create } from 'zustand';
  * - `hoveredSystemTickKey` — drives the hover-to-isolate effect across panels without coupling the
  *   underlying renderers to one another.
  */
-export interface TimeSelection {
-  /** Inclusive start (µs). */
-  start: number;
-  /** Exclusive end (µs). */
-  end: number;
-}
 
 /**
  * Identifier for a "data track" — a row in the Data Flow Timeline / Access Matrix that the user clicks to
@@ -60,8 +57,6 @@ export interface HoveredSystemTickKey {
 }
 
 export interface SelectionState {
-  time: TimeSelection | null;
-  focusTick: number | null;
   system: string | null;
   component: string | null;
   queue: string | null;
@@ -73,8 +68,6 @@ export interface SelectionState {
   phase: string | null;
   hoveredSystemTickKey: HoveredSystemTickKey | null;
 
-  setTime: (range: TimeSelection | null) => void;
-  setFocusTick: (tick: number | null) => void;
   setSystem: (name: string | null) => void;
   setComponent: (name: string | null) => void;
   setQueue: (name: string | null) => void;
@@ -90,11 +83,9 @@ export interface SelectionState {
 
 const INITIAL: Pick<
   SelectionState,
-  | 'time' | 'focusTick' | 'system' | 'component' | 'queue' | 'resource' | 'entity' | 'worker'
+  | 'system' | 'component' | 'queue' | 'resource' | 'entity' | 'worker'
   | 'dataTrack' | 'phase' | 'hoveredSystemTickKey'
 > = {
-  time: null,
-  focusTick: null,
   system: null,
   component: null,
   queue: null,
@@ -105,13 +96,6 @@ const INITIAL: Pick<
   phase: null,
   hoveredSystemTickKey: null,
 };
-
-/** Value-equality for {@link TimeSelection}. Exported for use in cross-store bridges and URL sync. */
-export function timeEqual(a: TimeSelection | null, b: TimeSelection | null): boolean {
-  if (a === b) return true;
-  if (a === null || b === null) return false;
-  return a.start === b.start && a.end === b.end;
-}
 
 /** Value-equality for {@link DataTrackSelection}. Used by the value-equal-aware setter. */
 export function dataTrackEqual(a: DataTrackSelection | null, b: DataTrackSelection | null): boolean {
@@ -129,16 +113,8 @@ export function hoveredKeyEqual(a: HoveredSystemTickKey | null, b: HoveredSystem
 
 export const useSelectionStore = create<SelectionState>()((set, get) => ({
   ...INITIAL,
-  // Setters are value-equal-aware: writing the current value is a silent no-op so subscribers
-  // (especially the URL-sync mirror) don't fire on idempotent writes from the bridges.
-  setTime: (range) => {
-    if (timeEqual(get().time, range)) return;
-    set({ time: range });
-  },
-  setFocusTick: (tick) => {
-    if (get().focusTick === tick) return;
-    set({ focusTick: tick });
-  },
+  // Setters are value-equal-aware: writing the current value is a silent no-op so the URL-sync
+  // subscriber doesn't fire on idempotent writes.
   setSystem: (name) => {
     if (get().system === name) return;
     set({ system: name });
@@ -146,6 +122,16 @@ export const useSelectionStore = create<SelectionState>()((set, get) => ({
   setComponent: (name) => {
     if (get().component === name) return;
     set({ component: name });
+    // Inlined cross-store mirror — bidirectional component slot (unified ↔ schema inspector).
+    // Guarded so the loop with `useSchemaInspectorStore.selectComponent` terminates: when schema
+    // → us writes through here, our slot now equals `name`, so calling schema back is skipped via
+    // its own value check. Symmetrically, when we → schema fires, schema's `selectComponent` calls
+    // `setComponent(sameName)` which hits the `get().component === name` early-return above. The
+    // ES module cycle (this file ↔ useSchemaInspectorStore) is safe — neither setter runs at
+    // module-load time.
+    if (useSchemaInspectorStore.getState().selectedComponentType !== name) {
+      useSchemaInspectorStore.getState().selectComponent(name);
+    }
   },
   setQueue: (name) => {
     if (get().queue === name) return;

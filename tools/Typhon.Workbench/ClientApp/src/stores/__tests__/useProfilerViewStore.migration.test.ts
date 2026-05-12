@@ -114,4 +114,24 @@ describe('useProfilerViewStore — v0 → v1 migration', () => {
     expect(state.gaugeCollapse).toEqual({});
     expect(state.gaugeRegionVisible).toBe(true);
   });
+
+  it('v3 → v4: drops orphan liveFollowWindowUs from persisted state (#345 Step 8)', async () => {
+    // Live-follow mode is gone — leftover `liveFollowWindowUs` from a v3 install must be removed
+    // so localStorage doesn't carry the orphan key indefinitely. The runtime state already lacks
+    // the field (spread initialiser ignores unknown keys), but the test asserts the migrate
+    // function explicitly deletes the field from the persisted blob.
+    localStorage.setItem('workbench-profiler-view', JSON.stringify({
+      state: { gaugeCollapse: { 'gauge-gc': 'double' }, liveFollowWindowUs: 2_000_000 },
+      version: 3,
+    }));
+    await useProfilerViewStore.persist.rehydrate();
+    // Read the persisted blob back — `liveFollowWindowUs` should be gone.
+    const raw = localStorage.getItem('workbench-profiler-view');
+    expect(raw).toBeTruthy();
+    const persisted = JSON.parse(raw!) as { state: Record<string, unknown>; version: number };
+    expect(persisted.version).toBe(4);
+    expect(persisted.state).not.toHaveProperty('liveFollowWindowUs');
+    // Other v3 fields survived the migration.
+    expect(persisted.state.gaugeCollapse).toEqual({ 'gauge-gc': 'double' });
+  });
 });

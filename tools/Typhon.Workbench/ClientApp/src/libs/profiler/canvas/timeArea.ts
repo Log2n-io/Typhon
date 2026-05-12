@@ -1,6 +1,7 @@
 import type { ChunkSpan, SpanData, TickData } from '@/libs/profiler/model/traceModel';
 import type { TimeRange, TrackLayout, Viewport } from '@/libs/profiler/model/uiTypes';
 import type { ProfilerSelection } from '@/stores/useProfilerSelectionStore';
+import type { TimeAreaHover } from './timeAreaHitTest';
 import { relativeLuminance } from '@/libs/colors';
 import {
   colorForChunk,
@@ -179,6 +180,13 @@ export interface TimeAreaInputs {
   gutterWidth: number;
   legendsVisible: boolean;
   selection: ProfilerSelection | null;
+  /**
+   * Current pointer hover (from `hitTestTimeArea`), or `null` when the cursor is outside the
+   * canvas / over a non-highlightable element. Drives the thin contour stroke that distinguishes
+   * adjacent same-coloured bars (spans, chunks, phases, mini-row ops). Selection's heavier stroke
+   * takes precedence — the two are visually distinct (1.5 px full-alpha vs 1 px at ~55% alpha).
+   */
+  hover: TimeAreaHover | null;
   dragSelection: { x1: number; x2: number } | null;
   crosshairX: number;     // -1 = cursor outside canvas
   /** Gauge bundle from the chunk cache. Required when gauge tracks are in the layout. */
@@ -212,7 +220,7 @@ export function drawTimeArea(
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
 
-  const { tracks, viewRange, vp, gutterWidth, legendsVisible, visibleTicks, ticks, selection, dragSelection, crosshairX, gaugeData, helpHover, pendingRangesUs, spanColorMode } = inputs;
+  const { tracks, viewRange, vp, gutterWidth, legendsVisible, visibleTicks, ticks, selection, hover, dragSelection, crosshairX, gaugeData, helpHover, pendingRangesUs, spanColorMode } = inputs;
   const contentWidth = width - gutterWidth;
   // Height of the pinned ruler band (ruler + gap below it). Everything above this line is always
   // visible regardless of vertical scroll; tracks below are clipped to this boundary.
@@ -384,7 +392,7 @@ export function drawTimeArea(
     // chunk row; chunks never span ticks so the visible-only subset is sufficient + faster).
     if (track.id.startsWith('slot-')) {
       const threadSlot = Number.parseInt(track.id.slice(5), 10);
-      drawSlotLane(ctx, track, threadSlot, ticks, visibleTicks, visStartUs, visEndUs, gutterWidth, width, pxOfUs, ty, selection, theme, spanColorMode);
+      drawSlotLane(ctx, track, threadSlot, ticks, visibleTicks, visStartUs, visEndUs, gutterWidth, width, pxOfUs, ty, selection, hover, theme, spanColorMode);
       continue;
     }
 
@@ -392,13 +400,13 @@ export function drawTimeArea(
     // the slot-lane chunk row.
     if (track.id.startsWith('system-')) {
       const systemIdx = Number.parseInt(track.id.slice(7), 10);
-      drawSystemLane(ctx, systemIdx, visibleTicks, gutterWidth, width, pxOfUs, ty, selection, theme, spanColorMode);
+      drawSystemLane(ctx, systemIdx, visibleTicks, gutterWidth, width, pxOfUs, ty, selection, hover, theme, spanColorMode);
       continue;
     }
 
     // Phases
     if (track.id === 'phases') {
-      drawPhases(ctx, visibleTicks, gutterWidth, width, pxOfUs, ty, theme);
+      drawPhases(ctx, visibleTicks, gutterWidth, width, pxOfUs, ty, hover, theme);
       continue;
     }
 
@@ -406,7 +414,7 @@ export function drawTimeArea(
     // that started in a tick now off-screen but extend INTO the viewport still render. The inner
     // loop cheaply skips ticks whose running-max endUs is before visStartUs.
     if (track.id === 'page-cache' || track.id === 'disk-io' || track.id === 'transactions' || track.id === 'wal' || track.id === 'checkpoint') {
-      drawMiniRowsTrack(ctx, track, ticks, visibleTicks, visStartUs, visEndUs, gutterWidth, width, pxOfUs, ty, theme);
+      drawMiniRowsTrack(ctx, track, ticks, visibleTicks, visStartUs, visEndUs, gutterWidth, width, pxOfUs, ty, hover, theme);
       continue;
     }
   }
@@ -608,6 +616,29 @@ function drawSlotSummary(
   ctx.restore();
 }
 
+/**
+ * Thin contour stroke for the bar the mouse is currently hovering. Visually distinct from the
+ * heavier 1.5 px selection stroke (clicks) only by line weight — both at full alpha for max
+ * legibility against busy bar fills. Caller already verified the hover identity match; this
+ * helper just paints the contour.
+ */
+function strokeHoverContour(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  theme: StudioTheme,
+): void {
+  ctx.strokeStyle = theme.selectedOutline;
+  ctx.lineWidth = 1.5;
+  const prevAlpha = ctx.globalAlpha;
+  ctx.globalAlpha = 0.8;
+  // +0.5 inset keeps the 1 px stroke crisp on the pixel grid (canvas strokes straddle the path).
+  ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+  ctx.globalAlpha = prevAlpha;
+}
+
 function drawSlotLane(
   ctx: CanvasRenderingContext2D,
   track: TrackLayout,
@@ -621,6 +652,7 @@ function drawSlotLane(
   pxOfUs: (us: number) => number,
   ty: number,
   selection: ProfilerSelection | null,
+  hover: TimeAreaHover | null,
   theme: StudioTheme,
   spanColorMode: SpanColorMode,
 ): void {
@@ -643,6 +675,8 @@ function drawSlotLane(
           ctx.strokeStyle = theme.selectedOutline;
           ctx.lineWidth = 1.5;
           ctx.strokeRect(x1 + 0.5, ty + SPAN_BAR_MARGIN + 0.5, w - 1, SPAN_BAR_HEIGHT - 1);
+        } else if (hover && hover.kind === 'chunk' && isSameChunk(hover.chunk, chunk)) {
+          strokeHoverContour(ctx, x1, ty + SPAN_BAR_MARGIN, w, SPAN_BAR_HEIGHT, theme);
         }
         if (x2 - x1 > 10) {
           ctx.save();
@@ -766,6 +800,8 @@ function drawSlotLane(
         ctx.strokeStyle = theme.selectedOutline;
         ctx.lineWidth = 1.5;
         ctx.strokeRect(x1 + 0.5, sy + SPAN_BAR_MARGIN + 0.5, w - 1, SPAN_BAR_HEIGHT - 1);
+      } else if (hover && hover.kind === 'span' && isSameSpan(hover.span, span)) {
+        strokeHoverContour(ctx, x1, sy + SPAN_BAR_MARGIN, w, SPAN_BAR_HEIGHT, theme);
       }
 
       if (actualWidth > 10) {
@@ -825,6 +861,7 @@ function drawSystemLane(
   pxOfUs: (us: number) => number,
   ty: number,
   selection: ProfilerSelection | null,
+  hover: TimeAreaHover | null,
   theme: StudioTheme,
   spanColorMode: SpanColorMode,
 ): void {
@@ -841,6 +878,8 @@ function drawSystemLane(
         ctx.strokeStyle = theme.selectedOutline;
         ctx.lineWidth = 1.5;
         ctx.strokeRect(x1 + 0.5, ty + SPAN_BAR_MARGIN + 0.5, w - 1, SPAN_BAR_HEIGHT - 1);
+      } else if (hover && hover.kind === 'chunk' && isSameChunk(hover.chunk, chunk)) {
+        strokeHoverContour(ctx, x1, ty + SPAN_BAR_MARGIN, w, SPAN_BAR_HEIGHT, theme);
       }
     }
   }
@@ -888,6 +927,7 @@ function drawPhases(
   width: number,
   pxOfUs: (us: number) => number,
   ty: number,
+  hover: TimeAreaHover | null,
   theme: StudioTheme,
 ): void {
   for (const tick of visibleTicks) {
@@ -898,6 +938,9 @@ function drawPhases(
       const w = Math.max(x2 - x1, MIN_RECT_WIDTH);
       ctx.fillStyle = theme.phaseColor;
       ctx.fillRect(x1, ty, w, PHASE_TRACK_HEIGHT);
+      if (hover && hover.kind === 'phase' && hover.tickNumber === tick.tickNumber && hover.phase.phase === phase.phase) {
+        strokeHoverContour(ctx, x1, ty, w, PHASE_TRACK_HEIGHT, theme);
+      }
       if (w > 50) {
         ctx.save();
         ctx.beginPath();
@@ -1034,6 +1077,7 @@ function drawMiniRowsTrack(
   width: number,
   pxOfUs: (us: number) => number,
   ty: number,
+  hover: TimeAreaHover | null,
   theme: StudioTheme,
 ): void {
   const rows = miniRowsForTrack(track.id, theme.timelineBands);
@@ -1049,7 +1093,7 @@ function drawMiniRowsTrack(
     const rowY = ty + r * MRH;
 
     // Draw bars FIRST (so labels overlay them)
-    drawMiniRowBars(ctx, row.getOps, row.getEndMax, rowY - 1, row.barColor, barH, ticks, visibleTicks, visStartUs, visEndUs, gutterWidth, pxOfUs);
+    drawMiniRowBars(ctx, row.getOps, row.getEndMax, rowY - 1, row.barColor, barH, track.id, ticks, visibleTicks, visStartUs, visEndUs, gutterWidth, pxOfUs, hover, theme);
 
     // Label pill
     const swatchSize = 7;
@@ -1078,12 +1122,15 @@ function drawMiniRowBars(
   rowY: number,
   barColor: string,
   barH: number,
+  trackId: string,
   ticks: readonly TickData[],
   visibleTicks: TickData[],
   visStartUs: number,
   visEndUs: number,
   gutterWidth: number,
   pxOfUs: (us: number) => number,
+  hover: TimeAreaHover | null,
+  theme: StudioTheme,
 ): void {
   // No coalescing on mini-row ops — overlapping semi-transparent bars naturally build up darker
   // tones where activity clusters, which is the intended read: "many events here" shows as
@@ -1121,6 +1168,12 @@ function drawMiniRowBars(
       const actualWidth = x2 - x1;
       const w = actualWidth < MIN_RECT_WIDTH ? MIN_RECT_WIDTH : actualWidth;
       ctx.fillRect(x1, rowY, w, barH);
+      if (hover && hover.kind === 'mini-row-op' && hover.trackId === trackId && isSameSpan(hover.op, op)) {
+        strokeHoverContour(ctx, x1, rowY, w, barH, theme);
+        // Hover stroke restored globalAlpha but may have changed fillStyle/strokeStyle; ensure
+        // subsequent ops in this row pick up the right fill again.
+        ctx.fillStyle = barColor;
+      }
     }
   };
 

@@ -99,6 +99,68 @@ class ScheduleValidationTests
     }
 
     [Test]
+    public void Build_ChunksPerWorker_Zero_Throws()
+    {
+        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
+        schedule.QuerySystem("Bad", _ => { }, input: () => null, parallel: true, chunksPerWorker: 0f);
+
+        var ex = Assert.Throws<InvalidOperationException>(() => schedule.Build(_registry.Runtime));
+        Assert.That(ex.Message, Does.Contain("ChunksPerWorker"));
+    }
+
+    [Test]
+    public void Build_ChunksPerWorker_Negative_Throws()
+    {
+        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
+        schedule.QuerySystem("Bad", _ => { }, input: () => null, parallel: true, chunksPerWorker: -1f);
+
+        var ex = Assert.Throws<InvalidOperationException>(() => schedule.Build(_registry.Runtime));
+        Assert.That(ex.Message, Does.Contain("ChunksPerWorker"));
+    }
+
+    [Test]
+    public void Build_ChunksPerWorker_NaN_Throws()
+    {
+        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
+        schedule.QuerySystem("Bad", _ => { }, input: () => null, parallel: true, chunksPerWorker: float.NaN);
+
+        var ex = Assert.Throws<InvalidOperationException>(() => schedule.Build(_registry.Runtime));
+        Assert.That(ex.Message, Does.Contain("ChunksPerWorker"));
+    }
+
+    [Test]
+    public void Build_ChunksPerWorker_NonDefaultWithoutParallel_Throws()
+    {
+        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
+        schedule.QuerySystem("Bad", _ => { }, chunksPerWorker: 2f);
+
+        var ex = Assert.Throws<InvalidOperationException>(() => schedule.Build(_registry.Runtime));
+        Assert.That(ex.Message, Does.Contain("ChunksPerWorker"));
+        Assert.That(ex.Message, Does.Contain("parallel"));
+    }
+
+    [Test]
+    public void Build_ChunksPerWorker_DefaultWithoutParallel_Succeeds()
+    {
+        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
+        schedule.QuerySystem("Good", _ => { }, chunksPerWorker: 1f);
+
+        using var scheduler = schedule.Build(_registry.Runtime);
+        Assert.That(scheduler.SystemCount, Is.EqualTo(1));
+    }
+
+    [Test]
+    public void Build_ChunksPerWorker_FractionalParallel_Succeeds()
+    {
+        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
+        schedule.QuerySystem("Good", _ => { }, input: () => null, parallel: true, chunksPerWorker: 1.5f);
+
+        using var scheduler = schedule.Build(_registry.Runtime);
+        Assert.That(scheduler.SystemCount, Is.EqualTo(1));
+        Assert.That(scheduler.Systems[0].ChunksPerWorker, Is.EqualTo(1.5f));
+    }
+
+    [Test]
     public void Build_UniqueNames_Succeeds()
     {
         var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });

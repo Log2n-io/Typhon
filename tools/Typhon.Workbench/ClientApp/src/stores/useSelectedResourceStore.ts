@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import type { ResourceNodeDto } from '@/api/generated/model/resourceNodeDto';
+import { useSelectionStore } from './useSelectionStore';
 
 export interface SelectedResource {
   resourceId: string;
@@ -18,9 +19,26 @@ interface SelectedResourceState {
   clear: () => void;
 }
 
+/**
+ * Inlined cross-store write: mirror the resource-id projection into `useSelectionStore.resource`.
+ * Pre-#345 this lived as a Zustand subscription in `selectionBridges.ts`; folding it into the
+ * setter is one-way (rich payload → id) and idempotent (the unified store's `setResource` is
+ * value-equal-aware so a no-op write doesn't trigger URL sync). One less subscription on the hot
+ * cross-store layer.
+ */
+function mirrorToUnifiedSelection(s: SelectedResource | null): void {
+  useSelectionStore.getState().setResource(s?.resourceId ?? null);
+}
+
 export const useSelectedResourceStore = create<SelectedResourceState>()((set) => ({
   selected: null,
   touchedAt: 0,
-  setSelected: (s) => set({ selected: s, touchedAt: Date.now() }),
-  clear: () => set({ selected: null, touchedAt: Date.now() }),
+  setSelected: (s) => {
+    set({ selected: s, touchedAt: Date.now() });
+    mirrorToUnifiedSelection(s);
+  },
+  clear: () => {
+    set({ selected: null, touchedAt: Date.now() });
+    mirrorToUnifiedSelection(null);
+  },
 }));

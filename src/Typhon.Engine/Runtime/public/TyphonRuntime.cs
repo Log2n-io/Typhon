@@ -1245,17 +1245,17 @@ public sealed partial class TyphonRuntime : IDisposable
                 var entityList = BuildTierScopedEntityList(cs, sys.TierFilter, view);
                 _parallelEntityLists[sysIdx] = entityList;
                 metrics.EntitiesProcessed = entityList.Count;
-                return entityList.Count == 0 ? 0 : ComputeChunkCount(entityList.Count);
+                return entityList.Count == 0 ? 0 : ComputeChunkCount(entityList.Count, sysIdx);
             }
 
             int clusterSize = cs.Layout.ClusterSize;
             int approxEntityCount = tierClusterCount * clusterSize;
             metrics.EntitiesProcessed = approxEntityCount;
-            return ComputeChunkCount(approxEntityCount);
+            return ComputeChunkCount(approxEntityCount, sysIdx);
         }
 
         metrics.EntitiesProcessed = view.Count;
-        return ComputeChunkCount(view.Count);
+        return ComputeChunkCount(view.Count, sysIdx);
     }
 
     /// <summary>Path 2: Change-filtered, Non-Versioned. O(dirty) prepare — materialize dirty list, use PTA for access.</summary>
@@ -1278,7 +1278,7 @@ public sealed partial class TyphonRuntime : IDisposable
             return 0;
         }
 
-        return ComputeChunkCount(entityList.Count);
+        return ComputeChunkCount(entityList.Count, sysIdx);
     }
 
     /// <summary>Paths 3 & 4: Versioned fallback — materialize entity list (same as original path).</summary>
@@ -1312,15 +1312,20 @@ public sealed partial class TyphonRuntime : IDisposable
             return 0;
         }
 
-        return ComputeChunkCount(entityList.Count);
+        return ComputeChunkCount(entityList.Count, sysIdx);
     }
 
-    private int ComputeChunkCount(int entityCount)
+    private int ComputeChunkCount(int entityCount, int sysIdx)
     {
         var workerCount = Scheduler.WorkerCount;
         var minChunkSize = _options.ParallelQueryMinChunkSize;
         var maxChunks = Math.Max(1, (entityCount + minChunkSize - 1) / minChunkSize);
-        return Math.Min(workerCount, maxChunks);
+
+        // Per-system oversubscription: lift the workerCount cap by ChunksPerWorker (default 1.0 = no change).
+        // Round-to-nearest so 1.5 × 16 = 24 exactly; small bumps like 1.1 × 16 = 17.6 → 18.
+        var chunksPerWorker = Scheduler.Systems[sysIdx].ChunksPerWorker;
+        var workerCap = Math.Max(1, (int)MathF.Round(workerCount * chunksPerWorker));
+        return Math.Min(workerCap, maxChunks);
     }
 
     /// <summary>
@@ -1407,7 +1412,9 @@ public sealed partial class TyphonRuntime : IDisposable
             if (cs.ClusterSegment != null)
             {
                 // PersistentStore path: ClusterRangeEntityView for sequential cluster-order iteration.
-                var rangeView = GetOrCreateTierRangeView(sysIdx, chunkIndex);
+                // Per-worker pool (sized to WorkerCount) — must index by workerId, not chunkIndex,
+                // since oversubscription (ChunksPerWorker > 1) allows chunkIndex >= workerCount.
+                var rangeView = GetOrCreateTierRangeView(sysIdx, workerId);
                 rangeView.Reset(cs, cs.ClusterSegment, tierIds, clusterStart, clusterEnd);
                 entities = rangeView;
             }
@@ -1426,8 +1433,10 @@ public sealed partial class TyphonRuntime : IDisposable
         }
         else
         {
-            // Path 1: Full — zero-copy partition view over HashMap buckets (per-system views, safe for concurrent systems)
-            var partView = _partitionViews[sysIdx][chunkIndex];
+            // Path 1: Full — zero-copy partition view over HashMap buckets (per-system views, safe for concurrent systems).
+            // Per-worker pool (sized to WorkerCount) — must index by workerId, not chunkIndex, since oversubscription
+            // (ChunksPerWorker > 1) allows chunkIndex >= workerCount. Reset() reconfigures the view for this chunk's slice.
+            var partView = _partitionViews[sysIdx][workerId];
             partView.Reset(_systemViews[sysIdx].EntityIdsInternal, chunkIndex, totalChunks);
             entities = partView;
 
@@ -1474,9 +1483,10 @@ public sealed partial class TyphonRuntime : IDisposable
     /// <summary>
     /// Lazy-init helper for the per-system, per-worker <see cref="ClusterRangeEntityView"/> pool used by tier-filtered Path 1 dispatch (issue #231).
     /// Returns a view that is reconfigured each chunk via <see cref="ClusterRangeEntityView.Reset"/> — the allocation only happens the first time a given
-    /// system runs under tier-filtered dispatch.
+    /// system runs under tier-filtered dispatch. Indexed by <paramref name="workerId"/> (not chunkIndex) so oversubscription
+    /// (<see cref="SystemDefinition.ChunksPerWorker"/> &gt; 1) stays within the WorkerCount-sized pool.
     /// </summary>
-    private ClusterRangeEntityView GetOrCreateTierRangeView(int sysIdx, int chunkIndex)
+    private ClusterRangeEntityView GetOrCreateTierRangeView(int sysIdx, int workerId)
     {
         var perWorker = _tierRangeViews[sysIdx];
         if (perWorker == null)
@@ -1484,11 +1494,11 @@ public sealed partial class TyphonRuntime : IDisposable
             perWorker = new ClusterRangeEntityView[Scheduler.WorkerCount];
             _tierRangeViews[sysIdx] = perWorker;
         }
-        var view = perWorker[chunkIndex];
+        var view = perWorker[workerId];
         if (view == null)
         {
             view = new ClusterRangeEntityView();
-            perWorker[chunkIndex] = view;
+            perWorker[workerId] = view;
         }
         return view;
     }

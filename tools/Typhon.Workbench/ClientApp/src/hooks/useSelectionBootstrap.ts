@@ -1,5 +1,4 @@
 import { useEffect } from 'react';
-import { installSelectionBridges } from '@/stores/selectionBridges';
 import {
   applySelectionToStore,
   installSelectionUrlSync,
@@ -7,27 +6,28 @@ import {
 } from '@/stores/selectionUrlSync';
 
 /**
- * One-shot bootstrap for the cross-panel selection store. Runs at app mount in three steps:
+ * One-shot bootstrap for the cross-panel selection state. Runs at app mount in two steps:
  *
- *   1. Install per-panel ↔ unified-store bridges. They snapshot the current state, then forward
- *      future changes both ways.
- *   2. Apply URL → unified store. The bridges installed in (1) propagate URL-loaded values out to
- *      the legacy per-panel stores so cold-load deep-linking reaches every consumer that still
- *      reads from the legacy stores.
- *   3. Install the unified-store → URL mirror. From here on, any stable-slot change writes back
- *      to `window.location.search` via `history.replaceState`.
+ *   1. Apply URL → canonical stores (`useSelectionStore` + `useProfilerViewStore`).
+ *      The per-store setters now inline the cross-store mirrors (selected resource → resource id,
+ *      schema inspector ↔ component), so URL deep-links reach every legacy consumer through the
+ *      inlined writes rather than a separate bridge layer.
+ *   2. Install the canonical-stores → URL mirror. From here on, any stable-slot change writes
+ *      back to `window.location.search` via `history.replaceState`.
+ *
+ * Pre-#345 had a step 0 that installed `selectionBridges` — Zustand subscriptions mirroring
+ * legacy per-panel stores into the unified store. Those bridges are gone (see #345 Step 7); the
+ * mirrors are inlined into the legacy stores' setters now.
  *
  * Call this from a single top-level component (Shell). Calling it elsewhere doubles the
  * subscriptions and produces redundant URL writes.
  */
 export function useSelectionBootstrap(): void {
   useEffect(() => {
-    const stopBridges = installSelectionBridges();
     applySelectionToStore(parseSelectionFromSearch(window.location.search));
     const stopUrlSync = installSelectionUrlSync();
     return () => {
       stopUrlSync();
-      stopBridges();
     };
   }, []);
 }

@@ -2,11 +2,12 @@ import { useEffect, useMemo, useState } from 'react';
 import type { IDockviewPanelProps } from 'dockview-react';
 import { useTopology } from '@/hooks/data/useTopology';
 import { useProfilerMetadata } from '@/hooks/profiler/useProfilerMetadata';
+import { useProfilerViewStore } from '@/stores/useProfilerViewStore';
 import { useSelectionStore } from '@/stores/useSelectionStore';
 import { useSessionStore } from '@/stores/useSessionStore';
 import { deriveEdges } from '@/lib/dag/edgeDerivation';
 import { timeToTickRange } from '../SystemDag/tickRangeMapping';
-import { computeAggregateCriticalPath, computeCriticalPathForTick, focusTickForWindow } from './criticalPath';
+import { computeAggregateCriticalPath, computeCriticalPathForTick, dominantTickInRange } from './criticalPath';
 import CriticalPathToolbar from './CriticalPathToolbar';
 import CriticalPathView from './CriticalPathView';
 import { useCriticalPathViewStore } from './useCriticalPathViewStore';
@@ -14,11 +15,15 @@ import { useCriticalPathViewStore } from './useCriticalPathViewStore';
 /**
  * Dedicated Critical-Path panel — top-level dockable view, replaces the old in-DAG tape.
  *
- * **Tick source.** Same model as the System DAG aggregation range: read `useSelectionStore.time`
- * (cross-panel-bound to the profiler's TimeArea), convert to ticks, then either honour the
- * user-pinned `focusTick` or default to the dominant tick in the range. This keeps the four
- * visible panels — profiler / DAG / critical-path / detail — consistent on what "the current
- * window" means.
+ * **Tick source.** Same model as the System DAG aggregation range: read
+ * `useProfilerViewStore.viewRange` (committed slot — debounced upstream so we don't recompute on
+ * every gesture frame), convert to ticks, then ask {@link dominantTickInRange} for the longest
+ * tick in window, with midpoint-fallback for sub-tick zoom. This keeps the four visible panels —
+ * profiler / DAG / critical-path / detail — consistent on what "the current window" means.
+ *
+ * Pre-#345 had a separate `focusTick` cross-panel slot that overrode the dominant-tick
+ * computation. That's gone: pinning a specific tick now means snapping the viewport to that
+ * tick's bounds (click in TickOverview or on a CP bar) — same outcome, one less concept.
  *
  * **Composition.** Toolbar + zoomable view. The view owns its scroll viewport and SVG canvas; the
  * panel only feeds it data and forwards the click selection. `fitSignal` is an increment counter
@@ -29,25 +34,26 @@ export default function CriticalPathPanel(_props: IDockviewPanelProps) {
   const { data: topology, isLoading: topoLoading, isError: topoError } = useTopology(sessionId);
   const { data: metadata, isLoading: metaLoading } = useProfilerMetadata(sessionId);
 
-  const time = useSelectionStore((s) => s.time);
-  const range = useMemo(() => timeToTickRange(time, metadata?.tickSummaries), [time, metadata]);
+  // Post-#345: time-window canonical source is the profiler view store. Reading the *committed*
+  // slot so CP only re-computes after the user stops scrubbing.
+  const viewRange = useProfilerViewStore((s) => s.viewRange);
+  const commitViewRange = useProfilerViewStore((s) => s.commitViewRange);
+  const range = useMemo(() => timeToTickRange(viewRange, metadata?.tickSummaries), [viewRange, metadata]);
 
-  const focusTick = useSelectionStore((s) => s.focusTick);
-  const setFocusTick = useSelectionStore((s) => s.setFocusTick);
   const selectedSystemName = useSelectionStore((s) => s.system);
   const setSystem = useSelectionStore((s) => s.setSystem);
 
   const tickSummaries = metadata?.tickSummaries ?? null;
-  // Fall back to `focusTickForWindow` (not `dominantTickInRange`) so that zooming the TimeArea
-  // inside a single tick still lands on that tick — `timeToTickRange` correctly returns null for
-  // sub-tick windows ("tick startUs in window" is the right semantic for SystemDag aggregations),
-  // and the helper carries a midpoint fallback for the focus-tick case. Keeps the user's "I'm
-  // looking at tick X" mental model intact across zoom gestures even when they didn't explicitly
-  // pin focusTick.
-  const tapeTick = useMemo(() => {
-    if (focusTick != null) return focusTick;
-    return focusTickForWindow(tickSummaries, range, time);
-  }, [focusTick, tickSummaries, range, time]);
+  // Display tick = dominant tick in the visible range, with midpoint-fallback for sub-tick zoom.
+  // `dominantTickInRange` (extended in #345 with the optional third `time` arg) absorbs the
+  // previous `focusTickForWindow` semantics, so the CP tape keeps tracking whatever tick the user
+  // is zoomed into even when the viewport is narrower than a tick. With `focusTick` deleted, the
+  // user pins a tick by clicking it in TickOverview — which now snaps viewRange to that tick's
+  // bounds, making it the unique tick in range and thus the dominant one trivially.
+  const tapeTick = useMemo(
+    () => dominantTickInRange(tickSummaries, range, viewRange),
+    [tickSummaries, range, viewRange],
+  );
 
   // Worker count drives the per-phase parallelism band (A2). Coerced once at the boundary so
   // the view can render the band unconditionally and bail on null inside.
@@ -165,7 +171,17 @@ export default function CriticalPathPanel(_props: IDockviewPanelProps) {
           workerCount={workerCount}
           onSelectBar={(name, tickNumber) => {
             setSystem(name);
-            setFocusTick(tickNumber);
+            // Pin the clicked tick by snapping viewRange to its bounds — replaces the pre-#345
+            // `setFocusTick(tickNumber)`. CP's `dominantTickInRange(viewRange)` then lands on
+            // this tick because it's the only one in range. Looking up the tick row is cheap
+            // (linear scan, N ≤ a few thousand; the strict-path of dominantTickInRange does the
+            // same shape of scan).
+            const row = (tickSummaries ?? []).find((t) => Number(t.tickNumber) === tickNumber);
+            if (row) {
+              const startUs = Number(row.startUs);
+              const dur = Number(row.durationUs) || 0;
+              commitViewRange({ startUs, endUs: startUs + Math.max(dur, 1) });
+            }
           }}
         />
       </div>

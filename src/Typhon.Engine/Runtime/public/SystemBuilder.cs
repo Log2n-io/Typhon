@@ -26,6 +26,7 @@ public sealed class SystemBuilder
     internal bool _canShed;
     internal bool _parallel;
     internal bool _writesVersioned;
+    internal float _chunksPerWorker = 1f;
     internal SimTier _tierFilter = SimTier.All;
     internal int _cellAmortize;
     internal bool _checkerboard;
@@ -125,6 +126,22 @@ public sealed class SystemBuilder
     public SystemBuilder WritesVersioned()
     {
         _writesVersioned = true;
+        return this;
+    }
+
+    /// <summary>
+    /// Oversubscription factor for parallel chunk dispatch. The effective worker-cap on chunk count becomes
+    /// <c>round(WorkerCount × factor)</c> instead of <c>WorkerCount</c>. Default <c>1.0f</c>.
+    /// <para>
+    /// Use values above 1.0 (e.g. 1.5, 2.0) when a parallel system shows poor worker efficiency because one slow chunk holds
+    /// back the critical path — extra chunks let fast workers steal more work via the dynamic dispatch loop. Final chunk count
+    /// is still capped by <c>ceil(entityCount / ParallelQueryMinChunkSize)</c>, so small populations don't proliferate chunks.
+    /// </para>
+    /// Validated at <see cref="RuntimeSchedule.Build"/>: rejected if &lt;= 0, and rejected on non-parallel systems where it has no effect.
+    /// </summary>
+    public SystemBuilder ChunksPerWorker(float factor)
+    {
+        _chunksPerWorker = factor;
         return this;
     }
 

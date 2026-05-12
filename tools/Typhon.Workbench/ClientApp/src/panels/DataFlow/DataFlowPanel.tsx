@@ -5,6 +5,7 @@ import { useTopology } from '@/hooks/data/useTopology';
 import { useProfilerMetadata } from '@/hooks/profiler/useProfilerMetadata';
 import { REFRESH_DEBOUNCE_MS, useDebouncedValue, useTickGatedSnapshot } from '@/hooks/useTickGatedSnapshot';
 import { useProfilerSessionStore } from '@/stores/useProfilerSessionStore';
+import { useProfilerViewStore } from '@/stores/useProfilerViewStore';
 import { useSelectionStore } from '@/stores/useSelectionStore';
 import { useSessionStore } from '@/stores/useSessionStore';
 import { timeToTickRange } from '@/panels/SystemDag/tickRangeMapping';
@@ -48,16 +49,16 @@ export default function DataFlowPanel(_props: IDockviewPanelProps) {
   const sessionId = useSessionStore((s) => s.sessionId);
   const { data: topology } = useTopology(sessionId);
   const { data: liveMetadata } = useProfilerMetadata(sessionId);
-  // Tick-gated debounced snapshot — recompute the heavy memos below only when the latest tick advances
-  // OR the user changes the visible time selection, debounced (see REFRESH_DEBOUNCE_MS) to coalesce
-  // live-stream bursts. Other metadata mutations (thread info, chunk manifest, global metrics) are
-  // intentionally ignored.
+  // Tick-gated debounced snapshot — recompute the heavy memos below only when the latest tick
+  // advances on the live stream. Other metadata mutations (thread info, chunk manifest, global
+  // metrics) are intentionally ignored. Post-#345: the user-pan/zoom portion is gone — viewRange
+  // is already debounced upstream, so we read it directly here.
   const latestTickNumber = useProfilerSessionStore((s) => s.latestTickNumber);
-  const liveTime = useSelectionStore((s) => s.time);
-  const refreshKey = `${latestTickNumber}|${liveTime?.start ?? '-'}|${liveTime?.end ?? '-'}`;
+  const refreshKey = `${latestTickNumber}`;
   const debouncedRefreshKey = useDebouncedValue(refreshKey, REFRESH_DEBOUNCE_MS);
   const metadata = useTickGatedSnapshot(liveMetadata, debouncedRefreshKey);
-  const time = useTickGatedSnapshot(liveTime, debouncedRefreshKey);
+  // Committed slot — upstream debounce already coalesces pan/zoom bursts.
+  const time = useProfilerViewStore((s) => s.viewRange);
   const granularityLevel = useDataFlowViewStore((s) => s.granularityLevel);
   const xMode = useDataFlowViewStore((s) => s.xMode);
   const aggMode = useDataFlowViewStore((s) => s.aggMode);

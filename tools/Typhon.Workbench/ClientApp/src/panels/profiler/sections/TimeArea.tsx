@@ -62,24 +62,34 @@ const DRAG_THRESHOLD_PX = 3;
 const ZOOM_ANIMATION_MS = 800;
 const LERP_FACTOR = 0.15;   // fraction of remaining distance to close per rAF frame (~60 fps)
 
-export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap, threadInfos, pendingRangesUs, isLive = false, onGutterWidthChange }: Props): React.JSX.Element {
+export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap, threadInfos, pendingRangesUs, isLive: _isLive = false, onGutterWidthChange }: Props): React.JSX.Element {
 
   // `metadata` is read for `threadNames` (slot-label lookup) + gating the wheel handler before the
-  // session has any data. Not used to derive viewRange — that comes from the selection store.
+  // session has any data. Not used to derive viewRange — that comes from the profiler view store.
   const metadata = useProfilerSessionStore((s) => s.metadata);
-  const setLiveFollowActive = useProfilerSessionStore((s) => s.setLiveFollowActive);
-  const viewRange = useProfilerViewStore((s) => s.viewRange);
-  const setViewRange = useProfilerViewStore((s) => s.setViewRange);
+  // TimeArea is the gesture-rate consumer: canvas paint + visible-depth memos + vpRef sync all read
+  // the in-flight transient slot so the rendering stays at 60 Hz during pan/zoom. The committed
+  // `viewRange` (read separately below) is reserved for effects that should fire once per settle
+  // rather than once per gesture frame (history push, viewport sync from external writes).
+  const viewRange = useProfilerViewStore((s) => s.transientViewRange);
+  // Committed slot — only the two settle-driven effects depend on this. Effect bodies use this
+  // name explicitly to make the intent obvious at the call site.
+  const committedViewRange = useProfilerViewStore((s) => s.viewRange);
+  const setTransientViewRange = useProfilerViewStore((s) => s.setTransientViewRange);
+  const commitViewRange = useProfilerViewStore((s) => s.commitViewRange);
   const legendsVisible = useUiPrefsStore((s) => s.legendsVisible);
 
-  // Centralised viewRange mutation. In live mode, any explicit user pan/zoom must pause auto-follow
-  // so the next tick batch (≤100 ms) doesn't snap viewRange back to the live tail. Funnel every
-  // wheel-zoom / drag-pan / mid-button-pan / tween site through this helper to keep that contract
-  // in one place. Mirrors the same pattern in `TickOverview.applyViewRange`.
+  // Centralised viewRange mutation. Writes the **transient** slot. The store debounces and copies
+  // it to the committed slot after the user stops gesturing — so heavy cross-panel consumers
+  // (SystemDag, CriticalPath) don't get re-triggered on every wheel notch. For animation-end /
+  // programmatic atomicity, use `commitViewRange` directly (see the zoom-animation tween below).
+  //
+  // Post-#345: live-follow mode is gone — there's no auto-scroll to "pause" on user gesture.
+  // First-tick init in `ProfilerPanel` pins the viewport once on attach; from there the user has
+  // full control.
   const applyViewRange = useCallback((r: TimeRange) => {
-    if (isLive) setLiveFollowActive(false);
-    setViewRange(r);
-  }, [isLive, setLiveFollowActive, setViewRange]);
+    setTransientViewRange(r);
+  }, [setTransientViewRange]);
   const gaugeRegionVisible = useProfilerViewStore((s) => s.gaugeRegionVisible);
   const gaugeCollapse = useProfilerViewStore((s) => s.gaugeCollapse);
   const setGaugeCollapse = useProfilerViewStore((s) => s.setGaugeCollapse);
@@ -387,8 +397,10 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
       });
     }
 
-    // Advance zoom animation if one's in flight. Each frame interpolates vp toward the target and
-    // writes the intermediate range back into the store so sibling sections (TickOverview) follow.
+    // Advance zoom animation if one's in flight. Intermediate frames write the transient slot so
+    // TickOverview's mirror animates smoothly. The FINAL frame commits atomically via
+    // `commitViewRange` so cross-panel consumers (SystemDag, CriticalPath, …) see the settled
+    // position immediately rather than after the post-animation debounce window.
     const anim = zoomAnimRef.current;
     if (anim) {
       const elapsed = performance.now() - anim.startTime;
@@ -396,10 +408,12 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
       const t = 1 - (1 - rawT) * (1 - rawT) * (1 - rawT); // ease-out cubic
       const curStart = anim.from.startUs + (anim.to.startUs - anim.from.startUs) * t;
       const curEnd = anim.from.endUs + (anim.to.endUs - anim.from.endUs) * t;
-      applyViewRange({ startUs: curStart, endUs: curEnd });
       if (rawT >= 1) {
+        // Animation end — commit atomically, bypass debounce.
+        commitViewRange({ startUs: anim.to.startUs, endUs: anim.to.endUs });
         zoomAnimRef.current = null;
       } else {
+        applyViewRange({ startUs: curStart, endUs: curEnd });
         cancelAnimationFrame(rafRef.current);
         rafRef.current = requestAnimationFrame(() => render());
       }
@@ -466,6 +480,7 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
       gutterWidth: gutter,
       legendsVisible,
       selection,
+      hover: hoverRef.current,
       dragSelection: dragSelection && dragSelection.x2 - dragSelection.x1 > DRAG_THRESHOLD_PX ? dragSelection : null,
       crosshairX: crosshairXRef.current,
       gaugeData,
@@ -473,7 +488,7 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
       pendingRangesUs,
       spanColorMode,
     }, getStudioThemeTokens());
-  }, [layout, ticks, viewRange, legendsVisible, selection, applyViewRange, onGutterWidthChange, gaugeData, pendingRangesUs, spanColorMode]);
+  }, [layout, ticks, viewRange, legendsVisible, selection, applyViewRange, commitViewRange, onGutterWidthChange, gaugeData, pendingRangesUs, spanColorMode]);
 
   const scheduleRender = useCallback((): void => {
     cancelAnimationFrame(rafRef.current);
@@ -510,44 +525,49 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
   useEffect(() => { selectionRef.current = selection; }, [selection]);
 
   useEffect(() => {
-    if (viewRange.endUs <= viewRange.startUs) return;
+    // Driven by the committed slot — fires once per settled change rather than once per gesture
+    // frame. The 250 ms internal debounce remains as a second-line coalescer in case the user
+    // chains rapid commits (e.g., history back/forward).
+    if (committedViewRange.endUs <= committedViewRange.startUs) return;
     const timer = setTimeout(() => {
       const nav = useNavHistoryStore.getState();
       const top = nav.pointer >= 0 ? nav.entries[nav.pointer] : null;
       if (top?.kind === 'profiler-selected'
-        && top.viewRange.startUs === viewRange.startUs
-        && top.viewRange.endUs === viewRange.endUs) {
+        && top.viewRange.startUs === committedViewRange.startUs
+        && top.viewRange.endUs === committedViewRange.endUs) {
         return;
       }
       nav.push({
         kind: 'profiler-selected',
         selection: selectionRef.current,
-        viewRange,
+        viewRange: committedViewRange,
         timestamp: Date.now(),
       });
     }, 250);
     return () => clearTimeout(timer);
-  }, [viewRange]);
+  }, [committedViewRange]);
 
   // Selection change → patch the top entry so back/forward remembers what was highlighted here.
   useEffect(() => {
     useNavHistoryStore.getState().updateTopSelection(selection);
   }, [selection]);
 
-  // Viewport sync — when viewRange changes externally (TickOverview selection, external nav),
-  // rewrite vp immediately so the next hit-test matches the drawn state.
+  // Viewport sync — fires when the *committed* slot changes (external writes: TickOverview
+  // commit, history back/forward, URL deep-link, programmatic animation end). TimeArea's own
+  // transient writes do NOT flow through here because the pointer handlers already mutate vpRef
+  // directly. Driven by `committedViewRange` to avoid re-firing on every gesture frame.
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
     const contentWidth = rect.width - gutterWidthRef.current;
-    const rangeUs = viewRange.endUs - viewRange.startUs;
+    const rangeUs = committedViewRange.endUs - committedViewRange.startUs;
     if (rangeUs > 0 && contentWidth > 0) {
-      vpRef.current.offsetX = viewRange.startUs;
+      vpRef.current.offsetX = committedViewRange.startUs;
       vpRef.current.scaleX = contentWidth / rangeUs;
     }
     scheduleRender();
-  }, [viewRange, scheduleRender]);
+  }, [committedViewRange, scheduleRender]);
 
   // ─── Animation helper ────────────────────────────────────────────────────────────────────────
   const animateToRange = useCallback((target: TimeRange): void => {

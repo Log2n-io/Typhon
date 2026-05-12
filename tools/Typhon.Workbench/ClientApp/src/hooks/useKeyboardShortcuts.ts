@@ -80,7 +80,7 @@ export function useKeyboardShortcuts(): void {
         const endUs = Number(gm.globalEndUs ?? 0);
         if (endUs > startUs) {
           e.preventDefault();
-          useProfilerViewStore.getState().setViewRange({ startUs, endUs });
+          useProfilerViewStore.getState().commitViewRange({ startUs, endUs });
         }
         return;
       }

@@ -36,8 +36,6 @@ export default function ProfilerPanel() {
   const buildError = useProfilerSessionStore((s) => s.buildError);
   const connectionStatus = useProfilerSessionStore((s) => s.connectionStatus);
   const latestTickNumber = useProfilerSessionStore((s) => s.latestTickNumber);
-  const liveFollowActive = useProfilerSessionStore((s) => s.liveFollowActive);
-  const setLiveFollowActive = useProfilerSessionStore((s) => s.setLiveFollowActive);
   const setIsLive = useProfilerSessionStore((s) => s.setIsLive);
 
   // Disconnect drops the engine TCP link but keeps the session+buffer alive for inspection. The button is
@@ -61,26 +59,16 @@ export default function ProfilerPanel() {
   const isAttach = kind === 'attach';
   const isTrace = kind === 'trace';
 
-  const setViewRange = useProfilerViewStore((s) => s.setViewRange);
-
-  // Reset viewRange to the `{0, 0}` "no-selection" sentinel on every metadata arrival. This keeps
-  // TickOverview's orange overlay off by default (its `computeSelectionIdxRange` returns {-1,-1}
-  // on a degenerate range). TimeArea internally treats `{0, 0}` as "show the full trace" — it
-  // falls back to `metadata.globalMetrics` for its initial viewport so the user still sees
-  // everything, but the store stays at the sentinel until a real pan/zoom/drag-zoom interaction.
-  //
-  // Live (Attach) mode skips this reset: the auto-follow effect below sets viewRange continuously
-  // from the latest tick's end-µs, so leaving the sentinel here would briefly blank the timeline
-  // every time metadata arrives (e.g. on Init reconnect).
-  useEffect(() => {
-    if (isAttach) return;
-    if (!metadata?.globalMetrics) return;
-    setViewRange({ startUs: 0, endUs: 0 });
-  }, [metadata, setViewRange, isAttach]);
+  const commitViewRange = useProfilerViewStore((s) => s.commitViewRange);
 
   // #289 — unified chunk cache for both modes. The replay path builds the cache once on session open;
   // the live path's IncrementalCacheBuilder grows the manifest server-side and ships growth deltas, so
   // useProfilerCache observes the same expanding manifest in either mode.
+  //
+  // ⚠️ Important: `useProfilerCache.loadRange` gates on `viewRange.endUs > viewRange.startUs` —
+  // any `{0, 0}` sentinel write here would suppress all tick loading. The first-tick init below
+  // therefore drives off `metadata.tickSummaries` (available in one shot from the API response)
+  // rather than `timeAreaTicks` (which only populates after viewRange is non-degenerate).
   const { ticks: timeAreaTicks, gaugeData, threadInfos, pendingRangesUs } = useProfilerCache(sessionId, isAttach);
 
   // Single producer for the viewport range-stats. RangeStatsDetail and TopSpansPanel both read the
@@ -93,21 +81,21 @@ export default function ProfilerPanel() {
   );
   useProfilerStatsWriter(timeAreaTicks, tickSummariesForStats, viewRangeForStats);
 
-  // Auto-follow viewport: in live mode with Following enabled, keep the viewRange anchored to the
-  // last `liveFollowWindowUs` µs of the newest tick. Pausing Follow freezes the viewport at
-  // wherever it is, so the user can inspect older ticks without the viewport snapping forward.
-  // The pan/zoom interactions in TimeArea remain free in either state — Follow only re-asserts
-  // the auto-window on each new tick, not on every render. The window width is a persisted UX
-  // preference on `useProfilerViewStore`.
-  const liveFollowWindowUs = useProfilerViewStore((s) => s.liveFollowWindowUs);
+  // If there's no time selection (viewRange = the `{0, 0}` sentinel) and the trace has summaries,
+  // default to the first tick. Fires once per session — once viewRange is set to a real range
+  // (user pan, URL deep-link via useSelectionBootstrap, or this effect itself), the early-return
+  // below keeps it from re-firing.
   useEffect(() => {
-    if (!isAttach || !liveFollowActive) return;
-    if (timeAreaTicks.length === 0) return;
-    const latest = timeAreaTicks[timeAreaTicks.length - 1];
-    const endUs = latest.endUs;
-    const startUs = Math.max(0, endUs - liveFollowWindowUs);
-    setViewRange({ startUs, endUs });
-  }, [isAttach, liveFollowActive, timeAreaTicks, setViewRange, liveFollowWindowUs]);
+    const vr = useProfilerViewStore.getState().viewRange;
+    if (vr.endUs > vr.startUs) return;
+    const summaries = metadata?.tickSummaries;
+    if (!summaries || summaries.length === 0) return;
+    const first = summaries[0];
+    const startUs = Number(first.startUs);
+    const durationUs = Number(first.durationUs) || 1;
+    if (!Number.isFinite(startUs)) return;
+    commitViewRange({ startUs, endUs: startUs + durationUs });
+  }, [metadata, commitViewRange]);
 
   // Metadata polling runs in both Trace and Attach modes — server branches on session kind.
   // Gate on kind so the query doesn't fire for Open (DB) sessions, which would 409.
@@ -187,24 +175,9 @@ export default function ProfilerPanel() {
             <span className="font-mono tabular-nums text-foreground">
               Tick {latestTickNumber.toLocaleString()}
             </span>
-            <div className="ml-auto">
-              <Button
-                variant={liveFollowActive ? 'default' : 'outline'}
-                size="sm"
-                onClick={() => setLiveFollowActive(!liveFollowActive)}
-                disabled={connectionStatus === 'disconnected'}
-                className="h-6 text-[11px]"
-                aria-label={liveFollowActive ? 'Disable auto-scroll' : 'Enable auto-scroll'}
-                aria-pressed={liveFollowActive}
-                title={
-                  connectionStatus === 'disconnected'
-                    ? 'Engine has shut down — no further ticks will arrive.'
-                    : 'When on, the time-area viewport tracks the latest tick. Any pan/zoom interaction turns it off.'
-                }
-              >
-                auto-scroll
-              </Button>
-            </div>
+            {/* Auto-scroll toggle removed in #345 — live mode pins viewRange to the first tick on
+               arrival and never moves it automatically thereafter. Pan/zoom interactions are
+               always available; the user navigates to new ticks via TickOverview / drag-select. */}
           </>
         )}
 

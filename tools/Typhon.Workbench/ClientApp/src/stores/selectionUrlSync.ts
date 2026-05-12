@@ -1,12 +1,17 @@
-import { timeEqual, useSelectionStore, type SelectionState, type TimeSelection } from './useSelectionStore';
+import { useProfilerViewStore } from './useProfilerViewStore';
+import { useSelectionStore } from './useSelectionStore';
+import type { TimeRange } from '@/libs/profiler/model/uiTypes';
 
 /**
- * URL ↔ selection-store sync for stable dimensions.
+ * URL ↔ selection sync for stable dimensions.
  *
- * Stable (URL-synced): `time`, `system`, `component`, `queue`, `resource`, `entity`.
- * Volatile (in-memory only): `focusTick`, `worker`, panel-internal sub-selections.
+ * Stable (URL-synced):
+ *   - `time` (the µs viewport) — canonical home is `useProfilerViewStore.viewRange` since #345.
+ *   - `system`, `component`, `queue`, `resource`, `entity` — `useSelectionStore`.
  *
- * See `claude/design/workbench/10-internal-data-api.md §9.3`.
+ * Volatile (in-memory only): `worker`, panel-internal sub-selections, hover state.
+ *
+ * See `claude/design/Apps/Workbench/10-internal-data-api.md §9.3`.
  *
  * Wire format example: `?session=...&time=120000-134000&system=AI&queue=Damage`.
  */
@@ -28,7 +33,12 @@ const STABLE_PARAMS = [
 ] as const;
 
 export interface ParsedSelection {
-  time: TimeSelection | null;
+  /**
+   * Parsed `?time=startUs-endUs`. The cold-load applier calls
+   * {@link useProfilerViewStore.commitViewRange} with this — the profiler view store is the
+   * canonical home of the viewport (no more `useSelectionStore.time` slot since #345).
+   */
+  viewRange: TimeRange | null;
   system: string | null;
   component: string | null;
   queue: string | null;
@@ -36,29 +46,29 @@ export interface ParsedSelection {
   entity: string | null;
 }
 
-function parseTimeRange(raw: string | null): TimeSelection | null {
+function parseViewRange(raw: string | null): TimeRange | null {
   if (!raw) return null;
   const dash = raw.indexOf('-');
   if (dash <= 0) return null;
-  const start = Number(raw.slice(0, dash));
-  const end = Number(raw.slice(dash + 1));
-  if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
-  if (end <= start) return null;
-  return { start, end };
+  const startUs = Number(raw.slice(0, dash));
+  const endUs = Number(raw.slice(dash + 1));
+  if (!Number.isFinite(startUs) || !Number.isFinite(endUs)) return null;
+  if (endUs <= startUs) return null;
+  return { startUs, endUs };
 }
 
-function formatTimeRange(t: TimeSelection): string {
-  return `${t.start}-${t.end}`;
+function formatViewRange(r: TimeRange): string {
+  return `${r.startUs}-${r.endUs}`;
 }
 
 /**
  * Parses the stable selection slots from a URL query string. Returns null for missing or
- * malformed entries — never throws. Volatile slots (`focusTick`, `worker`) are not parsed.
+ * malformed entries — never throws. Volatile slots (`worker`) are not parsed.
  */
 export function parseSelectionFromSearch(search: string): ParsedSelection {
   const params = new URLSearchParams(search);
   return {
-    time: parseTimeRange(params.get(PARAM_TIME)),
+    viewRange: parseViewRange(params.get(PARAM_TIME)),
     system: params.get(PARAM_SYSTEM),
     component: params.get(PARAM_COMPONENT),
     queue: params.get(PARAM_QUEUE),
@@ -67,18 +77,27 @@ export function parseSelectionFromSearch(search: string): ParsedSelection {
   };
 }
 
+interface UrlOutputState {
+  viewRange: TimeRange | null;
+  system: string | null;
+  component: string | null;
+  queue: string | null;
+  resource: string | null;
+  entity: string | null;
+}
+
 /**
  * Builds an updated `URLSearchParams` from `current` by writing the stable slots of `state`.
  * Non-selection params (e.g. `?session=...`) are preserved. Null slots are removed.
  */
 export function buildSelectionSearch(
   current: URLSearchParams,
-  state: Pick<SelectionState, 'time' | 'system' | 'component' | 'queue' | 'resource' | 'entity'>,
+  state: UrlOutputState,
 ): URLSearchParams {
   const out = new URLSearchParams(current);
   // Wipe any prior stable-selection params first so removals propagate.
   for (const name of STABLE_PARAMS) out.delete(name);
-  if (state.time) out.set(PARAM_TIME, formatTimeRange(state.time));
+  if (state.viewRange) out.set(PARAM_TIME, formatViewRange(state.viewRange));
   if (state.system) out.set(PARAM_SYSTEM, state.system);
   if (state.component) out.set(PARAM_COMPONENT, state.component);
   if (state.queue) out.set(PARAM_QUEUE, state.queue);
@@ -88,33 +107,48 @@ export function buildSelectionSearch(
 }
 
 /**
- * Apply a parsed selection to the store. Setters are value-equal-aware (see
- * {@link useSelectionStore}), so calling each unconditionally is cheap.
+ * Apply a parsed selection to the canonical stores. Setters are value-equal-aware (see
+ * {@link useSelectionStore}), so calling each unconditionally is cheap. The viewport goes to the
+ * profiler view store via {@link useProfilerViewStore.commitViewRange} (atomic write — bypasses
+ * the transient/debounce path since this is a one-shot cold-load action).
  */
 export function applySelectionToStore(parsed: ParsedSelection): void {
   const s = useSelectionStore.getState();
-  s.setTime(parsed.time);
   s.setSystem(parsed.system);
   s.setComponent(parsed.component);
   s.setQueue(parsed.queue);
   s.setResource(parsed.resource);
   s.setEntity(parsed.entity);
+  if (parsed.viewRange) {
+    useProfilerViewStore.getState().commitViewRange(parsed.viewRange);
+  }
 }
 
-function stableSnapshot(s: SelectionState) {
+function rangeEqual(a: TimeRange | null, b: TimeRange | null): boolean {
+  if (a === b) return true;
+  if (a === null || b === null) return false;
+  return a.startUs === b.startUs && a.endUs === b.endUs;
+}
+
+function snapshot(): UrlOutputState {
+  const sel = useSelectionStore.getState();
+  const vr = useProfilerViewStore.getState().viewRange;
+  // Treat the `{0,0}` no-selection sentinel as "no viewport in URL" — otherwise every fresh open
+  // would write `?time=0-0` which round-trips to a discarded zero-width range anyway.
+  const exportedRange: TimeRange | null = vr.endUs > vr.startUs ? vr : null;
   return {
-    time: s.time,
-    system: s.system,
-    component: s.component,
-    queue: s.queue,
-    resource: s.resource,
-    entity: s.entity,
+    viewRange: exportedRange,
+    system: sel.system,
+    component: sel.component,
+    queue: sel.queue,
+    resource: sel.resource,
+    entity: sel.entity,
   };
 }
 
-function stableEqual(a: ReturnType<typeof stableSnapshot>, b: ReturnType<typeof stableSnapshot>) {
+function snapshotEqual(a: UrlOutputState, b: UrlOutputState): boolean {
   return (
-    timeEqual(a.time, b.time) &&
+    rangeEqual(a.viewRange, b.viewRange) &&
     a.system === b.system &&
     a.component === b.component &&
     a.queue === b.queue &&
@@ -135,8 +169,10 @@ export interface UrlSyncOptions {
 
 /**
  * Installs a subscription that mirrors stable selection slots to the URL via `replaceState`.
- * Returns an unsubscribe handle. Idempotent — calling it twice yields two independent subs;
- * tests should always tear down via the returned function.
+ * Subscribes to both `useSelectionStore` (for system/component/queue/resource/entity) and
+ * `useProfilerViewStore.viewRange` (for the `?time=` parameter). Returns a combined unsubscribe
+ * handle. Idempotent — calling it twice yields two independent subs; tests should always tear
+ * down via the returned function.
  *
  * Cold-load behaviour is the caller's responsibility: invoke {@link applySelectionToStore}
  * with the result of {@link parseSelectionFromSearch} once at app mount, then install this.
@@ -144,16 +180,24 @@ export interface UrlSyncOptions {
 export function installSelectionUrlSync(options: UrlSyncOptions = {}): () => void {
   const replace = options.replaceState ?? defaultReplaceState;
   const readSearch = options.readSearch ?? defaultReadSearch;
-  let last = stableSnapshot(useSelectionStore.getState());
+  let last = snapshot();
 
-  return useSelectionStore.subscribe((s) => {
-    const next = stableSnapshot(s);
-    if (stableEqual(last, next)) return;
+  const emit = (): void => {
+    const next = snapshot();
+    if (snapshotEqual(last, next)) return;
     last = next;
     const params = buildSelectionSearch(new URLSearchParams(readSearch()), next);
     const query = params.toString();
     replace(query.length > 0 ? `?${query}` : '');
-  });
+  };
+
+  // Each store fires emit independently; the snapshot+diff inside dedupes the two streams.
+  const offSelection = useSelectionStore.subscribe(emit);
+  const offView = useProfilerViewStore.subscribe(emit);
+  return () => {
+    offSelection();
+    offView();
+  };
 }
 
 function defaultReplaceState(search: string): void {
@@ -166,3 +210,4 @@ function defaultReadSearch(): string {
   if (typeof window === 'undefined') return '';
   return window.location.search;
 }
+

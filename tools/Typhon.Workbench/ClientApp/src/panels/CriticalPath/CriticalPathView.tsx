@@ -11,7 +11,8 @@ import { useCriticalPathViewStore, type CpScale, type Orientation } from './useC
 interface Props {
   bars: TickPathBars;
   selectedSystemName: string | null;
-  /** Click handler — wires to the panel which sets useSelectionStore.system + focusTick. */
+  /** Click handler — wires to the panel which sets useSelectionStore.system and commits the
+   *  profiler viewRange to the clicked tick's bounds (post-#345: replaces the old focusTick slot). */
   onSelectBar: (systemName: string, tickNumber: number) => void;
   /**
    * Increment-signal: every time this changes, the view recomputes `pxPerUs` so the timeline fits

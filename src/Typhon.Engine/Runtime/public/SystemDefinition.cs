@@ -160,6 +160,24 @@ public sealed class SystemDefinition
     /// </summary>
     public bool WritesVersioned { get; internal set; }
 
+    /// <summary>
+    /// Oversubscription factor for parallel chunk dispatch. The effective worker-cap on chunk count becomes
+    /// <c>round(WorkerCount × ChunksPerWorker)</c> instead of <c>WorkerCount</c>. Default <c>1.0f</c> preserves the
+    /// pre-knob behaviour (one chunk per worker).
+    /// <para>
+    /// Use values above 1.0 (e.g. 1.5, 2.0) on parallel systems where worker efficiency suffers because a single slow chunk
+    /// holds back the critical path — extra chunks let fast workers steal more work via the existing dynamic <c>_nextChunk</c>
+    /// loop in <see cref="DagScheduler"/>. Values below 1.0 are rejected at <see cref="RuntimeSchedule.Build"/>.
+    /// </para>
+    /// <para>
+    /// The final chunk count is still capped by <c>ceil(entityCount / ParallelQueryMinChunkSize)</c>, so small populations
+    /// won't proliferate trivial chunks. Cost trade-off: every extra chunk pays its own prepare/dispatch overhead — Versioned
+    /// path also creates an extra <c>Transaction</c> per chunk.
+    /// </para>
+    /// Set by <see cref="RuntimeSchedule"/> from <see cref="SystemBuilder.ChunksPerWorker"/>.
+    /// </summary>
+    public float ChunksPerWorker { get; internal set; } = 1f;
+
     // ═══════════════════════════════════════════════════════════════
     // Issue #231: Tier dispatch filter
     // ═══════════════════════════════════════════════════════════════

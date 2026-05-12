@@ -630,6 +630,37 @@ function decodeSpan(
         return evt;
       }
 
+      // QueryPlan (kind 189) — extract the optional OwnerSystemIdx so the trace model can distinguish the
+      // per-tick synthesised variant (OwnerSystemIdx > 0, emitted by TyphonRuntime.OnSystemEnd around the
+      // whole system body) from the in-execution variant (OwnerSystemIdx absent / 0, emitted by PlanBuilder).
+      // Wire layout: BeginParams (19 bytes) = u8 EvaluatorCount, u16 IndexFieldIdx, i64 RangeMin, i64 RangeMax;
+      // then u8 optMask @ +19; then the set optional fields in mask-bit order:
+      //   0x01: u8  _queryInstanceKind
+      //   0x02: u32 _queryInstanceLocalId
+      //   0x04: u16 _executionSourceFileId
+      //   0x08: i32 _executionSourceLine
+      //   0x10: u16 _executionSourceMethodId
+      //   0x20: u16 _ownerSystemIdx
+      if ((kind as number) === 189) {
+        const evt = baseSpanEvent(kind, threadSlot, tickNumber, timestampUs, header);
+        const optMaskOffset = header.payloadOffset + 19;
+        // Guard against truncated/pre-v9 payloads — RecordDecoder would have rejected anything shorter than the
+        // begin-params block, but the opt-mask byte may not be present in older traces.
+        if (optMaskOffset < header.recordEnd) {
+          const mask = reader.readU8(optMaskOffset);
+          let cursor = optMaskOffset + 1;
+          if ((mask & 0x01) !== 0) cursor += 1; // _queryInstanceKind
+          if ((mask & 0x02) !== 0) cursor += 4; // _queryInstanceLocalId
+          if ((mask & 0x04) !== 0) cursor += 2; // _executionSourceFileId
+          if ((mask & 0x08) !== 0) cursor += 4; // _executionSourceLine
+          if ((mask & 0x10) !== 0) cursor += 2; // _executionSourceMethodId
+          if ((mask & 0x20) !== 0 && cursor + 2 <= header.recordEnd) {
+            evt.systemIndex = reader.readU16(cursor);
+          }
+        }
+        return evt;
+      }
+
       // Unknown kind ≥ 10 — emit header-only event so the viewer can still render timing. Matches RecordDecoder.DecodeGenericSpan.
       return baseSpanEvent(kind, threadSlot, tickNumber, timestampUs, header);
   }

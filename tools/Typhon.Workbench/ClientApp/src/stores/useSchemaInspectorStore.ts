@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { useSelectionStore } from './useSelectionStore';
 
 export type SchemaOverlayKey = 'defaults' | 'cacheLineBoundaries';
 export type SchemaViewMode = 'layout' | 'archetypes' | 'relationships' | 'defaults';
@@ -39,18 +40,27 @@ export const useSchemaInspectorStore = create<SchemaInspectorState>()((set) => (
   fieldTouchedAt: 0,
   overlays: INITIAL_OVERLAYS,
   viewMode: 'layout',
-  selectComponent: (typeName) =>
-    set({ selectedComponentType: typeName, selectedField: null, fieldTouchedAt: Date.now() }),
+  selectComponent: (typeName) => {
+    set({ selectedComponentType: typeName, selectedField: null, fieldTouchedAt: Date.now() });
+    // Inlined cross-store mirror — schema inspector ↔ unified selection. The unified store's
+    // `setComponent` is value-equal-aware, so when the loop trips via `useSelectionStore.subscribe`
+    // → `useSchemaInspectorStore.selectComponent(sameName)` → here → `setComponent(sameName)`,
+    // it short-circuits without an infinite loop. Pre-#345 this lived as a Zustand subscription
+    // pair in `selectionBridges.ts`.
+    useSelectionStore.getState().setComponent(typeName);
+  },
   selectField: (fieldName) => set({ selectedField: fieldName, fieldTouchedAt: Date.now() }),
   toggleOverlay: (key) =>
     set((s) => ({ overlays: { ...s.overlays, [key]: !s.overlays[key] } })),
   setViewMode: (mode) => set({ viewMode: mode }),
-  reset: () =>
+  reset: () => {
     set({
       selectedComponentType: null,
       selectedField: null,
       fieldTouchedAt: 0,
       overlays: INITIAL_OVERLAYS,
       viewMode: 'layout',
-    }),
+    });
+    useSelectionStore.getState().setComponent(null);
+  },
 }));

@@ -153,15 +153,15 @@ function zoomToFullTrace(): void {
   if (!gm) return;
   const startUs = Number(gm.globalStartUs ?? 0);
   const endUs = Number(gm.globalEndUs ?? 0);
-  if (endUs > startUs) useProfilerViewStore.getState().setViewRange({ startUs, endUs });
+  if (endUs > startUs) useProfilerViewStore.getState().commitViewRange({ startUs, endUs });
 }
 
 function panViewport(directionMultiplier: number): void {
-  const { viewRange, setViewRange } = useProfilerViewStore.getState();
+  const { viewRange, commitViewRange } = useProfilerViewStore.getState();
   const range = viewRange.endUs - viewRange.startUs;
   if (range <= 0) return;
   const delta = range * 0.25 * directionMultiplier;
-  setViewRange({ startUs: viewRange.startUs + delta, endUs: viewRange.endUs + delta });
+  commitViewRange({ startUs: viewRange.startUs + delta, endUs: viewRange.endUs + delta });
 }
 
 /**
@@ -169,7 +169,7 @@ function panViewport(directionMultiplier: number): void {
  * modules (nav-history restore, etc.) can ask the profiler to tween the viewport to a target
  * range with the same 800 ms ease-out curve used for double-click zoom. When TimeArea isn't
  * mounted (profiler panel closed, still loading), `animateViewportToRange` falls back to
- * `setViewRange` — no animation, but navigation still works.
+ * `commitViewRange` — no animation, but navigation still works.
  *
  * Registration pattern mirrors {@link registerProfilerDockApi}: a single module-level slot. The
  * TimeArea component calls `registerAnimateViewport(fn)` on mount and `registerAnimateViewport(null)`
@@ -183,7 +183,7 @@ export function registerAnimateViewport(fn: ((target: TimeRange) => void) | null
 
 export function animateViewportToRange(target: TimeRange): void {
   if (registeredAnimate) registeredAnimate(target);
-  else useProfilerViewStore.getState().setViewRange(target);
+  else useProfilerViewStore.getState().commitViewRange(target);
 }
 
 /**

@@ -84,7 +84,7 @@ public sealed class RuntimeSchedule
     public RuntimeSchedule QuerySystem(string name, Action<TickContext> action, string after = null, string[] afterAll = null,
         SystemPriority priority = SystemPriority.Normal, Func<bool> runIf = null, Func<ViewBase> input = null, Type[] changeFilter = null,
         int tickDivisor = 1, int throttledTickDivisor = 1, bool canShed = false, bool parallel = false, bool writesVersioned = false,
-        SimTier tier = SimTier.All, int cellAmortize = 0, bool checkerboard = false)
+        SimTier tier = SimTier.All, int cellAmortize = 0, bool checkerboard = false, float chunksPerWorker = 1f)
     {
         ThrowIfBuilt();
         ArgumentNullException.ThrowIfNull(name);
@@ -108,7 +108,8 @@ public sealed class RuntimeSchedule
             WritesVersioned = writesVersioned,
             TierFilter = tier,
             CellAmortize = cellAmortize,
-            Checkerboard = checkerboard
+            Checkerboard = checkerboard,
+            ChunksPerWorker = chunksPerWorker
         });
         return this;
     }
@@ -218,6 +219,7 @@ public sealed class RuntimeSchedule
             TierFilter = builder._tierFilter,
             CellAmortize = builder._cellAmortize,
             Checkerboard = builder._checkerboard,
+            ChunksPerWorker = builder._chunksPerWorker,
             Phase = builder._phase,
             PhaseSet = builder._phaseSet,
             Before = builder._before,
@@ -401,6 +403,18 @@ public sealed class RuntimeSchedule
             {
                 throw new InvalidOperationException(
                     $"System '{reg.Name}': WritesVersioned is only meaningful for parallel QuerySystems. Add b.Parallel() or parallel: true.");
+            }
+
+            if (reg.ChunksPerWorker <= 0f || !float.IsFinite(reg.ChunksPerWorker))
+            {
+                throw new InvalidOperationException(
+                    $"System '{reg.Name}': ChunksPerWorker must be > 0 and finite, got {reg.ChunksPerWorker}.");
+            }
+
+            if (reg.ChunksPerWorker != 1f && !reg.Parallel)
+            {
+                throw new InvalidOperationException(
+                    $"System '{reg.Name}': ChunksPerWorker is only meaningful for parallel QuerySystems. Add b.Parallel() or parallel: true.");
             }
 
             // Issue #231: tier filter + amortization validation.
@@ -626,6 +640,7 @@ public sealed class RuntimeSchedule
             systems[sysIdx].TierFilter = reg.TierFilter;
             systems[sysIdx].CellAmortize = reg.CellAmortize;
             systems[sysIdx].IsCheckerboard = reg.Checkerboard;
+            systems[sysIdx].ChunksPerWorker = reg.ChunksPerWorker;
 
             if (reg.Access != null)
             {
@@ -703,6 +718,7 @@ public sealed class RuntimeSchedule
         public Type[] ChangeFilter;
         public bool Parallel;
         public bool WritesVersioned;
+        public float ChunksPerWorker = 1f;
         public SimTier TierFilter = SimTier.All;
         public int CellAmortize;
         public bool Checkerboard;
