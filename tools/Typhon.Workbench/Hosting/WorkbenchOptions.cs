@@ -1,3 +1,5 @@
+using System.ComponentModel.DataAnnotations;
+
 namespace Typhon.Workbench.Hosting;
 
 /// <summary>
@@ -29,7 +31,7 @@ public sealed record EditorOptions
     public string CustomCommand { get; init; } = "";
 }
 
-/// <summary>Profiler-related preferences (workspace root, future fields).</summary>
+/// <summary>Profiler-related preferences (workspace root, view-range debounce, future fields).</summary>
 public sealed record ProfilerOptions
 {
     /// <summary>
@@ -38,6 +40,19 @@ public sealed record ProfilerOptions
     /// Workbench falls back to the directory it was launched from.
     /// </summary>
     public string WorkspaceRoot { get; init; } = "";
+
+    /// <summary>
+    /// Debounce window (milliseconds) between pan/zoom in the profiler's TimeArea and the moment
+    /// cross-panel consumers (SystemDag, CriticalPath, DataFlow, AccessMatrix) re-aggregate against
+    /// the new viewport. See #345 / claude/design/Apps/Workbench/profiler-time-window-refactor.md.
+    /// <para>
+    /// <c>0</c> commits synchronously — useful for tests and for users who explicitly prefer zero
+    /// latency at the cost of pan/zoom fluidity. Default 150 ms hits the "feels instant once you
+    /// stop" sweet spot; the upper bound of 5000 ms accommodates extreme-workload diagnostic use.
+    /// </para>
+    /// </summary>
+    [Range(0, 5000)]
+    public int ViewRangeDebounceMs { get; init; } = 150;
 }
 
 /// <summary>Editor target enumeration. Wire-stable; never renumber.</summary>

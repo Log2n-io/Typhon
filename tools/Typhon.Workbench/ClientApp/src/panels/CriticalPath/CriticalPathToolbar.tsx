@@ -206,7 +206,7 @@ function HelpOverlay({ onClose }: { onClose: () => void }) {
         </Section>
 
         <Section title="Tick source">
-          <p>The displayed tick is either the user-pinned <code>focusTick</code> (set by clicking a system on the DAG or a bar here) or the dominant tick (longest <code>durationUs</code>) inside the selected time window. The window comes from the profiler's TimeArea — scrub there to update.</p>
+          <p>The displayed tick is the dominant tick (longest <code>durationUs</code>) inside the selected time window — or, when the window is narrower than any tick, the tick whose body contains the window's midpoint. Click a tick in the profiler's TickOverview or a bar here to pin a specific tick (snaps the viewport to that tick's bounds).</p>
         </Section>
 
         <Section title="Lock zoom">

@@ -427,56 +427,46 @@ export function decodeMetronomeIntentClass(raw: unknown): MetronomeIntentClass |
 }
 
 /**
- * Pick the "dominant" tick in a range — the one with the longest wall-clock duration. Used as
- * the default focus tick for the tape when the user hasn't picked one explicitly. Falls back to
- * `null` when the range is empty.
+ * Pick the "dominant" tick in a window — the one with the longest wall-clock duration. Used as the
+ * default focus tick for the CP tape; replaces the pre-#345 `focusTick` cross-panel slot.
+ *
+ * Two-tier semantics, in priority order:
+ * 1. **Strict**: at least one tick falls within the `[range.from, range.to]` tick window. Returns
+ *    the longest one. Covers the common case where the viewport spans one or more whole ticks.
+ * 2. **Midpoint fallback** (only when `time` is provided): no tick number is in the strict window —
+ *    typically the user has zoomed *inside* one tick or straddled a boundary so the µs viewport is
+ *    narrower than any tick. Returns the tick whose body `[startUs, startUs + durationUs)`
+ *    contains the µs-window midpoint. Without this, the CP tape would blank out on sub-tick zoom.
+ *
+ * Returns `null` only when both tiers fail (no ticks loaded, or strict window empty AND no µs
+ * fallback was provided or the µs window is degenerate).
  */
 export function dominantTickInRange(
   tickSummaries: TickSummaryDto[] | null | undefined,
   range: TickRange | null,
+  time?: { startUs: number; endUs: number } | null,
 ): number | null {
-  if (!tickSummaries || tickSummaries.length === 0 || !range) return null;
-  let bestTick: number | null = null;
-  let bestDuration = -1;
-  for (const t of tickSummaries) {
-    const tn = numberValue((t as { tickNumber?: unknown }).tickNumber);
-    if (tn == null || tn < range.from || tn > range.to) continue;
-    const dur = numberValue((t as { durationUs?: unknown }).durationUs) ?? 0;
-    if (dur > bestDuration) {
-      bestDuration = dur;
-      bestTick = tn;
+  // Strict tier — longest tick in [range.from, range.to].
+  if (tickSummaries && tickSummaries.length > 0 && range) {
+    let bestTick: number | null = null;
+    let bestDuration = -1;
+    for (const t of tickSummaries) {
+      const tn = numberValue((t as { tickNumber?: unknown }).tickNumber);
+      if (tn == null || tn < range.from || tn > range.to) continue;
+      const dur = numberValue((t as { durationUs?: unknown }).durationUs) ?? 0;
+      if (dur > bestDuration) {
+        bestDuration = dur;
+        bestTick = tn;
+      }
     }
+    if (bestTick != null) return bestTick;
   }
-  return bestTick;
-}
 
-/**
- * Pick the tick the CP tape should focus on, given the current µs window plus its already-converted
- * tick range.
- *
- * Two-tier semantics, in priority order:
- * 1. **Strict**: at least one tick's `startUs` falls in `[time.start, time.end)`. Returns the
- *    longest such tick (delegates to {@link dominantTickInRange}). Covers the common case where
- *    the window spans one or more whole ticks.
- * 2. **Midpoint fallback**: no tick `startUs` is in window — typical when the user has zoomed
- *    *inside* one tick or straddled a boundary so the window is narrower than any tick. Returns
- *    the tick whose body `[startUs, startUs + durationUs)` contains the window's midpoint.
- *
- * Returns `null` only when no tick exists or both inputs are missing. `timeToTickRange` correctly
- * returns `null` for sub-tick windows (its semantic is "tick startUs in window"); this helper
- * rescues that case for the focus-tick use case where the user expects the tape to keep tracking
- * whatever tick they're zoomed into.
- */
-export function focusTickForWindow(
-  tickSummaries: TickSummaryDto[] | null | undefined,
-  range: TickRange | null,
-  time: { start: number; end: number } | null,
-): number | null {
-  const strict = dominantTickInRange(tickSummaries, range);
-  if (strict != null) return strict;
+  // Midpoint fallback — only when caller supplied the µs window. Without `time`, the CP tape just
+  // gets `null` (matches the pre-#345 dominantTickInRange behaviour on its 2-arg path).
   if (!time || !tickSummaries || tickSummaries.length === 0) return null;
-  if (!Number.isFinite(time.start) || !Number.isFinite(time.end) || time.end <= time.start) return null;
-  const mid = (time.start + time.end) / 2;
+  if (!Number.isFinite(time.startUs) || !Number.isFinite(time.endUs) || time.endUs <= time.startUs) return null;
+  const mid = (time.startUs + time.endUs) / 2;
   // Linear scan (O(N) — N is at most a few thousand ticks; binary search would be faster but the
   // strict path covers the common case so this fallback is cold). Looking for a tick whose body
   // includes the midpoint. If durations overlap (shouldn't, but defensively), take the first.

@@ -41,61 +41,61 @@ describe('timeToTickRange', () => {
   });
 
   it('returns null on empty tick array', () => {
-    expect(timeToTickRange({ start: 0, end: 5000 }, [])).toBeNull();
-    expect(timeToTickRange({ start: 0, end: 5000 }, null)).toBeNull();
+    expect(timeToTickRange({ startUs: 0, endUs: 5000 }, [])).toBeNull();
+    expect(timeToTickRange({ startUs: 0, endUs: 5000 }, null)).toBeNull();
   });
 
   it('full window covers all ticks', () => {
-    expect(timeToTickRange({ start: 0, end: 10000 }, FIVE_TICKS)).toEqual({ from: 1, to: 5 });
+    expect(timeToTickRange({ startUs: 0, endUs: 10000 }, FIVE_TICKS)).toEqual({ from: 1, to: 5 });
   });
 
   it('window matching exactly one tick startUs (inclusive start)', () => {
     // start at 2000 → tick 3 included; end at 3000 (exclusive) → tick 4 excluded.
-    expect(timeToTickRange({ start: 2000, end: 3000 }, FIVE_TICKS)).toEqual({ from: 3, to: 3 });
+    expect(timeToTickRange({ startUs: 2000, endUs: 3000 }, FIVE_TICKS)).toEqual({ from: 3, to: 3 });
   });
 
   it('end-exclusive boundary excludes the tick at end', () => {
     // tick 4 has startUs=3000. end=3000 means "up to but not including 3000".
-    expect(timeToTickRange({ start: 0, end: 3000 }, FIVE_TICKS)).toEqual({ from: 1, to: 3 });
+    expect(timeToTickRange({ startUs: 0, endUs: 3000 }, FIVE_TICKS)).toEqual({ from: 1, to: 3 });
   });
 
   it('window before any tick returns null', () => {
-    expect(timeToTickRange({ start: -1000, end: 0 }, FIVE_TICKS)).toBeNull();
+    expect(timeToTickRange({ startUs: -1000, endUs: 0 }, FIVE_TICKS)).toBeNull();
   });
 
   it('window after all ticks returns null', () => {
     // ticks end startUs at 4000; window starts at 5000 → no tick has startUs >= 5000.
-    expect(timeToTickRange({ start: 5000, end: 10000 }, FIVE_TICKS)).toBeNull();
+    expect(timeToTickRange({ startUs: 5000, endUs: 10000 }, FIVE_TICKS)).toBeNull();
   });
 
   it('partial overlap — start mid-tick includes the enclosing tick', () => {
     // start at 1500 falls inside tick 2's [1000, 1800) interval. Overlap semantics include tick 2
     // because its right edge crosses the window's left edge. tick 4 (startUs=3000) is included by
     // the window's right edge < 4000.
-    expect(timeToTickRange({ start: 1500, end: 4000 }, FIVE_TICKS)).toEqual({ from: 2, to: 4 });
+    expect(timeToTickRange({ startUs: 1500, endUs: 4000 }, FIVE_TICKS)).toEqual({ from: 2, to: 4 });
   });
 
   it('zoom strictly inside a tick snaps to that tick', () => {
     // Window [2300, 2500) is fully inside tick 3's [2000, 2800). Overlap → just tick 3.
-    expect(timeToTickRange({ start: 2300, end: 2500 }, FIVE_TICKS)).toEqual({ from: 3, to: 3 });
+    expect(timeToTickRange({ startUs: 2300, endUs: 2500 }, FIVE_TICKS)).toEqual({ from: 3, to: 3 });
   });
 
   it('zoom into the gap between two ticks falls back to the previous overlapping tick', () => {
     // Tick 1 ends at 800; tick 2 starts at 1000. Window [810, 900) lies in the gap. No tick has
     // (endUs > 810 AND startUs < 900) AT THE SAME TIME — tick 2 ends at 1800 > 810 ✓ but its
     // startUs=1000 is not < 900. So no overlap → null.
-    expect(timeToTickRange({ start: 810, end: 900 }, FIVE_TICKS)).toBeNull();
+    expect(timeToTickRange({ startUs: 810, endUs: 900 }, FIVE_TICKS)).toBeNull();
   });
 
   it('zero-width window at a tick boundary finds nothing', () => {
     // Boundary 1000 between tick 1 (ends at 800) and tick 2 (starts at 1000). Both half-open
     // intervals exclude their respective edges, so no overlap.
-    expect(timeToTickRange({ start: 1000, end: 1000 }, FIVE_TICKS)).toBeNull();
+    expect(timeToTickRange({ startUs: 1000, endUs: 1000 }, FIVE_TICKS)).toBeNull();
   });
 
   it('zero-width window strictly inside a tick maps to that tick', () => {
     // A point at 1500 lies inside tick 2's [1000, 1800). endUs=1800 > 1500 ✓ and startUs=1000 < 1500 ✓.
-    expect(timeToTickRange({ start: 1500, end: 1500 }, FIVE_TICKS)).toEqual({ from: 2, to: 2 });
+    expect(timeToTickRange({ startUs: 1500, endUs: 1500 }, FIVE_TICKS)).toEqual({ from: 2, to: 2 });
   });
 });
 
@@ -110,7 +110,7 @@ describe('lastNTicksToTime', () => {
   it('window covers exactly the last N ticks', () => {
     // last 3 ticks: tick 3 (startUs=2000), tick 4, tick 5 (startUs=4000, durationUs=800).
     // start=2000, end=4000+800=4800.
-    expect(lastNTicksToTime(3, FIVE_TICKS)).toEqual({ start: 2000, end: 4800 });
+    expect(lastNTicksToTime(3, FIVE_TICKS)).toEqual({ startUs: 2000, endUs: 4800 });
   });
 
   it('roundtrips through timeToTickRange to the same tick range', () => {
@@ -121,7 +121,7 @@ describe('lastNTicksToTime', () => {
   });
 
   it('clamps when fewer than N ticks exist', () => {
-    expect(lastNTicksToTime(100, FIVE_TICKS)).toEqual({ start: 0, end: 4800 });
+    expect(lastNTicksToTime(100, FIVE_TICKS)).toEqual({ startUs: 0, endUs: 4800 });
   });
 
   it('zero-duration last tick still includes it via +1 µs epsilon', () => {
@@ -129,7 +129,7 @@ describe('lastNTicksToTime', () => {
     // comparator in timeToTickRange still includes it on roundtrip.
     const ticks = [tick(1, 0, 800), tick(2, 1000, 0)];
     const time = lastNTicksToTime(1, ticks);
-    expect(time).toEqual({ start: 1000, end: 1001 });
+    expect(time).toEqual({ startUs: 1000, endUs: 1001 });
     expect(timeToTickRange(time, ticks)).toEqual({ from: 2, to: 2 });
   });
 
@@ -146,12 +146,12 @@ describe('lastNTicksToTime', () => {
     // tick still resolves to that one tick.
     const tickOnly = [tick(7, 10_000, 800)];
     const captured = lastNTicksToTime(1, tickOnly);
-    expect(captured).toEqual({ start: 10_000, end: 10_800 });
+    expect(captured).toEqual({ startUs: 10_000, endUs: 10_800 });
     // Mid-tick zoom — window is fully inside [10_000, 10_800).
-    expect(timeToTickRange({ start: 10_200, end: 10_400 }, tickOnly)).toEqual({ from: 7, to: 7 });
+    expect(timeToTickRange({ startUs: 10_200, endUs: 10_400 }, tickOnly)).toEqual({ from: 7, to: 7 });
     // Zoom touching only the right half.
-    expect(timeToTickRange({ start: 10_500, end: 10_799 }, tickOnly)).toEqual({ from: 7, to: 7 });
+    expect(timeToTickRange({ startUs: 10_500, endUs: 10_799 }, tickOnly)).toEqual({ from: 7, to: 7 });
     // Zero-width point inside the tick.
-    expect(timeToTickRange({ start: 10_500, end: 10_500 }, tickOnly)).toEqual({ from: 7, to: 7 });
+    expect(timeToTickRange({ startUs: 10_500, endUs: 10_500 }, tickOnly)).toEqual({ from: 7, to: 7 });
   });
 });

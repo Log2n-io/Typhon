@@ -7,19 +7,33 @@ interface WorkspaceRootDto {
 }
 
 /**
- * Profiler-related options (issue #293, Phase 4a). The workspace root is used to resolve the
- * "/_/..." paths from trace manifests to absolute paths on disk. When the user leaves it empty,
- * the server auto-detects the repo root by walking up from CWD looking for a `.git` entry. The
- * effective root is fetched from `/api/profiler/workspace-root` and shown so the user can verify
- * what's being used.
+ * Profiler-related options (issue #293 Phase 4a; #345 Step 9 added the debounce control). The
+ * workspace root resolves the "/_/..." paths from trace manifests to absolute paths on disk. When
+ * the user leaves it empty, the server auto-detects the repo root by walking up from CWD looking
+ * for a `.git` entry. The effective root is fetched from `/api/profiler/workspace-root` and shown
+ * so the user can verify what's being used.
+ *
+ * The view-range debounce (ms) controls how long after the user stops panning/zooming in TimeArea
+ * cross-panel consumers (SystemDag, CriticalPath, DataFlow, AccessMatrix) re-aggregate. Default
+ * 150 ms; range [0, 5000]. `0` disables debouncing entirely (commit-on-write).
  */
 export function ProfilerForm(): React.JSX.Element {
   const profiler = useOptionsStore((s) => s.options.profiler);
   const setProfiler = useOptionsStore((s) => s.setProfiler);
   const [pendingRoot, setPendingRoot] = useState<string>(profiler.workspaceRoot);
-  const dirty = pendingRoot !== profiler.workspaceRoot;
+  const [pendingDebounceMs, setPendingDebounceMs] = useState<number>(profiler.viewRangeDebounceMs);
+  const dirty =
+    pendingRoot !== profiler.workspaceRoot ||
+    pendingDebounceMs !== profiler.viewRangeDebounceMs;
   const [error, setError] = useState<string | null>(null);
   const [effective, setEffective] = useState<WorkspaceRootDto | null>(null);
+
+  // Reset the local edits whenever the server pushes new options (SSE) so we don't accidentally
+  // overwrite another window's changes.
+  useEffect(() => {
+    setPendingRoot(profiler.workspaceRoot);
+    setPendingDebounceMs(profiler.viewRangeDebounceMs);
+  }, [profiler.workspaceRoot, profiler.viewRangeDebounceMs]);
 
   useEffect(() => {
     let cancelled = false;
@@ -35,7 +49,10 @@ export function ProfilerForm(): React.JSX.Element {
   async function handleSave(): Promise<void> {
     setError(null);
     try {
-      await setProfiler({ workspaceRoot: pendingRoot });
+      // Clamp on the client to match the server's [Range(0, 5000)] guard — gives the user a
+      // predictable bound rather than letting the server 400 on out-of-range input.
+      const clampedMs = Math.max(0, Math.min(5000, Math.round(pendingDebounceMs)));
+      await setProfiler({ workspaceRoot: pendingRoot, viewRangeDebounceMs: clampedMs });
     } catch (err) {
       setError((err as Error).message);
     }
@@ -46,7 +63,8 @@ export function ProfilerForm(): React.JSX.Element {
       <header>
         <h2 className="text-[14px] font-semibold text-foreground">Profiler</h2>
         <p className="mt-1 text-[12px] text-muted-foreground">
-          Used to resolve repo-relative source paths from trace files.
+          Used to resolve repo-relative source paths from trace files, and to tune cross-panel
+          update latency during TimeArea pan/zoom.
         </p>
       </header>
 
@@ -71,6 +89,25 @@ export function ProfilerForm(): React.JSX.Element {
           <span className="font-mono text-foreground">{effective.effective}</span>
         </div>
       )}
+
+      <label className="block">
+        <span className="block text-[12px] font-medium text-foreground">View range debounce (ms)</span>
+        <input
+          type="number"
+          min={0}
+          max={5000}
+          step={10}
+          value={pendingDebounceMs}
+          onChange={(e) => setPendingDebounceMs(Number(e.target.value))}
+          className="mt-1 w-32 rounded border border-border bg-background px-2 py-1 font-mono text-[12px] tabular-nums"
+        />
+        <span className="mt-1 block text-[11px] text-muted-foreground">
+          How long the profiler waits after you stop panning/zooming the TimeArea before the System
+          DAG, Critical Path, Data Flow, and Access Matrix panels re-aggregate. Default <code>150</code> ms.
+          Set to <code>0</code> for synchronous updates (degraded pan fluidity); higher values give
+          smoother scrubbing at the cost of slower consumer reaction. Range <code>[0, 5000]</code>.
+        </span>
+      </label>
 
       <div className="flex items-center gap-2">
         <button

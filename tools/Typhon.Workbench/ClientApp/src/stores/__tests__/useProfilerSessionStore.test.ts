@@ -150,7 +150,6 @@ describe('useProfilerSessionStore — reset', () => {
     useProfilerSessionStore.getState().setIsLive(true);
     useProfilerSessionStore.getState().setConnectionStatus('reconnecting');
     useProfilerSessionStore.getState().appendTickSummary(makeTickSummary(1));
-    useProfilerSessionStore.getState().setLiveFollowActive(false);
     useProfilerSessionStore.getState().setSlotVisibility(3, false);
     useProfilerSessionStore.getState().setSystemVisibility(7, false);
 
@@ -163,7 +162,6 @@ describe('useProfilerSessionStore — reset', () => {
     expect(s.isLive).toBe(false);
     expect(s.connectionStatus).toBeNull();
     expect(s.latestTickNumber).toBe(0);
-    expect(s.liveFollowActive).toBe(true);
     expect(s.liveThreadInfos.size).toBe(0);
     expect(s.slotVisibility).toEqual({});
     expect(s.systemVisibility).toEqual({});

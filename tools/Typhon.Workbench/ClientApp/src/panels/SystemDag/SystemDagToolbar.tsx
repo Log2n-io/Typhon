@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import { Camera } from 'lucide-react';
 import type { SystemTickSummary } from '@/api/generated/model/systemTickSummary';
 import type { TickSummaryDto } from '@/api/generated/model/tickSummaryDto';
-import { useSelectionStore } from '@/stores/useSelectionStore';
+import { useProfilerViewStore } from '@/stores/useProfilerViewStore';
 import { useUiPrefsStore } from '@/stores/useUiPrefsStore';
 import ParallelismPill from './ParallelismPill';
 import { lastNTicksToTime, timeToTickRange } from './tickRangeMapping';
@@ -58,8 +58,13 @@ const SNAPSHOT_TICK_COUNT = 600;
  * been deep-linked from a URL — so a fresh open shows useful colour without a click.
  */
 export default function SystemDagToolbar({ tickSummaries, autoSnapshotEnabled, systemTickSummaries, workerCount }: Props) {
-  const time = useSelectionStore((s) => s.time);
-  const setTime = useSelectionStore((s) => s.setTime);
+  // Post-#345: time-window canonical source is the profiler view store. SystemDag aggregations
+  // read the *committed* slot — the debounce upstream already ensures we only re-fetch after the
+  // user stops scrubbing.
+  const viewRange = useProfilerViewStore((s) => s.viewRange);
+  const commitViewRange = useProfilerViewStore((s) => s.commitViewRange);
+  // "Has a real selection" — anything other than the `{0, 0}` no-selection sentinel.
+  const hasTimeSelection = viewRange.endUs > viewRange.startUs;
   const statMode = useDagViewStore((s) => s.statMode);
   const setStatMode = useDagViewStore((s) => s.setStatMode);
   const layout = useDagViewStore((s) => s.layout);
@@ -92,7 +97,7 @@ export default function SystemDagToolbar({ tickSummaries, autoSnapshotEnabled, s
   // Translate the current time-window (µs) back to ticks for the readout. Cross-panel scrubs
   // round through the converter so the user sees consistent tick numbers regardless of who set
   // the window.
-  const tickRange = useMemo(() => timeToTickRange(time, tickSummaries), [time, tickSummaries]);
+  const tickRange = useMemo(() => timeToTickRange(viewRange, tickSummaries), [viewRange, tickSummaries]);
 
   // Parallelism inefficiency over the selected range — drives the A1 pill + A6 sparkline. Pill
   // stays hidden (`null`) when worker count is missing / < 2 or the range has no usable ticks.
@@ -108,22 +113,25 @@ export default function SystemDagToolbar({ tickSummaries, autoSnapshotEnabled, s
     [workerCount, tickSummaries, systemTickSummaries, tickRange],
   );
 
-  // Auto-snapshot once on first arrival when the time slot is unset. After that, snapshot is
+  // Auto-snapshot once on first arrival when no selection exists yet (viewRange is the `{0,0}`
+  // sentinel set by the metadata-arrival reset in ProfilerPanel). After that, snapshot is
   // user-driven (per §7.3 — no continuous live updates).
   useEffect(() => {
     if (!autoSnapshotEnabled) return;
-    if (!hasTicks || time != null || tickSummaries == null) return;
+    if (!hasTicks || hasTimeSelection || tickSummaries == null) return;
     const next = lastNTicksToTime(SNAPSHOT_TICK_COUNT, tickSummaries);
-    if (next) setTime(next);
-  }, [autoSnapshotEnabled, hasTicks, time, tickSummaries, setTime]);
+    if (next) commitViewRange(next);
+  }, [autoSnapshotEnabled, hasTicks, hasTimeSelection, tickSummaries, commitViewRange]);
 
   const onSnapshotClick = () => {
     if (tickSummaries == null) return;
     const next = lastNTicksToTime(SNAPSHOT_TICK_COUNT, tickSummaries);
-    if (next) setTime(next);
+    if (next) commitViewRange(next);
   };
 
-  const onClearClick = () => setTime(null);
+  // Reset to the `{0, 0}` no-selection sentinel — TimeArea treats this as "show the full trace"
+  // and downstream aggregations (timeToTickRange returns null) skip their fetches.
+  const onClearClick = () => commitViewRange({ startUs: 0, endUs: 0 });
 
   return (
     <div className="flex items-center gap-3 border-b border-border bg-background/95 px-3 py-1.5">
@@ -231,9 +239,9 @@ export default function SystemDagToolbar({ tickSummaries, autoSnapshotEnabled, s
               clear
             </button>
           </>
-        ) : time != null ? (
-          // Time slot is set but the window doesn't intersect any tick (e.g. selection scrubbed
-          // before the first tick). Show a hint instead of a stale tick range.
+        ) : hasTimeSelection ? (
+          // A selection IS set, but the window doesn't intersect any tick (e.g. scrubbed before the
+          // first tick). Show a hint instead of a stale tick range.
           <span>Selection has no ticks — scrub or snapshot.</span>
         ) : (
           <span>No range — snapshot or scrub the profiler to enable stats.</span>

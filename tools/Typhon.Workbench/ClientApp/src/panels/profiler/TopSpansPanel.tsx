@@ -2,7 +2,6 @@ import { useMemo, useState } from 'react';
 import { ArrowDown, ArrowUp } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { SpanGroupStats } from '@/libs/profiler/stats/selectionStats';
-import { useProfilerSessionStore } from '@/stores/useProfilerSessionStore';
 import { useProfilerStatsStore } from '@/stores/useProfilerStatsStore';
 import { useProfilerViewStore } from '@/stores/useProfilerViewStore';
 import { useSessionStore } from '@/stores/useSessionStore';
@@ -55,9 +54,7 @@ function TopSpansTable({ groups }: { groups: SpanGroupStats[] }): React.JSX.Elem
   // even when each instance is fast, which is a different (and less common) question.
   const [sortKey, setSortKey] = useState<SpanSortKey>('maxUs');
   const [sortDesc, setSortDesc] = useState(true);
-  const setViewRange = useProfilerViewStore((s) => s.setViewRange);
-  const setLiveFollowActive = useProfilerSessionStore((s) => s.setLiveFollowActive);
-  const isLive = useProfilerSessionStore((s) => s.isLive);
+  const commitViewRange = useProfilerViewStore((s) => s.commitViewRange);
 
   const sorted = useMemo(() => {
     const cmp = (a: SpanGroupStats, b: SpanGroupStats): number => {
@@ -83,8 +80,7 @@ function TopSpansTable({ groups }: { groups: SpanGroupStats[] }): React.JSX.Elem
     const span = group.worstSpan;
     const dur = span.endUs - span.startUs;
     const pad = Math.max(dur * 0.05, 1); // 5% padding, with a 1 µs floor for sub-µs spans
-    if (isLive) setLiveFollowActive(false);
-    setViewRange({ startUs: span.startUs - pad, endUs: span.endUs + pad });
+    commitViewRange({ startUs: span.startUs - pad, endUs: span.endUs + pad });
   };
 
   return (

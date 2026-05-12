@@ -119,30 +119,21 @@ interface Props {
 
 export default function TickOverview({ isLive = false }: Props) {
   const metadata = useProfilerSessionStore((s) => s.metadata);
-  const liveFollowActive = useProfilerSessionStore((s) => s.liveFollowActive);
-  const setLiveFollowActive = useProfilerSessionStore((s) => s.setLiveFollowActive);
-  const viewRange = useProfilerViewStore((s) => s.viewRange);
-  const setViewRange = useProfilerViewStore((s) => s.setViewRange);
+  // Gesture-rate consumer: orange overlay + auto-scroll track the in-flight transient slot so the
+  // selection indicator stays glued to the user's drag/wheel frame-by-frame. The committed slot
+  // (read elsewhere by SystemDag/CriticalPath/...) is what triggers their heavy work after settle.
+  const viewRange = useProfilerViewStore((s) => s.transientViewRange);
+  const setTransientViewRange = useProfilerViewStore((s) => s.setTransientViewRange);
+  const commitViewRange = useProfilerViewStore((s) => s.commitViewRange);
   const legendsVisible = useUiPrefsStore((s) => s.legendsVisible);
   // Range-drag in TickOverview clears any stale span/chunk/marker click selection so the
   // right-pane's range-stats fallback ("Selection") takes over instead of the click-detail card.
   // Without this, an old TimeArea click sticks indefinitely and blocks the range stats from showing.
   const clearProfilerSelection = useProfilerSelectionStore((s) => s.clear);
-  // Single-tick click sets a tick-kind selection so the cross-panel `focusTick` slot (via
-  // `selectionBridges.bridgeProfilerSelectionAndFocusTick`) tracks the user's pick. The CP tape
-  // then follows that tick across any subsequent viewport change (zoom, pan) until the user does
-  // a different gesture. Range-drag still clears, since at that point the user is exploring a
-  // window, not pinning a tick.
+  // Tick-cell click sets the tick-kind selection (drives DetailPanel's per-tick summary). The
+  // viewport snap to the clicked tick's bounds happens via `commitViewRangeFromGesture` (#345);
+  // there's no `focusTick` cross-panel slot anymore.
   const setProfilerSelection = useProfilerSelectionStore((s) => s.setSelected);
-
-  // In live mode, any explicit user interaction (wheel pan, drag-select, overview pan, ...)
-  // implicitly turns off live-follow — otherwise the next tick batch (≤100 ms later) would snap
-  // both the viewport AND the overview's scroll window back to the live tail and erase the user's
-  // pan. Mirrors the standard "scroll = pause follow" UX in DevTools-style live profilers. The user
-  // re-enables follow via the header toggle.
-  const pauseLiveFollow = useCallback(() => {
-    if (isLive) setLiveFollowActive(false);
-  }, [isLive, setLiveFollowActive]);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wheelCleanupRef = useRef<(() => void) | null>(null);
@@ -206,42 +197,32 @@ export default function TickOverview({ isLive = false }: Props) {
   }, [tickRows]);
 
   // Initial + on-tickRows-change scroll-window setup.
-  // Live mode: snap to tail on first paint and whenever live-follow is active. When the user has
-  // paused follow (by panning, drag-selecting, etc.) we preserve their scroll offset and only
-  // re-clamp it against the new tickRows length — otherwise the 100 ms tick cadence would erase
-  // every pan within one frame.
+  //
+  // Post-#345: live-follow mode is gone. Live and replay modes behave identically — the scroll
+  // window covers as many ticks as fit at BAR_WIDTH starting from index 0 (or wherever the user
+  // has panned to). In live mode, as new ticks arrive the visible window stays anchored to the
+  // user's pan position; the user can scroll right to see new ticks. The viewport (orange overlay)
+  // is the cross-panel time selection, decoupled from this scroll window.
   useEffect(() => {
     if (tickRows.length === 0) {
       scrollRangeRef.current = { startIdx: 0, endIdx: 0 };
       return;
     }
-    if (isLive) {
-      // Cap visibleCount by what fits at BAR_WIDTH — same rule as trace mode below. The previous
-      // hardcoded 200 was unrelated to canvas width and caused inconsistent behavior across modes.
-      const w = canvasWidthRef.current;
-      const maxVisible = w > 0 ? Math.max(1, Math.floor((w - BAR_LEFT_PAD) / BAR_WIDTH)) : tickRows.length;
-      const sr = scrollRangeRef.current;
-      const visibleCount = sr.endIdx - sr.startIdx;
-      if (visibleCount <= 0 || liveFollowActive) {
-        // Auto-scroll ON: snap window to the live tail.
-        const endIdx = tickRows.length;
-        const desiredVisible = Math.min(maxVisible, tickRows.length);
-        const startIdx = Math.max(0, endIdx - desiredVisible);
-        scrollRangeRef.current = { startIdx, endIdx };
-      } else {
-        // Auto-scroll OFF: keep user's pan anchor (sr.startIdx), but let visibleCount grow up to the
-        // cap as new ticks accumulate — otherwise pausing follow at 50 ticks freezes the visible window
-        // at 50 forever even when thousands of ticks land later.
-        const desiredVisible = Math.min(maxVisible, tickRows.length);
-        const startIdx = Math.max(0, Math.min(tickRows.length - desiredVisible, sr.startIdx));
-        scrollRangeRef.current = { startIdx, endIdx: startIdx + desiredVisible };
-      }
+    const w = canvasWidthRef.current;
+    const maxVisible = w > 0 ? Math.max(1, Math.floor((w - BAR_LEFT_PAD) / BAR_WIDTH)) : tickRows.length;
+    const sr = scrollRangeRef.current;
+    const visibleCount = sr.endIdx - sr.startIdx;
+    const desiredVisible = Math.min(maxVisible, tickRows.length);
+    if (visibleCount <= 0) {
+      // First paint — anchor at the start.
+      scrollRangeRef.current = { startIdx: 0, endIdx: desiredVisible };
     } else {
-      const w = canvasWidthRef.current;
-      const visible = w > 0 ? Math.max(1, Math.min(tickRows.length, Math.floor((w - BAR_LEFT_PAD) / BAR_WIDTH))) : tickRows.length;
-      scrollRangeRef.current = { startIdx: 0, endIdx: Math.min(visible, tickRows.length) };
+      // Preserve user's pan anchor; just re-clamp against the new tickRows length so a freshly
+      // grown trace doesn't leave us with `endIdx > tickRows.length`.
+      const startIdx = Math.max(0, Math.min(tickRows.length - desiredVisible, sr.startIdx));
+      scrollRangeRef.current = { startIdx, endIdx: startIdx + desiredVisible };
     }
-  }, [tickRows, isLive, liveFollowActive]);
+  }, [tickRows]);
 
   const render = useCallback(() => {
     const canvas = canvasRef.current;
@@ -350,15 +331,21 @@ export default function TickOverview({ isLive = false }: Props) {
     if (visibleCount <= 0) return;
     const newStart = clampStart(sr.startIdx + deltaTicks, visibleCount);
     if (newStart === sr.startIdx) return;
-    pauseLiveFollow();
     scrollRangeRef.current = { startIdx: newStart, endIdx: newStart + visibleCount };
     scheduleRender();
-  }, [clampStart, pauseLiveFollow, scheduleRender]);
+  }, [clampStart, scheduleRender]);
 
+  // Pan-rate writes (wheel pan/resize, pan-drag) go through the transient slot so the orange
+  // overlay tracks the gesture at 60 Hz while cross-panel consumers wait for the debounced commit.
   const applyViewRange = useCallback((r: TimeRange) => {
-    pauseLiveFollow();
-    setViewRange(r);
-  }, [pauseLiveFollow, setViewRange]);
+    setTransientViewRange(r);
+  }, [setTransientViewRange]);
+
+  // One-shot user intents — drag-select release, single-tick click — commit atomically and bypass
+  // the debounce so SystemDag / CriticalPath / etc. see the new range on the next frame.
+  const commitViewRangeFromGesture = useCallback((r: TimeRange) => {
+    commitViewRange(r);
+  }, [commitViewRange]);
 
   // React attaches wheel handlers as **passive** — `e.preventDefault()` is silently ignored, which lets the
   // browser still fire Ctrl+wheel zoom or page scroll. Attach natively via a `{passive:false}` listener to
@@ -379,8 +366,6 @@ export default function TickOverview({ isLive = false }: Props) {
 
     // Any wheel interaction in live mode = user took control. Disable auto-scroll FIRST so subsequent
     // tick batches don't keep snapping the view to tail and erasing the change we're about to apply.
-    pauseLiveFollow();
-
     const sr = scrollRangeRef.current;
     const visibleCount = sr.endIdx - sr.startIdx;
 
@@ -463,7 +448,6 @@ export default function TickOverview({ isLive = false }: Props) {
       {
         e.preventDefault();
         // Pause auto-follow as soon as the user grabs the scrollbar — same UX as middle-button pan.
-        pauseLiveFollow();
         if (sb.kind === 'track')
         {
           // Click on the track outside the thumb: jump-scroll so the thumb's center lands at the click X.
@@ -517,7 +501,7 @@ export default function TickOverview({ isLive = false }: Props) {
     // Pointer capture keeps the drag live when the cursor leaves the canvas — pointermove/pointerup continue
     // firing on this element until release.
     try { canvas?.setPointerCapture(e.pointerId); } catch { /* safari private mode */ }
-  }, [getCanvasLocal, hitTest, legendsVisible, pauseLiveFollow, scheduleRender, tickRows]);
+  }, [getCanvasLocal, hitTest, legendsVisible, scheduleRender, tickRows]);
 
   const onPointerMove = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
@@ -542,7 +526,6 @@ export default function TickOverview({ isLive = false }: Props) {
         const deltaIdx = -Math.round(dx / barWidth);
         const newStart = clampStart(drag.startStartIdx + deltaIdx, visibleCount);
         if (newStart !== sr.startIdx) {
-          pauseLiveFollow();
           scrollRangeRef.current = { startIdx: newStart, endIdx: newStart + visibleCount };
         }
       } else if (drag.mode === 'scrollbar') {
@@ -656,7 +639,7 @@ export default function TickOverview({ isLive = false }: Props) {
       if (tickTooltipState !== null) setTickTooltipState(null);
     }
     scheduleRender();
-  }, [tickRows, hitTest, clampStart, pauseLiveFollow, scheduleRender, legendsVisible, tickTooltipState, metadata?.header?.baseTickRate]);
+  }, [tickRows, hitTest, clampStart, scheduleRender, legendsVisible, tickTooltipState, metadata?.header?.baseTickRate]);
 
   const onPointerUp = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
     const drag = dragRef.current;
@@ -669,7 +652,9 @@ export default function TickOverview({ isLive = false }: Props) {
         const a = Math.min(drag.startTickIdx, drag.currentTickIdx);
         const b = Math.max(drag.startTickIdx, drag.currentTickIdx);
         if (a >= 0 && b < tickRows.length) {
-          applyViewRange({ startUs: tickRows[a].startUs, endUs: tickRows[b].endUs });
+          // Drag-select release is a one-shot user intent — commit atomically (bypass the
+          // transient/debounce path) so cross-panel consumers see the new range immediately.
+          commitViewRangeFromGesture({ startUs: tickRows[a].startUs, endUs: tickRows[b].endUs });
           // Range-drag = "show me stats for this window". Drop any pinned tick — the user is
           // exploring a range, not focusing a specific tick.
           clearProfilerSelection();
@@ -678,16 +663,19 @@ export default function TickOverview({ isLive = false }: Props) {
         const idx = hitTest(e.clientX);
         if (idx >= 0 && idx < tickRows.length) {
           const tick = tickRows[idx];
-          applyViewRange({ startUs: tick.startUs, endUs: tick.endUs });
-          // Pin the tick so downstream surfaces (CP tape, side panels) keep tracking it across
-          // any subsequent viewport change. Cleared by a fresh range-drag (above) or by clicking
-          // a different tick (this same path overwrites with the new tickNumber).
+          // Tick-cell click commits the viewport to that single tick's bounds — the viewport
+          // visibly snaps to the clicked tick. CriticalPath's `dominantTickInRange(viewRange)`
+          // naturally lands on this tick because it's the only one in range. Replaces the
+          // pre-#345 behaviour where focusTick was set but the viewport stayed put.
+          commitViewRangeFromGesture({ startUs: tick.startUs, endUs: tick.endUs });
+          // Keep the rich tick selection (drives the inspector's per-tick detail card and live
+          // tick spotlight). `focusTick` is gone — CP no longer cares about this slot.
           setProfilerSelection({ kind: 'tick', tickNumber: Number(tick.tickNumber) });
         }
       }
     }
     scheduleRender();
-  }, [tickRows, applyViewRange, hitTest, scheduleRender, clearProfilerSelection, setProfilerSelection]);
+  }, [tickRows, commitViewRangeFromGesture, hitTest, scheduleRender, clearProfilerSelection, setProfilerSelection]);
 
   const onPointerLeave = useCallback(() => {
     // Only clear hover state on leave — in-flight drags are pointer-captured so pointermove still fires.

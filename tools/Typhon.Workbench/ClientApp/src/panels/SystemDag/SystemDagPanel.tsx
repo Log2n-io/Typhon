@@ -3,6 +3,7 @@ import type { IDockviewPanelProps } from 'dockview-react';
 import { useTopology } from '@/hooks/data/useTopology';
 import { useProfilerMetadata } from '@/hooks/profiler/useProfilerMetadata';
 import { useGatingStore } from '@/stores/useGatingStore';
+import { useProfilerViewStore } from '@/stores/useProfilerViewStore';
 import { useSelectionStore } from '@/stores/useSelectionStore';
 import { useSessionStore } from '@/stores/useSessionStore';
 import {
@@ -48,19 +49,17 @@ export default function SystemDagPanel(_props: IDockviewPanelProps) {
   const { data: metadata } = useProfilerMetadata(sessionId);
   const statMode = useDagViewStore((s) => s.statMode);
 
-  // Cross-panel binding (#316 Phase 2 final per `09-system-dag.md §7.1`): the tick range comes
-  // from `useSelectionStore.time`, the same µs window the profiler's TimeArea writes to. The
-  // existing selection-bridge sync (selectionBridges.ts) already mirrors profiler.viewRange ↔
-  // selection.time, so scrubbing the profiler's TimeArea live-updates the DAG aggregations, and
-  // hitting "Snapshot last N ticks" in the DAG (which writes to selection.time) pins the
-  // profiler's TimeArea too.
+  // Cross-panel binding (#345): the tick range comes from `useProfilerViewStore.viewRange` (the
+  // *committed* slot — debounced upstream so pan/zoom doesn't re-trigger the DAG's heavy
+  // aggregations on every gesture frame). The profiler's TimeArea writes the transient slot
+  // during gesture and commits on settle, so scrubbing only kicks DAG aggregations once.
   //
   // Conversion µs → tick happens at the panel boundary; downstream hooks (useSystemStats /
   // useQueueBackpressure / CP / skip-rate) all take TickRange and stay tick-native.
-  const time = useSelectionStore((s) => s.time);
+  const viewRange = useProfilerViewStore((s) => s.viewRange);
   const range = useMemo(
-    () => timeToTickRange(time, metadata?.tickSummaries),
-    [time, metadata],
+    () => timeToTickRange(viewRange, metadata?.tickSummaries),
+    [viewRange, metadata],
   );
 
   const selectedSystemName = useSelectionStore((s) => s.system);

@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
 import type { TimeRange, TrackState } from '@/libs/profiler/model/uiTypes';
+import { useOptionsStore } from '@/stores/useOptionsStore';
 
 /**
  * How the renderer colors span bars on slot lanes. Different lenses on the same data:
@@ -20,15 +21,20 @@ export type SpanColorMode = 'name' | 'thread' | 'depth' | 'duration';
  * session's viewport is meaningless on a different trace.
  */
 interface ProfilerViewState {
-  /** Current viewport (absolute µs timestamps). Session-scoped — not persisted. */
+  /**
+   * Committed viewport (absolute µs timestamps). Every cross-panel consumer subscribes here:
+   * SystemDag / CriticalPath / DataFlow / AccessMatrix / RangeStatsDetail / URL sync. Updated by
+   * the debounced commit of {@link transientViewRange} during pan/zoom, or atomically by
+   * {@link commitViewRange} for programmatic / animation-end writes. Session-scoped — not persisted.
+   */
   viewRange: TimeRange;
   /**
-   * Width of the auto-follow window in µs (live mode). When `liveFollowActive` is true and a new
-   * tick lands, `ProfilerPanel` sets `viewRange = [latest.endUs - liveFollowWindowUs, latest.endUs]`.
-   * Persisted as a UX preference — different traces / engines expose different timescales and the
-   * user may want a wider/narrower follow window per workload.
+   * In-flight viewport written on every wheel notch / drag pixel / rAF zoom-animation frame. Only
+   * TimeArea (canvas + cursor / ruler / hover overlays) and TickOverview's pan handler subscribe
+   * here. Committed into {@link viewRange} after `viewRangeDebounceMs` of idle (see app options).
+   * Session-scoped — not persisted.
    */
-  liveFollowWindowUs: number;
+  transientViewRange: TimeRange;
   /** Toggled by the `g` key. Hides the full gauge region. */
   gaugeRegionVisible: boolean;
   /** Per-system chunk-lanes section visibility. */
@@ -63,8 +69,19 @@ interface ProfilerViewState {
    *  stabilisation — heights change immediately. Persisted UX preference. */
   dynamicTrackHeight: boolean;
 
-  setViewRange: (r: TimeRange) => void;
-  setLiveFollowWindowUs: (us: number) => void;
+  /**
+   * Write the in-flight viewport. Updates {@link transientViewRange} immediately and schedules a
+   * debounced commit into {@link viewRange}. Called on every wheel notch / drag pixel / rAF
+   * animation frame — high frequency. The debounce window is read from
+   * `useOptionsStore.options.profiler.viewRangeDebounceMs` (default 150 ms; 0 = synchronous commit).
+   */
+  setTransientViewRange: (r: TimeRange) => void;
+  /**
+   * Atomically write both slots, bypassing any pending debounce. Use for programmatic writes (URL
+   * deep-link, "Snapshot last N ticks", animation end, metadata-arrival reset) where consumers
+   * should see the change immediately rather than after the debounce window.
+   */
+  commitViewRange: (r: TimeRange) => void;
   toggleGaugeRegion: () => void;
   togglePerSystemLanes: () => void;
   setGaugeCollapse: (groupId: string, state: TrackState) => void;
@@ -94,14 +111,33 @@ const safeStorage = createJSONStorage(() => ({
   },
 }));
 
-const INITIAL_VIEW_RANGE: TimeRange = { startUs: 0, endUs: 1_000_000 };
-const DEFAULT_LIVE_FOLLOW_WINDOW_US = 1_000_000; // 1 s of history visible while live-following.
+// Initial state = the "no selection" sentinel. The rest of the system treats `endUs <= startUs`
+// as "nothing selected" (TickOverview hides the overlay, SystemDag/CriticalPath skip aggregations,
+// ProfilerPanel's first-tick init commits the first tick). Pre-#345 this was `{0, 1_000_000}` —
+// non-degenerate, which meant TimeArea's globalMetrics fallback kicked in and rendered the full
+// trace by default; not great for large captures.
+const INITIAL_VIEW_RANGE: TimeRange = { startUs: 0, endUs: 0 };
+const DEFAULT_VIEW_RANGE_DEBOUNCE_MS = 150;
+
+// Module-level commit timer. Shared across the store instance so successive
+// `setTransientViewRange` calls coalesce into one commit. Cleared by both setters.
+let commitTimer: ReturnType<typeof setTimeout> | null = null;
+
+function readDebounceMs(): number {
+  // Server clamps to [0, 5000] via the [Range] attribute on `ProfilerOptions.ViewRangeDebounceMs`;
+  // the defensive clamp + Number.isFinite check below catches the (impossible) case where the
+  // server is older than the client and the field is missing from the response — fall back to the
+  // default rather than crash.
+  const v = useOptionsStore.getState().options.profiler.viewRangeDebounceMs;
+  if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) return DEFAULT_VIEW_RANGE_DEBOUNCE_MS;
+  return Math.min(5000, v);
+}
 
 export const useProfilerViewStore = create<ProfilerViewState>()(
   persist(
-    (set) => ({
+    (set, get) => ({
       viewRange: INITIAL_VIEW_RANGE,
-      liveFollowWindowUs: DEFAULT_LIVE_FOLLOW_WINDOW_US,
+      transientViewRange: INITIAL_VIEW_RANGE,
       gaugeRegionVisible: true,
       perSystemLanesVisible: true,
       gaugeCollapse: {},
@@ -110,8 +146,33 @@ export const useProfilerViewStore = create<ProfilerViewState>()(
       spanColorMode: 'name',
       dynamicTrackHeight: true,
 
-      setViewRange: (r) => set({ viewRange: r }),
-      setLiveFollowWindowUs: (us) => set({ liveFollowWindowUs: Math.max(1, us) }),
+      setTransientViewRange: (r) => {
+        set({ transientViewRange: r });
+        if (commitTimer !== null) {
+          clearTimeout(commitTimer);
+          commitTimer = null;
+        }
+        const ms = readDebounceMs();
+        if (ms <= 0) {
+          // Synchronous commit — useful for tests, and for users who want zero-lag behaviour at
+          // the cost of fluidity (configurable via the Profiler options dialog).
+          set({ viewRange: r });
+          return;
+        }
+        commitTimer = setTimeout(() => {
+          commitTimer = null;
+          // Read the latest transient at fire time, not the captured `r`, so the commit reflects
+          // the user's final position rather than an intermediate frame.
+          set({ viewRange: get().transientViewRange });
+        }, ms);
+      },
+      commitViewRange: (r) => {
+        if (commitTimer !== null) {
+          clearTimeout(commitTimer);
+          commitTimer = null;
+        }
+        set({ transientViewRange: r, viewRange: r });
+      },
       toggleGaugeRegion: () => set((s) => ({ gaugeRegionVisible: !s.gaugeRegionVisible })),
       togglePerSystemLanes: () => set((s) => ({ perSystemLanesVisible: !s.perSystemLanesVisible })),
       setGaugeCollapse: (groupId, state) =>
@@ -174,10 +235,10 @@ export const useProfilerViewStore = create<ProfilerViewState>()(
     {
       name: 'workbench-profiler-view',
       storage: safeStorage,
-      version: 3,
-      // Only persist UX preferences; viewRange is session-scoped and reset on each open.
+      version: 4,
+      // Only persist UX preferences; viewRange / transientViewRange are session-scoped and reset
+      // on each open (never appear in `partialize`).
       partialize: (s) => ({
-        liveFollowWindowUs: s.liveFollowWindowUs,
         gaugeRegionVisible: s.gaugeRegionVisible,
         perSystemLanesVisible: s.perSystemLanesVisible,
         gaugeCollapse: s.gaugeCollapse,
@@ -191,9 +252,15 @@ export const useProfilerViewStore = create<ProfilerViewState>()(
       //   Defaults are empty maps (= every track visible). Pre-v2 persisted state has neither field,
       //   which the spread initializer in the constructor handles cleanly.
       // v2 → v3: added dynamicTrackHeight (default true). Missing field defaults to true.
+      // v3 → v4 (#345 Step 8): dropped `liveFollowWindowUs` — live-follow mode is gone. The spread
+      //   initialiser would already filter the field out of runtime state, but we delete it from
+      //   the persisted blob explicitly so localStorage doesn't carry an orphan key forever.
       migrate: (persisted: unknown, fromVersion: number): Partial<ProfilerViewState> | undefined => {
         if (!persisted || typeof persisted !== 'object') return undefined;
-        const p = persisted as Partial<ProfilerViewState> & { gaugeCollapse?: Record<string, unknown> };
+        const p = persisted as Partial<ProfilerViewState> & {
+          gaugeCollapse?: Record<string, unknown>;
+          liveFollowWindowUs?: number;
+        };
         if (fromVersion < 1 && p.gaugeCollapse) {
           const migrated: Record<string, TrackState> = {};
           for (const [id, v] of Object.entries(p.gaugeCollapse)) {
@@ -212,6 +279,9 @@ export const useProfilerViewStore = create<ProfilerViewState>()(
         }
         if (fromVersion < 3) {
           p.dynamicTrackHeight = p.dynamicTrackHeight ?? true;
+        }
+        if (fromVersion < 4) {
+          delete p.liveFollowWindowUs;
         }
         return p;
       },

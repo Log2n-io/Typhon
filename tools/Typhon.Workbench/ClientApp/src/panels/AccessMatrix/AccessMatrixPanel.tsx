@@ -5,6 +5,7 @@ import { useTopology } from '@/hooks/data/useTopology';
 import { useProfilerMetadata } from '@/hooks/profiler/useProfilerMetadata';
 import { REFRESH_DEBOUNCE_MS, useDebouncedValue, useTickGatedSnapshot } from '@/hooks/useTickGatedSnapshot';
 import { useProfilerSessionStore } from '@/stores/useProfilerSessionStore';
+import { useProfilerViewStore } from '@/stores/useProfilerViewStore';
 import { useSelectionStore } from '@/stores/useSelectionStore';
 import { useSessionStore } from '@/stores/useSessionStore';
 import { findTickRangeSlice } from '@/panels/DataFlow/tickRangeFilter';
@@ -45,14 +46,15 @@ export default function AccessMatrixPanel(_props: IDockviewPanelProps) {
   const { data: topology } = useTopology(sessionId);
   const { data: liveMetadata } = useProfilerMetadata(sessionId);
   // Tick-gated debounced snapshot — same pattern as DataFlowPanel. Heavy memos below (touchSlice,
-  // baseMatrix, orderedColumns/Rows) only recompute when the latest tick advances OR the user changes
-  // the time selection, debounced (see REFRESH_DEBOUNCE_MS) to coalesce live-stream bursts.
+  // baseMatrix, orderedColumns/Rows) only recompute when the latest tick advances on the live
+  // stream, debounced (see REFRESH_DEBOUNCE_MS) to coalesce live-stream bursts. Post-#345: the
+  // user-pan/zoom portion is gone — viewRange is debounced upstream so we read it directly.
   const latestTickNumber = useProfilerSessionStore((s) => s.latestTickNumber);
-  const liveTime = useSelectionStore((s) => s.time);
-  const refreshKey = `${latestTickNumber}|${liveTime?.start ?? '-'}|${liveTime?.end ?? '-'}`;
+  const refreshKey = `${latestTickNumber}`;
   const debouncedRefreshKey = useDebouncedValue(refreshKey, REFRESH_DEBOUNCE_MS);
   const metadata = useTickGatedSnapshot(liveMetadata, debouncedRefreshKey);
-  const time = useTickGatedSnapshot(liveTime, debouncedRefreshKey);
+  // Committed slot — upstream debounce already coalesces pan/zoom bursts.
+  const time = useProfilerViewStore((s) => s.viewRange);
 
   const granularityLevel = useAccessMatrixViewStore((s) => s.granularityLevel);
   const rowSort = useAccessMatrixViewStore((s) => s.rowSort);
