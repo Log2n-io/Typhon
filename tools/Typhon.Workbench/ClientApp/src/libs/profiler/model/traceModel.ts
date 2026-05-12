@@ -745,6 +745,29 @@ export function processTickEvents(tickNumber: number, events: TraceEvent[], syst
       }
 
       default: {
+        // SchedulerSystemArchetype (kind 245) — per-(system, archetype, tick) entity-touch rollup. Emitted from
+        // TyphonRuntime.OnSystemEndInternal on whichever worker thread completed the last chunk; its timestamps cover the
+        // full parallel-query bracket (FirstChunkGrabTick → LastChunkDoneTick), so rendering it on the completer's lane
+        // misrepresents per-worker activity (a 1.9 ms span "running" on worker-12 that actually describes work distributed
+        // across 16 workers). Skip the span-push path; consumers that want the rollup read it from `rawEvents`.
+        if ((evt.kind as number) === 245) {
+          break;
+        }
+
+        // QueryPlan per-tick variant (kind 189 with OwnerSystemIdx present) — emitted by TyphonRuntime.OnSystemEnd around
+        // the whole system body for pull-mode/system-input views. Conceptually a system-scope wrapper, not a thread-scope
+        // span, so it doesn't belong on the worker lane that happened to complete the last chunk. Hide it from worker
+        // lanes; the Execution Inspector and Query Catalog read it directly from `rawEvents` so the data isn't lost.
+        //
+        // Detection: the decoder only sets `evt.systemIndex` for kind 189 when the OwnerSystemIdx optional-field mask
+        // bit (0x20) is present in the payload — which is precisely the per-tick variant. The in-execution QueryPlan
+        // emitted by PlanBuilder leaves the mask bit clear → systemIndex undefined → falls through to normal span
+        // rendering on whatever thread did the query work. System index 0 is a valid per-tick owner, hence the explicit
+        // `!== undefined` check rather than `> 0`.
+        if ((evt.kind as number) === 189 && evt.systemIndex !== undefined) {
+          break;
+        }
+
         // Every other span kind (≥ 10) is surfaced as a generic SpanData entry — spans already carry duration directly.
         if (evt.kind >= 10 && evt.durationUs !== undefined) {
           const duration = evt.durationUs;

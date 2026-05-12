@@ -465,6 +465,14 @@ function TickDetail({ tickNumber }: { tickNumber: number }): React.JSX.Element {
           <p className="text-[11px] text-muted-foreground">Summary not loaded.</p>
         )}
       </div>
+
+      {/* Mirror the no-selection fallback's per-system breakdown so a tick click doesn't trade away the
+          system-level view that range-drag preserves. The producer (`useProfilerStatsWriter`) keys off
+          `viewRange`; clicking a tick in TickOverview narrows the viewport to exactly that tick, so the
+          card reads "top systems within this tick" without any tick-scoped recompute. Clicks from the
+          TimeArea don't narrow viewport, in which case the card reflects the wider viewport — still the
+          most useful aggregate when a tick is what's pinned. */}
+      <TopSystemsCard />
     </div>
   );
 }
@@ -613,10 +621,6 @@ function RangeStatsDetail(): React.JSX.Element {
   // milliseconds-since-trace-start, matching the ruler's labels.
   const globalStartUs = useGlobalStartUs();
   const stats = useProfilerStatsStore((s) => s.stats);
-  // Worker count drives the colour-coding on the parallel-width column in the Top Systems table —
-  // without it we don't know what "good" parallelism looks like for this trace. Fall back to 0
-  // (no colour, just the raw ratio) when metadata hasn't loaded yet.
-  const workerCount = useProfilerSessionStore((s) => Number(s.metadata?.header?.workerCount ?? 0));
   const viewRange = useProfilerViewStore((s) => s.viewRange);
   const hasViewRange = viewRange.endUs > viewRange.startUs;
   if (stats === null) {
@@ -676,59 +680,77 @@ function RangeStatsDetail(): React.JSX.Element {
         </dl>
       </div>
 
-      {/* Top systems by total chunk time. Wall-clock time first (latency cost), CPU time second
-          (resource cost), parallel-width ratio (cpu/wall) last with colour coded against the
-          worker pool size — green when the system is using most of the pool, red when it's
-          parallel-but-underused. Single-threaded systems naturally land at ~1.0 → green when
-          worker pool itself is 1, otherwise neutral. */}
-      <div className="rounded-md border border-border bg-card p-3 text-[12px]">
-        <div className="mb-2 flex items-baseline justify-between border-b border-border pb-1">
-          <h4 className="text-[12px] font-semibold text-foreground">Top systems</h4>
-          {workerCount > 0 && (
-            <span className="font-mono text-[10px] text-muted-foreground" title="Worker pool size — drives the parallel-width colour">
-              pool: {workerCount}
-            </span>
-          )}
-        </div>
-        {stats.topSystemsByTotal.length === 0 ? (
-          <p className="text-[11px] text-muted-foreground">No chunks in range.</p>
-        ) : (
-          <table className="w-full text-[11px]">
-            <thead>
-              <tr className="text-left text-muted-foreground">
-                <th className="font-normal">System</th>
-                <th className="font-normal text-right" title="Σ wall-clock time the system occupied across the range (latency cost)">Wall</th>
-                <th className="font-normal text-right" title="Σ chunk durations across all workers (resource cost)">CPU</th>
-                <th className="font-normal text-right" title="Pool saturation while the system runs: (CPU/Wall) ÷ workerCount. 100% = every worker busy whenever this system runs. — = single-threaded by design.">Eff</th>
-                <th className="font-normal text-right">Count</th>
-              </tr>
-            </thead>
-            <tbody>
-              {stats.topSystemsByTotal.map((s) => {
-                const ratio = s.totalWallUs > 0 ? s.totalCpuUs / s.totalWallUs : 0;
-                return (
-                  <tr key={s.systemIndex} className="border-t border-border/50">
-                    <td className="truncate font-mono text-foreground" title={s.systemName}>{s.systemName || `System ${s.systemIndex}`}</td>
-                    <td className="text-right font-mono tabular-nums text-foreground">{formatDurationUs(s.totalWallUs)}</td>
-                    <td className="text-right font-mono tabular-nums text-foreground">{formatDurationUs(s.totalCpuUs)}</td>
-                    <td
-                      className={`text-right font-mono tabular-nums ${parallelWidthClass(ratio, workerCount)}`}
-                      title={parallelWidthTooltip(ratio, workerCount)}
-                    >
-                      {formatEfficiency(ratio, workerCount)}
-                    </td>
-                    <td className="text-right font-mono tabular-nums text-foreground">{s.count.toLocaleString()}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        )}
-      </div>
+      <TopSystemsCard />
 
       {/* Note: the sortable Top-N expensive-spans table lives in its own dock panel
           (`TopSpansPanel`) — it needs horizontal room (7 columns) that this narrow
           right-detail strip can't give it without forcing the user to widen the column. */}
+    </div>
+  );
+}
+
+/**
+ * Per-system aggregation card — Wall (latency cost), CPU (resource cost), Eff (pool saturation,
+ * colour-coded against worker count), Count. Reused by both the no-selection range fallback
+ * (RangeStatsDetail) and the tick-selected detail (TickDetail) so the system-level view stays
+ * available regardless of whether the user range-dragged or single-clicked a tick on the overview
+ * strip — fixing the asymmetry where a click cleared this panel but a drag preserved it.
+ *
+ * Reads pre-aggregated stats from `useProfilerStatsStore`; the producer key is `viewRange`, so when
+ * a tick click narrows viewport to that tick the card naturally reflects per-tick aggregates.
+ */
+function TopSystemsCard(): React.JSX.Element {
+  const stats = useProfilerStatsStore((s) => s.stats);
+  // Worker count drives the colour-coding on the parallel-width column in the Top Systems table —
+  // without it we don't know what "good" parallelism looks like for this trace. Fall back to 0
+  // (no colour, just the raw ratio) when metadata hasn't loaded yet.
+  const workerCount = useProfilerSessionStore((s) => Number(s.metadata?.header?.workerCount ?? 0));
+  return (
+    <div className="rounded-md border border-border bg-card p-3 text-[12px]">
+      <div className="mb-2 flex items-baseline justify-between border-b border-border pb-1">
+        <h4 className="text-[12px] font-semibold text-foreground">Top systems</h4>
+        {workerCount > 0 && (
+          <span className="font-mono text-[10px] text-muted-foreground" title="Worker pool size — drives the parallel-width colour">
+            pool: {workerCount}
+          </span>
+        )}
+      </div>
+      {stats === null ? (
+        <p className="text-[11px] text-muted-foreground">Computing…</p>
+      ) : stats.topSystemsByTotal.length === 0 ? (
+        <p className="text-[11px] text-muted-foreground">No chunks in range.</p>
+      ) : (
+        <table className="w-full text-[11px]">
+          <thead>
+            <tr className="text-left text-muted-foreground">
+              <th className="font-normal">System</th>
+              <th className="font-normal text-right" title="Σ wall-clock time the system occupied across the range (latency cost)">Wall</th>
+              <th className="font-normal text-right" title="Σ chunk durations across all workers (resource cost)">CPU</th>
+              <th className="font-normal text-right" title="Pool saturation while the system runs: (CPU/Wall) ÷ workerCount. 100% = every worker busy whenever this system runs. — = single-threaded by design.">Eff</th>
+              <th className="font-normal text-right">Count</th>
+            </tr>
+          </thead>
+          <tbody>
+            {stats.topSystemsByTotal.map((s) => {
+              const ratio = s.totalWallUs > 0 ? s.totalCpuUs / s.totalWallUs : 0;
+              return (
+                <tr key={s.systemIndex} className="border-t border-border/50">
+                  <td className="truncate font-mono text-foreground" title={s.systemName}>{s.systemName || `System ${s.systemIndex}`}</td>
+                  <td className="text-right font-mono tabular-nums text-foreground">{formatDurationUs(s.totalWallUs)}</td>
+                  <td className="text-right font-mono tabular-nums text-foreground">{formatDurationUs(s.totalCpuUs)}</td>
+                  <td
+                    className={`text-right font-mono tabular-nums ${parallelWidthClass(ratio, workerCount)}`}
+                    title={parallelWidthTooltip(ratio, workerCount)}
+                  >
+                    {formatEfficiency(ratio, workerCount)}
+                  </td>
+                  <td className="text-right font-mono tabular-nums text-foreground">{s.count.toLocaleString()}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
     </div>
   );
 }

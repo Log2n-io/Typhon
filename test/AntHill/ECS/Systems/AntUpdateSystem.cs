@@ -32,6 +32,7 @@ internal sealed class AntUpdateSystem : QuerySystem
         .Name("AntUpdate")
         .Phase(AntPhases.Simulation)
         .Parallel()
+        .ChunksPerWorker(2f)
         // Component access — single writer across (Bounds, Velocity, AntState); Genetics read-only post-spawn.
         .Reads<Genetics>()
         .Writes<WorldBounds>()

@@ -342,6 +342,10 @@ export const SpanKindNames: Record<number, string> = {
   // in `traceModel.ts` — this entry is only the `Kind[N]`-fallback safety net.
   243: 'Runtime.Phase',
   244: 'Queue.TickEnd',
+  // Per-(system, archetype) entity-touch rollup emitted at parallel-query completion. Span covers the
+  // first-chunk-start → last-chunk-end bracket. See `SchedulerSystemArchetypeEvent.cs` /
+  // TraceEventKind.SchedulerSystemArchetype (= 245). Feeds the Data Flow `system-archetype/*` tracks.
+  245: 'Scheduler.System.Archetype',
 
   // Runtime subtree (161-164, 235-240).
   161: 'Runtime.Phase.UoWCreate',
