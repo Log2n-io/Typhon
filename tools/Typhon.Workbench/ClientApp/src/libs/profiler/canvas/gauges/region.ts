@@ -12,7 +12,6 @@ import { GAUGE_PALETTE } from '../canvasUtils';
 
 /** Canonical IDs — used as `TrackLayout.id`, view-store keys, and the click-handler argument. */
 export const GAUGE_TRACK_IDS = {
-  Gc: 'gauge-gc',
   Memory: 'gauge-memory',
   Persistence: 'gauge-persistence',
   Transient: 'gauge-transient',
@@ -34,13 +33,16 @@ export interface GaugeGroupSpec {
 }
 
 /**
- * Six gauge groups in render order. GC / Memory / Page Cache default to `expanded` (primary
+ * Five gauge groups in render order. Memory / Page Cache default to `expanded` (primary
  * signals, opened on first load); Transient / WAL / Tx+UoW default to `summary` (secondary
  * signals; user expands on demand). Accent colours are picked from `GAUGE_PALETTE` so each group
  * is visually distinct both from its neighbours AND from the hues used inside its own chart.
+ *
+ * The dedicated GC track was removed — GC suspension overlays + per-event markers live inside the
+ * Memory track now (heap composition + GC events are tightly correlated, and the per-tick pause-bar
+ * was visually misleading at any zoom where it was big enough to read).
  */
 export const GAUGE_GROUPS: readonly GaugeGroupSpec[] = [
-  { id: GAUGE_TRACK_IDS.Gc,          label: 'GC',                  accentColor: GAUGE_PALETTE[2], expandedHeight: 40, defaultState: 'expanded' },
   { id: GAUGE_TRACK_IDS.Memory,      label: 'Memory',              accentColor: GAUGE_PALETTE[1], expandedHeight: 80, defaultState: 'expanded' },
   { id: GAUGE_TRACK_IDS.Persistence, label: 'Page Cache',          accentColor: GAUGE_PALETTE[4], expandedHeight: 60, defaultState: 'expanded' },
   { id: GAUGE_TRACK_IDS.Transient,   label: 'Transient Store',     accentColor: GAUGE_PALETTE[6], expandedHeight: 24, defaultState: 'summary'  },

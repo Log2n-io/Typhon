@@ -24,7 +24,7 @@ import {
   type MarkerPoint,
   type StackedAreaLayer,
 } from './draw';
-import { type GaugeGroupSpec } from './region';
+import { getGaugeGroupSpec, type GaugeGroupSpec } from './region';
 
 /**
  * Per-category gauge-group rendering — ported from the old profiler's `gaugeGroupRenderers.ts`.
@@ -207,7 +207,15 @@ const HEAP_GEN_COLOR_INDICES = [2, 3, 4, 5, 6] as const;
 const UNMANAGED_COLOR_INDEX = 0;
 const PEAK_COLOR_INDEX = 7;
 
-function renderMemoryGroup(cx: GaugeRenderContext): void {
+/**
+ * Memory group renderer. `memoryAlpha` scales the opacity of the memory shapes (heap stacked area,
+ * unmanaged area, live-blocks line, alloc-event markers) — the GC overlay always renders at its
+ * native opacity. Used by:
+ *   - expanded / double states (`memoryAlpha = 1`) — full Memory chart + GC overlay
+ *   - summary state (`memoryAlpha = 0.5`) — same content, scaled to summary strip height,
+ *     memory shapes muted so the GC overlay stays prominent at small height.
+ */
+function renderMemoryGroup(cx: GaugeRenderContext, memoryAlpha: number = 1): void {
   const gauges = cx.theme.gauges;
   const gen0 = getSeries(cx.gaugeData, GaugeId.GcHeapGen0Bytes);
   const gen1 = getSeries(cx.gaugeData, GaugeId.GcHeapGen1Bytes);
@@ -227,6 +235,14 @@ function renderMemoryGroup(cx: GaugeRenderContext): void {
   const heapRow = rows[0];
   const unmanagedRow = rows[1];
   const markersRow = rows[2];
+
+  // Memory shapes are wrapped in a globalAlpha scope so the summary-strip path can mute them
+  // (0.5) to keep the GC overlay prominent at small height. Expanded path uses 1 (no effect).
+  const dim = memoryAlpha < 1;
+  if (dim) {
+    cx.ctx.save();
+    cx.ctx.globalAlpha = memoryAlpha;
+  }
 
   // Row 1: heap composition stacked area
   if (gen0 || gen1 || gen2 || loh || poh) {
@@ -275,6 +291,76 @@ function renderMemoryGroup(cx: GaugeRenderContext): void {
     );
     drawMarkers(cx.ctx, markers, cx.vp, cx.labelWidth, markersRow);
   }
+
+  if (dim) cx.ctx.restore();
+
+  // GC overlay — moved here from the (removed) dedicated GC track. Lives on top of the Memory rows
+  // because GC events are tightly correlated with heap state (a Gen2 collection should visibly drop
+  // the Gen2 area below). The suspension rect's X = the actual EE-suspended window (start..start+duration),
+  // not the tick width — so what you see IS what got paused.
+  // Rendered AFTER the dim-restore so the GC overlay's own alpha (0.6) isn't multiplied by memoryAlpha
+  // — the GC layer should stay prominent even when memory shapes are muted.
+  drawGcOverlay(cx, cx.layout, 0.6);
+}
+
+/**
+ * GC overlay drawer — used by both expanded {@link renderMemoryGroup} (alpha ~0.6) and the
+ * collapsed summary strip (alpha ~0.5, smaller markers). `bandAlpha` is the alpha of the suspension
+ * rectangle; markers always render at full opacity.
+ */
+function drawGcOverlay(cx: GaugeRenderContext, row: GaugeTrackLayout, bandAlpha: number): void {
+  const { gcEvents, gcSuspensions } = cx.gaugeData;
+  if (gcEvents.length === 0 && gcSuspensions.length === 0) return;
+
+  const viewStartUs = cx.vp.offsetX;
+  const viewEndUs = cx.vp.offsetX + row.width / Math.max(cx.vp.scaleX, 0.001);
+
+  cx.ctx.save();
+  cx.ctx.beginPath();
+  cx.ctx.rect(row.x, row.y, row.width, row.height);
+  cx.ctx.clip();
+
+  // 1) Suspension rectangles — X = actual pause extent. Full row height, semi-transparent so the
+  // underlying heap/unmanaged charts still read through.
+  if (gcSuspensions.length > 0) {
+    cx.ctx.globalAlpha = bandAlpha;
+    cx.ctx.fillStyle = GC_PAUSE_COLOR;
+    for (const s of gcSuspensions) {
+      const sEnd = s.startUs + s.durationUs;
+      if (sEnd <= viewStartUs) continue;
+      if (s.startUs >= viewEndUs) break;
+      const x1 = toPixelX(s.startUs, cx.vp, cx.labelWidth);
+      const x2 = toPixelX(sEnd, cx.vp, cx.labelWidth);
+      const w = Math.max(1, x2 - x1);
+      cx.ctx.fillRect(x1, row.y, w, row.height);
+    }
+    cx.ctx.globalAlpha = 1;
+  }
+
+  // 2) GcStart triangles + GcEnd circles — gen-coloured, top-aligned to the row. Marker size
+  // scales with the row so the collapsed summary gets thinner glyphs that don't overflow.
+  if (gcEvents.length > 0) {
+    const markerSize = Math.max(2, Math.min(4, Math.floor(row.height / 6)));
+    const markerY = row.y + markerSize + 1;
+    for (const e of gcEvents) {
+      if (e.timestampUs < viewStartUs) continue;
+      if (e.timestampUs > viewEndUs) break;
+      const px = toPixelX(e.timestampUs, cx.vp, cx.labelWidth);
+      cx.ctx.fillStyle = gcGenColor(e.generation, cx.theme.gauges);
+      cx.ctx.beginPath();
+      if (e.kind === 7 /* GcStart */) {
+        cx.ctx.moveTo(px, markerY - markerSize);
+        cx.ctx.lineTo(px - markerSize, markerY + markerSize);
+        cx.ctx.lineTo(px + markerSize, markerY + markerSize);
+        cx.ctx.closePath();
+      } else {
+        cx.ctx.arc(px, markerY, Math.max(1, markerSize - 1), 0, Math.PI * 2);
+      }
+      cx.ctx.fill();
+    }
+  }
+
+  cx.ctx.restore();
 }
 
 // ───────────────────────────────────────────────────────────────────────────────────────────────
@@ -334,7 +420,7 @@ function renderPageCacheGroup(cx: GaugeRenderContext): void {
 }
 
 // ───────────────────────────────────────────────────────────────────────────────────────────────
-// GC group
+// GC overlay constants — used by drawGcOverlay (Memory track) + the GC tooltip lines.
 // ───────────────────────────────────────────────────────────────────────────────────────────────
 
 // Cool→warm ladder: Gen0 teal (frequent/fast), Gen1 green (moderate), Gen2+ yellow (STW likely).
@@ -349,133 +435,11 @@ function gcGenColor(generation: number, gauges: readonly string[]): string {
   return gauges[idx];
 }
 
-// GC pause-per-tick bar colour. Identity constant — deliberately off the Viridis palette so pause
-// bars can't be confused with generation-specific markers. Same literal as PageCache Exclusive.
+// GC suspension rectangle colour. Identity constant — deliberately off the Viridis palette so the
+// suspension overlay can't be confused with generation-specific markers. Same literal as PageCache
+// Exclusive.
 const GC_PAUSE_COLOR = CACHE_EXCLUSIVE_COLOR;
 
-/**
- * Per-tick GC pause-time series, memoised per tick array identity. For each tick, sums the
- * overlap (µs) of every GcSuspension span with that tick's time window. Two-pointer O(T + S).
- */
-const _gcPauseSeriesCache = new WeakMap<object, GaugeSample[]>();
-function getPerTickPauseSeries(ticks: readonly TickData[], suspensions: readonly GcSuspensionEvent[]): GaugeSample[] {
-  const cached = _gcPauseSeriesCache.get(ticks);
-  if (cached) return cached;
-
-  const result: GaugeSample[] = [];
-  if (ticks.length === 0) {
-    _gcPauseSeriesCache.set(ticks, result);
-    return result;
-  }
-
-  let sIdx = 0;
-  for (let tIdx = 0; tIdx < ticks.length; tIdx++) {
-    const tick = ticks[tIdx];
-    const tickStart = tick.startUs;
-    const tickEnd = tick.endUs;
-    let totalPauseUs = 0;
-    for (let i = sIdx; i < suspensions.length && suspensions[i].startUs < tickEnd; i++) {
-      const s = suspensions[i];
-      const sEnd = s.startUs + s.durationUs;
-      if (sEnd > tickStart) {
-        const overlapStart = Math.max(s.startUs, tickStart);
-        const overlapEnd = Math.min(sEnd, tickEnd);
-        totalPauseUs += overlapEnd - overlapStart;
-      }
-    }
-    while (sIdx < suspensions.length && suspensions[sIdx].startUs + suspensions[sIdx].durationUs <= tickEnd) {
-      sIdx++;
-    }
-    result.push({ tickNumber: tick.tickNumber, timestampUs: tick.startUs, value: totalPauseUs });
-  }
-
-  _gcPauseSeriesCache.set(ticks, result);
-  return result;
-}
-
-function renderGcGroup(cx: GaugeRenderContext): void {
-  const gcEvents = cx.gaugeData.gcEvents;
-  const gcSuspensions = cx.gaugeData.gcSuspensions;
-
-  if (gcEvents.length === 0 && gcSuspensions.length === 0) {
-    drawNoDataMessage(cx.ctx, cx.layout, `${cx.spec.label} — no GC activity captured (enable Typhon:Profiler:GcTracing:Enabled)`, cx.theme);
-    return;
-  }
-
-  const [bodyRow] = splitRows(cx.layout, [1]);
-
-  // Primary: per-tick pause-time bars.
-  const pauseSeries = getPerTickPauseSeries(cx.ticks, gcSuspensions);
-  if (pauseSeries.length > 0 && cx.ticks.length === pauseSeries.length) {
-    let maxPause = 0;
-    for (const s of pauseSeries) if (s.value > maxPause) maxPause = s.value;
-    if (maxPause > 0) {
-      const yMax = maxPause * 1.1;
-      const viewStartUs = cx.vp.offsetX;
-      const viewEndUs = cx.vp.offsetX + bodyRow.width / Math.max(cx.vp.scaleX, 0.001);
-      const bodyBottom = bodyRow.y + bodyRow.height;
-
-      cx.ctx.save();
-      cx.ctx.beginPath();
-      cx.ctx.rect(bodyRow.x, bodyRow.y, bodyRow.width, bodyRow.height);
-      cx.ctx.clip();
-      cx.ctx.fillStyle = GC_PAUSE_COLOR;
-
-      for (let i = 0; i < cx.ticks.length; i++) {
-        const pause = pauseSeries[i].value;
-        if (pause <= 0) continue;
-        const tick = cx.ticks[i];
-        if (tick.endUs < viewStartUs) continue;
-        if (tick.startUs > viewEndUs) break;
-        const x1 = toPixelX(tick.startUs, cx.vp, cx.labelWidth);
-        const x2 = toPixelX(tick.endUs, cx.vp, cx.labelWidth);
-        const barW = Math.max(1, x2 - x1);
-        const ratio = pause / yMax;
-        const barH = ratio * bodyRow.height;
-        const yTop = bodyBottom - barH;
-        cx.ctx.fillRect(x1, yTop, barW, barH);
-      }
-      cx.ctx.restore();
-
-      drawTrackAxis(cx.ctx, 0, yMax, 'duration', bodyRow, cx.labelWidth, cx.theme.mutedForeground);
-    }
-  }
-
-  // Markers: GcStart triangles + GcEnd dots, colour-coded by generation.
-  if (gcEvents.length > 0) {
-    cx.ctx.save();
-    cx.ctx.beginPath();
-    cx.ctx.rect(bodyRow.x, bodyRow.y, bodyRow.width, bodyRow.height);
-    cx.ctx.clip();
-    const markerY = bodyRow.y + 5;
-    for (const e of gcEvents) {
-      const px = toPixelX(e.timestampUs, cx.vp, cx.labelWidth);
-      if (px < bodyRow.x - 4 || px > bodyRow.x + bodyRow.width + 4) continue;
-      cx.ctx.fillStyle = gcGenColor(e.generation, cx.theme.gauges);
-      cx.ctx.beginPath();
-      if (e.kind === 7 /* GcStart */) {
-        cx.ctx.moveTo(px, markerY - 4);
-        cx.ctx.lineTo(px - 4, markerY + 4);
-        cx.ctx.lineTo(px + 4, markerY + 4);
-        cx.ctx.closePath();
-      } else {
-        cx.ctx.arc(px, markerY, 3, 0, Math.PI * 2);
-      }
-      cx.ctx.fill();
-    }
-    cx.ctx.restore();
-  }
-
-  // Legend — the shape-key entries use theme.gaugeLegendText so "shape alone conveys meaning".
-  drawLegendIfVisible(cx, [
-    { color: GC_PAUSE_COLOR,          label: 'pause / tick' },
-    { color: cx.theme.gaugeLegendText, label: 'start', shape: 'triangle' },
-    { color: cx.theme.gaugeLegendText, label: 'end',   shape: 'circle' },
-    { color: gcGenColor(0, cx.theme.gauges), label: 'Gen0' },
-    { color: gcGenColor(1, cx.theme.gauges), label: 'Gen1' },
-    { color: gcGenColor(2, cx.theme.gauges), label: 'Gen2+' },
-  ], cx.layout);
-}
 
 // ───────────────────────────────────────────────────────────────────────────────────────────────
 // Transient Store group
@@ -681,7 +645,6 @@ function renderTxUowGroup(cx: GaugeRenderContext): void {
 // ───────────────────────────────────────────────────────────────────────────────────────────────
 
 export const GROUP_RENDERERS: Record<string, GroupRenderer> = {
-  'gauge-gc': renderGcGroup,
   'gauge-memory': renderMemoryGroup,
   'gauge-persistence': renderPageCacheGroup,
   'gauge-transient': renderTransientGroup,
@@ -690,7 +653,6 @@ export const GROUP_RENDERERS: Record<string, GroupRenderer> = {
 };
 
 const SUMMARY_PRIMARY_GAUGE: Record<string, GaugeId> = {
-  'gauge-gc':          GaugeId.GcHeapCommittedBytes,
   'gauge-memory':      GaugeId.MemoryUnmanagedTotalBytes,
   'gauge-persistence': GaugeId.PageCacheDirtyUsedPages,
   'gauge-transient':   GaugeId.TransientStoreBytesUsed,
@@ -706,7 +668,23 @@ export function drawGaugeSummaryStrip(
   layout: GaugeTrackLayout,
   labelWidth: number,
   theme: StudioTheme,
+  ticks: readonly TickData[] = [],
 ): void {
+  // Memory is the only summary that renders the full track content (muted) instead of a sparkline,
+  // because the GC overlay carried inside the Memory track needs to stay visible even when collapsed.
+  // The memory shapes draw at 0.5 alpha so the GC suspension rect + start/end markers stay prominent
+  // at the small height (14 px).
+  if (trackId === 'gauge-memory') {
+    const spec = getGaugeGroupSpec(trackId);
+    if (spec === undefined) return;
+    renderMemoryGroup({
+      ctx, ticks, gaugeData, vp, labelWidth,
+      layout, spec, legendsVisible: false, theme,
+    }, 0.5);
+    return;
+  }
+
+  // Other gauge tracks keep the sparkline-preview behaviour.
   const gaugeId = SUMMARY_PRIMARY_GAUGE[trackId];
   if (gaugeId === undefined) return;
   const series = getSeries(gaugeData, gaugeId);
@@ -848,10 +826,6 @@ export function buildGaugeTooltipLines(
     trackId = walSubRowKey(localY, trackHeight);
     groupLabel = trackId === 'gauge-wal-buffer' ? 'WAL — Commit Buffer' : 'WAL — Pool';
   }
-  if (trackId === 'gauge-gc') {
-    return buildGcTooltipLines(ticks, gaugeData, groupLabel, cursorUs, theme);
-  }
-
   const specs = TOOLTIP_GAUGES[trackId];
   if (specs === undefined) return [];
 
@@ -876,79 +850,61 @@ export function buildGaugeTooltipLines(
     lines.push(`Capacity: ${formatGaugeValue(capacity, unit)}`);
   }
 
+  // Memory tooltip absorbs the (removed) GC track's hover info — the GC overlays now live on the
+  // Memory rows, so showing "GC suspension: X ms" alongside heap state matches what the user is
+  // visually pointing at.
+  if (trackId === 'gauge-memory-heap' || trackId === 'gauge-memory-unmanaged') {
+    const gcLines = buildGcMemoryAddendum(gaugeData, cursorUs, theme);
+    if (gcLines.length > 0) lines.push(...gcLines);
+  }
+
   return lines;
 }
 
-function buildGcTooltipLines(
-  ticks: readonly TickData[],
+/**
+ * GC info appended to the Memory tooltip when the cursor is inside or near a GcSuspension. Returns
+ * an empty array when there's no GC activity at cursor. The Memory tooltip path calls this after
+ * its own lines so users see "memory state + GC pause length" without needing a dedicated GC track.
+ */
+function buildGcMemoryAddendum(
   gaugeData: GaugeData,
-  groupLabel: string,
   cursorUs: number,
   theme: StudioTheme,
 ): TooltipLine[] {
-  if (ticks.length === 0) return [];
+  const lines: TooltipLine[] = [];
 
-  // Find the tick containing cursorUs.
-  let lo = 0;
-  let hi = ticks.length;
-  while (lo < hi) {
-    const mid = (lo + hi) >>> 1;
-    if (ticks[mid].endUs > cursorUs) hi = mid;
-    else lo = mid + 1;
-  }
-  if (lo >= ticks.length) return [];
-  const tick = ticks[lo];
-  if (cursorUs < tick.startUs) return [];
-
-  const pauseSeries = getPerTickPauseSeries(ticks, gaugeData.gcSuspensions);
-  const pauseSample = pauseSeries[lo];
-  const pauseUs = pauseSample !== undefined ? pauseSample.value : 0;
-
-  const starts: number[] = [0, 0, 0];
-  const ends: number[]   = [0, 0, 0];
-  for (const e of gaugeData.gcEvents) {
-    if (e.timestampUs >= tick.endUs) break;
-    if (e.timestampUs < tick.startUs) continue;
-    const genBucket = e.generation >= 2 ? 2 : e.generation;
-    if (e.kind === 7 /* GcStart */) starts[genBucket]++;
-    else if (e.kind === 8 /* GcEnd */) ends[genBucket]++;
-  }
-
-  let cursorSuspensionUs = 0;
+  // Cursor inside a suspension? Surface its duration — the load-bearing GC signal.
   for (const s of gaugeData.gcSuspensions) {
     if (s.startUs > cursorUs) break;
-    if (s.startUs + s.durationUs >= cursorUs) {
-      cursorSuspensionUs = s.durationUs;
-      break;
+    if (s.startUs + s.durationUs < cursorUs) continue;
+    lines.push('');
+    lines.push({ text: `GC suspension: ${formatGcDurationInline(s.durationUs)}`, color: GC_PAUSE_COLOR });
+    break;
+  }
+
+  // Nearest GC start/end event within 500 µs of cursor — useful when the suspension band is
+  // narrow on screen but the user is hovering close to it.
+  const proximityUs = 500;
+  let nearest: typeof gaugeData.gcEvents[number] | undefined;
+  let nearestDist = Number.POSITIVE_INFINITY;
+  for (const e of gaugeData.gcEvents) {
+    const d = Math.abs(e.timestampUs - cursorUs);
+    if (d < nearestDist && d <= proximityUs) {
+      nearestDist = d;
+      nearest = e;
     }
+    if (e.timestampUs > cursorUs + proximityUs) break;
   }
-
-  const lines: TooltipLine[] = [
-    groupLabel,
-    `Tick: ${tick.tickNumber}`,
-    { text: `Pause / tick:   ${formatDurationInline(pauseUs)}`, color: GC_PAUSE_COLOR },
-  ];
-
-  const starsTotal = starts[0] + starts[1] + starts[2];
-  const endsTotal  = ends[0]   + ends[1]   + ends[2];
-  if (starsTotal > 0 || endsTotal > 0) {
-    lines.push('');
-    lines.push('(GC events in this tick)');
-    if (starts[0] + ends[0] > 0) lines.push({ text: `Gen0 start/end:  ${starts[0]} / ${ends[0]}`, color: gcGenColor(0, theme.gauges) });
-    if (starts[1] + ends[1] > 0) lines.push({ text: `Gen1 start/end:  ${starts[1]} / ${ends[1]}`, color: gcGenColor(1, theme.gauges) });
-    if (starts[2] + ends[2] > 0) lines.push({ text: `Gen2+ start/end: ${starts[2]} / ${ends[2]}`, color: gcGenColor(2, theme.gauges) });
-  }
-
-  if (cursorSuspensionUs > 0) {
-    lines.push('');
-    lines.push('(cursor is INSIDE a suspension)');
-    lines.push(`Pause total:    ${formatDurationInline(cursorSuspensionUs)}`);
+  if (nearest !== undefined) {
+    const kindLabel = nearest.kind === 7 ? 'GC start' : 'GC end';
+    const genLabel = nearest.generation >= 2 ? 'Gen2+' : `Gen${nearest.generation}`;
+    lines.push({ text: `${kindLabel} — ${genLabel}`, color: gcGenColor(nearest.generation, theme.gauges) });
   }
 
   return lines;
 }
 
-function formatDurationInline(us: number): string {
+function formatGcDurationInline(us: number): string {
   if (us < 1) return '0 µs';
   if (us < 1000) return `${us.toFixed(0)} µs`;
   if (us < 1_000_000) return `${(us / 1000).toFixed(us < 10_000 ? 2 : 1)} ms`;

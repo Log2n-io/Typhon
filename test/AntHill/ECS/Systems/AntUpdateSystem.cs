@@ -33,8 +33,10 @@ internal sealed class AntUpdateSystem : QuerySystem
         .Phase(AntPhases.Simulation)
         .Parallel()
         .ChunksPerWorker(2f)
-        // Component access — single writer across (Bounds, Velocity, AntState); Genetics read-only post-spawn.
-        .Reads<Genetics>()
+        // Component access — single writer across (Bounds, Velocity, AntState, Genetics).
+        // Phase 5 promoted Genetics from Reads to Writes: Larva maturation flips Genetics.Caste in
+        // place. Still single-writer; no schedule conflict.
+        .Writes<Genetics>()
         .Writes<WorldBounds>()
         .Writes<Velocity>()
         .Writes<AntState>()

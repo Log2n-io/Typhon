@@ -225,6 +225,252 @@ function SpanDetail({ span }: { span: SpanData }): React.JSX.Element {
             </>
           )}
 
+          {/* SpatialClusterMigrationDetectScan (249) — fence-time scan. */}
+          {(span.kind as number) === 249 && span.rawEvent && (
+            <>
+              {span.rawEvent.archetypeId !== undefined && (
+                <>
+                  <dt className="text-muted-foreground">Archetype</dt>
+                  <dd className="font-mono tabular-nums text-foreground">#{span.rawEvent.archetypeId}</dd>
+                </>
+              )}
+              {span.rawEvent.scanSlotCount !== undefined && (
+                <>
+                  <dt className="text-muted-foreground">Scan slots</dt>
+                  <dd className="font-mono tabular-nums text-foreground">{span.rawEvent.scanSlotCount.toLocaleString()}</dd>
+                </>
+              )}
+              {span.rawEvent.clustersTouched !== undefined && (
+                <>
+                  <dt className="text-muted-foreground">Clusters touched</dt>
+                  <dd className="font-mono tabular-nums text-foreground">{span.rawEvent.clustersTouched.toLocaleString()}</dd>
+                </>
+              )}
+              {span.rawEvent.migrationsQueued !== undefined && (
+                <>
+                  <dt className="text-muted-foreground">Migrations queued</dt>
+                  <dd className="font-mono tabular-nums text-foreground">{span.rawEvent.migrationsQueued.toLocaleString()}</dd>
+                </>
+              )}
+              {span.rawEvent.hysteresisAbsorbed !== undefined && (
+                <>
+                  <dt className="text-muted-foreground">Hysteresis absorbed</dt>
+                  <dd className="font-mono tabular-nums text-foreground">{span.rawEvent.hysteresisAbsorbed.toLocaleString()}</dd>
+                </>
+              )}
+            </>
+          )}
+
+          {/* SpatialClusterAabbRefresh (250) — fence-time AABB refresh. */}
+          {(span.kind as number) === 250 && span.rawEvent && (
+            <>
+              {span.rawEvent.archetypeId !== undefined && (
+                <>
+                  <dt className="text-muted-foreground">Archetype</dt>
+                  <dd className="font-mono tabular-nums text-foreground">#{span.rawEvent.archetypeId}</dd>
+                </>
+              )}
+              {span.rawEvent.clusterScanned !== undefined && (
+                <>
+                  <dt className="text-muted-foreground">Clusters scanned</dt>
+                  <dd className="font-mono tabular-nums text-foreground">{span.rawEvent.clusterScanned.toLocaleString()}</dd>
+                </>
+              )}
+              {span.rawEvent.slotsScanned !== undefined && (
+                <>
+                  <dt className="text-muted-foreground">Slots scanned</dt>
+                  <dd className="font-mono tabular-nums text-foreground">{span.rawEvent.slotsScanned.toLocaleString()}</dd>
+                </>
+              )}
+              {span.rawEvent.aabbsChanged !== undefined && (
+                <>
+                  <dt className="text-muted-foreground">AABBs changed</dt>
+                  <dd className="font-mono tabular-nums text-foreground">{span.rawEvent.aabbsChanged.toLocaleString()}</dd>
+                </>
+              )}
+              {span.rawEvent.outlierGuardFires !== undefined && span.rawEvent.outlierGuardFires > 0 && (
+                <>
+                  <dt className="text-muted-foreground">Outlier guard fires</dt>
+                  <dd className="font-mono tabular-nums text-foreground">{span.rawEvent.outlierGuardFires.toLocaleString()}</dd>
+                </>
+              )}
+            </>
+          )}
+
+          {/* WriteTickFenceTable (251) — per-ComponentTable fence body. */}
+          {(span.kind as number) === 251 && span.rawEvent && (
+            <>
+              {span.rawEvent.componentTypeId !== undefined && (
+                <>
+                  <dt className="text-muted-foreground">Component type</dt>
+                  <dd className="font-mono tabular-nums text-foreground">#{span.rawEvent.componentTypeId}</dd>
+                </>
+              )}
+              {span.rawEvent.dirtyEntryCount !== undefined && (
+                <>
+                  <dt className="text-muted-foreground">Dirty entries</dt>
+                  <dd className="font-mono tabular-nums text-foreground">{span.rawEvent.dirtyEntryCount.toLocaleString()}</dd>
+                </>
+              )}
+              {span.rawEvent.walPublished !== undefined && (
+                <>
+                  <dt className="text-muted-foreground">WAL published</dt>
+                  <dd className="font-mono tabular-nums text-foreground">{span.rawEvent.walPublished ? 'yes' : 'no'}</dd>
+                </>
+              )}
+              {span.rawEvent.hasShadow !== undefined && (
+                <>
+                  <dt className="text-muted-foreground">Shadow path</dt>
+                  <dd className="font-mono tabular-nums text-foreground">{span.rawEvent.hasShadow ? 'yes' : 'no'}</dd>
+                </>
+              )}
+              {span.rawEvent.hasSpatial !== undefined && (
+                <>
+                  <dt className="text-muted-foreground">Spatial path</dt>
+                  <dd className="font-mono tabular-nums text-foreground">{span.rawEvent.hasSpatial ? 'yes' : 'no'}</dd>
+                </>
+              )}
+            </>
+          )}
+
+          {/* WriteTickFenceShadow (252) — ProcessShadowEntries for one table. */}
+          {(span.kind as number) === 252 && span.rawEvent && (
+            <>
+              {span.rawEvent.componentTypeId !== undefined && (
+                <>
+                  <dt className="text-muted-foreground">Component type</dt>
+                  <dd className="font-mono tabular-nums text-foreground">#{span.rawEvent.componentTypeId}</dd>
+                </>
+              )}
+              {span.rawEvent.indexedFieldCount !== undefined && (
+                <>
+                  <dt className="text-muted-foreground">Indexed fields</dt>
+                  <dd className="font-mono tabular-nums text-foreground">{span.rawEvent.indexedFieldCount.toLocaleString()}</dd>
+                </>
+              )}
+              {span.rawEvent.totalShadowEntries !== undefined && (
+                <>
+                  <dt className="text-muted-foreground">Shadow entries</dt>
+                  <dd className="font-mono tabular-nums text-foreground">{span.rawEvent.totalShadowEntries.toLocaleString()}</dd>
+                </>
+              )}
+            </>
+          )}
+
+          {/* WriteTickFenceSpatial (253) — ProcessSpatialEntries for one table. */}
+          {(span.kind as number) === 253 && span.rawEvent && (
+            <>
+              {span.rawEvent.componentTypeId !== undefined && (
+                <>
+                  <dt className="text-muted-foreground">Component type</dt>
+                  <dd className="font-mono tabular-nums text-foreground">#{span.rawEvent.componentTypeId}</dd>
+                </>
+              )}
+              {span.rawEvent.dirtyEntryCount !== undefined && (
+                <>
+                  <dt className="text-muted-foreground">Dirty entries</dt>
+                  <dd className="font-mono tabular-nums text-foreground">{span.rawEvent.dirtyEntryCount.toLocaleString()}</dd>
+                </>
+              )}
+              {span.rawEvent.escapedCount !== undefined && (
+                <>
+                  <dt className="text-muted-foreground">Escaped (reinsert)</dt>
+                  <dd className="font-mono tabular-nums text-foreground">{span.rawEvent.escapedCount.toLocaleString()}</dd>
+                </>
+              )}
+            </>
+          )}
+
+          {/* WriteTickFenceCluster (61) — per-archetype body inside WriteClusterTickFence. */}
+          {(span.kind as number) === 61 && span.rawEvent && (
+            <>
+              {span.rawEvent.archetypeId !== undefined && (
+                <>
+                  <dt className="text-muted-foreground">Archetype</dt>
+                  <dd className="font-mono tabular-nums text-foreground">#{span.rawEvent.archetypeId}</dd>
+                </>
+              )}
+              {span.rawEvent.dirtyClusterCount !== undefined && (
+                <>
+                  <dt className="text-muted-foreground">Dirty clusters</dt>
+                  <dd className="font-mono tabular-nums text-foreground">{span.rawEvent.dirtyClusterCount.toLocaleString()}</dd>
+                </>
+              )}
+              {span.rawEvent.entryCount !== undefined && (
+                <>
+                  <dt className="text-muted-foreground">Dirty entries</dt>
+                  <dd className="font-mono tabular-nums text-foreground">{span.rawEvent.entryCount.toLocaleString()}</dd>
+                </>
+              )}
+              {span.rawEvent.walPublished !== undefined && (
+                <>
+                  <dt className="text-muted-foreground">WAL published</dt>
+                  <dd className="font-mono tabular-nums text-foreground">{span.rawEvent.walPublished ? 'yes' : 'no'}</dd>
+                </>
+              )}
+              {span.rawEvent.hasShadow !== undefined && (
+                <>
+                  <dt className="text-muted-foreground">Shadow path</dt>
+                  <dd className="font-mono tabular-nums text-foreground">{span.rawEvent.hasShadow ? 'yes' : 'no'}</dd>
+                </>
+              )}
+              {span.rawEvent.hasSpatial !== undefined && (
+                <>
+                  <dt className="text-muted-foreground">Spatial path</dt>
+                  <dd className="font-mono tabular-nums text-foreground">{span.rawEvent.hasSpatial ? 'yes' : 'no'}</dd>
+                </>
+              )}
+            </>
+          )}
+
+          {/* WriteTickFenceClusterShadow (62) — ProcessClusterShadowEntries for one archetype. */}
+          {(span.kind as number) === 62 && span.rawEvent && (
+            <>
+              {span.rawEvent.archetypeId !== undefined && (
+                <>
+                  <dt className="text-muted-foreground">Archetype</dt>
+                  <dd className="font-mono tabular-nums text-foreground">#{span.rawEvent.archetypeId}</dd>
+                </>
+              )}
+              {span.rawEvent.dirtyClusterCount !== undefined && (
+                <>
+                  <dt className="text-muted-foreground">Dirty clusters</dt>
+                  <dd className="font-mono tabular-nums text-foreground">{span.rawEvent.dirtyClusterCount.toLocaleString()}</dd>
+                </>
+              )}
+              {span.rawEvent.totalShadowEntries !== undefined && (
+                <>
+                  <dt className="text-muted-foreground">Shadow entries</dt>
+                  <dd className="font-mono tabular-nums text-foreground">{span.rawEvent.totalShadowEntries.toLocaleString()}</dd>
+                </>
+              )}
+            </>
+          )}
+
+          {/* WriteTickFenceClusterSpatial (63) — cluster spatial-maintenance for one archetype. */}
+          {(span.kind as number) === 63 && span.rawEvent && (
+            <>
+              {span.rawEvent.archetypeId !== undefined && (
+                <>
+                  <dt className="text-muted-foreground">Archetype</dt>
+                  <dd className="font-mono tabular-nums text-foreground">#{span.rawEvent.archetypeId}</dd>
+                </>
+              )}
+              {span.rawEvent.dirtyClusterCount !== undefined && (
+                <>
+                  <dt className="text-muted-foreground">Dirty clusters</dt>
+                  <dd className="font-mono tabular-nums text-foreground">{span.rawEvent.dirtyClusterCount.toLocaleString()}</dd>
+                </>
+              )}
+              {span.rawEvent.migrationsExecuted !== undefined && (
+                <>
+                  <dt className="text-muted-foreground">Migrations executed</dt>
+                  <dd className="font-mono tabular-nums text-foreground">{span.rawEvent.migrationsExecuted.toLocaleString()}</dd>
+                </>
+              )}
+            </>
+          )}
+
           {(span.kind === TraceEventKind.PageCacheFlush || span.kind === TraceEventKind.PageCacheFlushCompleted) && span.rawEvent?.pageCount !== undefined && (
             <>
               <dt className="text-muted-foreground">Pages</dt>

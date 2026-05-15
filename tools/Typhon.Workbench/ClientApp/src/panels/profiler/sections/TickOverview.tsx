@@ -162,6 +162,26 @@ export default function TickOverview({ isLive = false }: Props) {
   // helper handles the float-drift boundary clamp; see its doc for why.
   const tickRows: TickRow[] = useMemo(() => buildTickRows(metadata?.tickSummaries), [metadata?.tickSummaries]);
 
+  // GC marker source: every GC suspension wraps a stop-the-world window, so any tick that overlaps one
+  // is a tick where GC happened. Merge-walk both sorted arrays in parallel — O(ticks + suspensions),
+  // memoized so we only recompute when the underlying data grows.
+  const gcTicks = useMemo<ReadonlySet<number>>(() => {
+    const out = new Set<number>();
+    const sus = metadata?.gcSuspensions;
+    if (!sus || sus.length === 0 || tickRows.length === 0) return out;
+    let ti = 0;
+    for (let si = 0; si < sus.length; si++) {
+      const susStart = Number(sus[si].startUs);
+      // Advance tick cursor to the first tick whose end is after this suspension's start.
+      while (ti < tickRows.length && tickRows[ti].endUs <= susStart) ti++;
+      if (ti >= tickRows.length) break;
+      if (tickRows[ti].startUs <= susStart) {
+        out.add(tickRows[ti].tickNumber);
+      }
+    }
+    return out;
+  }, [metadata?.gcSuspensions, tickRows]);
+
   const p95 = Number(metadata?.globalMetrics?.p95TickDurationUs ?? 0);
 
   // Scroll window — which ticks are visible in the overview (pan state). Separate from viewRange.
@@ -263,8 +283,9 @@ export default function TickOverview({ isLive = false }: Props) {
       legendsVisible,
       helpHovered: helpTooltipPosRef.current !== null,
       scrollbarHovered: scrollbarHoveredRef.current || dragRef.current?.mode === 'scrollbar',
+      gcTicks,
     }, getStudioThemeTokens());
-  }, [tickRows, viewRange, p95, legendsVisible, isLive]);
+  }, [tickRows, viewRange, p95, legendsVisible, isLive, gcTicks]);
 
   const scheduleRender = useCallback(() => {
     cancelAnimationFrame(rafRef.current);

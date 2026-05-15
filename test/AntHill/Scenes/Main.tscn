@@ -4,13 +4,14 @@
 [ext_resource type="Script" uid="uid://c8g1c0qq7ng5" path="res://Scripts/AntRenderer.cs" id="2"]
 [ext_resource type="Script" uid="uid://4ns7f330d2v0" path="res://Scripts/GameCamera.cs" id="3"]
 
-[node name="Main" type="Node2D" unique_id=1288788662]
+[node name="Main" type="Node3D" unique_id=1288788662]
 script = ExtResource("1")
 
-[node name="AntRenderer" type="Node2D" parent="." unique_id=1820962456]
+[node name="AntRenderer" type="Node3D" parent="." unique_id=1820962456]
 script = ExtResource("2")
 
-[node name="Camera" type="Camera2D" parent="." unique_id=1172137721]
-position = Vector2(10000, 10000)
-zoom = Vector2(0.075, 0.075)
+[node name="Camera" type="Camera3D" parent="." unique_id=1172137721]
+projection = 1
+size = 30.0
+far = 500.0
 script = ExtResource("3")

@@ -161,7 +161,7 @@ export function TimeAreaFilterButton({ activeSlots, activeSystems, threadNamesBy
   //   - slot-leaf-N      → track id = `slot-N`
   //   - system-leaf-N    → track id = `system-N`
   //   - op-leaf-X        → track id = `X` (already the literal track id like `page-cache`)
-  //   - gauge-leaf-X     → track id = `X` (e.g. `gauge-gc`)
+  //   - gauge-leaf-X     → track id = `X` (e.g. `gauge-memory`)
   const onSetCollapseState = React.useCallback((leafIds: string[], state: TrackState): void => {
     const gaugeUpd: Record<string, TrackState> = {};
     const otherUpd: Record<string, TrackState> = {};

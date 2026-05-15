@@ -74,6 +74,13 @@ public sealed class RenderFrame
     /// <summary>Downsampled pheromone heatmap: RGBA byte array (200×200×4). Green=food, Blue=home. Ready for Image.SetData.</summary>
     public byte[] HeatmapRGBA;
     public const int HeatmapSize = 200;
+
+    /// <summary>Phase 6B — fire CA state, 200×200 byte array (R8). One byte per cell: 0=Empty, 1=Fuel, 2=Burning. Ready for Image.SetData with Format.R8.</summary>
+    public byte[] FireR8;
+
+    /// <summary>Phase 6C — plant indices whose state changed since the last render frame (Alive→Burnt, Burnt→Despawned). VegetationRenderer drains the prefix [0, PlantDirtyCount) and pushes per-instance colour updates. Soft cap of 4096 / frame; missed transitions get re-enqueued by the next CA tick on the same cell.</summary>
+    public int[] PlantDirty;
+    public int PlantDirtyCount;
 }
 
 public sealed class RenderBridge

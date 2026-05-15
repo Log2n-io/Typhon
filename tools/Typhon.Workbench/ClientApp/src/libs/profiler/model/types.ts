@@ -338,6 +338,22 @@ export const SpanKindNames: Record<number, string> = {
   // Phase 4 follow-up (#289) — answer "why is the engine waiting for nothing".
   241: 'Scheduler.Metronome.Wait',
   242: 'Scheduler.Overload.Detector',
+  // Per-tick fence-time spatial maintenance spans (always-fire when gates are on; outcome counts
+  // are captured by the matching instant events 133–135 and 131).
+  249: 'Spatial.ClusterMigration.DetectScan',
+  250: 'Spatial.Cluster.AabbRefresh',
+  // Per-table fence-time spans inside WriteTickFenceCore. The outer InspectorPhase(WriteTickFence)
+  // wrapper still emits kind 243; these break it down per ComponentTable to surface "which table
+  // dominated the fence wall?" — prerequisite for the parallelize-the-fence work.
+  251: 'Runtime.WriteTickFence.Table',
+  252: 'Runtime.WriteTickFence.Shadow',
+  253: 'Runtime.WriteTickFence.Spatial',
+  // Cluster-scope mirror — these wrap the per-archetype body of WriteClusterTickFence. AntHill
+  // and other cluster-backed worlds do all their fence work here, not in the per-table loop.
+  // Wire IDs 61-63 land next to ClusterMigration (60) — semantic grouping.
+  61: 'Runtime.WriteTickFence.Cluster',
+  62: 'Runtime.WriteTickFence.Cluster.Shadow',
+  63: 'Runtime.WriteTickFence.Cluster.Spatial',
   // 243 (RuntimePhaseSpan) is a real span but its display name comes from `PHASE_NAMES[evt.phase]`
   // in `traceModel.ts` — this entry is only the `Kind[N]`-fallback safety net.
   243: 'Runtime.Phase',
@@ -546,6 +562,37 @@ export interface TraceEvent {
 
   // Cluster migration span
   migrationCount?: number;
+
+  // SpatialClusterMigrationDetectScan (kind 249) — fence-time scan span. Begin params:
+  // archetypeId, scanSlotCount. Optional outcomes published at dispose.
+  scanSlotCount?: number;
+  migrationsQueued?: number;
+  hysteresisAbsorbed?: number;
+  clustersTouched?: number;
+
+  // SpatialClusterAabbRefresh (kind 250) — fence-time AABB refresh span. Begin params:
+  // archetypeId, clusterScanned. Optional outcomes published at dispose.
+  clusterScanned?: number;
+  aabbsChanged?: number;
+  slotsScanned?: number;
+  outlierGuardFires?: number;
+
+  // WriteTickFenceTable (251), WriteTickFenceShadow (252), WriteTickFenceSpatial (253) —
+  // per-ComponentTable fence body spans. componentTypeId (declared above for transaction spans)
+  // is reused — matches WAL TickFenceHeader.ComponentTypeId.
+  dirtyEntryCount?: number;
+  walPublished?: number;          // 0/1 — WAL chunk was published this tick for this table
+  hasShadow?: number;             // 0/1 — table.HasShadowableIndexes
+  hasSpatial?: number;            // 0/1 — table has dynamic spatial index
+  indexedFieldCount?: number;     // IndexedFieldInfos.Length
+  totalShadowEntries?: number;    // sum of per-field shadow buffer counts drained this tick
+  escapedCount?: number;          // entities whose new position escaped the fat AABB
+
+  // WriteTickFenceCluster (61), WriteTickFenceClusterShadow (62), WriteTickFenceClusterSpatial (63).
+  // archetypeId (declared above) is reused. The other fields are cluster-fence specific.
+  dirtyClusterCount?: number;     // number of words with at least one bit set after occupancy mask
+  entryCount?: number;            // total dirty entity slots (popcount of full bitmap)
+  migrationsExecuted?: number;    // ClusterState.LastTickMigrationCount
 
   // Runtime UoW flush instant
   changeCount?: number;

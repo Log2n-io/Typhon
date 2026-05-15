@@ -355,11 +355,13 @@ export function drawTimeArea(
     // Summary mode
     if (track.state === 'summary') {
       if (GAUGE_TRACK_ID_SET.has(track.id)) {
-        // Spark-line preview drawn INSIDE the label row's Y band.
+        // Spark-line preview drawn INSIDE the label row's Y band. Memory is special-cased inside
+        // drawGaugeSummaryStrip — it renders the full Memory chart at reduced alpha so the GC
+        // overlay remains visible when the track is collapsed.
         drawGaugeSummaryStrip(ctx, gaugeData, track.id,
           vp,
           { x: gutterWidth, y: ty + SUMMARY_STRIP_TOP_PAD, width: contentWidth, height: SUMMARY_STRIP_HEIGHT },
-          gutterWidth, theme);
+          gutterWidth, theme, ticks);
       } else if (track.id.startsWith('slot-')) {
         const threadSlot = Number.parseInt(track.id.slice(5), 10);
         drawSlotSummary(ctx, threadSlot, visibleTicks, visStartUs, visEndUs, gutterWidth, contentWidth, pxOfUs, ty, width, theme);

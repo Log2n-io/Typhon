@@ -413,11 +413,11 @@ describe('timeAreaLayout.buildLayout — filter visibility', () => {
       activeSystems: [],
       systemNames: null,
       perSystemLanesVisible: false,
-      gaugeVisibility: { 'gauge-gc': false, 'gauge-memory': false },
+      gaugeVisibility: { 'gauge-memory': false, 'gauge-wal': false },
     });
     const ids = tracks.map((t) => t.id);
-    expect(ids).not.toContain('gauge-gc');
     expect(ids).not.toContain('gauge-memory');
+    expect(ids).not.toContain('gauge-wal');
     expect(ids).toContain('gauge-persistence'); // others stay
   });
 

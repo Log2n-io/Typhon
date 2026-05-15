@@ -25,6 +25,12 @@ public sealed class PheromoneGrid
     /// <summary>Home trail: deposited by foraging ants, followed by returning ants.</summary>
     public readonly float[] Home = new float[GridSize * GridSize];
 
+    /// <summary>Fight alarm: deposited by damaged ants (combat or spider). Workers flee; soldiers approach.</summary>
+    public readonly float[] Fight = new float[GridSize * GridSize];
+
+    /// <summary>Fire warning: deposited by ants near Burning cells. Both castes flee.</summary>
+    public readonly float[] Fire = new float[GridSize * GridSize];
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static int WorldToIndex(float wx, float wy)
     {
@@ -49,6 +55,40 @@ public sealed class PheromoneGrid
         float val = channel[index] + amount;
         if (val > MaxPheromone) val = MaxPheromone;
         channel[index] = val;
+    }
+
+    /// <summary>
+    /// Deposit pheromone in a 3×3 cell stamp centred at (wx, wy) with falloff:
+    /// centre 1.0, edge 0.5, corner 0.25. Used by event-driven channels (Fight) where a single
+    /// deposit needs to reach ants whose 3-sensor footprint may not overlap the centre cell.
+    /// Total area-integrated mass per call ≈ 4× the centre amount; coverage radius ≈ 1.5 cells
+    /// (≈ 30 sim units / 0.15 m) on top of the centre.
+    /// </summary>
+    public static void DepositArea(float[] channel, float wx, float wy, float amount)
+    {
+        int gx = (int)(wx * InvCellSize);
+        int gy = (int)(wy * InvCellSize);
+        if (gx < 0) gx = 0; else if (gx >= GridSize) gx = GridSize - 1;
+        if (gy < 0) gy = 0; else if (gy >= GridSize) gy = GridSize - 1;
+
+        int x0 = gx > 0 ? gx - 1 : gx;
+        int x1 = gx < GridSize - 1 ? gx + 1 : gx;
+        int y0 = gy > 0 ? gy - 1 : gy;
+        int y1 = gy < GridSize - 1 ? gy + 1 : gy;
+
+        for (int y = y0; y <= y1; y++)
+        {
+            int dyAbs = y == gy ? 0 : 1;
+            int row = y * GridSize;
+            for (int x = x0; x <= x1; x++)
+            {
+                int dxAbs = x == gx ? 0 : 1;
+                float weight = (dxAbs == 0 && dyAbs == 0) ? 1f
+                              : (dxAbs == 0 || dyAbs == 0) ? 0.5f
+                              : 0.25f;
+                Deposit(channel, row + x, amount * weight);
+            }
+        }
     }
 
     private const int EvaporateChunks = 16;
@@ -82,6 +122,54 @@ public sealed class PheromoneGrid
         {
             food[i] *= decayFactor;
             home[i] *= decayFactor;
+        }
+    }
+
+    /// <summary>
+    /// Single-channel evaporator for the danger channels (Fight, Fire). Same parallel-chunked
+    /// + AVX shape as <see cref="Evaporate"/> but operates on one array so each channel can decay
+    /// at its own rate (Fight is fast, Fire is slow).
+    /// </summary>
+    public void EvaporateChannel(float[] channel, float decayFactor)
+    {
+        int len = channel.Length;
+        int vecSize = Vector256<float>.Count;
+        int chunkSize = ((len / EvaporateChunks) / vecSize) * vecSize;
+        int parallelEnd = chunkSize * EvaporateChunks;
+
+        Parallel.For(0, EvaporateChunks, chunk =>
+        {
+            int start = chunk * chunkSize;
+            int end = start + chunkSize;
+            EvaporateSingleRange(channel, start, end, decayFactor);
+        });
+
+        for (int i = parallelEnd; i < len; i++)
+        {
+            channel[i] *= decayFactor;
+        }
+    }
+
+    private static void EvaporateSingleRange(float[] arr, int start, int end, float decayFactor)
+    {
+        ref float p = ref MemoryMarshal.GetArrayDataReference(arr);
+        if (Avx.IsSupported)
+        {
+            var decay256 = Vector256.Create(decayFactor);
+            int vecSize = Vector256<float>.Count;
+            nuint i = (nuint)start;
+            nuint simdEnd = (nuint)end;
+            for (; i + (nuint)vecSize <= simdEnd; i += (nuint)vecSize)
+            {
+                Avx.Multiply(Vector256.LoadUnsafe(ref p, i), decay256).StoreUnsafe(ref p, i);
+            }
+        }
+        else
+        {
+            for (int i = start; i < end; i++)
+            {
+                Unsafe.Add(ref p, i) *= decayFactor;
+            }
         }
     }
 

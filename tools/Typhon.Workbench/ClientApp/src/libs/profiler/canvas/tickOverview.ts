@@ -120,6 +120,13 @@ export interface TickOverviewInputs {
   legendsVisible: boolean;
   /** True when the cursor is inside the help-glyph hit zone — brightens the glyph. */
   helpHovered: boolean;
+  /**
+   * Set of `tickNumber` values that overlap at least one GC suspension. When set, the renderer draws a small
+   * yellow upward triangle at the base of each matching bar so the user can spot GC pauses at a glance.
+   * Sourced from `metadata.gcSuspensions` (session-wide, available at open time — no chunk-decode dependency).
+   * Undefined or empty ⇒ no markers drawn.
+   */
+  gcTicks?: ReadonlySet<number>;
 }
 
 export const TIMELINE_HEIGHT = 80;
@@ -194,7 +201,7 @@ export function drawTickOverview(
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
 
-  const { ticks, scrollWindow: sr, selection, dragPreview, hover, p95TickDurationUs, legendsVisible, helpHovered } = inputs;
+  const { ticks, scrollWindow: sr, selection, dragPreview, hover, p95TickDurationUs, legendsVisible, helpHovered, gcTicks } = inputs;
   const p95 = p95TickDurationUs || 1;
   const visibleCount = sr.endIdx - sr.startIdx;
   if (visibleCount <= 0) return;
@@ -228,6 +235,8 @@ export function drawTickOverview(
   const barWidth = BAR_WIDTH;
 
   // Bars. Minimum 1 px height floor so very-short ticks (e.g. a fast ForceCheckpoint) stay visible.
+  // A second pass below draws the GC marker triangles so they overlay the bars without being clipped by
+  // tall bars in subsequent iterations.
   for (let i = sr.startIdx; i < sr.endIdx; i++) {
     const tick = ticks[i];
     const ratio = Math.min(tick.durationUs / p95, 1.0);
@@ -245,6 +254,31 @@ export function drawTickOverview(
     ctx.fillStyle = throttleTint ?? (tick.durationUs > p95 ? theme.overviewP95 : theme.overviewBar);
     // Integer coords + width-1 leaves a 1-px gap between bars without sub-pixel anti-aliasing.
     ctx.fillRect(x, y, Math.max(barWidth - 1, 1), barH);
+  }
+
+  // GC marker — small upward triangle at the base of every bar whose tick overlapped a GC suspension.
+  // Drawn after the bar pass so the triangle always lays on top of the bar fill (no clip issues for
+  // bars that grew tall after a shorter neighbour). Theme-independent yellow — perf signal, not theme chrome.
+  if (gcTicks && gcTicks.size > 0) {
+    const baseY = barAreaTop + barAreaHeight - 2;
+    const halfW = 4;
+    const height = 7;
+    ctx.fillStyle = '#F6D85C';
+    ctx.strokeStyle = '#404040';
+    ctx.lineWidth = 1;
+    for (let i = sr.startIdx; i < sr.endIdx; i++) {
+      const tick = ticks[i];
+      if (!gcTicks.has(tick.tickNumber)) continue;
+      const x = BAR_LEFT_PAD + (i - sr.startIdx) * barWidth;
+      const cx = x + Math.floor((barWidth - 1) / 2);
+      ctx.beginPath();
+      ctx.moveTo(cx, baseY - height);
+      ctx.lineTo(cx - halfW, baseY);
+      ctx.lineTo(cx + halfW, baseY);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+    }
   }
 
   // Orange selection overlay — ticks overlapping viewRange.

@@ -593,6 +593,38 @@ function decodeSpan(
     case TraceEventKind.ClusterMigration:
       return decodeClusterMigration(reader, kind, threadSlot, tickNumber, timestampUs, header);
 
+    // WriteTickFenceCluster (61) — per-archetype body span. archetypeId only at Begin; everything else optional.
+    case 61 as TraceEventKind:
+      return decodeWriteTickFenceCluster(reader, kind, threadSlot, tickNumber, timestampUs, header);
+
+    // WriteTickFenceClusterShadow (62) — ProcessClusterShadowEntries span.
+    case 62 as TraceEventKind:
+      return decodeWriteTickFenceClusterShadow(reader, kind, threadSlot, tickNumber, timestampUs, header);
+
+    // WriteTickFenceClusterSpatial (63) — cluster spatial-maintenance span.
+    case 63 as TraceEventKind:
+      return decodeWriteTickFenceClusterSpatial(reader, kind, threadSlot, tickNumber, timestampUs, header);
+
+    // SpatialClusterMigrationDetectScan (249) — fence-time scan span.
+    case 249 as TraceEventKind:
+      return decodeClusterMigrationDetectScan(reader, kind, threadSlot, tickNumber, timestampUs, header);
+
+    // SpatialClusterAabbRefresh (250) — fence-time AABB refresh span.
+    case 250 as TraceEventKind:
+      return decodeClusterAabbRefresh(reader, kind, threadSlot, tickNumber, timestampUs, header);
+
+    // WriteTickFenceTable (251) — per-ComponentTable fence body span.
+    case 251 as TraceEventKind:
+      return decodeWriteTickFenceTable(reader, kind, threadSlot, tickNumber, timestampUs, header);
+
+    // WriteTickFenceShadow (252) — ProcessShadowEntries span for one table.
+    case 252 as TraceEventKind:
+      return decodeWriteTickFenceShadow(reader, kind, threadSlot, tickNumber, timestampUs, header);
+
+    // WriteTickFenceSpatial (253) — ProcessSpatialEntries span for one table.
+    case 253 as TraceEventKind:
+      return decodeWriteTickFenceSpatial(reader, kind, threadSlot, tickNumber, timestampUs, header);
+
     case TraceEventKind.RuntimePhaseSpan:
       return decodeRuntimePhaseSpan(reader, kind, threadSlot, tickNumber, timestampUs, header);
 
@@ -968,6 +1000,209 @@ function decodeClusterMigration(
   };
   if (o + 10 <= header.recordEnd) {
     evt.componentCount = reader.readI32(o + 6);
+  }
+  return evt;
+}
+
+// SpatialClusterMigrationDetectScan (kind 249) — fence-time scan span. Wire layout:
+// BeginParams (6 bytes): u16 archetypeId, i32 scanSlotCount.
+// Then u8 optMask @ +6; then optional fields in mask-bit order:
+//   0x01: i32 _migrationsQueued
+//   0x02: i32 _hysteresisAbsorbed
+//   0x04: i32 _clustersTouched
+function decodeClusterMigrationDetectScan(
+  reader: BinaryReader, kind: TraceEventKind,
+  threadSlot: number, tickNumber: number, timestampUs: number, header: SpanHeader,
+): TraceEvent {
+  const o = header.payloadOffset;
+  const evt: TraceEvent = {
+    ...baseSpanEvent(kind, threadSlot, tickNumber, timestampUs, header),
+    archetypeId: reader.readU16(o),
+    scanSlotCount: reader.readI32(o + 2),
+  };
+  const optMaskOffset = o + 6;
+  if (optMaskOffset < header.recordEnd) {
+    const mask = reader.readU8(optMaskOffset);
+    let cursor = optMaskOffset + 1;
+    if ((mask & 0x01) !== 0) { evt.migrationsQueued = reader.readI32(cursor); cursor += 4; }
+    if ((mask & 0x02) !== 0) { evt.hysteresisAbsorbed = reader.readI32(cursor); cursor += 4; }
+    if ((mask & 0x04) !== 0) { evt.clustersTouched = reader.readI32(cursor); cursor += 4; }
+  }
+  return evt;
+}
+
+// SpatialClusterAabbRefresh (kind 250) — fence-time AABB refresh span. Wire layout:
+// BeginParams (6 bytes): u16 archetypeId, i32 clusterScanned.
+// Then u8 optMask @ +6; then optional fields in mask-bit order:
+//   0x01: i32 _aabbsChanged
+//   0x02: i32 _slotsScanned
+//   0x04: i32 _outlierGuardFires
+function decodeClusterAabbRefresh(
+  reader: BinaryReader, kind: TraceEventKind,
+  threadSlot: number, tickNumber: number, timestampUs: number, header: SpanHeader,
+): TraceEvent {
+  const o = header.payloadOffset;
+  const evt: TraceEvent = {
+    ...baseSpanEvent(kind, threadSlot, tickNumber, timestampUs, header),
+    archetypeId: reader.readU16(o),
+    clusterScanned: reader.readI32(o + 2),
+  };
+  const optMaskOffset = o + 6;
+  if (optMaskOffset < header.recordEnd) {
+    const mask = reader.readU8(optMaskOffset);
+    let cursor = optMaskOffset + 1;
+    if ((mask & 0x01) !== 0) { evt.aabbsChanged = reader.readI32(cursor); cursor += 4; }
+    if ((mask & 0x02) !== 0) { evt.slotsScanned = reader.readI32(cursor); cursor += 4; }
+    if ((mask & 0x04) !== 0) { evt.outlierGuardFires = reader.readI32(cursor); cursor += 4; }
+  }
+  return evt;
+}
+
+// WriteTickFenceTable (kind 251) — per-ComponentTable fence body span. Wire layout:
+// BeginParams (6 bytes): u16 componentTypeId, i32 dirtyEntryCount.
+// Then u8 optMask @ +6; then optional fields in mask-bit order:
+//   0x01: u8 _walPublished
+//   0x02: u8 _hasShadow
+//   0x04: u8 _hasSpatial
+function decodeWriteTickFenceTable(
+  reader: BinaryReader, kind: TraceEventKind,
+  threadSlot: number, tickNumber: number, timestampUs: number, header: SpanHeader,
+): TraceEvent {
+  const o = header.payloadOffset;
+  const evt: TraceEvent = {
+    ...baseSpanEvent(kind, threadSlot, tickNumber, timestampUs, header),
+    componentTypeId: reader.readU16(o),
+    dirtyEntryCount: reader.readI32(o + 2),
+  };
+  const optMaskOffset = o + 6;
+  if (optMaskOffset < header.recordEnd) {
+    const mask = reader.readU8(optMaskOffset);
+    let cursor = optMaskOffset + 1;
+    if ((mask & 0x01) !== 0) { evt.walPublished = reader.readU8(cursor); cursor += 1; }
+    if ((mask & 0x02) !== 0) { evt.hasShadow = reader.readU8(cursor); cursor += 1; }
+    if ((mask & 0x04) !== 0) { evt.hasSpatial = reader.readU8(cursor); cursor += 1; }
+  }
+  return evt;
+}
+
+// WriteTickFenceShadow (kind 252) — ProcessShadowEntries span. Wire layout:
+// BeginParams (6 bytes): u16 componentTypeId, i32 indexedFieldCount.
+// Then u8 optMask @ +6; then optional fields:
+//   0x01: i32 _totalShadowEntries
+function decodeWriteTickFenceShadow(
+  reader: BinaryReader, kind: TraceEventKind,
+  threadSlot: number, tickNumber: number, timestampUs: number, header: SpanHeader,
+): TraceEvent {
+  const o = header.payloadOffset;
+  const evt: TraceEvent = {
+    ...baseSpanEvent(kind, threadSlot, tickNumber, timestampUs, header),
+    componentTypeId: reader.readU16(o),
+    indexedFieldCount: reader.readI32(o + 2),
+  };
+  const optMaskOffset = o + 6;
+  if (optMaskOffset < header.recordEnd) {
+    const mask = reader.readU8(optMaskOffset);
+    let cursor = optMaskOffset + 1;
+    if ((mask & 0x01) !== 0) { evt.totalShadowEntries = reader.readI32(cursor); cursor += 4; }
+  }
+  return evt;
+}
+
+// WriteTickFenceSpatial (kind 253) — ProcessSpatialEntries span. Wire layout:
+// BeginParams (6 bytes): u16 componentTypeId, i32 dirtyEntryCount.
+// Then u8 optMask @ +6; then optional fields:
+//   0x01: i32 _escapedCount
+function decodeWriteTickFenceSpatial(
+  reader: BinaryReader, kind: TraceEventKind,
+  threadSlot: number, tickNumber: number, timestampUs: number, header: SpanHeader,
+): TraceEvent {
+  const o = header.payloadOffset;
+  const evt: TraceEvent = {
+    ...baseSpanEvent(kind, threadSlot, tickNumber, timestampUs, header),
+    componentTypeId: reader.readU16(o),
+    dirtyEntryCount: reader.readI32(o + 2),
+  };
+  const optMaskOffset = o + 6;
+  if (optMaskOffset < header.recordEnd) {
+    const mask = reader.readU8(optMaskOffset);
+    let cursor = optMaskOffset + 1;
+    if ((mask & 0x01) !== 0) { evt.escapedCount = reader.readI32(cursor); cursor += 4; }
+  }
+  return evt;
+}
+
+// WriteTickFenceCluster (kind 61) — per-archetype body span inside WriteClusterTickFence.
+// BeginParams (2 bytes): u16 archetypeId.
+// Then u8 optMask @ +2; then optional fields:
+//   0x01: i32 _dirtyClusterCount
+//   0x02: i32 _entryCount
+//   0x04: u8  _hasShadow
+//   0x08: u8  _hasSpatial
+//   0x10: u8  _walPublished
+function decodeWriteTickFenceCluster(
+  reader: BinaryReader, kind: TraceEventKind,
+  threadSlot: number, tickNumber: number, timestampUs: number, header: SpanHeader,
+): TraceEvent {
+  const o = header.payloadOffset;
+  const evt: TraceEvent = {
+    ...baseSpanEvent(kind, threadSlot, tickNumber, timestampUs, header),
+    archetypeId: reader.readU16(o),
+  };
+  const optMaskOffset = o + 2;
+  if (optMaskOffset < header.recordEnd) {
+    const mask = reader.readU8(optMaskOffset);
+    let cursor = optMaskOffset + 1;
+    if ((mask & 0x01) !== 0) { evt.dirtyClusterCount = reader.readI32(cursor); cursor += 4; }
+    if ((mask & 0x02) !== 0) { evt.entryCount = reader.readI32(cursor); cursor += 4; }
+    if ((mask & 0x04) !== 0) { evt.hasShadow = reader.readU8(cursor); cursor += 1; }
+    if ((mask & 0x08) !== 0) { evt.hasSpatial = reader.readU8(cursor); cursor += 1; }
+    if ((mask & 0x10) !== 0) { evt.walPublished = reader.readU8(cursor); cursor += 1; }
+  }
+  return evt;
+}
+
+// WriteTickFenceClusterShadow (kind 62) — ProcessClusterShadowEntries span.
+// BeginParams (6 bytes): u16 archetypeId, i32 dirtyClusterCount.
+// Then u8 optMask @ +6; then optional fields:
+//   0x01: i32 _totalShadowEntries
+function decodeWriteTickFenceClusterShadow(
+  reader: BinaryReader, kind: TraceEventKind,
+  threadSlot: number, tickNumber: number, timestampUs: number, header: SpanHeader,
+): TraceEvent {
+  const o = header.payloadOffset;
+  const evt: TraceEvent = {
+    ...baseSpanEvent(kind, threadSlot, tickNumber, timestampUs, header),
+    archetypeId: reader.readU16(o),
+    dirtyClusterCount: reader.readI32(o + 2),
+  };
+  const optMaskOffset = o + 6;
+  if (optMaskOffset < header.recordEnd) {
+    const mask = reader.readU8(optMaskOffset);
+    let cursor = optMaskOffset + 1;
+    if ((mask & 0x01) !== 0) { evt.totalShadowEntries = reader.readI32(cursor); cursor += 4; }
+  }
+  return evt;
+}
+
+// WriteTickFenceClusterSpatial (kind 63) — cluster spatial-maintenance span.
+// BeginParams (6 bytes): u16 archetypeId, i32 dirtyClusterCount.
+// Then u8 optMask @ +6; then optional fields:
+//   0x01: i32 _migrationsExecuted
+function decodeWriteTickFenceClusterSpatial(
+  reader: BinaryReader, kind: TraceEventKind,
+  threadSlot: number, tickNumber: number, timestampUs: number, header: SpanHeader,
+): TraceEvent {
+  const o = header.payloadOffset;
+  const evt: TraceEvent = {
+    ...baseSpanEvent(kind, threadSlot, tickNumber, timestampUs, header),
+    archetypeId: reader.readU16(o),
+    dirtyClusterCount: reader.readI32(o + 2),
+  };
+  const optMaskOffset = o + 6;
+  if (optMaskOffset < header.recordEnd) {
+    const mask = reader.readU8(optMaskOffset);
+    let cursor = optMaskOffset + 1;
+    if ((mask & 0x01) !== 0) { evt.migrationsExecuted = reader.readI32(cursor); cursor += 4; }
   }
   return evt;
 }

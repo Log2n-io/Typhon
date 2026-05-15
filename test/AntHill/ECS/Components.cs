@@ -51,14 +51,18 @@ public struct Genetics
     [Field] public float BaseEnergy;         // max energy capacity
     [Field] public int EatAmount;            // food units consumed per eat event
     [Field] public int HomeNestIndex;        // index into nest arrays
+    [Field] public int ColonyId;             // Phase 5: 0..4 — drives per-colony palette + combat
+    [Field] public int Caste;                // Phase 5: 0=Worker, 1=Soldier, 2=Larva, 3=Queen
 }
 
 [Component("AntHill.AntState", 1, StorageMode = StorageMode.SingleVersion)]
 [StructLayout(LayoutKind.Sequential)]
 public struct AntState
 {
-    [Field] public byte State;      // 0=Foraging, >=1 = Returning (value = 1 + foodSourceIndex)
-    [Field] public float Energy;    // depletes over time; 0 = death → respawn
+    [Field] public int State;             // 0=Foraging, >=1 = Returning (value = 1 + foodSourceIndex)
+    [Field] public float Energy;          // depletes over time; 0 = death → respawn
+    [Field] public int TicksAsLarva;      // Phase 5: maturation counter (only meaningful when Genetics.Caste == Larva)
+    [Field] public int HitFlashTicks;     // Phase 5: combat damage flash — non-zero = render red for N ticks
 
     public const byte Foraging = 0;
     // Returning: State >= 1, food source index = State - 1
@@ -66,6 +70,18 @@ public struct AntState
     public int FoodSourceIndex => State - 1;
     public static byte ReturningFrom(int foodIdx) => (byte)(foodIdx + 1);
 }
+
+// ── Caste constants (referenced by simulation + render) ────────────────────
+
+public static class Caste
+{
+    public const byte Worker = 0;
+    public const byte Soldier = 1;
+    public const byte Larva = 2;
+    public const byte Queen = 3;
+}
+
+// (Spider state lives in flat arrays on TyphonBridge — see _spiderPositions / _spiderVelocities.)
 
 // ── Food components ────────────────────────────────────────────────────────
 
@@ -92,6 +108,31 @@ public struct FoodSource
     }
 }
 
+// ── Obstacle components ────────────────────────────────────────────────────
+
+[Component("AntHill.Obstacle", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+public struct Obstacle
+{
+    [Field]
+    [SpatialIndex(50.0f)]
+    public AABB2F Bounds;
+
+    [Field] public byte Kind;   // 0 = Rock (room for future variants)
+
+    public float X
+    {
+        readonly get => Bounds.MinX;
+        set { Bounds.MinX = value; Bounds.MaxX = value; }
+    }
+
+    public float Y
+    {
+        readonly get => Bounds.MinY;
+        set { Bounds.MinY = value; Bounds.MaxY = value; }
+    }
+}
+
 // ── Nest components ────────────────────────────────────────────────────────
 
 [Component("AntHill.NestInfo", 1, StorageMode = StorageMode.SingleVersion)]
@@ -104,6 +145,7 @@ public struct NestInfo
 
     [Field] public float FoodStored;
     [Field] public int Population;
+    [Field] public byte ColonyId;   // Phase 5: drives per-colony palette + ownership
 
     public float X
     {

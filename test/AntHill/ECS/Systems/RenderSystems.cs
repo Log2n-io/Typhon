@@ -19,8 +19,8 @@ internal sealed class PrepareRenderBufferSystem : CallbackSystem
         .ReadsResource("PheromoneGrid")
         .ReadsResource("FoodInventory")
         .ReadsResource("NestInventory")
-        .WritesResource("RenderBuffers")
-        .WritesResource("Heatmap");
+        .WritesResource("RenderBuffers");
+        // "Heatmap" write moved to HeatmapRgbaPackSystem (Phase 6 polish — parallel heatmap path).
 
     protected override void Execute(TickContext ctx) => _bridge.PrepareRender(ctx);
 }
@@ -67,10 +67,9 @@ internal sealed class PublishRenderFrameSystem : CallbackSystem
         .Phase(AntPhases.Render)
         .WritesResource("RenderBuffers")
         .WritesResource("Heatmap")
-        // Three writers of RenderBuffers (Prepare, Fill, this) — the deriver requires direct
-        // pairwise edges between every writer, no transitive closure. Same constraint applies
-        // to Heatmap (Prepare + this). AfterAll declares both at once.
-        .AfterAll("PrepareRenderBuffer", "FillRenderBuffer");
+        // Multiple writers of RenderBuffers (Prepare, Fill, this) and Heatmap (HeatmapRgbaPack, this)
+        // — the deriver requires direct pairwise edges between every writer, no transitive closure.
+        .AfterAll("PrepareRenderBuffer", "FillRenderBuffer", "HeatmapRgbaPack");
 
     protected override void Execute(TickContext ctx) => _bridge.PublishRender(ctx);
 }
@@ -99,10 +98,26 @@ internal sealed class AntStatsAggregatorSystem : CallbackSystem
 
     protected override void Execute(TickContext ctx)
     {
+        var prevDeath = _bridge._deathCount;
+
         _bridge._deathCount += _bridge._antDiedQueue.Count;
         _bridge._foodDelivered += _bridge._foodDeliveredQueue.Count;
         // FoodPickedUpEvent isn't surfaced as a counter today; consumed only to advance the
         // queue (the next tick's Reset clears it). Kept on the wire for future stats panels.
         _ = _bridge._foodPickedUpQueue.Count;
+
+        // Significance filter: only death milestones — delivery milestones spammed too fast.
+        const int DeathMilestone = 1000;
+        const float CenterRender = 50f;  // 100m world / 2
+
+        var t = _bridge._simTimeSec;
+        var deathMsBefore = prevDeath / DeathMilestone;
+        var deathMsAfter = _bridge._deathCount / DeathMilestone;
+        for (var m = deathMsBefore + 1; m <= deathMsAfter; m++)
+        {
+            _bridge._eventLog.Enqueue(new LogEntry(t,
+                $"{m * DeathMilestone:N0} ants died total",
+                CenterRender, CenterRender, LogSeverity.Milestone));
+        }
     }
 }
