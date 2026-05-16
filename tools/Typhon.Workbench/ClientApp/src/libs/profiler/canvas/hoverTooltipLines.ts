@@ -1,6 +1,6 @@
 import { formatDuration } from './canvasUtils';
 import type { TimeAreaHover } from './timeAreaHitTest';
-import { TraceEventKind } from '@/libs/profiler/model/types';
+import { OffCpuCategoryNames, TraceEventKind, WaitReasonDescriptions } from '@/libs/profiler/model/types';
 
 /**
  * Build the text lines shown in the TimeArea's hover tooltip for span / chunk / phase / mini-row-op
@@ -141,6 +141,19 @@ export function buildHoverTooltipLines(hover: TimeAreaHover): string[] | null {
         `Duration: ${formatDuration(op.durationUs)}`,
         `Thread slot: ${op.threadSlot}`,
       ];
+    }
+    case 'off-cpu': {
+      const iv = hover.interval;
+      const lines = [
+        `Off-CPU — ${OffCpuCategoryNames[iv.category] ?? 'Other'}`,
+        `Duration: ${formatDuration(iv.durationUs)}`,
+        `Reason: ${WaitReasonDescriptions[iv.waitReason] ?? `Reason ${iv.waitReason}`}`,
+        `Thread slot: ${iv.threadSlot}`,
+        `Last CPU: ${iv.processorNumber}`,
+      ];
+      // Ready-queue latency is the scheduler-pressure signal — only meaningful when non-zero (0 = unknown).
+      if (iv.readyTimeUs > 0) lines.push(`Ready-queue wait: ${formatDuration(iv.readyTimeUs)}`);
+      return lines;
     }
     case 'tick':
     case 'help':

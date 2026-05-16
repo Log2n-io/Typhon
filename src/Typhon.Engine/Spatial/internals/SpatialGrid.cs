@@ -11,14 +11,14 @@ namespace Typhon.Engine.Internals;
 /// <remarks>
 /// <para>Phase 1+2 scope of issue #229: this grid exists, is wired into the spawn path for spatial archetypes, and is rebuilt at startup.
 /// It does <em>not</em> yet participate in migration (Phase 3) or per-cell R-Tree queries (#230).</para>
-/// <para>The grid stores only transient state. Nothing in <see cref="CellDescriptor"/> is persisted;
+/// <para>The grid stores only transient state. Nothing in <see cref="CellState"/> is persisted;
 /// <c>RebuildCellState</c> reconstructs everything from entity positions after a reopen.</para>
 /// </remarks>
 [PublicAPI]
 internal sealed unsafe class SpatialGrid
 {
     private readonly SpatialGridConfig _config;
-    private readonly CellDescriptor[] _cells;
+    private readonly CellState[] _cells;
 
     // Issue #231: bumped every time SetCellTier actually changes a cell's tier byte. The per-archetype
     // TierClusterIndex uses this to skip its rebuild when no cell tier has changed since the last dispatch.
@@ -27,7 +27,7 @@ internal sealed unsafe class SpatialGrid
     public SpatialGrid(SpatialGridConfig config)
     {
         _config = config;
-        _cells = new CellDescriptor[config.CellCount];
+        _cells = new CellState[config.CellCount];
     }
 
     public ref readonly SpatialGridConfig Config => ref _config;
@@ -45,7 +45,7 @@ internal sealed unsafe class SpatialGrid
     /// Passing <see cref="SimTier.None"/> clears the cell's tier — the tier index will then skip the cell entirely during rebuild.
     /// </summary>
     /// <remarks>
-    /// <para>The tier byte stored on <see cref="CellDescriptor.Tier"/> is a single-bit flag value from <see cref="SimTier"/>.
+    /// <para>The tier byte stored on <see cref="CellState.Tier"/> is a single-bit flag value from <see cref="SimTier"/>.
     /// Callers must pass a single-bit tier; multi-bit combinations (e.g. <see cref="SimTier.Near"/>) are rejected because the rebuild path
     /// uses <see cref="System.Numerics.BitOperations.TrailingZeroCount(uint)"/> to map the byte to an array index.</para>
     /// <para>Intentionally <c>internal</c>: issue #231 exposes only the minimum needed for tests. The public <c>SpatialGridAccessor</c> /
@@ -80,11 +80,11 @@ internal sealed unsafe class SpatialGrid
     }
 
     /// <summary>
-    /// Access a cell descriptor by cell key for read + write (callers bump <see cref="CellDescriptor.EntityCount"/>
-    /// and <see cref="CellDescriptor.ClusterCount"/> directly).
+    /// Access a cell descriptor by cell key for read + write (callers bump <see cref="CellState.EntityCount"/>
+    /// and <see cref="CellState.ClusterCount"/> directly).
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public ref CellDescriptor GetCell(int cellKey) => ref _cells[cellKey];
+    public ref CellState GetCell(int cellKey) => ref _cells[cellKey];
 
     /// <summary>
     /// Convert a world-space 2D point to a grid cell key. Points outside the configured bounds are clamped to the nearest valid cell — callers that care

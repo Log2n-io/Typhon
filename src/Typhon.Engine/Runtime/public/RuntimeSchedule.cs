@@ -11,7 +11,7 @@ namespace Typhon.Engine;
 /// <remarks>
 /// <para>
 /// Wraps <see cref="DagBuilder"/> with a developer-friendly interface that supports dependency declaration via <c>after:</c>/<c>afterAll:</c>,
-/// <c>runIf:</c> predicates, typed event queues, and overload parameters.
+/// <c>shouldRun:</c> predicates, typed event queues, and overload parameters.
 /// </para>
 /// <para>
 /// Usage: <c>RuntimeSchedule.Create().CallbackSystem(...).PipelineSystem(...).Build(parent)</c>
@@ -51,7 +51,7 @@ public sealed class RuntimeSchedule
     /// that don't need conflict detection or auto-DAG. For declared access, use a class-based system and <see cref="Add(CallbackSystem)"/>.
     /// </remarks>
     public RuntimeSchedule CallbackSystem(string name, Action<TickContext> action, string after = null, string[] afterAll = null,
-        SystemPriority priority = SystemPriority.Normal, Func<bool> runIf = null, int tickDivisor = 1, int throttledTickDivisor = 1, bool canShed = false)
+        SystemPriority priority = SystemPriority.Normal, Func<bool> shouldRun = null, int tickDivisor = 1, int throttledTickDivisor = 1, bool canShed = false)
     {
         ThrowIfBuilt();
         ArgumentNullException.ThrowIfNull(name);
@@ -63,7 +63,7 @@ public sealed class RuntimeSchedule
             Type = SystemType.CallbackSystem,
             CallbackAction = action,
             Priority = priority,
-            RunIf = runIf,
+            ShouldRun = shouldRun,
             After = after,
             AfterAll = afterAll,
             TickDivisor = tickDivisor,
@@ -82,7 +82,7 @@ public sealed class RuntimeSchedule
     /// use <see cref="Add(QuerySystem)"/> with a class-based system for declared access.
     /// </remarks>
     public RuntimeSchedule QuerySystem(string name, Action<TickContext> action, string after = null, string[] afterAll = null,
-        SystemPriority priority = SystemPriority.Normal, Func<bool> runIf = null, Func<ViewBase> input = null, Type[] changeFilter = null,
+        SystemPriority priority = SystemPriority.Normal, Func<bool> shouldRun = null, Func<ViewBase> input = null, Type[] changeFilter = null,
         int tickDivisor = 1, int throttledTickDivisor = 1, bool canShed = false, bool parallel = false, bool writesVersioned = false,
         SimTier tier = SimTier.All, int cellAmortize = 0, bool checkerboard = false, float chunksPerWorker = 1f)
     {
@@ -96,7 +96,7 @@ public sealed class RuntimeSchedule
             Type = SystemType.QuerySystem,
             CallbackAction = action,
             Priority = priority,
-            RunIf = runIf,
+            ShouldRun = shouldRun,
             InputFactory = input,
             ChangeFilter = changeFilter,
             After = after,
@@ -122,7 +122,7 @@ public sealed class RuntimeSchedule
     /// requires the class-based API.
     /// </remarks>
     public RuntimeSchedule PipelineSystem(string name, Action<int, int> chunkAction, int totalChunks, string after = null, string[] afterAll = null,
-        SystemPriority priority = SystemPriority.Normal, Func<bool> runIf = null, Func<ViewBase> input = null, Type[] changeFilter = null,
+        SystemPriority priority = SystemPriority.Normal, Func<bool> shouldRun = null, Func<ViewBase> input = null, Type[] changeFilter = null,
         int tickDivisor = 1, int throttledTickDivisor = 1, bool canShed = false)
     {
         ThrowIfBuilt();
@@ -136,7 +136,7 @@ public sealed class RuntimeSchedule
             PipelineChunkAction = chunkAction,
             TotalChunks = totalChunks,
             Priority = priority,
-            RunIf = runIf,
+            ShouldRun = shouldRun,
             InputFactory = input,
             ChangeFilter = changeFilter,
             After = after,
@@ -170,7 +170,7 @@ public sealed class RuntimeSchedule
             CallbackAction = ctx => Engine.CallbackSystem.InvokeExecute(system, ctx),
             SystemInstance = system,
             Priority = builder._priority,
-            RunIf = builder._runIf,
+            ShouldRun = builder._shouldRun,
             After = builder._after,
             AfterAll = builder._afterAll,
             TickDivisor = builder._tickDivisor,
@@ -180,8 +180,10 @@ public sealed class RuntimeSchedule
             ChangeFilter = builder._changeFilter,
             Parallel = builder._parallel,
             WritesVersioned = builder._writesVersioned,
+            ExplicitChunkCount = builder._explicitChunkCount,
             Phase = builder._phase,
             PhaseSet = builder._phaseSet,
+            IsInternal = builder._isInternal,
             Before = builder._before,
             Access = builder._access
         });
@@ -206,7 +208,7 @@ public sealed class RuntimeSchedule
             CallbackAction = ctx => Engine.QuerySystem.InvokeExecute(system, ctx),
             SystemInstance = system,
             Priority = builder._priority,
-            RunIf = builder._runIf,
+            ShouldRun = builder._shouldRun,
             After = builder._after,
             AfterAll = builder._afterAll,
             TickDivisor = builder._tickDivisor,
@@ -222,6 +224,7 @@ public sealed class RuntimeSchedule
             ChunksPerWorker = builder._chunksPerWorker,
             Phase = builder._phase,
             PhaseSet = builder._phaseSet,
+            IsInternal = builder._isInternal,
             Before = builder._before,
             Access = builder._access
         });
@@ -374,10 +377,12 @@ public sealed class RuntimeSchedule
                         $"System '{reg.Name}': Input is not valid for CallbackSystem. CallbackSystem is proactive and does not process entities from a View.");
                 }
 
-                if (reg.Parallel)
+                // Parallel CallbackSystem is allowed only via the chunked-parallel path (b.ChunkedParallel(N)), which sets ExplicitChunkCount > 0 and skips
+                // all entity-prep infrastructure.
+                if (reg.Parallel && reg.ExplicitChunkCount == 0)
                 {
                     throw new InvalidOperationException(
-                        $"System '{reg.Name}': Parallel is not valid for CallbackSystem.");
+                        $"System '{reg.Name}': Parallel is not valid for CallbackSystem. Use b.ChunkedParallel(N) for explicit chunked parallel dispatch.");
                 }
             }
 
@@ -387,10 +392,59 @@ public sealed class RuntimeSchedule
                     $"System '{reg.Name}': Parallel is not valid for PipelineSystem. PipelineSystem has its own chunk-parallel execution model.");
             }
 
-            if (reg.Parallel && reg.InputFactory == null)
+            // Chunked-parallel callbacks (ExplicitChunkCount > 0) intentionally bypass the entity-input requirement. The legacy "Parallel requires Input"
+            // check still applies to QuerySystems.
+            if (reg.Parallel && reg.InputFactory == null && reg.ExplicitChunkCount == 0)
             {
                 throw new InvalidOperationException(
-                    $"System '{reg.Name}': Parallel requires an Input View. Specify b.Input(() => view) alongside b.Parallel().");
+                    $"System '{reg.Name}': Parallel requires an Input View. Specify b.Input(() => view) alongside b.Parallel(), " +
+                    "or use b.ChunkedParallel(N) for non-entity-iterating chunked work.");
+            }
+
+            // ExplicitChunkCount-only restrictions: only meaningful on CallbackSystem; incompatible with every entity-context concept (since the
+            // chunked-callback path skips all entity prep).
+            if (reg.ExplicitChunkCount > 0)
+            {
+                if (reg.Type != SystemType.CallbackSystem)
+                {
+                    throw new InvalidOperationException(
+                        $"System '{reg.Name}': ChunkedParallel is only valid for CallbackSystem.");
+                }
+                if (reg.InputFactory != null)
+                {
+                    throw new InvalidOperationException(
+                        $"System '{reg.Name}': ChunkedParallel is incompatible with Input — chunked callbacks have no entity context.");
+                }
+                if (reg.ChangeFilter is { Length: > 0 })
+                {
+                    throw new InvalidOperationException(
+                        $"System '{reg.Name}': ChunkedParallel is incompatible with ChangeFilter — chunked callbacks have no entity context.");
+                }
+                if (reg.WritesVersioned)
+                {
+                    throw new InvalidOperationException(
+                        $"System '{reg.Name}': ChunkedParallel is incompatible with WritesVersioned.");
+                }
+                if (reg.TierFilter != SimTier.All)
+                {
+                    throw new InvalidOperationException(
+                        $"System '{reg.Name}': ChunkedParallel is incompatible with Tier — chunked callbacks have no cluster context.");
+                }
+                if (reg.CellAmortize > 0)
+                {
+                    throw new InvalidOperationException(
+                        $"System '{reg.Name}': ChunkedParallel is incompatible with CellAmortize.");
+                }
+                if (reg.Checkerboard)
+                {
+                    throw new InvalidOperationException(
+                        $"System '{reg.Name}': ChunkedParallel is incompatible with Checkerboard.");
+                }
+                if (reg.ChunksPerWorker != 1f)
+                {
+                    throw new InvalidOperationException(
+                        $"System '{reg.Name}': ChunkedParallel is incompatible with ChunksPerWorker — chunk count is explicit, not derived.");
+                }
             }
 
             if (reg.ChangeFilter is { Length: > 0 } && reg.InputFactory == null)
@@ -476,21 +530,21 @@ public sealed class RuntimeSchedule
             switch (reg.Type)
             {
                 case SystemType.CallbackSystem:
-                    dagBuilder.AddCallbackSystemInternal(reg.Name, reg.CallbackAction, reg.Priority, reg.RunIf, sourceOverride);
+                    dagBuilder.AddCallbackSystemInternal(reg.Name, reg.CallbackAction, reg.Priority, reg.ShouldRun, sourceOverride, reg.SystemInstance);
                     if (reg.SystemInstance is CallbackSystem cbInstance)
                     {
                         cbInstance.Index = dagIndex;
                     }
                     break;
                 case SystemType.QuerySystem:
-                    dagBuilder.AddQuerySystemInternal(reg.Name, reg.CallbackAction, reg.Priority, reg.RunIf, sourceOverride);
+                    dagBuilder.AddQuerySystemInternal(reg.Name, reg.CallbackAction, reg.Priority, reg.ShouldRun, sourceOverride, reg.SystemInstance);
                     if (reg.SystemInstance is QuerySystem qsInstance)
                     {
                         qsInstance.Index = dagIndex;
                     }
                     break;
                 case SystemType.PipelineSystem:
-                    dagBuilder.AddPipelineSystem(reg.Name, reg.PipelineChunkAction, reg.TotalChunks, reg.Priority, reg.RunIf);
+                    dagBuilder.AddPipelineSystem(reg.Name, reg.PipelineChunkAction, reg.TotalChunks, reg.Priority, reg.ShouldRun, reg.SystemInstance);
                     if (reg.SystemInstance is PipelineSystem psInstance)
                     {
                         psInstance.Index = dagIndex;
@@ -648,6 +702,7 @@ public sealed class RuntimeSchedule
             systems[sysIdx].CellAmortize = reg.CellAmortize;
             systems[sysIdx].IsCheckerboard = reg.Checkerboard;
             systems[sysIdx].ChunksPerWorker = reg.ChunksPerWorker;
+            systems[sysIdx].ExplicitChunkCount = reg.ExplicitChunkCount;
 
             if (reg.Access != null)
             {
@@ -666,6 +721,7 @@ public sealed class RuntimeSchedule
 
             systems[sysIdx].Phase = reg.PhaseSet ? reg.Phase : _options.DefaultPhase;
             systems[sysIdx].PhaseIndex = regPhaseIndex[reg.Name];
+            systems[sysIdx].IsInternal = reg.IsInternal;
         }
 
         // Phase 6: Create scheduler
@@ -715,7 +771,7 @@ public sealed class RuntimeSchedule
         public Action<int, int> PipelineChunkAction;
         public int TotalChunks = 1;
         public SystemPriority Priority;
-        public Func<bool> RunIf;
+        public Func<bool> ShouldRun;
         public string After;
         public string[] AfterAll;
         public int TickDivisor = 1;
@@ -726,11 +782,13 @@ public sealed class RuntimeSchedule
         public bool Parallel;
         public bool WritesVersioned;
         public float ChunksPerWorker = 1f;
+        public int ExplicitChunkCount;          // > 0 → chunked-parallel CallbackSystem (no entity context)
         public SimTier TierFilter = SimTier.All;
         public int CellAmortize;
         public bool Checkerboard;
         public Phase Phase;
         public bool PhaseSet;
+        public bool IsInternal;
         public string Before;
         public SystemAccessDescriptor Access;
         /// <summary>

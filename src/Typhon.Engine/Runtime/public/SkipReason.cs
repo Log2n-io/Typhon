@@ -11,8 +11,8 @@ public enum SkipReason : byte
     /// <summary>System was not skipped — it executed normally.</summary>
     NotSkipped = 0,
 
-    /// <summary>System's <c>runIf</c> predicate returned false.</summary>
-    RunIfFalse = 1,
+    /// <summary>System's <c>ShouldRun</c> predicate returned false.</summary>
+    ShouldRunFalse = 1,
 
     /// <summary>System's input source was empty (no entities to process).</summary>
     EmptyInput = 2,

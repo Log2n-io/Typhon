@@ -32,6 +32,15 @@ public sealed partial class TyphonRuntime : IDisposable
     // Tick-level UoW (created at tick start, disposed at tick end)
     private UnitOfWork _currentUow;
 
+    // Engine-internal fence executors (parallel WriteTickFence — chained Prep→Migrate→Finalize phases). Null when EnableParallelFence is false —
+    // OnTickEndInternal then falls back to the legacy single-threaded WriteTickFence path. Each phase has its own FenceWorkPlan instance (rebuilt every tick).
+    private readonly FencePrepExecSystem _fencePrepExec;
+    private readonly FenceMigrateExecSystem _fenceMigrateExec;
+    private readonly FenceAabbRefreshExecSystem _fenceAabbRefreshExec;
+    private readonly FenceFinalizeExecSystem _fenceFinalizeExec;
+    private readonly LiveFenceCostModel _liveFenceCost;
+    private readonly bool _parallelFenceEnabled;
+
     // Per-system transaction tracking. Only one worker processes a given system index at a time (CAS on _isReady ensures single claimer), so no contention
     // on these slots.
     private readonly Transaction[] _systemTransactions;
@@ -129,8 +138,14 @@ public sealed partial class TyphonRuntime : IDisposable
     /// <summary>Current overload response level.</summary>
     public OverloadLevel CurrentOverloadLevel => Scheduler.CurrentOverloadLevel;
 
-    /// <summary>Static DAG system definitions (name, type, priority, dependencies).</summary>
+    /// <summary>
+    /// All registered systems including engine-internal ones (e.g. <c>FenceExec</c>). Use this when you need the full system list, indexed by canonical system
+    /// index. For "the systems the user registered" use <see cref="UserSystems"/> instead.
+    /// </summary>
     public SystemDefinition[] Systems => Scheduler.Systems;
+
+    /// <summary>User-registered systems only (filters out <see cref="SystemDefinition.IsInternal"/> entries).</summary>
+    public SystemDefinition[] UserSystems => Scheduler.UserSystems;
 
     /// <summary>
     /// Phase order from <see cref="RuntimeOptions.Phases"/>. Returned as a fresh string array so
@@ -144,7 +159,11 @@ public sealed partial class TyphonRuntime : IDisposable
         {
             var phases = _options.Phases;
             var names = new string[phases.Length];
-            for (var i = 0; i < phases.Length; i++) names[i] = phases[i].Name;
+            for (var i = 0; i < phases.Length; i++)
+            {
+                names[i] = phases[i].Name;
+            }
+
             return names;
         }
     }
@@ -174,40 +193,58 @@ public sealed partial class TyphonRuntime : IDisposable
         var schedule = RuntimeSchedule.Create(opts);
         configure(schedule);
 
+        // Register engine-internal systems (FenceExec) on the same schedule. They're flagged via SystemBuilder.Internal() so RuntimeSchedule.Build partitions
+        // them into the DagScheduler's internal sub-DAG. Only enabled when the user opts in via RuntimeOptions.EnableParallelFence (default true); otherwise
+        // the legacy serial WriteTickFence runs from OnTickEndInternal as before.
+        FenceExecBundle? fenceBundle = null;
+        if (opts.EnableParallelFence)
+        {
+            fenceBundle = InternalScheduleBuilder.AddFenceExec(schedule, engine);
+        }
+
         var resourceParent = parent ?? engine.Parent; // DatabaseEngine registers under DataEngine node
         var scheduler = schedule.Build(resourceParent, logger);
 
-        return new TyphonRuntime(engine, scheduler, opts, logger);
+        return new TyphonRuntime(engine, scheduler, opts, logger, fenceBundle);
     }
 
-    private TyphonRuntime(DatabaseEngine engine, DagScheduler scheduler, RuntimeOptions options, ILogger logger)
+    private TyphonRuntime(DatabaseEngine engine, DagScheduler scheduler, RuntimeOptions options, ILogger logger, FenceExecBundle? fenceBundle = null)
     {
+        if (fenceBundle.HasValue)
+        {
+            _fencePrepExec = fenceBundle.Value.Prep;
+            _fenceMigrateExec = fenceBundle.Value.Migrate;
+            _fenceAabbRefreshExec = fenceBundle.Value.AabbRefresh;
+            _fenceFinalizeExec = fenceBundle.Value.Finalize;
+            _liveFenceCost = new LiveFenceCostModel(options.FenceCostModel);
+            _parallelFenceEnabled = true;
+        }
         Engine = engine;
         Scheduler = scheduler;
         _options = options;
         _logger = logger ?? NullLogger.Instance;
-        _systemTransactions = new Transaction[scheduler.SystemCount];
-        _systemViews = new ViewBase[scheduler.SystemCount];
-        _systemQueryPlanStartTicks = new long[scheduler.SystemCount];
-        _systemChangeFilterTables = new ComponentTable[scheduler.SystemCount][];
-        _systemClusterStates = new ArchetypeClusterState[scheduler.SystemCount];
-        _systemArchetypeIds = new ushort[scheduler.SystemCount];
+        _systemTransactions = new Transaction[scheduler.AllSystemCount];
+        _systemViews = new ViewBase[scheduler.AllSystemCount];
+        _systemQueryPlanStartTicks = new long[scheduler.AllSystemCount];
+        _systemChangeFilterTables = new ComponentTable[scheduler.AllSystemCount][];
+        _systemClusterStates = new ArchetypeClusterState[scheduler.AllSystemCount];
+        _systemArchetypeIds = new ushort[scheduler.AllSystemCount];
         Array.Fill(_systemArchetypeIds, ushort.MaxValue);
-        _systemEntityLists = new PooledEntityList[scheduler.SystemCount];
-        _systemConsumedQueues = new EventQueueBase[scheduler.SystemCount][];
-        _parallelEntityLists = new PooledEntityList[scheduler.SystemCount];
-        _multiTableFilterSets = new HashMap<long>[scheduler.SystemCount];
-        _parallelAccessors = new PointInTimeAccessor[scheduler.SystemCount];
-        _partitionViews = new PartitionEntityView[scheduler.SystemCount][];
-        _systemTierClusterIds = new int[scheduler.SystemCount][];
-        _systemTierClusterCount = new int[scheduler.SystemCount];
-        _systemAmortizationBuffers = new int[scheduler.SystemCount][];
-        _tierRangeViews = new ClusterRangeEntityView[scheduler.SystemCount][];
-        _checkerboardPhase = new int[scheduler.SystemCount];
-        _checkerboardRedIds = new int[scheduler.SystemCount][];
-        _checkerboardRedCount = new int[scheduler.SystemCount];
-        _checkerboardBlackIds = new int[scheduler.SystemCount][];
-        _checkerboardBlackCount = new int[scheduler.SystemCount];
+        _systemEntityLists = new PooledEntityList[scheduler.AllSystemCount];
+        _systemConsumedQueues = new EventQueueBase[scheduler.AllSystemCount][];
+        _parallelEntityLists = new PooledEntityList[scheduler.AllSystemCount];
+        _multiTableFilterSets = new HashMap<long>[scheduler.AllSystemCount];
+        _parallelAccessors = new PointInTimeAccessor[scheduler.AllSystemCount];
+        _partitionViews = new PartitionEntityView[scheduler.AllSystemCount][];
+        _systemTierClusterIds = new int[scheduler.AllSystemCount][];
+        _systemTierClusterCount = new int[scheduler.AllSystemCount];
+        _systemAmortizationBuffers = new int[scheduler.AllSystemCount][];
+        _tierRangeViews = new ClusterRangeEntityView[scheduler.AllSystemCount][];
+        _checkerboardPhase = new int[scheduler.AllSystemCount];
+        _checkerboardRedIds = new int[scheduler.AllSystemCount][];
+        _checkerboardRedCount = new int[scheduler.AllSystemCount];
+        _checkerboardBlackIds = new int[scheduler.AllSystemCount][];
+        _checkerboardBlackCount = new int[scheduler.AllSystemCount];
         _createSideTxDelegate = CreateSideTransactionInternal;
 
         ResolveChangeFilters(scheduler);
@@ -244,6 +281,13 @@ public sealed partial class TyphonRuntime : IDisposable
         }
 
         Scheduler.OnCriticalOverloadCallback = () => OnCriticalOverload?.Invoke(this);
+
+        // Bind the engine's shared FenceContext onto every typed fence-phase system. Done in the ctor — after schedule build, before Start.
+        // Required for Start-time context-binding validation to pass on parallel-fence runtimes.
+        if (_parallelFenceEnabled)
+        {
+            Scheduler.RegisterContext(Engine.FenceContext);
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -263,6 +307,21 @@ public sealed partial class TyphonRuntime : IDisposable
             _tcpServer.Start();
         }
     }
+
+    /// <summary>
+    /// Bind an ambient context onto every registered system deriving from <see cref="ChunkedCallbackSystem{TContext}"/>.
+    /// Must be called after Configure (systems must already be registered) and before <see cref="Start"/>.
+    /// </summary>
+    public void RegisterContext<TContext>(TContext context) where TContext : class => Scheduler.RegisterContext(context);
+
+    /// <summary>Test/diagnostic accessor for the adaptive fence cost model. Null when parallel fence is disabled.</summary>
+    internal LiveFenceCostModel LiveFenceCost => _liveFenceCost;
+
+    /// <summary>Test/diagnostic accessor for the four fence-phase exec systems (parallel fence only).</summary>
+    internal FencePrepExecSystem FencePrepExec => _fencePrepExec;
+    internal FenceMigrateExecSystem FenceMigrateExec => _fenceMigrateExec;
+    internal FenceAabbRefreshExecSystem FenceAabbRefreshExec => _fenceAabbRefreshExec;
+    internal FenceFinalizeExecSystem FenceFinalizeExec => _fenceFinalizeExec;
 
     /// <summary>
     /// Gracefully shuts down the runtime. Stops the subscription server, fires <see cref="OnShutdown"/>, then stops the scheduler.
@@ -374,7 +433,7 @@ public sealed partial class TyphonRuntime : IDisposable
 
     private void ResolveChangeFilters(DagScheduler scheduler)
     {
-        for (var i = 0; i < scheduler.SystemCount; i++)
+        for (var i = 0; i < scheduler.AllSystemCount; i++)
         {
             var sys = scheduler.Systems[i];
 
@@ -1033,6 +1092,17 @@ public sealed partial class TyphonRuntime : IDisposable
     private int OnParallelQueryPrepare(int sysIdx)
     {
         var sys = Scheduler.Systems[sysIdx];
+
+        // Chunked-CallbackSystem fast-path: skip all entity-prep (no view, no PTA, no tier index, no change-filter materialization).
+        // The scheduler dispatches exactly ExplicitChunkCount chunks (or RuntimeChunkCount if the runtime set a per-dispatch override — used by FenceExec to
+        // size chunks from the per-tick FenceWorkPlan) and OnParallelQueryChunk routes to the simple dispatch below.
+        if (sys.ExplicitChunkCount > 0)
+        {
+            ref var metrics = ref Scheduler.GetCurrentSystemMetrics(sysIdx);
+            metrics.EntitiesProcessed = 0;
+            return sys.RuntimeChunkCount > 0 ? sys.RuntimeChunkCount : sys.ExplicitChunkCount;
+        }
+
         var hasView = _systemViews[sysIdx] != null;
         var hasChangeFilter = hasView && _systemChangeFilterTables[sysIdx] != null;
 
@@ -1335,13 +1405,45 @@ public sealed partial class TyphonRuntime : IDisposable
     /// </summary>
     private void OnParallelQueryChunk(int sysIdx, int chunkIndex, int totalChunks, int workerId)
     {
-        if (Scheduler.Systems[sysIdx].WritesVersioned)
+        var sys = Scheduler.Systems[sysIdx];
+
+        // Chunked-CallbackSystem fast-path: no Accessor, no per-chunk Transaction, no entity slice.
+        // The system body uses ctx.ChunkIndex / ctx.ChunkCount to compute its own data slice.
+        if (sys.ExplicitChunkCount > 0)
+        {
+            ExecuteChunkedCallback(sysIdx, chunkIndex, totalChunks, workerId);
+            return;
+        }
+
+        if (sys.WritesVersioned)
         {
             ExecuteChunkWithTransaction(sysIdx, chunkIndex, totalChunks);
             return;
         }
 
         ExecuteChunkWithAccessor(sysIdx, chunkIndex, totalChunks, workerId);
+    }
+
+    /// <summary>
+    /// Chunked-parallel <see cref="CallbackSystem"/> dispatch. Builds a minimal <see cref="TickContext"/> (no entity Accessor, no per-chunk Transaction, 
+    /// empty Entities) carrying tick metadata + chunk coordinates, then invokes the system callback. Used by systems registered with
+    /// <see cref="SystemBuilder.ChunkedParallel"/>.
+    /// </summary>
+    private void ExecuteChunkedCallback(int sysIdx, int chunkIndex, int totalChunks, int workerId)
+    {
+        var sys = Scheduler.Systems[sysIdx];
+        var ctx = new TickContext
+        {
+            TickNumber = Scheduler.CurrentTickNumber,
+            DeltaTime = _currentDeltaTime,
+            AmortizedDeltaTime = _currentDeltaTime,
+            WorkerId = workerId,
+            ChunkIndex = chunkIndex,
+            ChunkCount = totalChunks,
+            TierBudgetMetrics = _previousTickMetrics,
+            SpatialGrid = new SpatialGridAccessor(Engine?.SpatialGrid)
+        };
+        sys.CallbackAction(ctx);
     }
 
     /// <summary>Paths 1 & 2: Non-Versioned chunk execution with per-worker EntityAccessor from per-system PTA.</summary>
@@ -1750,7 +1852,7 @@ public sealed partial class TyphonRuntime : IDisposable
         // This ensures woken clusters appear in this tick's per-tier lists. The TransitionWakePendingToActive method is guarded by _lastWakeTransitionTick
         // so calling it for the same archetype via multiple systems is a no-op after the first call.
         long tick = Scheduler.CurrentTickNumber;
-        for (int i = 0; i < Scheduler.SystemCount; i++)
+        for (int i = 0; i < Scheduler.AllSystemCount; i++)
         {
             var cs = _systemClusterStates[i];
             if (cs?.SleepStates != null)
@@ -1759,7 +1861,7 @@ public sealed partial class TyphonRuntime : IDisposable
             }
         }
 
-        for (int i = 0; i < Scheduler.SystemCount; i++)
+        for (int i = 0; i < Scheduler.AllSystemCount; i++)
         {
             var sys = Scheduler.Systems[i];
             if (sys.TierFilter == SimTier.All)
@@ -1815,7 +1917,17 @@ public sealed partial class TyphonRuntime : IDisposable
         // through one accounting bucket. UoW.Flush below handles the writeback per the configured DurabilityMode (and skips it entirely in WAL mode where
         // WAL records carry durability). Without this, each tick-fence callee would create+commit its own private ChangeSet, doing redundant disk I/O on
         // every tick (measured at ~22 ms / 88% of ExecuteMigrations time on a 1071-migration AntHill storm).
-        InspectorPhase(TickPhase.WriteTickFence, () => Engine.WriteTickFence(scheduler.CurrentTickNumber, _currentUow?.ChangeSet));
+        InspectorPhase(TickPhase.WriteTickFence, () =>
+        {
+            if (_parallelFenceEnabled)
+            {
+                RunParallelFence(scheduler);
+            }
+            else
+            {
+                Engine.WriteTickFence(scheduler.CurrentTickNumber, _currentUow?.ChangeSet);
+            }
+        });
 
         // Flush the UoW to make all Deferred writes (including the tick fence publishes above) durable, then dispose. UoW.Flush in WAL mode calls
         // WalManager.RequestFlush + WaitForDurable(currentLsn), where currentLsn is captured at the moment of the call — so it includes every publish made
@@ -1853,6 +1965,65 @@ public sealed partial class TyphonRuntime : IDisposable
 
     /// <summary>
     /// Wraps a tick phase with paired profiler boundary events. When <see cref="TelemetryConfig.ProfilerActive"/> is false the JIT folds both
+    /// <summary>
+    /// Parallel cluster tick fence orchestration. Runs on TickDriver. Resets the shared <see cref="FenceContext"/>, drains dormancy wake requests, runs the
+    /// serial component-table fences, then triggers ONE <see cref="DagScheduler.DispatchInternalSchedule"/> call. The scheduler walks the four chained internal
+    /// exec systems (Prep → Migrate → AabbRefresh → Finalize) via the declared <c>.After()</c> edges — each phase's typed <c>Prepare(FenceContext)</c> builds
+    /// its plan and sets the dynamic chunk count. Aggregates the highest WAL LSN across tables + Finalize and publishes it via
+    /// <see cref="DatabaseEngine.UpdateLastTickFenceLSNAtomic"/>. See <c>claude/design/Spatial/SpatialTiers/01-spatial-clusters.md</c>
+    /// §"Parallel migration apply" and rule MD-02 in <c>claude/rules/spatial.md</c>.
+    /// </summary>
+    private void RunParallelFence(DagScheduler scheduler)
+    {
+        // Gate: parallel fence is WAL-mode only (v1). The per-worker ChangeSet cleanup uses ReleaseExcessDirtyMarks which is correct ONLY in WAL mode —
+        // WAL-less mode would need SaveChanges per worker (torn-write hazard across workers writing the same page). Fall back to the serial WriteTickFence
+        // which uses the UoW's single-thread ChangeSet correctly. AntHill (the parallelization target) is WAL.
+        if (Engine.WalManager == null)
+        {
+            Engine.WriteTickFence(scheduler.CurrentTickNumber, _currentUow?.ChangeSet);
+            return;
+        }
+
+        var ctx = Engine.FenceContext;
+        ctx.Reset(scheduler.CurrentTickNumber, _currentUow?.ChangeSet, scheduler.WorkerCount, _options.FenceChunkOversubscription, _liveFenceCost);
+
+        // Drain dormancy wake requests globally on TickDriver (single-threaded contract from issue #233).
+        DormancyReporter.DrainAll(Engine._archetypeStates);
+
+        // Serial table fences on TickDriver. Uses the UoW's ChangeSet (single-thread context).
+        foreach (var table in Engine.GetAllComponentTables())
+        {
+            if (table.StorageMode == Schema.Definition.StorageMode.Versioned || table.DirtyBitmap == null)
+            {
+                continue;
+            }
+
+            long lsn = Engine.ProcessTableFence(table, ctx.TickNumber, ctx.UowChangeSet);
+            if (lsn > ctx.HighestTableLsn)
+            {
+                ctx.HighestTableLsn = lsn;
+            }
+        }
+
+        // Single dispatch — the scheduler walks Prep → Migrate → AabbRefresh → Finalize via the declared `.After()` edges. Each phase's Prepare(ctx) builds its
+        // plan from FenceContext and sets RuntimeChunkCount; ShouldRun/Prepare returning 0 skips cleanly with successor fan-out. No explicit per-phase dispatch
+        // races against auto-fanout.
+        scheduler.DispatchInternalSchedule();
+
+        ctx.HighestArchetypeLsn = _fenceFinalizeExec.HighestLsn;
+        long overall = Math.Max(ctx.HighestTableLsn, ctx.HighestArchetypeLsn);
+        if (overall > 0)
+        {
+            Engine.UpdateLastTickFenceLSNAtomic(overall);
+        }
+
+        if (_options.AdaptiveFenceCost)
+        {
+            _liveFenceCost.UpdatePhase(FencePhase.Migrate, _fenceMigrateExec.TotalWallTicks, _fenceMigrateExec.TotalUnitCount);
+            _liveFenceCost.UpdatePhase(FencePhase.AabbRefresh, _fenceAabbRefreshExec.TotalWallTicks, _fenceAabbRefreshExec.TotalUnitCount);
+        }
+    }
+
     /// Emit calls to no-ops — this method compiles to just <c>action()</c>.
     /// </summary>
     private void InspectorPhase(TickPhase phase, Action action)
@@ -1873,7 +2044,7 @@ public sealed partial class TyphonRuntime : IDisposable
     {
         var metrics = new TierBudgetMetrics { BudgetMs = 1000f / _options.BaseTickRate };
 
-        for (int i = 0; i < Scheduler.SystemCount; i++)
+        for (int i = 0; i < Scheduler.AllSystemCount; i++)
         {
             ref var t = ref Scheduler.GetCurrentSystemMetrics(i);
             if (t.WasSkipped || t.FirstChunkGrabTick == 0)

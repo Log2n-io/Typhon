@@ -1045,4 +1045,225 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         dbe.InitializeArchetypes();
         return dbe;
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // WriteSpatial barrier tests (V1, AABB2F path).
+    // The barrier replaces the previous "raw GetSpan + MarkClusterSlotDirty" pattern with an
+    // inline detector that updates the per-cluster bookkeeping arrays so the fence loop iterates
+    // only the clusters that actually changed. See ClusterRef.WriteSpatial.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    [Test]
+    public void WriteSpatial_FlagsMigration_NoFullScan()
+    {
+        using var dbe = SetupEngineWithGrid();
+
+        EntityId id;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            id = tx.Spawn<ClMigUnit>(
+                ClMigUnit.Pos.Set(PointAt(50f, 50f)),
+                ClMigUnit.Scratch.Set(ScratchOf(0, 0f)));
+            tx.Commit();
+        }
+
+        int srcCell = dbe.SpatialGrid.WorldToCellKey(50f, 50f);
+        int dstCell = dbe.SpatialGrid.WorldToCellKey(250f, 250f);
+        Assert.That(srcCell, Is.Not.EqualTo(dstCell));
+
+        var meta = Archetype<ClMigUnit>.Metadata;
+        var cs = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
+        var (preChunkId, preSlot) = ReadLocation(dbe, id);
+
+        // WriteSpatial via cluster API — same flow AntHill's ant integration uses.
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var accessor = tx.For<ClMigUnit>();
+            foreach (var cluster in accessor.GetClusterEnumerator())
+            {
+                if (cluster.ChunkId != preChunkId) continue;
+                cluster.WriteSpatial(ClMigUnit.Pos, preSlot,
+                    new ClMigPos { Bounds = new AABB2F { MinX = 250f, MinY = 250f, MaxX = 250f, MaxY = 250f } });
+            }
+            accessor.Dispose();
+            tx.Commit();
+        }
+
+        // The barrier must have flagged a migration on the source cluster.
+        Assert.That(cs.ClusterMigrationPendingSlots, Is.Not.Null);
+        Assert.That(cs.ClusterMigrationPendingSlots[preChunkId] & (1UL << preSlot), Is.Not.Zero,
+            "WriteSpatial must set the per-slot migration bit on the source cluster");
+        Assert.That(cs.ClusterMigrationDestCellKeys[preChunkId], Is.EqualTo(dstCell),
+            "WriteSpatial must record the destination cell key");
+
+        // Fence drains the flagged migration → entity ends up in dest cell.
+        dbe.WriteTickFence(1);
+
+        ref var srcCellRef = ref dbe.SpatialGrid.GetCell(srcCell);
+        ref var dstCellRef = ref dbe.SpatialGrid.GetCell(dstCell);
+        Assert.That(srcCellRef.EntityCount, Is.EqualTo(0), "source cell drained");
+        Assert.That(dstCellRef.EntityCount, Is.EqualTo(1), "destination cell holds the migrated entity");
+        Assert.That(cs.LastTickMigrationCount, Is.EqualTo(1), "telemetry counter records 1 migration");
+
+        // Post-fence the bookkeeping bits MUST be cleared.
+        Assert.That(cs.ClusterMigrationPendingSlots[preChunkId], Is.Zero, "migration pending bits cleared at fence");
+    }
+
+    [Test]
+    public void WriteSpatial_AABBGrow_InlineUpdate()
+    {
+        using var dbe = SetupEngineWithGrid();
+
+        EntityId id;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            // Spawn near cell-(0,0) center. AABB grow when we move further from center, staying inside the cell.
+            id = tx.Spawn<ClMigUnit>(
+                ClMigUnit.Pos.Set(PointAt(50f, 50f)),
+                ClMigUnit.Scratch.Set(ScratchOf(0, 0f)));
+            tx.Commit();
+        }
+
+        var meta = Archetype<ClMigUnit>.Metadata;
+        var cs = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
+        var (chunkId, slotIdx) = ReadLocation(dbe, id);
+
+        // Move within the same cell but to a more extreme position — AABB should grow inline.
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var accessor = tx.For<ClMigUnit>();
+            foreach (var cluster in accessor.GetClusterEnumerator())
+            {
+                if (cluster.ChunkId != chunkId) continue;
+                cluster.WriteSpatial(ClMigUnit.Pos, slotIdx,
+                    new ClMigPos { Bounds = new AABB2F { MinX = 95f, MinY = 95f, MaxX = 95f, MaxY = 95f } });
+            }
+            accessor.Dispose();
+            tx.Commit();
+        }
+
+        // Inline grow must have updated ClusterAabbs[chunkId] (MaxX should now be 95).
+        Assert.That(cs.ClusterAabbs[chunkId].MaxX, Is.EqualTo(95f).Within(0.001f),
+            "AABB MaxX grew inline at WriteSpatial time");
+        // No migration should be flagged (still in same cell).
+        Assert.That(cs.ClusterMigrationPendingSlots[chunkId], Is.Zero, "no migration when staying in cell");
+        // ClusterProcessBitmap should be set so the fence updates the per-cell index.
+        Assert.That((cs.ClusterProcessBitmap[chunkId >> 6] >> (chunkId & 63)) & 1L, Is.EqualTo(1L),
+            "process bit set for fence-time PerCellIndex update");
+    }
+
+    [Test]
+    public void WriteSpatial_AABBShrink_DeferredToFence()
+    {
+        using var dbe = SetupEngineWithGrid();
+
+        // Spawn TWO entities in the same cluster so one of them can shrink the AABB.
+        EntityId idA, idB;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            idA = tx.Spawn<ClMigUnit>(
+                ClMigUnit.Pos.Set(PointAt(10f, 50f)),
+                ClMigUnit.Scratch.Set(ScratchOf(0, 0f)));
+            idB = tx.Spawn<ClMigUnit>(
+                ClMigUnit.Pos.Set(PointAt(90f, 50f)),
+                ClMigUnit.Scratch.Set(ScratchOf(0, 0f)));
+            tx.Commit();
+        }
+
+        var meta = Archetype<ClMigUnit>.Metadata;
+        var cs = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
+        var (chunkA, slotA) = ReadLocation(dbe, idA);
+        var (chunkB, slotB) = ReadLocation(dbe, idB);
+        // Sanity: tests assume both in same cluster.
+        if (chunkA != chunkB)
+        {
+            Assert.Ignore("Two spawns landed in different clusters — test only meaningful for shared cluster");
+        }
+
+        // Pre-state: cluster's AABB MaxX should reflect entity B at x=90.
+        Assert.That(cs.ClusterAabbs[chunkA].MaxX, Is.EqualTo(90f).Within(0.001f));
+
+        // Move B inward (away from MaxX extreme). This should flag the MaxX shrink axis but NOT
+        // update the stored AABB inline (shrink can't be done in O(1) — we don't know the new
+        // second-most-extreme entity).
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var accessor = tx.For<ClMigUnit>();
+            foreach (var cluster in accessor.GetClusterEnumerator())
+            {
+                if (cluster.ChunkId != chunkA) continue;
+                cluster.WriteSpatial(ClMigUnit.Pos, slotB,
+                    new ClMigPos { Bounds = new AABB2F { MinX = 50f, MinY = 50f, MaxX = 50f, MaxY = 50f } });
+            }
+            accessor.Dispose();
+            tx.Commit();
+        }
+
+        // Shrink flag set, stored AABB unchanged until fence.
+        Assert.That(cs.ClusterShrinkPendingAxes[chunkA] & 0x02, Is.Not.Zero, "MaxX shrink axis flagged");
+        Assert.That(cs.ClusterAabbs[chunkA].MaxX, Is.EqualTo(90f).Within(0.001f),
+            "stored AABB MaxX unchanged at write time (deferred to fence)");
+
+        // Fence rescans → AABB tightens to reflect entity A at x=10 (now the MaxX-extreme).
+        dbe.WriteTickFence(1);
+
+        Assert.That(cs.ClusterAabbs[chunkA].MaxX, Is.LessThan(90f),
+            "after fence, MaxX shrunk because the entity that defined the previous extreme moved inward");
+        Assert.That(cs.ClusterShrinkPendingAxes[chunkA], Is.Zero, "shrink flags cleared at fence");
+    }
+
+    [Test]
+    public void WriteSpatial_InteriorEntityMove_NoShrinkFlag()
+    {
+        using var dbe = SetupEngineWithGrid();
+
+        // Three entities: A and B define the cluster's extremes on both axes; C is strictly interior.
+        // Moving C around within the bounding box should NOT flag any shrink axis — C wasn't at any extreme.
+        EntityId idA, idB, idC;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            idA = tx.Spawn<ClMigUnit>(
+                ClMigUnit.Pos.Set(PointAt(10f, 10f)),
+                ClMigUnit.Scratch.Set(ScratchOf(0, 0f)));
+            idB = tx.Spawn<ClMigUnit>(
+                ClMigUnit.Pos.Set(PointAt(90f, 90f)),
+                ClMigUnit.Scratch.Set(ScratchOf(0, 0f)));
+            idC = tx.Spawn<ClMigUnit>(
+                ClMigUnit.Pos.Set(PointAt(50f, 50f)),
+                ClMigUnit.Scratch.Set(ScratchOf(0, 0f)));
+            tx.Commit();
+        }
+
+        var meta = Archetype<ClMigUnit>.Metadata;
+        var cs = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
+        var (chunkA, _) = ReadLocation(dbe, idA);
+        var (chunkB, _) = ReadLocation(dbe, idB);
+        var (chunkC, slotC) = ReadLocation(dbe, idC);
+        if (chunkA != chunkB || chunkA != chunkC)
+        {
+            Assert.Ignore("Three spawns landed in different clusters — test only meaningful for shared cluster");
+        }
+
+        // Move C from (50, 50) → (60, 60). Still interior on both axes (10 < 60 < 90).
+        // No extreme changes → no shrink, no grow → no fence work needed for the AABB.
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var accessor = tx.For<ClMigUnit>();
+            foreach (var cluster in accessor.GetClusterEnumerator())
+            {
+                if (cluster.ChunkId != chunkC) continue;
+                cluster.WriteSpatial(ClMigUnit.Pos, slotC,
+                    new ClMigPos { Bounds = new AABB2F { MinX = 60f, MinY = 60f, MaxX = 60f, MaxY = 60f } });
+            }
+            accessor.Dispose();
+            tx.Commit();
+        }
+
+        // Neither shrink nor migration flagged — only the slot's dirty bit was set.
+        Assert.That(cs.ClusterShrinkPendingAxes[chunkC], Is.EqualTo(0), "interior move flags no shrink axis");
+        Assert.That(cs.ClusterMigrationPendingSlots[chunkC], Is.Zero, "interior move triggers no migration");
+        // Process bit should NOT be set (no grow either — C's new pos is strictly inside the cluster's existing AABB).
+        Assert.That((cs.ClusterProcessBitmap[chunkC >> 6] >> (chunkC & 63)) & 1L, Is.EqualTo(0L),
+            "interior move with no extreme change avoids the fence-time process loop entirely");
+    }
 }

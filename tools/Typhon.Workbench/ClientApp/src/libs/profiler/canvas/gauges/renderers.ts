@@ -4,6 +4,7 @@ import type {
   GcEvent,
   GcSuspensionEvent,
   MemoryAllocEventData,
+  OffCpuStore,
   TickData,
 } from '@/libs/profiler/model/traceModel';
 import { GaugeId } from '@/libs/profiler/model/types';
@@ -47,6 +48,8 @@ export interface GaugeData {
   memoryAllocEvents: readonly MemoryAllocEventData[];
   gcEvents: readonly GcEvent[];
   gcSuspensions: readonly GcSuspensionEvent[];
+  /** Slot → off-CPU interval store. Consumed by the slot-lane renderer to overlay off-CPU bars. */
+  offCpuBySlot: Map<number, OffCpuStore>;
 }
 
 export interface GaugeRenderContext {

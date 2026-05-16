@@ -6,6 +6,7 @@ import {
   SpanKindNames,
   type GaugeId,
   FIXED_AT_INIT_GAUGES,
+  waitReasonToCategory,
 } from './types';
 
 /** A chunk span: one rectangle in the Gantt chart */
@@ -141,6 +142,122 @@ export interface GcSuspensionEvent {
   startUs: number;
   durationUs: number;
   threadSlot: number;
+}
+
+/**
+ * One ON-CPU slice for a Typhon-registered thread, decoded from a ThreadContextSwitch (kind 254) record. The viewer never
+ * renders slices directly — they are the raw input from which the off-CPU GAPS are derived (see {@link OffCpuStore}).
+ * Stored per tick in {@link TickData.contextSwitches}, keyed by the slice's `targetSlotIdx`.
+ */
+export interface OnCpuSlice {
+  /** When the thread got the CPU (µs, global timeline). */
+  startUs: number;
+  /** How long it held the CPU (µs). */
+  durationUs: number;
+  /** Raw `ThreadWaitReason` byte — why the thread left the CPU at the END of this slice. */
+  waitReason: number;
+  /** Post-switch `System.Diagnostics.ThreadState` raw byte. */
+  threadState: number;
+  /** True when the CPU went to the System Idle thread after this slice. */
+  gettingIdle: boolean;
+  /** Logical CPU id the slice ran on. */
+  processorNumber: number;
+  /** Ready-queue latency that preceded this slice (µs) — time between becoming runnable and getting the CPU. */
+  readyTimeUs: number;
+}
+
+/**
+ * Struct-of-arrays store of off-CPU intervals for one thread slot — the GAPS between consecutive {@link OnCpuSlice}s.
+ * Built once per cache reassembly by {@link aggregateGaugeData}, never per frame. Parallel arrays (one logical interval
+ * spread across them at a shared index) keep ~27 B/interval with zero per-interval JS objects, and `startUs` doubles as
+ * the binary-search key for viewport culling. Both `startUs` and `endUs` are monotonically ascending (the intervals are
+ * non-overlapping, sorted gaps), so the renderer can binary-search either edge.
+ */
+export interface OffCpuStore {
+  /** Interval start (µs) — sorted ascending. Binary-search key. */
+  startUs: Float64Array;
+  /** Interval end (µs) — also ascending (non-overlapping gaps). */
+  endUs: Float64Array;
+  /** Ready-queue latency of the slice that ENDS this gap (µs). */
+  readyTimeUs: Float64Array;
+  /** OffCpuCategory byte per interval — the coarse coloring bucket. */
+  category: Uint8Array;
+  /** Raw ThreadWaitReason byte per interval, for the tooltip / detail label. */
+  waitReason: Uint8Array;
+  /** Logical CPU the thread had been running on before the gap. */
+  processorNumber: Uint8Array;
+}
+
+/**
+ * A single off-CPU interval extracted from an {@link OffCpuStore} at a given index — the shape carried in a profiler
+ * selection and rendered by the detail pane. Materialized only on click (one object), never in bulk.
+ */
+export interface OffCpuInterval {
+  threadSlot: number;
+  startUs: number;
+  endUs: number;
+  durationUs: number;
+  readyTimeUs: number;
+  category: number;
+  waitReason: number;
+  processorNumber: number;
+}
+
+/**
+ * Materialize one {@link OffCpuInterval} object from an {@link OffCpuStore} at the given index — used by the hit-test
+ * when the user clicks an off-CPU bar, and by tests. This is the ONLY place a per-interval object is created; the
+ * renderer reads the struct-of-arrays directly.
+ */
+export function materializeOffCpuInterval(store: OffCpuStore, index: number, threadSlot: number): OffCpuInterval {
+  const startUs = store.startUs[index];
+  const endUs = store.endUs[index];
+  return {
+    threadSlot,
+    startUs,
+    endUs,
+    durationUs: endUs - startUs,
+    readyTimeUs: store.readyTimeUs[index],
+    category: store.category[index],
+    waitReason: store.waitReason[index],
+    processorNumber: store.processorNumber[index],
+  };
+}
+
+/**
+ * One ON-CPU slice for a Typhon-registered thread, observed by `EtwSchedulingPump` (kind 254). The header threadSlot is the
+ * pump's own slot — the workbench re-projects to `targetSlotIdx` to render the slice on the affected thread's lane.
+ *
+ * **Rendering model.** For each thread `targetSlotIdx`, sort the slices by `startUs`. The gaps between consecutive slices are
+ * the OFF-CPU intervals: `[prev.endUs, next.startUs]` with reason = `prev.waitReason` (why prev left the CPU) and
+ * readyTime = `next.readyTimeUs` (how long next was queued before getting the CPU). Render those gaps as semi-transparent
+ * overlay bars on the thread's existing lane, color-coded by wait-reason category (sync-wait / quantum-end / preempted /
+ * paging / idle).
+ *
+ * **Decode path.** Surfaced via the auto-generated `ThreadContextSwitchEventDto` (polymorphic kind discriminator
+ * `threadContextSwitch`). Wire payload: `targetSlotIdx u8`, `processorNumber u8`, `waitReason u8` (ThreadWaitReason),
+ * `threadState u8` (System.Diagnostics.ThreadState raw), `gettingIdle u8`, `durationQpc u32`, `readyTimeQpc u32`. Convert
+ * QPC fields to microseconds via the trace's `timestampFrequency` before populating this struct.
+ */
+export interface ThreadOnCpuSlice {
+  tickNumber: number;
+  /** Slot index of the thread whose ON-CPU slice this is (re-projection target, NOT the producer slot). */
+  targetSlotIdx: number;
+  /** Slice start on the global timeline (= record's common-header timestamp converted to µs). */
+  startUs: number;
+  /** Slice end on the global timeline (= startUs + durationUs). */
+  endUs: number;
+  /** Time the thread held the CPU. */
+  durationUs: number;
+  /** Logical CPU id the slice ran on. */
+  processorNumber: number;
+  /** `ThreadWaitReason` byte — why the thread left the CPU at the end of this slice. */
+  waitReason: number;
+  /** Post-switch `System.Diagnostics.ThreadState` raw byte. */
+  threadState: number;
+  /** True when the CPU went to the System Idle thread next (no contender for the core). */
+  gettingIdle: boolean;
+  /** Time the thread spent on the ready queue immediately before this slice started. 0 = unknown, very large = scheduler pressure. */
+  readyTimeUs: number;
 }
 
 /**
@@ -289,6 +406,12 @@ export interface TickData {
    */
   threadInfos: ThreadInfoEvent[];
   /**
+   * ON-CPU slices observed in this tick, keyed by the owning thread slot (`targetSlotIdx`). Raw per-tick storage — the
+   * off-CPU GAPS between slices are derived cross-tick by <see cref="aggregateGaugeData"/> (a gap can span a TickStart, so
+   * it cannot be computed per tick). Each inner array is sorted by `startUs`. Empty for traces with no scheduling data.
+   */
+  contextSwitches: Map<number, OnCpuSlice[]>;
+  /**
    * The raw events that went into building this TickData. Stored verbatim so that <c>mergeTickData</c> can combine two
    * partial <c>TickData</c> entries (from an intra-tick-split chunk pair) by concatenating their <c>rawEvents</c> and re-running
    * <c>processTickEvents</c> on the union — guaranteeing byte-identical output to a single-pass build on the full events.
@@ -357,6 +480,12 @@ export interface ProcessedTrace {
   gcEvents?: GcEvent[];
   /** Flat list of GcSuspension bars across loaded ticks. */
   gcSuspensions?: GcSuspensionEvent[];
+  /**
+   * Per-thread-slot off-CPU intervals across the currently-loaded ticks — the GAPS where a thread was switched out, derived
+   * cross-tick from <c>ThreadContextSwitch</c> records. Struct-of-arrays for compactness; rendered as overlay bars on each
+   * thread's lane. Undefined / empty-map for traces with no OS scheduling data (non-Windows, or the pump never ran).
+   */
+  offCpuBySlot?: Map<number, OffCpuStore>;
 }
 
 const PHASE_NAMES: Record<number, string> = {
@@ -448,7 +577,7 @@ export function processTrace(metadata: TraceMetadata, events: TraceEvent[]): Pro
       ? sortedDurations[sortedDurations.length - 1]  // fall back to max on tiny samples
       : sortedDurations[Math.min(p95Idx, sortedDurations.length - 1)];
 
-  const { gaugeSeries, gaugeCapacities, memoryAllocEvents, gcEvents, gcSuspensions, threadNames } = aggregateGaugeData(ticks);
+  const { gaugeSeries, gaugeCapacities, memoryAllocEvents, gcEvents, gcSuspensions, threadNames, offCpuBySlot } = aggregateGaugeData(ticks);
 
   // Fold the aggregated slot→name map into metadata so lane labels ("DagScheduler", "TyphonProfilerGcIngest", ...) can render. Mutating
   // `metadata` here is safe: the caller passes a fresh instance per processTrace call, and threadNames is additive-only.
@@ -476,6 +605,7 @@ export function processTrace(metadata: TraceMetadata, events: TraceEvent[]): Pro
     memoryAllocEvents,
     gcEvents,
     gcSuspensions,
+    offCpuBySlot,
   };
 }
 
@@ -511,6 +641,7 @@ export function processTickEvents(tickNumber: number, events: TraceEvent[], syst
   const gcEvents: GcEvent[] = [];
   const gcSuspensions: GcSuspensionEvent[] = [];
   const threadInfos: ThreadInfoEvent[] = [];
+  const contextSwitches = new Map<number, OnCpuSlice[]>();
   let gaugeSnapshot: GaugeSnapshot | undefined;
 
   // Phases are still emitted as Start/End instant pairs — keep a short-lived map to pair them up.
@@ -741,6 +872,29 @@ export function processTickEvents(tickNumber: number, events: TraceEvent[], syst
 
         const existing = systemDurations.get(sysIdx) ?? 0;
         systemDurations.set(sysIdx, existing + duration);
+        break;
+      }
+
+      case TraceEventKind.ThreadContextSwitch: {
+        // One ON-CPU slice. Collected per target slot — the viewer renders the off-CPU GAPS between slices, never the
+        // slices themselves, so this case does NOT fall through to the generic span-push path: a slice is not a lane span.
+        // events[] is timestamp-sorted, so each per-slot array stays sorted by startUs.
+        if (evt.targetSlotIdx !== undefined && evt.durationUs !== undefined) {
+          let arr = contextSwitches.get(evt.targetSlotIdx);
+          if (arr === undefined) {
+            arr = [];
+            contextSwitches.set(evt.targetSlotIdx, arr);
+          }
+          arr.push({
+            startUs: evt.timestampUs,
+            durationUs: evt.durationUs,
+            waitReason: evt.waitReason ?? 0,
+            threadState: evt.threadState ?? 0,
+            gettingIdle: evt.gettingIdle ?? false,
+            processorNumber: evt.processorNumber ?? 0,
+            readyTimeUs: evt.readyTimeUs ?? 0,
+          });
+        }
         break;
       }
 
@@ -1095,6 +1249,7 @@ export function processTickEvents(tickNumber: number, events: TraceEvent[], syst
     gcEvents,
     gcSuspensions,
     threadInfos,
+    contextSwitches,
     rawEvents: events,
   };
 }
@@ -1156,6 +1311,8 @@ export function aggregateGaugeData(ticks: TickData[]): {
    * on ThreadInfo records. Empty for pre-v4 traces — the filter UI then defaults all slots to Other.
    */
   threadKinds: Map<number, number>;
+  /** Slot → off-CPU interval store, derived cross-tick from per-tick ON-CPU slices. Empty for traces with no scheduling data. */
+  offCpuBySlot: Map<number, OffCpuStore>;
 } {
   const gaugeSeries = new Map<GaugeId, GaugeSeries>();
   const gaugeCapacities = new Map<GaugeId, number>();
@@ -1219,7 +1376,62 @@ export function aggregateGaugeData(ticks: TickData[]): {
     }
   }
 
-  return { gaugeSeries, gaugeCapacities, memoryAllocEvents, gcEvents, gcSuspensions, threadNames, threadKinds };
+  // ── Off-CPU interval derivation ──────────────────────────────────────────────────────────────
+  // Concatenate each slot's per-tick ON-CPU slices across all resident ticks, then emit the GAP between each adjacent pair
+  // as one off-CPU interval. A defensive sort precedes the gap pass: per-tick arrays are individually startUs-sorted, but a
+  // slice whose start lies in tick N can be tagged tick N+1 (it closed after the next TickStart), so concatenation alone
+  // does not guarantee global order — and both the gap pass and the renderer's binary-search culling require it. A gap
+  // straddling a TickStart is just a normal adjacent pair here, so cross-tick gaps are handled for free; leading/trailing
+  // open-ended gaps are never emitted because only between-pair gaps are produced. Runs once per cache reassembly.
+  const offCpuBySlot = new Map<number, OffCpuStore>();
+  {
+    const slicesBySlot = new Map<number, OnCpuSlice[]>();
+    for (const tick of ticks) {
+      if (tick.contextSwitches.size === 0) continue;
+      for (const [slot, slices] of tick.contextSwitches) {
+        let arr = slicesBySlot.get(slot);
+        if (arr === undefined) {
+          arr = [];
+          slicesBySlot.set(slot, arr);
+        }
+        for (const s of slices) arr.push(s);
+      }
+    }
+    for (const [slot, slices] of slicesBySlot) {
+      if (slices.length < 2) continue;   // need ≥2 slices for a gap to exist between them
+      slices.sort((a, b) => a.startUs - b.startUs);
+      // Size the typed arrays exactly: count valid (strictly-positive) gaps first, so there is no over-allocation and no
+      // per-interval JS object ever exists.
+      let gapCount = 0;
+      for (let i = 0; i + 1 < slices.length; i++) {
+        if (slices[i + 1].startUs > slices[i].startUs + slices[i].durationUs) gapCount++;
+      }
+      if (gapCount === 0) continue;
+      const startUs = new Float64Array(gapCount);
+      const endUs = new Float64Array(gapCount);
+      const readyTimeUs = new Float64Array(gapCount);
+      const category = new Uint8Array(gapCount);
+      const waitReason = new Uint8Array(gapCount);
+      const processorNumber = new Uint8Array(gapCount);
+      let g = 0;
+      for (let i = 0; i + 1 < slices.length; i++) {
+        const prev = slices[i];
+        const next = slices[i + 1];
+        const gapStart = prev.startUs + prev.durationUs;
+        if (next.startUs <= gapStart) continue;   // zero / negative gap — clock skew or unsorted residue; skip
+        startUs[g] = gapStart;
+        endUs[g] = next.startUs;
+        readyTimeUs[g] = next.readyTimeUs;
+        category[g] = waitReasonToCategory(prev.waitReason, prev.gettingIdle);
+        waitReason[g] = prev.waitReason & 0xff;
+        processorNumber[g] = prev.processorNumber & 0xff;
+        g++;
+      }
+      offCpuBySlot.set(slot, { startUs, endUs, readyTimeUs, category, waitReason, processorNumber });
+    }
+  }
+
+  return { gaugeSeries, gaugeCapacities, memoryAllocEvents, gcEvents, gcSuspensions, threadNames, threadKinds, offCpuBySlot };
 }
 
 /** Maximum ticks to keep in memory during live streaming (~50s at 60Hz). */
@@ -1287,7 +1499,7 @@ export function processTickAndAppend(
   // Rebuild gauge aggregates from the (possibly-trimmed) ticks array. A single linear pass — cheap at MAX_LIVE_TICKS = 3000.
   // Live mode slides a window over the trace, so incrementally patching the existing series would require equally-paced removes on the
   // left side; a full rebuild is simpler, O(loaded ticks), and matches the chunk-path's refresh model.
-  const { gaugeSeries, gaugeCapacities, memoryAllocEvents, gcEvents, gcSuspensions, threadNames } = aggregateGaugeData(ticks);
+  const { gaugeSeries, gaugeCapacities, memoryAllocEvents, gcEvents, gcSuspensions, threadNames, offCpuBySlot } = aggregateGaugeData(ticks);
 
   // Merge thread names into metadata — live mode sees new slot claims arrive as the session runs.
   const mergedMetadata = threadNames.size > 0
@@ -1309,5 +1521,6 @@ export function processTickAndAppend(
     memoryAllocEvents,
     gcEvents,
     gcSuspensions,
+    offCpuBySlot,
   };
 }

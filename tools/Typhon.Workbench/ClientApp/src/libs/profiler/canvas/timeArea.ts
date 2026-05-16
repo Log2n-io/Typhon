@@ -1,4 +1,4 @@
-import type { ChunkSpan, SpanData, TickData } from '@/libs/profiler/model/traceModel';
+import type { ChunkSpan, OffCpuStore, SpanData, TickData } from '@/libs/profiler/model/traceModel';
 import type { TimeRange, TrackLayout, Viewport } from '@/libs/profiler/model/uiTypes';
 import type { ProfilerSelection } from '@/stores/useProfilerSelectionStore';
 import type { TimeAreaHover } from './timeAreaHitTest';
@@ -66,6 +66,132 @@ const _coalPool = {
   count: new Int32Array(COAL_MAX_DEPTH),
   sy: new Float64Array(COAL_MAX_DEPTH),
 };
+
+// ─── Off-CPU overlay constants + scratch ─────────────────────────────────────────────────────────
+/** Compositing alpha for the off-CPU hatch fill — the diagonal lines are sparse, so the lane content shows through the gaps. */
+const OFF_CPU_ALPHA = 0.3;
+/** Diagonal-hatch tile size in px for the off-CPU fill pattern. */
+const OFF_CPU_HATCH_TILE = 6;
+/** Below this pixel width an off-CPU interval is sub-pixel; adjacent sub-pixel intervals coalesce into one run (LOD). */
+const OFF_CPU_MIN_WIDTH_PX = 2;
+// Per-frame run scratch for the off-CPU LOD pass. Grown on demand to the canvas pixel width. `buildOffCpuRuns` keeps every
+// emitted run ≥1px AND pixel-disjoint from the next, so the run count is bounded by the viewport pixel width regardless of
+// how many thousands of intervals a lane holds. Reused across slot lanes (drawTimeArea is single-threaded per frame), so the
+// off-CPU pass allocates nothing once the scratch has grown.
+let _offCpuRunX1 = new Float64Array(0);
+let _offCpuRunX2 = new Float64Array(0);
+let _offCpuRunCat = new Uint8Array(0);
+// Per-category off-CPU hatch CanvasPattern cache, indexed by OffCpuCategory. Built lazily on first paint from a small
+// offscreen tile; a CanvasPattern is reusable across contexts, so a single module-lifetime cache is safe.
+const _offCpuHatch: (CanvasPattern | null)[] = [];
+
+/**
+ * Lazily build + cache the diagonal-hatch fill pattern for one off-CPU category. The tile is a small transparent canvas
+ * with a single corner-to-corner diagonal stroke in the category color, which tiles into a seamless 45° hatch. Returns
+ * null only if an offscreen 2D context can't be obtained (never in a real browser) — callers fall back to a solid fill.
+ */
+function getOffCpuHatch(ctx: CanvasRenderingContext2D, category: number, color: string): CanvasPattern | null {
+  const cached = _offCpuHatch[category];
+  if (cached !== undefined) {
+    return cached;
+  }
+  const tile = document.createElement('canvas');
+  tile.width = OFF_CPU_HATCH_TILE;
+  tile.height = OFF_CPU_HATCH_TILE;
+  const tileCtx = tile.getContext('2d');
+  let pattern: CanvasPattern | null = null;
+  if (tileCtx !== null) {
+    tileCtx.strokeStyle = color;
+    tileCtx.lineWidth = 1.3;
+    tileCtx.beginPath();
+    tileCtx.moveTo(0, 0);
+    tileCtx.lineTo(OFF_CPU_HATCH_TILE, OFF_CPU_HATCH_TILE);
+    tileCtx.stroke();
+    pattern = ctx.createPattern(tile, 'repeat');
+  }
+  _offCpuHatch[category] = pattern;
+  return pattern;
+}
+
+/**
+ * Coalesce one slot's off-CPU intervals into draw runs for the current viewport — the level-of-detail pass. A wide interval
+ * (≥ <paramref name="minWidthPx"/>) becomes its own run; ANY run of adjacent sub-pixel intervals merges into one run,
+ * irrespective of category — at sub-pixel zoom the per-interval colour is invisible anyway, and merging across categories is
+ * what keeps the output bounded. The leftmost interval's category wins the merged run. Each emitted run is ≥1px and
+ * pixel-disjoint from the previous one, so a zoomed-out lane with thousands of gaps collapses to at most pixel-width runs
+ * (and pixel-width `fillRect` calls) — never thousands. Pure + scratch-based: writes <c>outX1 / outX2 / outCat</c> and
+ * returns the run count, so it allocates nothing per frame and can be unit-tested in isolation.
+ *
+ * Preconditions: <c>store.startUs</c> / <c>store.endUs</c> are ascending; <paramref name="firstIdx"/> is the first interval
+ * index with <c>endUs &gt; visStartUs</c> (binary-searched by the caller). The loop also hard-stops once the scratch is full
+ * — since runs are emitted left-to-right and pixel-disjoint, a full scratch means every viewport pixel is already painted.
+ */
+export function buildOffCpuRuns(
+  store: OffCpuStore,
+  firstIdx: number,
+  visEndUs: number,
+  pxOfUs: (us: number) => number,
+  gutterWidth: number,
+  minWidthPx: number,
+  outX1: Float64Array,
+  outX2: Float64Array,
+  outCat: Uint8Array,
+): number {
+  const n = store.startUs.length;
+  const cap = outX1.length;
+  let runCount = 0;
+  let curOpen = false;
+  let curCat = -1;
+  let curX1 = 0;
+  let curX2 = 0;
+  // Right edge of the last flushed run / wide interval. A sub-pixel interval entirely behind this is on an
+  // already-painted pixel column, so it is dropped — this is what makes consecutive runs pixel-disjoint.
+  let lastEmittedX2 = Number.NEGATIVE_INFINITY;
+  const flush = (): void => {
+    if (curOpen && runCount < cap) {
+      outX1[runCount] = curX1;
+      outX2[runCount] = curX2;
+      outCat[runCount] = curCat;
+      runCount++;
+      lastEmittedX2 = curX2;
+    }
+    curOpen = false;
+  };
+  for (let i = firstIdx; i < n; i++) {
+    if (runCount >= cap) break;                        // scratch full ⇒ every viewport pixel already painted
+    if (store.startUs[i] > visEndUs) break;            // sorted by startUs ⇒ nothing further is visible
+    const x2 = pxOfUs(store.endUs[i]);
+    if (x2 < gutterWidth) continue;                    // fully left of the content area
+    let x1 = pxOfUs(store.startUs[i]);
+    if (x1 < gutterWidth) x1 = gutterWidth;            // clamp to the content-left edge
+    const cat = store.category[i];
+    if (x2 - x1 >= minWidthPx) {
+      // Wide interval — its own run. Flush any open sub-pixel run first so draw order stays left-to-right.
+      flush();
+      if (runCount < cap) {
+        outX1[runCount] = x1;
+        outX2[runCount] = x2;
+        outCat[runCount] = cat;
+        runCount++;
+        lastEmittedX2 = x2;
+      }
+      continue;
+    }
+    // Sub-pixel interval — extend the open run when adjacent (≤1px gap), regardless of category.
+    if (curOpen && x1 <= curX2 + 1) {
+      if (x2 > curX2) curX2 = x2;
+      continue;
+    }
+    flush();
+    if (x2 <= lastEmittedX2) continue;                 // fully inside an already-emitted run ⇒ pixel already painted
+    curOpen = true;
+    curCat = cat;
+    curX1 = x1 > lastEmittedX2 ? x1 : lastEmittedX2;    // never start left of the last painted pixel
+    curX2 = x2 > curX1 + 1 ? x2 : curX1 + 1;           // a sub-pixel run still paints ≥1px wide
+  }
+  flush();
+  return runCount;
+}
 
 /**
  * Pick a readable label colour for text drawn on top of a coloured bar. Uses WCAG relative
@@ -204,6 +330,11 @@ export interface TimeAreaInputs {
    * Threaded through to {@link drawSlotLane} so the renderer's hot loop has a stable lookup.
    */
   spanColorMode: SpanColorMode;
+  /**
+   * Whether the off-CPU overlay is shown on slot lanes. Sourced from the TimeArea filter toggle
+   * (`useProfilerViewStore.showOffCpu`). When false the off-CPU pass is skipped entirely.
+   */
+  showOffCpu: boolean;
 }
 
 /**
@@ -220,7 +351,7 @@ export function drawTimeArea(
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
 
-  const { tracks, viewRange, vp, gutterWidth, legendsVisible, visibleTicks, ticks, selection, hover, dragSelection, crosshairX, gaugeData, helpHover, pendingRangesUs, spanColorMode } = inputs;
+  const { tracks, viewRange, vp, gutterWidth, legendsVisible, visibleTicks, ticks, selection, hover, dragSelection, crosshairX, gaugeData, helpHover, pendingRangesUs, spanColorMode, showOffCpu } = inputs;
   const contentWidth = width - gutterWidth;
   // Height of the pinned ruler band (ruler + gap below it). Everything above this line is always
   // visible regardless of vertical scroll; tracks below are clipped to this boundary.
@@ -394,7 +525,8 @@ export function drawTimeArea(
     // chunk row; chunks never span ticks so the visible-only subset is sufficient + faster).
     if (track.id.startsWith('slot-')) {
       const threadSlot = Number.parseInt(track.id.slice(5), 10);
-      drawSlotLane(ctx, track, threadSlot, ticks, visibleTicks, visStartUs, visEndUs, gutterWidth, width, pxOfUs, ty, selection, hover, theme, spanColorMode);
+      drawSlotLane(ctx, track, threadSlot, ticks, visibleTicks, visStartUs, visEndUs, gutterWidth, width, pxOfUs, ty, selection, hover, theme,
+        spanColorMode, gaugeData.offCpuBySlot.get(threadSlot), showOffCpu);
       continue;
     }
 
@@ -641,6 +773,87 @@ function strokeHoverContour(
   ctx.globalAlpha = prevAlpha;
 }
 
+/**
+ * Paint one slot lane's off-CPU intervals as a translucent, category-colored band over the full lane height. Drawn last
+ * (over the chunk row + span rows) so it reads as "this thread was switched out here, and here's why". Viewport-culled via
+ * a binary search on the monotonic <c>endUs</c> array, then LOD-coalesced by {@link buildOffCpuRuns} so a zoomed-out lane
+ * never issues more <c>fillRect</c>s than it has pixels.
+ */
+function drawOffCpuOverlay(
+  ctx: CanvasRenderingContext2D,
+  store: OffCpuStore,
+  threadSlot: number,
+  ty: number,
+  laneHeight: number,
+  visStartUs: number,
+  visEndUs: number,
+  gutterWidth: number,
+  width: number,
+  pxOfUs: (us: number) => number,
+  selection: ProfilerSelection | null,
+  theme: StudioTheme,
+): void {
+  const n = store.startUs.length;
+  if (n === 0 || laneHeight <= 0) return;
+
+  // First interval whose endUs is still inside the viewport. endUs is monotonically ascending (the intervals are
+  // non-overlapping, sorted gaps), so a plain lower-bound binary search is valid.
+  let lo = 0;
+  let hi = n;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (store.endUs[mid] <= visStartUs) lo = mid + 1; else hi = mid;
+  }
+  if (lo >= n) return;
+
+  // Grow the run scratch to the canvas pixel width — a run is always ≥1px, so the run count can never exceed `width`.
+  const cap = Math.max(64, Math.ceil(width) + 1);
+  if (_offCpuRunX1.length < cap) {
+    _offCpuRunX1 = new Float64Array(cap);
+    _offCpuRunX2 = new Float64Array(cap);
+    _offCpuRunCat = new Uint8Array(cap);
+  }
+  const runCount = buildOffCpuRuns(
+    store, lo, visEndUs, pxOfUs, gutterWidth, OFF_CPU_MIN_WIDTH_PX, _offCpuRunX1, _offCpuRunX2, _offCpuRunCat);
+
+  if (runCount > 0) {
+    const prevAlpha = ctx.globalAlpha;
+
+    // Hatch fill — per-category 45° diagonal pattern. The pattern is anchored to the canvas origin, so the hatch phase is
+    // continuous across every bar and lane. Lane content shows through the gaps between the hatch lines.
+    ctx.globalAlpha = OFF_CPU_ALPHA;
+    let prevCat = -1;
+    for (let i = 0; i < runCount; i++) {
+      const x1 = _offCpuRunX1[i];
+      if (x1 > width) break;
+      const w = Math.max(_offCpuRunX2[i] - x1, 1);
+      const cat = _offCpuRunCat[i];
+      if (cat !== prevCat) {
+        const color = theme.offCpu[cat] ?? theme.offCpu[theme.offCpu.length - 1];
+        // Solid-color fallback when a pattern couldn't be built (no offscreen 2D context — never in a real browser).
+        ctx.fillStyle = getOffCpuHatch(ctx, cat, color) ?? color;
+        prevCat = cat;
+      }
+      ctx.fillRect(x1, ty, w, laneHeight);
+    }
+
+    ctx.globalAlpha = prevAlpha;
+  }
+
+  // Selection outline — full alpha, drawn over the band. The selected interval carries exact float endpoints from this
+  // same store, so `pxOfUs` reproduces its on-screen rect precisely (no fuzzy match needed).
+  if (selection !== null && selection.kind === 'off-cpu' && selection.interval.threadSlot === threadSlot) {
+    const sx2 = pxOfUs(selection.interval.endUs);
+    let sx1 = pxOfUs(selection.interval.startUs);
+    if (sx2 >= gutterWidth && sx1 <= width) {
+      if (sx1 < gutterWidth) sx1 = gutterWidth;
+      ctx.strokeStyle = theme.selectedOutline;
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(sx1 + 0.5, ty + 0.5, Math.max(sx2 - sx1, 2) - 1, laneHeight - 1);
+    }
+  }
+}
+
 function drawSlotLane(
   ctx: CanvasRenderingContext2D,
   track: TrackLayout,
@@ -657,6 +870,8 @@ function drawSlotLane(
   hover: TimeAreaHover | null,
   theme: StudioTheme,
   spanColorMode: SpanColorMode,
+  offCpuStore: OffCpuStore | undefined,
+  showOffCpu: boolean,
 ): void {
   const chunkRowHeight = track.chunkRowHeight ?? 0;
   const spanRegionTop = ty + chunkRowHeight;
@@ -765,9 +980,15 @@ function drawSlotLane(
       // renderDepth (from deriveSlotInfo's greedy packing) guarantees two overlapping bars on
       // this slot land on different rows. Falls back to span.depth when packing hasn't run yet
       // (first paint before the useMemo resolves), and finally to 0.
-      const depth = span.renderDepth ?? span.depth ?? 0;
+      // Sentinel renderDepth === -1: pin to the chunk-row band (Idle / BetweenTick) — those
+      // spans live exactly in the no-chunk gap, so the chunk row's vertical space is empty.
+      // When the slot has no chunk row (chunkRowHeight === 0), `ty === spanRegionTop` so the
+      // pinned span draws on top of the lane, same as a normal renderDepth=0 span.
+      const rawDepth = span.renderDepth ?? span.depth ?? 0;
+      const pinChunkRow = rawDepth === -1;
+      const depth = pinChunkRow ? 0 : rawDepth;
       const d = depth < COAL_MAX_DEPTH ? depth : COAL_MAX_DEPTH - 1;
-      const sy = spanRegionTop + depth * SPAN_ROW_HEIGHT;
+      const sy = pinChunkRow ? ty : spanRegionTop + depth * SPAN_ROW_HEIGHT;
       if (sy + SPAN_ROW_HEIGHT > trackBottom) continue;
 
       const actualWidth = x2 - x1;
@@ -782,7 +1003,9 @@ function drawSlotLane(
           continue;
         }
         flushDepth(d);
-        const c = colorForSpan(span, spanColorMode, theme.spans);
+        // Idle / BetweenTick bars (pinChunkRow) draw with a deliberately muted theme.idleBar so
+        // they're spotted by being LESS visible than real work — light grey on light, dark grey on dark.
+        const c = pinChunkRow ? theme.idleBar : colorForSpan(span, spanColorMode, theme.spans);
         if (c !== prevFill) { ctx.fillStyle = c; prevFill = c; }
         ctx.fillRect(x1, sy + SPAN_BAR_MARGIN, w, SPAN_BAR_HEIGHT);
         coalX1[d] = x1;
@@ -794,7 +1017,7 @@ function drawSlotLane(
 
       // Wide bar
       flushDepth(d);
-      const c = colorForSpan(span, spanColorMode, theme.spans);
+      const c = pinChunkRow ? theme.idleBar : colorForSpan(span, spanColorMode, theme.spans);
       if (c !== prevFill) { ctx.fillStyle = c; prevFill = c; }
       ctx.fillRect(x1, sy + SPAN_BAR_MARGIN, w, SPAN_BAR_HEIGHT);
 
@@ -811,7 +1034,7 @@ function drawSlotLane(
         ctx.beginPath();
         ctx.rect(x1, sy + SPAN_BAR_MARGIN, actualWidth, SPAN_BAR_HEIGHT);
         ctx.clip();
-        ctx.fillStyle = readableOnBar(colorForSpan(span, spanColorMode, theme.spans), theme);
+        ctx.fillStyle = readableOnBar(pinChunkRow ? theme.idleBar : colorForSpan(span, spanColorMode, theme.spans), theme);
         ctx.font = '12px monospace';
         ctx.textAlign = 'left';
         // Clamp the text's X to the visible-left edge so the label stays readable when the bar's
@@ -846,6 +1069,12 @@ function drawSlotLane(
   // context (low startUs) naturally draws before native spans — correct z-order within the tick.
   for (const tick of visibleTicks) {
     drawOneTickSpans(tick, false);
+  }
+
+  // Off-CPU overlay — drawn last so the translucent band composites over the chunk + span rows. Opt-in via the
+  // TimeArea filter toggle; skipped entirely when the slot has no scheduling data.
+  if (showOffCpu && offCpuStore !== undefined) {
+    drawOffCpuOverlay(ctx, offCpuStore, threadSlot, ty, track.height, visStartUs, visEndUs, gutterWidth, width, pxOfUs, selection, theme);
   }
 }
 

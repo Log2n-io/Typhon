@@ -8,6 +8,7 @@
       "Scheduler":          { "Enabled": true },
       "Runtime": {
         "Enabled": true,
+        "ThreadScheduling": { "Enabled": true },
         "WriteTickFence": {
           "Enabled": true,
           "Table":   { "Enabled": true },

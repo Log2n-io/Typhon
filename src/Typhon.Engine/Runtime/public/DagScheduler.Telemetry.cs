@@ -39,7 +39,7 @@ public sealed partial class DagScheduler
         var activeSystemCount = 0;
         var totalEntitiesProcessed = 0;
 
-        for (var i = 0; i < _systemCount; i++)
+        for (var i = 0; i < AllSystemCount; i++)
         {
             ref var sm = ref _currentTickSystemMetrics[i];
             sm.SystemIndex = i;
@@ -78,7 +78,7 @@ public sealed partial class DagScheduler
             {
                 if (sm.SkipReason == SkipReason.NotSkipped)
                 {
-                    sm.SkipReason = SkipReason.RunIfFalse;
+                    sm.SkipReason = SkipReason.ShouldRunFalse;
                 }
             }
         }
@@ -145,7 +145,7 @@ public sealed partial class DagScheduler
         // Enrich with subscription metrics (Output phase duration, deltas pushed, overflows)
         TelemetryEnrichCallback?.Invoke(ref tickTelemetry);
 
-        _telemetryRing.Record(in tickTelemetry, _currentTickSystemMetrics.AsSpan(0, _systemCount));
+        _telemetryRing.Record(in tickTelemetry, _currentTickSystemMetrics.AsSpan(0, AllSystemCount));
 
         // Warn on overrun
         if (overrunRatio > 1.0f)

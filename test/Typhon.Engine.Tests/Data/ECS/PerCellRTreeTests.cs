@@ -484,4 +484,131 @@ class PerCellRTreeTests : TestBase<PerCellRTreeTests>
         // in issue #230 Option B purge; the legacy tree is gone. A rigorous regression benchmark is tracked as a follow-up of #228.
         Assert.That(newPathPerIter, Is.GreaterThan(0), "Smoke bench: new path should return at least one result for the 2500×2500 query box over a 9000-wide world.");
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ClusterSpatialQueryResult.Bounds — verify the narrowphase's read bounds
+    // are surfaced on each hit so callers don't need a second component-table read.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    [Test]
+    public void HitBounds_AabbQuery_MatchEntityBounds()
+    {
+        using var dbe = SetupEngineWithGrid();
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.Spawn<ClCohUnit>(ClCohUnit.Pos.Set(PointAt(150f, 250f)));
+            tx.Spawn<ClCohUnit>(ClCohUnit.Pos.Set(PointAt(600f, 800f)));
+            tx.Commit();
+        }
+
+        var hits = new List<(long entityId, float minX, float minY, float maxX, float maxY)>();
+        using (var epoch = EpochGuard.Enter(dbe.EpochManager))
+        {
+            var query = dbe.ClusterSpatialQuery<ClCohUnit>();
+            var box = new AABB2F { MinX = 0f, MinY = 0f, MaxX = 1000f, MaxY = 1000f };
+            var en = query.AABB<AABB2F>(in box);
+            try
+            {
+                while (en.MoveNext())
+                {
+                    var c = en.Current;
+                    hits.Add((c.EntityId, c.MinX, c.MinY, c.MaxX, c.MaxY));
+                }
+            }
+            finally { en.Dispose(); }
+        }
+
+        Assert.That(hits, Has.Count.EqualTo(2));
+        // Point AABBs: MinX == MaxX, MinY == MaxY. Bounds must surface the entity's exact position.
+        Assert.That(hits.Exists(h => h.minX == 150f && h.minY == 250f && h.maxX == 150f && h.maxY == 250f), Is.True, "Entity at (150,250) should appear with matching bounds");
+        Assert.That(hits.Exists(h => h.minX == 600f && h.minY == 800f && h.maxX == 600f && h.maxY == 800f), Is.True, "Entity at (600,800) should appear with matching bounds");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ClusterSpatialQuery<TArch>.Radius — sphere queries via BSphere2F.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    [Test]
+    public void Radius_2DSphere_FiltersEntitiesOutsideRadius()
+    {
+        using var dbe = SetupEngineWithGrid();
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.Spawn<ClCohUnit>(ClCohUnit.Pos.Set(PointAt(500f, 500f))); // center — inside any sane radius
+            tx.Spawn<ClCohUnit>(ClCohUnit.Pos.Set(PointAt(510f, 500f))); // 10 away
+            tx.Spawn<ClCohUnit>(ClCohUnit.Pos.Set(PointAt(550f, 500f))); // 50 away
+            tx.Spawn<ClCohUnit>(ClCohUnit.Pos.Set(PointAt(700f, 500f))); // 200 away — outside a 100 radius
+            tx.Commit();
+        }
+
+        var results = new List<(long entityId, float distSq)>();
+        using (var epoch = EpochGuard.Enter(dbe.EpochManager))
+        {
+            var query = dbe.ClusterSpatialQuery<ClCohUnit>();
+            var sphere = new BSphere2F { CenterX = 500f, CenterY = 500f, Radius = 100f };
+            var en = query.Radius(in sphere);
+            try
+            {
+                while (en.MoveNext())
+                {
+                    var c = en.Current;
+                    results.Add((c.EntityId, c.DistanceSq));
+                }
+            }
+            finally { en.Dispose(); }
+        }
+
+        Assert.That(results, Has.Count.EqualTo(3), "3 of 4 entities should be within radius=100");
+        // DistanceSq for point-entities = (x-cx)² + (y-cy)². The center entity should have distSq == 0.
+        var distSqValues = results.ConvertAll(r => r.distSq);
+        Assert.That(distSqValues, Has.Member(0f), "center entity should report distanceSq=0");
+        Assert.That(distSqValues, Has.Member(100f), "entity at +10 should report distanceSq=100");
+        Assert.That(distSqValues, Has.Member(2500f), "entity at +50 should report distanceSq=2500");
+    }
+
+    [Test]
+    public void Radius_2DSphere_BoundsArePopulated()
+    {
+        using var dbe = SetupEngineWithGrid();
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.Spawn<ClCohUnit>(ClCohUnit.Pos.Set(PointAt(520f, 530f)));
+            tx.Commit();
+        }
+
+        using var epoch = EpochGuard.Enter(dbe.EpochManager);
+        var sphere = new BSphere2F { CenterX = 500f, CenterY = 500f, Radius = 100f };
+        var en = dbe.ClusterSpatialQuery<ClCohUnit>().Radius(in sphere);
+        try
+        {
+            Assert.That(en.MoveNext(), Is.True, "expected one hit");
+            var c = en.Current;
+            Assert.That(c.MinX, Is.EqualTo(520f));
+            Assert.That(c.MinY, Is.EqualTo(530f));
+            Assert.That(c.MaxX, Is.EqualTo(520f));
+            Assert.That(c.MaxY, Is.EqualTo(530f));
+            Assert.That(en.MoveNext(), Is.False);
+        }
+        finally { en.Dispose(); }
+    }
+
+    [Test]
+    public void Radius_EmptyResult_WhenNoneInRange()
+    {
+        using var dbe = SetupEngineWithGrid();
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.Spawn<ClCohUnit>(ClCohUnit.Pos.Set(PointAt(900f, 900f)));
+            tx.Commit();
+        }
+
+        using var epoch = EpochGuard.Enter(dbe.EpochManager);
+        var sphere = new BSphere2F { CenterX = 100f, CenterY = 100f, Radius = 50f };
+        var en = dbe.ClusterSpatialQuery<ClCohUnit>().Radius(in sphere);
+        try
+        {
+            Assert.That(en.MoveNext(), Is.False);
+        }
+        finally { en.Dispose(); }
+    }
 }

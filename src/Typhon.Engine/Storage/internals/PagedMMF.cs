@@ -1099,6 +1099,34 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     
     public ChangeSet CreateChangeSet() => new(this);
 
+    // ─── ChangeSet pool ────────────────────────────────────────────────────────────────
+    // Fence-tick parallel phases create one ChangeSet per chunk (FencePrep + FenceMigrate × chunkCount × tickRate ≈ thousands per second). Pool them via a
+    // ConcurrentBag — bag uses thread-local internal storage so Rent/Return is lock-free in the common case (per-worker pool slot). The ChangeSet's owner
+    // PagedMMF reference is stable across reuse cycles, so a rented ChangeSet behaves identically to a freshly-allocated one after ClearForReuse.
+    private readonly ConcurrentBag<ChangeSet> _changeSetPool = new();
+
+    /// <summary>
+    /// Rent a reusable <see cref="ChangeSet"/> from the per-engine pool, falling back to a fresh allocation when the pool is empty. Caller must call
+    /// <see cref="ReturnChangeSet"/> exactly once when done; pages tracked by the rented ChangeSet must have their dirty marks resolved
+    /// (via SaveChangesAsync / ReleaseExcessDirtyMarks / Reset) BEFORE returning, otherwise the next renter will receive stale state.
+    /// </summary>
+    public ChangeSet RentChangeSet() => _changeSetPool.TryTake(out var cs) ? cs : new ChangeSet(this);
+
+    /// <summary>
+    /// Return a previously-rented <see cref="ChangeSet"/> to the pool. Clears the local tracking buffers via <see cref="ChangeSet.ClearForReuse"/>;
+    /// caller is responsible for having resolved dirty marks beforehand.
+    /// </summary>
+    public void ReturnChangeSet(ChangeSet cs)
+    {
+        if (cs == null)
+        {
+            return;
+        }
+
+        cs.ClearForReuse();
+        _changeSetPool.Add(cs);
+    }
+
     /// <summary>
     /// Acquire exclusive latch on an epoch-protected page (Idle → Exclusive).
     /// Re-entrant: if already exclusively held by the current thread, increments

@@ -44,6 +44,7 @@ function makeTick(overrides: Partial<TickData> = {}): TickData {
     systemDurations: new Map(),
     rawEvents: [],
     threadInfos: [],
+    contextSwitches: new Map(),
     memoryAllocEvents: [],
     gcEvents: [],
     gcSuspensions: [],

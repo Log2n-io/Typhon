@@ -332,6 +332,81 @@ class ClusterSpatialTests : TestBase<ClusterSpatialTests>
     }
 
     [Test]
+    public void TickFence_DirectSpanWrite_NoMarkSlotDirty_AABB_StillRefreshed()
+    {
+        // Regression test (2026-05-13): the cluster-direct-memory API ClusterRef.GetSpan<T>() returns
+        // a raw Span<T> into cluster memory and does NOT auto-mark slots dirty. A system that integrates
+        // positions via cluster.GetSpan<Pos>() without calling MarkSlotDirty previously left the
+        // ClusterDirtyBitmap empty, which made RecomputeDirtyClusterAabbs skip the cluster — freezing its
+        // stored AABB at spawn values while the entity positions drifted. Small-radius spatial queries
+        // then silently returned 0 hits because the broadphase rejected the cluster's stale-tight AABB.
+        // Found via AntHill's spider chase code: chase at radius 1000 found the ant, kill at radius 80
+        // missed it (the wider chase query overlapped the stale AABB; the tight kill did not).
+        // This test makes the bug pattern explicit and verifies the fix.
+        using var dbe = SetupEngine();
+
+        // Spawn 4 entities clustered around (10, 10, 10) so they all land in one cluster.
+        var ids = new EntityId[4];
+        {
+            using var tx = dbe.CreateQuickTransaction();
+            for (int i = 0; i < ids.Length; i++)
+            {
+                var pos = MakePos(10, 10, 10, size: 0.5f);
+                var met = new ClSpatialMeta { Tag = i };
+                ids[i] = tx.Spawn<ClSpatialUnit>(ClSpatialUnit.Pos.Set(in pos), ClSpatialUnit.Meta.Set(in met));
+            }
+            tx.Commit();
+        }
+
+        // Sanity: query at spawn position finds all four.
+        {
+            using var tx = dbe.CreateQuickTransaction();
+            var found = tx.Query<ClSpatialUnit>().WhereNearby<ClSpatialPos>(10, 10, 10, 5).Execute();
+            Assert.That(found.Count, Is.EqualTo(4), "All spawned entities visible at spawn position");
+        }
+
+        // Mutate positions via cluster span — the exact pattern that bypasses dirty tracking.
+        // Move every entity ~200 units away from spawn so the new positions are FAR outside the
+        // cluster's stored (spawn-time) AABB.
+        {
+            using var tx = dbe.CreateQuickTransaction();
+            var accessor = tx.For<ClSpatialUnit>();
+            foreach (var cluster in accessor.GetClusterEnumerator())
+            {
+                var positions = cluster.GetSpan(ClSpatialUnit.Pos);
+                var bits = cluster.OccupancyBits;
+                while (bits != 0)
+                {
+                    int slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                    bits &= bits - 1;
+                    ref var p = ref positions[slot];
+                    p.Bounds.MinX = 200f - 0.5f; p.Bounds.MaxX = 200f + 0.5f;
+                    p.Bounds.MinY = 200f - 0.5f; p.Bounds.MaxY = 200f + 0.5f;
+                    p.Bounds.MinZ = 200f - 0.5f; p.Bounds.MaxZ = 200f + 0.5f;
+                    // Deliberately NO MarkSlotDirty — that's the bug pattern under test.
+                }
+            }
+            accessor.Dispose();
+            tx.Commit();
+        }
+
+        // Tick fence — engine should refresh cluster AABBs from current entity positions.
+        dbe.WriteTickFence(1);
+
+        // Tight-radius query at NEW position must find all four entities.
+        // Pre-fix: returned 0 (stale cluster AABB at spawn position doesn't overlap query bubble).
+        // Post-fix: returns all four because RecomputeDirtyClusterAabbs scans every active cluster.
+        using var qtx = dbe.CreateQuickTransaction();
+        var hits = qtx.Query<ClSpatialUnit>().WhereNearby<ClSpatialPos>(200, 200, 200, 5).Execute();
+        Assert.That(hits.Count, Is.EqualTo(4),
+            "After GetSpan write + tick fence, tight-radius query at new position must find all moved entities");
+        foreach (var id in ids)
+        {
+            Assert.That(hits, Does.Contain(id));
+        }
+    }
+
+    [Test]
     public void TickFence_SmallMove_NoEscape_FastPath()
     {
         using var dbe = SetupEngine();

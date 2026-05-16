@@ -63,6 +63,8 @@ export function TimeAreaFilterButton({ activeSlots, activeSystems, threadNamesBy
   const setManyGaugeCollapse = useProfilerViewStore((s) => s.setManyGaugeCollapse);
   const spanColorMode = useProfilerViewStore((s) => s.spanColorMode);
   const setSpanColorMode = useProfilerViewStore((s) => s.setSpanColorMode);
+  const showOffCpu = useProfilerViewStore((s) => s.showOffCpu);
+  const toggleShowOffCpu = useProfilerViewStore((s) => s.toggleShowOffCpu);
 
   // ── Build the tree ───────────────────────────────────────────────────────────────────────────
   // Stable IDs: gauge-{n}, op-{n}, slot-{n}, system-{n}. Group ids are 'gauges', 'threads',
@@ -244,6 +246,15 @@ export function TimeAreaFilterButton({ activeSlots, activeSystems, threadNamesBy
             <option value="depth">Depth</option>
             <option value="duration">Duration (heat)</option>
           </select>
+        </label>
+        {/*
+         * Off-CPU overlay — semi-transparent bars on each thread lane showing where the OS switched the
+         * thread out (kind-254 context-switch events). Can be visually noisy on a contended machine, so
+         * it's a dedicated toggle; persisted in `useProfilerViewStore` so the choice survives reload.
+         */}
+        <label className="flex items-center gap-2 pt-2 mt-2 border-t border-border text-xs">
+          <input type="checkbox" checked={showOffCpu} onChange={toggleShowOffCpu} className="h-3.5 w-3.5" />
+          <span className="text-muted-foreground">Show off-CPU intervals</span>
         </label>
       </PopoverContent>
     </Popover>

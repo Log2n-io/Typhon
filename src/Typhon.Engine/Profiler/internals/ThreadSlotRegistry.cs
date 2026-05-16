@@ -1,5 +1,6 @@
 using System;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Threading;
 using Typhon.Profiler;
 
@@ -132,6 +133,70 @@ internal static class ThreadSlotRegistry
     /// <summary>Access to a slot's lifecycle state. Read-only to avoid accidentally bypassing the CAS transitions.</summary>
     public static int GetSlotState(int index) => SSlots[index].State;
 
+    /// <summary>
+    /// Look up a slot by OS thread ID. Used by the ETW scheduling pump to map kernel <c>OldThreadID</c> / <c>NewThreadID</c> values (which are OS TIDs) onto
+    /// Typhon thread slots, so context-switch events can be re-attributed to the right lane. Returns <c>false</c> if no Active or Retiring slot owns the given
+    /// OS TID — the pump drops such events (Typhon-only scope).
+    /// </summary>
+    /// <remarks>
+    /// <b>Hot path:</b> called from the ETW pump for every kernel cswitch event (thousands per second machine-wide). Implemented as a linear scan over the
+    /// high-water-mark range — ~30 slots typical, cache-hot sequential access, ~10 ns. A dictionary would add concurrency overhead (the slot pool is mutated by
+    /// claiming threads) without a meaningful speedup at this scale.
+    /// <para>
+    /// <b>Race-tolerance:</b> a slot may be in the middle of <c>AssignClaim</c> or <c>FreeRetiringSlot</c> while the pump scans. Reading stale data is
+    /// harmless: if we miss a just-claimed slot, the next cswitch will find it; if we match a just-freed slot, the pump emits an event for a slot the consumer
+    /// no longer renders. Both are recoverable — no correctness invariant depends on perfect hand-off here.
+    /// </para>
+    /// </remarks>
+    public static bool TryGetSlotByOsThreadId(uint osThreadId, out int slotIndex)
+    {
+        if (osThreadId == 0)
+        {
+            slotIndex = -1;
+            return false;
+        }
+        var hwm = SHighWaterMark;
+        for (var i = 0; i < hwm; i++)
+        {
+            // Read state once. Both Active (1) and Retiring (2) are valid — Retiring slots still have a real OS TID mapping until FreeRetiringSlot transitions
+            // to Free, and the cswitch events that happen just before the thread is reaped are exactly the ones we want to capture.
+            var state = SSlots[i].State;
+            if (state == (int)SlotState.Free)
+            {
+                continue;
+            }
+            if (SSlots[i].Slot.OwnerOsThreadId == osThreadId)
+            {
+                slotIndex = i;
+                return true;
+            }
+        }
+        slotIndex = -1;
+        return false;
+    }
+
+    /// <summary>Windows P/Invoke for <c>GetCurrentThreadId</c>. Returns the OS-level TID of the calling thread.</summary>
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentThreadId();
+
+    private static uint TryGetOsThreadId()
+    {
+        // On non-Windows platforms the import would still bind (kernel32 isn't present), but we never call it.
+        // Stopwatch + Activity TraceIds don't depend on this — the OS TID is purely for the ETW pump's correlation.
+        if (!OperatingSystem.IsWindows())
+        {
+            return 0;
+        }
+        try
+        {
+            return GetCurrentThreadId();
+        }
+        catch
+        {
+            return 0;
+        }
+    }
+
     private static int ClaimSlot()
     {
         var threadId = Environment.CurrentManagedThreadId;
@@ -182,10 +247,9 @@ internal static class ThreadSlotRegistry
         }
         else
         {
-            // Re-claim: collapse any leftover spillover chain back to the primary before resetting. The consumer
-            // should already have drained and recycled all spillovers before the slot reached Free, but we belt-
-            // and-suspenders this in case a Stop-while-warm path or a forced ResetForTests left a chain attached.
-            // Walk Buffer.Next forward, returning each spillover to the pool. Buffer itself is never recycled.
+            // Re-claim: collapse any leftover spillover chain back to the primary before resetting. The consumer should already have drained and recycled all
+            // spillovers before the slot reached Free, but we belt-and-suspenders this in case a Stop-while-warm path or a forced ResetForTests left a chain
+            // attached. Walk Buffer.Next forward, returning each spillover to the pool. Buffer itself is never recycled.
             CollapseChainToPrimary(slot);
             slot.Buffer.Reset();
         }
@@ -193,24 +257,27 @@ internal static class ThreadSlotRegistry
         slot.ChainTail = slot.Buffer;
         slot.CaptureActivityContext = SGlobalCaptureActivityContext;
 
-        // Resolve name + kind, then publish them BEFORE OwnerManagedThreadId. TcpExporter.BuildCatchupThreadInfoFrame
-        // uses OwnerManagedThreadId == 0 as the "AssignClaim mid-flight, skip me" sentinel; if we set ManagedThreadId
-        // first the catch-up could read a non-zero id while OwnerThreadName / OwnerThreadKind are still defaults and
-        // ship a stale record. By writing those two first, any non-zero ManagedThreadId observation implies both the
+        // Resolve name + kind, then publish them BEFORE OwnerManagedThreadId. TcpExporter.BuildCatchupThreadInfoFrame/ uses OwnerManagedThreadId == 0 as the
+        // "AssignClaim mid-flight, skip me" sentinel; if we set ManagedThreadId first the catch-up could read a non-zero id while OwnerThreadName /
+        // OwnerThreadKind are still defaults and ship a stale record. By writing those two first, any non-zero ManagedThreadId observation implies both the
         // name and kind fields are already populated (x64 store-store ordering).
         var threadName = Thread.CurrentThread.Name;
         var threadKind = ResolveThreadKind(threadId, threadName);
         slot.OwnerThreadName = threadName;
         slot.OwnerThreadKind = threadKind;
+        // OS TID is captured on the claiming thread (so GetCurrentThreadId resolves to the right thread). Published BEFORE OwnerManagedThreadId for the same
+        // store-store reason as name/kind: the ETW pump does a linear scan keyed on OwnerOsThreadId and only correlates events when the slot is Active —
+        // a stale OS TID observed before the slot transitions to Active would still be ignored by the pump (it skips State == Free), but ordering this write
+        // before ManagedThreadId keeps the invariant uniform.
+        slot.OwnerOsThreadId = TryGetOsThreadId();
         slot.OwnerManagedThreadId = threadId;
         SlotIndex = index;
         Releaser = new SlotReleaser(index);
         Interlocked.Increment(ref SActiveSlotCount);
 
-        // Emit a ThreadInfo record right after the claim so the viewer can label this lane with a real thread name
-        // instead of just "Slot N". This runs on the claiming thread, so the per-slot SPSC invariant is preserved
-        // (this thread is the sole writer of its ring). If the thread has no name set we pass null — the encoder
-        // writes a zero-length name and the viewer falls back to a synthesized label using ThreadKind + managed id.
+        // Emit a ThreadInfo record right after the claim so the viewer can label this lane with a real thread name instead of just "Slot N". This runs on the
+        // claiming thread, so the per-slot SPSC invariant is preserved (this thread is the sole writer of its ring). If the thread has no name set we pass null
+        // — the encoder writes a zero-length name and the viewer falls back to a synthesized label using ThreadKind + managed id.
         TyphonEvent.EmitThreadInfo((byte)index, threadId, threadName, threadKind);
     }
 
@@ -264,6 +331,7 @@ internal static class ThreadSlotRegistry
         if (Interlocked.CompareExchange(ref SSlots[slotIndex].State, (int)SlotState.Free, (int)SlotState.Retiring) == (int)SlotState.Retiring)
         {
             SSlots[slotIndex].Slot.OwnerManagedThreadId = 0;
+            SSlots[slotIndex].Slot.OwnerOsThreadId = 0;
             SSlots[slotIndex].Slot.OwnerThreadName = null;
             SSlots[slotIndex].Slot.OwnerThreadKind = ThreadKind.Other;
             Interlocked.Decrement(ref SActiveSlotCount);
@@ -284,6 +352,7 @@ internal static class ThreadSlotRegistry
             SSlots[i].State = (int)SlotState.Free;
             var slot = SSlots[i].Slot;
             slot.OwnerManagedThreadId = 0;
+            slot.OwnerOsThreadId = 0;
             slot.OwnerThreadName = null;
             slot.OwnerThreadKind = ThreadKind.Other;
             slot.CaptureActivityContext = true;
@@ -366,6 +435,7 @@ internal static class ThreadSlotRegistry
             if (Interlocked.CompareExchange(ref SSlots[idx].State, (int)SlotState.Free, (int)SlotState.Active) == (int)SlotState.Active)
             {
                 SSlots[idx].Slot.OwnerManagedThreadId = 0;
+                SSlots[idx].Slot.OwnerOsThreadId = 0;
                 SSlots[idx].Slot.OwnerThreadName = null;
                 SSlots[idx].Slot.OwnerThreadKind = ThreadKind.Other;
                 Interlocked.Decrement(ref SActiveSlotCount);

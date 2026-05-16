@@ -120,12 +120,66 @@ public readonly ref struct ClusterSpatialQuery<TArch> where TArch : Archetype<TA
             $"ClusterSpatialQuery<{typeof(TArch).Name}>.AABB<{typeof(TBox).Name}>: unknown ISpatialBox type. " +
             "Add a dispatch branch here and update SpatialTierExtensions.TBoxToTier<TBox>().");
     }
+
+    /// <summary>
+    /// Query all entities in this archetype whose spatial bounds are within <paramref name="sphere"/>'s radius of its center, using the
+    /// closest-point-on-AABB distance semantic. <see cref="ClusterSpatialQueryResult.DistanceSq"/> is populated for each hit, letting callers sort
+    /// by distance without re-reading bounds. The archetype must be 2D (tier <c>Tier2F</c>); 3D archetypes use the <see cref="BSphere3F"/> overload.
+    /// </summary>
+    /// <param name="sphere">Query sphere (center + radius), in world units.</param>
+    /// <param name="categoryMask">Category bitmask; a cluster is skipped if its union mask does not intersect. Pass <see cref="uint.MaxValue"/> (default) to accept every cluster.</param>
+    public AabbClusterEnumerator Radius(in BSphere2F sphere, uint categoryMask = uint.MaxValue)
+    {
+        if (_state == null || !_state.SpatialSlot.HasSpatialIndex)
+        {
+            throw new InvalidOperationException(
+                $"ClusterSpatialQuery<{typeof(TArch).Name}>: archetype has no spatial index. " +
+                "Ensure the archetype has a SpatialIndex field and that ConfigureSpatialGrid was called " +
+                "on the engine before InitializeArchetypes.");
+        }
+
+        var storageTier = _state.SpatialSlot.FieldInfo.FieldType.ToTier();
+        if (storageTier != SpatialTier.Tier2F)
+        {
+            throw new InvalidOperationException(
+                $"ClusterSpatialQuery<{typeof(TArch).Name}>.Radius(BSphere2F): " +
+                $"query tier Tier2F does not match archetype storage tier {storageTier}. " +
+                "Use the BSphere3F overload for 3D archetypes (or AABB2D/AABB3D follow-ups once f64 cluster queries ship).");
+        }
+
+        return _state.QueryRadius(_grid, sphere.CenterX, sphere.CenterY, 0f, sphere.Radius, categoryMask);
+    }
+
+    /// <summary>
+    /// 3D variant of <see cref="Radius(in BSphere2F, uint)"/>. The archetype must be 3D (tier <c>Tier3F</c>).
+    /// </summary>
+    public AabbClusterEnumerator Radius(in BSphere3F sphere, uint categoryMask = uint.MaxValue)
+    {
+        if (_state == null || !_state.SpatialSlot.HasSpatialIndex)
+        {
+            throw new InvalidOperationException(
+                $"ClusterSpatialQuery<{typeof(TArch).Name}>: archetype has no spatial index. " +
+                "Ensure the archetype has a SpatialIndex field and that ConfigureSpatialGrid was called " +
+                "on the engine before InitializeArchetypes.");
+        }
+
+        var storageTier = _state.SpatialSlot.FieldInfo.FieldType.ToTier();
+        if (storageTier != SpatialTier.Tier3F)
+        {
+            throw new InvalidOperationException(
+                $"ClusterSpatialQuery<{typeof(TArch).Name}>.Radius(BSphere3F): " +
+                $"query tier Tier3F does not match archetype storage tier {storageTier}. " +
+                "Use the BSphere2F overload for 2D archetypes (or AABB2D/AABB3D follow-ups once f64 cluster queries ship).");
+        }
+
+        return _state.QueryRadius(_grid, sphere.CenterX, sphere.CenterY, sphere.CenterZ, sphere.Radius, categoryMask);
+    }
 }
 
 /// <summary>
-/// Result of a cluster spatial query match. Holds the entity id, its location inside the cluster storage (chunk id and slot index), and — for Radius
-/// queries — the squared distance from the query center to the closest point on the entity's AABB. For AABB queries, <see cref="DistanceSq"/> is
-/// <c>0</c> and should be ignored.
+/// Result of a cluster spatial query match. Holds the entity id, its location inside the cluster storage (chunk id and slot index), the entity's tight
+/// bounds as read by the narrowphase, and — for Radius queries — the squared distance from the query center to the closest point on the entity's AABB.
+/// For AABB queries, <see cref="DistanceSq"/> is <c>0</c> and should be ignored.
 /// </summary>
 public readonly struct ClusterSpatialQueryResult
 {
@@ -137,11 +191,27 @@ public readonly struct ClusterSpatialQueryResult
     /// queries. Used by <see cref="ArchetypeClusterState.QueryNearest"/> for top-k sorting. Issue #230 Phase 3.</summary>
     public readonly float DistanceSq;
 
-    internal ClusterSpatialQueryResult(long entityId, int clusterChunkId, int slotIndex, float distanceSq = 0f)
+    /// <summary>Entity's tight AABB, read by the narrowphase. For 2D archetypes <c>MinZ</c>/<c>MaxZ</c> reflect the query's Z range (typically infinity
+    /// sentinels) and should be ignored — read only <c>MinX</c>/<c>MinY</c>/<c>MaxX</c>/<c>MaxY</c>. Lets callers skip a second component-table read.</summary>
+    public readonly float MinX;
+    public readonly float MinY;
+    public readonly float MinZ;
+    public readonly float MaxX;
+    public readonly float MaxY;
+    public readonly float MaxZ;
+
+    internal ClusterSpatialQueryResult(long entityId, int clusterChunkId, int slotIndex, float minX, float minY, float minZ, float maxX, float maxY, float maxZ,
+        float distanceSq = 0f)
     {
         EntityId = entityId;
         ClusterChunkId = clusterChunkId;
         SlotIndex = slotIndex;
+        MinX = minX;
+        MinY = minY;
+        MinZ = minZ;
+        MaxX = maxX;
+        MaxY = maxY;
+        MaxZ = maxZ;
         DistanceSq = distanceSq;
     }
 }

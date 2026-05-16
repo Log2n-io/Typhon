@@ -56,11 +56,11 @@ public readonly struct SpatialGridAccessor
     // Cell access
     // ═══════════════════════════════════════════════════════════════
 
-    /// <summary>Access a cell descriptor by cell key. Internal because <see cref="CellDescriptor"/> is an internal type.</summary>
-    internal ref CellDescriptor GetCell(int cellKey) { ThrowIfInvalid(); return ref _grid.GetCell(cellKey); }
+    /// <summary>Access a cell descriptor by cell key. Internal because <see cref="CellState"/> is an internal type.</summary>
+    internal ref CellState GetCell(int cellKey) { ThrowIfInvalid(); return ref _grid.GetCell(cellKey); }
 
-    /// <summary>Access a cell descriptor by grid coordinates. Internal because <see cref="CellDescriptor"/> is an internal type.</summary>
-    internal ref CellDescriptor GetCell(int cellX, int cellY) { ThrowIfInvalid(); return ref _grid.GetCell(_grid.ComputeCellKey(cellX, cellY)); }
+    /// <summary>Access a cell descriptor by grid coordinates. Internal because <see cref="CellState"/> is an internal type.</summary>
+    internal ref CellState GetCell(int cellX, int cellY) { ThrowIfInvalid(); return ref _grid.GetCell(_grid.ComputeCellKey(cellX, cellY)); }
 
     // ═══════════════════════════════════════════════════════════════
     // Tier assignment

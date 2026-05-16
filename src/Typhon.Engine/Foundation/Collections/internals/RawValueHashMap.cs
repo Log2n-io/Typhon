@@ -635,21 +635,16 @@ unsafe class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStore> where
     }
 
     /// <summary>
-    /// In-place value mutation primitive. Locates <paramref name="key"/>, marks the bucket page dirty,
-    /// takes the bucket's OLC write lock, calls <c>updater.Update(valueBytes)</c> on the value pointer,
-    /// and unlocks. Returns true if the key was found (and the updater ran), false otherwise.
+    /// In-place value mutation primitive. Locates <paramref name="key"/>, marks the bucket page dirty, takes the bucket's OLC write lock, calls
+    /// <c>updater.Update(valueBytes)</c> on the value pointer, and unlocks. Returns true if the key was found (and the updater ran), false otherwise.
     /// <para>
-    /// Use when only a few bytes of an existing value need to change (e.g. updating two fields of a
-    /// 14-byte ClusterEntityRecord). Avoids the TryGet+Upsert pair's two chain scans, full-record
-    /// stack-buffer copy, and double OLC traversal — single descent, single critical section.
+    /// Use when only a few bytes of an existing value need to change (e.g. updating two fields of a 14-byte ClusterEntityRecord). Avoids the TryGet+Upsert
+    /// pair's two chain scans, full-record stack-buffer copy, and double OLC traversal — single descent, single critical section.
     /// </para>
     /// </summary>
-    /// <typeparam name="TUpdater">A struct implementing <see cref="IRawValueUpdater"/>. The struct
-    /// constraint enables JIT devirtualisation of the <see cref="IRawValueUpdater.Update"/> call so the
-    /// callback inlines into this loop.</typeparam>
-    public bool TryUpdateInPlace<TUpdater>(TKey key, ref TUpdater updater,
-        ref ChunkAccessor<TStore> accessor, ChangeSet changeSet)
-        where TUpdater : struct, IRawValueUpdater
+    /// <typeparam name="TUpdater">A struct implementing <see cref="IRawValueUpdater"/>. The struct constraint enables JIT devirtualisation of the
+    /// <see cref="IRawValueUpdater.Update"/> call so the callback inlines into this loop.</typeparam>
+    public bool TryUpdateInPlace<TUpdater>(TKey key, ref TUpdater updater, ref ChunkAccessor<TStore> accessor) where TUpdater : struct, IRawValueUpdater
     {
         uint hash = ComputeHash(key);
 
@@ -660,9 +655,8 @@ unsafe class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStore> where
             int bucket = ResolveBucket(hash, level, next, N0);
             int chunkId = GetBucketChunkId(bucket, ref accessor);
 
-            // GetChunkAddress(_, true) marks the page dirty + registers it with the ChangeSet up-front,
-            // matching Upsert's pattern. If the key isn't found we still return having marked the page dirty
-            // — same belt-and-braces semantics as Upsert when UpdateInChain fails (it would still walk the
+            // GetChunkAddress(_, true) marks the page dirty + registers it with the ChangeSet up-front, matching Upsert's pattern. If the key isn't found we
+            // still return having marked the page dirty — same belt-and-braces semantics as Upsert when UpdateInChain fails (it would still walk the
             // chain through dirty-marked pages). The cost is negligible vs the chain scan.
             byte* addr = accessor.GetChunkAddress(chunkId, true);
             ref var header = ref GetHeader(addr);

@@ -179,6 +179,25 @@ public enum TraceEventKind : byte
     /// <summary>Cluster migration between spatial cells. Required: <c>archetypeId: u16</c>, <c>migrationCount: i32</c>.</summary>
     ClusterMigration = 60,
 
+    /// <summary>Per-tick span around the per-archetype body inside <c>WriteClusterTickFence</c>. Covers both the has-dirty branch
+    /// (snapshot + occupancy mask + shadow + spatial + WAL serialize + dormancy sweep) and the clean branch (dormancy sweep + optional
+    /// spatial AABB refresh on local occupancy bitmap). Required payload: <c>archetypeId: u16</c>.
+    /// Optional payload: <c>dirtyClusterCount: i32</c>, <c>entryCount: i32</c>, <c>hasShadow: u8</c>, <c>hasSpatial: u8</c>, <c>walPublished: u8</c>.
+    /// Gated on <c>RuntimeWriteTickFenceClusterActive</c>.</summary>
+    WriteTickFenceCluster = 61,
+
+    /// <summary>Per-tick span around <c>ProcessClusterShadowEntries</c> for one cluster-eligible archetype. Drains per-index shadow
+    /// buffers for cluster-backed B+Tree indexes. Required payload: <c>archetypeId: u16</c>, <c>dirtyClusterCount: i32</c>.
+    /// Optional payload: <c>totalShadowEntries: i32</c>. Gated on <c>RuntimeWriteTickFenceClusterShadowActive</c>.</summary>
+    WriteTickFenceClusterShadow = 62,
+
+    /// <summary>Per-tick span around the cluster spatial-maintenance block: <c>DetectClusterMigrations</c> + <c>ExecuteMigrations</c>
+    /// + <c>RecomputeDirtyClusterAabbs</c> for one archetype with a Dynamic spatial slot. Parent of the fine-grained spans
+    /// <see cref="SpatialClusterMigrationDetectScan"/> + <see cref="SpatialClusterAabbRefresh"/> + <see cref="ClusterMigration"/>.
+    /// Required payload: <c>archetypeId: u16</c>, <c>dirtyClusterCount: i32</c>. Optional: <c>migrationsExecuted: i32</c>.
+    /// Gated on <c>RuntimeWriteTickFenceClusterSpatialActive</c>.</summary>
+    WriteTickFenceClusterSpatial = 63,
+
     // ── .NET runtime GC suspension (span) ──
 
     /// <summary>
@@ -526,7 +545,7 @@ public enum TraceEventKind : byte
     /// <summary>Overload level transition (only on change). Payload: <c>prevLvl: u8</c>, <c>newLvl: u8</c>, <c>ratio: f32</c>, <c>queueDepth: i32</c>, <c>oldMul: u8</c>, <c>newMul: u8</c>.</summary>
     SchedulerOverloadLevelChange = 156,
 
-    /// <summary>Per-system shed/throttle decision (when overload level &gt; Normal). Payload: <c>sysIdx: u16</c>, <c>level: u8</c>, <c>divisor: u16</c>, <c>decision: u8</c> (0=runIfFalse, 1=throttled, 2=shed).</summary>
+    /// <summary>Per-system shed/throttle decision (when overload level &gt; Normal). Payload: <c>sysIdx: u16</c>, <c>level: u8</c>, <c>divisor: u16</c>, <c>decision: u8</c> (0=shouldRunFalse, 1=throttled, 2=shed).</summary>
     SchedulerOverloadSystemShed = 157,
 
     /// <summary>Tick multiplier applied (per tick). Payload: <c>tick: i64</c>, <c>multiplier: u8</c>, <c>intervalTicks: u8</c>.</summary>
@@ -955,6 +974,44 @@ public enum TraceEventKind : byte
     /// </summary>
     QueryArgs = 248,
 
+    // ── Spatial cluster fence-time spans (per-tick, always-on when gates active) ──
+
+    /// <summary>Per-tick span around <c>DetectClusterMigrations</c>. Fires once per archetype per tick whenever the spatial path runs,
+    /// regardless of whether any entity actually crossed a cell — the existing <see cref="SpatialClusterMigrationDetect"/> instant only
+    /// fires per detected crossing, so it's silent for workloads where ants/units move within hysteresis every tick (e.g. AntHill).
+    /// Required payload: <c>archetypeId: u16</c>, <c>scanSlotCount: i32</c> (slots iterated), <c>migrationsQueued: i32</c>,
+    /// <c>hysteresisAbsorbed: i32</c>. Gated on <c>SpatialClusterMigrationDetectActive</c>.</summary>
+    SpatialClusterMigrationDetectScan = 249,
+
+    /// <summary>Per-tick span around <c>RecomputeDirtyClusterAabbs</c>. Fires once per archetype per tick — the existing
+    /// <see cref="SpatialCellIndexUpdate"/> instant fires per per-cell index UpdateAt, but doesn't show the cost of the full pass
+    /// (occupancy scan + bit-exact compare for unchanged clusters). Required payload: <c>archetypeId: u16</c>, <c>clusterScanned: i32</c>,
+    /// <c>aabbChanged: i32</c>. Gated on <c>SpatialCellIndexUpdateActive</c>.</summary>
+    SpatialClusterAabbRefresh = 250,
+
+    // ── WriteTickFence per-table detail spans (issue follow-up to parallelize the fence) ──
+
+    /// <summary>Per-tick span around the per-ComponentTable body inside <c>WriteTickFenceCore</c> (WAL serialize + shadow + spatial + archive).
+    /// Fires once per dirty SV/Transient table per tick. Required payload: <c>componentTypeId: u16</c>, <c>dirtyEntryCount: i32</c>.
+    /// Optional payload: <c>walPublished: u8</c> (0/1), <c>hasShadow: u8</c> (0/1), <c>hasSpatial: u8</c> (0/1).
+    /// Gated on <c>RuntimeWriteTickFenceTableActive</c>.</summary>
+    WriteTickFenceTable = 251,
+
+    /// <summary>Per-tick span around <c>ProcessShadowEntries</c> for one ComponentTable (deferred index maintenance for non-Versioned
+    /// indexed fields with shadow buffers). Required payload: <c>componentTypeId: u16</c>, <c>indexedFieldCount: i32</c>.
+    /// Optional payload: <c>totalShadowEntries: i32</c> (sum of buffer counts across all indexed fields).
+    /// Gated on <c>RuntimeWriteTickFenceShadowActive</c>.</summary>
+    WriteTickFenceShadow = 252,
+
+    /// <summary>Per-tick span around <c>ProcessSpatialEntries</c> for one ComponentTable (R-Tree position update for dirty entities).
+    /// Required payload: <c>componentTypeId: u16</c>, <c>dirtyEntryCount: i32</c>.
+    /// Optional payload: <c>escapedCount: i32</c> (entities whose new position escaped their fat AABB and got reinserted).
+    /// Gated on <c>RuntimeWriteTickFenceSpatialActive</c>.</summary>
+    WriteTickFenceSpatial = 253,
+
+    // Cluster-scope per-archetype fence spans live at IDs 61-63 (next to ClusterMigration = 60).
+    // See WriteTickFenceCluster / WriteTickFenceClusterShadow / WriteTickFenceClusterSpatial above.
+
     // ── Fallback ──
 
     /// <summary>
@@ -968,6 +1025,35 @@ public enum TraceEventKind : byte
     /// </para>
     /// </summary>
     NamedSpan = 246,
+
+    // ═══════════════════════════════════════════════════════════════════════════════════════
+    // OS thread scheduling (Phase ETW) — IDs 254.
+    //
+    // Sourced from a dedicated ETW kernel-logger pump that consumes ContextSwitch / Dispatcher
+    // events for Typhon-registered OS threads. One record per ON-CPU slice closing (Avocat-style).
+    // Header threadSlot = the pump's slot (it's the producer); payload carries TargetSlotIdx for
+    // viewer re-attribution to the actual thread's lane. The 12-byte common header's timestamp =
+    // the slice's START tick (QPC). Stopwatch.GetTimestamp() on Windows IS QueryPerformanceCounter,
+    // so ETW QPC values cross-walk directly into the trace's time space — no conversion needed.
+    //
+    // Instant-shape (no span header extension). Wire layout: 12 B header + payload (12 B):
+    //   [u8 targetSlotIdx][u8 processorNumber][u8 waitReason][u8 threadState]
+    //   [u8 gettingIdle][u32 durationQpc][u32 readyTimeQpc]
+    //   (with 3-byte padding to land at a clean 12 B — generator handles alignment).
+    //
+    // See claude/design/observability/ ... (TBD) for the full design.
+    // ═══════════════════════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// OS thread context-switch — closes one ON-CPU slice for a Typhon-registered thread. Instant-style record produced by
+    /// <c>EtwSchedulingPump</c>. Payload: <c>u8 targetSlotIdx</c> (slot to re-attribute to, NOT the producer slot),
+    /// <c>u8 processorNumber</c>, <c>u8 waitReason</c> (<see cref="Profiler.ThreadWaitReason"/>),
+    /// <c>u8 threadState</c> (post-switch <see cref="System.Diagnostics.ThreadState"/>), <c>u8 gettingIdle</c>
+    /// (1 = CPU went to System Idle next), <c>u32 durationQpc</c> (QPC ticks the slice held the CPU, capped at uint.MaxValue ≈ 7 min),
+    /// <c>u32 readyTimeQpc</c> (QPC ticks on the ready queue before this slice; 0 = unknown, uint.MaxValue = saturated).
+    /// Common-header timestamp = the slice's START QPC tick. Gated on <c>RuntimeThreadSchedulingActive</c>.
+    /// </summary>
+    ThreadContextSwitch = 254,
 }
 
 /// <summary>
@@ -1073,6 +1159,14 @@ public static class TraceEventKindExtensions
         // Query Definition Export (#342, sub-issues #334/#335/#336):
         //   247 (QueryDefinitionDescribe), 248 (QueryArgs) — instant-style with variable payloads.
         if (v == 247 || v == 248)
+        {
+            return false;
+        }
+        // OS thread scheduling (Phase ETW): 254 (ThreadContextSwitch) — instant-style.
+        // Duration lives in payload (slice's QPC duration), not in a span header extension —
+        // both endpoints of the slice are historical at emit time, so the Begin/Dispose span model
+        // doesn't apply.
+        if (v == 254)
         {
             return false;
         }

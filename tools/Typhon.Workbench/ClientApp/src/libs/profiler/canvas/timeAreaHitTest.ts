@@ -1,4 +1,5 @@
-import type { ChunkSpan, PhaseMarker, PhaseSpan, SpanData, TickData } from '@/libs/profiler/model/traceModel';
+import type { ChunkSpan, OffCpuInterval, OffCpuStore, PhaseMarker, PhaseSpan, SpanData, TickData } from '@/libs/profiler/model/traceModel';
+import { materializeOffCpuInterval } from '@/libs/profiler/model/traceModel';
 import type { TrackLayout, Viewport } from '@/libs/profiler/model/uiTypes';
 import {
   LABEL_ROW_HEIGHT,
@@ -30,6 +31,7 @@ export type TimeAreaHover =
   | { kind: 'phase'; phase: PhaseSpan; tickNumber: number }
   | { kind: 'phase-marker'; marker: PhaseMarker; tickNumber: number }
   | { kind: 'mini-row-op'; op: SpanData; trackId: string; rowLabel: string }
+  | { kind: 'off-cpu'; interval: OffCpuInterval; trackId: string }  // off-CPU overlay bar on a slot lane
   | { kind: 'tick'; tickNumber: number }  // click on ruler or empty area within a slot lane
   | { kind: 'gutter-chevron'; trackId: string }  // click toggles collapse state
   | { kind: 'help'; trackId: string; label: string }  // hover on "?" glyph in a track's gutter
@@ -54,6 +56,10 @@ export interface HitTestInputs {
   gutterWidth: number;
   /** Whether the "?" glyph is being rendered (same gate the draw pass uses). */
   legendsVisible: boolean;
+  /** Slot → off-CPU interval store. Used to resolve a click on an off-CPU overlay bar. */
+  offCpuBySlot: Map<number, OffCpuStore>;
+  /** Whether the off-CPU overlay is shown — when false the off-CPU probe is skipped (matches the draw gate). */
+  showOffCpu: boolean;
 }
 
 /**
@@ -62,7 +68,7 @@ export interface HitTestInputs {
  * inside a gap).
  */
 export function hitTestTimeArea(inputs: HitTestInputs): TimeAreaHover {
-  const { mx, my, tracks, ticks, vp, gutterWidth, legendsVisible } = inputs;
+  const { mx, my, tracks, ticks, vp, gutterWidth, legendsVisible, offCpuBySlot, showOffCpu } = inputs;
 
   // Gutter — "?" help glyph wins over the chevron when hovered; else chevron toggles collapse.
   if (mx < gutterWidth) {
@@ -125,11 +131,26 @@ export function hitTestTimeArea(inputs: HitTestInputs): TimeAreaHover {
   // Slot lanes — chunk row on top, span rows below with per-depth layout.
   if (track.id.startsWith('slot-')) {
     const threadSlot = Number.parseInt(track.id.slice(5), 10);
+
+    // Off-CPU overlay takes precedence over chunk/span. The translucent band is the topmost drawn element and spans the
+    // full lane height; an off-CPU interval is a gap between the thread's on-CPU slices, so no chunk or span legitimately
+    // coexists in that time range. Probe it first — `findOffCpuAtX` returns null when the cursor isn't within an off-CPU
+    // bar (incl. its small snap tolerance), so a miss falls through cleanly to the chunk/span hit-test below.
+    if (showOffCpu) {
+      const interval = findOffCpuAtX(offCpuBySlot, threadSlot, mx, gutterWidth, vp);
+      if (interval !== null) return { kind: 'off-cpu', interval, trackId: track.id };
+    }
+
     const chunkRowHeight = track.chunkRowHeight ?? 0;
     const inChunkRow = chunkRowHeight > 0 && my >= ty && my < ty + chunkRowHeight;
     if (inChunkRow) {
       const chunk = findChunkAtX(ticks, threadSlot, mx, gutterWidth, vp);
       if (chunk) return { kind: 'chunk', chunk, trackId: track.id };
+      // No chunk under the cursor — the only spans that draw in the chunk-row band are the pinned
+      // ones (renderDepth = -1: Scheduler.Worker.Idle / BetweenTick). They exist exactly during the
+      // gaps between chunks, so a click landing here resolves to them.
+      const pinned = findSpanAtX(ticks, threadSlot, -1, mx, gutterWidth, vp);
+      if (pinned) return { kind: 'span', span: pinned, trackId: track.id };
     } else {
       const spanRegionTop = ty + chunkRowHeight;
       if (my >= spanRegionTop && my < ty + track.height) {
@@ -305,6 +326,49 @@ function findSpanAtX(
     }
   }
   return best;
+}
+
+/**
+ * Locate the off-CPU interval under the cursor for one thread slot. Converts the cursor X to µs, binary-searches the
+ * slot's interval store (sorted by `startUs`), and returns the containing interval — or the nearest one within a small
+ * pixel tolerance so a click in a dense, sub-pixel heat band still resolves to a real interval. O(log n), zoom-independent.
+ */
+export function findOffCpuAtX(
+  offCpuBySlot: Map<number, OffCpuStore>,
+  threadSlot: number,
+  mx: number,
+  gutterWidth: number,
+  vp: Viewport,
+): OffCpuInterval | null {
+  const store = offCpuBySlot.get(threadSlot);
+  if (store === undefined) return null;
+  const n = store.startUs.length;
+  if (n === 0) return null;
+
+  const us = vp.offsetX + (mx - gutterWidth) / vp.scaleX;
+  // ~2px snap tolerance so sub-pixel bars on a zoomed-out lane are still clickable.
+  const tolUs = 2 / Math.max(vp.scaleX, 1e-9);
+
+  // Largest index whose startUs ≤ us + tolUs (upper-bound − 1). The containing interval, if any, is at or just below it.
+  let lo = 0;
+  let hi = n;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (store.startUs[mid] <= us + tolUs) lo = mid + 1; else hi = mid;
+  }
+  // Probe a tiny window around the boundary: the containing interval is index lo-1; lo-2 / lo cover the snap-tolerance
+  // case where the cursor sits in the gap between two intervals.
+  let best = -1;
+  let bestDist = Number.POSITIVE_INFINITY;
+  for (let i = Math.max(0, lo - 2); i < Math.min(n, lo + 1); i++) {
+    const s = store.startUs[i];
+    const e = store.endUs[i];
+    if (us < s - tolUs || us > e + tolUs) continue;
+    const dist = us < s ? s - us : us > e ? us - e : 0;   // 0 when strictly inside
+    if (dist < bestDist) { bestDist = dist; best = i; }
+  }
+  if (best < 0) return null;
+  return materializeOffCpuInterval(store, best, threadSlot);
 }
 
 /**

@@ -35,11 +35,48 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     // Immutable DAG structure
     // ═══════════════════════════════════════════════════════════════
 
-    /// <summary>Static DAG system definitions (name, type, priority, dependencies). Immutable after construction.</summary>
+    /// <summary>
+    /// All registered systems (user + internal), indexed by system index. Used by the scheduler for dispatch, lookup, and topological reasoning — the index
+    /// identity is load-bearing for chunk dispatch state and dependency wiring, so this array stays as the canonical source for everything index-keyed
+    /// (including diagnostics/profiler that walk every entry by raw index).
+    /// </summary>
+    /// <remarks>
+    /// When you only care about systems the user registered (counting them in a test, iterating them in a DAG-viewer that hides engine plumbing), prefer
+    /// <see cref="UserSystems"/> — it filters out <see cref="SystemDefinition.IsInternal"/> entries (e.g. <c>FenceExec</c>) so the count is stable regardless
+    /// of which internal systems the runtime registers.
+    /// </remarks>
     public SystemDefinition[] Systems { get; }
 
-    private readonly int _systemCount;
-    private readonly int[] _rootSystems;
+    /// <summary>
+    /// User-registered systems only (filtered <see cref="Systems"/> with <see cref="SystemDefinition.IsInternal"/> removed). Indices in this view do NOT match
+    /// the canonical system index — use this only for iteration and counting, not for index-keyed lookups.
+    /// </summary>
+    public SystemDefinition[] UserSystems
+    {
+        get
+        {
+            if (field != null)
+            {
+                return field;
+            }
+
+            var arr = new SystemDefinition[SystemCount];
+            int j = 0;
+            for (int i = 0; i < AllSystemCount; i++)
+            {
+                if (!Systems[i].IsInternal)
+                {
+                    arr[j++] = Systems[i];
+                }
+            }
+            field = arr;
+            return arr;
+        }
+    }
+
+    private readonly int[] _rootSystems;          // User DAG roots (PredecessorCount == 0 AND !IsInternal)
+    private readonly int[] _internalRootSystems;  // Internal sub-DAG roots (PredecessorCount == 0 AND IsInternal)
+    private readonly int _internalSystemCount;    // Count of IsInternal systems
     private readonly int _workerCount;
     private readonly RuntimeOptions _options;
     private readonly int[] _topologicalOrder;
@@ -137,6 +174,20 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     /// off the callback is never set, so even the delegate invocation is skipped.
     /// </remarks>
     internal Action<DagScheduler> GaugeSnapshotCallback;
+
+    /// <summary>
+    /// Public hook fired when the WorkerLoop's outer safety net catches an unhandled exception that escaped every inner try/catch (engine bug, runaway
+    /// exception from inside a catch handler, etc.). User code can subscribe to log to file, send to telemetry, request graceful shutdown, or escalate to a
+    /// debugger break. Invoked on the worker thread that caught the exception. Defaults to null (no-op).
+    /// <para>
+    /// <b>Note:</b> The vast majority of user-code exceptions are already caught by the per-system handlers in
+    /// <see cref="ProcessParallelQuery"/>, <see cref="ProcessCallbackOrQuery"/>, <see cref="ProcessPipeline"/>, and
+    /// <see cref="ExecuteInline"/>. Those paths log via <c>LogSystemException</c> and capture via
+    /// <c>CaptureSystemException</c> without invoking this callback. This callback fires ONLY when the outer WorkerLoop safety net catches something — meaning
+    /// an inner handler didn't, which is itself a bug worth surfacing prominently.
+    /// </para>
+    /// </summary>
+    public Action<int, string, Exception> UnhandledExceptionCallback;
 
     /// <summary>Called when overload level transitions to <see cref="OverloadLevel.PlayerShedding"/>.</summary>
     internal Action OnCriticalOverloadCallback;
@@ -264,7 +315,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         // attribution. Synthetic ids = 0x8000 | systemIndex distinguish system entries from spans.
         RuntimeSourceLocationManifest.SetSystems(systems);
         _topologicalOrder = topologicalOrder;
-        _systemCount = systems.Length;
+        AllSystemCount = systems.Length;
         _options = options;
         _eventQueues = eventQueues ?? [];
         // Assign stable queue IDs (#311) so the per-queue telemetry path can carry a small u16 instead of the queue's name on the wire.
@@ -279,37 +330,61 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         // Tick interval
         _tickIntervalTicks = Stopwatch.Frequency / options.BaseTickRate;
 
-        // Find root systems (zero predecessors)
-        var rootCount = 0;
-        for (var i = 0; i < _systemCount; i++)
+        // Find root systems (zero predecessors). Partition into user-DAG roots and internal-sub-DAG roots so the two schedules can be dispatched independently
+        // — user systems run as the main tick body, internal systems (e.g. FenceExec) run in a second wake/barrier cycle invoked from TickEndCallback.
+        var userRootCount = 0;
+        var internalRootCount = 0;
+        var internalCount = 0;
+        for (var i = 0; i < AllSystemCount; i++)
         {
-            if (systems[i].PredecessorCount == 0)
+            if (systems[i].IsInternal)
             {
-                rootCount++;
+                internalCount++;
+                if (systems[i].PredecessorCount == 0)
+                {
+                    internalRootCount++;
+                }
+            }
+            else if (systems[i].PredecessorCount == 0)
+            {
+                userRootCount++;
             }
         }
+        _internalSystemCount = internalCount;
+        SystemCount = AllSystemCount - internalCount;
 
-        _rootSystems = new int[rootCount];
-        var rootIdx = 0;
-        for (var i = 0; i < _systemCount; i++)
+        _rootSystems = new int[userRootCount];
+        _internalRootSystems = new int[internalRootCount];
+        var userIdx = 0;
+        var iIdx = 0;
+        for (var i = 0; i < AllSystemCount; i++)
         {
-            if (systems[i].PredecessorCount == 0)
+            if (systems[i].PredecessorCount != 0)
             {
-                _rootSystems[rootIdx++] = i;
+                continue;
+            }
+
+            if (systems[i].IsInternal)
+            {
+                _internalRootSystems[iIdx++] = i;
+            }
+            else
+            {
+                _rootSystems[userIdx++] = i;
             }
         }
 
         // Allocate per-system state arrays
-        _nextChunk = new CacheLinePaddedInt[_systemCount];
-        _remainingChunks = new CacheLinePaddedInt[_systemCount];
-        _remainingDeps = new CacheLinePaddedInt[_systemCount];
-        _isReady = new CacheLinePaddedInt[_systemCount];
-        _systemFailed = new bool[_systemCount];
+        _nextChunk = new CacheLinePaddedInt[AllSystemCount];
+        _remainingChunks = new CacheLinePaddedInt[AllSystemCount];
+        _remainingDeps = new CacheLinePaddedInt[AllSystemCount];
+        _isReady = new CacheLinePaddedInt[AllSystemCount];
+        _systemFailed = new bool[AllSystemCount];
 
         // Build reset templates
-        _templateDeps = new int[_systemCount];
-        _templateChunks = new int[_systemCount];
-        for (var i = 0; i < _systemCount; i++)
+        _templateDeps = new int[AllSystemCount];
+        _templateChunks = new int[AllSystemCount];
+        for (var i = 0; i < AllSystemCount; i++)
         {
             _templateDeps[i] = systems[i].PredecessorCount;
             _templateChunks[i] = systems[i].TotalChunks;
@@ -325,8 +400,8 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
             ringCapacity = 1024;
         }
 
-        _telemetryRing = new TickTelemetryRing(ringCapacity, _systemCount);
-        _currentTickSystemMetrics = new SystemTelemetry[_systemCount];
+        _telemetryRing = new TickTelemetryRing(ringCapacity, AllSystemCount);
+        _currentTickSystemMetrics = new SystemTelemetry[AllSystemCount];
 
         // Per-worker telemetry
         _workerActiveTicks = new long[_workerCount];
@@ -364,7 +439,9 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     /// </summary>
     public new void Start()
     {
-        LogStarted(_systemCount, _workerCount, _options.BaseTickRate);
+        ValidateContextBindings();
+        _started = true;
+        LogStarted(AllSystemCount, _workerCount, _options.BaseTickRate);
 
         // Start worker threads
         for (var i = 0; i < _workers.Length; i++)
@@ -375,6 +452,62 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
 
         // Start the timer thread (HighResolutionTimerServiceBase.Start)
         base.Start();
+    }
+
+    private bool _started;
+
+    /// <summary>
+    /// Bind an ambient <typeparamref name="TContext"/> onto every registered system deriving from <see cref="ChunkedCallbackSystem{TContext}"/>.
+    /// Must be called after the schedule is built (systems must already be registered) and before <see cref="Start"/>.
+    /// </summary>
+    public void RegisterContext<TContext>(TContext context) where TContext : class
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        if (_started)
+        {
+            throw new InvalidOperationException("RegisterContext must be called before Start.");
+        }
+
+        for (var i = 0; i < Systems.Length; i++)
+        {
+            if (Systems[i].Instance is ChunkedCallbackSystem<TContext> typed)
+            {
+                typed.BindContext(context);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Verify every <see cref="ChunkedCallbackSystem{TContext}"/> instance has a bound Context.
+    /// Throws if a typed system was registered but no matching <c>RegisterContext&lt;TContext&gt;</c> call ran.
+    /// </summary>
+    private void ValidateContextBindings()
+    {
+        for (var i = 0; i < Systems.Length; i++)
+        {
+            var instance = Systems[i].Instance;
+            if (instance == null)
+            {
+                continue;
+            }
+
+            var type = instance.GetType();
+            while (type != null && type != typeof(object))
+            {
+                if (type.IsGenericType && type.GetGenericTypeDefinition() == typeof(ChunkedCallbackSystem<>))
+                {
+                    var ctxProp = type.GetProperty("Context", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                    if (ctxProp != null && ctxProp.GetValue(instance) == null)
+                    {
+                        var ctxType = type.GetGenericArguments()[0];
+                        throw new InvalidOperationException(
+                            $"System '{Systems[i].Name}' derives from ChunkedCallbackSystem<{ctxType.Name}> but no RegisterContext<{ctxType.Name}>(...) call was made.");
+                    }
+                    break;
+                }
+                type = type.BaseType;
+            }
+        }
     }
 
     /// <summary>
@@ -445,8 +578,14 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     /// <summary>Number of worker threads.</summary>
     public int WorkerCount => _workerCount;
 
-    /// <summary>Number of systems in the DAG.</summary>
-    public int SystemCount => _systemCount;
+    /// <summary>
+    /// Number of user-registered systems in the DAG (excludes <see cref="SystemDefinition.IsInternal"/> entries like <c>FenceExec</c>). This is the count
+    /// callers usually want — "the systems I registered". For the total including engine-internal systems use <see cref="AllSystemCount"/>.
+    /// </summary>
+    public int SystemCount { get; }
+
+    /// <summary>Total number of systems in the DAG, including engine-internal systems (e.g. <c>FenceExec</c>).</summary>
+    public int AllSystemCount { get; }
 
     /// <summary>Number of ticks executed so far.</summary>
     public long CurrentTickNumber => _currentTickNumber;
@@ -468,20 +607,17 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         TickStartCallback?.Invoke(this);
         InspectorTickStart(_currentTickNumber, tickStartTimestamp);
 
-        // 3. Mark root systems ready (evaluate runIf and ReactiveSkip for roots before waking workers)
+        // 3. Mark root systems ready (evaluate ShouldRun and ReactiveSkip for roots before waking workers)
         var readyNow = Stopwatch.GetTimestamp();
         foreach (var root in _rootSystems)
         {
             _currentTickSystemMetrics[root].ReadyTick = readyNow;
             InspectorSystemReady(root, readyNow);
             var sys = Systems[root];
-            if (sys.RunIf != null && !sys.RunIf())
+            ushort rootSkipUnused = 0;
+            if (!EvaluateShouldRunAndPrepare(root, -1, false, ref rootSkipUnused))
             {
-                _currentTickSystemMetrics[root].SkipReason = SkipReason.RunIfFalse;
-                InspectorSystemSkipped(root, SkipReason.RunIfFalse, Stopwatch.GetTimestamp());
-                // Skip root — dispatch its successors immediately.
-                // Safe to call here: workers haven't woken yet.
-                OnSystemComplete(root, -1, false);
+                // Skip / Prepare-dispatch already handled by helper.
             }
             else if (sys.ReactiveSkip != null && sys.ReactiveSkip())
             {
@@ -550,7 +686,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     private void ExecuteTickSingleThreaded(long tickStartTimestamp)
     {
         // Reset metrics, event queues, and failure flags
-        for (var i = 0; i < _systemCount; i++)
+        for (var i = 0; i < AllSystemCount; i++)
         {
             _currentTickSystemMetrics[i] = default;
         }
@@ -575,6 +711,13 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
             var sysIdx = _topologicalOrder[i];
             var sys = Systems[sysIdx];
 
+            // Internal systems (engine-internal sub-DAG, e.g. FenceExec) are not part of the user DAG cycle. The runtime dispatches them separately from
+            // TickEndCallback after the user DAG completes — see DispatchInternalSchedule.
+            if (sys.IsInternal)
+            {
+                continue;
+            }
+
             var readyTick = Stopwatch.GetTimestamp();
             _currentTickSystemMetrics[sysIdx].ReadyTick = readyTick;
             InspectorSystemReady(sysIdx, readyTick);
@@ -593,12 +736,37 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                 continue;
             }
 
-            // Evaluate runIf
-            if (sys.RunIf != null && !sys.RunIf())
+            // Evaluate ShouldRun (untyped delegate + typed virtual for ChunkedCallbackSystem<TContext>).
+            bool shouldRunSingle = sys.ShouldRun?.Invoke() ?? true;
+            if (shouldRunSingle && sys.Instance is ChunkedCallbackSystem ccsSingle)
             {
-                _currentTickSystemMetrics[sysIdx].SkipReason = SkipReason.RunIfFalse;
-                InspectorSystemSkipped(sysIdx, SkipReason.RunIfFalse, Stopwatch.GetTimestamp());
+                try { shouldRunSingle = ccsSingle.OnShouldRun(); }
+                catch { _systemFailed[sysIdx] = true; continue; }
+            }
+            if (!shouldRunSingle)
+            {
+                _currentTickSystemMetrics[sysIdx].SkipReason = SkipReason.ShouldRunFalse;
+                InspectorSystemSkipped(sysIdx, SkipReason.ShouldRunFalse, Stopwatch.GetTimestamp());
                 continue;
+            }
+
+            // Prepare gate (chunked systems only). Single-threaded mode: still needs to run so plans get built.
+            if (sys.Instance is ChunkedCallbackSystem ccsSingle2)
+            {
+                int chunks;
+                try { chunks = ccsSingle2.OnPrepare(); }
+                catch { _systemFailed[sysIdx] = true; continue; }
+
+                if (chunks == 0)
+                {
+                    _currentTickSystemMetrics[sysIdx].SkipReason = SkipReason.EmptyInput;
+                    InspectorSystemSkipped(sysIdx, SkipReason.EmptyInput, Stopwatch.GetTimestamp());
+                    continue;
+                }
+                if (chunks > 0)
+                {
+                    sys.RuntimeChunkCount = chunks;
+                }
             }
 
             if (sys.ReactiveSkip != null && sys.ReactiveSkip())
@@ -841,7 +1009,30 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                         }
                     }
                     idleSpins = 0;
-                    ProcessSystem(sysIdx, workerId, trackUtilization);
+                    // Outer safety net: ProcessSystem and its descendants (ProcessParallelQuery, ProcessCallbackOrQuery,/ ProcessPipeline, ExecuteInline) each
+                    // have their own try/catch around the user-system invocation. This wrap-around is defense-in-depth: ensures no unforeseen exception path
+                    // (engine-internal bug, exception from inside a catch handler, OOM during cleanup, etc.) can ever kill the worker thread. A dead worker
+                    // would leave _systemsRemaining stuck > 0 and the tick would never complete — the simulation appears frozen ("everything is still") while
+                    // the timer thread keeps firing ticks.
+                    try
+                    {
+                        ProcessSystem(sysIdx, workerId, trackUtilization);
+                    }
+                    catch (Exception ex)
+                    {
+                        // Mark the system as failed so its successors get skipped instead of waiting forever for the unbounded-dep counter. Capture the
+                        // exception for DumpHangDiagnostic. Surface to user code via the UnhandledExceptionCallback hook if registered.
+                        if ((uint)sysIdx < (uint)_systemFailed.Length)
+                        {
+                            _systemFailed[sysIdx] = true;
+                            _currentTickSystemMetrics[sysIdx].SkipReason = SkipReason.Exception;
+                        }
+                        var sysName = (uint)sysIdx < (uint)Systems.Length ? Systems[sysIdx].Name : "<unknown>";
+                        LogSystemException(sysIdx, sysName, ex);
+                        CaptureSystemException(sysIdx, ex);
+                        try { UnhandledExceptionCallback?.Invoke(sysIdx, sysName, ex); }
+                        catch { /* swallow — the callback itself threw; we're the last line of defense */ }
+                    }
                 }
                 else
                 {
@@ -910,7 +1101,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private int FindReadySystem()
     {
-        for (var i = 0; i < _systemCount; i++)
+        for (var i = 0; i < AllSystemCount; i++)
         {
             if (_isReady[i].Value != 1)
             {
@@ -962,7 +1153,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         }
         TyphonEvent.EmitSchedulerDispense((ushort)sysIdx, 0, (byte)workerId);
 
-        // runIf was already evaluated at dispatch time (OnSystemComplete or root marking).
+        // ShouldRun was already evaluated at dispatch time (OnSystemComplete or root marking).
         // System lifecycle hook: create per-system Transaction (called on the worker thread)
         var ctx = SystemStartCallback?.Invoke(sysIdx) ?? new TickContext { TickNumber = _currentTickNumber, DeltaTime = 0f };
         var workStart = Stopwatch.GetTimestamp();
@@ -1004,7 +1195,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
 
     private void ProcessPipeline(int sysIdx, int workerId, bool trackUtilization)
     {
-        // runIf was already evaluated at dispatch time. If we're here, the system should execute.
+        // ShouldRun was already evaluated at dispatch time. If we're here, the system should execute.
         var sys = Systems[sysIdx];
 
         while (true)
@@ -1272,14 +1463,11 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                         fanOutSkipped++;
                         OnSystemComplete(succIdx, workerId, trackUtilization);
                     }
-                    // Evaluate runIf here — before any worker can grab chunks.
-                    // This is thread-safe: only one thread decrements the last dependency to zero.
-                    else if (succ.RunIf != null && !succ.RunIf())
+                    // Unified ShouldRun + Prepare gate. Single-threaded by construction: only the thread that decremented _remainingDeps to zero reaches this
+                    // branch. The typed OnShouldRun/OnPrepare path serves ChunkedCallbackSystem<TContext>; non-chunked systems use the untyped delegate.
+                    else if (!EvaluateShouldRunAndPrepare(succIdx, workerId, trackUtilization, ref fanOutSkipped))
                     {
-                        _currentTickSystemMetrics[succIdx].SkipReason = SkipReason.RunIfFalse;
-                        InspectorSystemSkipped(succIdx, SkipReason.RunIfFalse, Stopwatch.GetTimestamp());
-                        fanOutSkipped++;
-                        OnSystemComplete(succIdx, workerId, trackUtilization);
+                        // Skip/dispatch already handled inside EvaluateShouldRunAndPrepare.
                     }
                     else if (succ.ReactiveSkip != null && succ.ReactiveSkip())
                     {
@@ -1324,9 +1512,87 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         }
     }
 
+    /// <summary>
+    /// Evaluate the unified ShouldRun + Prepare gate for a system. For <see cref="ChunkedCallbackSystem"/> instances, invokes the typed virtuals
+    /// (<see cref="ChunkedCallbackSystem.OnShouldRun"/>, <see cref="ChunkedCallbackSystem.OnPrepare"/>). For all systems, also evaluates the untyped
+    /// <see cref="SystemDefinition.ShouldRun"/> delegate.
+    ///
+    /// <para>Returns <c>true</c> if downstream branches (ReactiveSkip / overload / dispatch) should run. Returns <c>false</c> if this method already handled
+    /// the system (skip-recurse or full dispatch).</para>
+    /// </summary>
+    private bool EvaluateShouldRunAndPrepare(int succIdx, int workerId, bool trackUtilization, ref ushort fanOutSkipped)
+    {
+        var succ = Systems[succIdx];
+
+        // ─── ShouldRun gate ───
+        // Untyped delegate (fluent .ShouldRun(Func<bool>)) gate.
+        bool shouldRun = succ.ShouldRun?.Invoke() ?? true;
+
+        // Typed virtual gate (overridden by ChunkedCallbackSystem<TContext>).
+        if (shouldRun && succ.Instance is ChunkedCallbackSystem ccs)
+        {
+            try
+            {
+                shouldRun = ccs.OnShouldRun();
+            }
+            catch
+            {
+                _systemFailed[succIdx] = true;
+                fanOutSkipped++;
+                OnSystemComplete(succIdx, workerId, trackUtilization);
+                return false;
+            }
+        }
+
+        if (!shouldRun)
+        {
+            _currentTickSystemMetrics[succIdx].SkipReason = SkipReason.ShouldRunFalse;
+            InspectorSystemSkipped(succIdx, SkipReason.ShouldRunFalse, Stopwatch.GetTimestamp());
+            fanOutSkipped++;
+            OnSystemComplete(succIdx, workerId, trackUtilization);
+            return false;
+        }
+
+        // ─── Prepare gate (chunked systems only) ───
+        if (succ.Instance is ChunkedCallbackSystem ccs2)
+        {
+            int chunks;
+            try
+            {
+                chunks = ccs2.OnPrepare();
+            }
+            catch
+            {
+                _systemFailed[succIdx] = true;
+                fanOutSkipped++;
+                OnSystemComplete(succIdx, workerId, trackUtilization);
+                return false;
+            }
+
+            if (chunks == 0)
+            {
+                _currentTickSystemMetrics[succIdx].SkipReason = SkipReason.EmptyInput;
+                InspectorSystemSkipped(succIdx, SkipReason.EmptyInput, Stopwatch.GetTimestamp());
+                fanOutSkipped++;
+                OnSystemComplete(succIdx, workerId, trackUtilization);
+                return false;
+            }
+
+            if (chunks > 0)
+            {
+                // For IsParallelQuery chunked systems, ParallelQueryPrepareCallback reads RuntimeChunkCount.
+                // Set it and fall through to the existing dispatch flow (IsParallelQuery → DispatchParallelQuery).
+                succ.RuntimeChunkCount = chunks;
+            }
+            // chunks == -1 → fall through to existing dispatch flow.
+        }
+
+        return true;
+    }
+
     private void ExecuteInline(int sysIdx, int workerId, bool trackUtilization)
     {
-        // runIf was already evaluated by the caller (OnSystemComplete).
+        // ShouldRun was already evaluated by the caller (OnSystemComplete).
         var ctx = SystemStartCallback?.Invoke(sysIdx) ?? new TickContext { TickNumber = _currentTickNumber, DeltaTime = 0f };
         var workStart = Stopwatch.GetTimestamp();
         RecordFirstChunkGrab(sysIdx, workStart);
@@ -1460,7 +1726,11 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
 
     private void ResetTickState()
     {
-        for (var i = 0; i < _systemCount; i++)
+        // Resets per-system state for every entry in Systems[] — both user and internal — but sets _systemsRemaining to the USER count only, so the
+        // user-DAG dispatch loop terminates when all user systems are done. Internal systems' state sits idle until DispatchInternalSchedule wakes them in the
+        // second cycle. Internal systems are never marked ready during user dispatch (they're filtered out of _rootSystems, and any cross-edge from a user
+        // successor to an internal predecessor is treated as a configuration error — internal systems form an independent sub-DAG by contract).
+        for (var i = 0; i < AllSystemCount; i++)
         {
             _nextChunk[i].Value = 0;
             _remainingChunks[i].Value = _templateChunks[i];
@@ -1469,7 +1739,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
             _currentTickSystemMetrics[i] = default;
         }
 
-        _systemsRemaining.Value = _systemCount;
+        _systemsRemaining.Value = SystemCount;
         Array.Clear(_systemFailed);
 
         // Reset event queues at tick start
@@ -1483,6 +1753,182 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         {
             Array.Clear(_workerActiveTicks);
             Array.Clear(_workerIdleTicks);
+        }
+    }
+
+    /// <summary>
+    /// Dispatches the internal sub-DAG (systems flagged via <see cref="SystemBuilder.Internal"/>). Called by <c>TyphonRuntime.OnTickEndInternal</c> after the
+    /// user DAG completes — typically after FencePrep has bound the per-tick <c>FenceWorkPlan</c> and set <see cref="SystemDefinition.RuntimeChunkCount"/> on
+    /// the chunked-callback systems.
+    ///
+    /// <para>Reuses the same worker wake/barrier primitives (<c>_tickStartSignal</c> + <c>_systemsRemaining</c>) as the user dispatch. Workers in
+    /// <c>WorkerLoop</c> simply pick up the next ready system from <see cref="Systems"/> — they don't need to know about the schedule kind because internal
+    /// systems were filtered out of the user roots and only get marked ready here.</para>
+    ///
+    /// <para>No-op when there are zero internal systems registered.</para>
+    /// </summary>
+    public void DispatchInternalSchedule()
+    {
+        if (_internalSystemCount == 0)
+        {
+            return;
+        }
+
+        if (_workerCount == 1)
+        {
+            // Single-threaded mode: no worker pool exists, so we can't use the wake/barrier path. Run internal systems synchronously on the TickDriver thread,
+            // mirroring how ExecuteTickSingleThreaded handles parallel queries (loop chunks directly via ParallelQueryChunkCallback, no _systemsRemaining
+            // mechanics).
+            foreach (var root in _internalRootSystems)
+            {
+                DispatchInternalSystemSync(root);
+            }
+            return;
+        }
+
+        // Multi-threaded mode: reuse the worker pool. Per-system state was reset at user-tick start (ResetTickState). Between the user DAG completion and now,
+        // internal systems were never marked ready, so _remainingDeps / _nextChunk / _remainingChunks / _isReady still hold their post-reset values for
+        // internal indices. DispatchParallelQuery's prepare callback (TyphonRuntime.OnParallelQueryPrepare) reads RuntimeChunkCount and sets
+        // TotalChunks + _remainingChunks accordingly when MarkSystemReady is called below.
+        _systemsRemaining.Value = _internalSystemCount;
+
+        var readyNow = Stopwatch.GetTimestamp();
+        foreach (var root in _internalRootSystems)
+        {
+            _currentTickSystemMetrics[root].ReadyTick = readyNow;
+            InspectorSystemReady(root, readyNow);
+            var sys = Systems[root];
+            ushort rootSkipUnused = 0;
+            if (!EvaluateShouldRunAndPrepare(root, -1, false, ref rootSkipUnused))
+            {
+                // Skip / Prepare-dispatch already handled by helper.
+            }
+            else if (sys.IsParallelQuery)
+            {
+                DispatchParallelQuery(root, -1, false);
+            }
+            else
+            {
+                MarkSystemReady(root);
+            }
+        }
+
+        // Wake workers for the internal pass. Workers exited their dispatch loop when _systemsRemaining hit 0 at the end of the user pass; they're now back in
+        // the between-tick Wait. Bumping _tickGeneration + setting the signal pulls them back into FindReadySystem, where only internal systems are marked ready.
+        _tickInProgress = 1;
+        Interlocked.Increment(ref _tickGeneration);
+        _tickStartSignal.Set();
+
+        while (_systemsRemaining.Value > 0)
+        {
+            Thread.SpinWait(1);
+        }
+
+        _tickInProgress = 0;
+        _tickStartSignal.Reset();
+    }
+
+    /// <summary>
+    /// Dispatch ONE internal system (not its successors) in isolation. Used by the 3-phase parallel fence — TickDriver calls this once per phase (Prep, then
+    /// Migrate, then Finalize), doing inter-phase serial bookkeeping between calls. The system's <c>DependsOn</c> predecessor edge is ignored: the caller is
+    /// responsible for sequencing.
+    /// </summary>
+    /// <remarks>
+    /// Resets the per-system chunk-claim / completion state for this single system before dispatch, since <see cref="ResetTickState"/> only runs once at
+    /// user-tick start — a 2nd or 3rd phase dispatch in the same tick would otherwise see stale "completed" state from the prior phase.
+    /// </remarks>
+    public void DispatchInternalSystem(int sysIdx)
+    {
+        if (_workerCount == 1)
+        {
+            DispatchInternalSystemSync(sysIdx);
+            return;
+        }
+
+        // Reset per-system state for this single phase entry. Match the per-index slice of ResetTickState so the ready-mark / chunk-claim machinery sees a
+        // clean slot.
+        _nextChunk[sysIdx].Value = 0;
+        _remainingChunks[sysIdx].Value = 0;
+        _isReady[sysIdx].Value = 0;
+        _remainingDeps[sysIdx].Value = 0; // bypass DAG predecessor count — caller serializes phases
+        _currentTickSystemMetrics[sysIdx] = default;
+        _systemFailed[sysIdx] = false;
+
+        _systemsRemaining.Value = 1;
+
+        var readyNow = Stopwatch.GetTimestamp();
+        _currentTickSystemMetrics[sysIdx].ReadyTick = readyNow;
+        InspectorSystemReady(sysIdx, readyNow);
+        var sys = Systems[sysIdx];
+        ushort dispatchSkipUnused = 0;
+        if (!EvaluateShouldRunAndPrepare(sysIdx, -1, false, ref dispatchSkipUnused))
+        {
+            // Skip / Prepare-dispatch already handled by helper.
+        }
+        else if (sys.IsParallelQuery)
+        {
+            DispatchParallelQuery(sysIdx, -1, false);
+        }
+        else
+        {
+            MarkSystemReady(sysIdx);
+        }
+
+        // Wake the worker pool. Bumping _tickGeneration is required for workers parked in their between-tick Wait.
+        _tickInProgress = 1;
+        Interlocked.Increment(ref _tickGeneration);
+        _tickStartSignal.Set();
+
+        while (_systemsRemaining.Value > 0)
+        {
+            Thread.SpinWait(1);
+        }
+
+        _tickInProgress = 0;
+        _tickStartSignal.Reset();
+    }
+
+    /// <summary>
+    /// Synchronous internal-system dispatch for single-threaded mode (<c>WorkerCount == 1</c>). Runs the system's callback or chunks directly on the TickDriver
+    /// thread, then recurses into any internal-flagged successors. Mirrors the ExecuteTickSingleThreaded structure for parallel queries — minus the
+    /// failure/overload/skip machinery, which doesn't apply to engine-internal systems.
+    /// </summary>
+    private void DispatchInternalSystemSync(int sysIdx)
+    {
+        var sys = Systems[sysIdx];
+        if (sys.ShouldRun != null && !sys.ShouldRun())
+        {
+            return;
+        }
+
+        if (sys.IsParallelQuery)
+        {
+            var totalChunks = ParallelQueryPrepareCallback?.Invoke(sysIdx) ?? 0;
+            if (totalChunks > 0)
+            {
+                Systems[sysIdx].TotalChunks = totalChunks;
+                for (var chunk = 0; chunk < totalChunks; chunk++)
+                {
+                    ParallelQueryChunkCallback?.Invoke(sysIdx, chunk, totalChunks, 0);
+                }
+            }
+        }
+        else
+        {
+            var ctx = SystemStartCallback?.Invoke(sysIdx) ?? new TickContext { TickNumber = _currentTickNumber, DeltaTime = 0f };
+            sys.CallbackAction(ctx);
+        }
+
+        // Walk internal successors so chained internal systems run in topological order. In v1 the internal sub-DAG contains only FenceExec with no
+        // successors — this loop is a no-op in practice but future-proofs the path.
+        var successors = sys.Successors;
+        for (var i = 0; i < successors.Length; i++)
+        {
+            var succ = successors[i];
+            if (Systems[succ].IsInternal)
+            {
+                DispatchInternalSystemSync(succ);
+            }
         }
     }
 

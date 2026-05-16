@@ -1,7 +1,9 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Threading;
 using Typhon.Schema.Definition;
 
@@ -39,6 +41,325 @@ internal sealed unsafe class ArchetypeClusterState
 
     /// <summary>Chunk ID of first cluster with at least one free slot. -1 = none (allocate new).</summary>
     public int FreeClusterHead;
+
+    // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+    // Parallel-fence migration finalize latch. Single per-archetype exclusive latch acquired only on the rare path where an occupancy clear flips the LAST
+    // bit of a cluster — the worker that drained the cluster enters the finalize section (FinaliseEmptyClusterCellState + RemoveFromActiveList + segment
+    // FreeChunk) while other workers continue their migration work undisturbed. Padded to 64 bytes so the latch field owns a full cache line and uncontended
+    // acquisitions don't ping-pong with adjacent hot fields like ActiveClusterCount / MigrationHint / LastTickMigrationCount.
+    // See rule MD-03 in claude/rules/spatial.md.
+    // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    [StructLayout(LayoutKind.Explicit, Size = 64)]
+    private struct PaddedFinalizeLock
+    {
+        [FieldOffset(0)] public AccessControlSmall Lock;
+    }
+
+    private PaddedFinalizeLock _finalizeLock;
+
+    // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+    // Deferred-drain list. Migrate-phase workers atomically clear slot bits — when a clear flips the LAST bit of a cluster, the worker DOES NOT immediately
+    // finalize-and-free the chunk (would race with concurrent ClaimSlotInCell on the same cluster: the claimant could CAS-set a fresh bit between the AND
+    // and the finalize lock, then we'd free a chunk that has live data). Instead, the worker records the chunkId here. FinalizeArchetypeFence walks the
+    // list serially (per-archetype atomic), re-checks occupancy under _finalizeLock, and frees only clusters that are still empty. See review C-1.
+    //
+    // Slot reservation is lock-free: Interlocked.Increment on _drainedCount, then write into _drainedClusterIds[slot].
+    // Capacity is pre-sized by PreSizeMigrationBuffers to PendingMigrationCount (one migration releases at most one source slot, so cluster-drain
+    // count ≤ migration count).
+    // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+    internal int[] _drainedClusterIds;
+    internal int _drainedCount;
+
+    // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+    // Fence-tick intermediate state. Populated by the Prep phase of the parallel fence (DatabaseEngine.PrepareArchetypeFence), consumed by the Migrate phase
+    // (ExecuteMigrationsSlice) and the Finalize phase (FinalizeArchetypeFence). Single-archetype-scoped; reset at the top of Prep each tick.
+    // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    /// <summary>Branch path selected by Prep. 0 = no work (pure-transient with no dirty / no-spatial clean / non-cluster-eligible),
+    /// 1 = clean-bitmap spatial refresh path (local occupancy bits, no WAL), 2 = dirty-bitmap path (full snapshot + WAL).</summary>
+    internal byte FenceBranchPath;
+
+    /// <summary>Dirty-bits snapshot for this fence tick, set by Prep, mutated atomically by Migrate (slot bit flips), read by Finalize for AABB + WAL.
+    /// On branch path 1 this is the local occupancy-only spatialBits buffer; on path 2 it's the real <c>ClusterDirtyBitmap.Snapshot()</c> result.</summary>
+    internal long[] FenceDirtyBits;
+
+    /// <summary>Popcount of dirty entries after occupancy-masking. Drives WAL chunk sizing in Finalize. Path 1 leaves this at 0.</summary>
+    internal int FenceEntryCount;
+
+    /// <summary>Dirty cluster count (per-word non-zero count) at the end of Prep. Used for telemetry only.</summary>
+    internal int FenceDirtyClusterCount;
+
+    /// <summary>
+    /// Popcount of <see cref="ClusterProcessBitmap"/> captured at end of Prep. Read by the AabbRefresh planner to size per-archetype cost without redoing the
+    /// popcount on TickDriver (review D-4). -1 indicates "not computed this tick" (non-BarrierOnly archetypes use <see cref="ActiveClusterCount"/> directly).
+    /// </summary>
+    internal int FenceProcessBitmapClusterCount;
+
+    /// <summary>
+    /// Grow <see cref="FenceDirtyBits"/> and supporting per-cluster arrays to an upper-bound size that the parallel Migrate phase will never exceed. Called by
+    /// TickDriver between the Prep and Migrate phase dispatches — guarantees worker threads never need to <c>Array.Resize</c> a buffer during their parallel
+    /// apply.
+    /// </summary>
+    /// <param name="upperBound">Worst-case maximum cluster chunk ID + 1 that this fence tick could touch. Typically, <c>PrimarySegmentCapacity +
+    /// PendingMigrationCount</c> — one new cluster per migration in the worst case.</param>
+    /// <summary>
+    /// Apply a contiguous run of <see cref="DirtyBitDelta"/> entries to <see cref="FenceDirtyBits"/>. Called from <see cref="DatabaseEngine.FlushDirtyBitDeltas"/>
+    /// after each chunk's Migrate phase completes — the chunk's worker-local buffer is sorted by archetypeId, then this method applies all deltas for one
+    /// archetype under a single <see cref="_finalizeLock"/> acquisition. Plain bit ops (no Interlocked) are correct under the lock:
+    /// only one worker writes to this archetype's FenceDirtyBits at a time, eliminating cross-worker cache-line false-sharing on adjacent chunkIds.
+    /// </summary>
+    internal void ApplyDirtyBitDeltas(List<DirtyBitDelta> buffer, int offset, int count)
+    {
+        if (count <= 0)
+        {
+            return;
+        }
+
+        ref WaitContext nullCtx = ref Unsafe.NullRef<WaitContext>();
+        _finalizeLock.Lock.EnterExclusiveAccess(ref nullCtx);
+        try
+        {
+            // First pass: find the max chunkId referenced so we grow FenceDirtyBits once if needed.
+            int maxChunkId = -1;
+            for (int i = 0; i < count; i++)
+            {
+                var d = buffer[offset + i];
+                if (d.SrcChunkId > maxChunkId)
+                {
+                    maxChunkId = d.SrcChunkId;
+                }
+
+                if (d.DstChunkId > maxChunkId)
+                {
+                    maxChunkId = d.DstChunkId;
+                }
+            }
+            if (FenceDirtyBits == null || maxChunkId >= FenceDirtyBits.Length)
+            {
+                int required = maxChunkId + 1;
+                if (FenceDirtyBits == null)
+                {
+                    FenceDirtyBits = new long[Math.Max(required, 16)];
+                }
+                else
+                {
+                    int newLen = FenceDirtyBits.Length;
+                    while (newLen < required)
+                    {
+                        newLen = Math.Max(newLen * 2, required);
+                    }
+
+                    Array.Resize(ref FenceDirtyBits, newLen);
+                }
+            }
+
+            // Second pass: apply clears and sets. Plain bit ops — we hold the lock, no other worker is writing.
+            var bits = FenceDirtyBits;
+            for (int i = 0; i < count; i++)
+            {
+                var d = buffer[offset + i];
+                if (d.SrcClearMask != 0 && d.SrcChunkId >= 0 && d.SrcChunkId < bits.Length)
+                {
+                    bits[d.SrcChunkId] &= ~d.SrcClearMask;
+                }
+                if (d.DstSetMask != 0 && d.DstChunkId >= 0 && d.DstChunkId < bits.Length)
+                {
+                    bits[d.DstChunkId] |= d.DstSetMask;
+                }
+            }
+        }
+        finally
+        {
+            _finalizeLock.Lock.ExitExclusiveAccess();
+        }
+    }
+
+    /// <summary>
+    /// Grow <see cref="FenceDirtyBits"/> on-demand under <see cref="_finalizeLock"/> so a Migrate-phase worker can safely write to <c>FenceDirtyBits[chunkId]</c>
+    /// when its dstChunkId exceeds the pre-sized length. The lock excludes concurrent grows; callers must re-read <see cref="FenceDirtyBits"/> after the call
+    /// to pick up the (possibly grown) array reference. Idempotent — if another worker already grew the array beyond <paramref name="chunkId"/>, returns
+    /// without further work.
+    /// </summary>
+    internal void GrowFenceDirtyBitsForChunkId(int chunkId)
+    {
+        if (FenceDirtyBits != null && chunkId < FenceDirtyBits.Length)
+        {
+            return;
+        }
+
+        ref WaitContext nullCtx = ref Unsafe.NullRef<WaitContext>();
+        _finalizeLock.Lock.EnterExclusiveAccess(ref nullCtx);
+        try
+        {
+            // Re-check under lock — another worker may have already grown past us.
+            int required = chunkId + 1;
+            if (FenceDirtyBits == null)
+            {
+                FenceDirtyBits = new long[Math.Max(required, 16)];
+            }
+            else if (FenceDirtyBits.Length < required)
+            {
+                int newLen = FenceDirtyBits.Length;
+                while (newLen < required)
+                {
+                    newLen = Math.Max(newLen * 2, required);
+                }
+
+                Array.Resize(ref FenceDirtyBits, newLen);
+            }
+        }
+        finally
+        {
+            _finalizeLock.Lock.ExitExclusiveAccess();
+        }
+    }
+
+    internal void PreSizeMigrationBuffers(int upperBound)
+    {
+        if (upperBound <= 0)
+        {
+            return;
+        }
+
+        // FenceDirtyBits is per-cluster (one long word per cluster chunk id). Grow to at least the upper bound.
+        if (FenceDirtyBits == null)
+        {
+            FenceDirtyBits = new long[upperBound];
+        }
+        else if (FenceDirtyBits.Length < upperBound)
+        {
+            // Preserve existing dirty bits set during Prep — Array.Resize copies; we just need more tail space for migrations that may target chunk ids beyond
+            // the snapshot length.
+            int oldLen = FenceDirtyBits.Length;
+            int newLen = oldLen;
+            while (newLen < upperBound)
+            {
+                newLen = Math.Max(newLen * 2, upperBound);
+            }
+
+            Array.Resize(ref FenceDirtyBits, newLen);
+        }
+
+        // Per-cluster AABB + cell-mapping + spatial-index-slot arrays need to cover any newly allocated dst cluster.
+        EnsureClusterAabbsCapacity(upperBound);
+        EnsureClusterSpatialIndexSlotCapacity(upperBound);
+        EnsureClusterCellMapCapacity(upperBound);
+        EnsureClusterWriteBookkeepingCapacity(upperBound);
+
+        // Deferred-drain list sized to PendingMigrationCount (each migration drains at most one source slot, so the cluster-drain count cannot exceed migration
+        // count). _drainedCount is zeroed by Prep.
+        int drainCap = Math.Max(16, PendingMigrationCount);
+        if (_drainedClusterIds == null || _drainedClusterIds.Length < drainCap)
+        {
+            _drainedClusterIds = new int[Math.Max(drainCap, (_drainedClusterIds?.Length ?? 0) * 2)];
+        }
+    }
+
+    /// <summary>
+    /// Sort <see cref="PendingMigrations"/> in place by destination cell key so the parallel Migrate phase can give each worker a contiguous slice and have all
+    /// of that worker's destination cells be disjoint from every other worker's destination cells. Called by TickDriver between Prep and Migrate.
+    /// </summary>
+    internal void SortPendingMigrationsByDestCellKey()
+    {
+        if (PendingMigrations == null || PendingMigrationCount < 2)
+        {
+            return;
+        }
+
+        Array.Sort(PendingMigrations, 0, PendingMigrationCount, MigrationByDestCellKeyComparer.Instance);
+    }
+
+    private sealed class MigrationByDestCellKeyComparer : IComparer<MigrationRequest>
+    {
+        public static readonly MigrationByDestCellKeyComparer Instance = new();
+        public int Compare(MigrationRequest x, MigrationRequest y) => x.DestCellKey.CompareTo(y.DestCellKey);
+    }
+
+    /// <summary>
+    /// Record a cluster that's been drained to empty by ReleaseSlot. Lock-free append via <see cref="Interlocked.Increment(ref int)"/>. Capacity is guaranteed
+    /// by <see cref="PreSizeMigrationBuffers"/>. Same cluster may legitimately be recorded twice if a previous tick's drain wasn't followed by a finalize and
+    /// this tick re-empties it after a refill+drain cycle — <see cref="DrainPendingClusterFinalizations"/> re-checks occupancy under the finalize lock and
+    /// skips non-empty entries.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void RecordClusterDrain(int clusterChunkId)
+    {
+        int idx = Interlocked.Increment(ref _drainedCount) - 1;
+        if (_drainedClusterIds == null || idx >= _drainedClusterIds.Length)
+        {
+            // PreSizeMigrationBuffers should have covered this — fall back to a synchronized grow.
+            ref WaitContext nullCtx = ref Unsafe.NullRef<WaitContext>();
+            _finalizeLock.Lock.EnterExclusiveAccess(ref nullCtx);
+            try
+            {
+                if (_drainedClusterIds == null)
+                {
+                    _drainedClusterIds = new int[Math.Max(16, idx + 1)];
+                }
+                else if (_drainedClusterIds.Length <= idx)
+                {
+                    int newLen = _drainedClusterIds.Length * 2;
+                    while (newLen <= idx)
+                    {
+                        newLen *= 2;
+                    }
+
+                    Array.Resize(ref _drainedClusterIds, newLen);
+                }
+            }
+            finally
+            {
+                _finalizeLock.Lock.ExitExclusiveAccess();
+            }
+        }
+        _drainedClusterIds[idx] = clusterChunkId;
+    }
+
+    /// <summary>
+    /// Walk the deferred-drain list serially (called once per archetype from <see cref="DatabaseEngine.FinalizeArchetypeFence"/> after all Migrate-phase slices
+    /// have completed). For each drained cluster, re-check occupancy: if still empty, run finalize + free; if a concurrent Claim re-filled it during Migrate,
+    /// leave it alone. Resets <see cref="_drainedCount"/> to zero.
+    /// <para>
+    /// <b>Concurrency invariant:</b> Finalize-for-one-archetype runs on exactly one worker (one work item per archetype, dispatched atomically). By the time
+    /// this method runs, the Migrate and AabbRefresh phase barriers have both passed — no concurrent ClaimSlotInCell or ReleaseSlot can mutate this archetype's
+    /// clusters. The occupancy re-read is therefore single-threaded and the per-archetype lock is unnecessary here.
+    /// </para>
+    /// <para>
+    /// Note: a cluster can appear in the drain list AND have non-zero occupancy if a Migrate-phase Claim refilled it after the drain was recorded. That's a
+    /// Migrate-phase Claim arriving AFTER a Migrate-phase Release: legal because the cluster was still in the cell's claim list, and the Claim correctly
+    /// re-occupied it. Skip the finalize.
+    /// </para>
+    /// </summary>
+    internal void DrainPendingClusterFinalizations(SpatialGrid grid)
+    {
+        int count = _drainedCount;
+        if (count == 0)
+        {
+            return;
+        }
+
+        var ids = _drainedClusterIds;
+        bool hasCluster = ClusterSegment != null;
+        var clusterAccessor = hasCluster ? ClusterSegment.CreateChunkAccessor() : default;
+        var transientAccessor = TransientSegment != null ? TransientSegment.CreateChunkAccessor() : default;
+
+        for (int i = 0; i < count; i++)
+        {
+            int chunkId = ids[i];
+            byte* clusterBase = hasCluster ? clusterAccessor.GetChunkAddress(chunkId, true) : transientAccessor.GetChunkAddress(chunkId, true);
+            if (*(ulong*)clusterBase != 0)
+            {
+                continue; // Claim re-filled this cluster after the drain — keep alive
+            }
+
+            FinaliseEmptyClusterCellState(grid, chunkId);
+            RemoveFromActiveList(chunkId);
+            ClusterSegment?.FreeChunk(chunkId);
+            TransientSegment?.FreeChunk(chunkId);
+        }
+        _drainedCount = 0;
+    }
 
     /// <summary>
     /// Per-cluster cell membership for spatial archetypes (issue #229 Phase 1+2). Flat array indexed by <c>clusterChunkId</c>, value is the spatial
@@ -79,6 +400,13 @@ internal sealed unsafe class ArchetypeClusterState
     public double LastTickMigrationExecuteMs;
 
     /// <summary>
+    /// Coarse work-estimate counter bumped on every cell-crossing flagged by <c>WriteSpatial</c>. Read and reset (snapshot-then-zero) by the fence work-planner
+    /// to size the per-archetype migration cost. Non-atomic on purpose: order-of-magnitude is enough for chunk bucketing; lost increments under contention are
+    /// tolerable.
+    /// </summary>
+    internal int MigrationHint;
+
+    /// <summary>
     /// Test observation hook: length (in long words) of the <c>dirtyBits</c> snapshot at the end of <c>ExecuteMigrations</c>. Used by regression tests to
     /// verify the snapshot was grown when migration allocated a brand-new destination cluster whose chunk id exceeded the pre-migration length.
     /// Zero when no migrations ran.
@@ -102,6 +430,36 @@ internal sealed unsafe class ArchetypeClusterState
     /// Indexed by clusterChunkId.
     /// </summary>
     internal int[] ClusterSpatialIndexSlot;
+
+    // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+    // Write-time spatial bookkeeping. Populated by ClusterRef.WriteSpatial(...) at the write site. Consumed by the fence-time sparse-iteration pass — only
+    // clusters with bits set here do any work at fence time. See claude/design/spatial/write-time-spatial.md.
+    // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// One bit per cluster — set whenever WriteSpatial detects pending work (migration or shrink-rescan). Drives the fence-time loop, replacing the
+    /// unconditional scan of every active cluster. Indexed by clusterChunkId; word at <c>i / 64</c>, bit <c>i % 64</c>. Lazy-allocated alongside ClusterAabbs.
+    /// </summary>
+    internal long[] ClusterProcessBitmap;
+
+    /// <summary>
+    /// Per-cluster bitmap of slots needing migration this tick — one u64 per cluster, bit <c>i</c> set means slot <c>i</c>'s entity has crossed the
+    /// cell+hysteresis boundary. Drained at fence by <see cref="DatabaseEngine.DetectClusterMigrations"/>. Indexed by clusterChunkId.
+    /// </summary>
+    internal ulong[] ClusterMigrationPendingSlots;
+
+    /// <summary>
+    /// Per-cluster destination cell key for the migration batch in <see cref="ClusterMigrationPendingSlots"/>. <c>-1</c> when no migration is pending.
+    /// By cluster-coherence invariant, all flagged slots in a single cluster migrate to the same destination cell key (the first writer wins; conflicting
+    /// writes are resolved at fence time by re-reading the slot's position). Indexed by clusterChunkId.
+    /// </summary>
+    internal int[] ClusterMigrationDestCellKeys;
+
+    /// <summary>
+    /// Per-cluster shrink-pending axes mask. Bit layout: 0x01=MinX, 0x02=MaxX, 0x04=MinY, 0x08=MaxY, 0x10=MinZ, 0x20=MaxZ. Set when an entity at an axis
+    /// extreme moves inward — fence must rescan this cluster on the flagged axes only. Indexed by clusterChunkId.
+    /// </summary>
+    internal byte[] ClusterShrinkPendingAxes;
 
     /// <summary>
     /// Per-archetype per-cell spatial slot, indexed by cellKey. Null entries for cells where this archetype has no clusters. Lazy-allocated:
@@ -205,6 +563,25 @@ internal sealed unsafe class ArchetypeClusterState
     /// <summary>Archetype ID for this cluster state. Set during <see cref="InitializeSpatial"/>. Used by
     /// <see cref="SetDirty"/> to tag wake requests via <see cref="DormancyReporter"/>. Issue #233.</summary>
     internal int ArchetypeId;
+
+    /// <summary>Back-reference to the engine's <see cref="SpatialGrid"/>. Set during <see cref="InitializeSpatial"/>. Used by <c>ClusterRef.WriteSpatial</c> to
+    /// evaluate cell-boundary crossings at the write site without plumbing the grid through every call layer. <c>null</c> for non-spatial archetypes.</summary>
+    internal SpatialGrid Grid;
+
+    /// <summary>
+    /// When <c>true</c>, the engine treats <c>ClusterRef.WriteSpatial</c> as the canonical (and only) writer of this archetype's spatial component. Enables two
+    /// fence-time optimizations:
+    /// <list type="bullet">
+    ///   <item><c>DatabaseEngine.DetectClusterMigrations</c> skips its legacy dirtyBits scan
+    ///         (step (b)) — all migrations are expected to come from <see cref="ClusterMigrationPendingSlots"/>.</item>
+    ///   <item><see cref="RecomputeDirtyClusterAabbs"/> iterates <see cref="ClusterProcessBitmap"/>
+    ///         (sparse) instead of <see cref="ActiveClusterIds"/> (full).</item>
+    /// </list>
+    /// Setting this on an archetype whose spatial field is mutated via raw <c>GetSpan</c> / <c>OpenMut + Write</c> will cause those mutations to be invisible
+    /// to the engine's spatial maintenance — only set when you've migrated ALL spatial writers to <c>WriteSpatial</c>.
+    /// Default <c>false</c>: legacy behaviour (full scan), safe for any caller.
+    /// </summary>
+    internal bool SpatialBarrierOnly;
 
     /// <summary>Tick number of the last <see cref="TransitionWakePendingToActive"/> call. Guards against redundant scans
     /// when multiple systems reference the same archetype. Issue #233.</summary>
@@ -313,7 +690,7 @@ internal sealed unsafe class ArchetypeClusterState
         // ensures 3D archetypes with entities far along the Z axis are also captured.
         float maxRadius = float.MaxValue;
 
-        var scratch = new System.Collections.Generic.List<(long entityId, float distSq)>(64);
+        var scratch = new List<(long entityId, float distSq)>(64);
         foreach (var hit in QueryRadius(grid, centerX, centerY, centerZ, maxRadius, categoryMask))
         {
             scratch.Add((hit.EntityId, hit.DistanceSq));
@@ -625,8 +1002,8 @@ internal sealed unsafe class ArchetypeClusterState
     /// own cluster list for the target cell (typically ≤80 entries for AntHill-scale density, ≤15-30 ns scan cost).</para>
     /// <para>Under the Q10 resolution the scanned list is strictly this archetype's — other spatial archetypes sharing the grid have their own
     /// <see cref="CellClusterPool"/> instances, so no cross-archetype cluster chunk IDs ever appear in this scan.</para>
-    /// <para>Every successful claim bumps the global <see cref="CellDescriptor.EntityCount"/>. Allocation of a new cluster additionally bumps the global
-    /// <see cref="CellDescriptor.ClusterCount"/>, appends the cluster to this archetype's per-cell claim list, and records the mapping in
+    /// <para>Every successful claim bumps the global <see cref="CellState.EntityCount"/>. Allocation of a new cluster additionally bumps the global
+    /// <see cref="CellState.ClusterCount"/>, appends the cluster to this archetype's per-cell claim list, and records the mapping in
     /// <see cref="ClusterCellMap"/>.</para>
     /// </remarks>
     public (int clusterChunkId, int slotIndex) ClaimSlotInCell(int cellKey, ref ChunkAccessor<PersistentStore> accessor, ChangeSet changeSet, SpatialGrid grid)
@@ -654,31 +1031,56 @@ internal sealed unsafe class ArchetypeClusterState
             // CAS for future-proof concurrent commit (matches ClaimSlot semantics). Single-writer today.
             if (Interlocked.CompareExchange(ref occupancy, desired, current) == current)
             {
-                cell.EntityCount++;
+                Interlocked.Increment(ref cell.EntityCount);
                 return (clusterId, slot);
             }
 
-            // CAS failed — another writer took the slot. Retry with a direct read+write.
-            current = occupancy;
-            available = ~current & Layout.FullMask;
-            if (available != 0)
+            // CAS failed — another writer took the slot. Retry path: re-read occupancy and pick a fresh free slot, committing via Interlocked so concurrent
+            // ClaimSlotInCell calls on the same cluster from different workers stay safe (parallel fence migration paths can hit the same dst cluster from
+            // cell-partitioned workers).
+            while (true)
             {
+                current = occupancy;
+                available = ~current & Layout.FullMask;
+                if (available == 0)
+                {
+                    break; // cluster filled by another writer — fall through to next candidate
+                }
                 slot = BitOperations.TrailingZeroCount(available);
-                occupancy = current | (1UL << slot);
-                cell.EntityCount++;
-                return (clusterId, slot);
+                desired = current | (1UL << slot);
+                if (Interlocked.CompareExchange(ref occupancy, desired, current) == current)
+                {
+                    Interlocked.Increment(ref cell.EntityCount);
+                    return (clusterId, slot);
+                }
             }
-
-            // Cluster became full between reads — fall through to the next candidate.
         }
 
         // No free slot in any cluster of this cell — allocate a new cluster and attach it to this archetype's per-cell claim list.
-        int newChunkId = AllocateNewCluster(changeSet);
-        EnsureClusterCellMapCapacity(newChunkId + 1);
-        ClusterCellMap[newChunkId] = cellKey;
-        CellClusterPool.AddCluster(cellKey, newChunkId);
-        cell.ClusterCount++;
-        cell.EntityCount++;
+        // Slow path: protected by the per-archetype finalize latch. Three operations must be atomic w.r.t. other workers:
+        //   (1) Dual-segment AllocateChunk — ClusterSegment + TransientSegment must return matching chunk IDs (lockstep).
+        //       Worker interleave would mismatch them and crash the Debug.Assert.
+        //   (2) AddToActiveList — appends to ActiveClusterIds[], increments ActiveClusterCount, bumps ClusterSetVersion.
+        //   (3) CellClusterPool.AddCluster + ClusterCellMap[newChunkId] = cellKey — per-cell pool mutation + back-pointer.
+        // These all happen here. The hot path (existing-cluster CAS above) does NOT take this lock.
+        int newChunkId;
+        ref WaitContext nullCtx0 = ref Unsafe.NullRef<WaitContext>();
+        _finalizeLock.Lock.EnterExclusiveAccess(ref nullCtx0);
+        try
+        {
+            newChunkId = AllocateNewCluster(changeSet);
+            EnsureClusterCellMapCapacity(newChunkId + 1);
+            ClusterCellMap[newChunkId] = cellKey;
+            CellClusterPool.AddCluster(cellKey, newChunkId);
+        }
+        finally
+        {
+            _finalizeLock.Lock.ExitExclusiveAccess();
+        }
+
+        // Cell counters use Interlocked unconditionally (other archetypes sharing this grid may bump them too).
+        Interlocked.Increment(ref cell.ClusterCount);
+        Interlocked.Increment(ref cell.EntityCount);
 
         byte* newBase = accessor.GetChunkAddress(newChunkId, true);
         *(ulong*)newBase = 1UL; // occupancy bit 0
@@ -714,28 +1116,48 @@ internal sealed unsafe class ArchetypeClusterState
 
             if (Interlocked.CompareExchange(ref occupancy, desired, current) == current)
             {
-                cell.EntityCount++;
+                Interlocked.Increment(ref cell.EntityCount);
                 return (clusterId, slot);
             }
 
-            current = occupancy;
-            available = ~current & Layout.FullMask;
-            if (available != 0)
+            // CAS-loop retry path for concurrent claim safety (parallel fence migration may hit same dst cluster).
+            while (true)
             {
+                current = occupancy;
+                available = ~current & Layout.FullMask;
+                if (available == 0)
+                {
+                    break;
+                }
                 slot = BitOperations.TrailingZeroCount(available);
-                occupancy = current | (1UL << slot);
-                cell.EntityCount++;
-                return (clusterId, slot);
+                desired = current | (1UL << slot);
+                if (Interlocked.CompareExchange(ref occupancy, desired, current) == current)
+                {
+                    Interlocked.Increment(ref cell.EntityCount);
+                    return (clusterId, slot);
+                }
             }
         }
 
         // No free slot — allocate a new cluster and attach it to this archetype's per-cell claim list.
-        int newChunkId = AllocateNewCluster(null);
-        EnsureClusterCellMapCapacity(newChunkId + 1);
-        ClusterCellMap[newChunkId] = cellKey;
-        CellClusterPool.AddCluster(cellKey, newChunkId);
-        cell.ClusterCount++;
-        cell.EntityCount++;
+        // See PersistentStore overload above for the rationale on locking this slow path.
+        int newChunkId;
+        ref WaitContext nullCtx1 = ref Unsafe.NullRef<WaitContext>();
+        _finalizeLock.Lock.EnterExclusiveAccess(ref nullCtx1);
+        try
+        {
+            newChunkId = AllocateNewCluster(null);
+            EnsureClusterCellMapCapacity(newChunkId + 1);
+            ClusterCellMap[newChunkId] = cellKey;
+            CellClusterPool.AddCluster(cellKey, newChunkId);
+        }
+        finally
+        {
+            _finalizeLock.Lock.ExitExclusiveAccess();
+        }
+
+        Interlocked.Increment(ref cell.ClusterCount);
+        Interlocked.Increment(ref cell.EntityCount);
 
         byte* newBase = accessor.GetChunkAddress(newChunkId, true);
         *(ulong*)newBase = 1UL;
@@ -756,8 +1178,8 @@ internal sealed unsafe class ArchetypeClusterState
     /// cluster belong to the same cell) — reading only the first entity is sufficient.</para>
     /// <para>Non-spatial archetypes and archetypes without a configured grid are no-ops. Pure-Transient archetypes are also skipped since their data doesn't
     /// survive restart.</para>
-    /// <para><b>Precondition — NOT idempotent on a dirty grid.</b> This method ADDS to <see cref="CellDescriptor.EntityCount"/> /
-    /// <see cref="CellDescriptor.ClusterCount"/> and appends cluster IDs to this archetype's <see cref="CellClusterPool"/>. Callers MUST pass either a
+    /// <para><b>Precondition — NOT idempotent on a dirty grid.</b> This method ADDS to <see cref="CellState.EntityCount"/> /
+    /// <see cref="CellState.ClusterCount"/> and appends cluster IDs to this archetype's <see cref="CellClusterPool"/>. Callers MUST pass either a
     /// fresh <see cref="SpatialGrid"/> or one that has been reset via <see cref="SpatialGrid.ResetCellState"/> (and the per-archetype pools must also be
     /// reset) — calling twice without a reset double-counts entities and duplicates cluster IDs in the pool. The single caller today
     /// (<c>DatabaseEngine.InitializeArchetypes</c>) constructs a fresh grid + allocates a fresh per-archetype pool inside <see cref="InitializeSpatial"/>
@@ -900,6 +1322,60 @@ internal sealed unsafe class ArchetypeClusterState
         int oldLen = ClusterSpatialIndexSlot.Length;
         Array.Resize(ref ClusterSpatialIndexSlot, newLen);
         Array.Fill(ClusterSpatialIndexSlot, -1, oldLen, newLen - oldLen);
+    }
+
+    /// <summary>
+    /// Grow the four write-time bookkeeping arrays — <see cref="ClusterProcessBitmap"/>,
+    /// <see cref="ClusterMigrationPendingSlots"/>, <see cref="ClusterMigrationDestCellKeys"/>,
+    /// <see cref="ClusterShrinkPendingAxes"/> — in lockstep. Called alongside
+    /// <see cref="EnsureClusterAabbsCapacity"/> so the four arrays are always sized to match the cluster segment's chunk-id range.
+    /// </summary>
+    internal void EnsureClusterWriteBookkeepingCapacity(int requiredLength)
+    {
+        // ClusterProcessBitmap: 1 bit per cluster → (requiredLength + 63) / 64 long words.
+        int requiredWords = (requiredLength + 63) >> 6;
+        if (ClusterProcessBitmap == null)
+        {
+            int initialWords = Math.Max(1, requiredWords);
+            ClusterProcessBitmap = new long[initialWords];
+        }
+        else if (ClusterProcessBitmap.Length < requiredWords)
+        {
+            int newLen = Math.Max(ClusterProcessBitmap.Length, 1);
+            while (newLen < requiredWords)
+            {
+                newLen *= 2;
+            }
+
+            Array.Resize(ref ClusterProcessBitmap, newLen);
+            // No init — Array.Resize zero-fills.
+        }
+
+        // Per-cluster arrays sized 1:1 with clusterChunkId range.
+        if (ClusterMigrationPendingSlots == null)
+        {
+            int initial = Math.Max(16, requiredLength);
+            ClusterMigrationPendingSlots = new ulong[initial];
+            ClusterMigrationDestCellKeys = new int[initial];
+            Array.Fill(ClusterMigrationDestCellKeys, -1);
+            ClusterShrinkPendingAxes = new byte[initial];
+            return;
+        }
+        if (ClusterMigrationPendingSlots.Length >= requiredLength)
+        {
+            return;
+        }
+        int newClusterLen = Math.Max(ClusterMigrationPendingSlots.Length, 1);
+        while (newClusterLen < requiredLength)
+        {
+            newClusterLen *= 2;
+        }
+
+        int oldLen = ClusterMigrationPendingSlots.Length;
+        Array.Resize(ref ClusterMigrationPendingSlots, newClusterLen);
+        Array.Resize(ref ClusterMigrationDestCellKeys, newClusterLen);
+        Array.Fill(ClusterMigrationDestCellKeys, -1, oldLen, newClusterLen - oldLen);
+        Array.Resize(ref ClusterShrinkPendingAxes, newClusterLen);
     }
 
     /// <summary>
@@ -1069,10 +1545,14 @@ internal sealed unsafe class ArchetypeClusterState
     /// Category mask is the OR of per-entity masks; in Phase 1 all entities use the default <c>uint.MaxValue</c> mask, so this collapses to <c>uint.MaxValue</c>.
     /// </remarks>
     internal ClusterSpatialAabb RecomputeClusterAabb(int clusterChunkId, ref ChunkAccessor<PersistentStore> accessor)
+        => RecomputeClusterAabb(clusterChunkId, ref accessor, out _);
+
+    internal ClusterSpatialAabb RecomputeClusterAabb(int clusterChunkId, ref ChunkAccessor<PersistentStore> accessor, out int slotsScanned)
     {
         var ss = SpatialSlot;
         byte* clusterBase = accessor.GetChunkAddress(clusterChunkId);
         ulong occupancy = *(ulong*)clusterBase;
+        slotsScanned = BitOperations.PopCount(occupancy);
         int componentOffset = Layout.ComponentOffset(ss.Slot);
         int componentStride = Layout.ComponentSize(ss.Slot);
 
@@ -1136,6 +1616,7 @@ internal sealed unsafe class ArchetypeClusterState
 
         EnsureClusterAabbsCapacity(PrimarySegmentCapacity);
         EnsureClusterSpatialIndexSlotCapacity(PrimarySegmentCapacity);
+        EnsureClusterWriteBookkeepingCapacity(PrimarySegmentCapacity);
 
         // Reset the per-cell index before rebuilding so repeated calls to RebuildClusterAabbs (e.g. a startup reopen of a database that was reopened in the
         // same process) do not double-count clusters that already have entries in the index from a prior spawn/migration path.
@@ -1180,52 +1661,125 @@ internal sealed unsafe class ArchetypeClusterState
     }
 
     /// <summary>
-    /// Tick-fence pass (issue #230 Phase 2): re-tighten cluster AABBs for clusters that had entity writes this tick. Scans the dirty bitmap,
-    /// recomputes the tight AABB from live entities via <see cref="RecomputeClusterAabb"/>, and updates the per-cell index entry in-place when
-    /// the AABB actually changed. Closes the "loose AABB drift" trade-off from Phase 1 (see design doc deliberate deviation #4).
+    /// Tick-fence pass: re-tighten cluster AABBs and propagate to the per-cell index. Now driven by the write-time bookkeeping arrays
+    /// (<see cref="ClusterProcessBitmap"/>, <see cref="ClusterShrinkPendingAxes"/>) populated by <c>ClusterRef.WriteSpatial</c>.
+    /// <para>
+    /// For each cluster with its process bit set:
+    /// <list type="bullet">
+    ///   <item>If <c>ShrinkPendingAxes != 0</c>: an entity at an axis extreme moved inward, so the stored AABB no longer fits — rescan this cluster's occupied
+    ///         slots to recompute the tight AABB.</item>
+    ///   <item>Otherwise the process bit was set by an inline AABB grow (already applied) or a migration flag — just propagate the (already-current)
+    ///         <see cref="ClusterAabbs"/> entry to <c>PerCellIndex.UpdateAt</c>.</item>
+    /// </list>
+    /// </para>
+    /// <para>
+    /// All three bookkeeping arrays (<see cref="ClusterProcessBitmap"/>, <see cref="ClusterMigrationPendingSlots"/>, <see cref="ClusterShrinkPendingAxes"/>)
+    /// are cleared at the end of the pass. The migration drain is expected to have already happened in <c>DatabaseEngine.DetectClusterMigrations</c> (which
+    /// runs immediately before this method).
+    /// </para>
+    /// <para>
+    /// The <paramref name="dirtyBits"/> parameter is retained for API stability; this method no longer reads it.
+    /// </para>
     /// </summary>
-    /// <remarks>
-    /// <para>
-    /// <b>Dirty bitmap shape.</b> <see cref="ClusterDirtyBitmap"/> stores bits at <c>entityIndex = clusterChunkId * 64 + slotIndex</c>, so each
-    /// <c>long</c> word at index <c>i</c> in the snapshot corresponds to cluster chunk id <c>i</c> (its 64 bits are its 64 slots). Any non-zero
-    /// word means the cluster had at least one slot write this tick — we don't need a per-bit inner loop, a per-word non-zero test is enough.
-    /// </para>
-    /// <para>
-    /// <b>Category mask preservation.</b> <see cref="RecomputeClusterAabb"/> currently hardcodes <c>uint.MaxValue</c> as the returned mask
-    /// (Phase 1 has no per-entity category plumbing). We explicitly preserve whatever mask already lives on the per-cell index entry instead of
-    /// writing the fresh-but-collapsed value back. This is a no-op today but becomes load-bearing in Phase 3 once
-    /// <c>[SpatialIndex(Category=...)]</c> lands — without this preservation, the tick-fence pass would clobber the attribute-driven mask every tick.
-    /// </para>
-    /// <para>
-    /// <b>Cost.</b> ~100 ns per dirty cluster (SoA scan of &le;64 occupied slots via TZCNT loop, four float min/max ops). Worst case in AntHill
-    /// is ~5 ms/tick at 50K dirty clusters — the minimum cost of per-tick AABB freshness.
-    /// </para>
-    /// </remarks>
     internal void RecomputeDirtyClusterAabbs(long[] dirtyBits, ref ChunkAccessor<PersistentStore> accessor, SpatialGrid grid = null)
     {
-        // Same gating as the Phase 1 spawn/destroy/migration hooks.
+        _ = dirtyBits;
+
         if (!SpatialSlot.HasSpatialIndex)
         {
             return;
         }
+
         if (SpatialSlot.FieldInfo.Mode != SpatialMode.Dynamic)
         {
-            return; // Phase 1 is Dynamic-mode only; static index path lands in Phase 3.
+            return;
         }
+
         if (ClusterSpatialIndexSlot == null || ClusterAabbs == null)
         {
-            return; // no per-cell index entries exist yet — nothing to tighten
+            return;
         }
+
         if (PerCellIndex == null || ClusterCellMap == null)
         {
             return;
         }
 
-        // Max cluster AABB extent guard — issue #230 Phase 3 closing the Phase 1 gap. When the tick-tightened AABB exceeds cellSize × 1.2 on any horizontal
-        // axis, accumulated drift from hysteresis-absorbed entities has inflated the cluster beyond the spatial coherence target. Scan the cluster's entities
-        // and enqueue migration for any that have drifted outside the raw cell boundary (ignoring the hysteresis dead zone). See design doc
-        // claude/design/Spatial/SpatialTiers/01-spatial-clusters.md §"Max Cluster AABB Extent". The guard is a no-op when no grid is configured (no cell to
-        // reference) or when grid.Config.CellSize is zero.
+        // Whole-archetype convenience wrapper: serial WriteTickFence path. The parallel path dispatches RecomputeDirtyClusterAabbsSlice across workers directly
+        // and then runs ClearAabbRefreshBookkeeping in Finalize.
+        var refreshSpan = TyphonEvent.BeginSpatialClusterAabbRefresh((ushort)ArchetypeId, ActiveClusterCount);
+        try
+        {
+            int totalWork = (SpatialBarrierOnly && ClusterProcessBitmap != null) ? ClusterProcessBitmap.Length : ActiveClusterCount;
+            if (totalWork > 0)
+            {
+                var outlierBuffer = new List<MigrationRequest>(0);
+                RecomputeDirtyClusterAabbsSlice(0, totalWork, ref accessor, grid, outlierBuffer, out int aabbsChanged, out int slotsScanned, 
+                    out int outlierGuardFires);
+                EnqueueMigrationsBulk(outlierBuffer);
+                refreshSpan.AabbsChanged = aabbsChanged;
+                refreshSpan.SlotsScanned = slotsScanned;
+                refreshSpan.OutlierGuardFires = outlierGuardFires;
+            }
+            ClearAabbRefreshBookkeeping();
+        }
+        finally
+        {
+            refreshSpan.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Apply the AABB recompute pass to a contiguous slice of this archetype's clusters. Safe to call concurrently across DISJOINT slices of the SAME archetype
+    /// (used by the parallel-fence AabbRefresh phase).
+    /// <para>
+    /// Slicing axis depends on iteration mode (captured from <see cref="SpatialBarrierOnly"/>):
+    /// <list type="bullet">
+    ///   <item><b>BarrierOnly</b>: slice <see cref="ClusterProcessBitmap"/> by word range. <paramref name="sliceStart"/>=startWord,
+    ///         <paramref name="sliceCount"/>=wordCount. Each word's bits are disjoint cluster chunk-IDs so no two slices touch the same cluster.</item>
+    ///   <item><b>Legacy</b>: slice <see cref="ActiveClusterIds"/> by index range. <paramref name="sliceStart"/>=activeIdx,
+    ///         <paramref name="sliceCount"/>=count. Each slice owns a disjoint range of active-list indices.</item>
+    /// </list>
+    /// </para>
+    /// <para>
+    /// <b>Thread-safety</b>: writes only to per-cluster slots (<see cref="ClusterAabbs"/>[chunkId]) and per-cell index slots
+    /// (<c>PerCellIndex[cellKey].DynamicIndex.UpdateAt(indexSlot, ...)</c>). Different clusters always have different <c>indexSlot</c>s even within the same
+    /// cell, so SoA writes don't collide. The rare <see cref="FlagOutliersForMigration"/> path (extent-guard fire) serializes <see cref="EnqueueMigration"/>
+    /// internally via <c>_finalizeLock</c>.
+    /// </para>
+    /// </summary>
+    internal void RecomputeDirtyClusterAabbsSlice(int sliceStart, int sliceCount, ref ChunkAccessor<PersistentStore> accessor, SpatialGrid grid, 
+        List<MigrationRequest> outlierBuffer, out int aabbsChanged, out int slotsScanned, out int outlierGuardFires)
+    {
+        aabbsChanged = 0;
+        slotsScanned = 0;
+        outlierGuardFires = 0;
+
+        if (!SpatialSlot.HasSpatialIndex)
+        {
+            return;
+        }
+
+        if (SpatialSlot.FieldInfo.Mode != SpatialMode.Dynamic)
+        {
+            return;
+        }
+
+        if (ClusterSpatialIndexSlot == null || ClusterAabbs == null)
+        {
+            return;
+        }
+
+        if (PerCellIndex == null || ClusterCellMap == null)
+        {
+            return;
+        }
+
+        if (sliceCount <= 0)
+        {
+            return;
+        }
+
         float maxExtent = 0f;
         float cellSize = 0f;
         bool outlierGuardActive = grid != null && (cellSize = grid.Config.CellSize) > 0f;
@@ -1234,72 +1788,215 @@ internal sealed unsafe class ArchetypeClusterState
             maxExtent = cellSize * 1.2f;
         }
 
-        for (int chunkId = 0; chunkId < dirtyBits.Length; chunkId++)
+        if (SpatialBarrierOnly && ClusterProcessBitmap != null)
         {
-            if (dirtyBits[chunkId] == 0)
+            int wordEnd = Math.Min(sliceStart + sliceCount, ClusterProcessBitmap.Length);
+            for (int wordIdx = sliceStart; wordIdx < wordEnd; wordIdx++)
             {
-                continue; // no slot writes in this cluster this tick
-            }
+                long word = ClusterProcessBitmap[wordIdx];
+                if (word == 0)
+                {
+                    continue;
+                }
 
-            // Cluster may exist in the dirty bitmap but not (yet) in the per-cell index — e.g. a fresh
-            // migration destination that's already handled by the caller path. Skip defensively.
-            if (chunkId >= ClusterSpatialIndexSlot.Length)
+                while (word != 0)
+                {
+                    int chunkId = (wordIdx << 6) + BitOperations.TrailingZeroCount((ulong)word);
+                    word &= word - 1;
+
+                    if (chunkId >= ClusterSpatialIndexSlot.Length)
+                    {
+                        continue;
+                    }
+
+                    int indexSlot = ClusterSpatialIndexSlot[chunkId];
+                    if (indexSlot < 0)
+                    {
+                        continue;
+                    }
+
+                    if (chunkId >= ClusterCellMap.Length)
+                    {
+                        continue;
+                    }
+
+                    int cellKey = ClusterCellMap[chunkId];
+                    if (cellKey < 0)
+                    {
+                        continue;
+                    }
+
+                    var slot = PerCellIndex[cellKey];
+                    if (slot == null || slot.DynamicIndex == null)
+                    {
+                        continue;
+                    }
+
+                    byte shrinkMask = ClusterShrinkPendingAxes != null && chunkId < ClusterShrinkPendingAxes.Length ? ClusterShrinkPendingAxes[chunkId] : (byte)0;
+
+                    ref var stored = ref ClusterAabbs[chunkId];
+                    ClusterSpatialAabb fresh;
+                    if (shrinkMask != 0)
+                    {
+                        fresh = RecomputeClusterAabb(chunkId, ref accessor, out int clusterSlots);
+                        slotsScanned += clusterSlots;
+                        if (float.IsPositiveInfinity(fresh.MinX))
+                        {
+                            continue;
+                        }
+                    }
+                    else
+                    {
+                        fresh = stored;
+                        if (float.IsPositiveInfinity(fresh.MinX))
+                        {
+                            continue;
+                        }
+                    }
+
+                    if (stored.MinX == fresh.MinX && stored.MinY == fresh.MinY && stored.MinZ == fresh.MinZ &&
+                        stored.MaxX == fresh.MaxX && stored.MaxY == fresh.MaxY && stored.MaxZ == fresh.MaxZ && shrinkMask == 0)
+                    {
+                        continue;
+                    }
+
+                    fresh.CategoryMask = slot.DynamicIndex.CategoryMasks[indexSlot];
+                    stored = fresh;
+                    slot.DynamicIndex.UpdateAt(indexSlot, in fresh);
+                    aabbsChanged++;
+                    TyphonEvent.EmitSpatialCellIndexUpdate(cellKey, indexSlot);
+
+                    if (outlierGuardActive && ((fresh.MaxX - fresh.MinX) > maxExtent || (fresh.MaxY - fresh.MinY) > maxExtent))
+                    {
+                        outlierGuardFires++;
+                        FlagOutliersForMigration(chunkId, cellKey, grid, ref accessor, outlierBuffer);
+                    }
+                }
+            }
+        }
+        else
+        {
+            int activeEnd = Math.Min(sliceStart + sliceCount, ActiveClusterCount);
+            for (int activeIdx = sliceStart; activeIdx < activeEnd; activeIdx++)
+            {
+                int chunkId = ActiveClusterIds[activeIdx];
+
+                if (chunkId >= ClusterSpatialIndexSlot.Length)
+                {
+                    continue;
+                }
+
+                int indexSlot = ClusterSpatialIndexSlot[chunkId];
+                if (indexSlot < 0)
+                {
+                    continue;
+                }
+
+                if (chunkId >= ClusterCellMap.Length)
+                {
+                    continue;
+                }
+
+                int cellKey = ClusterCellMap[chunkId];
+                if (cellKey < 0)
+                {
+                    continue;
+                }
+
+                var slot = PerCellIndex[cellKey];
+                if (slot == null || slot.DynamicIndex == null)
+                {
+                    continue;
+                }
+
+                ClusterSpatialAabb fresh = RecomputeClusterAabb(chunkId, ref accessor, out int clusterSlots);
+                slotsScanned += clusterSlots;
+                if (float.IsPositiveInfinity(fresh.MinX))
+                {
+                    continue;
+                }
+
+                ref var stored = ref ClusterAabbs[chunkId];
+                if (stored.MinX == fresh.MinX && stored.MinY == fresh.MinY && stored.MinZ == fresh.MinZ &&
+                    stored.MaxX == fresh.MaxX && stored.MaxY == fresh.MaxY && stored.MaxZ == fresh.MaxZ)
+                {
+                    continue;
+                }
+
+                fresh.CategoryMask = slot.DynamicIndex.CategoryMasks[indexSlot];
+                stored = fresh;
+                slot.DynamicIndex.UpdateAt(indexSlot, in fresh);
+                aabbsChanged++;
+                TyphonEvent.EmitSpatialCellIndexUpdate(cellKey, indexSlot);
+
+                if (outlierGuardActive && ((fresh.MaxX - fresh.MinX) > maxExtent || (fresh.MaxY - fresh.MinY) > maxExtent))
+                {
+                    outlierGuardFires++;
+                    FlagOutliersForMigration(chunkId, cellKey, grid, ref accessor, outlierBuffer);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Count the clusters actually represented by an AABB-refresh slice. Used for the per-slice telemetry span (<c>ClusterScanned</c> field). Legacy mode:
+    /// <paramref name="sliceCount"/> directly. Barrier mode: popcount of the slice's bitmap words.
+    /// </summary>
+    internal int CountClustersInAabbSlice(int sliceStart, int sliceCount)
+    {
+        if (sliceCount <= 0)
+        {
+            return 0;
+        }
+
+        if (SpatialBarrierOnly && ClusterProcessBitmap != null)
+        {
+            int end = Math.Min(sliceStart + sliceCount, ClusterProcessBitmap.Length);
+            int total = 0;
+            for (int w = sliceStart; w < end; w++)
+            {
+                total += BitOperations.PopCount((ulong)ClusterProcessBitmap[w]);
+            }
+            return total;
+        }
+        return Math.Min(sliceCount, Math.Max(0, ActiveClusterCount - sliceStart));
+    }
+
+    /// <summary>
+    /// Clear the write-time bookkeeping arrays (<see cref="ClusterProcessBitmap"/>, <see cref="ClusterMigrationPendingSlots"/>,
+    /// <see cref="ClusterShrinkPendingAxes"/>) for the next tick. Single-threaded — called once per archetype from
+    /// <see cref="DatabaseEngine.FinalizeArchetypeFence"/> after all AABB slices finished.
+    /// </summary>
+    internal void ClearAabbRefreshBookkeeping()
+    {
+        if (ClusterProcessBitmap == null)
+        {
+            return;
+        }
+
+        for (int wordIdx = 0; wordIdx < ClusterProcessBitmap.Length; wordIdx++)
+        {
+            long word = ClusterProcessBitmap[wordIdx];
+            if (word == 0)
             {
                 continue;
             }
-            int indexSlot = ClusterSpatialIndexSlot[chunkId];
-            if (indexSlot < 0)
-            {
-                continue;
-            }
-            if (chunkId >= ClusterCellMap.Length)
-            {
-                continue;
-            }
-            int cellKey = ClusterCellMap[chunkId];
-            if (cellKey < 0)
-            {
-                continue;
-            }
-            var slot = PerCellIndex[cellKey];
-            if (slot == null || slot.DynamicIndex == null)
-            {
-                continue;
-            }
 
-            ClusterSpatialAabb fresh = RecomputeClusterAabb(chunkId, ref accessor);
-
-            // Empty-cluster guard: Empty has +inf / -inf extents. This shouldn't normally happen here
-            // because destroyed-slot dirty bits are masked by the caller (DatabaseEngine.WriteClusterTickFence
-            // AND's dirtyBits with live occupancy before calling us) — but handle it defensively in case a
-            // future caller forgets to do the masking.
-            if (float.IsPositiveInfinity(fresh.MinX))
+            while (word != 0)
             {
-                continue;
+                int chunkId = (wordIdx << 6) + BitOperations.TrailingZeroCount((ulong)word);
+                word &= word - 1;
+                if (ClusterMigrationPendingSlots != null && chunkId < ClusterMigrationPendingSlots.Length)
+                {
+                    ClusterMigrationPendingSlots[chunkId] = 0;
+                    ClusterMigrationDestCellKeys[chunkId] = -1;
+                }
+                if (ClusterShrinkPendingAxes != null && chunkId < ClusterShrinkPendingAxes.Length)
+                {
+                    ClusterShrinkPendingAxes[chunkId] = 0;
+                }
             }
-
-            ref var stored = ref ClusterAabbs[chunkId];
-            if (stored.MinX == fresh.MinX && stored.MinY == fresh.MinY && stored.MinZ == fresh.MinZ
-                && stored.MaxX == fresh.MaxX && stored.MaxY == fresh.MaxY && stored.MaxZ == fresh.MaxZ)
-            {
-                continue; // bit-exact AABB unchanged — skip the UpdateAt call
-            }
-
-            // Tighten the stored AABB. Preserve the existing CategoryMask on both the stored state and
-            // the index entry (forward-safe for Phase 3 archetype-level category masks).
-            // We mutate `fresh` in place with the preserved mask, then write the single value to both
-            // the in-memory ClusterAabbs entry and the per-cell index SoA row — avoids a redundant copy.
-            fresh.CategoryMask = slot.DynamicIndex.CategoryMasks[indexSlot];
-            stored = fresh;
-            slot.DynamicIndex.UpdateAt(indexSlot, in fresh);
-            TyphonEvent.EmitSpatialCellIndexUpdate(cellKey, indexSlot);
-
-            // Outlier extent check — only fires in the rare "accumulated drift" case. The AABB just-recomputed fits all live entities exactly, so the
-            // extent comparison is trivially correct.
-            if (outlierGuardActive && ((fresh.MaxX - fresh.MinX) > maxExtent || (fresh.MaxY - fresh.MinY) > maxExtent))
-            {
-                FlagOutliersForMigration(chunkId, cellKey, grid, ref accessor);
-            }
+            ClusterProcessBitmap[wordIdx] = 0;
         }
     }
 
@@ -1315,7 +2012,8 @@ internal sealed unsafe class ArchetypeClusterState
     /// migrations are drained on the next tick (not this one), because this runs AFTER <see cref="DatabaseEngine.ExecuteMigrations"/> in the tick fence
     /// order. That one-tick lag is the "safety valve, not a common case" note from the design doc.
     /// </remarks>
-    private void FlagOutliersForMigration(int clusterChunkId, int cellKey, SpatialGrid grid, ref ChunkAccessor<PersistentStore> accessor)
+    private void FlagOutliersForMigration(int clusterChunkId, int cellKey, SpatialGrid grid, ref ChunkAccessor<PersistentStore> accessor,
+        List<MigrationRequest> outlierBuffer)
     {
         var ss = SpatialSlot;
         byte* clusterBase = accessor.GetChunkAddress(clusterChunkId);
@@ -1350,7 +2048,9 @@ internal sealed unsafe class ArchetypeClusterState
                 int newCellKey = grid.WorldToCellKey(posX, posY);
                 if (newCellKey != cellKey)
                 {
-                    EnqueueMigration(clusterChunkId, slotIndex, newCellKey);
+                    // Worker-local buffer: caller bulk-appends under _finalizeLock once at slice end. Avoids per-entity lock acquisition (review D-2).
+                    // For serial callers (RecomputeDirtyClusterAabbs whole-archetype wrapper), the buffer is appended without contention.
+                    outlierBuffer.Add(new MigrationRequest(clusterChunkId, slotIndex, newCellKey));
                 }
             }
         }
@@ -1365,6 +2065,7 @@ internal sealed unsafe class ArchetypeClusterState
     {
         EnsurePerCellIndexCapacity(cellKey + 1);
         EnsureClusterSpatialIndexSlotCapacity(clusterChunkId + 1);
+        EnsureClusterWriteBookkeepingCapacity(clusterChunkId + 1);
 
         var slot = PerCellIndex[cellKey];
         if (slot == null)
@@ -1463,6 +2164,55 @@ internal sealed unsafe class ArchetypeClusterState
     }
 
     /// <summary>
+    /// Bulk-append a worker-local outlier-buffer to <see cref="PendingMigrations"/>. Takes <see cref="_finalizeLock"/> once per slice (review D-2).
+    /// Empty buffer = no-op, no lock acquisition.
+    /// </summary>
+    internal void EnqueueMigrationsBulk(List<MigrationRequest> outlierBuffer)
+    {
+        if (outlierBuffer == null || outlierBuffer.Count == 0)
+        {
+            return;
+        }
+
+        ref WaitContext nullCtx = ref Unsafe.NullRef<WaitContext>();
+        _finalizeLock.Lock.EnterExclusiveAccess(ref nullCtx);
+        try
+        {
+            int n = outlierBuffer.Count;
+            if (PendingMigrations == null)
+            {
+                int initCap = Math.Max(16, n);
+                int p = 1;
+                while (p < initCap)
+                {
+                    p <<= 1;
+                }
+
+                PendingMigrations = new MigrationRequest[p];
+            }
+            else if (PendingMigrationCount + n > PendingMigrations.Length)
+            {
+                int newLen = PendingMigrations.Length * 2;
+                while (newLen < PendingMigrationCount + n)
+                {
+                    newLen *= 2;
+                }
+
+                Array.Resize(ref PendingMigrations, newLen);
+            }
+            for (int i = 0; i < n; i++)
+            {
+                PendingMigrations[PendingMigrationCount++] = outlierBuffer[i];
+            }
+        }
+        finally
+        {
+            _finalizeLock.Lock.ExitExclusiveAccess();
+        }
+        outlierBuffer.Clear();
+    }
+
+    /// <summary>
     /// Allocate a new cluster from both segments (lockstep). Initializes to zero and adds to active list.
     /// </summary>
     public int AllocateNewCluster(ChangeSet changeSet)
@@ -1544,37 +2294,90 @@ internal sealed unsafe class ArchetypeClusterState
     }
 
     /// <summary>
-    /// Release a slot in a cluster: clear OccupancyBit, EnabledBits, EntityKey on the primary segment.
-    /// If the cluster becomes empty, free it from both segments.
+    /// Release one occupied slot of a Versioned/Transient mixed cluster on the persistent segment. Atomically clears the slot's OccupancyBit + EnabledBits + EntityKey
+    /// via <see cref="ClearSlotMetadata"/>, maintains the per-cell entity counter when the slot was actually occupied, and — if the slot was the cluster's last occupant —
+    /// either finalises the cluster immediately or defers finalisation to the per-tick fence depending on <paramref name="deferFinalize"/>.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Slot-level work.</b> <see cref="ClearSlotMetadata"/> returns the occupancy bitmap as it was BEFORE the clear, so the method can tell (a) whether the
+    /// slot was actually occupied (no-op release on a free slot is silently absorbed — no cell-count decrement, no drain handling) and (b) whether clearing
+    /// this single bit transitioned the cluster from non-empty to empty in one observation. Cell-entity bookkeeping
+    /// (<see cref="DecrementCellEntityCountOnRelease"/>) fires only on the genuinely-was-occupied path to keep <see cref="CellDescriptor.EntityCount"/>
+    /// consistent with the occupancy bitmaps under repeated-release idempotence.
+    /// </para>
+    /// <para>
+    /// <b>Drain branches.</b> When this release drains the cluster (last bit cleared), the cluster must exit the active set, get removed from its cell's pool
+    /// segment, and have its chunks returned to both <see cref="ClusterSegment"/> and <see cref="TransientSegment"/>. Two paths:
+    /// <list type="bullet">
+    ///   <item><b><paramref name="deferFinalize"/> = false</b> (default — single-threaded callers like <c>Transaction.Destroy</c>): finalise immediately.
+    ///     Safe because no concurrent claimer can CAS a slot back in between our last-bit-clear and the segment free.</item>
+    ///   <item><b><paramref name="deferFinalize"/> = true</b> (parallel-fence migration path, review C-1): record the drained cluster via
+    ///     <see cref="RecordClusterDrain"/> and let <c>FinalizeArchetypeFence</c> do the finalize+free pass after all workers have quiesced. Skipping immediate
+    ///     free closes the race where another worker mid-<c>ClaimSlotInCell</c> has already CAS-claimed a slot in this cluster between our last-bit-clear and
+    ///     any subsequent lock — finalising now would free a chunk the claimer is about to write into.</item>
+    /// </list>
+    /// </para>
+    /// <para>
+    /// <b>Free-list hint.</b> On a release that does NOT drain the cluster, the cluster still has free capacity and is a good candidate for the next claim. If
+    /// <see cref="FreeClusterHead"/> is currently unset (-1), it's biased to this cluster so the next <c>ClaimSlotInCell</c> hits an O(1) lookup. This is a
+    /// hint only — the claim path validates the head still has a free bit before using it.
+    /// </para>
+    /// <para>
+    /// <b>Threading.</b> Caller owns the writer mutex for this <see cref="ArchetypeClusterState"/> when <paramref name="deferFinalize"/> = false. When deferred,
+    /// the caller is the parallel fence path where workers operate on disjoint clusters; <see cref="RecordClusterDrain"/> uses
+    /// <see cref="System.Threading.Interlocked.Increment"/> to reserve a slot in the per-archetype drain list, so concurrent drain records are safe.
+    /// </para>
+    /// </remarks>
+    /// <param name="accessor">Chunk accessor bound to the <see cref="PersistentStore"/> segment — provides the in-memory address of the cluster chunk for
+    /// direct metadata mutation.</param>
+    /// <param name="clusterChunkId">Chunk id of the cluster containing the slot to release.</param>
+    /// <param name="slotIndex">Zero-based index of the slot within the cluster (0..<see cref="ClusterLayout.ClusterSize"/>-1). The slot's occupancy bit,
+    /// enabled bits, and entity key are all cleared.</param>
+    /// <param name="changeSet">Change set threaded through for WAL / dirty-page bookkeeping on the persistent segment writes performed
+    /// by <see cref="ClearSlotMetadata"/>.</param>
     /// <param name="grid">
     /// Optional spatial grid. When non-null <em>and</em> <see cref="ClusterCellMap"/> is populated for the released cluster, this method maintains the cell
-    /// descriptor: <c>EntityCount</c> always decrements, and a going-empty cluster is removed from its cell's pool segment.
+    /// descriptor: <see cref="CellDescriptor.EntityCount"/> always decrements (only on genuinely-was-occupied releases), and a going-empty cluster is removed
+    /// from its cell's pool segment at finalise time. Pass <c>null</c> when the archetype has no spatial slot — the cell bookkeeping is then a no-op.
     /// </param>
-    public void ReleaseSlot(ref ChunkAccessor<PersistentStore> accessor, int clusterChunkId, int slotIndex, ChangeSet changeSet, SpatialGrid grid = null)
+    /// <param name="deferFinalize">
+    /// When <c>true</c>, postpones the drain finalisation (cell removal + active-list eviction + segment free) so the per-tick fence can run it after the
+    /// parallel migration pass completes. Set by the cluster-migration / parallel-fence call sites; default <c>false</c> for single-threaded callers
+    /// (<c>Transaction.Destroy</c>, etc.) that can safely finalise inline.
+    /// </param>
+    public void ReleaseSlot(ref ChunkAccessor<PersistentStore> accessor, int clusterChunkId, int slotIndex, ChangeSet changeSet, SpatialGrid grid = null,
+        bool deferFinalize = false)
     {
         byte* clusterBase = accessor.GetChunkAddress(clusterChunkId, true);
 
-        // Read occupancy BEFORE clearing the slot. This keeps cell.EntityCount correct on double-release (the slot's bit is already zero, so no decrement
-        // should happen).
-        // Phase 1+2 never releases the same slot twice, but the Phase 3 migration fence will batch-release slots and correctness here is worth 3 lines of insurance.
         ulong slotMask = 1UL << slotIndex;
-        bool wasOccupied = (*(ulong*)clusterBase & slotMask) != 0;
-
-        ClearSlotMetadata(clusterBase, slotIndex);
+        ulong prevOccupancy = ClearSlotMetadata(clusterBase, slotIndex);
+        bool wasOccupied = (prevOccupancy & slotMask) != 0;
+        bool clusterDrained = wasOccupied && (prevOccupancy & ~slotMask) == 0;
 
         if (wasOccupied)
         {
             DecrementCellEntityCountOnRelease(grid, clusterChunkId);
         }
 
-        ref ulong occupancy = ref *(ulong*)clusterBase;
-        if (BitOperations.PopCount(occupancy) == 0)
+        if (clusterDrained)
         {
-            FinaliseEmptyClusterCellState(grid, clusterChunkId);
-            RemoveFromActiveList(clusterChunkId);
-            ClusterSegment.FreeChunk(clusterChunkId);
-            TransientSegment?.FreeChunk(clusterChunkId);
+            if (deferFinalize)
+            {
+                // Parallel-fence migration path (review C-1). Defer finalize-and-free to FinalizeArchetypeFence — freeing here would race with a concurrent
+                // ClaimSlotInCell that may have just CAS-claimed a slot in this cluster between our last-bit-clear and any lock acquire. The deferred list is
+                // per-archetype, slot reservation lock-free via Interlocked.Increment.
+                RecordClusterDrain(clusterChunkId);
+            }
+            else
+            {
+                // Single-threaded caller (Transaction.Destroy, etc.) — safe to finalize immediately.
+                FinaliseEmptyClusterCellState(grid, clusterChunkId);
+                RemoveFromActiveList(clusterChunkId);
+                ClusterSegment.FreeChunk(clusterChunkId);
+                TransientSegment?.FreeChunk(clusterChunkId);
+            }
         }
         else if (FreeClusterHead < 0)
         {
@@ -1585,27 +2388,32 @@ internal sealed unsafe class ArchetypeClusterState
     /// <summary>
     /// Release a slot for pure-Transient archetypes (no PersistentStore segment).
     /// </summary>
-    public void ReleaseSlot(ref ChunkAccessor<TransientStore> accessor, int clusterChunkId, int slotIndex, SpatialGrid grid = null)
+    public void ReleaseSlot(ref ChunkAccessor<TransientStore> accessor, int clusterChunkId, int slotIndex, SpatialGrid grid = null, bool deferFinalize = false)
     {
         byte* clusterBase = accessor.GetChunkAddress(clusterChunkId, true);
 
-        // See comment in the PersistentStore overload — read occupancy before clearing.
         ulong slotMask = 1UL << slotIndex;
-        bool wasOccupied = (*(ulong*)clusterBase & slotMask) != 0;
-
-        ClearSlotMetadata(clusterBase, slotIndex);
+        ulong prevOccupancy = ClearSlotMetadata(clusterBase, slotIndex);
+        bool wasOccupied = (prevOccupancy & slotMask) != 0;
+        bool clusterDrained = wasOccupied && (prevOccupancy & ~slotMask) == 0;
 
         if (wasOccupied)
         {
             DecrementCellEntityCountOnRelease(grid, clusterChunkId);
         }
 
-        ref ulong occupancy = ref *(ulong*)clusterBase;
-        if (BitOperations.PopCount(occupancy) == 0)
+        if (clusterDrained)
         {
-            FinaliseEmptyClusterCellState(grid, clusterChunkId);
-            RemoveFromActiveList(clusterChunkId);
-            TransientSegment.FreeChunk(clusterChunkId);
+            if (deferFinalize)
+            {
+                RecordClusterDrain(clusterChunkId);
+            }
+            else
+            {
+                FinaliseEmptyClusterCellState(grid, clusterChunkId);
+                RemoveFromActiveList(clusterChunkId);
+                TransientSegment.FreeChunk(clusterChunkId);
+            }
         }
         else if (FreeClusterHead < 0)
         {
@@ -1625,7 +2433,7 @@ internal sealed unsafe class ArchetypeClusterState
         {
             return;
         }
-        grid.GetCell(cellKey).EntityCount--;
+        Interlocked.Decrement(ref grid.GetCell(cellKey).EntityCount);
     }
 
     /// <summary>Detach an empty cluster from this archetype's per-cell claim list and clear its cell mapping.</summary>
@@ -1640,10 +2448,12 @@ internal sealed unsafe class ArchetypeClusterState
         {
             return;
         }
-        // Issue #229 Q10: per-archetype pool removal. Only decrements the global CellDescriptor.ClusterCount if the pool actually owned this cluster id.
+        // Issue #229 Q10: per-archetype pool removal. Only decrements the global CellState.ClusterCount if the pool actually owned this cluster id.
+        // Called inside the per-archetype _finalizeLock (parallel-fence migration path), so the CellClusterPool mutation is serialized — but the cell
+        // descriptor counter is shared across archetypes, so it still needs Interlocked.
         if (CellClusterPool.RemoveCluster(cellKey, clusterChunkId))
         {
-            grid.GetCell(cellKey).ClusterCount--;
+            Interlocked.Decrement(ref grid.GetCell(cellKey).ClusterCount);
         }
 
         // Issue #230 Phase 1: also remove from the per-cell cluster AABB index and reset the cluster's stored AABB. Runs before we clear ClusterCellMap so
@@ -1657,21 +2467,31 @@ internal sealed unsafe class ArchetypeClusterState
         ClusterCellMap[clusterChunkId] = -1;
     }
 
-    /// <summary>Clear EnabledBits, OccupancyBit, and EntityId for a slot (store-agnostic pointer math).</summary>
-    private void ClearSlotMetadata(byte* clusterBase, int slotIndex)
+    /// <summary>
+    /// Atomically clear EnabledBits, OccupancyBit, and EntityId for a slot (store-agnostic pointer math). Returns the PRE-AND occupancy word so the caller
+    /// can detect "this clear flipped the last bit" via <c>(prev &amp; slotMask) != 0 &amp;&amp; (prev &amp; ~slotMask) == 0</c>. The parallel-fence migration
+    /// path uses this last-bit-wins signal to decide which worker enters the finalize section under <see cref="_finalizeLock"/>.
+    /// </summary>
+    /// <remarks>
+    /// All bit mutations use <see cref="Interlocked.And(ref long, long)"/> so concurrent releases of different slots in the same cluster (parallel workers
+    /// handling cell-partitioned migrations whose sources share a cluster) compose without lost updates. The EntityId scalar write is independent (different
+    /// 8-byte slot per release) so it stays a plain store.
+    /// </remarks>
+    private ulong ClearSlotMetadata(byte* clusterBase, int slotIndex)
     {
-        ulong slotMask = 1UL << slotIndex;
+        long slotMask = 1L << slotIndex;
+        long inverseMask = ~slotMask;
 
         for (int slot = 0; slot < Layout.ComponentCount; slot++)
         {
-            ref ulong enabledBits = ref *(ulong*)(clusterBase + Layout.EnabledBitsOffset(slot));
-            enabledBits &= ~slotMask;
+            Interlocked.And(ref *(long*)(clusterBase + Layout.EnabledBitsOffset(slot)), inverseMask);
         }
 
-        ref ulong occupancy = ref *(ulong*)clusterBase;
-        occupancy &= ~slotMask;
+        ulong prevOccupancy = (ulong)Interlocked.And(ref *(long*)clusterBase, inverseMask);
 
         *(long*)(clusterBase + Layout.EntityIdsOffset + slotIndex * 8) = 0;
+
+        return prevOccupancy;
     }
 
     /// <summary>
@@ -1836,6 +2656,7 @@ internal sealed unsafe class ArchetypeClusterState
     public void InitializeSpatial(ComponentTable[] slotToTable, SpatialGrid grid, int archetypeId = 0)
     {
         ArchetypeId = archetypeId;
+        Grid = grid;
 
         for (int slot = 0; slot < slotToTable.Length; slot++)
         {

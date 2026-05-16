@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Threading;
 using Godot;
 using Typhon.Engine.Profiler;
 using Typhon.Profiler;
@@ -60,6 +61,8 @@ public partial class Main : Node3D
 
     public override void _Ready()
     {
+        Thread.CurrentThread.Name = "Main Thread";
+        
         // Restore last run's window position/size FIRST, before any scene-graph work. Godot's layout pass treats the window
         // dimensions as authoritative; changing them later would cascade into HUD anchor recalculations.
         LoadWindowState();

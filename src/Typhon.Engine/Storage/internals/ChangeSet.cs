@@ -102,6 +102,11 @@ public class ChangeSet
     /// </summary>
     public void ReleaseExcessDirtyMarks()
     {
+        if (_changedMemoryPageIndices.Count == 0)
+        {
+            return;
+        }
+
         foreach (var memPageIndex in _changedMemoryPageIndices)
         {
             _owner.DecrementDirtyToMin(memPageIndex, 1);
@@ -125,6 +130,19 @@ public class ChangeSet
             _owner.DecrementDirty(memPageIndex);
         }
         _changedMemoryPageIndices.Clear();
+        _saveTask = null;
+    }
+
+    /// <summary>
+    /// Clear ChangeSet state for reuse via <see cref="PagedMMF.RentChangeSet"/> / <see cref="PagedMMF.ReturnChangeSet"/>.
+    /// Caller must guarantee dirty marks have already been resolved (via <see cref="SaveChangesAsync"/> /
+    /// <see cref="ReleaseExcessDirtyMarks"/> / <see cref="Reset"/>) before clearing — this only zeroes the local
+    /// tracking buffers without touching DirtyCounter / ACW / SlotRefCount on owner pages.
+    /// </summary>
+    internal void ClearForReuse()
+    {
+        _changedMemoryPageIndices.Clear();
+        _deferredEvictions?.Clear();
         _saveTask = null;
     }
 }

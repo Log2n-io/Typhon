@@ -88,12 +88,18 @@ public sealed class FixturesController(SessionManager sessions) : ControllerBase
         //                                Playwright cases (no bars; archetype tables empty).
         //   "with-archetype-touches"   — extends the above with 2 archetypes + per-tick SchedulerSystemArchetype events,
         //                                so the Data Flow timeline can render bars (#327 Phase D bar-click + hover canary).
+        //   "with-context-switches"    — per-tick ThreadContextSwitch (kind 254) records, so the off-CPU overlay has
+        //                                data to render (off-CPU Playwright canary).
         //   default                    — minimal trace (no systems, no archetypes); for the open-trace flow canary.
         // tickCount/instantsPerTick are ignored for the typed variants; their builders hardcode the layout.
         string path;
         if (string.Equals(req?.Variant, "with-archetype-touches", StringComparison.OrdinalIgnoreCase))
         {
             path = TraceFixtureBuilder.BuildTraceWithArchetypeTouches(outDir);
+        }
+        else if (string.Equals(req?.Variant, "with-context-switches", StringComparison.OrdinalIgnoreCase))
+        {
+            path = TraceFixtureBuilder.BuildTraceWithContextSwitches(outDir);
         }
         else if (string.Equals(req?.Variant, "with-access-declarations", StringComparison.OrdinalIgnoreCase))
         {

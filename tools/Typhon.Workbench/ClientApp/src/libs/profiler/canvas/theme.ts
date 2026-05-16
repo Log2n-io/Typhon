@@ -52,6 +52,7 @@ export interface StudioTheme {
   textOnLightBar: string;        // near-black — pair with light bars via per-bar luminance pick
   textOnDarkBar: string;         // near-white — pair with dark bars via per-bar luminance pick
   coalescedText: string;         // "N spans — zoom in" label on striped block
+  idleBar: string;               // Scheduler.Worker.Idle / BetweenTick fill — deliberately muted
 
   // Layer 2c — gauge chrome (added in Phase 2c)
   gaugeNoDataBg: string;         // "no data" background fill inside a gauge track
@@ -73,7 +74,27 @@ export interface StudioTheme {
   spans: readonly string[];
   gauges: readonly string[];
   timelineBands: readonly string[];
+  /**
+   * Off-CPU overlay palette, indexed by `OffCpuCategory` (SyncWait=0, Preempted=1, QuantumEnd=2, Paging=3, UserWait=4,
+   * Idle=5, Other=6). Drawn at low alpha as a band over the thread lane, so the hues are picked saturated enough to read
+   * through the compositing. Identity — a wait-reason category's color is its identity, stable across light/dark.
+   */
+  offCpu: readonly string[];
 }
+
+/**
+ * Off-CPU category palette — index matches `OffCpuCategory`. Distinct hues; saturated because the renderer composites
+ * them at ~0.32 alpha over the lane. Idle is a neutral grey (an idle hand-off is "nothing happened", visually quiet).
+ */
+const OFF_CPU_PALETTE: readonly string[] = [
+  '#5b8def', // 0 SyncWait    — blue
+  '#e8893b', // 1 Preempted   — orange
+  '#a87fd6', // 2 QuantumEnd  — purple
+  '#3bb7a8', // 3 Paging      — teal
+  '#c2b34a', // 4 UserWait    — ochre
+  '#6b7280', // 5 Idle        — neutral grey
+  '#8a8f99', // 6 Other       — dim grey-blue
+];
 
 /**
  * Theme-adaptive chrome — two parallel tables keyed by dark/light. Picked by `getStudioThemeTokens` based on
@@ -95,6 +116,7 @@ interface AdaptiveTheme {
   textOnLightBar: string;
   textOnDarkBar: string;
   coalescedText: string;
+  idleBar: string;
   gaugeNoDataBg: string;
   gaugeLiveLine: string;
   gaugeSparkline: string;
@@ -124,6 +146,7 @@ const ADAPTIVE_DARK: AdaptiveTheme = {
   textOnLightBar: '#000',
   textOnDarkBar: '#eee',
   coalescedText: '#ccc',
+  idleBar: '#3f3f46',            // zinc-700 — recedes against the dark navy backdrop
   // Gauge chrome — dark values match the old gaugeDraw.ts literals.
   gaugeNoDataBg: 'rgba(180, 180, 200, 0.4)',
   gaugeLiveLine: 'rgba(170, 170, 170, 0.9)',
@@ -159,6 +182,7 @@ const ADAPTIVE_LIGHT: AdaptiveTheme = {
   textOnLightBar: '#000',
   textOnDarkBar: '#eee',
   coalescedText: '#475569',
+  idleBar: '#cbd5e1',            // slate-300 — neutral grey that recedes against the off-white card
   // Gauge chrome — light values use slate-scale neutrals so the muted greys of the old dark
   // values stay recognisable but read cleanly over off-white card bg.
   gaugeNoDataBg: 'rgba(148, 163, 184, 0.35)',
@@ -224,6 +248,7 @@ function buildTheme(isDark: boolean, cs: CSSStyleDeclaration | null): StudioThem
     textOnLightBar: adaptive.textOnLightBar,
     textOnDarkBar: adaptive.textOnDarkBar,
     coalescedText: adaptive.coalescedText,
+    idleBar: adaptive.idleBar,
     gaugeNoDataBg: adaptive.gaugeNoDataBg,
     gaugeLiveLine: adaptive.gaugeLiveLine,
     gaugeSparkline: adaptive.gaugeSparkline,
@@ -245,5 +270,6 @@ function buildTheme(isDark: boolean, cs: CSSStyleDeclaration | null): StudioThem
     spans: isDark ? SPAN_PALETTE : SPAN_PALETTE_LIGHT,
     gauges: GAUGE_PALETTE,
     timelineBands: isDark ? TIMELINE_PALETTE : TIMELINE_PALETTE_LIGHT,
+    offCpu: OFF_CPU_PALETTE,
   };
 }

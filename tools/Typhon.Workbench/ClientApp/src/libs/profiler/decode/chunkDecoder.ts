@@ -87,6 +87,8 @@ function isInstantKind(v: number): boolean {
   //   243 (RuntimePhaseSpan)        — SPAN, falls through.
   //   244 (QueueTickEnd)            — instant rollup, hand-coded codec, no span-header extension.
   if (v === 242 || v === 244) return true;
+  // OS thread scheduling (#ETW) — 254 (ThreadContextSwitch) is instant-shaped: 12-byte header + 13-byte payload, no span extension.
+  if (v === 254) return true;
   return false;
 }
 
@@ -237,6 +239,22 @@ function decodeInstant(
       return {
         kind, threadSlot, tickNumber, timestampUs,
         changeCount: reader.readI32(payloadOffset + 8),
+      };
+
+    case TraceEventKind.ThreadContextSwitch:
+      // OS thread context-switch — one ON-CPU slice. 13-byte payload, mirrors `ThreadSchedulingEvents.cs`:
+      //   u8 targetSlotIdx, u8 processorNumber, u8 waitReason, u8 threadState, u8 gettingIdle,
+      //   u32 durationQpc @ +5, u32 readyTimeQpc @ +9.
+      // durationQpc / readyTimeQpc are raw QPC ticks → microseconds via ticksPerUs (QPC == the trace clock).
+      return {
+        kind, threadSlot, tickNumber, timestampUs,
+        targetSlotIdx: reader.readU8(payloadOffset),
+        processorNumber: reader.readU8(payloadOffset + 1),
+        waitReason: reader.readU8(payloadOffset + 2),
+        threadState: reader.readU8(payloadOffset + 3),
+        gettingIdle: reader.readU8(payloadOffset + 4) !== 0,
+        durationUs: reader.readU32(payloadOffset + 5) / ticksPerUs,
+        readyTimeUs: reader.readU32(payloadOffset + 9) / ticksPerUs,
       };
 
     default:

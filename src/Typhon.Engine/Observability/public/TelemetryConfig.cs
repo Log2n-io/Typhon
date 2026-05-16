@@ -438,6 +438,30 @@ public static class TelemetryConfig
     public static readonly bool RuntimeSubscriptionOutputCleanupActive;
     public static readonly bool RuntimeSubscriptionDeltaDirtyBitmapSupplementActive;
 
+    // Runtime:WriteTickFence subtree — per-table (251-253) + per-archetype cluster (254-256) fence spans
+    public static readonly bool RuntimeWriteTickFenceActive;
+    public static readonly bool RuntimeWriteTickFenceTableActive;
+    public static readonly bool RuntimeWriteTickFenceShadowActive;
+    public static readonly bool RuntimeWriteTickFenceSpatialActive;
+    public static readonly bool RuntimeWriteTickFenceClusterActive;
+    public static readonly bool RuntimeWriteTickFenceClusterShadowActive;
+    public static readonly bool RuntimeWriteTickFenceClusterSpatialActive;
+
+    /// <summary>
+    /// Whether OS thread scheduling tracing is requested by configuration. Reads from
+    /// <c>Typhon:Profiler:Runtime:ThreadScheduling:Enabled</c>. When enabled (Windows-only),
+    /// <c>EtwSchedulingPump</c> opens the NT Kernel Logger and emits one <see cref="Typhon.Profiler.TraceEventKind.ThreadContextSwitch"/> record per on-CPU
+    /// slice for every Typhon-registered OS thread. Records carry duration + wait reason so the Workbench can render off-CPU gaps with their cause overlaid
+    /// on the affected thread's lane.
+    /// </summary>
+    /// <remarks>
+    /// <b>Privileged operation:</b> opening the NT Kernel Logger requires Administrator or Performance Log Users membership. The pump catches and logs
+    /// UnauthorizedAccessException without crashing — operators see a one-time warning that scheduling data won't be available for this session.
+    /// <b>Singleton:</b> only one process per machine can own the NT Kernel Logger;
+    /// PerfView/WPR/xperf will collide and surface a clear error.
+    /// </remarks>
+    public static readonly bool RuntimeThreadSchedulingActive;
+
     // ═══════════════════════════════════════════════════════════════════════════
     // STORAGE & MEMORY TRACING (Phase 5 — see 05-storage-memory.md)
     // ═══════════════════════════════════════════════════════════════════════════
@@ -1040,6 +1064,25 @@ public static class TelemetryConfig
                     new Node("Cleanup"),
                 ]),
             ]),
+            // Per-table detail spans inside WriteTickFenceCore — kinds 251-253.
+            // Surfaces "which table dominated the fence wall?" + Shadow/Spatial split, so the upcoming parallelize-the-fence work has data to act on.
+            // Default-off; opt in via Profiler:Runtime:WriteTickFence:Enabled = true.
+            new Node("WriteTickFence",
+            [
+                new Node("Table"),
+                new Node("Shadow"),
+                new Node("Spatial"),
+                // Cluster-scope mirror of the above — covers WriteClusterTickFence (the per-archetype loop in DatabaseEngine.cs that does the heavy work for
+                // cluster-backed archetypes like AntHill's ants).
+                new Node("Cluster",
+                [
+                    new Node("Shadow"),
+                    new Node("Spatial"),
+                ]),
+            ]),
+            // OS thread scheduling — Windows-only, requires admin. Enables EtwSchedulingPump which observes context-switches for Typhon-registered threads and
+            // emits one record per on-CPU slice (kind 254). Off by default — opt in via Profiler:Runtime:ThreadScheduling:Enabled = true.
+            new Node("ThreadScheduling"),
         ]);
         var runtimeRootExplicit = ReadBool(config, "Typhon:Profiler:Runtime:Enabled", false);
         var runtimeRootEffective = Enabled && runtimeRootExplicit;
@@ -1064,6 +1107,17 @@ public static class TelemetryConfig
         RuntimeSubscriptionDeltaDirtyBitmapSupplementActive = runtimeMap["Runtime:Subscription:Delta:DirtyBitmapSupplement"];
         RuntimeSubscriptionTransitionBeginSyncActive        = runtimeMap["Runtime:Subscription:Transition:BeginSync"];
         RuntimeSubscriptionOutputCleanupActive              = runtimeMap["Runtime:Subscription:Output:Cleanup"];
+
+        // WriteTickFence detail leaves (kinds 251-253 per-table, 254-256 per-archetype cluster)
+        RuntimeWriteTickFenceActive               = runtimeMap["Runtime:WriteTickFence"];
+        RuntimeWriteTickFenceTableActive          = runtimeMap["Runtime:WriteTickFence:Table"];
+        RuntimeWriteTickFenceShadowActive         = runtimeMap["Runtime:WriteTickFence:Shadow"];
+        RuntimeWriteTickFenceSpatialActive        = runtimeMap["Runtime:WriteTickFence:Spatial"];
+        RuntimeWriteTickFenceClusterActive        = runtimeMap["Runtime:WriteTickFence:Cluster"];
+        RuntimeWriteTickFenceClusterShadowActive  = runtimeMap["Runtime:WriteTickFence:Cluster:Shadow"];
+        RuntimeWriteTickFenceClusterSpatialActive = runtimeMap["Runtime:WriteTickFence:Cluster:Spatial"];
+
+        RuntimeThreadSchedulingActive = runtimeMap["Runtime:ThreadScheduling"];
 
         // ─── Storage subtree (Phase 5 final shape) ─────────────────────────────
         // Greenfield deeper subtree; the existing per-kind suppression list still controls

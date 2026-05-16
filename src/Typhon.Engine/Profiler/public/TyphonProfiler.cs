@@ -38,6 +38,7 @@ public static class TyphonProfiler
     private static Thread[] ExporterThreads;
     private static CancellationTokenSource ExporterCts;
     private static GcTracingHost GcTracing;
+    private static EtwSchedulingPump EtwSchedulingPumpInstance;
     private static bool Running;
 
     // Process-exit safety net — fields are non-null while hooks are wired (Running == true). Both invoke Stop()
@@ -160,6 +161,15 @@ public static class TyphonProfiler
                 GcTracing.Start();
             }
 
+            // Opt-in OS thread scheduling tracing (Windows-only, requires admin). Started after the consumer is up so/ events emitted by the pump (one record
+            // per ON-CPU slice for Typhon-registered threads) flow through the normal SPSC ring → consumer → exporter pipeline. The pump short-circuits with
+            // a stderr warning on non-Windows or when the NT Kernel Logger can't be opened (insufficient privileges or another tool owns it).
+            if (TelemetryConfig.RuntimeThreadSchedulingActive)
+            {
+                EtwSchedulingPumpInstance = new EtwSchedulingPump();
+                EtwSchedulingPumpInstance.Start();
+            }
+
             // Snapshot the host's bootstrap thread id so AssignClaim can tag its slot with ThreadKind.Main.
             // Set BEFORE Running flips so the first emit-from-this-thread (which can happen synchronously inside
             // the consumer/exporter Init paths above is in theory possible — defensive) sees a populated id.
@@ -224,7 +234,15 @@ public static class TyphonProfiler
             {
                 return;
             }
-            try { Stop(); } catch { }
+
+            try
+            {
+                Stop();
+            }
+            catch
+            {
+                // ignored
+            }
         };
 
         AppDomain.CurrentDomain.ProcessExit += s_processExitHandler;
@@ -257,6 +275,7 @@ public static class TyphonProfiler
         CancellationTokenSource ctsToCancel;
         List<IProfilerExporter> exportersToFlush;
         GcTracingHost gcTracingToDispose;
+        EtwSchedulingPump etwPumpToDispose;
 
         lock (LifecycleLock)
         {
@@ -270,11 +289,13 @@ public static class TyphonProfiler
             ctsToCancel = ExporterCts;
             exportersToFlush = consumerToTearDown.Exporters;
             gcTracingToDispose = GcTracing;
+            etwPumpToDispose = EtwSchedulingPumpInstance;
 
             Consumer = null;
             ExporterThreads = null;
             ExporterCts = null;
             GcTracing = null;
+            EtwSchedulingPumpInstance = null;
             Running = false;
             MainThreadId = 0;
 
@@ -288,6 +309,11 @@ public static class TyphonProfiler
         // Detach GC tracing first so the CLR stops delivering events before we start tearing down the consumer side.
         // Stop() drains the ingestion thread's final records into the ring so the consumer's FinalDrainAndComplete picks them up.
         gcTracingToDispose?.Dispose();
+
+        // Stop the ETW pump before the consumer drains: disposing the session unblocks Process() so the pump thread exits cleanly, and any in-flight cswitch
+        // records already in the pump's ring buffer get picked up by the FinalDrainAndComplete pass below. The Dispose call blocks on the pump thread's Join
+        // (capped at 2s).
+        etwPumpToDispose?.Dispose();
 
         // ── Tear-down outside the lock so blocked operations don't deadlock with future Start/Stop callers ──
 

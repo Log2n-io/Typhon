@@ -12,7 +12,7 @@ namespace Typhon.Engine.Internals;
 /// conflated cluster chunk IDs that are only meaningful inside a single archetype's <see cref="ArchetypeClusterState.ClusterSegment"/>. Under Q10 the pool
 /// is instead owned by each <see cref="ArchetypeClusterState"/> (one instance per cluster-spatial archetype) so two archetypes sharing the same grid cell
 /// no longer collide on chunk IDs. The pool is now fully self-contained — it owns its own per-cell head / count / capacity arrays and does not touch
-/// <see cref="CellDescriptor"/> at all. Global per-cell totals (<see cref="CellDescriptor.ClusterCount"/> and <see cref="CellDescriptor.EntityCount"/>)
+/// <see cref="CellState"/> at all. Global per-cell totals (<see cref="CellState.ClusterCount"/> and <see cref="CellState.EntityCount"/>)
 /// are maintained separately by the archetype state call sites.</para>
 /// <para>Growth strategy: each cell starts with zero capacity. On the first insert we allocate a small tail segment (capacity 4) at the current
 /// <see cref="_tail"/> offset and record its head. When that segment fills up we allocate a new tail segment at 2× capacity, copy the old entries across,
@@ -129,9 +129,14 @@ internal sealed class CellClusterPool
 
     private void GrowCellSegment(int cellKey, ref int capacity)
     {
-        int newCapacity = capacity == 0 ? 4 : capacity * 2;
-        EnsurePoolCapacity(_tail + newCapacity);
+        // Compute the new capacity and the resulting pool tail in long arithmetic. Both capacity*2 and _tail+newCapacity can overflow int on a
+        // pathologically large pool; EnsurePoolCapacity validates the long total against Array.MaxLength before anything is narrowed back to int.
+        long newCapacityLong = capacity == 0 ? 4L : (long)capacity * 2;
+        long requiredLong = _tail + newCapacityLong;
+        EnsurePoolCapacity(requiredLong);
 
+        // EnsurePoolCapacity returned without throwing ⇒ requiredLong <= Array.MaxLength, so both newCapacity and the updated _tail fit in int.
+        int newCapacity = (int)newCapacityLong;
         int newHead = _tail;
         int currentCount = _cellCounts[cellKey];
         if (currentCount > 0)
@@ -146,20 +151,23 @@ internal sealed class CellClusterPool
         capacity = newCapacity;
     }
 
-    private void EnsurePoolCapacity(int required)
+    private void EnsurePoolCapacity(long required)
     {
         if (required <= _pool.Length)
         {
             return;
         }
+        // .NET arrays cannot exceed Array.MaxLength (~2.147 B for an int[]) — well below int.MaxValue. Guard against it here with a clear error
+        // instead of letting Array.Resize throw a generic OutOfMemoryException further down. This is the reachable form of the check (the old
+        // `newSize == int.MaxValue && newSize < required` guard was dead: an int `required` can never exceed int.MaxValue).
+        if (required > Array.MaxLength)
+        {
+            throw new OutOfMemoryException($"CellClusterPool capacity ({required}) exceeds the maximum array length ({Array.MaxLength}).");
+        }
         int newSize = _pool.Length;
         while (newSize < required)
         {
-            newSize = (int)Math.Min((long)newSize * 2, int.MaxValue);
-            if (newSize == int.MaxValue && newSize < required)
-            {
-                throw new OutOfMemoryException($"CellClusterPool capacity ({required}) exceeds int.MaxValue.");
-            }
+            newSize = (int)Math.Min((long)newSize * 2, Array.MaxLength);
         }
         Array.Resize(ref _pool, newSize);
     }

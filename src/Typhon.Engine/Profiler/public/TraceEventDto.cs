@@ -23,11 +23,14 @@ namespace Typhon.Profiler.Events;
 /// tests and in viewer code that wants to construct minor variants of an event for display.
 /// </para>
 /// </remarks>
-// OtherTraceEventDto isn't a generated DTO so the generator-emitted polymorphism partial doesn't list it.
-// Register it manually here so the JsonPolymorphic resolver has it in its derived-type set — without this,
-// any record that decodes to OtherTraceEventDto (instants, forward-compat) throws NotSupportedException at
-// serialization time.
+// Hand-written DTOs the generator-emitted polymorphism partial (TraceEventDto.Polymorphism.g.cs) does NOT
+// list — they are decoded via hand-glue codecs rather than [TraceEvent]-decorated ref structs. Register them
+// manually here so the JsonPolymorphic resolver has them in its derived-type set; without this, any record
+// that decodes to one of these throws NotSupportedException at serialization time (e.g. the /decoded endpoint).
+// The discriminator value mirrors the generator's convention: the camelCase TraceEventKind name.
 [System.Text.Json.Serialization.JsonDerivedType(typeof(OtherTraceEventDto), "other")]
+[System.Text.Json.Serialization.JsonDerivedType(typeof(QueryDefinitionDescribeEventDto), "queryDefinitionDescribe")]
+[System.Text.Json.Serialization.JsonDerivedType(typeof(QueryArgsEventDto), "queryArgs")]
 public abstract partial record TraceEventDto
 {
     /// <summary>

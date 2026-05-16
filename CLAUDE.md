@@ -1,58 +1,54 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Be CONCISE in your answer, each word count. Dont elaborate or explain unless I ask you to or you think it's primordial for my understanding.
 
 ## Opinion vs Action
 
 When the user asks for your opinion on a design choice, code approach, or any topic — give your opinion only and challenge the user on their choices. Do NOT edit files or make changes; wait for explicit instructions to proceed.
 
-## Key Documentation Resources
+## Documentation is the source of truth — read it before reasoning
 
-Typhon maintains comprehensive documentation in the `claude/` directory.
-Use these resources to understand architecture, design rationale, and development workflow.
-When working on a new idea, always start by reading relevant documents in `claude/overview`, you can also read files in `claude/design` to get more context of existing features and APIs.
-Architecture Design Records are located in `claude/adr`, use it when designing new code.
-To estimate the CPU time taken by a given algorithm, base yourself on `claude/design/cpu-timings.md`.
+Typhon has comprehensive design documentation in `claude/`. Code reflects intent; docs explain it. For any non-trivial task — designing, analyzing, diagnosing, refactoring, gap-assessing, reviewing, or answering "how does X work?" — read the relevant docs FIRST, then read code to verify.
+
+**When to consult docs (not exhaustive):**
+- Understanding any subsystem's mechanics or invariants → `claude/overview/`
+- Designing a new feature or fix → `claude/design/<area>/` + relevant `claude/adr/`
+- Analyzing existing behavior, doing gap assessments, planning refactors → both
+- Checking a correctness invariant → `claude/rules/`
+- Estimating CPU cost of an algorithm → `claude/design/cpu-timings.md`
+- Glossary / terminology → `claude/design/glossary.md`
+
+**What counts as "trivial" (docs not required):** single-line fixes, typo corrections, well-scoped test additions, mechanical refactors that don't change behavior.
+
+**Red flags that mean STOP and read docs first:**
+- "I'll just read the code to figure it out"
+- "This feels like a continuation of what I was doing" (task type may have shifted from implement → analyze/design)
+- "I have enough context to answer this from memory"
+- Any task using words like *analyze, diagnose, design, assess, audit, review, refactor, propose*
+
+Never deviate from established specs without explicitly noting the deviation and getting user approval.
 
 > **Separate git repo:** The `claude/` directory is its own nested git repository. To commit or perform any git operations on documentation files, you must `cd claude/` first. Running `git status` from the Typhon root will not show changes to `claude/` files.
 
 ## Project Overview
 Typhon is a real-time, low-latency ACID database engine with microsecond-level performance targets, using an ECS architecture with MVCC snapshot isolation.
 
-### Design Doc Alignment
-Before proposing implementations or design changes, ALWAYS read the relevant existing design documents first (in `claude/design/`) and verify alignment. 
-Never deviate from established specs without explicitly noting the deviation and getting user approval.
-
 ### Quick Navigation
 
-| When You Need... | Go To | Key Contents |
-|------------------|-------|--------------|
-| **How the engine works** | `claude/overview/` | 11-part architecture guide covering all subsystems |
-| **Why a decision was made** | `claude/adr/` | 30 Architecture Decision Records with rationale |
+| When You Need... | Go To | Key Contents                                                    |
+|------------------|-------|-----------------------------------------------------------------|
+| **How the engine works** | `claude/overview/` | 13-part architecture guide covering all subsystems              |
+| **Feature designs & docs** | `claude/design/` | SOURCE OF TRUTH, USE IT!                                        |
+| **Why a decision was made** | `claude/adr/` | 50+ Architecture Decision Records with rationale                |
 | **What must always hold** | `claude/rules/` | Correctness invariants by domain (WAL, checkpoint, page safety) |
-| **Current priorities** | [GitHub Project](https://github.com/users/nockawa/projects/7) | Work tracking, status, roadmap |
-| **Feature designs & docs** | `claude/design/` | Implementation specs and API docs (stay here after implementation) |
-| **Deep research** | `claude/research/` | Analysis studies (e.g., timeout patterns, query systems) |
-| **Document workflows** | `claude/CLAUDE.md` | Lifecycle, templates, trigger phrases |
+| **Current priorities** | [GitHub Project](https://github.com/users/nockawa/projects/7) | Work tracking, status, roadmap                                  |
+| **Deep research** | `claude/research/` | Analysis studies (e.g., timeout patterns, query systems)        |
+| **Document workflows** | `claude/CLAUDE.md` | Lifecycle, templates, trigger phrases                           |
 
 ### Architecture Overview Series
 
-The `claude/overview/` directory is the **authoritative architectural reference**:
+The `claude/overview/` directory is the **authoritative architectural reference**, use it to asses which other md doc to search and read, which folders of the typhon.engine project you need to read the code from to understand what is already there. 
 
-| # | Document | Focus |
-|---|----------|-------|
-| 01 | [Concurrency](claude/overview/01-concurrency.md) | AccessControl, latches, deadlines, thread safety |
-| 02 | [Execution](claude/overview/02-execution.md) | UnitOfWork, durability modes, commit path |
-| 03 | [Storage](claude/overview/03-storage.md) | PagedMMF, page cache, segments, I/O |
-| 04 | [Data](claude/overview/04-data.md) | MVCC, ComponentTable, indexes, transactions |
-| 05 | [Query](claude/overview/05-query.md) | Query parsing, filtering, sorting |
-| 06 | [Durability](claude/overview/06-durability.md) | WAL, crash recovery, checkpoints |
-| 07 | [Backup](claude/overview/07-backup.md) | Incremental backup, restore |
-| 08 | [Resources](claude/overview/08-resources.md) | Memory budgets, resource graph |
-| 09 | [Observability](claude/overview/09-observability.md) | Telemetry, metrics, diagnostics |
-| 10 | [Errors](claude/overview/10-errors.md) | Error model, exception hierarchy |
-| 11 | [Utilities](claude/overview/11-utilities.md) | Allocators, disk management, shared utilities |
-| 13 | [Runtime](claude/overview/13-runtime.md) | DagScheduler, system types, parallel dispatch, subscriptions, overload |
 
 ### Correctness Rules
 
@@ -327,6 +323,6 @@ This project uses a structured document lifecycle in `claude/`. Documents progre
 ideas/ → research/ → design/ → archive/
 ```
 
-**When creating documents**, Claude asks for the category location (e.g., `database-engine/`, `persistence/`) unless specified explicitly.
+**When creating documents**, Claude asks for the category location (e.g., `Ecs/`, `Spatial/`, `Indexing/`) unless specified explicitly. Categories use PascalCase mirroring `src/Typhon.Engine/` — see [`claude/CLAUDE.md`](claude/CLAUDE.md) for the convention.
 
-For trigger phrases, templates, directory conventions, and workflows, see [`claude/README.md`](claude/README.md).
+For trigger phrases, templates, directory conventions, and workflows, see [`claude/CLAUDE.md`](claude/CLAUDE.md).

@@ -194,16 +194,20 @@ function Invoke-Start {
         -WindowStyle Hidden `
         -PassThru
 
+    # Cold dotnet+orval+vite build runs ~28-30 s; Kestrel needs a few more seconds after that
+    # to actually bind. 90 s leaves comfortable headroom for cold caches while still failing
+    # fast on a genuine hang.
+    $bindTimeoutSec = 90
     Write-Host "launching: Kestrel pid $($kestrel.Id) + Vite pid $($vite.Id)"
-    Write-Host 'waiting for ports to bind (timeout 30 s)...'
+    Write-Host "waiting for ports to bind (timeout $bindTimeoutSec s)..."
 
     # try/finally ensures child processes are killed if Ctrl+C is pressed during the wait loop.
     # The children no longer receive the signal themselves (detached console), so this script
     # is responsible for cleanup on interruption.
     $startupComplete = $false
     try {
-        $kBound = Wait-PortBound 5200 30
-        $vBound = Wait-PortBound 5173 30
+        $kBound = Wait-PortBound 5200 $bindTimeoutSec
+        $vBound = Wait-PortBound 5173 $bindTimeoutSec
 
         if (-not ($kBound -and $vBound)) {
             Write-Host 'ERROR: timeout waiting for binding'

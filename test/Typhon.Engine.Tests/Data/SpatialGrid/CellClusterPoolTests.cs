@@ -3,7 +3,7 @@ using NUnit.Framework;
 namespace Typhon.Engine.Tests;
 
 // Issue #229 Q10 resolution: CellClusterPool is now a self-contained data structure owned by each ArchetypeClusterState. The API no longer takes a
-// `ref CellDescriptor` — heads / counts / capacities all live on the pool itself so N archetypes sharing a grid never share pool state.
+// `ref CellState` — heads / counts / capacities all live on the pool itself so N archetypes sharing a grid never share pool state.
 [TestFixture]
 class CellClusterPoolTests
 {

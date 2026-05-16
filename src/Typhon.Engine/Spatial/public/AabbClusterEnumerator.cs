@@ -230,7 +230,7 @@ public unsafe ref struct AabbClusterEnumerator
                 }
 
                 long entityId = *(long*)(_currentClusterBase + _state.Layout.EntityIdsOffset + slot * 8);
-                _current = new ClusterSpatialQueryResult(entityId, _currentClusterChunkId, slot, distSq);
+                _current = new ClusterSpatialQueryResult(entityId, _currentClusterChunkId, slot, eMinX, eMinY, eMinZ, eMaxX, eMaxY, eMaxZ, distSq);
                 return true;
             }
 

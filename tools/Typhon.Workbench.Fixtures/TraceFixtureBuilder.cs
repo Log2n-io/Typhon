@@ -346,6 +346,90 @@ public static class TraceFixtureBuilder
     }
 
     /// <summary>
+    /// Build a trace whose ticks carry <see cref="TraceEventKind.ThreadContextSwitch"/> (kind 254) records — one
+    /// ON-CPU slice each — so the Workbench off-CPU overlay has data to render. Each tick emits four slices on
+    /// thread slot 0, spaced so three off-CPU GAPS fall between them; the gaps cross categories (QuantumEnd /
+    /// SyncWait / Preempted) so the colour mapping is exercised too. Used by the off-CPU Playwright canary and
+    /// the trace-mode round-trip server tests.
+    /// </summary>
+    public static string BuildTraceWithContextSwitches(string directory, int tickCount = 4)
+    {
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, $"fixture-cswitch-{Guid.NewGuid():N}.typhon-trace");
+
+        using var fs = File.Create(path);
+        using var writer = new TraceFileWriter(fs);
+        writer.WriteHeader(in DefaultHeader);
+        writer.WriteSystemDefinitions([]);
+        writer.WriteArchetypes([]);
+        writer.WriteComponentTypes([]);
+        writer.WritePhases([]);
+        writer.WriteEmptyStaticStructures();
+
+        // Per-tick layout: TickStart + 4× ThreadContextSwitch (25 B each) + TickEnd. The four slices start at
+        // tick-local offsets 0/20/40/60 (raw ticks) with a 2-tick ON-CPU duration, so the gaps [2,20], [22,40],
+        // [42,60] become three off-CPU intervals. Wait reasons rotate across categories.
+        const int tickStartSize = CommonHeaderSize;
+        const int cswitchSize = CommonHeaderSize + 13;
+        const int tickEndSize = CommonHeaderSize + 2;
+        const int slicesPerTick = 4;
+        byte[] waitReasons = [30, 7, 32, 0]; // QuantumEnd, SyncWait (WrExecutive), Preempted, SyncWait (Executive)
+
+        var totalRecords = tickCount * (2 + slicesPerTick);
+        var blockSize = tickCount * (tickStartSize + slicesPerTick * cswitchSize + tickEndSize);
+        var block = new byte[blockSize];
+        long ts = 100;
+        var offset = 0;
+        for (var t = 0; t < tickCount; t++)
+        {
+            WriteRecordHeader(block.AsSpan(offset), tickStartSize, TraceEventKind.TickStart, ts);
+            offset += tickStartSize;
+            var tickBaseTs = ts;
+            ts++;
+
+            for (var s = 0; s < slicesPerTick; s++)
+            {
+                var sliceTs = tickBaseTs + s * 20;
+                WriteContextSwitchEvent(block.AsSpan(offset, cswitchSize), startTs: sliceTs, targetSlotIdx: 0,
+                    processorNumber: (byte)(s & 3), waitReason: waitReasons[s], threadState: 5,
+                    gettingIdle: false, durationQpc: 2, readyTimeQpc: (uint)(s + 1));
+                offset += cswitchSize;
+            }
+            ts = tickBaseTs + slicesPerTick * 20;
+
+            WriteRecordHeader(block.AsSpan(offset), tickEndSize, TraceEventKind.TickEnd, ts);
+            block[offset + CommonHeaderSize] = 0;     // overloadLevel
+            block[offset + CommonHeaderSize + 1] = 1; // tickMultiplier
+            offset += tickEndSize;
+            ts++;
+        }
+
+        writer.WriteRecords(block, totalRecords);
+        writer.WriteSpanNames(new Dictionary<int, string>());
+        writer.Flush();
+        return path;
+    }
+
+    /// <summary>
+    /// Encode a single <see cref="TraceEventKind.ThreadContextSwitch"/> instant record in-place. Layout mirrors
+    /// <c>ThreadContextSwitchEvent</c>: 12 B common header + 13 B payload (u8 targetSlotIdx, u8 processorNumber,
+    /// u8 waitReason, u8 threadState, u8 gettingIdle, u32 durationQpc @+5, u32 readyTimeQpc @+9). No span extension.
+    /// </summary>
+    private static void WriteContextSwitchEvent(Span<byte> dest, long startTs, byte targetSlotIdx, byte processorNumber,
+        byte waitReason, byte threadState, bool gettingIdle, uint durationQpc, uint readyTimeQpc)
+    {
+        WriteRecordHeader(dest, dest.Length, TraceEventKind.ThreadContextSwitch, startTs);
+        var payload = dest[CommonHeaderSize..];
+        payload[0] = targetSlotIdx;
+        payload[1] = processorNumber;
+        payload[2] = waitReason;
+        payload[3] = threadState;
+        payload[4] = (byte)(gettingIdle ? 1 : 0);
+        BinaryPrimitives.WriteUInt32LittleEndian(payload[5..], durationQpc);
+        BinaryPrimitives.WriteUInt32LittleEndian(payload[9..], readyTimeQpc);
+    }
+
+    /// <summary>
     /// Build a trace with a deliberately wrong magic number. Used for the "malformed file" path in
     /// <c>TraceSessionRuntime</c> tests — the runtime should reject it before reading further.
     /// </summary>

@@ -9,8 +9,8 @@ namespace Typhon.Engine;
 /// Validates uniqueness and acyclicity on <see cref="Build"/>.
 /// </summary>
 /// <remarks>
-/// Systems are added with <see cref="AddCallbackSystem"/> or <see cref="AddPipelineSystem"/>, then connected with <see cref="AddEdge"/>. Call <see cref="Build"/> to
-/// produce an immutable <see cref="SystemDefinition"/> array with computed predecessors, successors, and topological order.
+/// Systems are added with <see cref="AddCallbackSystem"/> or <see cref="AddPipelineSystem"/>, then connected with <see cref="AddEdge"/>.
+/// Call <see cref="Build"/> to produce an immutable <see cref="SystemDefinition"/> array with computed predecessors, successors, and topological order.
 /// </remarks>
 [PublicAPI]
 public sealed class DagBuilder
@@ -25,11 +25,11 @@ public sealed class DagBuilder
     /// <param name="name">Unique name identifying this system.</param>
     /// <param name="action">Delegate invoked once per tick on a single worker.</param>
     /// <param name="priority">Scheduling priority (enforcement deferred to #201).</param>
-    public DagBuilder AddCallbackSystem(string name, Action<TickContext> action, SystemPriority priority = SystemPriority.Normal, Func<bool> runIf = null)
-        => AddCallbackSystemInternal(name, action, priority, runIf, null);
+    public DagBuilder AddCallbackSystem(string name, Action<TickContext> action, SystemPriority priority = SystemPriority.Normal, Func<bool> shouldRun = null)
+        => AddCallbackSystemInternal(name, action, priority, shouldRun, null);
 
-    internal DagBuilder AddCallbackSystemInternal(string name, Action<TickContext> action, SystemPriority priority, Func<bool> runIf,
-        (string FilePath, int Line, string MethodName)? sourceOverride)
+    internal DagBuilder AddCallbackSystemInternal(string name, Action<TickContext> action, SystemPriority priority, Func<bool> shouldRun,
+        (string FilePath, int Line, string MethodName)? sourceOverride, ISystem instance = null)
     {
         ArgumentNullException.ThrowIfNull(name);
         ArgumentNullException.ThrowIfNull(action);
@@ -49,7 +49,8 @@ public sealed class DagBuilder
             Index = idx,
             Priority = priority,
             CallbackAction = action,
-            RunIf = runIf,
+            ShouldRun = shouldRun,
+            Instance = instance,
             TotalChunks = 1,
             SourceFilePath = src?.FilePath,
             SourceLine = src?.Line ?? 0,
@@ -64,12 +65,12 @@ public sealed class DagBuilder
     /// <param name="name">Unique name identifying this system.</param>
     /// <param name="action">Delegate invoked once per tick on a single worker.</param>
     /// <param name="priority">Scheduling priority (enforcement deferred to #201).</param>
-    /// <param name="runIf">Optional predicate — if false, system is skipped.</param>
-    public DagBuilder AddQuerySystem(string name, Action<TickContext> action, SystemPriority priority = SystemPriority.Normal, Func<bool> runIf = null)
-        => AddQuerySystemInternal(name, action, priority, runIf, null);
+    /// <param name="shouldRun">Optional predicate — if false, system is skipped.</param>
+    public DagBuilder AddQuerySystem(string name, Action<TickContext> action, SystemPriority priority = SystemPriority.Normal, Func<bool> shouldRun = null)
+        => AddQuerySystemInternal(name, action, priority, shouldRun, null);
 
-    internal DagBuilder AddQuerySystemInternal(string name, Action<TickContext> action, SystemPriority priority, Func<bool> runIf,
-        (string FilePath, int Line, string MethodName)? sourceOverride)
+    internal DagBuilder AddQuerySystemInternal(string name, Action<TickContext> action, SystemPriority priority, Func<bool> shouldRun,
+        (string FilePath, int Line, string MethodName)? sourceOverride, ISystem instance = null)
     {
         ArgumentNullException.ThrowIfNull(name);
         ArgumentNullException.ThrowIfNull(action);
@@ -89,7 +90,8 @@ public sealed class DagBuilder
             Index = idx,
             Priority = priority,
             CallbackAction = action,
-            RunIf = runIf,
+            ShouldRun = shouldRun,
+            Instance = instance,
             TotalChunks = 1,
             SourceFilePath = src?.FilePath,
             SourceLine = src?.Line ?? 0,
@@ -105,8 +107,9 @@ public sealed class DagBuilder
     /// <param name="chunkAction">Delegate called per chunk with (chunkIndex, totalChunks). Must be thread-safe.</param>
     /// <param name="totalChunks">Number of chunks to distribute across workers.</param>
     /// <param name="priority">Scheduling priority (enforcement deferred to #201).</param>
-    /// <param name="runIf">Optional predicate — if false, system is skipped.</param>
-    public DagBuilder AddPipelineSystem(string name, Action<int, int> chunkAction, int totalChunks, SystemPriority priority = SystemPriority.Normal, Func<bool> runIf = null)
+    /// <param name="shouldRun">Optional predicate — if false, system is skipped.</param>
+    public DagBuilder AddPipelineSystem(string name, Action<int, int> chunkAction, int totalChunks, SystemPriority priority = SystemPriority.Normal,
+        Func<bool> shouldRun = null, ISystem instance = null)
     {
         ArgumentNullException.ThrowIfNull(name);
         ArgumentNullException.ThrowIfNull(chunkAction);
@@ -131,7 +134,8 @@ public sealed class DagBuilder
             Index = idx,
             Priority = priority,
             PipelineChunkAction = chunkAction,
-            RunIf = runIf,
+            ShouldRun = shouldRun,
+            Instance = instance,
             TotalChunks = totalChunks,
             SourceFilePath = src?.FilePath,
             SourceLine = src?.Line ?? 0,

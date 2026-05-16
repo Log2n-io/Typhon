@@ -150,7 +150,7 @@ class EventQueueIntegrationTests : TestBase<EventQueueIntegrationTests>
                 .CallbackSystem("Beta", _ => { }, after: "Alpha");
         }, new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
 
-        var systems = runtime.Systems;
+        var systems = runtime.UserSystems;
 
         Assert.That(systems, Is.Not.Null);
         Assert.That(systems.Length, Is.EqualTo(2));

@@ -22,6 +22,7 @@ const KIND = {
   TickStart: 0,
   TickEnd: 1,
   BTreeInsert: 14,
+  ThreadContextSwitch: 254,
 } as const;
 
 const ZERO_HEX = '0000000000000000';
@@ -83,6 +84,35 @@ describe('mergeTickData — intra-tick split fold', () => {
     // wipes it only on the final slot. This test pins that behaviour so a "clear rawEvents on
     // merge" regression can't slip in silently.
     expect(merged.rawEvents.length).toBe(head.length + tail.length);
+  });
+
+  it('preserves ThreadContextSwitch records across a split-tick merge', () => {
+    // Off-CPU slices can land in either half of an intra-tick split. mergeTickData re-runs
+    // processTickEvents on the concatenated rawEvents, so the kind-254 demux must reproduce the
+    // full per-slot slice list — a regression here would drop off-CPU intervals on split ticks.
+    const head: TraceEvent[] = [
+      baseEvent({ kind: KIND.TickStart as TraceEvent['kind'], timestampUs: 0 }),
+      baseEvent({
+        kind: KIND.ThreadContextSwitch as TraceEvent['kind'], timestampUs: 10, durationUs: 5,
+        targetSlotIdx: 3, waitReason: 30, threadState: 0, gettingIdle: false, processorNumber: 1, readyTimeUs: 0,
+      }),
+    ];
+    const tail: TraceEvent[] = [
+      baseEvent({
+        kind: KIND.ThreadContextSwitch as TraceEvent['kind'], timestampUs: 40, durationUs: 5,
+        targetSlotIdx: 3, waitReason: 7, threadState: 0, gettingIdle: false, processorNumber: 2, readyTimeUs: 0,
+      }),
+      baseEvent({ kind: KIND.TickEnd as TraceEvent['kind'], timestampUs: 50 }),
+    ];
+    const a = buildTick(1, head);
+    a.rawEvents = head;
+    const b = buildTick(1, tail);
+    b.rawEvents = tail;
+
+    const merged = mergeTickData(a, b, []);
+    const slices = merged.contextSwitches.get(3);
+    expect(slices).toHaveLength(2);
+    expect(slices!.map((s) => s.startUs)).toEqual([10, 40]);
   });
 
   it('throws on tickNumber mismatch — mergeTickData is strictly intra-tick', () => {

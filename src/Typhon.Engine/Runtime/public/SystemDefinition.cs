@@ -35,6 +35,20 @@ public sealed class SystemDefinition
     public int PhaseIndex { get; internal set; } = -1;
 
     /// <summary>
+    /// True when this system belongs to the engine-internal sub-DAG dispatched after the user DAG completes (e.g. <c>FenceExecSystem</c>).
+    /// Workbench DAG views typically filter these out of the user-facing graph.
+    /// Set by <see cref="RuntimeSchedule.Build"/> from <see cref="SystemBuilder.Internal"/>.
+    /// </summary>
+    public bool IsInternal { get; internal set; }
+
+    /// <summary>
+    /// Per-dispatch chunk-count override for chunked-callback systems. When non-zero, the runtime dispatches this many chunks for the next invocation instead
+    /// of the static <see cref="ExplicitChunkCount"/> from <see cref="SystemBuilder.ChunkedParallel"/>. Used by the fence work-planner to size
+    /// <c>FenceExec</c> based on per-tick work volume. Resets are caller-managed; zero means "use ExplicitChunkCount as before".
+    /// </summary>
+    public int RuntimeChunkCount { get; set; }
+
+    /// <summary>
     /// Declared read/write access for this system (RFC 07 — Unit 2). Populated from <see cref="SystemBuilder"/> declaration methods.
     /// Storage only at the Unit 2 stage — Unit 3 consumes this for conflict detection and DAG-edge derivation.
     /// Public read so tooling (Workbench RFC 07 Unit 6 surfacing) can project declarations into wire records; only the engine sets it.
@@ -75,6 +89,12 @@ public sealed class SystemDefinition
     /// <summary>Containing-method short name (e.g. <c>MoveAllAnts</c>) for display in the Source row.</summary>
     public string SourceMethod { get; init; }
 
+    /// <summary>
+    /// Back-pointer to the system instance backing this definition (class-based systems only — null for lambda-style registrations). Used by the scheduler to
+    /// invoke <see cref="ChunkedCallbackSystem.OnShouldRun"/> and <see cref="ChunkedCallbackSystem.OnPrepare"/> polymorphically on typed systems.
+    /// </summary>
+    public ISystem Instance { get; init; }
+
     // ═══════════════════════════════════════════════════════════════
     // DAG structure (set by DagBuilder.Build)
     // ═══════════════════════════════════════════════════════════════
@@ -100,7 +120,7 @@ public sealed class SystemDefinition
     /// Optional predicate evaluated before dispatch. If it returns false, the system is skipped and its successors are dispatched immediately.
     /// Null means always run. Evaluated before input query to avoid View refresh cost on false predicate.
     /// </summary>
-    public Func<bool> RunIf { get; init; }
+    public Func<bool> ShouldRun { get; init; }
 
     // ═══════════════════════════════════════════════════════════════
     // Overload parameters (stored for #201, not enforced yet)
@@ -136,9 +156,8 @@ public sealed class SystemDefinition
     public Type[] ChangeFilterTypes { get; set; }
 
     /// <summary>
-    /// Reactive skip predicate evaluated after <see cref="RunIf"/> passes. Returns true if the system should be skipped
-    /// because its change-filtered input is empty (no dirty entities and no newly added entities).
-    /// Set by <see cref="TyphonRuntime"/> at init — not configured by game code.
+    /// Reactive skip predicate evaluated after <see cref="ShouldRun"/> passes. Returns true if the system should be skipped because its change-filtered input
+    /// is empty (no dirty entities and no newly added entities). Set by <see cref="TyphonRuntime"/> at init — not configured by game code.
     /// </summary>
     public Func<bool> ReactiveSkip { get; set; }
 
@@ -152,6 +171,13 @@ public sealed class SystemDefinition
     /// Set by <see cref="RuntimeSchedule"/> from <see cref="SystemBuilder.Parallel"/>.
     /// </summary>
     public bool IsParallelQuery { get; internal set; }
+
+    /// <summary>
+    /// Explicit chunk count for chunked-parallel <see cref="CallbackSystem"/>s (set via <see cref="SystemBuilder.ChunkedParallel"/>). Zero means "derive from
+    /// entity count" (the QuerySystem path); positive means "this is a chunked callback — dispatch this many chunks regardless of any entity input, and skip
+    /// entity-prep infrastructure". The runtime fast-path in <see cref="TyphonRuntime"/> reads this and routes accordingly.
+    /// </summary>
+    public int ExplicitChunkCount { get; internal set; }
 
     /// <summary>
     /// True if this parallel QuerySystem writes Versioned components (copy-on-write MVCC).

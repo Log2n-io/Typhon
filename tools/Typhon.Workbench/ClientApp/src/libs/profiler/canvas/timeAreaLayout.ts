@@ -1,4 +1,5 @@
 import type { SpanData, TickData } from '@/libs/profiler/model/traceModel';
+import { TraceEventKind } from '@/libs/profiler/model/types';
 import type { TimeRange, TrackLayout, TrackState } from '@/libs/profiler/model/uiTypes';
 import { appendGaugeTracks } from './gauges/region';
 
@@ -241,13 +242,27 @@ export function deriveSlotInfo(ticks: TickData[]): {
       slotSet.add(chunk.threadSlot);
       withChunks.add(chunk.threadSlot);
     }
+    // A thread with OS context-switch records but no spans/chunks (e.g. an instrumented thread that
+    // parked the whole trace) still deserves a lane — its off-CPU overlay is the only thing to show.
+    for (const slot of tick.contextSwitches.keys()) {
+      slotSet.add(slot);
+    }
     for (const [slot, arr] of tick.spansByThreadSlot) {
       if (arr.length === 0) continue;
       slotSet.add(slot);
       let bucket = spansBySlot.get(slot);
       if (!bucket) { bucket = []; spansBySlot.set(slot, bucket); }
-      // Concatenate rather than interleave — per-slot sort after the full collection handles it.
-      for (const s of arr) bucket.push(s);
+      for (const s of arr) {
+        // Scheduler.Worker.Idle (150) and Scheduler.Worker.BetweenTick (152) are pinned to the chunk-row band by the
+        // renderer (sentinel renderDepth = -1). They by definition do not overlap any chunk on the same slot — Idle
+        // ends when work is found, BetweenTick lives between ticks. Excluding them from the packer keeps the
+        // span-stack height honest (no phantom row for spans that draw in the chunk-row band).
+        if (s.kind === TraceEventKind.SchedulerWorkerIdle || s.kind === TraceEventKind.SchedulerWorkerBetweenTick) {
+          s.renderDepth = -1;
+          continue;
+        }
+        bucket.push(s);
+      }
     }
   }
 
@@ -292,6 +307,10 @@ export function deriveVisibleSpanMaxDepthBySlot(ticks: readonly TickData[], view
     for (const [slot, spans] of tick.spansByThreadSlot) {
       for (const span of spans) {
         if (span.endUs <= startUs || span.startUs >= endUs) continue;
+        // Pinned-to-chunk-row spans (Idle / BetweenTick, renderDepth === -1) don't claim a span row
+        // and must not contribute to the per-slot max depth (would shrink height to a negative
+        // value if they're the only visible spans on a slot).
+        if (span.renderDepth === -1) continue;
         const d = span.renderDepth ?? span.depth ?? 0;
         const cur = depthBySlot.get(slot);
         if (cur === undefined || d > cur) depthBySlot.set(slot, d);

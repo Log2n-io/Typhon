@@ -56,7 +56,7 @@ test.describe('Profiler — open trace (Tier-0 canary)', () => {
 
     // Paste the absolute path into the "Or paste absolute path" input. Avoids the FileBrowser
     // dance — the paste input is a stable entry point that the OpenTraceTab explicitly supports.
-    await page.getByPlaceholder(/\.typhon-trace$/i).fill(traceFilePath);
+    await page.getByPlaceholder(/\.typhon-trace or/i).fill(traceFilePath);
     await page.getByRole('button', { name: /^open$/i }).click();
 
     // Dialog closes once the POST /api/sessions/trace round-trips.
@@ -85,7 +85,7 @@ test.describe('Profiler — open trace (Tier-0 canary)', () => {
     await page.getByRole('button', { name: /^open \.typhon-trace$/i }).click();
     await expect(page.getByRole('dialog')).toBeVisible();
     await page.getByRole('tab', { name: /^open trace$/i }).click();
-    await page.getByPlaceholder(/\.typhon-trace$/i).fill('C:\\does-not-exist\\nope.typhon-trace');
+    await page.getByPlaceholder(/\.typhon-trace or/i).fill('C:\\does-not-exist\\nope.typhon-trace');
     await page.getByRole('button', { name: /^open$/i }).click();
 
     // Dialog stays open; error pill surfaces the server's 404 problem detail.

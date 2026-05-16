@@ -53,7 +53,7 @@ public class SystemBuilderFluentTests
         Assert.That(b.AfterAll("A", "B"), Is.SameAs(b));
         Assert.That(b.Before("Z"), Is.SameAs(b));
         Assert.That(b.Priority(SystemPriority.High), Is.SameAs(b));
-        Assert.That(b.RunIf(() => true), Is.SameAs(b));
+        Assert.That(b.ShouldRun(() => true), Is.SameAs(b));
         Assert.That(b.TickDivisor(2), Is.SameAs(b));
         Assert.That(b.ThrottledTickDivisor(3), Is.SameAs(b));
         Assert.That(b.CanShed(true), Is.SameAs(b));

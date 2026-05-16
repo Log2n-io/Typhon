@@ -50,6 +50,13 @@ internal sealed class ThreadSlot
     public int OwnerManagedThreadId;
 
     /// <summary>
+    /// OS-level thread ID (Windows TID via <c>GetCurrentThreadId</c>) of the current owner, or 0 if the slot is free or the OS does not
+    /// expose a meaningful TID. Captured once at claim time so the ETW scheduling pump can correlate kernel context-switch events
+    /// (which carry OS TIDs) back to a Typhon thread slot via <see cref="ThreadSlotRegistry.TryGetSlotByOsThreadId"/>.
+    /// </summary>
+    public uint OwnerOsThreadId;
+
+    /// <summary>
     /// Name of the current owning thread, captured once at claim time. Cached so exporters can synthesize catch-up
     /// <see cref="TraceEventKind.ThreadInfo"/> records for clients that connect after the slot was claimed — without this, mid-session
     /// live connections have no slot→name mapping and the viewer can't label lanes. Nulled on retirement. Not read on the hot path.

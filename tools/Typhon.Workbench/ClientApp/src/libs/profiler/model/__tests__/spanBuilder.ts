@@ -142,6 +142,7 @@ export function buildTick(opts: BuildTickOptions): TickData {
     gcEvents: [],
     gcSuspensions: [],
     threadInfos: [],
+    contextSwitches: new Map(),
     rawEvents: [],
   };
 }

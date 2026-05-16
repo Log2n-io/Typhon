@@ -62,6 +62,10 @@ export const enum TraceEventKind {
   StatisticsRebuild = 89,
 
   GcSuspension = 75,
+
+  // Scheduler worker-loop spans — pinned to the chunk-row band by the renderer (see timeAreaLayout.deriveSlotInfo).
+  SchedulerWorkerIdle = 150,
+  SchedulerWorkerBetweenTick = 152,
   /**
    * Per-tick gauge snapshot. Numerically ≥ 10 for category grouping with metric records, but wire-shape is INSTANT (no span header
    * extension) — <c>IsSpan()</c> excludes it on both server (C#) and client (this decoder). Special-cased at the top of
@@ -90,6 +94,137 @@ export const enum TraceEventKind {
   RuntimePhaseUoWFlush = 162,
 
   NamedSpan = 200,
+
+  /**
+   * OS thread context-switch — one record per ON-CPU slice closed for a Typhon-registered OS thread, produced by the engine's
+   * EtwSchedulingPump (Windows-only). Wire shape is INSTANT (12-byte common header + 13-byte payload, no span-header extension) —
+   * `isInstantKind()` in `chunkDecoder.ts` carves it out. The header's threadSlot is the pump's producer slot; the payload's
+   * `targetSlotIdx` is the thread the slice belongs to. The viewer renders the GAPS between consecutive slices (off-CPU intervals).
+   */
+  ThreadContextSwitch = 254,
+}
+
+/**
+ * Coarse wait-reason category for off-CPU interval coloring. The raw `ThreadWaitReason` (~38 values) is too fine-grained for a
+ * legible palette, so each value collapses into one of these buckets via {@link waitReasonToCategory}. `Idle` is not a wait
+ * reason — it's assigned when the source slice's `gettingIdle` flag is set (the CPU went to the System Idle thread next).
+ */
+export const enum OffCpuCategory {
+  /** Blocked on a kernel object / sync primitive (event, mutex, semaphore, LPC, push-lock, ...). */
+  SyncWait = 0,
+  /** Booted off the CPU by a higher-priority thread or a dispatch interrupt; also voluntary yield. */
+  Preempted = 1,
+  /** Used up the scheduling quantum — pure CPU pressure with peers competing. */
+  QuantumEnd = 2,
+  /** Stalled on paging / virtual-memory / pool allocation. */
+  Paging = 3,
+  /** Explicit user-mode wait — Sleep, WaitForSingleObject, SuspendThread, delay-execution. */
+  UserWait = 4,
+  /** The CPU went idle after this slice (no contender). Set from the `gettingIdle` flag, not a wait reason. */
+  Idle = 5,
+  /** Anything not mapped above. */
+  Other = 6,
+}
+
+/** Human-readable label per {@link OffCpuCategory}, for the legend, tooltip, and detail pane. */
+export const OffCpuCategoryNames: Record<number, string> = {
+  [OffCpuCategory.SyncWait]: 'Sync wait',
+  [OffCpuCategory.Preempted]: 'Preempted',
+  [OffCpuCategory.QuantumEnd]: 'Quantum end',
+  [OffCpuCategory.Paging]: 'Paging / VM',
+  [OffCpuCategory.UserWait]: 'User wait',
+  [OffCpuCategory.Idle]: 'Idle',
+  [OffCpuCategory.Other]: 'Other',
+};
+
+/**
+ * Display name for each `ThreadWaitReason` byte — mirrors the C# enum in `src/Typhon.Profiler/ThreadWaitReason.cs`. Surfaced
+ * in the off-CPU tooltip + detail pane so the user sees the exact kernel reason, not just the coarse category. Out-of-range
+ * values (newer Windows builds appending entries) fall back to `Reason {n}` at the call site.
+ */
+export const WaitReasonNames: Record<number, string> = {
+  0: 'Executive', 1: 'FreePage', 2: 'PageIn', 3: 'PoolAllocation', 4: 'DelayExecution', 5: 'Suspended', 6: 'UserRequest',
+  7: 'WrExecutive', 8: 'WrFreePage', 9: 'WrPageIn', 10: 'WrPoolAllocation', 11: 'WrDelayExecution', 12: 'WrSuspended',
+  13: 'WrUserRequest', 14: 'WrSpare0', 15: 'WrQueue', 16: 'WrLpcReceive', 17: 'WrLpcReply', 18: 'WrVirtualMemory',
+  19: 'WrPageOut', 20: 'WrRendezvous', 21: 'WrKeyedEvent', 22: 'WrTerminated', 23: 'WrProcessInSwap', 24: 'WrCpuRateControl',
+  25: 'WrCalloutStack', 26: 'WrKernel', 27: 'WrResource', 28: 'WrPushLock', 29: 'WrMutex', 30: 'WrQuantumEnd',
+  31: 'WrDispatchInt', 32: 'WrPreempted', 33: 'WrYieldExecution', 34: 'WrFastMutex', 35: 'WrGuardedMutex', 36: 'WrRundown',
+  37: 'MaximumWaitReason',
+};
+
+/**
+ * Plain-English one-liner for each `ThreadWaitReason` byte — the cryptic kernel `KWAIT_REASON` name (see {@link WaitReasonNames})
+ * tells you nothing unless you know the Windows scheduler, so the tooltip shows this instead. Meanings are the well-established
+ * Windows-kernel definitions (`Wr` = "wait reason"); paired values like `Executive`/`WrExecutive` describe the same wait.
+ */
+export const WaitReasonDescriptions: Record<number, string> = {
+  0: 'Blocked on a kernel object',
+  1: 'Waiting for a free memory page',
+  2: 'Waiting for a page fault from disk',
+  3: 'Waiting for kernel pool memory',
+  4: 'Sleeping (timed delay)',
+  5: 'Thread suspended',
+  6: 'User-mode wait (WaitFor…)',
+  7: 'Blocked on a kernel object',
+  8: 'Waiting for a free memory page',
+  9: 'Waiting for a page fault from disk',
+  10: 'Waiting for kernel pool memory',
+  11: 'Sleeping (timed delay)',
+  12: 'Thread suspended',
+  13: 'User-mode wait (WaitFor…)',
+  14: 'Reserved wait reason',
+  15: 'Idle in a thread-pool / IO queue',
+  16: 'Waiting to receive an LPC/RPC message',
+  17: 'Waiting for an LPC/RPC reply',
+  18: 'Waiting for virtual memory',
+  19: 'Waiting for pages to flush to disk',
+  20: 'Waiting at a thread rendezvous',
+  21: 'Waiting on a keyed event (lock)',
+  22: 'Thread is terminating',
+  23: 'Process being swapped into memory',
+  24: 'Throttled by a CPU rate limit',
+  25: 'Waiting for a kernel callout stack',
+  26: 'Generic kernel wait',
+  27: 'Waiting on an ERESOURCE read/write lock',
+  28: 'Waiting on a push lock',
+  29: 'Waiting on a mutex',
+  30: 'Scheduling time slice expired',
+  31: 'Preempted by a dispatch interrupt',
+  32: 'Preempted by a higher-priority thread',
+  33: 'Voluntarily yielded the CPU',
+  34: 'Waiting on a fast mutex',
+  35: 'Waiting on a guarded mutex',
+  36: 'Waiting for rundown protection',
+  37: 'Unspecified wait reason',
+};
+
+/**
+ * 256-entry lookup table mapping a raw `ThreadWaitReason` byte → {@link OffCpuCategory}. Built once at module load so the
+ * trace-model demux can categorize each context-switch record with a single array index (no per-record switch). Unmapped
+ * bytes default to {@link OffCpuCategory.Other}.
+ */
+const WAIT_REASON_CATEGORY_LUT: Uint8Array = (() => {
+  const lut = new Uint8Array(256).fill(OffCpuCategory.Other);
+  // Blocked on a kernel object / sync primitive.
+  for (const r of [0, 7, 15, 16, 17, 21, 26, 27, 28, 29, 34, 35]) lut[r] = OffCpuCategory.SyncWait;
+  // Preempted / yielded / swapped off the core.
+  for (const r of [23, 31, 32, 33]) lut[r] = OffCpuCategory.Preempted;
+  // Quantum exhausted.
+  lut[30] = OffCpuCategory.QuantumEnd;
+  // Paging / virtual-memory / pool allocation stalls.
+  for (const r of [1, 2, 3, 8, 9, 10, 18, 19]) lut[r] = OffCpuCategory.Paging;
+  // Explicit user-mode waits + suspend.
+  for (const r of [4, 5, 6, 11, 12, 13]) lut[r] = OffCpuCategory.UserWait;
+  return lut;
+})();
+
+/**
+ * Categorize one off-CPU interval. `gettingIdle` (the source slice ended with the CPU going to the System Idle thread) wins
+ * over the wait reason — an idle hand-off is more informative to surface than whatever the thread was nominally waiting on.
+ */
+export function waitReasonToCategory(waitReason: number, gettingIdle: boolean): OffCpuCategory {
+  if (gettingIdle) return OffCpuCategory.Idle;
+  return WAIT_REASON_CATEGORY_LUT[waitReason & 0xff] as OffCpuCategory;
 }
 
 /**
@@ -458,6 +593,9 @@ export const SpanKindNames: Record<number, string> = {
   232: 'Durability.Recovery.TickFence',
   233: 'Durability.UoW.State',
   234: 'Durability.UoW.Deadline',
+
+  // OS thread scheduling (254). Instant-shaped; rendered as off-CPU overlay bars, not a lane span.
+  254: 'Thread.ContextSwitch',
 };
 
 export interface TraceMetadata {
@@ -683,6 +821,22 @@ export interface TraceEvent {
   queueOverflowCount?: number;
   queueProduced?: number;
   queueConsumed?: number;
+
+  // ThreadContextSwitch (kind 254) — one ON-CPU slice for the thread identified by `targetSlotIdx`.
+  // The 12-byte common-header timestamp is the slice START; `durationUs` (decoded from a u32 QPC
+  // duration) is how long it held the CPU. The viewer renders the GAPS between consecutive slices.
+  /** Re-projection target: the thread slot whose ON-CPU slice this is (NOT the producer `threadSlot`). */
+  targetSlotIdx?: number;
+  /** Logical CPU id the slice ran on. */
+  processorNumber?: number;
+  /** Raw `ThreadWaitReason` byte — why the thread left the CPU at the END of this slice. See `WaitReasonNames`. */
+  waitReason?: number;
+  /** Post-switch `System.Diagnostics.ThreadState` raw byte. */
+  threadState?: number;
+  /** True when the CPU went to the System Idle thread next (no contender for the core). */
+  gettingIdle?: boolean;
+  /** Time the thread spent on the ready queue immediately before this slice started (µs). 0 = unknown. */
+  readyTimeUs?: number;
 }
 
 /**

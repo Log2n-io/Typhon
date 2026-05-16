@@ -613,9 +613,12 @@ public unsafe partial class Transaction
 
         // Check if already pending spawn (destroy own spawn)
         bool isPending = SpawnedContains(id);
-        if (!isPending)
+        if (!isPending && !IsAlive(id))
         {
-            Debug.Assert(IsAlive(id), $"Entity {id} not alive — cannot destroy");
+            // Idempotent destroy: entity was committed-destroyed by a prior transaction (or never existed). Common when a spatial query returns an entity that
+            // another user system destroyed earlier in this tick — the spatial index can lag the EntityMap until fence cleanup runs. Silent no-op matches the
+            // `_pendingDestroys` early return above; the operation is logically idempotent.
+            return;
         }
 
         _pendingDestroys ??= [];

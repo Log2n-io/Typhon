@@ -73,7 +73,7 @@ internal sealed class TSHCommand : Command<TSHCommand.Settings>
         public bool NoWal { get; set; }
     }
 
-    public override int Execute(CommandContext context, Settings settings, CancellationToken cancellationToken)
+    protected override int Execute(CommandContext context, Settings settings, CancellationToken cancellationToken)
     {
         using var session = new ShellSession();
 

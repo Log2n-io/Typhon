@@ -369,7 +369,7 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
     {
         // Issue #229 Q10 resolution: two cluster-spatial archetypes can share a single SpatialGrid because each archetype owns its own per-cell
         // CellClusterPool. This test exercises the full stack — registration, spawn into the same cell from two different archetypes, query isolation,
-        // and the global CellDescriptor.EntityCount / ClusterCount aggregation that tests have always asserted on.
+        // and the global CellState.EntityCount / ClusterCount aggregation that tests have always asserted on.
         using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
         dbe.RegisterComponentFromAccessor<ClCohPos>();
         dbe.RegisterComponentFromAccessor<ClCohPos2>();
@@ -393,7 +393,7 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
         ref var cell = ref dbe.SpatialGrid.GetCell(cellKey);
 
         // Global aggregation: both entities live in the same cell, cluster count is the sum across archetypes.
-        Assert.That(cell.EntityCount, Is.EqualTo(2), "CellDescriptor.EntityCount is the sum across archetypes");
+        Assert.That(cell.EntityCount, Is.EqualTo(2), "CellState.EntityCount is the sum across archetypes");
         Assert.That(cell.ClusterCount, Is.EqualTo(2), "Two cluster-spatial archetypes each allocated one cluster in this cell");
 
         // Per-archetype pool isolation: each archetype sees only its own cluster id in the cell.

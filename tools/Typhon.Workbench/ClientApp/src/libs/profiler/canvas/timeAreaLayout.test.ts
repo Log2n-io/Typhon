@@ -188,6 +188,7 @@ describe('timeAreaLayout.getVisibleTicks', () => {
     gcEvents: [],
     gcSuspensions: [],
     threadInfos: [],
+    contextSwitches: new Map(),
     rawEvents: [],
   });
 
@@ -268,6 +269,7 @@ describe('timeAreaLayout.deriveSlotInfo', () => {
       gcEvents: [],
       gcSuspensions: [],
       threadInfos: [],
+      contextSwitches: new Map(),
       rawEvents: [],
     };
     return base;

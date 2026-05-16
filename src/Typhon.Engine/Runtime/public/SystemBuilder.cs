@@ -18,7 +18,7 @@ public sealed class SystemBuilder
     internal string[] _afterAll;
     internal string _before;
     internal SystemPriority _priority = SystemPriority.Normal;
-    internal Func<bool> _runIf;
+    internal Func<bool> _shouldRun;
     internal Func<ViewBase> _inputFactory;
     internal Type[] _changeFilter;
     internal int _tickDivisor = 1;
@@ -27,11 +27,13 @@ public sealed class SystemBuilder
     internal bool _parallel;
     internal bool _writesVersioned;
     internal float _chunksPerWorker = 1f;
+    internal int _explicitChunkCount;       // > 0 → chunked-parallel CallbackSystem (no entity input)
     internal SimTier _tierFilter = SimTier.All;
     internal int _cellAmortize;
     internal bool _checkerboard;
     internal Phase _phase;
     internal bool _phaseSet;
+    internal bool _isInternal;
     internal readonly SystemAccessDescriptor _access = new();
 
     // ═══════════════════════════════════════════════════════════════
@@ -74,9 +76,9 @@ public sealed class SystemBuilder
     }
 
     /// <summary>Set a predicate that must return true for the system to execute. Evaluated before any input processing.</summary>
-    public SystemBuilder RunIf(Func<bool> predicate)
+    public SystemBuilder ShouldRun(Func<bool> predicate)
     {
-        _runIf = predicate;
+        _shouldRun = predicate;
         return this;
     }
 
@@ -119,6 +121,31 @@ public sealed class SystemBuilder
     public SystemBuilder Parallel()
     {
         _parallel = true;
+        return this;
+    }
+
+    /// <summary>
+    /// Enable chunk-parallel execution for a <see cref="CallbackSystem"/> with an explicit chunk count, independent of any entity input. The system's
+    /// <c>Execute</c> is invoked <paramref name="chunkCount"/> times in parallel across workers; each invocation receives <see cref="TickContext.ChunkIndex"/>
+    /// and <see cref="TickContext.ChunkCount"/> so the implementation can offset its data accordingly.
+    /// <para>
+    /// Designed for non-entity-iterating work that's naturally chunkable — e.g. SIMD sweeps over flat arrays, image downsamples, parallel reductions.
+    /// Skips all entity-prep infrastructure (Accessor, Entities, per-chunk Transaction): the TickContext passed in carries only tick metadata + ChunkIndex/ChunkCount.
+    /// </para>
+    /// <para>
+    /// Incompatible with <see cref="Input"/>, <see cref="ChangeFilter"/>, <see cref="WritesVersioned"/>, <see cref="Tier"/>, <see cref="CellAmortize"/>,
+    /// <see cref="Checkerboard"/>, and <see cref="ChunksPerWorker"/> — all of those are entity-context concepts.
+    /// </para>
+    /// </summary>
+    public SystemBuilder ChunkedParallel(int chunkCount)
+    {
+        if (chunkCount < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(chunkCount), "chunkCount must be >= 1");
+        }
+
+        _parallel = true;
+        _explicitChunkCount = chunkCount;
         return this;
     }
 
@@ -183,6 +210,17 @@ public sealed class SystemBuilder
     {
         _phase = phase;
         _phaseSet = true;
+        return this;
+    }
+
+    /// <summary>
+    /// Mark this system as engine-internal. It is registered on the same <see cref="RuntimeSchedule"/> but partitioned into a separate internal sub-DAG
+    /// dispatched after the user DAG completes (used by <c>FenceExec</c>). Internal systems are not surfaced in user-facing tooling views by default.
+    /// Intended for engine code only.
+    /// </summary>
+    public SystemBuilder Internal()
+    {
+        _isInternal = true;
         return this;
     }
 
@@ -329,4 +367,69 @@ public sealed class SystemBuilder
 
     public SystemBuilder ReadsSnapshot<T1, T2, T3, T4, T5, T6>() where T1 : unmanaged where T2 : unmanaged where T3 : unmanaged where T4 : unmanaged
         where T5 : unmanaged where T6 : unmanaged => ReadsSnapshot<T1>().ReadsSnapshot<T2>().ReadsSnapshot<T3>().ReadsSnapshot<T4>().ReadsSnapshot<T5>().ReadsSnapshot<T6>();
+}
+
+/// <summary>
+/// Typed fluent builder for systems deriving from <see cref="ChunkedCallbackSystem{TContext}"/>. Wraps a non-generic <see cref="SystemBuilder"/> and exposes
+/// typed <see cref="ShouldRun"/> / <see cref="Prepare"/> overloads that receive the ambient TContext. All other methods forward to the inner builder unchanged.
+/// </summary>
+[PublicAPI]
+public sealed class SystemBuilder<TContext> where TContext : class
+{
+    private readonly SystemBuilder _inner;
+    private readonly ChunkedCallbackSystem<TContext> _system;
+
+    internal SystemBuilder(SystemBuilder inner, ChunkedCallbackSystem<TContext> system)
+    {
+        _inner = inner;
+        _system = system;
+    }
+
+    /// <summary>Set a typed predicate evaluated before dispatch. Stored on the system instance; read by <see cref="ChunkedCallbackSystem{TContext}.OnShouldRun"/>.</summary>
+    public SystemBuilder<TContext> ShouldRun(Func<TContext, bool> predicate)
+    {
+        _system.SetShouldRunLambda(predicate);
+        return this;
+    }
+
+    /// <summary>Set a typed plan builder evaluated before dispatch. Returns the dynamic chunk count (0 = skip, &gt;0 = dispatch, -1 = no opinion).</summary>
+    public SystemBuilder<TContext> Prepare(Func<TContext, int> planBuilder)
+    {
+        _system.SetPrepareLambda(planBuilder);
+        return this;
+    }
+
+    // Forwarded fluent methods. The typed builder intentionally does NOT expose the untyped
+    // ShouldRun(Func<bool>) overload — typed-system authors use the typed signature above.
+    public SystemBuilder<TContext> Name(string name) { _inner.Name(name); return this; }
+    public SystemBuilder<TContext> After(string dependency) { _inner.After(dependency); return this; }
+    public SystemBuilder<TContext> AfterAll(params string[] dependencies) { _inner.AfterAll(dependencies); return this; }
+    public SystemBuilder<TContext> Before(string dependent) { _inner.Before(dependent); return this; }
+    public SystemBuilder<TContext> Priority(SystemPriority priority) { _inner.Priority(priority); return this; }
+    public SystemBuilder<TContext> Input(Func<ViewBase> viewFactory) { _inner.Input(viewFactory); return this; }
+    public SystemBuilder<TContext> ChangeFilter(params Type[] componentTypes) { _inner.ChangeFilter(componentTypes); return this; }
+    public SystemBuilder<TContext> TickDivisor(int divisor) { _inner.TickDivisor(divisor); return this; }
+    public SystemBuilder<TContext> ThrottledTickDivisor(int divisor) { _inner.ThrottledTickDivisor(divisor); return this; }
+    public SystemBuilder<TContext> CanShed(bool value) { _inner.CanShed(value); return this; }
+    public SystemBuilder<TContext> Parallel() { _inner.Parallel(); return this; }
+    public SystemBuilder<TContext> ChunkedParallel(int chunkCount) { _inner.ChunkedParallel(chunkCount); return this; }
+    public SystemBuilder<TContext> WritesVersioned() { _inner.WritesVersioned(); return this; }
+    public SystemBuilder<TContext> ChunksPerWorker(float factor) { _inner.ChunksPerWorker(factor); return this; }
+    public SystemBuilder<TContext> Tier(SimTier tier) { _inner.Tier(tier); return this; }
+    public SystemBuilder<TContext> CellAmortize(int denominator) { _inner.CellAmortize(denominator); return this; }
+    public SystemBuilder<TContext> Checkerboard() { _inner.Checkerboard(); return this; }
+    public SystemBuilder<TContext> Phase(Phase phase) { _inner.Phase(phase); return this; }
+    public SystemBuilder<TContext> Internal() { _inner.Internal(); return this; }
+
+    public SystemBuilder<TContext> Reads<T>() where T : unmanaged { _inner.Reads<T>(); return this; }
+    public SystemBuilder<TContext> ReadsFresh<T>() where T : unmanaged { _inner.ReadsFresh<T>(); return this; }
+    public SystemBuilder<TContext> ReadsSnapshot<T>() where T : unmanaged { _inner.ReadsSnapshot<T>(); return this; }
+    public SystemBuilder<TContext> AdditionalReads<T>() where T : unmanaged { _inner.AdditionalReads<T>(); return this; }
+    public SystemBuilder<TContext> Writes<T>() where T : unmanaged { _inner.Writes<T>(); return this; }
+    public SystemBuilder<TContext> SideWrites<T>() where T : unmanaged { _inner.SideWrites<T>(); return this; }
+    public SystemBuilder<TContext> WritesEvents(EventQueueBase queue) { _inner.WritesEvents(queue); return this; }
+    public SystemBuilder<TContext> ReadsEvents(EventQueueBase queue) { _inner.ReadsEvents(queue); return this; }
+    public SystemBuilder<TContext> WritesResource(string name) { _inner.WritesResource(name); return this; }
+    public SystemBuilder<TContext> ReadsResource(string name) { _inner.ReadsResource(name); return this; }
+    public SystemBuilder<TContext> ExclusivePhase() { _inner.ExclusivePhase(); return this; }
 }

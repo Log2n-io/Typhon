@@ -21,7 +21,7 @@ public sealed partial class DagScheduler
 
     internal void CaptureSystemException(int sysIdx, Exception ex)
     {
-        var arr = _lastSystemException ??= new Exception[_systemCount];
+        var arr = _lastSystemException ??= new Exception[AllSystemCount];
         if ((uint)sysIdx < (uint)arr.Length) arr[sysIdx] = ex;
     }
 
@@ -42,7 +42,7 @@ public sealed partial class DagScheduler
         sb.AppendLine("Idx Phase                Name                            Pred  Deps  Ready  Chunks       Skip");
         sb.AppendLine("─── ──────────────────── ─────────────────────────────── ───── ───── ────── ──────────── ────");
 
-        for (var i = 0; i < _systemCount; i++)
+        for (var i = 0; i < AllSystemCount; i++)
         {
             var sys = Systems[i];
             var deps = _remainingDeps[i].Value;
@@ -50,7 +50,7 @@ public sealed partial class DagScheduler
             var nextChunk = _nextChunk[i].Value;
             var totalChunks = sys.TotalChunks;
             var skip = _currentTickSystemMetrics[i].SkipReason;
-            var phase = sys.Phase.Name.ToString();
+            var phase = sys.Phase.Name;
 
             sb.AppendFormat("{0,3} {1,-20} {2,-31} {3,5} {4,5} {5,6} {6,4}/{7,-5}    {8}",
                 i,
@@ -70,7 +70,7 @@ public sealed partial class DagScheduler
         sb.AppendLine();
         sb.AppendLine("Stuck systems (deps>0 OR ready==1 with chunks remaining):");
         var anyStuck = false;
-        for (var i = 0; i < _systemCount; i++)
+        for (var i = 0; i < AllSystemCount; i++)
         {
             var deps = _remainingDeps[i].Value;
             var ready = _isReady[i].Value;
@@ -81,7 +81,7 @@ public sealed partial class DagScheduler
             anyStuck = true;
             sb.Append("  ").Append(Systems[i].Name).Append("  pred=[");
             var first = true;
-            for (var j = 0; j < _systemCount; j++)
+            for (var j = 0; j < AllSystemCount; j++)
             {
                 foreach (var s in Systems[j].Successors)
                 {
@@ -106,7 +106,7 @@ public sealed partial class DagScheduler
             sb.AppendLine();
             sb.AppendLine("Captured exceptions (most recent per system):");
             var anyEx = false;
-            for (var i = 0; i < _systemCount; i++)
+            for (var i = 0; i < AllSystemCount; i++)
             {
                 var ex = _lastSystemException[i];
                 if (ex == null) continue;

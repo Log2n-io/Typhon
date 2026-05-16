@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Activity, Blocks, Clock, Crosshair, ExternalLink, FileCode, Layers, Search, Tag } from 'lucide-react';
-import type { ChunkSpan, MarkerSelection, PhaseMarker, PhaseSpan, SpanData } from '@/libs/profiler/model/traceModel';
-import { TraceEventKind } from '@/libs/profiler/model/types';
+import type { ChunkSpan, MarkerSelection, OffCpuInterval, PhaseMarker, PhaseSpan, SpanData } from '@/libs/profiler/model/traceModel';
+import { OffCpuCategoryNames, TraceEventKind, WaitReasonNames } from '@/libs/profiler/model/types';
 import type { ProfilerSelection } from '@/stores/useProfilerSelectionStore';
 import { useProfilerSessionStore } from '@/stores/useProfilerSessionStore';
 import { useProfilerStatsStore } from '@/stores/useProfilerStatsStore';
@@ -50,6 +50,7 @@ export default function ProfilerDetail({ selection }: Props): React.JSX.Element 
     case 'marker':       return <MarkerDetail marker={selection.marker} />;
     case 'phase':        return <PhaseDetail phase={selection.phase} tickNumber={selection.tickNumber} />;
     case 'phase-marker': return <PhaseMarkerDetail marker={selection.marker} tickNumber={selection.tickNumber} />;
+    case 'off-cpu':      return <OffCpuDetail interval={selection.interval} />;
   }
 }
 
@@ -846,6 +847,50 @@ function PhaseMarkerDetail({ marker, tickNumber }: { marker: PhaseMarker; tickNu
               <dd className="font-mono tabular-nums text-foreground">{marker.detail}</dd>
             </>
           )}
+        </dl>
+      </div>
+    </div>
+  );
+}
+
+// ─── Off-CPU interval (OS thread switched out) ────────────────────────────────────────────────
+
+function OffCpuDetail({ interval }: { interval: OffCpuInterval }): React.JSX.Element {
+  const globalStartUs = useGlobalStartUs();
+  const categoryName = OffCpuCategoryNames[interval.category] ?? 'Other';
+  const waitReasonName = WaitReasonNames[interval.waitReason] ?? `Reason ${interval.waitReason}`;
+  return (
+    <div className="flex h-full flex-col gap-3 overflow-y-auto bg-background p-3">
+      <div className="rounded-md border border-border bg-card p-3 text-[12px]">
+        <Header icon={<Clock className="h-4 w-4 text-muted-foreground" />} title={`Off-CPU — ${categoryName}`} suffix="thread switched out" />
+        <dl className={DL_CLASS}>
+          <dt className="text-muted-foreground">Thread slot</dt>
+          <dd className="font-mono tabular-nums text-foreground">{interval.threadSlot}</dd>
+
+          <dt className="text-muted-foreground">Wait reason</dt>
+          <dd className="font-mono tabular-nums text-foreground">{waitReasonName}</dd>
+
+          <dt className="text-muted-foreground">Category</dt>
+          <dd className="font-mono tabular-nums text-foreground">{categoryName}</dd>
+
+          <dt className="text-muted-foreground">Start</dt>
+          <dd className="font-mono tabular-nums text-foreground">{formatUs(interval.startUs - globalStartUs)}</dd>
+
+          <dt className="text-muted-foreground">End</dt>
+          <dd className="font-mono tabular-nums text-foreground">{formatUs(interval.endUs - globalStartUs)}</dd>
+
+          <dt className="text-muted-foreground">Duration</dt>
+          <dd className="font-mono tabular-nums text-foreground">{formatDurationUs(interval.durationUs)}</dd>
+
+          {interval.readyTimeUs > 0 && (
+            <>
+              <dt className="text-muted-foreground">Ready-queue wait</dt>
+              <dd className="font-mono tabular-nums text-foreground">{formatDurationUs(interval.readyTimeUs)}</dd>
+            </>
+          )}
+
+          <dt className="text-muted-foreground">Last CPU</dt>
+          <dd className="font-mono tabular-nums text-foreground">{interval.processorNumber}</dd>
         </dl>
       </div>
     </div>

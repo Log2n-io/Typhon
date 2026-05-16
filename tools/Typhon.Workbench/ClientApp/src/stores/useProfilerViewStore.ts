@@ -69,6 +69,10 @@ interface ProfilerViewState {
    *  stabilisation — heights change immediately. Persisted UX preference. */
   dynamicTrackHeight: boolean;
 
+  /** When true, slot lanes overlay off-CPU intervals (gaps where the thread was switched out) as
+   *  translucent, wait-reason-coloured bars. Default on; persisted UX preference. */
+  showOffCpu: boolean;
+
   /**
    * Write the in-flight viewport. Updates {@link transientViewRange} immediately and schedules a
    * debounced commit into {@link viewRange}. Called on every wheel notch / drag pixel / rAF
@@ -89,6 +93,7 @@ interface ProfilerViewState {
 
   setSpanColorMode: (mode: SpanColorMode) => void;
   toggleDynamicTrackHeight: () => void;
+  toggleShowOffCpu: () => void;
 
   setGaugeVisibility: (id: string, visible: boolean) => void;
   setEngineOpVisibility: (id: string, visible: boolean) => void;
@@ -145,6 +150,7 @@ export const useProfilerViewStore = create<ProfilerViewState>()(
       engineOpVisibility: {},
       spanColorMode: 'name',
       dynamicTrackHeight: true,
+      showOffCpu: true,
 
       setTransientViewRange: (r) => {
         set({ transientViewRange: r });
@@ -188,6 +194,7 @@ export const useProfilerViewStore = create<ProfilerViewState>()(
 
       setSpanColorMode: (mode) => set({ spanColorMode: mode }),
       toggleDynamicTrackHeight: () => set((s) => ({ dynamicTrackHeight: !s.dynamicTrackHeight })),
+      toggleShowOffCpu: () => set((s) => ({ showOffCpu: !s.showOffCpu })),
 
       setGaugeVisibility: (id, visible) =>
         set((s) => {
@@ -246,6 +253,7 @@ export const useProfilerViewStore = create<ProfilerViewState>()(
         engineOpVisibility: s.engineOpVisibility,
         spanColorMode: s.spanColorMode,
         dynamicTrackHeight: s.dynamicTrackHeight,
+        showOffCpu: s.showOffCpu,
       }),
       // v0 → v1: gaugeCollapse changed from `Record<string, boolean>` to `Record<string, TrackState>`.
       // v1 → v2: added gaugeVisibility / engineOpVisibility maps for the section-filter popup.

@@ -116,7 +116,7 @@ public class AccessDagDerivationTests
             .Add(new Sys { ConfigureAction = b => b.Name("Reader").Phase(Phase.Output).Reads<CompA>() })
             .Build(_registry.Runtime);
 
-        Assert.That(scheduler.Systems, Has.Length.EqualTo(2));
+        Assert.That(scheduler.UserSystems, Has.Length.EqualTo(2));
     }
 
     // ── R×W fresh / snapshot derivation ───────────────────────────────
@@ -371,7 +371,7 @@ public class AccessDagDerivationTests
             .Add(new Sys { ConfigureAction = b => b.Name("Other").Phase(Phase.Simulation) })
             .Build(_registry.Runtime);
 
-        Assert.That(scheduler.Systems, Has.Length.EqualTo(2));
+        Assert.That(scheduler.UserSystems, Has.Length.EqualTo(2));
     }
 
     // ── Undeclared systems land in DefaultPhase and ARE conflict-detected (Unit 5) ──
@@ -432,7 +432,7 @@ public class AccessDagDerivationTests
     public void EmptySchedule_BuildsCleanly()
     {
         using var scheduler = RuntimeSchedule.Create(Options()).Build(_registry.Runtime);
-        Assert.That(scheduler.Systems, Is.Empty);
+        Assert.That(scheduler.UserSystems, Is.Empty);
     }
 
     // ── Direct-adjacency limitation: 3+ writers force pairwise edges ──
@@ -462,7 +462,7 @@ public class AccessDagDerivationTests
             .Add(new Sys { ConfigureAction = b => b.Name("C").Phase(Phase.Simulation).Writes<CompA>().After("A") })
             .Build(_registry.Runtime);
 
-        Assert.That(scheduler.Systems, Has.Length.EqualTo(3));
+        Assert.That(scheduler.UserSystems, Has.Length.EqualTo(3));
     }
 
     [Test]

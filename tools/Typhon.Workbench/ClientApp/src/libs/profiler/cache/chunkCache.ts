@@ -11,7 +11,7 @@
  *  - Eviction never drops a chunk that overlaps the current viewport (pin-on-visible). LRU only evicts off-screen chunks.
  */
 import type { ChunkManifestEntry, GaugeId, SystemDef, TickSummary, TraceMetadata } from '../model/types';
-import type { GaugeSeries, GcEvent, GcSuspensionEvent, MemoryAllocEventData, TickData } from '../model/traceModel';
+import type { GaugeSeries, GcEvent, GcSuspensionEvent, MemoryAllocEventData, OffCpuStore, TickData } from '../model/traceModel';
 import { aggregateGaugeData, mergeTickData } from '../model/traceModel';
 import { fetchChunk, fetchChunkBinary } from './api';
 import { processEventsInWorker, processBinaryInWorker } from '../decode/chunkWorkerClient';
@@ -76,6 +76,7 @@ export interface ChunkCacheState {
       gcSuspensions: GcSuspensionEvent[];
       threadNames: Map<number, string>;
       threadKinds: Map<number, number>;
+      offCpuBySlot: Map<number, OffCpuStore>;
     };
   } | null;
   /**
@@ -263,6 +264,7 @@ export function assembleTickViewAndNumbers(cache: ChunkCacheState, systems: Syst
   gcSuspensions: GcSuspensionEvent[];
   threadNames: Map<number, string>;
   threadKinds: Map<number, number>;
+  offCpuBySlot: Map<number, OffCpuStore>;
 } {
   // ── Memo short-circuit ────────────────────────────────────────────────────────────────────────────────────────────
   // assembleTickViewAndNumbers runs on EVERY viewport effect — which fires on every pan, zoom, and wheel event. When the
@@ -328,7 +330,7 @@ export function assembleTickViewAndNumbers(cache: ChunkCacheState, systems: Syst
   for (const idx of mergedIndices) {
     tickData[idx].rawEvents = [];
   }
-  const { gaugeSeries, gaugeCapacities, memoryAllocEvents, gcEvents, gcSuspensions } = aggregateGaugeData(tickData);
+  const { gaugeSeries, gaugeCapacities, memoryAllocEvents, gcEvents, gcSuspensions, offCpuBySlot } = aggregateGaugeData(tickData);
   // Use the cache-level persistent thread-name map rather than the per-assembly aggregator's
   // result. The aggregator only sees currently-resident ticks; if chunk 1 (where pre-tick
   // ThreadInfo records live) has been evicted or never loaded for the current viewRange, the
@@ -336,7 +338,9 @@ export function assembleTickViewAndNumbers(cache: ChunkCacheState, systems: Syst
   // the cache survives evictions — see `cache.threadNames` docs and the harvest in `loadChunk`.
   const threadNames = cache.threadNames;
   const threadKinds = cache.threadKinds;
-  const result = { tickData, tickNumbers, gaugeSeries, gaugeCapacities, memoryAllocEvents, gcEvents, gcSuspensions, threadNames, threadKinds };
+  const result = {
+    tickData, tickNumbers, gaugeSeries, gaugeCapacities, memoryAllocEvents, gcEvents, gcSuspensions, threadNames, threadKinds, offCpuBySlot,
+  };
   // Snapshot the version at which this result was computed. Any future call with the same version returns the same result via the
   // short-circuit at the top. Invalidated automatically when entries mutate (loadChunk ↑, evict ↑).
   cache.lastAssembly = { version: cache.entriesVersion, result };

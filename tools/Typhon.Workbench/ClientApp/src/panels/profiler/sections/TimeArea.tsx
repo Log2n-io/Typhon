@@ -208,6 +208,7 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
   const engineOpVisibility = useProfilerViewStore((s) => s.engineOpVisibility);
   const spanColorMode = useProfilerViewStore((s) => s.spanColorMode);
   const dynamicTrackHeight = useProfilerViewStore((s) => s.dynamicTrackHeight);
+  const showOffCpu = useProfilerViewStore((s) => s.showOffCpu);
   dynamicTrackHeightRef.current = dynamicTrackHeight;
 
   // Committed depth — the depth currently reflected in the layout. Grows immediately (before paint)
@@ -487,8 +488,9 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
       helpHover: helpHoverRef.current,
       pendingRangesUs,
       spanColorMode,
+      showOffCpu,
     }, getStudioThemeTokens());
-  }, [layout, ticks, viewRange, legendsVisible, selection, applyViewRange, commitViewRange, onGutterWidthChange, gaugeData, pendingRangesUs, spanColorMode]);
+  }, [layout, ticks, viewRange, legendsVisible, selection, applyViewRange, commitViewRange, onGutterWidthChange, gaugeData, pendingRangesUs, spanColorMode, showOffCpu]);
 
   const scheduleRender = useCallback((): void => {
     cancelAnimationFrame(rafRef.current);
@@ -609,6 +611,8 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
           tracks: layoutRef.current.tracks, ticks, vp: vpRef.current,
           gutterWidth: gutterWidthRef.current,
           legendsVisible,
+          offCpuBySlot: gaugeData.offCpuBySlot,
+          showOffCpu,
         });
         if (hit && hit.kind === 'gutter-chevron') {
           if (GAUGE_TRACK_ID_SET.has(hit.trackId)) {
@@ -656,7 +660,7 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
       };
       try { canvas.setPointerCapture(e.pointerId); } catch { /* noop */ }
     }
-  }, [ticks, gaugeCollapse, setGaugeCollapse, collapseState, setSingleCollapseState, legendsVisible]);
+  }, [ticks, gaugeCollapse, setGaugeCollapse, collapseState, setSingleCollapseState, legendsVisible, gaugeData.offCpuBySlot, showOffCpu]);
 
   const onPointerMove = useCallback((e: React.PointerEvent<HTMLCanvasElement>): void => {
     const local = getLocal(e);
@@ -717,6 +721,8 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
       tracks: layoutRef.current.tracks, ticks, vp: vpRef.current,
       gutterWidth: gutterWidthRef.current,
       legendsVisible,
+      offCpuBySlot: gaugeData.offCpuBySlot,
+      showOffCpu,
     });
     hoverRef.current = hover;
 
@@ -754,7 +760,7 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
       setHoverTooltipState(null);
     }
     scheduleRender();
-  }, [ticks, scheduleRender, applyViewRange, gaugeTooltipState, legendsVisible, helpTooltipState, hoverTooltipState]);
+  }, [ticks, scheduleRender, applyViewRange, gaugeTooltipState, legendsVisible, helpTooltipState, hoverTooltipState, gaugeData.offCpuBySlot, showOffCpu]);
 
   const onPointerUp = useCallback((e: React.PointerEvent<HTMLCanvasElement>): void => {
     const drag = dragRef.current;
@@ -782,6 +788,8 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
           tracks: layoutRef.current.tracks, ticks, vp: vpRef.current,
           gutterWidth: gutterWidthRef.current,
           legendsVisible,
+          offCpuBySlot: gaugeData.offCpuBySlot,
+          showOffCpu,
         });
         if (hit) {
           routeSelection(hit, setSelected);
@@ -789,7 +797,7 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
       }
     }
     scheduleRender();
-  }, [ticks, animateToRange, setSelected, scheduleRender, legendsVisible]);
+  }, [ticks, animateToRange, setSelected, scheduleRender, legendsVisible, gaugeData.offCpuBySlot, showOffCpu]);
 
   const onPointerLeave = useCallback((): void => {
     if (dragRef.current) return; // captured drag continues
@@ -820,6 +828,8 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
       tracks: layoutRef.current.tracks, ticks, vp: vpRef.current,
       gutterWidth: gutterWidthRef.current,
       legendsVisible,
+      offCpuBySlot: gaugeData.offCpuBySlot,
+      showOffCpu,
     });
     if (!hit) return;
 
@@ -849,7 +859,7 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
       case 'mini-row-op': animateToRange({ startUs: hit.op.startUs,    endUs: hit.op.endUs    }); return;
       default: return; // 'tick', 'gutter-chevron' — no-op
     }
-  }, [ticks, animateToRange, legendsVisible]);
+  }, [ticks, animateToRange, legendsVisible, gaugeData.offCpuBySlot, showOffCpu]);
 
   // ─── Native wheel listener ──────────────────────────────────────────────────────────────────
   // React's synthetic wheel is passive — preventDefault on Ctrl+wheel would be ignored and the
@@ -1043,6 +1053,10 @@ function routeSelection(
     case 'mini-row-op':
       // Treat mini-row ops as spans (they ARE SpanData under the hood — stored in projection arrays).
       setSelected({ kind: 'span', span: hit.op });
+      return;
+    case 'off-cpu':
+      // Off-CPU overlay bar — surface wait reason / ready-queue latency in its own DetailPane branch.
+      setSelected({ kind: 'off-cpu', interval: hit.interval });
       return;
     case 'gutter-chevron':
       // Already handled in pointerdown; never reaches here on click-without-drag

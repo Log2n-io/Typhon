@@ -119,6 +119,19 @@ public struct TickContext
     public int WorkerId { get; init; }
 
     /// <summary>
+    /// Zero-based chunk index for chunked-parallel systems (e.g. <see cref="ChunkedCallbackSystem"/>).
+    /// Range: [0, <see cref="ChunkCount"/>). For non-chunked systems, always 0. Use to compute the per-chunk slice of arbitrary work:
+    /// <c>start = ChunkIndex × totalSize / ChunkCount</c>.
+    /// </summary>
+    public int ChunkIndex { get; init; }
+
+    /// <summary>
+    /// Total number of chunks for chunked-parallel systems. For non-chunked systems, always 1.
+    /// Equal to the value passed to <see cref="SystemBuilder.ChunkedParallel"/>.
+    /// </summary>
+    public int ChunkCount { get; init; }
+
+    /// <summary>
     /// Game-facing accessor for the engine's spatial grid (issue #232). Provides cell tier assignment, coordinate conversion, and multi-observer
     /// helpers (<see cref="SpatialGridAccessor.SetCellTierMin"/>, <see cref="SpatialGridAccessor.ResetAllTiers"/>,
     /// <see cref="SpatialGridAccessor.SetTierInAABB"/>). Check <see cref="SpatialGridAccessor.IsValid"/> before use — false when no grid is configured.

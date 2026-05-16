@@ -6,18 +6,18 @@ using System.Threading;
 namespace Typhon.Engine.Tests.Runtime;
 
 /// <summary>
-/// Tests for runIf predicate integration — verifying that systems are properly skipped
-/// when their runIf returns false, and that successors still dispatch.
+/// Tests for ShouldRun predicate integration — verifying that systems are properly skipped
+/// when their ShouldRun returns false, and that successors still dispatch.
 /// </summary>
 [TestFixture]
-public class RunIfTests
+public class ShouldRunTests
 {
     private ResourceRegistry _registry;
 
     [SetUp]
     public void SetUp()
     {
-        _registry = new ResourceRegistry(new ResourceRegistryOptions { Name = "RunIfTest" });
+        _registry = new ResourceRegistry(new ResourceRegistryOptions { Name = "ShouldRunTest" });
     }
 
     [TearDown]
@@ -27,9 +27,9 @@ public class RunIfTests
     }
 
     [Test]
-    public void RunIfFalse_SystemSkipped_SuccessorsStillDispatch()
+    public void ShouldRunFalse_SystemSkipped_SuccessorsStillDispatch()
     {
-        // A → B(runIf: false) → C
+        // A → B(shouldRun: false) → C
         // B should be skipped, but C must still execute
         var executed = new ConcurrentBag<string>();
         var captured = 0;
@@ -37,7 +37,7 @@ public class RunIfTests
         using var scheduler = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 2, BaseTickRate = 1000 })
             .CallbackSystem("A", _ => { if (captured == 0) { executed.Add("A"); } })
             .CallbackSystem("B", _ => { if (captured == 0) { executed.Add("B"); } },
-                after: "A", runIf: () => false)
+                after: "A", shouldRun: () => false)
             .CallbackSystem("C", _ =>
             {
                 if (captured == 0)
@@ -53,12 +53,12 @@ public class RunIfTests
         scheduler.Shutdown();
 
         Assert.That(executed, Does.Contain("A"), "A should execute");
-        Assert.That(executed, Does.Not.Contain("B"), "B should be skipped (runIf: false)");
+        Assert.That(executed, Does.Not.Contain("B"), "B should be skipped (shouldRun: false)");
         Assert.That(executed, Does.Contain("C"), "C should execute (successor of skipped B)");
     }
 
     [Test]
-    public void RunIfTrue_SystemExecutesNormally()
+    public void ShouldRunTrue_SystemExecutesNormally()
     {
         var executed = new ConcurrentBag<string>();
         var captured = 0;
@@ -71,7 +71,7 @@ public class RunIfTests
                     executed.Add("A");
                     Interlocked.Exchange(ref captured, 1);
                 }
-            }, runIf: () => true)
+            }, shouldRun: () => true)
             .Build(_registry.Runtime);
 
         scheduler.Start();
@@ -82,7 +82,7 @@ public class RunIfTests
     }
 
     [Test]
-    public void RunIfNull_SystemAlwaysRuns()
+    public void ShouldRunNull_SystemAlwaysRuns()
     {
         var executed = 0;
 
@@ -98,11 +98,11 @@ public class RunIfTests
     }
 
     [Test]
-    public void RunIfFalse_TelemetryRecordsSkipped()
+    public void ShouldRunFalse_TelemetryRecordsSkipped()
     {
         using var scheduler = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 2, BaseTickRate = 1000 })
             .CallbackSystem("A", _ => { })
-            .CallbackSystem("B", _ => { }, after: "A", runIf: () => false)
+            .CallbackSystem("B", _ => { }, after: "A", shouldRun: () => false)
             .Build(_registry.Runtime);
 
         scheduler.Start();
@@ -117,7 +117,7 @@ public class RunIfTests
     }
 
     [Test]
-    public void RunIfFalse_PipelineSystem_Skipped()
+    public void ShouldRunFalse_PipelineSystem_Skipped()
     {
         var chunkCount = 0;
         var outputExecuted = new ConcurrentBag<string>();
@@ -128,7 +128,7 @@ public class RunIfTests
             .PipelineSystem("Physics", (chunk, total) =>
             {
                 Interlocked.Increment(ref chunkCount);
-            }, 100, after: "Input", runIf: () => false)
+            }, 100, after: "Input", shouldRun: () => false)
             .CallbackSystem("Output", _ =>
             {
                 if (captured == 0)
@@ -143,12 +143,12 @@ public class RunIfTests
         SpinWait.SpinUntil(() => scheduler.CurrentTickNumber >= 1, TimeSpan.FromSeconds(5));
         scheduler.Shutdown();
 
-        Assert.That(chunkCount, Is.EqualTo(0), "PipelineSystem with runIf:false should process zero chunks");
+        Assert.That(chunkCount, Is.EqualTo(0), "PipelineSystem with shouldRun:false should process zero chunks");
         Assert.That(outputExecuted, Does.Contain("Output"), "Output should execute after skipped PipelineSystem");
     }
 
     [Test]
-    public void RunIf_DynamicPredicate_ChangesPerTick()
+    public void ShouldRun_DynamicPredicate_ChangesPerTick()
     {
         var ticksSeen = 0;
         var bExecutions = 0;
@@ -157,7 +157,7 @@ public class RunIfTests
         using var scheduler = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 })
             .CallbackSystem("A", _ => Interlocked.Increment(ref ticksSeen))
             .CallbackSystem("B", _ => Interlocked.Increment(ref bExecutions),
-                after: "A", runIf: () => ticksSeen % 2 == 1)
+                after: "A", shouldRun: () => ticksSeen % 2 == 1)
             .Build(_registry.Runtime);
 
         scheduler.Start();

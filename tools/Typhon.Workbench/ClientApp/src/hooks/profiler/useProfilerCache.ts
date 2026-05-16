@@ -17,6 +17,7 @@ import {
   type GcEvent,
   type GcSuspensionEvent,
   type MemoryAllocEventData,
+  type OffCpuStore,
   type TickData,
 } from '@/libs/profiler/model/traceModel';
 import type { ChunkManifestEntry, GaugeId, TickSummary, TraceMetadata } from '@/libs/profiler/model/types';
@@ -40,6 +41,8 @@ export interface ProfilerGaugeData {
   gcEvents: GcEvent[];
   gcSuspensions: GcSuspensionEvent[];
   threadNames: Map<number, string>;
+  /** Slot → off-CPU interval store, derived cross-tick from ThreadContextSwitch records. Empty for traces with no scheduling data. */
+  offCpuBySlot: Map<number, OffCpuStore>;
 }
 
 const EMPTY_GAUGE_DATA: ProfilerGaugeData = {
@@ -49,6 +52,7 @@ const EMPTY_GAUGE_DATA: ProfilerGaugeData = {
   gcEvents: [],
   gcSuspensions: [],
   threadNames: new Map(),
+  offCpuBySlot: new Map(),
 };
 
 /**
@@ -247,6 +251,7 @@ export function useProfilerCache(sessionId: string | null, isLive: boolean): {
         gcEvents: assembled.gcEvents,
         gcSuspensions: assembled.gcSuspensions,
         threadNames: mergedThreadNames,
+        offCpuBySlot: assembled.offCpuBySlot,
       }
     : { ...EMPTY_GAUGE_DATA, threadNames: mergedThreadNames };
 

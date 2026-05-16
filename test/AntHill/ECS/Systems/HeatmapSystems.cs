@@ -37,7 +37,7 @@ internal sealed class PheroMaxReduceSystem : ChunkedCallbackSystem
         .Phase(AntPhases.Render)
         .ReadsResource("PheromoneGrid")
         .WritesResource(_writesResource)
-        .RunIf(() => _bridge._heatmapEnabled)
+        .ShouldRun(() => _bridge._heatmapEnabled)
         .ChunkedParallel(ChunkCount);
 
     protected override void Execute(TickContext ctx)
@@ -95,7 +95,7 @@ internal sealed class HeatmapRgbaPackSystem : CallbackSystem
         .Name("HeatmapRgbaPack")
         .Phase(AntPhases.Render)
         .WritesResource("Heatmap")
-        .RunIf(() => _bridge._heatmapEnabled);
+        .ShouldRun(() => _bridge._heatmapEnabled);
 
     protected override void Execute(TickContext ctx)
     {

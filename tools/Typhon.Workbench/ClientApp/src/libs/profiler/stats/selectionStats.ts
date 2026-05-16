@@ -34,7 +34,7 @@ export interface SelectionStats {
 
   /**
    * All span groups (by name) within range — full per-group stats. Caller selects + slices for
-   * its surface: the right-pane's "Top spans" card uses descending totalUs, top-5; the sortable
+   * its surface: the right-pane's "Top spans" card uses descending totalUs, top-10; the sortable
    * "Top N" table sorts by whichever column the user clicked, top-20. Computed once here so both
    * surfaces share the underlying aggregation and the worst-instance click-jump target.
    */
@@ -59,7 +59,7 @@ export interface SelectionStats {
 }
 
 /** Cap on how many top-N entries we return per category. Keeps the right-pane vertical extent bounded. */
-export const TOP_N = 5;
+export const TOP_N = 10;
 
 /**
  * Aggregate metrics for one span name within the selection range. Each instance contributes its
