@@ -18,12 +18,27 @@ import {
   saveLayoutAsDefault,
 } from './openSchemaBrowser';
 import { buildProfilerPaletteCommands } from './profilerCommands';
+import type { ConnectTab } from '@/shell/dialogs/ConnectDialog';
 
 export interface CommandItem {
   id: string;
   label: string;
   keywords?: string;
   action: () => void;
+}
+
+/**
+ * Connect-dialog opener. MenuBar mounts the dialog and registers its tab-aware open callback here so
+ * palette commands can trigger it without prop-drilling. Same pattern as {@link registerOpenSaveReplay}.
+ */
+let registeredOpenConnect: ((tab: ConnectTab) => void) | null = null;
+
+export function registerOpenConnect(fn: ((tab: ConnectTab) => void) | null): void {
+  registeredOpenConnect = fn;
+}
+
+function openConnectDialog(tab: ConnectTab): void {
+  registeredOpenConnect?.(tab);
 }
 
 export function buildBaseCommands(): CommandItem[] {
@@ -36,10 +51,10 @@ export function buildBaseCommands(): CommandItem[] {
   };
 
   return [
-    { id: 'open-file',     label: 'Open File…',               keywords: 'open typhon',      action: () => {} },
-    { id: 'open-recent',   label: 'Open Recent',              keywords: 'recent file',       action: () => {} },
-    { id: 'attach',        label: 'Attach…',                  keywords: 'attach engine',     action: () => {} },
-    { id: 'open-trace',    label: 'Open Trace…',              keywords: 'trace typhon',      action: () => {} },
+    { id: 'open-file',     label: 'Open File…',               keywords: 'open typhon',      action: () => openConnectDialog('open') },
+    { id: 'open-recent',   label: 'Open Recent',              keywords: 'recent file',       action: () => openConnectDialog('recent') },
+    { id: 'attach',        label: 'Attach…',                  keywords: 'attach engine',     action: () => openConnectDialog('attach') },
+    { id: 'open-trace',    label: 'Open Trace…',              keywords: 'trace typhon',      action: () => openConnectDialog('trace') },
     { id: 'close-session', label: 'Close Session',            keywords: 'close disconnect',  action: closeSession },
     { id: 'refresh-graph', label: 'Refresh Resource Graph',   keywords: 'refresh reload tree', action: refreshResourceGraph },
     { id: 'toggle-view-component-browser',    label: 'Toggle View Component Browser',    keywords: 'schema components inspector #schema browser', action: toggleViewComponentBrowser },

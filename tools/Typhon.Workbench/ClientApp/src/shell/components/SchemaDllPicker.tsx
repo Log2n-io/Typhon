@@ -60,6 +60,7 @@ export default function SchemaDllPicker({ paths, onChange, initialPath, onAutoDe
  <div className="min-h-0 flex-1">
  <FileBrowser
  extensionFilter={['.schema.dll']}
+ recentKind="db"
  multiSelect
  initialPath={initialPath}
  onSelectionChange={onChange}

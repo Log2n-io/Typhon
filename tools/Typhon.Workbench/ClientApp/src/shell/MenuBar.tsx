@@ -33,6 +33,7 @@ import {
   saveLayoutAsDefault,
 } from './commands/openSchemaBrowser';
 import { toggleViewCriticalPath, toggleViewProfiler, toggleViewTopSpans, registerOpenSaveReplay } from './commands/profilerCommands';
+import { registerOpenConnect } from './commands/baseCommands';
 import { logError, logInfo } from '@/stores/useLogStore';
 
 export default function MenuBar() {
@@ -52,10 +53,14 @@ export default function MenuBar() {
  const [initialTab, setInitialTab] = useState<ConnectTab>('open');
  const [saveReplayOpen, setSaveReplayOpen] = useState(false);
 
- // Register the dialog opener with the module-level slot so palette commands can trigger it. Mirrors registerProfilerDockApi.
+ // Register the dialog openers with their module-level slots so palette commands can trigger them. Mirrors registerProfilerDockApi.
  useEffect(() => {
    registerOpenSaveReplay(() => setSaveReplayOpen(true));
-   return () => registerOpenSaveReplay(null);
+   registerOpenConnect((tab) => { setInitialTab(tab); setDialogOpen(true); });
+   return () => {
+     registerOpenSaveReplay(null);
+     registerOpenConnect(null);
+   };
  }, []);
 
  const openConnect = (tab: ConnectTab) => {
@@ -84,7 +89,7 @@ export default function MenuBar() {
  <MenubarTrigger className="h-7 px-2 text-density-sm">File</MenubarTrigger>
  <MenubarContent>
  <MenubarItem onClick={() => openConnect('open')}>Open .typhon File…</MenubarItem>
- <MenubarItem onClick={() => openConnect('cached')}>Open .typhon-trace…</MenubarItem>
+ <MenubarItem onClick={() => openConnect('trace')}>Open .typhon-trace…</MenubarItem>
  <MenubarItem onClick={() => openConnect('attach')}>Attach to Engine…</MenubarItem>
  <MenubarSeparator />
  <MenubarItem

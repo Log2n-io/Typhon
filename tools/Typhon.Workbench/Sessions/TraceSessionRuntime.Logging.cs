@@ -10,4 +10,10 @@ public sealed partial class TraceSessionRuntime
 
     [LoggerMessage(Level = LogLevel.Error, Message = "Trace cache build background task faulted for {Path}")]
     private partial void LogBuildTaskFaulted(System.Exception exception, string path);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Source trace file overwritten on disk — newer version available for {Path}")]
+    private partial void LogSourceFileVersionDetected(string path);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Failed to install source-file watcher for {Path}")]
+    private partial void LogSourceWatchFailed(System.Exception exception, string path);
 }

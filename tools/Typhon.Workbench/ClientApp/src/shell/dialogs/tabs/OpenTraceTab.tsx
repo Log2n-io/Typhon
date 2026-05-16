@@ -30,6 +30,7 @@ export default function OpenTraceTab({ onOpen, isOpening }: Props) {
         <div className="min-h-0 flex-1">
           <FileBrowser
             extensionFilter={['.typhon-trace', '.typhon-replay']}
+            recentKind="trace"
             onSelectionChange={(paths) => setSelectedPath(paths[0] ?? null)}
             onActivate={(p) => setSelectedPath(p)}
           />

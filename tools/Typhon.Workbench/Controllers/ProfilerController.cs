@@ -72,6 +72,30 @@ public sealed class ProfilerController : ControllerBase
     }
 
     /// <summary>
+    /// Reports whether the source <c>.typhon-trace</c> behind a Trace session has been overwritten on disk
+    /// since the session's sidecar cache was built — e.g. a profiling re-run against the same app regenerated
+    /// the file. The Workbench polls this (~3 s) so the profiler header can offer the user an in-place reload.
+    /// Detection is debounced + fingerprint-verified server-side; see <see cref="TraceSessionRuntime.NewVersionAvailable"/>.
+    /// Always reports <c>false</c> for self-contained <c>.typhon-replay</c> sessions — they have no source file.
+    /// </summary>
+    [HttpGet("trace-status")]
+    public ActionResult<TraceStatusDto> GetTraceStatus(Guid sessionId)
+    {
+        var session = HttpContext.Items["Session"];
+        if (session is TraceSession trace)
+        {
+            return Ok(new TraceStatusDto(trace.Runtime.NewVersionAvailable));
+        }
+
+        return Conflict(new ProblemDetails
+        {
+            Title = "session_kind_mismatch",
+            Detail = "Trace status is only available for Trace sessions.",
+            Status = StatusCodes.Status409Conflict,
+        });
+    }
+
+    /// <summary>
     /// #302 Phase 4: source-location manifest for the session — maps span <c>siteId</c>s to file/line/method.
     /// Works for both Attach (received in init handshake) and Trace (read from the file's trailer) sessions.
     /// Returns an empty manifest when the trace doesn't carry source attribution (engine emitted no

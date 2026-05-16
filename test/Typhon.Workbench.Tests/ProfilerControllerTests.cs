@@ -129,6 +129,46 @@ public sealed class ProfilerControllerTests
     }
 
     [Test]
+    public async Task TraceStatus_ReportsNewVersion_AfterSourceFileOverwritten()
+    {
+        var session = await CreateTraceSessionAsync(tickCount: 3, instantsPerTick: 2);
+        await WaitForBuildAsync(session.SessionId, TimeSpan.FromSeconds(5));
+
+        // Freshly built session, source untouched — endpoint must report no new version.
+        Assert.That(await GetNewVersionAvailableAsync(session.SessionId), Is.False,
+            "an untouched source file must report newVersionAvailable=false");
+
+        // Simulate a profiling re-run overwriting the same .typhon-trace in place.
+        var replacement = TraceFixtureBuilder.BuildMinimalTrace(_factory.DemoDirectory, tickCount: 6, instantsPerTick: 4);
+        File.Copy(replacement, session.FilePath!, overwrite: true);
+
+        // Poll the endpoint through the 1 s server-side debounce + fingerprint re-compute.
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+        var detected = false;
+        while (DateTime.UtcNow < deadline)
+        {
+            if (await GetNewVersionAvailableAsync(session.SessionId))
+            {
+                detected = true;
+                break;
+            }
+            await Task.Delay(100);
+        }
+        Assert.That(detected, Is.True,
+            "overwriting the source .typhon-trace must surface via trace-status within the debounce window");
+    }
+
+    private async Task<bool> GetNewVersionAvailableAsync(Guid sessionId)
+    {
+        var req = new HttpRequestMessage(HttpMethod.Get, $"/api/sessions/{sessionId}/profiler/trace-status");
+        req.Headers.Add("X-Session-Token", sessionId.ToString());
+        var resp = await _client.SendAsync(req);
+        Assert.That(resp.StatusCode, Is.EqualTo(HttpStatusCode.OK));
+        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+        return doc.RootElement.GetProperty("newVersionAvailable").GetBoolean();
+    }
+
+    [Test]
     public async Task Chunks_OutOfRangeIndex_Returns404()
     {
         var session = await CreateTraceSessionAsync();

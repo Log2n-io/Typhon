@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Activity, AlertCircle, Loader2, Radio, Unplug } from 'lucide-react';
+import { Activity, AlertCircle, Loader2, Radio, RefreshCw, Unplug } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { usePostApiSessionsTrace } from '@/api/generated/sessions/sessions';
+import { logError, logInfo } from '@/stores/useLogStore';
 import { useSessionStore } from '@/stores/useSessionStore';
 import { useNavHistoryStore } from '@/stores/useNavHistoryStore';
 import { useProfilerSelectionStore } from '@/stores/useProfilerSelectionStore';
@@ -12,7 +14,10 @@ import { useProfilerLiveStream } from '@/hooks/profiler/useProfilerLiveStream';
 import { useProfilerCache } from '@/hooks/profiler/useProfilerCache';
 import { useProfilerSourceLocations } from '@/hooks/profiler/useProfilerSourceLocations';
 import { useProfilerStatsWriter } from '@/hooks/profiler/useProfilerStatsWriter';
+import { useProfilerTraceStatus } from '@/hooks/profiler/useProfilerTraceStatus';
 import { useProfilerStatsStore } from '@/stores/useProfilerStatsStore';
+import { useRecentFilesStore } from '@/stores/useRecentFilesStore';
+import { resolveInitialViewport } from '@/libs/profiler/initialViewport';
 import TickOverview from './sections/TickOverview';
 import TimeArea from './sections/TimeArea';
 import OverloadStrip from './sections/OverloadStrip';
@@ -61,14 +66,39 @@ export default function ProfilerPanel() {
 
   const commitViewRange = useProfilerViewStore((s) => s.commitViewRange);
 
+  // Trace reload — the server watches the source .typhon-trace for re-profiling overwrites and flips a
+  // flag this hook polls (~3 s). When set, the header shows a Reload button. Gated on `metadata` so it
+  // doesn't poll during the build (the server only arms the watcher after the build completes anyway).
+  const setSession = useSessionStore((s) => s.setSession);
+  const postTrace = usePostApiSessionsTrace();
+  const newVersionAvailable = useProfilerTraceStatus(isTrace && metadata ? sessionId : null);
+
+  const handleReloadTrace = useCallback(async () => {
+    if (!filePath || postTrace.isPending) return;
+    try {
+      // Re-POSTing the same path makes the server drop the stale TraceSession and spin a fresh one — it
+      // re-fingerprints the file, sees the mismatch, and rebuilds the sidecar cache. Swapping sessionId
+      // re-keys this panel: the cleanup effect below wipes every profiler store (viewRange included), so
+      // the first-tick effect re-runs and the view resets cleanly onto the new run.
+      const response = await postTrace.mutateAsync({ data: { filePath } });
+      setSession(response.data);
+      logInfo('Reloaded trace with newer on-disk version', {
+        sessionId: response.data.sessionId,
+        filePath: response.data.filePath ?? filePath,
+      });
+    } catch (err) {
+      logError('Failed to reload trace', { filePath, error: String(err) });
+    }
+  }, [filePath, postTrace, setSession]);
+
   // #289 — unified chunk cache for both modes. The replay path builds the cache once on session open;
   // the live path's IncrementalCacheBuilder grows the manifest server-side and ships growth deltas, so
   // useProfilerCache observes the same expanding manifest in either mode.
   //
   // ⚠️ Important: `useProfilerCache.loadRange` gates on `viewRange.endUs > viewRange.startUs` —
-  // any `{0, 0}` sentinel write here would suppress all tick loading. The first-tick init below
-  // therefore drives off `metadata.tickSummaries` (available in one shot from the API response)
-  // rather than `timeAreaTicks` (which only populates after viewRange is non-degenerate).
+  // any `{0, 0}` sentinel write here would suppress all tick loading. The viewport-restore init
+  // below therefore drives off `metadata.tickSummaries` (available in one shot from the API
+  // response) rather than `timeAreaTicks` (which only populates after viewRange is non-degenerate).
   const { ticks: timeAreaTicks, gaugeData, threadInfos, pendingRangesUs } = useProfilerCache(sessionId, isAttach);
 
   // Single producer for the viewport range-stats. RangeStatsDetail and TopSpansPanel both read the
@@ -81,21 +111,35 @@ export default function ProfilerPanel() {
   );
   useProfilerStatsWriter(timeAreaTicks, tickSummariesForStats, viewRangeForStats);
 
-  // If there's no time selection (viewRange = the `{0, 0}` sentinel) and the trace has summaries,
-  // default to the first tick. Fires once per session — once viewRange is set to a real range
-  // (user pan, URL deep-link via useSelectionBootstrap, or this effect itself), the early-return
-  // below keeps it from re-firing.
+  // On metadata arrival, restore this file's last-used viewport (per-file memory, fingerprint-gated)
+  // or fall back to the first tick. Fires once per session — the `{0,0}` sentinel gate keeps it from
+  // re-firing once a real range is set (user pan, URL deep-link via useSelectionBootstrap, or this
+  // effect itself), and the session-change cleanup resets viewRange to `{0,0}` so it re-arms for
+  // each newly opened file. Restore is trace-only: live/attach sessions have no persistent file id.
   useEffect(() => {
     const vr = useProfilerViewStore.getState().viewRange;
     if (vr.endUs > vr.startUs) return;
-    const summaries = metadata?.tickSummaries;
-    if (!summaries || summaries.length === 0) return;
-    const first = summaries[0];
-    const startUs = Number(first.startUs);
-    const durationUs = Number(first.durationUs) || 1;
-    if (!Number.isFinite(startUs)) return;
-    commitViewRange({ startUs, endUs: startUs + durationUs });
-  }, [metadata, commitViewRange]);
+    if (!metadata) return;
+    const saved = isTrace && filePath ? useRecentFilesStore.getState().getLastViewport(filePath) : null;
+    const target = resolveInitialViewport(metadata, saved);
+    if (target) commitViewRange(target);
+  }, [metadata, isTrace, filePath, commitViewRange]);
+
+  // Persist the committed viewport per file (fingerprint-tagged) so reopening the same trace lands
+  // back where it was left. Skipped for the `{0,0}` sentinel and for live/attach sessions (no file
+  // identity). The fingerprint lets the restore effect above reject a viewport saved against older
+  // content once the trace is re-profiled — see resolveInitialViewport.
+  useEffect(() => {
+    if (!isTrace || !filePath) return;
+    if (viewRangeForStats.endUs <= viewRangeForStats.startUs) return;
+    const fingerprint = useProfilerSessionStore.getState().metadata?.fingerprint;
+    if (!fingerprint) return;
+    useRecentFilesStore.getState().setLastViewport(filePath, {
+      fingerprint,
+      startUs: viewRangeForStats.startUs,
+      endUs: viewRangeForStats.endUs,
+    });
+  }, [viewRangeForStats, isTrace, filePath]);
 
   // Metadata polling runs in both Trace and Attach modes — server branches on session kind.
   // Gate on kind so the query doesn't fire for Open (DB) sessions, which would 409.
@@ -116,6 +160,14 @@ export default function ProfilerPanel() {
   // The cleanup wipes every profiler-scoped store so switching sessions (or closing the panel)
   // doesn't leak stale SpanData references / DetailPanel selections / nav-history entries from
   // the previous trace into the next one.
+  //
+  // viewRange is reset to the `{0,0}` "no selection" sentinel here too: it's session-scoped, and
+  // a prior trace's viewport is meaningless on the next trace. Without this, opening a second
+  // trace keeps the old viewRange — the first-tick effect's sentinel gate then early-returns, so
+  // the new trace never snaps to its first tick AND useProfilerCache can't load chunks for a
+  // window outside the new trace's time range (it just shows empty until the user re-selects).
+  // The cleanup only fires on session *change* (not first mount), so a cold-load URL deep-link
+  // on the first session survives.
   useEffect(() => {
     setIsLive(isAttach);
     return () => {
@@ -123,6 +175,7 @@ export default function ProfilerPanel() {
       useProfilerSelectionStore.getState().clear();
       useProfilerStatsStore.getState().clear();
       useNavHistoryStore.getState().clear();
+      useProfilerViewStore.getState().commitViewRange({ startUs: 0, endUs: 0 });
     };
   }, [sessionId, isAttach, setIsLive]);
 
@@ -198,6 +251,20 @@ export default function ProfilerPanel() {
             <span className="font-mono tabular-nums text-muted-foreground">
               {metadata.header?.systemCount ?? 0} systems
             </span>
+            {newVersionAvailable && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleReloadTrace}
+                disabled={postTrace.isPending}
+                className="ml-auto h-6 border-amber-500/50 px-2 text-[11px] text-amber-600 hover:bg-amber-500/10 dark:text-amber-400"
+                aria-label="Reload trace with the newer on-disk version"
+                title="The source .typhon-trace file was overwritten on disk (a profiling re-run regenerated it). Reload to rebuild the cache from the new version — the current view resets."
+              >
+                <RefreshCw className="mr-1 h-3 w-3" aria-hidden="true" />
+                Reload trace
+              </Button>
+            )}
           </>
         )}
       </div>

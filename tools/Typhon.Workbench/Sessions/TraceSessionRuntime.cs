@@ -46,6 +46,22 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
     private string _buildError;
     private bool _disposed;
 
+    /// <summary>Idle window (ms) after the last filesystem event before the source file is re-fingerprinted.
+    /// A profiling re-run overwrites the trace in many small writes — each event only re-arms this debounce.</summary>
+    private const int SourceWatchDebounceMs = 1000;
+
+    /// <summary>Watches the source <c>.typhon-trace</c> directory for overwrites. Null for replay files (no source) and
+    /// until the build completes (started in <see cref="BuildAsync"/>).</summary>
+    private FileSystemWatcher _sourceWatcher;
+    /// <summary>Debounce timer for <see cref="_sourceWatcher"/> events — see <see cref="SourceWatchDebounceMs"/>.</summary>
+    private Timer _sourceWatchDebounce;
+    /// <summary>32-byte source fingerprint this session's cache was built from. Compared against a fresh fingerprint
+    /// on each debounce settle to decide whether the file genuinely changed.</summary>
+    private byte[] _loadedFingerprint;
+    /// <summary>Backing field for <see cref="NewVersionAvailable"/>. Set by the debounce callback, read by the controller.
+    /// Plain field — bool reads/writes are atomic on x64 and the 3 s client poll tolerates a one-tick visibility lag.</summary>
+    private bool _newVersionAvailable;
+
     /// <summary>The source <c>.typhon-trace</c> path, OR a self-contained <c>.typhon-replay</c> path. Use <see cref="IsReplayFile"/>
     /// to disambiguate.</summary>
     public string FilePath => _filePath;
@@ -74,6 +90,15 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
 
     /// <summary>Source timestamp frequency (ticks/second from the source header). 0 until build completes.</summary>
     public long TimestampFrequency => _timestampFrequency;
+
+    /// <summary>
+    /// True once the source <c>.typhon-trace</c> has been overwritten on disk with content that differs from the
+    /// version this session's cache was built from. Detected by a debounced <see cref="FileSystemWatcher"/> that
+    /// re-computes the SHA-256 fingerprint and compares it to <see cref="_loadedFingerprint"/>. Always false for
+    /// self-contained <c>.typhon-replay</c> sessions (no source file to watch). The Workbench polls this through
+    /// <c>GET /profiler/trace-status</c> so it can offer the user a reload after a profiling re-run.
+    /// </summary>
+    public bool NewVersionAvailable => _newVersionAvailable;
 
     /// <summary>
     /// #302 — source-location manifest read from the source <c>.typhon-trace</c>'s trailer at build
@@ -294,6 +319,13 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
                 () => QuerySourceStrings);
             _metadataTcs.TrySetResult(metadata);
             BuildCompleted?.Invoke(metadata);
+
+            // Watch the source .typhon-trace for re-profiling overwrites so the panel can offer a reload.
+            // Replay files are self-contained — no source file exists to watch.
+            if (!_isReplayFile)
+            {
+                StartSourceWatch(fingerprint);
+            }
         }
         catch (OperationCanceledException)
         {
@@ -763,6 +795,86 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
         }
     }
 
+    /// <summary>
+    /// Installs a debounced <see cref="FileSystemWatcher"/> on the source <c>.typhon-trace</c>. A profiling re-run
+    /// overwrites the file in many small writes, so each filesystem event only re-arms the debounce timer; the
+    /// timer's callback re-fingerprints the file and flips <see cref="NewVersionAvailable"/> only when the content
+    /// actually differs from <paramref name="loadedFingerprint"/>. The watcher is best-effort UX sugar — a setup
+    /// failure is logged and swallowed rather than faulting a session that otherwise built fine.
+    /// </summary>
+    private void StartSourceWatch(byte[] loadedFingerprint)
+    {
+        _loadedFingerprint = loadedFingerprint;
+        var dir = Path.GetDirectoryName(_filePath);
+        var name = Path.GetFileName(_filePath);
+        if (string.IsNullOrEmpty(dir) || string.IsNullOrEmpty(name))
+        {
+            return;
+        }
+
+        try
+        {
+            _sourceWatchDebounce = new Timer(OnSourceWatchDebounceElapsed, null, Timeout.Infinite, Timeout.Infinite);
+            // Filter is the exact source file name, so the sibling <name>.typhon-trace-cache rebuilds never trip it.
+            var watcher = new FileSystemWatcher(dir, name)
+            {
+                NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.FileName | NotifyFilters.CreationTime,
+            };
+            watcher.Changed += OnSourceFileEvent;
+            watcher.Created += OnSourceFileEvent;
+            watcher.Renamed += OnSourceFileEvent;
+            watcher.EnableRaisingEvents = true;
+            _sourceWatcher = watcher;
+        }
+        catch (Exception ex)
+        {
+            LogSourceWatchFailed(ex, _filePath);
+        }
+    }
+
+    private void OnSourceFileEvent(object sender, FileSystemEventArgs e)
+    {
+        // Once flagged there's nothing more to detect; leave the debounce timer idle.
+        if (_newVersionAvailable || _disposed)
+        {
+            return;
+        }
+        try
+        {
+            _sourceWatchDebounce?.Change(SourceWatchDebounceMs, Timeout.Infinite);
+        }
+        catch (ObjectDisposedException)
+        {
+            // Raced with Dispose — harmless.
+        }
+    }
+
+    private void OnSourceWatchDebounceElapsed(object state)
+    {
+        if (_newVersionAvailable || _disposed)
+        {
+            return;
+        }
+        try
+        {
+            var current = new byte[32];
+            TraceFileCacheReader.ComputeSourceFingerprint(_filePath, current);
+            if (!current.AsSpan().SequenceEqual(_loadedFingerprint))
+            {
+                _newVersionAvailable = true;
+                LogSourceFileVersionDetected(_filePath);
+            }
+        }
+        catch (IOException)
+        {
+            // File still locked by the writer (or transiently unreadable mid-overwrite) — a later event re-arms the timer.
+        }
+        catch (UnauthorizedAccessException)
+        {
+            // Transient sharing / ACL state during the writer's overwrite — same handling as above.
+        }
+    }
+
     private void ThrowIfDisposed()
     {
         if (_disposed) throw new ObjectDisposedException(nameof(TraceSessionRuntime));
@@ -775,5 +887,7 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
         try { _cts.Cancel(); } catch { }
         try { _cts.Dispose(); } catch { }
         try { _reader?.Dispose(); } catch { }
+        try { _sourceWatcher?.Dispose(); } catch { }
+        try { _sourceWatchDebounce?.Dispose(); } catch { }
     }
 }

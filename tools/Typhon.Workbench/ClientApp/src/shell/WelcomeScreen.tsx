@@ -51,7 +51,7 @@ export default function WelcomeScreen() {
  <Button
  variant="outline"
  className="flex h-auto flex-col items-center gap-2 px-6 py-4 text-density-sm"
- onClick={() => openDialog('cached')}
+ onClick={() => openDialog('trace')}
  >
  <FileSearch className="h-5 w-5" />
  <span>Open .typhon-trace</span>

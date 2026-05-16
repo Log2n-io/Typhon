@@ -34,6 +34,7 @@ export default function OpenFileTab({ onOpen, isOpening }: Props) {
  <div className="min-h-0 flex-1">
  <FileBrowser
  extensionFilter={['.bin', '.typhon']}
+ recentKind="db"
  onSelectionChange={(paths) => setSelectedPath(paths[0] ?? null)}
  onActivate={(p) => setSelectedPath(p)}
  />
