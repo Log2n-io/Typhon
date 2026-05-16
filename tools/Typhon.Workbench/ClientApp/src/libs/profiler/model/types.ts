@@ -328,7 +328,7 @@ export const TickPhaseNames: Record<number, string> = {
 
 export const SkipReasonNames: Record<number, string> = {
   0: 'Not Skipped',
-  1: 'RunIf False',
+  1: 'ShouldRun False',
   2: 'Empty Input',
   3: 'Empty Events',
   4: 'Throttled',

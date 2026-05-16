@@ -1829,66 +1829,6 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     }
 
     /// <summary>
-    /// Dispatch ONE internal system (not its successors) in isolation. Used by the 3-phase parallel fence — TickDriver calls this once per phase (Prep, then
-    /// Migrate, then Finalize), doing inter-phase serial bookkeeping between calls. The system's <c>DependsOn</c> predecessor edge is ignored: the caller is
-    /// responsible for sequencing.
-    /// </summary>
-    /// <remarks>
-    /// Resets the per-system chunk-claim / completion state for this single system before dispatch, since <see cref="ResetTickState"/> only runs once at
-    /// user-tick start — a 2nd or 3rd phase dispatch in the same tick would otherwise see stale "completed" state from the prior phase.
-    /// </remarks>
-    public void DispatchInternalSystem(int sysIdx)
-    {
-        if (_workerCount == 1)
-        {
-            DispatchInternalSystemSync(sysIdx);
-            return;
-        }
-
-        // Reset per-system state for this single phase entry. Match the per-index slice of ResetTickState so the ready-mark / chunk-claim machinery sees a
-        // clean slot.
-        _nextChunk[sysIdx].Value = 0;
-        _remainingChunks[sysIdx].Value = 0;
-        _isReady[sysIdx].Value = 0;
-        _remainingDeps[sysIdx].Value = 0; // bypass DAG predecessor count — caller serializes phases
-        _currentTickSystemMetrics[sysIdx] = default;
-        _systemFailed[sysIdx] = false;
-
-        _systemsRemaining.Value = 1;
-
-        var readyNow = Stopwatch.GetTimestamp();
-        _currentTickSystemMetrics[sysIdx].ReadyTick = readyNow;
-        InspectorSystemReady(sysIdx, readyNow);
-        var sys = Systems[sysIdx];
-        ushort dispatchSkipUnused = 0;
-        if (!EvaluateShouldRunAndPrepare(sysIdx, -1, false, ref dispatchSkipUnused))
-        {
-            // Skip / Prepare-dispatch already handled by helper.
-        }
-        else if (sys.IsParallelQuery)
-        {
-            DispatchParallelQuery(sysIdx, -1, false);
-        }
-        else
-        {
-            MarkSystemReady(sysIdx);
-        }
-
-        // Wake the worker pool. Bumping _tickGeneration is required for workers parked in their between-tick Wait.
-        _tickInProgress = 1;
-        Interlocked.Increment(ref _tickGeneration);
-        _tickStartSignal.Set();
-
-        while (_systemsRemaining.Value > 0)
-        {
-            Thread.SpinWait(1);
-        }
-
-        _tickInProgress = 0;
-        _tickStartSignal.Reset();
-    }
-
-    /// <summary>
     /// Synchronous internal-system dispatch for single-threaded mode (<c>WorkerCount == 1</c>). Runs the system's callback or chunks directly on the TickDriver
     /// thread, then recurses into any internal-flagged successors. Mirrors the ExecuteTickSingleThreaded structure for parallel queries — minus the
     /// failure/overload/skip machinery, which doesn't apply to engine-internal systems.
@@ -1899,6 +1839,29 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         if (sys.ShouldRun != null && !sys.ShouldRun())
         {
             return;
+        }
+
+        // Typed gate for ChunkedCallbackSystem instances (the fence-phase exec systems). The multi-threaded path runs this via EvaluateShouldRunAndPrepare;
+        // the sync path must mirror it or the per-phase FenceWorkPlan is never built and RuntimeChunkCount stays stale (0 on the first tick) — the fence then
+        // silently drops cluster migrations + AABB refresh. OnShouldRun() false → skip; OnPrepare() 0 → skip (empty input); >0 → set RuntimeChunkCount so the
+        // IsParallelQuery branch's ParallelQueryPrepareCallback reads the per-dispatch chunk count.
+        if (sys.Instance is ChunkedCallbackSystem ccs)
+        {
+            if (!ccs.OnShouldRun())
+            {
+                return;
+            }
+
+            int chunks = ccs.OnPrepare();
+            if (chunks == 0)
+            {
+                return;
+            }
+
+            if (chunks > 0)
+            {
+                sys.RuntimeChunkCount = chunks;
+            }
         }
 
         if (sys.IsParallelQuery)

@@ -183,9 +183,10 @@ public partial class VegetationRenderer : Node3D
     // ── Shader source ──────────────────────────────────────────────────────────
     // Vertex stage: deterministic per-plant sway phase derived from world-space origin of each
     //   MultiMesh instance. Top vertices (Y > 0) translate proportionally to (wind × sin(t)).
-    // Fragment stage: instance COLOR drives both ALBEDO and ALPHA; alpha-discard hides Despawned
-    //   plants without paying for alpha blending. unshaded → no per-fragment lighting cost; the
-    //   tint already bakes the "vegetation under day/night" feel via the renderer's u_time.
+    // Fragment stage: instance COLOR.rgb drives ALBEDO; COLOR.a is an alpha-discard mask that hides
+    //   Despawned plants (a=0). Surviving fragments render at a constant 50% ALPHA so the terrain and
+    //   ants read through the vegetation. unshaded → no per-fragment lighting cost; the tint already
+    //   bakes the "vegetation under day/night" feel via the renderer's u_time.
     private const string ShaderSource = @"
 shader_type spatial;
 render_mode unshaded, cull_disabled, depth_draw_opaque;
@@ -204,6 +205,7 @@ void vertex() {
 void fragment() {
     if (COLOR.a < 0.5) discard;
     ALBEDO = COLOR.rgb;
+    ALPHA = 0.5;
 }
 ";
 }

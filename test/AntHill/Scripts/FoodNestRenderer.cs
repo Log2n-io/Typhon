@@ -110,20 +110,20 @@ public partial class FoodNestRenderer : Node3D
             _foodMmi.Multimesh.InstanceCount = Math.Max(_foodMmi.Multimesh.InstanceCount * 2, foods.Length);
         }
 
-        int visible = 0;
-        for (int i = 0; i < foods.Length; i++)
+        var visible = 0;
+        for (var i = 0; i < foods.Length; i++)
         {
             var rem = remaining[i];
             if (rem <= 0) continue;
 
             var (sx, sy, initial) = foods[i];
             var ratio = initial > 0f ? Math.Clamp(rem / initial, 0f, 1f) : 0f;
-            float rx = sx * AntRenderer.SimToWorld;
-            float rz = sy * AntRenderer.SimToWorld;
-            float ry = _heightmap?.Sample(rx, rz) ?? 0f;
+            var rx = sx * AntRenderer.SimToWorld;
+            var rz = sy * AntRenderer.SimToWorld;
+            var ry = _heightmap?.Sample(rx, rz) ?? 0f;
 
             // Pile scale grows with remaining (0.2 m depleted → 0.5 m brimming).
-            float scale = 0.2f + 0.3f * ratio;
+            var scale = 0.2f + 0.3f * ratio;
             var basis = new Basis(Vector3.Right * scale, Vector3.Up * scale, Vector3.Back * scale);
             var xform = new Transform3D(basis, new Vector3(rx, ry + scale * 0.35f, rz));
             _foodMmi.Multimesh.SetInstanceTransform(visible, xform);
@@ -137,7 +137,7 @@ public partial class FoodNestRenderer : Node3D
     {
         var nests = _bridge.NestPositions;
         var stocks = _bridge.NestFoodStocks;
-        int initial = _bridge.InitialNestFoodPerNest;
+        var initial = _bridge.InitialNestFoodPerNest;
         if (initial <= 0) initial = 1;
 
         if (nests.Length > _nestMmi.Multimesh.InstanceCount)
@@ -145,15 +145,15 @@ public partial class FoodNestRenderer : Node3D
             _nestMmi.Multimesh.InstanceCount = Math.Max(_nestMmi.Multimesh.InstanceCount * 2, nests.Length);
         }
 
-        for (int i = 0; i < nests.Length; i++)
+        for (var i = 0; i < nests.Length; i++)
         {
             var (sx, sy) = nests[i];
-            float rx = sx * AntRenderer.SimToWorld;
-            float rz = sy * AntRenderer.SimToWorld;
-            float ry = _heightmap?.Sample(rx, rz) ?? 0f;
+            var rx = sx * AntRenderer.SimToWorld;
+            var rz = sy * AntRenderer.SimToWorld;
+            var ry = _heightmap?.Sample(rx, rz) ?? 0f;
 
-            float ratio = Math.Clamp(stocks[i] / (float)initial, 0f, 3f);
-            float scale = 0.45f + 0.25f * Math.Min(ratio, 1f);   // 45-70 cm radius
+            var ratio = Math.Clamp(stocks[i] / (float)initial, 0f, 3f);
+            var scale = 0.45f + 0.25f * Math.Min(ratio, 1f);   // 45-70 cm radius
             var basis = new Basis(Vector3.Right * scale, Vector3.Up * scale, Vector3.Back * scale);
             // Half-buried dome look — sphere centre at terrain level shows top hemisphere.
             var xform = new Transform3D(basis, new Vector3(rx, ry, rz));
@@ -161,8 +161,8 @@ public partial class FoodNestRenderer : Node3D
 
             // Slate blue-gray rather than nest-brown — pops against the dirt terrain so the
             // player can spot nests at a glance. Stockpile drives brightness; cool tint stays constant.
-            float fill = Math.Min(ratio, 1f);
-            float b = 0.30f + 0.45f * fill;
+            var fill = Math.Min(ratio, 1f);
+            var b = 0.30f + 0.45f * fill;
             _nestMmi.Multimesh.SetInstanceColor(i, new Color(b * 0.55f, b * 0.70f, b));
         }
         _nestMmi.Multimesh.VisibleInstanceCount = nests.Length;

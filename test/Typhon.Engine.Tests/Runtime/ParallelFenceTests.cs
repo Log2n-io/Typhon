@@ -258,6 +258,124 @@ class ParallelFenceTests : TestBase<ParallelFenceTests>
             "Engine must complete ≥20 ticks of position mutation under parallel fence — earlier exit indicates deadlock or stall.");
     }
 
+    /// <summary>
+    /// Bug A regression: single-threaded (<c>WorkerCount == 1</c>) parallel-fence path. <see cref="DagScheduler.DispatchInternalSchedule"/>'s sync branch
+    /// dispatched the chained <see cref="FencePhaseExecSystemBase"/> systems WITHOUT invoking their typed <c>OnShouldRun()</c>/<c>OnPrepare()</c> gate — so the
+    /// per-phase <see cref="FenceWorkPlan"/> was never built and <c>RuntimeChunkCount</c> stayed stale (0 on the first tick). The fence then silently dropped
+    /// cluster migrations. Every other <see cref="ParallelFenceTests"/> case uses <c>WorkerCount &gt;= 2</c>, so this path was unguarded.
+    ///
+    /// <para>This test runs a WAL-enabled engine with <c>WorkerCount = 1</c> + <c>EnableParallelFence = true</c>, moves an entity across a cell boundary, and
+    /// asserts the migration was actually applied (source cell empties, dest cell populated). Pre-fix the migration is dropped and the source cell stays
+    /// occupied.</para>
+    /// </summary>
+    [Test]
+    public void SingleThreadedParallelFence_AppliesMigrations()
+    {
+        var walDir = Path.Combine(Path.GetTempPath(), "Typhon.Tests", nameof(ParallelFenceTests), "Wal_SingleThreaded");
+        Directory.CreateDirectory(walDir);
+        var dbDir = Path.Combine(Path.GetTempPath(), "Typhon.Tests", nameof(ParallelFenceTests), "Db_SingleThreaded");
+        Directory.CreateDirectory(dbDir);
+        foreach (var f in Directory.GetFiles(walDir)) File.Delete(f);
+        foreach (var f in Directory.GetFiles(dbDir)) File.Delete(f);
+
+        var services = new ServiceCollection()
+            .AddLogging(b => b.SetMinimumLevel(LogLevel.Warning))
+            .AddResourceRegistry()
+            .AddMemoryAllocator()
+            .AddEpochManager()
+            .AddHighResolutionSharedTimer()
+            .AddDeadlineWatchdog()
+            .AddSingleton<IWalFileIO>(new WalFileIO())
+            .AddScopedManagedPagedMemoryMappedFile(opts =>
+            {
+                opts.DatabaseName = "WalSingleThreaded";
+                opts.DatabaseDirectory = dbDir;
+                opts.DatabaseCacheSize = (ulong)PagedMMF.MinimumCacheSize * 4;
+            })
+            .AddScopedDatabaseEngine(opts =>
+            {
+                opts.Wal = new WalWriterOptions
+                {
+                    WalDirectory = walDir,
+                    GroupCommitIntervalMs = 5,
+                    UseFUA = false,
+                    SegmentSize = 4 * 1024 * 1024,
+                    PreAllocateSegments = 1,
+                };
+            });
+        using var sp = services.BuildServiceProvider();
+        using var scope = sp.CreateScope();
+        var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+
+        Archetype<Typhon.Engine.Tests.ClMigUnit>.Touch();
+        dbe.RegisterComponentFromAccessor<Typhon.Engine.Tests.ClMigPos>();
+        dbe.RegisterComponentFromAccessor<Typhon.Engine.Tests.ClMigScratch>();
+        dbe.ConfigureSpatialGrid(new SpatialGridConfig(
+            worldMin: new Vector2(0, 0),
+            worldMax: new Vector2(1000, 1000),
+            cellSize: 100f));
+        dbe.InitializeArchetypes();
+
+        EntityId id;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var p = new Typhon.Engine.Tests.ClMigPos
+            {
+                Bounds = new AABB2F { MinX = 50f, MinY = 50f, MaxX = 50f, MaxY = 50f },
+                Tag = 0,
+            };
+            id = tx.Spawn<Typhon.Engine.Tests.ClMigUnit>(Typhon.Engine.Tests.ClMigUnit.Pos.Set(in p));
+            tx.Commit();
+        }
+
+        int srcCell = dbe.SpatialGrid.WorldToCellKey(50f, 50f);
+        int dstCell = dbe.SpatialGrid.WorldToCellKey(350f, 450f);
+        Assert.That(srcCell, Is.Not.EqualTo(dstCell));
+
+        var meta = Archetype<Typhon.Engine.Tests.ClMigUnit>.Metadata;
+        var cs = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
+
+        var moved = false;
+        var migrationsApplied = 0;
+        using var runtime = TyphonRuntime.Create(dbe, schedule =>
+        {
+            schedule.CallbackSystem("MoveOnce", _ =>
+            {
+                if (!Volatile.Read(ref moved))
+                {
+                    using var tx = dbe.CreateQuickTransaction();
+                    var eref = tx.OpenMut(id);
+                    ref var pos = ref eref.Write(Typhon.Engine.Tests.ClMigUnit.Pos);
+                    pos.Bounds = new AABB2F { MinX = 350f, MinY = 450f, MaxX = 350f, MaxY = 450f };
+                    tx.Commit();
+                    Volatile.Write(ref moved, true);
+                }
+                else if (cs.LastTickMigrationCount > 0)
+                {
+                    Interlocked.Increment(ref migrationsApplied);
+                }
+            });
+        }, new RuntimeOptions
+        {
+            WorkerCount = 1,
+            BaseTickRate = 1000,
+            EnableParallelFence = true,
+            FenceChunkOversubscription = 2,
+        });
+
+        runtime.Start();
+        SpinWait.SpinUntil(() => Volatile.Read(ref migrationsApplied) > 0, TimeSpan.FromSeconds(5));
+        runtime.Shutdown();
+
+        Assert.That(migrationsApplied, Is.GreaterThan(0),
+            "Single-threaded parallel fence must apply cluster migrations — RuntimeChunkCount/FenceWorkPlan must be prepared via the typed gate.");
+
+        ref var srcCellRef = ref dbe.SpatialGrid.GetCell(srcCell);
+        ref var dstCellRef = ref dbe.SpatialGrid.GetCell(dstCell);
+        Assert.That(srcCellRef.EntityCount, Is.EqualTo(0), "source cell must empty after migration applied by the single-threaded fence");
+        Assert.That(dstCellRef.EntityCount, Is.EqualTo(1), "destination cell must hold the migrated entity");
+    }
+
     [Test]
     public void ParallelFence_RunsTicksWithSpawnsAndMutations()
     {

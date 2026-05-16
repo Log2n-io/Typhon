@@ -882,35 +882,35 @@ public sealed class TyphonBridge : IDisposable
             var firstY = bounds[firstIdx].Bounds.MinY;
             var tcx = Math.Clamp((int)(firstX * InvCellSize), 0, GridCells - 1);
             var tcy = Math.Clamp((int)(firstY * InvCellSize), 0, GridCells - 1);
-            int t = Math.Min((int)tierMirror[tcy * GridCells + tcx], 3);
+            var t = Math.Min((int)tierMirror[tcy * GridCells + tcx], 3);
 
-            bool doMetab = (tick % AmortMetab[t]) == 0;
-            bool doBrain = (tick % AmortBrain[t]) == 0;
-            bool doPhero = (tick % AmortPhero[t]) == 0;
+            var doMetab = (tick % AmortMetab[t]) == 0;
+            var doBrain = (tick % AmortBrain[t]) == 0;
+            var doPhero = (tick % AmortPhero[t]) == 0;
             // dtScaleMetab matches today's MetabolismTick `dtScale = ctx.AmortizedDeltaTime / BaseDt * _timeScale`.
             // dt already includes _timeScale (see assignment above); cellAmortize period × dt gives the amortized dt.
-            float dtScaleMetab = AmortMetab[t] * dt / BaseDt;
+            var dtScaleMetab = AmortMetab[t] * dt / BaseDt;
             // pheroAmortScale matches today's PheromoneDepositTick `amortScale = ctx.AmortizedDeltaTime / BaseDt`
             // (no _timeScale — today's deposit code uses ctx.DeltaTime, not dt*_timeScale).
-            float pheroAmortScale = AmortPhero[t] * ctx.DeltaTime / BaseDt;
-            int amortBrainTicks = AmortBrain[t];
+            var pheroAmortScale = AmortPhero[t] * ctx.DeltaTime / BaseDt;
+            var amortBrainTicks = AmortBrain[t];
 
             // Phase 6D — gather rocks whose center is within (cluster.SpatialBounds expanded by
             // collision radius + a step margin). Linear scan over _rockPositions[]; rock count is
             // small (< 100 at demo scale) so a grid is overkill. nearby[] is reused across
             // clusters (stackalloc'd outside the loop) — reset count + refill each cluster.
-            int nearbyCount = 0;
-            int rockCountLocal = _rockCount;
+            var nearbyCount = 0;
+            var rockCountLocal = _rockCount;
             if (rockCountLocal > 0)
             {
                 ref readonly var caabb = ref cluster.SpatialBounds;
                 const float ExpandMargin = RockCollisionRadius + 50f;
-                float rMinX = caabb.MinX - ExpandMargin;
-                float rMaxX = caabb.MaxX + ExpandMargin;
-                float rMinY = caabb.MinY - ExpandMargin;
-                float rMaxY = caabb.MaxY + ExpandMargin;
+                var rMinX = caabb.MinX - ExpandMargin;
+                var rMaxX = caabb.MaxX + ExpandMargin;
+                var rMinY = caabb.MinY - ExpandMargin;
+                var rMaxY = caabb.MaxY + ExpandMargin;
                 var rocksLocal = _rockPositions;
-                for (int r = 0; r < rockCountLocal && nearbyCount < MaxNearbyRocks; r++)
+                for (var r = 0; r < rockCountLocal && nearbyCount < MaxNearbyRocks; r++)
                 {
                     var rp = rocksLocal[r];
                     if (rp.x >= rMinX && rp.x <= rMaxX && rp.y >= rMinY && rp.y <= rMaxY)
@@ -988,17 +988,17 @@ public sealed class TyphonBridge : IDisposable
 
                     if (heightmap != null)
                     {
-                        float sx = curX * SimToWorld;
-                        float sy = curY * SimToWorld;
-                        float tx = (curX + stepX) * SimToWorld;
-                        float ty = (curY + stepY) * SimToWorld;
-                        float dxz = MathF.Sqrt((tx - sx) * (tx - sx) + (ty - sy) * (ty - sy));
+                        var sx = curX * SimToWorld;
+                        var sy = curY * SimToWorld;
+                        var tx = (curX + stepX) * SimToWorld;
+                        var ty = (curY + stepY) * SimToWorld;
+                        var dxz = MathF.Sqrt((tx - sx) * (tx - sx) + (ty - sy) * (ty - sy));
                         if (dxz > 0.001f)
                         {
-                            float h1 = heightmap.Sample(sx, sy);
-                            float h2 = heightmap.Sample(tx, ty);
-                            float slope = (h2 - h1) / dxz;
-                            float scale = Math.Clamp(1f - slope * SlopeGain, 0.5f, 1.5f);
+                            var h1 = heightmap.Sample(sx, sy);
+                            var h2 = heightmap.Sample(tx, ty);
+                            var slope = (h2 - h1) / dxz;
+                            var scale = Math.Clamp(1f - slope * SlopeGain, 0.5f, 1.5f);
                             stepX *= scale;
                             stepY *= scale;
                         }
@@ -1021,19 +1021,19 @@ public sealed class TyphonBridge : IDisposable
                     if (nearbyCount > 0)
                     {
                         var rocksLocal2 = _rockPositions;
-                        for (int r = 0; r < nearbyCount; r++)
+                        for (var r = 0; r < nearbyCount; r++)
                         {
                             var rp = rocksLocal2[nearby[r]];
-                            float dx = x - rp.x;
-                            float dy = y - rp.y;
-                            float d2 = dx * dx + dy * dy;
+                            var dx = x - rp.x;
+                            var dy = y - rp.y;
+                            var d2 = dx * dx + dy * dy;
                             if (d2 < RockCollisionRadiusSq)
                             {
                                 float nx, ny;
                                 if (d2 > 0.01f)
                                 {
-                                    float d = MathF.Sqrt(d2);
-                                    float push = (RockCollisionRadius - d) / d;
+                                    var d = MathF.Sqrt(d2);
+                                    var push = (RockCollisionRadius - d) / d;
                                     x += dx * push;
                                     y += dy * push;
                                     // Unit outward normal is dx/d, NOT dx/R. The previous dx/R version
@@ -1050,23 +1050,23 @@ public sealed class TyphonBridge : IDisposable
                                     nx = 1f;
                                     ny = 0f;
                                 }
-                                float vRadial = vx * nx + vy * ny;
+                                var vRadial = vx * nx + vy * ny;
                                 if (vRadial < 0f)
                                 {
-                                    float origSpeed2 = vx * vx + vy * vy;
+                                    var origSpeed2 = vx * vx + vy * vy;
                                     if (origSpeed2 >= 0.01f)
                                     {
                                         // Standard slide: tangent = v − (v·n)·n. Magnitude shrinks by
                                         // sin(angle of incidence) — i.e., head-on hits go to zero.
                                         vx -= vRadial * nx;
                                         vy -= vRadial * ny;
-                                        float newSpeed2 = vx * vx + vy * vy;
+                                        var newSpeed2 = vx * vx + vy * vy;
                                         if (newSpeed2 > 0.01f)
                                         {
                                             // Glancing collision: renormalize tangent to the ant's
                                             // original speed. Ants are self-propelled, not rigid bodies
                                             // — energy preservation is the right model.
-                                            float scale = MathF.Sqrt(origSpeed2 / newSpeed2);
+                                            var scale = MathF.Sqrt(origSpeed2 / newSpeed2);
                                             vx *= scale;
                                             vy *= scale;
                                         }
@@ -1075,8 +1075,8 @@ public sealed class TyphonBridge : IDisposable
                                             // Head-on hit: tangent is zero. Rotate the normal 90° so
                                             // the ant peels off along the surface. Per-ant sign avoids
                                             // every neighbor swinging to the same side (would clump).
-                                            float origSpeed = MathF.Sqrt(origSpeed2);
-                                            float sign = ((idx + cluster.ChunkId) & 1) == 0 ? 1f : -1f;
+                                            var origSpeed = MathF.Sqrt(origSpeed2);
+                                            var sign = ((idx + cluster.ChunkId) & 1) == 0 ? 1f : -1f;
                                             vx = -ny * origSpeed * sign;
                                             vy =  nx * origSpeed * sign;
                                         }
@@ -1107,7 +1107,7 @@ public sealed class TyphonBridge : IDisposable
                 // the typical-cluster overhead is just a caste-check branch.
                 if (gen.Caste == global::AntHill.Caste.Soldier)
                 {
-                    int slot = Interlocked.Increment(ref _soldierCount) - 1;
+                    var slot = Interlocked.Increment(ref _soldierCount) - 1;
                     if (slot < _soldierPositions.Length)
                     {
                         _soldierPositions[slot] = (postMoveX, postMoveY);
@@ -1124,22 +1124,22 @@ public sealed class TyphonBridge : IDisposable
                 // Gated to 10 Hz (matches CA cadence — the fire grid doesn't change between CA ticks).
                 if (checkFire)
                 {
-                    int fcx = (int)(postMoveX * FireGrid.InvCellSizeSim);
-                    int fcy = (int)(postMoveY * FireGrid.InvCellSizeSim);
+                    var fcx = (int)(postMoveX * FireGrid.InvCellSizeSim);
+                    var fcy = (int)(postMoveY * FireGrid.InvCellSizeSim);
                     if ((uint)fcx < (uint)FireGrid.Size && (uint)fcy < (uint)FireGrid.Size)
                     {
                         // 3×3 fire-smell scan (incl. own cell).
-                        bool nearFire = false;
-                        int nx0 = fcx > 0 ? fcx - 1 : fcx;
-                        int nx1 = fcx < FireGrid.Size - 1 ? fcx + 1 : fcx;
-                        int ny0 = fcy > 0 ? fcy - 1 : fcy;
-                        int ny1 = fcy < FireGrid.Size - 1 ? fcy + 1 : fcy;
-                        for (int ny = ny0; ny <= ny1 && !nearFire; ny++)
+                        var nearFire = false;
+                        var nx0 = fcx > 0 ? fcx - 1 : fcx;
+                        var nx1 = fcx < FireGrid.Size - 1 ? fcx + 1 : fcx;
+                        var ny0 = fcy > 0 ? fcy - 1 : fcy;
+                        var ny1 = fcy < FireGrid.Size - 1 ? fcy + 1 : fcy;
+                        for (var ny = ny0; ny <= ny1 && !nearFire; ny++)
                         {
-                            int rowBase = ny * FireGrid.Size;
-                            for (int nxs = nx0; nxs <= nx1; nxs++)
+                            var rowBase = ny * FireGrid.Size;
+                            for (var nxs = nx0; nxs <= nx1; nxs++)
                             {
-                                byte s = fireState[rowBase + nxs];
+                                var s = fireState[rowBase + nxs];
                                 if (s >= FireGrid.BurnMin && s <= FireGrid.BurnStart) { nearFire = true; break; }
                             }
                         }
@@ -1148,7 +1148,7 @@ public sealed class TyphonBridge : IDisposable
                             PheromoneGrid.Deposit(phero.Fire, PheromoneGrid.WorldToIndex(postMoveX, postMoveY), FireDeposit);
                         }
 
-                        byte fireCell = fireState[fcy * FireGrid.Size + fcx];
+                        var fireCell = fireState[fcy * FireGrid.Size + fcx];
                         if (fireCell >= FireGrid.BurnMin && fireCell <= FireGrid.BurnStart)
                         {
                             // Single-tick red flash on the renderer for the moment of death (the
@@ -1324,7 +1324,7 @@ public sealed class TyphonBridge : IDisposable
                     var pCy = Math.Clamp((int)(pos.Bounds.MinY * CombatInvCellSize), 0, CombatGridCells - 1);
                     var cellBase = (pCy * CombatGridCells + pCx) * NestCount;
                     var myColony = gen.ColonyId;
-                    int opposingTotal = 0;
+                    var opposingTotal = 0;
                     for (var c = 0; c < NestCount; c++)
                     {
                         if (c == myColony) continue;
@@ -1714,7 +1714,7 @@ public sealed class TyphonBridge : IDisposable
                 // HitFlashDuration ticks (~130 ms). Continuous damage keeps the ant red.
                 if (state.HitFlashTicks > 0)
                 {
-                    float flashT = state.HitFlashTicks / (float)HitFlashDuration;
+                    var flashT = state.HitFlashTicks / (float)HitFlashDuration;
                     r = r + (1.0f - r) * flashT;
                     g = g + (0.10f - g) * flashT;
                     b = b + (0.10f - b) * flashT;
@@ -1824,7 +1824,7 @@ public sealed class TyphonBridge : IDisposable
         {
             var (nx, ny) = _nestPositions[nestIdx];
             var remaining = (nestIdx == NestCount - 1) ? AntCount - antsPerNest * (NestCount - 1) : antsPerNest;
-            int antIndexInNest = 0;   // first ant per nest = Queen
+            var antIndexInNest = 0;   // first ant per nest = Queen
 
             while (remaining > 0)
             {
@@ -1978,11 +1978,11 @@ public sealed class TyphonBridge : IDisposable
                     if (_spiderRespawnTicksLeft[i] == 0)
                     {
                         _spiderRng = _spiderRng * 1664525u + 1013904223u;
-                        float rx = (_spiderRng >> 8) * (1f / 16777216f);
+                        var rx = (_spiderRng >> 8) * (1f / 16777216f);
                         _spiderRng = _spiderRng * 1664525u + 1013904223u;
-                        float ry = (_spiderRng >> 8) * (1f / 16777216f);
+                        var ry = (_spiderRng >> 8) * (1f / 16777216f);
                         _spiderRng = _spiderRng * 1664525u + 1013904223u;
-                        float ra = (_spiderRng >> 8) * (1f / 16777216f);
+                        var ra = (_spiderRng >> 8) * (1f / 16777216f);
                         var newX = rx * WorldSize;
                         var newY = ry * WorldSize;
                         var ang = ra * MathF.PI * 2f;
@@ -2016,10 +2016,10 @@ public sealed class TyphonBridge : IDisposable
                 var cy = Math.Clamp((int)(py * InvCellSize), 0, GridCells - 1);
                 int tier = _tierMirror[cy * GridCells + cx];
 
-                bool killedThisTick = false;
-                bool chasing = false;
-                float targetX = px;
-                float targetY = py;
+                var killedThisTick = false;
+                var chasing = false;
+                var targetX = px;
+                var targetY = py;
 
                 // ── Chase + kill in the shared transaction ──────────────────────────
                 // Query real ants within SpiderChaseRange, read each candidate's WorldBounds (which
@@ -2046,23 +2046,23 @@ public sealed class TyphonBridge : IDisposable
                         var sphere = new BSphere2F { CenterX = px, CenterY = py, Radius = SpiderChaseRange };
                         var enumerator = _dbe.ClusterSpatialQuery<Ant>().Radius(in sphere);
                         dbgQueryTicks += System.Diagnostics.Stopwatch.GetTimestamp() - qStart;
-                        int killsLeft = SpiderKillsPerTick;
-                        int killsDone = 0;
-                        int localHits = 0;
+                        var killsLeft = SpiderKillsPerTick;
+                        var killsDone = 0;
+                        var localHits = 0;
                         try
                         {
                             var fStart = System.Diagnostics.Stopwatch.GetTimestamp();
-                            float bestD2 = float.MaxValue;
+                            var bestD2 = float.MaxValue;
                             float bestX = 0f, bestY = 0f;
-                            bool foundTarget = false;
+                            var foundTarget = false;
                             while (enumerator.MoveNext())
                             {
                                 localHits++;
                                 var hit = enumerator.Current;
                                 // Bounds come straight from the narrowphase — no second read.
-                                float ax = hit.MinX;
-                                float ay = hit.MinY;
-                                float d2 = hit.DistanceSq;   // already computed against entity's tight AABB
+                                var ax = hit.MinX;
+                                var ay = hit.MinY;
+                                var d2 = hit.DistanceSq;   // already computed against entity's tight AABB
                                 if (d2 <= SpiderKillRangeSq && killsLeft > 0
                                     && _spiderTicksSinceKill[i] >= SpiderKillCooldownTicks)
                                 {
@@ -2089,9 +2089,9 @@ public sealed class TyphonBridge : IDisposable
                             {
                                 targetX = bestX;
                                 targetY = bestY;
-                                float dx = bestX - px;
-                                float dy = bestY - py;
-                                float len = MathF.Max(MathF.Sqrt(dx * dx + dy * dy), 0.001f);
+                                var dx = bestX - px;
+                                var dy = bestY - py;
+                                var len = MathF.Max(MathF.Sqrt(dx * dx + dy * dy), 0.001f);
                                 vx = dx / len * SpiderChaseSpeed;
                                 vy = dy / len * SpiderChaseSpeed;
                                 chasing = true;
@@ -2132,15 +2132,15 @@ public sealed class TyphonBridge : IDisposable
                 // subtract SoldierDpsPerSoldier × count × dt from the spider's HP. On HP ≤ 0 the
                 // spider goes off-screen for SpiderRespawnDelayTicks ticks then respawns at a random
                 // edge (handled at the top of the next iteration's loop body).
-                int meleeSoldiers = 0;
+                var meleeSoldiers = 0;
                 {
                     var sCount = _soldierCount;
                     if (sCount > _soldierPositions.Length) sCount = _soldierPositions.Length;
-                    for (int s = 0; s < sCount; s++)
+                    for (var s = 0; s < sCount; s++)
                     {
                         var (sx, sy) = _soldierPositions[s];
-                        float ddx = sx - px;
-                        float ddy = sy - py;
+                        var ddx = sx - px;
+                        var ddy = sy - py;
                         if (ddx * ddx + ddy * ddy <= SoldierMeleeRangeSq) meleeSoldiers++;
                     }
                 }

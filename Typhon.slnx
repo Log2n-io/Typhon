@@ -20,6 +20,7 @@
         <Project Path="test/AntHill/AntHill.csproj">
             <BuildType Project="Debug" />
         </Project>
+        <Project Path="test/Typhon.Analyzers.Tests/Typhon.Analyzers.Tests.csproj" />
         <Project Path="test/Typhon.ARPG.Schema/Typhon.ARPG.Schema.csproj" />
         <Project Path="test/Typhon.ARPG.Shell/Typhon.ARPG.Shell.csproj" />
         <Project Path="test/Typhon.Benchmark/Typhon.Benchmark.csproj" />

@@ -66,23 +66,29 @@ public partial class SpiderRenderer : Node3D
         var chasing = _bridge.SpiderChasing;
         if (spiders.Length == 0) return;
 
-        int bodyCount = Mathf.Min(spiders.Length, _mmi.Multimesh.InstanceCount);
-        for (var i = 0; i < bodyCount; i++)
+        // Compact live spiders into the leading instance slots. A killed spider is parked off-map
+        // by TyphonBridge (_spiderPositions = (-1000, -1000)) for its respawn window; skipping it
+        // here is what that park relies on — otherwise it renders as a sphere outside the map.
+        var instanceCount = _mmi.Multimesh.InstanceCount;
+        var liveCount = 0;
+        for (var i = 0; i < spiders.Length && liveCount < instanceCount; i++)
         {
             var (sx, sy) = spiders[i];
-            float rx = sx * AntRenderer.SimToWorld;
-            float rz = sy * AntRenderer.SimToWorld;
-            float ry = _heightmap?.Sample(rx, rz) ?? 0f;
+            if (sx < 0f || sy < 0f) continue;   // parked off-screen (dead, awaiting respawn)
+
+            var rx = sx * AntRenderer.SimToWorld;
+            var rz = sy * AntRenderer.SimToWorld;
+            var ry = _heightmap?.Sample(rx, rz) ?? 0f;
             var xform = new Transform3D(Basis.Identity, new Vector3(rx, ry + 0.2f, rz));
-            _mmi.Multimesh.SetInstanceTransform(i, xform);
+            _mmi.Multimesh.SetInstanceTransform(liveCount, xform);
 
             // Body colour priority: red flash (recent kill) > orange (chase) > black (wander).
-            int tsk = i < ticksSinceKill.Length ? ticksSinceKill[i] : KillFlashDuration;
-            bool isChasing = i < chasing.Length && chasing[i];
+            var tsk = i < ticksSinceKill.Length ? ticksSinceKill[i] : KillFlashDuration;
+            var isChasing = i < chasing.Length && chasing[i];
             Color col;
             if (tsk < KillFlashDuration)
             {
-                float flashT = 1.0f - tsk / (float)KillFlashDuration;
+                var flashT = 1.0f - tsk / (float)KillFlashDuration;
                 col = new Color(0.02f + 0.98f * flashT, 0.02f + 0.03f * flashT, 0.02f + 0.03f * flashT);
             }
             else if (isChasing)
@@ -93,8 +99,9 @@ public partial class SpiderRenderer : Node3D
             {
                 col = new Color(0.02f, 0.02f, 0.02f);    // wander black
             }
-            _mmi.Multimesh.SetInstanceColor(i, col);
+            _mmi.Multimesh.SetInstanceColor(liveCount, col);
+            liveCount++;
         }
-        _mmi.Multimesh.VisibleInstanceCount = bodyCount;
+        _mmi.Multimesh.VisibleInstanceCount = liveCount;
     }
 }

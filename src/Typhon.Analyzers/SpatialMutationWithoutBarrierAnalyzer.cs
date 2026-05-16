@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Collections.Immutable;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
@@ -127,17 +128,44 @@ public class SpatialMutationWithoutBarrierAnalyzer : DiagnosticAnalyzer
         context.ReportDiagnostic(diag);
     }
 
+    /// <summary>Recursion depth cap for the nested-struct scan — guards against pathological deeply-nested component graphs.</summary>
+    private const int MaxNestedFieldDepth = 8;
+
     private static bool HasSpatialIndexField(INamedTypeSymbol type)
     {
+        // Reuses a per-call visited set to break struct-field cycles (a struct can't contain itself by value in C#, but a generic instantiation graph can still
+        // loop) and to avoid re-scanning a shared embedded struct multiple times.
+        var visited = new HashSet<INamedTypeSymbol>(SymbolEqualityComparer.Default);
+        return HasSpatialIndexField(type, visited, depth: 0);
+    }
+
+    private static bool HasSpatialIndexField(INamedTypeSymbol type, HashSet<INamedTypeSymbol> visited, int depth)
+    {
+        if (type == null || depth > MaxNestedFieldDepth || !visited.Add(type))
+        {
+            return false;
+        }
+
         foreach (var member in type.GetMembers())
         {
-            if (member is not IFieldSymbol field) continue;
+            if (member is not IFieldSymbol field || field.IsStatic) continue;
+
+            // Direct hit: the field itself carries [SpatialIndex].
             foreach (var attr in field.GetAttributes())
             {
                 var attrClass = attr.AttributeClass;
                 if (attrClass == null) continue;
-                var fqn = attrClass.ToDisplayString();
-                if (fqn == SpatialIndexAttributeFqn) return true;
+                if (attrClass.ToDisplayString() == SpatialIndexAttributeFqn) return true;
+            }
+
+            // Recurse into struct-typed fields: a component can embed a struct that carries the spatial-indexed field. Skip non-struct fields (classes,
+            // primitives bottom out, enums, pointers) — only value-type aggregates can host a [SpatialIndex] member relevant to a blittable component.
+            if (field.Type is INamedTypeSymbol fieldType
+                && fieldType.IsValueType
+                && fieldType.TypeKind == TypeKind.Struct
+                && HasSpatialIndexField(fieldType, visited, depth + 1))
+            {
+                return true;
             }
         }
         return false;

@@ -380,7 +380,7 @@ function HelpOverlay({ onClose }: { onClose: () => void }) {
                 <li><strong>exclusive</strong> — same idea as the amber left bar, surfaced as a chip too.</li>
                 <li><strong>tier N</strong> — only runs against entities at tier <code>N</code> (LOD / detail bucket).</li>
                 <li><strong>change:N</strong> — has <code>N</code> change-filter declarations (only runs when those components changed).</li>
-                <li><strong>↪ NN%</strong> — skip rate. Surfaced when {`>`} 50 %; means the system's <code>RunIf</code> /
+                <li><strong>↪ NN%</strong> — skip rate. Surfaced when {`>`} 50 %; means the system's <code>ShouldRun</code> /
                   <code>ReactiveSkip</code> bailed on the majority of ticks.</li>
                 <li><strong>no decls</strong> — the system has no declared access. Common for <code>CallbackSystem</code>; not
                   necessarily a bug, but the engine has no way to derive dependencies for it.</li>
@@ -454,7 +454,7 @@ function HelpOverlay({ onClose }: { onClose: () => void }) {
             ['Snapshot last 600 ticks', 'Pin both DAG aggregations and the profiler TimeArea to the most recent 600 ticks. Auto-fired once on first metadata arrival so a fresh open is useful without a click.'],
             ['stat: mean / p50 / p95 / p99 / max', 'Aggregation function for the per-system primary stat that drives the heat border + chip. mean = average duration; p99 = "the tick where this system was unusually slow"; max = worst single tick.'],
             ['layout', 'Pick one of the four layouts described above. Switching re-runs the layout engine and re-fits the viewport.'],
-            ['☐ Hide skipped', 'Hide systems that contributed nothing to the selected range — RunIf-bailed every tick, tier-filtered out, or scheduled-but-zero-duration. Driven by the same data as the visible "0.0 µs" on the tile. Topology is filtered before layout so dagre packs the surviving systems tightly (no holes). No-op when no range is selected.'],
+            ['☐ Hide skipped', 'Hide systems that contributed nothing to the selected range — ShouldRun-bailed every tick, tier-filtered out, or scheduled-but-zero-duration. Driven by the same data as the visible "0.0 µs" on the tile. Topology is filtered before layout so dagre packs the surviving systems tightly (no holes). No-op when no range is selected.'],
             ['☐ Cross-phase edges', 'Surface edges that span phase boundaries in the swim-lane layouts (otherwise hidden because lane order already encodes phase ordering). The current implementation gates them on hover: with the toggle on but no system pointed at, intra-phase edges still render alone; hover any system to reveal its cross-phase neighbours. Compact / circular layouts always show every edge — the chip dims to signal the no-op there.'],
             ['Ticks A–B (N)', 'Range read-out. Shows the tick window currently driving the stats. clear strips the time selection — node stats hide until you snapshot or scrub the profiler.'],
             ['?', 'Open this panel.'],

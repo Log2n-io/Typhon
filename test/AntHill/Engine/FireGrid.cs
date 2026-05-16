@@ -109,13 +109,13 @@ public sealed class FireGrid
         var hasDensity = !densityFactor.IsEmpty;
         const float Inv255 = 1f / 255f;
 
-        for (int y = 0; y < Size; y++)
+        for (var y = 0; y < Size; y++)
         {
-            int rowOffset = y * Size;
-            for (int x = 0; x < Size; x++)
+            var rowOffset = y * Size;
+            for (var x = 0; x < Size; x++)
             {
-                int c = rowOffset + x;
-                byte s = src[c];
+                var c = rowOffset + x;
+                var s = src[c];
                 byte n;
                 byte intensityN = 0;
                 if (s >= BurnMin && s <= BurnStart)
@@ -134,25 +134,25 @@ public sealed class FireGrid
                     //   - Same neighbour with wind west-pointing: contribution < 1.
                     // Phase 6C — producer-side: burning neighbours with high BurnIntensity (plants
                     // burning on them) emit more spread weight (× (1 + IntensityBoost × i/255)).
-                    float w = 0f;
+                    var w = 0f;
                     if (y > 0 && IsBurning(src[c - Size]))
                     {
-                        float weight = 1f + WindBias * (-1f * windY);
+                        var weight = 1f + WindBias * (-1f * windY);
                         if (weight > 0f) w += weight * (1f + IntensityBoost * intSrc[c - Size] * Inv255);
                     }
                     if (y < Size - 1 && IsBurning(src[c + Size]))
                     {
-                        float weight = 1f + WindBias * (1f * windY);
+                        var weight = 1f + WindBias * (1f * windY);
                         if (weight > 0f) w += weight * (1f + IntensityBoost * intSrc[c + Size] * Inv255);
                     }
                     if (x > 0 && IsBurning(src[c - 1]))
                     {
-                        float weight = 1f + WindBias * (-1f * windX);
+                        var weight = 1f + WindBias * (-1f * windX);
                         if (weight > 0f) w += weight * (1f + IntensityBoost * intSrc[c - 1] * Inv255);
                     }
                     if (x < Size - 1 && IsBurning(src[c + 1]))
                     {
-                        float weight = 1f + WindBias * (1f * windX);
+                        var weight = 1f + WindBias * (1f * windX);
                         if (weight > 0f) w += weight * (1f + IntensityBoost * intSrc[c + 1] * Inv255);
                     }
 
@@ -160,13 +160,13 @@ public sealed class FireGrid
                     {
                         // Probability that *any* neighbour ignites this cell = 1 - (1 - p)^w.
                         // Consumer-side density (Phase 6C): rescales p in [0.3×, 1.0×] of base.
-                        float pBase = SpreadPerNeighbour;
+                        var pBase = SpreadPerNeighbour;
                         if (hasDensity)
                         {
-                            float k = densityFactor[c] * Inv255;
+                            var k = densityFactor[c] * Inv255;
                             pBase *= 0.3f + 0.7f * k;
                         }
-                        float spread = 1f - MathF.Pow(1f - pBase, w);
+                        var spread = 1f - MathF.Pow(1f - pBase, w);
                         if (NextRand() < spread)
                         {
                             n = BurnStart;
@@ -218,26 +218,26 @@ public sealed class FireGrid
     /// </summary>
     public bool Ignite(float simX, float simY, int radius, ReadOnlySpan<byte> densityFactor = default)
     {
-        int cx = (int)(simX * InvCellSizeSim);
-        int cy = (int)(simY * InvCellSizeSim);
+        var cx = (int)(simX * InvCellSizeSim);
+        var cy = (int)(simY * InvCellSizeSim);
         if (cx < 0) cx = 0; else if (cx >= Size) cx = Size - 1;
         if (cy < 0) cy = 0; else if (cy >= Size) cy = Size - 1;
 
-        int x0 = Math.Max(cx - radius, 0);
-        int x1 = Math.Min(cx + radius, Size - 1);
-        int y0 = Math.Max(cy - radius, 0);
-        int y1 = Math.Min(cy + radius, Size - 1);
+        var x0 = Math.Max(cx - radius, 0);
+        var x1 = Math.Min(cx + radius, Size - 1);
+        var y0 = Math.Max(cy - radius, 0);
+        var y1 = Math.Min(cy + radius, Size - 1);
 
         var src = State;
         var intensity = BurnIntensity;
         var hasDensity = !densityFactor.IsEmpty;
-        bool anyFlipped = false;
-        for (int y = y0; y <= y1; y++)
+        var anyFlipped = false;
+        for (var y = y0; y <= y1; y++)
         {
-            int rowOffset = y * Size;
-            for (int x = x0; x <= x1; x++)
+            var rowOffset = y * Size;
+            for (var x = x0; x <= x1; x++)
             {
-                int c = rowOffset + x;
+                var c = rowOffset + x;
                 if (src[c] == Fuel)
                 {
                     src[c] = BurnStart;

@@ -112,15 +112,15 @@ public partial class GameCamera : Camera3D
 
     public override void _Process(double delta)
     {
-        float dt = (float)delta;
+        var dt = (float)delta;
 
         // Movement — true free-cam (Pattern A noclip): WASD along the camera's local axes.
         //   W/S = forward / back along the full 3D look direction (so pitching down + W flies you down toward the ground)
         //   A/D = strafe left / right along the camera's right vector (horizontal because we don't roll)
         //   Space / Ctrl = world up / world down (altitude shortcut, independent of look)
-        Vector3 forward = ForwardWorld;
-        Vector3 right   = RightWorld;
-        Vector3 move = Vector3.Zero;
+        var forward = ForwardWorld;
+        var right   = RightWorld;
+        var move = Vector3.Zero;
         if (Input.IsKeyPressed(Key.W)) move += forward;
         if (Input.IsKeyPressed(Key.S)) move -= forward;
         if (Input.IsKeyPressed(Key.D)) move += right;
@@ -130,7 +130,7 @@ public partial class GameCamera : Camera3D
 
         if (move.LengthSquared() > 0f)
         {
-            float speed = _baseSpeed * (Input.IsKeyPressed(Key.Shift) ? SprintFactor : 1f);
+            var speed = _baseSpeed * (Input.IsKeyPressed(Key.Shift) ? SprintFactor : 1f);
             _position += move.Normalized() * speed * dt;
         }
 
@@ -138,8 +138,8 @@ public partial class GameCamera : Camera3D
         if (_flyToPos.HasValue)
         {
             _flyToTimer += dt;
-            float t = Mathf.Clamp(_flyToTimer / FlyToDuration, 0f, 1f);
-            float ease = t * t * (3f - 2f * t);
+            var t = Mathf.Clamp(_flyToTimer / FlyToDuration, 0f, 1f);
+            var ease = t * t * (3f - 2f * t);
             _position = _position.Lerp(_flyToPos.Value, ease);
             _pitch    = Mathf.Lerp(_pitch, _flyToPitchTarget, ease);
             if (t >= 1f)
@@ -155,8 +155,8 @@ public partial class GameCamera : Camera3D
         // (manual descent with Ctrl, fly-to into a hilltop, etc.) because it runs last.
         if (_heightmap != null)
         {
-            float groundY = _heightmap.Sample(_position.X, _position.Z);
-            float minY = groundY + MinGroundClearance;
+            var groundY = _heightmap.Sample(_position.X, _position.Z);
+            var minY = groundY + MinGroundClearance;
             if (_position.Y < minY) _position.Y = minY;
         }
 
@@ -174,10 +174,10 @@ public partial class GameCamera : Camera3D
         // FPS convention: forward = -Z, right = +X, up = +Y in the camera's local frame.
         // At yaw=0, pitch=0: forward=(0,0,-1), right=(1,0,0), up=(0,1,0).
         // Yaw rotates around world Y; pitch rotates around the camera's right axis.
-        float cp = Mathf.Cos(_pitch);
-        float sp = Mathf.Sin(_pitch);
-        float cy = Mathf.Cos(_yaw);
-        float sy = Mathf.Sin(_yaw);
+        var cp = Mathf.Cos(_pitch);
+        var sp = Mathf.Sin(_pitch);
+        var cy = Mathf.Cos(_yaw);
+        var sy = Mathf.Sin(_yaw);
 
         var forward = new Vector3(sy * cp, sp, -cy * cp);
         var right   = new Vector3(cy, 0f, sy);
@@ -192,10 +192,10 @@ public partial class GameCamera : Camera3D
     {
         get
         {
-            float cp = Mathf.Cos(_pitch);
-            float sp = Mathf.Sin(_pitch);
-            float cy = Mathf.Cos(_yaw);
-            float sy = Mathf.Sin(_yaw);
+            var cp = Mathf.Cos(_pitch);
+            var sp = Mathf.Sin(_pitch);
+            var cy = Mathf.Cos(_yaw);
+            var sy = Mathf.Sin(_yaw);
             return new Vector3(sy * cp, sp, -cy * cp).Normalized();
         }
     }
@@ -205,8 +205,8 @@ public partial class GameCamera : Camera3D
         get
         {
             // Right is the world-horizontal vector 90° clockwise from the yaw-only forward.
-            float cy = Mathf.Cos(_yaw);
-            float sy = Mathf.Sin(_yaw);
+            var cy = Mathf.Cos(_yaw);
+            var sy = Mathf.Sin(_yaw);
             return new Vector3(cy, 0f, sy).Normalized();
         }
     }
@@ -263,12 +263,12 @@ public partial class GameCamera : Camera3D
             var origin    = ProjectRayOrigin(c);
             var direction = ProjectRayNormal(c);
 
-            float t = -1f;
+            var t = -1f;
 
             // First try: intersection with Y=0 in front of the camera (the common case for cameras looking down).
             if (Mathf.Abs(direction.Y) > 1e-6f)
             {
-                float tGround = -origin.Y / direction.Y;
+                var tGround = -origin.Y / direction.Y;
                 if (tGround > 0) t = tGround;
             }
 
@@ -277,7 +277,7 @@ public partial class GameCamera : Camera3D
             // capped at 500 m so a ray almost parallel to the ground doesn't extrapolate to infinity.
             if (t <= 0)
             {
-                float tFar = 0f;
+                var tFar = 0f;
                 if (direction.X >  1e-6f) tFar = Mathf.Max(tFar, (worldMax  - origin.X) / direction.X);
                 if (direction.X < -1e-6f) tFar = Mathf.Max(tFar, (0f       - origin.X) / direction.X);
                 if (direction.Z >  1e-6f) tFar = Mathf.Max(tFar, (worldMax - origin.Z) / direction.Z);
@@ -315,7 +315,7 @@ public partial class GameCamera : Camera3D
         var origin = ProjectRayOrigin(screenPos);
         var direction = ProjectRayNormal(screenPos);
         if (Mathf.Abs(direction.Y) < 1e-6f) { ground = default; return false; }
-        float t = -origin.Y / direction.Y;
+        var t = -origin.Y / direction.Y;
         if (t < 0) { ground = default; return false; }  // ground is behind the camera
         ground = origin + direction * t;
         return true;
@@ -328,7 +328,7 @@ public partial class GameCamera : Camera3D
         {
             var fwd = ForwardWorld;
             if (Mathf.Abs(fwd.Y) < 1e-3f) return Mathf.Max(_position.Y, 1f) * 30f;  // looking near-horizontal → huge effective distance
-            float t = -_position.Y / fwd.Y;
+            var t = -_position.Y / fwd.Y;
             return t > 0 ? Mathf.Min(t, 200f) : Mathf.Max(_position.Y, 1f) * 5f;
         }
     }
@@ -383,7 +383,7 @@ public partial class GameCamera : Camera3D
     {
         get
         {
-            float w = VisibleWidthAtFocus;
+            var w = VisibleWidthAtFocus;
             if (w < LoupeFootBoundary) return LodBand.Loupe;
             if (w < FootPatchBoundary) return LodBand.Foot;
             return LodBand.Patch;
@@ -394,10 +394,10 @@ public partial class GameCamera : Camera3D
     {
         get
         {
-            float w = VisibleWidthAtFocus;
-            float lo = FootPatchBoundary - FootPatchHalf;
-            float hi = FootPatchBoundary + FootPatchHalf;
-            float t = (w - lo) / (hi - lo);
+            var w = VisibleWidthAtFocus;
+            var lo = FootPatchBoundary - FootPatchHalf;
+            var hi = FootPatchBoundary + FootPatchHalf;
+            var t = (w - lo) / (hi - lo);
             return Mathf.Clamp(1f - t, 0f, 1f);
         }
     }

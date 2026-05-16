@@ -191,8 +191,8 @@ public partial class AntRenderer : Node3D
 		var frame = _bridge.GetLatest();
 		if (frame?.Buffers == null) return;
 
-		int total = 0;
-		for (int i = 0; i < frame.Buffers.Length; i++) total += frame.Buffers[i].Count;
+		var total = 0;
+		for (var i = 0; i < frame.Buffers.Length; i++) total += frame.Buffers[i].Count;
 
 		if (total <= 0)
 		{
@@ -234,7 +234,7 @@ public partial class AntRenderer : Node3D
 	private void UploadChannel(RenderChannel ch)
 	{
 		if (ch.StateImage == null) return;
-		int h = StateTexHeight(ch);
+		var h = StateTexHeight(ch);
 		ch.StateImage.SetData(StateTexWidth, h, false, Image.Format.Rgbaf, ch.StateBytes);
 		ch.StateTexture.Update(ch.StateImage);
 	}
@@ -243,7 +243,7 @@ public partial class AntRenderer : Node3D
 	{
 		if (ch.Mesh.InstanceCount < ch.Written)
 		{
-			int grown = ch.Written + ch.Written / 4;
+			var grown = ch.Written + ch.Written / 4;
 			ResizeMultiMesh(ch.Mesh, grown);
 		}
 		ch.Mesh.VisibleInstanceCount = ch.Written;
@@ -267,37 +267,37 @@ public partial class AntRenderer : Node3D
 			fixed (byte* solDstBase = _soldier.StateBytes)
 			fixed (byte* densBase = _densityBytes)
 			{
-				uint* capDst = (uint*)capDstBase;
-				uint* solDst = (uint*)solDstBase;
-				int capIdx = 0;
-				int solIdx = 0;
-				for (int b = 0; b < buffers.Length; b++)
+				var capDst = (uint*)capDstBase;
+				var solDst = (uint*)solDstBase;
+				var capIdx = 0;
+				var solIdx = 0;
+				for (var b = 0; b < buffers.Length; b++)
 				{
 					var snap = buffers[b];
 					if (snap.Data == null || snap.Count == 0) continue;
 					var data = snap.Data;
-					int count = snap.Count;
-					for (int i = 0; i < count; i++)
+					var count = snap.Count;
+					for (var i = 0; i < count; i++)
 					{
-						int off = i * Stride;
-						float simX = data[off + 3];
-						float simZ = data[off + 7];
-						float r    = data[off + 8];
-						float g    = data[off + 9];
-						float bl   = data[off + 10];
+						var off = i * Stride;
+						var simX = data[off + 3];
+						var simZ = data[off + 7];
+						var r    = data[off + 8];
+						var g    = data[off + 9];
+						var bl   = data[off + 10];
 
-						uint px = (uint)Mathf.Clamp((int)(simX * simToU16), 0, 65535);
-						uint pz = (uint)Mathf.Clamp((int)(simZ * simToU16), 0, 65535);
-						uint texelR = px | (pz << 16);
-						uint texelG = 0u;
+						var px = (uint)Mathf.Clamp((int)(simX * simToU16), 0, 65535);
+						var pz = (uint)Mathf.Clamp((int)(simZ * simToU16), 0, 65535);
+						var texelR = px | (pz << 16);
+						var texelG = 0u;
 						// Caste-driven scale byte. Mapping is hand-tuned to land each caste at the
 						// right visual scale given scale_min=0.6, scale_max=2.0:
 						//   Larva (2)   → 0    → 0.6×
 						//   Worker (0)  → 73   → 1.0×
 						//   Soldier (1) → 128  → 1.3×
 						//   Queen (3)   → 255  → 2.0×
-						int casteIdx = Mathf.Clamp((int)data[off + 1], 0, 3);
-						uint scale = casteIdx switch
+						var casteIdx = Mathf.Clamp((int)data[off + 1], 0, 3);
+						var scale = casteIdx switch
 						{
 							2 => 0u,
 							0 => 73u,
@@ -305,25 +305,25 @@ public partial class AntRenderer : Node3D
 							3 => 255u,
 							_ => 73u,
 						};
-						uint rb = (uint)Mathf.Clamp((int)(r  * 255f), 0, 255);
-						uint gb = (uint)Mathf.Clamp((int)(g  * 255f), 0, 255);
-						uint bb = (uint)Mathf.Clamp((int)(bl * 255f), 0, 255);
-						uint texelB = scale | (rb << 8) | (gb << 16) | (bb << 24);
+						var rb = (uint)Mathf.Clamp((int)(r  * 255f), 0, 255);
+						var gb = (uint)Mathf.Clamp((int)(g  * 255f), 0, 255);
+						var bb = (uint)Mathf.Clamp((int)(bl * 255f), 0, 255);
+						var texelB = scale | (rb << 8) | (gb << 16) | (bb << 24);
 
 						// Route: soldiers go to the prism channel, everyone else to the capsule channel.
-						bool isSoldier = casteIdx == 1;
-						uint* outDst = isSoldier ? solDst : capDst;
-						int outIdx = isSoldier ? solIdx : capIdx;
-						int baseIdx = outIdx * 4;
+						var isSoldier = casteIdx == 1;
+						var outDst = isSoldier ? solDst : capDst;
+						var outIdx = isSoldier ? solIdx : capIdx;
+						var baseIdx = outIdx * 4;
 						outDst[baseIdx + 0] = texelR;
 						outDst[baseIdx + 1] = texelG;
 						outDst[baseIdx + 2] = texelB;
 						outDst[baseIdx + 3] = 0u;
 						if (isSoldier) solIdx++; else capIdx++;
 
-						int cellX = Mathf.Clamp((int)(simX * simToCell), 0, DensityRes - 1);
-						int cellZ = Mathf.Clamp((int)(simZ * simToCell), 0, DensityRes - 1);
-						byte* slot = densBase + (cellZ * DensityRes + cellX);
+						var cellX = Mathf.Clamp((int)(simX * simToCell), 0, DensityRes - 1);
+						var cellZ = Mathf.Clamp((int)(simZ * simToCell), 0, DensityRes - 1);
+						var slot = densBase + (cellZ * DensityRes + cellX);
 						if (*slot < 255) (*slot)++;
 					}
 				}
@@ -339,20 +339,20 @@ public partial class AntRenderer : Node3D
 			// Density-only pass — Patch band. Skip state-texture pack entirely.
 			fixed (byte* densBase = _densityBytes)
 			{
-				for (int b = 0; b < buffers.Length; b++)
+				for (var b = 0; b < buffers.Length; b++)
 				{
 					var snap = buffers[b];
 					if (snap.Data == null || snap.Count == 0) continue;
 					var data = snap.Data;
-					int count = snap.Count;
-					for (int i = 0; i < count; i++)
+					var count = snap.Count;
+					for (var i = 0; i < count; i++)
 					{
-						int off = i * Stride;
-						float simX = data[off + 3];
-						float simZ = data[off + 7];
-						int cellX = Mathf.Clamp((int)(simX * simToCell), 0, DensityRes - 1);
-						int cellZ = Mathf.Clamp((int)(simZ * simToCell), 0, DensityRes - 1);
-						byte* slot = densBase + (cellZ * DensityRes + cellX);
+						var off = i * Stride;
+						var simX = data[off + 3];
+						var simZ = data[off + 7];
+						var cellX = Mathf.Clamp((int)(simX * simToCell), 0, DensityRes - 1);
+						var cellZ = Mathf.Clamp((int)(simZ * simToCell), 0, DensityRes - 1);
+						var slot = densBase + (cellZ * DensityRes + cellX);
 						if (*slot < 255) (*slot)++;
 					}
 				}
@@ -362,9 +362,9 @@ public partial class AntRenderer : Node3D
 
 	private static unsafe void ZeroTail(uint* dst, int writeIdx, int capacity)
 	{
-		for (int i = writeIdx; i < capacity; i++)
+		for (var i = writeIdx; i < capacity; i++)
 		{
-			int baseIdx = i * 4;
+			var baseIdx = i * 4;
 			dst[baseIdx + 0] = 0;
 			dst[baseIdx + 1] = 0;
 			dst[baseIdx + 2] = 0;
@@ -379,12 +379,12 @@ public partial class AntRenderer : Node3D
 		if (ch.StateImage != null && ch.Capacity >= requested) return;
 
 		// Grow with 25% headroom to amortise re-allocations; round up to a multiple of StateTexWidth so the texture is rectangular.
-		int newCap = ch.Capacity == 0 ? Math.Max(requested, 4096) : Math.Max(requested, ch.Capacity * 2);
+		var newCap = ch.Capacity == 0 ? Math.Max(requested, 4096) : Math.Max(requested, ch.Capacity * 2);
 		newCap = ((newCap + StateTexWidth - 1) / StateTexWidth) * StateTexWidth;
 		ch.Capacity = newCap;
 		ch.StateBytes = new byte[newCap * 16];
 
-		int texHeight = StateTexHeight(ch);
+		var texHeight = StateTexHeight(ch);
 		ch.StateImage = Image.CreateFromData(StateTexWidth, texHeight, false, Image.Format.Rgbaf, ch.StateBytes);
 		if (ch.StateTexture == null)
 		{
@@ -402,9 +402,9 @@ public partial class AntRenderer : Node3D
 	private static void ResizeMultiMesh(MultiMesh mm, int newInstanceCount)
 	{
 		// Grow MultiMesh.InstanceCount in place. Each instance's transform stays at identity — set them once on grow.
-		int oldCount = mm.InstanceCount;
+		var oldCount = mm.InstanceCount;
 		mm.InstanceCount = newInstanceCount;
-		for (int i = oldCount; i < newInstanceCount; i++)
+		for (var i = oldCount; i < newInstanceCount; i++)
 		{
 			mm.SetInstanceTransform(i, Transform3D.Identity);
 		}

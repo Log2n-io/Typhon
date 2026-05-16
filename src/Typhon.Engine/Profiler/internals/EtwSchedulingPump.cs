@@ -46,8 +46,9 @@ namespace Typhon.Engine.Internals;
 /// </remarks>
 internal sealed class EtwSchedulingPump : IDisposable
 {
-    /// <summary>Per-OS-thread slice tracking state held by the pump callbacks. Mutated only from the single Process() pump thread, so no sync needed.</summary>
-    private struct ThreadSliceState
+    /// <summary>Per-OS-thread slice tracking state held by the pump callbacks. Mutated only from the single Process() pump thread, so no sync needed.
+    /// <c>internal</c> rather than <c>private</c> so <see cref="IsStaleEntry"/> can be exercised by unit tests.</summary>
+    internal struct ThreadSliceState
     {
         /// <summary>QPC tick when this thread last got the CPU. <c>-1</c> = no <c>CSwitchNewThread</c> observed yet (skip slice close).</summary>
         public long StartTick;
@@ -62,8 +63,28 @@ internal sealed class EtwSchedulingPump : IDisposable
     /// <summary>
     /// Per-OS-TID slice state. Mutated only from the pump thread (Process() runs all callbacks serially on that thread), so no locking needed. Keyed by raw OS
     /// TID (<c>uint</c> from ETW data). Entries are kept across slice transitions to avoid dict churn — a closed slice leaves <c>StartTick = -1</c> sentinel.
+    /// Stale entries (threads that exited and never came back ON-CPU) are swept periodically by <see cref="PruneStaleThreadStates"/> so a long-running process
+    /// with thread churn doesn't leak one dict entry per distinct OS TID for the whole session.
     /// </summary>
     private readonly Dictionary<uint, ThreadSliceState> _threadStates = new();
+
+    /// <summary>
+    /// Count of <c>CSwitchOldThread</c> slice-close events observed since the last prune sweep. When it reaches <see cref="PruneIntervalCloses"/> the pump runs
+    /// <see cref="PruneStaleThreadStates"/> and resets the counter. Mutated only from the pump thread.
+    /// </summary>
+    private int _closesSincePrune;
+
+    /// <summary>
+    /// Slice-close events between stale-entry sweeps of <see cref="_threadStates"/>. The sweep is O(dict size); at typical cswitch rates (~10-50k/s) a 4096
+    /// interval triggers it roughly a few times per second — cheap relative to the per-callback work, and bounded enough that a thread-churn workload can't
+    /// inflate the dict between sweeps.
+    /// </summary>
+    private const int PruneIntervalCloses = 4096;
+
+    /// <summary>
+    /// Sentinel <c>StartTick</c> value marking a closed slice — the thread is not currently ON-CPU. Entries left at this value are pruning candidates.
+    /// </summary>
+    private const long ClosedSliceSentinel = -1;
 
     private TraceEventSession _session;
     private Thread _pumpThread;
@@ -294,12 +315,20 @@ internal sealed class EtwSchedulingPump : IDisposable
         // to a live Typhon slot. Registry lookup is a linear scan over the high-water mark (~30 active slots typical, ~10 ns) — cheap at the cswitch rate.
         if (oldTid != 0 && oldTid != _pumpOsThreadId && ThreadSlotRegistry.TryGetSlotByOsThreadId(oldTid, out var oldSlotIdx))
         {
-            if (_threadStates.TryGetValue(oldTid, out var st) && st.StartTick != -1)
+            if (_threadStates.TryGetValue(oldTid, out var st) && st.StartTick != ClosedSliceSentinel)
             {
                 EmitSliceClosing(in st, in data, (byte)oldSlotIdx);
             }
             // Reset the state — the next CSwitchNewThread will open a fresh slice. Keep the entry to avoid dict churn; just zero out StartTick + ReadyTick.
-            _threadStates[oldTid] = new ThreadSliceState { StartTick = -1, ReadyTick = 0, ProcessorNumber = 0 };
+            _threadStates[oldTid] = new ThreadSliceState { StartTick = ClosedSliceSentinel, ReadyTick = 0, ProcessorNumber = 0 };
+
+            // Periodic sweep: a closed-slice entry that's never reopened belongs to an exited thread. Without this, _threadStates grows one entry per distinct
+            // OS TID for the whole session on a thread-churning workload.
+            if (++_closesSincePrune >= PruneIntervalCloses)
+            {
+                _closesSincePrune = 0;
+                PruneStaleThreadStates();
+            }
         }
 
         // Open the NEW thread's slice if it's one we'll potentially care about. We don't gate this on the slot lookup yet — by the time the slice closes
@@ -329,6 +358,40 @@ internal sealed class EtwSchedulingPump : IDisposable
         ref var st = ref CollectionsMarshal.GetValueRefOrAddDefault(_threadStates, tid, out _);
         st.ReadyTick = data.TimeStampQPC;
     }
+
+    /// <summary>
+    /// Drop every closed-slice entry (<see cref="ThreadSliceState.StartTick"/> at the <see cref="ClosedSliceSentinel"/>) from <see cref="_threadStates"/>.
+    /// A closed-slice entry carries no in-progress slice — if its thread is scheduled again, <c>OnContextSwitch</c>'s
+    /// <c>GetValueRefOrAddDefault</c> re-creates the entry — so removing it loses nothing but reclaims the dict slot for an exited thread. Runs on the pump
+    /// thread only (no sync needed). Two-pass: collect keys, then remove — can't mutate the dict while enumerating it.
+    /// </summary>
+    private void PruneStaleThreadStates()
+    {
+        // First pass: count + collect the stale keys. Reuse a scratch list across sweeps to avoid per-prune allocation.
+        _pruneScratch.Clear();
+        foreach (var kvp in _threadStates)
+        {
+            if (IsStaleEntry(kvp.Value))
+            {
+                _pruneScratch.Add(kvp.Key);
+            }
+        }
+
+        for (int i = 0; i < _pruneScratch.Count; i++)
+        {
+            _threadStates.Remove(_pruneScratch[i]);
+        }
+    }
+
+    /// <summary>Scratch buffer for <see cref="PruneStaleThreadStates"/>'s collect-then-remove pass. Pump-thread-local; never resized to zero so steady-state
+    /// sweeps don't reallocate.</summary>
+    private readonly List<uint> _pruneScratch = new();
+
+    /// <summary>
+    /// Pure predicate: is <paramref name="state"/> a stale (closed-slice) entry, i.e. its owning thread is not currently ON-CPU and the entry can be dropped
+    /// from <see cref="_threadStates"/> without losing any in-progress slice? Extracted for unit testing — the ETW pump itself is not directly testable.
+    /// </summary>
+    internal static bool IsStaleEntry(ThreadSliceState state) => state.StartTick == ClosedSliceSentinel;
 
     private static void EmitSliceClosing(in ThreadSliceState st, in CSwitchTraceData data, byte targetSlotIdx)
     {

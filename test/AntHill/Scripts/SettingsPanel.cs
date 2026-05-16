@@ -169,28 +169,28 @@ public partial class SettingsPanel : CanvasLayer
     public void StepTimeScale(int direction)
     {
         if (_timeScaleSlider == null) return;
-        int next = Mathf.Clamp((int)_timeScaleSlider.Value + direction, 0, TimeScales.Length - 1);
+        var next = Mathf.Clamp((int)_timeScaleSlider.Value + direction, 0, TimeScales.Length - 1);
         _timeScaleSlider.Value = next;
     }
 
     private void OnTimeScaleSliderChanged(double value)
     {
-        int idx = Mathf.Clamp((int)value, 0, TimeScales.Length - 1);
-        float scale = TimeScales[idx];
+        var idx = Mathf.Clamp((int)value, 0, TimeScales.Length - 1);
+        var scale = TimeScales[idx];
         _timeScaleLabel.Text = $"Time scale: {(scale == 0f ? "Paused" : scale + "×")}";
         TimeScaleChanged?.Invoke(scale);
     }
 
     private void OnLuminosityChanged(double value)
     {
-        float v = Mathf.Clamp((float)value, 0f, 1f);
+        var v = Mathf.Clamp((float)value, 0f, 1f);
         _luminosityLabel.Text = $"Luminosity: {v:F2}";
         LuminosityChanged?.Invoke(v);
     }
 
     private void OnTiltSelected(long index)
     {
-        float tilt = index switch
+        var tilt = index switch
         {
             0 => 0f,
             1 => Mathf.Pi / 4f,

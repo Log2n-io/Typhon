@@ -155,6 +155,27 @@ describe('findOffCpuAtX — binary-search hit-test', () => {
     expect(hit!.startUs).toBe(100);
   });
 
+  it('finds a long containing interval when the cursor sits far from its startUs', () => {
+    // Off-CPU intervals can be arbitrarily long (a parked thread). Here index 0 spans [0, 10000] while every later
+    // interval is short. A cursor at us=9500 is deep inside index 0 but ~9500µs past its startUs. `findOffCpuAtX`
+    // must resolve the containing interval purely from the binary-search boundary (index lo-1) — its result must not
+    // depend on the long interval's startUs landing inside the small windowed-nearest probe. Regression guard for the
+    // explicit lo-1 containment test: if the windowed-nearest scan is ever narrowed and stops covering lo-1, this
+    // still catches the long-interval-far-from-startUs miss.
+    const store = makeStore([
+      { start: 0, end: 10000, cat: 1 },
+      { start: 12000, end: 12010, cat: 2 },
+      { start: 12020, end: 12030, cat: 3 },
+    ]);
+    const map = new Map([[7, store]]);
+    const hit = findOffCpuAtX(map, 7, 9500, 0, vp1to1);
+
+    expect(hit).not.toBeNull();
+    expect(hit!.startUs).toBe(0);
+    expect(hit!.endUs).toBe(10000);
+    expect(hit!.category).toBe(1);
+  });
+
   it('accounts for gutterWidth and viewport offset in the X→µs mapping', () => {
     const store = makeStore([{ start: 1000, end: 1100, cat: 0 }]);
     const map = new Map([[2, store]]);

@@ -153,7 +153,7 @@ public partial class Main : Node3D
         BuildRockRenderer();
         BuildFoodNestRenderer();
         BuildSpiderRenderer();
-        // BuildVegetationRenderer();   // temporarily disabled — PlantGrid + VegetationSystem still run sim-side (density factor still feeds fire spread); only the visual layer is suppressed
+        BuildVegetationRenderer();
         BuildFireParticleRenderer();
         BuildToolCursor();
 
@@ -431,10 +431,10 @@ void fragment() {
 
         // Map click position in the TextureRect to world XZ. Minimap covers the full 100 m world.
         var localPos = mb.Position;  // relative to the TextureRect
-        float u = Mathf.Clamp(localPos.X / MinimapSizePx, 0f, 1f);
-        float v = Mathf.Clamp(localPos.Y / MinimapSizePx, 0f, 1f);
-        float worldX = u * AntRenderer.WorldSizeM;
-        float worldZ = v * AntRenderer.WorldSizeM;
+        var u = Mathf.Clamp(localPos.X / MinimapSizePx, 0f, 1f);
+        var v = Mathf.Clamp(localPos.Y / MinimapSizePx, 0f, 1f);
+        var worldX = u * AntRenderer.WorldSizeM;
+        var worldZ = v * AntRenderer.WorldSizeM;
         _camera?.SetFollowTarget(new Vector3(worldX, 0f, worldZ));
     }
 
@@ -502,14 +502,14 @@ void fragment() {
 
         // Render m → sim units. AntRenderer.SimToWorld converts sim→render, so we divide.
         const float SimPerWorld = TyphonBridge.WorldSize / AntRenderer.WorldSizeM;
-        float simX = ground.X * SimPerWorld;
-        float simY = ground.Z * SimPerWorld;
+        var simX = ground.X * SimPerWorld;
+        var simY = ground.Z * SimPerWorld;
 
         if (_snapToGrid)
         {
             // Snap to 1 m grid in render space = 200 sim units. Round to nearest.
-            float renderX = Mathf.Round(ground.X);
-            float renderZ = Mathf.Round(ground.Z);
+            var renderX = Mathf.Round(ground.X);
+            var renderZ = Mathf.Round(ground.Z);
             simX = renderX * SimPerWorld;
             simY = renderZ * SimPerWorld;
         }
@@ -517,7 +517,7 @@ void fragment() {
         // Reject clicks that fall outside the world bounds (free-cam can look past it).
         if (simX < 0f || simX > TyphonBridge.WorldSize || simY < 0f || simY > TyphonBridge.WorldSize) return;
 
-        ToolCommand cmd = tool switch
+        var cmd = tool switch
         {
             ToolKind.Food => ToolCommand.PlaceFood(simX, simY, 8000f),
             ToolKind.Rock => ToolCommand.PlaceRock(simX, simY),
@@ -567,8 +567,8 @@ void fragment() {
             _bridge.UpdateCamera(0f, 0f, TyphonBridge.WorldSize, TyphonBridge.WorldSize);
 
             // LOD fade — push to ant material and Terrain
-            float fadeInd = _camera.FadeIndividuals;
-            float fadeDen = _camera.FadeDensity;
+            var fadeInd = _camera.FadeIndividuals;
+            var fadeDen = _camera.FadeDensity;
             _antRenderer.SetFadeIndividuals(fadeInd);
             _terrain?.SetFadeDensity(fadeDen);
             // Per-band split: at Patch (fade=0) skip state-texture upload + multimesh draw entirely.
@@ -588,7 +588,7 @@ void fragment() {
         // intentionally NOT modulated — the user navigates by it, must stay readable at midnight.
         if (_bridge != null)
         {
-            float brightness = _bridge.EnvironmentBrightness;
+            var brightness = _bridge.EnvironmentBrightness;
             _terrain?.SetBrightness(brightness);
             _antRenderer?.SetBrightness(brightness);
             if (_sun != null)
@@ -611,28 +611,28 @@ void fragment() {
         {
             var tiers = _bridge.TierCounts;
             var states = _bridge.StateCounts;
-            int foraging = states[0];
-            int carrying = states[1];
+            var foraging = states[0];
+            var carrying = states[1];
 
-            string speedLabel = _bridge.TimeScale == 0f ? "PAUSED" : $"{_bridge.TimeScale:G}x";
+            var speedLabel = _bridge.TimeScale == 0f ? "PAUSED" : $"{_bridge.TimeScale:G}x";
             _hudLeft.Text =
                 $"[{speedLabel}]  Ants: {TyphonBridge.AntCount:N0}  ({TyphonBridge.NestCount} nests)\n" +
                 $"Foraging: {foraging:N0}   Returning: {carrying:N0}\n" +
                 $"Food: {_bridge.FoodSourcesRemaining}/{TyphonBridge.FoodCount} sources   Delivered: {_bridge.FoodDelivered:N0}\n" +
                 $"Nest reserves: {_bridge.TotalNestFood:N0}   Deaths: {_bridge.DeathCount:N0}";
 
-            int drawCalls = (int)Performance.GetMonitor(Performance.Monitor.RenderTotalDrawCallsInFrame);
+            var drawCalls = (int)Performance.GetMonitor(Performance.Monitor.RenderTotalDrawCallsInFrame);
             var timing = _bridge.GetTimingInfo() ?? "N/A";
-            string lodLine = _camera != null
+            var lodLine = _camera != null
                 ? $"Band: {_camera.CurrentBand}  fade=ind:{_camera.FadeIndividuals:F2} dens:{_camera.FadeDensity:F2}  zoom: {_camera.OrthoZoom:F1}m"
                 : "Band: ?";
-            float fps = (float)Engine.GetFramesPerSecond();
-            float frameMs = fps > 0f ? 1000f / fps : 0f;
-            int uploadKb = (_antRenderer?.LastUploadBytes ?? 0) / 1024;
-            bool drawingInd = _antRenderer?.LastDrewIndividuals ?? false;
-            float fadeDenForHud = _camera?.FadeDensity ?? 0f;
-            string perfLine = $"frame: {frameMs:F1}ms  ant: {(drawingInd ? "ON " : "off")} state_tex_up: {uploadKb}KB  density: {(fadeDenForHud > 0.001f ? "ON " : "off")}";
-            string spiderPerf = $"spider: t0={_bridge.SpiderTier0Count}/{TyphonBridge.SpiderCount}  hits={_bridge.SpiderTotalHits}  query={_bridge.SpiderQueryMs:F2}ms  foreach={_bridge.SpiderForeachMs:F2}ms  commit={_bridge.SpiderCommitMs:F2}ms  kills={_bridge.SpiderKills}";
+            var fps = (float)Engine.GetFramesPerSecond();
+            var frameMs = fps > 0f ? 1000f / fps : 0f;
+            var uploadKb = (_antRenderer?.LastUploadBytes ?? 0) / 1024;
+            var drawingInd = _antRenderer?.LastDrewIndividuals ?? false;
+            var fadeDenForHud = _camera?.FadeDensity ?? 0f;
+            var perfLine = $"frame: {frameMs:F1}ms  ant: {(drawingInd ? "ON " : "off")} state_tex_up: {uploadKb}KB  density: {(fadeDenForHud > 0.001f ? "ON " : "off")}";
+            var spiderPerf = $"spider: t0={_bridge.SpiderTier0Count}/{TyphonBridge.SpiderCount}  hits={_bridge.SpiderTotalHits}  query={_bridge.SpiderQueryMs:F2}ms  foreach={_bridge.SpiderForeachMs:F2}ms  commit={_bridge.SpiderCommitMs:F2}ms  kills={_bridge.SpiderKills}";
             _hudRight.Text =
                 $"{fps:F0} fps  |  Draw: {drawCalls}  Visible: {_bridge.VisibleAnts:N0}\n" +
                 $"T0: {tiers[0]:N0}  T1: {tiers[1]:N0}  T2: {tiers[2]:N0}  T3: {tiers[3]:N0}\n" +

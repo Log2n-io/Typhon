@@ -113,7 +113,7 @@ export default function SystemDagCanvas({
   // (or is missing entirely), the system contributed nothing to the selected range and we drop
   // it. We filter the topology *before* buildDagModel so dagre lays out only the surviving
   // systems — otherwise the canvas leaves holes where the hidden tiles used to be. The
-  // underlying "no contribution" signal covers RunIf-skipped, tier-filtered, and
+  // underlying "no contribution" signal covers ShouldRun-skipped, tier-filtered, and
   // "scheduled-but-zero-duration" uniformly; matching `systemStats` keeps the toggle behaviour
   // aligned with the visible "0.0us" on each tile. No-op when no range is selected
   // (`systemStats` null) since we can't tell what counts as "didn't run" without a range.

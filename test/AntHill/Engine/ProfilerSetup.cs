@@ -63,13 +63,13 @@ public static class ProfilerSetup
             // thin tables, but the rich tables already cover every registered archetype / component type, so projecting
             // them here keeps the trace's two parallel tables consistent without a second registry walk.
             archetypes = new ArchetypeRecord[archetypeDefinitions.Length];
-            for (int i = 0; i < archetypeDefinitions.Length; i++)
+            for (var i = 0; i < archetypeDefinitions.Length; i++)
             {
                 var def = archetypeDefinitions[i];
                 archetypes[i] = new ArchetypeRecord { ArchetypeId = def.ArchetypeId, Name = def.Name };
             }
             componentTypes = new ComponentTypeRecord[componentDefinitions.Length];
-            for (int i = 0; i < componentDefinitions.Length; i++)
+            for (var i = 0; i < componentDefinitions.Length; i++)
             {
                 var def = componentDefinitions[i];
                 componentTypes[i] = new ComponentTypeRecord { ComponentTypeId = def.ComponentTypeId, Name = def.Name };

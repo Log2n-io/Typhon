@@ -57,19 +57,19 @@ public sealed class HeightmapResource
         };
 
         var data = new float[resolution * resolution];
-        float worldStep = WorldSize / resolution;
-        for (int z = 0; z < resolution; z++)
+        var worldStep = WorldSize / resolution;
+        for (var z = 0; z < resolution; z++)
         {
-            float wz = (z + 0.5f) * worldStep;
-            for (int x = 0; x < resolution; x++)
+            var wz = (z + 0.5f) * worldStep;
+            for (var x = 0; x < resolution; x++)
             {
-                float wx = (x + 0.5f) * worldStep;
+                var wx = (x + 0.5f) * worldStep;
                 // GetNoise2D returns roughly [-1, 1] but with FBM the distribution is bunched near 0 — most cells end up
                 // shallow. Boost contrast with a signed-power (preserves sign, exaggerates large values) so peaks and
                 // valleys read clearly. Exponent 0.6 = mild stretch; <1 pushes values away from 0.
-                float n = noise.GetNoise2D(wx, wz);
-                float sign = n < 0 ? -1f : 1f;
-                float stretched = sign * Mathf.Pow(Mathf.Abs(n), 0.6f);
+                var n = noise.GetNoise2D(wx, wz);
+                var sign = n < 0 ? -1f : 1f;
+                var stretched = sign * Mathf.Pow(Mathf.Abs(n), 0.6f);
                 data[z * resolution + x] = stretched * relief;
             }
         }
@@ -80,20 +80,20 @@ public sealed class HeightmapResource
     /// <summary>Bilinear sample at world (x, z) in metres. Clamps to edges.</summary>
     public float Sample(float worldX, float worldZ)
     {
-        float fx = Mathf.Clamp(worldX * _invCellSize - 0.5f, 0f, Resolution - 1.001f);
-        float fz = Mathf.Clamp(worldZ * _invCellSize - 0.5f, 0f, Resolution - 1.001f);
-        int ix = (int)fx;
-        int iz = (int)fz;
-        float tx = fx - ix;
-        float tz = fz - iz;
+        var fx = Mathf.Clamp(worldX * _invCellSize - 0.5f, 0f, Resolution - 1.001f);
+        var fz = Mathf.Clamp(worldZ * _invCellSize - 0.5f, 0f, Resolution - 1.001f);
+        var ix = (int)fx;
+        var iz = (int)fz;
+        var tx = fx - ix;
+        var tz = fz - iz;
 
-        float h00 = Data[iz * Resolution + ix];
-        float h10 = Data[iz * Resolution + ix + 1];
-        float h01 = Data[(iz + 1) * Resolution + ix];
-        float h11 = Data[(iz + 1) * Resolution + ix + 1];
+        var h00 = Data[iz * Resolution + ix];
+        var h10 = Data[iz * Resolution + ix + 1];
+        var h01 = Data[(iz + 1) * Resolution + ix];
+        var h11 = Data[(iz + 1) * Resolution + ix + 1];
 
-        float h0 = h00 + (h10 - h00) * tx;
-        float h1 = h01 + (h11 - h01) * tx;
+        var h0 = h00 + (h10 - h00) * tx;
+        var h1 = h01 + (h11 - h01) * tx;
         return h0 + (h1 - h0) * tz;
     }
 

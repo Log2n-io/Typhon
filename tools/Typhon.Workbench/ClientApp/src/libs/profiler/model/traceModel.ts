@@ -224,43 +224,6 @@ export function materializeOffCpuInterval(store: OffCpuStore, index: number, thr
 }
 
 /**
- * One ON-CPU slice for a Typhon-registered thread, observed by `EtwSchedulingPump` (kind 254). The header threadSlot is the
- * pump's own slot — the workbench re-projects to `targetSlotIdx` to render the slice on the affected thread's lane.
- *
- * **Rendering model.** For each thread `targetSlotIdx`, sort the slices by `startUs`. The gaps between consecutive slices are
- * the OFF-CPU intervals: `[prev.endUs, next.startUs]` with reason = `prev.waitReason` (why prev left the CPU) and
- * readyTime = `next.readyTimeUs` (how long next was queued before getting the CPU). Render those gaps as semi-transparent
- * overlay bars on the thread's existing lane, color-coded by wait-reason category (sync-wait / quantum-end / preempted /
- * paging / idle).
- *
- * **Decode path.** Surfaced via the auto-generated `ThreadContextSwitchEventDto` (polymorphic kind discriminator
- * `threadContextSwitch`). Wire payload: `targetSlotIdx u8`, `processorNumber u8`, `waitReason u8` (ThreadWaitReason),
- * `threadState u8` (System.Diagnostics.ThreadState raw), `gettingIdle u8`, `durationQpc u32`, `readyTimeQpc u32`. Convert
- * QPC fields to microseconds via the trace's `timestampFrequency` before populating this struct.
- */
-export interface ThreadOnCpuSlice {
-  tickNumber: number;
-  /** Slot index of the thread whose ON-CPU slice this is (re-projection target, NOT the producer slot). */
-  targetSlotIdx: number;
-  /** Slice start on the global timeline (= record's common-header timestamp converted to µs). */
-  startUs: number;
-  /** Slice end on the global timeline (= startUs + durationUs). */
-  endUs: number;
-  /** Time the thread held the CPU. */
-  durationUs: number;
-  /** Logical CPU id the slice ran on. */
-  processorNumber: number;
-  /** `ThreadWaitReason` byte — why the thread left the CPU at the end of this slice. */
-  waitReason: number;
-  /** Post-switch `System.Diagnostics.ThreadState` raw byte. */
-  threadState: number;
-  /** True when the CPU went to the System Idle thread next (no contender for the core). */
-  gettingIdle: boolean;
-  /** Time the thread spent on the ready queue immediately before this slice started. 0 = unknown, very large = scheduler pressure. */
-  readyTimeUs: number;
-}
-
-/**
  * A generic Typhon span captured via `TyphonEvent.BeginXxx` (B+Tree / Transaction / ECS / PageCache / Cluster / NamedSpan).
  * Every span-kind record arrives already with its duration in the wire format, so no Start/End pairing is needed.
  *
@@ -499,7 +462,7 @@ const PHASE_NAMES: Record<number, string> = {
 
 const SKIP_REASON_NAMES: Record<number, string> = {
   0: 'Not Skipped',
-  1: 'RunIf False',
+  1: 'ShouldRun False',
   2: 'Empty Input',
   3: 'Empty Events',
   4: 'Throttled',

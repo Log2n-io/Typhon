@@ -72,7 +72,7 @@ public sealed class PlantGrid
 
         const float SimToWorld = 100f / TyphonBridge.WorldSize;             // mirrors AntRenderer.SimToWorld (= 0.005)
 
-        int written = 0;
+        var written = 0;
         for (var sy = 0; sy < StratumPerSide; sy++)
         {
             for (var sx = 0; sx < StratumPerSide; sx++)

@@ -31,7 +31,7 @@ internal sealed class ToolCommandSystem : CallbackSystem
         var queue = _bridge._toolCommands;
         if (queue.IsEmpty) return;
 
-        bool foodAdded = false;
+        var foodAdded = false;
         var t = _bridge._simTimeSec;
         var simToWorld = 100f / TyphonBridge.WorldSize;   // mirrors AntRenderer.SimToWorld
 

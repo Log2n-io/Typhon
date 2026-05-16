@@ -22,7 +22,7 @@ public sealed class RenderWorkerBuffer
 
     public RenderWorkerBuffer(int initialCapacity)
     {
-        int len = initialCapacity * Stride;
+        var len = initialCapacity * Stride;
         _buffers[0] = new float[len];
         _buffers[1] = new float[len];
         _writeSlot = 0;
@@ -40,10 +40,10 @@ public sealed class RenderWorkerBuffer
     /// <summary>Ensure backing array can hold at least <paramref name="additionalInstances"/> more. Call once per cluster.</summary>
     public void EnsureCapacity(int additionalInstances)
     {
-        int needed = (Count + additionalInstances) * Stride;
+        var needed = (Count + additionalInstances) * Stride;
         if (needed > Data.Length)
         {
-            int newLen = Data.Length;
+            var newLen = Data.Length;
             while (newLen < needed) newLen *= 2;
             Array.Resize(ref Data, newLen);
             _buffers[_writeSlot] = Data;

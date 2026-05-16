@@ -367,6 +367,12 @@ export function findOffCpuAtX(
     const dist = us < s ? s - us : us > e ? us - e : 0;   // 0 when strictly inside
     if (dist < bestDist) { bestDist = dist; best = i; }
   }
+  // The windowed scan assumes bounded interval width, but off-CPU intervals (parked-thread gaps) can be arbitrarily
+  // long: an interval whose startUs sits far left of `lo-2` may still extend past the cursor. The containing interval,
+  // if any, is always index lo-1 (largest startUs ≤ us+tolUs). When the window found nothing, test it explicitly.
+  if (best < 0 && lo > 0 && us <= store.endUs[lo - 1] + tolUs) {
+    best = lo - 1;
+  }
   if (best < 0) return null;
   return materializeOffCpuInterval(store, best, threadSlot);
 }

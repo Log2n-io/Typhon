@@ -49,26 +49,26 @@ internal sealed class PheroMaxReduceSystem : ChunkedCallbackSystem
 
         // Partition output rows across chunks. Each chunk owns hStart..hEnd output rows and the
         // 5 source rows that feed each. Reset-then-fill so the previous tick's values don't bleed.
-        int outRowsPerChunk = (hs + ctx.ChunkCount - 1) / ctx.ChunkCount;
-        int hStart = ctx.ChunkIndex * outRowsPerChunk;
-        int hEnd = Math.Min(hStart + outRowsPerChunk, hs);
+        var outRowsPerChunk = (hs + ctx.ChunkCount - 1) / ctx.ChunkCount;
+        var hStart = ctx.ChunkIndex * outRowsPerChunk;
+        var hEnd = Math.Min(hStart + outRowsPerChunk, hs);
 
-        for (int hy = hStart; hy < hEnd; hy++)
+        for (var hy = hStart; hy < hEnd; hy++)
         {
-            int hiRow = hy * hs;
+            var hiRow = hy * hs;
 
             // Reset this chunk's output rows (this-tick's values will go on top of zeros).
-            for (int hx = 0; hx < hs; hx++) acc[hiRow + hx] = 0f;
+            for (var hx = 0; hx < hs; hx++) acc[hiRow + hx] = 0f;
 
             // Accumulate max from the 5 source rows that feed this output row.
-            int srcRowStart = hy * 5;
-            for (int sy = srcRowStart; sy < srcRowStart + 5; sy++)
+            var srcRowStart = hy * 5;
+            for (var sy = srcRowStart; sy < srcRowStart + 5; sy++)
             {
-                int srcRow = sy * gs;
-                for (int sx = 0; sx < gs; sx++)
+                var srcRow = sy * gs;
+                for (var sx = 0; sx < gs; sx++)
                 {
-                    int hi = hiRow + sx / 5;
-                    int si = srcRow + sx;
+                    var hi = hiRow + sx / 5;
+                    var si = srcRow + sx;
                     var v = src[si];
                     if (v > acc[hi]) acc[hi] = v;
                 }
@@ -104,7 +104,7 @@ internal sealed class HeatmapRgbaPackSystem : CallbackSystem
         var maxG = _bridge._heatMaxFight;
         var rgba = _bridge._heatmapRGBA;
         var invMax = 255f / PheromoneGrid.MaxPheromone;
-        int n = TyphonBridge.HeatmapPixels;
+        var n = TyphonBridge.HeatmapPixels;
 
         for (var i = 0; i < n; i++)
         {

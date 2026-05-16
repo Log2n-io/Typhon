@@ -1022,12 +1022,65 @@ function decodeClusterMigration(
   return evt;
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// Fence-span optional-field decoder — shared by the 8 WriteTickFence* / Spatial* span codecs.
+// ═══════════════════════════════════════════════════════════════════════
+
+/**
+ * One optional field in a fence-span payload: `bit` selects it in the mask byte, `type` picks the read width, `field`
+ * names the {@link TraceEvent} property it lands in. Constrained to the numeric-valued keys of {@link TraceEvent} so the
+ * decoded i32/u8 value assigns cleanly. Fields are listed in wire order (mask-bit order).
+ */
+type NumericTraceEventKey = {
+  [K in keyof TraceEvent]-?: NonNullable<TraceEvent[K]> extends number ? K : never;
+}[keyof TraceEvent];
+
+interface OptionalFieldSpec {
+  bit: number;
+  type: 'i32' | 'u8';
+  field: NumericTraceEventKey;
+}
+
+/**
+ * Decode the optional-field block shared by every fence span: a u8 mask byte followed by mask-selected typed fields in
+ * wire order. Returns nothing — fields are written onto `evt` in place.
+ *
+ * **Bounds discipline.** The mask byte is read only when it fits before `recordEnd`. Each optional field is read only
+ * when `cursor + size <= recordEnd`: a truncated trace, or an older trace whose mask bit is set but whose payload bytes
+ * were never written, must not advance the cursor into the adjacent record. `BinaryReader` would throw on a read past
+ * the LZ4 block end, but a stale mask bit inside a well-formed chunk reads *valid* bytes from the next record — silent
+ * corruption that only the explicit `recordEnd` guard catches.
+ */
+function decodeOptionalMaskedFields(
+  reader: BinaryReader, evt: TraceEvent, optMaskOffset: number, recordEnd: number, spec: readonly OptionalFieldSpec[],
+): void {
+  if (optMaskOffset >= recordEnd) return;
+  const mask = reader.readU8(optMaskOffset);
+  let cursor = optMaskOffset + 1;
+  // The write target is keyed dynamically; `field` is constrained to numeric-valued TraceEvent keys, so a numeric
+  // index-write is sound — TS cannot prove the single-property case, hence the local Record view.
+  const sink = evt as Record<NumericTraceEventKey, number>;
+  for (const f of spec) {
+    if ((mask & f.bit) === 0) continue;
+    const size = f.type === 'i32' ? 4 : 1;
+    if (cursor + size > recordEnd) break;   // truncated / stale-mask record — stop before the adjacent record
+    sink[f.field] = f.type === 'i32' ? reader.readI32(cursor) : reader.readU8(cursor);
+    cursor += size;
+  }
+}
+
 // SpatialClusterMigrationDetectScan (kind 249) — fence-time scan span. Wire layout:
 // BeginParams (6 bytes): u16 archetypeId, i32 scanSlotCount.
 // Then u8 optMask @ +6; then optional fields in mask-bit order:
 //   0x01: i32 _migrationsQueued
 //   0x02: i32 _hysteresisAbsorbed
 //   0x04: i32 _clustersTouched
+const FENCE_SCAN_FIELDS: readonly OptionalFieldSpec[] = [
+  { bit: 0x01, type: 'i32', field: 'migrationsQueued' },
+  { bit: 0x02, type: 'i32', field: 'hysteresisAbsorbed' },
+  { bit: 0x04, type: 'i32', field: 'clustersTouched' },
+];
+
 function decodeClusterMigrationDetectScan(
   reader: BinaryReader, kind: TraceEventKind,
   threadSlot: number, tickNumber: number, timestampUs: number, header: SpanHeader,
@@ -1038,14 +1091,7 @@ function decodeClusterMigrationDetectScan(
     archetypeId: reader.readU16(o),
     scanSlotCount: reader.readI32(o + 2),
   };
-  const optMaskOffset = o + 6;
-  if (optMaskOffset < header.recordEnd) {
-    const mask = reader.readU8(optMaskOffset);
-    let cursor = optMaskOffset + 1;
-    if ((mask & 0x01) !== 0) { evt.migrationsQueued = reader.readI32(cursor); cursor += 4; }
-    if ((mask & 0x02) !== 0) { evt.hysteresisAbsorbed = reader.readI32(cursor); cursor += 4; }
-    if ((mask & 0x04) !== 0) { evt.clustersTouched = reader.readI32(cursor); cursor += 4; }
-  }
+  decodeOptionalMaskedFields(reader, evt, o + 6, header.recordEnd, FENCE_SCAN_FIELDS);
   return evt;
 }
 
@@ -1055,6 +1101,12 @@ function decodeClusterMigrationDetectScan(
 //   0x01: i32 _aabbsChanged
 //   0x02: i32 _slotsScanned
 //   0x04: i32 _outlierGuardFires
+const FENCE_AABB_FIELDS: readonly OptionalFieldSpec[] = [
+  { bit: 0x01, type: 'i32', field: 'aabbsChanged' },
+  { bit: 0x02, type: 'i32', field: 'slotsScanned' },
+  { bit: 0x04, type: 'i32', field: 'outlierGuardFires' },
+];
+
 function decodeClusterAabbRefresh(
   reader: BinaryReader, kind: TraceEventKind,
   threadSlot: number, tickNumber: number, timestampUs: number, header: SpanHeader,
@@ -1065,14 +1117,7 @@ function decodeClusterAabbRefresh(
     archetypeId: reader.readU16(o),
     clusterScanned: reader.readI32(o + 2),
   };
-  const optMaskOffset = o + 6;
-  if (optMaskOffset < header.recordEnd) {
-    const mask = reader.readU8(optMaskOffset);
-    let cursor = optMaskOffset + 1;
-    if ((mask & 0x01) !== 0) { evt.aabbsChanged = reader.readI32(cursor); cursor += 4; }
-    if ((mask & 0x02) !== 0) { evt.slotsScanned = reader.readI32(cursor); cursor += 4; }
-    if ((mask & 0x04) !== 0) { evt.outlierGuardFires = reader.readI32(cursor); cursor += 4; }
-  }
+  decodeOptionalMaskedFields(reader, evt, o + 6, header.recordEnd, FENCE_AABB_FIELDS);
   return evt;
 }
 
@@ -1082,6 +1127,12 @@ function decodeClusterAabbRefresh(
 //   0x01: u8 _walPublished
 //   0x02: u8 _hasShadow
 //   0x04: u8 _hasSpatial
+const FENCE_TABLE_FIELDS: readonly OptionalFieldSpec[] = [
+  { bit: 0x01, type: 'u8', field: 'walPublished' },
+  { bit: 0x02, type: 'u8', field: 'hasShadow' },
+  { bit: 0x04, type: 'u8', field: 'hasSpatial' },
+];
+
 function decodeWriteTickFenceTable(
   reader: BinaryReader, kind: TraceEventKind,
   threadSlot: number, tickNumber: number, timestampUs: number, header: SpanHeader,
@@ -1092,14 +1143,7 @@ function decodeWriteTickFenceTable(
     componentTypeId: reader.readU16(o),
     dirtyEntryCount: reader.readI32(o + 2),
   };
-  const optMaskOffset = o + 6;
-  if (optMaskOffset < header.recordEnd) {
-    const mask = reader.readU8(optMaskOffset);
-    let cursor = optMaskOffset + 1;
-    if ((mask & 0x01) !== 0) { evt.walPublished = reader.readU8(cursor); cursor += 1; }
-    if ((mask & 0x02) !== 0) { evt.hasShadow = reader.readU8(cursor); cursor += 1; }
-    if ((mask & 0x04) !== 0) { evt.hasSpatial = reader.readU8(cursor); cursor += 1; }
-  }
+  decodeOptionalMaskedFields(reader, evt, o + 6, header.recordEnd, FENCE_TABLE_FIELDS);
   return evt;
 }
 
@@ -1107,6 +1151,10 @@ function decodeWriteTickFenceTable(
 // BeginParams (6 bytes): u16 componentTypeId, i32 indexedFieldCount.
 // Then u8 optMask @ +6; then optional fields:
 //   0x01: i32 _totalShadowEntries
+const FENCE_SHADOW_FIELDS: readonly OptionalFieldSpec[] = [
+  { bit: 0x01, type: 'i32', field: 'totalShadowEntries' },
+];
+
 function decodeWriteTickFenceShadow(
   reader: BinaryReader, kind: TraceEventKind,
   threadSlot: number, tickNumber: number, timestampUs: number, header: SpanHeader,
@@ -1117,12 +1165,7 @@ function decodeWriteTickFenceShadow(
     componentTypeId: reader.readU16(o),
     indexedFieldCount: reader.readI32(o + 2),
   };
-  const optMaskOffset = o + 6;
-  if (optMaskOffset < header.recordEnd) {
-    const mask = reader.readU8(optMaskOffset);
-    let cursor = optMaskOffset + 1;
-    if ((mask & 0x01) !== 0) { evt.totalShadowEntries = reader.readI32(cursor); cursor += 4; }
-  }
+  decodeOptionalMaskedFields(reader, evt, o + 6, header.recordEnd, FENCE_SHADOW_FIELDS);
   return evt;
 }
 
@@ -1130,6 +1173,10 @@ function decodeWriteTickFenceShadow(
 // BeginParams (6 bytes): u16 componentTypeId, i32 dirtyEntryCount.
 // Then u8 optMask @ +6; then optional fields:
 //   0x01: i32 _escapedCount
+const FENCE_SPATIAL_FIELDS: readonly OptionalFieldSpec[] = [
+  { bit: 0x01, type: 'i32', field: 'escapedCount' },
+];
+
 function decodeWriteTickFenceSpatial(
   reader: BinaryReader, kind: TraceEventKind,
   threadSlot: number, tickNumber: number, timestampUs: number, header: SpanHeader,
@@ -1140,12 +1187,7 @@ function decodeWriteTickFenceSpatial(
     componentTypeId: reader.readU16(o),
     dirtyEntryCount: reader.readI32(o + 2),
   };
-  const optMaskOffset = o + 6;
-  if (optMaskOffset < header.recordEnd) {
-    const mask = reader.readU8(optMaskOffset);
-    let cursor = optMaskOffset + 1;
-    if ((mask & 0x01) !== 0) { evt.escapedCount = reader.readI32(cursor); cursor += 4; }
-  }
+  decodeOptionalMaskedFields(reader, evt, o + 6, header.recordEnd, FENCE_SPATIAL_FIELDS);
   return evt;
 }
 
@@ -1157,6 +1199,14 @@ function decodeWriteTickFenceSpatial(
 //   0x04: u8  _hasShadow
 //   0x08: u8  _hasSpatial
 //   0x10: u8  _walPublished
+const FENCE_CLUSTER_FIELDS: readonly OptionalFieldSpec[] = [
+  { bit: 0x01, type: 'i32', field: 'dirtyClusterCount' },
+  { bit: 0x02, type: 'i32', field: 'entryCount' },
+  { bit: 0x04, type: 'u8', field: 'hasShadow' },
+  { bit: 0x08, type: 'u8', field: 'hasSpatial' },
+  { bit: 0x10, type: 'u8', field: 'walPublished' },
+];
+
 function decodeWriteTickFenceCluster(
   reader: BinaryReader, kind: TraceEventKind,
   threadSlot: number, tickNumber: number, timestampUs: number, header: SpanHeader,
@@ -1166,16 +1216,7 @@ function decodeWriteTickFenceCluster(
     ...baseSpanEvent(kind, threadSlot, tickNumber, timestampUs, header),
     archetypeId: reader.readU16(o),
   };
-  const optMaskOffset = o + 2;
-  if (optMaskOffset < header.recordEnd) {
-    const mask = reader.readU8(optMaskOffset);
-    let cursor = optMaskOffset + 1;
-    if ((mask & 0x01) !== 0) { evt.dirtyClusterCount = reader.readI32(cursor); cursor += 4; }
-    if ((mask & 0x02) !== 0) { evt.entryCount = reader.readI32(cursor); cursor += 4; }
-    if ((mask & 0x04) !== 0) { evt.hasShadow = reader.readU8(cursor); cursor += 1; }
-    if ((mask & 0x08) !== 0) { evt.hasSpatial = reader.readU8(cursor); cursor += 1; }
-    if ((mask & 0x10) !== 0) { evt.walPublished = reader.readU8(cursor); cursor += 1; }
-  }
+  decodeOptionalMaskedFields(reader, evt, o + 2, header.recordEnd, FENCE_CLUSTER_FIELDS);
   return evt;
 }
 
@@ -1193,12 +1234,7 @@ function decodeWriteTickFenceClusterShadow(
     archetypeId: reader.readU16(o),
     dirtyClusterCount: reader.readI32(o + 2),
   };
-  const optMaskOffset = o + 6;
-  if (optMaskOffset < header.recordEnd) {
-    const mask = reader.readU8(optMaskOffset);
-    let cursor = optMaskOffset + 1;
-    if ((mask & 0x01) !== 0) { evt.totalShadowEntries = reader.readI32(cursor); cursor += 4; }
-  }
+  decodeOptionalMaskedFields(reader, evt, o + 6, header.recordEnd, FENCE_SHADOW_FIELDS);
   return evt;
 }
 
@@ -1206,6 +1242,10 @@ function decodeWriteTickFenceClusterShadow(
 // BeginParams (6 bytes): u16 archetypeId, i32 dirtyClusterCount.
 // Then u8 optMask @ +6; then optional fields:
 //   0x01: i32 _migrationsExecuted
+const FENCE_CLUSTER_SPATIAL_FIELDS: readonly OptionalFieldSpec[] = [
+  { bit: 0x01, type: 'i32', field: 'migrationsExecuted' },
+];
+
 function decodeWriteTickFenceClusterSpatial(
   reader: BinaryReader, kind: TraceEventKind,
   threadSlot: number, tickNumber: number, timestampUs: number, header: SpanHeader,
@@ -1216,12 +1256,7 @@ function decodeWriteTickFenceClusterSpatial(
     archetypeId: reader.readU16(o),
     dirtyClusterCount: reader.readI32(o + 2),
   };
-  const optMaskOffset = o + 6;
-  if (optMaskOffset < header.recordEnd) {
-    const mask = reader.readU8(optMaskOffset);
-    let cursor = optMaskOffset + 1;
-    if ((mask & 0x01) !== 0) { evt.migrationsExecuted = reader.readI32(cursor); cursor += 4; }
-  }
+  decodeOptionalMaskedFields(reader, evt, o + 6, header.recordEnd, FENCE_CLUSTER_SPATIAL_FIELDS);
   return evt;
 }
 
