@@ -1,7 +1,8 @@
 using System;
+using AntHill.Core;
 using Godot;
 
-namespace AntHill;
+namespace AntHill.Demo;
 
 /// <summary>
 /// Renders food piles + nests as two MultiMeshes (sphere for food, larger half-dome for nests).

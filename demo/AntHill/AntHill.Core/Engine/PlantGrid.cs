@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 
-namespace AntHill;
+namespace AntHill.Core;
 
 /// <summary>
 /// Phase 6C — 100 k plant billboards spread across the world as plain arrays. Lives outside ECS

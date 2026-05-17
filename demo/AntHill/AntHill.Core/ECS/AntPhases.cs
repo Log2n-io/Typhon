@@ -1,6 +1,4 @@
-using Typhon.Engine;
-
-namespace AntHill;
+namespace AntHill.Core;
 
 /// <summary>
 /// AntHill custom phases — extends the engine-shipped <see cref="Phase.Input"/>, etc., with the

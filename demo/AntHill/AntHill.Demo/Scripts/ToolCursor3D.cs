@@ -1,6 +1,7 @@
+using AntHill.Core;
 using Godot;
 
-namespace AntHill;
+namespace AntHill.Demo;
 
 /// <summary>
 /// 3D ground indicator following the mouse via <see cref="GameCamera.TryProjectToGround"/>.

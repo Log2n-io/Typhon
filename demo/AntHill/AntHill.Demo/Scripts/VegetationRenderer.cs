@@ -1,6 +1,7 @@
+using AntHill.Core;
 using Godot;
 
-namespace AntHill;
+namespace AntHill.Demo;
 
 /// <summary>
 /// Phase 6C — renders the 100 k plant carpet as four <see cref="MultiMeshInstance3D"/> nodes
@@ -25,12 +26,12 @@ public partial class VegetationRenderer : Node3D
     // Tint per kind. Chosen for at-a-glance kind separation against the dirt-brown terrain.
     private static readonly Color[] AliveTints =
     [
-        new(0.35f, 0.55f, 0.18f, 1.0f),                                     // grass — warm green
-        new(0.18f, 0.40f, 0.20f, 1.0f),                                     // moss  — deep mossy
-        new(0.65f, 0.65f, 0.50f, 1.0f),                                     // lichen — pale yellow-grey
-        new(0.20f, 0.45f, 0.10f, 1.0f),                                     // leaf  — darker leafy
+        new(0.35f, 0.55f, 0.18f),                                     // grass — warm green
+        new(0.18f, 0.40f, 0.20f),                                     // moss  — deep mossy
+        new(0.65f, 0.65f, 0.50f),                                     // lichen — pale yellow-grey
+        new(0.20f, 0.45f, 0.10f),                                     // leaf  — darker leafy
     ];
-    private static readonly Color CharredColor = new(0.18f, 0.13f, 0.10f, 1.0f);
+    private static readonly Color CharredColor = new(0.18f, 0.13f, 0.10f);
     private static readonly Color DespawnedColor = new(0f, 0f, 0f, 0f);     // alpha 0 → fragment discard
 
     // Mesh sizes (width × height in metres) per kind. Tweaked per kind so the world reads layered:
@@ -139,7 +140,7 @@ public partial class VegetationRenderer : Node3D
 
         var w = _bridge.Wind;
         _sharedMaterial.SetShaderParameter("wind", new Vector2(w.X, w.Y));
-        _sharedMaterial.SetShaderParameter("u_time", (float)Time.GetTicksMsec() * 0.001f);
+        _sharedMaterial.SetShaderParameter("u_time", Time.GetTicksMsec() * 0.001f);
     }
 
     /// <summary>

@@ -1,6 +1,4 @@
-using Typhon.Engine;
-
-namespace AntHill;
+namespace AntHill.Core;
 
 /// <summary>
 /// Linear evaporate over the entire pheromone grid. Pure callback — per-cell sweep, no entity iteration.

@@ -1,4 +1,4 @@
-namespace AntHill;
+namespace AntHill.Core;
 
 /// <summary>
 /// Procedural heightmap for the 100 m × 100 m forest-floor world. Phase 1 implementation —

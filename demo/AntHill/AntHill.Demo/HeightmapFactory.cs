@@ -1,6 +1,7 @@
+using AntHill.Core;
 using Godot;
 
-namespace AntHill;
+namespace AntHill.Demo;
 
 /// <summary>
 /// Godot-coupled construction + export for <see cref="HeightmapResource"/> — procedural generation

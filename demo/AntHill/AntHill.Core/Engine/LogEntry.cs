@@ -1,4 +1,4 @@
-namespace AntHill;
+namespace AntHill.Core;
 
 public enum LogSeverity : byte { Milestone, Tool, Depletion, Action }
 

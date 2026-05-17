@@ -3,10 +3,9 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.X86;
-using System.Threading;
 using System.Threading.Tasks;
 
-namespace AntHill;
+namespace AntHill.Core;
 
 /// <summary>
 /// Two-channel pheromone grid: food trail + home trail.

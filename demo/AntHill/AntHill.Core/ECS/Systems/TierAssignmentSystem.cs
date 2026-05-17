@@ -1,6 +1,4 @@
-using Typhon.Engine;
-
-namespace AntHill;
+namespace AntHill.Core;
 
 /// <summary>
 /// Resets the spatial-grid tier assignment from the camera AABB. Pure callback — no entity

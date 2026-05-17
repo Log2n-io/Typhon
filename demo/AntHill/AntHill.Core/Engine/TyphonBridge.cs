@@ -4,10 +4,9 @@ using System.Numerics;
 using System.Threading;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
-using Typhon.Engine;
 using Typhon.Schema.Definition;
 
-namespace AntHill;
+namespace AntHill.Core;
 
 public sealed class TyphonBridge : IDisposable
 {
@@ -15,58 +14,58 @@ public sealed class TyphonBridge : IDisposable
     public const int FoodCount = 50;
     public const int NestCount = 5;
     public const float WorldSize = 20_000f;
-    public const float CellSize = 1000f;
-    public const float InvCellSize = 1f / CellSize;
-    public const int GridCells = 20; // WorldSize / CellSize
+    private const float CellSize = 1000f;
+    private const float InvCellSize = 1f / CellSize;
+    private const int GridCells = 20; // WorldSize / CellSize
 
     private ServiceProvider _serviceProvider;
     private IServiceScope _scope;
-    internal DatabaseEngine _dbe;
+    internal DatabaseEngine DBE;
     private TyphonRuntime _runtime;
-    internal EcsView<Ant> _antView;
+    internal EcsView<Ant> AntView;
 
     private const int Stride = 12;
 
     // Per-worker render buffers — each worker writes to its own, no synchronization needed
-    internal RenderWorkerBuffer[] _workerBuffers;
-    internal RenderWorkerBuffer _overlayBuffer; // food + nests
+    private RenderWorkerBuffer[] _workerBuffers;
+    private RenderWorkerBuffer _overlayBuffer; // food + nests
 
     // Pheromone heatmap double-buffered RGBA (200×200×4)
     internal const int HeatmapPixels = RenderFrame.HeatmapSize * RenderFrame.HeatmapSize;
-    internal byte[] _heatmapRGBA = new byte[HeatmapPixels * 4];
-    internal byte[] _heatmapRGBARead = new byte[HeatmapPixels * 4];
-    internal readonly float[] _heatMaxFood = new float[HeatmapPixels];
-    internal readonly float[] _heatMaxHome = new float[HeatmapPixels];
-    internal readonly float[] _heatMaxFight = new float[HeatmapPixels];   // Phase 6 polish — Fight alarm channel for the heatmap R lane
-    internal volatile bool _heatmapEnabled;
+    internal byte[] HeatmapRgba = new byte[HeatmapPixels * 4];
+    private byte[] _heatmapRgbaRead = new byte[HeatmapPixels * 4];
+    internal readonly float[] HeatMaxFood = new float[HeatmapPixels];
+    internal readonly float[] HeatMaxHome = new float[HeatmapPixels];
+    internal readonly float[] HeatMaxFight = new float[HeatmapPixels];   // Phase 6 polish — Fight alarm channel for the heatmap R lane
+    internal volatile bool HeatmapEnabled;
 
     // Tier counts tracked during FillRenderBuffer
-    internal readonly int[] _tierCounts = new int[4];
+    private readonly int[] _tierCounts = new int[4];
     public ReadOnlySpan<int> TierCounts => _tierCounts;
 
     // Ant state counters
-    internal readonly int[] _stateCounts = new int[2]; // [0]=Foraging, [1]=Carrying
+    private readonly int[] _stateCounts = new int[2]; // [0]=Foraging, [1]=Carrying
     public ReadOnlySpan<int> StateCounts => _stateCounts;
 
     // Camera world-space AABB (updated from Godot render thread)
-    internal volatile float _camMinX;
-    internal volatile float _camMinY;
-    internal volatile float _camMaxX = 20_000f;
-    internal volatile float _camMaxY = 20_000f;
+    private volatile float _camMinX;
+    private volatile float _camMinY;
+    private volatile float _camMaxX = 20_000f;
+    private volatile float _camMaxY = 20_000f;
 
     // Time control
-    internal volatile float _timeScale = 1f;
+    private volatile float _timeScale = 1f;
     public float TimeScale { get => _timeScale; set => _timeScale = value; }
 
     // Phase 6A — environment (Daisyworld luminosity + sim-time day/night cycle).
     // Plain fields, not an ECS component: this is a global tunable, not entity state. Same pattern
     // as _timeScale / _simTimeSec. EnvironmentTickSystem writes _dayPhase + _envBrightness once per
     // tick; renderers poll EnvironmentBrightness from the Godot side each frame.
-    internal const float DayCyclePeriodSec = 600f;   // 10 min sim-seconds at 1× speed
-    internal volatile float _luminosity = 0.5f;      // [0,1] HUD slider
-    internal volatile float _dayPhase   = 0.30f;     // [0,1] wraps every DayCyclePeriodSec sim-seconds — start at morning
-    internal volatile bool  _pauseDayNight;          // HUD toggle freezes _dayPhase but not _luminosity
-    internal volatile float _envBrightness = 0.5f;   // computed: _luminosity × daynightCurve(_dayPhase) with 0.15 floor
+    private const float DayCyclePeriodSec = 600f;   // 10 min sim-seconds at 1× speed
+    private volatile float _luminosity = 0.5f;      // [0,1] HUD slider
+    private volatile float _dayPhase   = 0.30f;     // [0,1] wraps every DayCyclePeriodSec sim-seconds — start at morning
+    private volatile bool  _pauseDayNight;          // HUD toggle freezes _dayPhase but not _luminosity
+    private volatile float _envBrightness = 0.5f;   // computed: _luminosity × daynightCurve(_dayPhase) with 0.15 floor
 
     public float Luminosity    { get => _luminosity;    set => _luminosity = Math.Clamp(value, 0f, 1f); }
     public bool  PauseDayNight { get => _pauseDayNight; set => _pauseDayNight = value; }
@@ -77,15 +76,15 @@ public sealed class TyphonBridge : IDisposable
     // Fire grid is owned outside ECS (dense 200×200 byte sweep, no per-cell entity payload).
     // Wind is a single global Vector2 that drifts slowly; the X/Y components are read by FireGrid
     // for spread anisotropy and (later) by vegetation for sway phase.
-    internal readonly FireGrid _fireGrid = new();
-    internal volatile float _windX = 0.7f;
-    internal volatile float _windY = 0.0f;
-    internal volatile float _windPhase;
+    private readonly FireGrid _fireGrid = new();
+    private float _windX = 0.7f;
+    private float _windY;
+    private float _windPhase;
     // Double-buffered fire texture data. _fireR8Write receives the CA snapshot in PrepareRender;
     // PublishRender hands _fireR8Read to the RenderFrame, then swaps. Mirrors the pheromone
     // heatmap double-buffer at line ~36.
-    internal byte[] _fireR8Write = new byte[FireGrid.CellCount];
-    internal byte[] _fireR8Read  = new byte[FireGrid.CellCount];
+    private byte[] _fireR8Write = new byte[FireGrid.CellCount];
+    private byte[] _fireR8Read  = new byte[FireGrid.CellCount];
 
     public (float X, float Y) Wind => (_windX, _windY);
     public ReadOnlySpan<byte> FireState => _fireGrid.State;
@@ -94,9 +93,9 @@ public sealed class TyphonBridge : IDisposable
     // into a single LogEntry (batches "N ants killed by fire" instead of spamming per-ant entries).
     // _fireKillLast{X,Y} is the last-killed position used as the event log's marker; plain int
     // writes are 32-bit atomic on x64 so the worst-case ordering risk is a stale by one kill — fine.
-    internal int _fireKillsAccum;
-    internal int _fireKillLastX;
-    internal int _fireKillLastY;
+    private int _fireKillsAccum;
+    private int _fireKillLastX;
+    private int _fireKillLastY;
     private const int FireCheckPeriodTicks = 6;     // 60 Hz / 10 Hz = 6 — matches CA cadence (no point sampling between updates)
 
     // Phase 6C — vegetation. PlantGrid is constructed lazily in SetHeightmap (needs the heightmap to
@@ -104,43 +103,41 @@ public sealed class TyphonBridge : IDisposable
     // index buffers carry per-frame state-change notifications to VegetationRenderer; double-buffered
     // for the same reason as _fireR8Write / _fireR8Read.
     public PlantGrid PlantGrid { get; private set; }
-    internal const int PlantDirtyCapacity = 4096;
-    internal int[] _plantDirtyWrite = new int[PlantDirtyCapacity];
-    internal int[] _plantDirtyRead  = new int[PlantDirtyCapacity];
-    internal int _plantDirtyWriteCount;
-    internal int _plantDirtyReadCount;
+    private const int PlantDirtyCapacity = 4096;
+    private int[] _plantDirtyWrite = new int[PlantDirtyCapacity];
+    private int[] _plantDirtyRead  = new int[PlantDirtyCapacity];
+    private int _plantDirtyWriteCount;
+    private int _plantDirtyReadCount;
 
     // Tier radii
-    internal float _tier0Radius = 2000f;
-    internal const float Tier2Radius = 8000f;
+    private readonly float _tier0Radius = 2000f;
+    private const float Tier2Radius = 8000f;
 
     // Tier mirror for rendering — linear indexed [cy * GridCells + cx]
-    internal readonly byte[] _tierMirror = new byte[GridCells * GridCells];
+    private readonly byte[] _tierMirror = new byte[GridCells * GridCells];
 
     // Nest data
-    internal (float x, float y)[] _nestPositions;
-    internal int[] _nestFoodStock;
-    internal const int InitialNestFood = 10_000;
+    private (float x, float y)[] _nestPositions;
+    private int[] _nestFoodStock;
+    private const int InitialNestFood = 10_000;
 
     // Food data
-    internal (float x, float y, float remaining)[] _foodCache;
-    internal int[] _foodRemainingInt;
-    internal int _foodDelivered;
-    internal int _deathCount;
+    private (float x, float y, float remaining)[] _foodCache;
+    private int[] _foodRemainingInt;
 
     // Food spatial grid: 40×40 cells (500-unit cells), per-cell list of food indices
-    internal const int FoodGridCells = 40;
-    internal const float FoodGridCellSize = WorldSize / FoodGridCells; // 500
-    internal const float FoodGridInvCellSize = 1f / FoodGridCellSize;
-    internal int[][] _foodGrid; // [cellIndex] → array of food source indices (null = empty)
+    private const int FoodGridCells = 40;
+    private const float FoodGridCellSize = WorldSize / FoodGridCells; // 500
+    private const float FoodGridInvCellSize = 1f / FoodGridCellSize;
+    private int[][] _foodGrid; // [cellIndex] → array of food source indices (null = empty)
 
     // Pheromone grid
-    internal readonly PheromoneGrid _pheromones = new();
+    private readonly PheromoneGrid _pheromones = new();
 
     // Heightmap (owned by Main.cs; reference wired post-Initialize via SetHeightmap). Sampled
     // in AntUpdateTick Step 1 for slope-aware step-length modulation. Null until wired — the
     // tick body null-checks once at the top.
-    internal HeightmapResource _heightmap;
+    private HeightmapResource _heightmap;
 
     // ── Phase 4: tool commands + event log + rocks ────────────────────────────
     //
@@ -150,17 +147,17 @@ public sealed class TyphonBridge : IDisposable
     // Godot main thread drains in _Process each frame.
     // _rockPositions / _rockCount: parallel array tracking spawned obstacles for RockRenderer.
     // ToolCommandSystem appends; Godot side reads under _rockCount watermark.
-    internal readonly ConcurrentQueue<ToolCommand> _toolCommands = new();
-    internal readonly ConcurrentQueue<LogEntry> _eventLog = new();
-    internal (float x, float y)[] _rockPositions = new (float, float)[16];
-    internal volatile int _rockCount;
+    internal readonly ConcurrentQueue<ToolCommand> ToolCommands = new();
+    internal readonly ConcurrentQueue<LogEntry> EventLog = new();
+    private (float x, float y)[] _rockPositions = new (float, float)[16];
+    private int _rockCount;
 
     // Per-tick simulation time (seconds, accumulated by tick count × baseDt × timeScale).
     // Read by ToolCommandSystem + AntStatsAggregator when stamping LogEntry.TimeSec.
-    internal volatile float _simTimeSec;
+    internal float SimTimeSec;
 
-    public void EnqueueToolCommand(ToolCommand cmd) => _toolCommands.Enqueue(cmd);
-    public bool TryDequeueLogEntry(out LogEntry entry) => _eventLog.TryDequeue(out entry);
+    public void EnqueueToolCommand(ToolCommand cmd) => ToolCommands.Enqueue(cmd);
+    public bool TryDequeueLogEntry(out LogEntry entry) => EventLog.TryDequeue(out entry);
 
     /// <summary>Snapshot of rock positions in sim units. RockRenderer reads this each frame
     /// and tops up its <c>MeshInstance3D</c> children for any new entries past its watermark.</summary>
@@ -174,15 +171,15 @@ public sealed class TyphonBridge : IDisposable
     //
     // Colony palettes — 5 distinct hues pushed to the ant shader once at Start. Order matches
     // NestColonyId (nest 0 → palette[0], ..., nest 4 → palette[4]).
-    internal readonly System.Numerics.Vector3[] _colonyPalette =
-    {
+    private readonly Vector3[] _colonyPalette =
+    [
         new(1.00f, 0.30f, 0.20f),   // 0 — warm red
         new(0.25f, 0.55f, 1.00f),   // 1 — sky blue
         new(1.00f, 0.85f, 0.20f),   // 2 — gold
         new(0.30f, 0.85f, 0.30f),   // 3 — fresh green
-        new(0.85f, 0.40f, 0.95f),   // 4 — magenta
-    };
-    public ReadOnlySpan<System.Numerics.Vector3> ColonyPalette => _colonyPalette;
+        new(0.85f, 0.40f, 0.95f)    // 4 — magenta
+    ];
+    public ReadOnlySpan<Vector3> ColonyPalette => _colonyPalette;
 
     // Per-cell per-colony ant population, double-buffered:
     //   AntUpdate Step 1 (parallel) Interlocked-increments _ccWrite as ants land in cells.
@@ -194,40 +191,40 @@ public sealed class TyphonBridge : IDisposable
     // ants contest only when they're within ~half-a-meter of each other rather than a 5 m square.
     // Memory: 200×200 × NestCount × 4 B × 2 buffers ≈ 800 KB (fits in L2). Atomic-contention is
     // very low because ants are sparse per cell at this resolution.
-    public const int CombatGridCells   = 200;
-    public const float CombatCellSize   = WorldSize / CombatGridCells;   // 100 sim units = 0.5 m
-    public const float CombatInvCellSize = 1f / CombatCellSize;
-    internal int[] _cellColonyCountWrite = new int[CombatGridCells * CombatGridCells * NestCount];
-    internal int[] _cellColonyCountRead  = new int[CombatGridCells * CombatGridCells * NestCount];
+    private const int CombatGridCells   = 200;
+    private const float CombatCellSize   = WorldSize / CombatGridCells;   // 100 sim units = 0.5 m
+    private const float CombatInvCellSize = 1f / CombatCellSize;
+    private int[] _cellColonyCountWrite = new int[CombatGridCells * CombatGridCells * NestCount];
+    private int[] _cellColonyCountRead  = new int[CombatGridCells * CombatGridCells * NestCount];
 
     // Spider data — plain arrays (NOT an ECS archetype). At Phase 5 scale (8 spiders) the archetype
     // overhead is pure cost; flat arrays mirror the same shape as `_nestPositions` + `_nestFoodStock`
     // and avoid cross-archetype access patterns that complicate the scheduler.
     internal const int SpiderCount = 8;
-    internal (float x, float y)[] _spiderPositions;
-    internal (float vx, float vy)[] _spiderVelocities;
+    private (float x, float y)[] _spiderPositions;
+    private (float vx, float vy)[] _spiderVelocities;
 
     // Phase 6 polish — spider HP + respawn timer. Soldiers in melee range deal damage; on HP ≤ 0 the
     // spider goes off-screen for SpiderRespawnDelayTicks ticks then re-spawns at a random edge.
-    internal float[] _spiderHealth;
-    internal int[]   _spiderRespawnTicksLeft;
+    private float[] _spiderHealth;
+    private int[]   _spiderRespawnTicksLeft;
 
     // Soldier-position cache (per tick). Populated by AntUpdateTick after each soldier's position
     // commit, drained by SpiderUpdateTick to count "soldiers in melee range" per spider. Resets to
     // empty in EnvironmentTick (runs in Phase.Input before AntUpdateSystem). Sized to AntCount as
     // worst case; in practice <10 % of ants are soldiers, ~5-10 k writes/tick.
-    internal (float x, float y)[] _soldierPositions = new (float, float)[AntCount];
-    internal int _soldierCount;
-    internal int[] _spiderTicksSinceKill;
+    private (float x, float y)[] _soldierPositions = new (float, float)[AntCount];
+    private int _soldierCount;
+    private int[] _spiderTicksSinceKill;
     // Debug-aid state: per-spider snapshot of "am I chasing right now?" + "what XY am I aiming at?".
     // Mirrors are written at the end of SpiderUpdateTick and read by SpiderRenderer for visual aids
     // (state colour, target line).
-    internal bool[] _spiderChasing;
-    internal (float x, float y)[] _spiderChaseTarget;
-    public ReadOnlySpan<(float x, float y)> SpiderPositions => _spiderPositions ?? System.Array.Empty<(float, float)>();
-    public ReadOnlySpan<int> SpiderTicksSinceKill => _spiderTicksSinceKill ?? System.Array.Empty<int>();
-    public ReadOnlySpan<bool> SpiderChasing => _spiderChasing ?? System.Array.Empty<bool>();
-    public ReadOnlySpan<(float x, float y)> SpiderChaseTarget => _spiderChaseTarget ?? System.Array.Empty<(float, float)>();
+    private bool[] _spiderChasing;
+    private (float x, float y)[] _spiderChaseTarget;
+    public ReadOnlySpan<(float x, float y)> SpiderPositions => _spiderPositions ?? Array.Empty<(float, float)>();
+    public ReadOnlySpan<int> SpiderTicksSinceKill => _spiderTicksSinceKill ?? Array.Empty<int>();
+    public ReadOnlySpan<bool> SpiderChasing => _spiderChasing ?? Array.Empty<bool>();
+    public ReadOnlySpan<(float x, float y)> SpiderChaseTarget => _spiderChaseTarget ?? Array.Empty<(float, float)>();
     // Visible chase-radius bubble — exposed so SpiderRenderer can size the translucent sphere
     // that shows each spider's hunting reach.
     public static float SpiderChaseRadiusWorld => SpiderChaseRange * (100f / WorldSize);
@@ -235,13 +232,13 @@ public sealed class TyphonBridge : IDisposable
     // Spider perf measurement — per-tick counters reset at the top of SpiderUpdateTick. HUD reads
     // these to display a live breakdown of where the ~10 ms cost goes. Volatile because Godot
     // reads from the render thread while the sim worker writes them.
-    internal volatile int _spiderTier0Count;       // how many of SpiderCount entered the chase path this tick
-    internal volatile int _spiderTotalHits;        // sum of chaseHits.Count across tier-0 spiders this tick
-    internal volatile int _spiderKills;            // ants destroyed this tick
+    private volatile int _spiderTier0Count;       // how many of SpiderCount entered the chase path this tick
+    private volatile int _spiderTotalHits;        // sum of chaseHits.Count across tier-0 spiders this tick
+    private volatile int _spiderKills;            // ants destroyed this tick
     // 64-bit ticks fields: plain access (long is naturally atomic on x64; volatile not permitted on long).
-    internal long _spiderQueryTicks;               // Stopwatch ticks spent in WhereNearby.Execute()
-    internal long _spiderForeachTicks;             // Stopwatch ticks spent in the per-hit foreach body
-    internal long _spiderCommitTicks;              // Stopwatch ticks spent in Commit() at end of tick
+    private long _spiderQueryTicks;               // Stopwatch ticks spent in WhereNearby.Execute()
+    private long _spiderForeachTicks;             // Stopwatch ticks spent in the per-hit foreach body
+    private long _spiderCommitTicks;              // Stopwatch ticks spent in Commit() at end of tick
 
     public int SpiderTier0Count    => _spiderTier0Count;
     public int SpiderTotalHits     => _spiderTotalHits;
@@ -266,29 +263,29 @@ public sealed class TyphonBridge : IDisposable
     public int InitialNestFoodPerNest => InitialNestFood;
 
     // Render bridge
-    internal readonly RenderBridge _renderBridge = new();
+    private readonly RenderBridge _renderBridge = new();
     public RenderBridge RenderBridge => _renderBridge;
 
     // Migration tracking
-    internal int _cellCrossingsThisTick;
-    internal int _crossingsAccum;
-    internal int _crossingsTickCount;
-    public int CrossingsPerSecond { get; internal set; }
+    private int _cellCrossingsThisTick;
+    private int _crossingsTickCount;
 
     // Event queues — wired in BuildSchedule, accessed by producer/consumer systems via the bridge.
     // Replace the previous Interlocked.Increment counters with proper RFC 07 event flow so the
     // System DAG view shows producer→consumer arrows.
-    internal EventQueue<AntDiedEvent> _antDiedQueue;
-    internal EventQueue<FoodPickedUpEvent> _foodPickedUpQueue;
-    internal EventQueue<FoodDeliveredEvent> _foodDeliveredQueue;
+    internal EventQueue<AntDiedEvent> AntDiedQueue;
+    internal EventQueue<FoodPickedUpEvent> FoodPickedUpQueue;
+    internal EventQueue<FoodDeliveredEvent> FoodDeliveredQueue;
 
     // Live runtime exposed to systems that need telemetry (PublishRender's periodic dump).
     internal TyphonRuntime Runtime => _runtime;
 
     // Public stats
     public int VisibleAnts { get; private set; }
-    public int FoodDelivered => _foodDelivered;
-    public int DeathCount => _deathCount;
+    public int FoodDelivered { get; internal set; }
+
+    public int DeathCount { get; internal set; }
+
     public int TotalNestFood
     {
         get
@@ -367,27 +364,27 @@ public sealed class TyphonBridge : IDisposable
         _serviceProvider.EnsureFileDeleted<ManagedPagedMMFOptions>();
 
         _scope = _serviceProvider.CreateScope();
-        _dbe = _scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+        DBE = _scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
 
         Archetype<Ant>.Touch();
         Archetype<Food>.Touch();
         Archetype<Nest>.Touch();
         Archetype<Rock>.Touch();
-        _dbe.RegisterComponentFromAccessor<WorldBounds>();
-        _dbe.RegisterComponentFromAccessor<Velocity>();
-        _dbe.RegisterComponentFromAccessor<Genetics>();
-        _dbe.RegisterComponentFromAccessor<AntState>();
-        _dbe.RegisterComponentFromAccessor<FoodSource>();
-        _dbe.RegisterComponentFromAccessor<NestInfo>();
-        _dbe.RegisterComponentFromAccessor<Obstacle>();
+        DBE.RegisterComponentFromAccessor<WorldBounds>();
+        DBE.RegisterComponentFromAccessor<Velocity>();
+        DBE.RegisterComponentFromAccessor<Genetics>();
+        DBE.RegisterComponentFromAccessor<AntState>();
+        DBE.RegisterComponentFromAccessor<FoodSource>();
+        DBE.RegisterComponentFromAccessor<NestInfo>();
+        DBE.RegisterComponentFromAccessor<Obstacle>();
 
-        _dbe.ConfigureSpatialGrid(new SpatialGridConfig(
+        DBE.ConfigureSpatialGrid(new SpatialGridConfig(
             worldMin: Vector2.Zero,
             worldMax: new Vector2(WorldSize, WorldSize),
             cellSize: CellSize,
             migrationHysteresisRatio: 0.05f));
 
-        _dbe.InitializeArchetypes();
+        DBE.InitializeArchetypes();
 
         // Opt every cluster-spatial archetype into the WriteSpatial barrier fast path.
         //   - Ant: WriteSpatial covers every position update in AntUpdateTick (movement + respawn).
@@ -396,10 +393,10 @@ public sealed class TyphonBridge : IDisposable
         //     spatial passes early-return). Without this opt-in, their fence pass would still run the
         //     legacy unconditional ActiveClusterIds scan every tick — wasted work for entities that
         //     never move.
-        _dbe.SetSpatialBarrierOnly<Ant>();
-        _dbe.SetSpatialBarrierOnly<Food>();
-        _dbe.SetSpatialBarrierOnly<Nest>();
-        _dbe.SetSpatialBarrierOnly<Rock>();
+        DBE.SetSpatialBarrierOnly<Ant>();
+        DBE.SetSpatialBarrierOnly<Food>();
+        DBE.SetSpatialBarrierOnly<Nest>();
+        DBE.SetSpatialBarrierOnly<Rock>();
 
         SpawnNests();
         SpawnFood();
@@ -407,11 +404,11 @@ public sealed class TyphonBridge : IDisposable
         SpawnSpiders();
         Console.WriteLine($"AntHill spawn diag: ants={AntCount} nests={NestCount} spiders={SpiderCount} foodCount={_foodCount}");
 
-        using var txView = _dbe.CreateQuickTransaction();
-        _antView = txView.Query<Ant>().ToView();
+        using var txView = DBE.CreateQuickTransaction();
+        AntView = txView.Query<Ant>().ToView();
 
         const int workerCount = 16;
-        _runtime = TyphonRuntime.Create(_dbe, BuildSchedule, new RuntimeOptions
+        _runtime = TyphonRuntime.Create(DBE, BuildSchedule, new RuntimeOptions
         {
             BaseTickRate = 60,
             WorkerCount = workerCount,
@@ -458,9 +455,9 @@ public sealed class TyphonBridge : IDisposable
         // Event queues must exist before systems are registered (Configure captures them via
         // WritesEvents / ReadsEvents). Capacities tuned for AntCount = 200 K — death events
         // fire in bursts when energy crashes; food pickups are throttled by Interlocked checks.
-        _antDiedQueue        = schedule.CreateEventQueue<AntDiedEvent>("AntDied",        capacity: 4096);
-        _foodPickedUpQueue   = schedule.CreateEventQueue<FoodPickedUpEvent>("FoodPickedUp", capacity: 4096);
-        _foodDeliveredQueue  = schedule.CreateEventQueue<FoodDeliveredEvent>("FoodDelivered", capacity: 4096);
+        AntDiedQueue        = schedule.CreateEventQueue<AntDiedEvent>("AntDied",        capacity: 4096);
+        FoodPickedUpQueue   = schedule.CreateEventQueue<FoodPickedUpEvent>("FoodPickedUp", capacity: 4096);
+        FoodDeliveredQueue  = schedule.CreateEventQueue<FoodDeliveredEvent>("FoodDelivered", capacity: 4096);
 
         // Input phase
         // ToolCommandSystem drains the Godot-side command queue and applies sim-side mutations
@@ -506,9 +503,9 @@ public sealed class TyphonBridge : IDisposable
         // for the max-reduce, plus an RGBA pack). The 3 ChunkedCallbackSystems run concurrently
         // with each other and with FillRenderBufferSystem; the pack accepts 1-tick tearing per
         // channel in exchange for also running in parallel.
-        schedule.Add(new PheroMaxReduceSystem(this, "HeatmapMaxFood",  () => _pheromones.Food,  () => _heatMaxFood,  "HeatFoodAccum"));
-        schedule.Add(new PheroMaxReduceSystem(this, "HeatmapMaxHome",  () => _pheromones.Home,  () => _heatMaxHome,  "HeatHomeAccum"));
-        schedule.Add(new PheroMaxReduceSystem(this, "HeatmapMaxFight", () => _pheromones.Fight, () => _heatMaxFight, "HeatFightAccum"));
+        schedule.Add(new PheroMaxReduceSystem(this, "HeatmapMaxFood",  () => _pheromones.Food,  () => HeatMaxFood,  "HeatFoodAccum"));
+        schedule.Add(new PheroMaxReduceSystem(this, "HeatmapMaxHome",  () => _pheromones.Home,  () => HeatMaxHome,  "HeatHomeAccum"));
+        schedule.Add(new PheroMaxReduceSystem(this, "HeatmapMaxFight", () => _pheromones.Fight, () => HeatMaxFight, "HeatFightAccum"));
         schedule.Add(new HeatmapRgbaPackSystem(this));
 
         schedule.Add(new PublishRenderFrameSystem(this));
@@ -524,7 +521,7 @@ public sealed class TyphonBridge : IDisposable
         // AntUpdate Step 1 incrementally fills the write buffer; the combat sub-step in the same
         // tick reads the previous tick's complete totals from the read buffer.
         (_cellColonyCountRead, _cellColonyCountWrite) = (_cellColonyCountWrite, _cellColonyCountRead);
-        System.Array.Clear(_cellColonyCountWrite);
+        Array.Clear(_cellColonyCountWrite);
 
         var camX = (_camMinX + _camMaxX) * 0.5f;
         var camY = (_camMinY + _camMaxY) * 0.5f;
@@ -532,9 +529,9 @@ public sealed class TyphonBridge : IDisposable
         var grid = ctx.SpatialGrid;
         grid.ResetAllTiers(SimTier.Tier3);
 
-        var r0sq = _tier0Radius * _tier0Radius;
-        var r1sq = (_tier0Radius * 3f) * (_tier0Radius * 3f);
-        var r2sq = Tier2Radius * Tier2Radius;
+        var r0Sq = _tier0Radius * _tier0Radius;
+        var r1Sq = (_tier0Radius * 3f) * (_tier0Radius * 3f);
+        const float r2Sq = Tier2Radius * Tier2Radius;
 
         for (var cy = 0; cy < GridCells; cy++)
         {
@@ -547,9 +544,9 @@ public sealed class TyphonBridge : IDisposable
                 var distSq = dx * dx + dy * dy;
 
                 SimTier tier;
-                if (distSq < r0sq) tier = SimTier.Tier0;
-                else if (distSq < r1sq) tier = SimTier.Tier1;
-                else if (distSq < r2sq) tier = SimTier.Tier2;
+                if (distSq < r0Sq) tier = SimTier.Tier0;
+                else if (distSq < r1Sq) tier = SimTier.Tier1;
+                else if (distSq < r2Sq) tier = SimTier.Tier2;
                 else
                 {
                     _tierMirror[cy * GridCells + cx] = 3;
@@ -567,16 +564,16 @@ public sealed class TyphonBridge : IDisposable
         // Min); guard with the mirror-byte check so we don't redundantly write cells already at T0.
         if (_spiderPositions != null)
         {
-            const int PromoteRadius = 2;
+            const int promoteRadius = 2;
             for (var si = 0; si < _spiderPositions.Length; si++)
             {
                 var (sx, sy) = _spiderPositions[si];
                 var scx = Math.Clamp((int)(sx * InvCellSize), 0, GridCells - 1);
                 var scy = Math.Clamp((int)(sy * InvCellSize), 0, GridCells - 1);
-                var minCx = Math.Max(0, scx - PromoteRadius);
-                var maxCx = Math.Min(GridCells - 1, scx + PromoteRadius);
-                var minCy = Math.Max(0, scy - PromoteRadius);
-                var maxCy = Math.Min(GridCells - 1, scy + PromoteRadius);
+                var minCx = Math.Max(0, scx - promoteRadius);
+                var maxCx = Math.Min(GridCells - 1, scx + promoteRadius);
+                var minCy = Math.Max(0, scy - promoteRadius);
+                var maxCy = Math.Min(GridCells - 1, scy + promoteRadius);
                 for (var cy = minCy; cy <= maxCy; cy++)
                 {
                     for (var cx = minCx; cx <= maxCx; cx++)
@@ -778,8 +775,8 @@ public sealed class TyphonBridge : IDisposable
         {
             var wx = _fireKillLastX * SimToWorld;
             var wy = _fireKillLastY * SimToWorld;
-            _eventLog.Enqueue(new LogEntry(
-                _simTimeSec,
+            EventLog.Enqueue(new LogEntry(
+                SimTimeSec,
                 killed == 1 ? "1 ant killed by fire" : $"{killed} ants killed by fire",
                 wx, wy, LogSeverity.Action));
         }
@@ -800,8 +797,8 @@ public sealed class TyphonBridge : IDisposable
             : _fireGrid.Ignite(simX, simY, radius);
         if (ignited)
         {
-            _eventLog.Enqueue(new LogEntry(
-                _simTimeSec,
+            EventLog.Enqueue(new LogEntry(
+                SimTimeSec,
                 $"Ignition at ({simX * SimToWorld:F1}, {simY * SimToWorld:F1})",
                 simX * SimToWorld, simY * SimToWorld, LogSeverity.Action));
         }
@@ -830,16 +827,16 @@ public sealed class TyphonBridge : IDisposable
     {
         var tick = ctx.TickNumber;
         var dt = ctx.DeltaTime * _timeScale;
-        _simTimeSec += dt;
+        SimTimeSec += dt;
         var phero = _pheromones;
         var food = _foodCache;
         var foodRemaining = _foodRemainingInt;
         var foodGrid = _foodGrid;
         var nests = _nestPositions;
         var nestStock = _nestFoodStock;
-        var deathQueue = _antDiedQueue;
-        var pickedUpQueue = _foodPickedUpQueue;
-        var deliveredQueue = _foodDeliveredQueue;
+        var deathQueue = AntDiedQueue;
+        var pickedUpQueue = FoodPickedUpQueue;
+        var deliveredQueue = FoodDeliveredQueue;
         var tierMirror = _tierMirror;
         var heightmap = _heightmap;            // null-check once per tick
         var ccRead = _cellColonyCountRead;     // previous tick's complete per-cell-per-colony totals
@@ -856,8 +853,8 @@ public sealed class TyphonBridge : IDisposable
         // Phase 6D — reusable scratch buffer for the per-cluster rock broadphase. Hoisted out of
         // the cluster loop because stack-allocated memory inside a loop accumulates across
         // iterations (CA2014); a single 16-int slot (64 B) reused per cluster is the right shape.
-        const int MaxNearbyRocks = 16;
-        Span<int> nearby = stackalloc int[MaxNearbyRocks];
+        const int maxNearbyRocks = 16;
+        Span<int> nearby = stackalloc int[maxNearbyRocks];
 
         foreach (var cluster in clusters)
         {
@@ -904,13 +901,13 @@ public sealed class TyphonBridge : IDisposable
             if (rockCountLocal > 0)
             {
                 ref readonly var caabb = ref cluster.SpatialBounds;
-                const float ExpandMargin = RockCollisionRadius + 50f;
-                var rMinX = caabb.MinX - ExpandMargin;
-                var rMaxX = caabb.MaxX + ExpandMargin;
-                var rMinY = caabb.MinY - ExpandMargin;
-                var rMaxY = caabb.MaxY + ExpandMargin;
+                const float expandMargin = RockCollisionRadius + 50f;
+                var rMinX = caabb.MinX - expandMargin;
+                var rMaxX = caabb.MaxX + expandMargin;
+                var rMinY = caabb.MinY - expandMargin;
+                var rMaxY = caabb.MaxY + expandMargin;
                 var rocksLocal = _rockPositions;
-                for (var r = 0; r < rockCountLocal && nearbyCount < MaxNearbyRocks; r++)
+                for (var r = 0; r < rockCountLocal && nearbyCount < maxNearbyRocks; r++)
                 {
                     var rp = rocksLocal[r];
                     if (rp.x >= rMinX && rp.x <= rMaxX && rp.y >= rMinY && rp.y <= rMaxY)
@@ -945,12 +942,12 @@ public sealed class TyphonBridge : IDisposable
                     var pCy = Math.Clamp((int)(pos.Bounds.MinY * CombatInvCellSize), 0, CombatGridCells - 1);
                     var ccIdx = (pCy * CombatGridCells + pCx) * NestCount + gen.ColonyId;
 
-                    if (gen.Caste == global::AntHill.Caste.Queen)
+                    if (gen.Caste == Caste.Queen)
                     {
                         Interlocked.Increment(ref ccWrite[ccIdx]);
                         continue;   // queens skip movement / metabolism / combat — they're immobile + immune
                     }
-                    if (gen.Caste == global::AntHill.Caste.Larva)
+                    if (gen.Caste == Caste.Larva)
                     {
                         Interlocked.Increment(ref ccWrite[ccIdx]);
                         state.TicksAsLarva++;
@@ -958,14 +955,14 @@ public sealed class TyphonBridge : IDisposable
                         {
                             // Pseudo-random 80/20 Worker/Soldier split using a cheap hash.
                             var hh = (uint)(idx * 2654435761u + cluster.ChunkId * 40503u + tick);
-                            gen.Caste = (hh % 100u) < 20u ? global::AntHill.Caste.Soldier : global::AntHill.Caste.Worker;
+                            gen.Caste = (hh % 100u) < 20u ? Caste.Soldier : Caste.Worker;
                             state.TicksAsLarva = 0;
                             // Spring into motion with a random heading.
                             var ang = (hh % 6283u) * 0.001f;
                             var spd = gen.Speed * 40f;
                             vel.X = MathF.Cos(ang) * spd;
                             vel.Y = MathF.Sin(ang) * spd;
-                            _dbe.MarkClusterSlotDirty(AntArchetypeId, cluster.ChunkId, idx);
+                            DBE.MarkClusterSlotDirty(AntArchetypeId, cluster.ChunkId, idx);
                         }
                         continue;
                     }
@@ -1105,7 +1102,7 @@ public sealed class TyphonBridge : IDisposable
                 // ── Soldier position cache (Phase 6 polish) — drains in SpiderUpdateTick for the
                 // "soldiers in melee range damage the spider" mechanic. Skipped for non-soldiers so
                 // the typical-cluster overhead is just a caste-check branch.
-                if (gen.Caste == global::AntHill.Caste.Soldier)
+                if (gen.Caste == Caste.Soldier)
                 {
                     var slot = Interlocked.Increment(ref _soldierCount) - 1;
                     if (slot < _soldierPositions.Length)
@@ -1126,7 +1123,7 @@ public sealed class TyphonBridge : IDisposable
                 {
                     var fcx = (int)(postMoveX * FireGrid.InvCellSizeSim);
                     var fcy = (int)(postMoveY * FireGrid.InvCellSizeSim);
-                    if ((uint)fcx < (uint)FireGrid.Size && (uint)fcy < (uint)FireGrid.Size)
+                    if ((uint)fcx < FireGrid.Size && (uint)fcy < FireGrid.Size)
                     {
                         // 3×3 fire-smell scan (incl. own cell).
                         var nearFire = false;
@@ -1170,14 +1167,14 @@ public sealed class TyphonBridge : IDisposable
                             }
                             state.Energy = freeE + bonusE;
                             state.State = AntState.Foraging;
-                            gen.Caste = global::AntHill.Caste.Larva;
+                            gen.Caste = Caste.Larva;
                             state.TicksAsLarva = 0;
 
                             cluster.WriteSpatial(Ant.Bounds, idx,
                                 new WorldBounds { Bounds = new AABB2F { MinX = nests[ni].x, MaxX = nests[ni].x, MinY = nests[ni].y, MaxY = nests[ni].y } });
                             vel.X = 0f;
                             vel.Y = 0f;
-                            _dbe.MarkClusterSlotDirty(AntArchetypeId, cluster.ChunkId, idx);
+                            DBE.MarkClusterSlotDirty(AntArchetypeId, cluster.ChunkId, idx);
 
                             Interlocked.Increment(ref _fireKillsAccum);
                             _fireKillLastX = (int)postMoveX;
@@ -1214,7 +1211,7 @@ public sealed class TyphonBridge : IDisposable
                         // Phase 5: respawn as Larva — re-enter the maturation loop. Queens skipped
                         // (continued out at Step 0.5). Workers / Soldiers that died here flip to Larva
                         // so the player visibly sees population renewal as small ants growing.
-                        gen.Caste = global::AntHill.Caste.Larva;
+                        gen.Caste = Caste.Larva;
                         state.TicksAsLarva = 0;
 
                         // Teleport to nest + zero velocity (Larva doesn't move). Position write goes through
@@ -1226,7 +1223,7 @@ public sealed class TyphonBridge : IDisposable
                             new WorldBounds { Bounds = new AABB2F { MinX = nests[ni].x, MaxX = nests[ni].x, MinY = nests[ni].y, MaxY = nests[ni].y } });
                         vel.X = 0f;
                         vel.Y = 0f;
-                        _dbe.MarkClusterSlotDirty(AntArchetypeId, cluster.ChunkId, idx);
+                        DBE.MarkClusterSlotDirty(AntArchetypeId, cluster.ChunkId, idx);
                     }
                 }
 
@@ -1268,10 +1265,10 @@ public sealed class TyphonBridge : IDisposable
                                     // ConcurrentQueue.Enqueue is thread-safe across all sim workers.
                                     if (after == 0)
                                     {
-                                        const float SimToWorld = 100f / WorldSize;
-                                        _eventLog.Enqueue(new LogEntry(_simTimeSec,
-                                            $"Food source depleted at ({food[fi].x * SimToWorld:F1}, {food[fi].y * SimToWorld:F1})",
-                                            food[fi].x * SimToWorld, food[fi].y * SimToWorld, LogSeverity.Depletion));
+                                        const float simToWorld = 100f / WorldSize;
+                                        EventLog.Enqueue(new LogEntry(SimTimeSec,
+                                            $"Food source depleted at ({food[fi].x * simToWorld:F1}, {food[fi].y * simToWorld:F1})",
+                                            food[fi].x * simToWorld, food[fi].y * simToWorld, LogSeverity.Depletion));
                                     }
                                 }
                                 else
@@ -1332,7 +1329,7 @@ public sealed class TyphonBridge : IDisposable
                     }
                     if (opposingTotal >= CombatContestedThreshold)
                     {
-                        var rollPct = gen.Caste == global::AntHill.Caste.Soldier
+                        var rollPct = gen.Caste == Caste.Soldier
                             ? CombatRollSoldierPercent
                             : CombatRollWorkerPercent;
                         var hh = (uint)(idx * 2246822519u + cluster.ChunkId * 3266489917u + tick);
@@ -1385,7 +1382,7 @@ public sealed class TyphonBridge : IDisposable
                         var maxFire = MathF.Max(fireL, MathF.Max(fireC, fireR));
 
                         var dangerStep = SteerStrength * DangerSteerMultiplier;
-                        var isSoldier = gen.Caste == global::AntHill.Caste.Soldier;
+                        var isSoldier = gen.Caste == Caste.Soldier;
 
                         if (maxFire > FireSteerThreshold)
                         {
@@ -1539,13 +1536,10 @@ public sealed class TyphonBridge : IDisposable
 
     internal void PrepareRender(TickContext ctx)
     {
-        var crossings = Interlocked.Exchange(ref _cellCrossingsThisTick, 0);
-        _crossingsAccum += crossings;
+        Interlocked.Exchange(ref _cellCrossingsThisTick, 0);
         _crossingsTickCount++;
         if (_crossingsTickCount >= 60)
         {
-            CrossingsPerSecond = _crossingsAccum;
-            _crossingsAccum = 0;
             _crossingsTickCount = 0;
         }
 
@@ -1703,7 +1697,7 @@ public sealed class TyphonBridge : IDisposable
 
                 // Phase 5: colony palette drives the ant's color. Returning ants get a small brightness
                 // boost so the player still reads the carry signal at Loupe band.
-                var paletteIdx = gen.ColonyId < NestCount ? gen.ColonyId : (byte)0;
+                var paletteIdx = gen.ColonyId < NestCount ? gen.ColonyId : 0;
                 var palette = _colonyPalette[paletteIdx];
                 var brightness = state.IsReturning ? 1.20f : 0.95f;
                 var r = Math.Min(1f, palette.X * brightness);
@@ -1757,7 +1751,7 @@ public sealed class TyphonBridge : IDisposable
             Buffers = buffers,
             Overlay = new BufferSnapshot { Data = _overlayBuffer.Data, Count = _overlayBuffer.Count },
             VisibleAnts = total,
-            HeatmapRGBA = _heatmapRGBARead,
+            HeatmapRGBA = _heatmapRgbaRead,
             FireR8 = _fireR8Read,
             PlantDirty = _plantDirtyRead,
             PlantDirtyCount = _plantDirtyReadCount,
@@ -1766,7 +1760,7 @@ public sealed class TyphonBridge : IDisposable
         _renderBridge.Publish(frame);
 
         // Swap heatmap buffer
-        (_heatmapRGBA, _heatmapRGBARead) = (_heatmapRGBARead, _heatmapRGBA);
+        (HeatmapRgba, _heatmapRgbaRead) = (_heatmapRgbaRead, HeatmapRgba);
         // Swap fire buffer (Phase 6B). After publish, _fireR8Read points to the array Godot will
         // upload next frame; _fireR8Write becomes the target for next PrepareRender's BlockCopy.
         (_fireR8Write, _fireR8Read) = (_fireR8Read, _fireR8Write);
@@ -1830,24 +1824,24 @@ public sealed class TyphonBridge : IDisposable
             {
                 var count = Math.Min(batchSize, remaining);
                 remaining -= count;
-                using var tx = _dbe.CreateQuickTransaction();
+                using var tx = DBE.CreateQuickTransaction();
 
                 for (var i = 0; i < count; i++, antIndexInNest++)
                 {
                     // Phase 5: caste mix per nest — first ant = Queen (planted), then ~15% Soldier,
                     // ~4% Larva, rest Worker. Queens / Larvae spawn at nest centre with zero velocity.
                     byte caste;
-                    if (antIndexInNest == 0) caste = global::AntHill.Caste.Queen;
+                    if (antIndexInNest == 0) caste = Caste.Queen;
                     else
                     {
                         var roll = rng.NextDouble();
-                        if (roll < 0.04) caste = global::AntHill.Caste.Larva;
-                        else if (roll < 0.19) caste = global::AntHill.Caste.Soldier;
-                        else caste = global::AntHill.Caste.Worker;
+                        if (roll < 0.04) caste = Caste.Larva;
+                        else if (roll < 0.19) caste = Caste.Soldier;
+                        else caste = Caste.Worker;
                     }
 
                     float x, y;
-                    if (caste == global::AntHill.Caste.Queen)
+                    if (caste == Caste.Queen)
                     {
                         x = nx;
                         y = ny;
@@ -1867,7 +1861,7 @@ public sealed class TyphonBridge : IDisposable
                     var eatAmount = 1 + rng.Next(3);
 
                     // Queens + Larvae sit still; AntUpdateTick also gates movement / metabolism by caste.
-                    var stationary = caste == global::AntHill.Caste.Queen || caste == global::AntHill.Caste.Larva;
+                    var stationary = caste == Caste.Queen || caste == Caste.Larva;
 
                     var bounds = new WorldBounds
                     {
@@ -1915,8 +1909,6 @@ public sealed class TyphonBridge : IDisposable
     // Godot-side SpiderRenderer reads it directly each frame.
     // ═══════════════════════════════════════════════════════════════════
 
-    private const float SpiderHuntRange = 800f;
-    private const float SpiderHuntRangeSq = SpiderHuntRange * SpiderHuntRange;
     // Kill range matches the visual sphere radius in SpiderRenderer (0.35 m). With SimToWorld = 100/20000 = 0.005,
     // 80 sim units = 0.40 m, slightly larger than the rendered sphere so any ant the player SEES touching the
     // spider gets eaten. The previous 30-sim value (15 cm) was less than half the visual radius — that's why
@@ -1930,7 +1922,6 @@ public sealed class TyphonBridge : IDisposable
     // 350 sim/s the spider still closes 350 sim in 1 s, perceptually still "I see you from across
     // the path". Drop further (≤ 200) only if foreach becomes hot again.
     private const float SpiderChaseRange = 350f;
-    private const float SpiderChaseRangeSq = SpiderChaseRange * SpiderChaseRange;
     private const float SpiderWanderSpeed = 200f;     // ≈ 1 m/s render — visibly moving at any LOD
     private const float SpiderChaseSpeed = 350f;      // outrun ants (40–80 sim/s)
     private const float SpiderTurnJitter = 0.10f;
@@ -1992,7 +1983,7 @@ public sealed class TyphonBridge : IDisposable
                         _spiderChasing[i] = false;
                         _spiderChaseTarget[i] = (newX, newY);
                         _spiderTicksSinceKill[i] = int.MaxValue / 2;
-                        _eventLog.Enqueue(new LogEntry(_simTimeSec,
+                        EventLog.Enqueue(new LogEntry(SimTimeSec,
                             "Spider respawned",
                             newX * SimToWorld, newY * SimToWorld, LogSeverity.Milestone));
                     }
@@ -2041,10 +2032,10 @@ public sealed class TyphonBridge : IDisposable
                         // on a cache-cold MVCC component-table read; the new path reads each entity's tight AABB inside the
                         // narrowphase and exposes it on the hit struct, so we just consume hit.MinX/MinY without a second read.
                         // Transaction is still needed for Destroy() (and constructs an epoch scope under the hood).
-                        sharedTx ??= _dbe.CreateQuickTransaction();
+                        sharedTx ??= DBE.CreateQuickTransaction();
                         var qStart = System.Diagnostics.Stopwatch.GetTimestamp();
                         var sphere = new BSphere2F { CenterX = px, CenterY = py, Radius = SpiderChaseRange };
-                        var enumerator = _dbe.ClusterSpatialQuery<Ant>().Radius(in sphere);
+                        var enumerator = DBE.ClusterSpatialQuery<Ant>().Radius(in sphere);
                         dbgQueryTicks += System.Diagnostics.Stopwatch.GetTimestamp() - qStart;
                         var killsLeft = SpiderKillsPerTick;
                         var killsDone = 0;
@@ -2149,7 +2140,7 @@ public sealed class TyphonBridge : IDisposable
                     _spiderHealth[i] -= SoldierDpsPerSoldier * dt * meleeSoldiers;
                     if (_spiderHealth[i] <= 0f)
                     {
-                        _eventLog.Enqueue(new LogEntry(_simTimeSec,
+                        EventLog.Enqueue(new LogEntry(SimTimeSec,
                             $"Spider killed by {meleeSoldiers} soldier{(meleeSoldiers == 1 ? "" : "s")}",
                             px * SimToWorld, py * SimToWorld, LogSeverity.Action));
                         _spiderRespawnTicksLeft[i] = SpiderRespawnDelayTicks;
@@ -2227,7 +2218,7 @@ public sealed class TyphonBridge : IDisposable
         // Reserve headroom so the first dozen tool-placed foods don't trigger a resize.
         _foodCache = new (float, float, float)[Math.Max(FoodCount * 4, 64)];
         _foodRemainingInt = new int[_foodCache.Length];
-        using var tx = _dbe.CreateQuickTransaction();
+        using var tx = DBE.CreateQuickTransaction();
         for (var i = 0; i < FoodCount; i++)
         {
             var x = (float)(rng.NextDouble() * WorldSize);
@@ -2318,7 +2309,7 @@ public sealed class TyphonBridge : IDisposable
     /// <summary>Tracks live food count under the <c>_foodCache</c> watermark. Set by
     /// init (<see cref="SpawnFood"/>) and grown by <see cref="RuntimeSpawnFood"/>.
     /// AntUpdateTick + PrepareRender iterate <c>0..</c>this.</summary>
-    internal int _foodCount;
+    private int _foodCount;
 
     /// <summary>Public wrapper so <c>ToolCommandSystem</c> can rebuild the food spatial
     /// grid after a batch of <see cref="RuntimeSpawnFood"/> calls within a tick.</summary>
@@ -2362,17 +2353,17 @@ public sealed class TyphonBridge : IDisposable
 
     private void SpawnNests()
     {
-        _nestPositions = new (float, float)[]
-        {
+        _nestPositions =
+        [
             (5000f, 5000f), (15000f, 5000f), (10000f, 10000f), (5000f, 15000f), (15000f, 15000f)
-        };
+        ];
         _nestFoodStock = new int[NestCount];
         for (var i = 0; i < NestCount; i++)
         {
             _nestFoodStock[i] = InitialNestFood;
         }
 
-        using var tx = _dbe.CreateQuickTransaction();
+        using var tx = DBE.CreateQuickTransaction();
         for (var ni = 0; ni < _nestPositions.Length; ni++)
         {
             var (nx, ny) = _nestPositions[ni];
@@ -2406,17 +2397,29 @@ public sealed class TyphonBridge : IDisposable
     /// the worker pool prevents the engine from making progress; without this dump we'd have
     /// no signal at all about which system is wedged.
     /// </summary>
+    /// <summary>Cancelled at the start of <see cref="Dispose"/> so the watchdog stops before shutdown freezes the tick counter — otherwise it dumps a
+    /// misleading "DagScheduler hang" diagnostic for the abandoned in-flight tick while the (legitimate) CPU-sample epilogue runs.</summary>
+    private readonly CancellationTokenSource _watchdogCts = new();
+
     private void StartHangWatchdog()
     {
         const int hangThresholdSeconds = 5;
         const int pollIntervalMs = 1_000;
+        var token = _watchdogCts.Token;
         System.Threading.Tasks.Task.Run(async () =>
         {
             var lastTick = -1L;
             var stuckSince = DateTime.UtcNow;
-            while (true)
+            while (!token.IsCancellationRequested)
             {
-                await System.Threading.Tasks.Task.Delay(pollIntervalMs).ConfigureAwait(false);
+                try
+                {
+                    await System.Threading.Tasks.Task.Delay(pollIntervalMs, token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    return; // shutdown began — a frozen tick counter now means "stopped", not "hung".
+                }
                 var rt = _runtime;
                 if (rt == null) return;
                 var current = rt.CurrentTickNumber;
@@ -2434,7 +2437,7 @@ public sealed class TyphonBridge : IDisposable
         });
     }
 
-    public void SetHeatmapEnabled(bool enabled) => _heatmapEnabled = enabled;
+    public void SetHeatmapEnabled(bool enabled) => HeatmapEnabled = enabled;
     public TickTelemetryRing Telemetry => _runtime?.Telemetry;
     public SystemDefinition[] Systems => _runtime?.Systems;
     public string[] PhaseNames => _runtime?.PhaseNames ?? [];
@@ -2444,14 +2447,14 @@ public sealed class TyphonBridge : IDisposable
     /// static-structure tables (component definitions, archetype definitions, index catalog) into the trace
     /// file via <see cref="Typhon.Engine.Profiler.ProfilerStaticDataBuilder"/>. Returns null before <see cref="Initialize"/>.
     /// </summary>
-    public DatabaseEngine DatabaseEngine => _dbe;
+    public DatabaseEngine DatabaseEngine => DBE;
 
     /// <summary>
-    /// Parent resource under which the engine's resource graph hangs. Used by <see cref="AntHill.ProfilerSetup"/>
+    /// Parent resource under which the engine's resource graph hangs. Used by <see cref="ProfilerSetup"/>
     /// to build the <see cref="Typhon.Profiler.ResourceGraphNodeRecord"/> snapshot. Same handle the profiler exporters
     /// use; aliasing it here lets the static-data builder walk the tree without needing DI.
     /// </summary>
-    public IResource ResourceGraphRoot => _dbe;
+    public IResource ResourceGraphRoot => DBE;
 
     /// <summary>
     /// Active <see cref="TyphonRuntime"/>. Exposed for <see cref="AntHill.ProfilerSetup"/> to walk
@@ -2507,6 +2510,14 @@ public sealed class TyphonBridge : IDisposable
 
     public void Dispose()
     {
+        // Cancel the hang-watchdog FIRST: shutdown freezes the tick counter, which the watchdog would otherwise
+        // misread as a scheduler hang and dump a misleading diagnostic mid-teardown.
+        try { _watchdogCts.Cancel(); }
+        catch
+        {
+            // ignored
+        }
+
         try { _runtime?.Shutdown(); }
         catch
         {
@@ -2519,13 +2530,19 @@ public sealed class TyphonBridge : IDisposable
             // ignored
         }
 
-        try { _antView?.Dispose(); }
+        try { AntView?.Dispose(); }
         catch
         {
             // ignored
         }
 
         try { _serviceProvider?.Dispose(); }
+        catch
+        {
+            // ignored
+        }
+
+        try { _watchdogCts.Dispose(); }
         catch
         {
             // ignored

@@ -1,6 +1,4 @@
-using Typhon.Engine;
-
-namespace AntHill;
+namespace AntHill.Core;
 
 /// <summary>
 /// Merged per-ant simulation system. Walks each Ant cluster once per tick and performs all five logical
@@ -47,10 +45,10 @@ internal sealed class AntUpdateSystem : QuerySystem
         .WritesResource("FoodInventory")
         .WritesResource("NestInventory")
         // Event emissions — consumed by AntStatsAggregator (Phase.Render).
-        .WritesEvents(_bridge._antDiedQueue)
-        .WritesEvents(_bridge._foodPickedUpQueue)
-        .WritesEvents(_bridge._foodDeliveredQueue)
-        .Input(() => _bridge._antView)
+        .WritesEvents(_bridge.AntDiedQueue)
+        .WritesEvents(_bridge.FoodPickedUpQueue)
+        .WritesEvents(_bridge.FoodDeliveredQueue)
+        .Input(() => _bridge.AntView)
         .After("TierAssignment");
 
     protected override void Execute(TickContext ctx) => _bridge.AntUpdateTick(ctx);

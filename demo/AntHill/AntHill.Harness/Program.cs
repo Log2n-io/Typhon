@@ -1,7 +1,8 @@
 using System;
+using System.Collections.Generic;
 using System.Threading;
+using AntHill.Core;
 using Typhon.Engine;
-using Typhon.Engine.Profiler;
 
 namespace AntHill.Harness;
 
@@ -54,7 +55,7 @@ public static class Program
 
         // Step 2: exporters + profiler start, now that DI has built registry.Profiler.
         // Must happen BEFORE bridge.Start() so the very first tick is captured. Dual-attach when both --trace and --live are passed.
-        System.Collections.Generic.List<IProfilerExporter> exporters = null;
+        List<IProfilerExporter> exporters = null;
         if (profilerConfig.IsActive)
         {
             try
@@ -168,10 +169,14 @@ public static class Program
 
         Console.WriteLine($"──────────────────────────────────────────────────");
 
+        // Begin stopping the CPU sampler BEFORE the bridge teardown so its (seconds-long) .nettrace transcode + symbol resolution runs on a background
+        // thread, overlapping the engine-teardown dirty-page flush instead of freezing the exit path after it.
+        ProfilerLauncher.BeginCpuSamplerStop();
+
         bridge.Dispose();
 
-        // Stop the CPU sampler after the bridge teardown (its capture then spans the full session) but BEFORE TyphonProfiler.Stop(): StopCpuSampler parses
-        // the .nettrace and hands the samples to the FileExporter, which Stop() then drains and closes. Idempotent + best-effort.
+        // Finish the CPU sampler (awaits the background parse) and hand the samples to the FileExporter, which Stop() then drains and closes — BEFORE
+        // TyphonProfiler.Stop(). Idempotent + best-effort.
         ProfilerLauncher.StopCpuSampler();
 
         // Stop the profiler AFTER the bridge so any final tick/shutdown events have been emitted. The exporters survive bridge.Dispose() (their

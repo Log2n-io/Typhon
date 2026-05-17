@@ -1,6 +1,4 @@
-using Typhon.Engine;
-
-namespace AntHill;
+namespace AntHill.Core;
 
 /// <summary>
 /// Phase 6A — Daisyworld luminosity + sim-time day/night cycle. Pure callback — no entity access.

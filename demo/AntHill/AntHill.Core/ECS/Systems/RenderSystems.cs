@@ -1,6 +1,4 @@
-using Typhon.Engine;
-
-namespace AntHill;
+namespace AntHill.Core;
 
 /// <summary>
 /// Resets per-worker render buffers + pre-computes the food/nest overlay + downsamples the
@@ -47,7 +45,7 @@ internal sealed class FillRenderBufferSystem : QuerySystem
         .ReadsResource("CameraAABB")
         .ReadsResource("TierMirror")
         .WritesResource("RenderBuffers")
-        .Input(() => _bridge._antView)
+        .Input(() => _bridge.AntView)
         .After("PrepareRenderBuffer");
 
     protected override void Execute(TickContext ctx) => _bridge.FillRender(ctx);
@@ -88,9 +86,9 @@ internal sealed class AntStatsAggregatorSystem : CallbackSystem
     protected override void Configure(SystemBuilder b) => b
         .Name("AntStatsAggregator")
         .Phase(AntPhases.Render)
-        .ReadsEvents(_bridge._antDiedQueue)
-        .ReadsEvents(_bridge._foodPickedUpQueue)
-        .ReadsEvents(_bridge._foodDeliveredQueue)
+        .ReadsEvents(_bridge.AntDiedQueue)
+        .ReadsEvents(_bridge.FoodPickedUpQueue)
+        .ReadsEvents(_bridge.FoodDeliveredQueue)
         // Cross-phase producer→consumer edge from AntUpdate is derived automatically by the
         // deriver (WritesEvents on AntUpdate side, ReadsEvents here).
         // Run before the renderer's stats dump so the published counters reflect this tick.
@@ -98,26 +96,26 @@ internal sealed class AntStatsAggregatorSystem : CallbackSystem
 
     protected override void Execute(TickContext ctx)
     {
-        var prevDeath = _bridge._deathCount;
+        var prevDeath = _bridge.DeathCount;
 
-        _bridge._deathCount += _bridge._antDiedQueue.Count;
-        _bridge._foodDelivered += _bridge._foodDeliveredQueue.Count;
+        _bridge.DeathCount += _bridge.AntDiedQueue.Count;
+        _bridge.FoodDelivered += _bridge.FoodDeliveredQueue.Count;
         // FoodPickedUpEvent isn't surfaced as a counter today; consumed only to advance the
         // queue (the next tick's Reset clears it). Kept on the wire for future stats panels.
-        _ = _bridge._foodPickedUpQueue.Count;
+        _ = _bridge.FoodPickedUpQueue.Count;
 
         // Significance filter: only death milestones — delivery milestones spammed too fast.
-        const int DeathMilestone = 1000;
-        const float CenterRender = 50f;  // 100m world / 2
+        const int deathMilestone = 1000;
+        const float centerRender = 50f;  // 100m world / 2
 
-        var t = _bridge._simTimeSec;
-        var deathMsBefore = prevDeath / DeathMilestone;
-        var deathMsAfter = _bridge._deathCount / DeathMilestone;
+        var t = _bridge.SimTimeSec;
+        var deathMsBefore = prevDeath / deathMilestone;
+        var deathMsAfter = _bridge.DeathCount / deathMilestone;
         for (var m = deathMsBefore + 1; m <= deathMsAfter; m++)
         {
-            _bridge._eventLog.Enqueue(new LogEntry(t,
-                $"{m * DeathMilestone:N0} ants died total",
-                CenterRender, CenterRender, LogSeverity.Milestone));
+            _bridge.EventLog.Enqueue(new LogEntry(t,
+                $"{m * deathMilestone:N0} ants died total",
+                centerRender, centerRender, LogSeverity.Milestone));
         }
     }
 }

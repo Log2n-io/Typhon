@@ -1,7 +1,8 @@
 using System;
+using AntHill.Core;
 using Godot;
 
-namespace AntHill;
+namespace AntHill.Demo;
 
 /// <summary>
 /// 3D renderer for the "Worker" archetype: one MultiMeshInstance3D, identity per-instance transforms (sunk cost),
@@ -199,7 +200,7 @@ public partial class AntRenderer : Node3D
 			_capsule.Mesh.VisibleInstanceCount = 0;
 			_soldier.Mesh.VisibleInstanceCount = 0;
 			LastUploadBytes = 0;
-			System.Array.Clear(_densityBytes, 0, _densityBytes.Length);
+			Array.Clear(_densityBytes, 0, _densityBytes.Length);
 			return;
 		}
 
@@ -259,7 +260,7 @@ public partial class AntRenderer : Node3D
 		const float simToU16  = 65535f / TyphonBridge.WorldSize;
 		const float simToCell = DensityRes / TyphonBridge.WorldSize;
 
-		System.Array.Clear(_densityBytes, 0, _densityBytes.Length);
+		Array.Clear(_densityBytes, 0, _densityBytes.Length);
 
 		if (writeState)
 		{

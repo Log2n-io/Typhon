@@ -1,6 +1,7 @@
+using AntHill.Core;
 using Godot;
 
-namespace AntHill;
+namespace AntHill.Demo;
 
 /// <summary>
 /// Renders the (small, ~8) Spider archetype as low-poly black spheres. Reads

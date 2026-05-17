@@ -1,8 +1,8 @@
-using System;
 using System.Collections.Generic;
+using AntHill.Core;
 using Godot;
 
-namespace AntHill;
+namespace AntHill.Demo;
 
 /// <summary>
 /// Right-side scrolling event log. Latest entry on top, capped at <see cref="MaxRows"/> rows.

@@ -1,6 +1,4 @@
-using Typhon.Engine;
-
-namespace AntHill;
+namespace AntHill.Core;
 
 /// <summary>
 /// Phase 5 predator update. Sequential callback over the (8) flat spider arrays on TyphonBridge.

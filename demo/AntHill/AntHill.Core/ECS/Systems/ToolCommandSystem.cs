@@ -1,7 +1,4 @@
-using System;
-using Typhon.Engine;
-
-namespace AntHill;
+namespace AntHill.Core;
 
 /// <summary>
 /// Drains the god-game tool command queue (filled by Godot's input handlers) and applies
@@ -28,14 +25,14 @@ internal sealed class ToolCommandSystem : CallbackSystem
 
     protected override void Execute(TickContext ctx)
     {
-        var queue = _bridge._toolCommands;
+        var queue = _bridge.ToolCommands;
         if (queue.IsEmpty) return;
 
         var foodAdded = false;
-        var t = _bridge._simTimeSec;
+        var t = _bridge.SimTimeSec;
         var simToWorld = 100f / TyphonBridge.WorldSize;   // mirrors AntRenderer.SimToWorld
 
-        using var tx = _bridge._dbe.CreateQuickTransaction();
+        using var tx = _bridge.DBE.CreateQuickTransaction();
         while (queue.TryDequeue(out var cmd))
         {
             switch (cmd.Kind)
@@ -44,7 +41,7 @@ internal sealed class ToolCommandSystem : CallbackSystem
                 {
                     _bridge.RuntimeSpawnFood(tx, cmd.X, cmd.Y, cmd.Amount);
                     foodAdded = true;
-                    _bridge._eventLog.Enqueue(new LogEntry(
+                    _bridge.EventLog.Enqueue(new LogEntry(
                         t,
                         $"Food placed at ({cmd.X * simToWorld:F1}, {cmd.Y * simToWorld:F1})",
                         cmd.X * simToWorld, cmd.Y * simToWorld, LogSeverity.Tool));
@@ -53,7 +50,7 @@ internal sealed class ToolCommandSystem : CallbackSystem
                 case ToolCommandKind.PlaceRock:
                 {
                     _bridge.RuntimeSpawnRock(tx, cmd.X, cmd.Y);
-                    _bridge._eventLog.Enqueue(new LogEntry(
+                    _bridge.EventLog.Enqueue(new LogEntry(
                         t,
                         $"Rock placed at ({cmd.X * simToWorld:F1}, {cmd.Y * simToWorld:F1})",
                         cmd.X * simToWorld, cmd.Y * simToWorld, LogSeverity.Tool));
@@ -62,7 +59,7 @@ internal sealed class ToolCommandSystem : CallbackSystem
                 case ToolCommandKind.Cull:
                 {
                     var killed = _bridge.RuntimeCullAnts(tx, cmd.X, cmd.Y, cmd.Radius);
-                    _bridge._eventLog.Enqueue(new LogEntry(
+                    _bridge.EventLog.Enqueue(new LogEntry(
                         t,
                         $"{killed} ants culled at ({cmd.X * simToWorld:F1}, {cmd.Y * simToWorld:F1})",
                         cmd.X * simToWorld, cmd.Y * simToWorld, LogSeverity.Action));

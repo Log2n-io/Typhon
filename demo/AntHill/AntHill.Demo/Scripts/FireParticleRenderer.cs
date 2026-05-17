@@ -1,6 +1,7 @@
+using AntHill.Core;
 using Godot;
 
-namespace AntHill;
+namespace AntHill.Demo;
 
 /// <summary>
 /// Phase 6 polish — volumetric flames + smoke for the fire CA. Two <see cref="GpuParticles3D"/>

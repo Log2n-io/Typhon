@@ -1,6 +1,6 @@
 using System;
 
-namespace AntHill;
+namespace AntHill.Core;
 
 /// <summary>
 /// Phase 6B — Drossel-Schwabl forest fire cellular automaton. Lives outside ECS by design

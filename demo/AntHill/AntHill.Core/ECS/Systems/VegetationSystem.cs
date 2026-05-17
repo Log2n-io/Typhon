@@ -1,6 +1,4 @@
-using Typhon.Engine;
-
-namespace AntHill;
+namespace AntHill.Core;
 
 /// <summary>
 /// Phase 6C — drives the 100 k plant carpet. At 10 Hz (every 6th 60 Hz tick, matching the fire

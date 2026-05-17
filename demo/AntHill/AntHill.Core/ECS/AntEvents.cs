@@ -1,4 +1,4 @@
-namespace AntHill;
+namespace AntHill.Core;
 
 /// <summary>
 /// Telemetry events emitted by the simulation. Replace the previous <c>Interlocked.Increment</c>

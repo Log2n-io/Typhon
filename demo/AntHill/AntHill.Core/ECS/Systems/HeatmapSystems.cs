@@ -1,7 +1,6 @@
 using System;
-using Typhon.Engine;
 
-namespace AntHill;
+namespace AntHill.Core;
 
 /// <summary>
 /// Chunked-parallel max-reduce of one pheromone channel into the heatmap accumulator. Each chunk
@@ -37,7 +36,7 @@ internal sealed class PheroMaxReduceSystem : ChunkedCallbackSystem
         .Phase(AntPhases.Render)
         .ReadsResource("PheromoneGrid")
         .WritesResource(_writesResource)
-        .ShouldRun(() => _bridge._heatmapEnabled)
+        .ShouldRun(() => _bridge.HeatmapEnabled)
         .ChunkedParallel(ChunkCount);
 
     protected override void Execute(TickContext ctx)
@@ -95,14 +94,14 @@ internal sealed class HeatmapRgbaPackSystem : CallbackSystem
         .Name("HeatmapRgbaPack")
         .Phase(AntPhases.Render)
         .WritesResource("Heatmap")
-        .ShouldRun(() => _bridge._heatmapEnabled);
+        .ShouldRun(() => _bridge.HeatmapEnabled);
 
     protected override void Execute(TickContext ctx)
     {
-        var maxF = _bridge._heatMaxFood;
-        var maxH = _bridge._heatMaxHome;
-        var maxG = _bridge._heatMaxFight;
-        var rgba = _bridge._heatmapRGBA;
+        var maxF = _bridge.HeatMaxFood;
+        var maxH = _bridge.HeatMaxHome;
+        var maxG = _bridge.HeatMaxFight;
+        var rgba = _bridge.HeatmapRgba;
         var invMax = 255f / PheromoneGrid.MaxPheromone;
         var n = TyphonBridge.HeatmapPixels;
 

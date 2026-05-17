@@ -1,4 +1,4 @@
-namespace AntHill;
+namespace AntHill.Core;
 
 /// <summary>
 /// Static helper methods for ant AI. Called from AntAITick system.

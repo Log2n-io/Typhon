@@ -1,0 +1,47 @@
+{
+  "Typhon": {
+    "Profiler": {
+      "Enabled": true,
+      "GcTracing":          { "Enabled": true },
+      "MemoryAllocations":  { "Enabled": true },
+      "CpuSampling":        { "Enabled": true },
+      "Gauges":             { "Enabled": true },
+      "Scheduler":          { "Enabled": true },
+      "Runtime": {
+        "Enabled": true,
+        "ThreadScheduling": { "Enabled": true },
+        "WriteTickFence": {
+          "Enabled": true,
+          "Table":   { "Enabled": true },
+          "Shadow":  { "Enabled": true },
+          "Spatial": { "Enabled": true },
+          "Cluster": {
+            "Enabled": true,
+            "Shadow":  { "Enabled": true },
+            "Spatial": { "Enabled": true }
+          }
+        }
+      },
+      "Storage":            { "Enabled": true },
+      "Memory":             { "Enabled": true },
+      "Data":               { "Enabled": true },
+      "ECS":                { "Enabled": true },
+      "Durability":         { "Enabled": true },
+      "Query":              { "Enabled": true },
+      "Spatial": {
+        "Enabled": true,
+        "ClusterMigration": {
+          "Enabled": true
+        },
+        "Cell": {
+          "Index": {
+            "Enabled": true
+          }
+        },
+        "Concurrency": {
+          "Enabled": true
+        }
+      }
+    }
+  }
+}

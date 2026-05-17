@@ -1,10 +1,10 @@
 using System.Collections.Generic;
 using System.Threading;
+using AntHill.Core;
 using Godot;
-using Typhon.Engine.Profiler;
 using Typhon.Profiler;
 
-namespace AntHill;
+namespace AntHill.Demo;
 
 public partial class Main : Node3D
 {
@@ -88,8 +88,11 @@ public partial class Main : Node3D
                 {
                     TyphonProfiler.AttachExporter(exp);
                 }
+                // CPU sampler must start BEFORE BuildSessionMetadata so its QPC anchor lands in the trace header.
+                // Gated internally on CpuSampling being enabled + a configured trace file — a no-op (returns 0) otherwise.
+                var samplingQpc = ProfilerLauncher.StartCpuSampler(_profilerConfig);
                 var metadata = ProfilerSetup.BuildSessionMetadata(_bridge.Systems, 16, 60f, _bridge.PhaseNames, () => _bridge?.CurrentTick ?? 0,
-                    _bridge.DatabaseEngine, _bridge.ResourceGraphRoot, _bridge.ActiveRuntime);
+                    _bridge.DatabaseEngine, _bridge.ResourceGraphRoot, _bridge.ActiveRuntime, samplingQpc);
 
                 if (_profilerConfig.LiveWaitMs > 0 && _profilerConfig.LivePort >= 0)
                 {
@@ -267,11 +270,11 @@ public partial class Main : Node3D
 
         _worldEnv = new WorldEnvironment
         {
-            Environment = new Godot.Environment
+            Environment = new Environment
             {
-                BackgroundMode = Godot.Environment.BGMode.Color,
+                BackgroundMode = Environment.BGMode.Color,
                 BackgroundColor = SkyDay,
-                AmbientLightSource = Godot.Environment.AmbientSource.Color,
+                AmbientLightSource = Environment.AmbientSource.Color,
                 AmbientLightColor = new Color(0.75f, 0.80f, 0.90f),
                 AmbientLightEnergy = AmbientBaseEnergy,
             },
@@ -438,7 +441,7 @@ void fragment() {
         _camera?.SetFollowTarget(new Vector3(worldX, 0f, worldZ));
     }
 
-    private static TcpExporter FindTcpExporter(System.Collections.Generic.List<IProfilerExporter> exporters)
+    private static TcpExporter FindTcpExporter(List<IProfilerExporter> exporters)
     {
         if (exporters == null) return null;
         foreach (var e in exporters)
@@ -448,7 +451,7 @@ void fragment() {
         return null;
     }
 
-    private System.Collections.Generic.List<IProfilerExporter> _exporters;
+    private List<IProfilerExporter> _exporters;
     private ProfilerLaunchConfig _profilerConfig;
 
     public override void _UnhandledInput(InputEvent @event)
@@ -660,6 +663,18 @@ void fragment() {
             GD.PrintErr($"AntHill: failed to save window state — {ex.Message}");
         }
 
+        // Begin stopping the CPU sampler BEFORE the bridge teardown so its (seconds-long) .nettrace transcode +
+        // symbol resolution runs on a background thread, overlapping the engine-teardown dirty-page flush instead
+        // of freezing the exit path after it.
+        try
+        {
+            ProfilerLauncher.BeginCpuSamplerStop();
+        }
+        catch
+        {
+            // ignored
+        }
+
         try
         {
             _bridge?.Dispose();
@@ -670,6 +685,18 @@ void fragment() {
         }
 
         _bridge = null;
+
+        // Finish the CPU sampler (awaits the background parse) and hand the samples to the FileExporter, which
+        // Stop() then drains into the trace's CpuSampleSection — BEFORE TyphonProfiler.Stop(). Idempotent + best-effort.
+        try
+        {
+            ProfilerLauncher.StopCpuSampler();
+        }
+        catch
+        {
+            // ignored
+        }
+
         if (_exporters != null && _exporters.Count > 0)
         {
             try

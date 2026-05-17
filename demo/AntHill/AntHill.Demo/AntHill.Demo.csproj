@@ -2,7 +2,6 @@
   <!-- AntHill.Demo — the Godot application. Rendering / UI / scene scripts; consumes AntHill.Core for
        all gameplay + Typhon-engine logic. -->
   <PropertyGroup>
-    <RootNamespace>AntHill</RootNamespace>
     <AssemblyName>AntHill.Demo</AssemblyName>
     <TargetFramework>net10.0</TargetFramework>
     <TargetFramework Condition=" '$(GodotTargetPlatform)' == 'android' ">net9.0</TargetFramework>
@@ -12,7 +11,7 @@
   <ItemGroup>
     <!-- Telemetry configuration: copied to output so TelemetryConfig's assembly-dir
          fallback can find it regardless of the process's current working directory. -->
-    <Content Include="..\typhon.telemetry.json" Link="typhon.telemetry.json" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="typhon.telemetry.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\AntHill.Core\AntHill.Core.csproj" />

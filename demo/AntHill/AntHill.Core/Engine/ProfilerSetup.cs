@@ -1,10 +1,8 @@
 using System;
 using System.Diagnostics;
-using Typhon.Engine;
-using Typhon.Engine.Profiler;
 using Typhon.Profiler;
 
-namespace AntHill;
+namespace AntHill.Core;
 
 /// <summary>
 /// AntHill-specific glue between the runtime's <see cref="SystemDefinition"/> array and the profiler's

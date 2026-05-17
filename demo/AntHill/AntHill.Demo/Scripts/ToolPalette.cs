@@ -1,7 +1,7 @@
 using System;
 using Godot;
 
-namespace AntHill;
+namespace AntHill.Demo;
 
 public enum ToolKind { Pointer, Food, Rock, Cull, Ignite, Pause }
 

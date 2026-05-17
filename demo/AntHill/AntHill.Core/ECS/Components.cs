@@ -1,7 +1,7 @@
 using System.Runtime.InteropServices;
 using Typhon.Schema.Definition;
 
-namespace AntHill;
+namespace AntHill.Core;
 
 // ── Ant components ─────────────────────────────────────────────────────────
 //

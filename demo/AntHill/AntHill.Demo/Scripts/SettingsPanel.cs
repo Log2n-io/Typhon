@@ -1,6 +1,6 @@
 using Godot;
 
-namespace AntHill;
+namespace AntHill.Demo;
 
 /// <summary>
 /// Phase 1 settings overlay — Esc toggles. Lives on its own CanvasLayer (Layer = 20) so it floats above the HUD

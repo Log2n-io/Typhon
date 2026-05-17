@@ -1,6 +1,7 @@
+using AntHill.Core;
 using Godot;
 
-namespace AntHill;
+namespace AntHill.Demo;
 
 /// <summary>
 /// Phase 1 unified ground: a subdivided 100 m × 100 m PlaneMesh whose vertex shader displaces Y from the heightmap,

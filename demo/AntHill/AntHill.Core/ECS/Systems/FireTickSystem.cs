@@ -1,6 +1,4 @@
-using Typhon.Engine;
-
-namespace AntHill;
+namespace AntHill.Core;
 
 /// <summary>
 /// Phase 6B — runs the Drossel-Schwabl forest fire CA at 10 Hz (every 6th 60 Hz tick).

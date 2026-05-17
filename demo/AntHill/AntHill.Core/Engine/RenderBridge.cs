@@ -1,6 +1,6 @@
 using System;
 
-namespace AntHill;
+namespace AntHill.Core;
 
 /// <summary>
 /// Double-buffered growable render buffer owned by a single worker thread.

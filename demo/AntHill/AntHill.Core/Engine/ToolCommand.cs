@@ -1,4 +1,4 @@
-namespace AntHill;
+namespace AntHill.Core;
 
 public enum ToolCommandKind : byte
 {

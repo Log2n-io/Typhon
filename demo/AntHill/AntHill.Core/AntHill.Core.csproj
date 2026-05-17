@@ -3,7 +3,6 @@
        Consumed by AntHill.Demo (Godot app) and AntHill.Harness (console). -->
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
-    <RootNamespace>AntHill</RootNamespace>
     <AssemblyName>AntHill.Core</AssemblyName>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <LangVersion>default</LangVersion>

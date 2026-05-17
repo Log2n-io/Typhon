@@ -1,6 +1,7 @@
+using AntHill.Core;
 using Godot;
 
-namespace AntHill;
+namespace AntHill.Demo;
 
 public enum LodBand { Loupe = 0, Foot = 1, Patch = 2 }
 
