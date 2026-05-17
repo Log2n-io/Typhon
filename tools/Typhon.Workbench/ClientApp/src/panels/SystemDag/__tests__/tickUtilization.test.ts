@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { SystemTickSummary } from '@/api/generated/model/systemTickSummary';
 import type { TickSummaryDto } from '@/api/generated/model/tickSummaryDto';
-import { computePhaseUtilization, computeRangeUtilization } from '../tickUtilization';
+import { computeRangeUtilization } from '../tickUtilization';
 
 function tick(tickNumber: number, durationUs: number, overrides?: Partial<TickSummaryDto>): TickSummaryDto {
   return {
@@ -200,29 +200,5 @@ describe('computeRangeUtilization', () => {
       range: { from: 1, to: 3 },
     });
     expect(result!.meanWaitUsPerTick).toBeCloseTo(200, 3);
-  });
-});
-
-describe('computePhaseUtilization', () => {
-  it('returns null when worker count is missing', () => {
-    expect(computePhaseUtilization({ workerCount: null, phaseWorkUs: 100, phaseWallTimeUs: 200 })).toBeNull();
-  });
-
-  it('returns null when wall time is zero', () => {
-    expect(computePhaseUtilization({ workerCount: 4, phaseWorkUs: 100, phaseWallTimeUs: 0 })).toBeNull();
-  });
-
-  it('computes wait and utilization for a populated phase', () => {
-    // 4 workers × 1000µs wall = 4000µs capacity. work = 1500 → wait = 2500, util = 0.375.
-    const u = computePhaseUtilization({ workerCount: 4, phaseWorkUs: 1500, phaseWallTimeUs: 1000 })!;
-    expect(u.capacityUs).toBe(4000);
-    expect(u.waitUs).toBe(2500);
-    expect(u.utilization).toBeCloseTo(0.375, 5);
-  });
-
-  it('saturates work-exceeds-capacity case', () => {
-    const u = computePhaseUtilization({ workerCount: 1, phaseWorkUs: 999, phaseWallTimeUs: 100 })!;
-    expect(u.waitUs).toBe(0);
-    expect(u.utilization).toBe(1);
   });
 });

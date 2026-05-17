@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Threading;
 using Typhon.Profiler;
@@ -30,11 +32,20 @@ internal sealed class FileExporter : ResourceNode, IProfilerExporter
     private long _batchesProcessed;
     private long _recordsProcessed;
 
+    /// <summary>CPU samples handed in by <see cref="ProfilerLauncher"/> after the EventPipe sampler is stopped + parsed; written as a trailer at close (#351).</summary>
+    private ParsedCpuSamples _cpuSamples;
+
     /// <summary>Diagnostic: how many batches this exporter has written so far.</summary>
     public long BatchesProcessed => _batchesProcessed;
 
     /// <summary>Diagnostic: total records written (sum of each batch's Count).</summary>
     public long RecordsProcessed => _recordsProcessed;
+
+    /// <summary>
+    /// Stash the parsed CPU-sample batch (#351). Called by <see cref="ProfilerLauncher.StopCpuSampler"/> after the EventPipe <c>.nettrace</c> is parsed,
+    /// before the profiler session stops — the close path encodes it into the trace's CPU-sample trailer section.
+    /// </summary>
+    internal void SetCpuSamples(ParsedCpuSamples samples) => _cpuSamples = samples;
 
     public FileExporter(string filePath, IResource parent) : base("FileExporter", ResourceType.Service, parent ?? throw new ArgumentNullException(nameof(parent)))
     {
@@ -44,6 +55,12 @@ internal sealed class FileExporter : ResourceNode, IProfilerExporter
 
     /// <inheritdoc />
     public ExporterQueue Queue { get; }
+
+    /// <summary>
+    /// The exporter's lifecycle is owned by <see cref="TyphonProfiler"/> (attach → <c>Stop</c> drains then disposes it), not by the engine resource tree it
+    /// is parented under for display. Returning <c>false</c> keeps a host's engine teardown from closing the trace file before the profiler's final drain.
+    /// </summary>
+    public override bool DisposeWithParent => false;
 
     /// <inheritdoc />
     public void Initialize(ProfilerSessionMetadata metadata)
@@ -92,25 +109,68 @@ internal sealed class FileExporter : ResourceNode, IProfilerExporter
     }
 
     /// <summary>
-    /// Append trailing sections (SourceLocationManifest + QuerySourceStringTable for v9) and patch the header offsets in. Called from <see cref="Dispose(bool)"/>
-    /// before the writer is closed. Each section is independently optional — if empty, the section is skipped and the corresponding header offset stays 0.
-    /// See claude/design/Profiler/10-profiler-source-attribution.md §4.6 (SourceLocationManifest) and claude/design/Profiler/11-query-definition-export.md §4.8 (QuerySourceStringTable).
+    /// Append the trailing sections (SourceLocationManifest, CpuSampleSection, QuerySourceStringTable) and patch the header offsets in. Called from
+    /// <see cref="Dispose(bool)"/> before the writer is closed. Each section is independently optional — if empty it is skipped and its header offset stays 0.
+    /// The CPU-sample frame symbols and the source-location manifest share one <c>FileTable</c>, so the CPU encoder runs first (extending the file table) and
+    /// the table is written once. A CPU-sample failure is contained — it never costs the source-location manifest.
+    /// See claude/design/Profiler/10-profiler-source-attribution.md §4.6, /11-query-definition-export.md §4.8, /11-cpu-sampling-integration.md §6.5.
     /// </summary>
-    private void WriteSourceLocationManifestAtClose()
+    private void WriteTrailerSectionsAtClose()
     {
         if (_writer == null)
         {
             return;
         }
 
-        // ── SourceLocationManifest (compile-time call sites + runtime-resolved systems) ──
-        var (files, manifest) = RuntimeSourceLocationManifest.BuildMerged();
-        var hasManifest = files.Length > 0 && manifest.Length > 0;
-        if (hasManifest)
+        // ── Shared FileTable: source-location manifest files first, then (below) the CPU-sample frame file paths appended to the same table ──
+        var (compileFiles, manifest) = RuntimeSourceLocationManifest.BuildMerged();
+        var fileTable = new List<string>(compileFiles.Length + 16);
+        var fileInterner = new Dictionary<string, int>(StringComparer.Ordinal);
+        for (var i = 0; i < compileFiles.Length; i++)
         {
-            var (fileTableOffset, manifestOffset) = _writer.WriteSourceLocationManifest(files, manifest);
+            var path = compileFiles[i] ?? string.Empty;
+            fileTable.Add(path);
+            fileInterner[path] = i; // BuildMerged yields unique paths; last-wins is harmless if that ever changes.
+        }
+
+        // ── CpuSampleSection (#351) — encode first so frame file paths land in the shared FileTable before it is written. Best-effort: a parse/encode
+        //    failure must not cost the source-location manifest, so the encode is contained in its own try. ──
+        CpuSampleSectionData cpuData = null;
+        var cpuEncodeMs = 0L;
+        if (_cpuSamples != null && _cpuSamples.SampleCount > 0)
+        {
+            try
+            {
+                var encodeSw = Stopwatch.StartNew();
+                cpuData = CpuSampleSectionEncoder.Encode(_cpuSamples, fileTable, fileInterner);
+                cpuEncodeMs = encodeSw.ElapsedMilliseconds;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine("[Typhon] FileExporter: CPU-sample encoding failed; the trace is written without a CPU-sample section. "
+                    + ex.GetType().Name + ": " + ex.Message);
+                cpuData = null;
+            }
+        }
+
+        // ── SourceLocationManifest + the shared FileTable (compile-time call sites + runtime-resolved systems + CPU-sample frame paths) ──
+        var hasFileContent = fileTable.Count > 0 || manifest.Length > 0;
+        if (hasFileContent)
+        {
+            var (fileTableOffset, manifestOffset) = _writer.WriteSourceLocationManifest(fileTable, manifest);
             _header.FileTableOffset = fileTableOffset;
             _header.SourceLocationManifestOffset = manifestOffset;
+        }
+
+        if (cpuData != null)
+        {
+            var writeSw = Stopwatch.StartNew();
+            var cpuOffset = _writer.WriteCpuSampleSection(cpuData.Samples, cpuData.Stacks, cpuData.FrameSymbols);
+            _header.CpuSampleSectionOffset = cpuOffset;
+            Console.WriteLine(
+                $"[Typhon] FileExporter: CPU-sample trailer written — {cpuData.Samples.Count} records, "
+                + $"{cpuData.Stacks.Count} interned stacks, {cpuData.FrameSymbols.Count} frame symbols "
+                + $"(encode {cpuEncodeMs} ms, write {writeSw.ElapsedMilliseconds} ms)");
         }
 
         // ── QuerySourceStringTable (v9, #342) — deduped query definition/execution source strings ──
@@ -122,7 +182,7 @@ internal sealed class FileExporter : ResourceNode, IProfilerExporter
         }
 
         // Only rewrite the header if at least one trailer section landed.
-        if (hasManifest || queryStrings.Length > 1)
+        if (hasFileContent || cpuData != null || queryStrings.Length > 1)
         {
             _writer.RewriteHeader(in _header);
             _writer.Flush();
@@ -160,12 +220,12 @@ internal sealed class FileExporter : ResourceNode, IProfilerExporter
 
         if (disposing)
         {
-            // Append the source-location manifest BEFORE disposing the writer (which closes the stream).
-            // Failures here are non-fatal — the trace stays valid without source attribution.
-            try { WriteSourceLocationManifestAtClose(); }
+            // Append the trailer sections BEFORE disposing the writer (which closes the stream).
+            // Failures here are non-fatal — the trace stays valid without source attribution / CPU samples.
+            try { WriteTrailerSectionsAtClose(); }
             catch
             {
-                // ignored — trace remains usable, just without source attribution.
+                // ignored — trace remains usable, just without trailer sections.
             }
 
             try { _writer?.Dispose(); }

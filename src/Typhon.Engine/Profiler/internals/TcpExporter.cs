@@ -88,6 +88,12 @@ internal sealed class TcpExporter : ResourceNode, IProfilerExporter
     /// <inheritdoc />
     public ExporterQueue Queue { get; }
 
+    /// <summary>
+    /// The exporter's lifecycle is owned by <see cref="TyphonProfiler"/> (attach → <c>Stop</c> drains then disposes it), not by the engine resource tree it
+    /// is parented under for display. Returning <c>false</c> keeps a host's engine teardown from disposing it before the profiler's final drain.
+    /// </summary>
+    public override bool DisposeWithParent => false;
+
     /// <summary>Number of frames dropped because the socket was not write-ready or partially sent.</summary>
     public long DroppedFrames => Interlocked.Read(ref _droppedFrames);
 

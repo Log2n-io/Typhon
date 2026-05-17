@@ -171,11 +171,29 @@ public class ResourceRegistry : IResourceRegistry
     }
 
     /// <summary>
-    /// Disposes all resources in the tree (depth-first).
+    /// Disposes all resources in the tree, subsystem by subsystem, in reverse-dependency order.
     /// </summary>
+    /// <remarks>
+    /// Teardown order is load-bearing. <see cref="DataEngine"/>'s graceful shutdown runs a final checkpoint plus
+    /// <c>PersistArchetypeState</c> / <c>PersistEngineState</c> (durability rule CX-06) that read the <see cref="Storage"/>
+    /// (ManagedPagedMMF), <see cref="Durability"/> (WAL) and <see cref="Synchronization"/> (EpochManager) subsystems — so
+    /// those must outlive it. A bare <c>Root.Dispose()</c> cascades children in <see cref="System.Collections.Concurrent.ConcurrentDictionary{TKey,TValue}"/>
+    /// enumeration order, which is unspecified — when Storage happened to enumerate before DataEngine the MMF was torn down
+    /// under the still-running engine teardown, faulting with a null page table / uninitialized segment. So dispose
+    /// subsystems explicitly here, dependents first; the trailing <c>Root.Dispose()</c> is a safety net for the root and
+    /// any subsystem not listed (already-disposed nodes are idempotent no-ops).
+    /// </remarks>
     public void Dispose()
     {
-        Root.Dispose();
+        Profiler.Dispose();          // observers of the engine — stop capturing first
+        Runtime.Dispose();           // scheduler — must stop driving ticks before the engine tears down
+        DataEngine.Dispose();        // engine graceful shutdown — reads Storage / Durability / Synchronization below
+        Durability.Dispose();        // WAL / checkpoint
+        Storage.Dispose();           // page cache / ManagedPagedMMF
+        Allocation.Dispose();        // leaf primitives everything above depends on — last
+        Synchronization.Dispose();
+        Timer.Dispose();
+        Root.Dispose();              // safety net: root + anything not enumerated above
         GC.SuppressFinalize(this);
     }
 }

@@ -86,7 +86,7 @@ export interface StudioTheme {
  * Off-CPU category palette — index matches `OffCpuCategory`. Distinct hues; saturated because the renderer composites
  * them at ~0.32 alpha over the lane. Idle is a neutral grey (an idle hand-off is "nothing happened", visually quiet).
  */
-const OFF_CPU_PALETTE: readonly string[] = [
+export const OFF_CPU_PALETTE: readonly string[] = [
   '#5b8def', // 0 SyncWait    — blue
   '#e8893b', // 1 Preempted   — orange
   '#a87fd6', // 2 QuantumEnd  — purple

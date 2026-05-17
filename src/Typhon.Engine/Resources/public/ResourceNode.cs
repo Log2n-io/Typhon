@@ -33,6 +33,13 @@ public class ResourceNode : IResource
     /// </remarks>
     public ExhaustionPolicy ExhaustionPolicy { get; }
 
+    /// <summary>
+    /// Whether this node is disposed by its parent's <see cref="Dispose(bool)"/> cascade. Default <c>true</c>. A node whose lifecycle is owned by something
+    /// other than the resource tree — e.g. a profiler exporter owned by <c>TyphonProfiler</c> — overrides this to <c>false</c>: it stays registered in the
+    /// tree for display, but is disposed only by its real owner, never by an ancestor's teardown.
+    /// </summary>
+    public virtual bool DisposeWithParent => true;
+
     public bool RegisterChild(IResource child)
     {
         if (!_children.TryAdd(child.Id, child))
@@ -110,6 +117,11 @@ public class ResourceNode : IResource
         }
         foreach (var resource in _children.Values)
         {
+            // Skip children whose lifecycle is owned elsewhere (e.g. profiler exporters owned by TyphonProfiler) — they are in the tree for display only.
+            if (resource is ResourceNode node && !node.DisposeWithParent)
+            {
+                continue;
+            }
             resource.Dispose();
         }
         _children.Clear();

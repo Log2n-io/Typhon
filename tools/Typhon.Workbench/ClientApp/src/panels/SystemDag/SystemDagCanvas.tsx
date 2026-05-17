@@ -13,7 +13,7 @@ import {
 import '@xyflow/react/dist/style.css';
 import type { TopologyDto } from '@/api/generated/model/topologyDto';
 import { useHoverStore } from '@/stores/useHoverStore';
-import { colorForPhase } from '../CriticalPath/phaseColors';
+import { colorForPhase } from '@/libs/palettes';
 import { buildDagModel, NODE_HEIGHT, NODE_WIDTH, type DagEdgeData, type DagNodeData } from './dagModel';
 import SystemDagNode from './SystemDagNode';
 import type { SystemStat } from './useSystemStats';
@@ -573,8 +573,8 @@ export default function SystemDagCanvas({
             Phase-highlight rects — drawn behind nodes when a phase is hovered AND the layout
             has no swim-lanes (compact / circular). Each rect sits at the node's flow-space
             position with a small padding so it reads as a backdrop, not a tile replacement.
-            Uses `laneTintHovered` so the colour matches the swim-lane hover tint exactly,
-            keeping the cross-layout cue consistent.
+            Colour comes from `colorForPhase` — the same palette the swim-lane bands and the
+            Critical Path tape use — keeping the cross-layout / cross-panel cue consistent.
           */}
           {phaseHighlights.map((hl) => (
             <div
@@ -588,10 +588,10 @@ export default function SystemDagCanvas({
                 top: hl.y - 12,
                 width: NODE_WIDTH + 24,
                 height: NODE_HEIGHT + 24,
-                // Plain fill, no border. CP tape's phase-stripe `stroke` hue re-cast as HSLA
-                // at very low alpha — visible enough to register "this node is in the hovered
-                // phase", washed-out enough to stay subtle and not compete with the node tile.
-                backgroundColor: hl.stroke.replace('hsl(', 'hsla(').replace(')', ', 0.12)'),
+                // Plain fill, no border. CP tape's phase-stripe `stroke` hue at very low alpha
+                // — visible enough to register "this node is in the hovered phase", washed-out
+                // enough to stay subtle and not compete with the node tile.
+                backgroundColor: `color-mix(in oklch, ${hl.stroke} 14%, transparent)`,
                 zIndex: -1,
               }}
             />
@@ -615,7 +615,11 @@ export default function SystemDagCanvas({
                   top: lane.yTop,
                   width: lane.width,
                   height: lane.height,
-                  backgroundColor: isHovered ? laneTintHovered(lane.index) : laneTint(lane.index),
+                  // Phase fill — the exact colour the Critical Path tape paints this phase's
+                  // stripe with ({@link colorForPhase}), at 30% opacity so it reads as a band
+                  // without overpowering the node tiles. Hover is signalled by the thicker,
+                  // brighter border, not a fill change.
+                  backgroundColor: `color-mix(in oklch, ${colorForPhase(lane.index).fill} 30%, transparent)`,
                   zIndex: -1,
                 }}
               >
@@ -659,39 +663,6 @@ export default function SystemDagCanvas({
       </ReactFlow>
     </div>
   );
-}
-
-// Baseline lane tints — readable at any zoom. The previous values (0.04–0.06 alpha) were so
-// faint they only registered when the lane filled most of the viewport; bumped to 0.14–0.18 so
-// the bands read as bands at zoom-out levels too without overpowering node tiles.
-const TINT_PALETTE = [
-  'rgba(56, 189, 248, 0.16)',  // sky
-  'rgba(148, 163, 184, 0.12)', // slate
-  'rgba(251, 146, 60, 0.16)',  // orange
-  'rgba(167, 139, 250, 0.16)', // violet
-  'rgba(74, 222, 128, 0.16)',  // emerald
-];
-
-function laneTint(index: number): string {
-  if (index < 0) return 'rgba(0, 0, 0, 0)';
-  return TINT_PALETTE[index % TINT_PALETTE.length];
-}
-
-/**
- * Higher-opacity twin of {@link laneTint} for the phase-hover state. Same hues, alpha roughly
- * doubled vs. the baseline so the matched lane is unmistakable.
- */
-const TINT_PALETTE_HOVERED = [
-  'rgba(56, 189, 248, 0.32)',
-  'rgba(148, 163, 184, 0.26)',
-  'rgba(251, 146, 60, 0.32)',
-  'rgba(167, 139, 250, 0.32)',
-  'rgba(74, 222, 128, 0.32)',
-];
-
-function laneTintHovered(index: number): string {
-  if (index < 0) return 'rgba(0, 0, 0, 0)';
-  return TINT_PALETTE_HOVERED[index % TINT_PALETTE_HOVERED.length];
 }
 
 /**

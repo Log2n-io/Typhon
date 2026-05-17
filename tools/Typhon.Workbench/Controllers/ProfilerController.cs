@@ -5,6 +5,7 @@ using Typhon.Profiler;
 using Typhon.Profiler.Events;
 using Typhon.Workbench.Dtos.Profiler;
 using Typhon.Workbench.Middleware;
+using Typhon.Workbench.Services;
 using Typhon.Workbench.Sessions;
 
 namespace Typhon.Workbench.Controllers;
@@ -122,6 +123,145 @@ public sealed class ProfilerController : ControllerBase
         {
             Title = "session_kind_mismatch",
             Detail = "Source-location manifest is only available for Trace and Attach sessions.",
+            Status = StatusCodes.Status409Conflict,
+        });
+    }
+
+    /// <summary>
+    /// #351 Phase 4: CPU-sample frame-symbol manifest for the session — maps a call-tree node's <c>frameId</c> to a
+    /// method name + <c>file:line</c> (for go-to-source) and a subsystem category. Exposed once per session, like the
+    /// #302 source-location manifest. CPU sampling is file-mode only in v1, so Attach sessions return an empty manifest.
+    /// Returns 202 while the trace cache is still building.
+    /// </summary>
+    [HttpGet("cpu-frames")]
+    public ActionResult<CpuFrameManifestDto> GetCpuFrames(Guid sessionId)
+    {
+        var session = HttpContext.Items["Session"];
+
+        if (session is TraceSession trace)
+        {
+            var runtime = trace.Runtime;
+            if (!runtime.IsBuildComplete)
+            {
+                Response.Headers["Retry-After"] = "1";
+                return StatusCode(StatusCodes.Status202Accepted);
+            }
+            return Ok(runtime.CpuSampleData.Manifest);
+        }
+
+        if (session is AttachSession)
+        {
+            // CPU sampling is file-mode only in v1 — a live attach carries no sample data (design §2, §9 risk 2).
+            return Ok(CpuFrameManifestDto.Empty);
+        }
+
+        return Conflict(new ProblemDetails
+        {
+            Title = "session_kind_mismatch",
+            Detail = "CPU-sample frames are only available for Trace and Attach sessions.",
+            Status = StatusCodes.Status409Conflict,
+        });
+    }
+
+    /// <summary>
+    /// #351 Phase 4: folds the session's CPU samples into a dotTrace-style call tree for the requested scope. The scope
+    /// is a composite (optional time window ∩ optional frame-root ∩ view mode), hence POST. The response carries the
+    /// folded tree (KB-scale) plus a per-category self-time breakdown — never the raw sample set. Attach sessions and
+    /// traces without a CPU-sample section return <see cref="CallTreeResponseDto.Empty"/>. 202 while the cache builds.
+    /// </summary>
+    [HttpPost("calltree")]
+    public ActionResult<CallTreeResponseDto> PostCallTree(Guid sessionId, [FromBody] CallTreeRequestDto request)
+    {
+        var session = HttpContext.Items["Session"];
+        request ??= new CallTreeRequestDto(null, null, null, "wall-clock");
+
+        if (session is TraceSession trace)
+        {
+            var runtime = trace.Runtime;
+            if (!runtime.IsBuildComplete)
+            {
+                Response.Headers["Retry-After"] = "1";
+                return StatusCode(StatusCodes.Status202Accepted);
+            }
+            if (runtime.Metadata == null)
+            {
+                return Problem(
+                    title: "trace_build_failed",
+                    detail: "Trace cache build failed. See server logs for details.",
+                    statusCode: StatusCodes.Status500InternalServerError);
+            }
+            var cpu = runtime.CpuSampleData;
+            var meta = runtime.Metadata;
+            var cacheKey = CpuCallTreeCache.KeyFor(request);
+            if (runtime.CallTreeCache.TryGet(cacheKey, out var cached))
+            {
+                return Ok(cached);
+            }
+            var windows = ScopeResolver.Resolve(
+                request, meta.Systems, meta.TickSummaries, meta.SystemTickSummaries, () => runtime.SpanInstanceIndex, runtime.TimestampFrequency);
+            var tree = CallTreeFolder.Fold(cpu.Samples, cpu.Stacks, cpu.CategoryByFrameId, windows, request, cpu.ThreadRuns);
+            runtime.CallTreeCache.Put(cacheKey, tree);
+            return Ok(tree);
+        }
+
+        if (session is AttachSession)
+        {
+            return Ok(CallTreeResponseDto.Empty);
+        }
+
+        return Conflict(new ProblemDetails
+        {
+            Title = "session_kind_mismatch",
+            Detail = "The CPU call tree is only available for Trace and Attach sessions.",
+            Status = StatusCodes.Status409Conflict,
+        });
+    }
+
+    /// <summary>
+    /// #351 Phase 5: bins the in-scope CPU samples of a root frame over time (§8.2) — the data behind the Call Tree's
+    /// non-stationarity sparkline. The body is the same composite scope a <c>calltree</c> request carries, plus a bin count.
+    /// Attach sessions and traces without a CPU-sample section return <see cref="SampleDensityDto.Empty"/>. 202 while the
+    /// cache builds. <i>(Design §8.4 sketches a GET; this is a POST because the scope is composite — the same reasoning
+    /// behind <c>calltree</c> being a POST.)</i>
+    /// </summary>
+    [HttpPost("sample-density")]
+    public ActionResult<SampleDensityDto> PostSampleDensity(Guid sessionId, [FromBody] SampleDensityRequestDto request)
+    {
+        var session = HttpContext.Items["Session"];
+        var scope = request?.Scope ?? new CallTreeRequestDto(null, null, null, "wall-clock");
+
+        if (session is TraceSession trace)
+        {
+            var runtime = trace.Runtime;
+            if (!runtime.IsBuildComplete)
+            {
+                Response.Headers["Retry-After"] = "1";
+                return StatusCode(StatusCodes.Status202Accepted);
+            }
+            if (runtime.Metadata == null)
+            {
+                return Problem(
+                    title: "trace_build_failed",
+                    detail: "Trace cache build failed. See server logs for details.",
+                    statusCode: StatusCodes.Status500InternalServerError);
+            }
+            var cpu = runtime.CpuSampleData;
+            var meta = runtime.Metadata;
+            var windows = ScopeResolver.Resolve(
+                scope, meta.Systems, meta.TickSummaries, meta.SystemTickSummaries, () => runtime.SpanInstanceIndex, runtime.TimestampFrequency);
+            return Ok(SampleDensityFolder.Compute(
+                cpu.Samples, cpu.Stacks, windows, scope, runtime.TimestampFrequency, request?.BinCount ?? 0, cpu.ThreadRuns));
+        }
+
+        if (session is AttachSession)
+        {
+            return Ok(SampleDensityDto.Empty);
+        }
+
+        return Conflict(new ProblemDetails
+        {
+            Title = "session_kind_mismatch",
+            Detail = "Sample density is only available for Trace and Attach sessions.",
             Status = StatusCodes.Status409Conflict,
         });
     }

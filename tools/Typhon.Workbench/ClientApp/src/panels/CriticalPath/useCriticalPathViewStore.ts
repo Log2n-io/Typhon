@@ -7,7 +7,6 @@ import { createJSONStorage, persist } from 'zustand/middleware';
  * tick / range slots do NOT live here. This store owns purely visual concerns:
  *
  * - **orientation** — bars flow left→right (`horizontal`) or top→bottom (`vertical`).
- * - **scale** — `linear` or `log`. Log helps when one phase dwarfs the others.
  * - **pxPerUs** — zoom factor: pixels per microsecond on the major (time) axis. Truly unbounded.
  *   Wheel-zoom multiplies this; "Fit" recomputes it from the current viewport size.
  *
@@ -20,11 +19,9 @@ import { createJSONStorage, persist } from 'zustand/middleware';
  * vertical. `horizontal` / `vertical` lock the choice regardless of dock shape.
  */
 export type Orientation = 'auto' | 'horizontal' | 'vertical';
-export type CpScale = 'linear' | 'log';
 
 export interface CriticalPathViewState {
   orientation: Orientation;
-  scale: CpScale;
   pxPerUs: number;
   /**
    * When `false` (default), the panel auto-fits the timeline whenever the displayed tick changes
@@ -55,7 +52,6 @@ export interface CriticalPathViewState {
    */
   showMetronome: boolean;
   setOrientation: (orientation: Orientation) => void;
-  setScale: (scale: CpScale) => void;
   setPxPerUs: (pxPerUs: number) => void;
   setLockZoom: (lock: boolean) => void;
   setFullGantt: (full: boolean) => void;
@@ -89,14 +85,12 @@ export const useCriticalPathViewStore = create<CriticalPathViewState>()(
   persist(
     (set) => ({
       orientation: 'auto',
-      scale: 'linear',
       pxPerUs: DEFAULT_PX_PER_US,
       lockZoom: false,
       fullGantt: false,
       aggregateMode: false,
       showMetronome: false,
       setOrientation: (orientation) => set({ orientation }),
-      setScale: (scale) => set({ scale }),
       setPxPerUs: (pxPerUs) => set({ pxPerUs: Math.max(1e-6, pxPerUs) }),
       setLockZoom: (lockZoom) => set({ lockZoom }),
       setFullGantt: (fullGantt) => set({ fullGantt }),

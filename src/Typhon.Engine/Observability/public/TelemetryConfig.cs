@@ -151,6 +151,16 @@ public static class TelemetryConfig
     public static readonly bool ProfilerMemoryAllocationsActive;
 
     /// <summary>
+    /// Whether opt-in in-process CPU stack sampling is requested by configuration. Reads from <c>Typhon:Profiler:CpuSampling:Enabled</c>.
+    /// </summary>
+    public static readonly bool ProfilerCpuSamplingEnabled;
+
+    /// <summary>
+    /// Combined flag: true only if <see cref="ProfilerActive"/> AND <see cref="ProfilerCpuSamplingEnabled"/> are set.
+    /// </summary>
+    public static readonly bool ProfilerCpuSamplingActive;
+
+    /// <summary>
     /// Whether opt-in per-tick gauge snapshots are requested by configuration. Reads from <c>Typhon:Profiler:Gauges:Enabled</c>.
     /// </summary>
     public static readonly bool ProfilerGaugesEnabled;
@@ -668,6 +678,10 @@ public static class TelemetryConfig
             "Typhon:Telemetry:Profiler:MemoryAllocations:Enabled",
             false, ref legacyDetected);
         ProfilerMemoryAllocationsActive = ProfilerActive && ProfilerMemoryAllocationsEnabled;
+
+        // CpuSampling is a new key (post-#351) — no Typhon:Telemetry:* legacy predecessor, so a plain ReadBool.
+        ProfilerCpuSamplingEnabled = ReadBool(config, "Typhon:Profiler:CpuSampling:Enabled", false);
+        ProfilerCpuSamplingActive = ProfilerActive && ProfilerCpuSamplingEnabled;
 
         ProfilerGaugesEnabled = ReadBoolFallback(config,
             "Typhon:Profiler:Gauges:Enabled",
@@ -1594,7 +1608,8 @@ public static class TelemetryConfig
            Profiler: Active={ProfilerActive}
              GcTracing={ProfilerGcTracingEnabled} (Active={ProfilerGcTracingActive}),
              MemoryAllocations={ProfilerMemoryAllocationsEnabled} (Active={ProfilerMemoryAllocationsActive}),
-             Gauges={ProfilerGaugesEnabled} (Active={ProfilerGaugesActive})
+             Gauges={ProfilerGaugesEnabled} (Active={ProfilerGaugesActive}),
+             CpuSampling={ProfilerCpuSamplingEnabled} (Active={ProfilerCpuSamplingActive})
 
            Scheduler: Active={SchedulerActive}
              Enabled={SchedulerEnabled}, TransitionLatency={SchedulerTrackTransitionLatency},
@@ -1633,6 +1648,10 @@ public static class TelemetryConfig
             if (ProfilerGaugesActive)
             {
                 suffix.Add("Gauges");
+            }
+            if (ProfilerCpuSamplingActive)
+            {
+                suffix.Add("CpuSampling");
             }
             active.Add(suffix.Count > 0 ? $"Profiler+{string.Join("+", suffix)}" : "Profiler");
         }

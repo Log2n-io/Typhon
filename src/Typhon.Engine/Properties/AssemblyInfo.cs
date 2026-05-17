@@ -12,8 +12,8 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("Typhon.Workbench")]
 
 // Test / sample friend assemblies
-[assembly: InternalsVisibleTo("AntHill")]
-[assembly: InternalsVisibleTo("AntHill.ProfileRunner")]
+[assembly: InternalsVisibleTo("AntHill.Core")]
+[assembly: InternalsVisibleTo("AntHill.Demo")]
 [assembly: InternalsVisibleTo("Typhon.Benchmark")]
 [assembly: InternalsVisibleTo("Typhon.Client.Tests")]
 [assembly: InternalsVisibleTo("Typhon.Engine.Tests")]

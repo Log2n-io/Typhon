@@ -190,7 +190,73 @@ public class FileExporterIntegrationTests
         });
     }
 
-    private static ProfilerSessionMetadata BuildMetadata()
+    [Test]
+    public void StartStop_PersistsSamplingSessionStartQpcInHeader()
+    {
+        // #351 Phase 1: the QPC anchor captured by the CPU sampler flows ProfilerSessionMetadata → FileExporter → trace header.
+        const long qpc = 0x0123456789ABCDEF;
+        var metadata = BuildMetadata(qpc);
+        var fileExporter = new FileExporter(_tempPath, _registry.Profiler);
+        TyphonProfiler.AttachExporter(fileExporter);
+
+        TyphonProfiler.Start(_registry.Profiler, metadata);
+        TyphonProfiler.Stop();
+
+        Assert.That(File.Exists(_tempPath), Is.True, "FileExporter should have produced a .typhon-trace file");
+
+        using var stream = File.OpenRead(_tempPath);
+        using var reader = new TraceFileReader(stream);
+        var header = reader.ReadHeader();
+        Assert.That(header.SamplingSessionStartQpc, Is.EqualTo(qpc),
+            "FileExporter must persist ProfilerSessionMetadata.SamplingSessionStartQpc into the trace header.");
+    }
+
+    [Test]
+    public void SetCpuSamples_EmbedsCpuSampleSection_SharingTheFileTable()
+    {
+        // #351 Phase 3: a CPU-sample batch handed to the FileExporter must land as a trailer section, with its resolved frame symbols indexing the same
+        // FileTable the source-location manifest uses.
+        var metadata = BuildMetadata();
+        var fileExporter = new FileExporter(_tempPath, _registry.Profiler);
+        fileExporter.Initialize(metadata);
+
+        const string framePath = "/_/src/Typhon.Engine/Ecs/MovementSystem.cs";
+        // Parser-interned shape: frame 0 = the resolved engine frame, frame 1 = a name-only BCL frame; stack 0 = [0,1], stack 1 = [0].
+        var samples = new ParsedCpuSamples(
+            samples:
+            [
+                new CpuSampleRecord(qpc: 1000, threadSlot: 2, sampleType: 0, stackIndex: 0),
+                new CpuSampleRecord(qpc: 2000, threadSlot: -1, sampleType: 1, stackIndex: 1),
+            ],
+            stacks: [[0, 1], [0]],
+            frames:
+            [
+                new ParsedCpuFrame("MovementSystem.Execute", framePath, 42),
+                new ParsedCpuFrame("System.Runtime.X", filePath: null, line: 0),
+            ]);
+        fileExporter.SetCpuSamples(samples);
+        ((IDisposable)fileExporter).Dispose();
+
+        using var stream = File.OpenRead(_tempPath);
+        using var reader = new TraceFileReader(stream);
+        var header = reader.ReadHeader();
+        Assert.That(header.CpuSampleSectionOffset, Is.Not.Zero, "the CPU-sample section offset must be patched into the header");
+
+        var ok = reader.TryReadCpuSampleSection(out var rtSamples, out var rtStacks, out var rtFrames);
+        Assert.That(ok, Is.True);
+        Assert.That(rtSamples.Length, Is.EqualTo(2));
+        Assert.That(rtStacks.Length, Is.GreaterThan(0));
+
+        // The resolved engine frame must index the shared FileTable at its real path.
+        reader.TryReadSourceLocationManifest(out var files, out _);
+        var resolved = Array.Find(rtFrames, f => f.HasSource && f.Method == "MovementSystem.Execute");
+        Assert.That(resolved.Method, Is.EqualTo("MovementSystem.Execute"), "the resolved CPU frame must be present");
+        Assert.That(resolved.FileId, Is.LessThan(files.Length), "the frame's FileId must index the shared FileTable");
+        Assert.That(files[resolved.FileId], Is.EqualTo(framePath));
+        Assert.That(resolved.Line, Is.EqualTo(42u));
+    }
+
+    private static ProfilerSessionMetadata BuildMetadata(long samplingSessionStartQpc = 0)
     {
         return new ProfilerSessionMetadata(
             systems: Array.Empty<SystemDefinitionRecord>(),
@@ -201,7 +267,7 @@ public class FileExporterIntegrationTests
             startTimestamp: System.Diagnostics.Stopwatch.GetTimestamp(),
             stopwatchFrequency: System.Diagnostics.Stopwatch.Frequency,
             startedUtc: DateTime.UtcNow,
-            samplingSessionStartQpc: 0);
+            samplingSessionStartQpc: samplingSessionStartQpc);
     }
 
     /// <summary>Walk a block's raw record bytes, dispatch on kind, and populate the tally + per-kind flags.</summary>

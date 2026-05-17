@@ -19,12 +19,14 @@ import AccessMatrixPanel from '@/panels/AccessMatrix/AccessMatrixPanel';
 import CriticalPathPanel from '@/panels/CriticalPath/CriticalPathPanel';
 import ProfilerPanel from '@/panels/profiler/ProfilerPanel';
 import TopSpansPanel from '@/panels/profiler/TopSpansPanel';
+import CallTreePanel from '@/panels/profiler/CallTree';
 import OptionsPanel from '@/panels/options/OptionsPanel';
 import SourcePreviewPanel from '@/panels/profiler/SourcePreviewPanel';
 import QueryCatalogPanel from '@/panels/QueryCatalog/QueryCatalogPanel';
 import QueryPlanTreePanel from '@/panels/QueryPlanTree/QueryPlanTreePanel';
 import ExecutionInspectorPanel from '@/panels/ExecutionInspector/ExecutionInspectorPanel';
-import { registerDockApi } from './commands/openSchemaBrowser';
+import PaletteDebugPanel from '@/panels/PaletteDebug';
+import { registerDockApi, registerResetLayout } from './commands/openSchemaBrowser';
 import { registerProfilerDockApi } from './commands/profilerCommands';
 import MigrationRequiredBanner from './banners/MigrationRequiredBanner';
 import IncompatibleBanner from './banners/IncompatibleBanner';
@@ -60,11 +62,13 @@ const components: Record<string, React.FC<IDockviewPanelProps>> = {
   CriticalPath: CriticalPathPanel,
   Profiler: ProfilerPanel,
   TopSpans: TopSpansPanel,
+  CallTree: CallTreePanel,
   Options: OptionsPanel,
   SourcePreview: SourcePreviewPanel,
   QueryCatalog: QueryCatalogPanel,
   QueryPlanTree: QueryPlanTreePanel,
   ExecutionInspector: ExecutionInspectorPanel,
+  PaletteDebug: PaletteDebugPanel,
 };
 
 function buildDefaultLayout(api: DockviewReadyEvent['api'], kind: 'none' | 'open' | 'attach' | 'trace') {
@@ -173,6 +177,20 @@ export default function DockHost() {
     apiRef.current = event.api;
     registerDockApi(event.api);
     registerProfilerDockApi(event.api);
+    // Reset-layout command: tear down every panel/group and rebuild this session kind's built-in
+    // default. The recovery path when a panel has been dragged somewhere it can't be reached.
+    // api.clear() empties the edge groups but keeps the now-empty group shells, and
+    // buildDefaultLayout's addEdgeGroup() throws on a position that still exists — so the lingering
+    // edge groups must be dropped first for a clean rebuild.
+    registerResetLayout(() => {
+      event.api.clear();
+      for (const pos of ['left', 'right', 'bottom'] as const) {
+        if (event.api.getEdgeGroup(pos)) {
+          event.api.removeEdgeGroup(pos);
+        }
+      }
+      buildDefaultLayout(event.api, kind);
+    });
     const saved = getLayout(layoutKey);
     if (saved) {
       try {
@@ -199,8 +217,25 @@ export default function DockHost() {
       event.api.addPanel({ id: 'profiler', component: 'Profiler', title: 'Profiler', tabComponent: 'locked' });
     }
 
-    // Top spans safety net: panel lives in the bottom edge group.
-    if ((kind === 'trace' || kind === 'attach') && !event.api.getPanel('top-spans')) {
+    // Bottom-edge-group panel safety net. A stale saved layout can restore without the Logs and/or
+    // Top-spans panels (and without the bottom edge group itself) — View → Logs would then have
+    // nothing to surface. Re-create whatever is missing; the edge group is added only when a panel
+    // actually needs it, so a layout that kept the panels elsewhere isn't given a spurious empty group.
+    const needLogs = !event.api.getPanel('logs');
+    const needTopSpans = (kind === 'trace' || kind === 'attach') && !event.api.getPanel('top-spans');
+    if ((needLogs || needTopSpans) && !event.api.getEdgeGroup('bottom')) {
+      event.api.addEdgeGroup('bottom', { id: EDGE_BOTTOM_ID, initialSize: 200, minimumSize: 100 });
+    }
+    if (needLogs) {
+      event.api.addPanel({
+        id: 'logs',
+        component: 'Logs',
+        title: 'Logs',
+        tabComponent: 'locked',
+        position: { referenceGroup: EDGE_BOTTOM_ID },
+      });
+    }
+    if (needTopSpans) {
       event.api.addPanel({
         id: 'top-spans',
         component: 'TopSpans',
@@ -233,6 +268,11 @@ export default function DockHost() {
           components={components}
           tabComponents={tabComponents}
           onReady={onReady}
+          // Floating groups can be dragged off-screen or behind the window and become unreachable,
+          // and the View-menu toggles only act on docked edge groups — so a panel stranded in a
+          // floating group can't be recovered. Keep panels docked; rearranging between docked groups
+          // still works. View → Reset Layout to Default is the escape hatch if one slips away.
+          disableFloatingGroups
         />
         {showIncompatible && (
           <div

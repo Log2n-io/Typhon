@@ -6,7 +6,7 @@
   },
   "servers": [
     {
-      "url": "http://127.0.0.1:5200/"
+      "url": "http://localhost:5200/"
     }
   ],
   "paths": {
@@ -1033,6 +1033,42 @@
         ]
       }
     },
+    "/api/sessions/{sessionId}/profiler/trace-status": {
+      "get": {
+        "tags": [
+          "Profiler"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TraceStatusDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
+      }
+    },
     "/api/sessions/{sessionId}/profiler/source-locations": {
       "get": {
         "tags": [
@@ -1056,6 +1092,154 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/SourceLocationManifestDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
+      }
+    },
+    "/api/sessions/{sessionId}/profiler/cpu-frames": {
+      "get": {
+        "tags": [
+          "Profiler"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CpuFrameManifestDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
+      }
+    },
+    "/api/sessions/{sessionId}/profiler/calltree": {
+      "post": {
+        "tags": [
+          "Profiler"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CallTreeRequestDto"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CallTreeRequestDto"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/CallTreeRequestDto"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CallTreeResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
+      }
+    },
+    "/api/sessions/{sessionId}/profiler/sample-density": {
+      "post": {
+        "tags": [
+          "Profiler"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SampleDensityRequestDto"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SampleDensityRequestDto"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/SampleDensityRequestDto"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SampleDensityDto"
                 }
               }
             }
@@ -2659,6 +2843,202 @@
           }
         }
       },
+      "CallTreeNodeDto": {
+        "required": [
+          "frameId",
+          "selfSamples",
+          "totalSamples",
+          "children"
+        ],
+        "type": "object",
+        "properties": {
+          "frameId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "selfSamples": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "totalSamples": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "children": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": [
+                "integer",
+                "string"
+              ],
+              "format": "int32"
+            }
+          }
+        }
+      },
+      "CallTreeRequestDto": {
+        "required": [
+          "startUs",
+          "endUs",
+          "frameRoot",
+          "viewMode"
+        ],
+        "type": "object",
+        "properties": {
+          "startUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "null",
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "endUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "null",
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "frameRoot": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "viewMode": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "systemIndex": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "phase": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "spanKind": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          }
+        }
+      },
+      "CallTreeResponseDto": {
+        "required": [
+          "nodes",
+          "totalSamples",
+          "managedSamples",
+          "externalSamples",
+          "categoryBreakdown"
+        ],
+        "type": "object",
+        "properties": {
+          "nodes": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/CallTreeNodeDto"
+            }
+          },
+          "totalSamples": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "managedSamples": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "externalSamples": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "categoryBreakdown": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/CategorySliceDto"
+            }
+          }
+        }
+      },
+      "CategorySliceDto": {
+        "required": [
+          "categoryId",
+          "selfSamples"
+        ],
+        "type": "object",
+        "properties": {
+          "categoryId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "selfSamples": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          }
+        }
+      },
       "CdfSampleDto": {
         "required": [
           "quantile",
@@ -2898,6 +3278,104 @@
               "null",
               "string"
             ]
+          }
+        }
+      },
+      "CpuCategoryDto": {
+        "required": [
+          "id",
+          "name"
+        ],
+        "type": "object",
+        "properties": {
+          "id": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "name": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "CpuFrameManifestDto": {
+        "required": [
+          "frames",
+          "categories"
+        ],
+        "type": "object",
+        "properties": {
+          "frames": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/CpuFrameSymbolDto"
+            }
+          },
+          "categories": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/CpuCategoryDto"
+            }
+          }
+        }
+      },
+      "CpuFrameSymbolDto": {
+        "required": [
+          "frameId",
+          "method",
+          "file",
+          "line",
+          "categoryId"
+        ],
+        "type": "object",
+        "properties": {
+          "frameId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "method": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "file": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "line": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "categoryId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
           }
         }
       },
@@ -3889,6 +4367,16 @@
               "null",
               "string"
             ]
+          },
+          "viewRangeDebounceMs": {
+            "maximum": 5000,
+            "minimum": 0,
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
           }
         }
       },
@@ -4210,6 +4698,31 @@
           }
         }
       },
+      "QueryFieldEvaluatorShapeDto": {
+        "required": [
+          "fieldIdx",
+          "op"
+        ],
+        "type": "object",
+        "properties": {
+          "fieldIdx": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint16"
+          },
+          "op": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          }
+        }
+      },
       "QueryInstanceIdDto": {
         "required": [
           "kind",
@@ -4324,6 +4837,87 @@
             "items": {
               "$ref": "#/components/schemas/ResourceNodeDto"
             }
+          }
+        }
+      },
+      "SampleDensityBinDto": {
+        "required": [
+          "startUs",
+          "count"
+        ],
+        "type": "object",
+        "properties": {
+          "startUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "count": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          }
+        }
+      },
+      "SampleDensityDto": {
+        "required": [
+          "startUs",
+          "binWidthUs",
+          "bins"
+        ],
+        "type": "object",
+        "properties": {
+          "startUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "binWidthUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "bins": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/SampleDensityBinDto"
+            }
+          }
+        }
+      },
+      "SampleDensityRequestDto": {
+        "required": [
+          "scope",
+          "binCount"
+        ],
+        "type": "object",
+        "properties": {
+          "scope": {
+            "$ref": "#/components/schemas/CallTreeRequestDto"
+          },
+          "binCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
           }
         }
       },
@@ -5099,6 +5693,9 @@
       "SystemTickSummary": {
         "type": "object"
       },
+      "ThreadWaitReason": {
+        "type": "integer"
+      },
       "TickSummaryDto": {
         "required": [
           "tickNumber",
@@ -5296,6 +5893,12 @@
         "anyOf": [
           {
             "$ref": "#/components/schemas/TraceEventDtoOtherTraceEventDto"
+          },
+          {
+            "$ref": "#/components/schemas/TraceEventDtoQueryDefinitionDescribeEventDto"
+          },
+          {
+            "$ref": "#/components/schemas/TraceEventDtoQueryArgsEventDto"
           },
           {
             "$ref": "#/components/schemas/TraceEventDtoBTreeDeleteEventDto"
@@ -5751,7 +6354,13 @@
             "$ref": "#/components/schemas/TraceEventDtoSpatialCellIndexUpdateEventDto"
           },
           {
+            "$ref": "#/components/schemas/TraceEventDtoSpatialClusterAabbRefreshEventDto"
+          },
+          {
             "$ref": "#/components/schemas/TraceEventDtoSpatialClusterMigrationDetectEventDto"
+          },
+          {
+            "$ref": "#/components/schemas/TraceEventDtoSpatialClusterMigrationDetectScanEventDto"
           },
           {
             "$ref": "#/components/schemas/TraceEventDtoSpatialClusterMigrationHysteresisEventDto"
@@ -5859,6 +6468,9 @@
             "$ref": "#/components/schemas/TraceEventDtoSystemSkippedEventDto"
           },
           {
+            "$ref": "#/components/schemas/TraceEventDtoThreadContextSwitchEventDto"
+          },
+          {
             "$ref": "#/components/schemas/TraceEventDtoTickEndEventDto"
           },
           {
@@ -5884,12 +6496,32 @@
           },
           {
             "$ref": "#/components/schemas/TraceEventDtoWalWaitEventDto"
+          },
+          {
+            "$ref": "#/components/schemas/TraceEventDtoWriteTickFenceClusterEventDto"
+          },
+          {
+            "$ref": "#/components/schemas/TraceEventDtoWriteTickFenceClusterShadowEventDto"
+          },
+          {
+            "$ref": "#/components/schemas/TraceEventDtoWriteTickFenceClusterSpatialEventDto"
+          },
+          {
+            "$ref": "#/components/schemas/TraceEventDtoWriteTickFenceShadowEventDto"
+          },
+          {
+            "$ref": "#/components/schemas/TraceEventDtoWriteTickFenceSpatialEventDto"
+          },
+          {
+            "$ref": "#/components/schemas/TraceEventDtoWriteTickFenceTableEventDto"
           }
         ],
         "discriminator": {
           "propertyName": "kind",
           "mapping": {
             "other": "#/components/schemas/TraceEventDtoOtherTraceEventDto",
+            "queryDefinitionDescribe": "#/components/schemas/TraceEventDtoQueryDefinitionDescribeEventDto",
+            "queryArgs": "#/components/schemas/TraceEventDtoQueryArgsEventDto",
             "bTreeDelete": "#/components/schemas/TraceEventDtoBTreeDeleteEventDto",
             "bTreeInsert": "#/components/schemas/TraceEventDtoBTreeInsertEventDto",
             "bTreeNodeMerge": "#/components/schemas/TraceEventDtoBTreeNodeMergeEventDto",
@@ -6041,7 +6673,9 @@
             "spatialCellIndexAdd": "#/components/schemas/TraceEventDtoSpatialCellIndexAddEventDto",
             "spatialCellIndexRemove": "#/components/schemas/TraceEventDtoSpatialCellIndexRemoveEventDto",
             "spatialCellIndexUpdate": "#/components/schemas/TraceEventDtoSpatialCellIndexUpdateEventDto",
+            "spatialClusterAabbRefresh": "#/components/schemas/TraceEventDtoSpatialClusterAabbRefreshEventDto",
             "spatialClusterMigrationDetect": "#/components/schemas/TraceEventDtoSpatialClusterMigrationDetectEventDto",
+            "spatialClusterMigrationDetectScan": "#/components/schemas/TraceEventDtoSpatialClusterMigrationDetectScanEventDto",
             "spatialClusterMigrationHysteresis": "#/components/schemas/TraceEventDtoSpatialClusterMigrationHysteresisEventDto",
             "spatialClusterMigrationQueue": "#/components/schemas/TraceEventDtoSpatialClusterMigrationQueueEventDto",
             "spatialGridCellTierChange": "#/components/schemas/TraceEventDtoSpatialGridCellTierChangeEventDto",
@@ -6077,6 +6711,7 @@
             "storageSegmentLoad": "#/components/schemas/TraceEventDtoStorageSegmentLoadEventDto",
             "systemReady": "#/components/schemas/TraceEventDtoSystemReadyEventDto",
             "systemSkipped": "#/components/schemas/TraceEventDtoSystemSkippedEventDto",
+            "threadContextSwitch": "#/components/schemas/TraceEventDtoThreadContextSwitchEventDto",
             "tickEnd": "#/components/schemas/TraceEventDtoTickEndEventDto",
             "tickStart": "#/components/schemas/TraceEventDtoTickStartEventDto",
             "transactionCommit": "#/components/schemas/TraceEventDtoTransactionCommitEventDto",
@@ -6085,7 +6720,13 @@
             "transactionRollback": "#/components/schemas/TraceEventDtoTransactionRollbackEventDto",
             "walFlush": "#/components/schemas/TraceEventDtoWalFlushEventDto",
             "walSegmentRotate": "#/components/schemas/TraceEventDtoWalSegmentRotateEventDto",
-            "walWait": "#/components/schemas/TraceEventDtoWalWaitEventDto"
+            "walWait": "#/components/schemas/TraceEventDtoWalWaitEventDto",
+            "writeTickFenceCluster": "#/components/schemas/TraceEventDtoWriteTickFenceClusterEventDto",
+            "writeTickFenceClusterShadow": "#/components/schemas/TraceEventDtoWriteTickFenceClusterShadowEventDto",
+            "writeTickFenceClusterSpatial": "#/components/schemas/TraceEventDtoWriteTickFenceClusterSpatialEventDto",
+            "writeTickFenceShadow": "#/components/schemas/TraceEventDtoWriteTickFenceShadowEventDto",
+            "writeTickFenceSpatial": "#/components/schemas/TraceEventDtoWriteTickFenceSpatialEventDto",
+            "writeTickFenceTable": "#/components/schemas/TraceEventDtoWriteTickFenceTableEventDto"
           }
         }
       },
@@ -14935,6 +15576,70 @@
           }
         }
       },
+      "TraceEventDtoQueryArgsEventDto": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "queryArgs"
+            ],
+            "type": "string"
+          },
+          "kindByte": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "thresholds": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": [
+                "integer",
+                "string"
+              ],
+              "format": "int64"
+            }
+          },
+          "threadSlot": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "tickNumber": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "timestampUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "sourceLocationId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint16"
+          }
+        }
+      },
       "TraceEventDtoQueryCountEventDto": {
         "properties": {
           "kind": {
@@ -14990,6 +15695,146 @@
               "null",
               "string"
             ]
+          },
+          "threadSlot": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "tickNumber": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "timestampUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "sourceLocationId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint16"
+          }
+        }
+      },
+      "TraceEventDtoQueryDefinitionDescribeEventDto": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "queryDefinitionDescribe"
+            ],
+            "type": "string"
+          },
+          "kindByte": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "queryKind": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "localId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint32"
+          },
+          "targetComponentType": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint16"
+          },
+          "primaryIndexFieldIdx": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int16"
+          },
+          "sortFieldIdx": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int16"
+          },
+          "sortDescending": {
+            "type": "boolean"
+          },
+          "definitionSourceFileId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint16"
+          },
+          "definitionSourceLine": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "definitionSourceMethodId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint16"
+          },
+          "evaluators": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/QueryFieldEvaluatorShapeDto"
+            }
+          },
+          "fieldDependencies": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": [
+                "integer",
+                "string"
+              ],
+              "format": "uint16"
+            }
           },
           "threadSlot": {
             "pattern": "^-?(?:0|[1-9]\\d*)$",
@@ -19085,6 +19930,131 @@
           }
         }
       },
+      "TraceEventDtoSpatialClusterAabbRefreshEventDto": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "spatialClusterAabbRefresh"
+            ],
+            "type": "string"
+          },
+          "kindByte": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "archetypeId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint16"
+          },
+          "clusterScanned": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "aabbsChanged": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "slotsScanned": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "outlierGuardFires": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "durationUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "spanId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "parentSpanId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "traceIdHi": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "traceIdLo": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "threadSlot": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "tickNumber": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "timestampUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "sourceLocationId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint16"
+          }
+        }
+      },
       "TraceEventDtoSpatialClusterMigrationDetectEventDto": {
         "properties": {
           "kind": {
@@ -19132,6 +20102,131 @@
               "string"
             ],
             "format": "int32"
+          },
+          "threadSlot": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "tickNumber": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "timestampUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "sourceLocationId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint16"
+          }
+        }
+      },
+      "TraceEventDtoSpatialClusterMigrationDetectScanEventDto": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "spatialClusterMigrationDetectScan"
+            ],
+            "type": "string"
+          },
+          "kindByte": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "archetypeId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint16"
+          },
+          "scanSlotCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "migrationsQueued": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "hysteresisAbsorbed": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "clustersTouched": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "durationUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "spanId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "parentSpanId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "traceIdHi": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "traceIdLo": {
+            "type": [
+              "null",
+              "string"
+            ]
           },
           "threadSlot": {
             "pattern": "^-?(?:0|[1-9]\\d*)$",
@@ -22332,6 +23427,102 @@
           }
         }
       },
+      "TraceEventDtoThreadContextSwitchEventDto": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "threadContextSwitch"
+            ],
+            "type": "string"
+          },
+          "kindByte": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "targetSlotIdx": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "processorNumber": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "waitReason": {
+            "$ref": "#/components/schemas/ThreadWaitReason"
+          },
+          "threadState": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "gettingIdle": {
+            "type": "boolean"
+          },
+          "durationQpc": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint32"
+          },
+          "readyTimeQpc": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint32"
+          },
+          "threadSlot": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "tickNumber": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "timestampUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "sourceLocationId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint16"
+          }
+        }
+      },
       "TraceEventDtoTickEndEventDto": {
         "properties": {
           "kind": {
@@ -23151,6 +24342,705 @@
               "string"
             ],
             "format": "uint16"
+          }
+        }
+      },
+      "TraceEventDtoWriteTickFenceClusterEventDto": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "writeTickFenceCluster"
+            ],
+            "type": "string"
+          },
+          "kindByte": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "archetypeId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint16"
+          },
+          "dirtyClusterCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "entryCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "hasShadow": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "hasSpatial": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "walPublished": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "durationUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "spanId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "parentSpanId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "traceIdHi": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "traceIdLo": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "threadSlot": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "tickNumber": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "timestampUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "sourceLocationId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint16"
+          }
+        }
+      },
+      "TraceEventDtoWriteTickFenceClusterShadowEventDto": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "writeTickFenceClusterShadow"
+            ],
+            "type": "string"
+          },
+          "kindByte": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "archetypeId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint16"
+          },
+          "dirtyClusterCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "totalShadowEntries": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "durationUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "spanId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "parentSpanId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "traceIdHi": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "traceIdLo": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "threadSlot": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "tickNumber": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "timestampUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "sourceLocationId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint16"
+          }
+        }
+      },
+      "TraceEventDtoWriteTickFenceClusterSpatialEventDto": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "writeTickFenceClusterSpatial"
+            ],
+            "type": "string"
+          },
+          "kindByte": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "archetypeId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint16"
+          },
+          "dirtyClusterCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "migrationsExecuted": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "durationUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "spanId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "parentSpanId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "traceIdHi": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "traceIdLo": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "threadSlot": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "tickNumber": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "timestampUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "sourceLocationId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint16"
+          }
+        }
+      },
+      "TraceEventDtoWriteTickFenceShadowEventDto": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "writeTickFenceShadow"
+            ],
+            "type": "string"
+          },
+          "kindByte": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "componentTypeId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint16"
+          },
+          "indexedFieldCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "totalShadowEntries": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "durationUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "spanId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "parentSpanId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "traceIdHi": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "traceIdLo": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "threadSlot": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "tickNumber": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "timestampUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "sourceLocationId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint16"
+          }
+        }
+      },
+      "TraceEventDtoWriteTickFenceSpatialEventDto": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "writeTickFenceSpatial"
+            ],
+            "type": "string"
+          },
+          "kindByte": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "componentTypeId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint16"
+          },
+          "dirtyEntryCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "escapedCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "durationUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "spanId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "parentSpanId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "traceIdHi": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "traceIdLo": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "threadSlot": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "tickNumber": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "timestampUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "sourceLocationId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint16"
+          }
+        }
+      },
+      "TraceEventDtoWriteTickFenceTableEventDto": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "writeTickFenceTable"
+            ],
+            "type": "string"
+          },
+          "kindByte": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "componentTypeId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint16"
+          },
+          "dirtyEntryCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "walPublished": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "hasShadow": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "hasSpatial": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "durationUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "spanId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "parentSpanId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "traceIdHi": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "traceIdLo": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "threadSlot": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "tickNumber": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "timestampUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "sourceLocationId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint16"
+          }
+        }
+      },
+      "TraceStatusDto": {
+        "required": [
+          "newVersionAvailable"
+        ],
+        "type": "object",
+        "properties": {
+          "newVersionAvailable": {
+            "type": "boolean"
           }
         }
       },

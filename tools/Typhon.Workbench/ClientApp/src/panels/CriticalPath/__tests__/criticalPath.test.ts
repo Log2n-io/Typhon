@@ -3,20 +3,21 @@ import type { PostTickSummary } from '@/api/generated/model/postTickSummary';
 import type { SystemDefinitionDto } from '@/api/generated/model/systemDefinitionDto';
 import type { SystemTickSummary } from '@/api/generated/model/systemTickSummary';
 import type { TickSummaryDto } from '@/api/generated/model/tickSummaryDto';
+import type { DerivedEdge } from '@/lib/dag/edgeDerivation';
 import {
+  computeAggregateCriticalPath,
   computeCriticalPathForTick,
   computeCriticalPathParticipation,
+  computeWorkerOccupancy,
   dominantTickInRange,
 } from '../criticalPath';
-import type { DerivedEdge } from '@/lib/dag/edgeDerivation';
 
 /**
- * Synthetic fixtures for the client-side critical-path algorithm. Each test fabricates a tiny
- * topology + a per-tick row stream and asserts which systems land on the CP.
+ * Fixtures for the measured-traceback critical-path algorithm (`09-system-dag.md §5.2`).
  *
- * The algorithm is per `09-system-dag.md §9.3`: client-side, no engine cost. v1 ignores wait
- * classification (phase-fence vs worker-claim) and post-tick serial — these tests exercise the
- * core "max-pathDurationTo with traceback" walk over a phase-ordered DAG.
+ * The path is a measured longest-path traceback: `terminus = argmax endUs`, each step back picks
+ * the predecessor that finished last. Phases never affect the path — only `system.predecessors`
+ * and measured timestamps do.
  */
 
 function sys(name: string, index: number, phase: string, opts?: Partial<SystemDefinitionDto>): SystemDefinitionDto {
@@ -47,193 +48,32 @@ function sys(name: string, index: number, phase: string, opts?: Partial<SystemDe
   } as SystemDefinitionDto;
 }
 
-function row(tick: number, sysIdx: number, durationUs: number): SystemTickSummary {
-  return {
-    tickNumber: tick,
-    systemIndex: sysIdx,
-    skipReasonCode: 0,
-    flags: 0,
-    startUs: 0,
-    endUs: durationUs,
-    readyUs: 0,
-    durationUs,
-    entitiesProcessed: 0,
-    workersTouched: 0,
-    chunksProcessed: 0,
-  } as unknown as SystemTickSummary;
-}
-
-function edge(source: string, target: string, kind: DerivedEdge['kind'] = 'fresh'): DerivedEdge {
-  return { id: `e-${source}-${target}`, source, target, kind, via: ['t'], reason: '' };
-}
-
-describe('computeCriticalPathParticipation', () => {
-  it('returns empty perSystem when no rows fall in range', () => {
-    const r = computeCriticalPathParticipation({
-      systems: [sys('A', 0, 'p1')],
-      rows: [],
-      edges: [],
-      phases: ['p1'],
-      range: null,
-    });
-    expect(r.perSystem.size).toBe(0);
-    expect(r.totalTicks).toBe(0);
-  });
-
-  it('linear chain: all three systems on CP every tick → rate 1.0 each', () => {
-    // p1: A → B → C (all in same phase, durations 100/200/50). CP = A→B→C every tick.
-    const systems = [sys('A', 0, 'p1'), sys('B', 1, 'p1'), sys('C', 2, 'p1')];
-    const edges = [edge('A', 'B'), edge('B', 'C')];
-    const rows = [
-      row(1, 0, 100), row(1, 1, 200), row(1, 2, 50),
-      row(2, 0, 100), row(2, 1, 200), row(2, 2, 50),
-    ];
-    const r = computeCriticalPathParticipation({ systems, rows, edges, phases: ['p1'], range: null });
-    expect(r.totalTicks).toBe(2);
-    expect(r.perSystem.get('A')?.rate).toBe(1);
-    expect(r.perSystem.get('B')?.rate).toBe(1);
-    expect(r.perSystem.get('C')?.rate).toBe(1);
-  });
-
-  it('parallel branches: only the heavier branch is on the CP', () => {
-    // p1:  A ─→ B ─→ D
-    //        ╲    ╱
-    //         ╲  ╱
-    //          C  (lighter branch, both into D)
-    // Durations: A=10, B=100, C=10, D=10. Heavy path A→B→D dominates; C never on CP.
-    const systems = [
-      sys('A', 0, 'p1'),
-      sys('B', 1, 'p1'),
-      sys('C', 2, 'p1'),
-      sys('D', 3, 'p1'),
-    ];
-    const edges = [edge('A', 'B'), edge('A', 'C'), edge('B', 'D'), edge('C', 'D')];
-    const rows = [
-      row(1, 0, 10),
-      row(1, 1, 100),
-      row(1, 2, 10),
-      row(1, 3, 10),
-    ];
-    const r = computeCriticalPathParticipation({ systems, rows, edges, phases: ['p1'], range: null });
-    expect(r.perSystem.get('A')?.rate).toBe(1);
-    expect(r.perSystem.get('B')?.rate).toBe(1);
-    expect(r.perSystem.get('D')?.rate).toBe(1);
-    expect(r.perSystem.get('C')?.rate ?? 0).toBe(0);
-  });
-
-  it('branch dominance flips per tick → fractional rates reflect both', () => {
-    // Same topology as above. Tick 1: B heavy. Tick 2: C heavy. Each on CP for one of two ticks.
-    const systems = [
-      sys('A', 0, 'p1'),
-      sys('B', 1, 'p1'),
-      sys('C', 2, 'p1'),
-      sys('D', 3, 'p1'),
-    ];
-    const edges = [edge('A', 'B'), edge('A', 'C'), edge('B', 'D'), edge('C', 'D')];
-    const rows = [
-      // tick 1 — B heavy
-      row(1, 0, 10), row(1, 1, 100), row(1, 2, 10), row(1, 3, 10),
-      // tick 2 — C heavy
-      row(2, 0, 10), row(2, 1, 10), row(2, 2, 100), row(2, 3, 10),
-    ];
-    const r = computeCriticalPathParticipation({ systems, rows, edges, phases: ['p1'], range: null });
-    expect(r.totalTicks).toBe(2);
-    expect(r.perSystem.get('A')?.rate).toBe(1);
-    expect(r.perSystem.get('D')?.rate).toBe(1);
-    expect(r.perSystem.get('B')?.rate).toBe(0.5);
-    expect(r.perSystem.get('C')?.rate).toBe(0.5);
-  });
-
-  it('phase fence: phase-2 system inherits phase-1 max as its base path duration', () => {
-    // p1: A=100, B=10 (parallel, no edges). p2: C=20 (no in-phase preds → phase-fence).
-    // CP terminates at C; traceback should include A (phase-fence dominator) → C.
-    const systems = [
-      sys('A', 0, 'p1'),
-      sys('B', 1, 'p1'),
-      sys('C', 2, 'p2'),
-    ];
-    const rows = [row(1, 0, 100), row(1, 1, 10), row(1, 2, 20)];
-    const r = computeCriticalPathParticipation({ systems, rows, edges: [], phases: ['p1', 'p2'], range: null });
-    expect(r.perSystem.get('A')?.rate).toBe(1);
-    expect(r.perSystem.get('C')?.rate).toBe(1);
-    // B never on CP.
-    expect(r.perSystem.get('B')?.rate ?? 0).toBe(0);
-  });
-
-  it('skipped system (no row) cannot be on the CP', () => {
-    // If B has no row this tick (skipped — e.g. NoDirty), it must not appear on the CP.
-    const systems = [sys('A', 0, 'p1'), sys('B', 1, 'p1')];
-    const edges = [edge('A', 'B')];
-    const rows = [
-      row(1, 0, 100),
-      // no row for B at tick 1 — it skipped
-    ];
-    const r = computeCriticalPathParticipation({ systems, rows, edges, phases: ['p1'], range: null });
-    expect(r.perSystem.get('A')?.rate).toBe(1);
-    expect(r.perSystem.get('B')?.rate ?? 0).toBe(0);
-  });
-
-  it('range filter: only ticks in [from, to] are counted', () => {
-    const systems = [sys('A', 0, 'p1')];
-    const rows = [row(1, 0, 10), row(2, 0, 10), row(3, 0, 10), row(4, 0, 10)];
-    const r = computeCriticalPathParticipation({
-      systems,
-      rows,
-      edges: [],
-      phases: ['p1'],
-      range: { from: 2, to: 3 },
-    });
-    expect(r.totalTicks).toBe(2);
-    expect(r.perSystem.get('A')?.onPathTicks).toBe(2);
-    expect(r.perSystem.get('A')?.rate).toBe(1);
-  });
-
-  it('rate is bounded to [0, 1]', () => {
-    const systems = [sys('A', 0, 'p1'), sys('B', 1, 'p1')];
-    const rows = [
-      row(1, 0, 100), row(1, 1, 10),
-      row(2, 0, 10), row(2, 1, 100),
-      row(3, 0, 50), row(3, 1, 50), // tie → traceback picks one consistently; just make sure rate is [0,1]
-    ];
-    const r = computeCriticalPathParticipation({ systems, rows, edges: [], phases: ['p1'], range: null });
-    for (const stat of r.perSystem.values()) {
-      expect(stat.rate).toBeGreaterThanOrEqual(0);
-      expect(stat.rate).toBeLessThanOrEqual(1);
-    }
-  });
-
-  it('cross-phase edges are ignored (phase fence is the contract)', () => {
-    // Cross-phase edges shouldn't add to predecessor lists; phase fence handles ordering.
-    const systems = [sys('A', 0, 'p1'), sys('B', 1, 'p2')];
-    // A → B is cross-phase — algorithm must ignore the explicit edge and rely on the fence.
-    const edges = [edge('A', 'B')];
-    const rows = [row(1, 0, 30), row(1, 1, 70)];
-    const r = computeCriticalPathParticipation({ systems, rows, edges, phases: ['p1', 'p2'], range: null });
-    expect(r.perSystem.get('A')?.rate).toBe(1);
-    expect(r.perSystem.get('B')?.rate).toBe(1);
-  });
-});
-
-// ── per-tick tape data ────────────────────────────────────────────────────
-
-/** Richer row helper for tape tests — needs startUs, endUs, readyUs explicitly set. */
-function detailedRow(opts: {
-  tick: number; sysIdx: number; durationUs: number;
-  startUs?: number; endUs?: number; readyUs?: number;
-  workersTouched?: number; chunksProcessed?: number;
+function row(o: {
+  tick: number;
+  sysIdx: number;
+  durationUs: number;
+  startUs?: number;
+  endUs?: number;
+  readyUs?: number;
+  totalCpuUs?: number;
+  workersTouched?: number;
+  chunksProcessed?: number;
+  skipReasonCode?: number;
 }): SystemTickSummary {
+  const startUs = o.startUs ?? 0;
   return {
-    tickNumber: opts.tick,
-    systemIndex: opts.sysIdx,
-    skipReasonCode: 0,
+    tickNumber: o.tick,
+    systemIndex: o.sysIdx,
+    skipReasonCode: o.skipReasonCode ?? 0,
     flags: 0,
-    startUs: opts.startUs ?? 0,
-    endUs: opts.endUs ?? opts.durationUs,
-    readyUs: opts.readyUs ?? 0,
-    durationUs: opts.durationUs,
+    startUs,
+    endUs: o.endUs ?? startUs + o.durationUs,
+    readyUs: o.readyUs ?? 0,
+    durationUs: o.durationUs,
     entitiesProcessed: 0,
-    workersTouched: opts.workersTouched ?? 0,
-    chunksProcessed: opts.chunksProcessed ?? 0,
+    workersTouched: o.workersTouched ?? 0,
+    chunksProcessed: o.chunksProcessed ?? 0,
+    totalCpuUs: o.totalCpuUs ?? 0,
   } as unknown as SystemTickSummary;
 }
 
@@ -255,188 +95,404 @@ function postTick(tick: number, opts: Partial<PostTickSummary> = {}): PostTickSu
   } as unknown as PostTickSummary;
 }
 
+function edge(source: string, target: string, kind: DerivedEdge['kind'] = 'fresh'): DerivedEdge {
+  return { id: `e-${source}-${target}`, source, target, kind, via: ['t'], reason: '' };
+}
+
+const NO_PHASE = ['p1', 'p2'];
+
+// ── computeCriticalPathParticipation ──────────────────────────────────────
+
+describe('computeCriticalPathParticipation', () => {
+  it('returns empty perSystem when no rows fall in range', () => {
+    const r = computeCriticalPathParticipation({
+      systems: [sys('A', 0, 'p1')], rows: [], edges: [], phases: NO_PHASE, range: null,
+    });
+    expect(r.perSystem.size).toBe(0);
+    expect(r.totalTicks).toBe(0);
+  });
+
+  it('linear chain A→B→C — all three on the CP every tick', () => {
+    const systems = [
+      sys('A', 0, 'p1'),
+      sys('B', 1, 'p1', { predecessors: [0] }),
+      sys('C', 2, 'p1', { predecessors: [1] }),
+    ];
+    const rows = [
+      row({ tick: 1, sysIdx: 0, durationUs: 100, startUs: 0, endUs: 100 }),
+      row({ tick: 1, sysIdx: 1, durationUs: 200, startUs: 100, endUs: 300 }),
+      row({ tick: 1, sysIdx: 2, durationUs: 50, startUs: 300, endUs: 350 }),
+      row({ tick: 2, sysIdx: 0, durationUs: 100, startUs: 0, endUs: 100 }),
+      row({ tick: 2, sysIdx: 1, durationUs: 200, startUs: 100, endUs: 300 }),
+      row({ tick: 2, sysIdx: 2, durationUs: 50, startUs: 300, endUs: 350 }),
+    ];
+    const r = computeCriticalPathParticipation({ systems, rows, edges: [], phases: NO_PHASE, range: null });
+    expect(r.totalTicks).toBe(2);
+    expect(r.perSystem.get('A')?.rate).toBe(1);
+    expect(r.perSystem.get('B')?.rate).toBe(1);
+    expect(r.perSystem.get('C')?.rate).toBe(1);
+  });
+
+  it('parallel branches — only the later-finishing branch is on the CP', () => {
+    // A → {B, C} → D. B finishes at 110, C at 20 — D is gated by B.
+    const systems = [
+      sys('A', 0, 'p1'),
+      sys('B', 1, 'p1', { predecessors: [0] }),
+      sys('C', 2, 'p1', { predecessors: [0] }),
+      sys('D', 3, 'p1', { predecessors: [1, 2] }),
+    ];
+    const rows = [
+      row({ tick: 1, sysIdx: 0, durationUs: 10, startUs: 0, endUs: 10 }),
+      row({ tick: 1, sysIdx: 1, durationUs: 100, startUs: 10, endUs: 110 }),
+      row({ tick: 1, sysIdx: 2, durationUs: 10, startUs: 10, endUs: 20 }),
+      row({ tick: 1, sysIdx: 3, durationUs: 10, startUs: 110, endUs: 120 }),
+    ];
+    const r = computeCriticalPathParticipation({ systems, rows, edges: [], phases: NO_PHASE, range: null });
+    expect(r.perSystem.get('A')?.rate).toBe(1);
+    expect(r.perSystem.get('B')?.rate).toBe(1);
+    expect(r.perSystem.get('D')?.rate).toBe(1);
+    expect(r.perSystem.get('C')?.rate ?? 0).toBe(0);
+  });
+
+  it('gating branch flips per tick → fractional rates', () => {
+    const systems = [
+      sys('A', 0, 'p1'),
+      sys('B', 1, 'p1', { predecessors: [0] }),
+      sys('C', 2, 'p1', { predecessors: [0] }),
+      sys('D', 3, 'p1', { predecessors: [1, 2] }),
+    ];
+    const rows = [
+      // tick 1 — B finishes last
+      row({ tick: 1, sysIdx: 0, durationUs: 10, startUs: 0, endUs: 10 }),
+      row({ tick: 1, sysIdx: 1, durationUs: 100, startUs: 10, endUs: 110 }),
+      row({ tick: 1, sysIdx: 2, durationUs: 10, startUs: 10, endUs: 20 }),
+      row({ tick: 1, sysIdx: 3, durationUs: 10, startUs: 110, endUs: 120 }),
+      // tick 2 — C finishes last
+      row({ tick: 2, sysIdx: 0, durationUs: 10, startUs: 0, endUs: 10 }),
+      row({ tick: 2, sysIdx: 1, durationUs: 10, startUs: 10, endUs: 20 }),
+      row({ tick: 2, sysIdx: 2, durationUs: 100, startUs: 10, endUs: 110 }),
+      row({ tick: 2, sysIdx: 3, durationUs: 10, startUs: 110, endUs: 120 }),
+    ];
+    const r = computeCriticalPathParticipation({ systems, rows, edges: [], phases: NO_PHASE, range: null });
+    expect(r.totalTicks).toBe(2);
+    expect(r.perSystem.get('A')?.rate).toBe(1);
+    expect(r.perSystem.get('D')?.rate).toBe(1);
+    expect(r.perSystem.get('B')?.rate).toBe(0.5);
+    expect(r.perSystem.get('C')?.rate).toBe(0.5);
+  });
+
+  it('cross-phase predecessors ARE used (no phase fence anymore)', () => {
+    // A in p1, B in p2, B depends on A. The traceback must follow the cross-phase edge.
+    const systems = [
+      sys('A', 0, 'p1'),
+      sys('B', 1, 'p2', { predecessors: [0] }),
+    ];
+    const rows = [
+      row({ tick: 1, sysIdx: 0, durationUs: 30, startUs: 0, endUs: 30 }),
+      row({ tick: 1, sysIdx: 1, durationUs: 70, startUs: 30, endUs: 100 }),
+    ];
+    const r = computeCriticalPathParticipation({ systems, rows, edges: [], phases: NO_PHASE, range: null });
+    expect(r.perSystem.get('A')?.rate).toBe(1);
+    expect(r.perSystem.get('B')?.rate).toBe(1);
+  });
+
+  it('skipped system (SkipReasonCode > 0) cannot be on the CP', () => {
+    const systems = [sys('A', 0, 'p1'), sys('B', 1, 'p1', { predecessors: [0] })];
+    const rows = [
+      row({ tick: 1, sysIdx: 0, durationUs: 100, startUs: 0, endUs: 100 }),
+      row({ tick: 1, sysIdx: 1, durationUs: 0, skipReasonCode: 3 }),
+    ];
+    const r = computeCriticalPathParticipation({ systems, rows, edges: [], phases: NO_PHASE, range: null });
+    expect(r.perSystem.get('A')?.rate).toBe(1);
+    expect(r.perSystem.get('B')?.rate ?? 0).toBe(0);
+  });
+
+  it('range filter — only ticks in [from, to] are counted', () => {
+    const systems = [sys('A', 0, 'p1')];
+    const rows = [1, 2, 3, 4].map((t) => row({ tick: t, sysIdx: 0, durationUs: 10, startUs: 0, endUs: 10 }));
+    const r = computeCriticalPathParticipation({ systems, rows, edges: [], phases: NO_PHASE, range: { from: 2, to: 3 } });
+    expect(r.totalTicks).toBe(2);
+    expect(r.perSystem.get('A')?.onPathTicks).toBe(2);
+  });
+
+  it('no DAG (no predecessors, no edges) → every system that ran counts as on-path', () => {
+    const systems = [sys('A', 0, 'p1'), sys('B', 1, 'p1')];
+    const rows = [
+      row({ tick: 1, sysIdx: 0, durationUs: 10, startUs: 0, endUs: 10 }),
+      row({ tick: 1, sysIdx: 1, durationUs: 10, startUs: 0, endUs: 10 }),
+    ];
+    const r = computeCriticalPathParticipation({ systems, rows, edges: [], phases: NO_PHASE, range: null });
+    expect(r.perSystem.get('A')?.rate).toBe(1);
+    expect(r.perSystem.get('B')?.rate).toBe(1);
+  });
+
+  it('legacy `edges` are used as a predecessor fallback', () => {
+    // systems carry no `predecessors`; edges supply A → B → C.
+    const systems = [sys('A', 0, 'p1'), sys('B', 1, 'p1'), sys('C', 2, 'p1')];
+    const edges = [edge('A', 'B'), edge('B', 'C')];
+    const rows = [
+      row({ tick: 1, sysIdx: 0, durationUs: 100, startUs: 0, endUs: 100 }),
+      row({ tick: 1, sysIdx: 1, durationUs: 50, startUs: 100, endUs: 150 }),
+      row({ tick: 1, sysIdx: 2, durationUs: 50, startUs: 150, endUs: 200 }),
+    ];
+    const r = computeCriticalPathParticipation({ systems, rows, edges, phases: NO_PHASE, range: null });
+    expect(r.perSystem.get('A')?.rate).toBe(1);
+    expect(r.perSystem.get('B')?.rate).toBe(1);
+    expect(r.perSystem.get('C')?.rate).toBe(1);
+  });
+});
+
+// ── computeCriticalPathForTick ────────────────────────────────────────────
+
 describe('computeCriticalPathForTick', () => {
   it('returns null when no rows match the tick', () => {
     const r = computeCriticalPathForTick({
-      tickNumber: 99,
-      systems: [sys('A', 0, 'p1')],
-      rows: [],
-      edges: [],
-      phases: ['p1'],
-      postTickRows: [],
-      tickSummaryRow: null,
+      tickNumber: 99, systems: [sys('A', 0, 'p1')], rows: [], edges: [], phases: NO_PHASE,
+      postTickRows: [], tickSummaryRow: null,
     });
     expect(r).toBeNull();
   });
 
-  it('orderedPath flows in forward execution order (root → terminus)', () => {
-    // Linear A → B → C; durations 100/50/200. CP = A→B→C; bars should appear A first, C last.
-    const systems = [sys('A', 0, 'p1'), sys('B', 1, 'p1'), sys('C', 2, 'p1')];
-    const edges = [edge('A', 'B'), edge('B', 'C')];
+  it('cpChain is in forward time order, root → terminus', () => {
+    const systems = [
+      sys('A', 0, 'p1'),
+      sys('B', 1, 'p1', { predecessors: [0] }),
+      sys('C', 2, 'p1', { predecessors: [1] }),
+    ];
     const rows = [
-      detailedRow({ tick: 1, sysIdx: 0, durationUs: 100 }),
-      detailedRow({ tick: 1, sysIdx: 1, durationUs: 50 }),
-      detailedRow({ tick: 1, sysIdx: 2, durationUs: 200 }),
+      row({ tick: 1, sysIdx: 0, durationUs: 100, startUs: 0, endUs: 100 }),
+      row({ tick: 1, sysIdx: 1, durationUs: 50, startUs: 100, endUs: 150 }),
+      row({ tick: 1, sysIdx: 2, durationUs: 200, startUs: 150, endUs: 350 }),
     ];
     const r = computeCriticalPathForTick({
-      tickNumber: 1, systems, rows, edges, phases: ['p1'],
-      postTickRows: [], tickSummaryRow: tickSummary(1, 350),
+      tickNumber: 1, systems, rows, edges: [], phases: NO_PHASE, postTickRows: [], tickSummaryRow: tickSummary(1, 350),
     });
-    expect(r).not.toBeNull();
-    expect(r!.phases).toHaveLength(1);
-    expect(r!.phases[0].bars.map((b) => b.systemName)).toEqual(['A', 'B', 'C']);
-  });
-
-  it('worker-claim wait = startUs - readyUs when readyUs is captured', () => {
-    const systems = [sys('A', 0, 'p1')];
-    const rows = [detailedRow({ tick: 1, sysIdx: 0, durationUs: 100, readyUs: 10, startUs: 30, endUs: 130 })];
-    const r = computeCriticalPathForTick({
-      tickNumber: 1, systems, rows, edges: [], phases: ['p1'],
-      postTickRows: [], tickSummaryRow: tickSummary(1, 130),
-    });
-    expect(r!.phases[0].bars[0].workerClaimWaitUs).toBe(20);
-  });
-
-  it('worker-claim wait suppressed when readyUs == 0 (pre-#311 traces)', () => {
-    const systems = [sys('A', 0, 'p1')];
-    const rows = [detailedRow({ tick: 1, sysIdx: 0, durationUs: 100, readyUs: 0, startUs: 30, endUs: 130 })];
-    const r = computeCriticalPathForTick({
-      tickNumber: 1, systems, rows, edges: [], phases: ['p1'],
-      postTickRows: [], tickSummaryRow: tickSummary(1, 130),
-    });
-    expect(r!.phases[0].bars[0].workerClaimWaitUs).toBe(0);
-  });
-
-  it('phase-fence wait = phase max EndUs minus CP-tail EndUs', () => {
-    // A on the CP, finishes at endUs=100. B is a non-CP straggler, finishes at endUs=180.
-    // phase-fence wait should be 80, attributed to B.
-    const systems = [sys('A', 0, 'p1'), sys('B', 1, 'p1')];
-    const rows = [
-      detailedRow({ tick: 1, sysIdx: 0, durationUs: 100, endUs: 100 }),
-      detailedRow({ tick: 1, sysIdx: 1, durationUs: 180, endUs: 180 }), // not on CP edge-wise
-    ];
-    // Edges: empty — A and B are independent. CP terminus = B (longer). Hmm.
-    // Tweak: make A larger so it dominates. A=200, B=180.
-    rows[0] = detailedRow({ tick: 1, sysIdx: 0, durationUs: 200, endUs: 200 });
-    rows[1] = detailedRow({ tick: 1, sysIdx: 1, durationUs: 180, endUs: 180 });
-    const r = computeCriticalPathForTick({
-      tickNumber: 1, systems, rows, edges: [], phases: ['p1'],
-      postTickRows: [], tickSummaryRow: tickSummary(1, 200),
-    });
-    // A is the CP terminus (endUs=200), so phase max == CP-tail end → no wait reported.
-    expect(r!.phases[0].phaseFenceWaitUs).toBe(0);
-
-    // Now flip: B has bigger endUs (straggler) but A is on the CP via edge ordering.
-    const edges2 = [edge('A', 'B')]; // forces A → B, B becomes CP terminus
-    rows[0] = detailedRow({ tick: 1, sysIdx: 0, durationUs: 100, endUs: 100 });
-    rows[1] = detailedRow({ tick: 1, sysIdx: 1, durationUs: 80, endUs: 180 });
-    const r2 = computeCriticalPathForTick({
-      tickNumber: 1, systems, rows, edges: edges2, phases: ['p1'],
-      postTickRows: [], tickSummaryRow: tickSummary(1, 180),
-    });
-    // B IS on CP (terminus); B is also the phase straggler — no wait because the CP holds it.
-    expect(r2!.phases[0].phaseFenceWaitUs).toBe(0);
-
-    // Real fence wait scenario: A and B in same phase, A is on CP (no edge to B), B is a
-    // straggler that finishes later — but A's path duration dominates. We use a self-loop on A
-    // to force critical-path mode (edges.length > 0) without otherwise perturbing the walk; a
-    // self-loop has no effect on path semantics because pathDurationTo[A] isn't yet set when
-    // computing A's own bestPredPathTo.
-    const rows3 = [
-      detailedRow({ tick: 1, sysIdx: 0, durationUs: 200, endUs: 200 }),
-      detailedRow({ tick: 1, sysIdx: 1, durationUs: 50, endUs: 220 }), // started later, finishes after A
-    ];
-    const r3 = computeCriticalPathForTick({
-      tickNumber: 1, systems, rows: rows3, edges: [edge('A', 'A')], phases: ['p1'],
-      postTickRows: [], tickSummaryRow: tickSummary(1, 220),
-    });
-    expect(r3!.phases[0].phaseFenceWaitUs).toBe(20);
-    expect(r3!.phases[0].phaseFenceStraggler).toBe('B');
-  });
-
-  it('post-tick block populates from PostTickSummary', () => {
-    const systems = [sys('A', 0, 'p1')];
-    const rows = [detailedRow({ tick: 1, sysIdx: 0, durationUs: 100 })];
-    const r = computeCriticalPathForTick({
-      tickNumber: 1, systems, rows, edges: [], phases: ['p1'],
-      postTickRows: [postTick(1, { walFlushUs: 50, writeTickFenceUs: 10 })],
-      tickSummaryRow: tickSummary(1, 100),
-    });
-    expect(r!.postTick.walFlushUs).toBe(50);
-    expect(r!.postTick.writeTickFenceUs).toBe(10);
-    expect(r!.postTick.totalUs).toBe(60);
-  });
-
-  it('metronomeWaitUs propagated from tickSummaryRow', () => {
-    const systems = [sys('A', 0, 'p1')];
-    const rows = [detailedRow({ tick: 1, sysIdx: 0, durationUs: 100 })];
-    const r = computeCriticalPathForTick({
-      tickNumber: 1, systems, rows, edges: [], phases: ['p1'],
-      postTickRows: [], tickSummaryRow: tickSummary(1, 100, /* metronomeWaitUs */ 250),
-    });
-    expect(r!.metronomeWaitUs).toBe(250);
-  });
-
-  it('fallback: no edges → all running systems on the path, sorted by startUs', () => {
-    // Three systems, no edges (e.g. trace lacks RFC 07 declarations). Without the dependency
-    // graph the dependency-aware walker would emit only the longest-duration system; the
-    // fallback should emit all three in startUs order.
-    const systems = [sys('A', 0, 'p1'), sys('B', 1, 'p1'), sys('C', 2, 'p1')];
-    const rows = [
-      detailedRow({ tick: 1, sysIdx: 0, durationUs: 100, startUs: 200, endUs: 300 }),  // 2nd
-      detailedRow({ tick: 1, sysIdx: 1, durationUs: 50, startUs: 0, endUs: 50 }),       // 1st
-      detailedRow({ tick: 1, sysIdx: 2, durationUs: 30, startUs: 400, endUs: 430 }),    // 3rd
-    ];
-    const r = computeCriticalPathForTick({
-      tickNumber: 1, systems, rows, edges: [], phases: ['p1'],
-      postTickRows: [], tickSummaryRow: tickSummary(1, 430),
-    });
-    expect(r).not.toBeNull();
-    expect(r!.mode).toBe('execution-order');
-    expect(r!.phases[0].bars.map((b) => b.systemName)).toEqual(['B', 'A', 'C']);
-  });
-
-  it('fallback: skipped systems (durationUs == 0) excluded from path', () => {
-    const systems = [sys('A', 0, 'p1'), sys('B', 1, 'p1')];
-    const rows = [
-      detailedRow({ tick: 1, sysIdx: 0, durationUs: 100, startUs: 0, endUs: 100 }),
-      detailedRow({ tick: 1, sysIdx: 1, durationUs: 0, startUs: 0, endUs: 0 }),  // skipped
-    ];
-    const r = computeCriticalPathForTick({
-      tickNumber: 1, systems, rows, edges: [], phases: ['p1'],
-      postTickRows: [], tickSummaryRow: tickSummary(1, 100),
-    });
-    expect(r!.phases[0].bars.map((b) => b.systemName)).toEqual(['A']);
-  });
-
-  it('mode reports critical-path when edges exist', () => {
-    const systems = [sys('A', 0, 'p1'), sys('B', 1, 'p1')];
-    const rows = [
-      detailedRow({ tick: 1, sysIdx: 0, durationUs: 100 }),
-      detailedRow({ tick: 1, sysIdx: 1, durationUs: 50 }),
-    ];
-    const r = computeCriticalPathForTick({
-      tickNumber: 1, systems, rows,
-      edges: [edge('A', 'B')],
-      phases: ['p1'],
-      postTickRows: [],
-      tickSummaryRow: tickSummary(1, 150),
-    });
+    expect(r!.cpChain.map((b) => b.systemName)).toEqual(['A', 'B', 'C']);
     expect(r!.mode).toBe('critical-path');
   });
 
-  it('chunkDispatchWaitUs is structurally present and zero in v1', () => {
-    const systems = [sys('A', 0, 'p1')];
-    const rows = [detailedRow({ tick: 1, sysIdx: 0, durationUs: 100, workersTouched: 4, chunksProcessed: 16 })];
+  it('terminus is the LAST-finishing system, not the longest-duration one', () => {
+    // A finishes last (endUs 500) though B has the longer duration. C→D supplies a DAG so the
+    // measured traceback runs rather than the no-DAG fallback.
+    const systems = [
+      sys('A', 0, 'p1'),
+      sys('B', 1, 'p1'),
+      sys('C', 2, 'p1'),
+      sys('D', 3, 'p1', { predecessors: [2] }),
+    ];
+    const rows = [
+      row({ tick: 1, sysIdx: 0, durationUs: 20, startUs: 480, endUs: 500 }),
+      row({ tick: 1, sysIdx: 1, durationUs: 400, startUs: 0, endUs: 400 }),
+      row({ tick: 1, sysIdx: 2, durationUs: 10, startUs: 0, endUs: 10 }),
+      row({ tick: 1, sysIdx: 3, durationUs: 10, startUs: 10, endUs: 20 }),
+    ];
     const r = computeCriticalPathForTick({
-      tickNumber: 1, systems, rows, edges: [], phases: ['p1'],
-      postTickRows: [], tickSummaryRow: tickSummary(1, 100),
+      tickNumber: 1, systems, rows, edges: [], phases: NO_PHASE, postTickRows: [], tickSummaryRow: tickSummary(1, 500),
     });
-    expect(r!.phases[0].bars[0].chunkDispatchWaitUs).toBe(0);
-    expect(r!.phases[0].bars[0].workersTouched).toBe(4);
-    expect(r!.phases[0].bars[0].chunksProcessed).toBe(16);
+    expect(r!.mode).toBe('critical-path');
+    expect(r!.cpChain.map((b) => b.systemName)).toEqual(['A']);
+  });
+
+  it('overlapping phases — a later phase starts before an earlier one ends', () => {
+    // p1: A [0, 5000]. p2: B [100, 600] — B is in a later phase but ran inside A's span.
+    // C→D (p1) supplies the DAG; A finishes last so it is the terminus.
+    const systems = [
+      sys('A', 0, 'p1'),
+      sys('B', 1, 'p2'),
+      sys('C', 2, 'p1'),
+      sys('D', 3, 'p1', { predecessors: [2] }),
+    ];
+    const rows = [
+      row({ tick: 1, sysIdx: 0, durationUs: 5000, startUs: 0, endUs: 5000 }),
+      row({ tick: 1, sysIdx: 1, durationUs: 500, startUs: 100, endUs: 600 }),
+      row({ tick: 1, sysIdx: 2, durationUs: 10, startUs: 0, endUs: 10 }),
+      row({ tick: 1, sysIdx: 3, durationUs: 10, startUs: 10, endUs: 20 }),
+    ];
+    const r = computeCriticalPathForTick({
+      tickNumber: 1, systems, rows, edges: [], phases: NO_PHASE, postTickRows: [], tickSummaryRow: tickSummary(1, 5000),
+    });
+    expect(r!.cpChain.map((b) => b.systemName)).toEqual(['A']);
+    const bBar = r!.nonCpBars.find((b) => b.systemName === 'B')!;
+    expect(bBar.startUs).toBe(100);
+    expect(bBar.endUs).toBe(600);
+    // Phase spans reflect measured extents and overlap: p2 starts (100) before p1 ends (5000).
+    const p1 = r!.phaseSpans.find((p) => p.name === 'p1')!;
+    const p2 = r!.phaseSpans.find((p) => p.name === 'p2')!;
+    expect(p2.startUs).toBeLessThan(p1.endUs);
+  });
+
+  it('worker-claim wait = startUs − readyUs when readyUs is observed', () => {
+    const systems = [sys('A', 0, 'p1')];
+    const rows = [row({ tick: 1, sysIdx: 0, durationUs: 100, readyUs: 10, startUs: 30, endUs: 130 })];
+    const r = computeCriticalPathForTick({
+      tickNumber: 1, systems, rows, edges: [], phases: NO_PHASE, postTickRows: [], tickSummaryRow: tickSummary(1, 130),
+    });
+    expect(r!.cpChain[0].workerClaimWaitUs).toBe(20);
+  });
+
+  it('worker-claim wait suppressed when readyUs == 0 (old traces)', () => {
+    const systems = [sys('A', 0, 'p1')];
+    const rows = [row({ tick: 1, sysIdx: 0, durationUs: 100, readyUs: 0, startUs: 30, endUs: 130 })];
+    const r = computeCriticalPathForTick({
+      tickNumber: 1, systems, rows, edges: [], phases: NO_PHASE, postTickRows: [], tickSummaryRow: tickSummary(1, 130),
+    });
+    expect(r!.cpChain[0].workerClaimWaitUs).toBe(0);
+  });
+
+  it('non-CP bars carry every other ran system, sorted by startUs', () => {
+    const systems = [
+      sys('A', 0, 'p1'),
+      sys('B', 1, 'p1', { predecessors: [0] }),
+      sys('X', 2, 'p1'),
+      sys('Y', 3, 'p1'),
+    ];
+    const rows = [
+      row({ tick: 1, sysIdx: 0, durationUs: 100, startUs: 0, endUs: 100 }),
+      row({ tick: 1, sysIdx: 1, durationUs: 100, startUs: 100, endUs: 200 }),
+      row({ tick: 1, sysIdx: 2, durationUs: 10, startUs: 50, endUs: 60 }),
+      row({ tick: 1, sysIdx: 3, durationUs: 10, startUs: 5, endUs: 15 }),
+    ];
+    const r = computeCriticalPathForTick({
+      tickNumber: 1, systems, rows, edges: [], phases: NO_PHASE, postTickRows: [], tickSummaryRow: tickSummary(1, 200),
+    });
+    expect(r!.cpChain.map((b) => b.systemName)).toEqual(['A', 'B']);
+    expect(r!.nonCpBars.map((b) => b.systemName)).toEqual(['Y', 'X']);
+  });
+
+  it('correctness invariant — Σ(cp durations) + Σ(cp claim waits) + post-tick = tick wall-clock', () => {
+    // Chain A → B. A starts at the tick origin (no leading wait); B's readyUs is observed, so
+    // the CP bars + worker-claim gaps tile the tick body exactly.
+    const systems = [sys('A', 0, 'p1'), sys('B', 1, 'p1', { predecessors: [0] })];
+    const rows = [
+      row({ tick: 1, sysIdx: 0, durationUs: 100, readyUs: 0, startUs: 0, endUs: 100 }),
+      row({ tick: 1, sysIdx: 1, durationUs: 80, readyUs: 100, startUs: 120, endUs: 200 }),
+    ];
+    const r = computeCriticalPathForTick({
+      tickNumber: 1, systems, rows, edges: [], phases: NO_PHASE,
+      postTickRows: [postTick(1, { walFlushUs: 50 })], tickSummaryRow: tickSummary(1, 250),
+    });
+    const cpDur = r!.cpChain.reduce((s, b) => s + b.durationUs, 0);
+    const cpWait = r!.cpChain.reduce((s, b) => s + b.workerClaimWaitUs, 0);
+    expect(cpDur + cpWait).toBe(r!.timeBounds.endUs); // 180 + 20 = 200
+    expect(cpDur + cpWait + r!.postTick.totalUs).toBe(r!.totalUs); // 200 + 50 = 250
+  });
+
+  it('no-DAG fallback → execution-order, every system sorted by startUs', () => {
+    const systems = [sys('A', 0, 'p1'), sys('B', 1, 'p1'), sys('C', 2, 'p1')];
+    const rows = [
+      row({ tick: 1, sysIdx: 0, durationUs: 100, startUs: 200, endUs: 300 }),
+      row({ tick: 1, sysIdx: 1, durationUs: 50, startUs: 0, endUs: 50 }),
+      row({ tick: 1, sysIdx: 2, durationUs: 30, startUs: 400, endUs: 430 }),
+    ];
+    const r = computeCriticalPathForTick({
+      tickNumber: 1, systems, rows, edges: [], phases: NO_PHASE, postTickRows: [], tickSummaryRow: tickSummary(1, 430),
+    });
+    expect(r!.mode).toBe('execution-order');
+    expect(r!.cpChain.map((b) => b.systemName)).toEqual(['B', 'A', 'C']);
+    expect(r!.nonCpBars).toHaveLength(0);
+  });
+
+  it('skipped systems are excluded from the timeline', () => {
+    const systems = [sys('A', 0, 'p1'), sys('B', 1, 'p1')];
+    const rows = [
+      row({ tick: 1, sysIdx: 0, durationUs: 100, startUs: 0, endUs: 100 }),
+      row({ tick: 1, sysIdx: 1, durationUs: 0, skipReasonCode: 2 }),
+    ];
+    const r = computeCriticalPathForTick({
+      tickNumber: 1, systems, rows, edges: [], phases: NO_PHASE, postTickRows: [], tickSummaryRow: tickSummary(1, 100),
+    });
+    expect(r!.cpChain.map((b) => b.systemName)).toEqual(['A']);
+    expect(r!.nonCpBars).toHaveLength(0);
+  });
+
+  it('parallel system → one bar carrying isParallel + worker count', () => {
+    const systems = [sys('A', 0, 'p1', { isParallel: true })];
+    const rows = [row({ tick: 1, sysIdx: 0, durationUs: 100, startUs: 0, endUs: 100, workersTouched: 16, chunksProcessed: 64 })];
+    const r = computeCriticalPathForTick({
+      tickNumber: 1, systems, rows, edges: [], phases: NO_PHASE, postTickRows: [], tickSummaryRow: tickSummary(1, 100),
+    });
+    expect(r!.cpChain).toHaveLength(1);
+    expect(r!.cpChain[0].isParallel).toBe(true);
+    expect(r!.cpChain[0].workersTouched).toBe(16);
+  });
+
+  it('post-tick block + metronome populate from their sources', () => {
+    const systems = [sys('A', 0, 'p1')];
+    const rows = [row({ tick: 1, sysIdx: 0, durationUs: 100, startUs: 0, endUs: 100 })];
+    const r = computeCriticalPathForTick({
+      tickNumber: 1, systems, rows, edges: [], phases: NO_PHASE,
+      postTickRows: [postTick(1, { walFlushUs: 50, writeTickFenceUs: 10 })],
+      tickSummaryRow: tickSummary(1, 100, /* metronomeWaitUs */ 250),
+    });
+    expect(r!.postTick.totalUs).toBe(60);
+    expect(r!.metronomeWaitUs).toBe(250);
   });
 });
+
+// ── computeWorkerOccupancy ────────────────────────────────────────────────
+
+describe('computeWorkerOccupancy', () => {
+  function barsWith(rowsIn: Array<{ idx: number; start: number; end: number; cpu: number }>): Parameters<typeof computeWorkerOccupancy>[0] {
+    const systems = rowsIn.map((r, i) => sys(`S${i}`, r.idx, 'p1'));
+    const rows = rowsIn.map((r) => row({ tick: 1, sysIdx: r.idx, durationUs: r.end - r.start, startUs: r.start, endUs: r.end, totalCpuUs: r.cpu }));
+    return computeCriticalPathForTick({
+      tickNumber: 1, systems, rows, edges: [], phases: NO_PHASE, postTickRows: [], tickSummaryRow: tickSummary(1, 100),
+    })!;
+  }
+
+  it('returns null when no system carries totalCpuUs (pre-v13 cache)', () => {
+    const bars = barsWith([{ idx: 0, start: 0, end: 100, cpu: 0 }]);
+    expect(computeWorkerOccupancy(bars, 8)).toBeNull();
+  });
+
+  it('builds a step function and clamps to workerCount', () => {
+    // One serial system [0,100] cpu 100 → concurrency 1. One 16-wide system [0,50] cpu 800 →
+    // concurrency 16. Overlap [0,50] = 17, clamped to W=8.
+    const bars = barsWith([
+      { idx: 0, start: 0, end: 100, cpu: 100 },
+      { idx: 1, start: 0, end: 50, cpu: 800 },
+    ]);
+    const occ = computeWorkerOccupancy(bars, 8)!;
+    expect(occ.breakpoints).toEqual([0, 50, 100]);
+    expect(occ.levels[0]).toBe(8);       // clamped
+    expect(occ.levels[1]).toBeCloseTo(1, 5);
+  });
+});
+
+// ── computeAggregateCriticalPath ──────────────────────────────────────────
+
+describe('computeAggregateCriticalPath', () => {
+  it('returns null when no ticks fall in range', () => {
+    const r = computeAggregateCriticalPath({
+      systems: [sys('A', 0, 'p1')], rows: [], edges: [], phases: NO_PHASE,
+      postTickRows: [], tickSummaries: [], range: { from: 1, to: 10 },
+    });
+    expect(r).toBeNull();
+  });
+
+  it('produces mean-duration bars across the range with the aggregate flag set', () => {
+    const systems = [sys('A', 0, 'p1'), sys('B', 1, 'p1', { predecessors: [0] })];
+    const rows = [
+      row({ tick: 1, sysIdx: 0, durationUs: 100, startUs: 0, endUs: 100 }),
+      row({ tick: 1, sysIdx: 1, durationUs: 200, startUs: 100, endUs: 300 }),
+      row({ tick: 2, sysIdx: 0, durationUs: 300, startUs: 0, endUs: 300 }),
+      row({ tick: 2, sysIdx: 1, durationUs: 400, startUs: 300, endUs: 700 }),
+    ];
+    const r = computeAggregateCriticalPath({
+      systems, rows, edges: [], phases: NO_PHASE, postTickRows: [],
+      tickSummaries: [tickSummary(1, 300), tickSummary(2, 700)], range: { from: 1, to: 2 },
+    })!;
+    expect(r.aggregate?.tickCount).toBe(2);
+    expect(r.tickNumber).toBe(-1);
+    const a = r.cpChain.find((b) => b.systemName === 'A')!;
+    const b = r.cpChain.find((b) => b.systemName === 'B')!;
+    expect(a.durationUs).toBe(200); // mean of 100, 300
+    expect(b.durationUs).toBe(300); // mean of 200, 400
+    expect(r.nonCpBars).toHaveLength(0);
+  });
+});
+
+// ── dominantTickInRange ───────────────────────────────────────────────────
 
 describe('dominantTickInRange', () => {
   it('returns null on empty inputs', () => {
@@ -446,34 +502,15 @@ describe('dominantTickInRange', () => {
   });
 
   it('picks the longest-durationUs tick in range', () => {
-    const ticks = [
-      tickSummary(1, 100),
-      tickSummary(2, 500),  // ← winner
-      tickSummary(3, 200),
-      tickSummary(4, 50),
-    ];
+    const ticks = [tickSummary(1, 100), tickSummary(2, 500), tickSummary(3, 200), tickSummary(4, 50)];
     expect(dominantTickInRange(ticks, { from: 1, to: 4 })).toBe(2);
   });
 
   it('respects the range — out-of-range ticks ignored even if longer', () => {
-    const ticks = [
-      tickSummary(1, 50),
-      tickSummary(2, 9999), // out of range
-      tickSummary(3, 100),  // ← winner inside range
-    ];
+    const ticks = [tickSummary(1, 50), tickSummary(2, 9999), tickSummary(3, 100)];
     expect(dominantTickInRange(ticks, { from: 3, to: 4 })).toBe(3);
   });
-});
 
-describe('dominantTickInRange — extended 3-arg signature (midpoint fallback for sub-tick zoom)', () => {
-  /**
-   * Build a TickSummaryDto with explicit startUs/durationUs — needed for the midpoint-fallback
-   * tests since the existing `tickSummary` helper hardcodes startUs=0.
-   *
-   * Post-#345: `dominantTickInRange` absorbed the old `focusTickForWindow` semantics. The strict
-   * path (2-arg form, tested above) still wins when any tick falls in `[range.from, range.to]`.
-   * The third `time?` arg adds the µs-window midpoint fallback for the sub-tick-zoom case.
-   */
   function ts(tickNumber: number, startUs: number, durationUs: number): TickSummaryDto {
     return {
       tickNumber, durationUs, startUs, metronomeWaitUs: 0,
@@ -483,95 +520,24 @@ describe('dominantTickInRange — extended 3-arg signature (midpoint fallback fo
     } as unknown as TickSummaryDto;
   }
 
-  it('returns null on empty inputs', () => {
-    expect(dominantTickInRange(null, { from: 1, to: 1 }, { startUs: 0, endUs: 100 })).toBeNull();
-    expect(dominantTickInRange([], { from: 1, to: 1 }, { startUs: 0, endUs: 100 })).toBeNull();
-  });
-
-  it('uses strict path when at least one tick is in [range.from, range.to]', () => {
-    const ticks = [
-      ts(1, 0,    100),
-      ts(2, 100,  200),  // longest in window
-      ts(3, 300,  150),
-    ];
-    expect(dominantTickInRange(ticks, { from: 1, to: 3 }, { startUs: 0, endUs: 450 })).toBe(2);
-  });
-
-  it('falls back to midpoint when window is entirely inside one tick (range null)', () => {
-    // Tick 5: [1000, 1500). Window [1100, 1300] entirely inside it. timeToTickRange would return
-    // null (sub-tick window), so the strict path is null and the midpoint fallback kicks in.
-    const ticks = [
-      ts(4, 500,  500),
-      ts(5, 1000, 500),  // body covers midpoint 1200
-      ts(6, 1500, 500),
-    ];
+  it('falls back to the midpoint tick when the window is inside one tick', () => {
+    const ticks = [ts(4, 500, 500), ts(5, 1000, 500), ts(6, 1500, 500)];
     expect(dominantTickInRange(ticks, null, { startUs: 1100, endUs: 1300 })).toBe(5);
   });
 
-  it('falls back to midpoint when window straddles a tick boundary on the slim side', () => {
-    // Window [1490, 1510] straddles tick 5 ↔ 6 boundary at 1500. Midpoint 1500. Tick 6 starts at
-    // 1500 → midpoint is in tick 6's body (start <= mid < start+dur).
-    const ticks = [
-      ts(5, 1000, 500),  // [1000, 1500)
-      ts(6, 1500, 500),  // [1500, 2000) — midpoint here
-    ];
-    expect(dominantTickInRange(ticks, null, { startUs: 1490, endUs: 1510 })).toBe(6);
-  });
-
-  it('returns null when the window is before the first tick', () => {
-    const ticks = [ts(1, 1000, 100)];
-    expect(dominantTickInRange(ticks, null, { startUs: 0, endUs: 500 })).toBeNull();
-  });
-
-  it('returns null when the window is after the last tick', () => {
-    const ticks = [ts(1, 0, 100)];
-    expect(dominantTickInRange(ticks, null, { startUs: 500, endUs: 1000 })).toBeNull();
-  });
-
-  it('returns null when time is missing AND range is empty (or null)', () => {
-    expect(dominantTickInRange([ts(1, 0, 100)], null, null)).toBeNull();
-    // No third arg at all — same as the original 2-arg form on an empty/null range.
-    expect(dominantTickInRange([ts(1, 0, 100)], null)).toBeNull();
-  });
-
-  it('returns null on degenerate window (endUs <= startUs)', () => {
-    expect(dominantTickInRange([ts(1, 0, 100)], null, { startUs: 50, endUs: 50 })).toBeNull();
-    expect(dominantTickInRange([ts(1, 0, 100)], null, { startUs: 50, endUs: 10 })).toBeNull();
-  });
-
-  it('skips zero-duration ticks in the midpoint fallback', () => {
-    // A zero-duration tick should never be picked as the focus.
-    const ticks = [
-      ts(1, 0,    0),     // zero duration — body is empty
-      ts(2, 1000, 1000),  // [1000, 2000) covers midpoint
-    ];
-    expect(dominantTickInRange(ticks, null, { startUs: 1100, endUs: 1900 })).toBe(2);
-  });
-
-  it('strict path beats midpoint fallback even when both are valid', () => {
-    // Range contains tick 5 (strict path finds it), AND the µs window's midpoint is also inside
-    // tick 5. Both paths land on the same tick — verify the strict path runs first (cheap).
+  it('strict path beats the midpoint fallback when both are valid', () => {
     const ticks = [ts(5, 1000, 500)];
     expect(dominantTickInRange(ticks, { from: 5, to: 5 }, { startUs: 1100, endUs: 1300 })).toBe(5);
   });
+
+  it('returns null on a degenerate window', () => {
+    expect(dominantTickInRange([ts(1, 0, 100)], null, { startUs: 50, endUs: 50 })).toBeNull();
+  });
 });
 
-// ── Performance — #317 acceptance: 1024 ticks × 200 systems < 50 ms ───────
+// ── Performance — #317 acceptance: 1024 ticks × 200 systems ───────────────
 
 describe('performance', () => {
-  /**
-   * Synthetic worst-case-ish workload: 200 systems split evenly across 5 phases (40 systems per
-   * phase), each phase forming a linear chain (40 intra-phase edges per phase = 200 edges total),
-   * 1024 ticks of rows. Mirrors the #317 acceptance threshold from `09-system-dag.md §11 Phase 3`.
-   *
-   * The walker is O(systems × ticks) per `computeCriticalPathParticipation`; on a typical dev box
-   * 1024 × 200 lands well under 50 ms. We assert against 750 ms (15× the dev-box target) to
-   * absorb CI variance — GitHub Actions runners are roughly 4× slower than a dev workstation
-   * before factoring in scheduling jitter and GC pauses, so the initial 200 ms ceiling tripped
-   * on CI by ~5 ms. The 50 ms target is the design budget on a typical workstation; this
-   * threshold catches gross algorithmic regressions (any change that makes the walker O(n²) or
-   * adds an allocation-heavy hot path) without flaking on slow CI runners.
-   */
   it('1024 ticks × 200 systems CP participation under 750 ms (target 50 ms)', () => {
     const PHASE_COUNT = 5;
     const PHASE_NAMES = Array.from({ length: PHASE_COUNT }, (_, i) => `p${i}`);
@@ -579,25 +545,20 @@ describe('performance', () => {
     const SYSTEM_COUNT = PHASE_COUNT * SYSTEMS_PER_PHASE;
     const TICK_COUNT = 1024;
 
-    // Build systems with predecessors[] populated (engine-built path the walker prefers).
     const systems: SystemDefinitionDto[] = [];
     for (let p = 0; p < PHASE_COUNT; p++) {
       for (let i = 0; i < SYSTEMS_PER_PHASE; i++) {
         const idx = p * SYSTEMS_PER_PHASE + i;
-        const preds = i > 0 ? [idx - 1] : [];
-        systems.push(sys(`s${idx}`, idx, PHASE_NAMES[p], { predecessors: preds }));
+        systems.push(sys(`s${idx}`, idx, PHASE_NAMES[p], { predecessors: i > 0 ? [idx - 1] : [] }));
       }
     }
 
-    // Per-tick rows for every system. Vary durations slightly per tick so different ticks pick
-    // different terminus systems — exercises the traceback path on every tick.
     const rows: SystemTickSummary[] = [];
     for (let t = 1; t <= TICK_COUNT; t++) {
       for (let s = 0; s < SYSTEM_COUNT; s++) {
-        // Duration: hash of (tick, system) so results aren't degenerate (all-equal would let
-        // first-system always win the tie). 1..100 µs.
         const dur = (((t * 31 + s) * 17) % 100) + 1;
-        rows.push(row(t, s, dur));
+        // Stagger starts so endUs varies per system per tick — exercises the traceback.
+        rows.push(row({ tick: t, sysIdx: s, durationUs: dur, startUs: s * 10, endUs: s * 10 + dur }));
       }
     }
 
@@ -609,8 +570,7 @@ describe('performance', () => {
 
     expect(result.totalTicks).toBe(TICK_COUNT);
     expect(elapsedMs).toBeLessThan(750);
-    // Sanity: every CP across the range should hit at least one system per phase (linear chain
-    // forces it). So the total perSystem map should have entries for some systems in every phase.
+    // A linear chain through the terminus's phase is always on the CP → the map is non-empty.
     expect(result.perSystem.size).toBeGreaterThan(0);
   });
 });

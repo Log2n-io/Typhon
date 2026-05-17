@@ -383,6 +383,9 @@ public sealed class TraceFileWriter : IDisposable
     /// <summary>Magic marker for the trailing QueryDefinitionTable (materialized definition catalog). "QDFT" LE (#342).</summary>
     public const uint QueryDefinitionTableMagic = 0x54_46_44_51;
 
+    /// <summary>Magic marker for the trailing CpuSampleSection (interned CPU stack samples). "CPUS" LE (#351).</summary>
+    public const uint CpuSampleSectionMagic = 0x53_55_50_43;
+
     /// <summary>
     /// Append the source-location manifest to the file. Returns the (fileTableOffset, manifestOffset)
     /// that the caller MUST patch into the file header via <see cref="RewriteHeader"/>. Phase 3 of the
@@ -450,6 +453,67 @@ public sealed class TraceFileWriter : IDisposable
         {
             WriteVarString(strings[i] ?? string.Empty);
         }
+        _writer.Flush();
+        return offset;
+    }
+
+    /// <summary>
+    /// Append the CpuSampleSection trailer (#351, v10) and return the offset for the header patch. CPU samples reference an interned stack table; each stack
+    /// references interned frame symbols, whose <c>FileId</c> indexes the same <c>FileTable</c> the source-location manifest uses. Empty input → no section
+    /// written (return 0).
+    /// </summary>
+    /// <remarks>
+    /// Wire layout:
+    /// <code>
+    /// u32  Magic ("CPUS")
+    /// u32  SampleCount;     per sample: i64 qpc, u8 threadSlot (0xFF = unslotted), u8 sampleType, u32 stackIndex
+    /// u32  StackCount;      per stack:  u16 frameCount, u16 frameId * frameCount
+    /// u32  FrameSymbolCount; per symbol: u16 frameId, u16 fileId, u32 line, u8 methodLen, byte[methodLen] utf8
+    /// </code>
+    /// </remarks>
+    public long WriteCpuSampleSection(IReadOnlyList<CpuSampleRecord> samples, IReadOnlyList<ushort[]> stacks, IReadOnlyList<CpuFrameSymbol> frameSymbols)
+    {
+        ArgumentNullException.ThrowIfNull(samples);
+        ArgumentNullException.ThrowIfNull(stacks);
+        ArgumentNullException.ThrowIfNull(frameSymbols);
+        if (samples.Count == 0)
+        {
+            return 0;
+        }
+
+        _writer.Flush();
+        var offset = _stream.Position;
+        _writer.Write(CpuSampleSectionMagic);
+
+        _writer.Write((uint)samples.Count);
+        foreach (var s in samples)
+        {
+            _writer.Write(s.Qpc);
+            _writer.Write(s.ThreadSlot < 0 ? (byte)0xFF : (byte)s.ThreadSlot);
+            _writer.Write(s.SampleType);
+            _writer.Write(s.StackIndex);
+        }
+
+        _writer.Write((uint)stacks.Count);
+        foreach (var stack in stacks)
+        {
+            var frames = stack ?? [];
+            _writer.Write((ushort)frames.Length);
+            foreach (var frameId in frames)
+            {
+                _writer.Write(frameId);
+            }
+        }
+
+        _writer.Write((uint)frameSymbols.Count);
+        foreach (var f in frameSymbols)
+        {
+            _writer.Write(f.FrameId);
+            _writer.Write(f.FileId);
+            _writer.Write(f.Line);
+            WriteShortString(f.Method);
+        }
+
         _writer.Flush();
         return offset;
     }

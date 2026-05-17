@@ -16,4 +16,7 @@ public sealed partial class TraceSessionRuntime
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Failed to install source-file watcher for {Path}")]
     private partial void LogSourceWatchFailed(System.Exception exception, string path);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Failed to build the span-instance index for {Path} — span-kind scoping unavailable")]
+    private partial void LogSpanInstanceIndexFailed(System.Exception exception, string path);
 }

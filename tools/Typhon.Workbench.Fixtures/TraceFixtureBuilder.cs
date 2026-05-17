@@ -430,6 +430,223 @@ public static class TraceFixtureBuilder
     }
 
     /// <summary>
+    /// Build a trace carrying a #351 <c>CpuSampleSection</c> trailer: a small FileTable, three resolved frame symbols
+    /// (an <c>Ecs</c> engine frame, a <c>Storage</c> engine frame, and a source-less BCL frame), two interned stacks,
+    /// and three samples (two Managed / on-CPU, one External / off-CPU). Drives the Phase-4 Call Tree endpoint tests.
+    /// </summary>
+    public static string BuildTraceWithCpuSamples(string directory)
+    {
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, $"fixture-cpusamples-{Guid.NewGuid():N}.typhon-trace");
+
+        using var fs = File.Create(path);
+        using var writer = new TraceFileWriter(fs);
+        var header = DefaultHeader;
+        writer.WriteHeader(in header);
+        writer.WriteSystemDefinitions([]);
+        writer.WriteArchetypes([]);
+        writer.WriteComponentTypes([]);
+        writer.WritePhases([]);
+        writer.WriteEmptyStaticStructures();
+
+        // Minimal record body — same shape as BuildMinimalTrace, enough for the cache build to complete.
+        const int tickStartSize = CommonHeaderSize;
+        const int instantSize = CommonHeaderSize + 8;
+        const int tickEndSize = CommonHeaderSize + 2;
+        const int tickCount = 3;
+        const int instantsPerTick = 2;
+        var totalRecords = tickCount * (2 + instantsPerTick);
+        var block = new byte[tickCount * (tickStartSize + instantsPerTick * instantSize + tickEndSize)];
+        long ts = 100;
+        var offset = 0;
+        for (var t = 0; t < tickCount; t++)
+        {
+            WriteRecordHeader(block.AsSpan(offset), tickStartSize, TraceEventKind.TickStart, ts);
+            offset += tickStartSize;
+            ts++;
+            for (var i = 0; i < instantsPerTick; i++)
+            {
+                WriteRecordHeader(block.AsSpan(offset), instantSize, TraceEventKind.Instant, ts);
+                offset += instantSize;
+                ts++;
+            }
+            WriteRecordHeader(block.AsSpan(offset), tickEndSize, TraceEventKind.TickEnd, ts);
+            block[offset + CommonHeaderSize] = 0;
+            block[offset + CommonHeaderSize + 1] = 1;
+            offset += tickEndSize;
+            ts++;
+        }
+        writer.WriteRecords(block, totalRecords);
+        writer.WriteSpanNames(new Dictionary<int, string>());
+
+        // FileTable (+ empty source-location manifest) so CPU frame symbols resolve to paths.
+        string[] files =
+        [
+            "src/Typhon.Engine/Ecs/MovementSystem.cs",
+            "src/Typhon.Engine/Storage/PagedMmf.cs",
+        ];
+        var (fileTableOffset, manifestOffset) = writer.WriteSourceLocationManifest(files, []);
+
+        CpuFrameSymbol[] frameSymbols =
+        [
+            new(0, 0, 42, "AntHill.MovementSystem.Execute"),       // Ecs, sourced
+            new(1, 1, 100, "Typhon.Engine.Storage.PagedMmf.GetPage"), // Storage, sourced
+            new(2, 0, 0, "System.Threading.Thread.Sleep"),          // BCL, no source (line 0)
+        ];
+        ushort[][] stacks =
+        [
+            [1, 0], // leaf PagedMmf.GetPage  ← MovementSystem.Execute (root)
+            [2, 0], // leaf Thread.Sleep      ← MovementSystem.Execute (root)
+        ];
+        CpuSampleRecord[] samples =
+        [
+            new(1000, 0, 0, 0), // Managed, stack 0
+            new(2000, 0, 0, 0), // Managed, stack 0
+            new(3000, 0, 1, 1), // External, stack 1
+        ];
+        var cpuOffset = writer.WriteCpuSampleSection(samples, stacks, frameSymbols);
+
+        header.FileTableOffset = fileTableOffset;
+        header.SourceLocationManifestOffset = manifestOffset;
+        header.CpuSampleSectionOffset = cpuOffset;
+        writer.RewriteHeader(in header);
+        writer.Flush();
+        return path;
+    }
+
+    /// <summary>
+    /// Build a trace for #351 Phase 5 span-kind scoping: the record body carries two <see cref="TraceEventKind.SchedulerSystemArchetype"/>
+    /// span records (kind 245) at QPC windows <c>[1000, 1500)</c> and <c>[3000, 3500)</c>, and the <c>CpuSampleSection</c>
+    /// carries three samples — two inside those windows (qpc 1200, 3200) and one between them (qpc 2000). A
+    /// <c>calltree</c> request scoped to span kind 245 must fold exactly the two in-window samples.
+    /// </summary>
+    public static string BuildTraceWithScopableCpuSamples(string directory)
+    {
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, $"fixture-scopable-cpusamples-{Guid.NewGuid():N}.typhon-trace");
+
+        using var fs = File.Create(path);
+        using var writer = new TraceFileWriter(fs);
+        var header = DefaultHeader;
+        writer.WriteHeader(in header);
+        writer.WriteSystemDefinitions([]);
+        writer.WriteArchetypes([]);
+        writer.WriteComponentTypes([]);
+        writer.WritePhases([]);
+        writer.WriteEmptyStaticStructures();
+
+        // One tick: TickStart + two SchedulerSystemArchetype spans + TickEnd. Span A → [1000, 1500), span B → [3000, 3500).
+        const int tickStartSize = CommonHeaderSize;
+        const int spanArchSize = CommonHeaderSize + 25 + 12; // 49 B
+        const int tickEndSize = CommonHeaderSize + 2;
+        const int totalRecords = 1 + 2 + 1;
+        var block = new byte[tickStartSize + 2 * spanArchSize + tickEndSize];
+        var offset = 0;
+        WriteRecordHeader(block.AsSpan(offset), tickStartSize, TraceEventKind.TickStart, 100);
+        offset += tickStartSize;
+        WriteSchedulerSystemArchetypeEvent(block.AsSpan(offset, spanArchSize), startTs: 1000, durationTicks: 500,
+            spanId: 1, systemIdx: 0, archetypeId: 100, entityCount: 8, chunkCount: 1);
+        offset += spanArchSize;
+        WriteSchedulerSystemArchetypeEvent(block.AsSpan(offset, spanArchSize), startTs: 3000, durationTicks: 500,
+            spanId: 2, systemIdx: 0, archetypeId: 100, entityCount: 8, chunkCount: 1);
+        offset += spanArchSize;
+        WriteRecordHeader(block.AsSpan(offset), tickEndSize, TraceEventKind.TickEnd, 4000);
+        block[offset + CommonHeaderSize] = 0;
+        block[offset + CommonHeaderSize + 1] = 1;
+
+        writer.WriteRecords(block, totalRecords);
+        writer.WriteSpanNames(new Dictionary<int, string>());
+
+        string[] files = ["src/Typhon.Engine/Ecs/MovementSystem.cs"];
+        var (fileTableOffset, manifestOffset) = writer.WriteSourceLocationManifest(files, []);
+
+        CpuFrameSymbol[] frameSymbols = [new(0, 0, 42, "AntHill.MovementSystem.Execute")];
+        ushort[][] stacks = [[0]];
+        CpuSampleRecord[] samples =
+        [
+            new(1200, 0, 0, 0), // inside span A [1000, 1500)
+            new(2000, 0, 0, 0), // between the spans — out of any span-kind window
+            new(3200, 0, 0, 0), // inside span B [3000, 3500)
+        ];
+        var cpuOffset = writer.WriteCpuSampleSection(samples, stacks, frameSymbols);
+
+        header.FileTableOffset = fileTableOffset;
+        header.SourceLocationManifestOffset = manifestOffset;
+        header.CpuSampleSectionOffset = cpuOffset;
+        writer.RewriteHeader(in header);
+        writer.Flush();
+        return path;
+    }
+
+    /// <summary>
+    /// Build a trace whose #351 <c>CpuSampleSection</c> carries one very deep call stack (<paramref name="depth"/>
+    /// frames). Folding it produces a <paramref name="depth"/>-deep call tree — past System.Text.Json's nesting
+    /// limit had the wire form been a nested-object tree. Drives the Phase-4 deep-tree serialization regression test.
+    /// </summary>
+    public static string BuildTraceWithDeepCpuStack(string directory, int depth = 50)
+    {
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, $"fixture-deepcpustack-{Guid.NewGuid():N}.typhon-trace");
+
+        using var fs = File.Create(path);
+        using var writer = new TraceFileWriter(fs);
+        var header = DefaultHeader;
+        writer.WriteHeader(in header);
+        writer.WriteSystemDefinitions([]);
+        writer.WriteArchetypes([]);
+        writer.WriteComponentTypes([]);
+        writer.WritePhases([]);
+        writer.WriteEmptyStaticStructures();
+
+        // Minimal record body so the cache build completes.
+        const int tickStartSize = CommonHeaderSize;
+        const int instantSize = CommonHeaderSize + 8;
+        const int tickEndSize = CommonHeaderSize + 2;
+        const int tickCount = 3;
+        const int instantsPerTick = 2;
+        var totalRecords = tickCount * (2 + instantsPerTick);
+        var block = new byte[tickCount * (tickStartSize + instantsPerTick * instantSize + tickEndSize)];
+        long ts = 100;
+        var offset = 0;
+        for (var t = 0; t < tickCount; t++)
+        {
+            WriteRecordHeader(block.AsSpan(offset), tickStartSize, TraceEventKind.TickStart, ts);
+            offset += tickStartSize;
+            ts++;
+            for (var i = 0; i < instantsPerTick; i++)
+            {
+                WriteRecordHeader(block.AsSpan(offset), instantSize, TraceEventKind.Instant, ts);
+                offset += instantSize;
+                ts++;
+            }
+            WriteRecordHeader(block.AsSpan(offset), tickEndSize, TraceEventKind.TickEnd, ts);
+            block[offset + CommonHeaderSize] = 0;
+            block[offset + CommonHeaderSize + 1] = 1;
+            offset += tickEndSize;
+            ts++;
+        }
+        writer.WriteRecords(block, totalRecords);
+        writer.WriteSpanNames(new Dictionary<int, string>());
+
+        // One interned stack, leaf-first: frame 0 is the leaf, frame depth-1 is the stack root.
+        var frameSymbols = new CpuFrameSymbol[depth];
+        var stack = new ushort[depth];
+        for (var i = 0; i < depth; i++)
+        {
+            frameSymbols[i] = new CpuFrameSymbol((ushort)i, 0, 0, $"Frame{i}"); // line 0 → name-only, no FileTable needed
+            stack[i] = (ushort)i;
+        }
+        ushort[][] stacks = [stack];
+        CpuSampleRecord[] samples = [new(1000, 0, 0, 0), new(2000, 0, 0, 0)];
+        var cpuOffset = writer.WriteCpuSampleSection(samples, stacks, frameSymbols);
+
+        header.CpuSampleSectionOffset = cpuOffset;
+        writer.RewriteHeader(in header);
+        writer.Flush();
+        return path;
+    }
+
+    /// <summary>
     /// Build a trace with a deliberately wrong magic number. Used for the "malformed file" path in
     /// <c>TraceSessionRuntime</c> tests — the runtime should reject it before reading further.
     /// </summary>

@@ -36,3 +36,32 @@ export function relativeLuminance(hex: string): number {
 export function pickTextColorFor(barHex: string, light: string = '#000', dark: string = '#fff'): string {
   return relativeLuminance(barHex) > 0.5 ? light : dark;
 }
+
+/** Parse a `#rrggbb` / `#rgb` hex string to an sRGB `[r, g, b]` triple (0..255). */
+function parseHex(hex: string): [number, number, number] {
+  if (hex.length === 7) {
+    return [parseInt(hex.slice(1, 3), 16), parseInt(hex.slice(3, 5), 16), parseInt(hex.slice(5, 7), 16)];
+  }
+  if (hex.length === 4) {
+    return [parseInt(hex[1] + hex[1], 16), parseInt(hex[2] + hex[2], 16), parseInt(hex[3] + hex[3], 16)];
+  }
+  return [0, 0, 0];
+}
+
+/** Clamp a channel to 0..255 and format the `[r, g, b]` triple back to `#rrggbb`. */
+function toHex(r: number, g: number, b: number): string {
+  const c = (v: number): string => Math.round(Math.max(0, Math.min(255, v))).toString(16).padStart(2, '0');
+  return `#${c(r)}${c(g)}${c(b)}`;
+}
+
+/** Mix `hex` toward white by `amount` (0 = unchanged, 1 = white). */
+export function lighten(hex: string, amount: number): string {
+  const [r, g, b] = parseHex(hex);
+  return toHex(r + (255 - r) * amount, g + (255 - g) * amount, b + (255 - b) * amount);
+}
+
+/** Mix `hex` toward black by `amount` (0 = unchanged, 1 = black). */
+export function darken(hex: string, amount: number): string {
+  const [r, g, b] = parseHex(hex);
+  return toHex(r * (1 - amount), g * (1 - amount), b * (1 - amount));
+}

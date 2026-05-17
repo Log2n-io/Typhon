@@ -1,6 +1,6 @@
 import { useMemo } from 'react';
 import { ACCESS_COLOR } from '@/panels/DataFlow/barBuilding';
-import { colorForPhase } from '@/panels/CriticalPath/phaseColors';
+import { colorForPhase } from '@/libs/palettes';
 import type { AccessMatrix, Cell, Column } from './matrixBuilding';
 
 /**

@@ -2,7 +2,8 @@
     "_comment": "Test-only telemetry config. Enables the Tracy-style profiler for ProfilerActive==true so TyphonEvent producer tests can exercise the on-path. Concurrency stays off — ConcurrencyTracingStressTests is [Explicit] and requires running with TYPHON__PROFILER__CONCURRENCY__ENABLED=true env var.",
     "Typhon": {
         "Profiler": {
-            "Enabled": true
+            "Enabled": true,
+            "CpuSampling": { "Enabled": true }
         }
     }
 }

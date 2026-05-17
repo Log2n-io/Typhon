@@ -4,6 +4,7 @@
       "Enabled": true,
       "GcTracing":         { "Enabled": false },
       "MemoryAllocations": { "Enabled": false },
+      "CpuSampling":       { "Enabled": false },
       "Gauges":            { "Enabled": false }
     }
   }

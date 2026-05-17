@@ -90,6 +90,8 @@ public sealed class FixturesController(SessionManager sessions) : ControllerBase
         //                                so the Data Flow timeline can render bars (#327 Phase D bar-click + hover canary).
         //   "with-context-switches"    — per-tick ThreadContextSwitch (kind 254) records, so the off-CPU overlay has
         //                                data to render (off-CPU Playwright canary).
+        //   "with-cpu-samples"         — a #351 CpuSampleSection trailer (frame symbols + interned stacks + samples),
+        //                                so the Call Tree panel has data to fold (Phase-4 Playwright canary).
         //   default                    — minimal trace (no systems, no archetypes); for the open-trace flow canary.
         // tickCount/instantsPerTick are ignored for the typed variants; their builders hardcode the layout.
         string path;
@@ -100,6 +102,10 @@ public sealed class FixturesController(SessionManager sessions) : ControllerBase
         else if (string.Equals(req?.Variant, "with-context-switches", StringComparison.OrdinalIgnoreCase))
         {
             path = TraceFixtureBuilder.BuildTraceWithContextSwitches(outDir);
+        }
+        else if (string.Equals(req?.Variant, "with-cpu-samples", StringComparison.OrdinalIgnoreCase))
+        {
+            path = TraceFixtureBuilder.BuildTraceWithCpuSamples(outDir);
         }
         else if (string.Equals(req?.Variant, "with-access-declarations", StringComparison.OrdinalIgnoreCase))
         {

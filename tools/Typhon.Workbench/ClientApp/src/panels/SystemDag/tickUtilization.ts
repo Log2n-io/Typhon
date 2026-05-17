@@ -4,7 +4,8 @@ import type { TickRange } from './useDagViewStore';
 
 /**
  * Parallelism-inefficiency / wait-time computation for the System DAG view's toolbar pill (A1) and
- * sparkline (A6), and the Critical Path tape's per-phase utilization band (A2).
+ * sparkline (A6). (The Critical Path timeline conveys parallelism via its own worker-occupancy
+ * ribbon — see `criticalPath.ts` `computeWorkerOccupancy` — not a per-phase band.)
  *
  * **Formula (per Loïc's spec).**
  *
@@ -133,41 +134,6 @@ export function computeRangeUtilization(input: {
     meanWaitFraction: 1 - meanUtilization,
     meanWaitUsPerTick: totalWait / perTick.length,
   };
-}
-
-/**
- * Per-phase utilization for ONE tick — drives the A2 phase-fence band on the CP tape. Inputs are
- * the per-phase `bars[].nonCpBars[]` lists already computed by {@link computeCriticalPathForTick}
- * (which carry every system that ran in the phase, CP and non-CP), plus the phase's wall-clock
- * `totalUs`. Capacity per phase = workerCount × phase.totalUs.
- *
- * Defined here (not in `criticalPath.ts`) so the parallelism concept lives in one place; the CP
- * module stays focused on path-tracing and wait-classification.
- */
-export interface PhaseUtilization {
-  /** Sum of every system's durationUs in the phase (CP + non-CP). */
-  workUs: number;
-  /** Phase wall-clock contribution (already includes CP bars + claim waits + fence waits). */
-  wallTimeUs: number;
-  capacityUs: number;
-  waitUs: number;
-  utilization: number;
-}
-
-export function computePhaseUtilization(input: {
-  workerCount: number | null;
-  /** Sum of CP-bar durations + non-CP-bar durations in the phase. */
-  phaseWorkUs: number;
-  /** Phase wall-clock (e.g. `TickPathPhase.totalUs`). */
-  phaseWallTimeUs: number;
-}): PhaseUtilization | null {
-  const { workerCount, phaseWorkUs, phaseWallTimeUs } = input;
-  if (!workerCount || workerCount < 1) return null;
-  if (phaseWallTimeUs <= 0) return null;
-  const capacity = workerCount * phaseWallTimeUs;
-  const wait = Math.max(0, capacity - phaseWorkUs);
-  const utilization = capacity > 0 ? Math.min(1, phaseWorkUs / capacity) : 0;
-  return { workUs: phaseWorkUs, wallTimeUs: phaseWallTimeUs, capacityUs: capacity, waitUs: wait, utilization };
 }
 
 function num(v: unknown): number | null {

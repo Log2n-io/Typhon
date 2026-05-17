@@ -1,5 +1,3 @@
-using Typhon.Engine;
-
 namespace Typhon.Engine.Internals;
 
 /// <summary>

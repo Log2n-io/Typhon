@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useUiPrefsStore } from '@/stores/useUiPrefsStore';
 import type { TickPathBars } from './criticalPath';
-import { useCriticalPathViewStore, type CpScale, type Orientation } from './useCriticalPathViewStore';
+import { useCriticalPathViewStore, type Orientation } from './useCriticalPathViewStore';
 
 interface Props {
   bars: TickPathBars | null;
@@ -17,8 +17,6 @@ interface Props {
 export default function CriticalPathToolbar({ bars, onFit }: Props) {
   const orientation = useCriticalPathViewStore((s) => s.orientation);
   const setOrientation = useCriticalPathViewStore((s) => s.setOrientation);
-  const scale = useCriticalPathViewStore((s) => s.scale);
-  const setScale = useCriticalPathViewStore((s) => s.setScale);
   const pxPerUs = useCriticalPathViewStore((s) => s.pxPerUs);
   const lockZoom = useCriticalPathViewStore((s) => s.lockZoom);
   const setLockZoom = useCriticalPathViewStore((s) => s.setLockZoom);
@@ -66,12 +64,6 @@ export default function CriticalPathToolbar({ bars, onFit }: Props) {
           value={orientation}
           options={['auto', 'horizontal', 'vertical']}
           onChange={setOrientation}
-        />
-        <SegmentedControl<CpScale>
-          label="scale"
-          value={scale}
-          options={['linear', 'log']}
-          onChange={setScale}
         />
         <label
           className="flex cursor-pointer items-center gap-1 text-muted-foreground"
@@ -199,10 +191,6 @@ function HelpOverlay({ onClose }: { onClose: () => void }) {
             <li><strong>Leading hatched stripe</strong> — metronome wait, the gap from the previous TickEnd to this TickStart. Excluded from "Fit" so the work itself fills the viewport; scroll left to see it.</li>
             <li><strong>Post-tick serial</strong> — trailing block: WriteTickFence, WAL flush, TierBudget, etc.</li>
           </ul>
-        </Section>
-
-        <Section title="Scale">
-          <p><strong>Linear</strong> — segment pixel length is proportional to its µs. <strong>Log</strong> — log10 redistribution; small segments expand, large ones shrink, total pixel length preserved so zoom feels consistent across modes.</p>
         </Section>
 
         <Section title="Tick source">

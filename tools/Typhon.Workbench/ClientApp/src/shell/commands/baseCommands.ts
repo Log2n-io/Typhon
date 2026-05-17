@@ -8,7 +8,9 @@ import {
   toggleViewComponentBrowser,
   toggleViewDataFlow,
   toggleViewDetail,
+  toggleViewLogs,
   toggleViewOptions,
+  toggleViewPaletteDebug,
   toggleViewResourceTree,
   toggleViewSchemaArchetypes,
   toggleViewSchemaIndexes,
@@ -16,6 +18,7 @@ import {
   toggleViewSystemDag,
   openSourcePreviewForCurrentSpan,
   saveLayoutAsDefault,
+  resetLayout,
 } from './openSchemaBrowser';
 import { buildProfilerPaletteCommands } from './profilerCommands';
 import type { ConnectTab } from '@/shell/dialogs/ConnectDialog';
@@ -67,10 +70,13 @@ export function buildBaseCommands(): CommandItem[] {
     { id: 'toggle-view-access-matrix',        label: 'Toggle View Access Matrix',           keywords: 'access matrix heatmap systems components touch grid', action: toggleViewAccessMatrix },
     { id: 'toggle-view-resource-tree',        label: 'Toggle View Resource Tree',        keywords: 'resource tree sidebar explorer',              action: toggleViewResourceTree },
     { id: 'toggle-view-detail',               label: 'Toggle View Detail',               keywords: 'detail inspector selection',                  action: toggleViewDetail },
+    { id: 'toggle-view-logs',                 label: 'Toggle View Logs',                 keywords: 'logs log console output messages bottom',     action: toggleViewLogs },
     { id: 'toggle-view-options',              label: 'Toggle View Options',              keywords: 'options preferences settings editor',         action: toggleViewOptions },
     { id: 'show-source-current-span', label: 'Show Source for Current Span', keywords: 'source preview profiler span go to attribution', action: openSourcePreviewForCurrentSpan },
     { id: 'save-layout-as-default', label: 'Save Layout as Default', keywords: 'layout default template save', action: saveLayoutAsDefault },
+    { id: 'reset-layout', label: 'Reset Layout to Default', keywords: 'reset layout default restore panels dock recover lost', action: resetLayout },
     { id: 'toggle-theme',  label: 'Toggle Dark / Light Mode', keywords: 'theme dark light',  action: toggleTheme },
+    { id: 'debug-color-palettes', label: 'Debug: Color Palettes', keywords: 'debug color colour palette palettes swatches dev', action: toggleViewPaletteDebug },
     ...buildProfilerPaletteCommands(),
     { id: 'reload',        label: 'Reload',                   keywords: 'refresh',           action: () => location.reload() },
     { id: 'about',         label: 'About Typhon Workbench',   keywords: 'version info',      action: () => {} },

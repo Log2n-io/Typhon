@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
 using System.Diagnostics.Tracing;
+using Typhon.Profiler;
 
 namespace Typhon.Engine.Internals;
 
@@ -24,7 +25,9 @@ namespace Typhon.Engine.Internals;
 /// <para>
 /// <b>Event-ID dispatch:</b> hot path is a single <c>switch</c> on <see cref="EventWrittenEventArgs.EventId"/>. Only four IDs are handled
 /// (1=GCStart, 2=GCEnd, 9=SuspendEEBegin, 3=RestartEEEnd) — all others fall through to a no-op, which is cheap. We intentionally do not
-/// subscribe to Verbose level, so <c>GCAllocationTick</c> (ID 10) is not delivered in the first place.
+/// subscribe to Verbose level, so <c>GCAllocationTick</c> (ID 10) is not delivered in the first place. <c>GCSuspendEEBegin</c> fires for
+/// <i>every</i> execution-engine suspension, not just GC — the EventPipe CPU sample profiler suspends the EE ~1000×/s to walk stacks — so
+/// suspend / restart events are filtered to GC-reason suspensions (see <see cref="IsGcSuspendReason"/>); recording the rest would flood the trace.
 /// </para>
 /// <para>
 /// <b>Timestamp source:</b> <see cref="Stopwatch.GetTimestamp()"/> in the callback rather than <see cref="EventWrittenEventArgs.TimeStamp"/>.
@@ -40,6 +43,12 @@ internal sealed class GcEventListener : EventListener
     private readonly GcEventQueue _queue;
     private volatile EventSource _runtimeSource;
     private bool _ready;
+
+    /// <summary>
+    /// Latched in <see cref="HandleSuspendBegin"/>: true when the current EE suspension is a GC suspension we recorded, so the unpayloaded
+    /// <c>GCRestartEEEnd</c> can be paired to it. EE suspend/restart is globally serialized and never nests, so a single flag is sufficient.
+    /// </summary>
+    private bool _suspendRecorded;
 
     public GcEventListener(GcEventQueue queue)
     {
@@ -141,21 +150,43 @@ internal sealed class GcEventListener : EventListener
 
     private void HandleSuspendBegin(EventWrittenEventArgs e)
     {
-        // GCSuspendEEBegin_V1 payload order: Count(u32), Reason(u32)
+        // GCSuspendEEBegin_V1 payload order: Count(u32), Reason(u32). The event fires for EVERY EE suspension, not just GC
+        // (see IsGcSuspendReason) — non-GC suspensions are dropped, and the decision is latched so the unpayloaded
+        // GCRestartEEEnd can be paired to it.
         var payload = e.Payload;
         byte reason = 0;
         if (payload != null && payload.Count >= 2)
         {
             reason = (byte)Convert.ToUInt32(payload[1]);
         }
-        _queue.TryEnqueue(GcEventRecord.ForSuspendBegin(Stopwatch.GetTimestamp(), reason));
+
+        _suspendRecorded = IsGcSuspendReason(reason);
+        if (_suspendRecorded)
+        {
+            _queue.TryEnqueue(GcEventRecord.ForSuspendBegin(Stopwatch.GetTimestamp(), reason));
+        }
     }
 
     private void HandleRestartEnd(EventWrittenEventArgs e)
     {
         _ = e;
-        _queue.TryEnqueue(GcEventRecord.ForRestartEnd(Stopwatch.GetTimestamp()));
+        // GCRestartEEEnd carries no Reason payload, so pair it to the preceding suspend-begin: emit only when that
+        // suspension was a GC suspension we recorded. EE suspend/restart is globally serialized and never nests, so
+        // the single latched flag always reflects the matching suspend.
+        if (_suspendRecorded)
+        {
+            _queue.TryEnqueue(GcEventRecord.ForRestartEnd(Stopwatch.GetTimestamp()));
+        }
     }
+
+    /// <summary>
+    /// True when <paramref name="reason"/> (a <see cref="GcSuspendReason"/> value) is a garbage-collection suspension —
+    /// <see cref="GcSuspendReason.ForGC"/> or <see cref="GcSuspendReason.ForGCPrep"/>. <c>GCSuspendEEBegin</c> fires for every
+    /// execution-engine suspension; the EventPipe CPU sample profiler suspends the EE ~1000×/s with <see cref="GcSuspendReason.Other"/>
+    /// to walk stacks, and those must not be recorded as GC events.
+    /// </summary>
+    internal static bool IsGcSuspendReason(byte reason) =>
+        (GcSuspendReason)reason is GcSuspendReason.ForGC or GcSuspendReason.ForGCPrep;
 
     public override void Dispose()
     {

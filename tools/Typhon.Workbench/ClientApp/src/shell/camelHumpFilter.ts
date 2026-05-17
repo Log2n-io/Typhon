@@ -5,6 +5,11 @@
  * letters of each word (the "humps"). Mixed-case input is normalised to uppercase
  * before comparing, so "tvrt" and "TvRt" both work. Falls back to a plain
  * case-insensitive substring match when hump matching fails.
+ *
+ * This is the command-palette matcher only — a palette label is a phrase, so word
+ * initials are matched *across* the whole label. Method-declaration filtering is a
+ * different policy (a within-word match) and has its own matcher — see
+ * panels/profiler/methodNameMatch.ts.
  */
 
 /** Positions of the first character of each whitespace-separated word in `label`. */

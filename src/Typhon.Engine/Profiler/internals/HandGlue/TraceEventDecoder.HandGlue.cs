@@ -141,9 +141,15 @@ public static partial class TraceEventDecoder
 /// <summary>Decoded DTO for a <see cref="TraceEventKind.QueryDefinitionDescribe"/> instant record (#342, v9).</summary>
 public sealed record QueryDefinitionDescribeEventDto : TraceEventDto
 {
+    // ReSharper disable UnusedAutoPropertyAccessor.Global
     public override byte KindByte => (byte)TraceEventKind.QueryDefinitionDescribe;
 
-    /// <summary>0 = View, 1 = EcsQuery — discriminator for the (Kind, LocalId) identity pair.</summary>
+    /// <summary>
+    /// 0 = View, 1 = EcsQuery — discriminator for the (Kind, LocalId) identity pair. Serialized as <c>queryKind</c>: the camelCase of the CLR name (<c>kind</c>)
+    /// collides with the polymorphic type-discriminator property the <c>TraceEventDto</c> hierarchy already uses, which makes System.Text.Json reject the whole
+    /// hierarchy at metadata-resolution time.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonPropertyName("queryKind")]
     public byte Kind { get; init; }
 
     /// <summary>ViewId or EcsQueryId — the runtime-assigned identity within its Kind's namespace.</summary>
@@ -162,6 +168,7 @@ public sealed record QueryDefinitionDescribeEventDto : TraceEventDto
 
     public QueryFieldEvaluatorShapeDto[] Evaluators { get; init; }
     public ushort[] FieldDependencies { get; init; }
+    // ReSharper restore UnusedAutoPropertyAccessor.Global
 }
 
 /// <summary>Decoded DTO for a <see cref="TraceEventKind.QueryArgs"/> instant record (#342, v9).</summary>

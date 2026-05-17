@@ -17,9 +17,6 @@
         <Project Path="src/Typhon.Profiler/Typhon.Profiler.csproj" />
     </Folder>
     <Folder Name="/test/">
-        <Project Path="test/AntHill/AntHill.csproj">
-            <BuildType Project="Debug" />
-        </Project>
         <Project Path="test/Typhon.Analyzers.Tests/Typhon.Analyzers.Tests.csproj" />
         <Project Path="test/Typhon.ARPG.Schema/Typhon.ARPG.Schema.csproj" />
         <Project Path="test/Typhon.ARPG.Shell/Typhon.ARPG.Shell.csproj" />
@@ -29,6 +26,13 @@
         <Project Path="test/Typhon.IOProfileRunner/Typhon.IOProfileRunner.csproj" />
         <Project Path="test/Typhon.MonitoringDemo/Typhon.MonitoringDemo.csproj" />
         <Project Path="test/Typhon.Workbench.Tests/Typhon.Workbench.Tests.csproj" />
+    </Folder>
+    <Folder Name="/demo/">
+        <Project Path="demo/AntHill/AntHill.Core/AntHill.Core.csproj" />
+        <Project Path="demo/AntHill/AntHill.Demo/AntHill.Demo.csproj">
+            <BuildType Project="Debug" />
+        </Project>
+        <Project Path="demo/AntHill/AntHill.Harness/AntHill.Harness.csproj" />
     </Folder>
     <Folder Name="/tools/">
         <Project Path="tools/Typhon.Workbench/Typhon.Workbench.csproj" />

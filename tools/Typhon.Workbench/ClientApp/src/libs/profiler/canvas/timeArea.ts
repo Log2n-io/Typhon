@@ -782,7 +782,6 @@ function strokeHoverContour(
 function drawOffCpuOverlay(
   ctx: CanvasRenderingContext2D,
   store: OffCpuStore,
-  threadSlot: number,
   ty: number,
   laneHeight: number,
   visStartUs: number,
@@ -790,7 +789,6 @@ function drawOffCpuOverlay(
   gutterWidth: number,
   width: number,
   pxOfUs: (us: number) => number,
-  selection: ProfilerSelection | null,
   theme: StudioTheme,
 ): void {
   const n = store.startUs.length;
@@ -838,19 +836,6 @@ function drawOffCpuOverlay(
     }
 
     ctx.globalAlpha = prevAlpha;
-  }
-
-  // Selection outline — full alpha, drawn over the band. The selected interval carries exact float endpoints from this
-  // same store, so `pxOfUs` reproduces its on-screen rect precisely (no fuzzy match needed).
-  if (selection !== null && selection.kind === 'off-cpu' && selection.interval.threadSlot === threadSlot) {
-    const sx2 = pxOfUs(selection.interval.endUs);
-    let sx1 = pxOfUs(selection.interval.startUs);
-    if (sx2 >= gutterWidth && sx1 <= width) {
-      if (sx1 < gutterWidth) sx1 = gutterWidth;
-      ctx.strokeStyle = theme.selectedOutline;
-      ctx.lineWidth = 1.5;
-      ctx.strokeRect(sx1 + 0.5, ty + 0.5, Math.max(sx2 - sx1, 2) - 1, laneHeight - 1);
-    }
   }
 }
 
@@ -1074,7 +1059,7 @@ function drawSlotLane(
   // Off-CPU overlay — drawn last so the translucent band composites over the chunk + span rows. Opt-in via the
   // TimeArea filter toggle; skipped entirely when the slot has no scheduling data.
   if (showOffCpu && offCpuStore !== undefined) {
-    drawOffCpuOverlay(ctx, offCpuStore, threadSlot, ty, track.height, visStartUs, visEndUs, gutterWidth, width, pxOfUs, selection, theme);
+    drawOffCpuOverlay(ctx, offCpuStore, ty, track.height, visStartUs, visEndUs, gutterWidth, width, pxOfUs, theme);
   }
 }
 

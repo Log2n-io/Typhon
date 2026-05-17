@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Activity, Blocks, Clock, Crosshair, ExternalLink, FileCode, Layers, Search, Tag } from 'lucide-react';
-import type { ChunkSpan, MarkerSelection, OffCpuInterval, PhaseMarker, PhaseSpan, SpanData } from '@/libs/profiler/model/traceModel';
-import { OffCpuCategoryNames, TraceEventKind, WaitReasonNames } from '@/libs/profiler/model/types';
+import type { ChunkSpan, MarkerSelection, PhaseMarker, PhaseSpan, SpanData } from '@/libs/profiler/model/traceModel';
+import { TraceEventKind } from '@/libs/profiler/model/types';
 import type { ProfilerSelection } from '@/stores/useProfilerSelectionStore';
 import { useProfilerSessionStore } from '@/stores/useProfilerSessionStore';
 import { useProfilerStatsStore } from '@/stores/useProfilerStatsStore';
@@ -10,7 +10,8 @@ import { useSourceLocationStore } from '@/stores/useSourceLocationStore';
 import { useSessionStore } from '@/stores/useSessionStore';
 import { useOptionsStore } from '@/stores/useOptionsStore';
 import { openSourcePreview } from '@/shell/commands/openSchemaBrowser';
-import { openViewExecutionInspector } from '@/shell/commands/profilerCommands';
+import { openViewCallTree, openViewExecutionInspector } from '@/shell/commands/profilerCommands';
+import { spanKindScope, systemScope, useCallTreeScopeStore } from '@/stores/useCallTreeScopeStore';
 import { useExecutionInspectorStore } from '@/panels/ExecutionInspector/useExecutionInspectorStore';
 import { useQueryPlanStore } from '@/panels/QueryPlanTree/useQueryPlanStore';
 import {
@@ -50,7 +51,6 @@ export default function ProfilerDetail({ selection }: Props): React.JSX.Element 
     case 'marker':       return <MarkerDetail marker={selection.marker} />;
     case 'phase':        return <PhaseDetail phase={selection.phase} tickNumber={selection.tickNumber} />;
     case 'phase-marker': return <PhaseMarkerDetail marker={selection.marker} tickNumber={selection.tickNumber} />;
-    case 'off-cpu':      return <OffCpuDetail interval={selection.interval} />;
   }
 }
 
@@ -84,8 +84,11 @@ function SpanDetail({ span }: { span: SpanData }): React.JSX.Element {
   const setEiSelected = useExecutionInspectorStore((s) => s.setSelected);
   const setPlanFocus = useQueryPlanStore((s) => s.setFocus);
   const setPlanSelectedExecution = useQueryPlanStore((s) => s.setSelectedExecution);
+  const setCallTreeScope = useCallTreeScopeStore((s) => s.setScope);
   const [openError, setOpenError] = useState<string | null>(null);
   const loc = resolve(span.rawEvent?.sourceLocationId);
+  // CPU sampling is file-mode only — the Call Tree (and this scope command) exist for trace sessions.
+  const canScopeCallTree = sessionKind === 'trace';
 
   // Look up the per-tick QueryPlan execution(s) parented under this span. Returns empty for non-system
   // spans or sessions without a query catalog (Open mode). Two stages because parent linking is only
@@ -145,6 +148,12 @@ function SpanDetail({ span }: { span: SpanData }): React.JSX.Element {
     setPlanFocus({ kind, localId });
     setPlanSelectedExecution(matchedExecution);
     openViewExecutionInspector();
+  }
+
+  function handleScopeCallTree(): void {
+    if (!sessionId) return;
+    setCallTreeScope(sessionId, spanKindScope(span.kind, span.name));
+    openViewCallTree();
   }
 
   return (
@@ -516,7 +525,7 @@ function SpanDetail({ span }: { span: SpanData }): React.JSX.Element {
           )}
         </dl>
 
-        {(loc || matchedExecution) && (
+        {(loc || matchedExecution || canScopeCallTree) && (
           <div className="mt-2 flex flex-wrap gap-2 border-t border-border pt-2">
             {loc && (
               <>
@@ -535,6 +544,13 @@ function SpanDetail({ span }: { span: SpanData }): React.JSX.Element {
                 title={`Open this tick's execution of EcsQuery #${matchedExecution.definitionId?.localId} in the Execution Inspector`}
                 className="flex items-center gap-1 rounded border border-border bg-background px-2 py-0.5 text-[11px] hover:bg-accent">
                 <Search className="h-3 w-3" /> Inspect query execution
+              </button>
+            )}
+            {canScopeCallTree && (
+              <button type="button" onClick={handleScopeCallTree}
+                title="Open the CPU Call Tree scoped to this span kind"
+                className="flex items-center gap-1 rounded border border-border bg-background px-2 py-0.5 text-[11px] hover:bg-accent">
+                <Activity className="h-3 w-3" /> Scope Call Tree to this
               </button>
             )}
             {openError && <span className="w-full truncate text-[11px] text-destructive" title={openError}>{openError.length > 60 ? openError.slice(0, 60) + '…' : openError}</span>}
@@ -557,12 +573,15 @@ function ChunkDetail({ chunk }: { chunk: ChunkSpan }): React.JSX.Element {
   const setEiSelected = useExecutionInspectorStore((s) => s.setSelected);
   const setPlanFocus = useQueryPlanStore((s) => s.setFocus);
   const setPlanSelectedExecution = useQueryPlanStore((s) => s.setSelectedExecution);
+  const setCallTreeScope = useCallTreeScopeStore((s) => s.setScope);
   // Look up which tick this chunk belongs to by binary-searching tick summaries against the chunk's startUs.
   // Required for the (systemIdx, tickIndex) round-trip key — ChunkSpan doesn't carry the tickNumber directly
   // because chunks are stored under their owning TickData.chunks array, not tagged individually.
   const tickNumber = useProfilerSessionStore((s) => findTickNumberForUs(s.metadata?.tickSummaries ?? undefined, chunk.startUs));
   const [openError, setOpenError] = useState<string | null>(null);
   const loc = resolveSystem(chunk.systemIndex);
+  // CPU sampling is file-mode only — the Call Tree (and this scope command) exist for trace sessions.
+  const canScopeCallTree = sessionKind === 'trace';
 
   const isProfilerSession = sessionKind === 'trace' || sessionKind === 'attach';
   const execsQuery = useGetApiSessionsSessionIdProfilerExecutionsBySystemTickSystemIdxTickIndex(
@@ -598,6 +617,12 @@ function ChunkDetail({ chunk }: { chunk: ChunkSpan }): React.JSX.Element {
     setPlanFocus({ kind, localId });
     setPlanSelectedExecution(matchedExecution);
     openViewExecutionInspector();
+  }
+
+  function handleScopeCallTree(): void {
+    if (!sessionId) return;
+    setCallTreeScope(sessionId, systemScope(chunk.systemIndex, chunk.systemName || `System ${chunk.systemIndex}`));
+    openViewCallTree();
   }
 
   return (
@@ -645,7 +670,7 @@ function ChunkDetail({ chunk }: { chunk: ChunkSpan }): React.JSX.Element {
           )}
         </dl>
 
-        {(loc || matchedExecution) && (
+        {(loc || matchedExecution || canScopeCallTree) && (
           <div className="mt-2 flex flex-wrap gap-2 border-t border-border pt-2">
             {loc && (
               <>
@@ -664,6 +689,13 @@ function ChunkDetail({ chunk }: { chunk: ChunkSpan }): React.JSX.Element {
                 title={`Open this tick's execution of EcsQuery #${matchedExecution.definitionId?.localId} in the Execution Inspector`}
                 className="flex items-center gap-1 rounded border border-border bg-background px-2 py-0.5 text-[11px] hover:bg-accent">
                 <Search className="h-3 w-3" /> Inspect query execution
+              </button>
+            )}
+            {canScopeCallTree && (
+              <button type="button" onClick={handleScopeCallTree}
+                title="Open the CPU Call Tree scoped to this system"
+                className="flex items-center gap-1 rounded border border-border bg-background px-2 py-0.5 text-[11px] hover:bg-accent">
+                <Activity className="h-3 w-3" /> Scope Call Tree to this
               </button>
             )}
             {openError && <span className="w-full truncate text-[11px] text-destructive" title={openError}>{openError.length > 60 ? openError.slice(0, 60) + '…' : openError}</span>}
@@ -847,50 +879,6 @@ function PhaseMarkerDetail({ marker, tickNumber }: { marker: PhaseMarker; tickNu
               <dd className="font-mono tabular-nums text-foreground">{marker.detail}</dd>
             </>
           )}
-        </dl>
-      </div>
-    </div>
-  );
-}
-
-// ─── Off-CPU interval (OS thread switched out) ────────────────────────────────────────────────
-
-function OffCpuDetail({ interval }: { interval: OffCpuInterval }): React.JSX.Element {
-  const globalStartUs = useGlobalStartUs();
-  const categoryName = OffCpuCategoryNames[interval.category] ?? 'Other';
-  const waitReasonName = WaitReasonNames[interval.waitReason] ?? `Reason ${interval.waitReason}`;
-  return (
-    <div className="flex h-full flex-col gap-3 overflow-y-auto bg-background p-3">
-      <div className="rounded-md border border-border bg-card p-3 text-[12px]">
-        <Header icon={<Clock className="h-4 w-4 text-muted-foreground" />} title={`Off-CPU — ${categoryName}`} suffix="thread switched out" />
-        <dl className={DL_CLASS}>
-          <dt className="text-muted-foreground">Thread slot</dt>
-          <dd className="font-mono tabular-nums text-foreground">{interval.threadSlot}</dd>
-
-          <dt className="text-muted-foreground">Wait reason</dt>
-          <dd className="font-mono tabular-nums text-foreground">{waitReasonName}</dd>
-
-          <dt className="text-muted-foreground">Category</dt>
-          <dd className="font-mono tabular-nums text-foreground">{categoryName}</dd>
-
-          <dt className="text-muted-foreground">Start</dt>
-          <dd className="font-mono tabular-nums text-foreground">{formatUs(interval.startUs - globalStartUs)}</dd>
-
-          <dt className="text-muted-foreground">End</dt>
-          <dd className="font-mono tabular-nums text-foreground">{formatUs(interval.endUs - globalStartUs)}</dd>
-
-          <dt className="text-muted-foreground">Duration</dt>
-          <dd className="font-mono tabular-nums text-foreground">{formatDurationUs(interval.durationUs)}</dd>
-
-          {interval.readyTimeUs > 0 && (
-            <>
-              <dt className="text-muted-foreground">Ready-queue wait</dt>
-              <dd className="font-mono tabular-nums text-foreground">{formatDurationUs(interval.readyTimeUs)}</dd>
-            </>
-          )}
-
-          <dt className="text-muted-foreground">Last CPU</dt>
-          <dd className="font-mono tabular-nums text-foreground">{interval.processorNumber}</dd>
         </dl>
       </div>
     </div>

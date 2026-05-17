@@ -1054,10 +1054,8 @@ function routeSelection(
       // Treat mini-row ops as spans (they ARE SpanData under the hood — stored in projection arrays).
       setSelected({ kind: 'span', span: hit.op });
       return;
-    case 'off-cpu':
-      // Off-CPU overlay bar — surface wait reason / ready-queue latency in its own DetailPane branch.
-      setSelected({ kind: 'off-cpu', interval: hit.interval });
-      return;
+    // 'off-cpu' is intentionally not routed to a selection — off-CPU overlay bars are a hover-only
+    // visual (the hover tooltip surfaces wait reason / duration); a click on one is a no-op.
     case 'gutter-chevron':
       // Already handled in pointerdown; never reaches here on click-without-drag
       return;

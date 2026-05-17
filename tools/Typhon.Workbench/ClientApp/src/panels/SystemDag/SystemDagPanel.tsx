@@ -155,9 +155,7 @@ export default function SystemDagPanel(_props: IDockviewPanelProps) {
     });
     if (!bars) return null;
     const out = new Set<string>();
-    for (const phase of bars.phases) {
-      for (const bar of phase.bars) out.add(bar.systemName);
-    }
+    for (const bar of bars.cpChain) out.add(bar.systemName);
     return out;
   }, [topology, metadata, range, derivedEdges]);
 

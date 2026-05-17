@@ -74,24 +74,28 @@ export function toggleViewDetail(): void {
 }
 
 /**
- * Toggle the Logs panel inside the bottom edge group.
- * If the group is collapsed, expand and focus Logs.
- * If expanded and Logs is already active, collapse the group.
- * If expanded and another tab is active, switch focus to Logs without collapsing.
+ * Toggle / surface the Logs panel. Logs normally lives in the bottom edge group: when it's the
+ * visible tab there, a repeat call collapses the group; otherwise the group is expanded (if needed)
+ * and Logs is focused. A stale saved layout can restore Logs into a different group (or with no
+ * bottom edge group at all) — in that case we skip the collapse/expand dance and just focus the
+ * panel wherever it lives, so View → Logs is never a silent no-op. (DockHost's onReady safety net
+ * guarantees the panel exists post-restore.)
  */
 export function toggleViewLogs(): void {
   const api = registeredApi;
   if (!api) return;
+  const panel = api.getPanel('logs');
+  if (!panel) return;
   const eg = api.getEdgeGroup('bottom');
-  if (!eg) return;
-  if (eg.isCollapsed()) {
-    eg.expand();
-    api.getPanel('logs')?.focus();
+  // Logs sits in the bottom edge group and is already the visible tab — second call hides it.
+  if (eg && !eg.isCollapsed() && panel.api.isActive) {
+    eg.collapse();
     return;
   }
-  const panel = api.getPanel('logs');
-  if (panel?.api.isActive) eg.collapse();
-  else panel?.focus();
+  if (eg?.isCollapsed()) {
+    eg.expand();
+  }
+  panel.focus();
 }
 
 // --- Dynamic view toggles (close if open, open if closed) ---
@@ -134,6 +138,11 @@ export function toggleViewAccessMatrix(): void {
 
 export function toggleViewOptions(): void {
   toggleDockPanel('options', 'Options', 'Options');
+}
+
+/** Debug-only: the colour-palette reference panel. Reachable from the command palette alone — no View-menu entry. */
+export function toggleViewPaletteDebug(): void {
+  toggleDockPanel('palette-debug', 'PaletteDebug', 'Color Palettes');
 }
 
 // --- Source preview (action command, not a view toggle) ---
@@ -181,6 +190,25 @@ export function saveLayoutAsDefault(): void {
   const kind = useSessionStore.getState().kind;
   if (kind === 'none') return;
   useDockLayoutStore.getState().saveTemplate(kind, api.toJSON());
+}
+
+/**
+ * Module-level reset-layout hook. DockHost owns `buildDefaultLayout`, so it publishes a reset
+ * closure here (mirroring {@link registerDockApi}); the View menu item and palette command invoke
+ * it without reaching into DockHost. No-op until DockHost has mounted.
+ */
+let registeredResetLayout: (() => void) | null = null;
+
+export function registerResetLayout(fn: (() => void) | null): void {
+  registeredResetLayout = fn;
+}
+
+/**
+ * Discard the current dock arrangement and rebuild this session kind's built-in default layout —
+ * the recovery path when a panel has been dragged somewhere it can no longer be reached.
+ */
+export function resetLayout(): void {
+  registeredResetLayout?.();
 }
 
 function toggleDockPanel(id: string, componentKey: string, title: string): void {

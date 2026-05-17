@@ -1,8 +1,8 @@
 import { create } from 'zustand';
-import type { ChunkSpan, MarkerSelection, OffCpuInterval, PhaseMarker, PhaseSpan, SpanData } from '@/libs/profiler/model/traceModel';
+import type { ChunkSpan, MarkerSelection, PhaseMarker, PhaseSpan, SpanData } from '@/libs/profiler/model/traceModel';
 
 /**
- * Discriminated union of profiler-panel selections. The profiler can select seven kinds of things, each
+ * Discriminated union of profiler-panel selections. The profiler can select six kinds of things, each
  * mapped to its own kind tag so DetailPanel's render branches know exactly what they're looking at:
  *
  *  - **span**: a nested span inside a scheduler chunk (Transaction.Commit, BTree.Insert, etc.)
@@ -11,7 +11,9 @@ import type { ChunkSpan, MarkerSelection, OffCpuInterval, PhaseMarker, PhaseSpan
  *  - **marker**: a discrete event instant (GC, memory alloc event)
  *  - **phase**: a tick lifecycle phase span (RuntimePhaseSpan — WriteTickFence, UoW Flush, OutputPhase, etc.)
  *  - **phase-marker**: a single-point lifecycle landmark (UoW Create / UoW Flush glyph in the phase track)
- *  - **off-cpu**: an off-CPU interval — a gap where a thread was switched out (overlay bar on a thread lane)
+ *
+ * Off-CPU overlay bars are deliberately NOT selectable — they're a hover-only visual (the hover tooltip
+ * surfaces wait reason / duration); see routeSelection in TimeArea.tsx.
  */
 export type ProfilerSelection =
   | { kind: 'span'; span: SpanData }
@@ -19,8 +21,7 @@ export type ProfilerSelection =
   | { kind: 'tick'; tickNumber: number }
   | { kind: 'marker'; marker: MarkerSelection }
   | { kind: 'phase'; phase: PhaseSpan; tickNumber: number }
-  | { kind: 'phase-marker'; marker: PhaseMarker; tickNumber: number }
-  | { kind: 'off-cpu'; interval: OffCpuInterval };
+  | { kind: 'phase-marker'; marker: PhaseMarker; tickNumber: number };
 
 interface ProfilerSelectionState {
   selected: ProfilerSelection | null;

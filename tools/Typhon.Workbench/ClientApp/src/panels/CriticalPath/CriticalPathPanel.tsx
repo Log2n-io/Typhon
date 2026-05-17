@@ -55,13 +55,13 @@ export default function CriticalPathPanel(_props: IDockviewPanelProps) {
     [tickSummaries, range, viewRange],
   );
 
-  // Worker count drives the per-phase parallelism band (A2). Coerced once at the boundary so
-  // the view can render the band unconditionally and bail on null inside.
+  // Worker count drives the worker-occupancy ribbon (§5.5). Coerced once at the boundary; the
+  // ribbon is meaningful even on a single-worker trace, so the floor is 1.
   const workerCount = useMemo(() => {
     const raw = metadata?.header?.workerCount;
     if (raw == null) return null;
     const n = typeof raw === 'number' ? raw : Number(raw);
-    return Number.isFinite(n) && n >= 2 ? n : null;
+    return Number.isFinite(n) && n >= 1 ? n : null;
   }, [metadata]);
 
   const derivedEdges = useMemo(

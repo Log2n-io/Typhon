@@ -86,27 +86,25 @@ public sealed class TraceFileReader : IDisposable
     public const ushort MinSupportedVersion = 8;
 
     /// <summary>
-    /// On-disk size of the v8 header (no query-definition trailer offsets). Computed from the v8 field layout:
-    /// Magic(4) + Version(2) + Flags(2) + TimestampFrequency(8) + BaseTickRate(4) + WorkerCount(1)
-    /// + SystemCount(2) + ArchetypeCount(2) + ComponentTypeCount(2) + CreatedUtcTicks(8)
-    /// + SamplingSessionStartQpc(8) + FileTableOffset(8) + SourceLocationManifestOffset(8)
-    /// + Reserved0(2) + Reserved1(2) = 63 bytes. v9 grows to 79 bytes by inserting two 8-byte trailer
-    /// offsets before the reserved pad.
+    /// On-disk header layout segments, shared across versions. The prefix (Magic .. SourceLocationManifestOffset) is byte-identical in every supported
+    /// version; later versions append trailer-offset fields before the trailing reserved pad. Total sizes: v8 = 63 bytes, v9 = 79, v10 = 87.
     /// </summary>
-    private const int V8HeaderSize = 63;
+    private const int HeaderCommonPrefixSize = 59; // Magic .. SourceLocationManifestOffset
+    private const int HeaderQueryOffsetsSize = 16; // QuerySourceStringTableOffset + QueryDefinitionTableOffset (v9+)
+    private const int HeaderCpuOffsetSize = 8;     // CpuSampleSectionOffset (v10+)
+    private const int HeaderReservedSize = 4;      // Reserved0 + Reserved1 (every version)
 
     /// <summary>Reads and validates the file header. Must be called first.</summary>
     /// <exception cref="InvalidDataException">If magic or version is wrong.</exception>
     public TraceFileHeader ReadHeader()
     {
-        // The header is read as raw bytes and decoded based on the on-disk version:
-        //  - v9 (current): full 87-byte layout including QuerySourceStringTableOffset + QueryDefinitionTableOffset.
-        //  - v8: 71-byte layout — the query-definition trailer offsets are absent; we zero them in the returned struct.
-        // Older versions are rejected by MinSupportedVersion.
+        // The header is read as raw bytes and decoded by on-disk version. The prefix (Magic .. SourceLocationManifestOffset) is byte-identical in every
+        // supported version; v9 appends the two query-definition trailer offsets and v10 appends CpuSampleSectionOffset — each before the trailing reserved
+        // pad. A field absent on disk for an older version is zeroed in the returned struct. Older versions are rejected by MinSupportedVersion.
         var fullSize = Unsafe.SizeOf<TraceFileHeader>();
         Span<byte> headerBytes = stackalloc byte[fullSize];
 
-        // Peek the first 6 bytes to determine version before reading the right number of trailing bytes.
+        // Peek the first 6 bytes (Magic + Version) to pick the layout before reading the rest.
         Span<byte> peek = stackalloc byte[6];
         _stream.ReadExactly(peek);
 
@@ -127,32 +125,36 @@ public sealed class TraceFileReader : IDisposable
                 + $"{MinSupportedVersion}..{TraceFileHeader.CurrentVersion}. Re-record against a current build.");
         }
 
-        // Copy the peek into the header buffer, then read the remaining bytes based on version.
         peek.CopyTo(headerBytes);
-        if (version == 8)
+
+        // Common prefix beyond the peek — present in every supported version.
+        _stream.ReadExactly(headerBytes[6..HeaderCommonPrefixSize]);
+        var cursor = HeaderCommonPrefixSize;
+
+        // QuerySourceStringTableOffset + QueryDefinitionTableOffset — on disk for v9+, zeroed for v8.
+        if (version >= 9)
         {
-            // v8 on-disk layout (63 bytes total). Beyond the 6-byte prefix we just read, that's 57 more bytes ending with the Reserved0/Reserved1 pair.
-            // The v9 in-memory struct grew by 16 bytes by inserting QuerySourceStringTableOffset + QueryDefinitionTableOffset BEFORE the Reserved pad.
-            // To upcast a v8 header into the v9 in-memory layout we read the v8 tail verbatim, copy the prefix bytes (Flags through SourceLocationManifestOffset)
-            // into the same positions, zero the two new offsets, and shift the trailing reserved bytes into the new reserved position.
-            Span<byte> v8Tail = stackalloc byte[V8HeaderSize - 6]; // 57 bytes
-            _stream.ReadExactly(v8Tail);
-            // v8 tail layout: Flags(2) + TimestampFrequency(8) + BaseTickRate(4) + WorkerCount(1)
-            //   + SystemCount(2) + ArchetypeCount(2) + ComponentTypeCount(2) + CreatedUtcTicks(8)
-            //   + SamplingSessionStartQpc(8) + FileTableOffset(8) + SourceLocationManifestOffset(8)
-            //   = 53 bytes, then Reserved0(2) + Reserved1(2) = 4 bytes. Total = 57.
-            const int v8TailPrefixLen = 53; // bytes [0..53) of v8Tail = bytes [6..59) absolute
-            v8Tail[..v8TailPrefixLen].CopyTo(headerBytes[6..]);
-            // Zero QuerySourceStringTableOffset + QueryDefinitionTableOffset (16 bytes at absolute [59..75)).
-            headerBytes.Slice(6 + v8TailPrefixLen, 16).Clear();
-            // Copy the 4 reserved bytes from v8 into v9 reserved slot (absolute [75..79)).
-            v8Tail.Slice(v8TailPrefixLen, 4).CopyTo(headerBytes[(6 + v8TailPrefixLen + 16)..]);
+            _stream.ReadExactly(headerBytes.Slice(cursor, HeaderQueryOffsetsSize));
         }
         else
         {
-            // v9+: read the rest directly.
-            _stream.ReadExactly(headerBytes[6..]);
+            headerBytes.Slice(cursor, HeaderQueryOffsetsSize).Clear();
         }
+        cursor += HeaderQueryOffsetsSize;
+
+        // CpuSampleSectionOffset — on disk for v10+, zeroed for earlier versions.
+        if (version >= 10)
+        {
+            _stream.ReadExactly(headerBytes.Slice(cursor, HeaderCpuOffsetSize));
+        }
+        else
+        {
+            headerBytes.Slice(cursor, HeaderCpuOffsetSize).Clear();
+        }
+        cursor += HeaderCpuOffsetSize;
+
+        // Reserved0 + Reserved1 trail every on-disk version.
+        _stream.ReadExactly(headerBytes.Slice(cursor, HeaderReservedSize));
 
         Header = MemoryMarshal.Read<TraceFileHeader>(headerBytes);
         return Header;
@@ -576,10 +578,14 @@ public sealed class TraceFileReader : IDisposable
             return ReadNextBlock(out records, out recordCount);
         }
         if (firstWord == TraceFileWriter.FileTableMagic ||
-            firstWord == TraceFileWriter.SourceLocationManifestMagic)
+            firstWord == TraceFileWriter.SourceLocationManifestMagic ||
+            firstWord == TraceFileWriter.QuerySourceStringTableMagic ||
+            firstWord == TraceFileWriter.QueryDefinitionTableMagic ||
+            firstWord == TraceFileWriter.CpuSampleSectionMagic)
         {
-            // Trailing source-location manifest sections (#302, Phase 3) — not a block. Rewind so a separate
-            // caller can read the trailer via TryReadSourceLocationManifest, and signal end-of-blocks.
+            // First trailing section marks end-of-blocks — none of these are event blocks. Rewind so the dedicated TryRead* helpers can seek to the trailer,
+            // and signal end-of-blocks. Trailer sections can appear in any order / subset (a CPU-sampled trace with no source-resolved frames carries no
+            // FileTable), so every known trailer magic must terminate the block scan, not just the #302 pair.
             _stream.Position -= bytesRead;
             return false;
         }
@@ -698,8 +704,8 @@ public sealed class TraceFileReader : IDisposable
     /// </summary>
     public bool TryReadSourceLocationManifest(out string[] files, out SourceLocationManifestEntry[] entries)
     {
-        files = Array.Empty<string>();
-        entries = Array.Empty<SourceLocationManifestEntry>();
+        files = [];
+        entries = [];
 
         if (Header.FileTableOffset == 0 || Header.SourceLocationManifestOffset == 0)
         {
@@ -762,6 +768,55 @@ public sealed class TraceFileReader : IDisposable
     }
 
     /// <summary>
+    /// Read the trailing <c>FileTable</c> (interned source-file paths) on its own. Unlike <see cref="TryReadSourceLocationManifest"/> — which requires the
+    /// <c>SourceLocationManifest</c> trailer to be present too — this reads the <c>FileTable</c> whenever <see cref="TraceFileHeader.FileTableOffset"/> is
+    /// non-zero. A trace can carry a populated <c>FileTable</c> (because CPU-sample frames resolved to source, #351) without any #302 call-site manifest, so
+    /// the CPU-sample loader needs a manifest-independent way to map a <c>CpuFrameSymbol.FileId</c> back to a path. Returns <c>false</c> when no FileTable
+    /// was written. Uses absolute seek; requires a seekable stream.
+    /// </summary>
+    /// <param name="files">Output: array of source-file paths indexed by <c>FileId</c>. Empty when the trace carries no FileTable.</param>
+    public bool TryReadFileTable(out string[] files)
+    {
+        files = [];
+        if (Header.FileTableOffset == 0)
+        {
+            return false;
+        }
+        if (!_stream.CanSeek)
+        {
+            throw new InvalidOperationException("TryReadFileTable requires a seekable stream.");
+        }
+
+        var savedPos = _stream.Position;
+        try
+        {
+            _stream.Position = Header.FileTableOffset;
+            var fileMagic = _binaryReader.ReadUInt32();
+            if (fileMagic != TraceFileWriter.FileTableMagic)
+            {
+                throw new InvalidDataException(
+                    $"Bad FileTable magic at offset {Header.FileTableOffset}: 0x{fileMagic:X8} (expected 0x{TraceFileWriter.FileTableMagic:X8})");
+            }
+            var fileCount = _binaryReader.ReadUInt32();
+            files = new string[fileCount];
+            for (uint i = 0; i < fileCount; i++)
+            {
+                var fileId = _binaryReader.ReadUInt16();
+                var path = ReadVarString();
+                if (fileId < files.Length)
+                {
+                    files[fileId] = path;
+                }
+            }
+            return true;
+        }
+        finally
+        {
+            _stream.Position = savedPos;
+        }
+    }
+
+    /// <summary>
     /// Read the trailing QuerySourceStringTable (#342, v9+). Returns <c>false</c> if the trace file doesn't carry one (offset in the header is zero — e.g.,
     /// v8 trace, or v9 trace with no Query Definition Export activity). Uses absolute seek; requires a seekable stream.
     /// </summary>
@@ -771,7 +826,7 @@ public sealed class TraceFileReader : IDisposable
     /// </param>
     public bool TryReadQuerySourceStringTable(out string[] strings)
     {
-        strings = Array.Empty<string>();
+        strings = [];
         if (Header.QuerySourceStringTableOffset == 0)
         {
             return false;
@@ -797,6 +852,81 @@ public sealed class TraceFileReader : IDisposable
             for (uint i = 0; i < count; i++)
             {
                 strings[i] = ReadVarString();
+            }
+            return true;
+        }
+        finally
+        {
+            _stream.Position = savedPos;
+        }
+    }
+
+    /// <summary>
+    /// Read the trailing CpuSampleSection (#351, v10+). Returns <c>false</c> if the trace file doesn't carry one (the header offset is zero — a v9-or-earlier
+    /// trace, or a v10 trace captured without CPU sampling). Uses absolute seek; requires a seekable stream.
+    /// </summary>
+    /// <param name="samples">Output: CPU samples, sorted by qpc and grouped per thread slot; each references a stack by <c>StackIndex</c>.</param>
+    /// <param name="stacks">Output: the interned stack table — each entry is a leaf-first array of frame ids into <paramref name="frameSymbols"/>.</param>
+    /// <param name="frameSymbols">Output: the interned frame symbols; <c>FileId</c> indexes the same <c>FileTable</c> the source-location manifest uses.</param>
+    public bool TryReadCpuSampleSection(out CpuSampleRecord[] samples, out ushort[][] stacks, out CpuFrameSymbol[] frameSymbols)
+    {
+        samples = [];
+        stacks = [];
+        frameSymbols = [];
+        if (Header.CpuSampleSectionOffset == 0)
+        {
+            return false;
+        }
+        if (!_stream.CanSeek)
+        {
+            throw new InvalidOperationException("TryReadCpuSampleSection requires a seekable stream.");
+        }
+
+        var savedPos = _stream.Position;
+        try
+        {
+            _stream.Position = Header.CpuSampleSectionOffset;
+            var magic = _binaryReader.ReadUInt32();
+            if (magic != TraceFileWriter.CpuSampleSectionMagic)
+            {
+                throw new InvalidDataException(
+                    $"Bad CpuSampleSection magic at offset {Header.CpuSampleSectionOffset}: 0x{magic:X8} "
+                    + $"(expected 0x{TraceFileWriter.CpuSampleSectionMagic:X8})");
+            }
+
+            var sampleCount = _binaryReader.ReadUInt32();
+            samples = new CpuSampleRecord[sampleCount];
+            for (uint i = 0; i < sampleCount; i++)
+            {
+                var qpc = _binaryReader.ReadInt64();
+                var rawSlot = _binaryReader.ReadByte();
+                var sampleType = _binaryReader.ReadByte();
+                var stackIndex = _binaryReader.ReadUInt32();
+                samples[i] = new CpuSampleRecord(qpc, rawSlot == 0xFF ? -1 : rawSlot, sampleType, stackIndex);
+            }
+
+            var stackCount = _binaryReader.ReadUInt32();
+            stacks = new ushort[stackCount][];
+            for (uint i = 0; i < stackCount; i++)
+            {
+                var frameCount = _binaryReader.ReadUInt16();
+                var frames = new ushort[frameCount];
+                for (var f = 0; f < frameCount; f++)
+                {
+                    frames[f] = _binaryReader.ReadUInt16();
+                }
+                stacks[i] = frames;
+            }
+
+            var frameSymbolCount = _binaryReader.ReadUInt32();
+            frameSymbols = new CpuFrameSymbol[frameSymbolCount];
+            for (uint i = 0; i < frameSymbolCount; i++)
+            {
+                var frameId = _binaryReader.ReadUInt16();
+                var fileId = _binaryReader.ReadUInt16();
+                var line = _binaryReader.ReadUInt32();
+                var method = ReadShortString();
+                frameSymbols[i] = new CpuFrameSymbol(frameId, fileId, line, method);
             }
             return true;
         }

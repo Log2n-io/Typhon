@@ -118,6 +118,20 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
     public string[] QuerySourceStrings { get; private set; } = [];
 
     /// <summary>
+    /// #351 Phase 4 — CPU-sample trailer section loaded from the source <c>.typhon-trace</c> at build completion:
+    /// raw samples + interned stacks, the resolved frame-symbol manifest, and the per-thread sample index. Mirrors how
+    /// <see cref="SourceLocationManifest"/> is loaded (from the source trace, not the sidecar cache).
+    /// <see cref="CpuSampleData.Empty"/> for traces without the section, for replay files, and on any read failure.
+    /// </summary>
+    public CpuSampleData CpuSampleData { get; private set; } = CpuSampleData.Empty;
+
+    /// <summary>
+    /// #351 — per-session memo of folded call trees, so an identical or repeated scope request is not re-folded. Lives for the session's lifetime;
+    /// the underlying <see cref="CpuSampleData"/> is immutable once loaded, so a cached fold never goes stale.
+    /// </summary>
+    public Services.CpuCallTreeCache CallTreeCache { get; } = new();
+
+    /// <summary>
     /// #337 (P4 of #342) — lazy per-session catalog facade. First call triggers a one-pass walk over
     /// the trace's chunk stream; subsequent calls return the cached result. Returns null until the
     /// session is ready (<see cref="IsReady"/>). See <see cref="Services.QueryCatalogService"/>.
@@ -130,6 +144,47 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
     /// before reading. Used by <see cref="Schema.SchemaService"/> for trace-mode schema requests.
     /// </summary>
     public Schema.IStaticSchemaProvider StaticSchemaProvider { get; private set; }
+
+    private SpanInstanceIndex _spanInstanceIndex;
+    private readonly object _spanInstanceIndexLock = new();
+
+    /// <summary>
+    /// #351 Phase 5 — per-session index of every instrumented span instance grouped by kind, used by the
+    /// <see cref="Services.ScopeResolver"/> for span-kind call-tree scoping. Built lazily on first access (a one-pass chunk
+    /// walk) and cached for the session's lifetime; best-effort — returns <see cref="SpanInstanceIndex.Empty"/> before the
+    /// build completes and on any read failure.
+    /// </summary>
+    public SpanInstanceIndex SpanInstanceIndex
+    {
+        get
+        {
+            if (_spanInstanceIndex != null)
+            {
+                return _spanInstanceIndex;
+            }
+            lock (_spanInstanceIndexLock)
+            {
+                if (_spanInstanceIndex != null)
+                {
+                    return _spanInstanceIndex;
+                }
+                if (!IsReady || _reader == null)
+                {
+                    return SpanInstanceIndex.Empty;
+                }
+                try
+                {
+                    _spanInstanceIndex = SpanInstanceIndex.Build(_reader);
+                }
+                catch (Exception ex)
+                {
+                    LogSpanInstanceIndexFailed(ex, _filePath);
+                    _spanInstanceIndex = SpanInstanceIndex.Empty;
+                }
+                return _spanInstanceIndex;
+            }
+        }
+    }
 
     /// <summary>Fires every ~200 ms during build with progress counters. Also fires at phase transitions (done / error).</summary>
     public event Action<BuildProgressEventArgs> BuildProgressChanged;
@@ -308,6 +363,7 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
             {
                 SourceLocationManifest = TryLoadSourceLocationManifest(_filePath);
                 QuerySourceStrings = TryLoadQuerySourceStrings(_filePath);
+                CpuSampleData = CpuSampleData.Load(_filePath);
             }
 
             Metadata = metadata;

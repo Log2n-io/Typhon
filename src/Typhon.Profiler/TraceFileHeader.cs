@@ -3,8 +3,8 @@ using System.Runtime.InteropServices;
 namespace Typhon.Profiler;
 
 /// <summary>
-/// Fixed 64-byte header at the start of a <c>.typhon-trace</c> file. Contains session-wide metadata that lets the viewer decode the record stream
-/// that follows.
+/// Version-stamped header at the start of a <c>.typhon-trace</c> file. Contains session-wide metadata that lets the viewer decode the record stream
+/// that follows. The on-disk size grows with the format version as trailer-offset fields are appended — readers parse it version-conditionally.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -81,6 +81,12 @@ public struct TraceFileHeader
     /// </summary>
     public long QueryDefinitionTableOffset;
 
+    /// <summary>
+    /// Byte offset of the trailing <c>CpuSampleSection</c> (interned CPU stack samples captured by the in-process EventPipe sampler, #351). 0 when
+    /// absent — no CPU sampling companion, or the parse produced nothing. v9 and earlier traces lack this on-disk field; the reader defaults it to 0.
+    /// </summary>
+    public long CpuSampleSectionOffset;
+
     /// <summary>Padding to keep on-disk layout future-extension-friendly. Zero-initialized; readers must ignore.</summary>
     public ushort Reserved0;
     /// <summary>Padding (aligning the next field to 4 bytes); zero-initialized.</summary>
@@ -113,7 +119,7 @@ public struct TraceFileHeader
     ///     latent collision with <see cref="TraceEventKind.EcsQueryMaskAnd"/>. v7 traces with NamedSpan records (kind=200)
     ///     would mis-decode as EcsQueryMaskAnd under a v8 reader; the reader hard-rejects v7 to surface the break loudly.
     ///     Re-record against a v8-aware build.
-    /// v9 (current, 2026-05-11): Query Definition Export (#342). Adds two trailing sections:
+    /// v9 (2026-05-11): Query Definition Export (#342). Adds two trailing sections:
     ///     <c>QuerySourceStringTable</c> (deduped file paths + method names referenced by query events)
     ///     at offset <see cref="QuerySourceStringTableOffset"/>, and <c>QueryDefinitionTable</c>
     ///     (materialized definitions accumulated from <see cref="TraceEventKind.QueryDefinitionDescribe"/>
@@ -124,6 +130,11 @@ public struct TraceFileHeader
     ///     ExecutionSourceMethodId). v8 traces continue to load: absent sections produce empty catalogs;
     ///     v8 QueryPlan records (without the trailing fields) decode with zero/sentinel defaults for the
     ///     new fields. See claude/design/Profiler/11-query-definition-export.md.
+    /// v10 (current, 2026-05-16): CPU Sampling Integration (#351). Adds one trailing section,
+    ///     <c>CpuSampleSection</c> (interned CPU stack samples from the in-process EventPipe sampler) at offset
+    ///     <see cref="CpuSampleSectionOffset"/>. v9 and earlier traces continue to load — the absent on-disk
+    ///     field defaults to 0, which downstream readers interpret as "no CPU samples".
+    ///     See claude/design/Profiler/11-cpu-sampling-integration.md.
     /// </summary>
-    public const ushort CurrentVersion = 9;
+    public const ushort CurrentVersion = 10;
 }

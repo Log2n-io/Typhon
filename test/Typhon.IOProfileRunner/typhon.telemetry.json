@@ -21,6 +21,7 @@
 
       "GcTracing":         { "Enabled": true },
       "MemoryAllocations": { "Enabled": true },
+      "CpuSampling":       { "Enabled": false },
       "Gauges":            { "Enabled": true },
 
       "Storage":    { "Enabled": true },

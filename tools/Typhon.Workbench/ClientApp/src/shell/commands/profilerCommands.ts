@@ -40,6 +40,39 @@ export function toggleViewCriticalPath(): void {
 }
 
 /**
+ * Toggle the CPU Call Tree panel (#351 Phase 4) — a dynamic dock panel (closed by default, no
+ * edge-group home). First call adds it to the center area at full width; subsequent calls remove
+ * it. Same shape as {@link toggleViewCriticalPath} — kept out of the default layout because the
+ * folded tree needs real width the collapsed right edge group can't give it.
+ */
+export function toggleViewCallTree(): void {
+  const api = registeredApi;
+  if (!api) return;
+  const existing = api.getPanel('call-tree');
+  if (existing) {
+    api.removePanel(existing);
+    return;
+  }
+  api.addPanel({ id: 'call-tree', component: 'CallTree', title: 'Call Tree' });
+}
+
+/**
+ * Open (or focus) the CPU Call Tree panel — focus-when-present variant of {@link toggleViewCallTree}. Used by the
+ * Detail panel's "Scope Call Tree to this" cross-panel command (#351 Phase 5) so a click never flips the panel
+ * closed when it is already open. Mirrors {@link openViewQueryCatalog}.
+ */
+export function openViewCallTree(): void {
+  const api = registeredApi;
+  if (!api) return;
+  const existing = api.getPanel('call-tree');
+  if (existing) {
+    existing.focus();
+    return;
+  }
+  api.addPanel({ id: 'call-tree', component: 'CallTree', title: 'Call Tree' });
+}
+
+/**
  * Toggle the Query Catalog panel — a dynamic dock panel (closed by default, no edge-group home).
  * First call adds it to the center area; subsequent calls remove it. Same shape as
  * {@link toggleViewCriticalPath}. Issue #338 (P5 of #342).

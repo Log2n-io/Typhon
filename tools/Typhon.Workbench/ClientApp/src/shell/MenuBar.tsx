@@ -30,9 +30,11 @@ import {
   toggleViewSchemaIndexes,
   toggleViewSchemaLayout,
   toggleViewSchemaRelationships,
+  toggleViewSystemDag,
   saveLayoutAsDefault,
+  resetLayout,
 } from './commands/openSchemaBrowser';
-import { toggleViewCriticalPath, toggleViewProfiler, toggleViewTopSpans, registerOpenSaveReplay } from './commands/profilerCommands';
+import { toggleViewCallTree, toggleViewCriticalPath, toggleViewProfiler, toggleViewTopSpans, registerOpenSaveReplay } from './commands/profilerCommands';
 import { registerOpenConnect } from './commands/baseCommands';
 import { logError, logInfo } from '@/stores/useLogStore';
 
@@ -162,10 +164,24 @@ export default function MenuBar() {
  </MenubarItem>
  <MenubarItem
  disabled={!isProfilerSession}
+ onClick={toggleViewSystemDag}
+ title={isProfilerSession ? undefined : 'Open a profiler trace or attach a session first'}
+ >
+ System DAG
+ </MenubarItem>
+ <MenubarItem
+ disabled={!isProfilerSession}
  onClick={toggleViewCriticalPath}
  title={isProfilerSession ? undefined : 'Open a profiler trace or attach a session first'}
  >
  Critical Path
+ </MenubarItem>
+ <MenubarItem
+ disabled={!isProfilerSession}
+ onClick={toggleViewCallTree}
+ title={isProfilerSession ? undefined : 'Open a profiler trace or attach a session first'}
+ >
+ Call Tree
  </MenubarItem>
  <MenubarItem
  disabled={!isProfilerSession}
@@ -196,6 +212,7 @@ export default function MenuBar() {
  <MenubarItem onClick={toggleTheme}>Toggle Dark / Light Mode</MenubarItem>
  <MenubarSeparator />
  <MenubarItem disabled={kind === 'none'} onClick={saveLayoutAsDefault}>Save Layout as Default</MenubarItem>
+ <MenubarItem onClick={resetLayout}>Reset Layout to Default</MenubarItem>
  </MenubarContent>
  </MenubarMenu>
 
