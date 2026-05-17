@@ -43,6 +43,12 @@ public struct TraceFileHeader
     /// <summary>Number of component types in the component type table.</summary>
     public ushort ComponentTypeCount;
 
+    /// <summary>Number of tracks in the tracks table (v11+).</summary>
+    public ushort TrackCount;
+
+    /// <summary>Number of DAGs in the DAGs table (v11+).</summary>
+    public ushort DagCount;
+
     /// <summary>UTC timestamp when the trace was started (DateTime.UtcNow.Ticks).</summary>
     public long CreatedUtcTicks;
 
@@ -130,11 +136,15 @@ public struct TraceFileHeader
     ///     ExecutionSourceMethodId). v8 traces continue to load: absent sections produce empty catalogs;
     ///     v8 QueryPlan records (without the trailing fields) decode with zero/sentinel defaults for the
     ///     new fields. See claude/design/Profiler/11-query-definition-export.md.
-    /// v10 (current, 2026-05-16): CPU Sampling Integration (#351). Adds one trailing section,
+    /// v10 (2026-05-16): CPU Sampling Integration (#351). Adds one trailing section,
     ///     <c>CpuSampleSection</c> (interned CPU stack samples from the in-process EventPipe sampler) at offset
     ///     <see cref="CpuSampleSectionOffset"/>. v9 and earlier traces continue to load — the absent on-disk
     ///     field defaults to 0, which downstream readers interpret as "no CPU samples".
     ///     See claude/design/Profiler/11-cpu-sampling-integration.md.
+    /// v11 (2026-05-17): Track→DAG partitioning hierarchy (#354). SystemDefinitionTable records gain a DagId
+    ///     field; the global PhasesTable is replaced by a TracksTable + DagsTable (each DAG carries its own
+    ///     ordered phase names). RuntimeConfigRecord drops Phases/DefaultPhase. v10-and-older traces are
+    ///     hard-rejected (layout-breaking SystemDefinitionTable change).
     /// </summary>
-    public const ushort CurrentVersion = 10;
+    public const ushort CurrentVersion = 11;
 }

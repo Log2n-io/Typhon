@@ -1011,33 +1011,56 @@ internal sealed unsafe class ArchetypeClusterState
         ref var cell = ref grid.GetCell(cellKey);
         var clusters = CellClusterPool.GetClusters(cellKey);
 
-        // Scan this archetype's existing clusters attached to this cell for a free slot.
-        for (int i = 0; i < clusters.Length; i++)
+        // Scan this archetype's existing clusters attached to this cell for a free slot. The scan starts at the per-cell cursor — the logical index of the
+        // first cluster that might still have a free slot — instead of 0. Clusters fill front-to-back, so without the cursor every claim re-walks all
+        // already-full clusters (O(M²) over a cell's lifetime); the cursor collapses that to O(1) amortized for an append-only spawn. The cursor is a hint:
+        // clamp it against the live count (a draining release can shrink the list) and advance it only past the contiguous full prefix observed below.
+        int scanStart = CellClusterPool.GetScanCursor(cellKey);
+        if (scanStart > clusters.Length)
+        {
+            scanStart = clusters.Length;
+        }
+        int firstNonFull = scanStart;
+        for (int i = scanStart; i < clusters.Length; i++)
         {
             int clusterId = clusters[i];
-            byte* clusterBase = accessor.GetChunkAddress(clusterId, true);
+            // dirty:false — the scan only reads the occupancy word. The claimed cluster is re-fetched with dirty:true below; full clusters skipped here are
+            // never written, so marking them dirty would inflate ActiveChunkWriters / ChangeSet / writeback pressure for nothing.
+            byte* clusterBase = accessor.GetChunkAddress(clusterId);
             ref ulong occupancy = ref *(ulong*)clusterBase;
 
             ulong current = occupancy;
             ulong available = ~current & Layout.FullMask;
             if (available == 0)
             {
+                // Advance the contiguous full prefix only when this full cluster is the prefix's leading edge — a non-full cluster earlier in the scan
+                // pins firstNonFull there, since the cursor must never skip a cluster that still has a free slot.
+                if (i == firstNonFull)
+                {
+                    firstNonFull = i + 1;
+                }
                 continue;
             }
 
             int slot = BitOperations.TrailingZeroCount(available);
             ulong desired = current | (1UL << slot);
 
+            // This cluster has a free slot and is about to be claimed — mark its page dirty BEFORE mutating occupancy. MarkSlotDirty raises
+            // ActiveChunkWriters, which must be set before the write so checkpoint cannot snapshot a half-written cluster (ACW-before-write invariant).
+            // MRU hit — clusterId was just read above. Full clusters skipped above were never dirtied (that is fix #3's saving).
+            accessor.GetChunkAddress(clusterId, true);
+
             // CAS for future-proof concurrent commit (matches ClaimSlot semantics). Single-writer today.
             if (Interlocked.CompareExchange(ref occupancy, desired, current) == current)
             {
+                CellClusterPool.AdvanceScanCursor(cellKey, firstNonFull);
                 Interlocked.Increment(ref cell.EntityCount);
                 return (clusterId, slot);
             }
 
             // CAS failed — another writer took the slot. Retry path: re-read occupancy and pick a fresh free slot, committing via Interlocked so concurrent
             // ClaimSlotInCell calls on the same cluster from different workers stay safe (parallel fence migration paths can hit the same dst cluster from
-            // cell-partitioned workers).
+            // cell-partitioned workers). The cluster is already dirtied above; MarkSlotDirty is idempotent so the retry needs no extra dirty call.
             while (true)
             {
                 current = occupancy;
@@ -1050,6 +1073,7 @@ internal sealed unsafe class ArchetypeClusterState
                 desired = current | (1UL << slot);
                 if (Interlocked.CompareExchange(ref occupancy, desired, current) == current)
                 {
+                    CellClusterPool.AdvanceScanCursor(cellKey, firstNonFull);
                     Interlocked.Increment(ref cell.EntityCount);
                     return (clusterId, slot);
                 }
@@ -1072,6 +1096,9 @@ internal sealed unsafe class ArchetypeClusterState
             EnsureClusterCellMapCapacity(newChunkId + 1);
             ClusterCellMap[newChunkId] = cellKey;
             CellClusterPool.AddCluster(cellKey, newChunkId);
+            // The fresh cluster is appended at the end of the cell list and is the only one with free slots — point the cursor at it so the next claim
+            // skips straight to it instead of re-scanning the now-full prefix.
+            CellClusterPool.AdvanceScanCursor(cellKey, CellClusterPool.GetClusterCount(cellKey) - 1);
         }
         finally
         {
@@ -1098,29 +1125,45 @@ internal sealed unsafe class ArchetypeClusterState
         ref var cell = ref grid.GetCell(cellKey);
         var clusters = CellClusterPool.GetClusters(cellKey);
 
-        for (int i = 0; i < clusters.Length; i++)
+        // Per-cell cursor scan — see the PersistentStore overload above for the rationale (O(M²) re-scan collapse, hint semantics, dirty:false scan).
+        int scanStart = CellClusterPool.GetScanCursor(cellKey);
+        if (scanStart > clusters.Length)
+        {
+            scanStart = clusters.Length;
+        }
+        int firstNonFull = scanStart;
+        for (int i = scanStart; i < clusters.Length; i++)
         {
             int clusterId = clusters[i];
-            byte* clusterBase = accessor.GetChunkAddress(clusterId, true);
+            // dirty:false — the scan only reads occupancy; the claimed cluster is re-fetched with dirty:true below.
+            byte* clusterBase = accessor.GetChunkAddress(clusterId);
             ref ulong occupancy = ref *(ulong*)clusterBase;
 
             ulong current = occupancy;
             ulong available = ~current & Layout.FullMask;
             if (available == 0)
             {
+                if (i == firstNonFull)
+                {
+                    firstNonFull = i + 1;
+                }
                 continue;
             }
 
             int slot = BitOperations.TrailingZeroCount(available);
             ulong desired = current | (1UL << slot);
 
+            // Dirty the claimed cluster BEFORE mutating occupancy — see the PersistentStore overload (ACW-before-write invariant). MRU hit.
+            accessor.GetChunkAddress(clusterId, true);
+
             if (Interlocked.CompareExchange(ref occupancy, desired, current) == current)
             {
+                CellClusterPool.AdvanceScanCursor(cellKey, firstNonFull);
                 Interlocked.Increment(ref cell.EntityCount);
                 return (clusterId, slot);
             }
 
-            // CAS-loop retry path for concurrent claim safety (parallel fence migration may hit same dst cluster).
+            // CAS-loop retry path for concurrent claim safety (parallel fence migration may hit same dst cluster). Cluster already dirtied above.
             while (true)
             {
                 current = occupancy;
@@ -1133,6 +1176,7 @@ internal sealed unsafe class ArchetypeClusterState
                 desired = current | (1UL << slot);
                 if (Interlocked.CompareExchange(ref occupancy, desired, current) == current)
                 {
+                    CellClusterPool.AdvanceScanCursor(cellKey, firstNonFull);
                     Interlocked.Increment(ref cell.EntityCount);
                     return (clusterId, slot);
                 }
@@ -1150,6 +1194,8 @@ internal sealed unsafe class ArchetypeClusterState
             EnsureClusterCellMapCapacity(newChunkId + 1);
             ClusterCellMap[newChunkId] = cellKey;
             CellClusterPool.AddCluster(cellKey, newChunkId);
+            // Point the cursor at the fresh cluster — see the PersistentStore overload.
+            CellClusterPool.AdvanceScanCursor(cellKey, CellClusterPool.GetClusterCount(cellKey) - 1);
         }
         finally
         {
@@ -2434,6 +2480,10 @@ internal sealed unsafe class ArchetypeClusterState
             return;
         }
         Interlocked.Decrement(ref grid.GetCell(cellKey).EntityCount);
+
+        // A slot just freed up in this cell — reset the scan cursor so the next ClaimSlotInCell re-scans from 0 and can reuse the freed slot (or a free
+        // slot in a cluster the swap-with-last RemoveCluster shuffled ahead of the old cursor). Without this the cursor would skip reusable capacity.
+        CellClusterPool?.ResetScanCursor(cellKey);
     }
 
     /// <summary>Detach an empty cluster from this archetype's per-cell claim list and clear its cell mapping.</summary>

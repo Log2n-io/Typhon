@@ -33,7 +33,6 @@ public sealed class SystemBuilder
     internal bool _checkerboard;
     internal Phase _phase;
     internal bool _phaseSet;
-    internal bool _isInternal;
     internal readonly SystemAccessDescriptor _access = new();
 
     // ═══════════════════════════════════════════════════════════════
@@ -202,25 +201,13 @@ public sealed class SystemBuilder
     }
 
     /// <summary>
-    /// Assign this system to a phase (RFC 07 / Q3). Phases form a total order in <see cref="RuntimeOptions.Phases"/> — all systems in
-    /// phase N complete before any system in phase N+1 starts. If not called, the system is unaffected by phase ordering (transitional;
-    /// Unit 5 of the auto-DAG migration will tighten this to require a phase per system).
+    /// Assign this system to a phase (RFC 07 / Q3). Phases form a DAG-local total order declared via <see cref="Dag.Phases"/> — all systems in phase N complete
+    /// before any system in phase N+1 of the same DAG. The phase must be one declared on the owning DAG. If not called, the system lands in the DAG's default phase.
     /// </summary>
     public SystemBuilder Phase(Phase phase)
     {
         _phase = phase;
         _phaseSet = true;
-        return this;
-    }
-
-    /// <summary>
-    /// Mark this system as engine-internal. It is registered on the same <see cref="RuntimeSchedule"/> but partitioned into a separate internal sub-DAG
-    /// dispatched after the user DAG completes (used by <c>FenceExec</c>). Internal systems are not surfaced in user-facing tooling views by default.
-    /// Intended for engine code only.
-    /// </summary>
-    public SystemBuilder Internal()
-    {
-        _isInternal = true;
         return this;
     }
 
@@ -419,7 +406,6 @@ public sealed class SystemBuilder<TContext> where TContext : class
     public SystemBuilder<TContext> CellAmortize(int denominator) { _inner.CellAmortize(denominator); return this; }
     public SystemBuilder<TContext> Checkerboard() { _inner.Checkerboard(); return this; }
     public SystemBuilder<TContext> Phase(Phase phase) { _inner.Phase(phase); return this; }
-    public SystemBuilder<TContext> Internal() { _inner.Internal(); return this; }
 
     public SystemBuilder<TContext> Reads<T>() where T : unmanaged { _inner.Reads<T>(); return this; }
     public SystemBuilder<TContext> ReadsFresh<T>() where T : unmanaged { _inner.ReadsFresh<T>(); return this; }

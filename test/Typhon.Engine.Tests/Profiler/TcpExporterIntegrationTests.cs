@@ -82,7 +82,8 @@ public class TcpExporterIntegrationTests
                 reader.ReadSystemDefinitions();
                 reader.ReadArchetypes();
                 reader.ReadComponentTypes();
-                reader.ReadPhases();
+                reader.ReadTracks();
+                reader.ReadDags();
                 reader.ReadStaticStructures();
             }
 

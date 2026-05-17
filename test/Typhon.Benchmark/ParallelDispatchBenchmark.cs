@@ -301,7 +301,7 @@ static class ParallelDispatchBenchmark
 
         using var runtime = TyphonRuntime.Create(env.Dbe, schedule =>
         {
-            schedule.QuerySystem("B", ctx =>
+            schedule.PublicTrack.DeclareDag("Test").QuerySystem("B", ctx =>
             {
                 long accumulator = 0;
                 foreach (var id in ctx.Entities)
@@ -364,9 +364,10 @@ static class ParallelDispatchBenchmark
 
         using var runtime = TyphonRuntime.Create(env.Dbe, schedule =>
         {
+            var dag = schedule.PublicTrack.DeclareDag("Test");
             if (versioned)
             {
-                schedule.QuerySystem("B", ctx =>
+                dag.QuerySystem("B", ctx =>
                 {
                     foreach (var id in ctx.Entities)
                     {
@@ -376,7 +377,7 @@ static class ParallelDispatchBenchmark
             }
             else if (write)
             {
-                schedule.QuerySystem("B", ctx =>
+                dag.QuerySystem("B", ctx =>
                 {
                     foreach (var id in ctx.Entities)
                     {
@@ -386,7 +387,7 @@ static class ParallelDispatchBenchmark
             }
             else
             {
-                schedule.QuerySystem("B", ctx =>
+                dag.QuerySystem("B", ctx =>
                 {
                     foreach (var id in ctx.Entities)
                     {

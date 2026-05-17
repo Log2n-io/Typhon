@@ -78,6 +78,7 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
     private ArchetypeDto[] _initialArchetypes = [];
     private ComponentTypeDto[] _initialComponentTypes = [];
     private string[] _initialPhases = [];
+    private TrackDto[] _initialTracks = [];
     private string _initialSignature;
 
     /// <summary>
@@ -724,7 +725,11 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
         reader.ReadSystemDefinitions();
         reader.ReadArchetypes();
         reader.ReadComponentTypes();
-        reader.ReadPhases();
+        // Track→DAG hierarchy (v11+, #354) — replaces the v6 PhasesTable slot.
+        reader.ReadTracks();
+        reader.ReadDags();
+        // W4: the full tracks[] → dags[] → phases[] hierarchy. The flat phase list below is a derived first-seen rollup.
+        var tracks = TrackHierarchyProjection.Project(reader.Tracks, reader.Dags);
         // v7 static-structure tables. Live attach currently sends empty placeholder sections (TcpExporter's
         // BuildInitPayload writes count = 0 / present = false for all six). AttachSession schema parity is
         // out of scope for the v7 rollout — the reader walks past them to keep any future block-reads aligned.
@@ -734,7 +739,20 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
         var systems = ProjectSystems(reader);
         var archetypes = ProjectArchetypes(reader);
         var componentTypes = ProjectComponentTypes(reader);
-        var phases = reader.Phases.ToArray();
+        // ProfilerMetadataDto.Phases (W4 reshape pending) — distinct DAG phase names in first-seen order.
+        var phaseSeen = new HashSet<string>(StringComparer.Ordinal);
+        var phaseList = new List<string>();
+        foreach (var dag in reader.Dags)
+        {
+            foreach (var phaseName in dag.PhaseNames)
+            {
+                if (phaseSeen.Add(phaseName ?? string.Empty))
+                {
+                    phaseList.Add(phaseName ?? string.Empty);
+                }
+            }
+        }
+        var phases = phaseList.ToArray();
 
         var newSignature = ComputeInitSignature(headerDto, systems, archetypes, componentTypes);
 
@@ -746,6 +764,7 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
             _initialArchetypes = archetypes;
             _initialComponentTypes = componentTypes;
             _initialPhases = phases;
+            _initialTracks = tracks;
             _initialSignature = newSignature;
             _timestampFrequency = headerDto.TimestampFrequency;
             // Capture the raw Init payload bytes — needed verbatim for the SourceMetadata section if the user later saves the live session
@@ -1097,6 +1116,7 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
             ChunkManifest: chunkManifestArr,
             GcSuspensions: [],
             Phases: _initialPhases ?? [],
+            Tracks: _initialTracks ?? [],
             SystemTickSummaries: sysTicks,
             QueueTickSummaries: qTicks,
             PostTickSummaries: postTicks,
@@ -1242,7 +1262,8 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
                 WritesResources: sr.WritesResources,
                 ReadsResources: sr.ReadsResources,
                 ExplicitAfter: sr.ExplicitAfter,
-                ExplicitBefore: sr.ExplicitBefore);
+                ExplicitBefore: sr.ExplicitBefore,
+                DagId: sr.DagId);
         }
         return arr;
     }

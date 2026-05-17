@@ -35,7 +35,8 @@ public class QueryDefinitionTraceFileTests
         writer.WriteSystemDefinitions(ReadOnlySpan<SystemDefinitionRecord>.Empty);
         writer.WriteArchetypes(ReadOnlySpan<ArchetypeRecord>.Empty);
         writer.WriteComponentTypes(ReadOnlySpan<ComponentTypeRecord>.Empty);
-        writer.WritePhases(ReadOnlySpan<string>.Empty);
+        writer.WriteTracks(ReadOnlySpan<TrackRecord>.Empty);
+        writer.WriteDags(ReadOnlySpan<DagRecord>.Empty);
         writer.WriteEmptyStaticStructures();
 
         var strings = new[]
@@ -86,7 +87,8 @@ public class QueryDefinitionTraceFileTests
         writer.WriteSystemDefinitions(ReadOnlySpan<SystemDefinitionRecord>.Empty);
         writer.WriteArchetypes(ReadOnlySpan<ArchetypeRecord>.Empty);
         writer.WriteComponentTypes(ReadOnlySpan<ComponentTypeRecord>.Empty);
-        writer.WritePhases(ReadOnlySpan<string>.Empty);
+        writer.WriteTracks(ReadOnlySpan<TrackRecord>.Empty);
+        writer.WriteDags(ReadOnlySpan<DagRecord>.Empty);
         writer.WriteEmptyStaticStructures();
         writer.Flush();
 
@@ -99,15 +101,15 @@ public class QueryDefinitionTraceFileTests
     }
 
     [Test]
-    public void V8Trace_LoadsGracefully_WithReader()
+    public void V8Trace_IsHardRejected_ByReader()
     {
-        // Synthesize a v8 trace: shorter header (63 bytes), no QSST/QueryDefinitionTable trailer offsets.
-        // The reader should decode the header, defaulting the new offsets to 0, and TryReadQuerySourceStringTable returns false.
+        // v11 (#354) is a layout-breaking change — the SystemDefinitionTable gained a DagId field and the
+        // PhasesTable was replaced by a TracksTable + DagsTable. The reader hard-rejects v10-and-older traces;
+        // a synthesized v8 header must throw at ReadHeader rather than mis-decode.
         var stream = new MemoryStream();
         using var bw = new System.IO.BinaryWriter(stream, Encoding.UTF8, leaveOpen: true);
 
-        // Write a v8-shaped header (63 bytes total).
-        bw.Write(TraceFileHeader.MagicValue);              // 4
+        bw.Write(TraceFileHeader.MagicValue);
         bw.Write((ushort)8);                                // Version=8
         bw.Write((ushort)0);                                // Flags
         bw.Write(10_000_000L);                              // TimestampFrequency
@@ -122,34 +124,11 @@ public class QueryDefinitionTraceFileTests
         bw.Write(0L);                                       // SourceLocationManifestOffset
         bw.Write((ushort)0);                                // Reserved0
         bw.Write((ushort)0);                                // Reserved1
-
-        // Required tables (all empty).
-        bw.Write((ushort)0);  // SystemCount
-        bw.Write((ushort)0);  // ArchetypeCount
-        bw.Write((ushort)0);  // ComponentTypeCount
-        bw.Write((ushort)0);  // PhasesCount
-
-        // v7+ static structures (all empty).
-        bw.Write((ushort)0);  // ComponentDefinitions
-        bw.Write((ushort)0);  // ArchetypeDefinitions
-        bw.Write((ushort)0);  // IndexCatalog
-        bw.Write(false);      // RuntimeConfig presence flag = false
-        bw.Write((ushort)0);  // EventQueues
-        bw.Write(0);          // ResourceGraphNodes (int32 length)
         bw.Flush();
 
         stream.Position = 0;
         var reader = new TraceFileReader(stream);
-        var header = reader.ReadHeader();
-
-        Assert.That(header.Version, Is.EqualTo((ushort)8));
-        Assert.That(header.TimestampFrequency, Is.EqualTo(10_000_000L));
-        Assert.That(header.WorkerCount, Is.EqualTo((byte)2));
-        Assert.That(header.QuerySourceStringTableOffset, Is.EqualTo(0L), "v9-only trailer offset should be 0 for a v8 trace");
-        Assert.That(header.QueryDefinitionTableOffset, Is.EqualTo(0L), "v9-only trailer offset should be 0 for a v8 trace");
-
-        var ok = reader.TryReadQuerySourceStringTable(out var strings);
-        Assert.That(ok, Is.False);
-        Assert.That(strings, Is.Empty);
+        var ex = Assert.Throws<System.IO.InvalidDataException>(() => reader.ReadHeader());
+        Assert.That(ex.Message, Does.Contain("version: 8"));
     }
 }

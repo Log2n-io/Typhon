@@ -129,7 +129,8 @@ public sealed class MockTcpProfilerServer : IAsyncDisposable
         bw.Write((ushort)0); // system count = 0
         bw.Write((ushort)0); // archetype count = 0
         bw.Write((ushort)0); // component-type count = 0
-        bw.Write((ushort)0); // phase count = 0 (v6+ Phases section)
+        bw.Write((ushort)0); // tracks count = 0 (v11+ Track→DAG hierarchy)
+        bw.Write((ushort)0); // dags count = 0
         // v7 static-structure tables — empty placeholders so the wire layout matches the source format
         // and AttachSessionRuntime can drive a TraceFileReader through it without throwing.
         bw.Write((ushort)0); // ComponentDefinitions count

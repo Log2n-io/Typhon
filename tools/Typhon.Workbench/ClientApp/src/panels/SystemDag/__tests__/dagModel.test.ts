@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
+import type { DagDto } from '@/api/generated/model/dagDto';
 import type { SystemDefinitionDto } from '@/api/generated/model/systemDefinitionDto';
 import type { TopologyDto } from '@/api/generated/model/topologyDto';
+import type { TrackDto } from '@/api/generated/model/trackDto';
 import { LANE_GAP, buildDagModel } from '../dagModel';
 
 function sys(overrides: Partial<SystemDefinitionDto> & { name: string }): SystemDefinitionDto {
@@ -26,6 +28,7 @@ function sys(overrides: Partial<SystemDefinitionDto> & { name: string }): System
     readsResources: [],
     explicitAfter: [],
     explicitBefore: [],
+    dagId: 0,
     ...overrides,
   };
 }
@@ -36,14 +39,15 @@ function topo(systems: SystemDefinitionDto[], phases: string[] = ['Input', 'Simu
     archetypes: [],
     componentTypes: [],
     phases,
+    tracks: [],
     componentFamilies: { componentToFamily: {}, familyOrder: [] },
   };
 }
 
 describe('buildDagModel', () => {
   it('returns an empty model for null/empty topology', () => {
-    expect(buildDagModel(null)).toEqual({ nodes: [], edges: [], lanes: [], width: 0, height: 0 });
-    expect(buildDagModel(topo([]))).toEqual({ nodes: [], edges: [], lanes: [], width: 0, height: 0 });
+    expect(buildDagModel(null)).toEqual({ nodes: [], edges: [], lanes: [], dagGroups: [], width: 0, height: 0 });
+    expect(buildDagModel(topo([]))).toEqual({ nodes: [], edges: [], lanes: [], dagGroups: [], width: 0, height: 0 });
   });
 
   it('places one lane per non-empty phase, in canonical order', () => {
@@ -231,5 +235,130 @@ describe('buildDagModel — circular layout', () => {
     const model = buildDagModel(topo(systems), 'circular');
     const positions = model.nodes.map((n) => `${n.position.x.toFixed(0)},${n.position.y.toFixed(0)}`);
     expect(new Set(positions).size).toBe(3);
+  });
+});
+
+// ── Track → DAG hierarchy (#354 W5) ──────────────────────────────────────
+
+function dag(id: number, name: string, phases: string[]): DagDto {
+  return { id, name, phases };
+}
+
+function track(name: string, orderIndex: number, tags: string[], dags: DagDto[]): TrackDto {
+  return { name, orderIndex, tags, dags };
+}
+
+function topoH(systems: SystemDefinitionDto[], tracks: TrackDto[]): TopologyDto {
+  return {
+    systems,
+    archetypes: [],
+    componentTypes: [],
+    phases: [],
+    tracks,
+    componentFamilies: { componentToFamily: {}, familyOrder: [] },
+  };
+}
+
+/** A Public track with a "World" DAG (id 0) + an engine-tagged Engine-Post track with a "Fence" DAG (id 1). */
+function worldAndFenceTracks(): TrackDto[] {
+  return [
+    track('Public', 1, [], [dag(0, 'World', ['Input', 'Simulation', 'Render'])]),
+    track('Engine-Post', 2, ['engine'], [dag(1, 'Fence', ['Default'])]),
+  ];
+}
+
+describe('buildDagModel — Track → DAG hierarchy', () => {
+  it('hides engine-tagged track systems by default', () => {
+    const t = topoH(
+      [
+        sys({ name: 'Movement', phaseName: 'Simulation', dagId: 0 }),
+        sys({ name: 'FencePrep', phaseName: 'Default', dagId: 1 }),
+      ],
+      worldAndFenceTracks(),
+    );
+    const model = buildDagModel(t);
+    expect(model.nodes.map((n) => n.id)).toEqual(['Movement']);
+    // The Fence DAG produced no group — its only system was filtered out.
+    expect(model.dagGroups.map((g) => g.dagName)).toEqual(['World']);
+  });
+
+  it('reveals engine-tagged tracks when showEngineTracks is set', () => {
+    const t = topoH(
+      [
+        sys({ name: 'Movement', phaseName: 'Simulation', dagId: 0 }),
+        sys({ name: 'FencePrep', phaseName: 'Default', dagId: 1 }),
+      ],
+      worldAndFenceTracks(),
+    );
+    const model = buildDagModel(t, 'horizontal-lanes', { showEngineTracks: true });
+    expect(model.nodes.map((n) => n.id).sort()).toEqual(['FencePrep', 'Movement']);
+    expect(model.dagGroups.map((g) => g.dagName)).toEqual(['World', 'Fence']);
+    const fence = model.dagGroups.find((g) => g.dagName === 'Fence')!;
+    expect(fence.isEngine).toBe(true);
+    expect(fence.trackName).toBe('Engine-Post');
+    const world = model.dagGroups.find((g) => g.dagName === 'World')!;
+    expect(world.isEngine).toBe(false);
+  });
+
+  it('orders lanes by track order → DAG order → DAG-local phase order', () => {
+    const t = topoH(
+      [
+        sys({ name: 'Render1', phaseName: 'Render', dagId: 0 }),
+        sys({ name: 'In1', phaseName: 'Input', dagId: 0 }),
+        sys({ name: 'Sim1', phaseName: 'Simulation', dagId: 0 }),
+        sys({ name: 'FencePrep', phaseName: 'Default', dagId: 1 }),
+      ],
+      worldAndFenceTracks(),
+    );
+    const model = buildDagModel(t, 'horizontal-lanes', { showEngineTracks: true });
+    // World phases in DAG-local declared order, then the Fence DAG's single phase.
+    expect(model.lanes.map((l) => l.name)).toEqual(['Input', 'Simulation', 'Render', 'Default']);
+    expect(model.lanes.map((l) => l.dagName)).toEqual(['World', 'World', 'World', 'Fence']);
+  });
+
+  it('respects track orderIndex even when the tracks array is unsorted', () => {
+    const tracks = [
+      track('Engine-Post', 2, ['engine'], [dag(1, 'Fence', ['Default'])]),
+      track('Public', 1, [], [dag(0, 'World', ['Simulation'])]),
+    ];
+    const t = topoH(
+      [
+        sys({ name: 'Movement', phaseName: 'Simulation', dagId: 0 }),
+        sys({ name: 'FencePrep', phaseName: 'Default', dagId: 1 }),
+      ],
+      tracks,
+    );
+    const model = buildDagModel(t, 'horizontal-lanes', { showEngineTracks: true });
+    // Public (orderIndex 1) before Engine-Post (orderIndex 2), regardless of array order.
+    expect(model.dagGroups.map((g) => g.dagName)).toEqual(['World', 'Fence']);
+  });
+
+  it('keys lanes uniquely per DAG even when two DAGs share a phase name', () => {
+    const tracks = [
+      track('Public', 1, [], [
+        dag(0, 'Alpha', ['Sim']),
+        dag(1, 'Beta', ['Sim']),
+      ]),
+    ];
+    const t = topoH(
+      [
+        sys({ name: 'A', phaseName: 'Sim', dagId: 0 }),
+        sys({ name: 'B', phaseName: 'Sim', dagId: 1 }),
+      ],
+      tracks,
+    );
+    const model = buildDagModel(t);
+    expect(model.lanes.map((l) => l.id)).toEqual(['0::Sim', '1::Sim']);
+    expect(new Set(model.lanes.map((l) => l.id)).size).toBe(2);
+  });
+
+  it('falls back to flat phase grouping when the topology carries no tracks', () => {
+    // topo() sets tracks: [] — the pre-#354 flat behaviour must be preserved, with no DAG groups.
+    const model = buildDagModel(topo([
+      sys({ name: 'In1', phaseName: 'Input' }),
+      sys({ name: 'Sim1', phaseName: 'Simulation' }),
+    ]));
+    expect(model.lanes.map((l) => l.name)).toEqual(['Input', 'Simulation']);
+    expect(model.dagGroups).toEqual([]);
   });
 });

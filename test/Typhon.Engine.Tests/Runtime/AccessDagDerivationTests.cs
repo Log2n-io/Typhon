@@ -42,6 +42,9 @@ public class AccessDagDerivationTests
     public void WW_SamePhase_NoOrdering_Throws()
     {
         var schedule = RuntimeSchedule.Create(Options())
+            .PublicTrack.DeclareDag("Test")
+            .Phases(Phase.Input, Phase.Simulation, Phase.Output, Phase.Cleanup)
+            .DefaultPhase(Phase.Simulation)
             .Add(new Sys { ConfigureAction = b => b.Name("A").Phase(Phase.Simulation).Writes<CompA>() })
             .Add(new Sys { ConfigureAction = b => b.Name("B").Phase(Phase.Simulation).Writes<CompA>() });
 
@@ -56,6 +59,9 @@ public class AccessDagDerivationTests
     public void WW_SamePhase_ResolvedByAfter_Builds()
     {
         using var scheduler = RuntimeSchedule.Create(Options())
+            .PublicTrack.DeclareDag("Test")
+            .Phases(Phase.Input, Phase.Simulation, Phase.Output, Phase.Cleanup)
+            .DefaultPhase(Phase.Simulation)
             .Add(new Sys { ConfigureAction = b => b.Name("A").Phase(Phase.Simulation).Writes<CompA>() })
             .Add(new Sys { ConfigureAction = b => b.Name("B").Phase(Phase.Simulation).Writes<CompA>().After("A") })
             .Build(_registry.Runtime);
@@ -69,6 +75,9 @@ public class AccessDagDerivationTests
     public void WW_SamePhase_ResolvedByBefore_Builds()
     {
         using var scheduler = RuntimeSchedule.Create(Options())
+            .PublicTrack.DeclareDag("Test")
+            .Phases(Phase.Input, Phase.Simulation, Phase.Output, Phase.Cleanup)
+            .DefaultPhase(Phase.Simulation)
             .Add(new Sys { ConfigureAction = b => b.Name("A").Phase(Phase.Simulation).Writes<CompA>().Before("B") })
             .Add(new Sys { ConfigureAction = b => b.Name("B").Phase(Phase.Simulation).Writes<CompA>() })
             .Build(_registry.Runtime);
@@ -82,6 +91,9 @@ public class AccessDagDerivationTests
     public void WW_DifferentPhases_NoConflict()
     {
         using var scheduler = RuntimeSchedule.Create(Options())
+            .PublicTrack.DeclareDag("Test")
+            .Phases(Phase.Input, Phase.Simulation, Phase.Output, Phase.Cleanup)
+            .DefaultPhase(Phase.Simulation)
             .Add(new Sys { ConfigureAction = b => b.Name("A").Phase(Phase.Simulation).Writes<CompA>() })
             .Add(new Sys { ConfigureAction = b => b.Name("B").Phase(Phase.Output).Writes<CompA>() })
             .Build(_registry.Runtime);
@@ -98,6 +110,9 @@ public class AccessDagDerivationTests
     public void RW_PlainReadWithSamePhaseWriter_Throws()
     {
         var schedule = RuntimeSchedule.Create(Options())
+            .PublicTrack.DeclareDag("Test")
+            .Phases(Phase.Input, Phase.Simulation, Phase.Output, Phase.Cleanup)
+            .DefaultPhase(Phase.Simulation)
             .Add(new Sys { ConfigureAction = b => b.Name("Writer").Phase(Phase.Simulation).Writes<CompA>() })
             .Add(new Sys { ConfigureAction = b => b.Name("Reader").Phase(Phase.Simulation).Reads<CompA>() });
 
@@ -112,6 +127,9 @@ public class AccessDagDerivationTests
     public void RW_PlainReadInDifferentPhase_OK()
     {
         using var scheduler = RuntimeSchedule.Create(Options())
+            .PublicTrack.DeclareDag("Test")
+            .Phases(Phase.Input, Phase.Simulation, Phase.Output, Phase.Cleanup)
+            .DefaultPhase(Phase.Simulation)
             .Add(new Sys { ConfigureAction = b => b.Name("Writer").Phase(Phase.Simulation).Writes<CompA>() })
             .Add(new Sys { ConfigureAction = b => b.Name("Reader").Phase(Phase.Output).Reads<CompA>() })
             .Build(_registry.Runtime);
@@ -125,6 +143,9 @@ public class AccessDagDerivationTests
     public void ReadsFresh_DerivesWriterToReaderEdge()
     {
         using var scheduler = RuntimeSchedule.Create(Options())
+            .PublicTrack.DeclareDag("Test")
+            .Phases(Phase.Input, Phase.Simulation, Phase.Output, Phase.Cleanup)
+            .DefaultPhase(Phase.Simulation)
             .Add(new Sys { ConfigureAction = b => b.Name("Writer").Phase(Phase.Simulation).Writes<CompA>() })
             .Add(new Sys { ConfigureAction = b => b.Name("Reader").Phase(Phase.Simulation).ReadsFresh<CompA>() })
             .Build(_registry.Runtime);
@@ -138,6 +159,9 @@ public class AccessDagDerivationTests
     public void ReadsSnapshot_DerivesReaderToWriterEdge()
     {
         using var scheduler = RuntimeSchedule.Create(Options())
+            .PublicTrack.DeclareDag("Test")
+            .Phases(Phase.Input, Phase.Simulation, Phase.Output, Phase.Cleanup)
+            .DefaultPhase(Phase.Simulation)
             .Add(new Sys { ConfigureAction = b => b.Name("Writer").Phase(Phase.Simulation).Writes<CompA>() })
             .Add(new Sys { ConfigureAction = b => b.Name("Reader").Phase(Phase.Simulation).ReadsSnapshot<CompA>() })
             .Build(_registry.Runtime);
@@ -161,6 +185,9 @@ public class AccessDagDerivationTests
         // This is the "phase boundaries are not barriers" property: independent systems may run
         // concurrently across the phase line.
         using var scheduler = RuntimeSchedule.Create(Options())
+            .PublicTrack.DeclareDag("Test")
+            .Phases(Phase.Input, Phase.Simulation, Phase.Output, Phase.Cleanup)
+            .DefaultPhase(Phase.Simulation)
             .Add(new Sys { ConfigureAction = b => b.Name("InputSys").Phase(Phase.Input) })
             .Add(new Sys { ConfigureAction = b => b.Name("SimSys").Phase(Phase.Simulation) })
             .Build(_registry.Runtime);
@@ -178,6 +205,9 @@ public class AccessDagDerivationTests
         // system. Result: zero derived edges. Phase order survives only as a logical contract;
         // the runtime DAG would dispatch all four to free workers concurrently.
         using var scheduler = RuntimeSchedule.Create(Options())
+            .PublicTrack.DeclareDag("Test")
+            .Phases(Phase.Input, Phase.Simulation, Phase.Output, Phase.Cleanup)
+            .DefaultPhase(Phase.Simulation)
             .Add(new Sys { ConfigureAction = b => b.Name("In").Phase(Phase.Input) })
             .Add(new Sys { ConfigureAction = b => b.Name("Sim").Phase(Phase.Simulation) })
             .Add(new Sys { ConfigureAction = b => b.Name("Out").Phase(Phase.Output) })
@@ -198,6 +228,9 @@ public class AccessDagDerivationTests
         // error, unlike same-phase W×W); the deriver emits a single earlier→later edge so the
         // later writer's commit is sequenced after the earlier one's.
         using var scheduler = RuntimeSchedule.Create(Options())
+            .PublicTrack.DeclareDag("Test")
+            .Phases(Phase.Input, Phase.Simulation, Phase.Output, Phase.Cleanup)
+            .DefaultPhase(Phase.Simulation)
             .Add(new Sys { ConfigureAction = b => b.Name("Early").Phase(Phase.Simulation).Writes<CompA>() })
             .Add(new Sys { ConfigureAction = b => b.Name("Late").Phase(Phase.Output).Writes<CompA>() })
             .Build(_registry.Runtime);
@@ -212,6 +245,9 @@ public class AccessDagDerivationTests
     {
         // ED-05a: writer in earlier phase, reader (any flavour) in later phase → edge.
         using var scheduler = RuntimeSchedule.Create(Options())
+            .PublicTrack.DeclareDag("Test")
+            .Phases(Phase.Input, Phase.Simulation, Phase.Output, Phase.Cleanup)
+            .DefaultPhase(Phase.Simulation)
             .Add(new Sys { ConfigureAction = b => b.Name("Writer").Phase(Phase.Simulation).Writes<CompA>() })
             .Add(new Sys { ConfigureAction = b => b.Name("ReaderFresh").Phase(Phase.Output).ReadsFresh<CompA>() })
             .Build(_registry.Runtime);
@@ -227,6 +263,9 @@ public class AccessDagDerivationTests
         // ED-05b: reader in earlier phase must complete before later-phase writer touches T.
         // Direction earlier→later regardless of role (phase order is the disambiguator).
         using var scheduler = RuntimeSchedule.Create(Options())
+            .PublicTrack.DeclareDag("Test")
+            .Phases(Phase.Input, Phase.Simulation, Phase.Output, Phase.Cleanup)
+            .DefaultPhase(Phase.Simulation)
             .Add(new Sys { ConfigureAction = b => b.Name("EarlyReader").Phase(Phase.Input).ReadsSnapshot<CompA>() })
             .Add(new Sys { ConfigureAction = b => b.Name("LateWriter").Phase(Phase.Simulation).Writes<CompA>() })
             .Build(_registry.Runtime);
@@ -242,10 +281,13 @@ public class AccessDagDerivationTests
         // ED-05c: producer in earlier phase, consumer in later phase. Without an explicit edge
         // the consumer could drain concurrently with the producer's writes; the deriver inserts
         // the producer→consumer ordering automatically.
-        var schedule = RuntimeSchedule.Create(Options());
-        var queue = schedule.CreateEventQueue<int>("EmitQ", 16);
+        var dag = RuntimeSchedule.Create(Options())
+            .PublicTrack.DeclareDag("Test")
+            .Phases(Phase.Input, Phase.Simulation, Phase.Output, Phase.Cleanup)
+            .DefaultPhase(Phase.Simulation);
+        var queue = dag.CreateEventQueue<int>("EmitQ", 16);
 
-        using var scheduler = schedule
+        using var scheduler = dag
             .Add(new Sys { ConfigureAction = b => b.Name("Producer").Phase(Phase.Simulation).WritesEvents(queue) })
             .Add(new Sys { ConfigureAction = b => b.Name("Consumer").Phase(Phase.Output).ReadsEvents(queue) })
             .Build(_registry.Runtime);
@@ -260,6 +302,9 @@ public class AccessDagDerivationTests
     {
         // ED-05d: any cross-phase resource access pair with at least one writer.
         using var scheduler = RuntimeSchedule.Create(Options())
+            .PublicTrack.DeclareDag("Test")
+            .Phases(Phase.Input, Phase.Simulation, Phase.Output, Phase.Cleanup)
+            .DefaultPhase(Phase.Simulation)
             .Add(new Sys { ConfigureAction = b => b.Name("Writer").Phase(Phase.Input).WritesResource("Physics") })
             .Add(new Sys { ConfigureAction = b => b.Name("Reader").Phase(Phase.Simulation).ReadsResource("Physics") })
             .Build(_registry.Runtime);
@@ -278,6 +323,9 @@ public class AccessDagDerivationTests
         // conflict-driven cross-phase derivation there's no edge — the runtime can dispatch
         // SoundSystem on a free worker while MoveAll is still running.
         using var scheduler = RuntimeSchedule.Create(Options())
+            .PublicTrack.DeclareDag("Test")
+            .Phases(Phase.Input, Phase.Simulation, Phase.Output, Phase.Cleanup)
+            .DefaultPhase(Phase.Simulation)
             .Add(new Sys { ConfigureAction = b => b.Name("MoveLike").Phase(Phase.Simulation).Writes<CompA>().Writes<CompB>() })
             .Add(new Sys { ConfigureAction = b => b.Name("SoundLike").Phase(Phase.Output).Writes<CompC>() })
             .Build(_registry.Runtime);
@@ -295,6 +343,9 @@ public class AccessDagDerivationTests
         // ED-05e: explicit `.After("X")` spanning phases must not be elided. Even with no
         // declared access conflict, the explicit edge survives the conflict-driven pass.
         using var scheduler = RuntimeSchedule.Create(Options())
+            .PublicTrack.DeclareDag("Test")
+            .Phases(Phase.Input, Phase.Simulation, Phase.Output, Phase.Cleanup)
+            .DefaultPhase(Phase.Simulation)
             .Add(new Sys { ConfigureAction = b => b.Name("Up").Phase(Phase.Input) })
             .Add(new Sys { ConfigureAction = b => b.Name("Down").Phase(Phase.Simulation).After("Up") })
             .Build(_registry.Runtime);
@@ -309,10 +360,13 @@ public class AccessDagDerivationTests
     [Test]
     public void Events_ProducerToConsumer_DerivesEdge()
     {
-        var schedule = RuntimeSchedule.Create(Options());
-        var queue = schedule.CreateEventQueue<int>("Q", 16);
+        var dag = RuntimeSchedule.Create(Options())
+            .PublicTrack.DeclareDag("Test")
+            .Phases(Phase.Input, Phase.Simulation, Phase.Output, Phase.Cleanup)
+            .DefaultPhase(Phase.Simulation);
+        var queue = dag.CreateEventQueue<int>("Q", 16);
 
-        using var scheduler = schedule
+        using var scheduler = dag
             .Add(new Sys { ConfigureAction = b => b.Name("Producer").Phase(Phase.Simulation).WritesEvents(queue) })
             .Add(new Sys { ConfigureAction = b => b.Name("Consumer").Phase(Phase.Simulation).ReadsEvents(queue) })
             .Build(_registry.Runtime);
@@ -328,6 +382,9 @@ public class AccessDagDerivationTests
     public void Resource_WW_SamePhase_NoOrdering_Throws()
     {
         var schedule = RuntimeSchedule.Create(Options())
+            .PublicTrack.DeclareDag("Test")
+            .Phases(Phase.Input, Phase.Simulation, Phase.Output, Phase.Cleanup)
+            .DefaultPhase(Phase.Simulation)
             .Add(new Sys { ConfigureAction = b => b.Name("A").Phase(Phase.Simulation).WritesResource("X") })
             .Add(new Sys { ConfigureAction = b => b.Name("B").Phase(Phase.Simulation).WritesResource("X") });
 
@@ -340,6 +397,9 @@ public class AccessDagDerivationTests
     public void Resource_RW_DerivesWriterToReaderEdge()
     {
         using var scheduler = RuntimeSchedule.Create(Options())
+            .PublicTrack.DeclareDag("Test")
+            .Phases(Phase.Input, Phase.Simulation, Phase.Output, Phase.Cleanup)
+            .DefaultPhase(Phase.Simulation)
             .Add(new Sys { ConfigureAction = b => b.Name("Writer").Phase(Phase.Simulation).WritesResource("Physics") })
             .Add(new Sys { ConfigureAction = b => b.Name("Reader").Phase(Phase.Simulation).ReadsResource("Physics") })
             .Build(_registry.Runtime);
@@ -355,6 +415,9 @@ public class AccessDagDerivationTests
     public void ExclusivePhase_WithOtherSystemInPhase_Throws()
     {
         var schedule = RuntimeSchedule.Create(Options())
+            .PublicTrack.DeclareDag("Test")
+            .Phases(Phase.Input, Phase.Simulation, Phase.Output, Phase.Cleanup)
+            .DefaultPhase(Phase.Simulation)
             .Add(new Sys { ConfigureAction = b => b.Name("Excl").Phase(Phase.Cleanup).ExclusivePhase() })
             .Add(new Sys { ConfigureAction = b => b.Name("Other").Phase(Phase.Cleanup) });
 
@@ -367,6 +430,9 @@ public class AccessDagDerivationTests
     public void ExclusivePhase_AloneInPhase_OK()
     {
         using var scheduler = RuntimeSchedule.Create(Options())
+            .PublicTrack.DeclareDag("Test")
+            .Phases(Phase.Input, Phase.Simulation, Phase.Output, Phase.Cleanup)
+            .DefaultPhase(Phase.Simulation)
             .Add(new Sys { ConfigureAction = b => b.Name("Excl").Phase(Phase.Cleanup).ExclusivePhase() })
             .Add(new Sys { ConfigureAction = b => b.Name("Other").Phase(Phase.Simulation) })
             .Build(_registry.Runtime);
@@ -381,6 +447,9 @@ public class AccessDagDerivationTests
     {
         // Two systems both Writes<CompA>, neither calls b.Phase(). Both default to Phase.Simulation → W×W triggers.
         var schedule = RuntimeSchedule.Create(Options())
+            .PublicTrack.DeclareDag("Test")
+            .Phases(Phase.Input, Phase.Simulation, Phase.Output, Phase.Cleanup)
+            .DefaultPhase(Phase.Simulation)
             .Add(new Sys { ConfigureAction = b => b.Name("A").Writes<CompA>() })
             .Add(new Sys { ConfigureAction = b => b.Name("B").Writes<CompA>() });
 
@@ -396,6 +465,9 @@ public class AccessDagDerivationTests
         // Two systems with no phase AND no declarations land in Phase.Simulation but conflict detection no-ops (HasAnyDeclaration == false).
         // Cross-phase edges: none (both in same default phase).
         using var scheduler = RuntimeSchedule.Create(Options())
+            .PublicTrack.DeclareDag("Test")
+            .Phases(Phase.Input, Phase.Simulation, Phase.Output, Phase.Cleanup)
+            .DefaultPhase(Phase.Simulation)
             .Add(new Sys { ConfigureAction = b => b.Name("A") })
             .Add(new Sys { ConfigureAction = b => b.Name("B") })
             .Build(_registry.Runtime);
@@ -419,6 +491,9 @@ public class AccessDagDerivationTests
         // A.Before("B").After("B") — both edges declared between A and B forms a cycle.
         // The W×W check should detect this as ambiguous (XOR rule) before the cycle detector kicks in.
         var schedule = RuntimeSchedule.Create(Options())
+            .PublicTrack.DeclareDag("Test")
+            .Phases(Phase.Input, Phase.Simulation, Phase.Output, Phase.Cleanup)
+            .DefaultPhase(Phase.Simulation)
             .Add(new Sys { ConfigureAction = b => b.Name("A").Phase(Phase.Simulation).Writes<CompA>().After("B").Before("B") })
             .Add(new Sys { ConfigureAction = b => b.Name("B").Phase(Phase.Simulation).Writes<CompA>() });
 
@@ -443,6 +518,9 @@ public class AccessDagDerivationTests
         // C2 limitation: A.Before(B).Before(C) does NOT implicitly resolve (A,C) — user must add `.After(A)` to C.
         // This test documents the limitation rather than asserting better behavior.
         var schedule = RuntimeSchedule.Create(Options())
+            .PublicTrack.DeclareDag("Test")
+            .Phases(Phase.Input, Phase.Simulation, Phase.Output, Phase.Cleanup)
+            .DefaultPhase(Phase.Simulation)
             .Add(new Sys { ConfigureAction = b => b.Name("A").Phase(Phase.Simulation).Writes<CompA>().Before("B") })
             .Add(new Sys { ConfigureAction = b => b.Name("B").Phase(Phase.Simulation).Writes<CompA>().Before("C") })
             .Add(new Sys { ConfigureAction = b => b.Name("C").Phase(Phase.Simulation).Writes<CompA>() });
@@ -457,6 +535,9 @@ public class AccessDagDerivationTests
     {
         // With explicit edges for every pair, the deriver accepts the configuration.
         using var scheduler = RuntimeSchedule.Create(Options())
+            .PublicTrack.DeclareDag("Test")
+            .Phases(Phase.Input, Phase.Simulation, Phase.Output, Phase.Cleanup)
+            .DefaultPhase(Phase.Simulation)
             .Add(new Sys { ConfigureAction = b => b.Name("A").Phase(Phase.Simulation).Writes<CompA>().Before("B") })
             .Add(new Sys { ConfigureAction = b => b.Name("B").Phase(Phase.Simulation).Writes<CompA>().Before("C") })
             .Add(new Sys { ConfigureAction = b => b.Name("C").Phase(Phase.Simulation).Writes<CompA>().After("A") })
@@ -470,6 +551,9 @@ public class AccessDagDerivationTests
     {
         // Movement writes Position. Render reads Position fresh (after Movement). Replay reads Position snapshot (before Movement).
         using var scheduler = RuntimeSchedule.Create(Options())
+            .PublicTrack.DeclareDag("Test")
+            .Phases(Phase.Input, Phase.Simulation, Phase.Output, Phase.Cleanup)
+            .DefaultPhase(Phase.Simulation)
             .Add(new Sys { ConfigureAction = b => b.Name("Movement").Phase(Phase.Simulation).Writes<CompA>() })
             .Add(new Sys { ConfigureAction = b => b.Name("Render").Phase(Phase.Simulation).ReadsFresh<CompA>() })
             .Add(new Sys { ConfigureAction = b => b.Name("Replay").Phase(Phase.Simulation).ReadsSnapshot<CompA>() })

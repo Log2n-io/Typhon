@@ -37,7 +37,7 @@ class TyphonRuntimeTests : TestBase<TyphonRuntimeTests>
         using var dbe = SetupEngine();
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Noop", _ => { });
+            schedule.PublicTrack.DeclareDag("Test").CallbackSystem("Noop", _ => { });
         }, new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
 
         Assert.That(runtime.Engine, Is.SameAs(dbe));
@@ -50,7 +50,7 @@ class TyphonRuntimeTests : TestBase<TyphonRuntimeTests>
         using var dbe = SetupEngine();
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Noop", _ => { });
+            schedule.PublicTrack.DeclareDag("Test").CallbackSystem("Noop", _ => { });
         }, new RuntimeOptions { WorkerCount = 2, BaseTickRate = 1000 });
 
         runtime.Start();
@@ -69,7 +69,7 @@ class TyphonRuntimeTests : TestBase<TyphonRuntimeTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Check", ctx =>
+            schedule.PublicTrack.DeclareDag("Test").CallbackSystem("Check", ctx =>
             {
                 if (captured == 0)
                 {
@@ -96,7 +96,7 @@ class TyphonRuntimeTests : TestBase<TyphonRuntimeTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule
+            schedule.PublicTrack.DeclareDag("Test")
                 .CallbackSystem("Spawner", ctx =>
                 {
                     if (captured == 0)
@@ -136,7 +136,7 @@ class TyphonRuntimeTests : TestBase<TyphonRuntimeTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("System", ctx =>
+            schedule.PublicTrack.DeclareDag("Test").CallbackSystem("System", ctx =>
             {
                 var tick = Interlocked.Increment(ref ticksSeen);
                 if (tick == 1)
@@ -179,7 +179,7 @@ class TyphonRuntimeTests : TestBase<TyphonRuntimeTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("System", ctx =>
+            schedule.PublicTrack.DeclareDag("Test").CallbackSystem("System", ctx =>
             {
                 var tick = Interlocked.Increment(ref ticksSeen);
                 if (tick == 1)
@@ -209,7 +209,7 @@ class TyphonRuntimeTests : TestBase<TyphonRuntimeTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Noop", _ => { });
+            schedule.PublicTrack.DeclareDag("Test").CallbackSystem("Noop", _ => { });
         }, new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
 
         runtime.OnFirstTick += _ => Interlocked.Increment(ref firstTickCount);
@@ -229,7 +229,7 @@ class TyphonRuntimeTests : TestBase<TyphonRuntimeTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Noop", _ => { });
+            schedule.PublicTrack.DeclareDag("Test").CallbackSystem("Noop", _ => { });
         }, new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
 
         runtime.OnFirstTick += ctx =>
@@ -259,7 +259,7 @@ class TyphonRuntimeTests : TestBase<TyphonRuntimeTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Noop", _ => { });
+            schedule.PublicTrack.DeclareDag("Test").CallbackSystem("Noop", _ => { });
         }, new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
 
         runtime.OnShutdown += _ => shutdownCalled = true;
@@ -280,7 +280,7 @@ class TyphonRuntimeTests : TestBase<TyphonRuntimeTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Spawner", ctx =>
+            schedule.PublicTrack.DeclareDag("Test").CallbackSystem("Spawner", ctx =>
             {
                 if (captured == 0)
                 {
@@ -311,7 +311,7 @@ class TyphonRuntimeTests : TestBase<TyphonRuntimeTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule
+            schedule.PublicTrack.DeclareDag("Test")
                 .CallbackSystem("Input", _ => Interlocked.Increment(ref callbackExecuted))
                 .PipelineSystem("Work", (chunk, total) => Interlocked.Increment(ref chunkCount), 10, after: "Input");
         }, new RuntimeOptions { WorkerCount = 2, BaseTickRate = 1000 });
@@ -354,7 +354,7 @@ class TyphonRuntimeTests : TestBase<TyphonRuntimeTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.QuerySystem("Counter", ctx =>
+            schedule.PublicTrack.DeclareDag("Test").QuerySystem("Counter", ctx =>
             {
                 Interlocked.Increment(ref executeCount);
             }, input: () => view);
@@ -388,7 +388,7 @@ class TyphonRuntimeTests : TestBase<TyphonRuntimeTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Noop", _ => Interlocked.Increment(ref executeCount));
+            schedule.PublicTrack.DeclareDag("Test").CallbackSystem("Noop", _ => Interlocked.Increment(ref executeCount));
         }, new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
 
         runtime.Start();

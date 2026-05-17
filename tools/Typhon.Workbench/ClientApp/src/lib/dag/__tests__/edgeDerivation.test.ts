@@ -25,6 +25,7 @@ function sys(overrides: Partial<SystemDefinitionDto> & { name: string }): System
     readsResources: [],
     explicitAfter: [],
     explicitBefore: [],
+    dagId: 0,
     ...overrides,
   };
 }

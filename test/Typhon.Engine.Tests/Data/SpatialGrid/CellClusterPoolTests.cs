@@ -139,4 +139,71 @@ class CellClusterPoolTests
         Assert.That(pool.GetClusterCount(cellKey: 3), Is.EqualTo(1));
         Assert.That(pool.GetClusters(cellKey: 3)[0], Is.EqualTo(99));
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Per-cell scan cursor (ClaimSlotInCell O(M²) re-scan collapse)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    [Test]
+    public void ScanCursor_New_DefaultsToZero()
+    {
+        var pool = new CellClusterPool(cellCount: 16);
+        Assert.That(pool.GetScanCursor(cellKey: 7), Is.EqualTo(0));
+    }
+
+    [Test]
+    public void AdvanceScanCursor_MovesForwardOnly()
+    {
+        var pool = new CellClusterPool(cellCount: 16);
+
+        pool.AdvanceScanCursor(cellKey: 2, value: 5);
+        Assert.That(pool.GetScanCursor(cellKey: 2), Is.EqualTo(5));
+
+        // Forward advance moves it.
+        pool.AdvanceScanCursor(cellKey: 2, value: 9);
+        Assert.That(pool.GetScanCursor(cellKey: 2), Is.EqualTo(9));
+
+        // Backward / equal advance is a no-op — the cursor is monotonic.
+        pool.AdvanceScanCursor(cellKey: 2, value: 3);
+        Assert.That(pool.GetScanCursor(cellKey: 2), Is.EqualTo(9));
+        pool.AdvanceScanCursor(cellKey: 2, value: 9);
+        Assert.That(pool.GetScanCursor(cellKey: 2), Is.EqualTo(9));
+    }
+
+    [Test]
+    public void ScanCursor_PerCell_Independent()
+    {
+        var pool = new CellClusterPool(cellCount: 16);
+        pool.AdvanceScanCursor(cellKey: 1, value: 4);
+        pool.AdvanceScanCursor(cellKey: 2, value: 8);
+        Assert.That(pool.GetScanCursor(cellKey: 1), Is.EqualTo(4));
+        Assert.That(pool.GetScanCursor(cellKey: 2), Is.EqualTo(8));
+        Assert.That(pool.GetScanCursor(cellKey: 3), Is.EqualTo(0));
+    }
+
+    [Test]
+    public void ResetScanCursor_ReturnsToZero()
+    {
+        var pool = new CellClusterPool(cellCount: 16);
+        pool.AdvanceScanCursor(cellKey: 0, value: 12);
+        pool.ResetScanCursor(cellKey: 0);
+        Assert.That(pool.GetScanCursor(cellKey: 0), Is.EqualTo(0));
+
+        // After reset the cursor advances again normally.
+        pool.AdvanceScanCursor(cellKey: 0, value: 3);
+        Assert.That(pool.GetScanCursor(cellKey: 0), Is.EqualTo(3));
+    }
+
+    [Test]
+    public void Reset_ClearsScanCursors()
+    {
+        var pool = new CellClusterPool(cellCount: 16);
+        pool.AdvanceScanCursor(cellKey: 0, value: 7);
+        pool.AdvanceScanCursor(cellKey: 5, value: 11);
+
+        pool.Reset();
+
+        Assert.That(pool.GetScanCursor(cellKey: 0), Is.EqualTo(0));
+        Assert.That(pool.GetScanCursor(cellKey: 5), Is.EqualTo(0));
+    }
 }

@@ -91,7 +91,7 @@ public partial class Main : Node3D
                 // CPU sampler must start BEFORE BuildSessionMetadata so its QPC anchor lands in the trace header.
                 // Gated internally on CpuSampling being enabled + a configured trace file — a no-op (returns 0) otherwise.
                 var samplingQpc = ProfilerLauncher.StartCpuSampler(_profilerConfig);
-                var metadata = ProfilerSetup.BuildSessionMetadata(_bridge.Systems, 16, 60f, _bridge.PhaseNames, () => _bridge?.CurrentTick ?? 0,
+                var metadata = ProfilerSetup.BuildSessionMetadata(_bridge.Systems, 16, 60f, () => _bridge?.CurrentTick ?? 0,
                     _bridge.DatabaseEngine, _bridge.ResourceGraphRoot, _bridge.ActiveRuntime, samplingQpc);
 
                 if (_profilerConfig.LiveWaitMs > 0 && _profilerConfig.LivePort >= 0)
@@ -504,17 +504,17 @@ void fragment() {
         if (!_camera.TryProjectToGround(screenPos, out var ground)) return;
 
         // Render m → sim units. AntRenderer.SimToWorld converts sim→render, so we divide.
-        const float SimPerWorld = TyphonBridge.WorldSize / AntRenderer.WorldSizeM;
-        var simX = ground.X * SimPerWorld;
-        var simY = ground.Z * SimPerWorld;
+        const float simPerWorld = TyphonBridge.WorldSize / AntRenderer.WorldSizeM;
+        var simX = ground.X * simPerWorld;
+        var simY = ground.Z * simPerWorld;
 
         if (_snapToGrid)
         {
             // Snap to 1 m grid in render space = 200 sim units. Round to nearest.
             var renderX = Mathf.Round(ground.X);
             var renderZ = Mathf.Round(ground.Z);
-            simX = renderX * SimPerWorld;
-            simY = renderZ * SimPerWorld;
+            simX = renderX * simPerWorld;
+            simY = renderZ * simPerWorld;
         }
 
         // Reject clicks that fall outside the world bounds (free-cam can look past it).
@@ -524,7 +524,7 @@ void fragment() {
         {
             ToolKind.Food => ToolCommand.PlaceFood(simX, simY, 8000f),
             ToolKind.Rock => ToolCommand.PlaceRock(simX, simY),
-            ToolKind.Cull => ToolCommand.Cull(simX, simY, 1f * SimPerWorld),   // 1 m in sim units
+            ToolKind.Cull => ToolCommand.Cull(simX, simY, 1f * simPerWorld),   // 1 m in sim units
             ToolKind.Ignite => ToolCommand.Ignite(simX, simY),
             _ => default,
         };
@@ -572,7 +572,7 @@ void fragment() {
             // LOD fade — push to ant material and Terrain
             var fadeInd = _camera.FadeIndividuals;
             var fadeDen = _camera.FadeDensity;
-            _antRenderer.SetFadeIndividuals(fadeInd);
+            _antRenderer!.SetFadeIndividuals(fadeInd);
             _terrain?.SetFadeDensity(fadeDen);
             // Per-band split: at Patch (fade=0) skip state-texture upload + multimesh draw entirely.
             _antRenderer.SetDrawIndividuals(fadeInd > 0f);

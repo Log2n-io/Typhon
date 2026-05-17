@@ -87,6 +87,8 @@ internal sealed class FileExporter : ResourceNode, IProfilerExporter
             SystemCount = (ushort)metadata.Systems.Length,
             ArchetypeCount = (ushort)metadata.Archetypes.Length,
             ComponentTypeCount = (ushort)metadata.ComponentTypes.Length,
+            TrackCount = (ushort)metadata.Tracks.Length,
+            DagCount = (ushort)metadata.Dags.Length,
             CreatedUtcTicks = metadata.StartedUtc.Ticks,
             SamplingSessionStartQpc = metadata.SamplingSessionStartQpc,
             // FileTableOffset + SourceLocationManifestOffset are 0 — patched in WriteSourceLocationManifestAtClose.
@@ -95,7 +97,8 @@ internal sealed class FileExporter : ResourceNode, IProfilerExporter
         _writer.WriteSystemDefinitions(metadata.Systems);
         _writer.WriteArchetypes(metadata.Archetypes);
         _writer.WriteComponentTypes(metadata.ComponentTypes);
-        _writer.WritePhases(metadata.Phases);
+        _writer.WriteTracks(metadata.Tracks);
+        _writer.WriteDags(metadata.Dags);
 
         // v7 static-structure tables. Order MUST match the reader (see TraceFileReader.Read* methods) — wire-positional, not section-table.
         // Empty inputs from hosts that don't introspect a live engine are valid: each writer emits a count prefix of 0 (or null

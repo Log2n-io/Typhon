@@ -35,6 +35,16 @@ internal sealed class CellClusterPool
     /// <summary>Allocated capacity of each cell's segment. Indexed by cell key.</summary>
     private readonly int[] _cellCapacities;
 
+    /// <summary>
+    /// Per-cell scan cursor: the logical index (into the <c>0..count</c> list <see cref="GetClusters"/> returns) of the first cluster that <em>might</em> still
+    /// have a free slot. Spatial slot claims (<c>ArchetypeClusterState.ClaimSlotInCell</c>) start their scan here instead of 0, collapsing the otherwise
+    /// O(M²) re-scan of already-full clusters during an append-only spawn to O(1) amortized. Indexed by cell key.
+    /// <para>This is a <b>hint only</b> — same status as <c>ArchetypeClusterState.FreeClusterHead</c>. A stale value can only cause a redundant scan or a
+    /// skipped free slot (mild fragmentation); never incorrectness, since the claim path's CAS and allocate-new fallback remain authoritative. It is
+    /// advanced monotonically by the claim path and reset to 0 whenever a slot is freed in the cell, so freed-slot reuse is preserved in steady state.</para>
+    /// </summary>
+    private readonly int[] _cellScanCursor;
+
     public CellClusterPool(int cellCount, int initialPoolCapacity = 256)
     {
         if (cellCount <= 0)
@@ -47,6 +57,7 @@ internal sealed class CellClusterPool
         _cellHeads = new int[cellCount];
         _cellCounts = new int[cellCount];
         _cellCapacities = new int[cellCount];
+        _cellScanCursor = new int[cellCount];
         Array.Fill(_cellHeads, -1);
     }
 
@@ -58,6 +69,30 @@ internal sealed class CellClusterPool
 
     /// <summary>Number of cluster chunk IDs currently in the specified cell's segment.</summary>
     public int GetClusterCount(int cellKey) => _cellCounts[cellKey];
+
+    /// <summary>
+    /// Logical index the next spatial slot claim should start its cluster scan from. See <see cref="_cellScanCursor"/>. The caller must still clamp this
+    /// against the current cluster count — a draining release can shrink the list below a previously advanced cursor.
+    /// </summary>
+    public int GetScanCursor(int cellKey) => _cellScanCursor[cellKey];
+
+    /// <summary>
+    /// Advance the cell's scan cursor to <paramref name="value"/> if it moves forward. Monotonic — never moves the cursor backward, so concurrent claimers
+    /// racing on the same cell cannot un-advance each other's progress. See <see cref="_cellScanCursor"/>.
+    /// </summary>
+    public void AdvanceScanCursor(int cellKey, int value)
+    {
+        if (value > _cellScanCursor[cellKey])
+        {
+            _cellScanCursor[cellKey] = value;
+        }
+    }
+
+    /// <summary>
+    /// Reset the cell's scan cursor to 0, forcing the next claim to scan the full cluster list. Called whenever a slot is freed in the cell so a reusable
+    /// free slot ahead of the cursor is not skipped. See <see cref="_cellScanCursor"/>.
+    /// </summary>
+    public void ResetScanCursor(int cellKey) => _cellScanCursor[cellKey] = 0;
 
     /// <summary>
     /// Read-only span of the cluster chunk IDs currently attached to <paramref name="cellKey"/>. May be empty.
@@ -123,6 +158,7 @@ internal sealed class CellClusterPool
     {
         Array.Clear(_cellCapacities);
         Array.Clear(_cellCounts);
+        Array.Clear(_cellScanCursor);
         Array.Fill(_cellHeads, -1);
         _tail = 0;
     }

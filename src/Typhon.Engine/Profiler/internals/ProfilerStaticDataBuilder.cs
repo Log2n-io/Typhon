@@ -234,19 +234,60 @@ internal static class ProfilerStaticDataBuilder
 
     /// <summary>
     /// Build a <see cref="RuntimeConfigRecord"/> from a runtime options snapshot. Caller is responsible for sourcing the option values — typically
-    /// <c>TyphonRuntime.Options</c> at session start. Pass null fields when the host has no runtime (the record's downstream consumer uses defaults).
+    /// <c>TyphonRuntime.Options</c> at session start.
     /// </summary>
-    public static RuntimeConfigRecord BuildRuntimeConfig(int baseTickRate, int workerCount, int telemetryRingCapacity,
-        int parallelQueryMinChunkSize, string defaultPhase, string[] phases) =>
+    public static RuntimeConfigRecord BuildRuntimeConfig(int baseTickRate, int workerCount, int telemetryRingCapacity, int parallelQueryMinChunkSize) =>
         new()
         {
             BaseTickRate = baseTickRate,
             WorkerCount = workerCount,
             TelemetryRingCapacity = telemetryRingCapacity,
             ParallelQueryMinChunkSize = parallelQueryMinChunkSize,
-            DefaultPhase = defaultPhase ?? string.Empty,
-            Phases = phases ?? [],
         };
+
+    /// <summary>
+    /// Build the v11 Track→DAG hierarchy tables (#354) from a live <see cref="TyphonRuntime"/>'s <see cref="DagScheduler.Tracks"/>. Each
+    /// <see cref="Track"/> becomes a <see cref="TrackRecord"/>; each <see cref="Dag"/> becomes a <see cref="DagRecord"/> whose
+    /// <see cref="DagRecord.TrackIndex"/> points at its owning track in the returned tracks array. Returns empty arrays when the runtime is null
+    /// or carries no scheduler (e.g., standalone profiling).
+    /// </summary>
+    public static (TrackRecord[] Tracks, DagRecord[] Dags) BuildTrackHierarchy(TyphonRuntime runtime)
+    {
+        if (runtime?.Scheduler == null)
+        {
+            return ([], []);
+        }
+
+        var schedulerTracks = runtime.Scheduler.Tracks;
+        var tracks = new TrackRecord[schedulerTracks.Count];
+        var dags = new List<DagRecord>();
+        for (var t = 0; t < schedulerTracks.Count; t++)
+        {
+            var track = schedulerTracks[t];
+            tracks[t] = new TrackRecord
+            {
+                Name = track.Name ?? string.Empty,
+                OrderIndex = track.OrderIndex,
+                Tags = [.. track.Tags],
+            };
+            foreach (var dag in track.Dags)
+            {
+                var phaseNames = new string[dag.ResolvedPhases.Length];
+                for (var p = 0; p < phaseNames.Length; p++)
+                {
+                    phaseNames[p] = dag.ResolvedPhases[p].Name ?? string.Empty;
+                }
+                dags.Add(new DagRecord
+                {
+                    Id = dag.Id,
+                    Name = dag.Name ?? string.Empty,
+                    TrackIndex = t,
+                    PhaseNames = phaseNames,
+                });
+            }
+        }
+        return (tracks, dags.ToArray());
+    }
 
     /// <summary>
     /// Event-queue catalog from a live <see cref="TyphonRuntime"/>. Walks <see cref="DagScheduler.EventQueues"/>; the event-payload type is resolved by

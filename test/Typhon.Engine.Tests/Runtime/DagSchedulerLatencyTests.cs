@@ -36,24 +36,14 @@ public class DagSchedulerLatencyTests
     {
         // Linear chain: A → B → C → D → E (all CallbackSystems)
         // B through E are inline continuations — transition latency should be near zero
-        var builder = new DagBuilder()
-            .AddCallbackSystem("A", _ => Thread.SpinWait(10))
-            .AddCallbackSystem("B", _ => Thread.SpinWait(10))
-            .AddCallbackSystem("C", _ => Thread.SpinWait(10))
-            .AddCallbackSystem("D", _ => Thread.SpinWait(10))
-            .AddCallbackSystem("E", _ => Thread.SpinWait(10))
-            .AddEdge("A", "B")
-            .AddEdge("B", "C")
-            .AddEdge("C", "D")
-            .AddEdge("D", "E");
-
-        var (systems, topo) = builder.Build();
-        using var scheduler = new DagScheduler(systems, topo, new RuntimeOptions
-        {
-            WorkerCount = 4,
-            BaseTickRate = 1000,
-            TelemetryRingCapacity = 1024
-        }, _registry.Runtime);
+        using var scheduler = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 4, BaseTickRate = 1000, TelemetryRingCapacity = 1024 })
+            .PublicTrack.DeclareDag("Test")
+            .CallbackSystem("A", _ => Thread.SpinWait(10))
+            .CallbackSystem("B", _ => Thread.SpinWait(10), after: "A")
+            .CallbackSystem("C", _ => Thread.SpinWait(10), after: "B")
+            .CallbackSystem("D", _ => Thread.SpinWait(10), after: "C")
+            .CallbackSystem("E", _ => Thread.SpinWait(10), after: "D")
+            .Build(_registry.Runtime);
 
         scheduler.Start();
 
@@ -109,20 +99,12 @@ public class DagSchedulerLatencyTests
     {
         // A(CallbackSystem) → B(PipelineSystem,50 chunks) → C(CallbackSystem)
         // B's transition latency = time from A completing to first B chunk grabbed
-        var builder = new DagBuilder()
-            .AddCallbackSystem("A", _ => Thread.SpinWait(100))
-            .AddPipelineSystem("B", (chunk, total) => Thread.SpinWait(50), 50)
-            .AddCallbackSystem("C", _ => Thread.SpinWait(10))
-            .AddEdge("A", "B")
-            .AddEdge("B", "C");
-
-        var (systems, topo) = builder.Build();
-        using var scheduler = new DagScheduler(systems, topo, new RuntimeOptions
-        {
-            WorkerCount = 4,
-            BaseTickRate = 1000,
-            TelemetryRingCapacity = 1024
-        }, _registry.Runtime);
+        using var scheduler = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 4, BaseTickRate = 1000, TelemetryRingCapacity = 1024 })
+            .PublicTrack.DeclareDag("Test")
+            .CallbackSystem("A", _ => Thread.SpinWait(100))
+            .PipelineSystem("B", (chunk, total) => Thread.SpinWait(50), 50, after: "A")
+            .CallbackSystem("C", _ => Thread.SpinWait(10), after: "B")
+            .Build(_registry.Runtime);
 
         scheduler.Start();
         SpinWait.SpinUntil(() => scheduler.CurrentTickNumber >= 220, TimeSpan.FromSeconds(10));
@@ -178,27 +160,20 @@ public class DagSchedulerLatencyTests
     {
         // Input(CB) → Movement(Pipeline,200) → Physics(Pipeline,200) → Combat(CB) → Output(CB)
         //           → AI(Pipeline,100) ────────────────────────────┘
-        var builder = new DagBuilder()
-            .AddCallbackSystem("Input", _ => Thread.SpinWait(100))
-            .AddPipelineSystem("Movement", (c, t) => Thread.SpinWait(50), 200)
-            .AddPipelineSystem("AI", (c, t) => Thread.SpinWait(80), 100)
-            .AddPipelineSystem("Physics", (c, t) => Thread.SpinWait(40), 200)
-            .AddCallbackSystem("Combat", _ => Thread.SpinWait(60))
-            .AddCallbackSystem("Output", _ => Thread.SpinWait(10))
-            .AddEdge("Input", "Movement")
-            .AddEdge("Input", "AI")
-            .AddEdge("Movement", "Physics")
-            .AddEdge("Physics", "Combat")
-            .AddEdge("AI", "Combat")
-            .AddEdge("Combat", "Output");
-
-        var (systems, topo) = builder.Build();
-        using var scheduler = new DagScheduler(systems, topo, new RuntimeOptions
-        {
-            WorkerCount = Math.Max(4, Environment.ProcessorCount - 4),
-            BaseTickRate = 1000,
-            TelemetryRingCapacity = 1024
-        }, _registry.Runtime);
+        using var scheduler = RuntimeSchedule.Create(new RuntimeOptions
+            {
+                WorkerCount = Math.Max(4, Environment.ProcessorCount - 4),
+                BaseTickRate = 1000,
+                TelemetryRingCapacity = 1024
+            })
+            .PublicTrack.DeclareDag("Test")
+            .CallbackSystem("Input", _ => Thread.SpinWait(100))
+            .PipelineSystem("Movement", (c, t) => Thread.SpinWait(50), 200, after: "Input")
+            .PipelineSystem("AI", (c, t) => Thread.SpinWait(80), 100, after: "Input")
+            .PipelineSystem("Physics", (c, t) => Thread.SpinWait(40), 200, after: "Movement")
+            .CallbackSystem("Combat", _ => Thread.SpinWait(60), afterAll: ["Physics", "AI"])
+            .CallbackSystem("Output", _ => Thread.SpinWait(10), after: "Combat")
+            .Build(_registry.Runtime);
 
         scheduler.Start();
         SpinWait.SpinUntil(() => scheduler.CurrentTickNumber >= 220, TimeSpan.FromSeconds(10));
@@ -254,16 +229,10 @@ public class DagSchedulerLatencyTests
     public void Report_TickTimingJitter_60Hz()
     {
         // Minimal DAG — just measure tick timing accuracy
-        var builder = new DagBuilder()
-            .AddCallbackSystem("Noop", _ => { });
-
-        var (systems, topo) = builder.Build();
-        using var scheduler = new DagScheduler(systems, topo, new RuntimeOptions
-        {
-            WorkerCount = 2,
-            BaseTickRate = 60,
-            TelemetryRingCapacity = 1024
-        }, _registry.Runtime);
+        using var scheduler = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 2, BaseTickRate = 60, TelemetryRingCapacity = 1024 })
+            .PublicTrack.DeclareDag("Test")
+            .CallbackSystem("Noop", _ => { })
+            .Build(_registry.Runtime);
 
         scheduler.Start();
 

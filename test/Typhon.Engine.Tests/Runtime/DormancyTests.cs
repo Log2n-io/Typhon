@@ -159,8 +159,9 @@ class DormancyTests : TestBase<DormancyTests>
         var ticksDone = 0;
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Counter", _ => Interlocked.Increment(ref ticksDone));
-            schedule.QuerySystem("Check", ctx =>
+            var dag = schedule.PublicTrack.DeclareDag("Test");
+            dag.CallbackSystem("Counter", _ => Interlocked.Increment(ref ticksDone));
+            dag.QuerySystem("Check", ctx =>
             {
                 foreach (var id in ctx.Entities)
                 {
@@ -463,8 +464,9 @@ class DormancyTests : TestBase<DormancyTests>
         var ticksDone = 0;
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Counter", _ => Interlocked.Increment(ref ticksDone));
-            schedule.QuerySystem("T0Check", ctx =>
+            var dag = schedule.PublicTrack.DeclareDag("Test");
+            dag.CallbackSystem("Counter", _ => Interlocked.Increment(ref ticksDone));
+            dag.QuerySystem("T0Check", ctx =>
             {
                 foreach (var id in ctx.Entities)
                 {
@@ -595,9 +597,10 @@ class DormancyTests : TestBase<DormancyTests>
         var ticksDone = 0;
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Counter", _ => Interlocked.Increment(ref ticksDone));
+            var dag = schedule.PublicTrack.DeclareDag("Test");
+            dag.CallbackSystem("Counter", _ => Interlocked.Increment(ref ticksDone));
             // NOTE: no tier filter — SimTier.All (default). The dormancy "promote" path should still filter sleeping clusters.
-            schedule.QuerySystem("AllCheck", ctx =>
+            dag.QuerySystem("AllCheck", ctx =>
             {
                 foreach (var id in ctx.Entities)
                 {

@@ -91,6 +91,8 @@ public class SystemBuilderFluentTests
         };
 
         using var scheduler = RuntimeSchedule.Create(new RuntimeOptions { BaseTickRate = 1000, WorkerCount = 1 })
+            .PublicTrack.DeclareDag("Test")
+            .Phases(Phase.Input, Phase.Simulation, Phase.Output)
             .Add(sys)
             .Build(_registry.Runtime);
 
@@ -111,6 +113,7 @@ public class SystemBuilderFluentTests
         var sysB = new DeclarativeSystem { ConfigureAction = b => b.Name("B") };
 
         using var scheduler = RuntimeSchedule.Create(new RuntimeOptions { BaseTickRate = 1000, WorkerCount = 1 })
+            .PublicTrack.DeclareDag("Test")
             .Add(sysA)
             .Add(sysB)
             .Build(_registry.Runtime);
@@ -132,11 +135,12 @@ public class SystemBuilderFluentTests
         var sysX = new DeclarativeSystem { ConfigureAction = b => b.Name("X").After("Y").Before("Y") };
         var sysY = new DeclarativeSystem { ConfigureAction = b => b.Name("Y") };
 
-        var schedule = RuntimeSchedule.Create()
+        var dag = RuntimeSchedule.Create()
+            .PublicTrack.DeclareDag("Test")
             .Add(sysX)
             .Add(sysY);
 
-        var ex = Assert.Throws<InvalidOperationException>(() => schedule.Build(_registry.Runtime));
+        var ex = Assert.Throws<InvalidOperationException>(() => dag.Build(_registry.Runtime));
         Assert.That(ex.Message, Does.Contain("cycle").IgnoreCase);
     }
 
@@ -148,6 +152,7 @@ public class SystemBuilderFluentTests
         var sys = new DeclarativeSystem { ConfigureAction = b => b.Name("R").Reads<CompA>() };
 
         using var scheduler = RuntimeSchedule.Create(new RuntimeOptions { BaseTickRate = 1000, WorkerCount = 1 })
+            .PublicTrack.DeclareDag("Test")
             .Add(sys)
             .Build(_registry.Runtime);
 
@@ -169,6 +174,7 @@ public class SystemBuilderFluentTests
         };
 
         using var scheduler = RuntimeSchedule.Create(new RuntimeOptions { BaseTickRate = 1000, WorkerCount = 1 })
+            .PublicTrack.DeclareDag("Test")
             .Add(batch)
             .Add(individual)
             .Build(_registry.Runtime);
@@ -189,6 +195,7 @@ public class SystemBuilderFluentTests
         };
 
         using var scheduler = RuntimeSchedule.Create(new RuntimeOptions { BaseTickRate = 1000, WorkerCount = 1 })
+            .PublicTrack.DeclareDag("Test")
             .Add(batch)
             .Build(_registry.Runtime);
 
@@ -205,6 +212,7 @@ public class SystemBuilderFluentTests
         };
 
         using var scheduler = RuntimeSchedule.Create(new RuntimeOptions { BaseTickRate = 1000, WorkerCount = 1 })
+            .PublicTrack.DeclareDag("Test")
             .Add(sys)
             .Build(_registry.Runtime);
 
@@ -224,6 +232,7 @@ public class SystemBuilderFluentTests
         };
 
         using var scheduler = RuntimeSchedule.Create(new RuntimeOptions { BaseTickRate = 1000, WorkerCount = 1 })
+            .PublicTrack.DeclareDag("Test")
             .Add(sys)
             .Build(_registry.Runtime);
 
@@ -234,8 +243,8 @@ public class SystemBuilderFluentTests
     [Test]
     public void EventQueueAndResource_DeclarationsAccumulate()
     {
-        var schedule = RuntimeSchedule.Create(new RuntimeOptions { BaseTickRate = 1000, WorkerCount = 1 });
-        var queue = schedule.CreateEventQueue<int>("Q", 16);
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { BaseTickRate = 1000, WorkerCount = 1 }).PublicTrack.DeclareDag("Test");
+        var queue = dag.CreateEventQueue<int>("Q", 16);
 
         var sys = new DeclarativeSystem
         {
@@ -247,7 +256,7 @@ public class SystemBuilderFluentTests
                 .ExclusivePhase(),
         };
 
-        using var scheduler = schedule.Add(sys).Build(_registry.Runtime);
+        using var scheduler = dag.Add(sys).Build(_registry.Runtime);
 
         var def = scheduler.Systems.First(s => s.Name == "Eventy");
         Assert.That(def.Access.WritesEvents, Does.Contain(queue));
@@ -263,6 +272,7 @@ public class SystemBuilderFluentTests
         var declared = new DeclarativeSystem { ConfigureAction = b => b.Name("Declared").Reads<CompA>() };
 
         using var scheduler = RuntimeSchedule.Create(new RuntimeOptions { BaseTickRate = 1000, WorkerCount = 1 })
+            .PublicTrack.DeclareDag("Test")
             .Add(undeclared)
             .Add(declared)
             .Build(_registry.Runtime);

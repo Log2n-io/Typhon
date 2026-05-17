@@ -45,11 +45,16 @@ public sealed class ProfilerSessionMetadata
     public long SamplingSessionStartQpc { get; }
 
     /// <summary>
-    /// User-defined phase order from <c>RuntimeOptions.Phases</c> (RFC 07 §Q3). Surfaced through the trace v6 PhasesTable section and the
-    /// Workbench Data API <c>/topology</c> endpoint so DAG-view consumers can render phase columns. Empty array when the host runs without a
-    /// scheduler (e.g., standalone profiling) or with no phase declarations.
+    /// Track table (#354) — the top level of the runtime partitioning hierarchy (<c>Engine → Track → DAG → Phase → System</c>). Surfaced through
+    /// the trace v11 TracksTable section. Empty array when the host runs without a scheduler (e.g., standalone profiling).
     /// </summary>
-    public string[] Phases { get; }
+    public TrackRecord[] Tracks { get; }
+
+    /// <summary>
+    /// DAG table (#354) — each DAG references its owning track by index and carries its own ordered phase names. Surfaced through the trace v11
+    /// DagsTable section. Empty array when the host runs without a scheduler.
+    /// </summary>
+    public DagRecord[] Dags { get; }
 
     // ── Static-structure tables (trace format v7+) ───────────────────────────
     // All optional. Hosts that don't have a live engine to introspect (e.g., the unit-test fixture builder) may pass empty
@@ -65,7 +70,7 @@ public sealed class ProfilerSessionMetadata
     /// <summary>Flat per-(component, field) index catalog. v7+ trace section. Empty when no engine is attached.</summary>
     public IndexCatalogEntry[] IndexCatalog { get; }
 
-    /// <summary>Engine runtime config snapshot (tick rate, worker count, phases). v7+ trace section. Null when no engine config is available.</summary>
+    /// <summary>Engine runtime config snapshot (tick rate, worker count). v7+ trace section. Null when no engine config is available.</summary>
     public RuntimeConfigRecord RuntimeConfig { get; }
 
     /// <summary>Per-queue static schema (capacity, event type). v7+ trace section. Empty when no queues are registered.</summary>
@@ -75,8 +80,8 @@ public sealed class ProfilerSessionMetadata
     public ResourceGraphNodeRecord[] ResourceGraphNodes { get; }
 
     public ProfilerSessionMetadata(SystemDefinitionRecord[] systems, ArchetypeRecord[] archetypes, ComponentTypeRecord[] componentTypes, int workerCount,
-        float baseTickRate, long startTimestamp, long stopwatchFrequency, DateTime startedUtc, long samplingSessionStartQpc = 0, string[] phases = null,
-        ComponentDefinitionRecord[] componentDefinitions = null, ArchetypeDefinitionRecord[] archetypeDefinitions = null,
+        float baseTickRate, long startTimestamp, long stopwatchFrequency, DateTime startedUtc, long samplingSessionStartQpc = 0, TrackRecord[] tracks = null,
+        DagRecord[] dags = null, ComponentDefinitionRecord[] componentDefinitions = null, ArchetypeDefinitionRecord[] archetypeDefinitions = null,
         IndexCatalogEntry[] indexCatalog = null, RuntimeConfigRecord runtimeConfig = null, EventQueueRecord[] eventQueues = null,
         ResourceGraphNodeRecord[] resourceGraphNodes = null)
     {
@@ -89,7 +94,8 @@ public sealed class ProfilerSessionMetadata
         StopwatchFrequency = stopwatchFrequency;
         StartedUtc = startedUtc;
         SamplingSessionStartQpc = samplingSessionStartQpc;
-        Phases = phases ?? [];
+        Tracks = tracks ?? [];
+        Dags = dags ?? [];
         ComponentDefinitions = componentDefinitions ?? [];
         ArchetypeDefinitions = archetypeDefinitions ?? [];
         IndexCatalog = indexCatalog ?? [];

@@ -3538,6 +3538,39 @@
           }
         }
       },
+      "DagDto": {
+        "required": [
+          "id",
+          "name",
+          "phases"
+        ],
+        "type": "object",
+        "properties": {
+          "id": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "name": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "phases": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
       "DecodedChunkDto": {
         "required": [
           "fromTick",
@@ -4224,7 +4257,8 @@
           "queueTickSummaries",
           "postTickSummaries",
           "queueIdToName",
-          "systemArchetypeTouches"
+          "systemArchetypeTouches",
+          "tracks"
         ],
         "type": "object",
         "properties": {
@@ -4355,6 +4389,15 @@
             ],
             "items": {
               "$ref": "#/components/schemas/SystemArchetypeTouchSummary"
+            }
+          },
+          "tracks": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/TrackDto"
             }
           }
         }
@@ -5405,7 +5448,8 @@
           "writesResources",
           "readsResources",
           "explicitAfter",
-          "explicitBefore"
+          "explicitBefore",
+          "dagId"
         ],
         "type": "object",
         "properties": {
@@ -5594,6 +5638,14 @@
             "items": {
               "type": "string"
             }
+          },
+          "dagId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint16"
           }
         }
       },
@@ -5840,6 +5892,7 @@
           "archetypes",
           "componentTypes",
           "phases",
+          "tracks",
           "componentFamilies"
         ],
         "type": "object",
@@ -5878,6 +5931,15 @@
             ],
             "items": {
               "type": "string"
+            }
+          },
+          "tracks": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/TrackDto"
             }
           },
           "componentFamilies": {
@@ -25062,6 +25124,49 @@
               "null",
               "array"
             ]
+          }
+        }
+      },
+      "TrackDto": {
+        "required": [
+          "name",
+          "orderIndex",
+          "tags",
+          "dags"
+        ],
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "orderIndex": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "tags": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "dags": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/DagDto"
+            }
           }
         }
       },

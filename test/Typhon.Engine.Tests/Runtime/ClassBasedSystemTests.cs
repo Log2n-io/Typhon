@@ -108,9 +108,9 @@ class ClassBasedSystemTests
     public void Add_CallbackSystem_ExecutesEveryTick()
     {
         var system = new CountingCallback();
-        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
-        schedule.Add(system);
-        using var scheduler = schedule.Build(_registry.Runtime);
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        dag.Add(system);
+        using var scheduler = dag.Build(_registry.Runtime);
 
         scheduler.Start();
         SpinWait.SpinUntil(() => scheduler.CurrentTickNumber >= 3, TimeSpan.FromSeconds(5));
@@ -123,9 +123,9 @@ class ClassBasedSystemTests
     public void Add_QuerySystem_ExecutesEveryTick()
     {
         var system = new CountingQuery();
-        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
-        schedule.Add(system);
-        using var scheduler = schedule.Build(_registry.Runtime);
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        dag.Add(system);
+        using var scheduler = dag.Build(_registry.Runtime);
 
         scheduler.Start();
         SpinWait.SpinUntil(() => scheduler.CurrentTickNumber >= 3, TimeSpan.FromSeconds(5));
@@ -138,9 +138,9 @@ class ClassBasedSystemTests
     public void Add_CompoundSystem_ExpandsSubSystems()
     {
         var compound = new TestCompound();
-        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
-        schedule.Add(compound);
-        using var scheduler = schedule.Build(_registry.Runtime);
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        dag.Add(compound);
+        using var scheduler = dag.Build(_registry.Runtime);
 
         scheduler.Start();
         SpinWait.SpinUntil(() => scheduler.CurrentTickNumber >= 3, TimeSpan.FromSeconds(5));
@@ -156,10 +156,10 @@ class ClassBasedSystemTests
         var classSystem = new CountingCallback();
         var lambdaCount = 0;
 
-        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
-        schedule.Add(classSystem);
-        schedule.CallbackSystem("Lambda", _ => Interlocked.Increment(ref lambdaCount), after: "Counter");
-        using var scheduler = schedule.Build(_registry.Runtime);
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        dag.Add(classSystem);
+        dag.CallbackSystem("Lambda", _ => Interlocked.Increment(ref lambdaCount), after: "Counter");
+        using var scheduler = dag.Build(_registry.Runtime);
 
         scheduler.Start();
         SpinWait.SpinUntil(() => scheduler.CurrentTickNumber >= 3, TimeSpan.FromSeconds(5));
@@ -172,52 +172,52 @@ class ClassBasedSystemTests
     [Test]
     public void Add_SystemWithoutName_Throws()
     {
-        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
-        Assert.Throws<InvalidOperationException>(() => schedule.Add(new NoNameSystem()));
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        Assert.Throws<InvalidOperationException>(() => dag.Add(new NoNameSystem()));
     }
 
     [Test]
     public void Add_PipelineSystem_ThrowsNotSupported()
     {
-        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
-        Assert.Throws<NotSupportedException>(() => schedule.Add(new StubPipeline()));
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        Assert.Throws<NotSupportedException>(() => dag.Add(new StubPipeline()));
     }
 
     [Test]
     public void Add_NullCallbackSystem_ThrowsArgumentNull()
     {
-        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
-        Assert.Throws<ArgumentNullException>(() => schedule.Add((CallbackSystem)null));
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        Assert.Throws<ArgumentNullException>(() => dag.Add((CallbackSystem)null));
     }
 
     [Test]
     public void Add_NullQuerySystem_ThrowsArgumentNull()
     {
-        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
-        Assert.Throws<ArgumentNullException>(() => schedule.Add((QuerySystem)null));
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        Assert.Throws<ArgumentNullException>(() => dag.Add((QuerySystem)null));
     }
 
     [Test]
     public void Add_NullCompoundSystem_ThrowsArgumentNull()
     {
-        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
-        Assert.Throws<ArgumentNullException>(() => schedule.Add((CompoundSystem)null));
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        Assert.Throws<ArgumentNullException>(() => dag.Add((CompoundSystem)null));
     }
 
     [Test]
     public void Add_NullPipelineSystem_ThrowsArgumentNull()
     {
-        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
-        Assert.Throws<ArgumentNullException>(() => schedule.Add((PipelineSystem)null));
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        Assert.Throws<ArgumentNullException>(() => dag.Add((PipelineSystem)null));
     }
 
     [Test]
     public void Add_AfterBuild_Throws()
     {
-        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
-        schedule.CallbackSystem("Noop", _ => { });
-        schedule.Build(_registry.Runtime).Dispose();
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        dag.CallbackSystem("Noop", _ => { });
+        dag.Build(_registry.Runtime).Dispose();
 
-        Assert.Throws<InvalidOperationException>(() => schedule.Add(new CountingCallback()));
+        Assert.Throws<InvalidOperationException>(() => dag.Add(new CountingCallback()));
     }
 }

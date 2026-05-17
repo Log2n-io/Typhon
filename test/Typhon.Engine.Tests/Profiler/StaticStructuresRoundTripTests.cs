@@ -12,7 +12,7 @@ namespace Typhon.Engine.Tests.Profiler;
 /// that exercises all six in one pass to lock the on-disk ordering.
 ///
 /// The empty-section path is already covered indirectly by every other Profiler test (they all use
-/// <see cref="TraceFileWriter.WriteEmptyStaticStructures"/> after WritePhases); these tests focus on the
+/// <see cref="TraceFileWriter.WriteEmptyStaticStructures"/> after WriteTracks/WriteDags); these tests focus on the
 /// non-empty wire paths so a bug there can't ship silently.
 /// </summary>
 [TestFixture]
@@ -193,8 +193,6 @@ public sealed class StaticStructuresRoundTripTests
             WorkerCount = 8,
             TelemetryRingCapacity = 4096,
             ParallelQueryMinChunkSize = 128,
-            DefaultPhase = "Simulation",
-            Phases = ["Input", "Simulation", "Output"],
         };
         var output = RoundTrip(input,
             (writer, value) => writer.WriteRuntimeConfig(value),
@@ -204,8 +202,6 @@ public sealed class StaticStructuresRoundTripTests
         Assert.That(output.WorkerCount, Is.EqualTo(8));
         Assert.That(output.TelemetryRingCapacity, Is.EqualTo(4096));
         Assert.That(output.ParallelQueryMinChunkSize, Is.EqualTo(128));
-        Assert.That(output.DefaultPhase, Is.EqualTo("Simulation"));
-        Assert.That(output.Phases, Is.EqualTo(new[] { "Input", "Simulation", "Output" }));
     }
 
     [Test]
@@ -254,7 +250,8 @@ public sealed class StaticStructuresRoundTripTests
             writer.WriteSystemDefinitions([]);
             writer.WriteArchetypes([]);
             writer.WriteComponentTypes([]);
-            writer.WritePhases([]);
+            writer.WriteTracks([]);
+            writer.WriteDags([]);
             writer.WriteComponentDefinitions(ReadOnlySpan<ComponentDefinitionRecord>.Empty);
             writer.WriteArchetypeDefinitions(ReadOnlySpan<ArchetypeDefinitionRecord>.Empty);
             writer.WriteIndexCatalog(ReadOnlySpan<IndexCatalogEntry>.Empty);
@@ -271,7 +268,8 @@ public sealed class StaticStructuresRoundTripTests
         reader.ReadSystemDefinitions();
         reader.ReadArchetypes();
         reader.ReadComponentTypes();
-        reader.ReadPhases();
+        reader.ReadTracks();
+        reader.ReadDags();
         reader.ReadStaticStructures();
 
         Assert.That(reader.ResourceGraphNodes, Has.Count.EqualTo(3));
@@ -297,7 +295,8 @@ public sealed class StaticStructuresRoundTripTests
             writer.WriteSystemDefinitions([]);
             writer.WriteArchetypes([]);
             writer.WriteComponentTypes([]);
-            writer.WritePhases([]);
+            writer.WriteTracks([]);
+            writer.WriteDags([]);
 
             writer.WriteComponentDefinitions(new[] {
                 new ComponentDefinitionRecord { ComponentTypeId = 1, Name = "A", Fields = [] }
@@ -325,7 +324,8 @@ public sealed class StaticStructuresRoundTripTests
         reader.ReadSystemDefinitions();
         reader.ReadArchetypes();
         reader.ReadComponentTypes();
-        reader.ReadPhases();
+        reader.ReadTracks();
+        reader.ReadDags();
         reader.ReadStaticStructures();
 
         Assert.That(reader.ComponentDefinitions, Has.Count.EqualTo(1));
@@ -358,7 +358,8 @@ public sealed class StaticStructuresRoundTripTests
             writer.WriteSystemDefinitions([]);
             writer.WriteArchetypes([]);
             writer.WriteComponentTypes([]);
-            writer.WritePhases([]);
+            writer.WriteTracks([]);
+            writer.WriteDags([]);
 
             // Default placeholders for the five sections we're not exercising; the test's section then
             // overwrites the appropriate one. The writer order MUST match the v7 wire-format order,
@@ -382,7 +383,8 @@ public sealed class StaticStructuresRoundTripTests
         reader.ReadSystemDefinitions();
         reader.ReadArchetypes();
         reader.ReadComponentTypes();
-        reader.ReadPhases();
+        reader.ReadTracks();
+        reader.ReadDags();
         reader.ReadStaticStructures();
 
         return readOne(reader);

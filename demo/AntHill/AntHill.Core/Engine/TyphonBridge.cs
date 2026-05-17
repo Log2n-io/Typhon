@@ -412,21 +412,10 @@ public sealed class TyphonBridge : IDisposable
         {
             BaseTickRate = 60,
             WorkerCount = workerCount,
-            // RFC 07 phase pipeline — declared as a total order. All systems in phase N complete
-            // before any system in phase N+1 starts. The Workbench's System DAG view uses this
-            // skeleton as the swim-lane structure.
-            Phases =
-            [
-                Phase.Input,
-                AntPhases.Simulation,
-                AntPhases.Trail,
-                AntPhases.Render,
-            ],
-            DefaultPhase = AntPhases.Render,
-            // Parallelize WriteTickFence across the worker pool — registers FenceExec as an internal sub-DAG system
-            // dispatched after the user DAG completes. Per-archetype/per-table fence work runs concurrently instead of
-            // serially on TickDriver, reclaiming the idle-worker window that previously dominated AntHill's cluster-fence
-            // wall-clock. K × WorkerCount chunk oversubscription smooths preemption jitter.
+            // Parallelize WriteTickFence across the worker pool — declares the Fence DAG on the Engine-Post track,
+            // dispatched after the Public track completes. Per-archetype/per-table fence work runs concurrently instead
+            // of serially on TickDriver, reclaiming the idle-worker window that previously dominated AntHill's
+            // cluster-fence wall-clock. K × WorkerCount chunk oversubscription smooths preemption jitter.
             EnableParallelFence = true,
         });
 
@@ -444,11 +433,10 @@ public sealed class TyphonBridge : IDisposable
     // ═══════════════════════════════════════════════════════════════════
 
     /// <summary>
-    /// Build the schedule using class-based RFC 07 registrations. Phase-derived swim-lanes,
-    /// per-system access declarations (Reads/Writes for components, ReadsResource/WritesResource
-    /// for shared simulation state, ReadsEvents/WritesEvents for telemetry queues). The previous
-    /// lambda-overload form is gone — it didn't carry the access metadata the auto-DAG (and the
-    /// Workbench System DAG view) needs.
+    /// Build the schedule using class-based RFC 07 registrations. AntHill's systems form a single DAG ("AntHill") on the
+    /// schedule's Public track, with the four DAG-local phases that drive the swim-lane structure. Per-system access
+    /// declarations (Reads/Writes for components, ReadsResource/WritesResource for shared simulation state,
+    /// ReadsEvents/WritesEvents for telemetry queues) carry the metadata the auto-DAG and the Workbench System DAG view need.
     /// </summary>
     private void BuildSchedule(RuntimeSchedule schedule)
     {
@@ -459,56 +447,63 @@ public sealed class TyphonBridge : IDisposable
         FoodPickedUpQueue   = schedule.CreateEventQueue<FoodPickedUpEvent>("FoodPickedUp", capacity: 4096);
         FoodDeliveredQueue  = schedule.CreateEventQueue<FoodDeliveredEvent>("FoodDelivered", capacity: 4096);
 
+        // The whole simulation is one DAG on the Public track. Its four DAG-local phases form a total order — every
+        // system in phase N completes before any system in phase N+1. The Workbench's System DAG view uses this skeleton
+        // as the swim-lane structure.
+        var dag = schedule.PublicTrack.DeclareDag("AntHill")
+            .Phases(Phase.Input, AntPhases.Simulation, AntPhases.Trail, AntPhases.Render)
+            .DefaultPhase(AntPhases.Render);
+
         // Input phase
         // ToolCommandSystem drains the Godot-side command queue and applies sim-side mutations
         // (spawn food / rock, cull). Runs first so AntUpdateSystem (Phase.Simulation) sees the
         // new entities + updated _foodCache / _foodGrid this same tick.
-        schedule.Add(new ToolCommandSystem(this));
+        dag.Add(new ToolCommandSystem(this));
         // Phase 6A — advances day/night phase + computes brightness scalar. Runs before
         // TierAssignment because the brightness scalar may eventually drive LOD curves; today
         // it's a pure write to a TyphonBridge field that the Godot side polls each frame.
-        schedule.Add(new EnvironmentTickSystem(this));
-        schedule.Add(new TierAssignmentSystem(this));
+        dag.Add(new EnvironmentTickSystem(this));
+        dag.Add(new TierAssignmentSystem(this));
 
         // Simulation phase — single merged system that walks each Ant cluster once per tick and
         // runs metabolism+respawn / move / food-interact / brain-steer / phero-deposit in registers.
         // Per-cluster tier amortization is inside the body (AmortMetab/Brain/Phero tables).
-        schedule.Add(new AntUpdateSystem(this));
+        dag.Add(new AntUpdateSystem(this));
 
         // Spider predators — Phase 5. Sequential (8 entities); after AntUpdate so it can read the
         // spatial index without racing AntUpdate's WorldBounds writes (AntUpdate finishes its parallel
         // walk before this system starts via cross-system W×W ordering on Velocity).
-        schedule.Add(new SpiderUpdateSystem(this));
+        dag.Add(new SpiderUpdateSystem(this));
 
         // Trail phase — pheromone grid evaporation sweep. Single writer of PheromoneGrid alongside
         // AntUpdate's per-ant deposits; runs after AntUpdate via cross-phase ordering.
-        schedule.Add(new PheroDecaySystem(this));
+        dag.Add(new PheroDecaySystem(this));
 
         // Phase 6B — Drossel-Schwabl fire CA at 10 Hz. Lives in the Trail phase next to PheroDecay
         // because both are "ambient environment" sweeps (no entity access, no MVCC, dense grid pass).
-        schedule.Add(new FireTickSystem(this));
+        dag.Add(new FireTickSystem(this));
 
         // Phase 6C — Vegetation tick at 10 Hz. ReadsResource("FireGrid") + WritesResource("PlantGrid")
         // orders it after FireTickSystem this tick (FireGrid is what FireTickSystem just wrote), so the
         // plant scan sees the freshly-resolved Burning cells. Cell density feedback for next tick's
         // FireGrid.Tick goes via PlantGrid.DensityFactor (read in FireTick on the following CA tick).
-        schedule.Add(new VegetationSystem(this));
+        dag.Add(new VegetationSystem(this));
 
         // Render phase — stats sink consumes the three event queues, prepare/fill/publish chain
-        schedule.Add(new AntStatsAggregatorSystem(this));
-        schedule.Add(new PrepareRenderBufferSystem(this));
-        schedule.Add(new FillRenderBufferSystem(this));
+        dag.Add(new AntStatsAggregatorSystem(this));
+        dag.Add(new PrepareRenderBufferSystem(this));
+        dag.Add(new FillRenderBufferSystem(this));
 
         // Phase 6 polish — heatmap downsample split into 4 parallel systems (one per channel
         // for the max-reduce, plus an RGBA pack). The 3 ChunkedCallbackSystems run concurrently
         // with each other and with FillRenderBufferSystem; the pack accepts 1-tick tearing per
         // channel in exchange for also running in parallel.
-        schedule.Add(new PheroMaxReduceSystem(this, "HeatmapMaxFood",  () => _pheromones.Food,  () => HeatMaxFood,  "HeatFoodAccum"));
-        schedule.Add(new PheroMaxReduceSystem(this, "HeatmapMaxHome",  () => _pheromones.Home,  () => HeatMaxHome,  "HeatHomeAccum"));
-        schedule.Add(new PheroMaxReduceSystem(this, "HeatmapMaxFight", () => _pheromones.Fight, () => HeatMaxFight, "HeatFightAccum"));
-        schedule.Add(new HeatmapRgbaPackSystem(this));
+        dag.Add(new PheroMaxReduceSystem(this, "HeatmapMaxFood",  () => _pheromones.Food,  () => HeatMaxFood,  "HeatFoodAccum"));
+        dag.Add(new PheroMaxReduceSystem(this, "HeatmapMaxHome",  () => _pheromones.Home,  () => HeatMaxHome,  "HeatHomeAccum"));
+        dag.Add(new PheroMaxReduceSystem(this, "HeatmapMaxFight", () => _pheromones.Fight, () => HeatMaxFight, "HeatFightAccum"));
+        dag.Add(new HeatmapRgbaPackSystem(this));
 
-        schedule.Add(new PublishRenderFrameSystem(this));
+        dag.Add(new PublishRenderFrameSystem(this));
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -2440,7 +2435,6 @@ public sealed class TyphonBridge : IDisposable
     public void SetHeatmapEnabled(bool enabled) => HeatmapEnabled = enabled;
     public TickTelemetryRing Telemetry => _runtime?.Telemetry;
     public SystemDefinition[] Systems => _runtime?.Systems;
-    public string[] PhaseNames => _runtime?.PhaseNames ?? [];
 
     /// <summary>
     /// Active <see cref="DatabaseEngine"/>. Exposed so <see cref="AntHill.ProfilerSetup"/> can build the v7

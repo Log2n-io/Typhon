@@ -34,7 +34,7 @@ class DeltaTimeTests : TestBase<DeltaTimeTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Capture", ctx =>
+            schedule.PublicTrack.DeclareDag("Test").CallbackSystem("Capture", ctx =>
             {
                 if (Interlocked.Increment(ref ticksSeen) == 2)
                 {
@@ -62,7 +62,7 @@ class DeltaTimeTests : TestBase<DeltaTimeTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Capture", ctx =>
+            schedule.PublicTrack.DeclareDag("Test").CallbackSystem("Capture", ctx =>
             {
                 if (firstDeltaTime < 0f)
                 {

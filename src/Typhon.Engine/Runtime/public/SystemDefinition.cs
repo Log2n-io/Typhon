@@ -23,23 +23,19 @@ public sealed class SystemDefinition
     public SystemPriority Priority { get; init; } = SystemPriority.Normal;
 
     /// <summary>
-    /// The phase this system belongs to (RFC 07 / Q3). Set by <see cref="RuntimeSchedule.Build"/> from <see cref="SystemBuilder.Phase"/>.
-    /// Default-valued (zero <see cref="Phase"/>) when no phase was declared — pair with <see cref="PhaseIndex"/> = -1 to detect.
+    /// The DAG-local phase this system belongs to (RFC 07 / Q3). Set by <see cref="RuntimeSchedule.Build"/> from <see cref="SystemBuilder.Phase"/>, or the
+    /// owning DAG's default phase when no phase was declared.
     /// </summary>
     public Phase Phase { get; internal set; }
 
-    /// <summary>
-    /// Index into <see cref="RuntimeOptions.Phases"/> for the resolved phase. -1 when no phase was declared (transitional; Unit 5 of the
-    /// auto-DAG migration will require a phase per system).
-    /// </summary>
+    /// <summary>Index into the owning <see cref="Dag.ResolvedPhases"/> for the resolved phase. DAG-local — every system has a valid phase.</summary>
     public int PhaseIndex { get; internal set; } = -1;
 
     /// <summary>
-    /// True when this system belongs to the engine-internal sub-DAG dispatched after the user DAG completes (e.g. <c>FenceExecSystem</c>).
-    /// Workbench DAG views typically filter these out of the user-facing graph.
-    /// Set by <see cref="RuntimeSchedule.Build"/> from <see cref="SystemBuilder.Internal"/>.
+    /// Flat global id of the <see cref="Dag"/> this system belongs to. Set by <see cref="RuntimeSchedule.Build"/>.
+    /// The DAG's <see cref="Dag.Track"/> determines whether the system is engine-internal (track carries <see cref="Track.EngineTag"/>).
     /// </summary>
-    public bool IsInternal { get; internal set; }
+    public int DagId { get; internal set; }
 
     /// <summary>
     /// Per-dispatch chunk-count override for chunked-callback systems. When non-zero, the runtime dispatches this many chunks for the next invocation instead

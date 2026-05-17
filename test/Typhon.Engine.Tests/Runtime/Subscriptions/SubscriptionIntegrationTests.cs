@@ -90,7 +90,7 @@ class SubscriptionIntegrationTests : TestBase<SubscriptionIntegrationTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Spawner", ctx =>
+            schedule.PublicTrack.DeclareDag("Test").CallbackSystem("Spawner", ctx =>
             {
                 var tick = (int)ctx.TickNumber;
                 if (tick == 2) // Spawn on tick 2 to give client time to subscribe
@@ -185,7 +185,7 @@ class SubscriptionIntegrationTests : TestBase<SubscriptionIntegrationTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Noop", _ => { });
+            schedule.PublicTrack.DeclareDag("Test").CallbackSystem("Noop", _ => { });
         }, new RuntimeOptions
         {
             WorkerCount = 1,

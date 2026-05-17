@@ -206,6 +206,67 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
         Assert.That(clusterState.ClusterCellMap[c1], Is.EqualTo(cellKey));
     }
 
+    [Test]
+    public void Spawn_OverflowsManyClusters_ScanCursorAdvancesPastFullPrefix()
+    {
+        // Regression guard for the ClaimSlotInCell per-cell scan cursor. Filling K clusters in one cell must leave the cursor at the last cluster's logical
+        // index — i.e. the scan advanced past the full prefix instead of restarting at 0 on every claim (the old O(M²) behaviour).
+        using var dbe = SetupEngineWithGrid();
+        var meta = Archetype<ClCohUnit>.Metadata;
+        int clusterSize = meta.ClusterLayout.ClusterSize;
+
+        // Fill exactly 3 clusters and start a 4th — all inside cell (50, 50).
+        int spawnCount = clusterSize * 3 + 1;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            for (int i = 0; i < spawnCount; i++)
+            {
+                tx.Spawn<ClCohUnit>(ClCohUnit.Pos.Set(PointAt(50f, 50f)));
+            }
+            tx.Commit();
+        }
+
+        var cs = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
+        int cellKey = dbe.SpatialGrid.WorldToCellKey(50f, 50f);
+
+        Assert.That(cs.ActiveClusterCount, Is.EqualTo(4), "3 full clusters + 1 partial");
+        Assert.That(cs.CellClusterPool.GetScanCursor(cellKey), Is.EqualTo(3),
+            "cursor must point at the last (only non-full) cluster — proves the scan does not restart at 0");
+    }
+
+    [Test]
+    public void Destroy_ResetsScanCursor_SoFreedSlotIsReusable()
+    {
+        // A release must reset the cell's scan cursor to 0 — otherwise a slot freed ahead of the cursor would be permanently skipped.
+        using var dbe = SetupEngineWithGrid();
+        var meta = Archetype<ClCohUnit>.Metadata;
+        int clusterSize = meta.ClusterLayout.ClusterSize;
+
+        EntityId toKill = default;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            for (int i = 0; i < clusterSize * 2 + 1; i++)
+            {
+                var id = tx.Spawn<ClCohUnit>(ClCohUnit.Pos.Set(PointAt(50f, 50f)));
+                if (i == 0) { toKill = id; } // an entity in the first (full) cluster
+            }
+            tx.Commit();
+        }
+
+        var cs = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
+        int cellKey = dbe.SpatialGrid.WorldToCellKey(50f, 50f);
+        Assert.That(cs.CellClusterPool.GetScanCursor(cellKey), Is.GreaterThan(0), "cursor advanced during spawn");
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.Destroy(toKill);
+            tx.Commit();
+        }
+
+        Assert.That(cs.CellClusterPool.GetScanCursor(cellKey), Is.EqualTo(0),
+            "releasing a slot must reset the cursor so the freed slot can be reused");
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // Destroy — cell state maintenance
     // ═══════════════════════════════════════════════════════════════════════

@@ -144,29 +144,8 @@ public sealed partial class TyphonRuntime : IDisposable
     /// </summary>
     public SystemDefinition[] Systems => Scheduler.Systems;
 
-    /// <summary>User-registered systems only (filters out <see cref="SystemDefinition.IsInternal"/> entries).</summary>
+    /// <summary>User-registered systems only (filters out engine-tagged-track systems such as the Fence DAG).</summary>
     public SystemDefinition[] UserSystems => Scheduler.UserSystems;
-
-    /// <summary>
-    /// Phase order from <see cref="RuntimeOptions.Phases"/>. Returned as a fresh string array so
-    /// callers (notably profiler exporters that ship the list to the Workbench) can hand it
-    /// straight to <c>ProfilerSessionMetadata</c> without having to know about the
-    /// <see cref="Phase"/> struct or the underlying options object.
-    /// </summary>
-    public string[] PhaseNames
-    {
-        get
-        {
-            var phases = _options.Phases;
-            var names = new string[phases.Length];
-            for (var i = 0; i < phases.Length; i++)
-            {
-                names[i] = phases[i].Name;
-            }
-
-            return names;
-        }
-    }
 
     /// <summary>Fires when overload reaches <see cref="OverloadLevel.PlayerShedding"/>. Game code decides what to do (migrate, disconnect, split).</summary>
     public event Action<TyphonRuntime> OnCriticalOverload;
@@ -193,13 +172,12 @@ public sealed partial class TyphonRuntime : IDisposable
         var schedule = RuntimeSchedule.Create(opts);
         configure(schedule);
 
-        // Register engine-internal systems (FenceExec) on the same schedule. They're flagged via SystemBuilder.Internal() so RuntimeSchedule.Build partitions
-        // them into the DagScheduler's internal sub-DAG. Only enabled when the user opts in via RuntimeOptions.EnableParallelFence (default true); otherwise
-        // the legacy serial WriteTickFence runs from OnTickEndInternal as before.
+        // Declare the engine's parallel Fence as a normal DAG on the schedule's Engine-Post track. Only when the user opts in via
+        // RuntimeOptions.EnableParallelFence (default true); otherwise the legacy serial WriteTickFence runs from OnTickEndInternal as before.
         FenceExecBundle? fenceBundle = null;
         if (opts.EnableParallelFence)
         {
-            fenceBundle = InternalScheduleBuilder.AddFenceExec(schedule, engine);
+            fenceBundle = FenceDagBuilder.DeclareFenceDag(schedule, engine);
         }
 
         var resourceParent = parent ?? engine.Parent; // DatabaseEngine registers under DataEngine node
@@ -1917,17 +1895,16 @@ public sealed partial class TyphonRuntime : IDisposable
         // through one accounting bucket. UoW.Flush below handles the writeback per the configured DurabilityMode (and skips it entirely in WAL mode where
         // WAL records carry durability). Without this, each tick-fence callee would create+commit its own private ChangeSet, doing redundant disk I/O on
         // every tick (measured at ~22 ms / 88% of ExecuteMigrations time on a 1071-migration AntHill storm).
-        InspectorPhase(TickPhase.WriteTickFence, () =>
+        if (_parallelFenceEnabled)
         {
-            if (_parallelFenceEnabled)
-            {
-                RunParallelFence(scheduler);
-            }
-            else
-            {
-                Engine.WriteTickFence(scheduler.CurrentTickNumber, _currentUow?.ChangeSet);
-            }
-        });
+            // RunParallelFence brackets its own serial-prep portion with the WriteTickFence phase marker and dispatches the Fence DAG *outside* it — the four
+            // Fence systems carry their own Engine-Post telemetry, so wrapping the dispatch would double-count them into `writeTickFenceUs`.
+            RunParallelFence(scheduler);
+        }
+        else
+        {
+            InspectorPhase(TickPhase.WriteTickFence, () => Engine.WriteTickFence(scheduler.CurrentTickNumber, _currentUow?.ChangeSet));
+        }
 
         // Flush the UoW to make all Deferred writes (including the tick fence publishes above) durable, then dispose. UoW.Flush in WAL mode calls
         // WalManager.RequestFlush + WaitForDurable(currentLsn), where currentLsn is captured at the moment of the call — so it includes every publish made
@@ -1967,7 +1944,7 @@ public sealed partial class TyphonRuntime : IDisposable
     /// Wraps a tick phase with paired profiler boundary events. When <see cref="TelemetryConfig.ProfilerActive"/> is false the JIT folds both
     /// <summary>
     /// Parallel cluster tick fence orchestration. Runs on TickDriver. Resets the shared <see cref="FenceContext"/>, drains dormancy wake requests, runs the
-    /// serial component-table fences, then triggers ONE <see cref="DagScheduler.DispatchInternalSchedule"/> call. The scheduler walks the four chained internal
+    /// serial component-table fences, then triggers ONE <see cref="DagScheduler.DispatchDeferredTracks"/> call. The scheduler walks the four chained Fence-DAG
     /// exec systems (Prep → Migrate → AabbRefresh → Finalize) via the declared <c>.After()</c> edges — each phase's typed <c>Prepare(FenceContext)</c> builds
     /// its plan and sets the dynamic chunk count. Aggregates the highest WAL LSN across tables + Finalize and publishes it via
     /// <see cref="DatabaseEngine.UpdateLastTickFenceLSNAtomic"/>. See <c>claude/design/Spatial/SpatialTiers/01-spatial-clusters.md</c>
@@ -1980,35 +1957,42 @@ public sealed partial class TyphonRuntime : IDisposable
         // which uses the UoW's single-thread ChangeSet correctly. AntHill (the parallelization target) is WAL.
         if (Engine.WalManager == null)
         {
-            Engine.WriteTickFence(scheduler.CurrentTickNumber, _currentUow?.ChangeSet);
+            InspectorPhase(TickPhase.WriteTickFence, () => Engine.WriteTickFence(scheduler.CurrentTickNumber, _currentUow?.ChangeSet));
             return;
         }
 
         var ctx = Engine.FenceContext;
-        ctx.Reset(scheduler.CurrentTickNumber, _currentUow?.ChangeSet, scheduler.WorkerCount, _options.FenceChunkOversubscription, _liveFenceCost);
 
-        // Drain dormancy wake requests globally on TickDriver (single-threaded contract from issue #233).
-        DormancyReporter.DrainAll(Engine._archetypeStates);
-
-        // Serial table fences on TickDriver. Uses the UoW's ChangeSet (single-thread context).
-        foreach (var table in Engine.GetAllComponentTables())
+        // `TickPhase.WriteTickFence` brackets ONLY the serial prep — context reset, dormancy drain, and the serial component-table fences. This is the sole
+        // genuinely-serial post-tick fence cost; the Fence DAG dispatched below is four chained systems on the Engine-Post track, each with its own per-system
+        // telemetry. Pre-#354 the marker wrapped `DispatchDeferredTracks` too, so `writeTickFenceUs` double-counted the Fence systems' wall-time.
+        InspectorPhase(TickPhase.WriteTickFence, () =>
         {
-            if (table.StorageMode == Schema.Definition.StorageMode.Versioned || table.DirtyBitmap == null)
-            {
-                continue;
-            }
+            ctx.Reset(scheduler.CurrentTickNumber, _currentUow?.ChangeSet, scheduler.WorkerCount, _options.FenceChunkOversubscription, _liveFenceCost);
 
-            long lsn = Engine.ProcessTableFence(table, ctx.TickNumber, ctx.UowChangeSet);
-            if (lsn > ctx.HighestTableLsn)
-            {
-                ctx.HighestTableLsn = lsn;
-            }
-        }
+            // Drain dormancy wake requests globally on TickDriver (single-threaded contract from issue #233).
+            DormancyReporter.DrainAll(Engine._archetypeStates);
 
-        // Single dispatch — the scheduler walks Prep → Migrate → AabbRefresh → Finalize via the declared `.After()` edges. Each phase's Prepare(ctx) builds its
-        // plan from FenceContext and sets RuntimeChunkCount; ShouldRun/Prepare returning 0 skips cleanly with successor fan-out. No explicit per-phase dispatch
-        // races against auto-fanout.
-        scheduler.DispatchInternalSchedule();
+            // Serial table fences on TickDriver. Uses the UoW's ChangeSet (single-thread context).
+            foreach (var table in Engine.GetAllComponentTables())
+            {
+                if (table.StorageMode == Schema.Definition.StorageMode.Versioned || table.DirtyBitmap == null)
+                {
+                    continue;
+                }
+
+                long lsn = Engine.ProcessTableFence(table, ctx.TickNumber, ctx.UowChangeSet);
+                if (lsn > ctx.HighestTableLsn)
+                {
+                    ctx.HighestTableLsn = lsn;
+                }
+            }
+        });
+
+        // Dispatch the deferred Engine-Post track (the Fence DAG) — OUTSIDE the WriteTickFence marker (see above). The scheduler walks Prep → Migrate →
+        // AabbRefresh → Finalize via the declared `.After()` edges. Each phase's Prepare(ctx) builds its plan from FenceContext and sets RuntimeChunkCount;
+        // ShouldRun/Prepare returning 0 skips cleanly with successor fan-out.
+        scheduler.DispatchDeferredTracks();
 
         ctx.HighestArchetypeLsn = _fenceFinalizeExec.HighestLsn;
         long overall = Math.Max(ctx.HighestTableLsn, ctx.HighestArchetypeLsn);

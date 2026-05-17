@@ -210,7 +210,6 @@ internal sealed class FencePrepExecSystem : FencePhaseExecSystemBase
 
     protected override void Configure(SystemBuilder<FenceContext> b) => b
         .Name(SystemName)
-        .Internal()
         .ChunkedParallel(1); // RuntimeChunkCount overridden per-dispatch from plan.ChunkCount
 
     protected override ChangeSet CreateChunkChangeSet() => Engine.MMF.RentChangeSet();
@@ -243,7 +242,6 @@ internal sealed class FenceMigrateExecSystem : FencePhaseExecSystemBase
 
     protected override void Configure(SystemBuilder<FenceContext> b) => b
         .Name(SystemName)
-        .Internal()
         .ChunkedParallel(1)
         .After(FencePrepExecSystem.SystemName);
 
@@ -359,7 +357,6 @@ internal sealed class FenceAabbRefreshExecSystem : FencePhaseExecSystemBase
 
     protected override void Configure(SystemBuilder<FenceContext> b) => b
         .Name(SystemName)
-        .Internal()
         .ChunkedParallel(1)
         .After(FenceMigrateExecSystem.SystemName);
 
@@ -391,7 +388,6 @@ internal sealed class FenceFinalizeExecSystem : FencePhaseExecSystemBase
 
     protected override void Configure(SystemBuilder<FenceContext> b) => b
         .Name(SystemName)
-        .Internal()
         .ChunkedParallel(1)
         .After(FenceAabbRefreshExecSystem.SystemName);
 

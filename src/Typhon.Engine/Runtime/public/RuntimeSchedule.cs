@@ -6,22 +6,22 @@ using System.Collections.Generic;
 namespace Typhon.Engine;
 
 /// <summary>
-/// Fluent builder for constructing a runtime schedule — the public API that game developers use to register systems and build a <see cref="DagScheduler"/>.
+/// Fluent builder for constructing a runtime schedule — the public API game developers use to declare the <c>Track → DAG → Phase → System</c> hierarchy and
+/// build a <see cref="DagScheduler"/>.
 /// </summary>
 /// <remarks>
 /// <para>
-/// Wraps <see cref="DagBuilder"/> with a developer-friendly interface that supports dependency declaration via <c>after:</c>/<c>afterAll:</c>,
-/// <c>shouldRun:</c> predicates, typed event queues, and overload parameters.
-/// </para>
-/// <para>
-/// Usage: <c>RuntimeSchedule.Create().CallbackSystem(...).PipelineSystem(...).Build(parent)</c>
+/// A schedule owns three built-in <see cref="Track"/>s — Engine-Pre, <see cref="PublicTrack"/>, Engine-Post — in that execution order. Apps declare their DAGs
+/// on the Public track (<c>schedule.PublicTrack.DeclareDag("Game").Add(...)</c>) and may add further app tracks via <see cref="DeclareTrack"/>; those slot into
+/// the app region between Public and Engine-Post in declaration (execution) order. The engine declares its own DAGs (the Fence) on the Engine-Post track.
+/// Declaring a DAG is mandatory — there is no default-DAG convenience.
 /// </para>
 /// </remarks>
 [PublicAPI]
 public sealed class RuntimeSchedule
 {
     private readonly RuntimeOptions _options;
-    private readonly List<SystemRegistration> _registrations = [];
+    private readonly List<Track> _tracks;
     private readonly List<EventQueueBase> _eventQueues = [];
     private readonly Dictionary<string, List<EventQueueBase>> _produces = new(StringComparer.Ordinal);
     private readonly Dictionary<string, List<EventQueueBase>> _consumes = new(StringComparer.Ordinal);
@@ -30,249 +30,88 @@ public sealed class RuntimeSchedule
     private RuntimeSchedule(RuntimeOptions options)
     {
         _options = options ?? new RuntimeOptions();
+
+        // Built-in tracks, in execution order. Engine-Pre / Engine-Post carry the `engine` tag so tooling can hide them by default; Public is the app's track.
+        // Engine-Pre is empty initially — declared for symmetry.
+        EnginePreTrack = new Track(this, "Engine-Pre", 0, [Track.EngineTag]);
+        PublicTrack = new Track(this, "Public", 1, []);
+        EnginePostTrack = new Track(this, "Engine-Post", 2, [Track.EngineTag]);
+        _tracks = [EnginePreTrack, PublicTrack, EnginePostTrack];
     }
 
-    /// <summary>
-    /// Creates a new runtime schedule builder.
-    /// </summary>
+    /// <summary>Creates a new runtime schedule builder.</summary>
     /// <param name="options">Runtime configuration. If null, defaults are used.</param>
     public static RuntimeSchedule Create(RuntimeOptions options = null) => new(options);
 
     // ═══════════════════════════════════════════════════════════════
-    // System registration
+    // Tracks
     // ═══════════════════════════════════════════════════════════════
 
-    /// <summary>
-    /// Registers a CallbackSystem — lightweight single-invocation, no entity input.
-    /// </summary>
-    /// <remarks>
-    /// This lambda-style overload does NOT support RFC 07 access declarations (<c>Reads&lt;T&gt;</c>, <c>Writes&lt;T&gt;</c>, <c>Phase</c>, etc.).
-    /// Systems registered here land in <see cref="RuntimeOptions.DefaultPhase"/> with an empty access descriptor — fine for systems
-    /// that don't need conflict detection or auto-DAG. For declared access, use a class-based system and <see cref="Add(CallbackSystem)"/>.
-    /// </remarks>
-    public RuntimeSchedule CallbackSystem(string name, Action<TickContext> action, string after = null, string[] afterAll = null,
-        SystemPriority priority = SystemPriority.Normal, Func<bool> shouldRun = null, int tickDivisor = 1, int throttledTickDivisor = 1, bool canShed = false)
-    {
-        ThrowIfBuilt();
-        ArgumentNullException.ThrowIfNull(name);
-        ArgumentNullException.ThrowIfNull(action);
+    /// <summary>The built-in Engine-Pre track — engine work before the app. Empty initially; declared for symmetry.</summary>
+    public Track EnginePreTrack { get; }
 
-        _registrations.Add(new SystemRegistration
-        {
-            Name = name,
-            Type = SystemType.CallbackSystem,
-            CallbackAction = action,
-            Priority = priority,
-            ShouldRun = shouldRun,
-            After = after,
-            AfterAll = afterAll,
-            TickDivisor = tickDivisor,
-            ThrottledTickDivisor = throttledTickDivisor,
-            CanShed = canShed
-        });
-        return this;
-    }
+    /// <summary>The built-in Public track — the app declares its DAGs here.</summary>
+    public Track PublicTrack { get; }
+
+    /// <summary>The built-in Engine-Post track — engine work after the app (currently the parallel Fence DAG).</summary>
+    public Track EnginePostTrack { get; }
+
+    /// <summary>All tracks in execution order: Engine-Pre, Public, any app tracks (see <see cref="DeclareTrack"/>), Engine-Post.</summary>
+    public IReadOnlyList<Track> Tracks => _tracks;
 
     /// <summary>
-    /// Registers a QuerySystem — single-worker entity iteration.
+    /// Declares an application <see cref="Track"/> and appends it to the app region — after <see cref="PublicTrack"/> and any previously declared app tracks,
+    /// before the engine's Engine-Post track. Declaration order is execution order: every DAG of a track completes before any DAG of the next track begins
+    /// (a coarse engine-level barrier).
     /// </summary>
-    /// <remarks>
-    /// This lambda-style overload does NOT support RFC 07 access declarations.
-    /// See <see cref="CallbackSystem(string,Action{TickContext},string,string[],SystemPriority,Func{bool},int,int,bool)"/> for the same caveat —
-    /// use <see cref="Add(QuerySystem)"/> with a class-based system for declared access.
-    /// </remarks>
-    public RuntimeSchedule QuerySystem(string name, Action<TickContext> action, string after = null, string[] afterAll = null,
-        SystemPriority priority = SystemPriority.Normal, Func<bool> shouldRun = null, Func<ViewBase> input = null, Type[] changeFilter = null,
-        int tickDivisor = 1, int throttledTickDivisor = 1, bool canShed = false, bool parallel = false, bool writesVersioned = false,
-        SimTier tier = SimTier.All, int cellAmortize = 0, bool checkerboard = false, float chunksPerWorker = 1f)
+    /// <param name="name">
+    /// Track name — must be non-empty, unique across the schedule, and must not start with the reserved
+    /// <c>Engine-</c> prefix.
+    /// </param>
+    /// <param name="tags">Optional open tag set for tooling. The reserved <see cref="Track.EngineTag"/> is rejected.</param>
+    /// <returns>The new track — declare DAGs on it via <see cref="Track.DeclareDag"/>.</returns>
+    /// <exception cref="InvalidOperationException">
+    /// The schedule is already built, the name duplicates an existing track or uses the reserved prefix, or the tag set contains the engine tag.
+    /// </exception>
+    public Track DeclareTrack(string name, params string[] tags)
     {
         ThrowIfBuilt();
-        ArgumentNullException.ThrowIfNull(name);
-        ArgumentNullException.ThrowIfNull(action);
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
 
-        _registrations.Add(new SystemRegistration
+        if (name.StartsWith("Engine-", StringComparison.Ordinal))
         {
-            Name = name,
-            Type = SystemType.QuerySystem,
-            CallbackAction = action,
-            Priority = priority,
-            ShouldRun = shouldRun,
-            InputFactory = input,
-            ChangeFilter = changeFilter,
-            After = after,
-            AfterAll = afterAll,
-            TickDivisor = tickDivisor,
-            ThrottledTickDivisor = throttledTickDivisor,
-            CanShed = canShed,
-            Parallel = parallel,
-            WritesVersioned = writesVersioned,
-            TierFilter = tier,
-            CellAmortize = cellAmortize,
-            Checkerboard = checkerboard,
-            ChunksPerWorker = chunksPerWorker
-        });
-        return this;
-    }
+            throw new InvalidOperationException($"Track name '{name}' uses the reserved 'Engine-' prefix. Engine tracks are declared by the engine, not the app.");
+        }
 
-    /// <summary>
-    /// Registers a PipelineSystem — multi-worker chunk-parallel execution.
-    /// </summary>
-    /// <remarks>
-    /// This lambda-style overload does NOT support RFC 07 access declarations. See the CallbackSystem lambda overload for the same caveat — declared access
-    /// requires the class-based API.
-    /// </remarks>
-    public RuntimeSchedule PipelineSystem(string name, Action<int, int> chunkAction, int totalChunks, string after = null, string[] afterAll = null,
-        SystemPriority priority = SystemPriority.Normal, Func<bool> shouldRun = null, Func<ViewBase> input = null, Type[] changeFilter = null,
-        int tickDivisor = 1, int throttledTickDivisor = 1, bool canShed = false)
-    {
-        ThrowIfBuilt();
-        ArgumentNullException.ThrowIfNull(name);
-        ArgumentNullException.ThrowIfNull(chunkAction);
-
-        _registrations.Add(new SystemRegistration
+        foreach (var existing in _tracks)
         {
-            Name = name,
-            Type = SystemType.PipelineSystem,
-            PipelineChunkAction = chunkAction,
-            TotalChunks = totalChunks,
-            Priority = priority,
-            ShouldRun = shouldRun,
-            InputFactory = input,
-            ChangeFilter = changeFilter,
-            After = after,
-            AfterAll = afterAll,
-            TickDivisor = tickDivisor,
-            ThrottledTickDivisor = throttledTickDivisor,
-            CanShed = canShed
-        });
-        return this;
-    }
-
-    // ═══════════════════════════════════════════════════════════════
-    // Class-based system registration
-    // ═══════════════════════════════════════════════════════════════
-
-    /// <summary>Register a class-based CallbackSystem.</summary>
-    public RuntimeSchedule Add(CallbackSystem system)
-    {
-        ThrowIfBuilt();
-        ArgumentNullException.ThrowIfNull(system);
-
-        var builder = new SystemBuilder();
-        Engine.CallbackSystem.InvokeConfigure(system, builder);
-        ValidateBuilderName(builder, nameof(Typhon.Engine.CallbackSystem));
-        system.Name = builder._name;
-
-        _registrations.Add(new SystemRegistration
-        {
-            Name = builder._name,
-            Type = SystemType.CallbackSystem,
-            CallbackAction = ctx => Engine.CallbackSystem.InvokeExecute(system, ctx),
-            SystemInstance = system,
-            Priority = builder._priority,
-            ShouldRun = builder._shouldRun,
-            After = builder._after,
-            AfterAll = builder._afterAll,
-            TickDivisor = builder._tickDivisor,
-            ThrottledTickDivisor = builder._throttledTickDivisor,
-            CanShed = builder._canShed,
-            InputFactory = builder._inputFactory,
-            ChangeFilter = builder._changeFilter,
-            Parallel = builder._parallel,
-            WritesVersioned = builder._writesVersioned,
-            ExplicitChunkCount = builder._explicitChunkCount,
-            Phase = builder._phase,
-            PhaseSet = builder._phaseSet,
-            IsInternal = builder._isInternal,
-            Before = builder._before,
-            Access = builder._access
-        });
-        return this;
-    }
-
-    /// <summary>Register a class-based QuerySystem.</summary>
-    public RuntimeSchedule Add(QuerySystem system)
-    {
-        ThrowIfBuilt();
-        ArgumentNullException.ThrowIfNull(system);
-
-        var builder = new SystemBuilder();
-        Engine.QuerySystem.InvokeConfigure(system, builder);
-        ValidateBuilderName(builder, nameof(Typhon.Engine.QuerySystem));
-        system.Name = builder._name;
-
-        _registrations.Add(new SystemRegistration
-        {
-            Name = builder._name,
-            Type = SystemType.QuerySystem,
-            CallbackAction = ctx => Engine.QuerySystem.InvokeExecute(system, ctx),
-            SystemInstance = system,
-            Priority = builder._priority,
-            ShouldRun = builder._shouldRun,
-            After = builder._after,
-            AfterAll = builder._afterAll,
-            TickDivisor = builder._tickDivisor,
-            ThrottledTickDivisor = builder._throttledTickDivisor,
-            CanShed = builder._canShed,
-            InputFactory = builder._inputFactory,
-            ChangeFilter = builder._changeFilter,
-            Parallel = builder._parallel,
-            WritesVersioned = builder._writesVersioned,
-            TierFilter = builder._tierFilter,
-            CellAmortize = builder._cellAmortize,
-            Checkerboard = builder._checkerboard,
-            ChunksPerWorker = builder._chunksPerWorker,
-            Phase = builder._phase,
-            PhaseSet = builder._phaseSet,
-            IsInternal = builder._isInternal,
-            Before = builder._before,
-            Access = builder._access
-        });
-        return this;
-    }
-
-    /// <summary>Register a class-based PipelineSystem. Not yet supported — execution model pending Patate design.</summary>
-    public RuntimeSchedule Add(PipelineSystem system)
-    {
-        ThrowIfBuilt();
-        ArgumentNullException.ThrowIfNull(system);
-        throw new NotSupportedException("PipelineSystem registration not yet supported — execution model pending Patate design.");
-    }
-
-    /// <summary>Register a CompoundSystem. Expands all sub-systems into the schedule.</summary>
-    public RuntimeSchedule Add(CompoundSystem compound)
-    {
-        ThrowIfBuilt();
-        ArgumentNullException.ThrowIfNull(compound);
-
-        CompoundSystem.InvokeConfigure(compound);
-        foreach (var sys in compound._systems)
-        {
-            switch (sys)
+            if (string.Equals(existing.Name, name, StringComparison.Ordinal))
             {
-                case CallbackSystem cb:
-                    Add(cb);
-                    break;
-                case QuerySystem qs:
-                    Add(qs);
-                    break;
-                case PipelineSystem ps:
-                    Add(ps);
-                    break;
-                default:
-                    throw new InvalidOperationException($"Unknown system type in CompoundSystem: {sys.GetType().Name}");
+                throw new InvalidOperationException($"Duplicate track name: '{name}'. Track names must be unique across the schedule.");
             }
         }
 
-        return this;
-    }
-
-    private static void ValidateBuilderName(SystemBuilder builder, string systemTypeName)
-    {
-        if (builder._name == null)
+        if (tags != null)
         {
-            throw new InvalidOperationException($"{systemTypeName} must have a name. Call b.Name(...) in Configure.");
+            foreach (var tag in tags)
+            {
+                if (string.Equals(tag, Track.EngineTag, StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException($"Track '{name}' may not carry the reserved '{Track.EngineTag}' tag — it marks engine-internal tracks.");
+                }
+            }
         }
+
+        // Slot into the app region: after the last app track, before Engine-Post. OrderIndex is reassigned by position so the execution-order contract
+        // (Engine-Pre → app tracks → Engine-Post) always holds.
+        var track = new Track(this, name, 0, tags ?? []);
+        _tracks.Insert(_tracks.Count - 1, track);
+        for (var i = 0; i < _tracks.Count; i++)
+        {
+            _tracks[i].OrderIndex = i;
+        }
+
+        return track;
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -293,9 +132,7 @@ public sealed class RuntimeSchedule
         return queue;
     }
 
-    /// <summary>
-    /// Declares that a system produces (writes to) the specified event queues.
-    /// </summary>
+    /// <summary>Declares that a system produces (writes to) the specified event queues.</summary>
     public RuntimeSchedule Produces(string systemName, params EventQueueBase[] queues)
     {
         ThrowIfBuilt();
@@ -311,9 +148,7 @@ public sealed class RuntimeSchedule
         return this;
     }
 
-    /// <summary>
-    /// Declares that a system consumes (reads from) the specified event queues.
-    /// </summary>
+    /// <summary>Declares that a system consumes (reads from) the specified event queues.</summary>
     public RuntimeSchedule Consumes(string systemName, params EventQueueBase[] queues)
     {
         ThrowIfBuilt();
@@ -339,193 +174,73 @@ public sealed class RuntimeSchedule
     /// <param name="parent">Parent resource node (typically <see cref="IResourceRegistry.Runtime"/>).</param>
     /// <param name="logger">Optional logger.</param>
     /// <returns>A ready-to-start <see cref="DagScheduler"/>.</returns>
-    /// <exception cref="InvalidOperationException">DAG contains a cycle, duplicate names, or invalid references.</exception>
+    /// <exception cref="InvalidOperationException">A DAG contains a cycle, duplicate names, or invalid references.</exception>
     public DagScheduler Build(IResource parent, ILogger logger = null)
     {
         ThrowIfBuilt();
 
-        // ── Resolve phase index map (RFC 07 / Q3) ──
-        var phaseIndexMap = BuildPhaseIndexMap(_options.Phases);
-
-        if (!phaseIndexMap.TryGetValue(_options.DefaultPhase.Name, out var defaultPhaseIndex))
+        // ── Collect every DAG in track order; assign flat global DAG ids ──
+        var orderedDags = new List<Dag>();
+        foreach (var track in _tracks)
         {
-            throw new InvalidOperationException(
-                $"RuntimeOptions.DefaultPhase '{_options.DefaultPhase.Name}' must be present in RuntimeOptions.Phases. " +
-                "Either add it to Phases or set DefaultPhase to one of the listed phases.");
+            foreach (var dag in track.Dags)
+            {
+                dag.Id = orderedDags.Count;
+                orderedDags.Add(dag);
+            }
         }
 
-        // ── Build-time validation ──
+        // Flatten registrations, recording each system's owning DAG. Iteration order = DAG order = system index order.
+        var allRegs = new List<(Dag.SystemRegistration Reg, Dag Dag)>();
+        foreach (var dag in orderedDags)
+        {
+            foreach (var reg in dag.Registrations)
+            {
+                allRegs.Add((reg, dag));
+            }
+        }
+
+        // ── Per-DAG phase index maps + default-phase validation ──
+        var dagPhaseIndexMap = new Dictionary<int, Dictionary<string, int>>(orderedDags.Count);
+        var dagDefaultPhaseIndex = new Dictionary<int, int>(orderedDags.Count);
+        foreach (var dag in orderedDags)
+        {
+            var map = BuildPhaseIndexMap(dag);
+            dagPhaseIndexMap[dag.Id] = map;
+
+            if (!map.TryGetValue(dag.ResolvedDefaultPhase.Name ?? string.Empty, out var defIdx))
+            {
+                throw new InvalidOperationException(
+                    $"DAG '{dag.Name}': default phase '{dag.ResolvedDefaultPhase}' must be one of the DAG's declared phases. " +
+                    "Add it to Phases(...) or set DefaultPhase(...) to a listed phase.");
+            }
+
+            dagDefaultPhaseIndex[dag.Id] = defIdx;
+        }
+
+        // ── Build-time validation (global duplicate names + per-registration rules) ──
         var seenNames = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var reg in _registrations)
+        foreach (var (reg, dag) in allRegs)
         {
             if (!seenNames.Add(reg.Name))
             {
-                throw new InvalidOperationException($"Duplicate system name: '{reg.Name}'.");
+                throw new InvalidOperationException($"Duplicate system name: '{reg.Name}'. System names must be unique across the whole schedule.");
             }
 
-            if (reg.Type == SystemType.CallbackSystem)
-            {
-                if (reg.ChangeFilter is { Length: > 0 })
-                {
-                    throw new InvalidOperationException(
-                        $"System '{reg.Name}': ChangeFilter is not valid for CallbackSystem. CallbackSystem is proactive and does not have a View input.");
-                }
-
-                if (reg.InputFactory != null)
-                {
-                    throw new InvalidOperationException(
-                        $"System '{reg.Name}': Input is not valid for CallbackSystem. CallbackSystem is proactive and does not process entities from a View.");
-                }
-
-                // Parallel CallbackSystem is allowed only via the chunked-parallel path (b.ChunkedParallel(N)), which sets ExplicitChunkCount > 0 and skips
-                // all entity-prep infrastructure.
-                if (reg.Parallel && reg.ExplicitChunkCount == 0)
-                {
-                    throw new InvalidOperationException(
-                        $"System '{reg.Name}': Parallel is not valid for CallbackSystem. Use b.ChunkedParallel(N) for explicit chunked parallel dispatch.");
-                }
-            }
-
-            if (reg.Type == SystemType.PipelineSystem && reg.Parallel)
-            {
-                throw new InvalidOperationException(
-                    $"System '{reg.Name}': Parallel is not valid for PipelineSystem. PipelineSystem has its own chunk-parallel execution model.");
-            }
-
-            // Chunked-parallel callbacks (ExplicitChunkCount > 0) intentionally bypass the entity-input requirement. The legacy "Parallel requires Input"
-            // check still applies to QuerySystems.
-            if (reg.Parallel && reg.InputFactory == null && reg.ExplicitChunkCount == 0)
-            {
-                throw new InvalidOperationException(
-                    $"System '{reg.Name}': Parallel requires an Input View. Specify b.Input(() => view) alongside b.Parallel(), " +
-                    "or use b.ChunkedParallel(N) for non-entity-iterating chunked work.");
-            }
-
-            // ExplicitChunkCount-only restrictions: only meaningful on CallbackSystem; incompatible with every entity-context concept (since the
-            // chunked-callback path skips all entity prep).
-            if (reg.ExplicitChunkCount > 0)
-            {
-                if (reg.Type != SystemType.CallbackSystem)
-                {
-                    throw new InvalidOperationException(
-                        $"System '{reg.Name}': ChunkedParallel is only valid for CallbackSystem.");
-                }
-                if (reg.InputFactory != null)
-                {
-                    throw new InvalidOperationException(
-                        $"System '{reg.Name}': ChunkedParallel is incompatible with Input — chunked callbacks have no entity context.");
-                }
-                if (reg.ChangeFilter is { Length: > 0 })
-                {
-                    throw new InvalidOperationException(
-                        $"System '{reg.Name}': ChunkedParallel is incompatible with ChangeFilter — chunked callbacks have no entity context.");
-                }
-                if (reg.WritesVersioned)
-                {
-                    throw new InvalidOperationException(
-                        $"System '{reg.Name}': ChunkedParallel is incompatible with WritesVersioned.");
-                }
-                if (reg.TierFilter != SimTier.All)
-                {
-                    throw new InvalidOperationException(
-                        $"System '{reg.Name}': ChunkedParallel is incompatible with Tier — chunked callbacks have no cluster context.");
-                }
-                if (reg.CellAmortize > 0)
-                {
-                    throw new InvalidOperationException(
-                        $"System '{reg.Name}': ChunkedParallel is incompatible with CellAmortize.");
-                }
-                if (reg.Checkerboard)
-                {
-                    throw new InvalidOperationException(
-                        $"System '{reg.Name}': ChunkedParallel is incompatible with Checkerboard.");
-                }
-                if (reg.ChunksPerWorker != 1f)
-                {
-                    throw new InvalidOperationException(
-                        $"System '{reg.Name}': ChunkedParallel is incompatible with ChunksPerWorker — chunk count is explicit, not derived.");
-                }
-            }
-
-            if (reg.ChangeFilter is { Length: > 0 } && reg.InputFactory == null)
-            {
-                throw new InvalidOperationException(
-                    $"System '{reg.Name}': ChangeFilter requires an Input View. Specify input: () => view alongside changeFilter.");
-            }
-
-            if (reg.WritesVersioned && !reg.Parallel)
-            {
-                throw new InvalidOperationException(
-                    $"System '{reg.Name}': WritesVersioned is only meaningful for parallel QuerySystems. Add b.Parallel() or parallel: true.");
-            }
-
-            // ChunksPerWorker is an oversubscription multiplier: chunks are capped at round(WorkerCount × factor).
-            // - Below 1f reduces parallelism below the worker count — confusing given the name's intent and not
-            //   a use case the knob was designed for. Reject so the value-space matches the name.
-            // - Above 64f silently collapses to 1 chunk on machines with high worker counts because
-            //   (int)MathF.Round(WorkerCount × factor) overflows to int.MinValue, then Math.Max(1, MIN) = 1.
-            //   The runtime caps chunks at entityCount/MinChunkSize anyway, so values above ~16 are already
-            //   pointless in practice; 64 is a generous ceiling that keeps the overflow well out of reach.
-            if (!float.IsFinite(reg.ChunksPerWorker) || reg.ChunksPerWorker < 1f || reg.ChunksPerWorker > 64f)
-            {
-                throw new InvalidOperationException(
-                    $"System '{reg.Name}': ChunksPerWorker must be finite and in [1.0, 64.0], got {reg.ChunksPerWorker}.");
-            }
-
-            if (reg.ChunksPerWorker != 1f && !reg.Parallel)
-            {
-                throw new InvalidOperationException(
-                    $"System '{reg.Name}': ChunksPerWorker is only meaningful for parallel QuerySystems. Add b.Parallel() or parallel: true.");
-            }
-
-            // Issue #231: tier filter + amortization validation.
-            if (reg.TierFilter == SimTier.None)
-            {
-                throw new InvalidOperationException(
-                    $"System '{reg.Name}': tier: SimTier.None would dispatch zero clusters. Use a specific tier (e.g. SimTier.Tier0), " +
-                    "a flag combination (e.g. SimTier.Near), or SimTier.All (the default) to disable tier filtering.");
-            }
-
-            if (reg.CellAmortize < 0)
-            {
-                throw new InvalidOperationException(
-                    $"System '{reg.Name}': cellAmortize must be >= 0 (0 = no amortization), got {reg.CellAmortize}.");
-            }
-
-            if (reg.CellAmortize > 0 && reg.TierFilter == SimTier.All)
-            {
-                throw new InvalidOperationException(
-                    $"System '{reg.Name}': cellAmortize requires a tier filter. Amortizing the full cluster set without tier scoping " +
-                    "is not supported — amortization is a per-tier policy (typically used with coarse tiers like SimTier.Tier2).");
-            }
-
-            if (reg.TierFilter != SimTier.All && reg.TierFilter != SimTier.None && reg.Type != SystemType.QuerySystem)
-            {
-                throw new InvalidOperationException(
-                    $"System '{reg.Name}': tier filter is only supported on QuerySystem, not {reg.Type}.");
-            }
-
-            // Issue #234: checkerboard validation.
-            if (reg.Checkerboard && !reg.Parallel)
-            {
-                throw new InvalidOperationException($"System '{reg.Name}': checkerboard dispatch requires parallel: true. Add b.Parallel() or parallel: true.");
-            }
+            ValidateRegistration(reg);
         }
 
         _built = true;
 
         var dagBuilder = new DagBuilder();
 
-        // Phase 1: Register all systems. The dag-side index matches the loop iteration since DagBuilder appends one
-        // SystemDefinition per registration in order — we mirror that into ISystem.Index so class-based systems can
-        // read their own runtime id from inside Execute.
+        // Phase 1: register all systems into one flat global DAG builder. The dag-side index matches the allRegs iteration order; mirror it into
+        // ISystem.Index for class-based systems.
+        var systemDagId = new int[allRegs.Count];
         var dagIndex = 0;
-        foreach (var reg in _registrations)
+        foreach (var (reg, dag) in allRegs)
         {
-            // Class-based registrations (Add(QuerySystem) / Add(CallbackSystem)) wrap the user's Execute override in a trivial pass-through lambda whose method
-            // group resolves to a synthesized method here in RuntimeSchedule.cs — useless for "click → see code". Redirect to the actual override on the
-            // concrete instance type. Falls back to delegate-based resolution when no instance is present or the override has no sequence points (e.g.,
-            // compiled without symbols).
+            systemDagId[dagIndex] = dag.Id;
             var sourceOverride = reg.SystemInstance != null ? SystemSourceResolver.ResolveOverride(reg.SystemInstance, "Execute") : null;
             switch (reg.Type)
             {
@@ -554,34 +269,41 @@ public sealed class RuntimeSchedule
             dagIndex++;
         }
 
-        // Phase 1b: Resolve each registration's phase index up-front (RFC 07 / Q3 — needed by access-edge derivation).
-        // Systems that didn't call b.Phase(...) get RuntimeOptions.DefaultPhase so every system lands in some phase
-        // (RFC 07 / Unit 5 — closes the PhaseIndex==-1 escape hatch from Unit 1).
-        var regPhaseIndex = new Dictionary<string, int>(_registrations.Count, StringComparer.Ordinal);
-        foreach (var reg in _registrations)
+        // Phase 1b: resolve each registration's DAG-local phase index. Systems that didn't call b.Phase(...) get their DAG's default phase (RFC 07 / Unit 5
+        // — every system lands in some phase).
+        var regPhaseIndex = new Dictionary<string, int>(allRegs.Count, StringComparer.Ordinal);
+        foreach (var (reg, dag) in allRegs)
         {
             if (!reg.PhaseSet)
             {
-                regPhaseIndex[reg.Name] = defaultPhaseIndex;
+                regPhaseIndex[reg.Name] = dagDefaultPhaseIndex[dag.Id];
                 continue;
             }
 
-            if (!phaseIndexMap.TryGetValue(reg.Phase.Name, out var phaseIdx))
+            if (!dagPhaseIndexMap[dag.Id].TryGetValue(reg.Phase.Name ?? string.Empty, out var phaseIdx))
             {
                 throw new InvalidOperationException(
-                    $"System '{reg.Name}' declares phase '{reg.Phase.Name}' which is not in RuntimeOptions.Phases. " +
-                    "Add it to options.Phases or use a phase already listed there.");
+                    $"System '{reg.Name}' declares phase '{reg.Phase}' which is not in DAG '{dag.Name}'.Phases(...). " +
+                    "Add it to the DAG's phase list or use a phase already declared there.");
             }
 
             regPhaseIndex[reg.Name] = phaseIdx;
         }
 
-        // Phase 2: Collect dependency edges (explicit, declared via .After/.AfterAll/.Before)
+        // name → owning DAG id, for explicit-edge same-DAG validation.
+        var nameToDagId = new Dictionary<string, int>(allRegs.Count, StringComparer.Ordinal);
+        foreach (var (reg, dag) in allRegs)
+        {
+            nameToDagId[reg.Name] = dag.Id;
+        }
+
+        // Phase 2: collect explicit dependency edges (.After / .AfterAll / .Before). Edges must stay within one DAG.
         var explicitEdges = new List<(string From, string To)>();
-        foreach (var reg in _registrations)
+        foreach (var (reg, dag) in allRegs)
         {
             if (reg.After != null)
             {
+                ValidateSameDag(reg.After, reg.Name, dag, nameToDagId);
                 explicitEdges.Add((reg.After, reg.Name));
             }
 
@@ -589,26 +311,54 @@ public sealed class RuntimeSchedule
             {
                 foreach (var dep in reg.AfterAll)
                 {
+                    ValidateSameDag(dep, reg.Name, dag, nameToDagId);
                     explicitEdges.Add((dep, reg.Name));
                 }
             }
 
             if (reg.Before != null)
             {
+                ValidateSameDag(reg.Before, reg.Name, dag, nameToDagId);
                 explicitEdges.Add((reg.Name, reg.Before));
             }
         }
 
-        // Phase 2b: Derive access-based edges + validate conflicts (RFC 07 — Unit 3)
-        var systemInfos = new List<AccessDagDeriver.SystemInfo>(_registrations.Count);
-        foreach (var reg in _registrations)
+        // Phase 2b: per-DAG access-based edge derivation + conflict validation (RFC 07 — Unit 3). DAGs are independent — phases are DAG-local, so derivation
+        // runs once per DAG over that DAG's systems only.
+        var derivedEdges = new List<(string From, string To)>();
+        foreach (var dag in orderedDags)
         {
-            systemInfos.Add(new AccessDagDeriver.SystemInfo(reg.Name, regPhaseIndex[reg.Name], reg.Access));
+            var dagSystemNames = new HashSet<string>(StringComparer.Ordinal);
+            var systemInfos = new List<AccessDagDeriver.SystemInfo>();
+            foreach (var (reg, regDag) in allRegs)
+            {
+                if (regDag.Id != dag.Id)
+                {
+                    continue;
+                }
+
+                dagSystemNames.Add(reg.Name);
+                systemInfos.Add(new AccessDagDeriver.SystemInfo(reg.Name, regPhaseIndex[reg.Name], reg.Access));
+            }
+
+            if (systemInfos.Count == 0)
+            {
+                continue;
+            }
+
+            var dagExplicitEdges = new List<(string From, string To)>();
+            foreach (var edge in explicitEdges)
+            {
+                if (dagSystemNames.Contains(edge.From) && dagSystemNames.Contains(edge.To))
+                {
+                    dagExplicitEdges.Add(edge);
+                }
+            }
+
+            derivedEdges.AddRange(AccessDagDeriver.DeriveAndValidate(systemInfos, dagExplicitEdges));
         }
 
-        var derivedEdges = AccessDagDeriver.DeriveAndValidate(systemInfos, explicitEdges);
-
-        // Phase 2c: Apply all edges (explicit + derived) to the DAG builder
+        // Phase 2c: apply all edges (explicit + derived) to the DAG builder.
         foreach (var (from, to) in explicitEdges)
         {
             dagBuilder.AddEdge(from, to);
@@ -619,10 +369,10 @@ public sealed class RuntimeSchedule
             dagBuilder.AddEdge(from, to);
         }
 
-        // Phase 3: Build DAG (validates acyclicity, computes predecessors/successors)
+        // Phase 3: build the graph (validates acyclicity, computes predecessors/successors/topological order).
         var (systems, topologicalOrder) = dagBuilder.Build();
 
-        // Phase 4: Wire event queue indices into SystemDefinitions
+        // Phase 4: wire event queue indices into SystemDefinitions.
         var nameToIndex = new Dictionary<string, int>(StringComparer.Ordinal);
         foreach (var sys in systems)
         {
@@ -667,8 +417,8 @@ public sealed class RuntimeSchedule
             systems[sysIdx].ConsumesQueueIndices = indices;
         }
 
-        // Phase 4b: Validate parallel QuerySystem constraints (must run after queue wiring)
-        foreach (var reg in _registrations)
+        // Phase 4b: validate parallel QuerySystem constraints (must run after queue wiring).
+        foreach (var (reg, _) in allRegs)
         {
             if (reg.Parallel && nameToIndex.TryGetValue(reg.Name, out var pIdx))
             {
@@ -681,16 +431,14 @@ public sealed class RuntimeSchedule
             }
         }
 
-        // Phase 5: Store overload params, input, and change filter from registrations
-        foreach (var reg in _registrations)
+        // Phase 5: store overload params, input, change filter, and access from registrations.
+        foreach (var (reg, _) in allRegs)
         {
             if (!nameToIndex.TryGetValue(reg.Name, out var sysIdx))
             {
                 continue;
             }
 
-            // TickDivisor, ThrottledTickDivisor, CanShed are already set via init properties
-            // in DagBuilder. But DagBuilder doesn't pass them through yet, so set them here.
             systems[sysIdx].TickDivisor = reg.TickDivisor;
             systems[sysIdx].ThrottledTickDivisor = reg.ThrottledTickDivisor;
             systems[sysIdx].CanShed = reg.CanShed;
@@ -710,93 +458,208 @@ public sealed class RuntimeSchedule
             }
         }
 
-        // Phase 5b: Stamp resolved phase + index onto each SystemDefinition (RFC 07 / Q3-Q5 — index already resolved in Phase 1b).
-        // Undeclared systems get RuntimeOptions.DefaultPhase via the same path.
-        foreach (var reg in _registrations)
+        // Phase 5b: stamp resolved phase + DAG-local phase index + owning DAG id onto each SystemDefinition.
+        foreach (var (reg, dag) in allRegs)
         {
             if (!nameToIndex.TryGetValue(reg.Name, out var sysIdx))
             {
                 continue;
             }
 
-            systems[sysIdx].Phase = reg.PhaseSet ? reg.Phase : _options.DefaultPhase;
+            systems[sysIdx].Phase = reg.PhaseSet ? reg.Phase : dag.ResolvedDefaultPhase;
             systems[sysIdx].PhaseIndex = regPhaseIndex[reg.Name];
-            systems[sysIdx].IsInternal = reg.IsInternal;
+            systems[sysIdx].DagId = dag.Id;
         }
 
-        // Phase 6: Create scheduler
-        return new DagScheduler(systems, topologicalOrder, _options, parent, [.. _eventQueues], logger);
+        // Phase 5c: record which system indices belong to each DAG (track-by-track dispatch needs this).
+        var dagSystemIndices = new List<int>[orderedDags.Count];
+        for (var i = 0; i < orderedDags.Count; i++)
+        {
+            dagSystemIndices[i] = [];
+        }
+        foreach (var sys in systems)
+        {
+            dagSystemIndices[sys.DagId].Add(sys.Index);
+        }
+        for (var i = 0; i < orderedDags.Count; i++)
+        {
+            orderedDags[i].SystemIndices = [.. dagSystemIndices[i]];
+        }
+
+        // Phase 6: create the scheduler. Engine-Post is dispatched by the runtime after serial fence prep,
+        // so the in-tick track loop stops at it.
+        return new DagScheduler(systems, topologicalOrder, _tracks, EnginePostTrack.OrderIndex, _options, parent, [.. _eventQueues], logger);
     }
 
-    /// <summary>
-    /// Builds the phase-token → index map from <see cref="RuntimeOptions.Phases"/>. Validates that the list is non-empty and contains no duplicates.
-    /// </summary>
-    private static Dictionary<string, int> BuildPhaseIndexMap(Phase[] phases)
+    /// <summary>Builds the phase-token → DAG-local index map for a DAG. Rejects an empty or duplicate-containing phase list.</summary>
+    private static Dictionary<string, int> BuildPhaseIndexMap(Dag dag)
     {
-        if (phases is null || phases.Length == 0)
-        {
-            throw new InvalidOperationException("RuntimeOptions.Phases must contain at least one phase. Default is RuntimeOptions.DefaultPhases.");
-        }
-
+        var phases = dag.ResolvedPhases;
         var map = new Dictionary<string, int>(phases.Length, StringComparer.Ordinal);
         for (var i = 0; i < phases.Length; i++)
         {
-            var name = phases[i].Name;
+            var name = phases[i].Name ?? string.Empty;
             if (!map.TryAdd(name, i))
             {
-                throw new InvalidOperationException($"Duplicate phase '{name}' in RuntimeOptions.Phases at index {i}. Each phase must appear at most once.");
+                throw new InvalidOperationException($"DAG '{dag.Name}': duplicate phase '{name}' in Phases(...) at index {i}. Each phase must appear at most once.");
             }
         }
 
         return map;
     }
 
-    private void ThrowIfBuilt()
+    private static void ValidateSameDag(string target, string source, Dag dag, Dictionary<string, int> nameToDagId)
+    {
+        if (!nameToDagId.TryGetValue(target, out var targetDagId))
+        {
+            throw new InvalidOperationException($"System '{source}' in DAG '{dag.Name}' declares a dependency on unknown system '{target}'.");
+        }
+
+        if (targetDagId != dag.Id)
+        {
+            throw new InvalidOperationException(
+                $"System '{source}' in DAG '{dag.Name}' declares a dependency on '{target}', which belongs to a different DAG. " +
+                "DAGs are independent — dependency edges cannot cross DAG boundaries.");
+        }
+    }
+
+    private static void ValidateRegistration(Dag.SystemRegistration reg)
+    {
+        if (reg.Type == SystemType.CallbackSystem)
+        {
+            if (reg.ChangeFilter is { Length: > 0 })
+            {
+                throw new InvalidOperationException(
+                    $"System '{reg.Name}': ChangeFilter is not valid for CallbackSystem. CallbackSystem is proactive and does not have a View input.");
+            }
+
+            if (reg.InputFactory != null)
+            {
+                throw new InvalidOperationException(
+                    $"System '{reg.Name}': Input is not valid for CallbackSystem. CallbackSystem is proactive and does not process entities from a View.");
+            }
+
+            if (reg.Parallel && reg.ExplicitChunkCount == 0)
+            {
+                throw new InvalidOperationException(
+                    $"System '{reg.Name}': Parallel is not valid for CallbackSystem. Use b.ChunkedParallel(N) for explicit chunked parallel dispatch.");
+            }
+        }
+
+        if (reg.Type == SystemType.PipelineSystem && reg.Parallel)
+        {
+            throw new InvalidOperationException(
+                $"System '{reg.Name}': Parallel is not valid for PipelineSystem. PipelineSystem has its own chunk-parallel execution model.");
+        }
+
+        if (reg.Parallel && reg.InputFactory == null && reg.ExplicitChunkCount == 0)
+        {
+            throw new InvalidOperationException(
+                $"System '{reg.Name}': Parallel requires an Input View. Specify b.Input(() => view) alongside b.Parallel(), " +
+                "or use b.ChunkedParallel(N) for non-entity-iterating chunked work.");
+        }
+
+        if (reg.ExplicitChunkCount > 0)
+        {
+            if (reg.Type != SystemType.CallbackSystem)
+            {
+                throw new InvalidOperationException($"System '{reg.Name}': ChunkedParallel is only valid for CallbackSystem.");
+            }
+            if (reg.InputFactory != null)
+            {
+                throw new InvalidOperationException(
+                    $"System '{reg.Name}': ChunkedParallel is incompatible with Input — chunked callbacks have no entity context.");
+            }
+            if (reg.ChangeFilter is { Length: > 0 })
+            {
+                throw new InvalidOperationException(
+                    $"System '{reg.Name}': ChunkedParallel is incompatible with ChangeFilter — chunked callbacks have no entity context.");
+            }
+            if (reg.WritesVersioned)
+            {
+                throw new InvalidOperationException($"System '{reg.Name}': ChunkedParallel is incompatible with WritesVersioned.");
+            }
+            if (reg.TierFilter != SimTier.All)
+            {
+                throw new InvalidOperationException(
+                    $"System '{reg.Name}': ChunkedParallel is incompatible with Tier — chunked callbacks have no cluster context.");
+            }
+            if (reg.CellAmortize > 0)
+            {
+                throw new InvalidOperationException($"System '{reg.Name}': ChunkedParallel is incompatible with CellAmortize.");
+            }
+            if (reg.Checkerboard)
+            {
+                throw new InvalidOperationException($"System '{reg.Name}': ChunkedParallel is incompatible with Checkerboard.");
+            }
+            if (reg.ChunksPerWorker != 1f)
+            {
+                throw new InvalidOperationException(
+                    $"System '{reg.Name}': ChunkedParallel is incompatible with ChunksPerWorker — chunk count is explicit, not derived.");
+            }
+        }
+
+        if (reg.ChangeFilter is { Length: > 0 } && reg.InputFactory == null)
+        {
+            throw new InvalidOperationException(
+                $"System '{reg.Name}': ChangeFilter requires an Input View. Specify input: () => view alongside changeFilter.");
+        }
+
+        if (reg.WritesVersioned && !reg.Parallel)
+        {
+            throw new InvalidOperationException(
+                $"System '{reg.Name}': WritesVersioned is only meaningful for parallel QuerySystems. Add b.Parallel() or parallel: true.");
+        }
+
+        if (!float.IsFinite(reg.ChunksPerWorker) || reg.ChunksPerWorker < 1f || reg.ChunksPerWorker > 64f)
+        {
+            throw new InvalidOperationException(
+                $"System '{reg.Name}': ChunksPerWorker must be finite and in [1.0, 64.0], got {reg.ChunksPerWorker}.");
+        }
+
+        if (reg.ChunksPerWorker != 1f && !reg.Parallel)
+        {
+            throw new InvalidOperationException(
+                $"System '{reg.Name}': ChunksPerWorker is only meaningful for parallel QuerySystems. Add b.Parallel() or parallel: true.");
+        }
+
+        if (reg.TierFilter == SimTier.None)
+        {
+            throw new InvalidOperationException(
+                $"System '{reg.Name}': tier: SimTier.None would dispatch zero clusters. Use a specific tier (e.g. SimTier.Tier0), " +
+                "a flag combination (e.g. SimTier.Near), or SimTier.All (the default) to disable tier filtering.");
+        }
+
+        if (reg.CellAmortize < 0)
+        {
+            throw new InvalidOperationException(
+                $"System '{reg.Name}': cellAmortize must be >= 0 (0 = no amortization), got {reg.CellAmortize}.");
+        }
+
+        if (reg.CellAmortize > 0 && reg.TierFilter == SimTier.All)
+        {
+            throw new InvalidOperationException(
+                $"System '{reg.Name}': cellAmortize requires a tier filter. Amortizing the full cluster set without tier scoping " +
+                "is not supported — amortization is a per-tier policy (typically used with coarse tiers like SimTier.Tier2).");
+        }
+
+        if (reg.TierFilter != SimTier.All && reg.TierFilter != SimTier.None && reg.Type != SystemType.QuerySystem)
+        {
+            throw new InvalidOperationException(
+                $"System '{reg.Name}': tier filter is only supported on QuerySystem, not {reg.Type}.");
+        }
+
+        if (reg.Checkerboard && !reg.Parallel)
+        {
+            throw new InvalidOperationException($"System '{reg.Name}': checkerboard dispatch requires parallel: true. Add b.Parallel() or parallel: true.");
+        }
+    }
+
+    internal void ThrowIfBuilt()
     {
         if (_built)
         {
             throw new InvalidOperationException("This schedule has already been built. Create a new RuntimeSchedule.");
         }
-    }
-
-    // ═══════════════════════════════════════════════════════════════
-    // Internal registration record
-    // ═══════════════════════════════════════════════════════════════
-
-    private sealed class SystemRegistration
-    {
-        public string Name;
-        public SystemType Type;
-        public Action<TickContext> CallbackAction;
-        public Action<int, int> PipelineChunkAction;
-        public int TotalChunks = 1;
-        public SystemPriority Priority;
-        public Func<bool> ShouldRun;
-        public string After;
-        public string[] AfterAll;
-        public int TickDivisor = 1;
-        public int ThrottledTickDivisor = 1;
-        public bool CanShed;
-        public Func<ViewBase> InputFactory;
-        public Type[] ChangeFilter;
-        public bool Parallel;
-        public bool WritesVersioned;
-        public float ChunksPerWorker = 1f;
-        public int ExplicitChunkCount;          // > 0 → chunked-parallel CallbackSystem (no entity context)
-        public SimTier TierFilter = SimTier.All;
-        public int CellAmortize;
-        public bool Checkerboard;
-        public Phase Phase;
-        public bool PhaseSet;
-        public bool IsInternal;
-        public string Before;
-        public SystemAccessDescriptor Access;
-        /// <summary>
-        /// Class-based system instance (subclass of <see cref="QuerySystem"/>, <see cref="CallbackSystem"/>, or <see cref="PipelineSystem"/>) when this
-        /// registration came from the <c>Add(QuerySystem)</c> family rather than the inline delegate <c>AddQuerySystem(name, action, …)</c> path. Null for
-        /// delegate registrations. Used by <see cref="Build"/> to redirect source attribution from the trivial pass-through lambda in this file to the user's
-        /// actual <c>Execute</c> override body, and to write back the engine-assigned <see cref="ISystem.Name"/> / <see cref="ISystem.Index"/>.
-        /// </summary>
-        public ISystem SystemInstance;
     }
 }

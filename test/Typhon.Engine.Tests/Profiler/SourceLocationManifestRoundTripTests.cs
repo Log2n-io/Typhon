@@ -53,7 +53,8 @@ public class SourceLocationManifestRoundTripTests
         writer.WriteSystemDefinitions(ReadOnlySpan<SystemDefinitionRecord>.Empty);
         writer.WriteArchetypes(ReadOnlySpan<ArchetypeRecord>.Empty);
         writer.WriteComponentTypes(ReadOnlySpan<ComponentTypeRecord>.Empty);
-        writer.WritePhases(ReadOnlySpan<string>.Empty);
+        writer.WriteTracks(ReadOnlySpan<TrackRecord>.Empty);
+        writer.WriteDags(ReadOnlySpan<DagRecord>.Empty);
         writer.WriteEmptyStaticStructures();
 
         var (fileTableOffset, manifestOffset) = writer.WriteSourceLocationManifest(files, entries);
@@ -115,7 +116,8 @@ public class SourceLocationManifestRoundTripTests
         writer.WriteSystemDefinitions(ReadOnlySpan<SystemDefinitionRecord>.Empty);
         writer.WriteArchetypes(ReadOnlySpan<ArchetypeRecord>.Empty);
         writer.WriteComponentTypes(ReadOnlySpan<ComponentTypeRecord>.Empty);
-        writer.WritePhases(ReadOnlySpan<string>.Empty);
+        writer.WriteTracks(ReadOnlySpan<TrackRecord>.Empty);
+        writer.WriteDags(ReadOnlySpan<DagRecord>.Empty);
         writer.WriteEmptyStaticStructures();
         writer.Flush();
 

@@ -32,6 +32,23 @@ class ParallelFenceTests : TestBase<ParallelFenceTests>
         return dbe;
     }
 
+    /// <summary>True when <paramref name="sys"/> belongs to a DAG on an engine-tagged track (e.g. the Fence DAG on Engine-Post).</summary>
+    private static bool IsEngineInternal(DagScheduler scheduler, SystemDefinition sys)
+    {
+        foreach (var track in scheduler.Tracks)
+        {
+            foreach (var dag in track.Dags)
+            {
+                if (dag.Id == sys.DagId)
+                {
+                    return track.IsEngine;
+                }
+            }
+        }
+
+        return false;
+    }
+
     [Test]
     public void OptOut_SerialFenceRunsCleanly()
     {
@@ -50,7 +67,7 @@ class ParallelFenceTests : TestBase<ParallelFenceTests>
         var ticksObserved = 0;
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksObserved));
+            schedule.PublicTrack.DeclareDag("Test").CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksObserved));
         }, new RuntimeOptions
         {
             WorkerCount = 2,
@@ -58,12 +75,10 @@ class ParallelFenceTests : TestBase<ParallelFenceTests>
             EnableParallelFence = false,
         });
 
-        // No FenceExec system registered in the schedule when opt-out — verify by scanning Systems.
-        for (var i = 0; i < runtime.Scheduler.SystemCount; i++)
-        {
-            Assert.That(runtime.Scheduler.Systems[i].IsInternal, Is.False,
-                $"System '{runtime.Scheduler.Systems[i].Name}' should not be internal when EnableParallelFence=false.");
-        }
+        // EnableParallelFence=false → no Fence DAG declared → the Engine-Post track is empty, so no engine-internal
+        // systems exist (AllSystemCount, counting every track, equals the user-only SystemCount).
+        Assert.That(runtime.Scheduler.AllSystemCount, Is.EqualTo(runtime.Scheduler.SystemCount),
+            "No engine-internal systems should exist when EnableParallelFence=false.");
 
         runtime.Start();
         SpinWait.SpinUntil(() => ticksObserved >= 3, TimeSpan.FromSeconds(5));
@@ -80,7 +95,7 @@ class ParallelFenceTests : TestBase<ParallelFenceTests>
         var ticksObserved = 0;
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksObserved));
+            schedule.PublicTrack.DeclareDag("Test").CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksObserved));
         }, new RuntimeOptions
         {
             WorkerCount = 2,
@@ -88,9 +103,9 @@ class ParallelFenceTests : TestBase<ParallelFenceTests>
             EnableParallelFence = true,
         });
 
-        // The parallel fence wiring registers four chained internal systems:
-        // FencePrep → FenceMigrate → FenceAabbRefresh → FenceFinalize. Each must be present, flagged internal,
-        // and ChunkedParallel. Iterate AllSystemCount because the public SystemCount filters internal systems out.
+        // The parallel fence wiring declares the four chained Fence-DAG systems on the Engine-Post track:
+        // FencePrep → FenceMigrate → FenceAabbRefresh → FenceFinalize. Each must be present, on an engine-tagged
+        // track, and ChunkedParallel. Iterate AllSystemCount because the public SystemCount filters engine systems out.
         var foundPrep = false;
         var foundMigrate = false;
         var foundAabbRefresh = false;
@@ -101,25 +116,25 @@ class ParallelFenceTests : TestBase<ParallelFenceTests>
             if (sys.Name == "FencePrep")
             {
                 foundPrep = true;
-                Assert.That(sys.IsInternal, Is.True, "FencePrep must be flagged IsInternal.");
+                Assert.That(IsEngineInternal(runtime.Scheduler, sys), Is.True, "FencePrep must be on an engine-tagged track.");
                 Assert.That(sys.ExplicitChunkCount, Is.GreaterThan(0), "FencePrep is a ChunkedParallel system.");
             }
             else if (sys.Name == "FenceMigrate")
             {
                 foundMigrate = true;
-                Assert.That(sys.IsInternal, Is.True, "FenceMigrate must be flagged IsInternal.");
+                Assert.That(IsEngineInternal(runtime.Scheduler, sys), Is.True, "FenceMigrate must be on an engine-tagged track.");
                 Assert.That(sys.ExplicitChunkCount, Is.GreaterThan(0), "FenceMigrate is a ChunkedParallel system.");
             }
             else if (sys.Name == "FenceAabbRefresh")
             {
                 foundAabbRefresh = true;
-                Assert.That(sys.IsInternal, Is.True, "FenceAabbRefresh must be flagged IsInternal.");
+                Assert.That(IsEngineInternal(runtime.Scheduler, sys), Is.True, "FenceAabbRefresh must be on an engine-tagged track.");
                 Assert.That(sys.ExplicitChunkCount, Is.GreaterThan(0), "FenceAabbRefresh is a ChunkedParallel system.");
             }
             else if (sys.Name == "FenceFinalize")
             {
                 foundFinalize = true;
-                Assert.That(sys.IsInternal, Is.True, "FenceFinalize must be flagged IsInternal.");
+                Assert.That(IsEngineInternal(runtime.Scheduler, sys), Is.True, "FenceFinalize must be on an engine-tagged track.");
                 Assert.That(sys.ExplicitChunkCount, Is.GreaterThan(0), "FenceFinalize is a ChunkedParallel system.");
             }
         }
@@ -216,7 +231,7 @@ class ParallelFenceTests : TestBase<ParallelFenceTests>
         Exception observedException = null;
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("MoveAll", _ =>
+            schedule.PublicTrack.DeclareDag("Test").CallbackSystem("MoveAll", _ =>
             {
                 try
                 {
@@ -259,8 +274,8 @@ class ParallelFenceTests : TestBase<ParallelFenceTests>
     }
 
     /// <summary>
-    /// Bug A regression: single-threaded (<c>WorkerCount == 1</c>) parallel-fence path. <see cref="DagScheduler.DispatchInternalSchedule"/>'s sync branch
-    /// dispatched the chained <see cref="FencePhaseExecSystemBase"/> systems WITHOUT invoking their typed <c>OnShouldRun()</c>/<c>OnPrepare()</c> gate — so the
+    /// Bug A regression: single-threaded (<c>WorkerCount == 1</c>) parallel-fence path. <see cref="DagScheduler.DispatchTrack"/>'s synchronous branch must
+    /// invoke the chained <see cref="FencePhaseExecSystemBase"/> systems' typed <c>OnShouldRun()</c>/<c>OnPrepare()</c> gate — otherwise the
     /// per-phase <see cref="FenceWorkPlan"/> was never built and <c>RuntimeChunkCount</c> stayed stale (0 on the first tick). The fence then silently dropped
     /// cluster migrations. Every other <see cref="ParallelFenceTests"/> case uses <c>WorkerCount &gt;= 2</c>, so this path was unguarded.
     ///
@@ -339,7 +354,7 @@ class ParallelFenceTests : TestBase<ParallelFenceTests>
         var migrationsApplied = 0;
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("MoveOnce", _ =>
+            schedule.PublicTrack.DeclareDag("Test").CallbackSystem("MoveOnce", _ =>
             {
                 if (!Volatile.Read(ref moved))
                 {
@@ -393,7 +408,7 @@ class ParallelFenceTests : TestBase<ParallelFenceTests>
         var ticksObserved = 0;
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksObserved));
+            schedule.PublicTrack.DeclareDag("Test").CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksObserved));
         }, new RuntimeOptions
         {
             WorkerCount = 4,
@@ -434,7 +449,7 @@ class ParallelFenceTests : TestBase<ParallelFenceTests>
         int ticksObserved = 0;
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksObserved));
+            schedule.PublicTrack.DeclareDag("Test").CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksObserved));
         }, new RuntimeOptions
         {
             WorkerCount = 4,
@@ -474,7 +489,7 @@ class ParallelFenceTests : TestBase<ParallelFenceTests>
         int ticksObserved = 0;
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksObserved));
+            schedule.PublicTrack.DeclareDag("Test").CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksObserved));
         }, new RuntimeOptions
         {
             WorkerCount = 4,
@@ -513,7 +528,7 @@ class ParallelFenceTests : TestBase<ParallelFenceTests>
         int ticksObserved = 0;
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksObserved));
+            schedule.PublicTrack.DeclareDag("Test").CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksObserved));
         }, new RuntimeOptions
         {
             WorkerCount = 4,
@@ -558,7 +573,7 @@ class ParallelFenceTests : TestBase<ParallelFenceTests>
         var ticksObserved = 0;
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksObserved));
+            schedule.PublicTrack.DeclareDag("Test").CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksObserved));
         }, new RuntimeOptions
         {
             WorkerCount = 4,

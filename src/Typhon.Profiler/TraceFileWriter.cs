@@ -97,20 +97,42 @@ public sealed class TraceFileWriter : IDisposable
             WriteStringArray(sys.ReadsResources);
             WriteStringArray(sys.ExplicitAfter);
             WriteStringArray(sys.ExplicitBefore);
+
+            // Track→DAG hierarchy (v11+) — trailing DagId ushort. Appended at the end of the record so the layout is a clean append.
+            _writer.Write(sys.DagId);
         }
         _writer.Flush();
     }
 
     /// <summary>
-    /// Writes the phases table (v6+). One entry per <c>RuntimeOptions.Phases</c> name in declaration order.
-    /// Empty array is valid (legacy session with no phase declarations); the reader returns an empty list.
+    /// Writes the tracks table (v11+, #354). One entry per <see cref="TrackRecord"/> — the top level of the runtime partitioning hierarchy. Takes the on-disk
+    /// slot the v6 PhasesTable used. Empty array is valid; the reader returns an empty list.
     /// </summary>
-    public void WritePhases(ReadOnlySpan<string> phaseNames)
+    public void WriteTracks(ReadOnlySpan<TrackRecord> tracks)
     {
-        _writer.Write((ushort)phaseNames.Length);
-        foreach (var p in phaseNames)
+        _writer.Write((ushort)tracks.Length);
+        foreach (var t in tracks)
         {
-            WriteShortString(p ?? string.Empty);
+            WriteShortString(t.Name ?? string.Empty);
+            _writer.Write(t.OrderIndex);
+            WriteStringArray(t.Tags);
+        }
+        _writer.Flush();
+    }
+
+    /// <summary>
+    /// Writes the DAGs table (v11+, #354). One entry per <see cref="DagRecord"/> — each carries its owning track index and its own ordered phase names.
+    /// Follows the TracksTable on disk. Empty array is valid; the reader returns an empty list.
+    /// </summary>
+    public void WriteDags(ReadOnlySpan<DagRecord> dags)
+    {
+        _writer.Write((ushort)dags.Length);
+        foreach (var d in dags)
+        {
+            _writer.Write(d.Id);
+            WriteShortString(d.Name ?? string.Empty);
+            _writer.Write(d.TrackIndex);
+            WriteStringArray(d.PhaseNames);
         }
         _writer.Flush();
     }
@@ -140,9 +162,8 @@ public sealed class TraceFileWriter : IDisposable
     }
 
     /// <summary>
-    /// Writes the rich component-definitions table (v7+). One <see cref="ComponentDefinitionRecord"/> per registered component
-    /// type — sits after <c>WritePhases</c> in the on-disk sequence. Empty array is valid (no components → 0 length prefix; the
-    /// reader returns an empty list).
+    /// Writes the rich component-definitions table (v7+). One <see cref="ComponentDefinitionRecord"/> per registered component type — sits after
+    /// <c>WriteDags</c> in the on-disk sequence. Empty array is valid (no components → 0 length prefix; the reader returns an empty list).
     /// </summary>
     public void WriteComponentDefinitions(ReadOnlySpan<ComponentDefinitionRecord> components)
     {
@@ -270,11 +291,6 @@ public sealed class TraceFileWriter : IDisposable
         _writer.Write(config.WorkerCount);
         _writer.Write(config.TelemetryRingCapacity);
         _writer.Write(config.ParallelQueryMinChunkSize);
-        WriteShortString(config.DefaultPhase ?? string.Empty);
-
-        var phases = config.Phases ?? [];
-        _writer.Write((ushort)phases.Length);
-        foreach (var p in phases) WriteShortString(p ?? string.Empty);
         _writer.Flush();
     }
 

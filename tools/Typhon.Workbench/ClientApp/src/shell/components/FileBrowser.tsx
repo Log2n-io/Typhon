@@ -4,6 +4,7 @@ import { Input } from '@/components/ui/input';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { useGetApiFsHome, useGetApiFsList } from '@/api/generated/files/files';
 import type { FileEntryDto } from '@/api/generated/model';
+import { formatDateTime, formatFileSize } from '@/lib/formatters';
 import { getRecentLocations, useRecentFilesStore, type RecentFileKind } from '@/stores/useRecentFilesStore';
 
 export interface FileBrowserProps {
@@ -258,10 +259,17 @@ export default function FileBrowser({
               <Icon className="h-3 w-3 shrink-0 text-muted-foreground" />
               <span className="min-w-0 flex-1 truncate">{e.name}</span>
               {e.isSchemaDll && (
-                <span className="ml-auto shrink-0 rounded bg-accent/20 px-1 text-[10px] uppercase text-accent">
+                <span className="shrink-0 rounded bg-accent/20 px-1 text-[10px] uppercase text-accent">
                   schema
                 </span>
               )}
+              {/* Size + last-modified columns. Directory entries carry null for both — rendered blank. */}
+              <span className="w-20 shrink-0 text-right tabular-nums text-[10px] text-muted-foreground">
+                {formatFileSize(e.size)}
+              </span>
+              <span className="w-32 shrink-0 text-right tabular-nums text-[10px] text-muted-foreground">
+                {formatDateTime(e.lastWriteUtc)}
+              </span>
             </div>
           );
         })}

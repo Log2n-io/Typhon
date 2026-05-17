@@ -698,7 +698,8 @@ public sealed class IncrementalCacheBuilder : IDisposable
         reader.ReadSystemDefinitions();
         reader.ReadArchetypes();
         reader.ReadComponentTypes();
-        reader.ReadPhases(); // v6+ section; reader returns empty for v5 traces without consuming bytes.
+        reader.ReadTracks(); // v11+ Track→DAG hierarchy — replaces the v6 PhasesTable slot.
+        reader.ReadDags();
         // v7+ static-structure tables — walk past them so the next ReadNextBlock lands on the first compressed
         // record block. Reader exposes the data via its public state lists; the cache propagates them through new
         // CacheSectionId entries (see Phase B reader extensions).

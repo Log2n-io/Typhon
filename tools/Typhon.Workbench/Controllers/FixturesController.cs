@@ -111,6 +111,12 @@ public sealed class FixturesController(SessionManager sessions) : ControllerBase
         {
             path = TraceFixtureBuilder.BuildTraceWithAccessDeclarations(outDir);
         }
+        else if (string.Equals(req?.Variant, "with-track-hierarchy", StringComparison.OrdinalIgnoreCase))
+        {
+            // #354 W5 — 3 ordered tracks (Engine-Pre / Public / Engine-Post), a user DAG + a Fence DAG.
+            // Drives the System-DAG Track→DAG grouping Playwright canary.
+            path = TraceFixtureBuilder.BuildTraceWithTrackHierarchy(outDir);
+        }
         else
         {
             path = TraceFixtureBuilder.BuildMinimalTrace(outDir, tickCount, instantsPerTick);

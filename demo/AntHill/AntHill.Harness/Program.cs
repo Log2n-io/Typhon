@@ -66,7 +66,6 @@ public static class Program
                 var samplingQpc = ProfilerLauncher.StartCpuSampler(profilerConfig);
                 var metadata = ProfilerSetup.BuildSessionMetadata(
                     bridge.Systems, workerCount: 16, baseTickRate: 60f,
-                    phases: bridge.PhaseNames,
                     currentEngineTickProvider: () => bridge.CurrentTick,
                     engine: bridge.DatabaseEngine,
                     resourceGraphRoot: bridge.ResourceGraphRoot,

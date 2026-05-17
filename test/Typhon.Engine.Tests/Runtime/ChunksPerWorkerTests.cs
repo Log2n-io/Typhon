@@ -52,8 +52,9 @@ class ChunksPerWorkerTests : TestBase<ChunksPerWorkerTests>
         var ticksSeen = 0;
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksSeen));
-            schedule.QuerySystem("Parallel", _ => { }, input: () => view, parallel: true,
+            var dag = schedule.PublicTrack.DeclareDag("Test");
+            dag.CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksSeen));
+            dag.QuerySystem("Parallel", _ => { }, input: () => view, parallel: true,
                 chunksPerWorker: chunksPerWorker, after: "Tick");
         }, new RuntimeOptions
         {
@@ -150,8 +151,9 @@ class ChunksPerWorkerTests : TestBase<ChunksPerWorkerTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksSeen));
-            schedule.QuerySystem("VisitAll", ctx =>
+            var dag = schedule.PublicTrack.DeclareDag("Test");
+            dag.CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksSeen));
+            dag.QuerySystem("VisitAll", ctx =>
             {
                 foreach (var id in ctx.Entities)
                 {
@@ -215,8 +217,9 @@ class ChunksPerWorkerTests : TestBase<ChunksPerWorkerTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksSeen));
-            schedule.QuerySystem("Single", ctx =>
+            var dag = schedule.PublicTrack.DeclareDag("Test");
+            dag.CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksSeen));
+            dag.QuerySystem("Single", ctx =>
             {
                 foreach (var id in ctx.Entities)
                 {

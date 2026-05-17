@@ -89,6 +89,7 @@ internal static class SystemDefinitionRecordBuilder
             // surface as empty until the descriptor exposes them. Workbench treats empty arrays as "no explicit hint".
             ExplicitAfter = [],
             ExplicitBefore = [],
+            DagId = (ushort)sys.DagId,
         };
     }
 

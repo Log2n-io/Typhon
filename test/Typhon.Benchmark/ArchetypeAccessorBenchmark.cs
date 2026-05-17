@@ -208,7 +208,7 @@ static class ArchetypeAccessorBenchmark
 
         using var runtime = TyphonRuntime.Create(env.Dbe, schedule =>
         {
-            schedule.QuerySystem("Movement", ctx =>
+            schedule.PublicTrack.DeclareDag("Test").QuerySystem("Movement", ctx =>
             {
                 if (useAccessor)
                 {
@@ -282,7 +282,7 @@ static class ArchetypeAccessorBenchmark
 
         using var runtime = TyphonRuntime.Create(env.Dbe, schedule =>
         {
-            schedule.QuerySystem("Movement", ctx =>
+            schedule.PublicTrack.DeclareDag("Test").QuerySystem("Movement", ctx =>
             {
                 foreach (var id in ctx.Entities)
                 {
@@ -316,7 +316,7 @@ static class ArchetypeAccessorBenchmark
 
         using var runtime = TyphonRuntime.Create(env.Dbe, schedule =>
         {
-            schedule.QuerySystem("Movement", ctx =>
+            schedule.PublicTrack.DeclareDag("Test").QuerySystem("Movement", ctx =>
             {
                 var ants = ctx.Accessor.For<AaBenchAnt>();
                 foreach (var id in ctx.Entities)

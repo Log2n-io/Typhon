@@ -101,7 +101,7 @@ class AdaptiveFenceCostTests
         int ticksObserved = 0;
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksObserved));
+            schedule.PublicTrack.DeclareDag("Test").CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksObserved));
         }, new RuntimeOptions
         {
             WorkerCount = 2,
@@ -137,7 +137,7 @@ class AdaptiveFenceCostTests
         int ticksObserved = 0;
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksObserved));
+            schedule.PublicTrack.DeclareDag("Test").CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksObserved));
         }, new RuntimeOptions
         {
             WorkerCount = 2,

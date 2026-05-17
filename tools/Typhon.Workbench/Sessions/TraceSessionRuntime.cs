@@ -535,7 +535,7 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
     /// because the reader's internal state is exactly the parsed records right after <c>ReadStaticStructures</c> consumes them — the
     /// alternative is opening + re-parsing the file, which doubles I/O for no gain.
     /// </summary>
-    private static (ProfilerHeaderDto, SystemDefinitionDto[], ArchetypeDto[], ComponentTypeDto[], string[]) ProjectHeaderAndTables(
+    private static (ProfilerHeaderDto, SystemDefinitionDto[], ArchetypeDto[], ComponentTypeDto[], string[], TrackDto[]) ProjectHeaderAndTables(
         TraceFileReader traceReader,
         Action<Schema.IStaticSchemaProvider> staticSchemaProviderSink = null)
     {
@@ -578,15 +578,33 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
                 WritesResources: sr.WritesResources,
                 ReadsResources: sr.ReadsResources,
                 ExplicitAfter: sr.ExplicitAfter,
-                ExplicitBefore: sr.ExplicitBefore);
+                ExplicitBefore: sr.ExplicitBefore,
+                DagId: sr.DagId);
         }
 
         var archetypeRecords = traceReader.ReadArchetypes();
 
         var componentRecords = traceReader.ReadComponentTypes();
 
-        // Phases section — present in v6+ traces only; reader returns empty for v5.
-        var phases = traceReader.ReadPhases().ToArray();
+        // Track→DAG hierarchy (v11+, #354) — replaces the v6 PhasesTable slot. Read both tables so the cursor stays aligned.
+        traceReader.ReadTracks();
+        var dags = traceReader.ReadDags();
+        // W4: the full tracks[] → dags[] → phases[] hierarchy. The flat Phases list below is kept as a derived
+        // first-seen rollup for consumers not yet migrated to the hierarchy.
+        var tracks = TrackHierarchyProjection.Project(traceReader.Tracks, dags);
+        var phaseSeen = new HashSet<string>(StringComparer.Ordinal);
+        var phaseList = new List<string>();
+        foreach (var dag in dags)
+        {
+            foreach (var phaseName in dag.PhaseNames)
+            {
+                if (phaseSeen.Add(phaseName ?? string.Empty))
+                {
+                    phaseList.Add(phaseName ?? string.Empty);
+                }
+            }
+        }
+        var phases = phaseList.ToArray();
         // v7 static-structure tables. Walk past them so any subsequent block reads land at the right offset.
         traceReader.ReadStaticStructures();
 
@@ -639,7 +657,7 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
             staticSchemaProviderSink(provider);
         }
 
-        return (headerDto, systems, archetypes, componentTypes, phases);
+        return (headerDto, systems, archetypes, componentTypes, phases, tracks);
     }
 
     /// <summary>
@@ -679,6 +697,7 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
         ArchetypeDto[] archetypes;
         ComponentTypeDto[] componentTypes;
         string[] phases;
+        TrackDto[] tracks;
 
         if (isReplayFile)
         {
@@ -687,14 +706,14 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
             var metaCopy = reader.SourceMetadataBytes.ToArray();
             using var ms = new MemoryStream(metaCopy, writable: false);
             using var traceReader = new TraceFileReader(ms);
-            (headerDto, systems, archetypes, componentTypes, phases) = ProjectHeaderAndTables(traceReader, staticSchemaProviderSink);
+            (headerDto, systems, archetypes, componentTypes, phases, tracks) = ProjectHeaderAndTables(traceReader, staticSchemaProviderSink);
         }
         else
         {
             // Read source tables (header is already read by ReadSourceTimestampFrequency, but we need the tables — re-open and walk).
             using var fs = File.OpenRead(sourcePath);
             using var traceReader = new TraceFileReader(fs);
-            (headerDto, systems, archetypes, componentTypes, phases) = ProjectHeaderAndTables(traceReader, staticSchemaProviderSink);
+            (headerDto, systems, archetypes, componentTypes, phases, tracks) = ProjectHeaderAndTables(traceReader, staticSchemaProviderSink);
         }
 
         // Tick summaries, manifest, metrics, aggregates all come from the cache reader (already in memory).
@@ -774,6 +793,7 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
             ChunkManifest: manifest,
             GcSuspensions: gcSuspensions,
             Phases: phases,
+            Tracks: tracks,
             SystemTickSummaries: sysTicks,
             QueueTickSummaries: qTicks,
             PostTickSummaries: postTicks,

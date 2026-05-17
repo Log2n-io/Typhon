@@ -36,20 +36,25 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     // ═══════════════════════════════════════════════════════════════
 
     /// <summary>
-    /// All registered systems (user + internal), indexed by system index. Used by the scheduler for dispatch, lookup, and topological reasoning — the index
-    /// identity is load-bearing for chunk dispatch state and dependency wiring, so this array stays as the canonical source for everything index-keyed
+    /// All registered systems across every track and DAG, indexed by system index. Used by the scheduler for dispatch, lookup, and topological reasoning — the
+    /// index identity is load-bearing for chunk dispatch state and dependency wiring, so this array stays as the canonical source for everything index-keyed
     /// (including diagnostics/profiler that walk every entry by raw index).
     /// </summary>
     /// <remarks>
     /// When you only care about systems the user registered (counting them in a test, iterating them in a DAG-viewer that hides engine plumbing), prefer
-    /// <see cref="UserSystems"/> — it filters out <see cref="SystemDefinition.IsInternal"/> entries (e.g. <c>FenceExec</c>) so the count is stable regardless
-    /// of which internal systems the runtime registers.
+    /// <see cref="UserSystems"/> — it filters out systems whose track carries the <see cref="Track.EngineTag"/> (e.g. the Fence DAG) so the count is stable
+    /// regardless of which engine-internal DAGs the runtime registers.
     /// </remarks>
     public SystemDefinition[] Systems { get; }
 
     /// <summary>
-    /// User-registered systems only (filtered <see cref="Systems"/> with <see cref="SystemDefinition.IsInternal"/> removed). Indices in this view do NOT match
-    /// the canonical system index — use this only for iteration and counting, not for index-keyed lookups.
+    /// The runtime partitioning hierarchy — tracks in execution order, each carrying its DAGs. Static for the scheduler's lifetime.
+    /// </summary>
+    public IReadOnlyList<Track> Tracks => _tracks;
+
+    /// <summary>
+    /// User-registered systems only (filtered <see cref="Systems"/> with engine-tagged-track entries removed). Indices in this view do NOT match the canonical
+    /// system index — use this only for iteration and counting, not for index-keyed lookups.
     /// </summary>
     public SystemDefinition[] UserSystems
     {
@@ -64,7 +69,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
             int j = 0;
             for (int i = 0; i < AllSystemCount; i++)
             {
-                if (!Systems[i].IsInternal)
+                if (!_systemIsEngine[i])
                 {
                     arr[j++] = Systems[i];
                 }
@@ -74,13 +79,25 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         }
     }
 
-    private readonly int[] _rootSystems;          // User DAG roots (PredecessorCount == 0 AND !IsInternal)
-    private readonly int[] _internalRootSystems;  // Internal sub-DAG roots (PredecessorCount == 0 AND IsInternal)
-    private readonly int _internalSystemCount;    // Count of IsInternal systems
+    private readonly Track[] _tracks;                       // public-facing track objects, in execution order
+    private readonly ScheduledTrack[] _scheduledTracks;     // per-track dispatch state (roots + members), parallel to _tracks
+    private readonly int _deferredTrackStartIndex;          // tracks [this, count) are dispatched by the runtime, not the in-tick loop
+    private readonly int[] _systemTrackIndex;               // per-system → owning track index
+    private readonly bool[] _systemIsEngine;                // per-system → owning track carries the engine tag
     private readonly int _workerCount;
     private readonly RuntimeOptions _options;
     private readonly int[] _topologicalOrder;
     private readonly EventQueueBase[] _eventQueues;
+
+    /// <summary>Per-track dispatch state: the track's root systems (zero predecessors) and its full member set.</summary>
+    private sealed class ScheduledTrack
+    {
+        public string Name;
+        public bool IsEngine;
+        public int[] Roots = [];
+        public int[] Members = [];
+        public int MemberCount => Members.Length;
+    }
 
     // ═══════════════════════════════════════════════════════════════
     // Per-system mutable state (reset each tick)
@@ -298,15 +315,19 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     /// </summary>
     /// <param name="systems">System definitions from <see cref="DagBuilder.Build"/>.</param>
     /// <param name="topologicalOrder">Topological order from <see cref="DagBuilder.Build"/>.</param>
+    /// <param name="tracks">The track hierarchy in execution order — each track carries its DAGs and their resolved system indices.</param>
+    /// <param name="deferredTrackStartIndex">Tracks from this index onward are dispatched on demand by the runtime (e.g. Engine-Post after serial fence prep),
+    /// not by the in-tick track loop.</param>
     /// <param name="options">Runtime configuration.</param>
     /// <param name="parent">Parent resource node (typically <see cref="IResourceRegistry.Runtime"/>).</param>
     /// <param name="eventQueues">Event queues to reset at each tick start. Can be empty.</param>
     /// <param name="logger">Optional logger for diagnostics.</param>
-    public DagScheduler(SystemDefinition[] systems, int[] topologicalOrder, RuntimeOptions options, IResource parent, EventQueueBase[] eventQueues = null, 
-        ILogger logger = null) : base("DagScheduler", parent)
+    public DagScheduler(SystemDefinition[] systems, int[] topologicalOrder, IReadOnlyList<Track> tracks, int deferredTrackStartIndex, RuntimeOptions options,
+        IResource parent, EventQueueBase[] eventQueues = null, ILogger logger = null) : base("DagScheduler", parent)
     {
         ArgumentNullException.ThrowIfNull(systems);
         ArgumentNullException.ThrowIfNull(topologicalOrder);
+        ArgumentNullException.ThrowIfNull(tracks);
         ArgumentNullException.ThrowIfNull(options);
 
         Systems = systems;
@@ -330,49 +351,48 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         // Tick interval
         _tickIntervalTicks = Stopwatch.Frequency / options.BaseTickRate;
 
-        // Find root systems (zero predecessors). Partition into user-DAG roots and internal-sub-DAG roots so the two schedules can be dispatched independently
-        // — user systems run as the main tick body, internal systems (e.g. FenceExec) run in a second wake/barrier cycle invoked from TickEndCallback.
-        var userRootCount = 0;
-        var internalRootCount = 0;
-        var internalCount = 0;
-        for (var i = 0; i < AllSystemCount; i++)
+        // Build per-track dispatch state. Track order is the execution sequence: each track is dispatched as its own
+        // wake/barrier cycle (DispatchTrack), tracks [deferredTrackStartIndex, count) on demand from the runtime.
+        _tracks = [.. tracks];
+        _deferredTrackStartIndex = deferredTrackStartIndex;
+        _scheduledTracks = new ScheduledTrack[_tracks.Length];
+        _systemTrackIndex = new int[AllSystemCount];
+        _systemIsEngine = new bool[AllSystemCount];
+
+        var userSystemCount = 0;
+        for (var t = 0; t < _tracks.Length; t++)
         {
-            if (systems[i].IsInternal)
+            var track = _tracks[t];
+            var members = new List<int>();
+            var roots = new List<int>();
+            foreach (var dag in track.Dags)
             {
-                internalCount++;
-                if (systems[i].PredecessorCount == 0)
+                foreach (var sysIdx in dag.SystemIndices)
                 {
-                    internalRootCount++;
+                    members.Add(sysIdx);
+                    _systemTrackIndex[sysIdx] = t;
+                    _systemIsEngine[sysIdx] = track.IsEngine;
+                    if (systems[sysIdx].PredecessorCount == 0)
+                    {
+                        roots.Add(sysIdx);
+                    }
                 }
             }
-            else if (systems[i].PredecessorCount == 0)
+
+            _scheduledTracks[t] = new ScheduledTrack
             {
-                userRootCount++;
+                Name = track.Name,
+                IsEngine = track.IsEngine,
+                Members = [.. members],
+                Roots = [.. roots],
+            };
+
+            if (!track.IsEngine)
+            {
+                userSystemCount += members.Count;
             }
         }
-        _internalSystemCount = internalCount;
-        SystemCount = AllSystemCount - internalCount;
-
-        _rootSystems = new int[userRootCount];
-        _internalRootSystems = new int[internalRootCount];
-        var userIdx = 0;
-        var iIdx = 0;
-        for (var i = 0; i < AllSystemCount; i++)
-        {
-            if (systems[i].PredecessorCount != 0)
-            {
-                continue;
-            }
-
-            if (systems[i].IsInternal)
-            {
-                _internalRootSystems[iIdx++] = i;
-            }
-            else
-            {
-                _rootSystems[userIdx++] = i;
-            }
-        }
+        SystemCount = userSystemCount;
 
         // Allocate per-system state arrays
         _nextChunk = new CacheLinePaddedInt[AllSystemCount];
@@ -579,8 +599,8 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     public int WorkerCount => _workerCount;
 
     /// <summary>
-    /// Number of user-registered systems in the DAG (excludes <see cref="SystemDefinition.IsInternal"/> entries like <c>FenceExec</c>). This is the count
-    /// callers usually want — "the systems I registered". For the total including engine-internal systems use <see cref="AllSystemCount"/>.
+    /// Number of user-registered systems (systems whose track does not carry the <see cref="Track.EngineTag"/> — i.e. excludes the Fence DAG). This is the
+    /// count callers usually want — "the systems I registered". For the total including engine-internal systems use <see cref="AllSystemCount"/>.
     /// </summary>
     public int SystemCount { get; }
 
@@ -607,62 +627,14 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         TickStartCallback?.Invoke(this);
         InspectorTickStart(_currentTickNumber, tickStartTimestamp);
 
-        // 3. Mark root systems ready (evaluate ShouldRun and ReactiveSkip for roots before waking workers)
-        var readyNow = Stopwatch.GetTimestamp();
-        foreach (var root in _rootSystems)
+        // 3. Dispatch the in-tick tracks in execution order — one wake/barrier cycle per non-empty track. Tracks
+        //    [_deferredTrackStartIndex, count) (Engine-Post) are dispatched later by the runtime after serial fence prep.
+        for (var t = 0; t < _deferredTrackStartIndex; t++)
         {
-            _currentTickSystemMetrics[root].ReadyTick = readyNow;
-            InspectorSystemReady(root, readyNow);
-            var sys = Systems[root];
-            ushort rootSkipUnused = 0;
-            if (!EvaluateShouldRunAndPrepare(root, -1, false, ref rootSkipUnused))
-            {
-                // Skip / Prepare-dispatch already handled by helper.
-            }
-            else if (sys.ReactiveSkip != null && sys.ReactiveSkip())
-            {
-                _currentTickSystemMetrics[root].SkipReason = SkipReason.EmptyInput;
-                InspectorSystemSkipped(root, SkipReason.EmptyInput, Stopwatch.GetTimestamp());
-                OnSystemComplete(root, -1, false);
-            }
-            else
-            {
-                var overloadSkip = CheckOverloadSkip(root);
-                if (overloadSkip != SkipReason.NotSkipped)
-                {
-                    _currentTickSystemMetrics[root].SkipReason = overloadSkip;
-                    InspectorSystemSkipped(root, overloadSkip, Stopwatch.GetTimestamp());
-                    OnSystemComplete(root, -1, false);
-                }
-                else if (sys.IsParallelQuery)
-                {
-                    DispatchParallelQuery(root, -1, false);
-                }
-                else
-                {
-                    MarkSystemReady(root);
-                }
-            }
+            DispatchTrackMultiThreaded(t);
         }
 
-        // 3. Activate tick — bump generation + signal workers (D7)
-        _tickInProgress = 1;
-        Interlocked.Increment(ref _tickGeneration);
-        _tickStartSignal.Set();
-
-        // 4. Wait for all systems to complete.
-        //    The timer thread must spin here — Thread.Yield() on Windows can delay up to 15.6ms,
-        //    which would cascade into all subsequent ticks. One core spinning for the tick
-        //    duration (~0.1-5ms) is acceptable; delayed completion detection is not.
-        while (_systemsRemaining.Value > 0)
-        {
-            Thread.SpinWait(1);
-        }
-
-        _tickInProgress = 0;
-        _tickStartSignal.Reset(); // Workers will block again on next between-tick wait
-
-        // 5. Tick end hook (TyphonRuntime flushes/disposes UoW)
+        // 5. Tick end hook (TyphonRuntime flushes/disposes UoW, then dispatches the Engine-Post track)
         TickEndCallback?.Invoke(this);
 
         var tickEndTimestamp = Stopwatch.GetTimestamp();
@@ -705,156 +677,168 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         TickStartCallback?.Invoke(this);
         InspectorTickStart(_currentTickNumber, tickStartTimestamp);
 
-        // Execute in topological order
+        // Dispatch the in-tick tracks in execution order. Engine-Post is dispatched separately by the runtime (DispatchTrack).
+        for (var t = 0; t < _deferredTrackStartIndex; t++)
+        {
+            RunTrackSingleThreaded(t);
+        }
+
+        // Tick end hook
+        TickEndCallback?.Invoke(this);
+
+        var tickEndTimestampSt = Stopwatch.GetTimestamp();
+        InspectorTickEnd(_currentTickNumber, tickEndTimestampSt);
+
+        // Profiler gauge snapshot (post-TickEnd). Same contract as the multi-threaded path.
+        GaugeSnapshotCallback?.Invoke(this);
+
+        ComputeAndRecordTelemetry(tickStartTimestamp, tickEndTimestampSt);
+    }
+
+    /// <summary>Runs every system of one track in topological order on the calling thread (single-threaded / synchronous track dispatch).</summary>
+    private void RunTrackSingleThreaded(int trackIndex)
+    {
         for (var i = 0; i < _topologicalOrder.Length; i++)
         {
             var sysIdx = _topologicalOrder[i];
-            var sys = Systems[sysIdx];
-
-            // Internal systems (engine-internal sub-DAG, e.g. FenceExec) are not part of the user DAG cycle. The runtime dispatches them separately from
-            // TickEndCallback after the user DAG completes — see DispatchInternalSchedule.
-            if (sys.IsInternal)
+            if (_systemTrackIndex[sysIdx] == trackIndex)
             {
-                continue;
-            }
+                RunSystemSingleThreaded(sysIdx);
 
-            var readyTick = Stopwatch.GetTimestamp();
+                // Propagate `readyUs` to successors — the serial analog of `OnSystemComplete`'s fan-out. A successor becomes ready when its last predecessor
+                // finishes; topological order runs predecessors first, and the last one to run overwrites last, so the successor's `ReadyTick` settles on its
+                // gating predecessor's completion time. Without this, a successor's `ReadyTick` would be stamped only when the topo loop *reached* it (its own
+                // entry) — i.e. after every earlier-running sibling, not when its predecessor completed. Skipped systems leave `LastChunkDoneTick == 0` and
+                // propagate nothing; a successor gated only by skipped predecessors falls back to its own entry stamp.
+                var doneTick = _currentTickSystemMetrics[sysIdx].LastChunkDoneTick;
+                if (doneTick > 0)
+                {
+                    foreach (var succ in Systems[sysIdx].Successors)
+                    {
+                        _currentTickSystemMetrics[succ].ReadyTick = doneTick;
+                    }
+                }
+            }
+        }
+    }
+
+    /// <summary>Executes a single system synchronously on the calling thread, with the full ShouldRun / Prepare / overload / failure machinery.</summary>
+    private void RunSystemSingleThreaded(int sysIdx)
+    {
+        var sys = Systems[sysIdx];
+
+        // `readyUs` contract: a system is ready when its last predecessor completed. In serial topological dispatch the predecessors have already run and
+        // stamped this slot via the successor-propagation tail in `RunTrackSingleThreaded`; a root — or a system gated only by skipped predecessors — has
+        // no stamp yet, so it is ready as of now.
+        var readyTick = _currentTickSystemMetrics[sysIdx].ReadyTick;
+        if (readyTick == 0)
+        {
+            readyTick = Stopwatch.GetTimestamp();
             _currentTickSystemMetrics[sysIdx].ReadyTick = readyTick;
-            InspectorSystemReady(sysIdx, readyTick);
+        }
 
-            // Check if a predecessor failed
-            if (_systemFailed[sysIdx])
+        InspectorSystemReady(sysIdx, readyTick);
+
+        // Check if a predecessor failed
+        if (_systemFailed[sysIdx])
+        {
+            _currentTickSystemMetrics[sysIdx].SkipReason = SkipReason.DependencyFailed;
+            InspectorSystemSkipped(sysIdx, SkipReason.DependencyFailed, Stopwatch.GetTimestamp());
+            // Propagate failure to successors
+            foreach (var succ in sys.Successors)
             {
-                _currentTickSystemMetrics[sysIdx].SkipReason = SkipReason.DependencyFailed;
-                InspectorSystemSkipped(sysIdx, SkipReason.DependencyFailed, Stopwatch.GetTimestamp());
-                // Propagate failure to successors
-                foreach (var succ in sys.Successors)
-                {
-                    _systemFailed[succ] = true;
-                }
-
-                continue;
+                _systemFailed[succ] = true;
             }
 
-            // Evaluate ShouldRun (untyped delegate + typed virtual for ChunkedCallbackSystem<TContext>).
-            bool shouldRunSingle = sys.ShouldRun?.Invoke() ?? true;
-            if (shouldRunSingle && sys.Instance is ChunkedCallbackSystem ccsSingle)
-            {
-                try { shouldRunSingle = ccsSingle.OnShouldRun(); }
-                catch { _systemFailed[sysIdx] = true; continue; }
-            }
-            if (!shouldRunSingle)
-            {
-                _currentTickSystemMetrics[sysIdx].SkipReason = SkipReason.ShouldRunFalse;
-                InspectorSystemSkipped(sysIdx, SkipReason.ShouldRunFalse, Stopwatch.GetTimestamp());
-                continue;
-            }
+            return;
+        }
 
-            // Prepare gate (chunked systems only). Single-threaded mode: still needs to run so plans get built.
-            if (sys.Instance is ChunkedCallbackSystem ccsSingle2)
-            {
-                int chunks;
-                try { chunks = ccsSingle2.OnPrepare(); }
-                catch { _systemFailed[sysIdx] = true; continue; }
+        // Evaluate ShouldRun (untyped delegate + typed virtual for ChunkedCallbackSystem<TContext>).
+        bool shouldRunSingle = sys.ShouldRun?.Invoke() ?? true;
+        if (shouldRunSingle && sys.Instance is ChunkedCallbackSystem ccsSingle)
+        {
+            try { shouldRunSingle = ccsSingle.OnShouldRun(); }
+            catch { _systemFailed[sysIdx] = true; return; }
+        }
+        if (!shouldRunSingle)
+        {
+            _currentTickSystemMetrics[sysIdx].SkipReason = SkipReason.ShouldRunFalse;
+            InspectorSystemSkipped(sysIdx, SkipReason.ShouldRunFalse, Stopwatch.GetTimestamp());
+            return;
+        }
 
-                if (chunks == 0)
-                {
-                    _currentTickSystemMetrics[sysIdx].SkipReason = SkipReason.EmptyInput;
-                    InspectorSystemSkipped(sysIdx, SkipReason.EmptyInput, Stopwatch.GetTimestamp());
-                    continue;
-                }
-                if (chunks > 0)
-                {
-                    sys.RuntimeChunkCount = chunks;
-                }
-            }
+        // Prepare gate (chunked systems only). Single-threaded mode: still needs to run so plans get built.
+        if (sys.Instance is ChunkedCallbackSystem ccsSingle2)
+        {
+            int chunks;
+            try { chunks = ccsSingle2.OnPrepare(); }
+            catch { _systemFailed[sysIdx] = true; return; }
 
-            if (sys.ReactiveSkip != null && sys.ReactiveSkip())
+            if (chunks == 0)
             {
                 _currentTickSystemMetrics[sysIdx].SkipReason = SkipReason.EmptyInput;
                 InspectorSystemSkipped(sysIdx, SkipReason.EmptyInput, Stopwatch.GetTimestamp());
-                continue;
+                return;
             }
-
+            if (chunks > 0)
             {
-                var overloadSkip = CheckOverloadSkip(sysIdx);
-                if (overloadSkip != SkipReason.NotSkipped)
-                {
-                    _currentTickSystemMetrics[sysIdx].SkipReason = overloadSkip;
-                    InspectorSystemSkipped(sysIdx, overloadSkip, Stopwatch.GetTimestamp());
-                    continue;
-                }
+                sys.RuntimeChunkCount = chunks;
             }
+        }
 
-            var startTick = Stopwatch.GetTimestamp();
-            _currentTickSystemMetrics[sysIdx].FirstChunkGrabTick = startTick;
+        if (sys.ReactiveSkip != null && sys.ReactiveSkip())
+        {
+            _currentTickSystemMetrics[sysIdx].SkipReason = SkipReason.EmptyInput;
+            InspectorSystemSkipped(sysIdx, SkipReason.EmptyInput, Stopwatch.GetTimestamp());
+            return;
+        }
 
-            // Phase 4: Scheduler:System:SingleThreaded span — wraps the per-system synchronous tick body. ChunkCount filled once known.
-            var stScope = TyphonEvent.BeginSchedulerSystemSingleThreaded(
-                (ushort)sysIdx,
-                sys.IsParallelQuery ? (byte)1 : (byte)0,
-                0);
-            try
+        {
+            var overloadSkip = CheckOverloadSkip(sysIdx);
+            if (overloadSkip != SkipReason.NotSkipped)
             {
+                _currentTickSystemMetrics[sysIdx].SkipReason = overloadSkip;
+                InspectorSystemSkipped(sysIdx, overloadSkip, Stopwatch.GetTimestamp());
+                return;
+            }
+        }
 
-                if (sys.IsParallelQuery)
+        var startTick = Stopwatch.GetTimestamp();
+        _currentTickSystemMetrics[sysIdx].FirstChunkGrabTick = startTick;
+
+        // Phase 4: Scheduler:System:SingleThreaded span — wraps the per-system synchronous tick body. ChunkCount filled once known.
+        var stScope = TyphonEvent.BeginSchedulerSystemSingleThreaded(
+            (ushort)sysIdx,
+            sys.IsParallelQuery ? (byte)1 : (byte)0,
+            0);
+        try
+        {
+            if (sys.IsParallelQuery)
+            {
+                // Issue #234: do/while loop supports checkerboard two-phase dispatch. For non-checkerboard systems, cleanup returns false on
+                // the first iteration → loop executes exactly once → zero overhead.
+                bool morePhases;
+                do
                 {
-                    // Issue #234: do/while loop supports checkerboard two-phase dispatch. For non-checkerboard systems, cleanup returns false on
-                    // the first iteration → loop executes exactly once → zero overhead.
-                    bool morePhases;
-                    do
+                    var totalChunks = ParallelQueryPrepareCallback?.Invoke(sysIdx) ?? 0;
+                    if (totalChunks <= 0)
                     {
-                        var totalChunks = ParallelQueryPrepareCallback?.Invoke(sysIdx) ?? 0;
-                        if (totalChunks <= 0)
-                        {
-                            morePhases = ParallelQueryCleanupCallback?.Invoke(sysIdx) ?? false;
-                            continue;
-                        }
-
-                        Systems[sysIdx].TotalChunks = totalChunks;
-                        var chunkFailed = false;
-                        for (var chunk = 0; chunk < totalChunks; chunk++)
-                        {
-                            SystemAccessValidator.EnterSystem(sys.Access, sys.Name);
-                            try
-                            {
-                                ParallelQueryChunkCallback?.Invoke(sysIdx, chunk, totalChunks, 0);
-                            }
-                            catch (Exception ex)
-                            {
-                                chunkFailed = true;
-                                _currentTickSystemMetrics[sysIdx].SkipReason = SkipReason.Exception;
-                                _systemFailed[sysIdx] = true;
-                                LogSystemException(sysIdx, sys.Name, ex); CaptureSystemException(sysIdx, ex);
-                                foreach (var succ in sys.Successors)
-                                {
-                                    _systemFailed[succ] = true;
-                                }
-                            }
-                            finally
-                            {
-                                SystemAccessValidator.LeaveSystem();
-                            }
-                        }
-
                         morePhases = ParallelQueryCleanupCallback?.Invoke(sysIdx) ?? false;
-                        if (chunkFailed)
-                        {
-                            morePhases = false; // Abort remaining phases on failure
-                        }
-                    } while (morePhases);
-                }
-                else if (sys.Type == SystemType.PipelineSystem)
-                {
-                    for (var chunk = 0; chunk < sys.TotalChunks; chunk++)
+                        continue;
+                    }
+
+                    Systems[sysIdx].TotalChunks = totalChunks;
+                    var chunkFailed = false;
+                    for (var chunk = 0; chunk < totalChunks; chunk++)
                     {
                         SystemAccessValidator.EnterSystem(sys.Access, sys.Name);
                         try
                         {
-                            sys.PipelineChunkAction(chunk, sys.TotalChunks);
+                            ParallelQueryChunkCallback?.Invoke(sysIdx, chunk, totalChunks, 0);
                         }
                         catch (Exception ex)
                         {
+                            chunkFailed = true;
                             _currentTickSystemMetrics[sysIdx].SkipReason = SkipReason.Exception;
                             _systemFailed[sysIdx] = true;
                             LogSystemException(sysIdx, sys.Name, ex); CaptureSystemException(sysIdx, ex);
@@ -868,21 +852,28 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                             SystemAccessValidator.LeaveSystem();
                         }
                     }
-                }
-                else // CallbackSystem or non-parallel QuerySystem — single invocation
+
+                    morePhases = ParallelQueryCleanupCallback?.Invoke(sysIdx) ?? false;
+                    if (chunkFailed)
+                    {
+                        morePhases = false; // Abort remaining phases on failure
+                    }
+                } while (morePhases);
+            }
+            else if (sys.Type == SystemType.PipelineSystem)
+            {
+                for (var chunk = 0; chunk < sys.TotalChunks; chunk++)
                 {
-                    var ctx = SystemStartCallback?.Invoke(sysIdx) ?? new TickContext { TickNumber = _currentTickNumber, DeltaTime = 0f };
                     SystemAccessValidator.EnterSystem(sys.Access, sys.Name);
                     try
                     {
-                        sys.CallbackAction(ctx);
+                        sys.PipelineChunkAction(chunk, sys.TotalChunks);
                     }
                     catch (Exception ex)
                     {
                         _currentTickSystemMetrics[sysIdx].SkipReason = SkipReason.Exception;
                         _systemFailed[sysIdx] = true;
                         LogSystemException(sysIdx, sys.Name, ex); CaptureSystemException(sysIdx, ex);
-                        // Propagate failure to successors
                         foreach (var succ in sys.Successors)
                         {
                             _systemFailed[succ] = true;
@@ -892,37 +883,49 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                     {
                         SystemAccessValidator.LeaveSystem();
                     }
-
                 }
-
-                var endTick = Stopwatch.GetTimestamp();
-                _currentTickSystemMetrics[sysIdx].LastChunkDoneTick = endTick;
-                _currentTickSystemMetrics[sysIdx].WorkersTouched = sys.IsParallelQuery ? sys.TotalChunks : 1;
-
-                stScope.ChunkCount = (ushort)Math.Min(sys.IsParallelQuery ? sys.TotalChunks : 1, ushort.MaxValue);
-
-                // Fire system-end lifecycle for every system kind on the single-threaded path. Earlier this only ran inside
-                // the callback-system `else` branch above, which silently skipped the parallel-query and pipeline branches —
-                // hiding the entire #327 Phase A emit path on real workloads. Placed after LastChunkDoneTick is set so the
-                // emit's `endTs > 0` guard sees a populated timestamp.
-                SystemEndCallback?.Invoke(sysIdx, !_systemFailed[sysIdx]);
             }
-            finally
+            else // CallbackSystem or non-parallel QuerySystem — single invocation
             {
-                stScope.Dispose();
+                var ctx = SystemStartCallback?.Invoke(sysIdx) ?? new TickContext { TickNumber = _currentTickNumber, DeltaTime = 0f };
+                SystemAccessValidator.EnterSystem(sys.Access, sys.Name);
+                try
+                {
+                    sys.CallbackAction(ctx);
+                }
+                catch (Exception ex)
+                {
+                    _currentTickSystemMetrics[sysIdx].SkipReason = SkipReason.Exception;
+                    _systemFailed[sysIdx] = true;
+                    LogSystemException(sysIdx, sys.Name, ex); CaptureSystemException(sysIdx, ex);
+                    // Propagate failure to successors
+                    foreach (var succ in sys.Successors)
+                    {
+                        _systemFailed[succ] = true;
+                    }
+                }
+                finally
+                {
+                    SystemAccessValidator.LeaveSystem();
+                }
             }
+
+            var endTick = Stopwatch.GetTimestamp();
+            _currentTickSystemMetrics[sysIdx].LastChunkDoneTick = endTick;
+            _currentTickSystemMetrics[sysIdx].WorkersTouched = sys.IsParallelQuery ? sys.TotalChunks : 1;
+
+            stScope.ChunkCount = (ushort)Math.Min(sys.IsParallelQuery ? sys.TotalChunks : 1, ushort.MaxValue);
+
+            // Fire system-end lifecycle for every system kind on the single-threaded path. Earlier this only ran inside
+            // the callback-system `else` branch above, which silently skipped the parallel-query and pipeline branches —
+            // hiding the entire #327 Phase A emit path on real workloads. Placed after LastChunkDoneTick is set so the
+            // emit's `endTs > 0` guard sees a populated timestamp.
+            SystemEndCallback?.Invoke(sysIdx, !_systemFailed[sysIdx]);
         }
-
-        // Tick end hook
-        TickEndCallback?.Invoke(this);
-
-        var tickEndTimestamp = Stopwatch.GetTimestamp();
-        InspectorTickEnd(_currentTickNumber, tickEndTimestamp);
-
-        // Profiler gauge snapshot (post-TickEnd). Same contract as the multi-threaded path.
-        GaugeSnapshotCallback?.Invoke(this);
-
-        ComputeAndRecordTelemetry(tickStartTimestamp, tickEndTimestamp);
+        finally
+        {
+            stScope.Dispose();
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -1432,6 +1435,13 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     {
         Interlocked.Decrement(ref _systemsRemaining.Value);
 
+        // `readyUs` contract: a successor becomes ready the instant its last predecessor completes. `sysIdx` IS that last predecessor for every successor this
+        // call decrements to zero, so all of them share one ready timestamp — `sysIdx`'s completion — captured once here, before the loop. Capturing it
+        // per-successor *inside* the loop (the old code) drifted late: an earlier sibling dispatched via `ExecuteInline` runs to completion *within* the loop,
+        // so a later sibling's `GetTimestamp()` measured successor-loop arrival time, not predecessor-completion time — putting it spuriously off the Critical
+        // Path. (#354 CP-view diagnosis.)
+        var readyTs = Stopwatch.GetTimestamp();
+
         // D2: any-worker dispatch — iterate successors
         var successors = Systems[sysIdx].Successors;
         var fanOutSpan = TyphonEvent.BeginSchedulerDependencyFanOut((ushort)sysIdx);
@@ -1449,7 +1459,6 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                 var depsLeft = Interlocked.Decrement(ref _remainingDeps[succIdx].Value);
                 if (depsLeft == 0)
                 {
-                    var readyTs = Stopwatch.GetTimestamp();
                     _currentTickSystemMetrics[succIdx].ReadyTick = readyTs;
                     InspectorSystemReady(succIdx, readyTs);
                     TyphonEvent.EmitSchedulerDependencyReady((ushort)sysIdx, (ushort)succIdx, (ushort)successors.Length, 0);
@@ -1726,10 +1735,9 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
 
     private void ResetTickState()
     {
-        // Resets per-system state for every entry in Systems[] — both user and internal — but sets _systemsRemaining to the USER count only, so the
-        // user-DAG dispatch loop terminates when all user systems are done. Internal systems' state sits idle until DispatchInternalSchedule wakes them in the
-        // second cycle. Internal systems are never marked ready during user dispatch (they're filtered out of _rootSystems, and any cross-edge from a user
-        // successor to an internal predecessor is treated as a configuration error — internal systems form an independent sub-DAG by contract).
+        // Resets per-system state for every system across every track. _systemsRemaining is NOT seeded here — each DispatchTrack call seeds it with its own
+        // track's member count, so the per-track dispatch loop terminates when that track's systems are done. A track's systems are only marked ready during
+        // that track's dispatch.
         for (var i = 0; i < AllSystemCount; i++)
         {
             _nextChunk[i].Value = 0;
@@ -1739,7 +1747,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
             _currentTickSystemMetrics[i] = default;
         }
 
-        _systemsRemaining.Value = SystemCount;
+        _systemsRemaining.Value = 0;
         Array.Clear(_systemFailed);
 
         // Reset event queues at tick start
@@ -1757,43 +1765,13 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     }
 
     /// <summary>
-    /// Dispatches the internal sub-DAG (systems flagged via <see cref="SystemBuilder.Internal"/>). Called by <c>TyphonRuntime.OnTickEndInternal</c> after the
-    /// user DAG completes — typically after FencePrep has bound the per-tick <c>FenceWorkPlan</c> and set <see cref="SystemDefinition.RuntimeChunkCount"/> on
-    /// the chunked-callback systems.
-    ///
-    /// <para>Reuses the same worker wake/barrier primitives (<c>_tickStartSignal</c> + <c>_systemsRemaining</c>) as the user dispatch. Workers in
-    /// <c>WorkerLoop</c> simply pick up the next ready system from <see cref="Systems"/> — they don't need to know about the schedule kind because internal
-    /// systems were filtered out of the user roots and only get marked ready here.</para>
-    ///
-    /// <para>No-op when there are zero internal systems registered.</para>
+    /// Marks one track's root systems ready (evaluating ShouldRun / Prepare / ReactiveSkip / overload-skip). Shared by every track's multi-threaded dispatch
+    /// — the in-tick tracks and the runtime-deferred Engine-Post track alike.
     /// </summary>
-    public void DispatchInternalSchedule()
+    private void MarkTrackRootsReady(int[] roots)
     {
-        if (_internalSystemCount == 0)
-        {
-            return;
-        }
-
-        if (_workerCount == 1)
-        {
-            // Single-threaded mode: no worker pool exists, so we can't use the wake/barrier path. Run internal systems synchronously on the TickDriver thread,
-            // mirroring how ExecuteTickSingleThreaded handles parallel queries (loop chunks directly via ParallelQueryChunkCallback, no _systemsRemaining
-            // mechanics).
-            foreach (var root in _internalRootSystems)
-            {
-                DispatchInternalSystemSync(root);
-            }
-            return;
-        }
-
-        // Multi-threaded mode: reuse the worker pool. Per-system state was reset at user-tick start (ResetTickState). Between the user DAG completion and now,
-        // internal systems were never marked ready, so _remainingDeps / _nextChunk / _remainingChunks / _isReady still hold their post-reset values for
-        // internal indices. DispatchParallelQuery's prepare callback (TyphonRuntime.OnParallelQueryPrepare) reads RuntimeChunkCount and sets
-        // TotalChunks + _remainingChunks accordingly when MarkSystemReady is called below.
-        _systemsRemaining.Value = _internalSystemCount;
-
         var readyNow = Stopwatch.GetTimestamp();
-        foreach (var root in _internalRootSystems)
+        foreach (var root in roots)
         {
             _currentTickSystemMetrics[root].ReadyTick = readyNow;
             InspectorSystemReady(root, readyNow);
@@ -1803,22 +1781,57 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
             {
                 // Skip / Prepare-dispatch already handled by helper.
             }
-            else if (sys.IsParallelQuery)
+            else if (sys.ReactiveSkip != null && sys.ReactiveSkip())
             {
-                DispatchParallelQuery(root, -1, false);
+                _currentTickSystemMetrics[root].SkipReason = SkipReason.EmptyInput;
+                InspectorSystemSkipped(root, SkipReason.EmptyInput, Stopwatch.GetTimestamp());
+                OnSystemComplete(root, -1, false);
             }
             else
             {
-                MarkSystemReady(root);
+                var overloadSkip = CheckOverloadSkip(root);
+                if (overloadSkip != SkipReason.NotSkipped)
+                {
+                    _currentTickSystemMetrics[root].SkipReason = overloadSkip;
+                    InspectorSystemSkipped(root, overloadSkip, Stopwatch.GetTimestamp());
+                    OnSystemComplete(root, -1, false);
+                }
+                else if (sys.IsParallelQuery)
+                {
+                    DispatchParallelQuery(root, -1, false);
+                }
+                else
+                {
+                    MarkSystemReady(root);
+                }
             }
         }
+    }
 
-        // Wake workers for the internal pass. Workers exited their dispatch loop when _systemsRemaining hit 0 at the end of the user pass; they're now back in
-        // the between-tick Wait. Bumping _tickGeneration + setting the signal pulls them back into FindReadySystem, where only internal systems are marked ready.
+    /// <summary>
+    /// Dispatches one track on the worker pool — a single wake/barrier cycle. Marks the track's roots ready, wakes the workers, then spin-waits for the track's
+    /// systems to complete. No-op for an empty track.
+    /// </summary>
+    private void DispatchTrackMultiThreaded(int trackIndex)
+    {
+        var track = _scheduledTracks[trackIndex];
+        if (track.MemberCount == 0)
+        {
+            return;
+        }
+
+        // Seed the completion counter with this track's member count, then mark its roots ready. Systems of other tracks are never marked ready during this
+        // cycle, so the worker dispatch loop terminates on this track only.
+        _systemsRemaining.Value = track.MemberCount;
+        MarkTrackRootsReady(track.Roots);
+
+        // Activate — bump generation + signal workers.
         _tickInProgress = 1;
         Interlocked.Increment(ref _tickGeneration);
         _tickStartSignal.Set();
 
+        // Wait for the track's systems to complete. The timer thread must spin — Thread.Yield() on Windows can stall up to 15.6 ms, cascading into every
+        // subsequent tick.
         while (_systemsRemaining.Value > 0)
         {
             Thread.SpinWait(1);
@@ -1829,69 +1842,31 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     }
 
     /// <summary>
-    /// Synchronous internal-system dispatch for single-threaded mode (<c>WorkerCount == 1</c>). Runs the system's callback or chunks directly on the TickDriver
-    /// thread, then recurses into any internal-flagged successors. Mirrors the ExecuteTickSingleThreaded structure for parallel queries — minus the
-    /// failure/overload/skip machinery, which doesn't apply to engine-internal systems.
+    /// Dispatches a single track by its execution-order index. The in-tick tracks are dispatched automatically each tick; the runtime calls this
+    /// (via <see cref="DispatchDeferredTracks"/>) for the deferred Engine-Post track after serial fence prep. Branches on worker count: single-threaded mode
+    /// runs the track synchronously on the caller.
     /// </summary>
-    private void DispatchInternalSystemSync(int sysIdx)
+    public void DispatchTrack(int trackIndex)
     {
-        var sys = Systems[sysIdx];
-        if (sys.ShouldRun != null && !sys.ShouldRun())
+        if (_workerCount == 1)
         {
-            return;
-        }
-
-        // Typed gate for ChunkedCallbackSystem instances (the fence-phase exec systems). The multi-threaded path runs this via EvaluateShouldRunAndPrepare;
-        // the sync path must mirror it or the per-phase FenceWorkPlan is never built and RuntimeChunkCount stays stale (0 on the first tick) — the fence then
-        // silently drops cluster migrations + AABB refresh. OnShouldRun() false → skip; OnPrepare() 0 → skip (empty input); >0 → set RuntimeChunkCount so the
-        // IsParallelQuery branch's ParallelQueryPrepareCallback reads the per-dispatch chunk count.
-        if (sys.Instance is ChunkedCallbackSystem ccs)
-        {
-            if (!ccs.OnShouldRun())
-            {
-                return;
-            }
-
-            int chunks = ccs.OnPrepare();
-            if (chunks == 0)
-            {
-                return;
-            }
-
-            if (chunks > 0)
-            {
-                sys.RuntimeChunkCount = chunks;
-            }
-        }
-
-        if (sys.IsParallelQuery)
-        {
-            var totalChunks = ParallelQueryPrepareCallback?.Invoke(sysIdx) ?? 0;
-            if (totalChunks > 0)
-            {
-                Systems[sysIdx].TotalChunks = totalChunks;
-                for (var chunk = 0; chunk < totalChunks; chunk++)
-                {
-                    ParallelQueryChunkCallback?.Invoke(sysIdx, chunk, totalChunks, 0);
-                }
-            }
+            RunTrackSingleThreaded(trackIndex);
         }
         else
         {
-            var ctx = SystemStartCallback?.Invoke(sysIdx) ?? new TickContext { TickNumber = _currentTickNumber, DeltaTime = 0f };
-            sys.CallbackAction(ctx);
+            DispatchTrackMultiThreaded(trackIndex);
         }
+    }
 
-        // Walk internal successors so chained internal systems run in topological order. In v1 the internal sub-DAG contains only FenceExec with no
-        // successors — this loop is a no-op in practice but future-proofs the path.
-        var successors = sys.Successors;
-        for (var i = 0; i < successors.Length; i++)
+    /// <summary>
+    /// Dispatches every runtime-deferred track (Engine-Post and beyond) in execution order. Called by <c>TyphonRuntime.OnTickEndInternal</c> after the serial
+    /// <c>WriteTickFence</c> prep, so the Fence DAG sees a populated <c>FenceContext</c>. No-op when every deferred track is empty (e.g. parallel fence disabled).
+    /// </summary>
+    public void DispatchDeferredTracks()
+    {
+        for (var t = _deferredTrackStartIndex; t < _scheduledTracks.Length; t++)
         {
-            var succ = successors[i];
-            if (Systems[succ].IsInternal)
-            {
-                DispatchInternalSystemSync(succ);
-            }
+            DispatchTrack(t);
         }
     }
 

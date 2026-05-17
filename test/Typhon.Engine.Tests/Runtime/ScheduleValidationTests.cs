@@ -23,118 +23,118 @@ class ScheduleValidationTests
     [Test]
     public void Build_DuplicateSystemNames_Throws()
     {
-        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
-        schedule.CallbackSystem("Dup", _ => { });
-        schedule.CallbackSystem("Dup", _ => { });
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        dag.CallbackSystem("Dup", _ => { });
+        dag.CallbackSystem("Dup", _ => { });
 
         var ex = Assert.Throws<InvalidOperationException>(() =>
-            schedule.Build(_registry.Runtime));
+            dag.Build(_registry.Runtime));
         Assert.That(ex.Message, Does.Contain("Duplicate system name"));
     }
 
     [Test]
     public void Build_DuplicateClassBasedNames_Throws()
     {
-        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
-        schedule.Add(new NamedCallback("Dup"));
-        schedule.Add(new NamedCallback("Dup"));
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        dag.Add(new NamedCallback("Dup"));
+        dag.Add(new NamedCallback("Dup"));
 
         var ex = Assert.Throws<InvalidOperationException>(() =>
-            schedule.Build(_registry.Runtime));
+            dag.Build(_registry.Runtime));
         Assert.That(ex.Message, Does.Contain("Duplicate system name"));
     }
 
     [Test]
     public void Build_ChangeFilterOnCallbackSystem_Throws()
     {
-        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
-        schedule.Add(new CallbackWithChangeFilter());
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        dag.Add(new CallbackWithChangeFilter());
 
         var ex = Assert.Throws<InvalidOperationException>(() =>
-            schedule.Build(_registry.Runtime));
+            dag.Build(_registry.Runtime));
         Assert.That(ex.Message, Does.Contain("ChangeFilter"));
     }
 
     [Test]
     public void Build_ParallelOnCallbackSystem_Throws()
     {
-        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
-        schedule.Add(new CallbackWithParallel());
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        dag.Add(new CallbackWithParallel());
 
         var ex = Assert.Throws<InvalidOperationException>(() =>
-            schedule.Build(_registry.Runtime));
+            dag.Build(_registry.Runtime));
         Assert.That(ex.Message, Does.Contain("Parallel"));
     }
 
     [Test]
     public void Build_ChangeFilterWithoutInput_Throws()
     {
-        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
-        schedule.Add(new QueryWithChangeFilter());
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        dag.Add(new QueryWithChangeFilter());
 
         var ex = Assert.Throws<InvalidOperationException>(() =>
-            schedule.Build(_registry.Runtime));
+            dag.Build(_registry.Runtime));
         Assert.That(ex.Message, Does.Contain("ChangeFilter requires an Input View"));
     }
 
     [Test]
     public void Build_ParallelOnQuerySystem_DoesNotThrow()
     {
-        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
-        schedule.Add(new QueryWithParallel());
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        dag.Add(new QueryWithParallel());
 
-        using var scheduler = schedule.Build(_registry.Runtime);
+        using var scheduler = dag.Build(_registry.Runtime);
         Assert.That(scheduler.SystemCount, Is.EqualTo(1));
     }
 
     [Test]
     public void Build_ParallelWithoutInput_Throws()
     {
-        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
-        schedule.Add(new QueryWithParallelNoInput());
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        dag.Add(new QueryWithParallelNoInput());
 
         var ex = Assert.Throws<InvalidOperationException>(() =>
-            schedule.Build(_registry.Runtime));
+            dag.Build(_registry.Runtime));
         Assert.That(ex.Message, Does.Contain("Parallel requires an Input View"));
     }
 
     [Test]
     public void Build_ChunksPerWorker_Zero_Throws()
     {
-        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
-        schedule.QuerySystem("Bad", _ => { }, input: () => null, parallel: true, chunksPerWorker: 0f);
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        dag.QuerySystem("Bad", _ => { }, input: () => null, parallel: true, chunksPerWorker: 0f);
 
-        var ex = Assert.Throws<InvalidOperationException>(() => schedule.Build(_registry.Runtime));
+        var ex = Assert.Throws<InvalidOperationException>(() => dag.Build(_registry.Runtime));
         Assert.That(ex.Message, Does.Contain("ChunksPerWorker"));
     }
 
     [Test]
     public void Build_ChunksPerWorker_Negative_Throws()
     {
-        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
-        schedule.QuerySystem("Bad", _ => { }, input: () => null, parallel: true, chunksPerWorker: -1f);
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        dag.QuerySystem("Bad", _ => { }, input: () => null, parallel: true, chunksPerWorker: -1f);
 
-        var ex = Assert.Throws<InvalidOperationException>(() => schedule.Build(_registry.Runtime));
+        var ex = Assert.Throws<InvalidOperationException>(() => dag.Build(_registry.Runtime));
         Assert.That(ex.Message, Does.Contain("ChunksPerWorker"));
     }
 
     [Test]
     public void Build_ChunksPerWorker_NaN_Throws()
     {
-        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
-        schedule.QuerySystem("Bad", _ => { }, input: () => null, parallel: true, chunksPerWorker: float.NaN);
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        dag.QuerySystem("Bad", _ => { }, input: () => null, parallel: true, chunksPerWorker: float.NaN);
 
-        var ex = Assert.Throws<InvalidOperationException>(() => schedule.Build(_registry.Runtime));
+        var ex = Assert.Throws<InvalidOperationException>(() => dag.Build(_registry.Runtime));
         Assert.That(ex.Message, Does.Contain("ChunksPerWorker"));
     }
 
     [Test]
     public void Build_ChunksPerWorker_NonDefaultWithoutParallel_Throws()
     {
-        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
-        schedule.QuerySystem("Bad", _ => { }, chunksPerWorker: 2f);
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        dag.QuerySystem("Bad", _ => { }, chunksPerWorker: 2f);
 
-        var ex = Assert.Throws<InvalidOperationException>(() => schedule.Build(_registry.Runtime));
+        var ex = Assert.Throws<InvalidOperationException>(() => dag.Build(_registry.Runtime));
         Assert.That(ex.Message, Does.Contain("ChunksPerWorker"));
         Assert.That(ex.Message, Does.Contain("parallel"));
     }
@@ -142,20 +142,20 @@ class ScheduleValidationTests
     [Test]
     public void Build_ChunksPerWorker_DefaultWithoutParallel_Succeeds()
     {
-        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
-        schedule.QuerySystem("Good", _ => { }, chunksPerWorker: 1f);
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        dag.QuerySystem("Good", _ => { }, chunksPerWorker: 1f);
 
-        using var scheduler = schedule.Build(_registry.Runtime);
+        using var scheduler = dag.Build(_registry.Runtime);
         Assert.That(scheduler.SystemCount, Is.EqualTo(1));
     }
 
     [Test]
     public void Build_ChunksPerWorker_FractionalParallel_Succeeds()
     {
-        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
-        schedule.QuerySystem("Good", _ => { }, input: () => null, parallel: true, chunksPerWorker: 1.5f);
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        dag.QuerySystem("Good", _ => { }, input: () => null, parallel: true, chunksPerWorker: 1.5f);
 
-        using var scheduler = schedule.Build(_registry.Runtime);
+        using var scheduler = dag.Build(_registry.Runtime);
         Assert.That(scheduler.SystemCount, Is.EqualTo(1));
         Assert.That(scheduler.Systems[0].ChunksPerWorker, Is.EqualTo(1.5f));
     }
@@ -165,10 +165,10 @@ class ScheduleValidationTests
     {
         // ChunksPerWorker is an oversubscription multiplier — values below 1 would *reduce* parallelism below the
         // worker count, which is confusing given the name and not a use case the knob was designed for. Reject.
-        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
-        schedule.QuerySystem("Bad", _ => { }, input: () => null, parallel: true, chunksPerWorker: 0.5f);
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        dag.QuerySystem("Bad", _ => { }, input: () => null, parallel: true, chunksPerWorker: 0.5f);
 
-        var ex = Assert.Throws<InvalidOperationException>(() => schedule.Build(_registry.Runtime));
+        var ex = Assert.Throws<InvalidOperationException>(() => dag.Build(_registry.Runtime));
         Assert.That(ex.Message, Does.Contain("ChunksPerWorker"));
         Assert.That(ex.Message, Does.Contain("[1.0, 64.0]"));
     }
@@ -179,10 +179,10 @@ class ScheduleValidationTests
         // Absurd factors like 1e10 cast unchecked to int.MinValue (then Math.Max(1, MIN) = 1), silently collapsing
         // the chunk cap to 1 chunk — the exact opposite of what the user asked for. The 64 ceiling keeps the (int)
         // round well clear of overflow and is already past the point where ParallelQueryMinChunkSize kicks in.
-        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
-        schedule.QuerySystem("Bad", _ => { }, input: () => null, parallel: true, chunksPerWorker: 100f);
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        dag.QuerySystem("Bad", _ => { }, input: () => null, parallel: true, chunksPerWorker: 100f);
 
-        var ex = Assert.Throws<InvalidOperationException>(() => schedule.Build(_registry.Runtime));
+        var ex = Assert.Throws<InvalidOperationException>(() => dag.Build(_registry.Runtime));
         Assert.That(ex.Message, Does.Contain("ChunksPerWorker"));
         Assert.That(ex.Message, Does.Contain("[1.0, 64.0]"));
     }
@@ -190,32 +190,32 @@ class ScheduleValidationTests
     [Test]
     public void Build_ChunksPerWorker_AtBoundaries_Succeeds()
     {
-        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
-        schedule.QuerySystem("Lower", _ => { }, input: () => null, parallel: true, chunksPerWorker: 1f);
-        schedule.QuerySystem("Upper", _ => { }, input: () => null, parallel: true, chunksPerWorker: 64f);
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        dag.QuerySystem("Lower", _ => { }, input: () => null, parallel: true, chunksPerWorker: 1f);
+        dag.QuerySystem("Upper", _ => { }, input: () => null, parallel: true, chunksPerWorker: 64f);
 
-        using var scheduler = schedule.Build(_registry.Runtime);
+        using var scheduler = dag.Build(_registry.Runtime);
         Assert.That(scheduler.SystemCount, Is.EqualTo(2));
     }
 
     [Test]
     public void Build_ChunksPerWorker_PositiveInfinity_Throws()
     {
-        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
-        schedule.QuerySystem("Bad", _ => { }, input: () => null, parallel: true, chunksPerWorker: float.PositiveInfinity);
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        dag.QuerySystem("Bad", _ => { }, input: () => null, parallel: true, chunksPerWorker: float.PositiveInfinity);
 
-        var ex = Assert.Throws<InvalidOperationException>(() => schedule.Build(_registry.Runtime));
+        var ex = Assert.Throws<InvalidOperationException>(() => dag.Build(_registry.Runtime));
         Assert.That(ex.Message, Does.Contain("ChunksPerWorker"));
     }
 
     [Test]
     public void Build_UniqueNames_Succeeds()
     {
-        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
-        schedule.CallbackSystem("A", _ => { });
-        schedule.CallbackSystem("B", _ => { });
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        dag.CallbackSystem("A", _ => { });
+        dag.CallbackSystem("B", _ => { });
 
-        using var scheduler = schedule.Build(_registry.Runtime);
+        using var scheduler = dag.Build(_registry.Runtime);
         Assert.That(scheduler.SystemCount, Is.EqualTo(2));
     }
 

@@ -13,6 +13,7 @@ import {
 import '@xyflow/react/dist/style.css';
 import type { TopologyDto } from '@/api/generated/model/topologyDto';
 import { useHoverStore } from '@/stores/useHoverStore';
+import { useViewOptionsStore } from '@/stores/useViewOptionsStore';
 import { colorForPhase } from '@/libs/palettes';
 import { buildDagModel, NODE_HEIGHT, NODE_WIDTH, type DagEdgeData, type DagNodeData } from './dagModel';
 import SystemDagNode from './SystemDagNode';
@@ -108,6 +109,8 @@ export default function SystemDagCanvas({
   const layout = useDagViewStore((s) => s.layout);
   const hideSkipped = useDagViewStore((s) => s.hideSkipped);
   const showCrossPhaseEdges = useDagViewStore((s) => s.showCrossPhaseEdges);
+  // Shared cross-panel setting (Options → DAG). `dagModel`'s option is still named `showEngineTracks`.
+  const showEngineTracks = useViewOptionsStore((s) => s.showEngineSystems);
 
   // "Hide skipped" matches what the user sees on each tile: if the stat chip would read 0.0us
   // (or is missing entirely), the system contributed nothing to the selected range and we drop
@@ -129,8 +132,8 @@ export default function SystemDagCanvas({
   }, [topology, hideSkipped, systemStats]);
 
   const model = useMemo(
-    () => buildDagModel(visibleTopology, layout, { showCrossPhaseEdges }),
-    [visibleTopology, layout, showCrossPhaseEdges],
+    () => buildDagModel(visibleTopology, layout, { showCrossPhaseEdges, showEngineTracks }),
+    [visibleTopology, layout, showCrossPhaseEdges, showEngineTracks],
   );
 
   const hoveredSystem = useHoverStore((s) => s.hoveredSystem);
@@ -570,6 +573,32 @@ export default function SystemDagCanvas({
           */}
           {model.lanes.length > 1 && <PhaseFlowArrow lanes={model.lanes} />}
           {/*
+            DAG group boxes (#354 W5) — one bordered rect per DAG, spanning its phase lanes, with
+            a header strip carrying the track + DAG name. Engine-tagged tracks (revealed via the
+            "Show engine tracks" toggle) get a distinct dashed amber border so they read as
+            infrastructure, not app code. Drawn at `zIndex: -2` — behind the phase lanes (-1) and
+            the nodes/edges — so it reads as an outer container.
+          */}
+          {model.dagGroups.map((g) => (
+            <div
+              key={`dag-${g.dagId}`}
+              className={`pointer-events-none absolute rounded-md border ${g.isEngine ? 'border-dashed border-amber-500/50' : 'border-border'}`}
+              style={{ left: g.xLeft, top: g.yTop, width: g.width, height: g.height, zIndex: -2 }}
+            >
+              <div
+                className="pointer-events-auto inline-flex items-center gap-1.5 rounded-br-md rounded-tl-md bg-card px-2 py-0.5 font-mono text-[10px] uppercase tracking-wide text-foreground"
+                style={{ height: g.headerHeight }}
+              >
+                <span className="text-muted-foreground">{g.trackName}</span>
+                <span className="text-muted-foreground/50">/</span>
+                <span className="font-semibold">{g.dagName}</span>
+                {g.isEngine && (
+                  <span className="rounded bg-amber-500/20 px-1 text-[9px] text-amber-600 dark:text-amber-400">engine</span>
+                )}
+              </div>
+            </div>
+          ))}
+          {/*
             Phase-highlight rects — drawn behind nodes when a phase is hovered AND the layout
             has no swim-lanes (compact / circular). Each rect sits at the node's flow-space
             position with a small padding so it reads as a backdrop, not a tile replacement.
@@ -604,7 +633,7 @@ export default function SystemDagCanvas({
             const isVertical = lane.labelEdge === 'top';
             return (
               <div
-                key={lane.name}
+                key={lane.id}
                 // `pointer-events: none` so clicks pass through to nodes / pane; the inner label
                 // re-enables them for the hover sync.
                 // `zIndex: -1` puts the lane below the edges + nodes ReactFlow renders inside
@@ -681,7 +710,7 @@ export default function SystemDagCanvas({
  * Pointer-events disabled so arrows don't intercept node hover / click. Rendered inside
  * ViewportPortal with `currentColor` so theme switches and viewport pan/zoom Just Work.
  */
-function PhaseFlowArrow({ lanes }: { lanes: ReadonlyArray<{ name: string; xLeft: number; yTop: number; width: number; height: number; labelEdge: 'left' | 'top' }> }) {
+function PhaseFlowArrow({ lanes }: { lanes: ReadonlyArray<{ name: string; dagId: number; xLeft: number; yTop: number; width: number; height: number; labelEdge: 'left' | 'top' }> }) {
   const isVertical = lanes[0].labelEdge === 'top';
   const SHAFT_WIDTH = 1.5;
   const ARROWHEAD_HALF = 5; // arrowhead width on the cross-flow axis
@@ -702,6 +731,8 @@ function PhaseFlowArrow({ lanes }: { lanes: ReadonlyArray<{ name: string; xLeft:
       <>
         {lanes.slice(0, -1).map((lane, i) => {
           const next = lanes[i + 1];
+          // No flow arrow across a DAG boundary — phase ordering is DAG-local.
+          if (lane.dagId !== next.dagId) return null;
           const startX = lane.xLeft + lane.width;
           const endX = next.xLeft;
           return (
@@ -731,6 +762,8 @@ function PhaseFlowArrow({ lanes }: { lanes: ReadonlyArray<{ name: string; xLeft:
     <>
       {lanes.slice(0, -1).map((lane, i) => {
         const next = lanes[i + 1];
+        // No flow arrow across a DAG boundary — phase ordering is DAG-local.
+        if (lane.dagId !== next.dagId) return null;
         const startY = lane.yTop + lane.height;
         const endY = next.yTop;
         return (

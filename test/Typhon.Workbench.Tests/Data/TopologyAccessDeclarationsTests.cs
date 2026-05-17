@@ -42,6 +42,14 @@ public sealed class TopologyAccessDeclarationsTests
         return JsonSerializer.Deserialize<SessionDto>(await resp.Content.ReadAsStringAsync(), Json)!;
     }
 
+    private async Task<SessionDto> CreateTrackHierarchyTraceAsync()
+    {
+        var path = TraceFixtureBuilder.BuildTraceWithTrackHierarchy(_factory.DemoDirectory);
+        var resp = await _client.PostAsJsonAsync("/api/sessions/trace", new CreateTraceSessionRequest(path));
+        resp.EnsureSuccessStatusCode();
+        return JsonSerializer.Deserialize<SessionDto>(await resp.Content.ReadAsStringAsync(), Json)!;
+    }
+
     private async Task<TopologyDto> WaitForTopologyAsync(Guid sessionId)
     {
         var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
@@ -87,6 +95,59 @@ public sealed class TopologyAccessDeclarationsTests
         Assert.That(damage.ReadsSnapshot, Is.EqualTo(new[] { "Game.Position" }));
         Assert.That(damage.Writes, Is.EqualTo(new[] { "Game.Health" }));
         Assert.That(damage.WritesEvents, Is.EqualTo(new[] { "Death" }));
+    }
+
+    [Test]
+    public async Task Topology_ExposesTrackDagHierarchy()
+    {
+        var session = await CreateTrackHierarchyTraceAsync();
+        var topo = await WaitForTopologyAsync(session.SessionId);
+
+        // Three tracks, in execution order. Engine-Pre / Engine-Post carry the `engine` tag; Public does not.
+        Assert.That(topo.Tracks, Is.Not.Null);
+        Assert.That(Array.ConvertAll(topo.Tracks, t => t.Name), Is.EqualTo(new[] { "Engine-Pre", "Public", "Engine-Post" }));
+        Assert.That(Array.ConvertAll(topo.Tracks, t => t.OrderIndex), Is.EqualTo(new[] { 0, 1, 2 }));
+
+        var enginePre = topo.Tracks[0];
+        var publicTrack = topo.Tracks[1];
+        var enginePost = topo.Tracks[2];
+        Assert.That(enginePre.Tags, Does.Contain("engine"));
+        Assert.That(enginePost.Tags, Does.Contain("engine"));
+        Assert.That(publicTrack.Tags, Does.Not.Contain("engine"));
+
+        // The user DAG sits in the Public track; the Fence DAG sits in Engine-Post. Engine-Pre is empty.
+        Assert.That(enginePre.Dags, Is.Empty);
+        Assert.That(publicTrack.Dags.Length, Is.EqualTo(1));
+        Assert.That(enginePost.Dags.Length, Is.EqualTo(1));
+
+        var worldDag = publicTrack.Dags[0];
+        Assert.That(worldDag.Id, Is.EqualTo(0));
+        Assert.That(worldDag.Name, Is.EqualTo("World"));
+        Assert.That(worldDag.Phases, Is.EqualTo(new[] { "Input", "Simulation", "Render" }));
+
+        var fenceDag = enginePost.Dags[0];
+        Assert.That(fenceDag.Id, Is.EqualTo(1));
+        Assert.That(fenceDag.Name, Is.EqualTo("Fence"));
+        Assert.That(fenceDag.Phases, Is.EqualTo(new[] { "Default" }));
+
+        // Every system's DagId resolves to exactly one DAG in the hierarchy.
+        var dagIds = new HashSet<int>();
+        foreach (var t in topo.Tracks)
+        {
+            foreach (var d in t.Dags)
+            {
+                dagIds.Add(d.Id);
+            }
+        }
+        foreach (var s in topo.Systems)
+        {
+            Assert.That(dagIds, Does.Contain(s.DagId), $"system '{s.Name}' has unresolved DagId {s.DagId}");
+        }
+
+        Assert.That(FindByName(topo.Systems, "Movement").DagId, Is.EqualTo(0));
+        Assert.That(FindByName(topo.Systems, "Render").DagId, Is.EqualTo(0));
+        Assert.That(FindByName(topo.Systems, "FencePrep").DagId, Is.EqualTo(1));
+        Assert.That(FindByName(topo.Systems, "FenceFinalize").DagId, Is.EqualTo(1));
     }
 
     [Test]

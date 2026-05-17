@@ -41,7 +41,8 @@ public static class TraceFixtureBuilder
         writer.WriteSystemDefinitions([]);
         writer.WriteArchetypes([]);
         writer.WriteComponentTypes([]);
-        writer.WritePhases([]);
+        writer.WriteTracks([]);
+        writer.WriteDags([]);
         writer.WriteEmptyStaticStructures();
 
         // One block containing every record. Record sizes follow the production codec:
@@ -144,11 +145,100 @@ public static class TraceFixtureBuilder
         writer.WriteSystemDefinitions(systems);
         writer.WriteArchetypes([]);
         writer.WriteComponentTypes(components);
-        writer.WritePhases(["Input", "Simulation", "Output"]);
+        writer.WriteTracks([new TrackRecord { Name = "Main", OrderIndex = 0, Tags = [] }]);
+        writer.WriteDags([new DagRecord { Id = 0, Name = "Main", TrackIndex = 0, PhaseNames = ["Input", "Simulation", "Output"] }]);
         writer.WriteEmptyStaticStructures();
 
         // Same record body as BuildMinimalTrace — 3 ticks of TickStart + Instant + TickEnd. Anything thinner
         // can prevent the cache builder from producing a non-empty manifest, which leaves /topology stuck at 202.
+        const int tickStartSize = CommonHeaderSize;
+        const int instantSize = CommonHeaderSize + 8;
+        const int tickEndSize = CommonHeaderSize + 2;
+        const int tickCount = 3;
+        const int instantsPerTick = 2;
+        var totalRecords = tickCount * (2 + instantsPerTick);
+        var blockSize = tickCount * (tickStartSize + instantsPerTick * instantSize + tickEndSize);
+        var block = new byte[blockSize];
+        long ts = 100;
+        var offset = 0;
+        for (var t = 0; t < tickCount; t++)
+        {
+            WriteRecordHeader(block.AsSpan(offset), tickStartSize, TraceEventKind.TickStart, ts);
+            offset += tickStartSize;
+            ts++;
+            for (var i = 0; i < instantsPerTick; i++)
+            {
+                WriteRecordHeader(block.AsSpan(offset), instantSize, TraceEventKind.Instant, ts);
+                offset += instantSize;
+                ts++;
+            }
+            WriteRecordHeader(block.AsSpan(offset), tickEndSize, TraceEventKind.TickEnd, ts);
+            block[offset + CommonHeaderSize] = 0;
+            block[offset + CommonHeaderSize + 1] = 1;
+            offset += tickEndSize;
+            ts++;
+        }
+        writer.WriteRecords(block, totalRecords);
+        writer.WriteSpanNames(new Dictionary<int, string>());
+        writer.Flush();
+        return path;
+    }
+
+    /// <summary>
+    /// Build a minimal trace exercising the #354 Track → DAG hierarchy: three ordered tracks (Engine-Pre and Engine-Post
+    /// tagged <c>engine</c>, a Public track in between), a user DAG in the Public track and a Fence DAG in Engine-Post,
+    /// with each system stamped with its <c>DagId</c>. Used by the topology hierarchy round-trip test.
+    /// </summary>
+    public static string BuildTraceWithTrackHierarchy(string directory)
+    {
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, $"fixture-trackdag-{Guid.NewGuid():N}.typhon-trace");
+
+        // Two systems in the Public-track "World" DAG (DagId 0), two in the Engine-Post "Fence" DAG (DagId 1).
+        var systems = new[]
+        {
+            new SystemDefinitionRecord
+            {
+                Index = 0, Name = "Movement", Type = 0, Priority = 0, IsParallel = false, TierFilter = 0x0F,
+                Predecessors = [], Successors = [1], PhaseName = "Simulation", IsExclusivePhase = false, DagId = 0,
+            },
+            new SystemDefinitionRecord
+            {
+                Index = 1, Name = "Render", Type = 0, Priority = 0, IsParallel = false, TierFilter = 0x0F,
+                Predecessors = [0], Successors = [], PhaseName = "Render", IsExclusivePhase = false, DagId = 0,
+            },
+            new SystemDefinitionRecord
+            {
+                Index = 2, Name = "FencePrep", Type = 0, Priority = 0, IsParallel = false, TierFilter = 0x0F,
+                Predecessors = [], Successors = [3], PhaseName = "Default", IsExclusivePhase = false, DagId = 1,
+            },
+            new SystemDefinitionRecord
+            {
+                Index = 3, Name = "FenceFinalize", Type = 0, Priority = 0, IsParallel = false, TierFilter = 0x0F,
+                Predecessors = [2], Successors = [], PhaseName = "Default", IsExclusivePhase = false, DagId = 1,
+            },
+        };
+
+        using var fs = File.Create(path);
+        using var writer = new TraceFileWriter(fs);
+        writer.WriteHeader(in DefaultHeader);
+        writer.WriteSystemDefinitions(systems);
+        writer.WriteArchetypes([]);
+        writer.WriteComponentTypes([]);
+        writer.WriteTracks(
+        [
+            new TrackRecord { Name = "Engine-Pre",  OrderIndex = 0, Tags = ["engine"] },
+            new TrackRecord { Name = "Public",      OrderIndex = 1, Tags = [] },
+            new TrackRecord { Name = "Engine-Post", OrderIndex = 2, Tags = ["engine"] },
+        ]);
+        writer.WriteDags(
+        [
+            new DagRecord { Id = 0, Name = "World", TrackIndex = 1, PhaseNames = ["Input", "Simulation", "Render"] },
+            new DagRecord { Id = 1, Name = "Fence", TrackIndex = 2, PhaseNames = ["Default"] },
+        ]);
+        writer.WriteEmptyStaticStructures();
+
+        // Same 3-tick record body as BuildTraceWithAccessDeclarations — enough for the cache builder to emit a manifest.
         const int tickStartSize = CommonHeaderSize;
         const int instantSize = CommonHeaderSize + 8;
         const int tickEndSize = CommonHeaderSize + 2;
@@ -264,13 +354,14 @@ public static class TraceFixtureBuilder
         writer.WriteSystemDefinitions(systems);
         writer.WriteArchetypes(archetypes);
         writer.WriteComponentTypes(components);
-        writer.WritePhases(["Input", "Simulation", "Output"]);
+        writer.WriteTracks([new TrackRecord { Name = "Main", OrderIndex = 0, Tags = [] }]);
+        writer.WriteDags([new DagRecord { Id = 0, Name = "Main", TrackIndex = 0, PhaseNames = ["Input", "Simulation", "Output"] }]);
         // Replace the "everything-empty" static-structures block with the rich definitions above. The cache
         // builder folds these into ProfilerMetadataDto.archetypes / componentTypes for the topology endpoint.
         writer.WriteComponentDefinitions(componentDefs);
         writer.WriteArchetypeDefinitions(archetypeDefs);
         writer.WriteIndexCatalog([]);
-        writer.WriteRuntimeConfig(new RuntimeConfigRecord { BaseTickRate = 1_000, WorkerCount = 1, Phases = ["Input", "Simulation", "Output"] });
+        writer.WriteRuntimeConfig(new RuntimeConfigRecord { BaseTickRate = 1_000, WorkerCount = 1 });
         writer.WriteEventQueueCatalog([]);
         writer.WriteResourceGraphSnapshot([]);
 
@@ -363,7 +454,8 @@ public static class TraceFixtureBuilder
         writer.WriteSystemDefinitions([]);
         writer.WriteArchetypes([]);
         writer.WriteComponentTypes([]);
-        writer.WritePhases([]);
+        writer.WriteTracks([]);
+        writer.WriteDags([]);
         writer.WriteEmptyStaticStructures();
 
         // Per-tick layout: TickStart + 4× ThreadContextSwitch (25 B each) + TickEnd. The four slices start at
@@ -446,7 +538,8 @@ public static class TraceFixtureBuilder
         writer.WriteSystemDefinitions([]);
         writer.WriteArchetypes([]);
         writer.WriteComponentTypes([]);
-        writer.WritePhases([]);
+        writer.WriteTracks([]);
+        writer.WriteDags([]);
         writer.WriteEmptyStaticStructures();
 
         // Minimal record body — same shape as BuildMinimalTrace, enough for the cache build to complete.
@@ -532,7 +625,8 @@ public static class TraceFixtureBuilder
         writer.WriteSystemDefinitions([]);
         writer.WriteArchetypes([]);
         writer.WriteComponentTypes([]);
-        writer.WritePhases([]);
+        writer.WriteTracks([]);
+        writer.WriteDags([]);
         writer.WriteEmptyStaticStructures();
 
         // One tick: TickStart + two SchedulerSystemArchetype spans + TickEnd. Span A → [1000, 1500), span B → [3000, 3500).
@@ -595,7 +689,8 @@ public static class TraceFixtureBuilder
         writer.WriteSystemDefinitions([]);
         writer.WriteArchetypes([]);
         writer.WriteComponentTypes([]);
-        writer.WritePhases([]);
+        writer.WriteTracks([]);
+        writer.WriteDags([]);
         writer.WriteEmptyStaticStructures();
 
         // Minimal record body so the cache build completes.
@@ -674,7 +769,8 @@ public static class TraceFixtureBuilder
         writer.WriteSystemDefinitions([]);
         writer.WriteArchetypes([]);
         writer.WriteComponentTypes([]);
-        writer.WritePhases([]);
+        writer.WriteTracks([]);
+        writer.WriteDags([]);
         writer.WriteEmptyStaticStructures();
         // No records, no span-name table → reader sees EOF mid-way through block scan.
         writer.Flush();

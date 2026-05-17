@@ -141,6 +141,7 @@ public sealed class DataController : ControllerBase
             metadata.Archetypes,
             metadata.ComponentTypes,
             metadata.Phases,
+            metadata.Tracks,
             BuildComponentFamilyMap(metadata.ComponentTypes)));
     }
 

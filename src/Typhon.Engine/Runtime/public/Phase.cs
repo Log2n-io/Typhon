@@ -4,14 +4,13 @@ using System;
 namespace Typhon.Engine;
 
 /// <summary>
-/// A phase token in the system scheduler. Phases form a user-defined total order (see RFC 07 / Q3) — every system
-/// belongs to a phase, and all systems in phase N complete before any system in phase N+1 starts.
+/// A phase token in the system scheduler. Phases form a DAG-local total order (see RFC 07 / Q3) — every system belongs to a phase of its DAG, and all systems
+/// in phase N complete before any system in phase N+1 of the same DAG.
 /// </summary>
 /// <remarks>
 /// <para>
-/// Typhon ships four default phases via static fields: <see cref="Input"/>, <see cref="Simulation"/>, <see cref="Output"/>, <see cref="Cleanup"/>.
-/// User code extends the set by declaring additional phases as static fields in its own class and listing them
-/// (in order) in <see cref="RuntimeOptions.Phases"/>.
+/// Typhon ships four reusable phase tokens via static fields: <see cref="Input"/>, <see cref="Simulation"/>, <see cref="Output"/>, <see cref="Cleanup"/>.
+/// A DAG declares its ordered phase sequence via <see cref="Dag.Phases"/>; user code may reuse these tokens or declare its own.
 /// </para>
 /// <para>
 /// The token wraps a <see cref="string"/> for diagnostic clarity and minimal memory footprint — phases are resolved to integer indices

@@ -80,36 +80,6 @@ public class RuntimeOptions
     public bool AdaptiveFenceCost { get; set; } = true;
 
     /// <summary>
-    /// Returns a fresh array of Typhon-shipped default phases. Each call returns a new array so callers may mutate without
-    /// affecting other <see cref="RuntimeOptions"/> instances. Order: <see cref="Phase.Input"/> → <see cref="Phase.Simulation"/>
-    /// → <see cref="Phase.Output"/> → <see cref="Phase.Cleanup"/>.
-    /// </summary>
-    public static Phase[] DefaultPhases =>
-    [
-        Phase.Input,
-        Phase.Simulation,
-        Phase.Output,
-        Phase.Cleanup,
-    ];
-
-    /// <summary>
-    /// Ordered list of phases for the system scheduler. Forms a total order — all systems in phase N complete before any system
-    /// in phase N+1 starts. User code extends this by declaring its own <see cref="Phase"/> statics and inserting them in the
-    /// desired position. Default: a fresh array equivalent to <see cref="DefaultPhases"/>. See RFC 07 / Q3.
-    /// </summary>
-    public Phase[] Phases { get; set; } = DefaultPhases;
-
-    /// <summary>
-    /// The phase that systems registered without an explicit <c>b.Phase(...)</c> call are assigned to (RFC 07 — Unit 5).
-    /// Must be present in <see cref="Phases"/>. Default: <see cref="Phase.Simulation"/>.
-    /// </summary>
-    /// <remarks>
-    /// New systems should declare their phase explicitly — the default exists so pre-RFC test fixtures and quick-and-dirty
-    /// callbacks land in a sensible bucket without forcing every call site to be touched.
-    /// </remarks>
-    public Phase DefaultPhase { get; set; } = Phase.Simulation;
-
-    /// <summary>
     /// Resolves the effective worker count, applying the auto-detect formula if <see cref="WorkerCount"/> is -1.
     /// </summary>
     internal int ResolveWorkerCount() => WorkerCount == -1 ? Math.Max(1, Environment.ProcessorCount - 4) : WorkerCount;

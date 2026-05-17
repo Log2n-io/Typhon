@@ -3,6 +3,7 @@ import type { PostTickSummary } from '@/api/generated/model/postTickSummary';
 import type { SystemDefinitionDto } from '@/api/generated/model/systemDefinitionDto';
 import type { SystemTickSummary } from '@/api/generated/model/systemTickSummary';
 import type { TickSummaryDto } from '@/api/generated/model/tickSummaryDto';
+import type { TrackDto } from '@/api/generated/model/trackDto';
 import type { DerivedEdge } from '@/lib/dag/edgeDerivation';
 import {
   computeAggregateCriticalPath,
@@ -489,6 +490,160 @@ describe('computeAggregateCriticalPath', () => {
     expect(a.durationUs).toBe(200); // mean of 100, 300
     expect(b.durationUs).toBe(300); // mean of 200, 400
     expect(r.nonCpBars).toHaveLength(0);
+  });
+});
+
+// ── Track-aware critical path (#354) ──────────────────────────────────────
+
+/** Build a `TrackDto` with `dagIds` DAGs (each declares no phases — irrelevant to the walk). */
+function track(name: string, orderIndex: number, dagIds: number[], tags: string[] = []): TrackDto {
+  return {
+    name,
+    orderIndex,
+    tags,
+    dags: dagIds.map((id) => ({ id, name: `dag${id}`, phases: [] })),
+  } as unknown as TrackDto;
+}
+
+describe('track-aware critical path', () => {
+  it('per-track traceback — terminus is the track-wide last finisher; concurrent sibling DAGs are off-path', () => {
+    // One track "Sim" with two concurrent DAGs: Physics A→B→C (dag 0), Audio D→E (dag 1).
+    const systems = [
+      sys('A', 0, 'p1', { dagId: 0 }),
+      sys('B', 1, 'p1', { dagId: 0, predecessors: [0] }),
+      sys('C', 2, 'p1', { dagId: 0, predecessors: [1] }),
+      sys('D', 3, 'p1', { dagId: 1 }),
+      sys('E', 4, 'p1', { dagId: 1, predecessors: [3] }),
+    ];
+    const rows = [
+      row({ tick: 1, sysIdx: 0, durationUs: 20, startUs: 0, endUs: 20 }),
+      row({ tick: 1, sysIdx: 1, durationUs: 30, startUs: 20, endUs: 50 }),
+      row({ tick: 1, sysIdx: 2, durationUs: 40, startUs: 50, endUs: 90 }),
+      row({ tick: 1, sysIdx: 3, durationUs: 30, startUs: 0, endUs: 30 }),
+      row({ tick: 1, sysIdx: 4, durationUs: 30, startUs: 30, endUs: 60 }),
+    ];
+    const tracks = [track('Sim', 0, [0, 1])];
+    const r = computeCriticalPathForTick({
+      tickNumber: 1, systems, rows, edges: [], phases: NO_PHASE,
+      postTickRows: [], tickSummaryRow: tickSummary(1, 90), tracks, trackScope: 'Sim',
+    })!;
+    // C finishes last (90) → the Physics DAG holds the CP; the Audio DAG ran concurrently, off-path.
+    expect(r.cpChain.map((b) => b.systemName)).toEqual(['A', 'B', 'C']);
+    expect(r.nonCpBars.map((b) => b.systemName).sort()).toEqual(['D', 'E']);
+  });
+
+  it('"All" scope concatenates per-track chains in track order across the barrier', () => {
+    // Track "First" (dag 0): A→B. Track "Second" (dag 1): C→D. Barriered — Second starts after First.
+    const systems = [
+      sys('A', 0, 'p1', { dagId: 0 }),
+      sys('B', 1, 'p1', { dagId: 0, predecessors: [0] }),
+      sys('C', 2, 'p1', { dagId: 1 }),
+      sys('D', 3, 'p1', { dagId: 1, predecessors: [2] }),
+    ];
+    const rows = [
+      row({ tick: 1, sysIdx: 0, durationUs: 100, startUs: 0, endUs: 100 }),
+      row({ tick: 1, sysIdx: 1, durationUs: 100, startUs: 100, endUs: 200 }),
+      row({ tick: 1, sysIdx: 2, durationUs: 60, startUs: 200, endUs: 260 }),
+      row({ tick: 1, sysIdx: 3, durationUs: 140, startUs: 260, endUs: 400 }),
+    ];
+    const tracks = [track('First', 0, [0]), track('Second', 1, [1])];
+    const r = computeCriticalPathForTick({
+      tickNumber: 1, systems, rows, edges: [], phases: NO_PHASE,
+      postTickRows: [], tickSummaryRow: tickSummary(1, 400), tracks, trackScope: 'all',
+    })!;
+    expect(r.cpChain.map((b) => b.systemName)).toEqual(['A', 'B', 'C', 'D']);
+    // Tracks band — one span per track, in order, at measured extents.
+    expect(r.trackSpans.map((s) => s.name)).toEqual(['First', 'Second']);
+    expect(r.trackSpans[0]).toMatchObject({ startUs: 0, endUs: 200 });
+    expect(r.trackSpans[1]).toMatchObject({ startUs: 200, endUs: 400 });
+  });
+
+  it('engine-tagged tracks are excluded from "All" unless showEngineSystems is set', () => {
+    const systems = [
+      sys('A', 0, 'p1', { dagId: 0 }),
+      sys('F', 1, 'p1', { dagId: 1 }),
+    ];
+    const rows = [
+      row({ tick: 1, sysIdx: 0, durationUs: 100, startUs: 0, endUs: 100 }),
+      row({ tick: 1, sysIdx: 1, durationUs: 100, startUs: 200, endUs: 300 }),
+    ];
+    const tracks = [track('Public', 0, [0]), track('Engine-Post', 1, [1], ['engine'])];
+    const hidden = computeCriticalPathForTick({
+      tickNumber: 1, systems, rows, edges: [], phases: NO_PHASE, postTickRows: [],
+      tickSummaryRow: tickSummary(1, 300), tracks, trackScope: 'all', showEngineSystems: false,
+    })!;
+    expect(hidden.cpChain.map((b) => b.systemName)).toEqual(['A']);
+    const shown = computeCriticalPathForTick({
+      tickNumber: 1, systems, rows, edges: [], phases: NO_PHASE, postTickRows: [],
+      tickSummaryRow: tickSummary(1, 300), tracks, trackScope: 'all', showEngineSystems: true,
+    })!;
+    expect(shown.cpChain.map((b) => b.systemName)).toEqual(['A', 'F']);
+  });
+
+  it('single-track scope shows only that track and emits no Tracks band', () => {
+    const systems = [
+      sys('A', 0, 'p1', { dagId: 0 }),
+      sys('F', 1, 'p1', { dagId: 1 }),
+    ];
+    const rows = [
+      row({ tick: 1, sysIdx: 0, durationUs: 100, startUs: 0, endUs: 100 }),
+      row({ tick: 1, sysIdx: 1, durationUs: 100, startUs: 200, endUs: 300 }),
+    ];
+    const tracks = [track('Public', 0, [0]), track('Engine-Post', 1, [1], ['engine'])];
+    const r = computeCriticalPathForTick({
+      tickNumber: 1, systems, rows, edges: [], phases: NO_PHASE, postTickRows: [],
+      tickSummaryRow: tickSummary(1, 300), tracks, trackScope: 'Public',
+    })!;
+    expect(r.cpChain.map((b) => b.systemName)).toEqual(['A']);
+    expect(r.nonCpBars).toHaveLength(0);
+    expect(r.trackSpans).toHaveLength(0);
+  });
+
+  it('track-less topology falls back to the single global traceback', () => {
+    const systems = [
+      sys('A', 0, 'p1'),
+      sys('B', 1, 'p1', { predecessors: [0] }),
+    ];
+    const rows = [
+      row({ tick: 1, sysIdx: 0, durationUs: 100, startUs: 0, endUs: 100 }),
+      row({ tick: 1, sysIdx: 1, durationUs: 100, startUs: 100, endUs: 200 }),
+    ];
+    const r = computeCriticalPathForTick({
+      tickNumber: 1, systems, rows, edges: [], phases: NO_PHASE, postTickRows: [],
+      tickSummaryRow: tickSummary(1, 200), tracks: [], trackScope: 'all',
+    })!;
+    expect(r.cpChain.map((b) => b.systemName)).toEqual(['A', 'B']);
+    expect(r.trackSpans).toHaveLength(0);
+  });
+
+  it('participation surfaces every track — not just the last DAG the global traceback reaches', () => {
+    // Two barriered tracks. Without track-awareness the global terminus is in track 2 and the
+    // DAG-local traceback never reaches track 1's A, B — that is the bug this rework fixes.
+    const systems = [
+      sys('A', 0, 'p1', { dagId: 0 }),
+      sys('B', 1, 'p1', { dagId: 0, predecessors: [0] }),
+      sys('C', 2, 'p1', { dagId: 1 }),
+      sys('D', 3, 'p1', { dagId: 1, predecessors: [2] }),
+    ];
+    const rows = [
+      row({ tick: 1, sysIdx: 0, durationUs: 100, startUs: 0, endUs: 100 }),
+      row({ tick: 1, sysIdx: 1, durationUs: 100, startUs: 100, endUs: 200 }),
+      row({ tick: 1, sysIdx: 2, durationUs: 60, startUs: 200, endUs: 260 }),
+      row({ tick: 1, sysIdx: 3, durationUs: 140, startUs: 260, endUs: 400 }),
+    ];
+    const tracks = [track('First', 0, [0]), track('Second', 1, [1])];
+    const trackAware = computeCriticalPathParticipation({
+      systems, rows, edges: [], phases: NO_PHASE, range: null, tracks, trackScope: 'all',
+    });
+    expect(trackAware.perSystem.get('A')?.rate).toBe(1);
+    expect(trackAware.perSystem.get('B')?.rate).toBe(1);
+    expect(trackAware.perSystem.get('C')?.rate).toBe(1);
+    expect(trackAware.perSystem.get('D')?.rate).toBe(1);
+    // Track-less: the global traceback orphans track 1's systems.
+    const trackLess = computeCriticalPathParticipation({
+      systems, rows, edges: [], phases: NO_PHASE, range: null,
+    });
+    expect(trackLess.perSystem.get('A')?.rate ?? 0).toBe(0);
   });
 });
 

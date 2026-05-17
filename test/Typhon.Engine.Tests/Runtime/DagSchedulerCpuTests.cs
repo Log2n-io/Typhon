@@ -40,24 +40,17 @@ public class DagSchedulerCpuTests
         const int tickRate = 200; // Fast tick rate to accumulate more within-tick time
         const int targetTicks = 200;
 
-        var builder = new DagBuilder()
-            .AddCallbackSystem("Input", _ => { })
-            .AddPipelineSystem("Heavy", (chunk, total) =>
+        using var scheduler = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = workerCount, BaseTickRate = tickRate })
+            .PublicTrack.DeclareDag("Test")
+            .CallbackSystem("Input", _ => { })
+            .PipelineSystem("Heavy", (chunk, total) =>
             {
                 // ~500µs per chunk busy-spin
                 var end = Stopwatch.GetTimestamp() + Stopwatch.Frequency / 2000;
                 while (Stopwatch.GetTimestamp() < end) { }
-            }, chunks)
-            .AddCallbackSystem("Output", _ => { })
-            .AddEdge("Input", "Heavy")
-            .AddEdge("Heavy", "Output");
-
-        var (systems, topo) = builder.Build();
-        using var scheduler = new DagScheduler(systems, topo, new RuntimeOptions
-        {
-            WorkerCount = workerCount,
-            BaseTickRate = tickRate
-        }, _registry.Runtime);
+            }, chunks, after: "Input")
+            .CallbackSystem("Output", _ => { }, after: "Heavy")
+            .Build(_registry.Runtime);
 
         // Measure CPU time
         var process = Process.GetCurrentProcess();
@@ -112,15 +105,10 @@ public class DagSchedulerCpuTests
         const int tickRate = 60;
         const int durationSeconds = 3;
 
-        var builder = new DagBuilder()
-            .AddCallbackSystem("Noop", _ => { });
-
-        var (systems, topo) = builder.Build();
-        using var scheduler = new DagScheduler(systems, topo, new RuntimeOptions
-        {
-            WorkerCount = workerCount,
-            BaseTickRate = tickRate
-        }, _registry.Runtime);
+        using var scheduler = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = workerCount, BaseTickRate = tickRate })
+            .PublicTrack.DeclareDag("Test")
+            .CallbackSystem("Noop", _ => { })
+            .Build(_registry.Runtime);
 
         var process = Process.GetCurrentProcess();
         var cpuBefore = process.TotalProcessorTime;
@@ -169,44 +157,31 @@ public class DagSchedulerCpuTests
         const int targetTicks = 200;
 
         // Wide DAG: Input → 4 parallel Pipeline systems (50 chunks each) → Output
-        var builder = new DagBuilder()
-            .AddCallbackSystem("Input", _ => { })
-            .AddPipelineSystem("Physics", (c, t) =>
+        using var scheduler = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = workerCount, BaseTickRate = tickRate })
+            .PublicTrack.DeclareDag("Test")
+            .CallbackSystem("Input", _ => { })
+            .PipelineSystem("Physics", (c, t) =>
             {
                 var end = Stopwatch.GetTimestamp() + Stopwatch.Frequency / 5000; // ~200µs
                 while (Stopwatch.GetTimestamp() < end) { }
-            }, chunks)
-            .AddPipelineSystem("AI", (c, t) =>
+            }, chunks, after: "Input")
+            .PipelineSystem("AI", (c, t) =>
             {
                 var end = Stopwatch.GetTimestamp() + Stopwatch.Frequency / 5000;
                 while (Stopwatch.GetTimestamp() < end) { }
-            }, chunks)
-            .AddPipelineSystem("Movement", (c, t) =>
+            }, chunks, after: "Input")
+            .PipelineSystem("Movement", (c, t) =>
             {
                 var end = Stopwatch.GetTimestamp() + Stopwatch.Frequency / 5000;
                 while (Stopwatch.GetTimestamp() < end) { }
-            }, chunks)
-            .AddPipelineSystem("Animation", (c, t) =>
+            }, chunks, after: "Input")
+            .PipelineSystem("Animation", (c, t) =>
             {
                 var end = Stopwatch.GetTimestamp() + Stopwatch.Frequency / 5000;
                 while (Stopwatch.GetTimestamp() < end) { }
-            }, chunks)
-            .AddCallbackSystem("Output", _ => { })
-            .AddEdge("Input", "Physics")
-            .AddEdge("Input", "AI")
-            .AddEdge("Input", "Movement")
-            .AddEdge("Input", "Animation")
-            .AddEdge("Physics", "Output")
-            .AddEdge("AI", "Output")
-            .AddEdge("Movement", "Output")
-            .AddEdge("Animation", "Output");
-
-        var (systems, topo) = builder.Build();
-        using var scheduler = new DagScheduler(systems, topo, new RuntimeOptions
-        {
-            WorkerCount = workerCount,
-            BaseTickRate = tickRate
-        }, _registry.Runtime);
+            }, chunks, after: "Input")
+            .CallbackSystem("Output", _ => { }, afterAll: ["Physics", "AI", "Movement", "Animation"])
+            .Build(_registry.Runtime);
 
         var process = Process.GetCurrentProcess();
         var cpuBefore = process.TotalProcessorTime;

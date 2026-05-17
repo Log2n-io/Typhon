@@ -5,6 +5,7 @@ import type { SystemTickSummary } from '@/api/generated/model/systemTickSummary'
 import type { TickSummaryDto } from '@/api/generated/model/tickSummaryDto';
 import { useProfilerViewStore } from '@/stores/useProfilerViewStore';
 import { useUiPrefsStore } from '@/stores/useUiPrefsStore';
+import { useViewOptionsStore } from '@/stores/useViewOptionsStore';
 import ParallelismPill from './ParallelismPill';
 import { lastNTicksToTime, timeToTickRange } from './tickRangeMapping';
 import { computeRangeUtilization } from './tickUtilization';
@@ -73,6 +74,9 @@ export default function SystemDagToolbar({ tickSummaries, autoSnapshotEnabled, s
   const setHideSkipped = useDagViewStore((s) => s.setHideSkipped);
   const showCrossPhaseEdges = useDagViewStore((s) => s.showCrossPhaseEdges);
   const setShowCrossPhaseEdges = useDagViewStore((s) => s.setShowCrossPhaseEdges);
+  // Shared cross-panel setting, also editable from Options → DAG.
+  const showEngineTracks = useViewOptionsStore((s) => s.showEngineSystems);
+  const setShowEngineTracks = useViewOptionsStore((s) => s.setShowEngineSystems);
   const isLaneLayout = layout === 'horizontal-lanes' || layout === 'vertical-lanes';
 
   // Manual-position override count for the current layout — drives the "Reset positions"
@@ -220,6 +224,16 @@ export default function SystemDagToolbar({ tickSummaries, autoSnapshotEnabled, s
               + 'affects the swim-lane layouts.'
         }
         muted={!isLaneLayout}
+      />
+      <ToggleChip
+        label="Show engine tracks"
+        checked={showEngineTracks}
+        onChange={setShowEngineTracks}
+        title={
+          'Reveal the engine-internal tracks (Engine-Pre, Engine-Post / Fence). Off by default — '
+          + "the engine's own DAGs are infrastructure noise for app-level work. When on, they "
+          + 'render as their own delimited DAG groups. Keyed off the track’s `engine` tag.'
+        }
       />
 
       <div className="ml-auto flex items-center gap-2 font-mono text-[10px] text-muted-foreground">

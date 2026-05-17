@@ -49,7 +49,8 @@ public class IncrementalCacheBuilderTests
                 reader.ReadSystemDefinitions();
                 reader.ReadArchetypes();
                 reader.ReadComponentTypes();
-                reader.ReadPhases();
+                reader.ReadTracks();
+                reader.ReadDags();
                 reader.ReadStaticStructures();
 
                 var sink = FileCacheSink.Create(cachePathB);
@@ -125,7 +126,8 @@ public class IncrementalCacheBuilderTests
                 reader.ReadSystemDefinitions();
                 reader.ReadArchetypes();
                 reader.ReadComponentTypes();
-                reader.ReadPhases();
+                reader.ReadTracks();
+                reader.ReadDags();
                 reader.ReadStaticStructures();
 
                 var sink = FileCacheSink.Create(cachePath);
@@ -175,7 +177,8 @@ public class IncrementalCacheBuilderTests
                 reader.ReadSystemDefinitions();
                 reader.ReadArchetypes();
                 reader.ReadComponentTypes();
-                reader.ReadPhases();
+                reader.ReadTracks();
+                reader.ReadDags();
                 reader.ReadStaticStructures();
 
                 var sink = FileCacheSink.Create(cachePath);
@@ -241,7 +244,8 @@ public class IncrementalCacheBuilderTests
                 reader.ReadSystemDefinitions();
                 reader.ReadArchetypes();
                 reader.ReadComponentTypes();
-                reader.ReadPhases();
+                reader.ReadTracks();
+                reader.ReadDags();
                 reader.ReadStaticStructures();
 
                 var sink = FileCacheSink.Create(cachePath);
@@ -460,7 +464,8 @@ public class IncrementalCacheBuilderTests
         writer.WriteSystemDefinitions(ReadOnlySpan<SystemDefinitionRecord>.Empty);
         writer.WriteArchetypes(ReadOnlySpan<ArchetypeRecord>.Empty);
         writer.WriteComponentTypes(ReadOnlySpan<ComponentTypeRecord>.Empty);
-        writer.WritePhases(ReadOnlySpan<string>.Empty);
+        writer.WriteTracks(ReadOnlySpan<TrackRecord>.Empty);
+        writer.WriteDags(ReadOnlySpan<DagRecord>.Empty);
         writer.WriteEmptyStaticStructures();
 
         const int maxRecordsPerBlock = TraceFileWriter.MaxBlockBytes / CommonHeaderSize;

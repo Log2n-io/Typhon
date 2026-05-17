@@ -539,6 +539,10 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
         var view = new EcsView<TArchetype>(this, firstTable.DBE.MemoryAllocator, firstTable, bufferCapacity, _tx.TSN, callerFile, callerLine, callerMethod);
 
+        // Pre-size the entity-id set to the exact final count: initialSet is a HashSet (all keys distinct) and the View's map is fresh, so every key is a
+        // genuine add. This collapses the ~log2(count/64) incremental resizes of the populate loop into a single right-sized POH allocation.
+        view.EntityIdsInternal.EnsureCapacity(initialSet.Count);
+
         // Populate initial entity set
         foreach (var id in initialSet)
         {

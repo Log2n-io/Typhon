@@ -23,7 +23,31 @@ public record ProfilerMetadataDto(
     Typhon.Profiler.PostTickSummary[] PostTickSummaries,
     System.Collections.Generic.Dictionary<ushort, string> QueueIdToName,
     // v15 (#327) — Workbench Data Flow per-(tick, system, archetype) entity-touch rollups. Empty for v14-or-older caches.
-    Typhon.Profiler.SystemArchetypeTouchSummary[] SystemArchetypeTouches);
+    Typhon.Profiler.SystemArchetypeTouchSummary[] SystemArchetypeTouches,
+    // #354 W4 — runtime partitioning hierarchy (Engine → Track → DAG → Phase → System), projected from the trace's
+    // Tracks + DAGs tables. Empty for traces with no track data. The flat <see cref="Phases"/> list is retained as a
+    // derived first-seen rollup for consumers not yet migrated to the hierarchy.
+    TrackDto[] Tracks);
+
+/// <summary>
+/// One Track — the top level of the runtime partitioning hierarchy (<c>Engine → Track → DAG → Phase → System</c>, #354).
+/// Tracks execute in <see cref="OrderIndex"/> order; engine-internal tracks carry the <c>engine</c> tag.
+/// </summary>
+public record TrackDto(
+    string Name,
+    int OrderIndex,
+    string[] Tags,
+    DagDto[] Dags);
+
+/// <summary>
+/// One DAG within a <see cref="TrackDto"/>. <see cref="Phases"/> is the DAG-local ordered phase-name list — phases are
+/// DAG-scoped, never engine-global. A system belongs to this DAG when its <see cref="SystemDefinitionDto.DagId"/> equals
+/// <see cref="Id"/>.
+/// </summary>
+public record DagDto(
+    int Id,
+    string Name,
+    string[] Phases);
 
 /// <summary>Header fields projected from <c>TraceFileHeader</c>. All primitive types — JSON-friendly.</summary>
 public record ProfilerHeaderDto(
@@ -66,7 +90,9 @@ public record SystemDefinitionDto(
     string[] WritesResources,
     string[] ReadsResources,
     string[] ExplicitAfter,
-    string[] ExplicitBefore);
+    string[] ExplicitBefore,
+    // #354 W4 — flat global id of the DAG this system belongs to; matches a <see cref="DagDto.Id"/> in the topology hierarchy.
+    ushort DagId);
 
 /// <summary>
 /// Archetype-id → metadata mapping. Surfaced through <c>TopologyDto.Archetypes</c> and consumed by the Workbench

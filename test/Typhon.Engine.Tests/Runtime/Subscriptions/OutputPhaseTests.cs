@@ -46,7 +46,7 @@ class OutputPhaseTests : TestBase<OutputPhaseTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Spawner", ctx =>
+            schedule.PublicTrack.DeclareDag("Test").CallbackSystem("Spawner", ctx =>
             {
                 // Wait for client to be subscribed
                 if (Volatile.Read(ref clientReady) == 0)
@@ -156,7 +156,7 @@ class OutputPhaseTests : TestBase<OutputPhaseTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Spawner", ctx =>
+            schedule.PublicTrack.DeclareDag("Test").CallbackSystem("Spawner", ctx =>
             {
                 if (Volatile.Read(ref clientReady) == 0) return;
 

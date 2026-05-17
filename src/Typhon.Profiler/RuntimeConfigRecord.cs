@@ -21,13 +21,4 @@ public sealed class RuntimeConfigRecord
 
     /// <summary>Minimum entities per parallel-query chunk (<c>RuntimeOptions.ParallelQueryMinChunkSize</c>).</summary>
     public int ParallelQueryMinChunkSize { get; init; }
-
-    /// <summary>Default phase name (<c>RuntimeOptions.DefaultPhase</c>). Empty when no phases were declared.</summary>
-    public string DefaultPhase { get; init; } = string.Empty;
-
-    /// <summary>
-    /// Phase names in declaration order — same content as the existing v6 PhasesTable, but kept here too so the runtime-config record is self-contained for the
-    /// Workbench's options panel without cross-table joins.
-    /// </summary>
-    public string[] Phases { get; init; } = [];
 }

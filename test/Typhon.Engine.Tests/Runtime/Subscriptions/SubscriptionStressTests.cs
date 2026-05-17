@@ -98,7 +98,8 @@ class SubscriptionStressTests : TestBase<SubscriptionStressTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Spawner", ctx =>
+            var dag = schedule.PublicTrack.DeclareDag("Test");
+            dag.CallbackSystem("Spawner", ctx =>
             {
                 if (ctx.TickNumber >= 3 && ctx.TickNumber <= 7)
                 {
@@ -208,7 +209,7 @@ class SubscriptionStressTests : TestBase<SubscriptionStressTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Noop", _ => { });
+            schedule.PublicTrack.DeclareDag("Test").CallbackSystem("Noop", _ => { });
         }, new RuntimeOptions
         {
             WorkerCount = 1,
@@ -297,7 +298,7 @@ class SubscriptionStressTests : TestBase<SubscriptionStressTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Churn", ctx =>
+            schedule.PublicTrack.DeclareDag("Test").CallbackSystem("Churn", ctx =>
             {
                 // Wait until client has subscribed
                 if (Volatile.Read(ref clientReady) == 0)
@@ -402,7 +403,7 @@ class SubscriptionStressTests : TestBase<SubscriptionStressTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Spawner", ctx =>
+            schedule.PublicTrack.DeclareDag("Test").CallbackSystem("Spawner", ctx =>
             {
                 // Spawn many entities to generate large deltas
                 for (var i = 0; i < 50; i++)
@@ -512,7 +513,8 @@ class SubscriptionStressTests : TestBase<SubscriptionStressTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("SystemA", ctx =>
+            var dag = schedule.PublicTrack.DeclareDag("Test");
+            dag.CallbackSystem("SystemA", ctx =>
             {
                 if (ctx.TickNumber % 3 == 0 && pubA != null)
                 {
@@ -523,7 +525,7 @@ class SubscriptionStressTests : TestBase<SubscriptionStressTests>
                     }
                 }
             });
-            schedule.CallbackSystem("SystemB", ctx =>
+            dag.CallbackSystem("SystemB", ctx =>
             {
                 if (ctx.TickNumber % 5 == 0 && pubB != null)
                 {
@@ -616,7 +618,7 @@ class SubscriptionStressTests : TestBase<SubscriptionStressTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Mutator", ctx =>
+            schedule.PublicTrack.DeclareDag("Test").CallbackSystem("Mutator", ctx =>
             {
                 // Spawn entities on ticks 5-14 (after clients have time to subscribe)
                 if (ctx.TickNumber >= 5 && ctx.TickNumber < 15)

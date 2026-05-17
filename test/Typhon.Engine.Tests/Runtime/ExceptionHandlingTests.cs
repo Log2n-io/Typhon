@@ -27,13 +27,13 @@ class ExceptionHandlingTests
     {
         var afterSystemCount = 0;
 
-        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
-        schedule
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        dag
             .CallbackSystem("Thrower", _ => throw new InvalidOperationException("test"))
             .CallbackSystem("After", _ => Interlocked.Increment(ref afterSystemCount));
         // "After" has no dependency on "Thrower", so it should still run
 
-        using var scheduler = schedule.Build(_registry.Runtime);
+        using var scheduler = dag.Build(_registry.Runtime);
         scheduler.Start();
         SpinWait.SpinUntil(() => scheduler.CurrentTickNumber >= 3, TimeSpan.FromSeconds(5));
         scheduler.Shutdown();
@@ -47,12 +47,12 @@ class ExceptionHandlingTests
     {
         var successorCount = 0;
 
-        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
-        schedule
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        dag
             .CallbackSystem("Thrower", _ => throw new InvalidOperationException("test"))
             .CallbackSystem("Successor", _ => Interlocked.Increment(ref successorCount), after: "Thrower");
 
-        using var scheduler = schedule.Build(_registry.Runtime);
+        using var scheduler = dag.Build(_registry.Runtime);
         scheduler.Start();
         SpinWait.SpinUntil(() => scheduler.CurrentTickNumber >= 3, TimeSpan.FromSeconds(5));
         scheduler.Shutdown();
@@ -64,12 +64,12 @@ class ExceptionHandlingTests
     [Test]
     public void SystemException_TelemetryRecordsException()
     {
-        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
-        schedule
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        dag
             .CallbackSystem("Thrower", _ => throw new InvalidOperationException("test"))
             .CallbackSystem("Successor", _ => { }, after: "Thrower");
 
-        using var scheduler = schedule.Build(_registry.Runtime);
+        using var scheduler = dag.Build(_registry.Runtime);
         scheduler.Start();
         SpinWait.SpinUntil(() => scheduler.CurrentTickNumber >= 2, TimeSpan.FromSeconds(5));
         scheduler.Shutdown();
@@ -96,15 +96,15 @@ class ExceptionHandlingTests
         // advances the tick. Fix: drain remaining chunks on failure (`DrainFailedSystemChunks`).
         // This test fails (timeout) without the fix; passes within ~1 s with it.
         var afterCount = 0;
-        var schedule = RuntimeSchedule.Create(new RuntimeOptions
+        var dag = RuntimeSchedule.Create(new RuntimeOptions
         {
             WorkerCount = 4, BaseTickRate = 1000, ParallelQueryMinChunkSize = 64,
-        });
-        schedule
+        }).PublicTrack.DeclareDag("Test");
+        dag
             .QuerySystem("ThrowingParallel", _ => { }, input: () => null, parallel: true)
             .CallbackSystem("After", _ => Interlocked.Increment(ref afterCount));
 
-        using var scheduler = schedule.Build(_registry.Runtime);
+        using var scheduler = dag.Build(_registry.Runtime);
         scheduler.ParallelQueryPrepareCallback = _ => 4;
         scheduler.ParallelQueryChunkCallback = (_, chunk, _, _) =>
         {
@@ -135,8 +135,8 @@ class ExceptionHandlingTests
         var branch2Count = 0;
         var joinCount = 0;
 
-        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
-        schedule
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        dag
             .CallbackSystem("Root", _ => { })
             .CallbackSystem("Branch1", _ =>
             {
@@ -146,7 +146,7 @@ class ExceptionHandlingTests
             .CallbackSystem("Branch2", _ => Interlocked.Increment(ref branch2Count), after: "Root")
             .CallbackSystem("Join", _ => Interlocked.Increment(ref joinCount), afterAll: ["Branch1", "Branch2"]);
 
-        using var scheduler = schedule.Build(_registry.Runtime);
+        using var scheduler = dag.Build(_registry.Runtime);
         scheduler.Start();
         SpinWait.SpinUntil(() => scheduler.CurrentTickNumber >= 3, TimeSpan.FromSeconds(5));
         scheduler.Shutdown();

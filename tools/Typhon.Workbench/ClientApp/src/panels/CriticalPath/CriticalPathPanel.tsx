@@ -5,6 +5,7 @@ import { useProfilerMetadata } from '@/hooks/profiler/useProfilerMetadata';
 import { useProfilerViewStore } from '@/stores/useProfilerViewStore';
 import { useSelectionStore } from '@/stores/useSelectionStore';
 import { useSessionStore } from '@/stores/useSessionStore';
+import { useViewOptionsStore } from '@/stores/useViewOptionsStore';
 import { deriveEdges } from '@/lib/dag/edgeDerivation';
 import { timeToTickRange } from '../SystemDag/tickRangeMapping';
 import { computeAggregateCriticalPath, computeCriticalPathForTick, dominantTickInRange } from './criticalPath';
@@ -72,6 +73,20 @@ export default function CriticalPathPanel(_props: IDockviewPanelProps) {
   // In aggregate mode the displayed bars are means across the selected tick range — bypass the
   // dominant-tick selector entirely. Single-tick (default) keeps the existing behaviour.
   const aggregateMode = useCriticalPathViewStore((s) => s.aggregateMode);
+  const trackScope = useCriticalPathViewStore((s) => s.trackScope);
+  const showEngineSystems = useViewOptionsStore((s) => s.showEngineSystems);
+
+  // Track-selector options — every track carrying ≥1 DAG, in execution order, filtered by the
+  // shared engine-systems setting. The toolbar prepends "All".
+  const trackOptions = useMemo(() => {
+    const tracks = topology?.tracks ?? [];
+    return [...tracks]
+      .filter((t) => (t.dags?.length ?? 0) > 0 && (showEngineSystems || !(t.tags ?? []).includes('engine')))
+      .sort((a, b) => Number(a.orderIndex) - Number(b.orderIndex))
+      .map((t) => t.name ?? '')
+      .filter((n) => n.length > 0);
+  }, [topology, showEngineSystems]);
+
   const bars = useMemo(() => {
     if (!topology?.systems || !metadata) return null;
     if (aggregateMode) {
@@ -83,6 +98,9 @@ export default function CriticalPathPanel(_props: IDockviewPanelProps) {
         postTickRows: metadata.postTickSummaries ?? [],
         tickSummaries: metadata.tickSummaries ?? [],
         range,
+        tracks: topology.tracks ?? [],
+        trackScope,
+        showEngineSystems,
       });
     }
     if (tapeTick == null) return null;
@@ -95,8 +113,11 @@ export default function CriticalPathPanel(_props: IDockviewPanelProps) {
       phases: topology.phases ?? [],
       postTickRows: metadata.postTickSummaries ?? [],
       tickSummaryRow: tickRow,
+      tracks: topology.tracks ?? [],
+      trackScope,
+      showEngineSystems,
     });
-  }, [aggregateMode, tapeTick, topology, metadata, derivedEdges, range]);
+  }, [aggregateMode, tapeTick, topology, metadata, derivedEdges, range, trackScope, showEngineSystems]);
 
   // Fit signal — increments per "Fit" press / `0` keybind / middle-click / auto-fit. View
   // watches and recomputes pxPerUs.
@@ -153,7 +174,7 @@ export default function CriticalPathPanel(_props: IDockviewPanelProps) {
   if (!bars) {
     return (
       <div className="flex h-full w-full flex-col overflow-hidden bg-background">
-        <CriticalPathToolbar bars={null} onFit={requestFit} />
+        <CriticalPathToolbar bars={null} onFit={requestFit} trackOptions={trackOptions} />
         <EmptyState message="Snapshot or scrub the profiler to populate the view — and pick a focus tick by clicking a system on the DAG." />
       </div>
     );
@@ -161,7 +182,7 @@ export default function CriticalPathPanel(_props: IDockviewPanelProps) {
 
   return (
     <div className="flex h-full w-full flex-col overflow-hidden bg-background">
-      <CriticalPathToolbar bars={bars} onFit={requestFit} />
+      <CriticalPathToolbar bars={bars} onFit={requestFit} trackOptions={trackOptions} />
       <div className="min-h-0 flex-1">
         <CriticalPathView
           bars={bars}

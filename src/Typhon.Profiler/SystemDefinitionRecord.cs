@@ -77,4 +77,9 @@ public sealed class SystemDefinitionRecord
 
     /// <summary>Names of systems this one is explicitly ordered BEFORE.</summary>
     public string[] ExplicitBefore { get; init; } = [];
+
+    // ─── Track→DAG hierarchy (trace format v11+, #354) ───────────────────────
+
+    /// <summary>Flat global id of the DAG this system belongs to — indexes the trace's <see cref="DagRecord"/> table by <see cref="DagRecord.Id"/>.</summary>
+    public ushort DagId { get; init; }
 }

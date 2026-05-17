@@ -12,6 +12,7 @@ function topo(overrides: Partial<TopologyDto> = {}): TopologyDto {
     archetypes: [],
     componentTypes: [],
     phases: [],
+    tracks: [],
     componentFamilies: { componentToFamily: {}, familyOrder: [] },
     ...overrides,
   };
@@ -26,6 +27,7 @@ function sys(name: string, index: number, phaseName: string = 'Sim', overrides: 
     writesEvents: [], readsEvents: [],
     writesResources: [], readsResources: [],
     explicitAfter: [], explicitBefore: [],
+    dagId: 0,
     ...overrides,
   };
 }

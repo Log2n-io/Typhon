@@ -244,9 +244,10 @@ class OverloadThrottleTests : TestBase<OverloadThrottleTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("EveryOther", _ => Interlocked.Increment(ref executeCount),
+            var dag = schedule.PublicTrack.DeclareDag("Test");
+            dag.CallbackSystem("EveryOther", _ => Interlocked.Increment(ref executeCount),
                 tickDivisor: 2); // Every 2nd tick
-            schedule.CallbackSystem("Counter", _ => Interlocked.Increment(ref ticksSeen));
+            dag.CallbackSystem("Counter", _ => Interlocked.Increment(ref ticksSeen));
         }, new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
 
         runtime.Start();
@@ -269,13 +270,14 @@ class OverloadThrottleTests : TestBase<OverloadThrottleTests>
         // EscalationTicks=1, OverrunThreshold=0 → any tick triggers Level 1 immediately
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
+            var dag = schedule.PublicTrack.DeclareDag("Test");
             // Deliberately slow system to trigger overrun
-            schedule.CallbackSystem("Critical", _ =>
+            dag.CallbackSystem("Critical", _ =>
             {
                 Interlocked.Increment(ref criticalCount);
                 Thread.SpinWait(100_000); // Force overrun
             }, priority: SystemPriority.Critical);
-            schedule.CallbackSystem("Shedable", _ => Interlocked.Increment(ref shedCount),
+            dag.CallbackSystem("Shedable", _ => Interlocked.Increment(ref shedCount),
                 priority: SystemPriority.Low, canShed: true, after: "Critical");
         }, new RuntimeOptions
         {
@@ -305,7 +307,7 @@ class OverloadThrottleTests : TestBase<OverloadThrottleTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Noop", _ => Interlocked.Increment(ref ticksSeen));
+            schedule.PublicTrack.DeclareDag("Test").CallbackSystem("Noop", _ => Interlocked.Increment(ref ticksSeen));
         }, new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
 
         runtime.Start();
@@ -331,12 +333,13 @@ class OverloadThrottleTests : TestBase<OverloadThrottleTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
+            var dag = schedule.PublicTrack.DeclareDag("Test");
             // A is shed-able, B depends on A
-            schedule.CallbackSystem("A", _ => Interlocked.Increment(ref aCount),
+            dag.CallbackSystem("A", _ => Interlocked.Increment(ref aCount),
                 priority: SystemPriority.Low, canShed: true, tickDivisor: 2);
-            schedule.CallbackSystem("B", _ => Interlocked.Increment(ref bCount),
+            dag.CallbackSystem("B", _ => Interlocked.Increment(ref bCount),
                 priority: SystemPriority.Critical, after: "A");
-            schedule.CallbackSystem("Counter", _ => Interlocked.Increment(ref ticksSeen), after: "B");
+            dag.CallbackSystem("Counter", _ => Interlocked.Increment(ref ticksSeen), after: "B");
         }, new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
 
         runtime.Start();

@@ -29,7 +29,7 @@ public static class ProfilerSetup
     /// AntHill workload needs per-archetype flame-graph labels. Timestamps anchor the session —
     /// all subsequent events are measured against <c>startTimestamp</c>.
     /// </remarks>
-    public static ProfilerSessionMetadata BuildSessionMetadata(SystemDefinition[] systems, int workerCount, float baseTickRate, string[] phases = null,
+    public static ProfilerSessionMetadata BuildSessionMetadata(SystemDefinition[] systems, int workerCount, float baseTickRate,
         Func<long> currentEngineTickProvider = null, DatabaseEngine engine = null, IResource resourceGraphRoot = null, TyphonRuntime runtime = null,
         long samplingSessionStartQpc = 0)
     {
@@ -79,6 +79,9 @@ public static class ProfilerSetup
             resourceGraphNodes = ProfilerStaticDataBuilder.BuildResourceGraphSnapshot(resourceGraphRoot);
         }
 
+        // Track→DAG hierarchy (#354) — built directly from the runtime's scheduler. Empty when no runtime is supplied.
+        var (tracks, dags) = ProfilerStaticDataBuilder.BuildTrackHierarchy(runtime);
+
         // Runtime config record — populated from the values we have at call time. Telemetry ring capacity / parallel-query
         // chunk size aren't surfaced through TyphonBridge today; pass 0 (the Workbench renders "—" for those rows).
         var runtimeConfig = new RuntimeConfigRecord
@@ -87,15 +90,11 @@ public static class ProfilerSetup
             WorkerCount = workerCount,
             TelemetryRingCapacity = 0,
             ParallelQueryMinChunkSize = 0,
-            DefaultPhase = phases is { Length: > 0 } ? phases[0] : string.Empty,
-            Phases = phases ?? [],
         };
 
         return new ProfilerSessionMetadata(
             SystemDefinitionRecordBuilder.BuildAll(systems), archetypes, componentTypes, workerCount, baseTickRate, Stopwatch.GetTimestamp(), Stopwatch.Frequency,
-            DateTime.UtcNow,
-            samplingSessionStartQpc: samplingSessionStartQpc,
-            phases: phases ?? [], componentDefinitions: componentDefinitions, archetypeDefinitions: archetypeDefinitions, indexCatalog: indexCatalog,
-            runtimeConfig: runtimeConfig, eventQueues: eventQueues, resourceGraphNodes: resourceGraphNodes);
+            DateTime.UtcNow, samplingSessionStartQpc, tracks, dags, componentDefinitions, archetypeDefinitions, indexCatalog, runtimeConfig, eventQueues, 
+            resourceGraphNodes);
     }
 }

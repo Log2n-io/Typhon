@@ -20,7 +20,7 @@ public sealed class ScopeResolverTests
 
     private static SystemDefinitionDto Sys(ushort index, string phase) => new(
         index, $"System{index}", 0, 0, false, 0, [], [], phase, false,
-        [], [], [], [], [], [], [], [], [], [], [], []);
+        [], [], [], [], [], [], [], [], [], [], [], [], DagId: 0);
 
     private static TickSummaryDto Tick(uint number, double startUs) => new(
         number, startUs, 0f, 0, 0f, "0", 0, 0, 0, 0, 0, 0);

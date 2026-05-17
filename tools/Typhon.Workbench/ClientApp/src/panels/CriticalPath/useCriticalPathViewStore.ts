@@ -51,12 +51,20 @@ export interface CriticalPathViewState {
    * intent-class chip surfaced on the stripe.
    */
   showMetronome: boolean;
+  /**
+   * Critical-path track scope (#354). `'all'` walks every in-scope track and concatenates their
+   * per-track chains in track order; a track name scopes the view to that track alone. Persisted;
+   * an unknown name (a scope persisted from a different trace) degrades to `'all'` in the
+   * algorithm. See `09-system-dag.md §5`.
+   */
+  trackScope: string;
   setOrientation: (orientation: Orientation) => void;
   setPxPerUs: (pxPerUs: number) => void;
   setLockZoom: (lock: boolean) => void;
   setFullGantt: (full: boolean) => void;
   setAggregateMode: (agg: boolean) => void;
   setShowMetronome: (show: boolean) => void;
+  setTrackScope: (scope: string) => void;
   /**
    * Multiply zoom by `factor` — used by the wheel handler. Caller is responsible for any scroll
    * compensation needed to keep the cursor anchored.
@@ -90,12 +98,14 @@ export const useCriticalPathViewStore = create<CriticalPathViewState>()(
       fullGantt: false,
       aggregateMode: false,
       showMetronome: false,
+      trackScope: 'all',
       setOrientation: (orientation) => set({ orientation }),
       setPxPerUs: (pxPerUs) => set({ pxPerUs: Math.max(1e-6, pxPerUs) }),
       setLockZoom: (lockZoom) => set({ lockZoom }),
       setFullGantt: (fullGantt) => set({ fullGantt }),
       setAggregateMode: (aggregateMode) => set({ aggregateMode }),
       setShowMetronome: (showMetronome) => set({ showMetronome }),
+      setTrackScope: (trackScope) => set({ trackScope }),
       zoomBy: (factor) => set((state) => ({ pxPerUs: Math.max(1e-6, state.pxPerUs * factor) })),
     }),
     { name: 'typhon-cp-view', storage: safeStorage },

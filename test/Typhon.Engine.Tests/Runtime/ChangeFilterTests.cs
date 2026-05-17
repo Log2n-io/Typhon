@@ -45,7 +45,7 @@ class ChangeFilterTests : TestBase<ChangeFilterTests>
         {
             TyphonRuntime.Create(dbe, schedule =>
             {
-                schedule.QuerySystem("Bad", _ => { }, changeFilter: [typeof(EcsPosition)]);
+                schedule.PublicTrack.DeclareDag("Test").QuerySystem("Bad", _ => { }, changeFilter: [typeof(EcsPosition)]);
             }, new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
         });
     }
@@ -63,7 +63,7 @@ class ChangeFilterTests : TestBase<ChangeFilterTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.QuerySystem("Filtered", _ => { },
+            schedule.PublicTrack.DeclareDag("Test").QuerySystem("Filtered", _ => { },
                 input: () => view,
                 changeFilter: [typeof(EcsPosition)]);
         }, new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
@@ -83,7 +83,7 @@ class ChangeFilterTests : TestBase<ChangeFilterTests>
         {
             TyphonRuntime.Create(dbe, schedule =>
             {
-                schedule.QuerySystem("Bad", _ => { },
+                schedule.PublicTrack.DeclareDag("Test").QuerySystem("Bad", _ => { },
                     input: () => view,
                     changeFilter: [typeof(int)]); // int is not a registered component
             }, new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
@@ -119,10 +119,11 @@ class ChangeFilterTests : TestBase<ChangeFilterTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
+            var dag = schedule.PublicTrack.DeclareDag("Test");
             // Noop callback runs first to burn ticks (ensures tick fence processes dirty bitmaps)
-            schedule.CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksSeen));
+            dag.CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksSeen));
 
-            schedule.QuerySystem("Filtered", ctx =>
+            dag.QuerySystem("Filtered", ctx =>
             {
                 Interlocked.Increment(ref executeCount);
             }, input: () => view, changeFilter: [typeof(EcsPosition)], after: "Tick");
@@ -164,15 +165,16 @@ class ChangeFilterTests : TestBase<ChangeFilterTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
+            var dag = schedule.PublicTrack.DeclareDag("Test");
             // Writer system modifies Position every tick
-            schedule.CallbackSystem("Writer", ctx =>
+            dag.CallbackSystem("Writer", ctx =>
             {
                 Interlocked.Increment(ref ticksSeen);
                 ref var pos = ref ctx.Transaction.OpenMut(entityId).Write(EcsUnit.Position);
                 pos.X += 1.0f;
             });
 
-            schedule.QuerySystem("Filtered", ctx =>
+            dag.QuerySystem("Filtered", ctx =>
             {
                 Interlocked.Increment(ref executeCount);
             }, input: () => view, changeFilter: [typeof(EcsPosition)], after: "Writer");
@@ -273,8 +275,9 @@ class ChangeFilterTests : TestBase<ChangeFilterTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
+            var dag = schedule.PublicTrack.DeclareDag("Test");
             // Write only e1's Position on tick 2
-            schedule.CallbackSystem("Writer", ctx =>
+            dag.CallbackSystem("Writer", ctx =>
             {
                 var tick = Interlocked.Increment(ref ticksSeen);
                 if (tick == 2)
@@ -286,7 +289,7 @@ class ChangeFilterTests : TestBase<ChangeFilterTests>
             });
 
             // Track max entity count across ticks after the write (tick 3+)
-            schedule.QuerySystem("Filtered", ctx =>
+            dag.QuerySystem("Filtered", ctx =>
             {
                 if (writerDone == 1 && ticksSeen >= 3)
                 {
@@ -344,8 +347,9 @@ class ChangeFilterTests : TestBase<ChangeFilterTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
+            var dag = schedule.PublicTrack.DeclareDag("Test");
             // Write only Health (not Position) on tick 2
-            schedule.CallbackSystem("Writer", ctx =>
+            dag.CallbackSystem("Writer", ctx =>
             {
                 var tick = Interlocked.Increment(ref ticksSeen);
                 if (tick == 2)
@@ -356,7 +360,7 @@ class ChangeFilterTests : TestBase<ChangeFilterTests>
             });
 
             // changeFilter on [Position, Health] — OR logic
-            schedule.QuerySystem("Filtered", ctx =>
+            dag.QuerySystem("Filtered", ctx =>
             {
                 if (ticksSeen == 3)
                 {
@@ -404,7 +408,7 @@ class ChangeFilterTests : TestBase<ChangeFilterTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.QuerySystem("All", ctx =>
+            schedule.PublicTrack.DeclareDag("Test").QuerySystem("All", ctx =>
             {
                 if (captured == 0)
                 {
@@ -437,7 +441,7 @@ class ChangeFilterTests : TestBase<ChangeFilterTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Callback", ctx =>
+            schedule.PublicTrack.DeclareDag("Test").CallbackSystem("Callback", ctx =>
             {
                 if (captured == 0)
                 {

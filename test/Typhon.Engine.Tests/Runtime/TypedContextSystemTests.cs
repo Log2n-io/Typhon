@@ -93,6 +93,7 @@ public class TypedContextSystemTests
         var sys = new TypedSystem();
 
         using var scheduler = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 2, BaseTickRate = 1000 })
+            .PublicTrack.DeclareDag("Test")
             .Add(sys)
             .Build(_registry.Runtime);
 
@@ -112,6 +113,7 @@ public class TypedContextSystemTests
         var successor = new UntypedChunkedSystem { SystemName = "B", AfterName = "A" };
 
         using var scheduler = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 2, BaseTickRate = 1000 })
+            .PublicTrack.DeclareDag("Test")
             .Add(typed)
             .Add(successor)
             .Build(_registry.Runtime);
@@ -131,6 +133,7 @@ public class TypedContextSystemTests
         var successor = new UntypedChunkedSystem { SystemName = "B", AfterName = "A" };
 
         using var scheduler = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 2, BaseTickRate = 1000 })
+            .PublicTrack.DeclareDag("Test")
             .Add(typed)
             .Add(successor)
             .Build(_registry.Runtime);
@@ -151,6 +154,7 @@ public class TypedContextSystemTests
         var typed = new TypedSystem { SystemName = "A" };
 
         using var scheduler = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 2, BaseTickRate = 1000 })
+            .PublicTrack.DeclareDag("Test")
             .Add(typed)
             .Build(_registry.Runtime);
 
@@ -175,6 +179,7 @@ public class TypedContextSystemTests
         var successor = new UntypedChunkedSystem { SystemName = "B", AfterName = "A" };
 
         using var scheduler = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 2, BaseTickRate = 1000 })
+            .PublicTrack.DeclareDag("Test")
             .Add(typed)
             .Add(successor)
             .Build(_registry.Runtime);
@@ -194,6 +199,7 @@ public class TypedContextSystemTests
         var successor = new UntypedChunkedSystem { SystemName = "B", AfterName = "A" };
 
         using var scheduler = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 2, BaseTickRate = 1000 })
+            .PublicTrack.DeclareDag("Test")
             .Add(typed)
             .Add(successor)
             .Build(_registry.Runtime);
@@ -209,7 +215,6 @@ public class TypedContextSystemTests
     {
         protected override void Configure(SystemBuilder<TyCtx> b) => b
             .Name("Chained")
-            .Internal()
             .ChunkedParallel(2)
             .After("Root");
 
@@ -222,6 +227,7 @@ public class TypedContextSystemTests
         var typed = new ChainedFluentSystem();
 
         using var scheduler = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 })
+            .PublicTrack.DeclareDag("Test")
             .CallbackSystem("Root", _ => { })
             .Add(typed)
             .Build(_registry.Runtime);
@@ -238,7 +244,6 @@ public class TypedContextSystemTests
             }
         }
         Assert.That(def, Is.Not.Null, "Chained system should be registered with the name set via typed builder");
-        Assert.That(def.IsInternal, Is.True, "Internal() forwarded through typed builder");
         Assert.That(def.ExplicitChunkCount, Is.EqualTo(2), "ChunkedParallel(2) forwarded through typed builder");
     }
 
@@ -250,6 +255,7 @@ public class TypedContextSystemTests
         var sys = new UntypedChunkedSystem { SystemName = "Plain" };
 
         using var scheduler = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 2, BaseTickRate = 1000 })
+            .PublicTrack.DeclareDag("Test")
             .Add(sys)
             .Build(_registry.Runtime);
 
@@ -266,6 +272,7 @@ public class TypedContextSystemTests
         var b = new TypedSystem { SystemName = "B", AfterName = "A" };
 
         using var scheduler = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 2, BaseTickRate = 1000 })
+            .PublicTrack.DeclareDag("Test")
             .Add(a)
             .Add(b)
             .Build(_registry.Runtime);
@@ -284,6 +291,7 @@ public class TypedContextSystemTests
         var typed = new TypedSystem();
 
         using var scheduler = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 })
+            .PublicTrack.DeclareDag("Test")
             .Add(typed)
             .Build(_registry.Runtime);
 
@@ -298,6 +306,7 @@ public class TypedContextSystemTests
         var ctx = new TyCtx { ShouldRunFlag = true, PrepareReturnValue = -1 };
 
         using var scheduler = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 })
+            .PublicTrack.DeclareDag("Test")
             .Add(typed)
             .Build(_registry.Runtime);
 

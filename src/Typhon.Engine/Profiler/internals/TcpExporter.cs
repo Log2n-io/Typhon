@@ -462,8 +462,8 @@ internal sealed class TcpExporter : ResourceNode, IProfilerExporter
     }
 
     /// <summary>
-    /// Build the INIT frame payload — identical layout to the first four sections of a <c>.typhon-trace</c> file: header + system defs
-    /// + archetype table + component type table.
+    /// Build the INIT frame payload — identical layout to the leading sections of a <c>.typhon-trace</c> file: header + system defs
+    /// + archetype table + component type table + tracks table + DAGs table.
     /// </summary>
     private byte[] BuildInitPayload()
     {
@@ -480,6 +480,8 @@ internal sealed class TcpExporter : ResourceNode, IProfilerExporter
             SystemCount = (ushort)_metadata.Systems.Length,
             ArchetypeCount = (ushort)_metadata.Archetypes.Length,
             ComponentTypeCount = (ushort)_metadata.ComponentTypes.Length,
+            TrackCount = (ushort)_metadata.Tracks.Length,
+            DagCount = (ushort)_metadata.Dags.Length,
             CreatedUtcTicks = _metadata.StartedUtc.Ticks,
             SamplingSessionStartQpc = _metadata.SamplingSessionStartQpc,
         };
@@ -524,6 +526,9 @@ internal sealed class TcpExporter : ResourceNode, IProfilerExporter
             WriteStringArray(bw, sys.ReadsResources);
             WriteStringArray(bw, sys.ExplicitAfter);
             WriteStringArray(bw, sys.ExplicitBefore);
+
+            // Track→DAG hierarchy (v11+) — trailing DagId ushort.
+            bw.Write(sys.DagId);
         }
 
         // Archetype table
@@ -542,11 +547,23 @@ internal sealed class TcpExporter : ResourceNode, IProfilerExporter
             WriteShortString(bw, c.Name);
         }
 
-        // Phases table (v6+) — RuntimeOptions.Phases names in declaration order.
-        bw.Write((ushort)_metadata.Phases.Length);
-        foreach (var p in _metadata.Phases)
+        // Tracks table (v11+, #354) — top level of the Track→DAG hierarchy. Mirrors TraceFileWriter.WriteTracks.
+        bw.Write((ushort)_metadata.Tracks.Length);
+        foreach (var t in _metadata.Tracks)
         {
-            WriteShortString(bw, p ?? string.Empty);
+            WriteShortString(bw, t.Name ?? string.Empty);
+            bw.Write(t.OrderIndex);
+            WriteStringArray(bw, t.Tags);
+        }
+
+        // DAGs table (v11+, #354) — mirrors TraceFileWriter.WriteDags.
+        bw.Write((ushort)_metadata.Dags.Length);
+        foreach (var d in _metadata.Dags)
+        {
+            bw.Write(d.Id);
+            WriteShortString(bw, d.Name ?? string.Empty);
+            bw.Write(d.TrackIndex);
+            WriteStringArray(bw, d.PhaseNames);
         }
 
         // v7 static-structure tables. The TCP init frame mirrors the source-file layout exactly so receivers can

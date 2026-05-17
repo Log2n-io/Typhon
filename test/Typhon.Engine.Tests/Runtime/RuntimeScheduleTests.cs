@@ -1,6 +1,7 @@
 using NUnit.Framework;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 
 namespace Typhon.Engine.Tests.Runtime;
@@ -29,6 +30,7 @@ public class RuntimeScheduleTests
         var captured = 0;
 
         using var scheduler = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 })
+            .PublicTrack.DeclareDag("Test")
             .CallbackSystem("A", _ => { if (captured == 0) { executionOrder.Add("A"); } })
             .CallbackSystem("B", _ => { if (captured == 0) { executionOrder.Add("B"); } }, after: "A")
             .CallbackSystem("C", _ =>
@@ -56,6 +58,7 @@ public class RuntimeScheduleTests
         var captured = 0;
 
         using var scheduler = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 })
+            .PublicTrack.DeclareDag("Test")
             .CallbackSystem("A", _ => { if (captured == 0) { executed.Add("A"); } })
             .CallbackSystem("B", _ => { if (captured == 0) { executed.Add("B"); } }, after: "A")
             .CallbackSystem("C", _ => { if (captured == 0) { executed.Add("C"); } }, after: "A")
@@ -82,26 +85,29 @@ public class RuntimeScheduleTests
     [Test]
     public void FluentBuilder_DuplicateNames_Throws()
     {
-        var schedule = RuntimeSchedule.Create()
+        var dag = RuntimeSchedule.Create()
+            .PublicTrack.DeclareDag("Test")
             .CallbackSystem("A", _ => { });
 
         Assert.Throws<InvalidOperationException>(() =>
-            schedule.CallbackSystem("A", _ => { }).Build(_registry.Runtime));
+            dag.CallbackSystem("A", _ => { }).Build(_registry.Runtime));
     }
 
     [Test]
     public void FluentBuilder_MissingAfterTarget_Throws()
     {
-        var schedule = RuntimeSchedule.Create()
+        var dag = RuntimeSchedule.Create()
+            .PublicTrack.DeclareDag("Test")
             .CallbackSystem("A", _ => { }, after: "NonExistent");
 
-        Assert.Throws<InvalidOperationException>(() => schedule.Build(_registry.Runtime));
+        Assert.Throws<InvalidOperationException>(() => dag.Build(_registry.Runtime));
     }
 
     [Test]
     public void FluentBuilder_MixedSystemTypes_AllRegistered()
     {
         using var scheduler = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 })
+            .PublicTrack.DeclareDag("Test")
             .CallbackSystem("Input", _ => { })
             .QuerySystem("GameRules", _ => { }, after: "Input")
             .PipelineSystem("Physics", (c, t) => { }, 50, after: "Input")
@@ -121,6 +127,7 @@ public class RuntimeScheduleTests
 
         // Set overload params via RuntimeSchedule's Build path
         using var scheduler = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 })
+            .PublicTrack.DeclareDag("Test")
             .QuerySystem("AI", _ => { }, priority: SystemPriority.Low,
                 tickDivisor: 2, throttledTickDivisor: 5, canShed: true)
             .Build(_registry.Runtime);
@@ -132,10 +139,10 @@ public class RuntimeScheduleTests
     [Test]
     public void FluentBuilder_EventQueues_WiredToSystems()
     {
-        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
-        var damageQueue = schedule.CreateEventQueue<int>("DamageEvents");
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        var damageQueue = dag.CreateEventQueue<int>("DamageEvents");
 
-        using var scheduler = schedule
+        using var scheduler = dag
             .CallbackSystem("Combat", _ => damageQueue.Push(42), after: null)
             .QuerySystem("LootDrop", _ =>
             {
@@ -157,12 +164,12 @@ public class RuntimeScheduleTests
     [Test]
     public void FluentBuilder_EventQueue_ResetEachTick()
     {
-        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
-        var queue = schedule.CreateEventQueue<int>("test");
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        var queue = dag.CreateEventQueue<int>("test");
 
         var pushCount = 0;
 
-        using var scheduler = schedule
+        using var scheduler = dag
             .CallbackSystem("Producer", _ =>
             {
                 // Push 3 items per tick
@@ -186,12 +193,89 @@ public class RuntimeScheduleTests
     [Test]
     public void Build_CalledTwice_Throws()
     {
-        var schedule = RuntimeSchedule.Create()
+        var dag = RuntimeSchedule.Create()
+            .PublicTrack.DeclareDag("Test")
             .CallbackSystem("A", _ => { });
 
-        schedule.Build(_registry.Runtime).Dispose();
+        dag.Build(_registry.Runtime).Dispose();
 
-        Assert.Throws<InvalidOperationException>(() => schedule.Build(_registry.Runtime));
+        Assert.Throws<InvalidOperationException>(() => dag.Build(_registry.Runtime));
+    }
+
+    [Test]
+    public void DeclareTrack_AppTracks_SlottedBetweenPublicAndEnginePost()
+    {
+        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
+        var physics = schedule.DeclareTrack("Physics");
+        var ai = schedule.DeclareTrack("AI");
+
+        Assert.That(
+            schedule.Tracks.Select(t => t.Name),
+            Is.EqualTo(new[] { "Engine-Pre", "Public", "Physics", "AI", "Engine-Post" }));
+
+        // OrderIndex always equals the track's execution position.
+        for (var i = 0; i < schedule.Tracks.Count; i++)
+        {
+            Assert.That(schedule.Tracks[i].OrderIndex, Is.EqualTo(i));
+        }
+
+        Assert.That(physics.OrderIndex, Is.EqualTo(2));
+        Assert.That(ai.OrderIndex, Is.EqualTo(3));
+        Assert.That(physics.IsEngine, Is.False);
+    }
+
+    [Test]
+    public void DeclareTrack_DuplicateName_Throws()
+    {
+        var schedule = RuntimeSchedule.Create();
+        schedule.DeclareTrack("Physics");
+
+        Assert.Throws<InvalidOperationException>(() => schedule.DeclareTrack("Physics"));
+        // Built-in track names are reserved too.
+        Assert.Throws<InvalidOperationException>(() => schedule.DeclareTrack("Public"));
+    }
+
+    [Test]
+    public void DeclareTrack_ReservedEnginePrefix_Throws()
+    {
+        var schedule = RuntimeSchedule.Create();
+        Assert.Throws<InvalidOperationException>(() => schedule.DeclareTrack("Engine-Custom"));
+    }
+
+    [Test]
+    public void DeclareTrack_EngineTag_Throws()
+    {
+        var schedule = RuntimeSchedule.Create();
+        Assert.Throws<InvalidOperationException>(() => schedule.DeclareTrack("Physics", Track.EngineTag));
+    }
+
+    [Test]
+    public void DeclareTrack_SystemsRunInTrackOrder()
+    {
+        var order = new List<string>();
+        var captured = 0;
+
+        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
+        schedule.DeclareTrack("Alpha").DeclareDag("AlphaDag")
+            .CallbackSystem("A", _ => { if (captured == 0) { order.Add("Alpha"); } });
+        schedule.DeclareTrack("Beta").DeclareDag("BetaDag")
+            .CallbackSystem("B", _ =>
+            {
+                if (captured == 0)
+                {
+                    order.Add("Beta");
+                    Interlocked.Exchange(ref captured, 1);
+                }
+            });
+
+        using var scheduler = schedule.Build(_registry.Runtime);
+        scheduler.Start();
+        SpinWait.SpinUntil(() => scheduler.CurrentTickNumber >= 1, TimeSpan.FromSeconds(5));
+        scheduler.Shutdown();
+
+        // The track-order barrier runs Alpha to completion before Beta begins.
+        Assert.That(order, Is.EqualTo(new[] { "Alpha", "Beta" }));
+        Assert.That(scheduler.SystemCount, Is.EqualTo(2));
     }
 
     [Test]
@@ -200,6 +284,7 @@ public class RuntimeScheduleTests
         var chunkCount = 0;
 
         using var scheduler = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 4, BaseTickRate = 1000 })
+            .PublicTrack.DeclareDag("Test")
             .CallbackSystem("Input", _ => { })
             .PipelineSystem("Physics", (chunk, total) =>
             {

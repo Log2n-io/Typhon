@@ -38,7 +38,7 @@ class ViewSeparationTests : TestBase<ViewSeparationTests>
         // Create runtime with the view as system input → marks IsSystemInput
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.QuerySystem("TestSystem", _ => { }, input: () => view);
+            schedule.PublicTrack.DeclareDag("Test").QuerySystem("TestSystem", _ => { }, input: () => view);
         }, new RuntimeOptions { WorkerCount = 1 });
 
         // Publishing the same view should throw
@@ -58,7 +58,7 @@ class ViewSeparationTests : TestBase<ViewSeparationTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Noop", _ => { });
+            schedule.PublicTrack.DeclareDag("Test").CallbackSystem("Noop", _ => { });
         }, new RuntimeOptions { WorkerCount = 1 });
 
         runtime.PublishView("test_view", view1);
@@ -74,7 +74,7 @@ class ViewSeparationTests : TestBase<ViewSeparationTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Noop", _ => { });
+            schedule.PublicTrack.DeclareDag("Test").CallbackSystem("Noop", _ => { });
         }, new RuntimeOptions { WorkerCount = 1 });
 
         runtime.PublishView("view_a", view);
@@ -95,7 +95,7 @@ class ViewSeparationTests : TestBase<ViewSeparationTests>
         // Separate instances — no conflict
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.QuerySystem("TestSystem", _ => { }, input: () => viewForSystem);
+            schedule.PublicTrack.DeclareDag("Test").QuerySystem("TestSystem", _ => { }, input: () => viewForSystem);
         }, new RuntimeOptions { WorkerCount = 1 });
 
         Assert.DoesNotThrow(() => runtime.PublishView("test_view", viewForSubs));
@@ -113,7 +113,7 @@ class ViewSeparationTests : TestBase<ViewSeparationTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Noop", _ => { });
+            schedule.PublicTrack.DeclareDag("Test").CallbackSystem("Noop", _ => { });
         }, new RuntimeOptions { WorkerCount = 1 });
 
         runtime.PublishView("test_view", view);

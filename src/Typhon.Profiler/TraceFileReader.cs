@@ -78,29 +78,29 @@ public sealed class TraceFileReader : IDisposable
     }
 
     /// <summary>
-    /// Oldest format version this reader still accepts. Bumped to 8 (2026-05-10) when
-    /// <see cref="TraceEventKind.NamedSpan"/> was reassigned from value 200 to 246 to break a latent collision with
-    /// <see cref="TraceEventKind.EcsQueryMaskAnd"/>. v7 traces with NamedSpan records would mis-decode under a v8 reader;
-    /// hard-rejecting v7 surfaces the break loudly. Re-record against a v8 build.
+    /// Oldest format version this reader still accepts. Bumped to 11 (2026-05-17) for the Track→DAG partitioning hierarchy (#354): the SystemDefinitionTable
+    /// layout gained a trailing <c>DagId</c> field and the global PhasesTable was replaced by a TracksTable + DagsTable. That is a layout-breaking change —
+    /// v10-and-older traces would mis-decode, so the reader hard-rejects them. Re-record against a v11 build.
     /// </summary>
-    public const ushort MinSupportedVersion = 8;
+    public const ushort MinSupportedVersion = 11;
 
     /// <summary>
-    /// On-disk header layout segments, shared across versions. The prefix (Magic .. SourceLocationManifestOffset) is byte-identical in every supported
-    /// version; later versions append trailer-offset fields before the trailing reserved pad. Total sizes: v8 = 63 bytes, v9 = 79, v10 = 87.
+    /// On-disk header layout segments. v11 is the oldest supported version, so every segment is always present on disk.
+    /// The prefix runs Magic .. SourceLocationManifestOffset; the query-offset + CPU-offset segments follow, then the trailing reserved pad.
+    /// Total on-disk size: v11 = 91 bytes.
     /// </summary>
-    private const int HeaderCommonPrefixSize = 59; // Magic .. SourceLocationManifestOffset
-    private const int HeaderQueryOffsetsSize = 16; // QuerySourceStringTableOffset + QueryDefinitionTableOffset (v9+)
-    private const int HeaderCpuOffsetSize = 8;     // CpuSampleSectionOffset (v10+)
-    private const int HeaderReservedSize = 4;      // Reserved0 + Reserved1 (every version)
+    private const int HeaderCommonPrefixSize = 63; // Magic .. SourceLocationManifestOffset (incl. TrackCount + DagCount, v11)
+    private const int HeaderQueryOffsetsSize = 16; // QuerySourceStringTableOffset + QueryDefinitionTableOffset
+    private const int HeaderCpuOffsetSize = 8;     // CpuSampleSectionOffset
+    private const int HeaderReservedSize = 4;      // Reserved0 + Reserved1
 
     /// <summary>Reads and validates the file header. Must be called first.</summary>
     /// <exception cref="InvalidDataException">If magic or version is wrong.</exception>
     public TraceFileHeader ReadHeader()
     {
-        // The header is read as raw bytes and decoded by on-disk version. The prefix (Magic .. SourceLocationManifestOffset) is byte-identical in every
-        // supported version; v9 appends the two query-definition trailer offsets and v10 appends CpuSampleSectionOffset — each before the trailing reserved
-        // pad. A field absent on disk for an older version is zeroed in the returned struct. Older versions are rejected by MinSupportedVersion.
+        // The header is read as raw bytes and decoded by on-disk version. v11 is the oldest supported version, so every header segment is always present on
+        // disk — the version-conditional segment reads below are unconditional in practice but kept structured for clarity. Older versions are rejected by
+        // MinSupportedVersion.
         var fullSize = Unsafe.SizeOf<TraceFileHeader>();
         Span<byte> headerBytes = stackalloc byte[fullSize];
 
@@ -209,6 +209,9 @@ public sealed class TraceFileReader : IDisposable
             var explicitAfter = ReadStringArray();
             var explicitBefore = ReadStringArray();
 
+            // Track→DAG hierarchy (v11+) — trailing DagId ushort.
+            var dagId = _binaryReader.ReadUInt16();
+
             _systems.Add(new SystemDefinitionRecord
             {
                 Index = index,
@@ -233,17 +236,24 @@ public sealed class TraceFileReader : IDisposable
                 ReadsResources = readsResources,
                 ExplicitAfter = explicitAfter,
                 ExplicitBefore = explicitBefore,
+                DagId = dagId,
             });
         }
         return _systems;
     }
 
     /// <summary>
-    /// Phase order list (RFC 07 §Q3 — <c>RuntimeOptions.Phases</c>), available after <see cref="ReadPhases"/>.
-    /// Empty for v5 traces (the section is absent and not read).
+    /// Tracks table (v11+, #354) — the top level of the runtime partitioning hierarchy. Available after <see cref="ReadTracks"/>.
     /// </summary>
-    public IReadOnlyList<string> Phases => _phases;
-    private readonly List<string> _phases = [];
+    public IReadOnlyList<TrackRecord> Tracks => _tracks;
+    private readonly List<TrackRecord> _tracks = [];
+
+    /// <summary>
+    /// DAGs table (v11+, #354) — each DAG references its owning track by index and carries its own ordered phase names.
+    /// Available after <see cref="ReadDags"/>.
+    /// </summary>
+    public IReadOnlyList<DagRecord> Dags => _dags;
+    private readonly List<DagRecord> _dags = [];
 
     /// <summary>Rich component-type definitions (v7+), available after <see cref="ReadComponentDefinitions"/>.</summary>
     public IReadOnlyList<ComponentDefinitionRecord> ComponentDefinitions => _componentDefinitions;
@@ -268,19 +278,38 @@ public sealed class TraceFileReader : IDisposable
     public IReadOnlyList<ResourceGraphNodeRecord> ResourceGraphNodes => _resourceGraphNodes;
     private readonly List<ResourceGraphNodeRecord> _resourceGraphNodes = [];
 
-    /// <summary>Reads the phases table. Call after <see cref="ReadComponentTypes"/>. v7+ — always present.</summary>
-    public IReadOnlyList<string> ReadPhases()
+    /// <summary>Reads the tracks table (v11+, #354). Call after <see cref="ReadComponentTypes"/>, before <see cref="ReadDags"/>.</summary>
+    public IReadOnlyList<TrackRecord> ReadTracks()
     {
-        _phases.Clear();
+        _tracks.Clear();
         var count = _binaryReader.ReadUInt16();
         for (var i = 0; i < count; i++)
         {
-            _phases.Add(ReadShortString());
+            var name = ReadShortString();
+            var orderIndex = _binaryReader.ReadInt32();
+            var tags = ReadStringArray();
+            _tracks.Add(new TrackRecord { Name = name, OrderIndex = orderIndex, Tags = tags });
         }
-        return _phases;
+        return _tracks;
     }
 
-    /// <summary>Reads the rich component-definitions table (v7+). Call after <see cref="ReadPhases"/>.</summary>
+    /// <summary>Reads the DAGs table (v11+, #354). Call after <see cref="ReadTracks"/>, before <see cref="ReadComponentDefinitions"/>.</summary>
+    public IReadOnlyList<DagRecord> ReadDags()
+    {
+        _dags.Clear();
+        var count = _binaryReader.ReadUInt16();
+        for (var i = 0; i < count; i++)
+        {
+            var id = _binaryReader.ReadInt32();
+            var name = ReadShortString();
+            var trackIndex = _binaryReader.ReadInt32();
+            var phaseNames = ReadStringArray();
+            _dags.Add(new DagRecord { Id = id, Name = name, TrackIndex = trackIndex, PhaseNames = phaseNames });
+        }
+        return _dags;
+    }
+
+    /// <summary>Reads the rich component-definitions table (v7+). Call after <see cref="ReadDags"/>.</summary>
     public IReadOnlyList<ComponentDefinitionRecord> ReadComponentDefinitions()
     {
         _componentDefinitions.Clear();
@@ -441,11 +470,6 @@ public sealed class TraceFileReader : IDisposable
         var workerCount = _binaryReader.ReadInt32();
         var telemetryRingCapacity = _binaryReader.ReadInt32();
         var parallelMin = _binaryReader.ReadInt32();
-        var defaultPhase = ReadShortString();
-
-        var phaseCount = _binaryReader.ReadUInt16();
-        var phases = new string[phaseCount];
-        for (var i = 0; i < phaseCount; i++) phases[i] = ReadShortString();
 
         RuntimeConfig = new RuntimeConfigRecord
         {
@@ -453,8 +477,6 @@ public sealed class TraceFileReader : IDisposable
             WorkerCount = workerCount,
             TelemetryRingCapacity = telemetryRingCapacity,
             ParallelQueryMinChunkSize = parallelMin,
-            DefaultPhase = defaultPhase,
-            Phases = phases,
         };
         return RuntimeConfig;
     }

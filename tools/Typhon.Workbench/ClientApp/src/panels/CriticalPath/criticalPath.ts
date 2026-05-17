@@ -2,6 +2,7 @@ import type { PostTickSummary } from '@/api/generated/model/postTickSummary';
 import type { SystemDefinitionDto } from '@/api/generated/model/systemDefinitionDto';
 import type { SystemTickSummary } from '@/api/generated/model/systemTickSummary';
 import type { TickSummaryDto } from '@/api/generated/model/tickSummaryDto';
+import type { TrackDto } from '@/api/generated/model/trackDto';
 import type { DerivedEdge } from '@/lib/dag/edgeDerivation';
 import type { TickRange } from '../SystemDag/useDagViewStore';
 
@@ -22,6 +23,14 @@ import type { TickRange } from '../SystemDag/useDagViewStore';
  * Phases are display metadata only — never consulted here. `SystemDefinition.predecessors` (the
  * engine DAG) is the complete ordering authority; for legacy traces that don't carry it the
  * client-derived `edges` are the fallback.
+ *
+ * **Track scope (#354).** The runtime partitions systems into `Track → DAG → Phase → System`;
+ * tracks run under a hard barrier (every DAG of track *N* completes before track *N+1* begins),
+ * and a dependency edge never crosses a DAG. So the path is computed **per track**: the candidate
+ * set is the track's ran systems, the terminus is the track-wide `argmax endUs`, and the
+ * traceback stays DAG-local on its own. The `'all'` scope concatenates the per-track chains in
+ * track order (the barrier makes the concatenation monotonic in time); a single-track scope shows
+ * just that track. A topology with no track table falls back to the single global traceback.
  *
  * The CP has exactly one wait class: **worker-claim wait** (`startUs − readyUs`) — the gap
  * between a system becoming eligible and a worker picking it up. Phase-fence wait and
@@ -47,14 +56,26 @@ export interface CriticalPathInputs {
   phases: string[];
   /** Tick range to consider. `null` means all rows. */
   range: TickRange | null;
+  /**
+   * Track → DAG hierarchy from `topology.tracks`. When present the walk is track-scoped (per-track
+   * traceback concatenated in track order); when absent / empty it falls back to the single global
+   * traceback (legacy, track-less traces).
+   */
+  tracks?: TrackDto[];
+  /** `'all'` (default) walks every in-scope track; a track name scopes the walk to that track alone. */
+  trackScope?: string;
+  /** When `false` (default), `engine`-tagged tracks are excluded from the `'all'` scope. */
+  showEngineSystems?: boolean;
 }
 
 export function computeCriticalPathParticipation(input: CriticalPathInputs): CriticalPathParticipation {
-  const { systems, rows, edges, range } = input;
+  const { systems, rows, edges, range, tracks, trackScope = 'all', showEngineSystems = false } = input;
 
   const indexToName = buildIndexToName(systems);
   const predecessorsByName = buildPredecessorMap(systems, indexToName, edges);
   const hasGraph = predecessorsByName.size > 0;
+  const scopeTracks = selectScopeTracks(resolveScopeTracks(tracks), trackScope, showEngineSystems);
+  const nameToDagId = buildNameToDagId(systems);
 
   const byTick = bucketRanByTick(rows, indexToName, range);
 
@@ -62,10 +83,10 @@ export function computeCriticalPathParticipation(input: CriticalPathInputs): Cri
   let totalTicks = 0;
   for (const [, ran] of byTick) {
     totalTicks++;
-    // With a DAG: the measured longest-path traceback. Without one: every system that ran is
-    // trivially "on the path" — there is no chain to discriminate.
-    const onPath = hasGraph ? traceCriticalPath(ran, predecessorsByName) : [...ran.keys()];
-    for (const name of onPath) {
+    // Per-track measured traceback (track-less → single global traceback). Without a DAG every
+    // ran system is trivially on the path — `tracedCriticalPath` returns the full ordered set.
+    const { cpNames } = tracedCriticalPath(ran, scopeTracks, nameToDagId, predecessorsByName, hasGraph);
+    for (const name of cpNames) {
       onPathTicksByName.set(name, (onPathTicksByName.get(name) ?? 0) + 1);
     }
   }
@@ -150,6 +171,19 @@ export interface PhaseSpan {
   endUs: number;
 }
 
+/**
+ * Measured extent of one track — `[min startUs, max endUs]` over its ran systems. Populated only
+ * in the `'all'` scope with ≥2 tracks; drives the Critical-Path view's Tracks band. Tracks run
+ * under a hard barrier, so spans never overlap — the band needs no interval packing.
+ */
+export interface TrackSpan {
+  name: string;
+  /** Position in the in-scope track list — drives a stable colour. */
+  index: number;
+  startUs: number;
+  endUs: number;
+}
+
 export interface TickPathPostTick {
   writeTickFenceUs: number;
   walFlushUs: number;
@@ -177,6 +211,12 @@ export interface TickPathBars {
   nonCpBars: TickPathBar[];
   /** Per-phase measured spans, sorted by `startUs` — drives the multi-lane phase band. */
   phaseSpans: PhaseSpan[];
+  /**
+   * Per-track measured spans, in track order — drives the Tracks band. Non-empty only in the
+   * `'all'` scope with ≥2 visible tracks; empty for a single-track scope, a track-less topology,
+   * and aggregate mode.
+   */
+  trackSpans: TrackSpan[];
   /** Tick body `[0, maxEndUs]`. Post-tick extends past `endUs`; metronome before `startUs`. */
   timeBounds: { startUs: number; endUs: number };
   postTick: TickPathPostTick;
@@ -271,8 +311,17 @@ export function computeCriticalPathForTick(input: {
   phases: string[];
   postTickRows: PostTickSummary[];
   tickSummaryRow: TickSummaryDto | null;
+  /** Track → DAG hierarchy; when present the walk is track-scoped (see {@link CriticalPathInputs}). */
+  tracks?: TrackDto[];
+  /** `'all'` (default) or a single track name. */
+  trackScope?: string;
+  /** When `false` (default), `engine`-tagged tracks drop out of the `'all'` scope. */
+  showEngineSystems?: boolean;
 }): TickPathBars | null {
-  const { tickNumber, systems, rows, edges, phases, postTickRows, tickSummaryRow } = input;
+  const {
+    tickNumber, systems, rows, edges, phases, postTickRows, tickSummaryRow,
+    tracks, trackScope = 'all', showEngineSystems = false,
+  } = input;
 
   const indexToName = buildIndexToName(systems);
   const nameToPhase = buildNameToPhase(systems);
@@ -292,26 +341,39 @@ export function computeCriticalPathForTick(input: {
   if (ran.size === 0) return null;
 
   const hasGraph = predecessorsByName.size > 0;
-  const cpNames = hasGraph ? traceCriticalPath(ran, predecessorsByName) : fallbackOrder(ran);
+  const scopeTracks = selectScopeTracks(resolveScopeTracks(tracks), trackScope, showEngineSystems);
+  const nameToDagId = buildNameToDagId(systems);
+  // Per-track measured traceback, concatenated in track order. `scopedRan` is `ran` narrowed to
+  // the in-scope tracks — it is the universe for the non-CP bars, phase spans and time bounds.
+  const { cpNames, scopedRan } = tracedCriticalPath(ran, scopeTracks, nameToDagId, predecessorsByName, hasGraph);
+  if (scopedRan.size === 0) return null;
   const cpSet = new Set(cpNames);
 
-  const cpChain = cpNames.map((n) => makeBar(ran.get(n)!, nameToDef.get(n), phaseIndexOf(n)));
+  const cpChain = cpNames.map((n) => makeBar(scopedRan.get(n)!, nameToDef.get(n), phaseIndexOf(n)));
   const nonCpBars: TickPathBar[] = [];
-  for (const [name, s] of ran) {
+  for (const [name, s] of scopedRan) {
     if (cpSet.has(name)) continue;
     nonCpBars.push(makeBar(s, nameToDef.get(name), phaseIndexOf(name)));
   }
   nonCpBars.sort((a, b) => (a.startUs - b.startUs) || a.systemName.localeCompare(b.systemName));
 
-  const phaseSpans = buildPhaseSpans(ran, nameToPhase, phases);
+  const phaseSpans = buildPhaseSpans(scopedRan, nameToPhase, phases);
+  // Tracks band: only meaningful when the whole tick is in view across ≥2 tracks.
+  const trackSpans = (trackScope === 'all' && scopeTracks.length >= 2)
+    ? buildTrackSpans(scopeTracks, scopedRan, nameToDagId)
+    : [];
 
   let maxEnd = 0;
-  for (const s of ran.values()) {
+  for (const s of scopedRan.values()) {
     if (s.endUs > maxEnd) maxEnd = s.endUs;
   }
   const timeBounds = { startUs: 0, endUs: maxEnd };
 
-  const postTick = buildPostTick(postTickRows, tickNumber);
+  // Post-tick serial work belongs to the whole tick — shown only when the whole tick is in view
+  // (the `'all'` scope with engine tracks visible, or a track-less trace). A scoped view (single
+  // track, or app-tracks-only) drops it so the displayed total equals the sum of what is shown.
+  const wholeTick = scopeTracks.length === 0 || (trackScope === 'all' && showEngineSystems);
+  const postTick = wholeTick ? buildPostTick(postTickRows, tickNumber) : EMPTY_POST_TICK;
   const metronomeWaitUs = tickSummaryRow
     ? numberValue((tickSummaryRow as { metronomeWaitUs?: unknown }).metronomeWaitUs) ?? 0
     : 0;
@@ -325,6 +387,7 @@ export function computeCriticalPathForTick(input: {
     cpChain,
     nonCpBars,
     phaseSpans,
+    trackSpans,
     timeBounds,
     postTick,
     metronomeWaitUs,
@@ -404,8 +467,14 @@ export function computeAggregateCriticalPath(input: {
   postTickRows: PostTickSummary[];
   tickSummaries: TickSummaryDto[];
   range: TickRange | null;
+  tracks?: TrackDto[];
+  trackScope?: string;
+  showEngineSystems?: boolean;
 }): TickPathBars | null {
-  const { systems, rows, edges, phases, postTickRows, tickSummaries, range } = input;
+  const {
+    systems, rows, edges, phases, postTickRows, tickSummaries, range,
+    tracks, trackScope = 'all', showEngineSystems = false,
+  } = input;
   if (!range) return null;
 
   const ticksSeen = new Set<number>();
@@ -428,7 +497,10 @@ export function computeAggregateCriticalPath(input: {
   let mode: PathMode = 'execution-order';
   for (const tickNumber of ticksSeen) {
     const tickSummaryRow = tickSummaries.find((t) => Number((t as { tickNumber?: unknown }).tickNumber) === tickNumber) ?? null;
-    const bars = computeCriticalPathForTick({ tickNumber, systems, rows, edges, phases, postTickRows, tickSummaryRow });
+    const bars = computeCriticalPathForTick({
+      tickNumber, systems, rows, edges, phases, postTickRows, tickSummaryRow,
+      tracks, trackScope, showEngineSystems,
+    });
     if (!bars) continue;
     if (bars.mode === 'critical-path') mode = 'critical-path';
     for (const bar of bars.cpChain) {
@@ -464,7 +536,11 @@ export function computeAggregateCriticalPath(input: {
     cursor += m.meanUs;
   }
 
-  const postTick = buildAggregatePostTick(postTickRows, range);
+  // Post-tick serial work — included only when the whole tick is in view (same rule as the
+  // single-tick path); a scoped aggregate drops it so the total equals the sum of what's shown.
+  const scopeTracks = selectScopeTracks(resolveScopeTracks(tracks), trackScope, showEngineSystems);
+  const wholeTick = scopeTracks.length === 0 || (trackScope === 'all' && showEngineSystems);
+  const postTick = wholeTick ? buildAggregatePostTick(postTickRows, range) : EMPTY_POST_TICK;
   const { metronomeWaitUs, metronomeIntentClass } = buildAggregateMetronome(tickSummaries, range);
 
   return {
@@ -473,6 +549,7 @@ export function computeAggregateCriticalPath(input: {
     cpChain,
     nonCpBars: [],
     phaseSpans: [],
+    trackSpans: [],
     timeBounds: { startUs: 0, endUs: cursor },
     postTick,
     metronomeWaitUs,
@@ -662,6 +739,144 @@ function fallbackOrder(ran: Map<string, RanSystem>): string[] {
   return [...ran.values()]
     .sort((a, b) => (a.startUs - b.startUs) || a.name.localeCompare(b.name))
     .map((s) => s.name);
+}
+
+// ── Track scoping (#354) ──────────────────────────────────────────────────
+
+/** Track tag marking engine-internal tracks — excluded from the `'all'` scope unless revealed. */
+const ENGINE_TAG = 'engine';
+
+/** Empty post-tick block — used by scoped views, which omit the whole-tick serial tail. */
+const EMPTY_POST_TICK: TickPathPostTick = {
+  writeTickFenceUs: 0,
+  walFlushUs: 0,
+  subscriptionOutputUs: 0,
+  tierIndexRebuildUs: 0,
+  dormancySweepUs: 0,
+  tierBudgetUs: 0,
+  totalUs: 0,
+};
+
+/** One track resolved for scoping — its DAG-id set plus the `engine` tag, in execution order. */
+interface ScopeTrack {
+  name: string;
+  orderIndex: number;
+  isEngine: boolean;
+  dagIds: Set<number>;
+}
+
+/**
+ * Project `topology.tracks` into ordered scope buckets. Returns an empty array for a track-less
+ * topology (legacy traces) — the caller then falls back to the single global traceback.
+ */
+function resolveScopeTracks(tracks: TrackDto[] | undefined): ScopeTrack[] {
+  if (!tracks || tracks.length === 0) return [];
+  const out: ScopeTrack[] = [];
+  for (const t of tracks) {
+    const dagIds = new Set<number>();
+    for (const d of t.dags ?? []) {
+      const id = numberValue((d as { id?: unknown }).id);
+      if (id != null) dagIds.add(id);
+    }
+    out.push({
+      name: t.name ?? '',
+      orderIndex: numberValue((t as { orderIndex?: unknown }).orderIndex) ?? 0,
+      isEngine: (t.tags ?? []).includes(ENGINE_TAG),
+      dagIds,
+    });
+  }
+  out.sort((a, b) => a.orderIndex - b.orderIndex);
+  return out;
+}
+
+/**
+ * The tracks in scope for the current selection, in execution order. `'all'` keeps every track
+ * (minus `engine`-tagged ones unless `showEngineSystems`); a track name keeps just that track. An
+ * unknown name — e.g. a `trackScope` persisted from another trace — degrades to the `'all'` set.
+ */
+function selectScopeTracks(resolved: ScopeTrack[], trackScope: string, showEngineSystems: boolean): ScopeTrack[] {
+  if (resolved.length === 0) return [];
+  if (trackScope !== 'all') {
+    const named = resolved.filter((t) => t.name === trackScope);
+    if (named.length > 0) return named;
+    // Unknown track — fall through to the 'all' set.
+  }
+  return showEngineSystems ? resolved : resolved.filter((t) => !t.isEngine);
+}
+
+/** systemName → owning DAG id, from `SystemDefinitionDto.dagId`. */
+function buildNameToDagId(systems: SystemDefinitionDto[]): Map<string, number> {
+  const map = new Map<string, number>();
+  for (const s of systems) {
+    if (!s.name) continue;
+    const dagId = numberValue((s as { dagId?: unknown }).dagId);
+    if (dagId != null) map.set(s.name, dagId);
+  }
+  return map;
+}
+
+/**
+ * Track-aware critical-path names for one tick's `ran` set. With a real Track hierarchy the path
+ * is the per-track measured traceback ({@link traceCriticalPath} over the track's ran systems —
+ * terminus = track-wide `argmax endUs`; the traceback stays DAG-local on its own since
+ * `predecessors` never crosses a DAG) concatenated in track order. A track-less topology
+ * (`scopeTracks` empty) falls back to the single global traceback.
+ *
+ * Returns the ordered CP names plus `scopedRan` — `ran` narrowed to the in-scope tracks, which is
+ * the universe the caller uses for non-CP bars / spans / bounds.
+ */
+function tracedCriticalPath(
+  ran: Map<string, RanSystem>,
+  scopeTracks: ScopeTrack[],
+  nameToDagId: Map<string, number>,
+  preds: Map<string, string[]>,
+  hasGraph: boolean,
+): { cpNames: string[]; scopedRan: Map<string, RanSystem> } {
+  // Track-less: today's behaviour over the whole ran set.
+  if (scopeTracks.length === 0) {
+    return { cpNames: hasGraph ? traceCriticalPath(ran, preds) : fallbackOrder(ran), scopedRan: ran };
+  }
+
+  const cpNames: string[] = [];
+  const scopedRan = new Map<string, RanSystem>();
+  for (const track of scopeTracks) {
+    const ranT = new Map<string, RanSystem>();
+    for (const [name, rs] of ran) {
+      const dagId = nameToDagId.get(name);
+      if (dagId != null && track.dagIds.has(dagId)) {
+        ranT.set(name, rs);
+        scopedRan.set(name, rs);
+      }
+    }
+    if (ranT.size === 0) continue;
+    const chainT = hasGraph ? traceCriticalPath(ranT, preds) : fallbackOrder(ranT);
+    for (const n of chainT) cpNames.push(n);
+  }
+  return { cpNames, scopedRan };
+}
+
+/** Per-track measured `[min startUs, max endUs]` over `scopedRan`. Tracks with no ran system are dropped. */
+function buildTrackSpans(
+  scopeTracks: ScopeTrack[],
+  scopedRan: Map<string, RanSystem>,
+  nameToDagId: Map<string, number>,
+): TrackSpan[] {
+  const spans: TrackSpan[] = [];
+  for (let i = 0; i < scopeTracks.length; i++) {
+    const track = scopeTracks[i];
+    let start = Infinity;
+    let end = -Infinity;
+    for (const [name, rs] of scopedRan) {
+      const dagId = nameToDagId.get(name);
+      if (dagId == null || !track.dagIds.has(dagId)) continue;
+      if (rs.startUs < start) start = rs.startUs;
+      if (rs.endUs > end) end = rs.endUs;
+    }
+    if (start !== Infinity) {
+      spans.push({ name: track.name, index: i, startUs: start, endUs: end });
+    }
+  }
+  return spans;
 }
 
 function makeBar(s: RanSystem, def: SystemDefinitionDto | undefined, phaseIndex: number): TickPathBar {

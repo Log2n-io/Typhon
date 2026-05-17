@@ -62,8 +62,9 @@ class CheckerboardTests : TestBase<CheckerboardTests>
         var ticksDone = 0;
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Counter", _ => Interlocked.Increment(ref ticksDone));
-            schedule.QuerySystem("CB_Check", ctx =>
+            var dag = schedule.PublicTrack.DeclareDag("Test");
+            dag.CallbackSystem("Counter", _ => Interlocked.Increment(ref ticksDone));
+            dag.QuerySystem("CB_Check", ctx =>
             {
                 // Callback is invoked once per phase — should see it twice per tick
                 Interlocked.Increment(ref callbackCount);
@@ -152,8 +153,9 @@ class CheckerboardTests : TestBase<CheckerboardTests>
         var ticksDone = 0;
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Counter", _ => Interlocked.Increment(ref ticksDone));
-            schedule.QuerySystem("CB_BlackOnly", ctx =>
+            var dag = schedule.PublicTrack.DeclareDag("Test");
+            dag.CallbackSystem("Counter", _ => Interlocked.Increment(ref ticksDone));
+            dag.QuerySystem("CB_BlackOnly", ctx =>
             {
                 foreach (var id in ctx.Entities)
                 {
@@ -182,7 +184,8 @@ class CheckerboardTests : TestBase<CheckerboardTests>
         {
             TyphonRuntime.Create(dbe, schedule =>
             {
-                schedule.QuerySystem("Bad", _ => { }, input: () => view, checkerboard: true);
+                var dag = schedule.PublicTrack.DeclareDag("Test");
+                dag.QuerySystem("Bad", _ => { }, input: () => view, checkerboard: true);
             }, new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
         });
         Assert.That(ex.Message, Does.Contain("checkerboard"));
@@ -234,8 +237,9 @@ class CheckerboardTests : TestBase<CheckerboardTests>
         var ticksDone = 0;
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Counter", _ => Interlocked.Increment(ref ticksDone));
-            schedule.QuerySystem("CB_Dormancy", ctx =>
+            var dag = schedule.PublicTrack.DeclareDag("Test");
+            dag.CallbackSystem("Counter", _ => Interlocked.Increment(ref ticksDone));
+            dag.QuerySystem("CB_Dormancy", ctx =>
             {
                 foreach (var id in ctx.Entities)
                 {
@@ -279,9 +283,10 @@ class CheckerboardTests : TestBase<CheckerboardTests>
         var ticksDone = 0;
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Counter", _ => Interlocked.Increment(ref ticksDone));
+            var dag = schedule.PublicTrack.DeclareDag("Test");
+            dag.CallbackSystem("Counter", _ => Interlocked.Increment(ref ticksDone));
             // NOTE: no tier filter — checkerboard with SimTier.All (default)
-            schedule.QuerySystem("CB_AllTier", ctx =>
+            dag.QuerySystem("CB_AllTier", ctx =>
             {
                 Interlocked.Increment(ref callbackCount);
             }, input: () => view, parallel: true, checkerboard: true, after: "Counter");
@@ -321,8 +326,9 @@ class CheckerboardTests : TestBase<CheckerboardTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Counter", _ => Interlocked.Increment(ref ticksDone));
-            schedule.QuerySystem("T0_Work", ctx =>
+            var dag = schedule.PublicTrack.DeclareDag("Test");
+            dag.CallbackSystem("Counter", _ => Interlocked.Increment(ref ticksDone));
+            dag.QuerySystem("T0_Work", ctx =>
             {
                 // On tick 2+, previous tick's metrics should be populated
                 if (ctx.TickNumber > 0)
@@ -369,13 +375,14 @@ class CheckerboardTests : TestBase<CheckerboardTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Counter", _ => Interlocked.Increment(ref ticksDone));
-            schedule.QuerySystem("T0_Sys", ctx =>
+            var dag = schedule.PublicTrack.DeclareDag("Test");
+            dag.CallbackSystem("Counter", _ => Interlocked.Increment(ref ticksDone));
+            dag.QuerySystem("T0_Sys", ctx =>
             {
                 foreach (var id in ctx.Entities) { }
                 if (ctx.TickNumber > 0) { capturedMetrics = ctx.TierBudgetMetrics; }
             }, input: () => view, tier: SimTier.Tier0, parallel: true, after: "Counter");
-            schedule.QuerySystem("T1_Sys", ctx =>
+            dag.QuerySystem("T1_Sys", ctx =>
             {
                 foreach (var id in ctx.Entities) { }
             }, input: () => view, tier: SimTier.Tier1, parallel: true, after: "T0_Sys");
@@ -484,7 +491,8 @@ class CheckerboardTests : TestBase<CheckerboardTests>
         var ticksDone = 0;
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("GridAccess", ctx =>
+            var dag = schedule.PublicTrack.DeclareDag("Test");
+            dag.CallbackSystem("GridAccess", ctx =>
             {
                 if (Interlocked.Increment(ref ticksDone) == 1)
                 {
@@ -532,7 +540,8 @@ class CheckerboardTests : TestBase<CheckerboardTests>
         var ticksDone = 0;
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("TierAssignment", ctx =>
+            var dag = schedule.PublicTrack.DeclareDag("Test");
+            dag.CallbackSystem("TierAssignment", ctx =>
             {
                 if (Interlocked.Increment(ref ticksDone) == 1)
                 {

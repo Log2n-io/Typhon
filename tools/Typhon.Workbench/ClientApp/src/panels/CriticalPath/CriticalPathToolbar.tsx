@@ -7,6 +7,8 @@ import { useCriticalPathViewStore, type Orientation } from './useCriticalPathVie
 interface Props {
   bars: TickPathBars | null;
   onFit: () => void;
+  /** Track names with ≥1 DAG, filtered by the engine-systems setting. The selector prepends "All". */
+  trackOptions: string[];
 }
 
 /**
@@ -14,7 +16,7 @@ interface Props {
  * scale toggles, zoom indicator, and a Fit button. All view-state lives in
  * {@link useCriticalPathViewStore} so the toggles are dumb pass-throughs.
  */
-export default function CriticalPathToolbar({ bars, onFit }: Props) {
+export default function CriticalPathToolbar({ bars, onFit, trackOptions }: Props) {
   const orientation = useCriticalPathViewStore((s) => s.orientation);
   const setOrientation = useCriticalPathViewStore((s) => s.setOrientation);
   const pxPerUs = useCriticalPathViewStore((s) => s.pxPerUs);
@@ -26,6 +28,10 @@ export default function CriticalPathToolbar({ bars, onFit }: Props) {
   const setAggregateMode = useCriticalPathViewStore((s) => s.setAggregateMode);
   const showMetronome = useCriticalPathViewStore((s) => s.showMetronome);
   const setShowMetronome = useCriticalPathViewStore((s) => s.setShowMetronome);
+  const trackScope = useCriticalPathViewStore((s) => s.trackScope);
+  const setTrackScope = useCriticalPathViewStore((s) => s.setTrackScope);
+  // A scope persisted from another trace may name a track that isn't here — show "All" for it.
+  const effectiveScope = trackScope === 'all' || trackOptions.includes(trackScope) ? trackScope : 'all';
   // Help glyph follows the app-wide `legendsVisible` flag (toggled via the `l` key or the
   // "Toggle Legends" palette command). Hidden when legends are off so chrome stays minimal.
   const legendsVisible = useUiPrefsStore((s) => s.legendsVisible);
@@ -53,6 +59,22 @@ export default function CriticalPathToolbar({ bars, onFit }: Props) {
       {bars && <span className="text-muted-foreground">{formatUs(bars.totalUs)}</span>}
 
       <div className="ml-auto flex items-center gap-3">
+        {trackOptions.length > 0 && (
+          <div className="flex items-center gap-1">
+            <span className="text-muted-foreground">track</span>
+            <select
+              value={effectiveScope}
+              onChange={(e) => setTrackScope(e.target.value)}
+              className="rounded border border-border bg-card px-1.5 py-0.5 text-[10px] text-foreground hover:bg-muted focus:outline-none focus:ring-1 focus:ring-primary"
+              title="Scope the critical path to one track, or All to walk every track in order. Engine tracks follow the Options → DAG setting."
+            >
+              <option value="all">All</option>
+              {trackOptions.map((t) => (
+                <option key={t} value={t}>{t}</option>
+              ))}
+            </select>
+          </div>
+        )}
         <SegmentedControl<'single' | 'aggregate'>
           label="mode"
           value={aggregateMode ? 'aggregate' : 'single'}

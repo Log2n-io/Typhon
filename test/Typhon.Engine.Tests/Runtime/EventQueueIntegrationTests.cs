@@ -39,9 +39,10 @@ class EventQueueIntegrationTests : TestBase<EventQueueIntegrationTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            queue = schedule.CreateEventQueue<int>("TestEvents");
+            var dag = schedule.PublicTrack.DeclareDag("Test");
+            queue = dag.CreateEventQueue<int>("TestEvents");
 
-            schedule
+            dag
                 .CallbackSystem("Producer", _ => queue.Push(42))
                 .CallbackSystem("Consumer", ctx =>
                 {
@@ -74,7 +75,7 @@ class EventQueueIntegrationTests : TestBase<EventQueueIntegrationTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("System", ctx =>
+            schedule.PublicTrack.DeclareDag("Test").CallbackSystem("System", ctx =>
             {
                 if (captured == 0)
                 {
@@ -102,9 +103,10 @@ class EventQueueIntegrationTests : TestBase<EventQueueIntegrationTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            queue = schedule.CreateEventQueue<int>("Damage");
+            var dag = schedule.PublicTrack.DeclareDag("Test");
+            queue = dag.CreateEventQueue<int>("Damage");
 
-            schedule
+            dag
                 .CallbackSystem("Combat", _ =>
                 {
                     queue.Push(10);
@@ -146,7 +148,7 @@ class EventQueueIntegrationTests : TestBase<EventQueueIntegrationTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Alpha", _ => { })
+            schedule.PublicTrack.DeclareDag("Test").CallbackSystem("Alpha", _ => { })
                 .CallbackSystem("Beta", _ => { }, after: "Alpha");
         }, new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
 

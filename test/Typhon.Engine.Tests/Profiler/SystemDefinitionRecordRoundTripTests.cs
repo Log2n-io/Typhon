@@ -5,12 +5,12 @@ using Typhon.Profiler;
 namespace Typhon.Engine.Tests.Profiler;
 
 /// <summary>
-/// Wire-format tests for the trace v6 SystemDefinitionTable + PhasesTable extension introduced for #310.
+/// Wire-format tests for the trace SystemDefinitionTable + Track→DAG hierarchy (v11, #354).
 ///
 /// Goals:
-///   1. Round-trip every RFC 07 field declared on <see cref="SystemDefinitionRecord"/>.
-///   2. Backward-compat: a v5 trace (no RFC 07 fields, no Phases section) reads with empty defaults
-///      and does not throw.
+///   1. Round-trip every RFC 07 field declared on <see cref="SystemDefinitionRecord"/>, including the v11 DagId.
+///   2. Round-trip the TracksTable + DagsTable that replaced the v6 PhasesTable.
+///   3. Hard-reject layout-incompatible old versions (v10 and earlier).
 /// </summary>
 [TestFixture]
 public sealed class SystemDefinitionRecordRoundTripTests
@@ -57,6 +57,7 @@ public sealed class SystemDefinitionRecordRoundTripTests
             ReadsResources = ["r2"],
             ExplicitAfter = ["X"],
             ExplicitBefore = ["Y"],
+            DagId = 4,
         };
 
         byte[] bytes;
@@ -69,7 +70,8 @@ public sealed class SystemDefinitionRecordRoundTripTests
                 writer.WriteSystemDefinitions([input]);
                 writer.WriteArchetypes([]);
                 writer.WriteComponentTypes([]);
-                writer.WritePhases(["Input", "Simulation", "Output"]);
+                writer.WriteTracks([new TrackRecord { Name = "Main", OrderIndex = 0, Tags = ["engine"] }]);
+                writer.WriteDags([new DagRecord { Id = 4, Name = "SimDag", TrackIndex = 0, PhaseNames = ["Input", "Simulation", "Output"] }]);
                 writer.WriteEmptyStaticStructures();
                 writer.Flush();
                 bytes = writeStream.ToArray();
@@ -82,7 +84,8 @@ public sealed class SystemDefinitionRecordRoundTripTests
         reader.ReadSystemDefinitions();
         reader.ReadArchetypes();
         reader.ReadComponentTypes();
-        reader.ReadPhases();
+        reader.ReadTracks();
+        reader.ReadDags();
         reader.ReadComponentDefinitions();
         reader.ReadArchetypeDefinitions();
         reader.ReadIndexCatalog();
@@ -111,17 +114,24 @@ public sealed class SystemDefinitionRecordRoundTripTests
         Assert.That(output.ReadsResources, Is.EqualTo(new[] { "r2" }));
         Assert.That(output.ExplicitAfter, Is.EqualTo(new[] { "X" }));
         Assert.That(output.ExplicitBefore, Is.EqualTo(new[] { "Y" }));
+        Assert.That(output.DagId, Is.EqualTo(4));
 
-        Assert.That(reader.Phases, Is.EqualTo(new[] { "Input", "Simulation", "Output" }));
+        Assert.That(reader.Tracks, Has.Count.EqualTo(1));
+        Assert.That(reader.Tracks[0].Name, Is.EqualTo("Main"));
+        Assert.That(reader.Tracks[0].Tags, Is.EqualTo(new[] { "engine" }));
+        Assert.That(reader.Dags, Has.Count.EqualTo(1));
+        Assert.That(reader.Dags[0].Id, Is.EqualTo(4));
+        Assert.That(reader.Dags[0].Name, Is.EqualTo("SimDag"));
+        Assert.That(reader.Dags[0].TrackIndex, Is.EqualTo(0));
+        Assert.That(reader.Dags[0].PhaseNames, Is.EqualTo(new[] { "Input", "Simulation", "Output" }));
     }
 
-    [TestCase((ushort)5)]
-    [TestCase((ushort)6)]
+    [TestCase((ushort)8)]
+    [TestCase((ushort)10)]
     public void OldVersionsAreHardRejected(ushort version)
     {
-        // v7 introduced rich static-structure tables that the Workbench schema panels rely on. Older traces
-        // simply lack the data; rather than synthesising empty defaults (which would silently render "no schema"
-        // for old traces with no indication why), the reader hard-rejects them. Re-record against a current build.
+        // v11 is a layout-breaking change (SystemDefinitionTable gained a DagId field; PhasesTable replaced by
+        // TracksTable + DagsTable). Older traces would mis-decode, so the reader hard-rejects them.
         //
         // Critically: we craft a header with VALID magic + the old version. With magic correct, the reader's
         // magic-check (which fires first per #6 of the v7 review) passes and the version-check is what rejects.

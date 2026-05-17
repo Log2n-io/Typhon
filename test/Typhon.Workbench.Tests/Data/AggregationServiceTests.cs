@@ -599,7 +599,8 @@ public sealed class AggregationServiceTests
         System.Array.Empty<string>(), System.Array.Empty<string>(),
         System.Array.Empty<string>(), System.Array.Empty<string>(),
         System.Array.Empty<string>(), System.Array.Empty<string>(),
-        System.Array.Empty<string>(), System.Array.Empty<string>());
+        System.Array.Empty<string>(), System.Array.Empty<string>(),
+        DagId: 0);
 
     private static SystemTickSummary MakeSystemRow(uint tick, ushort sysIdx, float duration) => new()
     {
@@ -706,6 +707,7 @@ public sealed class AggregationServiceTests
                 ChunkManifest: System.Array.Empty<ChunkManifestEntryDto>(),
                 GcSuspensions: System.Array.Empty<GcSuspensionDto>(),
                 Phases: System.Array.Empty<string>(),
+                Tracks: System.Array.Empty<TrackDto>(),
                 SystemTickSummaries: systemRows ?? System.Array.Empty<SystemTickSummary>(),
                 QueueTickSummaries: queueRows ?? System.Array.Empty<QueueTickSummary>(),
                 PostTickSummaries: postRows ?? System.Array.Empty<PostTickSummary>(),

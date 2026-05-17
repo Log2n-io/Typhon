@@ -41,21 +41,21 @@ public class ParallelQueryTests
         string after = null,
         Action<TickContext> predecessorAction = null)
     {
-        var schedule = RuntimeSchedule.Create(new RuntimeOptions
+        var dag = RuntimeSchedule.Create(new RuntimeOptions
         {
             WorkerCount = workerCount,
             BaseTickRate = 1000,
             ParallelQueryMinChunkSize = minChunkSize
-        });
+        }).PublicTrack.DeclareDag("Test");
 
         if (predecessorAction != null)
         {
-            schedule.CallbackSystem("Predecessor", predecessorAction);
+            dag.CallbackSystem("Predecessor", predecessorAction);
         }
 
-        schedule.QuerySystem("Parallel", _ => { }, after: after, input: () => null, parallel: true);
+        dag.QuerySystem("Parallel", _ => { }, after: after, input: () => null, parallel: true);
 
-        var scheduler = schedule.Build(_registry.Runtime);
+        var scheduler = dag.Build(_registry.Runtime);
 
         // Wire manual callbacks that simulate entity partitioning
         var entityArray = new EntityId[entityCount];
@@ -247,9 +247,9 @@ public class ParallelQueryTests
         var parallelRan = 0;
         var captured = 0;
 
-        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 2, BaseTickRate = 1000 });
-        schedule.QuerySystem("Parallel", _ => { }, input: () => null, parallel: true);
-        schedule.CallbackSystem("Successor", _ =>
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 2, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        dag.QuerySystem("Parallel", _ => { }, input: () => null, parallel: true);
+        dag.CallbackSystem("Successor", _ =>
         {
             if (captured == 0)
             {
@@ -257,7 +257,7 @@ public class ParallelQueryTests
             }
         }, after: "Parallel");
 
-        var scheduler = schedule.Build(_registry.Runtime);
+        var scheduler = dag.Build(_registry.Runtime);
 
         // Wire: prepare returns 0 (empty)
         scheduler.ParallelQueryPrepareCallback = _ => 0;
@@ -284,9 +284,9 @@ public class ParallelQueryTests
         var successorRan = 0;
         var captured = 0;
 
-        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
-        schedule.QuerySystem("Parallel", _ => { }, input: () => null, parallel: true);
-        schedule.CallbackSystem("Successor", _ =>
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        dag.QuerySystem("Parallel", _ => { }, input: () => null, parallel: true);
+        dag.CallbackSystem("Successor", _ =>
         {
             if (captured == 0)
             {
@@ -294,7 +294,7 @@ public class ParallelQueryTests
             }
         }, after: "Parallel");
 
-        var scheduler = schedule.Build(_registry.Runtime);
+        var scheduler = dag.Build(_registry.Runtime);
 
         // Wire: 2 chunks, first one throws
         scheduler.ParallelQueryPrepareCallback = _ => 2;
@@ -357,16 +357,16 @@ public class ParallelQueryTests
         var timestamps = new ConcurrentDictionary<string, long>();
         var captured = 0;
 
-        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 2, BaseTickRate = 1000 });
-        schedule.CallbackSystem("Setup", _ =>
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 2, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        dag.CallbackSystem("Setup", _ =>
         {
             if (captured == 0)
             {
                 timestamps["Setup"] = Stopwatch.GetTimestamp();
             }
         });
-        schedule.QuerySystem("Parallel", _ => { }, after: "Setup", input: () => null, parallel: true);
-        schedule.CallbackSystem("Cleanup", _ =>
+        dag.QuerySystem("Parallel", _ => { }, after: "Setup", input: () => null, parallel: true);
+        dag.CallbackSystem("Cleanup", _ =>
         {
             if (captured == 0)
             {
@@ -375,7 +375,7 @@ public class ParallelQueryTests
             }
         }, after: "Parallel");
 
-        var scheduler = schedule.Build(_registry.Runtime);
+        var scheduler = dag.Build(_registry.Runtime);
 
         scheduler.ParallelQueryPrepareCallback = _ => 2;
         scheduler.ParallelQueryChunkCallback = (_, chunk, _, _) =>
@@ -520,20 +520,20 @@ public class ParallelQueryTests
     [Test]
     public void LambdaQuerySystem_ParallelFlag_SetsIsParallelQuery()
     {
-        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 2, BaseTickRate = 1000 });
-        schedule.QuerySystem("Parallel", _ => { }, input: () => null, parallel: true);
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 2, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        dag.QuerySystem("Parallel", _ => { }, input: () => null, parallel: true);
 
-        using var scheduler = schedule.Build(_registry.Runtime);
+        using var scheduler = dag.Build(_registry.Runtime);
         Assert.That(scheduler.Systems[0].IsParallelQuery, Is.True);
     }
 
     [Test]
     public void LambdaQuerySystem_NoParallelFlag_NotParallel()
     {
-        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 2, BaseTickRate = 1000 });
-        schedule.QuerySystem("Normal", _ => { });
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 2, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        dag.QuerySystem("Normal", _ => { });
 
-        using var scheduler = schedule.Build(_registry.Runtime);
+        using var scheduler = dag.Build(_registry.Runtime);
         Assert.That(scheduler.Systems[0].IsParallelQuery, Is.False);
     }
 
@@ -547,15 +547,15 @@ public class ParallelQueryTests
         var successorRan = 0;
         var captured = 0;
 
-        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 2, BaseTickRate = 1000 });
-        schedule.PipelineSystem("FailPipeline", (chunk, total) =>
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 2, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        dag.PipelineSystem("FailPipeline", (chunk, total) =>
         {
             if (captured == 0 && chunk == 0)
             {
                 throw new InvalidOperationException("Pipeline chunk 0 failed");
             }
         }, totalChunks: 2);
-        schedule.CallbackSystem("After", _ =>
+        dag.CallbackSystem("After", _ =>
         {
             if (captured == 0)
             {
@@ -563,7 +563,7 @@ public class ParallelQueryTests
             }
         }, after: "FailPipeline");
 
-        using var scheduler = schedule.Build(_registry.Runtime);
+        using var scheduler = dag.Build(_registry.Runtime);
         scheduler.TickEndCallback = _ => Interlocked.Exchange(ref captured, 1);
 
         RunOneTick(scheduler);
@@ -669,10 +669,10 @@ public class ParallelQueryTests
     [Test]
     public void WritesVersioned_LambdaApi_FlagPropagated()
     {
-        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 2, BaseTickRate = 1000 });
-        schedule.QuerySystem("Parallel", _ => { }, input: () => null, parallel: true, writesVersioned: true);
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 2, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        dag.QuerySystem("Parallel", _ => { }, input: () => null, parallel: true, writesVersioned: true);
 
-        using var scheduler = schedule.Build(_registry.Runtime);
+        using var scheduler = dag.Build(_registry.Runtime);
         Assert.That(scheduler.Systems[0].WritesVersioned, Is.True);
         Assert.That(scheduler.Systems[0].IsParallelQuery, Is.True);
     }
@@ -680,20 +680,20 @@ public class ParallelQueryTests
     [Test]
     public void WritesVersioned_DefaultFalse()
     {
-        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 2, BaseTickRate = 1000 });
-        schedule.QuerySystem("Parallel", _ => { }, input: () => null, parallel: true);
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 2, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        dag.QuerySystem("Parallel", _ => { }, input: () => null, parallel: true);
 
-        using var scheduler = schedule.Build(_registry.Runtime);
+        using var scheduler = dag.Build(_registry.Runtime);
         Assert.That(scheduler.Systems[0].WritesVersioned, Is.False);
     }
 
     [Test]
     public void WritesVersioned_WithoutParallel_Throws()
     {
-        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 2, BaseTickRate = 1000 });
-        schedule.QuerySystem("NonParallel", _ => { }, writesVersioned: true);
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 2, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        dag.QuerySystem("NonParallel", _ => { }, writesVersioned: true);
 
-        Assert.Throws<InvalidOperationException>(() => schedule.Build(_registry.Runtime));
+        Assert.Throws<InvalidOperationException>(() => dag.Build(_registry.Runtime));
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -705,10 +705,10 @@ public class ParallelQueryTests
     {
         var captured = 0;
 
-        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 2, BaseTickRate = 1000 });
-        schedule.QuerySystem("Parallel", _ => { }, input: () => null, parallel: true);
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 2, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        dag.QuerySystem("Parallel", _ => { }, input: () => null, parallel: true);
 
-        var scheduler = schedule.Build(_registry.Runtime);
+        var scheduler = dag.Build(_registry.Runtime);
 
         // Wire manual callbacks simulating PTA-based dispatch
         scheduler.ParallelQueryPrepareCallback = _ => 1;
@@ -738,10 +738,10 @@ public class ParallelQueryTests
     {
         var captured = 0;
 
-        var schedule = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 2, BaseTickRate = 1000 });
-        schedule.QuerySystem("Parallel", _ => { }, input: () => null, parallel: true, writesVersioned: true);
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 2, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        dag.QuerySystem("Parallel", _ => { }, input: () => null, parallel: true, writesVersioned: true);
 
-        var scheduler = schedule.Build(_registry.Runtime);
+        var scheduler = dag.Build(_registry.Runtime);
 
         scheduler.ParallelQueryPrepareCallback = _ => 1;
         scheduler.ParallelQueryChunkCallback = (sysIdx, chunk, total, workerId) =>

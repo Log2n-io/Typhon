@@ -1,24 +1,18 @@
 namespace AntHill.Core;
 
 /// <summary>
-/// AntHill custom phases — extends the engine-shipped <see cref="Phase.Input"/>, etc., with the
-/// six tick stages that drive ant simulation. Phases form a total order (per RFC 07 / Q3); the
-/// ordered list is wired into <c>RuntimeOptions.Phases</c> at engine bootstrap.
+/// AntHill custom phases — reuses the engine-shipped <see cref="Phase.Input"/> token and adds three
+/// of its own. The four phases form the DAG-local total order of the "AntHill" DAG (declared via
+/// <see cref="Dag.Phases"/> in <c>TyphonBridge.BuildSchedule</c>); every system in phase N completes
+/// before any system in phase N+1.
 ///
 /// Pipeline (top → bottom):
 /// <list type="bullet">
-///   <item><see cref="Phase.Input"/> — TierAssignment (camera → spatial-grid tiers)</item>
-///   <item><see cref="Movement"/> — MoveAll (apply velocity to bounds)</item>
-///   <item><see cref="Lifecycle"/> — Metabolism (energy decay, death/respawn) per tier</item>
-///   <item><see cref="Sense"/> — FoodDetect (food smell + pickup + nest drop)</item>
-///   <item><see cref="Brain"/> — pheromone steering + wander, per tier</item>
-///   <item><see cref="Trail"/> — pheromone deposit + decay</item>
-///   <item><see cref="Render"/> — Prepare/Fill/Publish render buffers + stats aggregation</item>
+///   <item><see cref="Phase.Input"/> — ToolCommand / EnvironmentTick / TierAssignment</item>
+///   <item><see cref="Simulation"/> — AntUpdate (merged per-ant simulation) + SpiderUpdate</item>
+///   <item><see cref="Trail"/> — pheromone decay, fire CA, vegetation</item>
+///   <item><see cref="Render"/> — Prepare/Fill/Publish render buffers + stats aggregation + heatmaps</item>
 /// </list>
-///
-/// Splitting Sense / Brain / Trail rather than collapsing into one "Simulation" phase is
-/// deliberate — each phase boundary becomes a visible stripe in the Workbench System DAG and
-/// Critical-Path views, which is the showcase value of the migration.
 /// </summary>
 public static class AntPhases
 {

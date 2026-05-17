@@ -228,6 +228,8 @@ public class SystemAccessValidatorTests
         };
 
         using var scheduler = RuntimeSchedule.Create(new RuntimeOptions { BaseTickRate = 1000, WorkerCount = 1 })
+            .PublicTrack.DeclareDag("Test")
+            .Phases(Phase.Simulation)
             .Add(sys)
             .Build(_registry.Runtime);
 
@@ -260,6 +262,8 @@ public class SystemAccessValidatorTests
         };
 
         using var scheduler = RuntimeSchedule.Create(new RuntimeOptions { BaseTickRate = 1000, WorkerCount = 1 })
+            .PublicTrack.DeclareDag("Test")
+            .Phases(Phase.Simulation)
             .Add(sys)
             .Build(_registry.Runtime);
 
@@ -285,6 +289,8 @@ public class SystemAccessValidatorTests
         };
 
         using var scheduler = RuntimeSchedule.Create(new RuntimeOptions { BaseTickRate = 1000, WorkerCount = 1 })
+            .PublicTrack.DeclareDag("Test")
+            .Phases(Phase.Simulation)
             .Add(sys)
             .Build(_registry.Runtime);
 

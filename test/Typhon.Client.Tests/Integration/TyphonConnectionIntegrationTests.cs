@@ -139,7 +139,7 @@ public class TyphonConnectionIntegrationTests
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Spawner", ctx =>
+            schedule.PublicTrack.DeclareDag("Test").CallbackSystem("Spawner", ctx =>
             {
                 if ((int)ctx.TickNumber == 2)
                 {

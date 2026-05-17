@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { colorForPhase, SYSTEM_PALETTE } from '@/libs/palettes';
 import { pickTextColorFor } from '@/libs/colors';
@@ -41,6 +41,8 @@ const RULER_PX = 20;
 const PHASE_LANE_PX = 13;
 const RIBBON_PX = 15;
 const TRACK_PX = 30;
+/** Height of the Tracks band (#354) — a single non-overlapping lane, shown only in the "All" scope. */
+const TRACK_BAND_PX = 14;
 /** Minor-axis inset of a bar inside its TRACK_PX lane — leaves room for the ≤2 px stroke (centred
  *  on the rect edge) so a bar never bleeds into the neighbouring lane or a section separator. */
 const BAR_INSET_PX = 2;
@@ -64,8 +66,11 @@ export default function CriticalPathView({ bars, selectedSystemName, onSelectBar
   const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 });
   const [stableViewportSize, setStableViewportSize] = useState({ width: 0, height: 0 });
   const [tooltip, setTooltip] = useState<TooltipState | null>(null);
-  // Horizontal scroll offset — drives the sticky band-label gutter (kept X-pinned via a transform).
-  const [scrollX, setScrollX] = useState(0);
+  // Major-axis pan offset (px). The time axis is clipped to the viewport — TimeArea model — and
+  // panned via this offset rather than a native scrollbar. `panMajorRef` mirrors the clamped value
+  // so the native wheel handler reads it fresh without re-binding.
+  const [panMajor, setPanMajor] = useState(0);
+  const panMajorRef = useRef(0);
 
   const orientation: Exclude<Orientation, 'auto'> = useMemo(
     () => resolveOrientation(rawOrientation, stableViewportSize.width, stableViewportSize.height),
@@ -99,15 +104,19 @@ export default function CriticalPathView({ bars, selectedSystemName, onSelectBar
   );
 
   // ── Minor-axis band offsets ─────────────────────────────────────────────
-  // Band order: ruler → worker-occupancy ribbon → phase band → CP track → non-CP tracks. The ribbon
-  // sits directly under the ruler (above the phases) so pool utilisation reads against the time axis first.
+  // Band order: ruler → worker-occupancy ribbon → Tracks band → phase band → CP track → non-CP
+  // tracks. The ribbon sits directly under the ruler so pool utilisation reads against the time
+  // axis first; the Tracks band (only populated in the "All" scope) sits above the phases since a
+  // track contains DAGs which contain phases.
   const phaseBandPx = phasePacked.laneCount * PHASE_LANE_PX;
   const ribbonPx = occupancy ? RIBBON_PX : 0;
+  const tracksBandPx = bars.trackSpans.length > 0 ? TRACK_BAND_PX : 0;
   const nonCpTracksPx = fullGantt ? nonCpPacked.laneCount * TRACK_PX : 0;
 
   const rulerStart = 0;
   const ribbonStart = RULER_PX + BAND_GAP_PX;
-  const phaseBandStart = ribbonStart + ribbonPx + (ribbonPx > 0 ? BAND_GAP_PX : 0);
+  const tracksBandStart = ribbonStart + ribbonPx + (ribbonPx > 0 ? BAND_GAP_PX : 0);
+  const phaseBandStart = tracksBandStart + tracksBandPx + (tracksBandPx > 0 ? BAND_GAP_PX : 0);
   const cpTrackStart = phaseBandStart + phaseBandPx + (phaseBandPx > 0 ? BAND_GAP_PX : 0);
   const nonCpStart = cpTrackStart + TRACK_PX + BAND_GAP_PX;
   const minorTotalPx = (fullGantt && nonCpTracksPx > 0 ? nonCpStart + nonCpTracksPx : cpTrackStart + TRACK_PX) + EDGE_PAD_PX;
@@ -126,9 +135,16 @@ export default function CriticalPathView({ bars, selectedSystemName, onSelectBar
   // Left band-label gutter — horizontal orientation only; the time content is shifted right by its width.
   const gutterPx = orientation === 'horizontal' ? GUTTER_PX : 0;
   const majorTotalPx = Math.max(1, totalSpanUs * pxPerUs);
-  // Major axis drives the time dimension — width in horizontal, height in vertical.
-  const svgW = orientation === 'horizontal' ? gutterPx + majorTotalPx : minorTotalPx;
-  const svgH = orientation === 'horizontal' ? minorTotalPx : majorTotalPx;
+  // Major-axis viewport extent. The content is clipped to this (no native scrollbar on the time
+  // axis) and panned via `panMajor`; the SVG is sized to the viewport, never to the content.
+  const majorViewport = Math.max(1, orientation === 'horizontal' ? viewportSize.width : viewportSize.height);
+  // Largest valid pan — content end flush with the viewport edge; 0 when the content already fits.
+  const maxPanMajor = Math.max(0, gutterPx + majorTotalPx - majorViewport);
+  const panMajorClamped = Math.min(Math.max(0, panMajor), maxPanMajor);
+  panMajorRef.current = panMajorClamped;
+  // Major axis = viewport-sized (clipped); minor axis = full content (native scroll when taller).
+  const svgW = orientation === 'horizontal' ? majorViewport : minorTotalPx;
+  const svgH = orientation === 'horizontal' ? minorTotalPx : majorViewport;
 
   // ── Viewport tracking ───────────────────────────────────────────────────
   useEffect(() => {
@@ -172,8 +188,10 @@ export default function CriticalPathView({ bars, selectedSystemName, onSelectBar
     onFit();
   }, [showMetronome, onFit]);
 
-  // ── Cursor-anchored wheel zoom ──────────────────────────────────────────
-  const pendingAnchor = useRef<{ anchorUs: number; cursorMajor: number } | null>(null);
+  // ── Wheel: cursor-anchored zoom + clip-and-pan ──────────────────────────
+  // The time axis is clipped to the viewport (no native scrollbar — TimeArea model). Plain wheel
+  // zooms around the cursor; horizontal wheel / Shift+wheel pan the time axis; Ctrl/Cmd+wheel
+  // scrolls the minor (cross) axis, which keeps its native scrollbar.
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -181,48 +199,39 @@ export default function CriticalPathView({ bars, selectedSystemName, onSelectBar
       e.preventDefault();
       const rect = el.getBoundingClientRect();
       const orient = orientationRef.current;
-      if (e.deltaX !== 0) {
-        el.scrollLeft += e.deltaX;
-        return;
-      }
-      if (e.shiftKey) {
-        const delta = e.deltaY * 5;
-        if (orient === 'horizontal') el.scrollLeft += delta;
-        else el.scrollTop += delta;
-        return;
-      }
+      const g = orient === 'horizontal' ? GUTTER_PX : 0;
+      const vpMajor = Math.max(1, orient === 'horizontal' ? rect.width : rect.height);
+      const cur = useCriticalPathViewStore.getState().pxPerUs;
+      const clampPan = (p: number, px: number): number =>
+        Math.min(Math.max(0, p), Math.max(0, g + totalSpanUs * px - vpMajor));
+
       if (e.ctrlKey || e.metaKey) {
         if (orient === 'horizontal') el.scrollTop += e.deltaY;
         else el.scrollLeft += e.deltaY;
         return;
       }
-      const cur = useCriticalPathViewStore.getState().pxPerUs;
-      const factor = Math.exp(-e.deltaY * 0.0015);
+      if (e.deltaX !== 0 || e.shiftKey) {
+        // Horizontal wheel, or Shift+wheel → pan the time axis.
+        const delta = e.shiftKey ? e.deltaY : e.deltaX;
+        setPanMajor(clampPan(panMajorRef.current + delta, cur));
+        return;
+      }
+      // Plain wheel → zoom, anchored on the drawn-µs under the cursor. Position of a drawn-µs `u`
+      // is `g + u·pxPerUs − panMajor`; solve for the `u` under the cursor, then re-pan so it stays.
       const cursorMajor = orient === 'horizontal' ? e.clientX - rect.left : e.clientY - rect.top;
-      const scrollMajor = orient === 'horizontal' ? el.scrollLeft : el.scrollTop;
-      // Anchor on the drawn-µs under the cursor — the gutter is a fixed, non-scaling band, so the
-      // anchor must be expressed in content time (gutter excluded), not as a fraction of the whole
-      // major extent. `g + drawnUs * pxPerUs` is the major-px of any drawn-µs.
-      const g = orient === 'horizontal' ? GUTTER_PX : 0;
-      const anchorUs = (scrollMajor + cursorMajor - g) / cur;
-      pendingAnchor.current = { anchorUs, cursorMajor };
-      useCriticalPathViewStore.getState().setPxPerUs(cur * factor);
+      const anchorUs = (panMajorRef.current + cursorMajor - g) / cur;
+      const next = Math.max(1e-6, cur * Math.exp(-e.deltaY * 0.0015));
+      useCriticalPathViewStore.getState().setPxPerUs(next);
+      setPanMajor(clampPan(g + anchorUs * next - cursorMajor, next));
     };
     el.addEventListener('wheel', onWheel, { passive: false });
     return () => el.removeEventListener('wheel', onWheel);
   }, [totalSpanUs]);
 
-  useLayoutEffect(() => {
-    const a = pendingAnchor.current;
-    if (!a) return;
-    const el = scrollRef.current;
-    if (!el) return;
-    const g = orientationRef.current === 'horizontal' ? GUTTER_PX : 0;
-    const newScroll = g + a.anchorUs * pxPerUs - a.cursorMajor;
-    if (orientationRef.current === 'horizontal') el.scrollLeft = newScroll;
-    else el.scrollTop = newScroll;
-    pendingAnchor.current = null;
-  }, [pxPerUs, totalSpanUs]);
+  // Re-clamp the pan when a zoom-out or a viewport resize shrinks the pannable range.
+  useEffect(() => {
+    setPanMajor((p) => Math.min(Math.max(0, p), maxPanMajor));
+  }, [maxPanMajor]);
 
   // ── Fit ─────────────────────────────────────────────────────────────────
   const fitInputsRef = useRef({ orientation, viewportSize, totalSpanUs });
@@ -236,7 +245,6 @@ export default function CriticalPathView({ bars, selectedSystemName, onSelectBar
   // size lands — otherwise the request is silently dropped and the view stays unfitted until the
   // user presses Fit.
   const pendingFitRef = useRef(false);
-  const pendingFitScroll = useRef<number | null>(null);
   useEffect(() => {
     if (fitSignal !== lastFitSignalRef.current) {
       lastFitSignalRef.current = fitSignal;
@@ -249,24 +257,8 @@ export default function CriticalPathView({ bars, selectedSystemName, onSelectBar
     if (major <= 0) return; // viewport not measured yet — keep the latch, retry on the next size change
     pendingFitRef.current = false;
     setPxPerUs(major / Math.max(1, total));
-    pendingAnchor.current = null;
-    pendingFitScroll.current = 0;
+    setPanMajor(0); // fitted content fills the viewport exactly — pan back to the start.
   }, [fitSignal, viewportSize, setPxPerUs]);
-
-  useLayoutEffect(() => {
-    const offset = pendingFitScroll.current;
-    if (offset == null) return;
-    const el = scrollRef.current;
-    if (!el) return;
-    if (orientation === 'horizontal') {
-      el.scrollLeft = offset;
-      el.scrollTop = 0;
-    } else {
-      el.scrollTop = offset;
-      el.scrollLeft = 0;
-    }
-    pendingFitScroll.current = null;
-  }, [pxPerUs, orientation]);
 
   // Middle-click = fit.
   useEffect(() => {
@@ -291,7 +283,7 @@ export default function CriticalPathView({ bars, selectedSystemName, onSelectBar
   // ── Geometry helpers ────────────────────────────────────────────────────
   // A tick-relative time → drawn-µs (metronome lead included) → px on the major axis. The gutter
   // shifts every absolute position right; lengths taken as a difference of two majorPx cancel it.
-  const majorPx = (tickRelUs: number): number => gutterPx + (leadUs + tickRelUs) * pxPerUs;
+  const majorPx = (tickRelUs: number): number => gutterPx + (leadUs + tickRelUs) * pxPerUs - panMajorClamped;
   // A drawn-µs value (already lead-relative, e.g. metronome / post-tick) → px. Pure span — no gutter
   // (it is used as a length; callers add `gutterPx` themselves when they need an absolute start).
   const drawnPx = (drawnUs: number): number => drawnUs * pxPerUs;
@@ -315,9 +307,6 @@ export default function CriticalPathView({ bars, selectedSystemName, onSelectBar
     <div
       ref={scrollRef}
       className="relative h-full w-full overflow-auto bg-background"
-      onScroll={(e) => {
-        if (orientation === 'horizontal') setScrollX(e.currentTarget.scrollLeft);
-      }}
       onMouseLeave={() => {
         setTooltip(null);
         setHoveredSystem(null);
@@ -356,7 +345,7 @@ export default function CriticalPathView({ bars, selectedSystemName, onSelectBar
 
         {/* ── Metronome lead stripe ────────────────────────────────────── */}
         {leadUs > 0 && (() => {
-          const r = rect(gutterPx, drawnPx(leadUs), ribbonStart, minorTotalPx - ribbonStart - EDGE_PAD_PX);
+          const r = rect(gutterPx - panMajorClamped, drawnPx(leadUs), ribbonStart, minorTotalPx - ribbonStart - EDGE_PAD_PX);
           return (
             <g
               onMouseEnter={(e) => showTip(e, setTooltip, {
@@ -380,6 +369,53 @@ export default function CriticalPathView({ bars, selectedSystemName, onSelectBar
             </g>
           );
         })()}
+
+        {/* ── Tracks band (#354) — one stripe per track; populated only in the "All" scope ── */}
+        {bars.trackSpans.map((span, i) => {
+          const r = rect(
+            majorPx(span.startUs),
+            majorPx(span.endUs) - majorPx(span.startUs),
+            tracksBandStart,
+            tracksBandPx - 1,
+          );
+          const colour = colorForPhase(span.index);
+          return (
+            <g
+              key={`track-${i}`}
+              onMouseEnter={(e) => showTip(e, setTooltip, {
+                kind: 'track',
+                lines: [
+                  `Track ${span.name}`,
+                  `span ${formatUs(span.startUs)} – ${formatUs(span.endUs)}`,
+                  `wall ${formatUs(span.endUs - span.startUs)}`,
+                ],
+              })}
+              onMouseLeave={() => setTooltip(null)}
+            >
+              <rect
+                x={r.x}
+                y={r.y}
+                width={r.width}
+                height={r.height}
+                fill={colour.fill}
+                stroke={colour.stroke}
+                strokeWidth={0.75}
+                rx={2}
+              />
+              {r.width >= 44 && orientation === 'horizontal' && (
+                <text
+                  x={r.x + 4}
+                  y={r.y + tracksBandPx - 4}
+                  fontSize={9}
+                  fontFamily="ui-monospace, monospace"
+                  fill={pickTextColorFor(colour.fill)}
+                >
+                  {clipText(span.name, r.width - 8)}
+                </text>
+              )}
+            </g>
+          );
+        })}
 
         {/* ── Phase band (multi-lane) ──────────────────────────────────── */}
         {phasePacked.packed.map(({ item: span, lane }, i) => {
@@ -478,7 +514,7 @@ export default function CriticalPathView({ bars, selectedSystemName, onSelectBar
         {/* ── Post-tick serial tail ────────────────────────────────────── */}
         {buildPostTickBlocks(bars.postTick).map((blk, i, arr) => {
           const offsetUs = bodyEndUs + arr.slice(0, i).reduce((s, b) => s + b.us, 0);
-          const r = rect(gutterPx + drawnPx(offsetUs), drawnPx(blk.us), cpTrackStart + BAR_INSET_PX, TRACK_PX - 2 * BAR_INSET_PX);
+          const r = rect(gutterPx + drawnPx(offsetUs) - panMajorClamped, drawnPx(blk.us), cpTrackStart + BAR_INSET_PX, TRACK_PX - 2 * BAR_INSET_PX);
           return (
             <g
               key={`pt-${i}`}
@@ -504,14 +540,16 @@ export default function CriticalPathView({ bars, selectedSystemName, onSelectBar
           ),
         )}
 
-        {/* ── Sticky band-label gutter (horizontal only) ───────────────────
-            Drawn last so it sits above the content; the translate keeps it pinned to the left
-            edge while the time axis scrolls, yet it scrolls vertically with the bands. */}
+        {/* ── Band-label gutter (horizontal only) ──────────────────────────
+            Drawn last so it sits above the panned content. The time axis pans underneath it via
+            `panMajor`; the gutter itself never pans (fixed at x=0) and scrolls vertically with the
+            bands as part of the SVG. The opaque fill masks content panned under it. */}
         {orientation === 'horizontal' && (
-          <g transform={`translate(${scrollX},0)`}>
+          <g>
             <rect x={0} y={0} width={gutterPx} height={minorTotalPx} fill="var(--card)" />
             <line x1={gutterPx - 0.5} y1={0} x2={gutterPx - 0.5} y2={minorTotalPx} stroke="var(--border)" strokeWidth={1} />
             {occupancy && <GutterLabel y={ribbonStart} h={RIBBON_PX} label="Workers" />}
+            {tracksBandPx > 0 && <GutterLabel y={tracksBandStart} h={tracksBandPx} label="Tracks" />}
             {phaseBandPx > 0 && <GutterLabel y={phaseBandStart} h={phaseBandPx} label="Phases" />}
             <GutterLabel y={cpTrackStart} h={TRACK_PX} label="Critical Path" />
             {fullGantt && nonCpTracksPx > 0 && <GutterLabel y={nonCpStart} h={nonCpTracksPx} label="Systems" />}
@@ -584,7 +622,11 @@ function BarShape({
 
   return (
     <g>
-      {claimPx > 0 && (
+      {/* Worker-claim-wait hatch — CP track only (`TickPathBar.workerClaimWaitUs` doc). On the CP
+          track it fills the inter-bar gap [gating.endUs, startUs]; for a non-CP bar the hatch would
+          extend back past whatever neighbour the interval-packer placed before it (packing keys on
+          [startUs, endUs) and is blind to the hatch) and paint over it. So it is CP-track only. */}
+      {track === 'cp' && claimPx > 0 && (
         <g
           onMouseEnter={(e) => {
             onTip(e, [`Worker-claim wait — ${formatUs(bar.workerClaimWaitUs)}`, `before: ${bar.systemName}`, 'Eligible, but no worker had picked it up yet.']);
@@ -771,7 +813,7 @@ function buildPostTickBlocks(postTick: TickPathPostTick): Array<{ label: string;
 // ── Tooltip ─────────────────────────────────────────────────────────────────
 
 interface TooltipState {
-  kind: 'bar' | 'phase' | 'ribbon' | 'posttick' | 'metronome';
+  kind: 'bar' | 'phase' | 'ribbon' | 'posttick' | 'metronome' | 'track';
   lines: string[];
   x: number;
   y: number;

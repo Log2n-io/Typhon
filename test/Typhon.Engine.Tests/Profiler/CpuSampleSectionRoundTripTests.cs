@@ -10,7 +10,7 @@ namespace Typhon.Engine.Tests.Profiler;
 
 /// <summary>
 /// Phase 3 (#351) round-trip: write a trace with a CPU-sample trailer section, read it back, confirm the records / interned stacks / frame symbols
-/// survive and the header offset is patched. Also covers the absent-section case and v9-trace forward-compat under the v10 reader.
+/// survive and the header offset is patched. Also covers the absent-section case and hard-rejection of pre-v11 traces.
 /// </summary>
 /// <remarks>
 /// <see cref="TraceFileWriter.Dispose"/> closes the underlying stream, so these tests write to a <see cref="MemoryStream"/> and skip Dispose, reading the
@@ -40,7 +40,8 @@ public sealed class CpuSampleSectionRoundTripTests
         writer.WriteSystemDefinitions(ReadOnlySpan<SystemDefinitionRecord>.Empty);
         writer.WriteArchetypes(ReadOnlySpan<ArchetypeRecord>.Empty);
         writer.WriteComponentTypes(ReadOnlySpan<ComponentTypeRecord>.Empty);
-        writer.WritePhases(ReadOnlySpan<string>.Empty);
+        writer.WriteTracks(ReadOnlySpan<TrackRecord>.Empty);
+        writer.WriteDags(ReadOnlySpan<DagRecord>.Empty);
         writer.WriteEmptyStaticStructures();
     }
 
@@ -79,7 +80,7 @@ public sealed class CpuSampleSectionRoundTripTests
         stream.Position = 0;
         var reader = new TraceFileReader(stream);
         var readHeader = reader.ReadHeader();
-        Assert.That(readHeader.Version, Is.EqualTo((ushort)10));
+        Assert.That(readHeader.Version, Is.EqualTo(TraceFileHeader.CurrentVersion));
         Assert.That(readHeader.CpuSampleSectionOffset, Is.EqualTo(offset));
 
         var ok = reader.TryReadCpuSampleSection(out var rtSamples, out var rtStacks, out var rtFrames);
@@ -134,30 +135,30 @@ public sealed class CpuSampleSectionRoundTripTests
     }
 
     [Test]
-    public void ReadHeader_V9OnDiskLayout_DefaultsCpuSampleOffsetToZero()
+    public void ReadHeader_V9OnDiskLayout_IsHardRejected()
     {
-        // Synthesize a genuine v9 on-disk header (79 bytes): the v10 struct (87 bytes) without the 8-byte CpuSampleSectionOffset at [75..83). A v10 reader
-        // must parse it version-conditionally, leave the stream positioned exactly past byte 79, and default CpuSampleSectionOffset to 0.
-        var v10 = NewHeader();
-        v10.QuerySourceStringTableOffset = 0;
-        v10.QueryDefinitionTableOffset = 0;
-        v10.CpuSampleSectionOffset = 12345; // must be ignored — absent on disk for v9
-        var v10Bytes = MemoryMarshal.AsBytes(MemoryMarshal.CreateReadOnlySpan(in v10, 1)).ToArray();
-        Assert.That(v10Bytes.Length, Is.EqualTo(87), "v10 header struct must be 87 bytes");
+        // v11 (#354) is a layout-breaking change: the v11 header struct grew (TrackCount + DagCount) and the
+        // SystemDefinitionTable / PhasesTable layout changed. The reader hard-rejects v10-and-older traces. Synthesize a
+        // genuine v9 on-disk header (79 bytes) and confirm ReadHeader throws rather than mis-decoding.
+        var v11 = NewHeader();
+        v11.QuerySourceStringTableOffset = 0;
+        v11.QueryDefinitionTableOffset = 0;
+        v11.CpuSampleSectionOffset = 12345;
+        var v11Bytes = MemoryMarshal.AsBytes(MemoryMarshal.CreateReadOnlySpan(in v11, 1)).ToArray();
+        Assert.That(v11Bytes.Length, Is.EqualTo(91), "v11 header struct must be 91 bytes");
 
+        // A v9 on-disk header is 79 bytes — it predates both the v10 CpuSampleSectionOffset and the v11
+        // TrackCount/DagCount. The exact byte layout no longer matters since the reader rejects on version.
         var v9Bytes = new byte[79];
-        Array.Copy(v10Bytes, 0, v9Bytes, 0, 75);    // common prefix + query offsets
-        Array.Copy(v10Bytes, 83, v9Bytes, 75, 4);   // reserved pad — skip CpuSampleSectionOffset at [75..83)
-        BinaryPrimitives.WriteUInt16LittleEndian(v9Bytes.AsSpan(4), 9); // stamp the on-disk version as v9
+        BinaryPrimitives.WriteUInt32LittleEndian(v9Bytes, TraceFileHeader.MagicValue);
+        BinaryPrimitives.WriteUInt16LittleEndian(v9Bytes.AsSpan(4), 9); // on-disk version v9
 
         var stream = new MemoryStream();
         stream.Write(v9Bytes);
         stream.Position = 0;
 
         var reader = new TraceFileReader(stream);
-        var header = reader.ReadHeader();
-        Assert.That(header.Version, Is.EqualTo((ushort)9));
-        Assert.That(header.CpuSampleSectionOffset, Is.Zero, "a v9 trace carries no CPU-sample section");
-        Assert.That(stream.Position, Is.EqualTo(79), "the v9 header must be consumed exactly — no over/under-read");
+        var ex = Assert.Throws<InvalidDataException>(() => reader.ReadHeader());
+        Assert.That(ex.Message, Does.Contain("version: 9"));
     }
 }

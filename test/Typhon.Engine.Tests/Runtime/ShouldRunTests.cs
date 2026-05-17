@@ -35,6 +35,7 @@ public class ShouldRunTests
         var captured = 0;
 
         using var scheduler = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 2, BaseTickRate = 1000 })
+            .PublicTrack.DeclareDag("Test")
             .CallbackSystem("A", _ => { if (captured == 0) { executed.Add("A"); } })
             .CallbackSystem("B", _ => { if (captured == 0) { executed.Add("B"); } },
                 after: "A", shouldRun: () => false)
@@ -64,6 +65,7 @@ public class ShouldRunTests
         var captured = 0;
 
         using var scheduler = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 2, BaseTickRate = 1000 })
+            .PublicTrack.DeclareDag("Test")
             .CallbackSystem("A", _ =>
             {
                 if (captured == 0)
@@ -87,6 +89,7 @@ public class ShouldRunTests
         var executed = 0;
 
         using var scheduler = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 })
+            .PublicTrack.DeclareDag("Test")
             .CallbackSystem("A", _ => Interlocked.Increment(ref executed))
             .Build(_registry.Runtime);
 
@@ -101,6 +104,7 @@ public class ShouldRunTests
     public void ShouldRunFalse_TelemetryRecordsSkipped()
     {
         using var scheduler = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 2, BaseTickRate = 1000 })
+            .PublicTrack.DeclareDag("Test")
             .CallbackSystem("A", _ => { })
             .CallbackSystem("B", _ => { }, after: "A", shouldRun: () => false)
             .Build(_registry.Runtime);
@@ -124,6 +128,7 @@ public class ShouldRunTests
         var captured = 0;
 
         using var scheduler = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 4, BaseTickRate = 1000 })
+            .PublicTrack.DeclareDag("Test")
             .CallbackSystem("Input", _ => { })
             .PipelineSystem("Physics", (chunk, total) =>
             {
@@ -155,6 +160,7 @@ public class ShouldRunTests
 
         // B runs only on odd ticks
         using var scheduler = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 })
+            .PublicTrack.DeclareDag("Test")
             .CallbackSystem("A", _ => Interlocked.Increment(ref ticksSeen))
             .CallbackSystem("B", _ => Interlocked.Increment(ref bExecutions),
                 after: "A", shouldRun: () => ticksSeen % 2 == 1)

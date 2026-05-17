@@ -9,6 +9,7 @@ function topo(overrides: Partial<TopologyDto> = {}): TopologyDto {
     archetypes: [],
     componentTypes: [],
     phases: [],
+    tracks: [],
     componentFamilies: { componentToFamily: {}, familyOrder: [] },
     ...overrides,
   };

@@ -226,7 +226,8 @@ class TierDispatchTests : TestBase<TierDispatchTests>
         {
             TyphonRuntime.Create(dbe, schedule =>
             {
-                schedule.QuerySystem("Bad", _ => { }, input: () => view, parallel: true, tier: SimTier.None);
+                var dag = schedule.PublicTrack.DeclareDag("Test");
+                dag.QuerySystem("Bad", _ => { }, input: () => view, parallel: true, tier: SimTier.None);
             }, new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
         });
         Assert.That(ex.Message, Does.Contain("SimTier.None"));
@@ -244,7 +245,8 @@ class TierDispatchTests : TestBase<TierDispatchTests>
         {
             TyphonRuntime.Create(dbe, schedule =>
             {
-                schedule.QuerySystem("Bad", _ => { }, input: () => view, parallel: true, cellAmortize: 4);
+                var dag = schedule.PublicTrack.DeclareDag("Test");
+                dag.QuerySystem("Bad", _ => { }, input: () => view, parallel: true, cellAmortize: 4);
             }, new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
         });
         Assert.That(ex.Message, Does.Contain("cellAmortize"));
@@ -262,7 +264,8 @@ class TierDispatchTests : TestBase<TierDispatchTests>
         {
             TyphonRuntime.Create(dbe, schedule =>
             {
-                schedule.QuerySystem("Bad", _ => { }, input: () => view, parallel: true,
+                var dag = schedule.PublicTrack.DeclareDag("Test");
+                dag.QuerySystem("Bad", _ => { }, input: () => view, parallel: true,
                     tier: SimTier.Tier2, cellAmortize: -1);
             }, new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
         });
@@ -308,8 +311,9 @@ class TierDispatchTests : TestBase<TierDispatchTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksSeen));
-            schedule.QuerySystem("T0_Check", ctx =>
+            var dag = schedule.PublicTrack.DeclareDag("Test");
+            dag.CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksSeen));
+            dag.QuerySystem("T0_Check", ctx =>
             {
                 foreach (var id in ctx.Entities)
                 {
@@ -359,8 +363,9 @@ class TierDispatchTests : TestBase<TierDispatchTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksSeen));
-            schedule.QuerySystem("Near_Check", ctx =>
+            var dag = schedule.PublicTrack.DeclareDag("Test");
+            dag.CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksSeen));
+            dag.QuerySystem("Near_Check", ctx =>
             {
                 foreach (var id in ctx.Entities)
                 {
@@ -409,8 +414,9 @@ class TierDispatchTests : TestBase<TierDispatchTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksSeen));
-            schedule.QuerySystem("Amortized", ctx =>
+            var dag = schedule.PublicTrack.DeclareDag("Test");
+            dag.CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksSeen));
+            dag.QuerySystem("Amortized", ctx =>
             {
                 int count = 0;
                 foreach (var _ in ctx.Entities)
@@ -460,8 +466,9 @@ class TierDispatchTests : TestBase<TierDispatchTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksSeen));
-            schedule.QuerySystem("AmortTick", ctx =>
+            var dag = schedule.PublicTrack.DeclareDag("Test");
+            dag.CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksSeen));
+            dag.QuerySystem("AmortTick", ctx =>
             {
                 lastDeltaTime = ctx.DeltaTime;
                 lastAmortizedDt = ctx.AmortizedDeltaTime;
@@ -501,9 +508,10 @@ class TierDispatchTests : TestBase<TierDispatchTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksSeen));
+            var dag = schedule.PublicTrack.DeclareDag("Test");
+            dag.CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksSeen));
             // Intentionally default tier: SimTier.All
-            schedule.QuerySystem("AllTier", _ => { }, input: () => view, parallel: true, after: "Tick");
+            dag.QuerySystem("AllTier", _ => { }, input: () => view, parallel: true, after: "Tick");
         }, new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
 
         runtime.Start();
@@ -553,8 +561,9 @@ class TierDispatchTests : TestBase<TierDispatchTests>
         // tier-scoped helper consistently with Phase 2.
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksSeen));
-            schedule.QuerySystem("Tier0_View", ctx =>
+            var dag = schedule.PublicTrack.DeclareDag("Test");
+            dag.CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksSeen));
+            dag.QuerySystem("Tier0_View", ctx =>
             {
                 foreach (var id in ctx.Entities)
                 {
@@ -601,10 +610,11 @@ class TierDispatchTests : TestBase<TierDispatchTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksSeen));
+            var dag = schedule.PublicTrack.DeclareDag("Test");
+            dag.CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksSeen));
 
             // Writer: marks Pos dirty on both entities every tick.
-            schedule.QuerySystem("Writer", ctx =>
+            dag.QuerySystem("Writer", ctx =>
             {
                 foreach (var id in ctx.Entities)
                 {
@@ -615,7 +625,7 @@ class TierDispatchTests : TestBase<TierDispatchTests>
             }, input: () => view, parallel: true, after: "Tick");
 
             // Tier-filtered change-filtered reader: should only see Tier0 dirty entities.
-            schedule.QuerySystem("Tier0_Reactive", ctx =>
+            dag.QuerySystem("Tier0_Reactive", ctx =>
             {
                 foreach (var id in ctx.Entities)
                 {
@@ -672,11 +682,12 @@ class TierDispatchTests : TestBase<TierDispatchTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksSeen));
+            var dag = schedule.PublicTrack.DeclareDag("Test");
+            dag.CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksSeen));
 
             // Writer: any parallel write — keeps the change filter "active" so the reader's prepare path runs
             // BuildFilteredEntitySet (instead of being ReactiveSkipped).
-            schedule.QuerySystem("Writer", ctx =>
+            dag.QuerySystem("Writer", ctx =>
             {
                 foreach (var id in ctx.Entities)
                 {
@@ -688,7 +699,7 @@ class TierDispatchTests : TestBase<TierDispatchTests>
 
             // Reader: tier-filtered + change-filtered. The fix in ExecuteChunkWithAccessor must route this through
             // the Path 2 materialized-slice path, not the ClusterRangeEntityView path.
-            schedule.QuerySystem("Tier0_Reactive", ctx =>
+            dag.QuerySystem("Tier0_Reactive", ctx =>
             {
                 if (entitiesTypeName == null)
                 {
@@ -741,8 +752,9 @@ class TierDispatchTests : TestBase<TierDispatchTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksSeen));
-            schedule.QuerySystem("VersionedTier0", ctx =>
+            var dag = schedule.PublicTrack.DeclareDag("Test");
+            dag.CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksSeen));
+            dag.QuerySystem("VersionedTier0", ctx =>
             {
                 if (ctx.ClusterIds != null)
                 {
@@ -802,8 +814,9 @@ class TierDispatchTests : TestBase<TierDispatchTests>
         // Tier2 is set on cellB but cellB has no entities. amortized system on Tier2 must not crash.
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksSeen));
-            schedule.QuerySystem("EmptyTier2", ctx =>
+            var dag = schedule.PublicTrack.DeclareDag("Test");
+            dag.CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksSeen));
+            dag.QuerySystem("EmptyTier2", ctx =>
             {
                 foreach (var _ in ctx.Entities)
                 {
@@ -856,10 +869,11 @@ class TierDispatchTests : TestBase<TierDispatchTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksSeen));
+            var dag = schedule.PublicTrack.DeclareDag("Test");
+            dag.CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksSeen));
             // Use a versioned system so it goes through PrepareVersionedFallback → BuildFullViewEntitySet,
             // which is where view.TierFilter is consumed end-to-end.
-            schedule.QuerySystem("ViewTierOnly", ctx =>
+            dag.QuerySystem("ViewTierOnly", ctx =>
             {
                 foreach (var id in ctx.Entities)
                 {
@@ -972,8 +986,9 @@ class TierDispatchTests : TestBase<TierDispatchTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksSeen));
-            schedule.QuerySystem("Cluster_T1", ctx =>
+            var dag = schedule.PublicTrack.DeclareDag("Test");
+            dag.CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksSeen));
+            dag.QuerySystem("Cluster_T1", ctx =>
             {
                 if (ctx.ClusterIds == null)
                 {
@@ -1046,8 +1061,9 @@ class TierDispatchTests : TestBase<TierDispatchTests>
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
-            schedule.CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksSeen));
-            schedule.QuerySystem("OversubscribedTier0", ctx =>
+            var dag = schedule.PublicTrack.DeclareDag("Test");
+            dag.CallbackSystem("Tick", _ => Interlocked.Increment(ref ticksSeen));
+            dag.QuerySystem("OversubscribedTier0", ctx =>
             {
                 foreach (var id in ctx.Entities)
                 {
