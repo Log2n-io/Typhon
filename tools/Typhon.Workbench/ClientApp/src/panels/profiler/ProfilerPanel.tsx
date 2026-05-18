@@ -18,6 +18,7 @@ import { useProfilerTraceStatus } from '@/hooks/profiler/useProfilerTraceStatus'
 import { useProfilerStatsStore } from '@/stores/useProfilerStatsStore';
 import { useRecentFilesStore } from '@/stores/useRecentFilesStore';
 import { resolveInitialViewport } from '@/libs/profiler/initialViewport';
+import { buildTickRows, computeSelectionIdxRange } from '@/libs/profiler/canvas/tickOverview';
 import TickOverview from './sections/TickOverview';
 import TimeArea from './sections/TimeArea';
 import OverloadStrip from './sections/OverloadStrip';
@@ -185,6 +186,19 @@ export default function ProfilerPanel() {
     return parts[parts.length - 1] || filePath;
   }, [filePath]);
 
+  // Header "selected range" indicator — maps the committed viewport (µs) to the tick numbers it
+  // spans, so the top bar shows e.g. "Ticks 12–45" alongside "x systems". Reuses the same
+  // `computeSelectionIdxRange` the TickOverview uses to draw the orange selection overlay, so the
+  // header label and the overlay always agree. `tickRows` only rebuilds when tickSummaries change.
+  const tickRows = useMemo(() => buildTickRows(metadata?.tickSummaries), [metadata?.tickSummaries]);
+  const selectedTickRange = useMemo(() => {
+    if (tickRows.length === 0) return null;
+    if (viewRangeForStats.endUs <= viewRangeForStats.startUs) return null;
+    const { first, last } = computeSelectionIdxRange(tickRows, viewRangeForStats);
+    if (first < 0 || last < 0) return null;
+    return { first: tickRows[first].tickNumber, last: tickRows[last].tickNumber };
+  }, [tickRows, viewRangeForStats]);
+
   if (!isTrace && !isAttach) {
     return (
       <div className="flex h-full w-full items-center justify-center bg-background">
@@ -251,6 +265,19 @@ export default function ProfilerPanel() {
             <span className="font-mono tabular-nums text-muted-foreground">
               {metadata.header?.systemCount ?? 0} systems
             </span>
+            {selectedTickRange && (
+              <>
+                <span className="text-muted-foreground">·</span>
+                <span
+                  className="font-mono tabular-nums text-foreground"
+                  title="Selected range — the tick(s) spanned by the current viewport"
+                >
+                  {selectedTickRange.first === selectedTickRange.last
+                    ? `Tick ${selectedTickRange.first.toLocaleString()}`
+                    : `Ticks ${selectedTickRange.first.toLocaleString()}–${selectedTickRange.last.toLocaleString()}`}
+                </span>
+              </>
+            )}
             {newVersionAvailable && (
               <Button
                 variant="outline"
