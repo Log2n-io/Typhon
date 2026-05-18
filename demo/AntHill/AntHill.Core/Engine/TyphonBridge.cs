@@ -11,6 +11,10 @@ namespace AntHill.Core;
 public sealed class TyphonBridge : IDisposable
 {
     public const int AntCount = 100_000;
+
+    /// <summary>Historical default runtime worker-thread count — see <see cref="ScenarioConfig.WorkerCount"/>.</summary>
+    public const int DefaultWorkerCount = 16;
+
     public const int FoodCount = 50;
     public const int NestCount = 5;
     public const float WorldSize = 20_000f;
@@ -20,6 +24,10 @@ public sealed class TyphonBridge : IDisposable
 
     private ServiceProvider _serviceProvider;
     private IServiceScope _scope;
+
+    // Scenario configuration — ant count, worker count, seed, tier mode. Defaults to the historical
+    // hard-coded values when the bridge is constructed without an explicit config (AntHill.Demo).
+    private readonly ScenarioConfig _config;
     internal DatabaseEngine DBE;
     private TyphonRuntime _runtime;
     internal EcsView<Ant> AntView;
@@ -213,7 +221,7 @@ public sealed class TyphonBridge : IDisposable
     // commit, drained by SpiderUpdateTick to count "soldiers in melee range" per spider. Resets to
     // empty in EnvironmentTick (runs in Phase.Input before AntUpdateSystem). Sized to AntCount as
     // worst case; in practice <10 % of ants are soldiers, ~5-10 k writes/tick.
-    private (float x, float y)[] _soldierPositions = new (float, float)[AntCount];
+    private readonly (float x, float y)[] _soldierPositions;
     private int _soldierCount;
     private int[] _spiderTicksSinceKill;
     // Debug-aid state: per-spider snapshot of "am I chasing right now?" + "what XY am I aiming at?".
@@ -333,6 +341,21 @@ public sealed class TyphonBridge : IDisposable
         if (heightmap != null) PlantGrid = new PlantGrid(heightmap.Sample);
     }
 
+    /// <summary>
+    /// Creates the bridge with the given scenario configuration. Pass <c>null</c> (or use the
+    /// parameterless form) for the historical defaults — <c>AntHill.Demo</c> relies on this.
+    /// </summary>
+    public TyphonBridge(ScenarioConfig config = null)
+    {
+        _config = config ?? new ScenarioConfig();
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(_config.AntCount);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(_config.WorkerCount);
+        _soldierPositions = new (float, float)[_config.AntCount];
+    }
+
+    /// <summary>The scenario configuration this bridge was constructed with.</summary>
+    public ScenarioConfig Config => _config;
+
     public void Initialize(Action<IServiceCollection> configureServices = null)
     {
         var services = new ServiceCollection();
@@ -406,12 +429,12 @@ public sealed class TyphonBridge : IDisposable
         SpawnFood();
         SpawnAnts();
         SpawnSpiders();
-        Console.WriteLine($"AntHill spawn diag: ants={AntCount} nests={NestCount} spiders={SpiderCount} foodCount={_foodCount}");
+        Console.WriteLine($"AntHill spawn diag: ants={_config.AntCount} nests={NestCount} spiders={SpiderCount} foodCount={_foodCount}");
 
         using var txView = DBE.CreateQuickTransaction();
         AntView = txView.Query<Ant>().ToView();
 
-        const int workerCount = 16;
+        var workerCount = _config.WorkerCount;
         _runtime = TyphonRuntime.Create(DBE, BuildSchedule, new RuntimeOptions
         {
             BaseTickRate = 60,
@@ -427,7 +450,7 @@ public sealed class TyphonBridge : IDisposable
         _workerBuffers = new RenderWorkerBuffer[workerCount];
         for (var i = 0; i < workerCount; i++)
         {
-            _workerBuffers[i] = new RenderWorkerBuffer(AntCount / workerCount + 1024);
+            _workerBuffers[i] = new RenderWorkerBuffer(_config.AntCount / workerCount + 1024);
         }
         _overlayBuffer = new RenderWorkerBuffer(FoodCount + NestCount);
     }
@@ -522,10 +545,21 @@ public sealed class TyphonBridge : IDisposable
         (_cellColonyCountRead, _cellColonyCountWrite) = (_cellColonyCountWrite, _cellColonyCountRead);
         Array.Clear(_cellColonyCountWrite);
 
+        var grid = ctx.SpatialGrid;
+
+        // Harness stress mode: the whole world runs at full per-tick fidelity, so every cell is
+        // forced to Tier0 and the camera-distance ring computation is skipped entirely. Camera
+        // position has no effect — see ScenarioConfig.TierMode.
+        if (_config.TierMode == TierMode.UniformT0)
+        {
+            grid.ResetAllTiers(SimTier.Tier0);
+            Array.Clear(_tierMirror);   // mirror byte 0 == Tier0 (TrailingZeroCount of the Tier0 bit)
+            return;
+        }
+
         var camX = (_camMinX + _camMaxX) * 0.5f;
         var camY = (_camMinY + _camMaxY) * 0.5f;
 
-        var grid = ctx.SpatialGrid;
         grid.ResetAllTiers(SimTier.Tier3);
 
         var r0Sq = _tier0Radius * _tier0Radius;
@@ -1808,15 +1842,15 @@ public sealed class TyphonBridge : IDisposable
 
     private void SpawnAnts()
     {
-        var rng = new Random(42);
+        var rng = new Random(_config.Seed);
         const int batchSize = 1_000;
-        var antsPerNest = AntCount / NestCount;
+        var antsPerNest = _config.AntCount / NestCount;
         var spawnRadius = 200f;
 
         for (var nestIdx = 0; nestIdx < NestCount; nestIdx++)
         {
             var (nx, ny) = _nestPositions[nestIdx];
-            var remaining = (nestIdx == NestCount - 1) ? AntCount - antsPerNest * (NestCount - 1) : antsPerNest;
+            var remaining = (nestIdx == NestCount - 1) ? _config.AntCount - antsPerNest * (NestCount - 1) : antsPerNest;
             var antIndexInNest = 0;   // first ant per nest = Queen
 
             while (remaining > 0)
@@ -2189,7 +2223,7 @@ public sealed class TyphonBridge : IDisposable
 
     private void SpawnSpiders()
     {
-        var rng = new Random(777);
+        var rng = new Random(_config.Seed + 1);
         _spiderPositions = new (float, float)[SpiderCount];
         _spiderVelocities = new (float, float)[SpiderCount];
         _spiderTicksSinceKill = new int[SpiderCount];
@@ -2213,7 +2247,7 @@ public sealed class TyphonBridge : IDisposable
 
     private void SpawnFood()
     {
-        var rng = new Random(123);
+        var rng = new Random(_config.Seed + 2);
         // Reserve headroom so the first dozen tool-placed foods don't trigger a resize.
         _foodCache = new (float, float, float)[Math.Max(FoodCount * 4, 64)];
         _foodRemainingInt = new int[_foodCache.Length];
@@ -2370,7 +2404,7 @@ public sealed class TyphonBridge : IDisposable
             {
                 Bounds = new AABB2F { MinX = nx, MinY = ny, MaxX = nx, MaxY = ny },
                 FoodStored = 0f,
-                Population = AntCount / NestCount,
+                Population = _config.AntCount / NestCount,
                 ColonyId = (byte)ni,
             };
             tx.Spawn<Nest>(Nest.Info.Set(in info));

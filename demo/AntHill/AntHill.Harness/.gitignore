@@ -1,0 +1,3 @@
+# Harness run artifacts — generated per run, never committed.
+*.typhon-trace
+*-report.json

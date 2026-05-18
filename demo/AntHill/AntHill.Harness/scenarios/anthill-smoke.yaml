@@ -1,0 +1,15 @@
+# AntHill smoke scenario — a fast end-to-end sanity check of the harness pipeline.
+# Small ant count, short duration, two worker counts — completes in seconds. Use it to
+# validate the harness locally / in CI without the cost of the full 500K stress run.
+name: anthill-smoke
+seed: 42
+world: 20000
+ants: 2000
+workers: [2, 4]
+duration: 2             # seconds, per worker-count run
+simulation:
+  tierMode: uniform-t0
+trace: false
+assertions:
+  exceptions: { max: 0 }
+  antCount: { invariant: true }

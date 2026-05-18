@@ -1,144 +1,121 @@
 using System;
-using System.Threading;
-using AntHill.Core;
-using Typhon.Engine;
+using System.Collections.Generic;
 
 namespace AntHill.Harness;
 
+/// <summary>
+/// AntHill.Harness entry point. Two modes:
+///   <c>--scenario &lt;file.yaml&gt;</c> runs a declarative scenario (the validation harness);
+///   with no scenario it falls back to the ad-hoc profiler runner (see <see cref="AdHocRunner"/>).
+/// </summary>
 public static class Program
 {
-    const int RunSeconds = 10;
-    const int WarmupSeconds = 2;
-
-    public static void Main(string[] args)
+    /// <summary>Exit codes: 0 = all runs passed, 1 = a run failed, 2 = scenario load/validation error.</summary>
+    public static int Main(string[] args)
     {
-        int durationSec = RunSeconds;
-
-        // First pass: handle --duration and --help here (profile-runner-specific).
-        // Profiler flags (--trace, --live) are parsed by the shared helper below.
-        for (int i = 0; i < args.Length; i++)
+        if (HasFlag(args, "--help", "-h"))
         {
-            switch (args[i])
+            PrintUsage();
+            return 0;
+        }
+
+        var wantsScenario = HasFlag(args, "--scenario");
+        var scenarioPath = GetOption(args, "--scenario");
+        if (wantsScenario && scenarioPath == null)
+        {
+            Console.Error.WriteLine("Error: --scenario requires a file path.");
+            return 2;
+        }
+        if (scenarioPath != null)
+        {
+            return RunScenario(scenarioPath);
+        }
+
+        AdHocRunner.Run(args);
+        return 0;
+    }
+
+    private static int RunScenario(string scenarioPath)
+    {
+        Scenario scenario;
+        try
+        {
+            scenario = ScenarioLoader.Load(scenarioPath);
+        }
+        catch (ScenarioException ex)
+        {
+            Console.Error.WriteLine($"Scenario error: {ex.Message}");
+            return 2;
+        }
+
+        var runs = ScenarioExpander.Expand(scenario);
+        Console.WriteLine($"Scenario '{scenario.Name}': {runs.Count} run(s) across the worker sweep.");
+
+        var results = new List<RunResult>(runs.Count);
+        foreach (var run in runs)
+        {
+            results.Add(ScenarioRunner.Run(run));
+        }
+
+        RunReporter.WriteHuman(results, Console.Out);
+        var jsonPath = $"{scenario.Name}-report.json";
+        RunReporter.WriteJson(results, jsonPath);
+        Console.WriteLine($"JSON report: {jsonPath}");
+
+        var anyFailed = false;
+        foreach (var r in results)
+        {
+            if (!r.Passed)
             {
-                case "--duration" when i + 1 < args.Length:
-                    durationSec = int.Parse(args[++i]);
-                    break;
-                case "--help" or "-h":
-                    PrintUsage();
-                    return;
+                anyFailed = true;
             }
         }
+        return anyFailed ? 1 : 0;
+    }
 
-        Console.WriteLine($"AntHill ProfileRunner: {TyphonBridge.AntCount:N0} ants, {TyphonBridge.WorldSize:N0} world");
-        Console.WriteLine($"Warming up {WarmupSeconds}s, measuring {durationSec}s...");
-
-        // Profiler (issue #332): enabled via typhon.telemetry.json (Typhon:Profiler:Enabled, or any Trace/Live key).
-        // This runner's --trace/--live flags are parsed here and injected through the AddTyphonProfiler DI hook —
-        // the host owns its CLI parsing; the engine never reads the command line itself.
-        var bridge = new TyphonBridge();
-        bridge.Initialize(services =>
-            services.AddTyphonProfiler(fileConfig => fileConfig.MergedWith(ProfilerLaunchConfig.FromArgs(args))));
-
-        bridge.Start();
-
-        // Warm up
-        Thread.Sleep(WarmupSeconds * 1000);
-
-        var telemetry = bridge.Telemetry;
-        if (telemetry == null)
+    private static bool HasFlag(string[] args, params string[] flags)
+    {
+        foreach (var a in args)
         {
-            Console.WriteLine("ERROR: No telemetry available");
-            bridge.Dispose();
-            return;
-        }
-
-        long startTick = telemetry.NewestTick;
-        Thread.Sleep(durationSec * 1000);
-        long endTick = telemetry.NewestTick;
-
-        if (endTick <= startTick)
-        {
-            Console.WriteLine("ERROR: No ticks recorded");
-            bridge.Dispose();
-            return;
-        }
-
-        // Collect metrics
-        var sysDefs = bridge.Systems;
-        long oldest = telemetry.OldestAvailableTick;
-        long from = Math.Max(startTick + 1, oldest);
-        int tickCount = (int)(endTick - from + 1);
-
-        var tickDurations = new float[tickCount];
-        var systemDurations = new float[sysDefs.Length][];
-        for (int s = 0; s < sysDefs.Length; s++)
-        {
-            systemDurations[s] = new float[tickCount];
-        }
-
-        for (int i = 0; i < tickCount; i++)
-        {
-            long t = from + i;
-            ref readonly var tick = ref telemetry.GetTick(t);
-            tickDurations[i] = tick.ActualDurationMs;
-            var systems = telemetry.GetSystemMetrics(t);
-            for (int s = 0; s < sysDefs.Length && s < systems.Length; s++)
+            foreach (var f in flags)
             {
-                systemDurations[s][i] = systems[s].DurationUs;
+                if (a == f)
+                {
+                    return true;
+                }
             }
         }
+        return false;
+    }
 
-        // Print results
-        Array.Sort(tickDurations);
-        float tickP50 = tickDurations[tickCount / 2];
-        float tickP99 = tickDurations[(int)(tickCount * 0.99)];
-
-        Console.WriteLine();
-        Console.WriteLine($"── Results ({tickCount} ticks) ──────────────────────────────────");
-        Console.WriteLine($"  Tick p50: {tickP50:F2}ms  p99: {tickP99:F2}ms");
-        Console.WriteLine();
-        Console.WriteLine($"  {"System",-24} {"p50 (us)",10} {"p99 (us)",10}");
-        Console.WriteLine($"  {"─",-24} {"─",10} {"─",10}");
-
-        for (int s = 0; s < sysDefs.Length; s++)
+    private static string GetOption(string[] args, string name)
+    {
+        for (var i = 0; i < args.Length - 1; i++)
         {
-            var dur = systemDurations[s];
-            Array.Sort(dur);
-            float p50 = dur[tickCount / 2];
-            float p99 = dur[(int)(tickCount * 0.99)];
-            if (p50 > 0.1f)
+            if (args[i] == name)
             {
-                Console.WriteLine($"  {sysDefs[s].Name,-24} {p50,10:F0} {p99,10:F0}");
+                return args[i + 1];
             }
         }
-
-        Console.WriteLine($"──────────────────────────────────────────────────");
-
-        // The profiler tears itself down inside bridge.Dispose() → TyphonRuntime.Shutdown (begins the async CPU-sampler
-        // stop) → TyphonRuntime.Dispose (finishes it, stops the profiler, detaches exporters). Issue #332.
-        bridge.Dispose();
+        return null;
     }
 
     private static void PrintUsage()
     {
-        Console.WriteLine("AntHill ProfileRunner — captures per-system timings and optionally a runtime trace.");
+        Console.WriteLine("AntHill.Harness — scriptable engine stress + validation harness.");
         Console.WriteLine();
         Console.WriteLine("Usage:");
-        Console.WriteLine("  dotnet run -- [options]");
+        Console.WriteLine("  dotnet run -- --scenario <file.yaml>   Run a declarative scenario (validation harness)");
+        Console.WriteLine("  dotnet run -- [options]                Ad-hoc profiler run (no scenario)");
         Console.WriteLine();
-        Console.WriteLine("Options:");
-        Console.WriteLine("  --duration <seconds>   Measurement window in seconds (default: 10)");
-        Console.WriteLine("  --trace <path>         Enable runtime profiler, write .typhon-trace file to <path>");
-        Console.WriteLine("  --live [port]          Enable runtime profiler, open TCP listener on <port>");
-        Console.WriteLine($"                         (default port: {ProfilerLaunchConfig.DefaultLivePort})");
-        Console.WriteLine("  --live-wait <ms>       Block startup up to <ms> milliseconds waiting for the first viewer to attach");
-        Console.WriteLine("  --help, -h             Show this message");
+        Console.WriteLine("Scenario mode:");
+        Console.WriteLine("  --scenario <path>   YAML scenario file; expands its worker sweep into one run each.");
+        Console.WriteLine("                      Exit code: 0 all passed, 1 a run failed, 2 scenario error.");
         Console.WriteLine();
-        Console.WriteLine("Examples:");
-        Console.WriteLine("  dotnet run -- --duration 30");
-        Console.WriteLine("  dotnet run -- --trace anthill.typhon-trace");
-        Console.WriteLine("  dotnet run -- --live 9001");
-        Console.WriteLine();
-        Console.WriteLine("Note: --trace and --live are mutually exclusive; if both are given, --trace wins.");
+        Console.WriteLine("Ad-hoc mode options:");
+        Console.WriteLine("  --duration <sec>    Measurement window in seconds (default: 10)");
+        Console.WriteLine("  --trace <path>      Enable the runtime profiler, write a .typhon-trace file");
+        Console.WriteLine("  --live [port]       Enable the runtime profiler, open a TCP listener");
+        Console.WriteLine("  --help, -h          Show this message");
     }
 }

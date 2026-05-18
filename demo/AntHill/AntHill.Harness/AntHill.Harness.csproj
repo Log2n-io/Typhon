@@ -14,5 +14,10 @@
   <ItemGroup>
     <!-- Shared telemetry configuration — single source of truth at ..\typhon.telemetry.json. -->
     <Content Include="typhon.telemetry.json" CopyToOutputDirectory="PreserveNewest" />
+    <!-- Harness scenario definitions — shipped alongside the build for relative-path use. -->
+    <Content Include="scenarios\**\*.yaml" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="YamlDotNet" Version="17.1.0" />
   </ItemGroup>
 </Project>

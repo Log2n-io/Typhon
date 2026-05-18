@@ -1,0 +1,16 @@
+# AntHill 500K-ant stress scenario — the primary engine stress workload (#353).
+# Drives 500,000 ants at full per-tick fidelity (uniform-t0) across a worker-scaling
+# sweep. Each worker count is a separate run emitting its own .typhon-trace.
+# This is the workload the SkyPilot AWS automation runs on bare-metal instances.
+name: anthill-500k-stress
+seed: 12345
+world: 20000            # fixed at 20000 in v1 (see design doc)
+ants: 500000
+workers: [16, 32, 64, 128]
+duration: 60            # seconds, per worker-count run
+simulation:
+  tierMode: uniform-t0  # whole world at full fidelity — the worst-case stress
+trace: true             # emit a .typhon-trace per run
+assertions:
+  exceptions: { max: 0 }
+  antCount: { invariant: true }
