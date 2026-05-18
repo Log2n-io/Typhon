@@ -425,6 +425,36 @@ public partial class ManagedPagedMMF
             }
         }
 
+        /// <summary>
+        /// Copies the level-0 occupancy words into <paramref name="dest"/> — one <c>long</c> per 64 pages, a set bit meaning the page is allocated. Read-only;
+        /// walks only the resident occupancy-segment pages, so it incurs no data-page I/O. <paramref name="dest"/> must hold at
+        /// least <c>(Capacity + 63) / 64</c> words.
+        /// </summary>
+        public void ReadOccupancyBits(Span<long> dest)
+        {
+            var wordCount = (Capacity + 63) / 64;
+            if (dest.Length < wordCount)
+            {
+                throw new ArgumentException($"Destination span too small: need {wordCount} words, got {dest.Length}.", nameof(dest));
+            }
+
+            var epoch = _segment.Store.EpochManager.GlobalEpoch;
+            var curPageId = -1;
+            ReadOnlySpan<long> curData = default;
+            for (var i = 0; i < wordCount; i++)
+            {
+                var (pageId, offset) = LogicalSegment<PersistentStore>.GetItemLocation<long>(i);
+                if (pageId != curPageId)
+                {
+                    var page = _segment.GetPage(pageId, epoch, out _);
+                    var dataOff = page.IsRoot ? LogicalSegment<PersistentStore>.RootHeaderIndexSectionLength : 0;
+                    curData = page.RawDataReadOnly<long>(dataOff, (PageRawDataSize - dataOff) / sizeof(long));
+                    curPageId = pageId;
+                }
+                dest[i] = curData[offset];
+            }
+        }
+
         public int Capacity { get; private set; }
     }
 }

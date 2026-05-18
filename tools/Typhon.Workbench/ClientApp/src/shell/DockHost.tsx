@@ -27,6 +27,7 @@ import QueryCatalogPanel from '@/panels/QueryCatalog/QueryCatalogPanel';
 import QueryPlanTreePanel from '@/panels/QueryPlanTree/QueryPlanTreePanel';
 import ExecutionInspectorPanel from '@/panels/ExecutionInspector/ExecutionInspectorPanel';
 import PaletteDebugPanel from '@/panels/PaletteDebug';
+import DbMapPanel from '@/panels/DbMap/DbMapPanel';
 import { registerDockApi, registerResetLayout } from './commands/openSchemaBrowser';
 import { registerProfilerDockApi } from './commands/profilerCommands';
 import MigrationRequiredBanner from './banners/MigrationRequiredBanner';
@@ -131,6 +132,7 @@ const components: Record<string, React.FC<IDockviewPanelProps>> = {
   QueryPlanTree: QueryPlanTreePanel,
   ExecutionInspector: ExecutionInspectorPanel,
   PaletteDebug: PaletteDebugPanel,
+  DbMap: DbMapPanel,
 };
 
 function buildDefaultLayout(api: DockviewReadyEvent['api'], kind: 'none' | 'open' | 'attach' | 'trace') {

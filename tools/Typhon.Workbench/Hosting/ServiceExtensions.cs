@@ -3,6 +3,7 @@ using Typhon.Workbench.Schema;
 using Typhon.Workbench.Security;
 using Typhon.Workbench.Services;
 using Typhon.Workbench.Sessions;
+using Typhon.Workbench.Storage;
 using Typhon.Workbench.Streams;
 
 namespace Typhon.Workbench.Hosting;
@@ -17,6 +18,8 @@ public static class ServiceExtensions
         services.AddSingleton<DemoDataProvider>();
         services.AddSingleton<FileBrowserService>();
         services.AddSingleton<SchemaService>();
+        // Module 15: Database File Map — read-only storage introspection of the live engine.
+        services.AddSingleton<StorageMapService>();
         // #302 Phase 5: file-backed user options (editor preference, workspace root). Singleton because the
         // FileSystemWatcher hot-reload + atomic-write semantics need a single shared instance.
         services.AddSingleton<OptionsStore>();

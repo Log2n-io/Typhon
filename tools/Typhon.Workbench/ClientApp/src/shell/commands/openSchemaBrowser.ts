@@ -140,6 +140,11 @@ export function toggleViewOptions(): void {
   toggleDockPanel('options', 'Options', 'Options');
 }
 
+/** Module 15: open / close the Database File Map panel. */
+export function toggleViewDbMap(): void {
+  toggleDockPanel('dbmap', 'DbMap', 'Database File Map');
+}
+
 /** Debug-only: the colour-palette reference panel. Reachable from the command palette alone — no View-menu entry. */
 export function toggleViewPaletteDebug(): void {
   toggleDockPanel('palette-debug', 'PaletteDebug', 'Color Palettes');

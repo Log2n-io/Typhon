@@ -201,6 +201,12 @@ internal sealed class WalSegmentManager : IDisposable
     public int SealedSegmentCount => _sealedSegments.Count;
 
     /// <summary>
+    /// Total byte size of the WAL across all segment files — sealed segments counted at full segment size plus
+    /// the active segment's current write offset. Read-only; for storage introspection (Database File Map).
+    /// </summary>
+    public long TotalWalBytes => (SealedSegmentCount * _segmentSize) + (ActiveSegment?.WriteOffset ?? 0L);
+
+    /// <summary>
     /// Ensures the pre-allocation pool is full (creates new empty segment files as needed).
     /// </summary>
     public void EnsurePreAllocated()

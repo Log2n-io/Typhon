@@ -1,4 +1,4 @@
-import { Binary, FolderOpen } from 'lucide-react';
+import { Binary, FolderOpen, HardDrive } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { StatusBadge } from '@/components/ui/status-badge';
 import { simplifyTypeName } from '@/libs/simplifyTypeName';
@@ -7,20 +7,22 @@ import { useSchemaInspectorStore } from '@/stores/useSchemaInspectorStore';
 import { useProfilerSelectionStore } from '@/stores/useProfilerSelectionStore';
 import { useProfilerSessionStore } from '@/stores/useProfilerSessionStore';
 import { useSessionStore } from '@/stores/useSessionStore';
+import { useDbMapSelectionStore, type DbMapPageInfo } from '@/stores/useDbMapSelectionStore';
 import { useComponentSchema } from '@/hooks/schema/useComponentSchema';
 import type { ComponentSchema, Field } from '@/hooks/schema/types';
 import ProfilerDetail from '@/panels/profiler/ProfilerDetail';
 
 /**
- * The Detail panel — a single "what's selected" surface. Three independent stores feed it:
+ * The Detail panel — a single "what's selected" surface. Four independent stores feed it:
  *  - `useSchemaInspectorStore.selectedField` (schema canvas click, arrow-nav, Index row click)
  *  - `useSelectedResourceStore.selected` (resource-tree click)
  *  - `useProfilerSelectionStore.selected` (profiler panel — span / chunk / tick / marker)
+ *  - `useDbMapSelectionStore.selected` (Database File Map — page click)
  *
  * Whichever was touched most recently wins — matches the IDE convention that the user's latest
  * interaction drives what the inspector shows. Graceful fallback: if the winner's data isn't
  * loaded (e.g., `schema` still fetching), fall back to the next non-empty source. Empty state
- * fires only when nothing has ever been selected from any of the three.
+ * fires only when nothing has ever been selected from any of the four.
  */
 export default function DetailPanel() {
   const selectedType = useSchemaInspectorStore((s) => s.selectedComponentType);
@@ -31,6 +33,8 @@ export default function DetailPanel() {
   const resourceTouchedAt = useSelectedResourceStore((s) => s.touchedAt);
   const profilerSelected = useProfilerSelectionStore((s) => s.selected);
   const profilerTouchedAt = useProfilerSelectionStore((s) => s.touchedAt);
+  const dbMapSelected = useDbMapSelectionStore((s) => s.selected);
+  const dbMapTouchedAt = useDbMapSelectionStore((s) => s.touchedAt);
 
   // Profiler session signals — used to render the range-stats fallback when no click selection has
   // been made but the user is exploring a profiler trace. The fallback runs through the same
@@ -49,17 +53,19 @@ export default function DetailPanel() {
   const fieldAvailable = !!field && !!schema;
   const resourceAvailable = !!resource;
   const profilerAvailable = profilerSelected !== null;
+  const dbMapAvailable = dbMapSelected !== null;
   // The range-stats fallback is "available" whenever a profiler session is open and has metadata —
   // viewRange is always defined; an empty viewRange just renders the empty-state inside the detail.
   const profilerRangeFallbackAvailable = isProfilerSession && profilerMetadata !== null;
 
-  // 3-way arbitration by recency. Each candidate's `at` is 0 when unavailable so they drop out
+  // 4-way arbitration by recency. Each candidate's `at` is 0 when unavailable so they drop out
   // of the max comparison — that way a never-populated source can't accidentally win on a
   // stale `touchedAt` tombstone.
   const fieldAt    = fieldAvailable    ? fieldTouchedAt    : 0;
   const resourceAt = resourceAvailable ? resourceTouchedAt : 0;
   const profilerAt = profilerAvailable ? profilerTouchedAt : 0;
-  const winnerAt = Math.max(fieldAt, resourceAt, profilerAt);
+  const dbMapAt    = dbMapAvailable    ? dbMapTouchedAt    : 0;
+  const winnerAt = Math.max(fieldAt, resourceAt, profilerAt, dbMapAt);
 
   if (winnerAt === 0) {
     // Nothing was clicked. If a profiler session is open, show the range-stats fallback over the
@@ -78,6 +84,9 @@ export default function DetailPanel() {
   }
 
   // Dispatch to the winning source. Graceful fallback chain if the winner's data isn't loaded.
+  if (dbMapAt === winnerAt && dbMapAvailable) {
+    return <DbMapDetail info={dbMapSelected!} />;
+  }
   if (profilerAt === winnerAt && profilerAvailable) {
     return <ProfilerDetail selection={profilerSelected!} />;
   }
@@ -87,11 +96,48 @@ export default function DetailPanel() {
   if (resourceAt === winnerAt && resourceAvailable) {
     return <ResourceDetail />;
   }
-  // Fall-back: show whichever source has data, preferring profiler > field > resource.
+  // Fall-back: show whichever source has data, preferring profiler > field > resource > dbMap.
   if (profilerAvailable) return <ProfilerDetail selection={profilerSelected!} />;
   if (fieldAvailable)    return <FieldDetail field={field!} schema={schema!} />;
   if (resourceAvailable) return <ResourceDetail />;
+  if (dbMapAvailable)    return <DbMapDetail info={dbMapSelected!} />;
   return null;
+}
+
+// Database File Map page selection (Module 15, §6.5) — coarse, A1-level page metadata.
+function DbMapDetail({ info }: { info: DbMapPageInfo }) {
+  return (
+    <div className="flex h-full flex-col bg-background p-3">
+      <div className="rounded-md border border-border bg-card p-3 text-[12px]">
+        <div className="mb-2 flex items-center gap-2 border-b border-border pb-2">
+          <HardDrive className="h-4 w-4 text-muted-foreground" />
+          <h3 className="text-[13px] font-semibold text-foreground">Page {info.pageIndex}</h3>
+          <StatusBadge tone="neutral">{info.typeLabel}</StatusBadge>
+          <span className="ml-auto truncate font-mono text-[11px] text-muted-foreground">
+            {info.databaseName}
+          </span>
+        </div>
+
+        <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-[11px]">
+          <dt className="text-muted-foreground">Page index</dt>
+          <dd className="font-mono tabular-nums text-foreground">{info.pageIndex}</dd>
+
+          <dt className="text-muted-foreground">Type</dt>
+          <dd className="text-foreground">{info.typeLabel}</dd>
+
+          <dt className="text-muted-foreground">Byte offset</dt>
+          <dd className="font-mono tabular-nums text-foreground">
+            {info.byteOffset.toLocaleString()} (0x{info.byteOffset.toString(16).toUpperCase()})
+          </dd>
+
+          <dt className="text-muted-foreground">Owning segment</dt>
+          <dd className="text-foreground">
+            {info.segmentId != null ? `#${info.segmentId} · ${info.segmentKind}` : 'none'}
+          </dd>
+        </dl>
+      </div>
+    </div>
+  );
 }
 
 function FieldDetail({ field, schema }: { field: Field; schema: ComponentSchema }) {
