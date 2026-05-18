@@ -69,62 +69,12 @@ public partial class Main : Node3D
 
         GD.Print("AntHill: Initializing Typhon engine...");
 
-        // Resolve profiler inputs from env vars + Godot cmdline user args (after the "++" separator).
-        _profilerConfig = ProfilerLaunchConfig
-            .FromEnvironment()
-            .MergedWith(ProfilerLaunchConfig.FromArgs(OS.GetCmdlineUserArgs()));
-
-        ProfilerLauncher.EnableTelemetryGateIfActive(_profilerConfig);
-
+        // Profiler (issue #332): enabled via typhon.telemetry.json (Typhon:Profiler:Enabled, or any Trace/Live key).
+        // The trace path / live port is injected per run from Godot's post-"++" user args through the AddTyphonProfiler
+        // DI hook — the host owns its CLI parsing; the engine never reads the command line itself.
         _bridge = new TyphonBridge();
-        _bridge.Initialize();
-
-        if (_profilerConfig.IsActive)
-        {
-            try
-            {
-                _exporters = ProfilerLauncher.CreateExporters(_profilerConfig, _bridge.ProfilerParent);
-                foreach (var exp in _exporters)
-                {
-                    TyphonProfiler.AttachExporter(exp);
-                }
-                // CPU sampler must start BEFORE BuildSessionMetadata so its QPC anchor lands in the trace header.
-                // Gated internally on CpuSampling being enabled + a configured trace file — a no-op (returns 0) otherwise.
-                var samplingQpc = ProfilerLauncher.StartCpuSampler(_profilerConfig);
-                var metadata = ProfilerSetup.BuildSessionMetadata(_bridge.Systems, 16, 60f, () => _bridge?.CurrentTick ?? 0,
-                    _bridge.DatabaseEngine, _bridge.ResourceGraphRoot, _bridge.ActiveRuntime, samplingQpc);
-
-                if (_profilerConfig.LiveWaitMs > 0 && _profilerConfig.LivePort >= 0)
-                {
-                    GD.Print($"AntHill: Waiting up to {_profilerConfig.LiveWaitMs} ms for the workbench to attach on :{_profilerConfig.LivePort}…");
-                }
-
-                TyphonProfiler.Start(_bridge.ProfilerParent, metadata);
-
-                if (_profilerConfig.TraceFilePath != null) GD.Print($"AntHill: Profiler enabled -> file: {_profilerConfig.TraceFilePath}");
-                if (_profilerConfig.LivePort >= 0)
-                {
-                    var tcp = FindTcpExporter(_exporters);
-                    if (tcp != null && _profilerConfig.LiveWaitMs > 0)
-                    {
-                        GD.Print(tcp.HasClientEverConnected
-                            ? $"AntHill: Profiler enabled -> live TCP client attached on :{_profilerConfig.LivePort}."
-                            : $"AntHill: Profiler enabled -> live TCP listener on :{_profilerConfig.LivePort} (live-wait timed out — viewer can still attach).");
-                    }
-                    else
-                    {
-                        GD.Print($"AntHill: Profiler enabled -> live TCP listener on :{_profilerConfig.LivePort}.");
-                    }
-                    GD.Print("  Viewer server must connect to this port (LiveStream:Port in its config, default 9100).");
-                }
-            }
-            catch (System.Exception ex)
-            {
-                GD.PrintErr($"AntHill: profiler startup FAILED — {ex.GetType().Name}: {ex.Message}");
-                GD.PrintErr($"  Likely cause: port {_profilerConfig.LivePort} already in use, firewall blocking, or trace path not writable. Continuing without profiling.");
-                _exporters = null;
-            }
-        }
+        _bridge.Initialize(services =>
+            services.AddTyphonProfiler(fileConfig => fileConfig.MergedWith(ProfilerLaunchConfig.FromArgs(OS.GetCmdlineUserArgs()))));
 
         GD.Print($"AntHill: Spawned {TyphonBridge.AntCount:N0} ants. Starting runtime...");
 
@@ -162,8 +112,6 @@ public partial class Main : Node3D
 
         _bridge.Start();
         GD.Print("AntHill: Runtime started. WASD=pan, wheel=zoom, T=tilt, Ctrl+T=cinematic, mid-drag=yaw, `=pause, 1-4=speed, H=pheromone overlay, M=minimap toggle, Esc=settings, F1=debug HUD, tools 1/2/3/4/5/P.");
-
-        ProfilerLauncher.PrintDiagnostics(GD.Print, _exporters);
     }
 
     private void BuildSettings()
@@ -441,19 +389,6 @@ void fragment() {
         _camera?.SetFollowTarget(new Vector3(worldX, 0f, worldZ));
     }
 
-    private static TcpExporter FindTcpExporter(List<IProfilerExporter> exporters)
-    {
-        if (exporters == null) return null;
-        foreach (var e in exporters)
-        {
-            if (e is TcpExporter tcp) return tcp;
-        }
-        return null;
-    }
-
-    private List<IProfilerExporter> _exporters;
-    private ProfilerLaunchConfig _profilerConfig;
-
     public override void _UnhandledInput(InputEvent @event)
     {
         if (@event is InputEventKey key && key.Pressed && !key.Echo)
@@ -663,18 +598,8 @@ void fragment() {
             GD.PrintErr($"AntHill: failed to save window state — {ex.Message}");
         }
 
-        // Begin stopping the CPU sampler BEFORE the bridge teardown so its (seconds-long) .nettrace transcode +
-        // symbol resolution runs on a background thread, overlapping the engine-teardown dirty-page flush instead
-        // of freezing the exit path after it.
-        try
-        {
-            ProfilerLauncher.BeginCpuSamplerStop();
-        }
-        catch
-        {
-            // ignored
-        }
-
+        // The profiler tears itself down inside _bridge.Dispose() → TyphonRuntime.Shutdown/Dispose (issue #332):
+        // Shutdown begins the async CPU-sampler stop, Dispose finishes it and stops the profiler.
         try
         {
             _bridge?.Dispose();
@@ -685,42 +610,6 @@ void fragment() {
         }
 
         _bridge = null;
-
-        // Finish the CPU sampler (awaits the background parse) and hand the samples to the FileExporter, which
-        // Stop() then drains into the trace's CpuSampleSection — BEFORE TyphonProfiler.Stop(). Idempotent + best-effort.
-        try
-        {
-            ProfilerLauncher.StopCpuSampler();
-        }
-        catch
-        {
-            // ignored
-        }
-
-        if (_exporters != null && _exporters.Count > 0)
-        {
-            try
-            {
-                TyphonProfiler.Stop();
-            }
-            catch
-            {
-                // ignored
-            }
-
-            foreach (var exp in _exporters)
-            {
-                try
-                {
-                    TyphonProfiler.DetachExporter(exp);
-                }
-                catch
-                {
-                    // ignored
-                }
-            }
-            _exporters = null;
-        }
 
         var dropTotal = TyphonEvent.TotalDroppedEvents;
         var exporterDrops = TyphonProfiler.TotalDroppedExporterBatches;

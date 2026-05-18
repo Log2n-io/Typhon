@@ -26,6 +26,13 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     internal event EventHandler CreatingEvent;
     internal event EventHandler LoadingEvent;
 
+    /// <summary>
+    /// Raised once at the end of <see cref="Dispose(bool)"/> (explicit disposal only). Lets observers run teardown that
+    /// must outlive the engine — the profiler bootstrap finalizes the trace here, since this MMF is disposed after the
+    /// <see cref="DatabaseEngine"/> so the engine's shutdown events are still buffered and can be drained.
+    /// </summary>
+    internal event EventHandler DisposingEvent;
+
     #endregion
 
     #region Constants
@@ -602,6 +609,14 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         }
         IsDisposed = true;
         base.Dispose(disposing);
+
+        // Signal observers AFTER the full storage + resource-node teardown. Explicit-disposal only — handlers touch
+        // managed state, so this must not run on the finalizer path.
+        if (disposing)
+        {
+            var handler = DisposingEvent;
+            handler?.Invoke(this, null!);
+        }
     }
     
     /// <summary>

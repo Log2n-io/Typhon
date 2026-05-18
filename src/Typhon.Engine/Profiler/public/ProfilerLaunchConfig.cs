@@ -1,22 +1,22 @@
-using System;
+using Microsoft.Extensions.Configuration;
 
 namespace Typhon.Engine;
 
 /// <summary>
 /// Parsed profiler launch options for a host application (AntHill, IOProfileRunner, MonitoringDemo, …).
-/// Resolved from CLI args and/or environment variables, then handed to <see cref="ProfilerLauncher"/> to
-/// produce the exporter list and (optionally) flip the telemetry gate before <see cref="TyphonProfiler.Start"/>.
+/// Resolved from CLI args and/or environment variables, then handed to <see cref="ProfilerLauncher"/> to produce the exporter list and (optionally) flip the
+/// telemetry gate before <see cref="TyphonProfiler.Start"/>.
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Convention.</b> Two output channels are recognized: a sidecar trace file (post-mortem analysis in the
-/// workbench's Trace mode) and a TCP listener for live attach (workbench's Attach mode). Either, both, or neither
-/// can be configured. <see cref="LiveWaitMs"/> turns the live exporter's <see cref="TcpExporter.Initialize"/> into
-/// a synchronous "wait for first client" gate so the host can pause at startup until a viewer attaches.
+/// <b>Convention.</b> Two output channels are recognized: a sidecar trace file (post-mortem analysis in the workbench's Trace mode) and a TCP listener for
+/// live attach (workbench's Attach mode). Either, both, or neither can be configured. <see cref="LiveWaitMs"/> turns the live exporter's
+/// <see cref="TcpExporter.Initialize"/> into a synchronous "wait for first client" gate so the host can pause at startup until a viewer attaches.
 /// </para>
 /// <para>
-/// <b>Sources of truth.</b> CLI args take precedence over environment variables (the standard tooling convention).
-/// Use <see cref="FromEnvironment"/> + <see cref="FromArgs"/> + <see cref="MergedWith"/> to layer them.
+/// <b>Sources of truth.</b> The runtime self-resolves this from the merged telemetry configuration via <see cref="FromConfiguration"/> (the
+/// <c>typhon.telemetry.json</c> file plus <c>TYPHON__PROFILER__*</c> environment variables — see <see cref="TelemetryConfig"/>). Hosts that still want CLI
+/// control layer <see cref="FromArgs"/> on top with <see cref="MergedWith"/> and feed the result through the <c>AddTyphonProfiler</c> override hook.
 /// </para>
 /// <para>
 /// <b>Sentinels.</b> Unset state is encoded in-band: <see cref="TraceFilePath"/> is <c>null</c>, <see cref="LivePort"/>
@@ -102,32 +102,40 @@ public sealed record ProfilerLaunchConfig
     }
 
     /// <summary>
-    /// Parse from environment variables:
+    /// Parse from a merged <see cref="IConfiguration"/> — the standard source for the zero-host-code startup path.
+    /// Recognized keys (under the existing <c>Typhon:Profiler</c> namespace, beside <c>Enabled</c>):
     /// <list type="bullet">
-    ///   <item><c>TYPHON_PROFILER_TRACE</c> — sidecar file path</item>
-    ///   <item><c>TYPHON_PROFILER_LIVE</c> — TCP port (or any non-numeric value to use <see cref="DefaultLivePort"/>)</item>
-    ///   <item><c>TYPHON_PROFILER_LIVE_WAIT_MS</c> — wait timeout in milliseconds</item>
+    ///   <item><c>Typhon:Profiler:Trace</c> — sidecar file path</item>
+    ///   <item><c>Typhon:Profiler:Live</c> — TCP port (or any non-numeric value to use <see cref="DefaultLivePort"/>)</item>
+    ///   <item><c>Typhon:Profiler:LiveWaitMs</c> — wait timeout in milliseconds</item>
     /// </list>
-    /// Unset variables leave the field at its sentinel.
+    /// The configuration is built once by <see cref="TelemetryConfig"/> from <c>typhon.telemetry.json</c> (probed in the current directory then next to the
+    /// engine assembly) overlaid with <c>TYPHON__PROFILER__*</c> environment variables.
+    /// Unset keys leave the field at its sentinel; a <c>null</c> config yields an all-sentinel (inactive) result.
     /// </summary>
-    public static ProfilerLaunchConfig FromEnvironment()
+    public static ProfilerLaunchConfig FromConfiguration(IConfiguration config)
     {
-        string traceFile = Environment.GetEnvironmentVariable("TYPHON_PROFILER_TRACE");
+        if (config == null)
+        {
+            return new ProfilerLaunchConfig();
+        }
+
+        var traceFile = config["Typhon:Profiler:Trace"];
         if (string.IsNullOrWhiteSpace(traceFile))
         {
             traceFile = null;
         }
 
-        int livePort = -1;
-        string liveEnv = Environment.GetEnvironmentVariable("TYPHON_PROFILER_LIVE");
-        if (!string.IsNullOrWhiteSpace(liveEnv))
+        var livePort = -1;
+        var liveValue = config["Typhon:Profiler:Live"];
+        if (!string.IsNullOrWhiteSpace(liveValue))
         {
-            livePort = int.TryParse(liveEnv, out var p) ? p : DefaultLivePort;
+            livePort = int.TryParse(liveValue, out var p) ? p : DefaultLivePort;
         }
 
-        int liveWaitMs = 0;
-        string waitEnv = Environment.GetEnvironmentVariable("TYPHON_PROFILER_LIVE_WAIT_MS");
-        if (!string.IsNullOrWhiteSpace(waitEnv) && int.TryParse(waitEnv, out var ms) && ms >= 0)
+        var liveWaitMs = 0;
+        var waitValue = config["Typhon:Profiler:LiveWaitMs"];
+        if (!string.IsNullOrWhiteSpace(waitValue) && int.TryParse(waitValue, out var ms) && ms >= 0)
         {
             liveWaitMs = ms;
         }

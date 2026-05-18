@@ -642,6 +642,21 @@ public static class TelemetryConfig
     public static readonly string LoadedConfigurationFile;
 
     /// <summary>
+    /// The merged configuration built by <see cref="BuildConfiguration"/> — <c>typhon.telemetry.json</c> (current dir then assembly dir) overlaid with
+    /// environment variables. Exposed so the profiler bootstrap can resolve <see cref="ProfilerLaunchConfig.FromConfiguration"/> from the same source without
+    /// re-running the multi-location probe.
+    /// </summary>
+    internal static readonly IConfiguration Configuration;
+
+    /// <summary>
+    /// The profiler launch config resolved from the file/environment layer only — <c>typhon.telemetry.json</c> plus <c>TYPHON__PROFILER__*</c> variables. The
+    /// process command line is deliberately NOT read here: a host parses its own arguments and injects the launch config through DI (<c>AddTyphonProfiler</c>),
+    /// which <see cref="ProfilerBootstrap"/> merges on top of this. An active value here also turns <see cref="ProfilerActive"/> on — declaring an output
+    /// channel in config enables the profiler.
+    /// </summary>
+    internal static readonly ProfilerLaunchConfig ProfilerLaunch;
+
+    /// <summary>
     /// True if any value was read from the legacy <c>Typhon:Telemetry:*</c> namespace via the back-compat shim,
     /// or if any legacy key was present in the loaded configuration. A deprecation warning is emitted to
     /// <c>Console.Error</c> at static-class load when this flag is set.
@@ -656,13 +671,20 @@ public static class TelemetryConfig
     {
         var (config, configPath) = BuildConfiguration();
         LoadedConfigurationFile = configPath;
+        Configuration = config;
+
+        // Resolve the profiler launch config from the file/environment layer only. The command line is NOT read here —
+        // a host parses its own args and injects the launch config through DI (AddTyphonProfiler); see ProfilerBootstrap.
+        ProfilerLaunch = ProfilerLaunchConfig.FromConfiguration(config);
 
         var legacyDetected = false;
 
         // ─── Master switch ─────────────────────────────────────────────────────
-        // New: Typhon:Profiler:Enabled is the single master.
+        // Typhon:Profiler:Enabled is the master. A Trace/Live key in config also implies "enabled" — declaring an
+        // output channel turns the profiler on. The producer gate is a JIT-folded static, so it must resolve from this
+        // ambient config here, before hot paths compile — it cannot come from DI, which is built later.
         // Legacy: required Typhon:Telemetry:Enabled AND Typhon:Telemetry:Profiler:Enabled (both must be true).
-        Enabled = ReadMasterEnabled(config, ref legacyDetected);
+        Enabled = ReadMasterEnabled(config, ref legacyDetected) || ProfilerLaunch.IsActive;
         ProfilerEnabled = Enabled;
         ProfilerActive = Enabled;
 

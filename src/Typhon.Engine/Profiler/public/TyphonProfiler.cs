@@ -43,8 +43,12 @@ public static class TyphonProfiler
 
     // Process-exit safety net — fields are non-null while hooks are wired (Running == true). Both invoke Stop()
     // best-effort; Stop is idempotent so a double-fire (host called Stop and ProcessExit also fired) is harmless.
-    private static EventHandler s_processExitHandler;
-    private static UnhandledExceptionEventHandler s_unhandledExceptionHandler;
+    private static EventHandler SProcessExitHandler;
+    private static UnhandledExceptionEventHandler SUnhandledExceptionHandler;
+
+    // Teardown action the safety-net hooks invoke instead of a bare Stop() — set by Start, cleared by Stop. See the
+    // processExitTeardown parameter of Start. Null means "just call Stop()".
+    private static Action SProcessExitTeardown;
 
     /// <summary>True while the profiler consumer thread is running.</summary>
     public static bool IsRunning
@@ -100,10 +104,21 @@ public static class TyphonProfiler
     /// <summary>
     /// Start the profiler consumer thread and all attached exporter threads. Idempotent — calling on an already-running profiler is a no-op.
     /// </summary>
+    /// <remarks>
+    /// <b>Low-level entry point.</b> Most hosts never call this — the runtime self-wires the profiler from configuration via
+    /// <c>ProfilerBootstrap</c> (issue #332). This overload stays <c>internal</c> for metadata-explicit consumers that have no
+    /// <see cref="TyphonRuntime"/> to derive a session from (the exporter integration tests, <c>Typhon.IOProfileRunner</c>).
+    /// </remarks>
     /// <param name="parent">Resource-tree parent for the consumer thread. Typically <c>registry.Profiler</c>.</param>
     /// <param name="metadata">Static session description passed to each exporter's <see cref="IProfilerExporter.Initialize"/>.</param>
     /// <param name="options">Tunable parameters. <c>null</c> uses defaults (1 ms cadence, 4-deep queues, 8 KB merge buffer).</param>
-    public static void Start(IResource parent, ProfilerSessionMetadata metadata, ProfilerOptions options = null)
+    /// <param name="processExitTeardown">
+    /// Optional teardown action invoked by the process-exit / unhandled-exception safety net <i>instead of</i> a bare <see cref="Stop"/>.
+    /// <c>ProfilerBootstrap</c> passes its full teardown here (CPU-sampler stop + <see cref="Stop"/> + exporter detach) so the trace —
+    /// including events emitted during host/engine teardown — is finalised correctly without the host stopping the profiler explicitly.
+    /// <c>null</c> falls back to <see cref="Stop"/>.
+    /// </param>
+    internal static void Start(IResource parent, ProfilerSessionMetadata metadata, ProfilerOptions options = null, Action processExitTeardown = null)
     {
         ArgumentNullException.ThrowIfNull(parent);
         ArgumentNullException.ThrowIfNull(metadata);
@@ -183,6 +198,9 @@ public static class TyphonProfiler
 
             Running = true;
 
+            // Hand the safety-net hooks their teardown action (full bootstrap teardown, or bare Stop when null).
+            SProcessExitTeardown = processExitTeardown;
+
             // Register process-exit safety net under the lock so paired Unregister in Stop sees the same instances.
             // If the host (Godot _ExitTree, console Main exit, ASP.NET host shutdown, …) forgets to call Stop, the
             // CLR's ProcessExit / UnhandledException paths will run it for us so attached exporters get a chance to
@@ -213,20 +231,20 @@ public static class TyphonProfiler
     /// </remarks>
     private static void RegisterProcessExitHooks()
     {
-        if (s_processExitHandler != null)
+        if (SProcessExitHandler != null)
         {
             return; // already registered (lock-protected, but be defensive)
         }
 
-        s_processExitHandler = (_, _) =>
+        SProcessExitHandler = (_, _) =>
         {
-            try { Stop(); }
+            try { (SProcessExitTeardown ?? Stop)(); }
             catch
             {
                 // Process is exiting — nothing useful to do with the exception.
             }
         };
-        s_unhandledExceptionHandler = (_, args) =>
+        SUnhandledExceptionHandler = (_, args) =>
         {
             // Only run on terminating exceptions. Non-terminating UnhandledException (rare on .NET 6+) means the
             // process keeps going and we shouldn't tear down the profiler.
@@ -237,7 +255,7 @@ public static class TyphonProfiler
 
             try
             {
-                Stop();
+                (SProcessExitTeardown ?? Stop)();
             }
             catch
             {
@@ -245,22 +263,22 @@ public static class TyphonProfiler
             }
         };
 
-        AppDomain.CurrentDomain.ProcessExit += s_processExitHandler;
-        AppDomain.CurrentDomain.UnhandledException += s_unhandledExceptionHandler;
+        AppDomain.CurrentDomain.ProcessExit += SProcessExitHandler;
+        AppDomain.CurrentDomain.UnhandledException += SUnhandledExceptionHandler;
     }
 
     /// <summary>Mirror of <see cref="RegisterProcessExitHooks"/> — call from <see cref="Stop"/> so the CLR doesn't keep references to disposed state.</summary>
     private static void UnregisterProcessExitHooks()
     {
-        if (s_processExitHandler != null)
+        if (SProcessExitHandler != null)
         {
-            AppDomain.CurrentDomain.ProcessExit -= s_processExitHandler;
-            s_processExitHandler = null;
+            AppDomain.CurrentDomain.ProcessExit -= SProcessExitHandler;
+            SProcessExitHandler = null;
         }
-        if (s_unhandledExceptionHandler != null)
+        if (SUnhandledExceptionHandler != null)
         {
-            AppDomain.CurrentDomain.UnhandledException -= s_unhandledExceptionHandler;
-            s_unhandledExceptionHandler = null;
+            AppDomain.CurrentDomain.UnhandledException -= SUnhandledExceptionHandler;
+            SUnhandledExceptionHandler = null;
         }
     }
 
@@ -304,6 +322,7 @@ public static class TyphonProfiler
             // second call from the handler bails at the !Running check above, but unregistering also keeps the
             // AppDomain from holding stale delegate references after a Start/Stop/Start cycle).
             UnregisterProcessExitHooks();
+            SProcessExitTeardown = null;
         }
 
         // Detach GC tracing first so the CLR stops delivering events before we start tearing down the consumer side.

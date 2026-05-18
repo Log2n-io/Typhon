@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 using System.Threading;
 using AntHill.Core;
 using Typhon.Engine;
@@ -30,70 +29,17 @@ public static class Program
             }
         }
 
-        // Shared profiler activation path (same ordering as Godot's Main.cs).
-        // Step 1 runs env-var + TelemetryConfig setup BEFORE bridge construction so the JIT gate
-        // (TelemetryConfig.ProfilerActive) is open when the scheduler compiles.
-        var profilerConfig = ProfilerLaunchConfig
-            .FromEnvironment()
-            .MergedWith(ProfilerLaunchConfig.FromArgs(args));
-        ProfilerLauncher.EnableTelemetryGateIfActive(profilerConfig);
-
-        if (profilerConfig.TraceFilePath != null)
-        {
-            Console.WriteLine($"Profiler: file mode → {profilerConfig.TraceFilePath}");
-        }
-        else if (profilerConfig.LivePort >= 0)
-        {
-            Console.WriteLine($"Profiler: live mode → TCP listener on port {profilerConfig.LivePort}");
-        }
-
         Console.WriteLine($"AntHill ProfileRunner: {TyphonBridge.AntCount:N0} ants, {TyphonBridge.WorldSize:N0} world");
         Console.WriteLine($"Warming up {WarmupSeconds}s, measuring {durationSec}s...");
 
+        // Profiler (issue #332): enabled via typhon.telemetry.json (Typhon:Profiler:Enabled, or any Trace/Live key).
+        // This runner's --trace/--live flags are parsed here and injected through the AddTyphonProfiler DI hook —
+        // the host owns its CLI parsing; the engine never reads the command line itself.
         var bridge = new TyphonBridge();
-        bridge.Initialize();
-
-        // Step 2: exporters + profiler start, now that DI has built registry.Profiler.
-        // Must happen BEFORE bridge.Start() so the very first tick is captured. Dual-attach when both --trace and --live are passed.
-        List<IProfilerExporter> exporters = null;
-        if (profilerConfig.IsActive)
-        {
-            try
-            {
-                exporters = ProfilerLauncher.CreateExporters(profilerConfig, bridge.ProfilerParent);
-                foreach (var exp in exporters) TyphonProfiler.AttachExporter(exp);
-                // CPU sampler must start BEFORE BuildSessionMetadata so its QPC anchor lands in the trace header.
-                var samplingQpc = ProfilerLauncher.StartCpuSampler(profilerConfig);
-                var metadata = ProfilerSetup.BuildSessionMetadata(
-                    bridge.Systems, workerCount: 16, baseTickRate: 60f,
-                    currentEngineTickProvider: () => bridge.CurrentTick,
-                    engine: bridge.DatabaseEngine,
-                    resourceGraphRoot: bridge.ResourceGraphRoot,
-                    runtime: bridge.ActiveRuntime,
-                    samplingSessionStartQpc: samplingQpc);
-                if (profilerConfig.LiveWaitMs > 0 && profilerConfig.LivePort >= 0)
-                {
-                    Console.WriteLine($"Waiting up to {profilerConfig.LiveWaitMs} ms for the workbench to attach on :{profilerConfig.LivePort}…");
-                }
-                // Start runs each exporter's Initialize. For a TcpExporter with LiveWaitMs > 0, that call blocks
-                // until the first viewer connects (or the timeout elapses), giving the operator time to attach.
-                TyphonProfiler.Start(bridge.ProfilerParent, metadata);
-            }
-            catch (Exception ex)
-            {
-                // Port busy / firewall / disposal race / non-writable trace path. Continue without profiling rather than crashing.
-                Console.Error.WriteLine($"Profiler startup FAILED — {ex.GetType().Name}: {ex.Message}");
-                Console.Error.WriteLine($"  Likely cause: port {profilerConfig.LivePort} already in use, firewall blocking, or trace path not writable. Running without profiling.");
-                exporters = null;
-            }
-        }
+        bridge.Initialize(services =>
+            services.AddTyphonProfiler(fileConfig => fileConfig.MergedWith(ProfilerLaunchConfig.FromArgs(args))));
 
         bridge.Start();
-
-        // Telemetry diagnostics — prints full config state, exporter types, and whether
-        // TyphonProfiler's consumer thread is running. Run right after Start() so the
-        // scheduler has had a chance to register with the profiler.
-        ProfilerLauncher.PrintDiagnostics(Console.WriteLine, exporters);
 
         // Warm up
         Thread.Sleep(WarmupSeconds * 1000);
@@ -168,27 +114,9 @@ public static class Program
 
         Console.WriteLine($"──────────────────────────────────────────────────");
 
-        // Begin stopping the CPU sampler BEFORE the bridge teardown so its (seconds-long) .nettrace transcode + symbol resolution runs on a background
-        // thread, overlapping the engine-teardown dirty-page flush instead of freezing the exit path after it.
-        ProfilerLauncher.BeginCpuSamplerStop();
-
+        // The profiler tears itself down inside bridge.Dispose() → TyphonRuntime.Shutdown (begins the async CPU-sampler
+        // stop) → TyphonRuntime.Dispose (finishes it, stops the profiler, detaches exporters). Issue #332.
         bridge.Dispose();
-
-        // Finish the CPU sampler (awaits the background parse) and hand the samples to the FileExporter, which Stop() then drains and closes — BEFORE
-        // TyphonProfiler.Stop(). Idempotent + best-effort.
-        ProfilerLauncher.StopCpuSampler();
-
-        // Stop the profiler AFTER the bridge so any final tick/shutdown events have been emitted. The exporters survive bridge.Dispose() (their
-        // DisposeWithParent is false — lifecycle owned by TyphonProfiler), so this final drain still captures the engine-teardown events.
-        // DetachExporter clears the static list so re-running in the same process starts from empty state.
-        if (exporters != null && exporters.Count > 0)
-        {
-            TyphonProfiler.Stop();
-            foreach (var exp in exporters)
-            {
-                TyphonProfiler.DetachExporter(exp);
-            }
-        }
     }
 
     private static void PrintUsage()

@@ -3,6 +3,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using System;
+using Typhon.Engine.internals;
 
 namespace Typhon.Engine;
 
@@ -305,6 +306,21 @@ public static class ServiceCollectionExtensions
         return new DatabaseEngine(resourceRegistry, epochManager, watchdog, mpmmf, memoryAllocator, options.Value, logger);
     }
     
+    /// <summary>
+    /// Register a host-supplied profiler-launch override.
+    /// </summary>
+    /// <remarks>
+    /// The runtime self-wires the profiler from <c>typhon.telemetry.json</c> by default — a host needs <b>zero code</b> to get profiling. Call this only to
+    /// adjust the resolved <see cref="ProfilerLaunchConfig"/> in code (e.g. to layer CLI args on top, or compute a trace path at runtime).
+    /// <paramref name="configure"/> receives the config resolved from file + environment and returns the effective config; precedence is JSON file →
+    /// environment → this delegate. For the override to be seen, the host must pass its <see cref="IServiceProvider"/> to <see cref="TyphonRuntime.Create"/>.
+    /// </remarks>
+    public static IServiceCollection AddTyphonProfiler(this IServiceCollection services, Func<ProfilerLaunchConfig, ProfilerLaunchConfig> configure = null)
+    {
+        services.AddSingleton(new ProfilerLaunchOverride(configure));
+        return services;
+    }
+
     public static void EnsureFileDeleted<TO>(this IServiceProvider provider) where TO : PagedMMFOptions
     {
         using var scope = provider.CreateScope();

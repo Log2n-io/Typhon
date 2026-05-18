@@ -333,7 +333,7 @@ public sealed class TyphonBridge : IDisposable
         if (heightmap != null) PlantGrid = new PlantGrid(heightmap.Sample);
     }
 
-    public void Initialize()
+    public void Initialize(Action<IServiceCollection> configureServices = null)
     {
         var services = new ServiceCollection();
         services
@@ -359,6 +359,10 @@ public sealed class TyphonBridge : IDisposable
                 // tick cost elsewhere.
                 opt.Wal = new WalWriterOptions();
             });
+
+        // Host hook: register extra services (e.g. AddTyphonProfiler for a code-based profiler-launch override)
+        // before the provider is built. The Demo host passes nothing — the profiler self-wires from config.
+        configureServices?.Invoke(services);
 
         _serviceProvider = services.BuildServiceProvider();
         _serviceProvider.EnsureFileDeleted<ManagedPagedMMFOptions>();
@@ -417,7 +421,7 @@ public sealed class TyphonBridge : IDisposable
             // of serially on TickDriver, reclaiming the idle-worker window that previously dominated AntHill's
             // cluster-fence wall-clock. K × WorkerCount chunk oversubscription smooths preemption jitter.
             EnableParallelFence = true,
-        });
+        }, serviceProvider: _serviceProvider);
 
         // Per-worker render buffers: each parallel FillRender worker writes to its own buffer
         _workerBuffers = new RenderWorkerBuffer[workerCount];

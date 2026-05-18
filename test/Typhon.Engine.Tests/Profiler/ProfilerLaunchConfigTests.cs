@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using Microsoft.Extensions.Configuration;
 using NUnit.Framework;
 using Typhon.Engine.Profiler;
 
@@ -6,17 +8,11 @@ namespace Typhon.Engine.Tests.Profiler;
 
 /// <summary>
 /// Unit tests for <see cref="ProfilerLaunchConfig"/> — the engine's host-launch convention parser. Pure data
-/// transformations: argv → record, env → record, merge of two records. Each test runs in isolation; the env-var
-/// tests save/restore the underlying environment so concurrent fixtures aren't disturbed.
+/// transformations: argv → record, <see cref="IConfiguration"/> → record, merge of two records.
 /// </summary>
 [TestFixture]
-[NonParallelizable] // env-var tests touch process-global state; serialize within fixture and across fixtures.
 public sealed class ProfilerLaunchConfigTests
 {
-    private const string EnvTrace = "TYPHON_PROFILER_TRACE";
-    private const string EnvLive = "TYPHON_PROFILER_LIVE";
-    private const string EnvWait = "TYPHON_PROFILER_LIVE_WAIT_MS";
-
     [Test]
     public void DefaultConfig_IsInactive()
     {
@@ -111,63 +107,55 @@ public sealed class ProfilerLaunchConfigTests
     }
 
     [Test]
-    public void FromEnvironment_AllUnset_ReturnsInactive()
+    public void FromConfiguration_Null_ReturnsInactive()
     {
-        using var _ = WithEnvVar(EnvTrace, null);
-        using var _2 = WithEnvVar(EnvLive, null);
-        using var _3 = WithEnvVar(EnvWait, null);
-        var cfg = ProfilerLaunchConfig.FromEnvironment();
+        var cfg = ProfilerLaunchConfig.FromConfiguration(null);
         Assert.That(cfg.IsActive, Is.False);
     }
 
     [Test]
-    public void FromEnvironment_TraceOnly()
+    public void FromConfiguration_Empty_ReturnsInactive()
     {
-        using var _ = WithEnvVar(EnvTrace, "/tmp/out.bin");
-        using var _2 = WithEnvVar(EnvLive, null);
-        using var _3 = WithEnvVar(EnvWait, null);
-        var cfg = ProfilerLaunchConfig.FromEnvironment();
-        Assert.That(cfg.TraceFilePath, Is.EqualTo("/tmp/out.bin"));
-        Assert.That(cfg.LivePort, Is.EqualTo(-1));
+        var cfg = ProfilerLaunchConfig.FromConfiguration(Config());
+        Assert.That(cfg.IsActive, Is.False);
     }
 
     [Test]
-    public void FromEnvironment_LiveWithPort()
+    public void FromConfiguration_TraceOnly()
     {
-        using var _ = WithEnvVar(EnvLive, "9300");
-        using var _2 = WithEnvVar(EnvTrace, null);
-        using var _3 = WithEnvVar(EnvWait, null);
-        var cfg = ProfilerLaunchConfig.FromEnvironment();
+        var cfg = ProfilerLaunchConfig.FromConfiguration(Config(("Typhon:Profiler:Trace", "/tmp/out.bin")));
+        Assert.That(cfg.TraceFilePath, Is.EqualTo("/tmp/out.bin"));
+        Assert.That(cfg.LivePort, Is.EqualTo(-1));
+        Assert.That(cfg.IsActive, Is.True);
+    }
+
+    [Test]
+    public void FromConfiguration_LiveWithPort()
+    {
+        var cfg = ProfilerLaunchConfig.FromConfiguration(Config(("Typhon:Profiler:Live", "9300")));
         Assert.That(cfg.LivePort, Is.EqualTo(9300));
     }
 
     [Test]
-    public void FromEnvironment_LiveNonNumeric_UsesDefault()
+    public void FromConfiguration_LiveNonNumeric_UsesDefault()
     {
-        using var _ = WithEnvVar(EnvLive, "yes");
-        using var _2 = WithEnvVar(EnvTrace, null);
-        using var _3 = WithEnvVar(EnvWait, null);
-        var cfg = ProfilerLaunchConfig.FromEnvironment();
+        var cfg = ProfilerLaunchConfig.FromConfiguration(Config(("Typhon:Profiler:Live", "yes")));
         Assert.That(cfg.LivePort, Is.EqualTo(ProfilerLaunchConfig.DefaultLivePort));
     }
 
     [Test]
-    public void FromEnvironment_LiveWaitMs()
+    public void FromConfiguration_LiveWaitMs()
     {
-        using var _ = WithEnvVar(EnvLive, "9100");
-        using var _2 = WithEnvVar(EnvTrace, null);
-        using var _3 = WithEnvVar(EnvWait, "7500");
-        var cfg = ProfilerLaunchConfig.FromEnvironment();
+        var cfg = ProfilerLaunchConfig.FromConfiguration(Config(
+            ("Typhon:Profiler:Live", "9100"),
+            ("Typhon:Profiler:LiveWaitMs", "7500")));
         Assert.That(cfg.LiveWaitMs, Is.EqualTo(7500));
     }
 
     [Test]
-    public void FromEnvironment_LiveWaitMs_Negative_StaysZero()
+    public void FromConfiguration_LiveWaitMs_Negative_StaysZero()
     {
-        using var _ = WithEnvVar(EnvWait, "-100");
-        using var _2 = WithEnvVar(EnvLive, null);
-        using var _3 = WithEnvVar(EnvTrace, null);
-        var cfg = ProfilerLaunchConfig.FromEnvironment();
+        var cfg = ProfilerLaunchConfig.FromConfiguration(Config(("Typhon:Profiler:LiveWaitMs", "-100")));
         Assert.That(cfg.LiveWaitMs, Is.EqualTo(0));
     }
 
@@ -213,37 +201,27 @@ public sealed class ProfilerLaunchConfigTests
     }
 
     [Test]
-    public void TypicalLayering_EnvFirstThenArgsOverride()
+    public void TypicalLayering_ConfigFirstThenArgsOverride()
     {
-        // The standard CLI-tooling pattern: env provides the user's defaults, args take precedence.
-        // Setup: env says trace + port 9100. CLI overrides with port 9200.
-        using var _ = WithEnvVar(EnvTrace, "/env.bin");
-        using var _2 = WithEnvVar(EnvLive, "9100");
-        using var _3 = WithEnvVar(EnvWait, null);
-        var env = ProfilerLaunchConfig.FromEnvironment();
+        // The standard pattern: typhon.telemetry.json provides defaults, CLI args take precedence —
+        // exactly how AntHill.Harness layers its --trace/--live flags through the AddTyphonProfiler hook.
+        var fileConfig = ProfilerLaunchConfig.FromConfiguration(Config(
+            ("Typhon:Profiler:Trace", "/file.bin"),
+            ("Typhon:Profiler:Live", "9100")));
         var cli = ProfilerLaunchConfig.FromArgs(new[] { "--live", "9200" });
-        var final = env.MergedWith(cli);
-        Assert.That(final.TraceFilePath, Is.EqualTo("/env.bin"), "trace from env preserved");
+        var final = fileConfig.MergedWith(cli);
+        Assert.That(final.TraceFilePath, Is.EqualTo("/file.bin"), "trace from config preserved");
         Assert.That(final.LivePort, Is.EqualTo(9200), "port overridden by CLI");
     }
 
-    /// <summary>
-    /// Helper: temporarily set an env var, restore on Dispose. Tolerates parallel test execution because each
-    /// test only touches its own three env vars and we restore deterministically. (The fixture is also
-    /// non-parallel-safe in the strict sense, but this RAII pattern is the simplest defense.)
-    /// </summary>
-    private static IDisposable WithEnvVar(string name, string value)
+    /// <summary>Builds an in-memory <see cref="IConfiguration"/> from key/value pairs for <c>FromConfiguration</c> tests.</summary>
+    private static IConfiguration Config(params (string Key, string Value)[] entries)
     {
-        var prev = Environment.GetEnvironmentVariable(name);
-        Environment.SetEnvironmentVariable(name, value);
-        return new Restore(name, prev);
-    }
-
-    private sealed class Restore : IDisposable
-    {
-        private readonly string _name;
-        private readonly string _value;
-        public Restore(string name, string value) { _name = name; _value = value; }
-        public void Dispose() => Environment.SetEnvironmentVariable(_name, _value);
+        var dict = new Dictionary<string, string>();
+        foreach (var (key, value) in entries)
+        {
+            dict[key] = value;
+        }
+        return new ConfigurationBuilder().AddInMemoryCollection(dict).Build();
     }
 }

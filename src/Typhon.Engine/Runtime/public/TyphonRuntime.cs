@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using Typhon.Engine.internals;
 using Typhon.Profiler;
 
 namespace Typhon.Engine;
@@ -26,7 +27,6 @@ namespace Typhon.Engine;
 [PublicAPI]
 public sealed partial class TyphonRuntime : IDisposable
 {
-    private readonly RuntimeOptions _options;
     private readonly ILogger _logger;
 
     // Tick-level UoW (created at tick start, disposed at tick end)
@@ -129,6 +129,9 @@ public sealed partial class TyphonRuntime : IDisposable
     /// <summary>The DAG scheduler driving tick execution.</summary>
     public DagScheduler Scheduler { get; }
 
+    /// <summary>The runtime options this runtime was created with. The profiler derives session metadata from these.</summary>
+    public RuntimeOptions Options { get; }
+
     /// <summary>Telemetry ring buffer for diagnostic inspection.</summary>
     public TickTelemetryRing Telemetry => Scheduler.Telemetry;
 
@@ -162,8 +165,12 @@ public sealed partial class TyphonRuntime : IDisposable
     /// <param name="options">Runtime options. If null, defaults are used.</param>
     /// <param name="parent">Parent resource node. If null, uses the registry's Runtime node.</param>
     /// <param name="logger">Optional logger.</param>
+    /// <param name="serviceProvider">
+    /// Optional DI container. When supplied, a profiler-launch override registered via <c>AddTyphonProfiler</c> is resolved
+    /// from it. The zero-host-code profiler path works without it — pass it only when a host wants to override config in code.
+    /// </param>
     public static TyphonRuntime Create(DatabaseEngine engine, Action<RuntimeSchedule> configure, RuntimeOptions options = null, IResource parent = null,
-        ILogger logger = null)
+        ILogger logger = null, IServiceProvider serviceProvider = null)
     {
         ArgumentNullException.ThrowIfNull(engine);
         ArgumentNullException.ThrowIfNull(configure);
@@ -183,7 +190,13 @@ public sealed partial class TyphonRuntime : IDisposable
         var resourceParent = parent ?? engine.Parent; // DatabaseEngine registers under DataEngine node
         var scheduler = schedule.Build(resourceParent, logger);
 
-        return new TyphonRuntime(engine, scheduler, opts, logger, fenceBundle);
+        var runtime = new TyphonRuntime(engine, scheduler, opts, logger, fenceBundle);
+
+        // Self-wire the profiler from configuration (issue #332) — a no-op unless typhon.telemetry.json enables it.
+        // Done here, with the runtime fully built and the engine fully populated, so the session metadata is complete.
+        ProfilerBootstrap.TryStart(runtime, serviceProvider);
+
+        return runtime;
     }
 
     private TyphonRuntime(DatabaseEngine engine, DagScheduler scheduler, RuntimeOptions options, ILogger logger, FenceExecBundle? fenceBundle = null)
@@ -199,7 +212,7 @@ public sealed partial class TyphonRuntime : IDisposable
         }
         Engine = engine;
         Scheduler = scheduler;
-        _options = options;
+        Options = options;
         _logger = logger ?? NullLogger.Instance;
         _systemTransactions = new Transaction[scheduler.AllSystemCount];
         _systemViews = new ViewBase[scheduler.AllSystemCount];
@@ -278,7 +291,7 @@ public sealed partial class TyphonRuntime : IDisposable
         Scheduler.Start();
 
         // Start TCP subscription server if a port is configured
-        var subOptions = _options.SubscriptionServer;
+        var subOptions = Options.SubscriptionServer;
         if (subOptions != null && subOptions.Port > 0)
         {
             _tcpServer = new TcpSubscriptionServer(subOptions, _clientConnectionManager, _subscriptionOutputPhase, _logger);
@@ -306,6 +319,10 @@ public sealed partial class TyphonRuntime : IDisposable
     /// </summary>
     public void Shutdown()
     {
+        // Begin the async CPU-sampler stop first so its (seconds-long) .nettrace transcode overlaps the rest of teardown.
+        // No-op unless the profiler was self-wired by ProfilerBootstrap.TryStart.
+        ProfilerBootstrap.BeginStop();
+
         // Stop accepting new connections and flush remaining data
         _tcpServer?.Shutdown();
 
@@ -342,6 +359,11 @@ public sealed partial class TyphonRuntime : IDisposable
         {
             _parallelAccessors[i]?.Dispose();
         }
+
+        // The profiler is intentionally NOT finalized here. ProfilerBootstrap finalizes the trace from the engine
+        // storage's Disposing event (ManagedPagedMMF, disposed after DatabaseEngine) — that runs deterministically on
+        // every host AND after the engine's shutdown teardown, so those events still reach the trace. Stopping it here
+        // would precede the engine teardown and drop it. Shutdown() above only pre-warms the async CPU-sampler stop.
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -1366,7 +1388,7 @@ public sealed partial class TyphonRuntime : IDisposable
     private int ComputeChunkCount(int entityCount, int sysIdx)
     {
         var workerCount = Scheduler.WorkerCount;
-        var minChunkSize = _options.ParallelQueryMinChunkSize;
+        var minChunkSize = Options.ParallelQueryMinChunkSize;
         var maxChunks = Math.Max(1, (entityCount + minChunkSize - 1) / minChunkSize);
 
         // Per-system oversubscription: lift the workerCount cap by ChunksPerWorker (default 1.0 = no change).
@@ -1968,7 +1990,7 @@ public sealed partial class TyphonRuntime : IDisposable
         // telemetry. Pre-#354 the marker wrapped `DispatchDeferredTracks` too, so `writeTickFenceUs` double-counted the Fence systems' wall-time.
         InspectorPhase(TickPhase.WriteTickFence, () =>
         {
-            ctx.Reset(scheduler.CurrentTickNumber, _currentUow?.ChangeSet, scheduler.WorkerCount, _options.FenceChunkOversubscription, _liveFenceCost);
+            ctx.Reset(scheduler.CurrentTickNumber, _currentUow?.ChangeSet, scheduler.WorkerCount, Options.FenceChunkOversubscription, _liveFenceCost);
 
             // Drain dormancy wake requests globally on TickDriver (single-threaded contract from issue #233).
             DormancyReporter.DrainAll(Engine._archetypeStates);
@@ -2001,7 +2023,7 @@ public sealed partial class TyphonRuntime : IDisposable
             Engine.UpdateLastTickFenceLSNAtomic(overall);
         }
 
-        if (_options.AdaptiveFenceCost)
+        if (Options.AdaptiveFenceCost)
         {
             _liveFenceCost.UpdatePhase(FencePhase.Migrate, _fenceMigrateExec.TotalWallTicks, _fenceMigrateExec.TotalUnitCount);
             _liveFenceCost.UpdatePhase(FencePhase.AabbRefresh, _fenceAabbRefreshExec.TotalWallTicks, _fenceAabbRefreshExec.TotalUnitCount);
@@ -2026,7 +2048,7 @@ public sealed partial class TyphonRuntime : IDisposable
     /// </summary>
     private void ComputeTierBudgetMetrics()
     {
-        var metrics = new TierBudgetMetrics { BudgetMs = 1000f / _options.BaseTickRate };
+        var metrics = new TierBudgetMetrics { BudgetMs = 1000f / Options.BaseTickRate };
 
         for (int i = 0; i < Scheduler.AllSystemCount; i++)
         {
