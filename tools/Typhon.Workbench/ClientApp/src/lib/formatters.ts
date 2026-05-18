@@ -39,19 +39,23 @@ export function formatDateTime(iso: string | null | undefined): string {
 }
 
 /**
- * Coarse relative age of an ISO-8601 timestamp — `today`, `N days`, or `N months`. Days are used
- * up to ~2 months, months beyond. Empty string on an unparseable input.
+ * Approximate relative age of an ISO-8601 timestamp, on an adaptive scale: `just now`, `N minutes`,
+ * `N hours`, `N days`, or `N months`. Picks the coarsest unit that still reads naturally — minutes
+ * under an hour, hours under a day, days up to ~2 months, months beyond. Always floored (an
+ * approximation, never a precise duration). Empty string on an unparseable input.
  */
 export function formatRelativeAge(iso: string | null | undefined): string {
   if (!iso) return '';
   const then = new Date(iso).getTime();
   if (!Number.isFinite(then)) return '';
   const ms = Date.now() - then;
-  if (ms < 0) return 'just now';
-  const days = Math.floor(ms / 86_400_000);
-  if (days === 0) return 'today';
-  if (days === 1) return '1 day';
-  if (days < 60) return `${days} days`;
+  if (ms < 60_000) return 'just now';
+  const minutes = Math.floor(ms / 60_000);
+  if (minutes < 60) return minutes === 1 ? '1 minute' : `${minutes} minutes`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return hours === 1 ? '1 hour' : `${hours} hours`;
+  const days = Math.floor(hours / 24);
+  if (days < 60) return days === 1 ? '1 day' : `${days} days`;
   const months = Math.floor(days / 30);
   return months === 1 ? '1 month' : `${months} months`;
 }

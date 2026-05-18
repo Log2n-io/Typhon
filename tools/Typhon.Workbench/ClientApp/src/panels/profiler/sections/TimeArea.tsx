@@ -10,6 +10,8 @@ import { getStudioThemeTokens } from '@/libs/profiler/canvas/theme';
 import { GaugeTooltip } from '@/panels/profiler/components/GaugeTooltip';
 import { HelpOverlay } from '@/panels/profiler/components/HelpOverlay';
 import { TimeAreaFilterButton } from '@/panels/profiler/sections/TimeAreaFilterButton';
+import { TimeAreaDisplayButton } from '@/panels/profiler/sections/TimeAreaDisplayButton';
+import { TimeAreaHelpButton } from '@/panels/profiler/sections/TimeAreaHelpButton';
 import { getTrackHelpLines } from '@/libs/profiler/canvas/trackHelpLines';
 import { buildHoverTooltipLines } from '@/libs/profiler/canvas/hoverTooltipLines';
 import { registerAnimateViewport } from '@/shell/commands/profilerCommands';
@@ -971,17 +973,24 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
         <div ref={scrollPhantomRef} style={{ height: layout.totalHeight - (RULER_HEIGHT + TRACK_GAP), width: 1 }} aria-hidden />
       </div>
       {/*
-       * Section-filter icon. Sits at the right edge of the ruler row's gutter band — same horizontal
-       * column as the rest of the gutter labels. Click opens a Popover with the search input + tri-state
-       * tree (Gauges / Threads / Systems / Engine Operations). The button absorbs its own pointer events
-       * so it doesn't trigger the canvas's drag/zoom handlers underneath.
+       * Gutter icon cluster — pinned to the right edge of the ruler row's gutter band, same column as
+       * the gutter labels. Distinct concerns behind distinct icons:
+       *   - Display options (sliders) — span colour lens, off-CPU overlay, dynamic track height.
+       *   - Section filter (funnel)   — search input + tri-state tree (Gauges / Threads / Systems /
+       *     Engine Operations) controlling which sections render.
+       *   - Help (?)                  — how-to-use dialog; only mounted when inline legends are on,
+       *     mirroring the per-track "?" canvas glyphs. Each icon is 20 px wide + a 2 px gap, so the
+       *     cluster is 64 px with help / 42 px without — `left` is offset to keep it right-anchored.
+       * The wrapper absorbs its own pointer/wheel events so popover interaction doesn't trigger the
+       * canvas drag/zoom handlers underneath.
        */}
       <div
-        className="absolute"
-        style={{ left: gutterWidth - 22, top: 4 }}
+        className="absolute flex items-center gap-0.5"
+        style={{ left: gutterWidth - (legendsVisible ? 66 : 44), top: 4 }}
         onPointerDown={(e) => e.stopPropagation()}
         onWheel={(e) => e.stopPropagation()}
       >
+        <TimeAreaDisplayButton />
         <TimeAreaFilterButton
           activeSlots={slotInfo.activeSlots}
           activeSystems={activeSystems}
@@ -989,6 +998,7 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
           systemNamesByIdx={systemNames}
           threadInfos={threadInfos}
         />
+        {legendsVisible && <TimeAreaHelpButton />}
       </div>
       {gaugeTooltipState && (
         <GaugeTooltip

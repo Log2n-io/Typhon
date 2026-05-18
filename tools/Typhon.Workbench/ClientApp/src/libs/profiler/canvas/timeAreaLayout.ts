@@ -95,8 +95,9 @@ export function buildLayout(inputs: BuildLayoutInputs): LayoutResult {
   const tracks: TrackLayout[] = [];
   let y = 0;
 
-  // Ruler — always first, never collapsible.
-  tracks.push({ id: 'ruler', label: 'Time', y, height: RULER_HEIGHT, state: 'expanded', collapsible: false });
+  // Ruler — always first, never collapsible. No gutter label: the ruler's purpose is self-evident
+  // from the timestamps it draws, and the gutter slot is now occupied by the icon cluster.
+  tracks.push({ id: 'ruler', label: '', y, height: RULER_HEIGHT, state: 'expanded', collapsible: false });
   // Trailing gap so the next track's top edge doesn't collide with the ruler separator line.
   y += RULER_HEIGHT + TRACK_GAP;
 

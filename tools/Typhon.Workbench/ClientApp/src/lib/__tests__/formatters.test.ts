@@ -34,10 +34,14 @@ describe('formatDateTime', () => {
 describe('formatRelativeAge', () => {
   afterEach(() => vi.useRealTimers());
 
-  it('reports days, then months', () => {
+  it('picks the coarsest natural unit — minutes, hours, days, then months', () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-05-17T12:00:00Z'));
-    expect(formatRelativeAge('2026-05-17T09:00:00Z')).toBe('today');
+    expect(formatRelativeAge('2026-05-17T11:59:30Z')).toBe('just now');
+    expect(formatRelativeAge('2026-05-17T11:59:00Z')).toBe('1 minute');
+    expect(formatRelativeAge('2026-05-17T11:35:00Z')).toBe('25 minutes');
+    expect(formatRelativeAge('2026-05-17T11:00:00Z')).toBe('1 hour');
+    expect(formatRelativeAge('2026-05-17T09:00:00Z')).toBe('3 hours');
     expect(formatRelativeAge('2026-05-16T09:00:00Z')).toBe('1 day');
     expect(formatRelativeAge('2026-05-04T12:00:00Z')).toBe('13 days');
     expect(formatRelativeAge('2026-02-01T12:00:00Z')).toBe('3 months');

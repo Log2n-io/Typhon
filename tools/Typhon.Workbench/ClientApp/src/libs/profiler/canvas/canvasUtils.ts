@@ -16,7 +16,7 @@ import type { StudioTheme } from './theme';
  */
 export const OVERVIEW_PALETTE = {
   bar: '#252E55',          // dark navy — baseline per-tick duration bar
-  selection: '#F6D85C',    // warm yellow — selected time range
+  selection: '#4ADE80',    // emerald green — selected time range
   overP95: '#00C4FF',      // bright cyan — tick exceeded its P95 budget
 } as const;
 

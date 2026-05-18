@@ -61,10 +61,6 @@ export function TimeAreaFilterButton({ activeSlots, activeSystems, threadNamesBy
   const clearEngineOpVisibility = useProfilerViewStore((s) => s.clearEngineOpVisibility);
   const setManyCollapseState = useProfilerSessionStore((s) => s.setManyCollapseState);
   const setManyGaugeCollapse = useProfilerViewStore((s) => s.setManyGaugeCollapse);
-  const spanColorMode = useProfilerViewStore((s) => s.spanColorMode);
-  const setSpanColorMode = useProfilerViewStore((s) => s.setSpanColorMode);
-  const showOffCpu = useProfilerViewStore((s) => s.showOffCpu);
-  const toggleShowOffCpu = useProfilerViewStore((s) => s.toggleShowOffCpu);
 
   // ── Build the tree ───────────────────────────────────────────────────────────────────────────
   // Stable IDs: gauge-{n}, op-{n}, slot-{n}, system-{n}. Group ids are 'gauges', 'threads',
@@ -226,36 +222,6 @@ export function TimeAreaFilterButton({ activeSlots, activeSystems, threadNamesBy
           <Button size="sm" variant="outline" className="h-7 px-2" onClick={onClickAll}>All</Button>
           <Button size="sm" variant="outline" className="h-7 px-2" onClick={onClickNone}>None</Button>
         </div>
-        {/*
-         * Color spans by — alternative lenses on the same data:
-         *   name     → hash span name into the palette (default; pre-toggle behaviour)
-         *   thread   → palette[threadSlot]; spots cross-thread patterns
-         *   depth    → palette[depth]; visualises call-stack nesting
-         *   duration → log-scale heat ramp (blue → green → orange → red); makes outliers pop
-         * Persisted in `useProfilerViewStore` so the chosen lens survives reload.
-         */}
-        <label className="flex items-center gap-2 pt-2 mt-2 border-t border-border text-xs">
-          <span className="text-muted-foreground shrink-0">Color spans by</span>
-          <select
-            value={spanColorMode}
-            onChange={(e) => setSpanColorMode(e.target.value as typeof spanColorMode)}
-            className="flex-1 h-7 rounded-sm border border-input bg-background px-2 text-sm"
-          >
-            <option value="name">Name</option>
-            <option value="thread">Thread</option>
-            <option value="depth">Depth</option>
-            <option value="duration">Duration (heat)</option>
-          </select>
-        </label>
-        {/*
-         * Off-CPU overlay — semi-transparent bars on each thread lane showing where the OS switched the
-         * thread out (kind-254 context-switch events). Can be visually noisy on a contended machine, so
-         * it's a dedicated toggle; persisted in `useProfilerViewStore` so the choice survives reload.
-         */}
-        <label className="flex items-center gap-2 pt-2 mt-2 border-t border-border text-xs">
-          <input type="checkbox" checked={showOffCpu} onChange={toggleShowOffCpu} className="h-3.5 w-3.5" />
-          <span className="text-muted-foreground">Show off-CPU intervals</span>
-        </label>
       </PopoverContent>
     </Popover>
   );

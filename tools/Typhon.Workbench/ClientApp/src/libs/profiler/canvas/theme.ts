@@ -70,7 +70,7 @@ export interface StudioTheme {
   // Layer 3 — identity (palettes + constants, same across themes)
   selectedStroke: string;
   phaseColor: string;
-  overviewSelection: string;   // yellow selection overlay (identity — reads on both backgrounds)
+  overviewSelection: string;   // green selection overlay (identity — reads on both backgrounds)
   spans: readonly string[];
   gauges: readonly string[];
   timelineBands: readonly string[];

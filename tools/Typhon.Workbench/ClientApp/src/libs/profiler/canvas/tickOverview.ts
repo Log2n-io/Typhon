@@ -169,7 +169,7 @@ export const SCROLLBAR_TOP_PAD = 1;
 /** Minimum thumb width (px) for usability — short thumbs become un-grabbable on long traces. */
 export const SCROLLBAR_MIN_THUMB_PX = 16;
 
-const OVERLAY_COLOR = OVERVIEW_PALETTE.selection + '40';
+const OVERLAY_COLOR = OVERVIEW_PALETTE.selection + '80';
 const OVERLAY_BORDER = OVERVIEW_PALETTE.selection + 'B3';
 
 /**
@@ -281,7 +281,7 @@ export function drawTickOverview(
     }
   }
 
-  // Orange selection overlay — ticks overlapping viewRange.
+  // Green selection overlay — ticks overlapping viewRange.
   if (selection.first >= 0) {
     const drawFirst = Math.max(selection.first, sr.startIdx);
     const drawLast = Math.min(selection.last, sr.endIdx - 1);

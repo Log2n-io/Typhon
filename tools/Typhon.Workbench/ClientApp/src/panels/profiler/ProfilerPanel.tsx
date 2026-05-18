@@ -187,16 +187,17 @@ export default function ProfilerPanel() {
   }, [filePath]);
 
   // Header "selected range" indicator — maps the committed viewport (µs) to the tick numbers it
-  // spans, so the top bar shows e.g. "Ticks 12–45" alongside "x systems". Reuses the same
-  // `computeSelectionIdxRange` the TickOverview uses to draw the orange selection overlay, so the
-  // header label and the overlay always agree. `tickRows` only rebuilds when tickSummaries change.
+  // spans, so the top bar shows e.g. "Ticks 12–45 (34 frames)" alongside "x systems". Reuses the
+  // same `computeSelectionIdxRange` the TickOverview uses to draw the selection overlay, so the
+  // header label and the overlay always agree. `count` is index-based (tick numbers may have gaps).
+  // `tickRows` only rebuilds when tickSummaries change.
   const tickRows = useMemo(() => buildTickRows(metadata?.tickSummaries), [metadata?.tickSummaries]);
   const selectedTickRange = useMemo(() => {
     if (tickRows.length === 0) return null;
     if (viewRangeForStats.endUs <= viewRangeForStats.startUs) return null;
     const { first, last } = computeSelectionIdxRange(tickRows, viewRangeForStats);
     if (first < 0 || last < 0) return null;
-    return { first: tickRows[first].tickNumber, last: tickRows[last].tickNumber };
+    return { first: tickRows[first].tickNumber, last: tickRows[last].tickNumber, count: last - first + 1 };
   }, [tickRows, viewRangeForStats]);
 
   if (!isTrace && !isAttach) {
@@ -273,8 +274,9 @@ export default function ProfilerPanel() {
                   title="Selected range — the tick(s) spanned by the current viewport"
                 >
                   {selectedTickRange.first === selectedTickRange.last
-                    ? `Tick ${selectedTickRange.first.toLocaleString()}`
-                    : `Ticks ${selectedTickRange.first.toLocaleString()}–${selectedTickRange.last.toLocaleString()}`}
+                    ? `Tick ${selectedTickRange.first.toLocaleString()} (1 frame)`
+                    : `Ticks ${selectedTickRange.first.toLocaleString()}–${selectedTickRange.last.toLocaleString()}`
+                      + ` (${selectedTickRange.count.toLocaleString()} frames)`}
                 </span>
               </>
             )}

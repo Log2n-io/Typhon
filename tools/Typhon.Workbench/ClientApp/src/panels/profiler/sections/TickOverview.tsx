@@ -310,7 +310,7 @@ export default function TickOverview({ isLive = false }: Props) {
 
   // When viewRange or tickRows change, recompute the selection-idx range + auto-scroll to keep it visible.
   // Sticky: when the viewport is in a gap between ticks (computeSelectionIdxRange returns {-1,-1}),
-  // keep the last valid selection so the yellow overlay stays visible as a navigation anchor while
+  // keep the last valid selection so the green overlay stays visible as a navigation anchor while
   // panning through empty time.
   useEffect(() => {
     const newSel = computeSelectionIdxRange(tickRows, viewRange);
