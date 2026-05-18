@@ -1,5 +1,6 @@
-import { useRef } from 'react';
+import { useEffect, useRef } from 'react';
 import { useThemeStore } from '@/stores/useThemeStore';
+import { useLogStore, selectUnseenLevel, selectUnseenCount, type LogLevel } from '@/stores/useLogStore';
 import { DockviewDefaultTab, DockviewReact, themeDark, themeLight, type DockviewApi, type DockviewReadyEvent, type IDockviewDefaultTabProps, type IDockviewPanelHeaderProps, type IDockviewPanelProps } from 'dockview-react';
 import { useDockLayoutStore } from '@/stores/useDockLayoutStore';
 import { useSessionStore } from '@/stores/useSessionStore';
@@ -32,9 +33,70 @@ import MigrationRequiredBanner from './banners/MigrationRequiredBanner';
 import IncompatibleBanner from './banners/IncompatibleBanner';
 
 // Tab component without a close button — applied to structural panels that should not be closable.
-const LockedTab: React.FC<IDockviewPanelHeaderProps> = (props) => (
+const PlainLockedTab: React.FC<IDockviewPanelHeaderProps> = (props) => (
   <DockviewDefaultTab {...(props as IDockviewDefaultTabProps)} hideClose />
 );
+
+// Badge color per severity — reuses the status-badge palette so the Workbench reads consistently.
+// Light backgrounds (info/warn) take dark text; the red error badge takes white text.
+const LOG_BADGE_CLASS: Record<LogLevel, string> = {
+  info: 'bg-sky-400 text-slate-900',
+  warn: 'bg-amber-400 text-slate-900',
+  error: 'bg-red-400 text-white',
+};
+
+// Logs tab: a locked tab that also shows an unseen-activity badge. When the panel is hidden and
+// logs are published, a badge next to the title shows how many arrived, colored by the most
+// critical level among them; it clears once the panel becomes visible again. `dockview`'s
+// onDidVisibilityChange covers tab-switch and whole-group hide but NOT edge-group collapse
+// (View → Logs), so the group's onDidCollapsedChange is tracked too — effective visibility is
+// `isVisible && !group.isCollapsed()`.
+const LogsTab: React.FC<IDockviewPanelHeaderProps> = (props) => {
+  const { api } = props;
+  const setLogsVisible = useLogStore((s) => s.setLogsVisible);
+  const unseenLevel = useLogStore(selectUnseenLevel);
+  const unseenCount = useLogStore(selectUnseenCount);
+
+  useEffect(() => {
+    const sync = () => setLogsVisible(api.isVisible && !api.group.api.isCollapsed());
+    sync(); // correct the store's optimistic default against the real layout state
+    const visSub = api.onDidVisibilityChange(sync);
+    let groupSub = api.group.api.onDidCollapsedChange(sync);
+    // Re-bind the collapse subscription if the panel is ever moved to a different group.
+    const groupChangeSub = api.onDidGroupChange(() => {
+      groupSub.dispose();
+      groupSub = api.group.api.onDidCollapsedChange(sync);
+      sync();
+    });
+    return () => {
+      visSub.dispose();
+      groupSub.dispose();
+      groupChangeSub.dispose();
+    };
+  }, [api, setLogsVisible]);
+
+  return (
+    <div className="flex items-center gap-1.5">
+      {unseenCount > 0 && (
+        <span
+          className={
+            'pointer-events-none flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full ' +
+            `px-1 text-[10px] font-medium tabular-nums ${LOG_BADGE_CLASS[unseenLevel ?? 'info']}`
+          }
+          title={`${unseenCount} new log entr${unseenCount === 1 ? 'y' : 'ies'} since last viewed`}
+        >
+          {unseenCount > 99 ? '99+' : unseenCount}
+        </span>
+      )}
+      <DockviewDefaultTab {...(props as IDockviewDefaultTabProps)} hideClose />
+    </div>
+  );
+};
+
+// Locked-tab dispatcher. The Logs panel keeps `tabComponent: 'locked'` (so persisted layouts need
+// no migration) and is routed to the activity-dot variant by its component id.
+const LockedTab: React.FC<IDockviewPanelHeaderProps> = (props) =>
+  props.api.component === 'Logs' ? <LogsTab {...props} /> : <PlainLockedTab {...props} />;
 
 const tabComponents: Record<string, React.FC<IDockviewPanelHeaderProps>> = {
   locked: LockedTab,

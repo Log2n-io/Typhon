@@ -53,19 +53,27 @@ public static class OptionsChangedStream
             channel.Writer.TryWrite(store.Get());
 
             using var keepalive = new PeriodicTimer(KeepaliveInterval);
+
+            // PeriodicTimer.WaitForNextTickAsync permits only ONE in-flight consumer — issuing a
+            // second call before the prior one completes throws InvalidOperationException. So both
+            // tasks are hoisted out of the loop and only the one that won Task.WhenAny is renewed;
+            // the loser stays pending across iterations instead of being recreated.
+            var readTask = channel.Reader.ReadAsync(ct).AsTask();
+            var keepaliveTask = keepalive.WaitForNextTickAsync(ct).AsTask();
             while (!ct.IsCancellationRequested)
             {
-                var readTask = channel.Reader.ReadAsync(ct).AsTask();
-                var keepaliveTask = keepalive.WaitForNextTickAsync(ct).AsTask();
                 var winner = await Task.WhenAny(readTask, keepaliveTask);
                 if (winner == readTask)
                 {
                     var snapshot = await readTask;
                     await SseExtensions.WriteEventAsync(ctx, EventType, snapshot, ct);
+                    readTask = channel.Reader.ReadAsync(ct).AsTask();
                 }
                 else
                 {
+                    await keepaliveTask; // observe the tick (propagates cancellation as OCE)
                     await SseExtensions.WriteCommentAsync(ctx, "keepalive", ct);
+                    keepaliveTask = keepalive.WaitForNextTickAsync(ct).AsTask();
                 }
             }
         }

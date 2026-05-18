@@ -17,19 +17,35 @@
       trip cost.
 
 .PARAMETER Action
-  start | stop | status | restart | help. Default: start.
+  start | stop | status | restart | watch-kestrel | watch-vite | help. Default: start.
+
+  watch-kestrel / watch-vite run a single server in the FOREGROUND of the calling
+  shell (dedicated window) so you get interactive Hot Reload prompts and live output.
+  They block until Ctrl+C, then clear their own PID from the shared state file.
 
 .EXAMPLE
   pwsh -File wb-dev.ps1 start
   pwsh -File wb-dev.ps1 status
   pwsh -File wb-dev.ps1 stop
+
+.EXAMPLE
+  # window 1:  pwsh -File wb-dev.ps1 watch-kestrel
+  # window 2:  pwsh -File wb-dev.ps1 watch-vite
+  # window 3:  pwsh -File wb-dev.ps1 status
 #>
 
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('start', 'stop', 'status', 'restart', 'help', '--help', '-h')]
-    [string]$Action = 'start'
+    [ValidateSet('start', 'stop', 'status', 'restart', 'watch-kestrel', 'watch-vite', 'help', '--help', '-h')]
+    [string]$Action = 'start',
+
+    # Overrides the Kestrel / ASP.NET Core log category (Microsoft.AspNetCore) via a command-line
+    # config key passed to `dotnet watch`. Applies to start / restart / watch-kestrel. Without it,
+    # appsettings.Development.json's "Information" wins. Accepts the standard .NET levels (e.g.
+    # -LogLevel Warning, or the prefix/colon form -log:warning).
+    [ValidateSet('Trace', 'Debug', 'Information', 'Warning', 'Error', 'Critical', 'None')]
+    [string]$LogLevel
 )
 
 $ErrorActionPreference = 'Stop'
@@ -45,6 +61,11 @@ $ViteErrLog     = Join-Path $StateDir 'wb-dev.vite.err.log'
 $WorkbenchProj  = Join-Path $RepoRoot 'tools/Typhon.Workbench'
 $ClientApp      = Join-Path $WorkbenchProj 'ClientApp'
 
+# App args appended after `--` so `dotnet watch` forwards them to the Workbench host. The
+# Microsoft.AspNetCore config key (a command-line config provider override) outranks
+# appsettings*.json, so -LogLevel wins over the Development file's "Information".
+$KestrelAppArgs = if ($LogLevel) { @('--', "--Logging:LogLevel:Microsoft.AspNetCore=$LogLevel") } else { @() }
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 function Read-DevState {
@@ -57,6 +78,40 @@ function Write-DevState($state) {
         New-Item -ItemType Directory -Path $StateDir -Force | Out-Null
     }
     $state | ConvertTo-Json -Depth 4 | Set-Content -Path $StateFile -Encoding UTF8
+}
+
+# Read-modify-write a subset of keys into the state file. Used by watch-kestrel /
+# watch-vite, which run in separate shells and must not clobber each other's PID.
+function Update-DevState([hashtable]$patch) {
+    $state = Read-DevState
+    if (-not $state) { $state = [pscustomobject]@{} }
+    foreach ($key in $patch.Keys) {
+        if ($state.PSObject.Properties[$key]) {
+            $state.$key = $patch[$key]
+        }
+        else {
+            $state | Add-Member -NotePropertyName $key -NotePropertyValue $patch[$key]
+        }
+    }
+    Write-DevState $state
+}
+
+# Drop one PID key on shutdown. Deletes the whole file once no PID keys remain so a
+# later `status` doesn't report stale entries.
+function Remove-DevStateKey([string]$key) {
+    $state = Read-DevState
+    if (-not $state) { return }
+    if ($state.PSObject.Properties[$key]) {
+        $state.PSObject.Properties.Remove($key)
+    }
+    $hasK = $state.PSObject.Properties['kestrelPid'] -and $state.kestrelPid
+    $hasV = $state.PSObject.Properties['vitePid']    -and $state.vitePid
+    if (-not $hasK -and -not $hasV) {
+        Remove-Item $StateFile -ErrorAction SilentlyContinue
+    }
+    else {
+        Write-DevState $state
+    }
 }
 
 function Test-ProcAlive($processId) {
@@ -94,17 +149,34 @@ function Stop-ProcTree($processId) {
 
 function Invoke-Help {
     @'
-wb-dev.ps1 [start | stop | status | restart | help]
+wb-dev.ps1 [start | stop | status | restart | watch-kestrel | watch-vite | help]
 
   Manage the Typhon Workbench dev servers (Kestrel :5200 + Vite :5173).
   Single-shot — replaces the 7-9 round-trip /wb-dev skill flow.
 
 Actions:
-  start     Launch Kestrel + Vite, wait for binding, write state JSON
-  stop      Read state, kill process trees, delete state, verify
-  status    Read state, check liveness + port binding
-  restart   Stop then start (1 s pause between)
-  help      Show this help
+  start          Launch Kestrel + Vite detached, wait for binding, write state JSON
+  stop           Read state, kill process trees, delete state, verify
+  status         Read state, check liveness + port binding
+  restart        Stop then start (1 s pause between)
+  watch-kestrel  Run Kestrel in THIS shell (foreground, interactive Hot Reload);
+                 blocks until Ctrl+C. Use a dedicated window.
+  watch-vite     Run Vite in THIS shell (foreground); blocks until Ctrl+C.
+  help           Show this help
+
+  watch-* write their PID into the same state file, so `status` / `stop` from a
+  third shell see them. Ctrl+C in the watch window clears that server's PID.
+
+Options:
+  -LogLevel <level>  Override the Kestrel / ASP.NET Core log category
+                     (Microsoft.AspNetCore). Levels: Trace, Debug, Information,
+                     Warning, Error, Critical, None. Applies to start / restart /
+                     watch-kestrel. Without it, appsettings.Development.json's
+                     "Information" wins. Prefix/colon form also works: -log:warning
+
+Examples:
+  wb-dev.ps1 watch-kestrel -log:warning
+  wb-dev.ps1 start -LogLevel Warning
 
 State:    .claude/state/wb-dev.json
 Logs:     .claude/state/wb-dev.kestrel.log, wb-dev.vite.log
@@ -180,7 +252,8 @@ function Invoke-Start {
     # console session and are NOT in this terminal's process group. Without this (-NoNewWindow),
     # Ctrl+C sends CTRL_C_EVENT to the entire group, killing npm/node without console-mode cleanup
     # and leaving the terminal with VT mode stuck on (the "goes crazy" symptom).
-    $kestrelCmd = "dotnet watch --project `"$WorkbenchProj`" 1>`"$KestrelLog`" 2>`"$KestrelErrLog`""
+    $kestrelAppArgStr = if ($KestrelAppArgs.Count) { ' ' + ($KestrelAppArgs -join ' ') } else { '' }
+    $kestrelCmd = "dotnet watch --project `"$WorkbenchProj`"$kestrelAppArgStr 1>`"$KestrelLog`" 2>`"$KestrelErrLog`""
     $kestrel = Start-Process 'cmd.exe' `
         -ArgumentList "/c $kestrelCmd" `
         -WorkingDirectory $RepoRoot `
@@ -199,6 +272,7 @@ function Invoke-Start {
     # fast on a genuine hang.
     $bindTimeoutSec = 90
     Write-Host "launching: Kestrel pid $($kestrel.Id) + Vite pid $($vite.Id)"
+    if ($LogLevel) { Write-Host "Microsoft.AspNetCore log level overridden -> $LogLevel" }
     Write-Host "waiting for ports to bind (timeout $bindTimeoutSec s)..."
 
     # try/finally ensures child processes are killed if Ctrl+C is pressed during the wait loop.
@@ -285,14 +359,79 @@ function Invoke-Restart {
     Invoke-Start
 }
 
+# Run one server in the foreground of THIS shell. -NoNewWindow keeps the child on the
+# calling console, so its stdout streams live and stdin is available for `dotnet watch`
+# Hot Reload prompts. Blocks on Wait-Process until Ctrl+C; the finally clause kills the
+# tree and removes only this server's PID from the shared state.
+function Invoke-WatchKestrel {
+    if (Test-PortBound 5200) {
+        Write-Host "ERROR: :5200 already bound (pid $(Get-PortOwner 5200)) — stop it first"
+        exit 1
+    }
+    if (-not (Test-Path $StateDir)) {
+        New-Item -ItemType Directory -Path $StateDir -Force | Out-Null
+    }
+
+    Write-Host 'starting Kestrel (dotnet watch) in this window — Ctrl+C to stop'
+    if ($LogLevel) { Write-Host "Microsoft.AspNetCore log level overridden -> $LogLevel" }
+    $proc = Start-Process 'dotnet' `
+        -ArgumentList (@('watch', '--project', $WorkbenchProj) + $KestrelAppArgs) `
+        -WorkingDirectory $RepoRoot `
+        -NoNewWindow -PassThru
+
+    Update-DevState @{ kestrelPid = $proc.Id; startedAt = (Get-Date).ToString('o') }
+    Write-Host "Kestrel pid $($proc.Id)  ->  http://localhost:5200/health"
+    Write-Host "check from another shell:  wb-dev.ps1 status"
+
+    try {
+        Wait-Process -Id $proc.Id
+    }
+    finally {
+        Stop-ProcTree $proc.Id
+        Remove-DevStateKey 'kestrelPid'
+        Write-Host "`nKestrel stopped — kestrelPid cleared from state"
+    }
+}
+
+function Invoke-WatchVite {
+    if (Test-PortBound 5173) {
+        Write-Host "ERROR: :5173 already bound (pid $(Get-PortOwner 5173)) — stop it first"
+        exit 1
+    }
+    if (-not (Test-Path $StateDir)) {
+        New-Item -ItemType Directory -Path $StateDir -Force | Out-Null
+    }
+
+    Write-Host 'starting Vite (npm run dev) in this window — Ctrl+C to stop'
+    $proc = Start-Process 'npm.cmd' `
+        -ArgumentList 'run', 'dev' `
+        -WorkingDirectory $ClientApp `
+        -NoNewWindow -PassThru
+
+    Update-DevState @{ vitePid = $proc.Id; startedAt = (Get-Date).ToString('o') }
+    Write-Host "Vite pid $($proc.Id)  ->  http://localhost:5173"
+    Write-Host "check from another shell:  wb-dev.ps1 status"
+
+    try {
+        Wait-Process -Id $proc.Id
+    }
+    finally {
+        Stop-ProcTree $proc.Id
+        Remove-DevStateKey 'vitePid'
+        Write-Host "`nVite stopped — vitePid cleared from state"
+    }
+}
+
 # ── Dispatch ───────────────────────────────────────────────────────────────────
 
 switch ($Action) {
-    'help'    { Invoke-Help }
-    '--help'  { Invoke-Help }
-    '-h'      { Invoke-Help }
-    'start'   { Invoke-Start }
-    'stop'    { Invoke-Stop }
-    'status'  { Invoke-Status }
-    'restart' { Invoke-Restart }
+    'help'          { Invoke-Help }
+    '--help'        { Invoke-Help }
+    '-h'            { Invoke-Help }
+    'start'         { Invoke-Start }
+    'stop'          { Invoke-Stop }
+    'status'        { Invoke-Status }
+    'restart'       { Invoke-Restart }
+    'watch-kestrel' { Invoke-WatchKestrel }
+    'watch-vite'    { Invoke-WatchVite }
 }

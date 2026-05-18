@@ -113,6 +113,17 @@ internal sealed class WorkbenchExceptionHandler : IExceptionHandler
     {
         if (exception is not WorkbenchException wb) return false;
 
+        // The client may have already disconnected (SSE close, page navigation, aborted fetch).
+        // Once the response has started we can't rewrite status/headers, and writing into a dead
+        // connection throws OperationCanceledException from the response pipe. Either way the
+        // exception is still "handled" — returning true (rather than throwing) lets .NET 10's
+        // exception-handler middleware suppress the error-level diagnostics it emits for unhandled
+        // exceptions. Throwing here is what previously produced the "fail" log spam.
+        if (httpContext.RequestAborted.IsCancellationRequested || httpContext.Response.HasStarted)
+        {
+            return true;
+        }
+
         var problem = new ProblemDetails
         {
             Status = wb.StatusCode,
@@ -123,7 +134,14 @@ internal sealed class WorkbenchExceptionHandler : IExceptionHandler
 
         httpContext.Response.StatusCode = wb.StatusCode;
         httpContext.Response.ContentType = "application/problem+json";
-        await httpContext.Response.WriteAsJsonAsync(problem, cancellationToken);
+        try
+        {
+            await httpContext.Response.WriteAsJsonAsync(problem, cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            // Client vanished mid-flush — nothing left to send; the exception is handled regardless.
+        }
         return true;
     }
 }
