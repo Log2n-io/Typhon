@@ -113,6 +113,16 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
         _bitmapLongsOther = (ChunkCountPerPage + 63) >> 6;
     }
 
+    /// <summary>
+    /// Byte offset within this segment's root page where chunk 0 begins — after the page header, the
+    /// logical-segment directory section, and stride-alignment padding. Surfaced read-only for the Database
+    /// File Map decoders (Module 15, A2), which slice chunks straight out of a page body.
+    /// </summary>
+    public int RootDataOffset => PagedMMF.PageHeaderSize + RootHeaderIndexSectionLength + _rootAlignmentPadding;
+
+    /// <summary>Byte offset within a non-root page of this segment where chunk 0 begins.</summary>
+    public int OtherDataOffset => PagedMMF.PageHeaderSize + _otherAlignmentPadding;
+
     // ═══════════════════════════════════════════════════════════════════════
     // Segment lifecycle: Create, Load, Grow
     // ═══════════════════════════════════════════════════════════════════════

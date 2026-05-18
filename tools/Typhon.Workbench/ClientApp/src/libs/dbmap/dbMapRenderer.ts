@@ -1,10 +1,11 @@
 // Owner-drawn Canvas 2D renderer for the Database File Map (Module 15, §6.6).
 //
 // Built on the profiler's owner-drawn pattern (libs/profiler/canvas) — no third-party drawing library. The
-// coarse Hilbert map is painted once into an offscreen image (one pixel per page); every frame is then a single
-// camera-transformed drawImage, so per-frame cost is independent of database size — the de-risking the A1
-// rendering spike validates. The class surface (setData / setCamera / render / …) is the seam behind which a
-// PixiJS renderer could be swapped if Canvas 2D ever missed 60 fps.
+// coarse Hilbert map (L0/L1) is painted once into an offscreen image (one pixel per page); every frame is then
+// a single camera-transformed drawImage, so the L1 cost is independent of database size. A2 adds the live
+// per-frame deep bands — L3 chunk grids and L4 decoded content — and the L1↔L3↔L4 crossfades; those are
+// viewport-culled, so their cost tracks what is on screen, not the file size. The class surface is the seam
+// behind which a PixiJS renderer could be swapped if Canvas 2D ever missed 60 fps.
 
 import {
   visibleWorldRect,
@@ -14,9 +15,31 @@ import {
   type Rect,
 } from './camera';
 import { buildLayout, type MapLayout } from './dbMapLayout';
-import { FREE_RGB, TAIL_RGB, USED_RGB, pageColorRgb, type Rgb } from './dbMapColors';
+import { pageAtScreen } from './dbMapHitTest';
+import { lodForScale, tileNodesForSpan, type DbLodState } from './dbMapLod';
+import { gridCols, gridSubRect } from './dbMapGrid';
+import {
+  CRC_RGB,
+  FREE_RGB,
+  RESIDENCY_RGB,
+  TAIL_RGB,
+  USED_RGB,
+  contentCellRgb,
+  fillDensityRgb,
+  pageColorRgb,
+  writeAgeRgb,
+  type Rgb,
+} from './dbMapColors';
 import { hilbertD2XY, hilbertXY2D } from './hilbert';
-import { DbPageType, type DbMapData, type DbMapEncoding } from './types';
+import {
+  DbPageType,
+  isDetailEncoding,
+  type DbChunkContent,
+  type DbDetailTile,
+  type DbMapData,
+  type DbMapEncoding,
+  type DbPageDetail,
+} from './types';
 
 /** Theme tokens the renderer needs — resolved from CSS variables by the panel. */
 export interface DbMapTheme {
@@ -28,6 +51,16 @@ export interface DbMapTheme {
   accent: string;
 }
 
+/** What the panel must fetch for the current camera — computed by {@link DbMapRenderer.getDetailRequest}. */
+export interface DbDetailRequest {
+  /** Detail-tile node ids intersecting the viewport (for the active detail encoding). */
+  tileNodes: number[];
+  /** Visible page indices needing their L3 chunk grid. */
+  pages: number[];
+  /** Visible chunk refs needing their L4 content. */
+  chunks: { segId: number; chunkId: number }[];
+}
+
 /** Cell pixel size below which only L0 shows; above L1_FULL_CELL only L1 shows. Between → crossfade. */
 const L0_ONLY_CELL = 0.5;
 const L1_FULL_CELL = 4;
@@ -36,15 +69,22 @@ const SEGMENT_OVERLAY_MIN_CELL = 5;
 const MINIMAP_SIZE = 140;
 const MINIMAP_MARGIN = 12;
 const OFFSET_STRIP_HEIGHT = 16;
+/** Safety caps so a degenerate camera can never schedule an unbounded fetch / draw. */
+const MAX_VISIBLE_PAGES = 256;
+const MAX_VISIBLE_CHUNKS = 256;
 
 function clamp01(v: number): number {
   return v < 0 ? 0 : v > 1 ? 1 : v;
 }
 
-function lerpRgb(a: Rgb, b: Rgb, t: number): string {
+function lerpRgbCss(a: Rgb, b: Rgb, t: number): string {
   return `rgb(${Math.round(a[0] + (b[0] - a[0]) * t)}, ${Math.round(a[1] + (b[1] - a[1]) * t)}, ${Math.round(
     a[2] + (b[2] - a[2]) * t,
   )})`;
+}
+
+function rgb(c: Rgb): string {
+  return `rgb(${c[0]}, ${c[1]}, ${c[2]})`;
 }
 
 export class DbMapRenderer {
@@ -61,6 +101,12 @@ export class DbMapRenderer {
   private _hover: number | null = null;
   private _selection: number | null = null;
   private _usedRatio = 0;
+
+  // A2 detail-tier inputs, fed by the panel as the viewport changes.
+  private _tiles: Map<number, DbDetailTile> = new Map();
+  private _pageDetails: Map<number, DbPageDetail> = new Map();
+  private _chunkContents: Map<string, DbChunkContent> = new Map();
+  private _maxChangeRevision = 1;
 
   private _cssW = 1;
   private _cssH = 1;
@@ -94,6 +140,10 @@ export class DbMapRenderer {
 
   setData(data: DbMapData | null): void {
     this._data = data;
+    this._tiles = new Map();
+    this._pageDetails = new Map();
+    this._chunkContents = new Map();
+    this._maxChangeRevision = 1;
     if (!data) {
       this._layout = null;
       return;
@@ -139,6 +189,31 @@ export class DbMapRenderer {
     this._theme = theme;
   }
 
+  /** Feeds the detail tiles for the active detail encoding; repaints the offscreen L1 map. */
+  setDetailTiles(tiles: Map<number, DbDetailTile>): void {
+    this._tiles = tiles;
+    let max = 1;
+    for (const tile of tiles.values()) {
+      if (tile.maxChangeRevision > max) {
+        max = tile.maxChangeRevision;
+      }
+    }
+    this._maxChangeRevision = max;
+    if (isDetailEncoding(this._encoding)) {
+      this.paintOffscreen();
+    }
+  }
+
+  /** Feeds the per-page detail (L3 chunk grids) for the visible pages. */
+  setPageDetails(pages: Map<number, DbPageDetail>): void {
+    this._pageDetails = pages;
+  }
+
+  /** Feeds the per-chunk decoded content (L4) for the visible chunks. */
+  setChunkContents(chunks: Map<string, DbChunkContent>): void {
+    this._chunkContents = chunks;
+  }
+
   setViewport(cssWidth: number, cssHeight: number, dpr: number): void {
     this._cssW = Math.max(1, cssWidth);
     this._cssH = Math.max(1, cssHeight);
@@ -151,6 +226,58 @@ export class DbMapRenderer {
 
   getLayout(): MapLayout | null {
     return this._layout;
+  }
+
+  // ── LOD / detail-request queries (consumed by the panel) ────────────────────────────────────────────────
+
+  /** The current LOD band and crossfade alphas, derived purely from the camera scale. */
+  getLodState(): DbLodState {
+    return lodForScale(this._camera.scale);
+  }
+
+  /** The page index under the viewport centre, or null when the centre is off the page grid. */
+  getFocusedPage(): number | null {
+    return this.pageAt(this._cssW / 2, this._cssH / 2);
+  }
+
+  /**
+   * Computes what the panel must fetch for the current camera: detail tiles for the active detail encoding,
+   * L3 page details when zoomed into the chunk band, and L4 chunk content when zoomed into the content band.
+   */
+  getDetailRequest(): DbDetailRequest {
+    const request: DbDetailRequest = { tileNodes: [], pages: [], chunks: [] };
+    if (!this._data || !this._layout) {
+      return request;
+    }
+    const { l3Alpha, l4Alpha } = this.getLodState();
+    const span = this.visiblePageSpan();
+
+    if (isDetailEncoding(this._encoding)) {
+      // visiblePageSpan is null when the whole file is on screen — at that zoom the detail encoding still
+      // needs every tile to colour the map, so fall back to the full tile range (each tile stays bounded).
+      const tileSize = this._data.detailTileSize;
+      request.tileNodes = span
+        ? tileNodesForSpan(span.min, span.max, tileSize)
+        : tileNodesForSpan(0, this._data.pageCount - 1, tileSize);
+    }
+
+    if (l3Alpha > 0) {
+      request.pages = this.visiblePageList();
+    }
+
+    if (l4Alpha > 0) {
+      for (const page of this.visiblePageList()) {
+        const detail = this._pageDetails.get(page);
+        if (!detail || detail.chunkTotal <= 0 || detail.ownerSegmentId < 0) {
+          continue;
+        }
+        for (let i = 0; i < detail.chunkTotal && request.chunks.length < MAX_VISIBLE_CHUNKS; i++) {
+          request.chunks.push({ segId: detail.ownerSegmentId, chunkId: detail.firstChunkId + i });
+        }
+      }
+    }
+
+    return request;
   }
 
   // ── Chrome geometry (used by the panel for minimap / offset-strip hit-testing) ──────────────────────────
@@ -188,6 +315,62 @@ export class DbMapRenderer {
     return Math.min(this._layout.pageCount - 1, Math.floor(f * this._layout.pageCount));
   }
 
+  // ── Hit-testing ─────────────────────────────────────────────────────────────────────────────────────────
+
+  /** The page index under a screen point, or null when off the page grid. */
+  pageAt(screenX: number, screenY: number): number | null {
+    return this._layout ? pageAtScreen(this._camera, this._layout, screenX, screenY) : null;
+  }
+
+  /** The chunk (page + in-page index) under a screen point at L3, or null. */
+  pickChunk(screenX: number, screenY: number): { page: number; chunkInPage: number } | null {
+    const page = this.pageAt(screenX, screenY);
+    if (page == null || !this._layout) {
+      return null;
+    }
+    const detail = this._pageDetails.get(page);
+    if (!detail || detail.chunkTotal <= 0) {
+      return null;
+    }
+    const { x, y } = hilbertD2XY(this._layout.order, page);
+    const wx = (screenX - this._camera.x) / this._camera.scale - (this._layout.dataRect.x + x);
+    const wy = (screenY - this._camera.y) / this._camera.scale - (this._layout.dataRect.y + y);
+    const cols = gridCols(detail.chunkTotal);
+    const rows = Math.ceil(detail.chunkTotal / cols);
+    const col = Math.min(cols - 1, Math.max(0, Math.floor(wx * cols)));
+    const row = Math.min(rows - 1, Math.max(0, Math.floor(wy * rows)));
+    const chunkInPage = row * cols + col;
+    return chunkInPage < detail.chunkTotal ? { page, chunkInPage } : null;
+  }
+
+  /** The content cell (page + chunk + cell index) under a screen point at L4, or null. */
+  pickContentCell(screenX: number, screenY: number): { page: number; chunkInPage: number; cellIndex: number } | null {
+    const hit = this.pickChunk(screenX, screenY);
+    if (!hit || !this._layout) {
+      return null;
+    }
+    const detail = this._pageDetails.get(hit.page);
+    if (!detail) {
+      return null;
+    }
+    const content = this._chunkContents.get(`${detail.ownerSegmentId}:${detail.firstChunkId + hit.chunkInPage}`);
+    if (!content || content.cells.length === 0) {
+      return null;
+    }
+    const { x, y } = hilbertD2XY(this._layout.order, hit.page);
+    const cols = gridCols(detail.chunkTotal);
+    const rows = Math.ceil(detail.chunkTotal / cols);
+    const chunkCol = hit.chunkInPage % cols;
+    const chunkRow = Math.floor(hit.chunkInPage / cols);
+    const wx = (screenX - this._camera.x) / this._camera.scale - (this._layout.dataRect.x + x) - chunkCol / cols;
+    const wy = (screenY - this._camera.y) / this._camera.scale - (this._layout.dataRect.y + y) - chunkRow / rows;
+    const ccols = gridCols(content.cells.length);
+    const col = Math.min(ccols - 1, Math.max(0, Math.floor(wx * cols * ccols)));
+    const row = Math.min(ccols - 1, Math.max(0, Math.floor(wy * rows * ccols)));
+    const cellIndex = row * ccols + col;
+    return cellIndex < content.cells.length ? { page: hit.page, chunkInPage: hit.chunkInPage, cellIndex } : null;
+  }
+
   // ── Render ──────────────────────────────────────────────────────────────────────────────────────────
 
   render(): void {
@@ -210,11 +393,12 @@ export class DbMapRenderer {
     const layout = this._layout;
     const cellPx = cam.scale;
     const l1Alpha = clamp01((cellPx - L0_ONLY_CELL) / (L1_FULL_CELL - L0_ONLY_CELL));
+    const { l3Alpha, l4Alpha } = this.getLodState();
 
     // L0 — the data file as a single area-proportional rectangle filled by its used ratio.
     if (l1Alpha < 1) {
       ctx.globalAlpha = 1 - l1Alpha;
-      ctx.fillStyle = lerpRgb(FREE_RGB, USED_RGB, this._usedRatio);
+      ctx.fillStyle = lerpRgbCss(FREE_RGB, USED_RGB, this._usedRatio);
       this.fillWorldRect(ctx, layout.dataRect);
       ctx.globalAlpha = 1;
     }
@@ -234,6 +418,11 @@ export class DbMapRenderer {
       ctx.globalAlpha = 1;
     }
 
+    // L3 — chunk grids, crossfaded in over L1; L4 — decoded content, crossfaded in over L3.
+    if (l3Alpha > 0) {
+      this.drawChunkBand(ctx, l3Alpha, l4Alpha);
+    }
+
     // The WAL — an opaque sized region, drawn at every zoom level (A1: no WAL page grid).
     if (layout.walRect) {
       ctx.fillStyle = this._theme.surface;
@@ -249,7 +438,7 @@ export class DbMapRenderer {
     ctx.lineWidth = 1;
     this.strokeWorldRect(ctx, layout.dataRect);
 
-    if (this._segmentOverlay && cellPx >= SEGMENT_OVERLAY_MIN_CELL) {
+    if (this._segmentOverlay && cellPx >= SEGMENT_OVERLAY_MIN_CELL && l3Alpha < 1) {
       this.drawSegmentOverlay(ctx);
     }
 
@@ -279,16 +468,168 @@ export class DbMapRenderer {
       buf[i + 3] = 255;
     }
     const { pageType, ownerSegmentId } = this._data;
+    const detail = isDetailEncoding(this._encoding);
     for (let p = 0; p < pageCount; p++) {
       const { x, y } = hilbertD2XY(order, p);
-      const rgb = pageColorRgb(this._encoding, pageType[p], ownerSegmentId[p]);
+      const rgbColor = detail
+        ? this.detailPageRgb(p) ?? pageColorRgb('pageType', pageType[p], ownerSegmentId[p])
+        : pageColorRgb(this._encoding, pageType[p], ownerSegmentId[p]);
       const o = (y * side + x) * 4;
-      buf[o] = rgb[0];
-      buf[o + 1] = rgb[1];
-      buf[o + 2] = rgb[2];
+      buf[o] = rgbColor[0];
+      buf[o + 1] = rgbColor[1];
+      buf[o + 2] = rgbColor[2];
       buf[o + 3] = 255;
     }
     this._offCtx.putImageData(img, 0, 0);
+  }
+
+  /** Detail-encoding colour for a page, or null when its tile is not loaded (caller falls back to coarse). */
+  private detailPageRgb(page: number): Rgb | null {
+    if (!this._data) {
+      return null;
+    }
+    const tile = this._tiles.get(Math.floor(page / this._data.detailTileSize));
+    if (!tile) {
+      return null;
+    }
+    const i = page - tile.firstPage;
+    if (i < 0 || i >= tile.pageCount) {
+      return null;
+    }
+    switch (this._encoding) {
+      case 'fillDensity':
+        return fillDensityRgb(tile.fillRatio[i] / 255);
+      case 'writeAge':
+        return writeAgeRgb(tile.changeRevision[i] / this._maxChangeRevision);
+      case 'crc':
+        return CRC_RGB[tile.crcStatus[i]] ?? CRC_RGB[0];
+      case 'residency':
+        return RESIDENCY_RGB[tile.residency[i]] ?? RESIDENCY_RGB[0];
+      default:
+        return null;
+    }
+  }
+
+  /** Draws the L3 chunk grids (and, crossfaded over them, the L4 decoded content) for the visible pages. */
+  private drawChunkBand(ctx: CanvasRenderingContext2D, l3Alpha: number, l4Alpha: number): void {
+    if (!this._layout || !this._data) {
+      return;
+    }
+    const layout = this._layout;
+    const pageType = this._data.pageType;
+    for (const page of this.visiblePageList()) {
+      const detail = this._pageDetails.get(page);
+      if (!detail) {
+        continue;
+      }
+      const { x, y } = hilbertD2XY(layout.order, page);
+      const pageRect: Rect = { x: layout.dataRect.x + x, y: layout.dataRect.y + y, w: 1, h: 1 };
+
+      if (detail.chunkTotal <= 0) {
+        // A non-chunk-based page (free / root / occupancy / index) has no L3 chunk grid — it keeps its L1
+        // appearance. Only a genuinely unclassified page becomes the unknown tile (§3.4), never blank.
+        if (pageType[page] === DbPageType.Unknown) {
+          ctx.globalAlpha = l3Alpha;
+          this.drawUnknownTile(ctx, pageRect);
+          ctx.globalAlpha = 1;
+        }
+        continue;
+      }
+
+      const cols = gridCols(detail.chunkTotal);
+      const rows = Math.ceil(detail.chunkTotal / cols);
+      ctx.globalAlpha = l3Alpha;
+      for (let i = 0; i < detail.chunkTotal; i++) {
+        const occupied = detail.chunkOccupancy[i] === 1;
+        ctx.fillStyle = rgb(occupied ? USED_RGB : FREE_RGB);
+        this.fillWorldRect(ctx, gridSubRect(pageRect, cols, rows, i));
+      }
+      // Thin gridlines keep the chunk grid legible even when every chunk is occupied (a solid fill otherwise).
+      this.drawChunkGridLines(ctx, pageRect, cols, rows, l3Alpha);
+
+      if (l4Alpha > 0) {
+        ctx.globalAlpha = l4Alpha;
+        for (let i = 0; i < detail.chunkTotal; i++) {
+          this.drawChunkContent(ctx, detail, gridSubRect(pageRect, cols, rows, i), i);
+        }
+      }
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  /** Draws one chunk's L4 decoded content cells, or the unknown tile when the chunk has no typed decode. */
+  private drawChunkContent(ctx: CanvasRenderingContext2D, detail: DbPageDetail, chunkRect: Rect, chunkInPage: number): void {
+    // Cull chunks well below a few pixels — their content cells would be sub-pixel.
+    if (chunkRect.w * this._camera.scale < 8) {
+      return;
+    }
+    const content = this._chunkContents.get(`${detail.ownerSegmentId}:${detail.firstChunkId + chunkInPage}`);
+    if (!content) {
+      return;
+    }
+    if (content.decoder === 'unknown' || content.cells.length === 0) {
+      this.drawUnknownTile(ctx, chunkRect);
+      return;
+    }
+    const ccols = gridCols(content.cells.length);
+    const crows = Math.ceil(content.cells.length / ccols);
+    for (let j = 0; j < content.cells.length; j++) {
+      const cell = content.cells[j];
+      ctx.fillStyle = rgb(contentCellRgb(cell.kind, cell.colorKey));
+      this.fillWorldRect(ctx, gridSubRect(chunkRect, ccols, crows, j));
+    }
+  }
+
+  /** Draws the internal gridlines of a `cols × rows` chunk grid inside a page rect. */
+  private drawChunkGridLines(ctx: CanvasRenderingContext2D, pageRect: Rect, cols: number, rows: number, alpha: number): void {
+    const sx = worldToScreenX(this._camera, pageRect.x);
+    const sy = worldToScreenY(this._camera, pageRect.y);
+    const sw = pageRect.w * this._camera.scale;
+    const sh = pageRect.h * this._camera.scale;
+    if (sw / cols < 4) {
+      return;
+    }
+    ctx.save();
+    ctx.globalAlpha = alpha * 0.5;
+    ctx.strokeStyle = this._theme.mutedText;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let c = 1; c < cols; c++) {
+      const x = sx + (c / cols) * sw;
+      ctx.moveTo(x, sy);
+      ctx.lineTo(x, sy + sh);
+    }
+    for (let r = 1; r < rows; r++) {
+      const y = sy + (r / rows) * sh;
+      ctx.moveTo(sx, y);
+      ctx.lineTo(sx + sw, y);
+    }
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  /** A distinct hatched tile for regions the engine can locate but not classify / decode (§3.4) — never blank. */
+  private drawUnknownTile(ctx: CanvasRenderingContext2D, r: Rect): void {
+    const sx = worldToScreenX(this._camera, r.x);
+    const sy = worldToScreenY(this._camera, r.y);
+    const sw = r.w * this._camera.scale;
+    const sh = r.h * this._camera.scale;
+    ctx.fillStyle = rgb(TAIL_RGB);
+    ctx.fillRect(sx, sy, sw, sh);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(sx, sy, sw, sh);
+    ctx.clip();
+    ctx.strokeStyle = this._theme.mutedText;
+    ctx.lineWidth = 1;
+    ctx.globalAlpha = 0.5;
+    for (let d = -sh; d < sw; d += 8) {
+      ctx.beginPath();
+      ctx.moveTo(sx + d, sy);
+      ctx.lineTo(sx + d + sh, sy + sh);
+      ctx.stroke();
+    }
+    ctx.restore();
   }
 
   private fillWorldRect(ctx: CanvasRenderingContext2D, r: Rect): void {
@@ -455,25 +796,38 @@ export class DbMapRenderer {
     ctx.restore();
   }
 
-  /** The bounding page-index span of currently visible cells, or null when the whole file is visible. */
-  private visiblePageSpan(): { min: number; max: number } | null {
+  /** The visible cell rect in grid coordinates, clamped to the grid. */
+  private visibleCellRect(): { cx0: number; cy0: number; cx1: number; cy1: number } | null {
     if (!this._layout) {
       return null;
     }
-    const { order, side, dataRect, pageCount } = this._layout;
+    const { side, dataRect } = this._layout;
     const vis = visibleWorldRect(this._camera, this._cssW, this._cssH);
     const cx0 = Math.max(0, Math.floor(vis.x - dataRect.x));
     const cy0 = Math.max(0, Math.floor(vis.y - dataRect.y));
     const cx1 = Math.min(side - 1, Math.ceil(vis.x - dataRect.x + vis.w));
     const cy1 = Math.min(side - 1, Math.ceil(vis.y - dataRect.y + vis.h));
-    const cellCount = (cx1 - cx0 + 1) * (cy1 - cy0 + 1);
-    if (cellCount <= 0 || cellCount >= 40000 || cellCount >= side * side) {
+    return cx1 >= cx0 && cy1 >= cy0 ? { cx0, cy0, cx1, cy1 } : null;
+  }
+
+  /** The bounding page-index span of currently visible cells, or null when the whole file is visible. */
+  private visiblePageSpan(): { min: number; max: number } | null {
+    if (!this._layout) {
+      return null;
+    }
+    const rect = this.visibleCellRect();
+    if (!rect) {
+      return null;
+    }
+    const { order, pageCount } = this._layout;
+    const cellCount = (rect.cx1 - rect.cx0 + 1) * (rect.cy1 - rect.cy0 + 1);
+    if (cellCount >= 40000 || cellCount >= this._layout.side * this._layout.side) {
       return null;
     }
     let min = pageCount;
     let max = -1;
-    for (let cy = cy0; cy <= cy1; cy++) {
-      for (let cx = cx0; cx <= cx1; cx++) {
+    for (let cy = rect.cy0; cy <= rect.cy1; cy++) {
+      for (let cx = rect.cx0; cx <= rect.cx1; cx++) {
         const page = hilbertXY2D(order, cx, cy);
         if (page >= 0 && page < pageCount) {
           if (page < min) min = page;
@@ -482,6 +836,28 @@ export class DbMapRenderer {
       }
     }
     return max >= min ? { min, max } : null;
+  }
+
+  /** The visible page indices, capped — the L3/L4 fetch + draw set. Empty when too zoomed out to be in L3. */
+  private visiblePageList(): number[] {
+    if (!this._layout) {
+      return [];
+    }
+    const rect = this.visibleCellRect();
+    if (!rect) {
+      return [];
+    }
+    const { order, pageCount } = this._layout;
+    const pages: number[] = [];
+    for (let cy = rect.cy0; cy <= rect.cy1 && pages.length <= MAX_VISIBLE_PAGES; cy++) {
+      for (let cx = rect.cx0; cx <= rect.cx1 && pages.length <= MAX_VISIBLE_PAGES; cx++) {
+        const page = hilbertXY2D(order, cx, cy);
+        if (page >= 0 && page < pageCount) {
+          pages.push(page);
+        }
+      }
+    }
+    return pages.length > MAX_VISIBLE_PAGES ? [] : pages;
   }
 }
 

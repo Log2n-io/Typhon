@@ -91,7 +91,18 @@ public partial class DatabaseEngine
         {
             return;
         }
-        sink.Add(new StorageSegmentDescriptor(segment.RootPageIndex, kind, segment.Pages.ToArray()));
+
+        // Chunk-based segments also carry the layout constants (stride, per-page chunk counts, chunk-0 byte
+        // offsets) that the Database File Map's L3/L4 decoders need to slice chunks out of a page body.
+        if (segment is ChunkBasedSegment<PersistentStore> chunked)
+        {
+            sink.Add(new StorageSegmentDescriptor(segment.RootPageIndex, kind, segment.Pages.ToArray(), chunked.Stride, chunked.ChunkCountRootPage, 
+                chunked.ChunkCountPerPage, chunked.RootDataOffset, chunked.OtherDataOffset));
+        }
+        else
+        {
+            sink.Add(new StorageSegmentDescriptor(segment.RootPageIndex, kind, segment.Pages.ToArray()));
+        }
     }
 
     private static StoragePageType ToPageType(StorageSegmentKind kind) => kind switch

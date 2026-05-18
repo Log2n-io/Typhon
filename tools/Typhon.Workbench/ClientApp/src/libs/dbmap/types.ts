@@ -1,8 +1,11 @@
-// Database File Map (Module 15, Track A — A1 coarse tier) — shared types.
+// Database File Map (Module 15, Track A) — shared types.
 //
-// The DTO interfaces mirror the server records in Dtos/Storage/StorageMapDtos.cs. They are hand-written rather
-// than Orval-generated for A1 — the hooks fetch raw (the useTrack.ts pattern) and the coarse map is a tiny,
-// stable shape; regenerating schema/openapi.json + Orval is a follow-up once the endpoints settle.
+// The DTO interfaces mirror the server records in Dtos/Storage/*.cs. They are hand-written rather than
+// Orval-generated — the map is a small, stable shape; regenerating schema/openapi.json + Orval is a follow-up
+// once the endpoints settle. A1 added the coarse tier; A2 adds the detail tier (per-page detail tiles, page /
+// segment / chunk decodes).
+
+// ── A1 coarse tier ────────────────────────────────────────────────────────────────────────────────────────
 
 /** One logical segment in the segment table — mirrors `StorageSegmentDto`. */
 export interface StorageSegmentDto {
@@ -21,6 +24,7 @@ export interface StorageRegionsDto {
   hilbertOrder: number;
   checkpointLsn: number;
   downSampleFactor: number;
+  detailTileSize: number;
   segments: StorageSegmentDto[];
 }
 
@@ -32,6 +36,81 @@ export interface StorageRegionDto {
   pageTypes: string;
   ownerSegmentIds: string;
 }
+
+// ── A2 detail tier ────────────────────────────────────────────────────────────────────────────────────────
+
+/** Response of `GET /dbmap/region/detail` — mirrors `StorageRegionDetailDto`. Buffers are base64 SoA. */
+export interface StorageRegionDetailDto {
+  node: number;
+  firstPage: number;
+  pageCount: number;
+  fillRatio: string;
+  changeRevision: string;
+  crcStatus: string;
+  residency: string;
+  chunkUsed: string;
+  chunkTotal: string;
+  maxChangeRevision: number;
+}
+
+/** One decoded content cell — mirrors `StorageContentCellDto`. */
+export interface StorageContentCellDto {
+  label: string;
+  value: string;
+  kind: string;
+  offset: number;
+  size: number;
+  colorKey: number;
+}
+
+/** Response of `GET /dbmap/page/{idx}` — mirrors `StoragePageDetailDto`. */
+export interface StoragePageDetailDto {
+  pageIndex: number;
+  byteOffset: number;
+  pageType: string;
+  ownerSegmentId: number;
+  ownerSegmentKind: string;
+  changeRevision: number;
+  formatRevision: number;
+  modificationCounter: number;
+  storedChecksum: number;
+  liveChecksum: number;
+  crcStatus: string;
+  residency: string;
+  dirtyCounter: number;
+  chunkUsed: number;
+  chunkTotal: number;
+  fillRatio: number;
+  firstChunkId: number;
+  chunkOccupancy: string;
+  directoryEntries: StorageContentCellDto[];
+}
+
+/** Response of `GET /dbmap/segment/{id}` — mirrors `StorageSegmentDetailDto`. */
+export interface StorageSegmentDetailDto {
+  id: number;
+  rootPageIndex: number;
+  kind: string;
+  pageCount: number;
+  stride: number;
+  chunkCountPerPage: number;
+  totalChunkCapacity: number;
+  pages: number[];
+}
+
+/** Response of `GET /dbmap/chunk/{segId}/{chunkId}` — mirrors `StorageChunkDto`. */
+export interface StorageChunkDto {
+  segmentId: number;
+  chunkId: number;
+  decoder: string;
+  occupied: boolean;
+  byteOffset: number;
+  size: number;
+  componentType: string;
+  cells: StorageContentCellDto[];
+}
+
+// ── Enums (ordinals mirror the engine / server) ───────────────────────────────────────────────────────────
 
 /** Semantic page type — ordinals mirror the engine's `StoragePageType` enum. */
 export enum DbPageType {
@@ -45,6 +124,20 @@ export enum DbPageType {
   Cluster = 7,
   Vsbs = 8,
   StringTable = 9,
+}
+
+/** Live CRC verdict — ordinals mirror the server's `StorageCrcStatus`. */
+export enum DbCrcStatus {
+  Unverified = 0,
+  Verified = 1,
+  Failed = 2,
+}
+
+/** Page-cache residency — ordinals mirror the server's `StorageResidency`. */
+export enum DbResidency {
+  OnDiskOnly = 0,
+  ResidentClean = 1,
+  ResidentDirty = 2,
 }
 
 /** Human-readable label per page type, indexed by ordinal. */
@@ -67,10 +160,25 @@ export const NO_SEGMENT = 0xffff;
 /** Bytes per file page. */
 export const PAGE_SIZE = 8192;
 
-/** The three coarse base encodings selectable in A1. */
-export type DbMapEncoding = 'pageType' | 'segment' | 'freeUsed';
+// ── Encodings ─────────────────────────────────────────────────────────────────────────────────────────────
 
-/** The fully decoded coarse map the client renders — assembled from the two endpoints. */
+/** The coarse (in-memory) base encodings — A1. */
+export type DbMapCoarseEncoding = 'pageType' | 'segment' | 'freeUsed';
+
+/** The detail-tier base encodings — A2; each needs page bodies, fetched per visible tile. */
+export type DbMapDetailEncoding = 'fillDensity' | 'writeAge' | 'crc' | 'residency';
+
+/** The active base encoding — coarse or detail. */
+export type DbMapEncoding = DbMapCoarseEncoding | DbMapDetailEncoding;
+
+/** Whether an encoding needs the detail tier (page bodies) rather than the free in-memory coarse map. */
+export function isDetailEncoding(encoding: DbMapEncoding): encoding is DbMapDetailEncoding {
+  return encoding === 'fillDensity' || encoding === 'writeAge' || encoding === 'crc' || encoding === 'residency';
+}
+
+// ── Decoded client-side structures ────────────────────────────────────────────────────────────────────────
+
+/** The fully decoded coarse map the renderer consumes — assembled from the two A1 endpoints. */
 export interface DbMapData {
   databaseName: string;
   dataFileBytes: number;
@@ -78,6 +186,7 @@ export interface DbMapData {
   walBytes: number;
   hilbertOrder: number;
   checkpointLsn: number;
+  detailTileSize: number;
   segments: StorageSegmentDto[];
   /** Per-page semantic type (one `DbPageType` ordinal per page). */
   pageType: Uint8Array;
@@ -85,3 +194,63 @@ export interface DbMapData {
   ownerSegmentId: Uint16Array;
 }
 
+/** One decoded detail tile — a contiguous page range, decoded from `StorageRegionDetailDto`. */
+export interface DbDetailTile {
+  node: number;
+  firstPage: number;
+  pageCount: number;
+  fillRatio: Uint8Array;
+  changeRevision: Int32Array;
+  crcStatus: Uint8Array;
+  residency: Uint8Array;
+  chunkUsed: Uint16Array;
+  chunkTotal: Uint16Array;
+  maxChangeRevision: number;
+}
+
+/** One decoded content cell. */
+export interface DbContentCell {
+  label: string;
+  value: string;
+  kind: string;
+  offset: number;
+  size: number;
+  colorKey: number;
+}
+
+/** A page's decoded detail — drives the L3 chunk grid and the page Detail-panel view. */
+export interface DbPageDetail {
+  pageIndex: number;
+  byteOffset: number;
+  pageType: string;
+  ownerSegmentId: number;
+  ownerSegmentKind: string;
+  changeRevision: number;
+  formatRevision: number;
+  modificationCounter: number;
+  storedChecksum: number;
+  liveChecksum: number;
+  crcStatus: string;
+  residency: string;
+  dirtyCounter: number;
+  chunkUsed: number;
+  chunkTotal: number;
+  fillRatio: number;
+  /** Global chunk id of chunk 0 on this page — an L4 chunk ref is `firstChunkId + i`. */
+  firstChunkId: number;
+  /** One byte per chunk, 1 = allocated. Empty for non-chunk-based pages. */
+  chunkOccupancy: Uint8Array;
+  directoryEntries: DbContentCell[];
+}
+
+/** A chunk's decoded L4 content. */
+export interface DbChunkContent {
+  segmentId: number;
+  chunkId: number;
+  decoder: string;
+  occupied: boolean;
+  byteOffset: number;
+  size: number;
+  componentType: string;
+  cells: DbContentCell[];
+}

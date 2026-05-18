@@ -1,30 +1,47 @@
 import { create } from 'zustand';
 
-// The current Database File Map selection — a 4th source for the shared Detail panel (Module 15, §6.5).
-// Mirrors the touched-at recency pattern of useSelectedResourceStore / useSchemaInspectorStore so DetailPanel
-// arbitrates the most-recent interaction.
+// The current Database File Map selection — a source for the shared Detail panel (Module 15, §6.5). Mirrors the
+// touched-at recency pattern of useSelectedResourceStore / useSchemaInspectorStore so DetailPanel arbitrates the
+// most-recent interaction. A2 widens the A1 page-only selection to page / chunk / content-cell.
 
-/** Coarse, A1-level detail of a selected file page. */
-export interface DbMapPageInfo {
-  databaseName: string;
+/** A selected file page (L1). */
+export interface DbMapPageSelection {
+  kind: 'page';
   pageIndex: number;
-  typeLabel: string;
-  /** Dense owning-segment id, or null when the page is owned by no segment. */
-  segmentId: number | null;
-  segmentKind: string | null;
-  byteOffset: number;
 }
 
+/** A selected chunk within a page (L3). */
+export interface DbMapChunkSelection {
+  kind: 'chunk';
+  pageIndex: number;
+  segmentId: number;
+  chunkId: number;
+}
+
+/** A selected content cell within a chunk (L4). */
+export interface DbMapCellSelection {
+  kind: 'cell';
+  pageIndex: number;
+  segmentId: number;
+  chunkId: number;
+  /** Byte offset of the cell within the chunk — identifies it in the decoded cell list. */
+  cellOffset: number;
+}
+
+export type DbMapSelection = DbMapPageSelection | DbMapChunkSelection | DbMapCellSelection;
+
 interface DbMapSelectionState {
-  selected: DbMapPageInfo | null;
+  databaseName: string;
+  selected: DbMapSelection | null;
   touchedAt: number;
-  select: (info: DbMapPageInfo) => void;
+  select: (databaseName: string, selection: DbMapSelection) => void;
   clear: () => void;
 }
 
 export const useDbMapSelectionStore = create<DbMapSelectionState>()((set) => ({
+  databaseName: '',
   selected: null,
   touchedAt: 0,
-  select: (info) => set({ selected: info, touchedAt: Date.now() }),
+  select: (databaseName, selection) => set({ databaseName, selected: selection, touchedAt: Date.now() }),
   clear: () => set({ selected: null, touchedAt: 0 }),
 }));

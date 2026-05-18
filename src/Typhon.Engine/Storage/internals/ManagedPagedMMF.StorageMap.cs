@@ -11,6 +11,9 @@ public partial class ManagedPagedMMF
     /// </summary>
     public int StorageFilePageCount => (int)(FileSize >> PageSizePow2);
 
+    /// <summary>Size in bytes of one storage page (8 KiB) — the unit the Database File Map detail tier reads.</summary>
+    public int StoragePageSize => 1 << PageSizePow2;
+
     /// <summary>The occupancy-bitmap segment — exposed read-only for storage introspection.</summary>
     internal LogicalSegment<PersistentStore> OccupancySegment => _occupancySegment;
 

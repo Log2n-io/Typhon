@@ -10,7 +10,7 @@ namespace Typhon.Workbench.Storage;
 /// the live-provider pattern, mirroring <c>LiveSchemaProvider</c>. Stateless: every method rebuilds a coarse
 /// <see cref="StructuralMap"/> from in-memory engine structures, with no page-body disk I/O.
 /// </summary>
-public sealed class StorageMapService
+public sealed partial class StorageMapService
 {
     /// <summary>Number of pyramid levels (0-based) returned by <see cref="GetOverview"/>.</summary>
     private const int OverviewMaxLevels = 5;
@@ -26,7 +26,7 @@ public sealed class StorageMapService
             segments[i] = new StorageSegmentDto(s.Id, s.RootPageIndex, s.Kind.ToString(), s.PageCount);
         }
         return new StorageRegionsDto(map.DatabaseName, map.DataFileBytes, map.DataFilePageCount, map.WalBytes,
-            map.HilbertOrder, map.CheckpointLsn, map.DownSampleFactor, segments);
+            map.HilbertOrder, map.CheckpointLsn, map.DownSampleFactor, DetailTileSize, segments);
     }
 
     /// <summary>
@@ -72,7 +72,8 @@ public sealed class StorageMapService
         {
             var seg = segments[i];
             var id = (ushort)i;
-            segInfos[i] = new StorageSegmentInfo(id, seg.RootPageIndex, seg.Kind, seg.Pages.Length);
+            segInfos[i] = new StorageSegmentInfo(id, seg.RootPageIndex, seg.Kind, seg.Pages.Length,
+                seg.Stride, seg.ChunkCountRootPage, seg.ChunkCountPerPage, seg.RootDataOffset, seg.OtherDataOffset);
             foreach (var page in seg.Pages.Span)
             {
                 if ((uint)page < (uint)pageCount)

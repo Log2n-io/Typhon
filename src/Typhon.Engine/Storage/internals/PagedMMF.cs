@@ -726,6 +726,81 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     }
 
     /// <summary>
+    /// Like <see cref="RequestPageEpochUnchecked"/> but does <b>not</b> bump the page's clock-sweep counter and does <b>not</b> touch
+    /// <see cref="PageInfo.CrcVerified"/>. This is the read-only introspection path consumed by the Database File Map's detail tier (Module 15, A2): faulting
+    /// a page in purely to inspect it must not perturb the eviction heuristic that protects the live working set, and must leave a genuine CRC verification
+    /// still pending. Caller must be inside an <see cref="EpochGuard"/> scope.
+    /// </summary>
+    internal bool RequestPageEpochNoSweep(int filePageIndex, long currentEpoch, out int memPageIndex)
+    {
+        while (true)
+        {
+            if (!FetchPageToMemory(filePageIndex, out memPageIndex))
+            {
+                return false;
+            }
+
+            var pi = _memPagesInfo[memPageIndex];
+
+            long existing;
+            do
+            {
+                existing = pi.AccessEpoch;
+                if (currentEpoch <= existing)
+                {
+                    break;
+                }
+            } while (Interlocked.CompareExchange(ref pi.AccessEpoch, currentEpoch, existing) != existing);
+
+            if (pi.PageState == PageState.Allocating)
+            {
+                pi.PageState = PageState.Idle;
+                Interlocked.Increment(ref _metrics.FreeMemPageCount);
+            }
+
+            if (pi.FilePageIndex != filePageIndex)
+            {
+                continue;
+            }
+
+            var ioTask = pi.IOReadTask;
+            if (ioTask != null && !ioTask.IsCompletedSuccessfully)
+            {
+                ioTask.GetAwaiter().GetResult();
+                pi.ResetIOCompletionTask();
+            }
+
+            // Deliberately omitted vs RequestPageEpoch / RequestPageEpochUnchecked: IncrementClockSweepCounter (the eviction heuristic must not see
+            // introspection reads) and EnsurePageVerified / CrcVerified = true (the detail tier recomputes the CRC itself and must be able to read an
+            // unverified or corrupt page).
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Reports whether file page <paramref name="filePageIndex"/> is currently resident in the page cache and, if so, whether it is dirty
+    /// (<see cref="PageInfo.DirtyCounter"/> &gt; 0). Non-faulting — a directory lookup only, never triggers page I/O — so it reflects residency as it stands
+    /// before any introspection read.
+    /// </summary>
+    internal bool TryGetPageResidency(int filePageIndex, out bool resident, out bool dirty)
+    {
+        if (_memPageIndexByFilePageIndex.TryGetValue(filePageIndex, out var memPageIndex))
+        {
+            var pi = _memPagesInfo[memPageIndex];
+            if (pi.FilePageIndex == filePageIndex && pi.PageState != PageState.Free)
+            {
+                resident = true;
+                dirty = pi.DirtyCounter > 0;
+                return true;
+            }
+        }
+
+        resident = false;
+        dirty = false;
+        return false;
+    }
+
+    /// <summary>
     /// Fetch the requested File Page to memory, allocating a Memory Page if needed.
     /// </summary>
     /// <param name="filePageIndex">Index of the File Page to fetch</param>
@@ -1913,6 +1988,24 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     {
         var pi = _memPagesInfo[memPageIndex];
         return (pi.DirtyCounter, pi.ActiveChunkWriters, pi.SlotRefCount, pi.AccessEpoch, pi.PageState, pi.CrcVerified);
+    }
+
+    /// <summary>
+    /// Diagnostic: the clock-sweep counter of a file page, or <c>-1</c> when the page is not resident. Used by the Database File Map tests to assert that
+    /// <see cref="RequestPageEpochNoSweep"/> leaves the counter untouched.
+    /// </summary>
+    internal int GetClockSweepCounterForDiagnostic(int filePageIndex)
+    {
+        if (_memPageIndexByFilePageIndex.TryGetValue(filePageIndex, out var memPageIndex))
+        {
+            var pi = _memPagesInfo[memPageIndex];
+            if (pi.FilePageIndex == filePageIndex)
+            {
+                return pi.ClockSweepCounter;
+            }
+        }
+
+        return -1;
     }
 
     /// <summary>

@@ -12,6 +12,8 @@ public record StorageRegionsDto(
     int HilbertOrder,
     long CheckpointLsn,
     int DownSampleFactor,
+    /// <summary>Pages per A2 detail tile — the client derives which tiles intersect the viewport from this.</summary>
+    int DetailTileSize,
     StorageSegmentDto[] Segments);
 
 /// <summary>One logical segment in the segment table.</summary>

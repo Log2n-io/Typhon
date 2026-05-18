@@ -20,6 +20,11 @@
         <PackageReference Include="Scalar.AspNetCore" Version="2.9.0" />
     </ItemGroup>
 
+    <!-- The test project unit-tests the internal Database File Map decoders (L4Decoder, StorageFieldFormatter). -->
+    <ItemGroup>
+        <InternalsVisibleTo Include="Typhon.Workbench.Tests" />
+    </ItemGroup>
+
     <!-- Exclude client build artifacts and node_modules from the C# project -->
     <ItemGroup>
         <Content Remove="ClientApp\**" />

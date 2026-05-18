@@ -5,8 +5,9 @@ import { useSessionStore } from '@/stores/useSessionStore';
 import { useDbMapStore } from '@/stores/useDbMapStore';
 import { useDbMapSelectionStore } from '@/stores/useDbMapSelectionStore';
 import { useDbMap } from '@/hooks/dbmap/useDbMap';
+import { useDbMapChunks, useDbMapPages, useDbMapTiles } from '@/hooks/dbmap/useDbMapDetail';
 import { formatFileSize } from '@/lib/formatters';
-import { DbMapRenderer, type DbMapTheme } from '@/libs/dbmap/dbMapRenderer';
+import { DbMapRenderer, type DbDetailRequest, type DbMapTheme } from '@/libs/dbmap/dbMapRenderer';
 import {
   fitToRect,
   zoomAt,
@@ -15,20 +16,33 @@ import {
   screenToWorldY,
   type Camera,
 } from '@/libs/dbmap/camera';
-import { pageAtScreen } from '@/libs/dbmap/dbMapHitTest';
 import { hilbertD2XY } from '@/libs/dbmap/hilbert';
 import {
   DbPageType,
   NO_SEGMENT,
   PAGE_SIZE,
   PAGE_TYPE_LABELS,
+  isDetailEncoding,
   type DbMapData,
   type DbMapEncoding,
 } from '@/libs/dbmap/types';
-import { FREE_RGB, PAGE_TYPE_RGB, USED_RGB, rgbCss } from '@/libs/dbmap/dbMapColors';
+import {
+  CRC_RGB,
+  FREE_RGB,
+  PAGE_TYPE_RGB,
+  RESIDENCY_RGB,
+  USED_RGB,
+  fillDensityRgb,
+  rgbCss,
+  writeAgeRgb,
+} from '@/libs/dbmap/dbMapColors';
 
 const FIT_PADDING = 24;
 const CLICK_SLOP_PX = 3;
+/** Debounce before re-deriving the detail-fetch set after the camera settles. */
+const DETAIL_SYNC_MS = 160;
+
+const EMPTY_REQUEST: DbDetailRequest = { tileNodes: [], pages: [], chunks: [] };
 
 /** Drag-gesture state, held in a ref so high-frequency mouse events never trigger React renders. */
 interface DragState {
@@ -50,10 +64,10 @@ interface HoverInfo {
 }
 
 /**
- * Database File Map panel (Module 15, Track A — A1). Renders the open database's on-disk layout as a
- * Hilbert-laid, area-proportional page grid. Owns the 2D camera and routes selections to the shared Detail
- * panel. Built on the owner-drawn {@link DbMapRenderer}; gesture transients live in refs (the profiler's
- * rAF-coalesced pattern) so pan / zoom stay at 60 fps.
+ * Database File Map panel (Module 15, Track A). Renders the open database's on-disk layout as a Hilbert-laid,
+ * area-proportional page grid (A1) with the deep L3 chunk / L4 content bands (A2). Owns the 2D camera, drives
+ * the on-demand detail-tile fetch from the viewport, and routes selections to the shared Detail panel. Gesture
+ * transients live in refs (the profiler's rAF-coalesced pattern) so pan / zoom stay at 60 fps.
  */
 export default function DbMapPanel(_props: IDockviewPanelProps) {
   const sessionId = useSessionStore((s) => s.sessionId);
@@ -61,7 +75,7 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
   const setEncoding = useDbMapStore((s) => s.setEncoding);
   const segmentOverlay = useDbMapStore((s) => s.segmentOverlay);
   const toggleSegmentOverlay = useDbMapStore((s) => s.toggleSegmentOverlay);
-  const selectDbMapPage = useDbMapSelectionStore((s) => s.select);
+  const selectDbMap = useDbMapSelectionStore((s) => s.select);
   const clearDbMapSelection = useDbMapSelectionStore((s) => s.clear);
 
   const { data, isLoading, isError, refetch } = useDbMap(sessionId);
@@ -72,10 +86,23 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
   const cameraRef = useRef<Camera>({ scale: 1, x: 0, y: 0 });
   const frameRef = useRef<number | null>(null);
   const dragRef = useRef<DragState | null>(null);
+  const detailSyncRef = useRef<number | null>(null);
+  // The camera is fit to the file only on first load — a later refresh (or refetch) keeps the user's viewport.
+  const fittedRef = useRef(false);
 
   const [hover, setHover] = useState<HoverInfo | null>(null);
   const [regionRect, setRegionRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
   const [themeTick, setThemeTick] = useState(0);
+  const [detailReq, setDetailReq] = useState<DbDetailRequest>(EMPTY_REQUEST);
+  const [lod, setLod] = useState<{ band: 'L1' | 'L3' | 'L4'; focusedPage: number | null }>({
+    band: 'L1',
+    focusedPage: null,
+  });
+
+  // On-demand detail data — TanStack Query caches each tile / page / chunk, so panning back never refetches.
+  const tiles = useDbMapTiles(sessionId, detailReq.tileNodes);
+  const pageDetails = useDbMapPages(sessionId, detailReq.pages);
+  const chunkContents = useDbMapChunks(sessionId, detailReq.chunks);
 
   // rAF-coalesced redraw — every input mutates cameraRef then asks for one frame.
   const scheduleRender = useCallback(() => {
@@ -90,6 +117,29 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
         renderer.render();
       }
     });
+  }, []);
+
+  // After the camera settles, re-derive which detail tiles / pages / chunks the viewport now needs.
+  const queueDetailSync = useCallback(() => {
+    if (detailSyncRef.current != null) {
+      window.clearTimeout(detailSyncRef.current);
+    }
+    detailSyncRef.current = window.setTimeout(() => {
+      detailSyncRef.current = null;
+      const renderer = rendererRef.current;
+      if (!renderer) {
+        return;
+      }
+      const req = renderer.getDetailRequest();
+      setDetailReq((prev) => (sameRequest(prev, req) ? prev : req));
+      const lodState = renderer.getLodState();
+      const focused = renderer.getFocusedPage();
+      setLod((prev) =>
+        prev.band === lodState.band && prev.focusedPage === focused
+          ? prev
+          : { band: lodState.band, focusedPage: focused },
+      );
+    }, DETAIL_SYNC_MS);
   }, []);
 
   // Construct the renderer once the canvas element exists.
@@ -119,9 +169,13 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
     const { width, height } = surface.getBoundingClientRect();
     renderer.setViewport(width, height, window.devicePixelRatio || 1);
     renderer.setData(data ?? null);
+    setDetailReq(EMPTY_REQUEST);
     const layout = renderer.getLayout();
-    if (layout && width > 0 && height > 0) {
+    if (!data) {
+      fittedRef.current = false;
+    } else if (layout && width > 0 && height > 0 && !fittedRef.current) {
       cameraRef.current = fitToRect(layout.worldBounds, width, height, FIT_PADDING);
+      fittedRef.current = true;
     }
     renderer.setCamera(cameraRef.current);
     renderer.render();
@@ -137,7 +191,7 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
     renderer.render();
   }, [themeTick]);
 
-  // Encoding / overlay changes — recolor without reframing.
+  // Encoding / overlay changes — recolor without reframing; a detail encoding triggers a tile fetch.
   useEffect(() => {
     const renderer = rendererRef.current;
     if (!renderer) {
@@ -146,7 +200,23 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
     renderer.setEncoding(encoding);
     renderer.setSegmentOverlay(segmentOverlay);
     scheduleRender();
-  }, [encoding, segmentOverlay, scheduleRender]);
+    queueDetailSync();
+  }, [encoding, segmentOverlay, scheduleRender, queueDetailSync]);
+
+  // Detail data arrived — feed the renderer and repaint. Re-run the detail sync too: an L4 chunk request can
+  // only be derived once the page details (which carry firstChunkId) have loaded, so page data arriving must
+  // trigger a fresh getDetailRequest. The debounce + same-request guard keep this from churning.
+  useEffect(() => {
+    const renderer = rendererRef.current;
+    if (!renderer) {
+      return;
+    }
+    renderer.setDetailTiles(tiles);
+    renderer.setPageDetails(pageDetails);
+    renderer.setChunkContents(chunkContents);
+    scheduleRender();
+    queueDetailSync();
+  }, [tiles, pageDetails, chunkContents, scheduleRender, queueDetailSync]);
 
   // Resize — keep the canvas backing store in sync with the surface.
   useEffect(() => {
@@ -177,10 +247,21 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
       const factor = e.deltaY < 0 ? step : 1 / step;
       cameraRef.current = zoomAt(cameraRef.current, pt.x, pt.y, factor);
       scheduleRender();
+      queueDetailSync();
     };
     canvas.addEventListener('wheel', onWheel, { passive: false });
     return () => canvas.removeEventListener('wheel', onWheel);
-  }, [scheduleRender]);
+  }, [scheduleRender, queueDetailSync]);
+
+  // Drop any pending detail-sync timer on unmount.
+  useEffect(
+    () => () => {
+      if (detailSyncRef.current != null) {
+        window.clearTimeout(detailSyncRef.current);
+      }
+    },
+    [],
+  );
 
   const fitWholeFile = useCallback(() => {
     const renderer = rendererRef.current;
@@ -192,7 +273,8 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
     const { width, height } = surface.getBoundingClientRect();
     cameraRef.current = fitToRect(layout.worldBounds, width, height, FIT_PADDING);
     scheduleRender();
-  }, [scheduleRender]);
+    queueDetailSync();
+  }, [scheduleRender, queueDetailSync]);
 
   // ── Mouse interaction ───────────────────────────────────────────────────────────────────────────────
   // The gesture helpers are memoised so the window-level move/up listeners keep a stable identity for the
@@ -212,8 +294,9 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
       const { width, height } = surface.getBoundingClientRect();
       cameraRef.current = centerCameraOn(cameraRef.current, world.x, world.y, width, height);
       scheduleRender();
+      queueDetailSync();
     },
-    [scheduleRender],
+    [scheduleRender, queueDetailSync],
   );
 
   const jumpViaOffsetStrip = useCallback(
@@ -238,36 +321,73 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
         height,
       );
       scheduleRender();
+      queueDetailSync();
     },
-    [scheduleRender],
+    [scheduleRender, queueDetailSync],
   );
 
-  const selectPageAt = useCallback(
+  const selectAt = useCallback(
     (screenX: number, screenY: number) => {
       const renderer = rendererRef.current;
-      const layout = renderer?.getLayout();
-      if (!renderer || !layout || !data) {
+      if (!renderer || !data) {
         return;
       }
-      const page = pageAtScreen(cameraRef.current, layout, screenX, screenY);
+      const band = renderer.getLodState().band;
+
+      // L4 — a content cell decodes to a single record.
+      if (band === 'L4') {
+        const hit = renderer.pickContentCell(screenX, screenY);
+        if (hit) {
+          const detail = pageDetails.get(hit.page);
+          const content = detail
+            ? chunkContents.get(`${detail.ownerSegmentId}:${detail.firstChunkId + hit.chunkInPage}`)
+            : undefined;
+          const cell = content?.cells[hit.cellIndex];
+          if (detail && cell) {
+            renderer.setSelection(hit.page);
+            scheduleRender();
+            selectDbMap(data.databaseName, {
+              kind: 'cell',
+              pageIndex: hit.page,
+              segmentId: detail.ownerSegmentId,
+              chunkId: detail.firstChunkId + hit.chunkInPage,
+              cellOffset: cell.offset,
+            });
+            return;
+          }
+        }
+      }
+
+      // L3 — a chunk.
+      if (band === 'L3' || band === 'L4') {
+        const hit = renderer.pickChunk(screenX, screenY);
+        if (hit) {
+          const detail = pageDetails.get(hit.page);
+          if (detail && detail.ownerSegmentId >= 0) {
+            renderer.setSelection(hit.page);
+            scheduleRender();
+            selectDbMap(data.databaseName, {
+              kind: 'chunk',
+              pageIndex: hit.page,
+              segmentId: detail.ownerSegmentId,
+              chunkId: detail.firstChunkId + hit.chunkInPage,
+            });
+            return;
+          }
+        }
+      }
+
+      // L1 — a page.
+      const page = renderer.pageAt(screenX, screenY);
       renderer.setSelection(page);
       scheduleRender();
       if (page == null) {
         clearDbMapSelection();
         return;
       }
-      const segId = data.ownerSegmentId[page];
-      const seg = segId !== NO_SEGMENT ? data.segments.find((s) => s.id === segId) : undefined;
-      selectDbMapPage({
-        databaseName: data.databaseName,
-        pageIndex: page,
-        typeLabel: PAGE_TYPE_LABELS[data.pageType[page]] ?? 'Unknown',
-        segmentId: seg ? seg.id : null,
-        segmentKind: seg ? seg.kind : null,
-        byteOffset: page * PAGE_SIZE,
-      });
+      selectDbMap(data.databaseName, { kind: 'page', pageIndex: page });
     },
-    [data, scheduleRender, selectDbMapPage, clearDbMapSelection],
+    [data, pageDetails, chunkContents, scheduleRender, selectDbMap, clearDbMapSelection],
   );
 
   const handleWindowMouseMove = useCallback(
@@ -330,13 +450,16 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
           const { width, height } = surface.getBoundingClientRect();
           cameraRef.current = zoomToWorldRect(world, width, height, FIT_PADDING);
           scheduleRender();
+          queueDetailSync();
         }
       } else if (drag.mode === 'pan' && !drag.moved) {
-        selectPageAt(pt.x, pt.y);
+        selectAt(pt.x, pt.y);
+      } else if (drag.mode === 'pan' && drag.moved) {
+        queueDetailSync();
       }
       setRegionRect(null);
     },
-    [handleWindowMouseMove, scheduleRender, selectPageAt],
+    [handleWindowMouseMove, scheduleRender, queueDetailSync, selectAt],
   );
 
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -369,8 +492,7 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
       return;
     }
     const pt = canvasPoint(canvas, e.clientX, e.clientY);
-    const layout = renderer.getLayout();
-    const page = layout ? pageAtScreen(cameraRef.current, layout, pt.x, pt.y) : null;
+    const page = renderer.pageAt(pt.x, pt.y);
     renderer.setHover(page);
     scheduleRender();
     if (page == null) {
@@ -425,9 +547,17 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
           onChange={(e) => setEncoding(e.target.value as DbMapEncoding)}
           data-testid="dbmap-encoding"
         >
-          <option value="pageType">Page type</option>
-          <option value="segment">Owning segment</option>
-          <option value="freeUsed">Free / used</option>
+          <optgroup label="Coarse">
+            <option value="pageType">Page type</option>
+            <option value="segment">Owning segment</option>
+            <option value="freeUsed">Free / used</option>
+          </optgroup>
+          <optgroup label="Detail">
+            <option value="fillDensity">Fill density</option>
+            <option value="writeAge">Write age</option>
+            <option value="crc">CRC status</option>
+            <option value="residency">Cache residency</option>
+          </optgroup>
         </select>
         <button
           type="button"
@@ -467,6 +597,13 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
             {' · '}
             {data.pageCount.toLocaleString()} pages · {formatFileSize(data.dataFileBytes)}
             {data.walBytes > 0 ? ` · WAL ${formatFileSize(data.walBytes)}` : ' · no WAL'}
+            {lod.band !== 'L1' && lod.focusedPage != null && (
+              <span className="text-foreground">
+                {' › '}
+                Page {lod.focusedPage.toLocaleString()}
+                {lod.band === 'L4' ? ' › chunk content' : ' › chunks'}
+              </span>
+            )}
           </span>
         ) : (
           <span>No database open</span>
@@ -500,6 +637,17 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
   );
 }
 
+/** True when two detail requests address the same tiles / pages / chunks. */
+function sameRequest(a: DbDetailRequest, b: DbDetailRequest): boolean {
+  const sameNums = (x: number[], y: number[]) => x.length === y.length && x.every((v, i) => v === y[i]);
+  return (
+    sameNums(a.tileNodes, b.tileNodes) &&
+    sameNums(a.pages, b.pages) &&
+    a.chunks.length === b.chunks.length &&
+    a.chunks.every((c, i) => c.segId === b.chunks[i].segId && c.chunkId === b.chunks[i].chunkId)
+  );
+}
+
 function HoverTooltip({ info }: { info: HoverInfo }) {
   return (
     <div
@@ -518,9 +666,10 @@ function HoverTooltip({ info }: { info: HoverInfo }) {
 
 function DbMapLegend({ encoding }: { encoding: DbMapEncoding }) {
   if (encoding === 'segment') {
-    return (
-      <span className="ml-auto text-[10px] text-muted-foreground">Colour: one hue per segment</span>
-    );
+    return <span className="ml-auto text-[10px] text-muted-foreground">Colour: one hue per segment</span>;
+  }
+  if (isDetailEncoding(encoding)) {
+    return <DbMapDetailLegend encoding={encoding} />;
   }
   const entries: { label: string; color: string }[] =
     encoding === 'freeUsed'
@@ -531,6 +680,49 @@ function DbMapLegend({ encoding }: { encoding: DbMapEncoding }) {
       : [DbPageType.Free, DbPageType.Root, DbPageType.Occupancy, DbPageType.Component, DbPageType.Index].map(
           (t) => ({ label: PAGE_TYPE_LABELS[t], color: rgbCss(PAGE_TYPE_RGB[t]) }),
         );
+  return <SwatchRow entries={entries} />;
+}
+
+function DbMapDetailLegend({ encoding }: { encoding: DbMapEncoding }) {
+  if (encoding === 'crc') {
+    return (
+      <SwatchRow
+        entries={[
+          { label: 'Unverified', color: rgbCss(CRC_RGB[0]) },
+          { label: 'Verified', color: rgbCss(CRC_RGB[1]) },
+          { label: 'Failed', color: rgbCss(CRC_RGB[2]) },
+        ]}
+      />
+    );
+  }
+  if (encoding === 'residency') {
+    return (
+      <SwatchRow
+        entries={[
+          { label: 'On disk', color: rgbCss(RESIDENCY_RGB[0]) },
+          { label: 'Clean', color: rgbCss(RESIDENCY_RGB[1]) },
+          { label: 'Dirty', color: rgbCss(RESIDENCY_RGB[2]) },
+        ]}
+      />
+    );
+  }
+  // Sequential ramp — fill density / write age.
+  const stops = [0, 0.25, 0.5, 0.75, 1];
+  const ramp = encoding === 'writeAge' ? writeAgeRgb : fillDensityRgb;
+  const lo = encoding === 'writeAge' ? 'old' : 'empty';
+  const hi = encoding === 'writeAge' ? 'new' : 'full';
+  return (
+    <div className="ml-auto flex items-center gap-1 text-[10px] text-muted-foreground">
+      <span>{lo}</span>
+      {stops.map((s) => (
+        <span key={s} className="inline-block h-2.5 w-3" style={{ backgroundColor: rgbCss(ramp(s)) }} />
+      ))}
+      <span>{hi}</span>
+    </div>
+  );
+}
+
+function SwatchRow({ entries }: { entries: { label: string; color: string }[] }) {
   return (
     <div className="ml-auto flex items-center gap-2">
       {entries.map((e) => (

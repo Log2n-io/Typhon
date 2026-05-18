@@ -55,6 +55,66 @@ export function rgbCss(rgb: Rgb): string {
   return `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`;
 }
 
+// ── A2 detail-tier ramps (Module 15, §4.2) ─────────────────────────────────────────────────────────────────
+
+function lerpRgb(a: Rgb, b: Rgb, t: number): Rgb {
+  const tt = t < 0 ? 0 : t > 1 ? 1 : t;
+  return [
+    Math.round(a[0] + (b[0] - a[0]) * tt),
+    Math.round(a[1] + (b[1] - a[1]) * tt),
+    Math.round(a[2] + (b[2] - a[2]) * tt),
+  ];
+}
+
+/** Fill-density heatmap — empty (dark) → half (blue) → full (amber). `ratio` is 0..1. */
+export function fillDensityRgb(ratio: number): Rgb {
+  return ratio < 0.5
+    ? lerpRgb([30, 41, 59], [59, 130, 246], ratio * 2)
+    : lerpRgb([59, 130, 246], [245, 158, 11], (ratio - 0.5) * 2);
+}
+
+/** Write-age ramp — cold (old) blue → hot (newest) red. `ratio` is 0..1, relative to the region's max revision. */
+export function writeAgeRgb(ratio: number): Rgb {
+  return lerpRgb([37, 99, 235], [239, 68, 68], ratio);
+}
+
+/** CRC-status categorical colour — indexed by `DbCrcStatus` ordinal. */
+export const CRC_RGB: readonly Rgb[] = [
+  [107, 114, 128], // Unverified — gray
+  [16, 185, 129], //  Verified   — green
+  [239, 68, 68], //   Failed     — red
+];
+
+/** Cache-residency categorical colour — indexed by `DbResidency` ordinal. */
+export const RESIDENCY_RGB: readonly Rgb[] = [
+  [71, 85, 105], //  OnDiskOnly    — slate
+  [34, 197, 94], //  ResidentClean — green
+  [234, 179, 8], //  ResidentDirty — yellow
+];
+
+/** Stable colour for one L4 content cell — field id / directory entry / byte class — colored by semantics. */
+export function contentCellRgb(kind: string, colorKey: number): Rgb {
+  if (kind === 'byteRun') {
+    // 0 zero · 1 0xFF · 2 ascii · 3 binary
+    const byteClass: readonly Rgb[] = [
+      [30, 41, 59],
+      [148, 163, 184],
+      [234, 179, 8],
+      [59, 130, 246],
+    ];
+    return byteClass[colorKey] ?? [107, 114, 128];
+  }
+  if (kind === 'entityPk') {
+    return [148, 163, 184];
+  }
+  if (colorKey < 0) {
+    return [107, 114, 128];
+  }
+  // Field / directory entry — golden-angle hue walk keeps adjacent keys distinct.
+  const hue = (colorKey * 137.508) % 360;
+  return hslToRgb(hue / 360, 0.6, 0.6);
+}
+
 function hslToRgb(h: number, s: number, l: number): Rgb {
   if (s === 0) {
     const v = Math.round(l * 255);

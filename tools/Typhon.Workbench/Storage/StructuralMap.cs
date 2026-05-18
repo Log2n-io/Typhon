@@ -37,5 +37,27 @@ internal sealed class StructuralMap
     public const ushort NoSegment = 0xFFFF;
 }
 
-/// <summary>One logical segment's coarse footprint in the <see cref="StructuralMap"/>.</summary>
-internal readonly record struct StorageSegmentInfo(int Id, int RootPageIndex, StorageSegmentKind Kind, int PageCount);
+/// <summary>
+/// One logical segment's footprint in the <see cref="StructuralMap"/> — coarse identity plus, for chunk-based
+/// segments, the layout constants the A2 detail tier and L4 decoders need (0 for non-chunk-based segments).
+/// </summary>
+internal readonly record struct StorageSegmentInfo(
+    int Id,
+    int RootPageIndex,
+    StorageSegmentKind Kind,
+    int PageCount,
+    int Stride,
+    int ChunkCountRootPage,
+    int ChunkCountPerPage,
+    int RootDataOffset,
+    int OtherDataOffset)
+{
+    /// <summary>Whether this segment stores fixed-size chunks (has an L3 chunk grid).</summary>
+    public bool IsChunkBased => Stride > 0;
+
+    /// <summary>Chunk capacity of the given segment-relative page index.</summary>
+    public int ChunkCountOfPage(int segmentPageIndex) => segmentPageIndex == 0 ? ChunkCountRootPage : ChunkCountPerPage;
+
+    /// <summary>Byte offset within the given segment-relative page where chunk 0 begins.</summary>
+    public int DataOffsetOfPage(int segmentPageIndex) => segmentPageIndex == 0 ? RootDataOffset : OtherDataOffset;
+}
