@@ -27,7 +27,7 @@ public sealed partial class StorageMapService
         var first = (long)node * DetailTileSize;
         if (node < 0 || first >= map.DataFilePageCount)
         {
-            return new StorageRegionDetailDto(node, 0, 0, "", "", "", "", "", "", 0);
+            return new StorageRegionDetailDto(node, 0, 0, "", "", "", "", "", "", 0, "", "");
         }
 
         var start = (int)first;
@@ -39,6 +39,8 @@ public sealed partial class StorageMapService
         var residency = new byte[count];
         var chunkUsed = new ushort[count];
         var chunkTotal = new ushort[count];
+        var entropy = new byte[count];
+        var byteClass = new byte[count];
         var body = new byte[engine.MMF.StoragePageSize];
         var maxRev = 0;
 
@@ -71,6 +73,10 @@ public sealed partial class StorageMapService
             crc[i] = (byte)ClassifyCrc(body, header.PageChecksum);
             residency[i] = (byte)(resident ? (dirty ? StorageResidency.ResidentDirty : StorageResidency.ResidentClean) : StorageResidency.OnDiskOnly);
 
+            // Decode-free characterization (design §4.2): both reuse the page body already in hand — no extra I/O.
+            entropy[i] = ShannonEntropy(body);
+            byteClass[i] = (byte)L4Decoder.DominantByteClass(body);
+
             var seg = OwningChunkSegment(map, page);
             if (seg.HasValue)
             {
@@ -90,7 +96,39 @@ public sealed partial class StorageMapService
             Convert.ToBase64String(residency),
             Convert.ToBase64String(MemoryMarshal.AsBytes<ushort>(chunkUsed)),
             Convert.ToBase64String(MemoryMarshal.AsBytes<ushort>(chunkTotal)),
-            maxRev);
+            maxRev,
+            Convert.ToBase64String(entropy),
+            Convert.ToBase64String(byteClass));
+    }
+
+    /// <summary>
+    /// Shannon entropy of a page body, scaled to 0..255 (decode-free, design §4.2). A 256-bin byte histogram
+    /// gives <c>H = -Σ p·log2 p</c> in bits; the theoretical max is 8 bits, so the scaled value is <c>H·255/8</c>.
+    /// A zeroed page reads 0; uniformly-random bytes read near 255.
+    /// </summary>
+    internal static byte ShannonEntropy(ReadOnlySpan<byte> body)
+    {
+        if (body.IsEmpty)
+        {
+            return 0;
+        }
+        Span<int> counts = stackalloc int[256];
+        foreach (var b in body)
+        {
+            counts[b]++;
+        }
+        var len = (double)body.Length;
+        var h = 0.0;
+        for (var i = 0; i < 256; i++)
+        {
+            if (counts[i] == 0)
+            {
+                continue;
+            }
+            var p = counts[i] / len;
+            h -= p * Math.Log2(p);
+        }
+        return (byte)Math.Clamp(h * 255.0 / 8.0, 0.0, 255.0);
     }
 
     /// <summary>Builds one page's full decode — <c>GET /dbmap/page/{idx}</c>. Returns <c>null</c> for an out-of-range index.</summary>

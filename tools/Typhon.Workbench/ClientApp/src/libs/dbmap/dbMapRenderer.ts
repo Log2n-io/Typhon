@@ -19,12 +19,14 @@ import { pageAtScreen } from './dbMapHitTest';
 import { lodForScale, tileNodesForSpan, type DbLodState } from './dbMapLod';
 import { gridCols, gridSubRect } from './dbMapGrid';
 import {
+  BYTE_CLASS_RGB,
   CRC_RGB,
   FREE_RGB,
   RESIDENCY_RGB,
   TAIL_RGB,
   USED_RGB,
   contentCellRgb,
+  entropyRgb,
   fillDensityRgb,
   pageColorRgb,
   writeAgeRgb,
@@ -38,6 +40,7 @@ import {
   type DbDetailTile,
   type DbMapData,
   type DbMapEncoding,
+  type DbMapLens,
   type DbPageDetail,
 } from './types';
 
@@ -64,8 +67,16 @@ export interface DbDetailRequest {
 /** Cell pixel size below which only L0 shows; above L1_FULL_CELL only L1 shows. Between → crossfade. */
 const L0_ONLY_CELL = 0.5;
 const L1_FULL_CELL = 4;
+/** Opacity of the lens dim layer — non-highlighted pages fade back so the lens mask reads clearly (§4.3). */
+const LENS_DIM_ALPHA = 0.62;
+/** Outline colour for search-match cells (§4.5) — amber, distinct from the accent selection outline. */
+const SEARCH_HIT_COLOR = 'rgb(245, 158, 11)';
 /** Minimum cell size at which the segment-boundary overlay is drawn (zoomed-in only). */
 const SEGMENT_OVERLAY_MIN_CELL = 5;
+/** Page-cell pixel size above which the faint per-page gridline overlay is drawn. */
+const GRID_MIN_CELL = 6;
+/** Opacity of the per-page gridline overlay — barely visible, just enough to give each cell a border. */
+const GRID_ALPHA = 0.04;
 const MINIMAP_SIZE = 140;
 const MINIMAP_MARGIN = 12;
 const OFFSET_STRIP_HEIGHT = 16;
@@ -92,14 +103,22 @@ export class DbMapRenderer {
   private readonly _ctx: CanvasRenderingContext2D;
   private readonly _offscreen: HTMLCanvasElement;
   private readonly _offCtx: CanvasRenderingContext2D;
+  // The lens highlight buffer — the offscreen Hilbert image with non-masked pages made transparent. Rebuilt
+  // only when the lens mask or the base encoding changes, so a lens costs one extra drawImage per frame (§4.3).
+  private readonly _highlight: HTMLCanvasElement;
+  private readonly _highlightCtx: CanvasRenderingContext2D;
 
   private _data: DbMapData | null = null;
   private _layout: MapLayout | null = null;
   private _encoding: DbMapEncoding = 'pageType';
   private _segmentOverlay = false;
+  private _lens: DbMapLens = 'none';
+  private _lensMask: Uint8Array | null = null;
   private _camera: Camera = { scale: 1, x: 0, y: 0 };
   private _hover: number | null = null;
   private _selection: number | null = null;
+  private _searchHits: readonly number[] = [];
+  private _searchCurrent = -1;
   private _usedRatio = 0;
 
   // A2 detail-tier inputs, fed by the panel as the viewport changes.
@@ -129,11 +148,18 @@ export class DbMapRenderer {
     }
     this._ctx = ctx;
     this._offscreen = document.createElement('canvas');
-    const offCtx = this._offscreen.getContext('2d');
+    // willReadFrequently — the offscreen image is read back by paintHighlightBuffer to build the lens mask.
+    const offCtx = this._offscreen.getContext('2d', { willReadFrequently: true });
     if (!offCtx) {
       throw new Error('DbMapRenderer: offscreen 2D context unavailable');
     }
     this._offCtx = offCtx;
+    this._highlight = document.createElement('canvas');
+    const highlightCtx = this._highlight.getContext('2d');
+    if (!highlightCtx) {
+      throw new Error('DbMapRenderer: highlight 2D context unavailable');
+    }
+    this._highlightCtx = highlightCtx;
   }
 
   // ── Inputs ────────────────────────────────────────────────────────────────────────────────────────────
@@ -144,6 +170,10 @@ export class DbMapRenderer {
     this._pageDetails = new Map();
     this._chunkContents = new Map();
     this._maxChangeRevision = 1;
+    // A fresh map invalidates the previous map's lens mask and search hits (page indices no longer apply).
+    this._lensMask = null;
+    this._searchHits = [];
+    this._searchCurrent = -1;
     if (!data) {
       this._layout = null;
       return;
@@ -151,6 +181,8 @@ export class DbMapRenderer {
     this._layout = buildLayout(data.pageCount, data.walBytes, data.hilbertOrder);
     this._offscreen.width = this._layout.side;
     this._offscreen.height = this._layout.side;
+    this._highlight.width = this._layout.side;
+    this._highlight.height = this._layout.side;
     let free = 0;
     for (let p = 0; p < data.pageCount; p++) {
       if (data.pageType[p] === DbPageType.Free) {
@@ -173,6 +205,17 @@ export class DbMapRenderer {
     this._segmentOverlay = on;
   }
 
+  /**
+   * Sets the active analytical lens and its per-page highlight mask (1 = highlighted, 0 = dimmed). The mask is
+   * computed by the panel; this rebuilds the highlight buffer once, so the lens then costs one extra drawImage
+   * per frame regardless of database size (§4.3).
+   */
+  setLens(lens: DbMapLens, mask: Uint8Array | null): void {
+    this._lens = lens;
+    this._lensMask = lens === 'none' ? null : mask;
+    this.paintHighlightBuffer();
+  }
+
   setCamera(camera: Camera): void {
     this._camera = camera;
   }
@@ -183,6 +226,12 @@ export class DbMapRenderer {
 
   setSelection(page: number | null): void {
     this._selection = page;
+  }
+
+  /** Sets the search-match pages to mark on the map; `current` is the index the camera is flown to (§4.5). */
+  setSearchHits(pages: readonly number[], current: number): void {
+    this._searchHits = pages;
+    this._searchCurrent = current;
   }
 
   setTheme(theme: DbMapTheme): void {
@@ -418,6 +467,31 @@ export class DbMapRenderer {
       ctx.globalAlpha = 1;
     }
 
+    // A faint per-page gridline overlay — gives every page cell a thin border once cells are big enough to
+    // read it; suppressed once fully in L3 where the chunk grid takes over.
+    if (l1Alpha > 0 && l3Alpha < 1) {
+      this.drawPageGrid(ctx, l1Alpha);
+    }
+
+    // Lens — dim the whole data file, then punch the masked pages back through at full opacity (§4.3). Drawn
+    // over L1 but under L3, so a drilled-in chunk grid stays unobscured.
+    if (this._lens !== 'none' && l1Alpha > 0 && l3Alpha < 1) {
+      const dr = layout.dataRect;
+      ctx.globalAlpha = l1Alpha * LENS_DIM_ALPHA;
+      ctx.fillStyle = this._theme.background;
+      this.fillWorldRect(ctx, dr);
+      ctx.globalAlpha = l1Alpha;
+      ctx.imageSmoothingEnabled = cam.scale < 1;
+      ctx.drawImage(
+        this._highlight,
+        worldToScreenX(cam, dr.x),
+        worldToScreenY(cam, dr.y),
+        dr.w * cam.scale,
+        dr.h * cam.scale,
+      );
+      ctx.globalAlpha = 1;
+    }
+
     // L3 — chunk grids, crossfaded in over L1; L4 — decoded content, crossfaded in over L3.
     if (l3Alpha > 0) {
       this.drawChunkBand(ctx, l3Alpha, l4Alpha);
@@ -440,6 +514,11 @@ export class DbMapRenderer {
 
     if (this._segmentOverlay && cellPx >= SEGMENT_OVERLAY_MIN_CELL && l3Alpha < 1) {
       this.drawSegmentOverlay(ctx);
+    }
+
+    // Search-match markers — every hit gets a thin amber outline; the current match a thicker one (§4.5).
+    for (let i = 0; i < this._searchHits.length; i++) {
+      this.drawCellHighlight(ctx, this._searchHits[i], SEARCH_HIT_COLOR, i === this._searchCurrent ? 3 : 1);
     }
 
     this.drawCellHighlight(ctx, this._hover, this._theme.mutedText, 1);
@@ -481,6 +560,35 @@ export class DbMapRenderer {
       buf[o + 3] = 255;
     }
     this._offCtx.putImageData(img, 0, 0);
+    this.paintHighlightBuffer();
+  }
+
+  /**
+   * Rebuilds the lens highlight buffer: a copy of the offscreen Hilbert image in which every page outside the
+   * lens mask is fully transparent. O(pageCount), but runs only when the mask or the base encoding changes.
+   */
+  private paintHighlightBuffer(): void {
+    if (!this._layout) {
+      return;
+    }
+    const { side, pageCount, order } = this._layout;
+    const dst = this._highlightCtx.createImageData(side, side);
+    if (this._lens !== 'none' && this._lensMask) {
+      const src = this._offCtx.getImageData(0, 0, side, side).data;
+      const mask = this._lensMask;
+      for (let p = 0; p < pageCount; p++) {
+        if (mask[p] !== 1) {
+          continue;
+        }
+        const { x, y } = hilbertD2XY(order, p);
+        const o = (y * side + x) * 4;
+        dst.data[o] = src[o];
+        dst.data[o + 1] = src[o + 1];
+        dst.data[o + 2] = src[o + 2];
+        dst.data[o + 3] = 255;
+      }
+    }
+    this._highlightCtx.putImageData(dst, 0, 0);
   }
 
   /** Detail-encoding colour for a page, or null when its tile is not loaded (caller falls back to coarse). */
@@ -505,6 +613,10 @@ export class DbMapRenderer {
         return CRC_RGB[tile.crcStatus[i]] ?? CRC_RGB[0];
       case 'residency':
         return RESIDENCY_RGB[tile.residency[i]] ?? RESIDENCY_RGB[0];
+      case 'entropy':
+        return entropyRgb(tile.entropy[i] / 255);
+      case 'byteClass':
+        return BYTE_CLASS_RGB[tile.byteClass[i]] ?? BYTE_CLASS_RGB[0];
       default:
         return null;
     }
@@ -665,6 +777,45 @@ export class DbMapRenderer {
     );
     ctx.rotate(-Math.PI / 2);
     ctx.fillText('WAL', 0, 0);
+    ctx.restore();
+  }
+
+  /**
+   * Draws a barely-visible 1 px gridline at every page-cell boundary across the visible part of the Hilbert
+   * square, so each page reads as a bordered cell. Viewport-culled (only the on-screen cell lines are drawn)
+   * and gated on a minimum cell size so it never collapses into a solid mush when zoomed out.
+   */
+  private drawPageGrid(ctx: CanvasRenderingContext2D, alpha: number): void {
+    if (!this._layout || this._camera.scale < GRID_MIN_CELL) {
+      return;
+    }
+    const rect = this.visibleCellRect();
+    if (!rect) {
+      return;
+    }
+    const { dataRect } = this._layout;
+    const cam = this._camera;
+    const top = worldToScreenY(cam, dataRect.y + rect.cy0);
+    const bottom = worldToScreenY(cam, dataRect.y + rect.cy1 + 1);
+    const left = worldToScreenX(cam, dataRect.x + rect.cx0);
+    const right = worldToScreenX(cam, dataRect.x + rect.cx1 + 1);
+
+    ctx.save();
+    ctx.globalAlpha = alpha * GRID_ALPHA;
+    ctx.strokeStyle = this._theme.border;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let cx = rect.cx0; cx <= rect.cx1 + 1; cx++) {
+      const sx = Math.round(worldToScreenX(cam, dataRect.x + cx)) + 0.5;
+      ctx.moveTo(sx, top);
+      ctx.lineTo(sx, bottom);
+    }
+    for (let cy = rect.cy0; cy <= rect.cy1 + 1; cy++) {
+      const sy = Math.round(worldToScreenY(cam, dataRect.y + cy)) + 0.5;
+      ctx.moveTo(left, sy);
+      ctx.lineTo(right, sy);
+    }
+    ctx.stroke();
     ctx.restore();
   }
 

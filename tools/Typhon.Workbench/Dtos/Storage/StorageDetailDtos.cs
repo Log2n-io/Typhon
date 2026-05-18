@@ -52,7 +52,11 @@ public record StorageRegionDetailDto(
     /// <summary><c>ushort[]</c> — total chunk capacity per page.</summary>
     string ChunkTotal,
     /// <summary>Highest <c>ChangeRevision</c> in this tile — the region-relative write-age ramp anchor.</summary>
-    int MaxChangeRevision);
+    int MaxChangeRevision,
+    /// <summary><c>byte[]</c> — Shannon entropy 0..255 per page (decode-free; 0 for free pages).</summary>
+    string Entropy,
+    /// <summary><c>byte[]</c> — dominant byte class per page (0 zero · 1 0xFF · 2 ASCII · 3 binary).</summary>
+    string ByteClass);
 
 /// <summary>One fully-decoded page — the response of <c>GET /dbmap/page/{idx}</c>.</summary>
 public record StoragePageDetailDto(

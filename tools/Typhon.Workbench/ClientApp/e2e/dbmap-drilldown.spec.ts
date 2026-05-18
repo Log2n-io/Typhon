@@ -92,4 +92,52 @@ test.describe('Module 15 — Database File Map (A2 drill-down canary)', () => {
     await page.getByTestId('dbmap-encoding').selectOption('pageType');
     await expect(canvas).toBeVisible();
   });
+
+  test('A3 — entropy encoding fetches detail, the fragmentation lens, and the region table fly-to', async ({
+    page,
+    request,
+  }) => {
+    await openDemo(page, request);
+
+    await page.keyboard.press('Control+k');
+    await page.getByPlaceholder(/search commands/i).fill('Database File Map');
+    await page.getByText(/Toggle View Database File Map/i).first().click();
+
+    const panel = page.getByTestId('dbmap-panel');
+    await expect(panel).toBeVisible();
+    const canvas = page.getByTestId('dbmap-canvas');
+    await expect(canvas).toBeVisible();
+    await expect(page.getByTestId('dbmap-breadcrumb')).toContainText(/pages/i, { timeout: 10_000 });
+
+    // Entropy is a decode-free detail-tier encoding — selecting it must trigger an on-demand detail fetch.
+    const entropyFetch = page.waitForResponse(
+      (r) => r.url().includes('/dbmap/region/detail') && r.status() === 200,
+      { timeout: 10_000 },
+    );
+    await page.getByTestId('dbmap-encoding').selectOption('entropy');
+    await entropyFetch;
+    await expect(canvas).toBeVisible();
+
+    // The fragmentation lens dims the map — selecting it must not throw and the canvas keeps rendering.
+    await page.getByTestId('dbmap-lens').selectOption('fragmentation');
+    await expect(canvas).toBeVisible();
+
+    // The Regions side-rail tab lists the RLE region runs; a row click flies the camera (must not throw).
+    await page.getByRole('tab', { name: /regions/i }).click();
+    const firstRegion = page.getByTestId('dbmap-region-row').first();
+    await expect(firstRegion).toBeVisible({ timeout: 10_000 });
+    await firstRegion.click();
+    await expect(canvas).toBeVisible();
+
+    // Search by page index — the toolbar search box resolves the query and the camera flies to it.
+    await page.getByTestId('dbmap-search').fill('page:0');
+    await page.getByTestId('dbmap-search').press('Enter');
+    await expect(page.getByTestId('dbmap-search-count')).toContainText('1/1');
+    await expect(canvas).toBeVisible();
+
+    // Back to a coarse encoding under the free-space lens — recolor + lens compositing stay error-free.
+    await page.getByTestId('dbmap-encoding').selectOption('pageType');
+    await page.getByTestId('dbmap-lens').selectOption('freeSpace');
+    await expect(canvas).toBeVisible();
+  });
 });

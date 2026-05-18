@@ -89,7 +89,11 @@ internal static class L4Decoder
         return cells;
     }
 
-    private static int DominantByteClass(ReadOnlySpan<byte> run)
+    /// <summary>
+    /// The dominant byte class (0 zero · 1 0xFF · 2 ASCII · 3 binary) of a byte span — the decode-free
+    /// characterization the generic decoder uses and the detail tier's per-page byte-class encoding reuses.
+    /// </summary>
+    internal static int DominantByteClass(ReadOnlySpan<byte> run)
     {
         Span<int> counts = stackalloc int[4];
         foreach (var b in run)

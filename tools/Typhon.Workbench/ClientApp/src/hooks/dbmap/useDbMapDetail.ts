@@ -33,6 +33,8 @@ function decodeTile(dto: StorageRegionDetailDto): DbDetailTile {
     chunkUsed: decodeUint16(dto.chunkUsed),
     chunkTotal: decodeUint16(dto.chunkTotal),
     maxChangeRevision: dto.maxChangeRevision,
+    entropy: decodeBase64(dto.entropy),
+    byteClass: decodeBase64(dto.byteClass),
   };
 }
 

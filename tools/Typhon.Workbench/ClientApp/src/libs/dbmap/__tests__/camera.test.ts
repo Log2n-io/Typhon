@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
+  cameraCenteredOn,
   fitToRect,
   panBy,
   screenToWorldX,
   screenToWorldY,
+  tweenCamera,
   visibleWorldRect,
   worldToScreenX,
   worldToScreenY,
@@ -52,5 +54,53 @@ describe('camera', () => {
     expect(vis.x).toBeCloseTo(screenToWorldX(CAM, 0), 6);
     expect(vis.w).toBeCloseTo(800 / CAM.scale, 6);
     expect(vis.h).toBeCloseTo(600 / CAM.scale, 6);
+  });
+
+  it('cameraCenteredOn puts the world point at the viewport centre', () => {
+    const cam = cameraCenteredOn(40, 25, 8, 800, 600);
+    expect(cam.scale).toBe(8);
+    expect(worldToScreenX(cam, 40)).toBeCloseTo(400, 6);
+    expect(worldToScreenY(cam, 25)).toBeCloseTo(300, 6);
+  });
+
+  it('tweenCamera lands exactly on the from / to endpoints', () => {
+    const from: Camera = { scale: 1, x: 0, y: 0 };
+    const to: Camera = { scale: 100, x: -500, y: -300 };
+    const tween = { from, to, startMs: 1000, durationMs: 400 };
+
+    const atStart = tweenCamera(tween, 1000, 800, 600);
+    expect(atStart.camera.scale).toBeCloseTo(1, 6);
+    expect(atStart.done).toBe(false);
+
+    const atEnd = tweenCamera(tween, 1400, 800, 600);
+    expect(atEnd.camera.scale).toBeCloseTo(100, 3);
+    expect(atEnd.camera.x).toBeCloseTo(-500, 2);
+    expect(atEnd.camera.y).toBeCloseTo(-300, 2);
+    expect(atEnd.done).toBe(true);
+  });
+
+  it('tweenCamera interpolates scale in log space — the geometric mean at ease 0.5', () => {
+    const from: Camera = { scale: 1, x: 0, y: 0 };
+    const to: Camera = { scale: 100, x: 0, y: 0 };
+    // The ease-out cubic 1-(1-t)^3 reaches 0.5 at t = 1 - cbrt(0.5); the scale there is √(1·100) = 10.
+    const t = 1 - Math.cbrt(0.5);
+    const sample = tweenCamera({ from, to, startMs: 0, durationMs: 1000 }, t * 1000, 800, 600);
+    expect(sample.camera.scale).toBeCloseTo(10, 3);
+  });
+
+  it('tweenCamera with an anchor keeps the anchored world point pinned through the whole glide', () => {
+    // A pure cursor zoom: `to` is `from` zoomed about the anchor, so the world point under the anchor must
+    // stay fixed at every sampled frame — no mid-glide wobble.
+    const from: Camera = { scale: 4, x: 100, y: 50 };
+    const anchorX = 600;
+    const anchorY = 200;
+    const to = zoomAt(from, anchorX, anchorY, 3);
+    const tween = { from, to, startMs: 0, durationMs: 1000, anchorX, anchorY };
+    const pinned = { x: screenToWorldX(from, anchorX), y: screenToWorldY(from, anchorY) };
+    for (const ms of [0, 120, 370, 600, 880, 1000]) {
+      const { camera } = tweenCamera(tween, ms, 1280, 720);
+      expect(screenToWorldX(camera, anchorX)).toBeCloseTo(pinned.x, 4);
+      expect(screenToWorldY(camera, anchorY)).toBeCloseTo(pinned.y, 4);
+    }
   });
 });

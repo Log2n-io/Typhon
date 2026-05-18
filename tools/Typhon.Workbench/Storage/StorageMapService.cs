@@ -23,7 +23,12 @@ public sealed partial class StorageMapService
         for (var i = 0; i < segments.Length; i++)
         {
             var s = map.Segments[i];
-            segments[i] = new StorageSegmentDto(s.Id, s.RootPageIndex, s.Kind.ToString(), s.PageCount);
+            // Resolve the user component type name for component segments — it drives the map's search box.
+            // In-memory only (walks the component-table registry, no page I/O), so the coarse tier stays free.
+            var typeName = s.Kind == StorageSegmentKind.Component
+                ? ResolveComponentDefinition(engine, s.RootPageIndex)?.Name ?? ""
+                : "";
+            segments[i] = new StorageSegmentDto(s.Id, s.RootPageIndex, s.Kind.ToString(), s.PageCount, typeName);
         }
         return new StorageRegionsDto(map.DatabaseName, map.DataFileBytes, map.DataFilePageCount, map.WalBytes,
             map.HilbertOrder, map.CheckpointLsn, map.DownSampleFactor, DetailTileSize, segments);

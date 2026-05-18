@@ -78,6 +78,21 @@ export function writeAgeRgb(ratio: number): Rgb {
   return lerpRgb([37, 99, 235], [239, 68, 68], ratio);
 }
 
+/** Entropy ramp (A3, §4.2) — low (structured, dark) → mid (teal) → high (random/encrypted, red). `ratio` is 0..1. */
+export function entropyRgb(ratio: number): Rgb {
+  return ratio < 0.5
+    ? lerpRgb([30, 41, 59], [20, 184, 166], ratio * 2)
+    : lerpRgb([20, 184, 166], [239, 68, 68], (ratio - 0.5) * 2);
+}
+
+/** Byte-class categorical palette (A3, §4.2) — 0 zero · 1 0xFF · 2 ASCII · 3 binary. */
+export const BYTE_CLASS_RGB: readonly Rgb[] = [
+  [30, 41, 59], //   zero   — dark slate
+  [148, 163, 184], // 0xFF   — light slate
+  [234, 179, 8], //   ASCII  — yellow
+  [59, 130, 246], //  binary — blue
+];
+
 /** CRC-status categorical colour — indexed by `DbCrcStatus` ordinal. */
 export const CRC_RGB: readonly Rgb[] = [
   [107, 114, 128], // Unverified — gray
@@ -96,13 +111,7 @@ export const RESIDENCY_RGB: readonly Rgb[] = [
 export function contentCellRgb(kind: string, colorKey: number): Rgb {
   if (kind === 'byteRun') {
     // 0 zero · 1 0xFF · 2 ascii · 3 binary
-    const byteClass: readonly Rgb[] = [
-      [30, 41, 59],
-      [148, 163, 184],
-      [234, 179, 8],
-      [59, 130, 246],
-    ];
-    return byteClass[colorKey] ?? [107, 114, 128];
+    return BYTE_CLASS_RGB[colorKey] ?? [107, 114, 128];
   }
   if (kind === 'entityPk') {
     return [148, 163, 184];

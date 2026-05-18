@@ -13,6 +13,8 @@ export interface StorageSegmentDto {
   rootPageIndex: number;
   kind: string;
   pageCount: number;
+  /** Component type name when the segment is a component table; empty otherwise. */
+  typeName: string;
 }
 
 /** Response of `GET /dbmap/regions` — mirrors `StorageRegionsDto`. */
@@ -51,6 +53,8 @@ export interface StorageRegionDetailDto {
   chunkUsed: string;
   chunkTotal: string;
   maxChangeRevision: number;
+  entropy: string;
+  byteClass: string;
 }
 
 /** One decoded content cell — mirrors `StorageContentCellDto`. */
@@ -165,16 +169,26 @@ export const PAGE_SIZE = 8192;
 /** The coarse (in-memory) base encodings — A1. */
 export type DbMapCoarseEncoding = 'pageType' | 'segment' | 'freeUsed';
 
-/** The detail-tier base encodings — A2; each needs page bodies, fetched per visible tile. */
-export type DbMapDetailEncoding = 'fillDensity' | 'writeAge' | 'crc' | 'residency';
+/** The detail-tier base encodings — A2 (fill / write-age / CRC / residency) + A3 (decode-free entropy / byte-class). */
+export type DbMapDetailEncoding = 'fillDensity' | 'writeAge' | 'crc' | 'residency' | 'entropy' | 'byteClass';
 
 /** The active base encoding — coarse or detail. */
 export type DbMapEncoding = DbMapCoarseEncoding | DbMapDetailEncoding;
 
 /** Whether an encoding needs the detail tier (page bodies) rather than the free in-memory coarse map. */
 export function isDetailEncoding(encoding: DbMapEncoding): encoding is DbMapDetailEncoding {
-  return encoding === 'fillDensity' || encoding === 'writeAge' || encoding === 'crc' || encoding === 'residency';
+  return (
+    encoding === 'fillDensity' ||
+    encoding === 'writeAge' ||
+    encoding === 'crc' ||
+    encoding === 'residency' ||
+    encoding === 'entropy' ||
+    encoding === 'byteClass'
+  );
 }
+
+/** The active analytical lens (A3, §4.3) — a focused dim/highlight overlay on top of the base encoding. */
+export type DbMapLens = 'none' | 'fragmentation' | 'freeSpace' | 'pathology';
 
 // ── Decoded client-side structures ────────────────────────────────────────────────────────────────────────
 
@@ -206,6 +220,10 @@ export interface DbDetailTile {
   chunkUsed: Uint16Array;
   chunkTotal: Uint16Array;
   maxChangeRevision: number;
+  /** Per-page Shannon entropy 0..255 (decode-free). */
+  entropy: Uint8Array;
+  /** Per-page dominant byte class (0 zero · 1 0xFF · 2 ASCII · 3 binary). */
+  byteClass: Uint8Array;
 }
 
 /** One decoded content cell. */

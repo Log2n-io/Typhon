@@ -21,7 +21,9 @@ public record StorageSegmentDto(
     int Id,
     int RootPageIndex,
     string Kind,
-    int PageCount);
+    int PageCount,
+    /// <summary>Component type name when the segment is a component table; empty otherwise. Drives map search.</summary>
+    string TypeName);
 
 /// <summary>
 /// Coarse per-page descriptors for a quadtree node — the response of <c>GET /dbmap/region</c>. In A1 the whole

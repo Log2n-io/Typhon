@@ -87,3 +87,64 @@ export function visibleWorldRect(cam: Camera, viewportW: number, viewportH: numb
     h: viewportH / cam.scale,
   };
 }
+
+/** A camera that centres world point (`worldX`, `worldY`) at `scale` in a `viewportW` × `viewportH` viewport. */
+export function cameraCenteredOn(
+  worldX: number,
+  worldY: number,
+  scale: number,
+  viewportW: number,
+  viewportH: number,
+): Camera {
+  const s = clampScale(scale);
+  return { scale: s, x: viewportW / 2 - worldX * s, y: viewportH / 2 - worldY * s };
+}
+
+// ── Animated fly-to (A3, §4.5) ──────────────────────────────────────────────────────────────────────────────
+
+/** A camera animation from `from` to `to`, played over `durationMs` from the `startMs` (`performance.now()`) stamp. */
+export interface CameraTween {
+  from: Camera;
+  to: Camera;
+  startMs: number;
+  durationMs: number;
+  /**
+   * Screen point held fixed during the glide — the world point under it is interpolated, so it stays put.
+   * Defaults to the viewport centre. A cursor-anchored wheel zoom must pass the cursor here: otherwise the
+   * centre-anchored interpolation makes the focus point bulge off-and-back mid-glide (a visible wobble),
+   * because `1/scale` (log-eased) and the centre point (linearly eased) do not cancel between the endpoints.
+   */
+  anchorX?: number;
+  anchorY?: number;
+}
+
+function lerp(a: number, b: number, t: number): number {
+  return a + (b - a) * t;
+}
+
+/**
+ * Samples a camera tween at `nowMs`. The anchor's world point moves linearly while the scale moves in log
+ * space — a linear scale lerp across the map's ~10^7 zoom range would feel wrong, cramming most of the travel
+ * into the first frames. Eased out (cubic); `done` is true once the tween reaches its end.
+ */
+export function tweenCamera(
+  tween: CameraTween,
+  nowMs: number,
+  viewportW: number,
+  viewportH: number,
+): { camera: Camera; done: boolean } {
+  const raw = tween.durationMs <= 0 ? 1 : (nowMs - tween.startMs) / tween.durationMs;
+  const t = raw <= 0 ? 0 : raw >= 1 ? 1 : raw;
+  const e = 1 - Math.pow(1 - t, 3);
+  const scale = Math.exp(lerp(Math.log(tween.from.scale), Math.log(tween.to.scale), e));
+  // Hold the anchor screen point fixed by interpolating the world point beneath it. For a pure zoom (wheel),
+  // `from` and `to` agree on that point, so it stays exactly pinned through the whole glide — no wobble.
+  const ax = tween.anchorX ?? viewportW / 2;
+  const ay = tween.anchorY ?? viewportH / 2;
+  const wx = lerp(screenToWorldX(tween.from, ax), screenToWorldX(tween.to, ax), e);
+  const wy = lerp(screenToWorldY(tween.from, ay), screenToWorldY(tween.to, ay), e);
+  return {
+    camera: { scale, x: ax - wx * scale, y: ay - wy * scale },
+    done: t >= 1,
+  };
+}
