@@ -29,6 +29,8 @@ import type { MetricsCardData } from './MetricsCard';
 // pathology list). The panel computes every figure; this tab only lays them out.
 
 interface LegendTabProps {
+  /** Coarse down-sample factor (§5.5) — > 1 marks the map (and its encodings) as approximate. */
+  downSampleFactor: number;
   /** Fragmentation-lens metrics, or null when no segment is focused. */
   metrics: MetricsCardData | null;
   /** Free-space composition, or null when the free-space lens is inactive. */
@@ -50,6 +52,14 @@ export function LegendTab(props: LegendTabProps) {
       <section className="flex flex-col gap-1">
         <h3 className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Encoding</h3>
         <EncodingLegend encoding={encoding} />
+        {props.downSampleFactor > 1 && (
+          <span
+            className="mt-0.5 self-start rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400"
+            title={`This database exceeds the coarse-cell budget — each cell aggregates ${props.downSampleFactor} pages (§5.5). Colours and metrics are approximate.`}
+          >
+            Approximate · down-sampled ×{props.downSampleFactor}
+          </span>
+        )}
       </section>
 
       {lens === 'fragmentation' && (

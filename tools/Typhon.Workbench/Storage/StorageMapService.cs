@@ -43,7 +43,8 @@ public sealed partial class StorageMapService
         var map = BuildMap(engine, databaseName);
         var typeBytes = MemoryMarshal.AsBytes<StoragePageType>(map.PageType);
         var ownerBytes = MemoryMarshal.AsBytes<ushort>(map.OwnerSegmentId);
-        return new StorageRegionDto(node, string.IsNullOrEmpty(lod) ? "leaf" : lod, map.DataFilePageCount,
+        // PageCount is the descriptor-array length — the cell count, which equals the page count when exact.
+        return new StorageRegionDto(node, string.IsNullOrEmpty(lod) ? "leaf" : lod, map.CellCount,
             Convert.ToBase64String(typeBytes), Convert.ToBase64String(ownerBytes));
     }
 
@@ -88,31 +89,129 @@ public sealed partial class StorageMapService
             }
         }
 
+        // §5.5 — past the cell budget the coarse arrays are down-sampled (one descriptor per `factor` pages) so a
+        // multi-GB database stays bounded in browser memory. The arrays are then in cell space; DataFilePageCount
+        // stays the real page count for byte math, and DownSampleFactor bridges the two.
+        var factor = DownSampleFactorFor(pageCount, MaxCoarseCells);
+        var cellType = pageType;
+        var cellOwner = ownerSegmentId;
+        if (factor > 1)
+        {
+            DownSampleArrays(pageType, ownerSegmentId, factor, out cellType, out cellOwner);
+        }
+
         return new StructuralMap
         {
             DatabaseName = string.IsNullOrEmpty(databaseName) ? "database" : databaseName,
             DataFileBytes = mmf.FileSize,
             DataFilePageCount = pageCount,
             WalBytes = engine.GetWalTotalBytes(),
-            HilbertOrder = HilbertOrderFor(pageCount),
+            HilbertOrder = HilbertOrderFor(cellType.Length),
             CheckpointLsn = engine.CheckpointManager?.CheckpointLsn ?? 0L,
-            DownSampleFactor = 1,
-            PageType = pageType,
-            OwnerSegmentId = ownerSegmentId,
+            DownSampleFactor = factor,
+            PageType = cellType,
+            OwnerSegmentId = cellOwner,
             Segments = segInfos,
         };
     }
 
-    /// <summary>Smallest Hilbert order <c>n</c> such that <c>4^n ≥ pageCount</c>.</summary>
-    internal static int HilbertOrderFor(int pageCount)
+    /// <summary>Smallest Hilbert order <c>n</c> such that <c>4^n ≥ cellCount</c>.</summary>
+    internal static int HilbertOrderFor(int cellCount)
     {
         var n = 0;
         long cells = 1;
-        while (cells < pageCount)
+        while (cells < cellCount)
         {
             cells <<= 2;
             n++;
         }
         return n;
+    }
+
+    /// <summary>
+    /// Coarse-map cell budget (§5.5). Past this the map is down-sampled — one descriptor per <c>factor</c> pages,
+    /// <c>factor</c> a power of 4 — so a multi-GB database stays bounded in browser memory. Mutable so tests can
+    /// lower it and exercise down-sampling without a multi-GB fixture.
+    /// </summary>
+    internal static int MaxCoarseCells = 1 << 20;
+
+    /// <summary>Descriptor cells for <paramref name="pageCount"/> pages at down-sample <paramref name="factor"/>.</summary>
+    internal static int CellCountFor(int pageCount, int factor) => (pageCount + factor - 1) / factor;
+
+    /// <summary>Smallest power-of-4 factor such that the down-sampled cell count fits within <paramref name="maxCells"/>.</summary>
+    internal static int DownSampleFactorFor(int pageCount, int maxCells)
+    {
+        var factor = 1;
+        while (CellCountFor(pageCount, factor) > maxCells)
+        {
+            factor <<= 2;
+        }
+        return factor;
+    }
+
+    /// <summary>
+    /// Aggregates the per-page coarse arrays into one descriptor per <paramref name="factor"/> pages — the dominant
+    /// non-free type, and the dominant owning segment (<see cref="StructuralMap.NoSegment"/> when unowned wins).
+    /// </summary>
+    internal static void DownSampleArrays(StoragePageType[] pageType, ushort[] ownerSegmentId, int factor,
+        out StoragePageType[] cellType, out ushort[] cellOwner)
+    {
+        var cellCount = CellCountFor(pageType.Length, factor);
+        cellType = new StoragePageType[cellCount];
+        cellOwner = new ushort[cellCount];
+        Span<int> tally = stackalloc int[StorageMapPyramid.PageTypeCount];
+
+        for (var c = 0; c < cellCount; c++)
+        {
+            var start = c * factor;
+            var end = Math.Min(start + factor, pageType.Length);
+            tally.Clear();
+            for (var p = start; p < end; p++)
+            {
+                tally[(int)pageType[p]]++;
+            }
+            cellType[c] = StorageMapPyramid.DominantType(tally);
+            cellOwner[c] = DominantOwner(ownerSegmentId, start, end);
+        }
+    }
+
+    /// <summary>The owning-segment id covering the most pages in <c>[start, end)</c> — ties keep the first seen.</summary>
+    private static ushort DominantOwner(ushort[] ownerSegmentId, int start, int end)
+    {
+        var first = ownerSegmentId[start];
+        var homogeneous = true;
+        for (var i = start + 1; i < end; i++)
+        {
+            if (ownerSegmentId[i] != first)
+            {
+                homogeneous = false;
+                break;
+            }
+        }
+        if (homogeneous)
+        {
+            return first;
+        }
+
+        var bestOwner = first;
+        var bestCount = 0;
+        for (var i = start; i < end; i++)
+        {
+            var owner = ownerSegmentId[i];
+            var count = 0;
+            for (var j = start; j < end; j++)
+            {
+                if (ownerSegmentId[j] == owner)
+                {
+                    count++;
+                }
+            }
+            if (count > bestCount)
+            {
+                bestCount = count;
+                bestOwner = owner;
+            }
+        }
+        return bestOwner;
     }
 }

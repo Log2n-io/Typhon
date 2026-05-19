@@ -107,6 +107,11 @@ export class DbMapRenderer {
   // only when the lens mask or the base encoding changes, so a lens costs one extra drawImage per frame (§4.3).
   private readonly _highlight: HTMLCanvasElement;
   private readonly _highlightCtx: CanvasRenderingContext2D;
+  // The filter-to-dim buffer (§4.6) — a translucent dim overlay covering only filter-excluded cells, so it
+  // composes on top of the lens (a cell stays bright iff it passes both). Rebuilt only when the filter changes.
+  private readonly _filter: HTMLCanvasElement;
+  private readonly _filterCtx: CanvasRenderingContext2D;
+  private _filterMask: Uint8Array | null = null;
 
   private _data: DbMapData | null = null;
   private _layout: MapLayout | null = null;
@@ -160,6 +165,12 @@ export class DbMapRenderer {
       throw new Error('DbMapRenderer: highlight 2D context unavailable');
     }
     this._highlightCtx = highlightCtx;
+    this._filter = document.createElement('canvas');
+    const filterCtx = this._filter.getContext('2d');
+    if (!filterCtx) {
+      throw new Error('DbMapRenderer: filter 2D context unavailable');
+    }
+    this._filterCtx = filterCtx;
   }
 
   // ── Inputs ────────────────────────────────────────────────────────────────────────────────────────────
@@ -170,19 +181,22 @@ export class DbMapRenderer {
     this._pageDetails = new Map();
     this._chunkContents = new Map();
     this._maxChangeRevision = 1;
-    // A fresh map invalidates the previous map's lens mask and search hits (page indices no longer apply).
+    // A fresh map invalidates the previous map's lens mask, filter mask and search hits (page indices change).
     this._lensMask = null;
+    this._filterMask = null;
     this._searchHits = [];
     this._searchCurrent = -1;
     if (!data) {
       this._layout = null;
       return;
     }
-    this._layout = buildLayout(data.pageCount, data.walBytes, data.hilbertOrder);
+    this._layout = buildLayout(data.pageCount, data.walBytes, data.hilbertOrder, data.downSampleFactor);
     this._offscreen.width = this._layout.side;
     this._offscreen.height = this._layout.side;
     this._highlight.width = this._layout.side;
     this._highlight.height = this._layout.side;
+    this._filter.width = this._layout.side;
+    this._filter.height = this._layout.side;
     let free = 0;
     for (let p = 0; p < data.pageCount; p++) {
       if (data.pageType[p] === DbPageType.Free) {
@@ -216,6 +230,16 @@ export class DbMapRenderer {
     this.paintHighlightBuffer();
   }
 
+  /**
+   * Sets the filter-to-dim mask (§4.6) — 1 = the cell passes the filter (stays bright), 0 = it is dimmed back.
+   * `null` clears the filter. Rebuilds the filter buffer once; the filter then costs one drawImage per frame
+   * and composes on top of the lens — a cell is bright only if it passes the lens *and* the filter.
+   */
+  setFilter(mask: Uint8Array | null): void {
+    this._filterMask = mask;
+    this.paintFilterBuffer();
+  }
+
   setCamera(camera: Camera): void {
     this._camera = camera;
   }
@@ -236,6 +260,8 @@ export class DbMapRenderer {
 
   setTheme(theme: DbMapTheme): void {
     this._theme = theme;
+    // The filter buffer bakes in the theme's dim colour — rebuild it so a theme toggle recolours the dim layer.
+    this.paintFilterBuffer();
   }
 
   /** Feeds the detail tiles for the active detail encoding; repaints the offscreen L1 map. */
@@ -275,6 +301,14 @@ export class DbMapRenderer {
 
   getLayout(): MapLayout | null {
     return this._layout;
+  }
+
+  /**
+   * The offscreen Hilbert map image — one pixel per cell, painted in the active encoding. Drives the whole-map
+   * PNG export (§4.6); null until a map is loaded.
+   */
+  getWholeMapImage(): HTMLCanvasElement | null {
+    return this._layout ? this._offscreen : null;
   }
 
   // ── LOD / detail-request queries (consumed by the panel) ────────────────────────────────────────────────
@@ -492,6 +526,22 @@ export class DbMapRenderer {
       ctx.globalAlpha = 1;
     }
 
+    // Filter-to-dim (§4.6) — a translucent overlay darkening only the filter-excluded cells. Drawn after the
+    // lens so the two compose: a cell stays bright only if it passes the lens *and* the filter.
+    if (this._filterMask && l1Alpha > 0 && l3Alpha < 1) {
+      const dr = layout.dataRect;
+      ctx.globalAlpha = l1Alpha;
+      ctx.imageSmoothingEnabled = cam.scale < 1;
+      ctx.drawImage(
+        this._filter,
+        worldToScreenX(cam, dr.x),
+        worldToScreenY(cam, dr.y),
+        dr.w * cam.scale,
+        dr.h * cam.scale,
+      );
+      ctx.globalAlpha = 1;
+    }
+
     // L3 — chunk grids, crossfaded in over L1; L4 — decoded content, crossfaded in over L3.
     if (l3Alpha > 0) {
       this.drawChunkBand(ctx, l3Alpha, l4Alpha);
@@ -589,6 +639,38 @@ export class DbMapRenderer {
       }
     }
     this._highlightCtx.putImageData(dst, 0, 0);
+  }
+
+  /**
+   * Rebuilds the filter-to-dim buffer (§4.6): the whole grid filled with the theme's dim colour at
+   * {@link LENS_DIM_ALPHA}, then the filter-passing cells punched back to transparent. The result is a dim
+   * overlay touching only excluded cells — one drawImage per frame, rebuilt only when the filter changes.
+   */
+  private paintFilterBuffer(): void {
+    if (!this._layout) {
+      return;
+    }
+    const { side, pageCount, order } = this._layout;
+    const ctx = this._filterCtx;
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.clearRect(0, 0, side, side);
+    const mask = this._filterMask;
+    if (!mask) {
+      return;
+    }
+    ctx.globalAlpha = LENS_DIM_ALPHA;
+    ctx.fillStyle = this._theme.background;
+    ctx.fillRect(0, 0, side, side);
+    ctx.globalAlpha = 1;
+    // destination-out clears the alpha of the passing cells, so only the excluded cells keep the dim fill.
+    ctx.globalCompositeOperation = 'destination-out';
+    for (let p = 0; p < pageCount; p++) {
+      if (mask[p] === 1) {
+        const { x, y } = hilbertD2XY(order, p);
+        ctx.fillRect(x, y, 1, 1);
+      }
+    }
+    ctx.globalCompositeOperation = 'source-over';
   }
 
   /** Detail-encoding colour for a page, or null when its tile is not loaded (caller falls back to coarse). */

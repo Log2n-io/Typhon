@@ -31,7 +31,17 @@ import {
   segmentReclaimableBytes,
 } from '@/libs/dbmap/dbMapMetrics';
 import { searchDbMap } from '@/libs/dbmap/dbMapSearch';
+import { buildFilterMask } from '@/libs/dbmap/dbMapFilter';
+import { newBookmarkId } from '@/libs/dbmap/dbMapBookmarks';
+import { exportRegionsCsv, exportViewPng, exportWholeMapPng } from '@/libs/dbmap/dbMapExport';
+import {
+  openComponentInSchema,
+  registerDbMapCameraRestore,
+  revealComponentInResourceTree,
+} from '@/shell/commands/openDbMap';
+import { useNavHistoryStore } from '@/stores/useNavHistoryStore';
 import { DbMapToolbar } from './DbMapToolbar';
+import { DbMapContextMenu } from './DbMapContextMenu';
 import { DbMapSidePanel } from './sidebar/DbMapSidePanel';
 import { LegendTab } from './sidebar/LegendTab';
 import { RegionsTab } from './sidebar/RegionsTab';
@@ -62,6 +72,16 @@ interface DragState {
   moved: boolean;
 }
 
+/** Right-click context-menu state (§4.6) — null when the menu is closed. */
+interface CtxMenuState {
+  x: number;
+  y: number;
+  pageIndex: number;
+  byteOffset: number;
+  /** Owning segment id, or -1 when the cell belongs to no segment. */
+  segmentId: number;
+}
+
 /** Transient hover info shown in the on-surface tooltip. */
 interface HoverInfo {
   pageIndex: number;
@@ -86,8 +106,15 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
   const toggleSegmentOverlay = useDbMapStore((s) => s.toggleSegmentOverlay);
   const lens = useDbMapStore((s) => s.lens);
   const lensSegmentId = useDbMapStore((s) => s.lensSegmentId);
+  const filter = useDbMapStore((s) => s.filter);
+  const pendingFocusType = useDbMapStore((s) => s.pendingFocusType);
+  const clearPendingFocus = useDbMapStore((s) => s.clearPendingFocus);
   const selectDbMap = useDbMapSelectionStore((s) => s.select);
   const clearDbMapSelection = useDbMapSelectionStore((s) => s.clear);
+  const bookmarksByDb = useDbMapStore((s) => s.bookmarks);
+  const addBookmark = useDbMapStore((s) => s.addBookmark);
+  const removeBookmark = useDbMapStore((s) => s.removeBookmark);
+  const renameBookmark = useDbMapStore((s) => s.renameBookmark);
 
   const { data, isLoading, isError, refetch } = useDbMap(sessionId);
 
@@ -114,6 +141,7 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
   });
   const [searchQuery, setSearchQuery] = useState('');
   const [searchIndex, setSearchIndex] = useState(0);
+  const [ctxMenu, setCtxMenu] = useState<CtxMenuState | null>(null);
 
   // The focused segment's directory — fetched only while the fragmentation lens has a segment (AC1 metrics).
   const segmentQuery = useDbMapSegment(sessionId, lens === 'fragmentation' ? lensSegmentId : null);
@@ -153,6 +181,7 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
   const pathologyFlags = useMemo(() => (data ? findUnderFilledPages(data, tiles) : []), [data, tiles]);
   const composition = useMemo(() => (data ? freeSpaceComposition(data) : null), [data]);
   const searchMatches = useMemo(() => (data ? searchDbMap(searchQuery, data) : []), [searchQuery, data]);
+  const filterMask = useMemo(() => (data ? buildFilterMask(data, filter) : null), [data, filter]);
 
   const metrics = useMemo<MetricsCardData | null>(() => {
     if (lens !== 'fragmentation' || lensSegmentId == null || !data) {
@@ -278,6 +307,11 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
     [runTween],
   );
 
+  // Records a discrete map navigation in the Workbench nav history (§13 A4 AC2) — `Alt+←/→` retraces it.
+  const pushNav = useCallback((camera: Camera, label: string) => {
+    useNavHistoryStore.getState().push({ kind: 'dbmap-navigated', camera, label, timestamp: Date.now() });
+  }, []);
+
   const flyToPage = useCallback(
     (page: number) => {
       const renderer = rendererRef.current;
@@ -290,9 +324,11 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
       const { width, height } = surface.getBoundingClientRect();
       // Keep the current depth if already zoomed in; otherwise zoom to a comfortable cell-level framing.
       const targetScale = Math.max(cameraRef.current.scale, Math.min(width, height) / FLY_CELLS_ACROSS);
-      flyTo(cameraCenteredOn(layout.dataRect.x + x + 0.5, layout.dataRect.y + y + 0.5, targetScale, width, height));
+      const target = cameraCenteredOn(layout.dataRect.x + x + 0.5, layout.dataRect.y + y + 0.5, targetScale, width, height);
+      pushNav(target, `Page ${page.toLocaleString()}`);
+      flyTo(target);
     },
-    [flyTo],
+    [flyTo, pushNav],
   );
 
   const flyToRegion = useCallback(
@@ -326,10 +362,50 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
         h: maxY - minY + 1,
       };
       const { width, height } = surface.getBoundingClientRect();
-      flyTo(zoomToWorldRect(world, width, height, FIT_PADDING));
+      const target = zoomToWorldRect(world, width, height, FIT_PADDING);
+      pushNav(target, `Region @${startPage.toLocaleString()}`);
+      flyTo(target);
     },
-    [flyTo],
+    [flyTo, pushNav],
   );
+
+  // Publish the camera fly-to so an `Alt+←/→` nav-history restore can drive it (§13 A4 AC2).
+  useEffect(() => {
+    registerDbMapCameraRestore((cam) => flyTo(cam));
+    return () => registerDbMapCameraRestore(null);
+  }, [flyTo]);
+
+  // ── Bookmarks (§4.5 / A4 AC3) — persisted per database in useDbMapStore ─────────────────────────────────
+
+  const bookmarks = data ? (bookmarksByDb[data.databaseName] ?? []) : [];
+
+  const addCurrentBookmark = useCallback(() => {
+    if (!data) {
+      return;
+    }
+    const count = useDbMapStore.getState().bookmarks[data.databaseName]?.length ?? 0;
+    addBookmark(data.databaseName, {
+      id: newBookmarkId(),
+      label: `View ${count + 1}`,
+      camera: { ...cameraRef.current },
+      createdAt: Date.now(),
+    });
+  }, [data, addBookmark]);
+
+  // Cross-link entry (§7.3 / A4 AC1) — a Resource Explorer / Schema Inspector "Show in File Map" sets a
+  // pending component type; once the map is loaded, focus that component's segment (fragmentation lens) and
+  // fly there, then clear the request so a later panel re-render does not re-trigger it.
+  useEffect(() => {
+    if (!data || !pendingFocusType) {
+      return;
+    }
+    const seg = data.segments.find((s) => s.typeName === pendingFocusType);
+    clearPendingFocus();
+    if (seg) {
+      useDbMapStore.getState().focusSegment(seg.id);
+      flyToPage(seg.rootPageIndex);
+    }
+  }, [data, pendingFocusType, clearPendingFocus, flyToPage]);
 
   // Construct the renderer once the canvas element exists.
   useLayoutEffect(() => {
@@ -436,6 +512,17 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
     scheduleRender();
   }, [lens, lensSegmentId, data, tiles, pathologyFlags, scheduleRender]);
 
+  // Filter-to-dim changed — hand the renderer the new pass/fail mask (§4.6). The mask is O(pageCount) but
+  // recomputed only on a filter / data change, and composes on top of the active lens inside the renderer.
+  useEffect(() => {
+    const renderer = rendererRef.current;
+    if (!renderer) {
+      return;
+    }
+    renderer.setFilter(filterMask);
+    scheduleRender();
+  }, [filterMask, scheduleRender]);
+
   // Search matches changed — mark them on the map; the camera fly-to is driven explicitly by Enter / cycle.
   useEffect(() => {
     const renderer = rendererRef.current;
@@ -526,6 +613,27 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
     // Ease from the current framing to the whole-file fit (centre-anchored — the natural fit anchor).
     flyTo(fitToRect(layout.worldBounds, width, height, FIT_PADDING), FIT_DURATION_MS);
   }, [flyTo]);
+
+  // ── Export (§4.6 / A4 AC5) ──────────────────────────────────────────────────────────────────────────────
+
+  const exportViewPngNow = useCallback(() => {
+    if (canvasRef.current && data) {
+      exportViewPng(canvasRef.current, data.databaseName);
+    }
+  }, [data]);
+
+  const exportMapPngNow = useCallback(() => {
+    const image = rendererRef.current?.getWholeMapImage();
+    if (image && data) {
+      exportWholeMapPng(image, data.databaseName);
+    }
+  }, [data]);
+
+  const exportCsvNow = useCallback(() => {
+    if (data) {
+      exportRegionsCsv(regions, data.databaseName);
+    }
+  }, [data, regions]);
 
   // ── Search interaction ──────────────────────────────────────────────────────────────────────────────────
 
@@ -764,6 +872,30 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
     window.addEventListener('mouseup', handleWindowMouseUp);
   };
 
+  const handleContextMenu = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    e.preventDefault();
+    const canvas = canvasRef.current;
+    const renderer = rendererRef.current;
+    if (!canvas || !renderer || !data) {
+      return;
+    }
+    const pt = canvasPoint(canvas, e.clientX, e.clientY);
+    const page = renderer.pageAt(pt.x, pt.y);
+    if (page == null) {
+      setCtxMenu(null);
+      return;
+    }
+    const segId = data.ownerSegmentId[page];
+    setCtxMenu({
+      x: e.clientX,
+      y: e.clientY,
+      pageIndex: page,
+      // A down-sampled cell stands for `downSampleFactor` pages — the offset is the first page of the cell.
+      byteOffset: page * PAGE_SIZE * data.downSampleFactor,
+      segmentId: segId === NO_SEGMENT ? -1 : segId,
+    });
+  };
+
   const handleHoverMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
     const renderer = rendererRef.current;
@@ -801,6 +933,9 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
     } else if (e.key === 'f' || e.key === 'F') {
       fitWholeFile();
       e.preventDefault();
+    } else if (e.key === 'b' || e.key === 'B') {
+      addCurrentBookmark();
+      e.preventDefault();
     } else if (e.key === 'Escape') {
       rendererRef.current?.setSelection(null);
       clearDbMapSelection();
@@ -821,6 +956,9 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
       <DbMapToolbar
         onFit={fitWholeFile}
         onRefresh={() => void refetch()}
+        onExportViewPng={exportViewPngNow}
+        onExportMapPng={exportMapPngNow}
+        onExportCsv={exportCsvNow}
         search={searchQuery}
         onSearchChange={(v) => {
           setSearchQuery(v);
@@ -839,7 +977,21 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
             <span className="font-mono text-foreground">{data.databaseName}</span>
             {' · '}
             {data.pageCount.toLocaleString()} pages · {formatFileSize(data.dataFileBytes)}
-            {data.walBytes > 0 ? ` · WAL ${formatFileSize(data.walBytes)}` : ' · no WAL'}
+            {data.walBytes > 0 ? (
+              <>
+                {' · '}
+                <button
+                  type="button"
+                  disabled
+                  className="cursor-not-allowed text-muted-foreground opacity-70"
+                  title="Open in WAL Events — the WAL Events module (Module 08) is not yet available"
+                >
+                  WAL {formatFileSize(data.walBytes)}
+                </button>
+              </>
+            ) : (
+              ' · no WAL'
+            )}
             {lod.band !== 'L1' && lod.focusedPage != null && (
               <span className="text-foreground">
                 {' › '}
@@ -860,6 +1012,7 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
             onMouseDown={handleMouseDown}
             onMouseMove={handleHoverMove}
             onMouseLeave={handleHoverLeave}
+            onContextMenu={handleContextMenu}
             style={{ display: 'block', cursor: 'crosshair' }}
             data-testid="dbmap-canvas"
           />
@@ -874,11 +1027,29 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
             <p className="absolute left-3 top-2 text-[11px] text-destructive">Failed to load the file map.</p>
           )}
           {hover && <HoverTooltip info={hover} />}
+          {ctxMenu &&
+            (() => {
+              // Reveal / open-in-schema work component-by-type — enabled only for a component segment.
+              const ctxType = data?.segments.find((s) => s.id === ctxMenu.segmentId)?.typeName ?? '';
+              return (
+                <DbMapContextMenu
+                  x={ctxMenu.x}
+                  y={ctxMenu.y}
+                  pageIndex={ctxMenu.pageIndex}
+                  byteOffset={ctxMenu.byteOffset}
+                  segmentId={ctxMenu.segmentId}
+                  onClose={() => setCtxMenu(null)}
+                  onReveal={ctxType ? () => revealComponentInResourceTree(ctxType) : undefined}
+                  onOpenInSchema={ctxType ? () => openComponentInSchema(ctxType) : undefined}
+                />
+              );
+            })()}
         </div>
 
         <DbMapSidePanel
           legend={
             <LegendTab
+              downSampleFactor={data?.downSampleFactor ?? 1}
               metrics={metrics}
               composition={composition}
               pathologies={pathologyFlags}
@@ -887,7 +1058,19 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
             />
           }
           regions={<RegionsTab regions={regions} segments={data?.segments ?? []} onFlyToRegion={flyToRegion} />}
-          bookmarks={<BookmarksTab />}
+          bookmarks={
+            <BookmarksTab
+              bookmarks={bookmarks}
+              hasMap={!!data}
+              onAddCurrent={addCurrentBookmark}
+              onFlyTo={(b) => {
+                pushNav(b.camera, b.label);
+                flyTo(b.camera);
+              }}
+              onRemove={(id) => data && removeBookmark(data.databaseName, id)}
+              onRename={(id, label) => data && renameBookmark(data.databaseName, id, label)}
+            />
+          }
         />
       </div>
     </div>

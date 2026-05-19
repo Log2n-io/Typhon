@@ -5,7 +5,7 @@
 // fragmentation / free-space metrics need only the in-memory descriptors; fill density and reclaimable bytes
 // need the per-page detail tiles and therefore report how many of a segment's pages were actually sampled.
 
-import { DbPageType, PAGE_SIZE, type DbDetailTile, type DbMapData } from './types';
+import { DbPageType, type DbDetailTile, type DbMapData } from './types';
 
 /**
  * Fragmentation %: the fraction of a segment's directory-ordered pages whose physical successor is not the
@@ -140,11 +140,16 @@ export function freeSpaceComposition(data: DbMapData): FreeSpaceComposition {
       overhead++;
     }
   }
-  const total = data.pageCount * PAGE_SIZE;
+  // Cells map to bytes by their share of the file — exact when the map is exact, and on a down-sampled map
+  // (§5.5) this keeps the bar summing to the real file size rather than `cellCount × PAGE_SIZE`.
+  const total = data.dataFileBytes;
+  const cells = data.pageCount;
+  const freeBytes = cells > 0 ? Math.round((free / cells) * total) : 0;
+  const overheadBytes = cells > 0 ? Math.round((overhead / cells) * total) : 0;
   return {
     totalBytes: total,
-    freeBytes: free * PAGE_SIZE,
-    overheadBytes: overhead * PAGE_SIZE,
-    liveBytes: total - (free + overhead) * PAGE_SIZE,
+    freeBytes,
+    overheadBytes,
+    liveBytes: total - freeBytes - overheadBytes,
   };
 }

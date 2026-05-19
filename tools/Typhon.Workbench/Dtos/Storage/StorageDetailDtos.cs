@@ -56,7 +56,14 @@ public record StorageRegionDetailDto(
     /// <summary><c>byte[]</c> — Shannon entropy 0..255 per page (decode-free; 0 for free pages).</summary>
     string Entropy,
     /// <summary><c>byte[]</c> — dominant byte class per page (0 zero · 1 0xFF · 2 ASCII · 3 binary).</summary>
-    string ByteClass);
+    string ByteClass,
+    /// <summary>
+    /// True when the map is down-sampled (§5.5): each entry's detail comes from one representative page sampled
+    /// per <see cref="SampleStride"/>-page cell, not an exact per-page read. The client labels the encoding.
+    /// </summary>
+    bool Approximate,
+    /// <summary>Pages per coarse cell — the down-sample factor; 1 when the map is exact (one entry per page).</summary>
+    int SampleStride);
 
 /// <summary>One fully-decoded page — the response of <c>GET /dbmap/page/{idx}</c>.</summary>
 public record StoragePageDetailDto(

@@ -35,6 +35,8 @@ function decodeTile(dto: StorageRegionDetailDto): DbDetailTile {
     maxChangeRevision: dto.maxChangeRevision,
     entropy: decodeBase64(dto.entropy),
     byteClass: decodeBase64(dto.byteClass),
+    approximate: dto.approximate,
+    sampleStride: dto.sampleStride,
   };
 }
 

@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { IDockviewPanelProps } from 'dockview-react';
-import { AlertTriangle, Info } from 'lucide-react';
+import { AlertTriangle, Info, Map } from 'lucide-react';
 import {
   Tooltip,
   TooltipContent,
@@ -8,6 +8,7 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip';
 import { useSchemaInspectorStore } from '@/stores/useSchemaInspectorStore';
+import { openDbMapForComponent } from '@/shell/commands/openDbMap';
 import { useComponentSchema } from '@/hooks/schema/useComponentSchema';
 import {
   DEFAULT_THEME,
@@ -171,6 +172,14 @@ export default function SchemaLayoutPanel(_props: IDockviewPanelProps) {
                 {schema.allowMultiple ? ' · multi-instance' : ''}
               </span>
             )}
+            <button
+              type="button"
+              onClick={() => openDbMapForComponent(selectedType)}
+              className="flex items-center gap-1 rounded border border-border bg-card px-1.5 py-0.5 text-[11px] text-muted-foreground hover:text-foreground"
+              title="Show this component's segment in the Database File Map"
+            >
+              <Map className="h-3 w-3" /> File Map
+            </button>
             {crossBoundaryCount > 0 && (
               <span className="ml-auto inline-flex items-center gap-1 text-[11px] text-amber-400">
                 <AlertTriangle className="h-3.5 w-3.5" />

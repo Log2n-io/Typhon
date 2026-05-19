@@ -122,6 +122,25 @@ function filterTree(node: ResourceNode, term: string): ResourceNode | null {
  return null;
 }
 
+/** Depth-first search for the node with the given exact name; returns it plus its root→node name path. */
+function findNodeByName(
+ node: ResourceNode,
+ name: string,
+ path: string[] = [],
+): { node: ResourceNode; path: string[] } | null {
+ const here = [...path, node.name];
+ if (node.name === name) {
+  return { node, path: here };
+ }
+ for (const child of node.children ?? []) {
+  const hit = findNodeByName(child, name, here);
+  if (hit) {
+   return hit;
+  }
+ }
+ return null;
+}
+
 function activateFromTreeNode(node: NodeApi<ResourceNode>) {
  activateResource({
  id: node.data.id,
@@ -219,6 +238,8 @@ export default function ResourceTreePanel() {
  const filter = useResourceGraphStore((s) => s.filter);
  const setFilter = useResourceGraphStore((s) => s.setFilter);
  const setSelected = useResourceGraphStore((s) => s.setSelected);
+ const revealRequest = useResourceGraphStore((s) => s.revealRequest);
+ const clearRevealRequest = useResourceGraphStore((s) => s.clearRevealRequest);
  const navSelectedId = useSelectedResourceStore((s) => s.selected?.resourceId);
  const sessionId = useSessionStore((s) => s.sessionId);
  const containerRef = useRef<HTMLDivElement>(null);
@@ -257,6 +278,30 @@ export default function ResourceTreePanel() {
  queryKey: [`/api/sessions/${sessionId}/resources/root`],
  });
  }, [queryClient, sessionId]);
+
+ // Cross-link reveal (§7.3) — a "Reveal in Resource Explorer" request resolves the resource node by name,
+ // selects it (drives the Detail panel + nav history) and scrolls it into view. It never filters the tree.
+ useEffect(() => {
+ if (!revealRequest || !rawRoot) return;
+ const hit = findNodeByName(rawRoot, revealRequest);
+ clearRevealRequest();
+ if (!hit) return;
+ activateResource({
+ id: hit.node.id,
+ name: hit.node.name,
+ kind: hit.node.type,
+ path: hit.path,
+ raw: hit.node as unknown as ResourceNodeDto,
+ score: 0,
+ });
+ // Open the node's ancestors so its row exists, then scroll to it — next frame, after reconciliation.
+ requestAnimationFrame(() => {
+ const api = treeRef.current;
+ if (!api) return;
+ api.get(hit.node.id)?.openParents();
+ api.scrollTo(hit.node.id);
+ });
+ }, [revealRequest, rawRoot, clearRevealRequest]);
 
  // Tree-scoped keyboard shortcuts: `/` and Ctrl+F focus the filter; Esc clears + returns focus
  // to the tree container so arrow-nav keeps working.

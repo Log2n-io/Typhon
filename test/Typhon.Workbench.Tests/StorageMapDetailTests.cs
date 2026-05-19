@@ -87,6 +87,39 @@ public sealed class StorageMapDetailTests
     }
 
     [Test]
+    public async Task GetRegionDetail_ReturnsEntropyAndByteClassBuffers()
+    {
+        // A3 — the detail tier carries the two decode-free per-page encodings (§4.2).
+        var session = await CreateSessionAsync();
+        var detail = await GetOkAsync<StorageRegionDetailDto>(session, "region/detail?node=0");
+
+        var entropy = Convert.FromBase64String(detail.Entropy);
+        var byteClass = Convert.FromBase64String(detail.ByteClass);
+        Assert.That(entropy.Length, Is.EqualTo(detail.PageCount));
+        Assert.That(byteClass.Length, Is.EqualTo(detail.PageCount));
+        Assert.That(byteClass, Is.All.LessThanOrEqualTo(3), "byte class is one of the 4 classes");
+    }
+
+    [Test]
+    public void ShannonEntropy_ZeroedPageReadsZero()
+    {
+        // A uniform page (all 0x00) carries no information — entropy 0.
+        Assert.That(StorageMapService.ShannonEntropy(new byte[8192]), Is.EqualTo(0));
+    }
+
+    [Test]
+    public void ShannonEntropy_UniformByteSpreadReadsMaximum()
+    {
+        // Every byte value present in equal measure — 8 bits of entropy, the scaled maximum (255).
+        var body = new byte[8192];
+        for (var i = 0; i < body.Length; i++)
+        {
+            body[i] = (byte)(i & 0xFF);
+        }
+        Assert.That(StorageMapService.ShannonEntropy(body), Is.EqualTo(255));
+    }
+
+    [Test]
     public async Task GetPage_DecodesOccupancyRoot()
     {
         var session = await CreateSessionAsync();

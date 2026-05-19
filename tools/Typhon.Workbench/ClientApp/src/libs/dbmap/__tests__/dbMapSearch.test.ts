@@ -19,6 +19,7 @@ function makeData(): DbMapData {
     databaseName: 'test',
     dataFileBytes: 16 * PAGE_SIZE,
     pageCount: 16,
+    downSampleFactor: 1,
     walBytes: 0,
     hilbertOrder: 2,
     checkpointLsn: 0,

@@ -140,4 +140,47 @@ test.describe('Module 15 — Database File Map (A2 drill-down canary)', () => {
     await page.getByTestId('dbmap-lens').selectOption('freeSpace');
     await expect(canvas).toBeVisible();
   });
+
+  test('A4 — bookmarks list, filter-to-dim, CSV export downloads, context menu opens', async ({
+    page,
+    request,
+  }) => {
+    await openDemo(page, request);
+
+    await page.keyboard.press('Control+k');
+    await page.getByPlaceholder(/search commands/i).fill('Database File Map');
+    await page.getByText(/Toggle View Database File Map/i).first().click();
+
+    const panel = page.getByTestId('dbmap-panel');
+    await expect(panel).toBeVisible();
+    const canvas = page.getByTestId('dbmap-canvas');
+    await expect(canvas).toBeVisible();
+    await expect(page.getByTestId('dbmap-breadcrumb')).toContainText(/pages/i, { timeout: 10_000 });
+
+    // Bookmarks — add the current viewport; the side-rail tab lists it (AC3).
+    await page.getByRole('tab', { name: /bookmarks/i }).click();
+    await page.getByTestId('dbmap-bookmark-add').click();
+    await expect(page.getByTestId('dbmap-bookmark-list').getByRole('listitem')).toHaveCount(1);
+
+    // Filter-to-dim — exclude a page type; the toolbar button reports the filter is active (AC4).
+    await page.getByTestId('dbmap-filter').click();
+    await page.getByTestId('dbmap-filter-type-1').uncheck();
+    await expect(page.getByTestId('dbmap-filter')).toContainText('(');
+    await page.keyboard.press('Escape');
+    await expect(canvas).toBeVisible();
+
+    // Export — the region-table CSV triggers a file download (AC5).
+    const download = page.waitForEvent('download');
+    await page.getByTestId('dbmap-export').click();
+    await page.getByText('CSV — region table').click();
+    expect((await download).suggestedFilename()).toMatch(/regions\.csv$/);
+
+    // Context menu — right-clicking a populated cell opens the copy / reveal menu (AC5).
+    const box = await canvas.boundingBox();
+    expect(box).not.toBeNull();
+    if (box) {
+      await canvas.click({ button: 'right', position: { x: box.width * 0.18, y: box.height * 0.18 } });
+    }
+    await expect(page.getByTestId('dbmap-context-menu')).toBeVisible();
+  });
 });

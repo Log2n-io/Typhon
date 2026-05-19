@@ -11,6 +11,7 @@ import { useSessionStore } from '@/stores/useSessionStore';
 import { useResourceGraphStore } from '@/stores/useResourceGraphStore';
 import { useSchemaInspectorStore } from '@/stores/useSchemaInspectorStore';
 import { toggleViewSchemaLayout } from '@/shell/commands/openSchemaBrowser';
+import { openDbMapForComponent } from '@/shell/commands/openDbMap';
 
 interface Props {
   resourceId: string;          // synthetic uid — used for pin storage (unique)
@@ -100,6 +101,16 @@ export default function ResourceTreeContextMenu({
           }}
         >
           Show Component Layout
+        </ContextMenuItem>
+        <ContextMenuItem
+          disabled={!canOpenInSchema}
+          onSelect={() => {
+            if (!canOpenInSchema) return;
+            const typeName = name.startsWith('ComponentTable_') ? name.slice('ComponentTable_'.length) : name;
+            openDbMapForComponent(typeName);
+          }}
+        >
+          Show in File Map
         </ContextMenuItem>
         <ContextMenuItem disabled>Open in Data Browser</ContextMenuItem>
         <ContextMenuItem disabled>Open in Query Console</ContextMenuItem>

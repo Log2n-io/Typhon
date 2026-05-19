@@ -13,7 +13,7 @@ namespace Typhon.Workbench.Storage;
 internal static class StorageMapPyramid
 {
     /// <summary>Upper bound on <see cref="StoragePageType"/> ordinals — sizes the per-node tally buffer.</summary>
-    private const int PageTypeCount = 16;
+    internal const int PageTypeCount = 16;
 
     /// <summary>
     /// Reduces <paramref name="pageType"/> into the top <paramref name="maxLevels"/> pyramid levels (0-based,
@@ -66,7 +66,7 @@ internal static class StorageMapPyramid
     }
 
     /// <summary>The dominant non-free page type in a node; an all-free or empty node reports <c>Free</c>.</summary>
-    private static StoragePageType DominantType(ReadOnlySpan<int> tally)
+    internal static StoragePageType DominantType(ReadOnlySpan<int> tally)
     {
         var bestType = StoragePageType.Free;
         var bestCount = 0;

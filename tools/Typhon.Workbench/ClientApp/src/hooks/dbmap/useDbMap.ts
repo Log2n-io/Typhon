@@ -37,7 +37,9 @@ export function useDbMap(sessionId: string | null) {
       return {
         databaseName: regions.databaseName,
         dataFileBytes: regions.dataFileBytes,
-        pageCount: regions.dataFilePageCount,
+        // The descriptor arrays are in cell space (§5.5); their length is the grid size, == real pages when exact.
+        pageCount: pageType.length,
+        downSampleFactor: regions.downSampleFactor,
         walBytes: regions.walBytes,
         hilbertOrder: regions.hilbertOrder,
         checkpointLsn: regions.checkpointLsn,

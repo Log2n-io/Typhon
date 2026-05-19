@@ -55,6 +55,10 @@ export interface StorageRegionDetailDto {
   maxChangeRevision: number;
   entropy: string;
   byteClass: string;
+  /** True when the map is down-sampled — each entry's detail is sampled from one representative page (§5.5). */
+  approximate: boolean;
+  /** Pages per coarse cell — the down-sample factor; 1 when the map is exact. */
+  sampleStride: number;
 }
 
 /** One decoded content cell — mirrors `StorageContentCellDto`. */
@@ -196,15 +200,21 @@ export type DbMapLens = 'none' | 'fragmentation' | 'freeSpace' | 'pathology';
 export interface DbMapData {
   databaseName: string;
   dataFileBytes: number;
+  /**
+   * Descriptor cell count — the length of {@link pageType} / {@link ownerSegmentId} and the Hilbert grid size.
+   * Equals the real page count when exact; on a down-sampled map (§5.5) it is `ceil(realPages / downSampleFactor)`.
+   */
   pageCount: number;
+  /** Pages per descriptor cell — a power of 4; 1 when the map is exact (one cell per page). */
+  downSampleFactor: number;
   walBytes: number;
   hilbertOrder: number;
   checkpointLsn: number;
   detailTileSize: number;
   segments: StorageSegmentDto[];
-  /** Per-page semantic type (one `DbPageType` ordinal per page). */
+  /** Per-cell semantic type (one `DbPageType` ordinal per cell — the dominant type when down-sampled). */
   pageType: Uint8Array;
-  /** Per-page dense owning-segment id (`NO_SEGMENT` when unowned). */
+  /** Per-cell dense owning-segment id (`NO_SEGMENT` when unowned). */
   ownerSegmentId: Uint16Array;
 }
 
@@ -224,6 +234,10 @@ export interface DbDetailTile {
   entropy: Uint8Array;
   /** Per-page dominant byte class (0 zero · 1 0xFF · 2 ASCII · 3 binary). */
   byteClass: Uint8Array;
+  /** True when this tile's detail was sampled from representative pages on a down-sampled map (§5.5). */
+  approximate: boolean;
+  /** Pages per cell — the down-sample factor; 1 when exact. */
+  sampleStride: number;
 }
 
 /** One decoded content cell. */

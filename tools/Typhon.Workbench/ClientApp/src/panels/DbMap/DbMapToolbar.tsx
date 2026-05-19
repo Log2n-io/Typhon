@@ -2,6 +2,8 @@ import { Crosshair, RefreshCw } from 'lucide-react';
 import { useDbMapStore } from '@/stores/useDbMapStore';
 import type { DbMapEncoding, DbMapLens } from '@/libs/dbmap/types';
 import { DbMapSearchBox } from './DbMapSearchBox';
+import { DbMapFilterMenu } from './DbMapFilterMenu';
+import { DbMapExportMenu } from './DbMapExportMenu';
 
 // The Database File Map toolbar (Module 15, A3, §6.1) — the encoding picker, the lens selector, the segment
 // overlay toggle, fit / refresh, and the search box. Encoding / lens / overlay are read straight from the
@@ -10,6 +12,9 @@ import { DbMapSearchBox } from './DbMapSearchBox';
 interface DbMapToolbarProps {
   onFit: () => void;
   onRefresh: () => void;
+  onExportViewPng: () => void;
+  onExportMapPng: () => void;
+  onExportCsv: () => void;
   search: string;
   onSearchChange: (value: string) => void;
   onSearchSubmit: () => void;
@@ -94,6 +99,9 @@ export function DbMapToolbar(props: DbMapToolbarProps) {
       >
         <RefreshCw className="h-3 w-3" /> Refresh
       </button>
+
+      <DbMapFilterMenu />
+      <DbMapExportMenu onExportViewPng={props.onExportViewPng} onExportMapPng={props.onExportMapPng} onExportCsv={props.onExportCsv} />
 
       <div className="ml-auto">
         <DbMapSearchBox

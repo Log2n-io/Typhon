@@ -7,6 +7,7 @@ function makeData(pageType: number[], ownerSegmentId: number[]): DbMapData {
     databaseName: 'test',
     dataFileBytes: pageType.length * PAGE_SIZE,
     pageCount: pageType.length,
+    downSampleFactor: 1,
     walBytes: 0,
     hilbertOrder: 4,
     checkpointLsn: 0,

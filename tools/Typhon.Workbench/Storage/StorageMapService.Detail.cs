@@ -18,20 +18,25 @@ public sealed partial class StorageMapService
     /// </summary>
     public const int DetailTileSize = 1024;
 
-    /// <summary>Builds the per-page detail SoA for one detail tile — <c>GET /dbmap/region?node=&amp;lod=detail</c>.</summary>
+    /// <summary>
+    /// Builds the per-cell detail SoA for one detail tile — <c>GET /dbmap/region?node=&amp;lod=detail</c>. The tile
+    /// is in cell space (matching the coarse arrays); on a down-sampled map (§5.5) each cell's detail is sampled
+    /// from one representative page (<c>cell × factor</c>) — the response is then flagged <c>Approximate</c>.
+    /// </summary>
     public StorageRegionDetailDto GetRegionDetail(DatabaseEngine engine, string databaseName, int node)
     {
         ArgumentNullException.ThrowIfNull(engine);
 
         var map = BuildMap(engine, databaseName);
         var first = (long)node * DetailTileSize;
-        if (node < 0 || first >= map.DataFilePageCount)
+        if (node < 0 || first >= map.CellCount)
         {
-            return new StorageRegionDetailDto(node, 0, 0, "", "", "", "", "", "", 0, "", "");
+            return new StorageRegionDetailDto(node, 0, 0, "", "", "", "", "", "", 0, "", "", false, 1);
         }
 
+        var factor = map.DownSampleFactor;
         var start = (int)first;
-        var count = Math.Min(DetailTileSize, map.DataFilePageCount - start);
+        var count = Math.Min(DetailTileSize, map.CellCount - start);
 
         var fill = new byte[count];
         var changeRev = new int[count];
@@ -46,12 +51,14 @@ public sealed partial class StorageMapService
 
         for (var i = 0; i < count; i++)
         {
-            var page = start + i;
+            var cell = start + i;
+            // When down-sampled there is no per-page array — sample one representative page per cell (§5.5).
+            var page = cell * factor;
 
             // Residency must be probed before the body read — the read itself faults the page in.
             engine.GetPageResidency(page, out var resident, out var dirty);
 
-            if (map.PageType[page] == StoragePageType.Free)
+            if (map.PageType[cell] == StoragePageType.Free)
             {
                 residency[i] = (byte)(resident ? (dirty ? StorageResidency.ResidentDirty : StorageResidency.ResidentClean) : StorageResidency.OnDiskOnly);
                 crc[i] = (byte)StorageCrcStatus.Unverified;
@@ -77,7 +84,7 @@ public sealed partial class StorageMapService
             entropy[i] = ShannonEntropy(body);
             byteClass[i] = (byte)L4Decoder.DominantByteClass(body);
 
-            var seg = OwningChunkSegment(map, page);
+            var seg = OwningChunkSegment(map, cell, page);
             if (seg.HasValue)
             {
                 var total = seg.Value.IsRoot ? seg.Value.Info.ChunkCountRootPage : seg.Value.Info.ChunkCountPerPage;
@@ -98,7 +105,9 @@ public sealed partial class StorageMapService
             Convert.ToBase64String(MemoryMarshal.AsBytes<ushort>(chunkTotal)),
             maxRev,
             Convert.ToBase64String(entropy),
-            Convert.ToBase64String(byteClass));
+            Convert.ToBase64String(byteClass),
+            factor > 1,
+            factor);
     }
 
     /// <summary>
@@ -142,6 +151,10 @@ public sealed partial class StorageMapService
             return null;
         }
 
+        // The coarse arrays are cell-indexed (§5.5) — map the real page to its descriptor cell. The exact chunk
+        // layout below is still resolved per real page from the segment directory, so down-sampling never blurs it.
+        var cell = pageIndex / map.DownSampleFactor;
+
         engine.GetPageResidency(pageIndex, out var resident, out var dirty);
 
         var body = new byte[engine.MMF.StoragePageSize];
@@ -150,7 +163,7 @@ public sealed partial class StorageMapService
         var crcStatus = read ? ClassifyCrc(body, header.PageChecksum) : StorageCrcStatus.Unverified;
         var liveCrc = read ? WalCrc.ComputeSkipping(body, PageBaseHeader.PageChecksumOffset, PageBaseHeader.PageChecksumSize) : 0u;
 
-        var ownerId = map.OwnerSegmentId[pageIndex];
+        var ownerId = map.OwnerSegmentId[cell];
 
         // Resolve the owning segment once — it yields the kind, the directory (when this page is the segment
         // root), the chunk layout, and the global id of this page's first chunk (FirstChunkId + i = an L4 ref).
@@ -197,7 +210,7 @@ public sealed partial class StorageMapService
         return new StoragePageDetailDto(
             pageIndex,
             (long)pageIndex * engine.MMF.StoragePageSize,
-            map.PageType[pageIndex].ToString(),
+            map.PageType[cell].ToString(),
             ownerId != StructuralMap.NoSegment ? ownerId : -1,
             ownerKind,
             header.ChangeRevision,
@@ -330,16 +343,19 @@ public sealed partial class StorageMapService
         return live == storedChecksum ? StorageCrcStatus.Verified : StorageCrcStatus.Failed;
     }
 
-    /// <summary>The chunk-based segment owning <paramref name="page"/>, plus whether the page is the segment root.</summary>
-    private static (StorageSegmentInfo Info, bool IsRoot)? OwningChunkSegment(StructuralMap map, int page)
+    /// <summary>
+    /// The chunk-based segment owning the descriptor <paramref name="cell"/>, plus whether <paramref name="realPage"/>
+    /// (the sampled representative page) is that segment's root. On an exact map the cell index is the page index.
+    /// </summary>
+    private static (StorageSegmentInfo Info, bool IsRoot)? OwningChunkSegment(StructuralMap map, int cell, int realPage)
     {
-        var ownerId = map.OwnerSegmentId[page];
+        var ownerId = map.OwnerSegmentId[cell];
         if (ownerId == StructuralMap.NoSegment)
         {
             return null;
         }
         var seg = map.Segments[ownerId];
-        return seg.IsChunkBased ? (seg, page == seg.RootPageIndex) : null;
+        return seg.IsChunkBased ? (seg, realPage == seg.RootPageIndex) : null;
     }
 
     /// <summary>Counts allocated chunks in a page's metadata occupancy bitmap, limited to its real chunk count.</summary>

@@ -23,8 +23,16 @@ export interface MapLayout {
   worldBounds: Rect;
 }
 
-/** Builds the world geometry from the coarse-map header fields. */
-export function buildLayout(pageCount: number, walBytes: number, hilbertOrder: number): MapLayout {
+/**
+ * Builds the world geometry from the coarse-map header fields. `downSampleFactor` (§5.5) is the page count one
+ * grid cell represents — it scales the WAL so the data ↔ WAL area ratio stays strictly proportional to bytes.
+ */
+export function buildLayout(
+  pageCount: number,
+  walBytes: number,
+  hilbertOrder: number,
+  downSampleFactor = 1,
+): MapLayout {
   const order = hilbertOrder > 0 ? hilbertOrder : hilbertOrderFor(Math.max(pageCount, 1));
   const side = hilbertSide(order);
   const dataRect: Rect = { x: 0, y: 0, w: side, h: side };
@@ -33,8 +41,9 @@ export function buildLayout(pageCount: number, walBytes: number, hilbertOrder: n
   const gap = side * 0.03;
   let walRect: Rect | null = null;
   if (walBytes > 0) {
-    // Area ∝ bytes: the WAL spans the full data-file height; its width carries the area.
-    const walCells = walBytes / PAGE_SIZE;
+    // Area ∝ bytes: the WAL spans the full data-file height; its width carries the area. One data cell holds
+    // `downSampleFactor` pages, so the WAL must be measured in the same cell unit to keep the ratio honest.
+    const walCells = walBytes / (PAGE_SIZE * downSampleFactor);
     const walWidth = Math.max(walCells / side, side * 0.02);
     walRect = { x: side + gap, y: 0, w: walWidth, h: side };
   }

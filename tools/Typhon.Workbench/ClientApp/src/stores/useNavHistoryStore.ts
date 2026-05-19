@@ -1,6 +1,8 @@
 import { create } from 'zustand';
 import type { TimeRange } from '@/libs/profiler/model/uiTypes';
+import type { Camera } from '@/libs/dbmap/camera';
 import { animateViewportToRange } from '../shell/commands/profilerCommands';
+import { restoreDbMapCamera } from '../shell/commands/openDbMap';
 import { useProfilerSelectionStore, type ProfilerSelection } from './useProfilerSelectionStore';
 import { useSelectedResourceStore, type SelectedResource } from './useSelectedResourceStore';
 
@@ -13,7 +15,12 @@ export type NavEntry =
    * Selection-only changes call {@link NavHistoryState.updateTopSelection} to patch the top entry
    * in place, so back/forward restores the latest span that was active *at* that viewport.
    */
-  | { kind: 'profiler-selected'; selection: ProfilerSelection | null; viewRange: TimeRange; timestamp: number };
+  | { kind: 'profiler-selected'; selection: ProfilerSelection | null; viewRange: TimeRange; timestamp: number }
+  /**
+   * A Database File Map navigation (§13 A4 AC2) — pushed on a discrete fly-to (region-row / search /
+   * pathology / cross-link / bookmark). Restoring flies the map camera back to the recorded framing.
+   */
+  | { kind: 'dbmap-navigated'; camera: Camera; label: string; timestamp: number };
 
 const CAPACITY = 100;
 
@@ -61,6 +68,9 @@ function restoreSideEffect(entry: NavEntry) {
     // isn't mounted. Selection update is synchronous above so DetailPanel reacts immediately; the
     // viewport eases in over 800 ms.
     animateViewportToRange(entry.viewRange);
+  } else if (entry.kind === 'dbmap-navigated') {
+    // Flies the map camera back to the recorded framing; a no-op when the File Map panel is not mounted.
+    restoreDbMapCamera(entry.camera);
   }
   // panel-opened: no-op in Phase 5 (forward-compat).
 }

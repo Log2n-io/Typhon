@@ -104,7 +104,7 @@ export function MetricsCard(props: MetricsCardData) {
         type="button"
         disabled
         className="mt-1 cursor-not-allowed rounded border border-border bg-card px-1.5 py-0.5 text-[11px] text-muted-foreground opacity-60"
-        title="Compaction launches the Admin Ops wizard — available once Module 11 ships (A4)"
+        title="Compaction launches the Admin Ops compact wizard — the Admin Ops module (Module 11) is not yet available"
       >
         Compact…
       </button>

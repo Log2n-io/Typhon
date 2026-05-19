@@ -23,6 +23,8 @@ function makeTile(firstPage: number, used: number[], total: number[]): DbDetailT
     maxChangeRevision: 1,
     entropy: new Uint8Array(n),
     byteClass: new Uint8Array(n),
+    approximate: false,
+    sampleStride: 1,
   };
 }
 
@@ -31,6 +33,7 @@ function makeData(pageType: Uint8Array): DbMapData {
     databaseName: 'test',
     dataFileBytes: pageType.length * PAGE_SIZE,
     pageCount: pageType.length,
+    downSampleFactor: 1,
     walBytes: 0,
     hilbertOrder: 4,
     checkpointLsn: 0,

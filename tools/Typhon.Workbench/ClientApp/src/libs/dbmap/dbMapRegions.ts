@@ -62,7 +62,8 @@ export function buildRegions(data: DbMapData, tiles: Map<number, DbDetailTile>):
     regions.push({
       startPage: runStart,
       pageCount: count,
-      byteSize: count * PAGE_SIZE,
+      // One cell holds `downSampleFactor` pages (§5.5) — scale the run's byte size by it (factor 1 when exact).
+      byteSize: count * PAGE_SIZE * data.downSampleFactor,
       pageType: data.pageType[runStart],
       ownerSegmentId: data.ownerSegmentId[runStart],
       fillAvg: averageFill(runStart, count, tiles, data.detailTileSize),
