@@ -1,0 +1,39 @@
+# Dry-run task — validates the whole pipeline (provisioning, NVMe mount, build,
+# harness run, trace -> S3, teardown) on a cheap bare-metal c5d.metal instance
+# before committing to a production m6idn.metal run. Identical to
+# anthill-bench.sky.yaml except the instance type and the (small) scenario.
+# Launch (from the Typhon repo root):  sky launch bench/aws/anthill-dryrun.sky.yaml --down -y
+name: anthill-dryrun
+
+resources:
+  cloud: aws
+  instance_type: c5d.metal     # bare metal + local NVMe — exercises the real path, cheaply
+  region: eu-west-1            # MUST match the S3 bucket's region
+
+workdir: .                     # the repo root — synced to ~/sky_workdir on the instance
+
+file_mounts:
+  /outputs:
+    source: s3://typhon-traces # pre-created bucket in eu-west-1
+    mode: MOUNT
+
+setup: |
+  set -euo pipefail
+  # Local instance-store NVMe is ephemeral and not auto-mounted — format + mount it.
+  DEV=$(lsblk -dno NAME,MODEL | grep -i 'Instance Storage' | head -1 | awk '{print $1}')
+  sudo mkfs.ext4 -F "/dev/$DEV"
+  sudo mkdir -p /nvme && sudo mount "/dev/$DEV" /nvme
+  sudo chown "$(whoami)" /nvme
+  curl -sSL https://dot.net/v1/dotnet-install.sh | bash -s -- --channel 10.0
+  export PATH="$HOME/.dotnet:$PATH"
+  dotnet build demo/AntHill/AntHill.Harness/AntHill.Harness.csproj -c Release
+
+run: |
+  export PATH="$HOME/.dotnet:$PATH"
+  cd /nvme
+  HARNESS=~/sky_workdir/demo/AntHill/AntHill.Harness
+  dotnet "$HARNESS/bin/Release/net10.0/AntHill.Harness.dll" \
+    --scenario "$HARNESS/scenarios/anthill-dryrun.yaml"
+  RC=$?
+  cp /nvme/*.typhon-trace /nvme/anthill-dryrun-report.json /outputs/ || true
+  exit $RC

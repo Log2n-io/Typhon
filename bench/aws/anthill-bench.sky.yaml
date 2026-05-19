@@ -1,0 +1,41 @@
+# Production benchmark — drives AntHill.Harness at 500K ants on a bare-metal
+# m6idn.metal instance and retrieves the per-run .typhon-trace files via S3.
+# Design + one-time operator setup: design/Infrastructure/skypilot-aws-automation.md
+# Launch (from the Typhon repo root):  sky launch bench/aws/anthill-bench.sky.yaml --down -y
+name: anthill-bench
+
+resources:
+  cloud: aws
+  instance_type: m6idn.metal
+  region: eu-west-1            # MUST match the S3 bucket's region
+
+workdir: .                     # the repo root — synced to ~/sky_workdir on the instance
+
+file_mounts:
+  /outputs:
+    source: s3://typhon-traces # pre-created bucket in eu-west-1
+    mode: MOUNT                # writes to /outputs replicate to the bucket
+
+setup: |
+  set -euo pipefail
+  # Local instance-store NVMe is ephemeral and not auto-mounted — format + mount it.
+  DEV=$(lsblk -dno NAME,MODEL | grep -i 'Instance Storage' | head -1 | awk '{print $1}')
+  sudo mkfs.ext4 -F "/dev/$DEV"
+  sudo mkdir -p /nvme && sudo mount "/dev/$DEV" /nvme
+  sudo chown "$(whoami)" /nvme
+  # .NET 10 SDK + build the harness (pulls in AntHill.Core + Typhon.Engine).
+  curl -sSL https://dot.net/v1/dotnet-install.sh | bash -s -- --channel 10.0
+  export PATH="$HOME/.dotnet:$PATH"
+  dotnet build demo/AntHill/AntHill.Harness/AntHill.Harness.csproj -c Release
+
+run: |
+  export PATH="$HOME/.dotnet:$PATH"
+  # Profile on fast LOCAL NVMe — cd there so traces + report land on local disk.
+  cd /nvme
+  HARNESS=~/sky_workdir/demo/AntHill/AntHill.Harness
+  dotnet "$HARNESS/bin/Release/net10.0/AntHill.Harness.dll" \
+    --scenario "$HARNESS/scenarios/anthill-500k-stress.yaml"
+  RC=$?
+  # Always retrieve whatever artifacts exist — even a failed run's partial traces.
+  cp /nvme/*.typhon-trace /nvme/anthill-500k-stress-report.json /outputs/ || true
+  exit $RC

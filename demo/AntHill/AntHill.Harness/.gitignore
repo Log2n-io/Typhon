@@ -1,3 +1,4 @@
 # Harness run artifacts — generated per run, never committed.
 *.typhon-trace
+*.nettrace
 *-report.json

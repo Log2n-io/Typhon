@@ -1,0 +1,15 @@
+# AntHill dry-run scenario — small and trace-enabled, for validating the AWS
+# pipeline on c5d.metal before a production run. See the SkyPilot design doc
+# (design/Infrastructure/skypilot-aws-automation.md, "First Launch").
+name: anthill-dryrun
+seed: 42
+world: 20000
+ants: 5000
+workers: [4, 8]
+duration: 3             # seconds, per worker-count run
+simulation:
+  tierMode: uniform-t0
+trace: true             # on — the dry run validates the trace -> S3 path
+assertions:
+  exceptions: { max: 0 }
+  antCount: { invariant: true }
