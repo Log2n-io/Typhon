@@ -1,9 +1,0 @@
-- name: Get started
-- name: Introduction
-  href: index.md
-- name: Core data structures
-  href: datalayers.md
-- name: Data access pattern
-  href: dataaccess.md
-- name: Component storage and versioning
-  href: compstorver.md  
