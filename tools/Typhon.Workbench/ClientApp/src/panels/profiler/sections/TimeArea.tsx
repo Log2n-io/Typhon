@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
-import type { TickData } from '@/libs/profiler/model/traceModel';
+import type { ChunkSpan, SpanData, TickData } from '@/libs/profiler/model/traceModel';
 import type { TimeRange, TrackLayout, TrackState, Viewport } from '@/libs/profiler/model/uiTypes';
 import { computeGutterWidth, drawTimeArea } from '@/libs/profiler/canvas/timeArea';
 import { hitTestTimeArea, type TimeAreaHover } from '@/libs/profiler/canvas/timeAreaHitTest';
@@ -12,15 +12,21 @@ import { HelpOverlay } from '@/panels/profiler/components/HelpOverlay';
 import { TimeAreaFilterButton } from '@/panels/profiler/sections/TimeAreaFilterButton';
 import { TimeAreaDisplayButton } from '@/panels/profiler/sections/TimeAreaDisplayButton';
 import { TimeAreaHelpButton } from '@/panels/profiler/sections/TimeAreaHelpButton';
+import { TimeAreaContextMenu } from '@/panels/profiler/sections/TimeAreaContextMenu';
 import { getTrackHelpLines } from '@/libs/profiler/canvas/trackHelpLines';
 import { buildHoverTooltipLines } from '@/libs/profiler/canvas/hoverTooltipLines';
-import { registerAnimateViewport } from '@/shell/commands/profilerCommands';
+import { openViewCallTree, registerAnimateViewport } from '@/shell/commands/profilerCommands';
+import { openSourcePreview } from '@/shell/commands/openSchemaBrowser';
+import { resolveFrameRootForSite } from '@/libs/profiler/resolveFrameRoot';
+import { spanKindScope, systemScope, useCallTreeScopeStore } from '@/stores/useCallTreeScopeStore';
+import { useCpuFrameStore } from '@/stores/useCpuFrameStore';
+import { useSessionStore } from '@/stores/useSessionStore';
 import { useOptionsStore } from '@/stores/useOptionsStore';
 import { useNavHistoryStore } from '@/stores/useNavHistoryStore';
 import { useProfilerSessionStore } from '@/stores/useProfilerSessionStore';
 import { useProfilerSelectionStore } from '@/stores/useProfilerSelectionStore';
 import { useProfilerViewStore } from '@/stores/useProfilerViewStore';
-import { useSourceLocationStore } from '@/stores/useSourceLocationStore';
+import { useSourceLocationStore, type ResolvedSourceLocation } from '@/stores/useSourceLocationStore';
 import { useThemeStore } from '@/stores/useThemeStore';
 import { useUiPrefsStore } from '@/stores/useUiPrefsStore';
 
@@ -97,6 +103,17 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
   const setGaugeCollapse = useProfilerViewStore((s) => s.setGaugeCollapse);
   const selection = useProfilerSelectionStore((s) => s.selected);
   const setSelected = useProfilerSelectionStore((s) => s.setSelected);
+
+  // Right-click context menu on a span bar. Session id/kind drive the "View in Call Tree" action —
+  // CPU sampling (and therefore the Call Tree) is `trace`-session only.
+  const sessionId = useSessionStore((s) => s.sessionId);
+  const sessionKind = useSessionStore((s) => s.kind);
+  const setCallTreeScope = useCallTreeScopeStore((s) => s.setScope);
+  const [contextMenu, setContextMenu] = useState<
+    | { kind: 'span'; x: number; y: number; span: SpanData; sourceLoc: ResolvedSourceLocation | null }
+    | { kind: 'chunk'; x: number; y: number; chunk: ChunkSpan; sourceLoc: ResolvedSourceLocation | null }
+    | null
+  >(null);
 
   // The view store's `viewRange` doubles as the TickOverview selection. `{0, 0}` = "no selection";
   // in that state TimeArea shows an empty-state placeholder, not the full trace. A range only
@@ -863,6 +880,53 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
     }
   }, [ticks, animateToRange, legendsVisible, gaugeData.offCpuBySlot, showOffCpu]);
 
+  // ─── Context menu ────────────────────────────────────────────────────────────────────────────
+  // Right-click → context menu for a span bar or a scheduler-chunk bar. The browser's native menu is
+  // always suppressed over the canvas — it distracts and offers nothing useful for a visualization.
+  // Other hits (phase / gauge / off-CPU / empty) just dismiss our menu without opening it.
+  const onContextMenu = useCallback((e: React.MouseEvent<HTMLCanvasElement>): void => {
+    e.preventDefault();
+    const local = getLocal(e);
+    if (!local) return;
+    const hit = hitTestTimeArea({
+      mx: local.mx, my: local.my,
+      tracks: layoutRef.current.tracks, ticks, vp: vpRef.current,
+      gutterWidth: gutterWidthRef.current,
+      legendsVisible,
+      offCpuBySlot: gaugeData.offCpuBySlot,
+      showOffCpu,
+    });
+    if (hit && hit.kind === 'span') {
+      const sourceLoc = useSourceLocationStore.getState().resolve(hit.span.rawEvent?.sourceLocationId);
+      setContextMenu({ kind: 'span', x: e.clientX, y: e.clientY, span: hit.span, sourceLoc });
+    } else if (hit && hit.kind === 'chunk') {
+      const sourceLoc = useSourceLocationStore.getState().resolveSystem(hit.chunk.systemIndex);
+      setContextMenu({ kind: 'chunk', x: e.clientX, y: e.clientY, chunk: hit.chunk, sourceLoc });
+    } else {
+      setContextMenu(null);
+    }
+  }, [ticks, legendsVisible, gaugeData.offCpuBySlot, showOffCpu]);
+
+  // "View in Call Tree (merged)" — scope the Call Tree to every instance of this span's kind (#351
+  // span-kind scope) and re-root it at the span's emitting method, so the tree opens rooted on that
+  // method (percentages relative to it, no ancestor noise — §8.2). Falls back to no re-root when the
+  // method isn't resolvable / wasn't sampled.
+  const handleViewInCallTreeMerged = useCallback((span: SpanData, sourceLoc: ResolvedSourceLocation | null): void => {
+    if (!sessionId) return;
+    const frameRoot = resolveFrameRootForSite(sourceLoc, useCpuFrameStore.getState().byId);
+    setCallTreeScope(sessionId, spanKindScope(span.kind, span.name, frameRoot));
+    openViewCallTree();
+  }, [sessionId, setCallTreeScope]);
+
+  // "View in Call Tree (system)" — scope the Call Tree to the chunk's system (#351 system scope) and
+  // re-root it at the system's method, same rationale as the span path above.
+  const handleViewInCallTreeSystem = useCallback((chunk: ChunkSpan, sourceLoc: ResolvedSourceLocation | null): void => {
+    if (!sessionId) return;
+    const frameRoot = resolveFrameRootForSite(sourceLoc, useCpuFrameStore.getState().byId);
+    setCallTreeScope(sessionId, systemScope(chunk.systemIndex, chunk.systemName || `System ${chunk.systemIndex}`, frameRoot));
+    openViewCallTree();
+  }, [sessionId, setCallTreeScope]);
+
   // ─── Native wheel listener ──────────────────────────────────────────────────────────────────
   // React's synthetic wheel is passive — preventDefault on Ctrl+wheel would be ignored and the
   // browser would zoom the page. Attach natively with {passive:false}.
@@ -948,6 +1012,7 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
         onPointerCancel={onPointerUp}
         onPointerLeave={onPointerLeave}
         onDoubleClick={onDoubleClick}
+        onContextMenu={onContextMenu}
       />
       {/*
        * Vertical scroll overlay. Sits on the right edge of the canvas as a thin native-scrollbar
@@ -1000,7 +1065,9 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
         />
         {legendsVisible && <TimeAreaHelpButton />}
       </div>
-      {gaugeTooltipState && (
+      {/* Tooltips are suppressed while the context menu is open — they portal to body at z-9999 and
+          would otherwise paint over the menu. */}
+      {!contextMenu && gaugeTooltipState && (
         <GaugeTooltip
           lines={buildGaugeTooltipLines(
             ticks,
@@ -1016,18 +1083,72 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
           clientY={gaugeTooltipState.clientY}
         />
       )}
-      {helpTooltipState && (
+      {!contextMenu && helpTooltipState && (
         <HelpOverlay
           lines={getTrackHelpLines(helpTooltipState.trackId, helpTooltipState.label)}
           clientX={helpTooltipState.clientX}
           clientY={helpTooltipState.clientY}
         />
       )}
-      {hoverTooltipState && (
+      {!contextMenu && hoverTooltipState && (
         <HelpOverlay
           lines={hoverTooltipState.lines}
           clientX={hoverTooltipState.clientX}
           clientY={hoverTooltipState.clientY}
+        />
+      )}
+      {contextMenu && contextMenu.kind === 'span' && (
+        <TimeAreaContextMenu
+          kind="span"
+          x={contextMenu.x}
+          y={contextMenu.y}
+          spanName={contextMenu.span.name}
+          spanId={contextMenu.span.spanId}
+          callTreeAvailable={sessionKind === 'trace'}
+          sourceAvailable={contextMenu.sourceLoc != null}
+          onClose={() => setContextMenu(null)}
+          onViewInCallTree={() => {
+            handleViewInCallTreeMerged(contextMenu.span, contextMenu.sourceLoc);
+            setContextMenu(null);
+          }}
+          onZoom={() => {
+            animateToRange({ startUs: contextMenu.span.startUs, endUs: contextMenu.span.endUs });
+            setContextMenu(null);
+          }}
+          onOpenSource={() => {
+            const loc = contextMenu.sourceLoc;
+            if (loc) void useOptionsStore.getState().openInEditor(loc.file, loc.line);
+            setContextMenu(null);
+          }}
+        />
+      )}
+      {contextMenu && contextMenu.kind === 'chunk' && (
+        <TimeAreaContextMenu
+          kind="chunk"
+          x={contextMenu.x}
+          y={contextMenu.y}
+          systemName={contextMenu.chunk.systemName || `System ${contextMenu.chunk.systemIndex}`}
+          callTreeAvailable={sessionKind === 'trace'}
+          sourceAvailable={contextMenu.sourceLoc != null}
+          onClose={() => setContextMenu(null)}
+          onViewInCallTree={() => {
+            handleViewInCallTreeSystem(contextMenu.chunk, contextMenu.sourceLoc);
+            setContextMenu(null);
+          }}
+          onZoom={() => {
+            animateToRange({ startUs: contextMenu.chunk.startUs, endUs: contextMenu.chunk.endUs });
+            setContextMenu(null);
+          }}
+          onShowSourceInline={() => {
+            const loc = contextMenu.sourceLoc;
+            if (loc) openSourcePreview(loc.file, loc.line);
+            setContextMenu(null);
+          }}
+          onOpenSource={() => {
+            const loc = contextMenu.sourceLoc;
+            if (loc) void useOptionsStore.getState().openInEditor(loc.file, loc.line);
+            setContextMenu(null);
+          }}
         />
       )}
     </div>

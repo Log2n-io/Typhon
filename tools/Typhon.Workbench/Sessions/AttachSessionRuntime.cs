@@ -778,7 +778,10 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
             // surfaced to the client for live sessions; we just need a valid 32-byte value.
             Span<byte> fingerprint = stackalloc byte[32];
             _sessionId.TryWriteBytes(fingerprint);
-            _builder = new IncrementalCacheBuilder(_tempFile.Sink, ownsSink: false, profilerHeader, fingerprint, new Dictionary<int, string>());
+            // queueNames empty at handshake — the live attach protocol doesn't ship an EventQueueCatalog frame today. If
+            // it ever does, RegisterQueueName fills in the gaps without re-constructing. Until then, queue-name lookups
+            // on a live session legitimately resolve to nothing (no queues registered yet on the wire).
+            _builder = new IncrementalCacheBuilder(_tempFile.Sink, ownsSink: false, profilerHeader, fingerprint, new Dictionary<int, string>(), new Dictionary<ushort, string>());
             _builder.TickFinalized += OnBuilderTickFinalized;
             _builder.ChunkFlushed += OnBuilderChunkFlushed;
 

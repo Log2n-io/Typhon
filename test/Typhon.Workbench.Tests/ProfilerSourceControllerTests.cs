@@ -130,4 +130,101 @@ public sealed class ProfilerSourceControllerTests
         var resp = await _client.PostAsJsonAsync("/api/profiler/open-in-editor", new { file = "/_/x.cs", line = 0 });
         Assert.That(resp.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest));
     }
+
+    // ─── Method-block detection (FindEnclosingMethodLines) ───────────────────────────────────────
+
+    /// <summary>A two-method class with a local function, plus brace-in-string / brace-in-comment traps.</summary>
+    private static readonly string SampleSource = string.Join('\n', new[]
+    {
+        "namespace N;",                       //  1
+        "class C",                            //  2
+        "{",                                  //  3
+        "    void Alpha()",                   //  4
+        "    {",                              //  5
+        "        var s = \"} not a brace\";", //  6
+        "        // } also not a brace",      //  7
+        "    }",                              //  8
+        "",                                   //  9
+        "    int Beta(int x)",                // 10
+        "    {",                              // 11
+        "        void Local()",               // 12
+        "        {",                          // 13
+        "            x++;",                   // 14
+        "        }",                          // 15
+        "        Local();",                   // 16
+        "        return x;",                  // 17
+        "    }",                              // 18
+        "}",                                  // 19
+    });
+
+    [Test]
+    public void FindEnclosingMethodLines_LineInsideMethod_ReturnsMethodBlock()
+    {
+        // Line 6 has a brace inside a string, line 7 a brace inside a comment — neither may truncate
+        // Alpha()'s block (lines 4–8).
+        var block = ProfilerSourceController.FindEnclosingMethodLines(SampleSource, 6);
+        Assert.That(block, Is.Not.Null);
+        Assert.That(block!.Value.Start, Is.EqualTo(4));
+        Assert.That(block.Value.End, Is.EqualTo(8));
+    }
+
+    [Test]
+    public void FindEnclosingMethodLines_LineInsideLocalFunction_ReturnsInnermostMember()
+    {
+        // Line 14 is inside Local() (12–15), itself inside Beta() (10–18) — the innermost wins.
+        var block = ProfilerSourceController.FindEnclosingMethodLines(SampleSource, 14);
+        Assert.That(block, Is.Not.Null);
+        Assert.That(block!.Value.Start, Is.EqualTo(12));
+        Assert.That(block.Value.End, Is.EqualTo(15));
+    }
+
+    [Test]
+    public void FindEnclosingMethodLines_LineInMethodButOutsideLocalFunction_ReturnsOuterMethod()
+    {
+        // Line 16 is in Beta() but past Local() — resolves to Beta() (10–18).
+        var block = ProfilerSourceController.FindEnclosingMethodLines(SampleSource, 16);
+        Assert.That(block, Is.Not.Null);
+        Assert.That(block!.Value.Start, Is.EqualTo(10));
+        Assert.That(block.Value.End, Is.EqualTo(18));
+    }
+
+    [Test]
+    public void FindEnclosingMethodLines_LineOutsideAnyMethod_ReturnsNull()
+    {
+        // Line 2 is the class declaration — no enclosing method-like member.
+        Assert.That(ProfilerSourceController.FindEnclosingMethodLines(SampleSource, 2), Is.Null);
+    }
+
+    [Test]
+    public void FindEnclosingMethodLines_NonCSharpText_ReturnsNull()
+    {
+        Assert.That(ProfilerSourceController.FindEnclosingMethodLines("not c# at all\nmore text", 1), Is.Null);
+    }
+
+    [Test]
+    public async Task GetSource_CSharpFile_ReturnsEnclosingMethodBlock()
+    {
+        var filePath = Path.Combine(_tempRoot, "method-target.cs");
+        var content = string.Join('\n', new[]
+        {
+            "class C",                  // 1
+            "{",                        // 2
+            "    void M()",             // 3
+            "    {",                    // 4
+            "        var s = \"}\";",   // 5
+            "    }",                    // 6
+            "}",                        // 7
+        });
+        await File.WriteAllTextAsync(filePath, content);
+
+        // A generous context=50 would yield the whole file (1–7) if it fell back to a window; the
+        // method-block path must instead return exactly M()'s span (3–6).
+        var resp = await _client.GetAsync(
+            $"/api/profiler/source?path={Uri.EscapeDataString(filePath)}&line=5&context=50");
+        Assert.That(resp.StatusCode, Is.EqualTo(HttpStatusCode.OK), await resp.Content.ReadAsStringAsync());
+
+        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+        Assert.That(doc.RootElement.GetProperty("startLine").GetInt32(), Is.EqualTo(3));
+        Assert.That(doc.RootElement.GetProperty("endLine").GetInt32(), Is.EqualTo(6));
+    }
 }

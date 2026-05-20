@@ -4,9 +4,13 @@ import { create } from 'zustand';
 export type CallTreeScopeKind = 'session' | 'range' | 'system' | 'phase' | 'span-kind';
 
 /**
- * The active scope for the Call Tree panel — the time-window axis only (`frameRoot` / `viewMode` stay panel-local).
- * Written by the toolbar selectors and the Detail panel's "Scope Call Tree to this" action; read by the panel to build
- * its {@link CallTreeRequest}. `label` is the human-readable chip text.
+ * The active scope for the Call Tree panel — the time-window axis, plus an optional `frameRoot` (`viewMode`
+ * stays panel-local). Written by the toolbar selectors and the "Scope Call Tree to this" / "View in Call Tree"
+ * actions; read by the panel to build its {@link CallTreeRequest}. `label` is the human-readable chip text.
+ *
+ * `frameRoot` lets a command that knows the target's method (a span / chunk right-click) open the tree
+ * re-rooted at that method's CPU frame — so its percentages are relative to the method, not the whole scope
+ * (#351 §8.2). Null for the toolbar's span-agnostic selectors (system / phase / range).
  */
 export interface CallTreeScope {
   kind: CallTreeScopeKind;
@@ -15,6 +19,8 @@ export interface CallTreeScope {
   systemIndex: number | null;
   phase: string | null;
   spanKind: number | null;
+  /** CPU-frame id to re-root the folded tree at, or null. Seeds the panel's drill stack. */
+  frameRoot: number | null;
   label: string;
 }
 
@@ -26,12 +32,16 @@ export const WHOLE_SESSION_SCOPE: CallTreeScope = {
   systemIndex: null,
   phase: null,
   spanKind: null,
+  frameRoot: null,
   label: 'Whole session',
 };
 
-/** Builds a system scope. `label` is the system name (the chip shows "System: <name>"). */
-export function systemScope(systemIndex: number, label: string): CallTreeScope {
-  return { ...WHOLE_SESSION_SCOPE, kind: 'system', systemIndex, label: `System: ${label}` };
+/**
+ * Builds a system scope. `label` is the system name (the chip shows "System: <name>"). `frameRoot`, when
+ * given, re-roots the tree at the system's method (see {@link CallTreeScope.frameRoot}).
+ */
+export function systemScope(systemIndex: number, label: string, frameRoot: number | null = null): CallTreeScope {
+  return { ...WHOLE_SESSION_SCOPE, kind: 'system', systemIndex, frameRoot, label: `System: ${label}` };
 }
 
 /** Builds a phase scope. */
@@ -39,9 +49,12 @@ export function phaseScope(phase: string): CallTreeScope {
   return { ...WHOLE_SESSION_SCOPE, kind: 'phase', phase, label: `Phase: ${phase}` };
 }
 
-/** Builds a span-kind scope. `label` is the span-kind name. */
-export function spanKindScope(spanKind: number, label: string): CallTreeScope {
-  return { ...WHOLE_SESSION_SCOPE, kind: 'span-kind', spanKind, label: `Span kind: ${label}` };
+/**
+ * Builds a span-kind scope. `label` is the span-kind name. `frameRoot`, when given, re-roots the tree at
+ * the span's emitting method (see {@link CallTreeScope.frameRoot}).
+ */
+export function spanKindScope(spanKind: number, label: string, frameRoot: number | null = null): CallTreeScope {
+  return { ...WHOLE_SESSION_SCOPE, kind: 'span-kind', spanKind, frameRoot, label: `Span kind: ${label}` };
 }
 
 /** Builds a manual time-range scope (also used for a clicked single span instance). */

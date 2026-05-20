@@ -322,6 +322,31 @@ public sealed class SchemaControllerTests
         }
     }
 
+    [Test]
+    public async Task SchemaEndpoints_WhileTraceBuildInProgress_Return202_Accepted()
+    {
+        // A freshly created trace session reports IsSchemaBuilding=true until its background cache build finishes.
+        // Every schema endpoint must surface that as 202 Accepted (mirrors the /profiler/metadata pattern) so the SPA
+        // hooks poll quietly via refetchInterval instead of logging Query failed every time a schema panel mounts.
+        // We use the IsSchemaBuilding=true / StaticSchemaProvider=null fake to exercise the controller's 202 branch
+        // without racing the real cache builder.
+        var manager = _factory.Services.GetRequiredService<SessionManager>();
+        var fakeId = Guid.NewGuid();
+        manager.Create(new FakeSchemaBuildingSession(fakeId));
+
+        foreach (var route in new[] { "components", "archetypes", "components/Foo", "components/Foo/archetypes", "components/Foo/indexes", "components/Foo/systems" })
+        {
+            var req = new HttpRequestMessage(HttpMethod.Get, $"/api/sessions/{fakeId}/schema/{route}");
+            req.Headers.Add("X-Session-Token", fakeId.ToString());
+            var resp = await _client.SendAsync(req);
+            Assert.That(resp.StatusCode, Is.EqualTo(HttpStatusCode.Accepted), $"route={route}");
+            // 202 must carry no body — customFetch keys off the status code, the SPA hook treats body-less 202 as
+            // "still building" and schedules the next poll.
+            var body = await resp.Content.ReadAsStringAsync();
+            Assert.That(body, Is.Empty.Or.EqualTo("null"), $"route={route} expected empty body, got: {body}");
+        }
+    }
+
     /// <summary>
     /// Test fake — minimal ISession implementation with <c>StaticSchemaProvider = null</c>. Mirrors what an
     /// AttachSession produces today (live engine doesn't push schema over the wire).
@@ -332,5 +357,18 @@ public sealed class SchemaControllerTests
         public SessionState State => SessionState.Attached;
         public string FilePath => string.Empty;
         public Typhon.Workbench.Schema.IStaticSchemaProvider StaticSchemaProvider => null;
+    }
+
+    /// <summary>
+    /// Test fake — schema provider is null AND <c>IsSchemaBuilding</c> is true. Mirrors a trace session whose
+    /// background cache build is still in flight (the controller must respond with 202 Accepted, not 404).
+    /// </summary>
+    private sealed record FakeSchemaBuildingSession(Guid Id) : ISession
+    {
+        public SessionKind Kind => SessionKind.Trace;
+        public SessionState State => SessionState.Trace;
+        public string FilePath => string.Empty;
+        public Typhon.Workbench.Schema.IStaticSchemaProvider StaticSchemaProvider => null;
+        public bool IsSchemaBuilding => true;
     }
 }

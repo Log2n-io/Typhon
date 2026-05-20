@@ -1,8 +1,10 @@
+using System.Collections.Generic;
 using System.Linq;
 using NUnit.Framework;
 using Typhon.Profiler;
 using Typhon.Workbench.Dtos.Profiler;
 using Typhon.Workbench.Services;
+using Typhon.Workbench.Sessions;
 
 namespace Typhon.Workbench.Tests.Services;
 
@@ -197,6 +199,122 @@ public sealed class CallTreeFolderTests
         Assert.That(steps, Is.EqualTo(depth));
         Assert.That(result.Nodes[nodeIdx].FrameId, Is.EqualTo(0), "leaf is frame 0");
         Assert.That(result.Nodes[nodeIdx].SelfSamples, Is.EqualTo(1), "leaf carries the self time");
+    }
+
+    // ─── §8.7 sample classification ──────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// A classifier for thread slot 0: ON-CPU slice [1000,2000] whose gap is a voluntary wait, ON-CPU slice [3000,4000]
+    /// whose gap is scheduler preemption, and a GC suspension over [6000,7000]. <c>ClassificationAvailable</c> is true.
+    /// </summary>
+    private static SampleClassifier ThreeWayClassifier()
+        => SampleClassifier.Create(
+            [(6000, 7000)],
+            new Dictionary<int, SampleClassifier.OnCpuSlice[]>
+            {
+                [0] =
+                [
+                    new SampleClassifier.OnCpuSlice(1000, 2000, SampleClass.Voluntary),
+                    new SampleClassifier.OnCpuSlice(3000, 4000, SampleClass.InvoluntaryScheduler),
+                ],
+            },
+            classificationAvailable: true);
+
+    // Slot 0, qpc-sorted: 1500 on-CPU · 2500 voluntary-wait · 4500 scheduler stall · 6500 GC stall. All stack 0 ([1,0]).
+    private static readonly CpuSampleRecord[] ClassifiedSamples =
+    [
+        new(1500, 0, 0, 0),
+        new(2500, 0, 0, 0),
+        new(4500, 0, 0, 0),
+        new(6500, 0, 0, 0),
+    ];
+
+    private static CallTreeNodeDto AggregateNode(CallTreeResponseDto r, int frameId)
+        => r.Nodes.Single(n => n.FrameId == frameId);
+
+    [Test]
+    public void Fold_NullClassifier_ReportsClassificationUnavailable()
+    {
+        var result = CallTreeFolder.Fold(Samples, Stacks, CategoryByFrameId, WholeSession, Request());
+        Assert.That(result.ClassificationAvailable, Is.False);
+    }
+
+    [Test]
+    public void Fold_GcSample_RoutedToGcAggregateNotMethod()
+    {
+        var result = CallTreeFolder.Fold(
+            ClassifiedSamples, Stacks, CategoryByFrameId, WholeSession, Request(), null, ThreeWayClassifier());
+
+        Assert.That(result.ClassificationAvailable, Is.True);
+        Assert.That(result.TotalSamples, Is.EqualTo(4));
+
+        // The GC sample is its own labelled aggregate hung off the root — not folded into frame 0.
+        var gc = AggregateNode(result, CallTreeFolder.GcSuspensionFrameId);
+        Assert.That(gc.SelfSamples, Is.EqualTo(1));
+        Assert.That(gc.TotalSamples, Is.EqualTo(1));
+        Assert.That(gc.Children, Is.Empty);
+
+        // frame 0 carries only the on-CPU + voluntary samples (2), never the GC / scheduler stalls.
+        var frame0 = ChildrenOf(result, Root(result)).Single(n => n.FrameId == 0);
+        Assert.That(frame0.TotalSamples, Is.EqualTo(2));
+    }
+
+    [Test]
+    public void Fold_SchedulerSample_RoutedToPreemptedAggregate()
+    {
+        var result = CallTreeFolder.Fold(
+            ClassifiedSamples, Stacks, CategoryByFrameId, WholeSession, Request(), null, ThreeWayClassifier());
+
+        var preempted = AggregateNode(result, CallTreeFolder.PreemptedFrameId);
+        Assert.That(preempted.SelfSamples, Is.EqualTo(1));
+        Assert.That(preempted.Children, Is.Empty);
+    }
+
+    [Test]
+    public void Fold_VoluntarySample_FoldedInWallClock_DroppedInOnCpu()
+    {
+        // Wall-clock: the voluntary-wait sample folds into frame 0 alongside the on-CPU one → frame 0 total = 2.
+        var wall = CallTreeFolder.Fold(
+            ClassifiedSamples, Stacks, CategoryByFrameId, WholeSession, Request(), null, ThreeWayClassifier());
+        Assert.That(ChildrenOf(wall, Root(wall)).Single(n => n.FrameId == 0).TotalSamples, Is.EqualTo(2));
+        Assert.That(wall.TotalSamples, Is.EqualTo(4));
+
+        // On-CPU: the voluntary-wait sample is dropped → frame 0 total = 1; the involuntary aggregates still stand.
+        var onCpu = CallTreeFolder.Fold(
+            ClassifiedSamples, Stacks, CategoryByFrameId, WholeSession, Request(viewMode: "on-cpu"), null, ThreeWayClassifier());
+        Assert.That(ChildrenOf(onCpu, Root(onCpu)).Single(n => n.FrameId == 0).TotalSamples, Is.EqualTo(1));
+        Assert.That(onCpu.TotalSamples, Is.EqualTo(3), "1 on-CPU + GC + scheduler aggregates; voluntary dropped");
+        Assert.That(AggregateNode(onCpu, CallTreeFolder.GcSuspensionFrameId).SelfSamples, Is.EqualTo(1));
+    }
+
+    [Test]
+    public void Fold_InvoluntaryAggregate_SuppressedUnderFrameRoot()
+    {
+        // A frame-root drill: an involuntary stall has no stack, so it cannot honestly hang under the drilled method.
+        var result = CallTreeFolder.Fold(
+            ClassifiedSamples, Stacks, CategoryByFrameId, WholeSession, Request(frameRoot: 1), null, ThreeWayClassifier());
+
+        Assert.That(result.TotalSamples, Is.EqualTo(2), "only the on-CPU + voluntary samples whose stack contains frame 1");
+        Assert.That(result.Nodes.Any(n => n.FrameId == CallTreeFolder.GcSuspensionFrameId), Is.False);
+        Assert.That(result.Nodes.Any(n => n.FrameId == CallTreeFolder.PreemptedFrameId), Is.False);
+    }
+
+    [Test]
+    public void Fold_DegradedClassifier_GcStillAggregated_RestBySampleTypeProxy()
+    {
+        // ClassificationAvailable = false (no context-switch slices) but a GC interval is still known: the GC sample
+        // classifies involuntary; the rest fall back to the SampleType proxy (Managed ⇒ on-CPU, External ⇒ voluntary).
+        var degraded = SampleClassifier.Create(
+            [(6000, 7000)],
+            new Dictionary<int, SampleClassifier.OnCpuSlice[]>(),
+            classificationAvailable: false);
+        var result = CallTreeFolder.Fold(
+            ClassifiedSamples, Stacks, CategoryByFrameId, WholeSession, Request(), null, degraded);
+
+        Assert.That(result.ClassificationAvailable, Is.False);
+        Assert.That(AggregateNode(result, CallTreeFolder.GcSuspensionFrameId).SelfSamples, Is.EqualTo(1));
+        // The three non-GC samples are all Managed → fold per-method into frame 0.
+        Assert.That(ChildrenOf(result, Root(result)).Single(n => n.FrameId == 0).TotalSamples, Is.EqualTo(3));
     }
 
     [Test]

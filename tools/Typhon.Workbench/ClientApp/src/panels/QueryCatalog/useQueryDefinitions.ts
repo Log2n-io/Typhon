@@ -16,7 +16,14 @@ export function useQueryDefinitions() {
 
   const query = useGetApiSessionsSessionIdProfilerQueries(
     sessionId ?? '',
-    { query: { enabled: !!sessionId, staleTime: Infinity } },
+    {
+      query: {
+        enabled: !!sessionId,
+        staleTime: Infinity,
+        // 202 while the trace cache build is still running — poll every 1 s until it lands.
+        refetchInterval: (q) => (q.state.data && q.state.data.data === undefined ? 1_000 : false),
+      },
+    },
   );
 
   const definitions: QueryDefinitionDto[] = useMemo(

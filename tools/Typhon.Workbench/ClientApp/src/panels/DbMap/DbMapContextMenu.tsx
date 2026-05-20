@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 
 // The map's right-click context menu (Module 15, A4, §4.6). Copies the byte offset / page index / segment id
 // of the clicked cell, and offers the cross-link reveal actions (§7.3) when the panel supplies their handlers.
@@ -21,9 +22,11 @@ export interface DbMapContextMenuProps {
 export function DbMapContextMenu(props: DbMapContextMenuProps) {
   const ref = useRef<HTMLDivElement | null>(null);
 
-  // Close on any outside pointer-down or Escape — the standard transient-menu dismissal.
+  // Close on any outside pointer-down or Escape — the standard transient-menu dismissal. pointerdown,
+  // not mousedown: pointerdown always fires (a canvas may preventDefault() it, suppressing the
+  // compatibility mousedown but not pointerdown itself).
   useEffect(() => {
-    const onDown = (e: MouseEvent) => {
+    const onDown = (e: PointerEvent) => {
       if (ref.current && !ref.current.contains(e.target as Node)) {
         props.onClose();
       }
@@ -33,10 +36,10 @@ export function DbMapContextMenu(props: DbMapContextMenuProps) {
         props.onClose();
       }
     };
-    window.addEventListener('mousedown', onDown);
+    window.addEventListener('pointerdown', onDown);
     window.addEventListener('keydown', onKey);
     return () => {
-      window.removeEventListener('mousedown', onDown);
+      window.removeEventListener('pointerdown', onDown);
       window.removeEventListener('keydown', onKey);
     };
   }, [props]);
@@ -57,10 +60,15 @@ export function DbMapContextMenu(props: DbMapContextMenuProps) {
     </button>
   );
 
-  return (
+  if (typeof document === 'undefined') {
+    return null;
+  }
+  // Portaled to document.body so dockview chrome (resize sashes, z-index up to 9999) never paints
+  // over the menu, and a transformed panel ancestor cannot re-anchor its `position: fixed` box.
+  return createPortal(
     <div
       ref={ref}
-      className="fixed z-50 min-w-44 rounded border border-border bg-popover p-1 text-popover-foreground shadow-md"
+      className="fixed z-[10000] min-w-44 rounded border border-border bg-popover p-1 text-popover-foreground shadow-md"
       style={{ left: props.x, top: props.y }}
       data-testid="dbmap-context-menu"
     >
@@ -81,6 +89,7 @@ export function DbMapContextMenu(props: DbMapContextMenuProps) {
         props.onOpenInSchema?.();
         props.onClose();
       }))}
-    </div>
+    </div>,
+    document.body,
   );
 }

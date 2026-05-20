@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Camera } from 'lucide-react';
+import { Camera, Maximize2 } from 'lucide-react';
 import type { SystemTickSummary } from '@/api/generated/model/systemTickSummary';
 import type { TickSummaryDto } from '@/api/generated/model/tickSummaryDto';
 import { useProfilerViewStore } from '@/stores/useProfilerViewStore';
@@ -21,6 +21,8 @@ interface Props {
   systemTickSummaries: readonly SystemTickSummary[] | null;
   /** Worker pool size from the profiler header. Pill stays hidden when null / < 2 (parallelism is undefined). */
   workerCount: number | null;
+  /** Fit-viewport callback — bumps the panel's <c>fitSignal</c>, which the canvas observes. */
+  onFit: () => void;
 }
 
 const STAT_OPTIONS: Array<{ key: StatMode; label: string }> = [
@@ -58,7 +60,7 @@ const SNAPSHOT_TICK_COUNT = 600;
  * Auto-snapshot fires once on first metadata arrival when the time slot is null AND nothing has
  * been deep-linked from a URL — so a fresh open shows useful colour without a click.
  */
-export default function SystemDagToolbar({ tickSummaries, autoSnapshotEnabled, systemTickSummaries, workerCount }: Props) {
+export default function SystemDagToolbar({ tickSummaries, autoSnapshotEnabled, systemTickSummaries, workerCount, onFit }: Props) {
   // Post-#345: time-window canonical source is the profiler view store. SystemDag aggregations
   // read the *committed* slot — the debounce upstream already ensures we only re-fetch after the
   // user stops scrubbing.
@@ -235,6 +237,16 @@ export default function SystemDagToolbar({ tickSummaries, autoSnapshotEnabled, s
           + 'render as their own delimited DAG groups. Keyed off the track’s `engine` tag.'
         }
       />
+
+      <button
+        type="button"
+        onClick={onFit}
+        className="flex items-center gap-1.5 rounded border border-border bg-card px-2 py-1 font-mono text-[11px] text-foreground hover:bg-muted"
+        title="Fit the DAG to the viewport (or middle-click the canvas)"
+      >
+        <Maximize2 className="h-3 w-3" />
+        Fit
+      </button>
 
       <div className="ml-auto flex items-center gap-2 font-mono text-[10px] text-muted-foreground">
         <ParallelismPill utilization={utilization} />

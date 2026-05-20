@@ -222,19 +222,26 @@ html .dockview-react {
   /* Shorter tab strip — default is ~35px, this trims ~6px off the header chrome. */
   --dv-tabs-and-actions-container-height:              22px;
 
-  --dv-group-view-background-color:                    var(--background);
-  --dv-tabs-and-actions-container-background-color:    var(--card);
-  --dv-group-control-background-color:                 var(--card);
+  /* Panel-header shades — a darker tab strip than the panel content, and a darker-still selected
+   * tab, so the header (and which view is active) is identifiable at a glance. Both are mixed off
+   * --background so the two steps hold in light and dark themes alike. */
+  --wb-dv-header:                                      color-mix(in oklch, var(--background), black 1%);
+  --wb-dv-selected-tab:                                color-mix(in oklch, var(--background), black 5%);
 
-  --dv-activegroup-visiblepanel-tab-background-color:  var(--background);
-  --dv-activegroup-hiddenpanel-tab-background-color:   var(--card);
-  --dv-inactivegroup-visiblepanel-tab-background-color:var(--card);
-  --dv-inactivegroup-hiddenpanel-tab-background-color: var(--card);
+  --dv-group-view-background-color:                    var(--background);
+  --dv-tabs-and-actions-container-background-color:    var(--wb-dv-header);
+  --dv-group-control-background-color:                 var(--wb-dv-header);
+
+  /* Visible (selected) panel tab = darkest; hidden tabs = the header shade. */
+  --dv-activegroup-visiblepanel-tab-background-color:  var(--wb-dv-selected-tab);
+  --dv-activegroup-hiddenpanel-tab-background-color:   var(--wb-dv-header);
+  --dv-inactivegroup-visiblepanel-tab-background-color:var(--wb-dv-selected-tab);
+  --dv-inactivegroup-hiddenpanel-tab-background-color: var(--wb-dv-header);
   --dv-activegroup-visiblepanel-tab-color:             var(--foreground);
   --dv-activegroup-hiddenpanel-tab-color:              var(--muted-foreground);
   --dv-inactivegroup-visiblepanel-tab-color:           var(--muted-foreground);
   --dv-inactivegroup-hiddenpanel-tab-color:            var(--muted-foreground);
-  --dv-tab-divider-color:                              var(--card);
+  --dv-tab-divider-color:                              var(--wb-dv-header);
 
   --dv-separator-border:                               var(--border);
   --dv-paneview-header-border-color:                   var(--border);

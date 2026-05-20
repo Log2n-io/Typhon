@@ -23,8 +23,11 @@ export function useArchetypeList() {
     queryKey: ['schema', 'archetypes', sessionId],
     enabled: !!sessionId,
     staleTime: 5_000,
+    // Server returns 202 while the trace cache build is still running. customFetch hands us
+    // a `{ data: undefined, status: 202 }` envelope; poll every 1 s until the build completes.
+    refetchInterval: (q) => (q.state.data?.status === 202 ? 1_000 : false),
     queryFn: () =>
-      customFetch<Envelope<ArchetypeInfoDto[]>>(
+      customFetch<Envelope<ArchetypeInfoDto[]> | Envelope<undefined>>(
         `/api/sessions/${sessionId}/schema/archetypes`,
         { method: 'GET' },
       ),

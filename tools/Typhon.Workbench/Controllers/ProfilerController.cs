@@ -199,7 +199,8 @@ public sealed class ProfilerController : ControllerBase
             }
             var windows = ScopeResolver.Resolve(
                 request, meta.Systems, meta.TickSummaries, meta.SystemTickSummaries, () => runtime.SpanInstanceIndex, runtime.TimestampFrequency);
-            var tree = CallTreeFolder.Fold(cpu.Samples, cpu.Stacks, cpu.CategoryByFrameId, windows, request, cpu.ThreadRuns);
+            var tree = CallTreeFolder.Fold(
+                cpu.Samples, cpu.Stacks, cpu.CategoryByFrameId, windows, request, cpu.ThreadRuns, runtime.SampleClassifier);
             runtime.CallTreeCache.Put(cacheKey, tree);
             return Ok(tree);
         }
@@ -611,15 +612,7 @@ public sealed class ProfilerController : ControllerBase
     public async Task<ActionResult<QueryDefinitionDto[]>> GetQueries(Guid sessionId, CancellationToken ct)
     {
         var catalog = ResolveCatalog();
-        if (catalog == null)
-        {
-            return Conflict(new ProblemDetails
-            {
-                Title = "session_not_ready",
-                Detail = "Query catalog is only available after the session metadata is built.",
-                Status = StatusCodes.Status409Conflict,
-            });
-        }
+        if (catalog == null) return CatalogNotReadyResponse();
         var defs = await catalog.GetAllDefinitionsAsync(ct);
         return Ok(defs);
     }
@@ -633,7 +626,7 @@ public sealed class ProfilerController : ControllerBase
     {
         if (kind < 0 || kind > 255 || localId < 0 || localId > uint.MaxValue) return BadRequest();
         var catalog = ResolveCatalog();
-        if (catalog == null) return Conflict();
+        if (catalog == null) return CatalogNotReadyResponse();
         var def = await catalog.GetDefinitionAsync((byte)kind, (uint)localId, ct);
         if (def == null) return NotFound();
         return Ok(def);
@@ -668,7 +661,7 @@ public sealed class ProfilerController : ControllerBase
         }
 
         var catalog = ResolveCatalog();
-        if (catalog == null) return Conflict();
+        if (catalog == null) return CatalogNotReadyResponse();
         var execs = await catalog.GetExecutionsAsync(
             (byte)kind,
             (uint)localId,
@@ -689,7 +682,7 @@ public sealed class ProfilerController : ControllerBase
     public async Task<ActionResult<QueryExecutionDto>> GetExecution(Guid sessionId, long spanId, CancellationToken ct)
     {
         var catalog = ResolveCatalog();
-        if (catalog == null) return Conflict();
+        if (catalog == null) return CatalogNotReadyResponse();
         var exec = await catalog.GetExecutionBySpanIdAsync(spanId, ct);
         if (exec == null) return NotFound();
         return Ok(exec);
@@ -705,7 +698,7 @@ public sealed class ProfilerController : ControllerBase
     public async Task<ActionResult<QueryExecutionDto[]>> GetExecutionsByParent(Guid sessionId, long parentSpanId, CancellationToken ct)
     {
         var catalog = ResolveCatalog();
-        if (catalog == null) return Conflict();
+        if (catalog == null) return CatalogNotReadyResponse();
         var execs = await catalog.GetExecutionsByParentSpanIdAsync(parentSpanId, ct);
         return Ok(execs);
     }
@@ -721,7 +714,7 @@ public sealed class ProfilerController : ControllerBase
     public async Task<ActionResult<QueryExecutionDto[]>> GetExecutionsBySystemTick(Guid sessionId, int systemIdx, long tickIndex, CancellationToken ct)
     {
         var catalog = ResolveCatalog();
-        if (catalog == null) return Conflict();
+        if (catalog == null) return CatalogNotReadyResponse();
         var execs = await catalog.GetExecutionsBySystemTickAsync(systemIdx, tickIndex, ct);
         return Ok(execs);
     }
@@ -735,5 +728,28 @@ public sealed class ProfilerController : ControllerBase
             AttachSession attach => attach.Runtime.QueryCatalog,
             _ => null,
         };
+    }
+
+    /// <summary>
+    /// Returns the right "no catalog" response: <b>202 Accepted</b> when the catalog is null because the trace
+    /// session's background build hasn't finished yet (transient — clients poll quietly via the same contract as
+    /// <c>/profiler/metadata</c>), or <b>409 Conflict</b> when the session kind doesn't support a catalog at all
+    /// (permanent — surfaces as a hard error). Without this distinction every query-catalog endpoint logged
+    /// "Query catalog is only available after the session metadata is built." on first mount against a fresh trace.
+    /// </summary>
+    private ActionResult CatalogNotReadyResponse()
+    {
+        var session = (Sessions.ISession)HttpContext.Items["Session"]!;
+        if (session.IsSchemaBuilding)
+        {
+            Response.Headers["Retry-After"] = "1";
+            return StatusCode(StatusCodes.Status202Accepted);
+        }
+        return Conflict(new ProblemDetails
+        {
+            Title = "session_not_ready",
+            Detail = "Query catalog is only available after the session metadata is built.",
+            Status = StatusCodes.Status409Conflict,
+        });
     }
 }

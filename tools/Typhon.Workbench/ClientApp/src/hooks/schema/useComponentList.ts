@@ -15,7 +15,13 @@ export function useComponentList() {
   const sessionId = useSessionStore((s) => s.sessionId);
 
   const query = useGetApiSessionsSessionIdSchemaComponents(sessionId ?? '', {
-    query: { enabled: !!sessionId, staleTime: 5_000 },
+    query: {
+      enabled: !!sessionId,
+      staleTime: 5_000,
+      // Server returns 202 while the trace cache build is still running — customFetch hands us
+      // an envelope with `data: undefined`. Poll every 1 s until the build completes.
+      refetchInterval: (q) => (q.state.data && q.state.data.data === undefined ? 1_000 : false),
+    },
   });
 
   const list: ComponentSummary[] = useMemo(

@@ -18,12 +18,27 @@ import { friendlyMethodName } from '@/panels/profiler/methodName';
 import { useCpuFrameManifest } from '@/hooks/profiler/useCpuFrameManifest';
 import {
   useCallTree,
+  INVOLUNTARY_FRAME_LABELS,
   type CallTreeNode,
   type CallTreeRequest,
   type CallTreeViewMode,
   type CategorySlice,
 } from '@/hooks/profiler/useCallTree';
 import { useSampleDensity } from '@/hooks/profiler/useSampleDensity';
+import { openSourcePreview, updateSourcePreviewIfOpen } from '@/shell/commands/openSchemaBrowser';
+import { CallTreeContextMenu } from '@/panels/profiler/CallTreeContextMenu';
+
+/**
+ * One entry of the Call Tree's navigation stack — a complete view state: the time-window {@link CallTreeScope} plus an
+ * optional frame-root. The breadcrumb renders the stack; clicking a crumb restores that entry's full state.
+ */
+interface NavEntry {
+  scope: CallTreeScope;
+  frameRoot: number | null;
+}
+
+/** The root crumb — whole session, no scope, no drill. Always `navStack[0]`; a stable module identity. */
+const ROOT_ENTRY: NavEntry = { scope: WHOLE_SESSION_SCOPE, frameRoot: null };
 
 /**
  * Call Tree panel (#351 Phase 4 + Phase 5) — a dotTrace-style, server-folded CPU-sample call tree. Phase 5 makes the
@@ -36,25 +51,55 @@ export default function CallTree() {
 
   const [viewMode, setViewMode] = useState<CallTreeViewMode>('wall-clock');
   const [groupByCategory, setGroupByCategory] = useState(false);
-  // The frame-root drill is a dedicated, panel-local navigation stack (not the global nav history):
-  // each Crosshair "focus" pushes a frame, the breadcrumb pops back to any level. The active root —
-  // what the fold re-roots at — is the top of the stack.
-  const [frameRootStack, setFrameRootStack] = useState<number[]>([]);
+  // The breadcrumb is the panel-local navigation stack: each entry is a full view state (time-window scope +
+  // frame-root). Every scope command and every Crosshair drill pushes one; clicking a crumb restores it. Entry 0
+  // is always the whole-session root. Deliberately panel-local exploration, not the global nav history.
+  const [navStack, setNavStack] = useState<NavEntry[]>([ROOT_ENTRY]);
   const [filterText, setFilterText] = useState('');
   const [appliedFilter, setAppliedFilter] = useState('');
   const byId = useCpuFrameStore((s) => s.byId);
+  const openInEditor = useOptionsStore((s) => s.openInEditor);
 
-  const activeFrameRoot = frameRootStack.length > 0 ? frameRootStack[frameRootStack.length - 1] : null;
+  // Row selection — node index into the folded `nodes` array. Single-click selects; the selection
+  // syncs an already-open Source Preview panel. Reset whenever the tree re-folds (scope / view-mode /
+  // drill change ⇒ a new `data` identity ⇒ stale indices).
+  const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; nodeIndex: number } | null>(null);
 
-  // Re-rooting (a Crosshair drill or a breadcrumb jump) clears the filter — it was a find tool for
-  // the previous tree, and a stale query against the re-rooted tree just yields a confusing view.
+  // Row expansion — the set of expanded node indices. Lifted out of per-row useState so the context
+  // menu can expand / collapse whole subtrees. `key` pins it to the folded `data`; see the in-render
+  // resync below.
+  const [expansion, setExpansion] = useState<{ key: object | null; set: Set<number> }>({ key: null, set: new Set() });
+
+  const active = navStack[navStack.length - 1];
+  const scope = active.scope;
+  const activeFrameRoot = active.frameRoot;
+
+  // Every navigation clears the method filter — it was a find tool for the previous tree; a stale query against
+  // the new one just confuses.
+  //
+  // Crosshair drill — push a crumb that keeps the current scope but re-roots the tree at this frame.
   const drillInto = useCallback((frameId: number) => {
-    setFrameRootStack((s) => [...s, frameId]);
+    setNavStack((s) => [...s, { scope: s[s.length - 1].scope, frameRoot: frameId }]);
     setFilterText('');
     setAppliedFilter('');
   }, []);
-  const navigateBreadcrumb = useCallback((depth: number) => {
-    setFrameRootStack((s) => s.slice(0, depth));
+  // Click crumb `index` — truncate the stack to it, restoring that crumb's full view state (scope + frame-root).
+  // Index 0 is the root crumb (whole session). Clicking the current crumb is a no-op.
+  const navigateBreadcrumb = useCallback((index: number) => {
+    setNavStack((s) => (index >= 0 && index < s.length - 1 ? s.slice(0, index + 1) : s));
+    setFilterText('');
+    setAppliedFilter('');
+  }, []);
+  // Apply a time-window scope as a new crumb. `replaceIfSameKind` (range live-editing) overwrites the current
+  // crumb instead of stacking one per keystroke, when that crumb is an undrilled scope of the same kind.
+  const applyScope = useCallback((scoped: CallTreeScope, replaceIfSameKind = false) => {
+    setNavStack((s) => {
+      const top = s[s.length - 1];
+      const entry: NavEntry = { scope: scoped, frameRoot: scoped.frameRoot };
+      const replace = replaceIfSameKind && s.length > 1 && top.frameRoot == null && top.scope.kind === scoped.kind;
+      return replace ? [...s.slice(0, -1), entry] : [...s, entry];
+    });
     setFilterText('');
     setAppliedFilter('');
   }, []);
@@ -69,10 +114,36 @@ export default function CallTree() {
   const isTrace = kind === 'trace';
   useCpuFrameManifest(isTrace ? sessionId : null);
 
-  // The scope is a cross-panel command channel. A scope set for a different session is stale — fall back to whole-session.
+  // The store is the cross-panel command inbox: TimeArea / Detail "View in Call Tree" write a scope here; this
+  // panel observes it and pushes a breadcrumb crumb (with any frame-root it resolved — §8.2). Reconciled in-render
+  // (the documented "adjust state on prop change" pattern) so the tree never flashes the un-scoped view first. A
+  // scope owned by another session is stale.
   const storeScope = useCallTreeScopeStore((s) => s.scope);
   const ownerSessionId = useCallTreeScopeStore((s) => s.ownerSessionId);
-  const scope = ownerSessionId != null && ownerSessionId === sessionId ? storeScope : WHOLE_SESSION_SCOPE;
+  const incomingScope = ownerSessionId != null && ownerSessionId === sessionId ? storeScope : null;
+  const [synced, setSynced] = useState<{ sessionId: string | null; scope: CallTreeScope | null }>({
+    sessionId: null,
+    scope: null,
+  });
+  if (synced.sessionId !== sessionId) {
+    // Session changed — the whole nav history belonged to the old trace; drop it.
+    setSynced({ sessionId, scope: incomingScope });
+    setNavStack(
+      incomingScope != null && incomingScope.kind !== 'session'
+        ? [ROOT_ENTRY, { scope: incomingScope, frameRoot: incomingScope.frameRoot }]
+        : [ROOT_ENTRY],
+    );
+    setFilterText('');
+    setAppliedFilter('');
+  } else if (incomingScope !== synced.scope) {
+    // A new cross-panel scope command — push it as a crumb.
+    setSynced({ sessionId, scope: incomingScope });
+    if (incomingScope != null && incomingScope.kind !== 'session') {
+      setNavStack((s) => [...s, { scope: incomingScope, frameRoot: incomingScope.frameRoot }]);
+      setFilterText('');
+      setAppliedFilter('');
+    }
+  }
 
   const request = useMemo<CallTreeRequest>(
     () => ({
@@ -89,6 +160,108 @@ export default function CallTree() {
 
   const query = useCallTree(isTrace ? sessionId : null, request);
   const data = query.data ?? null;
+
+  // Re-fold ⇒ node indices are invalid ⇒ drop selection + any open context menu.
+  useEffect(() => {
+    setSelectedIndex(null);
+    setContextMenu(null);
+  }, [data]);
+
+  // A re-fold resets expansion to the default hot-path. Done in-render (the documented "adjust state
+  // on prop change" pattern) rather than in an effect so there is no all-collapsed flash on load.
+  if (expansion.key !== data) {
+    setExpansion({ key: data, set: defaultExpandedSet(data) });
+  }
+  const expandedSet = expansion.set;
+
+  // Chevron toggle — flip one node's membership.
+  const toggleExpand = useCallback((nodeIndex: number) => {
+    setExpansion((prev) => {
+      const set = new Set(prev.set);
+      if (set.has(nodeIndex)) {
+        set.delete(nodeIndex);
+      } else {
+        set.add(nodeIndex);
+      }
+      return { key: prev.key, set };
+    });
+  }, []);
+
+  // Context-menu "Expand subtree" — open this frame and every descendant.
+  const expandSubtree = useCallback(
+    (nodeIndex: number) => {
+      if (!data) {
+        return;
+      }
+      const sub = collectSubtree(data.nodes, nodeIndex);
+      setExpansion((prev) => ({ key: prev.key, set: new Set([...prev.set, ...sub]) }));
+    },
+    [data],
+  );
+
+  // Context-menu "Collapse subtree" — close this frame and drop every descendant from the set, so a
+  // later re-expand starts from a clean (collapsed) subtree.
+  const collapseSubtree = useCallback(
+    (nodeIndex: number) => {
+      if (!data) {
+        return;
+      }
+      const sub = new Set(collectSubtree(data.nodes, nodeIndex));
+      setExpansion((prev) => {
+        const set = new Set<number>();
+        for (const i of prev.set) {
+          if (!sub.has(i)) {
+            set.add(i);
+          }
+        }
+        return { key: prev.key, set };
+      });
+    },
+    [data],
+  );
+
+  // frameId → resolved symbol for a node index. `line === 0` ⇒ BCL / native frame with no source.
+  const resolveSymbol = useCallback(
+    (nodeIndex: number) => {
+      const node = data?.nodes[nodeIndex];
+      return node ? byId.get(node.frameId) ?? null : null;
+    },
+    [data, byId],
+  );
+
+  // Single-click — select the row and, if the Source Preview panel is open, sync it to this frame's
+  // source. Deliberately does not spawn the panel: surfacing it is the context menu's "Show inline".
+  const handleSelect = useCallback(
+    (nodeIndex: number) => {
+      setSelectedIndex(nodeIndex);
+      const sym = resolveSymbol(nodeIndex);
+      if (sym && sym.line > 0) {
+        updateSourcePreviewIfOpen(sym.file, sym.line);
+      }
+    },
+    [resolveSymbol],
+  );
+
+  // Double-click — open the frame's source in the external editor.
+  const handleActivate = useCallback(
+    (nodeIndex: number) => {
+      const sym = resolveSymbol(nodeIndex);
+      if (sym && sym.line > 0) {
+        void openInEditor(sym.file, sym.line);
+      }
+    },
+    [resolveSymbol, openInEditor],
+  );
+
+  // Right-click — select the row (so the menu acts on a visibly-highlighted frame) and open the menu.
+  const handleContextMenu = useCallback(
+    (e: React.MouseEvent, nodeIndex: number) => {
+      e.preventDefault();
+      handleSelect(nodeIndex);
+      setContextMenu({ x: e.clientX, y: e.clientY, nodeIndex });
+    },
+    [handleSelect],
+  );
 
   // Client-side method-name filter: a node is visible when it — or any descendant — matches the query, so the path to
   // every match stays on screen. Matching is per-word and CamelCase-hump aware (see methodNameMatch): "AUS" hump-matches
@@ -140,6 +313,10 @@ export default function CallTree() {
     return <EmptyState text={`Failed to load the call tree: ${query.error?.message ?? 'unknown error'}`} />;
   }
 
+  // Context-menu target — resolve the right-clicked node's symbol once for the menu render.
+  const ctxNode = contextMenu && data ? data.nodes[contextMenu.nodeIndex] ?? null : null;
+  const ctxSymbol = ctxNode ? byId.get(ctxNode.frameId) ?? null : null;
+
   return (
     <div className="flex h-full w-full flex-col overflow-hidden bg-background text-[11px]">
       <Toolbar
@@ -149,6 +326,9 @@ export default function CallTree() {
         groupByCategory={groupByCategory}
         onGroupByCategory={setGroupByCategory}
         scope={scope}
+        onApplyScope={applyScope}
+        onClearScope={() => navigateBreadcrumb(0)}
+        onPopScope={() => navigateBreadcrumb(navStack.length - 2)}
         data={data}
       />
 
@@ -175,8 +355,8 @@ export default function CallTree() {
         ) : (
           <div className="flex h-full w-full">
             <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-              {frameRootStack.length > 0 && (
-                <FocusBreadcrumb stack={frameRootStack} onNavigate={navigateBreadcrumb} />
+              {navStack.length > 1 && (
+                <NavBreadcrumb stack={navStack} onNavigate={navigateBreadcrumb} />
               )}
               <SearchBar
                 value={filterText}
@@ -189,6 +369,12 @@ export default function CallTree() {
                   rootTotal={data.totalSamples}
                   onDrill={drillInto}
                   filter={treeFilter}
+                  selectedIndex={selectedIndex}
+                  expandedSet={expandedSet}
+                  onSelect={handleSelect}
+                  onActivate={handleActivate}
+                  onContextMenu={handleContextMenu}
+                  onToggleExpand={toggleExpand}
                 />
               </div>
             </div>
@@ -196,6 +382,41 @@ export default function CallTree() {
           </div>
         )}
       </div>
+      {contextMenu && ctxNode && (
+        <CallTreeContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          methodName={friendlyMethodName(ctxSymbol?.method ?? `#${ctxNode.frameId}`)}
+          fullSignature={ctxSymbol?.method ?? `#${ctxNode.frameId}`}
+          sourceAvailable={ctxSymbol != null && ctxSymbol.line > 0}
+          hasChildren={ctxNode.children.length > 0}
+          onClose={() => setContextMenu(null)}
+          onShowInline={() => {
+            if (ctxSymbol && ctxSymbol.line > 0) {
+              openSourcePreview(ctxSymbol.file, ctxSymbol.line);
+            }
+            setContextMenu(null);
+          }}
+          onOpenInEditor={() => {
+            if (ctxSymbol && ctxSymbol.line > 0) {
+              void openInEditor(ctxSymbol.file, ctxSymbol.line);
+            }
+            setContextMenu(null);
+          }}
+          onFocusTree={() => {
+            drillInto(ctxNode.frameId);
+            setContextMenu(null);
+          }}
+          onExpandSubtree={() => {
+            expandSubtree(contextMenu.nodeIndex);
+            setContextMenu(null);
+          }}
+          onCollapseSubtree={() => {
+            collapseSubtree(contextMenu.nodeIndex);
+            setContextMenu(null);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -207,12 +428,21 @@ function Toolbar(props: {
   groupByCategory: boolean;
   onGroupByCategory: (v: boolean) => void;
   scope: CallTreeScope;
-  data: { totalSamples: number; managedSamples: number; externalSamples: number } | null;
+  /** Push a time-window scope as a new breadcrumb crumb (`replaceIfSameKind` for live range editing). */
+  onApplyScope: (scope: CallTreeScope, replaceIfSameKind?: boolean) => void;
+  /** Jump to the root crumb — drops every scope and drill. Backs the active-scope chip's ×. */
+  onClearScope: () => void;
+  /** Pop the current crumb — backs clearing the manual range fields. */
+  onPopScope: () => void;
+  data: {
+    totalSamples: number;
+    managedSamples: number;
+    externalSamples: number;
+    classificationAvailable: boolean;
+  } | null;
 }) {
   const { sessionId, scope } = props;
   const metadata = useProfilerSessionStore((s) => s.metadata);
-  const setScope = useCallTreeScopeStore((s) => s.setScope);
-  const resetScope = useCallTreeScopeStore((s) => s.reset);
 
   const systems = metadata?.systems ?? [];
   const phases = metadata?.phases ?? [];
@@ -237,17 +467,29 @@ function Toolbar(props: {
     const s = toUs(nextStartMs);
     const e = toUs(nextEndMs);
     if (s == null && e == null) {
-      resetScope();
+      // Both fields cleared — drop the range crumb if it is the active one.
+      if (scope.kind === 'range') props.onPopScope();
     } else {
-      setScope(sessionId, rangeScope(s, e));
+      // Live-typed range — replace the crumb rather than stack one per keystroke.
+      props.onApplyScope(rangeScope(s, e), true);
     }
   };
 
   return (
     <div className="flex flex-shrink-0 flex-wrap items-center gap-2 border-b border-border bg-card px-2 py-1.5">
+      {/* §8.7 — the on-CPU view is a true on-/off-core split only when the trace carried context-switch data; without
+          it the same view is a SampleType proxy, so it honestly labels itself "Thread time" instead of "On-CPU". */}
       <div className="flex items-center overflow-hidden rounded border border-border">
-        <ModeButton active={props.viewMode === 'on-cpu'} onClick={() => props.onViewMode('on-cpu')}>
-          On-CPU
+        <ModeButton
+          active={props.viewMode === 'on-cpu'}
+          onClick={() => props.onViewMode('on-cpu')}
+          title={
+            props.data?.classificationAvailable
+              ? 'Samples classified on-CPU — excludes GC pauses and voluntary waits'
+              : 'No context-switch data in this trace — shows managed-leaf samples (thread time), not a true on-CPU split'
+          }
+        >
+          {props.data?.classificationAvailable ? 'On-CPU' : 'Thread time'}
         </ModeButton>
         <ModeButton active={props.viewMode === 'wall-clock'} onClick={() => props.onViewMode('wall-clock')}>
           Wall-clock
@@ -273,7 +515,7 @@ function Toolbar(props: {
           if (!sessionId || e.target.value === '') return;
           const idx = Number(e.target.value);
           const sys = systems.find((s) => s.index === idx);
-          setScope(sessionId, systemScope(idx, sys?.name ?? `#${idx}`));
+          props.onApplyScope(systemScope(idx, sys?.name ?? `#${idx}`));
         }}
         title="Scope the call tree to a system"
         className="h-6 rounded border border-border bg-background px-1 text-[11px] text-foreground"
@@ -290,7 +532,7 @@ function Toolbar(props: {
         value={scope.kind === 'phase' && scope.phase != null ? scope.phase : ''}
         onChange={(e) => {
           if (!sessionId || e.target.value === '') return;
-          setScope(sessionId, phaseScope(e.target.value));
+          props.onApplyScope(phaseScope(e.target.value));
         }}
         title="Scope the call tree to a phase"
         className="h-6 rounded border border-border bg-background px-1 text-[11px] text-foreground"
@@ -332,13 +574,13 @@ function Toolbar(props: {
         ms
       </label>
 
-      {/* Active scope chip — shown for any scope other than whole-session. */}
+      {/* Active-scope chip — readout of the current crumb's time-window scope; its × jumps to the root crumb. */}
       {scope.kind !== 'session' && (
         <span className="flex items-center gap-1 rounded bg-accent/20 px-1.5 py-0.5 text-foreground">
           {scope.label}
           <button
             type="button"
-            onClick={resetScope}
+            onClick={props.onClearScope}
             className="ml-0.5 text-muted-foreground hover:text-foreground"
             aria-label="Clear scope"
           >
@@ -402,11 +644,22 @@ function DensitySparkline({ sessionId, request }: { sessionId: string; request: 
   );
 }
 
-function ModeButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
+function ModeButton({
+  active,
+  onClick,
+  title,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  title?: string;
+  children: React.ReactNode;
+}) {
   return (
     <button
       type="button"
       onClick={onClick}
+      title={title}
       className={`h-6 px-2 text-[11px] ${active ? 'bg-primary text-primary-foreground' : 'bg-background text-muted-foreground hover:bg-primary/10'}`}
     >
       {children}
@@ -456,32 +709,31 @@ function SearchBar({
 }
 
 /**
- * The frame-root drill path, rendered above the call-tree content. Each Crosshair "focus" pushed a
- * crumb; clicking a crumb re-roots the tree at that frame (popping the deeper crumbs); the leading
- * "root" crumb clears the drill entirely. Verbose declarations are shown friendly, full as tooltip.
+ * The Call Tree navigation stack, rendered as a breadcrumb. Each crumb is a complete view state (time-window scope +
+ * frame-root); clicking one restores that state, dropping the deeper crumbs. Crumb 0 is "All" — whole session, no
+ * scope, no drill. A crumb that carries a frame-root is labelled by that method; a scope-only crumb (a catalog pick
+ * or a range) by the scope label. Verbose method declarations are shown friendly, full as the tooltip.
  */
-function FocusBreadcrumb({ stack, onNavigate }: { stack: number[]; onNavigate: (depth: number) => void }) {
+function NavBreadcrumb({ stack, onNavigate }: { stack: NavEntry[]; onNavigate: (index: number) => void }) {
   const byId = useCpuFrameStore((s) => s.byId);
   return (
     <nav
-      aria-label="Call tree focus"
+      aria-label="Call tree navigation"
       className="flex flex-shrink-0 items-center gap-1 overflow-x-auto border-b border-border bg-card px-2 py-1"
     >
       <Crosshair className="h-3 w-3 shrink-0 text-muted-foreground" aria-hidden="true" />
-      <button
-        type="button"
-        onClick={() => onNavigate(0)}
-        className="shrink-0 text-muted-foreground hover:text-foreground hover:underline"
-      >
-        root
-      </button>
-      {stack.map((frameId, i) => {
-        const full = byId.get(frameId)?.method ?? `#${frameId}`;
-        const label = friendlyMethodName(full);
+      {stack.map((entry, i) => {
+        const isRoot = i === 0;
         const isCurrent = i === stack.length - 1;
+        const full = isRoot
+          ? 'Whole session'
+          : entry.frameRoot != null
+            ? byId.get(entry.frameRoot)?.method ?? `#${entry.frameRoot}`
+            : entry.scope.label;
+        const label = isRoot ? 'All' : entry.frameRoot != null ? friendlyMethodName(full) : entry.scope.label;
         return (
           <span key={i} className="flex shrink-0 items-center gap-1">
-            <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground/50" aria-hidden="true" />
+            {!isRoot && <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground/50" aria-hidden="true" />}
             {isCurrent ? (
               <span className="font-medium text-foreground" title={full}>
                 {label}
@@ -489,7 +741,7 @@ function FocusBreadcrumb({ stack, onNavigate }: { stack: number[]; onNavigate: (
             ) : (
               <button
                 type="button"
-                onClick={() => onNavigate(i + 1)}
+                onClick={() => onNavigate(i)}
                 className="text-muted-foreground hover:text-foreground hover:underline"
                 title={full}
               >
@@ -537,17 +789,71 @@ function highlightMatch(text: string, query: string): React.ReactNode {
   );
 }
 
+/** Row interaction handlers threaded from {@link CallTree} through {@link TreeBody} into every {@link TreeRow}. */
+type RowHandlers = {
+  /** Node index of the selected row, or null. */
+  selectedIndex: number | null;
+  /** The set of expanded node indices. */
+  expandedSet: Set<number>;
+  /** Single-click — select the row. */
+  onSelect: (nodeIndex: number) => void;
+  /** Double-click — open the frame's source in the editor. */
+  onActivate: (nodeIndex: number) => void;
+  /** Right-click — open the row context menu. */
+  onContextMenu: (e: React.MouseEvent, nodeIndex: number) => void;
+  /** Chevron click — toggle this node's expansion. */
+  onToggleExpand: (nodeIndex: number) => void;
+};
+
+/**
+ * The default hot-path expansion for a freshly-folded tree: the chain of hottest children (the server
+ * sorts children hottest-first) from the root down to depth 10. Matches the pre-lift per-row
+ * `onHotPath && depth < 10` default.
+ */
+function defaultExpandedSet(data: { nodes: CallTreeNode[] } | null): Set<number> {
+  const set = new Set<number>();
+  const root = data?.nodes[0];
+  if (!root) {
+    return set;
+  }
+  let idx: number | undefined = root.children[0];
+  for (let depth = 0; idx != null && depth < 10; depth++) {
+    set.add(idx);
+    idx = data?.nodes[idx]?.children[0];
+  }
+  return set;
+}
+
+/** Every node index in the subtree rooted at {@link rootIndex} (inclusive), via an iterative walk. */
+function collectSubtree(nodes: CallTreeNode[], rootIndex: number): number[] {
+  const out: number[] = [];
+  const stack = [rootIndex];
+  while (stack.length > 0) {
+    const i = stack.pop();
+    const node = i != null ? nodes[i] : undefined;
+    if (i == null || !node) {
+      continue;
+    }
+    out.push(i);
+    for (const c of node.children) {
+      stack.push(c);
+    }
+  }
+  return out;
+}
+
 function TreeBody({
   nodes,
   rootTotal,
   onDrill,
   filter,
+  ...rowHandlers
 }: {
   nodes: CallTreeNode[];
   rootTotal: number;
   onDrill: (frameId: number) => void;
   filter: TreeFilter | null;
-}) {
+} & RowHandlers) {
   const root = nodes[0];
   if (!root) {
     return null;
@@ -558,16 +864,17 @@ function TreeBody({
   }
   return (
     <div className="py-0.5">
-      {childIndices.map((childIdx, i) => (
+      {childIndices.map((childIdx) => (
         <TreeRow
           key={childIdx}
           node={nodes[childIdx]}
+          nodeIndex={childIdx}
           nodes={nodes}
           depth={0}
           rootTotal={rootTotal}
-          onHotPath={i === 0}
           onDrill={onDrill}
           filter={filter}
+          {...rowHandlers}
         />
       ))}
     </div>
@@ -576,29 +883,60 @@ function TreeBody({
 
 function TreeRow({
   node,
+  nodeIndex,
   nodes,
   depth,
   rootTotal,
-  onHotPath,
   onDrill,
   filter,
+  ...rowHandlers
 }: {
   node: CallTreeNode;
+  nodeIndex: number;
   nodes: CallTreeNode[];
   depth: number;
   rootTotal: number;
-  onHotPath: boolean;
   onDrill: (frameId: number) => void;
   filter: TreeFilter | null;
-}) {
-  const [expanded, setExpanded] = useState(onHotPath && depth < 10);
+} & RowHandlers) {
+  const { selectedIndex, expandedSet, onSelect, onActivate, onContextMenu, onToggleExpand } = rowHandlers;
   const byId = useCpuFrameStore((s) => s.byId);
-  const openInEditor = useOptionsStore((s) => s.openInEditor);
+
+  // §8.7 — synthetic involuntary-stall aggregate (`[GC suspension]` / `[Preempted]` / `[Paging]`). It has no real frame,
+  // no stack and no children: render a flat, distinct, non-interactive row — never a drill / go-to-source target.
+  const involuntaryLabel = INVOLUNTARY_FRAME_LABELS[node.frameId];
+  if (involuntaryLabel) {
+    const involuntaryPct = rootTotal > 0 ? (node.totalSamples / rootTotal) * 100 : 0;
+    return (
+      <div
+        className="relative flex h-[22px] cursor-default items-center gap-1 pr-2 leading-none hover:bg-primary/10"
+        style={{ paddingLeft: depth * 12 + 4 }}
+        title="Involuntary stall — the thread was frozen from outside (GC / scheduler / paging); the captured stack is noise (§8.7)"
+      >
+        <div
+          className="pointer-events-none absolute inset-y-0 left-0 -z-10 bg-amber-500/15"
+          style={{ width: `${Math.min(100, involuntaryPct)}%` }}
+          aria-hidden="true"
+        />
+        <span className="w-3.5 shrink-0" aria-hidden="true" />
+        <span className="min-w-0 flex-1 truncate italic text-amber-600 dark:text-amber-400">{involuntaryLabel}</span>
+        <span className="w-14 shrink-0 text-right font-mono tabular-nums text-foreground" title="total %">
+          {involuntaryPct.toFixed(1)}%
+        </span>
+        <span className="w-14 shrink-0 text-right font-mono tabular-nums text-muted-foreground">—</span>
+        <span className="w-16 shrink-0 text-right font-mono tabular-nums text-muted-foreground" title="total samples">
+          {node.totalSamples.toLocaleString()}
+        </span>
+        <span className="w-3 shrink-0" aria-hidden="true" />
+      </div>
+    );
+  }
 
   const symbol = byId.get(node.frameId);
   const method = symbol?.method ?? `#${node.frameId}`;
   const friendly = friendlyMethodName(method);
   const hasSource = symbol != null && symbol.line > 0;
+  const selected = nodeIndex === selectedIndex;
   const totalPct = rootTotal > 0 ? (node.totalSamples / rootTotal) * 100 : 0;
   const selfPct = rootTotal > 0 ? (node.selfSamples / rootTotal) * 100 : 0;
 
@@ -606,20 +944,19 @@ function TreeRow({
   // is on screen without manual drilling.
   const childIndices = filter ? node.children.filter((c) => filter.visible.has(c)) : node.children;
   const hasChildren = childIndices.length > 0;
-  const effectiveExpanded = filter != null ? true : expanded;
-
-  const onOpenSource = useCallback(() => {
-    if (hasSource && symbol) {
-      void openInEditor(symbol.file, symbol.line);
-    }
-  }, [hasSource, symbol, openInEditor]);
+  const effectiveExpanded = filter != null ? true : expandedSet.has(nodeIndex);
 
   return (
     <div>
       <div
-        className="relative flex h-[22px] cursor-default items-center gap-1 pr-2 leading-none hover:bg-primary/20"
+        className={`relative flex h-[22px] cursor-default items-center gap-1 pr-2 leading-none ${
+          selected ? 'bg-primary/30' : 'hover:bg-primary/20'
+        }`}
         style={{ paddingLeft: depth * 12 + 4 }}
         title={hasSource ? `${method}\n${symbol?.file}:${symbol?.line}` : method}
+        onClick={() => onSelect(nodeIndex)}
+        onDoubleClick={() => onActivate(nodeIndex)}
+        onContextMenu={(e) => onContextMenu(e, nodeIndex)}
       >
         {/* Hot-bar — total% as a faint background fill. */}
         <div
@@ -629,7 +966,12 @@ function TreeRow({
         />
         <button
           type="button"
-          onClick={() => hasChildren && filter == null && setExpanded((v) => !v)}
+          onClick={(e) => {
+            e.stopPropagation();
+            if (hasChildren && filter == null) {
+              onToggleExpand(nodeIndex);
+            }
+          }}
           className="w-3.5 shrink-0 text-muted-foreground"
           aria-label={hasChildren ? (effectiveExpanded ? 'Collapse' : 'Expand') : undefined}
         >
@@ -641,10 +983,7 @@ function TreeRow({
             )
           ) : null}
         </button>
-        <span
-          className={`min-w-0 flex-1 truncate ${hasSource ? 'cursor-pointer hover:text-accent hover:underline' : 'text-foreground'}`}
-          onClick={onOpenSource}
-        >
+        <span className="min-w-0 flex-1 truncate text-foreground">
           {filter ? highlightMatch(friendly, filter.query) : friendly}
           {hasSource && <FileCode className="ml-1 inline h-3 w-3 text-muted-foreground" aria-hidden="true" />}
         </span>
@@ -659,7 +998,10 @@ function TreeRow({
         </span>
         <button
           type="button"
-          onClick={() => onDrill(node.frameId)}
+          onClick={(e) => {
+            e.stopPropagation();
+            onDrill(node.frameId);
+          }}
           className="shrink-0 text-muted-foreground hover:text-foreground"
           title="Focus the tree on this frame"
           aria-label={`Focus the call tree on ${friendly}`}
@@ -668,16 +1010,17 @@ function TreeRow({
         </button>
       </div>
       {effectiveExpanded &&
-        childIndices.map((childIdx, i) => (
+        childIndices.map((childIdx) => (
           <TreeRow
             key={childIdx}
             node={nodes[childIdx]}
+            nodeIndex={childIdx}
             nodes={nodes}
             depth={depth + 1}
             rootTotal={rootTotal}
-            onHotPath={onHotPath && i === 0}
             onDrill={onDrill}
             filter={filter}
+            {...rowHandlers}
           />
         ))}
     </div>

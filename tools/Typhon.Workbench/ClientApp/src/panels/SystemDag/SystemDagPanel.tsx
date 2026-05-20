@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { IDockviewPanelProps } from 'dockview-react';
 import { useTopology } from '@/hooks/data/useTopology';
 import { useProfilerMetadata } from '@/hooks/profiler/useProfilerMetadata';
@@ -246,6 +246,36 @@ export default function SystemDagPanel(_props: IDockviewPanelProps) {
     return Number.isFinite(n) && n >= 1 ? n : null;
   }, [metadata]);
 
+  // Fit-request counter — incremented by every "want to fit" trigger. Consumed by the canvas's
+  // FitController, which gates on xyflow's readiness signal before actually fitting (see that
+  // component's docstring for the why). The panel only needs to bump; it never calls fitView.
+  //
+  // Triggers covered here:
+  //   - Fit button in the toolbar (via the `onFit` prop).
+  //   - Middle-click on the canvas (via SystemDagCanvas's `onRequestFit` prop, which it routes here).
+  //   - Tick-range change (the effect below) — user clicks another tick in the profiler → refit.
+  //
+  // NOT covered here (handled inside the canvas directly into FitController's local token):
+  //   - First-show / panel-becomes-visible / dockview readiness — the FitController's readiness
+  //     gate handles all of those without a special trigger, because xyflow's `width` / `height` /
+  //     `nodesInitialized` deps fire the effect when the gate opens.
+  //   - Layout switch / hideSkipped filter change / showEngineTracks toggle — the canvas reads
+  //     those locally and bumps the FitController's token directly.
+  const [fitSignal, setFitSignal] = useState(0);
+  const requestFit = useCallback(() => setFitSignal((n) => n + 1), []);
+
+  // Refit on every committed viewRange change (tick click in TickOverview, profiler scrub-settle).
+  // Skips the very first run (mount) — the FitController's readiness gate already produces the
+  // initial fit; an extra bump here would just be a duplicate token consumed on the same tick.
+  const viewRangeFirstRunRef = useRef(true);
+  useEffect(() => {
+    if (viewRangeFirstRunRef.current) {
+      viewRangeFirstRunRef.current = false;
+      return;
+    }
+    requestFit();
+  }, [viewRange.startUs, viewRange.endUs, requestFit]);
+
   if (!sessionId) {
     return <EmptyState message="No session attached. Open a trace or attach to a live engine to see the DAG." />;
   }
@@ -263,6 +293,7 @@ export default function SystemDagPanel(_props: IDockviewPanelProps) {
         autoSnapshotEnabled
         systemTickSummaries={metadata?.systemTickSummaries ?? null}
         workerCount={workerCount}
+        onFit={requestFit}
       />
       <div className="flex flex-1 overflow-hidden">
         <div className="flex-1 min-w-0">
@@ -281,6 +312,8 @@ export default function SystemDagPanel(_props: IDockviewPanelProps) {
             queryCountsBySystem={queryCountsBySystem}
             singleOwnedDefBySystem={singleOwnedDefBySystem}
             systemNameToIndex={systemNameToIndex}
+            fitSignal={fitSignal}
+            onRequestFit={requestFit}
             onSelectSystem={(name) => {
               setSystem(name);
               setSidePanelOverride(null);

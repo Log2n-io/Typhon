@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ReactFlow,
   Background,
   Controls,
   MiniMap,
   ViewportPortal,
+  useReactFlow,
+  useStore,
   type Edge,
   type Node,
   type NodeChange,
@@ -83,6 +85,19 @@ interface Props {
    * or multiple owned queries; the badge just applies the filter in that case.
    */
   singleOwnedDefBySystem: Map<string, { kind: number; localId: number }>;
+  /**
+   * Monotonic counter — every increment requests a fit. Combined with the internal triggers
+   * (layout / visibleTopology / showEngineTracks) into a local token consumed by
+   * <see cref="FitController"/>, which gates on xyflow's readiness (nodes measured, viewport sized)
+   * before actually calling <c>fitView</c>. The two-step (token → ready gate) is the whole reason
+   * this works under dockview's async layout — see the FitController docstring.
+   */
+  fitSignal: number;
+  /**
+   * Middle-click handler. The canvas's only internal trigger; defers to the panel's
+   * <c>requestFit</c> so every fit goes through the same single path.
+   */
+  onRequestFit: () => void;
 }
 
 const NODE_TYPES = { system: SystemDagNode as never };
@@ -103,6 +118,8 @@ export default function SystemDagCanvas({
   queryCountsBySystem,
   singleOwnedDefBySystem,
   systemNameToIndex,
+  fitSignal,
+  onRequestFit,
 }: Props) {
   // Layout is read straight from the store (avoids prop drilling). Switching layouts re-runs
   // `buildDagModel` and `<ReactFlow fitView>` re-fits the viewport to the new bounds.
@@ -521,6 +538,29 @@ export default function SystemDagCanvas({
 
   const onPaneClick = useMemo(() => () => onSelectSystem(null), [onSelectSystem]);
 
+  // All fit requests collapse into one monotonic token consumed by <FitController/> below. The
+  // controller gates on xyflow's readiness (nodes measured + viewport sized) and only then calls
+  // fitView — that's the entire reason the diagram lands on-screen even when the panel mounts
+  // inside a dockview hidden tab (display:none → 0×0 container) or before xyflow has finished
+  // measuring nodes. Earlier attempts called fitView imperatively against stale viewport state and
+  // produced fits to off-screen targets; the readiness gate is the global fix.
+  const [fitToken, setFitToken] = useState(0);
+  // External triggers (Fit button, middle-click, panel's tick-change effect) bump fitSignal.
+  // Internal triggers (layout switch, visibleTopology filter change, showEngineTracks toggle)
+  // bump the token directly. `showCrossPhaseEdges` is excluded — it changes edge visibility, not
+  // node positions, so refitting on its toggle would jitter the viewport for no reason.
+  useEffect(() => { setFitToken((n) => n + 1); }, [fitSignal]);
+  useEffect(() => { setFitToken((n) => n + 1); }, [layout, visibleTopology, showEngineTracks]);
+
+  // Middle-mouse-click → request fit. `onAuxClick` fires for any non-primary button; filter to
+  // button=1 (middle). Defers to the panel's request callback so every fit, regardless of source,
+  // flows through the same token → readiness-gate path.
+  const onAuxClick = useCallback((e: React.MouseEvent) => {
+    if (e.button !== 1) return;
+    e.preventDefault();
+    onRequestFit();
+  }, [onRequestFit]);
+
   if (model.nodes.length === 0) {
     return (
       <div className="flex h-full w-full items-center justify-center bg-background text-[12px] text-muted-foreground">
@@ -530,12 +570,14 @@ export default function SystemDagCanvas({
   }
 
   return (
-    <div className={`relative h-full w-full bg-background ${ctrlHeld ? 'cursor-grab' : ''}`}>
+    <div
+      className={`relative h-full w-full bg-background ${ctrlHeld ? 'cursor-grab' : ''}`}
+      onAuxClick={onAuxClick}
+    >
       <ReactFlow
         nodes={styledNodes}
         edges={styledEdges}
         nodeTypes={NODE_TYPES}
-        fitView
         // Ctrl-gated dragging: tiles only move when the user holds Ctrl. Without it,
         // dragging on a tile is treated as a click (so selection still works) and the
         // canvas itself is panned via `panOnDrag`. The 5px threshold prevents a normal
@@ -553,6 +595,7 @@ export default function SystemDagCanvas({
         onNodeMouseLeave={onNodeMouseLeave}
         onPaneClick={onPaneClick}
       >
+        <FitController token={fitToken} modelWidth={model.width} modelHeight={model.height} />
         {/*
           Lane backgrounds — rendered inside `ViewportPortal` so they share the ReactFlow viewport
           transform (translate + scale) with the nodes. Without this, the lanes are static in
@@ -865,4 +908,104 @@ function backpressureColour(stat: QueueBackpressureStat): string {
 function formatCount(n: number): string {
   if (n < 1000) return String(n);
   return `${(n / 1000).toFixed(1)}k`;
+}
+
+/**
+ * Single source of truth for fit-viewport behaviour. Lives inside <see cref="ReactFlow"/> so it can
+ * read xyflow's internal store via <see cref="useReactFlow"/> / <see cref="useStore"/> — these
+ * hooks require the ReactFlow context that <c>ReactFlow</c> sets up for its children.
+ *
+ * <para>
+ * <b>Why this exists.</b> Earlier attempts called <c>instance.fitView()</c> imperatively from
+ * timers / RAFs / ResizeObservers, hoping the viewport was sized by then. When mounted inside a
+ * dockview hidden tab (display:none → 0×0 container) those calls computed against stale state and
+ * produced fits to arbitrary off-screen targets — visible as an animation flying the diagram off
+ * the canvas.
+ * </para>
+ *
+ * <para>
+ * <b>How it works.</b> The controller watches the container's measured dimensions from xyflow's
+ * store (<c>width</c>, <c>height</c>; kept in sync by xyflow's own ResizeObserver) plus the model
+ * bounds passed in as props. <paramref name="token"/> is a monotonic counter incremented by every
+ * "want to fit" trigger upstream (Fit button, middle-click, tick change, layout switch, etc).
+ * </para>
+ *
+ * <para>
+ * <b>The rule.</b> Fit happens once per token, only when the container has real dimensions. If a
+ * token arrives while the container is still 0×0 (dockview hidden tab), nothing happens; the
+ * effect re-fires when the gate opens because <c>width</c> / <c>height</c> are in its dep list,
+ * at which point the still-unconsumed token is committed and the fit lands. This is the entire
+ * mechanism — no RAFs, no observers, no timers, no animations.
+ * </para>
+ *
+ * <para>
+ * <b>Note on <c>useNodesInitialized</c>.</b> Logically this controller would also gate on
+ * "nodes have been measured by xyflow". In our setup that hook stays permanently false — one of
+ * the custom node shapes apparently breaks xyflow's internal measurement pass (root cause still
+ * outstanding). We don't need it: the model's <c>width × height</c> comes from
+ * <c>buildDagModel</c> using the layout's known <c>NODE_WIDTH</c> / <c>NODE_HEIGHT</c> constants,
+ * so the bounds are correct regardless of xyflow's internal measurement state.
+ * </para>
+ */
+function FitController({
+  token,
+  modelWidth,
+  modelHeight,
+}: {
+  token: number;
+  modelWidth: number;
+  modelHeight: number;
+}) {
+  const instance = useReactFlow<Node<DagNodeData>, Edge<DagEdgeData>>();
+  // xyflow's store carries the canvas dimensions, kept in sync by its internal ResizeObserver.
+  const width = useStore((s) => s.width);
+  const height = useStore((s) => s.height);
+  // xyflow's clamp range — must match the props on <ReactFlow minZoom/maxZoom> below or we'd pick
+  // a zoom outside the allowed band and the viewport would still clip.
+  const minZoom = useStore((s) => s.minZoom);
+  const maxZoom = useStore((s) => s.maxZoom);
+  // Track the last token we actually fit on. If the gate is closed when a token arrives, this
+  // stays behind and the effect re-fires the moment the gate opens — that's the visibility-flip
+  // recovery path.
+  const consumedRef = useRef(-1);
+  useEffect(() => {
+    // <c>useNodesInitialized</c> stayed permanently false in our setup (one of the custom node
+    // shapes apparently breaks xyflow's internal measurement — investigated, not yet root-caused).
+    // We don't need it: the model's <c>width × height</c> comes from <c>buildDagModel</c> using
+    // the known <c>NODE_WIDTH</c> / <c>NODE_HEIGHT</c> constants the layout algorithm hands to
+    // dagre, so the bounds are correct regardless of whether xyflow has finished its own measure
+    // pass. The container's <c>width</c> / <c>height</c> alone are sufficient to compute the fit.
+    if (width <= 0 || height <= 0) return;
+    if (modelWidth <= 0 || modelHeight <= 0) return;
+    if (consumedRef.current === token) return;
+    consumedRef.current = token;
+
+    // Y-favoured fit against the FULL model bounds — not just node bounds. The model carries the
+    // surrounding chrome (DAG group boxes with their header strips, phase lane backgrounds and
+    // labels) which extends past the union of node rects; using <c>getNodesBounds</c> would clip
+    // those off the viewport even though they're rendered. <c>buildDagModel</c> publishes the full
+    // layout extent as <c>width × height</c> with origin (0, 0).
+    //
+    // We compute the zoom level that makes the diagram fill vertically (ignoring the X-axis fit).
+    // If the diagram is wider than the resulting on-screen footprint, the user pans horizontally —
+    // which is the usual reading flow for a top-down lane layout (eyes travel left→right within a
+    // phase, panels are typically taller than wide). xyflow's stock <c>fitView</c> picks
+    // <c>min(zoomY, zoomX)</c>, which on a wide diagram squeezes everything into a strip and
+    // wastes the vertical room.
+    //
+    // Padding is a fixed pixel inset (top + bottom) — keeps the gutter constant whatever the
+    // panel size. A percentage-based padding would eat 10% of a tall panel = 90 px of gap, which
+    // is far more than needed when the only purpose is "don't kiss the panel chrome".
+    const PADDING_PX = 10;
+    const usableHeight = Math.max(1, height - PADDING_PX * 2);
+    const rawZoom = usableHeight / modelHeight;
+    const zoom = Math.max(minZoom, Math.min(maxZoom, rawZoom));
+
+    // Center the bounds in the viewport at the chosen zoom. With Y filling and X overflowing
+    // symmetrically, the diagram lands centred and the user pans equally in either direction.
+    const x = width / 2 - (modelWidth / 2) * zoom;
+    const y = height / 2 - (modelHeight / 2) * zoom;
+    instance.setViewport({ x, y, zoom });
+  }, [token, width, height, minZoom, maxZoom, modelWidth, modelHeight, instance]);
+  return null;
 }

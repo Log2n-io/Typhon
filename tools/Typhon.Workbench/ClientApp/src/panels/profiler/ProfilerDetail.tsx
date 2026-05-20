@@ -12,6 +12,8 @@ import { useOptionsStore } from '@/stores/useOptionsStore';
 import { openSourcePreview } from '@/shell/commands/openSchemaBrowser';
 import { openViewCallTree, openViewExecutionInspector } from '@/shell/commands/profilerCommands';
 import { spanKindScope, systemScope, useCallTreeScopeStore } from '@/stores/useCallTreeScopeStore';
+import { useCpuFrameStore } from '@/stores/useCpuFrameStore';
+import { resolveFrameRootForSite } from '@/libs/profiler/resolveFrameRoot';
 import { useExecutionInspectorStore } from '@/panels/ExecutionInspector/useExecutionInspectorStore';
 import { useQueryPlanStore } from '@/panels/QueryPlanTree/useQueryPlanStore';
 import {
@@ -152,7 +154,10 @@ function SpanDetail({ span }: { span: SpanData }): React.JSX.Element {
 
   function handleScopeCallTree(): void {
     if (!sessionId) return;
-    setCallTreeScope(sessionId, spanKindScope(span.kind, span.name));
+    // Re-root the tree at the span's emitting method so its percentages are relative to that method,
+    // not the whole scope (§8.2). Null frame-root ⇒ un-rooted fallback.
+    const frameRoot = resolveFrameRootForSite(loc, useCpuFrameStore.getState().byId);
+    setCallTreeScope(sessionId, spanKindScope(span.kind, span.name, frameRoot));
     openViewCallTree();
   }
 
@@ -621,7 +626,9 @@ function ChunkDetail({ chunk }: { chunk: ChunkSpan }): React.JSX.Element {
 
   function handleScopeCallTree(): void {
     if (!sessionId) return;
-    setCallTreeScope(sessionId, systemScope(chunk.systemIndex, chunk.systemName || `System ${chunk.systemIndex}`));
+    // Re-root the tree at the system's method, same rationale as the span path (§8.2).
+    const frameRoot = resolveFrameRootForSite(loc, useCpuFrameStore.getState().byId);
+    setCallTreeScope(sessionId, systemScope(chunk.systemIndex, chunk.systemName || `System ${chunk.systemIndex}`, frameRoot));
     openViewCallTree();
   }
 

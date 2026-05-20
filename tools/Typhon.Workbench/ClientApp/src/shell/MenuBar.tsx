@@ -30,6 +30,7 @@ import {
   toggleViewSchemaIndexes,
   toggleViewSchemaLayout,
   toggleViewSchemaRelationships,
+  toggleViewSourcePreview,
   toggleViewSystemDag,
   saveLayoutAsDefault,
   resetLayout,
@@ -182,6 +183,13 @@ export default function MenuBar() {
  title={isProfilerSession ? undefined : 'Open a profiler trace or attach a session first'}
  >
  Call Tree
+ </MenubarItem>
+ <MenubarItem
+ disabled={!isProfilerSession}
+ onClick={toggleViewSourcePreview}
+ title={isProfilerSession ? undefined : 'Open a profiler trace or attach a session first'}
+ >
+ Source Preview
  </MenubarItem>
  <MenubarItem
  disabled={!isProfilerSession}

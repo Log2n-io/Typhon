@@ -43,6 +43,13 @@ public sealed class SchemaController : ControllerBase
         {
             return Ok(action());
         }
+        catch (SchemaBuildingException)
+        {
+            // Trace cache build still in flight — return 202 Accepted (no body) so the SPA's customFetch hands the
+            // hooks a "not ready" envelope and they retry quietly via refetchInterval. Mirrors the 202 contract on
+            // /profiler/metadata (see useProfilerMetadata.ts) so the two surfaces behave identically during build.
+            return StatusCode(StatusCodes.Status202Accepted);
+        }
         catch (SchemaUnavailableException ex)
         {
             // Distinct ProblemDetails title so the client can render a dedicated "schema unavailable for this session
