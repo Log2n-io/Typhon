@@ -2,6 +2,7 @@ using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using NUnit.Framework;
 using Typhon.Profiler;
 
@@ -55,7 +56,7 @@ public class IncrementalCacheBuilderTests
 
                 var sink = FileCacheSink.Create(cachePathB);
                 var profilerHeader = new ProfilerHeader { Version = fileHeader.Version, TimestampFrequency = fileHeader.TimestampFrequency };
-                using var builder = new IncrementalCacheBuilder(sink, ownsSink: true, profilerHeader, fingerprint, reader.SpanNames);
+                using var builder = new IncrementalCacheBuilder(sink, ownsSink: true, profilerHeader, fingerprint, reader.SpanNames, reader.EventQueues.ToDictionary(q => q.QueueIndex, q => q.Name));
                 while (reader.ReadNextBlock(out var recordBytes, out _))
                 {
                     var span = recordBytes.Span;
@@ -132,7 +133,7 @@ public class IncrementalCacheBuilderTests
 
                 var sink = FileCacheSink.Create(cachePath);
                 var profilerHeader = new ProfilerHeader { Version = fileHeader.Version, TimestampFrequency = fileHeader.TimestampFrequency };
-                using var builder = new IncrementalCacheBuilder(sink, ownsSink: true, profilerHeader, fingerprint, reader.SpanNames);
+                using var builder = new IncrementalCacheBuilder(sink, ownsSink: true, profilerHeader, fingerprint, reader.SpanNames, reader.EventQueues.ToDictionary(q => q.QueueIndex, q => q.Name));
                 builder.TickFinalized += _ => tickEvents++;
                 builder.ChunkFlushed += _ => chunkEvents++;
 
@@ -183,7 +184,7 @@ public class IncrementalCacheBuilderTests
 
                 var sink = FileCacheSink.Create(cachePath);
                 var profilerHeader = new ProfilerHeader { Version = fileHeader.Version, TimestampFrequency = fileHeader.TimestampFrequency };
-                using var builder = new IncrementalCacheBuilder(sink, ownsSink: true, profilerHeader, fingerprint, reader.SpanNames);
+                using var builder = new IncrementalCacheBuilder(sink, ownsSink: true, profilerHeader, fingerprint, reader.SpanNames, reader.EventQueues.ToDictionary(q => q.QueueIndex, q => q.Name));
 
                 reader.ReadNextBlock(out var recordBytes, out _);
                 var span = recordBytes.Span;
@@ -250,7 +251,7 @@ public class IncrementalCacheBuilderTests
 
                 var sink = FileCacheSink.Create(cachePath);
                 var profilerHeader = new ProfilerHeader { Version = fileHeader.Version, TimestampFrequency = fileHeader.TimestampFrequency };
-                using var builder = new IncrementalCacheBuilder(sink, ownsSink: true, profilerHeader, fingerprint, reader.SpanNames);
+                using var builder = new IncrementalCacheBuilder(sink, ownsSink: true, profilerHeader, fingerprint, reader.SpanNames, reader.EventQueues.ToDictionary(q => q.QueueIndex, q => q.Name));
                 while (reader.ReadNextBlock(out var recordBytes, out _))
                 {
                     builder.FeedRawRecords(recordBytes.Span);
@@ -317,7 +318,7 @@ public class IncrementalCacheBuilderTests
         var fingerprint = new byte[32];
         var profilerHeader = new ProfilerHeader { Version = TraceFileHeader.CurrentVersion, TimestampFrequency = 10_000_000 };
         var sink = new MemorySink();
-        var builder = new IncrementalCacheBuilder(sink, ownsSink: true, profilerHeader, fingerprint, new Dictionary<int, string>());
+        var builder = new IncrementalCacheBuilder(sink, ownsSink: true, profilerHeader, fingerprint, new Dictionary<int, string>(), new Dictionary<ushort, string>());
         builder.FeedRawRecords(buffer);
         builder.Dispose();   // flushes the trailing tick-1 chunk
 
@@ -378,7 +379,7 @@ public class IncrementalCacheBuilderTests
         var fingerprint = new byte[32];
         var profilerHeader = new ProfilerHeader { Version = TraceFileHeader.CurrentVersion, TimestampFrequency = 10_000_000 };
         var sink = new MemorySink();
-        using var builder = new IncrementalCacheBuilder(sink, ownsSink: true, profilerHeader, fingerprint, new Dictionary<int, string>());
+        using var builder = new IncrementalCacheBuilder(sink, ownsSink: true, profilerHeader, fingerprint, new Dictionary<int, string>(), new Dictionary<ushort, string>());
         builder.FeedRawRecords(buffer);
 
         Assert.That(builder.PreTickDroppedBytes, Is.GreaterThan(0L), "expected drops once the buffer hits its cap");
@@ -441,7 +442,49 @@ public class IncrementalCacheBuilderTests
     /// (common header only); first record per tick is <see cref="TraceEventKind.TickStart"/>, the rest are
     /// <see cref="TraceEventKind.Instant"/>.
     /// </summary>
-    private static void WriteSyntheticTrace(string path, int ticks, int eventsPerTick)
+    /// <summary>
+    /// End-to-end regression for the queue-name propagation gap that caused the Workbench's aggregate endpoint to
+    /// reject queue queries even when topology declared the queues (AntHill demo: "No queue named 'AntDied' in
+    /// topology" / fix in IncrementalCacheBuilder ctor `queueNames` arg). Writes a trace with a non-empty
+    /// <c>EventQueueCatalog</c>, runs it through <see cref="IncrementalCacheBuilder.Build"/>, then verifies the
+    /// resulting cache's <see cref="TraceFileCacheReader.QueueIdToName"/> table contains every entry. Before the fix
+    /// this dictionary was empty regardless of catalog contents — the bug shipped because no test exercised the
+    /// trace → cache pipeline end-to-end for queue names (V12CacheRoundTripTests tested only the *format* round-trip
+    /// with a hand-crafted dict).
+    /// </summary>
+    [Test]
+    public void Build_PropagatesEventQueueCatalogIntoQueueNameTable()
+    {
+        var sourcePath = Path.Combine(Path.GetTempPath(), $"icb-qnames-{Guid.NewGuid():N}.typhon-trace");
+        var cachePath = Path.Combine(Path.GetTempPath(), $"icb-qnames-{Guid.NewGuid():N}.typhon-trace-cache");
+        var catalog = new[]
+        {
+            new EventQueueRecord { QueueIndex = 0, Name = "AntDied",       Capacity = 4096, EventTypeName = "AntHill.Core.AntDiedEvent" },
+            new EventQueueRecord { QueueIndex = 1, Name = "FoodPickedUp",  Capacity = 4096, EventTypeName = "AntHill.Core.FoodPickedUpEvent" },
+            new EventQueueRecord { QueueIndex = 2, Name = "FoodDelivered", Capacity = 4096, EventTypeName = "AntHill.Core.FoodDeliveredEvent" },
+        };
+        try
+        {
+            WriteSyntheticTrace(sourcePath, ticks: 1, eventsPerTick: 10, eventQueueCatalog: catalog);
+
+            TraceFileCacheBuilder.Build(sourcePath, cachePath);
+
+            using var cacheStream = File.OpenRead(cachePath);
+            using var cacheReader = new TraceFileCacheReader(cacheStream);
+            Assert.That(cacheReader.QueueIdToName, Has.Count.EqualTo(3),
+                "All three queues from the EventQueueCatalog must land in the cache's QueueNameTable section");
+            Assert.That(cacheReader.QueueIdToName[0], Is.EqualTo("AntDied"));
+            Assert.That(cacheReader.QueueIdToName[1], Is.EqualTo("FoodPickedUp"));
+            Assert.That(cacheReader.QueueIdToName[2], Is.EqualTo("FoodDelivered"));
+        }
+        finally
+        {
+            if (File.Exists(sourcePath)) File.Delete(sourcePath);
+            if (File.Exists(cachePath)) File.Delete(cachePath);
+        }
+    }
+
+    private static void WriteSyntheticTrace(string path, int ticks, int eventsPerTick, EventQueueRecord[] eventQueueCatalog = null)
     {
         using var fs = File.Create(path);
         using var writer = new TraceFileWriter(fs);
@@ -466,7 +509,21 @@ public class IncrementalCacheBuilderTests
         writer.WriteComponentTypes(ReadOnlySpan<ComponentTypeRecord>.Empty);
         writer.WriteTracks(ReadOnlySpan<TrackRecord>.Empty);
         writer.WriteDags(ReadOnlySpan<DagRecord>.Empty);
-        writer.WriteEmptyStaticStructures();
+        if (eventQueueCatalog == null)
+        {
+            writer.WriteEmptyStaticStructures();
+        }
+        else
+        {
+            // Mirror WriteEmptyStaticStructures's ordering but inject the caller-supplied EventQueueCatalog so we can
+            // exercise the queue-name propagation path end-to-end.
+            writer.WriteComponentDefinitions(ReadOnlySpan<ComponentDefinitionRecord>.Empty);
+            writer.WriteArchetypeDefinitions(ReadOnlySpan<ArchetypeDefinitionRecord>.Empty);
+            writer.WriteIndexCatalog(ReadOnlySpan<IndexCatalogEntry>.Empty);
+            writer.WriteRuntimeConfig(null);
+            writer.WriteEventQueueCatalog(eventQueueCatalog);
+            writer.WriteResourceGraphSnapshot(ReadOnlySpan<ResourceGraphNodeRecord>.Empty);
+        }
 
         const int maxRecordsPerBlock = TraceFileWriter.MaxBlockBytes / CommonHeaderSize;
         var blockBuf = new byte[maxRecordsPerBlock * CommonHeaderSize];

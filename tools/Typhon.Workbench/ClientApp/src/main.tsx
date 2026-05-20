@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { QueryClient, QueryClientProvider, QueryCache, MutationCache } from '@tanstack/react-query';
 import App from './App';
 import { logError } from './stores/useLogStore';
+import { shouldSilence } from './lib/silenceErrors';
 // Load dockview's own stylesheet BEFORE globals.css so our theme-variable overrides in
 // globals.css come later in the cascade and win on equal-specificity selectors like
 // `.dockview-theme-dark`. Without this, the theme appears on the shell but dockview panels
@@ -23,9 +24,14 @@ const queryClient = new QueryClient({
     },
   },
   // Log failures globally into the Workbench Logs panel. Individual call sites can still handle the
-  // error their own way via try/catch — this is the floor, not a replacement.
+  // error their own way via try/catch — this is the floor, not a replacement. Queries can opt out
+  // of the global log via `meta.silenceErrors`:
+  //   - `true` — always silence (e.g. fs/stat on a moved/deleted recent file: every 404 is expected).
+  //   - `(error) => boolean` — predicate (e.g. typeName schema hooks: silence 404s when the URL
+  //     restored a selection that doesn't exist in the new session, but still log 500s).
   queryCache: new QueryCache({
     onError: (error, query) => {
+      if (shouldSilence(error, query.meta)) return;
       logError(`Query failed: ${query.queryKey.join(' / ')}`, {
         error: error instanceof Error ? error.message : String(error),
         queryKey: query.queryKey,
@@ -34,6 +40,7 @@ const queryClient = new QueryClient({
   }),
   mutationCache: new MutationCache({
     onError: (error, _vars, _ctx, mutation) => {
+      if (shouldSilence(error, mutation.meta)) return;
       const key = mutation.options.mutationKey?.join(' / ') ?? '(anonymous mutation)';
       logError(`Mutation failed: ${key}`, {
         error: error instanceof Error ? error.message : String(error),

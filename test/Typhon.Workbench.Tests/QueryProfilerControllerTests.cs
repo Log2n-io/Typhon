@@ -5,9 +5,11 @@ using System.Net.Http;
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Threading.Tasks;
+using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using Typhon.Workbench.Dtos.Sessions;
 using Typhon.Workbench.Fixtures;
+using Typhon.Workbench.Sessions;
 
 namespace Typhon.Workbench.Tests;
 
@@ -145,5 +147,48 @@ public sealed class QueryProfilerControllerTests
         // controller validates the byte range.
         var resp = await SendAsync(session.SessionId, "queries/999/1");
         Assert.That(resp.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest));
+    }
+
+    [Test]
+    public async Task QueryCatalogEndpoints_WhileTraceBuildInProgress_Return202_Accepted()
+    {
+        // Mirrors SchemaController's IsSchemaBuilding flow: a trace session whose static state isn't ready yet must
+        // surface 202 Accepted (with a Retry-After hint) from every query-catalog endpoint so the SPA hooks poll
+        // quietly via refetchInterval instead of logging "Query catalog is only available …" on every panel mount.
+        // Uses a fake ISession with `IsSchemaBuilding=true` and `StaticSchemaProvider=null`, identical to the
+        // schema-controller test pattern, so we exercise the 202 branch without racing the real cache builder.
+        var manager = _factory.Services.GetRequiredService<SessionManager>();
+        var fakeId = Guid.NewGuid();
+        manager.Create(new FakeBuildingSession(fakeId));
+
+        foreach (var route in new[]
+                 {
+                     "queries",
+                     "queries/0/1",
+                     "queries/0/1/executions",
+                     "executions/12345",
+                     "executions/by-parent/12345",
+                     "executions/by-system-tick/0/1",
+                 })
+        {
+            var req = new HttpRequestMessage(HttpMethod.Get, $"/api/sessions/{fakeId}/profiler/{route}");
+            req.Headers.Add("X-Session-Token", fakeId.ToString());
+            var resp = await _client.SendAsync(req);
+            Assert.That(resp.StatusCode, Is.EqualTo(HttpStatusCode.Accepted), $"route={route}");
+            Assert.That(resp.Headers.Contains("Retry-After"), Is.True, $"route={route} missing Retry-After");
+        }
+    }
+
+    /// <summary>
+    /// Test fake — mirrors a trace session whose background cache build is still in flight. Reports
+    /// <c>IsSchemaBuilding=true</c> so the controller's <c>CatalogNotReadyResponse</c> returns 202 (not 409).
+    /// </summary>
+    private sealed record FakeBuildingSession(Guid Id) : ISession
+    {
+        public SessionKind Kind => SessionKind.Trace;
+        public SessionState State => SessionState.Trace;
+        public string FilePath => string.Empty;
+        public Typhon.Workbench.Schema.IStaticSchemaProvider StaticSchemaProvider => null;
+        public bool IsSchemaBuilding => true;
     }
 }

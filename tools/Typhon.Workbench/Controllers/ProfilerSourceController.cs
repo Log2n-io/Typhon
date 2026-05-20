@@ -1,5 +1,7 @@
 using System.Text;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Typhon.Workbench.Hosting;
 using Typhon.Workbench.Middleware;
 
@@ -125,8 +127,25 @@ public sealed class ProfilerSourceController : ControllerBase
         }
 
         var allLines = System.IO.File.ReadAllLines(fullPath, Encoding.UTF8);
-        var startLine = Math.Max(1, line - ctx);
-        var endLine = Math.Min(allLines.Length, line + ctx);
+
+        // Prefer showing exactly the method block enclosing `line` — Roslyn-detected, so braces inside
+        // strings / comments / interpolations never truncate it. Fall back to a fixed ±context window
+        // for non-C# files, or a line that sits in no method-like member.
+        int startLine;
+        int endLine;
+        var method = path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase)
+            ? FindEnclosingMethodLines(string.Join('\n', allLines), line)
+            : null;
+        if (method is { } block)
+        {
+            startLine = Math.Clamp(block.Start, 1, allLines.Length);
+            endLine = Math.Clamp(block.End, startLine, allLines.Length);
+        }
+        else
+        {
+            startLine = Math.Max(1, line - ctx);
+            endLine = Math.Min(allLines.Length, line + ctx);
+        }
         var window = new string[endLine - startLine + 1];
         Array.Copy(allLines, startLine - 1, window, 0, window.Length);
 
@@ -136,6 +155,46 @@ public sealed class ProfilerSourceController : ControllerBase
             StartLine: startLine,
             EndLine: endLine,
             Lines: window));
+    }
+
+    /// <summary>
+    /// The 1-based <c>[Start, End]</c> line range of the smallest method-like declaration enclosing
+    /// <paramref name="line"/> in the C# <paramref name="source"/> — method / constructor / operator,
+    /// local function, property / indexer / event, or accessor. Returns <c>null</c> when the line sits
+    /// in no such member (the caller then falls back to a fixed ±context window).
+    /// </summary>
+    /// <remarks>
+    /// Roslyn-based on purpose: brace counting from the method line mis-handles braces inside strings,
+    /// char literals, comments and interpolations. <see cref="CSharpSyntaxTree.ParseText(string, CSharpParseOptions, string, Encoding, System.Threading.CancellationToken)"/>
+    /// never throws on malformed input — it yields a best-effort tree — so a partially-broken file still
+    /// resolves what it can.
+    /// </remarks>
+    internal static (int Start, int End)? FindEnclosingMethodLines(string source, int line)
+    {
+        var root = CSharpSyntaxTree.ParseText(source).GetRoot();
+        var target = line - 1; // Roslyn line positions are 0-based.
+        (int Start, int End)? best = null;
+        foreach (var node in root.DescendantNodes())
+        {
+            if (node is not (BaseMethodDeclarationSyntax or LocalFunctionStatementSyntax
+                or AccessorDeclarationSyntax or BasePropertyDeclarationSyntax))
+            {
+                continue;
+            }
+            var span = node.GetLocation().GetLineSpan();
+            var start = span.StartLinePosition.Line;
+            var end = span.EndLinePosition.Line;
+            if (target < start || target > end)
+            {
+                continue;
+            }
+            // Smallest enclosing member wins — a local function inside a method, an accessor in a property.
+            if (best is not { } cur || (end - start) < (cur.End - cur.Start))
+            {
+                best = (start + 1, end + 1);
+            }
+        }
+        return best;
     }
 
     /// <summary>

@@ -267,6 +267,52 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
             "releasing a slot must reset the cursor so the freed slot can be reused");
     }
 
+    [Test]
+    public void ClaimSlotInCell_Phase2_ReclaimsSlotBehindStaleHighCursor()
+    {
+        // ClaimSlotInCell's phase-2 scan must reclaim a slot freed behind a stale-high cursor — without it the cursor would skip the free slot and a new
+        // cluster would be wrongly allocated. This is the correctness backstop that lets the parallel-migration release path skip the cursor reset.
+        using var dbe = SetupEngineWithGrid();
+        var meta = Archetype<ClCohUnit>.Metadata;
+        int clusterSize = meta.ClusterLayout.ClusterSize;
+
+        EntityId toKill = default;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            for (int i = 0; i < clusterSize * 3; i++)
+            {
+                var id = tx.Spawn<ClCohUnit>(ClCohUnit.Pos.Set(PointAt(50f, 50f)));
+                if (i == 0) { toKill = id; } // an entity in the first cluster
+            }
+            tx.Commit();
+        }
+
+        var cs = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
+        int cellKey = dbe.SpatialGrid.WorldToCellKey(50f, 50f);
+        int clusterCountBefore = cs.ActiveClusterCount;
+        Assert.That(clusterCountBefore, Is.EqualTo(3), "exactly 3 full clusters spawned");
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.Destroy(toKill); // frees a slot in cluster index 0
+            tx.Commit();
+        }
+
+        // Plant a stale-high cursor (past every cluster) — simulates the parallel-migration path where releases no longer reset the cursor.
+        cs.CellClusterPool.SetScanCursor(cellKey, 3);
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.Spawn<ClCohUnit>(ClCohUnit.Pos.Set(PointAt(50f, 50f)));
+            tx.Commit();
+        }
+
+        Assert.That(cs.ActiveClusterCount, Is.EqualTo(clusterCountBefore),
+            "phase-2 must reclaim the freed slot in cluster 0 — no new cluster allocated despite the stale-high cursor");
+        Assert.That(cs.CellClusterPool.GetScanCursor(cellKey), Is.EqualTo(0),
+            "phase-2 success moves the cursor backward to the reclaimed region");
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // Destroy — cell state maintenance
     // ═══════════════════════════════════════════════════════════════════════

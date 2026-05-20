@@ -148,6 +148,9 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
     private SpanInstanceIndex _spanInstanceIndex;
     private readonly object _spanInstanceIndexLock = new();
 
+    private SampleClassifier _sampleClassifier;
+    private readonly object _sampleClassifierLock = new();
+
     /// <summary>
     /// #351 Phase 5 — per-session index of every instrumented span instance grouped by kind, used by the
     /// <see cref="Services.ScopeResolver"/> for span-kind call-tree scoping. Built lazily on first access (a one-pass chunk
@@ -182,6 +185,44 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
                     _spanInstanceIndex = SpanInstanceIndex.Empty;
                 }
                 return _spanInstanceIndex;
+            }
+        }
+    }
+
+    /// <summary>
+    /// #364 §8.7 — per-session classifier that labels each CPU sample on-CPU / voluntary-wait / involuntary-stall by joining
+    /// it against GC-suspension intervals and context-switch slices. Built lazily on first access (a one-pass chunk walk) and
+    /// cached for the session's lifetime; best-effort — returns <see cref="SampleClassifier.Empty"/> before the build
+    /// completes and on any read failure (the call-tree fold then degrades to the <c>SampleType</c> proxy).
+    /// </summary>
+    public SampleClassifier SampleClassifier
+    {
+        get
+        {
+            if (_sampleClassifier != null)
+            {
+                return _sampleClassifier;
+            }
+            lock (_sampleClassifierLock)
+            {
+                if (_sampleClassifier != null)
+                {
+                    return _sampleClassifier;
+                }
+                if (!IsReady || _reader == null)
+                {
+                    return SampleClassifier.Empty;
+                }
+                try
+                {
+                    _sampleClassifier = SampleClassifier.Build(_reader);
+                }
+                catch (Exception ex)
+                {
+                    LogSampleClassifierFailed(ex, _filePath);
+                    _sampleClassifier = SampleClassifier.Empty;
+                }
+                return _sampleClassifier;
             }
         }
     }

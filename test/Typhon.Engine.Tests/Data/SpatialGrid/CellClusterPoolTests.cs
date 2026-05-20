@@ -206,4 +206,23 @@ class CellClusterPoolTests
         Assert.That(pool.GetScanCursor(cellKey: 0), Is.EqualTo(0));
         Assert.That(pool.GetScanCursor(cellKey: 5), Is.EqualTo(0));
     }
+
+    [Test]
+    public void SetScanCursor_MovesBackward()
+    {
+        var pool = new CellClusterPool(cellCount: 16);
+        pool.AdvanceScanCursor(cellKey: 4, value: 12);
+
+        // SetScanCursor is unconditional — unlike AdvanceScanCursor it moves the cursor backward (phase-2 self-healing).
+        pool.SetScanCursor(cellKey: 4, value: 3);
+        Assert.That(pool.GetScanCursor(cellKey: 4), Is.EqualTo(3));
+    }
+
+    [Test]
+    public void SetScanCursor_MovesForward()
+    {
+        var pool = new CellClusterPool(cellCount: 16);
+        pool.SetScanCursor(cellKey: 4, value: 9);
+        Assert.That(pool.GetScanCursor(cellKey: 4), Is.EqualTo(9));
+    }
 }

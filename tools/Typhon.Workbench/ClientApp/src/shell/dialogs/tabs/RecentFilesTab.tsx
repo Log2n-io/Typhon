@@ -54,8 +54,13 @@ function RecentFileRow({ entry, onOpen, onOpenTrace }: { entry: RecentFile } & P
     : 'bg-muted text-muted-foreground';
 
   // Live file metadata — recent entries persist only the path, so size + modified time are
-  // re-statted on render. A moved/deleted file simply 404s and the parenthetical is omitted.
-  const stat = useGetApiFsStat({ path: entry.filePath }, { query: { staleTime: 30_000 } });
+  // re-statted on render. A moved/deleted file simply 404s and the parenthetical is omitted;
+  // `silenceErrors` opts this query out of the global Logs-panel error stream so a stale recent
+  // doesn't spam one "Query failed" entry per render.
+  const stat = useGetApiFsStat(
+    { path: entry.filePath },
+    { query: { staleTime: 30_000, meta: { silenceErrors: true } } },
+  );
   const meta = stat.data?.data;
   const size = formatFileSize(meta?.size);
   const age = formatRelativeAge(meta?.lastWriteUtc);

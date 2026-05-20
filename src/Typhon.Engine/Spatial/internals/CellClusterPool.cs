@@ -95,6 +95,14 @@ internal sealed class CellClusterPool
     public void ResetScanCursor(int cellKey) => _cellScanCursor[cellKey] = 0;
 
     /// <summary>
+    /// Unconditionally set the cell's scan cursor to <paramref name="value"/>. Unlike <see cref="AdvanceScanCursor"/> this may move the cursor <b>backward</b>
+    /// — used by <c>ArchetypeClusterState.ClaimSlotInCell</c>'s phase-2 self-healing scan when it reclaims a free slot behind a stale-high cursor. Safe as a
+    /// plain write because every cell's cursor is single-writer across all call paths: serial entity spawn, worker-exclusive migration destination cell, and
+    /// serial entity destroy. See <see cref="_cellScanCursor"/>.
+    /// </summary>
+    public void SetScanCursor(int cellKey, int value) => _cellScanCursor[cellKey] = value;
+
+    /// <summary>
     /// Read-only span of the cluster chunk IDs currently attached to <paramref name="cellKey"/>. May be empty.
     /// </summary>
     public ReadOnlySpan<int> GetClusters(int cellKey)

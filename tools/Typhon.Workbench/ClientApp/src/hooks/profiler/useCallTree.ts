@@ -6,8 +6,10 @@ export type CallTreeViewMode = 'on-cpu' | 'wall-clock';
 
 /**
  * One node of the folded call tree. `children` holds indices into {@link CallTreeResponse.nodes} — the tree is
- * flat on the wire (a deep call stack would otherwise blow past System.Text.Json's MaxDepth). The synthetic root
- * carries `frameId === -1`.
+ * flat on the wire (a deep call stack would otherwise blow past System.Text.Json's MaxDepth).
+ *
+ * Negative `frameId`s are synthetic, not real frames: `-1` is the tree root; `-2`/`-3`/`-4` are the §8.7
+ * involuntary-stall aggregates — see {@link INVOLUNTARY_FRAME_LABELS}.
  */
 export interface CallTreeNode {
   frameId: number;
@@ -15,6 +17,17 @@ export interface CallTreeNode {
   totalSamples: number;
   children: number[];
 }
+
+/**
+ * Labels for the synthetic §8.7 involuntary-stall aggregate nodes (server: `CallTreeFolder.GcSuspensionFrameId` etc.).
+ * A node whose `frameId` is a key here is an aggregate of samples whose stack was bad-luck noise — it has no children
+ * and never resolves against the frame-symbol manifest.
+ */
+export const INVOLUNTARY_FRAME_LABELS: Record<number, string> = {
+  [-2]: '[GC suspension]',
+  [-3]: '[Preempted]',
+  [-4]: '[Paging]',
+};
 
 /** Self-time sample count attributed to one subsystem category. */
 export interface CategorySlice {
@@ -29,6 +42,12 @@ export interface CallTreeResponse {
   managedSamples: number;
   externalSamples: number;
   categoryBreakdown: CategorySlice[];
+  /**
+   * §8.7 — `true` when the trace carried context-switch data, so the on-CPU view is a true on-/off-core split. `false`
+   * ⇒ degraded mode (GC stalls still classified, the rest by the `SampleType` proxy); the panel then labels its first
+   * view "Thread time" rather than "On-CPU".
+   */
+  classificationAvailable: boolean;
 }
 
 /**

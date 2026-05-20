@@ -1117,7 +1117,8 @@ public static class TelemetryConfig
                 ]),
             ]),
             // OS thread scheduling — Windows-only, requires admin. Enables EtwSchedulingPump which observes context-switches for Typhon-registered threads and
-            // emits one record per on-CPU slice (kind 254). Off by default — opt in via Profiler:Runtime:ThreadScheduling:Enabled = true.
+            // emits one record per on-CPU slice (kind 254). Default is COUPLED to CpuSampling (see the coupling block after the resolve below): enabling
+            // CPU sampling pulls this on too, since §8.7 sample classification needs the slices. An explicit Profiler:Runtime:ThreadScheduling:Enabled wins.
             new Node("ThreadScheduling"),
         ]);
         var runtimeRootExplicit = ReadBool(config, "Typhon:Profiler:Runtime:Enabled", false);
@@ -1154,6 +1155,18 @@ public static class TelemetryConfig
         RuntimeWriteTickFenceClusterSpatialActive = runtimeMap["Runtime:WriteTickFence:Cluster:Spatial"];
 
         RuntimeThreadSchedulingActive = runtimeMap["Runtime:ThreadScheduling"];
+
+        // §8.7 — CPU sampling is wall-clock thread-time: classifying a sample as truly on-CPU (vs. parked at a lock or
+        // the GC barrier) needs the context-switch slices the EtwSchedulingPump emits. So the ThreadScheduling DEFAULT is
+        // coupled to CpuSampling — enabling CPU sampling pulls scheduling capture on too, with no second knob. An explicit
+        // Profiler:Runtime:ThreadScheduling:Enabled (true OR false) still wins; the coupling only fills an absent default.
+        // The pump's own Windows + elevation guards (EtwSchedulingPump.Start) still degrade gracefully where unsupported.
+        if (!RuntimeThreadSchedulingActive
+            && ProfilerCpuSamplingActive
+            && string.IsNullOrEmpty(config["Typhon:Profiler:Runtime:ThreadScheduling:Enabled"]))
+        {
+            RuntimeThreadSchedulingActive = true;
+        }
 
         // ─── Storage subtree (Phase 5 final shape) ─────────────────────────────
         // Greenfield deeper subtree; the existing per-kind suppression list still controls

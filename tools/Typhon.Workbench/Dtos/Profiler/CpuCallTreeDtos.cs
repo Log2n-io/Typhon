@@ -38,7 +38,13 @@ public sealed record CallTreeRequestDto(
 /// One node of the folded call tree. <see cref="Children"/> holds <i>indices</i> into the flat
 /// <see cref="CallTreeResponseDto.Nodes"/> array — the tree is not nested on the wire. A real CPU call stack can be
 /// hundreds of frames deep; a nested-object tree of that depth blows past System.Text.Json's <c>MaxDepth</c>, so the
-/// depth lives in index links instead. The synthetic root carries <c>FrameId == -1</c>.
+/// depth lives in index links instead.
+/// <para>
+/// Negative <see cref="FrameId"/>s are synthetic, not real frames: <c>-1</c> is the tree root; <c>-2</c> / <c>-3</c> /
+/// <c>-4</c> are the §8.7 involuntary-stall aggregates (<c>[GC suspension]</c> / <c>[Preempted]</c> / <c>[Paging]</c>) —
+/// root children with no stack beneath them, never resolved against the frame-symbol manifest. See
+/// <see cref="Services.CallTreeFolder.GcSuspensionFrameId"/> and siblings.
+/// </para>
 /// </summary>
 public sealed record CallTreeNodeDto(int FrameId, long SelfSamples, long TotalSamples, int[] Children);
 
@@ -50,16 +56,22 @@ public sealed record CategorySliceDto(int CategoryId, long SelfSamples);
 /// array — <c>Nodes[0]</c> is always the synthetic root; every node's <c>Children</c> are indices into this array.
 /// <see cref="TotalSamples"/> is the sample count in scope; <see cref="ManagedSamples"/> / <see cref="ExternalSamples"/>
 /// split it by <c>SampleType</c>; <see cref="CategoryBreakdown"/> is the §8.6 self-time-per-category aggregation.
+/// <para>
+/// <see cref="ClassificationAvailable"/> (§8.7) is <c>true</c> when the trace carried context-switch data, so the tree is
+/// a true on-CPU / voluntary-wait / involuntary-stall split. When <c>false</c> the fold ran in degraded mode (GC stalls
+/// still classified, everything else by the <c>SampleType</c> proxy) and the panel labels its on-CPU view "thread time".
+/// </para>
 /// </summary>
 public sealed record CallTreeResponseDto(
     CallTreeNodeDto[] Nodes,
     long TotalSamples,
     long ManagedSamples,
     long ExternalSamples,
-    CategorySliceDto[] CategoryBreakdown)
+    CategorySliceDto[] CategoryBreakdown,
+    bool ClassificationAvailable)
 {
     /// <summary>Returned when the trace carries no CPU samples (or none fall in scope) — a lone synthetic root.</summary>
-    public static CallTreeResponseDto Empty { get; } = new([new CallTreeNodeDto(-1, 0, 0, [])], 0, 0, 0, []);
+    public static CallTreeResponseDto Empty { get; } = new([new CallTreeNodeDto(-1, 0, 0, [])], 0, 0, 0, [], false);
 }
 
 /// <summary>

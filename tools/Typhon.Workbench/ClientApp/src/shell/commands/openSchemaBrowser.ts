@@ -145,6 +145,15 @@ export function toggleViewDbMap(): void {
   toggleDockPanel('dbmap', 'DbMap', 'Database File Map');
 }
 
+/**
+ * #302: open / close the inline Source Preview panel. Opens empty — the {@link registerDockApi}
+ * selection subscription feeds it the resolved `file:line` on the next span / chunk click; until
+ * then the panel shows its "No source location selected" placeholder.
+ */
+export function toggleViewSourcePreview(): void {
+  toggleDockPanel('source-preview', 'SourcePreview', 'Source Preview');
+}
+
 /** Debug-only: the colour-palette reference panel. Reachable from the command palette alone — no View-menu entry. */
 export function toggleViewPaletteDebug(): void {
   toggleDockPanel('palette-debug', 'PaletteDebug', 'Color Palettes');
@@ -155,23 +164,51 @@ export function toggleViewPaletteDebug(): void {
 /**
  * #302 Phase 7: open the inline source-preview panel for a given file:line. Each invocation reuses
  * one panel id so opening a second source from the Source row replaces the contents instead of
- * stacking panels.
+ * stacking panels. Always surfaces the panel — see {@link surfacePanel}.
  */
 export function openSourcePreview(path: string, line: number): void {
   const api = registeredApi;
   if (!api) return;
-  const existing = api.getPanel('source-preview');
-  if (existing) {
-    existing.api.updateParameters({ path, line });
-    existing.focus();
-    return;
+  let panel = api.getPanel('source-preview');
+  if (panel) {
+    panel.api.updateParameters({ path, line });
+  } else {
+    api.addPanel({
+      id: 'source-preview',
+      component: 'SourcePreview',
+      title: 'Source Preview',
+      params: { path, line },
+    });
+    panel = api.getPanel('source-preview');
   }
-  api.addPanel({
-    id: 'source-preview',
-    component: 'SourcePreview',
-    title: 'Source Preview',
-    params: { path, line },
-  });
+  surfacePanel(panel);
+}
+
+/**
+ * Make a panel actually visible. `panel.focus()` activates the panel's tab within its group, but a
+ * panel docked in a *collapsed edge group* would stay hidden — `focus()` never expands one. So
+ * expand the panel's group first (a no-op for a regular, non-edge group), then focus.
+ */
+function surfacePanel(panel: ReturnType<DockviewApi['getPanel']>): void {
+  if (!panel) return;
+  const group = panel.api.group;
+  if (group.api.isCollapsed()) {
+    group.api.expand();
+  }
+  panel.focus();
+}
+
+/**
+ * #351: update the Source Preview panel's content **only when it is already open** — the select-a-row
+ * counterpart to {@link openSourcePreview}. A plain selection must never spawn the panel (the user
+ * owns that real estate); it just keeps an already-open panel in sync. No-op when the panel is closed.
+ */
+export function updateSourcePreviewIfOpen(path: string, line: number): void {
+  const api = registeredApi;
+  if (!api) return;
+  const panel = api.getPanel('source-preview');
+  if (!panel) return;
+  panel.api.updateParameters({ path, line });
 }
 
 /**

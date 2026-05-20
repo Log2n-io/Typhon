@@ -42,6 +42,13 @@ public sealed class SchemaService
         var provider = session.StaticSchemaProvider;
         if (provider == null)
         {
+            // Sessions that report IsSchemaBuilding (a trace whose background cache build hasn't completed) get
+            // a distinct exception → 202 Accepted, so the UI polls quietly during the build window instead of
+            // logging a hard error every time a schema panel mounts.
+            if (session.IsSchemaBuilding)
+            {
+                throw new SchemaBuildingException(sessionId);
+            }
             throw new SchemaUnavailableException(sessionId, session.Kind.ToString());
         }
         return provider;
@@ -65,4 +72,15 @@ public sealed class SchemaUnavailableException(Guid sessionId, string sessionKin
 {
     public Guid SessionId { get; } = sessionId;
     public string SessionKind { get; } = sessionKind;
+}
+
+/// <summary>
+/// The trace session's background cache build hasn't finished yet, so the static-schema tables aren't projected.
+/// Controllers map this to 202 Accepted (mirrors the existing <c>/profiler/metadata</c> pattern) so the SPA can poll
+/// without logging a hard error for the duration of the build.
+/// </summary>
+public sealed class SchemaBuildingException(Guid sessionId)
+    : Exception($"Trace session {sessionId} schema is still being built.")
+{
+    public Guid SessionId { get; } = sessionId;
 }

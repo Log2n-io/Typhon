@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { colorForPhase, SYSTEM_PALETTE } from '@/libs/palettes';
 import { pickTextColorFor } from '@/libs/colors';
@@ -6,6 +6,17 @@ import { useHoverStore } from '@/stores/useHoverStore';
 import { computeWorkerOccupancy, type TickPathBar, type TickPathBars, type TickPathPostTick, type WorkerOccupancy } from './criticalPath';
 import { packIntervals } from './intervalPacking';
 import { useCriticalPathViewStore, type Orientation } from './useCriticalPathViewStore';
+import {
+  drawnUsAt,
+  easeOutCubic,
+  interpZoomWindow,
+  pushViewHistory,
+  stepViewHistory,
+  viewParamsForWindow,
+  visibleWindow,
+  type DrawnWindow,
+  type ViewHistory,
+} from './criticalPathZoom';
 
 interface Props {
   bars: TickPathBars;
@@ -40,6 +51,9 @@ interface Props {
 const RULER_PX = 20;
 const PHASE_LANE_PX = 13;
 const RIBBON_PX = 15;
+/** An occupancy cell prints its percentage inline only when the rect is large enough to hold the label un-clipped. */
+const RIBBON_LABEL_MIN_W = 26;
+const RIBBON_LABEL_MIN_H = 11;
 const TRACK_PX = 30;
 /** Height of the Tracks band (#354) — a single non-overlapping lane, shown only in the "All" scope. */
 const TRACK_BAND_PX = 14;
@@ -50,6 +64,12 @@ const BAND_GAP_PX = 4;
 const EDGE_PAD_PX = 6;
 /** Width of the sticky left band-label gutter (horizontal orientation only). */
 const GUTTER_PX = 92;
+/** Pointer travel (px) before a press is treated as a drag-to-zoom rather than a click. */
+const DRAG_THRESHOLD_PX = 3;
+/** Duration of the zoom-to-selection tween — matches the profiler's TimeArea for an identical feel. */
+const ZOOM_ANIMATION_MS = 800;
+/** Cap on CP-local zoom/pan history entries — back/forward walks at most this many states. */
+const CP_HISTORY_CAP = 50;
 
 export default function CriticalPathView({ bars, selectedSystemName, onSelectBar, fitSignal, onFit, workerCount }: Props) {
   const rawOrientation = useCriticalPathViewStore((s) => s.orientation);
@@ -72,12 +92,35 @@ export default function CriticalPathView({ bars, selectedSystemName, onSelectBar
   const [panMajor, setPanMajor] = useState(0);
   const panMajorRef = useRef(0);
 
+  // ── Drag-to-zoom gesture ────────────────────────────────────────────────
+  // `dragRef` tracks an in-flight major-axis selection; `dragRect` mirrors it into render state so
+  // the selection overlay paints. `suppressClickRef` swallows the synthetic click that trails a
+  // moved drag so it doesn't also select a bar. `tweenRef` drives the 800 ms ease-out zoom tween —
+  // same machinery as the profiler's TimeArea: it interpolates the drawn-µs window endpoints and
+  // each rAF frame derives `(pxPerUs, panMajor)` from the lerped window.
+  const dragRef = useRef<{ startMajor: number; currentMajor: number; moved: boolean } | null>(null);
+  const [dragRect, setDragRect] = useState<{ a: number; b: number } | null>(null);
+  const suppressClickRef = useRef(false);
+  const tweenRef = useRef<{ from: { start: number; end: number }; to: { start: number; end: number }; startTime: number } | null>(null);
+  const rafRef = useRef(0);
+
+  // CP-local zoom/pan history — independent of the profiler's shared nav-history stack. Mouse
+  // back/forward over the CP panel walks THIS stack (drag-to-zoom / wheel / fit states), restored
+  // with the same 800 ms tween. Each entry is a drawn-µs window; `pointer` is the current position.
+  // A fit resets the stack — its windows are tick-relative, hence stale once the displayed tick
+  // changes.
+  const historyRef = useRef<ViewHistory>({ entries: [], pointer: -1 });
+  // Debounce timer — a wheel burst settles into a single history entry.
+  const wheelSettleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const orientation: Exclude<Orientation, 'auto'> = useMemo(
     () => resolveOrientation(rawOrientation, stableViewportSize.width, stableViewportSize.height),
     [rawOrientation, stableViewportSize.width, stableViewportSize.height],
   );
   const orientationRef = useRef(orientation);
   orientationRef.current = orientation;
+  const viewportSizeRef = useRef(viewportSize);
+  viewportSizeRef.current = viewportSize;
 
   // ── Timeline model ──────────────────────────────────────────────────────
   // Drawn timeline = [metronome lead] + [tick body 0..endUs] + [post-tick tail]. A tick-relative
@@ -188,6 +231,63 @@ export default function CriticalPathView({ bars, selectedSystemName, onSelectBar
     onFit();
   }, [showMetronome, onFit]);
 
+  // ── Drag-to-zoom: 800 ms ease-out tween ─────────────────────────────────
+  // Ref-stored step function (TimeArea pattern) so the rAF recursion never captures a stale
+  // closure — every frame reads the freshest orientation / viewport off the refs.
+  const stepTweenRef = useRef<() => void>(() => {});
+  stepTweenRef.current = () => {
+    const tw = tweenRef.current;
+    if (!tw) return;
+    const orient = orientationRef.current;
+    const g = orient === 'horizontal' ? GUTTER_PX : 0;
+    const vp = viewportSizeRef.current;
+    const vpMajor = Math.max(1, orient === 'horizontal' ? vp.width : vp.height);
+    const raw = (performance.now() - tw.startTime) / ZOOM_ANIMATION_MS;
+    const w = interpZoomWindow(tw.from, tw.to, easeOutCubic(raw));
+    const { pxPerUs: pp, panMajor: pm } = viewParamsForWindow(w.start, w.end, g, vpMajor);
+    useCriticalPathViewStore.getState().setPxPerUs(pp);
+    setPanMajor(pm);
+    if (raw >= 1) {
+      tweenRef.current = null;
+    } else {
+      rafRef.current = requestAnimationFrame(() => stepTweenRef.current());
+    }
+  };
+
+  // Kick a tween from the current visible window to the dragged `[start, end]` drawn-µs window.
+  const animateToWindow = useCallback((start: number, end: number): void => {
+    const orient = orientationRef.current;
+    const g = orient === 'horizontal' ? GUTTER_PX : 0;
+    const vp = viewportSizeRef.current;
+    const vpMajor = Math.max(1, orient === 'horizontal' ? vp.width : vp.height);
+    const from = visibleWindow(panMajorRef.current, useCriticalPathViewStore.getState().pxPerUs, g, vpMajor);
+    tweenRef.current = { from, to: { start, end }, startTime: performance.now() };
+    cancelAnimationFrame(rafRef.current);
+    rafRef.current = requestAnimationFrame(() => stepTweenRef.current());
+  }, []);
+
+  useEffect(() => () => {
+    cancelAnimationFrame(rafRef.current);
+    if (wheelSettleRef.current) clearTimeout(wheelSettleRef.current);
+  }, []);
+
+  // ── CP-local zoom/pan history ───────────────────────────────────────────
+  // Append the current viewport to CP history (drops forward entries, caps length).
+  const pushHistory = useCallback((w: DrawnWindow): void => {
+    historyRef.current = pushViewHistory(historyRef.current, w, CP_HISTORY_CAP);
+  }, []);
+
+  // Walk CP history by `dir` (−1 back, +1 forward) and tween to that entry. No-op at either end.
+  const navigateHistory = useCallback((dir: -1 | 1): void => {
+    // A pending wheel-settle push would land on the wrong slot after we move the pointer — drop it.
+    if (wheelSettleRef.current) { clearTimeout(wheelSettleRef.current); wheelSettleRef.current = null; }
+    const stepped = stepViewHistory(historyRef.current, dir);
+    if (stepped === historyRef.current) return; // at an end — nothing to navigate to
+    historyRef.current = stepped;
+    const w = stepped.entries[stepped.pointer];
+    animateToWindow(w.start, w.end);
+  }, [animateToWindow]);
+
   // ── Wheel: cursor-anchored zoom + clip-and-pan ──────────────────────────
   // The time axis is clipped to the viewport (no native scrollbar — TimeArea model). Plain wheel
   // zooms around the cursor; horizontal wheel / Shift+wheel pan the time axis; Ctrl/Cmd+wheel
@@ -197,6 +297,9 @@ export default function CriticalPathView({ bars, selectedSystemName, onSelectBar
     if (!el) return;
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
+      // A wheel gesture overrides any in-flight zoom tween — drop it so they don't fight.
+      tweenRef.current = null;
+      cancelAnimationFrame(rafRef.current);
       const rect = el.getBoundingClientRect();
       const orient = orientationRef.current;
       const g = orient === 'horizontal' ? GUTTER_PX : 0;
@@ -210,6 +313,16 @@ export default function CriticalPathView({ bars, selectedSystemName, onSelectBar
         else el.scrollLeft += e.deltaY;
         return;
       }
+      // Any non-Ctrl wheel changes the major-axis viewport — debounce it into one CP history entry.
+      if (wheelSettleRef.current) clearTimeout(wheelSettleRef.current);
+      wheelSettleRef.current = setTimeout(() => {
+        wheelSettleRef.current = null;
+        const wOrient = orientationRef.current;
+        const wg = wOrient === 'horizontal' ? GUTTER_PX : 0;
+        const wvp = viewportSizeRef.current;
+        const wMajor = Math.max(1, wOrient === 'horizontal' ? wvp.width : wvp.height);
+        pushHistory(visibleWindow(panMajorRef.current, useCriticalPathViewStore.getState().pxPerUs, wg, wMajor));
+      }, 250);
       if (e.deltaX !== 0 || e.shiftKey) {
         // Horizontal wheel, or Shift+wheel → pan the time axis.
         const delta = e.shiftKey ? e.deltaY : e.deltaX;
@@ -226,7 +339,7 @@ export default function CriticalPathView({ bars, selectedSystemName, onSelectBar
     };
     el.addEventListener('wheel', onWheel, { passive: false });
     return () => el.removeEventListener('wheel', onWheel);
-  }, [totalSpanUs]);
+  }, [totalSpanUs, pushHistory]);
 
   // Re-clamp the pan when a zoom-out or a viewport resize shrinks the pannable range.
   useEffect(() => {
@@ -256,21 +369,42 @@ export default function CriticalPathView({ bars, selectedSystemName, onSelectBar
     const major = o === 'horizontal' ? v.width - GUTTER_PX : v.height;
     if (major <= 0) return; // viewport not measured yet — keep the latch, retry on the next size change
     pendingFitRef.current = false;
+    // A fit overrides any in-flight tween / pending wheel-settle and resets CP history: the new
+    // framing becomes the lone entry — the old windows are tick-relative, hence stale here.
+    tweenRef.current = null;
+    cancelAnimationFrame(rafRef.current);
+    if (wheelSettleRef.current) { clearTimeout(wheelSettleRef.current); wheelSettleRef.current = null; }
     setPxPerUs(major / Math.max(1, total));
     setPanMajor(0); // fitted content fills the viewport exactly — pan back to the start.
+    historyRef.current = { entries: [{ start: 0, end: total }], pointer: 0 };
   }, [fitSignal, viewportSize, setPxPerUs]);
 
-  // Middle-click = fit.
+  // Middle-click = fit. Mouse thumb buttons = CP-local zoom-history back/forward.
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
     const onDown = (e: MouseEvent) => {
-      if (e.button !== 1) return;
-      e.preventDefault();
-      onFit();
+      if (e.button === 1) {
+        e.preventDefault();
+        onFit();
+        return;
+      }
+      // Mouse 3 = back (Shift = forward), Mouse 4 = forward — same mapping as the global mouse-nav
+      // handler (`useKeyboardShortcuts`). `stopPropagation` keeps that global handler from ALSO
+      // firing, so back/forward acts only on the panel the cursor is over.
+      if (e.button === 3) {
+        e.preventDefault();
+        e.stopPropagation();
+        navigateHistory(e.shiftKey ? 1 : -1);
+      } else if (e.button === 4) {
+        e.preventDefault();
+        e.stopPropagation();
+        navigateHistory(1);
+      }
     };
+    // Suppress the browser's own back/forward — Chrome / Edge navigate on mouseup / auxclick.
     const onAux = (e: MouseEvent) => {
-      if (e.button === 1) e.preventDefault();
+      if (e.button === 1 || e.button === 3 || e.button === 4) e.preventDefault();
     };
     el.addEventListener('mousedown', onDown, { passive: false });
     el.addEventListener('auxclick', onAux, { passive: false });
@@ -278,7 +412,82 @@ export default function CriticalPathView({ bars, selectedSystemName, onSelectBar
       el.removeEventListener('mousedown', onDown);
       el.removeEventListener('auxclick', onAux);
     };
-  }, [onFit]);
+  }, [onFit, navigateHistory]);
+
+  // ── Drag-to-zoom: pointer gesture ───────────────────────────────────────
+  const onPointerDown = (e: React.PointerEvent<HTMLDivElement>): void => {
+    if (e.button !== 0) return;
+    const el = scrollRef.current;
+    if (!el) return;
+    // A fresh press overrides any in-flight tween and any pending wheel-settle history push.
+    tweenRef.current = null;
+    cancelAnimationFrame(rafRef.current);
+    if (wheelSettleRef.current) { clearTimeout(wheelSettleRef.current); wheelSettleRef.current = null; }
+    suppressClickRef.current = false;
+    const rect = el.getBoundingClientRect();
+    const orient = orientationRef.current;
+    const g = orient === 'horizontal' ? GUTTER_PX : 0;
+    const major = orient === 'horizontal' ? e.clientX - rect.left : e.clientY - rect.top;
+    if (major < g) return; // started in the band-label gutter — not a time-axis selection
+    dragRef.current = { startMajor: major, currentMajor: major, moved: false };
+  };
+
+  const onPointerMove = (e: React.PointerEvent<HTMLDivElement>): void => {
+    const drag = dragRef.current;
+    const el = scrollRef.current;
+    if (!drag || !el) return;
+    const rect = el.getBoundingClientRect();
+    const orient = orientationRef.current;
+    const g = orient === 'horizontal' ? GUTTER_PX : 0;
+    const vpMajor = orient === 'horizontal' ? rect.width : rect.height;
+    const raw = orient === 'horizontal' ? e.clientX - rect.left : e.clientY - rect.top;
+    const major = Math.max(g, Math.min(vpMajor, raw));
+    drag.currentMajor = major;
+    if (!drag.moved && Math.abs(major - drag.startMajor) >= DRAG_THRESHOLD_PX) {
+      drag.moved = true;
+      // Capture only once the gesture is a real drag — a plain click never captures, so a bar's
+      // native click still lands and selects.
+      try { el.setPointerCapture(e.pointerId); } catch { /* noop */ }
+    }
+    if (drag.moved) {
+      suppressClickRef.current = true;
+      setDragRect({ a: drag.startMajor, b: major });
+    }
+  };
+
+  const onPointerUp = (e: React.PointerEvent<HTMLDivElement>): void => {
+    const drag = dragRef.current;
+    dragRef.current = null;
+    setDragRect(null);
+    try { scrollRef.current?.releasePointerCapture(e.pointerId); } catch { /* noop */ }
+    if (!drag || !drag.moved) return;
+    const orient = orientationRef.current;
+    const g = orient === 'horizontal' ? GUTTER_PX : 0;
+    const pp = useCriticalPathViewStore.getState().pxPerUs;
+    const pmc = panMajorRef.current;
+    const m1 = Math.min(drag.startMajor, drag.currentMajor);
+    const m2 = Math.max(drag.startMajor, drag.currentMajor);
+    const d1 = drawnUsAt(m1, pmc, pp, g);
+    const d2 = drawnUsAt(m2, pmc, pp, g);
+    if (d2 - d1 > 1e-6) {
+      pushHistory({ start: d1, end: d2 });
+      animateToWindow(d1, d2);
+    }
+  };
+
+  const onPointerCancel = (): void => {
+    dragRef.current = null;
+    setDragRect(null);
+  };
+
+  // Swallow the click that trails a moved drag-to-zoom so it doesn't also select a bar.
+  const handleBarSelect = (systemName: string, tickNumber: number): void => {
+    if (suppressClickRef.current) {
+      suppressClickRef.current = false;
+      return;
+    }
+    onSelectBar(systemName, tickNumber);
+  };
 
   // ── Geometry helpers ────────────────────────────────────────────────────
   // A tick-relative time → drawn-µs (metronome lead included) → px on the major axis. The gutter
@@ -307,6 +516,10 @@ export default function CriticalPathView({ bars, selectedSystemName, onSelectBar
     <div
       ref={scrollRef}
       className="relative h-full w-full overflow-auto bg-background"
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onPointerCancel={onPointerCancel}
       onMouseLeave={() => {
         setTooltip(null);
         setHoveredSystem(null);
@@ -486,7 +699,7 @@ export default function CriticalPathView({ bars, selectedSystemName, onSelectBar
             orientation={orientation}
             selected={bar.systemName === selectedSystemName}
             hovered={bar.systemName === hoveredSystem}
-            onSelect={() => onSelectBar(bar.systemName, bars.tickNumber)}
+            onSelect={() => handleBarSelect(bar.systemName, bars.tickNumber)}
             onTip={(e, lines) => showTip(e, setTooltip, { kind: 'bar', lines })}
             onLeaveTip={() => setTooltip(null)}
             setHoveredSystem={setHoveredSystem}
@@ -504,7 +717,7 @@ export default function CriticalPathView({ bars, selectedSystemName, onSelectBar
             orientation={orientation}
             selected={bar.systemName === selectedSystemName}
             hovered={bar.systemName === hoveredSystem}
-            onSelect={() => onSelectBar(bar.systemName, bars.tickNumber)}
+            onSelect={() => handleBarSelect(bar.systemName, bars.tickNumber)}
             onTip={(e, lines) => showTip(e, setTooltip, { kind: 'bar', lines })}
             onLeaveTip={() => setTooltip(null)}
             setHoveredSystem={setHoveredSystem}
@@ -555,6 +768,27 @@ export default function CriticalPathView({ bars, selectedSystemName, onSelectBar
             {fullGantt && nonCpTracksPx > 0 && <GutterLabel y={nonCpStart} h={nonCpTracksPx} label="Systems" />}
           </g>
         )}
+
+        {/* ── Drag-to-zoom selection overlay ───────────────────────────────
+            Drawn last so it sits above every band. `dragRect` carries major-axis container px,
+            which equals the SVG major coordinate (the SVG is viewport-sized on the major axis). */}
+        {dragRect && (() => {
+          const lo = Math.min(dragRect.a, dragRect.b);
+          const r = rect(lo, Math.abs(dragRect.b - dragRect.a), 0, minorTotalPx);
+          return (
+            <rect
+              x={r.x}
+              y={r.y}
+              width={r.width}
+              height={r.height}
+              fill="var(--primary)"
+              fillOpacity={0.18}
+              stroke="var(--primary)"
+              strokeWidth={1}
+              pointerEvents="none"
+            />
+          );
+        })()}
       </svg>
       {tooltip && <Tooltip tooltip={tooltip} />}
       {bars.mode === 'execution-order' && <FallbackBadge />}
@@ -758,19 +992,41 @@ function OccupancyRibbon({
         stroke="var(--border)"
         strokeWidth={1}
       />
-      {cells.map(({ r, level, i, opacity }) => (
-        <rect
-          key={i}
-          x={r.x}
-          y={r.y}
-          width={r.width}
-          height={r.height}
-          fill={SYSTEM_PALETTE[5].fill}
-          fillOpacity={opacity}
-          onMouseEnter={(e) => onTip(e, [`Worker occupancy — ${level.toFixed(1)} / ${workerCount}`, `${((level / workerCount) * 100).toFixed(0)}% of the worker pool busy here.`])}
-          onMouseLeave={onLeave}
-        />
-      ))}
+      {cells.map(({ r, level, i, opacity }) => {
+        const pct = Math.round((level / workerCount) * 100);
+        // Print the percentage inside the cell when it is wide and tall enough for the label not to clip.
+        // The label is always drawn horizontally, so a thin vertical ribbon (width = RIBBON_PX) skips it.
+        const showLabel = r.width >= RIBBON_LABEL_MIN_W && r.height >= RIBBON_LABEL_MIN_H;
+        return (
+          <g key={i}>
+            <rect
+              x={r.x}
+              y={r.y}
+              width={r.width}
+              height={r.height}
+              fill={SYSTEM_PALETTE[5].fill}
+              fillOpacity={opacity}
+              onMouseEnter={(e) => onTip(e, [`Worker occupancy — ${level.toFixed(1)} / ${workerCount}`, `${pct}% of the worker pool busy here.`])}
+              onMouseLeave={onLeave}
+            />
+            {showLabel && (
+              <text
+                x={r.x + r.width / 2}
+                y={r.y + r.height / 2}
+                fontSize={10}
+                fontWeight="bold"
+                fontFamily="ui-monospace, monospace"
+                textAnchor="middle"
+                dominantBaseline="central"
+                pointerEvents="none"
+                fill="var(--foreground)"
+              >
+                {pct}%
+              </text>
+            )}
+          </g>
+        );
+      })}
     </g>
   );
 }

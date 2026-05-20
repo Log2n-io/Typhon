@@ -18,6 +18,9 @@
     <ItemGroup>
         <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.0" />
         <PackageReference Include="Scalar.AspNetCore" Version="2.9.0" />
+        <!-- Roslyn syntax API — ProfilerSourceController parses C# files to crop the inline source
+             preview to the enclosing method block. -->
+        <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="5.3.0" />
     </ItemGroup>
 
     <!-- The test project unit-tests the internal Database File Map decoders (L4Decoder, StorageFieldFormatter). -->

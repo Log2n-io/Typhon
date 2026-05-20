@@ -22,6 +22,9 @@ public sealed class TraceSession : ISession, IDisposable
     /// </remarks>
     public IStaticSchemaProvider StaticSchemaProvider => Runtime.StaticSchemaProvider;
 
+    /// <inheritdoc />
+    public bool IsSchemaBuilding => !Runtime.IsBuildComplete;
+
     public TraceSession(Guid id, string filePath, TraceSessionRuntime runtime)
     {
         Id = id;

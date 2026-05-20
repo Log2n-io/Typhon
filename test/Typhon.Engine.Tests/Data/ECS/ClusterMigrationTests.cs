@@ -176,6 +176,115 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
     }
 
     // ═══════════════════════════════════════════════════════════════════════
+    // Scan-cursor behaviour under migration (issue #364 — cursor-thrash fix)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    [Test]
+    public void Migration_OutOfCell_DoesNotResetSourceCursor()
+    {
+        // A parallel-fence migration release (deferFinalize:true) must NOT reset the source cell's scan cursor. That reset — firing on every release across
+        // non-worker-exclusive source cells — is what thrashed the cursor and reintroduced the O(M²) re-scan during ExecuteMigrations.
+        using var dbe = SetupEngineWithGrid();
+        var meta = Archetype<ClMigUnit>.Metadata;
+        int clusterSize = meta.ClusterLayout.ClusterSize;
+
+        EntityId firstInCell = default;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            for (int i = 0; i < clusterSize * 3; i++)
+            {
+                var id = tx.Spawn<ClMigUnit>(
+                    ClMigUnit.Pos.Set(PointAt(50f, 50f)),
+                    ClMigUnit.Scratch.Set(ScratchOf(0, 0f)));
+                if (i == 0) { firstInCell = id; }
+            }
+            tx.Commit();
+        }
+
+        var cs = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
+        int srcCell = dbe.SpatialGrid.WorldToCellKey(50f, 50f);
+        int cursorBefore = cs.CellClusterPool.GetScanCursor(srcCell);
+        Assert.That(cursorBefore, Is.GreaterThan(0), "cursor advanced during the spawn");
+
+        // Migrate one entity out of srcCell — the release runs on the deferFinalize migration path.
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var eref = tx.OpenMut(firstInCell);
+            ref var pos = ref eref.Write(ClMigUnit.Pos);
+            pos.Bounds = new AABB2F { MinX = 850f, MinY = 150f, MaxX = 850f, MaxY = 150f };
+            tx.Commit();
+        }
+        dbe.WriteTickFence(1);
+
+        Assert.That(cs.CellClusterPool.GetScanCursor(srcCell), Is.EqualTo(cursorBefore),
+            "a migration release must leave the source cell's cursor untouched (no thrash)");
+    }
+
+    [Test]
+    public void Migration_IntoCellWithFreedSlot_ReusesViaPhase2()
+    {
+        // After a migration frees a slot behind the destination cell's (un-reset) cursor, a later migration into that cell must reclaim the slot via
+        // ClaimSlotInCell's phase-2 scan rather than allocate a new cluster.
+        using var dbe = SetupEngineWithGrid();
+        var meta = Archetype<ClMigUnit>.Metadata;
+        int clusterSize = meta.ClusterLayout.ClusterSize;
+
+        EntityId firstInCell = default;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            for (int i = 0; i < clusterSize * 3; i++)
+            {
+                var id = tx.Spawn<ClMigUnit>(
+                    ClMigUnit.Pos.Set(PointAt(50f, 50f)),
+                    ClMigUnit.Scratch.Set(ScratchOf(0, 0f)));
+                if (i == 0) { firstInCell = id; }
+            }
+            tx.Commit();
+        }
+
+        // The future migrant — spawned in a different cell, moved into the dst cell only on tick 2.
+        EntityId migrant;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            migrant = tx.Spawn<ClMigUnit>(
+                ClMigUnit.Pos.Set(PointAt(550f, 550f)),
+                ClMigUnit.Scratch.Set(ScratchOf(0, 0f)));
+            tx.Commit();
+        }
+
+        int dstCell = dbe.SpatialGrid.WorldToCellKey(50f, 50f);
+
+        // Tick 1: migrate one entity OUT of the dst cell — frees a slot in its cluster 0; the deferFinalize release leaves the cursor advanced (stale-high).
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var eref = tx.OpenMut(firstInCell);
+            ref var pos = ref eref.Write(ClMigUnit.Pos);
+            pos.Bounds = new AABB2F { MinX = 850f, MinY = 150f, MaxX = 850f, MaxY = 150f };
+            tx.Commit();
+        }
+        dbe.WriteTickFence(1);
+
+        Assert.That(dbe.SpatialGrid.GetCell(dstCell).ClusterCount, Is.EqualTo(3),
+            "dst cell still owns its 3 clusters (one now has a freed slot)");
+
+        // Tick 2: migrate the migrant INTO the dst cell — must reuse the freed slot via phase 2, not allocate a 4th cluster.
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var eref = tx.OpenMut(migrant);
+            ref var pos = ref eref.Write(ClMigUnit.Pos);
+            pos.Bounds = new AABB2F { MinX = 50f, MinY = 50f, MaxX = 50f, MaxY = 50f };
+            tx.Commit();
+        }
+        dbe.WriteTickFence(2);
+
+        ref var dstAfter = ref dbe.SpatialGrid.GetCell(dstCell);
+        Assert.That(dstAfter.ClusterCount, Is.EqualTo(3),
+            "phase-2 must reclaim the freed slot — no new cluster allocated despite the stale-high cursor");
+        Assert.That(dstAfter.EntityCount, Is.EqualTo(clusterSize * 3),
+            "dst cell holds the original entities minus the migrated-out one plus the migrant");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
     // Hysteresis dead-zone — small crossings are absorbed
     // ═══════════════════════════════════════════════════════════════════════
 

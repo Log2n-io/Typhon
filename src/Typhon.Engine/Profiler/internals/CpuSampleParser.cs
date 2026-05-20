@@ -37,6 +37,12 @@ namespace Typhon.Engine.Internals;
 /// its <see cref="ThreadSlot"/> via <see cref="ThreadSlotRegistry.TryGetSlotByOsThreadId"/>. Samples on non-Typhon threads (GC, thread-pool, finalizer,
 /// the sampler / IPC threads) are kept with <see cref="CpuSampleRecord.ThreadSlot"/> = -1. <c>Error</c>-type samples (failed stack walks) are dropped.
 /// </para>
+/// <para>
+/// <b>GC-safepoint-poll samples are dropped — observer-effect noise.</b> The sampler suspends the EE ~1 kHz to walk every thread's stack; a thread it
+/// catches at a GC-safe point is parked in <c>Thread.PollGC</c> / its <c>&lt;PollGC&gt;g__PollGCWorker</c> local function. A sample whose <i>leaf</i> frame
+/// is that poll is not program execution — it is the cost of being sampled, and it pads whatever method sits beneath it. Such samples are discarded here,
+/// before the trace is written, mirroring how <c>GcEventListener</c> already refuses to record the sampler's own <c>GcSuspendReason.Other</c> EE-suspensions.
+/// </para>
 /// </remarks>
 internal static class CpuSampleParser
 {
@@ -97,8 +103,9 @@ internal static class CpuSampleParser
 
             var result = ctx.Build(out var decimatedFrom);
             var decimNote = decimatedFrom > 0 ? $" (decimated from {decimatedFrom}, cap {MaxSamples})" : string.Empty;
+            var gcPollNote = ctx.GcPollDropped > 0 ? $", dropped {ctx.GcPollDropped} GC-safepoint-poll samples" : string.Empty;
             Console.WriteLine(
-                $"[CpuSampleParser] parsed {result.SampleCount} samples{decimNote} — {result.Stacks.Length} unique stacks, "
+                $"[CpuSampleParser] parsed {result.SampleCount} samples{decimNote}{gcPollNote} — {result.Stacks.Length} unique stacks, "
                 + $"{result.Frames.Length} unique frames in {totalSw.ElapsedMilliseconds} ms — module map {moduleMapMs} ms, "
                 + $".nettrace→.etlx convert {convertMs} ms, event processing {processMs} ms (of which symbol resolution {ctx.ResolveMs} ms)");
             return result;
@@ -134,13 +141,21 @@ internal static class CpuSampleParser
         private readonly Dictionary<FrameKey, ushort> _frameInterner = [];
         private readonly Dictionary<CodeAddressIndex, ushort> _codeAddrToFrameId = [];
 
+        // CodeAddressIndex → "is this the GC-safepoint poll" memo. The poll leaf recurs on a huge share of samples, all sharing
+        // one code address, so the name check runs once per unique code address, not once per sample.
+        private readonly Dictionary<CodeAddressIndex, bool> _gcPollLeafCache = [];
+
         private long _resolveTicks;
         private int _emptyStackIndex = -1;
+        private int _gcPollDropped;
 
         public ParseContext(Dictionary<string, Module> moduleMap) => _moduleMap = moduleMap;
 
         /// <summary>Accumulated symbol-resolution time, rendered as milliseconds.</summary>
         public long ResolveMs => _resolveTicks * 1000 / Stopwatch.Frequency;
+
+        /// <summary>Count of samples discarded because their leaf frame was the GC-safepoint poll (observer-effect noise).</summary>
+        public int GcPollDropped => _gcPollDropped;
 
         /// <summary><see cref="SampleProfilerTraceEventParser.ThreadSample"/> handler — interns one sample's stack and appends its record.</summary>
         public void Add(ClrThreadSampleTraceData data)
@@ -150,10 +165,33 @@ internal static class CpuSampleParser
             {
                 return;
             }
+            var callStack = data.CallStack();
+            // A sample whose leaf frame is the GC-safepoint poll is a thread the sampler froze at a safepoint to walk its
+            // stack — observer-effect noise, not program execution. Drop it before it reaches the trace (see class remarks).
+            if (callStack != null && IsGcPollLeaf(callStack.CodeAddress))
+            {
+                _gcPollDropped++;
+                return;
+            }
             var sampleType = data.Type == ClrThreadSampleType.External ? (byte)1 : (byte)0;
             var threadSlot = ThreadSlotRegistry.TryGetSlotByOsThreadId((uint)data.ThreadID, out var slot) ? slot : -1;
-            var stackIndex = InternStack(data.CallStack());
+            var stackIndex = InternStack(callStack);
             _records.Add(new CpuSampleRecord(data.TimeStampQPC, threadSlot, sampleType, (uint)stackIndex));
+        }
+
+        /// <summary>True when <paramref name="leaf"/> resolves to the runtime GC-safepoint poll. Memoised per code address.</summary>
+        private bool IsGcPollLeaf(TraceCodeAddress leaf)
+        {
+            var cai = leaf.CodeAddressIndex;
+            if (_gcPollLeafCache.TryGetValue(cai, out var cached))
+            {
+                return cached;
+            }
+            var method = leaf.Method;
+            var name = method != null ? method.FullMethodName : leaf.FullMethodName;
+            var isPoll = IsGcPollMethodName(name);
+            _gcPollLeafCache[cai] = isPoll;
+            return isPoll;
         }
 
         /// <summary>Finalises the batch: applies the <see cref="MaxSamples"/> decimation cap, then sorts records by <c>(threadSlot, qpc)</c>.</summary>
@@ -282,6 +320,15 @@ internal static class CpuSampleParser
         }
         return kept;
     }
+
+    /// <summary>
+    /// True when <paramref name="methodName"/> is the runtime GC-safepoint poll — <c>System.Threading.Thread.PollGC</c> or its
+    /// compiler-generated <c>&lt;PollGC&gt;g__PollGCWorker|NN_N</c> local function. Matched on the substring <c>PollGC</c> only:
+    /// the trailing <c>|NN_N</c> local-function ordinal is a per-build compiler artifact and must not be matched, but
+    /// <c>PollGC</c> itself is the stable method name. A <c>null</c> name is not the poll.
+    /// </summary>
+    internal static bool IsGcPollMethodName(string methodName)
+        => methodName != null && methodName.Contains("PollGC", StringComparison.Ordinal);
 
     private static string ResolveModuleName(TraceCodeAddress codeAddress, TraceMethod method)
     {
