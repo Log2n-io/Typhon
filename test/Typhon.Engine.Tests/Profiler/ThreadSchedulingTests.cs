@@ -197,7 +197,7 @@ public sealed class ThreadSchedulingTests
         var fingerprint = new byte[32];
         var profilerHeader = new ProfilerHeader { Version = TraceFileHeader.CurrentVersion, TimestampFrequency = 10_000_000 };
         var sink = new ListSink();
-        using (var builder = new IncrementalCacheBuilder(sink, ownsSink: true, profilerHeader, fingerprint, new Dictionary<int, string>()))
+        using (var builder = new IncrementalCacheBuilder(sink, ownsSink: true, profilerHeader, fingerprint, new Dictionary<int, string>(), new Dictionary<ushort, string>()))
         {
             builder.FeedRawRecords(buffer);
         }

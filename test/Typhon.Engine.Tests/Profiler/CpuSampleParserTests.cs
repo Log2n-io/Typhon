@@ -228,4 +228,25 @@ public sealed class CpuSampleParserTests
         Assert.That(result, Is.Not.Null);
         Assert.That(result.SampleCount, Is.Zero, "A corrupt .nettrace must degrade to an empty list, not throw.");
     }
+
+    // ─── GC-safepoint-poll leaf detection (#364) ─────────────────────────────────────────────────
+    // A sample whose leaf frame is the runtime GC poll is observer-effect noise — the sampler froze the thread at a
+    // safepoint to walk its stack. CpuSampleParser drops such samples; this is the leaf-name predicate behind that.
+
+    [TestCase("System.Threading.Thread.PollGC", true, TestName = "Thread.PollGC is the poll")]
+    [TestCase("System.Threading.Thread.<PollGC>g__PollGCWorker|70_0", true, TestName = "PollGCWorker local function (ordinal 70_0)")]
+    [TestCase("System.Threading.Thread.<PollGC>g__PollGCWorker|67_0", true, TestName = "PollGCWorker — a different build's ordinal still matches")]
+    [TestCase("Typhon.Engine.DatabaseEngine.ExecuteMigrationsSlice", false, TestName = "a real engine method is not the poll")]
+    [TestCase("System.Threading.Monitor.Wait", false, TestName = "Monitor.Wait is not the poll")]
+    [TestCase("", false, TestName = "empty name is not the poll")]
+    public void IsGcPollMethodName_DetectsTheSafepointPoll(string methodName, bool expected)
+    {
+        Assert.That(CpuSampleParser.IsGcPollMethodName(methodName), Is.EqualTo(expected));
+    }
+
+    [Test]
+    public void IsGcPollMethodName_NullName_IsNotPoll()
+    {
+        Assert.That(CpuSampleParser.IsGcPollMethodName(null), Is.False);
+    }
 }

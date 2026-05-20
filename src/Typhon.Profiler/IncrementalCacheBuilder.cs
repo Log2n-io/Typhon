@@ -102,10 +102,19 @@ public sealed class IncrementalCacheBuilder : IDisposable
     /// <summary>Read-only view of finalized per-tick post-tick markers.</summary>
     public IReadOnlyList<PostTickSummary> PostTickSummaries => _postTickSummaries;
 
-    /// <summary>Queue-id → display-name map captured from the engine's Init metadata (set externally by the live / replay paths).</summary>
+    /// <summary>
+    /// Queue-id → display-name map. Seeded at construction from the source's <c>EventQueueCatalog</c> (the engine
+    /// registers every queue up-front during <c>Init</c>, so the catalog is complete before any record arrives).
+    /// <see cref="RegisterQueueName"/> stays available for late-arriving queues — the live attach path needs it
+    /// if the engine ever ships a queue catalog mid-stream — but the replay path no longer relies on it.
+    /// </summary>
     public IReadOnlyDictionary<ushort, string> QueueIdToName => _queueIdToName;
 
-    /// <summary>Register a queue's display name. Called by live / replay paths after parsing the engine Init metadata.</summary>
+    /// <summary>
+    /// Register a queue's display name. Idempotent (last write wins). Used only by paths that learn queue identities
+    /// AFTER the constructor has run — e.g. a live engine that registers a new queue post-handshake. Replay traces
+    /// hydrate the table via the constructor's <c>queueNames</c> parameter; calling this for those is unnecessary.
+    /// </summary>
     public void RegisterQueueName(ushort queueId, string name) => _queueIdToName[queueId] = name ?? string.Empty;
 
     private bool _tickActive;
@@ -271,12 +280,21 @@ public sealed class IncrementalCacheBuilder : IDisposable
     /// <param name="header">Source profiler header (used for <c>TimestampFrequency</c> and version stamping).</param>
     /// <param name="sourceFingerprint">32-byte source fingerprint to embed in the cache header. Live: arbitrary 32-byte session ID.</param>
     /// <param name="spanNames">Span-name intern table from the source. Pre-populated for replay traces; empty / lazily-grown for live (live appends spans through the same buffer).</param>
+    /// <param name="queueNames">
+    /// Queue-id → display-name map from the source's <c>EventQueueCatalog</c>. Pre-populated for replay traces (the
+    /// engine writes every queue at <c>Init</c> time, so the catalog is complete before any block). Empty for live
+    /// attach until the engine ships the equivalent catalog over the wire — at which point
+    /// <see cref="RegisterQueueName"/> fills in the gaps. Required (not optional) so a forgotten call site fails the
+    /// compile instead of silently shipping an empty <c>QueueNameTable</c> cache section (which caused #?? where the
+    /// Workbench's aggregate endpoint couldn't resolve queue names declared in topology).
+    /// </param>
     public IncrementalCacheBuilder(
         ICacheChunkSink sink,
         bool ownsSink,
         in ProfilerHeader header,
         ReadOnlySpan<byte> sourceFingerprint,
-        IReadOnlyDictionary<int, string> spanNames)
+        IReadOnlyDictionary<int, string> spanNames,
+        IReadOnlyDictionary<ushort, string> queueNames)
     {
         ArgumentNullException.ThrowIfNull(sink);
         if (sourceFingerprint.Length < 32)
@@ -289,6 +307,10 @@ public sealed class IncrementalCacheBuilder : IDisposable
         _ticksPerUs = header.TimestampFrequency / 1_000_000.0;
         _fingerprint = sourceFingerprint[..32].ToArray();
         _spanNames = spanNames ?? new Dictionary<int, string>();
+        if (queueNames != null)
+        {
+            foreach (var kv in queueNames) _queueIdToName[kv.Key] = kv.Value ?? string.Empty;
+        }
     }
 
     /// <summary>
@@ -716,9 +738,16 @@ public sealed class IncrementalCacheBuilder : IDisposable
             TimestampFrequency = fileHeader.TimestampFrequency,
         };
 
+        // Project the EventQueueCatalog (queueIndex → display name) into the dict shape the builder ctor expects.
+        // Required so the cache's QueueNameTable section is populated — otherwise the Workbench's aggregate endpoint
+        // rejects queue-name lookups even when topology declares the queues (root cause of the AntHill demo's
+        // "No queue named 'AntDied' in topology" errors).
+        var queueNames = new Dictionary<ushort, string>(reader.EventQueues.Count);
+        foreach (var q in reader.EventQueues) queueNames[q.QueueIndex] = q.Name;
+
         var sink = FileCacheSink.Create(cachePath);
         // ownsSink: true so that disposing the builder closes the underlying TraceFileCacheWriter.
-        var builder = new IncrementalCacheBuilder(sink, ownsSink: true, profilerHeader, fingerprint, reader.SpanNames);
+        var builder = new IncrementalCacheBuilder(sink, ownsSink: true, profilerHeader, fingerprint, reader.SpanNames, queueNames);
         try
         {
             while (reader.ReadNextBlock(out var recordBytes, out _))
