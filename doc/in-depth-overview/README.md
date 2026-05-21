@@ -11,6 +11,8 @@ The series is *in-depth* in the sense that it explains mechanism (structures, li
 
 > **What Typhon isn't.** Not SQL. Not a networked database. Not a key-value store. Not a queue. No built-in replication. No multi-process clustering. The engine focuses on extracting maximum throughput from a single machine.
 
+> **Disk-backed, not RAM-bound.** Storage is a memory-mapped, paged store: resident memory is bounded by the page-cache size, not by database size, so a Typhon database can exceed RAM by orders of magnitude — only the working set is resident. Persistent component data, indexes, and the per-archetype `EntityMap` all page to disk; data volume scales with disk, not memory. This is conventional for SQL/embedded engines but unusual for an ECS, every mainstream one of which is in-memory only.
+
 ---
 
 ## The chapters

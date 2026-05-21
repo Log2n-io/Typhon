@@ -4,6 +4,8 @@
 
 Storage is the physical layer: a memory-mapped file managed by a page cache, segments built on top of pages, and accessors that hold short-lived, JIT-inlined views into chunk memory. Everything above this layer — MVCC revision chains, B+Tree indexes, the ECS component tables, even the WAL's full-page-image capture — bottoms out here. The shape of this layer (8 KB pages, two-pass clock-sweep eviction, generic `<TStore>` segments) is what makes the higher layers cheap.
 
+Because the cache is a fixed pool with on-demand load + clock-sweep eviction, **the database file can be arbitrarily larger than the cache** — resident memory is bounded by `DatabaseCacheSize`, not by database size. Persistent component data, B+Tree indexes, the per-archetype `EntityMap`, and the free-space bitmap all live in this paged store, so data volume and entity count scale with *disk*, not memory. The lone exception is **Transient** components (`TransientComponentSegment`), which are in-memory only by design. This larger-than-RAM property is routine for SQL and embedded engines (SQLite, LMDB) but sets Typhon apart from in-memory ECS frameworks, where the entire world must fit in process memory.
+
 You read this doc when you're: tuning page-cache pressure, understanding why a benchmark stalls, designing a new on-disk structure, debugging dirty-counter inflation, or reading the engine's most allocation-sensitive code (`ChunkAccessor`, `ChunkBasedSegment`). The narrative is bottom-up — file → pages → segments → accessors → cross-cutting concerns (dirty tracking, backpressure, FPI).
 
 <a href="assets/typhon-storage-overview.svg">

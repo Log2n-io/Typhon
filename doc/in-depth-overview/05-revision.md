@@ -4,7 +4,7 @@
 
 > 💡 **Scope.** Typhon supports three per-component storage modes — **Versioned** (full MVCC), **SingleVersion** (in-place, no isolation), and **Transient** (in-memory, no persistence). 
 > 
-> **This doc covers only the Versioned mode.** SV and Transient bypass the revision chain entirely: writes go straight to the component slot. The mode is declared on the component field via `[StorageMode(...)]`. See [06-ecs §8](06-ecs.md) for the full comparison.
+> **This doc covers only the Versioned mode.** SV and Transient bypass the revision chain entirely: writes go straight to the component slot. The mode is set per component type via the `StorageMode` argument on its `[Component]` attribute (`[Component("name", rev, StorageMode = StorageMode.SingleVersion)]`). See [06-ecs §8](06-ecs.md) for the full comparison.
 
 Revision is where Typhon's MVCC (Multi-Version Concurrency Control) lives. Every Versioned component update appends a new entry to a per-entity **revision chain**; every read walks the chain and picks the latest version whose Transaction Sequence Number (TSN) is ≤ the reader's snapshot TSN. That single mechanism is what makes concurrent reads and writes coexist without locks on the read path.
 

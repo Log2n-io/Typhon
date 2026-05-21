@@ -292,7 +292,7 @@ Cluster storage is opt-in per archetype (`IsClusterEligible` on `ArchetypeMetada
 
 ## 8. Storage modes
 
-[`Typhon.Schema.Definition/StorageMode.cs`](../../src/Typhon.Schema.Definition/StorageMode.cs) — declared per component via `[StorageMode(...)]`. Three modes, very different contracts.
+[`Typhon.Schema.Definition/StorageMode.cs`](../../src/Typhon.Schema.Definition/StorageMode.cs) — set per component type via the `StorageMode` argument on its `[Component]` attribute (`[Component("name", rev, StorageMode = StorageMode.SingleVersion)]`); the default is `Versioned`. Three modes, very different contracts.
 
 ### The contract per mode
 
@@ -327,20 +327,27 @@ A transaction around SV writes still gives you *thread affinity* and a *consiste
 
 ### Mixing modes in one archetype
 
-A single archetype can mix modes freely:
+A single archetype can mix modes freely — because the mode lives on each **component type** (its `[Component]` attribute), the archetype just registers them:
 
 ```csharp
+[Component("Position", 1)]                                       // Versioned (default)
+public struct Position { public float X, Y, Z; }
+
+[Component("NavCost", 1, StorageMode = StorageMode.SingleVersion)]
+public struct NavCost { public float Value; }
+
+[Component("TickScratch", 1, StorageMode = StorageMode.Transient)]
+public struct TickScratch { public int Flags; }
+
 public sealed partial class Ant : Archetype<Ant>
 {
-    public static readonly Comp<Position>     Position     = Register<Position>();      // Versioned (default)
-    [StorageMode(StorageMode.SingleVersion)]
-    public static readonly Comp<NavCost>      NavCost      = Register<NavCost>();       // SV
-    [StorageMode(StorageMode.Transient)]
-    public static readonly Comp<TickScratch>  TickScratch  = Register<TickScratch>();   // Transient
+    public static readonly Comp<Position>     Position    = Register<Position>();      // Versioned
+    public static readonly Comp<NavCost>      NavCost     = Register<NavCost>();       // SingleVersion
+    public static readonly Comp<TickScratch>  TickScratch = Register<TickScratch>();   // Transient
 }
 ```
 
-Internal layout: `Position` lives in the archetype's main `ComponentSegment` with a revision chain in `CompRevTableSegment`; `NavCost` in the same `ComponentSegment` but no rev table; `TickScratch` in a separate `TransientComponentSegment` that's never persisted. `ArchetypeMetadata.VersionedSlotMask` and `.TransientSlotMask` drive the per-slot routing.
+Each `Register<T>()` simply picks up the mode declared on `T`'s `[Component]`. Internal layout: `Position` lives in the archetype's main `ComponentSegment` with a revision chain in `CompRevTableSegment`; `NavCost` in the same `ComponentSegment` but no rev table; `TickScratch` in a separate `TransientComponentSegment` that's never persisted. `ArchetypeMetadata.VersionedSlotMask` and `.TransientSlotMask` drive the per-slot routing.
 
 ### Who can write what
 
