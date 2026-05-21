@@ -4,7 +4,7 @@
 
 ### ⚠️ The engine is in active development and not usable as a library or product. ⚠️
 
-There is no documentation, no stable API, no NuGet package, and no support.
+There is no reference documentation, no stable API, no NuGet package, and no support.
 
 
 **A microsecond-latency ACID data engine combining ECS archetype storage with tick-based parallel execution.**
@@ -12,6 +12,10 @@ There is no documentation, no stable API, no NuGet package, and no support.
 Typhon is an embedded data engine for real-time workloads like game servers, simulations, and stateful dataflow.<br/> 
 It pairs a microsecond-latency ACID store — MVCC snapshot isolation, configurable durability, source-generated ECS archetype accessors — with a tick-based parallel runtime that dispatches fine-grained system chunks across worker threads, each operating directly on the store.<br/>
 The runtime doesn't sit on top of the database — it runs inside it.
+
+📖 **Start here:**
+- **[User Guide](doc/guide/README.md)** — learn the key concepts hands-on, backed by a small **runnable sample project** ([`doc/guide/example`](doc/guide/example)).
+- **[In-Depth Overview](doc/in-depth-overview/README.md)** — dig into how every subsystem works, and the reasoning behind it.
 
 ---
 
@@ -21,6 +25,8 @@ The runtime doesn't sit on top of the database — it runs inside it.
 - **ACID Transactions** — Full transactional semantics with optimistic concurrency control
 - **MVCC Snapshot Isolation** — Readers never block writers; each transaction sees a consistent snapshot
 - **ECS Archetype System** — Entities are typed by archetype; components are blittable structs with source-generated accessors and archetype inheritance
+- **Larger-Than-RAM Storage** — The database is a memory-mapped, paged file on disk, virtualized through a page cache that holds only the hot working set — so resident memory is bounded by the cache, not the database. Manipulate a 100 GiB store on a machine with a fraction of that RAM; component data, indexes, and the entity map all page to/from disk on demand (in-memory ECS frameworks, by contrast, must fit the entire world in RAM)
+- **Workbench Dev UI** — A local, browser-based companion (ASP.NET Core + React/Vite) — *DataGrip for Typhon*, not just a profiler. Open a recorded `.typhon-trace`, attach to a live engine over TCP, or open a `.typhon` database file directly. **Performance:** per-tick profiler timeline with CPU-sample + off-CPU overlays, Top Spans, Call Tree, Critical Path, System DAG. **Data & schema:** component/archetype browsers, Schema Inspector, a zoomable Hilbert-curve Database File Map, live Resource Tree. **Queries:** catalog, plan tree, per-execution inspector — all in a dockable, persisted workspace
 - **Entity Clusters** — SoA batched storage co-locating up to 64 entities per cluster, with cluster-native SIMD predicate evaluation (AVX-512 / AVX2 / scalar dispatch), zone-map pruning, and k-way sorted merge
 - **Query Engine** — Typed queries with `Where`, `With`/`Without` filters, polymorphic iteration, OR logic, navigation joins, and a cluster execution path that routes filtered scans through SIMD gather-compare on cluster SoA columns
 - **Views & Change Tracking** — Incremental entity-set monitoring across transactions (added/removed/modified detection) with ring-buffer delta streaming
@@ -36,96 +42,37 @@ The runtime doesn't sit on top of the database — it runs inside it.
 - **Observability** — Runtime telemetry, metrics, and diagnostics with zero-cost JIT-eliminated toggles
 - **Deep-Trace Profiler** — Per-tick Gantt and flame-graph visualization via a `.typhon-trace` binary format, live TCP streaming to a React/Vite viewer, and optional `dotnet-trace` CPU sampling correlation for full managed-stack profiles
 - **Interactive Shell (tsh)** — Database REPL for inspection and debugging
-- **Workbench Dev UI** — Local ASP.NET Core + React/Vite app for data browsing, schema inspection, profiler trace viewing, System DAG and Data Flow timeline panels, Access Matrix, and internal data API for cross-panel cross-linking
 - **Public/Internal API split** — Two namespaces per assembly (`Typhon.Engine` / `Typhon.Engine.Internals`), each subsystem folder split into `public/` + `internals/`, enforced at compile time by the `TYPHON008` Roslyn analyzer
 - **Roslyn Analyzers** — Custom analyzers detecting undisposed engine resources at compile time + the `TYPHON008` internal-API leak detector
 
 ## Quick Start
 
+A taste — declare a component and an archetype, spawn an entity, read it back:
+
 ```csharp
-// Define components
-[Component("Game.Position", 1)]
-[StructLayout(LayoutKind.Sequential)]
-public struct Position
-{
-    [Field] public float X;
-    [Field] public float Y;
-    [Field] public float Z;
-}
+// A component is a plain struct; an archetype is the fixed set of components an entity has.
+[Component("Game.Health", 1, StorageMode = StorageMode.Versioned)]
+public struct Health { public int Current, Max; }
 
-[Component("Game.Health", 1)]
-[StructLayout(LayoutKind.Sequential)]
-public struct Health
-{
-    [Field] public int Current;
-    [Field] public int Max;
-}
-
-// Define an archetype (ID is a unique 12-bit identifier embedded in EntityId)
 [Archetype(1)]
-partial class Unit : Archetype<Unit>
+public sealed partial class Unit : Archetype<Unit>
 {
-    public static readonly Comp<Position> Position = Register<Position>();
-    public static readonly Comp<Health>   Health   = Register<Health>();
+    public static readonly Comp<Health> Health = Register<Health>();
 }
 
-// Register and initialize
-var dbe = serviceProvider.GetRequiredService<DatabaseEngine>();
-dbe.RegisterComponentFromAccessor<Position>();
-dbe.RegisterComponentFromAccessor<Health>();
-dbe.InitializeArchetypes();
-
-// Spawn an entity
+// ...build the engine + register the schema (see the Guide), then:
 using var tx = dbe.CreateQuickTransaction();
-
-var pos = new Position { X = 10, Y = 20, Z = 0 };
-var hp  = new Health { Current = 100, Max = 100 };
-var id  = tx.Spawn<Unit>(Unit.Position.Set(in pos), Unit.Health.Set(in hp));
-
-// Read it back
-ref readonly var p = ref tx.Open(id).Read(Unit.Position);
-// p.X == 10, p.Y == 20
-
-// Mutate
-ref var h = ref tx.OpenMut(id).Write(Unit.Health);
-h.Current = 80;
-
+var id = tx.Spawn<Unit>(Unit.Health.Set(new Health { Current = 100, Max = 100 }));
+var hp = tx.Open(id).Read(Unit.Health);   // hp.Current == 100
 tx.Commit();
 ```
 
-### Running as a Game Server (Runtime)
-
-For tick-based workloads, the `TyphonRuntime` wraps the engine with a DAG scheduler, parallel worker pool, and tick loop:
-
-```csharp
-// Register components and archetypes as above, then:
-
-using var runtime = TyphonRuntime.Create(dbe, schedule =>
-{
-    // Parallel query system — runs once per tick across worker threads
-    schedule.QuerySystem("Movement", ctx =>
-    {
-        foreach (var id in ctx.Entities)
-        {
-            var e = ctx.Accessor.OpenMut(id);
-            ref var pos = ref e.Write(Unit.Position);
-            pos.X += e.Read(Unit.Velocity).X * ctx.DeltaTime;
-        }
-    }, input: () => activeUnitsView, parallel: true);
-
-    // Sequential cleanup system — runs after Movement completes
-    schedule.CallbackSystem("Cleanup", ctx => { /* ... */ }, after: "Movement");
-});
-
-runtime.Start();  // Tick loop runs at configured Hz (default 60)
-```
-
-The runtime creates one `UnitOfWork` per tick (Deferred durability), one `Transaction` per system (or per parallel chunk), and coalesces all writes into tick-fence WAL chunks at the end of each tick.
+> *Illustrative — engine build + schema registration are elided. The **[User Guide](doc/guide/README.md)** has the full, **runnable** version ([`doc/guide/example`](doc/guide/example)).*
 
 ## Architecture
 
-<a href="typhon-architecture-layers.svg">
-  <img src="typhon-architecture-layers.svg" width="1165"
+<a href="doc/in-depth-overview/assets/typhon-architecture-layers.svg">
+  <img src="doc/in-depth-overview/assets/typhon-architecture-layers.svg" width="1165"
        alt="Typhon Architecture Layers">
 </a>
 
@@ -160,7 +107,7 @@ Typhon is in **active development** targeting an alpha release. Current state:
 
 ## Project Structure
 
-Each engine subsystem folder splits into `public/` (consumer surface, namespace `Typhon.Engine`) and `internals/` (implementation, namespace `Typhon.Engine.Internals`) — see the [Public/Internal API classification doc](https://github.com/nockawa/typhon-claude/blob/main/research/PublicVsInternalApiClassification.md) for the methodology.
+Each engine subsystem folder splits into `public/` (consumer surface, namespace `Typhon.Engine`) and `internals/` (implementation, namespace `Typhon.Engine.Internals`).
 
 ```
 Typhon/
