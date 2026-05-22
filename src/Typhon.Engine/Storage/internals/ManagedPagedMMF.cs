@@ -343,6 +343,12 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
         });
     }
 
+    /// <summary>
+    /// The authoritative set of every registered persistent segment, keyed by root page. Used by storage introspection (Module 15) so every allocated page
+    /// is attributable to a segment (and thus classifiable) — there is no other complete source of "which segments own which pages". Returns a snapshot view.
+    /// </summary>
+    internal ICollection<LogicalSegment<PersistentStore>> RegisteredSegments => _segments?.Values ?? Array.Empty<LogicalSegment<PersistentStore>>();
+
     internal LogicalSegment<PersistentStore> CreateOccupancySegment(int filePageIndex, PageBlockType type, int length, ChangeSet cs)
     {
         var dic = _segments;
@@ -357,7 +363,7 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
             return null;
         }
 
-        if (segment.Create(type, filePageIndex, true, cs) == false)
+        if (segment.Create(type, StorageSegmentKind.Occupancy, filePageIndex, true, cs) == false)
         {
             return null;
         }
@@ -389,7 +395,8 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
         return segment;
     }
 
-    public LogicalSegment<PersistentStore> AllocateSegment(PageBlockType type, int length, ChangeSet changeSet = null)
+    public LogicalSegment<PersistentStore> AllocateSegment(PageBlockType type, int length, ChangeSet changeSet = null, 
+        StorageSegmentKind kind = StorageSegmentKind.Other)
     {
         var dic = _segments;
         if (dic == null)
@@ -406,7 +413,7 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
             Debug.Fail("Segment root page already registered in dictionary — duplicate allocation");
         }
 
-        if (segment.Create(type, pages, false, changeSet) == false)
+        if (!segment.Create(type, kind, pages, false, changeSet))
         {
             return null;
         }
@@ -436,7 +443,8 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
         base.Dispose(disposing);
     }
 
-    public ChunkBasedSegment<PersistentStore> AllocateChunkBasedSegment(PageBlockType type, int length, int stride, ChangeSet changeSet = null)
+    public ChunkBasedSegment<PersistentStore> AllocateChunkBasedSegment(PageBlockType type, int length, int stride, ChangeSet changeSet = null, 
+        StorageSegmentKind kind = StorageSegmentKind.Other)
     {
         var dic = _segments;
         if (dic == null)
@@ -453,7 +461,7 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
             Debug.Fail("Segment root page already registered in dictionary — duplicate allocation");
         }
 
-        if (!segment.Create(type, pages, false, changeSet))
+        if (!segment.Create(type, kind, pages, false, changeSet))
         {
             return null;
         }

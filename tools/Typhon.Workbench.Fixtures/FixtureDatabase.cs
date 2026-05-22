@@ -44,6 +44,7 @@ internal static class FixtureDatabase
     private const int CompDArchCount   = 200;
     private const int GuildArchCount   = 50;
     private const int PlayerArchCount  = 300;
+    private const int ParticleArchCount = 2_000;
 
     /// <summary>
     /// Ensure the Workbench test database exists under <paramref name="outputDir"/>. When
@@ -78,6 +79,7 @@ internal static class FixtureDatabase
         Archetype<CompDArch>.Touch();
         Archetype<GuildArch>.Touch();
         Archetype<PlayerArch>.Touch();
+        Archetype<ParticleArch>.Touch();
 
         using (var sp = BuildEngineServices(absOut, DefaultDatabaseName))
         using (var engine = sp.GetRequiredService<DatabaseEngine>())
@@ -88,6 +90,7 @@ internal static class FixtureDatabase
             engine.RegisterComponentFromAccessor<CompD>();
             engine.RegisterComponentFromAccessor<CompGuild>();
             engine.RegisterComponentFromAccessor<CompPlayer>();
+            engine.RegisterComponentFromAccessor<CompParticle>();
             engine.InitializeArchetypes();
 
             Populate(engine);
@@ -102,7 +105,7 @@ internal static class FixtureDatabase
         CopySchemaDll(absOut);
 
         int total = CompAArchCount + CompABArchCount + CompABCArchCount
-                    + CompDArchCount + GuildArchCount + PlayerArchCount;
+                    + CompDArchCount + GuildArchCount + PlayerArchCount + ParticleArchCount;
         return new FixtureGenerationResult(typhonPath, schemaDllPath, total, WasCreated: true);
     }
 
@@ -159,6 +162,38 @@ internal static class FixtureDatabase
             if (!tx.Commit())
             {
                 throw new InvalidOperationException("Bulk commit failed");
+            }
+        }
+
+        // Cluster-eligible (SingleVersion) archetype — spawn a block, then destroy a scattered ~40% so the
+        // clusters end up partially filled. That gives the Database File Map's A6 L3 rendering a real spread of
+        // intra-cluster fill (the half-empty-cluster fragmentation signal), not a wall of full clusters.
+        var particleIds = new EntityId[ParticleArchCount];
+        using (var tx = engine.CreateQuickTransaction())
+        {
+            for (int i = 0; i < ParticleArchCount; i++)
+            {
+                var p = new CompParticle((float)rand.NextDouble(), (float)rand.NextDouble(), (float)rand.NextDouble());
+                particleIds[i] = tx.Spawn<ParticleArch>(ParticleArch.Particle.Set(in p));
+            }
+            if (!tx.Commit())
+            {
+                throw new InvalidOperationException("Particle spawn commit failed");
+            }
+        }
+
+        using (var tx = engine.CreateQuickTransaction())
+        {
+            for (int i = 0; i < ParticleArchCount; i++)
+            {
+                if (rand.Next(0, 5) < 2)
+                {
+                    tx.Destroy(particleIds[i]);
+                }
+            }
+            if (!tx.Commit())
+            {
+                throw new InvalidOperationException("Particle destroy commit failed");
             }
         }
     }

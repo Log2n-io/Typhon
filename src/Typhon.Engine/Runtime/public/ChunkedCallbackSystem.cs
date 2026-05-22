@@ -53,7 +53,7 @@ public abstract class ChunkedCallbackSystem : CallbackSystem
 
 /// <summary>
 /// Generic <see cref="ChunkedCallbackSystem"/> layer that exposes typed access to an ambient <typeparamref name="TContext"/> populated progressively across the
-/// DAG. The context is bound at runtime via <c>TyphonRuntime.RegisterContext&lt;TContext&gt;</c> after Configure and before Start.
+/// DAG. The context is bound at runtime via <see cref="TyphonRuntime.RegisterContext{TContext}"/> after Configure and before Start.
 ///
 /// <para>Override <see cref="ShouldRun(TContext)"/> to gate dispatch on a typed flag, or <see cref="Prepare(TContext)"/> to build a per-tick plan and return a
 /// dynamic chunk count (0 = skip, &gt;0 = dispatch with that many chunks).</para>

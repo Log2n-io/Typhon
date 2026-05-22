@@ -1060,7 +1060,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         segment = new ChunkBasedSegment<TransientStore>(EpochManager, tsValue, stride);
         Span<int> tsPages = stackalloc int[4];
         tsValue.AllocatePages(ref tsPages, 0, null);
-        segment.Create(PageBlockType.None, tsPages, false);
+        segment.Create(PageBlockType.None, StorageSegmentKind.Cluster, tsPages, false);
     }
 
     /// <summary>
@@ -2884,7 +2884,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         {
             // Creating path: allocate a 1-page segment for the registry (150 entries)
             var cs = MMF.CreateChangeSet();
-            var segment = MMF.AllocateSegment(PageBlockType.None, 1, cs);
+            var segment = MMF.AllocateSegment(PageBlockType.None, 1, cs, StorageSegmentKind.System);
 
             // Clear the data area so all entries start as Free (State = 0)
             var page = segment.GetPageExclusive(0, epoch, out var memPageIdx);
@@ -2962,12 +2962,14 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     unsafe internal ChunkBasedSegment<PersistentStore> GetComponentCollectionSegment<T>() where T : unmanaged =>
         _componentCollectionSegmentByStride.GetOrAdd(
             RoundToStandardStride(Math.Max(sizeof(T) * ComponentCollectionItemCountPerChunk, sizeof(VariableSizedBufferRootHeader))),
-            stride => MMF.AllocateChunkBasedSegment(PageBlockType.None, ComponentCollectionSegmentStartingSize, stride));
+            stride => MMF.AllocateChunkBasedSegment(PageBlockType.None, ComponentCollectionSegmentStartingSize, stride, null, 
+                StorageSegmentKind.ComponentCollection));
 
     unsafe internal ChunkBasedSegment<PersistentStore> GetComponentCollectionSegment(int itemSize, ChangeSet changeSet = null) =>
         _componentCollectionSegmentByStride.GetOrAdd(
             RoundToStandardStride(Math.Max(itemSize * ComponentCollectionItemCountPerChunk, sizeof(VariableSizedBufferRootHeader))),
-            stride => MMF.AllocateChunkBasedSegment(PageBlockType.None, ComponentCollectionSegmentStartingSize, stride, changeSet));
+            stride => MMF.AllocateChunkBasedSegment(PageBlockType.None, ComponentCollectionSegmentStartingSize, stride, changeSet, 
+                StorageSegmentKind.ComponentCollection));
 
     // Create the first revision of the system schema
     private unsafe void CreateSystemSchemaR1()
@@ -3988,7 +3990,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 // Fresh allocation (new archetype or legacy database without SPI)
                 // n0=256 avoids excessive linear hash splits during bulk entity insertion
                 // (256 buckets × ~9 entries/bucket × 0.75 load = ~1728 entities before first split)
-                var segment = MMF.AllocateChunkBasedSegment(PageBlockType.None, 20, stride);
+                var segment = MMF.AllocateChunkBasedSegment(PageBlockType.None, 20, stride, null, StorageSegmentKind.EntityMap);
                 _archetypeStates[meta.ArchetypeId] = new ArchetypeEngineState
                 {
                     SlotToComponentTable = slotToTable,
@@ -4009,7 +4011,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     ChunkBasedSegment<PersistentStore> clusterSegment = null;
                     if (!isPureTransient)
                     {
-                        clusterSegment = MMF.AllocateChunkBasedSegment(PageBlockType.None, 4, meta.ClusterLayout.ClusterStride);
+                        clusterSegment = MMF.AllocateChunkBasedSegment(PageBlockType.None, 4, meta.ClusterLayout.ClusterStride, null, 
+                            StorageSegmentKind.Cluster);
                         if (clusterSegment == null)
                         {
                             throw new InvalidOperationException(
@@ -4057,7 +4060,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     }
                     else if (!isPureTransient)
                     {
-                        var fallbackSegment = MMF.AllocateChunkBasedSegment(PageBlockType.None, 20, meta.ClusterLayout.ClusterStride);
+                        var fallbackSegment = MMF.AllocateChunkBasedSegment(PageBlockType.None, 20, meta.ClusterLayout.ClusterStride, null, 
+                            StorageSegmentKind.Cluster);
                         _archetypeStates[meta.ArchetypeId].ClusterState =
                             ArchetypeClusterState.Create(meta.ClusterLayout, fallbackSegment, transientClusterSegment, transientClusterStore);
                     }
@@ -4088,7 +4092,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                         }
                         else
                         {
-                            indexSegment = MMF.AllocateChunkBasedSegment(PageBlockType.None, 20, 256 /* sizeof(Index64Chunk) */);
+                            indexSegment = MMF.AllocateChunkBasedSegment(PageBlockType.None, 20, 256 /* sizeof(Index64Chunk) */, null, 
+                                StorageSegmentKind.Index);
                         }
 
                         clusterState.InitializeIndexes(slotToTable, indexSegment, loadIndexes, changeSet);

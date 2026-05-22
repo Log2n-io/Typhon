@@ -291,7 +291,7 @@ internal static class ProfilerStaticDataBuilder
 
     /// <summary>
     /// Event-queue catalog from a live <see cref="TyphonRuntime"/>. Walks <see cref="DagScheduler.EventQueues"/>; the event-payload type is resolved by
-    /// reflection from the queue's runtime type (every queue is an <c>EventQueue&lt;T&gt;</c> — T's full name is captured).
+    /// reflection from the queue's runtime type (every queue is an <see cref="EventQueue{T}"/> — T's full name is captured).
     /// Returns an empty array when the runtime is null or carries no queues.
     /// </summary>
     public static EventQueueRecord[] BuildEventQueueCatalog(TyphonRuntime runtime)

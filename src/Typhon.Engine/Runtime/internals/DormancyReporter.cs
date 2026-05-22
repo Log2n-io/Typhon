@@ -12,21 +12,21 @@ namespace Typhon.Engine.Internals;
 /// <remarks>
 /// <para><b>Thread safety:</b> Each <see cref="List{T}"/> is written by exactly one thread (the <c>[ThreadStatic]</c> owner). <see cref="DrainAll"/> reads
 /// all lists single-threaded after all parallel work completes — no race.</para> <para><b>Entry format:</b> Each <c>long</c> packs
-/// <c>(archetypeId &lt;&lt; 32 | (uint)chunkId)</c>. This avoids per-request struct allocation and keeps the thread-local list a flat <c>List&lt;long&gt;</c>.</para>
+/// <c>(archetypeId &lt;&lt; 32 | (uint)chunkId)</c>. This avoids per-request struct allocation and keeps the thread-local list a flat <see cref="List{T}"/>.</para>
 /// <para><b>Deduplication:</b> Implicit — <see cref="ArchetypeClusterState.ProcessWakeRequest"/> is a no-op for clusters that are
 /// already <see cref="ClusterSleepState.WakePending"/>.</para>
 /// </remarks>
 internal static class DormancyReporter
 {
-    [ThreadStatic] private static List<long> t_wakeRequests;
-    [ThreadStatic] private static bool t_registered;
+    [ThreadStatic] private static List<long> WakeRequests;
+    [ThreadStatic] private static bool Registered;
 
     // Registry of all thread-local lists. ConcurrentBag.Add is lock-free; iteration at drain time is safe because it runs single-threaded after all parallel
     // systems complete.
-    private static readonly ConcurrentBag<List<long>> s_allLists = new();
+    private static readonly ConcurrentBag<List<long>> AllLists = new();
 
     // Atomic flag for O(1) HasPendingRequests in the common case (no requests). Set by RequestWake, cleared by DrainAll.
-    private static volatile bool s_hasAnyRequest;
+    private static volatile bool HasAnyRequest;
 
     /// <summary>
     /// Request that a sleeping cluster be woken. Safe to call from any thread during parallel system execution.
@@ -37,17 +37,17 @@ internal static class DormancyReporter
     /// <param name="clusterChunkId">Cluster chunk ID within the archetype.</param>
     public static void RequestWake(int archetypeId, int clusterChunkId)
     {
-        if (t_wakeRequests == null)
+        if (WakeRequests == null)
         {
-            t_wakeRequests = new List<long>(64);
-            if (!t_registered)
+            WakeRequests = new List<long>(64);
+            if (!Registered)
             {
-                s_allLists.Add(t_wakeRequests);
-                t_registered = true;
+                AllLists.Add(WakeRequests);
+                Registered = true;
             }
         }
-        t_wakeRequests.Add(((long)archetypeId << 32) | (uint)clusterChunkId);
-        s_hasAnyRequest = true;
+        WakeRequests.Add(((long)archetypeId << 32) | (uint)clusterChunkId);
+        HasAnyRequest = true;
     }
 
     /// <summary>
@@ -57,7 +57,7 @@ internal static class DormancyReporter
     /// <param name="archetypeStates">Engine's per-archetype state array, indexed by archetype ID.</param>
     internal static void DrainAll(ArchetypeEngineState[] archetypeStates)
     {
-        foreach (var list in s_allLists)
+        foreach (var list in AllLists)
         {
             for (int i = 0; i < list.Count; i++)
             {
@@ -73,20 +73,20 @@ internal static class DormancyReporter
             }
             list.Clear();
         }
-        s_hasAnyRequest = false;
+        HasAnyRequest = false;
     }
 
     /// <summary>
     /// Returns true if any thread-local list has pending wake requests. O(1) via atomic flag in the common case (no requests).
     /// </summary>
-    internal static bool HasPendingRequests => s_hasAnyRequest;
+    internal static bool HasPendingRequests => HasAnyRequest;
 
     /// <summary>
     /// Reset all thread-local lists. For test teardown only — ensures no stale state bleeds between tests.
     /// </summary>
     internal static void Reset()
     {
-        foreach (var list in s_allLists)
+        foreach (var list in AllLists)
         {
             list.Clear();
         }

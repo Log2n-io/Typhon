@@ -7,6 +7,7 @@ import type {
   DbDetailTile,
   DbPageDetail,
   StorageChunkDto,
+  StorageContentCellDto,
   StoragePageDetailDto,
   StorageRegionDetailDto,
 } from '@/libs/dbmap/types';
@@ -17,8 +18,16 @@ import type {
 
 const DETAIL_STALE_MS = 30_000;
 
-function cellsOf(cells: { label: string; value: string; kind: string; offset: number; size: number; colorKey: number }[]): DbContentCell[] {
-  return cells.map((c) => ({ label: c.label, value: c.value, kind: c.kind, offset: c.offset, size: c.size, colorKey: c.colorKey }));
+function cellsOf(cells: StorageContentCellDto[]): DbContentCell[] {
+  return cells.map((c) => ({
+    label: c.label,
+    value: c.value,
+    kind: c.kind,
+    offset: c.offset,
+    size: c.size,
+    colorKey: c.colorKey,
+    enabledMask: c.enabledMask,
+  }));
 }
 
 function decodeTile(dto: StorageRegionDetailDto): DbDetailTile {
@@ -61,6 +70,15 @@ function decodePage(dto: StoragePageDetailDto): DbPageDetail {
     firstChunkId: dto.firstChunkId,
     chunkOccupancy: dto.chunkOccupancy ? decodeBase64(dto.chunkOccupancy) : new Uint8Array(0),
     directoryEntries: cellsOf(dto.directoryEntries ?? []),
+    chunkFill: dto.chunkFill ? decodeBase64(dto.chunkFill) : undefined,
+    chunkClass: dto.chunkClass ? decodeBase64(dto.chunkClass) : undefined,
+    occupancyMap: dto.occupancyMap ? decodeBase64(dto.occupancyMap) : undefined,
+    occupancyFirstPage: dto.occupancyFirstPage,
+    occupancyGovernedCount: dto.occupancyGovernedCount,
+    occupancyGridCols: dto.occupancyGridCols,
+    headerBytes: dto.headerBytes,
+    directoryBytes: dto.directoryBytes,
+    paddingBytes: dto.paddingBytes,
   };
 }
 
@@ -74,6 +92,7 @@ function decodeChunk(dto: StorageChunkDto): DbChunkContent {
     size: dto.size,
     componentType: dto.componentType,
     cells: cellsOf(dto.cells ?? []),
+    clusterComponents: dto.clusterComponents ?? [],
   };
 }
 

@@ -19,11 +19,20 @@ export const PAGE_TYPE_RGB: readonly Rgb[] = [
   [236, 72, 153], //   Cluster   — pink
   [249, 115, 22], //   VSBS      — orange
   [234, 179, 8], //    String    — yellow
+  [20, 184, 166], //   Spatial   — teal
+  [132, 204, 22], //   EntityMap — lime
+  [100, 116, 139], //  System    — slate
 ];
 
 /** Free / used binary encoding. */
 export const FREE_RGB: Rgb = [30, 41, 59];
 export const USED_RGB: Rgb = [56, 189, 248];
+
+/** Structural (non-data) chunk fill — a hashmap meta / directory or index directory chunk. Distinct from free so it never reads as data or empty (A6). */
+export const STRUCT_RGB: Rgb = [51, 65, 85];
+
+/** B-tree internal-node accent (A6). Leaf nodes take the page colour; internal nodes (the sparse skeleton) take this amber so the tree shape reads at a glance. */
+export const INDEX_INTERNAL_RGB: Rgb = [245, 158, 11];
 
 /** Inert Hilbert-tail / no-data background. */
 export const TAIL_RGB: Rgb = [15, 23, 42];
@@ -64,6 +73,11 @@ function lerpRgb(a: Rgb, b: Rgb, t: number): Rgb {
     Math.round(a[1] + (b[1] - a[1]) * tt),
     Math.round(a[2] + (b[2] - a[2]) * tt),
   ];
+}
+
+/** Allocation ramp — free (dark slate) → allocated (cyan), the file's used/free palette. `ratio` is 0..1 (allocated fraction). */
+export function allocationRgb(ratio: number): Rgb {
+  return lerpRgb(FREE_RGB, USED_RGB, ratio);
 }
 
 /** Fill-density heatmap — empty (dark) → half (blue) → full (amber). `ratio` is 0..1. */
@@ -116,12 +130,32 @@ export function contentCellRgb(kind: string, colorKey: number): Rgb {
   if (kind === 'entityPk') {
     return [148, 163, 184];
   }
+  if (kind === 'entitySlot') {
+    // Cluster entity sub-grid (A6): a slot is lit (occupied) or dark (free).
+    return colorKey > 0 ? USED_RGB : FREE_RGB;
+  }
   if (colorKey < 0) {
     return [107, 114, 128];
   }
   // Field / directory entry — golden-angle hue walk keeps adjacent keys distinct.
   const hue = (colorKey * 137.508) % 360;
   return hslToRgb(hue / 360, 0.6, 0.6);
+}
+
+/** Component-enabled overlay colour for a cluster entity slot (A6 §10.1). */
+export const ENABLED_RGB: Rgb = [34, 197, 94]; //  enabled  — green
+export const DISABLED_RGB: Rgb = [120, 53, 53]; // occupied but component disabled — muted red
+
+/**
+ * Colour for one cluster entity slot under the per-component overlay: free slots stay dark; an occupied slot is
+ * green when the selected component is enabled for its entity, muted-red when it is occupied but the component is
+ * disabled. Makes per-component enable/disable distribution legible across the whole cluster segment.
+ */
+export function enabledOverlayRgb(occupied: boolean, enabled: boolean): Rgb {
+  if (!occupied) {
+    return FREE_RGB;
+  }
+  return enabled ? ENABLED_RGB : DISABLED_RGB;
 }
 
 function hslToRgb(h: number, s: number, l: number): Rgb {

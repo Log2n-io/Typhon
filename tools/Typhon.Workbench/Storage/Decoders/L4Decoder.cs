@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Text;
 using Typhon.Engine;
 using Typhon.Workbench.Dtos.Storage;
 
@@ -46,6 +47,253 @@ internal static class L4Decoder
 
         // Stable layout order — the client renders cells left-to-right by byte offset.
         cells.Sort(static (a, b) => a.Offset.CompareTo(b.Offset));
+        return cells.ToArray();
+    }
+
+    /// <summary>
+    /// Decodes one cluster chunk into an N-slot entity sub-grid (Module 15, A6, design §10.1). A cluster packs N
+    /// entities SoA-style: an <c>OccupancyBits</c> u64 at offset 0 (bit <c>s</c> set ⇒ slot <c>s</c> holds a live
+    /// entity), one <c>EnabledBits</c> u64 per component slot at <c>8 + c*8</c> (bit <c>s</c> ⇒ component <c>c</c>
+    /// is enabled for the entity in slot <c>s</c>), then the packed entity-id array at
+    /// <paramref name="entityIdsOffset"/> (8 bytes per slot). Each emitted cell is one slot: <c>ColorKey</c> 1 =
+    /// occupied / 0 = free, and <c>EnabledMask</c> carries the per-slot component bitmask, so the client renders
+    /// the occupancy sub-grid and the component overlay from a single decode. Layout constants come from
+    /// <see cref="DatabaseEngine.TryGetClusterLayout"/>.
+    /// </summary>
+    public static StorageContentCellDto[] DecodeCluster(ReadOnlySpan<byte> chunkBytes, int clusterSize, int componentCount, int entityIdsOffset)
+    {
+        if (clusterSize <= 0 || chunkBytes.Length < 8)
+        {
+            return [];
+        }
+
+        var occupancy = System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(chunkBytes);
+
+        // Read each component's EnabledBits word (at 8 + c*8); transposed to a per-slot mask in the slot loop below.
+        Span<ulong> enabled = componentCount <= 16 ? stackalloc ulong[16] : new ulong[componentCount];
+        for (var c = 0; c < componentCount; c++)
+        {
+            var off = 8 + c * 8;
+            enabled[c] = off + 8 <= chunkBytes.Length
+                ? System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(chunkBytes.Slice(off))
+                : 0UL;
+        }
+
+        var cells = new StorageContentCellDto[clusterSize];
+        for (var s = 0; s < clusterSize; s++)
+        {
+            var occupied = (occupancy & (1UL << s)) != 0;
+
+            long enabledMask = 0;
+            for (var c = 0; c < componentCount; c++)
+            {
+                if ((enabled[c] & (1UL << s)) != 0)
+                {
+                    enabledMask |= 1L << c;
+                }
+            }
+
+            var idOffset = entityIdsOffset + s * 8;
+            var value = "—";
+            if (occupied && idOffset >= 0 && idOffset + 8 <= chunkBytes.Length)
+            {
+                var id = System.Buffers.Binary.BinaryPrimitives.ReadInt64LittleEndian(chunkBytes.Slice(idOffset));
+                value = id.ToString(CultureInfo.InvariantCulture);
+            }
+
+            cells[s] = new StorageContentCellDto($"slot {s}", value, "entitySlot", idOffset, 8, occupied ? 1 : 0, enabledMask);
+        }
+        return cells;
+    }
+
+    /// <summary>
+    /// Decodes one VSBS / component-collection chunk (Module 15, A6, design §10.1). A buffer spans a chain of fixed-stride
+    /// chunks linked by <c>NextChunkId</c> (header @chunk+0); <c>ElementCount</c> (@chunk+4) is the elements stored in this
+    /// chunk. Reports element count, the per-chunk capacity (<c>(stride − 8) / elementSize</c>) and the chain link. Single
+    /// chunk only — root vs continuation can't be told from one chunk's bytes (the root's larger header overlaps element
+    /// data), so no head/length is claimed.
+    /// </summary>
+    public static StorageContentCellDto[] DecodeVsbs(ReadOnlySpan<byte> chunkBytes, int elementSize, int stride)
+    {
+        if (chunkBytes.Length < 8 || elementSize <= 0)
+        {
+            return [];
+        }
+
+        var nextChunkId = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(chunkBytes);
+        var elementCount = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(chunkBytes.Slice(4));
+        var capacity = (stride - 8) / elementSize;
+
+        return
+        [
+            new StorageContentCellDto("Elements", elementCount.ToString(CultureInfo.InvariantCulture), "vsbsMeta", 4, 4, -1),
+            new StorageContentCellDto("Capacity / chunk", capacity.ToString(CultureInfo.InvariantCulture), "vsbsMeta", 0, 0, -1),
+            new StorageContentCellDto("Element size", $"{elementSize} B", "vsbsMeta", 0, 0, -1),
+            new StorageContentCellDto("Next chunk", nextChunkId == 0 ? "— (chain end)" : $"#{nextChunkId}", "chainLink", 0, 4, nextChunkId),
+        ];
+    }
+
+    /// <summary>
+    /// Decodes one string-table chunk (Module 15, A6, design §10.1) into a UTF-8 preview. A string spans a chain of chunks
+    /// linked by <c>NextChunkId</c> (@chunk+4); <c>SizeLeft</c> (@chunk+0) is the bytes remaining from this chunk on, so this
+    /// chunk holds <c>min(SizeLeft, blockSize)</c> payload bytes (<c>blockSize = stride − 8</c>). Single chunk: the preview is
+    /// this chunk's slice (so a mid-chain chunk shows a fragment of the whole string), and the chain link points onward.
+    /// </summary>
+    public static StorageContentCellDto[] DecodeString(ReadOnlySpan<byte> chunkBytes, int stride)
+    {
+        if (chunkBytes.Length < 8)
+        {
+            return [];
+        }
+
+        var sizeLeft = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(chunkBytes);
+        var nextChunkId = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(chunkBytes.Slice(4));
+        var blockSize = stride - 8;
+        var payloadLen = Math.Clamp(sizeLeft, 0, Math.Min(blockSize, chunkBytes.Length - 8));
+        var preview = payloadLen > 0 ? Utf8Preview(chunkBytes.Slice(8, payloadLen), 96) : "";
+
+        return
+        [
+            new StorageContentCellDto("Bytes from here", $"{sizeLeft} B", "stringMeta", 0, 4, -1),
+            new StorageContentCellDto("This chunk", $"{Math.Min(Math.Max(sizeLeft, 0), blockSize)} / {blockSize} B", "stringMeta", 0, 0, -1),
+            new StorageContentCellDto("Next chunk", nextChunkId == 0 ? "— (chain end)" : $"#{nextChunkId}", "chainLink", 4, 4, nextChunkId),
+            new StorageContentCellDto("Preview", preview, "stringPreview", 8, payloadLen, -1),
+        ];
+    }
+
+    /// <summary>UTF-8 decode of a payload slice for display: control chars shown as · and the result capped at <paramref name="maxChars"/>.</summary>
+    private static string Utf8Preview(ReadOnlySpan<byte> bytes, int maxChars)
+    {
+        var decoded = Encoding.UTF8.GetString(bytes);
+        var sb = new StringBuilder(Math.Min(decoded.Length, maxChars + 1));
+        foreach (var ch in decoded)
+        {
+            if (sb.Length >= maxChars)
+            {
+                sb.Append('…');
+                break;
+            }
+            sb.Append(char.IsControl(ch) ? '·' : ch);
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Decodes one linear-hash (entity-map) chunk (Module 15, A6, design §10.1). The chunk's role is supplied by the caller — the meta chunk is always chunk 0;
+    /// directory / overflow-dir-index chunks come from the engine's non-data set (<see cref="DatabaseEngine.TryGetHashMapLayout"/>) — because a headerless
+    /// directory chunk can't be told from a bucket by its bytes alone:
+    /// <list type="bullet">
+    /// <item><b>meta</b> — unpacks <c>PackedMeta</c> (@+8): the linear-hash <c>Level</c> / split pointer / bucket count, plus total entries (@+16) and the
+    /// directory-chunk count (@+24);</item>
+    /// <item><b>directory</b> — a flat table of 64 bucket-chunk pointers (no header);</item>
+    /// <item><b>bucket / overflow</b> — the bucket header (@+0): <c>EntryCount</c> (@+4) over capacity, the overflow chain link (@+8), and the
+    /// primary-vs-overflow role (a primary bucket carries a non-zero <c>OlcVersion</c>; an overflow chunk carries <c>OlcVersion == 0</c>).</item>
+    /// </list>
+    /// </summary>
+    public static StorageContentCellDto[] DecodeHashMap(ReadOnlySpan<byte> chunkBytes, bool isMeta, bool isDirectory, int bucketCapacity)
+    {
+        if (chunkBytes.Length < 12)
+        {
+            return [];
+        }
+
+        if (isMeta)
+        {
+            // PackedMeta layout (PagedHashMapBase.UnpackMeta): Level(bits 56-63) | Next(bits 32-55) | BucketCount(bits 0-31).
+            var packed = System.Buffers.Binary.BinaryPrimitives.ReadInt64LittleEndian(chunkBytes.Slice(8));
+            var level = (int)((packed >> 56) & 0xFF);
+            var next = (int)((packed >> 32) & 0x00FFFFFF);
+            var bucketCount = (int)(packed & 0xFFFFFFFF);
+            var entryCount = System.Buffers.Binary.BinaryPrimitives.ReadInt64LittleEndian(chunkBytes.Slice(16));
+            var dirChunks = System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(chunkBytes.Slice(24));
+            return
+            [
+                new StorageContentCellDto("Role", "Meta", "hashMeta", 0, 0, -1),
+                new StorageContentCellDto("Buckets", bucketCount.ToString(CultureInfo.InvariantCulture), "hashMeta", 8, 8, -1),
+                new StorageContentCellDto("Total entries", entryCount.ToString(CultureInfo.InvariantCulture), "hashMeta", 16, 8, -1),
+                new StorageContentCellDto("Level", level.ToString(CultureInfo.InvariantCulture), "hashMeta", 8, 8, -1),
+                new StorageContentCellDto("Split pointer", next.ToString(CultureInfo.InvariantCulture), "hashMeta", 8, 8, -1),
+                new StorageContentCellDto("Directory chunks", dirChunks.ToString(CultureInfo.InvariantCulture), "hashMeta", 24, 2, -1),
+            ];
+        }
+
+        if (isDirectory)
+        {
+            return
+            [
+                new StorageContentCellDto("Role", "Directory", "hashMeta", 0, 0, -1),
+                new StorageContentCellDto("Bucket pointers", "64 / chunk", "hashMeta", 0, 0, -1),
+            ];
+        }
+
+        // Bucket or overflow chunk — PagedHashMapBucketHeader { OlcVersion @0, EntryCount @4, _ @5-7, OverflowChunkId @8 }.
+        var olcVersion = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(chunkBytes);
+        var bucketEntries = chunkBytes[4];
+        var overflowChunkId = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(chunkBytes.Slice(8));
+        var role = olcVersion == 0 ? "Overflow" : "Bucket";
+        var entriesLabel = bucketCapacity > 0 ? $"{bucketEntries} / {bucketCapacity}" : bucketEntries.ToString(CultureInfo.InvariantCulture);
+        return
+        [
+            new StorageContentCellDto("Role", role, "hashBucket", 0, 4, -1),
+            new StorageContentCellDto("Entries", entriesLabel, "hashBucket", 4, 1, -1),
+            new StorageContentCellDto("Overflow", overflowChunkId == -1 ? "— (none)" : $"#{overflowChunkId}", "chainLink", 8, 4, overflowChunkId),
+        ];
+    }
+
+    /// <summary>
+    /// Decodes one B-tree index chunk (Module 15, A6, design §10.1). The chunk's role comes from its id: chunks <c>[0, directoryChunkCount)</c> are the segment's
+    /// shared directory (chunk 0 + overflow), every other chunk is a node. A node's header is variant-independent — leaf vs internal and the entry count read at
+    /// fixed offsets regardless of key width — so this needs no per-node capacity (deliberately omitted; see §13 A6):
+    /// <list type="bullet">
+    /// <item><b>directory</b> — lists every B-tree registered in the segment (primary key + one per secondary-indexed field): stable id, root chunk, entry count.</item>
+    /// <item><b>node</b> — the control word (@+0): leaf (bit 1) vs internal, the entry <c>Count</c> (byte 3); the prev / next sibling links (@+8 / @+12); and the
+    /// leftmost-child link (@+16) for an internal node. The keys / HighKey are not decoded — their width is the (unknown) key width.</item>
+    /// </list>
+    /// </summary>
+    public static StorageContentCellDto[] DecodeIndex(ReadOnlySpan<byte> chunkBytes, int chunkId, int directoryChunkCount,
+        (short StableId, int RootChunkId, int EntryCount)[] trees)
+    {
+        if (chunkId < directoryChunkCount)
+        {
+            var treeCount = trees?.Length ?? 0;
+            var dirCells = new List<StorageContentCellDto>(1 + treeCount)
+            {
+                new("B-trees", treeCount.ToString(CultureInfo.InvariantCulture), "indexMeta", 0, 2, -1),
+            };
+            if (trees != null)
+            {
+                foreach (var t in trees)
+                {
+                    var label = t.StableId == -1 ? "Primary key" : t.StableId == 0 ? "Standalone" : $"Field #{t.StableId}";
+                    dirCells.Add(new(label, $"root #{t.RootChunkId} · {t.EntryCount} entries", "indexTree", 0, 12, t.RootChunkId));
+                }
+            }
+            return dirCells.ToArray();
+        }
+
+        if (chunkBytes.Length < 20)
+        {
+            return [];
+        }
+
+        var control = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(chunkBytes);
+        var isLeaf = (control & 0x02) != 0; // NodeStates.IsLeaf
+        var count = (control >> 24) & 0xFF; // Count = byte 3 of the control word
+        var prev = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(chunkBytes.Slice(8));
+        var next = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(chunkBytes.Slice(12));
+        var leftChild = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(chunkBytes.Slice(16));
+
+        var cells = new List<StorageContentCellDto>(5)
+        {
+            new("Role", isLeaf ? "Leaf" : "Internal", "indexNode", 0, 4, -1),
+            new("Entries", count.ToString(CultureInfo.InvariantCulture), "indexNode", 3, 1, -1),
+            new("Prev sibling", prev == 0 ? "—" : $"#{prev}", "chainLink", 8, 4, prev),
+            new("Next sibling", next == 0 ? "—" : $"#{next}", "chainLink", 12, 4, next),
+        };
+        if (!isLeaf)
+        {
+            cells.Add(new("Leftmost child", leftChild == 0 ? "—" : $"#{leftChild}", "chainLink", 16, 4, leftChild));
+        }
         return cells.ToArray();
     }
 

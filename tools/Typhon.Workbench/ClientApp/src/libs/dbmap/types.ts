@@ -69,6 +69,8 @@ export interface StorageContentCellDto {
   offset: number;
   size: number;
   colorKey: number;
+  /** Per-slot enabled-component bitmask for cluster `entitySlot` cells; 0/absent for other cells. */
+  enabledMask?: number;
 }
 
 /** Response of `GET /dbmap/page/{idx}` — mirrors `StoragePageDetailDto`. */
@@ -92,6 +94,24 @@ export interface StoragePageDetailDto {
   firstChunkId: number;
   chunkOccupancy: string;
   directoryEntries: StorageContentCellDto[];
+  /** `byte[]` (base64) — per-chunk intra-chunk fill 0..255 for container kinds (e.g. cluster). Empty otherwise. */
+  chunkFill?: string;
+  /** `byte[]` (base64) — per-chunk class (0 slot · 1 containerFill · …). Empty when not populated. */
+  chunkClass?: string;
+  /** `byte[]` (base64) — occupancy region-map: allocated fraction 0..255 per governed sub-range cell. Occupancy pages only. */
+  occupancyMap?: string;
+  /** First file page governed by this occupancy page (0 unless occupancy). */
+  occupancyFirstPage?: number;
+  /** Count of file pages governed by this occupancy page (0 unless occupancy). */
+  occupancyGovernedCount?: number;
+  /** Column count of the occupancy region-map grid (0 unless occupancy). */
+  occupancyGridCols?: number;
+  /** Fixed per-page header bytes (base + metadata) on a chunk-based page; 0 otherwise. */
+  headerBytes?: number;
+  /** Logical-segment directory/index bytes the root page carries (page-index table); 0 for non-root/non-chunk. */
+  directoryBytes?: number;
+  /** Stride-alignment padding before chunk 0 (dead space the engine inserts to stride-align chunks); 0 when none. */
+  paddingBytes?: number;
 }
 
 /** Response of `GET /dbmap/segment/{id}` — mirrors `StorageSegmentDetailDto`. */
@@ -106,6 +126,40 @@ export interface StorageSegmentDetailDto {
   pages: number[];
 }
 
+/** Linear-hash distribution stats for an archetype's entity-map — mirrors `EntityMapStatsDto`. */
+export interface EntityMapStatsDto {
+  bucketCount: number;
+  entryCount: number;
+  overflowBucketCount: number;
+  maxChainLength: number;
+  loadFactor: number;
+  fillEmpty: number;
+  fillQuarter: number;
+  fillHalf: number;
+  fillThreeQuarter: number;
+  fillFull: number;
+}
+
+/** Response of `GET /dbmap/segment/{id}/summary` — mirrors `StorageSegmentSummaryDto` (A6 harvest card). */
+export interface StorageSegmentSummaryDto {
+  id: number;
+  rootPageIndex: number;
+  kind: string;
+  pageCount: number;
+  stride: number;
+  allocatedChunkCount: number;
+  freeChunkCount: number;
+  chunkCapacity: number;
+  /** Cluster archetype's live entity count; 0 when not a cluster. */
+  entityCount: number;
+  /** Active (non-empty) cluster chunks; 0 when not a cluster. */
+  activeClusterCount: number;
+  /** Slots per cluster; 0 when not a cluster. */
+  clusterSize: number;
+  /** Entity-map linear-hash stats; null unless the segment is an entity-map. */
+  entityMap: EntityMapStatsDto | null;
+}
+
 /** Response of `GET /dbmap/chunk/{segId}/{chunkId}` — mirrors `StorageChunkDto`. */
 export interface StorageChunkDto {
   segmentId: number;
@@ -116,6 +170,8 @@ export interface StorageChunkDto {
   size: number;
   componentType: string;
   cells: StorageContentCellDto[];
+  /** Slot-ordered component names for a `cluster` chunk (index = `enabledMask` bit); null/empty otherwise. */
+  clusterComponents: string[] | null;
 }
 
 // ── Enums (ordinals mirror the engine / server) ───────────────────────────────────────────────────────────
@@ -132,6 +188,9 @@ export enum DbPageType {
   Cluster = 7,
   Vsbs = 8,
   StringTable = 9,
+  Spatial = 10,
+  EntityMap = 11,
+  System = 12,
 }
 
 /** Live CRC verdict — ordinals mirror the server's `StorageCrcStatus`. */
@@ -148,6 +207,16 @@ export enum DbResidency {
   ResidentDirty = 2,
 }
 
+/** Per-chunk class for the L3 grid — ordinals mirror the server's `StorageChunkClass` (A6). */
+export enum DbChunkClass {
+  Slot = 0,
+  ContainerFill = 1,
+  Leaf = 2,
+  Internal = 3,
+  Overflow = 4,
+  NonData = 5,
+}
+
 /** Human-readable label per page type, indexed by ordinal. */
 export const PAGE_TYPE_LABELS: readonly string[] = [
   'Unknown',
@@ -160,6 +229,9 @@ export const PAGE_TYPE_LABELS: readonly string[] = [
   'Cluster',
   'VSBS',
   'String table',
+  'Spatial',
+  'Entity map',
+  'System',
 ];
 
 /** Sentinel owner-segment id for a page owned by no segment. */
@@ -248,6 +320,8 @@ export interface DbContentCell {
   offset: number;
   size: number;
   colorKey: number;
+  /** Per-slot enabled-component bitmask for cluster `entitySlot` cells; 0/absent otherwise. */
+  enabledMask?: number;
 }
 
 /** A page's decoded detail — drives the L3 chunk grid and the page Detail-panel view. */
@@ -273,6 +347,24 @@ export interface DbPageDetail {
   /** One byte per chunk, 1 = allocated. Empty for non-chunk-based pages. */
   chunkOccupancy: Uint8Array;
   directoryEntries: DbContentCell[];
+  /** Per-chunk intra-chunk fill 0..255 for container kinds (e.g. cluster popcount/N). Empty/absent otherwise. */
+  chunkFill?: Uint8Array;
+  /** Per-chunk class byte (0 slot · 1 containerFill · …). Empty/absent when not populated. */
+  chunkClass?: Uint8Array;
+  /** Occupancy region-map: allocated fraction 0..255 per governed sub-range cell. Occupancy pages only. */
+  occupancyMap?: Uint8Array;
+  /** First file page governed by this occupancy page. */
+  occupancyFirstPage?: number;
+  /** Count of file pages governed by this occupancy page. */
+  occupancyGovernedCount?: number;
+  /** Column count of the occupancy region-map grid. */
+  occupancyGridCols?: number;
+  /** Fixed per-page header bytes (base + metadata); the renderer reserves this band. */
+  headerBytes?: number;
+  /** Logical-segment directory/index bytes the root page carries (page-index table); 0 for non-root. */
+  directoryBytes?: number;
+  /** Stride-alignment padding before chunk 0 — dead space, rendered distinctly from real overhead. */
+  paddingBytes?: number;
 }
 
 /** A chunk's decoded L4 content. */
@@ -285,4 +377,6 @@ export interface DbChunkContent {
   size: number;
   componentType: string;
   cells: DbContentCell[];
+  /** Slot-ordered component names for a cluster chunk — index = `enabledMask` bit. Drives the overlay picker. Empty for non-cluster chunks. */
+  clusterComponents: string[];
 }

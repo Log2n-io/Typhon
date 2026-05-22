@@ -15,7 +15,7 @@ namespace Typhon.Engine;
 /// The Transaction is committed automatically after the system completes — systems must NOT commit or dispose it.
 /// </para>
 /// <para>
-/// Pipeline systems do NOT receive TickContext — they use <c>Action&lt;int, int&gt;</c> and access entity data
+/// Pipeline systems do NOT receive TickContext — they use an <see cref="System.Action{T1,T2}"/> and access entity data
 /// through Gather/Scatter pipelines (separate mechanism).
 /// </para>
 /// </remarks>
@@ -56,7 +56,7 @@ public struct TickContext
 
     /// <summary>
     /// Event queues this system consumes. Null if the system has no consumed queues.
-    /// Cast to <c>EventQueue&lt;T&gt;</c> and call <c>Drain(span)</c> or <c>AsSpan()</c> to read events.
+    /// Cast to <see cref="EventQueue{T}"/> and call <c>Drain(span)</c> or <c>AsSpan()</c> to read events.
     /// </summary>
     public EventQueueBase[] ConsumedQueues { get; init; }
 

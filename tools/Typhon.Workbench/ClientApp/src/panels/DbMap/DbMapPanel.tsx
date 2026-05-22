@@ -3,11 +3,14 @@ import type { IDockviewPanelProps } from 'dockview-react';
 import { useSessionStore } from '@/stores/useSessionStore';
 import { useDbMapStore } from '@/stores/useDbMapStore';
 import { useDbMapSelectionStore } from '@/stores/useDbMapSelectionStore';
+import { useDbMapOverlayStore } from '@/stores/useDbMapOverlayStore';
 import { useDbMap } from '@/hooks/dbmap/useDbMap';
 import { useDbMapChunks, useDbMapPages, useDbMapTiles } from '@/hooks/dbmap/useDbMapDetail';
 import { useDbMapSegment } from '@/hooks/dbmap/useDbMapSegment';
 import { formatFileSize } from '@/lib/formatters';
 import { DbMapRenderer, type DbDetailRequest, type DbMapTheme } from '@/libs/dbmap/dbMapRenderer';
+import type { L0Stripe } from '@/libs/dbmap/dbMapL0';
+import { rgbCss } from '@/libs/dbmap/dbMapColors';
 import {
   cameraCenteredOn,
   fitToRect,
@@ -20,7 +23,15 @@ import {
   type CameraTween,
 } from '@/libs/dbmap/camera';
 import { hilbertD2XY } from '@/libs/dbmap/hilbert';
-import { DbPageType, NO_SEGMENT, PAGE_SIZE, PAGE_TYPE_LABELS, type DbMapData } from '@/libs/dbmap/types';
+import {
+  DbPageType,
+  NO_SEGMENT,
+  PAGE_SIZE,
+  PAGE_TYPE_LABELS,
+  type DbChunkContent,
+  type DbMapData,
+  type DbPageDetail,
+} from '@/libs/dbmap/types';
 import { buildRegions } from '@/libs/dbmap/dbMapRegions';
 import { findUnderFilledPages, LOW_FILL_THRESHOLD } from '@/libs/dbmap/dbMapPathology';
 import {
@@ -60,6 +71,14 @@ const WHEEL_ZOOM_DURATION_MS = 500;
 const FIT_DURATION_MS = 600;
 /** When flying to a page from a coarse zoom, frame roughly this many cells across the viewport. */
 const FLY_CELLS_ACROSS = 32;
+/** Mouse must stay still this long before the on-surface tooltip appears (any motion resets the timer). */
+const TOOLTIP_DELAY_MS = 3000;
+/**
+ * Lead time before a fly-to's destination detail tier is prefetched. Short — well under any fly duration —
+ * so the fetch overlaps most of the camera flight, but long enough that rapid wheel notches (which redirect
+ * the in-flight tween) coalesce onto the final destination instead of firing a request per notch.
+ */
+const PREFETCH_LEAD_MS = 80;
 
 const EMPTY_REQUEST: DbDetailRequest = { tileNodes: [], pages: [], chunks: [] };
 
@@ -90,6 +109,31 @@ interface HoverInfo {
   byteOffset: number;
   clientX: number;
   clientY: number;
+  /**
+   * Chunk under the cursor at L3/L4 (proposal 5). `chunkId` is the global id; `byteOffset` / `sizeBytes` come
+   * from the decoded L4 content and are present only when that chunk's content is resident.
+   */
+  chunk?: {
+    chunkId: number;
+    indexInPage: number;
+    occupied: boolean;
+    sizeBytes?: number;
+    byteOffset?: number;
+    /** Intra-chunk fill 0..255 for container-kind chunks (A6, e.g. a cluster); absent for slot-like chunks. */
+    fill?: number;
+    /** Live / total entity slots when the hovered chunk is a cluster (A6); absent otherwise. */
+    slotsLive?: number;
+    slotsTotal?: number;
+  };
+  /** Governed file-page range when the hovered page is an occupancy page (A6, §10.2). */
+  occupancy?: { first: number; count: number };
+}
+
+/** Transient L0 stripe hover — drives the L0 tooltip variant. */
+interface L0HoverInfo {
+  stripe: L0Stripe;
+  clientX: number;
+  clientY: number;
 }
 
 /**
@@ -104,6 +148,10 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
   const encoding = useDbMapStore((s) => s.encoding);
   const segmentOverlay = useDbMapStore((s) => s.segmentOverlay);
   const toggleSegmentOverlay = useDbMapStore((s) => s.toggleSegmentOverlay);
+  const residencyOverlay = useDbMapStore((s) => s.residencyOverlay);
+  const toggleResidencyOverlay = useDbMapStore((s) => s.toggleResidencyOverlay);
+  const regionCaptions = useDbMapStore((s) => s.regionCaptions);
+  const toggleRegionCaptions = useDbMapStore((s) => s.toggleRegionCaptions);
   const lens = useDbMapStore((s) => s.lens);
   const lensSegmentId = useDbMapStore((s) => s.lensSegmentId);
   const filter = useDbMapStore((s) => s.filter);
@@ -125,18 +173,34 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
   const frameRef = useRef<number | null>(null);
   const dragRef = useRef<DragState | null>(null);
   const detailSyncRef = useRef<number | null>(null);
+  // Predictive-prefetch timer — debounces the destination detail fetch kicked off when a fly-to begins.
+  const prefetchRef = useRef<number | null>(null);
+  // Tooltip dwell — refs hold the latest hover intent + timer so the React tooltip state only flips on after
+  // {@link TOOLTIP_DELAY_MS} of mouse stillness. Any move resets the timer; mouseleave / drag clear both.
+  const tooltipTimerRef = useRef<number | null>(null);
+  const hoverIntentRef = useRef<{ kind: 'page'; data: HoverInfo } | { kind: 'l0'; data: L0HoverInfo } | null>(null);
   // The camera is fit to the file only on first load — a later refresh (or refetch) keeps the user's viewport.
   const fittedRef = useRef(false);
   // Active camera fly-to (§4.5) — when set, the animation loop steps it; any user gesture clears it.
   const tweenRef = useRef<CameraTween | null>(null);
   const animationRef = useRef<number | null>(null);
+  // rAF chain that keeps repainting while freshly-arrived L4 chunk content is fading in (so it eases, not pops).
+  const contentFadeRef = useRef<number | null>(null);
 
   const [hover, setHover] = useState<HoverInfo | null>(null);
+  const [l0Hover, setL0Hover] = useState<L0HoverInfo | null>(null);
   const [regionRect, setRegionRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
   const [themeTick, setThemeTick] = useState(0);
   const [detailReq, setDetailReq] = useState<DbDetailRequest>(EMPTY_REQUEST);
-  const [lod, setLod] = useState<{ band: 'L1' | 'L3' | 'L4'; focusedPage: number | null }>({
+  const [lod, setLod] = useState<{
+    /** Underlying renderer band (used for detail-tier orchestration). */
+    band: 'L1' | 'L3' | 'L4';
+    /** Visually dominant band — L0 is folded in for the per-band legend chrome. */
+    displayBand: 'L0' | 'L1' | 'L3' | 'L4';
+    focusedPage: number | null;
+  }>({
     band: 'L1',
+    displayBand: 'L0',
     focusedPage: null,
   });
   const [searchQuery, setSearchQuery] = useState('');
@@ -250,10 +314,11 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
       setDetailReq((prev) => (sameRequest(prev, req) ? prev : req));
       const lodState = renderer.getLodState();
       const focused = renderer.getFocusedPage();
+      const displayBand = renderer.getDisplayBand();
       setLod((prev) =>
-        prev.band === lodState.band && prev.focusedPage === focused
+        prev.band === lodState.band && prev.displayBand === displayBand && prev.focusedPage === focused
           ? prev
-          : { band: lodState.band, focusedPage: focused },
+          : { band: lodState.band, displayBand, focusedPage: focused },
       );
     }, DETAIL_SYNC_MS);
   }, []);
@@ -290,6 +355,30 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
     animationRef.current = requestAnimationFrame(tick);
   }, [queueDetailSync]);
 
+  // Repaints each frame while any L4 chunk content is mid fade-in, then stops. Separate from the tween loop because
+  // content typically arrives *after* the camera has settled (its decode is a two-hop fetch), so there's no tween
+  // running to drive the fade. No-op while a tween is active — that loop already repaints every frame.
+  const runContentFade = useCallback(() => {
+    if (contentFadeRef.current != null || animationRef.current != null) {
+      return;
+    }
+    const tick = () => {
+      const renderer = rendererRef.current;
+      if (!renderer) {
+        contentFadeRef.current = null;
+        return;
+      }
+      renderer.setCamera(cameraRef.current);
+      renderer.render();
+      if (renderer.hasFadingContent()) {
+        contentFadeRef.current = requestAnimationFrame(tick);
+      } else {
+        contentFadeRef.current = null;
+      }
+    };
+    contentFadeRef.current = requestAnimationFrame(tick);
+  }, []);
+
   // Cancels any in-flight fly-to — called the moment the user takes the camera themselves.
   const cancelTween = useCallback(() => {
     tweenRef.current = null;
@@ -299,12 +388,45 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
     }
   }, []);
 
+  // Predictive prefetch (§5 — smooth L1→L3): when a fly-to begins, fetch the *destination's* detail tier now,
+  // while the camera is still animating toward it, so the deep bands are resident (or in flight) by the time
+  // the tween lands rather than blank-then-popping after it settles + the DETAIL_SYNC_MS debounce. Debounced
+  // so a burst of wheel notches that keep redirecting the tween coalesces onto the final destination. Only
+  // detailReq is touched — the LOD band / breadcrumb still track the live camera and update at settle time.
+  const prefetchForCamera = useCallback((target: Camera) => {
+    if (prefetchRef.current != null) {
+      window.clearTimeout(prefetchRef.current);
+    }
+    prefetchRef.current = window.setTimeout(() => {
+      prefetchRef.current = null;
+      const renderer = rendererRef.current;
+      if (!renderer) {
+        return;
+      }
+      const req = renderer.getDetailRequestForCamera(target);
+      setDetailReq((prev) => (sameRequest(prev, req) ? prev : req));
+    }, PREFETCH_LEAD_MS);
+  }, []);
+
   const flyTo = useCallback(
     (target: Camera, durationMs: number = FLY_DURATION_MS, anchorX?: number, anchorY?: number) => {
-      tweenRef.current = { from: cameraRef.current, to: target, startMs: performance.now(), durationMs, anchorX, anchorY };
+      const from = cameraRef.current;
+      // When the caller doesn't pin an anchor (the cursor, for a wheel zoom), default to the zoom's *invariant point*
+      // — the screen point whose world coordinate is identical in `from` and `to`. Anchoring the glide there makes it
+      // a clean monotonic zoom; the centre-anchored default otherwise swoops (the focus bulges off-and-back) whenever
+      // the move both zooms and pans, e.g. double-click-to-fit. Pure pans (equal scale) keep the centre anchor.
+      if (anchorX === undefined && anchorY === undefined) {
+        const denom = from.scale - target.scale;
+        if (Math.abs(denom) > 1e-6) {
+          anchorX = (target.x * from.scale - from.x * target.scale) / denom;
+          anchorY = (target.y * from.scale - from.y * target.scale) / denom;
+        }
+      }
+      tweenRef.current = { from, to: target, startMs: performance.now(), durationMs, anchorX, anchorY };
       runTween();
+      prefetchForCamera(target);
     },
-    [runTween],
+    [runTween, prefetchForCamera],
   );
 
   // Records a discrete map navigation in the Workbench nav history (§13 A4 AC2) — `Alt+←/→` retraces it.
@@ -468,6 +590,28 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
     queueDetailSync();
   }, [encoding, segmentOverlay, scheduleRender, queueDetailSync]);
 
+  // Per-component overlay (A6) — push the picker's selection to the renderer; it recolours the L4 cluster slots
+  // of the chosen segment by the component's enabled bit. Cleared on DB change so a stale segment id can't carry over.
+  const overlaySegmentId = useDbMapOverlayStore((s) => s.segmentId);
+  const overlayComponentSlot = useDbMapOverlayStore((s) => s.componentSlot);
+  const clearOverlay = useDbMapOverlayStore((s) => s.clear);
+  useEffect(() => {
+    const renderer = rendererRef.current;
+    if (!renderer) {
+      return;
+    }
+    renderer.setComponentOverlay(
+      overlaySegmentId != null && overlayComponentSlot != null
+        ? { segmentId: overlaySegmentId, componentSlot: overlayComponentSlot }
+        : null,
+    );
+    scheduleRender();
+  }, [overlaySegmentId, overlayComponentSlot, scheduleRender]);
+
+  useEffect(() => {
+    clearOverlay();
+  }, [data?.databaseName, clearOverlay]);
+
   // Lens change — recompute the per-page highlight mask and hand it to the renderer (§4.3). The mask is
   // O(pageCount) but rebuilt only on a lens / focus / data / tile change, never per frame.
   useEffect(() => {
@@ -475,7 +619,9 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
     if (!renderer) {
       return;
     }
-    if (!data || lens === 'none') {
+    // The fragmentation lens needs a focused segment; without one (e.g. restored from a persisted session where
+    // the segment id no longer applies) treat it as no lens so the map isn't dimmed-to-nothing on open.
+    if (!data || lens === 'none' || (lens === 'fragmentation' && lensSegmentId == null)) {
       renderer.setLens('none', null);
       scheduleRender();
       return;
@@ -523,6 +669,38 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
     scheduleRender();
   }, [filterMask, scheduleRender]);
 
+  // Pathology flags drive both the L0 badge (count) and the L1 per-page marker (page lookup against the
+  // set) — fed in one shot.
+  useEffect(() => {
+    const renderer = rendererRef.current;
+    if (!renderer) {
+      return;
+    }
+    renderer.setPathologyFlags(pathologyFlags);
+    scheduleRender();
+  }, [pathologyFlags, scheduleRender]);
+
+  // L1 enhancement #3 + #7 — feed the residency-overlay toggle, region-caption toggle, and the regions
+  // array (already computed by the buildRegions memo) into the renderer.
+  useEffect(() => {
+    const renderer = rendererRef.current;
+    if (!renderer) {
+      return;
+    }
+    renderer.setResidencyOverlay(residencyOverlay);
+    renderer.setRegionCaptions(regionCaptions);
+    scheduleRender();
+  }, [residencyOverlay, regionCaptions, scheduleRender]);
+
+  useEffect(() => {
+    const renderer = rendererRef.current;
+    if (!renderer) {
+      return;
+    }
+    renderer.setRegions(regions);
+    scheduleRender();
+  }, [regions, scheduleRender]);
+
   // Search matches changed — mark them on the map; the camera fly-to is driven explicitly by Enter / cycle.
   useEffect(() => {
     const renderer = rendererRef.current;
@@ -547,9 +725,20 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
     renderer.setDetailTiles(tiles);
     renderer.setPageDetails(pageDetails);
     renderer.setChunkContents(chunkContents);
-    scheduleRender();
-    queueDetailSync();
-  }, [tiles, pageDetails, chunkContents, scheduleRender, queueDetailSync]);
+    // Newly-arrived chunk content fades in; drive a repaint chain until the fade completes (else a single repaint).
+    if (renderer.hasFadingContent()) {
+      runContentFade();
+    } else {
+      scheduleRender();
+    }
+    // Re-derive the request *immediately* on data arrival (no debounce): the L4 chunk fetch depends on page details,
+    // so the instant those land we issue the chunk request — waiting out DETAIL_SYNC_MS here was the main source of
+    // the zoom-in content lag. Crucially, derive it for the tween *destination* (a fixed point), not the live camera:
+    // syncing against the moving camera churns the visible chunk set frame-to-frame, which flickers content on/off.
+    const target = tweenRef.current?.to ?? cameraRef.current;
+    const req = renderer.getDetailRequestForCamera(target);
+    setDetailReq((prev) => (sameRequest(prev, req) ? prev : req));
+  }, [tiles, pageDetails, chunkContents, scheduleRender, runContentFade]);
 
   // Resize — keep the canvas backing store in sync with the surface (also fires when the side rail collapses).
   useEffect(() => {
@@ -589,14 +778,23 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
     return () => canvas.removeEventListener('wheel', onWheel);
   }, [flyTo]);
 
-  // Drop any pending detail-sync timer / fly-to on unmount.
+  // Drop any pending detail-sync timer / fly-to / tooltip dwell on unmount.
   useEffect(
     () => () => {
       if (detailSyncRef.current != null) {
         window.clearTimeout(detailSyncRef.current);
       }
+      if (prefetchRef.current != null) {
+        window.clearTimeout(prefetchRef.current);
+      }
       if (animationRef.current != null) {
         cancelAnimationFrame(animationRef.current);
+      }
+      if (contentFadeRef.current != null) {
+        cancelAnimationFrame(contentFadeRef.current);
+      }
+      if (tooltipTimerRef.current != null) {
+        window.clearTimeout(tooltipTimerRef.current);
       }
     },
     [],
@@ -705,6 +903,24 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
       if (!renderer || !data) {
         return;
       }
+
+      // L0 — a stripe click activates that slice. Type stripe → encoding stays/becomes pageType so the L1
+      // colours line up with the clicked band; segment stripe → focuses that segment under the fragmentation
+      // lens (matches the in-flight L1 convention at line 762 below). The "Other" bucket is intentionally
+      // inert — it collapses many segments, so there's no single target to focus.
+      const stripe = renderer.l0HitTest(screenX, screenY);
+      if (stripe) {
+        const store = useDbMapStore.getState();
+        if (stripe.kind === 'segment' && stripe.segmentId != null && stripe.segmentId !== NO_SEGMENT) {
+          store.focusSegment(stripe.segmentId);
+        } else if (stripe.kind === 'type') {
+          if (store.encoding !== 'pageType') {
+            store.setEncoding('pageType');
+          }
+        }
+        return;
+      }
+
       const band = renderer.getLodState().band;
 
       // L4 — a content cell decodes to a single record.
@@ -718,6 +934,8 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
           const cell = content?.cells[hit.cellIndex];
           if (detail && cell) {
             renderer.setSelection(hit.page);
+            renderer.setSelectionChunk({ page: hit.page, chunkInPage: hit.chunkInPage });
+            renderer.setSelectionCell({ page: hit.page, chunkInPage: hit.chunkInPage, cellIndex: hit.cellIndex });
             scheduleRender();
             selectDbMap(data.databaseName, {
               kind: 'cell',
@@ -738,6 +956,8 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
           const detail = pageDetails.get(hit.page);
           if (detail && detail.ownerSegmentId >= 0) {
             renderer.setSelection(hit.page);
+            renderer.setSelectionChunk({ page: hit.page, chunkInPage: hit.chunkInPage });
+            renderer.setSelectionCell(null);
             scheduleRender();
             selectDbMap(data.databaseName, {
               kind: 'chunk',
@@ -750,9 +970,12 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
         }
       }
 
-      // L1 — a page.
+      // L1 — a page. A page-level selection drops any chunk-level marker so a later zoom-in shows the page,
+      // not a stale chunk outline.
       const page = renderer.pageAt(screenX, screenY);
       renderer.setSelection(page);
+      renderer.setSelectionChunk(null);
+      renderer.setSelectionCell(null);
       scheduleRender();
       if (page == null) {
         clearDbMapSelection();
@@ -868,8 +1091,34 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
       jumpViaOffsetStrip(pt.x);
     }
     dragRef.current = { mode, startX: pt.x, startY: pt.y, startCam: cameraRef.current, moved: false };
+    // A drag in progress should never leave a stale tooltip-dwell timer running — the user is intentionally
+    // mid-gesture, not parked over a target.
+    cancelTooltip();
     window.addEventListener('mousemove', handleWindowMouseMove);
     window.addEventListener('mouseup', handleWindowMouseUp);
+  };
+
+  // Double-click — select the hovered element and ease the camera to fit it (cell @L4 / chunk @L3 / page @L1), the
+  // per-element analogue of the Fit button. The two preceding single-clicks have already selected it; this adds the zoom.
+  const handleDoubleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current;
+    const renderer = rendererRef.current;
+    const surface = surfaceRef.current;
+    if (!canvas || !renderer || !surface || !data) {
+      return;
+    }
+    const pt = canvasPoint(canvas, e.clientX, e.clientY);
+    // Leave the minimap / offset strip to their own click behaviour.
+    if (pointIn(pt, renderer.getMinimapScreenRect()) || pointIn(pt, renderer.getOffsetStripScreenRect())) {
+      return;
+    }
+    const rect = renderer.elementWorldRectAt(pt.x, pt.y);
+    if (!rect) {
+      return;
+    }
+    selectAt(pt.x, pt.y);
+    const { width, height } = surface.getBoundingClientRect();
+    flyTo(zoomToWorldRect(rect, width, height, FIT_PADDING), FIT_DURATION_MS);
   };
 
   const handleContextMenu = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -896,6 +1145,39 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
     });
   };
 
+  // Latches the latest hover intent and (re)starts the dwell timer. The tooltip only renders after the timer
+  // fires — any subsequent move calls this again and resets the countdown, so the user sees a tooltip only
+  // after holding the mouse still over the same target for TOOLTIP_DELAY_MS.
+  const scheduleTooltip = useCallback(() => {
+    if (tooltipTimerRef.current != null) {
+      window.clearTimeout(tooltipTimerRef.current);
+    }
+    tooltipTimerRef.current = window.setTimeout(() => {
+      tooltipTimerRef.current = null;
+      const intent = hoverIntentRef.current;
+      if (!intent) {
+        return;
+      }
+      if (intent.kind === 'page') {
+        setHover(intent.data);
+      } else {
+        setL0Hover(intent.data);
+      }
+    }, TOOLTIP_DELAY_MS);
+  }, []);
+
+  // Cancels the dwell timer and hides whatever tooltip is currently up — used on mouse-leave, drag start,
+  // and unmount.
+  const cancelTooltip = useCallback(() => {
+    if (tooltipTimerRef.current != null) {
+      window.clearTimeout(tooltipTimerRef.current);
+      tooltipTimerRef.current = null;
+    }
+    hoverIntentRef.current = null;
+    setHover(null);
+    setL0Hover(null);
+  }, []);
+
   const handleHoverMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
     const renderer = rendererRef.current;
@@ -903,26 +1185,68 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
       return;
     }
     const pt = canvasPoint(canvas, e.clientX, e.clientY);
-    const page = renderer.pageAt(pt.x, pt.y);
-    renderer.setHover(page);
-    scheduleRender();
-    if (page == null) {
+
+    // Any motion hides the visible tooltip — it reappears only after the dwell period.
+    if (hover) {
       setHover(null);
+    }
+    if (l0Hover) {
+      setL0Hover(null);
+    }
+
+    // At L0 a stripe under the cursor takes priority — the renderer returns null past L0 so we cleanly fall
+    // through to page hover above the L0→L1 crossfade.
+    const stripe = renderer.l0HitTest(pt.x, pt.y);
+    if (stripe) {
+      hoverIntentRef.current = { kind: 'l0', data: { stripe, clientX: e.clientX, clientY: e.clientY } };
+      // Stripe is the active target — clear the L1 cell outline so the page outline doesn't follow the cursor
+      // around the stripe column.
+      renderer.setHover(null);
+      renderer.setHoverChunk(null);
+      renderer.setHoverCell(null);
+      scheduleRender();
+      scheduleTooltip();
       return;
     }
-    setHover({
-      pageIndex: page,
-      typeLabel: PAGE_TYPE_LABELS[data.pageType[page]] ?? 'Unknown',
-      segmentLabel: segmentLabel(data, page),
-      byteOffset: page * PAGE_SIZE,
-      clientX: e.clientX,
-      clientY: e.clientY,
-    });
+
+    const page = renderer.pageAt(pt.x, pt.y);
+    renderer.setHover(page);
+    // At L3/L4 also track the chunk under the cursor so the hover outline tightens to the individual chunk; at L4
+    // tighten further to the decoded content cell (entity slot) so the deepest level has its own hover feedback.
+    const band = renderer.getLodState().band;
+    const chunkHit = band === 'L1' ? null : renderer.pickChunk(pt.x, pt.y);
+    renderer.setHoverChunk(chunkHit);
+    renderer.setHoverCell(band === 'L4' ? renderer.pickContentCell(pt.x, pt.y) : null);
+    scheduleRender();
+    if (page == null) {
+      hoverIntentRef.current = null;
+      if (tooltipTimerRef.current != null) {
+        window.clearTimeout(tooltipTimerRef.current);
+        tooltipTimerRef.current = null;
+      }
+      return;
+    }
+    hoverIntentRef.current = {
+      kind: 'page',
+      data: {
+        pageIndex: page,
+        typeLabel: PAGE_TYPE_LABELS[data.pageType[page]] ?? 'Unknown',
+        segmentLabel: segmentLabel(data, page),
+        byteOffset: page * PAGE_SIZE,
+        clientX: e.clientX,
+        clientY: e.clientY,
+        chunk: chunkHit ? chunkHoverInfo(chunkHit, pageDetails, chunkContents) : undefined,
+        occupancy: occupancyHoverInfo(page, pageDetails),
+      },
+    };
+    scheduleTooltip();
   };
 
   const handleHoverLeave = () => {
-    setHover(null);
+    cancelTooltip();
     rendererRef.current?.setHover(null);
+    rendererRef.current?.setHoverChunk(null);
+    rendererRef.current?.setHoverCell(null);
     scheduleRender();
   };
 
@@ -936,8 +1260,15 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
     } else if (e.key === 'b' || e.key === 'B') {
       addCurrentBookmark();
       e.preventDefault();
+    } else if (e.key === 'r' || e.key === 'R') {
+      toggleResidencyOverlay();
+      e.preventDefault();
+    } else if (e.key === 'c' || e.key === 'C') {
+      toggleRegionCaptions();
+      e.preventDefault();
     } else if (e.key === 'Escape') {
       rendererRef.current?.setSelection(null);
+      rendererRef.current?.setSelectionChunk(null);
       clearDbMapSelection();
       scheduleRender();
       e.preventDefault();
@@ -1010,6 +1341,7 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
           <canvas
             ref={canvasRef}
             onMouseDown={handleMouseDown}
+            onDoubleClick={handleDoubleClick}
             onMouseMove={handleHoverMove}
             onMouseLeave={handleHoverLeave}
             onContextMenu={handleContextMenu}
@@ -1027,6 +1359,7 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
             <p className="absolute left-3 top-2 text-[11px] text-destructive">Failed to load the file map.</p>
           )}
           {hover && <HoverTooltip info={hover} />}
+          {l0Hover && <L0StripeTooltip info={l0Hover} data={data} />}
           {ctxMenu &&
             (() => {
               // Reveal / open-in-schema work component-by-type — enabled only for a component segment.
@@ -1049,6 +1382,7 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
         <DbMapSidePanel
           legend={
             <LegendTab
+              displayBand={lod.displayBand}
               downSampleFactor={data?.downSampleFactor ?? 1}
               metrics={metrics}
               composition={composition}
@@ -1057,7 +1391,14 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
               onFlyToPage={flyToPage}
             />
           }
-          regions={<RegionsTab regions={regions} segments={data?.segments ?? []} onFlyToRegion={flyToRegion} />}
+          regions={
+            <RegionsTab
+              regions={regions}
+              segments={data?.segments ?? []}
+              onFlyToRegion={flyToRegion}
+              onSelectSegment={(segId) => data && selectDbMap(data.databaseName, { kind: 'segment', segmentId: segId })}
+            />
+          }
           bookmarks={
             <BookmarksTab
               bookmarks={bookmarks}
@@ -1094,12 +1435,89 @@ function HoverTooltip({ info }: { info: HoverInfo }) {
       className="pointer-events-none z-50 rounded border border-border bg-popover px-2 py-1 text-[11px] text-popover-foreground shadow-md"
       style={{ position: 'fixed', left: info.clientX + 12, top: info.clientY - 8, transform: 'translateY(-100%)' }}
     >
-      <span className="font-mono font-semibold text-foreground">#{info.pageIndex}</span>
-      <span className="ml-2 text-muted-foreground">{info.typeLabel}</span>
-      <span className="ml-2 text-muted-foreground">{info.segmentLabel}</span>
-      <span className="ml-2 font-mono tabular-nums text-muted-foreground">
-        @ 0x{info.byteOffset.toString(16).toUpperCase()}
-      </span>
+      <div>
+        <span className="font-mono font-semibold text-foreground">#{info.pageIndex}</span>
+        <span className="ml-2 text-muted-foreground">{info.typeLabel}</span>
+        <span className="ml-2 text-muted-foreground">{info.segmentLabel}</span>
+        <span className="ml-2 font-mono tabular-nums text-muted-foreground">
+          @ 0x{info.byteOffset.toString(16).toUpperCase()}
+        </span>
+      </div>
+      {info.chunk && (
+        <div className="mt-0.5">
+          <span className="font-mono font-semibold text-foreground">chunk #{info.chunk.chunkId}</span>
+          <span className="ml-2 text-muted-foreground">[{info.chunk.indexInPage}]</span>
+          <span className={`ml-2 ${info.chunk.occupied ? 'text-foreground' : 'text-muted-foreground'}`}>
+            {info.chunk.occupied ? 'occupied' : 'free'}
+          </span>
+          {info.chunk.sizeBytes != null && (
+            <span className="ml-2 font-mono tabular-nums text-muted-foreground">{formatFileSize(info.chunk.sizeBytes)}</span>
+          )}
+          {info.chunk.byteOffset != null && (
+            <span className="ml-2 font-mono tabular-nums text-muted-foreground">
+              @ 0x{info.chunk.byteOffset.toString(16).toUpperCase()}
+            </span>
+          )}
+          {info.chunk.slotsTotal != null && (
+            <span className="ml-2 font-mono tabular-nums text-muted-foreground">
+              {info.chunk.slotsLive}/{info.chunk.slotsTotal} slots
+            </span>
+          )}
+          {info.chunk.fill != null && (
+            <span className="ml-2 font-mono tabular-nums text-muted-foreground">
+              {Math.round((info.chunk.fill / 255) * 100)}% full
+            </span>
+          )}
+        </div>
+      )}
+      {info.occupancy && (
+        <div className="mt-0.5 text-muted-foreground">
+          governs pages{' '}
+          <span className="font-mono tabular-nums text-foreground">
+            {info.occupancy.first.toLocaleString()}–{(info.occupancy.first + info.occupancy.count).toLocaleString()}
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function L0StripeTooltip({ info, data }: { info: L0HoverInfo; data: DbMapData | null | undefined }) {
+  const s = info.stripe;
+  const pct = (s.fraction * 100).toFixed(1);
+  // Segment stripes can append the kind / typeName from the StorageSegmentDto for extra context.
+  let detail: string | null = null;
+  if (s.kind === 'segment' && s.segmentId != null && data) {
+    const seg = data.segments.find((x) => x.id === s.segmentId);
+    if (seg && seg.typeName.length > 0) {
+      detail = `${seg.kind} · ${seg.typeName}`;
+    } else if (seg) {
+      detail = seg.kind;
+    }
+  } else if (s.kind === 'other' && s.bucketed && data) {
+    // "Other" bucket — list up to 5 of the largest segment ids it collapsed.
+    const sample = s.bucketed
+      .slice(0, 5)
+      .map((id) => {
+        const seg = data.segments.find((x) => x.id === id);
+        return seg ? `#${seg.id}` : `#${id}`;
+      })
+      .join(', ');
+    detail = s.bucketed.length > 5 ? `${sample}, +${s.bucketed.length - 5} more` : sample;
+  }
+  return (
+    <div
+      className="pointer-events-none z-50 rounded border border-border bg-popover px-2 py-1 text-[11px] text-popover-foreground shadow-md"
+      style={{ position: 'fixed', left: info.clientX + 12, top: info.clientY - 8, transform: 'translateY(-100%)' }}
+    >
+      <div className="flex items-center gap-2">
+        <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: rgbCss(s.color) }} />
+        <span className="font-semibold text-foreground">{s.label}</span>
+      </div>
+      <div className="mt-0.5 font-mono tabular-nums text-muted-foreground">
+        {formatFileSize(s.byteCount)} · {s.pageCount.toLocaleString()} pages · {pct}%
+      </div>
+      {detail && <div className="mt-0.5 text-muted-foreground">{detail}</div>}
     </div>
   );
 }
@@ -1120,6 +1538,46 @@ function segmentLabel(data: DbMapData, page: number): string {
   }
   const seg = data.segments.find((s) => s.id === segId);
   return seg ? `${seg.kind} #${seg.id}` : `segment #${segId}`;
+}
+
+/**
+ * Builds the chunk line of the hover tooltip (proposal 5). chunk id / index / occupancy come from the page
+ * detail (resident at L3); byte offset + size are added only when the L4 content for that chunk is resident.
+ */
+function chunkHoverInfo(
+  hit: { page: number; chunkInPage: number },
+  pageDetails: Map<number, DbPageDetail>,
+  chunkContents: Map<string, DbChunkContent>,
+): HoverInfo['chunk'] {
+  const detail = pageDetails.get(hit.page);
+  if (!detail || detail.chunkTotal <= 0 || hit.chunkInPage >= detail.chunkTotal) {
+    return undefined;
+  }
+  const chunkId = detail.firstChunkId + hit.chunkInPage;
+  const content = chunkContents.get(`${detail.ownerSegmentId}:${chunkId}`);
+  // Cluster chunks (A6): the resident L4 content is the N entity slots — count the lit ones for the tooltip.
+  const isCluster = content?.decoder === 'cluster';
+  const slotsTotal = isCluster ? content!.cells.length : undefined;
+  const slotsLive = isCluster ? content!.cells.filter((c) => c.colorKey > 0).length : undefined;
+  return {
+    chunkId,
+    indexInPage: hit.chunkInPage,
+    occupied: detail.chunkOccupancy[hit.chunkInPage] === 1,
+    sizeBytes: content?.size,
+    byteOffset: content?.byteOffset,
+    fill: detail.chunkFill?.[hit.chunkInPage],
+    slotsLive,
+    slotsTotal,
+  };
+}
+
+/** Governed-range info for an occupancy page's hover tooltip (A6, §10.2); undefined for non-occupancy pages. */
+function occupancyHoverInfo(page: number, pageDetails: Map<number, DbPageDetail>): HoverInfo['occupancy'] {
+  const detail = pageDetails.get(page);
+  if (!detail || detail.occupancyGovernedCount == null || detail.occupancyGovernedCount <= 0) {
+    return undefined;
+  }
+  return { first: detail.occupancyFirstPage ?? 0, count: detail.occupancyGovernedCount };
 }
 
 /** Resolves the renderer theme from the design-token CSS variables on <html>. */

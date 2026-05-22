@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { gridCols, gridSubRect } from '../dbMapGrid';
+import { chunkAreaRect, gridCols, gridSubRect } from '../dbMapGrid';
 
 describe('gridCols', () => {
   it('lays cells into a near-square grid', () => {
@@ -29,5 +29,29 @@ describe('gridSubRect', () => {
   it('honours the parent rect offset and size', () => {
     const parent = { x: 10, y: 20, w: 4, h: 8 };
     expect(gridSubRect(parent, 2, 2, 1)).toEqual({ x: 12, y: 20, w: 2, h: 4 });
+  });
+});
+
+describe('chunkAreaRect — reserved overhead band (A6 memory-faithful layout)', () => {
+  const unit = { x: 0, y: 0, w: 1, h: 1 };
+  const PAGE = 8192;
+
+  it('returns the whole cell when there is no overhead', () => {
+    expect(chunkAreaRect(unit, 0, PAGE)).toEqual(unit);
+  });
+
+  it('reserves the overhead band as a top fraction of the cell', () => {
+    const r = chunkAreaRect(unit, 996, PAGE); // a cluster non-root page's header + alignment
+    expect(r.y).toBeCloseTo(996 / PAGE, 6);
+    expect(r.h).toBeCloseTo(1 - 996 / PAGE, 6);
+    expect(r.x).toBe(0);
+    expect(r.w).toBe(1);
+  });
+
+  it('scales the reserve to the parent rect height', () => {
+    const parent = { x: 5, y: 10, w: 2, h: 4 };
+    const r = chunkAreaRect(parent, 2048, PAGE); // 2048/8192 = 0.25 of the page
+    expect(r.y).toBeCloseTo(10 + 4 * 0.25, 6);
+    expect(r.h).toBeCloseTo(4 * 0.75, 6);
   });
 });

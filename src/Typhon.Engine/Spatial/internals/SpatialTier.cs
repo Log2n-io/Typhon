@@ -26,7 +26,7 @@ internal enum SpatialTier : byte
 
 /// <summary>
 /// Helpers that map from <see cref="SpatialFieldType"/> (archetype-declared spatial field) and from <see cref="ISpatialBox"/> generic type parameters to the
-/// common <see cref="SpatialTier"/> enum. Used by <c>ClusterSpatialQuery&lt;TArch&gt;.AABB&lt;TBox&gt;</c> to enforce strict tier matching between a
+/// common <see cref="SpatialTier"/> enum. Used by <see cref="ClusterSpatialQuery{TArch}"/>'s <c>AABB&lt;TBox&gt;</c> to enforce strict tier matching between a
 /// query's box type and an archetype's cluster storage (issue #230 Phase 2.5).
 /// </summary>
 internal static class SpatialTierExtensions

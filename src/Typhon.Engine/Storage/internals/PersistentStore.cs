@@ -8,9 +8,8 @@ namespace Typhon.Engine.Internals;
 /// Page store backed by a <see cref="ManagedPagedMMF"/> (memory-mapped file with page cache).
 /// Every method delegates directly to the underlying MMF instance.
 /// <para>
-/// This is a <c>readonly struct</c> (8 bytes — one pointer). Used as a generic type parameter
-/// on <c>CBS&lt;PersistentStore&gt;</c>. The JIT inlines all delegations, producing identical
-/// assembly to the current non-generic code.
+/// This is a <c>readonly struct</c> (8 bytes — one pointer). Used as a generic type parameter on <see cref="ChunkBasedSegment{TStore}"/>. The JIT inlines all
+/// delegations, producing identical assembly to the current non-generic code.
 /// </para>
 /// </summary>
 [PublicAPI]

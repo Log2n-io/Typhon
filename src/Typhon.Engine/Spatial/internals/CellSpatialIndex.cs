@@ -3,35 +3,30 @@ using System;
 namespace Typhon.Engine.Internals;
 
 /// <summary>
-/// Per-cell cluster index for one spatial archetype. Holds a compact SoA of cluster AABBs plus per-cluster
-/// back-references (clusterChunkId) and category masks. Used by the broadphase stage of cluster-spatial
-/// queries — a linear scan over these arrays identifies which clusters in the cell overlap the query AABB
+/// Per-cell cluster index for one spatial archetype. Holds a compact SoA of cluster AABBs plus per-cluster back-references (clusterChunkId) and category masks.
+/// Used by the broadphase stage of cluster-spatial queries — a linear scan over these arrays identifies which clusters in the cell overlap the query AABB
 /// before the narrowphase scans each cluster's entities (issue #230).
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Storage shape.</b> One allocation per cell that contains at least one cluster of this archetype.
-/// Each backing array has the same length (<see cref="Capacity"/>) and the first <see cref="ClusterCount"/>
-/// entries are valid. Grown by doubling when <see cref="Add"/> would exceed capacity. Removal is swap-with-last
-/// (the last entry fills the removed slot), which requires the caller to fix up the swapped cluster's
-/// back-pointer stored in <c>ArchetypeClusterState.ClusterSpatialIndexSlot</c>.
+/// <b>Storage shape.</b> One allocation per cell that contains at least one cluster of this archetype. Each backing array has the same
+/// length (<see cref="Capacity"/>) and the first <see cref="ClusterCount"/> entries are valid. Grown by doubling when <see cref="Add"/> would exceed capacity.
+/// Removal is swap-with-last (the last entry fills the removed slot), which requires the caller to fix up the swapped cluster's back-pointer stored in
+/// <c>ArchetypeClusterState.ClusterSpatialIndexSlot</c>.
 /// </para>
 /// <para>
-/// <b>Tier support.</b> Stores 6 f32 axis-aligned bounds (XYZ min/max) per cluster. 2D archetypes leave
-/// <see cref="MinZ"/>/<see cref="MaxZ"/> at +inf/-inf sentinels and are queried with an infinite Z range;
-/// 3D archetypes populate all six. Issue #230 Phase 3 unified the 2D and 3D paths into a single cluster-index
-/// layout rather than maintaining two parallel index types. f64 variants are deferred to a follow-up.
+/// <b>Tier support.</b> Stores 6 f32 axis-aligned bounds (XYZ min/max) per cluster. 2D archetypes leave <see cref="MinZ"/>/<see cref="MaxZ"/> at +inf/-inf
+/// sentinels and are queried with an infinite Z range; 3D archetypes populate all six. Issue #230 Phase 3 unified the 2D and 3D paths into a single
+/// cluster-index layout rather than maintaining two parallel index types. f64 variants are deferred to a follow-up.
 /// </para>
 /// <para>
-/// <b>Phase 1 deviation from the design doc.</b> Design doc <c>02-cluster-rtree.md</c> proposes a fixed
-/// inline capacity (~24 clusters via <c>fixed float[]</c> struct fields) with overflow to a real
-/// <c>SpatialRTree&lt;PersistentStore&gt;</c>. Phase 1 uses plain managed arrays for simplicity and
-/// testability; the linear broadphase scan is fine for typical cell populations (≤80 clusters in AntHill's
-/// dense zones). Phase 2 can reintroduce the inline-vs-overflow split once profiling identifies hotspots.
+/// <b>Phase 1 deviation from the design doc.</b> Design doc <c>02-cluster-rtree.md</c> proposes a fixed inline capacity (~24 clusters via <c>fixed float[]</c>
+/// struct fields) with overflow to a real <see cref="SpatialRTree{TStore}"/>. Phase 1 uses plain managed arrays for simplicity and testability; the linear
+/// broadphase scan is fine for typical cell populations (≤80 clusters in AntHill's dense zones). Phase 2 can reintroduce the inline-vs-overflow split once
+/// profiling identifies hotspots.
 /// </para>
 /// <para>
-/// <b>Not thread-safe.</b> All mutations happen inside the single-threaded tick fence / spawn / destroy
-/// paths. Queries also run single-threaded for now.
+/// <b>Not thread-safe.</b> All mutations happen inside the single-threaded tick fence / spawn / destroy paths. Queries also run single-threaded for now.
 /// </para>
 /// </remarks>
 internal sealed class CellSpatialIndex

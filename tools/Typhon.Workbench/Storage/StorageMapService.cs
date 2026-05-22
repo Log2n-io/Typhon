@@ -80,9 +80,12 @@ public sealed partial class StorageMapService
             var id = (ushort)i;
             segInfos[i] = new StorageSegmentInfo(id, seg.RootPageIndex, seg.Kind, seg.Pages.Length,
                 seg.Stride, seg.ChunkCountRootPage, seg.ChunkCountPerPage, seg.RootDataOffset, seg.OtherDataOffset);
+            // Mirror the engine classifier (DatabaseEngine.StorageIntrospection.cs): the occupancy bitmap is
+            // authoritative — a page that ClassifyAllPages marked Free stays unowned even if a segment's
+            // page list still references it. Keeps `pageType` and `ownerSegmentId` consistent.
             foreach (var page in seg.Pages.Span)
             {
-                if ((uint)page < (uint)pageCount)
+                if ((uint)page < (uint)pageCount && pageType[page] != StoragePageType.Free)
                 {
                     ownerSegmentId[page] = id;
                 }

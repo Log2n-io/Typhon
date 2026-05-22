@@ -19,7 +19,7 @@ namespace Typhon.Engine.Internals;
 /// <para>
 /// Migration policy: a system whose access descriptor has <see cref="SystemAccessDescriptor.HasAnyDeclaration"/> = false is treated as
 /// "undeclared" and the assertion silently passes — preserves backwards compatibility for systems that haven't migrated to declared access.
-/// Once a developer adds any declaration, the validator activates fully (a <c>Writes&lt;T&gt;</c> not in the declared set throws).
+/// Once a developer adds any declaration, the validator activates fully (a <see cref="SystemBuilder.Writes{T}"/> not in the declared set throws).
 /// </para>
 /// </remarks>
 internal static class SystemAccessValidator
@@ -57,7 +57,7 @@ internal static class SystemAccessValidator
     }
 
     /// <summary>
-    /// Assert that the currently-executing system declared <c>Writes&lt;T&gt;</c> or <c>SideWrites&lt;T&gt;</c>.
+    /// Assert that the currently-executing system declared <see cref="SystemBuilder.Writes{T}"/> or <see cref="SystemBuilder.SideWrites{T}"/>.
     /// Compiled out in RELEASE. Skips the check when no system context is active (e.g., direct test code outside scheduler dispatch),
     /// or when the active descriptor has no declarations (transitional — system hasn't migrated yet).
     /// </summary>

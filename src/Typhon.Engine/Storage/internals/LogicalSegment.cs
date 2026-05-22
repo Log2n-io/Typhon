@@ -33,6 +33,11 @@ internal struct LogicalSegmentHeader
     /// If the Page Block is a Logical Segment, will store the index to the next block storing Raw Data, 0 if there's none.
     /// </summary>
     public int LogicalSegmentNextRawDataPBID;
+    /// <summary>
+    /// The segment's runtime role, written on the root page at Create time and read back on Load — makes the segment self-describing so storage
+    /// introspection (Module 15) can classify every page without re-deriving ownership from context. Only meaningful on the root page.
+    /// </summary>
+    public StorageSegmentKind Kind;
 }
 
 /// <summary>
@@ -58,6 +63,13 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
 
     private readonly Lock _growLock = new();
     private volatile int[] _pages;
+    private StorageSegmentKind _kind;
+
+    /// <summary>
+    /// The segment's runtime role, persisted in the root-page <see cref="LogicalSegmentHeader"/>. Set at <c>Create</c>, restored at <c>Load</c>.
+    /// Consumed by the Database File Map (Module 15) so every allocated page classifies without context-derived ownership.
+    /// </summary>
+    public StorageSegmentKind Kind => _kind;
 
     public int RootPageIndex
     {
@@ -222,7 +234,8 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
             curPages.CopyTo(newPagesAsSpan);
             _store.AllocatePages(ref newPagesAsSpan, curPages.Length, changeSet);
 
-            CreateOrGrow(PageBlockType.None, newPages, curPages.Length, ref NoNextMap, clearNewPages, changeSet);
+            int noNextMap = 0;
+            CreateOrGrow(PageBlockType.None, newPages, curPages.Length, ref noNextMap, clearNewPages, changeSet);
 
             // Phase 5: Storage:Segment:Grow event. Use the first page id as a stable segment identifier.
             TyphonEvent.EmitStorageSegmentGrow(newPages[0], oldLen, newLength);
@@ -263,23 +276,24 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
         return (pi + 1, off);
     }
 
-    internal bool Create(PageBlockType type, int filePageIndex, bool clear, ChangeSet changeSet = null)
+    internal bool Create(PageBlockType type, StorageSegmentKind kind, int filePageIndex, bool clear, ChangeSet changeSet = null)
     {
         Span<int> ids = stackalloc int[1];
         ids[0] = filePageIndex;
-        return Create(type, ids, clear, changeSet);
+        return Create(type, kind, ids, clear, changeSet);
     }
 
-    private static int NoNextMap;
-
-    internal virtual bool Create(PageBlockType type, Span<int> filePageIndices, bool clear, ChangeSet changeSet = null)
+    internal virtual bool Create(PageBlockType type, StorageSegmentKind kind, Span<int> filePageIndices, bool clear, ChangeSet changeSet = null)
     {
+        // The kind is persisted into the root page's header by CreateOrGrow (read back by Load) — set it before so the root-page write captures it.
+        _kind = kind;
         // Phase 5: Storage:Segment:Create event. First page id doubles as the segment identifier.
         if (filePageIndices.Length > 0)
         {
             TyphonEvent.EmitStorageSegmentCreate(filePageIndices[0], filePageIndices.Length);
         }
-        return CreateOrGrow(type, filePageIndices, 0, ref NoNextMap, clear, changeSet);
+        int noNextMap = 0;
+        return CreateOrGrow(type, filePageIndices, 0, ref noNextMap, clear, changeSet);
     }
 
     internal unsafe bool CreateOrGrow(PageBlockType type, Span<int> filePageIndices, int growFrom, ref int nextMap, bool clear, ChangeSet changeSet)
@@ -311,7 +325,7 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
                 // Need to rebuild the indices pages
                 if (growFrom > 0)
                 {
-                    WalkIndicesMap((i, page, memIdx, span) =>
+                    WalkIndicesMap((i, _, memIdx, span) =>
                     {
                         span[i] = _store.GetFilePageIndex(memIdx);
                         mapIndexAllocStartFrom = i + 1;                 // Update the start index for the first page to allocate
@@ -483,6 +497,11 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
             // Update link list of the pages that make the segment
             ref var lsh = ref page.StructAt<LogicalSegmentHeader>(LogicalSegmentHeader.Offset);
             lsh.LogicalSegmentNextRawDataPBID = ((i + 1) < filePageIndices.Length) ? filePageIndices[i + 1] : 0;
+            // Persist the segment kind on the root page (self-describing for storage introspection, Module 15).
+            if (i == 0)
+            {
+                lsh.Kind = _kind;
+            }
 
             _store.UnlatchPageExclusive(memPageIdx);
         }
@@ -524,6 +543,9 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
         var epoch = _store.EpochManager.GlobalEpoch;
         _store.RequestPageEpoch(filePageIndex, epoch, out var memPageIndex);
         var page = _store.GetPage(memPageIndex);
+
+        // Restore the persisted segment kind from the root page before `page` is reassigned to traverse map pages.
+        _kind = page.StructAt<LogicalSegmentHeader>(LogicalSegmentHeader.Offset).Kind;
 
         var pages = new List<int>();
         var rd = page.RawDataReadOnly<int>(0, RootHeaderIndexSectionCount);
