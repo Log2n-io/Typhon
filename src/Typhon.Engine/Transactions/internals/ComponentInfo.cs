@@ -9,7 +9,7 @@ namespace Typhon.Engine.Internals;
 
 /// <summary>
 /// Action callback for <see cref="ComponentInfo.ForEachMutableEntry{TAction}"/>.
-/// Implemented as a struct for zero-overhead JIT specialization (same mechanism as <c>Span&lt;T&gt;.Sort</c>).
+/// Implemented as a struct for zero-overhead JIT specialization (same mechanism as <see cref="Span{T}"/>'s <c>Sort</c>).
 /// </summary>
 internal interface IEntryAction
 {

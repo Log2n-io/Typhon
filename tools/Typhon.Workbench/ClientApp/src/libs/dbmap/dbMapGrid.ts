@@ -9,6 +9,18 @@ export function gridCols(count: number): number {
   return count <= 1 ? 1 : Math.ceil(Math.sqrt(count));
 }
 
+/**
+ * The sub-rect of a page cell that the chunk grid occupies, after reserving the byte-proportional overhead band at
+ * the top — the header, the root-only segment directory, and the stride-alignment padding (all the bytes before
+ * chunk 0). Keeping the chunk grid inside this rect (instead of the whole cell) makes the L3 surface map the page's
+ * *real* data area, so a root page visibly fits fewer chunks than its later pages. With no overhead it returns
+ * `parent` unchanged.
+ */
+export function chunkAreaRect(parent: Rect, overheadBytes: number, pageSize: number): Rect {
+  const top = pageSize > 0 ? (parent.h * Math.max(0, overheadBytes)) / pageSize : 0;
+  return { x: parent.x, y: parent.y + top, w: parent.w, h: parent.h - top };
+}
+
 /** The world rect of cell `index` in an evenly-tiled `cols × rows` grid inside `parent`. */
 export function gridSubRect(parent: Rect, cols: number, rows: number, index: number): Rect {
   const col = index % cols;

@@ -82,3 +82,19 @@ public struct CompPlayer
     [Index(AllowMultiple = true), ForeignKey(typeof(CompGuild))] public long GuildId;
     [Index(AllowMultiple = true)] public int Active;
 }
+
+/// <summary>SingleVersion component — its archetype is cluster-eligible, so it lands in a cluster segment and
+/// exercises the Database File Map's A6 intra-cluster fill / entity sub-grid rendering.</summary>
+[Component("Typhon.Workbench.Fixture.Particle", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+public struct CompParticle
+{
+    public float X, Y, Z;
+
+    public CompParticle(float x, float y, float z)
+    {
+        X = x;
+        Y = y;
+        Z = z;
+    }
+}

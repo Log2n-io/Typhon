@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { Binary, Boxes, FolderOpen, HardDrive } from 'lucide-react';
+import { Binary, Boxes, FolderOpen, HardDrive, Layers } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { StatusBadge } from '@/components/ui/status-badge';
 import { simplifyTypeName } from '@/libs/simplifyTypeName';
@@ -9,8 +9,10 @@ import { useProfilerSelectionStore } from '@/stores/useProfilerSelectionStore';
 import { useProfilerSessionStore } from '@/stores/useProfilerSessionStore';
 import { useSessionStore } from '@/stores/useSessionStore';
 import { useDbMapSelectionStore, type DbMapSelection } from '@/stores/useDbMapSelectionStore';
+import { useDbMapOverlayStore } from '@/stores/useDbMapOverlayStore';
 import { useDbMapChunk, useDbMapPage } from '@/hooks/dbmap/useDbMapDetail';
-import type { DbChunkContent, DbContentCell, DbPageDetail } from '@/libs/dbmap/types';
+import { useDbMapSegmentSummary } from '@/hooks/dbmap/useDbMapSegment';
+import type { DbChunkContent, DbContentCell, DbPageDetail, StorageSegmentSummaryDto } from '@/libs/dbmap/types';
 import { useComponentSchema } from '@/hooks/schema/useComponentSchema';
 import type { ComponentSchema, Field } from '@/hooks/schema/types';
 import ProfilerDetail from '@/panels/profiler/ProfilerDetail';
@@ -113,13 +115,19 @@ function DbMapDetail({ selection }: { selection: DbMapSelection }) {
   const sessionId = useSessionStore((s) => s.sessionId);
   const databaseName = useDbMapSelectionStore((s) => s.databaseName);
   const pageIndex = selection.kind === 'page' ? selection.pageIndex : null;
-  const segId = selection.kind !== 'page' ? selection.segmentId : null;
-  const chunkId = selection.kind !== 'page' ? selection.chunkId : null;
+  const isChunkLike = selection.kind === 'chunk' || selection.kind === 'cell';
+  const segId = isChunkLike ? selection.segmentId : null;
+  const chunkId = isChunkLike ? selection.chunkId : null;
+  const summarySegId = selection.kind === 'segment' ? selection.segmentId : null;
   const { data: page } = useDbMapPage(sessionId, pageIndex);
   const { data: chunk } = useDbMapChunk(sessionId, segId, chunkId);
+  const { data: summary } = useDbMapSegmentSummary(sessionId, summarySegId);
 
   if (selection.kind === 'page') {
     return <DbMapPageDetail databaseName={databaseName} pageIndex={selection.pageIndex} page={page ?? null} />;
+  }
+  if (selection.kind === 'segment') {
+    return <DbMapSegmentDetail databaseName={databaseName} segmentId={selection.segmentId} summary={summary ?? null} />;
   }
   if (selection.kind === 'chunk') {
     return <DbMapChunkDetail databaseName={databaseName} pageIndex={selection.pageIndex} chunk={chunk ?? null} />;
@@ -174,6 +182,7 @@ function DbMapPageDetail({
   pageIndex: number;
   page: DbPageDetail | null;
 }) {
+  const select = useDbMapSelectionStore((s) => s.select);
   return (
     <DbMapDetailCard
       icon={<HardDrive className="h-4 w-4 text-muted-foreground" />}
@@ -187,10 +196,21 @@ function DbMapPageDetail({
         <>
           <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-[11px]">
             <Row label="Byte offset" value={`0x${page.byteOffset.toString(16).toUpperCase()}`} />
-            <Row
-              label="Owning segment"
-              value={page.ownerSegmentId >= 0 ? `#${page.ownerSegmentId} · ${page.ownerSegmentKind}` : 'none'}
-            />
+            <dt className="text-muted-foreground">Owning segment</dt>
+            <dd className="font-mono tabular-nums text-foreground">
+              {page.ownerSegmentId >= 0 ? (
+                <button
+                  type="button"
+                  onClick={() => select(databaseName, { kind: 'segment', segmentId: page.ownerSegmentId })}
+                  className="text-sky-400 underline-offset-2 hover:underline"
+                  title="Show segment harvest summary"
+                >
+                  #{page.ownerSegmentId} · {page.ownerSegmentKind}
+                </button>
+              ) : (
+                'none'
+              )}
+            </dd>
             <Row label="Change revision" value={page.changeRevision.toLocaleString()} />
             <Row label="Format revision" value={String(page.formatRevision)} />
             <Row label="Modification counter" value={String(page.modificationCounter)} />
@@ -212,6 +232,111 @@ function DbMapPageDetail({
         </>
       )}
     </DbMapDetailCard>
+  );
+}
+
+function DbMapSegmentDetail({
+  databaseName,
+  segmentId,
+  summary,
+}: {
+  databaseName: string;
+  segmentId: number;
+  summary: StorageSegmentSummaryDto | null;
+}) {
+  const chunkBased = (summary?.chunkCapacity ?? 0) > 0;
+  const chunkFillPct =
+    summary && chunkBased ? Math.round((summary.allocatedChunkCount / summary.chunkCapacity) * 100) : null;
+  const isCluster = (summary?.clusterSize ?? 0) > 0;
+  const slotDenom = summary ? summary.activeClusterCount * summary.clusterSize : 0;
+  const slotOccPct = summary && isCluster && slotDenom > 0 ? Math.round((Number(summary.entityCount) / slotDenom) * 100) : null;
+  const map = summary?.entityMap ?? null;
+
+  return (
+    <DbMapDetailCard
+      icon={<Layers className="h-4 w-4 text-muted-foreground" />}
+      title={`Segment #${segmentId}`}
+      badge={summary?.kind}
+      databaseName={databaseName}
+    >
+      {!summary ? (
+        <p className="text-[11px] text-muted-foreground">Harvesting segment summary…</p>
+      ) : (
+        <>
+          <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-[11px]">
+            <Row label="Root page" value={`#${summary.rootPageIndex}`} />
+            <Row label="Pages" value={summary.pageCount.toLocaleString()} />
+            {summary.stride > 0 && <Row label="Stride" value={`${summary.stride} B`} />}
+            {chunkBased && (
+              <>
+                <Row
+                  label="Chunks"
+                  value={`${summary.allocatedChunkCount.toLocaleString()} / ${summary.chunkCapacity.toLocaleString()} (${chunkFillPct}% full)`}
+                />
+                <Row label="Free chunks" value={summary.freeChunkCount.toLocaleString()} />
+              </>
+            )}
+          </dl>
+
+          {isCluster && (
+            <div className="mt-3 border-t border-border pt-2">
+              <p className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">Cluster fill</p>
+              <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-[11px]">
+                <Row label="Entities" value={Number(summary.entityCount).toLocaleString()} />
+                <Row label="Active clusters" value={summary.activeClusterCount.toLocaleString()} />
+                <Row label="Slots / cluster" value={String(summary.clusterSize)} />
+                {slotOccPct != null && <Row label="Slot occupancy" value={`${slotOccPct}%`} />}
+              </dl>
+            </div>
+          )}
+
+          {map && (
+            <div className="mt-3 border-t border-border pt-2">
+              <p className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">Entity-map (linear hash)</p>
+              <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-[11px]">
+                <Row label="Entries" value={Number(map.entryCount).toLocaleString()} />
+                <Row label="Buckets" value={map.bucketCount.toLocaleString()} />
+                <Row label="Load factor" value={map.loadFactor.toFixed(2)} />
+                <Row label="Overflow buckets" value={map.overflowBucketCount.toLocaleString()} />
+                <Row label="Max chain" value={String(map.maxChainLength)} />
+              </dl>
+              <BucketFillBar map={map} />
+            </div>
+          )}
+        </>
+      )}
+    </DbMapDetailCard>
+  );
+}
+
+// Five-band primary-bucket fill histogram (empty / ¼ / ½ / ¾ / full) — a horizontal stacked bar makes hash skew
+// visible at a glance (a heavy "full" band next to many "empty" buckets ⇒ uneven distribution).
+function BucketFillBar({ map }: { map: NonNullable<StorageSegmentSummaryDto['entityMap']> }) {
+  const bands: { label: string; count: number; cls: string }[] = [
+    { label: 'empty', count: map.fillEmpty, cls: 'bg-muted' },
+    { label: '1–25%', count: map.fillQuarter, cls: 'bg-sky-900' },
+    { label: '26–50%', count: map.fillHalf, cls: 'bg-sky-700' },
+    { label: '51–75%', count: map.fillThreeQuarter, cls: 'bg-sky-500' },
+    { label: '76–100%', count: map.fillFull, cls: 'bg-sky-400' },
+  ];
+  const total = bands.reduce((s, b) => s + b.count, 0);
+  if (total === 0) return null;
+  return (
+    <div className="mt-2">
+      <p className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">Bucket fill</p>
+      <div className="flex h-2 w-full overflow-hidden rounded-sm">
+        {bands.map((b) =>
+          b.count === 0 ? null : (
+            <div
+              key={b.label}
+              className={b.cls}
+              style={{ width: `${(b.count / total) * 100}%` }}
+              title={`${b.label}: ${b.count.toLocaleString()} buckets`}
+            />
+          ),
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -243,6 +368,7 @@ function DbMapChunkDetail({
             <Row label="Byte offset" value={`0x${chunk.byteOffset.toString(16).toUpperCase()}`} />
             <Row label="Size" value={`${chunk.size} B`} />
           </dl>
+          {chunk.clusterComponents.length > 0 && <ClusterOverlayPicker chunk={chunk} />}
           {chunk.cells.length > 0 ? (
             <CellList title={`Decoded content · ${chunk.cells.length} cells`} cells={chunk.cells} />
           ) : (
@@ -253,6 +379,55 @@ function DbMapChunkDetail({
         </>
       )}
     </DbMapDetailCard>
+  );
+}
+
+// Per-component enabled-state overlay picker (A6 §10.1) — shown for cluster chunks. Selecting a component recolours
+// every L4 entity slot of this cluster segment on the map by whether that component is enabled for each entity
+// (green) vs occupied-but-disabled (dim red); "Occupancy" restores the plain lit/dark colouring. The mask is already
+// in the decode, so switching is a pure client recolour — no refetch.
+function ClusterOverlayPicker({ chunk }: { chunk: DbChunkContent }) {
+  const segmentId = useDbMapOverlayStore((s) => s.segmentId);
+  const componentSlot = useDbMapOverlayStore((s) => s.componentSlot);
+  const setOverlay = useDbMapOverlayStore((s) => s.setOverlay);
+  const clearOverlay = useDbMapOverlayStore((s) => s.clear);
+  const occupancyActive = !(segmentId === chunk.segmentId && componentSlot != null);
+
+  const chipCls = (active: boolean) =>
+    `rounded px-1.5 py-0.5 text-[10px] font-mono ${
+      active ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground hover:bg-muted/70'
+    }`;
+
+  return (
+    <div className="mt-3 border-t border-border pt-2">
+      <p className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">Component overlay</p>
+      <div className="flex flex-wrap gap-1">
+        <button type="button" className={chipCls(occupancyActive)} onClick={clearOverlay} title="Colour slots by occupancy only">
+          Occupancy
+        </button>
+        {chunk.clusterComponents.map((name, i) => {
+          const active = segmentId === chunk.segmentId && componentSlot === i;
+          const short = name.includes('.') ? name.slice(name.lastIndexOf('.') + 1) : name;
+          return (
+            <button
+              key={name}
+              type="button"
+              className={chipCls(active)}
+              title={`Overlay: ${name} (enabled = green, disabled = dim)`}
+              onClick={() => setOverlay(chunk.segmentId, i, name)}
+            >
+              {short}
+            </button>
+          );
+        })}
+      </div>
+      {!occupancyActive && (
+        <p className="mt-1.5 flex items-center gap-2 text-[10px] text-muted-foreground">
+          <span className="inline-block h-2 w-2 rounded-sm" style={{ background: 'rgb(34,197,94)' }} /> enabled
+          <span className="inline-block h-2 w-2 rounded-sm" style={{ background: 'rgb(120,53,53)' }} /> disabled
+        </p>
+      )}
+    </div>
   );
 }
 
@@ -277,14 +452,19 @@ function DbMapCellDetail({
       {!cell ? (
         <p className="text-[11px] text-muted-foreground">Decoding…</p>
       ) : (
-        <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-[11px]">
-          <dt className="text-muted-foreground">Value</dt>
-          <dd className="break-all font-mono text-foreground">{cell.value}</dd>
-          <Row label="Kind" value={cell.kind} />
-          <Row label="Offset" value={`${cell.offset} (in chunk)`} />
-          <Row label="Size" value={`${cell.size} B`} />
-          {chunk?.componentType && <Row label="Component" value={chunk.componentType} />}
-        </dl>
+        <>
+          <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-[11px]">
+            <dt className="text-muted-foreground">Value</dt>
+            <dd className="break-all font-mono text-foreground">{cell.value}</dd>
+            <Row label="Kind" value={cell.kind} />
+            <Row label="Offset" value={`${cell.offset} (in chunk)`} />
+            <Row label="Size" value={`${cell.size} B`} />
+            {chunk?.componentType && <Row label="Component" value={chunk.componentType} />}
+          </dl>
+          {/* The overlay matters most at L4 (where clicking selects a slot/cell) — surface the picker here too so the
+              component can be switched while looking at the entity grid. */}
+          {chunk && chunk.clusterComponents.length > 0 && <ClusterOverlayPicker chunk={chunk} />}
+        </>
       )}
     </DbMapDetailCard>
   );
@@ -296,8 +476,8 @@ function CellList({ title, cells }: { title: string; cells: DbContentCell[] }) {
       <p className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">{title}</p>
       <div className="max-h-64 overflow-auto">
         <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-0.5 text-[11px]">
-          {cells.slice(0, 256).map((c) => (
-            <div key={`${c.kind}-${c.offset}`} className="contents">
+          {cells.slice(0, 256).map((c, i) => (
+            <div key={`${c.kind}-${c.offset}-${i}`} className="contents">
               <dt className="truncate text-muted-foreground" title={c.label}>
                 {c.label}
               </dt>

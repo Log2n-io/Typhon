@@ -55,6 +55,11 @@ public sealed class StorageMapController : ControllerBase
     public ActionResult<StorageSegmentDetailDto> GetSegment(Guid sessionId, int id)
         => InvokeFound((engine, _) => _service.GetSegmentDetail(engine, id));
 
+    /// <summary>One segment's harvest summary — chunk allocation plus cluster / entity-map stats (lazy; A6).</summary>
+    [HttpGet("segment/{id:int}/summary")]
+    public ActionResult<StorageSegmentSummaryDto> GetSegmentSummary(Guid sessionId, int id)
+        => InvokeFound((engine, _) => _service.GetSegmentSummary(engine, id));
+
     /// <summary>One chunk's decoded L4 content — component fields, a generic byte-class view, or the unknown tile.</summary>
     [HttpGet("chunk/{segId:int}/{chunkId:int}")]
     public ActionResult<StorageChunkDto> GetChunk(Guid sessionId, int segId, int chunkId)

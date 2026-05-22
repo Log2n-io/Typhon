@@ -4,9 +4,20 @@
 /** Page-cell pixel size below / above which L1 fully shows / hands off to L3. */
 export const L3_MIN_PAGE_PX = 220;
 export const L3_FULL_PAGE_PX = 640;
-/** Page-cell pixel size band over which L3 crossfades into L4. */
-export const L4_MIN_PAGE_PX = 2600;
-export const L4_FULL_PAGE_PX = 7000;
+/**
+ * Page-cell pixel size band over which L3 crossfades into L4 (chunk content / cluster entity sub-grid). Kept just
+ * above {@link L3_FULL_PAGE_PX} so content fades in shortly after the chunk grid is legible — at ~800 px/page a
+ * 5-chunk cluster's 49-slot sub-grid is already ~30 px/slot, so waiting longer hid the level-under needlessly.
+ * A short 640–800 px window stays pure-L3 (the fill heatmap), then content crossfades in by ~2000 px.
+ */
+export const L4_MIN_PAGE_PX = 800;
+export const L4_FULL_PAGE_PX = 2000;
+/**
+ * Page-cell px at which the L4 chunk *content* starts being fetched — below {@link L4_MIN_PAGE_PX} so the (two-hop:
+ * page-detail → chunk) decode has a head start and is resident by the time the L4 crossfade actually ramps. Without
+ * this lead the content only loads once you're already at L4, so it lands after the camera settles and pops in.
+ */
+export const L4_CONTENT_PREFETCH_PAGE_PX = 560;
 
 /** The LOD band currently dominant, plus the L3 / L4 crossfade alphas (0 = absent, 1 = fully in). */
 export interface DbLodState {

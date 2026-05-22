@@ -14,6 +14,8 @@ interface RegionsTabProps {
   regions: DbMapRegion[];
   segments: StorageSegmentDto[];
   onFlyToRegion: (startPage: number, pageCount: number) => void;
+  /** Selects a run's owning segment so the Detail panel shows its A6 harvest summary card. */
+  onSelectSegment: (segmentId: number) => void;
 }
 
 const COLUMNS: { key: RegionSortKey; label: string; align: 'left' | 'right' }[] = [
@@ -24,7 +26,7 @@ const COLUMNS: { key: RegionSortKey; label: string; align: 'left' | 'right' }[] 
   { key: 'fill', label: 'Fill', align: 'right' },
 ];
 
-export function RegionsTab({ regions, segments, onFlyToRegion }: RegionsTabProps) {
+export function RegionsTab({ regions, segments, onFlyToRegion, onSelectSegment }: RegionsTabProps) {
   const [sortKey, setSortKey] = useState<RegionSortKey>('start');
   const [ascending, setAscending] = useState(true);
 
@@ -75,7 +77,12 @@ export function RegionsTab({ regions, segments, onFlyToRegion }: RegionsTabProps
           {sorted.slice(0, ROW_CAP).map((r) => (
             <TableRow
               key={r.startPage}
-              onClick={() => onFlyToRegion(r.startPage, r.pageCount)}
+              onClick={() => {
+                onFlyToRegion(r.startPage, r.pageCount);
+                if (r.ownerSegmentId !== NO_SEGMENT) {
+                  onSelectSegment(r.ownerSegmentId);
+                }
+              }}
               className="cursor-pointer"
               data-testid="dbmap-region-row"
             >

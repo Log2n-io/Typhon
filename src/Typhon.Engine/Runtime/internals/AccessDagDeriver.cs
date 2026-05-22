@@ -48,7 +48,7 @@ namespace Typhon.Engine.Internals;
 /// see <c>claude/design/Runtime/07-system-access-declarations.md</c> §"Amendment 2026-05-07".
 /// </para>
 /// <para>
-/// Semantic note: cross-phase <c>ReadsSnapshot&lt;T&gt;</c> in a later phase observes the
+/// Semantic note: cross-phase <see cref="SystemBuilder.ReadsSnapshot{T}"/> in a later phase observes the
 /// earlier-phase writer's *this-tick* value (not previous-tick), because phase order forces
 /// writer-first. This differs from intra-phase <c>ReadsSnapshot</c> by design — see the same
 /// design doc for the rationale.

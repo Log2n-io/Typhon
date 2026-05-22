@@ -6,7 +6,7 @@ namespace Typhon.Engine;
 
 /// <summary>
 /// Typed entity reference — an 8-byte wrapper around <see cref="EntityId"/> that provides compile-time archetype safety.
-/// <c>EntityLink&lt;Building&gt;</c> accepts Building, House, or any descendant archetype.
+/// An <see cref="EntityLink{T}"/> accepts Building, House, or any descendant archetype.
 /// </summary>
 /// <typeparam name="T">The target archetype type (or ancestor for polymorphic references).</typeparam>
 [PublicAPI]

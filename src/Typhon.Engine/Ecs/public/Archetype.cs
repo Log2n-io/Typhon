@@ -5,7 +5,7 @@ namespace Typhon.Engine;
 
 /// <summary>
 /// CRTP base class for ECS archetypes. Concrete archetypes inherit from this and declare components
-/// as <c>static readonly Comp&lt;T&gt;</c> fields via <see cref="Register{T}"/>.
+/// as <c>static readonly</c> <see cref="Comp{T}"/> fields via <see cref="Register{T}"/>.
 /// </summary>
 /// <remarks>
 /// <para>

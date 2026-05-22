@@ -499,7 +499,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
 
     /// <summary>
     /// Verify every <see cref="ChunkedCallbackSystem{TContext}"/> instance has a bound Context.
-    /// Throws if a typed system was registered but no matching <c>RegisterContext&lt;TContext&gt;</c> call ran.
+    /// Throws if a typed system was registered but no matching <see cref="TyphonRuntime.RegisterContext{TContext}"/> call ran.
     /// </summary>
     private void ValidateContextBindings()
     {

@@ -28,7 +28,13 @@ export interface DbMapCellSelection {
   cellOffset: number;
 }
 
-export type DbMapSelection = DbMapPageSelection | DbMapChunkSelection | DbMapCellSelection;
+/** A selected logical segment — drives the A6 harvest summary card (Module 15, §10.1). */
+export interface DbMapSegmentSelection {
+  kind: 'segment';
+  segmentId: number;
+}
+
+export type DbMapSelection = DbMapPageSelection | DbMapChunkSelection | DbMapCellSelection | DbMapSegmentSelection;
 
 interface DbMapSelectionState {
   databaseName: string;

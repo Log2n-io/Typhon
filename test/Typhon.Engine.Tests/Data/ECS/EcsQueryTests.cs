@@ -418,6 +418,50 @@ class EcsQueryTests : TestBase<EcsQueryTests>
         Assert.That(ordered, Has.Count.EqualTo(1));
     }
 
+    // Guards: a clause a terminal can't honor must throw, not silently drop (footgun hardening).
+    [Test]
+    public void QueryGuards_UnsupportedClauseCombosThrow()
+    {
+        using var dbe = SetupEngine();
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.Spawn<CompDArch>(CompDArch.D.Set(new CompD(1f, 100, 2.0)));
+            tx.Spawn<CompDArch>(CompDArch.D.Set(new CompD(2f, 200, 3.0)));
+            tx.Commit();
+        }
+        using var qtx = dbe.CreateQuickTransaction();
+
+        // foreach ignores WhereField — must throw instead of iterating the whole archetype.
+        Assert.Throws<System.InvalidOperationException>(() =>
+        {
+            foreach (var _ in qtx.Query<CompDArch>().WhereField<CompD>(d => d.B >= 150)) { }
+        });
+
+        // Execute ignores OrderBy/Skip/Take — use ExecuteOrdered.
+        Assert.Throws<System.InvalidOperationException>(() =>
+            qtx.Query<CompDArch>().WhereField<CompD>(d => d.B >= 0).OrderByField<CompD, int>(d => d.B).Execute());
+
+        // Count/Any ignore Skip/Take.
+        Assert.Throws<System.InvalidOperationException>(() =>
+            qtx.Query<CompDArch>().WhereField<CompD>(d => d.B >= 0).OrderByField<CompD, int>(d => d.B).Take(1).Count());
+        Assert.Throws<System.InvalidOperationException>(() =>
+            qtx.Query<CompDArch>().WhereField<CompD>(d => d.B >= 0).OrderByField<CompD, int>(d => d.B).Take(1).Any());
+
+        // A View is unordered.
+        Assert.Throws<System.InvalidOperationException>(() =>
+            qtx.Query<CompDArch>().WhereField<CompD>(d => d.B >= 0).OrderByField<CompD, int>(d => d.B).ToView());
+
+        // An incremental (WhereField) view can't also carry a .Where(lambda).
+        Assert.Throws<System.InvalidOperationException>(() =>
+            qtx.Query<CompDArch>().WhereField<CompD>(d => d.B >= 0).Where<CompD>(d => d.A > 0f).ToView());
+
+        // Sanity: the supported forms still work.
+        Assert.That(qtx.Query<CompDArch>().WhereField<CompD>(d => d.B >= 150).Count(), Is.EqualTo(1));
+        Assert.That(
+            qtx.Query<CompDArch>().WhereField<CompD>(d => d.B >= 0).OrderByField<CompD, int>(d => d.B).ExecuteOrdered(),
+            Has.Count.EqualTo(2));
+    }
+
     // ── WHERE predicates (T3) ──
 
     [Test]

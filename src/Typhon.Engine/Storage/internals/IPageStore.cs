@@ -7,9 +7,9 @@ namespace Typhon.Engine.Internals;
 /// <summary>
 /// Abstraction over page storage backends: persistent (MMF-backed) and transient (heap-backed).
 /// Used as a struct generic constraint (<c>where TStore : struct, IPageStore</c>) on
-/// <c>LogicalSegment&lt;TStore&gt;</c>, <c>ChunkBasedSegment&lt;TStore&gt;</c>,
-/// <c>ChunkAccessor&lt;TStore&gt;</c>, <c>BTree&lt;TKey, TStore&gt;</c>, and
-/// <c>HashMap&lt;TKey, TVal, TStore&gt;</c>.
+/// <see cref="LogicalSegment{TStore}"/>, <see cref="ChunkBasedSegment{TStore}"/>,
+/// <see cref="ChunkAccessor{TStore}"/>, <see cref="BTree{TKey,TStore}"/>, and
+/// <see cref="PagedHashMap{TKey,TValue,TStore}"/>.
 /// <para>
 /// The JIT specializes per concrete struct — zero virtual dispatch at runtime.
 /// <c>typeof(TStore)</c> branches in hot paths (e.g. ChunkAccessor) enable dead-code

@@ -17,8 +17,8 @@ namespace Typhon.Engine.Internals;
 /// </para>
 /// <para>
 /// <b>Thread safety.</b> Producer-side reads happen on any thread that emits query trace events. The internal <see cref="ConcurrentDictionary{TKey,TValue}"/>
-/// handles concurrent <see cref="Intern"/> calls. The companion <c>List&lt;string&gt;</c> is mutated under a lock so the export-time
-/// <see cref="SnapshotStrings"/> sees a consistent index → string mapping.
+/// handles concurrent <see cref="Intern"/> calls. The companion <see cref="System.Collections.Generic.List{T}"/> of strings is mutated under a lock so the
+/// export-time <see cref="SnapshotStrings"/> sees a consistent index → string mapping.
 /// </para>
 /// <para>
 /// <b>Lifecycle.</b> <see cref="Reset"/> is called at <c>TyphonProfiler.Start</c>. Tables grow throughout the session and are read once by the exporter at

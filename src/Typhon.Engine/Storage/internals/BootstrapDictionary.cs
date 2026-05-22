@@ -18,7 +18,7 @@ namespace Typhon.Engine.Internals;
 /// [TypeTag:1B] [Key:UTF8+NUL] [Value:N bytes] ...
 /// [0xFF]             // end sentinel
 /// </code>
-/// <para>In-memory: <c>Dictionary&lt;string, BootstrapValue&gt;</c> for O(1) lookup.</para>
+/// <para>In-memory: a <see cref="Dictionary{TKey,TValue}"/> (string → BootstrapValue) for O(1) lookup.</para>
 /// </remarks>
 [PublicAPI]
 public class BootstrapDictionary

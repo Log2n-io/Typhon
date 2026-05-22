@@ -17,6 +17,14 @@ interface DbMapStoreState {
   encoding: DbMapEncoding;
   /** Whether the segment-boundary overlay is shown. */
   segmentOverlay: boolean;
+  /**
+   * Whether the cache-residency overlay is shown — a small persistent corner mark per page (Module 15 L1
+   * enhancement #3). Independent of the residency *encoding* — this lets the user keep e.g. fillDensity in
+   * the body while still seeing which pages are resident in cache.
+   */
+  residencyOverlay: boolean;
+  /** Whether on-canvas region captions are drawn (Module 15 L1 enhancement #7). */
+  regionCaptions: boolean;
   /** The active analytical lens (§4.3). */
   lens: DbMapLens;
   /** The segment the fragmentation lens focuses, or null. */
@@ -36,6 +44,8 @@ interface DbMapStoreState {
   bookmarks: Record<string, DbMapBookmark[]>;
   setEncoding: (encoding: DbMapEncoding) => void;
   toggleSegmentOverlay: () => void;
+  toggleResidencyOverlay: () => void;
+  toggleRegionCaptions: () => void;
   setLens: (lens: DbMapLens) => void;
   /** Activates the fragmentation lens focused on a segment (the canonical AC1 entry point). */
   focusSegment: (segmentId: number) => void;
@@ -68,6 +78,8 @@ export const useDbMapStore = create<DbMapStoreState>()(
     (set) => ({
       encoding: 'pageType',
       segmentOverlay: false,
+      residencyOverlay: true,
+      regionCaptions: false,
       lens: 'none',
       lensSegmentId: null,
       railCollapsed: false,
@@ -77,6 +89,8 @@ export const useDbMapStore = create<DbMapStoreState>()(
       bookmarks: {},
       setEncoding: (encoding) => set({ encoding }),
       toggleSegmentOverlay: () => set((s) => ({ segmentOverlay: !s.segmentOverlay })),
+      toggleResidencyOverlay: () => set((s) => ({ residencyOverlay: !s.residencyOverlay })),
+      toggleRegionCaptions: () => set((s) => ({ regionCaptions: !s.regionCaptions })),
       // Switching away from the fragmentation lens drops its focused segment so a later re-entry starts clean.
       setLens: (lens) => set((s) => ({ lens, lensSegmentId: lens === 'fragmentation' ? s.lensSegmentId : null })),
       focusSegment: (segmentId) => set({ lens: 'fragmentation', lensSegmentId: segmentId, activeTab: 'legend' }),
@@ -107,8 +121,22 @@ export const useDbMapStore = create<DbMapStoreState>()(
     {
       name: 'workbench-dbmap',
       storage: safeStorage(),
-      // Only bookmarks survive a session — encoding / lens / rail are transient view state that resets fresh.
-      partialize: (s) => ({ bookmarks: s.bookmarks }),
+      // Persist the view configuration so the panel reopens the way the user left it — encoding, lens, overlay
+      // toggles, filter, and rail layout — alongside the per-database bookmarks. `lensSegmentId` and
+      // `pendingFocusType` are deliberately NOT persisted: they reference a specific segment / cross-link that
+      // may not exist next session, so they reset (the panel guards a restored fragmentation lens with no
+      // segment so it doesn't dim the whole map on open).
+      partialize: (s) => ({
+        bookmarks: s.bookmarks,
+        encoding: s.encoding,
+        lens: s.lens,
+        segmentOverlay: s.segmentOverlay,
+        residencyOverlay: s.residencyOverlay,
+        regionCaptions: s.regionCaptions,
+        filter: s.filter,
+        railCollapsed: s.railCollapsed,
+        activeTab: s.activeTab,
+      }),
     },
   ),
 );

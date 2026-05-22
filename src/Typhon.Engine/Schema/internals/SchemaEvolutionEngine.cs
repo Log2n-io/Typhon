@@ -367,7 +367,8 @@ internal static class SchemaEvolutionEngine
 
         // Allocate new component segment with NEW stride
         var initialPages = Math.Max(4, oldCompSeg.Length);
-        var newCompSeg = mmf.AllocateChunkBasedSegment(PageBlockType.None, initialPages, newStride, changeSet);
+        var newCompSeg = mmf.AllocateChunkBasedSegment(PageBlockType.None, initialPages, newStride, changeSet, 
+            StorageSegmentKind.Component);
 
         progressCallback?.Invoke(new MigrationProgressEventArgs
         {
@@ -387,7 +388,8 @@ internal static class SchemaEvolutionEngine
         // Load old revision segment and allocate new one
         var oldRevSeg = mmf.LoadChunkBasedSegment(persistedComp.VersionSPI, ComponentRevisionManager.CompRevChunkSize);
         var revInitialPages = Math.Max(4, oldRevSeg.Length);
-        var newRevSeg = mmf.AllocateChunkBasedSegment(PageBlockType.None, revInitialPages, ComponentRevisionManager.CompRevChunkSize, changeSet);
+        var newRevSeg = mmf.AllocateChunkBasedSegment(PageBlockType.None, revInitialPages, 
+            ComponentRevisionManager.CompRevChunkSize, changeSet, StorageSegmentKind.Revision);
 
         // Migrate revision chains (HEAD only)
         MigrateRevisionChain(oldRevSeg, newRevSeg, oldCompSeg, changeSet);
@@ -469,7 +471,8 @@ internal static class SchemaEvolutionEngine
 
         // Allocate new component segment with NEW stride
         var initialPages = Math.Max(4, oldCompSeg.Length);
-        var newCompSeg = mmf.AllocateChunkBasedSegment(PageBlockType.None, initialPages, newStride, changeSet);
+        var newCompSeg = mmf.AllocateChunkBasedSegment(PageBlockType.None, initialPages, newStride, changeSet, 
+            StorageSegmentKind.Component);
 
         progressCallback?.Invoke(new MigrationProgressEventArgs
         {
@@ -498,7 +501,8 @@ internal static class SchemaEvolutionEngine
         // Load old revision segment and allocate new one
         var oldRevSeg = mmf.LoadChunkBasedSegment(persistedComp.VersionSPI, ComponentRevisionManager.CompRevChunkSize);
         var revInitialPages = Math.Max(4, oldRevSeg.Length);
-        var newRevSeg = mmf.AllocateChunkBasedSegment(PageBlockType.None, revInitialPages, ComponentRevisionManager.CompRevChunkSize, changeSet);
+        var newRevSeg = mmf.AllocateChunkBasedSegment(PageBlockType.None, revInitialPages, 
+            ComponentRevisionManager.CompRevChunkSize, changeSet, StorageSegmentKind.Revision);
 
         // Migrate revision chains (HEAD only) — reuse existing logic
         MigrateRevisionChain(oldRevSeg, newRevSeg, oldCompSeg, changeSet);

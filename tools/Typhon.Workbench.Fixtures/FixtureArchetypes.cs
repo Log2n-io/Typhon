@@ -44,3 +44,11 @@ public class PlayerArch : Archetype<PlayerArch>
 {
     public static readonly Comp<CompPlayer> Player = Register<CompPlayer>();
 }
+
+// Cluster-eligible archetype (a single SingleVersion component) — produces a Cluster storage segment so the
+// Database File Map's A6 cluster rendering (intra-chunk fill, entity sub-grid) has real data to draw.
+[Archetype(806)]
+public class ParticleArch : Archetype<ParticleArch>
+{
+    public static readonly Comp<CompParticle> Particle = Register<CompParticle>();
+}

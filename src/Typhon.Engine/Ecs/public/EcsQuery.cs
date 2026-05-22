@@ -20,6 +20,16 @@ internal enum SpatialQueryType : byte
 }
 
 /// <summary>
+/// Allocates process-global, monotonically-increasing ids for <see cref="EcsQuery{TArchetype}.EcsQueryId"/>. Non-generic on purpose: a static field on the
+/// generic <see cref="EcsQuery{TArchetype}"/> gives each closed type its own counter, so ids would only be unique per archetype type — breaking the global
+/// uniqueness the profiler's <c>(Kind=1, EcsQueryId)</c> identity relies on. Mirrors <see cref="ViewBase"/>'s non-generic <c>NextViewId</c>.
+/// </summary>
+internal static class EcsQueryIdAllocator
+{
+    internal static int Next;
+}
+
+/// <summary>
 /// ECS query builder with three-tier evaluation: T1 (ArchetypeMask), T2 (EnabledBits), T3 (WHERE — future).
 /// Supports polymorphic queries (archetype + descendants) and exact queries (single archetype).
 /// </summary>
@@ -27,8 +37,6 @@ internal enum SpatialQueryType : byte
 #pragma warning disable TYPHON005 // EcsQuery borrows Transaction, doesn't own it
 public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 {
-    private static int NextEcsQueryId;
-
     /// <summary>
     /// Monotonic, globally-unique handle for this query struct instance, assigned at construction (mirrors <see cref="ViewBase.ViewId"/>).
     /// Each <c>tx.Query&lt;T&gt;()</c> / <c>tx.QueryExact&lt;T&gt;()</c> call produces a fresh ID; fluent mutation methods preserve it because the struct
@@ -76,7 +84,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
     internal EcsQuery(Transaction tx, bool polymorphic, string sourceFile = null, int sourceLine = 0, string sourceMethod = null)
     {
-        EcsQueryId = Interlocked.Increment(ref NextEcsQueryId);
+        EcsQueryId = Interlocked.Increment(ref EcsQueryIdAllocator.Next);
         SourceFile = sourceFile;
         SourceLine = sourceLine;
         SourceMethod = sourceMethod;
@@ -361,9 +369,20 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     // Spatial predicates
     // ═══════════════════════════════════════════════════════════════════════
 
+    /// <summary>Guard: at most one spatial predicate per query — a second call would silently overwrite the first.</summary>
+    private readonly void ThrowIfSpatialAlreadySet()
+    {
+        if (_spatialQueryType != SpatialQueryType.None)
+        {
+            throw new InvalidOperationException(
+                "Only one spatial predicate is allowed per query (WhereNearby / WhereInAABB / WhereRay). Run separate queries for multiple regions.");
+        }
+    }
+
     /// <summary>Filter by radius (sphere) around a center point. Component <typeparamref name="T"/> must have <c>[SpatialIndex]</c>.</summary>
     public EcsQuery<TArchetype> WhereNearby<T>(double centerX, double centerY, double centerZ, double radius) where T : unmanaged
     {
+        ThrowIfSpatialAlreadySet();
         _spatialTable = _tx.DBE.GetComponentTable<T>();
         Debug.Assert(_spatialTable?.SpatialIndex != null, $"Component {typeof(T).Name} has no [SpatialIndex]");
         _spatialQueryType = SpatialQueryType.Radius;
@@ -376,6 +395,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     /// <summary>Filter by AABB overlap. Component <typeparamref name="T"/> must have <c>[SpatialIndex]</c>.</summary>
     public EcsQuery<TArchetype> WhereInAABB<T>(double minX, double minY, double minZ, double maxX, double maxY, double maxZ) where T : unmanaged
     {
+        ThrowIfSpatialAlreadySet();
         _spatialTable = _tx.DBE.GetComponentTable<T>();
         Debug.Assert(_spatialTable?.SpatialIndex != null, $"Component {typeof(T).Name} has no [SpatialIndex]");
         _spatialQueryType = SpatialQueryType.AABB;
@@ -390,6 +410,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     public EcsQuery<TArchetype> WhereRay<T>(double originX, double originY, double originZ, double dirX, double dirY, double dirZ, double maxDist)
         where T : unmanaged
     {
+        ThrowIfSpatialAlreadySet();
         _spatialTable = _tx.DBE.GetComponentTable<T>();
         Debug.Assert(_spatialTable?.SpatialIndex != null, $"Component {typeof(T).Name} has no [SpatialIndex]");
         _spatialQueryType = SpatialQueryType.Ray;
@@ -521,12 +542,27 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         [CallerLineNumber] int    callerLine = 0,
         [CallerMemberName] string callerMethod = null)
     {
+        if (_orderBy.HasValue)
+        {
+            throw new InvalidOperationException("A View is unordered; OrderBy / Skip / Take are not supported on ToView().");
+        }
+
         if (HasFieldPredicates)
         {
+            if (_whereFilter != null)
+            {
+                throw new InvalidOperationException(
+                    "An incremental view (WhereField) does not apply a chained .Where(lambda). Fold the condition into WhereField, " +
+                    "or drop WhereField to build a pull view from .Where(...).");
+            }
+            if (_spatialQueryType != SpatialQueryType.None)
+            {
+                throw new InvalidOperationException("A view cannot combine WhereField with a spatial predicate (WhereNearby / WhereInAABB / WhereRay).");
+            }
             return ToIncrementalView(bufferCapacity, callerFile, callerLine, callerMethod);
         }
 
-        // Pull mode: no field evaluators
+        // Pull mode: no field evaluators (spatial / Where(lambda) are honoured by Execute() inside ToPullView).
         return ToPullView(bufferCapacity, callerFile, callerLine, callerMethod);
     }
 
@@ -619,6 +655,11 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     {
         // callerFile/Line/Method captured at user call site; consumed by trace emission in P2 (issue #335).
         _ = callerFile; _ = callerLine; _ = callerMethod;
+        if (_orderBy.HasValue)
+        {
+            throw new InvalidOperationException(
+                "Execute() returns an unordered set and ignores OrderBy / Skip / Take. Use ExecuteOrdered() for ordered or paged results.");
+        }
         var scope = TyphonEvent.BeginEcsQueryExecute(0);
         try
         {
@@ -630,22 +671,24 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 return result;
             }
 
-            // Targeted scan via PipelineExecutor when field predicates are present
-            if (HasFieldPredicates)
-            {
-                var targeted = ExecuteTargeted(callerFile, callerLine, callerMethod);
-                scope.ScanMode = EcsQueryScanMode.Targeted;
-                scope.ResultCount = targeted.Count;
-                return targeted;
-            }
-
-            // Spatial-driven scan: spatial index produces candidates, filtered by archetype mask + visibility
+            // Spatial-driven scan: the spatial index produces candidates; ExecuteSpatial then ANDs any field/Where
+            // predicate per-candidate. Checked before the field-only path so a combined spatial + WhereField query
+            // applies BOTH predicates instead of silently dropping the spatial one.
             if (_spatialQueryType != SpatialQueryType.None)
             {
                 var spatial = ExecuteSpatial();
                 scope.ScanMode = EcsQueryScanMode.Spatial;
                 scope.ResultCount = spatial.Count;
                 return spatial;
+            }
+
+            // Targeted scan via PipelineExecutor when field predicates are present (and no spatial predicate)
+            if (HasFieldPredicates)
+            {
+                var targeted = ExecuteTargeted(callerFile, callerLine, callerMethod);
+                scope.ScanMode = EcsQueryScanMode.Targeted;
+                scope.ResultCount = targeted.Count;
+                return targeted;
             }
 
             CollectMatching((id, _) => result.Add(id));
@@ -683,6 +726,15 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         if (!HasFieldPredicates)
         {
             throw new InvalidOperationException("ExecuteOrdered requires WhereField to identify the component table.");
+        }
+        if (_spatialQueryType != SpatialQueryType.None)
+        {
+            throw new InvalidOperationException(
+                "ExecuteOrdered() does not support spatial predicates. Run a spatial Execute() (unordered) and sort the result yourself.");
+        }
+        if (_whereFilter != null)
+        {
+            throw new InvalidOperationException("ExecuteOrdered() does not apply .Where(lambda) — fold the condition into WhereField.");
         }
         if (MaskIsEmpty)
         {
@@ -1728,7 +1780,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     /// Scan bounds are stored as raw <c>long</c> in <see cref="ExecutionPlan"/>. For float/double, the lower 32/64 bits
     /// hold the IEEE 754 bit pattern. Use <see cref="BitConverter"/> (JIT intrinsic, zero overhead) for safe reinterpretation
     /// instead of <c>Unsafe.As</c> on temporaries (which creates dangling refs to stack values).
-    /// ULong is stored as <c>BTree&lt;long&gt;</c> (same convention as <see cref="PipelineExecutor"/>).
+    /// ULong is stored as a <see cref="BTree{TKey,TStore}"/> keyed by <c>long</c> (same convention as <see cref="PipelineExecutor"/>).
     /// </remarks>
     private static void CollectClusterLocationsFromBTree(BTreeBase<PersistentStore> index, KeyType keyType, long scanMin, long scanMax,
         bool allowMultiple, ulong[] matchBitsArr, ref bool hasAny)
@@ -1908,11 +1960,20 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             }
         }
 
-        // Opaque WHERE post-filter
+        // Opaque WHERE post-filter (.Where(lambda))
         var filter = _whereFilter;
         if (filter != null)
         {
             result.RemoveWhere(id => !filter(id, tx));
+        }
+
+        // WhereField composition: when a field predicate is combined with a spatial predicate, the spatial index drives the candidate set and the compiled
+        // field predicate is verified per-candidate (AND semantics). _pendingSpawnFieldFilter is the compiled form of every WhereField call chained with
+        // AND — reused here as a general per-entity field verifier.
+        var fieldFilter = _pendingSpawnFieldFilter;
+        if (fieldFilter != null)
+        {
+            result.RemoveWhere(id => !fieldFilter(id, tx));
         }
 
         return result;
@@ -2022,6 +2083,11 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     {
         // callerFile/Line/Method captured at user call site; consumed by trace emission in P2 (issue #335).
         _ = callerFile; _ = callerLine; _ = callerMethod;
+        if (_skip > 0 || _take > 0)
+        {
+            throw new InvalidOperationException(
+                "Count() ignores Skip / Take — it reports the full match count. Remove Skip / Take, or use ExecuteOrdered().Count for a paged count.");
+        }
         var scope = TyphonEvent.BeginEcsQueryCount(0);
         try
         {
@@ -2030,6 +2096,16 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 scope.ScanMode = EcsQueryScanMode.Empty;
                 scope.ResultCount = 0;
                 return 0;
+            }
+
+            // Spatial-driven count: the spatial index drives the candidate set; ExecuteSpatial ANDs any field/Where predicate per-candidate. Checked before
+            // the field-only path so spatial + WhereField composes.
+            if (_spatialQueryType != SpatialQueryType.None)
+            {
+                var spatialCount = ExecuteSpatial().Count;
+                scope.ScanMode = EcsQueryScanMode.Spatial;
+                scope.ResultCount = spatialCount;
+                return spatialCount;
             }
 
             // Targeted count via PipelineExecutor — avoids allocating result collections
@@ -2095,6 +2171,10 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     {
         // callerFile/Line/Method captured at user call site; consumed by trace emission in P2 (issue #335).
         _ = callerFile; _ = callerLine; _ = callerMethod;
+        if (_skip > 0 || _take > 0)
+        {
+            throw new InvalidOperationException("Any() ignores Skip / Take — it reports whether any entity matches. Remove Skip / Take.");
+        }
         var scope = TyphonEvent.BeginEcsQueryAny(0);
         try
         {
@@ -2103,6 +2183,16 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 scope.ScanMode = EcsQueryScanMode.Empty;
                 scope.Found = false;
                 return false;
+            }
+
+            // Spatial-driven existence check: spatial drives the candidate set; ExecuteSpatial ANDs any field/Where predicate. Checked before the field-only
+            // path so spatial + WhereField composes.
+            if (_spatialQueryType != SpatialQueryType.None)
+            {
+                var spatialFound = ExecuteSpatial().Count > 0;
+                scope.ScanMode = EcsQueryScanMode.Spatial;
+                scope.Found = spatialFound;
+                return spatialFound;
             }
 
             if (HasFieldPredicates)
@@ -2142,14 +2232,28 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     /// <summary>
     /// Get an enumerator for foreach support. Pre-collects matching entities then iterates.
     /// <para>
-    /// Caller-attribute capture is NOT available here — the C# foreach pattern requires <c>GetEnumerator</c> to have zero parameters
-    /// (optional parameters don't satisfy the pattern). Execution-site attribution for foreach loops falls back to the query's
-    /// construction site (captured at <c>tx.Query&lt;T&gt;()</c>). For explicit execution-site capture, call <c>.Execute()</c>,
-    /// <c>.Count()</c>, etc., instead.
+    /// Caller-attribute capture is NOT available here — the C# foreach pattern requires <c>GetEnumerator</c> to have zero parameters (optional parameters don't
+    /// satisfy the pattern). Execution-site attribution for foreach loops falls back to the query's construction site (captured at <c>tx.Query&lt;T&gt;()</c>).
+    /// For explicit execution-site capture, call <see cref="Execute"/>, <see cref="Count"/>, etc., instead.
     /// </para>
     /// </summary>
     public EcsQueryEnumerator GetEnumerator()
     {
+        // foreach runs a broad archetype scan + the .Where(lambda) post-filter only. It does NOT apply WhereField, spatial, or OrderBy/Skip/Take — guard
+        // against silently iterating the wrong set.
+        if (HasFieldPredicates)
+        {
+            throw new InvalidOperationException("foreach does not apply WhereField predicates — call .Execute() to materialise the matches (or .ToView()).");
+        }
+        if (_spatialQueryType != SpatialQueryType.None)
+        {
+            throw new InvalidOperationException("foreach does not apply spatial predicates (WhereNearby / WhereInAABB / WhereRay) — call .Execute().");
+        }
+        if (_orderBy.HasValue)
+        {
+            throw new InvalidOperationException("foreach does not apply OrderBy / Skip / Take — call .ExecuteOrdered().");
+        }
+
         var entities = new List<(EntityId Id, ArchetypeMetadata Meta, ushort EnabledBits, EntityLocations Locations)>();
         if (!MaskIsEmpty)
         {

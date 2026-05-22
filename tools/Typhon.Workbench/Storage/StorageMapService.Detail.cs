@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using Typhon.Engine;
 using Typhon.Engine.Internals;
@@ -172,6 +173,15 @@ public sealed partial class StorageMapService
         var chunkTotal = 0;
         var firstChunkId = 0;
         var occupancy = "";
+        var chunkFill = "";
+        var chunkClass = "";
+        var occupancyMap = "";
+        var occupancyFirst = 0L;
+        var occupancyGoverned = 0;
+        var occupancyCols = 0;
+        var headerBytes = 0;
+        var directoryBytes = 0;
+        var paddingBytes = 0;
         StorageContentCellDto[] directory = [];
 
         if (ownerId != StructuralMap.NoSegment)
@@ -187,6 +197,13 @@ public sealed partial class StorageMapService
 
             if (descriptor.IsChunkBased)
             {
+                var dataOffset = descriptor.OtherDataOffset;
+                // Decompose the bytes before chunk 0 into the three distinct overhead parts so the renderer maps the
+                // page's memory honestly (A6): the fixed per-page header, the root-only segment directory (page-index
+                // table), and the stride-alignment padding the engine inserts so chunks start stride-aligned. The
+                // padding grows with the stride — that's why a large-stride segment (e.g. cluster) shows a wider
+                // overhead band than a small-stride one even on a non-root page.
+                headerBytes = PagedMMF.PageHeaderSize;
                 var pages = descriptor.Pages.Span;
                 for (var k = 0; k < pages.Length; k++)
                 {
@@ -195,6 +212,9 @@ public sealed partial class StorageMapService
                         var isRoot = k == 0;
                         chunkTotal = isRoot ? descriptor.ChunkCountRootPage : descriptor.ChunkCountPerPage;
                         firstChunkId = isRoot ? 0 : descriptor.ChunkCountRootPage + (k - 1) * descriptor.ChunkCountPerPage;
+                        dataOffset = isRoot ? descriptor.RootDataOffset : descriptor.OtherDataOffset;
+                        directoryBytes = isRoot ? LogicalSegment<PersistentStore>.RootHeaderIndexSectionLength : 0;
+                        paddingBytes = dataOffset - headerBytes - directoryBytes;
                         break;
                     }
                 }
@@ -203,7 +223,47 @@ public sealed partial class StorageMapService
                 {
                     chunkUsed = CountOccupiedChunks(body, chunkTotal);
                     occupancy = Convert.ToBase64String(OccupancyBytes(body, chunkTotal));
+
+                    // A Cluster chunk is a sub-allocator of N entity slots; OccupancyBits @chunk+0 popcounted over N
+                    // is its intra-chunk fill (design §10.1). ContainerFill chunks colour by this ratio instead of
+                    // binary occupancy. Every read is one cache line of the body already faulted in — no extra I/O.
+                    if (descriptor.Kind == StorageSegmentKind.Cluster
+                        && engine.TryGetClusterLayout(descriptor.RootPageIndex, out var clusterN, out _, out _, out _) && clusterN > 0)
+                    {
+                        (chunkFill, chunkClass) = BuildClusterChunkFill(body, chunkTotal, dataOffset, descriptor.Stride, clusterN);
+                    }
+                    else if ((descriptor.Kind == StorageSegmentKind.Vsbs || descriptor.Kind == StorageSegmentKind.ComponentCollection)
+                        && engine.TryGetVsbsLayout(descriptor.RootPageIndex, out var vsbsElementSize, out _, out _) && vsbsElementSize > 0)
+                    {
+                        // A VSBS chunk packs ElementCount elements (header @chunk+4) of vsbsElementSize bytes; fill = used / capacity.
+                        (chunkFill, chunkClass) = BuildVsbsChunkFill(body, chunkTotal, dataOffset, descriptor.Stride, vsbsElementSize);
+                    }
+                    else if (descriptor.Kind == StorageSegmentKind.StringTable)
+                    {
+                        // A string chunk holds min(SizeLeft, blockSize) UTF-8 bytes (SizeLeft @chunk+0 = bytes from this chunk on).
+                        (chunkFill, chunkClass) = BuildStringChunkFill(body, chunkTotal, dataOffset, descriptor.Stride);
+                    }
+                    else if (descriptor.Kind == StorageSegmentKind.EntityMap
+                        && engine.TryGetHashMapLayout(descriptor.RootPageIndex, out _, out _, out var hmBucketCapacity, out var hmNonData) && hmBucketCapacity > 0)
+                    {
+                        // A linear-hash bucket chunk holds EntryCount entries (header @chunk+4); fill = used / capacity. Structural
+                        // chunks (meta / directory) are hatched, and an overflowing bucket is flagged (design §10.1).
+                        (chunkFill, chunkClass) = BuildHashMapChunkFill(body, chunkTotal, dataOffset, descriptor.Stride, firstChunkId, hmBucketCapacity, hmNonData);
+                    }
+                    else if (descriptor.Kind == StorageSegmentKind.Index
+                        && engine.TryGetIndexLayout(descriptor.RootPageIndex, out var idxDirectoryChunks, out _))
+                    {
+                        // A B-tree node is coloured leaf vs internal (self-describing from its control word); the shared directory chunks (0..n) are hatched as
+                        // non-data. No intra-node fill-heat — B+tree nodes stay in a narrow [50%,100%] band, so the fill carries little signal (design §13 A6).
+                        (chunkFill, chunkClass) = BuildIndexChunkClass(body, chunkTotal, dataOffset, descriptor.Stride, firstChunkId, idxDirectoryChunks);
+                    }
                 }
+            }
+            else if (descriptor.Kind == StorageSegmentKind.Occupancy)
+            {
+                // An occupancy page is not chunk-based but is the densest page in the file: it governs the
+                // allocation state of a contiguous file-page range (design §10.2). Render it as a region-map.
+                (occupancyMap, occupancyFirst, occupancyGoverned, occupancyCols) = BuildOccupancyRegionMap(engine, descriptor, pageIndex);
             }
         }
 
@@ -226,7 +286,16 @@ public sealed partial class StorageMapService
             chunkTotal > 0 ? (double)chunkUsed / chunkTotal : 0.0,
             firstChunkId,
             occupancy,
-            directory);
+            directory,
+            chunkFill,
+            chunkClass,
+            occupancyMap,
+            occupancyFirst,
+            occupancyGoverned,
+            occupancyCols,
+            headerBytes,
+            directoryBytes,
+            paddingBytes);
     }
 
     /// <summary>Builds one segment's directory — <c>GET /dbmap/segment/{id}</c>. Returns <c>null</c> for an unknown id.</summary>
@@ -249,6 +318,45 @@ public sealed partial class StorageMapService
         return new StorageSegmentDetailDto(
             segmentId, seg.RootPageIndex, seg.Kind.ToString(), pages.Length,
             seg.Stride, seg.ChunkCountPerPage, capacity, pages);
+    }
+
+    /// <summary>
+    /// Builds one segment's harvest summary — <c>GET /dbmap/segment/{id}/summary</c> (Module 15, A6). Returns <c>null</c> for an unknown id. Universal chunk
+    /// counts come straight off the descriptor; cluster and entity-map segments add kind-specific stats. The entity-map stats walk every bucket + overflow chain,
+    /// so this endpoint is fetched lazily by the client (only when the card opens), never on the tile path.
+    /// </summary>
+    public StorageSegmentSummaryDto GetSegmentSummary(DatabaseEngine engine, int segmentId)
+    {
+        ArgumentNullException.ThrowIfNull(engine);
+
+        var segments = engine.EnumerateStorageSegments();
+        if (segmentId < 0 || segmentId >= segments.Count)
+        {
+            return null;
+        }
+
+        var seg = segments[segmentId];
+        var pageCount = seg.Pages.Length;
+
+        long entityCount = 0;
+        int activeClusterCount = 0;
+        int clusterSize = 0;
+        if (seg.Kind == StorageSegmentKind.Cluster)
+        {
+            engine.TryGetClusterStats(seg.RootPageIndex, out entityCount, out activeClusterCount, out clusterSize);
+        }
+
+        EntityMapStatsDto entityMap = null;
+        if (seg.Kind == StorageSegmentKind.EntityMap && engine.TryGetEntityMapStats(seg.RootPageIndex, out var stats))
+        {
+            entityMap = new EntityMapStatsDto(stats.BucketCount, stats.EntryCount, stats.OverflowBucketCount, stats.MaxChainLength, stats.LoadFactor,
+                stats.FillEmpty, stats.FillQuarter, stats.FillHalf, stats.FillThreeQuarter, stats.FillFull);
+        }
+
+        return new StorageSegmentSummaryDto(
+            segmentId, seg.RootPageIndex, seg.Kind.ToString(), pageCount, seg.Stride,
+            seg.AllocatedChunkCount, seg.FreeChunkCount, seg.ChunkCapacity,
+            entityCount, activeClusterCount, clusterSize, entityMap);
     }
 
     /// <summary>Decodes one chunk's L4 content — <c>GET /dbmap/chunk/{segId}/{chunkId}</c>. Returns <c>null</c> for an unknown id.</summary>
@@ -307,6 +415,7 @@ public sealed partial class StorageMapService
         var decoder = L4Decoder.UnknownDecoder;
         var componentType = "";
         StorageContentCellDto[] cells = [];
+        string[] clusterComponents = [];
 
         if (seg.Kind == StorageSegmentKind.Component)
         {
@@ -318,6 +427,41 @@ public sealed partial class StorageMapService
                 cells = L4Decoder.DecodeComponent(def, chunkBytes);
             }
         }
+        else if (seg.Kind == StorageSegmentKind.Cluster
+            && engine.TryGetClusterLayout(seg.RootPageIndex, out var clusterN, out _, out var clusterComponentCount, out var clusterEntityIdsOffset))
+        {
+            decoder = "cluster";
+            cells = L4Decoder.DecodeCluster(chunkBytes, clusterN, clusterComponentCount, clusterEntityIdsOffset);
+            // Slot-ordered component names label the client's per-component overlay picker (bit c of each cell's enabledMask ↔ clusterComponents[c]).
+            engine.TryGetClusterComponentNames(seg.RootPageIndex, out clusterComponents);
+        }
+        else if ((seg.Kind == StorageSegmentKind.Vsbs || seg.Kind == StorageSegmentKind.ComponentCollection)
+            && engine.TryGetVsbsLayout(seg.RootPageIndex, out var vsbsElementSize, out _, out _) && vsbsElementSize > 0)
+        {
+            decoder = "vsbs";
+            cells = L4Decoder.DecodeVsbs(chunkBytes, vsbsElementSize, seg.Stride);
+        }
+        else if (seg.Kind == StorageSegmentKind.StringTable)
+        {
+            decoder = "string";
+            cells = L4Decoder.DecodeString(chunkBytes, seg.Stride);
+        }
+        else if (seg.Kind == StorageSegmentKind.EntityMap
+            && engine.TryGetHashMapLayout(seg.RootPageIndex, out _, out _, out var hmBucketCapacity, out var hmNonData))
+        {
+            decoder = "hash-bucket";
+            // The meta chunk is always chunk 0; directory / overflow-dir-index chunks come from the engine's non-data set. Everything else is a bucket / overflow.
+            var isMeta = chunkId == 0;
+            var isDirectory = !isMeta && Array.IndexOf(hmNonData, chunkId) >= 0;
+            cells = L4Decoder.DecodeHashMap(chunkBytes, isMeta, isDirectory, hmBucketCapacity);
+        }
+        else if (seg.Kind == StorageSegmentKind.Index
+            && engine.TryGetIndexLayout(seg.RootPageIndex, out var idxDirectoryChunks, out var idxTrees))
+        {
+            decoder = "index";
+            // Chunks 0..n are the shared B-tree directory; everything else is a node decoded leaf / internal from its own header.
+            cells = L4Decoder.DecodeIndex(chunkBytes, chunkId, idxDirectoryChunks, idxTrees);
+        }
 
         if (decoder == L4Decoder.UnknownDecoder)
         {
@@ -327,7 +471,7 @@ public sealed partial class StorageMapService
             cells = L4Decoder.DecodeGeneric(chunkBytes);
         }
 
-        return new StorageChunkDto(segmentId, chunkId, decoder, occupied, fileOffset, seg.Stride, componentType, cells);
+        return new StorageChunkDto(segmentId, chunkId, decoder, occupied, fileOffset, seg.Stride, componentType, cells, clusterComponents);
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────────────────────────────────
@@ -391,6 +535,243 @@ public sealed partial class StorageMapService
             bytes[b] = (byte)((bitmap[b >> 6] >> (b & 63)) & 1);
         }
         return bytes;
+    }
+
+    /// <summary>
+    /// Per-chunk intra-chunk fill (0..255) + class arrays for a Cluster page (Module 15, A6, design §10.1). Each
+    /// occupied chunk is a cluster of <paramref name="clusterSize"/> entity slots; OccupancyBits @chunk+0 popcounted
+    /// over N is the live-entity ratio. Free chunks stay 0 / <see cref="StorageChunkClass.Slot"/>. Both arrays are
+    /// base64 SoA, mirroring <see cref="OccupancyBytes"/>. No extra page I/O — the body is already in hand.
+    /// </summary>
+    private static (string Fill, string Class) BuildClusterChunkFill(ReadOnlySpan<byte> body, int chunkTotal, int dataOffset, int stride, int clusterSize)
+    {
+        var fill = new byte[chunkTotal];
+        var cls = new byte[chunkTotal];
+        var fullMask = clusterSize >= 64 ? ulong.MaxValue : (1UL << clusterSize) - 1;
+
+        for (var i = 0; i < chunkTotal; i++)
+        {
+            if (!ChunkBit(body, i))
+            {
+                continue; // free chunk → fill 0, class Slot (0)
+            }
+            var off = dataOffset + i * stride;
+            if (off + 8 > body.Length)
+            {
+                continue;
+            }
+            var live = System.Numerics.BitOperations.PopCount(System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(body.Slice(off)) & fullMask);
+            fill[i] = (byte)Math.Clamp(live * 255 / clusterSize, 0, 255);
+            cls[i] = (byte)StorageChunkClass.ContainerFill;
+        }
+
+        return (Convert.ToBase64String(fill), Convert.ToBase64String(cls));
+    }
+
+    /// <summary>
+    /// Per-chunk element fill (0..255) + class arrays for a VSBS / component-collection page (Module 15, A6, design §10.1).
+    /// Each occupied chunk packs <c>ElementCount</c> (header @chunk+4) elements of <paramref name="elementSize"/> bytes; the
+    /// fill is that over the chunk capacity <c>(stride − 8) / elementSize</c>. The root chunk's larger header makes it hold a
+    /// few fewer (its fill is thus slightly over-reported) — which root is can't be told from the chunk, so the per-chunk
+    /// capacity is used uniformly. Free chunks stay 0. base64 SoA, no extra I/O.
+    /// </summary>
+    private static (string Fill, string Class) BuildVsbsChunkFill(ReadOnlySpan<byte> body, int chunkTotal, int dataOffset, int stride, int elementSize)
+    {
+        var fill = new byte[chunkTotal];
+        var cls = new byte[chunkTotal];
+        var capacity = elementSize > 0 ? (stride - 8) / elementSize : 0; // 8 = VariableSizedBufferChunkHeader { NextChunkId; ElementCount }
+        if (capacity <= 0)
+        {
+            return (Convert.ToBase64String(fill), Convert.ToBase64String(cls));
+        }
+
+        for (var i = 0; i < chunkTotal; i++)
+        {
+            if (!ChunkBit(body, i))
+            {
+                continue;
+            }
+            var off = dataOffset + i * stride;
+            if (off + 8 > body.Length)
+            {
+                continue;
+            }
+            var elementCount = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(body.Slice(off + 4));
+            fill[i] = (byte)Math.Clamp(elementCount * 255 / capacity, 0, 255);
+            cls[i] = (byte)StorageChunkClass.ContainerFill;
+        }
+
+        return (Convert.ToBase64String(fill), Convert.ToBase64String(cls));
+    }
+
+    /// <summary>
+    /// Per-chunk payload fill (0..255) + class arrays for a string-table page (Module 15, A6, design §10.1). Each occupied
+    /// chunk holds <c>min(SizeLeft, blockSize)</c> UTF-8 bytes (<c>SizeLeft</c> @chunk+0 is the bytes remaining from this
+    /// chunk onward, so it is valid on every chunk of a chain — full chunks read 100%, the chain's tail reads partial);
+    /// <c>blockSize = stride − 8</c>. Free chunks stay 0. base64 SoA, no extra I/O.
+    /// </summary>
+    private static (string Fill, string Class) BuildStringChunkFill(ReadOnlySpan<byte> body, int chunkTotal, int dataOffset, int stride)
+    {
+        var fill = new byte[chunkTotal];
+        var cls = new byte[chunkTotal];
+        var blockSize = stride - 8; // 8 = string ChunkHeader { SizeLeft; NextChunkId }
+        if (blockSize <= 0)
+        {
+            return (Convert.ToBase64String(fill), Convert.ToBase64String(cls));
+        }
+
+        for (var i = 0; i < chunkTotal; i++)
+        {
+            if (!ChunkBit(body, i))
+            {
+                continue;
+            }
+            var off = dataOffset + i * stride;
+            if (off + 8 > body.Length)
+            {
+                continue;
+            }
+            var sizeLeft = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(body.Slice(off));
+            var used = Math.Clamp(sizeLeft, 0, blockSize);
+            fill[i] = (byte)(used * 255 / blockSize);
+            cls[i] = (byte)StorageChunkClass.ContainerFill;
+        }
+
+        return (Convert.ToBase64String(fill), Convert.ToBase64String(cls));
+    }
+
+    /// <summary>
+    /// Per-chunk fill (0..255) + class arrays for a linear-hash (entity-map) page (Module 15, A6, design §10.1). Every <i>data</i> chunk is a bucket or an
+    /// overflow chunk whose <c>EntryCount</c> (header @chunk+4) over <paramref name="bucketCapacity"/> is its fill; an overflow chunk (<c>OlcVersion == 0</c>
+    /// @chunk+0) or a primary bucket that chains (<c>OverflowChunkId != −1</c> @chunk+8) is flagged <see cref="StorageChunkClass.Overflow"/>, a lone primary
+    /// <see cref="StorageChunkClass.ContainerFill"/>. The structural chunks — the meta chunk and every directory / overflow-dir-index chunk, supplied as global
+    /// ids in <paramref name="nonDataChunkIds"/> — are headerless so their bytes can't be read as a bucket; they are marked <see cref="StorageChunkClass.NonData"/>
+    /// (no fill). Free chunks stay 0. base64 SoA, no extra I/O.
+    /// </summary>
+    private static (string Fill, string Class) BuildHashMapChunkFill(ReadOnlySpan<byte> body, int chunkTotal, int dataOffset, int stride, int firstChunkId,
+        int bucketCapacity, int[] nonDataChunkIds)
+    {
+        var fill = new byte[chunkTotal];
+        var cls = new byte[chunkTotal];
+        var nonData = nonDataChunkIds is { Length: > 0 } ? new HashSet<int>(nonDataChunkIds) : null;
+
+        for (var i = 0; i < chunkTotal; i++)
+        {
+            if (!ChunkBit(body, i))
+            {
+                continue; // free chunk → fill 0, class Slot (0)
+            }
+            if (nonData != null && nonData.Contains(firstChunkId + i))
+            {
+                cls[i] = (byte)StorageChunkClass.NonData; // meta / directory — structural, no fill
+                continue;
+            }
+            var off = dataOffset + i * stride;
+            if (off + 12 > body.Length)
+            {
+                continue;
+            }
+            var olcVersion = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(body.Slice(off));
+            var entryCount = body[off + 4];
+            var overflowChunkId = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(body.Slice(off + 8));
+            fill[i] = bucketCapacity > 0 ? (byte)Math.Clamp(entryCount * 255 / bucketCapacity, 0, 255) : (byte)0;
+            cls[i] = olcVersion == 0 || overflowChunkId != -1 ? (byte)StorageChunkClass.Overflow : (byte)StorageChunkClass.ContainerFill;
+        }
+
+        return (Convert.ToBase64String(fill), Convert.ToBase64String(cls));
+    }
+
+    /// <summary>
+    /// Per-chunk class array for a B-tree index page (Module 15, A6, design §13 A6). Each occupied node is classed leaf vs internal from its control word
+    /// (<c>NodeStates.IsLeaf</c> = bit 1 @chunk+0) — self-describing regardless of key width; the shared directory chunks (global ids <c>[0, directoryChunkCount)</c>)
+    /// are <see cref="StorageChunkClass.NonData"/>. No fill array is emitted (per-node fill needs a tree walk and carries little signal for a self-balancing B+tree).
+    /// base64 SoA for the class; empty fill. No extra page I/O.
+    /// </summary>
+    private static (string Fill, string Class) BuildIndexChunkClass(ReadOnlySpan<byte> body, int chunkTotal, int dataOffset, int stride, int firstChunkId,
+        int directoryChunkCount)
+    {
+        var cls = new byte[chunkTotal];
+        for (var i = 0; i < chunkTotal; i++)
+        {
+            if (!ChunkBit(body, i))
+            {
+                continue; // free chunk → class Slot (0)
+            }
+            if (firstChunkId + i < directoryChunkCount)
+            {
+                cls[i] = (byte)StorageChunkClass.NonData; // shared B-tree directory chunk
+                continue;
+            }
+            var off = dataOffset + i * stride;
+            if (off + 4 > body.Length)
+            {
+                continue;
+            }
+            var control = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(body.Slice(off));
+            cls[i] = (byte)((control & 0x02) != 0 ? StorageChunkClass.Leaf : StorageChunkClass.Internal); // NodeStates.IsLeaf = bit 1
+        }
+        return ("", Convert.ToBase64String(cls));
+    }
+
+    /// <summary>
+    /// Occupancy region-map for an occupancy page (Module 15, A6, design §10.2). The page governs a contiguous file-page
+    /// range (the root governs fewer — see <see cref="DatabaseEngine.GetOccupancyPageGovernedRange"/>); the bits come from
+    /// the resident occupancy segment via <c>ReadOccupancyBits</c> (zero data-page I/O). The range is down-sampled into a
+    /// near-square grid of ≤ 256 cells, each the allocated fraction (0..255) of its sub-range — a map-within-the-map.
+    /// </summary>
+    private static (string Map, long First, int Governed, int Cols) BuildOccupancyRegionMap(DatabaseEngine engine, StorageSegmentDescriptor descriptor,
+        int pageIndex)
+    {
+        var pages = descriptor.Pages.Span;
+        var ordinal = -1;
+        for (var k = 0; k < pages.Length; k++)
+        {
+            if (pages[k] == pageIndex)
+            {
+                ordinal = k;
+                break;
+            }
+        }
+        if (ordinal < 0)
+        {
+            return ("", 0L, 0, 0);
+        }
+
+        var (first, governed) = engine.GetOccupancyPageGovernedRange(ordinal);
+        var filePages = engine.MMF.StorageFilePageCount;
+        var effective = (int)Math.Min(governed, Math.Max(0L, filePages - first));
+        if (effective <= 0)
+        {
+            return ("", first, 0, 0);
+        }
+
+        var capacity = engine.MMF.OccupancyCapacityPages;
+        var words = new long[(Math.Max(capacity, filePages) + 63) / 64];
+        engine.MMF.ReadOccupancyBits(words);
+
+        const int cap = 256;
+        var cells = Math.Min(effective, cap);
+        var map = new byte[cells];
+        for (var c = 0; c < cells; c++)
+        {
+            var lo = first + (long)c * effective / cells;
+            var hi = first + (long)(c + 1) * effective / cells;
+            if (hi <= lo)
+            {
+                hi = lo + 1;
+            }
+            var alloc = 0;
+            for (var p = lo; p < hi; p++)
+            {
+                if ((words[(int)(p >> 6)] & (1L << (int)(p & 63))) != 0)
+                {
+                    alloc++;
+                }
+            }
+            map[c] = (byte)Math.Clamp(alloc * 255 / (int)(hi - lo), 0, 255);
+        }
+
+        return (Convert.ToBase64String(map), first, effective, (int)Math.Ceiling(Math.Sqrt(cells)));
     }
 
     private static bool ChunkBit(ReadOnlySpan<byte> body, int chunkInPage)

@@ -236,6 +236,123 @@ class SpatialEcsIntegrationTests : TestBase<SpatialEcsIntegrationTests>
         Assert.That(hits.Count, Is.GreaterThan(0));
     }
 
+    // Regression: Count() and Any() must apply the spatial predicate, like Execute() does. Before the fix they
+    // fell through to the archetype-mask broad scan and counted/answered over the WHOLE archetype, ignoring geometry.
+    [Test]
+    public void SpatialQuery_CountAndAny_RespectSpatialPredicate()
+    {
+        using var dbe = SetupEngine();
+
+        using (var t = dbe.CreateQuickTransaction())
+        {
+            var near = new SpatialShip { Bounds = new AABB3F { MinX = 10, MinY = 20, MinZ = 30, MaxX = 12, MaxY = 22, MaxZ = 32 }, Speed = 1f };
+            var far  = new SpatialShip { Bounds = new AABB3F { MinX = 1000, MinY = 1000, MinZ = 1000, MaxX = 1002, MaxY = 1002, MaxZ = 1002 }, Speed = 1f };
+            t.Spawn<SpatialShipArchetype>(SpatialShipArchetype.Ship.Set(in near), SpatialShipArchetype.Name.Set(new SpatialName { Id = 1 }));
+            t.Spawn<SpatialShipArchetype>(SpatialShipArchetype.Ship.Set(in far),  SpatialShipArchetype.Name.Set(new SpatialName { Id = 2 }));
+            t.Commit();
+        }
+        dbe.WriteTickFence(1);   // build/refresh the spatial index (mirrors the runtime's per-tick fence)
+
+        using var qtx = dbe.CreateQuickTransaction();
+
+        // A region that overlaps only the near ship — selective.
+        int executeCount = qtx.Query<SpatialShipArchetype>().WhereInAABB<SpatialShip>(0, 10, 20, 20, 30, 40).Execute().Count;
+        int countCount   = qtx.Query<SpatialShipArchetype>().WhereInAABB<SpatialShip>(0, 10, 20, 20, 30, 40).Count();
+        bool anyHit      = qtx.Query<SpatialShipArchetype>().WhereInAABB<SpatialShip>(0, 10, 20, 20, 30, 40).Any();
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(executeCount, Is.EqualTo(1), "Execute should match only the near ship (selectivity sanity check)");
+            Assert.That(countCount, Is.EqualTo(executeCount), "Count() must apply the spatial predicate, matching Execute()");
+            Assert.That(anyHit, Is.True, "Any() must report the near ship");
+        });
+
+        // A region with nothing in it: Count must be 0 and Any false (previously Count returned the archetype size, Any true).
+        int emptyCount = qtx.Query<SpatialShipArchetype>().WhereInAABB<SpatialShip>(5000, 5000, 5000, 5001, 5001, 5001).Count();
+        bool emptyAny  = qtx.Query<SpatialShipArchetype>().WhereInAABB<SpatialShip>(5000, 5000, 5000, 5001, 5001, 5001).Any();
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(emptyCount, Is.EqualTo(0), "Count() over an empty region must be 0, not the archetype size");
+            Assert.That(emptyAny, Is.False, "Any() over an empty region must be false");
+        });
+    }
+
+    // Composition: a spatial predicate AND a field predicate must both apply. Before the fix, the field-predicate
+    // path was checked first and returned early, silently dropping the spatial predicate.
+    [Test]
+    public void SpatialQuery_ComposesWithFieldAndWherePredicates()
+    {
+        using var dbe = SetupEngine();
+
+        using (var t = dbe.CreateQuickTransaction())
+        {
+            // Three ships clustered near the origin: two slow, one fast.
+            SpawnShip(t, 10, 10, speed: 1f);
+            SpawnShip(t, 12, 12, speed: 9f);
+            SpawnShip(t, 14, 14, speed: 1f);
+            // A fast ship far outside the query region.
+            SpawnShip(t, 5000, 5000, speed: 9f);
+            t.Commit();
+        }
+        dbe.WriteTickFence(1);
+
+        using var qtx = dbe.CreateQuickTransaction();
+
+        // Region covers only the three near ships; the field predicate keeps only the fast one of those.
+        int execHits = qtx.Query<SpatialShipArchetype>()
+            .WhereInAABB<SpatialShip>(0, 0, 0, 100, 100, 100).WhereField<SpatialShip>(s => s.Speed > 5f).Execute().Count;
+        int countHits = qtx.Query<SpatialShipArchetype>()
+            .WhereInAABB<SpatialShip>(0, 0, 0, 100, 100, 100).WhereField<SpatialShip>(s => s.Speed > 5f).Count();
+        bool anyHits = qtx.Query<SpatialShipArchetype>()
+            .WhereInAABB<SpatialShip>(0, 0, 0, 100, 100, 100).WhereField<SpatialShip>(s => s.Speed > 5f).Any();
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(execHits, Is.EqualTo(1), "spatial ∩ WhereField: only the fast ship inside the region");
+            Assert.That(countHits, Is.EqualTo(1), "Count must compose spatial + WhereField");
+            Assert.That(anyHits, Is.True, "Any must compose spatial + WhereField");
+        });
+
+        // The .Where(lambda) form composes with spatial too.
+        int lambdaHits = qtx.Query<SpatialShipArchetype>()
+            .WhereInAABB<SpatialShip>(0, 0, 0, 100, 100, 100).Where<SpatialShip>(s => s.Speed > 5f).Execute().Count;
+        Assert.That(lambdaHits, Is.EqualTo(1), "spatial ∩ Where(lambda)");
+    }
+
+    // Guards: spatial-clause misuse must throw, not silently drop.
+    [Test]
+    public void SpatialQueryGuards_UnsupportedCombosThrow()
+    {
+        using var dbe = SetupEngine();
+        using (var t = dbe.CreateQuickTransaction())
+        {
+            SpawnShip(t, 10, 10, 1f);
+            t.Commit();
+        }
+        dbe.WriteTickFence(1);
+        using var qtx = dbe.CreateQuickTransaction();
+
+        // Two spatial predicates — the second would silently overwrite the first.
+        Assert.Throws<System.InvalidOperationException>(() =>
+            qtx.Query<SpatialShipArchetype>().WhereInAABB<SpatialShip>(0, 0, 0, 100, 100, 100).WhereNearby<SpatialShip>(0, 0, 0, 50));
+
+        // foreach does not apply spatial predicates.
+        Assert.Throws<System.InvalidOperationException>(() =>
+        {
+            foreach (var _ in qtx.Query<SpatialShipArchetype>().WhereInAABB<SpatialShip>(0, 0, 0, 100, 100, 100)) { }
+        });
+
+        // A view cannot combine WhereField with a spatial predicate.
+        Assert.Throws<System.InvalidOperationException>(() =>
+            qtx.Query<SpatialShipArchetype>().WhereInAABB<SpatialShip>(0, 0, 0, 100, 100, 100).WhereField<SpatialShip>(s => s.Speed > 0f).ToView());
+    }
+
+    private static void SpawnShip(Transaction t, float x, float y, float speed) =>
+        t.Spawn<SpatialShipArchetype>(
+            SpatialShipArchetype.Ship.Set(new SpatialShip { Bounds = new AABB3F { MinX = x, MinY = y, MinZ = 0, MaxX = x, MaxY = y, MaxZ = 0 }, Speed = speed }),
+            SpatialShipArchetype.Name.Set(new SpatialName { Id = 0 }));
+
     // ── Destroy ──────────────────────────────────────────────────────────
 
     [Test]

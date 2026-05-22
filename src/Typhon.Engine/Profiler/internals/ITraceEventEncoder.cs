@@ -5,7 +5,7 @@ namespace Typhon.Engine.Internals;
 
 /// <summary>
 /// Common contract implemented by every typed-event <c>ref struct</c>: the two methods needed to serialize a completed event into a ring-buffer
-/// slot. Used only via C# 13 generic constraints with <c>allows ref struct</c> to let <c>TyphonEvent.PublishEvent&lt;T&gt;</c> share its
+/// slot. Used only via C# 13 generic constraints with <c>allows ref struct</c> to let <see cref="TyphonEvent.PublishEvent{T}"/> share its
 /// Dispose-time publish logic across all event types without boxing or per-event code duplication.
 /// </summary>
 internal interface ITraceEventEncoder

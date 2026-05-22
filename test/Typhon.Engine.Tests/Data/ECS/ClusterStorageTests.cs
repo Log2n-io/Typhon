@@ -153,6 +153,280 @@ class ClusterStorageTests : TestBase<ClusterStorageTests>
     }
 
     [Test]
+    public void TryGetClusterLayout_ResolvesLayoutByClusterSegmentRootPage()
+    {
+        using var dbe = SetupClusterEngine();
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var pos = new ClPosition(10, 20);
+            var mov = new ClMovement(1, 2);
+            tx.Spawn<ClAnt>(ClAnt.Position.Set(in pos), ClAnt.Movement.Set(in mov));
+            tx.Commit();
+        }
+
+        var meta = ArchetypeRegistry.GetMetadata<ClAnt>();
+        var clusterState = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
+        var rootPage = clusterState.ClusterSegment.RootPageIndex;
+
+        var found = dbe.TryGetClusterLayout(rootPage, out var n, out var headerSize, out var componentCount, out var entityIdsOffset);
+
+        Assert.That(found, Is.True);
+        Assert.That(componentCount, Is.EqualTo(2), "ClAnt has Position + Movement");
+        Assert.That(n, Is.EqualTo(clusterState.Layout.ClusterSize));
+        Assert.That(headerSize, Is.EqualTo(8 + 8 * componentCount), "OccupancyBits + EnabledBits[C]");
+        Assert.That(entityIdsOffset, Is.EqualTo(headerSize), "entity-id array begins right after the fixed header");
+    }
+
+    [Test]
+    public void TryGetClusterLayout_NonClusterRootPage_ReturnsFalse()
+    {
+        using var dbe = SetupClusterEngine();
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var pos = new ClPosition(10, 20);
+            var mov = new ClMovement(1, 2);
+            tx.Spawn<ClAnt>(ClAnt.Position.Set(in pos), ClAnt.Movement.Set(in mov));
+            tx.Commit();
+        }
+
+        // The occupancy segment root page is not a cluster segment.
+        var occupancyRoot = -1;
+        foreach (var seg in dbe.EnumerateStorageSegments())
+        {
+            if (seg.Kind == StorageSegmentKind.Occupancy)
+            {
+                occupancyRoot = seg.RootPageIndex;
+                break;
+            }
+        }
+        Assert.That(occupancyRoot, Is.GreaterThanOrEqualTo(0));
+
+        Assert.That(dbe.TryGetClusterLayout(occupancyRoot, out _, out _, out _, out _), Is.False);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // A6 harvest summary accessors
+    // ═══════════════════════════════════════════════════════════════════════
+
+    [Test]
+    public void TryGetClusterStats_ReportsEntityAndClusterCounts()
+    {
+        using var dbe = SetupClusterEngine();
+        var meta = ArchetypeRegistry.GetMetadata<ClAnt>();
+        int n = meta.ClusterLayout.ClusterSize;
+        int spawnCount = n + 3; // one full cluster + a partial one ⇒ 2 active clusters
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            for (int i = 0; i < spawnCount; i++)
+            {
+                var pos = new ClPosition(i, 0);
+                var mov = new ClMovement(0, 0);
+                tx.Spawn<ClAnt>(ClAnt.Position.Set(in pos), ClAnt.Movement.Set(in mov));
+            }
+            tx.Commit();
+        }
+
+        var clusterState = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
+        var rootPage = clusterState.ClusterSegment.RootPageIndex;
+
+        var found = dbe.TryGetClusterStats(rootPage, out var entityCount, out var activeClusters, out var clusterSize);
+
+        Assert.That(found, Is.True);
+        Assert.That(entityCount, Is.EqualTo(spawnCount));
+        Assert.That(clusterSize, Is.EqualTo(n));
+        Assert.That(activeClusters, Is.EqualTo(2));
+        Assert.That(activeClusters, Is.EqualTo(clusterState.ActiveClusterCount));
+    }
+
+    [Test]
+    public void TryGetClusterStats_NonClusterRootPage_ReturnsFalse()
+    {
+        using var dbe = SetupClusterEngine();
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var pos = new ClPosition(1, 2);
+            var mov = new ClMovement(3, 4);
+            tx.Spawn<ClAnt>(ClAnt.Position.Set(in pos), ClAnt.Movement.Set(in mov));
+            tx.Commit();
+        }
+
+        Assert.That(dbe.TryGetClusterStats(-1, out _, out _, out _), Is.False);
+    }
+
+    [Test]
+    public void TryGetEntityMapStats_ReportsEntryAndBucketCounts()
+    {
+        using var dbe = SetupClusterEngine();
+        var meta = ArchetypeRegistry.GetMetadata<ClAnt>();
+        int spawnCount = 50;
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            for (int i = 0; i < spawnCount; i++)
+            {
+                var pos = new ClPosition(i, 0);
+                var mov = new ClMovement(0, 0);
+                tx.Spawn<ClAnt>(ClAnt.Position.Set(in pos), ClAnt.Movement.Set(in mov));
+            }
+            tx.Commit();
+        }
+
+        var mapRoot = dbe._archetypeStates[meta.ArchetypeId].EntityMap.Segment.RootPageIndex;
+
+        var found = dbe.TryGetEntityMapStats(mapRoot, out var stats);
+
+        Assert.That(found, Is.True);
+        Assert.That(stats.EntryCount, Is.EqualTo(spawnCount));
+        Assert.That(stats.BucketCount, Is.GreaterThan(0));
+        Assert.That(stats.LoadFactor, Is.GreaterThan(0.0));
+
+        // The fill histogram partitions every primary bucket exactly once.
+        var histogram = stats.FillEmpty + stats.FillQuarter + stats.FillHalf + stats.FillThreeQuarter + stats.FillFull;
+        Assert.That(histogram, Is.EqualTo(stats.BucketCount));
+    }
+
+    [Test]
+    public void TryGetEntityMapStats_NonEntityMapRootPage_ReturnsFalse()
+    {
+        using var dbe = SetupClusterEngine();
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var pos = new ClPosition(1, 2);
+            var mov = new ClMovement(3, 4);
+            tx.Spawn<ClAnt>(ClAnt.Position.Set(in pos), ClAnt.Movement.Set(in mov));
+            tx.Commit();
+        }
+
+        Assert.That(dbe.TryGetEntityMapStats(-1, out _), Is.False);
+    }
+
+    [Test]
+    public void TryGetHashMapLayout_ReportsWidthsCapacityAndNonDataChunks()
+    {
+        using var dbe = SetupClusterEngine();
+        var meta = ArchetypeRegistry.GetMetadata<ClAnt>();
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            for (int i = 0; i < 50; i++)
+            {
+                var pos = new ClPosition(i, 0);
+                var mov = new ClMovement(0, 0);
+                tx.Spawn<ClAnt>(ClAnt.Position.Set(in pos), ClAnt.Movement.Set(in mov));
+            }
+            tx.Commit();
+        }
+
+        var mapRoot = dbe._archetypeStates[meta.ArchetypeId].EntityMap.Segment.RootPageIndex;
+
+        // Stride comes off the descriptor — the bucket-capacity denominator the renderer can't derive from a chunk alone.
+        var stride = 0;
+        foreach (var seg in dbe.EnumerateStorageSegments())
+        {
+            if (seg.RootPageIndex == mapRoot)
+            {
+                stride = seg.Stride;
+                break;
+            }
+        }
+        Assert.That(stride, Is.GreaterThan(0));
+
+        var found = dbe.TryGetHashMapLayout(mapRoot, out var keyWidth, out var valueWidth, out var bucketCapacity, out var nonDataChunkIds);
+
+        Assert.That(found, Is.True);
+        Assert.That(keyWidth, Is.EqualTo(8), "EntityKey is a long");
+        Assert.That(valueWidth, Is.GreaterThan(0));
+        Assert.That(bucketCapacity, Is.EqualTo((stride - 12) / (keyWidth + valueWidth)), "capacity = (stride − header) / (key + value)");
+        // The structural set is meta (chunk 0) plus every directory chunk — at least 2 ids, and chunk 0 must be present.
+        Assert.That(nonDataChunkIds, Does.Contain(0), "the meta chunk is always chunk 0");
+        Assert.That(nonDataChunkIds.Length, Is.GreaterThanOrEqualTo(2), "meta + at least one directory chunk");
+    }
+
+    [Test]
+    public void TryGetHashMapLayout_NonEntityMapRootPage_ReturnsFalse()
+    {
+        using var dbe = SetupClusterEngine();
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var pos = new ClPosition(1, 2);
+            var mov = new ClMovement(3, 4);
+            tx.Spawn<ClAnt>(ClAnt.Position.Set(in pos), ClAnt.Movement.Set(in mov));
+            tx.Commit();
+        }
+
+        Assert.That(dbe.TryGetHashMapLayout(-1, out _, out _, out _, out _), Is.False);
+    }
+
+    [Test]
+    public void EnumerateStorageSegments_ClusterSegmentReportsChunkCounts()
+    {
+        using var dbe = SetupClusterEngine();
+        var meta = ArchetypeRegistry.GetMetadata<ClAnt>();
+        int spawnCount = meta.ClusterLayout.ClusterSize + 1; // 2 active clusters
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            for (int i = 0; i < spawnCount; i++)
+            {
+                var pos = new ClPosition(i, 0);
+                var mov = new ClMovement(0, 0);
+                tx.Spawn<ClAnt>(ClAnt.Position.Set(in pos), ClAnt.Movement.Set(in mov));
+            }
+            tx.Commit();
+        }
+
+        var rootPage = dbe._archetypeStates[meta.ArchetypeId].ClusterState.ClusterSegment.RootPageIndex;
+        StorageSegmentDescriptor cluster = default;
+        var found = false;
+        foreach (var seg in dbe.EnumerateStorageSegments())
+        {
+            if (seg.RootPageIndex == rootPage)
+            {
+                cluster = seg;
+                found = true;
+                break;
+            }
+        }
+
+        Assert.That(found, Is.True);
+        Assert.That(cluster.IsChunkBased, Is.True);
+        Assert.That(cluster.ChunkCapacity, Is.GreaterThan(0));
+        Assert.That(cluster.AllocatedChunkCount, Is.GreaterThan(0));
+        Assert.That(cluster.AllocatedChunkCount, Is.LessThanOrEqualTo(cluster.ChunkCapacity));
+        Assert.That(cluster.FreeChunkCount, Is.EqualTo(cluster.ChunkCapacity - cluster.AllocatedChunkCount));
+    }
+
+    [Test]
+    public void TryGetClusterComponentNames_ReturnsSlotOrderedNames()
+    {
+        using var dbe = SetupClusterEngine();
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var pos = new ClPosition(1, 2);
+            var mov = new ClMovement(3, 4);
+            tx.Spawn<ClAnt>(ClAnt.Position.Set(in pos), ClAnt.Movement.Set(in mov));
+            tx.Commit();
+        }
+
+        var rootPage = dbe._archetypeStates[ArchetypeRegistry.GetMetadata<ClAnt>().ArchetypeId].ClusterState.ClusterSegment.RootPageIndex;
+
+        var found = dbe.TryGetClusterComponentNames(rootPage, out var names);
+
+        Assert.That(found, Is.True);
+        Assert.That(names, Has.Length.EqualTo(2), "ClAnt has Position + Movement");
+        Assert.That(names, Does.Contain("Typhon.Test.Cluster.Position"));
+        Assert.That(names, Does.Contain("Typhon.Test.Cluster.Movement"));
+    }
+
+    [Test]
+    public void TryGetClusterComponentNames_NonClusterRootPage_ReturnsFalse()
+    {
+        using var dbe = SetupClusterEngine();
+        Assert.That(dbe.TryGetClusterComponentNames(-1, out _), Is.False);
+    }
+
+    [Test]
     public void Read_SpawnedEntity_CorrectData()
     {
         using var dbe = SetupClusterEngine();

@@ -127,9 +127,9 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
     // Segment lifecycle: Create, Load, Grow
     // ═══════════════════════════════════════════════════════════════════════
 
-    internal override bool Create(PageBlockType type, Span<int> filePageIndices, bool clear, ChangeSet changeSet = null)
+    internal override bool Create(PageBlockType type, StorageSegmentKind kind, Span<int> filePageIndices, bool clear, ChangeSet changeSet = null)
     {
-        if (!base.Create(type, filePageIndices, clear, changeSet))
+        if (!base.Create(type, kind, filePageIndices, clear, changeSet))
         {
             return false;
         }

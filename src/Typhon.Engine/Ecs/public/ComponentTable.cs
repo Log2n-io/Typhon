@@ -420,20 +420,24 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
 
         // Versioned and SingleVersion both use PersistentStore (SV needs MMF checkpoint for clean entity recovery)
         var mmf = DBE.MMF;
-        ComponentSegment    = mmf.AllocateChunkBasedSegment(PageBlockType.None, ComponentSegmentStartingSize, ComponentTotalSize, changeSet);
-        DefaultIndexSegment  = mmf.AllocateChunkBasedSegment(PageBlockType.None, MainIndexSegmentStartingSize, sizeof(Index64Chunk), changeSet);
-        String64IndexSegment = mmf.AllocateChunkBasedSegment(PageBlockType.None, MainIndexSegmentStartingSize, sizeof(IndexString64Chunk), changeSet);
+        ComponentSegment    = mmf.AllocateChunkBasedSegment(PageBlockType.None, ComponentSegmentStartingSize, ComponentTotalSize, changeSet, 
+            StorageSegmentKind.Component);
+        DefaultIndexSegment  = mmf.AllocateChunkBasedSegment(PageBlockType.None, MainIndexSegmentStartingSize, sizeof(Index64Chunk), changeSet, 
+            StorageSegmentKind.Index);
+        String64IndexSegment = mmf.AllocateChunkBasedSegment(PageBlockType.None, MainIndexSegmentStartingSize, sizeof(IndexString64Chunk), changeSet, 
+            StorageSegmentKind.Index);
 
         // Versioned only: allocate revision chain segment for MVCC
         if (storageMode == StorageMode.Versioned)
         {
-            CompRevTableSegment = mmf.AllocateChunkBasedSegment(PageBlockType.None, ComponentSegmentStartingSize, ComponentRevisionManager.CompRevChunkSize, changeSet);
+            CompRevTableSegment = mmf.AllocateChunkBasedSegment(PageBlockType.None, ComponentSegmentStartingSize, ComponentRevisionManager.CompRevChunkSize, 
+                changeSet, StorageSegmentKind.Revision);
         }
 
         // Allocate TAIL version-history segment for AllowMultiple secondary indexes
         if (Definition.MultipleIndicesCount > 0)
         {
-            TailIndexSegment = mmf.AllocateChunkBasedSegment(PageBlockType.None, MainIndexSegmentStartingSize, 512, changeSet);
+            TailIndexSegment = mmf.AllocateChunkBasedSegment(PageBlockType.None, MainIndexSegmentStartingSize, 512, changeSet, StorageSegmentKind.Index);
             TailVSBS = new VariableSizedBufferSegment<VersionedIndexEntry, PersistentStore>(TailIndexSegment);
         }
 
@@ -555,7 +559,7 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
         TransientComponentSegment = new ChunkBasedSegment<TransientStore>(em, compStore, ComponentTotalSize);
         Span<int> compPages = stackalloc int[ComponentSegmentStartingSize];
         compStore.AllocatePages(ref compPages, 0, null);
-        TransientComponentSegment.Create(PageBlockType.None, compPages, false);
+        TransientComponentSegment.Create(PageBlockType.None, StorageSegmentKind.Component, compPages, false);
 
         // Default index segment (for PK B+Tree and non-String64 secondary indexes)
         _transientDefaultIndexStore = new TransientStore(opts, dbe.MemoryAllocator, em, this);
@@ -563,7 +567,7 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
         TransientDefaultIndexSegment = new ChunkBasedSegment<TransientStore>(em, idxStore, sizeof(Index64Chunk));
         Span<int> idxPages = stackalloc int[MainIndexSegmentStartingSize];
         idxStore.AllocatePages(ref idxPages, 0, null);
-        TransientDefaultIndexSegment.Create(PageBlockType.None, idxPages, false);
+        TransientDefaultIndexSegment.Create(PageBlockType.None, StorageSegmentKind.Index, idxPages, false);
 
         // String64 index segment
         _transientString64IndexStore = new TransientStore(opts, dbe.MemoryAllocator, em, this);
@@ -571,7 +575,7 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
         TransientString64IndexSegment = new ChunkBasedSegment<TransientStore>(em, s64Store, sizeof(IndexString64Chunk));
         Span<int> s64Pages = stackalloc int[MainIndexSegmentStartingSize];
         s64Store.AllocatePages(ref s64Pages, 0, null);
-        TransientString64IndexSegment.Create(PageBlockType.None, s64Pages, false);
+        TransientString64IndexSegment.Create(PageBlockType.None, StorageSegmentKind.Index, s64Pages, false);
 
         BuildIndexedFieldInfo(false);
         ViewRegistry = new ViewRegistry(IndexedFieldInfos.Length);
@@ -652,14 +656,15 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
         if (!load)
         {
             var mmf = DBE.MMF;
-            treeSegment = mmf.AllocateChunkBasedSegment(PageBlockType.None, MainIndexSegmentStartingSize, descriptor.Stride, changeSet);
-            backPtrSegment = mmf.AllocateChunkBasedSegment(PageBlockType.None, ComponentSegmentStartingSize, 8, changeSet);
+            treeSegment = mmf.AllocateChunkBasedSegment(PageBlockType.None, MainIndexSegmentStartingSize, descriptor.Stride, changeSet, 
+                StorageSegmentKind.Spatial);
+            backPtrSegment = mmf.AllocateChunkBasedSegment(PageBlockType.None, ComponentSegmentStartingSize, 8, changeSet, StorageSegmentKind.Spatial);
 
             // Allocate Layer 1 occupancy hashmap when CellSize > 0
             if (fieldInfo.CellSize > 0)
             {
                 int hmStride = PagedHashMap<long, int, PersistentStore>.RecommendedStride();
-                var hmSegment = mmf.AllocateChunkBasedSegment(PageBlockType.None, MainIndexSegmentStartingSize, hmStride, changeSet);
+                var hmSegment = mmf.AllocateChunkBasedSegment(PageBlockType.None, MainIndexSegmentStartingSize, hmStride, changeSet, StorageSegmentKind.Spatial);
                 occupancyMap = PagedHashMap<long, int, PersistentStore>.Create(hmSegment, initialBuckets: 64, changeSet: changeSet);
             }
         }

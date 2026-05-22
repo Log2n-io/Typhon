@@ -34,11 +34,13 @@ internal struct VariableSizedBufferChunkHeader
 [PublicAPI]
 public unsafe class VariableSizedBufferSegmentBase<TStore> where TStore : struct, IPageStore
 {
-    private readonly int _elementSize;
     protected internal readonly int ElementCountRootChunk;
     protected readonly int ElementCountPerChunk;
     protected internal readonly int RootHeaderTotalSize;
     public readonly ChunkBasedSegment<TStore> Segment;
+
+    /// <summary>Fixed byte size of one element in this buffer (the generic <c>T</c>). Surfaced for storage introspection (Module 15 A6).</summary>
+    internal int ElementSize { get; }
 
     protected VariableSizedBufferSegmentBase(ChunkBasedSegment<TStore> segment, int elementSize) : this(segment, elementSize, sizeof(VariableSizedBufferRootHeader))
     {
@@ -46,13 +48,13 @@ public unsafe class VariableSizedBufferSegmentBase<TStore> where TStore : struct
 
     protected VariableSizedBufferSegmentBase(ChunkBasedSegment<TStore> segment, int elementSize, int rootHeaderTotalSize)
     {
-        _elementSize = elementSize;
+        ElementSize = elementSize;
         RootHeaderTotalSize = rootHeaderTotalSize;
         var stride = segment.Stride;
         Debug.Assert(rootHeaderTotalSize <= stride, $"Error, stride is too small, should be at least, {rootHeaderTotalSize} bytes.");
 
-        ElementCountRootChunk = (stride - rootHeaderTotalSize) / _elementSize;
-        ElementCountPerChunk = (stride - sizeof(VariableSizedBufferChunkHeader)) / _elementSize;
+        ElementCountRootChunk = (stride - rootHeaderTotalSize) / ElementSize;
+        ElementCountPerChunk = (stride - sizeof(VariableSizedBufferChunkHeader)) / ElementSize;
         Segment = segment;
     }
 
