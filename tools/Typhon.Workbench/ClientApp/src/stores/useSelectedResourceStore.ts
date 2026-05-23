@@ -28,6 +28,11 @@ interface SelectedResourceState {
  */
 function mirrorToUnifiedSelection(s: SelectedResource | null): void {
   useSelectionStore.getState().setResource(s?.resourceId ?? null);
+  // Stage 1 (#373): a tree selection is also the Inspector leaf — the rich payload rides as the ref
+  // so the Resource card renders without a refetch.
+  if (s !== null) {
+    useSelectionStore.getState().select('resource', s);
+  }
 }
 
 export const useSelectedResourceStore = create<SelectedResourceState>()((set) => ({

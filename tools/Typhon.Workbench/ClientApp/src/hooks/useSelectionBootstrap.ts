@@ -4,6 +4,8 @@ import {
   installSelectionUrlSync,
   parseSelectionFromSearch,
 } from '@/stores/selectionUrlSync';
+import { installNavHistorySync } from '@/stores/navHistorySync';
+import { installSessionResetSync } from '@/stores/resetSessionScopedState';
 
 /**
  * One-shot bootstrap for the cross-panel selection state. Runs at app mount in two steps:
@@ -26,8 +28,12 @@ export function useSelectionBootstrap(): void {
   useEffect(() => {
     applySelectionToStore(parseSelectionFromSearch(window.location.search));
     const stopUrlSync = installSelectionUrlSync();
+    const stopNavSync = installNavHistorySync();
+    const stopSessionReset = installSessionResetSync();
     return () => {
       stopUrlSync();
+      stopNavSync();
+      stopSessionReset();
     };
   }, []);
 }

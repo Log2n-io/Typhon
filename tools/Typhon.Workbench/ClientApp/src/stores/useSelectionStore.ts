@@ -56,6 +56,42 @@ export interface HoveredSystemTickKey {
   readonly tickNumber: number;
 }
 
+/**
+ * The set of navigable object types (IA §2.1). The selection bus carries one **leaf** of one of these
+ * types — the Inspector's current primary object (Stage 1, #373). Scalar slots below remain for
+ * cross-panel *projection* (highlighting), which never changes the leaf (IA §3, "projection ≠ leaf").
+ */
+export type SelectionObjectType =
+  | 'system'
+  | 'component'
+  | 'archetype'
+  | 'entity'
+  | 'index'
+  | 'field'
+  | 'resource'
+  | 'segment'
+  | 'page'
+  | 'chunk'
+  | 'cell'
+  | 'query'
+  | 'execution'
+  | 'span'
+  | 'tick'
+  | 'timeRange'
+  | 'sourceLocation';
+
+/**
+ * The most-recently selected *primary* object — what the right-rail Inspector renders in full and
+ * builds its containment context-stack around (IA §2.5). `ref` is the type-specific payload (a stable
+ * id for navigator objects, or a rich selection object mirrored from a panel store). `touchedAt`
+ * drives recency arbitration ("leaf = most-recent primary selection").
+ */
+export interface SelectionLeaf {
+  readonly type: SelectionObjectType;
+  readonly ref: unknown;
+  readonly touchedAt: number;
+}
+
 export interface SelectionState {
   system: string | null;
   component: string | null;
@@ -67,6 +103,8 @@ export interface SelectionState {
   dataTrack: DataTrackSelection | null;
   phase: string | null;
   hoveredSystemTickKey: HoveredSystemTickKey | null;
+  // Stage 1 (#373) — the Inspector leaf (recency-stamped primary selection across every object type).
+  leaf: SelectionLeaf | null;
 
   setSystem: (name: string | null) => void;
   setComponent: (name: string | null) => void;
@@ -78,13 +116,23 @@ export interface SelectionState {
   setPhase: (phase: string | null) => void;
   setHoveredSystemTickKey: (key: HoveredSystemTickKey | null) => void;
 
+  /**
+   * Make `{type, ref}` the Inspector leaf, stamping recency. Idempotent: re-selecting the same
+   * object (same type + reference/primitive-equal ref) is a no-op so it doesn't re-notify. This is
+   * the **primary-selection** path; cross-panel *projection* uses the scalar setters above and never
+   * touches the leaf.
+   */
+  select: (type: SelectionObjectType, ref: unknown) => void;
+  /** Clear the Inspector leaf (back to the empty "select anything" state). */
+  clearLeaf: () => void;
+
   clear: () => void;
 }
 
 const INITIAL: Pick<
   SelectionState,
   | 'system' | 'component' | 'queue' | 'resource' | 'entity' | 'worker'
-  | 'dataTrack' | 'phase' | 'hoveredSystemTickKey'
+  | 'dataTrack' | 'phase' | 'hoveredSystemTickKey' | 'leaf'
 > = {
   system: null,
   component: null,
@@ -95,6 +143,7 @@ const INITIAL: Pick<
   dataTrack: null,
   phase: null,
   hoveredSystemTickKey: null,
+  leaf: null,
 };
 
 /** Value-equality for {@link DataTrackSelection}. Used by the value-equal-aware setter. */
@@ -160,6 +209,16 @@ export const useSelectionStore = create<SelectionState>()((set, get) => ({
   setHoveredSystemTickKey: (key) => {
     if (hoveredKeyEqual(get().hoveredSystemTickKey, key)) return;
     set({ hoveredSystemTickKey: key });
+  },
+  select: (type, ref) => {
+    const cur = get().leaf;
+    // Idempotent: same type + reference/primitive-equal ref → no re-stamp, no re-notify.
+    if (cur !== null && cur.type === type && cur.ref === ref) return;
+    set({ leaf: { type, ref, touchedAt: Date.now() } });
+  },
+  clearLeaf: () => {
+    if (get().leaf === null) return;
+    set({ leaf: null });
   },
   clear: () => set({ ...INITIAL }),
 }));

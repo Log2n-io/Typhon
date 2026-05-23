@@ -3,8 +3,16 @@ import { useEffect, useRef, useState } from 'react';
 import { buildBaseCommands } from './commands/baseCommands';
 import { buildResourceHits, groupHitsByKind } from './commands/resourceCommands';
 import { activateResource } from './commands/activateResource';
+import { parsePaletteMode, parseJump, PALETTE_PREFIX_HELP } from './commands/paletteRouting';
+import { buildObjectHits, type ObjectHit } from './commands/objectHits';
 import { humpFilter, matchHighlight } from './camelHumpFilter';
 import { useResourceIndex } from '@/hooks/useResourceIndex';
+import { useComponentList } from '@/hooks/schema/useComponentList';
+import { useArchetypeList } from '@/hooks/schema/useArchetypeList';
+import { useQueryDefinitions } from '@/panels/QueryCatalog/useQueryDefinitions';
+import { useProfilerSessionStore } from '@/stores/useProfilerSessionStore';
+import { useSelectionStore } from '@/stores/useSelectionStore';
+import { useSessionStore } from '@/stores/useSessionStore';
 import { logInfo } from '@/stores/useLogStore';
 
 function HighlightedLabel({ label, query }: { label: string; query: string }) {
@@ -38,31 +46,57 @@ interface CommandPaletteProps {
  anchorRef: React.RefObject<HTMLElement | null>;
 }
 
+const itemClass =
+  'flex cursor-pointer items-center rounded px-3 py-1.5 text-density-sm text-foreground ' +
+  'aria-selected:bg-accent aria-selected:text-accent-foreground';
+const groupClass =
+  '[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1 [&_[cmdk-group-heading]]:text-[10px] ' +
+  '[&_[cmdk-group-heading]]:uppercase [&_[cmdk-group-heading]]:tracking-wider [&_[cmdk-group-heading]]:text-muted-foreground';
+
 export default function CommandPalette({ open, onClose, anchorRef }: CommandPaletteProps) {
  const commands = buildBaseCommands();
  const containerRef = useRef<HTMLDivElement>(null);
  const [value, setValue] = useState('');
- // Highlighted item value — controlled so arrow keys have an anchor even when cmdk's built-in
- // filter is disabled (shouldFilter={false} in resource mode). Without this, re-renders wipe
- // the internal selection and up/down do nothing.
  const [highlighted, setHighlighted] = useState('');
+
  const { index } = useResourceIndex();
+ // Object-resolution sources. The hooks are gated internally by session id/kind; buildObjectHits then
+ // filters by the current kind so inapplicable groups never surface (e.g. no Systems in an Open session).
+ const { list: components } = useComponentList();
+ const { list: archetypes } = useArchetypeList();
+ const { definitions: queries } = useQueryDefinitions();
+ const systems = useProfilerSessionStore((s) => s.metadata?.systems) ?? [];
+ const select = useSelectionStore((s) => s.select);
+ const kind = useSessionStore((s) => s.kind);
 
- const isResourceMode = value.startsWith('#');
- const hits = isResourceMode ? buildResourceHits(index, value) : [];
- const groups = isResourceMode ? groupHitsByKind(hits) : [];
+ const route = parsePaletteMode(value);
+ const isObjectMode = route.mode === 'object-session' || route.mode === 'object-global';
 
- // Re-anchor the highlight to the first visible item whenever the query or mode changes.
+ const resourceHits = isObjectMode ? buildResourceHits(index, route.query) : [];
+ const resourceGroups = groupHitsByKind(resourceHits);
+ const objectHits: ObjectHit[] = isObjectMode
+   ? buildObjectHits(
+       route.query,
+       {
+         components: components.map((c) => ({ typeName: c.typeName })),
+         archetypes: archetypes.map((a) => ({ archetypeId: a.archetypeId, componentTypes: a.componentTypes })),
+         systems,
+         queries,
+       },
+       kind,
+     )
+   : [];
+ const objectGroups = groupObjectHits(objectHits);
+ const jump = route.mode === 'jump' ? parseJump(route.query) : null;
+
+ // Re-anchor the highlight to the first visible item whenever the query/mode changes.
+ const firstId = isObjectMode
+   ? (resourceHits[0]?.id ?? objectHits[0]?.id ?? '')
+   : (commands[0]?.id ?? '');
  useEffect(() => {
- if (isResourceMode) {
- setHighlighted(hits[0]?.id ?? '');
- } else {
- setHighlighted(commands[0]?.id ?? '');
- }
- // `commands` comes from buildBaseCommands() each render, but its identity isn't stable; its
- // contents are — keying on hits length + first id is enough to re-anchor across searches.
- // eslint-disable-next-line react-hooks/exhaustive-deps
- }, [isResourceMode, hits.length, hits[0]?.id]);
+   setHighlighted(firstId);
+   // eslint-disable-next-line react-hooks/exhaustive-deps
+ }, [route.mode, firstId]);
 
  // Close on outside click
  useEffect(() => {
@@ -87,6 +121,21 @@ export default function CommandPalette({ open, onClose, anchorRef }: CommandPale
 
  if (!open) return null;
 
+ const selectObject = (hit: ObjectHit) => {
+   select(hit.type, hit.ref);
+   logInfo(`Go to ${hit.type}: ${hit.label}`, { id: hit.id });
+   onClose();
+ };
+
+ const placeholder =
+   route.mode === 'help'
+     ? 'Prefixes: > action · @/# object · : jump'
+     : isObjectMode
+       ? 'Go to an object…'
+       : route.mode === 'jump'
+         ? 'Jump… (:tick 8412 · :page 1024)'
+         : 'Search commands… (try > @ # : ?)';
+
  return (
  <div
  ref={containerRef}
@@ -95,8 +144,11 @@ export default function CommandPalette({ open, onClose, anchorRef }: CommandPale
  >
  <Command
  className="rounded-md"
- shouldFilter={!isResourceMode}
- filter={humpFilter}
+ shouldFilter={route.mode === 'command' || route.mode === 'action'}
+ // cmdk filters against the raw input value, which still carries the mode prefix (e.g. ">open"); match
+ // on the prefix-stripped `route.query` instead, so the explicit ">" action mode filters commands the
+ // same as the bare command mode. (Without this, ">open" matches nothing — the ">" breaks every score.)
+ filter={(_value, _search, keywords) => humpFilter(_value, route.query, keywords)}
  value={highlighted}
  onValueChange={setHighlighted}
  >
@@ -104,7 +156,7 @@ export default function CommandPalette({ open, onClose, anchorRef }: CommandPale
  autoFocus
  value={value}
  onValueChange={setValue}
- placeholder={isResourceMode ? 'Search resources…' : 'Search commands… (try #resource)'}
+ placeholder={placeholder}
  className="w-full border-b border-border bg-transparent px-3 py-2
  text-density-sm text-foreground outline-none
  placeholder:text-muted-foreground"
@@ -115,52 +167,92 @@ export default function CommandPalette({ open, onClose, anchorRef }: CommandPale
  No results
  </Command.Empty>
 
- {isResourceMode
- ? groups.map((group) => (
- <Command.Group
- key={group.kind}
- heading={group.kind}
- className="[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1 [&_[cmdk-group-heading]]:text-[10px] [&_[cmdk-group-heading]]:uppercase [&_[cmdk-group-heading]]:tracking-wider [&_[cmdk-group-heading]]:text-muted-foreground"
- >
- {group.hits.map((hit) => (
- <Command.Item
- key={hit.id}
- value={hit.id}
- onSelect={() => {
- activateResource(hit);
- onClose();
- }}
- className="flex cursor-pointer items-center rounded px-3 py-1.5
- text-density-sm text-foreground
- aria-selected:bg-accent aria-selected:text-accent-foreground"
- >
- <span className="truncate">{hit.name}</span>
- <span className="ml-auto truncate pl-3 text-[10px] text-muted-foreground">
- {hit.path.join(' / ')}
- </span>
- </Command.Item>
+ {route.mode === 'help' && (
+   <div className="px-3 py-2 text-density-sm">
+     {PALETTE_PREFIX_HELP.map((h) => (
+       <div key={h.prefix} className="flex gap-3 py-0.5">
+         <code className="w-16 shrink-0 text-amber-400">{h.prefix}</code>
+         <span className="text-muted-foreground">{h.meaning}</span>
+       </div>
+     ))}
+   </div>
+ )}
+
+ {route.mode === 'jump' && jump && (
+   <Command.Item
+     value="jump-target"
+     onSelect={() => {
+       if (jump.kind === 'tick') select('tick', jump.value);
+       else select('page', { kind: 'page', pageIndex: jump.value });
+       onClose();
+     }}
+     className={itemClass}
+   >
+     Jump to {jump.kind} {jump.value}
+   </Command.Item>
+ )}
+
+ {isObjectMode && resourceGroups.map((group) => (
+   <Command.Group key={`res:${group.kind}`} heading={group.kind} className={groupClass}>
+     {group.hits.map((hit) => (
+       <Command.Item
+         key={hit.id}
+         value={hit.id}
+         onSelect={() => { activateResource(hit); onClose(); }}
+         className={itemClass}
+       >
+         <span className="truncate">{hit.name}</span>
+         <span className="ml-auto truncate pl-3 text-[10px] text-muted-foreground">{hit.path.join(' / ')}</span>
+       </Command.Item>
+     ))}
+   </Command.Group>
  ))}
- </Command.Group>
- ))
- : commands.map((cmd) => (
- <Command.Item
- key={cmd.id}
- value={cmd.id}
- keywords={[cmd.label, cmd.keywords ?? '']}
- onSelect={() => {
- logInfo(`Command: ${cmd.label}`, { id: cmd.id });
- cmd.action();
- onClose();
- }}
- className="flex cursor-pointer items-center rounded px-3 py-1.5
- text-density-sm text-foreground
- aria-selected:bg-accent aria-selected:text-accent-foreground"
- >
- <HighlightedLabel label={cmd.label} query={value} />
- </Command.Item>
+
+ {isObjectMode && objectGroups.map((group) => (
+   <Command.Group key={`obj:${group.group}`} heading={group.group} className={groupClass}>
+     {group.hits.map((hit) => (
+       <Command.Item key={hit.id} value={hit.id} onSelect={() => selectObject(hit)} className={itemClass}>
+         <span className="truncate">{hit.label}</span>
+         {hit.sublabel && <span className="ml-auto truncate pl-3 text-[10px] text-muted-foreground">{hit.sublabel}</span>}
+       </Command.Item>
+     ))}
+   </Command.Group>
  ))}
+
+ {(route.mode === 'command' || route.mode === 'action') &&
+   commands.map((cmd) => (
+   <Command.Item
+   key={cmd.id}
+   value={cmd.id}
+   keywords={[cmd.label, cmd.keywords ?? '']}
+   onSelect={() => {
+   logInfo(`Command: ${cmd.label}`, { id: cmd.id });
+   cmd.action();
+   onClose();
+   }}
+   className={itemClass}
+   >
+   <HighlightedLabel label={cmd.label} query={route.query} />
+   </Command.Item>
+   ))}
  </Command.List>
  </Command>
  </div>
  );
+}
+
+interface ObjectGroupRender {
+  group: ObjectHit['group'];
+  hits: ObjectHit[];
+}
+
+/** Group object hits by their display group, preserving the order buildObjectHits emitted. */
+function groupObjectHits(hits: ObjectHit[]): ObjectGroupRender[] {
+  const out: ObjectGroupRender[] = [];
+  for (const hit of hits) {
+    const last = out[out.length - 1];
+    if (last && last.group === hit.group) last.hits.push(hit);
+    else out.push({ group: hit.group, hits: [hit] });
+  }
+  return out;
 }

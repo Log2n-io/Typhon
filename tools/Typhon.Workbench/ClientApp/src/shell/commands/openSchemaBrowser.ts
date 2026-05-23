@@ -44,6 +44,62 @@ export function registerDockApi(api: DockviewApi | null): void {
   }
 }
 
+// Structural shell panels, in their natural F6 order. Dockview's `moveToNext` only walks the grid
+// (center) — our nav/inspector/logs live in *edge groups*, which it ignores — so we cycle the panels
+// ourselves. Center (zone-D) panels are discovered dynamically from `api.groups`.
+const SHELL_PANEL_ORDER = ['resource-tree', 'systems-queries-nav', 'profiler', 'detail', 'logs', 'top-spans'];
+
+/**
+ * Activate a panel AND move real DOM focus into its body — the fix for the recurring "F6 does nothing"
+ * symptom. dockview's `panel.focus()` only activates the group/tab (it sets `.dv-active-group`); it does
+ * **not** move DOM focus into the panel content (shell-and-dockview.md §2: *"Focus into panel content:
+ * not guaranteed → focus the panel's primary element"*). Without DOM focus, `:focus-visible` never fires,
+ * the keystroke target is `<body>`, and the active-panel border is the only visible change — so it reads
+ * as broken. We focus the group's content container (dockview gives it `tabindex=-1`); per-view
+ * roving-tabindex (Stages 2-4) refines the landing target from there. Idempotent: re-focusing the
+ * already-active panel does not re-fire `onDidActivePanelChange`, so routing through here can't loop.
+ */
+export function focusPanelBody(panel: NonNullable<ReturnType<DockviewApi['getPanel']>>): void {
+  panel.focus();
+  const body = panel.api.group.element.querySelector<HTMLElement>('.dv-content-container');
+  body?.focus();
+}
+
+/**
+ * F6 / Shift+F6 panel-focus cycling (PC-8). Cycles DOM focus across every present, non-collapsed panel
+ * (edge groups + center) in left→right / top→bottom order. `getPanel(id)` resolves edge-group panels
+ * (which `moveToNext`/`api.panels` do not); {@link focusPanelBody} both activates the panel and moves
+ * DOM focus into its body — `panel.focus()` alone only flips `.dv-active-group`. No-op pre-mount.
+ */
+function cyclePanelFocus(dir: 1 | -1): void {
+  const api = registeredApi;
+  if (!api) return;
+  const ids = new Set<string>(SHELL_PANEL_ORDER);
+  for (const group of api.groups) {
+    for (const panel of group.panels) ids.add(panel.id);
+  }
+  const present = [...ids]
+    .map((id) => api.getPanel(id))
+    .filter((p): p is NonNullable<typeof p> => p != null && !p.api.group.api.isCollapsed());
+  if (present.length === 0) return;
+  present.sort((a, b) => {
+    const ra = a.api.group.element.getBoundingClientRect();
+    const rb = b.api.group.element.getBoundingClientRect();
+    return ra.left - rb.left || ra.top - rb.top;
+  });
+  const activeIdx = present.findIndex((p) => p.api.group.element.classList.contains('dv-active-group'));
+  const base = activeIdx >= 0 ? activeIdx : dir === 1 ? -1 : 0;
+  focusPanelBody(present[(base + dir + present.length) % present.length]);
+}
+
+export function focusNextPanel(): void {
+  cyclePanelFocus(1);
+}
+
+export function focusPrevPanel(): void {
+  cyclePanelFocus(-1);
+}
+
 // --- Edge-group (structural) view toggles ---
 
 /** Toggle the left edge group (Resource Tree). No-op in trace/attach sessions (no left edge group). */

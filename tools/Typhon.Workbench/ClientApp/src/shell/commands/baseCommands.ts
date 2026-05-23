@@ -1,6 +1,7 @@
 import { deleteApiSessionsId } from '@/api/generated/sessions/sessions';
 import { useSessionStore } from '@/stores/useSessionStore';
 import { useThemeStore } from '@/stores/useThemeStore';
+import { useDensityStore } from '@/stores/useDensityStore';
 import { refreshResourceGraph } from '@/hooks/useResourceIndex';
 import {
   toggleViewAccessMatrix,
@@ -47,7 +48,8 @@ export function registerOpenConnect(fn: ((tab: ConnectTab) => void) | null): voi
   registeredOpenConnect = fn;
 }
 
-function openConnectDialog(tab: ConnectTab): void {
+/** Open the Connect dialog on a given tab. Exported so blocked-state banners can offer a forward action. */
+export function openConnect(tab: ConnectTab): void {
   registeredOpenConnect?.(tab);
 }
 
@@ -61,10 +63,10 @@ export function buildBaseCommands(): CommandItem[] {
   };
 
   const commands: CommandItem[] = [
-    { id: 'open-file',     label: 'Open File…',               keywords: 'open typhon',      action: () => openConnectDialog('open') },
-    { id: 'open-recent',   label: 'Open Recent',              keywords: 'recent file',       action: () => openConnectDialog('recent') },
-    { id: 'attach',        label: 'Attach…',                  keywords: 'attach engine',     action: () => openConnectDialog('attach') },
-    { id: 'open-trace',    label: 'Open Trace…',              keywords: 'trace typhon',      action: () => openConnectDialog('trace') },
+    { id: 'open-file',     label: 'Open File…',               keywords: 'open typhon',      action: () => openConnect('open') },
+    { id: 'open-recent',   label: 'Open Recent',              keywords: 'recent file',       action: () => openConnect('recent') },
+    { id: 'attach',        label: 'Attach…',                  keywords: 'attach engine',     action: () => openConnect('attach') },
+    { id: 'open-trace',    label: 'Open Trace…',              keywords: 'trace typhon',      action: () => openConnect('trace') },
     { id: 'close-session', label: 'Close Session',            keywords: 'close disconnect',  action: closeSession },
     { id: 'refresh-graph', label: 'Refresh Resource Graph',   keywords: 'refresh reload tree', action: refreshResourceGraph },
     { id: 'toggle-view-component-browser',    label: 'Toggle View Component Browser',    keywords: 'schema components inspector #schema browser', action: toggleViewComponentBrowser, viewId: 'SchemaBrowser' },
@@ -86,6 +88,7 @@ export function buildBaseCommands(): CommandItem[] {
     { id: 'save-layout-as-default', label: 'Save Layout as Default', keywords: 'layout default template save', action: saveLayoutAsDefault },
     { id: 'reset-layout', label: 'Reset Layout to Default', keywords: 'reset layout default restore panels dock recover lost', action: resetLayout },
     { id: 'toggle-theme',  label: 'Toggle Dark / Light Mode', keywords: 'theme dark light',  action: toggleTheme },
+    { id: 'toggle-density', label: 'Toggle Density (Compact / Comfortable)', keywords: 'density compact comfortable rows spacing size', action: () => useDensityStore.getState().toggle() },
     // PaletteDebug is a dev-only color-swatch view — present only in DEBUG/dev builds (IA §9.1/§9.4).
     ...(import.meta.env.DEV
       ? [{ id: 'debug-color-palettes', label: 'Debug: Color Palettes', keywords: 'debug color colour palette palettes swatches dev', action: toggleViewPaletteDebug }]

@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import type { ChunkSpan, MarkerSelection, PhaseMarker, PhaseSpan, SpanData } from '@/libs/profiler/model/traceModel';
+import { useSelectionStore } from './useSelectionStore';
 
 /**
  * Discriminated union of profiler-panel selections. The profiler can select six kinds of things, each
@@ -37,6 +38,11 @@ interface ProfilerSelectionState {
 export const useProfilerSelectionStore = create<ProfilerSelectionState>()((set) => ({
   selected: null,
   touchedAt: 0,
-  setSelected: (selection) => set({ selected: selection, touchedAt: Date.now() }),
+  setSelected: (selection) => {
+    set({ selected: selection, touchedAt: Date.now() });
+    // Strangler mirror → unified bus leaf (Stage 1, #373). A tick is its own object type; every other
+    // profiler selection routes to the Profiler "span" card. The full selection rides as the ref.
+    useSelectionStore.getState().select(selection.kind === 'tick' ? 'tick' : 'span', selection);
+  },
   clear: () => set({ selected: null, touchedAt: Date.now() }),
 }));

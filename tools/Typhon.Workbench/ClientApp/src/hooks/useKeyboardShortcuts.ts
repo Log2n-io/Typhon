@@ -5,7 +5,7 @@ import { useProfilerSessionStore } from '@/stores/useProfilerSessionStore';
 import { useProfilerViewStore } from '@/stores/useProfilerViewStore';
 import { useThemeStore } from '@/stores/useThemeStore';
 import { useUiPrefsStore } from '@/stores/useUiPrefsStore';
-import { toggleViewResourceTree } from '@/shell/commands/openSchemaBrowser';
+import { toggleViewResourceTree, focusNextPanel, focusPrevPanel } from '@/shell/commands/openSchemaBrowser';
 import { useShiftShift } from './useShiftShift';
 
 /**
@@ -34,6 +34,13 @@ export function useKeyboardShortcuts(): void {
       if (e.key === 'k' && e.ctrlKey && !e.shiftKey && !e.altKey) {
         e.preventDefault();
         togglePalette();
+        return;
+      }
+      // F6 / Shift+F6 — cycle keyboard focus between dockview panels (PC-8 panel traversal).
+      if (e.key === 'F6') {
+        e.preventDefault();
+        if (e.shiftKey) focusPrevPanel();
+        else focusNextPanel();
         return;
       }
       if (e.key === 'ArrowLeft' && e.altKey) {

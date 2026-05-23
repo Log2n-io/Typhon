@@ -58,7 +58,7 @@ export default function LogsPanel() {
 
   return (
     <div className="flex h-full w-full flex-col overflow-hidden bg-background">
-      <div className="flex items-center gap-1.5 border-b border-border px-2 py-1.5">
+      <div className="wb-pane-header flex items-center gap-1.5 border-b border-border px-2 py-1.5">
         {LEVELS.map((level) => (
           <LevelChip
             key={level}

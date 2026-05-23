@@ -5,9 +5,19 @@ import { animateViewportToRange } from '../shell/commands/profilerCommands';
 import { restoreDbMapCamera } from '../shell/commands/openDbMap';
 import { useProfilerSelectionStore, type ProfilerSelection } from './useProfilerSelectionStore';
 import { useSelectedResourceStore, type SelectedResource } from './useSelectedResourceStore';
+import { useSchemaInspectorStore } from './useSchemaInspectorStore';
+import { useDataBrowserStore } from './useDataBrowserStore';
+import { useSelectionStore, type SelectionLeaf } from './useSelectionStore';
 
 export type NavEntry =
   | { kind: 'resource-selected'; resourceId: string; selected: SelectedResource; timestamp: number }
+  /**
+   * A unified selection-bus leaf (Stage 1, #373). Pushed for every object-type selection that lacks
+   * its own viewport-carrying entry (component, field, archetype, entity, system, query, index) —
+   * closing the old G9 gap where schema/data selections never entered nav history. Restore re-drives
+   * the source store so the navigator + Inspector + bus all re-target.
+   */
+  | { kind: 'bus-leaf'; leaf: SelectionLeaf; timestamp: number }
   | { kind: 'panel-opened'; panelId: string; timestamp: number }
   /**
    * A profiler viewport snapshot with the selection that was active at that moment. Pushed on
@@ -50,9 +60,42 @@ function deriveFlags(entries: NavEntry[], pointer: number) {
   };
 }
 
+/**
+ * Re-drive the source store for a restored bus leaf, so back/forward restores the navigator highlight +
+ * Inspector + bus together (the source setters mirror back to the bus). Runs under `isRestoring`, so the
+ * mirror's nav-push is suppressed. Types without a source store go straight to the bus.
+ */
+function restoreLeaf(leaf: SelectionLeaf) {
+  switch (leaf.type) {
+    case 'component':
+      useSchemaInspectorStore.getState().selectComponent(leaf.ref as string);
+      break;
+    case 'field': {
+      const r = leaf.ref as { component: string | null; field: string };
+      useSchemaInspectorStore.getState().selectComponent(r.component);
+      useSchemaInspectorStore.getState().selectField(r.field);
+      break;
+    }
+    case 'archetype':
+      useDataBrowserStore.getState().setArchetype(leaf.ref as string);
+      break;
+    case 'entity': {
+      const r = leaf.ref as { archetypeId: string | null; entityId: string };
+      useDataBrowserStore.getState().setArchetype(r.archetypeId);
+      useDataBrowserStore.getState().selectEntity(r.entityId);
+      break;
+    }
+    default:
+      // system / query / index (and any future type with no dedicated source store).
+      useSelectionStore.getState().select(leaf.type, leaf.ref);
+  }
+}
+
 function restoreSideEffect(entry: NavEntry) {
   if (entry.kind === 'resource-selected') {
     useSelectedResourceStore.getState().setSelected(entry.selected);
+  } else if (entry.kind === 'bus-leaf') {
+    restoreLeaf(entry.leaf);
   } else if (entry.kind === 'profiler-selected') {
     // Restore both: the selection drives DetailPanel recency, the viewRange drives TimeArea's
     // viewport + TickOverview's orange overlay. A null selection means "at this viewport the user

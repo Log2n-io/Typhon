@@ -1,5 +1,7 @@
 import { XCircle } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 import { useSessionStore } from '@/stores/useSessionStore';
+import { openConnect } from '@/shell/commands/baseCommands';
 
 export default function IncompatibleBanner() {
  const diagnostics = useSessionStore((s) => s.schemaDiagnostics);
@@ -14,8 +16,8 @@ export default function IncompatibleBanner() {
  <div className="min-w-0 flex-1">
  <p className="font-semibold">Schema incompatible</p>
  <p className="mt-0.5 text-[11px] opacity-90">
- This database cannot be opened with the loaded schema DLLs. Close this session and load
- a compatible schema to continue.
+ This database cannot be opened with the loaded schema DLLs. Reopen it with binaries that match
+ its recorded schema to continue.
  </p>
  {diagnostics && diagnostics.length > 0 && (
  <ul className="mt-1 list-disc pl-4 text-[11px] opacity-80">
@@ -27,6 +29,15 @@ export default function IncompatibleBanner() {
  </ul>
  )}
  </div>
+ <Button
+ variant="outline"
+ size="sm"
+ className="h-6 shrink-0 text-[11px]"
+ onClick={() => openConnect('open')}
+ title="Reopen with binaries matching this database's schema"
+ >
+ Open another file…
+ </Button>
  </div>
  );
 }

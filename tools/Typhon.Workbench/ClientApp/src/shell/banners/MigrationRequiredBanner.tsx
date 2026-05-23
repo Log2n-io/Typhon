@@ -1,6 +1,7 @@
 import { AlertTriangle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useSessionStore } from '@/stores/useSessionStore';
+import { openConnect } from '@/shell/commands/baseCommands';
 
 export default function MigrationRequiredBanner() {
  const diagnostics = useSessionStore((s) => s.schemaDiagnostics);
@@ -32,10 +33,10 @@ export default function MigrationRequiredBanner() {
  variant="outline"
  size="sm"
  className="h-6 shrink-0 text-[11px]"
- disabled
- title="Migration module coming in a later phase"
+ onClick={() => openConnect('open')}
+ title="Reopen with binaries matching this database's schema"
  >
- Start Migration
+ Open another file…
  </Button>
  </div>
  );

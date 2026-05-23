@@ -89,19 +89,22 @@ test.describe('Phase 6 — Resource Tree polish', () => {
     await page.keyboard.press('Escape');
   });
 
-  test('Ctrl+/ hides the tree and status bar shows restore affordance', async ({ page, request }) => {
+  test('Ctrl+/ collapses the Resource Tree nav and toggles it back', async ({ page, request }) => {
     await openDemo(page, request);
 
     // Tree filter input is the canary — visible before the toggle.
     await expect(page.getByPlaceholder(/filter resources/i)).toBeVisible();
 
+    // The Workbench revamp replaced the old "hide tree + status-bar restore button" with a dockview
+    // edge-group collapse: Ctrl+/ collapses the left (Resource Tree) nav, hiding its content; the
+    // collapsed rotated "Resources" strip is the new restore affordance (no status-bar button).
     await page.keyboard.press('Control+/');
+    await expect(page.locator('.dv-groupview-header-left.dv-edge-collapsed')).toBeVisible({ timeout: 3_000 });
+    await expect(page.getByPlaceholder(/filter resources/i)).toBeHidden();
 
-    // Status bar restore button shows up.
-    const restoreBtn = page.getByRole('button', { name: /hidden/i });
-    await expect(restoreBtn).toBeVisible({ timeout: 3_000 });
-
-    await restoreBtn.click();
+    // Ctrl+/ again restores the nav.
+    await page.keyboard.press('Control+/');
+    await expect(page.locator('.dv-groupview-header-left.dv-edge-collapsed')).toHaveCount(0);
     await expect(page.getByPlaceholder(/filter resources/i)).toBeVisible();
   });
 });

@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import type { PreviewField } from '@/hooks/dataBrowser/previewFields';
+import { useSelectionStore } from './useSelectionStore';
 
 /**
  * Data Browser panel-local selection state (Module 06, v1). Holds the chosen archetype and the selected entity;
@@ -34,7 +35,7 @@ interface DataBrowserState {
   reset: () => void;
 }
 
-export const useDataBrowserStore = create<DataBrowserState>()((set) => ({
+export const useDataBrowserStore = create<DataBrowserState>()((set, get) => ({
   archetypeId: null,
   selectedEntityId: null,
   touchedAt: 0,
@@ -43,8 +44,20 @@ export const useDataBrowserStore = create<DataBrowserState>()((set) => ({
   pageIndex: 0,
   previewFields: null,
   // Switching archetype clears the entity selection, returns to page 1, and drops custom columns (they belong to the old schema).
-  setArchetype: (id) => set({ archetypeId: id, selectedEntityId: null, pageIndex: 0, previewFields: null, touchedAt: Date.now() }),
-  selectEntity: (entityId) => set({ selectedEntityId: entityId, touchedAt: Date.now() }),
+  setArchetype: (id) => {
+    set({ archetypeId: id, selectedEntityId: null, pageIndex: 0, previewFields: null, touchedAt: Date.now() });
+    // Strangler mirror → unified bus leaf (Stage 1, #373).
+    if (id != null) {
+      useSelectionStore.getState().select('archetype', id);
+    }
+  },
+  selectEntity: (entityId) => {
+    set({ selectedEntityId: entityId, touchedAt: Date.now() });
+    // The entity ref carries its archetype so the Inspector context-stack can show Archetype ⊃ Entity.
+    if (entityId != null) {
+      useSelectionStore.getState().select('entity', { archetypeId: get().archetypeId, entityId });
+    }
+  },
   // Picking an explicit size leaves auto mode; resets to the first page so the offset never lands past the end.
   setPageSize: (size) => set({ pageSize: size, autoPageSize: false, pageIndex: 0 }),
   setAutoPageSize: (on) => set({ autoPageSize: on, pageIndex: 0 }),

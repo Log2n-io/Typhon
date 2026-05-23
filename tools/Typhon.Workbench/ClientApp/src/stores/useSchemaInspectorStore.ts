@@ -34,7 +34,7 @@ const INITIAL_OVERLAYS: SchemaOverlays = {
   cacheLineBoundaries: true,
 };
 
-export const useSchemaInspectorStore = create<SchemaInspectorState>()((set) => ({
+export const useSchemaInspectorStore = create<SchemaInspectorState>()((set, get) => ({
   selectedComponentType: null,
   selectedField: null,
   fieldTouchedAt: 0,
@@ -48,8 +48,19 @@ export const useSchemaInspectorStore = create<SchemaInspectorState>()((set) => (
     // it short-circuits without an infinite loop. Pre-#345 this lived as a Zustand subscription
     // pair in `selectionBridges.ts`.
     useSelectionStore.getState().setComponent(typeName);
+    // Stage 1 (#373): selecting a component also makes it the Inspector leaf (recency-stamped).
+    if (typeName != null) {
+      useSelectionStore.getState().select('component', typeName);
+    }
   },
-  selectField: (fieldName) => set({ selectedField: fieldName, fieldTouchedAt: Date.now() }),
+  selectField: (fieldName) => {
+    const component = get().selectedComponentType;
+    set({ selectedField: fieldName, fieldTouchedAt: Date.now() });
+    // Strangler mirror → unified bus leaf; the ref carries its owning component for Component ⊃ Field.
+    if (fieldName != null) {
+      useSelectionStore.getState().select('field', { component, field: fieldName });
+    }
+  },
   toggleOverlay: (key) =>
     set((s) => ({ overlays: { ...s.overlays, [key]: !s.overlays[key] } })),
   setViewMode: (mode) => set({ viewMode: mode }),

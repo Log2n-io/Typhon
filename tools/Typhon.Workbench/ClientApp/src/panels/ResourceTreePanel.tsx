@@ -19,6 +19,7 @@ import {
 import { createContext, useCallback, useContext, useDeferredValue, useEffect, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { Tree, type NodeApi, type NodeRendererProps, type TreeApi } from 'react-arborist';
+import { useDensityRowHeight } from '@/hooks/useDensityRowHeight';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import type { ResourceNodeDto } from '@/api/generated/model';
@@ -242,6 +243,7 @@ export default function ResourceTreePanel() {
  const clearRevealRequest = useResourceGraphStore((s) => s.clearRevealRequest);
  const navSelectedId = useSelectedResourceStore((s) => s.selected?.resourceId);
  const sessionId = useSessionStore((s) => s.sessionId);
+ const rowHeight = useDensityRowHeight();
  const containerRef = useRef<HTMLDivElement>(null);
  const treeScrollRef = useRef<HTMLDivElement>(null);
  const filterInputRef = useRef<HTMLInputElement>(null);
@@ -350,7 +352,7 @@ export default function ResourceTreePanel() {
  return (
  <div className="flex h-full flex-col bg-background">
  {/* Filter bar + refresh */}
- <div className="flex shrink-0 items-center gap-1 border-b border-border px-2 py-1">
+ <div className="wb-pane-header flex shrink-0 items-center gap-1 border-b border-border px-2 py-1">
  <Input
  ref={filterInputRef}
  placeholder="Filter resources… ( / )"
@@ -385,7 +387,7 @@ export default function ResourceTreePanel() {
  <Tree
  ref={treeRef}
  data={[rootNode]}
- rowHeight={18}
+ rowHeight={rowHeight}
  openByDefault
  selection={navSelectedId}
  onSelect={(nodes) => {

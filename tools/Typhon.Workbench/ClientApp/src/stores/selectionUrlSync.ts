@@ -1,5 +1,5 @@
 import { useProfilerViewStore } from './useProfilerViewStore';
-import { useSelectionStore } from './useSelectionStore';
+import { useSelectionStore, type SelectionObjectType } from './useSelectionStore';
 import type { TimeRange } from '@/libs/profiler/model/uiTypes';
 
 /**
@@ -22,6 +22,7 @@ const PARAM_COMPONENT = 'component';
 const PARAM_QUEUE = 'queue';
 const PARAM_RESOURCE = 'resource';
 const PARAM_ENTITY = 'entity';
+const PARAM_LEAF = 'leaf';
 
 const STABLE_PARAMS = [
   PARAM_TIME,
@@ -30,7 +31,35 @@ const STABLE_PARAMS = [
   PARAM_QUEUE,
   PARAM_RESOURCE,
   PARAM_ENTITY,
+  PARAM_LEAF,
 ] as const;
+
+/**
+ * Inspector-leaf object types that round-trip through the URL as `?leaf=type:ref` (Stage 1, #373). Only
+ * primitive-ref navigator objects qualify; rich-ref leaves (resource/field/entity/profiler/file-map)
+ * are reconstructed from their panels, not the URL.
+ */
+const URL_LEAF_TYPES = new Set<SelectionObjectType>(['system', 'component', 'archetype']);
+
+export interface ParsedLeaf {
+  readonly type: SelectionObjectType;
+  readonly ref: string;
+}
+
+function parseLeafParam(raw: string | null): ParsedLeaf | null {
+  if (!raw) return null;
+  const i = raw.indexOf(':');
+  if (i <= 0 || i === raw.length - 1) return null;
+  const type = raw.slice(0, i) as SelectionObjectType;
+  if (!URL_LEAF_TYPES.has(type)) return null;
+  return { type, ref: raw.slice(i + 1) };
+}
+
+function encodeLeaf(leaf: { type: SelectionObjectType; ref: unknown } | null): string | null {
+  if (!leaf || !URL_LEAF_TYPES.has(leaf.type)) return null;
+  if (typeof leaf.ref !== 'string' && typeof leaf.ref !== 'number') return null;
+  return `${leaf.type}:${leaf.ref}`;
+}
 
 export interface ParsedSelection {
   /**
@@ -44,6 +73,8 @@ export interface ParsedSelection {
   queue: string | null;
   resource: string | null;
   entity: string | null;
+  /** Optional in callers; {@link parseSelectionFromSearch} always populates it (null when absent). */
+  leaf?: ParsedLeaf | null;
 }
 
 function parseViewRange(raw: string | null): TimeRange | null {
@@ -74,6 +105,7 @@ export function parseSelectionFromSearch(search: string): ParsedSelection {
     queue: params.get(PARAM_QUEUE),
     resource: params.get(PARAM_RESOURCE),
     entity: params.get(PARAM_ENTITY),
+    leaf: parseLeafParam(params.get(PARAM_LEAF)),
   };
 }
 
@@ -84,6 +116,8 @@ interface UrlOutputState {
   queue: string | null;
   resource: string | null;
   entity: string | null;
+  /** Optional in callers; {@link snapshot} always provides it (encoded leaf or null). */
+  leaf?: string | null;
 }
 
 /**
@@ -103,6 +137,7 @@ export function buildSelectionSearch(
   if (state.queue) out.set(PARAM_QUEUE, state.queue);
   if (state.resource) out.set(PARAM_RESOURCE, state.resource);
   if (state.entity) out.set(PARAM_ENTITY, state.entity);
+  if (state.leaf) out.set(PARAM_LEAF, state.leaf);
   return out;
 }
 
@@ -121,6 +156,10 @@ export function applySelectionToStore(parsed: ParsedSelection): void {
   s.setEntity(parsed.entity);
   if (parsed.viewRange) {
     useProfilerViewStore.getState().commitViewRange(parsed.viewRange);
+  }
+  // Apply the explicit Inspector-leaf last so it wins recency over the scalar projections above.
+  if (parsed.leaf) {
+    s.select(parsed.leaf.type, parsed.leaf.ref);
   }
 }
 
@@ -143,6 +182,7 @@ function snapshot(): UrlOutputState {
     queue: sel.queue,
     resource: sel.resource,
     entity: sel.entity,
+    leaf: encodeLeaf(sel.leaf),
   };
 }
 
@@ -153,7 +193,8 @@ function snapshotEqual(a: UrlOutputState, b: UrlOutputState): boolean {
     a.component === b.component &&
     a.queue === b.queue &&
     a.resource === b.resource &&
-    a.entity === b.entity
+    a.entity === b.entity &&
+    a.leaf === b.leaf
   );
 }
 

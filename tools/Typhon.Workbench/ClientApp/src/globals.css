@@ -29,6 +29,7 @@
   --border:                    oklch(0.9290 0.0126 255.5317);
   --input:                     oklch(0.9290 0.0126 255.5317);
   --ring:                      oklch(0.5449 0.2154 262.7414);
+  --panel-active-border:       var(--ring);
   --chart-1:                   oklch(0.5449 0.2154 262.7414);
   --chart-2:                   oklch(0.6727 0.1333 166.2734);
   --chart-3:                   oklch(0.6776 0.1481 238.1044);
@@ -92,6 +93,7 @@
   --border:                    oklch(0.2716 0.0392 233.4421);
   --input:                     oklch(0.3559 0.0533 244.0259);
   --ring:                      oklch(0.6875 0.0818 227.1024);
+  --panel-active-border:       var(--ring);
   --chart-1:                   oklch(0.8911 0.1720 172.4357);
   --chart-2:                   oklch(0.6783 0.1069 234.8074);
   --chart-3:                   oklch(0.6821 0.0940 178.1200);
@@ -186,6 +188,43 @@
 }
 
 @layer base {
+  /* DS-1: comfortable density — runtime-switched via `<html data-density="comfortable">` (useDensityStore).
+     Row height is also read in JS (useDensityRowHeight) so virtualized lists/trees re-measure. */
+  :root[data-density='comfortable'] {
+    --density-spacing-1: 0.375rem;
+    --density-spacing-2: 0.625rem;
+    --density-spacing-3: 0.875rem;
+    --density-row-height: 28px;
+  }
+
+  /* DS-4: a clear keyboard focus ring (distinct from selection, which uses bg-accent), and a strong
+     active-panel indicator overriding dockview's subtle default tab tint. */
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 1px;
+  }
+  /* Dense list/tree rows (e.g. react-arborist treeitems) are tightly packed, so an *offset* outline
+     overflows into the rows above/below — reading as stray lines bracketing the focused row. Use a
+     contained inset ring instead so the focus indicator stays within the row. */
+  [role='treeitem']:focus-visible,
+  [role='option']:focus-visible,
+  [role='row']:focus-visible {
+    outline: none;
+    box-shadow: inset 0 0 0 2px var(--ring);
+  }
+  /* Active-panel indicator (DS-4): a *discreet* tint on the active pane's own header toolbar — the row
+     each panel renders at its top (Resources' filter, Logs' badges+filter, the Inspector title). The
+     visible rule lives unlayered below the dockview theme block (`.dv-active-group .wb-pane-header`),
+     where it reliably beats Tailwind utility-layer backgrounds. Here we only suppress the focus outline on
+     `.dv-content-container`: F6 / focus-follows-navigation moves DOM focus into it (shell-and-dockview §2),
+     but the header tint is the cue — inner elements keep their own :focus-visible ring. */
+  .dv-content-container:focus,
+  .dv-content-container:focus-visible {
+    outline: none;
+  }
+}
+
+@layer base {
   * {
     @apply border-border outline-ring/50;
   }
@@ -256,4 +295,20 @@ html .dockview-react {
   --dv-icon-hover-background-color:                    var(--muted);
   --dv-scrollbar-background-color:                     var(--muted);
   --dv-tabs-container-scrollbar-color:                 var(--muted-foreground);
+}
+
+/* Collapsed edge group: dockview fixes the collapsed width at its default header height (35px), but our
+ * shortened tab strip is only 22px wide — leaving a strip of empty group background that reads as a
+ * half-retracted panel. Let the rotated tab strip fill the collapsed column so it reads as one solid tab. */
+.dv-groupview.dv-edge-collapsed > .dv-tabs-and-actions-container {
+  width: 100% !important;
+}
+
+/* Active-panel cue (DS-4): a discreet tint on the *active* pane's own header toolbar — the row each panel
+ * renders at its top (Resources' filter, Logs' badges + filter, the Inspector title). Panels opt in with
+ * the shared `wb-pane-header` class. Kept unlayered so it reliably wins over Tailwind utility-layer
+ * backgrounds; scoped to `.dv-active-group` so exactly the focused pane is tinted. A ~10% accent wash over
+ * the panel background reads as "this pane has focus" without the loudness of a full border. */
+.dv-active-group .wb-pane-header {
+  background-color: color-mix(in oklch, var(--panel-active-border) 6%, var(--background));
 }

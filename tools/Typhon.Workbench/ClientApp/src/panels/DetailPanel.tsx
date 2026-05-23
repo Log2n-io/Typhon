@@ -1,10 +1,7 @@
-import type { ReactNode } from 'react';
-import { Binary, Boxes, FolderOpen, HardDrive, Layers } from 'lucide-react';
+import { useMemo, useState, type ReactNode } from 'react';
+import { Binary, Boxes, ChevronDown, ChevronRight, FolderOpen, HardDrive, Layers, ListTree, Pin, PinOff, Workflow } from 'lucide-react';
 import { StatusBadge } from '@/components/ui/status-badge';
 import { simplifyTypeName } from '@/libs/simplifyTypeName';
-import { useSelectedResourceStore } from '@/stores/useSelectedResourceStore';
-import { useSchemaInspectorStore } from '@/stores/useSchemaInspectorStore';
-import { useProfilerSelectionStore } from '@/stores/useProfilerSelectionStore';
 import { useProfilerSessionStore } from '@/stores/useProfilerSessionStore';
 import { useSessionStore } from '@/stores/useSessionStore';
 import { useDbMapSelectionStore, type DbMapSelection } from '@/stores/useDbMapSelectionStore';
@@ -15,111 +12,198 @@ import type { DbChunkContent, DbContentCell, DbPageDetail, StorageSegmentSummary
 import { useComponentSchema } from '@/hooks/schema/useComponentSchema';
 import type { ComponentSchema, Field } from '@/hooks/schema/types';
 import ProfilerDetail from '@/panels/profiler/ProfilerDetail';
-import { useDataBrowserStore } from '@/stores/useDataBrowserStore';
 import { useEntityDetail } from '@/hooks/dataBrowser/useEntityDetail';
 import EntityCardsDetail from '@/panels/DataBrowser/EntityCardsDetail';
+import { useSelectionStore, type SelectionLeaf } from '@/stores/useSelectionStore';
+import { resolveChain, type SelectionRef } from '@/stores/selectionChain';
+import type { SelectedResource } from '@/stores/useSelectedResourceStore';
+import type { ProfilerSelection } from '@/stores/useProfilerSelectionStore';
 
 /**
- * The Detail panel — a single "what's selected" surface. Five independent stores feed it:
- *  - `useSchemaInspectorStore.selectedField` (schema canvas click, arrow-nav, Index row click)
- *  - `useSelectedResourceStore.selected` (resource-tree click)
- *  - `useProfilerSelectionStore.selected` (profiler panel — span / chunk / tick / marker)
- *  - `useDbMapSelectionStore.selected` (Database File Map — page click)
- *  - `useDataBrowserStore.selectedEntityId` (Data Browser — entity row click → component-card stack)
+ * The Inspector (right rail, zone E) — the single "what's selected" surface for the whole app (IA §2.4).
  *
- * Whichever was touched most recently wins — matches the IDE convention that the user's latest
- * interaction drives what the inspector shows. Graceful fallback: if the winner's data isn't
- * loaded (e.g., `schema` still fetching), fall back to the next non-empty source. Empty state
- * fires only when nothing has ever been selected from any of the four.
+ * Stage 1 (#373): the Inspector now follows the **unified selection bus** ({@link useSelectionStore} `leaf`)
+ * instead of arbitrating five siloed stores. The bus leaf is the most-recently selected *primary* object
+ * across every object type (the silos write-through to it); projections never steal the leaf. The leaf is
+ * rendered **in full** via a per-type card; its containment ancestors ({@link resolveChain}) stack above it
+ * as collapsible **summaries** (IA §2.5). A **pin** freezes the chain so the user can click around.
+ *
+ * The handoff footer (real Open-in/Reveal-in verbs) is intentionally absent in Stage 1 — the deep panels it
+ * would target are gated off (Stage 0), and PC-6 forbids dead verbs. It returns with those panels in Stages 2-4.
  */
 export default function DetailPanel() {
-  const selectedType = useSchemaInspectorStore((s) => s.selectedComponentType);
-  const selectedFieldName = useSchemaInspectorStore((s) => s.selectedField);
-  const fieldTouchedAt = useSchemaInspectorStore((s) => s.fieldTouchedAt);
-  const { schema } = useComponentSchema(selectedType);
-  const resource = useSelectedResourceStore((s) => s.selected);
-  const resourceTouchedAt = useSelectedResourceStore((s) => s.touchedAt);
-  const profilerSelected = useProfilerSelectionStore((s) => s.selected);
-  const profilerTouchedAt = useProfilerSelectionStore((s) => s.touchedAt);
-  const dbMapSelected = useDbMapSelectionStore((s) => s.selected);
-  const dbMapTouchedAt = useDbMapSelectionStore((s) => s.touchedAt);
-  const dbArchetypeId = useDataBrowserStore((s) => s.archetypeId);
-  const dbEntityId = useDataBrowserStore((s) => s.selectedEntityId);
-  const dbEntityTouchedAt = useDataBrowserStore((s) => s.touchedAt);
-  const { detail: entityDetail } = useEntityDetail(dbArchetypeId, dbEntityId);
-
-  // Profiler session signals — used to render the range-stats fallback when no click selection has
-  // been made but the user is exploring a profiler trace. The fallback runs through the same
-  // ProfilerDetail entry point with `selection={null}`; ProfilerDetail reads its data straight from
-  // `useProfilerStatsStore` (populated by `useProfilerStatsWriter` in ProfilerPanel) so we don't
-  // re-instantiate `useProfilerCache` here.
+  const leaf = useSelectionStore((s) => s.leaf);
   const profilerMetadata = useProfilerSessionStore((s) => s.metadata);
   const sessionKind = useSessionStore((s) => s.kind);
   const isProfilerSession = sessionKind === 'attach' || sessionKind === 'trace';
 
-  const field: Field | undefined =
-    selectedFieldName && schema
-      ? schema.fields.find((f) => f.name === selectedFieldName)
-      : undefined;
+  // Pin freezes the rail on the current object so clicking elsewhere doesn't re-target it (ephemeral).
+  const [pinned, setPinned] = useState<SelectionLeaf | null>(null);
+  const activeLeaf = pinned ?? leaf;
 
-  const fieldAvailable = !!field && !!schema;
-  const resourceAvailable = !!resource;
-  const profilerAvailable = profilerSelected !== null;
-  const dbMapAvailable = dbMapSelected !== null;
-  const entityAvailable = entityDetail !== null;
-  // The range-stats fallback is "available" whenever a profiler session is open and has metadata —
-  // viewRange is always defined; an empty viewRange just renders the empty-state inside the detail.
-  const profilerRangeFallbackAvailable = isProfilerSession && profilerMetadata !== null;
+  // Ancestors derive from the leaf's own ref (+ scalar-context fallback); recompute when the leaf changes.
+  const ancestors = useMemo(() => resolveChain(activeLeaf, useSelectionStore.getState()), [activeLeaf]);
 
-  // 4-way arbitration by recency. Each candidate's `at` is 0 when unavailable so they drop out
-  // of the max comparison — that way a never-populated source can't accidentally win on a
-  // stale `touchedAt` tombstone.
-  const fieldAt    = fieldAvailable    ? fieldTouchedAt    : 0;
-  const resourceAt = resourceAvailable ? resourceTouchedAt : 0;
-  const profilerAt = profilerAvailable ? profilerTouchedAt : 0;
-  const dbMapAt    = dbMapAvailable    ? dbMapTouchedAt    : 0;
-  const entityAt   = entityAvailable   ? dbEntityTouchedAt : 0;
-  const winnerAt = Math.max(fieldAt, resourceAt, profilerAt, dbMapAt, entityAt);
-
-  if (winnerAt === 0) {
-    // Nothing was clicked. If a profiler session is open, show the range-stats fallback over the
-    // current viewport — that way the right pane carries useful info even before the user picks a
-    // specific element. Outside profiler land, fall through to the empty prompt.
-    if (profilerRangeFallbackAvailable) {
+  if (activeLeaf === null) {
+    // Before any pick, a profiler session still shows range-stats over the current viewport.
+    if (isProfilerSession && profilerMetadata !== null) {
       return <ProfilerDetail selection={null} />;
     }
     return (
-      <div className="flex h-full items-center justify-center bg-background">
-        <p className="text-density-sm text-muted-foreground">
-          Select a resource, component, field, or profiler element to see details
+      <div className="flex h-full items-center justify-center bg-background p-3">
+        <p className="text-center text-density-sm text-muted-foreground">
+          Select anything — a resource, component, entity, system, or profiler element — to inspect it.
         </p>
       </div>
     );
   }
 
-  // Dispatch to the winning source. Graceful fallback chain if the winner's data isn't loaded.
-  if (entityAt === winnerAt && entityAvailable) {
-    return <EntityCardsDetail detail={entityDetail!} />;
+  return (
+    <div className="flex h-full flex-col bg-background">
+      <div className="wb-pane-header flex items-center gap-2 border-b border-border px-3 py-1.5">
+        <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Inspector</span>
+        <button
+          type="button"
+          onClick={() => setPinned(pinned ? null : leaf)}
+          aria-pressed={pinned !== null}
+          title={pinned ? 'Unpin — follow selection' : 'Pin this object'}
+          className="ml-auto rounded p-1 text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+        >
+          {pinned ? <Pin className="h-3.5 w-3.5" /> : <PinOff className="h-3.5 w-3.5" />}
+        </button>
+      </div>
+      <div className="flex min-h-0 flex-1 flex-col">
+        {ancestors.length > 0 && (
+          <div className="shrink-0 border-b border-border">
+            {ancestors.map((node) => (
+              <AncestorSection key={`${node.type}:${String(node.ref)}`} node={node} />
+            ))}
+          </div>
+        )}
+        <div className="min-h-0 flex-1 overflow-auto">
+          <LeafCard leaf={activeLeaf} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Maps the bus leaf to its **full** card — reusing the existing detail bodies. Each card that fetches data
+ * is its own component so its hooks stay unconditional. Object types with a (currently-gated) deep panel
+ * render a summary placeholder until that panel returns.
+ */
+function LeafCard({ leaf }: { leaf: SelectionLeaf }): React.JSX.Element {
+  switch (leaf.type) {
+    case 'resource':
+      return <ResourceDetail resource={leaf.ref as SelectedResource} />;
+    case 'field':
+      return <FieldLeafCard ref0={leaf.ref as { component: string | null; field: string }} />;
+    case 'entity':
+      return <EntityLeafCard ref0={leaf.ref as { archetypeId: string | null; entityId: string }} />;
+    case 'page':
+    case 'chunk':
+    case 'cell':
+    case 'segment':
+      return <DbMapDetail selection={leaf.ref as DbMapSelection} />;
+    case 'span':
+    case 'tick':
+      return <ProfilerDetail selection={leaf.ref as ProfilerSelection} />;
+    case 'component':
+      return <ObjectSummaryCard icon={<Boxes className="h-4 w-4 text-muted-foreground" />} kind="Component" title={String(leaf.ref)} />;
+    case 'archetype':
+      return <ObjectSummaryCard icon={<Layers className="h-4 w-4 text-muted-foreground" />} kind="Archetype" title={`#${String(leaf.ref)}`} />;
+    case 'system':
+      return <ObjectSummaryCard icon={<Workflow className="h-4 w-4 text-muted-foreground" />} kind="System" title={String(leaf.ref)} />;
+    case 'query':
+      return <ObjectSummaryCard icon={<ListTree className="h-4 w-4 text-muted-foreground" />} kind="Query" title={queryLabel(leaf.ref)} />;
+    default:
+      return <ObjectSummaryCard icon={<Binary className="h-4 w-4 text-muted-foreground" />} kind={leaf.type} title={String(leaf.ref)} />;
   }
-  if (dbMapAt === winnerAt && dbMapAvailable) {
-    return <DbMapDetail selection={dbMapSelected!} />;
+}
+
+/** Field leaf → fetch its component schema, find the field, render the full FieldDetail. */
+function FieldLeafCard({ ref0 }: { ref0: { component: string | null; field: string } }): React.JSX.Element {
+  const { schema } = useComponentSchema(ref0.component);
+  const field = schema?.fields.find((f) => f.name === ref0.field);
+  if (!schema || !field) {
+    return <CardLoading label="field" />;
   }
-  if (profilerAt === winnerAt && profilerAvailable) {
-    return <ProfilerDetail selection={profilerSelected!} />;
+  return <FieldDetail field={field} schema={schema} />;
+}
+
+/** Entity leaf → fetch the entity detail, render the component-card stack. */
+function EntityLeafCard({ ref0 }: { ref0: { archetypeId: string | null; entityId: string } }): React.JSX.Element {
+  const { detail } = useEntityDetail(ref0.archetypeId, ref0.entityId);
+  if (!detail) {
+    return <CardLoading label="entity" />;
   }
-  if (fieldAt === winnerAt && fieldAvailable) {
-    return <FieldDetail field={field!} schema={schema!} />;
+  return <EntityCardsDetail detail={detail} />;
+}
+
+/** Best-effort label for a query leaf ref (id/string today; richer when the Query Analyzer returns). */
+function queryLabel(ref: unknown): string {
+  if (typeof ref === 'string' || typeof ref === 'number') {
+    return String(ref);
   }
-  if (resourceAt === winnerAt && resourceAvailable) {
-    return <ResourceDetail />;
+  if (ref !== null && typeof ref === 'object') {
+    const r = ref as Record<string, unknown>;
+    if ('localId' in r) {
+      return `${String(r.kind ?? 'Query')}#${String(r.localId)}`;
+    }
   }
-  // Fall-back: show whichever source has data, preferring profiler > field > resource > dbMap > entity.
-  if (profilerAvailable) return <ProfilerDetail selection={profilerSelected!} />;
-  if (fieldAvailable)    return <FieldDetail field={field!} schema={schema!} />;
-  if (resourceAvailable) return <ResourceDetail />;
-  if (dbMapAvailable)    return <DbMapDetail selection={dbMapSelected!} />;
-  if (entityAvailable)   return <EntityCardsDetail detail={entityDetail!} />;
-  return null;
+  return 'Query';
+}
+
+/**
+ * A summary card for an object whose rich/deep surface is a (currently-gated) workspace panel — Component,
+ * Archetype, System, Query. It states what's selected and that the deep view returns later (PC-6: an
+ * explained gated state, never a dead "Open in →" button).
+ */
+function ObjectSummaryCard({ icon, kind, title }: { icon: ReactNode; kind: string; title: string }): React.JSX.Element {
+  return (
+    <div className="flex h-full flex-col bg-background p-3">
+      <div className="rounded-md border border-border bg-card p-3 text-[12px]">
+        <div className="mb-2 flex items-center gap-2 border-b border-border pb-2">
+          {icon}
+          <h3 className="truncate text-[13px] font-semibold text-foreground" title={title}>{title}</h3>
+          <span className="ml-auto text-[11px] text-muted-foreground">{kind}</span>
+        </div>
+        <p className="text-[11px] text-muted-foreground">
+          The {kind} deep view returns in a later stage of the Workbench redesign.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/** A collapsible containment-ancestor summary line in the Inspector context stack (expanded by default). */
+function AncestorSection({ node }: { node: SelectionRef }): React.JSX.Element {
+  const [open, setOpen] = useState(true);
+  return (
+    <div className="px-3 py-1">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="flex w-full items-center gap-1.5 text-left text-[11px] text-muted-foreground hover:text-foreground"
+      >
+        {open ? <ChevronDown className="h-3 w-3 shrink-0" /> : <ChevronRight className="h-3 w-3 shrink-0" />}
+        <span className="text-[10px] uppercase tracking-wide">{node.type}</span>
+        {open && <span className="truncate font-mono text-foreground">{String(node.ref)}</span>}
+      </button>
+    </div>
+  );
+}
+
+/** Card-body loading placeholder (PC-2 loading state). */
+function CardLoading({ label }: { label: string }): React.JSX.Element {
+  return (
+    <div className="flex h-full flex-col bg-background p-3">
+      <div className="rounded-md border border-border bg-card p-3">
+        <p className="text-[11px] text-muted-foreground">Loading {label}…</p>
+      </div>
+    </div>
+  );
 }
 
 // Database File Map selection (Module 15, §6.5) — a page, a chunk, or a content cell, fully decoded by the
@@ -569,10 +653,8 @@ function FieldDetail({ field, schema }: { field: Field; schema: ComponentSchema 
   );
 }
 
-function ResourceDetail() {
-  const selected = useSelectedResourceStore((s) => s.selected);
-  if (!selected) return null;
-
+function ResourceDetail({ resource }: { resource: SelectedResource }) {
+  const selected = resource;
   const { raw } = selected;
   const childrenCount = raw.children?.length ?? 0;
   const entityCount = raw.entityCount != null ? Number(raw.entityCount) : null;

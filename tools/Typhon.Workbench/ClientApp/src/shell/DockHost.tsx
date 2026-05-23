@@ -28,7 +28,8 @@ import ExecutionInspectorPanel from '@/panels/ExecutionInspector/ExecutionInspec
 import PaletteDebugPanel from '@/panels/PaletteDebug';
 import DbMapPanel from '@/panels/DbMap/DbMapPanel';
 import EntityListPanel from '@/panels/DataBrowser/EntityListPanel';
-import { registerDockApi, registerResetLayout } from './commands/openSchemaBrowser';
+import SystemsQueriesNavigatorPanel from '@/panels/SystemsQueriesNavigator/SystemsQueriesNavigatorPanel';
+import { registerDockApi, registerResetLayout, focusPanelBody } from './commands/openSchemaBrowser';
 import { registerProfilerDockApi } from './commands/profilerCommands';
 import { isViewActive } from './viewRegistry';
 import MigrationRequiredBanner from './banners/MigrationRequiredBanner';
@@ -138,6 +139,8 @@ const components: Record<string, React.FC<IDockviewPanelProps>> = {
   PaletteDebug: PaletteDebugPanel,
   DbMap: DbMapPanel,
   DataBrowserEntities: EntityListPanel,
+  // Shell navigator (zone C, Trace/Attach) — not a zone-D deep view, so it is never gated.
+  SystemsQueriesNavigator: SystemsQueriesNavigatorPanel,
 };
 
 // Only the active (shell + ungated) components are handed to dockview. Gated zone-D ids drop out here.
@@ -150,8 +153,18 @@ const activeComponents: Record<string, React.FC<IDockviewPanelProps>> = Object.f
 // so the deep panels stay out today and re-appear automatically as Stages 2-4 flip them back on.
 function buildDefaultLayout(api: DockviewReadyEvent['api'], kind: 'none' | 'open' | 'attach' | 'trace') {
   if (kind === 'trace' || kind === 'attach') {
+    api.addEdgeGroup('left', { id: EDGE_LEFT_ID, initialSize: 260, minimumSize: 150 });
     api.addEdgeGroup('right', { id: EDGE_RIGHT_ID, initialSize: 320, minimumSize: 200 });
     api.addEdgeGroup('bottom', { id: EDGE_BOTTOM_ID, initialSize: 200, minimumSize: 100 });
+
+    // Zone C navigator for a profiler session — the trace/attach analogue of the open-mode Resource Tree.
+    api.addPanel({
+      id: 'systems-queries-nav',
+      component: 'SystemsQueriesNavigator',
+      title: 'Systems & Queries',
+      tabComponent: 'locked',
+      position: { referenceGroup: EDGE_LEFT_ID },
+    });
 
     if (isViewActive('Profiler')) {
       api.addPanel({ id: 'profiler', component: 'Profiler', title: 'Profiler', tabComponent: 'locked' });
@@ -249,6 +262,12 @@ export default function DockHost() {
     apiRef.current = event.api;
     registerDockApi(event.api);
     registerProfilerDockApi(event.api);
+
+    // Focus-follows-navigation (PC-8): when the active panel changes (F6, a bus handoff, a click),
+    // move DOM focus into its body so a keyboard user lands where they navigated — never orphaned on
+    // <body>. `panel.focus()` alone only activates the group/tab; focusPanelBody also moves DOM focus
+    // into the content container (shell-and-dockview §2), which is what makes the focus visible.
+    event.api.onDidActivePanelChange((panel) => { if (panel) focusPanelBody(panel); });
     // Tear down every panel/group and rebuild this session kind's built-in default. The recovery path for both the
     // reset-layout command and a failed restore. api.clear() empties the edge groups but keeps the now-empty group shells,
     // and buildDefaultLayout's addEdgeGroup() throws on a position that still exists — so a partially-applied fromJSON (e.g.

@@ -35,9 +35,9 @@ export const useDockLayoutStore = create<DockLayoutState>()(
       getTemplate: (kind) => get().layouts[`__template__:${kind}`] ?? null,
       clear: () => set({ layouts: {} }),
     }),
-    // v5: Stage 0 deactivated the zone-D views, so the components map no longer registers them. Bumping the
-    // key discards layouts saved against the old (richer) panel set rather than relying on per-panel fromJSON
-    // recovery for every stored layout.
-    { name: 'typhon-dock-layouts-v5', storage: safeStorage },
+    // v6: Stage 1 changed the default layouts — the Systems & Queries navigator now occupies a left edge group
+    // in trace/attach sessions. Bumping the key discards Stage-0 (v5) layouts so the navigator is present on
+    // first load rather than only after Reset Layout. (v5 = Stage 0 zone-D deactivation.)
+    { name: 'typhon-dock-layouts-v6', storage: safeStorage },
   ),
 );
