@@ -89,12 +89,17 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
 
         Stride = stride;
 
-        // Alignment padding: ensures chunks start at stride-aligned absolute page offsets.
-        // For stride=64: PageHeaderSize (192) % 64 == 0 → zero padding (backward compat).
-        // For stride=128: 192 % 128 == 64 → 64-byte non-root padding, 112-byte root padding.
-        bool needsAlignment = (PagedMMF.PageHeaderSize % stride) != 0;
-        _otherAlignmentPadding = needsAlignment ? stride - (PagedMMF.PageHeaderSize % stride) : 0;
-        _rootAlignmentPadding = needsAlignment ? (stride - ((PagedMMF.PageHeaderSize + RootHeaderIndexSectionLength) % stride)) % stride : 0;
+        // Alignment padding: align chunk starts to a cache line, capped at ChunkStartAlignment (64).
+        // The original rule aligned to the full stride, which is pathological for large strides: for any stride
+        // larger than PageHeaderSize (192) the padding becomes ~a whole chunk (stride - 192), so e.g. a 3960-byte
+        // cluster stride wasted 3768 B/page and dropped capacity from 2 chunks to 1. Capping at 64 keeps the small-
+        // stride behaviour (stride=64: 192 % 64 == 0 → zero padding) while never over-padding large strides. Callers
+        // that need every chunk (not just chunk 0) cache-aligned round their stride up to this same boundary so the
+        // constant pitch keeps each chunk aligned (clusters do this — see ArchetypeClusterInfo).
+        int align = Math.Min(stride, PagedMMF.ChunkStartAlignment);
+        bool needsAlignment = (PagedMMF.PageHeaderSize % align) != 0;
+        _otherAlignmentPadding = needsAlignment ? align - (PagedMMF.PageHeaderSize % align) : 0;
+        _rootAlignmentPadding = needsAlignment ? (align - ((PagedMMF.PageHeaderSize + RootHeaderIndexSectionLength) % align)) % align : 0;
 
         ChunkCountRootPage = (PagedMMF.PageRawDataSize - RootHeaderIndexSectionLength - _rootAlignmentPadding) / stride;
         ChunkCountPerPage = (PagedMMF.PageRawDataSize - _otherAlignmentPadding) / stride;

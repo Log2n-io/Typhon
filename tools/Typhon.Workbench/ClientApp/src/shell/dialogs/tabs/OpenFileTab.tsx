@@ -62,7 +62,7 @@ export default function OpenFileTab({ onOpen, isOpening }: Props) {
  )}
 
  <p className="shrink-0 text-[10px] text-muted-foreground">
- Schema DLLs are auto-discovered via the <code>*.schema.dll</code> convention in the same directory.
+ Schema assemblies are recorded inside the database and auto-located next to the file by assembly name.
  </p>
 
  <div className="flex shrink-0 justify-end gap-2">

@@ -45,7 +45,7 @@ public sealed partial class StorageMapService
         var ownerBytes = MemoryMarshal.AsBytes<ushort>(map.OwnerSegmentId);
         // PageCount is the descriptor-array length — the cell count, which equals the page count when exact.
         return new StorageRegionDto(node, string.IsNullOrEmpty(lod) ? "leaf" : lod, map.CellCount,
-            Convert.ToBase64String(typeBytes), Convert.ToBase64String(ownerBytes));
+            Convert.ToBase64String(typeBytes), Convert.ToBase64String(ownerBytes), Convert.ToBase64String(map.PageRank));
     }
 
     /// <summary>Builds the top pyramid levels for <c>GET /dbmap/overview</c>.</summary>
@@ -72,6 +72,7 @@ public sealed partial class StorageMapService
         var segments = engine.EnumerateStorageSegments();
         var ownerSegmentId = new ushort[pageCount];
         ownerSegmentId.AsSpan().Fill(StructuralMap.NoSegment);
+        var pageRank = new byte[pageCount]; // normalized directory-order position within the owning segment (0 = first page, 255 = last)
 
         var segInfos = new StorageSegmentInfo[segments.Count];
         for (var i = 0; i < segments.Count; i++)
@@ -82,12 +83,17 @@ public sealed partial class StorageMapService
                 seg.Stride, seg.ChunkCountRootPage, seg.ChunkCountPerPage, seg.RootDataOffset, seg.OtherDataOffset);
             // Mirror the engine classifier (DatabaseEngine.StorageIntrospection.cs): the occupancy bitmap is
             // authoritative — a page that ClassifyAllPages marked Free stays unowned even if a segment's
-            // page list still references it. Keeps `pageType` and `ownerSegmentId` consistent.
-            foreach (var page in seg.Pages.Span)
+            // page list still references it. Keeps `pageType` and `ownerSegmentId` consistent. The page list is in
+            // directory (logical) order, so the loop index is the page's rank within the segment.
+            var segPages = seg.Pages.Span;
+            var rankDenom = Math.Max(1, segPages.Length - 1);
+            for (var k = 0; k < segPages.Length; k++)
             {
+                var page = segPages[k];
                 if ((uint)page < (uint)pageCount && pageType[page] != StoragePageType.Free)
                 {
                     ownerSegmentId[page] = id;
+                    pageRank[page] = (byte)(k * 255 / rankDenom);
                 }
             }
         }
@@ -98,9 +104,10 @@ public sealed partial class StorageMapService
         var factor = DownSampleFactorFor(pageCount, MaxCoarseCells);
         var cellType = pageType;
         var cellOwner = ownerSegmentId;
+        var cellRank = pageRank;
         if (factor > 1)
         {
-            DownSampleArrays(pageType, ownerSegmentId, factor, out cellType, out cellOwner);
+            DownSampleArrays(pageType, ownerSegmentId, pageRank, factor, out cellType, out cellOwner, out cellRank);
         }
 
         return new StructuralMap
@@ -114,6 +121,7 @@ public sealed partial class StorageMapService
             DownSampleFactor = factor,
             PageType = cellType,
             OwnerSegmentId = cellOwner,
+            PageRank = cellRank,
             Segments = segInfos,
         };
     }
@@ -156,12 +164,13 @@ public sealed partial class StorageMapService
     /// Aggregates the per-page coarse arrays into one descriptor per <paramref name="factor"/> pages — the dominant
     /// non-free type, and the dominant owning segment (<see cref="StructuralMap.NoSegment"/> when unowned wins).
     /// </summary>
-    internal static void DownSampleArrays(StoragePageType[] pageType, ushort[] ownerSegmentId, int factor,
-        out StoragePageType[] cellType, out ushort[] cellOwner)
+    internal static void DownSampleArrays(StoragePageType[] pageType, ushort[] ownerSegmentId, byte[] pageRank, int factor,
+        out StoragePageType[] cellType, out ushort[] cellOwner, out byte[] cellRank)
     {
         var cellCount = CellCountFor(pageType.Length, factor);
         cellType = new StoragePageType[cellCount];
         cellOwner = new ushort[cellCount];
+        cellRank = new byte[cellCount];
         Span<int> tally = stackalloc int[StorageMapPyramid.PageTypeCount];
 
         for (var c = 0; c < cellCount; c++)
@@ -175,6 +184,9 @@ public sealed partial class StorageMapService
             }
             cellType[c] = StorageMapPyramid.DominantType(tally);
             cellOwner[c] = DominantOwner(ownerSegmentId, start, end);
+            // The block's rank ≈ its first page's rank — within a down-sample block (a contiguous file-page run) the
+            // directory-order rank is monotonic, so the leading page is a faithful representative.
+            cellRank[c] = pageRank[start];
         }
     }
 

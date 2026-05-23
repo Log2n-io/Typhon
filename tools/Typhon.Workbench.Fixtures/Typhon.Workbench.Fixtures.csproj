@@ -5,8 +5,8 @@
         <LangVersion>default</LangVersion>
         <IsPackable>false</IsPackable>
         <Nullable>disable</Nullable>
-        <!-- Emit the assembly as *.schema.dll directly so the Workbench's SchemaConvention loader picks it up
-             without the fixture generator having to rename it. -->
+        <!-- Assembly simple name is "Typhon.Workbench.Fixtures.schema"; the on-disk file is therefore Typhon.Workbench.Fixtures.schema.dll, which the
+             Workbench's manifest resolver locates via its fast {SimpleName}.dll probe next to the database file. -->
         <AssemblyName>Typhon.Workbench.Fixtures.schema</AssemblyName>
         <RootNamespace>Typhon.Workbench.Fixtures</RootNamespace>
         <AllowUnsafeBlocks>true</AllowUnsafeBlocks>

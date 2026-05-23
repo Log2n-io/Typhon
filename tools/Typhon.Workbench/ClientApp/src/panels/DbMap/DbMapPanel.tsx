@@ -44,6 +44,7 @@ import {
 import { searchDbMap } from '@/libs/dbmap/dbMapSearch';
 import { buildFilterMask } from '@/libs/dbmap/dbMapFilter';
 import { newBookmarkId } from '@/libs/dbmap/dbMapBookmarks';
+import { emptyCameraHistory, pushCameraHistory, stepCameraHistory, type CameraHistory } from '@/libs/dbmap/dbMapNavHistory';
 import { exportRegionsCsv, exportViewPng, exportWholeMapPng } from '@/libs/dbmap/dbMapExport';
 import {
   openComponentInSchema,
@@ -67,6 +68,8 @@ const DETAIL_SYNC_MS = 160;
 const FLY_DURATION_MS = 420;
 /** Wheel-zoom glide duration — short so rapid notches stay responsive while each notch still eases. */
 const WHEEL_ZOOM_DURATION_MS = 500;
+/** Idle window after the last wheel notch before the settled framing is committed as one nav-history entry. */
+const WHEEL_NAV_SETTLE_MS = 250;
 /** Fit-whole-file glide duration — the camera eases from its current framing to the whole-file fit. */
 const FIT_DURATION_MS = 600;
 /** When flying to a page from a coarse zoom, frame roughly this many cells across the viewport. */
@@ -146,6 +149,7 @@ interface L0HoverInfo {
 export default function DbMapPanel(_props: IDockviewPanelProps) {
   const sessionId = useSessionStore((s) => s.sessionId);
   const encoding = useDbMapStore((s) => s.encoding);
+  const pageOrder = useDbMapStore((s) => s.pageOrder);
   const segmentOverlay = useDbMapStore((s) => s.segmentOverlay);
   const toggleSegmentOverlay = useDbMapStore((s) => s.toggleSegmentOverlay);
   const residencyOverlay = useDbMapStore((s) => s.residencyOverlay);
@@ -184,6 +188,10 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
   // Active camera fly-to (§4.5) — when set, the animation loop steps it; any user gesture clears it.
   const tweenRef = useRef<CameraTween | null>(null);
   const animationRef = useRef<number | null>(null);
+  // Panel-local camera back/forward history (mouse thumb buttons). Independent of the global Workbench nav
+  // history, which records only cross-panel jumps. A wheel burst settles into one entry via wheelSettleRef.
+  const historyRef = useRef<CameraHistory>(emptyCameraHistory());
+  const wheelSettleRef = useRef<number | null>(null);
   // rAF chain that keeps repainting while freshly-arrived L4 chunk content is fading in (so it eases, not pops).
   const contentFadeRef = useRef<number | null>(null);
 
@@ -430,12 +438,37 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
   );
 
   // Records a discrete map navigation in the Workbench nav history (§13 A4 AC2) — `Alt+←/→` retraces it.
+  // Reserved for cross-panel entry points (the Schema/Data "Show in File Map" cross-link); in-panel pan/zoom
+  // goes to the panel-local stack below instead, so the global history isn't flooded with map exploration.
   const pushNav = useCallback((camera: Camera, label: string) => {
     useNavHistoryStore.getState().push({ kind: 'dbmap-navigated', camera, label, timestamp: Date.now() });
   }, []);
 
+  // Records a camera state in the panel-local back/forward stack (the mouse-thumb-button history).
+  const pushHistory = useCallback((camera: Camera) => {
+    historyRef.current = pushCameraHistory(historyRef.current, camera);
+  }, []);
+
+  // Walks the panel-local history by `dir` (−1 back, +1 forward) and eases to that camera. No-op at either end.
+  // A pending wheel-settle push would otherwise land on the wrong slot once we move the pointer — drop it.
+  const stepHistory = useCallback(
+    (dir: -1 | 1) => {
+      if (wheelSettleRef.current != null) {
+        window.clearTimeout(wheelSettleRef.current);
+        wheelSettleRef.current = null;
+      }
+      const stepped = stepCameraHistory(historyRef.current, dir);
+      if (stepped === historyRef.current) {
+        return; // at an end — nothing to navigate to
+      }
+      historyRef.current = stepped;
+      flyTo(stepped.entries[stepped.pointer]);
+    },
+    [flyTo],
+  );
+
   const flyToPage = useCallback(
-    (page: number) => {
+    (page: number, globalLabel?: string) => {
       const renderer = rendererRef.current;
       const surface = surfaceRef.current;
       const layout = renderer?.getLayout();
@@ -447,10 +480,15 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
       // Keep the current depth if already zoomed in; otherwise zoom to a comfortable cell-level framing.
       const targetScale = Math.max(cameraRef.current.scale, Math.min(width, height) / FLY_CELLS_ACROSS);
       const target = cameraCenteredOn(layout.dataRect.x + x + 0.5, layout.dataRect.y + y + 0.5, targetScale, width, height);
-      pushNav(target, `Page ${page.toLocaleString()}`);
+      pushHistory(target);
+      // Only a cross-panel entry point passes a label — it also records in the global history so `Alt+←/→`
+      // retraces the panel-to-panel jump. In-panel jumps (search, sidebar lists) stay local-only.
+      if (globalLabel) {
+        pushNav(target, globalLabel);
+      }
       flyTo(target);
     },
-    [flyTo, pushNav],
+    [flyTo, pushNav, pushHistory],
   );
 
   const flyToRegion = useCallback(
@@ -485,10 +523,10 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
       };
       const { width, height } = surface.getBoundingClientRect();
       const target = zoomToWorldRect(world, width, height, FIT_PADDING);
-      pushNav(target, `Region @${startPage.toLocaleString()}`);
+      pushHistory(target);
       flyTo(target);
     },
-    [flyTo, pushNav],
+    [flyTo, pushHistory],
   );
 
   // Publish the camera fly-to so an `Alt+←/→` nav-history restore can drive it (§13 A4 AC2).
@@ -525,7 +563,7 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
     clearPendingFocus();
     if (seg) {
       useDbMapStore.getState().focusSegment(seg.id);
-      flyToPage(seg.rootPageIndex);
+      flyToPage(seg.rootPageIndex, `Component ${pendingFocusType}`);
     }
   }, [data, pendingFocusType, clearPendingFocus, flyToPage]);
 
@@ -536,6 +574,19 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
     }
     rendererRef.current = new DbMapRenderer(canvasRef.current);
     rendererRef.current.setTheme(readDbMapTheme());
+    // Cursor is driven imperatively by the gesture/hover handlers (default at rest); not a React-managed style
+    // prop, so a re-render mid-gesture can't reset it.
+    canvasRef.current.style.cursor = 'default';
+  }, []);
+
+  // Normalize a stale persisted lens on mount: `lens` is persisted but `lensSegmentId` is not, so a fragmentation
+  // lens restored without a segment would leave the Lens combo stuck on "Fragmentation" with no actual overlay
+  // (and reappear after every remount, e.g. a pane resize). Reset it to "None" so the combo reflects reality.
+  useEffect(() => {
+    const s = useDbMapStore.getState();
+    if (s.lens === 'fragmentation' && s.lensSegmentId == null) {
+      s.setLens('none');
+    }
   }, []);
 
   // Track <html>'s class attribute — ThemeProvider toggles `.dark` there; a tick triggers the redraw.
@@ -560,9 +611,15 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
     const layout = renderer.getLayout();
     if (!data) {
       fittedRef.current = false;
+      historyRef.current = emptyCameraHistory();
     } else if (layout && width > 0 && height > 0 && !fittedRef.current) {
       cameraRef.current = fitToRect(layout.worldBounds, width, height, FIT_PADDING);
       fittedRef.current = true;
+      // Seed the local back/forward stack with the initial fit so the user can always step back to it — but only
+      // if nothing landed first (a cross-link open flies before this runs and must keep its entry).
+      if (historyRef.current.pointer < 0) {
+        historyRef.current = pushCameraHistory(historyRef.current, cameraRef.current);
+      }
     }
     renderer.setCamera(cameraRef.current);
     renderer.render();
@@ -589,6 +646,18 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
     scheduleRender();
     queueDetailSync();
   }, [encoding, segmentOverlay, scheduleRender, queueDetailSync]);
+
+  // Page-layout ordering (Hilbert vs sequential) — re-lays out the grid in place. Pages move under the camera, so
+  // re-sync detail tiles for the newly-visible set; no reframe (page-index selection / hover stay valid).
+  useEffect(() => {
+    const renderer = rendererRef.current;
+    if (!renderer) {
+      return;
+    }
+    renderer.setPageOrder(pageOrder);
+    scheduleRender();
+    queueDetailSync();
+  }, [pageOrder, scheduleRender, queueDetailSync]);
 
   // Per-component overlay (A6) — push the picker's selection to the renderer; it recolours the L4 cluster slots
   // of the chosen segment by the component's enabled bit. Cleared on DB change so a stale segment id can't carry over.
@@ -773,10 +842,51 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
       // The cursor is the tween anchor — without it the centre-anchored glide makes the focus point wobble.
       const base = tweenRef.current ? tweenRef.current.to : cameraRef.current;
       flyTo(zoomAt(base, pt.x, pt.y, factor), WHEEL_ZOOM_DURATION_MS, pt.x, pt.y);
+      // Coalesce a wheel burst into one nav-history entry — record the settled framing once notches stop.
+      if (wheelSettleRef.current != null) {
+        window.clearTimeout(wheelSettleRef.current);
+      }
+      wheelSettleRef.current = window.setTimeout(() => {
+        wheelSettleRef.current = null;
+        pushHistory(tweenRef.current?.to ?? cameraRef.current);
+      }, WHEEL_NAV_SETTLE_MS);
     };
     canvas.addEventListener('wheel', onWheel, { passive: false });
     return () => canvas.removeEventListener('wheel', onWheel);
-  }, [flyTo]);
+  }, [flyTo, pushHistory]);
+
+  // Mouse thumb buttons walk the panel-local history while the cursor is over the map: 3 = back, 4 = forward,
+  // Ctrl/Shift+3 = forward (for mice without a forward button). `stopPropagation` keeps the global mouse-nav
+  // handler (useKeyboardShortcuts) from also firing, so back/forward acts on whichever panel the cursor is over —
+  // the Critical Path model. `auxclick`/`mousedown` preventDefault suppresses the browser's own back/forward.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) {
+      return;
+    }
+    const onDown = (e: MouseEvent) => {
+      if (e.button === 3) {
+        e.preventDefault();
+        e.stopPropagation();
+        stepHistory(e.ctrlKey || e.shiftKey ? 1 : -1);
+      } else if (e.button === 4) {
+        e.preventDefault();
+        e.stopPropagation();
+        stepHistory(1);
+      }
+    };
+    const onAux = (e: MouseEvent) => {
+      if (e.button === 1 || e.button === 3 || e.button === 4) {
+        e.preventDefault();
+      }
+    };
+    canvas.addEventListener('mousedown', onDown);
+    canvas.addEventListener('auxclick', onAux);
+    return () => {
+      canvas.removeEventListener('mousedown', onDown);
+      canvas.removeEventListener('auxclick', onAux);
+    };
+  }, [stepHistory]);
 
   // Drop any pending detail-sync timer / fly-to / tooltip dwell on unmount.
   useEffect(
@@ -796,6 +906,9 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
       if (tooltipTimerRef.current != null) {
         window.clearTimeout(tooltipTimerRef.current);
       }
+      if (wheelSettleRef.current != null) {
+        window.clearTimeout(wheelSettleRef.current);
+      }
     },
     [],
   );
@@ -809,8 +922,10 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
     }
     const { width, height } = surface.getBoundingClientRect();
     // Ease from the current framing to the whole-file fit (centre-anchored — the natural fit anchor).
-    flyTo(fitToRect(layout.worldBounds, width, height, FIT_PADDING), FIT_DURATION_MS);
-  }, [flyTo]);
+    const target = fitToRect(layout.worldBounds, width, height, FIT_PADDING);
+    pushHistory(target);
+    flyTo(target, FIT_DURATION_MS);
+  }, [flyTo, pushHistory]);
 
   // ── Export (§4.6 / A4 AC5) ──────────────────────────────────────────────────────────────────────────────
 
@@ -911,8 +1026,14 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
       const stripe = renderer.l0HitTest(screenX, screenY);
       if (stripe) {
         const store = useDbMapStore.getState();
+        // Only *re-focus* the segment when the fragmentation lens is already active (matching the L1 page-click
+        // path below). A bare click — including the first click of a double-click-to-zoom, which at L0 always lands
+        // on a stripe — must not silently switch the Lens combo to fragmentation. The deliberate entry points stay:
+        // pick Fragmentation in the combo, or use the Schema/Data "Show in File Map" cross-link.
         if (stripe.kind === 'segment' && stripe.segmentId != null && stripe.segmentId !== NO_SEGMENT) {
-          store.focusSegment(stripe.segmentId);
+          if (store.lens === 'fragmentation') {
+            store.focusSegment(stripe.segmentId);
+          }
         } else if (stripe.kind === 'type') {
           if (store.encoding !== 'pageType') {
             store.setEncoding('pageType');
@@ -1050,18 +1171,25 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
         const surface = surfaceRef.current;
         if (surface && world.w > 0 && world.h > 0) {
           const { width, height } = surface.getBoundingClientRect();
-          cameraRef.current = zoomToWorldRect(world, width, height, FIT_PADDING);
-          scheduleRender();
-          queueDetailSync();
+          // Ease into the selection like every other navigation (double-click / fit) — the marquee zoom snapping
+          // was the odd one out. flyTo drives its own rAF render + detail sync on landing.
+          const target = zoomToWorldRect(world, width, height, FIT_PADDING);
+          pushHistory(target);
+          flyTo(target, FIT_DURATION_MS);
         }
       } else if (drag.mode === 'pan' && !drag.moved) {
         selectAt(pt.x, pt.y);
       } else if (drag.mode === 'pan' && drag.moved) {
         queueDetailSync();
+        pushHistory(cameraRef.current);
+      } else if (drag.mode === 'minimap' || drag.mode === 'strip') {
+        queueDetailSync();
+        pushHistory(cameraRef.current);
       }
       setRegionRect(null);
+      canvas.style.cursor = 'default';
     },
-    [handleWindowMouseMove, scheduleRender, queueDetailSync, selectAt],
+    [handleWindowMouseMove, queueDetailSync, selectAt, pushHistory, flyTo],
   );
 
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -1077,6 +1205,10 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
       fitWholeFile();
       return;
     }
+    // Thumb buttons (3 back / 4 forward) drive the local history via a dedicated native listener — never start a drag.
+    if (e.button !== 0) {
+      return;
+    }
     cancelTween();
     const pt = canvasPoint(canvas, e.clientX, e.clientY);
     const mm = renderer.getMinimapScreenRect();
@@ -1090,6 +1222,9 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
       mode = 'strip';
       jumpViaOffsetStrip(pt.x);
     }
+    // Cursor reflects the active gesture: grabbing while panning, crosshair while marqueeing a zoom rectangle,
+    // pointer while scrubbing a widget. Reset to default on mouse-up.
+    canvas.style.cursor = mode === 'pan' ? 'grabbing' : mode === 'region' ? 'crosshair' : 'pointer';
     dragRef.current = { mode, startX: pt.x, startY: pt.y, startCam: cameraRef.current, moved: false };
     // A drag in progress should never leave a stale tooltip-dwell timer running — the user is intentionally
     // mid-gesture, not parked over a target.
@@ -1118,7 +1253,9 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
     }
     selectAt(pt.x, pt.y);
     const { width, height } = surface.getBoundingClientRect();
-    flyTo(zoomToWorldRect(rect, width, height, FIT_PADDING), FIT_DURATION_MS);
+    const target = zoomToWorldRect(rect, width, height, FIT_PADDING);
+    pushHistory(target);
+    flyTo(target, FIT_DURATION_MS);
   };
 
   const handleContextMenu = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -1186,6 +1323,11 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
     }
     const pt = canvasPoint(canvas, e.clientX, e.clientY);
 
+    // Cursor affordance: pointer over the minimap/offset-strip widgets, crosshair while Shift advertises the
+    // zoom-rectangle gesture, plain arrow otherwise. (Active-drag cursors are set by the drag handlers.)
+    const overWidget = pointIn(pt, renderer.getMinimapScreenRect()) || pointIn(pt, renderer.getOffsetStripScreenRect());
+    canvas.style.cursor = overWidget ? 'pointer' : e.shiftKey ? 'crosshair' : 'default';
+
     // Any motion hides the visible tooltip — it reappears only after the dwell period.
     if (hover) {
       setHover(null);
@@ -1251,6 +1393,13 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    // The panel-level shortcuts (s/f/b/r/c/Esc) must not hijack keystrokes meant for an editable control — the
+    // search box, the toolbar selects, a bookmark-rename field. Without this, typing those letters in the Find box
+    // toggled overlays and `preventDefault` swallowed the character. Let the event through when a control is focused.
+    const target = e.target as HTMLElement;
+    if (target.isContentEditable || target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT') {
+      return;
+    }
     if (e.key === 's' || e.key === 'S') {
       toggleSegmentOverlay();
       e.preventDefault();
@@ -1345,7 +1494,7 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
             onMouseMove={handleHoverMove}
             onMouseLeave={handleHoverLeave}
             onContextMenu={handleContextMenu}
-            style={{ display: 'block', cursor: 'crosshair' }}
+            style={{ display: 'block' }}
             data-testid="dbmap-canvas"
           />
           {regionRect && (

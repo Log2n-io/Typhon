@@ -93,8 +93,12 @@ internal sealed class ArchetypeClusterInfo
         EntityIdsOffset = HeaderSize;
         FullMask = clusterSize == 64 ? ulong.MaxValue : (1UL << clusterSize) - 1;
 
-        // Stride = offset past the elementId tail (or past the last component array when M=0)
-        ClusterStride = indexElementIdsBaseOffset + multipleIndexedFieldCount * clusterSize * sizeof(int);
+        // Stride = offset past the elementId tail (or past the last component array when M=0), rounded up to the
+        // chunk-start alignment so every cluster in the segment lands on a cache line (the segment uses a constant
+        // pitch == stride, so the stride itself must be a multiple of the alignment for chunk 1..N to stay aligned).
+        // The rounding adds at most ChunkStartAlignment-1 unused tail bytes per cluster; all field offsets are below
+        // the unrounded end, so they are unaffected. SelectClusterSize scores against this same rounded stride.
+        ClusterStride = AlignStride(indexElementIdsBaseOffset + multipleIndexedFieldCount * clusterSize * sizeof(int));
     }
 
     /// <summary>Byte offset of component data for the given slot from the cluster base.</summary>
@@ -184,6 +188,12 @@ internal sealed class ArchetypeClusterInfo
     }
 
     /// <summary>
+    /// Rounds a raw cluster stride up to the chunk-start alignment so the segment's constant pitch keeps every chunk
+    /// cache-aligned. <see cref="PagedMMF.ChunkStartAlignment"/> must stay a power of two for the mask round-up.
+    /// </summary>
+    internal static int AlignStride(int stride) => (stride + (PagedMMF.ChunkStartAlignment - 1)) & ~(PagedMMF.ChunkStartAlignment - 1);
+
+    /// <summary>
     /// Select the cluster size N in [8..64] that maximizes entities per page.
     /// </summary>
     /// <param name="fixedHeader">Fixed bytes per cluster: 8 + 8 * ComponentCount.</param>
@@ -200,7 +210,12 @@ internal sealed class ArchetypeClusterInfo
 
         for (int n = 8; n <= 64; n++)
         {
-            int stride = fixedHeader + perEntitySize * n;
+            // Score against the *aligned* stride and the segment's real non-root geometry. Chunk starts are aligned
+            // to ChunkStartAlignment (64); since PageHeaderSize and PageRawDataSize are both multiples of 64 the
+            // non-root alignment padding is zero, so clustersPerPage = PageRawDataSize / alignedStride. Scoring the
+            // raw stride here (the previous bug) over-counted: it ignored that ChunkBasedSegment lays chunks at the
+            // aligned pitch, so it picked an N that fit 2 clusters only in theory and 1 in practice.
+            int stride = AlignStride(fixedHeader + perEntitySize * n);
             if (stride > pageSize)
             {
                 break;
@@ -219,7 +234,7 @@ internal sealed class ArchetypeClusterInfo
         {
             throw new InvalidOperationException(
                 $"Components too large for cluster storage (fixedHeader={fixedHeader}, perEntity={perEntitySize}, " +
-                $"min stride at N=8 = {fixedHeader + perEntitySize * 8}, page size = {PagedMMF.PageRawDataSize})");
+                $"min aligned stride at N=8 = {AlignStride(fixedHeader + perEntitySize * 8)}, page size = {PagedMMF.PageRawDataSize})");
         }
 
         return bestN;

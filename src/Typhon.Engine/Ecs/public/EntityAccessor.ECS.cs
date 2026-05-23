@@ -337,6 +337,19 @@ public unsafe partial class EntityAccessor
         return ref Unsafe.AsRef<T>(ptr + info.ComponentOverhead);
     }
 
+    /// <summary>
+    /// Non-generic counterpart to <see cref="ReadEcsComponentData{T}"/>: resolves the raw storage pointer for a component instance without a compile-time type
+    /// parameter. Returns a pointer to the component's field data (already past <see cref="ComponentInfo.ComponentOverhead"/>); the caller reads
+    /// <c>ComponentStorageSize</c> bytes and decodes fields by offset. Backs <see cref="EntityRef.ReadRaw"/> for runtime tooling (the Workbench Data Browser).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal byte* ReadEcsComponentDataRaw(ComponentTable table, int componentTypeId, Type componentType, int chunkId)
+    {
+        var info = GetComponentInfoByTypeId(componentTypeId, componentType);
+        byte* ptr = table.StorageMode == StorageMode.Transient ? info.TransientCompContentAccessor.GetChunkAddress(chunkId) : info.CompContentAccessor.GetChunkAddress(chunkId);
+        return ptr + info.ComponentOverhead;
+    }
+
     /// <summary>Write component data via the existing ComponentInfo accessor cache. Returns mutable ref.
     /// For SingleVersion: atomically marks chunkId in DirtyBitmap for tick fence serialization.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

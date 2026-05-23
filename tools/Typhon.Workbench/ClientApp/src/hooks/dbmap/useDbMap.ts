@@ -33,6 +33,7 @@ export function useDbMap(sessionId: string | null) {
         ownerBytes.byteOffset,
         ownerBytes.byteLength >> 1,
       );
+      const pageRank = decodeBase64(region.pageRanks);
 
       return {
         databaseName: regions.databaseName,
@@ -47,6 +48,7 @@ export function useDbMap(sessionId: string | null) {
         segments: regions.segments,
         pageType,
         ownerSegmentId,
+        pageRank,
       };
     },
   });

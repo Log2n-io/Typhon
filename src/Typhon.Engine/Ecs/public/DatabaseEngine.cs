@@ -58,6 +58,9 @@ public struct ComponentR1
     public int SchemaRevision;
     public int FieldCount;
     public byte StorageMode;
+
+    /// <summary>AssemblyR1 row id (chunkId) of the assembly that declares this component. 0 = core engine assembly (implicit, never in the manifest).</summary>
+    public ushort AssemblyId;
 }
 
 /// <summary>
@@ -100,7 +103,34 @@ public struct ArchetypeR1
     /// <summary>Resume entity key counter on reopen (avoids scanning PK indexes).</summary>
     public long NextEntityKey;
 
+    /// <summary>AssemblyR1 row id (chunkId) of the assembly that declares this archetype. 0 = core engine assembly (implicit, never in the manifest).</summary>
+    public ushort AssemblyId;
+
     public const ushort NoParent = 0xFFFF;
+}
+
+/// <summary>
+/// Persisted identity of a .NET assembly that declares one or more components/archetypes stored in this database — the self-describing schema manifest.
+/// One entity per assembly. Stores identity (simple name + version + public-key-token), never a filename/path: the Workbench resolves the assembly by simple
+/// name at open time. The core engine assembly (Typhon.Engine) is intentionally excluded — it is always loaded — so it never gets a row.
+/// </summary>
+[Component(SchemaName, 1)]
+[StructLayout(LayoutKind.Sequential)]
+[PublicAPI]
+public struct AssemblyR1
+{
+    public const string SchemaName = "Typhon.Schema.Assembly";
+
+    /// <summary>Assembly simple name (e.g. "AntHill.Core") — the resolution key.</summary>
+    public String64 SimpleName;
+
+    public int VerMajor;
+    public int VerMinor;
+    public int VerBuild;
+    public int VerRevision;
+
+    /// <summary>Public-key-token packed little-endian into a u64; 0 = unsigned assembly.</summary>
+    public ulong PublicKeyToken;
 }
 
 /// <summary>
@@ -216,9 +246,12 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     internal const string BK_SystemSchemaRevision   = "SystemSchemaRevision";
     internal const string BK_SysComponentR1         = "sys.ComponentR1";
     internal const string BK_SysSchemaHistory       = "sys.SchemaHistory";
+    internal const string BK_SysAssemblyR1          = "sys.AssemblyR1";
+    internal const string BK_SpatialGridConfig      = "spatial.GridConfig";
     internal const string BK_NextFreeTSN            = "NextFreeTSN";
     internal const string BK_UowRegistrySPI         = "UowRegistrySPI";
     internal const string BK_CollectionFieldR1      = "collection.FieldR1";
+    internal const string BK_CollectionCount        = "collection.count";
     internal const string BK_UserSchemaVersion      = "UserSchemaVersion";
     internal const string BK_LastTickFenceLSN       = "LastTickFenceLSN";
     // ReSharper restore InconsistentNaming
@@ -237,6 +270,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
     private ComponentTable _componentsTable;
     private ComponentTable _schemaHistoryTable;
+    private ComponentTable _assembliesTable;
     private ConcurrentDictionary<Type, ComponentTable> _componentTableByType;
 
     /// <summary>Component schema names that underwent migration during this engine session. Used to invalidate stale EntityMaps.</summary>
@@ -272,8 +306,14 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             }
         }
     }
-    private Dictionary<string, (int ChunkId, ComponentR1 Comp)> _persistedComponents;
-    private Dictionary<ushort, (int ChunkId, ArchetypeR1 Arch)> _persistedArchetypes;
+    internal Dictionary<string, (int ChunkId, ComponentR1 Comp)> _persistedComponents;
+    internal Dictionary<ushort, (int ChunkId, ArchetypeR1 Arch)> _persistedArchetypes;
+
+    /// <summary>Persisted schema-assembly manifest, keyed by AssemblyId (= AssemblyR1 row chunkId). Loaded eagerly on open so it is readable schemaless.</summary>
+    internal Dictionary<ushort, (int ChunkId, AssemblyR1 Asm)> _persistedAssemblies;
+
+    /// <summary>Dedup index: assembly simple name → AssemblyId. Seeded from <see cref="_persistedAssemblies"/> on open; appended as new assemblies are persisted.</summary>
+    private Dictionary<string, ushort> _assemblyIdByName;
 
     /// <summary>Per-engine archetype runtime state, indexed by ArchetypeId. Separates per-engine mutable data from shared schema metadata.</summary>
     internal ArchetypeEngineState[] _archetypeStates;
@@ -2817,6 +2857,39 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     }
 
     /// <summary>
+    /// Persists the engine-wide <see cref="SpatialGridConfig"/> (world bounds, cell size, hysteresis — the 6 source floats; the rest is derived) so a generic
+    /// opener that never calls <see cref="ConfigureSpatialGrid"/> can reconstruct the grid and fully initialize cluster-spatial archetypes. Floats are stored as
+    /// their raw bit patterns in an Int6 bootstrap value.
+    /// </summary>
+    private void SaveSpatialGridConfig(SpatialGridConfig config)
+    {
+        MMF.Bootstrap.Set(BK_SpatialGridConfig, BootstrapDictionary.Value.FromInt6(
+            BitConverter.SingleToInt32Bits(config.WorldMin.X),
+            BitConverter.SingleToInt32Bits(config.WorldMin.Y),
+            BitConverter.SingleToInt32Bits(config.WorldMax.X),
+            BitConverter.SingleToInt32Bits(config.WorldMax.Y),
+            BitConverter.SingleToInt32Bits(config.CellSize),
+            BitConverter.SingleToInt32Bits(config.MigrationHysteresisRatio)));
+        MMF.SaveBootstrap();
+    }
+
+    /// <summary>Reads the persisted <see cref="SpatialGridConfig"/> written by <see cref="SaveSpatialGridConfig"/>; <see langword="false"/> when none was persisted.</summary>
+    private bool TryLoadSpatialGridConfig(out SpatialGridConfig config)
+    {
+        config = default;
+        if (!MMF.Bootstrap.TryGet(BK_SpatialGridConfig, out var v))
+        {
+            return false;
+        }
+        config = new SpatialGridConfig(
+            new System.Numerics.Vector2(BitConverter.Int32BitsToSingle(v.GetInt(0)), BitConverter.Int32BitsToSingle(v.GetInt(1))),
+            new System.Numerics.Vector2(BitConverter.Int32BitsToSingle(v.GetInt(2)), BitConverter.Int32BitsToSingle(v.GetInt(3))),
+            BitConverter.Int32BitsToSingle(v.GetInt(4)),
+            BitConverter.Int32BitsToSingle(v.GetInt(5)));
+        return true;
+    }
+
+    /// <summary>
     /// Load spatial index from BootstrapDictionary and attach to the ComponentTable.
     /// Called during database reopen for components with [SpatialIndex].
     /// </summary>
@@ -2989,6 +3062,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // is persisted to the system schema (needed for LoadPersistedArchetypes on reopen).
         RegisterComponentFromAccessor<ArchetypeR1>(cs);
 
+        // AssemblyR1 — the schema-assembly manifest. Registered after _componentsTable so its own ComponentR1 row persists during registration. Its rows are
+        // populated lazily as user components/archetypes are persisted (system components are core → AssemblyId 0, no rows).
+        RegisterComponentFromAccessor<AssemblyR1>(cs);
+        _assembliesTable = GetComponentTable<AssemblyR1>();
+
         using var guard = EpochGuard.Enter(EpochManager);
         var epoch = guard.Epoch;
 
@@ -3012,6 +3090,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             _schemaHistoryTable.CompRevTableSegment.RootPageIndex,
             _schemaHistoryTable.DefaultIndexSegment.RootPageIndex,
             _schemaHistoryTable.String64IndexSegment.RootPageIndex));
+        bootstrap.Set(BK_SysAssemblyR1, BootstrapDictionary.Value.FromInt4(
+            _assembliesTable.ComponentSegment.RootPageIndex,
+            _assembliesTable.CompRevTableSegment.RootPageIndex,
+            _assembliesTable.DefaultIndexSegment.RootPageIndex,
+            _assembliesTable.String64IndexSegment.RootPageIndex));
         bootstrap.SetLong(BK_NextFreeTSN, TransactionChain.NextFreeId);
 
         MMF.UnlatchPageExclusive(memPageIdx);
@@ -3061,6 +3144,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             SchemaRevision      = definition.Revision,
             FieldCount          = nonStaticCount,
             StorageMode         = (byte)table.StorageMode,
+            AssemblyId          = GetOrCreateAssemblyId(definition.POCOType.Assembly, cs),
         };
 
         var fieldList = new List<FieldR1>();
@@ -3094,6 +3178,67 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         var chunkId = SystemCrud.Create(_componentsTable, ref comp, EpochManager, cs);
         cs.SaveChanges();
         return (chunkId, comp, fieldList.ToArray());
+    }
+
+    /// <summary>
+    /// Returns the AssemblyR1 row id (chunkId) for <paramref name="asm"/>, creating the row on first use. The core engine assembly is excluded (returns 0) —
+    /// it is always loaded by any host, so it never belongs in the manifest, and excluding it also avoids a system-component bootstrap self-reference. Dedups on
+    /// simple name via <see cref="_assemblyIdByName"/> (seeded on open), so the same assembly is persisted once. Rides on the caller's <paramref name="cs"/>.
+    /// </summary>
+    private ushort GetOrCreateAssemblyId(System.Reflection.Assembly asm, ChangeSet cs)
+    {
+        if (asm == null || asm == typeof(DatabaseEngine).Assembly)
+        {
+            return 0; // core / implicit — never recorded in the manifest
+        }
+
+        _assemblyIdByName ??= new Dictionary<string, ushort>(StringComparer.OrdinalIgnoreCase);
+        _persistedAssemblies ??= new Dictionary<ushort, (int, AssemblyR1)>();
+
+        var an = asm.GetName();
+        var name = an.Name ?? asm.FullName ?? "";
+        if (_assemblyIdByName.TryGetValue(name, out var existing))
+        {
+            return existing;
+        }
+
+        if (_assembliesTable == null)
+        {
+            return 0; // pre-manifest database (file written before AssemblyR1 existed) — cannot record; degrade gracefully rather than fault
+        }
+
+        var v = an.Version ?? new Version(0, 0, 0, 0);
+        var row = new AssemblyR1
+        {
+            SimpleName     = (String64)name,
+            VerMajor       = v.Major,
+            VerMinor       = v.Minor,
+            VerBuild       = v.Build < 0 ? 0 : v.Build,
+            VerRevision    = v.Revision < 0 ? 0 : v.Revision,
+            PublicKeyToken = TokenToULong(an.GetPublicKeyToken()),
+        };
+
+        var chunkId = SystemCrud.Create(_assembliesTable, ref row, EpochManager, cs);
+        var id = (ushort)chunkId;
+        _assemblyIdByName[name] = id;
+        _persistedAssemblies[id] = (chunkId, row);
+        return id;
+    }
+
+    /// <summary>Packs an 8-byte public-key-token little-endian into a u64; 0 for an unsigned (empty/null) token.</summary>
+    internal static ulong TokenToULong(byte[] token) =>
+        token is { Length: 8 } ? System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(token) : 0UL;
+
+    /// <summary>Unpacks a u64 public-key-token back into 8 little-endian bytes; empty array for 0 (unsigned).</summary>
+    internal static byte[] ULongToToken(ulong token)
+    {
+        if (token == 0)
+        {
+            return [];
+        }
+        var b = new byte[8];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(b, token);
+        return b;
     }
 
     /// <summary>
@@ -3215,6 +3360,39 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         _schemaHistoryTable.WalTypeId = historyWalTypeId;
         _componentTableByWalTypeId.TryAdd(historyWalTypeId, _schemaHistoryTable);
 
+        // AssemblyR1 — the schema-assembly manifest. Loaded eagerly here (like ComponentR1, unlike ArchetypeR1) so GetRequiredAssemblies works on a schemaless
+        // open. Absent on databases written before the manifest existed — then the manifest stays empty and the open is simply schemaless.
+        _persistedAssemblies = new Dictionary<ushort, (int, AssemblyR1)>();
+        _assemblyIdByName = new Dictionary<string, ushort>(StringComparer.OrdinalIgnoreCase);
+        if (bootstrap.ContainsKey(BK_SysAssemblyR1))
+        {
+            DBD.CreateFromAccessor<AssemblyR1>();
+            var assemblyDef = DBD.GetComponent(AssemblyR1.SchemaName, 1);
+            var asmSPIs = bootstrap.Get(BK_SysAssemblyR1);
+            _assembliesTable = new ComponentTable(this, assemblyDef, this, asmSPIs.GetInt(), asmSPIs.GetInt(1), asmSPIs.GetInt(2), asmSPIs.GetInt(3));
+            _componentTableByType.TryAdd(typeof(AssemblyR1), _assembliesTable);
+
+            var asmWalTypeId = (ushort)_assembliesTable.ComponentSegment.RootPageIndex;
+            _assembliesTable.WalTypeId = asmWalTypeId;
+            _componentTableByWalTypeId.TryAdd(asmWalTypeId, _assembliesTable);
+
+            var asmSeg = _assembliesTable.ComponentSegment;
+            var asmCapacity = asmSeg.ChunkCapacity;
+            for (var chunkId = 1; chunkId < asmCapacity; chunkId++)
+            {
+                if (!asmSeg.IsChunkAllocated(chunkId))
+                {
+                    continue;
+                }
+                if (SystemCrud.Read(_assembliesTable, chunkId, out AssemblyR1 asm, EpochManager))
+                {
+                    var id = (ushort)chunkId;
+                    _persistedAssemblies[id] = (chunkId, asm);
+                    _assemblyIdByName[asm.SimpleName.AsString] = id;
+                }
+            }
+        }
+
         // Load the ComponentCollection segment for FieldR1
         var fieldCollectionSPI = bootstrap.GetInt(BK_CollectionFieldR1);
         if (fieldCollectionSPI != 0)
@@ -3225,6 +3403,23 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     Math.Max(sizeof(FieldR1) * ComponentCollectionItemCountPerChunk, sizeof(VariableSizedBufferRootHeader)));
                 var segment = MMF.LoadChunkBasedSegment(fieldCollectionSPI, stride);
                 _componentCollectionSegmentByStride.TryAdd(stride, segment);
+            }
+        }
+
+        // Load every persisted component-collection segment into the pool (keyed by stride) so later accesses — ArchetypeR1.ComponentNames, user component
+        // collections — reload the existing segment instead of allocating a fresh one (which would orphan the original). Runs before any collection is touched.
+        var collectionCount = bootstrap.GetInt(BK_CollectionCount);
+        for (var i = 0; i < collectionCount; i++)
+        {
+            if (!bootstrap.TryGet($"collection.{i}", out var cv))
+            {
+                continue;
+            }
+            var collectionStride = cv.GetInt(0);
+            var collectionSPI = cv.GetInt(1);
+            if (collectionSPI != 0 && !_componentCollectionSegmentByStride.ContainsKey(collectionStride))
+            {
+                _componentCollectionSegmentByStride.TryAdd(collectionStride, MMF.LoadChunkBasedSegment(collectionSPI, collectionStride));
             }
         }
 
@@ -3308,6 +3503,19 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         {
             MMF.Bootstrap.SetLong(BK_LastTickFenceLSN, _lastTickFenceLSN);
         }
+
+        // Persist every component-collection segment (stride → root page). Only FieldR1 had a dedicated key before; the rest (e.g. the String64 collection
+        // backing ArchetypeR1.ComponentNames) were re-allocated fresh on reopen, orphaning the originals — a page leak that also left those pages Unknown in
+        // storage introspection. Persisting the whole pool lets the reopen reload them in place.
+        var collections = _componentCollectionSegmentByStride;
+        MMF.Bootstrap.SetInt(BK_CollectionCount, collections.Count);
+        var collectionIndex = 0;
+        foreach (var kv in collections)
+        {
+            MMF.Bootstrap.Set($"collection.{collectionIndex}", BootstrapDictionary.Value.FromInt2(kv.Key, kv.Value.RootPageIndex));
+            collectionIndex++;
+        }
+
         MMF.SaveBootstrap(cs);
 
         MMF.UnlatchPageExclusive(memPageIdx);
@@ -3802,12 +4010,22 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     {
         ArchetypeRegistry.Freeze();
 
-        // Construct the engine-wide spatial grid if one was configured. A grid is only required when at least one cluster-eligible archetype has a spatial
-        // component (checked per-archetype below).
+        // Construct the engine-wide spatial grid. A grid is only required when at least one cluster-eligible archetype has a spatial component (checked
+        // per-archetype below). The config is persisted so a generic opener (e.g. the Workbench) that never calls ConfigureSpatialGrid can still reconstruct
+        // the grid and fully initialize the cluster-spatial archetypes — otherwise their cluster / entity-map segments stay unattributed in introspection.
         if (_pendingGridConfig.HasValue)
         {
-            _spatialGrid = new SpatialGrid(_pendingGridConfig.Value);
+            var gridConfig = _pendingGridConfig.Value;
+            _spatialGrid = new SpatialGrid(gridConfig);
             _pendingGridConfig = null;
+            if (!MMF.Bootstrap.ContainsKey(BK_SpatialGridConfig))
+            {
+                SaveSpatialGridConfig(gridConfig);
+            }
+        }
+        else if (TryLoadSpatialGridConfig(out var persistedGridConfig))
+        {
+            _spatialGrid = new SpatialGrid(persistedGridConfig);
         }
 
         // Ensure ArchetypeR1 is registered in this session. On a new database CreateSystemSchemaR1 already registered it; on reopen LoadSystemSchemaR1 stops
@@ -4493,6 +4711,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
             // Build and persist the ArchetypeR1 entity
             var arch = BuildArchetypeR1(meta);
+            arch.AssemblyId = GetOrCreateAssemblyId(meta.ArchetypeType.Assembly, cs);
 
             // Populate ComponentNames collection via VSBS
             var names = GetArchetypeComponentNames(meta);

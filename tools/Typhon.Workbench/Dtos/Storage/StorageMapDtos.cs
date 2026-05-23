@@ -34,7 +34,8 @@ public record StorageRegionDto(
     string Lod,
     int PageCount,
     string PageTypes,
-    string OwnerSegmentIds);
+    string OwnerSegmentIds,
+    string PageRanks);
 
 /// <summary>The top levels of the Hilbert aggregate pyramid — the response of <c>GET /dbmap/overview</c>.</summary>
 public record StorageOverviewDto(

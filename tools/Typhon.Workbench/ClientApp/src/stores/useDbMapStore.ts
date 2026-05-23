@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
-import type { DbMapEncoding, DbMapLens } from '@/libs/dbmap/types';
+import type { DbMapEncoding, DbMapLens, DbMapPageOrder } from '@/libs/dbmap/types';
 import type { DbMapBookmark } from '@/libs/dbmap/dbMapBookmarks';
 import type { DbMapFilter } from '@/libs/dbmap/dbMapFilter';
 
@@ -15,6 +15,8 @@ export type DbMapTab = 'legend' | 'regions' | 'bookmarks';
 interface DbMapStoreState {
   /** The active base encoding. */
   encoding: DbMapEncoding;
+  /** How file pages are laid out on the 2D grid — Hilbert curve (locality) or row-major sequential. */
+  pageOrder: DbMapPageOrder;
   /** Whether the segment-boundary overlay is shown. */
   segmentOverlay: boolean;
   /**
@@ -43,6 +45,7 @@ interface DbMapStoreState {
   /** Saved viewports, keyed by database name — the only persisted slice (§13 A4 AC3). */
   bookmarks: Record<string, DbMapBookmark[]>;
   setEncoding: (encoding: DbMapEncoding) => void;
+  setPageOrder: (pageOrder: DbMapPageOrder) => void;
   toggleSegmentOverlay: () => void;
   toggleResidencyOverlay: () => void;
   toggleRegionCaptions: () => void;
@@ -77,6 +80,7 @@ export const useDbMapStore = create<DbMapStoreState>()(
   persist(
     (set) => ({
       encoding: 'pageType',
+      pageOrder: 'hilbert',
       segmentOverlay: false,
       residencyOverlay: true,
       regionCaptions: false,
@@ -88,6 +92,7 @@ export const useDbMapStore = create<DbMapStoreState>()(
       filter: null,
       bookmarks: {},
       setEncoding: (encoding) => set({ encoding }),
+      setPageOrder: (pageOrder) => set({ pageOrder }),
       toggleSegmentOverlay: () => set((s) => ({ segmentOverlay: !s.segmentOverlay })),
       toggleResidencyOverlay: () => set((s) => ({ residencyOverlay: !s.residencyOverlay })),
       toggleRegionCaptions: () => set((s) => ({ regionCaptions: !s.regionCaptions })),
@@ -129,6 +134,7 @@ export const useDbMapStore = create<DbMapStoreState>()(
       partialize: (s) => ({
         bookmarks: s.bookmarks,
         encoding: s.encoding,
+        pageOrder: s.pageOrder,
         lens: s.lens,
         segmentOverlay: s.segmentOverlay,
         residencyOverlay: s.residencyOverlay,

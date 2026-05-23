@@ -1,3 +1,4 @@
+using Typhon.Workbench.DataBrowser;
 using Typhon.Workbench.Fs;
 using Typhon.Workbench.Schema;
 using Typhon.Workbench.Security;
@@ -18,6 +19,8 @@ public static class ServiceExtensions
         services.AddSingleton<DemoDataProvider>();
         services.AddSingleton<FileBrowserService>();
         services.AddSingleton<SchemaService>();
+        // Module 06: Data Browser — read-only entity enumeration + component decode over the live engine.
+        services.AddSingleton<DataBrowserService>();
         // Module 15: Database File Map — read-only storage introspection of the live engine.
         services.AddSingleton<StorageMapService>();
         // #302 Phase 5: file-backed user options (editor preference, workspace root). Singleton because the

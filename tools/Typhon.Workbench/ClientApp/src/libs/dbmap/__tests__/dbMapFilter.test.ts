@@ -17,6 +17,7 @@ function makeData(types: number[]): DbMapData {
     segments: [],
     pageType: Uint8Array.from(types),
     ownerSegmentId: new Uint16Array(types.length),
+    pageRank: new Uint8Array(types.length),
   };
 }
 

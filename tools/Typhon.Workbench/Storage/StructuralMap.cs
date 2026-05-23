@@ -35,6 +35,13 @@ internal sealed class StructuralMap
     /// <summary>Dense 16-bit owning-segment id per <em>cell</em> (<see cref="NoSegment"/> when unowned).</summary>
     public required ushort[] OwnerSegmentId { get; init; }
 
+    /// <summary>
+    /// Normalized position of each <em>cell</em> within its owning segment's directory (logical) page order — 0 = first
+    /// page of the segment, 255 = last. Lets the Owning-Segment encoding shade each page's luminosity by its rank so
+    /// the page order within a segment is legible despite the Hilbert layout. 0 for unowned cells (not shown there).
+    /// </summary>
+    public required byte[] PageRank { get; init; }
+
     public required StorageSegmentInfo[] Segments { get; init; }
 
     /// <summary>Number of descriptor cells — <c>ceil(DataFilePageCount / DownSampleFactor)</c>.</summary>

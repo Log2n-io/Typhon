@@ -1,6 +1,6 @@
 import { Crosshair, RefreshCw } from 'lucide-react';
 import { useDbMapStore } from '@/stores/useDbMapStore';
-import type { DbMapEncoding, DbMapLens } from '@/libs/dbmap/types';
+import type { DbMapEncoding, DbMapLens, DbMapPageOrder } from '@/libs/dbmap/types';
 import { DbMapSearchBox } from './DbMapSearchBox';
 import { DbMapFilterMenu } from './DbMapFilterMenu';
 import { DbMapExportMenu } from './DbMapExportMenu';
@@ -29,6 +29,8 @@ const SELECT_CLASS = 'rounded border border-border bg-card px-1.5 py-0.5 text-[1
 export function DbMapToolbar(props: DbMapToolbarProps) {
   const encoding = useDbMapStore((s) => s.encoding);
   const setEncoding = useDbMapStore((s) => s.setEncoding);
+  const pageOrder = useDbMapStore((s) => s.pageOrder);
+  const setPageOrder = useDbMapStore((s) => s.setPageOrder);
   const lens = useDbMapStore((s) => s.lens);
   const setLens = useDbMapStore((s) => s.setLens);
   const segmentOverlay = useDbMapStore((s) => s.segmentOverlay);
@@ -36,6 +38,18 @@ export function DbMapToolbar(props: DbMapToolbarProps) {
 
   return (
     <div className="flex items-center gap-2 border-b border-border px-3 py-1.5">
+      <label className="text-[11px] text-muted-foreground">Order</label>
+      <select
+        className={SELECT_CLASS}
+        value={pageOrder}
+        onChange={(e) => setPageOrder(e.target.value as DbMapPageOrder)}
+        data-testid="dbmap-page-order"
+        title="Page layout — Hilbert curve (2D locality) or row-major sequential"
+      >
+        <option value="hilbert">Hilbert</option>
+        <option value="sequential">Sequential</option>
+      </select>
+
       <label className="text-[11px] text-muted-foreground">Encoding</label>
       <select
         className={SELECT_CLASS}

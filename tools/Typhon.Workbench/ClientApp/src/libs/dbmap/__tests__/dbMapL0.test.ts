@@ -24,6 +24,7 @@ function makeData(pageType: Uint8Array, ownerSegmentId?: Uint16Array, segments: 
     segments,
     pageType,
     ownerSegmentId: owners,
+    pageRank: new Uint8Array(pageType.length),
   };
 }
 

@@ -137,6 +137,86 @@ public unsafe partial class Transaction
         return total;
     }
 
+    /// <summary>
+    /// Non-generic enumeration of every entity in a single exact archetype, visible at this transaction's snapshot (TSN). The runtime counterpart to
+    /// <see cref="Query{TArchetype}"/> for tooling that only knows the archetype by its id at runtime (e.g. the Workbench Data Browser). Walks the archetype's
+    /// entity map directly, so it works for both cluster and legacy storage. Entities pending destroy in this transaction are excluded; entities spawned (and not
+    /// yet committed) in this transaction are NOT included — use the typed <see cref="Query{TArchetype}"/> path when read-your-own-writes is required.
+    /// <para>
+    /// Prefer the generic <see cref="Query{TArchetype}"/> whenever the archetype is known at compile time: it adds Tier-1/2/3 filtering, ordering, and paging,
+    /// and avoids materializing a <see cref="List{T}"/> of every id. Reach for this overload only when the archetype type is not available statically.
+    /// </para>
+    /// </summary>
+    /// <param name="archetypeId">The exact archetype to enumerate (no subtree / polymorphic expansion).</param>
+    /// <returns>
+    /// Entity ids in entity-map iteration order — deterministic for a given snapshot. Empty when the archetype id is unknown or has no engine state. Pair each
+    /// id with <see cref="EntityAccessor.Open"/> + <see cref="EntityRef.ReadRaw"/> to decode component values without a compile-time type.
+    /// </returns>
+    public List<EntityId> EnumerateArchetypeEntities(ushort archetypeId)
+    {
+        var results = new List<EntityId>();
+        var states = _dbe._archetypeStates;
+        if (states == null || archetypeId >= states.Length)
+        {
+            return results;
+        }
+
+        var engineState = states[archetypeId];
+        if (engineState?.EntityMap == null)
+        {
+            return results;
+        }
+
+        var accessor = engineState.EntityMap.Segment.CreateChunkAccessor();
+        var action = new ArchetypeEntityCollectAction
+        {
+            ArchetypeId = archetypeId,
+            TxTsn = TSN,
+            Results = results,
+            PendingDestroys = _pendingDestroys,
+        };
+        engineState.EntityMap.ForEachEntry(ref accessor, ref action);
+        accessor.Dispose();
+        return results;
+    }
+
+    /// <summary>
+    /// <see cref="RawValuePagedHashMap{TKey,TStore}.IEntryAction{TKey}"/> for <see cref="EnumerateArchetypeEntities"/>: collects every entity-map entry visible
+    /// at <see cref="TxTsn"/> (committed and not yet died), skipping ids pending destroy in the owning transaction. Mirrors the visibility filter in EcsQuery's
+    /// broad-scan action; no Tier-2 (enabled/disabled) filtering — the Data Browser shows every entity of the archetype.
+    /// </summary>
+    private struct ArchetypeEntityCollectAction : RawValuePagedHashMap<long, PersistentStore>.IEntryAction<long>
+    {
+        public ushort ArchetypeId;
+        public long TxTsn;
+        public List<EntityId> Results;
+        public HashSet<EntityId> PendingDestroys;
+
+        public bool Process(long key, byte* value)
+        {
+            ref var header = ref EntityRecordAccessor.GetHeader(value);
+
+            // MVCC visibility: not-yet-born or already-died entities are invisible at this snapshot.
+            if (header.BornTSN != 0 && header.BornTSN > TxTsn)
+            {
+                return true;
+            }
+            if (header.DiedTSN != 0 && header.DiedTSN <= TxTsn)
+            {
+                return true;
+            }
+
+            var entityId = new EntityId(key, ArchetypeId);
+            if (PendingDestroys != null && PendingDestroys.Contains(entityId))
+            {
+                return true;
+            }
+
+            Results.Add(entityId);
+            return true;
+        }
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // Spawn
     // ═══════════════════════════════════════════════════════════════════════

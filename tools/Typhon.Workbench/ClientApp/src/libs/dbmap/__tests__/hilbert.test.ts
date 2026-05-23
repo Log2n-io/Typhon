@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { hilbertD2XY, hilbertOrderFor, hilbertSide, hilbertXY2D } from '../hilbert';
+import { hilbertD2XY, hilbertOrderFor, hilbertSide, hilbertXY2D, pageToXY, xyToPage } from '../hilbert';
 
 describe('hilbert', () => {
   it('hilbertSide is 2^order', () => {
@@ -50,5 +50,38 @@ describe('hilbert', () => {
       const b = hilbertD2XY(order, d);
       expect(Math.abs(a.x - b.x) + Math.abs(a.y - b.y)).toBe(1);
     }
+  });
+});
+
+describe('page-order dispatchers', () => {
+  it('hilbert mode matches the raw Hilbert functions', () => {
+    const order = 4;
+    const side = hilbertSide(order);
+    for (let d = 0; d < side * side; d++) {
+      expect(pageToXY(order, 'hilbert', d)).toEqual(hilbertD2XY(order, d));
+    }
+    expect(xyToPage(order, 'hilbert', 3, 5)).toBe(hilbertXY2D(order, 3, 5));
+  });
+
+  it('sequential mode is row-major and round-trips exactly', () => {
+    const order = 4;
+    const side = hilbertSide(order);
+    for (let d = 0; d < side * side; d++) {
+      const { x, y } = pageToXY(order, 'sequential', d);
+      expect(x).toBe(d % side);
+      expect(y).toBe(Math.floor(d / side));
+      expect(xyToPage(order, 'sequential', x, y)).toBe(d);
+    }
+  });
+
+  it('sequential visits every cell exactly once', () => {
+    const order = 3;
+    const side = hilbertSide(order);
+    const seen = new Set<number>();
+    for (let d = 0; d < side * side; d++) {
+      const { x, y } = pageToXY(order, 'sequential', d);
+      seen.add(y * side + x);
+    }
+    expect(seen.size).toBe(side * side);
   });
 });

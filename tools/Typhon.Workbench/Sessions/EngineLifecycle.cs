@@ -132,14 +132,21 @@ public sealed class EngineLifecycle : IDisposable
             var registry = sp.GetRequiredService<IResourceRegistry>();
             var allocator = sp.GetRequiredService<IMemoryAllocator>();
 
+            // Schema DLLs to load: an explicit (user-specified) list wins; otherwise resolve from the database's persisted assembly manifest
+            // (engine.GetRequiredAssemblies, populated on every open including schemaless) by locating each assembly next to the database file.
+            var missingAssemblies = new List<string>();
+            var resolvedSchemaPaths = schemaDllPaths.Length > 0
+                ? schemaDllPaths
+                : ResolveManifestAssemblies(engine, directory, missingAssemblies);
+
             SchemaCompatibility.State state = SchemaCompatibility.State.Ready;
             SchemaCompatibility.Diagnostic[] diagnostics = [];
             int loaded = 0;
 
-            if (schemaDllPaths.Length > 0)
+            if (resolvedSchemaPaths.Length > 0)
             {
                 alc = new WorkbenchAssemblyLoadContext($"Workbench-Session-{Guid.NewGuid():N}");
-                var loadedSchema = SchemaLoader.LoadSchemaDlls(alc, schemaDllPaths);
+                var loadedSchema = SchemaLoader.LoadSchemaDlls(alc, resolvedSchemaPaths);
                 var result = SchemaCompatibility.ClassifyAndRegister(engine, loadedSchema);
                 state = result.State;
                 diagnostics = result.Diagnostics;
@@ -201,6 +208,23 @@ public sealed class EngineLifecycle : IDisposable
                 }
             }
 
+            // Any manifest assembly we couldn't locate → surface it as a diagnostic and a non-Ready state so the UI banner names the missing assembly
+            // rather than silently opening schemaless (which renders the data as unclassified).
+            if (missingAssemblies.Count > 0)
+            {
+                foreach (var name in missingAssemblies)
+                {
+                    diagnostics = [.. diagnostics, new SchemaCompatibility.Diagnostic(
+                        name,
+                        "missing_assembly",
+                        $"Assembly '{name}' is referenced by this database but was not found next to '{Path.GetFileName(fullPath)}'. Place the assembly there to load the schema.")];
+                }
+                if (state == SchemaCompatibility.State.Ready)
+                {
+                    state = SchemaCompatibility.State.Incompatible;
+                }
+            }
+
             return new EngineLifecycle(sp, alc, engine, registry, allocator, fullPath, state, loaded, diagnostics);
         }
         catch (WorkbenchException)
@@ -219,6 +243,72 @@ public sealed class EngineLifecycle : IDisposable
             }
             throw new WorkbenchException(400, "engine_open_failed", $"Failed to open database: {ex.Message}", ex);
         }
+    }
+
+    /// <summary>
+    /// Resolves the database's persisted assembly manifest to on-disk DLL paths, all within <paramref name="directory"/> (the database file's own directory).
+    /// Each assembly is located by simple name: first the fast path <c>{SimpleName}.dll</c>, then a metadata name-match over every <c>*.dll</c> in the directory
+    /// (so a versioned or <c>*.schema.dll</c>-named file still resolves by its real assembly name). Names that resolve to no file are appended to
+    /// <paramref name="missing"/>. The core engine assembly is never in the manifest, so it is never sought here.
+    /// </summary>
+    private static string[] ResolveManifestAssemblies(DatabaseEngine engine, string directory, List<string> missing)
+    {
+        var required = engine.GetRequiredAssemblies();
+        if (required.Count == 0)
+        {
+            return [];
+        }
+
+        var paths = new List<string>(required.Count);
+        Dictionary<string, string> byMetadataName = null; // built lazily on the first fast-path miss
+        foreach (var an in required)
+        {
+            var name = an.Name;
+            if (string.IsNullOrEmpty(name))
+            {
+                continue;
+            }
+
+            var direct = Path.Combine(directory, name + ".dll");
+            if (File.Exists(direct))
+            {
+                paths.Add(direct);
+                continue;
+            }
+
+            byMetadataName ??= BuildAssemblyNameIndex(directory);
+            if (byMetadataName.TryGetValue(name, out var resolved))
+            {
+                paths.Add(resolved);
+                continue;
+            }
+
+            missing.Add(name);
+        }
+
+        return paths.ToArray();
+    }
+
+    /// <summary>Indexes every managed <c>*.dll</c> in <paramref name="directory"/> by its assembly simple name (metadata only — no assembly is loaded).</summary>
+    private static Dictionary<string, string> BuildAssemblyNameIndex(string directory)
+    {
+        var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var dll in Directory.EnumerateFiles(directory, "*.dll", SearchOption.TopDirectoryOnly))
+        {
+            try
+            {
+                var name = System.Reflection.AssemblyName.GetAssemblyName(dll).Name;
+                if (name != null)
+                {
+                    map.TryAdd(name, dll);
+                }
+            }
+            catch
+            {
+                // Not a managed assembly (native DLL, corrupt, etc.) — skip it.
+            }
+        }
+        return map;
     }
 
     private static IOException FindIOException(Exception ex)

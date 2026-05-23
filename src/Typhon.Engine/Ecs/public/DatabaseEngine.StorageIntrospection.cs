@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using System.Runtime.CompilerServices;
 
 namespace Typhon.Engine;
@@ -83,6 +84,36 @@ public partial class DatabaseEngine
 
     /// <summary>Total byte size of the write-ahead log across all segment files (0 when no WAL is active).</summary>
     public long GetWalTotalBytes() => WalManager?.SegmentManager?.TotalWalBytes ?? 0L;
+
+    /// <summary>
+    /// The schema-assembly manifest persisted in this database: the identity of every .NET assembly that declares a stored component or archetype. Read from the
+    /// <see cref="AssemblyR1"/> catalog, which is loaded on every open (including schemaless), so this is available without any user schema DLL. The core engine
+    /// assembly is intentionally excluded — it is always loaded. Consumed by tooling (the Workbench) to locate and load the schema assemblies a file depends on.
+    /// </summary>
+    public IReadOnlyList<AssemblyName> GetRequiredAssemblies()
+    {
+        var result = new List<AssemblyName>();
+        var persisted = _persistedAssemblies;
+        if (persisted == null)
+        {
+            return result;
+        }
+        foreach (var kvp in persisted)
+        {
+            var a = kvp.Value.Asm;
+            var an = new AssemblyName(a.SimpleName.AsString)
+            {
+                Version = new Version(a.VerMajor, a.VerMinor, a.VerBuild, a.VerRevision),
+            };
+            var token = ULongToToken(a.PublicKeyToken);
+            if (token.Length == 8)
+            {
+                an.SetPublicKeyToken(token);
+            }
+            result.Add(an);
+        }
+        return result;
+    }
 
     /// <summary>
     /// Resolves the cluster memory layout for the cluster segment whose root page is <paramref name="clusterSegmentRootPage"/>. Used by the Database File Map

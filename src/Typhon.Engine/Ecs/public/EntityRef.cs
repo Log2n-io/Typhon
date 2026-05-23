@@ -1,3 +1,4 @@
+using System;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using JetBrains.Annotations;
@@ -388,6 +389,80 @@ public unsafe ref struct EntityRef
         var table2 = _engineState.SlotToComponentTable[slot];
         value = _accessor.ReadEcsComponentData<T>(table2, chunkId2);
         return true;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Non-generic / runtime access — for tooling that decodes by field layout
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// <summary>Number of component slots declared by this entity's archetype. Slots are addressable <c>[0, ComponentCount)</c>.</summary>
+    public int ComponentCount => _archetype.ComponentCount;
+
+    /// <summary>
+    /// The registered name of the component at <paramref name="slot"/> — matches <c>ComponentTable.Definition.Name</c> (the join key for the schema layout).
+    /// Pairs with <see cref="ReadRaw"/> for runtime, non-generic component decode.
+    /// </summary>
+    public string GetComponentName(int slot)
+    {
+        if ((uint)slot >= (uint)_archetype.ComponentCount)
+        {
+            throw new ArgumentOutOfRangeException(nameof(slot));
+        }
+        return _engineState.SlotToComponentTable[slot].Definition.Name;
+    }
+
+    /// <summary>
+    /// Read the raw storage bytes of the component at <paramref name="slot"/> — the non-generic counterpart to <see cref="Read{T}()"/> for tooling that decodes
+    /// components by field layout at runtime (e.g. the Workbench Data Browser). The returned span points directly into mapped page / cluster memory (zero-copy)
+    /// and is valid only while this <see cref="EntityRef"/> is alive. Its length is the component's storage size; field values are decoded by the caller using
+    /// the component's field offsets. MVCC-correct: Versioned slots resolve to the content visible at the owning transaction's snapshot. Works regardless of the
+    /// component's enabled state — query <see cref="IsEnabled(byte)"/> separately to render disabled components.
+    /// <para>
+    /// Prefer the typed <see cref="Read{T}()"/> / <see cref="TryRead{T}(out T)"/> whenever the component type is known at compile time — they return a typed
+    /// (zero-copy) ref with no manual offset decoding. Reach for <see cref="ReadRaw"/> only when the component type is not available statically.
+    /// </para>
+    /// </summary>
+    public ReadOnlySpan<byte> ReadRaw(int slot)
+    {
+        if ((uint)slot >= (uint)_archetype.ComponentCount)
+        {
+            throw new ArgumentOutOfRangeException(nameof(slot));
+        }
+
+        var table = _engineState.SlotToComponentTable[slot];
+        int size = table.Definition.ComponentStorageSize;
+
+        if (_clusterBase != null)
+        {
+            // Transient slot: TransientStore cluster segment (mixed archetypes; for pure-T, _clusterBase IS the TS base so this branch is skipped).
+            if (_transientClusterBase != null && (_archetype.TransientSlotMask & (1 << slot)) != 0)
+            {
+                byte* tp = _transientClusterBase + _clusterLayout.ComponentOffset(slot) + _clusterSlotIndex * _clusterLayout.ComponentSize(slot);
+                return new ReadOnlySpan<byte>(tp, size);
+            }
+            // Versioned slot: read from the content chunk resolved by the revision-chain walk (MVCC-correct), not the cluster HEAD cache.
+            if ((_archetype.VersionedSlotMask & (1 << slot)) != 0)
+            {
+                int vChunkId = _locations[slot];
+                if (vChunkId == 0)
+                {
+                    return default;
+                }
+                byte* vp = _accessor.ReadEcsComponentDataRaw(table, _archetype._componentTypeIds[slot], _archetype._slotToComponentType[slot], vChunkId);
+                return new ReadOnlySpan<byte>(vp, size);
+            }
+            // SV cluster slot: direct SoA pointer.
+            byte* cp = _clusterBase + _clusterLayout.ComponentOffset(slot) + _clusterSlotIndex * _clusterLayout.ComponentSize(slot);
+            return new ReadOnlySpan<byte>(cp, size);
+        }
+
+        int chunkId = _locations[slot];
+        if (chunkId == 0)
+        {
+            return default;
+        }
+        byte* p = _accessor.ReadEcsComponentDataRaw(table, _archetype._componentTypeIds[slot], _archetype._slotToComponentType[slot], chunkId);
+        return new ReadOnlySpan<byte>(p, size);
     }
 
     /// <summary>Disable a component by handle. Stages the change for commit.</summary>

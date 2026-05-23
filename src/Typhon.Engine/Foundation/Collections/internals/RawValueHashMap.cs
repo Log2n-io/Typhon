@@ -1045,37 +1045,121 @@ unsafe class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStore> where
     }
 
     /// <summary>
-    /// Iterate all live entries in the hash map, calling <paramref name="action"/> for each.
-    /// Uses OLC read protocol for thread safety. Entries are visited in bucket order (cache-friendly).
+    /// Iterate all live entries in the hash map, calling <paramref name="action"/> for each, under the OLC read protocol so the
+    /// scan is safe against concurrent writers (insert / overflow append / bucket split). Each bucket is read optimistically into
+    /// a scratch buffer; if a concurrent writer bumps the bucket's head version — or the directory splits — mid-read, the bucket
+    /// is re-read. Entries are handed to <paramref name="action"/> only once a consistent snapshot of the bucket has been
+    /// captured: the callback may have side effects (it collects / invokes), so it must never observe a torn read.
+    /// <para>
+    /// Snapshot semantics: an entry present for the whole scan is visited exactly once; an entry concurrently inserted, removed,
+    /// or relocated (by a split) during the scan may or may not be visited. Callers that need a fully consistent view must run
+    /// against a quiescent map (the engine's broad-scan query path already does — it runs on the owning transaction thread).
+    /// Buckets are visited in directory order (cache-friendly).
+    /// </para>
     /// </summary>
-    /// <returns>Number of entries visited.</returns>
+    /// <returns>Number of entries visited (handed to <paramref name="action"/>).</returns>
     internal int ForEachEntry<TAction>(ref ChunkAccessor<TStore> accessor, ref TAction action) where TAction : struct, IEntryAction<TKey>
     {
         int visited = 0;
         var (_, _, bucketCount) = ReadMeta();
 
+        // Per-bucket optimistic snapshot buffers. The value buffer lives on the pinned object heap so the byte* handed to
+        // action.Process stays valid without a fixed region spanning the (retryable) read. Both grow on demand to the largest
+        // bucket seen — a single small allocation amortised across the whole O(n) scan.
+        int bufCap = _bucketCapacity * 2;
+        var keyBuf = new TKey[bufCap];
+        var valBuf = GC.AllocateUninitializedArray<byte>(bufCap * _valueSize, pinned: true);
+        byte* valPtr = (byte*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(valBuf));
+
         for (int b = 0; b < bucketCount; b++)
         {
-            int chunkId = GetBucketChunkId(b, ref accessor);
-
-            while (chunkId != -1)
+            while (true)   // OLC retry for this bucket
             {
-                byte* addr = accessor.GetChunkAddress(chunkId);
-                ref readonly var header = ref GetHeader(addr);
-                int count = header.EntryCount;
-                TKey* keys = KeysPtr(addr);
-
-                for (int i = 0; i < count; i++)
+                // Re-read fresh each attempt: a concurrent writer can grow the segment (raising the capacity) mid-scan, so a
+                // legitimately-valid head/overflow chunk id may exceed a stale snapshot — caching it would livelock the retry.
+                int chunkCapacity = Segment.ChunkCapacity;
+                long packed = PackedMeta;
+                int headId = GetBucketChunkId(b, ref accessor);
+                if (headId < 0)
                 {
-                    byte* valuePtr = ValueAt(addr, i);
-                    if (!action.Process(keys[i], valuePtr))
+                    break;   // empty bucket
+                }
+                if ((uint)headId >= (uint)chunkCapacity)
+                {
+                    continue;   // torn directory read — retry
+                }
+
+                byte* headAddr = accessor.GetChunkAddress(headId);
+                var latch = new OlcLatch(ref GetHeader(headAddr).OlcVersion);
+                int version = latch.ReadVersion();
+                if (version == 0)
+                {
+                    continue;   // bucket write-locked — retry
+                }
+
+                // Optimistically buffer the whole chain. Counts are clamped to _bucketCapacity and chunk ids are range-checked,
+                // so a torn read can never index past a chunk (ValueAt assert) or follow a wild OverflowChunkId; the version
+                // validation below discards any inconsistent snapshot before it reaches the callback.
+                int n = 0;
+                bool retry = false;
+                int chunkId = headId;
+                for (int walk = 0; chunkId >= 0; walk++)
+                {
+                    if ((uint)chunkId >= (uint)chunkCapacity || walk > chunkCapacity)
+                    {
+                        retry = true;   // torn OverflowChunkId or cycle from a repurposed chunk
+                        break;
+                    }
+
+                    byte* addr = accessor.GetChunkAddress(chunkId);
+                    ref readonly var header = ref GetHeader(addr);
+                    int rawCount = header.EntryCount;
+                    int count = rawCount <= _bucketCapacity ? rawCount : _bucketCapacity;
+                    int nextId = header.OverflowChunkId;
+
+                    if (n + count > bufCap)
+                    {
+                        bufCap = Math.Max(bufCap * 2, n + count);
+                        keyBuf = new TKey[bufCap];
+                        valBuf = GC.AllocateUninitializedArray<byte>(bufCap * _valueSize, pinned: true);
+                        valPtr = (byte*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(valBuf));
+                        retry = true;   // restart the bucket with the larger buffer
+                        break;
+                    }
+
+                    TKey* keys = KeysPtr(addr);
+                    for (int i = 0; i < count; i++)
+                    {
+                        keyBuf[n] = keys[i];
+                        Unsafe.CopyBlock(valPtr + n * _valueSize, ValueAt(addr, i), (uint)_valueSize);
+                        n++;
+                    }
+
+                    chunkId = nextId;
+                }
+
+                if (retry)
+                {
+                    continue;
+                }
+
+                // Validate the bucket stayed quiescent for the whole read: no writer bumped the head version, no split changed
+                // the directory. On failure, re-read the bucket from the head.
+                if (!latch.ValidateVersion(version) || PackedMeta != packed)
+                {
+                    continue;
+                }
+
+                for (int i = 0; i < n; i++)
+                {
+                    if (!action.Process(keyBuf[i], valPtr + i * _valueSize))
                     {
                         return visited;
                     }
                     visited++;
                 }
 
-                chunkId = header.OverflowChunkId;
+                break;   // bucket complete
             }
         }
 

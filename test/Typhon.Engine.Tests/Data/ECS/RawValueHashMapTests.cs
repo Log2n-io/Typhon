@@ -2,6 +2,8 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using NUnit.Framework;
 using System;
+using System.Collections.Generic;
+using System.Threading;
 
 namespace Typhon.Engine.Tests;
 
@@ -524,5 +526,167 @@ unsafe class RawValuePagedHashMapTests
 
         Assert.That(EntityRecordAccessor.GetHeader(readBuf).BornTSN, Is.EqualTo(largeTsn));
         Assert.That(EntityRecordAccessor.GetHeader(readBuf).DiedTSN, Is.EqualTo(largeTsn - 1000));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ForEachEntry (OLC enumeration)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // Collects every key the scan visits — used to assert completeness on a quiescent map.
+    private struct KeyCollector : RawValuePagedHashMap<long, PersistentStore>.IEntryAction<long>
+    {
+        public List<long> Keys;
+        public bool Process(long key, byte* value)
+        {
+            Keys.Add(key);
+            return true;
+        }
+    }
+
+    // Asserts every visited key is a real, in-range key seen exactly once: a torn read (the bug this guards) would surface an
+    // out-of-range key or a duplicate.
+    private struct RangeValidator : RawValuePagedHashMap<long, PersistentStore>.IEntryAction<long>
+    {
+        public long MaxKey;
+        public HashSet<long> Seen;
+        public bool Ok;
+        public bool Process(long key, byte* value)
+        {
+            if (key < 1 || key > MaxKey || !Seen.Add(key))
+            {
+                Ok = false;
+            }
+            return true;
+        }
+    }
+
+    [Test]
+    public void ForEachEntry_Quiescent_VisitsEveryEntryOnce()
+    {
+        using var mpmmf = _serviceProvider.GetRequiredService<ManagedPagedMMF>();
+        var em = _serviceProvider.GetRequiredService<EpochManager>();
+        int valueSize = EntityRecordAccessor.RecordSize(2);
+        int stride = RawValuePagedHashMap<long, PersistentStore>.RecommendedStride(valueSize);
+        var segment = mpmmf.AllocateChunkBasedSegment(PageBlockType.None, 10, stride);
+        var map = RawValuePagedHashMap<long, PersistentStore>.Create(segment, 4, valueSize);
+
+        const int total = 2000; // forces many splits + overflow chains from the n0=4 start
+        byte* record = stackalloc byte[valueSize];
+        EntityRecordAccessor.InitializeRecord(record, 2);
+        using (EpochGuard.Enter(em))
+        {
+            var accessor = segment.CreateChunkAccessor();
+            for (long k = 1; k <= total; k++)
+            {
+                map.Insert(k, record, ref accessor, null);
+            }
+            accessor.Dispose();
+        }
+
+        var collector = new KeyCollector { Keys = new List<long>(total) };
+        using (EpochGuard.Enter(em))
+        {
+            var accessor = segment.CreateChunkAccessor();
+            int visited = map.ForEachEntry(ref accessor, ref collector);
+            accessor.Dispose();
+            Assert.That(visited, Is.EqualTo(total));
+        }
+
+        Assert.That(collector.Keys, Has.Count.EqualTo(total));
+        Assert.That(new HashSet<long>(collector.Keys), Has.Count.EqualTo(total), "no duplicates");
+        Assert.That(collector.Keys, Is.All.InRange(1L, total));
+    }
+
+    // Regression for the Workbench Data Browser crash: ForEachEntry must honour the OLC read protocol so a scan racing a writer
+    // (inserts that trigger overflow appends + bucket splits, freeing/reusing chunks) never reads a torn chunk — which before the
+    // fix tripped the ValueAt capacity assert (`index N out of range`) and aborted the process.
+    [Test]
+    public void ForEachEntry_ConcurrentWriterScans_NoTornRead()
+    {
+        using var mpmmf = _serviceProvider.GetRequiredService<ManagedPagedMMF>();
+        var em = _serviceProvider.GetRequiredService<EpochManager>();
+        int valueSize = EntityRecordAccessor.RecordSize(2);
+        int stride = RawValuePagedHashMap<long, PersistentStore>.RecommendedStride(valueSize);
+        var segment = mpmmf.AllocateChunkBasedSegment(PageBlockType.None, 10, stride);
+        var map = RawValuePagedHashMap<long, PersistentStore>.Create(segment, 4, valueSize);
+
+        const int total = 4000;
+        Exception failure = null;
+        var done = false;
+
+        var writer = new Thread(() =>
+        {
+            try
+            {
+                byte* record = stackalloc byte[valueSize];
+                EntityRecordAccessor.InitializeRecord(record, 2);
+                for (long k = 1; k <= total; k++)
+                {
+                    using var guard = EpochGuard.Enter(em);
+                    var accessor = segment.CreateChunkAccessor();
+                    map.Insert(k, record, ref accessor, null);
+                    accessor.Dispose();
+                }
+            }
+            catch (Exception ex)
+            {
+                Interlocked.CompareExchange(ref failure, ex, null);
+            }
+            finally
+            {
+                Volatile.Write(ref done, true);
+            }
+        });
+
+        var readers = new Thread[3];
+        for (var t = 0; t < readers.Length; t++)
+        {
+            readers[t] = new Thread(() =>
+            {
+                try
+                {
+                    while (!Volatile.Read(ref done))
+                    {
+                        using var guard = EpochGuard.Enter(em);
+                        var accessor = segment.CreateChunkAccessor();
+                        var v = new RangeValidator { MaxKey = total, Seen = new HashSet<long>(), Ok = true };
+                        map.ForEachEntry(ref accessor, ref v);
+                        accessor.Dispose();
+                        if (!v.Ok)
+                        {
+                            Interlocked.CompareExchange(ref failure, new Exception("torn read: out-of-range or duplicate key"), null);
+                            break;
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Interlocked.CompareExchange(ref failure, ex, null);
+                }
+            });
+        }
+
+        writer.Start();
+        foreach (var r in readers)
+        {
+            r.Start();
+        }
+        Assert.That(writer.Join(TimeSpan.FromSeconds(10)), Is.True, "writer did not finish");
+        foreach (var r in readers)
+        {
+            Assert.That(r.Join(TimeSpan.FromSeconds(10)), Is.True, "reader did not finish");
+        }
+
+        Assert.That(failure, Is.Null, () => failure!.ToString());
+
+        // Final quiescent scan sees the full set, exactly once.
+        var collector = new KeyCollector { Keys = new List<long>(total) };
+        using (EpochGuard.Enter(em))
+        {
+            var accessor = segment.CreateChunkAccessor();
+            map.ForEachEntry(ref accessor, ref collector);
+            accessor.Dispose();
+        }
+        Assert.That(new HashSet<long>(collector.Keys), Has.Count.EqualTo(total));
     }
 }

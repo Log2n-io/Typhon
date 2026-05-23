@@ -8,11 +8,15 @@ import {
 } from '@/components/ui/context-menu';
 import { useSchemaInspectorStore } from '@/stores/useSchemaInspectorStore';
 import {
+  openDataBrowser,
   toggleViewSchemaArchetypes,
   toggleViewSchemaIndexes,
   toggleViewSchemaRelationships,
 } from '@/shell/commands/openSchemaBrowser';
 import type { ComponentSummary } from '@/hooks/schema/types';
+import type { ArchetypeInfoDto } from '@/api/generated/model';
+import { customFetch } from '@/api/client';
+import { useSessionStore } from '@/stores/useSessionStore';
 
 interface Props {
   component: ComponentSummary;
@@ -38,6 +42,26 @@ export default function SchemaBrowserContextMenu({ component, onOpenInLayout, ch
   const selectAndOpen = (open: () => void) => () => {
     selectComponent(component.typeName);
     open();
+  };
+
+  // Open the Data Browser focused on an archetype that declares this component. A component can belong to several
+  // archetypes; v1 picks the first. Resolved on click (not per row render) to avoid a fetch for every menu instance.
+  const openInDataBrowser = async () => {
+    const sessionId = useSessionStore.getState().sessionId;
+    if (!sessionId) {
+      openDataBrowser();
+      return;
+    }
+    try {
+      const res = await customFetch<{ data: ArchetypeInfoDto[] | undefined }>(
+        `/api/sessions/${sessionId}/schema/components/${component.typeName}/archetypes`,
+        { method: 'GET' },
+      );
+      const first = res.data?.[0];
+      openDataBrowser(first ? String(first.archetypeId) : undefined);
+    } catch {
+      openDataBrowser();
+    }
   };
 
   return (
@@ -68,7 +92,7 @@ export default function SchemaBrowserContextMenu({ component, onOpenInLayout, ch
           Copy Fully-Qualified Name
         </ContextMenuItem>
         <ContextMenuSeparator />
-        <ContextMenuItem disabled>Open in Data Browser</ContextMenuItem>
+        <ContextMenuItem onSelect={openInDataBrowser}>Open in Data Browser</ContextMenuItem>
         <ContextMenuItem disabled>Open in Query Console</ContextMenuItem>
         <ContextMenuItem disabled>Reveal in Resource Tree</ContextMenuItem>
         <ContextMenuSeparator />

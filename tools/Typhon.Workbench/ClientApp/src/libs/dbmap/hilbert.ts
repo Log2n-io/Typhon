@@ -2,6 +2,12 @@
 //
 // Pages are laid out on a 2^order × 2^order grid by a Hilbert curve so byte-offset locality is preserved in 2D
 // and every quadtree node is a contiguous page-index range. The curve position d equals the page index.
+//
+// A `sequential` (row-major) layout is offered as an alternative ordering on the *same* square grid — see the
+// {@link pageToXY} / {@link xyToPage} dispatchers at the bottom, which the renderer routes every page↔cell
+// mapping through so a single toolbar setting flips the whole map between curves.
+
+import type { DbMapPageOrder } from './types';
 
 /** Grid side length (cells per axis) for a curve of the given order. */
 export function hilbertSide(order: number): number {
@@ -64,4 +70,28 @@ export function hilbertXY2D(order: number, x: number, y: number): number {
     }
   }
   return d;
+}
+
+// ── Layout dispatchers ─────────────────────────────────────────────────────────────────────────────────────
+//
+// Row-major (sequential) on the same 2^order × 2^order square: page index → (col, row) and back, in O(1). The
+// dispatchers below pick Hilbert or row-major from the active `DbMapPageOrder`; the renderer routes every
+// page↔cell mapping through them so the whole map flips with one setting (the grid, camera, fit and detail-tile
+// addressing are all ordering-agnostic, so nothing else changes).
+
+/** Maps a page index `d` to its grid cell under the given page ordering, on an order-`order` square grid. */
+export function pageToXY(order: number, mode: DbMapPageOrder, d: number): { x: number; y: number } {
+  if (mode === 'sequential') {
+    const side = 1 << order;
+    return { x: d & (side - 1), y: d >> order };
+  }
+  return hilbertD2XY(order, d);
+}
+
+/** Maps a grid cell to its page index under the given page ordering, on an order-`order` square grid. */
+export function xyToPage(order: number, mode: DbMapPageOrder, x: number, y: number): number {
+  if (mode === 'sequential') {
+    return (y << order) + x;
+  }
+  return hilbertXY2D(order, x, y);
 }

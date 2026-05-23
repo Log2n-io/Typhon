@@ -43,6 +43,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     internal const int PageSize                 = 8192;                                 // Base Header + Metadata + RawData
     internal const int PageRawDataSize          = PageSize - PageHeaderSize;
     internal const int PageSizePow2             = 13;                                   // 2^( PageSizePow2 = PageSize
+    internal const int ChunkStartAlignment      = 64;                                   // Cache line — ceiling for chunk-start alignment (see ChunkBasedSegment)
     internal const int DatabaseFormatRevision   = 1;
     internal const ulong MinimumCacheSize       = DefaultMemPageCount * PageSize;
     internal const int WriteCachePageSize       = 1024 * 1024;

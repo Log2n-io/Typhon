@@ -31,7 +31,8 @@ public sealed partial class SessionsController : ControllerBase
         // Phase 3 compat; any other path is used verbatim (Phase 4's real file picker).
         var resolvedFile = ResolveFilePath(request.FilePath);
 
-        // Determine schema DLL list: explicit (user-specified) > convention (adjacent *.schema.dll) > none.
+        // Determine schema DLL list: an explicit (user-specified) list wins; otherwise EngineLifecycle resolves the assemblies from the database's persisted
+        // manifest (engine.GetRequiredAssemblies) by locating them next to the file — no filename convention.
         string[] schemaDllPaths;
         string schemaStatus;
         if (request.SchemaDllPaths is { Length: > 0 })
@@ -41,8 +42,8 @@ public sealed partial class SessionsController : ControllerBase
         }
         else
         {
-            schemaDllPaths = SchemaConvention.ResolveConventionally(resolvedFile);
-            schemaStatus = schemaDllPaths.Length > 0 ? "convention" : "schemaless";
+            schemaDllPaths = [];
+            schemaStatus = "manifest";
         }
 
         // Phase 3 compat: single-session at a time per file path.

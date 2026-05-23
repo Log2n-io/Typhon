@@ -1,9 +1,10 @@
-// Hit-testing for the Database File Map (Module 15, §6.6) — a Hilbert xy→d inverse plus L0 region tests.
+// Hit-testing for the Database File Map (Module 15, §6.6) — a page-order xy→d inverse plus L0 region tests.
 // Zoom-independent: everything goes through the camera transform.
 
 import { screenToWorldX, screenToWorldY, type Camera } from './camera';
-import { hilbertXY2D } from './hilbert';
+import { xyToPage } from './hilbert';
 import type { MapLayout } from './dbMapLayout';
+import type { DbMapPageOrder } from './types';
 
 /** Which L0 region a screen point falls in. */
 export type DbMapRegionHit = 'data' | 'wal' | null;
@@ -13,7 +14,13 @@ function inRect(px: number, py: number, r: { x: number; y: number; w: number; h:
 }
 
 /** The page index under a screen point, or null when the point is off the page grid / on the inert tail. */
-export function pageAtScreen(cam: Camera, layout: MapLayout, screenX: number, screenY: number): number | null {
+export function pageAtScreen(
+  cam: Camera,
+  layout: MapLayout,
+  pageOrder: DbMapPageOrder,
+  screenX: number,
+  screenY: number,
+): number | null {
   const wx = screenToWorldX(cam, screenX);
   const wy = screenToWorldY(cam, screenY);
   if (!inRect(wx, wy, layout.dataRect)) {
@@ -24,7 +31,7 @@ export function pageAtScreen(cam: Camera, layout: MapLayout, screenX: number, sc
   if (cx < 0 || cy < 0 || cx >= layout.side || cy >= layout.side) {
     return null;
   }
-  const page = hilbertXY2D(layout.order, cx, cy);
+  const page = xyToPage(layout.order, pageOrder, cx, cy);
   return page >= 0 && page < layout.pageCount ? page : null;
 }
 

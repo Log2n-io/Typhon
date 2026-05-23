@@ -37,6 +37,8 @@ export interface StorageRegionDto {
   pageCount: number;
   pageTypes: string;
   ownerSegmentIds: string;
+  /** Per-page normalized rank (0–255) within the owning segment's directory order — base64 byte SoA. */
+  pageRanks: string;
 }
 
 // ── A2 detail tier ────────────────────────────────────────────────────────────────────────────────────────
@@ -266,6 +268,13 @@ export function isDetailEncoding(encoding: DbMapEncoding): encoding is DbMapDeta
 /** The active analytical lens (A3, §4.3) — a focused dim/highlight overlay on top of the base encoding. */
 export type DbMapLens = 'none' | 'fragmentation' | 'freeSpace' | 'pathology';
 
+/**
+ * How file pages are laid out on the 2D grid. `hilbert` (default) preserves byte-offset locality in 2D — adjacent
+ * pages stay adjacent on the curve. `sequential` is plain row-major (left-to-right, top-to-bottom) on the same
+ * square grid: page order reads naturally but loses 2D locality. Both reuse the same `2^order × 2^order` square.
+ */
+export type DbMapPageOrder = 'hilbert' | 'sequential';
+
 // ── Decoded client-side structures ────────────────────────────────────────────────────────────────────────
 
 /** The fully decoded coarse map the renderer consumes — assembled from the two A1 endpoints. */
@@ -288,6 +297,8 @@ export interface DbMapData {
   pageType: Uint8Array;
   /** Per-cell dense owning-segment id (`NO_SEGMENT` when unowned). */
   ownerSegmentId: Uint16Array;
+  /** Per-cell normalized rank (0–255) within the owning segment's directory order — drives the segment encoding's luminosity. */
+  pageRank: Uint8Array;
 }
 
 /** One decoded detail tile — a contiguous page range, decoded from `StorageRegionDetailDto`. */

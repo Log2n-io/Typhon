@@ -41,6 +41,7 @@ function makeData(pageType: Uint8Array): DbMapData {
     segments: [],
     pageType,
     ownerSegmentId: new Uint16Array(pageType.length),
+    pageRank: new Uint8Array(pageType.length),
   };
 }
 

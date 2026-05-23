@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { Camera } from '../camera';
 import { buildLayout } from '../dbMapLayout';
 import { pageAtScreen, regionAtScreen } from '../dbMapHitTest';
-import { hilbertD2XY } from '../hilbert';
+import { pageToXY } from '../hilbert';
 
 describe('dbMapHitTest', () => {
   // 200 pages → order 4 (16×16 grid). No WAL.
@@ -12,21 +12,29 @@ describe('dbMapHitTest', () => {
 
   it('pageAtScreen resolves the cell centre back to its page index', () => {
     for (const page of [0, 1, 42, 137, 199]) {
-      const { x, y } = hilbertD2XY(layout.order, page);
-      const hit = pageAtScreen(cam, layout, x * 10 + 5, y * 10 + 5);
+      const { x, y } = pageToXY(layout.order, 'hilbert', page);
+      const hit = pageAtScreen(cam, layout, 'hilbert', x * 10 + 5, y * 10 + 5);
+      expect(hit).toBe(page);
+    }
+  });
+
+  it('pageAtScreen round-trips under the sequential (row-major) ordering', () => {
+    for (const page of [0, 1, 42, 137, 199]) {
+      const { x, y } = pageToXY(layout.order, 'sequential', page);
+      const hit = pageAtScreen(cam, layout, 'sequential', x * 10 + 5, y * 10 + 5);
       expect(hit).toBe(page);
     }
   });
 
   it('pageAtScreen returns null on the inert Hilbert tail', () => {
     // Page 255 is the last grid cell but only 200 pages are real.
-    const { x, y } = hilbertD2XY(layout.order, 255);
-    expect(pageAtScreen(cam, layout, x * 10 + 5, y * 10 + 5)).toBeNull();
+    const { x, y } = pageToXY(layout.order, 'hilbert', 255);
+    expect(pageAtScreen(cam, layout, 'hilbert', x * 10 + 5, y * 10 + 5)).toBeNull();
   });
 
   it('pageAtScreen returns null outside the data rect', () => {
-    expect(pageAtScreen(cam, layout, -50, -50)).toBeNull();
-    expect(pageAtScreen(cam, layout, 100_000, 100_000)).toBeNull();
+    expect(pageAtScreen(cam, layout, 'hilbert', -50, -50)).toBeNull();
+    expect(pageAtScreen(cam, layout, 'hilbert', 100_000, 100_000)).toBeNull();
   });
 
   it('regionAtScreen distinguishes the data file from the WAL', () => {

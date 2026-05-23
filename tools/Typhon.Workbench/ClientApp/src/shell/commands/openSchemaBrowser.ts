@@ -3,6 +3,7 @@ import { useProfilerSelectionStore } from '@/stores/useProfilerSelectionStore';
 import { useSourceLocationStore } from '@/stores/useSourceLocationStore';
 import { useDockLayoutStore } from '@/stores/useDockLayoutStore';
 import { useSessionStore } from '@/stores/useSessionStore';
+import { useDataBrowserStore } from '@/stores/useDataBrowserStore';
 
 /**
  * Module-level dockview api registration — same pattern as refreshResourceGraph. DockHost publishes
@@ -143,6 +144,49 @@ export function toggleViewOptions(): void {
 /** Module 15: open / close the Database File Map panel. */
 export function toggleViewDbMap(): void {
   toggleDockPanel('dbmap', 'DbMap', 'Database File Map');
+}
+
+/**
+ * Module 06: open the Data Browser — the Entity List in the center. The selected entity's component-card stack renders in the
+ * shared Detail pane (right edge), so we surface that group too. Optionally pre-selects an archetype (the "Open in Data
+ * Browser" cross-link path). Focuses the entity list; never closes anything.
+ */
+export function openDataBrowser(archetypeId?: string): void {
+  if (archetypeId) {
+    useDataBrowserStore.getState().setArchetype(archetypeId);
+  }
+  const api = registeredApi;
+  if (!api) return;
+
+  let entities = api.getPanel('data-browser-entities');
+  if (!entities) {
+    const anchor = api.getPanel('profiler') ?? api.getPanel('start-here');
+    api.addPanel({
+      id: 'data-browser-entities',
+      component: 'DataBrowserEntities',
+      title: 'Data Browser',
+      position: anchor ? { referencePanel: anchor.id } : undefined,
+    });
+    entities = api.getPanel('data-browser-entities');
+  }
+  // Surface the shared Detail pane (right edge) — that's where the selected entity's component cards appear.
+  const detailGroup = api.getEdgeGroup('right');
+  if (detailGroup?.isCollapsed()) {
+    detailGroup.expand();
+  }
+  entities?.focus();
+}
+
+/** View-menu / palette toggle: open the Data Browser, or close the entity-list panel if already open. */
+export function toggleViewDataBrowser(): void {
+  const api = registeredApi;
+  if (!api) return;
+  const entities = api.getPanel('data-browser-entities');
+  if (entities) {
+    api.removePanel(entities);
+    return;
+  }
+  openDataBrowser();
 }
 
 /**

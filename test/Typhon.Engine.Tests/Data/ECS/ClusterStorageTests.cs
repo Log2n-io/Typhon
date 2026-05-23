@@ -109,6 +109,44 @@ class ClusterStorageTests : TestBase<ClusterStorageTests>
             ArchetypeClusterInfo.Compute(1, [1000]));
     }
 
+    [Test]
+    public void ClusterStride_IsAlwaysCacheLineAligned()
+    {
+        // Every cluster stride must be a multiple of the chunk-start alignment so consecutive chunks (laid at a
+        // constant pitch == stride) all land on a cache line. Spot-check a spread of component shapes.
+        foreach (var (count, sizes) in new (int, int[])[]
+                 {
+                     (1, [8]),
+                     (2, [8, 8]),
+                     (3, [12, 20, 4]),
+                     (4, [16, 8, 32, 16]),   // ant-like
+                     (4, [200, 200, 200, 200]),
+                 })
+        {
+            var info = ArchetypeClusterInfo.Compute(count, sizes);
+            Assert.That(info.ClusterStride % PagedMMF.ChunkStartAlignment, Is.EqualTo(0),
+                $"stride {info.ClusterStride} for ({count} comps) is not {PagedMMF.ChunkStartAlignment}-aligned");
+        }
+    }
+
+    [Test]
+    public void ClusterInfo_AntLike_PacksTwoClustersPerPage()
+    {
+        // Regression for the page-waste bug. Ant archetype = WorldBounds(16) + Velocity(8) + Genetics(32) +
+        // AntState(16) = 72 B/entity; fixedHeader = 8 + 8*4 = 40; perEntity = 8 + 72 = 80.
+        // SelectClusterSize maximizes entities/page → N=49, raw stride 40 + 80*49 = 3960, rounded up to 3968.
+        // With the 64-byte alignment cap the non-root padding is 0, so PageRawDataSize / 3968 = 2 clusters/page
+        // (98 entities). Before the fix, full-stride alignment padded 3768 B/page → only 1 cluster (49 entities).
+        var info = ArchetypeClusterInfo.Compute(4, [16, 8, 32, 16]);
+
+        Assert.That(info.ClusterSize, Is.EqualTo(49), "selector should pick N=49 (max entities/page)");
+        Assert.That(info.ClusterStride, Is.EqualTo(3968), "stride rounded up to the 64-byte boundary");
+
+        int clustersPerPage = PagedMMF.PageRawDataSize / info.ClusterStride;
+        Assert.That(clustersPerPage, Is.EqualTo(2), "two ant clusters must fit per page (the bug fit only one)");
+        Assert.That(clustersPerPage * info.ClusterSize, Is.EqualTo(98), "98 ants/page");
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // Cluster Eligibility
     // ═══════════════════════════════════════════════════════════════════════

@@ -46,6 +46,34 @@ export function segmentRgb(segmentId: number): Rgb {
   return hslToRgb(hue / 360, 0.62, 0.58);
 }
 
+/**
+ * Lightness band for the rank-shaded segment encoding — rank 0 (first page of a segment) → darkest, rank 1 (last) →
+ * lightest. Wide on purpose so a large segment shows a clear start→end gradient; small segments don't reach the
+ * extremes because the caller scales the band by a per-segment spread factor (see the renderer).
+ */
+const SEG_RANK_L_MIN = 0.18;
+const SEG_RANK_L_MAX = 0.92;
+
+/**
+ * Owning-segment colour shaded by the page's rank within its segment: the same golden-angle hue as {@link segmentRgb}
+ * (so the segment stays identifiable) but with lightness ramped by rank to make page order legible despite the Hilbert
+ * layout. The ramp is centred on the segment's base lightness and its half-width is scaled by `spread` (0..1) so a
+ * few-page segment only uses a narrow band (the caller passes a smaller `spread` for small segments — see the renderer's
+ * per-segment spread factor). `rankFraction` is 0..1 (the persisted 0–255 rank ÷ 255); `spread` 1 = full range. Unowned
+ * pages fall back to the Free colour, matching {@link pageColorRgb}'s `segment` case.
+ */
+export function segmentRgbRanked(segmentId: number, rankFraction: number, spread = 1): Rgb {
+  if (segmentId === NO_SEGMENT) {
+    return PAGE_TYPE_RGB[DbPageType.Free];
+  }
+  const hue = (segmentId * 137.508) % 360;
+  const t = rankFraction < 0 ? 0 : rankFraction > 1 ? 1 : rankFraction;
+  const s = spread < 0 ? 0 : spread > 1 ? 1 : spread;
+  const center = (SEG_RANK_L_MIN + SEG_RANK_L_MAX) / 2;
+  const halfRange = ((SEG_RANK_L_MAX - SEG_RANK_L_MIN) / 2) * s;
+  return hslToRgb(hue / 360, 0.62, center + (t * 2 - 1) * halfRange);
+}
+
 /** Resolves the [r,g,b] for one page under the active encoding. */
 export function pageColorRgb(encoding: DbMapEncoding, type: number, segmentId: number): Rgb {
   switch (encoding) {

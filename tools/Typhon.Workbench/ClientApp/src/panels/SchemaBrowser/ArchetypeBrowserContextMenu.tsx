@@ -7,6 +7,7 @@ import {
   ContextMenuTrigger,
 } from '@/components/ui/context-menu';
 import type { ArchetypeInfo } from '@/hooks/schema/types';
+import { openDataBrowser } from '@/shell/commands/openSchemaBrowser';
 
 interface Props {
   archetype: ArchetypeInfo;
@@ -37,7 +38,9 @@ export default function ArchetypeBrowserContextMenu({ archetype, children }: Pro
           Copy Component Type Names
         </ContextMenuItem>
         <ContextMenuSeparator />
-        <ContextMenuItem disabled>Open in Data Browser</ContextMenuItem>
+        <ContextMenuItem onSelect={() => openDataBrowser(archetype.archetypeId)}>
+          Open in Data Browser
+        </ContextMenuItem>
         <ContextMenuSeparator />
         <ContextMenuItem disabled className="text-muted-foreground">
           #{archetype.archetypeId} · {archetype.componentTypes.length} components

@@ -33,11 +33,12 @@ import {
   entropyRgb,
   fillDensityRgb,
   pageColorRgb,
+  segmentRgbRanked,
   writeAgeRgb,
   type Rgb,
 } from './dbMapColors';
 import { computeComposition, type L0Stripe } from './dbMapL0';
-import { hilbertD2XY, hilbertXY2D } from './hilbert';
+import { pageToXY, xyToPage } from './hilbert';
 import { formatFileSize } from '@/lib/formatters';
 import {
   DbChunkClass,
@@ -53,6 +54,7 @@ import {
   type DbMapData,
   type DbMapEncoding,
   type DbMapLens,
+  type DbMapPageOrder,
   type DbPageDetail,
 } from './types';
 import type { PathologyFlag } from './dbMapPathology';
@@ -86,13 +88,23 @@ export interface L0StripeScreenRect {
 }
 
 /**
- * Cell pixel size below which only L0 shows; above L1_FULL_CELL only L1 shows. Between → crossfade.
- * Sized so the L0 composition stripes are the default view at "fit to screen" on a realistic database
- * (4k–1M pages → cell px 0.8–12 at fit, well inside the L0-dominant band). L1 takes over once cells are
- * large enough that individual pages can be visually counted — past ~32 px.
+ * The L0→L1 crossfade is keyed to the *fit-to-screen scale*, not an absolute px/cell. This makes the page-level
+ * Hilbert map (L1) the base view at fit and any zoom-in — regardless of file size — so the whole page map is always
+ * viewable at fit (a large file no longer hides it behind the composition stripes until you've zoomed past the
+ * point where the whole file is visible). The L0 composition stripes return only when you zoom *out* below fit.
+ *
+ * {@link L0_FADE_FRACTION} is the fraction of the fit scale at which the view is fully L0; L1 is fully shown at the
+ * fit scale and beyond, crossfading to L0 across [fraction·fit, fit].
  */
-const L0_ONLY_CELL = 6;
-const L1_FULL_CELL = 32;
+const L0_FADE_FRACTION = 0.5;
+/** Must match DbMapPanel's FIT_PADDING so L1 is fully shown exactly at the Fit camera. */
+const FIT_PADDING = 24;
+/**
+ * Page count at/above which the Owning-Segment rank shading uses the full lightness range. Below it the range is
+ * scaled by `(pageCount-1)/(SEG_RANK_FULL_RANGE_PAGES-1)`, which caps the per-page lightness step so a few-page
+ * segment stays one identifiable colour instead of swinging across the whole band between adjacent pages.
+ */
+const SEG_RANK_FULL_RANGE_PAGES = 16;
 /** Opacity of the lens dim layer — non-highlighted pages fade back so the lens mask reads clearly (§4.3). */
 const LENS_DIM_ALPHA = 0.62;
 /** Outline colour for search-match cells (§4.5) — amber, distinct from the accent selection outline. */
@@ -107,12 +119,21 @@ const GRID_MIN_CELL = 6;
 const HEADER_STRIP_MIN_CELL = 44;
 /** Header byte share of a page — drives the strip's vertical fraction of the cell. */
 const HEADER_RATIO = 192 / 8192;
+/** Cell px below which the per-page fill-density bar (coarse encodings) is too small to read and is skipped. */
+const FILL_BAR_MIN_CELL = 48;
+/** The fill-density bar's height as a fraction of the page cell (1/20). */
+const FILL_BAR_HEIGHT_RATIO = 1 / 20;
 /**
- * Diagonal-hatch line spacing (screen px) for the header strip and the L3 header/directory overhead bands. Wide
- * enough that the 1 px diagonals don't moiré against the pixel grid when the bands grow large at deep zoom, still
- * tight enough to read as a pattern on the thin L1 header strip.
+ * Diagonal-hatch line spacing for the header strip and the L3 header/directory overhead bands, expressed as a
+ * multiple of the band's own height rather than a fixed screen distance. The hatch lines span the band height, so
+ * a fixed-px spacing packs them denser as the to-scale band grows taller on zoom-in (sparse ticks → solid fill) —
+ * tying the spacing to the height instead keeps the hatch at a constant visual density across every zoom level.
+ * Each band-height-tall line covers one column slot, so lines-per-column ≈ 1 / ratio: at 0.5 every column is
+ * crossed by ~2 diagonals, reading as a continuous hatch (a ratio ≥ 1 leaves bare columns and looks gappy).
+ * Floored at {@link HEADER_HATCH_MIN_STEP} px so the thinnest (near sub-pixel) strips don't moiré against the grid.
  */
-const HEADER_HATCH_SPACING = 10;
+const HEADER_HATCH_STEP_RATIO = 0.5;
+const HEADER_HATCH_MIN_STEP = 4;
 /** Minimum cell px below which the free-page diagonal mark is sub-pixel and skipped. */
 const FREE_HATCH_MIN_CELL = 4;
 /** Minimum cell px below which corner markers (residency / CRC / pathology) are too small to register. */
@@ -197,8 +218,16 @@ export class DbMapRenderer {
   private _filterMask: Uint8Array | null = null;
 
   private _data: DbMapData | null = null;
+  /**
+   * Per-segment lightness-spread factor (0..1) for the rank-shaded Owning-Segment encoding, indexed by segment id.
+   * A small segment uses a narrow band centred on its base lightness so its hue stays identifiable; the full range
+   * kicks in at {@link SEG_RANK_FULL_RANGE_PAGES} pages. With the factor `(count-1)/(T-1)` the per-page lightness step
+   * is capped at `fullRange/(T-1)` for any segment of ≤ T pages — so the colour never jumps too far between adjacent pages.
+   */
+  private _segmentSpread = new Float32Array(0);
   private _layout: MapLayout | null = null;
   private _encoding: DbMapEncoding = 'pageType';
+  private _pageOrder: DbMapPageOrder = 'hilbert';
   private _segmentOverlay = false;
   private _lens: DbMapLens = 'none';
   private _lensMask: Uint8Array | null = null;
@@ -297,6 +326,18 @@ export class DbMapRenderer {
       this._layout = null;
       return;
     }
+    // Per-segment lightness-spread factor for the rank-shaded Owning-Segment encoding (see {@link _segmentSpread}).
+    let maxSegId = -1;
+    for (const s of data.segments) {
+      if (s.id > maxSegId) {
+        maxSegId = s.id;
+      }
+    }
+    this._segmentSpread = new Float32Array(maxSegId + 1);
+    for (const s of data.segments) {
+      this._segmentSpread[s.id] = clamp01((s.pageCount - 1) / (SEG_RANK_FULL_RANGE_PAGES - 1));
+    }
+
     this._layout = buildLayout(data.pageCount, data.walBytes, data.hilbertOrder, data.downSampleFactor);
     this._offscreen.width = this._layout.side;
     this._offscreen.height = this._layout.side;
@@ -314,6 +355,21 @@ export class DbMapRenderer {
     this._encoding = encoding;
     this._l0Stripes = null;
     this.paintOffscreen();
+  }
+
+  /**
+   * Sets the page-layout ordering (Hilbert vs row-major sequential). Page positions move, so every position-keyed
+   * buffer is rebuilt: the offscreen L1 image and lens highlight ({@link paintOffscreen}) plus the filter-to-dim
+   * overlay ({@link paintFilterBuffer}). The L0 stripes are byte-proportional (1D) and ordering-agnostic, so they
+   * are left intact. Hover / selection are page-index based and re-resolve to the new layout on the next frame.
+   */
+  setPageOrder(pageOrder: DbMapPageOrder): void {
+    if (this._pageOrder === pageOrder) {
+      return;
+    }
+    this._pageOrder = pageOrder;
+    this.paintOffscreen();
+    this.paintFilterBuffer();
   }
 
   /**
@@ -503,6 +559,30 @@ export class DbMapRenderer {
     return lodForScale(this._camera.scale);
   }
 
+  /** The camera scale at which the whole map fits the viewport — mirrors the Fit button (DbMapPanel's fitToRect). */
+  private fitScale(): number {
+    if (!this._layout) {
+      return 1;
+    }
+    const wb = this._layout.worldBounds;
+    const availW = Math.max(1, this._cssW - 2 * FIT_PADDING);
+    const availH = Math.max(1, this._cssH - 2 * FIT_PADDING);
+    return Math.min(availW / Math.max(wb.w, 1e-9), availH / Math.max(wb.h, 1e-9));
+  }
+
+  /**
+   * L1 (page-level Hilbert map) crossfade alpha, keyed to the fit scale rather than absolute px/cell: L1 is fully
+   * shown at fit and any zoom-in (so the whole page map is always viewable at fit, independent of file size), and
+   * crossfades down to the L0 composition stripes only as you zoom out below fit.
+   */
+  private l1AlphaForScale(scale: number): number {
+    const fit = this.fitScale();
+    if (fit <= 0) {
+      return 1;
+    }
+    return clamp01((scale / fit - L0_FADE_FRACTION) / (1 - L0_FADE_FRACTION));
+  }
+
   /**
    * The currently-dominant *display* band — extends {@link DbLodState}'s band (which lives in [L1, L3, L4])
    * with `L0` for the zoomed-out composition view. Drives the per-band Legend chrome (Module 15 L1 #7).
@@ -517,7 +597,7 @@ export class DbMapRenderer {
       return 'L3';
     }
     if (band === 'L1') {
-      const l1Alpha = clamp01((cellPx - L0_ONLY_CELL) / (L1_FULL_CELL - L0_ONLY_CELL));
+      const l1Alpha = this.l1AlphaForScale(cellPx);
       return l1Alpha < 0.5 ? 'L0' : 'L1';
     }
     return band;
@@ -547,6 +627,11 @@ export class DbMapRenderer {
       request.tileNodes = span
         ? tileNodesForSpan(span.min, span.max, tileSize)
         : tileNodesForSpan(0, this._data.pageCount - 1, tileSize);
+    } else if (span && this._camera.scale >= FILL_BAR_MIN_CELL && l3Alpha < 1) {
+      // Coarse encoding at L1 with cells large enough for the per-page fill-density bar — fetch just the visible
+      // span's tiles for the fill ratio. `span` is non-null at this zoom (cells are large → few cells visible), so
+      // this never pulls the whole-file tile set; the bar reads `tile.fillRatio` once the tiles resolve.
+      request.tileNodes = tileNodesForSpan(span.min, span.max, this._data.detailTileSize);
     }
 
     if (l3Alpha > 0) {
@@ -629,7 +714,7 @@ export class DbMapRenderer {
 
   /** The page index under a screen point, or null when off the page grid. */
   pageAt(screenX: number, screenY: number): number | null {
-    return this._layout ? pageAtScreen(this._camera, this._layout, screenX, screenY) : null;
+    return this._layout ? pageAtScreen(this._camera, this._layout, this._pageOrder, screenX, screenY) : null;
   }
 
   /** The chunk (page + in-page index) under a screen point at L3, or null. */
@@ -642,7 +727,7 @@ export class DbMapRenderer {
     if (!detail || detail.chunkTotal <= 0) {
       return null;
     }
-    const { x, y } = hilbertD2XY(this._layout.order, page);
+    const { x, y } = pageToXY(this._layout.order, this._pageOrder, page);
     const wx = (screenX - this._camera.x) / this._camera.scale - (this._layout.dataRect.x + x);
     const wy = (screenY - this._camera.y) / this._camera.scale - (this._layout.dataRect.y + y);
     // The chunk grid occupies only the cell below the reserved overhead band — remap wy into that sub-area so the
@@ -680,7 +765,7 @@ export class DbMapRenderer {
     if (INSPECTOR_ONLY_DECODERS.has(content.decoder)) {
       return null;
     }
-    const { x, y } = hilbertD2XY(this._layout.order, hit.page);
+    const { x, y } = pageToXY(this._layout.order, this._pageOrder, hit.page);
     const cols = gridCols(detail.chunkTotal);
     const rows = Math.ceil(detail.chunkTotal / cols);
     const chunkCol = hit.chunkInPage % cols;
@@ -702,7 +787,7 @@ export class DbMapRenderer {
     if (!this._layout) {
       return null;
     }
-    const { x, y } = hilbertD2XY(this._layout.order, page);
+    const { x, y } = pageToXY(this._layout.order, this._pageOrder, page);
     return { x: this._layout.dataRect.x + x, y: this._layout.dataRect.y + y, w: 1, h: 1 };
   }
 
@@ -778,7 +863,7 @@ export class DbMapRenderer {
     const cam = this._camera;
     const layout = this._layout;
     const cellPx = cam.scale;
-    const l1Alpha = clamp01((cellPx - L0_ONLY_CELL) / (L1_FULL_CELL - L0_ONLY_CELL));
+    const l1Alpha = this.l1AlphaForScale(cellPx);
     const { l3Alpha, l4Alpha } = this.getLodState();
 
     // L0 — composition stripes inside the data rect, sized strictly proportionally to bytes (§3.4). The L1
@@ -829,6 +914,13 @@ export class DbMapRenderer {
     // colour, differentiates it from the body), so `pageType` encoding still reads as split.
     if (l1Alpha > 0 && l3Alpha < 1 && cellPx >= HEADER_STRIP_MIN_CELL) {
       this.drawPageHeaderHatch(ctx, l1Alpha);
+    }
+
+    // Per-page fill-density bar — under a coarse encoding the page colour carries no occupancy signal, so draw a
+    // thin left-aligned bar (width = fill ratio) below the header strip, coloured by the fillDensity ramp. Only
+    // under coarse encodings (a detail encoding already paints the page body by its metric) and only at L1.
+    if (l1Alpha > 0 && l3Alpha < 1 && cellPx >= FILL_BAR_MIN_CELL && !isDetailEncoding(this._encoding)) {
+      this.drawPageFillBars(ctx, l1Alpha);
     }
 
     // Progressive per-cell labels — tier 1 = segment badge in the corner, tier 2 = page index centred.
@@ -1009,9 +1101,9 @@ export class DbMapRenderer {
 
   /** Returns the stripe under a screen point, or null when L0 is invisible (L1 fully in) or no stripe is hit. */
   l0HitTest(screenX: number, screenY: number): L0Stripe | null {
-    // The stripes' opacity is `1 - l1Alpha`; once cell px ≥ L1_FULL_CELL they paint at alpha 0. A click in
-    // that range belongs to L1 — return null so the panel falls through to its `pageAt` path.
-    if (this._camera.scale >= L1_FULL_CELL) {
+    // The stripes' opacity is `1 - l1Alpha`; at/above the fit scale L1 is fully in and they paint at alpha 0. A
+    // click there belongs to L1 — return null so the panel falls through to its `pageAt` path.
+    if (this.l1AlphaForScale(this._camera.scale) >= 1) {
       return null;
     }
     for (const { stripe, screenRect } of this.getL0StripeRects()) {
@@ -1162,7 +1254,7 @@ export class DbMapRenderer {
     // — the canvas background shows through and {@link drawTailHatch} labels the region with a crosshatch.
     // Keeping TAIL_RGB imported for any callers that still want it (e.g. the unknown tile).
     for (let p = 0; p < pageCount; p++) {
-      const { x, y } = hilbertD2XY(order, p);
+      const { x, y } = pageToXY(order, this._pageOrder, p);
       const rgbColor = this.pageEncodingRgb(p);
       const o = (y * side + x) * 4;
       buf[o] = rgbColor[0];
@@ -1183,9 +1275,15 @@ export class DbMapRenderer {
     if (!this._data) {
       return PAGE_TYPE_RGB[DbPageType.Unknown];
     }
-    const { pageType, ownerSegmentId } = this._data;
+    const { pageType, ownerSegmentId, pageRank } = this._data;
     if (isDetailEncoding(this._encoding)) {
       return this.detailPageRgb(page) ?? pageColorRgb('pageType', pageType[page], ownerSegmentId[page]);
+    }
+    // Owning-Segment encoding: shade each page's luminosity by its rank within the segment so the page order is
+    // legible despite the Hilbert layout (first page darkest → last lightest), while keeping the segment hue.
+    if (this._encoding === 'segment') {
+      const seg = ownerSegmentId[page];
+      return segmentRgbRanked(seg, pageRank[page] / 255, this._segmentSpread[seg] ?? 1);
     }
     return pageColorRgb(this._encoding, pageType[page], ownerSegmentId[page]);
   }
@@ -1207,7 +1305,7 @@ export class DbMapRenderer {
         if (mask[p] !== 1) {
           continue;
         }
-        const { x, y } = hilbertD2XY(order, p);
+        const { x, y } = pageToXY(order, this._pageOrder, p);
         const o = (y * side + x) * 4;
         dst.data[o] = src[o];
         dst.data[o + 1] = src[o + 1];
@@ -1243,7 +1341,7 @@ export class DbMapRenderer {
     ctx.globalCompositeOperation = 'destination-out';
     for (let p = 0; p < pageCount; p++) {
       if (mask[p] === 1) {
-        const { x, y } = hilbertD2XY(order, p);
+        const { x, y } = pageToXY(order, this._pageOrder, p);
         ctx.fillRect(x, y, 1, 1);
       }
     }
@@ -1293,7 +1391,7 @@ export class DbMapRenderer {
       if (!detail) {
         continue;
       }
-      const { x, y } = hilbertD2XY(layout.order, page);
+      const { x, y } = pageToXY(layout.order, this._pageOrder, page);
       const pageRect: Rect = { x: layout.dataRect.x + x, y: layout.dataRect.y + y, w: 1, h: 1 };
 
       // An occupancy page is not chunk-based but is the densest page in the file: render it as a mini
@@ -1397,6 +1495,9 @@ export class DbMapRenderer {
           }
           this.drawChunkContent(ctx, detail, gridSubRect(area, cols, rows, i), i);
         }
+        // L4 content cells fill each chunk edge-to-edge, so neighbouring chunks blend into one block and the chunk
+        // grid (drawn at l3Alpha) has faded out. Re-draw the chunk borders at l4Alpha so chunk boundaries stay legible.
+        this.drawChunkBorders(ctx, area, cols, rows, l4Alpha);
       }
 
       // Per-chunk index labels once chunks are large enough to carry text (proposal 4). An L3 affordance: it
@@ -1484,7 +1585,9 @@ export class DbMapRenderer {
     const headerH = (cellH * headerBytes) / PAGE_SIZE;
     const dirH = (cellH * dirBytes) / PAGE_SIZE;
     const padH = (cellH * padBytes) / PAGE_SIZE;
-    const c = PAGE_TYPE_RGB[this._data.pageType[page]] ?? PAGE_TYPE_RGB[DbPageType.Unknown];
+    // The overhead band shares the page's current-encoding colour (matching the L3 chunk tint), hatched to mark it as
+    // header / directory / padding rather than chunk data — not the page-type colour, which mismatched other encodings.
+    const c = this.pageEncodingRgb(page);
     const color = `rgb(${c[0]},${c[1]},${c[2]})`;
     // Bands stack in byte order: header, then root-only directory, then alignment padding (dead space).
     this.hatchBand(ctx, sx, sy, w, headerH, color, '\\', alpha);
@@ -1510,7 +1613,8 @@ export class DbMapRenderer {
     ctx.lineWidth = 1;
     ctx.globalAlpha = alpha * 0.7;
     ctx.beginPath();
-    for (let d = -h; d < w; d += HEADER_HATCH_SPACING) {
+    const step = Math.max(h * HEADER_HATCH_STEP_RATIO, HEADER_HATCH_MIN_STEP);
+    for (let d = -h; d < w; d += step) {
       if (dir === '\\') {
         ctx.moveTo(sx + d, sy);
         ctx.lineTo(sx + d + h, sy + h);
@@ -1568,7 +1672,7 @@ export class DbMapRenderer {
     ctx.strokeStyle = this._theme.text;
     ctx.lineWidth = 2;
     for (const page of pages) {
-      const { x, y } = hilbertD2XY(this._layout.order, page);
+      const { x, y } = pageToXY(this._layout.order, this._pageOrder, page);
       const sx = worldToScreenX(cam, this._layout.dataRect.x + x);
       const sy = worldToScreenY(cam, this._layout.dataRect.y + y);
       ctx.strokeRect(sx, sy, size, size);
@@ -1809,6 +1913,42 @@ export class DbMapRenderer {
     ctx.restore();
   }
 
+  /**
+   * Re-draws the chunk grid as a thin border around every chunk at L4 (interior separators + the chunk-area outer
+   * box), in one path so shared edges aren't double-stroked into an uneven alpha. Without this the L4 content cells
+   * — which fill each chunk edge-to-edge — merge into an indistinguishable block once the l3Alpha gridlines fade.
+   * Coordinates are snapped to the half-pixel grid so the 1 px stroke lands on a single device row instead of
+   * straddling two (which would render as a washed-out 2 px blur over the bright content fills).
+   */
+  private drawChunkBorders(ctx: CanvasRenderingContext2D, area: Rect, cols: number, rows: number, alpha: number): void {
+    const sx = worldToScreenX(this._camera, area.x);
+    const sy = worldToScreenY(this._camera, area.y);
+    const sw = area.w * this._camera.scale;
+    const sh = area.h * this._camera.scale;
+    if (sw / cols < 4) {
+      return;
+    }
+    const snap = (v: number): number => Math.round(v) + 0.5;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.strokeStyle = this._theme.background;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    for (let c = 1; c < cols; c++) {
+      const x = snap(sx + (c / cols) * sw);
+      ctx.moveTo(x, snap(sy));
+      ctx.lineTo(x, snap(sy + sh));
+    }
+    for (let r = 1; r < rows; r++) {
+      const y = snap(sy + (r / rows) * sh);
+      ctx.moveTo(snap(sx), y);
+      ctx.lineTo(snap(sx + sw), y);
+    }
+    ctx.rect(snap(sx), snap(sy), Math.round(sw), Math.round(sh));
+    ctx.stroke();
+    ctx.restore();
+  }
+
   /** A distinct hatched tile for regions the engine can locate but not classify / decode (§3.4) — never blank. */
   private drawUnknownTile(ctx: CanvasRenderingContext2D, r: Rect): void {
     const sx = worldToScreenX(this._camera, r.x);
@@ -1896,7 +2036,7 @@ export class DbMapRenderer {
     ctx.beginPath();
     for (let cy = rect.cy0; cy <= rect.cy1; cy++) {
       for (let cx = rect.cx0; cx <= rect.cx1; cx++) {
-        const page = hilbertXY2D(order, cx, cy);
+        const page = xyToPage(order, this._pageOrder, cx, cy);
         if (page < 0 || page >= pageCount) {
           continue;
         }
@@ -1938,7 +2078,7 @@ export class DbMapRenderer {
     ctx.beginPath();
     for (let cy = rect.cy0; cy <= rect.cy1; cy++) {
       for (let cx = rect.cx0; cx <= rect.cx1; cx++) {
-        const page = hilbertXY2D(order, cx, cy);
+        const page = xyToPage(order, this._pageOrder, cx, cy);
         // Skip real pages — tail = grid cells whose Hilbert index is past pageCount.
         if (page >= 0 && page < pageCount) {
           continue;
@@ -1978,22 +2118,17 @@ export class DbMapRenderer {
     if (stripH < 1) {
       return;
     }
-    const types = this._data.pageType;
     ctx.save();
     ctx.globalAlpha = alpha;
-    let lastType = -1;
     for (const page of pages) {
-      const type = types[page];
-      const { x, y } = hilbertD2XY(this._layout.order, page);
+      const { x, y } = pageToXY(this._layout.order, this._pageOrder, page);
       const sx = worldToScreenX(this._camera, this._layout.dataRect.x + x);
       const sy = worldToScreenY(this._camera, this._layout.dataRect.y + y);
-      // Strip fill in the page-type colour — preserves the type indicator while signalling "this is the
-      // overhead band".
-      if (type !== lastType) {
-        const c = PAGE_TYPE_RGB[type] ?? PAGE_TYPE_RGB[DbPageType.Unknown];
-        ctx.fillStyle = `rgb(${c[0]},${c[1]},${c[2]})`;
-        lastType = type;
-      }
+      // Strip fill in the page's *current-encoding* colour, so the header band reads as the same page (just hatched);
+      // the diagonal hatch in the theme background is the differentiator. Using the page-type colour here mismatched
+      // the body under any non-pageType encoding (e.g. Owning Segment).
+      const c = this.pageEncodingRgb(page);
+      ctx.fillStyle = `rgb(${c[0]},${c[1]},${c[2]})`;
       ctx.fillRect(sx, sy, cell, stripH);
       // Hatch — diagonal lines in the theme background colour, clipped to the strip so they don't bleed
       // into the body. One save/restore per cell to scope the clip; ~256 visible cells max, fast enough.
@@ -2005,7 +2140,8 @@ export class DbMapRenderer {
       ctx.lineWidth = 1;
       ctx.globalAlpha = alpha * 0.7;
       ctx.beginPath();
-      for (let d = -stripH; d < cell; d += HEADER_HATCH_SPACING) {
+      const step = Math.max(stripH * HEADER_HATCH_STEP_RATIO, HEADER_HATCH_MIN_STEP);
+      for (let d = -stripH; d < cell; d += step) {
         ctx.moveTo(sx + d, sy);
         ctx.lineTo(sx + d + stripH, sy + stripH);
       }
@@ -2016,11 +2152,60 @@ export class DbMapRenderer {
   }
 
   /**
+   * Draws the per-page fill-density bar for coarse encodings (L1). A coarse page colour (page type / segment /
+   * free-used) says nothing about how full the page is, so this overlays a thin horizontal bar just below the
+   * header strip: left-aligned, width = the page's fill ratio (full width at 100 %), height 1/20 of the cell,
+   * coloured by the same {@link fillDensityRgb} ramp the Fill-Density encoding uses (at 50 % alpha) with a thin
+   * dark-grey border. The ratio comes from the detail tiles (the panel fetches the visible span's tiles at this
+   * zoom even under a coarse encoding); pages whose tile hasn't loaded yet are simply skipped until it arrives.
+   */
+  private drawPageFillBars(ctx: CanvasRenderingContext2D, alpha: number): void {
+    if (!this._layout || !this._data) {
+      return;
+    }
+    const cam = this._camera;
+    const cell = cam.scale;
+    const stripH = cell * HEADER_RATIO;
+    const barH = cell * FILL_BAR_HEIGHT_RATIO;
+    const tileSize = this._data.detailTileSize;
+    ctx.save();
+    ctx.lineWidth = 1;
+    for (const page of this.visiblePageList()) {
+      const tile = this._tiles.get(Math.floor(page / tileSize));
+      if (!tile) {
+        continue;
+      }
+      const i = page - tile.firstPage;
+      if (i < 0 || i >= tile.pageCount) {
+        continue;
+      }
+      const ratio = tile.fillRatio[i] / 255;
+      if (ratio <= 0) {
+        continue;
+      }
+      const { x, y } = pageToXY(this._layout.order, this._pageOrder, page);
+      const sx = worldToScreenX(cam, this._layout.dataRect.x + x);
+      const sy = worldToScreenY(cam, this._layout.dataRect.y + y);
+      const barW = cell * ratio;
+      const barY = sy + stripH;
+      const c = fillDensityRgb(ratio);
+      ctx.globalAlpha = alpha * 0.8;
+      ctx.fillStyle = `rgb(${c[0]},${c[1]},${c[2]})`;
+      ctx.fillRect(sx, barY, barW, barH);
+      ctx.globalAlpha = alpha;
+      ctx.strokeStyle = this._theme.border;
+      ctx.strokeRect(sx + 0.5, barY + 0.5, Math.max(barW - 1, 1), barH - 1);
+    }
+    ctx.restore();
+  }
+
+  /**
    * Per-run segment labels. One label per RLE run (a page-index-contiguous block of a single segment), placed
    * on the run's own cell centroid — so a label never floats over cells it doesn't own (a per-segment centroid
-   * lies for scattered segments). Default text is `SegName k/M`, where M is the segment's total run count over
-   * the whole file and k is this run's order; the `k/M` counter shows only when M > 1, so a contiguous segment
-   * reads as a bare name and a fragmented one reads as `CompA 1/3 … 2/3 … 3/3` across its blocks. With the
+   * lies for scattered segments). Default text is `SegName [k of M]`, where M is the segment's total run count
+   * over the whole file and k is this run's order; the counter shows only when M > 1, so a contiguous segment
+   * reads as a bare name and a fragmented one reads as `CompA [1 of 3] … [2 of 3] … [3 of 3]` across its blocks
+   * (the `[k of M]` wording avoids reading as a fill fraction the way the old `k/M` did). With the
    * region-captions toggle ('c') the label switches to the verbose `Type · Name · N pages · size`. LOD-gated:
    * a run is labelled only when its on-screen blob is big enough to fit text, so small scattered fragments stay
    * colour-only (the hover tooltip still identifies them).
@@ -2086,7 +2271,7 @@ export class DbMapRenderer {
         if (p < 0 || p >= pageCount) {
           continue;
         }
-        const { x, y } = hilbertD2XY(order, p);
+        const { x, y } = pageToXY(order, this._pageOrder, p);
         const row = rowsX.get(y);
         if (!row) {
           rowsX.set(y, { minX: x, maxX: x });
@@ -2126,7 +2311,7 @@ export class DbMapRenderer {
       const label = verbose
         ? `${PAGE_TYPE_LABELS[region.pageType] ?? 'Unknown'} · ${name} · ${region.pageCount.toLocaleString()} pages · ${formatFileSize(region.byteSize)}`
         : m > 1
-          ? `${name} ${k}/${m}`
+          ? `${name} [${k} of ${m}]`
           : name;
 
       draws.push({
@@ -2217,7 +2402,7 @@ export class DbMapRenderer {
     const owners = this._data.ownerSegmentId;
     ctx.save();
     for (const page of pages) {
-      const { x, y } = hilbertD2XY(this._layout.order, page);
+      const { x, y } = pageToXY(this._layout.order, this._pageOrder, page);
       const sx = worldToScreenX(this._camera, this._layout.dataRect.x + x);
       const sy = worldToScreenY(this._camera, this._layout.dataRect.y + y);
       // Segment-id badge — top-left corner, monospace. Drawn once per contiguous run (on the run's first page, i.e.
@@ -2266,7 +2451,7 @@ export class DbMapRenderer {
     ctx.save();
     ctx.globalAlpha = alpha;
     for (const page of pages) {
-      const { x, y } = hilbertD2XY(this._layout.order, page);
+      const { x, y } = pageToXY(this._layout.order, this._pageOrder, page);
       const sx = worldToScreenX(this._camera, this._layout.dataRect.x + x);
       const sy = worldToScreenY(this._camera, this._layout.dataRect.y + y);
 
@@ -2287,12 +2472,20 @@ export class DbMapRenderer {
         ctx.fill();
       }
 
-      // Pathology flag — bottom-left amber dot, only when the page is in the under-filled set.
+      // Pathology flag — bottom-left dot, only when the page is in the under-filled set. Coloured by the same
+      // fill-density ramp as the per-page bar / Fill-Density encoding (read from the page's tile) so it reads as
+      // "low fill" rather than the old amber, which collides with the ramp's amber = 100% full. A thin dark-grey
+      // border keeps it legible over any page colour.
       if (this._pathologyPages.has(page)) {
-        ctx.fillStyle = PATHOLOGY_COLOR;
+        const ratio = haveDetail ? tile!.fillRatio[slot] / 255 : 0;
+        const c = fillDensityRgb(ratio);
         ctx.beginPath();
         ctx.arc(sx + inset + r, sy + cell - inset - r, r, 0, Math.PI * 2);
+        ctx.fillStyle = `rgb(${c[0]},${c[1]},${c[2]})`;
         ctx.fill();
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = this._theme.border;
+        ctx.stroke();
       }
 
       // Cache residency — bottom-right dot, suppressed for on-disk-only pages so most cells stay quiet.
@@ -2319,7 +2512,7 @@ export class DbMapRenderer {
     let max = -1;
     for (let cy = rect.cy0; cy <= rect.cy1; cy++) {
       for (let cx = rect.cx0; cx <= rect.cx1; cx++) {
-        const page = hilbertXY2D(order, cx, cy);
+        const page = xyToPage(order, this._pageOrder, cx, cy);
         if (page >= 0 && page < pageCount) {
           if (page < min) min = page;
           if (page > max) max = page;
@@ -2390,7 +2583,7 @@ export class DbMapRenderer {
       if (cx < 0 || cy < 0 || cx >= side || cy >= side) {
         return -1;
       }
-      const page = hilbertXY2D(order, cx, cy);
+      const page = xyToPage(order, this._pageOrder, cx, cy);
       return page >= 0 && page < pageCount ? owner[page] : -1;
     };
     for (let cy = cy0; cy <= cy1; cy++) {
@@ -2419,7 +2612,7 @@ export class DbMapRenderer {
     if (page == null || !this._layout || page < 0 || page >= this._layout.pageCount) {
       return;
     }
-    const { x, y } = hilbertD2XY(this._layout.order, page);
+    const { x, y } = pageToXY(this._layout.order, this._pageOrder, page);
     const sx = worldToScreenX(this._camera, this._layout.dataRect.x + x);
     const sy = worldToScreenY(this._camera, this._layout.dataRect.y + y);
     const size = Math.max(this._camera.scale, 3);
@@ -2532,7 +2725,7 @@ export class DbMapRenderer {
     let max = -1;
     for (let cy = rect.cy0; cy <= rect.cy1; cy++) {
       for (let cx = rect.cx0; cx <= rect.cx1; cx++) {
-        const page = hilbertXY2D(order, cx, cy);
+        const page = xyToPage(order, this._pageOrder, cx, cy);
         if (page >= 0 && page < pageCount) {
           if (page < min) min = page;
           if (page > max) max = page;
@@ -2555,7 +2748,7 @@ export class DbMapRenderer {
     const pages: number[] = [];
     for (let cy = rect.cy0; cy <= rect.cy1 && pages.length <= MAX_VISIBLE_PAGES; cy++) {
       for (let cx = rect.cx0; cx <= rect.cx1 && pages.length <= MAX_VISIBLE_PAGES; cx++) {
-        const page = hilbertXY2D(order, cx, cy);
+        const page = xyToPage(order, this._pageOrder, cx, cy);
         if (page >= 0 && page < pageCount) {
           pages.push(page);
         }

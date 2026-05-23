@@ -28,6 +28,7 @@ import QueryPlanTreePanel from '@/panels/QueryPlanTree/QueryPlanTreePanel';
 import ExecutionInspectorPanel from '@/panels/ExecutionInspector/ExecutionInspectorPanel';
 import PaletteDebugPanel from '@/panels/PaletteDebug';
 import DbMapPanel from '@/panels/DbMap/DbMapPanel';
+import EntityListPanel from '@/panels/DataBrowser/EntityListPanel';
 import { registerDockApi, registerResetLayout } from './commands/openSchemaBrowser';
 import { registerProfilerDockApi } from './commands/profilerCommands';
 import MigrationRequiredBanner from './banners/MigrationRequiredBanner';
@@ -133,6 +134,7 @@ const components: Record<string, React.FC<IDockviewPanelProps>> = {
   ExecutionInspector: ExecutionInspectorPanel,
   PaletteDebug: PaletteDebugPanel,
   DbMap: DbMapPanel,
+  DataBrowserEntities: EntityListPanel,
 };
 
 function buildDefaultLayout(api: DockviewReadyEvent['api'], kind: 'none' | 'open' | 'attach' | 'trace') {
@@ -241,12 +243,11 @@ export default function DockHost() {
     apiRef.current = event.api;
     registerDockApi(event.api);
     registerProfilerDockApi(event.api);
-    // Reset-layout command: tear down every panel/group and rebuild this session kind's built-in
-    // default. The recovery path when a panel has been dragged somewhere it can't be reached.
-    // api.clear() empties the edge groups but keeps the now-empty group shells, and
-    // buildDefaultLayout's addEdgeGroup() throws on a position that still exists — so the lingering
-    // edge groups must be dropped first for a clean rebuild.
-    registerResetLayout(() => {
+    // Tear down every panel/group and rebuild this session kind's built-in default. The recovery path for both the
+    // reset-layout command and a failed restore. api.clear() empties the edge groups but keeps the now-empty group shells,
+    // and buildDefaultLayout's addEdgeGroup() throws on a position that still exists — so a partially-applied fromJSON (e.g.
+    // a saved layout that references a since-removed panel component) must be fully torn down first for a clean rebuild.
+    const rebuildDefault = () => {
       event.api.clear();
       for (const pos of ['left', 'right', 'bottom'] as const) {
         if (event.api.getEdgeGroup(pos)) {
@@ -254,14 +255,16 @@ export default function DockHost() {
         }
       }
       buildDefaultLayout(event.api, kind);
-    });
+    };
+
+    registerResetLayout(rebuildDefault);
     const saved = getLayout(layoutKey);
     if (saved) {
       try {
         event.api.fromJSON(saved as Parameters<typeof event.api.fromJSON>[0]);
       } catch {
-        // Saved layout invalid (version skew) — fall through to default
-        buildDefaultLayout(event.api, kind);
+        // Saved layout invalid (version skew, or references a removed panel component) — tear down + rebuild default.
+        rebuildDefault();
       }
     } else {
       const template = getTemplate(kind);
@@ -269,7 +272,7 @@ export default function DockHost() {
         try {
           event.api.fromJSON(template as Parameters<typeof event.api.fromJSON>[0]);
         } catch {
-          buildDefaultLayout(event.api, kind);
+          rebuildDefault();
         }
       } else {
         buildDefaultLayout(event.api, kind);

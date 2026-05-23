@@ -16,13 +16,17 @@ import type { DbChunkContent, DbContentCell, DbPageDetail, StorageSegmentSummary
 import { useComponentSchema } from '@/hooks/schema/useComponentSchema';
 import type { ComponentSchema, Field } from '@/hooks/schema/types';
 import ProfilerDetail from '@/panels/profiler/ProfilerDetail';
+import { useDataBrowserStore } from '@/stores/useDataBrowserStore';
+import { useEntityDetail } from '@/hooks/dataBrowser/useEntityDetail';
+import EntityCardsDetail from '@/panels/DataBrowser/EntityCardsDetail';
 
 /**
- * The Detail panel — a single "what's selected" surface. Four independent stores feed it:
+ * The Detail panel — a single "what's selected" surface. Five independent stores feed it:
  *  - `useSchemaInspectorStore.selectedField` (schema canvas click, arrow-nav, Index row click)
  *  - `useSelectedResourceStore.selected` (resource-tree click)
  *  - `useProfilerSelectionStore.selected` (profiler panel — span / chunk / tick / marker)
  *  - `useDbMapSelectionStore.selected` (Database File Map — page click)
+ *  - `useDataBrowserStore.selectedEntityId` (Data Browser — entity row click → component-card stack)
  *
  * Whichever was touched most recently wins — matches the IDE convention that the user's latest
  * interaction drives what the inspector shows. Graceful fallback: if the winner's data isn't
@@ -40,6 +44,10 @@ export default function DetailPanel() {
   const profilerTouchedAt = useProfilerSelectionStore((s) => s.touchedAt);
   const dbMapSelected = useDbMapSelectionStore((s) => s.selected);
   const dbMapTouchedAt = useDbMapSelectionStore((s) => s.touchedAt);
+  const dbArchetypeId = useDataBrowserStore((s) => s.archetypeId);
+  const dbEntityId = useDataBrowserStore((s) => s.selectedEntityId);
+  const dbEntityTouchedAt = useDataBrowserStore((s) => s.touchedAt);
+  const { detail: entityDetail } = useEntityDetail(dbArchetypeId, dbEntityId);
 
   // Profiler session signals — used to render the range-stats fallback when no click selection has
   // been made but the user is exploring a profiler trace. The fallback runs through the same
@@ -59,6 +67,7 @@ export default function DetailPanel() {
   const resourceAvailable = !!resource;
   const profilerAvailable = profilerSelected !== null;
   const dbMapAvailable = dbMapSelected !== null;
+  const entityAvailable = entityDetail !== null;
   // The range-stats fallback is "available" whenever a profiler session is open and has metadata —
   // viewRange is always defined; an empty viewRange just renders the empty-state inside the detail.
   const profilerRangeFallbackAvailable = isProfilerSession && profilerMetadata !== null;
@@ -70,7 +79,8 @@ export default function DetailPanel() {
   const resourceAt = resourceAvailable ? resourceTouchedAt : 0;
   const profilerAt = profilerAvailable ? profilerTouchedAt : 0;
   const dbMapAt    = dbMapAvailable    ? dbMapTouchedAt    : 0;
-  const winnerAt = Math.max(fieldAt, resourceAt, profilerAt, dbMapAt);
+  const entityAt   = entityAvailable   ? dbEntityTouchedAt : 0;
+  const winnerAt = Math.max(fieldAt, resourceAt, profilerAt, dbMapAt, entityAt);
 
   if (winnerAt === 0) {
     // Nothing was clicked. If a profiler session is open, show the range-stats fallback over the
@@ -89,6 +99,9 @@ export default function DetailPanel() {
   }
 
   // Dispatch to the winning source. Graceful fallback chain if the winner's data isn't loaded.
+  if (entityAt === winnerAt && entityAvailable) {
+    return <EntityCardsDetail detail={entityDetail!} />;
+  }
   if (dbMapAt === winnerAt && dbMapAvailable) {
     return <DbMapDetail selection={dbMapSelected!} />;
   }
@@ -101,11 +114,12 @@ export default function DetailPanel() {
   if (resourceAt === winnerAt && resourceAvailable) {
     return <ResourceDetail />;
   }
-  // Fall-back: show whichever source has data, preferring profiler > field > resource > dbMap.
+  // Fall-back: show whichever source has data, preferring profiler > field > resource > dbMap > entity.
   if (profilerAvailable) return <ProfilerDetail selection={profilerSelected!} />;
   if (fieldAvailable)    return <FieldDetail field={field!} schema={schema!} />;
   if (resourceAvailable) return <ResourceDetail />;
   if (dbMapAvailable)    return <DbMapDetail selection={dbMapSelected!} />;
+  if (entityAvailable)   return <EntityCardsDetail detail={entityDetail!} />;
   return null;
 }
 

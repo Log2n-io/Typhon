@@ -807,6 +807,44 @@ public class ChunkBasedSegmentBitmapL3Tests
         Assert.That(segment.ChunkCapacity, Is.EqualTo(expectedCapacity));
     }
 
+    // ── Chunk-start alignment cap (page-waste regression) ──────────────────────────────────────────────────
+    //
+    // Aligning chunk starts to the *full stride* was pathological for large strides: for any stride > PageHeaderSize
+    // (192) the padding became ~a whole chunk (stride - 192), collapsing a 2-chunk page to 1. The alignment is now
+    // capped at ChunkStartAlignment (64); since PageHeaderSize and PageRawDataSize are both multiples of 64 the
+    // non-root padding is zero and both chunks fit.
+
+    [Test]
+    public void ChunkGeometry_AntClusterStride_PacksTwoPerPage()
+    {
+        // 3968 = the ant cluster stride (4 comps summing 72 B → N=49 → 3960, rounded up to a multiple of 64).
+        var segment = _pmmf.AllocateChunkBasedSegment(PageBlockType.None, 3, 3968);
+
+        Assert.That(segment.OtherChunkDataOffset, Is.EqualTo(0), "64-byte cap → zero non-root padding (192 % 64 == 0)");
+        Assert.That(segment.ChunkCountPerPage, Is.EqualTo(2), "8000 / 3968 = 2 chunks/page (was 1 under full-stride alignment)");
+    }
+
+    [Test]
+    public void ChunkGeometry_LargeNonMultipleStride_NotOverPadded()
+    {
+        // A large stride that is not a multiple of 64 (only chunk 0 is cache-aligned) must still not be over-padded:
+        // 3960 wasted 3768 B/page → 1 chunk before the fix; now padding is 0 so 2 fit.
+        var segment = _pmmf.AllocateChunkBasedSegment(PageBlockType.None, 3, 3960);
+
+        Assert.That(segment.OtherChunkDataOffset, Is.EqualTo(0));
+        Assert.That(segment.ChunkCountPerPage, Is.EqualTo(2));
+    }
+
+    [Test]
+    public void ChunkGeometry_SmallStride_BackwardCompatible()
+    {
+        // Stride 64 already divided the 192-byte header, so the cap changes nothing for the original small-chunk case.
+        var segment = _pmmf.AllocateChunkBasedSegment(PageBlockType.None, 3, 64);
+
+        Assert.That(segment.OtherChunkDataOffset, Is.EqualTo(0));
+        Assert.That(segment.ChunkCountPerPage, Is.EqualTo(PagedMMF.PageRawDataSize / 64)); // 125
+    }
+
     /// <summary>
     /// Test that AllocateChunk auto-grows when capacity is exhausted.
     /// 

@@ -21,6 +21,8 @@ import {
   toggleViewAccessMatrix,
   toggleViewArchetypeBrowser,
   toggleViewComponentBrowser,
+  toggleViewDataBrowser,
+  toggleViewDbMap,
   toggleViewDataFlow,
   toggleViewDetail,
   toggleViewLogs,
@@ -119,6 +121,14 @@ export default function MenuBar() {
  <MenubarContent>
  <MenubarItem onClick={toggleViewComponentBrowser}>Component Browser</MenubarItem>
  <MenubarItem onClick={toggleViewArchetypeBrowser}>Archetype Browser</MenubarItem>
+ <MenubarItem onClick={() => toggleViewDataBrowser()}>Data Browser</MenubarItem>
+ <MenubarItem
+ disabled={kind !== 'open'}
+ onClick={toggleViewDbMap}
+ title={kind === 'open' ? undefined : 'Available only for an open .typhon file'}
+ >
+ Database File Map
+ </MenubarItem>
  <MenubarSeparator />
  <MenubarItem
  disabled={!hasComponentSelection}

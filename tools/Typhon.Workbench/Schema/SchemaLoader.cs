@@ -55,19 +55,20 @@ public static class SchemaLoader
         var archetypeTypes = new List<Type>();
         foreach (var asm in assemblies)
         {
-            Type[] exported;
+            // GetTypes (not GetExportedTypes): user components/archetypes are frequently declared `internal` (e.g. AntHill's Ant/Food/Nest/Rock archetypes).
+            // Public-only discovery silently skips them, so their cluster / entity-map segments never register and the File Map renders them Unknown.
+            Type[] allTypes;
             try
             {
-                exported = asm.GetExportedTypes();
+                allTypes = asm.GetTypes();
             }
             catch (ReflectionTypeLoadException ex)
             {
-                var loaderMsg = ex.LoaderExceptions.FirstOrDefault()?.Message ?? ex.Message;
-                throw new WorkbenchException(400, "schema_missing_dependency",
-                    $"Type load error in {asm.GetName().Name}: {loaderMsg}", ex);
+                // Best-effort: keep the types that did load — one unresolvable type must not hide the rest from inspection.
+                allTypes = ex.Types.Where(t => t != null).ToArray()!;
             }
 
-            foreach (var type in exported)
+            foreach (var type in allTypes)
             {
                 // Components — value types with [Component].
                 if (type.IsValueType)

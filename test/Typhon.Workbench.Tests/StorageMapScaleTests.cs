@@ -54,14 +54,18 @@ public sealed class StorageMapScaleTests
             7, 7, 7, StructuralMap.NoSegment,
             9, 9, 9, StructuralMap.NoSegment,
         };
+        // Rank = directory-order position within the owning segment; the down-sampled cell takes its first page's rank.
+        var pageRank = new byte[] { 0, 85, 170, 0, 10, 20, 30, 0 };
 
-        StorageMapService.DownSampleArrays(pageType, owner, 4, out var cellType, out var cellOwner);
+        StorageMapService.DownSampleArrays(pageType, owner, pageRank, 4, out var cellType, out var cellOwner, out var cellRank);
 
         Assert.That(cellType.Length, Is.EqualTo(2));
         Assert.That(cellType[0], Is.EqualTo(StoragePageType.Component));
         Assert.That(cellType[1], Is.EqualTo(StoragePageType.Index));
         Assert.That(cellOwner[0], Is.EqualTo((ushort)7), "owner 7 covers 3 of cell 0's 4 pages");
         Assert.That(cellOwner[1], Is.EqualTo((ushort)9), "owner 9 covers 3 of cell 1's 4 pages");
+        Assert.That(cellRank[0], Is.EqualTo((byte)0), "cell rank is the block's first page's rank");
+        Assert.That(cellRank[1], Is.EqualTo((byte)10));
     }
 
     [Test]
