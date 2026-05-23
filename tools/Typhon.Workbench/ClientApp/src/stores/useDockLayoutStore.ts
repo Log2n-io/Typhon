@@ -35,6 +35,9 @@ export const useDockLayoutStore = create<DockLayoutState>()(
       getTemplate: (kind) => get().layouts[`__template__:${kind}`] ?? null,
       clear: () => set({ layouts: {} }),
     }),
-    { name: 'typhon-dock-layouts-v4', storage: safeStorage },
+    // v5: Stage 0 deactivated the zone-D views, so the components map no longer registers them. Bumping the
+    // key discards layouts saved against the old (richer) panel set rather than relying on per-panel fromJSON
+    // recovery for every stored layout.
+    { name: 'typhon-dock-layouts-v5', storage: safeStorage },
   ),
 );

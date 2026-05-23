@@ -39,6 +39,7 @@ import {
 } from './commands/openSchemaBrowser';
 import { toggleViewCallTree, toggleViewCriticalPath, toggleViewProfiler, toggleViewTopSpans, registerOpenSaveReplay } from './commands/profilerCommands';
 import { registerOpenConnect } from './commands/baseCommands';
+import { isViewActive, ANY_ZONE_D_VIEW_ACTIVE } from './viewRegistry';
 import { logError, logInfo } from '@/stores/useLogStore';
 
 export default function MenuBar() {
@@ -110,18 +111,14 @@ export default function MenuBar() {
  </MenubarMenu>
 
  <MenubarMenu>
- <MenubarTrigger className="h-7 px-2 text-density-sm">Edit</MenubarTrigger>
- <MenubarContent>
- <MenubarItem disabled>Find…</MenubarItem>
- </MenubarContent>
- </MenubarMenu>
-
- <MenubarMenu>
  <MenubarTrigger className="h-7 px-2 text-density-sm">View</MenubarTrigger>
  <MenubarContent>
- <MenubarItem onClick={toggleViewComponentBrowser}>Component Browser</MenubarItem>
- <MenubarItem onClick={toggleViewArchetypeBrowser}>Archetype Browser</MenubarItem>
- <MenubarItem onClick={() => toggleViewDataBrowser()}>Data Browser</MenubarItem>
+ {/* Deep/workspace (zone-D) views — gated off in Stage 0 (reversible per view via the view registry).
+     Stage 1 replaces this flat list with a session-kind-partitioned View menu (IA §5.1). */}
+ {isViewActive('SchemaBrowser') && <MenubarItem onClick={toggleViewComponentBrowser}>Component Browser</MenubarItem>}
+ {isViewActive('ArchetypeBrowser') && <MenubarItem onClick={toggleViewArchetypeBrowser}>Archetype Browser</MenubarItem>}
+ {isViewActive('DataBrowserEntities') && <MenubarItem onClick={() => toggleViewDataBrowser()}>Data Browser</MenubarItem>}
+ {isViewActive('DbMap') && (
  <MenubarItem
  disabled={kind !== 'open'}
  onClick={toggleViewDbMap}
@@ -129,7 +126,8 @@ export default function MenuBar() {
  >
  Database File Map
  </MenubarItem>
- <MenubarSeparator />
+ )}
+ {isViewActive('SchemaLayout') && (
  <MenubarItem
  disabled={!hasComponentSelection}
  onClick={toggleViewSchemaLayout}
@@ -137,6 +135,8 @@ export default function MenuBar() {
  >
  Component Layout
  </MenubarItem>
+ )}
+ {isViewActive('SchemaArchetypes') && (
  <MenubarItem
  disabled={!hasComponentSelection}
  onClick={toggleViewSchemaArchetypes}
@@ -144,6 +144,8 @@ export default function MenuBar() {
  >
  Component Archetypes
  </MenubarItem>
+ )}
+ {isViewActive('SchemaIndexes') && (
  <MenubarItem
  disabled={!hasComponentSelection}
  onClick={toggleViewSchemaIndexes}
@@ -151,6 +153,8 @@ export default function MenuBar() {
  >
  Component Indexes
  </MenubarItem>
+ )}
+ {isViewActive('SchemaRelationships') && (
  <MenubarItem
  disabled={!hasComponentSelection}
  onClick={toggleViewSchemaRelationships}
@@ -158,7 +162,8 @@ export default function MenuBar() {
  >
  Component Relationships
  </MenubarItem>
- <MenubarSeparator />
+ )}
+ {isViewActive('Profiler') && (
  <MenubarItem
  disabled={!isProfilerSession}
  onClick={toggleViewProfiler}
@@ -166,6 +171,8 @@ export default function MenuBar() {
  >
  Profiler
  </MenubarItem>
+ )}
+ {isViewActive('TopSpans') && (
  <MenubarItem
  disabled={!isProfilerSession}
  onClick={toggleViewTopSpans}
@@ -173,6 +180,8 @@ export default function MenuBar() {
  >
  Top Spans
  </MenubarItem>
+ )}
+ {isViewActive('SystemDag') && (
  <MenubarItem
  disabled={!isProfilerSession}
  onClick={toggleViewSystemDag}
@@ -180,6 +189,8 @@ export default function MenuBar() {
  >
  System DAG
  </MenubarItem>
+ )}
+ {isViewActive('CriticalPath') && (
  <MenubarItem
  disabled={!isProfilerSession}
  onClick={toggleViewCriticalPath}
@@ -187,6 +198,8 @@ export default function MenuBar() {
  >
  Critical Path
  </MenubarItem>
+ )}
+ {isViewActive('CallTree') && (
  <MenubarItem
  disabled={!isProfilerSession}
  onClick={toggleViewCallTree}
@@ -194,6 +207,8 @@ export default function MenuBar() {
  >
  Call Tree
  </MenubarItem>
+ )}
+ {isViewActive('SourcePreview') && (
  <MenubarItem
  disabled={!isProfilerSession}
  onClick={toggleViewSourcePreview}
@@ -201,6 +216,8 @@ export default function MenuBar() {
  >
  Source Preview
  </MenubarItem>
+ )}
+ {isViewActive('DataFlow') && (
  <MenubarItem
  disabled={!isProfilerSession}
  onClick={toggleViewDataFlow}
@@ -208,6 +225,8 @@ export default function MenuBar() {
  >
  Data Flow
  </MenubarItem>
+ )}
+ {isViewActive('AccessMatrix') && (
  <MenubarItem
  disabled={!isProfilerSession}
  onClick={toggleViewAccessMatrix}
@@ -215,7 +234,8 @@ export default function MenuBar() {
  >
  Access Matrix
  </MenubarItem>
- <MenubarSeparator />
+ )}
+ {ANY_ZONE_D_VIEW_ACTIVE && <MenubarSeparator />}
  <MenubarItem
    disabled={isProfilerSession}
    onClick={toggleViewResourceTree}
@@ -240,13 +260,6 @@ export default function MenuBar() {
  <MenubarItem disabled={kind === 'none'} onClick={handleCloseSession}>
  Close Session
  </MenubarItem>
- </MenubarContent>
- </MenubarMenu>
-
- <MenubarMenu>
- <MenubarTrigger className="h-7 px-2 text-density-sm">Help</MenubarTrigger>
- <MenubarContent>
- <MenubarItem disabled>About Typhon Workbench</MenubarItem>
  </MenubarContent>
  </MenubarMenu>
  </Menubar>

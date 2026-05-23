@@ -93,8 +93,6 @@ export default function SchemaBrowserContextMenu({ component, onOpenInLayout, ch
         </ContextMenuItem>
         <ContextMenuSeparator />
         <ContextMenuItem onSelect={openInDataBrowser}>Open in Data Browser</ContextMenuItem>
-        <ContextMenuItem disabled>Open in Query Console</ContextMenuItem>
-        <ContextMenuItem disabled>Reveal in Resource Tree</ContextMenuItem>
         <ContextMenuSeparator />
         <ContextMenuItem disabled className="text-muted-foreground">
           {component.typeName}

@@ -1,6 +1,5 @@
 import type { ReactNode } from 'react';
 import { Binary, Boxes, FolderOpen, HardDrive, Layers } from 'lucide-react';
-import { Button } from '@/components/ui/button';
 import { StatusBadge } from '@/components/ui/status-badge';
 import { simplifyTypeName } from '@/libs/simplifyTypeName';
 import { useSelectedResourceStore } from '@/stores/useSelectedResourceStore';
@@ -607,18 +606,6 @@ function ResourceDetail() {
           <dt className="text-muted-foreground">Children</dt>
           <dd className="text-foreground">{childrenCount}</dd>
         </dl>
-
-        <div className="mt-3 flex flex-wrap gap-2 border-t border-border pt-2">
-          <Button disabled size="sm" variant="outline" title="Coming in a later phase">
-            Open in Query
-          </Button>
-          <Button disabled size="sm" variant="outline" title="Coming in a later phase">
-            Open in Entities
-          </Button>
-          <Button disabled size="sm" variant="outline" title="Coming in a later phase">
-            Open in Schema
-          </Button>
-        </div>
       </div>
     </div>
   );

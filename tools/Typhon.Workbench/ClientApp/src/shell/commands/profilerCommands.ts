@@ -240,18 +240,19 @@ export function openSaveReplayDialog(): void {
  */
 export function buildProfilerPaletteCommands(): CommandItem[] {
   return [
-    { id: 'toggle-view-profiler',     label: 'Toggle View Profiler',  keywords: 'profiler open show',               action: toggleViewProfiler },
-    { id: 'toggle-view-critical-path', label: 'Toggle View Critical Path', keywords: 'critical path tape timeline cp wall-clock tick', action: toggleViewCriticalPath },
-    { id: 'toggle-view-query-catalog', label: 'Toggle View Query Catalog', keywords: 'query catalog definitions filters profiler', action: toggleViewQueryCatalog },
-    { id: 'toggle-view-query-plan-tree', label: 'Toggle View Query Plan Tree', keywords: 'query plan tree graph dagre xyflow profiler', action: toggleViewQueryPlanTree },
-    { id: 'toggle-view-execution-inspector', label: 'Toggle View Execution Inspector', keywords: 'execution inspector phases drill profiler query', action: toggleViewExecutionInspector },
-    { id: 'toggle-view-top-spans',   label: 'Toggle View Top Spans', keywords: 'profiler top spans table slow expensive sortable', action: toggleViewTopSpans },
+    { id: 'toggle-view-profiler',     label: 'Toggle View Profiler',  keywords: 'profiler open show',               action: toggleViewProfiler, viewId: 'Profiler' },
+    { id: 'toggle-view-critical-path', label: 'Toggle View Critical Path', keywords: 'critical path tape timeline cp wall-clock tick', action: toggleViewCriticalPath, viewId: 'CriticalPath' },
+    { id: 'toggle-view-query-catalog', label: 'Toggle View Query Catalog', keywords: 'query catalog definitions filters profiler', action: toggleViewQueryCatalog, viewId: 'QueryCatalog' },
+    { id: 'toggle-view-query-plan-tree', label: 'Toggle View Query Plan Tree', keywords: 'query plan tree graph dagre xyflow profiler', action: toggleViewQueryPlanTree, viewId: 'QueryPlanTree' },
+    { id: 'toggle-view-execution-inspector', label: 'Toggle View Execution Inspector', keywords: 'execution inspector phases drill profiler query', action: toggleViewExecutionInspector, viewId: 'ExecutionInspector' },
+    { id: 'toggle-view-top-spans',   label: 'Toggle View Top Spans', keywords: 'profiler top spans table slow expensive sortable', action: toggleViewTopSpans, viewId: 'TopSpans' },
     { id: 'profiler-save-replay',    label: 'Save Session as .typhon-replay…', keywords: 'save replay export attach session', action: openSaveReplayDialog },
-    { id: 'profiler-toggle-gauges',  label: 'Toggle Gauge Region',   keywords: 'gauges canvas profiler g',         action: () => useProfilerViewStore.getState().toggleGaugeRegion() },
+    // Profiler-view interaction commands — only meaningful with the Profiler view mounted, so gated with it.
+    { id: 'profiler-toggle-gauges',  label: 'Toggle Gauge Region',   keywords: 'gauges canvas profiler g',         action: () => useProfilerViewStore.getState().toggleGaugeRegion(), viewId: 'Profiler' },
     { id: 'toggle-legends',          label: 'Toggle Legends',        keywords: 'legends labels help legend l app-wide',        action: () => useUiPrefsStore.getState().toggleLegends() },
-    { id: 'profiler-toggle-systems', label: 'Toggle Per-System Lanes', keywords: 'systems lanes profiler',         action: () => useProfilerViewStore.getState().togglePerSystemLanes() },
-    { id: 'profiler-zoom-full',      label: 'Zoom to Full Trace',    keywords: 'zoom full profiler reset home',    action: zoomToFullTrace },
-    { id: 'profiler-pan-left',       label: 'Pan Left',              keywords: 'pan left profiler',                action: () => panViewport(-1) },
-    { id: 'profiler-pan-right',      label: 'Pan Right',             keywords: 'pan right profiler',               action: () => panViewport(+1) },
+    { id: 'profiler-toggle-systems', label: 'Toggle Per-System Lanes', keywords: 'systems lanes profiler',         action: () => useProfilerViewStore.getState().togglePerSystemLanes(), viewId: 'Profiler' },
+    { id: 'profiler-zoom-full',      label: 'Zoom to Full Trace',    keywords: 'zoom full profiler reset home',    action: zoomToFullTrace, viewId: 'Profiler' },
+    { id: 'profiler-pan-left',       label: 'Pan Left',              keywords: 'pan left profiler',                action: () => panViewport(-1), viewId: 'Profiler' },
+    { id: 'profiler-pan-right',      label: 'Pan Right',             keywords: 'pan right profiler',               action: () => panViewport(+1), viewId: 'Profiler' },
   ];
 }

@@ -24,6 +24,7 @@ import {
   resetLayout,
 } from './openSchemaBrowser';
 import { buildProfilerPaletteCommands } from './profilerCommands';
+import { isViewActive } from '@/shell/viewRegistry';
 import type { ConnectTab } from '@/shell/dialogs/ConnectDialog';
 
 export interface CommandItem {
@@ -31,6 +32,9 @@ export interface CommandItem {
   label: string;
   keywords?: string;
   action: () => void;
+  // Dockview component id of the view this command opens/drives, when it is bound to one. Commands whose
+  // view is gated off (Stage 0) are filtered out of the palette; shell commands leave this undefined.
+  viewId?: string;
 }
 
 /**
@@ -56,35 +60,40 @@ export function buildBaseCommands(): CommandItem[] {
     deleteApiSessionsId(sessionId).then(clearSession).catch(() => {});
   };
 
-  return [
+  const commands: CommandItem[] = [
     { id: 'open-file',     label: 'Open File…',               keywords: 'open typhon',      action: () => openConnectDialog('open') },
     { id: 'open-recent',   label: 'Open Recent',              keywords: 'recent file',       action: () => openConnectDialog('recent') },
     { id: 'attach',        label: 'Attach…',                  keywords: 'attach engine',     action: () => openConnectDialog('attach') },
     { id: 'open-trace',    label: 'Open Trace…',              keywords: 'trace typhon',      action: () => openConnectDialog('trace') },
     { id: 'close-session', label: 'Close Session',            keywords: 'close disconnect',  action: closeSession },
     { id: 'refresh-graph', label: 'Refresh Resource Graph',   keywords: 'refresh reload tree', action: refreshResourceGraph },
-    { id: 'toggle-view-component-browser',    label: 'Toggle View Component Browser',    keywords: 'schema components inspector #schema browser', action: toggleViewComponentBrowser },
-    { id: 'toggle-view-archetype-browser',    label: 'Toggle View Archetype Browser',    keywords: 'archetypes list schema cluster legacy',       action: toggleViewArchetypeBrowser },
-    { id: 'toggle-view-schema-archetypes',    label: 'Toggle View Component Archetypes', keywords: 'schema archetypes cluster storage',           action: toggleViewSchemaArchetypes },
-    { id: 'toggle-view-schema-indexes',       label: 'Toggle View Component Indexes',    keywords: 'schema indexes btree fields',                 action: toggleViewSchemaIndexes },
-    { id: 'toggle-view-schema-relationships', label: 'Toggle View Component Relationships', keywords: 'schema systems relationships',             action: toggleViewSchemaRelationships },
-    { id: 'toggle-view-system-dag',           label: 'Toggle View System DAG',              keywords: 'system dag scheduler topology phases rfc07', action: toggleViewSystemDag },
-    { id: 'toggle-view-data-flow',            label: 'Toggle View Data Flow',               keywords: 'data flow timeline marey tracks granularity bars', action: toggleViewDataFlow },
-    { id: 'toggle-view-access-matrix',        label: 'Toggle View Access Matrix',           keywords: 'access matrix heatmap systems components touch grid', action: toggleViewAccessMatrix },
-    { id: 'toggle-view-dbmap',                label: 'Toggle View Database File Map',       keywords: 'database file map storage layout pages hilbert fragmentation disk', action: toggleViewDbMap },
-    { id: 'data-browser',                     label: 'Open Data Browser',                   keywords: 'data browser entities components values inspect crud rows', action: () => toggleViewDataBrowser() },
+    { id: 'toggle-view-component-browser',    label: 'Toggle View Component Browser',    keywords: 'schema components inspector #schema browser', action: toggleViewComponentBrowser, viewId: 'SchemaBrowser' },
+    { id: 'toggle-view-archetype-browser',    label: 'Toggle View Archetype Browser',    keywords: 'archetypes list schema cluster legacy',       action: toggleViewArchetypeBrowser, viewId: 'ArchetypeBrowser' },
+    { id: 'toggle-view-schema-archetypes',    label: 'Toggle View Component Archetypes', keywords: 'schema archetypes cluster storage',           action: toggleViewSchemaArchetypes, viewId: 'SchemaArchetypes' },
+    { id: 'toggle-view-schema-indexes',       label: 'Toggle View Component Indexes',    keywords: 'schema indexes btree fields',                 action: toggleViewSchemaIndexes, viewId: 'SchemaIndexes' },
+    { id: 'toggle-view-schema-relationships', label: 'Toggle View Component Relationships', keywords: 'schema systems relationships',             action: toggleViewSchemaRelationships, viewId: 'SchemaRelationships' },
+    { id: 'toggle-view-system-dag',           label: 'Toggle View System DAG',              keywords: 'system dag scheduler topology phases rfc07', action: toggleViewSystemDag, viewId: 'SystemDag' },
+    { id: 'toggle-view-data-flow',            label: 'Toggle View Data Flow',               keywords: 'data flow timeline marey tracks granularity bars', action: toggleViewDataFlow, viewId: 'DataFlow' },
+    { id: 'toggle-view-access-matrix',        label: 'Toggle View Access Matrix',           keywords: 'access matrix heatmap systems components touch grid', action: toggleViewAccessMatrix, viewId: 'AccessMatrix' },
+    { id: 'toggle-view-dbmap',                label: 'Toggle View Database File Map',       keywords: 'database file map storage layout pages hilbert fragmentation disk', action: toggleViewDbMap, viewId: 'DbMap' },
+    { id: 'data-browser',                     label: 'Open Data Browser',                   keywords: 'data browser entities components values inspect crud rows', action: () => toggleViewDataBrowser(), viewId: 'DataBrowserEntities' },
     { id: 'toggle-view-resource-tree',        label: 'Toggle View Resource Tree',        keywords: 'resource tree sidebar explorer',              action: toggleViewResourceTree },
     { id: 'toggle-view-detail',               label: 'Toggle View Detail',               keywords: 'detail inspector selection',                  action: toggleViewDetail },
     { id: 'toggle-view-logs',                 label: 'Toggle View Logs',                 keywords: 'logs log console output messages bottom',     action: toggleViewLogs },
     { id: 'toggle-view-options',              label: 'Toggle View Options',              keywords: 'options preferences settings editor',         action: toggleViewOptions },
-    { id: 'toggle-view-source-preview',       label: 'Toggle View Source Preview',       keywords: 'source preview code file line attribution profiler', action: toggleViewSourcePreview },
-    { id: 'show-source-current-span', label: 'Show Source for Current Span', keywords: 'source preview profiler span go to attribution', action: openSourcePreviewForCurrentSpan },
+    { id: 'toggle-view-source-preview',       label: 'Toggle View Source Preview',       keywords: 'source preview code file line attribution profiler', action: toggleViewSourcePreview, viewId: 'SourcePreview' },
+    { id: 'show-source-current-span', label: 'Show Source for Current Span', keywords: 'source preview profiler span go to attribution', action: openSourcePreviewForCurrentSpan, viewId: 'SourcePreview' },
     { id: 'save-layout-as-default', label: 'Save Layout as Default', keywords: 'layout default template save', action: saveLayoutAsDefault },
     { id: 'reset-layout', label: 'Reset Layout to Default', keywords: 'reset layout default restore panels dock recover lost', action: resetLayout },
     { id: 'toggle-theme',  label: 'Toggle Dark / Light Mode', keywords: 'theme dark light',  action: toggleTheme },
-    { id: 'debug-color-palettes', label: 'Debug: Color Palettes', keywords: 'debug color colour palette palettes swatches dev', action: toggleViewPaletteDebug },
+    // PaletteDebug is a dev-only color-swatch view — present only in DEBUG/dev builds (IA §9.1/§9.4).
+    ...(import.meta.env.DEV
+      ? [{ id: 'debug-color-palettes', label: 'Debug: Color Palettes', keywords: 'debug color colour palette palettes swatches dev', action: toggleViewPaletteDebug }]
+      : []),
     ...buildProfilerPaletteCommands(),
     { id: 'reload',        label: 'Reload',                   keywords: 'refresh',           action: () => location.reload() },
-    { id: 'about',         label: 'About Typhon Workbench',   keywords: 'version info',      action: () => {} },
   ];
+
+  // Drop commands bound to a deactivated view (Stage 0 shell frame). Shell commands (viewId undefined) stay.
+  return commands.filter((c) => isViewActive(c.viewId));
 }

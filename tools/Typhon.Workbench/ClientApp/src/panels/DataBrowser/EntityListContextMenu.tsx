@@ -3,7 +3,6 @@ import {
   ContextMenu,
   ContextMenuContent,
   ContextMenuItem,
-  ContextMenuSeparator,
   ContextMenuTrigger,
 } from '@/components/ui/context-menu';
 
@@ -15,15 +14,13 @@ async function copyToClipboard(text: string) {
   }
 }
 
-/** Right-click menu for an entity row. "Open in Query Console" is a disabled stub until that module ships. */
+/** Right-click menu for an entity row. Cross-view handoffs (e.g. Query Console) return with their views in later stages. */
 export default function EntityListContextMenu({ entityId, children }: { entityId: string; children: ReactNode }) {
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
       <ContextMenuContent className="w-56">
         <ContextMenuItem onSelect={() => copyToClipboard(entityId)}>Copy Entity Id</ContextMenuItem>
-        <ContextMenuSeparator />
-        <ContextMenuItem disabled>Open in Query Console</ContextMenuItem>
       </ContextMenuContent>
     </ContextMenu>
   );
