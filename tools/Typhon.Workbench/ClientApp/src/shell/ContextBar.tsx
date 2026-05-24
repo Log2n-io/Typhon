@@ -63,7 +63,7 @@ export default function ContextBar() {
     <div
       className={
         'flex h-[26px] shrink-0 items-center gap-2 border-b border-border bg-card px-3 ' +
-        'text-[12px] text-muted-foreground ' + tone.barTint
+        'text-fs-base text-muted-foreground ' + tone.barTint
       }
     >
       {/* Identity */}
@@ -150,7 +150,7 @@ function EnvTagPicker({
         disabled={disabled}
         onClick={() => setOpen((o) => !o)}
         title={disabled ? 'Open a file to tag its environment' : 'Set environment tag'}
-        className={`rounded px-1.5 py-0.5 text-[10px] font-semibold tracking-wide ${ENV_TAG_STYLE[value].chip} disabled:opacity-50`}
+        className={`rounded px-1.5 py-0.5 text-fs-xs font-semibold tracking-wide ${ENV_TAG_STYLE[value].chip} disabled:opacity-50`}
       >
         {ENV_TAG_STYLE[value].label}
       </button>
@@ -165,7 +165,7 @@ function EnvTagPicker({
                 setOpen(false);
               }}
               className={
-                'flex w-full items-center gap-2 rounded px-2 py-1 text-left text-[11px] hover:bg-muted/60 ' +
+                'flex w-full items-center gap-2 rounded px-2 py-1 text-left text-fs-sm hover:bg-muted/60 ' +
                 (opt === value ? 'text-foreground' : 'text-muted-foreground')
               }
             >

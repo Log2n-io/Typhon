@@ -34,7 +34,7 @@ export function BookmarksTab(props: BookmarksTabProps) {
         type="button"
         onClick={props.onAddCurrent}
         disabled={!props.hasMap}
-        className="flex items-center gap-1.5 self-start rounded border border-border bg-card px-1.5 py-0.5 text-[11px] text-muted-foreground hover:text-foreground disabled:opacity-40"
+        className="flex items-center gap-1.5 self-start rounded border border-border bg-card px-1.5 py-0.5 text-fs-sm text-muted-foreground hover:text-foreground disabled:opacity-40"
         title="Bookmark the current viewport (b)"
         data-testid="dbmap-bookmark-add"
       >
@@ -42,7 +42,7 @@ export function BookmarksTab(props: BookmarksTabProps) {
       </button>
 
       {props.bookmarks.length === 0 ? (
-        <p className="text-[11px] text-muted-foreground">
+        <p className="text-fs-sm text-muted-foreground">
           No bookmarks yet. Press <kbd className="rounded bg-muted px-1">b</kbd> or the button above to pin the
           current viewport — bookmarks are saved per database and survive a restart.
         </p>
@@ -61,7 +61,7 @@ export function BookmarksTab(props: BookmarksTabProps) {
                       else if (e.key === 'Escape') setEditingId(null);
                     }}
                     onBlur={() => commitRename(b.id)}
-                    className="min-w-0 flex-1 rounded border border-border bg-background px-1 py-0.5 text-[11px] text-foreground"
+                    className="min-w-0 flex-1 rounded border border-border bg-background px-1 py-0.5 text-fs-sm text-foreground"
                   />
                   <button
                     type="button"
@@ -77,7 +77,7 @@ export function BookmarksTab(props: BookmarksTabProps) {
                   <button
                     type="button"
                     onClick={() => props.onFlyTo(b)}
-                    className="min-w-0 flex-1 truncate rounded px-1 py-0.5 text-left text-[11px] text-foreground hover:bg-muted/60"
+                    className="min-w-0 flex-1 truncate rounded px-1 py-0.5 text-left text-fs-sm text-foreground hover:bg-muted/60"
                     title="Fly the camera to this viewport"
                   >
                     {b.label}

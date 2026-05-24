@@ -51,7 +51,7 @@ export default function AccessChips({ componentTypeName }: AccessChipsProps) {
 
   return (
     <div className="border-b border-border bg-muted/10 px-3 py-2">
-      <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Access (RFC 07)</div>
+      <div className="text-fs-xs font-semibold uppercase tracking-wide text-muted-foreground">Access (RFC 07)</div>
       <div className="mt-1 flex flex-col gap-1.5">
         <ChipRow label="writes" tone="write" names={buckets.writes} />
         <ChipRow label="side-writes" tone="side-write" names={buckets.sideWrites} />
@@ -73,9 +73,9 @@ function ChipRow({ label, tone, names }: ChipRowProps) {
   if (names.length === 0) return null;
   return (
     <div className="flex flex-wrap items-center gap-1.5">
-      <span className="font-mono text-[10px] text-muted-foreground">{label}:</span>
+      <span className="font-mono text-fs-xs text-muted-foreground">{label}:</span>
       {names.map((n) => (
-        <span key={n} className={`rounded border px-1.5 py-0.5 font-mono text-[10px] ${toneClasses(tone)}`}>
+        <span key={n} className={`rounded border px-1.5 py-0.5 font-mono text-fs-xs ${toneClasses(tone)}`}>
           {n}
         </span>
       ))}

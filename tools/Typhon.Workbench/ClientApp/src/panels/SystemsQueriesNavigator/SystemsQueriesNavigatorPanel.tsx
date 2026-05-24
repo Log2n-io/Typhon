@@ -121,7 +121,7 @@ function NavSection({
         <button
           type="button"
           onClick={() => setOpen((o) => !o)}
-          className="flex w-full items-center gap-1.5 px-2 py-1.5 text-left text-[11px] font-medium uppercase tracking-wide text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+          className="flex w-full items-center gap-1.5 px-2 py-1.5 text-left text-fs-sm font-medium uppercase tracking-wide text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
         >
           {open ? <ChevronDown className="h-3 w-3 shrink-0" /> : <ChevronRight className="h-3 w-3 shrink-0" />}
           {icon}
@@ -152,14 +152,14 @@ function NavRow({
         onClick={onClick}
         aria-pressed={selected}
         className={
-          'flex h-[22px] w-full items-center gap-2 px-2 text-left text-density-sm ' +
+          'flex h-[22px] w-full items-center gap-2 px-2 text-left text-fs-lg ' +
           'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring ' +
           // focus (the ring) is rendered distinctly from selection (the accent fill) — DS-4 focus≠selection.
           (selected ? 'bg-accent text-accent-foreground' : 'text-foreground hover:bg-muted/60')
         }
       >
         <span className="truncate">{label}</span>
-        {detail && <span className="ml-auto shrink-0 truncate text-[10px] text-muted-foreground">{detail}</span>}
+        {detail && <span className="ml-auto shrink-0 truncate text-fs-xs text-muted-foreground">{detail}</span>}
       </button>
     </RovingItem>
   );
@@ -168,7 +168,7 @@ function NavRow({
 function NavMessage({ tone, children }: { tone: 'muted' | 'error'; children: React.ReactNode }) {
   return (
     <div className="flex h-full items-center justify-center bg-background p-3">
-      <p className={'text-center text-density-sm ' + (tone === 'error' ? 'text-destructive' : 'text-muted-foreground')}>
+      <p className={'text-center text-fs-lg ' + (tone === 'error' ? 'text-destructive' : 'text-muted-foreground')}>
         {children}
       </p>
     </div>

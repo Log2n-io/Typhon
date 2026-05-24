@@ -90,7 +90,7 @@ export default function DataFlowTooltip({ bar, cursor, tickDurationUs, barTickSt
   return (
     <div
       style={style}
-      className="rounded-md border border-border bg-popover px-3 py-2 text-[11px] leading-tight text-popover-foreground shadow-lg"
+      className="rounded-md border border-border bg-popover px-3 py-2 text-fs-sm leading-tight text-popover-foreground shadow-lg"
     >
       <div className="font-semibold">
         {delayedBar.systemName}

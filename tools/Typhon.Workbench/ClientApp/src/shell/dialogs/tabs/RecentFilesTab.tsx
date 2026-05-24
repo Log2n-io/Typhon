@@ -25,7 +25,7 @@ export default function RecentFilesTab({ onOpen, onOpenTrace }: Props) {
 
   if (entries.length === 0) {
     return (
-      <div className="flex h-full items-center justify-center text-density-sm text-muted-foreground">
+      <div className="flex h-full items-center justify-center text-fs-lg text-muted-foreground">
         No recent files. Open a database from the <b className="px-1">Open File</b> tab,
         or a trace from the <b className="px-1">Open Trace</b> tab.
       </div>
@@ -82,20 +82,20 @@ function RecentFileRow({ entry, onOpen, onOpenTrace }: { entry: RecentFile } & P
       <Icon className={`h-3.5 w-3.5 shrink-0 ${iconClass}`} />
       <button onClick={handleActivate} className="min-w-0 flex-1 text-left">
         <div className="flex items-baseline gap-2">
-          <span className="truncate text-density-sm font-semibold">{name}</span>
+          <span className="truncate text-fs-lg font-semibold">{name}</span>
           {detail && (
-            <span className="shrink-0 text-[10px] text-muted-foreground">({detail})</span>
+            <span className="shrink-0 text-fs-xs text-muted-foreground">({detail})</span>
           )}
-          <span className={`shrink-0 rounded px-1 text-[10px] uppercase ${kindBadgeClass}`}>
+          <span className={`shrink-0 rounded px-1 text-fs-xs uppercase ${kindBadgeClass}`}>
             {kindLabel}
           </span>
           {!isTrace && (
-            <span className={`shrink-0 rounded px-1 text-[10px] uppercase ${stateStyles[entry.lastState]}`}>
+            <span className={`shrink-0 rounded px-1 text-fs-xs uppercase ${stateStyles[entry.lastState]}`}>
               {entry.lastState}
             </span>
           )}
         </div>
-        <div className="truncate text-[10px] text-muted-foreground">
+        <div className="truncate text-fs-xs text-muted-foreground">
           {entry.filePath}
         </div>
       </button>

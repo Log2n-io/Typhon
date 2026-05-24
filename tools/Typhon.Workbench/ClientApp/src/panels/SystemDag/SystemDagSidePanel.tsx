@@ -85,10 +85,10 @@ export default function SystemDagSidePanel({ node, sessionId, range, cpStat, cpT
   return (
     <div className="flex h-full w-[300px] flex-col border-l border-border bg-background">
       <div className="flex items-center gap-2 border-b border-border px-3 py-2">
-        <h3 className="truncate font-mono text-[12px] font-semibold text-foreground" title={node.systemName}>
+        <h3 className="truncate font-mono text-fs-base font-semibold text-foreground" title={node.systemName}>
           {node.systemName}
         </h3>
-        <span className="rounded bg-muted/40 px-1.5 py-0.5 text-[9px] font-mono uppercase text-muted-foreground">
+        <span className="rounded bg-muted/40 px-1.5 py-0.5 text-fs-2xs font-mono uppercase text-muted-foreground">
           {node.kind}
         </span>
         <button
@@ -103,15 +103,15 @@ export default function SystemDagSidePanel({ node, sessionId, range, cpStat, cpT
 
       <div className="flex-1 overflow-y-auto px-3 py-2">
         <Section label="Phase">
-          <span className="font-mono text-[11px] text-foreground">{node.phaseName || '(unphased)'}</span>
+          <span className="font-mono text-fs-sm text-foreground">{node.phaseName || '(unphased)'}</span>
         </Section>
         <Section label="Flags">
           <ChipRow>
-            {node.isParallel && <span className="rounded border border-slate-300 bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] text-slate-800 dark:border-slate-600/50 dark:bg-slate-900/40 dark:text-slate-200">parallel</span>}
-            {node.isExclusivePhase && <span className="rounded border border-amber-300 bg-amber-100 px-1.5 py-0.5 font-mono text-[10px] text-amber-800 dark:border-amber-700/50 dark:bg-amber-950/40 dark:text-amber-200">exclusive</span>}
-            {node.tierFilter !== 0x0F && <span className="rounded border border-slate-300 bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] text-slate-800 dark:border-slate-600/50 dark:bg-slate-900/40 dark:text-slate-200">tier {node.tierFilter}</span>}
+            {node.isParallel && <span className="rounded border border-slate-300 bg-slate-100 px-1.5 py-0.5 font-mono text-fs-xs text-slate-800 dark:border-slate-600/50 dark:bg-slate-900/40 dark:text-slate-200">parallel</span>}
+            {node.isExclusivePhase && <span className="rounded border border-amber-300 bg-amber-100 px-1.5 py-0.5 font-mono text-fs-xs text-amber-800 dark:border-amber-700/50 dark:bg-amber-950/40 dark:text-amber-200">exclusive</span>}
+            {node.tierFilter !== 0x0F && <span className="rounded border border-slate-300 bg-slate-100 px-1.5 py-0.5 font-mono text-fs-xs text-slate-800 dark:border-slate-600/50 dark:bg-slate-900/40 dark:text-slate-200">tier {node.tierFilter}</span>}
             {!node.isParallel && !node.isExclusivePhase && node.tierFilter === 0x0F && (
-              <span className="font-mono text-[10px] text-muted-foreground">none</span>
+              <span className="font-mono text-fs-xs text-muted-foreground">none</span>
             )}
           </ChipRow>
         </Section>
@@ -157,7 +157,7 @@ export default function SystemDagSidePanel({ node, sessionId, range, cpStat, cpT
         <AccessGroup label="writes resources" tone="resource-write" items={node.writesResources} />
 
         {!node.hasAccess && (
-          <div className="mt-3 rounded border border-amber-300 bg-amber-50 px-2 py-1.5 text-[10px] text-amber-900 dark:border-amber-700/40 dark:bg-amber-950/30 dark:text-amber-200">
+          <div className="mt-3 rounded border border-amber-300 bg-amber-50 px-2 py-1.5 text-fs-xs text-amber-900 dark:border-amber-700/40 dark:bg-amber-950/30 dark:text-amber-200">
             This system has no RFC 07 declarations on the wire. The trace may predate v6 of the
             wire format, or the host has not been recompiled after #310.
           </div>
@@ -181,12 +181,12 @@ function StatsSection({
   return (
     <Section label={`stats over ticks ${range.from}–${range.to}`}>
       {error ? (
-        <div className="font-mono text-[10px] text-destructive">{error.message}</div>
+        <div className="font-mono text-fs-xs text-destructive">{error.message}</div>
       ) : isLoading || !stats ? (
-        <div className="font-mono text-[10px] text-muted-foreground">Loading…</div>
+        <div className="font-mono text-fs-xs text-muted-foreground">Loading…</div>
       ) : (
         <>
-          <div className="grid grid-cols-3 gap-x-2 gap-y-1 font-mono text-[10px] text-foreground">
+          <div className="grid grid-cols-3 gap-x-2 gap-y-1 font-mono text-fs-xs text-foreground">
             <Stat label="count" value={stats.count} unit="" />
             <Stat label="mean" value={stats.mean} unit="µs" />
             <Stat label="max" value={stats.max} unit="µs" />
@@ -196,7 +196,7 @@ function StatsSection({
           </div>
           {stats.histogram && stats.histogram.length > 0 && (
             <div className="mt-2">
-              <div className="mb-1 font-mono text-[9px] uppercase tracking-wide text-muted-foreground">
+              <div className="mb-1 font-mono text-fs-2xs uppercase tracking-wide text-muted-foreground">
                 duration distribution
               </div>
               <Histogram buckets={stats.histogram} />
@@ -204,10 +204,10 @@ function StatsSection({
           )}
           {stats.topk && stats.topk.length > 0 && (
             <div className="mt-2">
-              <div className="mb-1 font-mono text-[9px] uppercase tracking-wide text-muted-foreground">
+              <div className="mb-1 font-mono text-fs-2xs uppercase tracking-wide text-muted-foreground">
                 top-{stats.topk.length} overruns
               </div>
-              <div className="space-y-0.5 font-mono text-[10px]">
+              <div className="space-y-0.5 font-mono text-fs-xs">
                 {stats.topk.map((entry, i) => (
                   <div key={`${entry.tickNumber}-${i}`} className="flex justify-between">
                     <span className="text-muted-foreground">tick {String(entry.tickNumber)}</span>
@@ -242,12 +242,12 @@ function CriticalPathRow({
   return (
     <div className="space-y-0.5">
       <div className="flex items-baseline justify-between font-mono">
-        <span className={`text-[14px] tabular-nums ${tone}`}>{pct}%</span>
-        <span className="text-[10px] text-muted-foreground">
+        <span className={`text-fs-xl tabular-nums ${tone}`}>{pct}%</span>
+        <span className="text-fs-xs text-muted-foreground">
           {onPathTicks} / {totalTicks} ticks
         </span>
       </div>
-      <div className="font-mono text-[10px] text-muted-foreground">{headline}</div>
+      <div className="font-mono text-fs-xs text-muted-foreground">{headline}</div>
     </div>
   );
 }
@@ -255,8 +255,8 @@ function CriticalPathRow({
 function Stat({ label, value, unit }: { label: string; value: number | null; unit: string }) {
   return (
     <div>
-      <div className="text-[8px] uppercase tracking-wide text-muted-foreground">{label}</div>
-      <div className="text-[11px] tabular-nums">
+      <div className="text-fs-2xs uppercase tracking-wide text-muted-foreground">{label}</div>
+      <div className="text-fs-sm tabular-nums">
         {value == null ? '—' : `${formatNumber(value)}${unit ? ' ' + unit : ''}`}
       </div>
     </div>
@@ -273,7 +273,7 @@ function Histogram({ buckets }: { buckets: PanelStats['histogram'] }) {
     if (c > max) max = c;
   }
   if (max === 0 || safeBuckets.length === 0) {
-    return <div className="font-mono text-[10px] text-muted-foreground">No data in range.</div>;
+    return <div className="font-mono text-fs-xs text-muted-foreground">No data in range.</div>;
   }
   const width = 260;
   const height = 80;
@@ -347,8 +347,8 @@ function GatedBySection({ info }: { info: SystemGatingInfo }) {
   return (
     <div className="mb-2.5">
       <div className="mb-0.5 flex items-baseline justify-between">
-        <span className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">gated by</span>
-        <span className="font-mono text-[9px] text-muted-foreground">
+        <span className="text-fs-xs font-semibold uppercase tracking-wide text-muted-foreground">gated by</span>
+        <span className="font-mono text-fs-2xs text-muted-foreground">
           mean wait {formatUs(info.meanWaitGapUs)} · {info.ticksObserved} ticks
         </span>
       </div>
@@ -356,7 +356,7 @@ function GatedBySection({ info }: { info: SystemGatingInfo }) {
         {active.length > 0 ? (
           active.map((g) => <GaterRow key={g.predecessorName} gater={g} />)
         ) : (
-          <div className="font-mono text-[10px] italic text-muted-foreground">
+          <div className="font-mono text-fs-xs italic text-muted-foreground">
             No predecessor was the gater in any observed tick.
           </div>
         )}
@@ -392,13 +392,13 @@ function SilentPredecessorsBlock({
       <button
         type="button"
         onClick={onToggle}
-        className="mt-1 flex w-full items-center justify-between rounded border border-border/40 bg-card/40 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground hover:bg-muted/40 hover:text-foreground"
+        className="mt-1 flex w-full items-center justify-between rounded border border-border/40 bg-card/40 px-1.5 py-0.5 font-mono text-fs-xs text-muted-foreground hover:bg-muted/40 hover:text-foreground"
         title={expanded
           ? 'Collapse — hide predecessors that never gated this system in the range'
           : 'Expand — show predecessors that exist in the DAG but never gated this system'}
       >
         <span>+ {silent.length} other predecessor{silent.length === 1 ? '' : 's'} (never gated)</span>
-        <span className="font-sans text-[9px]">{expanded ? '▾' : '▸'}</span>
+        <span className="font-sans text-fs-2xs">{expanded ? '▾' : '▸'}</span>
       </button>
       {expanded && (
         <div className="mt-0.5 space-y-0.5">
@@ -429,14 +429,14 @@ function GaterRow({ gater }: { gater: GaterEntry }) {
     : 'border-border/60 bg-card/60';
   const edge = gater.edge;
   return (
-    <div className={`rounded border px-1.5 py-1 font-mono text-[10px] ${rowToneClass}`}>
+    <div className={`rounded border px-1.5 py-1 font-mono text-fs-xs ${rowToneClass}`}>
       <div className="flex items-baseline gap-1.5">
         <span className={`flex-1 truncate ${nameTone}`} title={gater.predecessorName}>
           {gater.predecessorName}
         </span>
         <span className={`tabular-nums ${pctTone}`}>{pctTicks.toFixed(0)}%</span>
       </div>
-      <div className="mt-0.5 flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-[9px] text-muted-foreground">
+      <div className="mt-0.5 flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-fs-2xs text-muted-foreground">
         <span>pred dur {formatUs(gater.meanPredDurationUs)}</span>
         {edge ? (
           <>
@@ -469,7 +469,7 @@ function MitigationHint({ gaters }: { gaters: GaterEntry[] }) {
   const hint = mitigationHintForKind(edge.kind, edge.via);
   if (!hint) return null;
   return (
-    <div className="mt-1.5 rounded border border-sky-300 bg-sky-50 px-2 py-1 text-[10px] text-sky-900 dark:border-sky-800/40 dark:bg-sky-950/30 dark:text-sky-200">
+    <div className="mt-1.5 rounded border border-sky-300 bg-sky-50 px-2 py-1 text-fs-xs text-sky-900 dark:border-sky-800/40 dark:bg-sky-950/30 dark:text-sky-200">
       <span className="mr-1 font-semibold">Mitigation:</span>
       {hint}
     </div>
@@ -521,7 +521,7 @@ function edgeKindClasses(kind: GaterEntry['edge'] extends infer T ? (T extends {
 function Section({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="mb-2.5">
-      <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{label}</div>
+      <div className="text-fs-xs font-semibold uppercase tracking-wide text-muted-foreground">{label}</div>
       <div className="mt-0.5">{children}</div>
     </div>
   );
@@ -556,7 +556,7 @@ function AccessGroup({
     <Section label={label}>
       <ChipRow>
         {items.map((item) => (
-          <span key={item} className={`rounded border px-1.5 py-0.5 font-mono text-[10px] ${toneClasses(tone)}`}>
+          <span key={item} className={`rounded border px-1.5 py-0.5 font-mono text-fs-xs ${toneClasses(tone)}`}>
             {item}
           </span>
         ))}

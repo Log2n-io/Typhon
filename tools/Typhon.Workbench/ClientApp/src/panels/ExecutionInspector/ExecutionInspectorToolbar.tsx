@@ -27,7 +27,7 @@ export function ExecutionInspectorToolbar({ definition, execution, archetypeName
   const setQueryPlanExecution = useQueryPlanStore((s) => s.setSelectedExecution);
 
   if (!definition) {
-    return <div className="border-b border-border bg-card px-3 py-1.5 text-[12px] text-muted-foreground">No execution selected.</div>;
+    return <div className="border-b border-border bg-card px-3 py-1.5 text-fs-base text-muted-foreground">No execution selected.</div>;
   }
 
   const kindLabel = definition.instanceId.kind === 0 ? 'View' : 'EcsQuery';
@@ -49,18 +49,18 @@ export function ExecutionInspectorToolbar({ definition, execution, archetypeName
   return (
     <div className="flex items-center gap-3 border-b border-border bg-card px-3 py-1.5">
       <div className="flex items-baseline gap-2">
-        <span className="font-mono text-[12px] font-semibold text-foreground">{idLabel}</span>
-        <span className="text-[11px] text-muted-foreground">on</span>
-        <span className="font-mono text-[12px] text-foreground">{archetypeName || '—'}</span>
+        <span className="font-mono text-fs-base font-semibold text-foreground">{idLabel}</span>
+        <span className="text-fs-sm text-muted-foreground">on</span>
+        <span className="font-mono text-fs-base text-foreground">{archetypeName || '—'}</span>
       </div>
 
       {execution && (
         <div className="flex items-baseline gap-2 border-l border-border pl-3">
-          <span className="text-[11px] text-muted-foreground">tick</span>
-          <span className="font-mono text-[12px] text-foreground">{toNumber(execution.tickIndex).toLocaleString()}</span>
-          <span className="text-[11px] text-muted-foreground">·</span>
-          <span className="text-[11px] text-muted-foreground">in</span>
-          <span className="font-mono text-[12px] text-foreground">{systemName || '<unattributed>'}</span>
+          <span className="text-fs-sm text-muted-foreground">tick</span>
+          <span className="font-mono text-fs-base text-foreground">{toNumber(execution.tickIndex).toLocaleString()}</span>
+          <span className="text-fs-sm text-muted-foreground">·</span>
+          <span className="text-fs-sm text-muted-foreground">in</span>
+          <span className="font-mono text-fs-base text-foreground">{systemName || '<unattributed>'}</span>
         </div>
       )}
 
@@ -70,7 +70,7 @@ export function ExecutionInspectorToolbar({ definition, execution, archetypeName
         <Button
           size="sm"
           variant="ghost"
-          className="h-7 gap-1 text-[11px]"
+          className="h-7 gap-1 text-fs-sm"
           onClick={onShowTree}
           title="Open the plan tree for this execution"
           data-testid="execution-inspector-show-tree"
@@ -84,7 +84,7 @@ export function ExecutionInspectorToolbar({ definition, execution, archetypeName
         <Button
           size="sm"
           variant="ghost"
-          className="h-7 gap-1 text-[11px]"
+          className="h-7 gap-1 text-fs-sm"
           onClick={() => openInEditor(src.file ?? '', sourceLine)}
           title={`${src.file}:${sourceLine}`}
         >

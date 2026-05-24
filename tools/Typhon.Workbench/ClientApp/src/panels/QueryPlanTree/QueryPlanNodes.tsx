@@ -38,11 +38,11 @@ function PlanNodeShell({ data, accent, badge }: { data: QueryPlanNodeData; accen
     <div className={`${NODE_BASE} ${accent}`}>
       <Handle type="target" position={Position.Top} className="opacity-40" />
       <div className="flex items-center justify-between border-b border-border/40 px-2.5 py-1">
-        <span className="font-semibold text-[12px]">{data.title}</span>
-        <span className="text-[9px] uppercase tracking-wider text-muted-foreground">{badge}</span>
+        <span className="font-semibold text-fs-base">{data.title}</span>
+        <span className="text-fs-2xs uppercase tracking-wider text-muted-foreground">{badge}</span>
       </div>
       <div className="px-2.5 py-1.5">
-        <div className="truncate font-mono text-[11px] text-foreground">{data.detail}</div>
+        <div className="truncate font-mono text-fs-sm text-foreground">{data.detail}</div>
         {data.stats && <StatsFooter stats={data.stats} />}
       </div>
       <Handle type="source" position={Position.Bottom} className="opacity-40" />
@@ -61,7 +61,7 @@ function StatsFooter({ stats }: { stats: NonNullable<QueryPlanNodeData['stats']>
   if (stats.notes) parts.push(stats.notes);
   if (parts.length === 0) return null;
   return (
-    <div className="mt-1 truncate text-[10px] text-muted-foreground">{parts.join(' · ')}</div>
+    <div className="mt-1 truncate text-fs-xs text-muted-foreground">{parts.join(' · ')}</div>
   );
 }
 

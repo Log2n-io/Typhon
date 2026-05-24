@@ -18,7 +18,7 @@ export function TimeAreaHelpButton(): React.JSX.Element {
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className="flex h-5 w-5 items-center justify-center rounded-full border border-border bg-card font-mono text-[11px] text-foreground hover:bg-muted"
+        className="flex h-5 w-5 items-center justify-center rounded-full border border-border bg-card font-mono text-fs-sm text-foreground hover:bg-muted"
         title="How to use the time area (toggle inline help with `l`)"
         aria-label="How to use the time area"
       >
@@ -45,11 +45,11 @@ function HelpDialog({ onClose }: { onClose: () => void }): React.JSX.Element {
       tabIndex={-1}
     >
       <div
-        className="max-h-[85vh] w-[720px] max-w-[92vw] overflow-auto rounded-lg border border-border bg-card p-5 font-mono text-[11px] text-foreground shadow-xl"
+        className="max-h-[85vh] w-[720px] max-w-[92vw] overflow-auto rounded-lg border border-border bg-card p-5 font-mono text-fs-sm text-foreground shadow-xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="mb-3 flex items-center justify-between">
-          <h2 className="text-[13px] font-semibold">Time Area — controls &amp; legend</h2>
+          <h2 className="text-fs-lg font-semibold">Time Area — controls &amp; legend</h2>
           <button
             type="button"
             onClick={onClose}
@@ -109,7 +109,7 @@ function HelpDialog({ onClose }: { onClose: () => void }): React.JSX.Element {
             </li>
           </ul>
           <p className="mt-1 text-muted-foreground">
-            With inline legends on (the <kbd className="rounded border border-border bg-muted px-1 py-0.5 text-[10px]">l</kbd>{' '}
+            With inline legends on (the <kbd className="rounded border border-border bg-muted px-1 py-0.5 text-fs-xs">l</kbd>{' '}
             palette command), every track also gets its own <strong>?</strong> glyph in the gutter —
             hover it for that track's specific help.
           </p>
@@ -195,7 +195,7 @@ function HelpDialog({ onClose }: { onClose: () => void }): React.JSX.Element {
 function Section({ title, children }: { title: string; children: ReactNode }): React.JSX.Element {
   return (
     <div className="mb-4">
-      <h3 className="mb-1.5 text-[12px] font-semibold uppercase tracking-wide text-muted-foreground">{title}</h3>
+      <h3 className="mb-1.5 text-fs-base font-semibold uppercase tracking-wide text-muted-foreground">{title}</h3>
       <div className="space-y-1 leading-snug">{children}</div>
     </div>
   );
@@ -208,7 +208,7 @@ function KeyTable({ rows }: { rows: Array<[string, string]> }): React.JSX.Elemen
         {rows.map(([k, v]) => (
           <tr key={k} className="align-top">
             <td className="w-48 py-0.5 pr-3">
-              <kbd className="rounded border border-border bg-muted px-1.5 py-0.5 text-[10px]">{k}</kbd>
+              <kbd className="rounded border border-border bg-muted px-1.5 py-0.5 text-fs-xs">{k}</kbd>
             </td>
             <td className="py-0.5 text-muted-foreground">{v}</td>
           </tr>

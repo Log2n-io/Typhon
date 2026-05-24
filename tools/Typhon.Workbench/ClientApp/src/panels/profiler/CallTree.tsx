@@ -318,7 +318,7 @@ export default function CallTree() {
   const ctxSymbol = ctxNode ? byId.get(ctxNode.frameId) ?? null : null;
 
   return (
-    <div className="flex h-full w-full flex-col overflow-hidden bg-background text-[11px]">
+    <div className="flex h-full w-full flex-col overflow-hidden bg-background text-fs-sm">
       <Toolbar
         sessionId={sessionId}
         viewMode={viewMode}
@@ -499,7 +499,7 @@ function Toolbar(props: {
       <Button
         variant={props.groupByCategory ? 'default' : 'outline'}
         size="sm"
-        className="h-6 px-2 text-[11px]"
+        className="h-6 px-2 text-fs-sm"
         onClick={() => props.onGroupByCategory(!props.groupByCategory)}
         title="Collapse the call tree to subsystem categories"
       >
@@ -518,7 +518,7 @@ function Toolbar(props: {
           props.onApplyScope(systemScope(idx, sys?.name ?? `#${idx}`));
         }}
         title="Scope the call tree to a system"
-        className="h-6 rounded border border-border bg-background px-1 text-[11px] text-foreground"
+        className="h-6 rounded border border-border bg-background px-1 text-fs-sm text-foreground"
       >
         <option value="">System ▾</option>
         {systems.map((s) => (
@@ -535,7 +535,7 @@ function Toolbar(props: {
           props.onApplyScope(phaseScope(e.target.value));
         }}
         title="Scope the call tree to a phase"
-        className="h-6 rounded border border-border bg-background px-1 text-[11px] text-foreground"
+        className="h-6 rounded border border-border bg-background px-1 text-fs-sm text-foreground"
       >
         <option value="">Phase ▾</option>
         {phases.map((p) => (
@@ -555,7 +555,7 @@ function Toolbar(props: {
           }}
           placeholder="start"
           inputMode="numeric"
-          className="h-6 w-14 rounded border border-border bg-background px-1 text-[11px] text-foreground"
+          className="h-6 w-14 rounded border border-border bg-background px-1 text-fs-sm text-foreground"
         />
         ms
       </label>
@@ -569,7 +569,7 @@ function Toolbar(props: {
           }}
           placeholder="end"
           inputMode="numeric"
-          className="h-6 w-14 rounded border border-border bg-background px-1 text-[11px] text-foreground"
+          className="h-6 w-14 rounded border border-border bg-background px-1 text-fs-sm text-foreground"
         />
         ms
       </label>
@@ -616,7 +616,7 @@ function DensitySparkline({ sessionId, request }: { sessionId: string; request: 
 
   return (
     <div
-      className="flex flex-shrink-0 items-center gap-2 border-b border-border bg-card px-2 py-1 text-[11px]"
+      className="flex flex-shrink-0 items-center gap-2 border-b border-border bg-card px-2 py-1 text-fs-sm"
       title={caveat}
     >
       <span className="text-muted-foreground">density</span>
@@ -660,7 +660,7 @@ function ModeButton({
       type="button"
       onClick={onClick}
       title={title}
-      className={`h-6 px-2 text-[11px] ${active ? 'bg-primary text-primary-foreground' : 'bg-background text-muted-foreground hover:bg-primary/10'}`}
+      className={`h-6 px-2 text-fs-sm ${active ? 'bg-primary text-primary-foreground' : 'bg-background text-muted-foreground hover:bg-primary/10'}`}
     >
       {children}
     </button>
@@ -687,7 +687,7 @@ function SearchBar({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder="Filter methods…"
-        className="h-6 min-w-0 flex-1 rounded border border-border bg-background px-1.5 text-[11px] text-foreground"
+        className="h-6 min-w-0 flex-1 rounded border border-border bg-background px-1.5 text-fs-sm text-foreground"
       />
       {value.trim() !== '' && (
         <>
@@ -1081,7 +1081,7 @@ function CategoryBars({ breakdown, total }: { breakdown: CategorySlice[]; total:
 function EmptyState({ icon, text }: { icon?: React.ReactNode; text: string }) {
   return (
     <div className="flex h-full w-full items-center justify-center bg-background">
-      <div className="max-w-md px-8 text-center text-[12px] text-muted-foreground">
+      <div className="max-w-md px-8 text-center text-fs-base text-muted-foreground">
         {icon}
         {text}
       </div>

@@ -17,20 +17,20 @@ interface TableProps {
 
 export function QueryCatalogTable({ definitions, archetypeNames, systemNames, duplicateRowIds }: TableProps) {
   return (
-    <Table className="text-[12px]">
+    <Table className="text-fs-base">
       <TableHeader>
         <TableRow>
-          <TableHead className="py-1 w-[20px] text-[11px]" />
-          <TableHead className="py-1 text-[11px]">ID</TableHead>
-          <TableHead className="py-1 text-[11px]">Owners</TableHead>
-          <TableHead className="py-1 text-[11px]">Archetype</TableHead>
-          <TableHead className="py-1 text-right text-[11px]">Filters</TableHead>
-          <TableHead className="py-1 text-right text-[11px]">Executions</TableHead>
-          <TableHead className="py-1 text-right text-[11px]">Avg wall</TableHead>
-          <TableHead className="py-1 text-[11px]">Source</TableHead>
-          <TableHead className="py-1 w-[28px] text-[11px]" />
-          <TableHead className="py-1 w-[28px] text-[11px]" />
-          <TableHead className="py-1 w-[24px] text-[11px]" />
+          <TableHead className="w-[20px] text-fs-sm" />
+          <TableHead className="text-fs-sm">ID</TableHead>
+          <TableHead className="text-fs-sm">Owners</TableHead>
+          <TableHead className="text-fs-sm">Archetype</TableHead>
+          <TableHead className="text-right text-fs-sm">Filters</TableHead>
+          <TableHead className="text-right text-fs-sm">Executions</TableHead>
+          <TableHead className="text-right text-fs-sm">Avg wall</TableHead>
+          <TableHead className="text-fs-sm">Source</TableHead>
+          <TableHead className="w-[28px] text-fs-sm" />
+          <TableHead className="w-[28px] text-fs-sm" />
+          <TableHead className="w-[24px] text-fs-sm" />
         </TableRow>
       </TableHeader>
       <TableBody>

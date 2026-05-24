@@ -81,16 +81,16 @@ export function QueryCatalogRow({ definition, archetypeName, ownerSystemNames, i
         data-row-id={rowId}
         data-duplicate={isDuplicate || undefined}
       >
-        <TableCell className="py-1 w-[20px]">
+        <TableCell className="w-[20px]">
           {isExpanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
         </TableCell>
-        <TableCell className="py-1 font-mono text-[12px]">{idLabel}</TableCell>
-        <TableCell className="py-1 text-[12px]">{ownersLabel}</TableCell>
-        <TableCell className="py-1 font-mono text-[11px] text-muted-foreground">{archetypeLabel}</TableCell>
-        <TableCell className="py-1 text-right tabular-nums text-[12px]">{filtersLabel}</TableCell>
-        <TableCell className="py-1 text-right tabular-nums text-[12px]">{formatThousands(execCount)}</TableCell>
-        <TableCell className="py-1 text-right tabular-nums text-[12px]">{formatNs(avgWallNs)}</TableCell>
-        <TableCell className="py-1 text-[11px]">
+        <TableCell className="font-mono text-fs-base">{idLabel}</TableCell>
+        <TableCell className="text-fs-base">{ownersLabel}</TableCell>
+        <TableCell className="font-mono text-fs-sm text-muted-foreground">{archetypeLabel}</TableCell>
+        <TableCell className="text-right tabular-nums text-fs-base">{filtersLabel}</TableCell>
+        <TableCell className="text-right tabular-nums text-fs-base">{formatThousands(execCount)}</TableCell>
+        <TableCell className="text-right tabular-nums text-fs-base">{formatNs(avgWallNs)}</TableCell>
+        <TableCell className="text-fs-sm">
           {hasSource ? (
             <button
               type="button"
@@ -110,7 +110,7 @@ export function QueryCatalogRow({ definition, archetypeName, ownerSystemNames, i
             <span className="text-muted-foreground">—</span>
           )}
         </TableCell>
-        <TableCell className="py-1 w-[28px]">
+        <TableCell className="w-[28px]">
           <button
             type="button"
             onClick={(e) => {
@@ -126,7 +126,7 @@ export function QueryCatalogRow({ definition, archetypeName, ownerSystemNames, i
             <Network className="h-3.5 w-3.5" />
           </button>
         </TableCell>
-        <TableCell className="py-1 w-[28px]">
+        <TableCell className="w-[28px]">
           <button
             type="button"
             onClick={(e) => {
@@ -142,7 +142,7 @@ export function QueryCatalogRow({ definition, archetypeName, ownerSystemNames, i
             <ListTree className="h-3.5 w-3.5" />
           </button>
         </TableCell>
-        <TableCell className="py-1 w-[24px]">
+        <TableCell className="w-[24px]">
           {isDuplicate && (
             <Copy
               className="h-3.5 w-3.5 text-amber-500"
@@ -154,7 +154,7 @@ export function QueryCatalogRow({ definition, archetypeName, ownerSystemNames, i
       </TableRow>
       {isExpanded && (
         <TableRow data-testid="query-catalog-detail-row">
-          <TableCell colSpan={11} className="bg-muted/30 px-4 py-2 text-[12px]">
+          <TableCell colSpan={11} className="bg-muted/30 px-4 py-2 text-fs-base">
             <DetailBody definition={definition} archetypeName={archetypeName} />
           </TableCell>
         </TableRow>
@@ -189,13 +189,13 @@ function DetailBody({ definition, archetypeName }: { definition: QueryDefinition
       <DetailKv label="Avg selectivity" value={formatSelectivity(toNumber(agg.avgSelectivity))} />
 
       <div className="col-span-2 pt-2">
-        <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Evaluators</div>
+        <div className="text-fs-sm font-semibold uppercase tracking-wide text-muted-foreground">Evaluators</div>
         {evaluators.length === 0 ? (
-          <div className="text-[11px] text-muted-foreground">No filter evaluators on this query.</div>
+          <div className="text-fs-sm text-muted-foreground">No filter evaluators on this query.</div>
         ) : (
           <ul className="mt-1 space-y-0.5">
             {evaluators.map((e, i) => (
-              <li key={i} className="font-mono text-[11px]">
+              <li key={i} className="font-mono text-fs-sm">
                 <span className="text-foreground">{e.fieldName || `Field[${toNumber(e.fieldIdx)}]`}</span>{' '}
                 <span className="text-muted-foreground">{e.opDisplay || `op${toNumber(e.op)}`}</span>{' '}
                 <span className="text-muted-foreground">?</span>
@@ -211,8 +211,8 @@ function DetailBody({ definition, archetypeName }: { definition: QueryDefinition
 function DetailKv({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
   return (
     <div className="flex gap-2">
-      <span className="text-[11px] text-muted-foreground min-w-[100px]">{label}:</span>
-      <span className={`text-[12px] ${mono ? 'font-mono' : ''}`}>{value}</span>
+      <span className="text-fs-sm text-muted-foreground min-w-[100px]">{label}:</span>
+      <span className={`text-fs-base ${mono ? 'font-mono' : ''}`}>{value}</span>
     </div>
   );
 }

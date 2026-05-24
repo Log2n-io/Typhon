@@ -58,14 +58,14 @@ export default function ArchetypeInspectorPanel(_props: IDockviewPanelProps) {
   const archetype = findArchetype(archetypes, targetId);
 
   if (isError) {
-    return <div data-testid="archetype-inspector" className="p-3 text-[12px] text-destructive">Failed to load schema.</div>;
+    return <div data-testid="archetype-inspector" className="p-3 text-fs-base text-destructive">Failed to load schema.</div>;
   }
   if (!archetype) {
     // No resolvable target: still loading, or (PC-2 Empty) the DB genuinely has no archetypes. PC-9 means we
     // never show a "pick elsewhere" dead-end while archetypes exist.
     return (
       <div data-testid="archetype-inspector" className="flex h-full items-center justify-center bg-background p-4 text-center">
-        <p className="text-[12px] text-muted-foreground">
+        <p className="text-fs-base text-muted-foreground">
           {aLoading || candidates.length > 0 ? 'Loading…' : 'This database has no archetypes.'}
         </p>
       </div>
@@ -89,7 +89,7 @@ export default function ArchetypeInspectorPanel(_props: IDockviewPanelProps) {
           testId="archetype"
           noun="archetype"
         />
-        <span className="text-[11px] text-muted-foreground">
+        <span className="text-fs-sm text-muted-foreground">
           {archetype.componentTypes.length} components · {archetype.entityCount.toLocaleString()} entities
         </span>
         <StorageModePill mode={archetype.storageMode} />
@@ -112,7 +112,7 @@ export default function ArchetypeInspectorPanel(_props: IDockviewPanelProps) {
             role="tab"
             aria-selected={tab === t.id}
             onClick={() => setTab(t.id)}
-            className={`px-3 py-1 text-[11px] ${tab === t.id ? 'border-b-2 border-primary text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+            className={`px-3 py-1 text-fs-sm ${tab === t.id ? 'border-b-2 border-primary text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
           >
             {t.label}
           </button>
@@ -121,13 +121,13 @@ export default function ArchetypeInspectorPanel(_props: IDockviewPanelProps) {
 
       <div className="min-h-0 flex-1 overflow-auto">
         {tab === 'components' && (
-          <Table className="text-[12px]">
+          <Table className="text-fs-base">
             <TableHeader>
               <TableRow>
-                <TableHead className="py-1 text-[11px]">Name</TableHead>
-                <TableHead className="py-1 text-right text-[11px]">Size</TableHead>
-                <TableHead className="py-1 text-right text-[11px]">Indexes</TableHead>
-                <TableHead className="py-1 text-right text-[11px]">Storage mode</TableHead>
+                <TableHead className="text-fs-sm">Name</TableHead>
+                <TableHead className="text-right text-fs-sm">Size</TableHead>
+                <TableHead className="text-right text-fs-sm">Indexes</TableHead>
+                <TableHead className="text-right text-fs-sm">Storage mode</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -144,10 +144,10 @@ export default function ArchetypeInspectorPanel(_props: IDockviewPanelProps) {
                     openComponentInspector();
                   }}
                 >
-                  <TableCell className="py-1 font-mono">{r.typeName}</TableCell>
-                  <TableCell className="py-1 text-right tabular-nums">{r.summary ? `${r.summary.storageSize}B` : '—'}</TableCell>
-                  <TableCell className="py-1 text-right tabular-nums">{r.summary?.indexCount ?? '—'}</TableCell>
-                  <TableCell className="py-1 text-right text-muted-foreground">{r.summary?.storageMode ?? '—'}</TableCell>
+                  <TableCell className="font-mono">{r.typeName}</TableCell>
+                  <TableCell className="text-right tabular-nums">{r.summary ? `${r.summary.storageSize}B` : '—'}</TableCell>
+                  <TableCell className="text-right tabular-nums">{r.summary?.indexCount ?? '—'}</TableCell>
+                  <TableCell className="text-right text-muted-foreground">{r.summary?.storageMode ?? '—'}</TableCell>
                 </TableRow>
               ))}
             </TableBody>
@@ -155,25 +155,25 @@ export default function ArchetypeInspectorPanel(_props: IDockviewPanelProps) {
         )}
 
         {tab === 'entities' && (
-          <div className="p-4 text-[12px]">
+          <div className="p-4 text-fs-base">
             <p className="text-foreground">{archetype.entityCount.toLocaleString()} entities</p>
             {archetype.entityCount > 0 ? (
               <button
                 type="button"
                 onClick={() => openDataBrowser(archetype.archetypeId)}
                 data-testid="archetype-open-data-browser"
-                className="mt-2 rounded border border-border px-2 py-1 text-[11px] text-foreground hover:bg-accent"
+                className="mt-2 rounded border border-border px-2 py-1 text-fs-sm text-foreground hover:bg-accent"
               >
                 Open in Data Browser →
               </button>
             ) : (
-              <p className="mt-1 text-[11px] text-muted-foreground">No entities to browse.</p>
+              <p className="mt-1 text-fs-sm text-muted-foreground">No entities to browse.</p>
             )}
           </div>
         )}
 
         {tab === 'storage' && (
-          <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 p-4 text-[12px]">
+          <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 p-4 text-fs-base">
             <dt className="text-muted-foreground">Strategy</dt>
             <dd><StorageModePill mode={archetype.storageMode} /></dd>
             <dt className="text-muted-foreground">Entities</dt>
@@ -189,7 +189,7 @@ export default function ArchetypeInspectorPanel(_props: IDockviewPanelProps) {
                   onClick={() => openDbMapForComponent(rows[0].typeName)}
                   data-testid="archetype-reveal-file-map"
                   title="Reveal this archetype's storage in the File Map"
-                  className="rounded border border-border px-2 py-1 text-[11px] text-foreground hover:bg-accent"
+                  className="rounded border border-border px-2 py-1 text-fs-sm text-foreground hover:bg-accent"
                 >
                   Reveal in File Map →
                 </button>
@@ -200,14 +200,14 @@ export default function ArchetypeInspectorPanel(_props: IDockviewPanelProps) {
 
         {tab === 'indexes' && (
           <div className="p-1">
-            <p className="px-2 py-1 text-[11px] text-muted-foreground">
+            <p className="px-2 py-1 text-fs-sm text-muted-foreground">
               Indexes are type-global (one B+Tree per indexed field, spanning all archetypes). These components in this
               archetype carry an index — open a component for field-level detail.
             </p>
             {indexed.length === 0 ? (
-              <p className="px-2 py-2 text-[12px] text-muted-foreground">No indexed components in this archetype.</p>
+              <p className="px-2 py-2 text-fs-base text-muted-foreground">No indexed components in this archetype.</p>
             ) : (
-              <Table className="text-[12px]">
+              <Table className="text-fs-base">
                 <TableBody>
                   {indexed.map((r) => (
                     <TableRow
@@ -217,8 +217,8 @@ export default function ArchetypeInspectorPanel(_props: IDockviewPanelProps) {
                       data-type-name={r.typeName}
                       onClick={() => select('component', r.typeName)}
                     >
-                      <TableCell className="py-1 font-mono">{r.typeName}</TableCell>
-                      <TableCell className="py-1 text-right tabular-nums">
+                      <TableCell className="font-mono">{r.typeName}</TableCell>
+                      <TableCell className="text-right tabular-nums">
                         {r.summary?.indexCount} {r.summary?.indexCount === 1 ? 'index' : 'indexes'}
                       </TableCell>
                     </TableRow>

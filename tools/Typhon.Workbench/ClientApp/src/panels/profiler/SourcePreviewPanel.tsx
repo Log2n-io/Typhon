@@ -72,7 +72,7 @@ export default function SourcePreviewPanel(props: IDockviewPanelProps): React.JS
 
   if (!path) {
     return (
-      <div className="flex h-full w-full items-center justify-center bg-background text-[12px] text-muted-foreground">
+      <div className="flex h-full w-full items-center justify-center bg-background text-fs-base text-muted-foreground">
         No source location selected.
       </div>
     );
@@ -80,7 +80,7 @@ export default function SourcePreviewPanel(props: IDockviewPanelProps): React.JS
 
   if (error) {
     return (
-      <div className="flex h-full w-full flex-col items-start justify-start gap-2 overflow-auto bg-background p-3 text-[12px]">
+      <div className="flex h-full w-full flex-col items-start justify-start gap-2 overflow-auto bg-background p-3 text-fs-base">
         <header className="select-text font-mono text-muted-foreground">{path}:{line}</header>
         <p className="text-destructive">{error}</p>
       </div>
@@ -89,7 +89,7 @@ export default function SourcePreviewPanel(props: IDockviewPanelProps): React.JS
 
   if (!data) {
     return (
-      <div className="flex h-full w-full items-center justify-center bg-background text-[12px] text-muted-foreground">
+      <div className="flex h-full w-full items-center justify-center bg-background text-fs-base text-muted-foreground">
         Loading source…
       </div>
     );
@@ -98,12 +98,12 @@ export default function SourcePreviewPanel(props: IDockviewPanelProps): React.JS
   const code = data.lines.join('\n');
   return (
     <div className="flex h-full w-full flex-col overflow-hidden bg-background">
-      <header className="select-text border-b border-border px-3 py-2 font-mono text-[12px] text-muted-foreground">
+      <header className="select-text border-b border-border px-3 py-2 font-mono text-fs-base text-muted-foreground">
         {data.file}<span className="text-foreground">:{data.line}</span>
-        <span className="ml-2 text-[11px]">(lines {data.startLine}–{data.endLine})</span>
+        <span className="ml-2 text-fs-sm">(lines {data.startLine}–{data.endLine})</span>
       </header>
       <div className="flex-1 overflow-auto">
-        <Suspense fallback={<pre className="p-3 font-mono text-[12px] text-muted-foreground">Loading highlighter…</pre>}>
+        <Suspense fallback={<pre className="p-3 font-mono text-fs-base text-muted-foreground">Loading highlighter…</pre>}>
           <SyntaxHighlighter
             language="csharp"
             showLineNumbers

@@ -177,24 +177,59 @@
   --tracking-wider:   calc(var(--tracking-normal) + 0.05em);
   --tracking-widest:  calc(var(--tracking-normal) + 0.1em);
 
-  /* Compact density (static — no runtime switching) */
-  --density-spacing-1:  0.25rem;
-  --density-spacing-2:  0.5rem;
-  --density-spacing-3:  0.75rem;
-  /* Tailwind v4 emits `text-density-sm` / `text-density-base` utilities only from --text-* tokens. */
-  --text-density-sm:    0.8125rem;
-  --text-density-base:  0.875rem;
-  --density-row-height: 22px;
+  /* DS-1 display density — :root holds the **Normal** (default) values; Compact / Comfortable overrides live in
+     @layer base below (selected via <html data-density>, useDensityStore). Spacing + row-height are consumed via
+     var() (row-height also in JS via useDensityRowHeight so virtualized lists re-measure). Font sizes are the
+     var()-backed --fs-* ramp exposed as the text-fs-* @utilities — deliberately NOT @theme text tokens, which
+     `inline` would bake in and stop responding to a runtime density switch. */
+  --density-spacing-1:  0.3125rem;
+  --density-spacing-2:  0.5625rem;
+  --density-spacing-3:  0.8125rem;
+  --density-row-height: 25px;
+  --fs-2xs:  10px;
+  --fs-xs:   11px;
+  --fs-sm:   12px;
+  --fs-base: 13px;
+  --fs-lg:   14px;
+  --fs-xl:   15px;
 }
 
+/* DS-1: density-responsive font-size utilities — backed by the runtime --fs-* vars so one density switch
+   restyles every label app-wide. font-size only (matches the former arbitrary text-[Npx] utilities). */
+@utility text-fs-2xs { font-size: var(--fs-2xs); }
+@utility text-fs-xs { font-size: var(--fs-xs); }
+@utility text-fs-sm { font-size: var(--fs-sm); }
+@utility text-fs-base { font-size: var(--fs-base); }
+@utility text-fs-lg { font-size: var(--fs-lg); }
+@utility text-fs-xl { font-size: var(--fs-xl); }
+
 @layer base {
-  /* DS-1: comfortable density — runtime-switched via `<html data-density="comfortable">` (useDensityStore).
-     Row height is also read in JS (useDensityRowHeight) so virtualized lists/trees re-measure. */
+  /* DS-1 density overrides — :root is Normal (default). Compact = today's pixel sizes (the dense, good-eyes
+     core-user mode); Comfortable = +2px. Row height is also read in JS (useDensityRowHeight) so virtualized
+     lists/trees re-measure on a switch. */
+  :root[data-density='compact'] {
+    --density-spacing-1: 0.25rem;
+    --density-spacing-2: 0.5rem;
+    --density-spacing-3: 0.75rem;
+    --density-row-height: 22px;
+    --fs-2xs: 9px;
+    --fs-xs: 10px;
+    --fs-sm: 11px;
+    --fs-base: 12px;
+    --fs-lg: 13px;
+    --fs-xl: 14px;
+  }
   :root[data-density='comfortable'] {
     --density-spacing-1: 0.375rem;
     --density-spacing-2: 0.625rem;
     --density-spacing-3: 0.875rem;
     --density-row-height: 28px;
+    --fs-2xs: 11px;
+    --fs-xs: 12px;
+    --fs-sm: 13px;
+    --fs-base: 14px;
+    --fs-lg: 15px;
+    --fs-xl: 16px;
   }
 
   /* DS-4: a clear keyboard focus ring (distinct from selection, which uses bg-accent), and a strong

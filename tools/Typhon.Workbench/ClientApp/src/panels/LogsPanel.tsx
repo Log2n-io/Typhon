@@ -72,12 +72,12 @@ export default function LogsPanel() {
           placeholder="Filter… (message or source)"
           value={filterText}
           onChange={(e) => setFilterText(e.target.value)}
-          className="h-6 flex-1 text-[11px]"
+          className="h-6 flex-1 text-fs-sm"
         />
         <Button
           size="sm"
           variant="ghost"
-          className={`h-6 px-2 text-[10px] ${followTail ? 'text-foreground' : 'text-muted-foreground'}`}
+          className={`h-6 px-2 text-fs-xs ${followTail ? 'text-foreground' : 'text-muted-foreground'}`}
           onClick={() => setFollowTail((v) => !v)}
           title={followTail ? 'Following tail' : 'Paused'}
         >
@@ -97,7 +97,7 @@ export default function LogsPanel() {
 
       {/* select-text re-enables text selection that the app-level select-none disables — users
            need to copy log lines (timestamps, sources, stacktrace details) for reporting. */}
-      <div ref={listRef} className="flex-1 select-text overflow-auto font-mono text-[11px]">
+      <div ref={listRef} className="flex-1 select-text overflow-auto font-mono text-fs-sm">
         {filtered.length === 0 && (
           <p className="p-3 text-muted-foreground">
             {entries.length === 0 ? 'No log entries yet.' : 'No entries match the filter.'}
@@ -108,7 +108,7 @@ export default function LogsPanel() {
         ))}
       </div>
 
-      <div className="flex items-center justify-between border-t border-border px-2 py-1 text-[10px] text-muted-foreground">
+      <div className="flex items-center justify-between border-t border-border px-2 py-1 text-fs-xs text-muted-foreground">
         <span>
           {filtered.length} shown · {entries.length} total
         </span>
@@ -169,7 +169,7 @@ function LogRow({ entry }: { entry: LogEntry }) {
         )}
       </div>
       {hasDetails && expanded && (
-        <pre className="mt-1 ml-20 overflow-auto rounded bg-muted/20 p-1.5 text-[10px] text-muted-foreground">
+        <pre className="mt-1 ml-20 overflow-auto rounded bg-muted/20 p-1.5 text-fs-xs text-muted-foreground">
           {formatDetails(entry.details)}
         </pre>
       )}

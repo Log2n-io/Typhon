@@ -176,9 +176,9 @@ export default function EntityListPanel(_props: IDockviewPanelProps) {
   return (
     <div className="flex h-full w-full flex-col overflow-hidden bg-background">
       <div className="wb-pane-header flex items-center gap-2 border-b border-border px-3 py-1.5">
-        <h3 className="font-mono text-[12px] font-semibold text-foreground">Data Browser</h3>
+        <h3 className="font-mono text-fs-base font-semibold text-foreground">Data Browser</h3>
         <select
-          className="ml-1 w-60 max-w-[15rem] truncate rounded border border-border bg-background px-1.5 py-0.5 text-[11px] text-foreground"
+          className="ml-1 w-60 max-w-[15rem] truncate rounded border border-border bg-background px-1.5 py-0.5 text-fs-sm text-foreground"
           value={archetypeId ?? ''}
           onChange={(e) => setArchetype(e.target.value || null)}
           data-testid="archetype-picker"
@@ -206,7 +206,7 @@ export default function EntityListPanel(_props: IDockviewPanelProps) {
             placeholder="Go to id…"
             inputMode="numeric"
             spellCheck={false}
-            className={`w-28 rounded border bg-background px-1.5 py-0.5 text-[11px] text-foreground placeholder:text-muted-foreground/60 ${
+            className={`w-28 rounded border bg-background px-1.5 py-0.5 text-fs-sm text-foreground placeholder:text-muted-foreground/60 ${
               goError ? 'border-destructive' : 'border-border'
             }`}
             title={goError ? 'Enter a numeric entity id' : 'Jump to an entity by id (Enter) — switches archetype automatically'}
@@ -214,7 +214,7 @@ export default function EntityListPanel(_props: IDockviewPanelProps) {
           />
         </form>
         {archetypeId && (
-          <span className="ml-auto text-[11px] tabular-nums text-muted-foreground" data-testid="entity-count">
+          <span className="ml-auto text-fs-sm tabular-nums text-muted-foreground" data-testid="entity-count">
             {total.toLocaleString()} entities
           </span>
         )}
@@ -228,7 +228,7 @@ export default function EntityListPanel(_props: IDockviewPanelProps) {
             placeholder="find: field = value"
             spellCheck={false}
             list="data-browser-filter-fields"
-            className="w-56 rounded border border-border bg-background px-1.5 py-0.5 text-[11px] text-foreground placeholder:text-muted-foreground/60"
+            className="w-56 rounded border border-border bg-background px-1.5 py-0.5 text-fs-sm text-foreground placeholder:text-muted-foreground/60"
             data-testid="entity-filter"
             title="Filter the loaded page by 'field = value' (case-insensitive contains). Full server-side find lands later."
           />
@@ -239,7 +239,7 @@ export default function EntityListPanel(_props: IDockviewPanelProps) {
             ))}
           </datalist>
           {filter && (
-            <span className="text-[10px] text-muted-foreground" data-testid="entity-filter-note">
+            <span className="text-fs-xs text-muted-foreground" data-testid="entity-filter-note">
               {fieldKnown
                 ? `${visibleRows.length} of ${rows.length} on this page · loaded-page find — server-side find lands later`
                 : `unknown column "${filter.field}" — add it via the column picker to filter on it`}
@@ -251,23 +251,23 @@ export default function EntityListPanel(_props: IDockviewPanelProps) {
       <div ref={listRef} tabIndex={0} onKeyDown={onListKeyDown} className="flex-1 overflow-auto outline-none">
         {!archetypeId && (
           <div className="flex h-full items-center justify-center">
-            <p className="text-[12px] text-muted-foreground">Select an archetype to browse its entities.</p>
+            <p className="text-fs-base text-muted-foreground">Select an archetype to browse its entities.</p>
           </div>
         )}
-        {archetypeId && isError && <p className="p-3 text-[12px] text-destructive">Failed to load entities.</p>}
-        {archetypeId && isLoading && <p className="p-3 text-[12px] text-muted-foreground">Loading entities…</p>}
+        {archetypeId && isError && <p className="p-3 text-fs-base text-destructive">Failed to load entities.</p>}
+        {archetypeId && isLoading && <p className="p-3 text-fs-base text-muted-foreground">Loading entities…</p>}
         {archetypeId && !isLoading && !isError && total === 0 && (
-          <p className="p-3 text-[12px] text-muted-foreground">This archetype has no entities.</p>
+          <p className="p-3 text-fs-base text-muted-foreground">This archetype has no entities.</p>
         )}
         {archetypeId && rows.length > 0 && visibleRows.length === 0 && filter && (
-          <p className="p-3 text-[12px] text-muted-foreground" data-testid="entity-filter-empty">
+          <p className="p-3 text-fs-base text-muted-foreground" data-testid="entity-filter-empty">
             No rows on this page match “{filterInput}”.
           </p>
         )}
         {archetypeId && visibleRows.length > 0 && (
-          <table className="w-full border-collapse text-[12px]">
+          <table className="w-full border-collapse text-fs-base">
             <thead className="sticky top-0 z-10 bg-background">
-              <tr className="border-b border-border text-[10px] uppercase tracking-wide text-muted-foreground">
+              <tr className="border-b border-border text-fs-xs uppercase tracking-wide text-muted-foreground">
                 <th className="px-3 py-0.5 text-left font-medium">Entity ID</th>
                 {effectivePreview.map((pf) => (
                   <th key={`${pf.typeName}:${pf.fieldId}`} className="px-2 py-0.5 text-left font-medium" title={`${pf.typeName}.${fieldName(pf)}`}>
@@ -309,13 +309,13 @@ export default function EntityListPanel(_props: IDockviewPanelProps) {
 
       {archetypeId && total > 0 && (
         <div
-          className="flex items-center gap-2 border-t border-border px-3 py-1 text-[11px] text-muted-foreground"
+          className="flex items-center gap-2 border-t border-border px-3 py-1 text-fs-sm text-muted-foreground"
           data-testid="entity-pager"
         >
           <label className="flex items-center gap-1">
             Rows
             <select
-              className="rounded border border-border bg-background px-1 py-0.5 text-[11px] text-foreground"
+              className="rounded border border-border bg-background px-1 py-0.5 text-fs-sm text-foreground"
               value={autoPageSize ? 'auto' : pageSize}
               onChange={(e) => onPageSizeChange(e.target.value)}
               data-testid="page-size"
@@ -353,7 +353,7 @@ export default function EntityListPanel(_props: IDockviewPanelProps) {
             </PagerButton>
           </div>
 
-          {isFetching && <span className="text-[10px] text-muted-foreground/70">…</span>}
+          {isFetching && <span className="text-fs-xs text-muted-foreground/70">…</span>}
         </div>
       )}
     </div>

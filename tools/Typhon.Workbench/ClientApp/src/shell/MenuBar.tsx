@@ -4,6 +4,8 @@ import {
  MenubarContent,
  MenubarItem,
  MenubarMenu,
+ MenubarRadioGroup,
+ MenubarRadioItem,
  MenubarSeparator,
  MenubarSub,
  MenubarSubContent,
@@ -15,6 +17,7 @@ import { usePaletteStore } from '@/stores/usePaletteStore';
 import { useSessionStore } from '@/stores/useSessionStore';
 import { useThemeStore } from '@/stores/useThemeStore';
 import { useUiPrefsStore } from '@/stores/useUiPrefsStore';
+import { useDensityStore, type Density } from '@/stores/useDensityStore';
 import CommandPalette from './CommandPalette';
 import ConnectDialog, { type ConnectTab } from './dialogs/ConnectDialog';
 import SaveReplayDialog from './dialogs/SaveReplayDialog';
@@ -51,6 +54,8 @@ export default function MenuBar() {
  const clearSession = useSessionStore((s) => s.clearSession);
  const toggleTheme = useThemeStore((s) => s.toggle);
  const toggleLegends = useUiPrefsStore((s) => s.toggleLegends);
+ const density = useDensityStore((s) => s.mode);
+ const setDensity = useDensityStore((s) => s.setMode);
  const isProfilerSession = kind === 'attach' || kind === 'trace';
 
  const [dialogOpen, setDialogOpen] = useState(false);
@@ -91,7 +96,7 @@ export default function MenuBar() {
  <header className="relative flex h-10 shrink-0 items-center gap-2 border-b border-border bg-card px-2">
  <Menubar className="border-0 bg-transparent p-0 shadow-none">
  <MenubarMenu>
- <MenubarTrigger className="h-7 px-2 text-density-sm">File</MenubarTrigger>
+ <MenubarTrigger className="h-7 px-2 text-fs-lg">File</MenubarTrigger>
  <MenubarContent>
  <MenubarItem onClick={() => openConnect('open')}>Open .typhon File…</MenubarItem>
  <MenubarItem onClick={() => openConnect('trace')}>Open .typhon-trace…</MenubarItem>
@@ -110,7 +115,7 @@ export default function MenuBar() {
  </MenubarMenu>
 
  <MenubarMenu>
- <MenubarTrigger className="h-7 px-2 text-density-sm">View</MenubarTrigger>
+ <MenubarTrigger className="h-7 px-2 text-fs-lg">View</MenubarTrigger>
  <MenubarContent>
  {/* Deep/workspace (zone-D) views — gated off in Stage 0 (reversible per view via the view registry).
      Stage 1 replaces this flat list with a session-kind-partitioned View menu (IA §5.1). */}
@@ -214,11 +219,23 @@ export default function MenuBar() {
  <MenubarSeparator />
  <MenubarItem disabled={kind === 'none'} onClick={saveLayoutAsDefault}>Save Layout as Default</MenubarItem>
  <MenubarItem onClick={resetLayout}>Reset Layout to Default</MenubarItem>
+ <MenubarSeparator />
+ {/* DS-1 display density — drives row height, spacing AND the --fs-* font ramp (useDensityStore). */}
+ <MenubarSub>
+ <MenubarSubTrigger>Density</MenubarSubTrigger>
+ <MenubarSubContent>
+ <MenubarRadioGroup value={density} onValueChange={(v) => setDensity(v as Density)}>
+ <MenubarRadioItem value="compact">Compact</MenubarRadioItem>
+ <MenubarRadioItem value="normal">Normal</MenubarRadioItem>
+ <MenubarRadioItem value="comfortable">Comfortable</MenubarRadioItem>
+ </MenubarRadioGroup>
+ </MenubarSubContent>
+ </MenubarSub>
  </MenubarContent>
  </MenubarMenu>
 
  <MenubarMenu>
- <MenubarTrigger className="h-7 px-2 text-density-sm">Session</MenubarTrigger>
+ <MenubarTrigger className="h-7 px-2 text-fs-lg">Session</MenubarTrigger>
  <MenubarContent>
  <MenubarItem disabled={kind === 'none'} onClick={handleCloseSession}>
  Close Session
@@ -227,7 +244,7 @@ export default function MenuBar() {
  </MenubarMenu>
 
  <MenubarMenu>
- <MenubarTrigger className="h-7 px-2 text-density-sm">Help</MenubarTrigger>
+ <MenubarTrigger className="h-7 px-2 text-fs-lg">Help</MenubarTrigger>
  <MenubarContent>
  <MenubarSub>
  <MenubarSubTrigger>Quick Doc</MenubarSubTrigger>

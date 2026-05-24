@@ -47,23 +47,23 @@ export function RegionsTab({ regions, segments, onFlyToRegion, onSelectSegment }
   };
 
   if (regions.length === 0) {
-    return <p className="p-2 text-[11px] text-muted-foreground">No regions — open a database.</p>;
+    return <p className="p-2 text-fs-sm text-muted-foreground">No regions — open a database.</p>;
   }
 
   return (
     <div className="flex flex-col">
-      <p className="px-2 py-1 text-[11px] text-muted-foreground">
+      <p className="px-2 py-1 text-fs-sm text-muted-foreground">
         {regions.length} region{regions.length === 1 ? '' : 's'}
         {regions.length > ROW_CAP ? ` · showing ${ROW_CAP}` : ''}
       </p>
-      <Table className="text-[11px]">
+      <Table className="text-fs-sm">
         <TableHeader>
           <TableRow>
             {COLUMNS.map((c) => (
               <TableHead
                 key={c.key}
                 onClick={() => toggleSort(c.key)}
-                className={`h-6 cursor-pointer px-2 py-0 text-[10px] hover:bg-muted/50 ${
+                className={`h-6 cursor-pointer px-2 py-0 text-fs-xs hover:bg-muted/50 ${
                   c.align === 'right' ? 'text-right' : 'text-left'
                 }`}
               >

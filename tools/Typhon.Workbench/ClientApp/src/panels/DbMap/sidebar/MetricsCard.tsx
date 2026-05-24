@@ -45,10 +45,10 @@ function bucketRuns(runs: number[]): number[] {
 function Stat({ label, value, note }: { label: string; value: string; note?: string }) {
   return (
     <div className="flex items-baseline justify-between gap-2">
-      <span className="text-[11px] text-muted-foreground">{label}</span>
-      <span className="font-mono text-[11px] tabular-nums text-foreground">
+      <span className="text-fs-sm text-muted-foreground">{label}</span>
+      <span className="font-mono text-fs-sm tabular-nums text-foreground">
         {value}
-        {note && <span className="ml-1 text-[10px] text-muted-foreground">{note}</span>}
+        {note && <span className="ml-1 text-fs-xs text-muted-foreground">{note}</span>}
       </span>
     </div>
   );
@@ -59,7 +59,7 @@ export function MetricsCard(props: MetricsCardData) {
     props;
 
   if (loading) {
-    return <p className="px-1 py-2 text-[11px] text-muted-foreground">Measuring {segmentLabel}…</p>;
+    return <p className="px-1 py-2 text-fs-sm text-muted-foreground">Measuring {segmentLabel}…</p>;
   }
 
   const buckets = bucketRuns(runs);
@@ -69,7 +69,7 @@ export function MetricsCard(props: MetricsCardData) {
 
   return (
     <div className="flex flex-col gap-1.5 rounded border border-border bg-card p-2">
-      <div className="truncate text-[11px] font-semibold text-foreground" title={segmentLabel}>
+      <div className="truncate text-fs-sm font-semibold text-foreground" title={segmentLabel}>
         {segmentLabel}
       </div>
       <Stat label="Fragmentation" value={`${(fragmentation * 100).toFixed(1)} %`} />
@@ -85,7 +85,7 @@ export function MetricsCard(props: MetricsCardData) {
       />
 
       <div className="mt-1 flex flex-col gap-0.5">
-        <span className="text-[10px] text-muted-foreground">Contiguous runs</span>
+        <span className="text-fs-xs text-muted-foreground">Contiguous runs</span>
         <div className="flex items-end gap-1" style={{ height: 32 }}>
           {RUN_BUCKETS.map((b, i) => (
             <div key={b.label} className="flex flex-1 flex-col items-center gap-0.5">
@@ -94,7 +94,7 @@ export function MetricsCard(props: MetricsCardData) {
                 style={{ height: `${(buckets[i] / maxBucket) * 24}px` }}
                 title={`${buckets[i]} run(s) of length ${b.label}`}
               />
-              <span className="text-[9px] text-muted-foreground">{b.label}</span>
+              <span className="text-fs-2xs text-muted-foreground">{b.label}</span>
             </div>
           ))}
         </div>
@@ -103,7 +103,7 @@ export function MetricsCard(props: MetricsCardData) {
       <button
         type="button"
         disabled
-        className="mt-1 cursor-not-allowed rounded border border-border bg-card px-1.5 py-0.5 text-[11px] text-muted-foreground opacity-60"
+        className="mt-1 cursor-not-allowed rounded border border-border bg-card px-1.5 py-0.5 text-fs-sm text-muted-foreground opacity-60"
         title="Compaction launches the Admin Ops compact wizard — the Admin Ops module (Module 11) is not yet available"
       >
         Compact…

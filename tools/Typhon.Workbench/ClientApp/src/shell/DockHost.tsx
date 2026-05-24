@@ -82,7 +82,7 @@ const LogsTab: React.FC<IDockviewPanelHeaderProps> = (props) => {
         <span
           className={
             'pointer-events-none flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full ' +
-            `px-1 text-[10px] font-medium tabular-nums ${LOG_BADGE_CLASS[unseenLevel ?? 'info']}`
+            `px-1 text-fs-xs font-medium tabular-nums ${LOG_BADGE_CLASS[unseenLevel ?? 'info']}`
           }
           title={`${unseenCount} new log entr${unseenCount === 1 ? 'y' : 'ies'} since last viewed`}
         >

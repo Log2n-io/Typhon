@@ -39,7 +39,7 @@ export function DbMapFilterMenu() {
       <PopoverTrigger asChild>
         <button
           type="button"
-          className={`flex items-center gap-1 rounded border px-1.5 py-0.5 text-[11px] ${
+          className={`flex items-center gap-1 rounded border px-1.5 py-0.5 text-fs-sm ${
             active ? 'border-primary bg-primary/15 text-foreground' : 'border-border bg-card text-muted-foreground'
           }`}
           title="Filter cells by page type — non-matching cells dim rather than vanish"
@@ -50,14 +50,14 @@ export function DbMapFilterMenu() {
       </PopoverTrigger>
       <PopoverContent className="w-48 p-2" align="start">
         <div className="flex items-center justify-between pb-1">
-          <span className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+          <span className="text-fs-xs font-semibold uppercase tracking-wide text-muted-foreground">
             Show page types
           </span>
           {active && (
             <button
               type="button"
               onClick={() => setFilter(null)}
-              className="text-[10px] text-primary hover:underline"
+              className="text-fs-xs text-primary hover:underline"
             >
               Clear
             </button>
@@ -67,7 +67,7 @@ export function DbMapFilterMenu() {
           {FILTERABLE_TYPES.map((t) => (
             <label
               key={t}
-              className="flex items-center gap-1.5 rounded px-1 py-0.5 text-[11px] hover:bg-muted/60"
+              className="flex items-center gap-1.5 rounded px-1 py-0.5 text-fs-sm hover:bg-muted/60"
             >
               <input
                 type="checkbox"

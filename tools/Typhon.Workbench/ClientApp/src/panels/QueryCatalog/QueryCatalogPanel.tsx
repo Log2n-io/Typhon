@@ -118,7 +118,7 @@ export default function QueryCatalogPanel(_props: IDockviewPanelProps) {
     return (
       <CenteredMessage>
         <p>No queries were observed in this trace.</p>
-        <p className="mt-1 text-[11px]">
+        <p className="mt-1 text-fs-sm">
           Query Definition Export (issue #342) emits <code className="rounded bg-muted px-1">QueryDefinitionDescribe</code> events
           when the profiler is active and the engine runs user queries (<code className="rounded bg-muted px-1">tx.Query&lt;T&gt;()</code>,{' '}
           <code className="rounded bg-muted px-1">ToView()</code>, etc.). Older traces (v8 and earlier) don't carry this data.
@@ -137,7 +137,7 @@ export default function QueryCatalogPanel(_props: IDockviewPanelProps) {
       />
       <div className="flex-1 overflow-auto">
         {filtered.length === 0 ? (
-          <div className="p-3 text-[12px] text-muted-foreground">No definitions match the current filters.</div>
+          <div className="p-3 text-fs-base text-muted-foreground">No definitions match the current filters.</div>
         ) : (
           <QueryCatalogTable
             definitions={filtered}
@@ -154,7 +154,7 @@ export default function QueryCatalogPanel(_props: IDockviewPanelProps) {
 function CenteredMessage({ children, tone }: { children: React.ReactNode; tone?: 'error' }) {
   return (
     <div className="flex h-full w-full items-center justify-center bg-background p-4 text-center">
-      <div className={tone === 'error' ? 'text-[12px] text-destructive' : 'text-[12px] text-muted-foreground'}>
+      <div className={tone === 'error' ? 'text-fs-base text-destructive' : 'text-fs-base text-muted-foreground'}>
         {children}
       </div>
     </div>

@@ -994,7 +994,7 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
     return (
       <div
         ref={containerRef}
-        className="flex h-full w-full items-center justify-center overflow-hidden select-none bg-background text-center text-[12px] text-muted-foreground"
+        className="flex h-full w-full items-center justify-center overflow-hidden select-none bg-background text-center text-fs-base text-muted-foreground"
       >
         <span>Drag a range in the tick overview above to show details.</span>
       </div>

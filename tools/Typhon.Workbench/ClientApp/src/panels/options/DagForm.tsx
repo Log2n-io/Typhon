@@ -14,8 +14,8 @@ export function DagForm(): React.JSX.Element {
   return (
     <section className="max-w-xl space-y-4">
       <header>
-        <h2 className="text-[14px] font-semibold text-foreground">DAG &amp; Critical Path</h2>
-        <p className="mt-1 text-[12px] text-muted-foreground">
+        <h2 className="text-fs-xl font-semibold text-foreground">DAG &amp; Critical Path</h2>
+        <p className="mt-1 text-fs-base text-muted-foreground">
           Shared display options for the System DAG and Critical Path panels.
         </p>
       </header>
@@ -28,10 +28,10 @@ export function DagForm(): React.JSX.Element {
           className="mt-0.5 h-3.5 w-3.5 cursor-pointer accent-primary"
         />
         <span className="block">
-          <span className="block text-[12px] font-medium text-foreground">
+          <span className="block text-fs-base font-medium text-foreground">
             Show engine-related systems &amp; DAGs
           </span>
-          <span className="mt-0.5 block text-[11px] text-muted-foreground">
+          <span className="mt-0.5 block text-fs-sm text-muted-foreground">
             Reveal the engine-internal tracks (Engine-Pre, Engine-Post / Fence) and their systems.
             Off by default — the engine's own DAGs are infrastructure noise for app-level work. When
             on, the System DAG renders them as their own groups and the Critical Path lists them in

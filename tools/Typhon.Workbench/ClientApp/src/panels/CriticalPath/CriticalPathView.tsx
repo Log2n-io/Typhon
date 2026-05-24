@@ -504,7 +504,7 @@ export default function CriticalPathView({ bars, selectedSystemName, onSelectBar
 
   if (bars.cpChain.length === 0 && bars.nonCpBars.length === 0) {
     return (
-      <div className="flex h-full w-full items-center justify-center bg-background text-[12px] text-muted-foreground">
+      <div className="flex h-full w-full items-center justify-center bg-background text-fs-base text-muted-foreground">
         {bars.aggregate ? 'No critical-path data in range.' : `Tick ${bars.tickNumber} has no measured work.`}
       </div>
     );
@@ -1093,7 +1093,7 @@ function Tooltip({ tooltip }: { tooltip: TooltipState }) {
   if (top + TOOLTIP_H > window.innerHeight) top = tooltip.y - TOOLTIP_H - 12;
   return createPortal(
     <div
-      className="pointer-events-none fixed z-[1000] rounded border border-border bg-card px-2 py-1.5 font-mono text-[10px] text-foreground shadow-md"
+      className="pointer-events-none fixed z-[1000] rounded border border-border bg-card px-2 py-1.5 font-mono text-fs-xs text-foreground shadow-md"
       style={{ left, top, width: TOOLTIP_W }}
     >
       {tooltip.lines.map((line, i) => (
@@ -1109,7 +1109,7 @@ function Tooltip({ tooltip }: { tooltip: TooltipState }) {
 function FallbackBadge() {
   return (
     <div
-      className="pointer-events-none absolute right-2 top-2 z-40 rounded bg-amber-950/80 px-2 py-0.5 font-mono text-[9px] uppercase text-amber-300"
+      className="pointer-events-none absolute right-2 top-2 z-40 rounded bg-amber-950/80 px-2 py-0.5 font-mono text-fs-2xs uppercase text-amber-300"
       title="The topology has no dependency edges — without a DAG the walker can't trace a critical path. Showing every system that ran, sorted by startUs."
     >
       execution order

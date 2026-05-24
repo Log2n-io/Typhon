@@ -37,12 +37,12 @@ export default function StorageHealthPanel(_props: IDockviewPanelProps) {
   };
 
   if (isError) {
-    return <div data-testid="storage-health" className="p-3 text-[12px] text-destructive">Failed to load storage health.</div>;
+    return <div data-testid="storage-health" className="p-3 text-fs-base text-destructive">Failed to load storage health.</div>;
   }
   if (isLoading || !data) {
     return (
       <div data-testid="storage-health" className="flex h-full items-center justify-center bg-background p-4 text-center">
-        <p className="text-[12px] text-muted-foreground">Loading storage health…</p>
+        <p className="text-fs-base text-muted-foreground">Loading storage health…</p>
       </div>
     );
   }
@@ -52,8 +52,8 @@ export default function StorageHealthPanel(_props: IDockviewPanelProps) {
   return (
     <div data-testid="storage-health" className="flex h-full w-full flex-col overflow-hidden bg-background">
       {/* DB-level summary */}
-      <div className="wb-pane-header flex flex-wrap items-center gap-x-3 gap-y-0.5 border-b border-border px-3 py-1.5 text-[11px] text-muted-foreground">
-        <span className="font-mono text-[12px] text-foreground">{data.databaseName}</span>
+      <div className="wb-pane-header flex flex-wrap items-center gap-x-3 gap-y-0.5 border-b border-border px-3 py-1.5 text-fs-sm text-muted-foreground">
+        <span className="font-mono text-fs-base text-foreground">{data.databaseName}</span>
         <span className="tabular-nums">{formatBytes(data.dataFileBytes)}</span>
         <span>·</span>
         <span className="tabular-nums">{data.dataFilePageCount.toLocaleString()} pages</span>
@@ -79,9 +79,9 @@ export default function StorageHealthPanel(_props: IDockviewPanelProps) {
       {/* Per-segment table */}
       <div className="min-h-0 flex-1 overflow-auto">
         {data.segments.length === 0 ? (
-          <p className="p-3 text-[12px] text-muted-foreground">Empty database — no segments.</p>
+          <p className="p-3 text-fs-base text-muted-foreground">Empty database — no segments.</p>
         ) : (
-          <Table className="text-[12px]">
+          <Table className="text-fs-base">
             <TableHeader>
               <TableRow>
                 <SortHead label="Segment" col="typeName" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
@@ -90,7 +90,7 @@ export default function StorageHealthPanel(_props: IDockviewPanelProps) {
                 <SortHead label="Occ%" col="occupancyPct" sortKey={sortKey} sortDir={sortDir} onSort={onSort} numeric />
                 <SortHead label="Fill%" col="chunkFillPct" sortKey={sortKey} sortDir={sortDir} onSort={onSort} numeric />
                 <SortHead label="Recl." col="reclaimableBytes" sortKey={sortKey} sortDir={sortDir} onSort={onSort} numeric />
-                <TableHead className="py-1 text-right text-[11px]"></TableHead>
+                <TableHead className="text-right text-fs-sm"></TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -102,7 +102,7 @@ export default function StorageHealthPanel(_props: IDockviewPanelProps) {
                   data-segment-id={s.id}
                   onClick={() => select('segment', { kind: 'segment', segmentId: s.id, typeName: s.typeName || undefined })}
                 >
-                  <TableCell className="py-1 font-mono">
+                  <TableCell className="font-mono">
                     {/* DS-2: the same stable per-segment hue the File Map paints, so a segment reads identically across both views. */}
                     <span
                       className="mr-1.5 inline-block h-2 w-2 rounded-sm align-middle"
@@ -110,12 +110,12 @@ export default function StorageHealthPanel(_props: IDockviewPanelProps) {
                     />
                     {s.typeName || `#${s.id}`}
                   </TableCell>
-                  <TableCell className="py-1">{s.kind}</TableCell>
-                  <TableCell className="py-1 text-right tabular-nums">{s.pageCount.toLocaleString()}</TableCell>
-                  <TableCell className="py-1 text-right tabular-nums">{s.occupancyPct.toFixed(0)}%</TableCell>
-                  <TableCell className="py-1 text-right tabular-nums">{s.chunkCapacity > 0 ? `${s.chunkFillPct.toFixed(0)}%` : '—'}</TableCell>
-                  <TableCell className="py-1 text-right tabular-nums">{formatBytes(s.reclaimableBytes)}</TableCell>
-                  <TableCell className="py-1 text-right">
+                  <TableCell>{s.kind}</TableCell>
+                  <TableCell className="text-right tabular-nums">{s.pageCount.toLocaleString()}</TableCell>
+                  <TableCell className="text-right tabular-nums">{s.occupancyPct.toFixed(0)}%</TableCell>
+                  <TableCell className="text-right tabular-nums">{s.chunkCapacity > 0 ? `${s.chunkFillPct.toFixed(0)}%` : '—'}</TableCell>
+                  <TableCell className="text-right tabular-nums">{formatBytes(s.reclaimableBytes)}</TableCell>
+                  <TableCell className="text-right">
                     {s.typeName && (
                       <button
                         type="button"
@@ -125,7 +125,7 @@ export default function StorageHealthPanel(_props: IDockviewPanelProps) {
                         }}
                         data-testid="storage-health-reveal"
                         title="Reveal this segment in the File Map"
-                        className="rounded border border-border px-1.5 py-0.5 text-[10px] text-foreground hover:bg-accent"
+                        className="rounded border border-border px-1.5 py-0.5 text-fs-xs text-foreground hover:bg-accent"
                       >
                         Map →
                       </button>
@@ -158,7 +158,7 @@ function SortHead({
 }) {
   const active = col === sortKey;
   return (
-    <TableHead className={`py-1 text-[11px] ${numeric ? 'text-right' : ''}`}>
+    <TableHead className={`text-fs-sm ${numeric ? 'text-right' : ''}`}>
       <button
         type="button"
         onClick={() => onSort(col)}

@@ -130,8 +130,8 @@ export default function SchemaLayoutCanvas({ schema, isLoading, isError, selecte
           style={{ display: 'block' }}
         />
         <ColorLegendBadge />
-        {isLoading && <p className="absolute inset-x-0 top-0 p-3 text-[12px] text-muted-foreground">Loading schema…</p>}
-        {isError && <p className="absolute inset-x-0 top-0 p-3 text-[12px] text-destructive">Failed to load schema.</p>}
+        {isLoading && <p className="absolute inset-x-0 top-0 p-3 text-fs-base text-muted-foreground">Loading schema…</p>}
+        {isError && <p className="absolute inset-x-0 top-0 p-3 text-fs-base text-destructive">Failed to load schema.</p>}
       </div>
       {hoverField && hoverPos && <HoverPeek field={hoverField} pos={hoverPos} />}
     </div>
@@ -141,7 +141,7 @@ export default function SchemaLayoutCanvas({ schema, isLoading, isError, selecte
 function HoverPeek({ field, pos }: { field: Field; pos: { x: number; y: number } }) {
   return (
     <div
-      className="pointer-events-none z-50 rounded border border-border bg-popover px-2 py-1 text-[11px] text-popover-foreground shadow-md"
+      className="pointer-events-none z-50 rounded border border-border bg-popover px-2 py-1 text-fs-sm text-popover-foreground shadow-md"
       style={{ position: 'fixed', left: pos.x + 12, top: pos.y - 8, transform: 'translateY(-100%)' }}
     >
       <span className="font-mono font-semibold text-foreground">{field.name}</span>
@@ -167,7 +167,7 @@ function ColorLegendBadge() {
           </button>
         </TooltipTrigger>
         <TooltipContent side="right" align="start" className="max-w-xs p-0">
-          <div className="space-y-1.5 p-2 text-[11px]">
+          <div className="space-y-1.5 p-2 text-fs-sm">
             <LegendRow swatch={<span className="block h-3 w-3 border-2" style={{ borderColor: 'var(--primary)' }} />} label="Field border" detail="Fits within a single 64-byte cache line" />
             <LegendRow swatch={<span className="block h-3 w-3 border-2 border-amber-400" />} label="Field border (thick)" detail="Crosses a cache-line boundary — two cache misses per access" />
             <LegendRow swatch={<span className="block h-0.5 w-3" style={{ backgroundColor: 'var(--destructive)' }} />} label="Horizontal rule" detail="Cache-line boundary between rows (every 64 bytes)" />

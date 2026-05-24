@@ -35,11 +35,11 @@ export function DbMapSearchBox(props: DbMapSearchBoxProps) {
             }
           }}
           placeholder="page:N · segment:N · type…"
-          className="w-44 bg-transparent text-[11px] text-foreground outline-none placeholder:text-muted-foreground"
+          className="w-44 bg-transparent text-fs-sm text-foreground outline-none placeholder:text-muted-foreground"
           data-testid="dbmap-search"
         />
         {hasQuery && (
-          <span className="font-mono text-[10px] tabular-nums text-muted-foreground" data-testid="dbmap-search-count">
+          <span className="font-mono text-fs-xs tabular-nums text-muted-foreground" data-testid="dbmap-search-count">
             {matchCount === 0 ? 'no match' : `${matchIndex + 1}/${matchCount}`}
           </span>
         )}

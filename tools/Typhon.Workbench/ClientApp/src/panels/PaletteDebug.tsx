@@ -57,8 +57,8 @@ const CHROME_TOKENS: readonly { name: string; note?: string }[] = [
  */
 export default function PaletteDebug() {
   return (
-    <div className="h-full w-full overflow-auto bg-background p-3 text-[11px]">
-      <h2 className="text-[13px] font-semibold text-foreground">Color Palettes</h2>
+    <div className="h-full w-full overflow-auto bg-background p-3 text-fs-sm">
+      <h2 className="text-fs-lg font-semibold text-foreground">Color Palettes</h2>
       <p className="mb-3 text-muted-foreground">
         Every palette the Workbench renders with. Debug view — opened via the command palette.
       </p>

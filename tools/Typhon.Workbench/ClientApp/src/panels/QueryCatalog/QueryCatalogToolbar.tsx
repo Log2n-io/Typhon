@@ -36,7 +36,7 @@ export function QueryCatalogToolbar({ totalCount, filteredCount, archetypeOption
           placeholder="Search filters / owners / archetype…"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          className="h-7 pl-7 text-[12px]"
+          className="h-7 pl-7 text-fs-base"
           data-testid="query-catalog-search"
         />
       </div>
@@ -44,7 +44,7 @@ export function QueryCatalogToolbar({ totalCount, filteredCount, archetypeOption
       <select
         value={archetypeFilter ?? ''}
         onChange={(e) => setArchetypeFilter(e.target.value === '' ? null : Number(e.target.value))}
-        className="h-7 rounded border border-border bg-background px-2 text-[12px]"
+        className="h-7 rounded border border-border bg-background px-2 text-fs-base"
         data-testid="query-catalog-archetype-filter"
       >
         <option value="">All archetypes</option>
@@ -56,7 +56,7 @@ export function QueryCatalogToolbar({ totalCount, filteredCount, archetypeOption
       <select
         value={systemFilter ?? ''}
         onChange={(e) => setSystemFilter(e.target.value === '' ? null : Number(e.target.value))}
-        className="h-7 rounded border border-border bg-background px-2 text-[12px]"
+        className="h-7 rounded border border-border bg-background px-2 text-fs-base"
         data-testid="query-catalog-system-filter"
       >
         <option value="">All systems</option>
@@ -65,7 +65,7 @@ export function QueryCatalogToolbar({ totalCount, filteredCount, archetypeOption
         ))}
       </select>
 
-      <span className="ml-auto text-[11px] text-muted-foreground tabular-nums">
+      <span className="ml-auto text-fs-sm text-muted-foreground tabular-nums">
         {filteredCount === totalCount ? `${totalCount}` : `${filteredCount} / ${totalCount}`}
       </span>
     </div>

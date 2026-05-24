@@ -64,18 +64,18 @@ export function EditorForm(): React.JSX.Element {
   return (
     <section className="max-w-xl space-y-4">
       <header>
-        <h2 className="text-[14px] font-semibold text-foreground">Editor</h2>
-        <p className="mt-1 text-[12px] text-muted-foreground">
+        <h2 className="text-fs-xl font-semibold text-foreground">Editor</h2>
+        <p className="mt-1 text-fs-base text-muted-foreground">
           Used by the &quot;Open in editor&quot; button on profiler spans (Source row).
         </p>
       </header>
 
       <label className="block">
-        <span className="block text-[12px] font-medium text-foreground">Editor</span>
+        <span className="block text-fs-base font-medium text-foreground">Editor</span>
         <select
           value={pendingKind}
           onChange={(e) => setPendingKind(e.target.value as EditorKind)}
-          className="mt-1 w-full rounded border border-border bg-background px-2 py-1 text-[12px]"
+          className="mt-1 w-full rounded border border-border bg-background px-2 py-1 text-fs-base"
         >
           {EDITOR_KINDS.map((opt) => {
             const disabled = (opt.windowsOnly === true && os !== 'windows')
@@ -94,15 +94,15 @@ export function EditorForm(): React.JSX.Element {
 
       {pendingKind === 'custom' && (
         <label className="block">
-          <span className="block text-[12px] font-medium text-foreground">Custom command</span>
+          <span className="block text-fs-base font-medium text-foreground">Custom command</span>
           <input
             type="text"
             value={pendingCmd}
             onChange={(e) => setPendingCmd(e.target.value)}
             placeholder="nvim-qt --remote +{line} {file}"
-            className="mt-1 w-full rounded border border-border bg-background px-2 py-1 font-mono text-[12px]"
+            className="mt-1 w-full rounded border border-border bg-background px-2 py-1 font-mono text-fs-base"
           />
-          <span className="mt-1 block text-[11px] text-muted-foreground">
+          <span className="mt-1 block text-fs-sm text-muted-foreground">
             Tokens: <code>{'{file}'}</code>, <code>{'{line}'}</code>, <code>{'{column}'}</code>. Each token becomes
             a single argv element — never executed via a shell, so no injection.
           </span>
@@ -114,19 +114,19 @@ export function EditorForm(): React.JSX.Element {
           type="button"
           onClick={handleSave}
           disabled={!dirty}
-          className="rounded border border-border bg-primary px-3 py-1 text-[12px] text-primary-foreground hover:opacity-90 disabled:opacity-50"
+          className="rounded border border-border bg-primary px-3 py-1 text-fs-base text-primary-foreground hover:opacity-90 disabled:opacity-50"
         >
           Save
         </button>
         <button
           type="button"
           onClick={handleTest}
-          className="rounded border border-border bg-background px-3 py-1 text-[12px] hover:bg-accent"
+          className="rounded border border-border bg-background px-3 py-1 text-fs-base hover:bg-accent"
         >
           Test
         </button>
         {testStatus && (
-          <span className={`text-[12px] ${testStatus.ok ? 'text-foreground' : 'text-destructive'}`}>
+          <span className={`text-fs-base ${testStatus.ok ? 'text-foreground' : 'text-destructive'}`}>
             {testStatus.msg}
           </span>
         )}

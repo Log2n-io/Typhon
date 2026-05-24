@@ -21,7 +21,7 @@ export function DbMapExportMenu(props: DbMapExportMenuProps) {
         run();
         setOpen(false);
       }}
-      className="w-full rounded px-2 py-1 text-left text-[11px] text-foreground hover:bg-muted/60"
+      className="w-full rounded px-2 py-1 text-left text-fs-sm text-foreground hover:bg-muted/60"
     >
       {label}
     </button>
@@ -32,7 +32,7 @@ export function DbMapExportMenu(props: DbMapExportMenuProps) {
       <PopoverTrigger asChild>
         <button
           type="button"
-          className="flex items-center gap-1 rounded border border-border bg-card px-1.5 py-0.5 text-[11px] text-muted-foreground hover:text-foreground"
+          className="flex items-center gap-1 rounded border border-border bg-card px-1.5 py-0.5 text-fs-sm text-muted-foreground hover:text-foreground"
           title="Export the map or the region table"
           data-testid="dbmap-export"
         >

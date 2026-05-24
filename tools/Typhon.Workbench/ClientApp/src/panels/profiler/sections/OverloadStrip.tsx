@@ -470,7 +470,7 @@ export default function OverloadStrip() {
             className="flex items-center justify-between border-b border-border px-2"
             style={{ height: `${POPUP_HEADER_HEIGHT}px` }}
           >
-            <span className="select-none text-[11px] font-semibold text-foreground">Overload diagnostics</span>
+            <span className="select-none text-fs-sm font-semibold text-foreground">Overload diagnostics</span>
             <button
               type="button"
               onClick={() => setPopupRect(null)}

@@ -42,7 +42,7 @@ export default function ParallelismPill({ utilization }: Props) {
     <>
       <div
         ref={setHoverEl}
-        className={`flex items-center gap-1.5 rounded border px-1.5 py-0.5 font-mono text-[10px] ${toneClass}`}
+        className={`flex items-center gap-1.5 rounded border px-1.5 py-0.5 font-mono text-fs-xs ${toneClass}`}
         title="Parallelism inefficiency over the selected range — hover for breakdown"
       >
         <span className="font-semibold">Wait</span>
@@ -90,10 +90,10 @@ function UtilizationPopover({ anchor, utilization }: { anchor: HTMLDivElement; u
 
   return createPortal(
     <div
-      className="pointer-events-none fixed z-[1000] rounded border border-border bg-card p-3 font-mono text-[10px] text-foreground shadow-lg"
+      className="pointer-events-none fixed z-[1000] rounded border border-border bg-card p-3 font-mono text-fs-xs text-foreground shadow-lg"
       style={{ left, top, width: POPOVER_W }}
     >
-      <div className="mb-2 text-[11px] font-semibold text-foreground">Parallelism inefficiency</div>
+      <div className="mb-2 text-fs-sm font-semibold text-foreground">Parallelism inefficiency</div>
       <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-muted-foreground">
         <span>workers</span>
         <span className="tabular-nums text-foreground">{utilization.workerCount}</span>
@@ -108,9 +108,9 @@ function UtilizationPopover({ anchor, utilization }: { anchor: HTMLDivElement; u
         <span>total wait</span>
         <span className="tabular-nums text-foreground">{formatWaitMs(utilization.totalWaitUs)}</span>
       </div>
-      <div className="mt-2.5 mb-1 text-[9px] uppercase tracking-wide text-muted-foreground">per-tick wait %</div>
+      <div className="mt-2.5 mb-1 text-fs-2xs uppercase tracking-wide text-muted-foreground">per-tick wait %</div>
       <Sparkline perTick={utilization.perTick} />
-      <div className="mt-1.5 text-[9px] leading-tight text-muted-foreground">
+      <div className="mt-1.5 text-fs-2xs leading-tight text-muted-foreground">
         wait = workers × wall − Σwork. Higher means more workers were idle while the tick advanced.
       </div>
     </div>,

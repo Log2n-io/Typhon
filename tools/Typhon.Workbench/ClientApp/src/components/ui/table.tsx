@@ -73,7 +73,11 @@ const TableHead = React.forwardRef<
   <th
     ref={ref}
     className={cn(
-      "h-12 px-4 text-left align-middle font-medium text-muted-foreground [&:has([role=checkbox])]:pr-0",
+      // DS-1: density-scaled padding (was a fixed h-12 / px-4 — a spacious shadcn default that made dense
+      // tables roomy and unresponsive to the density switch). `leading-tight` removes the inherited 1.5
+      // line-height's dead top/bottom space (the dominant row-height contributor); it scales with the density
+      // font since it's relative. Height now follows content + padding.
+      "px-[var(--density-spacing-2)] py-0.5 leading-tight text-left align-middle font-medium text-muted-foreground [&:has([role=checkbox])]:pr-0",
       className
     )}
     {...props}
@@ -87,7 +91,7 @@ const TableCell = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <td
     ref={ref}
-    className={cn("p-4 align-middle [&:has([role=checkbox])]:pr-0", className)}
+    className={cn("px-[var(--density-spacing-2)] py-0.5 leading-tight align-middle [&:has([role=checkbox])]:pr-0", className)}
     {...props}
   />
 ))

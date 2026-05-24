@@ -27,29 +27,29 @@ export default function AttachTab({ onAttach, isAttaching }: Props) {
   return (
     <div className="flex h-full flex-col gap-3">
       <div className="flex shrink-0 flex-col gap-1">
-        <label className="text-density-sm text-muted-foreground">Engine endpoint</label>
+        <label className="text-fs-lg text-muted-foreground">Engine endpoint</label>
         <Input
           placeholder="localhost:9100"
           value={endpoint}
           onChange={(e) => setEndpoint(e.target.value)}
           spellCheck={false}
           autoComplete="off"
-          className="font-mono text-[12px]"
+          className="font-mono text-fs-base"
         />
       </div>
 
-      <p className="shrink-0 text-[10px] text-muted-foreground">
+      <p className="shrink-0 text-fs-xs text-muted-foreground">
         Enter <code>host:port</code> of the target Typhon app's profiler TCP exporter (default port <code>9100</code>).
         The Workbench retries the connect for up to 6 seconds before giving up.
       </p>
 
       {trimmed && !shapeValid && (
-        <p className="shrink-0 rounded border border-destructive/50 bg-destructive/10 px-2 py-1 text-[11px] text-destructive">
+        <p className="shrink-0 rounded border border-destructive/50 bg-destructive/10 px-2 py-1 text-fs-sm text-destructive">
           Invalid endpoint — expected <code>host</code> or <code>host:port</code>.
         </p>
       )}
       {trimmed && shapeValid && !portValid && (
-        <p className="shrink-0 rounded border border-destructive/50 bg-destructive/10 px-2 py-1 text-[11px] text-destructive">
+        <p className="shrink-0 rounded border border-destructive/50 bg-destructive/10 px-2 py-1 text-fs-sm text-destructive">
           Port must be between 1 and 65535.
         </p>
       )}
@@ -60,7 +60,7 @@ export default function AttachTab({ onAttach, isAttaching }: Props) {
         <Button
           onClick={() => canAttach && onAttach(trimmed)}
           disabled={!canAttach}
-          className="text-density-sm"
+          className="text-fs-lg"
         >
           {isAttaching ? 'Attaching…' : 'Attach'}
         </Button>

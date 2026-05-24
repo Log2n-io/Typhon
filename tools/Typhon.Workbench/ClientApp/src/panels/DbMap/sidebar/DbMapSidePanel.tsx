@@ -50,7 +50,7 @@ export function DbMapSidePanel({ legend, regions, bookmarks }: DbMapSidePanelPro
         <div className="flex items-center gap-1 border-b border-border px-1.5 py-1">
           <TabsList className="h-6 gap-0.5 bg-transparent p-0">
             {TABS.map((t) => (
-              <TabsTrigger key={t.value} value={t.value} className="h-5 px-2 py-0 text-[11px]">
+              <TabsTrigger key={t.value} value={t.value} className="h-5 px-2 py-0 text-fs-sm">
                 {t.label}
               </TabsTrigger>
             ))}

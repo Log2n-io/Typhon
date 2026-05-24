@@ -145,7 +145,7 @@ export default function SystemDagToolbar({ tickSummaries, autoSnapshotEnabled, s
         type="button"
         disabled={!hasTicks}
         onClick={onSnapshotClick}
-        className="flex items-center gap-1.5 rounded border border-border bg-card px-2 py-1 font-mono text-[11px] text-foreground hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40"
+        className="flex items-center gap-1.5 rounded border border-border bg-card px-2 py-1 font-mono text-fs-sm text-foreground hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40"
         title={hasTicks ? `Pin both views to the last ${SNAPSHOT_TICK_COUNT} ticks` : 'Waiting for ticks…'}
       >
         <Camera className="h-3 w-3" />
@@ -153,7 +153,7 @@ export default function SystemDagToolbar({ tickSummaries, autoSnapshotEnabled, s
       </button>
 
       <div className="flex items-center gap-1">
-        <span className="font-mono text-[10px] uppercase tracking-wide text-muted-foreground">stat</span>
+        <span className="font-mono text-fs-xs uppercase tracking-wide text-muted-foreground">stat</span>
         <div className="flex overflow-hidden rounded border border-border">
           {STAT_OPTIONS.map((opt) => {
             const active = statMode === opt.key;
@@ -162,7 +162,7 @@ export default function SystemDagToolbar({ tickSummaries, autoSnapshotEnabled, s
                 key={opt.key}
                 type="button"
                 onClick={() => setStatMode(opt.key)}
-                className={`px-2 py-0.5 font-mono text-[11px] ${active
+                className={`px-2 py-0.5 font-mono text-fs-sm ${active
                     ? 'bg-primary text-primary-foreground'
                     : 'bg-card text-foreground hover:bg-muted'
                   }`}
@@ -176,11 +176,11 @@ export default function SystemDagToolbar({ tickSummaries, autoSnapshotEnabled, s
       </div>
 
       <div className="flex items-center gap-1">
-        <span className="font-mono text-[10px] uppercase tracking-wide text-muted-foreground">layout</span>
+        <span className="font-mono text-fs-xs uppercase tracking-wide text-muted-foreground">layout</span>
         <select
           value={layout}
           onChange={(e) => setLayout(e.target.value as LayoutMode)}
-          className="rounded border border-border bg-card px-2 py-0.5 font-mono text-[11px] text-foreground hover:bg-muted focus:outline-none focus:ring-1 focus:ring-primary"
+          className="rounded border border-border bg-card px-2 py-0.5 font-mono text-fs-sm text-foreground hover:bg-muted focus:outline-none focus:ring-1 focus:ring-primary"
           title={LAYOUT_OPTIONS.find((o) => o.key === layout)?.description ?? ''}
         >
           {LAYOUT_OPTIONS.map((opt) => (
@@ -195,7 +195,7 @@ export default function SystemDagToolbar({ tickSummaries, autoSnapshotEnabled, s
         <button
           type="button"
           onClick={() => clearLayoutPositions(layout)}
-          className="flex items-center gap-1.5 rounded border border-border bg-card px-2 py-1 font-mono text-[11px] text-foreground hover:bg-muted"
+          className="flex items-center gap-1.5 rounded border border-border bg-card px-2 py-1 font-mono text-fs-sm text-foreground hover:bg-muted"
           title={`Discard ${overrideCount} manual position${overrideCount === 1 ? '' : 's'} for the ${layout} layout — tiles snap back to the auto-computed positions.`}
         >
           Reset positions ({overrideCount})
@@ -241,14 +241,14 @@ export default function SystemDagToolbar({ tickSummaries, autoSnapshotEnabled, s
       <button
         type="button"
         onClick={onFit}
-        className="flex items-center gap-1.5 rounded border border-border bg-card px-2 py-1 font-mono text-[11px] text-foreground hover:bg-muted"
+        className="flex items-center gap-1.5 rounded border border-border bg-card px-2 py-1 font-mono text-fs-sm text-foreground hover:bg-muted"
         title="Fit the DAG to the viewport (or middle-click the canvas)"
       >
         <Maximize2 className="h-3 w-3" />
         Fit
       </button>
 
-      <div className="ml-auto flex items-center gap-2 font-mono text-[10px] text-muted-foreground">
+      <div className="ml-auto flex items-center gap-2 font-mono text-fs-xs text-muted-foreground">
         <ParallelismPill utilization={utilization} />
         {tickRange ? (
           <>
@@ -305,11 +305,11 @@ function HelpOverlay({ onClose }: { onClose: () => void }) {
       tabIndex={-1}
     >
       <div
-        className="max-h-[88vh] w-[840px] max-w-[94vw] overflow-auto rounded-lg border border-border bg-card p-6 font-mono text-[12px] leading-relaxed text-foreground shadow-xl"
+        className="max-h-[88vh] w-[840px] max-w-[94vw] overflow-auto rounded-lg border border-border bg-card p-6 font-mono text-fs-base leading-relaxed text-foreground shadow-xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="mb-4 flex items-center justify-between">
-          <h2 className="text-[15px] font-semibold">System DAG — controls & legend</h2>
+          <h2 className="text-fs-xl font-semibold">System DAG — controls & legend</h2>
           <button
             type="button"
             onClick={onClose}
@@ -581,7 +581,7 @@ function HelpOverlay({ onClose }: { onClose: () => void }) {
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div className="mb-5">
-      <h3 className="mb-2 text-[12px] font-semibold uppercase tracking-wide text-muted-foreground">{title}</h3>
+      <h3 className="mb-2 text-fs-base font-semibold uppercase tracking-wide text-muted-foreground">{title}</h3>
       <div className="space-y-1 leading-relaxed">{children}</div>
     </div>
   );
@@ -593,7 +593,7 @@ function KeyTable({ rows }: { rows: Array<[string, string]> }) {
       <tbody>
         {rows.map(([k, v]) => (
           <tr key={k} className="align-top">
-            <td className="w-52 py-0.5 pr-3"><kbd className="rounded border border-border bg-muted px-1.5 py-0.5 text-[10px]">{k}</kbd></td>
+            <td className="w-52 py-0.5 pr-3"><kbd className="rounded border border-border bg-muted px-1.5 py-0.5 text-fs-xs">{k}</kbd></td>
             <td className="py-0.5 text-muted-foreground">{v}</td>
           </tr>
         ))}
@@ -627,7 +627,7 @@ function ToggleChip({
     : 'border-border bg-card text-foreground hover:bg-muted';
   return (
     <label
-      className={`flex cursor-pointer select-none items-center gap-1.5 rounded border px-2 py-1 font-mono text-[11px] ${tone}`}
+      className={`flex cursor-pointer select-none items-center gap-1.5 rounded border px-2 py-1 font-mono text-fs-sm ${tone}`}
       title={title}
     >
       <input

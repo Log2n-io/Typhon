@@ -82,14 +82,14 @@ export default function ComponentInspectorPanel(props: IDockviewPanelProps) {
   const summary = targetId ? components.find((c) => c.typeName === targetId || c.fullName === targetId) ?? null : null;
 
   if (isError) {
-    return <div data-testid="component-inspector" className="p-3 text-[12px] text-destructive">Failed to load schema.</div>;
+    return <div data-testid="component-inspector" className="p-3 text-fs-base text-destructive">Failed to load schema.</div>;
   }
   if (!targetId) {
     // No resolvable target: still loading, or (PC-2 Empty) the DB genuinely has no components. PC-9 means we
     // never show a "pick elsewhere" dead-end while components exist.
     return (
       <div data-testid="component-inspector" className="flex h-full items-center justify-center bg-background p-4 text-center">
-        <p className="text-[12px] text-muted-foreground">
+        <p className="text-fs-base text-muted-foreground">
           {cLoading || candidates.length > 0 ? 'Loading…' : 'This database has no components.'}
         </p>
       </div>
@@ -113,7 +113,7 @@ export default function ComponentInspectorPanel(props: IDockviewPanelProps) {
           noun="component"
         />
         {summary && (
-          <span className="text-[11px] text-muted-foreground">
+          <span className="text-fs-sm text-muted-foreground">
             {summary.storageSize}B · {summary.fieldCount} fields · used in {summary.archetypeCount ?? '—'}
           </span>
         )}
@@ -123,7 +123,7 @@ export default function ComponentInspectorPanel(props: IDockviewPanelProps) {
             onClick={() => openDbMapForComponent(typeName)}
             data-testid="component-reveal-file-map"
             title="Reveal this component's storage segment in the File Map"
-            className="rounded border border-border px-2 py-0.5 text-[11px] text-foreground hover:bg-accent"
+            className="rounded border border-border px-2 py-0.5 text-fs-sm text-foreground hover:bg-accent"
           >
             Reveal in File Map →
           </button>
@@ -153,7 +153,7 @@ export default function ComponentInspectorPanel(props: IDockviewPanelProps) {
               // because Radix automatic mode makes the focused tab the *active* tab too, so without it the
               // `data-[state=active]:bg-transparent` rule (emitted later, equal specificity) would win and the
               // fill would never show. Selection stays the solid primary underline, so focus ≠ selection (DS-4).
-              className="rounded-none border-b-2 border-transparent px-3 py-1 text-[11px] font-normal text-muted-foreground hover:text-foreground focus-visible:bg-ring/20! focus-visible:text-foreground focus-visible:outline-none focus-visible:ring-0 focus-visible:ring-offset-0 data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:shadow-none"
+              className="rounded-none border-b-2 border-transparent px-3 py-1 text-fs-sm font-normal text-muted-foreground hover:text-foreground focus-visible:bg-ring/20! focus-visible:text-foreground focus-visible:outline-none focus-visible:ring-0 focus-visible:ring-offset-0 data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:shadow-none"
             >
               {t.label}
             </TabsTrigger>
@@ -197,7 +197,7 @@ function OpenInDataBrowserAction({ typeName }: { typeName: string }) {
       onClick={() => openDataBrowser(primary.archetypeId)}
       data-testid="component-open-data-browser"
       title={`Browse entities — auto-picks #${primary.archetypeId} (most entities for this component); change the archetype in the Data Browser`}
-      className="rounded border border-border px-2 py-0.5 text-[11px] text-foreground hover:bg-accent"
+      className="rounded border border-border px-2 py-0.5 text-fs-sm text-foreground hover:bg-accent"
     >
       Open in Data Browser →
     </button>
@@ -228,13 +228,13 @@ function StorageModeTab({ typeName }: { typeName: string }) {
   const { schema, isLoading, isError } = useComponentSchema(typeName);
   const mode = schema?.storageMode;
   return (
-    <div className="p-4 text-[12px]" data-testid="component-storagemode">
+    <div className="p-4 text-fs-base" data-testid="component-storagemode">
       {isError && <p className="text-destructive">Failed to load.</p>}
       {isLoading && !mode && <p className="text-muted-foreground">Loading…</p>}
       {mode && (
         <>
-          <p className="text-[13px] font-semibold text-foreground" data-testid="storagemode-value">{mode}</p>
-          <p className="mt-2 text-[11px] text-muted-foreground">{STORAGE_MODE_NOTES[mode] ?? 'Component MVCC storage mode.'}</p>
+          <p className="text-fs-lg font-semibold text-foreground" data-testid="storagemode-value">{mode}</p>
+          <p className="mt-2 text-fs-sm text-muted-foreground">{STORAGE_MODE_NOTES[mode] ?? 'Component MVCC storage mode.'}</p>
         </>
       )}
     </div>
@@ -245,29 +245,29 @@ function IndexesTab({ typeName }: { typeName: string }) {
   const { indexes, isLoading, isError } = useIndexesForComponent(typeName);
   return (
     <div className="p-1">
-      <p className="px-2 py-1 text-[11px] text-muted-foreground">
+      <p className="px-2 py-1 text-fs-sm text-muted-foreground">
         Type-global: one B+Tree per indexed field, spanning every archetype that uses this component.
       </p>
-      {isError && <p className="px-2 py-2 text-[12px] text-destructive">Failed to load indexes.</p>}
-      {isLoading && <p className="px-2 py-2 text-[12px] text-muted-foreground">Loading…</p>}
-      {!isLoading && indexes.length === 0 && <p className="px-2 py-2 text-[12px] text-muted-foreground">No indexed fields.</p>}
+      {isError && <p className="px-2 py-2 text-fs-base text-destructive">Failed to load indexes.</p>}
+      {isLoading && <p className="px-2 py-2 text-fs-base text-muted-foreground">Loading…</p>}
+      {!isLoading && indexes.length === 0 && <p className="px-2 py-2 text-fs-base text-muted-foreground">No indexed fields.</p>}
       {indexes.length > 0 && (
-        <Table className="text-[12px]">
+        <Table className="text-fs-base">
           <TableHeader>
             <TableRow>
-              <TableHead className="py-1 text-[11px]">Field</TableHead>
-              <TableHead className="py-1 text-right text-[11px]">Offset / Size</TableHead>
-              <TableHead className="py-1 text-[11px]">Index type</TableHead>
-              <TableHead className="py-1 text-[11px]">Multi</TableHead>
+              <TableHead className="text-fs-sm">Field</TableHead>
+              <TableHead className="text-right text-fs-sm">Offset / Size</TableHead>
+              <TableHead className="text-fs-sm">Index type</TableHead>
+              <TableHead className="text-fs-sm">Multi</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {indexes.map((i) => (
               <TableRow key={i.fieldName} data-testid="component-index-row" data-field={i.fieldName}>
-                <TableCell className="py-1 font-mono">{i.fieldName}</TableCell>
-                <TableCell className="py-1 text-right tabular-nums">{i.fieldOffset} / {i.fieldSize}B</TableCell>
-                <TableCell className="py-1">{i.indexType}</TableCell>
-                <TableCell className="py-1">{i.allowsMultiple ? 'yes' : 'no'}</TableCell>
+                <TableCell className="font-mono">{i.fieldName}</TableCell>
+                <TableCell className="text-right tabular-nums">{i.fieldOffset} / {i.fieldSize}B</TableCell>
+                <TableCell>{i.indexType}</TableCell>
+                <TableCell>{i.allowsMultiple ? 'yes' : 'no'}</TableCell>
               </TableRow>
             ))}
           </TableBody>
@@ -284,9 +284,9 @@ function RelationshipsTab({ typeName }: { typeName: string }) {
   // (which would 409 the profiler/topology endpoints) and show a kind-appropriate note instead.
   if (kind === 'open') {
     return (
-      <div className="p-4 text-[12px]" data-testid="component-relationships">
+      <div className="p-4 text-fs-base" data-testid="component-relationships">
         <p className="text-foreground">System relationships</p>
-        <p className="mt-1 text-[11px] text-muted-foreground">
+        <p className="mt-1 text-fs-sm text-muted-foreground">
           Which systems read or trigger on this component comes from a running engine — open a <strong>trace</strong> or{' '}
           <strong>attach</strong> to a live engine to see it. A database file on its own has no systems.
         </p>
@@ -304,7 +304,7 @@ function ProfilerRelationships({ typeName }: { typeName: string }) {
       {!response.runtimeHosted && (
         <div
           data-testid="rel-runtime-banner"
-          className="flex items-start gap-2 border-b border-amber-700/40 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-700 dark:text-amber-300"
+          className="flex items-start gap-2 border-b border-amber-700/40 bg-amber-500/10 px-3 py-2 text-fs-sm text-amber-700 dark:text-amber-300"
         >
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
           <div>
@@ -314,14 +314,14 @@ function ProfilerRelationships({ typeName }: { typeName: string }) {
         </div>
       )}
       {response.runtimeHosted && response.systems.length === 0 && (
-        <div className="flex items-start gap-2 border-b border-border bg-muted/20 px-3 py-2 text-[11px] text-muted-foreground">
+        <div className="flex items-start gap-2 border-b border-border bg-muted/20 px-3 py-2 text-fs-sm text-muted-foreground">
           <Info className="mt-0.5 h-4 w-4 shrink-0" />
           <div>No system reads this component via its input view, and none declares it as a change-filter trigger.</div>
         </div>
       )}
       <div className="min-h-0 flex-1" data-testid="component-relationships">
-        {isError && <p className="p-3 text-[12px] text-destructive">Failed to load relationships.</p>}
-        {isLoading && <p className="p-3 text-[12px] text-muted-foreground">Loading…</p>}
+        {isError && <p className="p-3 text-fs-base text-destructive">Failed to load relationships.</p>}
+        {isLoading && <p className="p-3 text-fs-base text-muted-foreground">Loading…</p>}
         {!isLoading && !isError && <SchemaRelationshipsGraph componentTypeName={typeName} systems={response.systems} />}
       </div>
     </div>
@@ -332,18 +332,18 @@ function UsedInTab({ typeName, onReveal }: { typeName: string; onReveal: (archet
   const { archetypes, isLoading, isError } = useArchetypesForComponent(typeName);
   return (
     <div className="p-1">
-      <p className="px-2 py-1 text-[11px] text-muted-foreground">Archetypes that use this component (M:N). Click a row to reveal it in the Archetype Inspector.</p>
-      {isError && <p className="px-2 py-2 text-[12px] text-destructive">Failed to load archetypes.</p>}
-      {isLoading && <p className="px-2 py-2 text-[12px] text-muted-foreground">Loading…</p>}
-      {!isLoading && archetypes.length === 0 && <p className="px-2 py-2 text-[12px] text-muted-foreground">Not used in any archetype.</p>}
+      <p className="px-2 py-1 text-fs-sm text-muted-foreground">Archetypes that use this component (M:N). Click a row to reveal it in the Archetype Inspector.</p>
+      {isError && <p className="px-2 py-2 text-fs-base text-destructive">Failed to load archetypes.</p>}
+      {isLoading && <p className="px-2 py-2 text-fs-base text-muted-foreground">Loading…</p>}
+      {!isLoading && archetypes.length === 0 && <p className="px-2 py-2 text-fs-base text-muted-foreground">Not used in any archetype.</p>}
       {archetypes.length > 0 && (
-        <Table className="text-[12px]">
+        <Table className="text-fs-base">
           <TableHeader>
             <TableRow>
-              <TableHead className="py-1 text-[11px]">Archetype</TableHead>
-              <TableHead className="py-1 text-[11px]">Storage</TableHead>
-              <TableHead className="py-1 text-right text-[11px]">Entities</TableHead>
-              <TableHead className="py-1 text-right text-[11px]">Occupancy</TableHead>
+              <TableHead className="text-fs-sm">Archetype</TableHead>
+              <TableHead className="text-fs-sm">Storage</TableHead>
+              <TableHead className="text-right text-fs-sm">Entities</TableHead>
+              <TableHead className="text-right text-fs-sm">Occupancy</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -355,12 +355,12 @@ function UsedInTab({ typeName, onReveal }: { typeName: string; onReveal: (archet
                 data-archetype-id={a.archetypeId}
                 onClick={() => onReveal(a.archetypeId)}
               >
-                <TableCell className="py-1 font-mono tabular-nums">#{a.archetypeId}</TableCell>
-                <TableCell className="py-1">
+                <TableCell className="font-mono tabular-nums">#{a.archetypeId}</TableCell>
+                <TableCell>
                   <StatusBadge tone={a.storageMode === 'cluster' ? 'success' : 'warn'}>{a.storageMode}</StatusBadge>
                 </TableCell>
-                <TableCell className="py-1 text-right tabular-nums">{a.entityCount.toLocaleString()}</TableCell>
-                <TableCell className="py-1 text-right tabular-nums">
+                <TableCell className="text-right tabular-nums">{a.entityCount.toLocaleString()}</TableCell>
+                <TableCell className="text-right tabular-nums">
                   {a.storageMode === 'cluster' && a.chunkCount > 0 ? `${a.occupancyPct.toFixed(1)}%` : '—'}
                 </TableCell>
               </TableRow>

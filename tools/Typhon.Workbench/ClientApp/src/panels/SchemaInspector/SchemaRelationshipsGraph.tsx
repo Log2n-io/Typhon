@@ -46,8 +46,8 @@ function CustomNode({ data }: { data: SchemaNode['data'] }) {
   if (data.kind === 'component') {
     return (
       <div className="rounded border-2 border-primary bg-card px-3 py-2 text-center shadow-md">
-        <div className="text-[10px] uppercase tracking-wider text-muted-foreground">component</div>
-        <div className="font-mono text-[13px] font-semibold text-foreground">{data.label}</div>
+        <div className="text-fs-xs uppercase tracking-wider text-muted-foreground">component</div>
+        <div className="font-mono text-fs-lg font-semibold text-foreground">{data.label}</div>
       </div>
     );
   }
@@ -55,10 +55,10 @@ function CustomNode({ data }: { data: SchemaNode['data'] }) {
     data.access === 'read' ? 'border-sky-500/60 bg-sky-900/30' : 'border-amber-500/60 bg-amber-900/30';
   return (
     <div className={`rounded border px-3 py-1.5 text-center shadow-sm ${accent}`}>
-      <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
+      <div className="text-fs-xs uppercase tracking-wider text-muted-foreground">
         {data.systemType ?? 'system'} · {data.access ?? ''}
       </div>
-      <div className="font-mono text-[11px] text-foreground">{data.label}</div>
+      <div className="font-mono text-fs-sm text-foreground">{data.label}</div>
     </div>
   );
 }

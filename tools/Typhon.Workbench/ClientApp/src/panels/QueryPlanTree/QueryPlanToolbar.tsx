@@ -29,9 +29,9 @@ export default function QueryPlanToolbar({ definition, archetypeName }: QueryPla
   return (
     <div className="flex items-center gap-3 border-b border-border bg-card px-3 py-1.5">
       <div className="flex items-baseline gap-2">
-        <span className="font-mono text-[12px] font-semibold text-foreground">{idLabel}</span>
-        <span className="text-[11px] text-muted-foreground">on</span>
-        <span className="font-mono text-[12px] text-foreground">{archetypeName}</span>
+        <span className="font-mono text-fs-base font-semibold text-foreground">{idLabel}</span>
+        <span className="text-fs-sm text-muted-foreground">on</span>
+        <span className="font-mono text-fs-base text-foreground">{archetypeName}</span>
       </div>
 
       <div className="flex-1" />
@@ -46,7 +46,7 @@ export default function QueryPlanToolbar({ definition, archetypeName }: QueryPla
         <Button
           size="sm"
           variant="ghost"
-          className="h-7 gap-1 text-[11px]"
+          className="h-7 gap-1 text-fs-sm"
           onClick={() => openInEditor(src.file ?? '', sourceLine)}
           title={`${src.file}:${sourceLine}`}
         >
@@ -71,14 +71,14 @@ function ModeToggle({
     <div className="flex rounded-md border border-border">
       <button
         type="button"
-        className={`px-2 py-0.5 text-[11px] ${mode === 'structural' ? 'bg-muted text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+        className={`px-2 py-0.5 text-fs-sm ${mode === 'structural' ? 'bg-muted text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
         onClick={() => onChange('structural')}
       >
         Structural
       </button>
       <button
         type="button"
-        className={`px-2 py-0.5 text-[11px] ${mode === 'execution' ? 'bg-muted text-foreground' : 'text-muted-foreground hover:text-foreground'} disabled:opacity-40`}
+        className={`px-2 py-0.5 text-fs-sm ${mode === 'execution' ? 'bg-muted text-foreground' : 'text-muted-foreground hover:text-foreground'} disabled:opacity-40`}
         onClick={() => onChange('execution')}
         disabled={!hasExecution}
         title={hasExecution ? '' : 'Open from Execution Inspector to view per-run stats'}

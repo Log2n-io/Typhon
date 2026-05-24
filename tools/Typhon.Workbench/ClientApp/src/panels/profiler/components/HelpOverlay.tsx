@@ -51,7 +51,7 @@ export function HelpOverlay({ lines, clientX, clientY, gap = DEFAULT_GAP }: Prop
 
   return createPortal(
     <div
-      className="pointer-events-none fixed z-[9999] overflow-hidden whitespace-pre rounded-[2px] border border-border bg-popover px-3 py-2 font-mono text-[11px] leading-4 text-popover-foreground shadow-lg"
+      className="pointer-events-none fixed z-[9999] overflow-hidden whitespace-pre rounded-[2px] border border-border bg-popover px-3 py-2 font-mono text-fs-sm leading-4 text-popover-foreground shadow-lg"
       style={style}
     >
       {lines.join('\n')}

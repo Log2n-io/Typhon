@@ -47,7 +47,7 @@ export default function StatusBar() {
  return (
  <footer
  className="flex h-[22px] shrink-0 items-center gap-3 border-t border-border
- bg-card px-3 text-[14px] text-muted-foreground"
+ bg-card px-3 text-fs-xl text-muted-foreground"
  >
  <span className={`h-2 w-2 rounded-full ${dotColor}`} aria-hidden="true" />
  <span>{fileLabel}</span>

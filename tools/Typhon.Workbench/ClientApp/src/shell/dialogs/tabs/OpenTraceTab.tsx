@@ -26,7 +26,7 @@ export default function OpenTraceTab({ onOpen, isOpening }: Props) {
   return (
     <div className="flex h-full flex-col gap-3">
       <div className="flex min-h-0 flex-col gap-1">
-        <label className="shrink-0 text-density-sm text-muted-foreground">Trace or replay file</label>
+        <label className="shrink-0 text-fs-lg text-muted-foreground">Trace or replay file</label>
         <div className="min-h-0 flex-1">
           <FileBrowser
             extensionFilter={['.typhon-trace', '.typhon-replay']}
@@ -38,24 +38,24 @@ export default function OpenTraceTab({ onOpen, isOpening }: Props) {
       </div>
 
       <div className="flex shrink-0 flex-col gap-1">
-        <label className="text-density-sm text-muted-foreground">Or paste absolute path</label>
+        <label className="text-fs-lg text-muted-foreground">Or paste absolute path</label>
         <Input
           placeholder="C:\path\to\trace.typhon-trace or session.typhon-replay"
           value={pastedPath}
           onChange={(e) => setPastedPath(e.target.value)}
           spellCheck={false}
           autoComplete="off"
-          className="font-mono text-[12px]"
+          className="font-mono text-fs-base"
         />
       </div>
 
       {effectivePath && (
-        <p className="shrink-0 truncate text-[10px] text-muted-foreground" title={effectivePath}>
+        <p className="shrink-0 truncate text-fs-xs text-muted-foreground" title={effectivePath}>
           Will open: <span className="font-mono text-foreground">{effectivePath}</span>
         </p>
       )}
 
-      <p className="shrink-0 text-[10px] text-muted-foreground">
+      <p className="shrink-0 text-fs-xs text-muted-foreground">
         <span className="font-mono">.typhon-trace</span>: sidecar cache is built on first open and reused.{' '}
         <span className="font-mono">.typhon-replay</span>: self-contained, opens directly.
       </p>
@@ -64,7 +64,7 @@ export default function OpenTraceTab({ onOpen, isOpening }: Props) {
         <Button
           onClick={() => effectivePath && onOpen(effectivePath)}
           disabled={!canOpen}
-          className="text-density-sm"
+          className="text-fs-lg"
         >
           {isOpening ? 'Opening…' : 'Open'}
         </Button>

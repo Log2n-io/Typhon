@@ -111,7 +111,7 @@ export default function AccessMatrixGrid({
               type="button"
               key={`syshdr:${col.systemName}`}
               className={
-                'sticky z-20 flex items-center justify-start truncate border-b border-r border-border px-1 text-left text-[11px] ' +
+                'sticky z-20 flex items-center justify-start truncate border-b border-r border-border px-1 text-left text-fs-sm ' +
                 (isSelected
                   ? 'bg-amber-500/20 font-semibold text-foreground'
                   : isHovered
@@ -142,7 +142,7 @@ export default function AccessMatrixGrid({
               type="button"
               key={`rowhdr:${row.id}`}
               className={
-                'sticky left-0 z-10 flex items-center truncate border-b border-r border-border px-2 text-left text-[11px] ' +
+                'sticky left-0 z-10 flex items-center truncate border-b border-r border-border px-2 text-left text-fs-sm ' +
                 (isSelected
                   ? 'bg-amber-500/20 font-semibold text-foreground ring-1 ring-amber-400/60'
                   : 'bg-card text-foreground hover:bg-muted')
@@ -214,7 +214,7 @@ function renderPhaseHeaders(
         key={`phdr:${i}:${phase}`}
         disabled={phase === ''}
         className={
-          'sticky top-0 z-20 flex items-center justify-center truncate border-r border-border text-[10px] uppercase tracking-wide text-foreground ' +
+          'sticky top-0 z-20 flex items-center justify-center truncate border-r border-border text-fs-xs uppercase tracking-wide text-foreground ' +
           (isSelected ? 'ring-1 ring-amber-400 brightness-125' : 'hover:brightness-110')
         }
         style={{
@@ -284,7 +284,7 @@ function CellTile({ cell, rowIdx, colIdx, maxTouch, isSelected, onClick }: CellT
     <button
       type="button"
       className={
-        'flex items-center justify-center border-b border-r text-[10px] font-mono leading-none text-white ' +
+        'flex items-center justify-center border-b border-r text-fs-xs font-mono leading-none text-white ' +
         (isSelected ? 'border-amber-400 ring-1 ring-amber-400/50' : 'border-border hover:brightness-110')
       }
       style={{ ...baseStyle, background: fill }}

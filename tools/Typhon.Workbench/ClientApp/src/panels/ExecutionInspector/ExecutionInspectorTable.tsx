@@ -16,22 +16,22 @@ export function ExecutionInspectorTable({ execution }: Props) {
 
   if (rows.length === 0) {
     return (
-      <div className="flex h-full items-center justify-center bg-muted/10 text-[11px] text-muted-foreground">
+      <div className="flex h-full items-center justify-center bg-muted/10 text-fs-sm text-muted-foreground">
         This execution carries no phase breakdown.
       </div>
     );
   }
 
   return (
-    <Table className="text-[12px]">
+    <Table className="text-fs-base">
       <TableHeader>
         <TableRow>
-          <TableHead className="py-1 text-[11px]">Phase</TableHead>
-          <TableHead className="py-1 text-right text-[11px]">Estimate</TableHead>
-          <TableHead className="py-1 text-right text-[11px]">Actual</TableHead>
-          <TableHead className="py-1 text-right text-[11px]">Δ</TableHead>
-          <TableHead className="py-1 text-right text-[11px]">Wall</TableHead>
-          <TableHead className="py-1 text-[11px]">Notes</TableHead>
+          <TableHead className="text-fs-sm">Phase</TableHead>
+          <TableHead className="text-right text-fs-sm">Estimate</TableHead>
+          <TableHead className="text-right text-fs-sm">Actual</TableHead>
+          <TableHead className="text-right text-fs-sm">Δ</TableHead>
+          <TableHead className="text-right text-fs-sm">Wall</TableHead>
+          <TableHead className="text-fs-sm">Notes</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
@@ -39,11 +39,11 @@ export function ExecutionInspectorTable({ execution }: Props) {
           <PhaseRowView key={i} row={r} />
         ))}
         <TableRow>
-          <TableCell className="py-1 font-semibold">Total</TableCell>
+          <TableCell className="font-semibold">Total</TableCell>
           <TableCell />
           <TableCell />
           <TableCell />
-          <TableCell className="py-1 text-right font-mono font-semibold tabular-nums">{formatNs(total)}</TableCell>
+          <TableCell className="text-right font-mono font-semibold tabular-nums">{formatNs(total)}</TableCell>
           <TableCell />
         </TableRow>
       </TableBody>
@@ -55,12 +55,12 @@ function PhaseRowView({ row }: { row: PhaseRow }) {
   const deltaClass = deltaToneClass(row.delta);
   return (
     <TableRow data-testid="execution-phase-row" data-phase-name={row.phaseName}>
-      <TableCell className="py-1 font-mono text-[11px] text-foreground">{row.phaseName}</TableCell>
-      <TableCell className="py-1 text-right font-mono tabular-nums text-muted-foreground">{formatCount(row.estimate)}</TableCell>
-      <TableCell className="py-1 text-right font-mono tabular-nums text-foreground">{formatCount(row.actual)}</TableCell>
-      <TableCell className={`py-1 text-right font-mono tabular-nums ${deltaClass}`}>{formatDelta(row.delta)}</TableCell>
-      <TableCell className="py-1 text-right font-mono tabular-nums">{formatNs(row.wallNs)}</TableCell>
-      <TableCell className="py-1 text-[11px] text-muted-foreground">{row.notes || ''}</TableCell>
+      <TableCell className="font-mono text-fs-sm text-foreground">{row.phaseName}</TableCell>
+      <TableCell className="text-right font-mono tabular-nums text-muted-foreground">{formatCount(row.estimate)}</TableCell>
+      <TableCell className="text-right font-mono tabular-nums text-foreground">{formatCount(row.actual)}</TableCell>
+      <TableCell className={`text-right font-mono tabular-nums ${deltaClass}`}>{formatDelta(row.delta)}</TableCell>
+      <TableCell className="text-right font-mono tabular-nums">{formatNs(row.wallNs)}</TableCell>
+      <TableCell className="text-fs-sm text-muted-foreground">{row.notes || ''}</TableCell>
     </TableRow>
   );
 }

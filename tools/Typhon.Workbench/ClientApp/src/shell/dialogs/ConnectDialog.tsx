@@ -166,7 +166,7 @@ export default function ConnectDialog({ open, initialTab, onOpenChange }: Props)
  <DialogContent className="flex h-[640px] max-w-4xl flex-col gap-3">
  <DialogHeader>
  <DialogTitle className="">Connect</DialogTitle>
- <DialogDescription className="text-density-sm">
+ <DialogDescription className="text-fs-lg">
  Open a database, attach to a live engine, or replay a trace.
  </DialogDescription>
  </DialogHeader>
@@ -207,17 +207,17 @@ export default function ConnectDialog({ open, initialTab, onOpenChange }: Props)
  </Tabs>
 
  {postFile.isError && (
- <p className="shrink-0 rounded border border-destructive/50 bg-destructive/10 px-2 py-1 text-[11px] text-destructive">
+ <p className="shrink-0 rounded border border-destructive/50 bg-destructive/10 px-2 py-1 text-fs-sm text-destructive">
  Failed to open session. {extractDetail(postFile.error)}
  </p>
  )}
  {postTrace.isError && (
- <p className="shrink-0 rounded border border-destructive/50 bg-destructive/10 px-2 py-1 text-[11px] text-destructive">
+ <p className="shrink-0 rounded border border-destructive/50 bg-destructive/10 px-2 py-1 text-fs-sm text-destructive">
  Failed to open trace. {extractDetail(postTrace.error)}
  </p>
  )}
  {postAttach.isError && (
- <p className="shrink-0 rounded border border-destructive/50 bg-destructive/10 px-2 py-1 text-[11px] text-destructive">
+ <p className="shrink-0 rounded border border-destructive/50 bg-destructive/10 px-2 py-1 text-fs-sm text-destructive">
  Failed to attach. {extractDetail(postAttach.error)}
  </p>
  )}

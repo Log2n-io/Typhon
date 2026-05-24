@@ -1544,7 +1544,7 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
         searchMatchIndex={searchIndex}
       />
 
-      <div className="border-b border-border px-3 py-1 text-[11px] text-muted-foreground" data-testid="dbmap-breadcrumb">
+      <div className="border-b border-border px-3 py-1 text-fs-sm text-muted-foreground" data-testid="dbmap-breadcrumb">
         {data ? (
           <span>
             <span className="font-mono text-foreground">{data.databaseName}</span>
@@ -1596,9 +1596,9 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
               style={{ left: regionRect.x, top: regionRect.y, width: regionRect.w, height: regionRect.h }}
             />
           )}
-          {isLoading && <p className="absolute left-3 top-2 text-[11px] text-muted-foreground">Loading map…</p>}
+          {isLoading && <p className="absolute left-3 top-2 text-fs-sm text-muted-foreground">Loading map…</p>}
           {isError && (
-            <p className="absolute left-3 top-2 text-[11px] text-destructive">Failed to load the file map.</p>
+            <p className="absolute left-3 top-2 text-fs-sm text-destructive">Failed to load the file map.</p>
           )}
           {hover && <HoverTooltip info={hover} />}
           {l0Hover && <L0StripeTooltip info={l0Hover} data={data} />}
@@ -1676,7 +1676,7 @@ function sameRequest(a: DbDetailRequest, b: DbDetailRequest): boolean {
 function HoverTooltip({ info }: { info: HoverInfo }) {
   return (
     <div
-      className="pointer-events-none z-50 rounded border border-border bg-popover px-2 py-1 text-[11px] text-popover-foreground shadow-md"
+      className="pointer-events-none z-50 rounded border border-border bg-popover px-2 py-1 text-fs-sm text-popover-foreground shadow-md"
       style={{ position: 'fixed', left: info.clientX + 12, top: info.clientY - 8, transform: 'translateY(-100%)' }}
     >
       <div>
@@ -1751,7 +1751,7 @@ function L0StripeTooltip({ info, data }: { info: L0HoverInfo; data: DbMapData | 
   }
   return (
     <div
-      className="pointer-events-none z-50 rounded border border-border bg-popover px-2 py-1 text-[11px] text-popover-foreground shadow-md"
+      className="pointer-events-none z-50 rounded border border-border bg-popover px-2 py-1 text-fs-sm text-popover-foreground shadow-md"
       style={{ position: 'fixed', left: info.clientX + 12, top: info.clientY - 8, transform: 'translateY(-100%)' }}
     >
       <div className="flex items-center gap-2">

@@ -69,7 +69,7 @@ function MenuItem(props: {
       type="button"
       disabled={props.disabled}
       onClick={props.onClick}
-      className="flex w-full items-center gap-2 rounded px-2 py-1 text-left text-[11px] text-foreground hover:bg-muted/60 disabled:opacity-40 disabled:hover:bg-transparent"
+      className="flex w-full items-center gap-2 rounded px-2 py-1 text-left text-fs-sm text-foreground hover:bg-muted/60 disabled:opacity-40 disabled:hover:bg-transparent"
     >
       <span className="shrink-0 text-muted-foreground">{props.icon}</span>
       <span className="flex-1">{props.label}</span>
@@ -124,7 +124,7 @@ export function TimeAreaContextMenu(props: TimeAreaContextMenuProps): React.JSX.
       style={{ left: props.x, top: props.y }}
       data-testid="time-area-context-menu"
     >
-      <div className="truncate px-2 py-1 text-[11px] font-semibold text-muted-foreground">
+      <div className="truncate px-2 py-1 text-fs-sm font-semibold text-muted-foreground">
         {props.kind === 'span' ? props.spanName : props.systemName}
       </div>
       <div className="my-1 border-t border-border" />
@@ -178,7 +178,7 @@ export function TimeAreaContextMenu(props: TimeAreaContextMenuProps): React.JSX.
         </>
       )}
       {!props.callTreeAvailable && (
-        <div className="px-2 py-1 text-[10px] leading-tight text-muted-foreground">
+        <div className="px-2 py-1 text-fs-xs leading-tight text-muted-foreground">
           Call Tree is available for trace sessions only.
         </div>
       )}

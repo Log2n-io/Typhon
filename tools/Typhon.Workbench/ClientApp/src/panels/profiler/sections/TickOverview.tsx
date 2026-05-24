@@ -738,7 +738,7 @@ export default function TickOverview({ isLive = false }: Props) {
     return (
       <div
         ref={containerRef}
-        className="flex w-full shrink-0 select-none items-center justify-center border-b border-border bg-card text-[11px] text-muted-foreground"
+        className="flex w-full shrink-0 select-none items-center justify-center border-b border-border bg-card text-fs-sm text-muted-foreground"
         style={{ height: `${TIMELINE_HEIGHT}px` }}
       >
         {isLive ? 'Live tick overview — aggregation lands in a later phase.' : 'No tick summaries available.'}

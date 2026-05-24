@@ -54,7 +54,7 @@ export function DbMapContextMenu(props: DbMapContextMenuProps) {
       type="button"
       disabled={!onClick}
       onClick={onClick}
-      className="w-full rounded px-2 py-1 text-left text-[11px] text-foreground hover:bg-muted/60 disabled:opacity-40 disabled:hover:bg-transparent"
+      className="w-full rounded px-2 py-1 text-left text-fs-sm text-foreground hover:bg-muted/60 disabled:opacity-40 disabled:hover:bg-transparent"
     >
       {label}
     </button>

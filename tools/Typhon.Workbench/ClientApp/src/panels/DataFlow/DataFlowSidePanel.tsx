@@ -73,7 +73,7 @@ export default function DataFlowSidePanel({ hoveredBar, selectedBar, tracks, sys
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div className="flex flex-col gap-1">
-      <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{title}</div>
+      <div className="text-fs-xs font-semibold uppercase tracking-wide text-muted-foreground">{title}</div>
       <div className="flex flex-col gap-0.5 rounded-md border border-border bg-card p-2">{children}</div>
     </div>
   );
@@ -82,8 +82,8 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 function Field({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex items-baseline justify-between gap-2">
-      <span className="text-[11px] text-muted-foreground">{label}</span>
-      <span className="font-mono text-[11px] text-foreground" title={value}>{value}</span>
+      <span className="text-fs-sm text-muted-foreground">{label}</span>
+      <span className="font-mono text-fs-sm text-foreground" title={value}>{value}</span>
     </div>
   );
 }
@@ -103,12 +103,12 @@ function AccessChips({ system, componentName }: { system: SystemDefinitionDto; c
   ];
   const matched = access.filter((a) => a.matches);
   if (matched.length === 0) {
-    return <span className="text-[11px] text-muted-foreground">— No declared access on this component —</span>;
+    return <span className="text-fs-sm text-muted-foreground">— No declared access on this component —</span>;
   }
   return (
     <div className="flex flex-wrap gap-1">
       {matched.map((a) => (
-        <span key={a.label} className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-foreground">
+        <span key={a.label} className="rounded bg-muted px-1.5 py-0.5 text-fs-xs font-medium text-foreground">
           {a.label}
         </span>
       ))}

@@ -116,11 +116,11 @@ function HelpOverlay({ onClose }: { onClose: () => void }) {
       tabIndex={-1}
     >
       <div
-        className="max-h-[85vh] w-[680px] max-w-[92vw] overflow-auto rounded-lg border border-border bg-card p-5 text-[12px] leading-snug text-foreground shadow-xl"
+        className="max-h-[85vh] w-[680px] max-w-[92vw] overflow-auto rounded-lg border border-border bg-card p-5 text-fs-base leading-snug text-foreground shadow-xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="mb-3 flex items-center justify-between">
-          <h2 className="text-[14px] font-semibold">Data Flow — controls &amp; legend</h2>
+          <h2 className="text-fs-xl font-semibold">Data Flow — controls &amp; legend</h2>
           <button
             type="button"
             onClick={onClose}
@@ -241,7 +241,7 @@ function HelpOverlay({ onClose }: { onClose: () => void }) {
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
     <div className="mb-4">
-      <h3 className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{title}</h3>
+      <h3 className="mb-1.5 text-fs-sm font-semibold uppercase tracking-wide text-muted-foreground">{title}</h3>
       <div className="space-y-1 leading-snug">{children}</div>
     </div>
   );
@@ -253,7 +253,7 @@ function KeyTable({ rows }: { rows: Array<[string, string]> }) {
       <tbody>
         {rows.map(([k, v]) => (
           <tr key={k} className="align-top">
-            <td className="w-32 py-0.5 pr-3"><kbd className="rounded border border-border bg-muted px-1.5 py-0.5 text-[10px]">{k}</kbd></td>
+            <td className="w-32 py-0.5 pr-3"><kbd className="rounded border border-border bg-muted px-1.5 py-0.5 text-fs-xs">{k}</kbd></td>
             <td className="py-0.5 text-muted-foreground">{v}</td>
           </tr>
         ))}

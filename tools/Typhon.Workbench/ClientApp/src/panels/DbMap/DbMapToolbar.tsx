@@ -24,7 +24,7 @@ interface DbMapToolbarProps {
   searchMatchIndex: number;
 }
 
-const SELECT_CLASS = 'rounded border border-border bg-card px-1.5 py-0.5 text-[11px] text-foreground';
+const SELECT_CLASS = 'rounded border border-border bg-card px-1.5 py-0.5 text-fs-sm text-foreground';
 
 export function DbMapToolbar(props: DbMapToolbarProps) {
   const encoding = useDbMapStore((s) => s.encoding);
@@ -38,7 +38,7 @@ export function DbMapToolbar(props: DbMapToolbarProps) {
 
   return (
     <div className="wb-pane-header flex items-center gap-2 border-b border-border px-3 py-1.5">
-      <label className="text-[11px] text-muted-foreground">Order</label>
+      <label className="text-fs-sm text-muted-foreground">Order</label>
       <select
         className={SELECT_CLASS}
         value={pageOrder}
@@ -50,7 +50,7 @@ export function DbMapToolbar(props: DbMapToolbarProps) {
         <option value="sequential">Sequential</option>
       </select>
 
-      <label className="text-[11px] text-muted-foreground">Encoding</label>
+      <label className="text-fs-sm text-muted-foreground">Encoding</label>
       <select
         className={SELECT_CLASS}
         value={encoding}
@@ -72,7 +72,7 @@ export function DbMapToolbar(props: DbMapToolbarProps) {
         </optgroup>
       </select>
 
-      <label className="text-[11px] text-muted-foreground">Lens</label>
+      <label className="text-fs-sm text-muted-foreground">Lens</label>
       <select
         className={SELECT_CLASS}
         value={lens}
@@ -88,7 +88,7 @@ export function DbMapToolbar(props: DbMapToolbarProps) {
       <button
         type="button"
         onClick={toggleSegmentOverlay}
-        className={`rounded border px-1.5 py-0.5 text-[11px] ${
+        className={`rounded border px-1.5 py-0.5 text-fs-sm ${
           segmentOverlay
             ? 'border-primary bg-primary/15 text-foreground'
             : 'border-border bg-card text-muted-foreground'
@@ -100,7 +100,7 @@ export function DbMapToolbar(props: DbMapToolbarProps) {
       <button
         type="button"
         onClick={props.onFit}
-        className="flex items-center gap-1 rounded border border-border bg-card px-1.5 py-0.5 text-[11px] text-muted-foreground hover:text-foreground"
+        className="flex items-center gap-1 rounded border border-border bg-card px-1.5 py-0.5 text-fs-sm text-muted-foreground hover:text-foreground"
         title="Fit whole file (f or middle-click)"
       >
         <Crosshair className="h-3 w-3" /> Fit
@@ -108,7 +108,7 @@ export function DbMapToolbar(props: DbMapToolbarProps) {
       <button
         type="button"
         onClick={props.onRefresh}
-        className="flex items-center gap-1 rounded border border-border bg-card px-1.5 py-0.5 text-[11px] text-muted-foreground hover:text-foreground"
+        className="flex items-center gap-1 rounded border border-border bg-card px-1.5 py-0.5 text-fs-sm text-muted-foreground hover:text-foreground"
         title="Refresh the map"
       >
         <RefreshCw className="h-3 w-3" /> Refresh

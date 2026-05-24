@@ -82,7 +82,7 @@ export function buildBaseCommands(): CommandItem[] {
     { id: 'save-layout-as-default', label: 'Save Layout as Default', keywords: 'layout default template save', action: saveLayoutAsDefault },
     { id: 'reset-layout', label: 'Reset Layout to Default', keywords: 'reset layout default restore panels dock recover lost', action: resetLayout },
     { id: 'toggle-theme',  label: 'Toggle Dark / Light Mode', keywords: 'theme dark light',  action: toggleTheme },
-    { id: 'toggle-density', label: 'Toggle Density (Compact / Comfortable)', keywords: 'density compact comfortable rows spacing size', action: () => useDensityStore.getState().toggle() },
+    { id: 'cycle-density', label: 'Cycle Density (Compact / Normal / Comfortable)', keywords: 'density compact normal comfortable rows spacing font size', action: () => useDensityStore.getState().cycle() },
     // PaletteDebug is a dev-only color-swatch view — present only in DEBUG/dev builds (IA §9.1/§9.4).
     ...(import.meta.env.DEV
       ? [{ id: 'debug-color-palettes', label: 'Debug: Color Palettes', keywords: 'debug color colour palette palettes swatches dev', action: toggleViewPaletteDebug }]

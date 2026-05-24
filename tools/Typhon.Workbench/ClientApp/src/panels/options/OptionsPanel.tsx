@@ -38,7 +38,7 @@ export default function OptionsPanel(): React.JSX.Element {
     <div className="flex h-full w-full overflow-hidden bg-background">
       {/* Sidebar with category list. */}
       <nav className="flex w-48 flex-col border-r border-border bg-card">
-        <header className="border-b border-border px-3 py-2 text-[12px] font-semibold text-muted-foreground">
+        <header className="border-b border-border px-3 py-2 text-fs-base font-semibold text-muted-foreground">
           Options
         </header>
         <ul className="flex flex-col py-1">
@@ -47,7 +47,7 @@ export default function OptionsPanel(): React.JSX.Element {
               <button
                 type="button"
                 onClick={() => setActive(c.key)}
-                className={`w-full px-3 py-1.5 text-left text-[12px] hover:bg-accent ${
+                className={`w-full px-3 py-1.5 text-left text-fs-base hover:bg-accent ${
                   active === c.key ? 'bg-accent font-medium text-foreground' : 'text-muted-foreground'
                 }`}
               >
@@ -66,7 +66,7 @@ export default function OptionsPanel(): React.JSX.Element {
         {active === 'dag' ? (
           <DagForm />
         ) : !loaded ? (
-          <p className="text-[12px] text-muted-foreground">Loading…</p>
+          <p className="text-fs-base text-muted-foreground">Loading…</p>
         ) : (
           <>
             {active === 'editor' && <EditorForm />}

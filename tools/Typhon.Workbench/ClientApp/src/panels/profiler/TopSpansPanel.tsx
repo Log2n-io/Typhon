@@ -29,7 +29,7 @@ export default function TopSpansPanel(): React.JSX.Element {
   if (!isProfilerSession) {
     return (
       <div className="flex h-full items-center justify-center bg-background p-3">
-        <p className="text-[11px] text-muted-foreground">Open a profiler trace or attach a session to see top spans.</p>
+        <p className="text-fs-sm text-muted-foreground">Open a profiler trace or attach a session to see top spans.</p>
       </div>
     );
   }
@@ -37,7 +37,7 @@ export default function TopSpansPanel(): React.JSX.Element {
   if (stats === null || stats.spanGroups.length === 0) {
     return (
       <div className="flex h-full items-center justify-center bg-background p-3">
-        <p className="text-[11px] text-muted-foreground">No spans in the current viewport — pan or zoom to see top spans.</p>
+        <p className="text-fs-sm text-muted-foreground">No spans in the current viewport — pan or zoom to see top spans.</p>
       </div>
     );
   }
@@ -87,15 +87,15 @@ function TopSpansTable({ groups }: { groups: SpanGroupStats[] }): React.JSX.Elem
   return (
     <div className="flex h-full flex-col overflow-hidden">
       <div className="flex items-baseline justify-between border-b border-border px-3 py-2">
-        <span className="text-[11px] text-muted-foreground">click row → jump to worst instance</span>
+        <span className="text-fs-sm text-muted-foreground">click row → jump to worst instance</span>
         {groups.length > TOP_SPANS_LIMIT && (
-          <span className="text-[10px] text-muted-foreground">
+          <span className="text-fs-xs text-muted-foreground">
             top {TOP_SPANS_LIMIT} of {groups.length} groups by {labelForSortKey(sortKey)}
           </span>
         )}
       </div>
       <div className="min-h-0 flex-1 overflow-auto">
-        <table className="w-full text-[11px]">
+        <table className="w-full text-fs-sm">
           <thead className="sticky top-0 z-10 bg-background">
             <tr className="text-left text-muted-foreground">
               <SortHeader label="Name"  align="left"  sortKey="name"    activeKey={sortKey} desc={sortDesc} onClick={onClickHeader} />

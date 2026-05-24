@@ -15,9 +15,9 @@ export default function EntityCardsDetail({ detail }: { detail: EntityDetail }) 
   return (
     <div className="flex h-full w-full flex-col overflow-hidden bg-background">
       <div className="flex items-center gap-2 border-b border-border px-3 py-1.5">
-        <h3 className="font-mono text-[12px] font-semibold text-foreground">Entity</h3>
-        <span className="font-mono text-[11px] tabular-nums text-muted-foreground">{detail.entityId}</span>
-        <span className="ml-auto text-[11px] text-muted-foreground">{detail.components.length} components</span>
+        <h3 className="font-mono text-fs-base font-semibold text-foreground">Entity</h3>
+        <span className="font-mono text-fs-sm tabular-nums text-muted-foreground">{detail.entityId}</span>
+        <span className="ml-auto text-fs-sm text-muted-foreground">{detail.components.length} components</span>
       </div>
 
       <div className="flex-1 overflow-auto p-2">
@@ -30,8 +30,8 @@ export default function EntityCardsDetail({ detail }: { detail: EntityDetail }) 
             data-enabled={comp.enabled}
           >
             <div className="flex items-center gap-2 border-b border-border bg-muted/40 px-2 py-1">
-              <span className="font-mono text-[12px] font-semibold text-foreground">{comp.typeName}</span>
-              {!comp.enabled && <span className="ml-auto text-[10px] uppercase text-muted-foreground">disabled</span>}
+              <span className="font-mono text-fs-base font-semibold text-foreground">{comp.typeName}</span>
+              {!comp.enabled && <span className="ml-auto text-fs-xs uppercase text-muted-foreground">disabled</span>}
             </div>
             <div className="divide-y divide-border/60">
               {comp.fields.map((f) => (
@@ -52,7 +52,7 @@ function FieldRow({ field, schema }: { field: ComponentValue; schema: ComponentS
   // Multi-line decoded values (e.g. an AABB rendered as "min(...)\nmax(...)") break onto their own lines instead of truncating.
   const multiline = text.includes('\n');
   return (
-    <div className={`flex gap-2 px-2 py-0.5 text-[11px] ${multiline ? 'items-start' : 'items-center'}`}>
+    <div className={`flex gap-2 px-2 py-0.5 text-fs-sm ${multiline ? 'items-start' : 'items-center'}`}>
       <span className="flex w-2/5 min-w-0 items-center gap-1 truncate font-mono text-muted-foreground" title={name}>
         {meta?.isIndexed && <KeyRound className="h-3 w-3 shrink-0 text-amber-400" aria-label="Indexed field" />}
         {name}

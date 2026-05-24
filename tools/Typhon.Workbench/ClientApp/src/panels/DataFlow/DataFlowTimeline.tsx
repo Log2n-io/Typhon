@@ -410,7 +410,7 @@ export default function DataFlowTimeline(props: DataFlowTimelineProps) {
                     <button
                       key={seg.name}
                       type="button"
-                      className="absolute top-0 truncate border-r border-border bg-muted/40 px-1 text-[11px] leading-none text-foreground last:border-r-0 hover:bg-muted"
+                      className="absolute top-0 truncate border-r border-border bg-muted/40 px-1 text-fs-sm leading-none text-foreground last:border-r-0 hover:bg-muted"
                       style={{
                         left: `${leftPct}%`,
                         width: `${widthPct}%`,

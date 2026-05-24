@@ -53,7 +53,7 @@ export default function InspectorTargetSwitcher({
   const [open, setOpen] = useState(false);
   return (
     <div className="flex items-center gap-1.5">
-      <span className="shrink-0 text-[11px] text-muted-foreground">{label}</span>
+      <span className="shrink-0 text-fs-sm text-muted-foreground">{label}</span>
       <Popover open={open} onOpenChange={setOpen}>
         <PopoverTrigger asChild>
           <button
@@ -61,7 +61,7 @@ export default function InspectorTargetSwitcher({
             data-testid={`${testId}-switcher`}
             aria-label={`Switch ${noun}`}
             title={currentTitle ?? `Switch ${noun}`}
-            className="flex items-center gap-1 rounded border border-border bg-muted/40 px-1.5 py-0.5 font-mono text-[12px] text-foreground hover:bg-muted"
+            className="flex items-center gap-1 rounded border border-border bg-muted/40 px-1.5 py-0.5 font-mono text-fs-base text-foreground hover:bg-muted"
           >
             {currentLabel}
             <ChevronDown className="h-3 w-3 text-muted-foreground" />
@@ -72,10 +72,10 @@ export default function InspectorTargetSwitcher({
             <Command.Input
               data-testid={`${testId}-switcher-input`}
               placeholder={`Switch ${noun}…`}
-              className="w-full border-b border-border bg-transparent px-3 py-2 text-[12px] outline-none placeholder:text-muted-foreground"
+              className="w-full border-b border-border bg-transparent px-3 py-2 text-fs-base outline-none placeholder:text-muted-foreground"
             />
             <Command.List className="max-h-72 overflow-auto p-1">
-              <Command.Empty className="px-3 py-2 text-[11px] text-muted-foreground">No {noun} matches.</Command.Empty>
+              <Command.Empty className="px-3 py-2 text-fs-sm text-muted-foreground">No {noun} matches.</Command.Empty>
               {items.map((it) => (
                 <Command.Item
                   key={it.id}
@@ -87,10 +87,10 @@ export default function InspectorTargetSwitcher({
                   }}
                   data-testid={`${testId}-switcher-item`}
                   data-id={it.id}
-                  className="flex cursor-pointer items-center justify-between gap-2 rounded px-2 py-1 text-[12px] aria-selected:bg-accent aria-selected:text-accent-foreground"
+                  className="flex cursor-pointer items-center justify-between gap-2 rounded px-2 py-1 text-fs-base aria-selected:bg-accent aria-selected:text-accent-foreground"
                 >
                   <span className="truncate font-mono">{it.label}</span>
-                  {it.meta && <span className="shrink-0 text-[11px] text-muted-foreground">{it.meta}</span>}
+                  {it.meta && <span className="shrink-0 text-fs-sm text-muted-foreground">{it.meta}</span>}
                 </Command.Item>
               ))}
             </Command.List>
@@ -101,7 +101,7 @@ export default function InspectorTargetSwitcher({
         <span
           data-testid={`${testId}-auto-chip`}
           title={autoTitle ?? 'Auto-selected — pick another above.'}
-          className="rounded bg-muted px-1 text-[10px] uppercase tracking-wide text-muted-foreground"
+          className="rounded bg-muted px-1 text-fs-xs uppercase tracking-wide text-muted-foreground"
         >
           auto
         </span>

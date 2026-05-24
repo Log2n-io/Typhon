@@ -563,7 +563,7 @@ export default function SystemDagCanvas({
 
   if (model.nodes.length === 0) {
     return (
-      <div className="flex h-full w-full items-center justify-center bg-background text-[12px] text-muted-foreground">
+      <div className="flex h-full w-full items-center justify-center bg-background text-fs-base text-muted-foreground">
         No topology yet. Open a trace or attach a session to populate the DAG.
       </div>
     );
@@ -629,14 +629,14 @@ export default function SystemDagCanvas({
               style={{ left: g.xLeft, top: g.yTop, width: g.width, height: g.height, zIndex: -2 }}
             >
               <div
-                className="pointer-events-auto inline-flex items-center gap-1.5 rounded-br-md rounded-tl-md bg-card px-2 py-0.5 font-mono text-[10px] uppercase tracking-wide text-foreground"
+                className="pointer-events-auto inline-flex items-center gap-1.5 rounded-br-md rounded-tl-md bg-card px-2 py-0.5 font-mono text-fs-xs uppercase tracking-wide text-foreground"
                 style={{ height: g.headerHeight }}
               >
                 <span className="text-muted-foreground">{g.trackName}</span>
                 <span className="text-muted-foreground/50">/</span>
                 <span className="font-semibold">{g.dagName}</span>
                 {g.isEngine && (
-                  <span className="rounded bg-amber-500/20 px-1 text-[9px] text-amber-600 dark:text-amber-400">engine</span>
+                  <span className="rounded bg-amber-500/20 px-1 text-fs-2xs text-amber-600 dark:text-amber-400">engine</span>
                 )}
               </div>
             </div>
@@ -700,7 +700,7 @@ export default function SystemDagCanvas({
                     dropped — it relied on the parent being page-scroll-anchored, which no
                     longer holds inside the transformed viewport plane. */}
                 <div
-                  className={`pointer-events-auto inline-block px-3 py-1.5 font-mono text-[10px] uppercase tracking-wide ${isHovered ? 'text-foreground/80' : 'text-muted-foreground'}`}
+                  className={`pointer-events-auto inline-block px-3 py-1.5 font-mono text-fs-xs uppercase tracking-wide ${isHovered ? 'text-foreground/80' : 'text-muted-foreground'}`}
                   onMouseEnter={() => setHoveredPhase(lane.name)}
                   onMouseLeave={() => setHoveredPhase(null)}
                 >

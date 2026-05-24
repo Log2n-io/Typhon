@@ -27,11 +27,11 @@ export default function KeyboardHelpDialog({ onClose }: { onClose: () => void })
       aria-label="Keyboard navigation"
     >
       <div
-        className="max-h-[80vh] w-[640px] max-w-[90vw] overflow-auto rounded-lg border border-border bg-card p-5 text-[12px] text-foreground shadow-xl"
+        className="max-h-[80vh] w-[640px] max-w-[90vw] overflow-auto rounded-lg border border-border bg-card p-5 text-fs-base text-foreground shadow-xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="mb-3 flex items-center justify-between">
-          <h2 className="text-[14px] font-semibold">Keyboard navigation</h2>
+          <h2 className="text-fs-xl font-semibold">Keyboard navigation</h2>
           <button
             type="button"
             onClick={onClose}
@@ -99,7 +99,7 @@ export default function KeyboardHelpDialog({ onClose }: { onClose: () => void })
           </p>
         </Section>
 
-        <p className="mt-4 border-t border-border pt-3 text-[11px] text-muted-foreground">
+        <p className="mt-4 border-t border-border pt-3 text-fs-sm text-muted-foreground">
           Some views add their own keys while focused — see that view’s “?” legend (visible when legends are on).
         </p>
       </div>
@@ -111,14 +111,14 @@ export default function KeyboardHelpDialog({ onClose }: { onClose: () => void })
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div className="mb-4">
-      <h3 className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{title}</h3>
+      <h3 className="mb-1.5 text-fs-sm font-semibold uppercase tracking-wide text-muted-foreground">{title}</h3>
       <div className="leading-snug">{children}</div>
     </div>
   );
 }
 
 function Kbd({ children }: { children: React.ReactNode }) {
-  return <kbd className="rounded border border-border bg-muted px-1.5 py-0.5 font-mono text-[10px]">{children}</kbd>;
+  return <kbd className="rounded border border-border bg-muted px-1.5 py-0.5 font-mono text-fs-xs">{children}</kbd>;
 }
 
 function Keys({ rows, sep = '+' }: { rows: Array<[string[], string]>; sep?: string }) {

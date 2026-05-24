@@ -100,7 +100,7 @@ function SystemDagNodeInner({
     >
       <Handle type="target" position={Position.Left} className="!h-2 !w-2 !border-0 !bg-muted-foreground" />
       <div className="flex items-center justify-between gap-1 px-2 pt-1">
-        <span className="truncate font-mono text-[11px] font-semibold text-foreground" title={data.systemName}>
+        <span className="truncate font-mono text-fs-sm font-semibold text-foreground" title={data.systemName}>
           {data.systemName}
         </span>
         <div className="flex items-center gap-1">
@@ -115,7 +115,7 @@ function SystemDagNodeInner({
           )}
           {cpBadge && (
             <span
-              className={`text-[12px] leading-none ${cpBadge.tone === 'solid'
+              className={`text-fs-base leading-none ${cpBadge.tone === 'solid'
                 ? 'text-amber-700 dark:text-amber-300'
                 : 'text-amber-700/50 dark:text-amber-400/40'}`}
               title={cpBadge.title}
@@ -123,13 +123,13 @@ function SystemDagNodeInner({
               {cpBadge.glyph}
             </span>
           )}
-          <span className={`rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase ${kindClass}`}>{data.kind}</span>
+          <span className={`rounded px-1.5 py-0.5 text-fs-2xs font-semibold uppercase ${kindClass}`}>{data.kind}</span>
         </div>
       </div>
       <div className="flex flex-wrap items-center gap-1 px-2 pb-1 pt-0.5">
         {stat ? (
           <span
-            className="rounded border px-1 py-px font-mono text-[10px]"
+            className="rounded border px-1 py-px font-mono text-fs-xs"
             style={heatChip(stat.heat, theme)}
             title={`${stat.value.toFixed(1)} µs`}
           >
@@ -180,7 +180,7 @@ function Chip({ children, tone = 'default' }: ChipProps) {
         : tone === 'info'
           ? 'border-sky-300 bg-sky-100 text-sky-800 dark:border-sky-700/50 dark:bg-sky-950/40 dark:text-sky-200'
           : 'border-slate-300 bg-slate-100 text-slate-800 dark:border-slate-600/50 dark:bg-slate-900/40 dark:text-slate-200';
-  return <span className={`rounded border px-1 py-px text-[9px] font-mono ${cls}`}>{children}</span>;
+  return <span className={`rounded border px-1 py-px text-fs-2xs font-mono ${cls}`}>{children}</span>;
 }
 
 function kindClasses(kind: DagNodeData['kind']): string {
@@ -285,7 +285,7 @@ function QueriesBadge({
     <button
       type="button"
       onClick={onClick}
-      className="rounded border border-sky-300 bg-sky-100 px-1 py-px font-mono text-[9px] text-sky-800 hover:bg-sky-200 dark:border-sky-700/50 dark:bg-sky-950/40 dark:text-sky-200 dark:hover:bg-sky-900/60"
+      className="rounded border border-sky-300 bg-sky-100 px-1 py-px font-mono text-fs-2xs text-sky-800 hover:bg-sky-200 dark:border-sky-700/50 dark:bg-sky-950/40 dark:text-sky-200 dark:hover:bg-sky-900/60"
       title={`${count} distinct quer${count === 1 ? 'y' : 'ies'} — open Catalog filtered to ${systemName}`}
       data-testid={`system-dag-queries-badge-${systemName}`}
     >

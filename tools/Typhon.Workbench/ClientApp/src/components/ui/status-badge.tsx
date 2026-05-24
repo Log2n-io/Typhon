@@ -36,7 +36,7 @@ export function StatusBadge({ tone, children, className, title, onClick, muted =
       title={title}
       onClick={onClick}
       className={cn(
-        'px-2 py-0 text-[10px] font-medium',
+        'px-2 py-0 text-fs-xs font-medium',
         TONE_CLASSES[tone],
         muted && 'opacity-40',
         onClick && 'cursor-pointer select-none',

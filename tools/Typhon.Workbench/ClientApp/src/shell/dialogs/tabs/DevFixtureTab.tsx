@@ -75,7 +75,7 @@ export default function DevFixtureTab({ onOpen, isOpening }: Props) {
 
   return (
     <div className="flex h-full flex-col gap-4 p-2">
-      <div className="rounded-md border border-dashed border-amber-500/40 bg-amber-950/10 p-3 text-[12px] text-muted-foreground">
+      <div className="rounded-md border border-dashed border-amber-500/40 bg-amber-950/10 p-3 text-fs-base text-muted-foreground">
         <div className="mb-1 flex items-center gap-2 text-foreground">
           <Sparkles className="h-4 w-4 text-amber-400" />
           <span className="font-semibold">Dev fixture database</span>
@@ -90,13 +90,13 @@ export default function DevFixtureTab({ onOpen, isOpening }: Props) {
       </div>
 
       <div className="flex flex-col gap-1">
-        <label className="text-density-sm text-muted-foreground">Output directory</label>
-        <p className="font-mono text-[11px] text-foreground" title={outputDirectory}>
+        <label className="text-fs-lg text-muted-foreground">Output directory</label>
+        <p className="font-mono text-fs-sm text-foreground" title={outputDirectory}>
           {outputDirectory || '(resolving…)'}
         </p>
       </div>
 
-      <label className="flex items-center gap-2 text-[12px] text-foreground">
+      <label className="flex items-center gap-2 text-fs-base text-foreground">
         <input
           type="checkbox"
           checked={force}
@@ -104,20 +104,20 @@ export default function DevFixtureTab({ onOpen, isOpening }: Props) {
           className="h-3.5 w-3.5 accent-primary"
         />
         Force recreation
-        <span className="text-[11px] text-muted-foreground">
+        <span className="text-fs-sm text-muted-foreground">
           (wipe directory + rebuild; otherwise reuse if the database already exists)
         </span>
       </label>
 
       {error && (
-        <div className="flex items-start gap-2 rounded border border-destructive/50 bg-destructive/10 px-2 py-1.5 text-[11px] text-destructive">
+        <div className="flex items-start gap-2 rounded border border-destructive/50 bg-destructive/10 px-2 py-1.5 text-fs-sm text-destructive">
           <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
           <span className="font-mono">{error}</span>
         </div>
       )}
 
       {lastResult && !error && (
-        <p className="text-[11px] text-muted-foreground">
+        <p className="text-fs-sm text-muted-foreground">
           {lastResult.wasCreated
             ? `Created ${lastResult.totalEntities.toLocaleString()} entities at`
             : `Reused existing database at`}{' '}

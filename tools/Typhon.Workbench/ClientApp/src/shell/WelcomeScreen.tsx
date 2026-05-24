@@ -33,7 +33,7 @@ export default function WelcomeScreen() {
  <div className="flex h-full flex-col items-center justify-center gap-8 bg-background">
  <div className="text-center">
  <h1 className="mb-1 text-xl font-semibold text-foreground">Typhon Workbench</h1>
- <p className="text-density-sm text-muted-foreground">
+ <p className="text-fs-lg text-muted-foreground">
  Open a database, trace file, or attach to a running engine
  </p>
  </div>
@@ -41,7 +41,7 @@ export default function WelcomeScreen() {
  <div className="flex gap-3">
  <Button
  variant="outline"
- className="flex h-auto flex-col items-center gap-2 px-6 py-4 text-density-sm"
+ className="flex h-auto flex-col items-center gap-2 px-6 py-4 text-fs-lg"
  onClick={() => openDialog('open')}
  >
  <Database className="h-5 w-5" />
@@ -50,7 +50,7 @@ export default function WelcomeScreen() {
 
  <Button
  variant="outline"
- className="flex h-auto flex-col items-center gap-2 px-6 py-4 text-density-sm"
+ className="flex h-auto flex-col items-center gap-2 px-6 py-4 text-fs-lg"
  onClick={() => openDialog('trace')}
  >
  <FileSearch className="h-5 w-5" />
@@ -59,7 +59,7 @@ export default function WelcomeScreen() {
 
  <Button
  variant="outline"
- className="flex h-auto flex-col items-center gap-2 px-6 py-4 text-density-sm"
+ className="flex h-auto flex-col items-center gap-2 px-6 py-4 text-fs-lg"
  onClick={() => openDialog('attach')}
  >
  <Plug className="h-5 w-5" />
@@ -68,7 +68,7 @@ export default function WelcomeScreen() {
 
  <Button
  variant="outline"
- className="flex h-auto flex-col items-center gap-2 px-6 py-4 text-density-sm"
+ className="flex h-auto flex-col items-center gap-2 px-6 py-4 text-fs-lg"
  onClick={() => openDialog('recent')}
  >
  <Clock className="h-5 w-5" />
@@ -78,7 +78,7 @@ export default function WelcomeScreen() {
  {devFixtureAvailable && (
  <Button
  variant="outline"
- className="flex h-auto flex-col items-center gap-2 border-amber-500/40 px-6 py-4 text-density-sm"
+ className="flex h-auto flex-col items-center gap-2 border-amber-500/40 px-6 py-4 text-fs-lg"
  onClick={() => openDialog('devfixture')}
  title="DEBUG build only — instantly create/reopen a populated test database"
  >

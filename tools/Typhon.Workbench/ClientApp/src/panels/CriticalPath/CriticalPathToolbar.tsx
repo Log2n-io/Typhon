@@ -40,7 +40,7 @@ export default function CriticalPathToolbar({ bars, onFit, trackOptions }: Props
   const isFallback = bars?.mode === 'execution-order';
 
   return (
-    <div className="flex items-center gap-3 border-b border-border bg-background/80 px-3 py-1.5 font-mono text-[11px]">
+    <div className="flex items-center gap-3 border-b border-border bg-background/80 px-3 py-1.5 font-mono text-fs-sm">
       <span className="font-semibold text-foreground">
         {bars
           ? bars.aggregate
@@ -50,7 +50,7 @@ export default function CriticalPathToolbar({ bars, onFit, trackOptions }: Props
       </span>
       {isFallback && (
         <span
-          className="rounded bg-amber-950/50 px-1 py-px text-[9px] uppercase text-amber-300"
+          className="rounded bg-amber-950/50 px-1 py-px text-fs-2xs uppercase text-amber-300"
           title="Topology has no RFC 07 access declarations — bars are sorted by startUs, not by data-flow path."
         >
           execution order
@@ -65,7 +65,7 @@ export default function CriticalPathToolbar({ bars, onFit, trackOptions }: Props
             <select
               value={effectiveScope}
               onChange={(e) => setTrackScope(e.target.value)}
-              className="rounded border border-border bg-card px-1.5 py-0.5 text-[10px] text-foreground hover:bg-muted focus:outline-none focus:ring-1 focus:ring-primary"
+              className="rounded border border-border bg-card px-1.5 py-0.5 text-fs-xs text-foreground hover:bg-muted focus:outline-none focus:ring-1 focus:ring-primary"
               title="Scope the critical path to one track, or All to walk every track in order. Engine tracks follow the Options → DAG setting."
             >
               <option value="all">All</option>
@@ -165,11 +165,11 @@ function HelpOverlay({ onClose }: { onClose: () => void }) {
       tabIndex={-1}
     >
       <div
-        className="max-h-[80vh] w-[640px] max-w-[90vw] overflow-auto rounded-lg border border-border bg-card p-5 font-mono text-[11px] text-foreground shadow-xl"
+        className="max-h-[80vh] w-[640px] max-w-[90vw] overflow-auto rounded-lg border border-border bg-card p-5 font-mono text-fs-sm text-foreground shadow-xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="mb-3 flex items-center justify-between">
-          <h2 className="text-[13px] font-semibold">Critical Path — controls & legend</h2>
+          <h2 className="text-fs-lg font-semibold">Critical Path — controls & legend</h2>
           <button
             type="button"
             onClick={onClose}
@@ -231,7 +231,7 @@ function HelpOverlay({ onClose }: { onClose: () => void }) {
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div className="mb-4">
-      <h3 className="mb-1.5 text-[12px] font-semibold uppercase tracking-wide text-muted-foreground">{title}</h3>
+      <h3 className="mb-1.5 text-fs-base font-semibold uppercase tracking-wide text-muted-foreground">{title}</h3>
       <div className="space-y-1 leading-snug">{children}</div>
     </div>
   );
@@ -243,7 +243,7 @@ function KeyTable({ rows }: { rows: Array<[string, string]> }) {
       <tbody>
         {rows.map(([k, v]) => (
           <tr key={k} className="align-top">
-            <td className="w-44 py-0.5 pr-3"><kbd className="rounded border border-border bg-muted px-1.5 py-0.5 text-[10px]">{k}</kbd></td>
+            <td className="w-44 py-0.5 pr-3"><kbd className="rounded border border-border bg-muted px-1.5 py-0.5 text-fs-xs">{k}</kbd></td>
             <td className="py-0.5 text-muted-foreground">{v}</td>
           </tr>
         ))}
@@ -274,7 +274,7 @@ function SegmentedControl<T extends string>({
               key={opt}
               type="button"
               onClick={() => onChange(opt)}
-              className={`px-1.5 py-0.5 text-[10px] ${active ? 'bg-primary text-primary-foreground' : 'bg-card text-foreground hover:bg-muted'}`}
+              className={`px-1.5 py-0.5 text-fs-xs ${active ? 'bg-primary text-primary-foreground' : 'bg-card text-foreground hover:bg-muted'}`}
             >
               {opt}
             </button>

@@ -175,13 +175,13 @@ export default function FileBrowser({
         <Input
           value={path ?? ''}
           onChange={(e) => setPath(e.target.value)}
-          className="h-6 border-0 bg-transparent text-[11px] shadow-none focus-visible:ring-0 focus-visible:ring-offset-0"
+          className="h-6 border-0 bg-transparent text-fs-sm shadow-none focus-visible:ring-0 focus-visible:ring-offset-0"
           placeholder="Path…"
         />
         <Popover open={historyOpen} onOpenChange={setHistoryOpen}>
           <PopoverTrigger asChild>
             <button
-              className="flex shrink-0 items-center gap-0.5 rounded px-1.5 py-1 text-[11px]
+              className="flex shrink-0 items-center gap-0.5 rounded px-1.5 py-1 text-fs-sm
                 text-muted-foreground hover:bg-muted"
               title="Recent locations"
             >
@@ -190,11 +190,11 @@ export default function FileBrowser({
             </button>
           </PopoverTrigger>
           <PopoverContent align="end" className="w-80 p-1">
-            <div className="px-2 py-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+            <div className="px-2 py-1 text-fs-xs uppercase tracking-wide text-muted-foreground">
               Recent locations
             </div>
             {recentLocations.length === 0 && (
-              <div className="px-2 py-2 text-[11px] text-muted-foreground">
+              <div className="px-2 py-2 text-fs-sm text-muted-foreground">
                 No recent locations yet — open a file to add one.
               </div>
             )}
@@ -208,7 +208,7 @@ export default function FileBrowser({
                     setPath(loc.dir);
                     setHistoryOpen(false);
                   }}
-                  className="flex w-full items-center gap-1.5 rounded px-2 py-1 text-left text-[11px] hover:bg-muted"
+                  className="flex w-full items-center gap-1.5 rounded px-2 py-1 text-left text-fs-sm hover:bg-muted"
                   title={loc.dir}
                 >
                   <Icon className={`h-3 w-3 shrink-0 ${iconClass}`} />
@@ -230,13 +230,13 @@ export default function FileBrowser({
         aria-label="Files"
       >
         {listing.isLoading && (
-          <p className="px-3 py-2 text-[11px] text-muted-foreground">Loading…</p>
+          <p className="px-3 py-2 text-fs-sm text-muted-foreground">Loading…</p>
         )}
         {listing.isError && (
-          <p className="px-3 py-2 text-[11px] text-destructive">Failed to read directory</p>
+          <p className="px-3 py-2 text-fs-sm text-destructive">Failed to read directory</p>
         )}
         {!listing.isLoading && entriesView.length === 0 && listing.data && (
-          <p className="px-3 py-2 text-[11px] text-muted-foreground">Empty</p>
+          <p className="px-3 py-2 text-fs-sm text-muted-foreground">Empty</p>
         )}
         {entriesView.map((e: FileEntryDto, i: number) => {
           const isActive = i === activeIndex;
@@ -252,22 +252,22 @@ export default function FileBrowser({
                 descend(e);
               }}
               onDoubleClick={() => descend(e)}
-              className={`flex cursor-pointer items-center gap-1.5 px-2 py-0.5 text-[11px] leading-relaxed
+              className={`flex cursor-pointer items-center gap-1.5 px-2 py-0.5 text-fs-sm leading-relaxed
                 ${isActive ? 'bg-muted' : ''}
                 ${isSelected ? 'border-l-2 border-accent bg-muted text-foreground' : 'text-foreground hover:bg-muted/60'}`}
             >
               <Icon className="h-3 w-3 shrink-0 text-muted-foreground" />
               <span className="min-w-0 flex-1 truncate">{e.name}</span>
               {e.isSchemaDll && (
-                <span className="shrink-0 rounded bg-accent/20 px-1 text-[10px] uppercase text-accent">
+                <span className="shrink-0 rounded bg-accent/20 px-1 text-fs-xs uppercase text-accent">
                   schema
                 </span>
               )}
               {/* Size + last-modified columns. Directory entries carry null for both — rendered blank. */}
-              <span className="w-20 shrink-0 text-right tabular-nums text-[10px] text-muted-foreground">
+              <span className="w-20 shrink-0 text-right tabular-nums text-fs-xs text-muted-foreground">
                 {formatFileSize(e.size)}
               </span>
-              <span className="w-32 shrink-0 text-right tabular-nums text-[10px] text-muted-foreground">
+              <span className="w-32 shrink-0 text-right tabular-nums text-fs-xs text-muted-foreground">
                 {formatDateTime(e.lastWriteUtc)}
               </span>
             </div>

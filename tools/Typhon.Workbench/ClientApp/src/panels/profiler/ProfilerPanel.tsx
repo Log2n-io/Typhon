@@ -225,7 +225,7 @@ export default function ProfilerPanel(props: IDockviewPanelProps) {
   return (
     <div className="flex h-full w-full flex-col overflow-hidden bg-background">
       {/* Header */}
-      <div className="flex flex-shrink-0 items-center gap-3 border-b border-border bg-card px-3 py-2 text-[12px]">
+      <div className="flex flex-shrink-0 items-center gap-3 border-b border-border bg-card px-3 py-2 text-fs-base">
         {isAttach
           ? <Radio className="h-4 w-4 text-muted-foreground" aria-label="Live profiler session" />
           : <Activity className="h-4 w-4 text-muted-foreground" aria-label="Trace profiler session" />}
@@ -242,7 +242,7 @@ export default function ProfilerPanel(props: IDockviewPanelProps) {
                 size="sm"
                 onClick={handleDisconnect}
                 disabled={disconnecting}
-                className="h-6 px-2 text-[11px]"
+                className="h-6 px-2 text-fs-sm"
                 aria-label="Disconnect from the engine"
                 title="Drop the TCP link to the engine. Captured ticks remain visible for inspection; close the tab to discard them."
               >
@@ -297,7 +297,7 @@ export default function ProfilerPanel(props: IDockviewPanelProps) {
                 size="sm"
                 onClick={handleReloadTrace}
                 disabled={postTrace.isPending}
-                className="ml-auto h-6 border-amber-500/50 px-2 text-[11px] text-amber-600 hover:bg-amber-500/10 dark:text-amber-400"
+                className="ml-auto h-6 border-amber-500/50 px-2 text-fs-sm text-amber-600 hover:bg-amber-500/10 dark:text-amber-400"
                 aria-label="Reload trace with the newer on-disk version"
                 title="The source .typhon-trace file was overwritten on disk (a profiling re-run regenerated it). Reload to rebuild the cache from the new version — the current view resets."
               >
@@ -349,7 +349,7 @@ function StatusPill({ status }: { status: ConnectionStatus | null }) {
           ? 'Connecting…'
           : 'Engine offline';
   return (
-    <span className="inline-flex items-center gap-1.5 rounded-full border border-border bg-muted px-2 py-0.5 text-[10px] font-medium text-foreground">
+    <span className="inline-flex items-center gap-1.5 rounded-full border border-border bg-muted px-2 py-0.5 text-fs-xs font-medium text-foreground">
       <span className={`h-2 w-2 rounded-full ${dotClass}`} />
       {label}
     </span>
@@ -361,8 +361,8 @@ function LiveWaitingOverlay({ status }: { status: ConnectionStatus | null }) {
     <div className="flex h-full w-full items-center justify-center">
       <div className="w-full max-w-md px-8 text-center">
         <Loader2 className="mx-auto mb-3 h-5 w-5 animate-spin text-muted-foreground" aria-hidden="true" />
-        <div className="text-[13px] font-semibold text-foreground">Waiting for the engine's Init frame…</div>
-        <div className="mt-1 text-[11px] text-muted-foreground">
+        <div className="text-fs-lg font-semibold text-foreground">Waiting for the engine's Init frame…</div>
+        <div className="mt-1 text-fs-sm text-muted-foreground">
           {status === 'connected'
             ? 'TCP link is up; engine hasn\u2019t published its metadata yet.'
             : status === 'reconnecting'
@@ -387,7 +387,7 @@ function BuildProgressOverlay({
   return (
     <div className="flex h-full w-full items-center justify-center">
       <div className="w-full max-w-md px-8">
-        <div className="mb-4 flex items-center gap-2 text-[13px] font-semibold text-foreground">
+        <div className="mb-4 flex items-center gap-2 text-fs-lg font-semibold text-foreground">
           <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
           Building trace cache…
         </div>
@@ -397,7 +397,7 @@ function BuildProgressOverlay({
             style={{ width: `${pct}%` }}
           />
         </div>
-        <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-[11px]">
+        <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-fs-sm">
           <dt className="text-muted-foreground">Progress</dt>
           <dd className="font-mono tabular-nums text-foreground">{pct.toFixed(1)}%</dd>
           <dt className="text-muted-foreground">Bytes</dt>
@@ -423,10 +423,10 @@ function ErrorState({ message }: { message: string }) {
     <div className="flex h-full w-full items-center justify-center">
       <div className="max-w-md px-8 text-center">
         <AlertCircle className="mx-auto mb-3 h-6 w-6 text-destructive" aria-hidden="true" />
-        <div className="mb-1 text-[13px] font-semibold text-foreground">
+        <div className="mb-1 text-fs-lg font-semibold text-foreground">
           Trace cache build failed
         </div>
-        <div className="font-mono text-[11px] text-muted-foreground">{message}</div>
+        <div className="font-mono text-fs-sm text-muted-foreground">{message}</div>
       </div>
     </div>
   );

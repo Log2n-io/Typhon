@@ -56,7 +56,7 @@ function SchemaNodeRow({ node, style }: NodeRendererProps<SchemaTreeNode>) {
     return (
       <div
         style={{ ...style, paddingLeft: indent + 4 }}
-        className="flex cursor-pointer items-center gap-1.5 px-1 text-[11px] leading-none hover:bg-primary/20"
+        className="flex cursor-pointer items-center gap-1.5 px-1 text-fs-sm leading-none hover:bg-primary/20"
         title={`Archetype #${a.archetypeId} — ${a.componentTypes.length} components`}
         data-testid="schema-explorer-archetype"
         data-archetype-id={a.archetypeId}
@@ -71,7 +71,7 @@ function SchemaNodeRow({ node, style }: NodeRendererProps<SchemaTreeNode>) {
           openArchetypeInspector();
         }}
       >
-        <span className="w-3.5 shrink-0 text-[13px] leading-none text-muted-foreground">
+        <span className="w-3.5 shrink-0 text-fs-lg leading-none text-muted-foreground">
           {node.isInternal ? (node.isOpen ? '▾' : '▸') : ''}
         </span>
         <Layers className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
@@ -80,12 +80,12 @@ function SchemaNodeRow({ node, style }: NodeRendererProps<SchemaTreeNode>) {
           {a.componentTypes.map(stripNamespace).join(', ')}
         </span>
         {a.entityCount > 0 && (
-          <Badge variant="secondary" className="h-4 shrink-0 px-1 text-[10px] leading-none">
+          <Badge variant="secondary" className="h-4 shrink-0 px-1 text-fs-xs leading-none">
             {a.entityCount.toLocaleString()}
           </Badge>
         )}
         {a.storageMode === 'cluster' && a.chunkCount > 0 && (
-          <span className="shrink-0 tabular-nums text-[10px] text-muted-foreground">{a.occupancyPct.toFixed(0)}%</span>
+          <span className="shrink-0 tabular-nums text-fs-xs text-muted-foreground">{a.occupancyPct.toFixed(0)}%</span>
         )}
       </div>
     );
@@ -94,7 +94,7 @@ function SchemaNodeRow({ node, style }: NodeRendererProps<SchemaTreeNode>) {
   return (
     <div
       style={{ ...style, paddingLeft: indent + 4 }}
-      className="flex cursor-pointer items-center gap-1.5 px-1 text-[11px] leading-none hover:bg-primary/20"
+      className="flex cursor-pointer items-center gap-1.5 px-1 text-fs-sm leading-none hover:bg-primary/20"
       title={data.fullName}
       data-testid="schema-explorer-component"
       data-type-name={data.typeName}
@@ -111,7 +111,7 @@ function SchemaNodeRow({ node, style }: NodeRendererProps<SchemaTreeNode>) {
       <Table2 className="h-3 w-3 shrink-0 text-muted-foreground" />
       <span className="min-w-0 flex-1 truncate font-mono text-foreground">{data.typeName}</span>
       {data.summary && (
-        <span className="shrink-0 tabular-nums text-[10px] text-muted-foreground">
+        <span className="shrink-0 tabular-nums text-fs-xs text-muted-foreground">
           {data.summary.storageSize}B{data.summary.indexCount > 0 ? ` · ${data.summary.indexCount} idx` : ''}
         </span>
       )}
@@ -210,7 +210,7 @@ export default function SchemaExplorerPanel(_props: IDockviewPanelProps) {
           placeholder={mode === 'archetypes' ? 'Search archetypes / components…' : 'Search component types…'}
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          className="h-6 flex-1 text-[12px]"
+          className="h-6 flex-1 text-fs-base"
         />
         <div className="flex shrink-0 overflow-hidden rounded border border-border">
           <ModeButton active={mode === 'archetypes'} onClick={() => setMode('archetypes')} icon={Layers} label="Archetypes" />
@@ -240,15 +240,15 @@ export default function SchemaExplorerPanel(_props: IDockviewPanelProps) {
             <FilterChip label="Large (≥128B)" active={!!compFilters.large} onClick={() => setCompFilters((f) => ({ ...f, large: !f.large }))} />
           </>
         )}
-        <span className="ml-auto text-[11px] text-muted-foreground">{count}</span>
+        <span className="ml-auto text-fs-sm text-muted-foreground">{count}</span>
       </div>
 
       <div ref={containerRef} className="min-h-0 flex-1 overflow-hidden" tabIndex={-1}>
-        {isError && <p className="p-3 text-[12px] text-destructive">Failed to load schema.</p>}
+        {isError && <p className="p-3 text-fs-base text-destructive">Failed to load schema.</p>}
         {isLoading && archetypes.length === 0 && components.length === 0 && (
-          <p className="p-3 text-[12px] text-muted-foreground">Loading schema…</p>
+          <p className="p-3 text-fs-base text-muted-foreground">Loading schema…</p>
         )}
-        {isEmpty && <p className="p-3 text-[12px] text-muted-foreground">No schema registered in this session.</p>}
+        {isEmpty && <p className="p-3 text-fs-base text-muted-foreground">No schema registered in this session.</p>}
 
         {!isError && !isEmpty && mode === 'archetypes' && (
           <Tree
@@ -268,7 +268,7 @@ export default function SchemaExplorerPanel(_props: IDockviewPanelProps) {
 
         {!isError && !isEmpty && mode === 'types' && (
           <div className="h-full overflow-auto">
-            <Table className="text-[12px]">
+            <Table className="text-fs-base">
               <TableHeader>
                 <TableRow>
                   <SortableHead sortKey="typeName" label="Name" current={sortKey} dir={sortDir} onClick={toggleSort} />
@@ -292,17 +292,17 @@ export default function SchemaExplorerPanel(_props: IDockviewPanelProps) {
                       openComponentInspector();
                     }}
                   >
-                    <TableCell className="py-1 font-mono">
+                    <TableCell className="font-mono">
                       <div className="flex flex-col">
                         <span className="text-foreground">{c.typeName}</span>
-                        {c.fullName !== c.typeName && <span className="text-[10px] text-muted-foreground">{c.fullName}</span>}
+                        {c.fullName !== c.typeName && <span className="text-fs-xs text-muted-foreground">{c.fullName}</span>}
                       </div>
                     </TableCell>
-                    <TableCell className="py-1 text-right font-mono tabular-nums">{c.storageSize}B</TableCell>
-                    <TableCell className="py-1 text-right tabular-nums">{c.fieldCount}</TableCell>
-                    <TableCell className="py-1 text-right tabular-nums">{c.archetypeCount ?? '—'}</TableCell>
-                    <TableCell className="py-1 text-right tabular-nums">{c.entityCount.toLocaleString()}</TableCell>
-                    <TableCell className="py-1 text-right tabular-nums">{c.indexCount}</TableCell>
+                    <TableCell className="text-right font-mono tabular-nums">{c.storageSize}B</TableCell>
+                    <TableCell className="text-right tabular-nums">{c.fieldCount}</TableCell>
+                    <TableCell className="text-right tabular-nums">{c.archetypeCount ?? '—'}</TableCell>
+                    <TableCell className="text-right tabular-nums">{c.entityCount.toLocaleString()}</TableCell>
+                    <TableCell className="text-right tabular-nums">{c.indexCount}</TableCell>
                   </TableRow>
                 ))}
               </TableBody>
@@ -321,7 +321,7 @@ function ModeButton({ active, onClick, icon: Icon, label }: { active: boolean; o
       onClick={onClick}
       aria-pressed={active}
       title={label}
-      className={`flex items-center gap-1 px-2 py-0.5 text-[11px] ${active ? 'bg-accent text-accent-foreground' : 'text-muted-foreground hover:bg-muted'}`}
+      className={`flex items-center gap-1 px-2 py-0.5 text-fs-sm ${active ? 'bg-accent text-accent-foreground' : 'text-muted-foreground hover:bg-muted'}`}
     >
       <Icon className="h-3 w-3" />
       {label}
@@ -331,7 +331,7 @@ function ModeButton({ active, onClick, icon: Icon, label }: { active: boolean; o
 
 function FilterChip({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
   return (
-    <Badge variant={active ? 'default' : 'outline'} className="cursor-pointer select-none px-2 py-0 text-[11px]" onClick={onClick}>
+    <Badge variant={active ? 'default' : 'outline'} className="cursor-pointer select-none px-2 py-0 text-fs-sm" onClick={onClick}>
       {label}
     </Badge>
   );
@@ -352,7 +352,7 @@ function SortableHead({
 }) {
   const active = current === sortKey;
   return (
-    <TableHead className="cursor-pointer select-none py-1 text-[11px]" onClick={() => onClick(sortKey)}>
+    <TableHead className="cursor-pointer select-none text-fs-sm" onClick={() => onClick(sortKey)}>
       <span className="inline-flex items-center gap-1">
         {label}
         {active && (dir === 'asc' ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />)}

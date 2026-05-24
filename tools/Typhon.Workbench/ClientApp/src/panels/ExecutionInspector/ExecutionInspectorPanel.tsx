@@ -79,7 +79,7 @@ export default function ExecutionInspectorPanel(_props: IDockviewPanelProps) {
     return (
       <CenteredMessage>
         <p>No query selected.</p>
-        <p className="mt-1 text-[11px]">Open a row from the Query Catalog and choose "Inspect executions".</p>
+        <p className="mt-1 text-fs-sm">Open a row from the Query Catalog and choose "Inspect executions".</p>
       </CenteredMessage>
     );
   }
@@ -112,7 +112,7 @@ export default function ExecutionInspectorPanel(_props: IDockviewPanelProps) {
           {selectedExecution ? (
             <ExecutionInspectorTable execution={selectedExecution} />
           ) : (
-            <div className="p-3 text-[12px] text-muted-foreground">Pick an execution from the list.</div>
+            <div className="p-3 text-fs-base text-muted-foreground">Pick an execution from the list.</div>
           )}
         </div>
       </div>
@@ -123,7 +123,7 @@ export default function ExecutionInspectorPanel(_props: IDockviewPanelProps) {
 function CenteredMessage({ children, tone }: { children: React.ReactNode; tone?: 'error' }) {
   return (
     <div className="flex h-full w-full items-center justify-center bg-background p-4 text-center">
-      <div className={tone === 'error' ? 'text-[12px] text-destructive' : 'text-[12px] text-muted-foreground'}>
+      <div className={tone === 'error' ? 'text-fs-base text-destructive' : 'text-fs-base text-muted-foreground'}>
         {children}
       </div>
     </div>

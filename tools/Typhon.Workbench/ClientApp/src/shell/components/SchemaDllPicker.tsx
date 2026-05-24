@@ -17,14 +17,14 @@ export default function SchemaDllPicker({ paths, onChange, initialPath, onAutoDe
  return (
  <div className="flex h-full flex-col gap-2">
  <div className="flex shrink-0 items-center justify-between">
- <span className="text-density-sm text-muted-foreground">
+ <span className="text-fs-lg text-muted-foreground">
  Schema DLLs {paths.length > 0 && <span className="opacity-70">({paths.length})</span>}
  </span>
  {onAutoDetect && (
  <Button
  variant="outline"
  size="sm"
- className="h-6 text-[11px]"
+ className="h-6 text-fs-sm"
  onClick={onAutoDetect}
  >
  Auto-detect
@@ -40,7 +40,7 @@ export default function SchemaDllPicker({ paths, onChange, initialPath, onAutoDe
  <span
  key={p}
  className="inline-flex items-center gap-1 rounded border border-border bg-muted
- px-2 py-0.5 text-[10px]"
+ px-2 py-0.5 text-fs-xs"
  title={p}
  >
  {name}

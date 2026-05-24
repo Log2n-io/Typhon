@@ -10,17 +10,17 @@ export default function IncompatibleBanner() {
  <div
  role="alert"
  className="flex items-start gap-3 border-b border-destructive/50 bg-destructive/10 px-4 py-2
- text-density-sm text-destructive"
+ text-fs-lg text-destructive"
  >
  <XCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
  <div className="min-w-0 flex-1">
  <p className="font-semibold">Schema incompatible</p>
- <p className="mt-0.5 text-[11px] opacity-90">
+ <p className="mt-0.5 text-fs-sm opacity-90">
  This database cannot be opened with the loaded schema DLLs. Reopen it with binaries that match
  its recorded schema to continue.
  </p>
  {diagnostics && diagnostics.length > 0 && (
- <ul className="mt-1 list-disc pl-4 text-[11px] opacity-80">
+ <ul className="mt-1 list-disc pl-4 text-fs-sm opacity-80">
  {diagnostics.slice(0, 3).map((d, i) => (
  <li key={i}>
  <span className="font-semibold">{d.componentName}</span> — {d.kind}
@@ -32,7 +32,7 @@ export default function IncompatibleBanner() {
  <Button
  variant="outline"
  size="sm"
- className="h-6 shrink-0 text-[11px]"
+ className="h-6 shrink-0 text-fs-sm"
  onClick={() => openConnect('open')}
  title="Reopen with binaries matching this database's schema"
  >

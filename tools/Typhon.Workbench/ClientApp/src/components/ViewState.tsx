@@ -31,7 +31,7 @@ function errorTitle(error: unknown): string {
 function Centered({ children, tone }: { children: ReactNode; tone?: 'error' }) {
   return (
     <div className="flex h-full items-center justify-center bg-background p-4">
-      <div className={'text-center text-density-sm ' + (tone === 'error' ? 'text-destructive' : 'text-muted-foreground')}>
+      <div className={'text-center text-fs-lg ' + (tone === 'error' ? 'text-destructive' : 'text-muted-foreground')}>
         {children}
       </div>
     </div>

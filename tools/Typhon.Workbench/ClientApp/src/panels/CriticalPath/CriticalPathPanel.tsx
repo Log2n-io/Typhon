@@ -213,7 +213,7 @@ export default function CriticalPathPanel(_props: IDockviewPanelProps) {
 function EmptyState({ message, tone = 'muted' }: { message: string; tone?: 'muted' | 'error' }) {
   const colour = tone === 'error' ? 'text-destructive' : 'text-muted-foreground';
   return (
-    <div className={`flex h-full w-full items-center justify-center bg-background text-[12px] ${colour}`}>
+    <div className={`flex h-full w-full items-center justify-center bg-background text-fs-base ${colour}`}>
       {message}
     </div>
   );

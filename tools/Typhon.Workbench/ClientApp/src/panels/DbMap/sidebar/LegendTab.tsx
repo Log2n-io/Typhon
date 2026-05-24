@@ -52,11 +52,11 @@ export function LegendTab(props: LegendTabProps) {
   return (
     <div className="flex flex-col gap-3 p-2">
       <section className="flex flex-col gap-1">
-        <h3 className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Encoding</h3>
+        <h3 className="text-fs-xs font-semibold uppercase tracking-wide text-muted-foreground">Encoding</h3>
         <EncodingLegend encoding={encoding} />
         {props.downSampleFactor > 1 && (
           <span
-            className="mt-0.5 self-start rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400"
+            className="mt-0.5 self-start rounded bg-amber-500/15 px-1.5 py-0.5 text-fs-xs font-medium text-amber-600 dark:text-amber-400"
             title={`This database exceeds the coarse-cell budget — each cell aggregates ${props.downSampleFactor} pages (§5.5). Colours and metrics are approximate.`}
           >
             Approximate · down-sampled ×{props.downSampleFactor}
@@ -68,33 +68,33 @@ export function LegendTab(props: LegendTabProps) {
 
       {lens === 'fragmentation' && (
         <section className="flex flex-col gap-1">
-          <h3 className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+          <h3 className="text-fs-xs font-semibold uppercase tracking-wide text-muted-foreground">
             Fragmentation lens
           </h3>
           {props.metrics ? (
             <MetricsCard {...props.metrics} />
           ) : (
-            <p className="text-[11px] text-muted-foreground">Select a segment to measure its fragmentation.</p>
+            <p className="text-fs-sm text-muted-foreground">Select a segment to measure its fragmentation.</p>
           )}
         </section>
       )}
 
       {lens === 'freeSpace' && (
         <section className="flex flex-col gap-1">
-          <h3 className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+          <h3 className="text-fs-xs font-semibold uppercase tracking-wide text-muted-foreground">
             Free-space lens
           </h3>
           {props.composition ? (
             <CompositionBar composition={props.composition} />
           ) : (
-            <p className="text-[11px] text-muted-foreground">No map loaded.</p>
+            <p className="text-fs-sm text-muted-foreground">No map loaded.</p>
           )}
         </section>
       )}
 
       {lens === 'pathology' && (
         <section className="flex flex-col gap-1">
-          <h3 className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+          <h3 className="text-fs-xs font-semibold uppercase tracking-wide text-muted-foreground">
             Pathology flags
           </h3>
           <PathologyList flags={props.pathologies} segments={props.segments} onFlyToPage={props.onFlyToPage} />
@@ -110,7 +110,7 @@ function EncodingLegend({ encoding }: { encoding: DbMapEncoding }) {
   if (encoding === 'segment') {
     return (
       <div className="flex flex-col gap-1.5">
-        <span className="text-[11px] text-muted-foreground">One stable hue per segment id.</span>
+        <span className="text-fs-sm text-muted-foreground">One stable hue per segment id.</span>
         <SwatchColumn entries={[TAIL_ENTRY]} />
       </div>
     );
@@ -191,7 +191,7 @@ function DetailLegend({ encoding }: { encoding: DbMapEncoding }) {
   const lo = encoding === 'writeAge' ? 'old' : encoding === 'entropy' ? 'low' : 'empty';
   const hi = encoding === 'writeAge' ? 'new' : encoding === 'entropy' ? 'high' : 'full';
   return (
-    <div className="flex items-center gap-1 text-[10px] text-muted-foreground">
+    <div className="flex items-center gap-1 text-fs-xs text-muted-foreground">
       <span>{lo}</span>
       {[0, 0.25, 0.5, 0.75, 1].map((s) => (
         <span key={s} className="inline-block h-3 w-5" style={{ backgroundColor: rgbCss(ramp(s)) }} />
@@ -205,7 +205,7 @@ function SwatchColumn({ entries }: { entries: readonly { label: string; color: s
   return (
     <div className="flex flex-col gap-0.5">
       {entries.map((e) => (
-        <span key={e.label} className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+        <span key={e.label} className="flex items-center gap-1.5 text-fs-sm text-muted-foreground">
           <Swatch color={e.color} hatched={e.hatched} />
           {e.label}
         </span>
@@ -239,14 +239,14 @@ function SymbolGuide({ band }: { band: 'L0' | 'L1' | 'L3' | 'L4' }) {
   const items = band === 'L0' ? L0_ITEMS : band === 'L1' ? L1_ITEMS : band === 'L3' ? L3_ITEMS : L4_ITEMS;
   return (
     <section className="flex flex-col gap-1">
-      <h3 className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+      <h3 className="text-fs-xs font-semibold uppercase tracking-wide text-muted-foreground">
         Symbols at this zoom ({band})
       </h3>
       <ul className="flex flex-col gap-1.5">
         {items.map((item) => (
           <li key={item.title} className="flex items-start gap-2">
             <span className="mt-[1px] shrink-0">{item.icon}</span>
-            <span className="text-[11px] leading-tight">
+            <span className="text-fs-sm leading-tight">
               <span className="font-semibold text-foreground">{item.title}</span>
               <span className="text-muted-foreground">{' — '}{item.body}</span>
             </span>
@@ -556,12 +556,12 @@ const L0_ITEMS: readonly SymbolItem[] = [
   {
     title: 'Click a stripe',
     body: 'Type stripe → switches encoding to pageType; segment stripe → focuses the fragmentation lens.',
-    icon: <span className="inline-block h-[18px] w-[18px] text-center text-[14px]">▾</span>,
+    icon: <span className="inline-block h-[18px] w-[18px] text-center text-fs-xl">▾</span>,
   },
   {
     title: 'Header band (top)',
     body: 'DB name · size · pages · segments · LSN. The ⚠ badge appears when pathology flags are present.',
-    icon: <span className="inline-block h-[18px] w-[18px] text-center text-[14px]">≡</span>,
+    icon: <span className="inline-block h-[18px] w-[18px] text-center text-fs-xl">≡</span>,
   },
 ];
 
@@ -614,7 +614,7 @@ const L1_ITEMS: readonly SymbolItem[] = [
   {
     title: 'Page index',
     body: 'Centered text, shown once cell ≥ 100 px.',
-    icon: <span className="inline-block h-[18px] w-[18px] text-center text-[10px] text-muted-foreground">#NNN</span>,
+    icon: <span className="inline-block h-[18px] w-[18px] text-center text-fs-xs text-muted-foreground">#NNN</span>,
   },
 ];
 
@@ -667,7 +667,7 @@ const L3_ITEMS: readonly SymbolItem[] = [
   {
     title: 'Chunk index',
     body: 'A `#globalId [inPageIndex]` label once a chunk is large enough; it fades out as the L4 content fades in.',
-    icon: <span className="inline-block h-[18px] w-[18px] text-center text-[9px] text-muted-foreground">#7</span>,
+    icon: <span className="inline-block h-[18px] w-[18px] text-center text-fs-2xs text-muted-foreground">#7</span>,
   },
 ];
 
@@ -725,7 +725,7 @@ function CompositionBar({ composition }: { composition: FreeSpaceComposition }) 
         ))}
       </div>
       {parts.map((p) => (
-        <div key={p.label} className="flex items-center justify-between gap-2 text-[11px]">
+        <div key={p.label} className="flex items-center justify-between gap-2 text-fs-sm">
           <span className="flex items-center gap-1.5 text-muted-foreground">
             <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: p.color }} />
             {p.label}
@@ -733,7 +733,7 @@ function CompositionBar({ composition }: { composition: FreeSpaceComposition }) 
           <span className="font-mono tabular-nums text-foreground">{formatFileSize(p.bytes)}</span>
         </div>
       ))}
-      <div className="flex items-center justify-between gap-2 border-t border-border pt-1 text-[11px]">
+      <div className="flex items-center justify-between gap-2 border-t border-border pt-1 text-fs-sm">
         <span className="text-muted-foreground">File size</span>
         <span className="font-mono tabular-nums text-foreground">{formatFileSize(totalBytes)}</span>
       </div>
@@ -756,7 +756,7 @@ function PathologyList({
 }) {
   if (flags.length === 0) {
     return (
-      <p className="text-[11px] text-muted-foreground">
+      <p className="text-fs-sm text-muted-foreground">
         No under-filled pages in the scanned region. Zoom across the map to scan more.
       </p>
     );
@@ -764,7 +764,7 @@ function PathologyList({
   const shown = flags.slice(0, PATHOLOGY_LIST_CAP);
   return (
     <div className="flex flex-col gap-0.5">
-      <p className="text-[11px] text-muted-foreground">
+      <p className="text-fs-sm text-muted-foreground">
         {flags.length} under-filled page{flags.length === 1 ? '' : 's'} (chunk fill below 25 %).
       </p>
       {shown.map((f) => {
@@ -775,7 +775,7 @@ function PathologyList({
             key={f.pageIndex}
             type="button"
             onClick={() => onFlyToPage(f.pageIndex)}
-            className="flex items-center justify-between gap-2 rounded px-1 py-0.5 text-left text-[11px] hover:bg-muted/60"
+            className="flex items-center justify-between gap-2 rounded px-1 py-0.5 text-left text-fs-sm hover:bg-muted/60"
           >
             <span className="truncate text-muted-foreground">
               <span className="font-mono text-foreground">#{f.pageIndex}</span> {label}
@@ -785,7 +785,7 @@ function PathologyList({
         );
       })}
       {flags.length > PATHOLOGY_LIST_CAP && (
-        <p className="text-[10px] text-muted-foreground">…and {flags.length - PATHOLOGY_LIST_CAP} more.</p>
+        <p className="text-fs-xs text-muted-foreground">…and {flags.length - PATHOLOGY_LIST_CAP} more.</p>
       )}
     </div>
   );

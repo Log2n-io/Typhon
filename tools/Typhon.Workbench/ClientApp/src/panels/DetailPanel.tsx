@@ -60,7 +60,7 @@ export default function DetailPanel() {
     }
     return (
       <div className="flex h-full items-center justify-center bg-background p-3">
-        <p className="text-center text-density-sm text-muted-foreground">
+        <p className="text-center text-fs-lg text-muted-foreground">
           Select anything — a resource, component, entity, system, or profiler element — to inspect it.
         </p>
       </div>
@@ -70,7 +70,7 @@ export default function DetailPanel() {
   return (
     <div className="flex h-full flex-col bg-background">
       <div className="wb-pane-header flex items-center gap-2 border-b border-border px-3 py-1.5">
-        <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Inspector</span>
+        <span className="text-fs-xs font-medium uppercase tracking-wide text-muted-foreground">Inspector</span>
         <button
           type="button"
           onClick={() => setPinned(pinned ? null : leaf)}
@@ -200,11 +200,11 @@ function LeafSummaryCard({
 }): React.JSX.Element {
   return (
     <div className="flex h-full flex-col bg-background p-3">
-      <div className="rounded-md border border-border bg-card p-3 text-[12px]">
+      <div className="rounded-md border border-border bg-card p-3 text-fs-base">
         <div className="mb-2 flex items-center gap-2 border-b border-border pb-2">
           {icon}
-          <h3 className="truncate text-[13px] font-semibold text-foreground" title={fullTitle ?? title}>{title}</h3>
-          <span className="ml-auto text-[11px] text-muted-foreground">{kind}</span>
+          <h3 className="truncate text-fs-lg font-semibold text-foreground" title={fullTitle ?? title}>{title}</h3>
+          <span className="ml-auto text-fs-sm text-muted-foreground">{kind}</span>
         </div>
         {children}
         <div className="mt-3 flex flex-col gap-1">
@@ -214,7 +214,7 @@ function LeafSummaryCard({
               type="button"
               onClick={a.onClick}
               data-testid={a.testId}
-              className="w-full rounded border border-border px-2 py-1 text-[11px] text-foreground hover:bg-accent"
+              className="w-full rounded border border-border px-2 py-1 text-fs-sm text-foreground hover:bg-accent"
             >
               {a.label}
             </button>
@@ -246,7 +246,7 @@ function ComponentLeafCard({ typeName }: { typeName: string }): React.JSX.Elemen
       actions={actions}
     >
       {c ? (
-        <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[11px]">
+        <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-fs-sm">
           <dt className="text-muted-foreground">Size</dt>
           <dd className="tabular-nums">{c.storageSize}B</dd>
           <dt className="text-muted-foreground">Fields</dt>
@@ -257,7 +257,7 @@ function ComponentLeafCard({ typeName }: { typeName: string }): React.JSX.Elemen
           <dd className="tabular-nums">{c.archetypeCount ?? '—'} archetypes</dd>
         </dl>
       ) : (
-        <p className="text-[11px] text-muted-foreground">Loading…</p>
+        <p className="text-fs-sm text-muted-foreground">Loading…</p>
       )}
     </LeafSummaryCard>
   );
@@ -279,7 +279,7 @@ function ArchetypeLeafCard({ archetypeId }: { archetypeId: string }): React.JSX.
       actions={actions}
     >
       {a ? (
-        <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[11px]">
+        <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-fs-sm">
           <dt className="text-muted-foreground">Components</dt>
           <dd className="tabular-nums">{a.componentTypes.length}</dd>
           <dt className="text-muted-foreground">Entities</dt>
@@ -288,7 +288,7 @@ function ArchetypeLeafCard({ archetypeId }: { archetypeId: string }): React.JSX.
           <dd>{a.storageMode}</dd>
         </dl>
       ) : (
-        <p className="text-[11px] text-muted-foreground">Loading…</p>
+        <p className="text-fs-sm text-muted-foreground">Loading…</p>
       )}
     </LeafSummaryCard>
   );
@@ -301,13 +301,13 @@ function ArchetypeLeafCard({ archetypeId }: { archetypeId: string }): React.JSX.
 function ObjectSummaryCard({ icon, kind, title }: { icon: ReactNode; kind: string; title: string }): React.JSX.Element {
   return (
     <div className="flex h-full flex-col bg-background p-3">
-      <div className="rounded-md border border-border bg-card p-3 text-[12px]">
+      <div className="rounded-md border border-border bg-card p-3 text-fs-base">
         <div className="mb-2 flex items-center gap-2 border-b border-border pb-2">
           {icon}
-          <h3 className="truncate text-[13px] font-semibold text-foreground" title={title}>{title}</h3>
-          <span className="ml-auto text-[11px] text-muted-foreground">{kind}</span>
+          <h3 className="truncate text-fs-lg font-semibold text-foreground" title={title}>{title}</h3>
+          <span className="ml-auto text-fs-sm text-muted-foreground">{kind}</span>
         </div>
-        <p className="text-[11px] text-muted-foreground">
+        <p className="text-fs-sm text-muted-foreground">
           The {kind} deep view returns in a later stage of the Workbench redesign.
         </p>
       </div>
@@ -336,10 +336,10 @@ function AncestorSection({ node, activeLeaf }: { node: SelectionRef; activeLeaf:
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-center gap-1.5 px-3 py-1 text-left text-[11px] text-muted-foreground hover:text-foreground"
+        className="flex w-full items-center gap-1.5 px-3 py-1 text-left text-fs-sm text-muted-foreground hover:text-foreground"
       >
         {open ? <ChevronDown className="h-3 w-3 shrink-0" /> : <ChevronRight className="h-3 w-3 shrink-0" />}
-        <span className="text-[10px] uppercase tracking-wide">{node.type}</span>
+        <span className="text-fs-xs uppercase tracking-wide">{node.type}</span>
         {(!full || !open) && <span className="truncate font-mono text-foreground">{String(node.ref)}</span>}
       </button>
       {open &&
@@ -397,7 +397,7 @@ function AncestorSummary({ node }: { node: SelectionRef }): React.JSX.Element | 
 }
 
 function AncestorBody({ children }: { children: ReactNode }): React.JSX.Element {
-  return <p className="text-[11px] text-muted-foreground" data-testid="inspector-ancestor-body">{children}</p>;
+  return <p className="text-fs-sm text-muted-foreground" data-testid="inspector-ancestor-body">{children}</p>;
 }
 
 function ComponentAncestorSummary({ typeName }: { typeName: string }): React.JSX.Element {
@@ -423,7 +423,7 @@ function CardLoading({ label }: { label: string }): React.JSX.Element {
   return (
     <div className="flex h-full flex-col bg-background p-3">
       <div className="rounded-md border border-border bg-card p-3">
-        <p className="text-[11px] text-muted-foreground">Loading {label}…</p>
+        <p className="text-fs-sm text-muted-foreground">Loading {label}…</p>
       </div>
     </div>
   );
@@ -474,12 +474,12 @@ function DbMapDetailCard({
 }) {
   return (
     <div className="flex h-full flex-col bg-background p-3">
-      <div className="rounded-md border border-border bg-card p-3 text-[12px]">
+      <div className="rounded-md border border-border bg-card p-3 text-fs-base">
         <div className="mb-2 flex items-center gap-2 border-b border-border pb-2">
           {icon}
-          <h3 className="text-[13px] font-semibold text-foreground">{title}</h3>
+          <h3 className="text-fs-lg font-semibold text-foreground">{title}</h3>
           {badge && <StatusBadge tone="neutral">{badge}</StatusBadge>}
-          <span className="ml-auto truncate font-mono text-[11px] text-muted-foreground">{databaseName}</span>
+          <span className="ml-auto truncate font-mono text-fs-sm text-muted-foreground">{databaseName}</span>
         </div>
         {children}
       </div>
@@ -513,10 +513,10 @@ function DbMapPageDetail({
       databaseName={databaseName}
     >
       {!page ? (
-        <p className="text-[11px] text-muted-foreground">Decoding page…</p>
+        <p className="text-fs-sm text-muted-foreground">Decoding page…</p>
       ) : (
         <>
-          <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-[11px]">
+          <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-fs-sm">
             <Row label="Byte offset" value={`0x${page.byteOffset.toString(16).toUpperCase()}`} />
             <Row label="Change revision" value={page.changeRevision.toLocaleString()} />
             <Row label="Format revision" value={String(page.formatRevision)} />
@@ -569,10 +569,10 @@ function DbMapSegmentDetail({
       databaseName={databaseName}
     >
       {!summary ? (
-        <p className="text-[11px] text-muted-foreground">Harvesting segment summary…</p>
+        <p className="text-fs-sm text-muted-foreground">Harvesting segment summary…</p>
       ) : (
         <>
-          <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-[11px]">
+          <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-fs-sm">
             <Row label="Root page" value={`#${summary.rootPageIndex}`} />
             <Row label="Pages" value={summary.pageCount.toLocaleString()} />
             {summary.stride > 0 && <Row label="Stride" value={`${summary.stride} B`} />}
@@ -589,8 +589,8 @@ function DbMapSegmentDetail({
 
           {isCluster && (
             <div className="mt-3 border-t border-border pt-2">
-              <p className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">Cluster fill</p>
-              <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-[11px]">
+              <p className="mb-1 text-fs-xs uppercase tracking-wide text-muted-foreground">Cluster fill</p>
+              <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-fs-sm">
                 <Row label="Entities" value={Number(summary.entityCount).toLocaleString()} />
                 <Row label="Active clusters" value={summary.activeClusterCount.toLocaleString()} />
                 <Row label="Slots / cluster" value={String(summary.clusterSize)} />
@@ -601,8 +601,8 @@ function DbMapSegmentDetail({
 
           {map && (
             <div className="mt-3 border-t border-border pt-2">
-              <p className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">Entity-map (linear hash)</p>
-              <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-[11px]">
+              <p className="mb-1 text-fs-xs uppercase tracking-wide text-muted-foreground">Entity-map (linear hash)</p>
+              <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-fs-sm">
                 <Row label="Entries" value={Number(map.entryCount).toLocaleString()} />
                 <Row label="Buckets" value={map.bucketCount.toLocaleString()} />
                 <Row label="Load factor" value={map.loadFactor.toFixed(2)} />
@@ -629,7 +629,7 @@ function DbMapSegmentDetail({
 function SegmentActions({ typeName }: { typeName: string }): React.JSX.Element {
   const { archetypes } = useArchetypesForComponent(typeName);
   const primary = pickPrimaryArchetype(archetypes);
-  const cls = 'w-full rounded border border-border px-2 py-1 text-[11px] text-foreground hover:bg-accent';
+  const cls = 'w-full rounded border border-border px-2 py-1 text-fs-sm text-foreground hover:bg-accent';
   return (
     <div className="mt-3 flex flex-col gap-1 border-t border-border pt-2">
       <button type="button" onClick={() => openComponentInSchema(typeName)} data-testid="segment-open-schema" className={cls}>
@@ -664,7 +664,7 @@ function BucketFillBar({ map }: { map: NonNullable<StorageSegmentSummaryDto['ent
   if (total === 0) return null;
   return (
     <div className="mt-2">
-      <p className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">Bucket fill</p>
+      <p className="mb-1 text-fs-xs uppercase tracking-wide text-muted-foreground">Bucket fill</p>
       <div className="flex h-2 w-full overflow-hidden rounded-sm">
         {bands.map((b) =>
           b.count === 0 ? null : (
@@ -698,10 +698,10 @@ function DbMapChunkDetail({
       databaseName={databaseName}
     >
       {!chunk ? (
-        <p className="text-[11px] text-muted-foreground">Decoding chunk…</p>
+        <p className="text-fs-sm text-muted-foreground">Decoding chunk…</p>
       ) : (
         <>
-          <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-[11px]">
+          <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-fs-sm">
             <Row label="Page" value={String(pageIndex)} />
             <Row label="Segment" value={`#${chunk.segmentId}`} />
             {chunk.componentType && <Row label="Component" value={chunk.componentType} />}
@@ -713,7 +713,7 @@ function DbMapChunkDetail({
           {chunk.cells.length > 0 ? (
             <CellList title={`Decoded content · ${chunk.cells.length} cells`} cells={chunk.cells} />
           ) : (
-            <p className="mt-3 border-t border-border pt-2 text-[11px] text-muted-foreground">
+            <p className="mt-3 border-t border-border pt-2 text-fs-sm text-muted-foreground">
               No typed decoder — undecoded content.
             </p>
           )}
@@ -735,13 +735,13 @@ function ClusterOverlayPicker({ chunk }: { chunk: DbChunkContent }) {
   const occupancyActive = !(segmentId === chunk.segmentId && componentSlot != null);
 
   const chipCls = (active: boolean) =>
-    `rounded px-1.5 py-0.5 text-[10px] font-mono ${
+    `rounded px-1.5 py-0.5 text-fs-xs font-mono ${
       active ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground hover:bg-muted/70'
     }`;
 
   return (
     <div className="mt-3 border-t border-border pt-2">
-      <p className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">Component overlay</p>
+      <p className="mb-1 text-fs-xs uppercase tracking-wide text-muted-foreground">Component overlay</p>
       <div className="flex flex-wrap gap-1">
         <button type="button" className={chipCls(occupancyActive)} onClick={clearOverlay} title="Colour slots by occupancy only">
           Occupancy
@@ -763,7 +763,7 @@ function ClusterOverlayPicker({ chunk }: { chunk: DbChunkContent }) {
         })}
       </div>
       {!occupancyActive && (
-        <p className="mt-1.5 flex items-center gap-2 text-[10px] text-muted-foreground">
+        <p className="mt-1.5 flex items-center gap-2 text-fs-xs text-muted-foreground">
           <span className="inline-block h-2 w-2 rounded-sm" style={{ background: 'rgb(34,197,94)' }} /> enabled
           <span className="inline-block h-2 w-2 rounded-sm" style={{ background: 'rgb(120,53,53)' }} /> disabled
         </p>
@@ -791,10 +791,10 @@ function DbMapCellDetail({
       databaseName={databaseName}
     >
       {!cell ? (
-        <p className="text-[11px] text-muted-foreground">Decoding…</p>
+        <p className="text-fs-sm text-muted-foreground">Decoding…</p>
       ) : (
         <>
-          <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-[11px]">
+          <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-fs-sm">
             <dt className="text-muted-foreground">Value</dt>
             <dd className="break-all font-mono text-foreground">{cell.value}</dd>
             <Row label="Kind" value={cell.kind} />
@@ -814,9 +814,9 @@ function DbMapCellDetail({
 function CellList({ title, cells }: { title: string; cells: DbContentCell[] }) {
   return (
     <div className="mt-3 border-t border-border pt-2">
-      <p className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">{title}</p>
+      <p className="mb-1 text-fs-xs uppercase tracking-wide text-muted-foreground">{title}</p>
       <div className="max-h-64 overflow-auto">
-        <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-0.5 text-[11px]">
+        <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-0.5 text-fs-sm">
           {cells.slice(0, 256).map((c, i) => (
             <div key={`${c.kind}-${c.offset}-${i}`} className="contents">
               <dt className="truncate text-muted-foreground" title={c.label}>
@@ -841,22 +841,22 @@ function FieldDetail({ field, schema }: { field: Field; schema: ComponentSchema 
 
   return (
     <div className="flex h-full flex-col bg-background p-3">
-      <div className="rounded-md border border-border bg-card p-3 text-[12px]">
+      <div className="rounded-md border border-border bg-card p-3 text-fs-base">
         <div className="mb-2 flex items-center gap-2 border-b border-border pb-2">
           <Binary className="h-4 w-4 text-muted-foreground" />
-          <h3 className="text-[13px] font-semibold text-foreground">{field.name}</h3>
+          <h3 className="text-fs-lg font-semibold text-foreground">{field.name}</h3>
           {field.isIndexed && (
             <StatusBadge tone="success">
               indexed{field.indexAllowsMultiple ? ' (multi)' : ''}
             </StatusBadge>
           )}
           {crossesBoundary && <StatusBadge tone="warn">crosses cache line</StatusBadge>}
-          <span className="ml-auto font-mono text-[11px] text-muted-foreground">
+          <span className="ml-auto font-mono text-fs-sm text-muted-foreground">
             {schema.typeName}
           </span>
         </div>
 
-        <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-[11px]">
+        <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-fs-sm">
           <dt className="text-muted-foreground">Type</dt>
           <dd className="font-mono text-foreground">{field.typeName}</dd>
 
@@ -905,14 +905,14 @@ function ResourceDetail({ resource }: { resource: SelectedResource }) {
 
   return (
     <div className="flex h-full flex-col bg-background p-3">
-      <div className="rounded-md border border-border bg-card p-3 text-[12px]">
+      <div className="rounded-md border border-border bg-card p-3 text-fs-base">
         <div className="mb-2 flex items-center gap-2 border-b border-border pb-2">
           <FolderOpen className="h-4 w-4 text-muted-foreground" />
-          <h3 className="text-[13px] font-semibold text-foreground">{selected.name}</h3>
-          <span className="ml-auto text-[11px] text-muted-foreground">{selected.kind}</span>
+          <h3 className="text-fs-lg font-semibold text-foreground">{selected.name}</h3>
+          <span className="ml-auto text-fs-sm text-muted-foreground">{selected.kind}</span>
         </div>
 
-        <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-[11px]">
+        <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-fs-sm">
           <dt className="text-muted-foreground">Id</dt>
           <dd className="truncate text-foreground">{raw.id ?? selected.resourceId}</dd>
 
@@ -961,7 +961,7 @@ function ResourceActions({ resource }: { resource: SelectedResource }): React.JS
           type="button"
           onClick={() => openDataBrowser(primary.archetypeId)}
           data-testid="resource-open-data-browser"
-          className="w-full rounded border border-border px-2 py-1 text-[11px] text-foreground hover:bg-accent"
+          className="w-full rounded border border-border px-2 py-1 text-fs-sm text-foreground hover:bg-accent"
         >
           Open in Data Browser
         </button>
@@ -970,7 +970,7 @@ function ResourceActions({ resource }: { resource: SelectedResource }): React.JS
         type="button"
         onClick={() => openDbMapForComponent(component.typeName)}
         data-testid="resource-reveal-file-map"
-        className="w-full rounded border border-border px-2 py-1 text-[11px] text-foreground hover:bg-accent"
+        className="w-full rounded border border-border px-2 py-1 text-fs-sm text-foreground hover:bg-accent"
       >
         Reveal in File Map
       </button>

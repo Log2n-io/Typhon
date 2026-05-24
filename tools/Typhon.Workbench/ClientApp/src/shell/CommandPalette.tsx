@@ -47,10 +47,10 @@ interface CommandPaletteProps {
 }
 
 const itemClass =
-  'flex cursor-pointer items-center rounded px-3 py-1.5 text-density-sm text-foreground ' +
+  'flex cursor-pointer items-center rounded px-3 py-1.5 text-fs-lg text-foreground ' +
   'aria-selected:bg-accent aria-selected:text-accent-foreground';
 const groupClass =
-  '[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1 [&_[cmdk-group-heading]]:text-[10px] ' +
+  '[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1 [&_[cmdk-group-heading]]:text-fs-xs ' +
   '[&_[cmdk-group-heading]]:uppercase [&_[cmdk-group-heading]]:tracking-wider [&_[cmdk-group-heading]]:text-muted-foreground';
 
 export default function CommandPalette({ open, onClose, anchorRef }: CommandPaletteProps) {
@@ -158,17 +158,17 @@ export default function CommandPalette({ open, onClose, anchorRef }: CommandPale
  onValueChange={setValue}
  placeholder={placeholder}
  className="w-full border-b border-border bg-transparent px-3 py-2
- text-density-sm text-foreground outline-none
+ text-fs-lg text-foreground outline-none
  placeholder:text-muted-foreground"
  onKeyDown={(e) => e.key === 'Escape' && onClose()}
  />
  <Command.List className="max-h-[320px] overflow-y-auto p-1">
- <Command.Empty className="px-3 py-4 text-center text-density-sm text-muted-foreground">
+ <Command.Empty className="px-3 py-4 text-center text-fs-lg text-muted-foreground">
  No results
  </Command.Empty>
 
  {route.mode === 'help' && (
-   <div className="px-3 py-2 text-density-sm">
+   <div className="px-3 py-2 text-fs-lg">
      {PALETTE_PREFIX_HELP.map((h) => (
        <div key={h.prefix} className="flex gap-3 py-0.5">
          <code className="w-16 shrink-0 text-amber-400">{h.prefix}</code>
@@ -202,7 +202,7 @@ export default function CommandPalette({ open, onClose, anchorRef }: CommandPale
          className={itemClass}
        >
          <span className="truncate">{hit.name}</span>
-         <span className="ml-auto truncate pl-3 text-[10px] text-muted-foreground">{hit.path.join(' / ')}</span>
+         <span className="ml-auto truncate pl-3 text-fs-xs text-muted-foreground">{hit.path.join(' / ')}</span>
        </Command.Item>
      ))}
    </Command.Group>
@@ -213,7 +213,7 @@ export default function CommandPalette({ open, onClose, anchorRef }: CommandPale
      {group.hits.map((hit) => (
        <Command.Item key={hit.id} value={hit.id} onSelect={() => selectObject(hit)} className={itemClass}>
          <span className="truncate">{hit.label}</span>
-         {hit.sublabel && <span className="ml-auto truncate pl-3 text-[10px] text-muted-foreground">{hit.sublabel}</span>}
+         {hit.sublabel && <span className="ml-auto truncate pl-3 text-fs-xs text-muted-foreground">{hit.sublabel}</span>}
        </Command.Item>
      ))}
    </Command.Group>

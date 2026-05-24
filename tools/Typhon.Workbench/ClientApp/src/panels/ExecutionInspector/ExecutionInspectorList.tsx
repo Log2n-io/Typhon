@@ -30,15 +30,15 @@ export function ExecutionInspectorList({ executions, systemNames }: Props) {
 
   if (executions.length === 0) {
     return (
-      <div className="flex h-full items-center justify-center bg-muted/10 text-[11px] text-muted-foreground">
+      <div className="flex h-full items-center justify-center bg-muted/10 text-fs-sm text-muted-foreground">
         No executions recorded.
       </div>
     );
   }
 
   return (
-    <div className="h-full w-[220px] shrink-0 overflow-y-auto border-r border-border bg-card text-[12px]">
-      <div className="border-b border-border bg-muted/30 px-2 py-1 text-[10px] uppercase tracking-wider text-muted-foreground">
+    <div className="h-full w-[220px] shrink-0 overflow-y-auto border-r border-border bg-card text-fs-base">
+      <div className="border-b border-border bg-muted/30 px-2 py-1 text-fs-xs uppercase tracking-wider text-muted-foreground">
         Executions ({executions.length})
       </div>
       <ul className="divide-y divide-border/50">
@@ -63,9 +63,9 @@ export function ExecutionInspectorList({ executions, systemNames }: Props) {
                 data-system-id={systemId}
                 aria-selected={isSelected}
               >
-                <span className="font-mono text-[11px] text-foreground">tick {tickIndex.toLocaleString()}</span>
-                <span className="truncate text-[11px] text-muted-foreground">{systemLabel}</span>
-                <span className="font-mono text-[10px] text-muted-foreground">{formatNs(Math.max(0, endTs - startTs))}</span>
+                <span className="font-mono text-fs-sm text-foreground">tick {tickIndex.toLocaleString()}</span>
+                <span className="truncate text-fs-sm text-muted-foreground">{systemLabel}</span>
+                <span className="font-mono text-fs-xs text-muted-foreground">{formatNs(Math.max(0, endTs - startTs))}</span>
               </button>
             </li>
           );

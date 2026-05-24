@@ -83,14 +83,14 @@ export default function SaveReplayDialog({ open, onOpenChange }: Props) {
       <DialogContent className="flex h-[640px] max-w-3xl flex-col gap-3">
         <DialogHeader>
           <DialogTitle>Save Session as .typhon-replay…</DialogTitle>
-          <DialogDescription className="text-density-sm">
+          <DialogDescription className="text-fs-lg">
             Snapshot the current live attach session into a self-contained replay file. Reopens directly with no companion
             <code className="mx-1">.typhon-trace</code> required.
           </DialogDescription>
         </DialogHeader>
 
         <div className="flex min-h-0 flex-col gap-1">
-          <label className="shrink-0 text-density-sm text-muted-foreground">Target directory</label>
+          <label className="shrink-0 text-fs-lg text-muted-foreground">Target directory</label>
           <div className="min-h-0 flex-1">
             <FileBrowser
               extensionFilter={[REPLAY_EXT]}
@@ -108,25 +108,25 @@ export default function SaveReplayDialog({ open, onOpenChange }: Props) {
         </div>
 
         <div className="flex shrink-0 flex-col gap-1">
-          <label className="text-density-sm text-muted-foreground">Filename</label>
+          <label className="text-fs-lg text-muted-foreground">Filename</label>
           <Input
             value={filename}
             onChange={(e) => setFilename(e.target.value)}
             spellCheck={false}
             autoComplete="off"
-            className="font-mono text-[12px]"
+            className="font-mono text-fs-base"
             placeholder="session.typhon-replay"
           />
         </div>
 
         {targetPath && (
-          <p className="shrink-0 truncate text-[10px] text-muted-foreground" title={targetPath}>
+          <p className="shrink-0 truncate text-fs-xs text-muted-foreground" title={targetPath}>
             Will save: <span className="font-mono text-foreground">{targetPath}</span>
           </p>
         )}
 
         {errorMessage && (
-          <p className="shrink-0 rounded border border-destructive/50 bg-destructive/10 px-2 py-1 text-[11px] text-destructive">
+          <p className="shrink-0 rounded border border-destructive/50 bg-destructive/10 px-2 py-1 text-fs-sm text-destructive">
             {errorMessage}
           </p>
         )}
