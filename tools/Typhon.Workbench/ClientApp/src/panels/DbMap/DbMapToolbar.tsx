@@ -37,7 +37,7 @@ export function DbMapToolbar(props: DbMapToolbarProps) {
   const toggleSegmentOverlay = useDbMapStore((s) => s.toggleSegmentOverlay);
 
   return (
-    <div className="flex items-center gap-2 border-b border-border px-3 py-1.5">
+    <div className="wb-pane-header flex items-center gap-2 border-b border-border px-3 py-1.5">
       <label className="text-[11px] text-muted-foreground">Order</label>
       <select
         className={SELECT_CLASS}

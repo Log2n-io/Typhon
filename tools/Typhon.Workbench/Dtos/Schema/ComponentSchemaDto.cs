@@ -7,6 +7,7 @@ namespace Typhon.Workbench.Dtos.Schema;
 /// <param name="StorageSize">User-authored data bytes (ComponentStorageSize) — what the byte grid draws.</param>
 /// <param name="TotalSize">StorageSize + EntityPKOverheadSize header — shown as metadata, not drawn.</param>
 /// <param name="Fields">Ordered ascending by Offset; padding is implicit (gaps between consecutive fields).</param>
+/// <param name="StorageMode">MVCC storage mode — "Versioned" / "SingleVersion" / "Transient" (GAP-25).</param>
 public record ComponentSchemaDto(
     string TypeName,
     string FullName,
@@ -14,4 +15,5 @@ public record ComponentSchemaDto(
     int TotalSize,
     bool AllowMultiple,
     int Revision,
-    FieldDto[] Fields);
+    FieldDto[] Fields,
+    string StorageMode);

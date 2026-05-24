@@ -206,6 +206,38 @@ public sealed class SchemaControllerTests
         Assert.That(value.IsIndexed, Is.False);
     }
 
+    [Test]
+    public async Task GetComponentSchema_IncludesStorageMode()
+    {
+        var session = await CreateSessionAsync();
+        var engine = GetEngineForSession(session.SessionId);
+        engine.RegisterComponentFromAccessor<WbCompA>();
+
+        var resp = await _client.SendAsync(BuildGet(session.SessionId, "components/Workbench.Test.WbCompA"));
+        Assert.That(resp.StatusCode, Is.EqualTo(HttpStatusCode.OK));
+
+        var schema = JsonSerializer.Deserialize<ComponentSchemaDto>(
+            await resp.Content.ReadAsStringAsync(), Json)!;
+        // GAP-25: the DTO now carries the MVCC storage mode (default Versioned for a plainly-registered component).
+        Assert.That(schema.StorageMode, Is.EqualTo(StorageMode.Versioned.ToString()));
+    }
+
+    [Test]
+    public async Task ListComponents_IncludesStorageMode()
+    {
+        var session = await CreateSessionAsync();
+        var engine = GetEngineForSession(session.SessionId);
+        engine.RegisterComponentFromAccessor<WbCompA>();
+
+        var resp = await _client.SendAsync(BuildGet(session.SessionId, "components"));
+        Assert.That(resp.StatusCode, Is.EqualTo(HttpStatusCode.OK));
+
+        var list = JsonSerializer.Deserialize<ComponentSummaryDto[]>(
+            await resp.Content.ReadAsStringAsync(), Json)!;
+        var compA = list.Single(c => c.TypeName == "Workbench.Test.WbCompA");
+        Assert.That(compA.StorageMode, Is.EqualTo(StorageMode.Versioned.ToString()));
+    }
+
     // ── Phase 2 endpoints ───────────────────────────────────────────────────
 
     [Test]

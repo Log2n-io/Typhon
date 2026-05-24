@@ -94,6 +94,7 @@ function schema(storageSize: number, fields: Field[]): ComponentSchema {
     allowMultiple: false,
     revision: 1,
     fields,
+    storageMode: 'Versioned',
   };
 }
 

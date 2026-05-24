@@ -18,17 +18,20 @@ test.describe('AC1.3 — command palette prefix routing', () => {
     await openDemoFile(page, request);
   });
 
+  // "open" matches the five Open-* commands, incl. the Stage-2 "Open Data Browser" + "Open Storage Health".
   test('bare query filters commands (command mode)', async ({ page }) => {
     await openPalette(page, 'open');
-    await expect.poll(() => itemCount(page)).toBe(3);
-    expect(await itemTexts(page)).toEqual(expect.arrayContaining(['Open File…', 'Open Recent', 'Open Trace…']));
+    await expect.poll(() => itemCount(page)).toBe(5);
+    expect(await itemTexts(page)).toEqual(
+      expect.arrayContaining(['Open File…', 'Open Recent', 'Open Trace…', 'Open Data Browser', 'Open Storage Health']),
+    );
   });
 
   test('">" runs the SAME command match as the bare query (regression: ">" must not zero out)', async ({ page }) => {
     await openPalette(page, '>open');
     // The bug this guards: ">open" used to show "No results". It must match exactly like "open".
-    await expect.poll(() => itemCount(page)).toBe(3);
-    expect(await itemTexts(page)).toEqual(expect.arrayContaining(['Open File…', 'Open Trace…']));
+    await expect.poll(() => itemCount(page)).toBe(5);
+    expect(await itemTexts(page)).toEqual(expect.arrayContaining(['Open File…', 'Open Trace…', 'Open Storage Health']));
   });
 
   test('"@" resolves in-session objects (resource hits)', async ({ page }) => {

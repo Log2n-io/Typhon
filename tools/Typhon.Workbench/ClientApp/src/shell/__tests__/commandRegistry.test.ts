@@ -13,8 +13,6 @@ const GATED_COMMAND_IDS = [
   'toggle-view-system-dag',
   'toggle-view-data-flow',
   'toggle-view-access-matrix',
-  'toggle-view-dbmap',
-  'data-browser',
   'toggle-view-source-preview',
   'show-source-current-span',
   'toggle-view-profiler',
@@ -29,6 +27,13 @@ const GATED_COMMAND_IDS = [
   'profiler-zoom-full',
   'profiler-pan-left',
   'profiler-pan-right',
+];
+
+// Commands whose bound zone-D view has been reintroduced (Stage 2+) — they must now appear in the palette.
+const ACTIVE_ZONE_D_COMMAND_IDS = [
+  'data-browser', // Data Browser reintroduced onto the bus (Stage 2 Phase 2).
+  'toggle-view-dbmap', // File Map reintroduced (Stage 2 Phase 3).
+  'toggle-view-storage-health', // Storage Health dashboard (Stage 2 Phase 3).
 ];
 
 // Shell commands that must survive the Stage 0 filter.
@@ -54,6 +59,12 @@ describe('command palette — Stage 0 view gating', () => {
   it('omits every command bound to a deactivated view', () => {
     for (const id of GATED_COMMAND_IDS) {
       expect(ids.has(id), `command "${id}" should be filtered out in Stage 0`).toBe(false);
+    }
+  });
+
+  it('surfaces reintroduced zone-D commands (Stage 2+)', () => {
+    for (const id of ACTIVE_ZONE_D_COMMAND_IDS) {
+      expect(ids.has(id), `command "${id}" should be available once its view is reintroduced`).toBe(true);
     }
   });
 

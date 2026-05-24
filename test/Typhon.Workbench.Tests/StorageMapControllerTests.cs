@@ -46,6 +46,26 @@ public sealed class StorageMapControllerTests
     }
 
     [Test]
+    public async Task GetHealth_ValidToken_ReturnsRollup()
+    {
+        var session = await CreateSessionAsync();
+        var dto = await GetAsync<StorageHealthDto>(session, "health");
+
+        Assert.That(dto.DataFilePageCount, Is.GreaterThan(0), "a real database has pages");
+        Assert.That(dto.UsedPageCount + dto.FreePageCount, Is.EqualTo(dto.DataFilePageCount), "used + free == total");
+        Assert.That(dto.UsedPageCount, Is.GreaterThan(0), "a real database has used pages");
+        Assert.That(dto.DataFileBytes, Is.GreaterThan(0L));
+        Assert.That(dto.SegmentCount, Is.GreaterThan(0).And.EqualTo(dto.Segments.Length));
+        Assert.That(dto.FragmentationPct, Is.InRange(0.0, 100.0));
+        foreach (var s in dto.Segments)
+        {
+            Assert.That(s.PageCount, Is.GreaterThanOrEqualTo(0));
+            Assert.That(s.OccupancyPct, Is.InRange(0.0, 100.0), $"segment {s.Id} occupancy in range");
+            Assert.That(s.ReclaimableBytes, Is.GreaterThanOrEqualTo(0L));
+        }
+    }
+
+    [Test]
     public async Task GetRegions_NoToken_Returns401()
     {
         var response = await _client.GetAsync($"/api/sessions/{Guid.NewGuid()}/dbmap/regions");

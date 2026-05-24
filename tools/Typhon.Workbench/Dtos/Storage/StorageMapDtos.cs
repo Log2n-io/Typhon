@@ -42,6 +42,45 @@ public record StorageOverviewDto(
     int HilbertOrder,
     StoragePyramidLevelDto[] Levels);
 
+/// <summary>
+/// Aggregate storage health rollup — the response of <c>GET /dbmap/health</c> (GAP-16). A server-side rollup of
+/// the whole-DB summary plus a per-segment table, so the Storage Health dashboard makes one call instead of
+/// aggregating every segment client-side. Computed in-memory (page classification + segment registry); no page
+/// I/O beyond what the coarse map already reads.
+/// </summary>
+public record StorageHealthDto(
+    string DatabaseName,
+    long DataFileBytes,
+    int DataFilePageCount,
+    int UsedPageCount,
+    int FreePageCount,
+    long WalBytes,
+    long CheckpointLsn,
+    int SegmentCount,
+    /// <summary>Sum of free-chunk bytes across chunk-based segments — space reclaimable by compaction.</summary>
+    long ReclaimableBytes,
+    /// <summary>Free pages as a percentage of the file (a coarse fragmentation proxy for v1).</summary>
+    double FragmentationPct,
+    StorageHealthSegmentDto[] Segments);
+
+/// <summary>One segment's health row in the <c>GET /dbmap/health</c> rollup.</summary>
+public record StorageHealthSegmentDto(
+    int Id,
+    string Kind,
+    /// <summary>Component type name for component/cluster segments; empty otherwise.</summary>
+    string TypeName,
+    int PageCount,
+    int AllocatedChunkCount,
+    int ChunkCapacity,
+    /// <summary>Allocated chunks ÷ capacity, as a percentage (0 for non-chunk segments).</summary>
+    double ChunkFillPct,
+    /// <summary>Free-chunk bytes (free chunks × stride) reclaimable in this segment.</summary>
+    long ReclaimableBytes,
+    /// <summary>Live entity count for cluster segments; 0 otherwise.</summary>
+    long EntityCount,
+    /// <summary>Cluster: entities ÷ active-cluster slots; otherwise the chunk fill — the "how full" headline %.</summary>
+    double OccupancyPct);
+
 /// <summary>One level of the aggregate pyramid: <c>4^Level</c> nodes, each covering a contiguous page range.</summary>
 public record StoragePyramidLevelDto(
     int Level,

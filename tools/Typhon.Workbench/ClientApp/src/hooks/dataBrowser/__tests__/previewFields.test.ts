@@ -6,7 +6,7 @@ function field(name: string, fieldId: number, typeName: string): Field {
   return { name, fieldId, typeName, typeFullName: typeName, offset: 0, size: 4, isIndexed: false, indexAllowsMultiple: false };
 }
 function schema(typeName: string, fields: Field[]): ComponentSchema {
-  return { typeName, fullName: typeName, storageSize: 0, totalSize: 0, allowMultiple: false, revision: 1, fields };
+  return { typeName, fullName: typeName, storageSize: 0, totalSize: 0, allowMultiple: false, revision: 1, fields, storageMode: 'Versioned' };
 }
 
 describe('defaultPreviewFields', () => {

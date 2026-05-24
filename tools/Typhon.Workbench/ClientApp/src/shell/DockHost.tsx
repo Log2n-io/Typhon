@@ -7,12 +7,9 @@ import { useSessionStore } from '@/stores/useSessionStore';
 import DetailPanel from '@/panels/DetailPanel';
 import LogsPanel from '@/panels/LogsPanel';
 import ResourceTreePanel from '@/panels/ResourceTreePanel';
-import SchemaBrowserPanel from '@/panels/SchemaBrowser/SchemaBrowserPanel';
-import ArchetypeBrowserPanel from '@/panels/SchemaBrowser/ArchetypeBrowserPanel';
-import SchemaLayoutPanel from '@/panels/SchemaInspector/SchemaLayoutPanel';
-import SchemaArchetypePanel from '@/panels/SchemaInspector/SchemaArchetypePanel';
-import SchemaIndexPanel from '@/panels/SchemaInspector/SchemaIndexPanel';
-import SchemaRelationshipsPanel from '@/panels/SchemaInspector/SchemaRelationshipsPanel';
+import SchemaExplorerPanel from '@/panels/SchemaExplorer/SchemaExplorerPanel';
+import ArchetypeInspectorPanel from '@/panels/ArchetypeInspector/ArchetypeInspectorPanel';
+import ComponentInspectorPanel from '@/panels/ComponentInspector/ComponentInspectorPanel';
 import SystemDagPanel from '@/panels/SystemDag/SystemDagPanel';
 import DataFlowPanel from '@/panels/DataFlow/DataFlowPanel';
 import AccessMatrixPanel from '@/panels/AccessMatrix/AccessMatrixPanel';
@@ -27,6 +24,7 @@ import QueryPlanTreePanel from '@/panels/QueryPlanTree/QueryPlanTreePanel';
 import ExecutionInspectorPanel from '@/panels/ExecutionInspector/ExecutionInspectorPanel';
 import PaletteDebugPanel from '@/panels/PaletteDebug';
 import DbMapPanel from '@/panels/DbMap/DbMapPanel';
+import StorageHealthPanel from '@/panels/StorageHealth/StorageHealthPanel';
 import EntityListPanel from '@/panels/DataBrowser/EntityListPanel';
 import SystemsQueriesNavigatorPanel from '@/panels/SystemsQueriesNavigator/SystemsQueriesNavigatorPanel';
 import { registerDockApi, registerResetLayout, focusPanelBody } from './commands/openSchemaBrowser';
@@ -118,12 +116,9 @@ const components: Record<string, React.FC<IDockviewPanelProps>> = {
   ResourceTree: ResourceTreePanel,
   Detail: DetailPanel,
   Logs: LogsPanel,
-  SchemaBrowser: SchemaBrowserPanel,
-  ArchetypeBrowser: ArchetypeBrowserPanel,
-  SchemaLayout: SchemaLayoutPanel,
-  SchemaArchetypes: SchemaArchetypePanel,
-  SchemaIndexes: SchemaIndexPanel,
-  SchemaRelationships: SchemaRelationshipsPanel,
+  SchemaExplorer: SchemaExplorerPanel,
+  ArchetypeInspector: ArchetypeInspectorPanel,
+  ComponentInspector: ComponentInspectorPanel,
   SystemDag: SystemDagPanel,
   DataFlow: DataFlowPanel,
   AccessMatrix: AccessMatrixPanel,
@@ -138,6 +133,7 @@ const components: Record<string, React.FC<IDockviewPanelProps>> = {
   ExecutionInspector: ExecutionInspectorPanel,
   PaletteDebug: PaletteDebugPanel,
   DbMap: DbMapPanel,
+  StorageHealth: StorageHealthPanel,
   DataBrowserEntities: EntityListPanel,
   // Shell navigator (zone C, Trace/Attach) — not a zone-D deep view, so it is never gated.
   SystemsQueriesNavigator: SystemsQueriesNavigatorPanel,
@@ -196,29 +192,23 @@ function buildDefaultLayout(api: DockviewReadyEvent['api'], kind: 'none' | 'open
       });
     }
 
-    // Trace-mode schema panels (v7+ static-data tables in the trace file feed these), stacked behind the Detail
-    // panel in the right edge group. Each panel handles its own "no schema data" empty state, so showing them costs
-    // nothing when the data isn't there.
-    if (kind === 'trace' && isViewActive('SchemaBrowser')) {
-      api.addPanel({
-        id: 'schema-browser',
-        component: 'SchemaBrowser',
-        title: 'Components',
-        position: { referenceGroup: EDGE_RIGHT_ID },
-      });
-    }
-    if (kind === 'trace' && isViewActive('ArchetypeBrowser')) {
-      api.addPanel({
-        id: 'archetype-browser',
-        component: 'ArchetypeBrowser',
-        title: 'Archetypes',
-        position: { referenceGroup: EDGE_RIGHT_ID },
-      });
-    }
+    // (Trace-mode schema browsing returns via the Schema Explorer when it is wired for trace sessions — the
+    // old SchemaBrowser/ArchetypeBrowser panels were removed in the GAP-02 consolidation, Stage 2.)
     return;
   }
 
-  // Open / none layout — navigator + inspector + drawer around a neutral empty center (no StartHere placeholder).
+  // Open / none layout — navigator + inspector + drawer around the Schema Explorer workspace.
+  // The Schema Explorer is the Open-session default center (J1 lands here) — always-on shell-structural,
+  // like the navigators (not a gateable zone-D deep view), so Open never dead-ends on an empty center.
+  // It is added FIRST (no position) so it establishes the main grid; the edge groups then wrap around it.
+  // (A no-position addPanel joins the active group, so adding it after an edge panel would dock it there.)
+  api.addPanel({
+    id: 'schema-explorer',
+    component: 'SchemaExplorer',
+    title: 'Schema',
+    tabComponent: 'locked',
+  });
+
   api.addEdgeGroup('left', { id: EDGE_LEFT_ID, initialSize: 260, minimumSize: 150 });
   api.addEdgeGroup('right', { id: EDGE_RIGHT_ID, initialSize: 320, minimumSize: 200 });
   api.addEdgeGroup('bottom', { id: EDGE_BOTTOM_ID, initialSize: 200, minimumSize: 100 });

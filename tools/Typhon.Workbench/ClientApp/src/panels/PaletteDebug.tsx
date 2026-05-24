@@ -16,6 +16,41 @@ import { OFF_CPU_PALETTE } from '@/libs/profiler/canvas/theme';
 import { ACCESS_COLOR } from '@/panels/DataFlow/barBuilding';
 
 /**
+ * Chrome semantic tokens (DS-2a) — the theme-aware CSS variables in globals.css that all UI chrome draws
+ * from (background/foreground/primary/accent/border/ring/…). Distinct from the data-viz palettes below: these
+ * are resolved live via `var(--token)`, so the swatches reflect the *current* light/dark theme. The focus ring
+ * (`--ring`) and the active-pane tint (`--panel-active-border`) live here — they are NOT data-viz colours.
+ */
+const CHROME_TOKENS: readonly { name: string; note?: string }[] = [
+  { name: '--ring', note: 'focus-visible ring (= --primary in light theme)' },
+  { name: '--panel-active-border', note: 'active-pane header tint (= --ring)' },
+  { name: '--sidebar-ring' },
+  { name: '--primary' },
+  { name: '--primary-foreground' },
+  { name: '--secondary' },
+  { name: '--secondary-foreground' },
+  { name: '--accent', note: 'selection fill (selected row/tab)' },
+  { name: '--accent-foreground' },
+  { name: '--background' },
+  { name: '--foreground' },
+  { name: '--card' },
+  { name: '--card-foreground' },
+  { name: '--popover' },
+  { name: '--popover-foreground' },
+  { name: '--muted' },
+  { name: '--muted-foreground' },
+  { name: '--border' },
+  { name: '--input' },
+  { name: '--destructive' },
+  { name: '--destructive-foreground' },
+  { name: '--chart-1' },
+  { name: '--chart-2' },
+  { name: '--chart-3' },
+  { name: '--chart-4' },
+  { name: '--chart-5' },
+];
+
+/**
  * Debug panel — renders every colour palette the Workbench draws with as labelled swatches. A
  * developer aid: opened only from the command palette ("Debug: Color Palettes"), never in the
  * View menu and not part of any default layout.
@@ -27,6 +62,15 @@ export default function PaletteDebug() {
       <p className="mb-3 text-muted-foreground">
         Every palette the Workbench renders with. Debug view — opened via the command palette.
       </p>
+
+      <Section
+        name="Chrome tokens (semantic — DS-2a)"
+        note="Theme-aware CSS variables (globals.css) — resolved live, so these reflect the current light/dark theme. The focus ring is --ring."
+      >
+        {CHROME_TOKENS.map((t) => (
+          <Swatch key={t.name} label={t.name} value={t.note ?? `var(${t.name})`} fill={`var(${t.name})`} />
+        ))}
+      </Section>
 
       <PairSection
         name="PHASE_PALETTE"

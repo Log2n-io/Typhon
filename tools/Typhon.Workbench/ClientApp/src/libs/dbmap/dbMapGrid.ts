@@ -10,6 +10,21 @@ export function gridCols(count: number): number {
 }
 
 /**
+ * The trailing slots of the near-square `gridCols × rows` grid that hold no cell (`cols * rows - count`) — the
+ * surplus bottom-right cells, i.e. the "void". A grid of 3 cells tiles 2×2 and leaves 1; these slots must be
+ * drawn as invalid area (X crosshatch), the same cue a page's surplus chunk slots and out-of-file cells use,
+ * so the void never masquerades as data by leaking the parent's fill.
+ */
+export function gridVoidCount(count: number): number {
+  if (count <= 0) {
+    return 0;
+  }
+  const cols = gridCols(count);
+  const rows = Math.ceil(count / cols);
+  return cols * rows - count;
+}
+
+/**
  * The sub-rect of a page cell that the chunk grid occupies, after reserving the byte-proportional overhead band at
  * the top — the header, the root-only segment directory, and the stride-alignment padding (all the bytes before
  * chunk 0). Keeping the chunk grid inside this rect (instead of the whole cell) makes the L3 surface map the page's

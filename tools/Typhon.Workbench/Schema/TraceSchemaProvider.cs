@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using Typhon.Profiler;
+using Typhon.Schema.Definition;
 using Typhon.Workbench.Dtos.Schema;
 
 namespace Typhon.Workbench.Schema;
@@ -68,7 +69,8 @@ public sealed class TraceSchemaProvider : IStaticSchemaProvider
                 FieldCount: c.Fields?.Length ?? 0,
                 ArchetypeCount: CountArchetypesContaining(c.ComponentTypeId),
                 EntityCount: 0,
-                IndexCount: c.IndicesCount);
+                IndexCount: c.IndicesCount,
+                StorageMode: ((StorageMode)c.StorageMode).ToString());
         }
         return result;
     }
@@ -97,7 +99,8 @@ public sealed class TraceSchemaProvider : IStaticSchemaProvider
             TotalSize: c.ComponentStorageTotalSize,
             AllowMultiple: c.AllowMultiple,
             Revision: c.Revision,
-            Fields: fields);
+            Fields: fields,
+            StorageMode: ((StorageMode)c.StorageMode).ToString());
     }
 
     public ArchetypeInfoDto[] ListArchetypes()

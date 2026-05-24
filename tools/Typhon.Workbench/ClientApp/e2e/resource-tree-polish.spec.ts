@@ -57,9 +57,9 @@ test.describe('Phase 6 — Resource Tree polish', () => {
     await expect(page.getByRole('menuitem', { name: /copy path/i })).toBeVisible();
     await expect(page.getByRole('menuitem', { name: /reveal in tree/i })).toBeVisible();
     await expect(page.getByRole('menuitem', { name: /refresh subtree/i })).toBeVisible();
-    // Stage 0: handoffs to deactivated views are gated out entirely (Show Component Layout → SchemaLayout,
-    // Show in File Map → DbMap), and the always-disabled "Open in …" stubs were removed (PC-6: no broken
-    // affordances). They return with their views in later stages — this asserts the reduced shape.
+    // The first row is a non-ComponentTable node (Root), so it shows NO cross-view handoffs at all — they are
+    // component-only and hidden elsewhere (PC-6: no disabled stubs). Show-Component-Layout stays gated
+    // (SchemaLayout not yet reintroduced); Show-in-File-Map appears only on a ComponentTable row (Stage 2 P3).
     await expect(page.getByRole('menuitem', { name: /show component layout/i })).toHaveCount(0);
     await expect(page.getByRole('menuitem', { name: /show in file map/i })).toHaveCount(0);
     await expect(page.getByRole('menuitem', { name: /open in data browser/i })).toHaveCount(0);

@@ -22,6 +22,8 @@ export interface ComponentSummary {
   archetypeCount: number | null;
   entityCount: number;
   indexCount: number;
+  /** MVCC storage mode — "Versioned" / "SingleVersion" / "Transient" (GAP-25). */
+  storageMode: string;
 }
 
 export interface ComponentSchema {
@@ -32,6 +34,8 @@ export interface ComponentSchema {
   allowMultiple: boolean;
   revision: number;
   fields: Field[];
+  /** MVCC storage mode — "Versioned" / "SingleVersion" / "Transient" (GAP-25). */
+  storageMode: string;
 }
 
 export interface Field {
@@ -60,6 +64,7 @@ export function normalizeSummary(raw: ComponentSummaryDto): ComponentSummary {
     archetypeCount: raw.archetypeCount == null ? null : toNumber(raw.archetypeCount),
     entityCount: toNumber(raw.entityCount),
     indexCount: toNumber(raw.indexCount),
+    storageMode: toString(raw.storageMode),
   };
 }
 
@@ -85,6 +90,7 @@ export function normalizeSchema(raw: ComponentSchemaDto): ComponentSchema {
     allowMultiple: raw.allowMultiple,
     revision: toNumber(raw.revision),
     fields: (raw.fields ?? []).map(normalizeField),
+    storageMode: toString(raw.storageMode),
   };
 }
 

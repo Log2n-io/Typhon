@@ -31,6 +31,10 @@ public sealed class StorageMapController : ControllerBase
     [HttpGet("regions")]
     public ActionResult<StorageRegionsDto> GetRegions(Guid sessionId) => Invoke(_service.GetRegions);
 
+    /// <summary>Aggregate storage health rollup — whole-DB summary + per-segment table (GAP-16).</summary>
+    [HttpGet("health")]
+    public ActionResult<StorageHealthDto> GetHealth(Guid sessionId) => Invoke(_service.GetHealth);
+
     /// <summary>The top levels of the Hilbert aggregate pyramid.</summary>
     [HttpGet("overview")]
     public ActionResult<StorageOverviewDto> GetOverview(Guid sessionId) => Invoke(_service.GetOverview);

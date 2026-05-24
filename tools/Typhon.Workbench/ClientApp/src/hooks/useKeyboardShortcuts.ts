@@ -1,26 +1,14 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { useNavHistoryStore } from '@/stores/useNavHistoryStore';
 import { usePaletteStore } from '@/stores/usePaletteStore';
 import { useProfilerSessionStore } from '@/stores/useProfilerSessionStore';
 import { useProfilerViewStore } from '@/stores/useProfilerViewStore';
 import { useThemeStore } from '@/stores/useThemeStore';
-import { useUiPrefsStore } from '@/stores/useUiPrefsStore';
-import { toggleViewResourceTree, focusNextPanel, focusPrevPanel } from '@/shell/commands/openSchemaBrowser';
+import { toggleViewResourceTree, focusNextPanel, focusPrevPanel, focusChordTarget } from '@/shell/commands/openSchemaBrowser';
+import { isTypingInText } from '@/libs/dom/textInput';
+import { useKeyChordStore } from '@/stores/useKeyChordStore';
+import { createChordHandler, type ChordHandler } from './keyChord';
 import { useShiftShift } from './useShiftShift';
-
-/**
- * True when the focused element is a text input, textarea, or contenteditable — used to guard
- * plain-letter shortcuts (`g`, `l`) from firing while the user is typing. All modifier-key
- * shortcuts (`Ctrl+K`, `Alt+Shift+T`, etc.) bypass this check because they don't conflict with
- * typical text input.
- */
-function isTypingInText(): boolean {
-  const el = document.activeElement;
-  if (!el) return false;
-  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) return true;
-  if (el instanceof HTMLElement && el.isContentEditable) return true;
-  return false;
-}
 
 export function useKeyboardShortcuts(): void {
   const back = useNavHistoryStore((s) => s.back);
@@ -29,8 +17,25 @@ export function useKeyboardShortcuts(): void {
   const togglePalette = usePaletteStore((s) => s.toggle);
   useShiftShift(togglePalette);
 
+  // `g`-leader focus chord (PC-8): `g` then c/a/s/d/m focuses Component / Archetype / Schema / Data Browser / File Map.
+  // Created once. A panel that claims `g` (the profiler gauge) intercepts it first via capture-phase
+  // usePanelHotkeys, so the leader is only free — and the chord only arms — outside such a panel.
+  const chordRef = useRef<ChordHandler | null>(null);
+  if (chordRef.current === null) {
+    chordRef.current = createChordHandler({
+      leader: 'g',
+      resolve: focusChordTarget,
+      isTyping: isTypingInText,
+      onArmedChange: (armed) => useKeyChordStore.getState().setArmed(armed),
+    });
+  }
+
   useEffect(() => {
+    const chord = chordRef.current;
     function onKeyDown(e: KeyboardEvent) {
+      if (chord && chord.handle(e)) {
+        return;
+      }
       if (e.key === 'k' && e.ctrlKey && !e.shiftKey && !e.altKey) {
         e.preventDefault();
         togglePalette();
@@ -64,21 +69,9 @@ export function useKeyboardShortcuts(): void {
         return;
       }
 
-      // Profiler-scoped shortcuts (2f). Plain-letter keys need the typing-guard so they don't
-      // fire while the user is typing in the command palette, schema filter, etc. The Ctrl-Home
-      // combo bypasses the guard — modifier keys don't conflict with text input.
-      if (!e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey && (e.key === 'g' || e.key === 'G')) {
-        if (isTypingInText()) return;
-        e.preventDefault();
-        useProfilerViewStore.getState().toggleGaugeRegion();
-        return;
-      }
-      if (!e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey && (e.key === 'l' || e.key === 'L')) {
-        if (isTypingInText()) return;
-        e.preventDefault();
-        useUiPrefsStore.getState().toggleLegends();
-        return;
-      }
+      // Profiler timeline jump-to-start. (The former bare `g`/`l` gauge/legend toggles moved to the profiler
+      // view as panel-scoped keys — see ProfilerPanel/usePanelHotkeys — so they no longer fire app-wide; `g`
+      // is now the global focus-chord leader.) Ctrl-Home bypasses the typing-guard — modifiers don't collide.
       if (e.key === 'Home' && e.ctrlKey && !e.shiftKey && !e.altKey) {
         const metadata = useProfilerSessionStore.getState().metadata;
         const gm = metadata?.globalMetrics;
@@ -124,6 +117,7 @@ export function useKeyboardShortcuts(): void {
     window.addEventListener('mouseup', suppressNavOnly);
     window.addEventListener('auxclick', suppressNavOnly);
     return () => {
+      chord?.cancel();
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('mousedown', onMouseDown);
       window.removeEventListener('mouseup', suppressNavOnly);

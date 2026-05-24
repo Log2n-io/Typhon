@@ -49,12 +49,11 @@ async function openDemo(
   await expect(page.locator('body')).toContainText(/Storage|DataEngine/i, { timeout: 10_000 });
 }
 
-// The deep/workspace (zone-D) views deactivated in Stage 0, by their View-menu label.
+// The deep/workspace (zone-D) views STILL deactivated, by their View-menu label. (Data Browser was
+// reintroduced in Stage 2 Phase 2, so it left this set and is asserted present below.)
 const ZONE_D_MENU_ITEMS = [
   /component browser/i,
   /archetype browser/i,
-  /data browser/i,
-  /database file map/i,
   /component layout/i,
   /component archetypes/i,
   /component indexes/i,
@@ -88,6 +87,10 @@ test.describe('Stage 0 — shell frame only', () => {
       await expect(page.getByRole('menuitem', { name: label })).toHaveCount(0);
     }
 
+    // The reintroduced deep views (Stage 2) ARE exposed.
+    await expect(page.getByRole('menuitem', { name: /^data browser$/i })).toBeVisible();
+    await expect(page.getByRole('menuitem', { name: /database file map/i })).toBeVisible();
+
     // Shell View items survive.
     await expect(page.getByRole('menuitem', { name: /^logs$/i })).toBeVisible();
     await expect(page.getByRole('menuitem', { name: /^detail$/i })).toBeVisible();
@@ -113,9 +116,6 @@ test.describe('Stage 0 — shell frame only', () => {
     await paletteInput.fill('profiler');
     await expect(page.getByRole('option', { name: /toggle view profiler/i })).toHaveCount(0);
 
-    await paletteInput.fill('database file map');
-    await expect(page.getByRole('option', { name: /database file map/i })).toHaveCount(0);
-
     await paletteInput.fill('component browser');
     await expect(page.getByRole('option', { name: /component browser/i })).toHaveCount(0);
 
@@ -125,10 +125,12 @@ test.describe('Stage 0 — shell frame only', () => {
     await page.keyboard.press('Escape');
   });
 
-  test('no zone-D panel mounts in the workspace (AC0.2)', async ({ page, request }) => {
+  test('the Open workspace hosts the Schema Explorer; no still-gated deep view leaks (AC0.2 / Stage 2)', async ({ page, request }) => {
     await openDemo(page, request);
-    // Canaries for the most-likely-to-leak deep panels — none should be present.
-    await expect(page.getByPlaceholder(/search components/i)).toHaveCount(0);
-    await expect(page.getByPlaceholder(/search archetypes/i)).toHaveCount(0);
+    // Stage 2 reintroduced the Schema Explorer as the Open default center (no more empty/dead-end workspace).
+    await expect(page.getByTestId('schema-explorer')).toBeVisible();
+    // Views still gated off (Stages 3-4 / later) must not leak into the workspace.
+    await expect(page.getByTestId('dbmap-canvas')).toHaveCount(0);
+    await expect(page.getByTestId('entity-row')).toHaveCount(0);
   });
 });

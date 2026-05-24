@@ -1,5 +1,6 @@
 import { useSelectionStore } from './useSelectionStore';
 import { useNavHistoryStore } from './useNavHistoryStore';
+import { currentActivePanelId } from './navFocusBridge';
 
 /**
  * Leaf types recorded in nav history as generic `bus-leaf` entries. Resource keeps its richer
@@ -21,6 +22,8 @@ export function installNavHistorySync(): () => void {
     if (leaf === prev.leaf || leaf === null) return;
     if (!PUSHED_LEAF_TYPES.has(leaf.type)) return;
     if (useNavHistoryStore.getState().isRestoring) return;
-    useNavHistoryStore.getState().push({ kind: 'bus-leaf', leaf, timestamp: Date.now() });
+    // View-granular record: updates the current view's entry in place, or pushes a new one for a new view.
+    // The active panel id stamps the origin so back-to-here restores focus, not just the leaf (IA §3.2/§5.3).
+    useNavHistoryStore.getState().recordSelection(leaf, currentActivePanelId());
   });
 }

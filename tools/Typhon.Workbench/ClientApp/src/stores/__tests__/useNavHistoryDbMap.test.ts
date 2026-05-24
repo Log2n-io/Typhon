@@ -27,4 +27,22 @@ describe('useNavHistoryStore — dbmap-navigated', () => {
 
     registerDbMapCameraRestore(null);
   });
+
+  it('a reveal fly coalesces into the just-opened File Map entry (one Back stop, not two)', () => {
+    const nav = useNavHistoryStore.getState();
+    // A reveal: open the File Map (panel-opened) then fly to the target — must be ONE Back stop.
+    nav.recordViewTransition('dbmap', { type: 'component', ref: 'CompA', touchedAt: 1 });
+    expect(useNavHistoryStore.getState().entries).toHaveLength(1);
+    nav.recordDbMapNav({ scale: 4, x: -10, y: -20 }, 'Component CompA', 'dbmap');
+    const entries = useNavHistoryStore.getState().entries;
+    expect(entries).toHaveLength(1); // replaced the panel-opened in place, not appended
+    expect(entries[0]).toMatchObject({ kind: 'dbmap-navigated', panelId: 'dbmap', label: 'Component CompA' });
+  });
+
+  it('a fly while already in the File Map appends (preserves the map’s retraceable camera history)', () => {
+    const nav = useNavHistoryStore.getState();
+    nav.recordDbMapNav({ scale: 1, x: 0, y: 0 }, 'A', 'dbmap'); // no panel-opened on top → append
+    nav.recordDbMapNav({ scale: 8, x: -5, y: -5 }, 'B', 'dbmap'); // top is dbmap-navigated → append
+    expect(useNavHistoryStore.getState().entries).toHaveLength(2);
+  });
 });

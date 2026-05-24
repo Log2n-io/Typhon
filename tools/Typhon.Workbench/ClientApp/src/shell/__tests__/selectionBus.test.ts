@@ -4,7 +4,6 @@ import { resolveChain } from '@/stores/selectionChain';
 import { useSelectedResourceStore, type SelectedResource } from '@/stores/useSelectedResourceStore';
 import { useSchemaInspectorStore } from '@/stores/useSchemaInspectorStore';
 import { useDataBrowserStore } from '@/stores/useDataBrowserStore';
-import { useDbMapSelectionStore } from '@/stores/useDbMapSelectionStore';
 import { useProfilerSelectionStore } from '@/stores/useProfilerSelectionStore';
 
 // Conformance suite A — selection-bus laws (IA §3, GAP-05). The keystone, tested before its consumers.
@@ -16,7 +15,6 @@ function resetAll() {
   useSelectedResourceStore.getState().clear();
   useSchemaInspectorStore.getState().reset();
   useDataBrowserStore.getState().reset();
-  useDbMapSelectionStore.getState().clear();
   useProfilerSelectionStore.getState().clear();
   // reset() / clear() on the silos re-touch the bus via mirrors; clear the leaf last.
   useSelectionStore.getState().clearLeaf();
@@ -59,8 +57,10 @@ describe('suite A — selection-bus laws', () => {
       expect(bus().leaf).toMatchObject({ type: 'entity', ref: { archetypeId: '2002', entityId: '104656996' } });
     });
 
-    it('file-map selection mirrors to the bus leaf with its kind as the type', () => {
-      useDbMapSelectionStore.getState().select('demo.typhon', { kind: 'page', pageIndex: 7 });
+    it('file-map selection writes the bus leaf with its kind as the type', () => {
+      // Stage 2 (#375): the File Map writes the bus directly (the `useDbMapSelectionStore` silo was retired);
+      // the selection `kind` doubles as the leaf `type`.
+      bus().select('page', { kind: 'page', pageIndex: 7 });
       expect(bus().leaf).toMatchObject({ type: 'page', ref: { kind: 'page', pageIndex: 7 } });
     });
 
@@ -112,6 +112,16 @@ describe('suite A — selection-bus laws', () => {
         { type: 'page', ref: 5 },
         { type: 'chunk', ref: 2 },
       ]);
+    });
+
+    it('a file-map page leaf resolves its owning segment ancestor', () => {
+      bus().select('page', { kind: 'page', pageIndex: 5, segmentId: 3 });
+      expect(resolveChain(bus().leaf, bus())).toEqual([{ type: 'segment', ref: 3 }]);
+    });
+
+    it('a free page leaf (no owner) resolves no ancestor — not a bogus segment', () => {
+      bus().select('page', { kind: 'page', pageIndex: 9 });
+      expect(resolveChain(bus().leaf, bus())).toEqual([]);
     });
 
     it('a top-of-chain object has no ancestors', () => {

@@ -167,6 +167,135 @@
         ]
       }
     },
+    "/api/sessions/{sessionId}/data/archetypes/{archetypeId}/entities": {
+      "get": {
+        "tags": [
+          "DataBrowser"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "archetypeId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "schema": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": [
+                "integer",
+                "string"
+              ],
+              "format": "int32",
+              "default": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": [
+                "integer",
+                "string"
+              ],
+              "format": "int32",
+              "default": 200
+            }
+          },
+          {
+            "name": "preview",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EntityPageDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
+      }
+    },
+    "/api/sessions/{sessionId}/data/archetypes/{archetypeId}/entities/{entityId}": {
+      "get": {
+        "tags": [
+          "DataBrowser"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "archetypeId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "entityId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EntityDetailDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
+      }
+    },
     "/api/sessions/{sessionId}/topology": {
       "get": {
         "tags": [
@@ -2543,6 +2672,414 @@
         ]
       }
     },
+    "/api/sessions/{sessionId}/dbmap/regions": {
+      "get": {
+        "tags": [
+          "StorageMap"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StorageRegionsDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
+      }
+    },
+    "/api/sessions/{sessionId}/dbmap/health": {
+      "get": {
+        "tags": [
+          "StorageMap"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StorageHealthDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
+      }
+    },
+    "/api/sessions/{sessionId}/dbmap/overview": {
+      "get": {
+        "tags": [
+          "StorageMap"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StorageOverviewDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
+      }
+    },
+    "/api/sessions/{sessionId}/dbmap/region": {
+      "get": {
+        "tags": [
+          "StorageMap"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "node",
+            "in": "query",
+            "schema": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": [
+                "integer",
+                "string"
+              ],
+              "format": "int32",
+              "default": 0
+            }
+          },
+          {
+            "name": "lod",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "default": "leaf"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StorageRegionDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
+      }
+    },
+    "/api/sessions/{sessionId}/dbmap/region/detail": {
+      "get": {
+        "tags": [
+          "StorageMap"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "node",
+            "in": "query",
+            "schema": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": [
+                "integer",
+                "string"
+              ],
+              "format": "int32",
+              "default": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StorageRegionDetailDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
+      }
+    },
+    "/api/sessions/{sessionId}/dbmap/page/{idx}": {
+      "get": {
+        "tags": [
+          "StorageMap"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "idx",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StoragePageDetailDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
+      }
+    },
+    "/api/sessions/{sessionId}/dbmap/segment/{id}": {
+      "get": {
+        "tags": [
+          "StorageMap"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StorageSegmentDetailDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
+      }
+    },
+    "/api/sessions/{sessionId}/dbmap/segment/{id}/summary": {
+      "get": {
+        "tags": [
+          "StorageMap"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StorageSegmentSummaryDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
+      }
+    },
+    "/api/sessions/{sessionId}/dbmap/chunk/{segId}/{chunkId}": {
+      "get": {
+        "tags": [
+          "StorageMap"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "segId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "chunkId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StorageChunkDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
+      }
+    },
     "/api/system/os": {
       "get": {
         "tags": [
@@ -2966,7 +3503,8 @@
           "totalSamples",
           "managedSamples",
           "externalSamples",
-          "categoryBreakdown"
+          "categoryBreakdown",
+          "classificationAvailable"
         ],
         "type": "object",
         "properties": {
@@ -3011,6 +3549,9 @@
             "items": {
               "$ref": "#/components/schemas/CategorySliceDto"
             }
+          },
+          "classificationAvailable": {
+            "type": "boolean"
           }
         }
       },
@@ -3129,6 +3670,34 @@
           }
         }
       },
+      "ComponentInstanceDto": {
+        "required": [
+          "typeName",
+          "enabled",
+          "fields"
+        ],
+        "type": "object",
+        "properties": {
+          "typeName": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "fields": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/ComponentValueDto"
+            }
+          }
+        }
+      },
       "ComponentSchemaDto": {
         "required": [
           "typeName",
@@ -3137,7 +3706,8 @@
           "totalSize",
           "allowMultiple",
           "revision",
-          "fields"
+          "fields",
+          "storageMode"
         ],
         "type": "object",
         "properties": {
@@ -3188,6 +3758,12 @@
             "items": {
               "$ref": "#/components/schemas/FieldDto"
             }
+          },
+          "storageMode": {
+            "type": [
+              "null",
+              "string"
+            ]
           }
         }
       },
@@ -3199,7 +3775,8 @@
           "fieldCount",
           "archetypeCount",
           "entityCount",
-          "indexCount"
+          "indexCount",
+          "storageMode"
         ],
         "type": "object",
         "properties": {
@@ -3255,6 +3832,12 @@
               "string"
             ],
             "format": "int32"
+          },
+          "storageMode": {
+            "type": [
+              "null",
+              "string"
+            ]
           }
         }
       },
@@ -3274,6 +3857,31 @@
             "format": "int32"
           },
           "name": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "ComponentValueDto": {
+        "required": [
+          "fieldId",
+          "value",
+          "raw"
+        ],
+        "type": "object",
+        "properties": {
+          "fieldId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "value": { },
+          "raw": {
             "type": [
               "null",
               "string"
@@ -3701,6 +4309,222 @@
               "null",
               "string"
             ]
+          }
+        }
+      },
+      "EntityDetailDto": {
+        "required": [
+          "entityId",
+          "archetypeId",
+          "revision",
+          "components"
+        ],
+        "type": "object",
+        "properties": {
+          "entityId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "archetypeId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "revision": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "components": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/ComponentInstanceDto"
+            }
+          }
+        }
+      },
+      "EntityMapStatsDto": {
+        "required": [
+          "bucketCount",
+          "entryCount",
+          "overflowBucketCount",
+          "maxChainLength",
+          "loadFactor",
+          "fillEmpty",
+          "fillQuarter",
+          "fillHalf",
+          "fillThreeQuarter",
+          "fillFull"
+        ],
+        "type": "object",
+        "properties": {
+          "bucketCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "entryCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "overflowBucketCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "maxChainLength": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "loadFactor": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "fillEmpty": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "fillQuarter": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "fillHalf": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "fillThreeQuarter": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "fillFull": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          }
+        }
+      },
+      "EntityPageDto": {
+        "required": [
+          "archetypeId",
+          "revision",
+          "totalCount",
+          "offset",
+          "entities",
+          "hasMore"
+        ],
+        "type": "object",
+        "properties": {
+          "archetypeId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "revision": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "totalCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "offset": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "entities": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/EntityRowDto"
+            }
+          },
+          "hasMore": {
+            "type": "boolean"
+          }
+        }
+      },
+      "EntityRowDto": {
+        "required": [
+          "entityId",
+          "preview"
+        ],
+        "type": "object",
+        "properties": {
+          "entityId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "preview": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/ComponentValueDto"
+            }
           }
         }
       },
@@ -5363,6 +6187,1155 @@
               "string"
             ],
             "format": "int32"
+          }
+        }
+      },
+      "StorageChunkDto": {
+        "required": [
+          "segmentId",
+          "chunkId",
+          "decoder",
+          "occupied",
+          "byteOffset",
+          "size",
+          "componentType",
+          "cells"
+        ],
+        "type": "object",
+        "properties": {
+          "segmentId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "chunkId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "decoder": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "occupied": {
+            "type": "boolean"
+          },
+          "byteOffset": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "size": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "componentType": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "cells": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/StorageContentCellDto"
+            }
+          },
+          "clusterComponents": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "StorageContentCellDto": {
+        "required": [
+          "label",
+          "value",
+          "kind",
+          "offset",
+          "size",
+          "colorKey"
+        ],
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "value": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "kind": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "offset": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "size": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "colorKey": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "enabledMask": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64",
+            "default": 0
+          }
+        }
+      },
+      "StorageHealthDto": {
+        "required": [
+          "databaseName",
+          "dataFileBytes",
+          "dataFilePageCount",
+          "usedPageCount",
+          "freePageCount",
+          "walBytes",
+          "checkpointLsn",
+          "segmentCount",
+          "reclaimableBytes",
+          "fragmentationPct",
+          "segments"
+        ],
+        "type": "object",
+        "properties": {
+          "databaseName": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "dataFileBytes": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "dataFilePageCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "usedPageCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "freePageCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "walBytes": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "checkpointLsn": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "segmentCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "reclaimableBytes": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "fragmentationPct": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "segments": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/StorageHealthSegmentDto"
+            }
+          }
+        }
+      },
+      "StorageHealthSegmentDto": {
+        "required": [
+          "id",
+          "kind",
+          "typeName",
+          "pageCount",
+          "allocatedChunkCount",
+          "chunkCapacity",
+          "chunkFillPct",
+          "reclaimableBytes",
+          "entityCount",
+          "occupancyPct"
+        ],
+        "type": "object",
+        "properties": {
+          "id": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "kind": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "typeName": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "pageCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "allocatedChunkCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "chunkCapacity": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "chunkFillPct": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "reclaimableBytes": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "entityCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "occupancyPct": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          }
+        }
+      },
+      "StorageOverviewDto": {
+        "required": [
+          "hilbertOrder",
+          "levels"
+        ],
+        "type": "object",
+        "properties": {
+          "hilbertOrder": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "levels": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/StoragePyramidLevelDto"
+            }
+          }
+        }
+      },
+      "StoragePageDetailDto": {
+        "required": [
+          "pageIndex",
+          "byteOffset",
+          "pageType",
+          "ownerSegmentId",
+          "ownerSegmentKind",
+          "changeRevision",
+          "formatRevision",
+          "modificationCounter",
+          "storedChecksum",
+          "liveChecksum",
+          "crcStatus",
+          "residency",
+          "dirtyCounter",
+          "chunkUsed",
+          "chunkTotal",
+          "fillRatio",
+          "firstChunkId",
+          "chunkOccupancy",
+          "directoryEntries"
+        ],
+        "type": "object",
+        "properties": {
+          "pageIndex": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "byteOffset": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "pageType": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "ownerSegmentId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "ownerSegmentKind": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "changeRevision": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "formatRevision": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "modificationCounter": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "storedChecksum": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint32"
+          },
+          "liveChecksum": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint32"
+          },
+          "crcStatus": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "residency": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "dirtyCounter": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "chunkUsed": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "chunkTotal": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "fillRatio": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "firstChunkId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "chunkOccupancy": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "directoryEntries": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/StorageContentCellDto"
+            }
+          },
+          "chunkFill": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "default": ""
+          },
+          "chunkClass": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "default": ""
+          },
+          "occupancyMap": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "default": ""
+          },
+          "occupancyFirstPage": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64",
+            "default": 0
+          },
+          "occupancyGovernedCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32",
+            "default": 0
+          },
+          "occupancyGridCols": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32",
+            "default": 0
+          },
+          "headerBytes": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32",
+            "default": 0
+          },
+          "directoryBytes": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32",
+            "default": 0
+          },
+          "paddingBytes": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32",
+            "default": 0
+          }
+        }
+      },
+      "StoragePyramidLevelDto": {
+        "required": [
+          "level",
+          "nodeCount",
+          "dominantTypes",
+          "usedCounts"
+        ],
+        "type": "object",
+        "properties": {
+          "level": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "nodeCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "dominantTypes": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "usedCounts": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": [
+                "integer",
+                "string"
+              ],
+              "format": "int32"
+            }
+          }
+        }
+      },
+      "StorageRegionDetailDto": {
+        "required": [
+          "node",
+          "firstPage",
+          "pageCount",
+          "fillRatio",
+          "changeRevision",
+          "crcStatus",
+          "residency",
+          "chunkUsed",
+          "chunkTotal",
+          "maxChangeRevision",
+          "entropy",
+          "byteClass",
+          "approximate",
+          "sampleStride"
+        ],
+        "type": "object",
+        "properties": {
+          "node": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "firstPage": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "pageCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "fillRatio": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "changeRevision": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "crcStatus": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "residency": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "chunkUsed": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "chunkTotal": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "maxChangeRevision": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "entropy": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "byteClass": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "approximate": {
+            "type": "boolean"
+          },
+          "sampleStride": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          }
+        }
+      },
+      "StorageRegionDto": {
+        "required": [
+          "node",
+          "lod",
+          "pageCount",
+          "pageTypes",
+          "ownerSegmentIds",
+          "pageRanks"
+        ],
+        "type": "object",
+        "properties": {
+          "node": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "lod": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "pageCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "pageTypes": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "ownerSegmentIds": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "pageRanks": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "StorageRegionsDto": {
+        "required": [
+          "databaseName",
+          "dataFileBytes",
+          "dataFilePageCount",
+          "walBytes",
+          "hilbertOrder",
+          "checkpointLsn",
+          "downSampleFactor",
+          "detailTileSize",
+          "segments"
+        ],
+        "type": "object",
+        "properties": {
+          "databaseName": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "dataFileBytes": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "dataFilePageCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "walBytes": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "hilbertOrder": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "checkpointLsn": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "downSampleFactor": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "detailTileSize": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "segments": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/StorageSegmentDto"
+            }
+          }
+        }
+      },
+      "StorageSegmentDetailDto": {
+        "required": [
+          "id",
+          "rootPageIndex",
+          "kind",
+          "pageCount",
+          "stride",
+          "chunkCountPerPage",
+          "totalChunkCapacity",
+          "pages"
+        ],
+        "type": "object",
+        "properties": {
+          "id": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "rootPageIndex": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "kind": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "pageCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "stride": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "chunkCountPerPage": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "totalChunkCapacity": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "pages": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": [
+                "integer",
+                "string"
+              ],
+              "format": "int32"
+            }
+          }
+        }
+      },
+      "StorageSegmentDto": {
+        "required": [
+          "id",
+          "rootPageIndex",
+          "kind",
+          "pageCount",
+          "typeName"
+        ],
+        "type": "object",
+        "properties": {
+          "id": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "rootPageIndex": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "kind": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "pageCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "typeName": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "StorageSegmentSummaryDto": {
+        "required": [
+          "id",
+          "rootPageIndex",
+          "kind",
+          "pageCount",
+          "stride",
+          "allocatedChunkCount",
+          "freeChunkCount",
+          "chunkCapacity"
+        ],
+        "type": "object",
+        "properties": {
+          "id": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "rootPageIndex": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "kind": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "pageCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "stride": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "allocatedChunkCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "freeChunkCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "chunkCapacity": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "entityCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64",
+            "default": 0
+          },
+          "activeClusterCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32",
+            "default": 0
+          },
+          "clusterSize": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32",
+            "default": 0
+          },
+          "entityMap": {
+            "$ref": "#/components/schemas/EntityMapStatsDto"
           }
         }
       },
@@ -25313,6 +27286,9 @@
       "name": "Options"
     },
     {
+      "name": "DataBrowser"
+    },
+    {
       "name": "Files"
     },
     {
@@ -25323,6 +27299,9 @@
     },
     {
       "name": "Schema"
+    },
+    {
+      "name": "StorageMap"
     },
     {
       "name": "System"

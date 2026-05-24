@@ -7,12 +7,9 @@ export default defineConfig({
   // Stage 0 (#372) deactivated every deep/workspace (zone-D) view, so the specs that drive those views
   // can no longer reach them. They are ignored — not deleted — and return (rewritten for the redesign) as
   // each view is reintroduced in Stages 2-4. Shell specs (resource tree, connect, theme, stage0-shell,
-  // conformance-affordances) still run.
+  // conformance-affordances) still run. Data Browser returned in Stage 2 Phase 2; File Map in Phase 3.
   testIgnore: [
-    '**/schema-inspector.spec.ts',
-    '**/data-browser.spec.ts',
     '**/data-flow.spec.ts',
-    '**/dbmap-*.spec.ts',
     '**/profiler-*.spec.ts',
   ],
   fullyParallel: false,

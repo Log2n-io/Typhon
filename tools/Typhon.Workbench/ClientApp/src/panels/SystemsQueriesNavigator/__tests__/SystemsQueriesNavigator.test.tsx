@@ -53,4 +53,25 @@ describe('SystemsQueriesNavigator', () => {
     // It also projects the system scalar slot for cross-panel highlighting.
     expect(useSelectionStore.getState().system).toBe('Movement');
   });
+
+  // PC-8 roving (suite F). The arrow-key *mechanics* are owned by the vetted Radix RovingFocusGroup (PC-8:
+  // "never hand-roll roving") and verified in a real browser — jsdom doesn't run Radix's focus collection.
+  // Here we assert the jsdom-stable invariant: every row is a roving *item*, so the whole list is ONE tab stop
+  // (Radix manages each row's tabindex) rather than N independent tab stops as before.
+  it('puts the whole list under one tab stop (every row is a roving item)', () => {
+    renderNav();
+    const rows = screen.getAllByRole('button');
+    expect(rows.length).toBeGreaterThan(1);
+    // A roving item always carries an explicit (Radix-managed) tabindex; plain multi-tab-stop buttons don't.
+    expect(rows.every((b) => b.getAttribute('tabindex') !== null)).toBe(true);
+  });
+
+  it('Esc backs focus out of the list', () => {
+    renderNav();
+    const movement = screen.getByRole('button', { name: /Movement/ });
+    movement.focus();
+    expect(document.activeElement).toBe(movement);
+    fireEvent.keyDown(movement, { key: 'Escape' });
+    expect(document.activeElement).not.toBe(movement);
+  });
 });

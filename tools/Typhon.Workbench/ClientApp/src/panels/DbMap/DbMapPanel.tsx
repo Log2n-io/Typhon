@@ -2,13 +2,14 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type { IDockviewPanelProps } from 'dockview-react';
 import { useSessionStore } from '@/stores/useSessionStore';
 import { useDbMapStore } from '@/stores/useDbMapStore';
-import { useDbMapSelectionStore } from '@/stores/useDbMapSelectionStore';
+import { useSelectionStore } from '@/stores/useSelectionStore';
+import { isDbMapLeafType } from '@/libs/dbmap/dbMapSelection';
 import { useDbMapOverlayStore } from '@/stores/useDbMapOverlayStore';
 import { useDbMap } from '@/hooks/dbmap/useDbMap';
 import { useDbMapChunks, useDbMapPages, useDbMapTiles } from '@/hooks/dbmap/useDbMapDetail';
 import { useDbMapSegment } from '@/hooks/dbmap/useDbMapSegment';
 import { formatFileSize } from '@/lib/formatters';
-import { DbMapRenderer, type DbDetailRequest, type DbMapTheme } from '@/libs/dbmap/dbMapRenderer';
+import { DbMapRenderer, SEGMENT_PULSE_MS, type DbDetailRequest, type DbMapTheme } from '@/libs/dbmap/dbMapRenderer';
 import type { L0Stripe } from '@/libs/dbmap/dbMapL0';
 import { rgbCss } from '@/libs/dbmap/dbMapColors';
 import {
@@ -22,6 +23,7 @@ import {
   type Camera,
   type CameraTween,
 } from '@/libs/dbmap/camera';
+import { shouldFitViewport } from '@/libs/dbmap/initialFit';
 import { hilbertD2XY } from '@/libs/dbmap/hilbert';
 import {
   DbPageType,
@@ -161,8 +163,16 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
   const filter = useDbMapStore((s) => s.filter);
   const pendingFocusType = useDbMapStore((s) => s.pendingFocusType);
   const clearPendingFocus = useDbMapStore((s) => s.clearPendingFocus);
-  const selectDbMap = useDbMapSelectionStore((s) => s.select);
-  const clearDbMapSelection = useDbMapSelectionStore((s) => s.clear);
+  const select = useSelectionStore((s) => s.select);
+  const clearLeaf = useSelectionStore((s) => s.clearLeaf);
+  // Clicking empty space (or Esc) deselects the map — but only clear the bus leaf when it currently holds
+  // a File-Map object, so we never wipe a leaf another panel owns (e.g. a component picked in Schema).
+  const clearDbMapSelection = useCallback(() => {
+    const leaf = useSelectionStore.getState().leaf;
+    if (leaf && isDbMapLeafType(leaf.type)) {
+      clearLeaf();
+    }
+  }, [clearLeaf]);
   const bookmarksByDb = useDbMapStore((s) => s.bookmarks);
   const addBookmark = useDbMapStore((s) => s.addBookmark);
   const removeBookmark = useDbMapStore((s) => s.removeBookmark);
@@ -194,6 +204,8 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
   const wheelSettleRef = useRef<number | null>(null);
   // rAF chain that keeps repainting while freshly-arrived L4 chunk content is fading in (so it eases, not pops).
   const contentFadeRef = useRef<number | null>(null);
+  // rAF chain that repaints for the lifetime of a post-reveal segment pulse (the renderer is pure-draw).
+  const pulseRafRef = useRef<number | null>(null);
 
   const [hover, setHover] = useState<HoverInfo | null>(null);
   const [l0Hover, setL0Hover] = useState<L0HoverInfo | null>(null);
@@ -440,8 +452,10 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
   // Records a discrete map navigation in the Workbench nav history (§13 A4 AC2) — `Alt+←/→` retraces it.
   // Reserved for cross-panel entry points (the Schema/Data "Show in File Map" cross-link); in-panel pan/zoom
   // goes to the panel-local stack below instead, so the global history isn't flooded with map exploration.
+  // The first fly after a reveal folds into the just-opened File Map Back stop (recordDbMapNav coalesces with
+  // the reveal's panel-opened entry) so a reveal is ONE Back, not two. 'dbmap' is this panel's dock id.
   const pushNav = useCallback((camera: Camera, label: string) => {
-    useNavHistoryStore.getState().push({ kind: 'dbmap-navigated', camera, label, timestamp: Date.now() });
+    useNavHistoryStore.getState().recordDbMapNav(camera, label, 'dbmap');
   }, []);
 
   // Records a camera state in the panel-local back/forward stack (the mouse-thumb-button history).
@@ -553,8 +567,43 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
   }, [data, addBookmark]);
 
   // Cross-link entry (§7.3 / A4 AC1) — a Resource Explorer / Schema Inspector "Show in File Map" sets a
-  // pending component type; once the map is loaded, focus that component's segment (fragmentation lens) and
-  // fly there, then clear the request so a later panel re-render does not re-trigger it.
+  // pending component type; once the map is loaded, fly to that component's segment and select it (so the
+  // Inspector shows it), then clear the request so a later panel re-render does not re-trigger it. A reveal is
+  // *spatial* (file-map.md §6: "fly to its segment") — it deliberately does NOT switch the analytical lens;
+  // Fragmentation stays a user choice via the Lens combo.
+  // Flash the just-revealed segment's pages so the matched zone is obvious. The renderer draws the pulse from
+  // its start time; this rAF chain keeps frames coming for the pulse window. While a camera fly-to is animating
+  // its own loop already repaints (don't double-render); once it settles, this keeps the pulse alive at rest.
+  const pulseSegment = useCallback((segmentId: number) => {
+    const renderer = rendererRef.current;
+    if (!renderer) {
+      return;
+    }
+    const start = performance.now();
+    renderer.setSegmentPulse(segmentId, start);
+    if (pulseRafRef.current != null) {
+      cancelAnimationFrame(pulseRafRef.current);
+    }
+    const step = () => {
+      const r = rendererRef.current;
+      if (!r) {
+        pulseRafRef.current = null;
+        return;
+      }
+      if (tweenRef.current == null) {
+        r.render();
+      }
+      if (performance.now() - start < SEGMENT_PULSE_MS) {
+        pulseRafRef.current = requestAnimationFrame(step);
+      } else {
+        r.setSegmentPulse(null, 0);
+        r.render();
+        pulseRafRef.current = null;
+      }
+    };
+    pulseRafRef.current = requestAnimationFrame(step);
+  }, []);
+
   useEffect(() => {
     if (!data || !pendingFocusType) {
       return;
@@ -562,10 +611,11 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
     const seg = data.segments.find((s) => s.typeName === pendingFocusType);
     clearPendingFocus();
     if (seg) {
-      useDbMapStore.getState().focusSegment(seg.id);
+      select('segment', { kind: 'segment', segmentId: seg.id, typeName: seg.typeName || undefined });
       flyToPage(seg.rootPageIndex, `Component ${pendingFocusType}`);
+      pulseSegment(seg.id);
     }
-  }, [data, pendingFocusType, clearPendingFocus, flyToPage]);
+  }, [data, pendingFocusType, clearPendingFocus, flyToPage, select, pulseSegment]);
 
   // Construct the renderer once the canvas element exists.
   useLayoutEffect(() => {
@@ -596,7 +646,44 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
     return () => observer.disconnect();
   }, []);
 
-  // Push the decoded map into the renderer and frame the whole file. The encoding / overlay are applied by
+  // Frame the whole file the first time we have BOTH data and a real surface. Fits exactly once (`fittedRef`)
+  // so later resizes / refreshes preserve the user's framing, and never fights an in-flight fly-to (a
+  // cross-link reveal owns the camera via its tween). Mounting a dockview panel while it is the *inactive*
+  // tab gives it a 0×0 box, so the data-driven call below can't fit then — the ResizeObserver retries this
+  // when the panel gets its first real size on activation. Without that retry the camera stays at its
+  // `{scale:1, x:0, y:0}` default and the file renders ~90% off the top-left ([shouldFitViewport]).
+  const applyInitialFit = useCallback(() => {
+    const renderer = rendererRef.current;
+    const surface = surfaceRef.current;
+    if (!renderer || !surface) {
+      return;
+    }
+    const layout = renderer.getLayout();
+    if (!layout) {
+      return;
+    }
+    const { width, height } = surface.getBoundingClientRect();
+    if (!shouldFitViewport({ hasData: !!data, alreadyFitted: fittedRef.current, flying: !!tweenRef.current, width, height })) {
+      return;
+    }
+    cameraRef.current = fitToRect(layout.worldBounds, width, height, FIT_PADDING);
+    fittedRef.current = true;
+    // Seed the local back/forward stack with the initial fit so the user can always step back to it — but only
+    // if nothing landed first (a cross-link open flies before this runs and must keep its entry).
+    if (historyRef.current.pointer < 0) {
+      historyRef.current = pushCameraHistory(historyRef.current, cameraRef.current);
+    }
+    renderer.setCamera(cameraRef.current);
+    renderer.render();
+  }, [data]);
+
+  // Latest fit fn behind a ref so the (never-resubscribed) ResizeObserver can call it without a stale `data`.
+  const applyInitialFitRef = useRef(applyInitialFit);
+  useEffect(() => {
+    applyInitialFitRef.current = applyInitialFit;
+  }, [applyInitialFit]);
+
+  // Push the decoded map into the renderer and frame it on data change. The encoding / overlay are applied by
   // their own effect below, which also runs on mount — so this effect deliberately tracks only data.
   useEffect(() => {
     const renderer = rendererRef.current;
@@ -608,22 +695,15 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
     renderer.setViewport(width, height, window.devicePixelRatio || 1);
     renderer.setData(data ?? null);
     setDetailReq(EMPTY_REQUEST);
-    const layout = renderer.getLayout();
     if (!data) {
       fittedRef.current = false;
       historyRef.current = emptyCameraHistory();
-    } else if (layout && width > 0 && height > 0 && !fittedRef.current) {
-      cameraRef.current = fitToRect(layout.worldBounds, width, height, FIT_PADDING);
-      fittedRef.current = true;
-      // Seed the local back/forward stack with the initial fit so the user can always step back to it — but only
-      // if nothing landed first (a cross-link open flies before this runs and must keep its entry).
-      if (historyRef.current.pointer < 0) {
-        historyRef.current = pushCameraHistory(historyRef.current, cameraRef.current);
-      }
+    } else {
+      applyInitialFit();
     }
     renderer.setCamera(cameraRef.current);
     renderer.render();
-  }, [data]);
+  }, [data, applyInitialFit]);
 
   // Theme change — re-resolve the token colours and repaint, without disturbing the camera.
   useEffect(() => {
@@ -819,6 +899,9 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
     const ro = new ResizeObserver(() => {
       const { width, height } = surface.getBoundingClientRect();
       renderer.setViewport(width, height, window.devicePixelRatio || 1);
+      // Retry the one-time fit here: when the panel was mounted as an inactive (0×0) tab, this is where it
+      // first gets real dimensions — without it the file stays framed ~90% off the top-left on activation.
+      applyInitialFitRef.current();
       renderer.render();
     });
     ro.observe(surface);
@@ -902,6 +985,9 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
       }
       if (contentFadeRef.current != null) {
         cancelAnimationFrame(contentFadeRef.current);
+      }
+      if (pulseRafRef.current != null) {
+        cancelAnimationFrame(pulseRafRef.current);
       }
       if (tooltipTimerRef.current != null) {
         window.clearTimeout(tooltipTimerRef.current);
@@ -1028,8 +1114,9 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
         const store = useDbMapStore.getState();
         // Only *re-focus* the segment when the fragmentation lens is already active (matching the L1 page-click
         // path below). A bare click — including the first click of a double-click-to-zoom, which at L0 always lands
-        // on a stripe — must not silently switch the Lens combo to fragmentation. The deliberate entry points stay:
-        // pick Fragmentation in the combo, or use the Schema/Data "Show in File Map" cross-link.
+        // on a stripe — must not silently switch the Lens combo to fragmentation. Fragmentation is a deliberate
+        // user choice via the Lens combo; the "Show in File Map" cross-link is purely spatial (it flies to + selects
+        // the segment without touching the lens).
         if (stripe.kind === 'segment' && stripe.segmentId != null && stripe.segmentId !== NO_SEGMENT) {
           if (store.lens === 'fragmentation') {
             store.focusSegment(stripe.segmentId);
@@ -1058,7 +1145,7 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
             renderer.setSelectionChunk({ page: hit.page, chunkInPage: hit.chunkInPage });
             renderer.setSelectionCell({ page: hit.page, chunkInPage: hit.chunkInPage, cellIndex: hit.cellIndex });
             scheduleRender();
-            selectDbMap(data.databaseName, {
+            select('cell', {
               kind: 'cell',
               pageIndex: hit.page,
               segmentId: detail.ownerSegmentId,
@@ -1080,7 +1167,7 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
             renderer.setSelectionChunk({ page: hit.page, chunkInPage: hit.chunkInPage });
             renderer.setSelectionCell(null);
             scheduleRender();
-            selectDbMap(data.databaseName, {
+            select('chunk', {
               kind: 'chunk',
               pageIndex: hit.page,
               segmentId: detail.ownerSegmentId,
@@ -1108,9 +1195,15 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
       if (store.lens === 'fragmentation' && segId !== NO_SEGMENT) {
         store.focusSegment(segId);
       }
-      selectDbMap(data.databaseName, { kind: 'page', pageIndex: page });
+      // Carry the owning segment so the Inspector shows the `Segment ⊃ Page` ancestor section (IA §2.5),
+      // matching chunk/cell. A free page (NO_SEGMENT) carries none → no bogus parent in the chain.
+      select('page', {
+        kind: 'page',
+        pageIndex: page,
+        segmentId: segId !== NO_SEGMENT ? segId : undefined,
+      });
     },
-    [data, pageDetails, chunkContents, scheduleRender, selectDbMap, clearDbMapSelection],
+    [data, pageDetails, chunkContents, scheduleRender, select, clearDbMapSelection],
   );
 
   const handleWindowMouseMove = useCallback(
@@ -1545,7 +1638,9 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
               regions={regions}
               segments={data?.segments ?? []}
               onFlyToRegion={flyToRegion}
-              onSelectSegment={(segId) => data && selectDbMap(data.databaseName, { kind: 'segment', segmentId: segId })}
+              onSelectSegment={(segId) =>
+                select('segment', { kind: 'segment', segmentId: segId, typeName: data?.segments.find((s) => s.id === segId)?.typeName || undefined })
+              }
             />
           }
           bookmarks={

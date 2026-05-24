@@ -9,9 +9,7 @@ import {
 import { useRecentFilesStore } from '@/stores/useRecentFilesStore';
 import { useSessionStore } from '@/stores/useSessionStore';
 import { useResourceGraphStore } from '@/stores/useResourceGraphStore';
-import { useSchemaInspectorStore } from '@/stores/useSchemaInspectorStore';
-import { toggleViewSchemaLayout } from '@/shell/commands/openSchemaBrowser';
-import { openDbMapForComponent } from '@/shell/commands/openDbMap';
+import { openComponentInSchema, openDbMapForComponent } from '@/shell/commands/openDbMap';
 import { isViewActive } from '@/shell/viewRegistry';
 
 interface Props {
@@ -40,7 +38,6 @@ export default function ResourceTreeContextMenu({
   const pinResource = useRecentFilesStore((s) => s.pinResource);
   const unpinResource = useRecentFilesStore((s) => s.unpinResource);
   const clearFilter = useResourceGraphStore((s) => s.setFilter);
-  const selectSchemaComponent = useSchemaInspectorStore((s) => s.selectComponent);
 
   const isPinned = pins.includes(resourceId);
   const pathStr = path.join('/');
@@ -88,31 +85,27 @@ export default function ResourceTreeContextMenu({
         <ContextMenuItem onSelect={onRefreshSubtree}>
           Refresh Subtree
         </ContextMenuItem>
-        {/* Cross-view handoffs to deep views — present only while the target view is active (gated off in
-            Stage 0; they return with their view in later stages). Stub "Open in …" verbs to not-yet-built
-            views are omitted entirely rather than shown disabled (PC-6 / no broken affordances). */}
-        {(isViewActive('SchemaLayout') || isViewActive('DbMap')) && <ContextMenuSeparator />}
-        {isViewActive('SchemaLayout') && (
+        {/* Cross-view handoffs — present only for a ComponentTable row (PC-6: no disabled stubs). The
+            Component Inspector is always-on (shell inspector), so its handoff is unconditional; the File Map
+            handoff appears when the map view is active. (GAP-02: the old "Show Component Layout" → SchemaLayout
+            handoff is now "Open in Component Inspector", whose Layout tab is the layout's new home.) */}
+        {canOpenInSchema && (isViewActive('ComponentInspector') || isViewActive('DbMap')) && <ContextMenuSeparator />}
+        {canOpenInSchema && isViewActive('ComponentInspector') && (
           <ContextMenuItem
-            disabled={!canOpenInSchema}
             onSelect={() => {
-              if (!canOpenInSchema) return;
               // ComponentTable nodes carry the resource-tree name "ComponentTable_{Definition.Name}"
               // (see ComponentTable's base(...) call in the engine). The server looks up by the raw
               // Definition.Name, so we strip the prefix.
               const typeName = name.startsWith('ComponentTable_') ? name.slice('ComponentTable_'.length) : name;
-              selectSchemaComponent(typeName);
-              toggleViewSchemaLayout();
+              openComponentInSchema(typeName);
             }}
           >
-            Show Component Layout
+            Open in Component Inspector
           </ContextMenuItem>
         )}
-        {isViewActive('DbMap') && (
+        {canOpenInSchema && isViewActive('DbMap') && (
           <ContextMenuItem
-            disabled={!canOpenInSchema}
             onSelect={() => {
-              if (!canOpenInSchema) return;
               const typeName = name.startsWith('ComponentTable_') ? name.slice('ComponentTable_'.length) : name;
               openDbMapForComponent(typeName);
             }}

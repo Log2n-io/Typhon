@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import type { IDockviewPanelProps } from 'dockview-react';
 import { Activity, AlertCircle, Loader2, Radio, RefreshCw, Unplug } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { usePanelHotkeys } from '@/hooks/usePanelHotkeys';
 import { usePostApiSessionsTrace } from '@/api/generated/sessions/sessions';
 import { logError, logInfo } from '@/stores/useLogStore';
 import { useSessionStore } from '@/stores/useSessionStore';
@@ -8,6 +10,7 @@ import { useNavHistoryStore } from '@/stores/useNavHistoryStore';
 import { useProfilerSelectionStore } from '@/stores/useProfilerSelectionStore';
 import { useProfilerSessionStore, type ConnectionStatus } from '@/stores/useProfilerSessionStore';
 import { useProfilerViewStore } from '@/stores/useProfilerViewStore';
+import { useUiPrefsStore } from '@/stores/useUiPrefsStore';
 import { useProfilerMetadata } from '@/hooks/profiler/useProfilerMetadata';
 import { useProfilerBuildProgress } from '@/hooks/profiler/useProfilerBuildProgress';
 import { useProfilerLiveStream } from '@/hooks/profiler/useProfilerLiveStream';
@@ -31,11 +34,19 @@ import OverloadStrip from './sections/OverloadStrip';
  * Phase 1b proves the live-data pipeline end-to-end (TCP connect → Init frame → metadata DTO → tick SSE);
  * Phase 2 lifts the Canvas 2D renderers on top.
  */
-export default function ProfilerPanel() {
+export default function ProfilerPanel(props: IDockviewPanelProps) {
   const sessionId = useSessionStore((s) => s.sessionId);
   const token = useSessionStore((s) => s.token);
   const filePath = useSessionStore((s) => s.filePath);
   const kind = useSessionStore((s) => s.kind);
+
+  // Panel-scoped `g` (gauge region) / `l` (legends) toggles — formerly global single-key shortcuts, re-homed
+  // here so they only fire while a profiler view is focused (PC-8). Capture-phase, so `g` here takes
+  // precedence over the global `g` focus-chord leader while the profiler is active.
+  usePanelHotkeys(props.api, {
+    g: () => useProfilerViewStore.getState().toggleGaugeRegion(),
+    l: () => useUiPrefsStore.getState().toggleLegends(),
+  });
 
   const metadata = useProfilerSessionStore((s) => s.metadata);
   const buildProgress = useProfilerSessionStore((s) => s.buildProgress);

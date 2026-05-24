@@ -10,15 +10,18 @@
 //
 // See claude/design/Apps/Workbench/stages/stage-0-deactivate.md and 02-information-architecture.md §9.4.
 export const ZONE_D_VIEW_ACTIVE: Readonly<Record<string, boolean>> = {
-  // Inspect (P-A) — schema/data/storage deep views
-  SchemaBrowser: false,
-  ArchetypeBrowser: false,
-  SchemaLayout: false,
-  SchemaArchetypes: false,
-  SchemaIndexes: false,
-  SchemaRelationships: false,
-  DataBrowserEntities: false,
-  DbMap: false,
+  // Inspect (P-A) — schema/data/storage deep views.
+  // (Stage 2, GAP-02: the SchemaBrowser/ArchetypeBrowser navigators AND the four Schema* deep panels
+  // — Layout/Archetypes/Indexes/Relationships — were *removed*, consolidated into the Schema Explorer +
+  // the Archetype/Component Inspectors. They are no longer gated entries because they no longer exist.)
+  // Stage 2 Phase 2: the Data Browser is reintroduced onto the unified bus (GAP-03/05). Flipping this on
+  // mounts the Entity List panel and lights up its View-menu + palette + "Open in → Data Browser" handoffs.
+  DataBrowserEntities: true,
+  // Stage 2 Phase 3: the File Map is reintroduced (the storage drill) — selection already mirrors to the bus
+  // (Stage 1), and the reverse-reveal (GAP-04) handoffs + DS-2/3 color land with it.
+  DbMap: true,
+  // Stage 2 Phase 3: Storage Health — the aggregate dashboard complement to the File Map (GAP-16).
+  StorageHealth: true,
   // Profile (P-B) — profiler deep views
   Profiler: false,
   TopSpans: false,

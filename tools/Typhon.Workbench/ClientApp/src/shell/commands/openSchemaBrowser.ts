@@ -4,6 +4,9 @@ import { useSourceLocationStore } from '@/stores/useSourceLocationStore';
 import { useDockLayoutStore } from '@/stores/useDockLayoutStore';
 import { useSessionStore } from '@/stores/useSessionStore';
 import { useDataBrowserStore } from '@/stores/useDataBrowserStore';
+import { useSelectionStore } from '@/stores/useSelectionStore';
+import { useNavHistoryStore } from '@/stores/useNavHistoryStore';
+import { registerNavFocus } from '@/stores/navFocusBridge';
 
 /**
  * Module-level dockview api registration — same pattern as refreshResourceGraph. DockHost publishes
@@ -15,6 +18,10 @@ let selectionUnsubscribe: (() => void) | null = null;
 
 export function registerDockApi(api: DockviewApi | null): void {
   registeredApi = api;
+
+  // Wire the nav-history focus seam: the store restores focus through these on Back/Forward (IA §3.2 /
+  // §5.3). Reset to inert defaults when the dock tears down (api === null).
+  registerNavFocus(api ? readActivePanelId : null, api ? focusPanelById : null);
 
   // #302: when the source-preview panel is already open, follow the profiler selection — re-render
   // the panel with the new file:line on each span click. Deliberately scoped to "panel already open":
@@ -66,6 +73,54 @@ export function focusPanelBody(panel: NonNullable<ReturnType<DockviewApi['getPan
 }
 
 /**
+ * The id of the panel that currently holds focus — the active panel of the active group. Uses the same
+ * `.dv-active-group` detection {@link cyclePanelFocus} relies on (proven across edge + center groups);
+ * `api.groups` includes edge groups. Registered into the nav-focus seam so the nav-history store can
+ * stamp "where focus was" on each entry. `undefined` pre-mount.
+ */
+function readActivePanelId(): string | undefined {
+  const api = registeredApi;
+  if (!api) return undefined;
+  for (const group of api.groups) {
+    if (group.element.classList.contains('dv-active-group')) {
+      return group.activePanel?.id;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Move DOM focus into a panel by id, surfacing its (possibly collapsed edge) group first — the restore
+ * counterpart used by Back/Forward. No-op for an unknown id / pre-mount. Routes through {@link focusPanelBody}
+ * so it both activates the tab and moves real DOM focus into the content (not just the active-group border).
+ */
+function focusPanelById(id: string): void {
+  const api = registeredApi;
+  if (!api) return;
+  const panel = api.getPanel(id);
+  if (!panel) return;
+  const group = panel.api.group;
+  if (group.api.isCollapsed()) {
+    group.api.expand();
+  }
+  focusPanelBody(panel);
+}
+
+/**
+ * Record a view transition (a handoff / reveal that opened or focused a deep panel) into nav history, so
+ * Back/Forward restores focus to where you navigated **from** (IA §3.2 / §5.3, conformance B.2). Delegates
+ * to {@link NavHistoryState.recordViewTransition}, which coalesces the click→dblclick gesture into a single
+ * Back step and no-ops while restoring. Skips no-op moves (already on the destination here), so F6
+ * focus-cycling (which routes through {@link cyclePanelFocus}, not this) never pollutes the stack.
+ */
+function recordPanelTransition(destPanelId: string, fromPanelId: string | undefined): void {
+  if (destPanelId === fromPanelId) return;
+  // recordViewTransition coalesces the click→dblclick gesture into one Back step (see its doc) and
+  // no-ops while restoring.
+  useNavHistoryStore.getState().recordViewTransition(destPanelId, useSelectionStore.getState().leaf);
+}
+
+/**
  * F6 / Shift+F6 panel-focus cycling (PC-8). Cycles DOM focus across every present, non-collapsed panel
  * (edge groups + center) in left→right / top→bottom order. `getPanel(id)` resolves edge-group panels
  * (which `moveToNext`/`api.panels` do not); {@link focusPanelBody} both activates the panel and moves
@@ -87,8 +142,14 @@ function cyclePanelFocus(dir: 1 | -1): void {
     const rb = b.api.group.element.getBoundingClientRect();
     return ra.left - rb.left || ra.top - rb.top;
   });
-  const activeIdx = present.findIndex((p) => p.api.group.element.classList.contains('dv-active-group'));
-  const base = activeIdx >= 0 ? activeIdx : dir === 1 ? -1 : 0;
+  // Identify the current stop by the *active panel* (the focused tab), NOT the active group. A stacked group
+  // shares `.dv-active-group` across all its tabs, so keying on the group class lands on the group's first
+  // panel every cycle — F6 then ping-pongs on that group's first two tabs and never traverses the rest (the
+  // "F6 stuck" bug). `readActivePanelId()` returns the active group's `activePanel` id, so cycling steps
+  // tab-by-tab through stacked panes and on to the next group, visiting every docked pane deterministically.
+  const currentId = readActivePanelId();
+  const curIdx = present.findIndex((p) => p.id === currentId);
+  const base = curIdx >= 0 ? curIdx : dir === 1 ? -1 : 0;
   focusPanelBody(present[(base + dir + present.length) % present.length]);
 }
 
@@ -155,31 +216,87 @@ export function toggleViewLogs(): void {
   panel.focus();
 }
 
+/**
+ * Stage 2: open the Archetype Inspector (the deep view for the bus's current archetype) as a tab in the
+ * center group, next to the Schema Explorer. If already open, just focus it — it reads the bus leaf, so it
+ * re-targets to whatever archetype is selected. Reveal semantics (never closes).
+ */
+export function openArchetypeInspector(): void {
+  const api = registeredApi;
+  if (!api) return;
+  const from = readActivePanelId();
+  const existing = api.getPanel('archetype-inspector');
+  if (existing) {
+    focusPanelBody(existing);
+  } else {
+    const anchor = api.getPanel('schema-explorer') ?? api.getPanel('profiler');
+    api.addPanel({
+      id: 'archetype-inspector',
+      component: 'ArchetypeInspector',
+      title: 'Archetype',
+      position: anchor ? { referencePanel: anchor.id } : undefined,
+    });
+  }
+  recordPanelTransition('archetype-inspector', from);
+}
+
+/**
+ * Stage 2: open the Component Inspector (the deep view for the bus's current component) as a center tab
+ * next to the Schema Explorer. Focus if already open — it reads the bus leaf, re-targeting to the selected
+ * component. Reveal semantics (never closes).
+ */
+export function openComponentInspector(): void {
+  const api = registeredApi;
+  if (!api) return;
+  const from = readActivePanelId();
+  const existing = api.getPanel('component-inspector');
+  if (existing) {
+    focusPanelBody(existing);
+  } else {
+    const anchor = api.getPanel('schema-explorer') ?? api.getPanel('profiler');
+    api.addPanel({
+      id: 'component-inspector',
+      component: 'ComponentInspector',
+      title: 'Component',
+      position: anchor ? { referencePanel: anchor.id } : undefined,
+    });
+  }
+  recordPanelTransition('component-inspector', from);
+}
+
+/**
+ * `g`-leader focus chord (PC-8): route the chord's second key to a deep view, revealing + focusing it. The
+ * family: `g c` → Component Inspector, `g a` → Archetype Inspector, `g s` → Schema Explorer, `g d` → Data
+ * Browser, `g m` → File Map. Reuses the existing reveal commands (open-if-needed + focus), so a chord works
+ * whether or not the view is already docked. Returns `true` when the key named a known view (so the caller
+ * can swallow it).
+ */
+export function focusChordTarget(key: string): boolean {
+  switch (key) {
+    case 'c':
+      openComponentInspector();
+      return true;
+    case 'a':
+      openArchetypeInspector();
+      return true;
+    case 's':
+      ensureDockPanel('schema-explorer', 'SchemaExplorer', 'Schema');
+      return true;
+    case 'd':
+      openDataBrowser();
+      return true;
+    case 'm':
+      ensureDockPanel('dbmap', 'DbMap', 'Database File Map');
+      return true;
+    default:
+      return false;
+  }
+}
+
 // --- Dynamic view toggles (close if open, open if closed) ---
-
-export function toggleViewComponentBrowser(): void {
-  toggleDockPanel('schema-browser', 'SchemaBrowser', 'Component Browser');
-}
-
-export function toggleViewArchetypeBrowser(): void {
-  toggleDockPanel('archetype-browser', 'ArchetypeBrowser', 'Archetype Browser');
-}
-
-export function toggleViewSchemaLayout(): void {
-  toggleDockPanel('schema-layout', 'SchemaLayout', 'Component Layout');
-}
-
-export function toggleViewSchemaArchetypes(): void {
-  toggleDockPanel('schema-archetypes', 'SchemaArchetypes', 'Component Archetypes');
-}
-
-export function toggleViewSchemaIndexes(): void {
-  toggleDockPanel('schema-indexes', 'SchemaIndexes', 'Component Indexes');
-}
-
-export function toggleViewSchemaRelationships(): void {
-  toggleDockPanel('schema-relationships', 'SchemaRelationships', 'Component Relationships');
-}
+// (Stage 2 / GAP-02: toggleViewSchemaLayout/Archetypes/Indexes/Relationships were removed with the four
+//  Schema* panels they opened. The component-layout handoff now lives in the Component Inspector — see
+//  openComponentInSchema in openDbMap.ts.)
 
 export function toggleViewSystemDag(): void {
   toggleDockPanel('system-dag', 'SystemDag', 'System DAG');
@@ -202,12 +319,18 @@ export function toggleViewDbMap(): void {
   toggleDockPanel('dbmap', 'DbMap', 'Database File Map');
 }
 
+/** Stage 2 Phase 3 (GAP-16): open / close the Storage Health dashboard. */
+export function toggleViewStorageHealth(): void {
+  toggleDockPanel('storage-health', 'StorageHealth', 'Storage Health');
+}
+
 /**
  * Module 06: open the Data Browser — the Entity List in the center. The selected entity's component-card stack renders in the
  * shared Detail pane (right edge), so we surface that group too. Optionally pre-selects an archetype (the "Open in Data
  * Browser" cross-link path). Focuses the entity list; never closes anything.
  */
 export function openDataBrowser(archetypeId?: string): void {
+  const from = readActivePanelId();
   if (archetypeId) {
     useDataBrowserStore.getState().setArchetype(archetypeId);
   }
@@ -216,7 +339,9 @@ export function openDataBrowser(archetypeId?: string): void {
 
   let entities = api.getPanel('data-browser-entities');
   if (!entities) {
-    const anchor = api.getPanel('profiler') ?? api.getPanel('start-here');
+    // Anchor next to the Open-session center (Schema Explorer) so the Data Browser opens as a sibling
+    // workspace tab, not docked into a narrow edge group. Profiler/start-here are legacy fallbacks.
+    const anchor = api.getPanel('schema-explorer') ?? api.getPanel('profiler') ?? api.getPanel('start-here');
     api.addPanel({
       id: 'data-browser-entities',
       component: 'DataBrowserEntities',
@@ -231,6 +356,7 @@ export function openDataBrowser(archetypeId?: string): void {
     detailGroup.expand();
   }
   entities?.focus();
+  recordPanelTransition('data-browser-entities', from);
 }
 
 /** View-menu / palette toggle: open the Data Browser, or close the entity-list panel if already open. */
@@ -360,17 +486,20 @@ export function resetLayout(): void {
 export function ensureDockPanel(id: string, componentKey: string, title: string): void {
   const api = registeredApi;
   if (!api) return;
+  const from = readActivePanelId();
   const existing = api.getPanel(id);
   if (existing) {
     existing.focus();
-    return;
-  }
-  const anchor = api.getPanel('profiler') ?? api.getPanel('start-here');
-  if (anchor) {
-    api.addPanel({ id, component: componentKey, title, position: { referencePanel: anchor.id } });
   } else {
-    api.addPanel({ id, component: componentKey, title });
+    // Prefer the Open-session center (Schema Explorer); fall back to profiler/start-here for trace/attach.
+    const anchor = api.getPanel('schema-explorer') ?? api.getPanel('profiler') ?? api.getPanel('start-here');
+    if (anchor) {
+      api.addPanel({ id, component: componentKey, title, position: { referencePanel: anchor.id } });
+    } else {
+      api.addPanel({ id, component: componentKey, title });
+    }
   }
+  recordPanelTransition(id, from);
 }
 
 /** Expands the left edge group and focuses the Resource Tree — the "reveal in tree" surfacing step. No-op when absent. */
@@ -394,9 +523,9 @@ function toggleDockPanel(id: string, componentKey: string, title: string): void 
   }
   // Without a position, dockview drops the new panel into whichever group was last active — which after a
   // trace-mode auto-build is one of the narrow right-edge groups (Detail / Components / Archetypes), not the
-  // wide center group with Profiler. Prefer planting these toggles next to the Profiler/Start-Here so the
-  // panel mounts at usable width. Falls back to `addPanel` with no position when neither anchor exists.
-  const anchor = api.getPanel('profiler') ?? api.getPanel('start-here');
+  // wide center group. Prefer planting these toggles next to the Open center (Schema Explorer) or the
+  // Profiler/Start-Here. Falls back to `addPanel` with no position when no anchor exists.
+  const anchor = api.getPanel('schema-explorer') ?? api.getPanel('profiler') ?? api.getPanel('start-here');
   if (anchor) {
     api.addPanel({ id, component: componentKey, title, position: { referencePanel: anchor.id } });
   } else {

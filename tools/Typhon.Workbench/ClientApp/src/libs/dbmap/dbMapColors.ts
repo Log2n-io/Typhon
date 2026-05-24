@@ -4,8 +4,11 @@
 // the offscreen Hilbert image — far cheaper than parsing a CSS colour string per page.
 
 import { DbPageType, NO_SEGMENT, type DbMapEncoding } from './types';
+import { categoricalColor, categoricalHue, hslToRgb, type Rgb } from '@/libs/color/categorical';
 
-export type Rgb = readonly [number, number, number];
+// `Rgb` lives in the shared color base now (DS-2 consolidation); re-export so the renderer/panels that import
+// it from here keep working unchanged.
+export type { Rgb };
 
 /** Categorical page-type palette, indexed by `DbPageType` ordinal. Identity colours (theme-independent). */
 export const PAGE_TYPE_RGB: readonly Rgb[] = [
@@ -37,13 +40,12 @@ export const INDEX_INTERNAL_RGB: Rgb = [245, 158, 11];
 /** Inert Hilbert-tail / no-data background. */
 export const TAIL_RGB: Rgb = [15, 23, 42];
 
-/** Stable per-segment colour — a golden-angle hue walk keeps neighbouring segment ids visually distinct. */
+/** Stable per-segment colour — the shared DS-2 categorical hue ({@link categoricalColor}), so a segment reads the same here as in any other view. */
 export function segmentRgb(segmentId: number): Rgb {
   if (segmentId === NO_SEGMENT) {
     return TAIL_RGB;
   }
-  const hue = (segmentId * 137.508) % 360;
-  return hslToRgb(hue / 360, 0.62, 0.58);
+  return categoricalColor(segmentId);
 }
 
 /**
@@ -66,7 +68,7 @@ export function segmentRgbRanked(segmentId: number, rankFraction: number, spread
   if (segmentId === NO_SEGMENT) {
     return PAGE_TYPE_RGB[DbPageType.Free];
   }
-  const hue = (segmentId * 137.508) % 360;
+  const hue = categoricalHue(segmentId);
   const t = rankFraction < 0 ? 0 : rankFraction > 1 ? 1 : rankFraction;
   const s = spread < 0 ? 0 : spread > 1 ? 1 : spread;
   const center = (SEG_RANK_L_MIN + SEG_RANK_L_MAX) / 2;
@@ -90,6 +92,36 @@ export function pageColorRgb(encoding: DbMapEncoding, type: number, segmentId: n
 /** CSS `rgb(...)` string — for DOM legend swatches. */
 export function rgbCss(rgb: Rgb): string {
   return `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`;
+}
+
+/** WCAG relative luminance of an sRGB colour (0 = black, 1 = white). */
+function relativeLuminance(rgb: Rgb): number {
+  const channel = (c: number): number => {
+    const s = c / 255;
+    return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+  };
+  return 0.2126 * channel(rgb[0]) + 0.7152 * channel(rgb[1]) + 0.0722 * channel(rgb[2]);
+}
+
+const ON_WHITE: Rgb = [255, 255, 255];
+const ON_BLACK: Rgb = [17, 24, 39]; // near-black (slate-900) — softer than pure #000 over coloured cells
+
+/**
+ * DS-3: legible text colour over a dynamic background. Picks white or near-black — whichever has the higher
+ * WCAG contrast against <paramref name="bg"/> — so a label drawn over any data-driven cell colour stays
+ * readable. Two inks guarantee at least the WCAG UI/large-text floor (≥3:1) over every cell colour, and
+ * AA-normal (≥4.5:1) wherever the background luminance allows. Use for every label painted over a cell.
+ */
+export function onColor(bg: Rgb): Rgb {
+  const lum = relativeLuminance(bg);
+  const contrastWhite = 1.05 / (lum + 0.05);
+  const contrastBlack = (lum + 0.05) / (relativeLuminance(ON_BLACK) + 0.05);
+  return contrastWhite >= contrastBlack ? ON_WHITE : ON_BLACK;
+}
+
+/** {@link onColor} as a CSS string — for canvas `fillStyle` / DOM text over a coloured cell. */
+export function onColorCss(bg: Rgb): string {
+  return rgbCss(onColor(bg));
 }
 
 // ── A2 detail-tier ramps (Module 15, §4.2) ─────────────────────────────────────────────────────────────────
@@ -165,9 +197,8 @@ export function contentCellRgb(kind: string, colorKey: number): Rgb {
   if (colorKey < 0) {
     return [107, 114, 128];
   }
-  // Field / directory entry — golden-angle hue walk keeps adjacent keys distinct.
-  const hue = (colorKey * 137.508) % 360;
-  return hslToRgb(hue / 360, 0.6, 0.6);
+  // Field / directory entry — the shared categorical hue, a touch lighter than the default swatch.
+  return categoricalColor(colorKey, 0.6, 0.6);
 }
 
 /** Component-enabled overlay colour for a cluster entity slot (A6 §10.1). */
@@ -184,28 +215,4 @@ export function enabledOverlayRgb(occupied: boolean, enabled: boolean): Rgb {
     return FREE_RGB;
   }
   return enabled ? ENABLED_RGB : DISABLED_RGB;
-}
-
-function hslToRgb(h: number, s: number, l: number): Rgb {
-  if (s === 0) {
-    const v = Math.round(l * 255);
-    return [v, v, v];
-  }
-  const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
-  const p = 2 * l - q;
-  return [
-    Math.round(hueToChannel(p, q, h + 1 / 3) * 255),
-    Math.round(hueToChannel(p, q, h) * 255),
-    Math.round(hueToChannel(p, q, h - 1 / 3) * 255),
-  ];
-}
-
-function hueToChannel(p: number, q: number, t: number): number {
-  let tt = t;
-  if (tt < 0) tt += 1;
-  if (tt > 1) tt -= 1;
-  if (tt < 1 / 6) return p + (q - p) * 6 * tt;
-  if (tt < 1 / 2) return q;
-  if (tt < 2 / 3) return p + (q - p) * (2 / 3 - tt) * 6;
-  return p;
 }

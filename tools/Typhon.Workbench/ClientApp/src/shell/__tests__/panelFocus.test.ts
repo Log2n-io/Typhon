@@ -2,15 +2,17 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DockviewApi } from 'dockview-react';
 import { registerDockApi, focusNextPanel, focusPrevPanel, focusPanelBody } from '@/shell/commands/openSchemaBrowser';
 
-// Conformance suite F (Stage-1 keyboard part): F6/Shift+F6 cycle focus across panels — including the
-// edge-group panels (nav/inspector/logs) that dockview's own `moveToNext` ignores. Intra-panel roving
-// lands per-view in Stages 2-4 (shell-and-dockview §6).
+// Conformance suite F (Stage-1 keyboard part): F6/Shift+F6 cycle focus across EVERY docked pane — edge
+// groups (nav/inspector/logs) AND the stacked tabs of a center group.
 //
-// REGRESSION GUARD (why these assertions look the way they do): the first cut of F6 "worked" in a green
-// test that only checked `panel.focus()` was *called* — but live, `panel.focus()` only flips the active
-// group; it never moves DOM focus into the panel, so `:focus-visible` never fired and F6 looked dead.
-// These tests therefore assert the thing that was actually broken: focus lands on the panel's
-// `.dv-content-container` *body*, not merely that the panel was activated.
+// REGRESSION GUARD 1 (why focus lands on the body, not just the group): `panel.focus()` only flips the
+// active group; the cue (`:focus-visible`) needs DOM focus inside the panel — so we assert `focusPanelBody`
+// focuses the group's `.dv-content-container`.
+//
+// REGRESSION GUARD 2 (the "F6 stuck" bug): the current stop must be the active *panel*, not the active
+// *group*. A stacked group shares `.dv-active-group` across all its tabs, so keying on the group class
+// landed on the group's first panel every cycle and F6 ping-ponged on two tabs, never traversing the rest.
+// The stacked-group test below fails if cycling regresses to group-granular detection.
 
 interface FakeBody {
   focus: ReturnType<typeof vi.fn>;
@@ -18,90 +20,123 @@ interface FakeBody {
 interface FakePanel {
   id: string;
   focus: ReturnType<typeof vi.fn>;
+  api: { group: FakeGroup };
+}
+interface FakeGroup {
+  element: {
+    classList: { contains: (c: string) => boolean };
+    getBoundingClientRect: () => { left: number; top: number };
+    querySelector: (sel: string) => FakeBody | null;
+  };
+  api: { isCollapsed: () => boolean; expand: ReturnType<typeof vi.fn> };
+  panels: FakePanel[];
+  activePanel: FakePanel | null;
   body: FakeBody;
-  api: {
-    group: {
+}
+
+interface GroupSpec {
+  left: number;
+  active?: boolean;
+  collapsed?: boolean;
+  /** Panel ids in tab order; first is the group's active tab unless `activeId` overrides. */
+  panels: string[];
+  activeId?: string;
+}
+
+/** Build a fake dockview api: one or more groups, each holding one or more stacked panels (tabs). */
+function setup(specs: GroupSpec[]) {
+  const byId = new Map<string, FakePanel>();
+  const groups: FakeGroup[] = specs.map((spec) => {
+    const body: FakeBody = { focus: vi.fn() };
+    const group: FakeGroup = {
       element: {
-        classList: { contains: (c: string) => boolean };
-        getBoundingClientRect: () => { left: number; top: number };
-        querySelector: (sel: string) => FakeBody | null;
-      };
-      api: { isCollapsed: () => boolean };
-    };
-  };
-}
-
-function mkPanel(id: string, left: number, active = false, collapsed = false): FakePanel {
-  const body: FakeBody = { focus: vi.fn() };
-  return {
-    id,
-    focus: vi.fn(),
-    body,
-    api: {
-      group: {
-        element: {
-          classList: { contains: (c: string) => c === 'dv-active-group' && active },
-          getBoundingClientRect: () => ({ left, top: 0 }),
-          // focusPanelBody resolves the panel body via `.dv-content-container` — mirror that here so
-          // the test exercises the real focus path, not just `panel.focus()`.
-          querySelector: (sel: string) => (sel === '.dv-content-container' ? body : null),
-        },
-        api: { isCollapsed: () => collapsed },
+        classList: { contains: (c) => c === 'dv-active-group' && !!spec.active },
+        getBoundingClientRect: () => ({ left: spec.left, top: 0 }),
+        querySelector: (sel) => (sel === '.dv-content-container' ? body : null),
       },
-    },
-  };
-}
-
-function registerPanels(panels: Record<string, FakePanel>) {
-  registerDockApi({ groups: [], getPanel: (id: string) => panels[id] } as unknown as DockviewApi);
+      api: { isCollapsed: () => !!spec.collapsed, expand: vi.fn() },
+      panels: [],
+      activePanel: null,
+      body,
+    };
+    for (const id of spec.panels) {
+      const panel: FakePanel = { id, focus: vi.fn(), api: { group } };
+      group.panels.push(panel);
+      byId.set(id, panel);
+    }
+    group.activePanel = group.panels.find((p) => p.id === (spec.activeId ?? spec.panels[0])) ?? null;
+    return group;
+  });
+  registerDockApi({ groups, getPanel: (id: string) => byId.get(id) ?? null } as unknown as DockviewApi);
+  return byId;
 }
 
 afterEach(() => registerDockApi(null));
 
 describe('suite F — F6 panel cycling', () => {
-  it('focusNextPanel moves DOM focus into the next panel body (incl. edge groups)', () => {
-    // resource-tree active at x0; DOM order by left: resource-tree(0) → logs(35) → detail(960).
-    const panels = {
-      'resource-tree': mkPanel('resource-tree', 0, true),
-      logs: mkPanel('logs', 35),
-      detail: mkPanel('detail', 960),
-    };
-    registerPanels(panels);
+  it('focusNextPanel moves DOM focus into the next panel (across edge groups)', () => {
+    // DOM order by group left: resource-tree(0) → logs(35) → detail(960). Active = resource-tree.
+    const p = setup([
+      { left: 0, active: true, panels: ['resource-tree'] },
+      { left: 35, panels: ['logs'] },
+      { left: 960, panels: ['detail'] },
+    ]);
     focusNextPanel();
-    // The bug-catching assertion: focus must land on the *body*, not just activate the panel.
-    expect(panels.logs.body.focus).toHaveBeenCalledTimes(1);
-    expect(panels.logs.focus).toHaveBeenCalledTimes(1);
-    expect(panels.detail.body.focus).not.toHaveBeenCalled();
+    expect(p.get('logs')!.focus).toHaveBeenCalledTimes(1); // tab activated
+    expect(p.get('logs')!.api.group.body.focus).toHaveBeenCalledTimes(1); // DOM focus into the body
+    expect(p.get('detail')!.focus).not.toHaveBeenCalled();
   });
 
-  it('focusPrevPanel wraps to the last panel and focuses its body', () => {
-    const panels = {
-      'resource-tree': mkPanel('resource-tree', 0, true),
-      logs: mkPanel('logs', 35),
-      detail: mkPanel('detail', 960),
-    };
-    registerPanels(panels);
+  it('steps through the stacked tabs of a group, not just the group (regression: F6 stuck)', () => {
+    // One center group (left 300) stacking three tabs, active tab = the MIDDLE one.
+    const p = setup([
+      { left: 0, panels: ['resource-tree'] },
+      { left: 300, active: true, panels: ['schema', 'archetype', 'dbmap'], activeId: 'archetype' },
+      { left: 960, panels: ['detail'] },
+    ]);
+    focusNextPanel();
+    // Must advance to the NEXT tab in the same group (archetype → dbmap), not snap back to the group's first.
+    expect(p.get('dbmap')!.focus).toHaveBeenCalledTimes(1);
+    expect(p.get('schema')!.focus).not.toHaveBeenCalled();
+  });
+
+  it('exits a stacked group to the next group once its last tab is active', () => {
+    const p = setup([
+      { left: 0, panels: ['resource-tree'] },
+      { left: 300, active: true, panels: ['schema', 'archetype', 'dbmap'], activeId: 'dbmap' },
+      { left: 960, panels: ['detail'] },
+    ]);
+    focusNextPanel();
+    expect(p.get('detail')!.focus).toHaveBeenCalledTimes(1); // last center tab → next group
+  });
+
+  it('focusPrevPanel wraps to the last panel and focuses it', () => {
+    const p = setup([
+      { left: 0, active: true, panels: ['resource-tree'] },
+      { left: 35, panels: ['logs'] },
+      { left: 960, panels: ['detail'] },
+    ]);
     focusPrevPanel();
-    expect(panels.detail.body.focus).toHaveBeenCalledTimes(1);
+    expect(p.get('detail')!.focus).toHaveBeenCalledTimes(1);
   });
 
   it('skips panels in collapsed edge groups', () => {
-    const panels = {
-      'resource-tree': mkPanel('resource-tree', 0, true),
-      logs: mkPanel('logs', 35, false, true), // collapsed → skipped
-      detail: mkPanel('detail', 960),
-    };
-    registerPanels(panels);
+    const p = setup([
+      { left: 0, active: true, panels: ['resource-tree'] },
+      { left: 35, collapsed: true, panels: ['logs'] }, // collapsed → skipped
+      { left: 960, panels: ['detail'] },
+    ]);
     focusNextPanel();
-    expect(panels.logs.body.focus).not.toHaveBeenCalled();
-    expect(panels.detail.body.focus).toHaveBeenCalledTimes(1);
+    expect(p.get('logs')!.focus).not.toHaveBeenCalled();
+    expect(p.get('detail')!.focus).toHaveBeenCalledTimes(1);
   });
 
   it('focusPanelBody activates the panel AND focuses its content body', () => {
-    const panel = mkPanel('detail', 0);
+    const p = setup([{ left: 0, panels: ['detail'] }]);
+    const panel = p.get('detail')!;
     focusPanelBody(panel as unknown as NonNullable<ReturnType<DockviewApi['getPanel']>>);
     expect(panel.focus).toHaveBeenCalledTimes(1);
-    expect(panel.body.focus).toHaveBeenCalledTimes(1);
+    expect(panel.api.group.body.focus).toHaveBeenCalledTimes(1);
   });
 
   it('is a safe no-op before the dock api is registered', () => {

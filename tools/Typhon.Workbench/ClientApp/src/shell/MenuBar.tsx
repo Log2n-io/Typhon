@@ -5,22 +5,24 @@ import {
  MenubarItem,
  MenubarMenu,
  MenubarSeparator,
+ MenubarSub,
+ MenubarSubContent,
+ MenubarSubTrigger,
  MenubarTrigger,
 } from '@/components/ui/menubar';
 import { useDeleteApiSessionsId } from '@/api/generated/sessions/sessions';
 import { usePaletteStore } from '@/stores/usePaletteStore';
 import { useSessionStore } from '@/stores/useSessionStore';
 import { useThemeStore } from '@/stores/useThemeStore';
-import { useSchemaInspectorStore } from '@/stores/useSchemaInspectorStore';
+import { useUiPrefsStore } from '@/stores/useUiPrefsStore';
 import CommandPalette from './CommandPalette';
 import ConnectDialog, { type ConnectTab } from './dialogs/ConnectDialog';
 import SaveReplayDialog from './dialogs/SaveReplayDialog';
+import KeyboardHelpDialog from './help/KeyboardHelpDialog';
 import NavButtons from './NavButtons';
 import PaletteTrigger from './PaletteTrigger';
 import {
   toggleViewAccessMatrix,
-  toggleViewArchetypeBrowser,
-  toggleViewComponentBrowser,
   toggleViewDataBrowser,
   toggleViewDbMap,
   toggleViewDataFlow,
@@ -28,10 +30,6 @@ import {
   toggleViewLogs,
   toggleViewOptions,
   toggleViewResourceTree,
-  toggleViewSchemaArchetypes,
-  toggleViewSchemaIndexes,
-  toggleViewSchemaLayout,
-  toggleViewSchemaRelationships,
   toggleViewSourcePreview,
   toggleViewSystemDag,
   saveLayoutAsDefault,
@@ -52,12 +50,13 @@ export default function MenuBar() {
  const sessionId = useSessionStore((s) => s.sessionId);
  const clearSession = useSessionStore((s) => s.clearSession);
  const toggleTheme = useThemeStore((s) => s.toggle);
- const hasComponentSelection = useSchemaInspectorStore((s) => s.selectedComponentType != null);
+ const toggleLegends = useUiPrefsStore((s) => s.toggleLegends);
  const isProfilerSession = kind === 'attach' || kind === 'trace';
 
  const [dialogOpen, setDialogOpen] = useState(false);
  const [initialTab, setInitialTab] = useState<ConnectTab>('open');
  const [saveReplayOpen, setSaveReplayOpen] = useState(false);
+ const [kbdHelpOpen, setKbdHelpOpen] = useState(false);
 
  // Register the dialog openers with their module-level slots so palette commands can trigger them. Mirrors registerProfilerDockApi.
  useEffect(() => {
@@ -115,8 +114,6 @@ export default function MenuBar() {
  <MenubarContent>
  {/* Deep/workspace (zone-D) views — gated off in Stage 0 (reversible per view via the view registry).
      Stage 1 replaces this flat list with a session-kind-partitioned View menu (IA §5.1). */}
- {isViewActive('SchemaBrowser') && <MenubarItem onClick={toggleViewComponentBrowser}>Component Browser</MenubarItem>}
- {isViewActive('ArchetypeBrowser') && <MenubarItem onClick={toggleViewArchetypeBrowser}>Archetype Browser</MenubarItem>}
  {isViewActive('DataBrowserEntities') && <MenubarItem onClick={() => toggleViewDataBrowser()}>Data Browser</MenubarItem>}
  {isViewActive('DbMap') && (
  <MenubarItem
@@ -127,42 +124,8 @@ export default function MenuBar() {
  Database File Map
  </MenubarItem>
  )}
- {isViewActive('SchemaLayout') && (
- <MenubarItem
- disabled={!hasComponentSelection}
- onClick={toggleViewSchemaLayout}
- title={hasComponentSelection ? undefined : 'Select a component first'}
- >
- Component Layout
- </MenubarItem>
- )}
- {isViewActive('SchemaArchetypes') && (
- <MenubarItem
- disabled={!hasComponentSelection}
- onClick={toggleViewSchemaArchetypes}
- title={hasComponentSelection ? undefined : 'Select a component first'}
- >
- Component Archetypes
- </MenubarItem>
- )}
- {isViewActive('SchemaIndexes') && (
- <MenubarItem
- disabled={!hasComponentSelection}
- onClick={toggleViewSchemaIndexes}
- title={hasComponentSelection ? undefined : 'Select a component first'}
- >
- Component Indexes
- </MenubarItem>
- )}
- {isViewActive('SchemaRelationships') && (
- <MenubarItem
- disabled={!hasComponentSelection}
- onClick={toggleViewSchemaRelationships}
- title={hasComponentSelection ? undefined : 'Select a component first'}
- >
- Component Relationships
- </MenubarItem>
- )}
+ {/* (Stage 2 / GAP-02: the Component Layout/Archetypes/Indexes/Relationships items were removed —
+     those facts are now tabs of the Component Inspector, reached by selecting a component.) */}
  {isViewActive('Profiler') && (
  <MenubarItem
  disabled={!isProfilerSession}
@@ -262,6 +225,21 @@ export default function MenuBar() {
  </MenubarItem>
  </MenubarContent>
  </MenubarMenu>
+
+ <MenubarMenu>
+ <MenubarTrigger className="h-7 px-2 text-density-sm">Help</MenubarTrigger>
+ <MenubarContent>
+ <MenubarSub>
+ <MenubarSubTrigger>Quick Doc</MenubarSubTrigger>
+ <MenubarSubContent>
+ <MenubarItem onClick={() => setKbdHelpOpen(true)}>Keyboard navigation</MenubarItem>
+ </MenubarSubContent>
+ </MenubarSub>
+ <MenubarSeparator />
+ {/* Toggles the app-wide inline "?" help glyphs / legends (useUiPrefsStore.legendsVisible). */}
+ <MenubarItem onClick={() => toggleLegends()}>Toggle legend</MenubarItem>
+ </MenubarContent>
+ </MenubarMenu>
  </Menubar>
 
  {/* Centered group: NavButtons immediately left of PaletteTrigger. The transform creates a
@@ -280,6 +258,7 @@ export default function MenuBar() {
 
  <ConnectDialog open={dialogOpen} initialTab={initialTab} onOpenChange={setDialogOpen} />
  <SaveReplayDialog open={saveReplayOpen} onOpenChange={setSaveReplayOpen} />
+ {kbdHelpOpen && <KeyboardHelpDialog onClose={() => setKbdHelpOpen(false)} />}
  </header>
  );
 }

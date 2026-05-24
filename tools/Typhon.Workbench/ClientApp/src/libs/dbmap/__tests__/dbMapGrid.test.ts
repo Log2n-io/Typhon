@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { chunkAreaRect, gridCols, gridSubRect } from '../dbMapGrid';
+import { chunkAreaRect, gridCols, gridSubRect, gridVoidCount } from '../dbMapGrid';
 
 describe('gridCols', () => {
   it('lays cells into a near-square grid', () => {
@@ -12,6 +12,25 @@ describe('gridCols', () => {
 
   it('never reports zero columns for an empty grid', () => {
     expect(gridCols(0)).toBe(1);
+  });
+});
+
+describe('gridVoidCount — surplus (void) slots of a near-square grid', () => {
+  it('reports the trailing empty slots that must be drawn as invalid area', () => {
+    expect(gridVoidCount(3)).toBe(1); // 3 cells tile 2×2 → 1 void (the reported case)
+    expect(gridVoidCount(5)).toBe(1); // 5 → 3×2 = 6 → 1 void
+    expect(gridVoidCount(7)).toBe(2); // 7 → 3×3 = 9 → 2 voids
+  });
+
+  it('is zero for perfectly-filled grids', () => {
+    expect(gridVoidCount(1)).toBe(0);
+    expect(gridVoidCount(2)).toBe(0); // 2 → 2×1
+    expect(gridVoidCount(4)).toBe(0); // 4 → 2×2
+    expect(gridVoidCount(9)).toBe(0); // 9 → 3×3
+  });
+
+  it('is zero for an empty grid', () => {
+    expect(gridVoidCount(0)).toBe(0);
   });
 });
 

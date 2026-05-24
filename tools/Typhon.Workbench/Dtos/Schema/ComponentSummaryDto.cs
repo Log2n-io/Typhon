@@ -8,6 +8,10 @@ namespace Typhon.Workbench.Dtos.Schema;
 /// Number of archetypes containing this component. Nullable — Phase 1 returns null until the ArchetypeRegistry accessor
 /// ships in Phase 2 (issue #256). The Browser column is hidden when every row has null.
 /// </param>
+/// <param name="StorageMode">
+/// The component's MVCC storage mode — "Versioned", "SingleVersion" or "Transient" (GAP-25). Sourced from the engine
+/// (live) or the trace's recorded component definition. The Schema Explorer / Archetype Inspector surface it per type.
+/// </param>
 public record ComponentSummaryDto(
     string TypeName,
     string FullName,
@@ -15,4 +19,5 @@ public record ComponentSummaryDto(
     int FieldCount,
     int? ArchetypeCount,
     int EntityCount,
-    int IndexCount);
+    int IndexCount,
+    string StorageMode);

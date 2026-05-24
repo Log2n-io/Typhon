@@ -4,12 +4,20 @@ import { StatusBadge } from '@/components/ui/status-badge';
 import { simplifyTypeName } from '@/libs/simplifyTypeName';
 import { useProfilerSessionStore } from '@/stores/useProfilerSessionStore';
 import { useSessionStore } from '@/stores/useSessionStore';
-import { useDbMapSelectionStore, type DbMapSelection } from '@/stores/useDbMapSelectionStore';
+import type { DbMapSelection } from '@/libs/dbmap/dbMapSelection';
 import { useDbMapOverlayStore } from '@/stores/useDbMapOverlayStore';
+import { useDbMap } from '@/hooks/dbmap/useDbMap';
 import { useDbMapChunk, useDbMapPage } from '@/hooks/dbmap/useDbMapDetail';
 import { useDbMapSegmentSummary } from '@/hooks/dbmap/useDbMapSegment';
 import type { DbChunkContent, DbContentCell, DbPageDetail, StorageSegmentSummaryDto } from '@/libs/dbmap/types';
 import { useComponentSchema } from '@/hooks/schema/useComponentSchema';
+import { useComponentList } from '@/hooks/schema/useComponentList';
+import { useArchetypeList } from '@/hooks/schema/useArchetypeList';
+import { openComponentInspector, openArchetypeInspector, openDataBrowser } from '@/shell/commands/openSchemaBrowser';
+import { useArchetypesForComponent } from '@/hooks/schema/useArchetypesForComponent';
+import { pickPrimaryArchetype } from '@/hooks/dataBrowser/pickArchetype';
+import { componentNameFromResource } from '@/hooks/dataBrowser/resourceComponent';
+import { openComponentInSchema, openDbMapForComponent, revealComponentInResourceTree } from '@/shell/commands/openDbMap';
 import type { ComponentSchema, Field } from '@/hooks/schema/types';
 import ProfilerDetail from '@/panels/profiler/ProfilerDetail';
 import { useEntityDetail } from '@/hooks/dataBrowser/useEntityDetail';
@@ -28,8 +36,9 @@ import type { ProfilerSelection } from '@/stores/useProfilerSelectionStore';
  * rendered **in full** via a per-type card; its containment ancestors ({@link resolveChain}) stack above it
  * as collapsible **summaries** (IA §2.5). A **pin** freezes the chain so the user can click around.
  *
- * The handoff footer (real Open-in/Reveal-in verbs) is intentionally absent in Stage 1 — the deep panels it
- * would target are gated off (Stage 0), and PC-6 forbids dead verbs. It returns with those panels in Stages 2-4.
+ * Per-leaf "Open in →" verbs appear only once their deep view exists (PC-6 forbids dead verbs). Stage 2:
+ * component / archetype leaves carry a live "Open in … Inspector" action; system / query stay summary-only
+ * until Stages 3-4.
  */
 export default function DetailPanel() {
   const leaf = useSelectionStore((s) => s.leaf);
@@ -72,17 +81,28 @@ export default function DetailPanel() {
           {pinned ? <Pin className="h-3.5 w-3.5" /> : <PinOff className="h-3.5 w-3.5" />}
         </button>
       </div>
-      <div className="flex min-h-0 flex-1 flex-col">
-        {ancestors.length > 0 && (
-          <div className="shrink-0 border-b border-border">
-            {ancestors.map((node) => (
-              <AncestorSection key={`${node.type}:${String(node.ref)}`} node={node} />
-            ))}
+      {/* Finest-grained first: the leaf (focused, most-specific object) on top, then its containment ancestors
+          below in finest→coarsest order (chunk → page → segment). `resolveChain` returns root→parent, so reverse
+          it. Leaf + ancestors share ONE scroll list. With a chain, the leaf is wrapped in an auto-height div so
+          its `h-full` collapses to content height — no whitespace gap before the first ancestor, one scrollbar.
+          With no chain, the lone leaf fills the rail as before (profiler / entity cards expect that). */}
+      <div className="min-h-0 flex-1 overflow-auto">
+        {ancestors.length === 0 ? (
+          <div className="h-full">
+            <LeafCard leaf={activeLeaf} />
           </div>
+        ) : (
+          <>
+            <div>
+              <LeafCard leaf={activeLeaf} />
+            </div>
+            <div className="border-t border-border">
+              {[...ancestors].reverse().map((node) => (
+                <AncestorSection key={`${node.type}:${String(node.ref)}`} node={node} activeLeaf={activeLeaf} />
+              ))}
+            </div>
+          </>
         )}
-        <div className="min-h-0 flex-1 overflow-auto">
-          <LeafCard leaf={activeLeaf} />
-        </div>
       </div>
     </div>
   );
@@ -110,9 +130,9 @@ function LeafCard({ leaf }: { leaf: SelectionLeaf }): React.JSX.Element {
     case 'tick':
       return <ProfilerDetail selection={leaf.ref as ProfilerSelection} />;
     case 'component':
-      return <ObjectSummaryCard icon={<Boxes className="h-4 w-4 text-muted-foreground" />} kind="Component" title={String(leaf.ref)} />;
+      return <ComponentLeafCard typeName={String(leaf.ref)} />;
     case 'archetype':
-      return <ObjectSummaryCard icon={<Layers className="h-4 w-4 text-muted-foreground" />} kind="Archetype" title={`#${String(leaf.ref)}`} />;
+      return <ArchetypeLeafCard archetypeId={String(leaf.ref)} />;
     case 'system':
       return <ObjectSummaryCard icon={<Workflow className="h-4 w-4 text-muted-foreground" />} kind="System" title={String(leaf.ref)} />;
     case 'query':
@@ -155,10 +175,128 @@ function queryLabel(ref: unknown): string {
   return 'Query';
 }
 
+/** One "Open in →" verb in a leaf summary card. Only verbs whose destination view exists are added (PC-6). */
+interface LeafAction {
+  label: string;
+  onClick: () => void;
+  testId?: string;
+}
+
+/** Shared shell for a leaf summary card: icon + title + kind, a body, and its real "Open in →" verbs. */
+function LeafSummaryCard({
+  icon,
+  kind,
+  title,
+  fullTitle,
+  actions,
+  children,
+}: {
+  icon: ReactNode;
+  kind: string;
+  title: string;
+  fullTitle?: string;
+  actions: LeafAction[];
+  children: ReactNode;
+}): React.JSX.Element {
+  return (
+    <div className="flex h-full flex-col bg-background p-3">
+      <div className="rounded-md border border-border bg-card p-3 text-[12px]">
+        <div className="mb-2 flex items-center gap-2 border-b border-border pb-2">
+          {icon}
+          <h3 className="truncate text-[13px] font-semibold text-foreground" title={fullTitle ?? title}>{title}</h3>
+          <span className="ml-auto text-[11px] text-muted-foreground">{kind}</span>
+        </div>
+        {children}
+        <div className="mt-3 flex flex-col gap-1">
+          {actions.map((a) => (
+            <button
+              key={a.label}
+              type="button"
+              onClick={a.onClick}
+              data-testid={a.testId}
+              className="w-full rounded border border-border px-2 py-1 text-[11px] text-foreground hover:bg-accent"
+            >
+              {a.label}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Component leaf → a summary + "Open in Component Inspector" and the type-first "Open in Data Browser" (GAP-03). */
+function ComponentLeafCard({ typeName }: { typeName: string }): React.JSX.Element {
+  const { list } = useComponentList();
+  const c = list.find((x) => x.typeName === typeName || x.fullName === typeName);
+  // M:N type-first (AC2.7): auto-pick the max-entity archetype; add the verb only when there's data to browse.
+  const { archetypes } = useArchetypesForComponent(c?.typeName ?? typeName);
+  const primary = pickPrimaryArchetype(archetypes);
+  const actions: LeafAction[] = [{ label: 'Open in Component Inspector', onClick: openComponentInspector }];
+  if (primary) {
+    actions.push({ label: 'Open in Data Browser', onClick: () => openDataBrowser(primary.archetypeId), testId: 'leaf-open-data-browser' });
+  }
+  actions.push({ label: 'Reveal in File Map', onClick: () => openDbMapForComponent(c?.typeName ?? typeName), testId: 'leaf-reveal-file-map' });
+  return (
+    <LeafSummaryCard
+      icon={<Boxes className="h-4 w-4 text-muted-foreground" />}
+      kind="Component"
+      title={c?.typeName ?? typeName}
+      fullTitle={c?.fullName ?? typeName}
+      actions={actions}
+    >
+      {c ? (
+        <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[11px]">
+          <dt className="text-muted-foreground">Size</dt>
+          <dd className="tabular-nums">{c.storageSize}B</dd>
+          <dt className="text-muted-foreground">Fields</dt>
+          <dd className="tabular-nums">{c.fieldCount}</dd>
+          <dt className="text-muted-foreground">Indexes</dt>
+          <dd className="tabular-nums">{c.indexCount}</dd>
+          <dt className="text-muted-foreground">Used in</dt>
+          <dd className="tabular-nums">{c.archetypeCount ?? '—'} archetypes</dd>
+        </dl>
+      ) : (
+        <p className="text-[11px] text-muted-foreground">Loading…</p>
+      )}
+    </LeafSummaryCard>
+  );
+}
+
+/** Archetype leaf → a summary + "Open in Archetype Inspector" and "Open in Data Browser" (when it has entities). */
+function ArchetypeLeafCard({ archetypeId }: { archetypeId: string }): React.JSX.Element {
+  const { list } = useArchetypeList();
+  const a = list.find((x) => x.archetypeId === archetypeId);
+  const actions: LeafAction[] = [{ label: 'Open in Archetype Inspector', onClick: openArchetypeInspector }];
+  if (a && a.entityCount > 0) {
+    actions.push({ label: 'Open in Data Browser', onClick: () => openDataBrowser(archetypeId), testId: 'leaf-open-data-browser' });
+  }
+  return (
+    <LeafSummaryCard
+      icon={<Layers className="h-4 w-4 text-muted-foreground" />}
+      kind="Archetype"
+      title={`#${archetypeId}`}
+      actions={actions}
+    >
+      {a ? (
+        <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[11px]">
+          <dt className="text-muted-foreground">Components</dt>
+          <dd className="tabular-nums">{a.componentTypes.length}</dd>
+          <dt className="text-muted-foreground">Entities</dt>
+          <dd className="tabular-nums">{a.entityCount.toLocaleString()}</dd>
+          <dt className="text-muted-foreground">Storage</dt>
+          <dd>{a.storageMode}</dd>
+        </dl>
+      ) : (
+        <p className="text-[11px] text-muted-foreground">Loading…</p>
+      )}
+    </LeafSummaryCard>
+  );
+}
+
 /**
- * A summary card for an object whose rich/deep surface is a (currently-gated) workspace panel — Component,
- * Archetype, System, Query. It states what's selected and that the deep view returns later (PC-6: an
- * explained gated state, never a dead "Open in →" button).
+ * A summary card for an object whose deep surface is still a gated workspace panel — System, Query (Stages
+ * 3-4). States what's selected + that the deep view returns later (PC-6: an explained state, no dead verb).
  */
 function ObjectSummaryCard({ icon, kind, title }: { icon: ReactNode; kind: string; title: string }): React.JSX.Element {
   return (
@@ -177,22 +315,107 @@ function ObjectSummaryCard({ icon, kind, title }: { icon: ReactNode; kind: strin
   );
 }
 
-/** A collapsible containment-ancestor summary line in the Inspector context stack (expanded by default). */
-function AncestorSection({ node }: { node: SelectionRef }): React.JSX.Element {
+// Ancestor types whose rail card IS the full detail (no dedicated deep panel — inspector.md §4.2), so they
+// render the SAME card as when selected directly. Types WITH a deep panel (component/archetype) render a
+// compact summary instead, deferring depth to that panel. `chunk` is here so a cell leaf's chunk parent shows
+// its full card (it has no deep panel either) rather than an empty summary section.
+const FULL_CARD_ANCESTORS = new Set<string>(['page', 'segment', 'chunk']);
+
+/**
+ * A collapsible containment-ancestor section in the Inspector context stack (IA §2.5 / inspector.md §3, §4.2),
+ * expanded by default. A page/segment has **no deep panel**, so the rail IS its full detail — it renders the
+ * **same card as the leaf** (identical UI whether it's the focus or a parent in the chain). Deep-panel types
+ * (component/archetype) render a compact summary line. The header carries the ref when collapsed; the full
+ * card's own title carries it when expanded.
+ */
+function AncestorSection({ node, activeLeaf }: { node: SelectionRef; activeLeaf: SelectionLeaf }): React.JSX.Element {
   const [open, setOpen] = useState(true);
+  const full = FULL_CARD_ANCESTORS.has(node.type);
   return (
-    <div className="px-3 py-1">
+    <div data-testid={`inspector-ancestor-${node.type}`}>
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-center gap-1.5 text-left text-[11px] text-muted-foreground hover:text-foreground"
+        className="flex w-full items-center gap-1.5 px-3 py-1 text-left text-[11px] text-muted-foreground hover:text-foreground"
       >
         {open ? <ChevronDown className="h-3 w-3 shrink-0" /> : <ChevronRight className="h-3 w-3 shrink-0" />}
         <span className="text-[10px] uppercase tracking-wide">{node.type}</span>
-        {open && <span className="truncate font-mono text-foreground">{String(node.ref)}</span>}
+        {(!full || !open) && <span className="truncate font-mono text-foreground">{String(node.ref)}</span>}
       </button>
+      {open &&
+        (full ? (
+          <AncestorFullCard node={node} activeLeaf={activeLeaf} />
+        ) : (
+          <div className="px-3 pb-1 pl-[18px]">
+            <AncestorSummary node={node} />
+          </div>
+        ))}
     </div>
   );
+}
+
+/** Renders the SAME full card the leaf would for a no-deep-panel ancestor (page/segment/chunk), via a synthesized leaf. */
+function AncestorFullCard({ node, activeLeaf }: { node: SelectionRef; activeLeaf: SelectionLeaf }): React.JSX.Element | null {
+  const leaf = ancestorToLeaf(node, activeLeaf);
+  return leaf ? <LeafCard leaf={leaf} /> : null;
+}
+
+/**
+ * Synthesize the bus leaf for a full-card ancestor so it reuses {@link LeafCard} verbatim — the "same UI"
+ * guarantee. `page`/`segment` need only their own id; a `chunk` card additionally needs its segment + page,
+ * which the node ref (just the chunk id) lacks — so source them from the active leaf. A chunk ancestor only
+ * arises under a `cell` leaf (see {@link resolveChain}), and that ref carries every storage coordinate.
+ */
+function ancestorToLeaf(node: SelectionRef, activeLeaf: SelectionLeaf): SelectionLeaf | null {
+  switch (node.type) {
+    case 'page':
+      return { type: 'page', ref: { kind: 'page', pageIndex: Number(node.ref) }, touchedAt: 0 };
+    case 'segment':
+      return { type: 'segment', ref: { kind: 'segment', segmentId: Number(node.ref) }, touchedAt: 0 };
+    case 'chunk': {
+      const r = activeLeaf.ref as { pageIndex?: number; segmentId?: number; chunkId?: number } | null;
+      if (r && r.pageIndex != null && r.segmentId != null && r.chunkId != null) {
+        return { type: 'chunk', ref: { kind: 'chunk', pageIndex: r.pageIndex, segmentId: r.segmentId, chunkId: r.chunkId }, touchedAt: 0 };
+      }
+      return null;
+    }
+    default:
+      return null;
+  }
+}
+
+/** Compact summary body for a deep-panel ancestor (component/archetype) — the rail defers to the deep view (§4.2). */
+function AncestorSummary({ node }: { node: SelectionRef }): React.JSX.Element | null {
+  switch (node.type) {
+    case 'component':
+      return <ComponentAncestorSummary typeName={String(node.ref)} />;
+    case 'archetype':
+      return <ArchetypeAncestorSummary archetypeId={String(node.ref)} />;
+    default:
+      return null;
+  }
+}
+
+function AncestorBody({ children }: { children: ReactNode }): React.JSX.Element {
+  return <p className="text-[11px] text-muted-foreground" data-testid="inspector-ancestor-body">{children}</p>;
+}
+
+function ComponentAncestorSummary({ typeName }: { typeName: string }): React.JSX.Element {
+  const { list } = useComponentList();
+  const c = list.find((x) => x.typeName === typeName);
+  if (!c) {
+    return <AncestorBody>{typeName}</AncestorBody>;
+  }
+  return <AncestorBody>{`${c.storageSize} B · ${c.fieldCount} fields · ${c.indexCount} idx`}</AncestorBody>;
+}
+
+function ArchetypeAncestorSummary({ archetypeId }: { archetypeId: string }): React.JSX.Element {
+  const { list } = useArchetypeList();
+  const a = list.find((x) => x.archetypeId === archetypeId);
+  if (!a) {
+    return <AncestorBody>{`#${archetypeId}`}</AncestorBody>;
+  }
+  return <AncestorBody>{`${a.componentTypes.length} comp · ${a.entityCount.toLocaleString()} ent · ${a.occupancyPct.toFixed(0)}%`}</AncestorBody>;
 }
 
 /** Card-body loading placeholder (PC-2 loading state). */
@@ -210,7 +433,10 @@ function CardLoading({ label }: { label: string }): React.JSX.Element {
 // server-side detail tier (A2). The hooks below are called unconditionally; the irrelevant ones stay disabled.
 function DbMapDetail({ selection }: { selection: DbMapSelection }) {
   const sessionId = useSessionStore((s) => s.sessionId);
-  const databaseName = useDbMapSelectionStore((s) => s.databaseName);
+  // The database name belongs to the file-map data, not the selection — read it from the (cached) map query
+  // rather than carrying it on the bus leaf. Empty until the map data is available; the card just omits it.
+  const { data: dbMap } = useDbMap(sessionId);
+  const databaseName = dbMap?.databaseName ?? '';
   const pageIndex = selection.kind === 'page' ? selection.pageIndex : null;
   const isChunkLike = selection.kind === 'chunk' || selection.kind === 'cell';
   const segId = isChunkLike ? selection.segmentId : null;
@@ -224,7 +450,7 @@ function DbMapDetail({ selection }: { selection: DbMapSelection }) {
     return <DbMapPageDetail databaseName={databaseName} pageIndex={selection.pageIndex} page={page ?? null} />;
   }
   if (selection.kind === 'segment') {
-    return <DbMapSegmentDetail databaseName={databaseName} segmentId={selection.segmentId} summary={summary ?? null} />;
+    return <DbMapSegmentDetail databaseName={databaseName} segmentId={selection.segmentId} typeName={selection.typeName} summary={summary ?? null} />;
   }
   if (selection.kind === 'chunk') {
     return <DbMapChunkDetail databaseName={databaseName} pageIndex={selection.pageIndex} chunk={chunk ?? null} />;
@@ -279,7 +505,6 @@ function DbMapPageDetail({
   pageIndex: number;
   page: DbPageDetail | null;
 }) {
-  const select = useDbMapSelectionStore((s) => s.select);
   return (
     <DbMapDetailCard
       icon={<HardDrive className="h-4 w-4 text-muted-foreground" />}
@@ -293,21 +518,6 @@ function DbMapPageDetail({
         <>
           <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-[11px]">
             <Row label="Byte offset" value={`0x${page.byteOffset.toString(16).toUpperCase()}`} />
-            <dt className="text-muted-foreground">Owning segment</dt>
-            <dd className="font-mono tabular-nums text-foreground">
-              {page.ownerSegmentId >= 0 ? (
-                <button
-                  type="button"
-                  onClick={() => select(databaseName, { kind: 'segment', segmentId: page.ownerSegmentId })}
-                  className="text-sky-400 underline-offset-2 hover:underline"
-                  title="Show segment harvest summary"
-                >
-                  #{page.ownerSegmentId} · {page.ownerSegmentKind}
-                </button>
-              ) : (
-                'none'
-              )}
-            </dd>
             <Row label="Change revision" value={page.changeRevision.toLocaleString()} />
             <Row label="Format revision" value={String(page.formatRevision)} />
             <Row label="Modification counter" value={String(page.modificationCounter)} />
@@ -335,10 +545,12 @@ function DbMapPageDetail({
 function DbMapSegmentDetail({
   databaseName,
   segmentId,
+  typeName,
   summary,
 }: {
   databaseName: string;
   segmentId: number;
+  typeName?: string;
   summary: StorageSegmentSummaryDto | null;
 }) {
   const chunkBased = (summary?.chunkCapacity ?? 0) > 0;
@@ -402,7 +614,39 @@ function DbMapSegmentDetail({
           )}
         </>
       )}
+      {typeName && <SegmentActions typeName={typeName} />}
     </DbMapDetailCard>
+  );
+}
+
+/**
+ * Segment → handoff verbs (AC2.14). A component-table segment pivots to the same destinations a component does
+ * — Open in Component Inspector (Schema), Open in Data Browser (type-first archetype pick), Reveal in File Map,
+ * Reveal in Resource Tree. Mirrors {@link ResourceActions}; renders only for a component segment (a `typeName`),
+ * so a non-component segment never shows a dead verb (PC-6). This is what makes a Storage Health row (which
+ * carries the type name on the bus segment leaf) reach all four views.
+ */
+function SegmentActions({ typeName }: { typeName: string }): React.JSX.Element {
+  const { archetypes } = useArchetypesForComponent(typeName);
+  const primary = pickPrimaryArchetype(archetypes);
+  const cls = 'w-full rounded border border-border px-2 py-1 text-[11px] text-foreground hover:bg-accent';
+  return (
+    <div className="mt-3 flex flex-col gap-1 border-t border-border pt-2">
+      <button type="button" onClick={() => openComponentInSchema(typeName)} data-testid="segment-open-schema" className={cls}>
+        Open in Component Inspector
+      </button>
+      {primary && (
+        <button type="button" onClick={() => openDataBrowser(primary.archetypeId)} data-testid="segment-open-data-browser" className={cls}>
+          Open in Data Browser
+        </button>
+      )}
+      <button type="button" onClick={() => openDbMapForComponent(typeName)} data-testid="segment-reveal-file-map" className={cls}>
+        Reveal in File Map
+      </button>
+      <button type="button" onClick={() => revealComponentInResourceTree(typeName)} data-testid="segment-reveal-resource" className={cls}>
+        Reveal in Resource Tree
+      </button>
+    </div>
   );
 }
 
@@ -688,7 +932,48 @@ function ResourceDetail({ resource }: { resource: SelectedResource }) {
           <dt className="text-muted-foreground">Children</dt>
           <dd className="text-foreground">{childrenCount}</dd>
         </dl>
+        <ResourceActions resource={selected} />
       </div>
+    </div>
+  );
+}
+
+/**
+ * Resource → handoff verbs (GAP-03 / GAP-04). Only a ComponentTable resource whose recovered component
+ * resolves against the live list gets verbs — a naming-convention change makes them vanish (PC-6), never a
+ * broken handoff. The resource name carries the *registered* name (`typeName`; the CLR `fullName` can differ —
+ * e.g. `Fixtures` vs `Fixture`), so match typeName first. "Open in Data Browser" needs a populated archetype;
+ * "Reveal in File Map" needs only the component (its segment exists regardless of entity count).
+ */
+function ResourceActions({ resource }: { resource: SelectedResource }): React.JSX.Element | null {
+  const { list } = useComponentList();
+  const recovered = componentNameFromResource(resource.kind, resource.name);
+  const component = recovered ? list.find((c) => c.typeName === recovered || c.fullName === recovered) : undefined;
+  const { archetypes } = useArchetypesForComponent(component?.typeName ?? null);
+  const primary = pickPrimaryArchetype(archetypes);
+  if (!component) {
+    return null;
+  }
+  return (
+    <div className="mt-3 flex flex-col gap-1">
+      {primary && (
+        <button
+          type="button"
+          onClick={() => openDataBrowser(primary.archetypeId)}
+          data-testid="resource-open-data-browser"
+          className="w-full rounded border border-border px-2 py-1 text-[11px] text-foreground hover:bg-accent"
+        >
+          Open in Data Browser
+        </button>
+      )}
+      <button
+        type="button"
+        onClick={() => openDbMapForComponent(component.typeName)}
+        data-testid="resource-reveal-file-map"
+        className="w-full rounded border border-border px-2 py-1 text-[11px] text-foreground hover:bg-accent"
+      >
+        Reveal in File Map
+      </button>
     </div>
   );
 }

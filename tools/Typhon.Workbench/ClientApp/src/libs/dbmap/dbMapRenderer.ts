@@ -17,7 +17,7 @@ import {
 import { buildLayout, type MapLayout } from './dbMapLayout';
 import { pageAtScreen } from './dbMapHitTest';
 import { L4_CONTENT_PREFETCH_PAGE_PX, lodForScale, tileNodesForSpan, type DbLodState } from './dbMapLod';
-import { chunkAreaRect, gridCols, gridSubRect } from './dbMapGrid';
+import { chunkAreaRect, gridCols, gridSubRect, gridVoidCount } from './dbMapGrid';
 import {
   BYTE_CLASS_RGB,
   CRC_RGB,
@@ -32,6 +32,7 @@ import {
   enabledOverlayRgb,
   entropyRgb,
   fillDensityRgb,
+  onColorCss,
   pageColorRgb,
   segmentRgbRanked,
   writeAgeRgb,
@@ -136,6 +137,25 @@ const HEADER_HATCH_STEP_RATIO = 0.5;
 const HEADER_HATCH_MIN_STEP = 4;
 /** Minimum cell px below which the free-page diagonal mark is sub-pixel and skipped. */
 const FREE_HATCH_MIN_CELL = 4;
+/**
+ * Duration of the post-reveal segment highlight pulse. A "Reveal in File Map" flies the camera to a segment and
+ * selects it; this transient accent pulse over the segment's own pages tells the eye *which* zone matched, then
+ * fades. The panel drives the frames (the renderer is pure-draw); both must agree on the duration.
+ */
+export const SEGMENT_PULSE_MS = 2800;
+
+/**
+ * The segment-reveal pulse opacity envelope at `elapsedMs` into the flash (0 before/after the window). A fading
+ * triple-oscillation — bright pulses up front, easing to nothing — so it reads as a transient "look here" flash,
+ * not a steady fill. Pure (the caller scales it by the L1 grid alpha), so the shape is unit-tested.
+ */
+export function segmentPulseAlpha(elapsedMs: number): number {
+  if (elapsedMs < 0 || elapsedMs >= SEGMENT_PULSE_MS) {
+    return 0;
+  }
+  const t = elapsedMs / SEGMENT_PULSE_MS;
+  return (1 - t) * (0.5 + 0.5 * (0.5 + 0.5 * Math.sin(t * Math.PI * 6)));
+}
 /** Minimum cell px below which corner markers (residency / CRC / pathology) are too small to register. */
 const CORNER_MARKER_MIN_CELL = 16;
 /** Persistent-marker corner-mark radius, in CSS pixels. */
@@ -229,6 +249,10 @@ export class DbMapRenderer {
   private _encoding: DbMapEncoding = 'pageType';
   private _pageOrder: DbMapPageOrder = 'hilbert';
   private _segmentOverlay = false;
+  // Post-reveal segment highlight pulse (transient): the segment to flash + the time it started. Cleared by the
+  // panel once SEGMENT_PULSE_MS elapses. See {@link drawSegmentPulse}.
+  private _pulseSegmentId: number | null = null;
+  private _pulseStartMs = 0;
   private _lens: DbMapLens = 'none';
   private _lensMask: Uint8Array | null = null;
   private _camera: Camera = { scale: 1, x: 0, y: 0 };
@@ -397,6 +421,16 @@ export class DbMapRenderer {
 
   setSegmentOverlay(on: boolean): void {
     this._segmentOverlay = on;
+  }
+
+  /**
+   * Arms (or clears) the post-reveal segment highlight pulse. Pass a segment id + `performance.now()` to start
+   * it; pass `null` to clear once {@link SEGMENT_PULSE_MS} has elapsed. The panel keeps calling {@link render}
+   * for the pulse's lifetime — the renderer derives the pulse envelope from `startMs` on each frame.
+   */
+  setSegmentPulse(segmentId: number | null, startMs: number): void {
+    this._pulseSegmentId = segmentId;
+    this._pulseStartMs = startMs;
   }
 
   /**
@@ -1030,6 +1064,11 @@ export class DbMapRenderer {
       }
     }
 
+    // Post-reveal segment pulse — a transient flash over the just-revealed segment's pages so the matched zone
+    // is unmistakable. Drawn over the selection outline (which marks only the root page); self-gates on l1Alpha
+    // and the pulse window, so it's a no-op outside a reveal.
+    this.drawSegmentPulse(ctx, l1Alpha);
+
     // Per-run segment labels — one label per contiguous run, placed on the run's own cells. Drawn last of the
     // map content (after the header hatch, corner markers, cell badges and highlights) so a label pill is never
     // overdrawn by them. `SegName k/M` by default; the 'c' toggle switches to the verbose size variant.
@@ -1147,7 +1186,6 @@ export class DbMapRenderer {
 
     // In-stripe labels, gated on each stripe's own on-screen height — small bands stay color-only.
     ctx.globalAlpha = alpha;
-    ctx.fillStyle = this._theme.text;
     ctx.font = '11px sans-serif';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
@@ -1162,6 +1200,9 @@ export class DbMapRenderer {
       }
       const label = `${stripe.label}  ·  ${formatFileSize(stripe.byteCount)}  ·  ${(stripe.fraction * 100).toFixed(1)}%`;
       const cy = screenRect.y + screenRect.h / 2;
+      // DS-3: the label sits on the stripe's data-driven colour, so pick a contrasting ink per stripe rather
+      // than a single theme text colour (which would wash out on light stripes).
+      ctx.fillStyle = onColorCss(stripe.color);
       // Truncate with ellipsis so a narrow stripe never spills past its right edge — keeps the column from
       // overflowing the data rect when the panel shrinks or the stripe represents a small slice.
       ctx.fillText(truncateToWidth(ctx, label, maxLabelPx), screenRect.x + labelPadX, cy);
@@ -1555,6 +1596,24 @@ export class DbMapRenderer {
       }
       ctx.fillStyle = rgb(color);
       this.fillWorldRect(ctx, gridSubRect(chunkRect, ccols, crows, j));
+    }
+    // The near-square ccols×crows grid can exceed the cell count (e.g. 3 cells in a 2×2), leaving surplus
+    // bottom-right slots. Mark them as invalid area — the same X-crosshatch the page's surplus chunk slots and
+    // out-of-file cells use — so the void reads as "no data here", not the L3 fill bleeding through.
+    const voidCount = gridVoidCount(content.cells.length);
+    if (voidCount > 0) {
+      const cam = this._camera;
+      for (let j = content.cells.length; j < content.cells.length + voidCount; j++) {
+        const sub = gridSubRect(chunkRect, ccols, crows, j);
+        this.drawInvalidChunkCell(
+          ctx,
+          worldToScreenX(cam, sub.x),
+          worldToScreenY(cam, sub.y),
+          sub.w * cam.scale,
+          sub.h * cam.scale,
+          baseAlpha * fade,
+        );
+      }
     }
     ctx.globalAlpha = baseAlpha;
   }
@@ -2603,6 +2662,47 @@ export class DbMapRenderer {
           ctx.lineTo(sx + this._camera.scale, sy + this._camera.scale);
           ctx.stroke();
         }
+      }
+    }
+    ctx.restore();
+  }
+
+  /**
+   * Draws the transient post-reveal pulse over every page of {@link _pulseSegmentId} (a "Reveal in File Map"
+   * just flew here and selected it). Fills the segment's own cells with the accent at a fading, oscillating
+   * alpha so the eye catches *which* zone matched, then fades to nothing. Iterates only the visible cells (the
+   * reveal framed the segment), reusing the {@link drawSegmentOverlay} visible-window pattern, so the per-frame
+   * cost is bounded regardless of file size. Returns once the pulse window has elapsed (the panel then clears it).
+   */
+  private drawSegmentPulse(ctx: CanvasRenderingContext2D, l1Alpha: number): void {
+    if (this._pulseSegmentId == null || !this._data || !this._layout) {
+      return;
+    }
+    const alpha = l1Alpha * segmentPulseAlpha(performance.now() - this._pulseStartMs);
+    if (alpha <= 0.01) {
+      return;
+    }
+    const { order, side, dataRect } = this._layout;
+    const owner = this._data.ownerSegmentId;
+    const pageCount = this._data.pageCount;
+    const cam = this._camera;
+    const vis = visibleWorldRect(cam, this._cssW, this._cssH);
+    const cx0 = Math.max(0, Math.floor(vis.x - dataRect.x));
+    const cy0 = Math.max(0, Math.floor(vis.y - dataRect.y));
+    const cx1 = Math.min(side - 1, Math.ceil(vis.x - dataRect.x + vis.w));
+    const cy1 = Math.min(side - 1, Math.ceil(vis.y - dataRect.y + vis.h));
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = this._theme.accent;
+    for (let cy = cy0; cy <= cy1; cy++) {
+      for (let cx = cx0; cx <= cx1; cx++) {
+        const page = xyToPage(order, this._pageOrder, cx, cy);
+        if (page < 0 || page >= pageCount || owner[page] !== this._pulseSegmentId) {
+          continue;
+        }
+        const sx = worldToScreenX(cam, dataRect.x + cx);
+        const sy = worldToScreenY(cam, dataRect.y + cy);
+        ctx.fillRect(sx, sy, cam.scale, cam.scale);
       }
     }
     ctx.restore();

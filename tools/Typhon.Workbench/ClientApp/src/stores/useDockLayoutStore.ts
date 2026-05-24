@@ -35,9 +35,10 @@ export const useDockLayoutStore = create<DockLayoutState>()(
       getTemplate: (kind) => get().layouts[`__template__:${kind}`] ?? null,
       clear: () => set({ layouts: {} }),
     }),
-    // v6: Stage 1 changed the default layouts — the Systems & Queries navigator now occupies a left edge group
-    // in trace/attach sessions. Bumping the key discards Stage-0 (v5) layouts so the navigator is present on
-    // first load rather than only after Reset Layout. (v5 = Stage 0 zone-D deactivation.)
-    { name: 'typhon-dock-layouts-v6', storage: safeStorage },
+    // v7: Stage 2 made the Schema Explorer the Open-session default center. Bumping the key discards v6
+    // (Stage-1) Open layouts so the new center is present on first load rather than only after Reset Layout
+    // — otherwise a saved centerless layout restores and the workspace looks empty. (v6 = Stage 1 navigator;
+    // v5 = Stage 0 zone-D deactivation.)
+    { name: 'typhon-dock-layouts-v7', storage: safeStorage },
   ),
 );

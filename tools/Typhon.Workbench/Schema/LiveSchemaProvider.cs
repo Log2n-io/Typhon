@@ -217,7 +217,8 @@ public sealed class LiveSchemaProvider : IStaticSchemaProvider
             FieldCount: def.FieldsByName.Count,
             ArchetypeCount: null,
             EntityCount: table.EstimatedEntityCount,
-            IndexCount: table.IndexedFieldInfos?.Length ?? 0);
+            IndexCount: table.IndexedFieldInfos?.Length ?? 0,
+            StorageMode: def.StorageMode.ToString());
     }
 
     private static ComponentSchemaDto BuildSchema(ComponentTable table)
@@ -243,7 +244,8 @@ public sealed class LiveSchemaProvider : IStaticSchemaProvider
             TotalSize: def.ComponentStorageTotalSize,
             AllowMultiple: def.AllowMultiple,
             Revision: def.Revision,
-            Fields: fields);
+            Fields: fields,
+            StorageMode: def.StorageMode.ToString());
     }
 
     private ComponentTable ResolveComponentTable(string typeName)

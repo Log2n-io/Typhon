@@ -16,7 +16,7 @@
   --card-foreground:           oklch(0.2064 0.0388 265.5472);
   --popover:                   oklch(1.0000 0 0);
   --popover-foreground:        oklch(0.2064 0.0388 265.5472);
-  --primary:                   oklch(0.5449 0.2154 262.7414);
+  --primary:                   var(--chart-3);
   --primary-foreground:        oklch(0.9838 0.0035 247.8583);
   --secondary:                 oklch(0.6727 0.1333 166.2734);
   --secondary-foreground:      oklch(0.9838 0.0035 247.8583);
@@ -28,7 +28,7 @@
   --destructive-foreground:    oklch(0.9838 0.0035 247.8583);
   --border:                    oklch(0.9290 0.0126 255.5317);
   --input:                     oklch(0.9290 0.0126 255.5317);
-  --ring:                      oklch(0.5449 0.2154 262.7414);
+  --ring:                      var(--chart-3);
   --panel-active-border:       var(--ring);
   --chart-1:                   oklch(0.5449 0.2154 262.7414);
   --chart-2:                   oklch(0.6727 0.1333 166.2734);
@@ -42,7 +42,7 @@
   --sidebar-accent:            oklch(0.2757 0.0353 259.7107);
   --sidebar-accent-foreground: oklch(0.9838 0.0035 247.8583);
   --sidebar-border:            oklch(0.3042 0.0405 259.6951);
-  --sidebar-ring:              oklch(0.5449 0.2154 262.7414);
+  --sidebar-ring:              var(--chart-3);
 
   --font-sans:  Inter, system-ui, sans-serif;
   --font-serif: Georgia, serif;
@@ -310,5 +310,5 @@ html .dockview-react {
  * backgrounds; scoped to `.dv-active-group` so exactly the focused pane is tinted. A ~10% accent wash over
  * the panel background reads as "this pane has focus" without the loudness of a full border. */
 .dv-active-group .wb-pane-header {
-  background-color: color-mix(in oklch, var(--panel-active-border) 6%, var(--background));
+  background-color: color-mix(in oklch, var(--panel-active-border) 10%, var(--background));
 }

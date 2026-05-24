@@ -35,6 +35,65 @@ public sealed partial class StorageMapService
     }
 
     /// <summary>
+    /// Builds the aggregate health rollup for <c>GET /dbmap/health</c> (GAP-16) — the whole-DB summary plus a
+    /// per-segment table. Reuses the page classifier for used/free counts and the segment registry for chunk
+    /// allocation, enumerating segments once (vs the client calling segment-summary per segment). In-memory only.
+    /// </summary>
+    public StorageHealthDto GetHealth(DatabaseEngine engine, string databaseName)
+    {
+        ArgumentNullException.ThrowIfNull(engine);
+
+        var mmf = engine.MMF;
+        var pageCount = mmf.StorageFilePageCount;
+        var pageType = new StoragePageType[pageCount];
+        engine.ClassifyAllPages(pageType);
+
+        var usedPages = 0;
+        for (var i = 0; i < pageCount; i++)
+        {
+            if (pageType[i] != StoragePageType.Free)
+            {
+                usedPages++;
+            }
+        }
+        var freePages = pageCount - usedPages;
+
+        var segments = engine.EnumerateStorageSegments();
+        var rows = new StorageHealthSegmentDto[segments.Count];
+        long totalReclaimable = 0;
+        for (var i = 0; i < segments.Count; i++)
+        {
+            var seg = segments[i];
+            var typeName = seg.Kind == StorageSegmentKind.Component
+                ? ResolveComponentDefinition(engine, seg.RootPageIndex)?.Name ?? ""
+                : "";
+            var capacity = seg.ChunkCapacity;
+            var reclaimable = (long)seg.FreeChunkCount * seg.Stride;
+            totalReclaimable += reclaimable;
+            var chunkFillPct = capacity > 0 ? (double)seg.AllocatedChunkCount / capacity * 100.0 : 0.0;
+
+            long entityCount = 0;
+            var occupancyPct = chunkFillPct;
+            if (seg.Kind == StorageSegmentKind.Cluster &&
+                engine.TryGetClusterStats(seg.RootPageIndex, out entityCount, out var activeClusterCount, out var clusterSize))
+            {
+                var slots = (long)activeClusterCount * clusterSize;
+                occupancyPct = slots > 0 ? (double)entityCount / slots * 100.0 : 0.0;
+            }
+
+            rows[i] = new StorageHealthSegmentDto(i, seg.Kind.ToString(), typeName, seg.Pages.Length,
+                seg.AllocatedChunkCount, capacity, chunkFillPct, reclaimable, entityCount, occupancyPct);
+        }
+
+        var fragmentationPct = pageCount > 0 ? (double)freePages / pageCount * 100.0 : 0.0;
+        return new StorageHealthDto(
+            string.IsNullOrEmpty(databaseName) ? "database" : databaseName,
+            mmf.FileSize, pageCount, usedPages, freePages,
+            engine.GetWalTotalBytes(), engine.CheckpointManager?.CheckpointLsn ?? 0L,
+            segments.Count, totalReclaimable, fragmentationPct, rows);
+    }
+
+    /// <summary>
     /// Builds the coarse per-page descriptors for <c>GET /dbmap/region</c>. In A1 the whole coarse map is
     /// returned in one call; <paramref name="node"/> / <paramref name="lod"/> are reserved for A2 tiling.
     /// </summary>

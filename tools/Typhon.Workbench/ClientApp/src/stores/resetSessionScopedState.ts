@@ -4,7 +4,6 @@ import { useNavHistoryStore } from './useNavHistoryStore';
 import { useSelectedResourceStore } from './useSelectedResourceStore';
 import { useSchemaInspectorStore } from './useSchemaInspectorStore';
 import { useDataBrowserStore } from './useDataBrowserStore';
-import { useDbMapSelectionStore } from './useDbMapSelectionStore';
 import { useProfilerSelectionStore } from './useProfilerSelectionStore';
 
 /**
@@ -17,7 +16,6 @@ export function resetSessionScopedState(): void {
   useSelectedResourceStore.getState().clear();
   useSchemaInspectorStore.getState().reset();
   useDataBrowserStore.getState().reset();
-  useDbMapSelectionStore.getState().clear();
   useProfilerSelectionStore.getState().clear();
   useSelectionStore.getState().clear();
   useNavHistoryStore.getState().clear();

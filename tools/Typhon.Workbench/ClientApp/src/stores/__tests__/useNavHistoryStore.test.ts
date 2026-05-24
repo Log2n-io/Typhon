@@ -29,6 +29,7 @@ const resourceEntry = (id: string): NavEntry => ({
 const panelEntry = (id: string): NavEntry => ({
   kind: 'panel-opened',
   panelId: id,
+  leaf: null,
   timestamp: Date.now(),
 });
 

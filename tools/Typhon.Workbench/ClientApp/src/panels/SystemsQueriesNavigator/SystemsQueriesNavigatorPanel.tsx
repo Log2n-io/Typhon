@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Item as RovingItem, Root as RovingRoot } from '@radix-ui/react-roving-focus';
 import { ChevronDown, ChevronRight, ListTree, Workflow } from 'lucide-react';
 import { useSessionStore } from '@/stores/useSessionStore';
 import { useProfilerSessionStore } from '@/stores/useProfilerSessionStore';
@@ -43,8 +44,16 @@ export default function SystemsQueriesNavigatorPanel() {
       ? String((leaf.ref as { localId?: unknown }).localId)
       : null;
 
+  // PC-8 roving: one tab stop for the whole navigator, ArrowUp/Down move the keyboard cursor between the
+  // section headers + rows (Radix RovingFocusGroup — vetted, not hand-rolled). Esc backs focus out of the list.
+  const onEsc = (e: React.KeyboardEvent) => {
+    if (e.key === 'Escape') {
+      (document.activeElement as HTMLElement | null)?.blur();
+    }
+  };
   return (
-    <div className="flex h-full w-full flex-col overflow-auto bg-background">
+    <RovingRoot asChild orientation="vertical" loop>
+      <div className="flex h-full w-full flex-col overflow-auto bg-background" onKeyDown={onEsc}>
       <NavSection
         icon={<Workflow className="h-3.5 w-3.5" />}
         title="Systems"
@@ -89,7 +98,8 @@ export default function SystemsQueriesNavigatorPanel() {
           })
         )}
       </NavSection>
-    </div>
+      </div>
+    </RovingRoot>
   );
 }
 
@@ -107,16 +117,18 @@ function NavSection({
   const [open, setOpen] = useState(true);
   return (
     <div className="border-b border-border">
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-center gap-1.5 px-2 py-1.5 text-left text-[11px] font-medium uppercase tracking-wide text-muted-foreground hover:text-foreground"
-      >
-        {open ? <ChevronDown className="h-3 w-3 shrink-0" /> : <ChevronRight className="h-3 w-3 shrink-0" />}
-        {icon}
-        <span>{title}</span>
-        <span className="ml-auto tabular-nums">{count}</span>
-      </button>
+      <RovingItem asChild>
+        <button
+          type="button"
+          onClick={() => setOpen((o) => !o)}
+          className="flex w-full items-center gap-1.5 px-2 py-1.5 text-left text-[11px] font-medium uppercase tracking-wide text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+        >
+          {open ? <ChevronDown className="h-3 w-3 shrink-0" /> : <ChevronRight className="h-3 w-3 shrink-0" />}
+          {icon}
+          <span>{title}</span>
+          <span className="ml-auto tabular-nums">{count}</span>
+        </button>
+      </RovingItem>
       {open && <div className="pb-1">{children}</div>}
     </div>
   );
@@ -134,18 +146,22 @@ function NavRow({
   onClick: () => void;
 }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-pressed={selected}
-      className={
-        'flex h-[22px] w-full items-center gap-2 px-2 text-left text-density-sm ' +
-        (selected ? 'bg-accent text-accent-foreground' : 'text-foreground hover:bg-muted/60')
-      }
-    >
-      <span className="truncate">{label}</span>
-      {detail && <span className="ml-auto shrink-0 truncate text-[10px] text-muted-foreground">{detail}</span>}
-    </button>
+    <RovingItem asChild>
+      <button
+        type="button"
+        onClick={onClick}
+        aria-pressed={selected}
+        className={
+          'flex h-[22px] w-full items-center gap-2 px-2 text-left text-density-sm ' +
+          'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring ' +
+          // focus (the ring) is rendered distinctly from selection (the accent fill) — DS-4 focus≠selection.
+          (selected ? 'bg-accent text-accent-foreground' : 'text-foreground hover:bg-muted/60')
+        }
+      >
+        <span className="truncate">{label}</span>
+        {detail && <span className="ml-auto shrink-0 truncate text-[10px] text-muted-foreground">{detail}</span>}
+      </button>
+    </RovingItem>
   );
 }
 
