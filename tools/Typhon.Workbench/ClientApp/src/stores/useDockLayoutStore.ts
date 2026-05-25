@@ -35,10 +35,10 @@ export const useDockLayoutStore = create<DockLayoutState>()(
       getTemplate: (kind) => get().layouts[`__template__:${kind}`] ?? null,
       clear: () => set({ layouts: {} }),
     }),
-    // v7: Stage 2 made the Schema Explorer the Open-session default center. Bumping the key discards v6
-    // (Stage-1) Open layouts so the new center is present on first load rather than only after Reset Layout
-    // — otherwise a saved centerless layout restores and the workspace looks empty. (v6 = Stage 1 navigator;
-    // v5 = Stage 0 zone-D deactivation.)
-    { name: 'typhon-dock-layouts-v7', storage: safeStorage },
+    // v8: Stage 3 Phase 1 made the Profiler timeline the trace/attach default center (a no-position addPanel
+    // had docked it into the left edge once the view was un-gated). Bumping the key discards v7 trace/attach
+    // layouts that captured the buggy left placement, so the centered timeline loads on first open rather than
+    // only after Reset Layout. (v7 = Stage 2 Schema Explorer center; v6 = Stage 1 navigator; v5 = Stage 0.)
+    { name: 'typhon-dock-layouts-v8', storage: safeStorage },
   ),
 );

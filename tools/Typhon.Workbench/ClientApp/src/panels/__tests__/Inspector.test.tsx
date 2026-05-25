@@ -6,6 +6,7 @@ import DetailPanel from '@/panels/DetailPanel';
 import { useSelectionStore } from '@/stores/useSelectionStore';
 import { useSessionStore } from '@/stores/useSessionStore';
 import { useDbMapStore } from '@/stores/useDbMapStore';
+import { useDagViewStore } from '@/panels/SystemDag/useDagViewStore';
 import type { SelectedResource } from '@/stores/useSelectedResourceStore';
 
 // Component/archetype leaf cards fetch a summary via TanStack hooks (disabled without a sessionId → empty),
@@ -33,6 +34,7 @@ const sampleResource: SelectedResource = {
 
 beforeEach(() => {
   useSelectionStore.getState().clear();
+  useDagViewStore.getState().clearPendingFocusSystem();
   // An Open session so the profiler range-stats fallback doesn't pre-empt the empty prompt.
   useSessionStore.setState({ kind: 'open' });
 });
@@ -66,10 +68,35 @@ describe('Inspector — bus-driven dispatch', () => {
     expect(screen.getByRole('button', { name: /open in archetype inspector/i })).toBeTruthy();
   });
 
-  it('renders a gated summary card for a system leaf', () => {
+  it('renders the System card (name header + declared-access body), not the old gated placeholder (3C)', () => {
     useSelectionStore.getState().select('system', 'Movement');
     renderInspector();
     expect(screen.getByText('Movement')).toBeTruthy();
+    // The System card is real now — no "deep view returns later" gated stub (declared access shows once topology loads).
+    expect(screen.queryByText(/deep view returns/i)).toBeNull();
+  });
+
+  it('the System card offers a live "Reveal in System DAG" verb that publishes the system + requests a DAG focus (3D)', () => {
+    useSelectionStore.getState().select('system', 'Movement');
+    renderInspector();
+    const reveal = screen.getByTestId('leaf-reveal-system-dag');
+    expect((reveal as HTMLButtonElement).disabled).toBe(false); // live verb — the DAG view is active as of 3D (PC-6)
+    fireEvent.click(reveal);
+    expect(useSelectionStore.getState().system).toBe('Movement'); // bus System projection set
+    expect(useDagViewStore.getState().pendingFocusSystem).toBe('Movement'); // canvas reveal requested
+  });
+
+  it('a span/chunk selection surfaces the owning-System ancestor with a live "Reveal in System DAG" verb (3D follow-up)', () => {
+    // A profiler span/chunk rides the `span` leaf; its owning system is the projected bus `system`, which
+    // resolveChain surfaces as a System ancestor section — now carrying the reveal verb (not only the leaf card),
+    // so the jump-to-DAG handoff works straight from a chunk/span selection.
+    useSelectionStore.getState().select('span', { kind: 'span', span: { kind: 0, name: 'sysspan', threadSlot: 0, startUs: 0, endUs: 1, durationUs: 1 } as never });
+    useSelectionStore.getState().setSystem('Movement'); // the owning-system projection (what TimeArea's routeSelection sets)
+    renderInspector();
+    const reveal = screen.getByTestId('ancestor-reveal-system-dag');
+    expect((reveal as HTMLButtonElement).disabled).toBe(false); // live verb on the ancestor too (PC-6)
+    fireEvent.click(reveal);
+    expect(useDagViewStore.getState().pendingFocusSystem).toBe('Movement');
   });
 
   it('renders the owning-segment ancestor section for a file-map page leaf (IA §2.5)', () => {

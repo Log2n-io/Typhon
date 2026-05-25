@@ -53,7 +53,13 @@ export default function SystemsQueriesNavigatorPanel() {
   };
   return (
     <RovingRoot asChild orientation="vertical" loop>
-      <div className="flex h-full w-full flex-col overflow-auto bg-background" onKeyDown={onEsc}>
+      <div className="flex h-full w-full flex-col overflow-hidden bg-background" onKeyDown={onEsc}>
+      {/* Pane header — carries the active-panel cue (DS-4): `.dv-active-group .wb-pane-header` tints it when
+          this navigator is the focused pane, the same affordance the Resources/Inspector panes render. */}
+      <div className="wb-pane-header flex shrink-0 items-center gap-2 border-b border-border px-3 py-1.5">
+        <span className="text-fs-xs font-medium uppercase tracking-wide text-muted-foreground">Navigator</span>
+      </div>
+      <div className="min-h-0 flex-1 overflow-auto">
       <NavSection
         icon={<Workflow className="h-3.5 w-3.5" />}
         title="Systems"
@@ -98,6 +104,7 @@ export default function SystemsQueriesNavigatorPanel() {
           })
         )}
       </NavSection>
+      </div>
       </div>
     </RovingRoot>
   );

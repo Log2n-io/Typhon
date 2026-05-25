@@ -3,7 +3,7 @@ import type { DagDto } from '@/api/generated/model/dagDto';
 import type { SystemDefinitionDto } from '@/api/generated/model/systemDefinitionDto';
 import type { TopologyDto } from '@/api/generated/model/topologyDto';
 import type { TrackDto } from '@/api/generated/model/trackDto';
-import { LANE_GAP, buildDagModel } from '../dagModel';
+import { LANE_GAP, buildDagModel, resolveNoAccessReason, toNodeData, topologyHasAnyAccess } from '../dagModel';
 
 function sys(overrides: Partial<SystemDefinitionDto> & { name: string }): SystemDefinitionDto {
   return {
@@ -360,5 +360,64 @@ describe('buildDagModel — Track → DAG hierarchy', () => {
     ]));
     expect(model.lanes.map((l) => l.name)).toEqual(['Input', 'Simulation']);
     expect(model.dagGroups).toEqual([]);
+  });
+});
+
+// ── Engine-aware "no declared access" classification (3C) ─────────────────
+// Engine-internal systems (Fence DAG on the Engine-Post track) declare no RFC 07 access by design;
+// distinguishing that from a genuinely old trace is what resolveNoAccessReason exists for.
+
+describe('toNodeData — dagId passthrough', () => {
+  it('carries the owning dagId so a consumer can resolve the system\'s track', () => {
+    expect(toNodeData(sys({ name: 'FencePrep', dagId: 1 })).dagId).toBe(1);
+    expect(toNodeData(sys({ name: 'Movement', dagId: 0 })).dagId).toBe(0);
+  });
+});
+
+describe('resolveNoAccessReason', () => {
+  it('classifies an engine-track system as engine-internal', () => {
+    const t = topoH(
+      [
+        sys({ name: 'Movement', dagId: 0, writes: ['Position'] }),
+        sys({ name: 'FencePrep', dagId: 1 }),
+      ],
+      worldAndFenceTracks(),
+    );
+    expect(resolveNoAccessReason(t, 1)).toBe('engine-internal');
+  });
+
+  it('engine wins even when the whole trace is access-free — never blames the trace version', () => {
+    const t = topoH([sys({ name: 'FencePrep', dagId: 1 })], worldAndFenceTracks());
+    expect(resolveNoAccessReason(t, 1)).toBe('engine-internal');
+  });
+
+  it('classifies a user system as declares-none when the trace carries access elsewhere', () => {
+    const t = topoH(
+      [
+        sys({ name: 'Movement', dagId: 0, writes: ['Position'] }),
+        sys({ name: 'Quiet', dagId: 0 }),
+      ],
+      worldAndFenceTracks(),
+    );
+    expect(topologyHasAnyAccess(t)).toBe(true);
+    expect(resolveNoAccessReason(t, 0)).toBe('declares-none');
+  });
+
+  it('classifies as trace-empty only when NO system in the trace declares any access', () => {
+    const t = topoH(
+      [
+        sys({ name: 'Movement', dagId: 0 }),
+        sys({ name: 'Quiet', dagId: 0 }),
+      ],
+      worldAndFenceTracks(),
+    );
+    expect(topologyHasAnyAccess(t)).toBe(false);
+    expect(resolveNoAccessReason(t, 0)).toBe('trace-empty');
+  });
+
+  it('counts any of the nine access lanes as "has access" (events / resources included)', () => {
+    expect(topologyHasAnyAccess(topo([sys({ name: 'E', readsEvents: ['Damage'] })]))).toBe(true);
+    expect(topologyHasAnyAccess(topo([sys({ name: 'R', writesResources: ['world.physics'] })]))).toBe(true);
+    expect(topologyHasAnyAccess(topo([sys({ name: 'N', additionalReads: ['Hidden'] })]))).toBe(false); // not a surfaced lane
   });
 });

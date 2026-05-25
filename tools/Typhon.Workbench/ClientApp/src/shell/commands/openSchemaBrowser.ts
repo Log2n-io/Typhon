@@ -1,5 +1,5 @@
 import type { DockviewApi } from 'dockview-react';
-import { useProfilerSelectionStore } from '@/stores/useProfilerSelectionStore';
+import type { ProfilerSelection } from '@/libs/profiler/model/traceModel';
 import { useSourceLocationStore } from '@/stores/useSourceLocationStore';
 import { useDockLayoutStore } from '@/stores/useDockLayoutStore';
 import { useSessionStore } from '@/stores/useSessionStore';
@@ -33,10 +33,14 @@ export function registerDockApi(api: DockviewApi | null): void {
     selectionUnsubscribe = null;
   }
   if (api) {
-    selectionUnsubscribe = useProfilerSelectionStore.subscribe((state, prev) => {
-      if (state.selected === prev.selected) return;
-      const sel = state.selected;
-      if (!sel) return;
+    // 3E — follow the profiler selection off the unified bus leaf (the `useProfilerSelectionStore` silo was
+    // retired). A profiler selection rides the `span` leaf (span/chunk/phase/…); ticks (`tick` leaf) and every
+    // other object type carry no source, so we gate on `leaf.type === 'span'` and read the `ProfilerSelection` ref.
+    selectionUnsubscribe = useSelectionStore.subscribe((state, prev) => {
+      if (state.leaf === prev.leaf) return;
+      const leaf = state.leaf;
+      if (!leaf || leaf.type !== 'span') return;
+      const sel = leaf.ref as ProfilerSelection;
       const panel = api.getPanel('source-preview');
       if (!panel) return;
       let loc = null;
@@ -306,10 +310,6 @@ export function toggleViewDataFlow(): void {
   toggleDockPanel('data-flow', 'DataFlow', 'Data Flow');
 }
 
-export function toggleViewAccessMatrix(): void {
-  toggleDockPanel('access-matrix', 'AccessMatrix', 'Access Matrix');
-}
-
 export function toggleViewOptions(): void {
   toggleDockPanel('options', 'Options', 'Options');
 }
@@ -444,8 +444,10 @@ export function updateSourcePreviewIfOpen(path: string, line: number): void {
  * the primary entry point; this is for keyboard-driven users.
  */
 export function openSourcePreviewForCurrentSpan(): void {
-  const selection = useProfilerSelectionStore.getState().selected;
-  if (!selection || selection.kind !== 'span') return;
+  const leaf = useSelectionStore.getState().leaf; // 3E — read the profiler selection off the unified bus leaf
+  if (!leaf || leaf.type !== 'span') return;
+  const selection = leaf.ref as ProfilerSelection;
+  if (selection.kind !== 'span') return;
   const siteId = selection.span.rawEvent?.sourceLocationId;
   const loc = useSourceLocationStore.getState().resolve(siteId);
   if (!loc) return;

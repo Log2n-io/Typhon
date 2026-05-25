@@ -12,7 +12,6 @@ import ArchetypeInspectorPanel from '@/panels/ArchetypeInspector/ArchetypeInspec
 import ComponentInspectorPanel from '@/panels/ComponentInspector/ComponentInspectorPanel';
 import SystemDagPanel from '@/panels/SystemDag/SystemDagPanel';
 import DataFlowPanel from '@/panels/DataFlow/DataFlowPanel';
-import AccessMatrixPanel from '@/panels/AccessMatrix/AccessMatrixPanel';
 import CriticalPathPanel from '@/panels/CriticalPath/CriticalPathPanel';
 import ProfilerPanel from '@/panels/profiler/ProfilerPanel';
 import TopSpansPanel from '@/panels/profiler/TopSpansPanel';
@@ -121,7 +120,6 @@ const components: Record<string, React.FC<IDockviewPanelProps>> = {
   ComponentInspector: ComponentInspectorPanel,
   SystemDag: SystemDagPanel,
   DataFlow: DataFlowPanel,
-  AccessMatrix: AccessMatrixPanel,
   CriticalPath: CriticalPathPanel,
   Profiler: ProfilerPanel,
   TopSpans: TopSpansPanel,
@@ -149,6 +147,14 @@ const activeComponents: Record<string, React.FC<IDockviewPanelProps>> = Object.f
 // so the deep panels stay out today and re-appear automatically as Stages 2-4 flip them back on.
 function buildDefaultLayout(api: DockviewReadyEvent['api'], kind: 'none' | 'open' | 'attach' | 'trace') {
   if (kind === 'trace' || kind === 'attach') {
+    // The Profiler timeline is the center workspace — add it FIRST (no position) so it establishes the main
+    // grid; the edge groups then wrap around it. A no-position addPanel joins the *active* group, so adding it
+    // AFTER an edge panel docks it into that edge instead — the bug that put the timeline in the left edge once
+    // Stage 3 Phase 1 un-gated the view. This mirrors the open-mode Schema Explorer ordering below.
+    if (isViewActive('Profiler')) {
+      api.addPanel({ id: 'profiler', component: 'Profiler', title: 'Profiler', tabComponent: 'locked' });
+    }
+
     api.addEdgeGroup('left', { id: EDGE_LEFT_ID, initialSize: 260, minimumSize: 150 });
     api.addEdgeGroup('right', { id: EDGE_RIGHT_ID, initialSize: 320, minimumSize: 200 });
     api.addEdgeGroup('bottom', { id: EDGE_BOTTOM_ID, initialSize: 200, minimumSize: 100 });
@@ -161,10 +167,6 @@ function buildDefaultLayout(api: DockviewReadyEvent['api'], kind: 'none' | 'open
       tabComponent: 'locked',
       position: { referenceGroup: EDGE_LEFT_ID },
     });
-
-    if (isViewActive('Profiler')) {
-      api.addPanel({ id: 'profiler', component: 'Profiler', title: 'Profiler', tabComponent: 'locked' });
-    }
 
     api.addPanel({
       id: 'detail',

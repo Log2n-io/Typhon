@@ -18,7 +18,7 @@ public sealed class CpuCallTreeCache
 
     /// <summary>The canonical cache key for a request — every scope axis that changes the fold result, and nothing else.</summary>
     public static string KeyFor(CallTreeRequestDto r) =>
-        $"{r.SpanKind}|{r.SystemIndex}|{r.Phase}|{r.StartUs}|{r.EndUs}|{r.FrameRoot}|{r.ViewMode}";
+        $"{r.SpanKind}|{r.SystemIndex}|{r.Phase}|{r.StartUs}|{r.EndUs}|{r.FrameRoot}|{r.ViewMode}|{r.Direction}";
 
     /// <summary>Returns a previously folded tree for <paramref name="key"/>, if cached.</summary>
     public bool TryGet(string key, out CallTreeResponseDto value)

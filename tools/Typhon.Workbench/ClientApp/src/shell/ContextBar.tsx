@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { ChevronRight } from 'lucide-react';
+import { ChevronRight, Link2, Unlink2 } from 'lucide-react';
 import { useSessionStore } from '@/stores/useSessionStore';
 import { useHeartbeat } from '@/hooks/streams/useHeartbeat';
 import { useProfilerViewStore } from '@/stores/useProfilerViewStore';
@@ -42,6 +42,8 @@ export default function ContextBar() {
   const filePath = useSessionStore((s) => s.filePath);
   const { status } = useHeartbeat();
   const viewRange = useProfilerViewStore((s) => s.viewRange);
+  const scopeLinked = useProfilerViewStore((s) => s.scopeLinked);
+  const setScopeLinked = useProfilerViewStore((s) => s.setScopeLinked);
   const leaf = useSelectionStore((s) => s.leaf);
   const select = useSelectionStore((s) => s.select);
   const envTag = useEnvTagStore((s) => s.get(filePath));
@@ -85,13 +87,36 @@ export default function ContextBar() {
       {/* Scope */}
       <span aria-hidden="true">·</span>
       {isProfiler ? (
-        viewRange.endUs > viewRange.startUs ? (
-          <span className="tabular-nums" title="Time window (global scope)">
-            ⟮ {fmtMs(viewRange.startUs)}–{fmtMs(viewRange.endUs)} ⟯
-          </span>
-        ) : (
-          <span title="Full trace (no window selected)">full trace</span>
-        )
+        <span className="flex items-center gap-1.5">
+          {viewRange.endUs > viewRange.startUs ? (
+            <span className="tabular-nums" title="Time window (global scope)">
+              ⟮ {fmtMs(viewRange.startUs)}–{fmtMs(viewRange.endUs)} ⟯
+            </span>
+          ) : (
+            <span title="Full trace (no window selected)">full trace</span>
+          )}
+          {/* Linked/unlink toggle (GAP-11, stage-3 Phase 3): linked = the scheduling cluster follows this window;
+              unlinked freezes them so the timeline can move without disturbing the panels under study. */}
+          <button
+            type="button"
+            onClick={() => setScopeLinked(!scopeLinked)}
+            aria-pressed={scopeLinked}
+            aria-label={scopeLinked ? 'Scope linked — click to unlink' : 'Scope unlinked — click to re-link'}
+            title={
+              scopeLinked
+                ? 'Scope linked — the scheduling panels (System DAG / Critical Path / Data Flow) follow this window. '
+                  + 'Click to unlink and freeze them at the current window.'
+                : 'Scope unlinked — the scheduling panels are frozen; move the timeline freely without disturbing them. '
+                  + 'Click to re-link.'
+            }
+            className={
+              'flex h-5 w-5 shrink-0 items-center justify-center rounded hover:bg-muted/60 '
+              + (scopeLinked ? 'text-muted-foreground hover:text-foreground' : 'text-amber-500')
+            }
+          >
+            {scopeLinked ? <Link2 className="h-3.5 w-3.5" /> : <Unlink2 className="h-3.5 w-3.5" />}
+          </button>
+        </span>
       ) : (
         <span title="Read revision (HEAD until a revision counter exists)">@HEAD</span>
       )}

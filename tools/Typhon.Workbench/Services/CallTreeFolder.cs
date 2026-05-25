@@ -71,6 +71,40 @@ public static class CallTreeFolder
         CallTreeRequestDto request,
         (int Start, int Count)[] threadRuns = null,
         SampleClassifier classifier = null)
+        => FoldCore(samples, stacks, categoryByFrameId, scopeWindows, request, bottomUp: false, threadRuns, classifier);
+
+    /// <summary>
+    /// Folds the in-scope samples into a <b>bottom-up</b> (callers) tree (§8.7 sandwich): the synthetic root's direct
+    /// children are the self-time frames (the stack leaves); expanding a node reveals its <i>callers</i> — the outer frames
+    /// that led to it. With <see cref="CallTreeRequestDto.FrameRoot"/> set, the tree is rooted at that frame, so it shows
+    /// exactly its callers — the <i>callers pane</i> of the sandwich view (the matching <i>callees pane</i> is the top-down
+    /// <see cref="Fold"/> with the same frame-root). Same scope / view-mode / §8.7 classification / involuntary-stall
+    /// handling as <see cref="Fold"/>; only the per-sample walk inverts (leaf→root, with self-time on the first node).
+    /// </summary>
+    public static CallTreeResponseDto FoldBottomUp(
+        CpuSampleRecord[] samples,
+        ushort[][] stacks,
+        int[] categoryByFrameId,
+        (long Start, long End)[] scopeWindows,
+        CallTreeRequestDto request,
+        (int Start, int Count)[] threadRuns = null,
+        SampleClassifier classifier = null)
+        => FoldCore(samples, stacks, categoryByFrameId, scopeWindows, request, bottomUp: true, threadRuns, classifier);
+
+    /// <summary>
+    /// Shared core for <see cref="Fold"/> (top-down) and <see cref="FoldBottomUp"/> (bottom-up). Scope filtering, §8.7
+    /// classification, view-mode filtering, involuntary-stall aggregation, totals and flattening are identical in both
+    /// directions; only the per-sample stack walk differs — see the <paramref name="bottomUp"/> branch.
+    /// </summary>
+    private static CallTreeResponseDto FoldCore(
+        CpuSampleRecord[] samples,
+        ushort[][] stacks,
+        int[] categoryByFrameId,
+        (long Start, long End)[] scopeWindows,
+        CallTreeRequestDto request,
+        bool bottomUp,
+        (int Start, int Count)[] threadRuns,
+        SampleClassifier classifier)
     {
         var classificationAvailable = classifier is { ClassificationAvailable: true };
         if (samples.Length == 0)
@@ -97,8 +131,8 @@ public static class CallTreeFolder
             }
 
             // Involuntary stalls never fold per-method — their stack is bad-luck noise. They collapse into a labelled
-            // aggregate hung off the root. Suppressed entirely under a frame-root drill: a stall has no stack, so it
-            // cannot honestly be claimed to have happened "under" the drilled method.
+            // aggregate hung off the root. Suppressed entirely under a frame-root drill: a stall has no stack, so it cannot
+            // honestly be claimed to have happened "under" (top-down) or "above" (bottom-up) the drilled method.
             if (cls is SampleClass.InvoluntaryGc or SampleClass.InvoluntaryScheduler or SampleClass.InvoluntaryPaging)
             {
                 if (frameRoot.HasValue)
@@ -133,25 +167,23 @@ public static class CallTreeFolder
                 continue;
             }
 
-            // Root frame is the last element (leaf-first storage). A frameRoot re-roots the walk at the outermost
-            // occurrence of that frame; a sample whose stack lacks the frame is out of scope.
-            var topIndex = stack.Length - 1;
+            // Stacks are leaf-first. Resolve the focus frame's outermost occurrence once (shared by both directions);
+            // a sample whose stack lacks the focus frame is out of scope.
+            var focus = -1;
             if (frameRoot.HasValue)
             {
-                var found = -1;
                 for (var k = stack.Length - 1; k >= 0; k--)
                 {
                     if (stack[k] == frameRoot.Value)
                     {
-                        found = k;
+                        focus = k;
                         break;
                     }
                 }
-                if (found < 0)
+                if (focus < 0)
                 {
                     continue;
                 }
-                topIndex = found;
             }
 
             total++;
@@ -165,21 +197,38 @@ public static class CallTreeFolder
             }
 
             var node = root;
-            for (var k = topIndex; k >= 0; k--)
+            int selfFrame;
+            if (!bottomUp)
             {
-                int frameId = stack[k];
-                if (!node.Children.TryGetValue(frameId, out var child))
+                // Top-down: walk root→leaf. TotalSamples on every node on the path; SelfSamples only on the leaf. A
+                // frame-root truncates the walk at the focus frame (showing the callees beneath it).
+                var topIndex = frameRoot.HasValue ? focus : stack.Length - 1;
+                for (var k = topIndex; k >= 0; k--)
                 {
-                    child = new Node { FrameId = frameId };
-                    node.Children[frameId] = child;
+                    node = Descend(node, stack[k]);
+                    node.TotalSamples++;
                 }
-                child.TotalSamples++;
-                node = child;
+                node.SelfSamples++;
+                selfFrame = stack[0];
             }
-            node.SelfSamples++;
+            else
+            {
+                // Bottom-up: walk leaf→root. The first node — the self-time frame (the leaf, or the focus frame under a
+                // drill) — carries SelfSamples; the rest of the path is its callers (outer frames).
+                var startIndex = frameRoot.HasValue ? focus : 0;
+                for (var k = startIndex; k < stack.Length; k++)
+                {
+                    node = Descend(node, stack[k]);
+                    node.TotalSamples++;
+                    if (k == startIndex)
+                    {
+                        node.SelfSamples++;
+                    }
+                }
+                selfFrame = stack[startIndex];
+            }
 
-            int leafFrame = stack[0];
-            var categoryId = leafFrame < categoryByFrameId.Length ? categoryByFrameId[leafFrame] : -1;
+            var categoryId = selfFrame < categoryByFrameId.Length ? categoryByFrameId[selfFrame] : -1;
             if (categoryId >= 0)
             {
                 categoryBreakdown[categoryId] = categoryBreakdown.GetValueOrDefault(categoryId) + 1;
@@ -204,6 +253,17 @@ public static class CallTreeFolder
         }
 
         return new CallTreeResponseDto(Flatten(root), total, managed, external, slices, classificationAvailable);
+    }
+
+    /// <summary>Navigates to (creating if absent) the child of <paramref name="node"/> for <paramref name="frameId"/>.</summary>
+    private static Node Descend(Node node, int frameId)
+    {
+        if (!node.Children.TryGetValue(frameId, out var child))
+        {
+            child = new Node { FrameId = frameId };
+            node.Children[frameId] = child;
+        }
+        return child;
     }
 
     /// <summary>

@@ -33,7 +33,34 @@ export type XAxisMode = 'uniform' | 'equal' | 'log';
  */
 export type AggregationMode = 'replay' | 'envelope' | 'density';
 
+/**
+ * View mode — the two renderings of the same `systemArchetypeTouches` dataset, merged from the former Data Flow +
+ * Access Matrix panels ([data-flow.md §1](../../../../claude/design/Apps/Workbench/views/data-flow.md)).
+ *
+ * - <b>timeline</b> — Marey bars over phase-segmented time (temporal data contention). Default.
+ * - <b>matrix</b>   — the absorbed Access Matrix: a system×data-track heatmap of access kinds (the access structure).
+ *
+ * Mode is a PC-1 preference (persisted). Selection lives on the bus, so toggling modes preserves it.
+ */
+export type DataFlowMode = 'timeline' | 'matrix';
+
+/**
+ * Matrix-mode column ordering (formerly the Access Matrix's `ColumnSort`).
+ * - <b>phase-then-dependency</b> — group by phase (matching the System DAG lanes), then topological order. Default.
+ * - <b>cluster</b> — cosine-similarity reorder grouping systems with similar data needs.
+ */
+export type ColumnSort = 'phase-then-dependency' | 'cluster';
+
+/**
+ * Matrix-mode row ordering (formerly the Access Matrix's `RowSort`).
+ * - <b>topology</b> — declaration order (matches the Timeline's track order). Default.
+ * - <b>cluster</b> — cosine-similarity reorder over rows' access vectors.
+ */
+export type RowSort = 'topology' | 'cluster';
+
 export interface DataFlowViewState {
+  /** Timeline ⇄ Matrix mode (PC-1). The two renderings of one dataset; selection (on the bus) survives the toggle. */
+  mode: DataFlowMode;
   /** Y-axis altitude. Default L2 (Component-family) per design D9 — right altitude for "what's happening to my data". */
   granularityLevel: GranularityLevel;
   /** Phase column scaling along the X axis. */
@@ -62,9 +89,16 @@ export interface DataFlowViewState {
    * who find it noisy.
    */
   hoverIsolateEnabled: boolean;
+  /** Matrix-mode row ordering. Only consulted in `matrix` mode. */
+  rowSort: RowSort;
+  /** Matrix-mode column ordering. Only consulted in `matrix` mode. */
+  colSort: ColumnSort;
+  setMode: (mode: DataFlowMode) => void;
   setGranularityLevel: (level: GranularityLevel) => void;
   setXMode: (mode: XAxisMode) => void;
   setAggMode: (mode: AggregationMode) => void;
+  setRowSort: (sort: RowSort) => void;
+  setColSort: (sort: ColumnSort) => void;
   /** Toggle phase between collapsed / expanded / default (auto). Click semantics: 1st click → collapse, 2nd → expand, 3rd → default. */
   cyclePhaseCollapse: (phaseName: string) => void;
   setHideUntouched: (hide: boolean) => void;
@@ -88,6 +122,7 @@ const safeStorage = createJSONStorage(() => ({
 export const useDataFlowViewStore = create<DataFlowViewState>()(
   persist(
     (set, get) => ({
+      mode: 'timeline',
       granularityLevel: 'L2',
       xMode: 'uniform',
       aggMode: 'replay',
@@ -96,9 +131,14 @@ export const useDataFlowViewStore = create<DataFlowViewState>()(
       hideUntouched: false,
       dimSkipped: false,
       hoverIsolateEnabled: true,
+      rowSort: 'topology',
+      colSort: 'phase-then-dependency',
+      setMode: (mode) => set({ mode }),
       setGranularityLevel: (granularityLevel) => set({ granularityLevel }),
       setXMode: (xMode) => set({ xMode }),
       setAggMode: (aggMode) => set({ aggMode }),
+      setRowSort: (rowSort) => set({ rowSort }),
+      setColSort: (colSort) => set({ colSort }),
       cyclePhaseCollapse: (phaseName) => {
         const { collapsedPhases, manuallyExpandedPhases } = get();
         const isCollapsed = collapsedPhases.includes(phaseName);

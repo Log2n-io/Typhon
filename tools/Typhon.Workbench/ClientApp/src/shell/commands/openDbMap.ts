@@ -1,4 +1,5 @@
 import type { Camera } from '@/libs/dbmap/camera';
+import { useDagViewStore } from '@/panels/SystemDag/useDagViewStore';
 import { useDbMapStore } from '@/stores/useDbMapStore';
 import { useResourceGraphStore } from '@/stores/useResourceGraphStore';
 import { useSelectionStore } from '@/stores/useSelectionStore';
@@ -13,6 +14,18 @@ import { ensureDockPanel, ensureResourceTreeVisible, openComponentInspector } fr
 export function openDbMapForComponent(typeName: string): void {
   useDbMapStore.getState().requestFocusComponent(typeName);
   ensureDockPanel('dbmap', 'DbMap', 'Database File Map');
+}
+
+/**
+ * Inspector System card → System DAG: highlight the system on the bus, request the canvas to centre + fit its node
+ * (the `pendingFocusSystem` reveal signal, distinct from the plain bus highlight so only an explicit reveal recentres),
+ * and surface the DAG panel. The panel auto-enables "show engine tracks" if the target is an engine-internal system
+ * that would otherwise be hidden (3D, AC3.14 handoff).
+ */
+export function revealSystemInDag(name: string): void {
+  useSelectionStore.getState().setSystem(name);
+  useDagViewStore.getState().requestFocusSystem(name);
+  ensureDockPanel('system-dag', 'SystemDag', 'System DAG');
 }
 
 /**

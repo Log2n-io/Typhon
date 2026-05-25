@@ -1,8 +1,7 @@
 import { useState } from 'react';
 import { Activity, Blocks, Clock, Crosshair, ExternalLink, FileCode, Layers, Search, Tag } from 'lucide-react';
-import type { ChunkSpan, MarkerSelection, PhaseMarker, PhaseSpan, SpanData } from '@/libs/profiler/model/traceModel';
+import type { ChunkSpan, MarkerSelection, PhaseMarker, PhaseSpan, ProfilerSelection, SpanData } from '@/libs/profiler/model/traceModel';
 import { TraceEventKind } from '@/libs/profiler/model/types';
-import type { ProfilerSelection } from '@/stores/useProfilerSelectionStore';
 import { useProfilerSessionStore } from '@/stores/useProfilerSessionStore';
 import { useProfilerStatsStore } from '@/stores/useProfilerStatsStore';
 import { useProfilerViewStore } from '@/stores/useProfilerViewStore';

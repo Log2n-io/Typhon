@@ -25,8 +25,10 @@ export function toggleViewProfiler(): void {
 
 /**
  * Toggle the Critical-Path panel — a dynamic dock panel (closed by default, no edge-group home).
- * First call adds it to the center area; subsequent calls remove it. Same shape as
- * {@link toggleViewComponentBrowser} but without the schema-browser dependencies.
+ * First call docks it in the **bottom strip alongside Logs / Top Spans** (its natural home — a wide-but-short
+ * tape view); subsequent calls remove it. A no-position `addPanel` would join whatever group is active (the
+ * recurring placement bug), so we anchor `within` the Logs (or Top Spans) group; falls back to no-position
+ * when the bottom strip isn't present.
  */
 export function toggleViewCriticalPath(): void {
   const api = registeredApi;
@@ -36,7 +38,12 @@ export function toggleViewCriticalPath(): void {
     api.removePanel(existing);
     return;
   }
-  api.addPanel({ id: 'critical-path', component: 'CriticalPath', title: 'Critical Path' });
+  const bottomAnchor = api.getPanel('logs') ?? api.getPanel('top-spans');
+  api.addPanel(
+    bottomAnchor
+      ? { id: 'critical-path', component: 'CriticalPath', title: 'Critical Path', position: { referencePanel: bottomAnchor.id, direction: 'within' } }
+      : { id: 'critical-path', component: 'CriticalPath', title: 'Critical Path' },
+  );
 }
 
 /**
@@ -53,7 +60,13 @@ export function toggleViewCallTree(): void {
     api.removePanel(existing);
     return;
   }
-  api.addPanel({ id: 'call-tree', component: 'CallTree', title: 'Call Tree' });
+  // Open in the center as a tab in the Profiler's group — a no-position addPanel joins whatever group is active
+  // (e.g. the bottom Logs / Top-spans strip), and the folded tree needs the center's full width & height.
+  api.addPanel(
+    api.getPanel('profiler')
+      ? { id: 'call-tree', component: 'CallTree', title: 'Call Tree', position: { referencePanel: 'profiler', direction: 'within' } }
+      : { id: 'call-tree', component: 'CallTree', title: 'Call Tree' },
+  );
 }
 
 /**
@@ -69,7 +82,13 @@ export function openViewCallTree(): void {
     existing.focus();
     return;
   }
-  api.addPanel({ id: 'call-tree', component: 'CallTree', title: 'Call Tree' });
+  // Open in the center as a tab in the Profiler's group — a no-position addPanel joins whatever group is active
+  // (e.g. the bottom Logs / Top-spans strip), and the folded tree needs the center's full width & height.
+  api.addPanel(
+    api.getPanel('profiler')
+      ? { id: 'call-tree', component: 'CallTree', title: 'Call Tree', position: { referencePanel: 'profiler', direction: 'within' } }
+      : { id: 'call-tree', component: 'CallTree', title: 'Call Tree' },
+  );
 }
 
 /**
@@ -241,6 +260,7 @@ export function openSaveReplayDialog(): void {
 export function buildProfilerPaletteCommands(): CommandItem[] {
   return [
     { id: 'toggle-view-profiler',     label: 'Toggle View Profiler',  keywords: 'profiler open show',               action: toggleViewProfiler, viewId: 'Profiler' },
+    { id: 'toggle-view-call-tree',    label: 'Toggle View Call Tree', keywords: 'call tree cpu samples folded stack callers callees sandwich bottom-up off-cpu profiler', action: toggleViewCallTree, viewId: 'CallTree' },
     { id: 'toggle-view-critical-path', label: 'Toggle View Critical Path', keywords: 'critical path tape timeline cp wall-clock tick', action: toggleViewCriticalPath, viewId: 'CriticalPath' },
     { id: 'toggle-view-query-catalog', label: 'Toggle View Query Catalog', keywords: 'query catalog definitions filters profiler', action: toggleViewQueryCatalog, viewId: 'QueryCatalog' },
     { id: 'toggle-view-query-plan-tree', label: 'Toggle View Query Plan Tree', keywords: 'query plan tree graph dagre xyflow profiler', action: toggleViewQueryPlanTree, viewId: 'QueryPlanTree' },

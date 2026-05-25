@@ -5,7 +5,7 @@ import { useTopology } from '@/hooks/data/useTopology';
 import { useProfilerMetadata } from '@/hooks/profiler/useProfilerMetadata';
 import { REFRESH_DEBOUNCE_MS, useDebouncedValue, useTickGatedSnapshot } from '@/hooks/useTickGatedSnapshot';
 import { useProfilerSessionStore } from '@/stores/useProfilerSessionStore';
-import { useProfilerViewStore } from '@/stores/useProfilerViewStore';
+import { selectEffectiveScope, useProfilerViewStore } from '@/stores/useProfilerViewStore';
 import { useSelectionStore } from '@/stores/useSelectionStore';
 import { useSessionStore } from '@/stores/useSessionStore';
 import { timeToTickRange } from '@/panels/SystemDag/tickRangeMapping';
@@ -17,10 +17,11 @@ import { type Bar, buildBars, buildDensityCells, buildEnvelopeBars, type Density
 import { applyPhaseCollapse, computePhaseLayout, type PhaseAxis, type PhaseSegment } from './phaseLayout';
 import { buildTracks, trackToDataTrackSelection } from './trackBuilding';
 import { findTickRangeSlice } from './tickRangeFilter';
-import { type GranularityLevel, type XAxisMode, useDataFlowViewStore } from './useDataFlowViewStore';
+import { type XAxisMode, useDataFlowViewStore } from './useDataFlowViewStore';
 import DataFlowTimeline from './DataFlowTimeline';
 import DataFlowToolbar from './DataFlowToolbar';
 import DataFlowSidePanel from './DataFlowSidePanel';
+import DataFlowMatrix from './DataFlowMatrix';
 import { type BarTickStats } from './DataFlowTooltip';
 
 /**
@@ -57,8 +58,10 @@ export default function DataFlowPanel(_props: IDockviewPanelProps) {
   const refreshKey = `${latestTickNumber}`;
   const debouncedRefreshKey = useDebouncedValue(refreshKey, REFRESH_DEBOUNCE_MS);
   const metadata = useTickGatedSnapshot(liveMetadata, debouncedRefreshKey);
-  // Committed slot — upstream debounce already coalesces pan/zoom bursts.
-  const time = useProfilerViewStore((s) => s.viewRange);
+  // Committed slot — upstream debounce already coalesces pan/zoom bursts. Resolved through the link/unlink scope
+  // (3B): follows the global window when linked, the frozen `pinnedRange` when unlinked.
+  const time = useProfilerViewStore(selectEffectiveScope);
+  const mode = useDataFlowViewStore((s) => s.mode);
   const granularityLevel = useDataFlowViewStore((s) => s.granularityLevel);
   const xMode = useDataFlowViewStore((s) => s.xMode);
   const aggMode = useDataFlowViewStore((s) => s.aggMode);
@@ -69,7 +72,7 @@ export default function DataFlowPanel(_props: IDockviewPanelProps) {
   const dimSkipped = useDataFlowViewStore((s) => s.dimSkipped);
   const hoverIsolateEnabled = useDataFlowViewStore((s) => s.hoverIsolateEnabled);
   const setHoverIsolateEnabled = useDataFlowViewStore((s) => s.setHoverIsolateEnabled);
-  const setGranularityLevel = useDataFlowViewStore((s) => s.setGranularityLevel);
+  const setMode = useDataFlowViewStore((s) => s.setMode);
   const setXMode = useDataFlowViewStore((s) => s.setXMode);
   const clearSelection = useSelectionStore((s) => s.clear);
 
@@ -372,12 +375,10 @@ export default function DataFlowPanel(_props: IDockviewPanelProps) {
       const active = document.activeElement;
       if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')) return;
 
-      // Granularity step: [ decreases, ] increases. Wraps via clamping so the slider has hard ends.
+      // View mode: [ → Timeline, ] → Matrix (stage-3 §3 Phase 2 — the two renderings of one dataset). Granularity
+      // moved to the toolbar selector when these keys were repurposed for the mode toggle.
       if (e.key === '[' || e.key === ']') {
-        const order: GranularityLevel[] = ['L0', 'L1', 'L2', 'L3', 'L4'];
-        const idx = order.indexOf(granularityLevel);
-        const next = e.key === ']' ? Math.min(order.length - 1, idx + 1) : Math.max(0, idx - 1);
-        if (next !== idx) setGranularityLevel(order[next]);
+        setMode(e.key === '[' ? 'timeline' : 'matrix');
         return;
       }
 
@@ -410,7 +411,7 @@ export default function DataFlowPanel(_props: IDockviewPanelProps) {
     }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [granularityLevel, xMode, hoverIsolateEnabled, setGranularityLevel, setXMode, setHoverIsolateEnabled, clearSelection]);
+  }, [xMode, hoverIsolateEnabled, setMode, setXMode, setHoverIsolateEnabled, clearSelection]);
 
   function onBarHover(key: { systemName: string; tickNumber: number } | null) {
     // Phase D (#327): mirror to the cross-panel store so AccessMatrix + System DAG react. Local Bar object
@@ -460,44 +461,51 @@ export default function DataFlowPanel(_props: IDockviewPanelProps) {
       // dockview unmounts inactive tabs and switching tabs would clear `hoveredSystemTickKey` via the
       // canvas' mouseleave; observing it on the always-mounted Data Flow panel sidesteps that.
       data-testid="data-flow-panel-root"
+      data-mode={mode}
       data-hovered-system={sharedHoveredKey?.systemName ?? ''}
     >
       <DataFlowToolbar />
-      {/* @container marks this row a Tailwind v4 container; the side panel disappears when the panel itself is
-          below 720 px wide so the timeline canvas (already minus 180 px of track labels) doesn't get squeezed
-          to a sliver. The user can widen the panel by dragging the splitter to bring the side panel back. */}
-      <div className="@container flex min-h-0 min-w-0 flex-1 flex-row">
-        <div className="min-w-0 flex-1">
-          <DataFlowTimeline
-            tracks={visibleTracks}
-            bars={bars}
-            densityCells={densityCells}
-            phaseSegments={phaseSegments}
-            systems={topology.systems ?? []}
-            hoverIsolate={hoverIsolate}
-            selectedSystem={selectedSystem}
-            selectedTrackId={dataTrack?.id ?? null}
-            skippedKeys={skippedKeys}
-            topology={topology}
-            resolveBarTickStats={(bar) => barStatsByKey.get(`${bar.systemName}|${bar.tickNumber}`) ?? null}
-            resolveTickDurationUs={(t) => tickDurationByNumber.get(t) ?? null}
-            formatXLabel={formatXLabel}
-            onBarClick={onBarClick}
-            onBarHover={onBarHover}
-            onTrackClick={onTrackClick}
-            onPhaseClick={cyclePhaseCollapse}
-            fitToken={fitToken}
-          />
+      {mode === 'matrix' ? (
+        // Matrix mode — the absorbed Access Matrix, fed the same topology / granularity / touch slice as the
+        // Timeline so the two never diverge. Selection is on the bus → switching back keeps the highlight.
+        <DataFlowMatrix topology={topology} granularityLevel={granularityLevel} touchSlice={touchesSlice} />
+      ) : (
+        // @container marks this row a Tailwind v4 container; the side panel disappears when the panel itself is
+        // below 720 px wide so the timeline canvas (already minus 180 px of track labels) doesn't get squeezed
+        // to a sliver. The user can widen the panel by dragging the splitter to bring the side panel back.
+        <div className="@container flex min-h-0 min-w-0 flex-1 flex-row">
+          <div className="min-w-0 flex-1">
+            <DataFlowTimeline
+              tracks={visibleTracks}
+              bars={bars}
+              densityCells={densityCells}
+              phaseSegments={phaseSegments}
+              systems={topology.systems ?? []}
+              hoverIsolate={hoverIsolate}
+              selectedSystem={selectedSystem}
+              selectedTrackId={dataTrack?.id ?? null}
+              skippedKeys={skippedKeys}
+              topology={topology}
+              resolveBarTickStats={(bar) => barStatsByKey.get(`${bar.systemName}|${bar.tickNumber}`) ?? null}
+              resolveTickDurationUs={(t) => tickDurationByNumber.get(t) ?? null}
+              formatXLabel={formatXLabel}
+              onBarClick={onBarClick}
+              onBarHover={onBarHover}
+              onTrackClick={onTrackClick}
+              onPhaseClick={cyclePhaseCollapse}
+              fitToken={fitToken}
+            />
+          </div>
+          <div className="hidden w-64 shrink-0 border-l border-border bg-card @[720px]:block">
+            <DataFlowSidePanel
+              hoveredBar={hoveredBar}
+              selectedBar={selectedBar}
+              tracks={tracks}
+              systems={topology.systems ?? []}
+            />
+          </div>
         </div>
-        <div className="hidden w-64 shrink-0 border-l border-border bg-card @[720px]:block">
-          <DataFlowSidePanel
-            hoveredBar={hoveredBar}
-            selectedBar={selectedBar}
-            tracks={tracks}
-            systems={topology.systems ?? []}
-          />
-        </div>
-      </div>
+      )}
     </div>
   );
 }

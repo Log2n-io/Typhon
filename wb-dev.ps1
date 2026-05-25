@@ -17,7 +17,7 @@
       trip cost.
 
 .PARAMETER Action
-  start | stop | status | restart | watch-kestrel | watch-vite | help. Default: start.
+  start | stop | reset | status | restart | watch-kestrel | watch-vite | help. Default: start.
 
   watch-kestrel / watch-vite run a single server in the FOREGROUND of the calling
   shell (dedicated window) so you get interactive Hot Reload prompts and live output.
@@ -37,7 +37,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('start', 'stop', 'status', 'restart', 'watch-kestrel', 'watch-vite', 'help', '--help', '-h')]
+    [ValidateSet('start', 'stop', 'reset', 'status', 'restart', 'watch-kestrel', 'watch-vite', 'help', '--help', '-h')]
     [string]$Action = 'start',
 
     # Overrides the Kestrel / ASP.NET Core log category (Microsoft.AspNetCore) via a command-line
@@ -145,6 +145,47 @@ function Stop-ProcTree($processId) {
     taskkill /F /T /PID $processId 2>&1 | Out-Null
 }
 
+# This script's own process plus its ancestor chain (pwsh -> cmd/bash -> ...). The `reset` sweep
+# excludes these so a `/T` tree-kill can never take down the shell running it — the documented
+# "pwsh self-kill" gotcha. Bounded + cycle-guarded against a pathological parent loop.
+function Get-SelfAncestry {
+    $safe = [System.Collections.Generic.HashSet[int]]::new()
+    $cur = $PID
+    for ($i = 0; $cur -and $i -lt 64; $i++) {
+        if (-not $safe.Add([int]$cur)) { break }
+        $p = Get-CimInstance Win32_Process -Filter "ProcessId=$cur" -ErrorAction SilentlyContinue
+        if (-not $p) { break }
+        $cur = [int]$p.ParentProcessId
+    }
+    return $safe
+}
+
+# Find every wb-dev server process by SIGNATURE — independent of the (possibly stale/missing)
+# state file. Two sources, unioned: (1) dotnet/node whose command line targets this repo's
+# Workbench tree (`Typhon.Workbench` appears in both the Kestrel `--project` path and Vite's
+# `ClientApp/node_modules/...` path), tightly scoped so an unrelated dotnet/node is never reaped;
+# (2) whoever currently owns :5200 / :5173 (catches a listener whose command line didn't match,
+# e.g. the published `Typhon.Workbench.exe`). Returns pid -> reason; excludes this script's ancestry.
+function Find-WbDevProcesses {
+    $safe = Get-SelfAncestry
+    $found = [System.Collections.Generic.Dictionary[int, string]]::new()
+
+    Get-CimInstance Win32_Process -Filter "Name='dotnet.exe' OR Name='node.exe'" -ErrorAction SilentlyContinue |
+        ForEach-Object {
+            if ($_.CommandLine -and $_.CommandLine -match 'Typhon\.Workbench' -and -not $safe.Contains([int]$_.ProcessId)) {
+                $found[[int]$_.ProcessId] = $_.Name
+            }
+        }
+
+    foreach ($port in 5200, 5173) {
+        $owner = Get-PortOwner $port
+        if ($owner -and -not $safe.Contains([int]$owner) -and -not $found.ContainsKey([int]$owner)) {
+            $found[[int]$owner] = "port:$port"
+        }
+    }
+    return $found
+}
+
 # ── Actions ────────────────────────────────────────────────────────────────────
 
 function Invoke-Help {
@@ -157,6 +198,9 @@ wb-dev.ps1 [start | stop | status | restart | watch-kestrel | watch-vite | help]
 Actions:
   start          Launch Kestrel + Vite detached, wait for binding, write state JSON
   stop           Read state, kill process trees, delete state, verify
+  reset          Kill EVERY lingering Workbench Kestrel/Vite by signature + port
+                 owner (ignores the state file), then clear state. Use when start
+                 reports an untracked port, or status shows stale/orphan processes.
   status         Read state, check liveness + port binding
   restart        Stop then start (1 s pause between)
   watch-kestrel  Run Kestrel in THIS shell (foreground, interactive Hot Reload);
@@ -359,6 +403,38 @@ function Invoke-Restart {
     Invoke-Start
 }
 
+# Nuke-from-orbit recovery: kill EVERY lingering Workbench Kestrel/Vite found by signature +
+# port owner (state file ignored), then clear state. Use when `start` reports an untracked port,
+# or `status` shows stale/orphan processes (e.g. a `dotnet watch` that choked on "too many
+# changes" and left an orphan watcher). Unlike `stop`, it does not depend on the tracked PIDs.
+function Invoke-Reset {
+    Write-Host 'reset — killing every lingering Workbench dev process (state-independent)...'
+    $found = Find-WbDevProcesses
+    if ($found.Count -eq 0) {
+        Write-Host '  no Workbench Kestrel/Vite processes found'
+    }
+    else {
+        foreach ($entry in $found.GetEnumerator()) {
+            Write-Host ("  killing pid {0} [{1}]" -f $entry.Key, $entry.Value)
+            Stop-ProcTree $entry.Key
+        }
+    }
+
+    Remove-Item $StateFile -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 500
+
+    $stillBound = @()
+    if (Test-PortBound 5200) { $stillBound += "5200 (pid $(Get-PortOwner 5200))" }
+    if (Test-PortBound 5173) { $stillBound += "5173 (pid $(Get-PortOwner 5173))" }
+    if ($stillBound.Count -gt 0) {
+        Write-Host "WARN: ports still bound after reset: $($stillBound -join ', ')"
+        Write-Host 'a manual  taskkill /F /PID <pid>  may be required'
+    }
+    else {
+        Write-Host 'reset complete — :5200 and :5173 are free; state cleared'
+    }
+}
+
 # Run one server in the foreground of THIS shell. -NoNewWindow keeps the child on the
 # calling console, so its stdout streams live and stdin is available for `dotnet watch`
 # Hot Reload prompts. Blocks on Wait-Process until Ctrl+C; the finally clause kills the
@@ -430,6 +506,7 @@ switch ($Action) {
     '-h'            { Invoke-Help }
     'start'         { Invoke-Start }
     'stop'          { Invoke-Stop }
+    'reset'         { Invoke-Reset }
     'status'        { Invoke-Status }
     'restart'       { Invoke-Restart }
     'watch-kestrel' { Invoke-WatchKestrel }

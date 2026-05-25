@@ -40,7 +40,7 @@ export default function CriticalPathToolbar({ bars, onFit, trackOptions }: Props
   const isFallback = bars?.mode === 'execution-order';
 
   return (
-    <div className="flex items-center gap-3 border-b border-border bg-background/80 px-3 py-1.5 font-mono text-fs-sm">
+    <div className="wb-pane-header flex items-center gap-3 border-b border-border bg-background/80 px-3 py-1.5 font-mono text-fs-sm">
       <span className="font-semibold text-foreground">
         {bars
           ? bars.aggregate

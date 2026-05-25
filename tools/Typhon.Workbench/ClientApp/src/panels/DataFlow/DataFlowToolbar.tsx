@@ -3,7 +3,15 @@ import { createPortal } from 'react-dom';
 import { Button } from '@/components/ui/button';
 import { Separator } from '@/components/ui/separator';
 import { useUiPrefsStore } from '@/stores/useUiPrefsStore';
-import { type AggregationMode, type GranularityLevel, type XAxisMode, useDataFlowViewStore } from './useDataFlowViewStore';
+import {
+  type AggregationMode,
+  type ColumnSort,
+  type DataFlowMode,
+  type GranularityLevel,
+  type RowSort,
+  type XAxisMode,
+  useDataFlowViewStore,
+} from './useDataFlowViewStore';
 
 /**
  * Top toolbar for the Data Flow Timeline (#327). Per design §11:
@@ -15,18 +23,24 @@ import { type AggregationMode, type GranularityLevel, type XAxisMode, useDataFlo
  * - "?" button — opens a modal-ish overlay describing every control + visual cue (mirrors CriticalPath panel).
  */
 export default function DataFlowToolbar() {
+  const mode = useDataFlowViewStore((s) => s.mode);
   const granularityLevel = useDataFlowViewStore((s) => s.granularityLevel);
   const xMode = useDataFlowViewStore((s) => s.xMode);
   const aggMode = useDataFlowViewStore((s) => s.aggMode);
   const hideUntouched = useDataFlowViewStore((s) => s.hideUntouched);
   const dimSkipped = useDataFlowViewStore((s) => s.dimSkipped);
   const hoverIsolateEnabled = useDataFlowViewStore((s) => s.hoverIsolateEnabled);
+  const rowSort = useDataFlowViewStore((s) => s.rowSort);
+  const colSort = useDataFlowViewStore((s) => s.colSort);
+  const setMode = useDataFlowViewStore((s) => s.setMode);
   const setGranularity = useDataFlowViewStore((s) => s.setGranularityLevel);
   const setXMode = useDataFlowViewStore((s) => s.setXMode);
   const setAggMode = useDataFlowViewStore((s) => s.setAggMode);
   const setHideUntouched = useDataFlowViewStore((s) => s.setHideUntouched);
   const setDimSkipped = useDataFlowViewStore((s) => s.setDimSkipped);
   const setHoverIsolate = useDataFlowViewStore((s) => s.setHoverIsolateEnabled);
+  const setRowSort = useDataFlowViewStore((s) => s.setRowSort);
+  const setColSort = useDataFlowViewStore((s) => s.setColSort);
   // App-wide "show legends + help affordances" flag, toggled by the `L` key. When off, the `?` button
   // hides — same convention as the Critical Path toolbar and the profiler's tick-overview help glyph.
   const legendsVisible = useUiPrefsStore((s) => s.legendsVisible);
@@ -34,52 +48,75 @@ export default function DataFlowToolbar() {
   const [helpOpen, setHelpOpen] = useState(false);
 
   return (
-    <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border bg-card px-2 py-1">
+    <div className="wb-pane-header flex shrink-0 flex-wrap items-center gap-2 border-b border-border bg-card px-2 py-1">
+      {/* Mode toggle — the two renderings of one dataset (stage-3 §3 Phase 2). [ / ] also toggle it. */}
+      <ModeSegmented value={mode} onChange={setMode} />
+
+      <Separator orientation="vertical" className="h-6" />
+
       <span className="text-xs text-muted-foreground">Granularity</span>
       <GranularitySegmented value={granularityLevel} onChange={setGranularity} />
 
-      <Separator orientation="vertical" className="h-6" />
+      {mode === 'timeline' && (
+        <>
+          <Separator orientation="vertical" className="h-6" />
 
-      <span className="text-xs text-muted-foreground">X-axis</span>
-      <XModeSegmented value={xMode} onChange={setXMode} />
+          <span className="text-xs text-muted-foreground">X-axis</span>
+          <XModeSegmented value={xMode} onChange={setXMode} />
 
-      <Separator orientation="vertical" className="h-6" />
+          <Separator orientation="vertical" className="h-6" />
 
-      <span className="text-xs text-muted-foreground">Aggregate</span>
-      <AggModeSegmented value={aggMode} onChange={setAggMode} />
+          <span className="text-xs text-muted-foreground">Aggregate</span>
+          <AggModeSegmented value={aggMode} onChange={setAggMode} />
 
-      <Separator orientation="vertical" className="h-6" />
+          <Separator orientation="vertical" className="h-6" />
 
-      <Button
-        size="sm"
-        variant={hideUntouched ? 'default' : 'outline'}
-        className="h-7"
-        onClick={() => setHideUntouched(!hideUntouched)}
-        title="Hide tracks with no bars in the visible range"
-      >
-        Hide untouched
-      </Button>
-      <Button
-        size="sm"
-        variant={dimSkipped ? 'default' : 'outline'}
-        className="h-7"
-        onClick={() => setDimSkipped(!dimSkipped)}
-        title="Dim systems whose summary reports a non-zero skipReason"
-      >
-        Dim skipped
-      </Button>
+          <Button
+            size="sm"
+            variant={hideUntouched ? 'default' : 'outline'}
+            className="h-7"
+            onClick={() => setHideUntouched(!hideUntouched)}
+            title="Hide tracks with no bars in the visible range"
+          >
+            Hide untouched
+          </Button>
+          <Button
+            size="sm"
+            variant={dimSkipped ? 'default' : 'outline'}
+            className="h-7"
+            onClick={() => setDimSkipped(!dimSkipped)}
+            title="Dim systems whose summary reports a non-zero skipReason"
+          >
+            Dim skipped
+          </Button>
 
-      <Separator orientation="vertical" className="h-6" />
+          <Separator orientation="vertical" className="h-6" />
 
-      <Button
-        size="sm"
-        variant={hoverIsolateEnabled ? 'default' : 'outline'}
-        className="h-7"
-        onClick={() => setHoverIsolate(!hoverIsolateEnabled)}
-        title="Toggle hover-to-isolate (H)"
-      >
-        Hover isolate
-      </Button>
+          <Button
+            size="sm"
+            variant={hoverIsolateEnabled ? 'default' : 'outline'}
+            className="h-7"
+            onClick={() => setHoverIsolate(!hoverIsolateEnabled)}
+            title="Toggle hover-to-isolate (H)"
+          >
+            Hover isolate
+          </Button>
+        </>
+      )}
+
+      {mode === 'matrix' && (
+        <>
+          <Separator orientation="vertical" className="h-6" />
+
+          <span className="text-xs text-muted-foreground">Rows</span>
+          <RowSortSegmented value={rowSort} onChange={setRowSort} />
+
+          <Separator orientation="vertical" className="h-6" />
+
+          <span className="text-xs text-muted-foreground">Columns</span>
+          <ColumnSortSegmented value={colSort} onChange={setColSort} />
+        </>
+      )}
 
       <div className="ml-auto" />
 
@@ -87,7 +124,7 @@ export default function DataFlowToolbar() {
         <button
           type="button"
           onClick={() => setHelpOpen((o) => !o)}
-          className="flex h-5 w-5 items-center justify-center rounded-full border border-border bg-card text-foreground hover:bg-muted"
+          className="flex h-5 w-5 items-center justify-center rounded-full border border-border bg-card text-fs-xs leading-none text-foreground hover:bg-muted"
           title="Show controls + legend (toggle inline help with `L`)"
           aria-label="Show controls and legend"
         >
@@ -130,6 +167,15 @@ function HelpOverlay({ onClose }: { onClose: () => void }) {
             ✕
           </button>
         </div>
+
+        <Section title="Two modes (Timeline / Matrix)">
+          <p>
+            <strong>Timeline</strong> — Marey bars over phase-segmented time: <em>what happens to the data, when</em>
+            (temporal contention). <strong>Matrix</strong> — a system × data-track heatmap of access kinds: <em>which
+            systems touch which data</em> (the access structure). Both read the same touch data + granularity; toggle
+            with the segmented control or <kbd>[</kbd> / <kbd>]</kbd>. Selection carries across the toggle.
+          </p>
+        </Section>
 
         <Section title="What you're looking at">
           <p>
@@ -185,8 +231,8 @@ function HelpOverlay({ onClose }: { onClose: () => void }) {
 
         <Section title="Keyboard">
           <KeyTable rows={[
-            ['[ / ]',     'Step granularity coarser / finer'],
-            ['1 / 2 / 3', 'X-axis mode (uniform / equal / log)'],
+            ['[ / ]',     'Mode — [ Timeline, ] Matrix (granularity is on the toolbar)'],
+            ['1 / 2 / 3', 'X-axis mode (uniform / equal / log) — Timeline only'],
             ['F',         'Fit X axis to visible range — clears wheel-zoom (no-op if not zoomed)'],
             ['H',         'Toggle hover-to-isolate'],
             ['L',         'Toggle inline help affordances (this `?` button + the profiler\'s overview glyphs) — app-wide'],
@@ -379,6 +425,93 @@ function AggModeSegmented({
           onClick={() => onChange(mode)}
         >
           {AGG_MODE_LABELS[mode]}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+const MODE_LABELS: Record<DataFlowMode, string> = { timeline: 'Timeline', matrix: 'Matrix' };
+const MODE_DESCRIPTIONS: Record<DataFlowMode, string> = {
+  timeline: 'Marey bars over time — what happens to the data, when ([)',
+  matrix: 'System × data-track access heatmap — which systems touch which data (])',
+};
+
+function ModeSegmented({ value, onChange }: { value: DataFlowMode; onChange: (m: DataFlowMode) => void }) {
+  const modes: DataFlowMode[] = ['timeline', 'matrix'];
+  return (
+    <div className="flex overflow-hidden rounded-md border border-border">
+      {modes.map((m) => (
+        <button
+          key={m}
+          type="button"
+          className={
+            'h-7 px-2.5 text-xs leading-none ' +
+            (value === m ? 'bg-primary text-primary-foreground' : 'bg-background text-foreground hover:bg-muted')
+          }
+          title={MODE_DESCRIPTIONS[m]}
+          aria-pressed={value === m}
+          onClick={() => onChange(m)}
+        >
+          {MODE_LABELS[m]}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function RowSortSegmented({ value, onChange }: { value: RowSort; onChange: (s: RowSort) => void }) {
+  const opts: { id: RowSort; label: string; tip: string }[] = [
+    { id: 'topology', label: 'Topo', tip: 'Declaration order — matches the Timeline track order' },
+    { id: 'cluster', label: 'Cluster', tip: 'Cosine-similarity cluster — groups rows touched by similar systems' },
+  ];
+  return (
+    <div className="flex overflow-hidden rounded-md border border-border">
+      {opts.map((o) => (
+        <button
+          key={o.id}
+          type="button"
+          className={
+            'h-7 px-2 text-xs leading-none ' +
+            (value === o.id ? 'bg-primary text-primary-foreground' : 'bg-background text-foreground hover:bg-muted')
+          }
+          title={o.tip}
+          onClick={() => onChange(o.id)}
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function ColumnSortSegmented({ value, onChange }: { value: ColumnSort; onChange: (s: ColumnSort) => void }) {
+  const opts: { id: ColumnSort; label: string; tip: string }[] = [
+    {
+      id: 'phase-then-dependency',
+      label: 'Phase + dep',
+      tip: 'Group by phase, sort by dependency order — matches System DAG swim-lanes',
+    },
+    {
+      id: 'cluster',
+      label: 'Cluster',
+      tip: 'Cosine-similarity cluster — adjacent systems use similar data',
+    },
+  ];
+  return (
+    <div className="flex overflow-hidden rounded-md border border-border">
+      {opts.map((o) => (
+        <button
+          key={o.id}
+          type="button"
+          className={
+            'h-7 px-2 text-xs leading-none ' +
+            (value === o.id ? 'bg-primary text-primary-foreground' : 'bg-background text-foreground hover:bg-muted')
+          }
+          title={o.tip}
+          onClick={() => onChange(o.id)}
+        >
+          {o.label}
         </button>
       ))}
     </div>

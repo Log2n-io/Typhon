@@ -107,6 +107,45 @@ describe('CallTree — §8.7 involuntary-stall aggregate node', () => {
   });
 });
 
+describe('CallTree — selected-row focus styling', () => {
+  it('a clicked row gets the wb-tree-selected hook (its colour is focus-dependent via CSS)', () => {
+    mockData = treeWith(true);
+    render(<CallTree />);
+    // The row div wraps the per-row crosshair button; clicking the row selects it.
+    const row = screen.getByRole('button', { name: 'Focus the call tree on #5' }).closest('div');
+    expect(row).toBeTruthy();
+    expect(row!.className).not.toContain('wb-tree-selected');
+    fireEvent.click(row!);
+    // Selection no longer hard-codes bg-primary/30 — it tags the row so `.dv-active-group .wb-tree-selected`
+    // (focused) vs `.wb-tree-selected` (grey, unfocused) can branch on pane focus.
+    expect(row!.className).toContain('wb-tree-selected');
+  });
+});
+
+describe('CallTree — sandwich row context menu', () => {
+  /** Drill into the only real frame (so sandwich has a focus), then switch to the Sandwich direction. */
+  function renderSandwich() {
+    mockData = treeWith(true);
+    render(<CallTree />);
+    // Drill in the top-down view — the crosshair re-roots the tree at frame #5, giving the sandwich a focus.
+    fireEvent.click(screen.getByRole('button', { name: 'Focus the call tree on #5' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Sandwich' }));
+  }
+
+  it('right-clicking a sandwich row opens the same Call Tree context menu', () => {
+    renderSandwich();
+    // Both panes (callers + callees) now render the frame row, so there are two focus crosshairs.
+    const crosshairs = screen.getAllByRole('button', { name: 'Focus the call tree on #5' });
+    expect(crosshairs.length).toBe(2);
+    const row = crosshairs[0].closest('div');
+    expect(row).toBeTruthy();
+    fireEvent.contextMenu(row!);
+    expect(screen.getByTestId('call-tree-context-menu')).toBeTruthy();
+    // The reused menu carries the drill verb — proof it's the full menu, not a stub.
+    expect(screen.getByText('Focus tree on this frame')).toBeTruthy();
+  });
+});
+
 describe('CallTree — unified breadcrumb navigation', () => {
   /** Renders the panel with a cross-panel `Cluster.Migration` span-kind scope already commanded. */
   function renderScoped() {

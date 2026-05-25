@@ -23,7 +23,8 @@ public sealed record CpuCategoryDto(int Id, string Name);
 /// ▸ <see cref="Phase"/> ▸ the manual <see cref="StartUs"/>/<see cref="EndUs"/> range ▸ whole session (all null). A clicked
 /// span instance is just the range scope (a single window). <see cref="ViewMode"/> is <c>on-cpu</c> (Managed samples only)
 /// or <c>wall-clock</c> (all samples). <see cref="FrameRoot"/>, when set, re-roots the folded tree at that frame
-/// (drill-down — §8.2) and composes with any scope.
+/// (drill-down — §8.2) and composes with any scope. <see cref="Direction"/> is <c>top-down</c> (the folded callees) or
+/// <c>bottom-up</c> (the callers tree, leaf→root); a sandwich view requests both with the same <see cref="FrameRoot"/>.
 /// </summary>
 public sealed record CallTreeRequestDto(
     double? StartUs,
@@ -32,7 +33,8 @@ public sealed record CallTreeRequestDto(
     string ViewMode,
     int? SystemIndex = null,
     string Phase = null,
-    int? SpanKind = null);
+    int? SpanKind = null,
+    string Direction = "top-down");
 
 /// <summary>
 /// One node of the folded call tree. <see cref="Children"/> holds <i>indices</i> into the flat

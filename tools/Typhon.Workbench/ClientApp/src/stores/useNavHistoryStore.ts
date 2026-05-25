@@ -3,7 +3,7 @@ import type { TimeRange } from '@/libs/profiler/model/uiTypes';
 import type { Camera } from '@/libs/dbmap/camera';
 import { animateViewportToRange } from '../shell/commands/profilerCommands';
 import { restoreDbMapCamera } from '../shell/commands/openDbMap';
-import { useProfilerSelectionStore, type ProfilerSelection } from './useProfilerSelectionStore';
+import type { ProfilerSelection } from '@/libs/profiler/model/traceModel';
 import { useSelectedResourceStore, type SelectedResource } from './useSelectedResourceStore';
 import { useSchemaInspectorStore } from './useSchemaInspectorStore';
 import { useDataBrowserStore } from './useDataBrowserStore';
@@ -145,12 +145,12 @@ function restoreSideEffect(entry: NavEntry) {
   } else if (entry.kind === 'profiler-selected') {
     // Restore both: the selection drives DetailPanel recency, the viewRange drives TimeArea's
     // viewport + TickOverview's orange overlay. A null selection means "at this viewport the user
-    // hadn't selected anything yet" — clear() resets the selection store without planting a fake
-    // tick-0 entry.
+    // hadn't selected anything yet" — clearLeaf() resets the bus leaf without planting a fake
+    // tick-0 entry. 3E: the profiler selection lives on the unified bus leaf (silo retired).
     if (entry.selection === null) {
-      useProfilerSelectionStore.getState().clear();
+      useSelectionStore.getState().clearLeaf();
     } else {
-      useProfilerSelectionStore.getState().setSelected(entry.selection);
+      useSelectionStore.getState().select(entry.selection.kind === 'tick' ? 'tick' : 'span', entry.selection);
     }
     // Animate the viewport to the target range so back/forward feels like the double-click zoom
     // tween (800 ms ease-out). Falls back to a snap via `setViewRange` when the profiler panel

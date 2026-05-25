@@ -341,4 +341,86 @@ public sealed class CallTreeFolderTests
         var derived = CallTreeFolder.Fold(samples, Stacks, CategoryByFrameId, [(150, 350)], Request());
         Assert.That(derived.TotalSamples, Is.EqualTo(2), "deriving the per-thread runs inline matches the explicit table");
     }
+
+    // ─── bottom-up / sandwich (FoldBottomUp) ─────────────────────────────────────────────────────
+
+    [Test]
+    public void FoldBottomUp_WallClock_BuildsLeafRootedCallersTree()
+    {
+        var result = CallTreeFolder.FoldBottomUp(Samples, Stacks, CategoryByFrameId, WholeSession, Request());
+
+        Assert.That(result.TotalSamples, Is.EqualTo(3));
+        Assert.That(result.ManagedSamples, Is.EqualTo(2));
+        Assert.That(result.ExternalSamples, Is.EqualTo(1));
+
+        // The synthetic root's children are the self-time leaves, hottest-first: frame 1 (2) before frame 2 (1).
+        var leaves = ChildrenOf(result, Root(result));
+        Assert.That(leaves.Select(c => c.FrameId), Is.EqualTo(new[] { 1, 2 }));
+        Assert.That(leaves[0].TotalSamples, Is.EqualTo(2));
+        Assert.That(leaves[0].SelfSamples, Is.EqualTo(2), "the leaf carries the self time in bottom-up");
+
+        // Expanding a leaf shows its caller (frame 0), with no self time of its own.
+        var frame1Caller = ChildrenOf(result, leaves[0]);
+        Assert.That(frame1Caller, Has.Length.EqualTo(1));
+        Assert.That(frame1Caller[0].FrameId, Is.EqualTo(0));
+        Assert.That(frame1Caller[0].TotalSamples, Is.EqualTo(2));
+        Assert.That(frame1Caller[0].SelfSamples, Is.EqualTo(0));
+
+        Assert.That(leaves[1].FrameId, Is.EqualTo(2));
+        Assert.That(leaves[1].TotalSamples, Is.EqualTo(1));
+        Assert.That(leaves[1].SelfSamples, Is.EqualTo(1));
+        Assert.That(ChildrenOf(result, leaves[1]).Single().FrameId, Is.EqualTo(0));
+    }
+
+    [Test]
+    public void FoldBottomUp_CategoryBreakdown_AttributesSelfLeaf()
+    {
+        var result = CallTreeFolder.FoldBottomUp(Samples, Stacks, CategoryByFrameId, WholeSession, Request());
+
+        // Self-time semantic is unchanged from top-down: leaf frame 1 → cat 1 (×2), leaf frame 2 → cat 2 (×1).
+        var byCategory = result.CategoryBreakdown.ToDictionary(s => s.CategoryId, s => s.SelfSamples);
+        Assert.That(byCategory[1], Is.EqualTo(2));
+        Assert.That(byCategory[2], Is.EqualTo(1));
+    }
+
+    [Test]
+    public void FoldBottomUp_OnCpu_DropsExternalSamples()
+    {
+        var result = CallTreeFolder.FoldBottomUp(Samples, Stacks, CategoryByFrameId, WholeSession, Request(viewMode: "on-cpu"));
+
+        Assert.That(result.TotalSamples, Is.EqualTo(2));
+        Assert.That(result.ExternalSamples, Is.EqualTo(0));
+        // Only the Managed stack-0 samples survive → a single leaf (frame 1) called by frame 0.
+        var leaves = ChildrenOf(result, Root(result));
+        Assert.That(leaves, Has.Length.EqualTo(1));
+        Assert.That(leaves[0].FrameId, Is.EqualTo(1));
+        Assert.That(ChildrenOf(result, leaves[0]).Single().FrameId, Is.EqualTo(0));
+    }
+
+    [Test]
+    public void FoldBottomUp_FrameRoot_ShowsCallersOfFocusFrame()
+    {
+        // Callers of frame 1 (a leaf): only the two stack-0 samples contain it; its sole caller is frame 0.
+        var result = CallTreeFolder.FoldBottomUp(Samples, Stacks, CategoryByFrameId, WholeSession, Request(frameRoot: 1));
+
+        Assert.That(result.TotalSamples, Is.EqualTo(2));
+        var focus = ChildrenOf(result, Root(result)).Single();
+        Assert.That(focus.FrameId, Is.EqualTo(1));
+        Assert.That(focus.SelfSamples, Is.EqualTo(2));
+        Assert.That(ChildrenOf(result, focus).Single().FrameId, Is.EqualTo(0), "frame 0 is frame 1's caller");
+    }
+
+    [Test]
+    public void FoldBottomUp_FrameRoot_OutermostFrameHasNoCallers()
+    {
+        // Callers of frame 0 (the stack root in every sample): it has no callers, so the focus node is a childless leaf.
+        var result = CallTreeFolder.FoldBottomUp(Samples, Stacks, CategoryByFrameId, WholeSession, Request(frameRoot: 0));
+
+        Assert.That(result.TotalSamples, Is.EqualTo(3));
+        var focus = ChildrenOf(result, Root(result)).Single();
+        Assert.That(focus.FrameId, Is.EqualTo(0));
+        Assert.That(focus.TotalSamples, Is.EqualTo(3));
+        Assert.That(focus.SelfSamples, Is.EqualTo(3));
+        Assert.That(focus.Children, Is.Empty, "the outermost frame has no callers above it");
+    }
 }

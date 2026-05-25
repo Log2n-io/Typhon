@@ -25,7 +25,6 @@ import KeyboardHelpDialog from './help/KeyboardHelpDialog';
 import NavButtons from './NavButtons';
 import PaletteTrigger from './PaletteTrigger';
 import {
-  toggleViewAccessMatrix,
   toggleViewDataBrowser,
   toggleViewDbMap,
   toggleViewDataFlow,
@@ -192,15 +191,6 @@ export default function MenuBar() {
  title={isProfilerSession ? undefined : 'Open a profiler trace or attach a session first'}
  >
  Data Flow
- </MenubarItem>
- )}
- {isViewActive('AccessMatrix') && (
- <MenubarItem
- disabled={!isProfilerSession}
- onClick={toggleViewAccessMatrix}
- title={isProfilerSession ? undefined : 'Open a profiler trace or attach a session first'}
- >
- Access Matrix
  </MenubarItem>
  )}
  {ANY_ZONE_D_VIEW_ACTIVE && <MenubarSeparator />}

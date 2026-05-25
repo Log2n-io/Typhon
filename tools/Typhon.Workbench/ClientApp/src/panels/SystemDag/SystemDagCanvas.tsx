@@ -128,6 +128,11 @@ export default function SystemDagCanvas({
   const showCrossPhaseEdges = useDagViewStore((s) => s.showCrossPhaseEdges);
   // Shared cross-panel setting (Options → DAG). `dagModel`'s option is still named `showEngineTracks`.
   const showEngineTracks = useViewOptionsStore((s) => s.showEngineSystems);
+  const setShowEngineTracks = useViewOptionsStore((s) => s.setShowEngineSystems);
+  // "Reveal in System DAG" handoff (3D): a system name parked here by `revealSystemInDag`. The canvas centres its
+  // node (RevealController, below) and clears the signal; if the target is hidden (engine tracks off) we reveal it.
+  const pendingFocusSystem = useDagViewStore((s) => s.pendingFocusSystem);
+  const clearPendingFocusSystem = useDagViewStore((s) => s.clearPendingFocusSystem);
 
   // "Hide skipped" matches what the user sees on each tile: if the stat chip would read 0.0us
   // (or is missing entirely), the system contributed nothing to the selected range and we drop
@@ -152,6 +157,26 @@ export default function SystemDagCanvas({
     () => buildDagModel(visibleTopology, layout, { showCrossPhaseEdges, showEngineTracks }),
     [visibleTopology, layout, showCrossPhaseEdges, showEngineTracks],
   );
+
+  // Reveal handoff — make a parked target visible. If the requested system isn't in the rendered model, it's either
+  // unknown (give up — clear the signal) or filtered out: the common case is an engine-internal system hidden by the
+  // default `showEngineTracks=false`, so we flip that on and let the rebuilt model surface it (RevealController then
+  // centres it). If engine tracks are already shown and it's still missing (e.g. hidden by `hideSkipped`), we clear
+  // rather than leave a stuck signal — we don't override the user's other filters.
+  useEffect(() => {
+    if (!pendingFocusSystem) return;
+    if (model.nodes.some((n) => n.id === pendingFocusSystem)) return; // visible → RevealController handles it
+    const inTopology = topology?.systems?.some((s) => s.name === pendingFocusSystem) ?? false;
+    if (!inTopology) {
+      clearPendingFocusSystem();
+      return;
+    }
+    if (!showEngineTracks) {
+      setShowEngineTracks(true);
+      return; // model rebuilds with the engine node; this effect re-runs and the node is then visible
+    }
+    clearPendingFocusSystem(); // present in topology but hidden by another filter — give up gracefully
+  }, [pendingFocusSystem, model.nodes, topology, showEngineTracks, setShowEngineTracks, clearPendingFocusSystem]);
 
   const hoveredSystem = useHoverStore((s) => s.hoveredSystem);
   const setHoveredSystem = useHoverStore((s) => s.setHoveredSystem);
@@ -596,6 +621,7 @@ export default function SystemDagCanvas({
         onPaneClick={onPaneClick}
       >
         <FitController token={fitToken} modelWidth={model.width} modelHeight={model.height} />
+        <RevealController nodes={styledNodes} />
         {/*
           Lane backgrounds — rendered inside `ViewportPortal` so they share the ReactFlow viewport
           transform (translate + scale) with the nodes. Without this, the lanes are static in
@@ -1007,5 +1033,30 @@ function FitController({
     const y = height / 2 - (modelHeight / 2) * zoom;
     instance.setViewport({ x, y, zoom });
   }, [token, width, height, minZoom, maxZoom, modelWidth, modelHeight, instance]);
+  return null;
+}
+
+/**
+ * Centres the viewport on a single node when a reveal is requested ("Reveal in System DAG", 3D). Reads the parked
+ * <c>pendingFocusSystem</c> from {@link useDagViewStore}; when the named node is present in the rendered set and the
+ * container is sized, it pans (keeping the current zoom) to centre that node and clears the signal. Distinct from
+ * <see cref="FitController"/> (which fits the whole graph) and from the plain bus highlight (which never moves the
+ * viewport) — only an explicit reveal recentres. Node positions come from the model (xyflow's own measurement pass
+ * stays unreliable here — see FitController), so we centre on the flow-space position + half the node box.
+ */
+function RevealController({ nodes }: { nodes: Node<DagNodeData>[] }) {
+  const instance = useReactFlow<Node<DagNodeData>, Edge<DagEdgeData>>();
+  const width = useStore((s) => s.width);
+  const height = useStore((s) => s.height);
+  const pendingFocusSystem = useDagViewStore((s) => s.pendingFocusSystem);
+  const clearPendingFocusSystem = useDagViewStore((s) => s.clearPendingFocusSystem);
+  useEffect(() => {
+    if (!pendingFocusSystem) return;
+    if (width <= 0 || height <= 0) return; // container not sized yet (hidden dock tab) — re-fires when it opens
+    const node = nodes.find((n) => n.id === pendingFocusSystem);
+    if (!node) return; // not visible yet (engine auto-show pass pending) — don't clear; wait for the re-render
+    instance.setCenter(node.position.x + NODE_WIDTH / 2, node.position.y + NODE_HEIGHT / 2, { zoom: instance.getZoom(), duration: 400 });
+    clearPendingFocusSystem();
+  }, [pendingFocusSystem, nodes, width, height, instance, clearPendingFocusSystem]);
   return null;
 }

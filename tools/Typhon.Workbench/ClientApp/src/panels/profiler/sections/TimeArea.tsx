@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
 import type { ChunkSpan, SpanData, TickData } from '@/libs/profiler/model/traceModel';
+import { resolveOwningSystem } from '@/libs/profiler/model/owningSystem';
 import type { TimeRange, TrackLayout, TrackState, Viewport } from '@/libs/profiler/model/uiTypes';
 import { computeGutterWidth, drawTimeArea } from '@/libs/profiler/canvas/timeArea';
 import { hitTestTimeArea, type TimeAreaHover } from '@/libs/profiler/canvas/timeAreaHitTest';
@@ -24,7 +25,8 @@ import { useSessionStore } from '@/stores/useSessionStore';
 import { useOptionsStore } from '@/stores/useOptionsStore';
 import { useNavHistoryStore } from '@/stores/useNavHistoryStore';
 import { useProfilerSessionStore } from '@/stores/useProfilerSessionStore';
-import { useProfilerSelectionStore } from '@/stores/useProfilerSelectionStore';
+import type { ProfilerSelection } from '@/libs/profiler/model/traceModel';
+import { useSelectionStore } from '@/stores/useSelectionStore';
 import { useProfilerViewStore } from '@/stores/useProfilerViewStore';
 import { useSourceLocationStore, type ResolvedSourceLocation } from '@/stores/useSourceLocationStore';
 import { useThemeStore } from '@/stores/useThemeStore';
@@ -101,8 +103,12 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
   const gaugeRegionVisible = useProfilerViewStore((s) => s.gaugeRegionVisible);
   const gaugeCollapse = useProfilerViewStore((s) => s.gaugeCollapse);
   const setGaugeCollapse = useProfilerViewStore((s) => s.setGaugeCollapse);
-  const selection = useProfilerSelectionStore((s) => s.selected);
-  const setSelected = useProfilerSelectionStore((s) => s.setSelected);
+  // Profiler selection now lives on the unified bus leaf (3E — the `useProfilerSelectionStore` silo was retired).
+  // A profiler selection routes to the `span` leaf (or `tick`); other leaf types aren't ours → null. The selector
+  // returns the leaf's stable `ref`, so re-render behaviour matches the old per-store subscription (no canvas churn
+  // when an unrelated object is selected elsewhere).
+  const selection = useSelectionStore((s) =>
+    (s.leaf && (s.leaf.type === 'span' || s.leaf.type === 'tick')) ? (s.leaf.ref as ProfilerSelection) : null);
 
   // Right-click context menu on a span bar. Session id/kind drive the "View in Call Tree" action —
   // CPU sampling (and therefore the Call Tree) is `trace`-session only.
@@ -811,12 +817,12 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
           showOffCpu,
         });
         if (hit) {
-          routeSelection(hit, setSelected);
+          routeSelection(hit, ticks);
         }
       }
     }
     scheduleRender();
-  }, [ticks, animateToRange, setSelected, scheduleRender, legendsVisible, gaugeData.offCpuBySlot, showOffCpu]);
+  }, [ticks, animateToRange, scheduleRender, legendsVisible, gaugeData.offCpuBySlot, showOffCpu]);
 
   const onPointerLeave = useCallback((): void => {
     if (dragRef.current) return; // captured drag continues
@@ -1160,36 +1166,46 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
  */
 function routeSelection(
   hit: NonNullable<TimeAreaHover>,
-  setSelected: (s: import('@/stores/useProfilerSelectionStore').ProfilerSelection) => void,
+  ticks: readonly TickData[],
 ): void {
+  const selection = selectionFromHit(hit);
+  if (selection === null) {
+    // 'off-cpu' overlay bars are a hover-only visual (tooltip surfaces wait reason / duration); 'gutter-chevron'
+    // is handled on pointerdown. Neither produces a selection.
+    return;
+  }
+  // 3E — write the profiler selection straight to the unified bus leaf (tick → `tick`, everything else → `span`),
+  // the same routing the retired `useProfilerSelectionStore` mirror used. The full selection rides as the leaf ref.
+  useSelectionStore.getState().select(selection.kind === 'tick' ? 'tick' : 'span', selection);
+  // AC3.2 (Stage 3 Phase 1) — project the owning System onto the bus as a *projection* (scalar slot, no recency
+  // bump, so it never steals the Inspector leaf). This lets the Inspector resolve `System ⊃ Span` and, from
+  // Phase 3, lets the scheduling cluster (DAG / Critical Path / Data Flow) highlight the same system. A span
+  // carries only its thread slot; its system is the scheduler chunk occupying that slot at the span's instant
+  // (infra spans — WAL / checkpoint / page-cache / GC — have no chunk → null clears the projection).
+  useSelectionStore.getState().setSystem(resolveOwningSystem(selection, ticks.flatMap((t) => t.chunks)));
+}
+
+/** Map a hit-test result to a profiler selection, or null for hover-only / non-selecting hits. */
+function selectionFromHit(hit: NonNullable<TimeAreaHover>): ProfilerSelection | null {
   switch (hit.kind) {
     case 'chunk':
-      setSelected({ kind: 'chunk', chunk: hit.chunk });
-      return;
+      return { kind: 'chunk', chunk: hit.chunk };
     case 'span':
-      setSelected({ kind: 'span', span: hit.span });
-      return;
+      return { kind: 'span', span: hit.span };
     case 'tick':
-      setSelected({ kind: 'tick', tickNumber: hit.tickNumber });
-      return;
+      return { kind: 'tick', tickNumber: hit.tickNumber };
     case 'phase':
-      // Phase span (RuntimePhaseSpan, kind 243) — surface as its own DetailPane branch so the user can
-      // read the phase's SpanId and verify child spans (PageCacheFlush etc.) attach via parentSpanId.
-      setSelected({ kind: 'phase', phase: hit.phase, tickNumber: hit.tickNumber });
-      return;
+      // Phase span (RuntimePhaseSpan, kind 243) — its own DetailPane branch so the user can read the phase's
+      // SpanId and verify child spans (PageCacheFlush etc.) attach via parentSpanId.
+      return { kind: 'phase', phase: hit.phase, tickNumber: hit.tickNumber };
     case 'phase-marker':
-      // Glyph in the phase track (UoW Create / UoW Flush). Surfaces its own marker-detail branch.
-      setSelected({ kind: 'phase-marker', marker: hit.marker, tickNumber: hit.tickNumber });
-      return;
+      // Glyph in the phase track (UoW Create / UoW Flush). Its own marker-detail branch.
+      return { kind: 'phase-marker', marker: hit.marker, tickNumber: hit.tickNumber };
     case 'mini-row-op':
-      // Treat mini-row ops as spans (they ARE SpanData under the hood — stored in projection arrays).
-      setSelected({ kind: 'span', span: hit.op });
-      return;
-    // 'off-cpu' is intentionally not routed to a selection — off-CPU overlay bars are a hover-only
-    // visual (the hover tooltip surfaces wait reason / duration); a click on one is a no-op.
-    case 'gutter-chevron':
-      // Already handled in pointerdown; never reaches here on click-without-drag
-      return;
+      // Mini-row ops ARE SpanData under the hood (stored in projection arrays) — treat as spans.
+      return { kind: 'span', span: hit.op };
+    default:
+      return null;
   }
 }
 

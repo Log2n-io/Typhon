@@ -6,22 +6,19 @@ import { ANY_ZONE_D_VIEW_ACTIVE, ZONE_D_VIEW_ACTIVE, isViewActive } from '../vie
 // Stage 2 (GAP-02): SchemaBrowser/ArchetypeBrowser AND the four Schema* deep panels were *removed* —
 // consolidated into the Schema Explorer + Archetype/Component Inspectors (see removedSurfaces.test.ts).
 const ZONE_D_GATED_OFF = [
-  'Profiler',
-  'TopSpans',
-  'CallTree',
-  'SourcePreview',
-  'SystemDag',
-  'CriticalPath',
-  'DataFlow',
-  'AccessMatrix',
   'QueryCatalog',
   'QueryPlanTree',
   'ExecutionInspector',
 ] as const;
 
 // Zone-D views reintroduced (flipped on) by Stages 2-4. Listed so a *de*activation regression is caught too.
-// Stage 2 Phase 2: Data Browser. Stage 2 Phase 3: File Map + Storage Health (the storage drill).
-const ZONE_D_ACTIVE = ['DataBrowserEntities', 'DbMap', 'StorageHealth'] as const;
+// Stage 2 Phase 2: Data Browser. Stage 2 Phase 3: File Map + Storage Health. Stage 3 Phase 1: Profiler timeline + Top
+// Spans. Stage 3 Phase 2: Call Tree + Source Preview (the span→cause drill). Stage 3 Phase 3 (3A): Data Flow —
+// absorbing the former Access Matrix as its in-panel Matrix mode (AccessMatrix is removed from the registry, not gated).
+// Stage 3 Phase 3 (3D): System DAG + Critical Path — the rest of the scheduling cluster (bus-driven, one selection).
+const ZONE_D_ACTIVE = [
+  'DataBrowserEntities', 'DbMap', 'StorageHealth', 'Profiler', 'TopSpans', 'CallTree', 'SourcePreview', 'DataFlow', 'SystemDag', 'CriticalPath',
+] as const;
 
 // The full registry key set = gated-off ∪ active. Used to assert the registry covers exactly the documented set.
 const ZONE_D_VIEW_IDS = [...ZONE_D_GATED_OFF, ...ZONE_D_ACTIVE] as const;

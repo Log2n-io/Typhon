@@ -11,6 +11,7 @@ beforeEach(() => {
   useSelectionStore.getState().clear();
   useEnvTagStore.setState({ tags: {} });
   useSessionStore.setState({ kind: 'open', filePath: 'C:/data/AntHill.typhon', sessionId: null });
+  useProfilerViewStore.setState({ scopeLinked: true, pinnedRange: null });
 });
 afterEach(cleanup);
 
@@ -27,6 +28,25 @@ describe('ContextBar (zone B)', () => {
     useProfilerViewStore.getState().commitViewRange({ startUs: 1000, endUs: 5000 });
     render(<ContextBar />);
     expect(screen.getByText(/1\.0ms–5\.0ms/)).toBeTruthy();
+  });
+
+  it('shows a link/unlink scope toggle in trace sessions and flips it on click (3B)', () => {
+    useSessionStore.setState({ kind: 'trace' });
+    useProfilerViewStore.getState().commitViewRange({ startUs: 1000, endUs: 5000 });
+    render(<ContextBar />);
+    const toggle = screen.getByRole('button', { name: /click to unlink/i });
+    expect(toggle.getAttribute('aria-pressed')).toBe('true');
+    fireEvent.click(toggle);
+    expect(useProfilerViewStore.getState().scopeLinked).toBe(false);
+    // The cluster's window is now frozen at the value present when unlinked.
+    expect(useProfilerViewStore.getState().pinnedRange).toEqual({ startUs: 1000, endUs: 5000 });
+    // The button now offers to re-link.
+    expect(screen.getByRole('button', { name: /click to re-link/i })).toBeTruthy();
+  });
+
+  it('has no scope toggle in Open sessions (revision scope, not a time window)', () => {
+    render(<ContextBar />); // beforeEach sets kind 'open'
+    expect(screen.queryByRole('button', { name: /unlink|re-link/i })).toBeNull();
   });
 
   it('renders the breadcrumb chain and navigates the bus when a crumb is clicked', () => {

@@ -4,7 +4,6 @@ import { useThemeStore } from '@/stores/useThemeStore';
 import { useDensityStore } from '@/stores/useDensityStore';
 import { refreshResourceGraph } from '@/hooks/useResourceIndex';
 import {
-  toggleViewAccessMatrix,
   toggleViewDataBrowser,
   toggleViewDataFlow,
   toggleViewDbMap,
@@ -68,8 +67,7 @@ export function buildBaseCommands(): CommandItem[] {
     // (Stage 2 / GAP-02: the schema-archetypes/indexes/relationships toggle commands were removed with the
     //  four Schema* panels — those facts now live in the Component Inspector tabs.)
     { id: 'toggle-view-system-dag',           label: 'Toggle View System DAG',              keywords: 'system dag scheduler topology phases rfc07', action: toggleViewSystemDag, viewId: 'SystemDag' },
-    { id: 'toggle-view-data-flow',            label: 'Toggle View Data Flow',               keywords: 'data flow timeline marey tracks granularity bars', action: toggleViewDataFlow, viewId: 'DataFlow' },
-    { id: 'toggle-view-access-matrix',        label: 'Toggle View Access Matrix',           keywords: 'access matrix heatmap systems components touch grid', action: toggleViewAccessMatrix, viewId: 'AccessMatrix' },
+    { id: 'toggle-view-data-flow',            label: 'Toggle View Data Flow',               keywords: 'data flow timeline matrix marey tracks granularity bars access heatmap systems components', action: toggleViewDataFlow, viewId: 'DataFlow' },
     { id: 'toggle-view-dbmap',                label: 'Toggle View Database File Map',       keywords: 'database file map storage layout pages hilbert fragmentation disk', action: toggleViewDbMap, viewId: 'DbMap' },
     { id: 'toggle-view-storage-health',       label: 'Open Storage Health',                 keywords: 'storage health dashboard segments occupancy dirty reclaimable fragmentation wal disk aggregate', action: toggleViewStorageHealth, viewId: 'StorageHealth' },
     { id: 'data-browser',                     label: 'Open Data Browser',                   keywords: 'data browser entities components values inspect crud rows', action: () => toggleViewDataBrowser(), viewId: 'DataBrowserEntities' },

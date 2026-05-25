@@ -17,15 +17,18 @@ import { openComponentInspector, openArchetypeInspector, openDataBrowser } from 
 import { useArchetypesForComponent } from '@/hooks/schema/useArchetypesForComponent';
 import { pickPrimaryArchetype } from '@/hooks/dataBrowser/pickArchetype';
 import { componentNameFromResource } from '@/hooks/dataBrowser/resourceComponent';
-import { openComponentInSchema, openDbMapForComponent, revealComponentInResourceTree } from '@/shell/commands/openDbMap';
+import { openComponentInSchema, openDbMapForComponent, revealComponentInResourceTree, revealSystemInDag } from '@/shell/commands/openDbMap';
 import type { ComponentSchema, Field } from '@/hooks/schema/types';
 import ProfilerDetail from '@/panels/profiler/ProfilerDetail';
+import { useTopology } from '@/hooks/data/useTopology';
+import { toNodeData, resolveNoAccessReason } from '@/panels/SystemDag/dagModel';
+import SystemAccessSummary from '@/panels/schemaCommon/SystemAccessSummary';
 import { useEntityDetail } from '@/hooks/dataBrowser/useEntityDetail';
 import EntityCardsDetail from '@/panels/DataBrowser/EntityCardsDetail';
 import { useSelectionStore, type SelectionLeaf } from '@/stores/useSelectionStore';
 import { resolveChain, type SelectionRef } from '@/stores/selectionChain';
 import type { SelectedResource } from '@/stores/useSelectedResourceStore';
-import type { ProfilerSelection } from '@/stores/useProfilerSelectionStore';
+import type { ProfilerSelection } from '@/libs/profiler/model/traceModel';
 
 /**
  * The Inspector (right rail, zone E) — the single "what's selected" surface for the whole app (IA §2.4).
@@ -134,7 +137,7 @@ function LeafCard({ leaf }: { leaf: SelectionLeaf }): React.JSX.Element {
     case 'archetype':
       return <ArchetypeLeafCard archetypeId={String(leaf.ref)} />;
     case 'system':
-      return <ObjectSummaryCard icon={<Workflow className="h-4 w-4 text-muted-foreground" />} kind="System" title={String(leaf.ref)} />;
+      return <SystemLeafCard name={String(leaf.ref)} />;
     case 'query':
       return <ObjectSummaryCard icon={<ListTree className="h-4 w-4 text-muted-foreground" />} kind="Query" title={queryLabel(leaf.ref)} />;
     default:
@@ -295,8 +298,72 @@ function ArchetypeLeafCard({ archetypeId }: { archetypeId: string }): React.JSX.
 }
 
 /**
- * A summary card for an object whose deep surface is still a gated workspace panel — System, Query (Stages
- * 3-4). States what's selected + that the deep view returns later (PC-6: an explained state, no dead verb).
+ * System card (inspector.md §4.2) — a summary: phase + RFC-07 declared access. Resolves the system from the
+ * (cached) topology and reuses {@link toNodeData} so the access arrays are byte-identical to the System DAG's,
+ * and {@link SystemAccessSummary} so there is one declared-access rendering (PC-3). No "Reveal in System DAG"
+ * verb yet — that view is gated until Phase 3D (PC-6: no dead affordance).
+ */
+function SystemDetailBody({ name }: { name: string }): React.JSX.Element {
+  const sessionId = useSessionStore((s) => s.sessionId);
+  const { data: topology } = useTopology(sessionId);
+  const system = topology?.systems?.find((s) => s.name === name) ?? null;
+  if (!system) {
+    return <AncestorBody>{topology ? 'Not in this trace topology.' : 'Loading…'}</AncestorBody>;
+  }
+  const node = toNodeData(system);
+  // topology is non-null here (system was just resolved from it); the guard keeps TS happy without `!`.
+  const noAccessReason = topology ? resolveNoAccessReason(topology, node.dagId) : undefined;
+  return (
+    <div className="space-y-2">
+      <div className="text-fs-sm">
+        <span className="text-muted-foreground">Phase: </span>
+        <span className="font-mono text-foreground">{node.phaseName || '(unphased)'}</span>
+      </div>
+      <SystemAccessSummary {...node} noAccessReason={noAccessReason} />
+    </div>
+  );
+}
+
+/**
+ * Full leaf card for a `system` selection — header + {@link SystemDetailBody} (phase + declared access) + the
+ * "Reveal in System DAG" handoff. The DAG view is active as of Phase 3D, so this is a live verb (PC-6: no dead
+ * affordance); it highlights the system on the bus and centres its node (engine systems auto-reveal).
+ */
+function SystemLeafCard({ name }: { name: string }): React.JSX.Element {
+  return (
+    <LeafSummaryCard
+      icon={<Workflow className="h-4 w-4 text-muted-foreground" />}
+      kind="System"
+      title={name}
+      actions={[{ label: 'Reveal in System DAG', onClick: () => revealSystemInDag(name), testId: 'leaf-reveal-system-dag' }]}
+    >
+      <SystemDetailBody name={name} />
+    </LeafSummaryCard>
+  );
+}
+
+/**
+ * The "Reveal in System DAG" verb for the System *ancestor* section (a chunk/span's owning system). The leaf card
+ * renders the same verb through {@link LeafSummaryCard}'s action row; this mirrors it for the ancestor so the
+ * jump-to-DAG handoff works from a chunk/span selection too. Same styling + handler as the leaf action; a distinct
+ * test id because the two never co-render (leaf XOR ancestor).
+ */
+function RevealInSystemDagButton({ name }: { name: string }): React.JSX.Element {
+  return (
+    <button
+      type="button"
+      onClick={() => revealSystemInDag(name)}
+      data-testid="ancestor-reveal-system-dag"
+      className="mt-2 w-full rounded border border-border px-2 py-1 text-fs-sm text-foreground hover:bg-accent"
+    >
+      Reveal in System DAG
+    </button>
+  );
+}
+
+/**
+ * A summary card for an object whose deep surface is still a gated workspace panel — Query (Stage 4). States
+ * what's selected + that the deep view returns later (PC-6: an explained state, no dead verb).
  */
 function ObjectSummaryCard({ icon, kind, title }: { icon: ReactNode; kind: string; title: string }): React.JSX.Element {
   return (
@@ -391,6 +458,17 @@ function AncestorSummary({ node }: { node: SelectionRef }): React.JSX.Element | 
       return <ComponentAncestorSummary typeName={String(node.ref)} />;
     case 'archetype':
       return <ArchetypeAncestorSummary archetypeId={String(node.ref)} />;
+    case 'system':
+      // System ⊃ Span/Chunk ancestor: the same phase + declared-access body the leaf shows (3C), PLUS the live
+      // "Reveal in System DAG" verb — so the jump-to-DAG handoff is reachable straight from a chunk/span selection,
+      // not only when the System is the primary leaf. The button is a sibling of the (topology-gated) body so it
+      // shows even while topology is still loading (reveal works by name regardless).
+      return (
+        <>
+          <SystemDetailBody name={String(node.ref)} />
+          <RevealInSystemDagButton name={String(node.ref)} />
+        </>
+      );
     default:
       return null;
   }

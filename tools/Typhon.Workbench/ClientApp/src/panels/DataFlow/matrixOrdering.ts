@@ -2,7 +2,8 @@ import type { Track } from '@/panels/DataFlow/trackBuilding';
 import type { AccessMatrix, Column } from './matrixBuilding';
 
 /**
- * Pure column / row ordering for the Access Matrix. Two strategies per axis — see {@link useAccessMatrixViewStore}.
+ * Pure column / row ordering for the Data Flow Matrix mode. Two strategies per axis — see `rowSort`/`colSort` in
+ * {@link useDataFlowViewStore} (folded in from the former Access Matrix when the two panels merged).
  *
  * The default `phase-then-dependency` column order matches the System DAG's swim-lane skeleton: phase groups
  * preserve the user's declared mental model, dependency-order within each group encodes the runtime causality.

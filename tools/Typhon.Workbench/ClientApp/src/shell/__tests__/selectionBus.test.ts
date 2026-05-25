@@ -4,7 +4,6 @@ import { resolveChain } from '@/stores/selectionChain';
 import { useSelectedResourceStore, type SelectedResource } from '@/stores/useSelectedResourceStore';
 import { useSchemaInspectorStore } from '@/stores/useSchemaInspectorStore';
 import { useDataBrowserStore } from '@/stores/useDataBrowserStore';
-import { useProfilerSelectionStore } from '@/stores/useProfilerSelectionStore';
 
 // Conformance suite A — selection-bus laws (IA §3, GAP-05). The keystone, tested before its consumers.
 
@@ -15,7 +14,6 @@ function resetAll() {
   useSelectedResourceStore.getState().clear();
   useSchemaInspectorStore.getState().reset();
   useDataBrowserStore.getState().reset();
-  useProfilerSelectionStore.getState().clear();
   // reset() / clear() on the silos re-touch the bus via mirrors; clear the leaf last.
   useSelectionStore.getState().clearLeaf();
 }
@@ -64,11 +62,15 @@ describe('suite A — selection-bus laws', () => {
       expect(bus().leaf).toMatchObject({ type: 'page', ref: { kind: 'page', pageIndex: 7 } });
     });
 
-    it('profiler selection mirrors: tick → tick, others → span', () => {
-      useProfilerSelectionStore.getState().setSelected({ kind: 'tick', tickNumber: 12 });
-      expect(bus().leaf?.type).toBe('tick');
-      useProfilerSelectionStore.getState().setSelected({ kind: 'span', span: { id: 1 } as never });
+    it('profiler selection writes the bus leaf directly: tick → tick, span/chunk/phase → span (3E)', () => {
+      // 3E retired the useProfilerSelectionStore silo — the profiler writers (TimeArea / TickOverview / nav
+      // restore) call the bus directly with the full ProfilerSelection as the leaf ref, same tick-vs-span routing.
+      bus().select('tick', { kind: 'tick', tickNumber: 12 });
+      expect(bus().leaf).toMatchObject({ type: 'tick', ref: { kind: 'tick', tickNumber: 12 } });
+      const span = { kind: 'span', span: { id: 1 } } as never;
+      bus().select('span', span);
       expect(bus().leaf?.type).toBe('span');
+      expect(bus().leaf?.ref).toBe(span); // the whole selection rides as the ref
     });
   });
 

@@ -1,6 +1,5 @@
-import type { ChunkSpan, OffCpuStore, SpanData, TickData } from '@/libs/profiler/model/traceModel';
+import type { ChunkSpan, OffCpuStore, ProfilerSelection, SpanData, TickData } from '@/libs/profiler/model/traceModel';
 import type { TimeRange, TrackLayout, Viewport } from '@/libs/profiler/model/uiTypes';
-import type { ProfilerSelection } from '@/stores/useProfilerSelectionStore';
 import type { TimeAreaHover } from './timeAreaHitTest';
 import { relativeLuminance } from '@/libs/colors';
 import {

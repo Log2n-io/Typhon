@@ -199,8 +199,11 @@ public sealed class ProfilerController : ControllerBase
             }
             var windows = ScopeResolver.Resolve(
                 request, meta.Systems, meta.TickSummaries, meta.SystemTickSummaries, () => runtime.SpanInstanceIndex, runtime.TimestampFrequency);
-            var tree = CallTreeFolder.Fold(
-                cpu.Samples, cpu.Stacks, cpu.CategoryByFrameId, windows, request, cpu.ThreadRuns, runtime.SampleClassifier);
+            var tree = string.Equals(request.Direction, "bottom-up", StringComparison.OrdinalIgnoreCase)
+                ? CallTreeFolder.FoldBottomUp(
+                    cpu.Samples, cpu.Stacks, cpu.CategoryByFrameId, windows, request, cpu.ThreadRuns, runtime.SampleClassifier)
+                : CallTreeFolder.Fold(
+                    cpu.Samples, cpu.Stacks, cpu.CategoryByFrameId, windows, request, cpu.ThreadRuns, runtime.SampleClassifier);
             runtime.CallTreeCache.Put(cacheKey, tree);
             return Ok(tree);
         }

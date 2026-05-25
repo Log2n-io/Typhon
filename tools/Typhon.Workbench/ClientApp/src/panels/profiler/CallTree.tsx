@@ -21,7 +21,9 @@ import {
   INVOLUNTARY_FRAME_LABELS,
   type CallTreeNode,
   type CallTreeRequest,
+  type CallTreeResponse,
   type CallTreeViewMode,
+  type CallTreeDirection,
   type CategorySlice,
 } from '@/hooks/profiler/useCallTree';
 import { useSampleDensity } from '@/hooks/profiler/useSampleDensity';
@@ -50,6 +52,8 @@ export default function CallTree() {
   const kind = useSessionStore((s) => s.kind);
 
   const [viewMode, setViewMode] = useState<CallTreeViewMode>('wall-clock');
+  // Fold direction (§8.7). top-down = callees · bottom-up = callers · sandwich = both around the drilled frame.
+  const [direction, setDirection] = useState<'top-down' | 'bottom-up' | 'sandwich'>('top-down');
   const [groupByCategory, setGroupByCategory] = useState(false);
   // The breadcrumb is the panel-local navigation stack: each entry is a full view state (time-window scope +
   // frame-root). Every scope command and every Crosshair drill pushes one; clicking a crumb restores it. Entry 0
@@ -145,20 +149,29 @@ export default function CallTree() {
     }
   }
 
+  // The main query: bottom-up when that mode is chosen, else top-down. Sandwich uses top-down here (its callees pane)
+  // and a second bottom-up query (its callers pane), both rooted at the same focus frame (the active drill).
+  const serverDirection: CallTreeDirection = direction === 'bottom-up' ? 'bottom-up' : 'top-down';
   const request = useMemo<CallTreeRequest>(
     () => ({
       startUs: scope.startUs,
       endUs: scope.endUs,
       frameRoot: activeFrameRoot,
       viewMode,
+      direction: serverDirection,
       systemIndex: scope.systemIndex,
       phase: scope.phase,
       spanKind: scope.spanKind,
     }),
-    [scope, activeFrameRoot, viewMode],
+    [scope, activeFrameRoot, viewMode, serverDirection],
   );
+  // Sandwich callers pane — a bottom-up fold rooted at the same focus. Disabled (null sessionId) unless sandwich mode
+  // has a focus frame, so it only fetches when actually shown.
+  const callersRequest = useMemo<CallTreeRequest>(() => ({ ...request, direction: 'bottom-up' }), [request]);
+  const sandwichFocused = direction === 'sandwich' && activeFrameRoot != null;
 
   const query = useCallTree(isTrace ? sessionId : null, request);
+  const callersQuery = useCallTree(sandwichFocused && isTrace ? sessionId : null, callersRequest);
   const data = query.data ?? null;
 
   // Re-fold ⇒ node indices are invalid ⇒ drop selection + any open context menu.
@@ -323,6 +336,8 @@ export default function CallTree() {
         sessionId={sessionId}
         viewMode={viewMode}
         onViewMode={setViewMode}
+        direction={direction}
+        onDirection={setDirection}
         groupByCategory={groupByCategory}
         onGroupByCategory={setGroupByCategory}
         scope={scope}
@@ -352,6 +367,13 @@ export default function CallTree() {
           />
         ) : groupByCategory ? (
           <CategoryView breakdown={data.categoryBreakdown} total={data.totalSamples} />
+        ) : direction === 'sandwich' ? (
+          <SandwichView
+            focusName={activeFrameRoot != null ? friendlyMethodName(byId.get(activeFrameRoot)?.method ?? `#${activeFrameRoot}`) : null}
+            callersData={callersQuery.data ?? null}
+            calleesData={data}
+            onDrill={drillInto}
+          />
         ) : (
           <div className="flex h-full w-full">
             <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
@@ -425,6 +447,8 @@ function Toolbar(props: {
   sessionId: string | null;
   viewMode: CallTreeViewMode;
   onViewMode: (m: CallTreeViewMode) => void;
+  direction: 'top-down' | 'bottom-up' | 'sandwich';
+  onDirection: (d: 'top-down' | 'bottom-up' | 'sandwich') => void;
   groupByCategory: boolean;
   onGroupByCategory: (v: boolean) => void;
   scope: CallTreeScope;
@@ -476,7 +500,7 @@ function Toolbar(props: {
   };
 
   return (
-    <div className="flex flex-shrink-0 flex-wrap items-center gap-2 border-b border-border bg-card px-2 py-1.5">
+    <div className="wb-pane-header flex flex-shrink-0 flex-wrap items-center gap-2 border-b border-border bg-card px-2 py-1.5">
       {/* §8.7 — the on-CPU view is a true on-/off-core split only when the trace carried context-switch data; without
           it the same view is a SampleType proxy, so it honestly labels itself "Thread time" instead of "On-CPU". */}
       <div className="flex items-center overflow-hidden rounded border border-border">
@@ -493,6 +517,19 @@ function Toolbar(props: {
         </ModeButton>
         <ModeButton active={props.viewMode === 'wall-clock'} onClick={() => props.onViewMode('wall-clock')}>
           Wall-clock
+        </ModeButton>
+      </div>
+
+      {/* §8.7 fold direction — top-down (callees), bottom-up (callers), or the sandwich of both around a drilled frame. */}
+      <div className="flex items-center overflow-hidden rounded border border-border">
+        <ModeButton active={props.direction === 'top-down'} onClick={() => props.onDirection('top-down')} title="Top-down — callees (root → leaf)">
+          Top-down
+        </ModeButton>
+        <ModeButton active={props.direction === 'bottom-up'} onClick={() => props.onDirection('bottom-up')} title="Bottom-up — callers (hot leaves; expand to see who called them)">
+          Bottom-up
+        </ModeButton>
+        <ModeButton active={props.direction === 'sandwich'} onClick={() => props.onDirection('sandwich')} title="Sandwich — callers + callees of the drilled frame">
+          Sandwich
         </ModeButton>
       </div>
 
@@ -950,7 +987,7 @@ function TreeRow({
     <div>
       <div
         className={`relative flex h-[22px] cursor-default items-center gap-1 pr-2 leading-none ${
-          selected ? 'bg-primary/30' : 'hover:bg-primary/20'
+          selected ? 'wb-tree-selected' : 'hover:bg-primary/20'
         }`}
         style={{ paddingLeft: depth * 12 + 4 }}
         title={hasSource ? `${method}\n${symbol?.file}:${symbol?.line}` : method}
@@ -1085,6 +1122,214 @@ function EmptyState({ icon, text }: { icon?: React.ReactNode; text: string }) {
         {icon}
         {text}
       </div>
+    </div>
+  );
+}
+
+/**
+ * Sandwich view (§8.7) — the callers and callees of one drilled frame, stacked. Both panes are folds rooted at the
+ * same focus frame: callers is a bottom-up fold, callees a top-down fold. Without a focus (no active drill) there is no
+ * "callers/callees of what?", so it prompts the user to drill in first. `onDrill` re-roots *both* panes (it changes the
+ * shared focus), so the per-pane "Focus tree on this frame" verb threads up to the parent's drill.
+ */
+function SandwichView({
+  focusName,
+  callersData,
+  calleesData,
+  onDrill,
+}: {
+  focusName: string | null;
+  callersData: CallTreeResponse | null;
+  calleesData: CallTreeResponse | null;
+  onDrill: (frameId: number) => void;
+}) {
+  if (focusName == null) {
+    return (
+      <EmptyState text="Sandwich shows the callers and callees of one frame. Drill into a frame first — right-click a row → Focus tree (or the crosshair) — then switch to Sandwich." />
+    );
+  }
+  return (
+    <div className="flex h-full w-full flex-col overflow-hidden">
+      <div className="flex-shrink-0 border-b border-border px-3 py-1 text-fs-xs text-muted-foreground">
+        Sandwich · focus <span className="font-mono text-foreground">{focusName}</span>
+      </div>
+      <SandwichPane label="Callers — who called this" data={callersData} onDrill={onDrill} />
+      <SandwichPane label="Callees — what this called" data={calleesData} onDrill={onDrill} />
+    </div>
+  );
+}
+
+/**
+ * One half of the {@link SandwichView} — a folded tree with its own local selection, expansion and row context menu.
+ * It reuses the same {@link CallTreeContextMenu} as the primary top-down / bottom-up views (Show inline · Open in
+ * editor · Focus tree · Expand / Collapse subtree · Copy), so a right-click behaves identically in either pane.
+ * Selection / expansion / the open menu are pane-local; "Focus tree" re-roots the whole sandwich via `onDrill`.
+ */
+function SandwichPane({
+  label,
+  data,
+  onDrill,
+}: {
+  label: string;
+  data: CallTreeResponse | null;
+  onDrill: (frameId: number) => void;
+}) {
+  const byId = useCpuFrameStore((s) => s.byId);
+  const openInEditor = useOptionsStore((s) => s.openInEditor);
+  const [expanded, setExpanded] = useState<Set<number>>(() => new Set([0]));
+  const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; nodeIndex: number } | null>(null);
+
+  // A re-fold (new focus / view-mode) invalidates node indices — drop selection + close any open menu.
+  useEffect(() => {
+    setSelectedIndex(null);
+    setContextMenu(null);
+  }, [data]);
+
+  const toggle = useCallback((nodeIndex: number) => {
+    setExpanded((s) => {
+      const next = new Set(s);
+      if (next.has(nodeIndex)) {
+        next.delete(nodeIndex);
+      } else {
+        next.add(nodeIndex);
+      }
+      return next;
+    });
+  }, []);
+
+  const resolveSymbol = useCallback(
+    (nodeIndex: number) => {
+      const node = data?.nodes[nodeIndex];
+      return node ? byId.get(node.frameId) ?? null : null;
+    },
+    [data, byId],
+  );
+
+  const handleSelect = useCallback(
+    (nodeIndex: number) => {
+      setSelectedIndex(nodeIndex);
+      const sym = resolveSymbol(nodeIndex);
+      if (sym && sym.line > 0) {
+        updateSourcePreviewIfOpen(sym.file, sym.line);
+      }
+    },
+    [resolveSymbol],
+  );
+
+  const handleActivate = useCallback(
+    (nodeIndex: number) => {
+      const sym = resolveSymbol(nodeIndex);
+      if (sym && sym.line > 0) {
+        void openInEditor(sym.file, sym.line);
+      }
+    },
+    [resolveSymbol, openInEditor],
+  );
+
+  const handleContextMenu = useCallback(
+    (e: React.MouseEvent, nodeIndex: number) => {
+      e.preventDefault();
+      handleSelect(nodeIndex);
+      setContextMenu({ x: e.clientX, y: e.clientY, nodeIndex });
+    },
+    [handleSelect],
+  );
+
+  const expandSubtree = useCallback(
+    (nodeIndex: number) => {
+      if (!data) {
+        return;
+      }
+      const sub = collectSubtree(data.nodes, nodeIndex);
+      setExpanded((prev) => new Set([...prev, ...sub]));
+    },
+    [data],
+  );
+
+  const collapseSubtree = useCallback(
+    (nodeIndex: number) => {
+      if (!data) {
+        return;
+      }
+      const sub = new Set(collectSubtree(data.nodes, nodeIndex));
+      setExpanded((prev) => {
+        const next = new Set<number>();
+        for (const i of prev) {
+          if (!sub.has(i)) {
+            next.add(i);
+          }
+        }
+        return next;
+      });
+    },
+    [data],
+  );
+
+  const ctxNode = contextMenu && data ? data.nodes[contextMenu.nodeIndex] ?? null : null;
+  const ctxSymbol = ctxNode ? byId.get(ctxNode.frameId) ?? null : null;
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden border-b border-border last:border-b-0">
+      <div className="flex-shrink-0 bg-card px-3 py-1 text-fs-xs font-semibold text-muted-foreground">{label}</div>
+      <div className="min-h-0 flex-1 overflow-auto">
+        {!data ? (
+          <div className="flex h-full items-center justify-center text-muted-foreground">
+            <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" />
+            Folding…
+          </div>
+        ) : data.totalSamples === 0 ? (
+          <EmptyState text="No samples." />
+        ) : (
+          <TreeBody
+            nodes={data.nodes}
+            rootTotal={data.totalSamples}
+            onDrill={onDrill}
+            filter={null}
+            selectedIndex={selectedIndex}
+            expandedSet={expanded}
+            onSelect={handleSelect}
+            onActivate={handleActivate}
+            onContextMenu={handleContextMenu}
+            onToggleExpand={toggle}
+          />
+        )}
+      </div>
+      {contextMenu && ctxNode && (
+        <CallTreeContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          methodName={friendlyMethodName(ctxSymbol?.method ?? `#${ctxNode.frameId}`)}
+          fullSignature={ctxSymbol?.method ?? `#${ctxNode.frameId}`}
+          sourceAvailable={ctxSymbol != null && ctxSymbol.line > 0}
+          hasChildren={ctxNode.children.length > 0}
+          onClose={() => setContextMenu(null)}
+          onShowInline={() => {
+            if (ctxSymbol && ctxSymbol.line > 0) {
+              openSourcePreview(ctxSymbol.file, ctxSymbol.line);
+            }
+            setContextMenu(null);
+          }}
+          onOpenInEditor={() => {
+            if (ctxSymbol && ctxSymbol.line > 0) {
+              void openInEditor(ctxSymbol.file, ctxSymbol.line);
+            }
+            setContextMenu(null);
+          }}
+          onFocusTree={() => {
+            onDrill(ctxNode.frameId);
+            setContextMenu(null);
+          }}
+          onExpandSubtree={() => {
+            expandSubtree(contextMenu.nodeIndex);
+            setContextMenu(null);
+          }}
+          onCollapseSubtree={() => {
+            collapseSubtree(contextMenu.nodeIndex);
+            setContextMenu(null);
+          }}
+        />
+      )}
     </div>
   );
 }

@@ -44,3 +44,14 @@ describe('AC2.13 — GAP-02 subtraction (removed schema surfaces stay removed)',
     }
   });
 });
+
+// AC3.15 (Stage-3 Phase 3E) — the profiler-selection silo retirement is also an *absence* guard. The legacy
+// `useProfilerSelectionStore` was a strangler mirror; once every consumer moved to the unified bus leaf it was
+// deleted. Re-introducing it (the file returning, or a re-export) would re-create the dual-write hazard. The
+// import-deletion is already compiler-enforced (tsc/build fail on a stray import); this is the runtime backstop.
+describe('AC3.15 — profiler-selection silo retirement (stays retired)', () => {
+  it('the legacy useProfilerSelectionStore module no longer resolves', async () => {
+    const legacyPath = '@/stores/useProfilerSelectionStore';
+    await expect(import(/* @vite-ignore */ legacyPath)).rejects.toBeTruthy();
+  });
+});

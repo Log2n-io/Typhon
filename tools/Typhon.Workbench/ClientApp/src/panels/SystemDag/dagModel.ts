@@ -36,6 +36,10 @@ export interface DagNodeData extends Record<string, unknown> {
   isParallel: boolean;
   isExclusivePhase: boolean;
   tierFilter: number;
+  /** Flat global id of the owning DAG (matches {@link DagDto.id}). Lets a consumer resolve the
+   *  system's track — e.g. to tell an engine-internal system from a user one (see
+   *  {@link resolveNoAccessReason}). */
+  dagId: number;
   // Display chips — derived from access declarations. Kept as raw arrays so the renderer can
   // chip them without re-parsing.
   reads: string[];
@@ -66,6 +70,9 @@ export interface DagEdgeData extends Record<string, unknown> {
 
 export type DagNode = Node<DagNodeData>;
 export type DagEdge = Edge<DagEdgeData>;
+
+/** Why a declaration-free system has no access — see {@link resolveNoAccessReason}. */
+export type NoAccessReason = 'engine-internal' | 'declares-none' | 'trace-empty';
 
 export interface PhaseLane {
   /** Unique lane key — `${dagId}::${name}`. Phase names are DAG-local, so a name alone collides. */
@@ -674,17 +681,6 @@ function layoutPhase(
  * **without** rebuilding the whole DAG layout, which is O(systems × edges) per dagre call.
  */
 export function toNodeData(s: SystemDefinitionDto): DagNodeData {
-  const access = (
-    (s.reads?.length ?? 0)
-    + (s.readsFresh?.length ?? 0)
-    + (s.readsSnapshot?.length ?? 0)
-    + (s.writes?.length ?? 0)
-    + (s.sideWrites?.length ?? 0)
-    + (s.writesEvents?.length ?? 0)
-    + (s.readsEvents?.length ?? 0)
-    + (s.writesResources?.length ?? 0)
-    + (s.readsResources?.length ?? 0)
-  );
   return {
     systemName: s.name ?? '',
     kind: kindFromByte(s.type),
@@ -692,6 +688,7 @@ export function toNodeData(s: SystemDefinitionDto): DagNodeData {
     isParallel: s.isParallel,
     isExclusivePhase: s.isExclusivePhase,
     tierFilter: typeof s.tierFilter === 'number' ? s.tierFilter : Number(s.tierFilter),
+    dagId: numOf(s.dagId),
     reads: s.reads ?? [],
     readsFresh: s.readsFresh ?? [],
     readsSnapshot: s.readsSnapshot ?? [],
@@ -702,8 +699,56 @@ export function toNodeData(s: SystemDefinitionDto): DagNodeData {
     readsResources: s.readsResources ?? [],
     writesResources: s.writesResources ?? [],
     changeFilterTypes: [], // not surfaced through topology DTO yet — placeholder
-    hasAccess: access > 0,
+    hasAccess: systemAccessCount(s) > 0,
   };
+}
+
+/**
+ * Count of a system's RFC 07 declarations across the nine surfaced lanes (reads / readsFresh /
+ * readsSnapshot / writes / sideWrites + event read+write + resource read+write). `additionalReads`
+ * is excluded — it isn't shown in the access summary, matching the historical {@link DagNodeData.hasAccess}
+ * semantics. Shared by {@link toNodeData} and {@link topologyHasAnyAccess} so the "has any access" bit
+ * is computed one way.
+ */
+function systemAccessCount(s: SystemDefinitionDto): number {
+  return (
+    (s.reads?.length ?? 0)
+    + (s.readsFresh?.length ?? 0)
+    + (s.readsSnapshot?.length ?? 0)
+    + (s.writes?.length ?? 0)
+    + (s.sideWrites?.length ?? 0)
+    + (s.writesEvents?.length ?? 0)
+    + (s.readsEvents?.length ?? 0)
+    + (s.writesResources?.length ?? 0)
+    + (s.readsResources?.length ?? 0)
+  );
+}
+
+/** True when ANY system in the topology carries a declaration — i.e. the trace is wire-v6+ and the
+ *  host was recompiled, so a *single* declaration-free system is a real "declares nothing", not an
+ *  old-trace artefact. */
+export function topologyHasAnyAccess(topology: TopologyDto): boolean {
+  for (const s of topology.systems ?? []) {
+    if (systemAccessCount(s) > 0) return true;
+  }
+  return false;
+}
+
+/**
+ * Why a system shows no declared access — drives the explanatory note. Only meaningful when the
+ * system's {@link DagNodeData.hasAccess} is false:
+ *
+ * - `engine-internal` — the system's DAG sits on an `engine`-tagged track (Engine-Pre / Engine-Post,
+ *   e.g. the Fence DAG). These run with privileged access and are ordered by explicit edges, so they
+ *   declare no RFC 07 access *by design* — not a defect.
+ * - `trace-empty` — no system in the whole trace carries access, so the trace genuinely predates
+ *   wire v6 or the host wasn't recompiled.
+ * - `declares-none` — the trace carries access elsewhere, but this (user) system declares nothing.
+ */
+export function resolveNoAccessReason(topology: TopologyDto, dagId: number): NoAccessReason {
+  const engineDagIds = engineDagIdSet(topology.tracks ?? []);
+  if (engineDagIds.has(dagId)) return 'engine-internal';
+  return topologyHasAnyAccess(topology) ? 'declares-none' : 'trace-empty';
 }
 
 function kindFromByte(type: number | string): DagNodeData['kind'] {

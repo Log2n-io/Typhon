@@ -53,10 +53,21 @@ export interface DagViewState {
    * layouts always show every edge; this toggle is a no-op there.
    */
   showCrossPhaseEdges: boolean;
+  /**
+   * Ephemeral "reveal this system" signal. A handoff (e.g. the Inspector's *Reveal in System DAG* verb) writes a
+   * system name here; the canvas consumes it on the next render to centre + fit that node, then clears it. Distinct
+   * from the bus `System` highlight so an ordinary cross-panel selection never yanks the viewport — only an explicit
+   * reveal recentres. Session-scoped: never persisted (excluded from {@link partialize}).
+   */
+  pendingFocusSystem: string | null;
   setStatMode: (mode: StatMode) => void;
   setLayout: (layout: LayoutMode) => void;
   setHideSkipped: (hide: boolean) => void;
   setShowCrossPhaseEdges: (show: boolean) => void;
+  /** Request the canvas to centre + fit the named system (the *Reveal in System DAG* handoff). */
+  requestFocusSystem: (name: string) => void;
+  /** Clear the pending reveal once the canvas has acted on it. */
+  clearPendingFocusSystem: () => void;
 }
 
 // SSR/test-safe localStorage wrapper — same shape as `useThemeStore`.
@@ -79,11 +90,25 @@ export const useDagViewStore = create<DagViewState>()(
       layout: 'horizontal-lanes',
       hideSkipped: false,
       showCrossPhaseEdges: false,
+      pendingFocusSystem: null,
       setStatMode: (statMode) => set({ statMode }),
       setLayout: (layout) => set({ layout }),
       setHideSkipped: (hideSkipped) => set({ hideSkipped }),
       setShowCrossPhaseEdges: (showCrossPhaseEdges) => set({ showCrossPhaseEdges }),
+      requestFocusSystem: (name) => set({ pendingFocusSystem: name }),
+      clearPendingFocusSystem: () => set({ pendingFocusSystem: null }),
     }),
-    { name: 'typhon-dag-view', storage: safeStorage },
+    {
+      name: 'typhon-dag-view',
+      storage: safeStorage,
+      // Persist only the sticky view preferences. pendingFocusSystem is an ephemeral handoff signal — persisting it
+      // would replay a stale reveal on the next open.
+      partialize: (s) => ({
+        statMode: s.statMode,
+        layout: s.layout,
+        hideSkipped: s.hideSkipped,
+        showCrossPhaseEdges: s.showCrossPhaseEdges,
+      }),
+    },
   ),
 );

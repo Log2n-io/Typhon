@@ -35,6 +35,15 @@ interface ProfilerViewState {
    * Session-scoped — not persisted.
    */
   transientViewRange: TimeRange;
+  /**
+   * Linked/unlink scope flag (GAP-11, stage-3 Phase 3). When `true` (default), the scheduling-cluster panels
+   * (System DAG / Critical Path / Data Flow) follow {@link viewRange}; when `false` they freeze on
+   * {@link pinnedRange} — the window captured at unlink time — and ignore further `viewRange` changes. Consumers
+   * read the resolved window via {@link selectEffectiveScope}. Session-scoped (reset on each open; not persisted).
+   */
+  scopeLinked: boolean;
+  /** The frozen time window while unlinked (captured at the unlink toggle); `null` while linked. */
+  pinnedRange: TimeRange | null;
   /** Toggled by the `g` key. Hides the full gauge region. */
   gaugeRegionVisible: boolean;
   /** Per-system chunk-lanes section visibility. */
@@ -86,6 +95,8 @@ interface ProfilerViewState {
    * should see the change immediately rather than after the debounce window.
    */
   commitViewRange: (r: TimeRange) => void;
+  /** Toggle scope linking. Unlink freezes the current {@link viewRange} into {@link pinnedRange}; relink clears it. */
+  setScopeLinked: (linked: boolean) => void;
   toggleGaugeRegion: () => void;
   togglePerSystemLanes: () => void;
   setGaugeCollapse: (groupId: string, state: TrackState) => void;
@@ -143,6 +154,8 @@ export const useProfilerViewStore = create<ProfilerViewState>()(
     (set, get) => ({
       viewRange: INITIAL_VIEW_RANGE,
       transientViewRange: INITIAL_VIEW_RANGE,
+      scopeLinked: true,
+      pinnedRange: null,
       gaugeRegionVisible: true,
       perSystemLanesVisible: true,
       gaugeCollapse: {},
@@ -179,6 +192,10 @@ export const useProfilerViewStore = create<ProfilerViewState>()(
         }
         set({ transientViewRange: r, viewRange: r });
       },
+      setScopeLinked: (linked) =>
+        set((s) => (linked
+          ? { scopeLinked: true, pinnedRange: null }
+          : { scopeLinked: false, pinnedRange: s.viewRange })),
       toggleGaugeRegion: () => set((s) => ({ gaugeRegionVisible: !s.gaugeRegionVisible })),
       togglePerSystemLanes: () => set((s) => ({ perSystemLanesVisible: !s.perSystemLanesVisible })),
       setGaugeCollapse: (groupId, state) =>
@@ -296,3 +313,12 @@ export const useProfilerViewStore = create<ProfilerViewState>()(
     },
   ),
 );
+
+/**
+ * The time window the scheduling-cluster panels (System DAG / Critical Path / Data Flow) should bind to: the live
+ * {@link ProfilerViewState.viewRange} while linked, or the frozen {@link ProfilerViewState.pinnedRange} while
+ * unlinked (GAP-11). Returns an existing object reference (never a fresh allocation), so it is safe to pass
+ * directly as a zustand selector under the default `Object.is` equality — no extra `useShallow` needed.
+ */
+export const selectEffectiveScope = (s: ProfilerViewState): TimeRange =>
+  s.scopeLinked ? s.viewRange : (s.pinnedRange ?? s.viewRange);

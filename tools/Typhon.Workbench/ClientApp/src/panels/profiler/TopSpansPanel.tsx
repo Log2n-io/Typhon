@@ -86,7 +86,7 @@ function TopSpansTable({ groups }: { groups: SpanGroupStats[] }): React.JSX.Elem
 
   return (
     <div className="flex h-full flex-col overflow-hidden">
-      <div className="flex items-baseline justify-between border-b border-border px-3 py-2">
+      <div className="wb-pane-header flex items-baseline justify-between border-b border-border px-3 py-2">
         <span className="text-fs-sm text-muted-foreground">click row → jump to worst instance</span>
         {groups.length > TOP_SPANS_LIMIT && (
           <span className="text-fs-xs text-muted-foreground">

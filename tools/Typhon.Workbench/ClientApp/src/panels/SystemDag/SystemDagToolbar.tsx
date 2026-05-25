@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Camera, Maximize2 } from 'lucide-react';
+import { Maximize2 } from 'lucide-react';
 import type { SystemTickSummary } from '@/api/generated/model/systemTickSummary';
 import type { TickSummaryDto } from '@/api/generated/model/tickSummaryDto';
 import { useProfilerViewStore } from '@/stores/useProfilerViewStore';
@@ -48,17 +48,14 @@ const LAYOUT_OPTIONS: Array<{ key: LayoutMode; label: string; description: strin
 const SNAPSHOT_TICK_COUNT = 600;
 
 /**
- * Top-of-panel toolbar for the System DAG. Two controls per `09-system-dag.md §6.1` + §7.2:
- * the **stat-mode** selector that swaps the per-node primary stat aggregation, and the
- * **Snapshot last N ticks** action that pins both panels (DAG aggregation range + profiler
- * TimeArea) to a frozen window via `useSelectionStore.time`.
+ * Top-of-panel toolbar for the System DAG. The **stat-mode** selector swaps the per-node primary stat
+ * aggregation; layout / hide-skipped / cross-phase / engine-tracks toggles tune the graph. The time window is
+ * owned by the profiler timeline + the global linked/unlink scope (context bar) — the DAG follows it via
+ * `selectEffectiveScope`, so there is no per-panel "snapshot" control (3D: removed — it wrote the global scope
+ * even while the DAG was unlinked, a confusing dead interaction).
  *
- * After cross-panel binding (§7.1), the range readout reflects whatever µs window the user has
- * selected — whether they snapshotted here or scrubbed in the profiler. The selection store and
- * its bridges keep the two views in lockstep automatically.
- *
- * Auto-snapshot fires once on first metadata arrival when the time slot is null AND nothing has
- * been deep-linked from a URL — so a fresh open shows useful colour without a click.
+ * Auto-snapshot still fires once on first metadata arrival when the time slot is null AND nothing has been
+ * deep-linked from a URL — so a fresh open frames the last N ticks and shows useful colour without a click.
  */
 export default function SystemDagToolbar({ tickSummaries, autoSnapshotEnabled, systemTickSummaries, workerCount, onFit }: Props) {
   // Post-#345: time-window canonical source is the profiler view store. SystemDag aggregations
@@ -129,29 +126,12 @@ export default function SystemDagToolbar({ tickSummaries, autoSnapshotEnabled, s
     if (next) commitViewRange(next);
   }, [autoSnapshotEnabled, hasTicks, hasTimeSelection, tickSummaries, commitViewRange]);
 
-  const onSnapshotClick = () => {
-    if (tickSummaries == null) return;
-    const next = lastNTicksToTime(SNAPSHOT_TICK_COUNT, tickSummaries);
-    if (next) commitViewRange(next);
-  };
-
   // Reset to the `{0, 0}` no-selection sentinel — TimeArea treats this as "show the full trace"
   // and downstream aggregations (timeToTickRange returns null) skip their fetches.
   const onClearClick = () => commitViewRange({ startUs: 0, endUs: 0 });
 
   return (
-    <div className="flex items-center gap-3 border-b border-border bg-background/95 px-3 py-1.5">
-      <button
-        type="button"
-        disabled={!hasTicks}
-        onClick={onSnapshotClick}
-        className="flex items-center gap-1.5 rounded border border-border bg-card px-2 py-1 font-mono text-fs-sm text-foreground hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40"
-        title={hasTicks ? `Pin both views to the last ${SNAPSHOT_TICK_COUNT} ticks` : 'Waiting for ticks…'}
-      >
-        <Camera className="h-3 w-3" />
-        Snapshot last {SNAPSHOT_TICK_COUNT} ticks
-      </button>
-
+    <div className="wb-pane-header flex items-center gap-3 border-b border-border bg-background/95 px-3 py-1.5">
       <div className="flex items-center gap-1">
         <span className="font-mono text-fs-xs uppercase tracking-wide text-muted-foreground">stat</span>
         <div className="flex overflow-hidden rounded border border-border">

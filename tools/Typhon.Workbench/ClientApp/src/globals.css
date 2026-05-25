@@ -347,3 +347,14 @@ html .dockview-react {
 .dv-active-group .wb-pane-header {
   background-color: color-mix(in oklch, var(--panel-active-border) 10%, var(--background));
 }
+
+/* Selected-row colour follows pane focus (DS-4 focus≠selection, applied to selection itself): a row marked
+ * `wb-tree-selected` (Call Tree + sandwich panes) reads vivid accent only while its pane is the focused group;
+ * in a background pane it dims to a neutral grey, so a stale selection in an unfocused pane doesn't compete for
+ * the eye. Unlayered so both rules beat Tailwind utility-layer backgrounds, like the header cue above. */
+.wb-tree-selected {
+  background-color: color-mix(in oklch, var(--muted-foreground) 22%, transparent);
+}
+.dv-active-group .wb-tree-selected {
+  background-color: color-mix(in oklch, var(--primary) 30%, transparent);
+}

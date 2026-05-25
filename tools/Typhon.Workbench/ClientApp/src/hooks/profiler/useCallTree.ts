@@ -5,6 +5,12 @@ import { useSessionStore } from '@/stores/useSessionStore';
 export type CallTreeViewMode = 'on-cpu' | 'wall-clock';
 
 /**
+ * Fold direction (§8.7 sandwich). `top-down` = callees (root→leaf); `bottom-up` = callers (leaf-rooted). The panel's
+ * "sandwich" UI mode is a client composition of the two with the same frame-root, not a separate server direction.
+ */
+export type CallTreeDirection = 'top-down' | 'bottom-up';
+
+/**
  * One node of the folded call tree. `children` holds indices into {@link CallTreeResponse.nodes} — the tree is
  * flat on the wire (a deep call stack would otherwise blow past System.Text.Json's MaxDepth).
  *
@@ -60,6 +66,7 @@ export interface CallTreeRequest {
   endUs: number | null;
   frameRoot: number | null;
   viewMode: CallTreeViewMode;
+  direction: CallTreeDirection;
   systemIndex: number | null;
   phase: string | null;
   spanKind: number | null;
@@ -86,6 +93,7 @@ export function useCallTree(
       request.endUs,
       request.frameRoot,
       request.viewMode,
+      request.direction,
       request.systemIndex,
       request.phase,
       request.spanKind,

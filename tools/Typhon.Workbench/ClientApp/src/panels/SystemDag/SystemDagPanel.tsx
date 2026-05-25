@@ -3,7 +3,7 @@ import type { IDockviewPanelProps } from 'dockview-react';
 import { useTopology } from '@/hooks/data/useTopology';
 import { useProfilerMetadata } from '@/hooks/profiler/useProfilerMetadata';
 import { useGatingStore } from '@/stores/useGatingStore';
-import { useProfilerViewStore } from '@/stores/useProfilerViewStore';
+import { selectEffectiveScope, useProfilerViewStore } from '@/stores/useProfilerViewStore';
 import { useSelectionStore } from '@/stores/useSelectionStore';
 import { useSessionStore } from '@/stores/useSessionStore';
 import {
@@ -12,7 +12,7 @@ import {
   computeSystemSkipRates,
   dominantTickInRange,
 } from '../CriticalPath/criticalPath';
-import { toNodeData } from './dagModel';
+import { toNodeData, resolveNoAccessReason } from './dagModel';
 import { resolveSystemsForDataTrack } from './dataTrackHighlight';
 import { deriveEdges } from '@/lib/dag/edgeDerivation';
 import { computeGatingAnalysis } from '@/lib/dag/gatingAnalysis';
@@ -56,7 +56,8 @@ export default function SystemDagPanel(_props: IDockviewPanelProps) {
   //
   // Conversion µs → tick happens at the panel boundary; downstream hooks (useSystemStats /
   // useQueueBackpressure / CP / skip-rate) all take TickRange and stay tick-native.
-  const viewRange = useProfilerViewStore((s) => s.viewRange);
+  // Resolved through the link/unlink scope (3B): follows the global window when linked, the frozen window when unlinked.
+  const viewRange = useProfilerViewStore(selectEffectiveScope);
   const range = useMemo(
     () => timeToTickRange(viewRange, metadata?.tickSummaries),
     [viewRange, metadata],
@@ -328,6 +329,7 @@ export default function SystemDagPanel(_props: IDockviewPanelProps) {
             cpStat={cpParticipation?.perSystem.get(selectedNode.systemName) ?? null}
             cpTotalTicks={cpParticipation?.totalTicks ?? null}
             gatingInfo={gatingAnalysis?.get(selectedNode.systemName) ?? null}
+            noAccessReason={resolveNoAccessReason(topology, selectedNode.dagId)}
             onClose={() => setSidePanelOverride(selectedSystemName)}
           />
         )}

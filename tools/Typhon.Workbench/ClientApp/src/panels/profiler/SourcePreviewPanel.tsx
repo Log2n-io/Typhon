@@ -98,7 +98,7 @@ export default function SourcePreviewPanel(props: IDockviewPanelProps): React.JS
   const code = data.lines.join('\n');
   return (
     <div className="flex h-full w-full flex-col overflow-hidden bg-background">
-      <header className="select-text border-b border-border px-3 py-2 font-mono text-fs-base text-muted-foreground">
+      <header className="wb-pane-header select-text border-b border-border px-3 py-2 font-mono text-fs-base text-muted-foreground">
         {data.file}<span className="text-foreground">:{data.line}</span>
         <span className="ml-2 text-fs-sm">(lines {data.startLine}–{data.endLine})</span>
       </header>

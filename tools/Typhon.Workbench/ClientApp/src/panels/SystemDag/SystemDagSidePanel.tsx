@@ -4,9 +4,10 @@ import { useAggregations } from '@/hooks/data/useAggregations';
 import type { AggregationQueryDto } from '@/api/generated/model/aggregationQueryDto';
 import type { HistogramBucketDto } from '@/api/generated/model/histogramBucketDto';
 import type { TopKEntryDto } from '@/api/generated/model/topKEntryDto';
-import type { DagNodeData } from './dagModel';
+import type { DagNodeData, NoAccessReason } from './dagModel';
 import type { GaterEntry, SystemGatingInfo } from '@/lib/dag/gatingAnalysis';
 import type { TickRange } from './useDagViewStore';
+import SystemAccessSummary from '@/panels/schemaCommon/SystemAccessSummary';
 
 /**
  * Stats derived from the batched /aggregate response by the side-panel's `useMemo`. Replaces the
@@ -35,6 +36,8 @@ interface Props {
   cpTotalTicks: number | null;
   /** Gating-predecessor analysis for this system (null when no range / no data). */
   gatingInfo: SystemGatingInfo | null;
+  /** Why this system has no declared access — drives the explanatory note (see {@link resolveNoAccessReason}). */
+  noAccessReason?: NoAccessReason;
   onClose: () => void;
 }
 
@@ -49,7 +52,7 @@ const TOPK_N = 5;
  * duration distribution histogram and the worst-N overrun ticks, both fetched in one batched
  * /aggregate call. When no range is pinned, only the declared-access view shows.
  */
-export default function SystemDagSidePanel({ node, sessionId, range, cpStat, cpTotalTicks, gatingInfo, onClose }: Props) {
+export default function SystemDagSidePanel({ node, sessionId, range, cpStat, cpTotalTicks, gatingInfo, noAccessReason, onClose }: Props) {
   const queries = useMemo<AggregationQueryDto[]>(() => {
     if (!range || !node.systemName) return [];
     const trackId = `system/${node.systemName}`;
@@ -135,33 +138,8 @@ export default function SystemDagSidePanel({ node, sessionId, range, cpStat, cpT
           />
         )}
 
-        <AccessGroup label="reads" tone="read" items={node.reads} />
-        <AccessGroup label="reads fresh" tone="fresh" items={node.readsFresh} />
-        <AccessGroup label="reads snapshot" tone="snapshot" items={node.readsSnapshot} />
-        <AccessGroup label="writes" tone="write" items={node.writes} />
-        <AccessGroup label="side-writes" tone="side-write" items={node.sideWrites} />
-
-        {/*
-          Event queues — producer (writesEvents) and consumer (readsEvents) sides shown
-          separately. Same dashed-violet tone as the corresponding edge style on the canvas
-          so the cross-reference reads at a glance.
-        */}
-        <AccessGroup label="reads events" tone="event-read" items={node.readsEvents} />
-        <AccessGroup label="writes events" tone="event-write" items={node.writesEvents} />
-
-        {/*
-          Named resources. Resources have no Fresh/Snapshot distinction in v1 so each side is
-          a flat list. Tone matches the dotted-red resource edges on the canvas.
-        */}
-        <AccessGroup label="reads resources" tone="resource-read" items={node.readsResources} />
-        <AccessGroup label="writes resources" tone="resource-write" items={node.writesResources} />
-
-        {!node.hasAccess && (
-          <div className="mt-3 rounded border border-amber-300 bg-amber-50 px-2 py-1.5 text-fs-xs text-amber-900 dark:border-amber-700/40 dark:bg-amber-950/30 dark:text-amber-200">
-            This system has no RFC 07 declarations on the wire. The trace may predate v6 of the
-            wire format, or the host has not been recompiled after #310.
-          </div>
-        )}
+        {/* Declared access — the single PC-3 rendering, shared with the Inspector System card (3C). */}
+        <SystemAccessSummary {...node} noAccessReason={noAccessReason} />
       </div>
     </div>
   );
@@ -529,67 +507,4 @@ function Section({ label, children }: { label: string; children: React.ReactNode
 
 function ChipRow({ children }: { children: React.ReactNode }) {
   return <div className="flex flex-wrap items-center gap-1">{children}</div>;
-}
-
-type AccessTone =
-  | 'read'
-  | 'fresh'
-  | 'snapshot'
-  | 'write'
-  | 'side-write'
-  | 'event-read'
-  | 'event-write'
-  | 'resource-read'
-  | 'resource-write';
-
-function AccessGroup({
-  label,
-  tone,
-  items,
-}: {
-  label: string;
-  tone: AccessTone;
-  items: string[];
-}) {
-  if (items.length === 0) return null;
-  return (
-    <Section label={label}>
-      <ChipRow>
-        {items.map((item) => (
-          <span key={item} className={`rounded border px-1.5 py-0.5 font-mono text-fs-xs ${toneClasses(tone)}`}>
-            {item}
-          </span>
-        ))}
-      </ChipRow>
-    </Section>
-  );
-}
-
-function toneClasses(tone: AccessTone): string {
-  // Theme-paired tones. Each chip uses light-bg + dark-text on light theme and dark-bg +
-  // light-text on dark theme. The hue family is preserved so the side-panel chip still
-  // visually pairs with its corresponding canvas edge style. Producer side gets a slightly
-  // bolder tint (200/100 shades) than consumer to keep the two readable at a glance.
-  switch (tone) {
-    case 'read':
-      return 'border-slate-300 bg-slate-100 text-slate-800 dark:border-slate-600/50 dark:bg-slate-900/40 dark:text-slate-200';
-    case 'fresh':
-      return 'border-emerald-300 bg-emerald-100 text-emerald-800 dark:border-emerald-700/50 dark:bg-emerald-950/40 dark:text-emerald-200';
-    case 'snapshot':
-      return 'border-sky-300 bg-sky-100 text-sky-800 dark:border-sky-700/50 dark:bg-sky-950/40 dark:text-sky-200';
-    case 'write':
-      return 'border-rose-300 bg-rose-100 text-rose-800 dark:border-rose-700/50 dark:bg-rose-950/40 dark:text-rose-200';
-    case 'side-write':
-      return 'border-orange-300 bg-orange-100 text-orange-800 dark:border-orange-700/50 dark:bg-orange-950/40 dark:text-orange-200';
-    // Event tones — violet, matching the dashed event edges on the canvas.
-    case 'event-read':
-      return 'border-violet-300 bg-violet-100 text-violet-800 dark:border-violet-700/50 dark:bg-violet-950/40 dark:text-violet-200';
-    case 'event-write':
-      return 'border-violet-400 bg-violet-200 text-violet-900 dark:border-violet-600/60 dark:bg-violet-900/50 dark:text-violet-100';
-    // Resource tones — red, matching the dotted resource edges.
-    case 'resource-read':
-      return 'border-red-300 bg-red-100 text-red-800 dark:border-red-800/50 dark:bg-red-950/40 dark:text-red-200';
-    case 'resource-write':
-      return 'border-red-400 bg-red-200 text-red-900 dark:border-red-700/60 dark:bg-red-900/50 dark:text-red-100';
-  }
 }

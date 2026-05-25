@@ -10,23 +10,9 @@ const GATED_COMMAND_IDS = [
   'toggle-view-schema-archetypes',
   'toggle-view-schema-indexes',
   'toggle-view-schema-relationships',
-  'toggle-view-system-dag',
-  'toggle-view-data-flow',
-  'toggle-view-access-matrix',
-  'toggle-view-source-preview',
-  'show-source-current-span',
-  'toggle-view-profiler',
-  'toggle-view-critical-path',
   'toggle-view-query-catalog',
   'toggle-view-query-plan-tree',
   'toggle-view-execution-inspector',
-  'toggle-view-top-spans',
-  // profiler-view interaction commands (only meaningful with the Profiler view mounted)
-  'profiler-toggle-gauges',
-  'profiler-toggle-systems',
-  'profiler-zoom-full',
-  'profiler-pan-left',
-  'profiler-pan-right',
 ];
 
 // Commands whose bound zone-D view has been reintroduced (Stage 2+) — they must now appear in the palette.
@@ -34,6 +20,24 @@ const ACTIVE_ZONE_D_COMMAND_IDS = [
   'data-browser', // Data Browser reintroduced onto the bus (Stage 2 Phase 2).
   'toggle-view-dbmap', // File Map reintroduced (Stage 2 Phase 3).
   'toggle-view-storage-health', // Storage Health dashboard (Stage 2 Phase 3).
+  // Stage 3 Phase 1: Profiler timeline + Top Spans reintroduced — their toggles + the Profiler-view
+  // interaction commands (gauges / per-system lanes / zoom / pan) now surface.
+  'toggle-view-profiler',
+  'toggle-view-top-spans',
+  'profiler-toggle-gauges',
+  'profiler-toggle-systems',
+  'profiler-zoom-full',
+  'profiler-pan-left',
+  'profiler-pan-right',
+  // Stage 3 Phase 2: Call Tree + Source Preview reintroduced — their toggles surface.
+  'toggle-view-call-tree',
+  'toggle-view-source-preview',
+  'show-source-current-span',
+  // Stage 3 Phase 3 (3A): Data Flow reintroduced, absorbing the Access Matrix as its in-panel Matrix mode.
+  'toggle-view-data-flow',
+  // Stage 3 Phase 3 (3D): the rest of the scheduling cluster — System DAG + Critical Path.
+  'toggle-view-system-dag',
+  'toggle-view-critical-path',
 ];
 
 // Shell commands that must survive the Stage 0 filter.

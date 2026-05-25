@@ -4,7 +4,6 @@ import { useNavHistoryStore } from './useNavHistoryStore';
 import { useSelectedResourceStore } from './useSelectedResourceStore';
 import { useSchemaInspectorStore } from './useSchemaInspectorStore';
 import { useDataBrowserStore } from './useDataBrowserStore';
-import { useProfilerSelectionStore } from './useProfilerSelectionStore';
 
 /**
  * Clear every session-scoped selection store so switching sessions (or closing one) leaves no stale
@@ -16,8 +15,7 @@ export function resetSessionScopedState(): void {
   useSelectedResourceStore.getState().clear();
   useSchemaInspectorStore.getState().reset();
   useDataBrowserStore.getState().reset();
-  useProfilerSelectionStore.getState().clear();
-  useSelectionStore.getState().clear();
+  useSelectionStore.getState().clear(); // wipes the bus leaf (incl. any profiler selection — the legacy silo was retired in 3E)
   useNavHistoryStore.getState().clear();
 }
 

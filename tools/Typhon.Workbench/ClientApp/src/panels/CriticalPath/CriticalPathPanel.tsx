@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import type { IDockviewPanelProps } from 'dockview-react';
 import { useTopology } from '@/hooks/data/useTopology';
 import { useProfilerMetadata } from '@/hooks/profiler/useProfilerMetadata';
-import { useProfilerViewStore } from '@/stores/useProfilerViewStore';
+import { selectEffectiveScope, useProfilerViewStore } from '@/stores/useProfilerViewStore';
 import { useSelectionStore } from '@/stores/useSelectionStore';
 import { useSessionStore } from '@/stores/useSessionStore';
 import { useViewOptionsStore } from '@/stores/useViewOptionsStore';
@@ -37,7 +37,9 @@ export default function CriticalPathPanel(_props: IDockviewPanelProps) {
 
   // Post-#345: time-window canonical source is the profiler view store. Reading the *committed*
   // slot so CP only re-computes after the user stops scrubbing.
-  const viewRange = useProfilerViewStore((s) => s.viewRange);
+  // Resolved through the link/unlink scope (3B): the global window when linked, the frozen window when unlinked.
+  // `commitViewRange` (the write — clicking a CP bar snaps the global window) stays the raw setter.
+  const viewRange = useProfilerViewStore(selectEffectiveScope);
   const commitViewRange = useProfilerViewStore((s) => s.commitViewRange);
   const range = useMemo(() => timeToTickRange(viewRange, metadata?.tickSummaries), [viewRange, metadata]);
 

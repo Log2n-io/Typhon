@@ -7,7 +7,7 @@ import { usePostApiSessionsTrace } from '@/api/generated/sessions/sessions';
 import { logError, logInfo } from '@/stores/useLogStore';
 import { useSessionStore } from '@/stores/useSessionStore';
 import { useNavHistoryStore } from '@/stores/useNavHistoryStore';
-import { useProfilerSelectionStore } from '@/stores/useProfilerSelectionStore';
+import { useSelectionStore } from '@/stores/useSelectionStore';
 import { useProfilerSessionStore, type ConnectionStatus } from '@/stores/useProfilerSessionStore';
 import { useProfilerViewStore } from '@/stores/useProfilerViewStore';
 import { useUiPrefsStore } from '@/stores/useUiPrefsStore';
@@ -184,10 +184,13 @@ export default function ProfilerPanel(props: IDockviewPanelProps) {
     setIsLive(isAttach);
     return () => {
       useProfilerSessionStore.getState().reset();
-      useProfilerSelectionStore.getState().clear();
+      useSelectionStore.getState().clearLeaf(); // 3E: clear the profiler selection on the unified bus (silo retired)
       useProfilerStatsStore.getState().clear();
       useNavHistoryStore.getState().clear();
       useProfilerViewStore.getState().commitViewRange({ startUs: 0, endUs: 0 });
+      // Scope-link is session-scoped (stage-3 Phase 3): a prior trace's frozen window is meaningless on the
+      // next one, so each new session starts linked (panels follow the timeline again).
+      useProfilerViewStore.getState().setScopeLinked(true);
     };
   }, [sessionId, isAttach, setIsLive]);
 
@@ -225,7 +228,7 @@ export default function ProfilerPanel(props: IDockviewPanelProps) {
   return (
     <div className="flex h-full w-full flex-col overflow-hidden bg-background">
       {/* Header */}
-      <div className="flex flex-shrink-0 items-center gap-3 border-b border-border bg-card px-3 py-2 text-fs-base">
+      <div className="wb-pane-header flex flex-shrink-0 items-center gap-3 border-b border-border bg-card px-3 py-2 text-fs-base">
         {isAttach
           ? <Radio className="h-4 w-4 text-muted-foreground" aria-label="Live profiler session" />
           : <Activity className="h-4 w-4 text-muted-foreground" aria-label="Trace profiler session" />}

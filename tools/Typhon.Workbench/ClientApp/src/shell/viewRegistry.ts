@@ -22,15 +22,29 @@ export const ZONE_D_VIEW_ACTIVE: Readonly<Record<string, boolean>> = {
   DbMap: true,
   // Stage 2 Phase 3: Storage Health — the aggregate dashboard complement to the File Map (GAP-16).
   StorageHealth: true,
-  // Profile (P-B) — profiler deep views
-  Profiler: false,
-  TopSpans: false,
-  CallTree: false,
-  SourcePreview: false,
-  SystemDag: false,
-  CriticalPath: false,
-  DataFlow: false,
-  AccessMatrix: false,
+  // Profile (P-B) — profiler deep views.
+  // Stage 3 Phase 1: the Profiler timeline (the global time-scope owner) + Top Spans are reintroduced onto the
+  // finished shell. Selection already mirrors to the unified bus (Stage 1); flipping these on mounts them into
+  // the trace/attach default layout and lights up their View-menu + palette entries. The remaining profiler/query
+  // views stay gated until their Stage-3 phase: CallTree/SourcePreview = Phase 2; SystemDag/CriticalPath/DataFlow
+  // (the scheduling cluster) = Phase 3; the Query views = Phase 4.
+  Profiler: true,
+  TopSpans: true,
+  // Stage 3 Phase 2: the Call Tree (the span→cause drill — scope axes + off-CPU + sandwich, GAP-17) + Source
+  // Preview (frame → file:line, degraded when attribution is absent) are reintroduced. Both are fully-built gated
+  // views; flipping mounts them + lights their View-menu / palette / handoffs.
+  CallTree: true,
+  SourcePreview: true,
+  // Stage 3 Phase 3 (3D): the rest of the scheduling cluster — System DAG + Critical Path — is reintroduced.
+  // All three cluster panels already read/write the bus `System` (Stage 1), so activation alone delivers AC3.5
+  // (one selection drives all); 3D also adds the focus cue + conformance enrolment + the "Reveal in System DAG"
+  // handoff. Engine-track systems stay hidden by default (DagForm "show engine tracks").
+  SystemDag: true,
+  CriticalPath: true,
+  // Stage 3 Phase 3 (3A): Data Flow is reintroduced, absorbing the former Access Matrix as its in-panel Matrix
+  // mode (the 2→1 consolidation, GAP-19's sibling). AccessMatrix is therefore *removed* — it is no longer a
+  // standalone view, so it has no entry here (its panel/command/menu were deleted, not gated).
+  DataFlow: true,
   // Query (P-A/B) — query-analysis deep views
   QueryCatalog: false,
   QueryPlanTree: false,

@@ -15,7 +15,12 @@ The previous skill needed 7-9 Bash round-trips per action; this one does 1.
 `$ARGUMENTS` first token determines the action; default is `start`. Pass `--help`,
 `-h`, or `help` to display the script's help block.
 
-Recognized actions: `start`, `stop`, `status`, `restart`, `help`.
+Recognized actions: `start`, `stop`, `reset`, `status`, `restart`, `help`.
+
+`reset` is the state-independent recovery: it kills **every** lingering Workbench Kestrel/Vite found
+by command-line signature (the `Typhon.Workbench` path) + whoever owns `:5200`/`:5173`, then clears the
+state file — for when the state went stale or an orphan `dotnet watch` is holding a port and `start`
+refuses ("port already bound by an untracked process"). Unlike `stop`, it doesn't rely on tracked PIDs.
 
 ## Behavior
 

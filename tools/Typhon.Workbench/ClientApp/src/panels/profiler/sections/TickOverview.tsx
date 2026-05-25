@@ -17,7 +17,7 @@ import {
 import { formatDuration } from '@/libs/profiler/canvas/canvasUtils';
 import { getStudioThemeTokens } from '@/libs/profiler/canvas/theme';
 import { HelpOverlay } from '@/panels/profiler/components/HelpOverlay';
-import { useProfilerSelectionStore } from '@/stores/useProfilerSelectionStore';
+import { useSelectionStore } from '@/stores/useSelectionStore';
 import { useProfilerSessionStore } from '@/stores/useProfilerSessionStore';
 import { useProfilerViewStore } from '@/stores/useProfilerViewStore';
 import { useUiPrefsStore } from '@/stores/useUiPrefsStore';
@@ -35,8 +35,8 @@ import type { TimeRange } from '@/libs/profiler/model/uiTypes';
  *
  * All state goes through stores:
  *  - `useProfilerViewStore.viewRange` / `legendsVisible` — read + write
- *  - `useProfilerSelectionStore.setSelected({kind:'tick', ...})` — on single-tick click (Phase 2e wires
- *    DetailPanel; for now the store just records the choice)
+ *  - `useSelectionStore.select('tick', {kind:'tick', ...})` — on single-tick click; the unified bus leaf
+ *    drives DetailPanel's per-tick card (3E: the `useProfilerSelectionStore` silo was retired)
  */
 const OVERVIEW_HELP_LINES: string[] = [
   'Overview timeline',
@@ -129,11 +129,11 @@ export default function TickOverview({ isLive = false }: Props) {
   // Range-drag in TickOverview clears any stale span/chunk/marker click selection so the
   // right-pane's range-stats fallback ("Selection") takes over instead of the click-detail card.
   // Without this, an old TimeArea click sticks indefinitely and blocks the range stats from showing.
-  const clearProfilerSelection = useProfilerSelectionStore((s) => s.clear);
+  const clearLeaf = useSelectionStore((s) => s.clearLeaf);
   // Tick-cell click sets the tick-kind selection (drives DetailPanel's per-tick summary). The
   // viewport snap to the clicked tick's bounds happens via `commitViewRangeFromGesture` (#345);
-  // there's no `focusTick` cross-panel slot anymore.
-  const setProfilerSelection = useProfilerSelectionStore((s) => s.setSelected);
+  // there's no `focusTick` cross-panel slot anymore. 3E: writes the bus leaf directly (silo retired).
+  const selectOnBus = useSelectionStore((s) => s.select);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wheelCleanupRef = useRef<(() => void) | null>(null);
@@ -678,7 +678,7 @@ export default function TickOverview({ isLive = false }: Props) {
           commitViewRangeFromGesture({ startUs: tickRows[a].startUs, endUs: tickRows[b].endUs });
           // Range-drag = "show me stats for this window". Drop any pinned tick — the user is
           // exploring a range, not focusing a specific tick.
-          clearProfilerSelection();
+          clearLeaf();
         }
       } else {
         const idx = hitTest(e.clientX);
@@ -691,12 +691,12 @@ export default function TickOverview({ isLive = false }: Props) {
           commitViewRangeFromGesture({ startUs: tick.startUs, endUs: tick.endUs });
           // Keep the rich tick selection (drives the inspector's per-tick detail card and live
           // tick spotlight). `focusTick` is gone — CP no longer cares about this slot.
-          setProfilerSelection({ kind: 'tick', tickNumber: Number(tick.tickNumber) });
+          selectOnBus('tick', { kind: 'tick', tickNumber: Number(tick.tickNumber) });
         }
       }
     }
     scheduleRender();
-  }, [tickRows, commitViewRangeFromGesture, hitTest, scheduleRender, clearProfilerSelection, setProfilerSelection]);
+  }, [tickRows, commitViewRangeFromGesture, hitTest, scheduleRender, clearLeaf, selectOnBus]);
 
   const onPointerLeave = useCallback(() => {
     // Only clear hover state on leave — in-flight drags are pointer-captured so pointermove still fires.

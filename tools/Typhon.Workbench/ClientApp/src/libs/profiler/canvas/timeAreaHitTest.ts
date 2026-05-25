@@ -22,7 +22,7 @@ import {
  *
  * Takes everything it needs as arguments so it can be unit-tested against synthetic inputs.
  * Caller (React wrapper) converts a returned hover into either a hover-tooltip or a
- * `useProfilerSelectionStore.setSelected()` write, depending on whether a click is in flight.
+ * `useSelectionStore.select('span'|'tick', …)` write on the unified bus, depending on whether a click is in flight.
  */
 
 export type TimeAreaHover =
