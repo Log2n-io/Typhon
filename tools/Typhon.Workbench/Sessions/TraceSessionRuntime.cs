@@ -88,6 +88,13 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
     /// <summary>True when the build has completed (success or failure).</summary>
     public bool IsBuildComplete => MetadataReady.IsCompleted;
 
+    /// <summary>
+    /// The build failure message when the background build faulted (<see cref="IsBuildComplete"/> is true but
+    /// <see cref="Metadata"/> is null); <c>null</c> on success or while still building. Surfaced to the client so a
+    /// failed build shows the real reason instead of "see server logs".
+    /// </summary>
+    public string BuildError => _buildError;
+
     /// <summary>Source timestamp frequency (ticks/second from the source header). 0 until build completes.</summary>
     public long TimestampFrequency => _timestampFrequency;
 
@@ -146,84 +153,76 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
     public Schema.IStaticSchemaProvider StaticSchemaProvider { get; private set; }
 
     private SpanInstanceIndex _spanInstanceIndex;
-    private readonly object _spanInstanceIndexLock = new();
-
     private SampleClassifier _sampleClassifier;
-    private readonly object _sampleClassifierLock = new();
+    private readonly object _scanLock = new();
+    private bool _scanBuilt;
 
     /// <summary>
     /// #351 Phase 5 — per-session index of every instrumented span instance grouped by kind, used by the
-    /// <see cref="Services.ScopeResolver"/> for span-kind call-tree scoping. Built lazily on first access (a one-pass chunk
-    /// walk) and cached for the session's lifetime; best-effort — returns <see cref="SpanInstanceIndex.Empty"/> before the
-    /// build completes and on any read failure.
+    /// <see cref="Services.ScopeResolver"/> for span-kind call-tree scoping. Built lazily on first access and cached for the
+    /// session's lifetime; best-effort — returns <see cref="SpanInstanceIndex.Empty"/> before the build completes and on any
+    /// read failure. Shares one chunk-stream walk with <see cref="SampleClassifier"/> (see <see cref="EnsureScanBuilt"/>).
     /// </summary>
     public SpanInstanceIndex SpanInstanceIndex
     {
         get
         {
-            if (_spanInstanceIndex != null)
-            {
-                return _spanInstanceIndex;
-            }
-            lock (_spanInstanceIndexLock)
-            {
-                if (_spanInstanceIndex != null)
-                {
-                    return _spanInstanceIndex;
-                }
-                if (!IsReady || _reader == null)
-                {
-                    return SpanInstanceIndex.Empty;
-                }
-                try
-                {
-                    _spanInstanceIndex = SpanInstanceIndex.Build(_reader);
-                }
-                catch (Exception ex)
-                {
-                    LogSpanInstanceIndexFailed(ex, _filePath);
-                    _spanInstanceIndex = SpanInstanceIndex.Empty;
-                }
-                return _spanInstanceIndex;
-            }
+            EnsureScanBuilt();
+            return _spanInstanceIndex ?? SpanInstanceIndex.Empty;
         }
     }
 
     /// <summary>
     /// #364 §8.7 — per-session classifier that labels each CPU sample on-CPU / voluntary-wait / involuntary-stall by joining
-    /// it against GC-suspension intervals and context-switch slices. Built lazily on first access (a one-pass chunk walk) and
-    /// cached for the session's lifetime; best-effort — returns <see cref="SampleClassifier.Empty"/> before the build
-    /// completes and on any read failure (the call-tree fold then degrades to the <c>SampleType</c> proxy).
+    /// it against GC-suspension intervals and context-switch slices. Built lazily on first access and cached for the
+    /// session's lifetime; best-effort — returns <see cref="SampleClassifier.Empty"/> before the build completes and on any
+    /// read failure (the call-tree fold then degrades to the <c>SampleType</c> proxy). Shares one chunk-stream walk with
+    /// <see cref="SpanInstanceIndex"/> (see <see cref="EnsureScanBuilt"/>).
     /// </summary>
     public SampleClassifier SampleClassifier
     {
         get
         {
-            if (_sampleClassifier != null)
+            EnsureScanBuilt();
+            return _sampleClassifier ?? SampleClassifier.Empty;
+        }
+    }
+
+    /// <summary>
+    /// Builds both lazy indexes from a <b>single</b> chunk-stream walk on first access — previously each index ran its own
+    /// full LZ4-decompress pass (#351 / #364). Best-effort: leaves the fields null (the properties return the empties)
+    /// while the build is not yet ready, and caches the empties on a walk failure so it is not retried — matching the
+    /// per-index behaviour it replaced. The eager build-time GC-suspension scan (<see cref="ComputeGcSuspensions"/>) is a
+    /// separate pass by design.
+    /// </summary>
+    private void EnsureScanBuilt()
+    {
+        if (_scanBuilt)
+        {
+            return;
+        }
+        lock (_scanLock)
+        {
+            if (_scanBuilt)
             {
-                return _sampleClassifier;
+                return;
             }
-            lock (_sampleClassifierLock)
+            if (!IsReady || _reader == null)
             {
-                if (_sampleClassifier != null)
-                {
-                    return _sampleClassifier;
-                }
-                if (!IsReady || _reader == null)
-                {
-                    return SampleClassifier.Empty;
-                }
-                try
-                {
-                    _sampleClassifier = SampleClassifier.Build(_reader);
-                }
-                catch (Exception ex)
-                {
-                    LogSampleClassifierFailed(ex, _filePath);
-                    _sampleClassifier = SampleClassifier.Empty;
-                }
-                return _sampleClassifier;
+                return;
             }
+            try
+            {
+                TraceChunkScan.BuildIndexes(_reader, out _spanInstanceIndex, out _sampleClassifier);
+            }
+            catch (Exception ex)
+            {
+                LogSpanInstanceIndexFailed(ex, _filePath);
+                LogSampleClassifierFailed(ex, _filePath);
+                _spanInstanceIndex = SpanInstanceIndex.Empty;
+                _sampleClassifier = SampleClassifier.Empty;
+            }
+            _scanBuilt = true;
         }
     }
 

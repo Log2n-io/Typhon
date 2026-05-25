@@ -24,18 +24,3 @@ export function sortHealthSegments(segments: HealthSegment[], key: HealthSortKey
     return cmp * sign;
   });
 }
-
-/** Compact byte size (e.g. `12.4 MB`) for the summary + reclaimable columns. */
-export function formatBytes(bytes: number): string {
-  if (bytes < 1024) {
-    return `${bytes} B`;
-  }
-  const units = ['KB', 'MB', 'GB', 'TB'];
-  let v = bytes / 1024;
-  let u = 0;
-  while (v >= 1024 && u < units.length - 1) {
-    v /= 1024;
-    u++;
-  }
-  return `${v.toFixed(1)} ${units[u]}`;
-}

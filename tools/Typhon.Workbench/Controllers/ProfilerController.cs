@@ -19,7 +19,7 @@ namespace Typhon.Workbench.Controllers;
 [Tags("Profiler")]
 [RequireBootstrapToken]
 [RequireSession]
-public sealed class ProfilerController : ControllerBase
+public sealed class ProfilerController : WorkbenchControllerBase
 {
     /// <summary>
     /// Returns the full metadata DTO once the session is ready. For Trace sessions this means the sidecar cache build
@@ -42,15 +42,11 @@ public sealed class ProfilerController : ControllerBase
                 {
                     return Ok(runtime.Metadata);
                 }
-                return Problem(
-                    title: "trace_build_failed",
-                    detail: "Trace cache build failed. See server logs for details.",
-                    statusCode: StatusCodes.Status500InternalServerError);
+                return TraceBuildFailed(runtime.BuildError);
             }
 
             // Build in flight — client should retry (TanStack Query handles this via refetchInterval).
-            Response.Headers["Retry-After"] = "1";
-            return StatusCode(StatusCodes.Status202Accepted);
+            return NotReady();
         }
 
         if (session is AttachSession attach)
@@ -60,16 +56,10 @@ public sealed class ProfilerController : ControllerBase
                 return Ok(attach.Runtime.Metadata);
             }
             // Init frame hasn't arrived yet — client retries.
-            Response.Headers["Retry-After"] = "1";
-            return StatusCode(StatusCodes.Status202Accepted);
+            return NotReady();
         }
 
-        return Conflict(new ProblemDetails
-        {
-            Title = "session_kind_mismatch",
-            Detail = "Profiler metadata is only available for Trace and Attach sessions.",
-            Status = StatusCodes.Status409Conflict,
-        });
+        return ConflictKindMismatch("Profiler metadata is only available for Trace and Attach sessions.");
     }
 
     /// <summary>
@@ -88,12 +78,7 @@ public sealed class ProfilerController : ControllerBase
             return Ok(new TraceStatusDto(trace.Runtime.NewVersionAvailable));
         }
 
-        return Conflict(new ProblemDetails
-        {
-            Title = "session_kind_mismatch",
-            Detail = "Trace status is only available for Trace sessions.",
-            Status = StatusCodes.Status409Conflict,
-        });
+        return ConflictKindMismatch("Trace status is only available for Trace sessions.");
     }
 
     /// <summary>
@@ -119,12 +104,7 @@ public sealed class ProfilerController : ControllerBase
             return Ok(trace.Runtime.SourceLocationManifest);
         }
 
-        return Conflict(new ProblemDetails
-        {
-            Title = "session_kind_mismatch",
-            Detail = "Source-location manifest is only available for Trace and Attach sessions.",
-            Status = StatusCodes.Status409Conflict,
-        });
+        return ConflictKindMismatch("Source-location manifest is only available for Trace and Attach sessions.");
     }
 
     /// <summary>
@@ -143,8 +123,7 @@ public sealed class ProfilerController : ControllerBase
             var runtime = trace.Runtime;
             if (!runtime.IsBuildComplete)
             {
-                Response.Headers["Retry-After"] = "1";
-                return StatusCode(StatusCodes.Status202Accepted);
+                return NotReady();
             }
             return Ok(runtime.CpuSampleData.Manifest);
         }
@@ -155,12 +134,7 @@ public sealed class ProfilerController : ControllerBase
             return Ok(CpuFrameManifestDto.Empty);
         }
 
-        return Conflict(new ProblemDetails
-        {
-            Title = "session_kind_mismatch",
-            Detail = "CPU-sample frames are only available for Trace and Attach sessions.",
-            Status = StatusCodes.Status409Conflict,
-        });
+        return ConflictKindMismatch("CPU-sample frames are only available for Trace and Attach sessions.");
     }
 
     /// <summary>
@@ -180,15 +154,11 @@ public sealed class ProfilerController : ControllerBase
             var runtime = trace.Runtime;
             if (!runtime.IsBuildComplete)
             {
-                Response.Headers["Retry-After"] = "1";
-                return StatusCode(StatusCodes.Status202Accepted);
+                return NotReady();
             }
             if (runtime.Metadata == null)
             {
-                return Problem(
-                    title: "trace_build_failed",
-                    detail: "Trace cache build failed. See server logs for details.",
-                    statusCode: StatusCodes.Status500InternalServerError);
+                return TraceBuildFailed(runtime.BuildError);
             }
             var cpu = runtime.CpuSampleData;
             var meta = runtime.Metadata;
@@ -213,12 +183,7 @@ public sealed class ProfilerController : ControllerBase
             return Ok(CallTreeResponseDto.Empty);
         }
 
-        return Conflict(new ProblemDetails
-        {
-            Title = "session_kind_mismatch",
-            Detail = "The CPU call tree is only available for Trace and Attach sessions.",
-            Status = StatusCodes.Status409Conflict,
-        });
+        return ConflictKindMismatch("The CPU call tree is only available for Trace and Attach sessions.");
     }
 
     /// <summary>
@@ -239,15 +204,11 @@ public sealed class ProfilerController : ControllerBase
             var runtime = trace.Runtime;
             if (!runtime.IsBuildComplete)
             {
-                Response.Headers["Retry-After"] = "1";
-                return StatusCode(StatusCodes.Status202Accepted);
+                return NotReady();
             }
             if (runtime.Metadata == null)
             {
-                return Problem(
-                    title: "trace_build_failed",
-                    detail: "Trace cache build failed. See server logs for details.",
-                    statusCode: StatusCodes.Status500InternalServerError);
+                return TraceBuildFailed(runtime.BuildError);
             }
             var cpu = runtime.CpuSampleData;
             var meta = runtime.Metadata;
@@ -262,12 +223,7 @@ public sealed class ProfilerController : ControllerBase
             return Ok(SampleDensityDto.Empty);
         }
 
-        return Conflict(new ProblemDetails
-        {
-            Title = "session_kind_mismatch",
-            Detail = "Sample density is only available for Trace and Attach sessions.",
-            Status = StatusCodes.Status409Conflict,
-        });
+        return ConflictKindMismatch("Sample density is only available for Trace and Attach sessions.");
     }
 
     /// <summary>
@@ -282,12 +238,7 @@ public sealed class ProfilerController : ControllerBase
         var session = HttpContext.Items["Session"];
         if (session is not AttachSession attach)
         {
-            return Conflict(new ProblemDetails
-            {
-                Title = "session_kind_mismatch",
-                Detail = "Disconnect is only valid on Attach sessions.",
-                Status = StatusCodes.Status409Conflict,
-            });
+            return ConflictKindMismatch("Disconnect is only valid on Attach sessions.");
         }
 
         attach.Runtime.RequestDisconnect();
@@ -313,12 +264,7 @@ public sealed class ProfilerController : ControllerBase
         var session = HttpContext.Items["Session"];
         if (session is not AttachSession attach)
         {
-            return Conflict(new ProblemDetails
-            {
-                Title = "session_kind_mismatch",
-                Detail = "Save Replay is only valid on Attach sessions.",
-                Status = StatusCodes.Status409Conflict,
-            });
+            return ConflictKindMismatch("Save Replay is only valid on Attach sessions.");
         }
 
         if (string.IsNullOrWhiteSpace(request?.Path))
@@ -745,8 +691,7 @@ public sealed class ProfilerController : ControllerBase
         var session = (Sessions.ISession)HttpContext.Items["Session"]!;
         if (session.IsSchemaBuilding)
         {
-            Response.Headers["Retry-After"] = "1";
-            return StatusCode(StatusCodes.Status202Accepted);
+            return NotReady();
         }
         return Conflict(new ProblemDetails
         {

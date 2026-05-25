@@ -234,7 +234,17 @@ export function installSelectionUrlSync(options: UrlSyncOptions = {}): () => voi
 
   // Each store fires emit independently; the snapshot+diff inside dedupes the two streams.
   const offSelection = useSelectionStore.subscribe(emit);
-  const offView = useProfilerViewStore.subscribe(emit);
+  // The view store updates `transientViewRange` on every pan/zoom frame, but only the committed `viewRange` reaches
+  // the URL (see snapshot). Gate on a `viewRange` reference change so emit()'s snapshot+diff doesn't run every frame
+  // during a drag — it now runs only when the viewport is actually committed.
+  let lastViewRange = useProfilerViewStore.getState().viewRange;
+  const offView = useProfilerViewStore.subscribe((state) => {
+    if (state.viewRange === lastViewRange) {
+      return;
+    }
+    lastViewRange = state.viewRange;
+    emit();
+  });
   return () => {
     offSelection();
     offView();

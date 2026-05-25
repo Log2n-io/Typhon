@@ -1,5 +1,6 @@
 import { create } from 'zustand';
-import { createJSONStorage, persist } from 'zustand/middleware';
+import { persist } from 'zustand/middleware';
+import { safeStorage } from '@/stores/safeStorage';
 
 /**
  * Persisted manual node positions for the System DAG. When the user Ctrl+drags a tile to
@@ -32,18 +33,6 @@ interface NodePositionsState {
   countForLayout: (layout: string) => number;
 }
 
-// SSR/test-safe localStorage wrapper — mirrors useThemeStore / useDagViewStore conventions.
-const safeStorage = createJSONStorage(() => ({
-  getItem: (name: string) => {
-    try { return localStorage.getItem(name); } catch { return null; }
-  },
-  setItem: (name: string, value: string) => {
-    try { localStorage.setItem(name, value); } catch { /* noop */ }
-  },
-  removeItem: (name: string) => {
-    try { localStorage.removeItem(name); } catch { /* noop */ }
-  },
-}));
 
 function keyOf(layout: string, systemName: string): string {
   // encodeURIComponent on both halves so a system name that happens to contain `|` (or any other delimiter)

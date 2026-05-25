@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { useNavHistoryStore, type NavEntry } from '../useNavHistoryStore';
 import { useSelectedResourceStore, type SelectedResource } from '../useSelectedResourceStore';
+import { useProfilerViewStore } from '../useProfilerViewStore';
+import { registerAnimateViewport } from '@/shell/commands/profilerCommands';
 import type { ResourceNodeDto } from '@/api/generated/model/resourceNodeDto';
 
 const makeRaw = (id: string): ResourceNodeDto => ({
@@ -203,5 +205,37 @@ describe('useNavHistoryStore — restore dispatches to selection store', () => {
     // inside the dispatch chain would be a no-op.
     expect(useNavHistoryStore.getState().entries.length).toBe(sizeBefore);
     expect(useNavHistoryStore.getState().isRestoring).toBe(false);
+  });
+
+  // Regression guard: back/forward must SNAP the viewport, never run the 800 ms tween. The tween
+  // was invisible while every tick shared one viewport, but #345 gave each tick its own framing,
+  // so back/forward started visibly sliding between adjacent ticks. Restore now commits directly;
+  // the registered animator (used by jumpToTimeRange) must stay untouched here.
+  it('back()/forward() on profiler-selected entries snaps the viewport and never calls the animator', () => {
+    let animateCalls = 0;
+    registerAnimateViewport(() => { animateCalls++; });
+    try {
+      const e1: NavEntry = {
+        kind: 'profiler-selected', selection: null,
+        viewRange: { startUs: 0, endUs: 100 }, timestamp: 0,
+      };
+      const e2: NavEntry = {
+        kind: 'profiler-selected', selection: null,
+        viewRange: { startUs: 500, endUs: 600 }, timestamp: 0,
+      };
+      useNavHistoryStore.getState().push(e1);
+      useNavHistoryStore.getState().push(e2);
+
+      useNavHistoryStore.getState().back();
+      expect(useProfilerViewStore.getState().viewRange).toEqual({ startUs: 0, endUs: 100 });
+
+      useNavHistoryStore.getState().forward();
+      expect(useProfilerViewStore.getState().viewRange).toEqual({ startUs: 500, endUs: 600 });
+
+      // No animation at any point — the viewport teleports, it does not travel.
+      expect(animateCalls).toBe(0);
+    } finally {
+      registerAnimateViewport(null);
+    }
   });
 });

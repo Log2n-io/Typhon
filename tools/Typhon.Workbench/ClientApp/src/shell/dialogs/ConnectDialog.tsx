@@ -12,6 +12,7 @@ import { useRecentFilesStore, type RecentFileState } from '@/stores/useRecentFil
 import { useSessionStore } from '@/stores/useSessionStore';
 import { logError, logInfo, logWarn } from '@/stores/useLogStore';
 import { customFetch } from '@/api/client';
+import { extractDetail } from './connectErrors';
 import RecentFilesTab from './tabs/RecentFilesTab';
 import OpenFileTab from './tabs/OpenFileTab';
 import OpenTraceTab from './tabs/OpenTraceTab';
@@ -21,14 +22,6 @@ import DevFixtureTab from './tabs/DevFixtureTab';
 import { toggleViewProfiler } from '@/shell/commands/profilerCommands';
 
 export type ConnectTab = 'recent' | 'open' | 'trace' | 'attach' | 'cached' | 'devfixture';
-
-function extractDetail(err: unknown): string {
- if (err && typeof err === 'object' && 'detail' in err) {
- const d = (err as Record<string, unknown>).detail;
- if (typeof d === 'string') return d;
- }
- return '';
-}
 
 interface Props {
  open: boolean;

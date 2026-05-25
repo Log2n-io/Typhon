@@ -203,14 +203,34 @@ export function buildOffCpuRuns(
  * to `#FFFCEE` where white text would vanish. Per-bar contrast is the only correct fix.
  */
 const _textOnBarCache = new Map<string, 'light' | 'dark'>();
+// Categorical palettes hash into ≤ 8 colours (huge hit rate), but DURATION colour mode paints a continuous heat
+// gradient — near-unique hex per bar, ~zero hits, and the module-level map would grow without bound across frames.
+// Cap it: once it fills, drop it and start fresh. The categorical modes never reach the cap, so they never churn.
+const TEXT_ON_BAR_CACHE_MAX = 512;
 
 function readableOnBar(barHex: string, theme: StudioTheme): string {
   let pick = _textOnBarCache.get(barHex);
   if (pick === undefined) {
     pick = relativeLuminance(barHex) > 0.5 ? 'dark' : 'light';
+    if (_textOnBarCache.size >= TEXT_ON_BAR_CACHE_MAX) {
+      _textOnBarCache.clear();
+    }
     _textOnBarCache.set(barHex, pick);
   }
   return pick === 'dark' ? theme.textOnLightBar : theme.textOnDarkBar;
+}
+
+// A per-frame cache of `new Set(visibleTicks)`: every lane needs the membership set to skip ticks already drawn in the
+// foreground pass, and they all receive the same `visibleTicks` array within one render — so build it once (first lane)
+// and reuse it, keyed by array identity so a new viewport (new array) rebuilds it. Both call sites read it read-only.
+let _visTickSetKey: readonly TickData[] | null = null;
+let _visTickSet = new Set<TickData>();
+function visibleTickSet(visibleTicks: TickData[]): Set<TickData> {
+  if (visibleTicks !== _visTickSetKey) {
+    _visTickSet = new Set(visibleTicks);
+    _visTickSetKey = visibleTicks;
+  }
+  return _visTickSet;
 }
 
 // Diagonal-stripe pattern painted over tick ranges whose chunk data hasn't arrived yet. Gives the
@@ -870,7 +890,8 @@ function drawSlotLane(
         const x2 = pxOfUs(chunk.endUs);
         if (x2 < gutterWidth || x1 > width) continue;
         const w = Math.max(x2 - x1, MIN_RECT_WIDTH);
-        ctx.fillStyle = colorForChunk(chunk, spanColorMode, theme.spans);
+        const chunkColor = colorForChunk(chunk, spanColorMode, theme.spans);
+        ctx.fillStyle = chunkColor;
         ctx.fillRect(x1, ty + SPAN_BAR_MARGIN, w, SPAN_BAR_HEIGHT);
         if (selection && selection.kind === 'chunk' && isSameChunk(selection.chunk, chunk)) {
           ctx.strokeStyle = theme.selectedOutline;
@@ -884,7 +905,7 @@ function drawSlotLane(
           ctx.beginPath();
           ctx.rect(x1, ty + SPAN_BAR_MARGIN, w, SPAN_BAR_HEIGHT);
           ctx.clip();
-          ctx.fillStyle = readableOnBar(colorForChunk(chunk, spanColorMode, theme.spans), theme);
+          ctx.fillStyle = readableOnBar(chunkColor, theme);
           ctx.font = '12px monospace';
           ctx.textAlign = 'left';
           const chunkName = chunk.isParallel ? `${chunk.systemName}[${chunk.chunkIndex}]` : chunk.systemName;
@@ -1018,7 +1039,7 @@ function drawSlotLane(
         ctx.beginPath();
         ctx.rect(x1, sy + SPAN_BAR_MARGIN, actualWidth, SPAN_BAR_HEIGHT);
         ctx.clip();
-        ctx.fillStyle = readableOnBar(pinChunkRow ? theme.idleBar : colorForSpan(span, spanColorMode, theme.spans), theme);
+        ctx.fillStyle = readableOnBar(c, theme);
         ctx.font = '12px monospace';
         ctx.textAlign = 'left';
         // Clamp the text's X to the visible-left edge so the label stays readable when the bar's
@@ -1044,7 +1065,7 @@ function drawSlotLane(
   // Pass 1: non-visible ticks, native spans only (background). Native spans may overflow past
   // their tick's endUs and still overlap the viewport — they draw correctly here. Cross-tick spans
   // are excluded: they start before the tick and can produce full-width bars in a gap.
-  const visSpanSet = new Set<TickData>(visibleTicks);
+  const visSpanSet = visibleTickSet(visibleTicks);
   for (const tick of ticks) {
     if (!visSpanSet.has(tick)) drawOneTickSpans(tick, true);
   }
@@ -1392,7 +1413,7 @@ function drawMiniRowBars(
     }
   };
 
-  const visMiniSet = new Set<TickData>(visibleTicks);
+  const visMiniSet = visibleTickSet(visibleTicks);
   for (const tick of ticks) {
     if (!visMiniSet.has(tick)) drawOneTick(tick, true);
   }

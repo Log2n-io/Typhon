@@ -13,6 +13,7 @@ import { openViewCallTree, revealQueryExecutionInAnalyzer } from '@/shell/comman
 import { spanKindScope, systemScope, useCallTreeScopeStore } from '@/stores/useCallTreeScopeStore';
 import { useCpuFrameStore } from '@/stores/useCpuFrameStore';
 import { resolveFrameRootForSite } from '@/libs/profiler/resolveFrameRoot';
+import { formatBytes } from '@/libs/formatBytes';
 import {
   useGetApiSessionsSessionIdProfilerExecutionsByParentParentSpanId,
   useGetApiSessionsSessionIdProfilerExecutionsBySystemTickSystemIdxTickIndex,
@@ -1125,9 +1126,3 @@ function findTickNumberForUs(
   return null;
 }
 
-function formatBytes(b: number): string {
-  if (b < 1024) return `${b} B`;
-  if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KiB`;
-  if (b < 1024 * 1024 * 1024) return `${(b / 1024 / 1024).toFixed(2)} MiB`;
-  return `${(b / 1024 / 1024 / 1024).toFixed(2)} GiB`;
-}

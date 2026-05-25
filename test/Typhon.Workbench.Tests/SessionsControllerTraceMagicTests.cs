@@ -126,4 +126,22 @@ public sealed class SessionsControllerTraceMagicTests
         var resp = await _client.PostAsJsonAsync("/api/sessions/trace", new CreateTraceSessionRequest(path));
         Assert.That(resp.StatusCode, Is.EqualTo(HttpStatusCode.NotFound));
     }
+
+    [Test]
+    public async Task Post_OldVersionTrace_Returns400_WithReRecordHint()
+    {
+        // Valid TYTR magic but an unsupported (old) on-disk format version. The up-front validator must reject it here
+        // with a clear 400 — otherwise the session is created and its background build faults at ReadHeader, surfacing
+        // a 500 on /metadata with a "see server logs" message instead of the actionable reason.
+        var bytes = new byte[64];
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(0, 4), Typhon.Profiler.TraceFileHeader.MagicValue);
+        BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(4, 2), 9); // pre-v11 — below MinSupportedVersion
+        var path = WriteFile("old-version.typhon-trace", bytes);
+
+        var (code, detail) = await PostTraceAsync(path);
+
+        Assert.That(code, Is.EqualTo(HttpStatusCode.BadRequest));
+        Assert.That(detail, Does.Contain("version"));
+        Assert.That(detail, Does.Contain("Re-record"), "detail must tell the user to re-record against a current build");
+    }
 }

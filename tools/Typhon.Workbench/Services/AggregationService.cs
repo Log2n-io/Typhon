@@ -522,105 +522,18 @@ public static class AggregationService
         return seen.Count;
     }
 
+    // Values-only fill — delegates to the unified FillValuesAndTicks with an empty ticks span (tick capture skipped).
     private static void FillValues(Span<double> dest, TickSummaryDto[] ticks, AggregationQueryDto query, ProfilerMetadataDto metadata)
-    {
-        var t0 = query.Range[0];
-        var t1 = query.Range[1];
-        var trackId = query.TrackId;
-        var field = query.Field;
-        var idx = 0;
+        => FillValuesAndTicks(dest, default, ticks, query, metadata);
 
-        if (trackId == "tick/summary")
-        {
-            for (var i = 0; i < ticks.Length && idx < dest.Length; i++)
-            {
-                var t = ticks[i];
-                if (t.TickNumber < t0 || t.TickNumber > t1) { if (t.TickNumber > t1) break; continue; }
-                dest[idx++] = ExtractTickSummaryField(t, field);
-            }
-            return;
-        }
-        if (trackId == "metronome/wait")
-        {
-            for (var i = 0; i < ticks.Length && idx < dest.Length; i++)
-            {
-                var t = ticks[i];
-                if (t.TickNumber < t0 || t.TickNumber > t1) { if (t.TickNumber > t1) break; continue; }
-                dest[idx++] = field == "waitUs" ? t.MetronomeWaitUs : t.MetronomeIntentClass;
-            }
-            return;
-        }
-
-        if (trackId.StartsWith("system/", StringComparison.Ordinal))
-        {
-            TryFindSystemIndex(metadata, trackId["system/".Length..], out var sysIdx);
-            var rows = metadata.SystemTickSummaries;
-            for (var i = 0; i < rows.Length && idx < dest.Length; i++)
-            {
-                ref readonly var r = ref rows[i];
-                if (r.SystemIndex != sysIdx || r.TickNumber < t0 || r.TickNumber > t1) { continue; }
-                dest[idx++] = ExtractSystemField(in r, field);
-            }
-            return;
-        }
-        if (trackId.StartsWith("queue/", StringComparison.Ordinal))
-        {
-            TryFindQueueId(metadata, trackId["queue/".Length..], out var qid);
-            var rows = metadata.QueueTickSummaries;
-            for (var i = 0; i < rows.Length && idx < dest.Length; i++)
-            {
-                ref readonly var r = ref rows[i];
-                if (r.QueueId != qid || r.TickNumber < t0 || r.TickNumber > t1) { continue; }
-                dest[idx++] = ExtractQueueField(in r, field);
-            }
-            return;
-        }
-
-        if (trackId.StartsWith("system-archetype/", StringComparison.Ordinal))
-        {
-            var rest = trackId["system-archetype/".Length..];
-            var sep = rest.IndexOf('/');
-            TryFindSystemIndex(metadata, rest[..sep], out var sysIdx);
-            TryFindArchetypeId(metadata, rest[(sep + 1)..], out var archId);
-            var rows = metadata.SystemArchetypeTouches;
-            for (var i = 0; i < rows.Length && idx < dest.Length; i++)
-            {
-                ref readonly var r = ref rows[i];
-                if (r.SystemIndex != sysIdx || r.ArchetypeId != archId || r.TickNumber < t0 || r.TickNumber > t1) { continue; }
-                dest[idx++] = ExtractSystemArchetypeField(in r, field);
-            }
-            return;
-        }
-        if (trackId.StartsWith("archetype/", StringComparison.Ordinal))
-        {
-            TryFindArchetypeId(metadata, trackId["archetype/".Length..], out var archId);
-            FillArchetypeRollup(dest, ref idx, metadata.SystemArchetypeTouches, archId, archetypeIds: null, t0, t1, field);
-            return;
-        }
-        if (trackId.StartsWith("component-family/", StringComparison.Ordinal))
-        {
-            var family = trackId["component-family/".Length..];
-            var familyArchIds = ResolveFamilyArchetypes(metadata, family);
-            FillArchetypeRollup(dest, ref idx, metadata.SystemArchetypeTouches, archetypeId: 0, archetypeIds: familyArchIds, t0, t1, field);
-            return;
-        }
-
-        // posttick/<phase>
-        var phase = trackId["posttick/".Length..];
-        var prows = metadata.PostTickSummaries;
-        for (var i = 0; i < prows.Length && idx < dest.Length; i++)
-        {
-            ref readonly var r = ref prows[i];
-            if (r.TickNumber < t0 || r.TickNumber > t1) { continue; }
-            dest[idx++] = ExtractPostTickField(in r, phase);
-        }
-    }
-
-    // Same as FillArchetypeRollup but also captures the source tick number for each rolled-up value (used by topk).
+    // Per-tick rollup: one value per distinct tick where any matching row exists, summing entitiesProcessed/chunkCount.
+    // Rows are stored sorted by (tick, sys, arch), so consecutive entries with the same tick are summed in-place. When
+    // the ticks span is empty (the values-only path) the source-tick capture is skipped — a single predictable branch.
     private static void FillArchetypeRollupWithTicks(
         Span<double> values, Span<uint> ticks, ref int idx, SystemArchetypeTouchSummary[] rows,
         ushort archetypeId, HashSet<ushort> archetypeIds, uint t0, uint t1, string field)
     {
+        var captureTicks = !ticks.IsEmpty;
         uint currentTick = 0;
         var currentEntities = 0u;
         var currentChunks = 0u;
@@ -637,7 +550,7 @@ public static class AggregationService
                 if (idx < values.Length)
                 {
                     values[idx] = field == "chunkCount" ? currentChunks : currentEntities;
-                    ticks[idx] = currentTick;
+                    if (captureTicks) { ticks[idx] = currentTick; }
                     idx++;
                 }
                 currentEntities = 0;
@@ -652,50 +565,17 @@ public static class AggregationService
         if (currentHasData && idx < values.Length)
         {
             values[idx] = field == "chunkCount" ? currentChunks : currentEntities;
-            ticks[idx] = currentTick;
+            if (captureTicks) { ticks[idx] = currentTick; }
             idx++;
         }
     }
 
-    // Per-tick rollup: one value per distinct tick where any matching row exists. Sums entitiesProcessed/chunkCount.
-    private static void FillArchetypeRollup(
-        Span<double> dest, ref int idx, SystemArchetypeTouchSummary[] rows,
-        ushort archetypeId, HashSet<ushort> archetypeIds, uint t0, uint t1, string field)
-    {
-        // Walk in order — rows are stored sorted by (tick, sys, arch) so consecutive entries with the same tick can be summed in-place.
-        uint currentTick = 0;
-        var currentEntities = 0u;
-        var currentChunks = 0u;
-        var currentHasData = false;
-        for (var i = 0; i < rows.Length; i++)
-        {
-            ref readonly var r = ref rows[i];
-            if (r.TickNumber < t0 || r.TickNumber > t1) { continue; }
-            var match = archetypeIds != null ? archetypeIds.Contains(r.ArchetypeId) : r.ArchetypeId == archetypeId;
-            if (!match) { continue; }
-
-            if (currentHasData && r.TickNumber != currentTick)
-            {
-                if (idx < dest.Length)
-                {
-                    dest[idx++] = field == "chunkCount" ? currentChunks : currentEntities;
-                }
-                currentEntities = 0;
-                currentChunks = 0;
-            }
-            currentTick = r.TickNumber;
-            currentEntities += r.EntityCount;
-            currentChunks += r.ChunkCount;
-            currentHasData = true;
-        }
-
-        if (currentHasData && idx < dest.Length)
-        {
-            dest[idx++] = field == "chunkCount" ? currentChunks : currentEntities;
-        }
-    }
-
-    /// <summary>Same as FillValues but also captures the source tick number for each value (used by topk).</summary>
+    /// <summary>
+    /// The unified per-track fill: writes each matching row's value into <paramref name="values"/> and, when
+    /// <paramref name="tickNumbers"/> is non-empty, the source tick number alongside it (topk needs the ticks; mean /
+    /// sum / percentile do not). The values-only <see cref="FillValues"/> delegates here with an empty ticks span, so a
+    /// single predictable <c>captureTicks</c> branch replaces the former duplicated values-only copy of this ladder.
+    /// </summary>
     private static void FillValuesAndTicks(
         Span<double> values,
         Span<uint> tickNumbers,
@@ -707,6 +587,7 @@ public static class AggregationService
         var t1 = query.Range[1];
         var trackId = query.TrackId;
         var field = query.Field;
+        var captureTicks = !tickNumbers.IsEmpty;
         var idx = 0;
 
         if (trackId == "tick/summary")
@@ -716,7 +597,7 @@ public static class AggregationService
                 var t = ticks[i];
                 if (t.TickNumber < t0 || t.TickNumber > t1) { if (t.TickNumber > t1) break; continue; }
                 values[idx] = ExtractTickSummaryField(t, field);
-                tickNumbers[idx] = t.TickNumber;
+                if (captureTicks) { tickNumbers[idx] = t.TickNumber; }
                 idx++;
             }
             return;
@@ -728,7 +609,7 @@ public static class AggregationService
                 var t = ticks[i];
                 if (t.TickNumber < t0 || t.TickNumber > t1) { if (t.TickNumber > t1) break; continue; }
                 values[idx] = field == "waitUs" ? t.MetronomeWaitUs : t.MetronomeIntentClass;
-                tickNumbers[idx] = t.TickNumber;
+                if (captureTicks) { tickNumbers[idx] = t.TickNumber; }
                 idx++;
             }
             return;
@@ -743,7 +624,7 @@ public static class AggregationService
                 ref readonly var r = ref rows[i];
                 if (r.SystemIndex != sysIdx || r.TickNumber < t0 || r.TickNumber > t1) { continue; }
                 values[idx] = ExtractSystemField(in r, field);
-                tickNumbers[idx] = r.TickNumber;
+                if (captureTicks) { tickNumbers[idx] = r.TickNumber; }
                 idx++;
             }
             return;
@@ -757,7 +638,7 @@ public static class AggregationService
                 ref readonly var r = ref rows[i];
                 if (r.QueueId != qid || r.TickNumber < t0 || r.TickNumber > t1) { continue; }
                 values[idx] = ExtractQueueField(in r, field);
-                tickNumbers[idx] = r.TickNumber;
+                if (captureTicks) { tickNumbers[idx] = r.TickNumber; }
                 idx++;
             }
             return;
@@ -775,7 +656,7 @@ public static class AggregationService
                 ref readonly var r = ref rows[i];
                 if (r.SystemIndex != sysIdx || r.ArchetypeId != archId || r.TickNumber < t0 || r.TickNumber > t1) { continue; }
                 values[idx] = ExtractSystemArchetypeField(in r, field);
-                tickNumbers[idx] = r.TickNumber;
+                if (captureTicks) { tickNumbers[idx] = r.TickNumber; }
                 idx++;
             }
             return;
@@ -801,7 +682,7 @@ public static class AggregationService
             ref readonly var r = ref prows[i];
             if (r.TickNumber < t0 || r.TickNumber > t1) { continue; }
             values[idx] = ExtractPostTickField(in r, phase);
-            tickNumbers[idx] = r.TickNumber;
+            if (captureTicks) { tickNumbers[idx] = r.TickNumber; }
             idx++;
         }
     }

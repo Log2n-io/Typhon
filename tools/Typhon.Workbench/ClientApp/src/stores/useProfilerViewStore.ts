@@ -1,5 +1,6 @@
 import { create } from 'zustand';
-import { createJSONStorage, persist } from 'zustand/middleware';
+import { persist } from 'zustand/middleware';
+import { safeStorage } from './safeStorage';
 import type { TimeRange, TrackState } from '@/libs/profiler/model/uiTypes';
 import { useOptionsStore } from '@/stores/useOptionsStore';
 
@@ -114,18 +115,6 @@ interface ProfilerViewState {
   clearEngineOpVisibility: () => void;
 }
 
-// Safe localStorage wrapper — falls back silently in non-browser environments (tests, SSR).
-const safeStorage = createJSONStorage(() => ({
-  getItem: (name: string) => {
-    try { return localStorage.getItem(name); } catch { return null; }
-  },
-  setItem: (name: string, value: string) => {
-    try { localStorage.setItem(name, value); } catch { /* noop */ }
-  },
-  removeItem: (name: string) => {
-    try { localStorage.removeItem(name); } catch { /* noop */ }
-  },
-}));
 
 // Initial state = the "no selection" sentinel. The rest of the system treats `endUs <= startUs`
 // as "nothing selected" (TickOverview hides the overlay, SystemDag/CriticalPath skip aggregations,

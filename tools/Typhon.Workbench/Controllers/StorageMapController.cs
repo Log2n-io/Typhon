@@ -18,7 +18,7 @@ namespace Typhon.Workbench.Controllers;
 [Tags("StorageMap")]
 [RequireBootstrapToken]
 [RequireSession]
-public sealed class StorageMapController : ControllerBase
+public sealed class StorageMapController : WorkbenchControllerBase
 {
     private readonly StorageMapService _service;
 
@@ -99,12 +99,7 @@ public sealed class StorageMapController : ControllerBase
             return session;
         }
 
-        conflict = Conflict(new ProblemDetails
-        {
-            Title = "session_kind_mismatch",
-            Detail = "The Database File Map is only available for Open (file) sessions.",
-            Status = StatusCodes.Status409Conflict,
-        });
+        conflict = ConflictKindMismatch("The Database File Map is only available for Open (file) sessions.");
         return null;
     }
 }

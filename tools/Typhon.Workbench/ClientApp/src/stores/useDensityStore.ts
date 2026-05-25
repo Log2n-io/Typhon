@@ -1,5 +1,6 @@
 import { create } from 'zustand';
-import { createJSONStorage, persist } from 'zustand/middleware';
+import { persist } from 'zustand/middleware';
+import { safeStorage } from './safeStorage';
 
 /**
  * Display density — one global, token-driven setting (DS-1). Drives row heights, spacing, **and the `--fs-*`
@@ -29,17 +30,6 @@ interface DensityState {
   cycle: () => void;
 }
 
-const safeStorage = createJSONStorage(() => ({
-  getItem: (name: string) => {
-    try { return localStorage.getItem(name); } catch { return null; }
-  },
-  setItem: (name: string, value: string) => {
-    try { localStorage.setItem(name, value); } catch { /* noop */ }
-  },
-  removeItem: (name: string) => {
-    try { localStorage.removeItem(name); } catch { /* noop */ }
-  },
-}));
 
 export const useDensityStore = create<DensityState>()(
   persist(

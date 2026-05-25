@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using Microsoft.AspNetCore.Mvc;
 using Typhon.Workbench.Dtos.Data;
 using Typhon.Workbench.Dtos.Profiler;
@@ -20,7 +21,7 @@ namespace Typhon.Workbench.Controllers;
 [RequireBootstrapToken]
 [RequireSession]
 [RequireApiVersion]
-public sealed class DataController : ControllerBase
+public sealed class DataController : WorkbenchControllerBase
 {
     private readonly StreamSubscriptionRegistry _subscriptionRegistry;
 
@@ -132,8 +133,7 @@ public sealed class DataController : ControllerBase
 
         if (metadata == null)
         {
-            Response.Headers["Retry-After"] = "1";
-            return StatusCode(StatusCodes.Status202Accepted);
+            return NotReady();
         }
 
         return Ok(new TopologyDto(
@@ -142,14 +142,32 @@ public sealed class DataController : ControllerBase
             metadata.ComponentTypes,
             metadata.Phases,
             metadata.Tracks,
-            BuildComponentFamilyMap(metadata.ComponentTypes)));
+            ResolveFamilies(metadata).TopologyMap));
     }
 
     // Workbench Data Flow module (#327): server-side family resolution. Heuristic-only here — the attribute path runs
-    // engine-side at session attach when reflection is available; for trace sessions only the component name survives,
-    // so we run the heuristic once per topology fetch (cheap, runs on a few dozen names) and the result is cached client-side.
-    private static ComponentFamilyMapDto BuildComponentFamilyMap(ComponentTypeDto[] componentTypes)
+    // engine-side at session attach when reflection is available; for trace sessions only the component name survives.
+    // Both the topology family map (component → family) and the per-family archetype-id sets derive purely from the
+    // session's immutable metadata, so they are computed once and memoized by metadata instance — GetTopology rebuilt the
+    // map on every fetch and GetComponentFamilyTrackData re-ran the heuristic over every archetype × component on every
+    // component-family track slice. The entry is auto-evicted when the session's metadata is collected.
+    private static readonly ConditionalWeakTable<ProfilerMetadataDto, FamilyResolution> _familyResolutionCache = new();
+
+    // Shared empty result for a requested family that no archetype carries — RollupByTick over an empty set yields no rows.
+    private static readonly HashSet<ushort> _noArchetypes = [];
+
+    private sealed class FamilyResolution
     {
+        public required ComponentFamilyMapDto TopologyMap { get; init; }
+        public required Dictionary<string, HashSet<ushort>> ArchetypeIdsByFamily { get; init; }
+    }
+
+    private static FamilyResolution ResolveFamilies(ProfilerMetadataDto metadata)
+        => _familyResolutionCache.GetValue(metadata, BuildFamilyResolution);
+
+    private static FamilyResolution BuildFamilyResolution(ProfilerMetadataDto metadata)
+    {
+        var componentTypes = metadata.ComponentTypes;
         var map = new Dictionary<string, string>(componentTypes.Length, StringComparer.Ordinal);
         var familiesUsed = new HashSet<string>(StringComparer.Ordinal);
         for (var i = 0; i < componentTypes.Length; i++)
@@ -162,7 +180,29 @@ public sealed class DataController : ControllerBase
 
         // Stable render order: pick the canonical entries that this session actually has, preserving canonical order.
         var orderedFamilies = ComponentFamilyResolver.CanonicalFamilyOrder.Where(familiesUsed.Contains).ToArray();
-        return new ComponentFamilyMapDto(map, orderedFamilies);
+
+        // family → archetype ids carrying at least one component in the family (one pass over archetypes × components).
+        var archIdsByFamily = new Dictionary<string, HashSet<ushort>>(StringComparer.Ordinal);
+        for (var i = 0; i < metadata.Archetypes.Length; i++)
+        {
+            var a = metadata.Archetypes[i];
+            for (var c = 0; c < a.ComponentTypeNames.Length; c++)
+            {
+                var family = ComponentFamilyResolver.ResolveByHeuristic(a.ComponentTypeNames[c]);
+                if (!archIdsByFamily.TryGetValue(family, out var set))
+                {
+                    set = [];
+                    archIdsByFamily[family] = set;
+                }
+                set.Add(a.ArchetypeId);
+            }
+        }
+
+        return new FamilyResolution
+        {
+            TopologyMap = new ComponentFamilyMapDto(map, orderedFamilies),
+            ArchetypeIdsByFamily = archIdsByFamily,
+        };
     }
 
     // ──────────────────────────────────────────────────────────────────────────
@@ -178,7 +218,7 @@ public sealed class DataController : ControllerBase
     {
         var metadata = ResolveMetadata(out var mismatch);
         if (mismatch != null) return mismatch;
-        if (metadata == null) { Response.Headers["Retry-After"] = "1"; return StatusCode(StatusCodes.Status202Accepted); }
+        if (metadata == null) { return NotReady(); }
 
         var matches = new List<SystemDefinitionDto>();
         foreach (var s in metadata.Systems)
@@ -200,7 +240,7 @@ public sealed class DataController : ControllerBase
     {
         var metadata = ResolveMetadata(out var mismatch);
         if (mismatch != null) return mismatch;
-        if (metadata == null) { Response.Headers["Retry-After"] = "1"; return StatusCode(StatusCodes.Status202Accepted); }
+        if (metadata == null) { return NotReady(); }
 
         var matches = new List<SystemDefinitionDto>();
         foreach (var s in metadata.Systems)
@@ -235,8 +275,7 @@ public sealed class DataController : ControllerBase
 
         if (metadata == null)
         {
-            Response.Headers["Retry-After"] = "1";
-            return StatusCode(StatusCodes.Status202Accepted);
+            return NotReady();
         }
 
         return Ok(_tracksSchema);
@@ -293,8 +332,7 @@ public sealed class DataController : ControllerBase
 
         if (metadata == null)
         {
-            Response.Headers["Retry-After"] = "1";
-            return StatusCode(StatusCodes.Status202Accepted);
+            return NotReady();
         }
 
         // v12 (#311) + v3 (#327): dispatch to the new track families before the v1 record layout assumes shape.
@@ -504,20 +542,8 @@ public sealed class DataController : ControllerBase
     private ActionResult<TrackDataResponseDto> GetComponentFamilyTrackData(ProfilerMetadataDto metadata, string trackId, uint from, uint to)
     {
         var family = trackId["component-family/".Length..];
-        // Resolve which archetypes have at least one component in the family.
-        var familyArchIds = new HashSet<ushort>();
-        for (var i = 0; i < metadata.Archetypes.Length; i++)
-        {
-            var a = metadata.Archetypes[i];
-            for (var c = 0; c < a.ComponentTypeNames.Length; c++)
-            {
-                if (ComponentFamilyResolver.ResolveByHeuristic(a.ComponentTypeNames[c]) == family)
-                {
-                    familyArchIds.Add(a.ArchetypeId);
-                    break;
-                }
-            }
-        }
+        // Archetypes carrying at least one component in the family — resolved once per session (memoized), not per request.
+        var familyArchIds = ResolveFamilies(metadata).ArchetypeIdsByFamily.GetValueOrDefault(family, _noArchetypes);
         var rows = metadata.SystemArchetypeTouches;
         var output = RollupByTick(rows, archetypeId: 0, archetypeIds: familyArchIds, from, to);
         return Ok(new TrackDataResponseDto(trackId, output));
@@ -619,8 +645,7 @@ public sealed class DataController : ControllerBase
 
         if (metadata == null)
         {
-            Response.Headers["Retry-After"] = "1";
-            return StatusCode(StatusCodes.Status202Accepted);
+            return NotReady();
         }
 
         var results = AggregationService.Compute(metadata, request.Queries);
@@ -722,12 +747,7 @@ public sealed class DataController : ControllerBase
             return attach.Runtime.Metadata;
         }
 
-        mismatchResult = Conflict(new ProblemDetails
-        {
-            Title = "session_kind_mismatch",
-            Detail = "Topology is only available for Trace and Attach sessions.",
-            Status = StatusCodes.Status409Conflict,
-        });
+        mismatchResult = ConflictKindMismatch("Topology is only available for Trace and Attach sessions.");
         return null;
     }
 }

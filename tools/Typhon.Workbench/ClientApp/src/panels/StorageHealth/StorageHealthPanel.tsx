@@ -7,7 +7,8 @@ import { useSelectionStore } from '@/stores/useSelectionStore';
 import { useDbMapHealth } from '@/hooks/dbmap/useDbMapHealth';
 import { openDbMapForComponent } from '@/shell/commands/openDbMap';
 import { segmentRgb, rgbCss } from '@/libs/dbmap/dbMapColors';
-import { sortHealthSegments, formatBytes, type HealthSortKey } from './storageHealthModel';
+import { sortHealthSegments, type HealthSortKey } from './storageHealthModel';
+import { formatBytes } from '@/libs/formatBytes';
 
 /**
  * Storage Health (Stage 2 Phase 3, GAP-16) — the *aggregate* storage dashboard, the non-spatial complement to

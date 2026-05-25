@@ -1,6 +1,4 @@
 using System;
-using System.Buffers;
-using System.Buffers.Binary;
 using System.Collections.Generic;
 using Typhon.Profiler;
 
@@ -173,120 +171,16 @@ public sealed class SampleClassifier
     }
 
     /// <summary>
-    /// Walks every chunk in <paramref name="reader"/> once, decoding GC-suspension intervals and per-thread context-switch
-    /// slices into a ready-to-query classifier. Returns <see cref="Empty"/> for a reader with no chunks.
+    /// Builds the classifier from a one-pass walk of <paramref name="reader"/>'s chunk stream. Delegates to
+    /// <see cref="TraceChunkScan.BuildIndexes"/> — the shared walk that produces this classifier and the
+    /// <see cref="SpanInstanceIndex"/> together from one decompression — and keeps the sample half. Returns
+    /// <see cref="Empty"/> for a reader with no chunks.
     /// </summary>
     public static SampleClassifier Build(TraceFileCacheReader reader)
     {
         ArgumentNullException.ThrowIfNull(reader);
-        if (reader.ChunkManifest.Count == 0)
-        {
-            return Empty;
-        }
-
-        var maxCompressed = 0;
-        var maxUncompressed = 0;
-        foreach (var entry in reader.ChunkManifest)
-        {
-            if ((int)entry.CacheByteLength > maxCompressed)
-            {
-                maxCompressed = (int)entry.CacheByteLength;
-            }
-            if ((int)entry.UncompressedBytes > maxUncompressed)
-            {
-                maxUncompressed = (int)entry.UncompressedBytes;
-            }
-        }
-        if (maxUncompressed == 0)
-        {
-            return Empty;
-        }
-
-        var compressedScratch = ArrayPool<byte>.Shared.Rent(maxCompressed);
-        var uncompressedScratch = ArrayPool<byte>.Shared.Rent(maxUncompressed);
-        var gcIntervals = new List<(long Start, long End)>();
-        var slicesBySlot = new Dictionary<int, List<OnCpuSlice>>();
-        var sawContextSwitch = false;
-        try
-        {
-            foreach (var entry in reader.ChunkManifest)
-            {
-                var compSpan = compressedScratch.AsSpan(0, (int)entry.CacheByteLength);
-                var uncompSpan = uncompressedScratch.AsSpan(0, (int)entry.UncompressedBytes);
-                reader.DecompressChunk(entry, uncompSpan, compSpan);
-                WalkRecords(uncompSpan, gcIntervals, slicesBySlot, ref sawContextSwitch);
-            }
-        }
-        finally
-        {
-            ArrayPool<byte>.Shared.Return(compressedScratch);
-            ArrayPool<byte>.Shared.Return(uncompressedScratch);
-        }
-
-        return new SampleClassifier(MergeIntervals(gcIntervals), FinalizeSlices(slicesBySlot), sawContextSwitch);
-    }
-
-    /// <summary>
-    /// Scans one decompressed chunk's packed records. Mirrors the record-walk loop in
-    /// <see cref="SpanInstanceIndex.WalkRecordsForSpans"/>: <c>u16 size</c> prefix, kind byte at offset 2, <c>0</c> / <c>0xFFFF</c>
-    /// size terminates the scan. Picks up <see cref="TraceEventKind.GcSuspension"/> spans and
-    /// <see cref="TraceEventKind.ThreadContextSwitch"/> instant records; everything else is skipped.
-    /// </summary>
-    private static void WalkRecords(
-        ReadOnlySpan<byte> records,
-        List<(long Start, long End)> gcIntervals,
-        Dictionary<int, List<OnCpuSlice>> slicesBySlot,
-        ref bool sawContextSwitch)
-    {
-        const int commonHeader = TraceRecordHeader.CommonHeaderSize;       // 12
-        const int minSpanRecord = commonHeader + TraceRecordHeader.SpanHeaderExtensionSize; // 37
-        const int contextSwitchRecord = commonHeader + 13;                 // 25 — see ThreadContextSwitchEvent wire layout
-
-        var pos = 0;
-        while (pos + 3 <= records.Length)
-        {
-            var size = BinaryPrimitives.ReadUInt16LittleEndian(records[pos..]);
-            if (size == 0 || size == 0xFFFF)
-            {
-                break;
-            }
-            if (pos + size > records.Length)
-            {
-                break;
-            }
-            var kind = (TraceEventKind)records[pos + 2];
-
-            if (kind == TraceEventKind.GcSuspension && size >= minSpanRecord)
-            {
-                TraceRecordHeader.ReadCommonHeader(records.Slice(pos, size), out _, out _, out _, out var startQpc);
-                TraceRecordHeader.ReadSpanHeaderExtension(records.Slice(pos + commonHeader), out var durationTicks, out _, out _, out _);
-                if (durationTicks > 0)
-                {
-                    gcIntervals.Add((startQpc, startQpc + durationTicks));
-                }
-            }
-            else if (kind == TraceEventKind.ThreadContextSwitch && size >= contextSwitchRecord)
-            {
-                // Wire layout (ThreadContextSwitchEvent): 12 B common header + 13 B payload. Common-header timestamp is the
-                // slice START qpc; the slice's thread is the payload's TargetSlotIdx (the common-header slot is the pump's).
-                // Payload: [0] u8 TargetSlotIdx, [1] u8 ProcessorNumber, [2] u8 WaitReason, [3] u8 ThreadState,
-                //          [4] u8 GettingIdle, [5..9) u32 DurationQpc, [9..13) u32 ReadyTimeQpc.
-                TraceRecordHeader.ReadCommonHeader(records.Slice(pos, size), out _, out _, out _, out var startQpc);
-                var payload = records.Slice(pos + commonHeader);
-                int targetSlot = payload[0];
-                var waitReason = payload[2];
-                var durationQpc = BinaryPrimitives.ReadUInt32LittleEndian(payload[5..]);
-                if (!slicesBySlot.TryGetValue(targetSlot, out var list))
-                {
-                    list = [];
-                    slicesBySlot[targetSlot] = list;
-                }
-                list.Add(new OnCpuSlice(startQpc, startQpc + durationQpc, OffCpuClassFor(waitReason)));
-                sawContextSwitch = true;
-            }
-
-            pos += size;
-        }
+        TraceChunkScan.BuildIndexes(reader, out _, out var samples);
+        return samples;
     }
 
     private static (long Start, long End)[] MergeIntervals(List<(long Start, long End)> intervals)

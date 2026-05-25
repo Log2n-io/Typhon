@@ -1,5 +1,6 @@
 import { create } from 'zustand';
-import { createJSONStorage, persist } from 'zustand/middleware';
+import { persist } from 'zustand/middleware';
+import { safeStorage } from '@/stores/safeStorage';
 
 /**
  * Panel-local view state for the System DAG. After cross-panel binding (per `09-system-dag.md §7.1`)
@@ -70,18 +71,6 @@ export interface DagViewState {
   clearPendingFocusSystem: () => void;
 }
 
-// SSR/test-safe localStorage wrapper — same shape as `useThemeStore`.
-const safeStorage = createJSONStorage(() => ({
-  getItem: (name: string) => {
-    try { return localStorage.getItem(name); } catch { return null; }
-  },
-  setItem: (name: string, value: string) => {
-    try { localStorage.setItem(name, value); } catch { /* noop */ }
-  },
-  removeItem: (name: string) => {
-    try { localStorage.removeItem(name); } catch { /* noop */ }
-  },
-}));
 
 export const useDagViewStore = create<DagViewState>()(
   persist(

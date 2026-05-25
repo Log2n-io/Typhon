@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { sortHealthSegments, formatBytes, type HealthSortKey } from '../storageHealthModel';
+import { sortHealthSegments, type HealthSortKey } from '../storageHealthModel';
 import type { HealthSegment } from '@/hooks/dbmap/useDbMapHealth';
 
 function seg(over: Partial<HealthSegment> & { id: number }): HealthSegment {
@@ -41,13 +41,5 @@ describe('sortHealthSegments', () => {
     const copy = [...rows];
     sortHealthSegments(rows, 'occupancyPct', 'desc');
     expect(rows).toEqual(copy);
-  });
-});
-
-describe('formatBytes', () => {
-  it('formats across units', () => {
-    expect(formatBytes(512)).toBe('512 B');
-    expect(formatBytes(2048)).toBe('2.0 KB');
-    expect(formatBytes(13_000_000)).toBe('12.4 MB');
   });
 });

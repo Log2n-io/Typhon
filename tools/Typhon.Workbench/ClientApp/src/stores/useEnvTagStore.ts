@@ -1,5 +1,6 @@
 import { create } from 'zustand';
-import { createJSONStorage, persist } from 'zustand/middleware';
+import { persist } from 'zustand/middleware';
+import { safeStorage } from './safeStorage';
 
 /**
  * Environment tag for a file/engine (the DataGrip "this is PROD" safety signal — context-bar §4.1, GAP-23).
@@ -15,17 +16,6 @@ interface EnvTagState {
   set: (key: string, tag: EnvTag) => void;
 }
 
-const safeStorage = createJSONStorage(() => ({
-  getItem: (name: string) => {
-    try { return localStorage.getItem(name); } catch { return null; }
-  },
-  setItem: (name: string, value: string) => {
-    try { localStorage.setItem(name, value); } catch { /* noop */ }
-  },
-  removeItem: (name: string) => {
-    try { localStorage.removeItem(name); } catch { /* noop */ }
-  },
-}));
 
 export const useEnvTagStore = create<EnvTagState>()(
   persist(

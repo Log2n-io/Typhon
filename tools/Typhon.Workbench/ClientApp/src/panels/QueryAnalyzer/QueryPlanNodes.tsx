@@ -1,5 +1,6 @@
 import { Handle, Position } from '@xyflow/react';
 import type { QueryPlanNodeData } from './queryPlanLayout';
+import { formatNs } from './format';
 
 /**
  * Custom node components for the plan tree. One component per <c>QueryPlanNodeKind</c>; React Flow
@@ -63,11 +64,4 @@ function StatsFooter({ stats }: { stats: NonNullable<QueryPlanNodeData['stats']>
   return (
     <div className="mt-1 truncate text-fs-xs text-muted-foreground">{parts.join(' · ')}</div>
   );
-}
-
-function formatNs(ns: number): string {
-  if (ns < 1_000) return `${ns} ns`;
-  if (ns < 1_000_000) return `${(ns / 1_000).toFixed(1)} µs`;
-  if (ns < 1_000_000_000) return `${(ns / 1_000_000).toFixed(2)} ms`;
-  return `${(ns / 1_000_000_000).toFixed(2)} s`;
 }

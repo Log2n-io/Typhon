@@ -72,10 +72,12 @@ public static class QueryCatalogBuilder
         var spanToDefKey = new Dictionary<long, ulong>(); // QueryPlan/QueryExecute child SpanId → defKey
 
         var chunkCount = metadata.ChunkManifest?.Length ?? 0;
+        // Reused across chunks (cleared each time) — avoids a per-chunk List allocation + backing-array growth.
+        var eventScratch = new List<TraceEventDto>(4096);
         for (var chunkIdx = 0; chunkIdx < chunkCount; chunkIdx++)
         {
             ct.ThrowIfCancellationRequested();
-            await ProcessChunkAsync(provider, chunkIdx, metadata, ticksPerUs, defs, execs, execBySpanId, spanToDefKey, ct);
+            await ProcessChunkAsync(provider, chunkIdx, metadata, ticksPerUs, defs, execs, execBySpanId, spanToDefKey, eventScratch, ct);
         }
 
         return Finalize(defs, execs, querySourceStrings);
@@ -116,6 +118,7 @@ public static class QueryCatalogBuilder
         List<ExecutionInProgress> execs,
         Dictionary<long, int> execBySpanId,
         Dictionary<long, ulong> spanToDefKey,
+        List<TraceEventDto> eventScratch,
         CancellationToken ct)
     {
         ChunkManifestEntry entry;
@@ -146,10 +149,10 @@ public static class QueryCatalogBuilder
             }
 
             var seedTick = isContinuation ? (int)entry.FromTick : (int)entry.FromTick - 1;
-            var events = new List<TraceEventDto>(Math.Min((int)entry.EventCount, 4096));
-            TraceEventDecoder.DecodeBlock(uncompressed.AsSpan(0, uncompressedSize), seedTick, ticksPerUs, events);
+            eventScratch.Clear();
+            TraceEventDecoder.DecodeBlock(uncompressed.AsSpan(0, uncompressedSize), seedTick, ticksPerUs, eventScratch);
 
-            ProcessEvents(events, defs, execs, execBySpanId, spanToDefKey);
+            ProcessEvents(eventScratch, defs, execs, execBySpanId, spanToDefKey);
         }
         finally
         {
@@ -343,6 +346,20 @@ public static class QueryCatalogBuilder
         _ => false,
     };
 
+    // Per-phase enum→name cache: BuildPhaseDto runs once per phase (~50k for a busy trace) and Enum.ToString does a value
+    // lookup on each call. Precomputing the 256 byte-enum names turns it into a single array index (no lookup, no alloc).
+    private static readonly string[] _kindNames = BuildKindNames();
+
+    private static string[] BuildKindNames()
+    {
+        var names = new string[256];
+        for (var i = 0; i < names.Length; i++)
+        {
+            names[i] = ((TraceEventKind)i).ToString();
+        }
+        return names;
+    }
+
     /// <summary>
     /// Build the per-phase row for the Workbench Execution Inspector. Typed pattern matching against
     /// the concrete DTO from the source generator — no reflection, no boxing. Each branch reads only
@@ -396,7 +413,7 @@ public static class QueryCatalogBuilder
                 break;
         }
 
-        return new QueryExecutionPhaseDto(kind.ToString(), estimate, actual, wallNs, notes ?? string.Empty);
+        return new QueryExecutionPhaseDto(_kindNames[(byte)kind], estimate, actual, wallNs, notes);
     }
 
     private static void UpdateRowsForExecution(ExecutionInProgress exec, TraceSpanEventDto span)

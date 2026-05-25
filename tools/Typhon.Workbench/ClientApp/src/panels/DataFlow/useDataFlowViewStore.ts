@@ -1,5 +1,6 @@
 import { create } from 'zustand';
-import { createJSONStorage, persist } from 'zustand/middleware';
+import { persist } from 'zustand/middleware';
+import { safeStorage } from '@/stores/safeStorage';
 
 /**
  * Panel-local view state for the Data Flow Timeline. The shared cross-panel state (tick range, selected
@@ -106,18 +107,6 @@ export interface DataFlowViewState {
   setHoverIsolateEnabled: (enabled: boolean) => void;
 }
 
-// SSR/test-safe localStorage wrapper — same shape as `useThemeStore` / `useDagViewStore`.
-const safeStorage = createJSONStorage(() => ({
-  getItem: (name: string) => {
-    try { return localStorage.getItem(name); } catch { return null; }
-  },
-  setItem: (name: string, value: string) => {
-    try { localStorage.setItem(name, value); } catch { /* noop */ }
-  },
-  removeItem: (name: string) => {
-    try { localStorage.removeItem(name); } catch { /* noop */ }
-  },
-}));
 
 export const useDataFlowViewStore = create<DataFlowViewState>()(
   persist(

@@ -51,6 +51,14 @@ public sealed class IncrementalCacheBuilder : IDisposable
     private readonly Dictionary<int, (uint InvocationCount, double TotalDurationUs)> _systemAggregates = new();
     private readonly List<ChunkManifestEntry> _chunkManifest = new(capacity: 256);
 
+    // Reused scratch buffers (grown as needed) — avoid the allocation churn of building a fresh array on every ~1 Hz
+    // metrics snapshot (p95) and on every tick flush (the per-tick key buffers). Only ever touched on the single-threaded
+    // build / ingest path (live: the builder lock serializes FeedRawRecords with the metrics read), so no sync is needed.
+    private double[] _p95Scratch = [];
+    private ushort[] _sysIdxScratch = [];
+    private ushort[] _qIdxScratch = [];
+    private uint[] _satKeyScratch = [];
+
     // ── v12 accumulators (#311) ─────────────────────────────────────────────
     // Per-tick scratch state for SystemTickSummary[]. Keyed by systemIndex; flushed at FinalizeCurrentTick().
     private readonly Dictionary<ushort, SystemTickAccumulator> _currentTickSystems = new();
@@ -241,16 +249,21 @@ public sealed class IncrementalCacheBuilder : IDisposable
     private GlobalMetricsFixed BuildGlobalMetricsSnapshot()
     {
         double p95 = 0;
-        if (_tickSummaries.Count > 0)
+        var tickCount = _tickSummaries.Count;
+        if (tickCount > 0)
         {
-            var durations = new double[_tickSummaries.Count];
-            for (var i = 0; i < _tickSummaries.Count; i++)
+            if (_p95Scratch.Length < tickCount)
+            {
+                _p95Scratch = new double[tickCount];
+            }
+            var durations = _p95Scratch;
+            for (var i = 0; i < tickCount; i++)
             {
                 durations[i] = _tickSummaries[i].DurationUs;
             }
-            Array.Sort(durations);
-            var p95Idx = (int)(durations.Length * 0.95);
-            p95 = durations[Math.Min(p95Idx, durations.Length - 1)];
+            Array.Sort(durations, 0, tickCount);
+            var p95Idx = (int)(tickCount * 0.95);
+            p95 = durations[Math.Min(p95Idx, tickCount - 1)];
         }
         return new GlobalMetricsFixed
         {
@@ -899,16 +912,21 @@ public sealed class IncrementalCacheBuilder : IDisposable
         // Per-system rows. Order by SystemIndex for deterministic output (binary-search friendly).
         if (_currentTickSystems.Count > 0)
         {
-            // Reusable temp list — small (≤ N systems) — populated, sorted, appended.
-            var sysIdxBuf = new ushort[_currentTickSystems.Count];
+            // Reusable scratch (grown as needed) — populated, sorted over its prefix, appended.
+            var sysCount = _currentTickSystems.Count;
+            if (_sysIdxScratch.Length < sysCount)
+            {
+                _sysIdxScratch = new ushort[sysCount];
+            }
+            var sysIdxBuf = _sysIdxScratch;
             var sk = 0;
             foreach (var key in _currentTickSystems.Keys)
             {
                 sysIdxBuf[sk++] = key;
             }
 
-            Array.Sort(sysIdxBuf);
-            for (var i = 0; i < sysIdxBuf.Length; i++)
+            Array.Sort(sysIdxBuf, 0, sysCount);
+            for (var i = 0; i < sysCount; i++)
             {
                 var sysIdx = sysIdxBuf[i];
                 var acc = _currentTickSystems[sysIdx];
@@ -947,15 +965,20 @@ public sealed class IncrementalCacheBuilder : IDisposable
         // Per-queue rows. Order by QueueId.
         if (_currentTickQueues.Count > 0)
         {
-            var qIdxBuf = new ushort[_currentTickQueues.Count];
+            var qCount = _currentTickQueues.Count;
+            if (_qIdxScratch.Length < qCount)
+            {
+                _qIdxScratch = new ushort[qCount];
+            }
+            var qIdxBuf = _qIdxScratch;
             var qk = 0;
             foreach (var key in _currentTickQueues.Keys)
             {
                 qIdxBuf[qk++] = key;
             }
 
-            Array.Sort(qIdxBuf);
-            for (var i = 0; i < qIdxBuf.Length; i++)
+            Array.Sort(qIdxBuf, 0, qCount);
+            for (var i = 0; i < qCount; i++)
             {
                 var qid = qIdxBuf[i];
                 var data = _currentTickQueues[qid];
@@ -978,14 +1001,19 @@ public sealed class IncrementalCacheBuilder : IDisposable
         // section is sorted by (TickNumber, SystemIndex, ArchetypeId) once concatenated across ticks (FoldV12 calls per-tick).
         if (_currentTickSystemArchetypeTouches.Count > 0)
         {
-            var keys = new uint[_currentTickSystemArchetypeTouches.Count];
+            var satCount = _currentTickSystemArchetypeTouches.Count;
+            if (_satKeyScratch.Length < satCount)
+            {
+                _satKeyScratch = new uint[satCount];
+            }
+            var keys = _satKeyScratch;
             var k = 0;
             foreach (var key in _currentTickSystemArchetypeTouches.Keys)
             {
                 keys[k++] = key;
             }
-            Array.Sort(keys);
-            for (var i = 0; i < keys.Length; i++)
+            Array.Sort(keys, 0, satCount);
+            for (var i = 0; i < satCount; i++)
             {
                 var acc = _currentTickSystemArchetypeTouches[keys[i]];
                 _systemArchetypeTouches.Add(new SystemArchetypeTouchSummary

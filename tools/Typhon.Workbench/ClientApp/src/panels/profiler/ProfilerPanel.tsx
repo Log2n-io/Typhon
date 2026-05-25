@@ -21,6 +21,7 @@ import { useProfilerTraceStatus } from '@/hooks/profiler/useProfilerTraceStatus'
 import { useProfilerStatsStore } from '@/stores/useProfilerStatsStore';
 import { useRecentFilesStore } from '@/stores/useRecentFilesStore';
 import { resolveInitialViewport } from '@/libs/profiler/initialViewport';
+import { formatBytes } from '@/libs/formatBytes';
 import { buildTickRows, computeSelectionIdxRange } from '@/libs/profiler/canvas/tickOverview';
 import TickOverview from './sections/TickOverview';
 import TimeArea from './sections/TimeArea';
@@ -440,11 +441,4 @@ function formatDurationUs(us: number): string {
   if (us < 1_000_000) return `${(us / 1000).toFixed(1)} ms`;
   if (us < 60_000_000) return `${(us / 1_000_000).toFixed(2)} s`;
   return `${(us / 60_000_000).toFixed(1)} min`;
-}
-
-function formatBytes(b: number): string {
-  if (b < 1024) return `${b} B`;
-  if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
-  if (b < 1024 * 1024 * 1024) return `${(b / 1024 / 1024).toFixed(2)} MB`;
-  return `${(b / 1024 / 1024 / 1024).toFixed(2)} GB`;
 }

@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import type { TimeRange } from '@/libs/profiler/model/uiTypes';
 import type { Camera } from '@/libs/dbmap/camera';
-import { animateViewportToRange } from '../shell/commands/profilerCommands';
+import { useProfilerViewStore } from './useProfilerViewStore';
 import { restoreDbMapCamera } from '../shell/commands/openDbMap';
 import type { ProfilerSelection } from '@/libs/profiler/model/traceModel';
 import { useSelectedResourceStore, type SelectedResource } from './useSelectedResourceStore';
@@ -152,11 +152,14 @@ function restoreSideEffect(entry: NavEntry) {
     } else {
       useSelectionStore.getState().select(entry.selection.kind === 'tick' ? 'tick' : 'span', entry.selection);
     }
-    // Animate the viewport to the target range so back/forward feels like the double-click zoom
-    // tween (800 ms ease-out). Falls back to a snap via `setViewRange` when the profiler panel
-    // isn't mounted. Selection update is synchronous above so DetailPanel reacts immediately; the
-    // viewport eases in over 800 ms.
-    animateViewportToRange(entry.viewRange);
+    // Snap the viewport to the target range — back/forward is a teleport to a prior place, not a
+    // smooth journey (browser semantics). This used to call animateViewportToRange (an 800 ms
+    // ease-out tween): harmless while every tick shared one viewport, but #345 gave each tick its
+    // own framing, so the tween turned into a visible slide between adjacent ticks on every
+    // back/forward — a regression. commitViewRange writes both slots atomically so TimeArea +
+    // TickOverview update on the next frame. (jumpToTimeRange keeps the tween — that is a single,
+    // deliberate jump where easing reads as intentional, not as lag.)
+    useProfilerViewStore.getState().commitViewRange(entry.viewRange);
   } else if (entry.kind === 'dbmap-navigated') {
     // Flies the map camera back to the recorded framing; a no-op when the File Map panel is not mounted.
     restoreDbMapCamera(entry.camera);

@@ -1,6 +1,4 @@
 using System;
-using System.Buffers;
-using System.Buffers.Binary;
 using System.Collections.Generic;
 using Typhon.Profiler;
 
@@ -63,106 +61,15 @@ public sealed class SpanInstanceIndex
     }
 
     /// <summary>
-    /// Walks every chunk in <paramref name="reader"/> once, extracting each span record's <c>[startQpc, startQpc + duration)</c>
-    /// window grouped by kind. Returns <see cref="Empty"/> for a reader with no chunks.
+    /// Builds the index from a one-pass walk of <paramref name="reader"/>'s chunk stream. Delegates to
+    /// <see cref="TraceChunkScan.BuildIndexes"/> — the shared walk that produces this index and the
+    /// <see cref="SampleClassifier"/> together from one decompression — and keeps the span half. Returns
+    /// <see cref="Empty"/> for a reader with no chunks.
     /// </summary>
     public static SpanInstanceIndex Build(TraceFileCacheReader reader)
     {
         ArgumentNullException.ThrowIfNull(reader);
-        if (reader.ChunkManifest.Count == 0)
-        {
-            return Empty;
-        }
-
-        var maxCompressed = 0;
-        var maxUncompressed = 0;
-        foreach (var entry in reader.ChunkManifest)
-        {
-            if ((int)entry.CacheByteLength > maxCompressed)
-            {
-                maxCompressed = (int)entry.CacheByteLength;
-            }
-            if ((int)entry.UncompressedBytes > maxUncompressed)
-            {
-                maxUncompressed = (int)entry.UncompressedBytes;
-            }
-        }
-        if (maxUncompressed == 0)
-        {
-            return Empty;
-        }
-
-        var compressedScratch = ArrayPool<byte>.Shared.Rent(maxCompressed);
-        var uncompressedScratch = ArrayPool<byte>.Shared.Rent(maxUncompressed);
-        var byKind = new Dictionary<int, List<(long Start, long End)>>();
-        try
-        {
-            foreach (var entry in reader.ChunkManifest)
-            {
-                var compSpan = compressedScratch.AsSpan(0, (int)entry.CacheByteLength);
-                var uncompSpan = uncompressedScratch.AsSpan(0, (int)entry.UncompressedBytes);
-                reader.DecompressChunk(entry, uncompSpan, compSpan);
-                WalkRecordsForSpans(uncompSpan, byKind);
-            }
-        }
-        finally
-        {
-            ArrayPool<byte>.Shared.Return(compressedScratch);
-            ArrayPool<byte>.Shared.Return(uncompressedScratch);
-        }
-
-        if (byKind.Count == 0)
-        {
-            return Empty;
-        }
-
-        var windowsByKind = new Dictionary<int, (long Start, long End)[]>(byKind.Count);
-        foreach (var kv in byKind)
-        {
-            var list = kv.Value;
-            list.Sort(static (a, b) => a.Start.CompareTo(b.Start));
-            windowsByKind[kv.Key] = list.ToArray();
-        }
-        return new SpanInstanceIndex(windowsByKind);
-    }
-
-    /// <summary>
-    /// Scans one decompressed chunk's packed records, appending each span record's window to its kind bucket. Mirrors the
-    /// record-walk loop in <see cref="TraceSessionRuntime.WalkRecordsForSuspensions"/>: <c>u16 size</c> prefix, kind byte at
-    /// offset 2, <c>0</c> / <c>0xFFFF</c> size terminates the scan.
-    /// </summary>
-    private static void WalkRecordsForSpans(ReadOnlySpan<byte> records, Dictionary<int, List<(long Start, long End)>> sink)
-    {
-        var pos = 0;
-        while (pos + 3 <= records.Length)
-        {
-            var size = BinaryPrimitives.ReadUInt16LittleEndian(records[pos..]);
-            if (size == 0 || size == 0xFFFF)
-            {
-                break;
-            }
-            if (pos + size > records.Length)
-            {
-                break;
-            }
-            var kind = (TraceEventKind)records[pos + 2];
-            if (kind.IsSpan())
-            {
-                TraceRecordHeader.ReadCommonHeader(records.Slice(pos, size), out _, out _, out _, out var startQpc);
-                TraceRecordHeader.ReadSpanHeaderExtension(
-                    records.Slice(pos + TraceRecordHeader.CommonHeaderSize),
-                    out var durationTicks,
-                    out _,
-                    out _,
-                    out _);
-                if (!sink.TryGetValue((int)kind, out var list))
-                {
-                    list = [];
-                    sink[(int)kind] = list;
-                }
-                list.Add((startQpc, startQpc + durationTicks));
-            }
-            pos += size;
-        }
+        TraceChunkScan.BuildIndexes(reader, out var spans, out _);
+        return spans;
     }
 }

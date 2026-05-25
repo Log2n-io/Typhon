@@ -17,7 +17,6 @@ public sealed class EngineLifecycle : IDisposable
 
     public DatabaseEngine Engine { get; }
     public IResourceRegistry Registry { get; }
-    internal IMemoryAllocator MemoryAllocator { get; }
     public string FilePath { get; }
     public SchemaCompatibility.State State { get; }
     public int LoadedComponentTypes { get; }
@@ -28,7 +27,6 @@ public sealed class EngineLifecycle : IDisposable
         WorkbenchAssemblyLoadContext alc,
         DatabaseEngine engine,
         IResourceRegistry registry,
-        IMemoryAllocator allocator,
         string filePath,
         SchemaCompatibility.State state,
         int loadedComponentTypes,
@@ -38,7 +36,6 @@ public sealed class EngineLifecycle : IDisposable
         _alc = alc;
         Engine = engine;
         Registry = registry;
-        MemoryAllocator = allocator;
         FilePath = filePath;
         State = state;
         LoadedComponentTypes = loadedComponentTypes;
@@ -130,7 +127,6 @@ public sealed class EngineLifecycle : IDisposable
             sp = services.BuildServiceProvider();
             var engine = sp.GetRequiredService<DatabaseEngine>();
             var registry = sp.GetRequiredService<IResourceRegistry>();
-            var allocator = sp.GetRequiredService<IMemoryAllocator>();
 
             // Schema DLLs to load: an explicit (user-specified) list wins; otherwise resolve from the database's persisted assembly manifest
             // (engine.GetRequiredAssemblies, populated on every open including schemaless) by locating each assembly next to the database file.
@@ -225,7 +221,7 @@ public sealed class EngineLifecycle : IDisposable
                 }
             }
 
-            return new EngineLifecycle(sp, alc, engine, registry, allocator, fullPath, state, loaded, diagnostics);
+            return new EngineLifecycle(sp, alc, engine, registry, fullPath, state, loaded, diagnostics);
         }
         catch (WorkbenchException)
         {

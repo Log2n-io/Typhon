@@ -296,21 +296,26 @@ public sealed partial class SessionsController : ControllerBase
     /// </summary>
     private static void ValidateTraceOrReplayMagic(string path)
     {
-        Span<byte> magicBytes = stackalloc byte[4];
+        // Read magic (4 bytes) + on-disk format version (next 2 bytes) in one peek — the version gate below catches an
+        // old/newer .typhon-trace up-front, so an unsupported file fails here with a clear 400 instead of creating a
+        // session whose background build faults at TraceFileReader.ReadHeader and surfaces a 500 on /metadata.
+        Span<byte> head = stackalloc byte[6];
+        int read;
         try
         {
             using var fs = System.IO.File.OpenRead(path);
-            if (fs.Length < 4 || fs.Read(magicBytes) != 4)
-            {
-                throw new WorkbenchException(400, "invalid_trace_file", $"File is too small to be a valid trace: {path}");
-            }
+            read = fs.ReadAtLeast(head, head.Length, throwOnEndOfStream: false);
         }
         catch (IOException ex)
         {
             throw new WorkbenchException(400, "invalid_trace_file", $"Cannot read trace file: {ex.Message}");
         }
+        if (read < 4)
+        {
+            throw new WorkbenchException(400, "invalid_trace_file", $"File is too small to be a valid trace: {path}");
+        }
 
-        var magic = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(magicBytes);
+        var magic = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(head);
         var extension = Path.GetExtension(path);
         var isReplay = string.Equals(extension, ".typhon-replay", StringComparison.OrdinalIgnoreCase);
 
@@ -320,7 +325,7 @@ public sealed partial class SessionsController : ControllerBase
             {
                 return;
             }
-            var asAscii = System.Text.Encoding.ASCII.GetString(magicBytes);
+            var asAscii = System.Text.Encoding.ASCII.GetString(head[..4]);
             throw new WorkbenchException(400, "invalid_replay_file",
                 $"File magic is '{asAscii}' (0x{magic:X8}); expected 'TPCH' for a .typhon-replay file.");
         }
@@ -328,11 +333,20 @@ public sealed partial class SessionsController : ControllerBase
         // Default: source .typhon-trace file with TYTR magic.
         if (magic == Typhon.Profiler.TraceFileHeader.MagicValue)
         {
+            // Magic is valid — also gate the on-disk format version so an old/newer trace fails with an immediate,
+            // actionable 400 (mirrors TraceFileReader.ReadHeader's range check, which would otherwise fault the build).
+            var version = read >= 6 ? System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(head[4..6]) : (ushort)0;
+            if (version < Typhon.Profiler.TraceFileReader.MinSupportedVersion || version > Typhon.Profiler.TraceFileHeader.CurrentVersion)
+            {
+                throw new WorkbenchException(400, "unsupported_trace_version",
+                    $"Unsupported trace file version: {version}. This build reads versions "
+                    + $"{Typhon.Profiler.TraceFileReader.MinSupportedVersion}..{Typhon.Profiler.TraceFileHeader.CurrentVersion}. Re-record against a current build.");
+            }
             return;
         }
 
         // Common-mistake hint: a TPCH file with .typhon-trace-cache extension is the auto-built sidecar; the user should open the parent.
-        var ascii = System.Text.Encoding.ASCII.GetString(magicBytes);
+        var ascii = System.Text.Encoding.ASCII.GetString(head[..4]);
         var hint = magic == Typhon.Profiler.CacheHeader.MagicValue
             ? "This looks like a .typhon-trace-cache sidecar. Open the matching source .typhon-trace file instead, or use .typhon-replay extension if this is a saved replay file."
             : $"File magic is '{ascii}' (0x{magic:X8}); expected 'TYTR' for a .typhon-trace file.";

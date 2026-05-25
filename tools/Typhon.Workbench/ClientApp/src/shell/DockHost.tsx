@@ -1,28 +1,17 @@
-import { useEffect, useRef } from 'react';
+import { lazy, Suspense, useEffect, useRef } from 'react';
 import { useThemeStore } from '@/stores/useThemeStore';
 import { useLogStore, selectUnseenLevel, selectUnseenCount, type LogLevel } from '@/stores/useLogStore';
 import { DockviewDefaultTab, DockviewReact, themeDark, themeLight, type DockviewApi, type DockviewReadyEvent, type IDockviewDefaultTabProps, type IDockviewPanelHeaderProps, type IDockviewPanelProps } from 'dockview-react';
 import { useDockLayoutStore } from '@/stores/useDockLayoutStore';
 import { useSessionStore } from '@/stores/useSessionStore';
+// Eagerly imported: the shell + default-layout panels that are always mounted at session open (so lazy-loading
+// them would only add a Suspense flash, not save the cold bundle anything). Everything else is lazy (below).
 import DetailPanel from '@/panels/DetailPanel';
 import LogsPanel from '@/panels/LogsPanel';
 import ResourceTreePanel from '@/panels/ResourceTreePanel';
 import SchemaExplorerPanel from '@/panels/SchemaExplorer/SchemaExplorerPanel';
-import ArchetypeInspectorPanel from '@/panels/ArchetypeInspector/ArchetypeInspectorPanel';
-import ComponentInspectorPanel from '@/panels/ComponentInspector/ComponentInspectorPanel';
-import SystemDagPanel from '@/panels/SystemDag/SystemDagPanel';
-import DataFlowPanel from '@/panels/DataFlow/DataFlowPanel';
-import CriticalPathPanel from '@/panels/CriticalPath/CriticalPathPanel';
 import ProfilerPanel from '@/panels/profiler/ProfilerPanel';
 import TopSpansPanel from '@/panels/profiler/TopSpansPanel';
-import CallTreePanel from '@/panels/profiler/CallTree';
-import OptionsPanel from '@/panels/options/OptionsPanel';
-import SourcePreviewPanel from '@/panels/profiler/SourcePreviewPanel';
-import QueryAnalyzerPanel from '@/panels/QueryAnalyzer/QueryAnalyzerPanel';
-import PaletteDebugPanel from '@/panels/PaletteDebug';
-import DbMapPanel from '@/panels/DbMap/DbMapPanel';
-import StorageHealthPanel from '@/panels/StorageHealth/StorageHealthPanel';
-import EntityListPanel from '@/panels/DataBrowser/EntityListPanel';
 import SystemsQueriesNavigatorPanel from '@/panels/SystemsQueriesNavigator/SystemsQueriesNavigatorPanel';
 import { registerDockApi, registerResetLayout, focusPanelBody } from './commands/openSchemaBrowser';
 import { registerProfilerDockApi } from './commands/profilerCommands';
@@ -105,32 +94,53 @@ const EDGE_LEFT_ID = 'edge-left';
 const EDGE_RIGHT_ID = 'edge-right';
 const EDGE_BOTTOM_ID = 'edge-bottom';
 
-// The full component registry. Every panel stays imported and listed here so deactivated views remain
-// compilable (Stage 0 gates, never deletes). `activeComponents` below is what dockview actually mounts —
-// gated zone-D ids are filtered out so a stale saved layout referencing one fails fromJSON cleanly and
-// hits the rebuildDefault() recovery (see shell-and-dockview.md §5).
+// A panel body shown while a lazily-loaded panel's chunk is in flight (usually a few ms on first open).
+const PanelLoading: React.FC = () => (
+  <div className="flex h-full w-full items-center justify-center text-fs-sm text-muted-foreground">Loading…</div>
+);
+
+// Wraps a dynamically-imported panel in a Suspense boundary so dockview can mount it directly. Heavy / on-demand
+// panels are code-split this way — most importantly the React-Flow + dagre graph panels (System DAG, Data Flow,
+// Query Analyzer) — so those libraries stay out of the cold bundle until a view that needs them is first opened.
+function lazyPanel(loader: () => Promise<{ default: React.ComponentType<IDockviewPanelProps> }>): React.FC<IDockviewPanelProps> {
+  const Lazy = lazy(loader);
+  const Wrapped: React.FC<IDockviewPanelProps> = (props) => (
+    <Suspense fallback={<PanelLoading />}>
+      <Lazy {...props} />
+    </Suspense>
+  );
+  Wrapped.displayName = 'LazyPanel';
+  return Wrapped;
+}
+
+// The full component registry. Shell + default-layout panels are imported eagerly (above); every on-demand panel is
+// lazy so its chunk — and any heavy library it pulls — is fetched only when its view is first opened. Every id stays
+// listed here so deactivated views remain compilable (Stage 0 gates, never deletes); `activeComponents` below is what
+// dockview actually mounts — gated zone-D ids are filtered out so a stale saved layout referencing one fails fromJSON
+// cleanly and hits the rebuildDefault() recovery (see shell-and-dockview.md §5).
 const components: Record<string, React.FC<IDockviewPanelProps>> = {
   ResourceTree: ResourceTreePanel,
   Detail: DetailPanel,
   Logs: LogsPanel,
   SchemaExplorer: SchemaExplorerPanel,
-  ArchetypeInspector: ArchetypeInspectorPanel,
-  ComponentInspector: ComponentInspectorPanel,
-  SystemDag: SystemDagPanel,
-  DataFlow: DataFlowPanel,
-  CriticalPath: CriticalPathPanel,
   Profiler: ProfilerPanel,
   TopSpans: TopSpansPanel,
-  CallTree: CallTreePanel,
-  Options: OptionsPanel,
-  SourcePreview: SourcePreviewPanel,
-  QueryAnalyzer: QueryAnalyzerPanel,
-  PaletteDebug: PaletteDebugPanel,
-  DbMap: DbMapPanel,
-  StorageHealth: StorageHealthPanel,
-  DataBrowserEntities: EntityListPanel,
   // Shell navigator (zone C, Trace/Attach) — not a zone-D deep view, so it is never gated.
   SystemsQueriesNavigator: SystemsQueriesNavigatorPanel,
+  // Lazy (on-demand) — code-split out of the cold bundle.
+  ArchetypeInspector: lazyPanel(() => import('@/panels/ArchetypeInspector/ArchetypeInspectorPanel')),
+  ComponentInspector: lazyPanel(() => import('@/panels/ComponentInspector/ComponentInspectorPanel')),
+  SystemDag: lazyPanel(() => import('@/panels/SystemDag/SystemDagPanel')),
+  DataFlow: lazyPanel(() => import('@/panels/DataFlow/DataFlowPanel')),
+  CriticalPath: lazyPanel(() => import('@/panels/CriticalPath/CriticalPathPanel')),
+  CallTree: lazyPanel(() => import('@/panels/profiler/CallTree')),
+  Options: lazyPanel(() => import('@/panels/options/OptionsPanel')),
+  SourcePreview: lazyPanel(() => import('@/panels/profiler/SourcePreviewPanel')),
+  QueryAnalyzer: lazyPanel(() => import('@/panels/QueryAnalyzer/QueryAnalyzerPanel')),
+  PaletteDebug: lazyPanel(() => import('@/panels/PaletteDebug')),
+  DbMap: lazyPanel(() => import('@/panels/DbMap/DbMapPanel')),
+  StorageHealth: lazyPanel(() => import('@/panels/StorageHealth/StorageHealthPanel')),
+  DataBrowserEntities: lazyPanel(() => import('@/panels/DataBrowser/EntityListPanel')),
 };
 
 // Only the active (shell + ungated) components are handed to dockview. Gated zone-D ids drop out here.

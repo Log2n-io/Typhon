@@ -391,6 +391,7 @@ export default function CallTree() {
                   rootTotal={data.totalSamples}
                   onDrill={drillInto}
                   filter={treeFilter}
+                  byId={byId}
                   selectedIndex={selectedIndex}
                   expandedSet={expandedSet}
                   onSelect={handleSelect}
@@ -826,12 +827,22 @@ function highlightMatch(text: string, query: string): React.ReactNode {
   );
 }
 
-/** Row interaction handlers threaded from {@link CallTree} through {@link TreeBody} into every {@link TreeRow}. */
+/** The frame-symbol map (frameId → symbol) from the CPU-frame store. */
+type FrameById = ReturnType<typeof useCpuFrameStore.getState>['byId'];
+
+/**
+ * Per-row props threaded from {@link CallTree} through {@link TreeBody} into every {@link TreeRow} — interaction
+ * handlers plus shared row state ({@link selectedIndex} / {@link expandedSet}) and the {@link byId} frame map.
+ * Threading {@link byId} as a prop — instead of each {@link TreeRow} calling {@link useCpuFrameStore} — keeps the
+ * store subscription at the {@link CallTree} root: one observer, not one per visible row (a deep tree had hundreds).
+ */
 type RowHandlers = {
   /** Node index of the selected row, or null. */
   selectedIndex: number | null;
   /** The set of expanded node indices. */
   expandedSet: Set<number>;
+  /** Frame-symbol map shared by every row (threaded, not per-row subscribed). */
+  byId: FrameById;
   /** Single-click — select the row. */
   onSelect: (nodeIndex: number) => void;
   /** Double-click — open the frame's source in the editor. */
@@ -936,8 +947,7 @@ function TreeRow({
   onDrill: (frameId: number) => void;
   filter: TreeFilter | null;
 } & RowHandlers) {
-  const { selectedIndex, expandedSet, onSelect, onActivate, onContextMenu, onToggleExpand } = rowHandlers;
-  const byId = useCpuFrameStore((s) => s.byId);
+  const { selectedIndex, expandedSet, onSelect, onActivate, onContextMenu, onToggleExpand, byId } = rowHandlers;
 
   // §8.7 — synthetic involuntary-stall aggregate (`[GC suspension]` / `[Preempted]` / `[Paging]`). It has no real frame,
   // no stack and no children: render a flat, distinct, non-interactive row — never a drill / go-to-source target.
@@ -1286,6 +1296,7 @@ function SandwichPane({
             rootTotal={data.totalSamples}
             onDrill={onDrill}
             filter={null}
+            byId={byId}
             selectedIndex={selectedIndex}
             expandedSet={expanded}
             onSelect={handleSelect}

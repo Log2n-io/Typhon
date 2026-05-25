@@ -11,7 +11,7 @@ namespace Typhon.Workbench.Controllers;
 [Tags("Resources")]
 [RequireBootstrapToken]
 [RequireSession]
-public sealed class ResourcesController : ControllerBase
+public sealed class ResourcesController : WorkbenchControllerBase
 {
     /// <summary>Eager depth for the root call; avoids a flurry of round-trips on initial render.</summary>
     private const int InitialDepth = 2;
@@ -25,12 +25,7 @@ public sealed class ResourcesController : ControllerBase
         var session = HttpContext.Items["Session"] as OpenSession;
         if (session == null)
         {
-            return Conflict(new ProblemDetails
-            {
-                Title = "session_kind_mismatch",
-                Detail = "Resource graph is only available for Open (file) sessions.",
-                Status = StatusCodes.Status409Conflict,
-            });
+            return ConflictKindMismatch("Resource graph is only available for Open (file) sessions.");
         }
 
         int effectiveDepth;
@@ -60,12 +55,7 @@ public sealed class ResourcesController : ControllerBase
         var session = HttpContext.Items["Session"] as OpenSession;
         if (session == null)
         {
-            return Conflict(new ProblemDetails
-            {
-                Title = "session_kind_mismatch",
-                Detail = "Resource graph is only available for Open (file) sessions.",
-                Status = StatusCodes.Status409Conflict,
-            });
+            return ConflictKindMismatch("Resource graph is only available for Open (file) sessions.");
         }
 
         var node = FindById(session.Engine.Registry.Root, resourceId);

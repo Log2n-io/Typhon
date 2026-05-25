@@ -1,5 +1,6 @@
 import { create } from 'zustand';
-import { createJSONStorage, persist } from 'zustand/middleware';
+import { persist } from 'zustand/middleware';
+import { safeStorage } from './safeStorage';
 
 /**
  * Cross-panel view options shared by the System DAG and Critical Path panels — and edited from the
@@ -21,18 +22,6 @@ export interface ViewOptionsState {
   setShowEngineSystems: (show: boolean) => void;
 }
 
-// SSR/test-safe localStorage wrapper — same shape as `useThemeStore` / `useDagViewStore`.
-const safeStorage = createJSONStorage(() => ({
-  getItem: (name: string) => {
-    try { return localStorage.getItem(name); } catch { return null; }
-  },
-  setItem: (name: string, value: string) => {
-    try { localStorage.setItem(name, value); } catch { /* noop */ }
-  },
-  removeItem: (name: string) => {
-    try { localStorage.removeItem(name); } catch { /* noop */ }
-  },
-}));
 
 export const useViewOptionsStore = create<ViewOptionsState>()(
   persist(

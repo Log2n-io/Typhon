@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Typhon.Engine;
 using Typhon.Workbench.Dtos.Storage;
@@ -14,6 +16,22 @@ public sealed partial class StorageMapService
 {
     /// <summary>Number of pyramid levels (0-based) returned by <see cref="GetOverview"/>.</summary>
     private const int OverviewMaxLevels = 5;
+
+    /// <summary>
+    /// Memoized coarse map per live engine. <see cref="BuildMap"/>'s whole-file <c>ClassifyAllPages</c> plus the
+    /// O(pageCount) descriptor arrays are rebuilt only when the structure changes. A viewport pan fires many
+    /// <see cref="GetRegionDetail"/> / <see cref="GetPageDetail"/> tile requests that all reuse the same map; before
+    /// this each tile rebuilt it (a multi-MB allocation + a full classify per tile). Keyed by engine (a
+    /// <see cref="ConditionalWeakTable{TKey,TValue}"/> entry is collected when the session's engine is) and a cheap
+    /// structural signature so a mutation rebuilds and a quiet pan hits.
+    /// </summary>
+    private readonly ConditionalWeakTable<DatabaseEngine, CachedMap> _mapCache = new();
+
+    private sealed class CachedMap
+    {
+        public long Signature;
+        public StructuralMap Map;
+    }
 
     /// <summary>Builds the region headers + segment table for <c>GET /dbmap/regions</c>.</summary>
     public StorageRegionsDto GetRegions(DatabaseEngine engine, string databaseName)
@@ -116,19 +134,72 @@ public sealed partial class StorageMapService
 
     /// <summary>
     /// Introspects the engine into a coarse <see cref="StructuralMap"/>. Reads only in-memory structures — the
-    /// occupancy bitmap and the segment registry — so the whole-file map costs no page-body disk I/O.
+    /// occupancy bitmap and the segment registry — so the whole-file map costs no page-body disk I/O. Memoized per
+    /// engine (see <see cref="_mapCache"/>): the cheap structural signature is recomputed each call, but the
+    /// O(pageCount) classify + arrays are skipped while it is unchanged.
     /// </summary>
-    internal static StructuralMap BuildMap(DatabaseEngine engine, string databaseName)
+    internal StructuralMap BuildMap(DatabaseEngine engine, string databaseName)
     {
         ArgumentNullException.ThrowIfNull(engine);
 
+        var segments = engine.EnumerateStorageSegments();
+        var pageCount = engine.MMF.StorageFilePageCount;
+        var walBytes = engine.GetWalTotalBytes();
+        var checkpointLsn = engine.CheckpointManager?.CheckpointLsn ?? 0L;
+        var signature = ComputeSignature(pageCount, walBytes, checkpointLsn, segments);
+
+        var entry = _mapCache.GetOrCreateValue(engine);
+        lock (entry)
+        {
+            if (entry.Map != null && entry.Signature == signature)
+            {
+                return entry.Map;
+            }
+            var rebuilt = BuildMapCore(engine, databaseName, segments, pageCount, walBytes, checkpointLsn);
+            entry.Signature = signature;
+            entry.Map = rebuilt;
+            return rebuilt;
+        }
+    }
+
+    /// <summary>
+    /// FNV-1a fold over the structural inputs of <see cref="BuildMapCore"/>. Every segment add/remove, per-segment
+    /// page growth, file growth, WAL append, or checkpoint moves the value — so the cached map is rebuilt exactly
+    /// when one of its fields could have changed. WAL bytes + checkpoint LSN cover occupancy-only flips (a page going
+    /// <c>used→Free</c> without a segment page-list change), since every structural mutation in an ACID engine is journaled.
+    /// </summary>
+    private static long ComputeSignature(int pageCount, long walBytes, long checkpointLsn, IReadOnlyList<StorageSegmentDescriptor> segments)
+    {
+        unchecked
+        {
+            var hash = 1469598103934665603L; // FNV-1a 64-bit offset basis
+            hash = (hash ^ pageCount) * 1099511628211L;
+            hash = (hash ^ walBytes) * 1099511628211L;
+            hash = (hash ^ checkpointLsn) * 1099511628211L;
+            hash = (hash ^ segments.Count) * 1099511628211L;
+            for (var i = 0; i < segments.Count; i++)
+            {
+                var seg = segments[i];
+                hash = (hash ^ seg.RootPageIndex) * 1099511628211L;
+                hash = (hash ^ seg.Pages.Length) * 1099511628211L;
+                hash = (hash ^ (byte)seg.Kind) * 1099511628211L;
+            }
+            return hash;
+        }
+    }
+
+    /// <summary>
+    /// The uncached build. Takes the already-fetched <paramref name="segments"/> and volatile counters so a cache
+    /// miss never re-enumerates or re-reads them.
+    /// </summary>
+    private static StructuralMap BuildMapCore(DatabaseEngine engine, string databaseName, IReadOnlyList<StorageSegmentDescriptor> segments,
+        int pageCount, long walBytes, long checkpointLsn)
+    {
         var mmf = engine.MMF;
-        var pageCount = mmf.StorageFilePageCount;
 
         var pageType = new StoragePageType[pageCount];
         engine.ClassifyAllPages(pageType);
 
-        var segments = engine.EnumerateStorageSegments();
         var ownerSegmentId = new ushort[pageCount];
         ownerSegmentId.AsSpan().Fill(StructuralMap.NoSegment);
         var pageRank = new byte[pageCount]; // normalized directory-order position within the owning segment (0 = first page, 255 = last)
@@ -174,9 +245,9 @@ public sealed partial class StorageMapService
             DatabaseName = string.IsNullOrEmpty(databaseName) ? "database" : databaseName,
             DataFileBytes = mmf.FileSize,
             DataFilePageCount = pageCount,
-            WalBytes = engine.GetWalTotalBytes(),
+            WalBytes = walBytes,
             HilbertOrder = HilbertOrderFor(cellType.Length),
-            CheckpointLsn = engine.CheckpointManager?.CheckpointLsn ?? 0L,
+            CheckpointLsn = checkpointLsn,
             DownSampleFactor = factor,
             PageType = cellType,
             OwnerSegmentId = cellOwner,

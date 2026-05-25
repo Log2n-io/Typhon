@@ -1,5 +1,6 @@
 import { create } from 'zustand';
-import { createJSONStorage, persist } from 'zustand/middleware';
+import { persist } from 'zustand/middleware';
+import { safeStorage } from '@/stores/safeStorage';
 
 /**
  * View state for the dedicated Critical-Path panel. The panel reads its **tick** from
@@ -76,18 +77,6 @@ export interface CriticalPathViewState {
 // viewport with room to scroll. User wheel-zoom adjusts from there.
 const DEFAULT_PX_PER_US = 0.05;
 
-// SSR/test-safe localStorage wrapper — same shape as `useThemeStore` / `useDagViewStore`.
-const safeStorage = createJSONStorage(() => ({
-  getItem: (name: string) => {
-    try { return localStorage.getItem(name); } catch { return null; }
-  },
-  setItem: (name: string, value: string) => {
-    try { localStorage.setItem(name, value); } catch { /* noop */ }
-  },
-  removeItem: (name: string) => {
-    try { localStorage.removeItem(name); } catch { /* noop */ }
-  },
-}));
 
 export const useCriticalPathViewStore = create<CriticalPathViewState>()(
   persist(
