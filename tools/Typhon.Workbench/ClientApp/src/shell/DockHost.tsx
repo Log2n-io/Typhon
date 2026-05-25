@@ -18,9 +18,7 @@ import TopSpansPanel from '@/panels/profiler/TopSpansPanel';
 import CallTreePanel from '@/panels/profiler/CallTree';
 import OptionsPanel from '@/panels/options/OptionsPanel';
 import SourcePreviewPanel from '@/panels/profiler/SourcePreviewPanel';
-import QueryCatalogPanel from '@/panels/QueryCatalog/QueryCatalogPanel';
-import QueryPlanTreePanel from '@/panels/QueryPlanTree/QueryPlanTreePanel';
-import ExecutionInspectorPanel from '@/panels/ExecutionInspector/ExecutionInspectorPanel';
+import QueryAnalyzerPanel from '@/panels/QueryAnalyzer/QueryAnalyzerPanel';
 import PaletteDebugPanel from '@/panels/PaletteDebug';
 import DbMapPanel from '@/panels/DbMap/DbMapPanel';
 import StorageHealthPanel from '@/panels/StorageHealth/StorageHealthPanel';
@@ -126,9 +124,7 @@ const components: Record<string, React.FC<IDockviewPanelProps>> = {
   CallTree: CallTreePanel,
   Options: OptionsPanel,
   SourcePreview: SourcePreviewPanel,
-  QueryCatalog: QueryCatalogPanel,
-  QueryPlanTree: QueryPlanTreePanel,
-  ExecutionInspector: ExecutionInspectorPanel,
+  QueryAnalyzer: QueryAnalyzerPanel,
   PaletteDebug: PaletteDebugPanel,
   DbMap: DbMapPanel,
   StorageHealth: StorageHealthPanel,

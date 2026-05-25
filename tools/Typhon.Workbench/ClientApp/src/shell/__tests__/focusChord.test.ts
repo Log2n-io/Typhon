@@ -6,8 +6,8 @@ import { focusChordTarget } from '@/shell/commands/openSchemaBrowser';
 // chord handler relies on to decide whether to swallow the key.
 
 describe('focusChordTarget (g-leader routing)', () => {
-  it('routes c / a / s / d / m to a view', () => {
-    for (const k of ['c', 'a', 's', 'd', 'm']) {
+  it('routes c / a / s / d / m / q to a view', () => {
+    for (const k of ['c', 'a', 's', 'd', 'm', 'q']) {
       expect(focusChordTarget(k), `g ${k}`).toBe(true);
     }
   });

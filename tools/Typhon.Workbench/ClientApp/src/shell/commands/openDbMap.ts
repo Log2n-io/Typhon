@@ -3,7 +3,7 @@ import { useDagViewStore } from '@/panels/SystemDag/useDagViewStore';
 import { useDbMapStore } from '@/stores/useDbMapStore';
 import { useResourceGraphStore } from '@/stores/useResourceGraphStore';
 import { useSelectionStore } from '@/stores/useSelectionStore';
-import { ensureDockPanel, ensureResourceTreeVisible, openComponentInspector } from './openSchemaBrowser';
+import { ensureDockPanel, ensureResourceTreeVisible, openArchetypeInspector, openComponentInspector } from './openSchemaBrowser';
 
 // Cross-links between the Database File Map and the rest of the Workbench (Module 15, §7.3 / §13 A4 AC1).
 // Every link identifies a component by its type name — the common handle Resource Explorer, Schema Inspector
@@ -35,6 +35,16 @@ export function revealSystemInDag(name: string): void {
 export function openComponentInSchema(typeName: string): void {
   useSelectionStore.getState().select('component', typeName);
   openComponentInspector();
+}
+
+/**
+ * Query Analyzer → Archetype Inspector: select an archetype on the bus and open its inspector. The
+ * archetype-target sibling of {@link openComponentInSchema} (a pull-mode query's `TargetComponentType`
+ * is an ArchetypeId rather than a ComponentType id). The Inspector reads the bus leaf, so it re-targets.
+ */
+export function revealArchetypeInInspector(archetypeId: string): void {
+  useSelectionStore.getState().select('archetype', archetypeId);
+  openArchetypeInspector();
 }
 
 /**

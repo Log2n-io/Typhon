@@ -2,8 +2,8 @@ import { memo } from 'react';
 import { Handle, Position } from '@xyflow/react';
 import { Hourglass } from 'lucide-react';
 import { useThemeStore } from '@/stores/useThemeStore';
-import { rowIdOf, useQueryCatalogStore } from '@/panels/QueryCatalog/useQueryCatalogStore';
-import { openViewQueryCatalog } from '@/shell/commands/profilerCommands';
+import { useQueryCatalogStore } from '@/panels/QueryAnalyzer/useQueryCatalogStore';
+import { openViewQueryAnalyzer, revealQueryInAnalyzer } from '@/shell/commands/profilerCommands';
 import type { DagNodeData } from './dagModel';
 import type { SystemStat } from './useSystemStats';
 
@@ -266,19 +266,20 @@ function QueriesBadge({
   soleOwnedDefId?: { kind: number; localId: number };
 }) {
   const setSystemFilter = useQueryCatalogStore((s) => s.setSystemFilter);
-  const setExpanded = useQueryCatalogStore((s) => s.setExpanded);
 
   function onClick(e: React.MouseEvent): void {
     e.stopPropagation();
     if (numericSystemId >= 0) {
       setSystemFilter(numericSystemId);
     }
-    // When the system owns exactly one query, expand that row so the user lands on the relevant
-    // detail rather than just a filtered-list view. Multi-owner systems keep the filter only — the
-    // user picks which to expand. Clear any prior expansion otherwise so the caller's intent is
-    // unambiguous.
-    setExpanded(soleOwnedDefId ? rowIdOf(soleOwnedDefId.kind, soleOwnedDefId.localId) : null);
-    openViewQueryCatalog();
+    // When the system owns exactly one query, land directly on it in the Query Analyzer; multi-owner
+    // systems just filter the catalog to this system (the user picks which to open). The Analyzer's
+    // master reads the same `useQueryCatalogStore` system filter.
+    if (soleOwnedDefId) {
+      revealQueryInAnalyzer(soleOwnedDefId.kind, soleOwnedDefId.localId);
+    } else {
+      openViewQueryAnalyzer();
+    }
   }
 
   return (
@@ -286,7 +287,7 @@ function QueriesBadge({
       type="button"
       onClick={onClick}
       className="rounded border border-sky-300 bg-sky-100 px-1 py-px font-mono text-fs-2xs text-sky-800 hover:bg-sky-200 dark:border-sky-700/50 dark:bg-sky-950/40 dark:text-sky-200 dark:hover:bg-sky-900/60"
-      title={`${count} distinct quer${count === 1 ? 'y' : 'ies'} — open Catalog filtered to ${systemName}`}
+      title={`${count} distinct quer${count === 1 ? 'y' : 'ies'} — open Query Analyzer filtered to ${systemName}`}
       data-testid={`system-dag-queries-badge-${systemName}`}
     >
       Q {count}

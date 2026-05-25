@@ -2,6 +2,7 @@ using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.IO;
+using Typhon.Engine.Internals; // QueryPlanEvent / phase span ref structs (internal `[TraceEvent]` encoders — #376 Stage-3 4A)
 using Typhon.Engine.Profiler;
 using Typhon.Profiler;
 
@@ -602,6 +603,164 @@ public static class TraceFixtureBuilder
         header.FileTableOffset = fileTableOffset;
         header.SourceLocationManifestOffset = manifestOffset;
         header.CpuSampleSectionOffset = cpuOffset;
+        writer.RewriteHeader(in header);
+        writer.Flush();
+        return path;
+    }
+
+    /// <summary>
+    /// Build a trace carrying query definitions + executions (#376 Stage-3 Phase 4A — the Query Analyzer prerequisite).
+    /// Records two View query definitions over the seeded components, each with multiple executions of varying wall
+    /// time and a Parse → Iterate → Filter → Count phase tree, plus a <c>QuerySourceStringTable</c> so <c>UserSource</c>
+    /// resolves and an <c>OwnerSystemIdx</c> so the owning system resolves. Drives the catalog (ranked by
+    /// <c>TotalWallNs</c> — definition #1 heavier than #2), the Executions tab, and the per-phase breakdown.
+    ///
+    /// <para>The execution/phase span tree is emitted via the engine's own <c>[TraceEvent]</c> encoders
+    /// (<see cref="QueryPlanEvent"/> et al.) — faithful by construction, no hand-packed wire format. Each QueryPlan span
+    /// is timestamped <b>before</b> its phase children so the time-sorted decode keeps the parent-before-child order
+    /// <c>QueryCatalogBuilder</c> requires (a phase only attaches once its parent execution is mapped).</para>
+    /// </summary>
+    public static string BuildTraceWithQueries(string directory)
+    {
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, $"fixture-queries-{Guid.NewGuid():N}.typhon-trace");
+
+        using var fs = File.Create(path);
+        using var writer = new TraceFileWriter(fs);
+        var header = DefaultHeader;
+        writer.WriteHeader(in header);
+        // Seed a system (OwnerSystemIdx → name) + two components (TargetComponentType → name).
+        writer.WriteSystemDefinitions(
+        [
+            new SystemDefinitionRecord
+            {
+                Index = 0, Name = "Movement", Type = 0, Priority = 0, IsParallel = false, TierFilter = 0x0F,
+                Predecessors = [], Successors = [], PhaseName = "Simulation", IsExclusivePhase = false, DagId = 0,
+            },
+        ]);
+        writer.WriteArchetypes([]);
+        writer.WriteComponentTypes(
+        [
+            new ComponentTypeRecord { ComponentTypeId = 1, Name = "Position" },
+            new ComponentTypeRecord { ComponentTypeId = 2, Name = "AABB" },
+        ]);
+        writer.WriteTracks([]);
+        writer.WriteDags([]);
+        writer.WriteEmptyStaticStructures();
+
+        // Source string table (sentinel @ 0). Definition source file/method ids reference these → UserSource = File:Line:Method.
+        string[] queryStrings = [string.Empty, "src/Game/Queries.cs", "FindByPosition", "RangeAabb"];
+        const ushort srcFileId = 1, methodAId = 2, methodBId = 3;
+
+        // One evaluator each (fieldIdx, op, reserved) — op 4 = ">=", op 3 = ">". Packed 4 B/entry.
+        static byte[] OneEvaluator(ushort fieldIdx, byte op) => [(byte)(fieldIdx & 0xFF), (byte)(fieldIdx >> 8), op, 0];
+
+        var block = new byte[64 * 1024];
+        var offset = 0;
+        var recordCount = 0;
+        long ts = 100;
+        ulong nextSpanId = 1;
+
+        void TickStart()
+        {
+            WriteRecordHeader(block.AsSpan(offset), CommonHeaderSize, TraceEventKind.TickStart, ts);
+            offset += CommonHeaderSize; ts += 1; recordCount++;
+        }
+        void TickEnd()
+        {
+            WriteRecordHeader(block.AsSpan(offset), CommonHeaderSize + 2, TraceEventKind.TickEnd, ts);
+            block[offset + CommonHeaderSize] = 0;     // overloadLevel
+            block[offset + CommonHeaderSize + 1] = 1; // tickMultiplier
+            offset += CommonHeaderSize + 2; ts += 1; recordCount++;
+        }
+        void Describe(byte kind, uint localId, ushort target, ushort methodId, ReadOnlySpan<byte> evaluators)
+        {
+            QueryDefinitionDescribeEventCodec.Write(block.AsSpan(offset), threadSlot: 0, timestamp: ts, kind: kind, localId: localId,
+                targetComponentType: target, primaryIndexFieldIdx: -1, sortFieldIdx: -1, sortDescending: 0,
+                definitionSourceFileId: srcFileId, definitionSourceLine: 42, definitionSourceMethodId: methodId,
+                evaluators: evaluators, fieldDependencies: ReadOnlySpan<byte>.Empty, out var w);
+            offset += w; ts += 1; recordCount++;
+        }
+        // Emit one execution = QueryPlan span (earliest ts) + QueryArgs + Parse/Iterate/Filter/Count phase children.
+        void Execution(byte kind, uint localId, long durTicks, int rowsScanned, int rowsReturned, int rejected)
+        {
+            var planTs = ts;
+            var planSpanId = nextSpanId++;
+            var plan = new QueryPlanEvent
+            {
+                Header = new TraceSpanHeader { ThreadSlot = 0, StartTimestamp = planTs, SpanId = planSpanId, ParentSpanId = 0 },
+                EvaluatorCount = 1, IndexFieldIdx = 0, RangeMin = 0, RangeMax = 100,
+                QueryInstanceKind = kind, QueryInstanceLocalId = localId,
+                ExecutionSourceFileId = 0, ExecutionSourceLine = 0, ExecutionSourceMethodId = 0,
+                OwnerSystemIdx = 0, // the seeded "Movement" system
+            };
+            plan.EncodeTo(block.AsSpan(offset), planTs + durTicks, out var pw);
+            offset += pw; recordCount++;
+
+            // QueryArgs (1 threshold) — attaches to the latest execution on this thread.
+            Span<byte> thresholds = stackalloc byte[8];
+            BinaryPrimitives.WriteInt64LittleEndian(thresholds, 5L);
+            QueryArgsEventCodec.Write(block.AsSpan(offset), threadSlot: 0, timestamp: planTs + 1, thresholds: thresholds, out var aw);
+            offset += aw; recordCount++;
+
+            // Phase children (parentSpanId = the QueryPlan span) — each timestamped after the plan, inside its window,
+            // so the time-sorted decode keeps parent-before-child. Inlined (the events are ref structs → can't be
+            // passed through a generic helper without `allows ref struct`).
+            const long phaseDur = 10;
+            var parse = new QueryParseEvent
+            {
+                Header = new TraceSpanHeader { ThreadSlot = 0, StartTimestamp = planTs + 2, SpanId = nextSpanId++, ParentSpanId = planSpanId },
+                PredicateCount = 1, BranchCount = 1,
+            };
+            parse.EncodeTo(block.AsSpan(offset), planTs + 2 + phaseDur, out var w1); offset += w1; recordCount++;
+
+            var iterate = new QueryExecuteIterateEvent
+            {
+                Header = new TraceSpanHeader { ThreadSlot = 0, StartTimestamp = planTs + 3, SpanId = nextSpanId++, ParentSpanId = planSpanId },
+                ChunkCount = 1, EntryCount = rowsScanned,
+            };
+            iterate.EncodeTo(block.AsSpan(offset), planTs + 3 + phaseDur, out var w2); offset += w2; recordCount++;
+
+            var filter = new QueryExecuteFilterEvent
+            {
+                Header = new TraceSpanHeader { ThreadSlot = 0, StartTimestamp = planTs + 4, SpanId = nextSpanId++, ParentSpanId = planSpanId },
+                FilterCount = 1, RejectedCount = rejected,
+            };
+            filter.EncodeTo(block.AsSpan(offset), planTs + 4 + phaseDur, out var w3); offset += w3; recordCount++;
+
+            var count = new QueryCountEvent
+            {
+                Header = new TraceSpanHeader { ThreadSlot = 0, StartTimestamp = planTs + 5, SpanId = nextSpanId++, ParentSpanId = planSpanId },
+                ResultCount = rowsReturned,
+            };
+            count.EncodeTo(block.AsSpan(offset), planTs + 5 + phaseDur, out var w4); offset += w4; recordCount++;
+
+            ts = planTs + durTicks + 50; // advance past this execution's window (+ gap) for the next one
+        }
+
+        // Tick 1 — both definitions + their first execution. (freq 10 MHz → 1 µs = 10 ticks.)
+        TickStart();
+        Describe(0, 1, target: 1, methodId: methodAId, OneEvaluator(0, 4)); // View #1 on Position, X >= ?
+        Describe(0, 2, target: 2, methodId: methodBId, OneEvaluator(1, 3)); // View #2 on AABB, Y > ?
+        Execution(0, 1, durTicks: 500, rowsScanned: 100, rowsReturned: 20, rejected: 80); // #1 exec a = 50 µs
+        Execution(0, 2, durTicks: 200, rowsScanned: 40, rowsReturned: 30, rejected: 10);  // #2 exec a = 20 µs
+        TickEnd();
+
+        // Tick 2 — second execution of each, longer, so percentiles/totals differ and #1 outranks #2.
+        TickStart();
+        Execution(0, 1, durTicks: 900, rowsScanned: 200, rowsReturned: 25, rejected: 175); // #1 exec b = 90 µs → total 140 µs
+        Execution(0, 2, durTicks: 400, rowsScanned: 60, rowsReturned: 35, rejected: 25);    // #2 exec b = 40 µs → total 60 µs
+        TickEnd();
+
+        // Tick 3 — empty trailer tick (matches the other fixtures' 3-tick shape).
+        TickStart();
+        TickEnd();
+
+        writer.WriteRecords(block.AsSpan(0, offset), recordCount);
+        writer.WriteSpanNames(new Dictionary<int, string>());
+
+        var qsstOffset = writer.WriteQuerySourceStringTable(queryStrings);
+        header.QuerySourceStringTableOffset = qsstOffset;
         writer.RewriteHeader(in header);
         writer.Flush();
         return path;

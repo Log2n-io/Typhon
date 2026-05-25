@@ -2,7 +2,11 @@ import type { DockviewApi } from 'dockview-react';
 import { useProfilerSessionStore } from '@/stores/useProfilerSessionStore';
 import { useProfilerViewStore } from '@/stores/useProfilerViewStore';
 import { useUiPrefsStore } from '@/stores/useUiPrefsStore';
+import { useSessionStore } from '@/stores/useSessionStore';
+import { useSelectionStore } from '@/stores/useSelectionStore';
+import { useQueryAnalyzerStore } from '@/panels/QueryAnalyzer/useQueryAnalyzerStore';
 import type { TimeRange } from '@/libs/profiler/model/uiTypes';
+import { isViewActive } from '../viewRegistry';
 import type { CommandItem } from './baseCommands';
 
 /**
@@ -92,90 +96,87 @@ export function openViewCallTree(): void {
 }
 
 /**
- * Toggle the Query Catalog panel — a dynamic dock panel (closed by default, no edge-group home).
- * First call adds it to the center area; subsequent calls remove it. Same shape as
- * {@link toggleViewCriticalPath}. Issue #338 (P5 of #342).
+ * Add the Query Analyzer panel to the center area (a tab in the Profiler group) — the consolidated
+ * master/detail catalog needs the center's full width, like the Call Tree. A no-position addPanel would
+ * join whatever group is active (the recurring placement bug), so anchor `within` the Profiler group.
  */
-export function toggleViewQueryCatalog(): void {
-  const api = registeredApi;
-  if (!api) return;
-  const existing = api.getPanel('query-catalog');
-  if (existing) {
-    api.removePanel(existing);
-    return;
-  }
-  api.addPanel({ id: 'query-catalog', component: 'QueryCatalog', title: 'Query Catalog' });
+function addQueryAnalyzerPanel(api: DockviewApi): void {
+  api.addPanel(
+    api.getPanel('profiler')
+      ? { id: 'query-analyzer', component: 'QueryAnalyzer', title: 'Query Analyzer', position: { referencePanel: 'profiler', direction: 'within' } }
+      : { id: 'query-analyzer', component: 'QueryAnalyzer', title: 'Query Analyzer' },
+  );
+}
+
+/** The Query Analyzer can open only when its view is active AND we're in a profiler (trace/attach) session. */
+function canOpenQueryAnalyzer(): boolean {
+  const kind = useSessionStore.getState().kind;
+  return isViewActive('QueryAnalyzer') && (kind === 'trace' || kind === 'attach');
 }
 
 /**
- * Open the Query Catalog panel (focus-when-present variant of {@link toggleViewQueryCatalog}).
- * Used by cross-panel navigation (e.g., System DAG "Queries" badge in P8) so a click doesn't flip
- * the panel closed when it's already open. Issue #341 (P8 of #342).
+ * Open (or focus) the Query Analyzer — the consolidated master/detail query view (#376 Phase 4, GAP-19).
+ * Focus-when-present so a reveal hand-off never flips it closed. No-ops outside a profiler session.
  */
-export function openViewQueryCatalog(): void {
+export function openViewQueryAnalyzer(): void {
   const api = registeredApi;
-  if (!api) return;
-  const existing = api.getPanel('query-catalog');
+  if (!api || !canOpenQueryAnalyzer()) return;
+  const existing = api.getPanel('query-analyzer');
   if (existing) {
     existing.focus();
     return;
   }
-  api.addPanel({ id: 'query-catalog', component: 'QueryCatalog', title: 'Query Catalog' });
+  addQueryAnalyzerPanel(api);
 }
 
-/**
- * Open (or focus) the Query Plan Tree panel. The store's <c>focus</c> is set independently before
- * calling this; the panel reads it via {@link useQueryPlanStore}. Issue #339 (P6 of #342).
- */
-export function openViewQueryPlanTree(): void {
+/** Toggle (close-when-open) variant of {@link openViewQueryAnalyzer} for the palette / View menu. */
+export function toggleViewQueryAnalyzer(): void {
   const api = registeredApi;
   if (!api) return;
-  const existing = api.getPanel('query-plan-tree');
-  if (existing) {
-    existing.focus();
-    return;
-  }
-  api.addPanel({ id: 'query-plan-tree', component: 'QueryPlanTree', title: 'Query Plan' });
-}
-
-/** Toggle (close-when-open) variant of {@link openViewQueryPlanTree} for the command palette. */
-export function toggleViewQueryPlanTree(): void {
-  const api = registeredApi;
-  if (!api) return;
-  const existing = api.getPanel('query-plan-tree');
+  const existing = api.getPanel('query-analyzer');
   if (existing) {
     api.removePanel(existing);
     return;
   }
-  api.addPanel({ id: 'query-plan-tree', component: 'QueryPlanTree', title: 'Query Plan' });
+  if (!canOpenQueryAnalyzer()) return;
+  addQueryAnalyzerPanel(api);
 }
 
 /**
- * Open (or focus) the Execution Inspector panel. The store's <c>focus</c> is set independently
- * before calling this; the panel reads it via {@link useExecutionInspectorStore}. Issue #340
- * (P7 of #342).
+ * Reveal a specific query in the analyzer: open/focus the panel, focus the query in the unified store,
+ * and write the bus `query` leaf (so the Inspector + nav history follow). The cross-panel entry point —
+ * used by the Systems & Queries navigator and the Inspector's query card.
  */
-export function openViewExecutionInspector(): void {
-  const api = registeredApi;
-  if (!api) return;
-  const existing = api.getPanel('execution-inspector');
-  if (existing) {
-    existing.focus();
-    return;
+export function revealQueryInAnalyzer(kind: number, localId: number): void {
+  openViewQueryAnalyzer();
+  const sessionId = useSessionStore.getState().sessionId;
+  if (sessionId) {
+    useQueryAnalyzerStore.getState().setSelectedQuery(sessionId, { kind, localId });
   }
-  api.addPanel({ id: 'execution-inspector', component: 'ExecutionInspector', title: 'Execution Inspector' });
+  useSelectionStore.getState().select('query', { kind, localId });
 }
 
-/** Toggle (close-when-open) variant of {@link openViewExecutionInspector} for the command palette. */
-export function toggleViewExecutionInspector(): void {
-  const api = registeredApi;
-  if (!api) return;
-  const existing = api.getPanel('execution-inspector');
-  if (existing) {
-    api.removePanel(existing);
-    return;
-  }
-  api.addPanel({ id: 'execution-inspector', component: 'ExecutionInspector', title: 'Execution Inspector' });
+/**
+ * Reveal a specific query EXECUTION in the analyzer — used by the Profiler timeline's "Inspect execution"
+ * hand-off (a query span → its execution). Selects the query first (which resets the execution per the store
+ * quirk), THEN pins the execution + reveals the Executions tab. Order matters: {@link revealQueryInAnalyzer}'s
+ * `setSelectedQuery` clears `selectedExecution`, so the execution must be set after it.
+ */
+export function revealQueryExecutionInAnalyzer(kind: number, localId: number, tickIndex: number, systemId: number): void {
+  revealQueryInAnalyzer(kind, localId);
+  const store = useQueryAnalyzerStore.getState();
+  store.setSelectedExecution({ tickIndex, systemId });
+  store.setActiveTab('executions');
+}
+
+/**
+ * Jump-to-time (GAP-20): set the global time window to `[startUs, endUs]` — the client-only hand-off from a
+ * query execution to the timeline (the data is already present; no API). Uses {@link animateViewportToRange}
+ * so the timeline tweens to the target when mounted, falling back to a synchronous commit otherwise.
+ */
+export function jumpToTimeRange(startUs: number, endUs: number): void {
+  if (!(endUs > startUs)) return;
+  animateViewportToRange({ startUs, endUs });
 }
 
 /**
@@ -262,9 +263,7 @@ export function buildProfilerPaletteCommands(): CommandItem[] {
     { id: 'toggle-view-profiler',     label: 'Toggle View Profiler',  keywords: 'profiler open show',               action: toggleViewProfiler, viewId: 'Profiler' },
     { id: 'toggle-view-call-tree',    label: 'Toggle View Call Tree', keywords: 'call tree cpu samples folded stack callers callees sandwich bottom-up off-cpu profiler', action: toggleViewCallTree, viewId: 'CallTree' },
     { id: 'toggle-view-critical-path', label: 'Toggle View Critical Path', keywords: 'critical path tape timeline cp wall-clock tick', action: toggleViewCriticalPath, viewId: 'CriticalPath' },
-    { id: 'toggle-view-query-catalog', label: 'Toggle View Query Catalog', keywords: 'query catalog definitions filters profiler', action: toggleViewQueryCatalog, viewId: 'QueryCatalog' },
-    { id: 'toggle-view-query-plan-tree', label: 'Toggle View Query Plan Tree', keywords: 'query plan tree graph dagre xyflow profiler', action: toggleViewQueryPlanTree, viewId: 'QueryPlanTree' },
-    { id: 'toggle-view-execution-inspector', label: 'Toggle View Execution Inspector', keywords: 'execution inspector phases drill profiler query', action: toggleViewExecutionInspector, viewId: 'ExecutionInspector' },
+    { id: 'toggle-view-query-analyzer', label: 'Toggle View Query Analyzer', keywords: 'query analyzer catalog plan executions profiler cost ranking selectivity workload', action: toggleViewQueryAnalyzer, viewId: 'QueryAnalyzer' },
     { id: 'toggle-view-top-spans',   label: 'Toggle View Top Spans', keywords: 'profiler top spans table slow expensive sortable', action: toggleViewTopSpans, viewId: 'TopSpans' },
     { id: 'profiler-save-replay',    label: 'Save Session as .typhon-replay…', keywords: 'save replay export attach session', action: openSaveReplayDialog },
     // Profiler-view interaction commands — only meaningful with the Profiler view mounted, so gated with it.

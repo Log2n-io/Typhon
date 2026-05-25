@@ -76,6 +76,13 @@ describe('Inspector — bus-driven dispatch', () => {
     expect(screen.queryByText(/deep view returns/i)).toBeNull();
   });
 
+  it('renders the Query card with a live "Open in Query Analyzer" verb, not the old gated placeholder (Phase 4)', () => {
+    useSelectionStore.getState().select('query', { kind: 0, localId: 5 });
+    renderInspector();
+    expect(screen.getByTestId('leaf-open-query-analyzer')).toBeTruthy();
+    expect(screen.queryByText(/deep view returns/i)).toBeNull();
+  });
+
   it('the System card offers a live "Reveal in System DAG" verb that publishes the system + requests a DAG focus (3D)', () => {
     useSelectionStore.getState().select('system', 'Movement');
     renderInspector();

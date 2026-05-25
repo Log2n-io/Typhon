@@ -9,12 +9,10 @@ import { useSourceLocationStore } from '@/stores/useSourceLocationStore';
 import { useSessionStore } from '@/stores/useSessionStore';
 import { useOptionsStore } from '@/stores/useOptionsStore';
 import { openSourcePreview } from '@/shell/commands/openSchemaBrowser';
-import { openViewCallTree, openViewExecutionInspector } from '@/shell/commands/profilerCommands';
+import { openViewCallTree, revealQueryExecutionInAnalyzer } from '@/shell/commands/profilerCommands';
 import { spanKindScope, systemScope, useCallTreeScopeStore } from '@/stores/useCallTreeScopeStore';
 import { useCpuFrameStore } from '@/stores/useCpuFrameStore';
 import { resolveFrameRootForSite } from '@/libs/profiler/resolveFrameRoot';
-import { useExecutionInspectorStore } from '@/panels/ExecutionInspector/useExecutionInspectorStore';
-import { useQueryPlanStore } from '@/panels/QueryPlanTree/useQueryPlanStore';
 import {
   useGetApiSessionsSessionIdProfilerExecutionsByParentParentSpanId,
   useGetApiSessionsSessionIdProfilerExecutionsBySystemTickSystemIdxTickIndex,
@@ -81,10 +79,6 @@ function SpanDetail({ span }: { span: SpanData }): React.JSX.Element {
   const openInEditor = useOptionsStore((s) => s.openInEditor);
   const sessionId = useSessionStore((s) => s.sessionId);
   const sessionKind = useSessionStore((s) => s.kind);
-  const setEiFocus = useExecutionInspectorStore((s) => s.setFocus);
-  const setEiSelected = useExecutionInspectorStore((s) => s.setSelected);
-  const setPlanFocus = useQueryPlanStore((s) => s.setFocus);
-  const setPlanSelectedExecution = useQueryPlanStore((s) => s.setSelectedExecution);
   const setCallTreeScope = useCallTreeScopeStore((s) => s.setScope);
   const [openError, setOpenError] = useState<string | null>(null);
   const loc = resolve(span.rawEvent?.sourceLocationId);
@@ -143,12 +137,7 @@ function SpanDetail({ span }: { span: SpanData }): React.JSX.Element {
     const localId = Number(def.localId);
     const tickIndex = Number(matchedExecution.tickIndex);
     const systemId = Number(matchedExecution.systemId ?? -1);
-    setEiFocus({ kind, localId });
-    setEiSelected({ tickIndex, systemId });
-    // Mirror onto the Plan Tree store so a swap to that panel lands on the same execution view.
-    setPlanFocus({ kind, localId });
-    setPlanSelectedExecution(matchedExecution);
-    openViewExecutionInspector();
+    revealQueryExecutionInAnalyzer(kind, localId, tickIndex, systemId);
   }
 
   function handleScopeCallTree(): void {
@@ -545,7 +534,7 @@ function SpanDetail({ span }: { span: SpanData }): React.JSX.Element {
             )}
             {matchedExecution && (
               <button type="button" onClick={handleInspectExecution}
-                title={`Open this tick's execution of EcsQuery #${matchedExecution.definitionId?.localId} in the Execution Inspector`}
+                title={`Open this tick's execution of EcsQuery #${matchedExecution.definitionId?.localId} in the Query Analyzer`}
                 className="flex items-center gap-1 rounded border border-border bg-background px-2 py-0.5 text-fs-sm hover:bg-accent">
                 <Search className="h-3 w-3" /> Inspect query execution
               </button>
@@ -573,10 +562,6 @@ function ChunkDetail({ chunk }: { chunk: ChunkSpan }): React.JSX.Element {
   const openInEditor = useOptionsStore((s) => s.openInEditor);
   const sessionId = useSessionStore((s) => s.sessionId);
   const sessionKind = useSessionStore((s) => s.kind);
-  const setEiFocus = useExecutionInspectorStore((s) => s.setFocus);
-  const setEiSelected = useExecutionInspectorStore((s) => s.setSelected);
-  const setPlanFocus = useQueryPlanStore((s) => s.setFocus);
-  const setPlanSelectedExecution = useQueryPlanStore((s) => s.setSelectedExecution);
   const setCallTreeScope = useCallTreeScopeStore((s) => s.setScope);
   // Look up which tick this chunk belongs to by binary-searching tick summaries against the chunk's startUs.
   // Required for the (systemIdx, tickIndex) round-trip key — ChunkSpan doesn't carry the tickNumber directly
@@ -616,11 +601,7 @@ function ChunkDetail({ chunk }: { chunk: ChunkSpan }): React.JSX.Element {
     const localId = Number(def.localId);
     const tickIndex = Number(matchedExecution.tickIndex);
     const systemId = Number(matchedExecution.systemId ?? -1);
-    setEiFocus({ kind, localId });
-    setEiSelected({ tickIndex, systemId });
-    setPlanFocus({ kind, localId });
-    setPlanSelectedExecution(matchedExecution);
-    openViewExecutionInspector();
+    revealQueryExecutionInAnalyzer(kind, localId, tickIndex, systemId);
   }
 
   function handleScopeCallTree(): void {
@@ -692,7 +673,7 @@ function ChunkDetail({ chunk }: { chunk: ChunkSpan }): React.JSX.Element {
             )}
             {matchedExecution && (
               <button type="button" onClick={handleInspectExecution}
-                title={`Open this tick's execution of EcsQuery #${matchedExecution.definitionId?.localId} in the Execution Inspector`}
+                title={`Open this tick's execution of EcsQuery #${matchedExecution.definitionId?.localId} in the Query Analyzer`}
                 className="flex items-center gap-1 rounded border border-border bg-background px-2 py-0.5 text-fs-sm hover:bg-accent">
                 <Search className="h-3 w-3" /> Inspect query execution
               </button>

@@ -19,6 +19,11 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("Typhon.Engine.Tests")]
 [assembly: InternalsVisibleTo("Typhon.IOProfileRunner")]
 [assembly: InternalsVisibleTo("Typhon.MonitoringDemo")]
+// Re-added 2026-05-25 (#376 Stage-3 4A): the `with-queries` trace fixture must emit QueryPlan + phase SPAN
+// records, whose typed `EncodeTo` encoders are internal source-generated `[TraceEvent]` ref structs
+// (QueryPlanEvent et al.) with NO public surface. Genuine internal-implementation reuse — the fixture drives
+// the engine's own encoders rather than hand-packing the wire format. (Assembly name is the `.schema` variant.)
+[assembly: InternalsVisibleTo("Typhon.Workbench.Fixtures.schema")]
 
 // Dropped 2026-05-11 — verified not needed by the mechanical audit (build succeeds without them):
 //   "Typhon.Shell"               — redundant: Shell's AssemblyName is `tsh`, not `Typhon.Shell`.

@@ -17,7 +17,8 @@ export function useKeyboardShortcuts(): void {
   const togglePalette = usePaletteStore((s) => s.toggle);
   useShiftShift(togglePalette);
 
-  // `g`-leader focus chord (PC-8): `g` then c/a/s/d/m focuses Component / Archetype / Schema / Data Browser / File Map.
+  // `g`-leader focus chord (PC-8): `g` then c/a/s/d/m/q focuses Component / Archetype / Schema / Data Browser /
+  // File Map / Query Analyzer.
   // Created once. A panel that claims `g` (the profiler gauge) intercepts it first via capture-phase
   // usePanelHotkeys, so the leader is only free — and the chord only arms — outside such a panel.
   const chordRef = useRef<ChordHandler | null>(null);

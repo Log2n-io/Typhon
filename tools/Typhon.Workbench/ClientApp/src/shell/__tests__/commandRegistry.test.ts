@@ -10,9 +10,6 @@ const GATED_COMMAND_IDS = [
   'toggle-view-schema-archetypes',
   'toggle-view-schema-indexes',
   'toggle-view-schema-relationships',
-  'toggle-view-query-catalog',
-  'toggle-view-query-plan-tree',
-  'toggle-view-execution-inspector',
 ];
 
 // Commands whose bound zone-D view has been reintroduced (Stage 2+) — they must now appear in the palette.
@@ -38,6 +35,8 @@ const ACTIVE_ZONE_D_COMMAND_IDS = [
   // Stage 3 Phase 3 (3D): the rest of the scheduling cluster — System DAG + Critical Path.
   'toggle-view-system-dag',
   'toggle-view-critical-path',
+  // Stage 3 Phase 4 (4B+4C): the consolidated Query Analyzer.
+  'toggle-view-query-analyzer',
 ];
 
 // Shell commands that must survive the Stage 0 filter.

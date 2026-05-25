@@ -24,7 +24,7 @@ import { timeToTickRange } from './tickRangeMapping';
 import { useDagViewStore } from './useDagViewStore';
 import { useQueueBackpressure } from './useQueueBackpressure';
 import { useSystemStats } from './useSystemStats';
-import { useQueryDefinitions } from '../QueryCatalog/useQueryDefinitions';
+import { useQueryDefinitions } from '@/panels/QueryAnalyzer/useQueryDefinitions';
 
 /**
  * System DAG view — Phase 1 + Phase 2 (#315 + #316).

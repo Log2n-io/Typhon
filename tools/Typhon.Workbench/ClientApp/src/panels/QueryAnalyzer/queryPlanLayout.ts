@@ -3,7 +3,7 @@ import type { Node, Edge } from '@xyflow/react';
 import type { QueryDefinitionDto } from '@/api/generated/model/queryDefinitionDto';
 import type { QueryExecutionDto } from '@/api/generated/model/queryExecutionDto';
 import type { QueryExecutionPhaseDto } from '@/api/generated/model/queryExecutionPhaseDto';
-import { toNumber } from '../QueryCatalog/numeric';
+import { toNumber } from './numeric';
 
 export type QueryPlanNodeKind = 'IndexScan' | 'Filter' | 'Sort' | 'Pagination' | 'Result';
 

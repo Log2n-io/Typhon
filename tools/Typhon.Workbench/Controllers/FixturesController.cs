@@ -92,6 +92,9 @@ public sealed class FixturesController(SessionManager sessions) : ControllerBase
         //                                data to render (off-CPU Playwright canary).
         //   "with-cpu-samples"         — a #351 CpuSampleSection trailer (frame symbols + interned stacks + samples),
         //                                so the Call Tree panel has data to fold (Phase-4 Playwright canary).
+        //   "with-queries"             — #376 Stage-3 4A: two View query definitions + executions (QueryPlan spans +
+        //                                phase children) + QuerySourceStringTable, so the Query Analyzer catalog ranks
+        //                                by TotalWallNs and the Executions/Plan tabs have data.
         //   default                    — minimal trace (no systems, no archetypes); for the open-trace flow canary.
         // tickCount/instantsPerTick are ignored for the typed variants; their builders hardcode the layout.
         string path;
@@ -116,6 +119,11 @@ public sealed class FixturesController(SessionManager sessions) : ControllerBase
             // #354 W5 — 3 ordered tracks (Engine-Pre / Public / Engine-Post), a user DAG + a Fence DAG.
             // Drives the System-DAG Track→DAG grouping Playwright canary.
             path = TraceFixtureBuilder.BuildTraceWithTrackHierarchy(outDir);
+        }
+        else if (string.Equals(req?.Variant, "with-queries", StringComparison.OrdinalIgnoreCase))
+        {
+            // #376 Stage-3 4A — query definitions + executions + phases; drives the Query Analyzer (4B–4D).
+            path = TraceFixtureBuilder.BuildTraceWithQueries(outDir);
         }
         else
         {

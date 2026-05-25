@@ -4,8 +4,9 @@ import { ChevronDown, ChevronRight, ListTree, Workflow } from 'lucide-react';
 import { useSessionStore } from '@/stores/useSessionStore';
 import { useProfilerSessionStore } from '@/stores/useProfilerSessionStore';
 import { useProfilerMetadata } from '@/hooks/profiler/useProfilerMetadata';
-import { useQueryDefinitions } from '@/panels/QueryCatalog/useQueryDefinitions';
+import { useQueryDefinitions } from '@/panels/QueryAnalyzer/useQueryDefinitions';
 import { useSelectionStore } from '@/stores/useSelectionStore';
+import { revealQueryInAnalyzer } from '@/shell/commands/profilerCommands';
 
 /**
  * Systems & Queries Navigator (zone C, Trace/Attach) — the left-rail "what exists" list for a profiler
@@ -98,7 +99,9 @@ export default function SystemsQueriesNavigatorPanel() {
                 label={`Query #${localId}`}
                 detail={`${Number(q.aggregate.executionCount).toLocaleString()} exec`}
                 selected={selectedQueryLocalId === localId}
-                onClick={() => select('query', { kind: q.instanceId.kind, localId: q.instanceId.localId })}
+                // First-class navigator entry — open/focus the Query Analyzer and select this query
+                // (reveal writes the bus leaf too, so the row's `selected` highlight still tracks).
+                onClick={() => revealQueryInAnalyzer(Number(q.instanceId.kind), Number(q.instanceId.localId))}
               />
             );
           })

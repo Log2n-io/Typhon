@@ -45,10 +45,12 @@ export const ZONE_D_VIEW_ACTIVE: Readonly<Record<string, boolean>> = {
   // mode (the 2→1 consolidation, GAP-19's sibling). AccessMatrix is therefore *removed* — it is no longer a
   // standalone view, so it has no entry here (its panel/command/menu were deleted, not gated).
   DataFlow: true,
-  // Query (P-A/B) — query-analysis deep views
-  QueryCatalog: false,
-  QueryPlanTree: false,
-  ExecutionInspector: false,
+  // Query (P-A/B) — query-analysis deep view.
+  // Stage 3 Phase 4 (GAP-19): the Query Analyzer — one master/detail view that CONSOLIDATED the former
+  // Query Catalog + Query Plan Tree + Execution Inspector (those 3 panels deleted in 4D-2; their reused
+  // leaf modules — catalog filters/toolbar, plan graph, phase table, data hooks — relocated into
+  // panels/QueryAnalyzer/).
+  QueryAnalyzer: true,
 };
 
 // Returns whether a view (or a view-bound command) is currently reachable. An undefined id means the caller

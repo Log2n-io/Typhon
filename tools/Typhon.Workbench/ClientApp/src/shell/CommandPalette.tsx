@@ -9,7 +9,7 @@ import { humpFilter, matchHighlight } from './camelHumpFilter';
 import { useResourceIndex } from '@/hooks/useResourceIndex';
 import { useComponentList } from '@/hooks/schema/useComponentList';
 import { useArchetypeList } from '@/hooks/schema/useArchetypeList';
-import { useQueryDefinitions } from '@/panels/QueryCatalog/useQueryDefinitions';
+import { useQueryDefinitions } from '@/panels/QueryAnalyzer/useQueryDefinitions';
 import { useProfilerSessionStore } from '@/stores/useProfilerSessionStore';
 import { useSelectionStore } from '@/stores/useSelectionStore';
 import { useSessionStore } from '@/stores/useSessionStore';

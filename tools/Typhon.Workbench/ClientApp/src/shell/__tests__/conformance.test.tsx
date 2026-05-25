@@ -15,6 +15,7 @@ import TopSpansPanel from '@/panels/profiler/TopSpansPanel';
 import CallTree from '@/panels/profiler/CallTree';
 import SourcePreviewPanel from '@/panels/profiler/SourcePreviewPanel';
 import CriticalPathPanel from '@/panels/CriticalPath/CriticalPathPanel';
+import QueryAnalyzerPanel from '@/panels/QueryAnalyzer/QueryAnalyzerPanel';
 
 // AC2.11 / AC3.11 — per-view conformance, parameterized over the reintroduced Stage-2/3 views (the conformance
 // doc's suites D + E). Each view is rendered in its **cold** state (no session → hooks disabled → empty/loading)
@@ -54,6 +55,9 @@ const VIEWS: { id: string; label: string; render: () => React.JSX.Element }[] = 
   { id: 'CallTree', label: 'Call Tree', render: () => <CallTree /> },
   { id: 'SourcePreview', label: 'Source Preview', render: () => <SourcePreviewPanel {...NO_PROPS} /> },
   { id: 'CriticalPath', label: 'Critical Path', render: () => <CriticalPathPanel {...NO_PROPS} /> },
+  // Query Analyzer (3 Phase 4): jsdom-mountable because the React-Flow Plan tab is lazy-loaded — the
+  // panel's static import graph carries no `@xyflow/react`, so it is enrolled here, not CANVAS_EXCLUDED.
+  { id: 'QueryAnalyzer', label: 'Query Analyzer', render: () => <QueryAnalyzerPanel {...NO_PROPS} /> },
 ];
 
 function mount(view: (typeof VIEWS)[number]) {

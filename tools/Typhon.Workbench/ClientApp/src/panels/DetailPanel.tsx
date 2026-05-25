@@ -18,6 +18,8 @@ import { useArchetypesForComponent } from '@/hooks/schema/useArchetypesForCompon
 import { pickPrimaryArchetype } from '@/hooks/dataBrowser/pickArchetype';
 import { componentNameFromResource } from '@/hooks/dataBrowser/resourceComponent';
 import { openComponentInSchema, openDbMapForComponent, revealComponentInResourceTree, revealSystemInDag } from '@/shell/commands/openDbMap';
+import { revealQueryInAnalyzer } from '@/shell/commands/profilerCommands';
+import { isViewActive } from '@/shell/viewRegistry';
 import type { ComponentSchema, Field } from '@/hooks/schema/types';
 import ProfilerDetail from '@/panels/profiler/ProfilerDetail';
 import { useTopology } from '@/hooks/data/useTopology';
@@ -139,7 +141,7 @@ function LeafCard({ leaf }: { leaf: SelectionLeaf }): React.JSX.Element {
     case 'system':
       return <SystemLeafCard name={String(leaf.ref)} />;
     case 'query':
-      return <ObjectSummaryCard icon={<ListTree className="h-4 w-4 text-muted-foreground" />} kind="Query" title={queryLabel(leaf.ref)} />;
+      return <QueryLeafCard ref0={leaf.ref} />;
     default:
       return <ObjectSummaryCard icon={<Binary className="h-4 w-4 text-muted-foreground" />} kind={leaf.type} title={String(leaf.ref)} />;
   }
@@ -338,6 +340,30 @@ function SystemLeafCard({ name }: { name: string }): React.JSX.Element {
       actions={[{ label: 'Reveal in System DAG', onClick: () => revealSystemInDag(name), testId: 'leaf-reveal-system-dag' }]}
     >
       <SystemDetailBody name={name} />
+    </LeafSummaryCard>
+  );
+}
+
+/**
+ * Query leaf → a summary card with the "Open in Query Analyzer" verb (the deep view now exists, so this
+ * is no longer the dead "returns later" placeholder — #376 Phase 4, PC-6). The verb is gated on the view
+ * being active so it can't go dead if the Analyzer is ever gated off.
+ */
+function QueryLeafCard({ ref0 }: { ref0: unknown }): React.JSX.Element {
+  const r = ref0 !== null && typeof ref0 === 'object' ? (ref0 as { kind?: unknown; localId?: unknown }) : {};
+  const kind = Number(r.kind);
+  const localId = Number(r.localId);
+  const canOpen = isViewActive('QueryAnalyzer') && Number.isFinite(kind) && Number.isFinite(localId);
+  return (
+    <LeafSummaryCard
+      icon={<ListTree className="h-4 w-4 text-muted-foreground" />}
+      kind="Query"
+      title={queryLabel(ref0)}
+      actions={canOpen
+        ? [{ label: 'Open in Query Analyzer', onClick: () => revealQueryInAnalyzer(kind, localId), testId: 'leaf-open-query-analyzer' }]
+        : []}
+    >
+      <p className="text-fs-sm text-muted-foreground">Its catalog entry, plan, and per-execution phase breakdown.</p>
     </LeafSummaryCard>
   );
 }

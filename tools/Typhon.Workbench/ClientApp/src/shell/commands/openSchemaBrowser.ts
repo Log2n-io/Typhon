@@ -7,6 +7,7 @@ import { useDataBrowserStore } from '@/stores/useDataBrowserStore';
 import { useSelectionStore } from '@/stores/useSelectionStore';
 import { useNavHistoryStore } from '@/stores/useNavHistoryStore';
 import { registerNavFocus } from '@/stores/navFocusBridge';
+import { openViewQueryAnalyzer } from './profilerCommands';
 
 /**
  * Module-level dockview api registration — same pattern as refreshResourceGraph. DockHost publishes
@@ -271,9 +272,9 @@ export function openComponentInspector(): void {
 /**
  * `g`-leader focus chord (PC-8): route the chord's second key to a deep view, revealing + focusing it. The
  * family: `g c` → Component Inspector, `g a` → Archetype Inspector, `g s` → Schema Explorer, `g d` → Data
- * Browser, `g m` → File Map. Reuses the existing reveal commands (open-if-needed + focus), so a chord works
- * whether or not the view is already docked. Returns `true` when the key named a known view (so the caller
- * can swallow it).
+ * Browser, `g m` → File Map, `g q` → Query Analyzer. Reuses the existing reveal commands (open-if-needed +
+ * focus), so a chord works whether or not the view is already docked. Returns `true` when the key named a
+ * known view (so the caller can swallow it).
  */
 export function focusChordTarget(key: string): boolean {
   switch (key) {
@@ -291,6 +292,10 @@ export function focusChordTarget(key: string): boolean {
       return true;
     case 'm':
       ensureDockPanel('dbmap', 'DbMap', 'Database File Map');
+      return true;
+    case 'q':
+      // Profiler-session view (no-ops in open sessions, where it has no home — see canOpenQueryAnalyzer).
+      openViewQueryAnalyzer();
       return true;
     default:
       return false;

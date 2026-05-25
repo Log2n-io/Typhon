@@ -18,9 +18,9 @@ namespace Typhon.Workbench.Tests;
 /// <see cref="Typhon.Workbench.Controllers.ProfilerController"/>:
 /// <c>GET /queries</c>, <c>GET /queries/{kind}/{localId}</c>,
 /// <c>GET /queries/{kind}/{localId}/executions</c>, and <c>GET /executions/{spanId}</c>.
-/// Uses the minimal fixture trace (no query events) — exercises the empty-catalog path + endpoint
-/// plumbing. Richer fixtures with synthetic query events are deferred until a fixture-builder
-/// extension lands (P5+).
+/// The minimal-fixture tests exercise the empty-catalog path + endpoint plumbing; the
+/// <c>with-queries</c> fixture tests (#376 Stage-3 4A) drive the populated path end-to-end —
+/// fixture file → TraceFileReader → QueryCatalogBuilder → endpoint — proving the fixture is faithful.
 /// </summary>
 [TestFixture]
 public sealed class QueryProfilerControllerTests
@@ -177,6 +177,77 @@ public sealed class QueryProfilerControllerTests
             Assert.That(resp.StatusCode, Is.EqualTo(HttpStatusCode.Accepted), $"route={route}");
             Assert.That(resp.Headers.Contains("Retry-After"), Is.True, $"route={route} missing Retry-After");
         }
+    }
+
+    // ── with-queries fixture (#376 Stage-3 4A) — the populated catalog path ──
+
+    private async Task<SessionDto> CreateQueryTraceSessionAsync()
+    {
+        var path = TraceFixtureBuilder.BuildTraceWithQueries(_factory.DemoDirectory);
+        var resp = await _client.PostAsJsonAsync("/api/sessions/trace", new CreateTraceSessionRequest(path));
+        resp.EnsureSuccessStatusCode();
+        return JsonSerializer.Deserialize<SessionDto>(await resp.Content.ReadAsStringAsync(), Json)!;
+    }
+
+    [Test]
+    public async Task GetQueries_WithQueriesFixture_ReturnsRankedCatalogWithResolvedStats()
+    {
+        var session = await CreateQueryTraceSessionAsync();
+        await WaitForBuildAsync(session.SessionId, TimeSpan.FromSeconds(5));
+
+        var resp = await SendAsync(session.SessionId, "queries");
+        Assert.That(resp.StatusCode, Is.EqualTo(HttpStatusCode.OK));
+        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+        var defs = doc.RootElement;
+        Assert.That(defs.GetArrayLength(), Is.EqualTo(2), "two View definitions in the fixture");
+
+        JsonElement def1 = default, def2 = default;
+        foreach (var d in defs.EnumerateArray())
+        {
+            var localId = d.GetProperty("instanceId").GetProperty("localId").GetInt64();
+            if (localId == 1) def1 = d;
+            else if (localId == 2) def2 = d;
+        }
+        Assert.That(def1.ValueKind, Is.EqualTo(JsonValueKind.Object), "definition localId=1 present");
+        Assert.That(def2.ValueKind, Is.EqualTo(JsonValueKind.Object), "definition localId=2 present");
+
+        static long Total(JsonElement d) => d.GetProperty("aggregate").GetProperty("totalWallNs").GetInt64();
+        Assert.That(Total(def1), Is.GreaterThan(Total(def2)), "def #1 (140 µs) outranks def #2 (60 µs) by TotalWallNs");
+
+        var agg1 = def1.GetProperty("aggregate");
+        Assert.That(agg1.GetProperty("executionCount").GetInt64(), Is.EqualTo(2), "def #1 has two executions");
+        Assert.That(agg1.GetProperty("p95WallNs").GetInt64(), Is.GreaterThan(0), "percentiles computed");
+        Assert.That(agg1.GetProperty("avgSelectivity").GetDouble(), Is.GreaterThan(0.0), "selectivity from Iterate/Count rows");
+
+        var owners = def1.GetProperty("ownerSystemIds");
+        Assert.That(owners.GetArrayLength(), Is.GreaterThan(0), "owning system attributed from OwnerSystemIdx");
+        Assert.That(owners[0].GetInt32(), Is.EqualTo(0), "the seeded Movement system (index 0)");
+
+        var src = def1.GetProperty("userSource");
+        Assert.That(src.GetProperty("file").GetString(), Is.Not.Empty, "UserSource resolved from QuerySourceStringTable");
+        Assert.That(src.GetProperty("method").GetString(), Is.Not.Empty);
+    }
+
+    [Test]
+    public async Task GetQueryExecutions_WithQueriesFixture_ReturnsExecutionsWithPhaseBreakdown()
+    {
+        var session = await CreateQueryTraceSessionAsync();
+        await WaitForBuildAsync(session.SessionId, TimeSpan.FromSeconds(5));
+
+        var resp = await SendAsync(session.SessionId, "queries/0/1/executions");
+        Assert.That(resp.StatusCode, Is.EqualTo(HttpStatusCode.OK));
+        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+        var execs = doc.RootElement;
+        Assert.That(execs.GetArrayLength(), Is.EqualTo(2), "def #1 has two executions");
+
+        var phases = execs[0].GetProperty("phases");
+        Assert.That(phases.GetArrayLength(), Is.GreaterThanOrEqualTo(4), "Parse/Iterate/Filter/Count phases present");
+        var anyWall = false;
+        foreach (var p in phases.EnumerateArray())
+        {
+            if (p.GetProperty("wallNs").GetInt64() > 0) { anyWall = true; break; }
+        }
+        Assert.That(anyWall, Is.True, "phase breakdown carries wall time");
     }
 
     /// <summary>

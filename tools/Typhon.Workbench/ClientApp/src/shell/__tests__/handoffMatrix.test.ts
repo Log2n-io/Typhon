@@ -1,10 +1,13 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openDataBrowser, registerDockApi } from '@/shell/commands/openSchemaBrowser';
-import { openComponentInSchema, openDbMapForComponent, revealComponentInResourceTree } from '@/shell/commands/openDbMap';
+import { openComponentInSchema, openDbMapForComponent, revealArchetypeInInspector, revealComponentInResourceTree, revealSystemInDag } from '@/shell/commands/openDbMap';
+import { jumpToTimeRange } from '@/shell/commands/profilerCommands';
 import { useSelectionStore } from '@/stores/useSelectionStore';
 import { useDataBrowserStore } from '@/stores/useDataBrowserStore';
 import { useDbMapStore } from '@/stores/useDbMapStore';
 import { useResourceGraphStore } from '@/stores/useResourceGraphStore';
+import { useDagViewStore } from '@/panels/SystemDag/useDagViewStore';
+import { useProfilerViewStore } from '@/stores/useProfilerViewStore';
 
 // AC2.14 — Stage-2 cross-view handoff matrix (UC-XV). Each handoff command resolves end-to-end to the
 // destination's *target state* — the bus leaf or the focus-request store the destination view reads — proven
@@ -52,5 +55,39 @@ describe('AC2.14 — handoff resolution matrix', () => {
   it('Used in → Archetype sets the bus archetype leaf', () => {
     useSelectionStore.getState().select('archetype', '2002');
     expect(useSelectionStore.getState().leaf).toMatchObject({ type: 'archetype', ref: '2002' });
+  });
+});
+
+// AC3.14 (#376 4D-1) — Query Analyzer cross-pillar hand-offs, proven dock-independent (no dockview api): each
+// resolves to the destination's bus leaf / focus-request / global-scope state. (Target→Component reuses
+// `openComponentInSchema`, already covered above.)
+describe('AC3.14 — Query Analyzer hand-off resolution', () => {
+  beforeEach(() => {
+    registerDockApi(null);
+    useSelectionStore.getState().clear();
+    useDagViewStore.getState().clearPendingFocusSystem();
+    useProfilerViewStore.getState().commitViewRange({ startUs: 0, endUs: 0 });
+  });
+
+  it('owner → System DAG sets the bus system + requests DAG focus', () => {
+    revealSystemInDag('Movement');
+    expect(useSelectionStore.getState().system).toBe('Movement');
+    expect(useDagViewStore.getState().pendingFocusSystem).toBe('Movement');
+  });
+
+  it('archetype target → Archetype Inspector sets the bus archetype leaf', () => {
+    revealArchetypeInInspector('2002');
+    expect(useSelectionStore.getState().leaf).toMatchObject({ type: 'archetype', ref: '2002' });
+  });
+
+  it('execution → Jump to time sets the global time window', () => {
+    jumpToTimeRange(120, 480);
+    expect(useProfilerViewStore.getState().viewRange).toEqual({ startUs: 120, endUs: 480 });
+  });
+
+  it('Jump to time ignores a degenerate (empty) window', () => {
+    useProfilerViewStore.getState().commitViewRange({ startUs: 5, endUs: 9 });
+    jumpToTimeRange(50, 50); // endUs not > startUs → no-op
+    expect(useProfilerViewStore.getState().viewRange).toEqual({ startUs: 5, endUs: 9 });
   });
 });

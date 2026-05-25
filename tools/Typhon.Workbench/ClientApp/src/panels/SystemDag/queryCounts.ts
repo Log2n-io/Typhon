@@ -1,5 +1,5 @@
 import type { QueryDefinitionDto } from '@/api/generated/model/queryDefinitionDto';
-import { toNumber } from '../QueryCatalog/numeric';
+import { toNumber } from '@/panels/QueryAnalyzer/numeric';
 
 /**
  * Count distinct query definitions owned by each system. Pure function — no React, no DOM —
