@@ -6,6 +6,7 @@ import type {
   TickSummaryDto,
 } from '@/api/generated/model';
 import type { TrackState } from '@/libs/profiler/model/uiTypes';
+import type { Anomaly } from '@/panels/EngineLiveHealth/anomalies';
 
 /**
  * Mirror of the server's BuildProgressDto. Orval regen may emit a generated type for this; wire through when available.
@@ -82,6 +83,13 @@ interface ProfilerSessionStoreState {
   /** Live connection status; null when no live session is active. */
   connectionStatus: ConnectionStatus | null;
   /**
+   * Reason string carried by the server's `shutdown` SSE event (e.g. `"init_mismatch"` when a reconnect's Init
+   * signature differs from the original session). Null for transient drops where the server emits no reason.
+   * Cleared on successful reconnect (next metadata arrival OR `connectionStatus` returning to `'connected'`).
+   * Drives the Stage 4 Phase 4 reconnect/shutdown banner's context-specific copy + action set (#377).
+   */
+  disconnectReason: string | null;
+  /**
    * Highest engine tick number seen so far in the live stream. Matches the rightmost bar of the tick overview.
    */
   latestTickNumber: number;
@@ -91,6 +99,13 @@ interface ProfilerSessionStoreState {
    * Empty for replay traces (chunk-cache `threadNames` is the source there).
    */
   liveThreadInfos: Map<number, SlotThreadInfo>;
+  /**
+   * Anomalies detected by the client-side heuristics in `useAnomalyDetection` (#377 Stage 4 Phase 3,
+   * GAP-21 jump). Cleared on session change via `reset()`; replaced wholesale by `setAnomalies(list)`
+   * whenever the chunk-cache's tick array changes. Tick-number-ascending order; the AnomalyLog UI
+   * sorts descending for "most recent first" display.
+   */
+  anomalies: Anomaly[];
 
   // ── Filter-popup ephemeral state (NOT persisted; reset on session change) ────────────
   /** Map slot index → false (hidden). Missing key = visible. Reset on `reset()`. */
@@ -149,6 +164,10 @@ interface ProfilerSessionStoreState {
   setManyCollapseState: (updates: Record<string, TrackState>) => void;
   clearCollapseState: () => void;
 
+  // ── Anomaly setters ──────────────────────────────────────────────────────────────────
+  /** Replace the anomaly list wholesale — called by `useAnomalyDetection` after each cache change. */
+  setAnomalies: (list: Anomaly[]) => void;
+
   reset: () => void;
 }
 
@@ -159,8 +178,10 @@ export const useProfilerSessionStore = create<ProfilerSessionStoreState>()((set)
 
   isLive: false,
   connectionStatus: null,
+  disconnectReason: null,
   latestTickNumber: 0,
   liveThreadInfos: new Map(),
+  anomalies: [],
 
   slotVisibility: {},
   systemVisibility: {},
@@ -169,17 +190,20 @@ export const useProfilerSessionStore = create<ProfilerSessionStoreState>()((set)
   setMetadata: (metadata) => {
     const summaries = metadata.tickSummaries ?? [];
     const last = summaries.length > 0 ? summaries[summaries.length - 1] : null;
+    // Metadata arrival means the session is ready / re-ready — any previous shutdown reason no longer applies.
     return set({
       metadata,
       buildError: null,
       latestTickNumber: last ? Number(last.tickNumber) : 0,
+      disconnectReason: null,
     });
   },
   setBuildProgress: (progress) => set({ buildProgress: progress }),
   setBuildError: (message) => set({ buildError: message }),
 
   setIsLive: (isLive) => set({ isLive }),
-  setConnectionStatus: (status) => set({ connectionStatus: status }),
+  // Clear disconnectReason whenever we move back to a 'connected' state — the user has effectively recovered.
+  setConnectionStatus: (status) => set((s) => status === 'connected' && s.disconnectReason !== null ? { connectionStatus: status, disconnectReason: null } : { connectionStatus: status }),
 
   appendTickSummary: (summary) =>
     set((s) => {
@@ -218,6 +242,7 @@ export const useProfilerSessionStore = create<ProfilerSessionStoreState>()((set)
       let metadata = s.metadata;
       let liveThreadInfos = s.liveThreadInfos;
       let connectionStatus = s.connectionStatus;
+      let disconnectReason = s.disconnectReason;
       let latestTickNumber = s.latestTickNumber;
 
       let pendingTicks: TickSummaryDto[] | null = null;
@@ -261,9 +286,16 @@ export const useProfilerSessionStore = create<ProfilerSessionStoreState>()((set)
           }
           case 'heartbeat':
             connectionStatus = ev.status;
+            // Recovery: a `connected` heartbeat after a recorded disconnect clears the stale reason.
+            if (ev.status === 'connected' && disconnectReason !== null) {
+              disconnectReason = null;
+            }
             break;
           case 'shutdown':
             connectionStatus = 'disconnected';
+            // Server's shutdown payload carries a reason string (e.g. `"init_mismatch"` after a reconnect's
+            // Init signature differs). Preserve it so the P4 reconnect banner can render context-specific copy.
+            disconnectReason = ev.status;
             break;
         }
       }
@@ -286,7 +318,7 @@ export const useProfilerSessionStore = create<ProfilerSessionStoreState>()((set)
         liveThreadInfos = pendingThreadInfos;
       }
 
-      return { metadata, liveThreadInfos, connectionStatus, latestTickNumber };
+      return { metadata, liveThreadInfos, connectionStatus, disconnectReason, latestTickNumber };
     }),
 
   setSlotVisibility: (slot, visible) =>
@@ -349,6 +381,23 @@ export const useProfilerSessionStore = create<ProfilerSessionStoreState>()((set)
     }),
   clearCollapseState: () => set({ collapseState: {} }),
 
+  setAnomalies: (list) =>
+    set((s) => {
+      // Skip the set if nothing materially changed — same length + same tickNumber sequence + same kind sequence.
+      // The detector runs on every cache tick; most calls during steady state produce identical output.
+      if (s.anomalies.length === list.length) {
+        let same = true;
+        for (let i = 0; i < list.length; i++) {
+          if (s.anomalies[i].tickNumber !== list[i].tickNumber || s.anomalies[i].kind !== list[i].kind) {
+            same = false;
+            break;
+          }
+        }
+        if (same) return s;
+      }
+      return { anomalies: list };
+    }),
+
   reset: () =>
     set({
       metadata: null,
@@ -356,8 +405,10 @@ export const useProfilerSessionStore = create<ProfilerSessionStoreState>()((set)
       buildError: null,
       isLive: false,
       connectionStatus: null,
+      disconnectReason: null,
       latestTickNumber: 0,
       liveThreadInfos: new Map(),
+      anomalies: [],
       slotVisibility: {},
       systemVisibility: {},
       collapseState: {},

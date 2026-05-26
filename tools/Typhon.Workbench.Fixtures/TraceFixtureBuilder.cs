@@ -915,8 +915,131 @@ public static class TraceFixtureBuilder
     }
 
     /// <summary>
-    /// Build a truncated trace that has a valid header but no blocks. Exercises the decoder's
-    /// "unexpected EOF" path.
+    /// Build a deterministic trace with two kinds of anomalies wired in at known tick numbers, for
+    /// #377 Stage 4 Phase 3 (GAP-21 anomaly stream + jump). Used by the J3 E2E and by the
+    /// Workbench client's anomaly-detection unit tests so the detector can be exercised against a
+    /// fixed-shape input.
+    ///
+    /// Layout: 30 ticks at a 1 ms baseline duration (10_000 ts units each, since timestamp frequency
+    /// is 10 MHz). Anomalies are placed at:
+    ///   <list type="bullet">
+    ///     <item>tick 10 — duration 10 ms (10× baseline → tick-duration outlier).</item>
+    ///     <item>tick 15 — embedded <see cref="TraceEventKind.GcSuspension"/> span lasting 20 ms (GC-pause anomaly).</item>
+    ///     <item>tick 20 — duration 8 ms (8× baseline → tick-duration outlier).</item>
+    ///     <item>tick 25 — embedded GC suspension lasting 30 ms (larger GC-pause anomaly).</item>
+    ///   </list>
+    /// Every other tick is a clean 1 ms baseline so the client-side p95 baseline has a meaningful
+    /// floor (≥ 10 samples per the detector's <c>minSampleSize</c> guard).
+    /// </summary>
+    public static string BuildTraceWithAnomalies(string directory)
+    {
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, $"fixture-anomalies-{Guid.NewGuid():N}.typhon-trace");
+
+        using var fs = File.Create(path);
+        using var writer = new TraceFileWriter(fs);
+        writer.WriteHeader(in DefaultHeader);
+        writer.WriteSystemDefinitions([]);
+        writer.WriteArchetypes([]);
+        writer.WriteComponentTypes([]);
+        writer.WriteTracks([]);
+        writer.WriteDags([]);
+        writer.WriteEmptyStaticStructures();
+
+        // ── Anomaly schedule (tickNumber → desiredDurationUs, gcPauseDurationUs) ─────────────
+        // Baseline 1 ms per tick = 10_000 ts units (10 MHz frequency). Convert µs to ts by ×10.
+        const long BaselineDurationTs = 10_000;       // 1 ms
+        const long TickOutlier10msTs = 100_000;        // 10 ms
+        const long TickOutlier8msTs = 80_000;          // 8 ms
+        const long Gc20msTs = 200_000;                 // 20 ms
+        const long Gc30msTs = 300_000;                 // 30 ms
+
+        const int tickStartSize = CommonHeaderSize;
+        const int tickEndSize = CommonHeaderSize + 2;
+        // GcSuspension is a span record: 12 B header + 25 B span extension + 2 B payload (reason, optMask) = 39 B.
+        const int gcSpanSize = CommonHeaderSize + 25 + 2;
+        const int tickCount = 30;
+
+        // Per-tick record count: TickStart + (optional GC) + TickEnd. Anomaly ticks may emit one GC span; tick-duration
+        // outliers do not need extra records — the inflated end timestamp produces a longer tick wall-clock duration.
+        var totalRecords = 0;
+        var blockSize = 0;
+        for (var t = 0; t < tickCount; t++)
+        {
+            totalRecords += 2; // TickStart + TickEnd
+            blockSize += tickStartSize + tickEndSize;
+            if (t == 15 || t == 25)
+            {
+                totalRecords += 1;
+                blockSize += gcSpanSize;
+            }
+        }
+
+        var block = new byte[blockSize];
+        long ts = 100; // start at non-zero so anomalies are visible after the first tick
+        var offset = 0;
+        ulong spanId = 1;
+        for (var t = 0; t < tickCount; t++)
+        {
+            // TickStart at `ts`.
+            WriteRecordHeader(block.AsSpan(offset), tickStartSize, TraceEventKind.TickStart, ts);
+            offset += tickStartSize;
+
+            long durationTs = t switch
+            {
+                10 => TickOutlier10msTs,
+                20 => TickOutlier8msTs,
+                _ => BaselineDurationTs,
+            };
+
+            // GC suspensions land inside their host tick (start a small offset into the tick, duration as scheduled).
+            if (t == 15 || t == 25)
+            {
+                long gcDurationTs = t == 15 ? Gc20msTs : Gc30msTs;
+                WriteGcSuspensionEvent(block.AsSpan(offset, gcSpanSize), startTs: ts + 10, durationTicks: gcDurationTs, spanId: spanId++);
+                offset += gcSpanSize;
+                // Extend the tick so the GC pause fits comfortably inside it (host tick ≥ GC duration).
+                if (durationTs < gcDurationTs + 1_000) durationTs = gcDurationTs + 1_000;
+            }
+
+            // TickEnd at `ts + durationTs`.
+            var endTs = ts + durationTs;
+            WriteRecordHeader(block.AsSpan(offset), tickEndSize, TraceEventKind.TickEnd, endTs);
+            block[offset + CommonHeaderSize] = 0;     // overloadLevel — engine-overload byte (kept at 0, not exercised in P3)
+            block[offset + CommonHeaderSize + 1] = 1; // tickMultiplier — 1 unit = BaseTickRate (1 ms)
+            offset += tickEndSize;
+
+            // Next tick starts immediately after the previous one ended.
+            ts = endTs;
+        }
+
+        writer.WriteRecords(block, totalRecords);
+        writer.WriteSpanNames(new Dictionary<int, string>());
+        writer.Flush();
+        return path;
+    }
+
+    /// <summary>
+    /// Encode a single <see cref="TraceEventKind.GcSuspension"/> span record. Layout: 12 B common
+    /// header + 25 B span extension (durationTicks, spanId, parentSpanId, spanFlags) + 2 B payload
+    /// (u8 reason, u8 optMask). Mirrors the engine's <c>GcSuspensionEvent</c> codec.
+    /// </summary>
+    private static void WriteGcSuspensionEvent(Span<byte> dest, long startTs, long durationTicks, ulong spanId)
+    {
+        WriteRecordHeader(dest, dest.Length, TraceEventKind.GcSuspension, startTs);
+        BinaryPrimitives.WriteInt64LittleEndian(dest.Slice(CommonHeaderSize, 8), durationTicks);
+        BinaryPrimitives.WriteUInt64LittleEndian(dest.Slice(CommonHeaderSize + 8, 8), spanId);
+        BinaryPrimitives.WriteUInt64LittleEndian(dest.Slice(CommonHeaderSize + 16, 8), 0UL); // parentSpanId — process-level event, always 0
+        dest[CommonHeaderSize + 24] = 0;                                                     // spanFlags — no trace context, no source location
+        var payload = dest[(CommonHeaderSize + 25)..];
+        payload[0] = 1; // u8 reason — GcSuspendReason.Gc (arbitrary non-zero for the fixture)
+        payload[1] = 0; // u8 optMask — reserved
+    }
+
+    /// <summary>
+    /// Build a trace whose record body is intentionally truncated mid-way — used by the error-path
+    /// tests for <c>TraceSessionRuntime</c> to confirm we surface a graceful "incomplete trace" error
+    /// rather than crashing.
     /// </summary>
     public static string BuildTruncated(string directory)
     {

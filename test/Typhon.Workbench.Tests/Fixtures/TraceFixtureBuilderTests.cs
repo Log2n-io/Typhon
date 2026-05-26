@@ -65,4 +65,21 @@ public sealed class TraceFixtureBuilderTests
         Assert.Throws<System.IO.InvalidDataException>(() => reader.ReadHeader(),
             "ReadHeader must reject non-TYTR magic");
     }
+
+    [Test]
+    public void BuildTraceWithAnomalies_CanBeCacheBuilt()
+    {
+        // #377 Stage-4 Phase 3 — the anomaly fixture must round-trip through the cache builder so the
+        // Workbench client's anomaly detector can consume it. 30 ticks with anomaly spikes at known
+        // tick numbers (10, 15, 20, 25); two of them carry GcSuspension span records.
+        var path = TraceFixtureBuilder.BuildTraceWithAnomalies(_tempDir);
+        Assert.That(File.Exists(path), "anomalies fixture should land on disk");
+
+        var cachePath = Typhon.Profiler.TraceFileCacheBuilder.GetCachePathFor(path);
+        var result = Typhon.Profiler.TraceFileCacheBuilder.Build(path, cachePath);
+        Assert.That(result.TickCount, Is.EqualTo(30), "thirty ticks total");
+        // Record count: each tick = TickStart + TickEnd = 2; ticks 15 + 25 also carry one GcSuspension each (+2).
+        Assert.That(result.EventCount, Is.EqualTo(30 * 2 + 2), "GcSuspension records on ticks 15 and 25");
+        Assert.That(File.Exists(cachePath));
+    }
 }

@@ -125,6 +125,12 @@ public sealed class FixturesController(SessionManager sessions) : ControllerBase
             // #376 Stage-3 4A — query definitions + executions + phases; drives the Query Analyzer (4B–4D).
             path = TraceFixtureBuilder.BuildTraceWithQueries(outDir);
         }
+        else if (string.Equals(req?.Variant, "with-anomalies", StringComparison.OrdinalIgnoreCase))
+        {
+            // #377 Stage-4 Phase 3 — deterministic tick-duration outliers + GC-pause spikes at known
+            // tick numbers; drives the Engine Live Health anomaly log + the J3 anomaly-jump E2E.
+            path = TraceFixtureBuilder.BuildTraceWithAnomalies(outDir);
+        }
         else
         {
             path = TraceFixtureBuilder.BuildMinimalTrace(outDir, tickCount, instantsPerTick);

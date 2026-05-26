@@ -18,6 +18,16 @@ import { useProfilerStatsStore } from '@/stores/useProfilerStatsStore';
  * the *committed* slot — already debounced by `setTransientViewRange`. This hook just reacts to
  * settled changes synchronously. The previous internal 150 ms `setTimeout` was redundant once
  * pan/zoom started writing the transient slot instead of viewRange directly.
+ *
+ * **rAF coalescing (#377 perf follow-up, 2026-05-26).** During live capture the `ticks` reference
+ * flips on every `chunkAdded` SSE event — up to dozens per second. Running `computeSelectionStats`
+ * synchronously on each flip was burning ~5% of the main thread for stats that the user only sees
+ * once per paint. We now defer the compute into a `requestAnimationFrame`: when deps change, the
+ * effect's cleanup cancels the pending rAF and the new body schedules a fresh one. If N deps flips
+ * happen inside a single 16 ms frame they collapse into one compute against the latest values —
+ * the closure captures the deps from the most-recent render, the older closures get GC'd alongside
+ * their cancelled rAFs. Net result: at most one `setStats` per frame, no missed updates because the
+ * trailing schedule always wins.
  */
 export function useProfilerStatsWriter(
   ticks: TickData[],
@@ -27,6 +37,9 @@ export function useProfilerStatsWriter(
   const setStats = useProfilerStatsStore((s) => s.setStats);
 
   useEffect(() => {
-    setStats(computeSelectionStats(ticks, tickSummaries, viewRange));
+    const rafId = requestAnimationFrame(() => {
+      setStats(computeSelectionStats(ticks, tickSummaries, viewRange));
+    });
+    return () => cancelAnimationFrame(rafId);
   }, [ticks, tickSummaries, viewRange, setStats]);
 }

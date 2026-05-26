@@ -85,6 +85,40 @@ export default defineConfig({
       '/api-explorer': BACKEND_URL,
     },
   },
+  // `vite preview` serves the production build from `wwwroot/` — used by `wb-dev start -Prod` to
+  // exercise the SPA without dev-mode React (no strict-mode double-renders, no React Profiler /
+  // `performance.measure` instrumentation, no HMR overhead). Important: Vite's preview mode does
+  // NOT inherit `server.proxy` — it needs its own block. Keep both in sync (the API + token-injection
+  // contract is the same regardless of whether Vite is in dev or preview mode).
+  preview: {
+    port: 5173,
+    strictPort: true,
+    proxy: {
+      '/api': {
+        target: BACKEND_URL,
+        configure: (proxy) => {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          proxy.on('proxyReq', (proxyReq: any) => {
+            const token = readBootstrapToken();
+            if (token) proxyReq.setHeader('X-Workbench-Token', token);
+          });
+        },
+      },
+      '/openapi.json': {
+        target: BACKEND_URL,
+        configure: (proxy) => {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          proxy.on('proxyReq', (proxyReq: any) => {
+            const token = readBootstrapToken();
+            if (token) proxyReq.setHeader('X-Workbench-Token', token);
+          });
+        },
+      },
+      '/swagger': BACKEND_URL,
+      '/health': BACKEND_URL,
+      '/api-explorer': BACKEND_URL,
+    },
+  },
   build: {
     outDir: '../wwwroot',
     emptyOutDir: true,

@@ -15,8 +15,9 @@ const ZONE_D_GATED_OFF = [] as const;
 // absorbing the former Access Matrix as its in-panel Matrix mode (AccessMatrix is removed from the registry, not gated).
 // Stage 3 Phase 3 (3D): System DAG + Critical Path — the rest of the scheduling cluster (bus-driven, one selection).
 // Stage 3 Phase 4 (4B+4C, GAP-19): Query Analyzer — consolidates Catalog + Plan Tree + Execution Inspector.
+// Stage 4 Phase 1 (#377, GAP-21/22): Engine Live Health — the consolidated live-attach surface (P1 shell + P2+ gauges/anomalies/Capture).
 const ZONE_D_ACTIVE = [
-  'DataBrowserEntities', 'DbMap', 'StorageHealth', 'Profiler', 'TopSpans', 'CallTree', 'SourcePreview', 'DataFlow', 'SystemDag', 'CriticalPath', 'QueryAnalyzer',
+  'DataBrowserEntities', 'DbMap', 'StorageHealth', 'Profiler', 'TopSpans', 'CallTree', 'SourcePreview', 'DataFlow', 'SystemDag', 'CriticalPath', 'QueryAnalyzer', 'EngineLiveHealth',
 ] as const;
 
 // The full registry key set = gated-off ∪ active. Used to assert the registry covers exactly the documented set.

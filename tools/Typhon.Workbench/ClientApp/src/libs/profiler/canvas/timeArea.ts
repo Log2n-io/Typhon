@@ -84,6 +84,62 @@ let _offCpuRunCat = new Uint8Array(0);
 // offscreen tile; a CanvasPattern is reusable across contexts, so a single module-lifetime cache is safe.
 const _offCpuHatch: (CanvasPattern | null)[] = [];
 
+// ─── Monospace truncation cache ─────────────────────────────────────────────────────────────────
+// `12px monospace` char width is system-dependent (the OS picks the actual mono font) but stable
+// across the page lifetime. Measure once at first draw, cache for the rest of the session.
+// Used to truncate chunk + span labels client-side instead of paying per-span `save/beginPath/rect/
+// clip/restore` — the latter was the dominant ~5% main-thread cost in drawOneTickSpans (#377 perf
+// follow-up, 2026-05-26). Truncation cuts at a full-char boundary, marginally different from the
+// prior mid-glyph clip — visually indistinguishable at 12px on real workloads.
+let _mono12pxCharWidth: number | null = null;
+
+/**
+ * Lazy-measure + cache the `12px monospace` glyph width on first call. Uses 'M' as a representative
+ * character — for true monospace this matches every other glyph. Exported for tests; production
+ * callers go through {@link fillTextTruncatedMono12px}.
+ */
+export function _getMono12pxCharWidthForTest(ctx: CanvasRenderingContext2D): number {
+  return getMono12pxCharWidth(ctx);
+}
+
+/** Test-only — reset the cached char width so each test starts from a clean measurement. */
+export function _resetMono12pxCharWidthCacheForTest(): void {
+  _mono12pxCharWidth = null;
+}
+
+function getMono12pxCharWidth(ctx: CanvasRenderingContext2D): number {
+  if (_mono12pxCharWidth === null) {
+    const prev = ctx.font;
+    ctx.font = '12px monospace';
+    _mono12pxCharWidth = ctx.measureText('M').width;
+    ctx.font = prev;
+  }
+  return _mono12pxCharWidth;
+}
+
+/**
+ * Draw <paramref name="text"/> at (<paramref name="x"/>, <paramref name="y"/>), truncated to fit
+ * within <paramref name="availWidth"/> pixels at the **caller-established 12px monospace font**.
+ * Skips drawing entirely when no character fits. Replaces the `ctx.save() + ctx.clip() + fillText()
+ * + ctx.restore()` pattern that was the #1 hotspot inside the span/chunk render loop — each saved
+ * canvas state-machine transition is ~µs cost, and the loop fires 1000s of times per frame.
+ *
+ * Exported for tests; production callers are in this file's `drawTrack`.
+ */
+export function fillTextTruncatedMono12px(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  x: number,
+  y: number,
+  availWidth: number,
+): void {
+  if (availWidth <= 0) return;
+  const charW = getMono12pxCharWidth(ctx);
+  const maxChars = Math.floor(availWidth / charW);
+  if (maxChars <= 0) return;
+  ctx.fillText(maxChars >= text.length ? text : text.slice(0, maxChars), x, y);
+}
+
 /**
  * Lazily build + cache the diagonal-hatch fill pattern for one off-CPU category. The tile is a small transparent canvas
  * with a single corner-to-corner diagonal stroke in the category color, which tiles into a seamless 45° hatch. Returns
@@ -907,18 +963,19 @@ function drawSlotLane(
           strokeHoverContour(ctx, x1, ty + SPAN_BAR_MARGIN, w, SPAN_BAR_HEIGHT, theme);
         }
         if (x2 - x1 > 10) {
-          ctx.save();
-          ctx.beginPath();
-          ctx.rect(x1, ty + SPAN_BAR_MARGIN, w, SPAN_BAR_HEIGHT);
-          ctx.clip();
+          // Manual truncation instead of save/clip/restore — the font is fixed (12px monospace),
+          // so we can compute how many chars fit and slice. Saves three canvas state-machine
+          // transitions per chunk bar; chunks render once per frame × dozens-to-hundreds of bars.
           ctx.fillStyle = readableOnBar(chunkColor, theme);
           ctx.font = '12px monospace';
           ctx.textAlign = 'left';
           const chunkName = chunk.isParallel ? `${chunk.systemName}[${chunk.chunkIndex}]` : chunk.systemName;
           const label = `${chunkName} (${formatDuration(chunk.endUs - chunk.startUs)})`;
           const textX = Math.max(x1 + 3, gutterWidth + 3);
-          ctx.fillText(label, textX, ty + SPAN_BAR_MARGIN + SPAN_BAR_HEIGHT -  SPAN_BAR_TEXT_OFFSET);
-          ctx.restore();
+          // `availWidth` is the visible portion of the bar starting at `textX` — when the bar is
+          // clamped left to the gutter, that's narrower than `w`.
+          const availWidth = (x1 + w) - textX;
+          fillTextTruncatedMono12px(ctx, label, textX, ty + SPAN_BAR_MARGIN + SPAN_BAR_HEIGHT - SPAN_BAR_TEXT_OFFSET, availWidth);
         }
       }
     }
@@ -939,6 +996,17 @@ function drawSlotLane(
   // Checkpoint.Cycle bar from tick 200 would overdraw all spans visible at tick 80.
   ctx.font = '12px monospace';
   ctx.textAlign = 'left';
+
+  // Hoist selection/hover-kind discrimination outside the per-span loop (#377 perf follow-up,
+  // 2026-05-26). Most frames have neither a selected nor a hovered span; checking three terms
+  // (`selection && selection.kind === 'span' && isSameSpan(...)`) per span × 1000s of spans was
+  // measurable in the bottom-up flame. Stash the kind-narrowed reference (or null) once per
+  // drawTrack invocation and the inner loop reduces to one null-compare + the `isSameSpan` only
+  // when a candidate exists.
+  const selectedSpan: SpanData | null =
+    selection !== null && selection.kind === 'span' ? selection.span : null;
+  const hoveredSpan: SpanData | null =
+    hover !== null && hover.kind === 'span' ? hover.span : null;
 
   const drawOneTickSpans = (tick: TickData, nativeOnly: boolean): void => {
     const slotSpans = tick.spansByThreadSlot.get(threadSlot);
@@ -1032,26 +1100,27 @@ function drawSlotLane(
       if (c !== prevFill) { ctx.fillStyle = c; prevFill = c; }
       ctx.fillRect(x1, sy + SPAN_BAR_MARGIN, w, SPAN_BAR_HEIGHT);
 
-      if (selection && selection.kind === 'span' && isSameSpan(selection.span, span)) {
+      if (selectedSpan !== null && isSameSpan(selectedSpan, span)) {
         ctx.strokeStyle = theme.selectedOutline;
         ctx.lineWidth = 1.5;
         ctx.strokeRect(x1 + 0.5, sy + SPAN_BAR_MARGIN + 0.5, w - 1, SPAN_BAR_HEIGHT - 1);
-      } else if (hover && hover.kind === 'span' && isSameSpan(hover.span, span)) {
+      } else if (hoveredSpan !== null && isSameSpan(hoveredSpan, span)) {
         strokeHoverContour(ctx, x1, sy + SPAN_BAR_MARGIN, w, SPAN_BAR_HEIGHT, theme);
       }
 
       if (actualWidth > 10) {
-        ctx.save();
-        ctx.beginPath();
-        ctx.rect(x1, sy + SPAN_BAR_MARGIN, actualWidth, SPAN_BAR_HEIGHT);
-        ctx.clip();
-        ctx.fillStyle = readableOnBar(c, theme);
+        // Manual truncation in lieu of save/clip/restore — see `fillTextTruncatedMono12px` for
+        // the rationale (#377 perf follow-up, 2026-05-26). Per-span, this was the #1 hotspot in
+        // the entire Workbench main thread (~21% self in prod recordings); removing the three
+        // canvas state transitions and the clip-path eval drops it to a single `fillText`.
+        const textColor = readableOnBar(c, theme);
+        ctx.fillStyle = textColor;
         ctx.font = '12px monospace';
         ctx.textAlign = 'left';
         // Clamp the text's X to the visible-left edge so the label stays readable when the bar's
-        // left edge is off-screen. The clip rect above still trims anything that runs past the
-        // bar's actual right edge, so a long label on a wide bar with most of its body off-screen
-        // left now slides in from the gutter and cuts at the bar's right edge naturally.
+        // left edge is off-screen. The truncation now caps anything that would run past the bar's
+        // right edge — a long label on a wide bar with most of its body off-screen left slides in
+        // from the gutter and cuts at a full-char boundary near the bar's right edge.
         //
         // Intentionally NOT `Math.round(...)`: the bar's left edge is at a fractional canvas X
         // (from `pxOfUs`) and its anti-aliased border blends across pixels. Keeping the text's X
@@ -1059,9 +1128,15 @@ function drawSlotLane(
         // when the bar is off-screen left the text anchors to the gutter at a stable integer
         // offset anyway — readability wins on both sides.
         const textX = Math.max(x1 + 3, gutterWidth + 3);
-        ctx.fillText(`${span.name} (${formatDuration(span.durationUs)})`, textX, sy + SPAN_BAR_MARGIN + SPAN_BAR_HEIGHT - SPAN_BAR_TEXT_OFFSET);
-        ctx.restore();
-        prevFill = ''; // clip/restore may invalidate cached fill
+        const availWidth = (x1 + actualWidth) - textX;
+        fillTextTruncatedMono12px(
+          ctx,
+          `${span.name} (${formatDuration(span.durationUs)})`,
+          textX,
+          sy + SPAN_BAR_MARGIN + SPAN_BAR_HEIGHT - SPAN_BAR_TEXT_OFFSET,
+          availWidth,
+        );
+        prevFill = textColor; // keep the fillStyle cache in sync with the assignment above.
       }
     }
 

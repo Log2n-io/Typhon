@@ -32,6 +32,10 @@
   # window 1:  pwsh -File wb-dev.ps1 watch-kestrel
   # window 2:  pwsh -File wb-dev.ps1 watch-vite
   # window 3:  pwsh -File wb-dev.ps1 status
+
+.EXAMPLE
+  # Prod-mode SPA (perf-testing without dev-mode React noise):
+  pwsh -File wb-dev.ps1 start -Prod
 #>
 
 [CmdletBinding()]
@@ -45,7 +49,14 @@ param(
     # appsettings.Development.json's "Information" wins. Accepts the standard .NET levels (e.g.
     # -LogLevel Warning, or the prefix/colon form -log:warning).
     [ValidateSet('Trace', 'Debug', 'Information', 'Warning', 'Error', 'Critical', 'None')]
-    [string]$LogLevel
+    [string]$LogLevel,
+
+    # Prod-mode SPA: build the client bundle with NODE_ENV=production then serve via `vite preview`
+    # instead of `vite` (dev). Eliminates dev-mode React noise (strict-mode double-render, profiler
+    # instrumentation, HMR overhead) so a `Performance` recording shows what users actually feel.
+    # Kestrel still runs in dev (`dotnet watch`) — the API's perf is not what changes between modes;
+    # the SPA bundle is. Applies to: start / restart.
+    [switch]$Prod
 )
 
 $ErrorActionPreference = 'Stop'
@@ -217,12 +228,19 @@ Options:
                      Warning, Error, Critical, None. Applies to start / restart /
                      watch-kestrel. Without it, appsettings.Development.json's
                      "Information" wins. Prefix/colon form also works: -log:warning
+  -Prod              Build the SPA with NODE_ENV=production then serve via
+                     `vite preview` instead of the dev server. Eliminates dev-mode
+                     React noise (strict-mode double-render, profiler instrumentation,
+                     HMR overhead) so a Performance recording shows what users actually
+                     feel. Kestrel still runs in dev — the API perf is not what
+                     differs between modes. Applies to: start / restart.
 
 Examples:
   wb-dev.ps1 watch-kestrel -log:warning
   wb-dev.ps1 start -LogLevel Warning
+  wb-dev.ps1 start -Prod                 # production SPA build, perf-test mode
 
-State:    .claude/state/wb-dev.json
+State:    .claude/state/wb-dev.json  (includes "mode": "dev" | "prod")
 Logs:     .claude/state/wb-dev.kestrel.log, wb-dev.vite.log
           .claude/state/wb-dev.kestrel.err.log, wb-dev.vite.err.log
 
@@ -252,6 +270,8 @@ function Invoke-Status {
     $port5200 = Get-PortOwner 5200
     $port5173 = Get-PortOwner 5173
 
+    $modeLabel = if ($state.PSObject.Properties['mode'] -and $state.mode) { $state.mode } else { 'dev (legacy state)' }
+    Write-Host "Mode:    $modeLabel"
     Write-Host "Kestrel  pid $($state.kestrelPid)  $(if ($kAlive) { 'alive' } else { 'dead' })"
     Write-Host "         :5200  $(if ($port5200) { "bound (pid $port5200)" } else { 'unbound' })"
     Write-Host "Vite     pid $($state.vitePid)  $(if ($vAlive) { 'alive' } else { 'dead' })"
@@ -292,6 +312,24 @@ function Invoke-Start {
         New-Item -ItemType Directory -Path $StateDir -Force | Out-Null
     }
 
+    # Prod mode: build the SPA first (synchronous, fail-fast). The build emits to ../wwwroot per
+    # vite.config.ts; `vite preview` then serves that bundle on :5173 with the same /api proxy as
+    # dev mode (preview block we added to vite.config.ts mirrors the server block). The bundle is
+    # built with NODE_ENV=production so the React runtime drops dev-mode hooks (strict-mode
+    # double-render, profiler instrumentation, performance.measure) — that's the whole point.
+    if ($Prod) {
+        Write-Host 'prod mode: building SPA (NODE_ENV=production) — this can take ~15-30 s on a cold cache'
+        $buildExit = & npm.cmd --prefix $ClientApp run build 2>&1 | Tee-Object -FilePath $ViteLog | ForEach-Object {
+            # Stream build output into wb-dev.vite.log AND inline so the user sees progress.
+            Write-Host $_
+        }
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "ERROR: SPA build failed (exit $LASTEXITCODE) — check $ViteLog for details"
+            exit 1
+        }
+        Write-Host 'SPA build complete; launching Kestrel + vite preview'
+    }
+
     # Launch via cmd.exe /c with -WindowStyle Hidden so the child processes get their own hidden
     # console session and are NOT in this terminal's process group. Without this (-NoNewWindow),
     # Ctrl+C sends CTRL_C_EVENT to the entire group, killing npm/node without console-mode cleanup
@@ -304,7 +342,10 @@ function Invoke-Start {
         -WindowStyle Hidden `
         -PassThru
 
-    $viteCmd = "npm.cmd run dev 1>`"$ViteLog`" 2>`"$ViteErrLog`""
+    # In prod, run `vite preview` (serves the production bundle from ../wwwroot); in dev, `vite`
+    # (the HMR-enabled dev server). Both bind :5173 with the same /api token-injecting proxy.
+    $viteScript = if ($Prod) { 'preview' } else { 'dev' }
+    $viteCmd = "npm.cmd run $viteScript 1>>`"$ViteLog`" 2>`"$ViteErrLog`""
     $vite = Start-Process 'cmd.exe' `
         -ArgumentList "/c $viteCmd" `
         -WorkingDirectory $ClientApp `
@@ -315,7 +356,8 @@ function Invoke-Start {
     # to actually bind. 90 s leaves comfortable headroom for cold caches while still failing
     # fast on a genuine hang.
     $bindTimeoutSec = 90
-    Write-Host "launching: Kestrel pid $($kestrel.Id) + Vite pid $($vite.Id)"
+    $modeLabel = if ($Prod) { 'PROD (vite preview)' } else { 'dev (vite hmr)' }
+    Write-Host "launching [$modeLabel]: Kestrel pid $($kestrel.Id) + Vite pid $($vite.Id)"
     if ($LogLevel) { Write-Host "Microsoft.AspNetCore log level overridden -> $LogLevel" }
     Write-Host "waiting for ports to bind (timeout $bindTimeoutSec s)..."
 
@@ -345,6 +387,7 @@ function Invoke-Start {
         $newState = [pscustomobject]@{
             kestrelPid = $kestrel.Id
             vitePid    = $vite.Id
+            mode       = if ($Prod) { 'prod' } else { 'dev' }
             startedAt  = (Get-Date).ToString('o')
             kestrelLog = $KestrelLog
             viteLog    = $ViteLog
@@ -352,7 +395,7 @@ function Invoke-Start {
         Write-DevState $newState
         $startupComplete = $true
 
-        Write-Host 'started successfully:'
+        Write-Host "started successfully [$modeLabel]:"
         Write-Host "  Kestrel pid $($kestrel.Id)  ->  http://localhost:5200/health"
         Write-Host "  Vite    pid $($vite.Id)  ->  http://localhost:5173"
         Write-Host "  Logs:   $KestrelLog"

@@ -267,26 +267,28 @@ public sealed class ProfilerController : WorkbenchControllerBase
             return ConflictKindMismatch("Save Replay is only valid on Attach sessions.");
         }
 
+        // #377 Stage 4 P4 "Capture & Analyse" — empty path means the client wants the one-gesture flow:
+        // server picks a default under %LOCALAPPDATA%/Typhon/Workbench/captures/ (or the XDG equivalent on
+        // POSIX), guarantees the directory exists, and returns the resolved path. Existing callers passing
+        // an explicit path retain the original validation semantics.
+        string resolved;
         if (string.IsNullOrWhiteSpace(request?.Path))
         {
-            return BadRequest(new ProblemDetails
-            {
-                Title = "invalid_path",
-                Detail = "path is required.",
-                Status = StatusCodes.Status400BadRequest,
-            });
+            resolved = ResolveDefaultCapturePath();
         }
-
-        var resolved = System.IO.Path.GetFullPath(request.Path);
-        var parent = System.IO.Path.GetDirectoryName(resolved);
-        if (string.IsNullOrEmpty(parent) || !System.IO.Directory.Exists(parent))
+        else
         {
-            return BadRequest(new ProblemDetails
+            resolved = System.IO.Path.GetFullPath(request.Path);
+            var parent = System.IO.Path.GetDirectoryName(resolved);
+            if (string.IsNullOrEmpty(parent) || !System.IO.Directory.Exists(parent))
             {
-                Title = "parent_directory_missing",
-                Detail = $"Parent directory does not exist: {parent}",
-                Status = StatusCodes.Status400BadRequest,
-            });
+                return BadRequest(new ProblemDetails
+                {
+                    Title = "parent_directory_missing",
+                    Detail = $"Parent directory does not exist: {parent}",
+                    Status = StatusCodes.Status400BadRequest,
+                });
+            }
         }
 
         try
@@ -532,6 +534,33 @@ public sealed class ProfilerController : WorkbenchControllerBase
             }
         }
         return set;
+    }
+
+    /// <summary>
+    /// Resolve the default capture directory used by the one-gesture "Capture &amp; Analyse" flow (#377 Stage 4
+    /// Phase 4). Anchors under <c>%LOCALAPPDATA%/Typhon/Workbench/captures/</c> on Windows (or the XDG-equivalent
+    /// <c>$XDG_DATA_HOME/typhon/workbench/captures/</c> on POSIX), guarantees the directory exists, and stamps a
+    /// monotone filename so repeated captures don't collide. Returns the resolved absolute path.
+    /// </summary>
+    private static string ResolveDefaultCapturePath()
+    {
+        string root;
+        if (OperatingSystem.IsWindows())
+        {
+            root = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        }
+        else
+        {
+            // XDG-equivalent on POSIX — defaults to ~/.local/share if XDG_DATA_HOME is unset.
+            var xdg = Environment.GetEnvironmentVariable("XDG_DATA_HOME");
+            root = !string.IsNullOrWhiteSpace(xdg)
+                ? xdg
+                : System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".local", "share");
+        }
+        var capturesDir = System.IO.Path.Combine(root, "Typhon", "Workbench", "captures");
+        System.IO.Directory.CreateDirectory(capturesDir);
+        var stamp = DateTime.UtcNow.ToString("yyyyMMddTHHmmssZ", System.Globalization.CultureInfo.InvariantCulture);
+        return System.IO.Path.Combine(capturesDir, $"typhon-capture-{stamp}.typhon-replay");
     }
 
     private static List<TraceEventDto> ApplyFilters(List<TraceEventDto> source, HashSet<int> kinds, int? tick)

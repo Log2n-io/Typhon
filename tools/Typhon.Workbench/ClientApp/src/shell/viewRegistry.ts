@@ -51,6 +51,11 @@ export const ZONE_D_VIEW_ACTIVE: Readonly<Record<string, boolean>> = {
   // leaf modules — catalog filters/toolbar, plan graph, phase table, data hooks — relocated into
   // panels/QueryAnalyzer/).
   QueryAnalyzer: true,
+  // Observe (P-C) — live engine surface.
+  // Stage 4 Phase 1 (#377, GAP-21/22): the Engine Live Health view — consolidated live signals (gauges, anomaly
+  // log, reconnect banner) + the freeze + Capture & Analyse glue. P1 ships the shell + connection-state header
+  // + Disconnect; gauges (P2), anomalies (P3), Capture & Analyse + reconnect banner (P4) follow.
+  EngineLiveHealth: true,
 };
 
 // Returns whether a view (or a view-bound command) is currently reachable. An undefined id means the caller

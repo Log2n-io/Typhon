@@ -37,7 +37,7 @@ import {
   saveLayoutAsDefault,
   resetLayout,
 } from './commands/openSchemaBrowser';
-import { toggleViewCallTree, toggleViewCriticalPath, toggleViewProfiler, toggleViewTopSpans, toggleViewQueryAnalyzer, registerOpenSaveReplay } from './commands/profilerCommands';
+import { toggleViewCallTree, toggleViewCriticalPath, toggleViewProfiler, toggleViewTopSpans, toggleViewQueryAnalyzer, toggleViewEngineLiveHealth, registerOpenSaveReplay } from './commands/profilerCommands';
 import { registerOpenConnect } from './commands/baseCommands';
 import { isViewActive, ANY_ZONE_D_VIEW_ACTIVE } from './viewRegistry';
 import { logError, logInfo } from '@/stores/useLogStore';
@@ -200,6 +200,15 @@ export default function MenuBar() {
  title={isProfilerSession ? undefined : 'Open a profiler trace or attach a session first'}
  >
  Query Analyzer
+ </MenubarItem>
+ )}
+ {isViewActive('EngineLiveHealth') && (
+ <MenubarItem
+ disabled={!isProfilerSession}
+ onClick={toggleViewEngineLiveHealth}
+ title={isProfilerSession ? undefined : 'Open a profiler trace or attach a session first'}
+ >
+ Engine Health
  </MenubarItem>
  )}
  {ANY_ZONE_D_VIEW_ACTIVE && <MenubarSeparator />}

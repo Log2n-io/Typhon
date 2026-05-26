@@ -143,6 +143,56 @@ export function toggleViewQueryAnalyzer(): void {
 }
 
 /**
+ * Add the Engine Live Health panel (#377 Stage 4 Phase 1) — the consolidated live-attach surface. Anchored
+ * `within` the Detail panel's group (the right edge group on the default attach layout) so it docks as a
+ * tab beside Detail; a no-position addPanel would join whatever group is active, which is the same bug the
+ * other deep panels' anchored placement avoids.
+ */
+function addEngineLiveHealthPanel(api: DockviewApi): void {
+  const detail = api.getPanel('detail');
+  api.addPanel(
+    detail
+      ? { id: 'engine-live-health', component: 'EngineLiveHealth', title: 'Engine Health', position: { referencePanel: detail.id, direction: 'within' } }
+      : { id: 'engine-live-health', component: 'EngineLiveHealth', title: 'Engine Health' },
+  );
+}
+
+/**
+ * Engine Live Health is meaningful in attach sessions (the live SSE stream is its data source), but we still
+ * allow opening it in trace so the cold-state message is reachable — the panel gates itself. View-menu /
+ * palette gating mirrors the rest of the profiler surfaces: enabled when the session is trace or attach.
+ */
+function canOpenEngineLiveHealth(): boolean {
+  const kind = useSessionStore.getState().kind;
+  return isViewActive('EngineLiveHealth') && (kind === 'trace' || kind === 'attach');
+}
+
+/** Open (or focus) the Engine Live Health panel — focus-when-present so a reveal never flips it closed. */
+export function openViewEngineLiveHealth(): void {
+  const api = registeredApi;
+  if (!api || !canOpenEngineLiveHealth()) return;
+  const existing = api.getPanel('engine-live-health');
+  if (existing) {
+    existing.focus();
+    return;
+  }
+  addEngineLiveHealthPanel(api);
+}
+
+/** Toggle (close-when-open) variant for the palette / View menu. */
+export function toggleViewEngineLiveHealth(): void {
+  const api = registeredApi;
+  if (!api) return;
+  const existing = api.getPanel('engine-live-health');
+  if (existing) {
+    api.removePanel(existing);
+    return;
+  }
+  if (!canOpenEngineLiveHealth()) return;
+  addEngineLiveHealthPanel(api);
+}
+
+/**
  * Reveal a specific query in the analyzer: open/focus the panel, focus the query in the unified store,
  * and write the bus `query` leaf (so the Inspector + nav history follow). The cross-panel entry point —
  * used by the Systems & Queries navigator and the Inspector's query card.
@@ -255,6 +305,27 @@ export function openSaveReplayDialog(): void {
 }
 
 /**
+ * Capture &amp; Analyse (#377 Stage 4 Phase 4, GAP-22) — palette / button entry point. The actual orchestration
+ * lives in `shell/commands/captureAndAnalyse.ts` so the panel button + ReconnectBanner button can share it.
+ * Gated on `sessionKind === 'attach'`: the flow only makes sense on a live session (POST /save-replay rejects
+ * with 409 in any other kind).
+ */
+function canCaptureAndAnalyse(): boolean {
+  const { kind, sessionId } = useSessionStore.getState();
+  return kind === 'attach' && sessionId !== null && sessionId.length > 0;
+}
+
+export async function runCaptureAndAnalyse(): Promise<void> {
+  if (!canCaptureAndAnalyse()) return;
+  const sessionId = useSessionStore.getState().sessionId;
+  if (!sessionId) return;
+  // Dynamic import keeps the orchestration's heavier API surface (sessions + recent-files store, log helpers)
+  // out of profilerCommands.ts's eager import graph — the palette can stay small.
+  const { captureAndAnalyse } = await import('@/shell/commands/captureAndAnalyse');
+  await captureAndAnalyse(sessionId);
+}
+
+/**
  * Profiler-module palette entries. Spread into `buildBaseCommands()` so they land alongside the
  * shell-level commands in the `Ctrl+K` palette.
  */
@@ -264,8 +335,10 @@ export function buildProfilerPaletteCommands(): CommandItem[] {
     { id: 'toggle-view-call-tree',    label: 'Toggle View Call Tree', keywords: 'call tree cpu samples folded stack callers callees sandwich bottom-up off-cpu profiler', action: toggleViewCallTree, viewId: 'CallTree' },
     { id: 'toggle-view-critical-path', label: 'Toggle View Critical Path', keywords: 'critical path tape timeline cp wall-clock tick', action: toggleViewCriticalPath, viewId: 'CriticalPath' },
     { id: 'toggle-view-query-analyzer', label: 'Toggle View Query Analyzer', keywords: 'query analyzer catalog plan executions profiler cost ranking selectivity workload', action: toggleViewQueryAnalyzer, viewId: 'QueryAnalyzer' },
+    { id: 'toggle-view-engine-health', label: 'Toggle View Engine Health', keywords: 'engine health live attach gauges anomaly tick rate jitter overload reconnect capture analyse observe', action: toggleViewEngineLiveHealth, viewId: 'EngineLiveHealth' },
     { id: 'toggle-view-top-spans',   label: 'Toggle View Top Spans', keywords: 'profiler top spans table slow expensive sortable', action: toggleViewTopSpans, viewId: 'TopSpans' },
     { id: 'profiler-save-replay',    label: 'Save Session as .typhon-replay…', keywords: 'save replay export attach session', action: openSaveReplayDialog },
+    { id: 'profiler-capture-and-analyse', label: 'Capture & Analyse', keywords: 'capture analyse freeze save replay attach trace one gesture observe', action: () => { void runCaptureAndAnalyse(); } },
     // Profiler-view interaction commands — only meaningful with the Profiler view mounted, so gated with it.
     { id: 'profiler-toggle-gauges',  label: 'Toggle Gauge Region',   keywords: 'gauges canvas profiler g',         action: () => useProfilerViewStore.getState().toggleGaugeRegion(), viewId: 'Profiler' },
     { id: 'toggle-legends',          label: 'Toggle Legends',        keywords: 'legends labels help legend l app-wide',        action: () => useUiPrefsStore.getState().toggleLegends() },

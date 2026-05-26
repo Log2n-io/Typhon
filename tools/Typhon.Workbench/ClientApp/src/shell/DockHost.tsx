@@ -12,12 +12,14 @@ import ResourceTreePanel from '@/panels/ResourceTreePanel';
 import SchemaExplorerPanel from '@/panels/SchemaExplorer/SchemaExplorerPanel';
 import ProfilerPanel from '@/panels/profiler/ProfilerPanel';
 import TopSpansPanel from '@/panels/profiler/TopSpansPanel';
+import EngineLiveHealthPanel from '@/panels/EngineLiveHealth/EngineLiveHealthPanel';
 import SystemsQueriesNavigatorPanel from '@/panels/SystemsQueriesNavigator/SystemsQueriesNavigatorPanel';
 import { registerDockApi, registerResetLayout, focusPanelBody } from './commands/openSchemaBrowser';
 import { registerProfilerDockApi } from './commands/profilerCommands';
 import { isViewActive } from './viewRegistry';
 import MigrationRequiredBanner from './banners/MigrationRequiredBanner';
 import IncompatibleBanner from './banners/IncompatibleBanner';
+import ReconnectBanner from './banners/ReconnectBanner';
 
 // Tab component without a close button — applied to structural panels that should not be closable.
 const PlainLockedTab: React.FC<IDockviewPanelHeaderProps> = (props) => (
@@ -125,6 +127,9 @@ const components: Record<string, React.FC<IDockviewPanelProps>> = {
   SchemaExplorer: SchemaExplorerPanel,
   Profiler: ProfilerPanel,
   TopSpans: TopSpansPanel,
+  // Stage 4 Phase 1 — the Engine Live Health panel is the attach default surface (per its design); eager
+  // (not lazy) so it mounts immediately on attach without a Suspense flash.
+  EngineLiveHealth: EngineLiveHealthPanel,
   // Shell navigator (zone C, Trace/Attach) — not a zone-D deep view, so it is never gated.
   SystemsQueriesNavigator: SystemsQueriesNavigatorPanel,
   // Lazy (on-demand) — code-split out of the cold bundle.
@@ -197,6 +202,19 @@ function buildDefaultLayout(api: DockviewReadyEvent['api'], kind: 'none' | 'open
         title: 'Top spans',
         tabComponent: 'locked',
         position: { referenceGroup: EDGE_BOTTOM_ID },
+      });
+    }
+
+    // Engine Live Health — attach default surface (#377 Stage 4 Phase 1). Mounted as a tab in the right edge
+    // group alongside Detail; the panel itself shows a cold message in trace sessions, but the design only
+    // promotes it onto the default layout for attach (where the live SSE stream is meaningful).
+    if (kind === 'attach' && isViewActive('EngineLiveHealth')) {
+      api.addPanel({
+        id: 'engine-live-health',
+        component: 'EngineLiveHealth',
+        title: 'Engine Health',
+        tabComponent: 'locked',
+        position: { referenceGroup: EDGE_RIGHT_ID },
       });
     }
 
@@ -353,6 +371,9 @@ export default function DockHost() {
     <div className="flex h-full flex-col">
       {showMigration && <MigrationRequiredBanner />}
       {showIncompatible && <IncompatibleBanner />}
+      {/* Stage 4 P4 (#377) — reconnect / shutdown banner; self-gates on sessionKind === 'attach' &&
+          connectionStatus === 'disconnected', so the conditional here is just "let it decide." */}
+      <ReconnectBanner />
       <div className="relative min-h-0 flex-1">
         <DockviewReact
           theme={theme === 'dark' ? themeDark : themeLight}

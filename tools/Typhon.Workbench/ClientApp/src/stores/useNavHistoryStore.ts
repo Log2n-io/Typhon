@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import type { TimeRange } from '@/libs/profiler/model/uiTypes';
 import type { Camera } from '@/libs/dbmap/camera';
 import { useProfilerViewStore } from './useProfilerViewStore';
+import { animateViewportToRange } from '../shell/commands/profilerCommands';
 import { restoreDbMapCamera } from '../shell/commands/openDbMap';
 import type { ProfilerSelection } from '@/libs/profiler/model/traceModel';
 import { useSelectedResourceStore, type SelectedResource } from './useSelectedResourceStore';
@@ -152,14 +153,27 @@ function restoreSideEffect(entry: NavEntry) {
     } else {
       useSelectionStore.getState().select(entry.selection.kind === 'tick' ? 'tick' : 'span', entry.selection);
     }
-    // Snap the viewport to the target range — back/forward is a teleport to a prior place, not a
-    // smooth journey (browser semantics). This used to call animateViewportToRange (an 800 ms
-    // ease-out tween): harmless while every tick shared one viewport, but #345 gave each tick its
-    // own framing, so the tween turned into a visible slide between adjacent ticks on every
-    // back/forward — a regression. commitViewRange writes both slots atomically so TimeArea +
-    // TickOverview update on the next frame. (jumpToTimeRange keeps the tween — that is a single,
-    // deliberate jump where easing reads as intentional, not as lag.)
-    useProfilerViewStore.getState().commitViewRange(entry.viewRange);
+    // Width-aware restore: snap on tick-to-tick navigations (similar widths → snapping prevents the
+    // annoying slide between adjacent tick framings, the #345 regression that the original fix
+    // targeted), tween on real zoom changes (substantially different widths → the user did a
+    // drag-zoom or zoom-out, so the back/forward should mirror that gesture with a matching
+    // ease-out so it reads as "I'm going back to the wider/narrower view I just came from").
+    //
+    // Threshold: width ratio ≥ 1.5×. Same-width tick navigations land below this and snap;
+    // drag-to-zoom (typically 5-10×) and zoom-out-to-overview transitions land above and animate.
+    // commitViewRange fallback when either viewport is degenerate keeps the path safe — animating
+    // to/from an empty viewport would either no-op or render garbage.
+    const cur = useProfilerViewStore.getState().viewRange;
+    const curWidth = cur.endUs - cur.startUs;
+    const tgtWidth = entry.viewRange.endUs - entry.viewRange.startUs;
+    const widthRatio = curWidth > 0 && tgtWidth > 0
+      ? Math.max(curWidth / tgtWidth, tgtWidth / curWidth)
+      : 1;
+    if (widthRatio >= 1.5) {
+      animateViewportToRange(entry.viewRange);
+    } else {
+      useProfilerViewStore.getState().commitViewRange(entry.viewRange);
+    }
   } else if (entry.kind === 'dbmap-navigated') {
     // Flies the map camera back to the recorded framing; a no-op when the File Map panel is not mounted.
     restoreDbMapCamera(entry.camera);

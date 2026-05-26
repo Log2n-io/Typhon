@@ -3494,6 +3494,13 @@
               "string"
             ],
             "format": "int32"
+          },
+          "direction": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "default": "top-down"
           }
         }
       },
@@ -5789,16 +5796,14 @@
         }
       },
       "SaveReplayRequest": {
-        "required": [
-          "path"
-        ],
         "type": "object",
         "properties": {
           "path": {
             "type": [
               "null",
               "string"
-            ]
+            ],
+            "default": ""
           }
         }
       },
