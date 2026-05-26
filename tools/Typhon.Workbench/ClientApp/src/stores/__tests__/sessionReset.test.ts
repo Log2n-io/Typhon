@@ -3,6 +3,7 @@ import { resetSessionScopedState, installSessionResetSync } from '@/stores/reset
 import { useSessionStore } from '@/stores/useSessionStore';
 import { useSelectionStore } from '@/stores/useSelectionStore';
 import { useNavHistoryStore } from '@/stores/useNavHistoryStore';
+import { useQueryCatalogStore } from '@/panels/QueryAnalyzer/useQueryCatalogStore';
 import { installNavHistorySync } from '@/stores/navHistorySync';
 import type { SessionDto } from '@/api/generated/model';
 
@@ -34,6 +35,26 @@ describe('resetSessionScopedState', () => {
 
     expect(useSelectionStore.getState().leaf).toBeNull();
     expect(useNavHistoryStore.getState().entries).toHaveLength(0);
+  });
+
+  it('AC3.16: clears the Query Analyzer catalog filters but PRESERVES the sort preference', () => {
+    // Trace-specific numeric filters (system / archetype ids) must not bleed into a new session;
+    // the sort is a PC-1 preference and survives the wipe.
+    const qa = useQueryCatalogStore.getState();
+    qa.setSearch('damage');
+    qa.setSystemFilter(7);
+    qa.setArchetypeFilter(42);
+    qa.toggleExpanded('0:1');
+    qa.setSort({ key: 'count', dir: 'asc' });
+
+    resetSessionScopedState();
+
+    const next = useQueryCatalogStore.getState();
+    expect(next.search).toBe('');
+    expect(next.systemFilter).toBeNull();
+    expect(next.archetypeFilter).toBeNull();
+    expect(next.expandedRowId).toBeNull();
+    expect(next.sort).toEqual({ key: 'count', dir: 'asc' });
   });
 });
 

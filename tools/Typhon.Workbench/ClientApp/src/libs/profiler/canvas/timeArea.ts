@@ -1,7 +1,7 @@
 import type { ChunkSpan, OffCpuStore, ProfilerSelection, SpanData, TickData } from '@/libs/profiler/model/traceModel';
 import type { TimeRange, TrackLayout, Viewport } from '@/libs/profiler/model/uiTypes';
 import type { TimeAreaHover } from './timeAreaHitTest';
-import { relativeLuminance } from '@/libs/colors';
+import { relativeLuminanceHex } from '@/libs/color/contrast';
 import {
   colorForChunk,
   colorForSpan,
@@ -10,7 +10,7 @@ import {
   formatRulerLabel,
   setupCanvas,
 } from './canvasUtils';
-import type { SpanColorMode } from '@/stores/useProfilerViewStore';
+import type { SpanColorMode, SpanPalette } from '@/stores/useProfilerViewStore';
 import { drawGaugeSummaryStrip, GROUP_RENDERERS, type GaugeData } from './gauges/renderers';
 import { GAUGE_TRACK_ID_SET, getGaugeGroupSpec } from './gauges/region';
 import type { StudioTheme } from './theme';
@@ -211,7 +211,7 @@ const TEXT_ON_BAR_CACHE_MAX = 512;
 function readableOnBar(barHex: string, theme: StudioTheme): string {
   let pick = _textOnBarCache.get(barHex);
   if (pick === undefined) {
-    pick = relativeLuminance(barHex) > 0.5 ? 'dark' : 'light';
+    pick = relativeLuminanceHex(barHex) > 0.5 ? 'dark' : 'light';
     if (_textOnBarCache.size >= TEXT_ON_BAR_CACHE_MAX) {
       _textOnBarCache.clear();
     }
@@ -350,6 +350,11 @@ export interface TimeAreaInputs {
    */
   spanColorMode: SpanColorMode;
   /**
+   * Which palette the categorical span modes draw from. Sourced from `useProfilerViewStore.spanPalette`.
+   * Threaded alongside {@link spanColorMode} so the renderer's hot loop has a stable lookup.
+   */
+  spanPalette: SpanPalette;
+  /**
    * Whether the off-CPU overlay is shown on slot lanes. Sourced from the TimeArea filter toggle
    * (`useProfilerViewStore.showOffCpu`). When false the off-CPU pass is skipped entirely.
    */
@@ -370,7 +375,7 @@ export function drawTimeArea(
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
 
-  const { tracks, viewRange, vp, gutterWidth, legendsVisible, visibleTicks, ticks, selection, hover, dragSelection, crosshairX, gaugeData, helpHover, pendingRangesUs, spanColorMode, showOffCpu } = inputs;
+  const { tracks, viewRange, vp, gutterWidth, legendsVisible, visibleTicks, ticks, selection, hover, dragSelection, crosshairX, gaugeData, helpHover, pendingRangesUs, spanColorMode, spanPalette, showOffCpu } = inputs;
   const contentWidth = width - gutterWidth;
   // Height of the pinned ruler band (ruler + gap below it). Everything above this line is always
   // visible regardless of vertical scroll; tracks below are clipped to this boundary.
@@ -545,7 +550,7 @@ export function drawTimeArea(
     if (track.id.startsWith('slot-')) {
       const threadSlot = Number.parseInt(track.id.slice(5), 10);
       drawSlotLane(ctx, track, threadSlot, ticks, visibleTicks, visStartUs, visEndUs, gutterWidth, width, pxOfUs, ty, selection, hover, theme,
-        spanColorMode, gaugeData.offCpuBySlot.get(threadSlot), showOffCpu);
+        spanColorMode, spanPalette, gaugeData.offCpuBySlot.get(threadSlot), showOffCpu);
       continue;
     }
 
@@ -553,7 +558,7 @@ export function drawTimeArea(
     // the slot-lane chunk row.
     if (track.id.startsWith('system-')) {
       const systemIdx = Number.parseInt(track.id.slice(7), 10);
-      drawSystemLane(ctx, systemIdx, visibleTicks, gutterWidth, width, pxOfUs, ty, selection, hover, theme, spanColorMode);
+      drawSystemLane(ctx, systemIdx, visibleTicks, gutterWidth, width, pxOfUs, ty, selection, hover, theme, spanColorMode, spanPalette);
       continue;
     }
 
@@ -874,6 +879,7 @@ function drawSlotLane(
   hover: TimeAreaHover | null,
   theme: StudioTheme,
   spanColorMode: SpanColorMode,
+  spanPalette: SpanPalette,
   offCpuStore: OffCpuStore | undefined,
   showOffCpu: boolean,
 ): void {
@@ -890,7 +896,7 @@ function drawSlotLane(
         const x2 = pxOfUs(chunk.endUs);
         if (x2 < gutterWidth || x1 > width) continue;
         const w = Math.max(x2 - x1, MIN_RECT_WIDTH);
-        const chunkColor = colorForChunk(chunk, spanColorMode, theme.spans);
+        const chunkColor = colorForChunk(chunk, spanColorMode, theme.spans, spanPalette, theme.isDark);
         ctx.fillStyle = chunkColor;
         ctx.fillRect(x1, ty + SPAN_BAR_MARGIN, w, SPAN_BAR_HEIGHT);
         if (selection && selection.kind === 'chunk' && isSameChunk(selection.chunk, chunk)) {
@@ -1010,7 +1016,7 @@ function drawSlotLane(
         flushDepth(d);
         // Idle / BetweenTick bars (pinChunkRow) draw with a deliberately muted theme.idleBar so
         // they're spotted by being LESS visible than real work — light grey on light, dark grey on dark.
-        const c = pinChunkRow ? theme.idleBar : colorForSpan(span, spanColorMode, theme.spans);
+        const c = pinChunkRow ? theme.idleBar : colorForSpan(span, spanColorMode, theme.spans, spanPalette, theme.isDark);
         if (c !== prevFill) { ctx.fillStyle = c; prevFill = c; }
         ctx.fillRect(x1, sy + SPAN_BAR_MARGIN, w, SPAN_BAR_HEIGHT);
         coalX1[d] = x1;
@@ -1022,7 +1028,7 @@ function drawSlotLane(
 
       // Wide bar
       flushDepth(d);
-      const c = pinChunkRow ? theme.idleBar : colorForSpan(span, spanColorMode, theme.spans);
+      const c = pinChunkRow ? theme.idleBar : colorForSpan(span, spanColorMode, theme.spans, spanPalette, theme.isDark);
       if (c !== prevFill) { ctx.fillStyle = c; prevFill = c; }
       ctx.fillRect(x1, sy + SPAN_BAR_MARGIN, w, SPAN_BAR_HEIGHT);
 
@@ -1085,7 +1091,7 @@ function drawSlotLane(
 
 /**
  * Per-system chunk lane — one row, filters chunks by `systemIndex`. Same bar colouring as the
- * slot-lane chunk row (`getSystemColor(systemIndex, theme.spans)`). No label text on the bar —
+ * slot-lane chunk row (`colorForChunk(chunk, spanColorMode, …)`). No label text on the bar —
  * the gutter already shows the system name.
  */
 function drawSystemLane(
@@ -1100,6 +1106,7 @@ function drawSystemLane(
   hover: TimeAreaHover | null,
   theme: StudioTheme,
   spanColorMode: SpanColorMode,
+  spanPalette: SpanPalette,
 ): void {
   for (const tick of visibleTicks) {
     for (const chunk of tick.chunks) {
@@ -1108,7 +1115,7 @@ function drawSystemLane(
       const x2 = pxOfUs(chunk.endUs);
       if (x2 < gutterWidth || x1 > width) continue;
       const w = Math.max(x2 - x1, MIN_RECT_WIDTH);
-      ctx.fillStyle = colorForChunk(chunk, spanColorMode, theme.spans);
+      ctx.fillStyle = colorForChunk(chunk, spanColorMode, theme.spans, spanPalette, theme.isDark);
       ctx.fillRect(x1, ty + SPAN_BAR_MARGIN, w, SPAN_BAR_HEIGHT);
       if (selection && selection.kind === 'chunk' && isSameChunk(selection.chunk, chunk)) {
         ctx.strokeStyle = theme.selectedOutline;

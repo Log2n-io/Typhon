@@ -67,6 +67,28 @@ export default function QueryAnalyzerPanel(_props: IDockviewPanelProps) {
     window.addEventListener('mouseup', onUp);
   }, []);
 
+  // AC3.11 / view §6 — panel-level keyboard bindings: `[` / `]` cycle Plan / Executions tabs; `s` triggers the
+  // detail-header "go to source" button (degrades silently when the source isn't attributed — the button isn't in
+  // the DOM). Skip when focus is in an input / textarea / contenteditable so typing isn't hijacked.
+  const onPanelKeyDown = (e: React.KeyboardEvent<HTMLDivElement>): void => {
+    const target = e.target as HTMLElement;
+    const tag = target.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || target.isContentEditable) return;
+    if (e.key === '[' || e.key === ']') {
+      const store = useQueryAnalyzerStore.getState();
+      store.setActiveTab(store.activeTab === 'plan' ? 'executions' : 'plan');
+      e.preventDefault();
+      return;
+    }
+    if (e.key === 's' || e.key === 'S') {
+      const btn = e.currentTarget.querySelector<HTMLButtonElement>('[data-testid="query-detail-open-in-editor"]');
+      if (btn) {
+        btn.click();
+        e.preventDefault();
+      }
+    }
+  };
+
   if (sessionKind !== 'trace' && sessionKind !== 'attach') {
     return <CenteredMessage><p>Query Analyzer is available in Trace and Attach sessions only.</p></CenteredMessage>;
   }
@@ -90,7 +112,7 @@ export default function QueryAnalyzerPanel(_props: IDockviewPanelProps) {
   }
 
   return (
-    <div ref={containerRef} className="flex h-full w-full overflow-hidden bg-background" data-testid="query-analyzer">
+    <div ref={containerRef} className="flex h-full w-full overflow-hidden bg-background" data-testid="query-analyzer" onKeyDown={onPanelKeyDown}>
       <div className="h-full overflow-hidden" style={{ width: `${masterPct}%` }}>
         <QueryAnalyzerMaster />
       </div>

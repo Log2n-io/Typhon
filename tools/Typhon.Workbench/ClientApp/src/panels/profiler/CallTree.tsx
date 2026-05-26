@@ -13,6 +13,7 @@ import {
   WHOLE_SESSION_SCOPE,
   type CallTreeScope,
 } from '@/stores/useCallTreeScopeStore';
+import { useCallTreePrefsStore } from '@/stores/useCallTreePrefsStore';
 import { matchMethodName } from '@/panels/profiler/methodNameMatch';
 import { friendlyMethodName } from '@/panels/profiler/methodName';
 import { useCpuFrameManifest } from '@/hooks/profiler/useCpuFrameManifest';
@@ -51,10 +52,15 @@ export default function CallTree() {
   const sessionId = useSessionStore((s) => s.sessionId);
   const kind = useSessionStore((s) => s.kind);
 
-  const [viewMode, setViewMode] = useState<CallTreeViewMode>('wall-clock');
-  // Fold direction (§8.7). top-down = callees · bottom-up = callers · sandwich = both around the drilled frame.
-  const [direction, setDirection] = useState<'top-down' | 'bottom-up' | 'sandwich'>('top-down');
-  const [groupByCategory, setGroupByCategory] = useState(false);
+  // viewMode / direction / groupByCategory are persisted UX prefs (PC-1, AC3.16) — they survive Workbench reloads
+  // and session changes. The Call Tree's *scope* stays session-scoped via `useCallTreeScopeStore`; only the lenses
+  // ride here.
+  const viewMode = useCallTreePrefsStore((s) => s.viewMode);
+  const setViewMode = useCallTreePrefsStore((s) => s.setViewMode);
+  const direction = useCallTreePrefsStore((s) => s.direction);
+  const setDirection = useCallTreePrefsStore((s) => s.setDirection);
+  const groupByCategory = useCallTreePrefsStore((s) => s.groupByCategory);
+  const setGroupByCategory = useCallTreePrefsStore((s) => s.setGroupByCategory);
   // The breadcrumb is the panel-local navigation stack: each entry is a full view state (time-window scope +
   // frame-root). Every scope command and every Crosshair drill pushes one; clicking a crumb restores it. Entry 0
   // is always the whole-session root. Deliberately panel-local exploration, not the global nav history.

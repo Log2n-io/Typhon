@@ -8,6 +8,8 @@ import { useSelectionStore } from '@/stores/useSelectionStore';
 import { useQueryCatalogStore } from '@/panels/QueryAnalyzer/useQueryCatalogStore';
 import { useQueryAnalyzerStore } from '../useQueryAnalyzerStore';
 import { makeDef } from './fixtures';
+import { categoricalColor } from '@/libs/color/categorical';
+import { rgbCss } from '@/libs/color/contrast';
 
 // Mutable holder so each test can swap the catalog the (mocked) data hook returns. `vi.hoisted` lifts it
 // above the hoisted `vi.mock` factory below.
@@ -73,6 +75,60 @@ describe('QueryAnalyzerMaster', () => {
     renderMaster();
     const rows = screen.getAllByTestId('query-analyzer-row');
     expect(rows.map((r) => r.getAttribute('data-row-id'))).toEqual(['0:2']);
+  });
+
+  it('AC3.10: owner systems render with their shared categorical identity dot', () => {
+    hoisted.defs = [makeDef({ localId: 1, target: 1, totalWallNs: 100_000, owners: [0] })];
+    renderMaster();
+    const row = screen.getByTestId('query-analyzer-row');
+    const expected = rgbCss(categoricalColor('Movement'));
+    const dots = Array.from(row.querySelectorAll('span[aria-hidden]')) as HTMLElement[];
+    expect(dots.some((d) => d.style.backgroundColor === expected)).toBe(true);
+  });
+
+  it('AC3.11 / §6: ↑/↓/Home/End move the catalog selection and fire onSelect for each step', () => {
+    hoisted.defs = [
+      makeDef({ localId: 1, target: 1, totalWallNs: 140_000 }), // ranked #1 (heaviest)
+      makeDef({ localId: 2, target: 2, totalWallNs: 60_000 }),  // ranked #2
+      makeDef({ localId: 3, target: 1, totalWallNs: 30_000 }),  // ranked #3
+    ];
+    renderMaster();
+
+    // Seed: pick the first row (heaviest = localId 1) so we have a starting point.
+    fireEvent.click(screen.getAllByTestId('query-analyzer-row').find((r) => r.getAttribute('data-row-id') === '0:1')!);
+    expect(useQueryAnalyzerStore.getState().selectedQuery).toEqual({ kind: 0, localId: 1 });
+
+    const catalog = screen.getByTestId('query-analyzer-catalog');
+
+    fireEvent.keyDown(catalog, { key: 'ArrowDown' });
+    expect(useQueryAnalyzerStore.getState().selectedQuery).toEqual({ kind: 0, localId: 2 });
+
+    fireEvent.keyDown(catalog, { key: 'ArrowDown' });
+    expect(useQueryAnalyzerStore.getState().selectedQuery).toEqual({ kind: 0, localId: 3 });
+
+    // At the last row → ArrowDown clamps (no change).
+    fireEvent.keyDown(catalog, { key: 'ArrowDown' });
+    expect(useQueryAnalyzerStore.getState().selectedQuery).toEqual({ kind: 0, localId: 3 });
+
+    fireEvent.keyDown(catalog, { key: 'ArrowUp' });
+    expect(useQueryAnalyzerStore.getState().selectedQuery).toEqual({ kind: 0, localId: 2 });
+
+    fireEvent.keyDown(catalog, { key: 'Home' });
+    expect(useQueryAnalyzerStore.getState().selectedQuery).toEqual({ kind: 0, localId: 1 });
+
+    fireEvent.keyDown(catalog, { key: 'End' });
+    expect(useQueryAnalyzerStore.getState().selectedQuery).toEqual({ kind: 0, localId: 3 });
+  });
+
+  it('AC3.11 / §6: ArrowDown with no prior selection lands on the first row', () => {
+    hoisted.defs = [
+      makeDef({ localId: 1, target: 1, totalWallNs: 100_000 }),
+      makeDef({ localId: 2, target: 2, totalWallNs: 50_000 }),
+    ];
+    renderMaster();
+    expect(useQueryAnalyzerStore.getState().selectedQuery).toBeNull();
+    fireEvent.keyDown(screen.getByTestId('query-analyzer-catalog'), { key: 'ArrowDown' });
+    expect(useQueryAnalyzerStore.getState().selectedQuery).toEqual({ kind: 0, localId: 1 });
   });
 
   it('AC4: clicking a row selects it in the store AND writes the bus query leaf', () => {

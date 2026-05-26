@@ -1,5 +1,7 @@
 import type { Viewport } from '@/libs/profiler/model/uiTypes';
 import type { StudioTheme } from './theme';
+import { categoricalColor } from '@/libs/color/categorical';
+import { rgbCss } from '@/libs/color/contrast';
 
 // ═══════════════════════════════════════════════════════════════════════
 // Static identity palettes — ported from the old profiler client.
@@ -287,14 +289,6 @@ export function drawTooltip(
   }
 }
 
-/**
- * Resolve a system-indexed top-level chunk color. The caller supplies the active span palette (dark or light)
- * via the theme — the same `index` resolves to the semantically-matched slot in either palette.
- */
-export function getSystemColor(index: number, palette: readonly string[] = SPAN_PALETTE): string {
-  return palette[index % palette.length];
-}
-
 /** Deterministic hash of a string into an unsigned int — used by the per-name color path. */
 function hashString(s: string): number {
   let hash = 0;
@@ -324,22 +318,55 @@ export function durationHeatColor(durationUs: number): string {
 }
 
 /**
- * Decide the bar-fill colour for a span based on the user's chosen color-by mode. Centralised here
- * so the renderer's hot loop has one switch point and the FilterTree's "color spans by …" dropdown
- * has one helper to call. `name` mirrors the pre-toggle behaviour (hash span.name into the palette).
+ * Which palette the categorical span/chunk modes draw from (mirror of `useProfilerViewStore.SpanPalette`; inlined
+ * as a union so this canvas lib has no store dependency). `duration` is a sequential heat ramp under both.
+ */
+export type SpanPaletteMode = 'categorical' | 'curated';
+
+// Categorical span-bar lightness. Dark theme keeps the default categorical swatch (0.58); light theme darkens it
+// so bars read against off-white cards and the selected-span outline (`#111827`) stays visible — the same reason
+// `SPAN_PALETTE_LIGHT` exists. Saturation stays at the categorical default (0.62).
+const CAT_SPAN_LIGHT_DARK = 0.58;
+const CAT_SPAN_LIGHT_LIGHT = 0.42;
+
+/** Shared DS-2 categorical span/chunk colour as a CSS string, theme-aware on lightness. Same id → same hue everywhere. */
+function categoricalSpanColor(id: string | number, isDark: boolean): string {
+  return rgbCss(categoricalColor(id, 0.62, isDark ? CAT_SPAN_LIGHT_DARK : CAT_SPAN_LIGHT_LIGHT));
+}
+
+/**
+ * Decide the bar-fill colour for a span based on the user's chosen color-by mode. Centralised here so the
+ * renderer's hot loop has one switch point. Under `spanPalette === 'categorical'` (default) the name/thread/depth
+ * modes draw from the shared DS-2 {@link categoricalColor} scale (stable hue-per-object across views); under
+ * `'curated'` they index the hand-tuned `palette` (the legacy djb2-into-SPAN_PALETTE behaviour). `duration` is the
+ * sequential heat ramp under both.
  */
 export function colorForSpan(
   span: { name: string; threadSlot: number; depth?: number; durationUs: number },
   mode: 'name' | 'thread' | 'depth' | 'duration',
   palette: readonly string[],
+  spanPalette: SpanPaletteMode,
+  isDark: boolean,
 ): string {
+  if (mode === 'duration') {
+    return durationHeatColor(span.durationUs);
+  }
+  if (spanPalette === 'categorical') {
+    switch (mode) {
+      case 'thread':
+        return categoricalSpanColor(span.threadSlot, isDark);
+      case 'depth':
+        return categoricalSpanColor(span.depth ?? 0, isDark);
+      case 'name':
+      default:
+        return categoricalSpanColor(span.name, isDark);
+    }
+  }
   switch (mode) {
     case 'thread':
       return palette[span.threadSlot % palette.length];
     case 'depth':
       return palette[(span.depth ?? 0) % palette.length];
-    case 'duration':
-      return durationHeatColor(span.durationUs);
     case 'name':
     default:
       return palette[hashString(span.name) % palette.length];
@@ -359,15 +386,31 @@ export function colorForSpan(
  * choice consistent across the whole timeline rather than only affecting the inner spans.
  */
 export function colorForChunk(
-  chunk: { systemIndex: number; threadSlot: number; durationUs: number },
+  chunk: { systemIndex: number; systemName: string; threadSlot: number; durationUs: number },
   mode: 'name' | 'thread' | 'depth' | 'duration',
   palette: readonly string[],
+  spanPalette: SpanPaletteMode,
+  isDark: boolean,
 ): string {
+  if (mode === 'duration') {
+    return durationHeatColor(chunk.durationUs);
+  }
+  if (spanPalette === 'categorical') {
+    switch (mode) {
+      case 'thread':
+        return categoricalSpanColor(chunk.threadSlot, isDark);
+      case 'depth':
+        // Chunks are all depth 0 — one shared slot keeps "Depth" meaningful (only nested spans differ by depth).
+        return categoricalSpanColor(0, isDark);
+      case 'name':
+      default:
+        // Keyed on systemName (not systemIndex) so a system reads the same hue here as in the DAG / matrix / Query Analyzer.
+        return categoricalSpanColor(chunk.systemName, isDark);
+    }
+  }
   switch (mode) {
     case 'thread':
       return palette[chunk.threadSlot % palette.length];
-    case 'duration':
-      return durationHeatColor(chunk.durationUs);
     case 'depth':
       return palette[0];
     case 'name':

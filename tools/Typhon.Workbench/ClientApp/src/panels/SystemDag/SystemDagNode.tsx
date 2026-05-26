@@ -4,6 +4,8 @@ import { Hourglass } from 'lucide-react';
 import { useThemeStore } from '@/stores/useThemeStore';
 import { useQueryCatalogStore } from '@/panels/QueryAnalyzer/useQueryCatalogStore';
 import { openViewQueryAnalyzer, revealQueryInAnalyzer } from '@/shell/commands/profilerCommands';
+import { categoricalColor } from '@/libs/color/categorical';
+import { rgbCss } from '@/libs/color/contrast';
 import type { DagNodeData } from './dagModel';
 import type { SystemStat } from './useSystemStats';
 
@@ -42,6 +44,14 @@ function SystemDagNodeInner({
 }) {
   const theme = useThemeStore((s) => s.theme);
   const kindClass = kindClasses(data.kind);
+  // DS-2 stable hue-per-object: the system's shared categorical identity colour — the SAME hue the timeline lane,
+  // Access-Matrix header, and Query Analyzer show for this system. Rendered as a clear 6px left band PLUS a faint
+  // title-row tint of the same hue so identity actually reads across views (the original 3px stripe was too thin
+  // to land — drowned by the heat border on hot nodes). Heat stays on the border (intensity) so both channels
+  // coexist: "which system" via the band/tint, "how hot" via the border.
+  const accentRgb = categoricalColor(data.systemName);
+  const accent = rgbCss(accentRgb);
+  const accentTintBg = `rgba(${accentRgb[0]}, ${accentRgb[1]}, ${accentRgb[2]}, 0.12)`;
   const exclusiveBar = data.isExclusivePhase ? 'border-l-4 border-l-amber-500' : '';
   // Selection wins over hover — once you click the node the primary ring locks in; hover only
   // illuminates when no harder selection is active. Hover comes from the cross-panel store, so
@@ -99,7 +109,13 @@ function SystemDagNodeInner({
       title={data.isOnDominantCp ? 'On the critical path of the dominant tick' : undefined}
     >
       <Handle type="target" position={Position.Left} className="!h-2 !w-2 !border-0 !bg-muted-foreground" />
-      <div className="flex items-center justify-between gap-1 px-2 pt-1">
+      <span
+        aria-hidden
+        className="pointer-events-none absolute inset-y-0 left-0 w-[6px] rounded-l"
+        style={{ backgroundColor: accent }}
+        data-testid={`system-dag-accent-${data.systemName}`}
+      />
+      <div className="flex items-center justify-between gap-1 px-2 pt-1" style={{ backgroundColor: accentTintBg }}>
         <span className="truncate font-mono text-fs-sm font-semibold text-foreground" title={data.systemName}>
           {data.systemName}
         </span>

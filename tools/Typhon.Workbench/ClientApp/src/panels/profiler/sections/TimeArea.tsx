@@ -232,6 +232,7 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
   const gaugeVisibility = useProfilerViewStore((s) => s.gaugeVisibility);
   const engineOpVisibility = useProfilerViewStore((s) => s.engineOpVisibility);
   const spanColorMode = useProfilerViewStore((s) => s.spanColorMode);
+  const spanPalette = useProfilerViewStore((s) => s.spanPalette);
   const dynamicTrackHeight = useProfilerViewStore((s) => s.dynamicTrackHeight);
   const showOffCpu = useProfilerViewStore((s) => s.showOffCpu);
   dynamicTrackHeightRef.current = dynamicTrackHeight;
@@ -513,9 +514,10 @@ export default function TimeArea({ ticks, gaugeData, threadNames: threadNamesMap
       helpHover: helpHoverRef.current,
       pendingRangesUs,
       spanColorMode,
+      spanPalette,
       showOffCpu,
     }, getStudioThemeTokens());
-  }, [layout, ticks, viewRange, legendsVisible, selection, applyViewRange, commitViewRange, onGutterWidthChange, gaugeData, pendingRangesUs, spanColorMode, showOffCpu]);
+  }, [layout, ticks, viewRange, legendsVisible, selection, applyViewRange, commitViewRange, onGutterWidthChange, gaugeData, pendingRangesUs, spanColorMode, spanPalette, showOffCpu]);
 
   const scheduleRender = useCallback((): void => {
     cancelAnimationFrame(rafRef.current);

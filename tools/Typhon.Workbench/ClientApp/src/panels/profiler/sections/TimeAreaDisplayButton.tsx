@@ -16,6 +16,8 @@ import { useProfilerViewStore } from '@/stores/useProfilerViewStore';
 export function TimeAreaDisplayButton(): React.JSX.Element {
   const spanColorMode = useProfilerViewStore((s) => s.spanColorMode);
   const setSpanColorMode = useProfilerViewStore((s) => s.setSpanColorMode);
+  const spanPalette = useProfilerViewStore((s) => s.spanPalette);
+  const setSpanPalette = useProfilerViewStore((s) => s.setSpanPalette);
   const showOffCpu = useProfilerViewStore((s) => s.showOffCpu);
   const toggleShowOffCpu = useProfilerViewStore((s) => s.toggleShowOffCpu);
   const dynamicTrackHeight = useProfilerViewStore((s) => s.dynamicTrackHeight);
@@ -55,6 +57,25 @@ export function TimeAreaDisplayButton(): React.JSX.Element {
             <option value="thread">Thread</option>
             <option value="depth">Depth</option>
             <option value="duration">Duration (heat)</option>
+          </select>
+        </label>
+        {/*
+         * Palette — which scale the categorical lenses (name / thread / depth) draw from:
+         *   categorical → the shared DS-2 scale (a system/function reads the same hue across views) — default
+         *   curated     → the hand-tuned 8-colour warm flame ramp (pre-DS-2 aesthetic)
+         * Disabled in Duration mode, which is a fixed heat ramp regardless of palette.
+         */}
+        <label className="flex items-center gap-2 pt-2 text-xs">
+          <span className="text-muted-foreground shrink-0">Palette</span>
+          <select
+            value={spanPalette}
+            onChange={(e) => setSpanPalette(e.target.value as typeof spanPalette)}
+            disabled={spanColorMode === 'duration'}
+            title={spanColorMode === 'duration' ? 'Duration mode uses the heat ramp — palette applies to Name / Thread / Depth.' : undefined}
+            className="flex-1 h-7 rounded-sm border border-input bg-background px-2 text-sm disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <option value="categorical">Categorical (shared)</option>
+            <option value="curated">Curated</option>
           </select>
         </label>
         {/*

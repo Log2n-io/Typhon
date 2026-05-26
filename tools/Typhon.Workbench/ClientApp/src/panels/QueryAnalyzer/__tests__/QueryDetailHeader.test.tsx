@@ -3,6 +3,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { QueryDetailHeader } from '../QueryDetailHeader';
 import { makeDef } from './fixtures';
+import { categoricalColor } from '@/libs/color/categorical';
+import { rgbCss } from '@/libs/color/contrast';
 
 // Spy on the shared reveal commands the header's hand-off buttons call (4D-1, AC3.14).
 const spies = vi.hoisted(() => ({
@@ -47,6 +49,14 @@ describe('QueryDetailHeader', () => {
     const noSrc = makeDef({ localId: 2, target: 1, totalWallNs: 1000, method: '', file: '', line: 0 });
     render(<QueryDetailHeader definition={noSrc} archetypeName="Position" ownerNames={[]} targetId={1} targetIsComponent />);
     expect(screen.queryByTestId('query-detail-open-in-editor')).toBeNull();
+  });
+
+  it('AC3.10: an owner renders its shared categorical identity dot', () => {
+    render(<QueryDetailHeader definition={def} archetypeName="Position" ownerNames={['Movement']} targetId={1} targetIsComponent />);
+    const ownerBtn = screen.getByTestId('query-detail-owner');
+    const dot = ownerBtn.querySelector('span[aria-hidden]') as HTMLElement | null;
+    expect(dot).toBeTruthy();
+    expect(dot!.style.backgroundColor).toBe(rgbCss(categoricalColor('Movement')));
   });
 
   it('AC-D1.1: clicking an owner reveals it in the System DAG', () => {

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import type { CallTreeResponse } from '@/hooks/profiler/useCallTree';
 import { spanKindScope, type CallTreeScope } from '@/stores/useCallTreeScopeStore';
+import { useCallTreePrefsStore } from '@/stores/useCallTreePrefsStore';
 
 /**
  * Component tests for the Call Tree panel. Covers the §8.7 surface (#364) — the view-mode toggle label and the
@@ -71,6 +72,9 @@ beforeEach(() => {
   mockData = null;
   mockScope = null;
   mockOwner = null;
+  // The Call Tree's viewMode/direction/groupByCategory now live in a persisted prefs store (AC3.16); reset to
+  // defaults so a prior test that set the direction to 'sandwich' doesn't leak into the next render.
+  useCallTreePrefsStore.setState({ viewMode: 'wall-clock', direction: 'top-down', groupByCategory: false });
 });
 afterEach(cleanup);
 

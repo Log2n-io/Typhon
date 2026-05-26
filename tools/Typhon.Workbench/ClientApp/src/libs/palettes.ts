@@ -9,7 +9,8 @@
  */
 
 import { TIMELINE_PALETTE } from '@/libs/profiler/canvas/canvasUtils';
-import { lighten } from '@/libs/colors';
+import { lighten, rgbToHex } from '@/libs/color/contrast';
+import { categoricalColor } from '@/libs/color/categorical';
 
 /** One categorical colour as a stroke (bright edge) + fill (muted body) pair. */
 export interface PaletteColor {
@@ -55,25 +56,21 @@ export function colorForPhase(phaseIndex: number): PaletteColor {
 }
 
 /**
- * System-identity palette — the {@link PHASE_PALETTE} with the alarm-red ramp hues (slots 11/12,
- * red-orange + dark red) removed. A system bar is coloured by hashing its name into this palette;
- * red is deliberately excluded so it stays available to flag *real* signal (overload, GC, slow
- * ticks) rather than an arbitrary system that merely happened to hash there.
+ * Fixed worker-occupancy ribbon fill for the Critical Path (was `SYSTEM_PALETTE[5].fill` before the DS-2
+ * system-colour consolidation). NOT a system-identity colour — one chosen warm tint for the occupancy band;
+ * pinned to its prior value (the Turbo orange, ramp slot 10) so the ribbon stays pixel-identical.
  */
-export const SYSTEM_PALETTE: readonly PaletteColor[] = RAMP_ORDER.filter((i) => i !== 11 && i !== 12).map(pairFromRamp);
+export const OCCUPANCY_FILL = TIMELINE_PALETTE[10];
 
-/** djb2 — small, deterministic, allocation-free string hash. */
-function hashString(s: string): number {
-  let h = 5381;
-  for (let i = 0; i < s.length; i++) {
-    h = ((h << 5) + h + s.charCodeAt(i)) | 0;
-  }
-  return h < 0 ? -h : h;
-}
-
-/** Stable identity colour for a system, keyed by name — the same name always gets the same colour. */
+/**
+ * Stable identity colour for a system, keyed by name — the DS-2 shared categorical hue ({@link categoricalColor}),
+ * so a system reads the SAME hue here as in the timeline lanes, the System DAG accent, the Access-Matrix header,
+ * and the Query Analyzer (DS-2 "stable hue-per-object"). `fill` is the categorical swatch; `stroke` a lightened
+ * edge for bar outlines. Replaces the former djb2-hash-into-`SYSTEM_PALETTE` lookup — a parallel palette, now removed.
+ */
 export function colorForSystem(systemName: string): PaletteColor {
-  return SYSTEM_PALETTE[hashString(systemName) % SYSTEM_PALETTE.length];
+  const fill = rgbToHex(categoricalColor(systemName));
+  return { stroke: lighten(fill, 0.3), fill };
 }
 
 // ── Canvas identity palettes ────────────────────────────────────────────────

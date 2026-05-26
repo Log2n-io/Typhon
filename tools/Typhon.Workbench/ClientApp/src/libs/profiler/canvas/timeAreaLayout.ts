@@ -152,7 +152,7 @@ export function buildLayout(inputs: BuildLayoutInputs): LayoutResult {
 
   // Per-system chunk lanes (2d) — one track per ECS system that emitted ≥1 chunk. A second lens
   // on the chunk data: "when did System X run?" Same colour identity as the slot-lane chunk row
-  // (both go through `getSystemColor(systemIndex, theme.spans)` so a chunk has the same hex in
+  // (both go through `colorForChunk(chunk, spanColorMode, …)` so a chunk has the same hex in
   // both views). Default state = `summary` so a many-system trace doesn't eat the screen on
   // first open; user clicks the chevron to expand.
   if (perSystemLanesVisible) {

@@ -1,4 +1,4 @@
-import { useDeferredValue, useMemo, useState } from 'react';
+import { useDeferredValue, useMemo } from 'react';
 import { ArrowDown, ArrowUp, Copy } from 'lucide-react';
 import type { QueryDefinitionDto } from '@/api/generated/model';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
@@ -7,12 +7,14 @@ import { useSelectionStore } from '@/stores/useSelectionStore';
 import { useProfilerNameMaps } from '@/hooks/useProfilerNameMaps';
 import { useQueryDefinitions } from './useQueryDefinitions';
 import { QueryCatalogToolbar } from './QueryCatalogToolbar';
-import { useQueryCatalogStore, rowIdOf } from './useQueryCatalogStore';
+import { useQueryCatalogStore, rowIdOf, type SortKey, type SortState } from './useQueryCatalogStore';
 import { passesFilter } from './filter';
 import { findDuplicateDefinitions } from './duplicate-detection';
 import { toNumber } from './numeric';
 import { useQueryAnalyzerStore, selectValidQuery, type QueryRef } from './useQueryAnalyzerStore';
 import { formatNs, formatSelectivity, formatThousands, predicateSummary, queryKindLabel } from './format';
+import { categoricalColor } from '@/libs/color/categorical';
+import { rgbCss } from '@/libs/color/contrast';
 
 /**
  * The Query Analyzer master — the ranked, filterable query catalog (design §4.1). One row per
@@ -22,14 +24,6 @@ import { formatNs, formatSelectivity, formatThousands, predicateSummary, queryKi
  * the Inspector + nav history). Reuses the Catalog toolbar/filters/dup-detection from #342; the old
  * expansion-based table is superseded here and removed in 4D.
  */
-type SortKey = 'id' | 'count' | 'total' | 'selectivity';
-interface SortState {
-  key: SortKey;
-  dir: 'asc' | 'desc';
-}
-
-const DEFAULT_SORT: SortState = { key: 'total', dir: 'desc' };
-
 function sortValue(d: QueryDefinitionDto, key: SortKey): number {
   const agg = d.aggregate;
   switch (key) {
@@ -54,7 +48,8 @@ export function QueryAnalyzerMaster() {
   const archetypeFilter = useQueryCatalogStore((s) => s.archetypeFilter);
   const deferredSearch = useDeferredValue(search);
 
-  const [sort, setSort] = useState<SortState>(DEFAULT_SORT);
+  const sort = useQueryCatalogStore((s) => s.sort);
+  const setSort = useQueryCatalogStore((s) => s.setSort);
 
   const selectedQuery = useQueryAnalyzerStore((s) => selectValidQuery(s, sessionId));
   const selectedRowId = selectedQuery ? rowIdOf(selectedQuery.kind, selectedQuery.localId) : null;
@@ -98,13 +93,43 @@ export function QueryAnalyzerMaster() {
     useSelectionStore.getState().select('query', ref);
   }
 
+  // AC3.11 / view §6 — arrow-key catalog navigation. ↑/↓ moves selection one row, Home/End jumps to ends; Enter on
+  // a row is already handled per-TableRow (existing tabIndex={0} keydown). Selection drives the store + bus via
+  // `onSelect`, and we focus the newly-selected row so the focus ring follows. The handler lives on the catalog
+  // scroll container so it fires regardless of which row currently has DOM focus.
+  function onCatalogKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp' && e.key !== 'Home' && e.key !== 'End') return;
+    if (ranked.length === 0) return;
+    const currentIdx = selectedQuery
+      ? ranked.findIndex((d) => toNumber(d.instanceId.kind) === selectedQuery.kind && toNumber(d.instanceId.localId) === selectedQuery.localId)
+      : -1;
+    let nextIdx: number;
+    switch (e.key) {
+      case 'ArrowDown': nextIdx = currentIdx < 0 ? 0 : Math.min(currentIdx + 1, ranked.length - 1); break;
+      case 'ArrowUp':   nextIdx = currentIdx < 0 ? 0 : Math.max(currentIdx - 1, 0); break;
+      case 'Home':      nextIdx = 0; break;
+      case 'End':       nextIdx = ranked.length - 1; break;
+      default: return;
+    }
+    if (nextIdx === currentIdx) return;
+    e.preventDefault();
+    const d = ranked[nextIdx];
+    const nextRef: QueryRef = { kind: toNumber(d.instanceId.kind), localId: toNumber(d.instanceId.localId) };
+    onSelect(nextRef);
+    // Focus the new row so the focus ring follows the keyboard. Defer until React renders the new aria-selected state.
+    const container = e.currentTarget;
+    queueMicrotask(() => {
+      const el = container.querySelector<HTMLElement>(`[data-row-id="${nextRef.kind}:${nextRef.localId}"]`);
+      el?.focus();
+    });
+  }
+
   function toggleSort(key: SortKey) {
-    setSort((cur) =>
-      cur.key === key
-        ? { key, dir: cur.dir === 'asc' ? 'desc' : 'asc' }
-        // New column: numeric columns default to desc ("biggest first"), id to asc.
-        : { key, dir: key === 'id' ? 'asc' : 'desc' },
-    );
+    // New column: numeric columns default to desc ("biggest first"), id to asc.
+    const next: SortState = sort.key === key
+      ? { key, dir: sort.dir === 'asc' ? 'desc' : 'asc' }
+      : { key, dir: key === 'id' ? 'asc' : 'desc' };
+    setSort(next);
   }
 
   return (
@@ -115,7 +140,7 @@ export function QueryAnalyzerMaster() {
         archetypeOptions={archetypeOptions}
         systemOptions={systemOptions}
       />
-      <div className="flex-1 overflow-auto">
+      <div className="flex-1 overflow-auto" onKeyDown={onCatalogKeyDown} data-testid="query-analyzer-catalog">
         {ranked.length === 0 ? (
           <div className="p-3 text-fs-base text-muted-foreground">No definitions match the current filters.</div>
         ) : (
@@ -178,7 +203,22 @@ export function QueryAnalyzerMaster() {
                     <TableCell className="font-mono text-fs-base">{`${queryKindLabel(kind)} #${localId}`}</TableCell>
                     <TableCell className="font-mono text-fs-sm text-muted-foreground">{target}</TableCell>
                     <TableCell className="font-mono text-fs-sm">{predicateSummary(d)}</TableCell>
-                    <TableCell className="text-fs-base">{owners.length === 0 ? '—' : owners.join(', ')}</TableCell>
+                    <TableCell className="text-fs-base">
+                      {owners.length === 0 ? '—' : (
+                        <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                          {owners.map((name) => (
+                            <span key={name} className="inline-flex items-center gap-1">
+                              <span
+                                aria-hidden
+                                className="inline-block h-2 w-2 shrink-0 rounded-sm"
+                                style={{ backgroundColor: rgbCss(categoricalColor(name)) }}
+                              />
+                              {name}
+                            </span>
+                          ))}
+                        </span>
+                      )}
+                    </TableCell>
                     <TableCell className="text-right tabular-nums text-fs-base">{formatThousands(toNumber(agg.executionCount))}</TableCell>
                     <TableCell className="text-right tabular-nums text-fs-base font-medium">{formatNs(toNumber(agg.totalWallNs))}</TableCell>
                     <TableCell className="text-right tabular-nums text-fs-sm text-muted-foreground">

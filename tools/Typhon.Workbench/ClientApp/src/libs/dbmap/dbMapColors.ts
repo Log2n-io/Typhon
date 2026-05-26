@@ -5,6 +5,7 @@
 
 import { DbPageType, NO_SEGMENT, type DbMapEncoding } from './types';
 import { categoricalColor, categoricalHue, hslToRgb, type Rgb } from '@/libs/color/categorical';
+import { onColor, onColorCss, rgbCss } from '@/libs/color/contrast';
 
 // `Rgb` lives in the shared color base now (DS-2 consolidation); re-export so the renderer/panels that import
 // it from here keep working unchanged.
@@ -89,40 +90,10 @@ export function pageColorRgb(encoding: DbMapEncoding, type: number, segmentId: n
   }
 }
 
-/** CSS `rgb(...)` string — for DOM legend swatches. */
-export function rgbCss(rgb: Rgb): string {
-  return `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`;
-}
-
-/** WCAG relative luminance of an sRGB colour (0 = black, 1 = white). */
-function relativeLuminance(rgb: Rgb): number {
-  const channel = (c: number): number => {
-    const s = c / 255;
-    return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
-  };
-  return 0.2126 * channel(rgb[0]) + 0.7152 * channel(rgb[1]) + 0.0722 * channel(rgb[2]);
-}
-
-const ON_WHITE: Rgb = [255, 255, 255];
-const ON_BLACK: Rgb = [17, 24, 39]; // near-black (slate-900) — softer than pure #000 over coloured cells
-
-/**
- * DS-3: legible text colour over a dynamic background. Picks white or near-black — whichever has the higher
- * WCAG contrast against <paramref name="bg"/> — so a label drawn over any data-driven cell colour stays
- * readable. Two inks guarantee at least the WCAG UI/large-text floor (≥3:1) over every cell colour, and
- * AA-normal (≥4.5:1) wherever the background luminance allows. Use for every label painted over a cell.
- */
-export function onColor(bg: Rgb): Rgb {
-  const lum = relativeLuminance(bg);
-  const contrastWhite = 1.05 / (lum + 0.05);
-  const contrastBlack = (lum + 0.05) / (relativeLuminance(ON_BLACK) + 0.05);
-  return contrastWhite >= contrastBlack ? ON_WHITE : ON_BLACK;
-}
-
-/** {@link onColor} as a CSS string — for canvas `fillStyle` / DOM text over a coloured cell. */
-export function onColorCss(bg: Rgb): string {
-  return rgbCss(onColor(bg));
-}
+// `onColor` / `onColorCss` / `rgbCss` now live in the shared contrast base (`@/libs/color/contrast`, DS-3
+// consolidation — one luminance/ink implementation, no parallel copies). Re-export them so the File Map renderer
+// + panels that import these from here keep working unchanged.
+export { onColor, onColorCss, rgbCss };
 
 // ── A2 detail-tier ramps (Module 15, §4.2) ─────────────────────────────────────────────────────────────────
 

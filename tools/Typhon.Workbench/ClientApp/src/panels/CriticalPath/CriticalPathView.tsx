@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { colorForPhase, SYSTEM_PALETTE } from '@/libs/palettes';
-import { pickTextColorFor } from '@/libs/colors';
+import { colorForPhase, OCCUPANCY_FILL } from '@/libs/palettes';
+import { pickTextColorFor, rgbCss } from '@/libs/color/contrast';
+import { categoricalColor } from '@/libs/color/categorical';
 import { useHoverStore } from '@/stores/useHoverStore';
 import { computeWorkerOccupancy, type TickPathBar, type TickPathBars, type TickPathPostTick, type WorkerOccupancy } from './criticalPath';
 import { packIntervals } from './intervalPacking';
@@ -826,6 +827,11 @@ function BarShape({
   // Phase colour — the same stroke+fill pair the phase band and the DAG swim-lanes use, so a bar
   // reads as "belongs to phase X" at a glance. Same-phase bars stay distinct by their name label.
   const colour = colorForPhase(bar.phaseIndex);
+  // DS-2 stable hue-per-object: the system's shared categorical identity colour, painted as a thin leading-edge
+  // rect over the phase fill so the SAME system reads the same colour here as in the timeline lane / DAG stripe /
+  // Access-Matrix header / Query Analyzer. Non-destructive: the phase-grouping read is preserved by the bar's fill
+  // + stroke; identity rides as a small left-edge accent (top edge in vertical orientation).
+  const identityFill = rgbCss(categoricalColor(bar.systemName));
   const barStartPx = majorPx(bar.startUs);
   const barLenPx = majorPx(bar.endUs) - barStartPx;
   const claimPx = bar.workerClaimWaitUs > 0 ? majorPx(bar.startUs) - majorPx(bar.startUs - bar.workerClaimWaitUs) : 0;
@@ -905,6 +911,17 @@ function BarShape({
           strokeWidth={selected || hovered ? 2 : 1}
           rx={2}
           filter="url(#cp-shadow)"
+        />
+        {/* System-identity leading-edge accent (DS-2). 4 px wide in horizontal (left edge), 4 px tall in vertical
+            (top edge); clamped to the bar size so a sliver bar doesn't draw an oversized identity strip. */}
+        <rect
+          x={r.x}
+          y={r.y}
+          width={orientation === 'horizontal' ? Math.min(4, r.width) : r.width}
+          height={orientation === 'horizontal' ? r.height : Math.min(4, r.height)}
+          fill={identityFill}
+          pointerEvents="none"
+          data-testid={`cp-system-edge-${bar.systemName}`}
         />
         {r.width >= 30 && orientation === 'horizontal' && (
           <text
@@ -1004,7 +1021,7 @@ function OccupancyRibbon({
               y={r.y}
               width={r.width}
               height={r.height}
-              fill={SYSTEM_PALETTE[5].fill}
+              fill={OCCUPANCY_FILL}
               fillOpacity={opacity}
               onMouseEnter={(e) => onTip(e, [`Worker occupancy — ${level.toFixed(1)} / ${workerCount}`, `${pct}% of the worker pool busy here.`])}
               onMouseLeave={onLeave}

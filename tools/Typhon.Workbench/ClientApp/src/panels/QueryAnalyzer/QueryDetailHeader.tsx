@@ -4,6 +4,8 @@ import { useOptionsStore } from '@/stores/useOptionsStore';
 import { toNumber } from './numeric';
 import { openComponentInSchema, revealArchetypeInInspector, revealSystemInDag } from '@/shell/commands/openDbMap';
 import { formatNs, formatSelectivity, formatThousands, predicateSummary, queryKindLabel } from './format';
+import { categoricalColor } from '@/libs/color/categorical';
+import { rgbCss } from '@/libs/color/contrast';
 
 /**
  * Detail header for the focused query (design §4.2): identity (`Kind#LocalId on target`), the
@@ -69,10 +71,15 @@ export function QueryDetailHeader({ definition, archetypeName, ownerNames, targe
                 <button
                   type="button"
                   onClick={() => revealSystemInDag(n)}
-                  className="text-foreground hover:underline"
+                  className="inline-flex items-center gap-1 text-foreground hover:underline"
                   title={`Reveal ${n} in System DAG`}
                   data-testid="query-detail-owner"
                 >
+                  <span
+                    aria-hidden
+                    className="inline-block h-2 w-2 shrink-0 rounded-sm"
+                    style={{ backgroundColor: rgbCss(categoricalColor(n)) }}
+                  />
                   {n}
                 </button>
               </span>

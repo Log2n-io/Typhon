@@ -1,6 +1,8 @@
 import { useMemo } from 'react';
 import { ACCESS_COLOR } from '@/panels/DataFlow/barBuilding';
 import { colorForPhase } from '@/libs/palettes';
+import { categoricalColor } from '@/libs/color/categorical';
+import { rgbCss } from '@/libs/color/contrast';
 import type { AccessMatrix, Cell, Column } from './matrixBuilding';
 
 /**
@@ -129,6 +131,11 @@ export default function AccessMatrixGrid({
               data-hovered={isHovered ? 'true' : 'false'}
               onClick={() => onSelectSystem?.(col.systemName)}
             >
+              <span
+                aria-hidden
+                className="mr-1 inline-block h-2 w-2 shrink-0 rounded-sm"
+                style={{ backgroundColor: rgbCss(categoricalColor(col.systemName)) }}
+              />
               {col.systemName}
             </button>
           );

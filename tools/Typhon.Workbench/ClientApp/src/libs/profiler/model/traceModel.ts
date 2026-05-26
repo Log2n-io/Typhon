@@ -436,8 +436,6 @@ export interface ProcessedTrace {
   maxTickDurationUs: number;
   /** P95 tick duration for timeline bar height scaling */
   p95TickDurationUs: number;
-  /** System color palette */
-  systemColors: string[];
   /**
    * Per-tick summary from the sidecar cache, one entry per tick in the whole file. Always-resident across the full timeline so the overview can
    * render immediately on open without loading any detail events. Present when a `/api/trace/open` response has been consumed; undefined for
@@ -494,27 +492,9 @@ const SKIP_REASON_NAMES: Record<number, string> = {
   7: 'Dependency Failed'
 };
 
-/** Color palette for systems — visually distinct, dark-theme friendly */
-const SYSTEM_PALETTE = [
-  '#e94560', '#4ecdc4', '#ffe66d', '#95e1d3', '#f38181',
-  '#aa96da', '#a8d8ea', '#fcbad3', '#c3aed6', '#b8de6f',
-  '#ff9a76', '#679b9b', '#ffc4a3', '#e8a87c', '#41b3a3',
-  '#d63447', '#f57b51', '#f6efa6', '#5ee7df', '#b490ca',
-];
-
-/** Generate system color based on index */
-function generateSystemColors(count: number): string[] {
-  const colors: string[] = [];
-  for (let i = 0; i < count; i++) {
-    colors.push(SYSTEM_PALETTE[i % SYSTEM_PALETTE.length]);
-  }
-  return colors;
-}
-
 /** Process raw records into renderable tick structures */
 export function processTrace(metadata: TraceMetadata, events: TraceEvent[]): ProcessedTrace {
   const systems = metadata.systems;
-  const systemColors = generateSystemColors(systems.length);
 
   // Group records by derived tick number (the server already assigns tickNumber on every record).
   const tickMap = new Map<number, TraceEvent[]>();
@@ -585,7 +565,6 @@ export function processTrace(metadata: TraceMetadata, events: TraceEvent[]): Pro
     maxSystemDurationUs,
     maxTickDurationUs,
     p95TickDurationUs,
-    systemColors,
     gaugeSeries,
     gaugeCapacities,
     memoryAllocEvents,
@@ -1434,7 +1413,6 @@ export function createEmptyTrace(metadata: TraceMetadata): ProcessedTrace {
     maxSystemDurationUs: 0,
     maxTickDurationUs: 0,
     p95TickDurationUs: 0,
-    systemColors: generateSystemColors(metadata.systems.length),
     gaugeSeries: new Map(),
     gaugeCapacities: new Map(),
     memoryAllocEvents: [],

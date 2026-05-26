@@ -41,6 +41,7 @@ describe('useProfilerViewStore — v0 → v1 migration', () => {
       gaugeCollapse: {},
       gaugeRegionVisible: true,
       perSystemLanesVisible: true,
+      spanPalette: 'categorical',
     });
   });
   afterEach(() => {
@@ -115,7 +116,7 @@ describe('useProfilerViewStore — v0 → v1 migration', () => {
     expect(state.gaugeRegionVisible).toBe(true);
   });
 
-  it('v3 → v4: drops orphan liveFollowWindowUs from persisted state (#345 Step 8)', async () => {
+  it('v3 → current: drops orphan liveFollowWindowUs from persisted state (#345 Step 8)', async () => {
     // Live-follow mode is gone — leftover `liveFollowWindowUs` from a v3 install must be removed
     // so localStorage doesn't carry the orphan key indefinitely. The runtime state already lacks
     // the field (spread initialiser ignores unknown keys), but the test asserts the migrate
@@ -129,9 +130,35 @@ describe('useProfilerViewStore — v0 → v1 migration', () => {
     const raw = localStorage.getItem('workbench-profiler-view');
     expect(raw).toBeTruthy();
     const persisted = JSON.parse(raw!) as { state: Record<string, unknown>; version: number };
-    expect(persisted.version).toBe(4);
+    // Rehydrating an old blob re-persists at the CURRENT store version (5), running every intermediate
+    // migration clause — including the < 4 `liveFollowWindowUs` drop asserted below.
+    expect(persisted.version).toBe(5);
     expect(persisted.state).not.toHaveProperty('liveFollowWindowUs');
     // Other v3 fields survived the migration.
     expect(persisted.state.gaugeCollapse).toEqual({ 'gauge-gc': 'double' });
+  });
+
+  it('v4 → v5: spanPalette defaults to "categorical" and persists (#376 Phase 5)', async () => {
+    // A pre-Phase-5 (v4) blob has no spanPalette; the migration must default it to 'categorical' and
+    // bump the persisted version, without disturbing the other v4 fields.
+    localStorage.setItem('workbench-profiler-view', JSON.stringify({
+      state: { gaugeCollapse: {}, spanColorMode: 'thread' },
+      version: 4,
+    }));
+    await useProfilerViewStore.persist.rehydrate();
+    expect(useProfilerViewStore.getState().spanPalette).toBe('categorical');
+    const persisted = JSON.parse(localStorage.getItem('workbench-profiler-view')!) as { state: Record<string, unknown>; version: number };
+    expect(persisted.version).toBe(5);
+    expect(persisted.state.spanPalette).toBe('categorical');
+    expect(persisted.state.spanColorMode).toBe('thread');
+  });
+
+  it('v5: an explicit spanPalette = "curated" round-trips unchanged', async () => {
+    localStorage.setItem('workbench-profiler-view', JSON.stringify({
+      state: { gaugeCollapse: {}, spanPalette: 'curated' },
+      version: 5,
+    }));
+    await useProfilerViewStore.persist.rehydrate();
+    expect(useProfilerViewStore.getState().spanPalette).toBe('curated');
   });
 });

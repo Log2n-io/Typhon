@@ -14,6 +14,14 @@ import { useOptionsStore } from '@/stores/useOptionsStore';
 export type SpanColorMode = 'name' | 'thread' | 'depth' | 'duration';
 
 /**
+ * Which palette the categorical span/chunk modes (name / thread / depth) draw from:
+ *   - `categorical` → the shared DS-2 `categoricalColor` scale (stable hue-per-object across views) — default.
+ *   - `curated`     → the hand-tuned 8-colour `SPAN_PALETTE` warm ramp (the pre-DS-2 flame aesthetic).
+ * The `duration` heat mode is a sequential ramp and is unaffected by this choice.
+ */
+export type SpanPalette = 'categorical' | 'curated';
+
+/**
  * View-state slice for the Profiler panel — viewport + toggle states + per-gauge-group collapse states.
  *
  * **Partial persistence:** toggles (gauge region visible, legends visible, per-system lanes visible) and gauge
@@ -74,6 +82,9 @@ interface ProfilerViewState {
   /** How spans are coloured on slot lanes. See {@link SpanColorMode}. Persisted UX preference. */
   spanColorMode: SpanColorMode;
 
+  /** Which palette the categorical span modes draw from. See {@link SpanPalette}. Persisted UX preference. */
+  spanPalette: SpanPalette;
+
   /** When true, each slot track height is sized to the deepest span visible in the current viewport
    *  rather than the session-wide maximum. Tracks shrink/grow as the user pans. No scroll
    *  stabilisation — heights change immediately. Persisted UX preference. */
@@ -104,6 +115,7 @@ interface ProfilerViewState {
   setManyGaugeCollapse: (updates: Record<string, TrackState>) => void;
 
   setSpanColorMode: (mode: SpanColorMode) => void;
+  setSpanPalette: (p: SpanPalette) => void;
   toggleDynamicTrackHeight: () => void;
   toggleShowOffCpu: () => void;
 
@@ -151,6 +163,7 @@ export const useProfilerViewStore = create<ProfilerViewState>()(
       gaugeVisibility: {},
       engineOpVisibility: {},
       spanColorMode: 'name',
+      spanPalette: 'categorical',
       dynamicTrackHeight: true,
       showOffCpu: true,
 
@@ -199,6 +212,7 @@ export const useProfilerViewStore = create<ProfilerViewState>()(
         }),
 
       setSpanColorMode: (mode) => set({ spanColorMode: mode }),
+      setSpanPalette: (p) => set({ spanPalette: p }),
       toggleDynamicTrackHeight: () => set((s) => ({ dynamicTrackHeight: !s.dynamicTrackHeight })),
       toggleShowOffCpu: () => set((s) => ({ showOffCpu: !s.showOffCpu })),
 
@@ -248,7 +262,7 @@ export const useProfilerViewStore = create<ProfilerViewState>()(
     {
       name: 'workbench-profiler-view',
       storage: safeStorage,
-      version: 4,
+      version: 5,
       // Only persist UX preferences; viewRange / transientViewRange are session-scoped and reset
       // on each open (never appear in `partialize`).
       partialize: (s) => ({
@@ -258,6 +272,7 @@ export const useProfilerViewStore = create<ProfilerViewState>()(
         gaugeVisibility: s.gaugeVisibility,
         engineOpVisibility: s.engineOpVisibility,
         spanColorMode: s.spanColorMode,
+        spanPalette: s.spanPalette,
         dynamicTrackHeight: s.dynamicTrackHeight,
         showOffCpu: s.showOffCpu,
       }),
@@ -269,6 +284,7 @@ export const useProfilerViewStore = create<ProfilerViewState>()(
       // v3 → v4 (#345 Step 8): dropped `liveFollowWindowUs` — live-follow mode is gone. The spread
       //   initialiser would already filter the field out of runtime state, but we delete it from
       //   the persisted blob explicitly so localStorage doesn't carry an orphan key forever.
+      // v4 → v5 (#376 Phase 5): added `spanPalette` (default 'categorical'). Missing field defaults to categorical.
       migrate: (persisted: unknown, fromVersion: number): Partial<ProfilerViewState> | undefined => {
         if (!persisted || typeof persisted !== 'object') return undefined;
         const p = persisted as Partial<ProfilerViewState> & {
@@ -296,6 +312,9 @@ export const useProfilerViewStore = create<ProfilerViewState>()(
         }
         if (fromVersion < 4) {
           delete p.liveFollowWindowUs;
+        }
+        if (fromVersion < 5) {
+          p.spanPalette = p.spanPalette ?? 'categorical';
         }
         return p;
       },

@@ -6,10 +6,10 @@ import {
   SELECTED_COLOR,
   SPAN_PALETTE,
   SPAN_PALETTE_LIGHT,
-  SYSTEM_PALETTE,
   TIMELINE_PALETTE,
   TIMELINE_PALETTE_LIGHT,
   UNPHASED_COLOR,
+  colorForSystem,
   type PaletteColor,
 } from '@/libs/palettes';
 import { OFF_CPU_PALETTE } from '@/libs/profiler/canvas/theme';
@@ -50,6 +50,9 @@ const CHROME_TOKENS: readonly { name: string; note?: string }[] = [
   { name: '--chart-5' },
 ];
 
+/** Illustrative system names for the DS-2 system-identity demo — colorForSystem hashes the name, so any set shows the hue spread. */
+const SAMPLE_SYSTEM_NAMES: readonly string[] = ['Physics', 'AI', 'Render', 'Network', 'Audio', 'Animation', 'Pathfinding', 'Damage', 'Spawning', 'Cleanup'];
+
 /**
  * Debug panel — renders every colour palette the Workbench draws with as labelled swatches. A
  * developer aid: opened only from the command palette ("Debug: Color Palettes"), never in the
@@ -78,11 +81,15 @@ export default function PaletteDebug() {
         colors={[...PHASE_PALETTE, UNPHASED_COLOR]}
         lastLabel="unphased"
       />
-      <PairSection
-        name="SYSTEM_PALETTE"
-        note="System-identity bars — colorForSystem(name). The phase palette minus the alarm-red hue. @/libs/palettes"
-        colors={SYSTEM_PALETTE}
-      />
+      <Section
+        name="System identity (DS-2)"
+        note="colorForSystem(name) = categoricalColor(name) — stable hue-per-object: a system reads the same hue across timeline / DAG / matrix / Query Analyzer. @/libs/palettes"
+      >
+        {SAMPLE_SYSTEM_NAMES.map((n) => {
+          const c = colorForSystem(n);
+          return <Swatch key={n} label={n} value={`fill ${c.fill}`} subValue={`stroke ${c.stroke}`} fill={c.fill} stroke={c.stroke} />;
+        })}
+      </Section>
       <HexSection
         name="TIMELINE_PALETTE"
         note="13-colour Turbo ramp — phase / operation bands (dark theme). @/libs/profiler/canvas/canvasUtils"
