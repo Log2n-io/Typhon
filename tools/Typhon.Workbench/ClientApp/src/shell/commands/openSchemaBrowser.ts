@@ -324,6 +324,11 @@ export function toggleViewDbMap(): void {
   toggleDockPanel('dbmap', 'DbMap', 'Database File Map');
 }
 
+/** Stage 2 Phase 3 (GAP-16): open / close the Storage Health dashboard. */
+export function toggleViewStorageHealth(): void {
+  toggleDockPanel('storage-health', 'StorageHealth', 'Storage Health');
+}
+
 /**
  * Dev Fixture: open / close the standalone fixture-creation surface. Dual-mode:
  * <list type="bullet">
@@ -347,11 +352,6 @@ export function toggleViewDevFixture(): void {
   // Defer the store import to avoid a top-level circular dep risk (the store is harmless but lighter to
   // pull lazily — the toggle path is a click handler, not a hot path).
   void import('@/stores/useDevFixtureModalStore').then((m) => m.useDevFixtureModalStore.getState().toggle());
-}
-
-/** Stage 2 Phase 3 (GAP-16): open / close the Storage Health dashboard. */
-export function toggleViewStorageHealth(): void {
-  toggleDockPanel('storage-health', 'StorageHealth', 'Storage Health');
 }
 
 /**
