@@ -4,6 +4,7 @@ import { useSelectionBootstrap } from '@/hooks/useSelectionBootstrap';
 import { useSessionStore } from '@/stores/useSessionStore';
 import { useDensityStore } from '@/stores/useDensityStore';
 import ContextBar from './ContextBar';
+import DevFixtureModal from './dialogs/DevFixtureModal';
 import DockHost from './DockHost';
 import MenuBar from './MenuBar';
 import StatusBar from './StatusBar';
@@ -30,6 +31,10 @@ export default function Shell() {
         {kind === 'none' ? <WelcomeScreen /> : <DockHost key={sessionId ?? 'none'} />}
       </main>
       <StatusBar />
+      {/* Modal fallback for the Dev Fixture surface when there's no dockview to dock into (Welcome state).
+          The panel content renders inside the dialog; once a session opens, the modal self-closes and the
+          dock takes over (no-session gate on the panel reduces post-open clicks to a "close session" CTA). */}
+      <DevFixtureModal />
     </div>
   );
 }

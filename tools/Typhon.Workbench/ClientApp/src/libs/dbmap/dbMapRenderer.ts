@@ -39,7 +39,8 @@ import {
   type Rgb,
 } from './dbMapColors';
 import { computeComposition, type L0Stripe } from './dbMapL0';
-import { pageToXY, xyToPage } from './hilbert';
+import { pageToXY } from './hilbert';
+import { fillViewportPageLut } from './dbMapViewportLut';
 import { formatFileSize } from '@/lib/formatters';
 import {
   DbChunkClass,
@@ -86,6 +87,17 @@ export interface L0StripeScreenRect {
   stripe: L0Stripe;
   /** CSS-pixel rect — the area the stripe occupies on the canvas at the current camera. */
   screenRect: Rect;
+}
+
+/**
+ * The "widest row" anchor for a region's label — cached by {@link DbMapRenderer._regionRowLayout}. Pure function of
+ * `(startPage, pageCount, order, pageOrder)`; recomputed only when those change (handled by setData / setPageOrder /
+ * setRegions invalidations).
+ */
+interface RegionRowLayout {
+  bestY: number;
+  bestMinX: number;
+  bestMaxX: number;
 }
 
 /**
@@ -286,6 +298,36 @@ export class DbMapRenderer {
   private _regionCaptions = false;
   private _regions: readonly DbMapRegion[] = [];
 
+  // ── Per-frame viewport page-index LUT ─────────────────────────────────────────────────────────────────
+  //
+  // Profiling showed `hilbertXY2D` dominating the renderer at 55.5% self-time, because the L1 annotation passes
+  // each scan the visible cell rect calling {@link xyToPage} per cell — `drawSegmentOverlay` does it 3× per cell
+  // (centre + (cx+1) + (cy+1)), `visiblePageList` / `visiblePageSpan` / `visiblePageSpanInclusive` each do it once.
+  // The same (cx, cy) ended up converted 4–5 times per frame.
+  //
+  // The LUT precomputes `xyToPage` for the visible cell rect ONCE at the start of {@link render}; subsequent
+  // callers read `lutPageAt(cx, cy)` (O(1) Int32Array index). The +1 row / +1 column on the right/bottom isn't
+  // pre-populated — `lutPageAt` does a bounds check and returns -1 for those off-grid queries, which is what the
+  // `ownerAt` closure used to compute the hard way. Lifetime is one render() call; no cross-frame caching is
+  // attempted because camera changes invalidate the rect anyway, and the precompute is the same cost we used to
+  // pay in the first set of calls — the win is from collapsing the 3-5× duplication, not from skipping work.
+  //
+  // Storage is a flat row-major Int32Array of size `_viewportLutW * _viewportLutH`. The backing buffer is reused
+  // when the visible rect shrinks (re-allocated only when growth is required) — keeps the per-frame allocator
+  // pressure off the hot path during a pan.
+  private _viewportLut: Int32Array | null = null;
+  private _viewportLutCap = 0;
+  private _viewportLutW = 0;
+  private _viewportLutH = 0;
+  private _viewportLutCx0 = 0;
+  private _viewportLutCy0 = 0;
+
+  // Per-region "widest-row" layout cache for {@link drawRunLabels} — pure function of (startPage, pageCount,
+  // order, pageOrder) so it's stable across frames until `setData` / `setPageOrder` / `setRegions` runs. Was the
+  // second-largest contributor in the profile (per-region 2048-sample loop + `pageToXY` per sample), and after
+  // the first frame it's a pure Map lookup. Keyed on `startPage` because regions don't overlap.
+  private _regionRowLayout: Map<number, RegionRowLayout | null> = new Map();
+
   private _cssW = 1;
   private _cssH = 1;
   private _dpr = 1;
@@ -335,6 +377,9 @@ export class DbMapRenderer {
     this._pageDetails = new Map();
     this._chunkContents = new Map();
     this._contentArrival = new Map();
+    // Region layout cache is keyed on (startPage, pageCount, order, pageOrder); a fresh map invalidates startPage
+    // identity (regions are recomputed by the panel against the new data) so it MUST be cleared here.
+    this._regionRowLayout.clear();
     this._maxChangeRevision = 1;
     // A fresh map invalidates the previous map's lens mask, filter mask, search hits and L0 composition.
     this._lensMask = null;
@@ -392,6 +437,8 @@ export class DbMapRenderer {
       return;
     }
     this._pageOrder = pageOrder;
+    // Layout-orientation cache: page positions change wholesale, so every cached "widest row" is stale.
+    this._regionRowLayout.clear();
     this.paintOffscreen();
     this.paintFilterBuffer();
   }
@@ -417,6 +464,10 @@ export class DbMapRenderer {
   /** Feeds the RLE region list (from {@link buildRegions}) used by the captions overlay. */
   setRegions(regions: readonly DbMapRegion[]): void {
     this._regions = regions;
+    // New region set → drop the row-layout cache. The cache is keyed on `startPage`, which CAN be stable across
+    // recomputes (e.g. same data, just a re-derive), but the new region's (startPage, pageCount) pair might differ.
+    // Cheaper to invalidate wholesale than to diff; the next render rebuilds the cache lazily, one region per draw.
+    this._regionRowLayout.clear();
   }
 
   setSegmentOverlay(on: boolean): void {
@@ -899,6 +950,12 @@ export class DbMapRenderer {
     const cellPx = cam.scale;
     const l1Alpha = this.l1AlphaForScale(cellPx);
     const { l3Alpha, l4Alpha } = this.getLodState();
+
+    // Precompute the per-frame viewport page-index LUT — every L1 annotation pass below reads `lutPageAt(cx, cy)`
+    // instead of calling `xyToPage` per cell. Pure-precompute optimisation: the cost is one full scan of the visible
+    // rect (~500-2000 hilbert calls); without it, drawSegmentOverlay + visiblePageSpan* + visiblePageList re-scan
+    // the same rect 4-5 times and re-convert every cell from scratch. See {@link precomputeViewportLut}.
+    this.precomputeViewportLut();
 
     // L0 — composition stripes inside the data rect, sized strictly proportionally to bytes (§3.4). The L1
     // image fades in over the stripes during the L0→L1 crossfade — same colours so no flicker.
@@ -2084,10 +2141,12 @@ export class DbMapRenderer {
       return;
     }
     const cell = this._camera.scale;
-    const { order, pageCount, dataRect } = this._layout;
+    const { dataRect } = this._layout;
     const types = this._data.pageType;
     const cam = this._camera;
     // One stroke per frame covering every free cell — building one path is much cheaper than N strokes.
+    // Cell→page conversion is read from the per-frame LUT (-1 sentinel for off-file cells); was an uncached
+    // `xyToPage` per cell before, contributing to the renderer's hilbert hotspot.
     ctx.save();
     ctx.globalAlpha = alpha * 0.32;
     ctx.strokeStyle = this._theme.mutedText;
@@ -2095,11 +2154,8 @@ export class DbMapRenderer {
     ctx.beginPath();
     for (let cy = rect.cy0; cy <= rect.cy1; cy++) {
       for (let cx = rect.cx0; cx <= rect.cx1; cx++) {
-        const page = xyToPage(order, this._pageOrder, cx, cy);
-        if (page < 0 || page >= pageCount) {
-          continue;
-        }
-        if (types[page] !== DbPageType.Free) {
+        const page = this.lutPageAt(cx, cy);
+        if (page < 0 || types[page] !== DbPageType.Free) {
           continue;
         }
         const sx = worldToScreenX(cam, dataRect.x + cx);
@@ -2128,19 +2184,19 @@ export class DbMapRenderer {
       return;
     }
     const cell = this._camera.scale;
-    const { order, pageCount, dataRect } = this._layout;
+    const { dataRect } = this._layout;
     const cam = this._camera;
     ctx.save();
     ctx.globalAlpha = alpha * 0.32;
     ctx.strokeStyle = this._theme.mutedText;
     ctx.lineWidth = 1;
     ctx.beginPath();
+    // Tail = cells whose page maps outside [0, pageCount) — exactly the cells the LUT stores as -1. So the
+    // inner check becomes a single equality against the sentinel; no conversion in the hot path.
     for (let cy = rect.cy0; cy <= rect.cy1; cy++) {
       for (let cx = rect.cx0; cx <= rect.cx1; cx++) {
-        const page = xyToPage(order, this._pageOrder, cx, cy);
-        // Skip real pages — tail = grid cells whose Hilbert index is past pageCount.
-        if (page >= 0 && page < pageCount) {
-          continue;
+        if (this.lutPageAt(cx, cy) >= 0) {
+          continue; // real page, not tail
         }
         const sx = worldToScreenX(cam, dataRect.x + cx);
         const sy = worldToScreenY(cam, dataRect.y + cy);
@@ -2269,6 +2325,49 @@ export class DbMapRenderer {
    * a run is labelled only when its on-screen blob is big enough to fit text, so small scattered fragments stay
    * colour-only (the hover tooltip still identifies them).
    */
+  /**
+   * Computes the "widest row" anchor for a single region — the cached payload behind {@link _regionRowLayout}.
+   * Pure function of `(region.startPage, region.pageCount, order, pageOrder)`; safe to memoise across frames.
+   * Sample-capped at 2048 pages so a huge contiguous region stays cheap to seed; the result is bounded regardless
+   * of region size because the sampling is on a step that scales with `pageCount`.
+   * Returns `null` if the region has no sampled cells (e.g. entirely outside the file's page range).
+   */
+  private computeRegionRowLayout(region: DbMapRegion, order: number, pageCount: number): RegionRowLayout | null {
+    const end = region.startPage + region.pageCount - 1;
+    const rowsX = new Map<number, { minX: number; maxX: number }>();
+    const step = Math.max(1, Math.floor(region.pageCount / 2048));
+    for (let p = region.startPage; p <= end; p += step) {
+      if (p < 0 || p >= pageCount) {
+        continue;
+      }
+      const { x, y } = pageToXY(order, this._pageOrder, p);
+      const row = rowsX.get(y);
+      if (!row) {
+        rowsX.set(y, { minX: x, maxX: x });
+      } else {
+        if (x < row.minX) row.minX = x;
+        if (x > row.maxX) row.maxX = x;
+      }
+    }
+    if (rowsX.size === 0) {
+      return null;
+    }
+    let bestY = 0;
+    let bestMinX = 0;
+    let bestMaxX = 0;
+    let bestSpan = -1;
+    for (const [y, row] of rowsX) {
+      const spanX = row.maxX - row.minX;
+      if (spanX > bestSpan) {
+        bestSpan = spanX;
+        bestY = y;
+        bestMinX = row.minX;
+        bestMaxX = row.maxX;
+      }
+    }
+    return { bestY, bestMinX, bestMaxX };
+  }
+
   private drawRunLabels(ctx: CanvasRenderingContext2D, alpha: number): void {
     if (!this._layout || !this._data || this._regions.length === 0) {
       return;
@@ -2322,39 +2421,21 @@ export class DbMapRenderer {
 
       // Anchor the label on the run's widest *row* — the Hilbert row (constant y) with the largest X extent.
       // A horizontal label then sits on a solid strip of cells the run actually owns and gets that strip's
-      // width as its budget, instead of a bbox centroid that can land between scattered cells. Sample-capped
-      // so a huge run stays cheap; one entry per visited row.
-      const rowsX = new Map<number, { minX: number; maxX: number }>();
-      const step = Math.max(1, Math.floor(region.pageCount / 2048));
-      for (let p = region.startPage; p <= end; p += step) {
-        if (p < 0 || p >= pageCount) {
-          continue;
-        }
-        const { x, y } = pageToXY(order, this._pageOrder, p);
-        const row = rowsX.get(y);
-        if (!row) {
-          rowsX.set(y, { minX: x, maxX: x });
-        } else {
-          if (x < row.minX) row.minX = x;
-          if (x > row.maxX) row.maxX = x;
-        }
+      // width as its budget, instead of a bbox centroid that can land between scattered cells.
+      //
+      // PERF: the widest-row math is a pure function of (startPage, pageCount, order, pageOrder). Cache it
+      // keyed on startPage — invalidated by setData / setPageOrder / setRegions. First frame computes the
+      // sampled scan + reduction once; subsequent frames are a single Map.get(). Was a ~2.5% self-time
+      // contributor before caching (per-region 2048-sample loop × N regions × every frame).
+      let layout = this._regionRowLayout.get(region.startPage);
+      if (layout === undefined) {
+        layout = this.computeRegionRowLayout(region, order, pageCount);
+        this._regionRowLayout.set(region.startPage, layout);
       }
-      if (rowsX.size === 0) {
+      if (layout === null) {
         continue;
       }
-      let bestY = 0;
-      let bestMinX = 0;
-      let bestMaxX = 0;
-      let bestSpan = -1;
-      for (const [y, row] of rowsX) {
-        const spanX = row.maxX - row.minX;
-        if (spanX > bestSpan) {
-          bestSpan = spanX;
-          bestY = y;
-          bestMinX = row.minX;
-          bestMaxX = row.maxX;
-        }
-      }
+      const { bestY, bestMinX, bestMaxX } = layout;
       const widthPx = (bestMaxX - bestMinX + 1) * cam.scale;
       if (widthPx < SEGMENT_LABEL_MIN_BBOX_PX) {
         continue; // widest row still too narrow on screen to carry a label
@@ -2561,21 +2642,24 @@ export class DbMapRenderer {
     ctx.restore();
   }
 
-  /** Visible page-index span — convenience around {@link visiblePageSpan} that accepts a pre-computed rect. */
+  /**
+   * Visible page-index span — convenience around {@link visiblePageSpan} that accepts a pre-computed rect.
+   * Reads through the per-frame viewport LUT — page-range filtering already baked into the LUT (off-file cells
+   * stored as -1), so the inner loop is a single Int32Array index + sentinel check. Was an 18.4% self-time
+   * contributor in the original profile.
+   */
   private visiblePageSpanInclusive(rect: { cx0: number; cy0: number; cx1: number; cy1: number }): { min: number; max: number } | null {
     if (!this._layout) {
       return null;
     }
-    const { order, pageCount } = this._layout;
-    let min = pageCount;
+    let min = this._layout.pageCount;
     let max = -1;
     for (let cy = rect.cy0; cy <= rect.cy1; cy++) {
       for (let cx = rect.cx0; cx <= rect.cx1; cx++) {
-        const page = xyToPage(order, this._pageOrder, cx, cy);
-        if (page >= 0 && page < pageCount) {
-          if (page < min) min = page;
-          if (page > max) max = page;
-        }
+        const page = this.lutPageAt(cx, cy);
+        if (page < 0) continue;
+        if (page < min) min = page;
+        if (page > max) max = page;
       }
     }
     return max >= min ? { min, max } : null;
@@ -2624,9 +2708,8 @@ export class DbMapRenderer {
     if (!this._data || !this._layout) {
       return;
     }
-    const { order, side, dataRect } = this._layout;
+    const { side, dataRect } = this._layout;
     const owner = this._data.ownerSegmentId;
-    const pageCount = this._data.pageCount;
     const vis = visibleWorldRect(this._camera, this._cssW, this._cssH);
     const cx0 = Math.max(0, Math.floor(vis.x - dataRect.x));
     const cy0 = Math.max(0, Math.floor(vis.y - dataRect.y));
@@ -2638,12 +2721,13 @@ export class DbMapRenderer {
     ctx.lineWidth = 1;
     // Fade with the L1 page grid — the overlay is a page-grid annotation, so it tracks the grid's visibility.
     ctx.globalAlpha = 0.7 * alpha;
+    // `ownerAt` was the renderer's #1 self-time hotspot — called 3× per visible cell, each time invoking
+    // hilbertXY2D from scratch. Replaced with two O(1) lookups: the viewport LUT for cell→page (precomputed at
+    // render() start), then a plain array index into `owner`. Off-grid / off-file cells get sentinel -1 from the
+    // LUT, matching the old closure's behaviour.
     const ownerAt = (cx: number, cy: number): number => {
-      if (cx < 0 || cy < 0 || cx >= side || cy >= side) {
-        return -1;
-      }
-      const page = xyToPage(order, this._pageOrder, cx, cy);
-      return page >= 0 && page < pageCount ? owner[page] : -1;
+      const page = this.lutPageAt(cx, cy);
+      return page < 0 ? -1 : owner[page];
     };
     for (let cy = cy0; cy <= cy1; cy++) {
       for (let cx = cx0; cx <= cx1; cx++) {
@@ -2682,9 +2766,8 @@ export class DbMapRenderer {
     if (alpha <= 0.01) {
       return;
     }
-    const { order, side, dataRect } = this._layout;
+    const { side, dataRect } = this._layout;
     const owner = this._data.ownerSegmentId;
-    const pageCount = this._data.pageCount;
     const cam = this._camera;
     const vis = visibleWorldRect(cam, this._cssW, this._cssH);
     const cx0 = Math.max(0, Math.floor(vis.x - dataRect.x));
@@ -2694,10 +2777,11 @@ export class DbMapRenderer {
     ctx.save();
     ctx.globalAlpha = alpha;
     ctx.fillStyle = this._theme.accent;
+    // LUT-driven page lookup: cell→page in O(1), then a single sentinel check. Off-grid / off-file cells = -1.
     for (let cy = cy0; cy <= cy1; cy++) {
       for (let cx = cx0; cx <= cx1; cx++) {
-        const page = xyToPage(order, this._pageOrder, cx, cy);
-        if (page < 0 || page >= pageCount || owner[page] !== this._pulseSegmentId) {
+        const page = this.lutPageAt(cx, cy);
+        if (page < 0 || owner[page] !== this._pulseSegmentId) {
           continue;
         }
         const sx = worldToScreenX(cam, dataRect.x + cx);
@@ -2794,6 +2878,65 @@ export class DbMapRenderer {
   }
 
   /** The visible cell rect in grid coordinates, clamped to the grid. */
+  /**
+   * Precomputes the {@link _viewportLut} for the current camera / layout, called once at the top of {@link render}.
+   * After this returns, {@link lutPageAt} is O(1) for any cell coordinate in the visible cell rect; cells outside
+   * the rect (including the `cx+1` / `cy+1` adjacency probes from {@link drawSegmentOverlay}) return -1 via the
+   * boundary check in `lutPageAt`. Cells inside the rect but outside the file (`page < 0 || page >= pageCount`)
+   * are stored as -1 too, so callers can do a single sentinel check instead of dual range tests.
+   *
+   * Backing buffer is reused across frames when the new viewport fits inside the previous capacity — the typical
+   * pan / wheel-zoom path makes thousands of render() calls in quick succession, so allocator pressure matters.
+   */
+  private precomputeViewportLut(): void {
+    if (!this._layout) {
+      this._viewportLut = null;
+      this._viewportLutW = 0;
+      this._viewportLutH = 0;
+      return;
+    }
+    const rect = this.visibleCellRect();
+    if (!rect) {
+      this._viewportLut = null;
+      this._viewportLutW = 0;
+      this._viewportLutH = 0;
+      return;
+    }
+    const { order, pageCount } = this._layout;
+    const w = rect.cx1 - rect.cx0 + 1;
+    const h = rect.cy1 - rect.cy0 + 1;
+    const needed = w * h;
+    if (this._viewportLut === null || needed > this._viewportLutCap) {
+      // Grow with headroom (1.5×) so a slowly-widening viewport doesn't realloc every frame.
+      const cap = Math.max(needed, Math.floor(this._viewportLutCap * 1.5));
+      this._viewportLut = new Int32Array(cap);
+      this._viewportLutCap = cap;
+    }
+    fillViewportPageLut(this._viewportLut, rect, order, pageCount, this._pageOrder);
+    this._viewportLutW = w;
+    this._viewportLutH = h;
+    this._viewportLutCx0 = rect.cx0;
+    this._viewportLutCy0 = rect.cy0;
+  }
+
+  /**
+   * O(1) lookup into the per-frame viewport page-index LUT (see {@link precomputeViewportLut}). Returns -1 for any
+   * cell outside the LUT rect (including off-grid adjacency probes) or outside the file's page range. Callers must
+   * have already invoked `precomputeViewportLut()` earlier in the same `render()` call — done implicitly by
+   * {@link render} before any draw method needs cell→page lookups.
+   */
+  private lutPageAt(cx: number, cy: number): number {
+    if (this._viewportLut === null) {
+      return -1;
+    }
+    const ix = cx - this._viewportLutCx0;
+    const iy = cy - this._viewportLutCy0;
+    if (ix < 0 || iy < 0 || ix >= this._viewportLutW || iy >= this._viewportLutH) {
+      return -1;
+    }
+    return this._viewportLut[iy * this._viewportLutW + ix];
+  }
+
   private visibleCellRect(): { cx0: number; cy0: number; cx1: number; cy1: number } | null {
     if (!this._layout) {
       return null;
@@ -2816,23 +2959,13 @@ export class DbMapRenderer {
     if (!rect) {
       return null;
     }
-    const { order, pageCount } = this._layout;
     const cellCount = (rect.cx1 - rect.cx0 + 1) * (rect.cy1 - rect.cy0 + 1);
     if (cellCount >= 40000 || cellCount >= this._layout.side * this._layout.side) {
       return null;
     }
-    let min = pageCount;
-    let max = -1;
-    for (let cy = rect.cy0; cy <= rect.cy1; cy++) {
-      for (let cx = rect.cx0; cx <= rect.cx1; cx++) {
-        const page = xyToPage(order, this._pageOrder, cx, cy);
-        if (page >= 0 && page < pageCount) {
-          if (page < min) min = page;
-          if (page > max) max = page;
-        }
-      }
-    }
-    return max >= min ? { min, max } : null;
+    // Identical body to {@link visiblePageSpanInclusive} now that both read the LUT — re-uses for consistency
+    // (this is the public-ish entry that also handles the "whole file is visible" sentinel).
+    return this.visiblePageSpanInclusive(rect);
   }
 
   /** The visible page indices, capped — the L3/L4 fetch + draw set. Empty when too zoomed out to be in L3. */
@@ -2844,12 +2977,11 @@ export class DbMapRenderer {
     if (!rect) {
       return [];
     }
-    const { order, pageCount } = this._layout;
     const pages: number[] = [];
     for (let cy = rect.cy0; cy <= rect.cy1 && pages.length <= MAX_VISIBLE_PAGES; cy++) {
       for (let cx = rect.cx0; cx <= rect.cx1 && pages.length <= MAX_VISIBLE_PAGES; cx++) {
-        const page = xyToPage(order, this._pageOrder, cx, cy);
-        if (page >= 0 && page < pageCount) {
+        const page = this.lutPageAt(cx, cy);
+        if (page >= 0) {
           pages.push(page);
         }
       }

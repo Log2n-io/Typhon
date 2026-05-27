@@ -114,12 +114,17 @@ public partial class ManagedPagedMMF
             var dataOffset = page.IsRoot ? LogicalSegment<PersistentStore>.RootHeaderIndexSectionLength : 0;
             var data = page.RawData<long>(dataOffset, (PageRawDataSize - dataOffset) / sizeof(long));
             {
-                var prevL0 = Interlocked.Or(ref data[pageOffset], l0Mask);
+                // CAS, not OR: bulk-allocate the entire L1 word IFF every bit is currently zero. The previous implementation used `Interlocked.Or(...)`
+                // which can't be undone — when the L1 word turned out to be partially occupied, the function returned false but had already set every
+                // previously-unset bit, leaking those pages into the bitmap with no segment claiming them. The orphan-page bug surfaced as power-of-2
+                // contiguous Unknown ranges in the Workbench File Map. With CAS, partial collision means the underlying word is untouched — caller cleanly
+                // falls back to page-by-page allocation.
+                var prevL0 = Interlocked.CompareExchange(ref data[pageOffset], l0Mask, 0L);
 
                 if (prevL0 != 0)
                 {
                     _segment.Store.UnlatchPageExclusive(memPageIdx);
-                    // Can't allocate the whole L1, some bits are set at L0
+                    // Can't allocate the whole L1 — at least one bit already set. Bitmap untouched.
                     return false;
                 }
 
@@ -343,11 +348,29 @@ public partial class ManagedPagedMMF
 
                 }
 
+                // Re-check capacity after the skip-L1 inner loop. When L1All is nearly fully saturated the `c1 = ++i1 << 6` step advances `c1` past `max`
+                // (and `c1 >> 6` past `_l1Any.Length`); without this guard the fall-through to `_l1Any.Span[c1 >> 6]` raises `IndexOutOfRangeException`
+                // instead of cleanly returning false. The sibling `FindNextUnsetL0` already has the equivalent `if (c0 >= capacity) return false;` guard —
+                // this restores symmetry.
+                if (c1 >= max)
+                {
+                    return false;
+                }
+
                 var t = 1L << (c1 & 0x3F);
                 v1 = _l1Any.Span[c1 >> 6] | (t - 1);
                 var bitPos = BitOperations.TrailingZeroCount(~v1);
                 v1 |= (1L << bitPos);
-                index = (c1 & ~0x3F) + bitPos;
+                var foundIndex = (c1 & ~0x3F) + bitPos;
+                // Padding-bit guard: `_l1All` / `_l1Any` are rounded up to 64-bit longs, so the top entry can have padding bits (positions >= Capacity/64)
+                // that are zero — they look "unset" but don't correspond to any real L1 group. Without this guard, `SetL1(foundIndex)` resolves a `pageIndex`
+                // past the segment's `_pages.Length` and raises IOOR inside `GetPageExclusive`. Hit at 8.5 M scale when the bitmap saturates: L1 padding bits
+                // 2750/2751 in a 2750-capacity bitmap got returned and crashed segment-grow.
+                if (foundIndex >= max)
+                {
+                    return false;
+                }
+                index = foundIndex;
                 mask = v1;
                 return true;
             }
@@ -417,11 +440,42 @@ public partial class ManagedPagedMMF
         {
             Debug.Assert(pages.IsEmpty==false && pages.Length > 0, "A valid span with a length > 0 must be passed");
             Debug.Assert(startFrom >= 0 && startFrom < pages.Length, "Start index must be within the valid range of the given pages span");
-            
+
             var length = pages.Length;
             for (int i = startFrom; i < length; i++)
             {
                 ClearL0(pages[i], changeSet);
+            }
+        }
+
+        /// <summary>
+        /// Frees a contiguous range of pages by clearing their L0 bits. Symmetric pair to the indices used by <see cref="Allocate"/> when allocations come
+        /// out contiguously. Saves the intermediate int[] allocation the <see cref="Free(ReadOnlySpan{int},int,ChangeSet)"/> overload would require for
+        /// synthesizing a range.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Used by the BulkLoad recovery path (Phase 3b in <see cref="WalRecovery"/>): when an orphan <see cref="WalChunkType.BulkBegin"/> is detected, every
+        /// contiguous range in the manifest's <see cref="BulkPageRange"/> list is freed via this method.
+        /// </para>
+        /// <para>
+        /// <b>Idempotency:</b> clearing an already-clear bit is a no-op (the underlying <see cref="ClearL0"/> AND-mask is monotonic). Calling
+        /// <c>FreeRange</c> twice on the same range produces the same end state — required by BL-04 (recovery idempotency).
+        /// </para>
+        /// </remarks>
+        /// <param name="firstIndex">Lowest page id in the range (inclusive).</param>
+        /// <param name="count">Number of pages to free. Range covers <c>[firstIndex, firstIndex + count)</c>.</param>
+        /// <param name="changeSet">Optional change set for tracking dirty bitmap pages.</param>
+        public void FreeRange(int firstIndex, int count, ChangeSet changeSet = null)
+        {
+            Debug.Assert(firstIndex >= 0, "firstIndex must be non-negative");
+            Debug.Assert(count > 0, "count must be positive");
+            Debug.Assert(firstIndex + count <= Capacity, "range exceeds bitmap capacity");
+
+            var end = firstIndex + count;
+            for (int i = firstIndex; i < end; i++)
+            {
+                ClearL0(i, changeSet);
             }
         }
 

@@ -20,6 +20,13 @@ internal enum WalChunkType : ushort
 
     /// <summary>Cluster tick fence: snapshot of dirty cluster-backed entity data at tick boundary. Per-archetype, all components per entry.</summary>
     ClusterTickFence = 4,
+
+    /// <summary>BulkLoad session begin manifest (placeholder). Anchors a bulk session in the LSN stream. See <see cref="BulkManifestHeader"/>.</summary>
+    BulkBegin = 5,
+
+    /// <summary>BulkLoad session end manifest (final). Carries the complete page-range list; presence + durability is the bulk's commit signal.
+    /// See <see cref="BulkManifestHeader"/>.</summary>
+    BulkEnd = 6,
 }
 
 /// <summary>

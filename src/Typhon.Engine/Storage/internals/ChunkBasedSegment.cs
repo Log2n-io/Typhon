@@ -239,10 +239,14 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
         {
             var currentLength = Length;
 
-            // Calculate new size: double current, or use minimum requested, whichever is larger
-            var newLength = minNewPageCount > 0
-                ? Math.Max(currentLength * 2, minNewPageCount)
-                : currentLength * 2;
+            // Calculate new size with capped-doubling growth. Up to GrowDoublingCap pages we double (cheap geometric growth when the segment is small); beyond
+            // that we grow additively by the cap. Pure doubling at scale produces catastrophic single-allocation requests (e.g. a segment at 8192 pages
+            // doubling to 16384 = 8192 NEW pages requested from the occupancy bitmap in one call), which stresses the bitmap's allocate-failure paths and
+            // produces unfriendly amortised behaviour for callers that just want "a bit more room". The cap keeps single-grow request size bounded while still
+            // amortising O(log n) grow operations until the cap is reached.
+            const int GrowDoublingCap = 1024;
+            var doubledOrAdditive = currentLength < GrowDoublingCap ? currentLength * 2 : currentLength + GrowDoublingCap;
+            var newLength = minNewPageCount > 0 ? Math.Max(doubledOrAdditive, minNewPageCount) : doubledOrAdditive;
 
             // Check if we can grow
             if (newLength <= currentLength)
@@ -421,6 +425,24 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
     }
 
     /// <summary>
+    /// Allocates a single chunk from the segment using the CALLER's <see cref="ChunkAccessor{TStore}"/> for the optional clear-content step. This is the
+    /// CP-04-safe variant: the new chunk's content page stays under ACW &gt; 0 protection continuously from <see cref="ChunkAccessor{TStore}.ClearChunk"/>
+    /// through the caller's first write — eliminating the transient ACW=0 window that exists when the legacy <see cref="AllocateChunk(bool, ChangeSet)"/>
+    /// overload uses a short-lived local accessor.
+    /// </summary>
+    /// <param name="changeSet">ChangeSet for dirty-tracking the bitmap page (required for CP-04 protection of the allocation itself).</param>
+    /// <param name="accessor">The caller's accessor; used for <see cref="ChunkAccessor{TStore}.ClearChunk"/> so ACW stays held until caller dispose.</param>
+    /// <returns>The allocated chunk ID, with content cleared via the caller's accessor.</returns>
+    /// <remarks>
+    /// Use this overload for any allocation immediately followed by writes through the same accessor — bucket chunks, overflow chunks, dir chunks,
+    /// OverflowDirIndex chunks. The legacy overload's race window (local accessor disposes → ACW=0 on new chunk's page → checkpoint snapshots zeroed content
+    /// → fsync drops DC→0 → eviction → reload-from-disk-zeros loses subsequent dir/bucket writes) does not exist here because the caller's accessor remains
+    /// the sole dirty-tracker for this page.
+    /// </remarks>
+    public int AllocateChunk(ChangeSet changeSet, ref ChunkAccessor<TStore> accessor)
+        => AllocateChunkInternal(clearContent: true, changeSet, ref accessor);
+
+    /// <summary>
     /// Allocates a single chunk from the segment.
     /// </summary>
     /// <param name="clearContent">Whether to clear the chunk content after allocation.</param>
@@ -432,10 +454,31 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
     /// <remarks>
     /// This method automatically grows the segment when capacity is exhausted.
     /// The allocation itself is lock-free; only growth and rebuild operations require synchronization.
+    /// <para>
+    /// CP-04 race window: when <paramref name="clearContent"/> is true, a short-lived local accessor performs the
+    /// clear and disposes immediately on return — leaving the new chunk's content page with ACW=0 before the caller
+    /// can take ownership. Prefer <see cref="AllocateChunk(ChangeSet, ref ChunkAccessor{TStore})"/> when a caller
+    /// accessor is in scope to eliminate this window.
+    /// </para>
     /// </remarks>
     public int AllocateChunk(bool clearContent, ChangeSet changeSet = null)
     {
-        using var accessor = clearContent ? CreateChunkAccessor(changeSet) : default;
+        var localAccessor = clearContent ? CreateChunkAccessor(changeSet) : default;
+        try
+        {
+            return AllocateChunkInternal(clearContent, changeSet, ref localAccessor);
+        }
+        finally
+        {
+            if (clearContent)
+            {
+                localAccessor.Dispose();
+            }
+        }
+    }
+
+    private int AllocateChunkInternal(bool clearContent, ChangeSet changeSet, ref ChunkAccessor<TStore> accessor)
+    {
         int pass = 0;
 
         restart:
@@ -496,8 +539,27 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
                         continue;
                     }
 
-                    // SUCCESS — chunk claimed
-                    _store.EnsureDirtyAtLeast(memPageIdx, 1);
+                    // SUCCESS — chunk claimed.
+                    //
+                    // CRITICAL (#301): bitmap-write durability follows the same CP-04 pattern as MarkSlotDirty. EnsureDirtyAtLeast(1) is a no-op when DC was
+                    // already ≥1 — and the running checkpoint may have ALREADY snapshotted this page's bitmap word BEFORE our Interlocked.Or above. That
+                    // snapshot has bit=0 (pre-OR). After fsync, the snapshot's DC decrement takes DC to 0; the page becomes evictable; eviction + reload
+                    // restores bit=0 from disk — silently REVERTING our allocation. A subsequent AllocateChunk sees bit=0 and hands the SAME chunkId out a
+                    // second time (the DOUBLE-ALLOC we caught at scale with the ground-truth tracker). The fix: register the metadata page with the ChangeSet
+                    // (its AddByMemPageIndex does IncrementDirty on first registration); on re-registration, do an explicit IncrementDirty per CP-04.
+                    // ReleaseExcessDirtyMarks caps inflation back to 1 on UoW dispose. Without a ChangeSet (callers that don't care about CP-04), fall back to
+                    // the old EnsureDirtyAtLeast(1) — keeps the legacy behaviour for unit-test paths.
+                    if (changeSet != null)
+                    {
+                        if (!changeSet.AddByMemPageIndex(memPageIdx))
+                        {
+                            _store.IncrementDirty(memPageIdx);
+                        }
+                    }
+                    else
+                    {
+                        _store.EnsureDirtyAtLeast(memPageIdx, 1);
+                    }
                     Interlocked.Increment(ref _allocatedCount);
 
                     var chunkId = PageOffsetToChunkIndex(cur, chunkInPage);
@@ -600,6 +662,13 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
 
     public void FreeChunk(int chunkId)
     {
+        // Chunk 0 is reserved (e.g., meta for paged hash maps). Refuse to free it — freeing would place it back in the free list and AllocateChunk would hand
+        // it out, causing every caller to clobber the meta chunk.
+        if (chunkId == 0)
+        {
+            return;
+        }
+
         var (pageIndex, chunkInPage) = GetChunkLocation(chunkId);
         var wordIndex = chunkInPage >> 6;
         var mask = 1L << (chunkInPage & 0x3F);
@@ -616,10 +685,12 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
             return;
         }
 
-        // Ensure DC≥1 so checkpoint includes this page in its next snapshot.
-        // Without this, the page can be evicted as "clean" and reloaded from the last checkpoint snapshot
-        // — which still has the bit SET, causing _allocatedCount to diverge from actual popcount.
-        _store.EnsureDirtyAtLeast(memPageIdx, 1);
+        // CRITICAL (#301): same CP-04 race as AllocateChunk. EnsureDirtyAtLeast(1) is a no-op when DC≥1, so if a concurrent checkpoint snapshotted the bitmap
+        // before our Interlocked.And, the snapshot has bit=1 (pre-AND, still allocated); after fsync + DC--, eviction + reload silently REVERTS our free.
+        // FreeChunk's signature doesn't take a ChangeSet, so we can't register the page for ReleaseExcessDirtyMarks capping here — but IncrementDirty is still
+        // the correct choice: it keeps the bit-clear durable. DC inflation on the metadata pages is bounded in practice by the next per-UoW
+        // ReleaseExcessDirtyMarks run (the metadata page is also touched via the chunk's content writes, which DO register it).
+        _store.IncrementDirty(memPageIdx);
         Interlocked.Decrement(ref _allocatedCount);
 
         // Add page to free list if not already present.

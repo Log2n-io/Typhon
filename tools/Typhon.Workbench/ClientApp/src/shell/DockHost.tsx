@@ -146,6 +146,10 @@ const components: Record<string, React.FC<IDockviewPanelProps>> = {
   DbMap: lazyPanel(() => import('@/panels/DbMap/DbMapPanel')),
   StorageHealth: lazyPanel(() => import('@/panels/StorageHealth/StorageHealthPanel')),
   DataBrowserEntities: lazyPanel(() => import('@/panels/DataBrowser/EntityListPanel')),
+  // Dev Fixture: lazy because it's only opened on demand (View → Dev Fixture or palette). Replaces the former
+  // tab inside ConnectDialog so the feature has a persistent home — generate, inspect, generate again without
+  // re-opening the Connect dialog.
+  DevFixture: lazyPanel(() => import('@/panels/DevFixture/DevFixturePanel')),
 };
 
 // Only the active (shell + ungated) components are handed to dockview. Gated zone-D ids drop out here.
@@ -274,6 +278,22 @@ export default function DockHost() {
   const getTemplate = useDockLayoutStore((s) => s.getTemplate);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const apiRef = useRef<DockviewApi | null>(null);
+
+  // Clear the module-level dockview registrations on unmount. Without this, after closing a session
+  // the stale `DockviewApi` reference lingers in `openSchemaBrowser.ts` (and the profiler-commands
+  // sibling) — `toggleViewDevFixture()` then sees `registeredApi !== null` on the next Welcome screen
+  // and routes to the dock-toggle path instead of the modal fallback, silently no-opping (the dock
+  // doesn't exist anymore). Same root cause as: "the Welcome-screen Dev Fixture button doesn't open
+  // anything after I closed a session". `registerResetLayout(null)` symmetric-nulls the reset hook
+  // so the View → Reset Layout menu item doesn't fire against a disposed api either.
+  useEffect(() => {
+    return () => {
+      registerDockApi(null);
+      registerProfilerDockApi(null);
+      registerResetLayout(null);
+      apiRef.current = null;
+    };
+  }, []);
   function onReady(event: DockviewReadyEvent) {
     apiRef.current = event.api;
     registerDockApi(event.api);

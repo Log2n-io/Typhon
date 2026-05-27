@@ -552,6 +552,192 @@ public partial class DatabaseEngine
         }
     }
 
+    /// <summary>
+    /// Audits storage-level invariants and returns every violation found. Pure read-only — touches the occupancy bitmap, the segment registry, and each
+    /// segment's forward header chain; no data-page mutation, no allocation beyond a small issue list. Safe to call at any time on a live engine.
+    /// </summary>
+    /// <remarks>
+    /// <para>Two classes of check, each independent:</para>
+    /// <list type="bullet">
+    /// <item><b>Popcount canary</b> — the count of set bits in the occupancy bitmap must equal the sum of every registered segment's <c>Pages.Length</c>,
+    /// plus each segment's directory-map extension pages (the pages outside the root that hold the page-index list when the segment owns more than 500 data
+    /// pages — they are bit-set but not part of <c>Pages</c>), plus the four reserved root pages (0..3), plus the two occupancy-reserve pages held by the
+    /// page-allocator machinery. Any orphan (bit set, no claimant) or phantom (claimant, bit clear) is reported as a hard durability/structural bug.</item>
+    /// <item><b>Chunk-segment capacity</b> — for every <see cref="ChunkBasedSegment{TStore}"/>, <c>AllocatedChunkCount + FreeChunkCount</c> must equal
+    /// <c>ChunkCapacity</c>. Desync indicates the segment's chunk free-list drifted from its on-page chunk bitmaps.</item>
+    /// </list>
+    /// </remarks>
+    public StorageIntegrityReport RunStorageIntegrityCheck()
+    {
+        var issues = new List<StorageIntegrityIssue>();
+        var pageCount = MMF.StorageFilePageCount;
+        var segments = MMF.RegisteredSegments;
+
+        // ─── Popcount canary ─
+        // Pass 1: build the bitmap into a long[] mirroring ClassifyAllPages' shape.
+        var capacity = MMF.OccupancyCapacityPages;
+        var wordCount = (Math.Max(capacity, pageCount) + 63) / 64;
+        var words = new long[wordCount];
+        MMF.ReadOccupancyBits(words);
+
+        // Pass 2: build an "owned" bitmap by ORing in every claimant — segments + their dir-map ext pages + reserves + reserved-root range.
+        var owned = new long[wordCount];
+        var segClaimedTotal = 0;
+        foreach (var seg in segments)
+        {
+            foreach (var page in seg.Pages)
+            {
+                if ((uint)page < (uint)pageCount)
+                {
+                    owned[page >> 6] |= 1L << (page & 0x3F);
+                    segClaimedTotal++;
+                }
+            }
+        }
+        // Directory-map extension pages — outside Pages but bit-set; reachable via LogicalSegmentNextMapPBID.
+        using (var dirMapGuard = EpochGuard.Enter(EpochManager))
+        {
+            var extBuf = new List<int>();
+            foreach (var seg in segments)
+            {
+                extBuf.Clear();
+                seg.CollectDirectoryMapExtensionPages(dirMapGuard.Epoch, extBuf);
+                foreach (var p in extBuf)
+                {
+                    if ((uint)p < (uint)pageCount)
+                    {
+                        owned[p >> 6] |= 1L << (p & 0x3F);
+                    }
+                }
+            }
+        }
+        // Reserved roots — pages 0..InitialReservedPageCount-1 are part of the file header layout, always allocated.
+        var rootEnd = Math.Min(ManagedPagedMMF.InitialReservedPageCount, pageCount);
+        for (var p = 0; p < rootEnd; p++)
+        {
+            owned[p >> 6] |= 1L << (p & 0x3F);
+        }
+        // Occupancy reserves — the two pages held outside any segment for occupancy-machinery growth.
+        var (dataReserve, mapReserve) = MMF.ReservedOccupancyPages;
+        if ((uint)dataReserve < (uint)pageCount)
+        {
+            owned[dataReserve >> 6] |= 1L << (dataReserve & 0x3F);
+        }
+        if ((uint)mapReserve < (uint)pageCount)
+        {
+            owned[mapReserve >> 6] |= 1L << (mapReserve & 0x3F);
+        }
+
+        // Compare word-by-word — orphans = bits set in `words` but not in `owned`, phantoms = vice versa.
+        var bitsSet = 0;
+        var orphanCount = 0;
+        var phantomCount = 0;
+        var orphanRanges = new List<(int start, int count)>();
+        var phantomRanges = new List<(int start, int count)>();
+        var orphanRunStart = -1; var orphanRunLen = 0;
+        var phantomRunStart = -1; var phantomRunLen = 0;
+        for (var p = 0; p < pageCount; p++)
+        {
+            var setBit = (words[p >> 6] >> (p & 0x3F)) & 1;
+            var ownBit = (owned[p >> 6] >> (p & 0x3F)) & 1;
+            bitsSet += (int)setBit;
+
+            if (setBit == 1 && ownBit == 0)
+            {
+                // Orphan — bit set, no owner.
+                orphanCount++;
+                if (orphanRunStart < 0) { orphanRunStart = p; orphanRunLen = 1; } else { orphanRunLen++; }
+            }
+            else if (orphanRunStart >= 0)
+            {
+                orphanRanges.Add((orphanRunStart, orphanRunLen));
+                orphanRunStart = -1;
+            }
+
+            if (setBit == 0 && ownBit == 1)
+            {
+                phantomCount++;
+                if (phantomRunStart < 0) { phantomRunStart = p; phantomRunLen = 1; } else { phantomRunLen++; }
+            }
+            else if (phantomRunStart >= 0)
+            {
+                phantomRanges.Add((phantomRunStart, phantomRunLen));
+                phantomRunStart = -1;
+            }
+        }
+        if (orphanRunStart >= 0) orphanRanges.Add((orphanRunStart, orphanRunLen));
+        if (phantomRunStart >= 0) phantomRanges.Add((phantomRunStart, phantomRunLen));
+
+        foreach (var (start, count) in orphanRanges)
+        {
+            issues.Add(new StorageIntegrityIssue(
+                StorageIntegrityIssueKind.PopcountOrphan, 0, start, count,
+                $"orphan range [{start}..{start + count - 1}] — {count} page(s) set in bitmap but not in any segment / reserve / root"));
+        }
+        foreach (var (start, count) in phantomRanges)
+        {
+            issues.Add(new StorageIntegrityIssue(
+                StorageIntegrityIssueKind.PopcountPhantom, 0, start, count,
+                $"phantom range [{start}..{start + count - 1}] — {count} page(s) claimed by a segment but bitmap bit clear"));
+        }
+
+        // ─── In-memory chain ↔ directory cross-check (LIVE engine, no disk roundtrip) ─
+        using (var chainGuard = EpochGuard.Enter(EpochManager))
+        {
+            foreach (var seg in segments)
+            {
+                if (seg.Pages.Length == 0) continue;
+                LogicalSegment<PersistentStore> ls = null;
+                if (MMF.RegisteredSegments is ICollection<LogicalSegment<PersistentStore>> coll)
+                {
+                    foreach (var s in coll)
+                    {
+                        if (s.RootPageIndex == seg.RootPageIndex)
+                        {
+                            ls = s;
+                            break;
+                        }
+                    }
+                }
+                if (ls == null) continue;
+                var chainCount = ls.WalkForwardChainPageCount(chainGuard.Epoch);
+                var dirCount = ls.WalkDirectoryPageCount(chainGuard.Epoch);
+                if (chainCount != seg.Pages.Length || dirCount != seg.Pages.Length)
+                {
+                    issues.Add(new StorageIntegrityIssue(
+                        StorageIntegrityIssueKind.ChainDirectoryMismatch, seg.RootPageIndex, -1, 0,
+                        $"IN-MEMORY mismatch: root={seg.RootPageIndex} kind={seg.Kind} _pages.Length={seg.Pages.Length} chain={chainCount} dir={dirCount}"));
+                }
+            }
+        }
+
+        // ─── Chunk-segment internal capacity ─
+        foreach (var seg in segments)
+        {
+            if (seg is not ChunkBasedSegment<PersistentStore> cbs)
+            {
+                continue;
+            }
+            var sum = cbs.AllocatedChunkCount + cbs.FreeChunkCount;
+            if (sum != cbs.ChunkCapacity)
+            {
+                issues.Add(new StorageIntegrityIssue(
+                    StorageIntegrityIssueKind.ChunkSegmentCapacity, cbs.Pages[0], -1, 0,
+                    $"segment root={cbs.Pages[0]} kind={cbs.Kind} alloc={cbs.AllocatedChunkCount} free={cbs.FreeChunkCount} " +
+                    $"sum={sum} capacity={cbs.ChunkCapacity}"));
+            }
+        }
+
+        return new StorageIntegrityReport
+        {
+            Issues = issues,
+            OrphanPageCount = orphanCount,
+            PhantomPageCount = phantomCount,
+            OccupancyBitsSet = bitsSet,
+            SegmentClaimedPages = segClaimedTotal,
+        };
+    }
+
     private static StoragePageType ToPageType(StorageSegmentKind kind) => kind switch
     {
         StorageSegmentKind.Component => StoragePageType.Component,

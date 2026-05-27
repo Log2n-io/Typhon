@@ -661,11 +661,13 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                 continue;  // Retry
             }
 
-            // Ensure data is ready (wait for pending I/O)
+            // Ensure data is ready (wait for pending I/O). Defensive: assert the disk read returned the full page;
+            // a short read would leave stale/zero bytes in the cache slot and Load would see truncated content.
             var ioTask = pi.IOReadTask;
             if (ioTask != null && !ioTask.IsCompletedSuccessfully)
             {
-                ioTask.GetAwaiter().GetResult();
+                var bytesRead = ioTask.GetAwaiter().GetResult();
+                Debug.Assert(bytesRead == PageSize, $"Short disk read for filePageIndex={filePageIndex}: got {bytesRead}, expected {PageSize}");
                 pi.ResetIOCompletionTask();
             }
 

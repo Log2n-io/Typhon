@@ -54,9 +54,12 @@ public sealed class EngineLifecycleManifestTests
     {
         var fixture = FixtureDatabase.CreateOrReuse(_tempDir, force: true);
 
+        // The schema DLL is copied alongside the `.typhon` marker, inside the per-database sub-directory that
+        // `CreateOrReuse` composes — derive the dir from `TyphonFilePath` rather than assuming `_tempDir`.
+        var fixtureDir = Path.GetDirectoryName(fixture.TyphonFilePath)!;
         // Rename the schema DLL so the fast {SimpleName}.dll probe misses — forcing the metadata name-match fallback.
-        var canonical = Path.Combine(_tempDir, "Typhon.Workbench.Fixtures.schema.dll");
-        var renamed = Path.Combine(_tempDir, "fixtures-9.9.9-renamed.dll");
+        var canonical = Path.Combine(fixtureDir, "Typhon.Workbench.Fixtures.schema.dll");
+        var renamed = Path.Combine(fixtureDir, "fixtures-9.9.9-renamed.dll");
         File.Move(canonical, renamed);
 
         using var lifecycle = await EngineLifecycle.OpenAsync(fixture.TyphonFilePath);
@@ -70,8 +73,11 @@ public sealed class EngineLifecycleManifestTests
     {
         var fixture = FixtureDatabase.CreateOrReuse(_tempDir, force: true);
 
+        // The schema DLL lives in the per-database sub-directory composed by `CreateOrReuse` — derive it from the
+        // returned `.typhon` path instead of assuming the test's `_tempDir`.
+        var fixtureDir = Path.GetDirectoryName(fixture.TyphonFilePath)!;
         // Remove the schema DLL entirely — resolution must fail gracefully, not throw.
-        File.Delete(Path.Combine(_tempDir, "Typhon.Workbench.Fixtures.schema.dll"));
+        File.Delete(Path.Combine(fixtureDir, "Typhon.Workbench.Fixtures.schema.dll"));
 
         using var lifecycle = await EngineLifecycle.OpenAsync(fixture.TyphonFilePath);
 

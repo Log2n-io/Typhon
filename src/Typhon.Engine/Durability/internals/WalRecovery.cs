@@ -163,6 +163,21 @@ internal sealed class WalRecovery : IDisposable
                         case WalChunkType.ClusterTickFence:
                             CollectClusterTickFenceChunk(clusterTickFenceEntries, body);
                             break;
+
+                        case WalChunkType.BulkBegin:
+                            // P3 (v1): no Phase-3b action — visibility correctness is provided by the standard UowRegistry void path. A BulkBegin without a
+                            // matching durable BulkEnd means the bulk's UoW remains Pending in the registry; the existing VoidRemainingPending step voids it
+                            // (UR-03 / UR-05), making the bulk's revisions invisible via CommittedBeforeTSN=0 + bitmap fallback. P3 future: scan into a
+                            // session-keyed map for explicit page-free in Phase 3b (deferred — see claude/design/Durability/BulkLoad/03-recovery.md).
+                            result.BulkBeginCount++;
+                            break;
+
+                        case WalChunkType.BulkEnd:
+                            // P3 (v1): no Phase-3b action. Standard recovery already promotes the bulk's UoW to WalDurable via the per-row machinery (no
+                            // per-row records exist for bulk, but the UowRegistry slot was transitioned via UoW.Flush during CompleteBulkLoad).
+                            // See above for the future Phase-3b note.
+                            result.BulkEndCount++;
+                            break;
                     }
                 }
                 segScope.RecCount = result.RecordsScanned - beforeRecords;

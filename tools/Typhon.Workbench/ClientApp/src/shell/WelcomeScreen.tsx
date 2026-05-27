@@ -3,6 +3,7 @@ import { Clock, Database, FileSearch, Plug, Sparkles } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { customFetch } from '@/api/client';
 import ConnectDialog, { type ConnectTab } from './dialogs/ConnectDialog';
+import { toggleViewDevFixture } from './commands/openSchemaBrowser';
 
 export default function WelcomeScreen() {
  const [dialogOpen, setDialogOpen] = useState(false);
@@ -79,8 +80,8 @@ export default function WelcomeScreen() {
  <Button
  variant="outline"
  className="flex h-auto flex-col items-center gap-2 border-amber-500/40 px-6 py-4 text-fs-lg"
- onClick={() => openDialog('devfixture')}
- title="DEBUG build only — instantly create/reopen a populated test database"
+ onClick={() => toggleViewDevFixture()}
+ title="DEBUG build only — open the Dev Fixture panel to configure + generate a populated test database"
  >
  <Sparkles className="h-5 w-5 text-amber-400" />
  <span>Dev Fixture</span>

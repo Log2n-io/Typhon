@@ -173,6 +173,29 @@ internal sealed class CheckpointManager : ResourceNode, IMetricSource
         _wakeEvent.Set();
     }
 
+    /// <summary>
+    /// Blocks until at least one checkpoint cycle has completed (since the call entered) or <paramref name="timeout"/>
+    /// elapses. Returns <see langword="true"/> if a cycle completed, <see langword="false"/> on timeout.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Pairs with <see cref="ForceCheckpoint"/> to expose a synchronous checkpoint barrier. Used by <see cref="BulkLoadSession.CompleteBulkLoad"/> to drain
+    /// the bulk's dirty pages to disk before emitting the <c>BulkEnd</c> manifest. Detection is via the monotonic <see cref="TotalCheckpoints"/> counter — the
+    /// method records the count on entry and spin-waits (adaptively) until it advances.
+    /// </para>
+    /// <para>
+    /// Concurrent waiters all observe the same cycle increment; this is safe (the counter is monotonic and the post-cycle invariants — CheckpointLSN advance,
+    /// page fsync — hold by the time any waiter returns).
+    /// </para>
+    /// </remarks>
+    /// <param name="timeout">Maximum wall-clock time to wait for the next cycle.</param>
+    /// <returns><see langword="true"/> if a checkpoint completed, <see langword="false"/> on timeout.</returns>
+    public bool WaitForCheckpoint(TimeSpan timeout)
+    {
+        var startCount = Interlocked.Read(ref _totalCheckpoints);
+        return SpinWait.SpinUntil(() => Interlocked.Read(ref _totalCheckpoints) > startCount, timeout);
+    }
+
     // ═══════════════════════════════════════════════════════════════
     // IMetricSource
     // ═══════════════════════════════════════════════════════════════
@@ -242,14 +265,15 @@ internal sealed class CheckpointManager : ResourceNode, IMetricSource
                 RunCheckpointCycle(durableLsn, force ? CheckpointReason.Forced : CheckpointReason.Periodic);
             }
 
-            // Shutdown: run one final checkpoint cycle to flush all dirty pages
+            // Shutdown: run one final checkpoint cycle to flush all dirty pages.
+            //
+            // UNCONDITIONAL by design: CreateOrGrow and other structural-write paths bump DirtyCounter on segment pages WITHOUT writing WAL records.
+            // Guarding the final cycle on `finalLsn > _checkpointLsn` skips those dirty pages whenever the last structural write came after the last
+            // transaction commit + last periodic checkpoint.
             if (_fatalError == null)
             {
                 var finalLsn = _walManager.DurableLsn;
-                if (finalLsn > Interlocked.Read(ref _checkpointLsn))
-                {
-                    RunCheckpointCycle(finalLsn, CheckpointReason.Shutdown);
-                }
+                RunCheckpointCycle(finalLsn, CheckpointReason.Shutdown);
             }
         }
         catch (Exception ex)
@@ -314,10 +338,8 @@ internal sealed class CheckpointManager : ResourceNode, IMetricSource
                 }
             }
 
-            if (_shutdown)
-            {
-                return; // Check between expensive operations
-            }
+            // (PREVIOUSLY: if (_shutdown) return; — early-exit removed by fact-finding. This skipped fsync+DC-decrement for an already-completed write batch,
+            // leaving dirty pages with stale DC and inconsistent disk state. The shutdown path needs the writes to be DURABLY committed, not bailed out of.)
 
             // Step 4: Fsync data file
             {

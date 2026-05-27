@@ -167,6 +167,20 @@ internal abstract unsafe partial class PagedHashMapBase<TStore> where TStore : s
     {
         ref readonly var meta = ref accessor.GetChunkReadOnly<PagedHashMapMeta>(0);
 
+        // Bounds check against the live DirectoryChunkCount — guards against the inline branch returning a zero / stale slot when callers compute a dirIndex
+        // past the populated range. Previously the inline path returned meta.DirectoryChunkIds[dirIndex] unconditionally, which means a lookup with dirIndex
+        // past DirectoryChunkCount but < MaxInlineDirectoryChunks read zero (or stale data on a re-used chunk) and the bucket-chunk read downstream blew up
+        // with an out-of-range chunk-id deep in ChunkBasedSegment.GetChunkLocation. Throwing here makes the violation impossible to confuse with segment
+        // corruption.
+        if (dirIndex >= meta.DirectoryChunkCount)
+        {
+            throw new InvalidOperationException(
+                $"PagedHashMap.GetDirectoryChunkId: dirIndex={dirIndex} >= DirectoryChunkCount={meta.DirectoryChunkCount}. " +
+                $"BucketCount={(int)(meta.PackedMeta & 0xFFFFFFFF)}, N0={meta.N0}. " +
+                "This means a bucket lookup landed on a directory chunk that was never allocated — either ResolveBucket returned a bucketId past the live " +
+                "bucketCount, or EnsureDirectoryCapacity was skipped before SetBucketChunkId.");
+        }
+
         if (dirIndex < PagedHashMapMeta.MaxInlineDirectoryChunks)
         {
             return meta.DirectoryChunkIds[dirIndex];
@@ -368,7 +382,11 @@ internal abstract unsafe partial class PagedHashMapBase<TStore> where TStore : s
 
         for (int i = currentCount; i < requiredDirChunks; i++)
         {
-            int newDirChunkId = _segment.AllocateChunk(true, changeSet);
+            // CRITICAL (#301 cascade fix): caller-accessor overload keeps ACW > 0 on the new dir chunk's content page continuously. The legacy overload's
+            // local-accessor-dispose window left the new dir chunk's CONTENT page with ACW=0 but DC=1 — a checkpoint racing in that window snapshotted
+            // the cleared (zero-filled) content, fsync'd, dropped DC→0, and any eviction-then-reload before the first SetBucketChunkId would lose subsequent
+            // slot writes (the SLOT-ZERO corruption).
+            int newDirChunkId = _segment.AllocateChunk(changeSet, ref accessor);
             meta = ref accessor.GetChunk<PagedHashMapMeta>(0, true);
 
             if (i < PagedHashMapMeta.MaxInlineDirectoryChunks)
@@ -384,13 +402,21 @@ internal abstract unsafe partial class PagedHashMapBase<TStore> where TStore : s
 
                 if (meta.OverflowDirIndexChunkId == -1)
                 {
-                    int ovId = _segment.AllocateChunk(true, changeSet);
-                    meta = ref accessor.GetChunk<PagedHashMapMeta>(0, true);
-                    meta.OverflowDirIndexChunkId = ovId;
+                    // ORDER MATTERS (#301 race-fix): initialise the new overflow-dir-index chunk's NextOverflowChunkId sentinel BEFORE linking it from the
+                    // meta. AllocateChunk(clearContent) zeroes the new chunk, so until we write `-1` its NextOverflowChunkId field is 0 (== meta chunk). If
+                    // we linked first and a checkpoint snapshotted in the gap, walks via GetDirectoryChunkId would read `meta → ov → next=0 → meta`, returning
+                    // garbage from meta's byte layout as directory chunk ids — which then propagates as `BucketChunkIds[slot] == 0` and corrupts every
+                    // subsequent insert that hashes into that bucket. Caller-accessor overload (#301 cascade fix) keeps ACW > 0 on the new chunk's content
+                    // page.
+                    int ovId = _segment.AllocateChunk(changeSet, ref accessor);
 
                     ref var ov = ref accessor.GetChunk<OverflowDirIndex>(ovId, true);
                     ov.NextOverflowChunkId = -1;
                     ov.DirectoryChunkIds[targetSlot] = newDirChunkId;
+
+                    // Link from meta LAST so any concurrent snapshot sees a fully-formed overflow chunk.
+                    meta = ref accessor.GetChunk<PagedHashMapMeta>(0, true);
+                    meta.OverflowDirIndexChunkId = ovId;
                 }
                 else
                 {
@@ -400,12 +426,19 @@ internal abstract unsafe partial class PagedHashMapBase<TStore> where TStore : s
                         ref var ovChunk = ref accessor.GetChunk<OverflowDirIndex>(ovId, true);
                         if (ovChunk.NextOverflowChunkId == -1)
                         {
-                            int newOvId = _segment.AllocateChunk(true, changeSet);
-                            ovChunk = ref accessor.GetChunk<OverflowDirIndex>(ovId, true);
-                            ovChunk.NextOverflowChunkId = newOvId;
+                            // ORDER MATTERS (#301 race-fix): initialise the new overflow-dir-index chunk's sentinel BEFORE linking it from prev. Same hazard
+                            // as the first-overflow branch above: a half-formed link (prev → new, new.NextOverflowChunkId == 0) lets a concurrent snapshot
+                            // persist a walk-into-meta, producing garbage directory slots. Caller-accessor overload (#301 cascade fix) keeps ACW > 0 on the
+                            // new chunk's content page.
+                            int newOvId = _segment.AllocateChunk(changeSet, ref accessor);
 
                             ref var newOv = ref accessor.GetChunk<OverflowDirIndex>(newOvId, true);
                             newOv.NextOverflowChunkId = -1;
+
+                            // Link from prev LAST — any concurrent observer sees either prev unlinked (correct end-of-chain) or prev → fully-initialised new
+                            // (chain terminates safely on -1).
+                            ovChunk = ref accessor.GetChunk<OverflowDirIndex>(ovId, true);
+                            ovChunk.NextOverflowChunkId = newOvId;
                             ovId = newOvId;
                         }
                         else
@@ -496,10 +529,11 @@ internal abstract unsafe partial class PagedHashMapBase<TStore> where TStore : s
             // Compute how many directory chunks we need: ceil(initialBuckets / 64)
             int dirChunkCount = (initialBuckets + PagedHashMapDirectory.EntriesPerChunk - 1) / PagedHashMapDirectory.EntriesPerChunk;
 
-            // Allocate directory chunks and store their IDs in meta
+            // Allocate directory chunks and store their IDs in meta.
+            // Caller-accessor overload (#301 cascade fix) keeps ACW > 0 on each new dir chunk's content page.
             for (int i = 0; i < dirChunkCount; i++)
             {
-                int dirChunkId = _segment.AllocateChunk(true, changeSet);
+                int dirChunkId = _segment.AllocateChunk(changeSet, ref accessor);
 
                 // Re-obtain meta ref after allocation — AllocateChunk may trigger page eviction
                 meta = ref accessor.GetChunk<PagedHashMapMeta>(0, true);
@@ -508,10 +542,11 @@ internal abstract unsafe partial class PagedHashMapBase<TStore> where TStore : s
 
             meta.DirectoryChunkCount = (ushort)dirChunkCount;
 
-            // Allocate bucket chunks and register them in the directory
+            // Allocate bucket chunks and register them in the directory.
+            // Caller-accessor overload (#301 cascade fix) keeps ACW > 0 on each new bucket chunk's content page.
             for (int b = 0; b < initialBuckets; b++)
             {
-                int bucketChunkId = _segment.AllocateChunk(true, changeSet);
+                int bucketChunkId = _segment.AllocateChunk(changeSet, ref accessor);
 
                 // Re-obtain meta ref after allocation
                 meta = ref accessor.GetChunk<PagedHashMapMeta>(0, true);

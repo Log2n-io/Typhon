@@ -16,8 +16,11 @@ const ZONE_D_GATED_OFF = [] as const;
 // Stage 3 Phase 3 (3D): System DAG + Critical Path — the rest of the scheduling cluster (bus-driven, one selection).
 // Stage 3 Phase 4 (4B+4C, GAP-19): Query Analyzer — consolidates Catalog + Plan Tree + Execution Inspector.
 // Stage 4 Phase 1 (#377, GAP-21/22): Engine Live Health — the consolidated live-attach surface (P1 shell + P2+ gauges/anomalies/Capture).
+// Out-of-stage: DevFixture — the standalone fixture-creation panel (formerly the Connect-dialog tab). DEBUG-only
+// on the server; client always-active so the View menu / palette entries render in dev builds, with the panel
+// itself handling the "not available" cold state when the server's #if DEBUG endpoints are absent.
 const ZONE_D_ACTIVE = [
-  'DataBrowserEntities', 'DbMap', 'StorageHealth', 'Profiler', 'TopSpans', 'CallTree', 'SourcePreview', 'DataFlow', 'SystemDag', 'CriticalPath', 'QueryAnalyzer', 'EngineLiveHealth',
+  'DataBrowserEntities', 'DbMap', 'StorageHealth', 'Profiler', 'TopSpans', 'CallTree', 'SourcePreview', 'DataFlow', 'SystemDag', 'CriticalPath', 'QueryAnalyzer', 'EngineLiveHealth', 'DevFixture',
 ] as const;
 
 // The full registry key set = gated-off ∪ active. Used to assert the registry covers exactly the documented set.

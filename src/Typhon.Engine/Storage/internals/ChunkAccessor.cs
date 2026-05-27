@@ -208,7 +208,17 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
 
     internal void ClearChunk(int index)
     {
-        var addr = GetChunkAddress(index);
+        // CRITICAL (#301): pass dirty:true so MarkSlotDirty fires before we write zeros. This sets ACW > 0 for the page, which blocks
+        // CheckpointManager.WritePagesForCheckpoint from snapshotting it. Without this, a concurrent checkpoint could snapshot the page in a TORN state —
+        // bitmap bit ALREADY set (post-AllocateChunk's Interlocked.Or, which marked the page dirty via my CP-04 fix) but content NOT YET CLEARED
+        // (the Span.Clear below hasn't run / hasn't completed). That snapshot fsyncs to disk: bitmap=1 with stale content from when the chunk was previously
+        // owned by something else. Once the snapshot's DC-- takes DC to 0, eviction can occur; reload-from-disk gets the stale content. The next caller that
+        // walks a chain via this chunk's id reads garbage as if it were a header — the corruption cascade I've been chasing for two days.
+        //
+        // Setting ACW > 0 here ensures the clear is atomic w.r.t. checkpoint snapshots: the snapshot either runs entirely BEFORE this method (sees the chunk's
+        // PREVIOUS content, but that's OK because the bitmap bit is also still =0 if FreeChunk's snapshot hasn't yet fsync'd) or entirely AFTER (sees cleared
+        // content).
+        var addr = GetChunkAddress(index, dirty: true);
         new Span<long>(addr, _stride / 8).Clear();
     }
 

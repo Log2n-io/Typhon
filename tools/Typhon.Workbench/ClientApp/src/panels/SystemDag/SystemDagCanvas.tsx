@@ -25,6 +25,7 @@ import type { CriticalPathParticipation } from '../CriticalPath/criticalPath';
 import type { SystemGatingInfo } from '@/lib/dag/gatingAnalysis';
 import { useDagViewStore } from './useDagViewStore';
 import { getOverride, useNodePositionsStore } from './useNodePositionsStore';
+import { computeRevealTargetZoom } from './dagRevealZoom';
 
 interface Props {
   topology: TopologyDto | null | undefined;
@@ -1004,6 +1005,12 @@ function FitController({
     if (width <= 0 || height <= 0) return;
     if (modelWidth <= 0 || modelHeight <= 0) return;
     if (consumedRef.current === token) return;
+    // First fit happens on mount (consumedRef still at the sentinel -1) — animate from origin-zero
+    // would render the diagram "flying in" from a clean slate, which reads as jank rather than
+    // motion. Subsequent fits (Fit button, middle-click, layout switch, filter change) have a real
+    // prior viewport to ease from, so they tween (#379 regression — `setViewport` defaults to
+    // instant, the pre-e2eb32e code used xyflow's `fitView({ duration })` which animated).
+    const isFirstFit = consumedRef.current < 0;
     consumedRef.current = token;
 
     // Y-favoured fit against the FULL model bounds — not just node bounds. The model carries the
@@ -1031,7 +1038,7 @@ function FitController({
     // symmetrically, the diagram lands centred and the user pans equally in either direction.
     const x = width / 2 - (modelWidth / 2) * zoom;
     const y = height / 2 - (modelHeight / 2) * zoom;
-    instance.setViewport({ x, y, zoom });
+    instance.setViewport({ x, y, zoom }, isFirstFit ? undefined : { duration: 300 });
   }, [token, width, height, minZoom, maxZoom, modelWidth, modelHeight, instance]);
   return null;
 }
@@ -1039,10 +1046,14 @@ function FitController({
 /**
  * Centres the viewport on a single node when a reveal is requested ("Reveal in System DAG", 3D). Reads the parked
  * <c>pendingFocusSystem</c> from {@link useDagViewStore}; when the named node is present in the rendered set and the
- * container is sized, it pans (keeping the current zoom) to centre that node and clears the signal. Distinct from
- * <see cref="FitController"/> (which fits the whole graph) and from the plain bus highlight (which never moves the
- * viewport) — only an explicit reveal recentres. Node positions come from the model (xyflow's own measurement pass
- * stays unreliable here — see FitController), so we centre on the flow-space position + half the node box.
+ * container is sized, it centres and zooms to frame that node + its 1-hop neighbourhood (#379 follow-up,
+ * 2026-05-26 — previously kept the user's current zoom, which made reveal pan-only and left the target as a tiny
+ * tile when the user was fully zoomed out). See {@link computeRevealTargetZoom} for the target-zoom rule:
+ * fit the 1-hop subgraph, cap node coverage at 60 %, floor at the user's current zoom. Distinct from
+ * <see cref="FitController"/> (which fits the whole graph) and from the plain bus highlight (which never moves
+ * the viewport) — only an explicit reveal recentres. Node positions come from the model (xyflow's own
+ * measurement pass stays unreliable here — see FitController), so we centre on the flow-space position + half
+ * the node box.
  */
 function RevealController({ nodes }: { nodes: Node<DagNodeData>[] }) {
   const instance = useReactFlow<Node<DagNodeData>, Edge<DagEdgeData>>();
@@ -1055,7 +1066,19 @@ function RevealController({ nodes }: { nodes: Node<DagNodeData>[] }) {
     if (width <= 0 || height <= 0) return; // container not sized yet (hidden dock tab) — re-fires when it opens
     const node = nodes.find((n) => n.id === pendingFocusSystem);
     if (!node) return; // not visible yet (engine auto-show pass pending) — don't clear; wait for the re-render
-    instance.setCenter(node.position.x + NODE_WIDTH / 2, node.position.y + NODE_HEIGHT / 2, { zoom: instance.getZoom(), duration: 400 });
+    // Compute the target zoom from the 1-hop subgraph. `instance.getEdges()` returns the current rendered
+    // edge set — already filtered to whatever the user has visible — so a hidden-by-filter neighbour
+    // won't be in the edges and the fit will shrink accordingly. Pure function lives in `dagRevealZoom.ts`
+    // so the math is testable without an xyflow harness.
+    const targetZoom = computeRevealTargetZoom({
+      nodeId: pendingFocusSystem,
+      nodes: nodes.map((n) => ({ id: n.id, position: n.position })),
+      edges: instance.getEdges().map((e) => ({ source: e.source, target: e.target })),
+      viewportWidth: width,
+      viewportHeight: height,
+      currentZoom: instance.getZoom(),
+    });
+    instance.setCenter(node.position.x + NODE_WIDTH / 2, node.position.y + NODE_HEIGHT / 2, { zoom: targetZoom, duration: 400 });
     clearPendingFocusSystem();
   }, [pendingFocusSystem, nodes, width, height, instance, clearPendingFocusSystem]);
   return null;

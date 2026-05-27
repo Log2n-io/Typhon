@@ -32,6 +32,17 @@ public struct WalRecoveryResult
     /// <summary>Number of individual component entries overwritten from TickFence data.</summary>
     public int TickFenceEntriesReplayed;
 
+    /// <summary>
+    /// Number of <see cref="WalChunkType.BulkBegin"/> chunks observed during scan. Each pairs with a <see cref="BulkEndCount"/> increment for a fully-durable
+    /// bulk; mismatches indicate incomplete bulks whose visibility correctness is provided by the standard UowRegistry void path (UR-03).
+    /// </summary>
+    public int BulkBeginCount;
+
+    /// <summary>
+    /// Number of <see cref="WalChunkType.BulkEnd"/> chunks observed during scan. See <see cref="BulkBeginCount"/>.
+    /// </summary>
+    public int BulkEndCount;
+
     /// <summary>LSN of the last valid record found during scan.</summary>
     public long LastValidLSN;
 

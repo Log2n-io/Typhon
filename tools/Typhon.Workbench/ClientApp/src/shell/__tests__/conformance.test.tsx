@@ -17,6 +17,7 @@ import SourcePreviewPanel from '@/panels/profiler/SourcePreviewPanel';
 import CriticalPathPanel from '@/panels/CriticalPath/CriticalPathPanel';
 import QueryAnalyzerPanel from '@/panels/QueryAnalyzer/QueryAnalyzerPanel';
 import EngineLiveHealthPanel from '@/panels/EngineLiveHealth/EngineLiveHealthPanel';
+import DevFixturePanel from '@/panels/DevFixture/DevFixturePanel';
 
 // AC2.11 / AC3.11 — per-view conformance, parameterized over the reintroduced Stage-2/3 views (the conformance
 // doc's suites D + E). Each view is rendered in its **cold** state (no session → hooks disabled → empty/loading)
@@ -62,6 +63,9 @@ const VIEWS: { id: string; label: string; render: () => React.JSX.Element }[] = 
   // Engine Live Health (4 Phase 1, #377): pure DOM (header + placeholders + button); cold-state branch
   // (non-attach session) covers D + E for the conformance enrolment guard.
   { id: 'EngineLiveHealth', label: 'Engine Live Health', render: () => <EngineLiveHealthPanel {...NO_PROPS} /> },
+  // Dev Fixture: pure DOM (form + buttons). Capability probe is async — the first render shows
+  // "Checking capability…", satisfying PC-2. PC-6 (no broken Open in/Reveal in/Go to) holds trivially.
+  { id: 'DevFixture', label: 'Dev Fixture', render: () => <DevFixturePanel {...NO_PROPS} /> },
 ];
 
 function mount(view: (typeof VIEWS)[number]) {

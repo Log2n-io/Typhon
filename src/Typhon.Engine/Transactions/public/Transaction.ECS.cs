@@ -667,6 +667,48 @@ public unsafe partial class Transaction
     /// <summary>Mark an entity link target for destruction.</summary>
     public void Destroy<T>(EntityLink<T> link) where T : class => Destroy(link.Id);
 
+    /// <summary>
+    /// Bulk-load destroy fast path: skips the per-call <see cref="IsAlive"/> check (and the random
+    /// <see cref="RawValuePagedHashMap{TKey,TStore}"/> lookup it implies) that <see cref="Destroy(EntityId)"/> uses to make the operation idempotent for ECS
+    /// systems.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Contract: <paramref name="id"/> MUST identify an entity that was spawned earlier in the same <see cref="BulkLoadSession"/> (committed by an earlier
+    /// transaction recycle, OR pending in the current transaction). Bulk sessions are single-thread, single-user, and the caller tracks the spawned ids, so
+    /// this assumption is structurally guaranteed by the API.
+    /// </para>
+    /// <para>
+    /// What we save vs the standard path: at scale (millions of destroys against a fragmented EntityMap that no longer fits in the page cache) the per-call
+    /// <c>IsAlive</c> lookup dominates wall-clock time — every call is a random hash-map probe on a cold page. The standard <see cref="Destroy(EntityId)"/>
+    /// stays available for any path that genuinely needs the idempotency guarantee.
+    /// </para>
+    /// </remarks>
+    /// <param name="id">Entity to destroy. Must be a live entity in this session.</param>
+    internal void DestroyBulk(EntityId id)
+    {
+        EnsureMutable();
+        State = TransactionState.InProgress;
+        AssertThreadAffinity();
+
+        Debug.Assert(!id.IsNull, "Cannot destroy null entity");
+
+        var scope = TyphonEvent.BeginEcsDestroy(id.RawValue);
+        scope.Tsn = TSN;
+
+        // Skip IsAlive — bulk caller guarantees the entity exists. Skip cascade traversal too —
+        // bulk-spawned archetypes don't (and can't, by design) have FK cascade targets.
+        if (_pendingDestroys != null && _pendingDestroys.Contains(id))
+        {
+            scope.Dispose();
+            return;
+        }
+        _pendingDestroys ??= [];
+        _pendingDestroys.Add(id);
+
+        scope.Dispose();
+    }
+
     /// <summary>Maximum cascade depth. DAG validation prevents cycles, but this guards against bugs.</summary>
     private const int MaxCascadeDepth = 32;
 

@@ -360,6 +360,12 @@ export default function CriticalPathView({ bars, selectedSystemName, onSelectBar
   // user presses Fit.
   const pendingFitRef = useRef(false);
   useEffect(() => {
+    // Detect FIRST fit (no prior signal observed) BEFORE we mutate the latch — used below to skip
+    // the ease-out tween on initial mount. Animating from origin-zero to fitted reads as the
+    // diagram "flying in" rather than motion; subsequent fits (middle-click, Fit button, orientation
+    // flip, fullGantt / metronome toggle) have a real prior framing to ease from, so they tween
+    // through the same 800 ms ease-out curve drag-to-zoom and history back/forward use.
+    const isFirstFit = lastFitSignalRef.current < 0;
     if (fitSignal !== lastFitSignalRef.current) {
       lastFitSignalRef.current = fitSignal;
       pendingFitRef.current = true;
@@ -370,15 +376,23 @@ export default function CriticalPathView({ bars, selectedSystemName, onSelectBar
     const major = o === 'horizontal' ? v.width - GUTTER_PX : v.height;
     if (major <= 0) return; // viewport not measured yet — keep the latch, retry on the next size change
     pendingFitRef.current = false;
-    // A fit overrides any in-flight tween / pending wheel-settle and resets CP history: the new
-    // framing becomes the lone entry — the old windows are tick-relative, hence stale here.
-    tweenRef.current = null;
-    cancelAnimationFrame(rafRef.current);
+    // A fit overrides any pending wheel-settle and resets CP history: the new framing becomes the
+    // lone entry — the old windows are tick-relative, hence stale here. The history reset fires
+    // unconditionally (before the tween) so back/forward acts on the new framing immediately.
     if (wheelSettleRef.current) { clearTimeout(wheelSettleRef.current); wheelSettleRef.current = null; }
-    setPxPerUs(major / Math.max(1, total));
-    setPanMajor(0); // fitted content fills the viewport exactly — pan back to the start.
     historyRef.current = { entries: [{ start: 0, end: total }], pointer: 0 };
-  }, [fitSignal, viewportSize, setPxPerUs]);
+    if (isFirstFit) {
+      // First-fit snaps — no prior viewport to ease from. Match the SystemDag first-fit-instant rule.
+      tweenRef.current = null;
+      cancelAnimationFrame(rafRef.current);
+      setPxPerUs(major / Math.max(1, total));
+      setPanMajor(0);
+    } else {
+      // Subsequent fits tween to the full window via the existing 800 ms ease-out infrastructure.
+      // `animateToWindow` itself cancels any in-flight rAF + replaces `tweenRef.current`.
+      animateToWindow(0, total);
+    }
+  }, [fitSignal, viewportSize, setPxPerUs, animateToWindow]);
 
   // Middle-click = fit. Mouse thumb buttons = CP-local zoom-history back/forward.
   useEffect(() => {

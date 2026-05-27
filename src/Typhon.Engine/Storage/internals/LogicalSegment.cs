@@ -437,6 +437,7 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
                             InitHeader(endPage.Address, PageClearMode.Header, PageBlockFlags.IsLogicalSegment, type, 1);
                             changeSet?.AddByMemPageIndex(endMemIdx);
                             endPage.RawData<int>(0, 1)[0] = 0;
+                            _store.EnsureDirtyAtLeast(endMemIdx, 1);  // durability: see comments below in main map-page block
                             _store.UnlatchPageExclusive(endMemIdx);
                         }
                     }
@@ -460,6 +461,10 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
                 if (isPageDirty)
                 {
                     changeSet?.AddByMemPageIndex(memPageIdx);
+                    // Durability: directory map-page write (root or extension) must survive a checkpoint regardless of whether the caller provided a
+                    // ChangeSet. Same rationale as the data-page-init loop above. Without this the directory entries get evicted as clean and the next Load
+                    // sees a truncated page list.
+                    _store.EnsureDirtyAtLeast(memPageIdx, 2);
                 }
 
                 if (hasPage)
@@ -470,6 +475,27 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
                 isFirstPage = false;
                 curIndexMapIndex++;
             }
+        }
+
+        // Patch the OLD tail's forward-chain pointer when growing. The data-page header chain (LogicalSegmentNextRawDataPBID) is the segment's
+        // structural-integrity invariant — chain count must equal the directory count at every healthy moment. Before this fix the inner data-page-init loop
+        // only touched pages [growFrom, filePageIndices.Length), so the OLD tail (page at growFrom-1) was left with its prior 0 terminator and the chain was
+        // permanently truncated at the original allocation size. With it, every Grow extends the chain by exactly the newly-added pages.
+        if (growFrom > 0)
+        {
+            var oldTailFilePage = filePageIndices[growFrom - 1];
+            _store.RequestPageEpoch(oldTailFilePage, epoch, out var oldTailMemIdx);
+            var oldTailLatched = _store.TryLatchPageExclusive(oldTailMemIdx);
+            Debug.Assert(oldTailLatched, "TryLatchPageExclusive failed on old-tail page during Grow chain-patch");
+            var oldTailPage = _store.GetPage(oldTailMemIdx);
+            ref var oldTailLsh = ref oldTailPage.StructAt<LogicalSegmentHeader>(LogicalSegmentHeader.Offset);
+            oldTailLsh.LogicalSegmentNextRawDataPBID = filePageIndices[growFrom];
+            changeSet?.AddByMemPageIndex(oldTailMemIdx);
+            // Durability: EnsureDirtyAtLeast guarantees the page survives one checkpoint cycle so the write reaches disk regardless of whether the caller
+            // provided a ChangeSet. UnlatchPageExclusive only releases the latch (it doesn't mark dirty), and many CreateOrGrow callers pass `null` for
+            // changeSet — so without this call the chain-pointer write can be evicted as clean and lost on reopen.
+            _store.EnsureDirtyAtLeast(oldTailMemIdx, 1);
+            _store.UnlatchPageExclusive(oldTailMemIdx);
         }
 
         // Initialize the subsequent pages on disk
@@ -503,12 +529,75 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
                 lsh.Kind = _kind;
             }
 
+            // Durability: same rationale as the old-tail patch above — UnlatchPageExclusive doesn't mark the page dirty and ChangeSet may be null
+            // (DatabaseEngine.InitializeArchetypes allocates segments with null ChangeSet for EntityMap / Cluster / per-archetype-index — see lines 4242,
+            // 4263, 4312, 4344). Without EnsureDirtyAtLeast the chain-pointer + KIND + clear-data writes are evicted as clean and the next reopen sees
+            // zeros, producing the chain↔directory mismatches the integrity check catches.
+            _store.EnsureDirtyAtLeast(memPageIdx, 2);
+
             _store.UnlatchPageExclusive(memPageIdx);
         }
 
         _pages = filePageIndices.ToArray();
 
+        // Post-condition #1: walk the chain in memory. Mismatch here ⇒ bug in CreateOrGrow pointer writes (not persistence).
+        var memChainCount = WalkForwardChainPageCount(epoch);
+        if (memChainCount != _pages.Length)
+        {
+            throw new InvalidOperationException(
+                $"CreateOrGrow IN-MEMORY chain mismatch: root={_pages[0]} kind={_kind} growFrom={growFrom} " +
+                $"expected={_pages.Length} chain={memChainCount} (diff={memChainCount - _pages.Length:+0;-#}) " +
+                $"— bug is in CreateOrGrow's pointer writes, not persistence.");
+        }
+
+        // Post-condition #2: walk the directory section in memory by reading the root + extension map pages RIGHT NOW (same code-path Load uses). Mismatch
+        // here ⇒ bug in CreateOrGrow's directory writes (not persistence).
+        var memDirCount = WalkDirectoryPageCount(epoch);
+        if (memDirCount != _pages.Length)
+        {
+            throw new InvalidOperationException(
+                $"CreateOrGrow IN-MEMORY directory mismatch: root={_pages[0]} kind={_kind} growFrom={growFrom} " +
+                $"expected={_pages.Length} directory={memDirCount} (diff={memDirCount - _pages.Length:+0;-#}) " +
+                $"— bug is in CreateOrGrow's directory writes, not persistence.");
+        }
+
         return true;
+    }
+
+    /// <summary>
+    /// Walks the on-page directory section (root + extension map pages reached via <c>LogicalSegmentNextMapPBID</c>) and counts non-zero entries, terminating
+    /// at the first zero — mirroring exactly what <see cref="Load"/> does. Used by the post-condition assertion at the end of <see cref="CreateOrGrow"/> to
+    /// isolate whether the in-memory directory after a write matches <c>_pages.Length</c>, which discriminates "CreateOrGrow logic bug" from "persistence bug".
+    /// </summary>
+    internal int WalkDirectoryPageCount(long epoch)
+    {
+        var rootIndex = RootPageIndex;
+        _store.RequestPageEpoch(rootIndex, epoch, out var memPageIndex);
+        var page = _store.GetPage(memPageIndex);
+
+        var count = 0;
+        var rd = page.RawDataReadOnly<int>(0, RootHeaderIndexSectionCount);
+        var maxIndicesForPage = RootHeaderIndexSectionCount;
+        var i = 0;
+        while (rd[i] != 0)
+        {
+            count++;
+            if (++i != maxIndicesForPage)
+            {
+                continue;
+            }
+            ref var lsh = ref page.StructAt<LogicalSegmentHeader>(LogicalSegmentHeader.Offset);
+            if (lsh.LogicalSegmentNextMapPBID == 0)
+            {
+                break;
+            }
+            _store.RequestPageEpoch(lsh.LogicalSegmentNextMapPBID, epoch, out memPageIndex);
+            page = _store.GetPage(memPageIndex);
+            rd = page.RawDataReadOnly<int>(0, NextHeadersIndexSectionCount);
+            i = 0;
+            maxIndicesForPage = NextHeadersIndexSectionCount;
+        }
+        return count;
     }
 
     /// <summary>
@@ -577,10 +666,88 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
 
         _pages = pages.ToArray();
 
+        // Structural integrity invariant: the data-page forward chain (LogicalSegmentNextRawDataPBID) must reach exactly as many pages as the persisted Page
+        // Directory enumerates. The two are written by independent code paths in CreateOrGrow — the chain pointer is updated per-page in the data-page-init
+        // loop and on the old tail; the Directory entries are written into root/extension-map raw-data sections. A mismatch means one of the two writes lost
+        // durability across a crash / checkpoint race, leaving a structurally inconsistent segment that would silently lose addressing of some pages. We
+        // throw early at Load rather than let the corruption propagate. Zero storage cost — both fields already exist; cost is O(N) page-header reads per
+        // segment on Open, paid once.
+        var chainCount = WalkForwardChainPageCount(epoch);
+        if (chainCount != _pages.Length)
+        {
+            throw new InvalidOperationException(
+                $"LogicalSegment integrity check failed at Load: root={filePageIndex} kind={_kind} directory={_pages.Length} chain={chainCount} " +
+                $"(diff={chainCount - _pages.Length:+0;-#}). Signature of a lost-write durability bug — either the directory append or the " +
+                $"forward-chain pointer didn't persist before the previous close.");
+        }
+
         // Phase 5: Storage:Segment:Load event.
         TyphonEvent.EmitStorageSegmentLoad(filePageIndex, _pages.Length);
 
         return true;
+    }
+
+    /// <summary>
+    /// Walks the segment's data-page forward chain — start at the root, follow each page's <see cref="LogicalSegmentHeader.LogicalSegmentNextRawDataPBID"/>
+    /// pointer until it reaches <c>0</c>, counting pages along the way.
+    /// </summary>
+    /// <remarks>
+    /// Pure integrity-check helper — read-only, no allocations. Caller must be inside an <see cref="EpochGuard"/> scope (or pass an epoch known to be live).
+    /// Used by <see cref="Load"/> as the chain↔directory cross-check that catches lost-write durability bugs at the earliest moment.
+    /// </remarks>
+    internal int WalkForwardChainPageCount(long epoch)
+    {
+        var rootIndex = RootPageIndex;
+        _store.RequestPageEpoch(rootIndex, epoch, out var memPageIndex);
+        var page = _store.GetPage(memPageIndex);
+
+        var count = 1;
+        // Cycle guard: any healthy chain is bounded by the directory's page count. A runaway chain (cycle or wildly past the directory's length) is itself a
+        // corruption signal — the caller's mismatch detection will flag it against the directory count.
+        var maxWalk = ((_pages?.Length ?? 0) * 2) + 16;
+        while (count < maxWalk)
+        {
+            var next = page.StructAt<LogicalSegmentHeader>(LogicalSegmentHeader.Offset).LogicalSegmentNextRawDataPBID;
+            if (next == 0)
+            {
+                return count;
+            }
+            _store.RequestPageEpoch(next, epoch, out memPageIndex);
+            page = _store.GetPage(memPageIndex);
+            count++;
+        }
+        return count;
+    }
+
+    /// <summary>
+    /// Enumerates the file-page indices of the segment's <b>directory map extension pages</b> — the pages outside the root that hold the page-index list when
+    /// the segment owns more than <see cref="RootHeaderIndexSectionCount"/> data pages. Walks <see cref="LogicalSegmentHeader.LogicalSegmentNextMapPBID"/>
+    /// starting from the root (which is excluded — it is already exposed via <c>Pages[0]</c>) until the chain terminates with <c>0</c>.
+    /// </summary>
+    /// <remarks>
+    /// Used by storage-integrity audits: dir-map ext pages are bit-set in the occupancy bitmap but are not data pages, so they don't appear in
+    /// <see cref="Pages"/>. Without this walk a healthy engine would falsely look like it has orphan pages. Caller must be inside an <see cref="EpochGuard"/>
+    /// scope.
+    /// </remarks>
+    internal void CollectDirectoryMapExtensionPages(long epoch, List<int> dest)
+    {
+        var rootIndex = RootPageIndex;
+        _store.RequestPageEpoch(rootIndex, epoch, out var memPageIndex);
+        var page = _store.GetPage(memPageIndex);
+        var maxWalk = (_pages?.Length ?? 0) / NextHeadersIndexSectionCount + 4; // cycle guard
+        var step = 0;
+        while (step < maxWalk)
+        {
+            var next = page.StructAt<LogicalSegmentHeader>(LogicalSegmentHeader.Offset).LogicalSegmentNextMapPBID;
+            if (next == 0)
+            {
+                return;
+            }
+            dest.Add(next);
+            _store.RequestPageEpoch(next, epoch, out memPageIndex);
+            page = _store.GetPage(memPageIndex);
+            step++;
+        }
     }
 
     public void Clear()

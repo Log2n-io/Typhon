@@ -64,7 +64,21 @@ public sealed class UnitOfWork : IDisposable
     /// </summary>
     internal ChangeSet ChangeSet { get; }
 
-    internal UnitOfWork(DatabaseEngine dbe, DurabilityMode durabilityMode, ushort uowId, TimeSpan timeout, ChangeSet changeSet = null)
+    /// <summary>
+    /// When <see langword="true"/>, transactions in this UoW skip per-row WAL serialization in <c>Transaction.PersistAndFinalize</c>. Set by
+    /// <see cref="BulkLoadSession"/> to honor BL-01 — the bulk path emits a manifest pair (<c>BulkBegin</c>/<c>BulkEnd</c>) instead of per-row records. Pages
+    /// still get dirty-marked normally so the checkpoint flushes them at <see cref="BulkLoadSession.CompleteBulkLoad"/>. Never set on UoWs returned by
+    /// <see cref="DatabaseEngine.CreateUnitOfWork"/>.
+    /// </summary>
+    internal bool SuppressWalSerialization { get; }
+
+    internal UnitOfWork(
+        DatabaseEngine dbe,
+        DurabilityMode durabilityMode,
+        ushort uowId,
+        TimeSpan timeout,
+        ChangeSet changeSet = null,
+        bool suppressWalSerialization = false)
     {
         _dbe = dbe;
         _durabilityMode = durabilityMode;
@@ -76,6 +90,7 @@ public sealed class UnitOfWork : IDisposable
         // AllocateUowId can track registry page mutations in it (avoiding sync I/O).
         // Immediate: each transaction creates its own ChangeSet for per-commit I/O.
         ChangeSet = changeSet;
+        SuppressWalSerialization = suppressWalSerialization;
 
         _cts = new CancellationTokenSource();
         _deadline = timeout == TimeSpan.Zero

@@ -273,6 +273,17 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     private ComponentTable _assembliesTable;
     private ConcurrentDictionary<Type, ComponentTable> _componentTableByType;
 
+    // ─── ArchetypeRegistry lifecycle tracking ───────────────────────────────────────────────────────────
+    //
+    // Every CLR archetype + component <see cref="Type"/> this engine causes to be inserted into the global <c>ArchetypeRegistry</c> is recorded here.
+    // On <see cref="Dispose"/> these sets are passed to <c>ArchetypeRegistry.UnregisterEngineUse</c>, which decrements per-Type refcounts and removes the
+    // registry entry when the count reaches zero. That release-on-zero is what lets the owning AssemblyLoadContext be GC'd between Workbench sessions — without
+    // it, the registry pinned the first ALC's Types for the lifetime of the process and any later session loading the same DLL into a fresh collectible ALC
+    // saw stale state.
+    private readonly HashSet<Type> _registeredArchetypeTypes = [];
+    private readonly HashSet<Type> _registeredComponentTypes = [];
+    private bool _unregisteredFromRegistry;
+
     /// <summary>Component schema names that underwent migration during this engine session. Used to invalidate stale EntityMaps.</summary>
     private HashSet<string> _migratedComponents;
     private ConcurrentDictionary<ushort, ComponentTable> _componentTableByWalTypeId;
@@ -652,6 +663,17 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             TransactionChain.Dispose();
             UowRegistry?.Dispose();
             MMF.Dispose();
+
+            // ─── Release the global ArchetypeRegistry's references to this engine's Types ──────────────
+            // Done last so the disposal pipeline above (PersistArchetypeState, PersistEngineState, etc.) still has access to the registry while it needs to
+            // read archetype metadata. After this call returns, the registry no longer holds Type references on behalf of THIS engine — and once the GC
+            // reclaims this engine instance, the collectible AssemblyLoadContext (Workbench) can also be reclaimed. Guarded by `_unregisteredFromRegistry` so
+            // a double-dispose doesn't double-decrement (the underlying API is idempotent anyway, but the flag is cheaper).
+            if (!_unregisteredFromRegistry)
+            {
+                ArchetypeRegistry.UnregisterEngineUse(_registeredArchetypeTypes, _registeredComponentTypes);
+                _unregisteredFromRegistry = true;
+            }
         }
         base.Dispose(disposing);
         IsDisposed = true;
@@ -3737,6 +3759,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     public bool RegisterComponentFromAccessor<T>(ChangeSet changeSet = null, SchemaValidationMode schemaValidation = SchemaValidationMode.Enforce,
         StorageMode? storageModeOverride = null) where T : unmanaged
     {
+        // Track this component Type for the registry lifecycle pairing in Dispose. Adding even on early-return / failure branches below is safe:
+        // UnregisterEngineUse is idempotent on Types it doesn't know about, and any Type the engine touched MAY have ended up in
+        // `ArchetypeRegistry.ComponentTypeIds` via the static-constructor + `DeclareComponent` cascade before this method's body inspected anything.
+        _registeredComponentTypes.Add(typeof(T));
+
         // Look up persisted fields for the resolver (keyed by component schema name)
         FieldIdResolver resolver = null;
         var componentAttr = typeof(T).GetCustomAttribute<ComponentAttribute>();
@@ -4433,6 +4460,16 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         // Persist any new archetypes not yet in the database
         PersistNewArchetypes();
+
+        // ─── Register this engine's use of every archetype Type currently in the registry ──────────────
+        // Snapshot AFTER all archetypes are registered (Touch() / DeclareComponent / EnsureFinalized cascade) so we hold a reference to every Type this engine
+        // is now consuming. The matching `Dispose` decrements the same set; the registry releases the Type on refcount=0, which is what lets the owning ALC be
+        // GC'd between sessions.
+        foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+        {
+            _registeredArchetypeTypes.Add(meta.ArchetypeType);
+        }
+        ArchetypeRegistry.RegisterEngineUse(_registeredArchetypeTypes, _registeredComponentTypes);
     }
 
     /// <summary>

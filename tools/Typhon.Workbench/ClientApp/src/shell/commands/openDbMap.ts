@@ -29,6 +29,50 @@ export function revealSystemInDag(name: string): void {
 }
 
 /**
+ * Set the unified bus's `system` leaf + projection in one call. Used by the Systems & Queries Navigator's
+ * hover-reveal buttons so a user clicking a verb (Reveal in CP / Flow / Inspector) without having clicked the
+ * row body first still ends up with the bus in a consistent state. Co-located with the other system reveals
+ * for visibility; the leaf write and projection write are intentionally separate API surfaces on the bus
+ * (leaf is the Inspector's primary signal, projection is the cluster panels' highlight target).
+ */
+function selectSystemOnBus(name: string): void {
+  const store = useSelectionStore.getState();
+  store.select('system', name);
+  store.setSystem(name);
+}
+
+/**
+ * Navigator → Critical Path: select the system on the bus and surface the CP panel. The panel reads the
+ * projection and highlights the system's `cp-system-edge-${name}` band. Mirrors {@link revealSystemInDag}'s
+ * shape but without a center-and-fit signal — CP has no node-positioning concept; the bar is wherever the
+ * scheduler put it on the timeline.
+ */
+export function revealSystemInCriticalPath(name: string): void {
+  selectSystemOnBus(name);
+  ensureDockPanel('critical-path', 'CriticalPath', 'Critical Path');
+}
+
+/**
+ * Navigator → Data Flow: select the system on the bus and surface the Data Flow panel. The panel's
+ * AccessMatrix column header + DataFlow track row pick up the projection and outline (the same cross-panel
+ * highlight `data-flow.spec.ts` exercises).
+ */
+export function revealSystemInDataFlow(name: string): void {
+  selectSystemOnBus(name);
+  ensureDockPanel('data-flow', 'DataFlow', 'Data Flow');
+}
+
+/**
+ * Navigator → Inspector (Detail pane): select the system on the bus and surface the Detail panel. The
+ * Detail panel reads the bus leaf and renders the system card with its DAG / phase / cross-link verbs.
+ * `'detail'` is the canonical panel id; component key is `'Detail'` (see DockHost.tsx:183).
+ */
+export function revealSystemInInspector(name: string): void {
+  selectSystemOnBus(name);
+  ensureDockPanel('detail', 'Detail', 'Detail');
+}
+
+/**
  * Map → Schema: select the component on the bus and open the Component Inspector (Stage 2 consolidation —
  * the old SchemaLayout panel was removed in GAP-02). The Inspector reads the bus leaf, so it re-targets.
  */

@@ -29,6 +29,7 @@ import {
   toggleViewDbMap,
   toggleViewDataFlow,
   toggleViewDetail,
+  toggleViewDevFixture,
   toggleViewLogs,
   toggleViewOptions,
   toggleViewResourceTree,
@@ -210,6 +211,12 @@ export default function MenuBar() {
  >
  Engine Health
  </MenubarItem>
+ )}
+ {/* Dev Fixture (DEBUG-only on the server). Not session-kind gated — the user generates a fixture
+     independently of any open session; opening the result establishes a new session. The panel itself
+     shows a "not available in this build" cold state if `/api/fixtures/capability` returns 404. */}
+ {isViewActive('DevFixture') && (
+ <MenubarItem onClick={toggleViewDevFixture}>Dev Fixture…</MenubarItem>
  )}
  {ANY_ZONE_D_VIEW_ACTIVE && <MenubarSeparator />}
  <MenubarItem

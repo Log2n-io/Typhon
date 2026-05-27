@@ -11,16 +11,17 @@ import { usePostApiSessionsAttach, usePostApiSessionsFile, usePostApiSessionsTra
 import { useRecentFilesStore, type RecentFileState } from '@/stores/useRecentFilesStore';
 import { useSessionStore } from '@/stores/useSessionStore';
 import { logError, logInfo, logWarn } from '@/stores/useLogStore';
-import { customFetch } from '@/api/client';
 import { extractDetail } from './connectErrors';
 import RecentFilesTab from './tabs/RecentFilesTab';
 import OpenFileTab from './tabs/OpenFileTab';
 import OpenTraceTab from './tabs/OpenTraceTab';
 import AttachTab from './tabs/AttachTab';
 import CachedDataTab from './tabs/CachedDataTab';
-import DevFixtureTab from './tabs/DevFixtureTab';
 import { toggleViewProfiler } from '@/shell/commands/profilerCommands';
 
+// Dev Fixture used to be a tab here; it now lives in `panels/DevFixture/DevFixturePanel.tsx`, reachable from the
+// View menu and palette ("Open Dev Fixture"). The `'devfixture'` literal stays in the union so any caller still
+// passing `initialTab='devfixture'` doesn't break compile (it silently falls through to the default `recent` tab).
 export type ConnectTab = 'recent' | 'open' | 'trace' | 'attach' | 'cached' | 'devfixture';
 
 interface Props {
@@ -36,24 +37,6 @@ export default function ConnectDialog({ open, initialTab, onOpenChange }: Props)
  const postFile = usePostApiSessionsFile();
  const postTrace = usePostApiSessionsTrace();
  const postAttach = usePostApiSessionsAttach();
-
- // Dev-fixture tab availability — probe once on mount. The server exposes /api/fixtures/capability
- // only when built with DEBUG, so a 404 here means "Release build, hide the tab". Keeping this as
- // one-time state (not a live query) because the server's build config can't change mid-session.
- const [devFixtureAvailable, setDevFixtureAvailable] = useState(false);
-
- useEffect(() => {
- let cancelled = false;
- (async () => {
- try {
- await customFetch('/api/fixtures/capability', { method: 'GET' });
- if (!cancelled) setDevFixtureAvailable(true);
- } catch {
- /* endpoint absent in Release builds — leave the tab hidden */
- }
- })();
- return () => { cancelled = true; };
- }, []);
 
  // Snap to the requested tab every time the dialog opens — the prop may have changed while the
  // dialog was closed (different Welcome button / MenuBar item).
@@ -175,7 +158,9 @@ export default function ConnectDialog({ open, initialTab, onOpenChange }: Props)
  <TabsTrigger value="trace">Open Trace</TabsTrigger>
  <TabsTrigger value="attach">Attach</TabsTrigger>
  <TabsTrigger value="cached">Cached Data</TabsTrigger>
- {devFixtureAvailable && <TabsTrigger value="devfixture">Dev Fixture</TabsTrigger>}
+ {/* Dev Fixture moved to its own standalone panel (View → Dev Fixture / palette: "Open Dev Fixture").
+     The capability probe + `devFixtureAvailable` state stay here only as a hint for the View-menu wiring
+     to render; the tab is no longer inside the Connect dialog. */}
  </TabsList>
  <TabsContent value="recent" className="min-h-0 flex-1">
  <RecentFilesTab onOpen={handleOpen} onOpenTrace={handleOpenTrace} />
@@ -192,11 +177,6 @@ export default function ConnectDialog({ open, initialTab, onOpenChange }: Props)
  <TabsContent value="cached" className="min-h-0 flex-1">
  <CachedDataTab />
  </TabsContent>
- {devFixtureAvailable && (
- <TabsContent value="devfixture" className="min-h-0 flex-1">
- <DevFixtureTab onOpen={handleOpen} isOpening={postFile.isPending} />
- </TabsContent>
- )}
  </Tabs>
 
  {postFile.isError && (

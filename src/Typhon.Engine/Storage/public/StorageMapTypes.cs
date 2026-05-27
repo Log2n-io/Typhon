@@ -1,5 +1,6 @@
 using JetBrains.Annotations;
 using System;
+using System.Collections.Generic;
 
 namespace Typhon.Engine;
 
@@ -152,6 +153,85 @@ public readonly struct StorageSegmentDescriptor
 
     /// <summary>Whether this segment stores fixed-size chunks (component / revision / index / VSBS / string-table).</summary>
     public bool IsChunkBased => Stride > 0;
+}
+
+/// <summary>
+/// Class of consistency violation surfaced by <see cref="DatabaseEngine.RunStorageIntegrityCheck"/>. Every value names an invariant that must hold across a
+/// healthy engine — a non-zero issue list is a hard durability / structural bug, not a warning.
+/// </summary>
+[PublicAPI]
+public enum StorageIntegrityIssueKind : byte
+{
+    /// <summary>
+    /// Occupancy bitmap has a bit set for a file page that no segment claims and is not a reserved root/reserve slot. Sign of a lost write — pages allocated
+    /// to a segment but the segment's persisted page-list (root-page Page Directory + extension map pages) didn't capture them durably. The on-disk bitmap
+    /// survived; the segment's directory append did not.
+    /// </summary>
+    PopcountOrphan,
+
+    /// <summary>
+    /// A segment's <c>Pages</c> list references a file page whose occupancy bit is clear — the segment believes it owns a page that is actually free.
+    /// Catastrophic; means a free could double-allocate that page.
+    /// </summary>
+    PopcountPhantom,
+
+    /// <summary>
+    /// <see cref="LogicalSegment{TStore}"/>'s forward header chain (via <c>LogicalSegmentNextRawDataPBID</c>) reaches a different page count than the
+    /// persisted Page Directory enumerates. Forward-chain canon is on each page header; Page Directory canon is on the root page's raw-data section. If they
+    /// disagree, one of the two writes lost durability during a Grow.
+    /// </summary>
+    ChainDirectoryMismatch,
+
+    /// <summary>
+    /// <see cref="ChunkBasedSegment{TStore}"/>'s computed capacity (<c>ChunkCapacity</c>) ≠ <c>AllocatedChunkCount + FreeChunkCount</c>. The segment's chunk
+    /// free-list desynced from the chunk-occupancy bitmaps on its pages.
+    /// </summary>
+    ChunkSegmentCapacity,
+}
+
+/// <summary>
+/// One concrete consistency violation found by <see cref="DatabaseEngine.RunStorageIntegrityCheck"/>. The combination (<see cref="Kind"/>,
+/// <see cref="SegmentRootPageIndex"/>) localises the bug; <see cref="Detail"/> carries the human-readable summary; the integer fields give the exact counts
+/// so the caller can produce structured assertions.
+/// </summary>
+/// <param name="Kind">Class of violation.</param>
+/// <param name="SegmentRootPageIndex">
+/// Root page of the implicated segment, or <c>0</c> for whole-DB issues (e.g. popcount mismatch with no specific owner).
+/// </param>
+/// <param name="FirstPageIndex">First file page of the implicated range, or <c>-1</c> when not applicable.</param>
+/// <param name="PageCount">Number of contiguous pages in the range, or <c>0</c> when not applicable.</param>
+/// <param name="Detail">Free-form forensic detail. Safe to log.</param>
+[PublicAPI]
+public readonly record struct StorageIntegrityIssue(StorageIntegrityIssueKind Kind, int SegmentRootPageIndex, int FirstPageIndex, int PageCount, string Detail);
+
+/// <summary>
+/// Whole-engine integrity audit produced by <see cref="DatabaseEngine.RunStorageIntegrityCheck"/>. <see cref="IsHealthy"/> is the only assertion callers
+/// should care about — every individual issue is reported with enough context to localise the cause without re-running the audit.
+/// </summary>
+/// <remarks>
+/// The audit reads only in-memory structures (occupancy bitmap, segment registry, page headers via the page cache). It is safe to call at any time and
+/// incurs no data-page I/O beyond touching the segment's chain headers.
+/// </remarks>
+[PublicAPI]
+public sealed class StorageIntegrityReport
+{
+    /// <summary>Every issue found in this audit pass, in discovery order. Empty when the engine is healthy.</summary>
+    public IReadOnlyList<StorageIntegrityIssue> Issues { get; init; } = Array.Empty<StorageIntegrityIssue>();
+
+    /// <summary>Count of file pages whose occupancy bit is set but no segment claims them. <c>0</c> in a healthy engine.</summary>
+    public int OrphanPageCount { get; init; }
+
+    /// <summary>Count of file pages a segment claims to own but whose occupancy bit is clear. <c>0</c> in a healthy engine.</summary>
+    public int PhantomPageCount { get; init; }
+
+    /// <summary>Total set bits in the occupancy bitmap when the audit ran. Useful for sizing diagnostics.</summary>
+    public int OccupancyBitsSet { get; init; }
+
+    /// <summary>Sum of every segment's <c>Pages.Length</c> over the registered-segments registry.</summary>
+    public int SegmentClaimedPages { get; init; }
+
+    /// <summary><c>true</c> when <see cref="Issues"/> is empty.</summary>
+    public bool IsHealthy => Issues.Count == 0;
 }
 
 /// <summary>

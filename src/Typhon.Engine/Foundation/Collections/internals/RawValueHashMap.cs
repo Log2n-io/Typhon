@@ -371,10 +371,20 @@ unsafe class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStore> where
                 continue;
             }
 
-            // Allocate overflow — re-fetch current chunk after (AllocateChunk may remap segment)
-            int overflowChunkId = Segment.AllocateChunk(true, changeSet);
-            addr = accessor.GetChunkAddress(chunkId, true);
-            GetHeader(addr).OverflowChunkId = overflowChunkId;
+            // Allocate overflow — re-fetch current chunk after (AllocateChunk may remap segment).
+            //
+            // ORDER MATTERS (#301 race-fix): fully initialise the new chunk's header — including writing OverflowChunkId = -1 (end-of-chain sentinel) — BEFORE
+            // linking from the previous chunk. Reason: AllocateChunk(clearContent=true) zeroes the new chunk, so its OverflowChunkId field is 0 (the meta
+            // chunk's id) until we explicitly write -1. If we linked from prev FIRST and then a background checkpoint snapshotted in the gap, the snapshot
+            // would persist `prev → new → 0` (chunk 0 = the meta). On any later eviction-and-reload of `new`, the bad chain becomes permanent. Initialising
+            // the new chunk fully before linking eliminates the window: any observer either sees `prev` not-yet-linked (chain ends at prev correctly) or `new`
+            // fully-initialised with the -1 sentinel.
+            //
+            // CRITICAL (#301 cascade fix): use the caller-accessor AllocateChunk overload so the new chunk's content page stays under ACW > 0 protection
+            // continuously from ClearChunk through our first write. The legacy `(true, changeSet)` overload has a transient ACW=0 window after its local
+            // accessor disposes — a checkpoint racing in that window can snap the zeroed content, fsync, drop DC→0 and let eviction reload zeros over our
+            // subsequent writes.
+            int overflowChunkId = Segment.AllocateChunk(changeSet, ref accessor);
 
             byte* ovAddr = accessor.GetChunkAddress(overflowChunkId, true);
             ref var ovHeader = ref GetHeader(ovAddr);
@@ -385,6 +395,11 @@ unsafe class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStore> where
             ovHeader.OverflowChunkId = -1;
             KeysPtr(ovAddr)[0] = key;
             Unsafe.CopyBlock(ValueAt(ovAddr, 0), value, (uint)_valueSize);
+
+            // Re-fetch the predecessor chunk last (the OOM/Grow during AllocateChunk above may have evicted it) and publish the link. Any concurrent snapshot
+            // of the predecessor now sees a fully-formed new chunk, not a half-initialised zero state.
+            addr = accessor.GetChunkAddress(chunkId, true);
+            GetHeader(addr).OverflowChunkId = overflowChunkId;
             return;
         }
     }
@@ -862,8 +877,9 @@ unsafe class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStore> where
                 // Rewrite old bucket
                 RewriteBucket(oldChunkId, keepKeys, keepValues, keepCount, ref accessor, changeSet);
 
-                // Allocate and write new bucket
-                int newChunkId = Segment.AllocateChunk(true, changeSet);
+                // Allocate and write new bucket — caller-accessor overload keeps ACW > 0 on the new chunk's content page from ClearChunk through
+                // WriteBucket's header/keys/values writes (#301).
+                int newChunkId = Segment.AllocateChunk(changeSet, ref accessor);
                 WriteBucket(newChunkId, moveKeys, moveValues, moveCount, ref accessor, changeSet);
 
                 EnsureDirectoryCapacity(newBucketId, ref accessor, changeSet);
@@ -960,10 +976,11 @@ unsafe class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStore> where
 
         while (offset < entryCount)
         {
-            int overflowChunkId = Segment.AllocateChunk(true, changeSet);
-
-            byte* prevAddr = accessor.GetChunkAddress(prevChunkId, true);
-            GetHeader(prevAddr).OverflowChunkId = overflowChunkId;
+            // ORDER MATTERS (#301 race-fix): same hazard as AppendEntry — initialise the new chunk FIRST, including OverflowChunkId = -1, then link from
+            // prev. The previous order (link → init) left a window where a CheckpointManager snapshot could persist `prev → new → 0` (chunk 0 = meta).
+            // Caller-accessor overload (#301 cascade fix) keeps ACW > 0 on the new chunk's content page continuously, preventing checkpoint-then-evict from
+            // losing the writes below.
+            int overflowChunkId = Segment.AllocateChunk(changeSet, ref accessor);
 
             byte* ovAddr = accessor.GetChunkAddress(overflowChunkId, true);
             ref var ovHeader = ref GetHeader(ovAddr);
@@ -980,6 +997,10 @@ unsafe class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStore> where
                 dstKeys[i] = keys[offset + i];
                 Unsafe.CopyBlock(ValueAt(ovAddr, i), values + (offset + i) * _valueSize, (uint)_valueSize);
             }
+
+            // Link from prev LAST so any concurrent snapshot of prev sees a fully-formed new chunk.
+            byte* prevAddr = accessor.GetChunkAddress(prevChunkId, true);
+            GetHeader(prevAddr).OverflowChunkId = overflowChunkId;
 
             prevChunkId = overflowChunkId;
             offset += writeCount;

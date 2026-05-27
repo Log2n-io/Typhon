@@ -223,6 +223,30 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
         return false;
     }
 
+    /// <summary>
+    /// Frees a contiguous range of pages on the occupancy map. Range overload of <see cref="FreePages(ReadOnlySpan{int},int,ChangeSet)"/>; avoids the caller
+    /// having to synthesise an <c>int[]</c> of page ids when the range is already a <c>(first, count)</c> pair.
+    /// </summary>
+    /// <remarks>
+    /// Used by the BulkLoad recovery path (Phase 3b in <see cref="WalRecovery"/>) to free pages referenced by an orphan <see cref="WalChunkType.BulkBegin"/>
+    /// manifest. Idempotent — see <see cref="BitmapL3.FreeRange"/>.
+    /// </remarks>
+    /// <param name="firstPageId">Lowest page id in the range (inclusive).</param>
+    /// <param name="count">Number of pages to free. Range covers <c>[firstPageId, firstPageId + count)</c>.</param>
+    /// <param name="changeSet">Optional change set for tracking dirty bitmap pages.</param>
+    public void FreePages(int firstPageId, int count, ChangeSet changeSet = null)
+    {
+        _occupancyMapAccess.EnterExclusiveAccess(ref WaitContext.Null);
+        try
+        {
+            _occupancyMap.FreeRange(firstPageId, count, changeSet);
+        }
+        finally
+        {
+            _occupancyMapAccess.ExitExclusiveAccess();
+        }
+    }
+
     unsafe protected override void OnFileCreating()
     {
         base.OnFileCreating();
@@ -348,6 +372,14 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
     /// is attributable to a segment (and thus classifiable) — there is no other complete source of "which segments own which pages". Returns a snapshot view.
     /// </summary>
     internal ICollection<LogicalSegment<PersistentStore>> RegisteredSegments => _segments?.Values ?? Array.Empty<LogicalSegment<PersistentStore>>();
+
+    /// <summary>
+    /// The two pages the occupancy machinery holds in reserve outside any segment: one for the next occupancy-segment data growth, one for the next
+    /// bitmap-extension map page. Both are bit-set in the occupancy bitmap but belong to no <see cref="LogicalSegment{TStore}"/>, so storage-introspection /
+    /// integrity checks need to account for them explicitly. Either value can be <c>0</c> (briefly, between consumption by
+    /// <see cref="GrowOccupancySegment"/> and refill by the next <see cref="AllocatePageCore"/>).
+    /// </summary>
+    internal (int DataReserve, int MapReserve) ReservedOccupancyPages => (_occupancyNextReservedPageIndex, _occupancyNextReservedMapPageIndex);
 
     internal LogicalSegment<PersistentStore> CreateOccupancySegment(int filePageIndex, PageBlockType type, int length, ChangeSet cs)
     {

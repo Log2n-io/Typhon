@@ -1443,9 +1443,11 @@ public unsafe partial class Transaction : EntityAccessor
     /// <summary>Serialize to WAL (or flush pages for WAL-less), transition to Committed, and record metrics.</summary>
     private void PersistAndFinalize(ref UnitOfWorkContext ctx, long startTicks)
     {
-        // WAL serialization (after conflict resolution, before state transition)
+        // WAL serialization (after conflict resolution, before state transition). BL-01: when the owning UoW has SuppressWalSerialization (BulkLoad path),
+        // skip per-row WAL. Page dirty marking still happens via CommitComponentCore so the checkpoint flushes the data; BulkLoadSession.CompleteBulkLoad
+        // runs a synchronous checkpoint + emits BulkEnd as the bulk's durability anchor. See claude/design/Durability/BulkLoad/02-write-path.md.
         long walHighLsn = 0;
-        if (_dbe.WalManager != null && State != TransactionState.Created)
+        if (_dbe.WalManager != null && State != TransactionState.Created && OwningUnitOfWork?.SuppressWalSerialization != true)
         {
             var persistScope = TyphonEvent.BeginTransactionPersist(TSN);
             try

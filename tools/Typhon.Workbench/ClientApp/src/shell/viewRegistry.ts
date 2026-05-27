@@ -56,6 +56,10 @@ export const ZONE_D_VIEW_ACTIVE: Readonly<Record<string, boolean>> = {
   // log, reconnect banner) + the freeze + Capture & Analyse glue. P1 ships the shell + connection-state header
   // + Disconnect; gauges (P2), anomalies (P3), Capture & Analyse + reconnect banner (P4) follow.
   EngineLiveHealth: true,
+  // Dev Fixture — the fixture-creation surface (presets + Advanced form + editable destination folder). DEBUG-only
+  // on the server; the panel itself probes `/api/fixtures/capability` and renders a "not available" cold state in
+  // Release builds so the activation flag stays unconditional here.
+  DevFixture: true,
 };
 
 // Returns whether a view (or a view-bound command) is currently reachable. An undefined id means the caller
