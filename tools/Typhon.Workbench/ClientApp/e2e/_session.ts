@@ -75,7 +75,7 @@ export async function openDemoFile(page: Page, request: APIRequestContext, name 
 export async function openDevFixture(page: Page): Promise<void> {
   await page.getByRole('button', { name: /^dev fixture$/i }).click();
   await expect(page.getByRole('dialog')).toBeVisible();
-  await page.getByRole('button', { name: /^create & open$/i }).click();
+  await page.getByRole('button', { name: /^generate & open$/i }).click();
   await expect(page.getByRole('dialog')).not.toBeVisible({ timeout: 20_000 });
   await expect(page.locator('body')).toContainText(/Storage|DataEngine/i, { timeout: 15_000 });
 }

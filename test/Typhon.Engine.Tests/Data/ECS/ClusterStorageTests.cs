@@ -216,6 +216,82 @@ class ClusterStorageTests : TestBase<ClusterStorageTests>
     }
 
     [Test]
+    public void TryGetClusterEntityLayout_ResolvesPerComponentOffsetsSizesAndDefinitions()
+    {
+        // Backs the Database File Map's L5 entity-content decode (file-map §10 Q4 override): the per-component offset / size / transient / definition the
+        // Workbench's DecodeClusterEntity uses to read each component's inline SoA value at slot s. ClAnt = ClPosition(8B) + ClMovement(8B), both SingleVersion.
+        using var dbe = SetupClusterEngine();
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var pos = new ClPosition(10, 20);
+            var mov = new ClMovement(1, 2);
+            tx.Spawn<ClAnt>(ClAnt.Position.Set(in pos), ClAnt.Movement.Set(in mov));
+            tx.Commit();
+        }
+
+        var meta = ArchetypeRegistry.GetMetadata<ClAnt>();
+        var clusterState = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
+        var layout = clusterState.Layout;
+        var rootPage = clusterState.ClusterSegment.RootPageIndex;
+
+        var found = dbe.TryGetClusterEntityLayout(rootPage, out var clusterSize, out var entityIdsOffset, out var components);
+
+        Assert.That(found, Is.True);
+        Assert.That(clusterSize, Is.EqualTo(layout.ClusterSize));
+        Assert.That(entityIdsOffset, Is.EqualTo(layout.EntityIdsOffset));
+        Assert.That(components.Length, Is.EqualTo(2), "ClAnt has Position + Movement");
+
+        // Each entry must carry the exact inline SoA addressing the decoder reads (slot base = Offset + slotIndex*Size), the live component definition for the
+        // field walk, and a correct transient flag. Both components are SingleVersion → decoded inline, never skipped.
+        for (var c = 0; c < components.Length; c++)
+        {
+            Assert.That(components[c].Offset, Is.EqualTo(layout.ComponentOffset(c)), $"slot {c} offset");
+            Assert.That(components[c].Size, Is.EqualTo(layout.ComponentSize(c)), $"slot {c} size");
+            Assert.That(components[c].Size, Is.EqualTo(8), $"slot {c} is a two-float component");
+            Assert.That(components[c].Transient, Is.False, $"slot {c} is SingleVersion, present in the persisted chunk");
+            Assert.That(components[c].Definition, Is.Not.Null, $"slot {c} carries its definition for the field decode");
+            Assert.That(components[c].Name, Is.Not.Empty);
+        }
+
+        // SoA blocks are laid out in slot order after the entity-id array — the ordering the decoder relies on.
+        Assert.That(components[0].Offset, Is.GreaterThanOrEqualTo(entityIdsOffset));
+        Assert.That(components[1].Offset, Is.GreaterThan(components[0].Offset));
+    }
+
+    [Test]
+    public void TryGetClusterEntityLayout_NonClusterRootPage_ReturnsFalse()
+    {
+        using var dbe = SetupClusterEngine();
+        Assert.That(dbe.TryGetClusterEntityLayout(-1, out _, out _, out _), Is.False);
+    }
+
+    [Test]
+    public void TryGetClusterSpatialInfo_NonSpatialArchetype_ReportsNonSpatialAndNoCellContext()
+    {
+        // ClAnt has no [SpatialIndex] component → non-spatial cluster: clusters fill linearly (ClaimSlot, not ClaimSlotInCell), so low slot occupancy would mean
+        // fragmentation, NOT spatial spread. The Workbench segment card branches on this flag to frame occupancy correctly.
+        using var dbe = SetupClusterEngine();
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var pos = new ClPosition(10, 20);
+            var mov = new ClMovement(1, 2);
+            tx.Spawn<ClAnt>(ClAnt.Position.Set(in pos), ClAnt.Movement.Set(in mov));
+            tx.Commit();
+        }
+
+        var meta = ArchetypeRegistry.GetMetadata<ClAnt>();
+        var rootPage = dbe._archetypeStates[meta.ArchetypeId].ClusterState.ClusterSegment.RootPageIndex;
+
+        var found = dbe.TryGetClusterSpatialInfo(rootPage, out var isSpatial, out var cellSize, out _, out _, out _);
+        Assert.That(found, Is.True, "a cluster archetype owns the segment");
+        Assert.That(isSpatial, Is.False);
+        Assert.That(cellSize, Is.EqualTo(0f), "no grid fields for a non-spatial cluster");
+
+        // No per-chunk cell context for a non-spatial cluster.
+        Assert.That(dbe.TryGetClusterChunkSpatialInfo(rootPage, 0, out _, out _, out _, out _, out _, out _, out _, out _, out _), Is.False);
+    }
+
+    [Test]
     public void TryGetClusterLayout_NonClusterRootPage_ReturnsFalse()
     {
         using var dbe = SetupClusterEngine();

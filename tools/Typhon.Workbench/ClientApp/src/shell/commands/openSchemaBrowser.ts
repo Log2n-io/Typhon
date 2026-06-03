@@ -5,9 +5,11 @@ import { useDockLayoutStore } from '@/stores/useDockLayoutStore';
 import { useSessionStore } from '@/stores/useSessionStore';
 import { useDataBrowserStore } from '@/stores/useDataBrowserStore';
 import { useSelectionStore } from '@/stores/useSelectionStore';
+import { useOptionsUiStore } from '@/stores/useOptionsUiStore';
 import { useNavHistoryStore } from '@/stores/useNavHistoryStore';
 import { registerNavFocus } from '@/stores/navFocusBridge';
 import { openViewQueryAnalyzer } from './profilerCommands';
+import { openQueryConsole } from './openQueryConsole';
 
 /**
  * Module-level dockview api registration — same pattern as refreshResourceGraph. DockHost publishes
@@ -294,7 +296,12 @@ export function focusChordTarget(key: string): boolean {
       ensureDockPanel('dbmap', 'DbMap', 'Database File Map');
       return true;
     case 'q':
-      // Profiler-session view (no-ops in open sessions, where it has no home — see canOpenQueryAnalyzer).
+      // #386 Phase 1 rebinding: g q → Query Console (open-session authoring). Query Analyzer moves to g w.
+      // The Console is open-session only (canOpenQueryConsole gates internally); in trace/attach this no-ops.
+      openQueryConsole();
+      return true;
+    case 'w':
+      // Workload analyser — formerly g q in the Stage 3 Phase 4 design. Profiler-session view (no-ops in open sessions).
       openViewQueryAnalyzer();
       return true;
     default:
@@ -317,6 +324,17 @@ export function toggleViewDataFlow(): void {
 
 export function toggleViewOptions(): void {
   toggleDockPanel('options', 'Options', 'Options');
+}
+
+/**
+ * Reveal the Options panel pre-snapped to its Schema category (ADR-055 Phase 2). Used by the schema
+ * migrate/incompatible banners so the user can register a directory holding a compatible schema build.
+ * Reveal semantics — opens if absent, focuses if already docked (never closes); the requested category
+ * is stashed in {@link useOptionsUiStore} which OptionsPanel honors on its next render.
+ */
+export function openOptionsToSchema(): void {
+  useOptionsUiStore.getState().requestCategory('schema');
+  ensureDockPanel('options', 'Options', 'Options');
 }
 
 /** Module 15: open / close the Database File Map panel. */
@@ -567,15 +585,46 @@ export function ensureDockPanel(id: string, componentKey: string, title: string)
   if (existing) {
     existing.focus();
   } else {
-    // Prefer the Open-session center (Schema Explorer); fall back to profiler/start-here for trace/attach.
-    const anchor = api.getPanel('schema-explorer') ?? api.getPanel('profiler') ?? api.getPanel('start-here');
-    if (anchor) {
-      api.addPanel({ id, component: componentKey, title, position: { referencePanel: anchor.id } });
+    const anchorId = centerAnchorPanelId(api);
+    if (anchorId) {
+      api.addPanel({ id, component: componentKey, title, position: { referencePanel: anchorId } });
     } else {
       api.addPanel({ id, component: componentKey, title });
     }
   }
   recordPanelTransition(id, from);
+}
+
+/**
+ * The panel id to anchor a newly-revealed center-workspace panel against. Prefers the Open-session center (Schema
+ * Explorer), then profiler/start-here for trace/attach; finally falls back to the **largest visible group** so the
+ * panel lands in the center even when none of the known anchors exist (e.g. a DbMap-centered restored layout).
+ * Without this last resort a position-less `addPanel` drops into dockview's last-active group — frequently a narrow
+ * bottom/edge dock — which is the Query Console "opens into a cramped strip" bug. Returns `undefined` only when the
+ * dock is empty (then the caller lets dockview place the first panel).
+ */
+function centerAnchorPanelId(api: DockviewApi): string | undefined {
+  return (
+    api.getPanel('schema-explorer')?.id ??
+    api.getPanel('profiler')?.id ??
+    api.getPanel('start-here')?.id ??
+    largestGroupPanelId(api)
+  );
+}
+
+/** The active-panel id of the largest visible dock group by rendered area — reliably the center workspace. Exported for testing. */
+export function largestGroupPanelId(api: DockviewApi): string | undefined {
+  let bestId: string | undefined;
+  let bestArea = 0;
+  for (const group of api.groups) {
+    const rect = group.element.getBoundingClientRect();
+    const area = rect.width * rect.height;
+    if (area > bestArea && group.activePanel) {
+      bestArea = area;
+      bestId = group.activePanel.id;
+    }
+  }
+  return bestId;
 }
 
 /** Expands the left edge group and focuses the Resource Tree — the "reveal in tree" surfacing step. No-op when absent. */
@@ -599,11 +648,11 @@ function toggleDockPanel(id: string, componentKey: string, title: string): void 
   }
   // Without a position, dockview drops the new panel into whichever group was last active — which after a
   // trace-mode auto-build is one of the narrow right-edge groups (Detail / Components / Archetypes), not the
-  // wide center group. Prefer planting these toggles next to the Open center (Schema Explorer) or the
-  // Profiler/Start-Here. Falls back to `addPanel` with no position when no anchor exists.
-  const anchor = api.getPanel('schema-explorer') ?? api.getPanel('profiler') ?? api.getPanel('start-here');
-  if (anchor) {
-    api.addPanel({ id, component: componentKey, title, position: { referencePanel: anchor.id } });
+  // wide center group. Anchor against the center workspace (Schema Explorer / Profiler / Start-Here, then the
+  // largest visible group). Falls back to `addPanel` with no position only when the dock is empty.
+  const anchorId = centerAnchorPanelId(api);
+  if (anchorId) {
+    api.addPanel({ id, component: componentKey, title, position: { referencePanel: anchorId } });
   } else {
     api.addPanel({ id, component: componentKey, title });
   }

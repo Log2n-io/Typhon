@@ -87,7 +87,9 @@ internal sealed class WalManager : ResourceNode
     /// </summary>
     /// <param name="lastSegmentId">Last known segment ID for continuity (0 for fresh start).</param>
     /// <param name="firstLSN">First LSN for the initial segment.</param>
-    public void Initialize(long lastSegmentId = 0, long firstLSN = 1)
+    /// <param name="checkpointLsn">Checkpoint frontier passed to the segment manager's reopen reconcile — segments with
+    /// records below it are reclaimed, segments with records ≥ it are retained for recovery. See WR-01.</param>
+    public void Initialize(long lastSegmentId = 0, long firstLSN = 1, long checkpointLsn = 0)
     {
         if (_initialized)
         {
@@ -95,7 +97,7 @@ internal sealed class WalManager : ResourceNode
         }
 
         SegmentManager = new WalSegmentManager(_fileIO, _options.WalDirectory, _options.SegmentSize, _options.PreAllocateSegments, _options.UseFUA);
-        SegmentManager.Initialize(lastSegmentId, firstLSN);
+        SegmentManager.Initialize(lastSegmentId, firstLSN, checkpointLsn);
         _writer = new WalWriter(CommitBuffer, SegmentManager, _fileIO, _options, _allocator, this);
         _initialized = true;
     }

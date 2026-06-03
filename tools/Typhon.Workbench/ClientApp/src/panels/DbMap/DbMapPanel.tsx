@@ -6,8 +6,9 @@ import { useSelectionStore } from '@/stores/useSelectionStore';
 import { isDbMapLeafType } from '@/libs/dbmap/dbMapSelection';
 import { useDbMapOverlayStore } from '@/stores/useDbMapOverlayStore';
 import { useDbMap } from '@/hooks/dbmap/useDbMap';
-import { useDbMapChunks, useDbMapPages, useDbMapTiles } from '@/hooks/dbmap/useDbMapDetail';
+import { useDbMapChunks, useDbMapPages, useDbMapSlots, useDbMapTiles } from '@/hooks/dbmap/useDbMapDetail';
 import { useDbMapSegment } from '@/hooks/dbmap/useDbMapSegment';
+import { useComponentNames } from '@/hooks/queryConsole/useComponentNames';
 import { formatFileSize } from '@/lib/formatters';
 import { DbMapRenderer, SEGMENT_PULSE_MS, type DbDetailRequest, type DbMapTheme } from '@/libs/dbmap/dbMapRenderer';
 import type { L0Stripe } from '@/libs/dbmap/dbMapL0';
@@ -15,6 +16,7 @@ import { rgbCss } from '@/libs/dbmap/dbMapColors';
 import {
   cameraCenteredOn,
   fitToRect,
+  frameWorldRect,
   tweenCamera,
   zoomAt,
   zoomToWorldRect,
@@ -23,7 +25,7 @@ import {
   type Camera,
   type CameraTween,
 } from '@/libs/dbmap/camera';
-import { shouldFitViewport } from '@/libs/dbmap/initialFit';
+import { initialL0Camera, shouldFitViewport } from '@/libs/dbmap/initialFit';
 import { hilbertD2XY } from '@/libs/dbmap/hilbert';
 import {
   DbPageType,
@@ -85,7 +87,7 @@ const TOOLTIP_DELAY_MS = 3000;
  */
 const PREFETCH_LEAD_MS = 80;
 
-const EMPTY_REQUEST: DbDetailRequest = { tileNodes: [], pages: [], chunks: [] };
+const EMPTY_REQUEST: DbDetailRequest = { tileNodes: [], pages: [], chunks: [], slots: [] };
 
 /** Drag-gesture state, held in a ref so high-frequency mouse events never trigger React renders. */
 interface DragState {
@@ -180,6 +182,12 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
 
   const { data, isLoading, isError, refetch } = useDbMap(sessionId);
 
+  // Same smart short-name labeller the Query Console uses (common-prefix stripping over all registered components).
+  // A segment's `typeName` is the FULL registered/CLR name of its owning component or archetype; this turns
+  // `Typhon.Workbench.Fixture.Player` → `Player` for display, while `typeName` stays the identity for search /
+  // cross-panel focus. Non-component owners (cluster/entity-map archetypes) fall back to their last dot-segment.
+  const { label: shortLabel } = useComponentNames();
+
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const surfaceRef = useRef<HTMLDivElement | null>(null);
   const rendererRef = useRef<DbMapRenderer | null>(null);
@@ -215,8 +223,8 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
   const [lod, setLod] = useState<{
     /** Underlying renderer band (used for detail-tier orchestration). */
     band: 'L1' | 'L3' | 'L4';
-    /** Visually dominant band — L0 is folded in for the per-band legend chrome. */
-    displayBand: 'L0' | 'L1' | 'L3' | 'L4';
+    /** Visually dominant band — L0 is folded in, plus L5 for the cluster entity-content level (file-map §10 Q4 override). */
+    displayBand: 'L0' | 'L1' | 'L3' | 'L4' | 'L5';
     focusedPage: number | null;
   }>({
     band: 'L1',
@@ -258,13 +266,14 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
   const tiles = useDbMapTiles(sessionId, tileNodes);
   const pageDetails = useDbMapPages(sessionId, detailReq.pages);
   const chunkContents = useDbMapChunks(sessionId, detailReq.chunks);
+  const slotContents = useDbMapSlots(sessionId, detailReq.slots);
 
   // ── Derived analysis state (A3) — computed from the StructuralMap the client already holds ──────────────
 
   const regions = useMemo(() => (data ? buildRegions(data, tiles) : []), [data, tiles]);
   const pathologyFlags = useMemo(() => (data ? findUnderFilledPages(data, tiles) : []), [data, tiles]);
   const composition = useMemo(() => (data ? freeSpaceComposition(data) : null), [data]);
-  const searchMatches = useMemo(() => (data ? searchDbMap(searchQuery, data) : []), [searchQuery, data]);
+  const searchMatches = useMemo(() => (data ? searchDbMap(searchQuery, data, shortLabel) : []), [searchQuery, data, shortLabel]);
   const filterMask = useMemo(() => (data ? buildFilterMask(data, filter) : null), [data, filter]);
 
   const metrics = useMemo<MetricsCardData | null>(() => {
@@ -274,7 +283,7 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
     const segMeta = data.segments.find((s) => s.id === lensSegmentId);
     const label = segMeta
       ? segMeta.typeName.length > 0
-        ? `${segMeta.kind} #${segMeta.id} · ${segMeta.typeName}`
+        ? `${segMeta.kind} #${segMeta.id} · ${shortLabel(segMeta.typeName)}`
         : `${segMeta.kind} #${segMeta.id}`
       : `segment #${lensSegmentId}`;
     const seg = segmentQuery.data;
@@ -302,7 +311,7 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
       reclaimableBytes: reclaimable.value,
       runs: contiguousRuns(seg.pages),
     };
-  }, [lens, lensSegmentId, data, segmentQuery.data, segmentQuery.isLoading, tiles]);
+  }, [lens, lensSegmentId, data, segmentQuery.data, segmentQuery.isLoading, tiles, shortLabel]);
 
   // rAF-coalesced redraw — every input mutates cameraRef then asks for one frame.
   const scheduleRender = useCallback(() => {
@@ -506,7 +515,11 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
   );
 
   const flyToRegion = useCallback(
-    (startPage: number, pageCount: number) => {
+    (
+      startPage: number,
+      pageCount: number,
+      opts?: { label?: string; fillFraction?: number; startFromDatabaseFit?: boolean },
+    ) => {
       const renderer = rendererRef.current;
       const surface = surfaceRef.current;
       const layout = renderer?.getLayout();
@@ -536,11 +549,26 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
         h: maxY - minY + 1,
       };
       const { width, height } = surface.getBoundingClientRect();
-      const target = zoomToWorldRect(world, width, height, FIT_PADDING);
+      // `fillFraction` < 1 zooms out so the region occupies that fraction of the view, leaving context around it.
+      const target = frameWorldRect(world, width, height, FIT_PADDING, opts?.fillFraction);
+      // `startFromDatabaseFit` begins the glide from the WHOLE-DATABASE fit (the reveal zooms in from the full map
+      // down to the segment), so it reads as a drill-down from the overview rather than a jump from wherever the
+      // camera happened to be. Paint that start frame before arming the tween so the animation starts there.
+      if (opts?.startFromDatabaseFit) {
+        const start = fitToRect(layout.worldBounds, width, height, FIT_PADDING);
+        cameraRef.current = start;
+        renderer.setCamera(start);
+        renderer.render();
+      }
       pushHistory(target);
+      // A cross-panel entry point (e.g. Reveal in File Map) passes a label so `Alt+←/→` retraces the jump back
+      // to the source panel; in-panel region jumps stay local-only.
+      if (opts?.label) {
+        pushNav(target, opts.label);
+      }
       flyTo(target);
     },
-    [flyTo, pushHistory],
+    [flyTo, pushHistory, pushNav],
   );
 
   // Publish the camera fly-to so an `Alt+←/→` nav-history restore can drive it (§13 A4 AC2).
@@ -612,10 +640,12 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
     clearPendingFocus();
     if (seg) {
       select('segment', { kind: 'segment', segmentId: seg.id, typeName: seg.typeName || undefined });
-      flyToPage(seg.rootPageIndex, `Component ${pendingFocusType}`);
+      // Reveal as a drill-down: start from the whole-database fit, then animate IN to the segment at HALF the view
+      // so the revealed zone settles with its surroundings for context. The pulse frames it throughout.
+      flyToRegion(seg.rootPageIndex, seg.pageCount, { label: `Component ${pendingFocusType}`, fillFraction: 0.5, startFromDatabaseFit: true });
       pulseSegment(seg.id);
     }
-  }, [data, pendingFocusType, clearPendingFocus, flyToPage, select, pulseSegment]);
+  }, [data, pendingFocusType, clearPendingFocus, flyToRegion, select, pulseSegment]);
 
   // Construct the renderer once the canvas element exists.
   useLayoutEffect(() => {
@@ -646,7 +676,8 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
     return () => observer.disconnect();
   }, []);
 
-  // Frame the whole file the first time we have BOTH data and a real surface. Fits exactly once (`fittedRef`)
+  // Frame the file at its largest pure-L0 composition view (just below the L1 page-grid crossfade — initialL0Camera)
+  // the first time we have BOTH data and a real surface. Fits exactly once (`fittedRef`)
   // so later resizes / refreshes preserve the user's framing, and never fights an in-flight fly-to (a
   // cross-link reveal owns the camera via its tween). Mounting a dockview panel while it is the *inactive*
   // tab gives it a 0×0 box, so the data-driven call below can't fit then — the ResizeObserver retries this
@@ -666,7 +697,7 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
     if (!shouldFitViewport({ hasData: !!data, alreadyFitted: fittedRef.current, flying: !!tweenRef.current, width, height })) {
       return;
     }
-    cameraRef.current = fitToRect(layout.worldBounds, width, height, FIT_PADDING);
+    cameraRef.current = initialL0Camera(layout.worldBounds, width, height, FIT_PADDING);
     fittedRef.current = true;
     // Seed the local back/forward stack with the initial fit so the user can always step back to it — but only
     // if nothing landed first (a cross-link open flies before this runs and must keep its entry).
@@ -704,6 +735,18 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
     renderer.setCamera(cameraRef.current);
     renderer.render();
   }, [data, applyInitialFit]);
+
+  // Feed the short-name labeller into the canvas renderer (it can't call the hook itself). Re-runs when the labeller
+  // resolves — the schema component list loads asynchronously, so `shortLabel` is identity on the first frame and
+  // gains real mappings a tick later; setShortLabel drops the cached L0 stripe labels so they rebuild shortened.
+  useEffect(() => {
+    const renderer = rendererRef.current;
+    if (!renderer) {
+      return;
+    }
+    renderer.setShortLabel(shortLabel);
+    renderer.render();
+  }, [shortLabel]);
 
   // Theme change — re-resolve the token colours and repaint, without disturbing the camera.
   useEffect(() => {
@@ -874,7 +917,8 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
     renderer.setDetailTiles(tiles);
     renderer.setPageDetails(pageDetails);
     renderer.setChunkContents(chunkContents);
-    // Newly-arrived chunk content fades in; drive a repaint chain until the fade completes (else a single repaint).
+    renderer.setSlotContents(slotContents);
+    // Newly-arrived chunk / slot content fades in; drive a repaint chain until the fade completes (else a single repaint).
     if (renderer.hasFadingContent()) {
       runContentFade();
     } else {
@@ -887,7 +931,7 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
     const target = tweenRef.current?.to ?? cameraRef.current;
     const req = renderer.getDetailRequestForCamera(target);
     setDetailReq((prev) => (sameRequest(prev, req) ? prev : req));
-  }, [tiles, pageDetails, chunkContents, scheduleRender, runContentFade]);
+  }, [tiles, pageDetails, chunkContents, slotContents, scheduleRender, runContentFade]);
 
   // Resize — keep the canvas backing store in sync with the surface (also fires when the side rail collapses).
   useEffect(() => {
@@ -1133,6 +1177,33 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
 
       // L4 — a content cell decodes to a single record.
       if (band === 'L4') {
+        // L5 first — an occupied cluster slot zoomed in far enough decodes to a whole entity. Selecting it shows the
+        // entity's full per-component field values in the Inspector (file-map §10 Q4 override). At L5 the slot *is*
+        // the entity, so this takes precedence over the bare L4 content-cell selection.
+        const entity = renderer.pickEntityAt(screenX, screenY);
+        if (entity) {
+          const detail = pageDetails.get(entity.page);
+          const content = detail
+            ? chunkContents.get(`${detail.ownerSegmentId}:${detail.firstChunkId + entity.chunkInPage}`)
+            : undefined;
+          const slotCell = content?.cells[entity.slot];
+          if (detail && slotCell) {
+            renderer.setSelection(entity.page);
+            renderer.setSelectionChunk({ page: entity.page, chunkInPage: entity.chunkInPage });
+            renderer.setSelectionCell({ page: entity.page, chunkInPage: entity.chunkInPage, cellIndex: entity.slot });
+            scheduleRender();
+            select('cell', {
+              kind: 'cell',
+              pageIndex: entity.page,
+              segmentId: detail.ownerSegmentId,
+              chunkId: detail.firstChunkId + entity.chunkInPage,
+              cellOffset: slotCell.offset,
+              slotIndex: entity.slot,
+            });
+            return;
+          }
+        }
+
         const hit = renderer.pickContentCell(screenX, screenY);
         if (hit) {
           const detail = pageDetails.get(hit.page);
@@ -1601,7 +1672,7 @@ export default function DbMapPanel(_props: IDockviewPanelProps) {
             <p className="absolute left-3 top-2 text-fs-sm text-destructive">Failed to load the file map.</p>
           )}
           {hover && <HoverTooltip info={hover} />}
-          {l0Hover && <L0StripeTooltip info={l0Hover} data={data} />}
+          {l0Hover && <L0StripeTooltip info={l0Hover} data={data} shortLabel={shortLabel} />}
           {ctxMenu &&
             (() => {
               // Reveal / open-in-schema work component-by-type — enabled only for a component segment.
@@ -1669,7 +1740,9 @@ function sameRequest(a: DbDetailRequest, b: DbDetailRequest): boolean {
     sameNums(a.tileNodes, b.tileNodes) &&
     sameNums(a.pages, b.pages) &&
     a.chunks.length === b.chunks.length &&
-    a.chunks.every((c, i) => c.segId === b.chunks[i].segId && c.chunkId === b.chunks[i].chunkId)
+    a.chunks.every((c, i) => c.segId === b.chunks[i].segId && c.chunkId === b.chunks[i].chunkId) &&
+    a.slots.length === b.slots.length &&
+    a.slots.every((s, i) => s.segId === b.slots[i].segId && s.chunkId === b.slots[i].chunkId && s.slot === b.slots[i].slot)
   );
 }
 
@@ -1726,7 +1799,15 @@ function HoverTooltip({ info }: { info: HoverInfo }) {
   );
 }
 
-function L0StripeTooltip({ info, data }: { info: L0HoverInfo; data: DbMapData | null | undefined }) {
+function L0StripeTooltip({
+  info,
+  data,
+  shortLabel,
+}: {
+  info: L0HoverInfo;
+  data: DbMapData | null | undefined;
+  shortLabel: (typeName: string) => string;
+}) {
   const s = info.stripe;
   const pct = (s.fraction * 100).toFixed(1);
   // Segment stripes can append the kind / typeName from the StorageSegmentDto for extra context.
@@ -1734,7 +1815,7 @@ function L0StripeTooltip({ info, data }: { info: L0HoverInfo; data: DbMapData | 
   if (s.kind === 'segment' && s.segmentId != null && data) {
     const seg = data.segments.find((x) => x.id === s.segmentId);
     if (seg && seg.typeName.length > 0) {
-      detail = `${seg.kind} · ${seg.typeName}`;
+      detail = `${seg.kind} · ${shortLabel(seg.typeName)}`;
     } else if (seg) {
       detail = seg.kind;
     }

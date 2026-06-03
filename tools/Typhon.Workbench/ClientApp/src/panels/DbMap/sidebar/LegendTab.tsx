@@ -1,5 +1,6 @@
 import { useDbMapStore } from '@/stores/useDbMapStore';
 import { formatFileSize } from '@/lib/formatters';
+import { useComponentNames } from '@/hooks/queryConsole/useComponentNames';
 import {
   BYTE_CLASS_RGB,
   CRC_RGB,
@@ -15,6 +16,7 @@ import {
 import {
   DbPageType,
   PAGE_TYPE_LABELS,
+  formatSegmentLabel,
   isDetailEncoding,
   type DbMapEncoding,
   type StorageSegmentDto,
@@ -30,7 +32,7 @@ import type { MetricsCardData } from './MetricsCard';
 
 interface LegendTabProps {
   /** Currently-dominant display band, used to pick which symbol guide to render. */
-  displayBand: 'L0' | 'L1' | 'L3' | 'L4';
+  displayBand: 'L0' | 'L1' | 'L3' | 'L4' | 'L5';
   /** Coarse down-sample factor (§5.5) — > 1 marks the map (and its encodings) as approximate. */
   downSampleFactor: number;
   /** Fragmentation-lens metrics, or null when no segment is focused. */
@@ -235,8 +237,17 @@ function Swatch({ color, hatched }: { color: string; hatched?: boolean }) {
 
 // ── Per-band symbol guide — what every visual cue at the current zoom means ───────────────────────────────
 
-function SymbolGuide({ band }: { band: 'L0' | 'L1' | 'L3' | 'L4' }) {
-  const items = band === 'L0' ? L0_ITEMS : band === 'L1' ? L1_ITEMS : band === 'L3' ? L3_ITEMS : L4_ITEMS;
+function SymbolGuide({ band }: { band: 'L0' | 'L1' | 'L3' | 'L4' | 'L5' }) {
+  const items =
+    band === 'L0'
+      ? L0_ITEMS
+      : band === 'L1'
+        ? L1_ITEMS
+        : band === 'L3'
+          ? L3_ITEMS
+          : band === 'L5'
+            ? L5_ITEMS
+            : L4_ITEMS;
   return (
     <section className="flex flex-col gap-1">
       <h3 className="text-fs-xs font-semibold uppercase tracking-wide text-muted-foreground">
@@ -488,7 +499,10 @@ function OccupancyMapIcon() {
   );
 }
 
-/** An N-slot grid lit by occupancy (cyan = occupied, dark = free) — the cluster entity sub-grid (A6 §10.1). */
+/**
+ * An N-slot grid lit by occupancy (cyan = occupied, dark = free) — the cluster entity sub-grid (A6 §10.1).
+ * Uses the File Map's shared Used/Free pair (USED_RGB / FREE_RGB), same as the page-level Free/Used encoding.
+ */
 function EntitySubGridIcon() {
   const cells = [1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 0, 1, 0, 1, 1, 1];
   return (
@@ -541,6 +555,32 @@ function OutlineIcon() {
     <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden>
       <rect x="0" y="0" width="18" height="18" fill="rgb(30, 41, 59)" rx="2" />
       <rect x="2.5" y="2.5" width="13" height="13" fill="none" stroke="rgb(56, 189, 248)" strokeWidth="1.5" />
+    </svg>
+  );
+}
+
+/** A plain dark cell, no hatch — a free / unallocated slot or unused space (FREE_RGB). Known, just empty. */
+function FreeCellIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden>
+      <rect x="0" y="0" width="18" height="18" fill="rgb(30, 41, 59)" rx="2" />
+    </svg>
+  );
+}
+
+/** One cluster slot opened into its entity's fields (L5): a structural-slate component header row over categorical field cells. */
+function EntityFieldsIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden>
+      <rect x="0" y="0" width="18" height="18" fill="rgb(236, 72, 153)" rx="2" />
+      {/* component header band (STRUCT_RGB), then two rows of categorical field cells */}
+      <rect x="1" y="1" width="16" height="4" fill="rgb(51, 65, 85)" />
+      <rect x="1" y="6" width="5" height="5" fill="rgb(59, 130, 246)" />
+      <rect x="6.5" y="6" width="5" height="5" fill="rgb(16, 185, 129)" />
+      <rect x="12" y="6" width="5" height="5" fill="rgb(245, 158, 11)" />
+      <rect x="1" y="12" width="5" height="5" fill="rgb(6, 182, 212)" />
+      <rect x="6.5" y="12" width="5" height="5" fill="rgb(139, 92, 246)" />
+      <rect x="12" y="12" width="5" height="5" fill="rgb(234, 179, 8)" />
     </svg>
   );
 }
@@ -679,7 +719,7 @@ const L4_ITEMS: readonly SymbolItem[] = [
   },
   {
     title: 'Cluster entity sub-grid',
-    body: 'A cluster chunk draws one cell per entity slot, lit by the live-entity bitmap: cyan = occupied, dark = free — the “level underneath” a cluster.',
+    body: 'A cluster chunk draws one cell per entity slot, lit by the live-entity bitmap: cyan = a slot holding an entity, dark = a free slot — the same Used / Free colours as the page-level encoding and the occupancy map, one “level underneath” a cluster. For a spatial archetype, mostly-free clusters are expected: each cluster buckets a single grid cell, so a sparsely-populated cell fills only a few slots (the segment / chunk Detail shows the cell’s entity count). Not waste — spatial spread.',
     icon: <EntitySubGridIcon />,
   },
   {
@@ -698,9 +738,37 @@ const L4_ITEMS: readonly SymbolItem[] = [
     icon: <OutlineIcon />,
   },
   {
+    title: 'Free / unallocated cell',
+    body: 'A plain dark cell with no hatch — an empty entity slot, an unused chunk, or unallocated space. It is known and intact, simply not occupied; it is not an Unknown tile.',
+    icon: <FreeCellIcon />,
+  },
+  {
     title: 'Unknown tile',
-    body: 'A chunk we cannot decode (unsupported type or unparsed region). Diagonal hatch, never blank.',
+    body: 'A chunk the map cannot decode — an unsupported type or an unparsed region — drawn with a diagonal hatch so it never reads as blank. The hatch is the tell: a plain dark cell with no hatch is free / unallocated, not unknown.',
     icon: <UnknownTileIcon />,
+  },
+];
+
+const L5_ITEMS: readonly SymbolItem[] = [
+  {
+    title: 'Entity fields',
+    body: 'Zoom into a single occupied cluster slot and it opens into the entity’s content: one cell per field of every component, the same field-level view the legacy component table shows — one “level underneath” the slot sub-grid. Click the slot to read the decoded values in the Detail panel.',
+    icon: <EntityFieldsIcon />,
+  },
+  {
+    title: 'Component header',
+    body: 'A slate band groups each component’s fields and notes whether that component is enabled or disabled for this entity. The categorical cells below it are its fields, coloured by field id.',
+    icon: <ContentCellsIcon />,
+  },
+  {
+    title: 'Transient component',
+    body: 'A component stored only in memory (the transient store) is not in the persisted file, so its fields can’t be decoded here — the header marks it “not persisted”. SingleVersion and Versioned components decode inline.',
+    icon: <InspectorIcon />,
+  },
+  {
+    title: 'Hover / selection outline',
+    body: 'The hovered (and the double-click-selected) slot gets a bright outline; selecting it shows the entity’s full decode in the Detail panel.',
+    icon: <OutlineIcon />,
   },
 ];
 
@@ -754,6 +822,7 @@ function PathologyList({
   segments: StorageSegmentDto[];
   onFlyToPage: (page: number) => void;
 }) {
+  const { label: shortLabel } = useComponentNames();
   if (flags.length === 0) {
     return (
       <p className="text-fs-sm text-muted-foreground">
@@ -769,7 +838,7 @@ function PathologyList({
       </p>
       {shown.map((f) => {
         const seg = segments.find((s) => s.id === f.ownerSegmentId);
-        const label = seg ? (seg.typeName.length > 0 ? seg.typeName : `${seg.kind} #${seg.id}`) : 'no segment';
+        const label = seg ? formatSegmentLabel(seg.kind, seg.id, seg.typeName, shortLabel) : 'no segment';
         return (
           <button
             key={f.pageIndex}

@@ -4,8 +4,10 @@ import { useSessionStore } from '@/stores/useSessionStore';
 import { useHeartbeat } from '@/hooks/streams/useHeartbeat';
 import { useProfilerViewStore } from '@/stores/useProfilerViewStore';
 import { useSelectionStore } from '@/stores/useSelectionStore';
-import { resolveChain, type SelectionRef } from '@/stores/selectionChain';
+import { resolveChain, selectionRefLabel, type SelectionRef } from '@/stores/selectionChain';
 import { useEnvTagStore, ENV_TAG_STYLE, type EnvTag } from '@/stores/useEnvTagStore';
+import { useComponentNames } from '@/hooks/queryConsole/useComponentNames';
+import { useArchetypeNames } from '@/hooks/queryConsole/useArchetypeNames';
 
 const ENV_OPTIONS: EnvTag[] = ['none', 'dev', 'staging', 'prod'];
 const KIND_LABEL: Record<string, string> = { open: 'Open', trace: 'Trace', attach: 'Attach', none: '—' };
@@ -13,22 +15,6 @@ const KIND_LABEL: Record<string, string> = { open: 'Open', trace: 'Trace', attac
 /** Compact µs→ms readout for the trace/attach time-window scope. */
 function fmtMs(us: number): string {
   return `${(us / 1000).toFixed(1)}ms`;
-}
-
-/** Best-effort short label for a breadcrumb crumb (primitive ref, or a known rich-ref field). */
-function crumbLabel(node: { type: string; ref: unknown }): string {
-  const { ref } = node;
-  if (typeof ref === 'string' || typeof ref === 'number') {
-    return String(ref);
-  }
-  if (ref !== null && typeof ref === 'object') {
-    const r = ref as Record<string, unknown>;
-    if ('field' in r) return String(r.field);
-    if ('entityId' in r) return String(r.entityId);
-    if ('name' in r) return String(r.name);
-    if ('localId' in r) return `#${String(r.localId)}`;
-  }
-  return node.type;
 }
 
 /**
@@ -48,6 +34,12 @@ export default function ContextBar() {
   const select = useSelectionStore((s) => s.select);
   const envTag = useEnvTagStore((s) => s.get(filePath));
   const setEnvTag = useEnvTagStore((s) => s.set);
+  // Friendly crumb labels: a component shows its smart short name, an archetype its name (or `#id` if unnamed) —
+  // matching the Schema Explorer / Inspector. Falls back to the raw ref before the session name maps load.
+  const { label: componentLabel } = useComponentNames();
+  const { label: archLabel } = useArchetypeNames();
+  const refLabel = (c: SelectionRef): string =>
+    selectionRefLabel(c, { component: componentLabel, archetype: (id) => archLabel(`#${id}`) });
 
   const connected = kind !== 'none';
   const fileLabel = filePath ? (filePath.split(/[\\/]/).pop() ?? filePath) : kind;
@@ -125,18 +117,18 @@ export default function ContextBar() {
       {crumbs.length > 0 && (
         <nav className="ml-auto flex min-w-0 items-center gap-1" aria-label="Selection breadcrumb">
           {crumbs.map((c, i) => (
-            <span key={`${c.type}:${String(c.ref)}`} className="flex min-w-0 items-center gap-1">
+            <span key={`${c.type}:${selectionRefLabel(c)}`} className="flex min-w-0 items-center gap-1">
               {i > 0 && <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground" />}
               <button
                 type="button"
                 onClick={() => select(c.type, c.ref)}
-                title={`${c.type}: ${crumbLabel(c)}`}
+                title={`${c.type}: ${refLabel(c)}`}
                 className={
                   'truncate rounded px-1 hover:bg-muted/60 hover:text-foreground ' +
                   (i === crumbs.length - 1 ? 'text-foreground' : 'text-muted-foreground')
                 }
               >
-                {crumbLabel(c)}
+                {refLabel(c)}
               </button>
             </span>
           ))}

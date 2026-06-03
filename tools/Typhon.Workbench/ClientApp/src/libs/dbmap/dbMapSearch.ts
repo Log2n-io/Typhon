@@ -26,8 +26,12 @@ function segmentPages(data: DbMapData, segmentId: number): number[] {
   return pages;
 }
 
-/** Resolves a search query into ordered match pages. Returns an empty list when nothing matches. */
-export function searchDbMap(query: string, data: DbMapData): DbMapSearchMatch[] {
+/**
+ * Resolves a search query into ordered match pages. Returns an empty list when nothing matches. `shortLabel` (the
+ * Query Console labeller) shortens the type name in the result label only — matching still tests the FULL `typeName`,
+ * so typing a namespace fragment keeps finding the segment.
+ */
+export function searchDbMap(query: string, data: DbMapData, shortLabel: (typeName: string) => string = (s) => s): DbMapSearchMatch[] {
   const q = query.trim();
   if (q.length === 0 || data.pageCount === 0) {
     return [];
@@ -53,7 +57,7 @@ export function searchDbMap(query: string, data: DbMapData): DbMapSearchMatch[] 
   if (/^\d+$/.test(q)) {
     return resolvePage(q, data);
   }
-  return resolveText(lower, data);
+  return resolveText(lower, data, shortLabel);
 }
 
 function resolvePage(text: string, data: DbMapData): DbMapSearchMatch[] {
@@ -89,12 +93,13 @@ function resolveChunk(text: string, data: DbMapData): DbMapSearchMatch[] {
   return [{ pageIndex: seg.rootPageIndex, label: `segment ${segId} · chunk ${chunkId}` }];
 }
 
-function resolveText(lower: string, data: DbMapData): DbMapSearchMatch[] {
+function resolveText(lower: string, data: DbMapData, shortLabel: (typeName: string) => string): DbMapSearchMatch[] {
   const matches: DbMapSearchMatch[] = [];
   for (const seg of data.segments) {
     const typeName = seg.typeName ?? '';
+    // Match on the FULL name (namespace fragments still find it); display the SHORT name.
     if (typeName.toLowerCase().includes(lower) || seg.kind.toLowerCase().includes(lower)) {
-      const label = typeName.length > 0 ? `${typeName} (segment ${seg.id})` : `${seg.kind} #${seg.id}`;
+      const label = typeName.length > 0 ? `${shortLabel(typeName)} (segment ${seg.id})` : `${seg.kind} #${seg.id}`;
       matches.push({ pageIndex: seg.rootPageIndex, label });
     }
   }

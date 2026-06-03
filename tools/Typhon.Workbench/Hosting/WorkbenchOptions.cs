@@ -1,3 +1,4 @@
+using System;
 using System.ComponentModel.DataAnnotations;
 
 namespace Typhon.Workbench.Hosting;
@@ -15,6 +16,7 @@ public sealed record WorkbenchOptions
 {
     public EditorOptions Editor { get; init; } = new();
     public ProfilerOptions Profiler { get; init; } = new();
+    public SchemaOptions Schema { get; init; } = new();
 }
 
 /// <summary>Editor handoff preferences for the "Open in editor" feature on profiler spans.</summary>
@@ -53,6 +55,38 @@ public sealed record ProfilerOptions
     /// </summary>
     [Range(0, 5000)]
     public int ViewRangeDebounceMs { get; init; } = 150;
+}
+
+/// <summary>
+/// Schema-assembly resolution preferences (ADR-055 Phase 2). Directories the Workbench searches — at
+/// priority 2, above its own bundled binaries — when resolving a database's recorded schema assemblies
+/// on open. Lets a user point the Workbench at a custom or recompiled-from-git schema build without
+/// copying DLLs next to the database file.
+/// </summary>
+public sealed record SchemaOptions
+{
+    /// <summary>
+    /// Absolute directories searched for schema assemblies, in order, before the bundled (Workbench
+    /// deployment) directory. A non-existent or non-matching entry is skipped at resolution time. Empty
+    /// by default.
+    /// </summary>
+    public string[] Directories { get; init; } = [];
+
+    // A record's auto-generated equality compares string[] by reference, so two SchemaOptions with
+    // element-equal arrays would compare unequal — making every WorkbenchOptions comparison spuriously
+    // unequal after a JSON round-trip and defeating OptionsStore's hot-reload dedup. Compare by element.
+    public bool Equals(SchemaOptions other) =>
+        other is not null && Directories.AsSpan().SequenceEqual(other.Directories);
+
+    public override int GetHashCode()
+    {
+        var hash = new HashCode();
+        foreach (var dir in Directories)
+        {
+            hash.Add(dir);
+        }
+        return hash.ToHashCode();
+    }
 }
 
 /// <summary>Editor target enumeration. Wire-stable; never renumber.</summary>

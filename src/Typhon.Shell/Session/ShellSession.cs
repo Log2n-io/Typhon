@@ -107,21 +107,24 @@ internal sealed class ShellSession : IDisposable
                 options.DatabaseCacheSize = 65536UL * 8192;
             })
             .AddMemoryAllocator()
-            .AddSingleton<IWalFileIO, WalFileIO>()
+            // --nowal now selects an in-memory WAL backend (the full WAL pipeline with zero disk I/O) instead of disabling WAL — the no-WAL engine mode was
+            // removed. WAL is always configured; only the file-IO backend differs.
+            .AddSingleton<IWalFileIO>(_ => NoWal ? new InMemoryWalFileIO() : new WalFileIO())
             .AddDatabaseEngine(engineOpts =>
             {
+                var walDir = Path.Combine(directory, "wal");
                 if (!NoWal)
                 {
-                    var walDir = Path.Combine(directory, "wal");
+                    // In-memory WAL needs no real directory; only the on-disk backend does.
                     Directory.CreateDirectory(walDir);
-                    engineOpts.Wal = new WalWriterOptions
-                    {
-                        WalDirectory = walDir,
-                        // Shell uses Deferred durability — WAL is only needed for checkpoint-driven page flushing.
-                        // FUA off since we don't need per-write durability guarantees in tsh.
-                        UseFUA = false
-                    };
                 }
+                engineOpts.Wal = new WalWriterOptions
+                {
+                    WalDirectory = walDir,
+                    // Shell uses Deferred durability — WAL is only needed for checkpoint-driven page flushing.
+                    // FUA off since we don't need per-write durability guarantees in tsh.
+                    UseFUA = false
+                };
             });
 
         _serviceProvider = services.BuildServiceProvider();

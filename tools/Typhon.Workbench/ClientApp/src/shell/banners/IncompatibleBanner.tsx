@@ -2,6 +2,7 @@ import { XCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useSessionStore } from '@/stores/useSessionStore';
 import { openConnect } from '@/shell/commands/baseCommands';
+import { openOptionsToSchema } from '@/shell/commands/openSchemaBrowser';
 
 export default function IncompatibleBanner() {
  const diagnostics = useSessionStore((s) => s.schemaDiagnostics);
@@ -29,15 +30,26 @@ export default function IncompatibleBanner() {
  </ul>
  )}
  </div>
+ <div className="flex shrink-0 items-center gap-1.5">
  <Button
  variant="outline"
  size="sm"
- className="h-6 shrink-0 text-fs-sm"
+ className="h-6 text-fs-sm"
+ onClick={openOptionsToSchema}
+ title="Register a directory holding a schema build compatible with this database"
+ >
+ Manage schema directories…
+ </Button>
+ <Button
+ variant="outline"
+ size="sm"
+ className="h-6 text-fs-sm"
  onClick={() => openConnect('open')}
  title="Reopen with binaries matching this database's schema"
  >
  Open another file…
  </Button>
+ </div>
  </div>
  );
 }

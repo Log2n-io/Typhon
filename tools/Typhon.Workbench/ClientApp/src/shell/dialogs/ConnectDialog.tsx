@@ -32,6 +32,9 @@ interface Props {
 
 export default function ConnectDialog({ open, initialTab, onOpenChange }: Props) {
  const [tab, setTab] = useState<ConnectTab>(initialTab);
+ // The file path currently being opened, so the Recent-files row that was clicked can show a spinner during the
+ // open round-trip (a big DB takes ~1s; without this the click feels dead until the UI flips to database mode).
+ const [openingPath, setOpeningPath] = useState<string | null>(null);
  const setSession = useSessionStore((s) => s.setSession);
  const recordRecent = useRecentFilesStore((s) => s.record);
  const postFile = usePostApiSessionsFile();
@@ -49,6 +52,7 @@ export default function ConnectDialog({ open, initialTab, onOpenChange }: Props)
  filePath,
  explicitSchemaDlls: schemaDllPaths,
  });
+ setOpeningPath(filePath);
  try {
  const response = await postFile.mutateAsync({
  data: {
@@ -91,11 +95,14 @@ export default function ConnectDialog({ open, initialTab, onOpenChange }: Props)
  error: extractDetail(err) || String(err),
  });
  throw err;
+ } finally {
+ setOpeningPath(null);
  }
  };
 
  const handleOpenTrace = async (filePath: string) => {
  logInfo(`Opening trace: ${filePath}`, { filePath });
+ setOpeningPath(filePath);
  try {
  const response = await postTrace.mutateAsync({ data: { filePath } });
  const dto = response.data;
@@ -116,6 +123,8 @@ export default function ConnectDialog({ open, initialTab, onOpenChange }: Props)
  error: extractDetail(err) || String(err),
  });
  throw err;
+ } finally {
+ setOpeningPath(null);
  }
  };
 
@@ -163,7 +172,7 @@ export default function ConnectDialog({ open, initialTab, onOpenChange }: Props)
      to render; the tab is no longer inside the Connect dialog. */}
  </TabsList>
  <TabsContent value="recent" className="min-h-0 flex-1">
- <RecentFilesTab onOpen={handleOpen} onOpenTrace={handleOpenTrace} />
+ <RecentFilesTab onOpen={handleOpen} onOpenTrace={handleOpenTrace} openingPath={openingPath} />
  </TabsContent>
  <TabsContent value="open" className="min-h-0 flex-1">
  <OpenFileTab onOpen={handleOpen} isOpening={postFile.isPending} />

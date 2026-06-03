@@ -407,18 +407,25 @@ static class ArchetypeAccessorBenchmark
                   o.DatabaseName = name;
                   o.DatabaseCacheSize = (ulong)(200 * 1024 * PagedMMF.PageSize);
                   o.PagesDebugPattern = false;
-              })
-              .AddScopedDatabaseEngine(o =>
-              {
-                  if (enableWal)
-                  {
-                      o.Wal = new WalWriterOptions { WalDirectory = Path.Combine(Path.GetTempPath(), $"AABench_wal_{Environment.ProcessId}") };
-                  }
-                  else
-                  {
-                      o.Wal = null;
-                  }
               });
+
+            // enableWal=true → on-disk WAL (default WalFileIO). enableWal=false → in-memory WAL, FUA off, idle checkpoint: zero disk I/O for CPU benchmarks.
+            if (!enableWal)
+            {
+                sc.AddSingleton<IWalFileIO>(_ => new InMemoryWalFileIO());
+            }
+            sc.AddScopedDatabaseEngine(o =>
+            {
+                if (enableWal)
+                {
+                    o.Wal = new WalWriterOptions { WalDirectory = Path.Combine(Path.GetTempPath(), $"AABench_wal_{Environment.ProcessId}") };
+                }
+                else
+                {
+                    o.Wal = new WalWriterOptions { UseFUA = false };
+                    o.Resources.CheckpointIntervalMs = int.MaxValue;
+                }
+            });
 
             var sp = sc.BuildServiceProvider();
             sp.EnsureFileDeleted<ManagedPagedMMFOptions>();
@@ -859,7 +866,7 @@ static class ArchetypeAccessorBenchmark
               o.DatabaseCacheSize = (ulong)(200 * 1024 * PagedMMF.PageSize);
               o.PagesDebugPattern = false;
           })
-          .AddScopedDatabaseEngine(o => { o.Wal = null; });
+          .AddInMemoryWalEngine();
 
         var sp = sc.BuildServiceProvider();
         sp.EnsureFileDeleted<ManagedPagedMMFOptions>();
@@ -910,7 +917,7 @@ static class ArchetypeAccessorBenchmark
               o.DatabaseCacheSize = (ulong)(200 * 1024 * PagedMMF.PageSize);
               o.PagesDebugPattern = false;
           })
-          .AddScopedDatabaseEngine(o => { o.Wal = null; });
+          .AddInMemoryWalEngine();
 
         var sp = sc.BuildServiceProvider();
         sp.EnsureFileDeleted<ManagedPagedMMFOptions>();
@@ -1080,7 +1087,7 @@ static class ArchetypeAccessorBenchmark
               o.DatabaseCacheSize = (ulong)(200 * 1024 * PagedMMF.PageSize);
               o.PagesDebugPattern = false;
           })
-          .AddScopedDatabaseEngine(o => { o.Wal = null; });
+          .AddInMemoryWalEngine();
 
         var sp = sc.BuildServiceProvider();
         sp.EnsureFileDeleted<ManagedPagedMMFOptions>();
@@ -1188,7 +1195,7 @@ static class ArchetypeAccessorBenchmark
               o.DatabaseCacheSize = (ulong)(200 * 1024 * PagedMMF.PageSize);
               o.PagesDebugPattern = false;
           })
-          .AddScopedDatabaseEngine(o => { o.Wal = null; });
+          .AddInMemoryWalEngine();
 
         var sp = sc.BuildServiceProvider();
         sp.EnsureFileDeleted<ManagedPagedMMFOptions>();
@@ -1341,7 +1348,7 @@ static class ArchetypeAccessorBenchmark
               o.DatabaseCacheSize = (ulong)(200 * 1024 * PagedMMF.PageSize);
               o.PagesDebugPattern = false;
           })
-          .AddScopedDatabaseEngine(o => { o.Wal = null; });
+          .AddInMemoryWalEngine();
 
         var sp = sc.BuildServiceProvider();
         sp.EnsureFileDeleted<ManagedPagedMMFOptions>();
@@ -1444,7 +1451,7 @@ static class ArchetypeAccessorBenchmark
               o.DatabaseCacheSize = (ulong)(200 * 1024 * PagedMMF.PageSize);
               o.PagesDebugPattern = false;
           })
-          .AddScopedDatabaseEngine(o => { o.Wal = null; });
+          .AddInMemoryWalEngine();
 
         var sp = sc.BuildServiceProvider();
         sp.EnsureFileDeleted<ManagedPagedMMFOptions>();

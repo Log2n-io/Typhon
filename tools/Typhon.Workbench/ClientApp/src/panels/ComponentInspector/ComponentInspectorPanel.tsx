@@ -9,6 +9,8 @@ import { useInspectorTarget } from '@/panels/schemaCommon/useInspectorTarget';
 import type { TargetCandidate } from '@/panels/schemaCommon/inspectorTarget';
 import { usePanelHotkeys } from '@/hooks/usePanelHotkeys';
 import { useComponentList } from '@/hooks/schema/useComponentList';
+import { useArchetypeNames } from '@/hooks/queryConsole/useArchetypeNames';
+import { buildComponentNameMap, leafSegment } from '@/libs/componentNames';
 import { useComponentSchema } from '@/hooks/schema/useComponentSchema';
 import { useIndexesForComponent } from '@/hooks/schema/useIndexesForComponent';
 import { useArchetypesForComponent } from '@/hooks/schema/useArchetypesForComponent';
@@ -59,15 +61,24 @@ export default function ComponentInspectorPanel(props: IDockviewPanelProps) {
     [components],
   );
   const { targetId, auto, pick } = useInspectorTarget({ type: 'component', candidates, loading: cLoading });
+
+  // Friendly display labels — the same labeller the File Map uses: shorten each registered typeName to its
+  // shortest dot-suffix that is still unique across the whole set (`Typhon.Test.EvoCc.Bag` → `Bag`, colliding
+  // leaves keep one more segment). Built over the full component list so the labels match the map elsewhere; the
+  // raw typeName stays the identity (`id`) and is kept searchable via `keywords`. See {@link buildComponentNameMap}.
+  const componentLabel = useMemo(() => {
+    const map = buildComponentNameMap(components.map((c) => c.typeName));
+    return (name: string): string => map.get(name) ?? leafSegment(name);
+  }, [components]);
   const switcherItems = useMemo<SwitcherItem[]>(
     () =>
       components.map((c) => ({
         id: c.typeName,
-        label: c.typeName,
+        label: componentLabel(c.typeName),
         meta: `${c.storageSize}B · used in ${c.archetypeCount ?? '—'}`,
-        keywords: c.fullName,
+        keywords: `${c.typeName} ${c.fullName}`,
       })),
-    [components],
+    [components, componentLabel],
   );
 
   const [tab, setTab] = useState<Tab>('layout');
@@ -103,7 +114,7 @@ export default function ComponentInspectorPanel(props: IDockviewPanelProps) {
       <div className="wb-pane-header flex items-center gap-2 border-b border-border px-3 py-1.5">
         <InspectorTargetSwitcher
           label="Component"
-          currentLabel={summary?.typeName ?? typeName}
+          currentLabel={componentLabel(summary?.typeName ?? typeName)}
           currentTitle={summary?.fullName ?? typeName}
           auto={auto}
           autoTitle="Auto-selected the component with the most entities — pick another above."
@@ -330,6 +341,7 @@ function ProfilerRelationships({ typeName }: { typeName: string }) {
 
 function UsedInTab({ typeName, onReveal }: { typeName: string; onReveal: (archetypeId: string) => void }) {
   const { archetypes, isLoading, isError } = useArchetypesForComponent(typeName);
+  const { label: archName } = useArchetypeNames();
   return (
     <div className="p-1">
       <p className="px-2 py-1 text-fs-sm text-muted-foreground">Archetypes that use this component (M:N). Click a row to reveal it in the Archetype Inspector.</p>
@@ -355,7 +367,7 @@ function UsedInTab({ typeName, onReveal }: { typeName: string; onReveal: (archet
                 data-archetype-id={a.archetypeId}
                 onClick={() => onReveal(a.archetypeId)}
               >
-                <TableCell className="font-mono tabular-nums">#{a.archetypeId}</TableCell>
+                <TableCell className="font-mono" title={`#${a.archetypeId}`}>{archName(`#${a.archetypeId}`)}</TableCell>
                 <TableCell>
                   <StatusBadge tone={a.storageMode === 'cluster' ? 'success' : 'warn'}>{a.storageMode}</StatusBadge>
                 </TableCell>

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   cameraCenteredOn,
   fitToRect,
+  frameWorldRect,
   panBy,
   screenToWorldX,
   screenToWorldY,
@@ -77,6 +78,26 @@ describe('camera', () => {
     expect(atEnd.camera.x).toBeCloseTo(-500, 2);
     expect(atEnd.camera.y).toBeCloseTo(-300, 2);
     expect(atEnd.done).toBe(true);
+  });
+
+  it('frameWorldRect with fillFraction 1 fits exactly (same as fitToRect)', () => {
+    const world = { x: 10, y: 20, w: 40, h: 30 };
+    const framed = frameWorldRect(world, 800, 600, 24, 1);
+    const fit = fitToRect(world, 800, 600, 24);
+    expect(framed).toEqual(fit);
+  });
+
+  it('frameWorldRect with fillFraction 0.5 halves the fitted scale and keeps the region centred', () => {
+    const world = { x: 10, y: 20, w: 40, h: 30 };
+    const fit = fitToRect(world, 800, 600, 24);
+    const framed = frameWorldRect(world, 800, 600, 24, 0.5);
+    // Zoomed out 2× → the region spans about half the view, leaving context around it.
+    expect(framed.scale).toBeCloseTo(fit.scale * 0.5, 6);
+    // The region's centre still maps to the viewport centre (centred reveal).
+    const cx = world.x + world.w / 2;
+    const cy = world.y + world.h / 2;
+    expect(framed.x + cx * framed.scale).toBeCloseTo(400, 6);
+    expect(framed.y + cy * framed.scale).toBeCloseTo(300, 6);
   });
 
   it('tweenCamera interpolates scale in log space — the geometric mean at ease 0.5', () => {

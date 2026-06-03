@@ -27,6 +27,7 @@ import {
   NO_SEGMENT,
   PAGE_SIZE,
   PAGE_TYPE_LABELS,
+  formatSegmentLabel,
   type DbMapData,
   type DbMapEncoding,
   type StorageSegmentDto,
@@ -101,12 +102,16 @@ const PAGE_TYPE_STRIPE_ORDER: readonly DbPageType[] = [
  * so the stripes sum to exactly the on-disk file size on a down-sampled map (where one descriptor cell
  * represents multiple pages).
  */
-export function computeComposition(data: DbMapData, encoding: DbMapEncoding): L0Stripe[] {
+export function computeComposition(
+  data: DbMapData,
+  encoding: DbMapEncoding,
+  shortLabel: (typeName: string) => string = (s) => s,
+): L0Stripe[] {
   if (data.pageCount === 0) {
     return [];
   }
   if (encoding === 'segment') {
-    return composeBySegment(data);
+    return composeBySegment(data, shortLabel);
   }
   if (encoding === 'freeUsed') {
     return composeByFreeUsed(data);
@@ -175,7 +180,7 @@ function composeByFreeUsed(data: DbMapData): L0Stripe[] {
   return stripes;
 }
 
-function composeBySegment(data: DbMapData): L0Stripe[] {
+function composeBySegment(data: DbMapData, shortLabel: (typeName: string) => string): L0Stripe[] {
   // Count pages per segment id from the dense per-cell array — the segment list itself doesn't reflect
   // down-sampling, but `ownerSegmentId[]` does.
   const counts = new Map<number, number>();
@@ -202,7 +207,7 @@ function composeBySegment(data: DbMapData): L0Stripe[] {
     stripes.push({
       key: `seg:${id}`,
       kind: 'segment',
-      label: segmentDisplayLabel(id, segmentMeta.get(id)),
+      label: segmentDisplayLabel(id, segmentMeta.get(id), shortLabel),
       color: segmentRgb(id),
       pageCount: c,
       byteCount: bytesFor(c, data),
@@ -240,11 +245,11 @@ function composeBySegment(data: DbMapData): L0Stripe[] {
   return stripes;
 }
 
-function segmentDisplayLabel(id: number, meta: StorageSegmentDto | undefined): string {
+function segmentDisplayLabel(id: number, meta: StorageSegmentDto | undefined, shortLabel: (typeName: string) => string): string {
   if (!meta) {
     return `segment #${id}`;
   }
-  return meta.typeName.length > 0 ? `${meta.kind} #${meta.id} · ${meta.typeName}` : `${meta.kind} #${meta.id}`;
+  return formatSegmentLabel(meta.kind, meta.id, meta.typeName, shortLabel);
 }
 
 /**

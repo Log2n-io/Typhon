@@ -4,10 +4,9 @@ using Typhon.Schema.Definition;
 namespace Typhon.ARPG.Schema;
 
 /// <summary>
-/// Temporary buffs and debuffs on an entity.
-/// AllowMultiple: an entity can have many concurrent effects (poison + burn + haste + ...).
+/// A temporary buff or debuff on an entity. Single instance per entity — component-level multi-instance (AllowMultiple) was removed.
 /// </summary>
-[Component("ARPG.StatusEffects", 1, true)]
+[Component("ARPG.StatusEffects", 1)]
 [StructLayout(LayoutKind.Sequential)]
 public struct StatusEffects
 {

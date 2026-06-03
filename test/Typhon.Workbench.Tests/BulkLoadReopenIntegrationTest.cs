@@ -81,16 +81,19 @@ public sealed class BulkLoadReopenIntegrationTest
         const double Reference = 17_000_000.0;
         // Use double arithmetic — int*int overflows for reference=4_000_000 × totalEntities=17_000_000 (= 6.8e13).
         int Scaled(int reference) => Math.Max(1, (int)Math.Round((double)reference * totalEntities / Reference));
-        var cfg = new FixtureConfig(
-            CompAArchCount: Scaled(4_000_000),
-            CompABArchCount: Scaled(2_000_000),
-            CompABCArchCount: Scaled(2_000_000),
-            CompDArchCount: Scaled(400_000),
-            GuildArchCount: Scaled(200_000),
-            PlayerArchCount: Scaled(400_000),
-            ParticleArchCount: Scaled(8_000_000),
-            ParticleFragmentation: 0.0,   // skip the destroy phase — adds time, not pressure
-            Seed: 123_456_789);
+        // Map the 17 M SWG breakdown through Scaled() so the test's totalEntities param drives the shape (bulk path:
+        // CC contents + enable/disable + cascade are skipped, so only the counts matter here).
+        var cfg = FixtureConfig.Default with
+        {
+            ResourceTypeCount = Scaled(10_000),
+            GuildCount        = Scaled(200_000),
+            RecipeCount       = Scaled(10_000),
+            PlayerCount       = Scaled(4_000_000),
+            DepositCount      = Scaled(1_000_000),
+            HarvesterCount    = Scaled(3_000_000),
+            FactoryCount      = Scaled(780_000),
+            ItemCount         = Scaled(8_000_000),
+        };
 
         // ─── Phase 1: bulk-generate the fixture ────────────────────────────────────────────────────────
         var genSw = Stopwatch.StartNew();

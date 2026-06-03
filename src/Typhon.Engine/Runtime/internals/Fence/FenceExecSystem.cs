@@ -16,8 +16,8 @@ namespace Typhon.Engine.Internals;
 /// (<c>claude/design/Transactions/transaction-overview.md §3.2</c>) — it cannot be threaded into parallel workers. Each chunk that needs page-dirty tracking
 /// creates a LOCAL ChangeSet via <see cref="CreateChunkChangeSet"/> (overridden by Prep / Migrate; returns null for Finalize which doesn't dirty pages).
 /// The base <see cref="Execute"/> caps the local <c>DirtyCounter</c>s via <c>ReleaseExcessDirtyMarks</c> at chunk end, then discards the ChangeSet.
-/// The parallel fence path is WAL-mode only — TickDriver gates dispatch on <c>WalManager != null</c>, so the WAL-less <c>SaveChanges</c> path is unreachable
-/// here.</para>
+/// Capping (not <c>SaveChanges</c>) is the correct lifecycle because WAL + checkpoint are mandatory (ADR-054): the checkpoint thread always drains the capped
+/// pages.</para>
 /// </summary>
 internal abstract class FencePhaseExecSystemBase : ChunkedCallbackSystem<FenceContext>
 {
@@ -179,9 +179,8 @@ internal abstract class FencePhaseExecSystemBase : ChunkedCallbackSystem<FenceCo
         }
         finally
         {
-            // WAL-mode contract: cap DirtyCounter at 1 for every page touched by this chunk so the next checkpoint cycle can transition them to evictable
-            // (DC: 1 → 0). Matches UnitOfWork.Dispose's WAL-mode cleanup. RunParallelFence gates the whole parallel path on WalManager != null, so we never
-            // need the WAL-less SaveChanges path here.
+            // Cap DirtyCounter at 1 for every page touched by this chunk so the next checkpoint cycle can transition them to evictable (DC: 1 → 0). Matches
+            // UnitOfWork.Dispose's cleanup. WAL + checkpoint are mandatory (ADR-054), so the checkpoint thread always drains these — no per-worker SaveChanges.
             if (chunkCs != null)
             {
                 chunkCs.ReleaseExcessDirtyMarks();

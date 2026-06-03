@@ -149,9 +149,16 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
             page.Metadata<long>(0, longSize).Clear();
 
             // Clear chunk 0's raw data on the root page so the BTree directory starts clean.
-            // We do this inline because ReserveChunk(index, clearContent:true) needs a ChunkAccessor
-            // which requires an epoch scope — unavailable during segment creation.
-            if (i == 0)
+            // We do this inline because ReserveChunk(index, clearContent:true) needs a ChunkAccessor which requires an epoch scope — unavailable during segment
+            // creation.
+            //
+            // Guard on ChunkCountRootPage > 0: for large strides (e.g. fat cluster slots) a chunk may fit a non-root page (PageRawDataSize) but NOT the root
+            // page, which loses RootHeaderIndexSectionLength to the segment directory — so ChunkCountRootPage == 0 and chunk 0 lives on page 1, not the root.
+            // Clearing a full Stride at RootChunkDataOffset on the root would then overrun the root page's raw data into the next page's LogicalSegmentHeader
+            // (zeroing NextRawDataPBID and truncating the forward chain). ChunkCountRootPage > 0 ⟺ RootChunkDataOffset + Stride ≤ PageRawDataSize, so the
+            // clear is overrun-free exactly when it runs. (base.Create already zeroed the page's raw data via clear: true, so skipping it on a chunk-less root
+            // is safe.)
+            if (i == 0 && ChunkCountRootPage > 0)
             {
                 page.RawData<byte>(RootChunkDataOffset, Stride).Clear();
             }

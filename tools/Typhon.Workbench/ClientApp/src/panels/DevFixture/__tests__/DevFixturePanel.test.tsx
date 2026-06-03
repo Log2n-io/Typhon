@@ -4,9 +4,13 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { IDockviewPanelProps } from 'dockview-react';
 import {
+  DATABASE_NAME_STORAGE_KEY,
   loadOutputDirFromStorage,
   OUTPUT_DIR_STORAGE_KEY,
+  saveDatabaseNameToStorage,
   saveOutputDirToStorage,
+  saveUseBulkLoadToStorage,
+  USE_BULK_LOAD_STORAGE_KEY,
 } from '@/shell/dialogs/tabs/devFixtureFormReducer';
 
 /**
@@ -298,6 +302,42 @@ describe('DevFixturePanel — start button gating', () => {
     await waitFor(() => expect(screen.getByTestId('devfixture-dbname')).toBeDefined());
     const start = screen.getByTestId('devfixture-start') as HTMLButtonElement;
     expect(start.disabled).toBe(false);
+  });
+});
+
+describe('DevFixturePanel — database name + bulk mode persistence', () => {
+  it('persists the database name to localStorage on edit', async () => {
+    mockCapabilityOk();
+    renderPanel();
+    await waitFor(() => expect(screen.getByTestId('devfixture-dbname')).toBeDefined());
+    fireEvent.change(screen.getByTestId('devfixture-dbname'), { target: { value: 'my-db' } });
+    expect(localStorage.getItem(DATABASE_NAME_STORAGE_KEY)).toBe('my-db');
+  });
+
+  it('restores the database name on remount (panel re-open)', async () => {
+    saveDatabaseNameToStorage('restored-db');
+    mockCapabilityOk();
+    renderPanel();
+    await waitFor(() => expect(screen.getByTestId('devfixture-dbname')).toBeDefined());
+    expect((screen.getByTestId('devfixture-dbname') as HTMLInputElement).value).toBe('restored-db');
+  });
+
+  it('persists the bulk-mode toggle to localStorage on change', async () => {
+    mockCapabilityOk();
+    renderPanel();
+    await waitFor(() => expect(screen.getByTestId('devfixture-use-bulkload')).toBeDefined());
+    const cb = screen.getByTestId('devfixture-use-bulkload') as HTMLInputElement;
+    expect(cb.checked).toBe(false); // default preset (9310 entities) is under the bulk threshold
+    fireEvent.click(cb);
+    expect(localStorage.getItem(USE_BULK_LOAD_STORAGE_KEY)).toBe('true');
+  });
+
+  it('restores the bulk-mode toggle on remount (panel re-open)', async () => {
+    saveUseBulkLoadToStorage(true);
+    mockCapabilityOk();
+    renderPanel();
+    await waitFor(() => expect(screen.getByTestId('devfixture-use-bulkload')).toBeDefined());
+    expect((screen.getByTestId('devfixture-use-bulkload') as HTMLInputElement).checked).toBe(true);
   });
 });
 

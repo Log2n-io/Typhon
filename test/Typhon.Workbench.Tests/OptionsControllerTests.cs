@@ -79,6 +79,36 @@ public sealed class OptionsControllerTests
     }
 
     [Test]
+    public async Task PatchSchema_NormalizesAndRoundTripsThroughGet()
+    {
+        // ADR-055 Phase 2: the server keeps only rooted paths, canonicalizes via GetFullPath, and de-duplicates
+        // case-insensitively while preserving order. A relative path is dropped; a duplicate collapses to one.
+        var abs = Path.Combine(Path.GetTempPath(), "typhon-schema-registered");
+        var patch = await _client.PatchAsJsonAsync("/api/options/schema",
+            new SchemaOptions { Directories = ["relative/skip-me", abs, abs] }, JsonOpts);
+        Assert.That(patch.StatusCode, Is.EqualTo(HttpStatusCode.OK));
+
+        var opts = await _client.GetFromJsonAsync<WorkbenchOptions>("/api/options", JsonOpts);
+        Assert.That(opts.Schema.Directories, Has.Length.EqualTo(1), "relative path dropped + duplicate de-duped");
+        Assert.That(opts.Schema.Directories[0], Is.EqualTo(Path.GetFullPath(abs)));
+    }
+
+    [Test]
+    public async Task PatchSchema_LeavesOtherCategoriesUntouched()
+    {
+        await _client.PatchAsJsonAsync("/api/options/editor",
+            new EditorOptions { Kind = EditorKind.Rider, CustomCommand = "" }, JsonOpts);
+
+        var dir = Path.Combine(Path.GetTempPath(), "typhon-schema-untouched");
+        await _client.PatchAsJsonAsync("/api/options/schema",
+            new SchemaOptions { Directories = [dir] }, JsonOpts);
+
+        var opts = await _client.GetFromJsonAsync<WorkbenchOptions>("/api/options", JsonOpts);
+        Assert.That(opts.Editor.Kind, Is.EqualTo(EditorKind.Rider), "schema patch must not disturb the editor category");
+        Assert.That(opts.Schema.Directories, Has.Length.EqualTo(1));
+    }
+
+    [Test]
     public async Task OutOfBandFileEdit_IsPickedUpByGet()
     {
         var store = _factory.Services.GetRequiredService<OptionsStore>();

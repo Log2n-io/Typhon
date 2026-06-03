@@ -89,23 +89,6 @@ public struct CompD
     }
 }
 
-[Component(SchemaName, 1, true)]
-[StructLayout(LayoutKind.Sequential)]
-public struct CompE
-{
-    private const string SchemaName = "Typhon.Schema.UnitTest.CompE";
-
-    public float A;
-    public int B;
-    public double C;
-
-    public CompE(float a, int b, double c)
-    {
-        A = a;
-        B = b;
-        C = c;
-    }
-}
 
 [Component(SchemaName, 1)]
 [StructLayout(LayoutKind.Sequential)]
@@ -297,7 +280,6 @@ public abstract class TestBase{
         dbe.RegisterComponentFromAccessor<CompB>();
         dbe.RegisterComponentFromAccessor<CompC>();
         dbe.RegisterComponentFromAccessor<CompD>();
-        dbe.RegisterComponentFromAccessor<CompE>();
         dbe.RegisterComponentFromAccessor<CompF>();
     }
     
@@ -420,14 +402,29 @@ abstract class TestBase<T> : TestBase
                 options.DatabaseCacheSize = (ulong)dcs;
                 options.PagesDebugPattern = false;
             })
-            .AddScopedDatabaseEngine(_ =>
-            {
-            });
+            .AddScopedDatabaseEngine(ConfigureEngineOptions);
+
+        // WAL is mandatory — every test engine runs the real WAL + checkpoint pipeline. Route it through an in-memory file-IO backend (scoped: a fresh
+        // instance per DI scope, so reopen tests that CreateScope() twice each get their own and there is no cross-scope dispose hazard) for zero disk I/O.
+        // Crash/replay tests that need WAL segments to survive a reopen override CreateWalFileIO() to return a disk-backed WalFileIO.
+        ServiceCollection.AddScoped<IWalFileIO>(_ => CreateWalFileIO());
 
         ServiceProvider = ServiceCollection.BuildServiceProvider();
         ServiceProvider.EnsureFileDeleted<ManagedPagedMMFOptions>();
         Logger = ServiceProvider.GetRequiredService<ILogger<T>>();
     }
+
+    /// <summary>
+    /// WAL file-IO backend for the test engine. Default is an <see cref="InMemoryWalFileIO"/> (no disk I/O). Override to return <c>new WalFileIO()</c> for
+    /// crash/replay fixtures that need WAL segments to survive an engine reopen within the same fixture.
+    /// </summary>
+    protected virtual IWalFileIO CreateWalFileIO() => new InMemoryWalFileIO();
+
+    /// <summary>
+    /// Configures the test engine's durability options. Default applies the fast test profile (in-memory WAL, FUA off, aggressive checkpoint so the
+    /// page-cache DirtyCounter drains). Override to tune for a specific fixture (e.g. a larger WAL ring or a different checkpoint cadence).
+    /// </summary>
+    protected virtual void ConfigureEngineOptions(DatabaseEngineOptions o) => TestWalProfile.Apply(o, _testDatabaseDir);
 
     [TearDown]
     public virtual void TearDown()

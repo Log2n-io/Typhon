@@ -69,6 +69,11 @@ public sealed class StorageMapController : WorkbenchControllerBase
     public ActionResult<StorageChunkDto> GetChunk(Guid sessionId, int segId, int chunkId)
         => InvokeFound((engine, _) => _service.GetChunk(engine, segId, chunkId));
 
+    /// <summary>One cluster entity's full decoded content (L5) — the entity at <paramref name="slotIndex"/> as component-grouped field cells.</summary>
+    [HttpGet("chunk/{segId:int}/{chunkId:int}/entity/{slotIndex:int}")]
+    public ActionResult<StorageChunkDto> GetClusterEntity(Guid sessionId, int segId, int chunkId, int slotIndex)
+        => InvokeFound((engine, _) => _service.GetClusterEntity(engine, segId, chunkId, slotIndex));
+
     private ActionResult<T> Invoke<T>(Func<DatabaseEngine, string, T> action)
     {
         var session = ResolveOpenSession(out var conflict);

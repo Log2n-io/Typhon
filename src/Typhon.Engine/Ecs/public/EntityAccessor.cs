@@ -169,14 +169,12 @@ public partial class EntityAccessor : IDisposable
             throw new InvalidOperationException($"The type {componentType} doesn't have a registered Component Table");
         }
 
-        var isMultiple = ct.Definition.AllowMultiple;
-        info = new ComponentInfo(isMultiple)
+        info = new ComponentInfo
         {
             ComponentTypeId = typeId >= 0 ? typeId : ArchetypeRegistry.GetComponentTypeId(componentType),
             ComponentTable = ct,
             ComponentOverhead = ct.ComponentOverhead,
-            SingleCache    = isMultiple ? null : new Dictionary<long, ComponentInfo.CompRevInfo>(),
-            MultipleCache  = isMultiple ? new Dictionary<long, List<ComponentInfo.CompRevInfo>>() : null,
+            SingleCache = new Dictionary<long, ComponentInfo.CompRevInfo>(),
         };
 
         switch (ct.StorageMode)

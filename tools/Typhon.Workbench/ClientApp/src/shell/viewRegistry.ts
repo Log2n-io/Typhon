@@ -1,3 +1,5 @@
+import type { SessionKind } from '@/stores/useSessionStore';
+
 // Stage 0 view-enablement gate.
 //
 // The Workbench product re-architecture migrates shell-first: Stage 0 reduces the app to its shell frame by
@@ -51,6 +53,9 @@ export const ZONE_D_VIEW_ACTIVE: Readonly<Record<string, boolean>> = {
   // leaf modules — catalog filters/toolbar, plan graph, phase table, data hooks — relocated into
   // panels/QueryAnalyzer/).
   QueryAnalyzer: true,
+  // #386 Phase 1: Query Console — author + run + browse against a live `.typhon`. Open-session only; the
+  // panel itself renders a disabled state in trace/attach so we don't need a separate gate here.
+  QueryConsole: true,
   // Observe (P-C) — live engine surface.
   // Stage 4 Phase 1 (#377, GAP-21/22): the Engine Live Health view — consolidated live signals (gauges, anomaly
   // log, reconnect banner) + the freeze + Capture & Analyse glue. P1 ships the shell + connection-state header
@@ -75,3 +80,68 @@ export function isViewActive(viewId: string | undefined): boolean {
 // True once at least one zone-D view is re-enabled (Stages 2-4). Lets the View menu show its deep-view
 // section separator only when there is a deep-view section to separate. False in Stage 0.
 export const ANY_ZONE_D_VIEW_ACTIVE: boolean = Object.values(ZONE_D_VIEW_ACTIVE).some((active) => active);
+
+// ── Session-kind scope (IA §5.1) ──────────────────────────────────────────────────────────────────────────────
+//
+// A view can run only in the session kind whose data it needs. The View menu and the command palette BOTH derive
+// visibility from this one map so they can never drift: a view that can't run in the current session is *absent*
+// from both (IA §7 principle 4 — no broken affordances), not greyed/dead. Independent of `isViewActive` (the
+// feature flag): a view shows only when it is BOTH active AND in-scope for the session — see `isViewVisible`.
+//
+// `open` = a loaded `.typhon` file; `profiler` = a trace/attach session; `any` = session-independent. The
+// shell-structural navigators (SchemaExplorer / SystemsQueriesNav / ResourceTree) are listed here even though they
+// are not in ZONE_D_VIEW_ACTIVE — they are still session-scoped. Unlisted ids default to `any` (Detail/Logs/Options
+// and every non-view command).
+export type ViewSessionScope = 'open' | 'profiler' | 'any';
+
+const VIEW_SESSION_SCOPE: Readonly<Record<string, ViewSessionScope>> = {
+  // Open (.typhon) views
+  SchemaExplorer: 'open',
+  DataBrowserEntities: 'open',
+  DbMap: 'open',
+  StorageHealth: 'open',
+  QueryConsole: 'open',
+  ResourceTree: 'open',
+  // Profiler (trace/attach) views
+  Profiler: 'profiler',
+  TopSpans: 'profiler',
+  CallTree: 'profiler',
+  SourcePreview: 'profiler',
+  SystemDag: 'profiler',
+  CriticalPath: 'profiler',
+  DataFlow: 'profiler',
+  QueryAnalyzer: 'profiler',
+  EngineLiveHealth: 'profiler',
+  SystemsQueriesNav: 'profiler',
+  // Session-independent (generates/opens regardless of the current session)
+  DevFixture: 'any',
+};
+
+/** The session-kind scope of a view (or view-bound command). Unlisted / undefined ids are `any`. */
+export function viewSessionScope(viewId: string | undefined): ViewSessionScope {
+  if (viewId == null) {
+    return 'any';
+  }
+  return VIEW_SESSION_SCOPE[viewId] ?? 'any';
+}
+
+/** Whether a view's panel can run in the given session kind (by its scope). `none` opens no session-scoped view. */
+export function isViewAvailableInKind(viewId: string | undefined, kind: SessionKind): boolean {
+  switch (viewSessionScope(viewId)) {
+    case 'any':
+      return true;
+    case 'open':
+      return kind === 'open';
+    case 'profiler':
+      return kind === 'attach' || kind === 'trace';
+  }
+}
+
+/**
+ * The single visibility predicate for a view (or view-bound command) in the current session — shared by the View
+ * menu and the command palette so they stay in lockstep. A view shows iff it is BOTH feature-active
+ * ({@link isViewActive}) AND in scope for the session ({@link isViewAvailableInKind}).
+ */
+export function isViewVisible(viewId: string | undefined, kind: SessionKind): boolean {
+  return isViewActive(viewId) && isViewAvailableInKind(viewId, kind);
+}

@@ -1,11 +1,24 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import ContextBar from '@/shell/ContextBar';
 import { useSessionStore } from '@/stores/useSessionStore';
 import { useSelectionStore } from '@/stores/useSelectionStore';
 import { useProfilerViewStore } from '@/stores/useProfilerViewStore';
 import { useEnvTagStore } from '@/stores/useEnvTagStore';
+
+// ContextBar now resolves crumb labels via the friendly name maps (useComponentNames / useArchetypeNames, both
+// React-Query hooks), so it needs a QueryClient. Without a session the queries are disabled → empty maps → labels
+// fall back to the raw ref's leaf segment (so `Position` stays `Position` here).
+function renderBar() {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(
+    <QueryClientProvider client={client}>
+      <ContextBar />
+    </QueryClientProvider>,
+  );
+}
 
 beforeEach(() => {
   useSelectionStore.getState().clear();
@@ -17,7 +30,7 @@ afterEach(cleanup);
 
 describe('ContextBar (zone B)', () => {
   it('shows identity (file + kind) and the Open-session scope', () => {
-    render(<ContextBar />);
+    renderBar();
     expect(screen.getByText('AntHill.typhon')).toBeTruthy();
     expect(screen.getByText('Open')).toBeTruthy();
     expect(screen.getByText('@HEAD')).toBeTruthy();
@@ -26,14 +39,14 @@ describe('ContextBar (zone B)', () => {
   it('shows the trace time-window scope from the profiler view range', () => {
     useSessionStore.setState({ kind: 'trace' });
     useProfilerViewStore.getState().commitViewRange({ startUs: 1000, endUs: 5000 });
-    render(<ContextBar />);
+    renderBar();
     expect(screen.getByText(/1\.0ms–5\.0ms/)).toBeTruthy();
   });
 
   it('shows a link/unlink scope toggle in trace sessions and flips it on click (3B)', () => {
     useSessionStore.setState({ kind: 'trace' });
     useProfilerViewStore.getState().commitViewRange({ startUs: 1000, endUs: 5000 });
-    render(<ContextBar />);
+    renderBar();
     const toggle = screen.getByRole('button', { name: /click to unlink/i });
     expect(toggle.getAttribute('aria-pressed')).toBe('true');
     fireEvent.click(toggle);
@@ -45,14 +58,14 @@ describe('ContextBar (zone B)', () => {
   });
 
   it('has no scope toggle in Open sessions (revision scope, not a time window)', () => {
-    render(<ContextBar />); // beforeEach sets kind 'open'
+    renderBar(); // beforeEach sets kind 'open'
     expect(screen.queryByRole('button', { name: /unlink|re-link/i })).toBeNull();
   });
 
   it('renders the breadcrumb chain and navigates the bus when a crumb is clicked', () => {
     // A field leaf → breadcrumb is "Position › X" (component ancestor + field leaf).
     useSelectionStore.getState().select('field', { component: 'Position', field: 'X' });
-    render(<ContextBar />);
+    renderBar();
     expect(screen.getByRole('button', { name: 'X' })).toBeTruthy();
     const componentCrumb = screen.getByRole('button', { name: 'Position' });
     fireEvent.click(componentCrumb);
@@ -60,8 +73,24 @@ describe('ContextBar (zone B)', () => {
     expect(useSelectionStore.getState().leaf).toMatchObject({ type: 'component', ref: 'Position' });
   });
 
+  it('a file-map cell selection: clicking the page crumb re-selects a structured page node (regression)', () => {
+    // The bug: ancestor crumbs carried bare ids, so clicking "page" put a number on the bus and the Inspector fell
+    // through to an empty Cell card. Each crumb must re-select a kind-tagged DbMap selection.
+    useSelectionStore.getState().select('cell', { kind: 'cell', pageIndex: 101, segmentId: 31, chunkId: 11, cellOffset: 64 });
+    renderBar();
+    fireEvent.click(screen.getByRole('button', { name: '#101' })); // the page crumb (labelled by id)
+    expect(useSelectionStore.getState().leaf).toMatchObject({ type: 'page', ref: { kind: 'page', pageIndex: 101, segmentId: 31 } });
+  });
+
+  it('a file-map cell selection: clicking the chunk crumb re-selects a structured chunk node', () => {
+    useSelectionStore.getState().select('cell', { kind: 'cell', pageIndex: 101, segmentId: 31, chunkId: 11, cellOffset: 64 });
+    renderBar();
+    fireEvent.click(screen.getByRole('button', { name: '#11' })); // the chunk crumb
+    expect(useSelectionStore.getState().leaf).toMatchObject({ type: 'chunk', ref: { kind: 'chunk', pageIndex: 101, segmentId: 31, chunkId: 11 } });
+  });
+
   it('sets and persists a per-file environment tag that tints the bar', () => {
-    const { container } = render(<ContextBar />);
+    const { container } = renderBar();
     fireEvent.click(screen.getByRole('button', { name: /^Tag$/ }));
     fireEvent.click(screen.getByRole('button', { name: /^PROD$/ }));
     expect(useEnvTagStore.getState().get('C:/data/AntHill.typhon')).toBe('prod');

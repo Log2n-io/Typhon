@@ -51,4 +51,34 @@ public sealed class OptionsController : ControllerBase
         _store.PatchProfiler(body);
         return Ok(_store.Get());
     }
+
+    /// <summary>
+    /// Patch the schema category (registered schema-assembly directories, ADR-055 Phase 2). The submitted
+    /// list is normalized server-side: only rooted, non-empty paths survive; each is canonicalized via
+    /// <see cref="Path.GetFullPath(string)"/> and de-duplicated case-insensitively, preserving order. A
+    /// directory need not exist at registration time — a missing one is simply skipped during resolution.
+    /// </summary>
+    [HttpPatch("schema")]
+    public ActionResult<WorkbenchOptions> PatchSchema([FromBody] SchemaOptions body)
+    {
+        if (body == null) return BadRequest(new { error = "Body required" });
+
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var dirs = new List<string>();
+        foreach (var dir in body.Directories ?? [])
+        {
+            if (string.IsNullOrWhiteSpace(dir) || !Path.IsPathRooted(dir))
+            {
+                continue;
+            }
+            var full = Path.GetFullPath(dir);
+            if (seen.Add(full))
+            {
+                dirs.Add(full);
+            }
+        }
+
+        _store.PatchSchema(new SchemaOptions { Directories = [.. dirs] });
+        return Ok(_store.Get());
+    }
 }

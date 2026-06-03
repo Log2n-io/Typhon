@@ -356,7 +356,9 @@ internal class DeferredCleanupManager
             var accessor = ct.ComponentSegment.CreateChunkAccessor();
             foreach (var kvp in ct.ComponentCollectionVSBSByOffset)
             {
-                var bufferId = accessor.GetChunkAsReadOnlySpan(chunkId).Slice(kvp.Key).Cast<byte, int>()[0];
+                // kvp.Key is the offset within the component struct; content chunks prefix it with ComponentOverhead
+                // (Versioned = 0, SingleVersion = 8 for the entity PK). Cluster slots have no overhead.
+                var bufferId = accessor.GetChunkAsReadOnlySpan(chunkId).Slice(ct.ComponentOverhead + kvp.Key).Cast<byte, int>()[0];
                 var collAccessor = kvp.Value.Segment.CreateChunkAccessor();
                 kvp.Value.BufferRelease(bufferId, ref collAccessor);
                 collAccessor.Dispose();
@@ -444,10 +446,7 @@ internal class DeferredCleanupManager
 
             if (isDeleted)
             {
-                if (!table.Definition.AllowMultiple)
-                {
-                    table.CompRevTableSegment.FreeChunk(firstChunkId);
-                }
+                table.CompRevTableSegment.FreeChunk(firstChunkId);
             }
             else
             {

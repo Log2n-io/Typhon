@@ -179,7 +179,7 @@ public unsafe ref struct ArchetypeAccessor<TArch> where TArch : class
             var info = _accessor.GetComponentInfoInternal(compTypeId, _archetype._slotToComponentType[slot]);
 
             // Check cache first (prior Open or Write in this transaction)
-            if (!info.IsMultiple && info.SingleCache.TryGetValue(pk, out var cached))
+            if (info.SingleCache.TryGetValue(pk, out var cached))
             {
                 result.SetLocation(slot, cached.CurCompContentChunkId);
                 continue;
@@ -221,7 +221,7 @@ public unsafe ref struct ArchetypeAccessor<TArch> where TArch : class
             var info = _accessor.GetComponentInfoInternal(compTypeId, _archetype._slotToComponentType[slot]);
 
             // Check cache first (prior Open or Write in this transaction)
-            if (!info.IsMultiple && info.SingleCache.TryGetValue(pk, out var cached))
+            if (info.SingleCache.TryGetValue(pk, out var cached))
             {
                 result.SetLocation(slot, cached.CurCompContentChunkId);
                 continue;

@@ -81,34 +81,15 @@ internal static class WalSerializer
                 var componentTypeId = info.ComponentTable.WalTypeId;
                 var storageSize = info.ComponentTable.ComponentStorageSize;
 
-                if (info.IsMultiple)
+                foreach (var pk in info.SingleCache.Keys)
                 {
-                    foreach (var pk in info.MultipleCache.Keys)
+                    ref var cri = ref CollectionsMarshal.GetValueRefOrNullRef(info.SingleCache, pk);
+                    if (cri.Operations == ComponentInfo.OperationType.Read)
                     {
-                        var list = CollectionsMarshal.AsSpan(CollectionsMarshal.GetValueRefOrNullRef(info.MultipleCache, pk));
-                        foreach (ref var cri in list)
-                        {
-                            if (cri.Operations == ComponentInfo.OperationType.Read)
-                            {
-                                continue;
-                            }
-
-                            WriteWalRecord(ref writer, pk, componentTypeId, storageSize, ref cri, info, tsn, uowId);
-                        }
+                        continue;
                     }
-                }
-                else
-                {
-                    foreach (var pk in info.SingleCache.Keys)
-                    {
-                        ref var cri = ref CollectionsMarshal.GetValueRefOrNullRef(info.SingleCache, pk);
-                        if (cri.Operations == ComponentInfo.OperationType.Read)
-                        {
-                            continue;
-                        }
 
-                        WriteWalRecord(ref writer, pk, componentTypeId, storageSize, ref cri, info, tsn, uowId);
-                    }
+                    WriteWalRecord(ref writer, pk, componentTypeId, storageSize, ref cri, info, tsn, uowId);
                 }
             }
 

@@ -92,7 +92,7 @@ public sealed class ArpgGenerateCommand : ShellCommand
         "  Scenarios:\n" +
         "    characters  Player characters with stats, metadata, equipment, skills\n" +
         "    world       World positions and resource nodes across zones\n" +
-        "    items       Items with random affixes (uses AllowMultiple)\n" +
+        "    items       Items with type, rarity and category\n" +
         "    monsters    Monsters with AI, combat stats, and positions\n" +
         "    crafting    Crafting recipes and stations\n" +
         "    full        All scenarios combined (default counts)\n" +

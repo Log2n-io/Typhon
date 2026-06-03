@@ -60,7 +60,8 @@ public sealed class FileBrowserService
                 {
                     var info = new FileInfo(entry);
                     var isSchema = name.EndsWith(".schema.dll", StringComparison.OrdinalIgnoreCase);
-                    entries.Add(new FileEntryDto(name, entry, "file", info.Length, info.LastWriteTimeUtc, isSchema));
+                    var (size, lastWrite) = EffectiveSizeAndTime(entry, info);
+                    entries.Add(new FileEntryDto(name, entry, "file", size, lastWrite, isSchema));
                 }
             }
             catch
@@ -97,9 +98,31 @@ public sealed class FileBrowserService
         {
             var info = new FileInfo(full);
             var isSchema = name.EndsWith(".schema.dll", StringComparison.OrdinalIgnoreCase);
-            return new FileEntryDto(name, full, "file", info.Length, info.LastWriteTimeUtc, isSchema);
+            var (size, lastWrite) = EffectiveSizeAndTime(full, info);
+            return new FileEntryDto(name, full, "file", size, lastWrite, isSchema);
         }
         throw new WorkbenchException(404, "path_not_found", $"Path not found: {path}");
+    }
+
+    /// <summary>
+    /// Size + last-write time to report for a file. A <c>.typhon</c> file is an empty marker — the actual database lives
+    /// in the sibling <c>{stem}.bin</c> (the engine derives both names from the marker stem; see
+    /// <c>EngineLifecycle</c> / <c>PagedMMFOptions.BuildDatabaseFileName</c>). So for a marker we report the <c>.bin</c>'s
+    /// size + mtime, which is what the user means by "the database size". Every other file (and a marker whose <c>.bin</c>
+    /// is somehow absent) reports its own stats unchanged.
+    /// </summary>
+    private static (long? Size, DateTime LastWrite) EffectiveSizeAndTime(string path, FileInfo info)
+    {
+        if (path.EndsWith(".typhon", StringComparison.OrdinalIgnoreCase))
+        {
+            var binPath = Path.ChangeExtension(path, ".bin");
+            if (File.Exists(binPath))
+            {
+                var binInfo = new FileInfo(binPath);
+                return (binInfo.Length, binInfo.LastWriteTimeUtc);
+            }
+        }
+        return (info.Length, info.LastWriteTimeUtc);
     }
 
     private static IEnumerable<string> EnumerateSafe(string directory)

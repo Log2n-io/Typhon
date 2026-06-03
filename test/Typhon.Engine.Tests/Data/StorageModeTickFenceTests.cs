@@ -29,26 +29,8 @@ class StorageModeTickFenceTests : TestBase<StorageModeTickFenceTests>
         return dbe;
     }
 
-    [Test]
-    public void WriteTickFence_NoWal_ReturnsZero()
-    {
-        using var dbe = SetupEngine();
-
-        // Default TestBase has no WAL configured
-        Assert.That(dbe.WalManager, Is.Null);
-        var lsn = dbe.WriteTickFence(1);
-        Assert.That(lsn, Is.EqualTo(0));
-    }
-
-    [Test]
-    public void WriteTickFence_NoDirty_ReturnsZero_NoWal()
-    {
-        using var dbe = SetupEngine();
-
-        // Even without WAL, verify the method gracefully returns 0 when no dirty entities
-        var lsn = dbe.WriteTickFence(1);
-        Assert.That(lsn, Is.EqualTo(0));
-    }
+    // Removed WriteTickFence_NoWal_ReturnsZero / WriteTickFence_NoDirty_ReturnsZero_NoWal: they asserted the no-WAL TickFence path (WriteTickFence returns 0
+    // when WalManager is null), which no longer exists now that WAL is mandatory. The remaining tests cover the WAL-independent DirtyBitmap behaviour.
 
     [Test]
     public void WriteTickFence_ClearsDirtyBitmap()

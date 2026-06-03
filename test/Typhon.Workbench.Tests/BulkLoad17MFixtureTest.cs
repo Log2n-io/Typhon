@@ -8,10 +8,10 @@ using Typhon.Workbench.Fixtures;
 namespace Typhon.Workbench.Tests;
 
 /// <summary>
-/// End-to-end stress test for the BulkLoad fixture path at <b>17 M entities</b> — Loïc's screenshot config
-/// (Custom preset: 4 M CompA + 2 M CompAB + 2 M CompABC + 400 k CompD + 200 k Guild + 400 k Player + 8 M Particle
-/// + 40 % particle fragmentation, seed 123_456_789). The whole-feature acceptance criterion AC-10 (issue #380):
-/// the 17 M Custom config that historically stalls at &lt; 1 % completes in &lt; 3 min via BulkLoad.
+/// End-to-end stress test for the BulkLoad fixture path at <b>17 M entities</b> on the SWG schema
+/// (10 k ResourceType + 200 k Guild + 10 k Recipe + 4 M Player + 1 M Deposit + 3 M Harvester + 780 k Factory
+/// + 8 M Item, seed 123_456_789). The whole-feature acceptance criterion AC-10 (issue #380):
+/// a 17 M config that historically stalls at &lt; 1 % completes in &lt; 3 min via BulkLoad.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -47,17 +47,18 @@ public sealed class BulkLoad17MFixtureTest
     [Test]
     public void BulkLoad_17M_Custom_Config_Generates_Successfully()
     {
-        // Mirrors Loïc's Dev Fixture screenshot config — 17 M total entities.
-        var cfg = new FixtureConfig(
-            CompAArchCount: 4_000_000,
-            CompABArchCount: 2_000_000,
-            CompABCArchCount: 2_000_000,
-            CompDArchCount: 400_000,
-            GuildArchCount: 200_000,
-            PlayerArchCount: 400_000,
-            ParticleArchCount: 8_000_000,
-            ParticleFragmentation: 0.40,
-            Seed: 123_456_789);
+        // 17 M-total SWG config exercised via the BulkLoad path (spawn-only: empty CCs, no enable/disable/cascade).
+        var cfg = FixtureConfig.Default with
+        {
+            ResourceTypeCount = 10_000,
+            GuildCount = 200_000,
+            RecipeCount = 10_000,
+            PlayerCount = 4_000_000,
+            DepositCount = 1_000_000,
+            HarvesterCount = 3_000_000,
+            FactoryCount = 780_000,
+            ItemCount = 8_000_000,
+        };
 
         Assert.That(cfg.TotalSpawnEstimate, Is.EqualTo(17_000_000), "config should sum to 17 M entities");
 

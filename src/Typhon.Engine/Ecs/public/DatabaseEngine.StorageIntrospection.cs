@@ -154,6 +154,57 @@ public partial class DatabaseEngine
     }
 
     /// <summary>
+    /// Resolves the per-component decode layout of a cluster segment for the Database File Map's L5 entity-content level (file-map §10 Q4 override): one entry
+    /// per component slot, in cluster slot order (slot <c>c</c> = bit <c>c</c> of <c>EnabledBits</c> / the decoder's enabled mask), carrying the component's
+    /// registered name, its inline SoA <c>Offset</c> / <c>Size</c> within the cluster chunk, whether the slot is <c>Transient</c> (its data lives in the in-memory
+    /// transient store — <b>not</b> in this persisted chunk, so the decoder must skip it), and the <see cref="DBComponentDefinition"/> the field decoder walks.
+    /// SingleVersion and Versioned slots are decoded inline (the Versioned inline copy is the current committed value — a full struct, not a pointer, since
+    /// <c>ComponentSize</c> is <c>sizeof(T)</c>); only Transient slots are absent. Returns <see langword="false"/> when no live cluster archetype owns that segment.
+    /// Read-only; walks only in-memory archetype state (O(components), no page I/O).
+    /// </summary>
+    internal bool TryGetClusterEntityLayout(int clusterSegmentRootPage, out int clusterSize, out int entityIdsOffset, out (string Name, int Offset, int Size,
+        bool Transient, DBComponentDefinition Definition)[] components)
+    {
+        clusterSize = 0;
+        entityIdsOffset = 0;
+        components = [];
+
+        var states = _archetypeStates;
+        if (states == null)
+        {
+            return false;
+        }
+
+        foreach (var state in states)
+        {
+            var cluster = state?.ClusterState;
+            if (cluster?.ClusterSegment == null || cluster.ClusterSegment.RootPageIndex != clusterSegmentRootPage)
+            {
+                continue;
+            }
+
+            var layout = cluster.Layout;
+            clusterSize = layout.ClusterSize;
+            entityIdsOffset = layout.EntityIdsOffset;
+
+            // Slot order = the cluster's EnabledBits / the decoder's enabledMask bit order. Resolved from THIS engine's slot→ComponentTable map (not the shared
+            // static ArchetypeRegistry, which a colliding archetype id could serve wrong metadata from — see TryGetClusterComponentNames).
+            var tables = state.SlotToComponentTable;
+            var count = layout.ComponentCount;
+            components = new (string, int, int, bool, DBComponentDefinition)[count];
+            for (var c = 0; c < count; c++)
+            {
+                var transient = (layout.TransientSlotMask & (1 << c)) != 0;
+                var def = c < tables.Length ? tables[c]?.Definition : null;
+                components[c] = (def?.Name ?? "", layout.ComponentOffset(c), layout.ComponentSize(c), transient, def);
+            }
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
     /// Live entity-fill counts for the cluster segment whose root page is <paramref name="clusterSegmentRootPage"/>. Used by the Database File Map
     /// harvest summary to show the intra-cluster fragmentation signal: <paramref name="entityCount"/> live entities packed into
     /// <paramref name="activeClusterCount"/> active clusters of <paramref name="clusterSize"/> slots each — slot occupancy is
@@ -230,6 +281,129 @@ public partial class DatabaseEngine
     }
 
     /// <summary>
+    /// Spatial-bucketing context for the cluster segment whose root page is <paramref name="clusterSegmentRootPage"/> — the Database File Map / Inspector uses
+    /// it to explain why a spatial cluster archetype's slot occupancy is low (each cluster is a per-grid-cell bucket, so entities spread thinly across cells leave
+    /// most slots free — not waste). Returns <see langword="true"/> for any live cluster archetype; <paramref name="isSpatial"/> distinguishes a spatial archetype
+    /// (clusters bucketed by grid cell — low occupancy is expected) from a non-spatial one (clusters fill linearly — low occupancy means fragmentation). The grid
+    /// fields (<paramref name="cellSize"/> / dimensions / <paramref name="spatialMode"/>) are populated only when spatial AND a grid is configured. Read-only,
+    /// O(archetypes), no page I/O.
+    /// </summary>
+    internal bool TryGetClusterSpatialInfo(int clusterSegmentRootPage, out bool isSpatial, out float cellSize, out int gridWidth, out int gridHeight,
+        out string spatialMode)
+    {
+        isSpatial = false;
+        cellSize = 0;
+        gridWidth = 0;
+        gridHeight = 0;
+        spatialMode = "";
+
+        var states = _archetypeStates;
+        if (states == null)
+        {
+            return false;
+        }
+
+        foreach (var state in states)
+        {
+            var cluster = state?.ClusterState;
+            if (cluster?.ClusterSegment == null || cluster.ClusterSegment.RootPageIndex != clusterSegmentRootPage)
+            {
+                continue;
+            }
+
+            isSpatial = cluster.SpatialSlot.HasSpatialIndex;
+            if (isSpatial && _spatialGrid != null)
+            {
+                ref readonly var cfg = ref _spatialGrid.Config;
+                cellSize = cfg.CellSize;
+                gridWidth = cfg.GridWidth;
+                gridHeight = cfg.GridHeight;
+                spatialMode = cluster.SpatialSlot.FieldInfo.Mode.ToString();
+            }
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Per-cluster spatial-cell context for the cluster chunk <paramref name="clusterChunkId"/> of the segment whose root page is
+    /// <paramref name="clusterSegmentRootPage"/> — the grid cell the cluster is attached to (key + 2D coords), the cell's live entity / cluster counts (global sums
+    /// across every cluster-spatial archetype sharing the grid), and the cluster's tight 2D AABB. This is the per-chunk "why is this cluster mostly empty" answer:
+    /// it is the only cluster in a cell that holds just a handful of entities. Returns <see langword="false"/> when no grid is configured, the owning archetype is
+    /// non-spatial, the chunk is unmapped (not attached to a cell), or the id is out of range. Read-only, O(archetypes), no page I/O — all reads hit in-memory
+    /// transient spatial state.
+    /// </summary>
+    internal bool TryGetClusterChunkSpatialInfo(int clusterSegmentRootPage, int clusterChunkId, out int cellKey, out int cellX, out int cellY,
+        out int entitiesInCell, out int clustersInCell, out float aabbMinX, out float aabbMinY, out float aabbMaxX, out float aabbMaxY)
+    {
+        cellKey = -1;
+        cellX = 0;
+        cellY = 0;
+        entitiesInCell = 0;
+        clustersInCell = 0;
+        aabbMinX = 0;
+        aabbMinY = 0;
+        aabbMaxX = 0;
+        aabbMaxY = 0;
+
+        var grid = _spatialGrid;
+        if (grid == null)
+        {
+            return false;
+        }
+
+        var states = _archetypeStates;
+        if (states == null)
+        {
+            return false;
+        }
+
+        foreach (var state in states)
+        {
+            var cluster = state?.ClusterState;
+            if (cluster?.ClusterSegment == null || cluster.ClusterSegment.RootPageIndex != clusterSegmentRootPage)
+            {
+                continue;
+            }
+
+            if (!cluster.SpatialSlot.HasSpatialIndex)
+            {
+                return false;
+            }
+
+            var cellMap = cluster.ClusterCellMap;
+            if (cellMap == null || (uint)clusterChunkId >= (uint)cellMap.Length)
+            {
+                return false;
+            }
+            cellKey = cellMap[clusterChunkId];
+            if (cellKey < 0)
+            {
+                return false; // cluster not attached to a cell (unmapped)
+            }
+
+            (cellX, cellY) = grid.CellKeyToCoords(cellKey);
+            ref var cell = ref grid.GetCell(cellKey);
+            entitiesInCell = cell.EntityCount;
+            clustersInCell = cell.ClusterCount;
+
+            var aabbs = cluster.ClusterAabbs;
+            if (aabbs != null && (uint)clusterChunkId < (uint)aabbs.Length)
+            {
+                ref var box = ref aabbs[clusterChunkId];
+                aabbMinX = box.MinX;
+                aabbMinY = box.MinY;
+                aabbMaxX = box.MaxX;
+                aabbMaxY = box.MaxY;
+            }
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
     /// Diagnostic statistics for the entity-map (entity-id → cluster-slot linear hash) whose backing segment's root page is
     /// <paramref name="entityMapSegmentRootPage"/>. Used by the Database File Map harvest summary. Unlike the other introspection accessors this one is
     /// <b>not</b> O(1): it walks every bucket and overflow chain under an epoch guard, so it must be fetched lazily (on the per-segment summary card only),
@@ -259,6 +433,58 @@ public partial class DatabaseEngine
             var s = map.GetStats(ref accessor);
             stats = new EntityMapStats(s.BucketCount, s.EntryCount, s.OverflowBucketCount, s.MaxChainLength, s.LoadFactor,
                 s.FillEmpty, s.FillQuarter, s.FillHalf, s.FillThreeQuarter, s.FillFull);
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Resolves the display name of the archetype that owns the cluster, entity-map, or cluster-index segment whose root page is <paramref name="segmentRootPage"/>.
+    /// These segment kinds are archetype-owned (a cluster-eligible archetype's SoA row store, its entity-id → cluster-slot linear hash, and its SoA field index)
+    /// rather than component-owned, so the component-table resolver can't name them — this walks the per-archetype state to find the owner, then formats the name
+    /// with the SAME precedence the schema endpoint uses (<c>Alias</c> → CLR <c>FullName</c> → CLR <c>Name</c>) so the Workbench's short-name labeller shortens it
+    /// identically to everywhere else. Returns <see langword="false"/> when no live archetype owns that segment (or <paramref name="kind"/> is not Cluster,
+    /// EntityMap, or Index). Read-only; walks only in-memory archetype state (O(archetypes), no page I/O).
+    /// </summary>
+    internal bool TryGetSegmentOwnerArchetypeName(int segmentRootPage, StorageSegmentKind kind, out string archetypeName)
+    {
+        archetypeName = "";
+
+        var states = _archetypeStates;
+        if (states == null)
+        {
+            return false;
+        }
+
+        for (var archetypeId = 0; archetypeId < states.Length; archetypeId++)
+        {
+            var state = states[archetypeId];
+            if (state == null)
+            {
+                continue;
+            }
+
+            var owns = kind switch
+            {
+                StorageSegmentKind.Cluster => state.ClusterState?.ClusterSegment != null
+                    && state.ClusterState.ClusterSegment.RootPageIndex == segmentRootPage,
+                StorageSegmentKind.EntityMap => state.EntityMap?.Segment != null
+                    && state.EntityMap.Segment.RootPageIndex == segmentRootPage,
+                // The per-archetype cluster index (the SoA index over a cluster-eligible archetype's indexed SV fields).
+                // It is archetype-owned, unlike the per-component-table indexes (Default/String64/Tail), so the
+                // component-table resolver can't name it — without this case it falls back to a bare "Index #id" label.
+                StorageSegmentKind.Index => state.ClusterState?.IndexSegment != null
+                    && state.ClusterState.IndexSegment.RootPageIndex == segmentRootPage,
+                _ => false,
+            };
+            if (!owns)
+            {
+                continue;
+            }
+
+            var meta = ArchetypeRegistry.GetMetadata((ushort)archetypeId);
+            archetypeName = meta?.Alias ?? meta?.ArchetypeType?.FullName ?? meta?.ArchetypeType?.Name ?? archetypeId.ToString();
             return true;
         }
 

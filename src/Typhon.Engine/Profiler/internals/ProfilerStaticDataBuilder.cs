@@ -96,7 +96,9 @@ internal static class ProfilerStaticDataBuilder
                 Name = def.POCOType?.FullName ?? def.Name,
                 Revision = def.Revision,
                 StorageMode = (byte)def.StorageMode,
-                AllowMultiple = def.AllowMultiple,
+                // Component-level multi-instance ("AllowMultiple") was removed (it never worked under cluster storage). The trace-format field is
+                // retained as always-false to keep the v11 layout byte-stable; deleting it would require a format-version bump.
+                AllowMultiple = false,
                 ComponentStorageSize = def.ComponentStorageSize,
                 ComponentStorageOverhead = def.ComponentStorageOverhead,
                 ComponentStorageTotalSize = def.ComponentStorageTotalSize,
@@ -157,7 +159,7 @@ internal static class ProfilerStaticDataBuilder
             records.Add(new ArchetypeDefinitionRecord
             {
                 ArchetypeId = meta.ArchetypeId,
-                Name = meta.ArchetypeType?.FullName ?? meta.ArchetypeType?.Name ?? $"Archetype#{meta.ArchetypeId}",
+                Name = meta.Alias ?? meta.ArchetypeType?.FullName ?? meta.ArchetypeType?.Name ?? $"Archetype#{meta.ArchetypeId}",
                 Revision = meta.Revision,
                 ParentArchetypeId = meta.ParentArchetypeId,
                 ChildArchetypeIds = children,

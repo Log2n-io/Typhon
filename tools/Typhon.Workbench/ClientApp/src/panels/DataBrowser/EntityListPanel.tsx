@@ -3,6 +3,8 @@ import type { IDockviewPanelProps } from 'dockview-react';
 import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight } from 'lucide-react';
 import { useArchetypeList } from '@/hooks/schema/useArchetypeList';
 import { useComponentList } from '@/hooks/schema/useComponentList';
+import { useComponentNames } from '@/hooks/queryConsole/useComponentNames';
+import { useArchetypeNames } from '@/hooks/queryConsole/useArchetypeNames';
 import type { ArchetypeInfo } from '@/hooks/schema/types';
 import { useEntityPage } from '@/hooks/dataBrowser/useEntityPage';
 import { useComponentSchemas } from '@/hooks/dataBrowser/useComponentSchemas';
@@ -50,6 +52,9 @@ export default function EntityListPanel(_props: IDockviewPanelProps) {
 
   const { list: archetypes } = useArchetypeList();
   const { list: components } = useComponentList();
+  // Friendly labels for the archetype picker — smart short names for components and the archetype name (or `#id`).
+  const { label: componentName } = useComponentNames();
+  const { label: archName } = useArchetypeNames();
   const currentArchetype = archetypes.find((a) => a.archetypeId === archetypeId);
   // ArchetypeInfo.componentTypes are CLR full names; the schema endpoint + decode key off the registered component name
   // (def.Name). Map CLR full name → registered name via the component summaries so lookups resolve when they differ.
@@ -185,8 +190,8 @@ export default function EntityListPanel(_props: IDockviewPanelProps) {
         >
           <option value="">Select an archetype…</option>
           {archetypes.map((a) => (
-            <option key={a.archetypeId} value={a.archetypeId} title={archetypeLabel(a, false)}>
-              {archetypeLabel(a, true)}
+            <option key={a.archetypeId} value={a.archetypeId} title={archetypeLabel(a, false, archName, componentName)}>
+              {archetypeLabel(a, true, archName, componentName)}
             </option>
           ))}
         </select>
@@ -385,16 +390,18 @@ function PagerButton({
   );
 }
 
-// Component type names are fully-qualified (e.g. "Typhon.Test.ECS.Position") — show the last segment in the compact picker.
-function shortName(typeName: string): string {
-  const dot = typeName.lastIndexOf('.');
-  return dot >= 0 ? typeName.slice(dot + 1) : typeName;
-}
-
-// `#id · count · Comp+Comp+…` — the component list is ellipsis-truncated for the closed select so a many-component archetype
-// doesn't overflow the picker. `truncate=false` (used for the option's title tooltip) keeps the full list.
-function archetypeLabel(a: ArchetypeInfo, truncate: boolean): string {
-  const comps = a.componentTypes.map(shortName).join('+');
+// `<archetype name> · count · Comp+Comp+…` — the friendly archetype name (or `#id` if unnamed) plus its component
+// composition (smart short names). The component list is ellipsis-truncated for the closed select so a
+// many-component archetype doesn't overflow the picker; `truncate=false` (the option's title tooltip) keeps it full.
+// `archName` / `componentName` are the session labellers (useArchetypeNames / useComponentNames), injected by the
+// caller since this is a plain function — `componentTypes` are CLR full names, which `componentName` resolves.
+function archetypeLabel(
+  a: ArchetypeInfo,
+  truncate: boolean,
+  archName: (ref: string) => string,
+  componentName: (name: string) => string,
+): string {
+  const comps = a.componentTypes.map(componentName).join('+');
   const shown = truncate && comps.length > 22 ? `${comps.slice(0, 21)}…` : comps;
-  return `#${a.archetypeId} · ${a.entityCount} · ${shown}`;
+  return `${archName(`#${a.archetypeId}`)} · ${a.entityCount} · ${shown}`;
 }

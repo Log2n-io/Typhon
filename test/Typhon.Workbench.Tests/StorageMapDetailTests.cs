@@ -196,6 +196,80 @@ public sealed class StorageMapDetailTests
     }
 
     [Test]
+    public async Task GetClusterEntity_DecodesOccupiedSlotFields()
+    {
+        // file-map §10 Q4 override (L5) — a cluster slot drills to the entity's full component-grouped field decode, the same field-level view the legacy
+        // component table shows at L4. Self-adapting: skips if the demo DB has no clusters or the root chunk has no occupied slot.
+        var session = await CreateSessionAsync();
+        var regions = await GetOkAsync<StorageRegionsDto>(session, "regions");
+        var cluster = Array.Find(regions.Segments, s => s.Kind == "Cluster");
+        if (cluster is null)
+        {
+            Assert.Ignore("the demo database has no cluster segments");
+            return;
+        }
+
+        // The L4 slot grid tells us which slots are occupied (entitySlot cell, colorKey > 0).
+        var slots = await GetOkAsync<StorageChunkDto>(session, $"chunk/{cluster.Id}/0");
+        var occupied = Array.FindIndex(slots.Cells, c => c.Kind == "entitySlot" && c.ColorKey > 0);
+        if (occupied < 0)
+        {
+            Assert.Ignore("the demo cluster's root chunk has no occupied slot");
+            return;
+        }
+
+        var entity = await GetOkAsync<StorageChunkDto>(session, $"chunk/{cluster.Id}/0/entity/{occupied}");
+        Assert.That(entity.Decoder, Is.EqualTo("clusterEntity"));
+        Assert.That(entity.Occupied, Is.True, "the chosen slot is occupied");
+        Assert.That(entity.Cells, Is.Not.Empty);
+        Assert.That(entity.Cells, Has.Some.Property("Kind").EqualTo("entityPk"), "the entity decode leads with its packed id");
+        Assert.That(entity.Cells, Has.Some.Property("Kind").EqualTo("componentHeader"), "fields are grouped under per-component headers");
+    }
+
+    [Test]
+    public async Task GetClusterEntity_FreeSlotHasNoEntity()
+    {
+        var session = await CreateSessionAsync();
+        var regions = await GetOkAsync<StorageRegionsDto>(session, "regions");
+        var cluster = Array.Find(regions.Segments, s => s.Kind == "Cluster");
+        if (cluster is null)
+        {
+            Assert.Ignore("the demo database has no cluster segments");
+            return;
+        }
+
+        var slots = await GetOkAsync<StorageChunkDto>(session, $"chunk/{cluster.Id}/0");
+        var free = Array.FindIndex(slots.Cells, c => c.Kind == "entitySlot" && c.ColorKey == 0);
+        if (free < 0)
+        {
+            Assert.Ignore("the demo cluster's root chunk is full");
+            return;
+        }
+
+        var entity = await GetOkAsync<StorageChunkDto>(session, $"chunk/{cluster.Id}/0/entity/{free}");
+        Assert.That(entity.Decoder, Is.EqualTo("clusterEntity"));
+        Assert.That(entity.Occupied, Is.False);
+        Assert.That(entity.Cells, Is.Empty, "a free slot holds no entity");
+    }
+
+    [Test]
+    public async Task GetClusterEntity_NonClusterSegmentReturns404()
+    {
+        var session = await CreateSessionAsync();
+        var regions = await GetOkAsync<StorageRegionsDto>(session, "regions");
+        var component = Array.Find(regions.Segments, s => s.Kind == "Component");
+        if (component is null)
+        {
+            Assert.Ignore("the demo database has no component segments");
+            return;
+        }
+
+        // GetClusterEntity rejects a non-cluster segment (returns null → 404), so the L5 endpoint never mis-decodes a component chunk as a cluster.
+        var resp = await GetAsync(session, $"chunk/{component.Id}/0/entity/0");
+        Assert.That(resp.StatusCode, Is.EqualTo(HttpStatusCode.NotFound));
+    }
+
+    [Test]
     public async Task GetPage_OutOfRangeReturns404()
     {
         var session = await CreateSessionAsync();

@@ -7,11 +7,14 @@ import { useSessionStore } from '@/stores/useSessionStore';
 import type { DbMapSelection } from '@/libs/dbmap/dbMapSelection';
 import { useDbMapOverlayStore } from '@/stores/useDbMapOverlayStore';
 import { useDbMap } from '@/hooks/dbmap/useDbMap';
-import { useDbMapChunk, useDbMapPage } from '@/hooks/dbmap/useDbMapDetail';
+import { useDbMapChunk, useDbMapPage, useDbMapSlot } from '@/hooks/dbmap/useDbMapDetail';
 import { useDbMapSegmentSummary } from '@/hooks/dbmap/useDbMapSegment';
-import type { DbChunkContent, DbContentCell, DbPageDetail, StorageSegmentSummaryDto } from '@/libs/dbmap/types';
+import type { DbChunkContent, DbContentCell, DbPageDetail, StorageClusterCellDto, StorageSegmentSummaryDto } from '@/libs/dbmap/types';
 import { useComponentSchema } from '@/hooks/schema/useComponentSchema';
 import { useComponentList } from '@/hooks/schema/useComponentList';
+import { useComponentNames } from '@/hooks/queryConsole/useComponentNames';
+import { useArchetypeNames } from '@/hooks/queryConsole/useArchetypeNames';
+import { friendlyComponentCellLabel } from '@/libs/dbmap/cellLabel';
 import { useArchetypeList } from '@/hooks/schema/useArchetypeList';
 import { openComponentInspector, openArchetypeInspector, openDataBrowser } from '@/shell/commands/openSchemaBrowser';
 import { useArchetypesForComponent } from '@/hooks/schema/useArchetypesForComponent';
@@ -28,7 +31,7 @@ import SystemAccessSummary from '@/panels/schemaCommon/SystemAccessSummary';
 import { useEntityDetail } from '@/hooks/dataBrowser/useEntityDetail';
 import EntityCardsDetail from '@/panels/DataBrowser/EntityCardsDetail';
 import { useSelectionStore, type SelectionLeaf } from '@/stores/useSelectionStore';
-import { resolveChain, type SelectionRef } from '@/stores/selectionChain';
+import { resolveChain, selectionRefLabel, type SelectionRef } from '@/stores/selectionChain';
 import type { SelectedResource } from '@/stores/useSelectedResourceStore';
 import type { ProfilerSelection } from '@/libs/profiler/model/traceModel';
 
@@ -103,7 +106,7 @@ export default function DetailPanel() {
             </div>
             <div className="border-t border-border">
               {[...ancestors].reverse().map((node) => (
-                <AncestorSection key={`${node.type}:${String(node.ref)}`} node={node} activeLeaf={activeLeaf} />
+                <AncestorSection key={`${node.type}:${selectionRefLabel(node)}`} node={node} />
               ))}
             </div>
           </>
@@ -150,11 +153,13 @@ function LeafCard({ leaf }: { leaf: SelectionLeaf }): React.JSX.Element {
 /** Field leaf → fetch its component schema, find the field, render the full FieldDetail. */
 function FieldLeafCard({ ref0 }: { ref0: { component: string | null; field: string } }): React.JSX.Element {
   const { schema } = useComponentSchema(ref0.component);
+  // Friendly owning-component label — the same smart labeller the Schema Explorer / File Map use.
+  const { label: componentName } = useComponentNames();
   const field = schema?.fields.find((f) => f.name === ref0.field);
   if (!schema || !field) {
     return <CardLoading label="field" />;
   }
-  return <FieldDetail field={field} schema={schema} />;
+  return <FieldDetail field={field} schema={schema} componentLabel={componentName(schema.typeName)} />;
 }
 
 /** Entity leaf → fetch the entity detail, render the component-card stack. */
@@ -233,6 +238,7 @@ function LeafSummaryCard({
 /** Component leaf → a summary + "Open in Component Inspector" and the type-first "Open in Data Browser" (GAP-03). */
 function ComponentLeafCard({ typeName }: { typeName: string }): React.JSX.Element {
   const { list } = useComponentList();
+  const { label: componentName } = useComponentNames();
   const c = list.find((x) => x.typeName === typeName || x.fullName === typeName);
   // M:N type-first (AC2.7): auto-pick the max-entity archetype; add the verb only when there's data to browse.
   const { archetypes } = useArchetypesForComponent(c?.typeName ?? typeName);
@@ -246,7 +252,7 @@ function ComponentLeafCard({ typeName }: { typeName: string }): React.JSX.Elemen
     <LeafSummaryCard
       icon={<Boxes className="h-4 w-4 text-muted-foreground" />}
       kind="Component"
-      title={c?.typeName ?? typeName}
+      title={componentName(c?.typeName ?? typeName)}
       fullTitle={c?.fullName ?? typeName}
       actions={actions}
     >
@@ -271,6 +277,7 @@ function ComponentLeafCard({ typeName }: { typeName: string }): React.JSX.Elemen
 /** Archetype leaf → a summary + "Open in Archetype Inspector" and "Open in Data Browser" (when it has entities). */
 function ArchetypeLeafCard({ archetypeId }: { archetypeId: string }): React.JSX.Element {
   const { list } = useArchetypeList();
+  const { label: archName } = useArchetypeNames();
   const a = list.find((x) => x.archetypeId === archetypeId);
   const actions: LeafAction[] = [{ label: 'Open in Archetype Inspector', onClick: openArchetypeInspector }];
   if (a && a.entityCount > 0) {
@@ -280,7 +287,8 @@ function ArchetypeLeafCard({ archetypeId }: { archetypeId: string }): React.JSX.
     <LeafSummaryCard
       icon={<Layers className="h-4 w-4 text-muted-foreground" />}
       kind="Archetype"
-      title={`#${archetypeId}`}
+      title={archName(`#${archetypeId}`)}
+      fullTitle={`#${archetypeId}`}
       actions={actions}
     >
       {a ? (
@@ -421,9 +429,13 @@ const FULL_CARD_ANCESTORS = new Set<string>(['page', 'segment', 'chunk']);
  * (component/archetype) render a compact summary line. The header carries the ref when collapsed; the full
  * card's own title carries it when expanded.
  */
-function AncestorSection({ node, activeLeaf }: { node: SelectionRef; activeLeaf: SelectionLeaf }): React.JSX.Element {
+function AncestorSection({ node }: { node: SelectionRef }): React.JSX.Element {
   const [open, setOpen] = useState(true);
   const full = FULL_CARD_ANCESTORS.has(node.type);
+  // Friendly crumb header: a component/archetype ancestor reads its short name, like the breadcrumb / deep views.
+  const { label: componentLabel } = useComponentNames();
+  const { label: archLabel } = useArchetypeNames();
+  const headerLabel = selectionRefLabel(node, { component: componentLabel, archetype: (id) => archLabel(`#${id}`) });
   return (
     <div data-testid={`inspector-ancestor-${node.type}`}>
       <button
@@ -433,11 +445,11 @@ function AncestorSection({ node, activeLeaf }: { node: SelectionRef; activeLeaf:
       >
         {open ? <ChevronDown className="h-3 w-3 shrink-0" /> : <ChevronRight className="h-3 w-3 shrink-0" />}
         <span className="text-fs-xs uppercase tracking-wide">{node.type}</span>
-        {(!full || !open) && <span className="truncate font-mono text-foreground">{String(node.ref)}</span>}
+        {(!full || !open) && <span className="truncate font-mono text-foreground">{headerLabel}</span>}
       </button>
       {open &&
         (full ? (
-          <AncestorFullCard node={node} activeLeaf={activeLeaf} />
+          <AncestorFullCard node={node} />
         ) : (
           <div className="px-3 pb-1 pl-[18px]">
             <AncestorSummary node={node} />
@@ -448,30 +460,23 @@ function AncestorSection({ node, activeLeaf }: { node: SelectionRef; activeLeaf:
 }
 
 /** Renders the SAME full card the leaf would for a no-deep-panel ancestor (page/segment/chunk), via a synthesized leaf. */
-function AncestorFullCard({ node, activeLeaf }: { node: SelectionRef; activeLeaf: SelectionLeaf }): React.JSX.Element | null {
-  const leaf = ancestorToLeaf(node, activeLeaf);
+function AncestorFullCard({ node }: { node: SelectionRef }): React.JSX.Element | null {
+  const leaf = ancestorToLeaf(node);
   return leaf ? <LeafCard leaf={leaf} /> : null;
 }
 
 /**
  * Synthesize the bus leaf for a full-card ancestor so it reuses {@link LeafCard} verbatim — the "same UI"
- * guarantee. `page`/`segment` need only their own id; a `chunk` card additionally needs its segment + page,
- * which the node ref (just the chunk id) lacks — so source them from the active leaf. A chunk ancestor only
- * arises under a `cell` leaf (see {@link resolveChain}), and that ref carries every storage coordinate.
+ * guarantee. The storage chain now carries the **full structured selection ref** on each ancestor
+ * ({@link resolveChain}), so a full-card ancestor IS its own leaf — no coordinates need borrowing from the
+ * active leaf.
  */
-function ancestorToLeaf(node: SelectionRef, activeLeaf: SelectionLeaf): SelectionLeaf | null {
+function ancestorToLeaf(node: SelectionRef): SelectionLeaf | null {
   switch (node.type) {
     case 'page':
-      return { type: 'page', ref: { kind: 'page', pageIndex: Number(node.ref) }, touchedAt: 0 };
     case 'segment':
-      return { type: 'segment', ref: { kind: 'segment', segmentId: Number(node.ref) }, touchedAt: 0 };
-    case 'chunk': {
-      const r = activeLeaf.ref as { pageIndex?: number; segmentId?: number; chunkId?: number } | null;
-      if (r && r.pageIndex != null && r.segmentId != null && r.chunkId != null) {
-        return { type: 'chunk', ref: { kind: 'chunk', pageIndex: r.pageIndex, segmentId: r.segmentId, chunkId: r.chunkId }, touchedAt: 0 };
-      }
-      return null;
-    }
+    case 'chunk':
+      return { type: node.type, ref: node.ref, touchedAt: 0 };
     default:
       return null;
   }
@@ -506,18 +511,20 @@ function AncestorBody({ children }: { children: ReactNode }): React.JSX.Element 
 
 function ComponentAncestorSummary({ typeName }: { typeName: string }): React.JSX.Element {
   const { list } = useComponentList();
+  const { label: componentName } = useComponentNames();
   const c = list.find((x) => x.typeName === typeName);
   if (!c) {
-    return <AncestorBody>{typeName}</AncestorBody>;
+    return <AncestorBody>{componentName(typeName)}</AncestorBody>;
   }
   return <AncestorBody>{`${c.storageSize} B · ${c.fieldCount} fields · ${c.indexCount} idx`}</AncestorBody>;
 }
 
 function ArchetypeAncestorSummary({ archetypeId }: { archetypeId: string }): React.JSX.Element {
   const { list } = useArchetypeList();
+  const { label: archName } = useArchetypeNames();
   const a = list.find((x) => x.archetypeId === archetypeId);
   if (!a) {
-    return <AncestorBody>{`#${archetypeId}`}</AncestorBody>;
+    return <AncestorBody>{archName(`#${archetypeId}`)}</AncestorBody>;
   }
   return <AncestorBody>{`${a.componentTypes.length} comp · ${a.entityCount.toLocaleString()} ent · ${a.occupancyPct.toFixed(0)}%`}</AncestorBody>;
 }
@@ -546,8 +553,12 @@ function DbMapDetail({ selection }: { selection: DbMapSelection }) {
   const segId = isChunkLike ? selection.segmentId : null;
   const chunkId = isChunkLike ? selection.chunkId : null;
   const summarySegId = selection.kind === 'segment' ? selection.segmentId : null;
+  // An L5 cluster-entity selection rides the 'cell' leaf with slotIndex set (file-map §10 Q4 override) — fetch the
+  // entity's full per-component decode. The hook is disabled (null slot) for plain L4 cell / chunk / page selections.
+  const slotIndex = selection.kind === 'cell' ? selection.slotIndex ?? null : null;
   const { data: page } = useDbMapPage(sessionId, pageIndex);
   const { data: chunk } = useDbMapChunk(sessionId, segId, chunkId);
+  const { data: entity } = useDbMapSlot(sessionId, segId, chunkId, slotIndex);
   const { data: summary } = useDbMapSegmentSummary(sessionId, summarySegId);
 
   if (selection.kind === 'page') {
@@ -558,6 +569,17 @@ function DbMapDetail({ selection }: { selection: DbMapSelection }) {
   }
   if (selection.kind === 'chunk') {
     return <DbMapChunkDetail databaseName={databaseName} pageIndex={selection.pageIndex} chunk={chunk ?? null} />;
+  }
+  if (selection.kind === 'cell' && selection.slotIndex != null) {
+    return (
+      <DbMapEntityDetail
+        databaseName={databaseName}
+        segmentId={selection.segmentId}
+        chunkId={selection.chunkId}
+        slotIndex={selection.slotIndex}
+        entity={entity ?? null}
+      />
+    );
   }
   const cell = chunk?.cells.find((c) => c.offset === selection.cellOffset) ?? null;
   return <DbMapCellDetail databaseName={databaseName} chunk={chunk ?? null} cellOffset={selection.cellOffset} cell={cell} />;
@@ -699,7 +721,21 @@ function DbMapSegmentDetail({
                 <Row label="Active clusters" value={summary.activeClusterCount.toLocaleString()} />
                 <Row label="Slots / cluster" value={String(summary.clusterSize)} />
                 {slotOccPct != null && <Row label="Slot occupancy" value={`${slotOccPct}%`} />}
+                {summary.clusterSpatial && (summary.clusterCellSize ?? 0) > 0 && (
+                  <Row
+                    label="Spatial grid"
+                    value={`${summary.clusterCellSize}-unit cells · ${summary.clusterGridWidth}×${summary.clusterGridHeight}${
+                      summary.clusterSpatialMode ? ` · ${summary.clusterSpatialMode}` : ''
+                    }`}
+                  />
+                )}
               </dl>
+              {/* The conditional crux: low occupancy means opposite things for spatial vs non-spatial clusters — say which so the number isn't misread as waste. */}
+              <p className="mt-1.5 text-fs-xs text-muted-foreground">
+                {summary.clusterSpatial
+                  ? 'Clusters bucket by spatial cell — low slot occupancy means entities are spread thinly across cells (≈1 cluster per occupied cell), not wasted space.'
+                  : 'Clusters fill linearly — low slot occupancy here means fragmentation (freed slots), not spatial spread.'}
+              </p>
             </div>
           )}
 
@@ -813,6 +849,7 @@ function DbMapChunkDetail({
             <Row label="Byte offset" value={`0x${chunk.byteOffset.toString(16).toUpperCase()}`} />
             <Row label="Size" value={`${chunk.size} B`} />
           </dl>
+          {chunk.clusterCell && <ClusterCellBlock cell={chunk.clusterCell} />}
           {chunk.clusterComponents.length > 0 && <ClusterOverlayPicker chunk={chunk} />}
           {chunk.cells.length > 0 ? (
             <CellList title={`Decoded content · ${chunk.cells.length} cells`} cells={chunk.cells} />
@@ -824,6 +861,28 @@ function DbMapChunkDetail({
         </>
       )}
     </DbMapDetailCard>
+  );
+}
+
+// Spatial-cell context for a cluster chunk — the grid cell it buckets into + that cell's totals + the cluster's AABB. This is the per-cluster "why mostly empty"
+// answer: a cluster holds only the entities of one cell, so a sparsely-populated cell yields a sparsely-filled cluster (spatial spread, not waste).
+function ClusterCellBlock({ cell }: { cell: StorageClusterCellDto }) {
+  const fmt = (n: number) => (Number.isInteger(n) ? String(n) : n.toFixed(1));
+  const aabbValid =
+    Number.isFinite(cell.aabbMinX) && Number.isFinite(cell.aabbMaxX) && cell.aabbMinX <= cell.aabbMaxX && cell.aabbMinY <= cell.aabbMaxY;
+  return (
+    <div className="mt-3 border-t border-border pt-2">
+      <p className="mb-1 text-fs-xs uppercase tracking-wide text-muted-foreground">Spatial cell</p>
+      <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-fs-sm">
+        <Row label="Cell" value={`(${cell.cellX}, ${cell.cellY}) · key ${cell.cellKey}`} />
+        <Row label="Entities here" value={cell.entitiesInCell.toLocaleString()} />
+        <Row label="Clusters here" value={cell.clustersInCell.toLocaleString()} />
+        {aabbValid && <Row label="Cluster AABB" value={`[${fmt(cell.aabbMinX)}, ${fmt(cell.aabbMinY)}]–[${fmt(cell.aabbMaxX)}, ${fmt(cell.aabbMaxY)}]`} />}
+      </dl>
+      <p className="mt-1.5 text-fs-xs text-muted-foreground">
+        This cluster buckets the entities of one grid cell. A cell holding only a few entities leaves the cluster’s other slots free — spatial spread, not waste.
+      </p>
+    </div>
   );
 }
 
@@ -876,6 +935,56 @@ function ClusterOverlayPicker({ chunk }: { chunk: DbChunkContent }) {
   );
 }
 
+// L5 cluster-entity card (file-map §10 Q4 override) — one occupied cluster slot decoded to its full per-component field
+// values, the same field-level view the legacy component table gives at L4, one level deeper than the slot sub-grid.
+function DbMapEntityDetail({
+  databaseName,
+  segmentId,
+  chunkId,
+  slotIndex,
+  entity,
+}: {
+  databaseName: string;
+  segmentId: number;
+  chunkId: number;
+  slotIndex: number;
+  entity: DbChunkContent | null;
+}) {
+  // Friendly component names in the per-component header / field rows, matching the rest of the Workbench.
+  const { label: shorten } = useComponentNames();
+  const entityId = entity?.cells.find((c) => c.kind === 'entityPk')?.value;
+  return (
+    <DbMapDetailCard
+      icon={<Binary className="h-4 w-4 text-muted-foreground" />}
+      title={entityId ? `Entity ${entityId}` : `Entity @ slot ${slotIndex}`}
+      badge="clusterEntity"
+      databaseName={databaseName}
+    >
+      {!entity ? (
+        <p className="text-fs-sm text-muted-foreground">Decoding…</p>
+      ) : entity.cells.length === 0 ? (
+        <p className="text-fs-sm text-muted-foreground">This slot is free — no entity here.</p>
+      ) : (
+        <>
+          <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-fs-sm">
+            <Row label="Slot" value={`${slotIndex} (in cluster #${chunkId})`} />
+            <Row label="Segment" value={`#${segmentId}`} />
+          </dl>
+          {/* The decode leads with an entityPk cell (shown as the card title), then per component a header row + one
+              field row each — render the components/fields as the readable table; the on-canvas grid is the texture.
+              Component names are shortened to their friendly form (the field cell's `<component>.<field>` keeps its field). */}
+          <CellList
+            title="Components & fields"
+            cells={entity.cells
+              .filter((c) => c.kind !== 'entityPk')
+              .map((c) => ({ ...c, label: friendlyComponentCellLabel(c, shorten) }))}
+          />
+        </>
+      )}
+    </DbMapDetailCard>
+  );
+}
+
 function DbMapCellDetail({
   databaseName,
   chunk,
@@ -901,6 +1010,10 @@ function DbMapCellDetail({
           <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-fs-sm">
             <dt className="text-muted-foreground">Value</dt>
             <dd className="break-all font-mono text-foreground">{cell.value}</dd>
+            {/* A cluster entity slot carries an allocation bit (colorKey: 1 = a live entity occupies the slot, 0 =
+                free) — surface it explicitly with the same "Occupied: yes/no" row the chunk card uses, rather than
+                leaving slot occupancy implicit in a "—" value. */}
+            {cell.kind === 'entitySlot' && <Row label="Occupied" value={cell.colorKey > 0 ? 'yes' : 'no'} />}
             <Row label="Kind" value={cell.kind} />
             <Row label="Offset" value={`${cell.offset} (in chunk)`} />
             <Row label="Size" value={`${cell.size} B`} />
@@ -937,7 +1050,7 @@ function CellList({ title, cells }: { title: string; cells: DbContentCell[] }) {
   );
 }
 
-function FieldDetail({ field, schema }: { field: Field; schema: ComponentSchema }) {
+function FieldDetail({ field, schema, componentLabel }: { field: Field; schema: ComponentSchema; componentLabel: string }) {
   const distanceToBoundary = 64 - (field.offset % 64);
   const crossesBoundary = field.size > distanceToBoundary;
   const nextFieldOffset = computeNextFieldOffset(field, schema);
@@ -946,18 +1059,26 @@ function FieldDetail({ field, schema }: { field: Field; schema: ComponentSchema 
   return (
     <div className="flex h-full flex-col bg-background p-3">
       <div className="rounded-md border border-border bg-card p-3 text-fs-base">
-        <div className="mb-2 flex items-center gap-2 border-b border-border pb-2">
-          <Binary className="h-4 w-4 text-muted-foreground" />
-          <h3 className="text-fs-lg font-semibold text-foreground">{field.name}</h3>
-          {field.isIndexed && (
-            <StatusBadge tone="success">
-              indexed{field.indexAllowsMultiple ? ' (multi)' : ''}
-            </StatusBadge>
-          )}
-          {crossesBoundary && <StatusBadge tone="warn">crosses cache line</StatusBadge>}
-          <span className="ml-auto font-mono text-fs-sm text-muted-foreground">
-            {schema.typeName}
-          </span>
+        <div className="mb-2 border-b border-border pb-2">
+          <div className="flex items-center gap-2">
+            <Binary className="h-4 w-4 text-muted-foreground" />
+            <h3 className="text-fs-lg font-semibold text-foreground">{field.name}</h3>
+            {field.isIndexed && (
+              <StatusBadge tone="success">
+                indexed{field.indexAllowsMultiple ? ' (multi)' : ''}
+              </StatusBadge>
+            )}
+            {crossesBoundary && <StatusBadge tone="warn">crosses cache line</StatusBadge>}
+          </div>
+          {/* Owning component on its own line — friendly short name (full name on hover), matching the labels
+              used in the Schema Explorer / File Map. */}
+          <div
+            data-testid="field-owner-component"
+            className="mt-1 truncate font-mono text-fs-sm text-muted-foreground"
+            title={schema.fullName}
+          >
+            {componentLabel}
+          </div>
         </div>
 
         <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-fs-sm">

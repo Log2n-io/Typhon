@@ -16,6 +16,7 @@ const comp = (over: Partial<ComponentSummary> & { typeName: string; fullName: st
 });
 
 const arch = (over: Partial<ArchetypeInfo> & { archetypeId: string }): ArchetypeInfo => ({
+  name: '',
   componentTypes: [],
   entityCount: 0,
   componentSize: 16,

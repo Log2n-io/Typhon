@@ -41,11 +41,11 @@ public sealed partial class StorageMapService
         for (var i = 0; i < segments.Length; i++)
         {
             var s = map.Segments[i];
-            // Resolve the user component type name for component segments — it drives the map's search box.
-            // In-memory only (walks the component-table registry, no page I/O), so the coarse tier stays free.
-            var typeName = s.Kind == StorageSegmentKind.Component
-                ? ResolveComponentDefinition(engine, s.RootPageIndex)?.Name ?? ""
-                : "";
+            // Resolve the owning component/archetype name for every attributable segment kind (component data, MVCC
+            // revision history, indexes, cluster rows, entity maps) — it drives the map's search box and the friendly
+            // label. In-memory only (walks the component-table / archetype registry, no page I/O), so the coarse tier
+            // stays free. The client shortens the returned full name via the shared labeller.
+            var typeName = ResolveSegmentOwnerName(engine, s.RootPageIndex, s.Kind);
             segments[i] = new StorageSegmentDto(s.Id, s.RootPageIndex, s.Kind.ToString(), s.PageCount, typeName);
         }
         return new StorageRegionsDto(map.DatabaseName, map.DataFileBytes, map.DataFilePageCount, map.WalBytes,
@@ -82,9 +82,7 @@ public sealed partial class StorageMapService
         for (var i = 0; i < segments.Count; i++)
         {
             var seg = segments[i];
-            var typeName = seg.Kind == StorageSegmentKind.Component
-                ? ResolveComponentDefinition(engine, seg.RootPageIndex)?.Name ?? ""
-                : "";
+            var typeName = ResolveSegmentOwnerName(engine, seg.RootPageIndex, seg.Kind);
             var capacity = seg.ChunkCapacity;
             var reclaimable = (long)seg.FreeChunkCount * seg.Stride;
             totalReclaimable += reclaimable;

@@ -56,7 +56,7 @@ public class ClusterRegressionBenchmarks : IDisposable
               o.DatabaseCacheSize = (ulong)(200 * 1024 * PagedMMF.PageSize);
               o.PagesDebugPattern = false;
           })
-          .AddScopedDatabaseEngine(o => { o.Wal = null; });
+          .AddInMemoryWalEngine();
 
         _serviceProvider = sc.BuildServiceProvider();
         _serviceProvider.EnsureFileDeleted<ManagedPagedMMFOptions>();

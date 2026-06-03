@@ -3,6 +3,7 @@ using Typhon.Workbench.Fs;
 using Typhon.Workbench.Schema;
 using Typhon.Workbench.Security;
 using Typhon.Workbench.Services;
+using Typhon.Workbench.Services.Querying;
 using Typhon.Workbench.Sessions;
 using Typhon.Workbench.Storage;
 using Typhon.Workbench.Streams;
@@ -30,6 +31,8 @@ public static class ServiceExtensions
         services.AddSingleton<EditorLauncher>();
         // #308: per-connection event-subscription state for the unified data stream.
         services.AddSingleton<StreamSubscriptionRegistry>();
+        // #386 Phase 1: Query Console — DSL parser + compiler + execute/plan/parse service.
+        services.AddSingleton<QueryConsoleService>();
         return services;
     }
 

@@ -18,6 +18,11 @@ const mocks = vi.hoisted(() => ({
 }));
 vi.mock('@/hooks/schema/useArchetypeList', () => ({ useArchetypeList: () => mocks.arch }));
 vi.mock('@/hooks/schema/useComponentList', () => ({ useComponentList: () => mocks.comp }));
+// The header/switcher labels run through useArchetypeNames (live react-query). Stub it to a passthrough so this
+// panel test stays provider-free; labels then fall back to "#<id>" (the mocked DTOs carry no archetype name).
+vi.mock('@/hooks/queryConsole/useArchetypeNames', () => ({
+  useArchetypeNames: () => ({ label: (ref: string | null | undefined) => ref ?? '', isLoading: false }),
+}));
 
 import ArchetypeInspectorPanel from '@/panels/ArchetypeInspector/ArchetypeInspectorPanel';
 
@@ -39,6 +44,7 @@ const comp = (over: Partial<ComponentSummary> & { typeName: string; fullName: st
 
 const arch = (id: string, entityCount: number, over: Partial<ArchetypeInfo> = {}): ArchetypeInfo => ({
   archetypeId: id,
+  name: '',
   componentTypes: ['Game.CompA', 'Game.CompB'],
   entityCount,
   componentSize: 32,
@@ -78,14 +84,26 @@ afterEach(() => cleanup());
 
 describe('ArchetypeInspectorPanel', () => {
   it('auto-targets the most-entities archetype when nothing is on the bus, with the (auto) chip (PC-9)', () => {
-    mocks.arch = { list: [arch('800', 1000), arch('806', 5000)], isLoading: false, isError: false, isFetching: false, refetch: () => {} };
+    mocks.arch = {
+      list: [arch('800', 1000), arch('806', 5000)],
+      isLoading: false,
+      isError: false,
+      isFetching: false,
+      refetch: () => {},
+    };
     render(<ArchetypeInspectorPanel {...PROPS} />);
     expect(screen.getByText('#806')).toBeTruthy(); // 5000 > 1000
     expect(screen.getByTestId('archetype-auto-chip')).toBeTruthy();
   });
 
   it('restores the PC-1 last-viewed archetype on cold open — no (auto) chip — even if another has more entities', () => {
-    mocks.arch = { list: [arch('800', 1000), arch('806', 5000)], isLoading: false, isError: false, isFetching: false, refetch: () => {} };
+    mocks.arch = {
+      list: [arch('800', 1000), arch('806', 5000)],
+      isLoading: false,
+      isError: false,
+      isFetching: false,
+      refetch: () => {},
+    };
     useInspectorTargetStore.getState().save(FILE, { archetypeId: '800' });
     render(<ArchetypeInspectorPanel {...PROPS} />);
     expect(screen.getByText('#800')).toBeTruthy();
@@ -100,7 +118,13 @@ describe('ArchetypeInspectorPanel', () => {
   });
 
   it('header switcher re-targets via the bus and clears the (auto) chip (PC-9)', () => {
-    mocks.arch = { list: [arch('800', 1000), arch('806', 5000)], isLoading: false, isError: false, isFetching: false, refetch: () => {} };
+    mocks.arch = {
+      list: [arch('800', 1000), arch('806', 5000)],
+      isLoading: false,
+      isError: false,
+      isFetching: false,
+      refetch: () => {},
+    };
     render(<ArchetypeInspectorPanel {...PROPS} />);
     expect(screen.getByText('#806')).toBeTruthy(); // auto-picked
     fireEvent.click(screen.getByTestId('archetype-switcher'));
@@ -115,7 +139,13 @@ describe('ArchetypeInspectorPanel', () => {
   });
 
   it('an external archetype selection clears the (auto) chip', () => {
-    mocks.arch = { list: [arch('800', 1000), arch('806', 5000)], isLoading: false, isError: false, isFetching: false, refetch: () => {} };
+    mocks.arch = {
+      list: [arch('800', 1000), arch('806', 5000)],
+      isLoading: false,
+      isError: false,
+      isFetching: false,
+      refetch: () => {},
+    };
     render(<ArchetypeInspectorPanel {...PROPS} />);
     expect(screen.getByTestId('archetype-auto-chip')).toBeTruthy();
     act(() => useSelectionStore.getState().select('archetype', '800'));

@@ -110,7 +110,7 @@ public struct Character
 /// <summary>
 /// Character inventory (storage slots).
 /// </summary>
-[Component("RPG.Inventory", 1, true)] // AllowMultiple for multiple items
+[Component("RPG.Inventory", 1)]
 [StructLayout(LayoutKind.Sequential)]
 public struct Inventory
 {
@@ -262,7 +262,7 @@ public struct Equipment
 /// <summary>
 /// A learned skill or ability.
 /// </summary>
-[Component("RPG.Skill", 1, true)] // AllowMultiple for multiple skills
+[Component("RPG.Skill", 1)]
 [StructLayout(LayoutKind.Sequential)]
 public struct Skill
 {
@@ -333,7 +333,7 @@ public struct Skill
 /// <summary>
 /// An active or completed quest.
 /// </summary>
-[Component("RPG.Quest", 1, true)] // AllowMultiple for quest log
+[Component("RPG.Quest", 1)]
 [StructLayout(LayoutKind.Sequential)]
 public struct Quest
 {

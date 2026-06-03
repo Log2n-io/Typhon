@@ -44,8 +44,8 @@ test.describe('File Map — reveal handoffs (GAP-04)', () => {
     await gotoWelcome(page);
     await openDevFixture(page);
 
-    await page.getByPlaceholder(/filter resources/i).fill('Fixture.CompA');
-    await page.getByText('ComponentTable_Typhon.Workbench.Fixture.CompA', { exact: true }).click();
+    await page.getByPlaceholder(/filter resources/i).fill('Fixture.Player');
+    await page.getByText('ComponentTable_Typhon.Workbench.Fixture.Player', { exact: true }).click();
     await page.getByTestId('resource-reveal-file-map').click();
 
     await expect(page.getByTestId('dbmap-canvas')).toBeVisible({ timeout: 10_000 });

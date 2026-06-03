@@ -19,11 +19,40 @@ export const L4_FULL_PAGE_PX = 2000;
  */
 export const L4_CONTENT_PREFETCH_PAGE_PX = 560;
 
+/**
+ * On-screen pixel size of a single cluster slot above which its entity's field grid (L5 — the entity-content level
+ * beneath the L4 slot sub-grid, file-map §10 Q4 override) crossfades in. L5 is keyed to *slot* px, not page px, because
+ * a slot's size depends on the page's chunk count and the cluster size — two clusters at the same page zoom can have
+ * very different slot sizes. The field grid is legible by ~200 px/slot; it starts fading at {@link L5_MIN_SLOT_PX}.
+ */
+export const L5_MIN_SLOT_PX = 90;
+export const L5_FULL_SLOT_PX = 200;
+/** Slot px at which the entity decode starts being fetched — below {@link L5_MIN_SLOT_PX} so the (three-hop) decode is resident before the L5 crossfade ramps. */
+export const L5_CONTENT_PREFETCH_SLOT_PX = 60;
+
+/**
+ * Fraction of the fit-to-screen scale at which the L0→L1 crossfade completes. Unlike the L3/L4/L5 thresholds above
+ * (absolute page/slot px), this is a *fraction of fit-scale*: L1 (the Hilbert page grid) is fully shown at the fit
+ * scale and any zoom-in; the L0 composition stripes are fully shown at `L0_FADE_FRACTION · fit` and below, crossfading
+ * across `[fraction·fit, fit]`. Consumed by the renderer's `l1AlphaForScale` AND by the initial-fit camera
+ * (`initialL0Camera`), which frames the file at exactly `L0_FADE_FRACTION · fit` — the largest pure-L0 view.
+ */
+export const L0_FADE_FRACTION = 0.5;
+
 /** The LOD band currently dominant, plus the L3 / L4 crossfade alphas (0 = absent, 1 = fully in). */
 export interface DbLodState {
   band: 'L1' | 'L3' | 'L4';
   l3Alpha: number;
   l4Alpha: number;
+}
+
+/**
+ * The L5 entity-content crossfade alpha for a slot of the given on-screen pixel size (0 = absent, 1 = fully in). Pure
+ * function of slot px so the renderer and the fetch planner agree on when the field grid shows. Independent of
+ * {@link lodForScale} (which stays a pure page-px band) — L5 nests inside an already-fully-L4 slot.
+ */
+export function l5AlphaForSlotPx(slotPx: number): number {
+  return clamp01((slotPx - L5_MIN_SLOT_PX) / (L5_FULL_SLOT_PX - L5_MIN_SLOT_PX));
 }
 
 function clamp01(v: number): number {

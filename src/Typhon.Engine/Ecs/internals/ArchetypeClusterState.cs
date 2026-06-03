@@ -482,6 +482,14 @@ internal sealed unsafe class ArchetypeClusterState
     /// <summary>Per-archetype B+Tree index slots, one per component slot with indexed fields. Null if no indexed fields.</summary>
     public ClusterIndexSlot[] IndexSlots;
 
+    /// <summary>
+    /// Per-slot SingleVersion <see cref="ComponentCollection{T}"/> descriptors — the buffers to release when a slot is freed on
+    /// destroy. SV CC has no revision chain, so the cluster slot is the buffer's sole owner and must release it directly (unlike
+    /// Versioned CC, whose buffers are owned by content chunks and released by the revision cleanup). Null when the archetype has
+    /// no SingleVersion component carrying a ComponentCollection field — zero overhead on the destroy hot path.
+    /// </summary>
+    internal ClusterCollectionSlot[] CollectionSlots;
+
     /// <summary>Shadow guard bitmap. Guards first-write-per-tick shadow capture. Same index semantics as <see cref="ClusterDirtyBitmap"/>.</summary>
     public DirtyBitmap ClusterShadowBitmap;
 
@@ -2416,6 +2424,14 @@ internal sealed unsafe class ArchetypeClusterState
     {
         byte* clusterBase = accessor.GetChunkAddress(clusterChunkId, true);
 
+        // Release SV ComponentCollection buffers held in this slot BEFORE clearing it — but only on a true destroy.
+        // Migration passes deferFinalize:true and is a MOVE: the handle was byte-copied to the destination slot, so the
+        // buffer must NOT be freed here. SV CC has no revision chain; the cluster slot is the buffer's sole owner.
+        if (!deferFinalize && CollectionSlots != null)
+        {
+            ReleaseSlotCollections(clusterBase, slotIndex, changeSet);
+        }
+
         ulong slotMask = 1UL << slotIndex;
         ulong prevOccupancy = ClearSlotMetadata(clusterBase, slotIndex);
         bool wasOccupied = (prevOccupancy & slotMask) != 0;
@@ -2485,6 +2501,60 @@ internal sealed unsafe class ArchetypeClusterState
         else if (FreeClusterHead < 0)
         {
             FreeClusterHead = clusterChunkId;
+        }
+    }
+
+    /// <summary>
+    /// Build the SingleVersion <c>ComponentCollection</c> descriptor (<see cref="CollectionSlots"/>) used by <c>ReleaseSlot</c> to free CC buffers on destroy.
+    /// Only SingleVersion CC fields are tracked: the cluster slot is their sole owner. Versioned CC is owned by content chunks (released via the revision
+    /// cleanup); Transient CC is rejected at registration. No-op for archetypes without an SV CC field (leaves <see cref="CollectionSlots"/> null).
+    /// </summary>
+    public void InitializeCollections(ComponentTable[] slotToTable)
+    {
+        List<ClusterCollectionSlot> slots = null;
+        for (int slot = 0; slot < slotToTable.Length; slot++)
+        {
+            var table = slotToTable[slot];
+            if (table == null || table.StorageMode != StorageMode.SingleVersion || !table.HasCollections)
+            {
+                continue;
+            }
+
+            var byOffset = table.ComponentCollectionVSBSByOffset;
+            var fields = new ClusterCollectionField[byOffset.Count];
+            int fi = 0;
+            foreach (var kvp in byOffset)
+            {
+                // kvp.Key is the offset within the component's pure data; cluster slots have no overhead, so it IS the slot-relative field offset.
+                fields[fi++] = new ClusterCollectionField { FieldOffset = kvp.Key, Vsbs = kvp.Value };
+            }
+
+            (slots ??= []).Add(new ClusterCollectionSlot { Slot = slot, Fields = fields });
+        }
+
+        CollectionSlots = slots?.ToArray();
+    }
+
+    /// <summary>
+    /// Release the SingleVersion ComponentCollection buffers held in one cluster slot. Called from <c>ReleaseSlot</c> on a true destroy (not migration),
+    /// before the slot data is cleared.
+    /// </summary>
+    private void ReleaseSlotCollections(byte* clusterBase, int slotIndex, ChangeSet changeSet)
+    {
+        var layout = Layout;
+        foreach (var cs in CollectionSlots)
+        {
+            byte* compBase = clusterBase + layout.ComponentOffset(cs.Slot) + slotIndex * layout.ComponentSize(cs.Slot);
+            foreach (var f in cs.Fields)
+            {
+                int bufferId = *(int*)(compBase + f.FieldOffset);
+                if (bufferId != 0)
+                {
+                    var ca = f.Vsbs.Segment.CreateChunkAccessor(changeSet);
+                    f.Vsbs.BufferRelease(bufferId, ref ca);
+                    ca.Dispose();
+                }
+            }
         }
     }
 
@@ -2969,4 +3039,30 @@ internal struct ClusterIndexField
     /// <c>(key, clusterLocation)</c> entry is removed — not the entire buffer at the key.
     /// </summary>
     public int MultiFieldIndex;
+}
+
+/// <summary>
+/// Per-component-slot SingleVersion ComponentCollection state for a cluster-eligible archetype. One entry per SV component slot that carries a
+/// ComponentCollection field. The cluster slot is the sole owner of these buffers (SV has no revision chain), so they are released directly in
+/// <c>ReleaseSlot</c> on destroy.
+/// </summary>
+internal struct ClusterCollectionSlot
+{
+    /// <summary>Component slot index within the archetype.</summary>
+    public int Slot;
+
+    /// <summary>The ComponentCollection fields of this SingleVersion component.</summary>
+    public ClusterCollectionField[] Fields;
+}
+
+/// <summary>
+/// A single ComponentCollection field within a SingleVersion cluster slot.
+/// </summary>
+internal struct ClusterCollectionField
+{
+    /// <summary>Byte offset of the ComponentCollection <c>_bufferId</c> within the pure component data (no overhead in clusters).</summary>
+    public int FieldOffset;
+
+    /// <summary>The variable-sized buffer segment backing this collection's element type.</summary>
+    public VariableSizedBufferSegmentBase<PersistentStore> Vsbs;
 }

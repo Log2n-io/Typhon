@@ -80,6 +80,28 @@ class ClusterIndexTests : TestBase<ClusterIndexTests>
     }
 
     [Test]
+    public void ClusterIndexSegment_ResolvesToOwningArchetypeName()
+    {
+        // Regression (File Map): the per-archetype cluster index rendered as a bare "Index #id" because the owner
+        // resolver only knew component-table indexes (Default/String64/Tail), not the archetype-owned cluster index
+        // (ClusterState.IndexSegment). TryGetSegmentOwnerArchetypeName must name it like Cluster / EntityMap do, so the
+        // Workbench's short-name labeller can show "Index · ClIdxUnit" instead of "Index #id".
+        using var dbe = SetupEngine();
+        var meta = Archetype<ClIdxUnit>.Metadata;
+        var es = dbe._archetypeStates[meta.ArchetypeId];
+        Assert.That(es.ClusterState?.IndexSegment, Is.Not.Null, "indexed cluster archetype must have an index segment");
+
+        var indexRoot = es.ClusterState.IndexSegment.RootPageIndex;
+        Assert.That(dbe.TryGetSegmentOwnerArchetypeName(indexRoot, StorageSegmentKind.Index, out var owner), Is.True,
+            "the cluster index segment must resolve to its owning archetype");
+        Assert.That(owner, Does.Contain(nameof(ClIdxUnit)), "cluster index owner name is the owning archetype");
+
+        // A page owned by no cluster index must not resolve as an Index owner (page 0 is the reserved file header).
+        Assert.That(dbe.TryGetSegmentOwnerArchetypeName(0, StorageSegmentKind.Index, out _), Is.False,
+            "a page owned by no cluster index must not resolve");
+    }
+
+    [Test]
     public void ClusterEligible_VersionedArchetype_NoClusterIndexes()
     {
         using var dbe = SetupEngine();

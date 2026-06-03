@@ -7,8 +7,11 @@ using Typhon.Workbench.Sessions;
 namespace Typhon.Workbench.Tests;
 
 /// <summary>
-/// Covers manifest-driven schema resolution in <see cref="EngineLifecycle"/>: the database records the assemblies that declare its components (AssemblyR1),
-/// and the open path locates them next to the file by simple name — replacing the old <c>*.schema.dll</c> filename convention.
+/// Covers schema-assembly resolution in <see cref="EngineLifecycle"/> after ADR-055: the schema DLL is no longer
+/// copied per-database. The database records the assemblies that declare its components (AssemblyR1), and the open
+/// path resolves each by simple name across the search order { <b>bundled</b> = the Workbench's own deployment
+/// directory (here, the test bin), <b>legacy-adjacent</b> = next to the database file }. The bundled (single,
+/// current) copy wins over any stale copy left beside a database — which is the exact failure ADR-055 fixes.
 /// </summary>
 [TestFixture]
 public sealed class EngineLifecycleManifestTests
@@ -30,59 +33,101 @@ public sealed class EngineLifecycleManifestTests
     }
 
     [Test]
-    public async Task Open_ResolvesManifestAssemblyAdjacentToFile_RegistersComponents()
+    public async Task Open_ResolvesSchemaFromBundledDir_RegistersComponents()
     {
+        // ADR-055: CreateOrReuse no longer copies the schema DLL beside the database — resolution comes from the
+        // Workbench's (here, the test's) own deployment directory.
         var fixture = FixtureDatabase.CreateOrReuse(_tempDir, force: true);
+        var fixtureDir = Path.GetDirectoryName(fixture.TyphonFilePath)!;
+        Assert.That(File.Exists(Path.Combine(fixtureDir, "Typhon.Workbench.Fixtures.schema.dll")), Is.False,
+            "ADR-055: the schema DLL must NOT be copied next to the database anymore");
 
         using var lifecycle = await EngineLifecycle.OpenAsync(fixture.TyphonFilePath);
 
         Assert.That(lifecycle.State, Is.EqualTo(SchemaCompatibility.State.Ready));
-        Assert.That(lifecycle.LoadedComponentTypes, Is.GreaterThan(0), "fixture components must register from the manifest-resolved assembly");
+        Assert.That(lifecycle.LoadedComponentTypes, Is.GreaterThan(0), "fixture components must register from the bundled assembly");
+        Assert.That(lifecycle.SchemaStatus, Is.EqualTo("bundled"), "resolution must report the bundled provenance");
+        Assert.That(lifecycle.ResolvedSchemaPaths.Any(p => p.StartsWith(AppContext.BaseDirectory, StringComparison.OrdinalIgnoreCase)),
+            Is.True, "the resolved schema DLL must come from the Workbench's own deployment directory");
 
         var required = lifecycle.Engine.GetRequiredAssemblies().Select(a => a.Name).ToArray();
         Assert.That(required, Does.Contain("Typhon.Workbench.Fixtures.schema"), "the declaring assembly must be recorded in the manifest");
 
-        // The original bug: without the schema the per-archetype segments were never registered, so the File Map rendered them Unknown. With the manifest-
-        // resolved schema loaded, the cluster archetype's segment must be registered — which is exactly what lets ClassifyAllPages attribute those pages.
+        // The original bug: without the schema the per-archetype segments were never registered, so the File Map rendered
+        // them Unknown. With the resolved schema loaded, the cluster archetype's segment must be registered.
         var segments = lifecycle.Engine.EnumerateStorageSegments();
         Assert.That(segments.Any(s => s.Kind == Typhon.Engine.StorageSegmentKind.Cluster), Is.True,
-            "the cluster archetype's segment must be registered once the manifest-resolved schema is loaded");
+            "the cluster archetype's segment must be registered once the resolved schema is loaded");
     }
 
     [Test]
-    public async Task Open_ResolvesByAssemblyName_WhenFileNameDiffers()
+    public async Task Open_PrefersBundled_OverStaleAdjacentCopy()
     {
+        // The heavy-01 regression: a stale/garbage *.schema.dll left beside the database must NOT be loaded — the
+        // single, current bundled assembly wins. (If the adjacent garbage were probed, SchemaLoader would throw a
+        // BadImageFormatException and the session would not be Ready.)
         var fixture = FixtureDatabase.CreateOrReuse(_tempDir, force: true);
-
-        // The schema DLL is copied alongside the `.typhon` marker, inside the per-database sub-directory that
-        // `CreateOrReuse` composes — derive the dir from `TyphonFilePath` rather than assuming `_tempDir`.
         var fixtureDir = Path.GetDirectoryName(fixture.TyphonFilePath)!;
-        // Rename the schema DLL so the fast {SimpleName}.dll probe misses — forcing the metadata name-match fallback.
-        var canonical = Path.Combine(fixtureDir, "Typhon.Workbench.Fixtures.schema.dll");
-        var renamed = Path.Combine(fixtureDir, "fixtures-9.9.9-renamed.dll");
-        File.Move(canonical, renamed);
+        File.WriteAllText(Path.Combine(fixtureDir, "Typhon.Workbench.Fixtures.schema.dll"), "not a real dll — a stale copy");
 
         using var lifecycle = await EngineLifecycle.OpenAsync(fixture.TyphonFilePath);
 
-        Assert.That(lifecycle.State, Is.EqualTo(SchemaCompatibility.State.Ready), "metadata name-match must resolve a non-conventionally-named DLL");
+        Assert.That(lifecycle.State, Is.EqualTo(SchemaCompatibility.State.Ready), "the stale adjacent copy must be ignored in favour of the bundled assembly");
+        Assert.That(lifecycle.SchemaStatus, Is.EqualTo("bundled"));
         Assert.That(lifecycle.LoadedComponentTypes, Is.GreaterThan(0));
     }
 
     [Test]
-    public async Task Open_MissingManifestAssembly_SurfacesDiagnostic_WithoutCrashing()
+    public async Task Open_ExplicitSchemaPath_TakesPrecedence()
     {
+        // An explicit user-specified path bypasses manifest resolution entirely (provenance "user-specified").
+        var fixture = FixtureDatabase.CreateOrReuse(_tempDir, force: true);
+        var bundledSchema = Path.Combine(AppContext.BaseDirectory, "Typhon.Workbench.Fixtures.schema.dll");
+
+        using var lifecycle = await EngineLifecycle.OpenAsync(fixture.TyphonFilePath, [bundledSchema]);
+
+        Assert.That(lifecycle.State, Is.EqualTo(SchemaCompatibility.State.Ready));
+        Assert.That(lifecycle.SchemaStatus, Is.EqualTo("user-specified"));
+        Assert.That(lifecycle.LoadedComponentTypes, Is.GreaterThan(0));
+    }
+
+    [Test]
+    public async Task Open_PrefersRegisteredDir_OverBundled()
+    {
+        // ADR-055 Phase 2: a user-registered schema directory wins over the Workbench's own bundled binaries —
+        // the escape hatch for pointing at a custom or recompiled-from-git schema build.
         var fixture = FixtureDatabase.CreateOrReuse(_tempDir, force: true);
 
-        // The schema DLL lives in the per-database sub-directory composed by `CreateOrReuse` — derive it from the
-        // returned `.typhon` path instead of assuming the test's `_tempDir`.
-        var fixtureDir = Path.GetDirectoryName(fixture.TyphonFilePath)!;
-        // Remove the schema DLL entirely — resolution must fail gracefully, not throw.
-        File.Delete(Path.Combine(fixtureDir, "Typhon.Workbench.Fixtures.schema.dll"));
+        // A separate directory holding a copy of the fixtures schema assembly. The per-session ALC defers
+        // Typhon.* dependencies to the default context (already loaded in-process), so the schema DLL alone
+        // resolves from the registered directory without its engine deps alongside it.
+        var registeredDir = Path.Combine(_tempDir, "registered-schema");
+        Directory.CreateDirectory(registeredDir);
+        var bundledSchema = Path.Combine(AppContext.BaseDirectory, "Typhon.Workbench.Fixtures.schema.dll");
+        var registeredCopy = Path.Combine(registeredDir, "Typhon.Workbench.Fixtures.schema.dll");
+        File.Copy(bundledSchema, registeredCopy, overwrite: true);
 
-        using var lifecycle = await EngineLifecycle.OpenAsync(fixture.TyphonFilePath);
+        using var lifecycle = await EngineLifecycle.OpenAsync(fixture.TyphonFilePath, null, [registeredDir]);
 
-        Assert.That(lifecycle.State, Is.Not.EqualTo(SchemaCompatibility.State.Ready));
-        Assert.That(lifecycle.Diagnostics.Any(d => d.Kind == "missing_assembly"), Is.True, "an unresolved manifest assembly must surface a missing_assembly diagnostic");
-        Assert.That(lifecycle.Diagnostics.Any(d => d.ComponentName == "Typhon.Workbench.Fixtures.schema"), Is.True, "the diagnostic must name the missing assembly");
+        Assert.That(lifecycle.State, Is.EqualTo(SchemaCompatibility.State.Ready));
+        Assert.That(lifecycle.LoadedComponentTypes, Is.GreaterThan(0));
+        Assert.That(lifecycle.SchemaStatus, Is.EqualTo("registered"), "a registered dir must win over bundled");
+        Assert.That(lifecycle.ResolvedSchemaPaths.Any(p => p.StartsWith(registeredDir, StringComparison.OrdinalIgnoreCase)),
+            Is.True, "the schema must resolve from the registered directory, not the bundled one");
+    }
+
+    [Test]
+    public async Task Open_SkipsNonExistentRegisteredDir_FallsBackToBundled()
+    {
+        // A registered directory that doesn't exist must be skipped gracefully — resolution falls through to the
+        // bundled binaries rather than throwing.
+        var fixture = FixtureDatabase.CreateOrReuse(_tempDir, force: true);
+        var ghostDir = Path.Combine(_tempDir, "does-not-exist");
+
+        using var lifecycle = await EngineLifecycle.OpenAsync(fixture.TyphonFilePath, null, [ghostDir]);
+
+        Assert.That(lifecycle.State, Is.EqualTo(SchemaCompatibility.State.Ready));
+        Assert.That(lifecycle.SchemaStatus, Is.EqualTo("bundled"), "a missing registered dir is skipped; bundled wins");
+        Assert.That(lifecycle.LoadedComponentTypes, Is.GreaterThan(0));
     }
 }

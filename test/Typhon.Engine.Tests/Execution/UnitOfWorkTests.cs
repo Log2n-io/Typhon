@@ -123,16 +123,16 @@ class UnitOfWorkTests : TestBase<UnitOfWorkTests>
     }
 
     [Test]
-    public void UoW_Flush_NoOp_WithoutWAL()
+    public void UoW_Flush_EmptyUoW_Completes()
     {
         using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
 
         using var uow = dbe.CreateUnitOfWork();
 
-        // Flush and FlushAsync should succeed without WAL infrastructure
+        // Flushing an empty UoW (no committed transactions) is a no-op and must not throw.
         Assert.DoesNotThrow(() => uow.Flush());
 
-        // FlushAsync should return completed task
+        // FlushAsync should return a completed task (nothing durable to wait on).
         var task = uow.FlushAsync();
         Assert.That(task.IsCompleted, Is.True);
     }

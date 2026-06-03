@@ -100,6 +100,8 @@ export type StorageMode = 'cluster' | 'legacy';
 
 export interface ArchetypeInfo {
   archetypeId: string;
+  /** Registered archetype name (CLR) when one exists; '' for implicit/anonymous archetypes. */
+  name: string;
   componentTypes: string[];
   entityCount: number;
   componentSize: number;
@@ -136,6 +138,7 @@ export function normalizeArchetype(raw: ArchetypeInfoDto): ArchetypeInfo {
   const mode = toString(raw.storageMode);
   return {
     archetypeId: toString(raw.archetypeId),
+    name: toString(raw.name),
     componentTypes: (raw.componentTypes ?? []).map((s) => s ?? ''),
     entityCount: toNumber(raw.entityCount),
     componentSize: toNumber(raw.componentSize),

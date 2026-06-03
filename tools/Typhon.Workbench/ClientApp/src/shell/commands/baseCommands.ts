@@ -23,7 +23,8 @@ import {
   resetLayout,
 } from './openSchemaBrowser';
 import { buildProfilerPaletteCommands } from './profilerCommands';
-import { isViewActive } from '@/shell/viewRegistry';
+import { openQueryConsole, toggleViewQueryConsole } from './openQueryConsole';
+import { isViewVisible } from '@/shell/viewRegistry';
 import type { ConnectTab } from '@/shell/dialogs/ConnectDialog';
 
 export interface CommandItem {
@@ -52,7 +53,7 @@ export function openConnect(tab: ConnectTab): void {
 }
 
 export function buildBaseCommands(): CommandItem[] {
-  const { sessionId, clearSession } = useSessionStore.getState();
+  const { sessionId, clearSession, kind } = useSessionStore.getState();
   const { toggle: toggleTheme } = useThemeStore.getState();
 
   const closeSession = () => {
@@ -75,9 +76,11 @@ export function buildBaseCommands(): CommandItem[] {
     { id: 'toggle-view-storage-health',       label: 'Open Storage Health',                 keywords: 'storage health dashboard segments occupancy dirty reclaimable fragmentation wal disk aggregate', action: toggleViewStorageHealth, viewId: 'StorageHealth' },
     { id: 'toggle-view-dev-fixture',          label: 'Open Dev Fixture',                    keywords: 'dev fixture database generate preset advanced destination folder debug', action: toggleViewDevFixture, viewId: 'DevFixture' },
     { id: 'data-browser',                     label: 'Open Data Browser',                   keywords: 'data browser entities components values inspect crud rows', action: () => toggleViewDataBrowser(), viewId: 'DataBrowserEntities' },
-    { id: 'toggle-view-schema-explorer',      label: 'Toggle View Schema',               keywords: 'schema explorer components archetypes browse open session workspace center default panel', action: toggleViewSchemaExplorer },
-    { id: 'toggle-view-systems-queries-nav',  label: 'Toggle View Systems & Queries',    keywords: 'systems queries navigator profiler trace attach sidebar left edge default panel scheduling', action: toggleViewSystemsQueriesNav },
-    { id: 'toggle-view-resource-tree',        label: 'Toggle View Resource Tree',        keywords: 'resource tree sidebar explorer',              action: toggleViewResourceTree },
+    { id: 'open-query-console',               label: 'Open Query Console',                  keywords: 'query console author run dsl chip filter where archetype indexed', action: () => openQueryConsole(), viewId: 'QueryConsole' },
+    { id: 'toggle-view-query-console',        label: 'Toggle View Query Console',           keywords: 'query console author run dsl chip filter where archetype indexed', action: toggleViewQueryConsole, viewId: 'QueryConsole' },
+    { id: 'toggle-view-schema-explorer',      label: 'Toggle View Schema',               keywords: 'schema explorer components archetypes browse open session workspace center default panel', action: toggleViewSchemaExplorer, viewId: 'SchemaExplorer' },
+    { id: 'toggle-view-systems-queries-nav',  label: 'Toggle View Systems & Queries',    keywords: 'systems queries navigator profiler trace attach sidebar left edge default panel scheduling', action: toggleViewSystemsQueriesNav, viewId: 'SystemsQueriesNav' },
+    { id: 'toggle-view-resource-tree',        label: 'Toggle View Resource Tree',        keywords: 'resource tree sidebar explorer',              action: toggleViewResourceTree, viewId: 'ResourceTree' },
     { id: 'toggle-view-detail',               label: 'Toggle View Detail',               keywords: 'detail inspector selection',                  action: toggleViewDetail },
     { id: 'toggle-view-logs',                 label: 'Toggle View Logs',                 keywords: 'logs log console output messages bottom',     action: toggleViewLogs },
     { id: 'toggle-view-options',              label: 'Toggle View Options',              keywords: 'options preferences settings editor',         action: toggleViewOptions },
@@ -95,6 +98,9 @@ export function buildBaseCommands(): CommandItem[] {
     { id: 'reload',        label: 'Reload',                   keywords: 'refresh',           action: () => location.reload() },
   ];
 
-  // Drop commands bound to a deactivated view (Stage 0 shell frame). Shell commands (viewId undefined) stay.
-  return commands.filter((c) => isViewActive(c.viewId));
+  // Show a command only when its bound view is BOTH feature-active AND in scope for the current session kind
+  // (IA §5.1) — so a view-toggle the session can't actually open is absent from the palette, mirroring the View
+  // menu. Non-view (shell) commands have no viewId → scope `any` → always kept. Single source of truth for the
+  // session scope is `viewRegistry.VIEW_SESSION_SCOPE`, shared with the menu.
+  return commands.filter((c) => isViewVisible(c.viewId, kind));
 }

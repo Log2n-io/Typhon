@@ -34,6 +34,9 @@ internal class ArchetypeMetadata
     /// <summary>CLR type of the archetype class.</summary>
     public Type ArchetypeType;
 
+    /// <summary>Optional human-readable label from <c>[Archetype(Alias = ...)]</c>; null when unset (callers fall back to the type name).</summary>
+    public string Alias;
+
     // ═══════════════════════════════════════════════════════════════════════
     // Slot mapping
     // ═══════════════════════════════════════════════════════════════════════

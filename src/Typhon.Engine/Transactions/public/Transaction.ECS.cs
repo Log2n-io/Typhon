@@ -824,8 +824,7 @@ public unsafe partial class Transaction
                 var info = GetComponentInfo(compType);
 
                 int dataChunkId = chunkId;
-                if (table.StorageMode == StorageMode.Versioned &&
-                    !info.IsMultiple && info.SingleCache.TryGetValue((long)entry.Id.RawValue, out var cri))
+                if (table.StorageMode == StorageMode.Versioned && info.SingleCache.TryGetValue((long)entry.Id.RawValue, out var cri))
                 {
                     dataChunkId = cri.CurCompContentChunkId;
                 }
@@ -973,7 +972,7 @@ public unsafe partial class Transaction
                 var info = GetComponentInfo(compType);
                 long pk = (long)id.RawValue;
 
-                if (!info.IsMultiple && info.SingleCache.TryGetValue(pk, out var cached))
+                if (info.SingleCache.TryGetValue(pk, out var cached))
                 {
                     result.SetLocation(slot, cached.CurCompContentChunkId);
                 }
@@ -1108,7 +1107,7 @@ public unsafe partial class Transaction
                         long pk = (long)id.RawValue;
 
                         // Check cache first (prior Open or Write in this transaction)
-                        if (!info.IsMultiple && info.SingleCache.TryGetValue(pk, out var cached))
+                        if (info.SingleCache.TryGetValue(pk, out var cached))
                         {
                             result.SetLocation(slot, cached.CurCompContentChunkId);
                             continue;
@@ -1148,7 +1147,7 @@ public unsafe partial class Transaction
                     long pk = (long)id.RawValue;
 
                     // If already resolved in this transaction (prior Open or Write), reuse cached entry
-                    if (!info.IsMultiple && info.SingleCache.TryGetValue(pk, out var cached))
+                    if (info.SingleCache.TryGetValue(pk, out var cached))
                     {
                         result.SetLocation(slot, cached.CurCompContentChunkId);
                         continue;
@@ -2421,15 +2420,21 @@ public unsafe partial class Transaction
 
                 long pk = (long)entityId.RawValue;
 
-                // Check if this archetype has SV indexed or spatial-indexed components requiring entity record lookup
+                // Check if this archetype has SV indexed or spatial-indexed components requiring entity record lookup.
+                // Cluster-eligible archetypes never need the legacy record here: their SV/spatial/index removal is done by the cluster destroy path
+                // (FlushPendingDestroys + ProcessClusterShadowEntries), and reading a ClusterEntityRecord through the legacy EntityRecord layout would be
+                // incorrect.
                 bool needsEntityRecord = false;
-                for (int slot = 0; slot < meta.ComponentCount; slot++)
+                if (!meta.IsClusterEligible)
                 {
-                    var table = engineState.SlotToComponentTable[slot];
-                    if (table?.HasShadowableIndexes == true || table?.SpatialIndex != null)
+                    for (int slot = 0; slot < meta.ComponentCount; slot++)
                     {
-                        needsEntityRecord = true;
-                        break;
+                        var table = engineState.SlotToComponentTable[slot];
+                        if (table?.HasShadowableIndexes == true || table?.SpatialIndex != null)
+                        {
+                            needsEntityRecord = true;
+                            break;
+                        }
                     }
                 }
 
@@ -2452,14 +2457,19 @@ public unsafe partial class Transaction
                     hasRecord = engineState.EntityMap.TryGet(entityId.EntityKey, readBuf, ref emAccessor);
                 }
 
-                // Cluster entities: index removal handled by cluster-specific destroy path (FlushPendingDestroys)
-                // and ProcessClusterShadowEntries. Skip legacy per-ComponentTable index removal to avoid
-                // reading ClusterEntityRecord (19 bytes) as legacy EntityRecord (14 + 4*C bytes).
-                if (meta.IsClusterEligible)
+                // Cluster Versioned components address their revision chain via the cluster EntityMap record (CompRevFirstChunkId), NOT the per-component PK
+                // index that MarkComponentDeleted's fallback uses — so a destroy-without-Open would fail to resolve them and never tombstone the chain.
+                // Pre-resolve them into the CompRevInfo cache here so the tombstone (below) is created and the chain — with any ComponentCollection
+                // buffers it holds — is cleaned via the CC-aware revision path.
+                if (meta.IsClusterEligible && meta.ClusterLayout?.SlotToVersionedIndex != null)
                 {
-                    continue;
+                    ResolveClusterVersionedForDestroy(entityId, meta, engineState, pk);
                 }
 
+                // Versioned components in a cluster-eligible archetype still own a revision chain (HEAD cached in the cluster slot, chain in CompRevTable),
+                // so they MUST be tombstoned here — that routes the chain (and any ComponentCollection buffers it holds) through the CC-aware revision
+                // cleanup (FreeCompContentChunk). The legacy per-ComponentTable SV/spatial index removal below reads the entity record and is the cluster
+                // destroy path's responsibility (FlushPendingDestroys + ProcessClusterShadowEntries) — skip it for clusters.
                 for (int slot = 0; slot < meta.ComponentCount; slot++)
                 {
                     var table = engineState.SlotToComponentTable[slot];
@@ -2472,7 +2482,7 @@ public unsafe partial class Transaction
                     {
                         MarkComponentDeleted(meta._slotToComponentType[slot], pk);
                     }
-                    else if ((table.HasShadowableIndexes || table.SpatialIndex != null) && hasRecord)
+                    else if (!meta.IsClusterEligible && (table.HasShadowableIndexes || table.SpatialIndex != null) && hasRecord)
                     {
                         int chunkId = EntityRecordAccessor.GetLocation(readBuf, slot);
                         table.TrackDestroyedChunkId(chunkId);
@@ -2656,6 +2666,61 @@ public unsafe partial class Transaction
         }
     }
 
+    /// <summary>
+    /// Populate the per-component <see cref="ComponentInfo"/> revision cache with the visible revision for each Versioned slot of a cluster entity being
+    /// destroyed. Cluster Versioned components address their revision chain through the cluster EntityMap record (<c>CompRevFirstChunkId</c>), not the
+    /// per-component PK index that <see cref="MarkComponentDeleted"/>'s fallback uses, so without this a destroy-without-Open cannot resolve them and never
+    /// tombstones the chain (leaking the chain and any ComponentCollection buffers it holds). Mirrors <c>ArchetypeAccessor.ResolveClusterVersionedSlots</c>.
+    /// </summary>
+    private void ResolveClusterVersionedForDestroy(EntityId entityId, ArchetypeMetadata meta, ArchetypeEngineState engineState, long pk)
+    {
+        var layout = meta.ClusterLayout;
+        byte* record = stackalloc byte[EntityRecordAccessor.MaxRecordSize];
+        var emAccessor = engineState.EntityMap.Segment.CreateChunkAccessor();
+        try
+        {
+            if (!engineState.EntityMap.TryGet(entityId.EntityKey, record, ref emAccessor))
+            {
+                return;
+            }
+
+            for (int slot = 0; slot < meta.ComponentCount; slot++)
+            {
+                int vi = layout.SlotToVersionedIndex[slot];
+                if (vi < 0)
+                {
+                    continue;
+                }
+
+                int firstChunkId = ClusterEntityRecordAccessor.GetCompRevFirstChunkId(record, vi);
+                if (firstChunkId == 0)
+                {
+                    continue;
+                }
+
+                var info = GetComponentInfo(meta._slotToComponentType[slot]);
+                if (info.SingleCache.ContainsKey(pk))
+                {
+                    continue; // already resolved by an Open/Write earlier in this transaction
+                }
+
+                var chainResult = RevisionChainReader.WalkChain(ref info.CompRevTableAccessor, firstChunkId, TSN, true);
+                if (chainResult.IsFailure)
+                {
+                    continue;
+                }
+
+                var cri = chainResult.Value;
+                cri.Operations = ComponentInfo.OperationType.Read;
+                info.AddNew(pk, cri);
+            }
+        }
+        finally
+        {
+            emAccessor.Dispose();
+        }
+    }
+
     private void FlushPendingEnableDisable()
     {
         if (_pendingEnableDisable == null || _pendingEnableDisable.Count == 0)
@@ -2762,6 +2827,10 @@ public unsafe partial class Transaction
     /// <summary>Clean up ECS-specific state on transaction reset/dispose. Frees orphaned chunks on rollback.</summary>
     internal void CleanupEcsState()
     {
+        // Rollback freeing below calls FreeContentChunk, which creates a ChunkAccessor and therefore needs an epoch scope.
+        // Entering one here is cheap and nesting-safe; on a committed transaction the freeing blocks are skipped, only the tail clears run.
+        using var epochGuard = EpochGuard.Enter(_epochManager);
+
         // If transaction was NOT committed, free component chunks for spawned entities.
         // Entity was never inserted into EntityMap, so no EntityMap.Remove needed.
         if (_spawnedEntities is { Count: > 0 } && State != TransactionState.Committed)
@@ -2789,12 +2858,12 @@ public unsafe partial class Transaction
                         int chunkId = entry.Loc[slot];
                         if (chunkId > 0)
                         {
-                            table.ComponentSegment.FreeChunk(chunkId);
+                            // CC-aware free: release any ComponentCollection buffers the rolled-back spawn chunk holds before freeing it.
+                            DeferredCleanupManager.FreeContentChunk(table, chunkId);
                         }
 
                         var compType = meta._slotToComponentType[slot];
-                        if (_componentInfos.TryGetValue(compType, out var info) &&
-                            !info.IsMultiple && info.SingleCache.TryGetValue((long)entry.Id.RawValue, out var cri))
+                        if (_componentInfos.TryGetValue(compType, out var info) && info.SingleCache.TryGetValue((long)entry.Id.RawValue, out var cri))
                         {
                             if (cri.CompRevTableFirstChunkId > 0)
                             {
@@ -2814,7 +2883,8 @@ public unsafe partial class Transaction
                             }
                             else
                             {
-                                table.ComponentSegment.FreeChunk(chunkId);
+                                // CC-aware free: release any SingleVersion ComponentCollection buffers before freeing the rolled-back spawn chunk.
+                                DeferredCleanupManager.FreeContentChunk(table, chunkId);
                             }
                         }
                     }
@@ -2843,7 +2913,8 @@ public unsafe partial class Transaction
                             (cri.Operations & ComponentInfo.OperationType.Created) == 0 &&
                             cri.CurCompContentChunkId > 0)
                         {
-                            info.CompContentSegment.FreeChunk(cri.CurCompContentChunkId);
+                            // CC-aware free: release the cloned ComponentCollection buffer of the rolled-back COW chunk (the committed head keeps its own).
+                            DeferredCleanupManager.FreeContentChunk(info.ComponentTable, cri.CurCompContentChunkId);
                         }
                     }
                 }

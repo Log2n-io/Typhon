@@ -1,8 +1,9 @@
 import { useMemo, useState } from 'react';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { formatFileSize } from '@/lib/formatters';
+import { useComponentNames } from '@/hooks/queryConsole/useComponentNames';
 import { sortRegions, type DbMapRegion, type RegionSortKey } from '@/libs/dbmap/dbMapRegions';
-import { NO_SEGMENT, PAGE_TYPE_LABELS, type StorageSegmentDto } from '@/libs/dbmap/types';
+import { NO_SEGMENT, PAGE_TYPE_LABELS, formatSegmentLabel, type StorageSegmentDto } from '@/libs/dbmap/types';
 
 // The side-rail Regions tab (Module 15, A3, §4.5) — the RLE region bands as a sortable "what is using my
 // space" table. Rows are contiguous same-type / same-segment runs; a row click flies the camera to the run.
@@ -30,11 +31,12 @@ export function RegionsTab({ regions, segments, onFlyToRegion, onSelectSegment }
   const [sortKey, setSortKey] = useState<RegionSortKey>('start');
   const [ascending, setAscending] = useState(true);
 
+  const { label: shortLabel } = useComponentNames();
   const sorted = useMemo(() => sortRegions(regions, sortKey, ascending), [regions, sortKey, ascending]);
   const segLabel = useMemo(() => {
-    const byId = new Map(segments.map((s) => [s.id, s.typeName.length > 0 ? s.typeName : `${s.kind} #${s.id}`]));
+    const byId = new Map(segments.map((s) => [s.id, formatSegmentLabel(s.kind, s.id, s.typeName, shortLabel)]));
     return (id: number) => (id === NO_SEGMENT ? '—' : byId.get(id) ?? `#${id}`);
-  }, [segments]);
+  }, [segments, shortLabel]);
 
   const toggleSort = (key: RegionSortKey) => {
     if (key === sortKey) {

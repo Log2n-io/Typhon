@@ -4,6 +4,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 
 namespace Typhon.Engine.Internals;
 
@@ -98,25 +99,137 @@ internal sealed class WalSegmentManager : IDisposable
     }
 
     /// <summary>
-    /// Initializes the segment manager, creating the WAL directory and first segment.
+    /// Initializes the segment manager, creating the WAL directory and first segment. On reopen, first reconciles WAL
+    /// segment files left on disk by the previous engine lifecycle (see <see cref="ReconcileExistingSegments"/>): empty
+    /// placeholders are deleted, valid segments are adopted for normal checkpoint-gated reclamation, and segment
+    /// numbering continues past the highest existing id. Without this, ids restart at 1 every open and prior-lifecycle
+    /// files orphan forever (their data is in the data file, but nothing ever deletes them). See WR-01 in durability.md.
     /// </summary>
-    /// <param name="lastSegmentId">Last known segment ID (0 for fresh start).</param>
-    /// <param name="firstLSN">First LSN for the initial segment.</param>
-    public void Initialize(long lastSegmentId, long firstLSN)
+    /// <param name="lastSegmentId">Last known segment ID (0 for fresh start). A floor only — the on-disk scan wins if higher.</param>
+    /// <param name="firstLSN">First LSN for the initial (fresh) active segment — the recovery frontier + 1.</param>
+    /// <param name="checkpointLsn">Checkpoint frontier. Adopted segments entirely below this are reclaimed immediately
+    /// (their records are already in the data file); segments with records ≥ this are retained for recovery and reclaimed
+    /// by the next checkpoint. Records ≥ checkpointLsn are NEVER deleted here.</param>
+    public void Initialize(long lastSegmentId, long firstLSN, long checkpointLsn = 0)
     {
         if (!Directory.Exists(_walDirectory))
         {
             Directory.CreateDirectory(_walDirectory);
         }
 
-        _nextSegmentId = lastSegmentId + 1;
+        // Reconcile leftover on-disk segments: delete empty placeholders, adopt valid segments into _sealedSegments, and
+        // return the highest existing id so numbering continues (no restart-at-1, no filename collision with the new active).
+        var recoveryLastValidLsn = firstLSN > 0 ? firstLSN - 1 : 0;
+        var maxExistingId = ReconcileExistingSegments(recoveryLastValidLsn);
+
+        _nextSegmentId = Math.Max(lastSegmentId, maxExistingId) + 1;
 
         // Create and open the first active segment
         ActiveSegment = CreateSegment(_nextSegmentId, firstLSN, 0);
+
+        // Pre-allocation must continue strictly AFTER the active segment id — otherwise EnsurePreAllocated would walk up
+        // from id 1 and recreate the very placeholders we just reclaimed (and any retained real segments' ids).
+        _lastPreAllocatedSegmentId = _nextSegmentId;
         _nextSegmentId++;
 
         // Pre-allocate additional segments
         EnsurePreAllocated();
+
+        // Reclaim adopted segments whose records are all below the checkpoint frontier (data already in the data file).
+        // Segments with records ≥ checkpointLsn stay in _sealedSegments and are reclaimed by the next checkpoint cycle —
+        // same gate as steady-state recycling. Reuses MarkReclaimable so the reopen path invents no new frontier.
+        MarkReclaimable(checkpointLsn);
+    }
+
+    /// <summary>
+    /// Reconciles WAL segment files left on disk by a previous engine lifecycle. Deletes files with no valid header
+    /// (empty/zero pre-allocated placeholders — <see cref="WalSegmentReader.OpenSegment"/> rejects them and recovery skips
+    /// them, so they hold zero records and deleting them cannot change recovery). Adopts each valid segment into
+    /// <see cref="_sealedSegments"/> with its computed LastLSN (chain rule: a segment's LSNs are below the next segment's
+    /// <see cref="WalSegmentHeader.FirstLSN"/>; the last runs to the recovery frontier) so the normal checkpoint gate can
+    /// reclaim it. Returns the highest existing segment id (0 if none). Does NOT itself delete any valid segment — the
+    /// caller's <see cref="MarkReclaimable"/> applies the checkpoint frontier. See WR-01.
+    /// </summary>
+    private long ReconcileExistingSegments(long recoveryLastValidLsn)
+    {
+        if (!Directory.Exists(_walDirectory))
+        {
+            return 0;
+        }
+
+        var files = Directory.GetFiles(_walDirectory, "*.wal");
+        if (files.Length == 0)
+        {
+            return 0;
+        }
+
+        var valid = new List<(long Id, long FirstLsn, string Path)>(files.Length);
+        long maxId = 0;
+        foreach (var path in files)
+        {
+            var id = ParseSegmentIdFromPath(path);
+            if (id > maxId)
+            {
+                maxId = id;
+            }
+
+            if (TryReadSegmentFirstLsn(path, out var firstLsn))
+            {
+                valid.Add((id, firstLsn, path));
+            }
+            else
+            {
+                // No valid header → empty/zero placeholder. Recovery skips these; deleting them is always safe.
+                _fileIO.Delete(path);
+            }
+        }
+
+        valid.Sort(static (a, b) => a.Id.CompareTo(b.Id));
+
+        for (var i = 0; i < valid.Count; i++)
+        {
+            var lastLsn = (i + 1 < valid.Count) ? valid[i + 1].FirstLsn - 1 : recoveryLastValidLsn;
+            if (lastLsn < valid[i].FirstLsn)
+            {
+                // The segment covers no live LSN (header-only / never written, e.g. the active segment a read-only
+                // session creates but never writes to). Recovery extracted nothing from it, so it is reclaimable now —
+                // delete it rather than adopt. Adopting (clamping LastLSN up to FirstLSN) would make it look non-empty
+                // and ≥ the frontier, so MarkReclaimable would retain it → one leaked segment per reopen.
+                _fileIO.Delete(valid[i].Path);
+                continue;
+            }
+            _sealedSegments.Add((valid[i].Path, lastLsn));
+        }
+
+        return maxId;
+    }
+
+    /// <summary>Parses the segment id from a <c>{id:D16}.wal</c> path; 0 if unparseable.</summary>
+    private static long ParseSegmentIdFromPath(string path)
+        => long.TryParse(Path.GetFileNameWithoutExtension(path), out var id) ? id : 0;
+
+    /// <summary>Reads + validates a segment header, returning its <see cref="WalSegmentHeader.FirstLSN"/>. False if the
+    /// file has no valid header (empty placeholder or torn).</summary>
+    private bool TryReadSegmentFirstLsn(string path, out long firstLsn)
+    {
+        firstLsn = 0;
+        try
+        {
+            using var handle = _fileIO.OpenSegmentForRead(path);
+            var headerBuffer = new byte[WalSegmentHeader.SizeInBytes];
+            _fileIO.ReadAligned(handle, 0, headerBuffer);
+            var header = MemoryMarshal.Read<WalSegmentHeader>(headerBuffer);
+            if (!header.Validate())
+            {
+                return false;
+            }
+            firstLsn = header.FirstLSN;
+            return true;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
     }
 
     /// <summary>

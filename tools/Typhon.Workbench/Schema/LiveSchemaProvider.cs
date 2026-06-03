@@ -80,6 +80,7 @@ public sealed class LiveSchemaProvider : IStaticSchemaProvider
 
             result.Add(new ArchetypeInfoDto(
                 ArchetypeId: archetype.ArchetypeId.ToString(),
+                Name: archetype.Alias ?? archetype.ArchetypeType?.FullName ?? archetype.ArchetypeType?.Name ?? archetype.ArchetypeId.ToString(),
                 ComponentTypes: componentTypes,
                 EntityCount: entityCount,
                 ComponentSize: 0,
@@ -151,6 +152,7 @@ public sealed class LiveSchemaProvider : IStaticSchemaProvider
 
             result.Add(new ArchetypeInfoDto(
                 ArchetypeId: archetype.ArchetypeId.ToString(),
+                Name: archetype.Alias ?? archetype.ArchetypeType?.FullName ?? archetype.ArchetypeType?.Name ?? archetype.ArchetypeId.ToString(),
                 ComponentTypes: componentTypes,
                 EntityCount: entityCount,
                 ComponentSize: componentSize,
@@ -218,7 +220,8 @@ public sealed class LiveSchemaProvider : IStaticSchemaProvider
             ArchetypeCount: null,
             EntityCount: table.EstimatedEntityCount,
             IndexCount: table.IndexedFieldInfos?.Length ?? 0,
-            StorageMode: def.StorageMode.ToString());
+            StorageMode: def.StorageMode.ToString(),
+            HasSpatialIndex: def.SpatialField != null);
     }
 
     private static ComponentSchemaDto BuildSchema(ComponentTable table)
@@ -234,7 +237,8 @@ public sealed class LiveSchemaProvider : IStaticSchemaProvider
                 Size: f.SizeInComponentStorage,
                 FieldId: f.FieldId,
                 IsIndexed: f.HasIndex,
-                IndexAllowsMultiple: f.IndexAllowMultiple))
+                IndexAllowsMultiple: f.IndexAllowMultiple,
+                IsSpatial: f.HasSpatialIndex))
             .ToArray();
 
         return new ComponentSchemaDto(
@@ -242,7 +246,7 @@ public sealed class LiveSchemaProvider : IStaticSchemaProvider
             FullName: def.POCOType?.FullName ?? def.Name,
             StorageSize: def.ComponentStorageSize,
             TotalSize: def.ComponentStorageTotalSize,
-            AllowMultiple: def.AllowMultiple,
+            AllowMultiple: false,
             Revision: def.Revision,
             Fields: fields,
             StorageMode: def.StorageMode.ToString());

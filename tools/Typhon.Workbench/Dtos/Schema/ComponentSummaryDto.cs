@@ -12,6 +12,10 @@ namespace Typhon.Workbench.Dtos.Schema;
 /// The component's MVCC storage mode — "Versioned", "SingleVersion" or "Transient" (GAP-25). Sourced from the engine
 /// (live) or the trace's recorded component definition. The Schema Explorer / Archetype Inspector surface it per type.
 /// </param>
+/// <param name="HasSpatialIndex">
+/// True when one of the component's fields carries <c>[SpatialIndex]</c>. The Query Console's SPATIAL chip uses this to
+/// filter its component picker to spatial-capable components. Defaults false; only the live provider populates it.
+/// </param>
 public record ComponentSummaryDto(
     string TypeName,
     string FullName,
@@ -20,4 +24,5 @@ public record ComponentSummaryDto(
     int? ArchetypeCount,
     int EntityCount,
     int IndexCount,
-    string StorageMode);
+    string StorageMode,
+    bool HasSpatialIndex = false);

@@ -159,6 +159,43 @@ public class ChunkBasedSegmentBitmapL3Tests
 
     #endregion
 
+    #region Large-stride / chunk-less-root regression
+
+    [Test]
+    public void Create_LargeStride_ChunklessRoot_ChainSurvivesGrowth()
+    {
+        // A stride large enough that a chunk fits a NON-root page (PageRawDataSize) but NOT the root page, which loses
+        // RootHeaderIndexSectionLength to the segment directory → ChunkCountRootPage == 0 (chunk 0 lives on page 1).
+        // Regression for the root-page clear overrun: ChunkBasedSegment.Create cleared a full Stride at
+        // RootChunkDataOffset on the root unconditionally, overrunning into the next page's LogicalSegmentHeader and
+        // zeroing NextRawDataPBID — which only surfaced later as a "CreateOrGrow IN-MEMORY chain mismatch" when the
+        // segment grew past its initial pages. (Old single-component cluster/index segments had small strides, so
+        // ChunkCountRootPage was always > 0 and the bug stayed latent.)
+        int stride = PagedMMF.PageRawDataSize - 1024;
+        var segment = _pmmf.AllocateChunkBasedSegment(PageBlockType.None, 4, stride);
+
+        Assert.That(segment.ChunkCountRootPage, Is.EqualTo(0),
+            "test precondition: the large stride must make the root page hold zero chunks");
+        Assert.That(segment.ChunkCountPerPage, Is.GreaterThanOrEqualTo(1),
+            "test precondition: a non-root page must still hold at least one chunk");
+
+        // Allocate well past the initial 4-page capacity so the segment grows several times. Each grow runs the
+        // forward-chain post-condition in LogicalSegment.CreateOrGrow; before the fix the very first grow threw because
+        // Create had already corrupted the chain. clearContent: true also exercises the per-chunk raw-data clear.
+        var ids = new List<int>();
+        for (int i = 0; i < 32; i++)
+        {
+            var id = segment.AllocateChunk(true);
+            Assert.That(id, Is.GreaterThan(0), $"chunk {i} must allocate (no chain-mismatch on grow)");
+            Assert.That(ids, Does.Not.Contain(id), $"duplicate chunk id {id}");
+            ids.Add(id);
+        }
+
+        Assert.That(segment.AllocatedChunkCount, Is.EqualTo(ids.Count + 1), "chunk 0 sentinel + allocated chunks");
+    }
+
+    #endregion
+
     #region Free (ClearL0) Tests
 
     [Test]

@@ -4,6 +4,10 @@ import {
   L3_MIN_PAGE_PX,
   L4_FULL_PAGE_PX,
   L4_MIN_PAGE_PX,
+  L5_CONTENT_PREFETCH_SLOT_PX,
+  L5_FULL_SLOT_PX,
+  L5_MIN_SLOT_PX,
+  l5AlphaForSlotPx,
   lodForScale,
   tileNodesForSpan,
 } from '../dbMapLod';
@@ -46,6 +50,35 @@ describe('lodForScale', () => {
 
   it('places the L4 crossfade band entirely above the L3 band', () => {
     expect(L4_MIN_PAGE_PX).toBeGreaterThan(L3_FULL_PAGE_PX);
+  });
+});
+
+describe('l5AlphaForSlotPx (cluster entity-content level — file-map §10 Q4 override)', () => {
+  it('is absent below the L5 min slot px and full at/above the L5-full slot px', () => {
+    expect(l5AlphaForSlotPx(L5_MIN_SLOT_PX - 1)).toBe(0);
+    expect(l5AlphaForSlotPx(L5_MIN_SLOT_PX)).toBe(0);
+    expect(l5AlphaForSlotPx(L5_FULL_SLOT_PX)).toBe(1);
+    expect(l5AlphaForSlotPx(L5_FULL_SLOT_PX + 100)).toBe(1);
+  });
+
+  it('ramps continuously and monotonically across the L5 band', () => {
+    let prev = -1;
+    let maxStep = 0;
+    for (let px = 0; px <= L5_FULL_SLOT_PX + 20; px += 5) {
+      const a = l5AlphaForSlotPx(px);
+      expect(a).toBeGreaterThanOrEqual(prev);
+      if (prev >= 0) {
+        maxStep = Math.max(maxStep, a - prev);
+      }
+      prev = a;
+    }
+    expect(maxStep).toBeLessThan(0.1);
+  });
+
+  it('starts prefetching the entity decode below the crossfade min so it is resident when L5 ramps', () => {
+    expect(L5_CONTENT_PREFETCH_SLOT_PX).toBeLessThan(L5_MIN_SLOT_PX);
+    // Prefetch threshold is below the visible-alpha threshold → the decode is in flight before any field grid draws.
+    expect(l5AlphaForSlotPx(L5_CONTENT_PREFETCH_SLOT_PX)).toBe(0);
   });
 });
 

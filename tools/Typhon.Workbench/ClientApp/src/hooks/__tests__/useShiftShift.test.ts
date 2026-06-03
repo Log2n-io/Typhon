@@ -2,53 +2,73 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createShiftShiftHandler } from '../useShiftShift';
 
-function shiftEvent(): KeyboardEvent {
-  return new KeyboardEvent('keydown', { key: 'Shift', bubbles: true });
+function down(repeat = false): KeyboardEvent {
+  return new KeyboardEvent('keydown', { key: 'Shift', repeat, bubbles: true });
 }
-
-function otherEvent(): KeyboardEvent {
+function up(): KeyboardEvent {
+  return new KeyboardEvent('keyup', { key: 'Shift', bubbles: true });
+}
+function otherDown(): KeyboardEvent {
   return new KeyboardEvent('keydown', { key: 'a', bubbles: true });
 }
 
 describe('createShiftShiftHandler', () => {
-  it('calls callback on double-Shift within 300ms', () => {
-    const cb = vi.fn();
+  function make(cb: () => void, editable: () => boolean = () => false) {
     let t = 0;
-    const h = createShiftShiftHandler(cb, () => false, () => t);
-    h(shiftEvent()); t = 100; h(shiftEvent());
+    const h = createShiftShiftHandler(cb, editable, () => t);
+    return { h, at: (ms: number) => { t = ms; } };
+  }
+
+  it('fires on a double-tap (press → release → press) within 300ms', () => {
+    const cb = vi.fn();
+    const { h, at } = make(cb);
+    h.onKeyDown(down()); h.onKeyUp(up()); at(100); h.onKeyDown(down());
     expect(cb).toHaveBeenCalledOnce();
   });
 
-  it('does not call callback when gap exceeds 300ms', () => {
+  it('does NOT fire while Shift is HELD — auto-repeat keydowns (event.repeat) are ignored', () => {
     const cb = vi.fn();
-    let t = 0;
-    const h = createShiftShiftHandler(cb, () => false, () => t);
-    h(shiftEvent()); t = 400; h(shiftEvent());
+    const { h, at } = make(cb);
+    h.onKeyDown(down()); // initial press
+    at(40); h.onKeyDown(down(true)); // OS auto-repeat while held
+    at(80); h.onKeyDown(down(true));
+    at(120); h.onKeyDown(down(true));
     expect(cb).not.toHaveBeenCalled();
   });
 
-  it('does not trigger on non-Shift key', () => {
+  it('does NOT fire on two keydowns with no intervening keyup (held, even if the repeat flag is absent)', () => {
     const cb = vi.fn();
-    let t = 0;
-    const h = createShiftShiftHandler(cb, () => false, () => t);
-    h(otherEvent()); t = 50; h(otherEvent());
+    const { h, at } = make(cb);
+    h.onKeyDown(down()); at(50); h.onKeyDown(down()); // no keyup between → not a real second tap
     expect(cb).not.toHaveBeenCalled();
   });
 
-  it('does not trigger when editable target is active', () => {
+  it('does not fire when the gap exceeds 300ms', () => {
     const cb = vi.fn();
-    let t = 0;
-    const h = createShiftShiftHandler(cb, () => true, () => t);
-    h(shiftEvent()); t = 50; h(shiftEvent());
+    const { h, at } = make(cb);
+    h.onKeyDown(down()); h.onKeyUp(up()); at(400); h.onKeyDown(down());
     expect(cb).not.toHaveBeenCalled();
   });
 
-  it('resets timer after a successful double-Shift (no immediate third trigger)', () => {
+  it('does not fire on a non-Shift key', () => {
     const cb = vi.fn();
-    let t = 0;
-    const h = createShiftShiftHandler(cb, () => false, () => t);
-    h(shiftEvent()); t = 50; h(shiftEvent()); // first double → fires
-    t = 100; h(shiftEvent()); t = 150; h(shiftEvent()); // second double → fires again
+    const { h, at } = make(cb);
+    h.onKeyDown(otherDown()); at(50); h.onKeyDown(otherDown());
+    expect(cb).not.toHaveBeenCalled();
+  });
+
+  it('does not fire when an editable target is focused', () => {
+    const cb = vi.fn();
+    const { h, at } = make(cb, () => true);
+    h.onKeyDown(down()); h.onKeyUp(up()); at(50); h.onKeyDown(down());
+    expect(cb).not.toHaveBeenCalled();
+  });
+
+  it('resets after a successful double-tap (no immediate third trigger)', () => {
+    const cb = vi.fn();
+    const { h, at } = make(cb);
+    h.onKeyDown(down()); h.onKeyUp(up()); at(50); h.onKeyDown(down()); // double #1 → fires
+    h.onKeyUp(up()); at(100); h.onKeyDown(down()); h.onKeyUp(up()); at(150); h.onKeyDown(down()); // double #2 → fires
     expect(cb).toHaveBeenCalledTimes(2);
   });
 });

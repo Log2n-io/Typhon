@@ -113,11 +113,10 @@ public class ChangeSet
             return Task.CompletedTask;
         }
 
-        // SavePages writes each page once and decrements DC once per page in its continuation. That preserves the WAL-less
-        // SaveChanges path's prior conservation behaviour: AddByMemPageIndex's first-add was already balanced by SavePages's
-        // single decrement, and any additional marks from RegisterReDirty were always "extra" (pre-existing DC inflation that
-        // ReleaseExcessDirtyMarks would normally cap in WAL mode). WAL-less mode doesn't run ReleaseExcessDirtyMarks today,
-        // so behaviour here is intentionally unchanged.
+        // SavePages writes each page once and decrements DC once per page in its continuation. This is the synchronous structural-write path
+        // (bootstrap / schema evolution / segment growth / recovery replay), distinct from the user-data UoW path — which is drained by the
+        // checkpoint and never calls SaveChanges. AddByMemPageIndex's first-add is balanced by SavePages's single decrement; structural ChangeSets
+        // are one-shot (created, saved, discarded), so they don't run ReleaseExcessDirtyMarks and any surplus RegisterReDirty marks are harmless.
         var pages = _marksByPage.Keys.ToArray();
         _marksByPage.Clear();
         _saveTask = _owner.SavePages(pages);
@@ -130,8 +129,8 @@ public class ChangeSet
     /// with the background checkpoint's <see cref="PagedMMF.DecrementDirty"/> and caused the lost-write durability bug
     /// captured in issue #385.
     /// <para>
-    /// In WAL mode, <see cref="SaveChangesAsync"/> is never called because WAL records replace the need for per-UoW dirty page
-    /// writeback. However, <see cref="AddByMemPageIndex"/> and <see cref="RegisterReDirty"/> still call <c>IncrementDirty</c>
+    /// For user-data (UoW) pages, <see cref="SaveChangesAsync"/> is never called — the checkpoint writes them, so WAL records replace the need
+    /// for per-UoW dirty page writeback. However, <see cref="AddByMemPageIndex"/> and <see cref="RegisterReDirty"/> still call <c>IncrementDirty</c>
     /// for every mark, so without this release hot pages would accumulate a DirtyCounter equal to the number of UoWs (and
     /// re-dirty events) that touched them — permanently unevictable by the page cache clock-sweep.
     /// </para>

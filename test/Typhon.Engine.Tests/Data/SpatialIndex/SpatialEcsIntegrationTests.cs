@@ -201,6 +201,46 @@ class SpatialEcsIntegrationTests : TestBase<SpatialEcsIntegrationTests>
     }
 
     [Test]
+    public void TryGetClusterSpatialInfo_SpatialArchetype_ReportsGridAndPerCellContext()
+    {
+        // Backs the Workbench's spatial-cell context (Inspector segment + cluster-chunk cards): a spatial cluster archetype buckets clusters by grid cell, so a
+        // cell holding only a few entities yields one cluster with a few occupied slots — the "why mostly empty" answer. Three ships near the origin all land in
+        // ONE cell → one cluster (chunk 0) holding all three.
+        using var dbe = SetupEngine();
+        using (var t = dbe.CreateQuickTransaction())
+        {
+            for (var i = 0; i < 3; i++)
+            {
+                var ship = new SpatialShip { Bounds = new AABB3F { MinX = 1 + i, MinY = 1, MinZ = 0, MaxX = 3 + i, MaxY = 3, MaxZ = 2 }, Speed = 1f };
+                t.Spawn<SpatialShipArchetype>(SpatialShipArchetype.Ship.Set(in ship), SpatialShipArchetype.Name.Set(new SpatialName { Id = i }));
+            }
+            t.Commit();
+        }
+
+        var meta = ArchetypeRegistry.GetMetadata<SpatialShipArchetype>();
+        var clusterState = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
+        var rootPage = clusterState.ClusterSegment.RootPageIndex;
+
+        var found = dbe.TryGetClusterSpatialInfo(rootPage, out var isSpatial, out var cellSize, out var gridWidth, out var gridHeight, out var mode);
+        Assert.That(found, Is.True);
+        Assert.That(isSpatial, Is.True);
+        Assert.That(cellSize, Is.EqualTo(100f), "grid cell size from ConfigureSpatialGrid");
+        Assert.That(gridWidth, Is.EqualTo(200), "(10000 − (−10000)) / 100");
+        Assert.That(gridHeight, Is.EqualTo(200));
+        Assert.That(mode, Is.EqualTo("Dynamic"), "SpatialShip's [SpatialIndex] defaults to Dynamic mode");
+
+        // The sole cluster for the origin cell holds all three ships. Use its real chunk id (clusters need not start at 0) — the same global id the Workbench passes.
+        Assert.That(clusterState.ActiveClusterCount, Is.EqualTo(1), "three co-located ships pack into one cluster");
+        var chunkId = clusterState.ActiveClusterIds[0];
+        var ok = dbe.TryGetClusterChunkSpatialInfo(rootPage, chunkId, out var cellKey, out _, out _, out var entitiesInCell, out var clustersInCell,
+            out _, out _, out _, out _);
+        Assert.That(ok, Is.True);
+        Assert.That(cellKey, Is.GreaterThanOrEqualTo(0));
+        Assert.That(entitiesInCell, Is.EqualTo(3), "all three ships bucketed into one cell");
+        Assert.That(clustersInCell, Is.EqualTo(1), "one cluster serves the cell");
+    }
+
+    [Test]
     public void Spawn_MultipleEntities_AllInTree()
     {
         using var dbe = SetupEngine();

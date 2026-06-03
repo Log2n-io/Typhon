@@ -2,11 +2,7 @@ import { Check, Columns3 } from 'lucide-react';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import type { ComponentSchema } from '@/hooks/schema/types';
 import { samePreviewField, type PreviewField } from '@/hooks/dataBrowser/previewFields';
-
-function shortName(typeName: string): string {
-  const dot = typeName.lastIndexOf('.');
-  return dot >= 0 ? typeName.slice(dot + 1) : typeName;
-}
+import { useComponentNames } from '@/hooks/queryConsole/useComponentNames';
 
 /**
  * Preview-column chooser for the entity list. Lists every field of the archetype's components grouped by component; toggling
@@ -23,6 +19,7 @@ export default function EntityColumnPicker({
   effective: PreviewField[];
   onChange: (fields: PreviewField[] | null) => void;
 }) {
+  const { label: componentName } = useComponentNames();
   const toggle = (field: PreviewField) => {
     const exists = effective.some((e) => samePreviewField(e, field));
     onChange(exists ? effective.filter((e) => !samePreviewField(e, field)) : [...effective, field]);
@@ -48,7 +45,7 @@ export default function EntityColumnPicker({
           return (
             <div key={typeName} className="mb-1">
               <div className="px-2 py-0.5 text-fs-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                {shortName(typeName)}
+                {componentName(typeName)}
               </div>
               {schema.fields.map((f) => {
                 const pf: PreviewField = { typeName, fieldId: f.fieldId };

@@ -242,38 +242,8 @@ internal sealed class BulkLoadWriteTests
             "transaction-recycling must not lose entities across the boundary — all 12 k must be visible after CompleteBulkLoad");
     }
 
-    [Test]
-    public void BulkLoad_WithoutWal_ThrowsAtBeginBulkLoad()
-    {
-        // BulkLoad requires a WAL-configured engine — the manifest pair is the durability anchor.
-        // Build a fresh engine WITHOUT WAL to verify the guardrail.
-        var noWalServices = new ServiceCollection();
-        var noWalDbDir = Path.Combine(Path.GetTempPath(), "Typhon.Tests", "BulkLoadWriteTests", "noWal");
-        Directory.CreateDirectory(noWalDbDir);
-
-        noWalServices
-            .AddLogging(b => b.SetMinimumLevel(LogLevel.Warning))
-            .AddResourceRegistry()
-            .AddMemoryAllocator()
-            .AddEpochManager()
-            .AddHighResolutionSharedTimer()
-            .AddDeadlineWatchdog()
-            .AddScopedManagedPagedMemoryMappedFile(opts =>
-            {
-                opts.DatabaseName = "BulkLoadNoWalGuardrail";
-                opts.DatabaseDirectory = noWalDbDir;
-                opts.DatabaseCacheSize = (ulong)PagedMMF.MinimumCacheSize * 4;
-            })
-            .AddScopedDatabaseEngine(_ => { });
-
-        using var sp = noWalServices.BuildServiceProvider();
-        sp.EnsureFileDeleted<ManagedPagedMMFOptions>();
-
-        var dbe = sp.GetRequiredService<DatabaseEngine>();
-
-        var ex = Assert.Throws<InvalidOperationException>(() => dbe.BeginBulkLoad());
-        Assert.That(ex.Message, Does.Contain("WAL"));
-    }
+    // Removed BulkLoad_WithoutWal_ThrowsAtBeginBulkLoad: WAL is now mandatory, so a no-WAL engine can no longer be constructed (DatabaseEngineOptions.Wal
+    // defaults to a non-null config). The "BulkLoad requires WAL" guardrail is now structurally guaranteed — there is no no-WAL state left to reject.
 
     /// <summary>
     /// Scans every <c>*.wal</c> file in <see cref="_walDir"/> and counts chunks by <see cref="WalChunkType"/>.

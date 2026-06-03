@@ -1141,7 +1141,8 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
               o.DatabaseCacheSize = (ulong)(50 * 1024 * PagedMMF.PageSize);
               o.PagesDebugPattern = false;
           })
-          .AddScopedDatabaseEngine(o => { o.Wal = null; });
+          .AddScopedDatabaseEngine(o => TestWalProfile.Apply(o, System.IO.Path.Combine(System.IO.Path.GetTempPath(), dbName)));
+        sc.AddScoped<IWalFileIO>(_ => new InMemoryWalFileIO());
 
         var sp = sc.BuildServiceProvider();
         var dbe = sp.GetRequiredService<DatabaseEngine>();

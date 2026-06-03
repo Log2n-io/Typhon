@@ -3,8 +3,8 @@ import { componentNameFromResource } from '../resourceComponent';
 
 describe('componentNameFromResource', () => {
   it('recovers the registered component name from a ComponentTable resource', () => {
-    expect(componentNameFromResource('ComponentTable', 'ComponentTable_Typhon.Workbench.Fixture.CompA')).toBe(
-      'Typhon.Workbench.Fixture.CompA',
+    expect(componentNameFromResource('ComponentTable', 'ComponentTable_Typhon.Workbench.Fixture.Player')).toBe(
+      'Typhon.Workbench.Fixture.Player',
     );
   });
 

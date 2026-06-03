@@ -183,6 +183,7 @@ public sealed class TraceSchemaProvider : IStaticSchemaProvider
 
         return new ArchetypeInfoDto(
             ArchetypeId: a.ArchetypeId.ToString(CultureInfo.InvariantCulture),
+            Name: a.Name,
             ComponentTypes: componentTypes,
             EntityCount: 0,
             ComponentSize: componentSize,

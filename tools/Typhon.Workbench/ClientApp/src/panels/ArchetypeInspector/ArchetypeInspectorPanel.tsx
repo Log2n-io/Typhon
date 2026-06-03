@@ -10,6 +10,7 @@ import { openDbMapForComponent } from '@/shell/commands/openDbMap';
 import { StorageModePill } from '@/panels/SchemaExplorer/SchemaExplorerPanel';
 import InspectorTargetSwitcher, { type SwitcherItem } from '@/panels/schemaCommon/InspectorTargetSwitcher';
 import { useInspectorTarget } from '@/panels/schemaCommon/useInspectorTarget';
+import { useArchetypeNames } from '@/hooks/queryConsole/useArchetypeNames';
 import type { TargetCandidate } from '@/panels/schemaCommon/inspectorTarget';
 import { findArchetype, resolveArchetypeComponents, indexedComponents } from './archetypeInspectorModel';
 
@@ -33,6 +34,7 @@ export default function ArchetypeInspectorPanel(_props: IDockviewPanelProps) {
   const { list: archetypes, isLoading: aLoading, isError } = useArchetypeList();
   const { list: components } = useComponentList();
   const select = useSelectionStore((s) => s.select);
+  const { label: archName } = useArchetypeNames();
 
   // Self-addressing target (PC-9): the bus `archetype` leaf when there is one, else an auto-pick over the
   // loaded archetypes — so this deep view is never an empty dead-end. Drilling into a component sets the
@@ -44,13 +46,16 @@ export default function ArchetypeInspectorPanel(_props: IDockviewPanelProps) {
   const { targetId, auto, pick } = useInspectorTarget({ type: 'archetype', candidates, loading: aLoading });
   const switcherItems = useMemo<SwitcherItem[]>(
     () =>
-      archetypes.map((a) => ({
-        id: a.archetypeId,
-        label: `#${a.archetypeId}`,
-        meta: `${a.entityCount.toLocaleString()} ent`,
-        keywords: a.componentTypes.join(' '),
-      })),
-    [archetypes],
+      archetypes.map((a) => {
+        const short = archName(a.archetypeId);
+        return {
+          id: a.archetypeId,
+          label: short === a.archetypeId ? `#${a.archetypeId}` : short,
+          meta: `#${a.archetypeId} · ${a.entityCount.toLocaleString()} ent`,
+          keywords: `#${a.archetypeId} ${a.archetypeId} ${a.componentTypes.join(' ')}`,
+        };
+      }),
+    [archetypes, archName],
   );
 
   const [tab, setTab] = useState<Tab>('components');
@@ -58,13 +63,20 @@ export default function ArchetypeInspectorPanel(_props: IDockviewPanelProps) {
   const archetype = findArchetype(archetypes, targetId);
 
   if (isError) {
-    return <div data-testid="archetype-inspector" className="p-3 text-fs-base text-destructive">Failed to load schema.</div>;
+    return (
+      <div data-testid="archetype-inspector" className="p-3 text-fs-base text-destructive">
+        Failed to load schema.
+      </div>
+    );
   }
   if (!archetype) {
     // No resolvable target: still loading, or (PC-2 Empty) the DB genuinely has no archetypes. PC-9 means we
     // never show a "pick elsewhere" dead-end while archetypes exist.
     return (
-      <div data-testid="archetype-inspector" className="flex h-full items-center justify-center bg-background p-4 text-center">
+      <div
+        data-testid="archetype-inspector"
+        className="flex h-full items-center justify-center bg-background p-4 text-center"
+      >
         <p className="text-fs-base text-muted-foreground">
           {aLoading || candidates.length > 0 ? 'Loading…' : 'This database has no archetypes.'}
         </p>
@@ -81,7 +93,11 @@ export default function ArchetypeInspectorPanel(_props: IDockviewPanelProps) {
       <div className="wb-pane-header flex items-center gap-2 border-b border-border px-3 py-1.5">
         <InspectorTargetSwitcher
           label="Archetype"
-          currentLabel={`#${archetype.archetypeId}`}
+          currentLabel={
+            archName(archetype.archetypeId) === archetype.archetypeId
+              ? `#${archetype.archetypeId}`
+              : `${archName(archetype.archetypeId)} (#${archetype.archetypeId})`
+          }
           auto={auto}
           autoTitle="Auto-selected the archetype with the most entities — pick another above."
           items={switcherItems}
@@ -145,7 +161,9 @@ export default function ArchetypeInspectorPanel(_props: IDockviewPanelProps) {
                   }}
                 >
                   <TableCell className="font-mono">{r.typeName}</TableCell>
-                  <TableCell className="text-right tabular-nums">{r.summary ? `${r.summary.storageSize}B` : '—'}</TableCell>
+                  <TableCell className="text-right tabular-nums">
+                    {r.summary ? `${r.summary.storageSize}B` : '—'}
+                  </TableCell>
                   <TableCell className="text-right tabular-nums">{r.summary?.indexCount ?? '—'}</TableCell>
                   <TableCell className="text-right text-muted-foreground">{r.summary?.storageMode ?? '—'}</TableCell>
                 </TableRow>
@@ -175,13 +193,21 @@ export default function ArchetypeInspectorPanel(_props: IDockviewPanelProps) {
         {tab === 'storage' && (
           <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 p-4 text-fs-base">
             <dt className="text-muted-foreground">Strategy</dt>
-            <dd><StorageModePill mode={archetype.storageMode} /></dd>
+            <dd>
+              <StorageModePill mode={archetype.storageMode} />
+            </dd>
             <dt className="text-muted-foreground">Entities</dt>
             <dd className="tabular-nums">{archetype.entityCount.toLocaleString()}</dd>
             <dt className="text-muted-foreground">Chunks</dt>
-            <dd className="tabular-nums">{archetype.storageMode === 'cluster' ? `${archetype.chunkCount} × ${archetype.chunkCapacity}` : '—'}</dd>
+            <dd className="tabular-nums">
+              {archetype.storageMode === 'cluster' ? `${archetype.chunkCount} × ${archetype.chunkCapacity}` : '—'}
+            </dd>
             <dt className="text-muted-foreground">Occupancy</dt>
-            <dd className="tabular-nums">{archetype.storageMode === 'cluster' && archetype.chunkCount > 0 ? `${archetype.occupancyPct.toFixed(1)}%` : '—'}</dd>
+            <dd className="tabular-nums">
+              {archetype.storageMode === 'cluster' && archetype.chunkCount > 0
+                ? `${archetype.occupancyPct.toFixed(1)}%`
+                : '—'}
+            </dd>
             {rows.length > 0 && (
               <dd className="col-span-2 mt-2">
                 <button

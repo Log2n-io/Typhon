@@ -314,6 +314,7 @@ internal static class ArchetypeRegistry
         {
             ArchetypeId = archetypeId,
             Revision = attr.Revision,
+            Alias = attr.Alias,
             ComponentCount = totalComponentCount,
             ParentArchetypeId = parentArchetypeId,
             ArchetypeType = archetypeType,

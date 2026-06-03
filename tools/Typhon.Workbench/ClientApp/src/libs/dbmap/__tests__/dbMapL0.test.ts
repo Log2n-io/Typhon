@@ -178,7 +178,7 @@ describe('computeComposition — segment encoding', () => {
       { id: 1, rootPageIndex: 0, kind: 'ComponentTable', pageCount: 3, typeName: 'UserRow' },
     ]);
     const stripes = computeComposition(data, 'segment');
-    expect(stripes[0].label).toBe('ComponentTable #1 · UserRow');
+    expect(stripes[0].label).toBe('ComponentTable UserRow');
   });
 
   it(`collapses past-top-${L0_SEGMENT_TOP_N} segments into one Other stripe ordered before Unowned`, () => {

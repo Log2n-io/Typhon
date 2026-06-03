@@ -27,7 +27,7 @@ export interface DbMapChunkSelection {
   chunkId: number;
 }
 
-/** A selected content cell within a chunk (L4). */
+/** A selected content cell within a chunk (L4) — or, when {@link slotIndex} is set, a cluster entity slot (L5). */
 export interface DbMapCellSelection {
   kind: 'cell';
   pageIndex: number;
@@ -35,6 +35,12 @@ export interface DbMapCellSelection {
   chunkId: number;
   /** Byte offset of the cell within the chunk — identifies it in the decoded cell list. */
   cellOffset: number;
+  /**
+   * Set only for an L5 cluster-entity selection: the entity's slot within its cluster chunk. The Inspector keys the
+   * full per-component field decode off `(segmentId, chunkId, slotIndex)` (file-map §10 Q4 override). Absent for a
+   * plain L4 content cell.
+   */
+  slotIndex?: number;
 }
 
 /** A selected logical segment — drives the A6 harvest summary card (Module 15, §10.1). */

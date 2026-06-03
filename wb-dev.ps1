@@ -45,7 +45,7 @@ param(
     [string]$Action = 'start',
 
     # Overrides the Kestrel / ASP.NET Core log category (Microsoft.AspNetCore) via a command-line
-    # config key passed to `dotnet watch`. Applies to start / restart / watch-kestrel. Without it,
+    # config key passed to the Kestrel host (`dotnet watch`/`run`). Applies to start / restart / watch-kestrel. Without it,
     # appsettings.Development.json's "Information" wins. Accepts the standard .NET levels (e.g.
     # -LogLevel Warning, or the prefix/colon form -log:warning).
     [ValidateSet('Trace', 'Debug', 'Information', 'Warning', 'Error', 'Critical', 'None')]
@@ -54,9 +54,16 @@ param(
     # Prod-mode SPA: build the client bundle with NODE_ENV=production then serve via `vite preview`
     # instead of `vite` (dev). Eliminates dev-mode React noise (strict-mode double-render, profiler
     # instrumentation, HMR overhead) so a `Performance` recording shows what users actually feel.
-    # Kestrel still runs in dev (`dotnet watch`) — the API's perf is not what changes between modes;
-    # the SPA bundle is. Applies to: start / restart.
-    [switch]$Prod
+    # Governs the SPA only — orthogonal to -Configuration (which governs the Kestrel build). Applies to: start / restart.
+    [switch]$Prod,
+
+    # .NET build configuration for the Kestrel host. 'Debug' (default) launches via `dotnet watch` — hot reload, dev
+    # iteration. 'Release' launches via `dotnet run -c Release` — an optimized build with NO file watcher, for API perf
+    # measurement where recompile-on-save and watch overhead are unwanted. ASPNETCORE_ENVIRONMENT and the port still
+    # come from launchSettings.json, so Release binds :5200 with the same Development config. Applies to start /
+    # restart / watch-kestrel.
+    [ValidateSet('Debug', 'Release')]
+    [string]$Configuration = 'Debug'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -78,6 +85,14 @@ $ClientApp      = Join-Path $WorkbenchProj 'ClientApp'
 $KestrelAppArgs = if ($LogLevel) { @('--', "--Logging:LogLevel:Microsoft.AspNetCore=$LogLevel") } else { @() }
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
+
+# Kestrel launch verb, chosen by -Configuration. Debug → `dotnet watch` (hot reload). Release → `dotnet run -c Release`
+# (optimized build, no file watcher) for API perf measurement. Returned as an arg array so both the detached `start`
+# path (a cmd.exe string) and the foreground `watch-kestrel` path (a Start-Process arg list) build from one decision.
+function Get-KestrelDotnetVerbArgs {
+    if ($Configuration -eq 'Release') { return @('run', '-c', 'Release') }
+    return @('watch')
+}
 
 function Read-DevState {
     if (-not (Test-Path $StateFile)) { return $null }
@@ -232,15 +247,22 @@ Options:
                      `vite preview` instead of the dev server. Eliminates dev-mode
                      React noise (strict-mode double-render, profiler instrumentation,
                      HMR overhead) so a Performance recording shows what users actually
-                     feel. Kestrel still runs in dev — the API perf is not what
-                     differs between modes. Applies to: start / restart.
+                     feel. Governs the SPA only (orthogonal to -Configuration).
+                     Applies to: start / restart.
+  -Configuration <c> .NET build config for the Kestrel host. Debug (default) ->
+                     `dotnet watch` (hot reload); Release -> `dotnet run -c Release`
+                     (optimized, no file watcher) for API perf measurement. Port and
+                     environment still come from launchSettings.json. Applies to:
+                     start / restart / watch-kestrel.
 
 Examples:
   wb-dev.ps1 watch-kestrel -log:warning
   wb-dev.ps1 start -LogLevel Warning
-  wb-dev.ps1 start -Prod                 # production SPA build, perf-test mode
+  wb-dev.ps1 start -Prod                            # production SPA build, perf-test mode
+  wb-dev.ps1 start -Configuration Release           # Release Kestrel + dev SPA
+  wb-dev.ps1 start -Prod -Configuration Release     # everything in release/prod
 
-State:    .claude/state/wb-dev.json  (includes "mode": "dev" | "prod")
+State:    .claude/state/wb-dev.json  (includes "mode": "dev" | "prod", "configuration")
 Logs:     .claude/state/wb-dev.kestrel.log, wb-dev.vite.log
           .claude/state/wb-dev.kestrel.err.log, wb-dev.vite.err.log
 
@@ -271,7 +293,9 @@ function Invoke-Status {
     $port5173 = Get-PortOwner 5173
 
     $modeLabel = if ($state.PSObject.Properties['mode'] -and $state.mode) { $state.mode } else { 'dev (legacy state)' }
+    $cfgLabel  = if ($state.PSObject.Properties['configuration'] -and $state.configuration) { $state.configuration } else { 'Debug (legacy state)' }
     Write-Host "Mode:    $modeLabel"
+    Write-Host "Config:  $cfgLabel (Kestrel)"
     Write-Host "Kestrel  pid $($state.kestrelPid)  $(if ($kAlive) { 'alive' } else { 'dead' })"
     Write-Host "         :5200  $(if ($port5200) { "bound (pid $port5200)" } else { 'unbound' })"
     Write-Host "Vite     pid $($state.vitePid)  $(if ($vAlive) { 'alive' } else { 'dead' })"
@@ -335,7 +359,8 @@ function Invoke-Start {
     # Ctrl+C sends CTRL_C_EVENT to the entire group, killing npm/node without console-mode cleanup
     # and leaving the terminal with VT mode stuck on (the "goes crazy" symptom).
     $kestrelAppArgStr = if ($KestrelAppArgs.Count) { ' ' + ($KestrelAppArgs -join ' ') } else { '' }
-    $kestrelCmd = "dotnet watch --project `"$WorkbenchProj`"$kestrelAppArgStr 1>`"$KestrelLog`" 2>`"$KestrelErrLog`""
+    $kestrelVerb = (Get-KestrelDotnetVerbArgs) -join ' '
+    $kestrelCmd = "dotnet $kestrelVerb --project `"$WorkbenchProj`"$kestrelAppArgStr 1>`"$KestrelLog`" 2>`"$KestrelErrLog`""
     $kestrel = Start-Process 'cmd.exe' `
         -ArgumentList "/c $kestrelCmd" `
         -WorkingDirectory $RepoRoot `
@@ -356,7 +381,8 @@ function Invoke-Start {
     # to actually bind. 90 s leaves comfortable headroom for cold caches while still failing
     # fast on a genuine hang.
     $bindTimeoutSec = 90
-    $modeLabel = if ($Prod) { 'PROD (vite preview)' } else { 'dev (vite hmr)' }
+    $spaMode = if ($Prod) { 'PROD (vite preview)' } else { 'dev (vite hmr)' }
+    $modeLabel = "Kestrel=$Configuration; SPA=$spaMode"
     Write-Host "launching [$modeLabel]: Kestrel pid $($kestrel.Id) + Vite pid $($vite.Id)"
     if ($LogLevel) { Write-Host "Microsoft.AspNetCore log level overridden -> $LogLevel" }
     Write-Host "waiting for ports to bind (timeout $bindTimeoutSec s)..."
@@ -387,8 +413,9 @@ function Invoke-Start {
         $newState = [pscustomobject]@{
             kestrelPid = $kestrel.Id
             vitePid    = $vite.Id
-            mode       = if ($Prod) { 'prod' } else { 'dev' }
-            startedAt  = (Get-Date).ToString('o')
+            mode          = if ($Prod) { 'prod' } else { 'dev' }
+            configuration = $Configuration
+            startedAt     = (Get-Date).ToString('o')
             kestrelLog = $KestrelLog
             viteLog    = $ViteLog
         }
@@ -491,10 +518,11 @@ function Invoke-WatchKestrel {
         New-Item -ItemType Directory -Path $StateDir -Force | Out-Null
     }
 
-    Write-Host 'starting Kestrel (dotnet watch) in this window — Ctrl+C to stop'
+    $kestrelVerbArgs = Get-KestrelDotnetVerbArgs
+    Write-Host "starting Kestrel (dotnet $($kestrelVerbArgs -join ' ')) in this window — Ctrl+C to stop"
     if ($LogLevel) { Write-Host "Microsoft.AspNetCore log level overridden -> $LogLevel" }
     $proc = Start-Process 'dotnet' `
-        -ArgumentList (@('watch', '--project', $WorkbenchProj) + $KestrelAppArgs) `
+        -ArgumentList ($kestrelVerbArgs + @('--project', $WorkbenchProj) + $KestrelAppArgs) `
         -WorkingDirectory $RepoRoot `
         -NoNewWindow -PassThru
 

@@ -466,8 +466,8 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
     /// <param name="newIndexFieldIds">Optional set of FieldIds for newly added indexes that need creating instead of loading.
     /// When non-null, indexes for these fields are created fresh; all other indexes are loaded from disk.</param>
     internal ComponentTable(DatabaseEngine dbe, DBComponentDefinition definition, IResource parent, int componentSPI, int versionSPI, int defaultIndexSPI,
-        int string64IndexSPI, int tailIndexSPI = 0, StorageMode storageMode = StorageMode.Versioned, ExhaustionPolicy exhaustionPolicy = ExhaustionPolicy.None, 
-        HashSet<int> newIndexFieldIds = null, ChangeSet changeSet = null) : 
+        int string64IndexSPI, int tailIndexSPI = 0, StorageMode storageMode = StorageMode.Versioned, ExhaustionPolicy exhaustionPolicy = ExhaustionPolicy.None,
+        HashSet<int> newIndexFieldIds = null, ChangeSet changeSet = null, bool restoreCollectionInfo = false) :
         base($"ComponentTable_{definition.Name}", ResourceType.ComponentTable, parent, exhaustionPolicy)
     {
         DBE = dbe;
@@ -503,7 +503,18 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
         BuildIndexedFieldInfo(true, changeSet, newIndexFieldIds);
         ViewRegistry = new ViewRegistry(IndexedFieldInfos.Length);
 
-        ComponentCollectionVSBSByOffset = new Dictionary<int, VariableSizedBufferSegmentBase<PersistentStore>>();
+        // On reopen, restore HasCollections + the offset→VSBS map — but ONLY for user tables (restoreCollectionInfo). User-table load sites pass true; they run
+        // AFTER the component-collection segment pool has been reloaded, so GetComponentCollectionVSBS reconnects to the existing segment. The system tables
+        // (e.g. ComponentR1.Fields) are constructed BEFORE that reload and re-derive their CC from runtime registration, so they pass false — calling
+        // BuildComponentCollectionInfo there would fresh-allocate and orphan the persisted segment (losing the field definitions → corrupt migration). See #387.
+        if (restoreCollectionInfo)
+        {
+            BuildComponentCollectionInfo(changeSet);
+        }
+        else
+        {
+            ComponentCollectionVSBSByOffset = new Dictionary<int, VariableSizedBufferSegmentBase<PersistentStore>>();
+        }
 
         if (storageMode == StorageMode.SingleVersion)
         {
@@ -518,7 +529,7 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
     /// </summary>
     internal ComponentTable(DatabaseEngine dbe, DBComponentDefinition definition, IResource parent, ChunkBasedSegment<PersistentStore> componentSegment,
         ChunkBasedSegment<PersistentStore> revisionSegment, int defaultIndexSPI, int string64IndexSPI, int tailIndexSPI = 0,
-        ExhaustionPolicy exhaustionPolicy = ExhaustionPolicy.None, HashSet<int> newIndexFieldIds = null, ChangeSet changeSet = null) :
+        ExhaustionPolicy exhaustionPolicy = ExhaustionPolicy.None, HashSet<int> newIndexFieldIds = null, ChangeSet changeSet = null, bool restoreCollectionInfo = false) :
         base($"ComponentTable_{definition.Name}", ResourceType.ComponentTable, parent, exhaustionPolicy)
     {
         Debug.Assert(definition.StorageMode == StorageMode.Versioned, "Schema migration only applies to Versioned components");
@@ -541,7 +552,16 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
         BuildIndexedFieldInfo(true, changeSet, newIndexFieldIds);
         ViewRegistry = new ViewRegistry(IndexedFieldInfos.Length);
 
-        ComponentCollectionVSBSByOffset = new Dictionary<int, VariableSizedBufferSegmentBase<PersistentStore>>();
+        // See the load ctor: restore CC info only for user tables (restoreCollectionInfo). Migration may shift field offsets, so the map is rebuilt from the NEW
+        // definition. Migrated user tables are constructed after the segment-pool reload, so reconnection is safe; system tables never use this ctor.
+        if (restoreCollectionInfo)
+        {
+            BuildComponentCollectionInfo(changeSet);
+        }
+        else
+        {
+            ComponentCollectionVSBSByOffset = new Dictionary<int, VariableSizedBufferSegmentBase<PersistentStore>>();
+        }
     }
 
     /// <summary>
@@ -553,28 +573,31 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
         var opts = dbe.TransientOptions;
         var em = dbe.EpochManager;
 
-        // Component data segment
+        // Component data segment.
+        // Order matters: allocate the initial pages BEFORE constructing the segment. TransientStore is a struct and the segment's base LogicalSegment copies it
+        // by value in its ctor — allocating after construction would leave the segment's copy at _pageCount=0, so the first Grow re-allocates duplicate page
+        // indices and corrupts the forward chain. Allocating first means the ctor captures the correct _pageCount.
         _transientComponentStore = new TransientStore(opts, dbe.MemoryAllocator, em, this);
         var compStore = _transientComponentStore.Value;
-        TransientComponentSegment = new ChunkBasedSegment<TransientStore>(em, compStore, ComponentTotalSize);
         Span<int> compPages = stackalloc int[ComponentSegmentStartingSize];
         compStore.AllocatePages(ref compPages, 0, null);
+        TransientComponentSegment = new ChunkBasedSegment<TransientStore>(em, compStore, ComponentTotalSize);
         TransientComponentSegment.Create(PageBlockType.None, StorageSegmentKind.Component, compPages, false);
 
-        // Default index segment (for PK B+Tree and non-String64 secondary indexes)
+        // Default index segment (for PK B+Tree and non-String64 secondary indexes). Allocate-before-construct, see note above.
         _transientDefaultIndexStore = new TransientStore(opts, dbe.MemoryAllocator, em, this);
         var idxStore = _transientDefaultIndexStore.Value;
-        TransientDefaultIndexSegment = new ChunkBasedSegment<TransientStore>(em, idxStore, sizeof(Index64Chunk));
         Span<int> idxPages = stackalloc int[MainIndexSegmentStartingSize];
         idxStore.AllocatePages(ref idxPages, 0, null);
+        TransientDefaultIndexSegment = new ChunkBasedSegment<TransientStore>(em, idxStore, sizeof(Index64Chunk));
         TransientDefaultIndexSegment.Create(PageBlockType.None, StorageSegmentKind.Index, idxPages, false);
 
-        // String64 index segment
+        // String64 index segment. Allocate-before-construct, see note above.
         _transientString64IndexStore = new TransientStore(opts, dbe.MemoryAllocator, em, this);
         var s64Store = _transientString64IndexStore.Value;
-        TransientString64IndexSegment = new ChunkBasedSegment<TransientStore>(em, s64Store, sizeof(IndexString64Chunk));
         Span<int> s64Pages = stackalloc int[MainIndexSegmentStartingSize];
         s64Store.AllocatePages(ref s64Pages, 0, null);
+        TransientString64IndexSegment = new ChunkBasedSegment<TransientStore>(em, s64Store, sizeof(IndexString64Chunk));
         TransientString64IndexSegment.Create(PageBlockType.None, StorageSegmentKind.Index, s64Pages, false);
 
         BuildIndexedFieldInfo(false);

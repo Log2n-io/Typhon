@@ -5,6 +5,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { useSessionStore } from '@/stores/useSessionStore';
 import { useSelectionStore } from '@/stores/useSelectionStore';
 import { useDbMapHealth } from '@/hooks/dbmap/useDbMapHealth';
+import { useComponentNames } from '@/hooks/queryConsole/useComponentNames';
 import { openDbMapForComponent } from '@/shell/commands/openDbMap';
 import { segmentRgb, rgbCss } from '@/libs/dbmap/dbMapColors';
 import { sortHealthSegments, type HealthSortKey } from './storageHealthModel';
@@ -20,6 +21,9 @@ export default function StorageHealthPanel(_props: IDockviewPanelProps) {
   const sessionId = useSessionStore((s) => s.sessionId);
   const { data, isLoading, isError, refetch, isFetching } = useDbMapHealth(sessionId);
   const select = useSelectionStore((s) => s.select);
+  // Friendly component name for component-table segments (matches the File Map's segment labels); non-component
+  // segments carry no typeName and fall back to `#<id>`.
+  const { label: componentName } = useComponentNames();
 
   const [sortKey, setSortKey] = useState<HealthSortKey>('occupancyPct');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
@@ -109,7 +113,7 @@ export default function StorageHealthPanel(_props: IDockviewPanelProps) {
                       className="mr-1.5 inline-block h-2 w-2 rounded-sm align-middle"
                       style={{ backgroundColor: rgbCss(segmentRgb(s.id)) }}
                     />
-                    {s.typeName || `#${s.id}`}
+                    {s.typeName ? componentName(s.typeName) : `#${s.id}`}
                   </TableCell>
                   <TableCell>{s.kind}</TableCell>
                   <TableCell className="text-right tabular-nums">{s.pageCount.toLocaleString()}</TableCell>

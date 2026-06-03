@@ -197,9 +197,10 @@ public class DatabaseEngineOptions
     public DeferredCleanupOptions DeferredCleanup { get; set; } = new();
 
     /// <summary>
-    /// WAL writer configuration. Null disables WAL durability (in-memory only).
+    /// WAL writer configuration. WAL + checkpoint are mandatory: this always resolves to a non-null configuration. To run without disk I/O (tests,
+    /// benchmarks, throwaway sessions), register an in-memory <see cref="IWalFileIO"/> in DI rather than disabling the WAL.
     /// </summary>
-    public WalWriterOptions Wal { get; set; }
+    public WalWriterOptions Wal { get; set; } = new();
 
     /// <summary>
     /// Transient storage configuration (heap-backed pages for <see cref="StorageMode.Transient"/> components).
@@ -254,6 +255,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     internal const string BK_CollectionCount        = "collection.count";
     internal const string BK_UserSchemaVersion      = "UserSchemaVersion";
     internal const string BK_LastTickFenceLSN       = "LastTickFenceLSN";
+    internal const string BK_CleanShutdown          = "CleanShutdown";
     // ReSharper restore InconsistentNaming
 
     // Transaction counters for observability
@@ -289,6 +291,29 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     private ConcurrentDictionary<ushort, ComponentTable> _componentTableByWalTypeId;
     private long _lastTickFenceLSN;
     internal long LastTickFenceLSN => _lastTickFenceLSN;
+
+    // ─── Clean-shutdown HEAD marker (open-time fast path) ─────────────────────────────────────────────────────────
+    // Versioned HEAD values live in-place in the persisted cluster slot (07-versioned-overlay.md §Write-Path step 4),
+    // so on a graceful close the on-disk slots are already current and RebuildVersionedHeadFromChain — ~49% of a large
+    // DB's open cost — is pure waste. A graceful Dispose sets a clean-shutdown FLAG (BK_CleanShutdown = 1) via
+    // MarkCleanShutdown (a separate fsync strictly after the data flush). On open we trust the persisted HEADs iff that
+    // flag was set and no component migrated this session, then clear the flag before any mutation so a crash this
+    // session forces a rebuild on the next open. The flag is deliberately NOT keyed on CheckpointLSN: a bulk-generated DB
+    // closes cleanly with CheckpointLSN == 0 (its data went straight to the .bin, nothing checkpointed through the WAL),
+    // and its HEADs are still current — gating trust on a non-zero LSN wrongly forced a full rebuild for exactly those
+    // DBs. CheckpointLSN is kept only for the diagnostic log line. See claude/rules/durability.md (CS-01..CS-03).
+    private bool _cleanShutdownAtOpen;
+    private long _checkpointLsnAtOpen;
+    private bool _headsTrusted;
+
+    /// <summary>Diagnostic + test oracle: the number of archetypes whose Versioned HEADs were rebuilt during the last
+    /// <see cref="InitializeArchetypes"/>. 0 on a trusted (clean) reopen; &gt;0 after a crash or on a legacy database.</summary>
+    internal int LastOpenVersionedHeadRebuildCount;
+
+    /// <summary>Test-only: when set, <see cref="Dispose"/> skips <c>MarkCleanShutdown</c>, reproducing an unclean shutdown
+    /// (a real crash also never writes the marker). Unit tests cannot abort the process — same convention as the
+    /// <c>BulkLoadRecoveryTests</c> incomplete-bulk path.</summary>
+    internal bool SimulateUncleanShutdownForTest;
 
     /// <summary>
     /// Tick-scoped state shared across the four fence phases. Reset by <c>TyphonRuntime.RunParallelFence</c>
@@ -585,8 +610,12 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// </summary>
     public void ForceCheckpoint() => CheckpointManager?.ForceCheckpoint();
 
+    // Optional WAL file-IO backend supplied by the host (DI). Null = the engine owns a production WalFileIO. Tests register an InMemoryWalFileIO to run
+    // the full WAL pipeline with zero disk I/O. When injected, the engine does NOT own/dispose it here — the DI scope's lifetime governs it.
+    private readonly IWalFileIO _injectedWalIo;
+
     internal DatabaseEngine(IResourceRegistry resourceRegistry, EpochManager epochManager, DeadlineWatchdog watchdog, ManagedPagedMMF mmf,
-        IMemoryAllocator memoryAllocator, DatabaseEngineOptions options, ILogger<DatabaseEngine> log, string name = null)
+        IMemoryAllocator memoryAllocator, DatabaseEngineOptions options, ILogger<DatabaseEngine> log, string name = null, IWalFileIO injectedWalIo = null)
         : base(name ?? $"DatabaseEngine_{Guid.NewGuid():N}", ResourceType.Engine, resourceRegistry.DataEngine)
     {
         // Engine initialization
@@ -595,6 +624,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         Watchdog = watchdog;
         _logger = log;
         _options = options;
+        _injectedWalIo = injectedWalIo;
         MemoryAllocator = memoryAllocator;
         _durabilityNode = resourceRegistry.Durability;
         TimeoutOptions.Current = _options.Timeouts;
@@ -656,6 +686,14 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             // 2. All committed transaction data is on disk even without WAL/checkpoint
             PersistEngineState();
 
+            // Clean-shutdown HEAD marker: STRICTLY AFTER PersistEngineState's data fsync (own separate fsync, never
+            // bundled), so a torn close can never leave the marker durable ahead of the cluster pages it vouches for.
+            // Skipped by SimulateUncleanShutdownForTest to reproduce a crash (which also never writes the marker).
+            if (!SimulateUncleanShutdownForTest)
+            {
+                MarkCleanShutdown();
+            }
+
             Logger?.LogInformation("Engine disposing: WalManager");
             WalManager?.Dispose();
             WalManager = null;
@@ -684,31 +722,32 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         var walOptions = _options.Wal;
         if (walOptions == null)
         {
-            return;
+            throw new InvalidOperationException(
+                "WAL is mandatory: DatabaseEngineOptions.Wal must not be null. For no-disk-I/O scenarios (tests, benchmarks), register an in-memory IWalFileIO instead.");
         }
 
-        // Engine constructs the production WAL file I/O internally — IWalFileIO is an engine-internal type
-        // (consumers don't plug in their own implementation; the only friend that ever did was the test suite,
-        // which builds a WalManager directly with InMemoryWalFileIO instead of going through DatabaseEngine).
-        IWalFileIO walFileIO = new WalFileIO();
+        // Use the host-injected WAL file-IO when supplied (tests register an InMemoryWalFileIO to exercise the full WAL pipeline with no disk I/O);
+        // otherwise construct the production file-based implementation. WalManager does NOT dispose this backend: production WalFileIO is stateless
+        // (no-op Dispose; segment handles are owned by WalSegmentManager), and an injected backend's lifetime is governed by the DI scope (see _injectedWalIo).
+        IWalFileIO walFileIO = _injectedWalIo ?? new WalFileIO();
 
         var commitBufferCapacity = _options.Resources.WalRingBufferSizeBytes / 2;
         WalManager = new WalManager(walOptions, MemoryAllocator, walFileIO, _durabilityNode, commitBufferCapacity);
 
         // Determine continuation point from recovery or fresh start
         var lastLSN = _lastRecoveryResult.LastValidLSN;
-        var lastSegmentId = 0L; // Segment continuity is handled by WalSegmentManager scanning existing files
-        WalManager.Initialize(lastSegmentId, lastLSN > 0 ? lastLSN + 1 : 1);
+        var lastSegmentId = 0L; // Floor only — WalSegmentManager.Initialize scans the on-disk directory and continues past the highest existing id.
+        // Checkpoint frontier for the reopen reconcile: WAL segments whose records are all below this are already in the
+        // data file and get reclaimed; segments with records ≥ this are retained for crash recovery (REC-04 / WR-01).
+        var checkpointLsn = MMF.Bootstrap.GetLong(ManagedPagedMMF.BK_CheckpointLSN);
+        WalManager.Initialize(lastSegmentId, lastLSN > 0 ? lastLSN + 1 : 1, checkpointLsn);
         WalManager.Logger = Logger;
         WalManager.Start();
     }
 
     private void InitializeCheckpointManager()
     {
-        if (WalManager == null)
-        {
-            return;
-        }
+        // WAL is mandatory, so WalManager is always present and the checkpoint manager is always created.
 
         // Read initial CheckpointLSN from file header
         long initialCheckpointLsn;
@@ -720,7 +759,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         StagingBufferPool = new StagingBufferPool(MemoryAllocator, _durabilityNode);
 
         // Enable FPI capture — creates FpiBitmap internally using cache page count
-        MMF.EnableFpiCapture(WalManager, _options.Wal?.EnableFpiCompression ?? false);
+        MMF.EnableFpiCapture(WalManager, _options.Wal.EnableFpiCompression);
 
         // Activate CRC verification mode — recovery is complete, so OnLoad checks are now safe
         MMF.SetPageChecksumVerification(_options.Resources.PageChecksumVerification);
@@ -946,7 +985,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             var hasSpatial = table.SpatialIndex != null && table.SpatialIndex.FieldInfo.Mode == SpatialMode.Dynamic;
 
             // WAL serialization: SV only — Transient has no WAL persistence, skip straight to shadow processing.
-            if (table.StorageMode == StorageMode.SingleVersion && WalManager != null)
+            if (table.StorageMode == StorageMode.SingleVersion)
             {
                 if (entryCount > 0)
                 {
@@ -1119,9 +1158,12 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     {
         store = new TransientStore(TransientOptions, MemoryAllocator, EpochManager, this);
         var tsValue = store.Value;
-        segment = new ChunkBasedSegment<TransientStore>(EpochManager, tsValue, stride);
+        // Allocate the initial pages on `tsValue` BEFORE constructing the segment. TransientStore is a struct, so the segment's base LogicalSegment copies it
+        // by value in its ctor — if we allocated after construction, the segment's copy would keep _pageCount=0 and the first Grow would re-allocate duplicate
+        // page indices (0,1,2,3 again), corrupting the forward chain. Allocating first means base(tsValue) captures _pageCount=4. (See ComponentTable.CreateTransientSegments.)
         Span<int> tsPages = stackalloc int[4];
         tsValue.AllocatePages(ref tsPages, 0, null);
+        segment = new ChunkBasedSegment<TransientStore>(EpochManager, tsValue, stride);
         segment.Create(PageBlockType.None, StorageSegmentKind.Cluster, tsPages, false);
     }
 
@@ -1645,12 +1687,6 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 var table = engineState.SlotToComponentTable[slot];
                 table.PreviousTickHadDirtyEntities = true;
                 table.PreviousTickDirtyBitmap ??= Array.Empty<long>();
-            }
-
-            // WAL serialization requires WalManager — skip WAL write if not available.
-            if (WalManager == null)
-            {
-                return highestLSN;
             }
 
             var layout = clusterState.Layout;
@@ -3003,6 +3039,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             // Loading path: read SPIs from bootstrap
             var spi = MMF.Bootstrap.GetInt(BK_UowRegistrySPI);
             var checkpointLSN = MMF.Bootstrap.GetLong(ManagedPagedMMF.BK_CheckpointLSN);
+            // Clean-shutdown HEAD marker (see field docs): capture both LSNs now; InitializeArchetypes decides trust.
+            _cleanShutdownAtOpen = MMF.Bootstrap.GetInt(BK_CleanShutdown) == 1;
+            _checkpointLsnAtOpen = checkpointLSN;
             var segment = MMF.GetSegment(spi);
             UowRegistry = new UowRegistry(segment, MMF, EpochManager, MemoryAllocator, this);
 
@@ -3011,10 +3050,32 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             {
                 // Two-phase WAL recovery: LoadFromDiskRaw preserves Pending entries for WAL cross-referencing
                 UowRegistry.LoadFromDiskRaw();
-                using var recoveryFileIO = new WalFileIO();
-                using var recovery = new WalRecovery(recoveryFileIO, walDir, MMF);
-                // Pass null for dbe: replay is deferred until component tables are registered (system schema auto-loading, #57)
-                _lastRecoveryResult = recovery.Recover(UowRegistry, checkpointLSN, null);
+                // Reuse the injected WAL IO when present (same backend that wrote the segments reads them back); otherwise a throwaway production IO.
+                // Critical: when injected we must NOT dispose it here — InitializeWalManager (later in this ctor) reuses the same instance (R6).
+                var recoveryFileIO = _injectedWalIo ?? new WalFileIO();
+                try
+                {
+                    using var recovery = new WalRecovery(recoveryFileIO, walDir, MMF);
+                    // Pass null for dbe: replay is deferred until component tables are registered (system schema auto-loading, #57)
+                    // Open-time instrumentation (#diagnose-open): the WAL scan reads every segment to collect FPIs, so its
+                    // cost is O(accumulated WAL since last checkpoint) — a candidate contributor to a slow open. Time it.
+                    var walStart = Stopwatch.GetTimestamp();
+                    _lastRecoveryResult = recovery.Recover(UowRegistry, checkpointLSN, null);
+                    var walMs = (Stopwatch.GetTimestamp() - walStart) * 1000.0 / Stopwatch.Frequency;
+                    long walBytes = 0;
+                    foreach (var f in System.IO.Directory.GetFiles(walDir, "*.wal"))
+                    {
+                        walBytes += new System.IO.FileInfo(f).Length;
+                    }
+                    LogWalRecoveryTiming(walMs, walBytes);
+                }
+                finally
+                {
+                    if (_injectedWalIo == null)
+                    {
+                        recoveryFileIO.Dispose();
+                    }
+                }
             }
             else
             {
@@ -3547,6 +3608,51 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     }
 
     /// <summary>
+    /// Records the clean-shutdown flag so the next open can trust the persisted Versioned-component HEAD values and skip
+    /// the O(entities) <see cref="ArchetypeClusterState.RebuildVersionedHeadFromChain"/> walk. Sets
+    /// <see cref="BK_CleanShutdown"/> = 1 and fsyncs it on its own. The flag is deliberately NOT keyed on
+    /// <see cref="ManagedPagedMMF.BK_CheckpointLSN"/>: a bulk-generated DB closes cleanly with CheckpointLSN == 0 yet its
+    /// HEADs are current in the data file, so trust must not depend on the LSN value.
+    /// </summary>
+    /// <remarks>
+    /// Called from <see cref="Dispose"/> STRICTLY AFTER <see cref="PersistEngineState"/> has flushed all dirty data pages,
+    /// in its own <c>FlushToDisk</c> — never bundled with the data flush. This ordering is the safety contract: the flag
+    /// is only durable once every cluster page whose HEADs it vouches for is already durable, so a torn close leaves the
+    /// flag unwritten and the next open conservatively rebuilds. See claude/rules/durability.md (CS-01).
+    /// </remarks>
+    private void MarkCleanShutdown()
+    {
+        MMF.Bootstrap.SetInt(BK_CleanShutdown, 1);
+        MMF.SaveBootstrap();
+        MMF.FlushToDisk();
+        var checkpointLsn = MMF.Bootstrap.GetLong(ManagedPagedMMF.BK_CheckpointLSN);
+        LogCleanShutdownMarked(checkpointLsn);
+        LogWalWatermarksSnapshot("close", checkpointLsn);
+    }
+
+    /// <summary>
+    /// Diagnostic (issue: bulk-generated DBs leave a 640 MiB WAL that never recycles). Snapshots the WAL LSN watermarks
+    /// and segment count so a single open/close pair reveals WHY: low currentLSN ⇒ empty pre-allocated segments (trim
+    /// problem); high currentLSN with low checkpointLSN ⇒ records written but never made durable (reclaim-gate problem).
+    /// Reads are cheap and WalManager is alive at both call sites (open: post-ctor; close: before WalManager.Dispose).
+    /// </summary>
+    private void LogWalWatermarksSnapshot(string phase, long checkpointLsn)
+    {
+        var wal = WalManager;
+        if (wal?.SegmentManager == null)
+        {
+            return;
+        }
+        LogWalWatermarks(
+            phase,
+            wal.CommitBuffer?.NextLsn ?? 0,
+            wal.DurableLsn,
+            checkpointLsn,
+            wal.SegmentManager.SealedSegmentCount,
+            wal.SegmentManager.TotalWalBytes);
+    }
+
+    /// <summary>
     /// Persists EntityMap segment root page indexes and NextEntityKey counters for all archetypes.
     /// Called during engine dispose so that reopen can load EntityMaps directly (O(1)) instead of
     /// rebuilding from PK index scans.
@@ -3790,6 +3896,21 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             definition.StorageMode = storageModeOverride.Value;
         }
 
+        // Transient ComponentCollection is not supported (out of scope; its buffers live in a persistent VSBS while the component is heap-volatile, which would
+        // orphan them on restart). Fail fast at registration rather than leaking silently. Versioned and SingleVersion ComponentCollection are supported.
+        if (storageMode == StorageMode.Transient)
+        {
+            foreach (var field in definition.FieldsByName.Values)
+            {
+                if (field.Type == FieldType.Collection)
+                {
+                    throw new InvalidOperationException(
+                        $"Component '{definition.Name}' is Transient but declares a ComponentCollection field '{field.Name}'. " +
+                        "ComponentCollection is only supported on Versioned and SingleVersion components.");
+                }
+            }
+        }
+
         ComponentTable componentTable;
 
         if (_persistedComponents != null && _persistedComponents.TryGetValue(schemaName, out var persisted))
@@ -3894,13 +4015,13 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 {
                     componentTable = new ComponentTable(this, definition, this, migrationResult.Value.NewComponentSegment, migrationResult.Value.NewRevisionSegment,
                         persisted.Comp.DefaultIndexSPI, persisted.Comp.String64IndexSPI, persisted.Comp.TailIndexSPI, newIndexFieldIds: newIndexFieldIds,
-                        changeSet: migrationChangeSet);
+                        changeSet: migrationChangeSet, restoreCollectionInfo: true);
                 }
                 else
                 {
                     componentTable = new ComponentTable(this, definition, this, persisted.Comp.ComponentSPI, persisted.Comp.VersionSPI, persisted.Comp.DefaultIndexSPI,
                         persisted.Comp.String64IndexSPI, persisted.Comp.TailIndexSPI, storageMode: persistedMode, newIndexFieldIds: newIndexFieldIds,
-                        changeSet: migrationChangeSet);
+                        changeSet: migrationChangeSet, restoreCollectionInfo: true);
                 }
 
                 // Load spatial index from bootstrap if present
@@ -4036,6 +4157,32 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     public void InitializeArchetypes()
     {
         ArchetypeRegistry.Freeze();
+
+        // Open-time latency instrumentation (#diagnose-open): the three reopen rebuilds below are O(entities) and run on
+        // EVERY open (their state is intentionally not persisted — ADR-045). Accumulate per-phase elapsed across the
+        // per-archetype loop and log one summary at the end, so a slow open shows exactly where the time went. The
+        // Stopwatch.GetTimestamp() reads are ~nanoseconds — negligible against the work they bracket.
+        var initStart = Stopwatch.GetTimestamp();
+        long cellStateTicks = 0;
+        long clusterAabbTicks = 0;
+        long versionedHeadTicks = 0;
+
+        // Clean-shutdown HEAD fast path (see _headsTrusted field docs): trust the persisted cluster-slot HEADs — and so
+        // skip the O(entities) RebuildVersionedHeadFromChain below — iff the last close set the clean-shutdown flag AND no
+        // component migrated this session (a migration changes cluster layout, so those HEADs must be rebuilt). The flag
+        // is independent of CheckpointLSN, so a bulk-generated DB (CheckpointLSN == 0) is trusted too. Then durably clear
+        // the flag, BEFORE any mutation, so a crash this session forces a rebuild on the next open — the real crash-safety.
+        LastOpenVersionedHeadRebuildCount = 0;
+        _headsTrusted = _cleanShutdownAtOpen
+            && (_migratedComponents == null || _migratedComponents.Count == 0);
+        if (MMF.Bootstrap.GetInt(BK_CleanShutdown) != 0)
+        {
+            MMF.Bootstrap.SetInt(BK_CleanShutdown, 0);
+            MMF.SaveBootstrap();
+            MMF.FlushToDisk();
+        }
+        LogVersionedHeadReopenDecision(_headsTrusted, _cleanShutdownAtOpen, _checkpointLsnAtOpen);
+        LogWalWatermarksSnapshot("open", _checkpointLsnAtOpen);
 
         // Construct the engine-wide spatial grid. A grid is only required when at least one cluster-eligible archetype has a spatial component (checked
         // per-archetype below). The config is persisted so a generic opener (e.g. the Workbench) that never calls ConfigureSpatialGrid can still reconstruct
@@ -4318,6 +4465,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     }
                 }
 
+                // Build the SV ComponentCollection descriptor so destroy can release CC buffers held in cluster slots (SV CC has no revision chain — the slot
+                // is the sole owner). No-op for archetypes without an SV CC field.
+                _archetypeStates[meta.ArchetypeId].ClusterState?.InitializeCollections(slotToTable);
+
                 // Initialize per-archetype B+Tree indexes for cluster archetypes with indexed fields.
                 if (meta.HasClusterIndexes)
                 {
@@ -4416,12 +4567,16 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                         if (clusterState.ActiveClusterCount > 0)
                         {
                             using var cellEpoch = EpochGuard.Enter(EpochManager);
+                            var cellStart = Stopwatch.GetTimestamp();
                             clusterState.RebuildCellState(_spatialGrid);
+                            cellStateTicks += Stopwatch.GetTimestamp() - cellStart;
 
                             // Issue #230 Phase 1: rebuild per-cluster AABBs and the per-cell dynamic index from the same entity positions.
                             // Runs AFTER RebuildCellState so ClusterCellMap is populated. Transient state — not persisted, always reconstructed at startup.
                             // No-op for static-mode archetypes (Phase 1 supports dynamic mode only).
+                            var aabbStart = Stopwatch.GetTimestamp();
                             clusterState.RebuildClusterAabbs();
+                            clusterAabbTicks += Stopwatch.GetTimestamp() - aabbStart;
                         }
                     }
                     finally
@@ -4431,8 +4586,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 }
 
                 // Rebuild Versioned HEAD values in cluster slots from revision chains on reopen.
-                // Crash between commit (chain WAL'd) and tick fence (cluster slot WAL'd) can leave stale HEADs.
-                if (!isFreshAllocation && meta.VersionedSlotMask != 0)
+                // Crash between commit (chain WAL'd) and tick fence (cluster slot WAL'd) can leave stale HEADs — so the
+                // rebuild repairs them. On a graceful reopen (_headsTrusted), the persisted cluster slots are already
+                // current and this O(entities) walk is pure waste, so it is skipped. See _headsTrusted field docs.
+                if (!isFreshAllocation && meta.VersionedSlotMask != 0 && !_headsTrusted)
                 {
                     var clusterState = _archetypeStates[meta.ArchetypeId].ClusterState;
                     if (clusterState != null && clusterState.ActiveClusterCount > 0)
@@ -4441,7 +4598,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                         try
                         {
                             using var vEpoch = EpochGuard.Enter(EpochManager);
+                            var vStart = Stopwatch.GetTimestamp();
                             clusterState.RebuildVersionedHeadFromChain(meta, _archetypeStates[meta.ArchetypeId], changeSet);
+                            versionedHeadTicks += Stopwatch.GetTimestamp() - vStart;
+                            LastOpenVersionedHeadRebuildCount++;
                         }
                         finally
                         {
@@ -4455,11 +4615,25 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // Build and validate cascade delete graph (after all slots connected)
         ArchetypeRegistry.BuildAndValidateCascadeGraph();
 
-        // Rebuild entity maps from persisted ComponentTable data (entities from prior database sessions)
+        // Rebuild entity maps from persisted ComponentTable data (entities from prior database sessions). On a clean
+        // reopen this is the O(1) persisted-EntityMap fast path; it only walks entities for legacy / migrated DBs.
+        var entityMapStart = Stopwatch.GetTimestamp();
         RebuildEntityMapsFromPersistedData();
+        var entityMapTicks = Stopwatch.GetTimestamp() - entityMapStart;
 
         // Persist any new archetypes not yet in the database
         PersistNewArchetypes();
+
+        // Open-time breakdown — emitted at Information so a slow open is visible in the Workbench log without a debug
+        // build. Each figure is summed across all archetypes; the WAL-recovery cost is logged separately at its own
+        // call site (it runs in the engine ctor, before this method).
+        var toMs = 1000.0 / Stopwatch.Frequency;
+        LogInitArchetypesTiming(
+            (Stopwatch.GetTimestamp() - initStart) * toMs,
+            versionedHeadTicks * toMs,
+            clusterAabbTicks * toMs,
+            cellStateTicks * toMs,
+            entityMapTicks * toMs);
 
         // ─── Register this engine's use of every archetype Type currently in the registry ──────────────
         // Snapshot AFTER all archetypes are registered (Touch() / DeclareComponent / EnsureFinalized cascade) so we hold a reference to every Type this engine
@@ -4850,8 +5024,36 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
     internal void RecordConflict() => Interlocked.Increment(ref _transactionConflicts);
 
-    [LoggerMessage(LogLevel.Warning, "Deferred UoW #{uowId} disposed with {count} committed transaction(s) without Flush/FlushAsync. Data relies on engine shutdown safety net.")]
-    internal partial void LogDeferredUowNotFlushed(ushort uowId, int count);
+    // Open-time latency breakdown (#diagnose-open). Information level so it surfaces on a normal open without a Debug
+    // build — these run on every reopen and are the prime suspects for a slow large-DB open.
+    [LoggerMessage(LogLevel.Information,
+        "Open: InitializeArchetypes {totalMs:F0} ms — versionedHeadRebuild {versionedHeadMs:F0} ms, clusterAabbRebuild {clusterAabbMs:F0} ms, cellStateRebuild {cellStateMs:F0} ms, entityMapRebuild {entityMapMs:F0} ms")]
+    internal partial void LogInitArchetypesTiming(double totalMs, double versionedHeadMs, double clusterAabbMs, double cellStateMs, double entityMapMs);
+
+    [LoggerMessage(LogLevel.Information, "Open: WAL recovery {walMs:F0} ms over {walBytes} WAL bytes")]
+    internal partial void LogWalRecoveryTiming(double walMs, long walBytes);
+
+    [LoggerMessage(LogLevel.Information,
+        "Open: total {totalMs:F0} ms — engineConstruct {engineConstructMs:F0} ms (incl. WAL recovery + system-schema load), schemaDllLoad {schemaDllMs:F0} ms, initializeArchetypes {initArchetypesMs:F0} ms")]
+    internal partial void LogOpenTiming(double totalMs, double engineConstructMs, double schemaDllMs, double initArchetypesMs);
+
+    [LoggerMessage(LogLevel.Information,
+        "Open: Versioned-HEAD reopen {decision} — cleanShutdownFlag {cleanFlag}, checkpointLSN {checkpointLsn} ({detail})")]
+    private partial void LogVersionedHeadReopenDecisionCore(string decision, bool cleanFlag, long checkpointLsn, string detail);
+
+    private void LogVersionedHeadReopenDecision(bool trusted, bool cleanFlag, long checkpointLsn)
+        => LogVersionedHeadReopenDecisionCore(
+            trusted ? "TRUSTED (rebuild skipped)" : "REBUILD",
+            cleanFlag,
+            checkpointLsn,
+            trusted ? "persisted cluster-slot HEADs are current" : "no clean-shutdown flag or migration this session");
+
+    [LoggerMessage(LogLevel.Information, "Close: clean-shutdown HEAD marker written at checkpointLSN {checkpointLsn}")]
+    internal partial void LogCleanShutdownMarked(long checkpointLsn);
+
+    [LoggerMessage(LogLevel.Information,
+        "WAL watermarks @{phase}: currentLSN {currentLsn}, durableLSN {durableLsn}, checkpointLSN {checkpointLsn}, sealedSegments {sealedSegments}, totalWalBytes {totalWalBytes}")]
+    internal partial void LogWalWatermarks(string phase, long currentLsn, long durableLsn, long checkpointLsn, int sealedSegments, long totalWalBytes);
 
     [LoggerMessage(LogLevel.Debug, "UoW #{uowId} ({mode}) flush: waiting for WAL durable LSN {targetLsn}")]
     internal partial void LogUowFlushStart(ushort uowId, DurabilityMode mode, long targetLsn);

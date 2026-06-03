@@ -444,7 +444,9 @@ internal ref struct ComponentRevisionManager
         {
             foreach (var kvp in ct.ComponentCollectionVSBSByOffset)
             {
-                var bufferId = compContentAccessor.GetChunkAsReadOnlySpan(chunkId).Slice(kvp.Key).Cast<byte, int>()[0];
+                // kvp.Key is the offset within the component struct; content chunks prefix it with ComponentOverhead
+                // (Versioned = 0, SingleVersion = 8 for the entity PK). Cluster slots have no overhead.
+                var bufferId = compContentAccessor.GetChunkAsReadOnlySpan(chunkId).Slice(ct.ComponentOverhead + kvp.Key).Cast<byte, int>()[0];
                 var collAccessor = kvp.Value.Segment.CreateChunkAccessor();
                 kvp.Value.BufferRelease(bufferId, ref collAccessor);
                 collAccessor.Dispose();

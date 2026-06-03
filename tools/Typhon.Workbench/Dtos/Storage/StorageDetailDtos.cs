@@ -186,7 +186,20 @@ public record StorageSegmentSummaryDto(
     /// <summary>Slots per cluster; 0 when the segment is not a cluster.</summary>
     int ClusterSize = 0,
     /// <summary>Entity-map linear-hash stats; <c>null</c> unless the segment is an entity-map.</summary>
-    EntityMapStatsDto EntityMap = null);
+    EntityMapStatsDto EntityMap = null,
+    /// <summary>
+    /// True when the cluster archetype is spatial — clusters are bucketed by spatial grid cell, so low slot occupancy is expected (entities spread across cells),
+    /// not waste. False for a non-spatial cluster (clusters fill linearly → low occupancy means fragmentation). Meaningless when the segment is not a cluster.
+    /// </summary>
+    bool ClusterSpatial = false,
+    /// <summary>Spatial grid cell size in world units (0 unless a spatial cluster with a configured grid).</summary>
+    float ClusterCellSize = 0,
+    /// <summary>Spatial grid width in cells (0 unless a spatial cluster with a configured grid).</summary>
+    int ClusterGridWidth = 0,
+    /// <summary>Spatial grid height in cells (0 unless a spatial cluster with a configured grid).</summary>
+    int ClusterGridHeight = 0,
+    /// <summary>Spatial mode of the cluster's spatial component — <c>Dynamic</c> / <c>Static</c> (empty unless a spatial cluster).</summary>
+    string ClusterSpatialMode = "");
 
 /// <summary>Linear-hash distribution stats for an archetype's entity-map (a projection of the engine's <c>EntityMapStats</c>).</summary>
 public record EntityMapStatsDto(
@@ -217,7 +230,27 @@ public record StorageChunkDto(
     /// Slot-ordered component names for a <c>cluster</c> chunk — index <c>c</c> is bit <c>c</c> of each cell's <c>EnabledMask</c>. Drives the client's
     /// per-component enabled-state overlay picker (A6). Empty for every non-cluster decoder.
     /// </summary>
-    string[] ClusterComponents = null);
+    string[] ClusterComponents = null,
+    /// <summary>
+    /// Spatial-cell context for a <c>cluster</c> chunk of a spatial archetype — the grid cell this cluster is bucketed into and that cell's totals. Explains the
+    /// "mostly empty" cluster directly: the cluster is the only one in a cell that holds just a few entities. <c>null</c> for non-cluster / non-spatial / unmapped chunks.
+    /// </summary>
+    StorageClusterCellDto ClusterCell = null);
+
+/// <summary>
+/// The spatial-grid cell a cluster chunk is bucketed into, plus the cell's live totals and the cluster's tight 2D AABB (Module 15 L5, file-map §10 Q4 override).
+/// The entity / cluster counts are global sums across every cluster-spatial archetype sharing the grid.
+/// </summary>
+public record StorageClusterCellDto(
+    int CellKey,
+    int CellX,
+    int CellY,
+    int EntitiesInCell,
+    int ClustersInCell,
+    float AabbMinX,
+    float AabbMinY,
+    float AabbMaxX,
+    float AabbMaxY);
 
 /// <summary>
 /// One decoded content cell — a component field, a directory entry, or a generic byte run. <c>ColorKey</c> is a

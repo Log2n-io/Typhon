@@ -36,10 +36,16 @@ public ref struct ComponentCollectionAccessor<T> : IDisposable where T : unmanag
             _field._bufferId = _vsbs.AllocateBuffer(ref _ca);
         }
 
-        // Need to clone the buffer as we mutate its content
-        else if (_initialBufferId == _field._bufferId)
+        // Clone before mutating only if the buffer is SHARED with another revision — i.e. Versioned copy-on-write, where EcsVersionedCopyOnWrite's AddRef made
+        // RefCounter > 1. When the buffer is solely owned (SingleVersion: no MVCC, no COW; or a buffer freshly built this transaction), mutate it in
+        // place: cloning would orphan the original, which non-Versioned storage has no revision cleanup to release — a leak.
+        else if (_initialBufferId == _field._bufferId && _vsbs.GetRefCounter(_initialBufferId, ref _ca) > 1)
         {
             _field._bufferId = _vsbs.CloneBuffer(_initialBufferId, ref _ca);
+
+            // This revision now references the clone, not the shared original. Release the AddRef that EcsVersionedCopyOnWrite took on the original — otherwise
+            // its RefCounter stays inflated and it leaks once the old revision is cleaned up (Bug #1).
+            _vsbs.BufferRelease(_initialBufferId, ref _ca);
         }
 
         _vsbs.AddElement(_field._bufferId, value, ref _ca);

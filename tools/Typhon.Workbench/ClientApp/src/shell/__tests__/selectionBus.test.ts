@@ -106,19 +106,20 @@ describe('suite A — selection-bus laws', () => {
       expect(resolveChain(bus().leaf, bus())).toEqual([{ type: 'component', ref: 'Position' }]);
     });
 
-    it('a file-map cell leaf resolves segment ⊃ page ⊃ chunk', () => {
+    it('a file-map cell leaf resolves segment ⊃ page ⊃ chunk, each a re-selectable structured ref', () => {
       const cell = { kind: 'cell', pageIndex: 5, segmentId: 3, chunkId: 2, cellOffset: 64 };
       bus().select('cell', cell);
+      // Each crumb carries the full DbMap selection (not a bare id) so clicking it re-selects that node.
       expect(resolveChain(bus().leaf, bus())).toEqual([
-        { type: 'segment', ref: 3 },
-        { type: 'page', ref: 5 },
-        { type: 'chunk', ref: 2 },
+        { type: 'segment', ref: { kind: 'segment', segmentId: 3 } },
+        { type: 'page', ref: { kind: 'page', pageIndex: 5, segmentId: 3 } },
+        { type: 'chunk', ref: { kind: 'chunk', pageIndex: 5, segmentId: 3, chunkId: 2 } },
       ]);
     });
 
     it('a file-map page leaf resolves its owning segment ancestor', () => {
       bus().select('page', { kind: 'page', pageIndex: 5, segmentId: 3 });
-      expect(resolveChain(bus().leaf, bus())).toEqual([{ type: 'segment', ref: 3 }]);
+      expect(resolveChain(bus().leaf, bus())).toEqual([{ type: 'segment', ref: { kind: 'segment', segmentId: 3 } }]);
     });
 
     it('a free page leaf (no owner) resolves no ancestor — not a bogus segment', () => {

@@ -5,6 +5,7 @@ import type { ArchetypeInfo } from '@/hooks/schema/types';
 function arch(id: string, entityCount: number): ArchetypeInfo {
   return {
     archetypeId: id,
+    name: '',
     componentTypes: ['Game.CompA'],
     entityCount,
     componentSize: 12,

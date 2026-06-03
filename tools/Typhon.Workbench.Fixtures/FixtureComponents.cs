@@ -4,97 +4,286 @@ using Typhon.Schema.Definition;
 
 namespace Typhon.Workbench.Fixtures;
 
-/// <summary>
-/// Component types exported by the Workbench fixture schema DLL. Deliberately narrow (no test-only
-/// variants sharing schema names, no intentionally-broken types) so the Workbench can load this
-/// assembly cleanly and the Schema Browser shows a focused surface.
-///
-/// Paired with <see cref="FixtureArchetypes"/> which declares the archetypes that group these
-/// components into entity shapes.
-/// </summary>
+// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// SWG-inspired crafting/industry economy fixture schema.
+//
+// A coherent mini-economy: Guilds of Players craft Items from Recipes, gathering Resources (typed by a ResourceType
+// taxonomy) from Deposits via Structures (Harvesters + Factories). The schema is feature-driven, not lore-driven — its
+// purpose is to exercise EVERY engine schema primitive so the Workbench (Schema Browser, Data Browser, Query Console,
+// File Map) has real-world-shaped content to render.
+//
+// Engine features exercised:
+//   • Storage modes: Versioned (default), SingleVersion (positions, MaintenanceState, PowerSupply), Transient (Session)
+//   • Mixed storage on one entity (Player = V + SV + Transient; Harvester/Factory = V + SV)
+//   • ComponentCollection<T> multi-value slots (Recipe.Slots, Item.Affixes) — the replacement for the removed AllowMultiple
+//   • Unique + non-unique indexes; EntityLink<T> typed FKs (10, incl. 2 cascade-delete); self-referential FK
+//   • Spatial R-Tree: Static + Dynamic modes, 3 distinct Category bitmasks (Player / Deposit / Structure)
+//   • Per-component Enable/Disable (Session / MaintenanceState / PowerSupply / Deposit)
+//   • Polymorphic archetype inheritance (Structure ← Harvester / Factory)
+//   • [ComponentFamily] grouping (Social / Industry / World / Item)
+//
+// NOTE on multi-value FKs: ComponentCollection<T> elements are opaque VSBS payloads and cannot be indexed FKs, so
+// RecipeSlot.ClassReq is a plain resource-type id (int), not an EntityLink. NOTE on spatial: a single shared Position
+// struct cannot present different Category/Mode per archetype (the attribute is compile-time, per-struct), so there are
+// three distinct *Position structs; StructurePosition is still shared by Harvester + Factory.
+//
+// Every field carries [Field] — required by the Typhon.Shell AssemblySchemaLoader (skips unmarked fields) and harmless
+// to the engine registration path (which reads all public fields regardless).
+//
+// Paired with FixtureArchetypes.cs which groups these components into the 9 archetypes (IDs 820–828).
+// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
-[Component("Typhon.Workbench.Fixture.CompA", 1)]
+// ── ComponentCollection element payloads (plain blittable structs, NOT components) ──────────────────────────────────
+
+/// <summary>One ingredient slot of a <see cref="Recipe"/>. Carried as a <see cref="ComponentCollection{T}"/> element
+/// (1..8 per recipe). ClassReq is a plain ResourceType id, not an EntityLink — CC element fields cannot be indexed FKs.</summary>
 [StructLayout(LayoutKind.Sequential)]
-public struct CompA
+public struct RecipeSlot
 {
-    public int A;
-    public float B;
-    public double C;
-
-    public CompA(int a, float b, double c)
-    {
-        A = a;
-        B = b;
-        C = c;
-    }
+    public int SlotIndex;
+    public int ClassReq;
+    public int MinUnits;
 }
 
-[Component("Typhon.Workbench.Fixture.CompB", 1)]
+/// <summary>One rolled affix on an <see cref="Item"/>. Carried as a <see cref="ComponentCollection{T}"/> element
+/// (0..MaxAffixesPerItem per item).</summary>
 [StructLayout(LayoutKind.Sequential)]
-public struct CompB
+public struct ItemAffix
 {
-    public int A;
-    public float B;
-
-    public CompB(int a, float b)
-    {
-        A = a;
-        B = b;
-    }
+    public int AffixType;
+    public int Value;
 }
 
-[Component("Typhon.Workbench.Fixture.CompC", 1)]
-[StructLayout(LayoutKind.Sequential)]
-public struct CompC
-{
-    public String64 Name;
+// ── Social family ───────────────────────────────────────────────────────────────────────────────────────────────────
 
-    public CompC(string name)
-    {
-        Name = default;
-        Name.AsString = name;
-    }
-}
-
-/// <summary>Component with mixed unique / non-unique indexes — exercises the Schema Inspector's Index panel.</summary>
-[Component("Typhon.Workbench.Fixture.CompD", 1)]
-[StructLayout(LayoutKind.Sequential)]
-public struct CompD
-{
-    [Index(AllowMultiple = true)] public float Weight;
-    [Index] public int Key;
-    public double Raw;
-}
-
-/// <summary>Guild — indexed by level (non-unique) and capacity (unique). Targeted by <see cref="CompPlayer"/> via FK.</summary>
+/// <summary>A player guild. Unique by Name; queryable by Faction / MemberCount.</summary>
 [Component("Typhon.Workbench.Fixture.Guild", 1)]
+[ComponentFamily("Social")]
 [StructLayout(LayoutKind.Sequential)]
-public struct CompGuild
+public struct Guild
 {
-    [Index(AllowMultiple = true)] public int Level;
-    [Index] public int MemberCap;
+    [Field] [Index] public String64 Name;
+    [Field] [Index(AllowMultiple = true)] public int Faction;
+    [Field] [Index(AllowMultiple = true)] public int MemberCount;
+    [Field] public long Treasury;
 }
 
+/// <summary>A player's guild membership (FK → Guild) plus rank.</summary>
+[Component("Typhon.Workbench.Fixture.Membership", 1)]
+[ComponentFamily("Social")]
+[StructLayout(LayoutKind.Sequential)]
+public struct Membership
+{
+    [Field] [Index(AllowMultiple = true)] public EntityLink<GuildArch> Guild;
+    [Field] public int GuildRank;
+}
+
+/// <summary>Core player identity. Unique by AccountId; queryable by Level / ProfessionId. Name is an unindexed
+/// String64 — PlayerArch is cluster-eligible (SV Position + Transient Session), and cluster archetypes route all
+/// indexes through one fixed-stride segment that can't hold a 64-byte String64 index. AccountId (a long) is the
+/// unique-index demonstration here; the String64 unique index is exercised by Guild/ResourceType/Recipe.</summary>
 [Component("Typhon.Workbench.Fixture.Player", 1)]
+[ComponentFamily("Social")]
 [StructLayout(LayoutKind.Sequential)]
-public struct CompPlayer
+public struct Player
 {
-    [Index(AllowMultiple = true), ForeignKey(typeof(CompGuild))] public long GuildId;
-    [Index(AllowMultiple = true)] public int Active;
+    [Field] public String64 Name;
+    [Field] [Index] public long AccountId;
+    [Field] [Index(AllowMultiple = true)] public int Level;
+    [Field] [Index(AllowMultiple = true)] public int ProfessionId;
+    [Field] public long CreatedAt;
 }
 
-/// <summary>SingleVersion component — its archetype is cluster-eligible, so it lands in a cluster segment and
-/// exercises the Database File Map's A6 intra-cluster fill / entity sub-grid rendering.</summary>
-[Component("Typhon.Workbench.Fixture.Particle", 1, StorageMode = StorageMode.SingleVersion)]
+/// <summary>A player's credit balances.</summary>
+[Component("Typhon.Workbench.Fixture.Wallet", 1)]
+[ComponentFamily("Social")]
 [StructLayout(LayoutKind.Sequential)]
-public struct CompParticle
+public struct Wallet
 {
-    public float X, Y, Z;
+    [Field] public long Credits;
+    [Field] public long BankCredits;
+}
 
-    public CompParticle(float x, float y, float z)
-    {
-        X = x;
-        Y = y;
-        Z = z;
-    }
+/// <summary>Transient (heap-only) connection state. Enabled = online, Disabled = offline. Lost on restart by design —
+/// the only Transient-storage representative, and what makes Player cluster-eligible.</summary>
+[Component("Typhon.Workbench.Fixture.Session", 1, StorageMode = StorageMode.Transient)]
+[ComponentFamily("Social")]
+[StructLayout(LayoutKind.Sequential)]
+public struct Session
+{
+    [Field] public long ConnectionId;
+    [Field] public int LatencyMs;
+}
+
+// ── Industry family ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// <summary>Resource-class taxonomy node. Unique by Name; self-referential FK (Parent → ResourceType) forms the tree.</summary>
+[Component("Typhon.Workbench.Fixture.ResourceType", 1)]
+[ComponentFamily("Industry")]
+[StructLayout(LayoutKind.Sequential)]
+public struct ResourceType
+{
+    [Field] [Index] public String64 Name;
+    [Field] [Index(AllowMultiple = true)] public int Tier;
+    [Field] [Index(AllowMultiple = true)] public EntityLink<ResourceTypeArch> Parent;
+}
+
+/// <summary>A crafting recipe. Unique by Name; FK PrimaryClass → ResourceType. Carries 1..8 ingredient slots in a
+/// <see cref="ComponentCollection{T}"/> (multi-value, the AllowMultiple replacement).</summary>
+[Component("Typhon.Workbench.Fixture.Recipe", 1)]
+[ComponentFamily("Industry")]
+[StructLayout(LayoutKind.Sequential)]
+public struct Recipe
+{
+    [Field] [Index] public String64 Name;
+    [Field] [Index(AllowMultiple = true)] public int Tier;
+    [Field] [Index(AllowMultiple = true)] public int ProfessionReq;
+    [Field] [Index(AllowMultiple = true)] public EntityLink<ResourceTypeArch> PrimaryClass;
+    [Field] public ComponentCollection<RecipeSlot> Slots;
+}
+
+/// <summary>A resource deposit instance. FK Type → ResourceType. Enable/Disable models depletion (disabled = depleted,
+/// data stays readable). Paired with DepositPosition (static spatial).</summary>
+[Component("Typhon.Workbench.Fixture.Deposit", 1)]
+[ComponentFamily("Industry")]
+[StructLayout(LayoutKind.Sequential)]
+public struct Deposit
+{
+    [Field] [Index(AllowMultiple = true)] public EntityLink<ResourceTypeArch> Type;
+    [Field] [Index(AllowMultiple = true)] public int Quality;
+    [Field] public int Concentration;
+    [Field] [Index(AllowMultiple = true)] public long DepletesAt;
+}
+
+/// <summary>Abstract structure base (queried via Query&lt;StructureArch&gt; to match Harvester + Factory). Never spawned
+/// directly. StructureOwner.Owner → Player cascades on player delete.</summary>
+[Component("Typhon.Workbench.Fixture.Structure", 1)]
+[ComponentFamily("Industry")]
+[StructLayout(LayoutKind.Sequential)]
+public struct Structure
+{
+    [Field] [Index(AllowMultiple = true)] public int TypeCode;
+    [Field] public long PlacedAt;
+    [Field] public int Maintenance;
+}
+
+/// <summary>Structure ownership FK → Player, cascade-delete: deleting a player removes their structures.</summary>
+[Component("Typhon.Workbench.Fixture.StructureOwner", 1)]
+[ComponentFamily("Industry")]
+[StructLayout(LayoutKind.Sequential)]
+public struct StructureOwner
+{
+    [Field] [Index(AllowMultiple = true, OnParentDelete = CascadeAction.Delete)] public EntityLink<PlayerArch> Owner;
+}
+
+/// <summary>A harvester's output hopper. FK Class → ResourceType.</summary>
+[Component("Typhon.Workbench.Fixture.Hopper", 1)]
+[ComponentFamily("Industry")]
+[StructLayout(LayoutKind.Sequential)]
+public struct Hopper
+{
+    [Field] [Index(AllowMultiple = true)] public EntityLink<ResourceTypeArch> Class;
+    [Field] public int Amount;
+    [Field] public int Rate;
+}
+
+/// <summary>The deposit a harvester is extracting from. FK → ResourceDeposit.</summary>
+[Component("Typhon.Workbench.Fixture.HarvesterTarget", 1)]
+[ComponentFamily("Industry")]
+[StructLayout(LayoutKind.Sequential)]
+public struct HarvesterTarget
+{
+    [Field] [Index(AllowMultiple = true)] public EntityLink<ResourceDepositArch> Deposit;
+}
+
+/// <summary>SingleVersion maintenance pool. Enable/Disable models broken (disabled) vs operational harvesters.</summary>
+[Component("Typhon.Workbench.Fixture.MaintenanceState", 1, StorageMode = StorageMode.SingleVersion)]
+[ComponentFamily("Industry")]
+[StructLayout(LayoutKind.Sequential)]
+public struct MaintenanceState
+{
+    [Field] public long PaidUntil;
+}
+
+/// <summary>A factory's production config. FK Recipe → Recipe.</summary>
+[Component("Typhon.Workbench.Fixture.FactoryConfig", 1)]
+[ComponentFamily("Industry")]
+[StructLayout(LayoutKind.Sequential)]
+public struct FactoryConfig
+{
+    [Field] [Index(AllowMultiple = true)] public EntityLink<RecipeArch> Recipe;
+    [Field] public int RemainingRuns;
+}
+
+/// <summary>SingleVersion power reserve. Enable/Disable models idle (disabled, out of credits) factories.</summary>
+[Component("Typhon.Workbench.Fixture.PowerSupply", 1, StorageMode = StorageMode.SingleVersion)]
+[ComponentFamily("Industry")]
+[StructLayout(LayoutKind.Sequential)]
+public struct PowerSupply
+{
+    [Field] public long CreditsRemaining;
+}
+
+// ── Item family ─────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// <summary>A crafted item instance. FK Recipe → Recipe. Carries 0..MaxAffixesPerItem affixes in a
+/// <see cref="ComponentCollection{T}"/>.</summary>
+[Component("Typhon.Workbench.Fixture.Item", 1)]
+[ComponentFamily("Item")]
+[StructLayout(LayoutKind.Sequential)]
+public struct Item
+{
+    [Field] [Index(AllowMultiple = true)] public EntityLink<RecipeArch> Recipe;
+    [Field] [Index(AllowMultiple = true)] public int ItemType;
+    [Field] [Index(AllowMultiple = true)] public int Quality;
+    [Field] public int Decay;
+    [Field] public ComponentCollection<ItemAffix> Affixes;
+}
+
+/// <summary>Item ownership FK → Player, cascade-delete: deleting a player removes their items.</summary>
+[Component("Typhon.Workbench.Fixture.ItemOwner", 1)]
+[ComponentFamily("Item")]
+[StructLayout(LayoutKind.Sequential)]
+public struct ItemOwner
+{
+    [Field] [Index(AllowMultiple = true, OnParentDelete = CascadeAction.Delete)] public EntityLink<PlayerArch> Owner;
+}
+
+// ── World family — three distinct spatial Position structs (one per Category/Mode combination) ───────────────────────
+
+/// <summary>Player location — Dynamic spatial, Category=Player. SingleVersion (hot tick storage).</summary>
+[Component("Typhon.Workbench.Fixture.PlayerPosition", 1, StorageMode = StorageMode.SingleVersion)]
+[ComponentFamily("World")]
+[StructLayout(LayoutKind.Sequential)]
+public struct PlayerPosition
+{
+    [Field] [SpatialIndex(1.0f, Mode = SpatialMode.Dynamic, Category = SwgCategory.Player)] public AABB2F Bounds;
+}
+
+/// <summary>Deposit location — Static spatial (immobile, skips tick-fence), Category=Deposit. SingleVersion.</summary>
+[Component("Typhon.Workbench.Fixture.DepositPosition", 1, StorageMode = StorageMode.SingleVersion)]
+[ComponentFamily("World")]
+[StructLayout(LayoutKind.Sequential)]
+public struct DepositPosition
+{
+    [Field] [SpatialIndex(1.0f, Mode = SpatialMode.Static, Category = SwgCategory.Deposit)] public AABB2F Bounds;
+}
+
+/// <summary>Structure location — Dynamic spatial, Category=Structure. SingleVersion. SHARED by Harvester + Factory
+/// (exercises "same component across archetypes").</summary>
+[Component("Typhon.Workbench.Fixture.StructurePosition", 1, StorageMode = StorageMode.SingleVersion)]
+[ComponentFamily("World")]
+[StructLayout(LayoutKind.Sequential)]
+public struct StructurePosition
+{
+    [Field] [SpatialIndex(1.0f, Mode = SpatialMode.Dynamic, Category = SwgCategory.Structure)] public AABB2F Bounds;
+}
+
+/// <summary>Spatial category bitmask values — one bit per spatially-distinct entity kind, so broadphase queries can
+/// filter by kind (e.g. "structures near point P").</summary>
+public static class SwgCategory
+{
+    public const uint Player = 1u << 0;
+    public const uint Deposit = 1u << 1;
+    public const uint Structure = 1u << 2;
 }

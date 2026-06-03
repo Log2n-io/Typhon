@@ -41,10 +41,10 @@ test.describe('Data Browser (Stage 2 — reintroduced)', () => {
     const picker = page.getByTestId('archetype-picker');
     await expect(picker).toBeVisible({ timeout: 5_000 });
 
-    // Scope to the Particle archetype (largest fixture shape) — selected by label so it survives id shifts.
-    const particleValue = await picker.locator('option', { hasText: /Particle/ }).first().getAttribute('value');
-    expect(particleValue, 'fixture should expose a Particle archetype').toBeTruthy();
-    await picker.selectOption(particleValue as string);
+    // Scope to the PlayerArch archetype (rich mixed-storage shape, 2k rows) — selected by label so it survives id shifts.
+    const playerValue = await picker.locator('option', { hasText: /PlayerArch/ }).first().getAttribute('value');
+    expect(playerValue, 'fixture should expose a PlayerArch archetype').toBeTruthy();
+    await picker.selectOption(playerValue as string);
 
     // Paged rows render with a "n–m of total" range (no dupes/skips is covered by server tests).
     const rows = page.getByTestId('entity-row');
@@ -55,7 +55,7 @@ test.describe('Data Browser (Stage 2 — reintroduced)', () => {
     await rows.first().click();
     const card = page.getByTestId('component-card').first();
     await expect(card).toBeVisible({ timeout: 5_000 });
-    await expect(card).toHaveAttribute('data-type-name', /Particle/);
+    await expect(card).toHaveAttribute('data-type-name', /Player/);
 
     // GAP-05: the highlighted row is the bus selection (the clicked row carries the active styling).
     await expect(rows.first()).toHaveClass(/bg-accent/);
@@ -122,21 +122,21 @@ test.describe('Data Browser — filter / keyboard / prefs / resource', () => {
     await closeAllSessions(request);
   });
 
-  async function openParticles(page: import('@playwright/test').Page) {
+  async function openPlayers(page: import('@playwright/test').Page) {
     await gotoWelcome(page);
     await openDevFixture(page);
     await page.getByRole('menuitem', { name: /^view$/i }).click();
     await page.getByRole('menuitem', { name: /^data browser$/i }).click();
     const picker = page.getByTestId('archetype-picker');
     await expect(picker).toBeVisible({ timeout: 5_000 });
-    const particle = await picker.locator('option', { hasText: /Particle/ }).first().getAttribute('value');
-    await picker.selectOption(particle as string);
+    const player = await picker.locator('option', { hasText: /PlayerArch/ }).first().getAttribute('value');
+    await picker.selectOption(player as string);
     await expect(page.getByTestId('entity-row').first()).toBeVisible({ timeout: 5_000 });
     return picker;
   }
 
   test('client filter narrows the loaded page by Entity Id and shows the degraded note (GAP-15)', async ({ page }) => {
-    await openParticles(page);
+    await openPlayers(page);
     const firstId = await page.getByTestId('entity-row').first().getAttribute('data-entity-id');
     await page.getByTestId('entity-filter').fill(`Entity ID = ${firstId}`);
     // Exactly the one matching row remains; the note states the loaded-page degradation.
@@ -146,7 +146,7 @@ test.describe('Data Browser — filter / keyboard / prefs / resource', () => {
   });
 
   test('keyboard: focus the list, ArrowDown + Enter selects a row → Inspector card (PC-8/F)', async ({ page }) => {
-    await openParticles(page);
+    await openPlayers(page);
     await page.locator('div[tabindex="0"].overflow-auto').focus();
     await page.keyboard.press('ArrowDown'); // cursor → row 0
     await page.keyboard.press('Enter'); // commit → bus entity leaf
@@ -155,16 +155,16 @@ test.describe('Data Browser — filter / keyboard / prefs / resource', () => {
   });
 
   test('PC-1: page size is remembered per archetype (AC2.16)', async ({ page }) => {
-    const picker = await openParticles(page);
+    const picker = await openPlayers(page);
     await page.getByTestId('page-size').selectOption('50');
     await expect(page.getByTestId('page-size')).toHaveValue('50');
 
-    // Switch to another archetype (its own default) then back — the 50 is restored for the Particle archetype.
-    const other = await picker.locator('option', { hasText: /CompD|Guild|Player/ }).first().getAttribute('value');
+    // Switch to another archetype (its own default) then back — the 50 is restored for the PlayerArch archetype.
+    const other = await picker.locator('option', { hasText: /GuildArch/ }).first().getAttribute('value');
     await picker.selectOption(other as string);
     await expect(page.getByTestId('page-size')).not.toHaveValue('50');
-    const particle = await picker.locator('option', { hasText: /Particle/ }).first().getAttribute('value');
-    await picker.selectOption(particle as string);
+    const player = await picker.locator('option', { hasText: /PlayerArch/ }).first().getAttribute('value');
+    await picker.selectOption(player as string);
     await expect(page.getByTestId('page-size')).toHaveValue('50');
   });
 
@@ -172,10 +172,10 @@ test.describe('Data Browser — filter / keyboard / prefs / resource', () => {
     await gotoWelcome(page);
     await openDevFixture(page);
 
-    // Narrow the (virtualized) resource tree so the CompA ComponentTable node renders, then select it →
+    // Narrow the (virtualized) resource tree so the Player ComponentTable node renders, then select it →
     // right-rail Inspector → its type-first Data Browser verb.
-    await page.getByPlaceholder(/filter resources/i).fill('Fixture.CompA');
-    await page.getByText('ComponentTable_Typhon.Workbench.Fixture.CompA', { exact: true }).click();
+    await page.getByPlaceholder(/filter resources/i).fill('Fixture.Player');
+    await page.getByText('ComponentTable_Typhon.Workbench.Fixture.Player', { exact: true }).click();
     const open = page.getByTestId('resource-open-data-browser');
     await expect(open).toBeVisible({ timeout: 5_000 });
     await open.click();

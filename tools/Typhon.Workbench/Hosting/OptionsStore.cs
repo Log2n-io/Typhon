@@ -110,6 +110,20 @@ public sealed partial class OptionsStore : IDisposable
         WriteAtomic(next);
     }
 
+    /// <summary>Patch the Schema sub-record (registered schema-assembly directories). Other categories untouched.</summary>
+    public void PatchSchema(SchemaOptions schema)
+    {
+        if (schema == null) throw new ArgumentNullException(nameof(schema));
+        WorkbenchOptions next;
+        lock (_lock)
+        {
+            next = _current with { Schema = schema };
+            _current = next;
+        }
+        OptionsChanged?.Invoke(next);
+        WriteAtomic(next);
+    }
+
     private WorkbenchOptions TryLoad()
     {
         try

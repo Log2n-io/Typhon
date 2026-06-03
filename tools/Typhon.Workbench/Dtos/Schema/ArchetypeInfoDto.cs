@@ -9,8 +9,13 @@ namespace Typhon.Workbench.Dtos.Schema;
 /// <param name="ChunkCount">Active cluster chunks for cluster archetypes. 0 for legacy (not applicable).</param>
 /// <param name="ChunkCapacity">Entities per chunk for cluster archetypes. 0 for legacy.</param>
 /// <param name="OccupancyPct">Cluster-only occupancy as a percentage in [0, 100]. 0 when not cluster or chunks=0.</param>
+/// <param name="Name">
+/// Archetype CLR type name (e.g. <c>Typhon.Workbench.Fixtures.PlayerArch</c>). The client shortens it for display
+/// (stripping the shared namespace) and falls back to <c>#ArchetypeId</c> when absent.
+/// </param>
 public record ArchetypeInfoDto(
     string ArchetypeId,
+    string Name,
     string[] ComponentTypes,
     long EntityCount,
     int ComponentSize,

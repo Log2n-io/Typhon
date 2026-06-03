@@ -1,3 +1,6 @@
+import { cameraCenteredOn, fitToRect, type Camera, type Rect } from './camera';
+import { L0_FADE_FRACTION } from './dbMapLod';
+
 /**
  * Whether the File Map should run its one-time fit-to-file *now*.
  *
@@ -21,4 +24,21 @@ export function shouldFitViewport(p: {
   height: number;
 }): boolean {
   return p.hasData && !p.alreadyFitted && !p.flying && p.width > 0 && p.height > 0;
+}
+
+/**
+ * The initial camera: the L0 composition view at its largest size that does NOT yet cross into L1.
+ *
+ * The L0→L1 crossfade is keyed to a fraction of the fit-to-screen scale (see {@link L0_FADE_FRACTION} and the
+ * renderer's `l1AlphaForScale`): L1 (the Hilbert page grid) is fully shown at the fit scale, crossfading down to a
+ * pure L0 composition view at `L0_FADE_FRACTION · fit` and below. So the largest zoom that is still entirely L0 is
+ * exactly `L0_FADE_FRACTION · fit` — this frames the file centred at that scale. (Fit-to-file at `scale = fit` lands
+ * on L1; that remains the `f` / Fit-button behaviour.)
+ */
+export function initialL0Camera(world: Rect, viewportW: number, viewportH: number, padding: number): Camera {
+  const fit = fitToRect(world, viewportW, viewportH, padding);
+  const scale = fit.scale * L0_FADE_FRACTION;
+  const centreX = world.x + world.w / 2;
+  const centreY = world.y + world.h / 2;
+  return cameraCenteredOn(centreX, centreY, scale, viewportW, viewportH);
 }

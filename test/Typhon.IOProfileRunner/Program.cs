@@ -218,7 +218,10 @@ public static class Program
                 }
                 else
                 {
-                    opt.Wal = null;
+                    // The no-WAL engine mode was removed (WAL is now mandatory). Profile the on-disk WAL path with WalEnabled=true; for a low-I/O baseline,
+                    // wire an in-memory IWalFileIO instead of disabling the WAL.
+                    throw new NotSupportedException(
+                        "config.Database.WalEnabled=false is no longer supported: the no-WAL engine mode was removed. Set WalEnabled=true to profile disk I/O.");
                 }
 
                 // PagesPerBlock bump is a DELIBERATE workaround for a latent engine bug around TransientStore's

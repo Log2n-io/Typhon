@@ -160,6 +160,29 @@ export interface StorageSegmentSummaryDto {
   clusterSize: number;
   /** Entity-map linear-hash stats; null unless the segment is an entity-map. */
   entityMap: EntityMapStatsDto | null;
+  /** True when the cluster archetype is spatial — clusters bucket by grid cell, so low slot occupancy is expected (spread), not waste. */
+  clusterSpatial?: boolean;
+  /** Spatial grid cell size in world units (0 unless a spatial cluster with a configured grid). */
+  clusterCellSize?: number;
+  /** Spatial grid width in cells. */
+  clusterGridWidth?: number;
+  /** Spatial grid height in cells. */
+  clusterGridHeight?: number;
+  /** Spatial mode — `Dynamic` / `Static` (empty unless a spatial cluster). */
+  clusterSpatialMode?: string;
+}
+
+/** The spatial-grid cell a cluster chunk is bucketed into, plus the cell's totals and the cluster's tight 2D AABB — mirrors `StorageClusterCellDto`. */
+export interface StorageClusterCellDto {
+  cellKey: number;
+  cellX: number;
+  cellY: number;
+  entitiesInCell: number;
+  clustersInCell: number;
+  aabbMinX: number;
+  aabbMinY: number;
+  aabbMaxX: number;
+  aabbMaxY: number;
 }
 
 /** Response of `GET /dbmap/chunk/{segId}/{chunkId}` — mirrors `StorageChunkDto`. */
@@ -174,6 +197,8 @@ export interface StorageChunkDto {
   cells: StorageContentCellDto[];
   /** Slot-ordered component names for a `cluster` chunk (index = `enabledMask` bit); null/empty otherwise. */
   clusterComponents: string[] | null;
+  /** Spatial-cell context for a `cluster` chunk of a spatial archetype; null otherwise. */
+  clusterCell?: StorageClusterCellDto | null;
 }
 
 // ── Enums (ordinals mirror the engine / server) ───────────────────────────────────────────────────────────
@@ -232,9 +257,26 @@ export const PAGE_TYPE_LABELS: readonly string[] = [
   'VSBS',
   'String table',
   'Spatial',
-  'Entity map',
+  'Entity hashmap',
   'System',
 ];
+
+/**
+ * Canonical segment label used everywhere the File Map names a segment (on-canvas run labels, L0 stripes, the Regions
+ * and Legend sidebars). Format is `"<Kind> <shortName>"` — the kind prefixes the short name, separated by a space (no
+ * dash, no id) — so the type stays visible after the short-name labeller resolves the owner. When the owner type does
+ * not resolve there is no name, so the bare `"<Kind> #<id>"` is used (the id is then the only identifier). The on-canvas
+ * run labels append a ` [x of y]` run index for multi-run segments. Keep all label sites on this one helper so they
+ * don't drift — a per-site copy is how the kind silently dropped from some labels in the first place.
+ */
+export function formatSegmentLabel(
+  kind: string,
+  id: number,
+  typeName: string,
+  shortLabel: (typeName: string) => string,
+): string {
+  return typeName.length > 0 ? `${kind} ${shortLabel(typeName)}` : `${kind} #${id}`;
+}
 
 /** Sentinel owner-segment id for a page owned by no segment. */
 export const NO_SEGMENT = 0xffff;
@@ -390,4 +432,6 @@ export interface DbChunkContent {
   cells: DbContentCell[];
   /** Slot-ordered component names for a cluster chunk — index = `enabledMask` bit. Drives the overlay picker. Empty for non-cluster chunks. */
   clusterComponents: string[];
+  /** Spatial-cell context for a spatial cluster chunk — its grid cell + that cell's totals + the cluster's AABB. Null otherwise. */
+  clusterCell?: StorageClusterCellDto | null;
 }

@@ -16,15 +16,15 @@ namespace Typhon.Engine;
 /// Create via <see cref="DatabaseEngine.CreateUnitOfWork"/>.
 /// </para>
 /// <para>
-/// In WAL-less mode, dirty page tracking and I/O behavior depends on <see cref="DurabilityMode"/>:
+/// All durability modes route through the WAL (WAL is mandatory — ADR-054); <see cref="DurabilityMode"/> controls only WHEN a UoW's WAL records become
+/// crash-safe:
 /// <list type="bullet">
-/// <item><b>Deferred</b>: UoW owns a shared <see cref="ChangeSet"/>. No I/O until <see cref="FlushAsync"/>
-/// which chains <c>SaveChangesAsync</c> (Layer 1→2) then <c>FlushToDisk</c> (Layer 2→3).</item>
-/// <item><b>GroupCommit</b>: UoW owns a shared <see cref="ChangeSet"/>. Each transaction calls
-/// <c>SaveChanges</c> on dispose (Layer 1→2). <see cref="FlushAsync"/> issues a single fsync (Layer 2→3).</item>
-/// <item><b>Immediate</b>: Each transaction creates its own <see cref="ChangeSet"/> and performs
-/// <c>SaveChanges</c> + <c>FlushToDisk</c> synchronously in <c>Commit()</c>.</item>
+/// <item><b>Deferred</b>: records become durable only on an explicit <see cref="Flush"/> / <see cref="FlushAsync"/>; dispose does not flush.</item>
+/// <item><b>GroupCommit</b>: the WAL writer thread auto-flushes buffered records every <c>GroupCommitIntervalMs</c>; <see cref="FlushAsync"/>
+/// waits for the pending group.</item>
+/// <item><b>Immediate</b>: each <c>Commit()</c> requests a WAL flush and waits for FUA durability before returning.</item>
 /// </list>
+/// Dirty data pages are drained by the checkpoint in every mode — never by a per-UoW <c>SaveChanges</c>.
 /// </para>
 /// </remarks>
 [PublicAPI]
@@ -164,41 +164,21 @@ public sealed class UnitOfWork : IDisposable
             return;
         }
 
+        // WAL is mandatory: signal the WAL writer to flush and wait for the durable LSN.
         var walManager = _dbe.WalManager;
-        if (walManager != null)
+        walManager.RequestFlush();
+        var currentLsn = walManager.CommitBuffer.NextLsn - 1;
+        if (currentLsn > 0)
         {
-            // Signal the WAL writer to flush and wait for durable LSN
-            walManager.RequestFlush();
-            var currentLsn = walManager.CommitBuffer.NextLsn - 1;
-            if (currentLsn > 0)
-            {
-                var ctx = _deadline == Deadline.Infinite ? WaitContext.Null : WaitContext.FromDeadline(_deadline);
-                walManager.WaitForDurable(currentLsn, ref ctx);
-            }
+            var ctx = _deadline == Deadline.Infinite ? WaitContext.Null : WaitContext.FromDeadline(_deadline);
+            walManager.WaitForDurable(currentLsn, ref ctx);
         }
-        else if (_durabilityMode == DurabilityMode.Deferred)
-        {
-            // Full pipeline: SaveChanges (Layer 1→2) then FlushToDisk (Layer 2→3)
-            ChangeSet.SaveChanges();
-            _dbe.MMF.FlushToDisk();
-        }
-        else if (_durabilityMode == DurabilityMode.GroupCommit)
-        {
-            // Transactions already called SaveChanges (Layer 1→2), just fsync (Layer 2→3)
-            _dbe.MMF.FlushToDisk();
-        }
-        // Immediate: no-op — SaveChanges + FlushToDisk already done in Tx.Commit
 
         TransitionToWalDurable();
     }
 
     /// <summary>
-    /// Async flush. For WAL-less mode, offloads I/O to the thread pool.
-    /// <list type="bullet">
-    /// <item><b>Deferred</b>: <c>SaveChangesAsync</c> → <c>ContinueWith(FlushToDisk)</c> — full async pipeline.</item>
-    /// <item><b>GroupCommit</b>: <c>Task.Run(FlushToDisk)</c> — transactions already wrote to OS cache.</item>
-    /// <item><b>Immediate</b>: no-op — already done in <c>Tx.Commit()</c>.</item>
-    /// </list>
+    /// Async flush. WAL is mandatory: signals the WAL writer and waits for the durable LSN.
     /// </summary>
     public Task FlushAsync()
     {
@@ -208,44 +188,21 @@ public sealed class UnitOfWork : IDisposable
         }
 
         var walManager = _dbe.WalManager;
-        if (walManager != null)
+        walManager.RequestFlush();
+        var currentLsn = walManager.CommitBuffer.NextLsn - 1;
+        if (currentLsn > 0)
         {
-            // WAL mode: synchronous flush + wait for durable LSN
-            walManager.RequestFlush();
-            var currentLsn = walManager.CommitBuffer.NextLsn - 1;
-            if (currentLsn > 0)
-            {
-                _dbe.LogUowFlushStart(_uowId, _durabilityMode, currentLsn);
-                // Use the UoW's deadline if bounded; otherwise fall back to DefaultCommitTimeout
-                // to prevent infinite hangs (especially for Deferred UoWs with Deadline.Infinite).
-                var ctx = _deadline == Deadline.Infinite
-                    ? WaitContext.FromTimeout(TimeoutOptions.Current.DefaultCommitTimeout)
-                    : WaitContext.FromDeadline(_deadline);
-                walManager.WaitForDurable(currentLsn, ref ctx);
-                _dbe.LogUowFlushComplete(_uowId);
-            }
-
-            TransitionToWalDurable();
-            return Task.CompletedTask;
+            _dbe.LogUowFlushStart(_uowId, _durabilityMode, currentLsn);
+            // Use the UoW's deadline if bounded; otherwise fall back to DefaultCommitTimeout
+            // to prevent infinite hangs (especially for Deferred UoWs with Deadline.Infinite).
+            var ctx = _deadline == Deadline.Infinite
+                ? WaitContext.FromTimeout(TimeoutOptions.Current.DefaultCommitTimeout)
+                : WaitContext.FromDeadline(_deadline);
+            walManager.WaitForDurable(currentLsn, ref ctx);
+            _dbe.LogUowFlushComplete(_uowId);
         }
 
         TransitionToWalDurable();
-
-        if (_durabilityMode == DurabilityMode.Deferred)
-        {
-            // Async pipeline: SaveChangesAsync (Layer 1→2) → FlushToDisk (Layer 2→3)
-            var mmf = _dbe.MMF;
-            return ChangeSet.SaveChangesAsync().ContinueWith(_ => mmf.FlushToDisk());
-        }
-
-        if (_durabilityMode == DurabilityMode.GroupCommit)
-        {
-            // Transactions already wrote to OS cache, just async fsync
-            var mmf = _dbe.MMF;
-            return Task.Run(() => mmf.FlushToDisk());
-        }
-
-        // Immediate: no-op — already done in Tx.Commit
         return Task.CompletedTask;
     }
 
@@ -266,38 +223,18 @@ public sealed class UnitOfWork : IDisposable
             _dbe.UowRegistry.Release(_uowId, ChangeSet);
         }
 
-        if (_dbe.WalManager != null)
+        // WAL is mandatory. Deferred UoWs skip flush — WAL records are already in the commit buffer and will be written by the WAL writer thread
+        // asynchronously. Non-Deferred modes flush for the durability guarantee on dispose.
+        if (_durabilityMode != DurabilityMode.Deferred)
         {
-            // WAL mode: Deferred UoWs skip flush — WAL records are already in the commit
-            // buffer and will be written by the WAL writer thread asynchronously.
-            // Non-Deferred modes: flush for durability guarantee on dispose.
-            if (_durabilityMode != DurabilityMode.Deferred)
-            {
-                _ = FlushAsync();
-            }
-
-            // WAL mode: balance DirtyCounter to prevent inflation.
-            // In WAL mode, ChangeSet pages are never written via SaveChangesAsync — only checkpoint
-            // writes them. Each UoW's ChangeSet incremented DirtyCounter for pages it touched, but the
-            // balancing DecrementDirty (from SavePages completion) never runs. Cap at 1 so that:
-            //   (a) Pages stay dirty for checkpoint (counter >= 1)
-            //   (b) One checkpoint cycle makes them evictable (1 → 0)
-            ChangeSet?.ReleaseExcessDirtyMarks();
-        }
-        else if (_durabilityMode == DurabilityMode.Deferred)
-        {
-            // Deferred WAL-less: NO I/O on Dispose — caller must call Flush/FlushAsync explicitly.
-            // Dirty pages will be flushed by the engine shutdown safety net if needed.
-            if (_committedTransactionCount > 0 && _state == UnitOfWorkState.Pending)
-            {
-                _dbe.LogDeferredUowNotFlushed(_uowId, _committedTransactionCount);
-            }
-        }
-        else
-        {
-            // GroupCommit / Immediate WAL-less: flush on dispose for convenience
             _ = FlushAsync();
         }
+
+        // Balance DirtyCounter to prevent inflation. ChangeSet pages are never written via SaveChangesAsync — only the checkpoint writes them. Each UoW's
+        // ChangeSet incremented DirtyCounter for pages it touched, but the balancing DecrementDirty (from SavePages completion) never runs. Cap at 1 so that:
+        //   (a) Pages stay dirty for checkpoint (counter >= 1)
+        //   (b) One checkpoint cycle makes them evictable (1 → 0)
+        ChangeSet?.ReleaseExcessDirtyMarks();
 
         // Cancel any outstanding operations
         _cts.Cancel();

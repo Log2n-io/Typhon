@@ -288,7 +288,7 @@ public struct Recipe
 /// <summary>
 /// A production queue for a building.
 /// </summary>
-[Component("Factory.ProductionQueue", 1, true)] // AllowMultiple = true
+[Component("Factory.ProductionQueue", 1)]
 [StructLayout(LayoutKind.Sequential)]
 public struct ProductionQueue
 {

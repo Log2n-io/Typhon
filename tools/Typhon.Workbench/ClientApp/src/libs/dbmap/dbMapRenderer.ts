@@ -16,8 +16,16 @@ import {
 } from './camera';
 import { buildLayout, type MapLayout } from './dbMapLayout';
 import { pageAtScreen } from './dbMapHitTest';
-import { L4_CONTENT_PREFETCH_PAGE_PX, lodForScale, tileNodesForSpan, type DbLodState } from './dbMapLod';
-import { chunkAreaRect, gridCols, gridSubRect, gridVoidCount } from './dbMapGrid';
+import {
+  L0_FADE_FRACTION,
+  L4_CONTENT_PREFETCH_PAGE_PX,
+  L5_CONTENT_PREFETCH_SLOT_PX,
+  l5AlphaForSlotPx,
+  lodForScale,
+  tileNodesForSpan,
+  type DbLodState,
+} from './dbMapLod';
+import { chunkAreaRect, gridCellIndexAt, gridCols, gridSubRect, gridVoidCount } from './dbMapGrid';
 import {
   BYTE_CLASS_RGB,
   CRC_RGB,
@@ -50,6 +58,7 @@ import {
   NO_SEGMENT,
   PAGE_SIZE,
   PAGE_TYPE_LABELS,
+  formatSegmentLabel,
   isDetailEncoding,
   type DbChunkContent,
   type DbDetailTile,
@@ -80,6 +89,8 @@ export interface DbDetailRequest {
   pages: number[];
   /** Visible chunk refs needing their L4 content. */
   chunks: { segId: number; chunkId: number }[];
+  /** Visible occupied cluster slots needing their L5 entity decode (only when zoomed into the entity-content band). */
+  slots: { segId: number; chunkId: number; slot: number }[];
 }
 
 /** An L0 composition stripe with its on-screen rectangle (CSS pixels) — drives panel hit-testing (§4.4). */
@@ -100,16 +111,8 @@ interface RegionRowLayout {
   bestMaxX: number;
 }
 
-/**
- * The L0→L1 crossfade is keyed to the *fit-to-screen scale*, not an absolute px/cell. This makes the page-level
- * Hilbert map (L1) the base view at fit and any zoom-in — regardless of file size — so the whole page map is always
- * viewable at fit (a large file no longer hides it behind the composition stripes until you've zoomed past the
- * point where the whole file is visible). The L0 composition stripes return only when you zoom *out* below fit.
- *
- * {@link L0_FADE_FRACTION} is the fraction of the fit scale at which the view is fully L0; L1 is fully shown at the
- * fit scale and beyond, crossfading to L0 across [fraction·fit, fit].
- */
-const L0_FADE_FRACTION = 0.5;
+// L0_FADE_FRACTION — the L0→L1 crossfade boundary, a fraction of fit-scale — lives in dbMapLod with the other LOD
+// constants (imported above) so the renderer's l1AlphaForScale and the initial-fit camera share one source of truth.
 /** Must match DbMapPanel's FIT_PADDING so L1 is fully shown exactly at the Fit camera. */
 const FIT_PADDING = 24;
 /**
@@ -151,22 +154,27 @@ const HEADER_HATCH_MIN_STEP = 4;
 const FREE_HATCH_MIN_CELL = 4;
 /**
  * Duration of the post-reveal segment highlight pulse. A "Reveal in File Map" flies the camera to a segment and
- * selects it; this transient accent pulse over the segment's own pages tells the eye *which* zone matched, then
- * fades. The panel drives the frames (the renderer is pure-draw); both must agree on the duration.
+ * selects it; this transient accent pulse + glowing silhouette frame over the segment's own pages tells the eye
+ * *which* zone matched, then fades. The panel drives the frames (the renderer is pure-draw); both must agree on
+ * the duration. Held long enough (and bold enough — see {@link segmentPulseAlpha} / {@link drawSegmentPulse}) that
+ * the matched zone is unmistakable even when the camera lands mid-fly.
  */
-export const SEGMENT_PULSE_MS = 2800;
+export const SEGMENT_PULSE_MS = 4500;
 
 /**
  * The segment-reveal pulse opacity envelope at `elapsedMs` into the flash (0 before/after the window). A fading
- * triple-oscillation — bright pulses up front, easing to nothing — so it reads as a transient "look here" flash,
- * not a steady fill. Pure (the caller scales it by the L1 grid alpha), so the shape is unit-tested.
+ * triple-oscillation — bold near-opaque pulses up front, easing to nothing — so it reads as a strong, transient
+ * "look here" flash, not a steady fill. High floor + slow (`^0.7`) decay keep it intense well into the window;
+ * the early crests reach ≈1.0 so the accent fill (and the white-hot core the renderer layers on its square,
+ * see {@link drawSegmentPulse}) punch through the dark→blue→amber density ramp they compete with. Pure (the
+ * caller scales it by the L1 grid alpha and derives the frame + white-core alphas from it), so it is unit-tested.
  */
 export function segmentPulseAlpha(elapsedMs: number): number {
   if (elapsedMs < 0 || elapsedMs >= SEGMENT_PULSE_MS) {
     return 0;
   }
   const t = elapsedMs / SEGMENT_PULSE_MS;
-  return (1 - t) * (0.5 + 0.5 * (0.5 + 0.5 * Math.sin(t * Math.PI * 6)));
+  return Math.pow(1 - t, 0.7) * (0.7 + 0.3 * (0.5 + 0.5 * Math.sin(t * Math.PI * 6)));
 }
 /** Minimum cell px below which corner markers (residency / CRC / pathology) are too small to register. */
 const CORNER_MARKER_MIN_CELL = 16;
@@ -220,6 +228,8 @@ const L0_LEGEND_MIN_FRACTION = 0.005;
 /** Safety caps so a degenerate camera can never schedule an unbounded fetch / draw. */
 const MAX_VISIBLE_PAGES = 256;
 const MAX_VISIBLE_CHUNKS = 256;
+/** L5 entity decodes are the heaviest (one fetch per occupied slot); cap so a degenerate zoom can't schedule thousands. */
+const MAX_VISIBLE_SLOTS = 256;
 
 function clamp01(v: number): number {
   return v < 0 ? 0 : v > 1 ? 1 : v;
@@ -232,6 +242,15 @@ function rgb(c: Rgb): string {
 /** Total bytes before chunk 0 on a chunk-based page — header + root directory + stride-alignment padding (A6). */
 function chunkOverheadBytes(detail: DbPageDetail): number {
   return (detail.headerBytes ?? 0) + (detail.directoryBytes ?? 0) + (detail.paddingBytes ?? 0);
+}
+
+/** Cubic ease-out fade multiplier (0..1) from a content arrival timestamp (`performance.now()` ms); 1 when unset or past the fade window. */
+function fadeFromArrival(arrival: number | undefined): number {
+  if (arrival == null) {
+    return 1;
+  }
+  const e = (performance.now() - arrival) / CONTENT_FADE_MS;
+  return e >= 1 ? 1 : e <= 0 ? 0 : 1 - Math.pow(1 - e, 3);
 }
 
 export class DbMapRenderer {
@@ -285,6 +304,9 @@ export class DbMapRenderer {
   private _chunkContents: Map<string, DbChunkContent> = new Map();
   // Per-chunk content arrival timestamps (key → performance.now()), for the fade-in (see CONTENT_FADE_MS).
   private _contentArrival: Map<string, number> = new Map();
+  // L5 entity-content decode per occupied cluster slot (key `segId:chunkId:slot`), plus its own fade-in arrivals.
+  private _slotContents: Map<string, DbChunkContent> = new Map();
+  private _slotArrival: Map<string, number> = new Map();
   private _componentOverlay: { segmentId: number; componentSlot: number } | null = null;
   private _maxChangeRevision = 1;
 
@@ -297,6 +319,9 @@ export class DbMapRenderer {
   // Whether to draw on-canvas region captions per RLE run (L1 enhancement #7); regions come from the panel.
   private _regionCaptions = false;
   private _regions: readonly DbMapRegion[] = [];
+  // Maps a segment's full registered type name → its short display label (same labeller the Query Console uses).
+  // Injected from the panel (a React component, where the hook lives); identity until set so labels never break.
+  private _shortLabel: (typeName: string) => string = (s) => s;
 
   // ── Per-frame viewport page-index LUT ─────────────────────────────────────────────────────────────────
   //
@@ -377,6 +402,8 @@ export class DbMapRenderer {
     this._pageDetails = new Map();
     this._chunkContents = new Map();
     this._contentArrival = new Map();
+    this._slotContents = new Map();
+    this._slotArrival = new Map();
     // Region layout cache is keyed on (startPage, pageCount, order, pageOrder); a fresh map invalidates startPage
     // identity (regions are recomputed by the panel against the new data) so it MUST be cleared here.
     this._regionRowLayout.clear();
@@ -459,6 +486,17 @@ export class DbMapRenderer {
   /** Whether on-canvas region captions are drawn at L1 (L1 enhancement #7). */
   setRegionCaptions(on: boolean): void {
     this._regionCaptions = on;
+  }
+
+  /**
+   * Injects the short-name labeller (the Query Console's {@link useComponentNames}/{@link useArchetypeNames} `label`)
+   * so on-canvas segment labels show the same friendly short name as everywhere else. Drops the cached L0 stripes —
+   * their labels embed the shortened name, so they must be rebuilt when the labeller changes (e.g. once the schema
+   * list loads and the map becomes available).
+   */
+  setShortLabel(shortLabel: (typeName: string) => string): void {
+    this._shortLabel = shortLabel;
+    this._l0Stripes = null;
   }
 
   /** Feeds the RLE region list (from {@link buildRegions}) used by the captions overlay. */
@@ -586,10 +624,35 @@ export class DbMapRenderer {
     this._chunkContents = chunks;
   }
 
-  /** Whether any resident chunk's content is still within its fade-in window — the panel keeps rendering until false. */
+  /**
+   * Feeds the per-slot decoded entity content (L5) for the visible occupied cluster slots. Same arrival-stamp fade as
+   * {@link setChunkContents} so a late three-hop decode fades in rather than popping.
+   */
+  setSlotContents(slots: Map<string, DbChunkContent>): void {
+    const now = performance.now();
+    const arrival = this._slotArrival;
+    for (const key of slots.keys()) {
+      if (!arrival.has(key)) {
+        arrival.set(key, now);
+      }
+    }
+    for (const key of arrival.keys()) {
+      if (!slots.has(key)) {
+        arrival.delete(key);
+      }
+    }
+    this._slotContents = slots;
+  }
+
+  /** Whether any resident chunk *or slot* content is still within its fade-in window — the panel keeps rendering until false. */
   hasFadingContent(): boolean {
     const now = performance.now();
     for (const t of this._contentArrival.values()) {
+      if (now - t < CONTENT_FADE_MS) {
+        return true;
+      }
+    }
+    for (const t of this._slotArrival.values()) {
       if (now - t < CONTENT_FADE_MS) {
         return true;
       }
@@ -599,12 +662,12 @@ export class DbMapRenderer {
 
   /** Ease-out fade multiplier (0..1) for a chunk's content, from its arrival time; 1 once past the fade window. */
   private contentFadeAlpha(key: string): number {
-    const arrival = this._contentArrival.get(key);
-    if (arrival == null) {
-      return 1;
-    }
-    const e = (performance.now() - arrival) / CONTENT_FADE_MS;
-    return e >= 1 ? 1 : e <= 0 ? 0 : 1 - Math.pow(1 - e, 3);
+    return fadeFromArrival(this._contentArrival.get(key));
+  }
+
+  /** Ease-out fade multiplier (0..1) for one slot's L5 entity content, from its arrival time; 1 once past the fade window. */
+  private slotFadeAlpha(key: string): number {
+    return fadeFromArrival(this._slotArrival.get(key));
   }
 
   /**
@@ -669,14 +732,16 @@ export class DbMapRenderer {
   }
 
   /**
-   * The currently-dominant *display* band — extends {@link DbLodState}'s band (which lives in [L1, L3, L4])
-   * with `L0` for the zoomed-out composition view. Drives the per-band Legend chrome (Module 15 L1 #7).
+   * The currently-dominant *display* band — extends {@link DbLodState}'s band (which lives in [L1, L3, L4]) with `L0`
+   * for the zoomed-out composition view and `L5` for the cluster entity-content level (file-map §10 Q4 override).
+   * Drives the per-band Legend chrome (Module 15 L1 #7). `L5` is reported once any cluster entity decode is resident
+   * (i.e. the camera is zoomed deep enough that occupied slots crossed the L5 fetch threshold).
    */
-  getDisplayBand(): 'L0' | 'L1' | 'L3' | 'L4' {
+  getDisplayBand(): 'L0' | 'L1' | 'L3' | 'L4' | 'L5' {
     const cellPx = this._camera.scale;
     const { band, l3Alpha, l4Alpha } = lodForScale(cellPx);
     if (l4Alpha > 0.5) {
-      return 'L4';
+      return this._slotContents.size > 0 ? 'L5' : 'L4';
     }
     if (l3Alpha > 0.5) {
       return 'L3';
@@ -698,7 +763,7 @@ export class DbMapRenderer {
    * L3 page details when zoomed into the chunk band, and L4 chunk content when zoomed into the content band.
    */
   getDetailRequest(): DbDetailRequest {
-    const request: DbDetailRequest = { tileNodes: [], pages: [], chunks: [] };
+    const request: DbDetailRequest = { tileNodes: [], pages: [], chunks: [], slots: [] };
     if (!this._data || !this._layout) {
       return request;
     }
@@ -734,6 +799,42 @@ export class DbMapRenderer {
         }
         for (let i = 0; i < detail.chunkTotal && request.chunks.length < MAX_VISIBLE_CHUNKS; i++) {
           request.chunks.push({ segId: detail.ownerSegmentId, chunkId: detail.firstChunkId + i });
+        }
+      }
+    }
+
+    // Fetch the L5 entity decode for each visible *occupied* cluster slot once slots are big enough on screen. Driven off
+    // the resident L4 chunk content (it already tells us which slots are occupied and the cluster size), so this only
+    // fires when the L4 grid is in hand. Prefetch threshold sits below the crossfade so the three-hop decode lands first.
+    if (this._camera.scale >= L4_CONTENT_PREFETCH_PAGE_PX) {
+      const scale = this._camera.scale;
+      for (const page of this.visiblePageList()) {
+        if (request.slots.length >= MAX_VISIBLE_SLOTS) {
+          break;
+        }
+        const detail = this._pageDetails.get(page);
+        if (!detail || detail.chunkTotal <= 0 || detail.ownerSegmentId < 0) {
+          continue;
+        }
+        const chunkCols = gridCols(detail.chunkTotal);
+        for (let i = 0; i < detail.chunkTotal && request.slots.length < MAX_VISIBLE_SLOTS; i++) {
+          const chunkId = detail.firstChunkId + i;
+          const content = this._chunkContents.get(`${detail.ownerSegmentId}:${chunkId}`);
+          if (!content || content.decoder !== 'cluster' || content.cells.length === 0) {
+            continue;
+          }
+          // slot px = page px / chunk grid cols / slot grid cols (cells are the slot sub-grid). The chunk overhead band
+          // trims a little height, not width, so the width-based estimate is a safe lower bound for the gate.
+          const slotPx = scale / chunkCols / gridCols(content.cells.length);
+          if (slotPx < L5_CONTENT_PREFETCH_SLOT_PX) {
+            continue;
+          }
+          for (let s = 0; s < content.cells.length && request.slots.length < MAX_VISIBLE_SLOTS; s++) {
+            // colorKey > 0 ⇒ the slot holds a live entity; free slots have no entity to decode.
+            if (content.cells[s].kind === 'entitySlot' && content.cells[s].colorKey > 0) {
+              request.slots.push({ segId: detail.ownerSegmentId, chunkId, slot: s });
+            }
+          }
         }
       }
     }
@@ -860,11 +961,47 @@ export class DbMapRenderer {
     const pageY = (screenY - this._camera.y) / this._camera.scale - (this._layout.dataRect.y + y);
     const areaY = top < 1 ? (pageY - top) / (1 - top) : 0;
     const wx = (screenX - this._camera.x) / this._camera.scale - (this._layout.dataRect.x + x) - chunkCol / cols;
+    // Invert the L4 content grid (ccols × crows) — the same dimensions the draw path tiles (contentCellWorldRect →
+    // gridSubRect). The vertical fraction must scale by crows, NOT ccols: scaling by ccols mis-mapped every non-square
+    // cell count (e.g. a 2-cell chunk is 2×1), so clicks in the lower rows fell out of range → null → the parent chunk
+    // got selected instead of the cell.
     const ccols = gridCols(content.cells.length);
-    const col = Math.min(ccols - 1, Math.max(0, Math.floor(wx * cols * ccols)));
-    const row = Math.min(ccols - 1, Math.max(0, Math.floor((areaY * rows - chunkRow) * ccols)));
-    const cellIndex = row * ccols + col;
+    const crows = Math.ceil(content.cells.length / ccols);
+    const cellIndex = gridCellIndexAt(wx * cols, areaY * rows - chunkRow, ccols, crows);
     return cellIndex < content.cells.length ? { page: hit.page, chunkInPage: hit.chunkInPage, cellIndex } : null;
+  }
+
+  /**
+   * The cluster entity (page + chunk + slot) under a screen point when the map is at the L5 entity-content level, or
+   * null. "At L5" means: the picked content cell is an occupied cluster slot (`entitySlot`, colorKey > 0) whose entity
+   * decode is resident and whose slot is big enough on screen that its field grid is showing. The panel uses this to
+   * select the *entity* (Inspector shows its full component decode) instead of the bare slot cell. A cluster slot is a
+   * content cell, so the slot index is the picked cell index.
+   */
+  pickEntityAt(screenX: number, screenY: number): { page: number; chunkInPage: number; slot: number } | null {
+    const hit = this.pickContentCell(screenX, screenY);
+    if (!hit) {
+      return null;
+    }
+    const detail = this._pageDetails.get(hit.page);
+    if (!detail) {
+      return null;
+    }
+    const chunkContent = this._chunkContents.get(`${detail.ownerSegmentId}:${detail.firstChunkId + hit.chunkInPage}`);
+    if (!chunkContent || chunkContent.decoder !== 'cluster') {
+      return null;
+    }
+    const slotCell = chunkContent.cells[hit.cellIndex];
+    if (!slotCell || slotCell.kind !== 'entitySlot' || slotCell.colorKey <= 0) {
+      return null; // free slot — no entity
+    }
+    // Gate on the slot actually being at L5 (its entity decode resident + big enough that the field grid draws).
+    const key = `${detail.ownerSegmentId}:${detail.firstChunkId + hit.chunkInPage}:${hit.cellIndex}`;
+    const slotRect = this.contentCellWorldRect(hit);
+    if (!this._slotContents.has(key) || !slotRect || l5AlphaForSlotPx(slotRect.w * this._camera.scale) <= 0) {
+      return null;
+    }
+    return { page: hit.page, chunkInPage: hit.chunkInPage, slot: hit.cellIndex };
   }
 
   /** World rect of a file-page cell (1×1 in the Hilbert data grid), or null when the layout isn't built. */
@@ -1163,7 +1300,7 @@ export class DbMapRenderer {
       return [];
     }
     if (!this._l0Stripes) {
-      this._l0Stripes = computeComposition(this._data, this._encoding);
+      this._l0Stripes = computeComposition(this._data, this._encoding, this._shortLabel);
     }
     return this._l0Stripes;
   }
@@ -1644,6 +1781,7 @@ export class DbMapRenderer {
     const overlayActive = overlay != null && overlay.segmentId === detail.ownerSegmentId;
     for (let j = 0; j < content.cells.length; j++) {
       const cell = content.cells[j];
+      const sub = gridSubRect(chunkRect, ccols, crows, j);
       let color: Rgb;
       if (overlayActive && cell.kind === 'entitySlot') {
         const enabled = ((cell.enabledMask ?? 0) & (1 << overlay!.componentSlot)) !== 0;
@@ -1652,7 +1790,14 @@ export class DbMapRenderer {
         color = contentCellRgb(cell.kind, cell.colorKey);
       }
       ctx.fillStyle = rgb(color);
-      this.fillWorldRect(ctx, gridSubRect(chunkRect, ccols, crows, j));
+      this.fillWorldRect(ctx, sub);
+
+      // L5 (file-map §10 Q4 override): once an occupied cluster slot is big enough on screen, reveal its entity's
+      // component-grouped field grid nested inside the slot — the same field-cell rendering the legacy component table
+      // uses at L4. Crossfades in over the flat occupancy fill by slot px; the readable values live in the Inspector.
+      if (content.decoder === 'cluster' && cell.kind === 'entitySlot' && cell.colorKey > 0) {
+        this.drawEntityContent(ctx, detail.ownerSegmentId, detail.firstChunkId + chunkInPage, j, sub, baseAlpha * fade);
+      }
     }
     // The near-square ccols×crows grid can exceed the cell count (e.g. 3 cells in a 2×2), leaving surplus
     // bottom-right slots. Mark them as invalid area — the same X-crosshatch the page's surplus chunk slots and
@@ -1673,6 +1818,46 @@ export class DbMapRenderer {
       }
     }
     ctx.globalAlpha = baseAlpha;
+  }
+
+  /**
+   * Draws one cluster entity's component-grouped field grid (L5) nested inside its occupied slot rect, crossfading in by
+   * slot pixel size (file-map §10 Q4 override). Reuses the L4 content-cell layout / colouring one level deeper: the slot
+   * is the parent, the entity's field cells the grid. No-op until the slot is large enough and its decode is resident.
+   * `parentAlpha` is the caller's current globalAlpha (page/chunk fade) — restored on exit so the caller's loop is unaffected.
+   */
+  private drawEntityContent(ctx: CanvasRenderingContext2D, segId: number, chunkId: number, slot: number, slotRect: Rect, parentAlpha: number): void {
+    const l5a = l5AlphaForSlotPx(slotRect.w * this._camera.scale);
+    if (l5a <= 0) {
+      return;
+    }
+    const key = `${segId}:${chunkId}:${slot}`;
+    const content = this._slotContents.get(key);
+    if (!content || content.cells.length === 0) {
+      return;
+    }
+    const fade = this.slotFadeAlpha(key);
+    if (fade <= 0) {
+      return;
+    }
+    const fcols = gridCols(content.cells.length);
+    const frows = Math.ceil(content.cells.length / fcols);
+    ctx.globalAlpha = parentAlpha * l5a * fade;
+    for (let k = 0; k < content.cells.length; k++) {
+      const fc = content.cells[k];
+      ctx.fillStyle = rgb(contentCellRgb(fc.kind, fc.colorKey));
+      this.fillWorldRect(ctx, gridSubRect(slotRect, fcols, frows, k));
+    }
+    // Surplus bottom-right slots of the near-square field grid → invalid hatch, same cue the chunk content void uses.
+    const voidCount = gridVoidCount(content.cells.length);
+    if (voidCount > 0) {
+      const cam = this._camera;
+      for (let k = content.cells.length; k < content.cells.length + voidCount; k++) {
+        const sub = gridSubRect(slotRect, fcols, frows, k);
+        this.drawInvalidChunkCell(ctx, worldToScreenX(cam, sub.x), worldToScreenY(cam, sub.y), sub.w * cam.scale, sub.h * cam.scale, parentAlpha * l5a * fade);
+      }
+    }
+    ctx.globalAlpha = parentAlpha;
   }
 
   /**
@@ -2442,17 +2627,18 @@ export class DbMapRenderer {
       }
 
       const meta = segMeta.get(region.ownerSegmentId);
-      const name = meta
-        ? meta.typeName.length > 0
-          ? meta.typeName
-          : `${meta.kind} #${region.ownerSegmentId}`
-        : `segment #${region.ownerSegmentId}`;
       const m = runTotal.get(region.ownerSegmentId) ?? 1;
+      // Non-verbose: kind-prefixed segment label (e.g. "Index · ClIdxUnit"), plus the per-segment run index when the
+      // segment spans multiple runs. Verbose: the page-type caption already leads, so only the short owner name follows.
+      const ownerName = meta && meta.typeName.length > 0 ? this._shortLabel(meta.typeName) : `#${region.ownerSegmentId}`;
+      const base = meta
+        ? formatSegmentLabel(meta.kind, region.ownerSegmentId, meta.typeName, this._shortLabel)
+        : `segment #${region.ownerSegmentId}`;
       const label = verbose
-        ? `${PAGE_TYPE_LABELS[region.pageType] ?? 'Unknown'} · ${name} · ${region.pageCount.toLocaleString()} pages · ${formatFileSize(region.byteSize)}`
+        ? `${PAGE_TYPE_LABELS[region.pageType] ?? 'Unknown'} · ${ownerName} · ${region.pageCount.toLocaleString()} pages · ${formatFileSize(region.byteSize)}`
         : m > 1
-          ? `${name} [${k} of ${m}]`
-          : name;
+          ? `${base} [${k} of ${m}]`
+          : base;
 
       draws.push({
         cx: worldToScreenX(cam, dataRect.x + (bestMinX + bestMaxX + 1) / 2),
@@ -2753,19 +2939,27 @@ export class DbMapRenderer {
 
   /**
    * Draws the transient post-reveal pulse over every page of {@link _pulseSegmentId} (a "Reveal in File Map"
-   * just flew here and selected it). Fills the segment's own cells with the accent at a fading, oscillating
-   * alpha so the eye catches *which* zone matched, then fades to nothing. Iterates only the visible cells (the
-   * reveal framed the segment), reusing the {@link drawSegmentOverlay} visible-window pattern, so the per-frame
-   * cost is bounded regardless of file size. Returns once the pulse window has elapsed (the panel then clears it).
+   * just flew here and selected it). Two layers, both fading on the {@link segmentPulseAlpha} envelope:
+   *   1. a glowing accent **fill** of the segment's own cells, so the matched pages light up; and
+   *   2. a bold, accent-glowing **silhouette frame** stroked around the segment's outer boundary (every edge
+   *      where one of its cells meets a different owner / off-grid), so the eye catches *which zone* matched —
+   *      not just a faint tint that blends with the density ramp. The frame rides a touch brighter than the fill
+   *      (and never below a legibility floor while the window is open) so the outline stays crisp through the
+   *      fill's oscillation troughs.
+   * Iterates only the visible cells (the reveal framed the segment), reusing the {@link drawSegmentOverlay}
+   * visible-window pattern, and batches the frame into a single stroke so the glow renders once. Per-frame cost is
+   * bounded regardless of file size. Returns once the pulse window has elapsed (the panel then clears it).
    */
   private drawSegmentPulse(ctx: CanvasRenderingContext2D, l1Alpha: number): void {
     if (this._pulseSegmentId == null || !this._data || !this._layout) {
       return;
     }
-    const alpha = l1Alpha * segmentPulseAlpha(performance.now() - this._pulseStartMs);
-    if (alpha <= 0.01) {
+    const env = segmentPulseAlpha(performance.now() - this._pulseStartMs);
+    const fillAlpha = l1Alpha * env;
+    if (fillAlpha <= 0.01) {
       return;
     }
+    const target = this._pulseSegmentId;
     const { side, dataRect } = this._layout;
     const owner = this._data.ownerSegmentId;
     const cam = this._camera;
@@ -2774,21 +2968,75 @@ export class DbMapRenderer {
     const cy0 = Math.max(0, Math.floor(vis.y - dataRect.y));
     const cx1 = Math.min(side - 1, Math.ceil(vis.x - dataRect.x + vis.w));
     const cy1 = Math.min(side - 1, Math.ceil(vis.y - dataRect.y + vis.h));
+    // LUT-driven page lookup: cell→page in O(1), then map to its owning segment. Off-grid / off-file cells = -1.
+    const ownerAt = (cx: number, cy: number): number => {
+      const page = this.lutPageAt(cx, cy);
+      return page < 0 ? -1 : owner[page];
+    };
+
+    // Layer 1 — intense fill of the segment's own cells: a bold accent base, with a white-hot core blown over the
+    // crests (`env²` concentrates the white at the brightest instants, so each pulse punches white then recedes to
+    // accent). One cell loop, both fills per cell, so the per-frame cost stays bounded. White is theme-safe — it
+    // reads as a flash over any fill in either theme. `globalAlpha` is set per fillStyle so the two layers stack.
+    const whiteAlpha = l1Alpha * env * env;
     ctx.save();
-    ctx.globalAlpha = alpha;
-    ctx.fillStyle = this._theme.accent;
-    // LUT-driven page lookup: cell→page in O(1), then a single sentinel check. Off-grid / off-file cells = -1.
     for (let cy = cy0; cy <= cy1; cy++) {
       for (let cx = cx0; cx <= cx1; cx++) {
-        const page = this.lutPageAt(cx, cy);
-        if (page < 0 || owner[page] !== this._pulseSegmentId) {
+        if (ownerAt(cx, cy) !== target) {
           continue;
         }
         const sx = worldToScreenX(cam, dataRect.x + cx);
         const sy = worldToScreenY(cam, dataRect.y + cy);
+        ctx.globalAlpha = fillAlpha;
+        ctx.fillStyle = this._theme.accent;
         ctx.fillRect(sx, sy, cam.scale, cam.scale);
+        if (whiteAlpha > 0.01) {
+          ctx.globalAlpha = whiteAlpha;
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(sx, sy, cam.scale, cam.scale);
+        }
       }
     }
+    ctx.restore();
+
+    // Layer 2 — bold, accent-glowing silhouette frame around the segment's outer boundary. Batched into one path
+    // so the shadow glow renders a single time over the whole outline. `theme.text` is the max-contrast colour in
+    // both themes, so the frame reads against any fill underneath; the accent shadow ties it to the selection.
+    ctx.save();
+    ctx.globalAlpha = l1Alpha * Math.min(1, 0.45 + env);
+    ctx.strokeStyle = this._theme.text;
+    ctx.lineWidth = Math.max(1, Math.min(2, cam.scale * 0.25));
+    ctx.lineJoin = 'round';
+    ctx.shadowColor = this._theme.accent;
+    ctx.shadowBlur = 12;
+    ctx.beginPath();
+    for (let cy = cy0; cy <= cy1; cy++) {
+      for (let cx = cx0; cx <= cx1; cx++) {
+        if (ownerAt(cx, cy) !== target) {
+          continue;
+        }
+        const sx = worldToScreenX(cam, dataRect.x + cx);
+        const sy = worldToScreenY(cam, dataRect.y + cy);
+        const s = cam.scale;
+        if (ownerAt(cx - 1, cy) !== target) {
+          ctx.moveTo(sx, sy);
+          ctx.lineTo(sx, sy + s);
+        }
+        if (ownerAt(cx + 1, cy) !== target) {
+          ctx.moveTo(sx + s, sy);
+          ctx.lineTo(sx + s, sy + s);
+        }
+        if (ownerAt(cx, cy - 1) !== target) {
+          ctx.moveTo(sx, sy);
+          ctx.lineTo(sx + s, sy);
+        }
+        if (ownerAt(cx, cy + 1) !== target) {
+          ctx.moveTo(sx, sy + s);
+          ctx.lineTo(sx + s, sy + s);
+        }
+      }
+    }
+    ctx.stroke();
     ctx.restore();
   }
 

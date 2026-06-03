@@ -16,7 +16,6 @@ public class DBComponentDefinition
 {
     public string Name { get; private set; }
     public int Revision { get; private set; }
-    public bool AllowMultiple { get; private set; }
     public Type POCOType { get; internal set; }
     public string FullName => FormatFullName(Name, Revision);
     
@@ -136,11 +135,10 @@ public class DBComponentDefinition
         public bool DoesFieldTypeSupportIndex() => (Type >= FieldType.Byte) && ((FieldType)((int)Type&0xFF) <= FieldType.String64);
     }
 
-    internal DBComponentDefinition(string name, int revision, bool allowMultiple, StorageMode storageMode = StorageMode.Versioned)
+    internal DBComponentDefinition(string name, int revision, StorageMode storageMode = StorageMode.Versioned)
     {
         Name = name;
         Revision = revision;
-        AllowMultiple = allowMultiple;
         StorageMode = storageMode;
         _fieldsByName = new Dictionary<string, Field>();
     }

@@ -96,7 +96,7 @@ public class ClusterAabbQueryBenchmarks : IDisposable
               o.OverrideDatabaseCacheMinSize = true;
               o.PagesDebugPattern = false;
           })
-          .AddScopedDatabaseEngine(o => { o.Wal = null; });
+          .AddInMemoryWalEngine();
 
         _sp = sc.BuildServiceProvider();
         _sp.EnsureFileDeleted<ManagedPagedMMFOptions>();
@@ -261,7 +261,7 @@ public class ClusterRadiusQueryBenchmarks : IDisposable
               o.OverrideDatabaseCacheMinSize = true;
               o.PagesDebugPattern = false;
           })
-          .AddScopedDatabaseEngine(o => { o.Wal = null; });
+          .AddInMemoryWalEngine();
 
         _sp = sc.BuildServiceProvider();
         _sp.EnsureFileDeleted<ManagedPagedMMFOptions>();

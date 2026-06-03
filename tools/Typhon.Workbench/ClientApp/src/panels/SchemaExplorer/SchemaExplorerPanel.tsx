@@ -8,6 +8,7 @@ import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { StatusBadge } from '@/components/ui/status-badge';
 import { useDensityRowHeight } from '@/hooks/useDensityRowHeight';
+import { createClickDisambiguator } from '@/hooks/clickDisambiguator';
 import { useArchetypeList } from '@/hooks/schema/useArchetypeList';
 import { useComponentList } from '@/hooks/schema/useComponentList';
 import { useSelectionStore } from '@/stores/useSelectionStore';
@@ -16,6 +17,7 @@ import { useSchemaExplorerPrefsStore } from '@/stores/useSchemaExplorerPrefsStor
 import { openArchetypeInspector, openComponentInspector } from '@/shell/commands/openSchemaBrowser';
 import type { StorageMode } from '@/hooks/schema/types';
 import {
+  buildArchetypeLabelMap,
   buildArchetypeTree,
   filterArchetypeTree,
   applyArchetypeFilters,
@@ -45,11 +47,24 @@ function stripNamespace(fullName: string): string {
   return dot === -1 ? fullName : fullName.slice(dot + 1);
 }
 
+// One double-click window: a single click's expand/collapse is deferred this long so a following double-click
+// (open inspector) can cancel it. ~Matches a typical OS double-click threshold; selection stays immediate.
+const ARCHETYPE_TOGGLE_DELAY_MS = 250;
+
 /** react-arborist row — switches on node kind; selection writes the bus leaf, internal nodes toggle. */
 function SchemaNodeRow({ node, style }: NodeRendererProps<SchemaTreeNode>) {
   const data = node.data;
   const indent = node.level * 12;
   const select = useSelectionStore.getState().select;
+  // Per-row click disambiguator (archetype rows only use it; declared unconditionally to satisfy hook rules).
+  // Defers the expand/collapse so a double-click can cancel it — a double-click opens the inspector and must NOT
+  // toggle the node. Cancel any pending toggle on unmount so it can't fire against a recycled/stale row.
+  const clickGuardRef = useRef<ReturnType<typeof createClickDisambiguator> | null>(null);
+  if (clickGuardRef.current == null) {
+    clickGuardRef.current = createClickDisambiguator(ARCHETYPE_TOGGLE_DELAY_MS);
+  }
+  const clickGuard = clickGuardRef.current;
+  useEffect(() => () => clickGuard.cancel(), [clickGuard]);
 
   if (data.kind === 'archetype') {
     const a = data.archetype;
@@ -63,10 +78,16 @@ function SchemaNodeRow({ node, style }: NodeRendererProps<SchemaTreeNode>) {
         onClick={() => {
           node.select();
           select('archetype', a.archetypeId);
-          if (node.isInternal) node.toggle();
+          // Defer the toggle — a follow-up double-click cancels it (open inspector, no expand/collapse). The
+          // selection above is immediate, so the click still gives instant feedback.
+          if (node.isInternal) {
+            clickGuard.onSingle(() => node.toggle());
+          }
         }}
         onDoubleClick={() => {
-          // Open in → the Archetype Inspector deep view (J1 step 4). Single click already set the leaf.
+          // Open in → the Archetype Inspector deep view (J1 step 4). Drop the pending single-click toggle so the
+          // double-click never expands/collapses the node. Single click already set the leaf.
+          clickGuard.cancel();
           select('archetype', a.archetypeId);
           openArchetypeInspector();
         }}
@@ -75,7 +96,8 @@ function SchemaNodeRow({ node, style }: NodeRendererProps<SchemaTreeNode>) {
           {node.isInternal ? (node.isOpen ? '▾' : '▸') : ''}
         </span>
         <Layers className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-        <span className="shrink-0 font-mono text-foreground">#{a.archetypeId}</span>
+        {/* Friendly archetype name (model-derived: shortened name, or `#<id>` when implicit/unnamed). */}
+        <span className="shrink-0 font-mono text-foreground">{data.label}</span>
         <span className="min-w-0 flex-1 truncate text-muted-foreground">
           {a.componentTypes.map(stripNamespace).join(', ')}
         </span>
@@ -158,11 +180,14 @@ export default function SchemaExplorerPanel(_props: IDockviewPanelProps) {
     cRefetch();
   };
 
+  // Friendly archetype labels, derived over the FULL set so shortening is stable as filters narrow the tree.
+  const archLabels = useMemo(() => buildArchetypeLabelMap(archetypes), [archetypes]);
+
   // Archetypes mode: filter archetypes → join with components → query-filter the tree (substring, like the
   // Resource Tree — react-arborist's fuzzy match leaves too many siblings visible).
   const archTree = useMemo(
-    () => filterArchetypeTree(buildArchetypeTree(applyArchetypeFilters(archetypes, archFilters), components), deferredQuery),
-    [archetypes, components, archFilters, deferredQuery],
+    () => filterArchetypeTree(buildArchetypeTree(applyArchetypeFilters(archetypes, archFilters), components, archLabels), deferredQuery),
+    [archetypes, components, archFilters, deferredQuery, archLabels],
   );
 
   // Types mode: fuzzy component search (matches the former Component Browser) → quick filters → sort.

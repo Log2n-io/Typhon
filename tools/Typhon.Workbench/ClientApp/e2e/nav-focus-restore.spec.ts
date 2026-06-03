@@ -13,12 +13,12 @@ test.describe('Nav focus restore (AC1.2 — one Back per view)', () => {
 
     await expect(page.getByTestId('schema-explorer')).toBeVisible();
 
-    // Drill 1: double-click an archetype → Archetype Inspector.
-    await page.locator('[data-archetype-id="802"]').dblclick();
+    // Drill 1: double-click an archetype → Archetype Inspector. (823 = PlayerArch in the SWG fixture.)
+    await page.locator('[data-archetype-id="823"]').dblclick();
     await expect(page.getByTestId('archetype-inspector')).toBeVisible();
 
     // Drill 2: double-click a component inside it → Component Inspector.
-    await page.locator('[data-testid="archetype-component-row"][data-type-name="Typhon.Workbench.Fixture.CompA"]').dblclick();
+    await page.locator('[data-testid="archetype-component-row"][data-type-name="Typhon.Workbench.Fixture.Player"]').dblclick();
     await expect(page.getByTestId('component-inspector')).toBeVisible();
 
     // Back #1 → Archetype Inspector (the view before drill 2).

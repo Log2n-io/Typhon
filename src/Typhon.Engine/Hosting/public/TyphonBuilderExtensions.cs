@@ -303,7 +303,10 @@ public static class ServiceCollectionExtensions
         var watchdog = serviceProvider.GetRequiredService<DeadlineWatchdog>();
         var memoryAllocator = serviceProvider.GetRequiredService<IMemoryAllocator>();
 
-        return new DatabaseEngine(resourceRegistry, epochManager, watchdog, mpmmf, memoryAllocator, options.Value, logger);
+        // Optional WAL file-IO backend (e.g. an in-memory implementation for tests). Absent in production → engine builds its own WalFileIO.
+        var walIo = serviceProvider.GetService<IWalFileIO>();
+
+        return new DatabaseEngine(resourceRegistry, epochManager, watchdog, mpmmf, memoryAllocator, options.Value, logger, injectedWalIo: walIo);
     }
     
     /// <summary>

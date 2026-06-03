@@ -825,10 +825,69 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/CreateFixtureResponseDto"
+                  "$ref": "#/components/schemas/StartFixtureJobResponseDto"
                 }
               }
             }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
+      }
+    },
+    "/api/fixtures/jobs/{jobId}": {
+      "get": {
+        "tags": [
+          "Fixtures"
+        ],
+        "parameters": [
+          {
+            "name": "jobId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FixtureJobStateDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "Fixtures"
+        ],
+        "parameters": [
+          {
+            "name": "jobId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
           }
         },
         "security": [
@@ -1102,6 +1161,50 @@
             "application/*+json": {
               "schema": {
                 "$ref": "#/components/schemas/ProfilerOptions"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkbenchOptions"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ]
+          }
+        ]
+      }
+    },
+    "/api/options/schema": {
+      "patch": {
+        "tags": [
+          "Options"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SchemaOptions"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SchemaOptions"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/SchemaOptions"
               }
             }
           },
@@ -2060,6 +2163,174 @@
         "security": [
           {
             "Bearer": [ ]
+          }
+        ]
+      }
+    },
+    "/api/sessions/{sessionId}/query/plan": {
+      "post": {
+        "tags": [
+          "QueryConsole"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QueryPlanRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QueryPlanRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/QueryPlanRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueryPlanDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
+      }
+    },
+    "/api/sessions/{sessionId}/query/execute": {
+      "post": {
+        "tags": [
+          "QueryConsole"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QueryExecuteRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QueryExecuteRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/QueryExecuteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueryResultDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
+      }
+    },
+    "/api/sessions/{sessionId}/query/parse": {
+      "post": {
+        "tags": [
+          "QueryConsole"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QueryParseRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QueryParseRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/QueryParseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueryParseResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
           }
         ]
       }
@@ -3080,6 +3351,72 @@
         ]
       }
     },
+    "/api/sessions/{sessionId}/dbmap/chunk/{segId}/{chunkId}/entity/{slotIndex}": {
+      "get": {
+        "tags": [
+          "StorageMap"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "segId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "chunkId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "slotIndex",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StorageChunkDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
+      }
+    },
     "/api/system/os": {
       "get": {
         "tags": [
@@ -3307,6 +3644,7 @@
       "ArchetypeInfoDto": {
         "required": [
           "archetypeId",
+          "name",
           "componentTypes",
           "entityCount",
           "componentSize",
@@ -3318,6 +3656,12 @@
         "type": "object",
         "properties": {
           "archetypeId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "name": {
             "type": [
               "null",
               "string"
@@ -3845,6 +4189,10 @@
               "null",
               "string"
             ]
+          },
+          "hasSpatialIndex": {
+            "type": "boolean",
+            "default": false
           }
         }
       },
@@ -4046,40 +4394,19 @@
               "null",
               "string"
             ]
-          }
-        }
-      },
-      "CreateFixtureResponseDto": {
-        "required": [
-          "typhonFilePath",
-          "schemaDllPath",
-          "totalEntities",
-          "wasCreated"
-        ],
-        "type": "object",
-        "properties": {
-          "typhonFilePath": {
+          },
+          "config": {
+            "$ref": "#/components/schemas/FixtureConfig"
+          },
+          "databaseName": {
             "type": [
               "null",
               "string"
             ]
           },
-          "schemaDllPath": {
-            "type": [
-              "null",
-              "string"
-            ]
-          },
-          "totalEntities": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "format": "int32"
-          },
-          "wasCreated": {
-            "type": "boolean"
+          "useBulkLoad": {
+            "type": "boolean",
+            "default": false
           }
         }
       },
@@ -4595,6 +4922,10 @@
           },
           "indexAllowsMultiple": {
             "type": "boolean"
+          },
+          "isSpatial": {
+            "type": "boolean",
+            "default": false
           }
         }
       },
@@ -4690,7 +5021,8 @@
       "FixtureCapabilityDto": {
         "required": [
           "available",
-          "outputDirectory"
+          "outputDirectory",
+          "defaultDatabaseName"
         ],
         "type": "object",
         "properties": {
@@ -4698,6 +5030,283 @@
             "type": "boolean"
           },
           "outputDirectory": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "defaultDatabaseName": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "FixtureConfig": {
+        "required": [
+          "resourceTypeCount",
+          "guildCount",
+          "recipeCount",
+          "playerCount",
+          "depositCount",
+          "harvesterCount",
+          "factoryCount",
+          "itemCount",
+          "resourceTaxonomyDepth",
+          "maxAffixesPerItem",
+          "professionCount",
+          "includeMultiAffixItems",
+          "includePolymorphicStructure",
+          "onlinePlayerFraction",
+          "brokenHarvesterFraction",
+          "depletedDepositFraction",
+          "idleFactoryFraction",
+          "playersPerGuildShape",
+          "deletedPlayerFraction",
+          "seed"
+        ],
+        "type": "object",
+        "properties": {
+          "resourceTypeCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "guildCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "recipeCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "playerCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "depositCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "harvesterCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "factoryCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "itemCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "resourceTaxonomyDepth": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "maxAffixesPerItem": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "professionCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "includeMultiAffixItems": {
+            "type": "boolean"
+          },
+          "includePolymorphicStructure": {
+            "type": "boolean"
+          },
+          "onlinePlayerFraction": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "brokenHarvesterFraction": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "depletedDepositFraction": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "idleFactoryFraction": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "playersPerGuildShape": {
+            "$ref": "#/components/schemas/PlayersPerGuildShape"
+          },
+          "deletedPlayerFraction": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "seed": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "totalSpawnEstimate": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          }
+        }
+      },
+      "FixtureCreateResultDto": {
+        "required": [
+          "typhonFilePath",
+          "schemaDllPath",
+          "totalEntities",
+          "wasCreated"
+        ],
+        "type": "object",
+        "properties": {
+          "typhonFilePath": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "schemaDllPath": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "totalEntities": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "wasCreated": {
+            "type": "boolean"
+          }
+        }
+      },
+      "FixtureJobStateDto": {
+        "required": [
+          "jobId",
+          "state",
+          "phase",
+          "completed",
+          "total",
+          "result",
+          "error"
+        ],
+        "type": "object",
+        "properties": {
+          "jobId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "state": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "phase": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "completed": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "total": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "result": {
+            "$ref": "#/components/schemas/FixtureCreateResultDto"
+          },
+          "error": {
             "type": [
               "null",
               "string"
@@ -4908,6 +5517,31 @@
       "MemoryAllocDirection": {
         "type": "integer"
       },
+      "NavigateClauseDto": {
+        "required": [
+          "field",
+          "targetComponent",
+          "where"
+        ],
+        "type": "object",
+        "properties": {
+          "field": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "targetComponent": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "where": {
+            "$ref": "#/components/schemas/PredicateNodeDto"
+          }
+        }
+      },
       "OpenInEditorRequest": {
         "required": [
           "file",
@@ -4966,6 +5600,31 @@
           }
         }
       },
+      "OrderByDto": {
+        "required": [
+          "component",
+          "field",
+          "descending"
+        ],
+        "type": "object",
+        "properties": {
+          "component": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "field": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "descending": {
+            "type": "boolean"
+          }
+        }
+      },
       "OsInfo": {
         "required": [
           "os"
@@ -4980,8 +5639,90 @@
           }
         }
       },
+      "ParseErrorDto": {
+        "required": [
+          "line",
+          "column",
+          "message"
+        ],
+        "type": "object",
+        "properties": {
+          "line": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "column": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "message": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "PlayersPerGuildShape": {
+        "type": "integer"
+      },
       "PostTickSummary": {
         "type": "object"
+      },
+      "PredicateNodeDto": {
+        "required": [
+          "kind",
+          "children",
+          "component",
+          "field",
+          "op",
+          "value"
+        ],
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "children": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/PredicateNodeDto"
+            }
+          },
+          "component": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "field": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "op": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "value": { }
+        }
       },
       "ProfilerHeaderDto": {
         "required": [
@@ -5342,6 +6083,45 @@
           }
         }
       },
+      "QueryCellDto": {
+        "required": [
+          "typeName",
+          "fieldId",
+          "fieldName",
+          "value",
+          "raw"
+        ],
+        "type": "object",
+        "properties": {
+          "typeName": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "fieldId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "fieldName": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "value": { },
+          "raw": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
       "QueryDefinitionDto": {
         "required": [
           "instanceId",
@@ -5429,6 +6209,42 @@
           },
           "userSource": {
             "$ref": "#/components/schemas/QuerySourceLocationDto"
+          }
+        }
+      },
+      "QueryExecuteRequest": {
+        "required": [
+          "dsl",
+          "revision",
+          "pageOffset",
+          "pageSize"
+        ],
+        "type": "object",
+        "properties": {
+          "dsl": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "revision": {
+            "$ref": "#/components/schemas/RevisionDto"
+          },
+          "pageOffset": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "pageSize": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
           }
         }
       },
@@ -5622,6 +6438,190 @@
           }
         }
       },
+      "QueryParseRequest": {
+        "required": [
+          "dsl"
+        ],
+        "type": "object",
+        "properties": {
+          "dsl": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "QueryParseResponse": {
+        "required": [
+          "spec",
+          "errors"
+        ],
+        "type": "object",
+        "properties": {
+          "spec": {
+            "$ref": "#/components/schemas/QuerySpecDto"
+          },
+          "errors": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/ParseErrorDto"
+            }
+          }
+        }
+      },
+      "QueryPlanDto": {
+        "required": [
+          "estimatedTotalEntities",
+          "archetypesScanned",
+          "estimatedPagesRead",
+          "perEvaluatorEstimates"
+        ],
+        "type": "object",
+        "properties": {
+          "estimatedTotalEntities": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "archetypesScanned": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "estimatedPagesRead": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "perEvaluatorEstimates": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": [
+                "integer",
+                "string"
+              ],
+              "format": "int64"
+            }
+          }
+        }
+      },
+      "QueryPlanRequest": {
+        "required": [
+          "dsl"
+        ],
+        "type": "object",
+        "properties": {
+          "dsl": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "QueryResultDto": {
+        "required": [
+          "rows",
+          "totalCountEstimate",
+          "hasMore",
+          "resolvedRevisionTsn",
+          "executionWallNs",
+          "plan",
+          "warnings"
+        ],
+        "type": "object",
+        "properties": {
+          "rows": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/QueryRowDto"
+            }
+          },
+          "totalCountEstimate": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "hasMore": {
+            "type": "boolean"
+          },
+          "resolvedRevisionTsn": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "executionWallNs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "plan": {
+            "$ref": "#/components/schemas/QueryPlanDto"
+          },
+          "warnings": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/QueryWarningDto"
+            }
+          }
+        }
+      },
+      "QueryRowDto": {
+        "required": [
+          "entityId",
+          "cells"
+        ],
+        "type": "object",
+        "properties": {
+          "entityId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "cells": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/QueryCellDto"
+            }
+          }
+        }
+      },
       "QuerySourceLocationDto": {
         "required": [
           "file",
@@ -5645,6 +6645,155 @@
             "format": "int32"
           },
           "method": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "QuerySpecDto": {
+        "required": [
+          "archetype",
+          "polymorphic",
+          "with",
+          "without",
+          "exclude",
+          "enabled",
+          "disabled",
+          "where",
+          "select",
+          "spatial",
+          "navigate",
+          "orderBy",
+          "skip",
+          "take",
+          "revision"
+        ],
+        "type": "object",
+        "properties": {
+          "archetype": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "polymorphic": {
+            "type": "boolean"
+          },
+          "with": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "without": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "exclude": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "enabled": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "disabled": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "where": {
+            "$ref": "#/components/schemas/PredicateNodeDto"
+          },
+          "select": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "spatial": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/SpatialClauseDto"
+            }
+          },
+          "navigate": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/NavigateClauseDto"
+            }
+          },
+          "orderBy": {
+            "$ref": "#/components/schemas/OrderByDto"
+          },
+          "skip": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "take": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "revision": {
+            "$ref": "#/components/schemas/RevisionDto"
+          }
+        }
+      },
+      "QueryWarningDto": {
+        "required": [
+          "code",
+          "message"
+        ],
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "message": {
             "type": [
               "null",
               "string"
@@ -5711,6 +6860,36 @@
             "items": {
               "$ref": "#/components/schemas/ResourceNodeDto"
             }
+          }
+        }
+      },
+      "RevisionDto": {
+        "required": [
+          "kind",
+          "value",
+          "timeIso"
+        ],
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "value": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "timeIso": {
+            "type": [
+              "null",
+              "string"
+            ]
           }
         }
       },
@@ -5827,6 +7006,20 @@
               "string"
             ],
             "format": "int64"
+          }
+        }
+      },
+      "SchemaOptions": {
+        "type": "object",
+        "properties": {
+          "directories": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
           }
         }
       },
@@ -6152,6 +7345,56 @@
           }
         }
       },
+      "SpatialClauseDto": {
+        "required": [
+          "component",
+          "kind",
+          "parameters"
+        ],
+        "type": "object",
+        "properties": {
+          "component": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "kind": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "parameters": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+              "type": [
+                "number",
+                "string"
+              ],
+              "format": "double"
+            }
+          }
+        }
+      },
+      "StartFixtureJobResponseDto": {
+        "required": [
+          "jobId"
+        ],
+        "type": "object",
+        "properties": {
+          "jobId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
       "StartMockProfilerRequestDto": {
         "required": [
           "blockIntervalMs",
@@ -6272,6 +7515,97 @@
             "items": {
               "type": "string"
             }
+          },
+          "clusterCell": {
+            "$ref": "#/components/schemas/StorageClusterCellDto"
+          }
+        }
+      },
+      "StorageClusterCellDto": {
+        "required": [
+          "cellKey",
+          "cellX",
+          "cellY",
+          "entitiesInCell",
+          "clustersInCell",
+          "aabbMinX",
+          "aabbMinY",
+          "aabbMaxX",
+          "aabbMaxY"
+        ],
+        "type": "object",
+        "properties": {
+          "cellKey": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "cellX": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "cellY": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "entitiesInCell": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "clustersInCell": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "aabbMinX": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "float"
+          },
+          "aabbMinY": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "float"
+          },
+          "aabbMaxX": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "float"
+          },
+          "aabbMaxY": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "float"
           }
         }
       },
@@ -7341,6 +8675,44 @@
           },
           "entityMap": {
             "$ref": "#/components/schemas/EntityMapStatsDto"
+          },
+          "clusterSpatial": {
+            "type": "boolean",
+            "default": false
+          },
+          "clusterCellSize": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "float",
+            "default": 0
+          },
+          "clusterGridWidth": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32",
+            "default": 0
+          },
+          "clusterGridHeight": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32",
+            "default": 0
+          },
+          "clusterSpatialMode": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "default": ""
           }
         }
       },
@@ -27228,6 +28600,9 @@
           },
           "profiler": {
             "$ref": "#/components/schemas/ProfilerOptions"
+          },
+          "schema": {
+            "$ref": "#/components/schemas/SchemaOptions"
           }
         }
       },
@@ -27301,6 +28676,9 @@
     },
     {
       "name": "Health"
+    },
+    {
+      "name": "QueryConsole"
     },
     {
       "name": "Schema"

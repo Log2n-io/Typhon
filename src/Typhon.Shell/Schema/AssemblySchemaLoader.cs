@@ -184,7 +184,8 @@ internal static class AssemblySchemaLoader
         return new ComponentSchema(
             componentAttr.Name,
             componentAttr.Revision,
-            componentAttr.AllowMultiple,
+            // Component-level multi-instance ("AllowMultiple") was removed — always false now (field retained on ComponentSchema for shape stability).
+            false,
             structSize,
             assemblyPath,
             fields);

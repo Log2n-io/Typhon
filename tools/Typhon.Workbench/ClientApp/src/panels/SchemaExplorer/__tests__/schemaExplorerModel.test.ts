@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ArchetypeInfo, ComponentSummary } from '@/hooks/schema/types';
 import {
+  buildArchetypeLabelMap,
   buildArchetypeTree,
   filterArchetypeTree,
   applyArchetypeFilters,
@@ -22,6 +23,7 @@ const comp = (over: Partial<ComponentSummary> & { typeName: string; fullName: st
 });
 
 const arch = (over: Partial<ArchetypeInfo> & { archetypeId: string }): ArchetypeInfo => ({
+  name: '',
   componentTypes: [],
   entityCount: 0,
   componentSize: 16,
@@ -49,6 +51,46 @@ describe('buildArchetypeTree', () => {
     // …unresolved child still renders, falling back to the stripped name (never hidden).
     expect(tree[0].children[1].summary).toBeNull();
     expect(tree[0].children[1].typeName).toBe('Missing');
+  });
+});
+
+describe('buildArchetypeLabelMap (friendly archetype names)', () => {
+  it('shortens each named archetype to its shortest unique dot-suffix; colliding leaves keep a segment', () => {
+    const map = buildArchetypeLabelMap([
+      arch({ archetypeId: '800', name: 'Typhon.Workbench.Fixtures.PlayerArch' }),
+      arch({ archetypeId: '801', name: 'Game.Combat.Loadout' }),
+      arch({ archetypeId: '802', name: 'Game.Spatial.Loadout' }),
+    ]);
+    expect(map.get('800')).toBe('PlayerArch'); // unique leaf
+    expect(map.get('801')).toBe('Combat.Loadout'); // leaf collides → keep one more segment
+    expect(map.get('802')).toBe('Spatial.Loadout');
+  });
+
+  it('omits implicit/unnamed archetypes (no name to show)', () => {
+    const map = buildArchetypeLabelMap([
+      arch({ archetypeId: '900', name: '' }),
+      arch({ archetypeId: '901', name: 'Game.Named' }),
+    ]);
+    expect(map.has('900')).toBe(false);
+    expect(map.get('901')).toBe('Named');
+  });
+});
+
+describe('buildArchetypeTree — node label', () => {
+  it('uses the friendly name from the label map, falling back to #<id> when unnamed/absent', () => {
+    const components = [comp({ typeName: 'Position', fullName: 'Game.Position' })];
+    const named = arch({ archetypeId: '800', name: 'Game.PlayerArch', componentTypes: ['Game.Position'] });
+    const unnamed = arch({ archetypeId: '801', name: '', componentTypes: ['Game.Position'] });
+    const labels = buildArchetypeLabelMap([named, unnamed]);
+
+    const tree = buildArchetypeTree([named, unnamed], components, labels);
+    expect(tree[0].label).toBe('PlayerArch'); // named → friendly
+    expect(tree[1].label).toBe('#801'); // unnamed → bare id fallback
+  });
+
+  it('falls back to #<id> for every node when no label map is passed', () => {
+    const tree = buildArchetypeTree([arch({ archetypeId: '2001', name: 'Game.PlayerArch' })], []);
+    expect(tree[0].label).toBe('#2001');
   });
 });
 

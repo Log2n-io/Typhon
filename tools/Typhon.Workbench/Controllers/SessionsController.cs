@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using Typhon.Workbench.Dtos.Sessions;
+using Typhon.Workbench.Hosting;
 using Typhon.Workbench.Middleware;
 using Typhon.Workbench.Schema;
 using Typhon.Workbench.Sessions;
@@ -15,12 +16,14 @@ public sealed partial class SessionsController : ControllerBase
 {
     private readonly SessionManager _sessions;
     private readonly DemoDataProvider _demoData;
+    private readonly OptionsStore _options;
     private readonly ILogger<SessionsController> _logger;
 
-    public SessionsController(SessionManager sessions, DemoDataProvider demoData, ILogger<SessionsController> logger)
+    public SessionsController(SessionManager sessions, DemoDataProvider demoData, OptionsStore options, ILogger<SessionsController> logger)
     {
         _sessions = sessions;
         _demoData = demoData;
+        _options = options;
         _logger = logger;
     }
 
@@ -31,25 +34,18 @@ public sealed partial class SessionsController : ControllerBase
         // Phase 3 compat; any other path is used verbatim (Phase 4's real file picker).
         var resolvedFile = ResolveFilePath(request.FilePath);
 
-        // Determine schema DLL list: an explicit (user-specified) list wins; otherwise EngineLifecycle resolves the assemblies from the database's persisted
-        // manifest (engine.GetRequiredAssemblies) by locating them next to the file — no filename convention.
-        string[] schemaDllPaths;
-        string schemaStatus;
-        if (request.SchemaDllPaths is { Length: > 0 })
-        {
-            schemaDllPaths = request.SchemaDllPaths;
-            schemaStatus = "user-specified";
-        }
-        else
-        {
-            schemaDllPaths = [];
-            schemaStatus = "manifest";
-        }
+        // Schema resolution + provenance are decided by EngineLifecycle during open (ADR-055): an explicit user list
+        // wins; otherwise it resolves the persisted manifest across { bundled, legacy-adjacent }. The controller no
+        // longer guesses the status up-front — it reads the actually-resolved paths + status back off the engine.
+        var requestedSchemaDllPaths = request.SchemaDllPaths is { Length: > 0 } ? request.SchemaDllPaths : [];
 
         // Phase 3 compat: single-session at a time per file path.
         _sessions.RemoveWhere(s => s is OpenSession os && string.Equals(os.FilePath, resolvedFile, StringComparison.OrdinalIgnoreCase));
 
-        var engine = await EngineLifecycle.OpenAsync(resolvedFile, schemaDllPaths, ct);
+        // ADR-055 Phase 2: the persisted registered schema directories feed manifest resolution at priority 2 (above
+        // the Workbench's own bundled binaries). Ignored when an explicit user-specified list is supplied above.
+        var registeredSchemaDirs = _options.Get().Schema?.Directories ?? [];
+        var engine = await EngineLifecycle.OpenAsync(resolvedFile, requestedSchemaDllPaths, registeredSchemaDirs, ct);
 
         var sessionState = engine.State switch
         {
@@ -64,8 +60,8 @@ public sealed partial class SessionsController : ControllerBase
             resolvedFile,
             engine,
             sessionState,
-            schemaStatus,
-            schemaDllPaths,
+            engine.SchemaStatus,
+            engine.ResolvedSchemaPaths,
             engine.LoadedComponentTypes,
             engine.Diagnostics);
 

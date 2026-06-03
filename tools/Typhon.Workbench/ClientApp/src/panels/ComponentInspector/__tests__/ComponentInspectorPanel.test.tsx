@@ -32,6 +32,9 @@ vi.mock('@/hooks/schema/useComponentSchema', () => ({ useComponentSchema: () => 
 vi.mock('@/hooks/schema/useIndexesForComponent', () => ({ useIndexesForComponent: () => mocks.indexes }));
 vi.mock('@/hooks/schema/useArchetypesForComponent', () => ({ useArchetypesForComponent: () => mocks.archetypes }));
 vi.mock('@/hooks/schema/useSystemRelationships', () => ({ useSystemRelationships: () => mocks.rels }));
+// The Used-in tab labels archetype rows via useArchetypeNames (a React-Query hook); this harness has no
+// QueryClient, so stub it to the `#<id>` fallback (matching an unnamed archetype).
+vi.mock('@/hooks/queryConsole/useArchetypeNames', () => ({ useArchetypeNames: () => ({ label: (ref: string) => ref, isLoading: false }) }));
 // The Relationships children fetch topology / render a React-Flow DAG — not jsdom-friendly; stub them.
 vi.mock('@/panels/SchemaInspector/AccessChips', () => ({ default: () => null }));
 vi.mock('@/panels/SchemaInspector/SchemaRelationshipsGraph', () => ({ default: () => null }));
@@ -50,6 +53,7 @@ const summary = (over: Partial<ComponentSummary> & { typeName: string; fullName:
 
 const archetype = (id: string): ArchetypeInfo => ({
   archetypeId: id,
+  name: '',
   componentTypes: ['Game.Position'],
   entityCount: 500,
   componentSize: 12,
@@ -135,6 +139,36 @@ describe('ComponentInspectorPanel', () => {
     expect(useSelectionStore.getState().leaf).toMatchObject({ type: 'component', ref: 'Position' });
     expect(screen.queryByTestId('component-auto-chip')).toBeNull();
     expect(useInspectorTargetStore.getState().byKey[FILE]?.componentType).toBe('Position');
+  });
+
+  it('displays friendly short names (not the namespace-qualified typeName), like the File Map', () => {
+    mocks.comp = {
+      list: [
+        summary({ typeName: 'Typhon.Test.EvoCc.Bag', fullName: 'Typhon.Test.EvoCc.Bag, Typhon.Test' }),
+        summary({ typeName: 'Game.Combat.Position', fullName: 'Game.Combat.Position, Game' }),
+        summary({ typeName: 'Game.Spatial.Position', fullName: 'Game.Spatial.Position, Game' }),
+      ],
+      isLoading: false,
+      isError: false,
+      isFetching: false,
+      refetch: () => {},
+    };
+    useSelectionStore.getState().select('component', 'Typhon.Test.EvoCc.Bag');
+    render(<ComponentInspectorPanel {...PROPS} />);
+    // Header shows the friendly leaf, not the dotted typeName.
+    expect(screen.getByText('Bag')).toBeTruthy();
+    expect(screen.queryByText('Typhon.Test.EvoCc.Bag')).toBeNull();
+    // Switcher: identity stays the raw typeName (data-id); labels are the shortest unique dot-suffix — the two
+    // Position components collide on the leaf, so each keeps its discriminating segment (same as buildComponentNameMap).
+    fireEvent.click(screen.getByTestId('component-switcher'));
+    const rows = screen.getAllByTestId('component-switcher-item');
+    expect(rows.map((r) => r.getAttribute('data-id'))).toEqual([
+      'Typhon.Test.EvoCc.Bag',
+      'Game.Combat.Position',
+      'Game.Spatial.Position',
+    ]);
+    expect(screen.getByText('Combat.Position')).toBeTruthy();
+    expect(screen.getByText('Spatial.Position')).toBeTruthy();
   });
 
   it('an external component selection clears the (auto) chip', () => {

@@ -1,4 +1,5 @@
 import type { ArchetypeInfo, ComponentSummary } from '@/hooks/schema/types';
+import { buildComponentNameMap, leafSegment } from '@/libs/componentNames';
 
 // Pure data model for the Schema Explorer (Stage 2, GAP-02 consolidation of the Component + Archetype
 // browsers). Kept separate from the panel so the join / filter / sort / Types-totals logic is unit-tested
@@ -25,6 +26,8 @@ export interface ArchetypeTreeNode {
   id: string;
   kind: 'archetype';
   archetype: ArchetypeInfo;
+  /** Friendly display label — the shortened archetype name, or `#<id>` for implicit/unnamed archetypes. */
+  label: string;
   children: ComponentChildNode[];
 }
 
@@ -36,13 +39,33 @@ function stripNamespace(fullName: string): string {
 }
 
 /**
+ * Friendly archetype display labels — the archetype counterpart to {@link useComponentNames}, computed over the
+ * WHOLE archetype set so the shortening is stable regardless of the active filter. Each named archetype's CLR
+ * name is shortened to its shortest dot-suffix that is still unique across the set (`...Fixtures.PlayerArch` →
+ * `PlayerArch`); colliding leaves keep one more segment. Returns `id → label`, named archetypes only — the caller
+ * falls back to `#<id>` for implicit/anonymous ones (which have no name to show).
+ */
+export function buildArchetypeLabelMap(archetypes: ArchetypeInfo[]): Map<string, string> {
+  const named = archetypes.filter((a) => a.name);
+  const shortByName = buildComponentNameMap(named.map((a) => a.name));
+  const byId = new Map<string, string>();
+  for (const a of named) {
+    byId.set(a.archetypeId, shortByName.get(a.name) ?? leafSegment(a.name));
+  }
+  return byId;
+}
+
+/**
  * Build the archetype-rooted tree by joining each archetype's `componentTypes` (full names) against the
  * component list. Unresolved types still render (fallback to the stripped name) so the tree never hides a
- * declared component just because the summary endpoint lagged.
+ * declared component just because the summary endpoint lagged. Each archetype node carries its friendly
+ * `label` (the shortened name, or `#<id>` when unnamed) so the row renders the name instead of the bare id;
+ * pass a label map from {@link buildArchetypeLabelMap} (built over the full set), else every node falls back to `#<id>`.
  */
 export function buildArchetypeTree(
   archetypes: ArchetypeInfo[],
   components: ComponentSummary[],
+  labelById?: Map<string, string>,
 ): ArchetypeTreeNode[] {
   const byFullName = new Map(components.map((c) => [c.fullName, c]));
   return archetypes.map((archetype) => {
@@ -58,7 +81,8 @@ export function buildArchetypeTree(
         summary,
       };
     });
-    return { id: archUid, kind: 'archetype', archetype, children };
+    const label = labelById?.get(archetype.archetypeId) ?? `#${archetype.archetypeId}`;
+    return { id: archUid, kind: 'archetype', archetype, label, children };
   });
 }
 

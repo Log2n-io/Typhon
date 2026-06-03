@@ -107,6 +107,79 @@ internal static class L4Decoder
     }
 
     /// <summary>
+    /// Decodes the full content of a single cluster entity — the L5 level beneath the L4 slot sub-grid (file-map §10 Q4 override). Where
+    /// <see cref="DecodeCluster"/> emits one occupancy cell per slot, this emits the entity at <paramref name="slotIndex"/> the same way
+    /// <see cref="DecodeComponent"/> shows a legacy component instance: a leading <c>entityPk</c> cell, then per component slot a <c>componentHeader</c> cell
+    /// (name + enabled / disabled for this entity) followed by one <c>field</c> cell per declared field, decoded from the component's inline SoA array at
+    /// <c>Offset + slotIndex * Size</c>. SingleVersion / Versioned components are decoded inline (the Versioned inline copy is the current committed value);
+    /// <c>Transient</c> slots carry no data in the persisted chunk (their SoA lives in the in-memory transient store) so they emit a single header note instead.
+    /// Returns an empty array when the slot is free (no live entity). Layout comes from <see cref="DatabaseEngine.TryGetClusterEntityLayout"/>.
+    /// </summary>
+    public static StorageContentCellDto[] DecodeClusterEntity(ReadOnlySpan<byte> chunkBytes, int slotIndex, int clusterSize, int entityIdsOffset,
+        (string Name, int Offset, int Size, bool Transient, DBComponentDefinition Definition)[] components)
+    {
+        if (clusterSize <= 0 || slotIndex < 0 || slotIndex >= clusterSize || chunkBytes.Length < 8 || components == null)
+        {
+            return [];
+        }
+
+        // Free slot → no entity to decode (mirrors a free legacy chunk decoding to nothing).
+        var occupancy = System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(chunkBytes);
+        if ((occupancy & (1UL << slotIndex)) == 0)
+        {
+            return [];
+        }
+
+        var cells = new List<StorageContentCellDto>();
+
+        var idOffset = entityIdsOffset + slotIndex * 8;
+        if (idOffset >= 0 && idOffset + 8 <= chunkBytes.Length)
+        {
+            var id = System.Buffers.Binary.BinaryPrimitives.ReadInt64LittleEndian(chunkBytes.Slice(idOffset));
+            cells.Add(new StorageContentCellDto("entity", id.ToString(CultureInfo.InvariantCulture), "entityPk", idOffset, 8, -1));
+        }
+
+        for (var c = 0; c < components.Length; c++)
+        {
+            var comp = components[c];
+
+            // Per-slot enabled bit (EnabledBits[c] @ 8 + c*8). A disabled component still occupies its SoA slot; the flag rides the header cell.
+            var enabledWordOffset = 8 + c * 8;
+            var enabled = enabledWordOffset + 8 <= chunkBytes.Length
+                && (System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(chunkBytes.Slice(enabledWordOffset)) & (1UL << slotIndex)) != 0;
+
+            if (comp.Transient)
+            {
+                // Transient component data is in the in-memory transient store, never this persisted chunk — surface that honestly rather than decode garbage.
+                cells.Add(new StorageContentCellDto(comp.Name, "(transient — not persisted)", "componentHeader", 0, 0, c));
+                continue;
+            }
+
+            cells.Add(new StorageContentCellDto(comp.Name, enabled ? "enabled" : "disabled", "componentHeader", comp.Offset, comp.Size, c));
+
+            if (comp.Definition == null)
+            {
+                continue;
+            }
+
+            var compBase = comp.Offset + slotIndex * comp.Size;
+            foreach (var field in comp.Definition.FieldsByName.Values)
+            {
+                // Cluster SoA stores the pure component struct (no per-element entity-PK overhead — the PK lives in the EntityKeys array), so the field offset is
+                // relative to the component base directly (unlike DecodeComponent's legacy chunk, which prepends an EntityPKOverheadSize header).
+                var fieldOffset = compBase + field.OffsetInComponentStorage;
+                var fieldSize = field.SizeInComponentStorage;
+                var value = fieldOffset >= 0 && fieldOffset + fieldSize <= chunkBytes.Length
+                    ? StorageFieldFormatter.Format(field.Type, chunkBytes.Slice(fieldOffset, fieldSize))
+                    : "—";
+                cells.Add(new StorageContentCellDto($"{comp.Name}.{field.Name}", value, "field", fieldOffset, fieldSize, field.FieldId));
+            }
+        }
+
+        return cells.ToArray();
+    }
+
+    /// <summary>
     /// Decodes one VSBS / component-collection chunk (Module 15, A6, design §10.1). A buffer spans a chain of fixed-stride
     /// chunks linked by <c>NextChunkId</c> (header @chunk+0); <c>ElementCount</c> (@chunk+4) is the elements stored in this
     /// chunk. Reports element count, the per-chunk capacity (<c>(stride − 8) / elementSize</c>) and the chain link. Single

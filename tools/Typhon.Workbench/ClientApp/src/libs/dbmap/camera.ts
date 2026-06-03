@@ -88,6 +88,26 @@ export function visibleWorldRect(cam: Camera, viewportW: number, viewportH: numb
   };
 }
 
+/**
+ * Frames `world` centred in the viewport, scaled so it occupies `fillFraction` of its fitted size:
+ *   - `1` (default) → fit exactly, same as {@link fitToRect} (region fills the view, minus `padding`);
+ *   - `0.5`        → the region spans about half the view, leaving its surroundings visible as context.
+ * A region reveal uses `0.5` so the user sees what's *around* the revealed zone, not just the zone itself.
+ */
+export function frameWorldRect(
+  world: Rect,
+  viewportW: number,
+  viewportH: number,
+  padding: number,
+  fillFraction = 1,
+): Camera {
+  const fit = fitToRect(world, viewportW, viewportH, padding);
+  if (fillFraction === 1) {
+    return fit;
+  }
+  return cameraCenteredOn(world.x + world.w / 2, world.y + world.h / 2, fit.scale * fillFraction, viewportW, viewportH);
+}
+
 /** A camera that centres world point (`worldX`, `worldY`) at `scale` in a `viewportW` × `viewportH` viewport. */
 export function cameraCenteredOn(
   worldX: number,

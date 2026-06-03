@@ -62,12 +62,33 @@ describe('onColor (DS-3)', () => {
 // Colour resolution for the L4 content cells and the L3/occupancy fill ramp (Module 15, A6).
 
 describe('contentCellRgb — entitySlot (A6 cluster sub-grid)', () => {
-  it('lights an occupied slot (colorKey > 0) with the used colour', () => {
+  it('lights an occupied slot (colorKey > 0) with the shared used colour', () => {
+    // The entity sub-grid speaks the File Map's universal allocated/free language: occupied = USED_RGB, the same
+    // pair as the page-level Free/Used encoding and allocationRgb (occupancy region map) below.
     expect(contentCellRgb('entitySlot', 1)).toEqual(USED_RGB);
   });
 
   it('darkens a free slot (colorKey 0) with the free colour', () => {
     expect(contentCellRgb('entitySlot', 0)).toEqual(FREE_RGB);
+  });
+
+  it('uses the same occupied/free pair as the occupancy region map (allocationRgb)', () => {
+    expect(contentCellRgb('entitySlot', 1)).toEqual(allocationRgb(1));
+    expect(contentCellRgb('entitySlot', 0)).toEqual(allocationRgb(0));
+  });
+});
+
+describe('contentCellRgb — clusterEntity L5 decode (file-map §10 Q4 override)', () => {
+  it('renders a component header band as structural slate, distinct from the categorical field cells', () => {
+    // The L5 entity decode groups field cells under a per-component header (kind `componentHeader`); it must read as a
+    // label row, not data, so it shares the structural-slate colour the directory / hashmap-meta chunks use.
+    expect(contentCellRgb('componentHeader', 0)).toEqual([51, 65, 85]);
+    // Field cells stay categorical (coloured by field id), so a header never collides with its own fields.
+    expect(contentCellRgb('field', 0)).not.toEqual(contentCellRgb('componentHeader', 0));
+  });
+
+  it('renders the leading entity-PK cell as the light-slate id colour', () => {
+    expect(contentCellRgb('entityPk', -1)).toEqual([148, 163, 184]);
   });
 });
 

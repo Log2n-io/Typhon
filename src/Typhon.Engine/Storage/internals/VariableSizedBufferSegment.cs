@@ -102,6 +102,13 @@ public unsafe class VariableSizedBufferSegmentBase<TStore> where TStore : struct
         }
     }
 
+    /// <summary>
+    /// Reads the buffer's reference count without locking. Safe for the copy-on-write decision: the count only decreases concurrently (background revision
+    /// cleanup of a sharing revision), never increases (only the owning transaction's COW increments it, synchronously before any mutation). So a read of 1
+    /// means sole ownership → safe to mutate in place; a read of >1 means another revision shares the buffer → must clone before mutating.
+    /// </summary>
+    public short GetRefCounter(int bufferId, ref ChunkAccessor<TStore> accessor) => accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, false).RefCounter;
+
     public int BufferRelease(int bufferId, ref ChunkAccessor<TStore> accessor)
     {
         ref var rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, true);

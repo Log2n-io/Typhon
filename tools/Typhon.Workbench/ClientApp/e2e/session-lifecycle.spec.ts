@@ -61,8 +61,8 @@ test.describe('Workbench ALC lifecycle — sequential generate + open of differe
     await page.getByRole('menuitem', { name: /^dev fixture/i }).click();
     await expect(dbNameInput).toBeVisible();
 
-    // Pick a different shape so the on-disk hash differs from round 1 — Empty cores has zero particles.
-    await page.getByTestId('devfixture-preset-emptyCores').click();
+    // Pick a different shape so the on-disk hash differs from round 1 — Sparse drops factories + multi-affix items.
+    await page.getByTestId('devfixture-preset-sparse').click();
     await dbNameInput.fill('base-tests-b');
     await page.getByTestId('devfixture-force').check();
     await page.getByTestId('devfixture-start').click();

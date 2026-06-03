@@ -14,18 +14,16 @@ public sealed class ComponentAttribute : Attribute
 {
     public string Name { get; }
     public int Revision { get; }
-    public bool AllowMultiple { get; }
 
     public string PreviousName { get; set; }
 
     /// <summary>Storage mode for this component. Default is <see cref="StorageMode.Versioned"/> (full MVCC).</summary>
     public StorageMode StorageMode { get; set; } = StorageMode.Versioned;
 
-    public ComponentAttribute(string name, int revision, bool allowMultiple = false)
+    public ComponentAttribute(string name, int revision)
     {
         Name = name;
         Revision = revision;
-        AllowMultiple = allowMultiple;
     }
 }
 

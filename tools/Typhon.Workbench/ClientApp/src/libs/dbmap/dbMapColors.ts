@@ -161,8 +161,17 @@ export function contentCellRgb(kind: string, colorKey: number): Rgb {
   if (kind === 'entityPk') {
     return [148, 163, 184];
   }
+  if (kind === 'componentHeader') {
+    // L5 cluster-entity decode (file-map §10 Q4 override): the per-component header band that groups an entity's field
+    // cells. Structural slate — the same non-data colour the directory / hashmap-meta chunks use — so it reads as a
+    // label row, distinct from the categorical field cells below it.
+    return STRUCT_RGB;
+  }
   if (kind === 'entitySlot') {
-    // Cluster entity sub-grid (A6): a slot is lit (occupied) or dark (free).
+    // Cluster entity sub-grid (A6): a slot is lit (occupied) or dark (free). Uses the File Map's universal
+    // allocated/free language — USED_RGB / FREE_RGB — the same pair as the page-level Free/Used encoding and the
+    // occupancy-page region map (allocationRgb). Keeping it identical makes "cyan = occupied, dark = free" read the
+    // same wherever allocation is shown; a unique slot colour would only fragment that vocabulary.
     return colorKey > 0 ? USED_RGB : FREE_RGB;
   }
   if (colorKey < 0) {

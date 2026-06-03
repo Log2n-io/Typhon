@@ -101,7 +101,6 @@ public class AssemblyWarmup
                 dbe.RegisterComponentFromAccessor<CompB>();
                 dbe.RegisterComponentFromAccessor<CompC>();
                 dbe.RegisterComponentFromAccessor<CompD>();
-                dbe.RegisterComponentFromAccessor<CompE>();
                 dbe.RegisterComponentFromAccessor<CompF>();
 
                 // Initialize ECS archetypes — connects archetype slots to ComponentTables

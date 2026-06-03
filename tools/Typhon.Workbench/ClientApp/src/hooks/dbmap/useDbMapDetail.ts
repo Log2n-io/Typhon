@@ -93,6 +93,7 @@ function decodeChunk(dto: StorageChunkDto): DbChunkContent {
     componentType: dto.componentType,
     cells: cellsOf(dto.cells ?? []),
     clusterComponents: dto.clusterComponents ?? [],
+    clusterCell: dto.clusterCell ?? null,
   };
 }
 
@@ -181,6 +182,66 @@ export function useDbMapChunks(
         }
       });
       return map;
+    },
+  });
+}
+
+/**
+ * Fetches the L5 entity content for the given cluster-slot refs; returns a `segId:chunkId:slot`→content map. The entity
+ * decode is component-grouped field cells (file-map §10 Q4 override) — same `DbChunkContent` shape, decoder `clusterEntity`.
+ */
+export function useDbMapSlots(
+  sessionId: string | null,
+  refs: readonly { segId: number; chunkId: number; slot: number }[],
+): Map<string, DbChunkContent> {
+  const token = useSessionStore((s) => s.token);
+  return useQueries({
+    queries: refs.map((ref) => ({
+      queryKey: ['dbmap-slot', sessionId, ref.segId, ref.chunkId, ref.slot] as const,
+      enabled: !!sessionId,
+      staleTime: DETAIL_STALE_MS,
+      refetchOnWindowFocus: false,
+      queryFn: async ({ signal }: { signal: AbortSignal }) => {
+        const dto = await fetchJson<StorageChunkDto>(
+          `/api/sessions/${sessionId}/dbmap/chunk/${ref.segId}/${ref.chunkId}/entity/${ref.slot}`,
+          token,
+          signal,
+        );
+        return decodeChunk(dto);
+      },
+    })),
+    combine: (results) => {
+      const map = new Map<string, DbChunkContent>();
+      results.forEach((r, i) => {
+        if (r.data) {
+          map.set(`${refs[i].segId}:${refs[i].chunkId}:${refs[i].slot}`, r.data);
+        }
+      });
+      return map;
+    },
+  });
+}
+
+/** Fetches one cluster entity's full decode (L5) for the Detail panel. */
+export function useDbMapSlot(
+  sessionId: string | null,
+  segId: number | null,
+  chunkId: number | null,
+  slotIndex: number | null,
+) {
+  const token = useSessionStore((s) => s.token);
+  return useQuery<DbChunkContent | null, Error>({
+    queryKey: ['dbmap-slot', sessionId, segId, chunkId, slotIndex],
+    enabled: !!sessionId && segId != null && chunkId != null && slotIndex != null,
+    staleTime: DETAIL_STALE_MS,
+    refetchOnWindowFocus: false,
+    queryFn: async ({ signal }) => {
+      const dto = await fetchJson<StorageChunkDto>(
+        `/api/sessions/${sessionId}/dbmap/chunk/${segId}/${chunkId}/entity/${slotIndex}`,
+        token,
+        signal,
+      );
+      return decodeChunk(dto);
     },
   });
 }

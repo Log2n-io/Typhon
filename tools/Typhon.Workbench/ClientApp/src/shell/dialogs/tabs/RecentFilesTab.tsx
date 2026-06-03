@@ -1,4 +1,4 @@
-import { Activity, Database, Trash2 } from 'lucide-react';
+import { Activity, Database, Loader2, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useGetApiFsStat } from '@/api/generated/files/files';
 import { formatFileSize, formatRelativeAge } from '@/lib/formatters';
@@ -12,6 +12,8 @@ import {
 interface Props {
   onOpen: (filePath: string, schemaDllPaths: string[]) => void;
   onOpenTrace: (filePath: string) => void;
+  /** The file path currently being opened, or null when idle. The matching row shows a spinner + disables itself. */
+  openingPath?: string | null;
 }
 
 const stateStyles: Record<RecentFileState, string> = {
@@ -20,7 +22,7 @@ const stateStyles: Record<RecentFileState, string> = {
   Incompatible: 'bg-destructive/15 text-destructive',
 };
 
-export default function RecentFilesTab({ onOpen, onOpenTrace }: Props) {
+export default function RecentFilesTab({ onOpen, onOpenTrace, openingPath }: Props) {
   const entries = useRecentFilesStore((s) => s.entries);
 
   if (entries.length === 0) {
@@ -35,13 +37,28 @@ export default function RecentFilesTab({ onOpen, onOpenTrace }: Props) {
   return (
     <div className="flex h-full flex-col gap-1 overflow-auto p-1">
       {entries.map((e) => (
-        <RecentFileRow key={e.filePath} entry={e} onOpen={onOpen} onOpenTrace={onOpenTrace} />
+        <RecentFileRow
+          key={e.filePath}
+          entry={e}
+          onOpen={onOpen}
+          onOpenTrace={onOpenTrace}
+          opening={openingPath === e.filePath}
+          // While any file is opening, freeze the other rows too — the dialog is mid-transition and a second
+          // open would race the first. Only the active row shows the spinner.
+          disabled={openingPath != null}
+        />
       ))}
     </div>
   );
 }
 
-function RecentFileRow({ entry, onOpen, onOpenTrace }: { entry: RecentFile } & Props) {
+function RecentFileRow({
+  entry,
+  onOpen,
+  onOpenTrace,
+  opening,
+  disabled,
+}: { entry: RecentFile; opening: boolean; disabled: boolean } & Pick<Props, 'onOpen' | 'onOpenTrace'>) {
   const remove = useRecentFilesStore((s) => s.remove);
   const name = entry.filePath.split(/[\\/]/).pop() ?? entry.filePath;
   const kind = getRecentFileKind(entry);
@@ -67,6 +84,7 @@ function RecentFileRow({ entry, onOpen, onOpenTrace }: { entry: RecentFile } & P
   const detail = size && age ? `${size} · ${age}` : size || age;
 
   const handleActivate = () => {
+    if (disabled) return;
     if (isTrace) {
       onOpenTrace(entry.filePath);
     } else {
@@ -76,15 +94,25 @@ function RecentFileRow({ entry, onOpen, onOpenTrace }: { entry: RecentFile } & P
 
   return (
     <div
-      className="group flex items-center gap-2 rounded border border-transparent px-2 py-1
-        hover:border-border hover:bg-muted"
+      className={`group flex items-center gap-2 rounded border border-transparent px-2 py-1
+        ${disabled ? '' : 'hover:border-border hover:bg-muted'}`}
     >
-      <Icon className={`h-3.5 w-3.5 shrink-0 ${iconClass}`} />
-      <button onClick={handleActivate} className="min-w-0 flex-1 text-left">
+      {opening ? (
+        <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-foreground" aria-hidden="true" />
+      ) : (
+        <Icon className={`h-3.5 w-3.5 shrink-0 ${iconClass}`} />
+      )}
+      <button
+        onClick={handleActivate}
+        disabled={disabled}
+        className="min-w-0 flex-1 text-left disabled:cursor-default"
+      >
         <div className="flex items-baseline gap-2">
           <span className="truncate text-fs-lg font-semibold">{name}</span>
-          {detail && (
-            <span className="shrink-0 text-fs-xs text-muted-foreground">({detail})</span>
+          {opening ? (
+            <span className="shrink-0 text-fs-xs text-muted-foreground">Opening…</span>
+          ) : (
+            detail && <span className="shrink-0 text-fs-xs text-muted-foreground">({detail})</span>
           )}
           <span className={`shrink-0 rounded px-1 text-fs-xs uppercase ${kindBadgeClass}`}>
             {kindLabel}

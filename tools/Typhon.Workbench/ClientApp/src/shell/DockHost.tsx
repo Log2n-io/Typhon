@@ -146,6 +146,8 @@ const components: Record<string, React.FC<IDockviewPanelProps>> = {
   DbMap: lazyPanel(() => import('@/panels/DbMap/DbMapPanel')),
   StorageHealth: lazyPanel(() => import('@/panels/StorageHealth/StorageHealthPanel')),
   DataBrowserEntities: lazyPanel(() => import('@/panels/DataBrowser/EntityListPanel')),
+  // #386 Phase 1: Query Console (chip-mode authoring + DSL editor + result grid + saved queries / history).
+  QueryConsole: lazyPanel(() => import('@/panels/QueryConsole/QueryConsolePanel')),
   // Dev Fixture: lazy because it's only opened on demand (View → Dev Fixture or palette). Replaces the former
   // tab inside ConnectDialog so the feature has a persistent home — generate, inspect, generate again without
   // re-opening the Connect dialog.

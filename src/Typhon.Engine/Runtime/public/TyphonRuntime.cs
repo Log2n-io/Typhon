@@ -1974,15 +1974,9 @@ public sealed partial class TyphonRuntime : IDisposable
     /// </summary>
     private void RunParallelFence(DagScheduler scheduler)
     {
-        // Gate: parallel fence is WAL-mode only (v1). The per-worker ChangeSet cleanup uses ReleaseExcessDirtyMarks which is correct ONLY in WAL mode —
-        // WAL-less mode would need SaveChanges per worker (torn-write hazard across workers writing the same page). Fall back to the serial WriteTickFence
-        // which uses the UoW's single-thread ChangeSet correctly. AntHill (the parallelization target) is WAL.
-        if (Engine.WalManager == null)
-        {
-            InspectorPhase(TickPhase.WriteTickFence, () => Engine.WriteTickFence(scheduler.CurrentTickNumber, _currentUow?.ChangeSet));
-            return;
-        }
-
+        // WAL + checkpoint are mandatory (ADR-054), so the per-worker ChangeSet cleanup via ReleaseExcessDirtyMarks is always correct here: the checkpoint
+        // thread drains the capped pages. The serial WriteTickFence path is reached only via the EnableParallelFence=false opt-out (call site in
+        // OnTickEndInternal).
         var ctx = Engine.FenceContext;
 
         // `TickPhase.WriteTickFence` brackets ONLY the serial prep — context reset, dormancy drain, and the serial component-table fences. This is the sole

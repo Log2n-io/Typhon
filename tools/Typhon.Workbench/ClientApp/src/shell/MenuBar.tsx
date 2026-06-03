@@ -42,8 +42,9 @@ import {
   resetLayout,
 } from './commands/openSchemaBrowser';
 import { toggleViewCallTree, toggleViewCriticalPath, toggleViewProfiler, toggleViewTopSpans, toggleViewQueryAnalyzer, toggleViewEngineLiveHealth, registerOpenSaveReplay } from './commands/profilerCommands';
+import { toggleViewQueryConsole } from './commands/openQueryConsole';
 import { registerOpenConnect } from './commands/baseCommands';
-import { isViewActive, ANY_ZONE_D_VIEW_ACTIVE } from './viewRegistry';
+import { ANY_ZONE_D_VIEW_ACTIVE, isViewVisible } from './viewRegistry';
 import { logError, logInfo } from '@/stores/useLogStore';
 
 export default function MenuBar() {
@@ -59,7 +60,6 @@ export default function MenuBar() {
  const toggleLegends = useUiPrefsStore((s) => s.toggleLegends);
  const density = useDensityStore((s) => s.mode);
  const setDensity = useDensityStore((s) => s.setMode);
- const isProfilerSession = kind === 'attach' || kind === 'trace';
 
  const [dialogOpen, setDialogOpen] = useState(false);
  const [initialTab, setInitialTab] = useState<ConnectTab>('open');
@@ -120,145 +120,76 @@ export default function MenuBar() {
  <MenubarMenu>
  <MenubarTrigger className="h-7 px-2 text-fs-lg">View</MenubarTrigger>
  <MenubarContent>
- {/* Deep/workspace (zone-D) views — gated off in Stage 0 (reversible per view via the view registry).
-     Stage 1 replaces this flat list with a session-kind-partitioned View menu (IA §5.1). */}
- {/* Schema Explorer is the open-session default workspace; without an entry here the only recovery path
-     after closing the tab is "Reset Layout to Default" (which nukes other customisations). Always-on at the
-     registry level (shell-structural per viewRegistry.ts), session-kind gated for usefulness. */}
- <MenubarItem
- disabled={kind !== 'open'}
- onClick={toggleViewSchemaExplorer}
- title={kind === 'open' ? undefined : 'Available only for an open .typhon file'}
- >
- Schema
- </MenubarItem>
- {isViewActive('DataBrowserEntities') && <MenubarItem onClick={() => toggleViewDataBrowser()}>Data Browser</MenubarItem>}
- {isViewActive('DbMap') && (
- <MenubarItem
- disabled={kind !== 'open'}
- onClick={toggleViewDbMap}
- title={kind === 'open' ? undefined : 'Available only for an open .typhon file'}
- >
- Database File Map
- </MenubarItem>
+ {/* IA §5.1 — the View menu shows ONLY the panels the current session kind can actually open; a view that
+     can't run in this mode is absent, never a greyed-out dead entry (the old disabled+tooltip — friction F8).
+     Each item is gated on its session kind AND its view-registry feature flag (isViewActive). 'none' (no
+     session) therefore shows only the always-on chrome below. Open-mode views first, then profiler-mode. */}
+ {/* Schema Explorer is the open-session default navigator; its menu entry is the only recovery path to reopen
+     it after closing the tab (besides "Reset Layout", which nukes other customisations) — so it stays visible
+     in open mode. Shell-structural at the registry level (viewRegistry.ts), session-kind gated for usefulness. */}
+ {isViewVisible('SchemaExplorer', kind) && (
+ <MenubarItem onClick={toggleViewSchemaExplorer}>Schema</MenubarItem>
+ )}
+ {isViewVisible('DataBrowserEntities', kind) && (
+ <MenubarItem onClick={() => toggleViewDataBrowser()}>Data Browser</MenubarItem>
+ )}
+ {isViewVisible('DbMap', kind) && (
+ <MenubarItem onClick={toggleViewDbMap}>Database File Map</MenubarItem>
  )}
  {/* Storage Health — aggregate dashboard sibling of DbMap (both surface storage facts of the loaded file). */}
- {isViewActive('StorageHealth') && (
- <MenubarItem
- disabled={kind !== 'open'}
- onClick={toggleViewStorageHealth}
- title={kind === 'open' ? undefined : 'Available only for an open .typhon file'}
- >
- Storage Health
- </MenubarItem>
+ {isViewVisible('StorageHealth', kind) && (
+ <MenubarItem onClick={toggleViewStorageHealth}>Storage Health</MenubarItem>
  )}
  {/* (Stage 2 / GAP-02: the Component Layout/Archetypes/Indexes/Relationships items were removed —
      those facts are now tabs of the Component Inspector, reached by selecting a component.) */}
- {isViewActive('Profiler') && (
- <MenubarItem
- disabled={!isProfilerSession}
- onClick={toggleViewProfiler}
- title={isProfilerSession ? undefined : 'Open a profiler trace or attach a session first'}
- >
- Profiler
- </MenubarItem>
+ {isViewVisible('Profiler', kind) && (
+ <MenubarItem onClick={toggleViewProfiler}>Profiler</MenubarItem>
  )}
- {isViewActive('TopSpans') && (
- <MenubarItem
- disabled={!isProfilerSession}
- onClick={toggleViewTopSpans}
- title={isProfilerSession ? undefined : 'Open a profiler trace or attach a session first'}
- >
- Top Spans
- </MenubarItem>
+ {isViewVisible('TopSpans', kind) && (
+ <MenubarItem onClick={toggleViewTopSpans}>Top Spans</MenubarItem>
  )}
- {isViewActive('SystemDag') && (
- <MenubarItem
- disabled={!isProfilerSession}
- onClick={toggleViewSystemDag}
- title={isProfilerSession ? undefined : 'Open a profiler trace or attach a session first'}
- >
- System DAG
- </MenubarItem>
+ {isViewVisible('SystemDag', kind) && (
+ <MenubarItem onClick={toggleViewSystemDag}>System DAG</MenubarItem>
  )}
- {isViewActive('CriticalPath') && (
- <MenubarItem
- disabled={!isProfilerSession}
- onClick={toggleViewCriticalPath}
- title={isProfilerSession ? undefined : 'Open a profiler trace or attach a session first'}
- >
- Critical Path
- </MenubarItem>
+ {isViewVisible('CriticalPath', kind) && (
+ <MenubarItem onClick={toggleViewCriticalPath}>Critical Path</MenubarItem>
  )}
- {isViewActive('CallTree') && (
- <MenubarItem
- disabled={!isProfilerSession}
- onClick={toggleViewCallTree}
- title={isProfilerSession ? undefined : 'Open a profiler trace or attach a session first'}
- >
- Call Tree
- </MenubarItem>
+ {isViewVisible('CallTree', kind) && (
+ <MenubarItem onClick={toggleViewCallTree}>Call Tree</MenubarItem>
  )}
- {isViewActive('SourcePreview') && (
- <MenubarItem
- disabled={!isProfilerSession}
- onClick={toggleViewSourcePreview}
- title={isProfilerSession ? undefined : 'Open a profiler trace or attach a session first'}
- >
- Source Preview
- </MenubarItem>
+ {isViewVisible('SourcePreview', kind) && (
+ <MenubarItem onClick={toggleViewSourcePreview}>Source Preview</MenubarItem>
  )}
- {isViewActive('DataFlow') && (
- <MenubarItem
- disabled={!isProfilerSession}
- onClick={toggleViewDataFlow}
- title={isProfilerSession ? undefined : 'Open a profiler trace or attach a session first'}
- >
- Data Flow
- </MenubarItem>
+ {isViewVisible('DataFlow', kind) && (
+ <MenubarItem onClick={toggleViewDataFlow}>Data Flow</MenubarItem>
  )}
- {isViewActive('QueryAnalyzer') && (
- <MenubarItem
- disabled={!isProfilerSession}
- onClick={toggleViewQueryAnalyzer}
- title={isProfilerSession ? undefined : 'Open a profiler trace or attach a session first'}
- >
- Query Analyzer
- </MenubarItem>
+ {isViewVisible('QueryAnalyzer', kind) && (
+ <MenubarItem onClick={toggleViewQueryAnalyzer}>Query Analyzer</MenubarItem>
  )}
- {isViewActive('EngineLiveHealth') && (
- <MenubarItem
- disabled={!isProfilerSession}
- onClick={toggleViewEngineLiveHealth}
- title={isProfilerSession ? undefined : 'Open a profiler trace or attach a session first'}
- >
- Engine Health
- </MenubarItem>
+ {/* #386 Phase 1: Query Console — open-session only. Hidden outside an open .typhon file (IA §5.1). */}
+ {isViewVisible('QueryConsole', kind) && (
+ <MenubarItem onClick={toggleViewQueryConsole}>Query Console</MenubarItem>
+ )}
+ {isViewVisible('EngineLiveHealth', kind) && (
+ <MenubarItem onClick={toggleViewEngineLiveHealth}>Engine Health</MenubarItem>
  )}
  {/* Systems & Queries Navigator — the trace/attach-mode default left-edge navigator (the profiler-mode
-     counterpart of Resource Tree). Without an entry here, closing the panel leaves the user without a
-     navigator and no recovery path other than Reset Layout. Profiler-session gated like the rest. */}
- <MenubarItem
- disabled={!isProfilerSession}
- onClick={toggleViewSystemsQueriesNav}
- title={isProfilerSession ? undefined : 'Open a profiler trace or attach a session first'}
- >
- Systems &amp; Queries
- </MenubarItem>
- {/* Dev Fixture (DEBUG-only on the server). Not session-kind gated — the user generates a fixture
-     independently of any open session; opening the result establishes a new session. The panel itself
-     shows a "not available in this build" cold state if `/api/fixtures/capability` returns 404. */}
- {isViewActive('DevFixture') && (
+     counterpart of Resource Tree). Shown only in a profiler session — the in-mode recovery path to reopen
+     the navigator after closing its panel. */}
+ {isViewVisible('SystemsQueriesNav', kind) && (
+ <MenubarItem onClick={toggleViewSystemsQueriesNav}>Systems &amp; Queries</MenubarItem>
+ )}
+ {/* Dev Fixture (DEBUG-only on the server). Session-independent (scope 'any') — the user generates a fixture
+     regardless of any open session; opening the result establishes a new session. The panel itself shows a
+     "not available in this build" cold state if `/api/fixtures/capability` returns 404. */}
+ {isViewVisible('DevFixture', kind) && (
  <MenubarItem onClick={toggleViewDevFixture}>Dev Fixture…</MenubarItem>
  )}
  {ANY_ZONE_D_VIEW_ACTIVE && <MenubarSeparator />}
- <MenubarItem
-   disabled={isProfilerSession}
-   onClick={toggleViewResourceTree}
-   title={isProfilerSession ? 'Not available in profiler sessions' : undefined}
- >
-   Resource Tree
- </MenubarItem>
+ {/* Resource Tree — the open-session navigator; hidden outside an open .typhon file (no resources to show). */}
+ {isViewVisible('ResourceTree', kind) && (
+ <MenubarItem onClick={toggleViewResourceTree}>Resource Tree</MenubarItem>
+ )}
  <MenubarItem onClick={toggleViewDetail}>Detail</MenubarItem>
  <MenubarItem onClick={toggleViewLogs}>Logs</MenubarItem>
  <MenubarItem onClick={toggleViewOptions}>Options</MenubarItem>

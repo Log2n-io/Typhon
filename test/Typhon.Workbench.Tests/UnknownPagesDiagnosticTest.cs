@@ -45,16 +45,17 @@ public sealed class UnknownPagesDiagnosticTest
     public unsafe void Dump_Unknown_Page_Distribution(bool useBulkLoad, int scale)
     {
         var d = FixtureConfig.Default;
-        var cfg = new FixtureConfig(
-            CompAArchCount:        d.CompAArchCount * scale,
-            CompABArchCount:       d.CompABArchCount * scale,
-            CompABCArchCount:      d.CompABCArchCount * scale,
-            CompDArchCount:        d.CompDArchCount * scale,
-            GuildArchCount:        d.GuildArchCount * scale,
-            PlayerArchCount:       d.PlayerArchCount * scale,
-            ParticleArchCount:     d.ParticleArchCount * scale,
-            ParticleFragmentation: d.ParticleFragmentation,
-            Seed:                  d.Seed);
+        var cfg = d with
+        {
+            ResourceTypeCount = d.ResourceTypeCount * scale,
+            GuildCount        = d.GuildCount * scale,
+            RecipeCount       = d.RecipeCount * scale,
+            PlayerCount       = d.PlayerCount * scale,
+            DepositCount      = d.DepositCount * scale,
+            HarvesterCount    = d.HarvesterCount * scale,
+            FactoryCount      = d.FactoryCount * scale,
+            ItemCount         = d.ItemCount * scale,
+        };
         var result = FixtureDatabase.CreateOrReuse(
             outputDir: _tempDir,
             force: true,

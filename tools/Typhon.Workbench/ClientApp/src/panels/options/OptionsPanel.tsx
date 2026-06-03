@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react';
 import { useOptionsStore } from '@/stores/useOptionsStore';
+import { useOptionsUiStore, type OptionsCategory } from '@/stores/useOptionsUiStore';
 import { DagForm } from './DagForm';
 import { EditorForm } from './EditorForm';
 import { ProfilerForm } from './ProfilerForm';
+import { SchemaForm } from './SchemaForm';
 
 /**
  * Workbench Options panel (issue #293, Phase 4a). Sidebar with category list, main area renders
@@ -10,7 +12,7 @@ import { ProfilerForm } from './ProfilerForm';
  *
  * Design ref: claude/design/observability/10-profiler-source-attribution.md §5.7.6.
  */
-type CategoryKey = 'editor' | 'profiler' | 'dag';
+type CategoryKey = OptionsCategory;
 
 interface CategoryDef {
   key: CategoryKey;
@@ -20,6 +22,7 @@ interface CategoryDef {
 const CATEGORIES: CategoryDef[] = [
   { key: 'editor', label: 'Editor' },
   { key: 'profiler', label: 'Profiler' },
+  { key: 'schema', label: 'Schema' },
   { key: 'dag', label: 'DAG' },
 ];
 
@@ -28,11 +31,23 @@ export default function OptionsPanel(): React.JSX.Element {
   const loaded = useOptionsStore((s) => s.loaded);
   const [active, setActive] = useState<CategoryKey>('editor');
 
+  // A deep-link (e.g. the schema banners' "Manage schema directories…") can request a category before/while
+  // the panel mounts; snap to it and clear the request so a later manual switch isn't overridden.
+  const requestedCategory = useOptionsUiStore((s) => s.requestedCategory);
+  const clearRequested = useOptionsUiStore((s) => s.clearRequested);
+
   useEffect(() => {
     if (!loaded) {
       void fetchOptions();
     }
   }, [loaded, fetchOptions]);
+
+  useEffect(() => {
+    if (requestedCategory) {
+      setActive(requestedCategory);
+      clearRequested();
+    }
+  }, [requestedCategory, clearRequested]);
 
   return (
     <div className="flex h-full w-full overflow-hidden bg-background">
@@ -71,6 +86,7 @@ export default function OptionsPanel(): React.JSX.Element {
           <>
             {active === 'editor' && <EditorForm />}
             {active === 'profiler' && <ProfilerForm />}
+            {active === 'schema' && <SchemaForm />}
           </>
         )}
       </main>

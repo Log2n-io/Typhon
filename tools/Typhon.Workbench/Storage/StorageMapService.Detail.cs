@@ -341,9 +341,17 @@ public sealed partial class StorageMapService
         long entityCount = 0;
         int activeClusterCount = 0;
         int clusterSize = 0;
+        var clusterSpatial = false;
+        float clusterCellSize = 0;
+        var clusterGridWidth = 0;
+        var clusterGridHeight = 0;
+        var clusterSpatialMode = "";
         if (seg.Kind == StorageSegmentKind.Cluster)
         {
             engine.TryGetClusterStats(seg.RootPageIndex, out entityCount, out activeClusterCount, out clusterSize);
+            // Spatial context — explains low slot occupancy (per-cell bucketing) vs flags it as fragmentation (non-spatial). Cheap, in-memory only.
+            engine.TryGetClusterSpatialInfo(seg.RootPageIndex, out clusterSpatial, out clusterCellSize, out clusterGridWidth, out clusterGridHeight,
+                out clusterSpatialMode);
         }
 
         EntityMapStatsDto entityMap = null;
@@ -356,7 +364,8 @@ public sealed partial class StorageMapService
         return new StorageSegmentSummaryDto(
             segmentId, seg.RootPageIndex, seg.Kind.ToString(), pageCount, seg.Stride,
             seg.AllocatedChunkCount, seg.FreeChunkCount, seg.ChunkCapacity,
-            entityCount, activeClusterCount, clusterSize, entityMap);
+            entityCount, activeClusterCount, clusterSize, entityMap,
+            clusterSpatial, clusterCellSize, clusterGridWidth, clusterGridHeight, clusterSpatialMode);
     }
 
     /// <summary>Decodes one chunk's L4 content — <c>GET /dbmap/chunk/{segId}/{chunkId}</c>. Returns <c>null</c> for an unknown id.</summary>
@@ -416,6 +425,7 @@ public sealed partial class StorageMapService
         var componentType = "";
         StorageContentCellDto[] cells = [];
         string[] clusterComponents = [];
+        StorageClusterCellDto clusterCell = null;
 
         if (seg.Kind == StorageSegmentKind.Component)
         {
@@ -434,6 +444,12 @@ public sealed partial class StorageMapService
             cells = L4Decoder.DecodeCluster(chunkBytes, clusterN, clusterComponentCount, clusterEntityIdsOffset);
             // Slot-ordered component names label the client's per-component overlay picker (bit c of each cell's enabledMask ↔ clusterComponents[c]).
             engine.TryGetClusterComponentNames(seg.RootPageIndex, out clusterComponents);
+            // Spatial-cell context (spatial archetypes only) — the per-cluster "why mostly empty" answer: the cell this cluster buckets into + that cell's totals.
+            if (engine.TryGetClusterChunkSpatialInfo(seg.RootPageIndex, chunkId, out var cellKey, out var cellX, out var cellY,
+                    out var entitiesInCell, out var clustersInCell, out var aabbMinX, out var aabbMinY, out var aabbMaxX, out var aabbMaxY))
+            {
+                clusterCell = new StorageClusterCellDto(cellKey, cellX, cellY, entitiesInCell, clustersInCell, aabbMinX, aabbMinY, aabbMaxX, aabbMaxY);
+            }
         }
         else if ((seg.Kind == StorageSegmentKind.Vsbs || seg.Kind == StorageSegmentKind.ComponentCollection)
             && engine.TryGetVsbsLayout(seg.RootPageIndex, out var vsbsElementSize, out _, out _) && vsbsElementSize > 0)
@@ -471,7 +487,80 @@ public sealed partial class StorageMapService
             cells = L4Decoder.DecodeGeneric(chunkBytes);
         }
 
-        return new StorageChunkDto(segmentId, chunkId, decoder, occupied, fileOffset, seg.Stride, componentType, cells, clusterComponents);
+        return new StorageChunkDto(segmentId, chunkId, decoder, occupied, fileOffset, seg.Stride, componentType, cells, clusterComponents, clusterCell);
+    }
+
+    /// <summary>
+    /// Decodes one cluster entity's full content — the L5 level beneath the L4 slot sub-grid (<c>GET /dbmap/chunk/{segId}/{chunkId}/entity/{slotIndex}</c>,
+    /// file-map §10 Q4 override). Returns the entity at <paramref name="slotIndex"/> as component-grouped field cells (see <see cref="L4Decoder.DecodeClusterEntity"/>):
+    /// a leading <c>entityPk</c> cell then, per component, a header + one field cell each. <see cref="StorageChunkDto.Occupied"/> reflects the slot's live state;
+    /// a free slot yields no cells. Returns <c>null</c> for an unknown segment / non-cluster segment / out-of-range chunk.
+    /// </summary>
+    public StorageChunkDto GetClusterEntity(DatabaseEngine engine, int segmentId, int chunkId, int slotIndex)
+    {
+        ArgumentNullException.ThrowIfNull(engine);
+
+        var segments = engine.EnumerateStorageSegments();
+        if (segmentId < 0 || segmentId >= segments.Count)
+        {
+            return null;
+        }
+
+        var seg = segments[segmentId];
+        if (!seg.IsChunkBased || seg.Kind != StorageSegmentKind.Cluster || chunkId < 0
+            || !engine.TryGetClusterEntityLayout(seg.RootPageIndex, out var clusterSize, out var entityIdsOffset, out var components))
+        {
+            return null;
+        }
+
+        // Resolve the chunk's page and in-page slot — same arithmetic as GetChunk / ChunkBasedSegment.GetChunkLocation.
+        int segmentPageIndex;
+        int chunkInPage;
+        if (chunkId < seg.ChunkCountRootPage)
+        {
+            segmentPageIndex = 0;
+            chunkInPage = chunkId;
+        }
+        else
+        {
+            var adjusted = chunkId - seg.ChunkCountRootPage;
+            segmentPageIndex = adjusted / seg.ChunkCountPerPage + 1;
+            chunkInPage = adjusted % seg.ChunkCountPerPage;
+        }
+
+        var pages = seg.Pages.Span;
+        if (segmentPageIndex >= pages.Length)
+        {
+            return null;
+        }
+
+        var filePage = pages[segmentPageIndex];
+        var dataOffset = segmentPageIndex == 0 ? seg.RootDataOffset : seg.OtherDataOffset;
+        var chunkOffset = dataOffset + chunkInPage * seg.Stride;
+
+        var body = new byte[engine.MMF.StoragePageSize];
+        if (!engine.TryReadPageBody(filePage, body) || chunkOffset + seg.Stride > body.Length)
+        {
+            return null;
+        }
+
+        var fileOffset = (long)filePage * engine.MMF.StoragePageSize + chunkOffset;
+
+        // A free chunk holds no cluster — no entity at any slot.
+        if (!ChunkBit(body, chunkInPage))
+        {
+            return new StorageChunkDto(segmentId, chunkId, "clusterEntity", false, fileOffset, seg.Stride, "", [], []);
+        }
+
+        var chunkBytes = body.AsSpan(chunkOffset, seg.Stride);
+        var cells = L4Decoder.DecodeClusterEntity(chunkBytes, slotIndex, clusterSize, entityIdsOffset, components);
+        var componentNames = new string[components.Length];
+        for (var c = 0; c < components.Length; c++)
+        {
+            componentNames[c] = components[c].Name;
+        }
+
+        return new StorageChunkDto(segmentId, chunkId, "clusterEntity", cells.Length > 0, fileOffset, seg.Stride, "", cells, componentNames);
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────────────────────────────────
@@ -792,5 +881,66 @@ public sealed partial class StorageMapService
             }
         }
         return null;
+    }
+
+    /// <summary>
+    /// Resolves a friendly owner name for an attributable storage segment — not just the <see cref="StorageSegmentKind.Component"/> data segment. The
+    /// component-owned data/history/index kinds (Component / Revision / Index) all hang off one <c>ComponentTable</c>, so a single root-page scan over the table's
+    /// segment family names them with the owning component's registered name. Archetype-owned kinds (<see cref="StorageSegmentKind.Cluster"/> /
+    /// <see cref="StorageSegmentKind.EntityMap"/>) are named via the engine's archetype-owner lookup. The returned name is the full registered/CLR name — the
+    /// Workbench client shortens it through the same labeller the Query Console uses, so a segment shows the same short name as its type does everywhere else.
+    /// Returns <c>""</c> for owner-less engine singletons (Occupancy / Root / System / Free) and for the indirectly-owned auxiliary kinds (VSBS / Spatial /
+    /// ComponentCollection), which keep their bare <c>kind #id</c> label — their owner chain isn't a flat <c>ComponentTable</c> field, and they're rarely the
+    /// segment a user is hunting for.
+    /// </summary>
+    private static string ResolveSegmentOwnerName(DatabaseEngine engine, int rootPage, StorageSegmentKind kind)
+    {
+        switch (kind)
+        {
+            case StorageSegmentKind.Cluster:
+            case StorageSegmentKind.EntityMap:
+                return engine.TryGetSegmentOwnerArchetypeName(rootPage, kind, out var archetypeName) ? archetypeName : "";
+
+            case StorageSegmentKind.Component:
+            case StorageSegmentKind.Revision:
+                foreach (var table in engine.GetAllComponentTables())
+                {
+                    if (OwnsSegment(table, rootPage))
+                    {
+                        return table.Definition.Name;
+                    }
+                }
+                return "";
+
+            case StorageSegmentKind.Index:
+                // An Index segment is either a per-component-table index (Default / String64 / Tail — component-owned) or the
+                // per-archetype cluster index (ClusterState.IndexSegment — archetype-owned, not a flat ComponentTable field).
+                // The two owners are disjoint: try the component-table path first, then fall back to the archetype resolver.
+                foreach (var table in engine.GetAllComponentTables())
+                {
+                    if (OwnsSegment(table, rootPage))
+                    {
+                        return table.Definition.Name;
+                    }
+                }
+                return engine.TryGetSegmentOwnerArchetypeName(rootPage, StorageSegmentKind.Index, out var idxArchetypeName) ? idxArchetypeName : "";
+
+            default:
+                // Occupancy / Root / System / Free / VSBS / Spatial / ComponentCollection — no flat owner path; keep the bare kind label.
+                return "";
+        }
+    }
+
+    /// <summary>True when <paramref name="rootPage"/> is the root of one of <paramref name="table"/>'s component-data / MVCC-revision / index segments
+    /// (default / String64 / tail). Covers the kinds the File Map labels per-component; the auxiliary VSBS / spatial chains are intentionally excluded
+    /// (see <see cref="ResolveSegmentOwnerName"/>).</summary>
+    private static bool OwnsSegment(ComponentTable table, int rootPage)
+    {
+        if (table.ComponentSegment?.RootPageIndex == rootPage) return true;
+        if (table.CompRevTableSegment?.RootPageIndex == rootPage) return true;
+        if (table.DefaultIndexSegment?.RootPageIndex == rootPage) return true;
+        if (table.String64IndexSegment?.RootPageIndex == rootPage) return true;
+        if (table.TailIndexSegment?.RootPageIndex == rootPage) return true;
+        return false;
     }
 }

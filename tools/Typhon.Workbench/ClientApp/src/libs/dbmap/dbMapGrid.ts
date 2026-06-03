@@ -47,3 +47,16 @@ export function gridSubRect(parent: Rect, cols: number, rows: number, index: num
     h: parent.h / rows,
   };
 }
+
+/**
+ * The row-major cell index of a fractional position (`fx`, `fy`) ∈ [0,1] within an evenly-tiled `cols × rows` grid —
+ * the inverse of {@link gridSubRect}. Clamps to the grid bounds; callers treat an index ≥ the real cell count as the
+ * void (no cell there). Keep this in lockstep with {@link gridSubRect}: scaling the row by the column count — the easy
+ * mistake — maps clicks in the lower rows out of range, so the hit-test misses and the caller silently selects the
+ * parent instead of the cell.
+ */
+export function gridCellIndexAt(fx: number, fy: number, cols: number, rows: number): number {
+  const col = Math.min(cols - 1, Math.max(0, Math.floor(fx * cols)));
+  const row = Math.min(rows - 1, Math.max(0, Math.floor(fy * rows)));
+  return row * cols + col;
+}

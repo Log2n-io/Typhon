@@ -4,10 +4,9 @@ using Typhon.Schema.Definition;
 namespace Typhon.ARPG.Schema;
 
 /// <summary>
-/// Randomly-rolled item modifier (prefix or suffix).
-/// AllowMultiple: a Rare item typically has 4-6 affixes, a Legendary may have special ones.
+/// Randomly-rolled item modifier (prefix or suffix). Single instance per item — component-level multi-instance (AllowMultiple) was removed.
 /// </summary>
-[Component("ARPG.ItemAffixes", 1, true)]
+[Component("ARPG.ItemAffixes", 1)]
 [StructLayout(LayoutKind.Sequential)]
 public struct ItemAffixes
 {

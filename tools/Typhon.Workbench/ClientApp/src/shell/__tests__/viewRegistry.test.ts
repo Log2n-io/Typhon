@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { ANY_ZONE_D_VIEW_ACTIVE, ZONE_D_VIEW_ACTIVE, isViewActive } from '../viewRegistry';
+import {
+  ANY_ZONE_D_VIEW_ACTIVE,
+  ZONE_D_VIEW_ACTIVE,
+  isViewActive,
+  isViewAvailableInKind,
+  isViewVisible,
+  viewSessionScope,
+} from '../viewRegistry';
 
 // The deep/workspace (zone-D) views still gated off. Kept here as the test's own copy so a regression
 // (a view silently flipped back on, or a new deep view added without gating) is caught.
@@ -20,7 +27,7 @@ const ZONE_D_GATED_OFF = [] as const;
 // on the server; client always-active so the View menu / palette entries render in dev builds, with the panel
 // itself handling the "not available" cold state when the server's #if DEBUG endpoints are absent.
 const ZONE_D_ACTIVE = [
-  'DataBrowserEntities', 'DbMap', 'StorageHealth', 'Profiler', 'TopSpans', 'CallTree', 'SourcePreview', 'DataFlow', 'SystemDag', 'CriticalPath', 'QueryAnalyzer', 'EngineLiveHealth', 'DevFixture',
+  'DataBrowserEntities', 'DbMap', 'StorageHealth', 'Profiler', 'TopSpans', 'CallTree', 'SourcePreview', 'DataFlow', 'SystemDag', 'CriticalPath', 'QueryAnalyzer', 'QueryConsole', 'EngineLiveHealth', 'DevFixture',
 ] as const;
 
 // The full registry key set = gated-off ∪ active. Used to assert the registry covers exactly the documented set.
@@ -63,5 +70,50 @@ describe('viewRegistry — Stage 0 deactivation gate', () => {
 
   it('reports a zone-D view active (drives the View-menu separator once views return)', () => {
     expect(ANY_ZONE_D_VIEW_ACTIVE).toBe(true);
+  });
+});
+
+// IA §5.1 — the single source of truth for "which session kind can open which view", shared by the View menu and
+// the command palette so the two can't drift.
+describe('viewRegistry — session-kind scope (IA §5.1)', () => {
+  it('classifies views by the session kind that can open them', () => {
+    expect(viewSessionScope('DbMap')).toBe('open');
+    expect(viewSessionScope('SchemaExplorer')).toBe('open');
+    expect(viewSessionScope('ResourceTree')).toBe('open');
+    expect(viewSessionScope('Profiler')).toBe('profiler');
+    expect(viewSessionScope('SystemsQueriesNav')).toBe('profiler');
+    expect(viewSessionScope('QueryAnalyzer')).toBe('profiler');
+    expect(viewSessionScope('DevFixture')).toBe('any');
+  });
+
+  it('defaults unlisted / undefined ids to `any` (shell-structural + non-view commands)', () => {
+    expect(viewSessionScope(undefined)).toBe('any');
+    expect(viewSessionScope('NotARealView')).toBe('any');
+  });
+
+  it('isViewAvailableInKind — open views run only in an open session', () => {
+    expect(isViewAvailableInKind('DbMap', 'open')).toBe(true);
+    expect(isViewAvailableInKind('DbMap', 'attach')).toBe(false);
+    expect(isViewAvailableInKind('DbMap', 'none')).toBe(false);
+  });
+
+  it('isViewAvailableInKind — profiler views run in trace and attach', () => {
+    expect(isViewAvailableInKind('Profiler', 'trace')).toBe(true);
+    expect(isViewAvailableInKind('Profiler', 'attach')).toBe(true);
+    expect(isViewAvailableInKind('Profiler', 'open')).toBe(false);
+  });
+
+  it('isViewAvailableInKind — `any` views (and non-view commands) run in every kind', () => {
+    for (const kind of ['open', 'attach', 'trace', 'none'] as const) {
+      expect(isViewAvailableInKind('DevFixture', kind)).toBe(true);
+      expect(isViewAvailableInKind(undefined, kind)).toBe(true);
+    }
+  });
+
+  it('isViewVisible requires BOTH feature-active and in-scope for the session', () => {
+    expect(isViewVisible('DbMap', 'open')).toBe(true); // active + in scope
+    expect(isViewVisible('DbMap', 'attach')).toBe(false); // active but out of scope
+    expect(isViewVisible('Profiler', 'open')).toBe(false); // active but wrong kind
+    expect(isViewVisible('Profiler', 'attach')).toBe(true);
   });
 });

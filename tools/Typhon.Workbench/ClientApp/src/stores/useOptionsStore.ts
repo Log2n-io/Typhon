@@ -21,14 +21,25 @@ export interface ProfilerOptions {
   viewRangeDebounceMs: number;
 }
 
+export interface SchemaOptions {
+  /**
+   * Absolute directories searched (at priority 2, above the Workbench's own bundled binaries) for a
+   * database's recorded schema assemblies on open. ADR-055 Phase 2. The server normalizes to absolute,
+   * de-duplicated paths; a non-existent entry is skipped at resolution time.
+   */
+  directories: string[];
+}
+
 export interface WorkbenchOptions {
   editor: EditorOptions;
   profiler: ProfilerOptions;
+  schema: SchemaOptions;
 }
 
 const DEFAULT_OPTIONS: WorkbenchOptions = {
   editor: { kind: 'vsCode', customCommand: '' },
   profiler: { workspaceRoot: '', viewRangeDebounceMs: 150 },
+  schema: { directories: [] },
 };
 
 interface OptionsState {
@@ -43,6 +54,8 @@ interface OptionsState {
   setEditor: (editor: EditorOptions) => Promise<void>;
   /** Patch the profiler category. Optimistic with rollback. */
   setProfiler: (profiler: ProfilerOptions) => Promise<void>;
+  /** Patch the schema category (registered schema directories). Optimistic with rollback. */
+  setSchema: (schema: SchemaOptions) => Promise<void>;
   /** Trigger an editor-launch via the server. Returns the structured result. */
   openInEditor: (file: string, line: number, column?: number) => Promise<OpenInEditorResult>;
 }
@@ -142,6 +155,28 @@ export const useOptionsStore = create<OptionsState>()((set, get) => ({
         set({ options: prev });
         throw new Error(`PATCH /api/options/profiler failed: ${resp.status}`);
       }
+      const updated = (await resp.json()) as WorkbenchOptions;
+      set({ options: updated });
+    } catch (err) {
+      set({ options: prev });
+      throw err;
+    }
+  },
+
+  setSchema: async (schema) => {
+    const prev = get().options;
+    set({ options: { ...prev, schema } });
+    try {
+      const resp = await fetch('/api/options/schema', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(schema),
+      });
+      if (!resp.ok) {
+        set({ options: prev });
+        throw new Error(`PATCH /api/options/schema failed: ${resp.status}`);
+      }
+      // Server normalizes (absolute + de-duplicated) — adopt its canonical list rather than our optimistic one.
       const updated = (await resp.json()) as WorkbenchOptions;
       set({ options: updated });
     } catch (err) {

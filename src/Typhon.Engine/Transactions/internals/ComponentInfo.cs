@@ -17,8 +17,9 @@ internal interface IEntryAction
 }
 
 /// <summary>
-/// Unified component info class that replaces the former ComponentInfoBase/ComponentInfoSingle/ComponentInfoMultiple hierarchy.
-/// Uses a boolean flag (<see cref="IsMultiple"/>) and dual caches to handle both single and multiple components.
+/// Per-transaction working set for one component type: caches the component-revision info (<see cref="CompRevInfo"/>) per entity primary key, keyed in
+/// <see cref="SingleCache"/>. (Component-level multi-instance — the former "AllowMultiple" dual-cache — was removed; every entity has at most one instance of a
+/// given component type.)
 /// </summary>
 internal sealed class ComponentInfo
 {
@@ -62,9 +63,7 @@ internal sealed class ComponentInfo
         public short ReadRevisionIndex;
     }
 
-    // Identity
-    public readonly bool IsMultiple;
-    public int EntryCount => IsMultiple ? MultipleCache.Count : SingleCache.Count;
+    public int EntryCount => SingleCache.Count;
 
     // Common fields
     public int ComponentTypeId;
@@ -77,33 +76,10 @@ internal sealed class ComponentInfo
     public ChunkAccessor<PersistentStore> CompRevTableAccessor;
     public ChunkAccessor<TransientStore> TransientCompContentAccessor;
 
-    // Dual caches (one is always null)
-    // ReSharper disable InconsistentNaming
+    /// <summary>Per-entity (primary key → component-revision info) working set for this transaction.</summary>
     internal Dictionary<long, CompRevInfo> SingleCache;
-    internal Dictionary<long, List<CompRevInfo>> MultipleCache;
-    // ReSharper restore InconsistentNaming
 
-    public ComponentInfo(bool isMultiple)
-    {
-        IsMultiple = isMultiple;
-    }
-
-    public void AddNew(long pk, CompRevInfo entry)
-    {
-        if (IsMultiple)
-        {
-            if (!MultipleCache.TryGetValue(pk, out var list))
-            {
-                list = [];
-                MultipleCache.Add(pk, list);
-            }
-            list.Add(entry);
-        }
-        else
-        {
-            SingleCache.Add(pk, entry);
-        }
-    }
+    public void AddNew(long pk, CompRevInfo entry) => SingleCache.Add(pk, entry);
 
     /// <summary>
     /// Disposes the ChunkAccessor<PersistentStore> fields to flush dirty pages.
@@ -132,36 +108,16 @@ internal sealed class ComponentInfo
     /// </summary>
     public void ForEachMutableEntry<TAction>(ref CommitContext context, ref TAction action) where TAction : struct, IEntryAction
     {
-        if (IsMultiple)
+        foreach (var key in SingleCache.Keys)
         {
-            foreach (var key in MultipleCache.Keys)
+            context.PrimaryKey = key;
+            ref var cri = ref CollectionsMarshal.GetValueRefOrNullRef(SingleCache, key);
+            if (cri.Operations == OperationType.Read)
             {
-                context.PrimaryKey = key;
-                var list = CollectionsMarshal.AsSpan(CollectionsMarshal.GetValueRefOrNullRef(MultipleCache, key));
-                foreach (ref var cri in list)
-                {
-                    if (cri.Operations == OperationType.Read)
-                    {
-                        continue;
-                    }
-                    context.CompRevInfo = ref cri;
-                    action.Process(ref context);
-                }
+                continue;
             }
-        }
-        else
-        {
-            foreach (var key in SingleCache.Keys)
-            {
-                context.PrimaryKey = key;
-                ref var cri = ref CollectionsMarshal.GetValueRefOrNullRef(SingleCache, key);
-                if (cri.Operations == OperationType.Read)
-                {
-                    continue;
-                }
-                context.CompRevInfo = ref cri;
-                action.Process(ref context);
-            }
+            context.CompRevInfo = ref cri;
+            action.Process(ref context);
         }
     }
 }

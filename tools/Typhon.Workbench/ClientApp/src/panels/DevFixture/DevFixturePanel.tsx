@@ -12,15 +12,24 @@ import {
   BULK_LOAD_AUTO_THRESHOLD,
   CUSTOM_CONFIG_STORAGE_KEY,
   DEFAULT_DATABASE_NAME,
+  PLAYERS_PER_GUILD_SHAPE_LABELS,
+  PlayersPerGuildShape,
   PRESET_CONFIGS,
   PRESET_LABELS,
   devFixtureFormReducer,
   initialDevFixtureFormState,
   loadOutputDirFromStorage,
   saveCustomConfigToStorage,
+  saveDatabaseNameToStorage,
   saveOutputDirToStorage,
+  saveUseBulkLoadToStorage,
+  toApiFixtureConfig,
   totalEntityCount,
+  type DevFixtureFormAction,
+  type FixtureBoolKey,
   type FixtureConfig,
+  type FixtureFractionKey,
+  type FixtureIntKey,
   type PresetId,
 } from '@/shell/dialogs/tabs/devFixtureFormReducer';
 import { cancelFixtureJob, useFixtureJobPolling } from '@/shell/dialogs/tabs/useFixtureJobPolling';
@@ -144,6 +153,15 @@ export default function DevFixturePanel(_props: IDockviewPanelProps): React.JSX.
     saveOutputDirToStorage(outputDirOverride);
   }, [outputDirOverride]);
 
+  // Persist the database name + BulkLoad toggle so the user's last choices survive a dialog re-open.
+  useEffect(() => {
+    saveDatabaseNameToStorage(form.databaseName);
+  }, [form.databaseName]);
+
+  useEffect(() => {
+    saveUseBulkLoadToStorage(form.useBulkLoad);
+  }, [form.useBulkLoad]);
+
   // Capability probe — runs ONCE on mount. A 404 (Release build, no /api/fixtures/capability) leaves
   // `capabilityAvailable=false` and the panel renders its "not available" cold state.
   useEffect(() => {
@@ -214,13 +232,15 @@ export default function DevFixturePanel(_props: IDockviewPanelProps): React.JSX.
     try {
       const body: {
         force: boolean;
-        config: FixtureConfig;
+        config: ReturnType<typeof toApiFixtureConfig>;
         databaseName: string;
         outputDirectory?: string;
         useBulkLoad: boolean;
       } = {
         force,
-        config: form.config,
+        // toApiFixtureConfig is the compile-time guard that the form's config mirrors the server's FixtureConfig
+        // record (orval-generated DTO) — a renamed/added server field breaks this call until the mirror is updated.
+        config: toApiFixtureConfig(form.config),
         databaseName: form.databaseName,
         useBulkLoad: form.useBulkLoad,
       };
@@ -340,9 +360,9 @@ export default function DevFixturePanel(_props: IDockviewPanelProps): React.JSX.
             <span className="font-semibold">Dev fixture database</span>
           </div>
           <p>
-            Generates a populated Typhon database with deterministic data, then opens it. Pick a preset for the common
-            shapes, or expand <span className="font-medium">Advanced</span> to tweak per-archetype counts + the
-            fragmentation / RNG seed for targeted test scenarios.
+            Generates a populated SWG-inspired Typhon database with deterministic data, then opens it. Pick a preset for
+            the common shapes, or expand <span className="font-medium">Advanced</span> to tune per-archetype volumetry,
+            schema-complexity toggles, the entity-mix distribution, and the RNG seed for targeted test scenarios.
           </p>
         </div>
 
@@ -596,85 +616,218 @@ function CenteredMessage({ children }: { children: React.ReactNode }): React.JSX
   );
 }
 
+// Advanced-form field groups (SWG schema). Labels are display-only; the second tuple element is the C#-mirrored
+// FixtureConfig key that the dispatched action targets.
+const VOLUMETRY_ROWS: Array<[string, FixtureIntKey]> = [
+  ['Resource types', 'resourceTypeCount'],
+  ['Guilds', 'guildCount'],
+  ['Recipes', 'recipeCount'],
+  ['Players', 'playerCount'],
+  ['Deposits', 'depositCount'],
+  ['Harvesters', 'harvesterCount'],
+  ['Factories', 'factoryCount'],
+  ['Items', 'itemCount'],
+];
+
+const COMPLEXITY_INT_ROWS: Array<[string, FixtureIntKey]> = [
+  ['Taxonomy depth', 'resourceTaxonomyDepth'],
+  ['Max affixes / item', 'maxAffixesPerItem'],
+  ['Professions', 'professionCount'],
+];
+
+const COMPLEXITY_BOOL_ROWS: Array<[string, FixtureBoolKey]> = [
+  ['Multi-affix items', 'includeMultiAffixItems'],
+  ['Factories (polymorphic)', 'includePolymorphicStructure'],
+];
+
+const DISTRIBUTION_FRACTION_ROWS: Array<[string, FixtureFractionKey]> = [
+  ['Online players', 'onlinePlayerFraction'],
+  ['Broken harvesters', 'brokenHarvesterFraction'],
+  ['Depleted deposits', 'depletedDepositFraction'],
+  ['Idle factories', 'idleFactoryFraction'],
+  ['Deleted players', 'deletedPlayerFraction'],
+];
+
+/** A titled group within the Advanced form. */
+function Section({ title, children }: { title: string; children: React.ReactNode }): React.JSX.Element {
+  return (
+    <div className="flex flex-col gap-1">
+      <span className="text-fs-sm font-medium uppercase tracking-wide text-muted-foreground">{title}</span>
+      {children}
+    </div>
+  );
+}
+
+/** A labelled non-negative integer input (volumetry + integer complexity knobs). */
+function NumberRow({
+  label,
+  testid,
+  value,
+  onChange,
+}: {
+  label: string;
+  testid: string;
+  value: number;
+  onChange: (value: number) => void;
+}): React.JSX.Element {
+  return (
+    <label className="flex items-center justify-between gap-2 text-fs-base text-foreground">
+      <span className="text-muted-foreground">{label}</span>
+      <input
+        type="number"
+        min={0}
+        step={1}
+        data-testid={testid}
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+        className="w-28 rounded border border-border bg-background px-1.5 py-0.5 text-right font-mono text-fs-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      />
+    </label>
+  );
+}
+
+/** A labelled [0,1] fraction slider rendered as an integer-percent range. */
+function FractionRow({
+  label,
+  testid,
+  value,
+  onChange,
+}: {
+  label: string;
+  testid: string;
+  value: number;
+  onChange: (value: number) => void;
+}): React.JSX.Element {
+  const pct = Math.round(value * 100);
+  return (
+    <label className="flex items-center justify-between gap-2 text-fs-base text-foreground">
+      <span className="text-muted-foreground">{label}</span>
+      <div className="flex items-center gap-2">
+        <input
+          type="range"
+          min={0}
+          max={100}
+          step={1}
+          data-testid={testid}
+          value={pct}
+          onChange={(e) => onChange(Number(e.target.value) / 100)}
+          className="w-28"
+        />
+        <span className="w-10 text-right font-mono text-fs-sm">{pct}%</span>
+      </div>
+    </label>
+  );
+}
+
 /**
- * Per-archetype-count form, shown when the Advanced collapse is open. Identical semantics to the previous tab's
- * inner form — moved here as an internal subcomponent so the panel file is self-contained.
+ * Grouped Advanced form (SWG schema), shown when the Advanced collapse is open. Three sections mirror the C#
+ * `FixtureConfig` axes: <b>Volumetry</b> (per-archetype counts), <b>Complexity</b> (data-level shape: integer knobs +
+ * the two boolean toggles), and <b>Distribution</b> (entity-mix fractions + the players-per-guild shape + RNG seed).
+ * Every control dispatches a typed action whose `key` is a compile-time-checked `FixtureConfig` field.
  */
 function AdvancedForm({
   config,
   dispatch,
 }: {
   config: FixtureConfig;
-  dispatch: (action: { type: 'set-count'; key: keyof FixtureConfig; value: number } | { type: 'set-fragmentation'; value: number } | { type: 'set-seed'; value: number } | { type: 'randomize-seed' }) => void;
+  dispatch: React.Dispatch<DevFixtureFormAction>;
 }): React.JSX.Element {
-  const countRows: Array<[string, keyof FixtureConfig]> = [
-    ['CompA', 'compAArchCount'],
-    ['CompAB', 'compABArchCount'],
-    ['CompABC', 'compABCArchCount'],
-    ['CompD', 'compDArchCount'],
-    ['Guild', 'guildArchCount'],
-    ['Player', 'playerArchCount'],
-    ['Particle', 'particleArchCount'],
-  ];
-
   return (
-    <div className="flex flex-col gap-2">
-      <div className="grid grid-cols-2 gap-x-3 gap-y-1">
-        {countRows.map(([label, key]) => (
-          <label key={key} className="flex items-center justify-between gap-2 text-fs-base text-foreground">
-            <span className="text-muted-foreground">{label}</span>
+    <div className="flex flex-col gap-3">
+      <Section title="Volumetry">
+        <div className="grid grid-cols-2 gap-x-3 gap-y-1">
+          {VOLUMETRY_ROWS.map(([label, key]) => (
+            <NumberRow
+              key={key}
+              label={label}
+              testid={`devfixture-count-${key}`}
+              value={config[key]}
+              onChange={(value) => dispatch({ type: 'set-count', key, value })}
+            />
+          ))}
+        </div>
+      </Section>
+
+      <Section title="Complexity">
+        <div className="grid grid-cols-2 gap-x-3 gap-y-1">
+          {COMPLEXITY_INT_ROWS.map(([label, key]) => (
+            <NumberRow
+              key={key}
+              label={label}
+              testid={`devfixture-count-${key}`}
+              value={config[key]}
+              onChange={(value) => dispatch({ type: 'set-count', key, value })}
+            />
+          ))}
+        </div>
+        <div className="mt-1 flex flex-col gap-1">
+          {COMPLEXITY_BOOL_ROWS.map(([label, key]) => (
+            <label key={key} className="flex items-center gap-2 text-fs-base text-foreground">
+              <input
+                type="checkbox"
+                data-testid={`devfixture-bool-${key}`}
+                checked={config[key]}
+                onChange={(e) => dispatch({ type: 'set-bool', key, value: e.target.checked })}
+                className="h-3.5 w-3.5 accent-primary"
+              />
+              <span className="text-muted-foreground">{label}</span>
+            </label>
+          ))}
+        </div>
+      </Section>
+
+      <Section title="Distribution">
+        <div className="flex flex-col gap-1">
+          {DISTRIBUTION_FRACTION_ROWS.map(([label, key]) => (
+            <FractionRow
+              key={key}
+              label={label}
+              testid={`devfixture-fraction-${key}`}
+              value={config[key]}
+              onChange={(value) => dispatch({ type: 'set-fraction', key, value })}
+            />
+          ))}
+        </div>
+
+        <label className="flex items-center justify-between gap-2 text-fs-base text-foreground">
+          <span className="text-muted-foreground">Players per guild</span>
+          <select
+            data-testid="devfixture-shape"
+            value={config.playersPerGuildShape}
+            onChange={(e) => dispatch({ type: 'set-shape', value: Number(e.target.value) })}
+            className="w-32 rounded border border-border bg-background px-1.5 py-0.5 text-fs-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            {Object.values(PlayersPerGuildShape).map((shape) => (
+              <option key={shape} value={shape}>
+                {PLAYERS_PER_GUILD_SHAPE_LABELS[shape]}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label className="flex items-center justify-between gap-2 text-fs-base text-foreground">
+          <span className="text-muted-foreground">RNG seed</span>
+          <div className="flex items-center gap-1">
             <input
               type="number"
-              min={0}
-              step={1}
-              data-testid={`devfixture-count-${key}`}
-              value={config[key]}
-              onChange={(e) => dispatch({ type: 'set-count', key, value: Number(e.target.value) })}
-              className="w-28 rounded border border-border bg-background px-1.5 py-0.5 text-right font-mono text-fs-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              data-testid="devfixture-seed"
+              value={config.seed}
+              onChange={(e) => dispatch({ type: 'set-seed', value: Number(e.target.value) })}
+              className="w-32 rounded border border-border bg-background px-1.5 py-0.5 text-right font-mono text-fs-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             />
-          </label>
-        ))}
-      </div>
-
-      <label className="flex items-center justify-between gap-2 text-fs-base text-foreground">
-        <span className="text-muted-foreground">Particle fragmentation</span>
-        <div className="flex items-center gap-2">
-          <input
-            type="range"
-            min={0}
-            max={100}
-            step={1}
-            data-testid="devfixture-fragmentation"
-            value={Math.round(config.particleFragmentation * 100)}
-            onChange={(e) => dispatch({ type: 'set-fragmentation', value: Number(e.target.value) / 100 })}
-            className="w-28"
-          />
-          <span className="w-10 text-right font-mono text-fs-sm">{Math.round(config.particleFragmentation * 100)}%</span>
-        </div>
-      </label>
-
-      <label className="flex items-center justify-between gap-2 text-fs-base text-foreground">
-        <span className="text-muted-foreground">RNG seed</span>
-        <div className="flex items-center gap-1">
-          <input
-            type="number"
-            data-testid="devfixture-seed"
-            value={config.seed}
-            onChange={(e) => dispatch({ type: 'set-seed', value: Number(e.target.value) })}
-            className="w-32 rounded border border-border bg-background px-1.5 py-0.5 text-right font-mono text-fs-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          />
-          <button
-            type="button"
-            data-testid="devfixture-seed-randomize"
-            title="Randomize seed"
-            aria-label="Randomize seed"
-            onClick={() => dispatch({ type: 'randomize-seed' })}
-            className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-accent-foreground"
-          >
-            <Dice5 className="h-3 w-3" />
-          </button>
-        </div>
-      </label>
+            <button
+              type="button"
+              data-testid="devfixture-seed-randomize"
+              title="Randomize seed"
+              aria-label="Randomize seed"
+              onClick={() => dispatch({ type: 'randomize-seed' })}
+              className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+            >
+              <Dice5 className="h-3 w-3" />
+            </button>
+          </div>
+        </label>
+      </Section>
     </div>
   );
 }

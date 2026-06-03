@@ -576,15 +576,25 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
         var filePageIndex = pages[pageIndex];
         Debug.Assert(filePageIndex >= 0);
 
-        var result = _store.RequestPageEpoch(filePageIndex, _epochManager.GlobalEpoch, out var memPageIndex);
+        // Resolve page memory through the LIVE segment store, not the accessor's by-value `_store` snapshot. `_store` is a copy taken at construction
+        // (see ctor). For PersistentStore that copy is harmless — its pages live in the global page cache addressed via a stable base pointer, so a copy
+        // aliases the same memory. TransientStore is different: its `_pageAddresses` array lives INSIDE the struct and AllocatePages REASSIGNS it to a larger
+        // array when the store grows past its current capacity (first at PagesPerBlock×4 pages). A ChunkAccessor created before such a grow
+        // — e.g. AllocateChunk(true)'s local accessor, which is snapshotted then immediately used to ClearChunk a freshly-grown page — would index the OLD,
+        // now-undersized array and throw IndexOutOfRange. Reading the page address from `_segment.Store` (the canonical instance the segment grows in place)
+        // always sees the current array. This is the cache-miss slow path, so the extra indirection is irrelevant; the cached raw pointers in `_baseAddresses`
+        // (pinned transient blocks never move on grow) keep the hot path snapshot-free.
+        ref var liveStore = ref _segment.Store;
+
+        var result = liveStore.RequestPageEpoch(filePageIndex, _epochManager.GlobalEpoch, out var memPageIndex);
         Debug.Assert(result);
 
         _pageIndices[slot] = pageIndex;
-        _baseAddresses[slot] = (long)_store.GetMemPageRawDataAddress(memPageIndex);
+        _baseAddresses[slot] = (long)liveStore.GetMemPageRawDataAddress(memPageIndex);
 
         // SlotRefCount prevents PagedMMF from evicting this page while the accessor holds a slot reference.
         // Deferred-decremented in EvictSlot, immediate-decremented in Dispose.
-        _store.IncrementSlotRefCount(memPageIndex);
+        liveStore.IncrementSlotRefCount(memPageIndex);
     }
 
     // ═══════════════════════════════════════════════════════════════════════

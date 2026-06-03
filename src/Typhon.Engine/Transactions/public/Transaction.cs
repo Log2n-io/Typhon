@@ -221,8 +221,6 @@ public unsafe partial class Transaction : EntityAccessor
         ProcessDeferredCleanups();
         dbe.LogTxDispose(tsn, "FlushAccessors");
         FlushAccessors();
-        dbe.LogTxDispose(tsn, "PersistIfNeeded");
-        PersistIfNeeded();
         // Mark disposed BEFORE ExitEpochAndRemove: Remove() pools the object, and a lock-free
         // CreateTransaction can immediately dequeue and Init it (_isDisposed = false). If we set _isDisposed = true AFTER Remove returns, we'd overwrite the
         // new owner's flag, causing their Dispose to skip Remove — leaking the chain node.
@@ -258,16 +256,6 @@ public unsafe partial class Transaction : EntityAccessor
                     _dbe.DeferredCleanupManager.ProcessDeferredCleanups(TSN, nextMinTSN, _dbe, _changeSet);
                 }
             }
-        }
-    }
-
-    /// <summary>WAL-less GroupCommit: write dirty pages to OS cache.</summary>
-    private void PersistIfNeeded()
-    {
-        if (State == TransactionState.Committed && _dbe.WalManager == null
-            && OwningUnitOfWork?.DurabilityMode == DurabilityMode.GroupCommit)
-        {
-            _changeSet.SaveChanges();
         }
     }
 
@@ -1392,25 +1380,22 @@ public unsafe partial class Transaction : EntityAccessor
 
                 componentInfo.ForEachMutableEntry(ref context, ref rollbackAction);
 
-                // Remove rolled-back Created entities from Single cache.
+                // Remove rolled-back Created entities from the cache.
                 // Can't modify dictionary during ForEachMutableEntry, so do a second pass.
-                if (!componentInfo.IsMultiple)
+                var cacheCount = componentInfo.SingleCache.Count;
+                Span<long> toRemove = cacheCount <= 128 ? createdPkBuffer[..cacheCount] : new long[cacheCount];
+                var removeCount = 0;
+                foreach (var kvp in componentInfo.SingleCache)
                 {
-                    var cacheCount = componentInfo.SingleCache.Count;
-                    Span<long> toRemove = cacheCount <= 128 ? createdPkBuffer[..cacheCount] : new long[cacheCount];
-                    var removeCount = 0;
-                    foreach (var kvp in componentInfo.SingleCache)
+                    if ((kvp.Value.Operations & ComponentInfo.OperationType.Created) != 0)
                     {
-                        if ((kvp.Value.Operations & ComponentInfo.OperationType.Created) != 0)
-                        {
-                            toRemove[removeCount++] = kvp.Key;
-                        }
+                        toRemove[removeCount++] = kvp.Key;
                     }
-                    for (var i = 0; i < removeCount; i++)
-                    {
-                        componentInfo.SingleCache.Remove(toRemove[i]);
-                        _deletedComponentCount++;
-                    }
+                }
+                for (var i = 0; i < removeCount; i++)
+                {
+                    componentInfo.SingleCache.Remove(toRemove[i]);
+                    _deletedComponentCount++;
                 }
             }
 
@@ -1440,14 +1425,14 @@ public unsafe partial class Transaction : EntityAccessor
         return Rollback(ref ctx);
     }
 
-    /// <summary>Serialize to WAL (or flush pages for WAL-less), transition to Committed, and record metrics.</summary>
+    /// <summary>Serialize to WAL, transition to Committed, and record metrics.</summary>
     private void PersistAndFinalize(ref UnitOfWorkContext ctx, long startTicks)
     {
         // WAL serialization (after conflict resolution, before state transition). BL-01: when the owning UoW has SuppressWalSerialization (BulkLoad path),
         // skip per-row WAL. Page dirty marking still happens via CommitComponentCore so the checkpoint flushes the data; BulkLoadSession.CompleteBulkLoad
         // runs a synchronous checkpoint + emits BulkEnd as the bulk's durability anchor. See claude/design/Durability/BulkLoad/02-write-path.md.
         long walHighLsn = 0;
-        if (_dbe.WalManager != null && State != TransactionState.Created && OwningUnitOfWork?.SuppressWalSerialization != true)
+        if (State != TransactionState.Created && OwningUnitOfWork?.SuppressWalSerialization != true)
         {
             var persistScope = TyphonEvent.BeginTransactionPersist(TSN);
             try
@@ -1468,33 +1453,6 @@ public unsafe partial class Transaction : EntityAccessor
             _dbe.WalManager.RequestFlush();
             var wc = ComposeWaitContext(ref ctx, TimeoutOptions.Current.DefaultCommitTimeout);
             _dbe.WalManager.WaitForDurable(walHighLsn, ref wc);
-        }
-
-        // WAL-less Immediate: persist dirty data pages and fsync before returning from Commit.
-        // This is the WAL-less equivalent of the WAL FUA path above — data is on stable storage when Commit returns.
-        if (_dbe.WalManager == null && OwningUnitOfWork?.DurabilityMode == DurabilityMode.Immediate)
-        {
-            // Flush batched dirty flags from long-lived accessors to the ChangeSet (BTree accessors are already
-            // disposed inline during CommitComponentCore, so their pages are already tracked).
-            foreach (var kvp in _componentInfos)
-            {
-                var ci = kvp.Value;
-                if (ci.ComponentTable.StorageMode == StorageMode.Transient)
-                {
-                    ci.TransientCompContentAccessor.CommitChanges();
-                }
-                else
-                {
-                    ci.CompContentAccessor.CommitChanges();
-                    if (ci.ComponentTable.StorageMode == StorageMode.Versioned)
-                    {
-                        ci.CompRevTableAccessor.CommitChanges();
-                    }
-                }
-            }
-
-            _changeSet.SaveChanges();
-            _dbe.MMF.FlushToDisk();
         }
 
         // New state

@@ -47,8 +47,14 @@ public sealed class SessionLifecycleTests
         // Step 1: generate two fixture databases on disk. Both use the same fixture schema (loaded into
         // separate collectible ALCs by the Workbench's open path); the registry-lifecycle fix is what
         // makes the second open succeed without trampling the first's state.
-        var dbAPath = GenerateFixture("db-a", FixtureConfig.Default with { ParticleArchCount = 100 });
-        var dbBPath = GenerateFixture("db-b", FixtureConfig.Default with { ParticleArchCount = 200 });
+        // Small, distinct configs — fast to generate; the two differ so they materialise as separate databases.
+        var smallA = FixtureConfig.Default with
+        {
+            ResourceTypeCount = 5, GuildCount = 2, RecipeCount = 5, PlayerCount = 10,
+            DepositCount = 5, HarvesterCount = 3, FactoryCount = 1, ItemCount = 10,
+        };
+        var dbAPath = GenerateFixture("db-a", smallA);
+        var dbBPath = GenerateFixture("db-b", smallA with { ItemCount = 20 });
 
         // Step 2: open the first DB. Assert it's Ready (engine + schema load both succeeded).
         EngineLifecycle a = await EngineLifecycle.OpenAsync(dbAPath);
