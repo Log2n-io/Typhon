@@ -22,6 +22,7 @@
     </PropertyGroup>
 
     <ItemGroup>
+        <PackageReference Include="CsCheck" Version="4.7.0" />
         <PackageReference Include="MemoryPack" Version="1.21.4" />
         <PackageReference Include="Microsoft.Extensions.Logging" Version="10.0.8" />
         <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.8" />

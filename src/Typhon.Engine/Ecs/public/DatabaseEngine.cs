@@ -589,6 +589,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     internal WalManager WalManager { get; private set; }
 
     /// <summary>
+    /// The WAL v2 durability seam (01 §3) — the single path every emitter appends records through. Composes <see cref="WalManager"/>.
+    /// </summary>
+    internal IDurabilityLog DurabilityLog { get; private set; }
+
+    /// <summary>
     /// Optional checkpoint manager. Null when WAL is not configured. Periodically flushes dirty data pages
     /// and advances CheckpointLSN to enable WAL segment recycling.
     /// </summary>
@@ -760,6 +765,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         var commitBufferCapacity = _options.Resources.WalRingBufferSizeBytes / 2;
         WalManager = new WalManager(walOptions, MemoryAllocator, walFileIO, _durabilityNode, commitBufferCapacity);
+        DurabilityLog = new DurabilityLog(WalManager);
 
         // Determine continuation point from recovery or fresh start
         var lastLSN = _lastRecoveryResult.LastValidLSN;
@@ -2967,8 +2973,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             return false;
         }
         config = new SpatialGridConfig(
-            new System.Numerics.Vector2(BitConverter.Int32BitsToSingle(v.GetInt(0)), BitConverter.Int32BitsToSingle(v.GetInt(1))),
-            new System.Numerics.Vector2(BitConverter.Int32BitsToSingle(v.GetInt(2)), BitConverter.Int32BitsToSingle(v.GetInt(3))),
+            new Vector2(BitConverter.Int32BitsToSingle(v.GetInt()), BitConverter.Int32BitsToSingle(v.GetInt(1))),
+            new Vector2(BitConverter.Int32BitsToSingle(v.GetInt(2)), BitConverter.Int32BitsToSingle(v.GetInt(3))),
             BitConverter.Int32BitsToSingle(v.GetInt(4)),
             BitConverter.Int32BitsToSingle(v.GetInt(5)));
         return true;
@@ -3295,7 +3301,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// it is always loaded by any host, so it never belongs in the manifest, and excluding it also avoids a system-component bootstrap self-reference. Dedups on
     /// simple name via <see cref="_assemblyIdByName"/> (seeded on open), so the same assembly is persisted once. Rides on the caller's <paramref name="cs"/>.
     /// </summary>
-    private ushort GetOrCreateAssemblyId(System.Reflection.Assembly asm, ChangeSet cs)
+    private ushort GetOrCreateAssemblyId(Assembly asm, ChangeSet cs)
     {
         if (asm == null || asm == typeof(DatabaseEngine).Assembly)
         {
@@ -3525,7 +3531,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             {
                 continue;
             }
-            var collectionStride = cv.GetInt(0);
+            var collectionStride = cv.GetInt();
             var collectionSPI = cv.GetInt(1);
             if (collectionSPI != 0 && !_componentCollectionSegmentByStride.ContainsKey(collectionStride))
             {
