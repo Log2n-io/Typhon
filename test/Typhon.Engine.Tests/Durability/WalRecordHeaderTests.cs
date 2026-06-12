@@ -59,14 +59,28 @@ public class WalRecordHeaderTests
 
     #endregion
 
-    #region WalFrameHeader — Size
+    #region WalFrameHeader — Size & Layout
 
     [Test]
-    public void FrameHeader_SizeOf_Is8Bytes()
+    public void FrameHeader_SizeOf_Is16Bytes()
     {
-        Assert.That(Unsafe.SizeOf<WalFrameHeader>(), Is.EqualTo(8));
+        // 16 bytes since P0.2 (LOG-05): FrameLength(4) + RecordCount(4) + LastLsn(8). LastLsn carries the frame's highest LSN so the consumer can compute an honest
+        // durable watermark without peeking NextLsn. Growing the in-band frame header is an on-disk WAL format change — paired with the P1 WAL v2 rewrite (same PR).
+        Assert.That(Unsafe.SizeOf<WalFrameHeader>(), Is.EqualTo(16));
         Assert.That(Unsafe.SizeOf<WalFrameHeader>(), Is.EqualTo(WalFrameHeader.SizeInBytes));
     }
+
+    [Test]
+    public void FrameHeader_FieldOffset_FrameLength_Is0() =>
+        Assert.That(Marshal.OffsetOf<WalFrameHeader>(nameof(WalFrameHeader.FrameLength)).ToInt32(), Is.EqualTo(0));
+
+    [Test]
+    public void FrameHeader_FieldOffset_RecordCount_Is4() =>
+        Assert.That(Marshal.OffsetOf<WalFrameHeader>(nameof(WalFrameHeader.RecordCount)).ToInt32(), Is.EqualTo(4));
+
+    [Test]
+    public void FrameHeader_FieldOffset_LastLsn_Is8() =>
+        Assert.That(Marshal.OffsetOf<WalFrameHeader>(nameof(WalFrameHeader.LastLsn)).ToInt32(), Is.EqualTo(8));
 
     #endregion
 

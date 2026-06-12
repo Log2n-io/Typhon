@@ -35,9 +35,18 @@ internal struct WalFrameHeader
     /// </summary>
     public int RecordCount;
 
+    /// <summary>
+    /// Highest LSN contained in this frame (<c>FirstLSN + RecordCount - 1</c> from the producer's claim). Written by the producer in <see cref="WalCommitBuffer.Publish"/>
+    /// before the <see cref="FrameLength"/> release store, so the single consumer sees it once the frame is published. The consumer takes the max of this field over the
+    /// frames it actually drains to compute an honest durable watermark (LOG-05): <see cref="WalWriter.DurableLsn"/> never advances past an LSN whose frame has not been
+    /// physically written. Replaces the prior <c>NextLsn - 1</c> peek, which over-reported by counting claims that were assigned an LSN but not yet drained (TXW-2). Zero
+    /// for padding frames and abandoned claims (RecordCount == 0).
+    /// </summary>
+    public long LastLsn;
+
     /// <summary>Sentinel value indicating end-of-buffer padding.</summary>
     public const int PaddingSentinel = -1;
 
     /// <summary>Expected size of this struct in bytes.</summary>
-    public const int SizeInBytes = 8;
+    public const int SizeInBytes = 16;
 }

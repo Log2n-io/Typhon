@@ -264,6 +264,86 @@ public class CheckpointManagerTests : AllocatorTestBase
     }
 
     // ═══════════════════════════════════════════════════════════════
+    // Coverage gate (CK-03 / STO-1) — P0.1
+    // ═══════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Dirties a page and pins its ActiveChunkWriters so checkpoint capture must skip it (a live writer mid-commit). The coverage gate must then refuse to advance
+    /// CheckpointLSN and refuse to recycle WAL segments — otherwise the skipped page's committed records would be lost on a crash once their segment is recycled
+    /// (STO-1). Fails against the pre-fix code, which advanced CheckpointLSN unconditionally. Acceptance criterion AC-1.
+    /// </summary>
+    [Test]
+    [CancelAfter(5000)]
+    public void CoverageGate_SkippedPage_NoAdvance()
+    {
+        CreateTestInfrastructure();
+        _walManager = CreateWalManager();
+        ProduceWalRecords(_walManager);
+
+        var memPageIdx = DirtyRootPage();
+
+        _mmf.IncrementActiveChunkWriters(memPageIdx); // pin → checkpoint capture CAS(ACW,-1,0) fails → page skipped
+        try
+        {
+            using var ckpt = new CheckpointManager(_mmf, _uowRegistry, _walManager, _resourceOptions, _epochManager, _stagingPool, AllocationResource);
+            var durableLsn = _walManager.DurableLsn;
+            Assert.That(durableLsn, Is.GreaterThan(0), "the workload must have produced durable WAL to make the advance assertion meaningful");
+
+            ckpt.RunCheckpointCycle(durableLsn);
+
+            Assert.That(ckpt.CheckpointLsn, Is.LessThan(durableLsn), "CheckpointLsn must NOT advance while a collected dirty page is uncaptured (CK-03)");
+            Assert.That(ckpt.ConsecutiveGatedCycles, Is.EqualTo(1), "the cycle must register as gated");
+            Assert.That(ckpt.TotalSegmentsRecycled, Is.EqualTo(0), "no WAL segment may be recycled while gated (CK-04)");
+        }
+        finally
+        {
+            _mmf.DecrementActiveChunkWriters(memPageIdx);
+        }
+    }
+
+    /// <summary>
+    /// Once the active writer releases the page, a subsequent cycle captures it and the gate opens: CheckpointLSN advances and the gate counter resets.
+    /// </summary>
+    [Test]
+    [CancelAfter(5000)]
+    public void CoverageGate_Released_Advances()
+    {
+        CreateTestInfrastructure();
+        _walManager = CreateWalManager();
+        ProduceWalRecords(_walManager);
+
+        var memPageIdx = DirtyRootPage();
+
+        using var ckpt = new CheckpointManager(_mmf, _uowRegistry, _walManager, _resourceOptions, _epochManager, _stagingPool, AllocationResource);
+        var durableLsn = _walManager.DurableLsn;
+        Assert.That(durableLsn, Is.GreaterThan(0));
+
+        // Cycle 1: page pinned → gated.
+        _mmf.IncrementActiveChunkWriters(memPageIdx);
+        ckpt.RunCheckpointCycle(durableLsn);
+        Assert.That(ckpt.CheckpointLsn, Is.LessThan(durableLsn));
+        Assert.That(ckpt.ConsecutiveGatedCycles, Is.EqualTo(1));
+
+        // Cycle 2: writer released → page captured → advance + reset.
+        _mmf.DecrementActiveChunkWriters(memPageIdx);
+        ckpt.RunCheckpointCycle(durableLsn);
+        Assert.That(ckpt.CheckpointLsn, Is.EqualTo(durableLsn), "once the page is captured, CheckpointLsn advances");
+        Assert.That(ckpt.ConsecutiveGatedCycles, Is.EqualTo(0), "a fully-covered cycle resets the gate counter");
+    }
+
+    /// <summary>Dirties the root page (page 0) without saving, so it is collected by the next checkpoint but stays dirty. Returns its in-memory page index.</summary>
+    private int DirtyRootPage()
+    {
+        using var guard = EpochGuard.Enter(_epochManager);
+        var cs = _mmf.CreateChangeSet();
+        _mmf.RequestPageEpoch(0, guard.Epoch, out var memPageIdx);
+        _mmf.TryLatchPageExclusive(memPageIdx);
+        cs.AddByMemPageIndex(memPageIdx);
+        _mmf.UnlatchPageExclusive(memPageIdx);
+        return memPageIdx;
+    }
+
+    // ═══════════════════════════════════════════════════════════════
     // Trigger Tests
     // ═══════════════════════════════════════════════════════════════
 

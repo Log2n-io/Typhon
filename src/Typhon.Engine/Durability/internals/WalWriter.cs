@@ -320,17 +320,10 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
                     }
                 }
 
-                // 3. Walk frames to track the highest LSN in this batch
-                long batchHighLsn = 0;
-                int totalRecordCount = 0;
-                WalCommitBuffer.WalkFrames(data, (payload, recordCount) =>
-                {
-                    totalRecordCount += recordCount;
-                });
-
-                // The highest LSN is: current NextLsn - 1 (since NextLsn has already been advanced by producers)
-                // We compute it from the commit buffer's NextLsn at drain time minus remaining undrained records
-                batchHighLsn = _commitBuffer.NextLsn - 1;
+                // 3. Highest LSN actually contained in this drained batch (LOG-05 honest watermark). TryDrain accumulated it from the drained frames' headers.
+                //    This is NOT NextLsn - 1: that counts claims which have been assigned an LSN but whose frames are not yet drained/written, so advancing the
+                //    durable watermark to it falsely acknowledges records still sitting in the buffer (TXW-2). LastDrainHighLsn never exceeds bytes about to be written.
+                long batchHighLsn = _commitBuffer.LastDrainHighLsn;
 
                 // WalFlush span: covers the write + signal cycle. The WAL writer thread claims its own ThreadSlotRegistry slot
                 // on first emit, so it appears as a dedicated lane in the viewer.
@@ -409,15 +402,16 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
                     }
 
                     // 7. Advance durable LSN and signal waiters. Phase 8: Signal span — LSN advance + waiter wake-up.
-                    if (batchHighLsn > 0)
+                    //    The outer check only gates span emission (avoid creating the Signal span when no advance is likely); AdvanceDurable performs the
+                    //    monotonic advance itself.
+                    if (batchHighLsn > Interlocked.Read(ref _durableLsn))
                     {
                         var signalScope = TyphonEvent.BeginDurabilityWalSignal(batchHighLsn);
                         try
                         {
                             Logger?.LogDebug("WAL writer: advancing durable LSN to {DurableLsn}, wrote {BytesWritten} bytes ({FrameCount} frames)",
                                 batchHighLsn, bytesToWrite, frameCount);
-                            Interlocked.Exchange(ref _durableLsn, batchHighLsn);
-                            _durabilityEvent.Set();
+                            AdvanceDurable(batchHighLsn);
                         }
                         finally
                         {
@@ -560,13 +554,83 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
 
             _commitBuffer.CompleteDrain(data.Length);
 
-            // Final durable LSN advance
-            var finalLsn = _commitBuffer.NextLsn - 1;
-            Interlocked.Exchange(ref _durableLsn, finalLsn);
-            _durabilityEvent.Set();
+            // Final durable LSN advance — honest watermark over the drained frames (LOG-05), monotonic; never NextLsn - 1 (TXW-2).
+            AdvanceDurable(_commitBuffer.LastDrainHighLsn);
         }
 
         // Final flush to ensure everything is on stable media
+        PerformFlush();
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Synchronous drain (crash-simulation tests — OQ-3)
+    // ═══════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Synchronously drains and writes every currently-published WAL frame on the CALLING thread, then flushes — the deterministic equivalent of running the
+    /// background drain loop to quiescence. Runs the same staging-copy → CRC-patch → <see cref="IWalFileIO.WriteAligned"/> → durable-watermark-advance path as
+    /// <see cref="WriterLoop"/> (minus telemetry spans), so a crash-simulation test can drive the real write path and fail the underlying <see cref="IWalFileIO"/>
+    /// at a chosen write/flush boundary, then inspect the resulting on-disk state.
+    /// </summary>
+    /// <remarks>
+    /// The background writer thread MUST NOT be running: the CRC chain state (<see cref="_lastFooterCrc"/>) assumes single-threaded access. Crash tests either never
+    /// call <see cref="Start"/> or stop the thread first.
+    /// </remarks>
+    internal void DrainAndWriteSync()
+    {
+        if (IsRunning)
+        {
+            ThrowHelper.ThrowInvalidOp("DrainAndWriteSync must not be called while the WAL writer thread is running (CRC chain state is single-threaded).");
+        }
+
+        while (_commitBuffer.TryDrain(out var data, out var frameCount))
+        {
+            if (frameCount == 0)
+            {
+                break;
+            }
+
+            // Honest watermark over exactly these frames (LOG-05), captured before the write so a crash mid-write leaves the watermark unadvanced.
+            var batchHighLsn = _commitBuffer.LastDrainHighLsn;
+            var bytesToWrite = AlignUp(data.Length, PageSize);
+
+            if (bytesToWrite > _stagingBufferSize)
+            {
+                WriteInChunks(data);
+            }
+            else
+            {
+                data.CopyTo(new Span<byte>(_stagingBuffer, _stagingBufferSize));
+
+                var padLength = bytesToWrite - data.Length;
+                if (padLength > 0)
+                {
+                    new Span<byte>(_stagingBuffer + data.Length, padLength).Clear();
+                }
+
+                PatchChunkCrcs(new Span<byte>(_stagingBuffer, _stagingBufferSize), data.Length);
+
+                var segment = _segmentManager.ActiveSegment;
+                var writeSpan = new ReadOnlySpan<byte>(_stagingBuffer, bytesToWrite);
+                _fileIO.WriteAligned(segment.Handle, segment.WriteOffset, writeSpan);
+                segment.WriteOffset += bytesToWrite;
+                Interlocked.Add(ref _totalBytesWritten, bytesToWrite);
+            }
+
+            _commitBuffer.CompleteDrain(data.Length);
+
+            AdvanceDurable(batchHighLsn);
+
+            Interlocked.Increment(ref _totalFlushes);
+
+            // Segment rotation parity with WriterLoop so multi-segment sync workloads behave like production.
+            if (_segmentManager.ActiveSegmentUtilization >= RotationThreshold)
+            {
+                _segmentManager.RotateSegment(batchHighLsn + 1, batchHighLsn);
+                _lastFooterCrc = 0;
+            }
+        }
+
         PerformFlush();
     }
 
@@ -635,6 +699,21 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
     // ═══════════════════════════════════════════════════════════════
     // Internal helpers
     // ═══════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Monotonically advances the durable watermark to <paramref name="candidate"/> and wakes waiters. The single source of the advance invariant, shared by the
+    /// background drain loop, shutdown drain, and the synchronous crash-test drain. Monotonic: a batch's high LSN can fall below the current watermark when claim
+    /// order and buffer/drain order diverge (tail and LSN are claimed via two independent <c>Interlocked.Add</c>s); lowering the watermark would un-acknowledge an
+    /// already-durable record. Caller is the single consumer (writer thread or a stopped-thread sync drain), so no CAS loop is needed.
+    /// </summary>
+    private void AdvanceDurable(long candidate)
+    {
+        if (candidate > Interlocked.Read(ref _durableLsn))
+        {
+            Interlocked.Exchange(ref _durableLsn, candidate);
+            _durabilityEvent.Set();
+        }
+    }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static int AlignUp(int value, int alignment) => (value + alignment - 1) & ~(alignment - 1);

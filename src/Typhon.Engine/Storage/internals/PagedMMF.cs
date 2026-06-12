@@ -1867,8 +1867,11 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             RandomAccess.Write(_fileHandle, staging.Span, pageOffset);
             TrackFileGrowth(pageOffset + PageSize);
 
-            // Compact: move written index to front of array so caller knows which pages to decrement
-            memPageIndices[writtenCount++] = memPageIndex;
+            // Partition in place: written pages to the front [0, writtenCount), skipped pages to the back [writtenCount, length). Swap (never overwrite) so the
+            // caller can retry exactly the skipped tail in a later pass (coverage gate, CK-03) instead of losing track of which pages still need writing.
+            memPageIndices[i] = memPageIndices[writtenCount];
+            memPageIndices[writtenCount] = memPageIndex;
+            writtenCount++;
 
             _metrics.PageWrittenToDiskCount++;
             _metrics.WrittenOperationCount++;

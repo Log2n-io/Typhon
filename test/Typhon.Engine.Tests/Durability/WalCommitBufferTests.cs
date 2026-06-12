@@ -77,9 +77,9 @@ public class WalCommitBufferTests : AllocatorTestBase
         // Request an odd number of bytes
         var claim = buffer.TryClaim(13, 1, ref ctx);
 
-        // Total frame size should be 8-byte aligned: Align8(8 + 13) = Align8(21) = 24
+        // Total frame size should be 8-byte aligned: Align8(WalFrameHeader.SizeInBytes + 13) = Align8(16 + 13) = Align8(29) = 32
         Assert.That(claim.TotalFrameSize % 8, Is.EqualTo(0));
-        Assert.That(claim.TotalFrameSize, Is.EqualTo(24));
+        Assert.That(claim.TotalFrameSize, Is.EqualTo(32));
 
         buffer.Publish(ref claim);
     }

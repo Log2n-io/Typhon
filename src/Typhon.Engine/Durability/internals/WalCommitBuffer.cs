@@ -81,6 +81,13 @@ internal sealed unsafe class WalCommitBuffer : IDisposable
     private readonly ManualResetEventSlim _dataAvailableEvent = new(false);
 
     // ═══════════════════════════════════════════════════════════════════════
+    // Drain watermark (consumer-thread only — no synchronization needed)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// <summary>Highest LSN among the frames returned by the most recent <see cref="TryDrain"/>. Read by the WAL writer to advance its durable watermark.</summary>
+    private long _drainHighLsn;
+
+    // ═══════════════════════════════════════════════════════════════════════
     // Disposal
     // ═══════════════════════════════════════════════════════════════════════
 
@@ -146,6 +153,13 @@ internal sealed unsafe class WalCommitBuffer : IDisposable
 
     /// <summary>Current Log Sequence Number (next to be assigned).</summary>
     public long NextLsn => Interlocked.Read(ref _nextLsn);
+
+    /// <summary>
+    /// Highest LSN contained in the frames returned by the most recent <see cref="TryDrain"/> call (0 if that drain returned nothing). Consumer-thread only. The WAL
+    /// writer advances its durable watermark to this value after the drained bytes are physically written and flushed, so <see cref="WalWriter.DurableLsn"/> never
+    /// exceeds what reached stable media (LOG-05). Replaces the old <c>NextLsn - 1</c> peek, which counted claims that had been assigned an LSN but not yet drained (TXW-2).
+    /// </summary>
+    internal long LastDrainHighLsn => _drainHighLsn;
 
     /// <summary>Index of the currently active buffer (0 or 1).</summary>
     public int ActiveBufferIndex => _activeBufferIndex;
@@ -230,6 +244,7 @@ internal sealed unsafe class WalCommitBuffer : IDisposable
                 var frameHeader = (WalFrameHeader*)(buffer + offset);
                 frameHeader->FrameLength = 0;
                 frameHeader->RecordCount = 0;
+                frameHeader->LastLsn = 0;
 
                 // Assign LSNs atomically
                 var firstLsn = Interlocked.Add(ref _nextLsn, recordCount) - recordCount;
@@ -316,10 +331,12 @@ internal sealed unsafe class WalCommitBuffer : IDisposable
         var buffer = claim.BufferIndex == 0 ? _buffer0 : _buffer1;
         var frameHeader = (WalFrameHeader*)(buffer + claim.FrameOffset);
 
-        // Write record count first (plain store — consumer reads this after seeing FrameLength)
+        // Write record count + the frame's highest LSN first (plain stores — consumer reads these after seeing FrameLength). LastLsn is the honest per-frame
+        // watermark source (LOG-05): the consumer takes the max over drained frames so DurableLsn cannot advance past an unwritten record's LSN.
         frameHeader->RecordCount = claim.RecordCount;
+        frameHeader->LastLsn = claim.FirstLSN + claim.RecordCount - 1;
 
-        // Release fence: Interlocked.Exchange ensures all prior writes (record data + RecordCount) are visible to the consumer before it sees the
+        // Release fence: Interlocked.Exchange ensures all prior writes (record data + RecordCount + LastLsn) are visible to the consumer before it sees the
         // non-zero FrameLength.
         Interlocked.Exchange(ref frameHeader->FrameLength, claim.TotalFrameSize);
 
@@ -405,6 +422,7 @@ internal sealed unsafe class WalCommitBuffer : IDisposable
         }
 
         var tail = Interlocked.Read(ref _tailPosition);
+        long maxLastLsn = 0;
 
         while (scanPos < tail && scanPos < BufferCapacity)
         {
@@ -423,9 +441,17 @@ internal sealed unsafe class WalCommitBuffer : IDisposable
                 break;
             }
 
+            // Track the highest LSN among published data frames in this batch (LOG-05 honest watermark). Padding and abandoned frames carry RecordCount 0 / LastLsn 0.
+            if (frameHeader->RecordCount > 0 && frameHeader->LastLsn > maxLastLsn)
+            {
+                maxLastLsn = frameHeader->LastLsn;
+            }
+
             scanPos += frameLength;
             frameCount++;
         }
+
+        _drainHighLsn = maxLastLsn;
 
         if (frameCount > 0)
         {

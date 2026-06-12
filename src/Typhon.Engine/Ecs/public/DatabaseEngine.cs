@@ -315,6 +315,27 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// <c>BulkLoadRecoveryTests</c> incomplete-bulk path.</summary>
     internal bool SimulateUncleanShutdownForTest;
 
+    private bool _simulateHardCrash;
+
+    /// <summary>
+    /// Test-only "power cut": tears the engine down WITHOUT any final persistence — no shutdown checkpoint cycle, no <c>PersistArchetypeState</c>, no
+    /// <c>PersistEngineState</c>, no clean-shutdown marker. The managed page cache (dirty, uncheckpointed pages) is discarded by <see cref="PagedMMF.Dispose"/>
+    /// exactly as volatile RAM is lost on power loss, so only data already on stable media survives: prior checkpoints and fsynced WAL records (Immediate commits).
+    /// The next open of the same directory must therefore recover committed data via WAL replay. This is the in-process equivalent of killing the process at a
+    /// moment of true data loss (which <c>TerminateProcess</c> cannot reproduce — the OS flushes its caches). See <c>claude/design/Durability/crash-recovery-testing.md</c> §1.
+    /// </summary>
+    internal void SimulateHardCrash()
+    {
+        if (IsDisposed)
+        {
+            return;
+        }
+
+        _simulateHardCrash = true;
+        CheckpointManager?.PrepareCrashStop(); // suppress the checkpoint thread's shutdown flush before we stop it
+        Dispose();
+    }
+
     /// <summary>
     /// Tick-scoped state shared across the four fence phases. Reset by <c>TyphonRuntime.RunParallelFence</c>
     /// at fence entry; populated progressively by each phase's <c>Prepare</c>.
@@ -676,22 +697,28 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             StagingBufferPool?.Dispose();
             StagingBufferPool = null;
 
-            Logger?.LogInformation("Engine disposing: PersistArchetypeState");
-            // Persist EntityMap SPIs and NextEntityKey counters so reopen can load EntityMaps directly
-            PersistArchetypeState();
-
-            Logger?.LogInformation("Engine disposing: PersistEngineState");
-            // Persist final TSN counter and flush all dirty pages to disk. This ensures:
-            // 1. TSN counter survives restart (MVCC visibility)
-            // 2. All committed transaction data is on disk even without WAL/checkpoint
-            PersistEngineState();
-
-            // Clean-shutdown HEAD marker: STRICTLY AFTER PersistEngineState's data fsync (own separate fsync, never
-            // bundled), so a torn close can never leave the marker durable ahead of the cluster pages it vouches for.
-            // Skipped by SimulateUncleanShutdownForTest to reproduce a crash (which also never writes the marker).
-            if (!SimulateUncleanShutdownForTest)
+            // Hard-crash simulation (power cut): skip EVERY final-persistence step. PersistEngineState would flush uncheckpointed dirty pages to the data file and
+            // PersistArchetypeState would persist EntityMap state — both would smuggle committed data onto disk that a real crash would have lost, masking the
+            // dependency on WAL replay. The clean-shutdown marker is likewise never written. Only what is already fsynced (prior checkpoints + WAL) survives.
+            if (!_simulateHardCrash)
             {
-                MarkCleanShutdown();
+                Logger?.LogInformation("Engine disposing: PersistArchetypeState");
+                // Persist EntityMap SPIs and NextEntityKey counters so reopen can load EntityMaps directly
+                PersistArchetypeState();
+
+                Logger?.LogInformation("Engine disposing: PersistEngineState");
+                // Persist final TSN counter and flush all dirty pages to disk. This ensures:
+                // 1. TSN counter survives restart (MVCC visibility)
+                // 2. All committed transaction data is on disk even without WAL/checkpoint
+                PersistEngineState();
+
+                // Clean-shutdown HEAD marker: STRICTLY AFTER PersistEngineState's data fsync (own separate fsync, never
+                // bundled), so a torn close can never leave the marker durable ahead of the cluster pages it vouches for.
+                // Skipped by SimulateUncleanShutdownForTest to reproduce a crash (which also never writes the marker).
+                if (!SimulateUncleanShutdownForTest)
+                {
+                    MarkCleanShutdown();
+                }
             }
 
             Logger?.LogInformation("Engine disposing: WalManager");

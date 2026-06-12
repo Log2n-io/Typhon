@@ -288,7 +288,7 @@ internal sealed class BulkLoadWriteTests
     {
         // WalSegmentHeader is 4096 bytes; frame data begins at offset 4096.
         const int segmentHeaderSize = 4096;
-        const int frameHeaderSize = 8;      // WalFrameHeader: int FrameLength + int RecordCount
+        const int frameHeaderSize = WalFrameHeader.SizeInBytes; // int FrameLength + int RecordCount + long LastLsn (16 B since P0.2 / LOG-05)
         const int chunkHeaderSize = 8;      // WalChunkHeader: ushort ChunkType + ushort ChunkSize + uint PrevCRC
         const int pageSize = 4096;
 

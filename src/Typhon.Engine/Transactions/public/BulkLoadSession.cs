@@ -256,6 +256,13 @@ public sealed class BulkLoadSession : IDisposable
         // UowRegistry).
         _uow.Flush();
 
+        // Step 2b: Dispose the (already-committed) final transaction BEFORE forcing the checkpoint. Until the transaction is disposed it keeps its bulk-allocated
+        // pages pinned (the checkpoint capture finds them with active writers and skips them); with the coverage gate (CK-03) a skipped page blocks CheckpointLSN
+        // from advancing, so the step-4 assertion below would fail. Dispose does NOT discard the committed revisions (they live in the dirty cluster pages,
+        // which the forced checkpoint then writes); the UoW stays alive for BulkEnd emission.
+        _currentTransaction.Dispose();
+        _currentTransaction = null;
+
         // Step 3: Force a checkpoint and block until at least one cycle completes. This drains every dirty page (including all bulk-allocated chunks) to disk
         // + advances CheckpointLSN past the bulk anchor.
         _engine.CheckpointManager.ForceCheckpoint();
@@ -280,8 +287,7 @@ public sealed class BulkLoadSession : IDisposable
         _engine.WalManager.RequestFlush();
         _engine.WalManager.WaitForDurable(bulkEndLsn, ref wc);
 
-        // Tear down the Transaction + UoW (releases the registry slot, etc.) and the bulk gate.
-        _currentTransaction.Dispose();
+        // Tear down the UoW (releases the registry slot, etc.) and the bulk gate. The final transaction was already disposed before the checkpoint (step 2b).
         _uow.Dispose();
         IsClosed = true;
         _engine.ReleaseBulkSessionGate();
