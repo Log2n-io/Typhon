@@ -147,9 +147,8 @@ internal sealed class BulkLoadWriteTests
     [Test]
     public void CompleteBulkLoad_EmitsExactlyOneBulkBeginAndOneBulkEnd_NoTransactionRecords()
     {
-        // BL-01: the bulk path emits no per-row Transaction records. The WAL should contain
-        // exactly one BulkBegin + one BulkEnd chunk (plus possibly FPI / TickFence which are
-        // orthogonal infrastructure — those don't count against BL-01).
+        // BL-01 (WAL v2): the bulk path emits no per-row commit records — exactly two BulkManifest records (the Begin and End
+        // anchors). Fence records (FenceRecord flag) are orthogonal infrastructure and don't count against BL-01.
         var dbe = BuildEngine();
 
         using (var bulk = dbe.BeginBulkLoad())
@@ -162,14 +161,12 @@ internal sealed class BulkLoadWriteTests
             bulk.CompleteBulkLoad();
         }
 
-        var counts = CountWalChunksByType();
+        var (bulkManifest, nonFenceCommitRecords) = CountWalRecordsByKind();
 
-        Assert.That(counts.GetValueOrDefault(WalChunkType.Transaction), Is.EqualTo(0),
-            "BL-01: no per-row Transaction WAL records during a bulk session");
-        Assert.That(counts.GetValueOrDefault(WalChunkType.BulkBegin), Is.EqualTo(1),
-            "exactly one BulkBegin chunk");
-        Assert.That(counts.GetValueOrDefault(WalChunkType.BulkEnd), Is.EqualTo(1),
-            "exactly one BulkEnd chunk");
+        Assert.That(nonFenceCommitRecords, Is.EqualTo(0),
+            "BL-01: no per-row commit (Slot/Lifecycle) records during a bulk session");
+        Assert.That(bulkManifest, Is.EqualTo(2),
+            "exactly one BulkBegin + one BulkEnd manifest record");
     }
 
     [Test]
@@ -277,6 +274,69 @@ internal sealed class BulkLoadWriteTests
         }
 
         return counts;
+    }
+
+    /// <summary>
+    /// Counts WAL v2 records across all segments: BulkManifest records, and non-fence Slot/Lifecycle (per-row commit) records.
+    /// Walks frames (skipping inter-drain padding) then feeds each frame's chunk region to the codec's <see cref="RecordCodec.RecordBatchReader"/>.
+    /// </summary>
+    private (int bulkManifest, int nonFenceCommitRecords) CountWalRecordsByKind()
+    {
+        const int segmentHeaderSize = 4096;
+        const int frameHeaderSize = WalFrameHeader.SizeInBytes;
+        const int pageSize = 4096;
+
+        int bulkManifest = 0, nonFenceCommit = 0;
+        var segments = Directory.GetFiles(_walDir, "*.wal").OrderBy(p => p).ToArray();
+
+        foreach (var segmentPath in segments)
+        {
+            using var fs = new FileStream(segmentPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            var bytes = new byte[fs.Length];
+            int read = 0;
+            while (read < bytes.Length)
+            {
+                var n = fs.Read(bytes, read, bytes.Length - read);
+                if (n == 0) break;
+                read += n;
+            }
+
+            int offset = segmentHeaderSize;
+            while (offset + frameHeaderSize <= bytes.Length)
+            {
+                var frameLength = BitConverter.ToInt32(bytes, offset);
+                if (frameLength == 0)
+                {
+                    var nextAligned = (offset + pageSize) & ~(pageSize - 1);
+                    offset = nextAligned <= offset ? offset + pageSize : nextAligned;
+                    continue;
+                }
+
+                if (frameLength == -1 || frameLength < frameHeaderSize || offset + frameLength > bytes.Length)
+                {
+                    break;
+                }
+
+                var frameEnd = offset + frameLength;
+                var chunkRegion = bytes.AsSpan(offset + frameHeaderSize, frameEnd - (offset + frameHeaderSize));
+                var reader = new RecordCodec.RecordBatchReader(chunkRegion);
+                while (reader.TryRead(out var v))
+                {
+                    if (v.Kind == RecordKind.BulkManifest)
+                    {
+                        bulkManifest++;
+                    }
+                    else if ((v.Kind == RecordKind.Slot || v.Kind == RecordKind.Lifecycle) && !v.IsFence)
+                    {
+                        nonFenceCommit++;
+                    }
+                }
+
+                offset = frameEnd;
+            }
+        }
+
+        return (bulkManifest, nonFenceCommit);
     }
 
     /// <summary>

@@ -164,14 +164,14 @@ public sealed class UnitOfWork : IDisposable
             return;
         }
 
-        // WAL is mandatory: signal the WAL writer to flush and wait for the durable LSN.
-        var walManager = _dbe.WalManager;
-        walManager.RequestFlush();
-        var currentLsn = walManager.CommitBuffer.NextLsn - 1;
+        // WAL is mandatory: signal the WAL writer to flush and wait for the durable LSN (M7 — through the IDurabilityLog seam).
+        var log = _dbe.DurabilityLog;
+        log.RequestFlush();
+        var currentLsn = log.LastAppendedLsn;
         if (currentLsn > 0)
         {
             var ctx = _deadline == Deadline.Infinite ? WaitContext.Null : WaitContext.FromDeadline(_deadline);
-            walManager.WaitForDurable(currentLsn, ref ctx);
+            log.WaitForDurable(currentLsn, ref ctx);
         }
 
         TransitionToWalDurable();
@@ -187,9 +187,9 @@ public sealed class UnitOfWork : IDisposable
             return Task.CompletedTask;
         }
 
-        var walManager = _dbe.WalManager;
-        walManager.RequestFlush();
-        var currentLsn = walManager.CommitBuffer.NextLsn - 1;
+        var log = _dbe.DurabilityLog;
+        log.RequestFlush();
+        var currentLsn = log.LastAppendedLsn;
         if (currentLsn > 0)
         {
             _dbe.LogUowFlushStart(_uowId, _durabilityMode, currentLsn);
@@ -198,7 +198,7 @@ public sealed class UnitOfWork : IDisposable
             var ctx = _deadline == Deadline.Infinite
                 ? WaitContext.FromTimeout(TimeoutOptions.Current.DefaultCommitTimeout)
                 : WaitContext.FromDeadline(_deadline);
-            walManager.WaitForDurable(currentLsn, ref ctx);
+            log.WaitForDurable(currentLsn, ref ctx);
             _dbe.LogUowFlushComplete(_uowId);
         }
 

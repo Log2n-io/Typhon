@@ -23,8 +23,8 @@ namespace Typhon.Engine;
 /// <para>
 /// <b>Implementation note (v1):</b> the bulk session wraps a regular <see cref="UnitOfWork"/> + a single <see cref="Transaction"/>, constructed with the
 /// internal <c>SuppressWalSerialization</c> flag (BL-01). All MVCC plumbing (revision chains, EntityMap, indexes, UowRegistry) reuses the standard
-/// infrastructure; the only divergence is that <c>PersistAndFinalize</c> skips <c>WalSerializer.SerializeToWal</c>. Pages still get dirty-marked, so
-/// <see cref="CompleteBulkLoad"/>'s forced checkpoint flushes them.
+/// infrastructure; the only divergence is that <c>PersistAndFinalize</c> skips the per-tx commit batch (no Slot records emitted). Pages still get
+/// dirty-marked, so <see cref="CompleteBulkLoad"/>'s forced checkpoint flushes them.
 /// </para>
 /// </remarks>
 [PublicAPI]
@@ -94,7 +94,7 @@ public sealed class BulkLoadSession : IDisposable
         // Emit BulkBegin placeholder. Body is just the BulkManifestHeader with PageRangeCount=0 (allocation
         // tracking deferred to P3 where the recovery consumer is). The LSN claimed here anchors the bulk in
         // the WAL stream.
-        BulkBeginLsn = EmitBulkManifestChunk(WalChunkType.BulkBegin, isFinal: false);
+        BulkBeginLsn = EmitBulkManifestChunk(isBegin: true, isFinal: false);
     }
 
     /// <summary>
@@ -280,7 +280,7 @@ public sealed class BulkLoadSession : IDisposable
         }
 
         // Step 5: Emit BulkEnd chunk carrying the final manifest (entity counters; PageRangeCount=0 in v1).
-        var bulkEndLsn = EmitBulkManifestChunk(WalChunkType.BulkEnd, isFinal: true);
+        var bulkEndLsn = EmitBulkManifestChunk(isBegin: false, isFinal: true);
 
         // Step 6: Wait for BulkEnd LSN to be durable.
         var wc = WaitContext.FromTimeout(Options.CheckpointTimeout);
@@ -380,58 +380,20 @@ public sealed class BulkLoadSession : IDisposable
     }
 
     /// <summary>
-    /// Emits a <c>BulkBegin</c> or <c>BulkEnd</c> chunk into the WAL ring buffer. Returns the chunk's LSN. Body is a single <see cref="BulkManifestHeader"/>;
-    /// v1 carries no page-range entries (PageRangeCount=0).
+    /// Emits a Bulk manifest record (Kind=4) into the WAL through the v2 codec (M6). Returns the record's LSN. The Begin record carries
+    /// <c>BulkBeginLsn=0</c> (it IS the anchor — recovery reads its own LSN); the End record cross-references the Begin. Manifest records are
+    /// FenceRecord-flagged (individually valid, no Tx markers, 02 §3.4). Counts are informational (orphan detection only) — EntitiesSpawned/Updated
+    /// map onto the record's EntityCount/ComponentCount fields.
     /// </summary>
-    private long EmitBulkManifestChunk(WalChunkType chunkType, bool isFinal)
+    private long EmitBulkManifestChunk(bool isBegin, bool isFinal)
     {
-        const int bodySize = BulkManifestHeader.SizeInBytes;
-        const int chunkSize = WalChunkHeader.SizeInBytes + bodySize + WalChunkFooter.SizeInBytes;
+        // Manifest is emitted at most twice per session — a per-call arena is fine.
+        var arena = new CommitBatchArena();
+        var batch = new CommitBatchBuilder(arena, tsn: 0, uowEpoch: 0, fenceMode: true);
+        batch.AddBulkManifest(BulkSessionId, isBegin ? 0 : BulkBeginLsn, isFinal ? EntitiesSpawned : 0, isFinal ? EntitiesUpdated : 0);
 
-        var commitBuffer = _engine.WalManager.CommitBuffer;
         var wc = WaitContext.FromTimeout(Options.CheckpointTimeout);
-        var claim = commitBuffer.TryClaim(chunkSize, recordCount: 1, ref wc);
-        if (!claim.IsValid)
-        {
-            throw new InvalidOperationException($"could not claim WAL space for {chunkType} manifest");
-        }
-
-        try
-        {
-            var lsn = claim.FirstLSN;
-
-            var chunkHeader = new WalChunkHeader
-            {
-                ChunkType = (ushort)chunkType,
-                ChunkSize = (ushort)chunkSize,
-                PrevCRC = 0, // patched by WAL writer
-            };
-            MemoryMarshal.Write(claim.DataSpan, in chunkHeader);
-
-            var manifest = new BulkManifestHeader
-            {
-                Lsn = lsn, // WP-07: at body offset 0
-                BulkSessionId = BulkSessionId,
-                BulkBeginLsn = chunkType == WalChunkType.BulkBegin ? lsn : BulkBeginLsn,
-                SegmentCount = 0, // v1: allocation tracking deferred to P3
-                PageRangeCount = 0,
-                EntitiesSpawned = isFinal ? EntitiesSpawned : 0,
-                EntitiesUpdated = isFinal ? EntitiesUpdated : 0,
-                EntitiesDestroyed = isFinal ? EntitiesDestroyed : 0,
-            };
-            MemoryMarshal.Write(claim.DataSpan.Slice(WalChunkHeader.SizeInBytes), in manifest);
-
-            var footer = new WalChunkFooter { CRC = 0 }; // patched by WAL writer
-            MemoryMarshal.Write(claim.DataSpan.Slice(chunkSize - WalChunkFooter.SizeInBytes), in footer);
-
-            commitBuffer.Publish(ref claim);
-            return lsn;
-        }
-        catch
-        {
-            commitBuffer.AbandonClaim(ref claim);
-            throw;
-        }
+        return _engine.DurabilityLog.Append(ref batch, ref wc);
     }
 
     private readonly DatabaseEngine _engine;

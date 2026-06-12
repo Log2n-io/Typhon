@@ -1425,6 +1425,71 @@ public unsafe partial class Transaction : EntityAccessor
         return Rollback(ref ctx);
     }
 
+    /// <summary>Pooled per-transaction arena backing <see cref="CommitBatchBuilder"/>; reset (not realloc) each commit.</summary>
+    private CommitBatchArena _commitBatchArena;
+
+    /// <summary>
+    /// Builds this transaction's WAL v2 record batch (M1, 02 §3): entity-lifecycle records (spawn/destroy/enable) plus one Slot
+    /// upsert per modified durable component, its committed value read from the content chunk. Component deletes are NOT emitted
+    /// as Slot records — an entity destroy is a single <see cref="CommitBatchBuilder.AddDestroy"/> (the builder enforces LOG-07
+    /// ordering). The schema-stable <see cref="ComponentInfo.ComponentTypeId"/> is the WAL identity (LOG-06). SV components flow
+    /// through the fence path, not here.
+    /// </summary>
+    private void BuildCommitBatch(ref CommitBatchBuilder batch)
+    {
+        // Spawn lifecycle.
+        if (_spawnedEntities != null)
+        {
+            for (int i = 0; i < _spawnedEntities.Count; i++)
+            {
+                var s = _spawnedEntities[i];
+                batch.AddSpawn((long)s.Id.RawValue, s.Id.ArchetypeId, s.EnabledBits);
+            }
+        }
+
+        // Component values: one Slot upsert per modified component (skip reads and deletes — deletes ride the entity-destroy record).
+        foreach (var kvp in _componentInfos)
+        {
+            var info = kvp.Value;
+            var componentTypeId = (ushort)info.ComponentTypeId;
+            var storageSize = info.ComponentTable.ComponentStorageSize;
+            foreach (var cacheEntry in info.SingleCache)
+            {
+                var cri = cacheEntry.Value;
+                if (cri.Operations == ComponentInfo.OperationType.Read || (cri.Operations & ComponentInfo.OperationType.Deleted) != 0)
+                {
+                    continue;
+                }
+
+                if (cri.CurCompContentChunkId <= 0)
+                {
+                    continue;
+                }
+
+                var payload = info.CompContentAccessor.GetChunkAsReadOnlySpan(cri.CurCompContentChunkId);
+                batch.AddSlot(cacheEntry.Key, componentTypeId, payload[..storageSize]);
+            }
+        }
+
+        // Destroy lifecycle (one record per entity; per-component tombstones are not logged separately).
+        if (_pendingDestroys != null)
+        {
+            foreach (var id in _pendingDestroys)
+            {
+                batch.AddDestroy((long)id.RawValue);
+            }
+        }
+
+        // Enable/disable lifecycle (absolute bits).
+        if (_pendingEnableDisable != null)
+        {
+            foreach (var enableEntry in _pendingEnableDisable)
+            {
+                batch.AddEnabledBits((long)enableEntry.Key.RawValue, enableEntry.Value);
+            }
+        }
+    }
+
     /// <summary>Serialize to WAL, transition to Committed, and record metrics.</summary>
     private void PersistAndFinalize(ref UnitOfWorkContext ctx, long startTicks)
     {
@@ -1437,7 +1502,16 @@ public unsafe partial class Transaction : EntityAccessor
             var persistScope = TyphonEvent.BeginTransactionPersist(TSN);
             try
             {
-                walHighLsn = WalSerializer.SerializeToWal(_componentInfos, _dbe.WalManager, TSN, UowId, ref ctx);
+                _commitBatchArena ??= new CommitBatchArena();
+                _commitBatchArena.Reset();
+                var batch = new CommitBatchBuilder(_commitBatchArena, TSN, UowId);
+                BuildCommitBatch(ref batch);
+                if (!batch.IsEmpty)
+                {
+                    var wc = ComposeWaitContext(ref ctx, TimeoutOptions.Current.DefaultCommitTimeout);
+                    walHighLsn = _dbe.DurabilityLog.Append(ref batch, ref wc);
+                }
+
                 persistScope.WalLsn = walHighLsn;
             }
             finally

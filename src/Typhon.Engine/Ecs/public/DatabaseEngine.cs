@@ -976,6 +976,19 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         return highestLSN;
     }
 
+    /// <summary>Per-thread scratch arena for fence batches — ProcessTableFence is documented safe to call concurrently across distinct tables.</summary>
+    [ThreadStatic]
+    private static CommitBatchArena _fenceArena;
+
+    /// <summary>Soft cap on a single fence <c>Append</c> frame; larger fences split into multiple Appends (each fence record is individually committed).</summary>
+    private const int MaxFenceBatchBytes = 256 * 1024;
+
+    private long AppendFenceBatch(ref CommitBatchBuilder batch)
+    {
+        var wc = WaitContext.FromDeadline(Deadline.FromTimeout(TimeoutOptions.Current.DefaultCommitTimeout));
+        return DurabilityLog.Append(ref batch, ref wc);
+    }
+
     /// <summary>
     /// Tick-fence body for a single <see cref="ComponentTable"/>. Encapsulates the per-table work historically inlined in <see cref="WriteTickFenceCore"/>'s
     /// loop: dirty-bitmap snapshot, WAL chunk serialization, shadow + spatial maintenance, dirty-ring archive. Returns the highest LSN published by this table
@@ -1017,121 +1030,62 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             var hasShadow = table.HasShadowableIndexes;
             var hasSpatial = table.SpatialIndex != null && table.SpatialIndex.FieldInfo.Mode == SpatialMode.Dynamic;
 
-            // WAL serialization: SV only — Transient has no WAL persistence, skip straight to shadow processing.
-            if (table.StorageMode == StorageMode.SingleVersion)
+            // WAL serialization: SV only — Transient has no WAL persistence, skip straight to shadow processing. Each dirty entity
+            // becomes one fence-flagged Slot record through the v2 codec (M3): the entity PK is read from the chunk overhead (offset 0,
+            // the same read PipelineExecutor does at :724), so fence records are logical (EntityId, ComponentTypeId), never physical chunk ids.
+            if (table.StorageMode == StorageMode.SingleVersion && entryCount > 0)
             {
-                if (entryCount > 0)
+                var stride = table.ComponentStorageSize;
+                var overhead = table.ComponentOverhead;
+                var componentTypeId = (ushort)ArchetypeRegistry.GetComponentTypeId(table.Definition.POCOType);
+                var recOverhead = RecordHeader.SizeInBytes + SlotRecordBody.FixedSize;
+
+                // One arena per thread — ProcessTableFence is documented safe to call concurrently across distinct tables.
+                var fenceArena = _fenceArena ??= new CommitBatchArena();
+                fenceArena.Reset();
+                var batch = new CommitBatchBuilder(fenceArena, tickNumber, 0, fenceMode: true);
+                var batchBytes = 0;
+
+                var accessor = table.ComponentSegment.CreateChunkAccessor();
+                try
                 {
-                    var stride = table.ComponentStorageSize;
-                    var overhead = table.ComponentOverhead;
-                    var entrySize = 4 + stride; // ChunkId(4B) + ComponentData(stride)
-
-                    // ChunkSize is ushort (max 65535). Split into multiple chunks if needed.
-                    var maxEntriesPerChunk = (ushort.MaxValue - WalChunkHeader.SizeInBytes - TickFenceHeader.SizeInBytes - WalChunkFooter.SizeInBytes) / entrySize;
-
-                    var accessor = table.ComponentSegment.CreateChunkAccessor();
-                    try
+                    for (var wi = 0; wi < dirtyBits.Length; wi++)
                     {
-                        var entriesRemaining = entryCount;
-                        var wordIndex = 0;
-                        var currentWord = wordIndex < dirtyBits.Length ? dirtyBits[wordIndex] : 0;
-
-                        while (entriesRemaining > 0)
+                        var word = dirtyBits[wi];
+                        while (word != 0)
                         {
-                            var batchCount = Math.Min(entriesRemaining, maxEntriesPerChunk);
-                            var bodySize = TickFenceHeader.SizeInBytes + batchCount * entrySize;
-                            var chunkSize = WalChunkHeader.SizeInBytes + bodySize + WalChunkFooter.SizeInBytes;
+                            var bit = BitOperations.TrailingZeroCount((ulong)word);
+                            word &= word - 1; // clear lowest set bit
+                            var chunkId = wi * 64 + bit;
 
-                            var wc = WaitContext.FromDeadline(Deadline.FromTimeout(TimeoutOptions.Current.DefaultCommitTimeout));
-                            var claim = WalManager.CommitBuffer.TryClaim(chunkSize, 1, ref wc);
-                            if (!claim.IsValid)
+                            var src = accessor.GetChunkAsReadOnlySpan(chunkId);
+                            var entityPk = MemoryMarshal.Read<long>(src);
+
+                            // Flush before the frame would exceed the per-Append cap. Fence records are individually committed, so
+                            // splitting across Appends is safe; the codec splits each batch into RecordBatch chunks internally.
+                            if (batchBytes > 0 && batchBytes + recOverhead + stride > MaxFenceBatchBytes)
                             {
-                                break; // back-pressure — skip remaining entries for this table
-                            }
-
-                            try
-                            {
-                                var offset = 0;
-
-                                // WalChunkHeader
-                                var chunkHeader = new WalChunkHeader
-                                {
-                                    ChunkType = (ushort)WalChunkType.TickFence,
-                                    ChunkSize = (ushort)chunkSize,
-                                    PrevCRC = 0,
-                                };
-                                MemoryMarshal.Write(claim.DataSpan[offset..], in chunkHeader);
-                                offset += WalChunkHeader.SizeInBytes;
-
-                                // TickFenceHeader
-                                var tfHeader = new TickFenceHeader
-                                {
-                                    TickNumber = tickNumber,
-                                    LSN = claim.FirstLSN,
-                                    ComponentTypeId = table.WalTypeId,
-                                    EntryCount = (ushort)batchCount,
-                                    PayloadStride = (ushort)stride,
-                                    Reserved = 0,
-                                };
-                                MemoryMarshal.Write(claim.DataSpan[offset..], in tfHeader);
-                                offset += TickFenceHeader.SizeInBytes;
-
-                                // Write entries by iterating dirty bits
-                                var written = 0;
-                                while (written < batchCount)
-                                {
-                                    // Advance to next word if current is exhausted
-                                    while (currentWord == 0 && wordIndex < dirtyBits.Length - 1)
-                                    {
-                                        wordIndex++;
-                                        currentWord = dirtyBits[wordIndex];
-                                    }
-
-                                    if (currentWord == 0)
-                                    {
-                                        break;
-                                    }
-
-                                    var bit = BitOperations.TrailingZeroCount((ulong)currentWord);
-                                    var chunkId = wordIndex * 64 + bit;
-                                    currentWord &= currentWord - 1; // clear lowest set bit
-
-                                    // Write ChunkId (4B)
-                                    MemoryMarshal.Write(claim.DataSpan[offset..], in chunkId);
-                                    offset += 4;
-
-                                    // Write component data (stride bytes)
-                                    var src = accessor.GetChunkAsReadOnlySpan(chunkId);
-                                    src.Slice(overhead, stride).CopyTo(claim.DataSpan[offset..]);
-                                    offset += stride;
-
-                                    written++;
-                                }
-
-                                // WalChunkFooter
-                                var footer = new WalChunkFooter { CRC = 0 };
-                                MemoryMarshal.Write(claim.DataSpan[offset..], in footer);
-
-                                WalManager.CommitBuffer.Publish(ref claim);
+                                highestLSN = Math.Max(highestLSN, AppendFenceBatch(ref batch));
                                 walPublished = true;
-                                if (claim.FirstLSN > highestLSN)
-                                {
-                                    highestLSN = claim.FirstLSN;
-                                }
-                            }
-                            catch
-                            {
-                                WalManager.CommitBuffer.AbandonClaim(ref claim);
-                                throw;
+                                fenceArena.Reset();
+                                batch = new CommitBatchBuilder(fenceArena, tickNumber, 0, fenceMode: true);
+                                batchBytes = 0;
                             }
 
-                            entriesRemaining -= batchCount;
+                            batch.AddSlot(entityPk, componentTypeId, src.Slice(overhead, stride));
+                            batchBytes += recOverhead + stride;
                         }
                     }
-                    finally
+
+                    if (!batch.IsEmpty)
                     {
-                        accessor.Dispose();
+                        highestLSN = Math.Max(highestLSN, AppendFenceBatch(ref batch));
+                        walPublished = true;
                     }
+                }
+                finally
+                {
+                    accessor.Dispose();
                 }
             }
 
@@ -1724,7 +1678,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
             var layout = clusterState.Layout;
             var transientMask = meta.TransientSlotMask;
-            var perEntityPayload = 0;
+            // Precompute the durable (non-transient) component slots' WAL identity once per archetype. Each becomes one Slot record
+            // per dirty entity (M4); the entity PK is read from the cluster's id array, so fence records are logical, never physical.
+            Span<int> durableSlots = stackalloc int[layout.ComponentCount];
+            Span<ushort> slotTypeIds = stackalloc ushort[layout.ComponentCount];
+            var durableCount = 0;
             for (var slot = 0; slot < layout.ComponentCount; slot++)
             {
                 if ((transientMask & (1 << slot)) != 0)
@@ -1732,115 +1690,54 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     continue;
                 }
 
-                perEntityPayload += layout.ComponentSize(slot);
+                durableSlots[durableCount] = slot;
+                slotTypeIds[durableCount] = (ushort)ArchetypeRegistry.GetComponentTypeId(engineState.SlotToComponentTable[slot].Definition.POCOType);
+                durableCount++;
             }
 
-            if (perEntityPayload > ushort.MaxValue)
+            // One arena per thread — fence emission is concurrency-safe across distinct archetypes.
+            var fenceArena = _fenceArena ??= new CommitBatchArena();
+            fenceArena.Reset();
+            var batch = new CommitBatchBuilder(fenceArena, tickNumber, 0, fenceMode: true);
+            var batchBytes = 0;
+            var recOverhead = RecordHeader.SizeInBytes + SlotRecordBody.FixedSize;
+
+            for (var wi = 0; wi < dirtyBits.Length; wi++)
             {
-                return highestLSN;
+                var word = dirtyBits[wi];
+                while (word != 0)
+                {
+                    var bit = BitOperations.TrailingZeroCount((ulong)word);
+                    word &= word - 1;
+                    var slotIndex = bit;
+
+                    var clusterBase = accessor.GetChunkAddress(wi);
+                    var entityPk = *(long*)(clusterBase + layout.EntityIdsOffset + slotIndex * 8);
+
+                    for (var d = 0; d < durableCount; d++)
+                    {
+                        var slot = durableSlots[d];
+                        var compSize = layout.ComponentSize(slot);
+
+                        // Flush before the frame would exceed the per-Append cap (fence records are individually committed).
+                        if (batchBytes > 0 && batchBytes + recOverhead + compSize > MaxFenceBatchBytes)
+                        {
+                            highestLSN = Math.Max(highestLSN, AppendFenceBatch(ref batch));
+                            fenceArena.Reset();
+                            batch = new CommitBatchBuilder(fenceArena, tickNumber, 0, fenceMode: true);
+                            batchBytes = 0;
+                        }
+
+                        var src = clusterBase + layout.ComponentOffset(slot) + slotIndex * compSize;
+                        batch.AddSlot(entityPk, slotTypeIds[d], new ReadOnlySpan<byte>(src, compSize));
+                        batchBytes += recOverhead + compSize;
+                    }
+                }
             }
 
-            var entrySize = 4 + perEntityPayload;
-            var maxEntriesPerChunk =
-                (ushort.MaxValue - WalChunkHeader.SizeInBytes - ClusterTickFenceHeader.SizeInBytes - WalChunkFooter.SizeInBytes) / entrySize;
-
-            var entriesRemaining = entryCount;
-            var wordIndex = 0;
-            var currentWord = wordIndex < dirtyBits.Length ? dirtyBits[wordIndex] : 0;
-
-            while (entriesRemaining > 0)
+            if (!batch.IsEmpty)
             {
-                var batchCount = Math.Min(entriesRemaining, maxEntriesPerChunk);
-                var bodySize = ClusterTickFenceHeader.SizeInBytes + batchCount * entrySize;
-                var chunkSize = WalChunkHeader.SizeInBytes + bodySize + WalChunkFooter.SizeInBytes;
-
-                var wc = WaitContext.FromDeadline(Deadline.FromTimeout(TimeoutOptions.Current.DefaultCommitTimeout));
-                var claim = WalManager.CommitBuffer.TryClaim(chunkSize, 1, ref wc);
-                if (!claim.IsValid)
-                {
-                    break;
-                }
-
-                try
-                {
-                    var offset = 0;
-                    var chunkHeader = new WalChunkHeader
-                    {
-                        ChunkType = (ushort)WalChunkType.ClusterTickFence,
-                        ChunkSize = (ushort)chunkSize,
-                        PrevCRC = 0,
-                    };
-                    MemoryMarshal.Write(claim.DataSpan[offset..], in chunkHeader);
-                    offset += WalChunkHeader.SizeInBytes;
-
-                    var ctfHeader = new ClusterTickFenceHeader
-                    {
-                        TickNumber = tickNumber,
-                        LSN = claim.FirstLSN,
-                        ArchetypeId = meta.ArchetypeId,
-                        EntryCount = (ushort)batchCount,
-                        PerEntityPayload = (ushort)perEntityPayload,
-                        ComponentCount = (byte)layout.ComponentCount,
-                        Reserved = 0,
-                    };
-                    MemoryMarshal.Write(claim.DataSpan[offset..], in ctfHeader);
-                    offset += ClusterTickFenceHeader.SizeInBytes;
-
-                    var written = 0;
-                    while (written < batchCount)
-                    {
-                        while (currentWord == 0 && wordIndex < dirtyBits.Length - 1)
-                        {
-                            wordIndex++;
-                            currentWord = dirtyBits[wordIndex];
-                        }
-                        if (currentWord == 0)
-                        {
-                            break;
-                        }
-
-                        var bit = BitOperations.TrailingZeroCount((ulong)currentWord);
-                        var clusterChunkId = wordIndex;
-                        var slotIndex = bit;
-                        var entityIndex = clusterChunkId * 64 + slotIndex;
-                        currentWord &= currentWord - 1;
-
-                        MemoryMarshal.Write(claim.DataSpan[offset..], in entityIndex);
-                        offset += 4;
-
-                        var clusterBase = accessor.GetChunkAddress(clusterChunkId);
-                        for (var slot = 0; slot < layout.ComponentCount; slot++)
-                        {
-                            if ((transientMask & (1 << slot)) != 0)
-                            {
-                                continue;
-                            }
-
-                            var compOffset = layout.ComponentOffset(slot);
-                            var compSize = layout.ComponentSize(slot);
-                            var src = clusterBase + compOffset + slotIndex * compSize;
-                            new ReadOnlySpan<byte>(src, compSize).CopyTo(claim.DataSpan[offset..]);
-                            offset += compSize;
-                        }
-                        written++;
-                    }
-
-                    var footer = new WalChunkFooter { CRC = 0 };
-                    MemoryMarshal.Write(claim.DataSpan[offset..], in footer);
-
-                    WalManager.CommitBuffer.Publish(ref claim);
-                    if (claim.FirstLSN > highestLSN)
-                    {
-                        highestLSN = claim.FirstLSN;
-                    }
-                }
-                catch
-                {
-                    WalManager.CommitBuffer.AbandonClaim(ref claim);
-                    throw;
-                }
-
-                entriesRemaining -= batchCount;
+                highestLSN = Math.Max(highestLSN, AppendFenceBatch(ref batch));
             }
         }
         finally
