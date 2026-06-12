@@ -4574,6 +4574,45 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             _registeredArchetypeTypes.Add(meta.ArchetypeType);
         }
         ArchetypeRegistry.RegisterEngineUse(_registeredArchetypeTypes, _registeredComponentTypes);
+
+        // WAL v2 crash recovery (P1.2): replay committed records that postdate the last checkpoint, now that archetypes,
+        // EntityMaps, and the page cache are online — the correct place, unlike the never-wired in-ctor WalRecovery(dbe:null)
+        // that runs before component metadata exists (TXW-1). No-op on a clean reopen (the WAL window is empty).
+        RunWalV2Recovery();
+    }
+
+    /// <summary>
+    /// Runs <see cref="RecoveryDriver"/> over the retained WAL segments after archetype initialization. Applies every committed
+    /// record past the persisted CheckpointLSN through the engine's own write primitives (P1.2). Guarded on WAL files existing,
+    /// so a clean reopen (recycled WAL) skips it entirely.
+    /// </summary>
+    private void RunWalV2Recovery()
+    {
+        var walDir = _options.Wal?.WalDirectory;
+        if (walDir == null || !System.IO.Directory.Exists(walDir) || System.IO.Directory.GetFiles(walDir, "*.wal").Length == 0)
+        {
+            return;
+        }
+
+        long checkpointLsn;
+        using (EpochGuard.Enter(EpochManager))
+        {
+            checkpointLsn = MMF.Bootstrap.GetLong(ManagedPagedMMF.BK_CheckpointLSN);
+        }
+
+        // Read with a throwaway IO when no backend is injected; the WAL writer's handles coexist (segments open with sharing).
+        var walIO = _injectedWalIo ?? new WalFileIO();
+        try
+        {
+            new RecoveryDriver().Run(walIO, walDir, this, checkpointLsn);
+        }
+        finally
+        {
+            if (_injectedWalIo == null)
+            {
+                walIO.Dispose();
+            }
+        }
     }
 
     /// <summary>

@@ -147,8 +147,10 @@ internal sealed class WalSegmentReader : IDisposable
             return false;
         }
 
-        // Advance to next frame if we've consumed all chunks in the current one
-        while (_recordsRemainingInFrame == 0)
+        // Advance to the next frame when the current frame's chunk region is exhausted. Bound by OFFSET (not the frame's
+        // RecordCount): WAL v2 packs multiple records per chunk, so chunkCount ≤ RecordCount — decrementing a per-chunk counter
+        // would stop early. Offset-based termination is correct for both v1 (1 record/chunk) and v2.
+        while (_frameEnd == 0 || _recordOffset + WalChunkHeader.SizeInBytes > _frameEnd)
         {
             if (!AdvanceToNextFrame())
             {
@@ -247,10 +249,23 @@ internal sealed class WalSegmentReader : IDisposable
 
             ref var frameHeader = ref Unsafe.As<byte, WalFrameHeader>(ref _segmentData[_frameOffset]);
 
-            // Zero frame length = end-of-data (not yet published)
+            // Zero frame length = either intra-block tail padding or genuine end-of-data. The WAL writer issues each drain as its
+            // own O_DIRECT block, padded up to a 4096-byte boundary (WalWriter: bytesToWrite = AlignUp(data.Length, PageSize)). A
+            // frame whose length is not a page multiple leaves a zero tail before the next page-aligned block — so the contiguous
+            // frame walk hits a zero FrameLength mid-segment with more frames still ahead. Drain blocks are written consecutively
+            // at page-aligned offsets and each block's first frame sits at its aligned start, so the next block (if any) begins at
+            // the next 4096 boundary: jump the tail and keep scanning. A zero FrameLength already AT a boundary means no block was
+            // ever written there (blocks are append-only with no inter-block gaps) → real end-of-data. See WR-02 in durability.md.
             if (frameHeader.FrameLength == 0)
             {
-                return false;
+                var nextBlock = AlignUp(_frameOffset, PageSize);
+                if (nextBlock == _frameOffset || nextBlock + WalFrameHeader.SizeInBytes > _segmentDataLength)
+                {
+                    return false;
+                }
+
+                _frameOffset = nextBlock;
+                continue;
             }
 
             // Padding sentinel = end of usable data

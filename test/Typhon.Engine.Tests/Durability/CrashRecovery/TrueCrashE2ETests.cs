@@ -11,12 +11,13 @@ namespace Typhon.Engine.Tests;
 /// and no <c>PersistEngineState</c>, so the committed data exists ONLY in the WAL). On reopen the entity must be recovered via WAL replay.
 /// </summary>
 /// <remarks>
-/// This test is <b>expected RED until #395 (P1.2 RecoveryDriver)</b>. Production reopen currently calls <c>WalRecovery.Recover(..., dbe: null)</c>, which skips the
-/// replay phase entirely (TXW-1) — so Immediate-committed data is silently lost across a crash. It is quarantined under <c>KnownIssue-395</c> so it runs and stays
-/// visible without failing the gating suite, exactly per design 08 §2 (A0.3): "exists, runs, and is red."
+/// <b>GREEN as of #395 P1.2 increment 1.</b> Reopen now replays the WAL through <see cref="DatabaseEngine"/>'s <c>RunWalV2Recovery</c> (the <c>RecoveryDriver</c>),
+/// which scans the retained v2 segments, determines commit fate from TxCommit markers (LOG-04), and re-applies committed Spawns. A prerequisite fix landed in the
+/// same increment: <see cref="WalSegmentReader"/> now traverses the zero-padding gaps between O_DIRECT-aligned drain blocks (WR-02) — without it the reader stopped
+/// at the first padded FPI frame and never reached the commit records (which were durable on disk all along). This test is the program's standing regression guard
+/// for crash survival; it is no longer quarantined.
 /// </remarks>
 [TestFixture]
-[Category("KnownIssue-395")]
 internal sealed class TrueCrashE2ETests
 {
     private string _dbDir;

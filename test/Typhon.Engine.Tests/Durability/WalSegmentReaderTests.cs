@@ -432,4 +432,97 @@ public class WalSegmentReaderTests : AllocatorTestBase
         Assert.That(h2.LSN, Is.EqualTo(100));
         Assert.That(h2.UowEpoch, Is.EqualTo(2));
     }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Page-aligned drain blocks (WR-02 — padding-gap traversal)
+    // ═══════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Builds a segment that mirrors the real <see cref="WalWriter"/> on-disk layout: each record is written as its own O_DIRECT
+    /// drain block — a <see cref="WalFrameHeader"/> + one chunk — starting at a 4096-aligned segment offset and zero-padded to the
+    /// next page boundary. Consecutive blocks are therefore separated by a zero tail, because the writer pads each
+    /// <c>WriteAligned</c> up to a page multiple (<c>bytesToWrite = AlignUp(data.Length, PageSize)</c>). The CRC chain
+    /// (<see cref="WalChunkHeader.PrevCRC"/>) runs continuously across blocks, exactly as the writer's single-threaded chain state
+    /// does. This is the shape a multi-commit Immediate workload leaves on disk; the reader must jump each padding tail to the next
+    /// page boundary to reach every frame (WR-02).
+    /// </summary>
+    private static unsafe byte[] BuildPageAlignedBlocks(long segmentId, long firstLSN, int blockCount)
+    {
+        const int pageSize = 4096;
+        var data = new byte[TestSegmentSize];
+
+        fixed (byte* p = data)
+        {
+            ref var header = ref *(WalSegmentHeader*)p;
+            header.Initialize(segmentId, firstLSN, prevSegmentLsn: 0, TestSegmentSize);
+            header.ComputeAndSetCrc();
+        }
+
+        var payload = new byte[] { 0x11, 0x22, 0x33, 0x44 };
+        var chunkSize = (ushort)(WalChunkHeader.SizeInBytes + WalRecordHeader.SizeInBytes + payload.Length + WalChunkFooter.SizeInBytes);
+        uint lastFooterCrc = 0;
+
+        for (int i = 0; i < blockCount; i++)
+        {
+            // Block i starts at a page-aligned segment offset: the segment header is exactly one page, then one page per block.
+            var blockOffset = WalSegmentHeader.SizeInBytes + i * pageSize;
+            var lsn = firstLSN + i;
+
+            ref var frameHeader = ref Unsafe.As<byte, WalFrameHeader>(ref data[blockOffset]);
+            frameHeader.FrameLength = WalFrameHeader.SizeInBytes + chunkSize;
+            frameHeader.RecordCount = 1;
+            frameHeader.LastLsn = lsn;
+
+            var chunkOffset = blockOffset + WalFrameHeader.SizeInBytes;
+            ref var chunkHeader = ref Unsafe.As<byte, WalChunkHeader>(ref data[chunkOffset]);
+            chunkHeader.ChunkType = (ushort)WalChunkType.Transaction;
+            chunkHeader.ChunkSize = chunkSize;
+            chunkHeader.PrevCRC = lastFooterCrc; // continuous chain across blocks
+
+            // Body: WalRecordHeader (LSN at offset 0 — the reader's LastValidLSN convention) + payload.
+            var bodyOffset = chunkOffset + WalChunkHeader.SizeInBytes;
+            ref var recHeader = ref Unsafe.As<byte, WalRecordHeader>(ref data[bodyOffset]);
+            recHeader.LSN = lsn;
+            recHeader.UowEpoch = 1;
+            recHeader.PayloadLength = (ushort)payload.Length;
+            payload.AsSpan().CopyTo(data.AsSpan(bodyOffset + WalRecordHeader.SizeInBytes));
+
+            var crcSpan = data.AsSpan(chunkOffset, chunkSize - WalChunkFooter.SizeInBytes);
+            var footerCrc = WalCrc.Compute(crcSpan);
+            Unsafe.As<byte, uint>(ref data[chunkOffset + chunkSize - WalChunkFooter.SizeInBytes]) = footerCrc;
+
+            lastFooterCrc = footerCrc;
+            // The rest of this page stays zero — the inter-block padding tail the reader must traverse.
+        }
+
+        return data;
+    }
+
+    [Test]
+    [VerifiesRule("WR-02")]
+    public void TryReadNext_FramesAcrossPageAlignedDrainBlocks_ReadsAll()
+    {
+        const int blocks = 5;
+        var segmentData = BuildPageAlignedBlocks(segmentId: 1, firstLSN: 10, blockCount: blocks);
+        LoadSegmentIntoFileIO(TestSegmentPath, segmentData);
+
+        using var reader = new WalSegmentReader(_fileIO);
+        Assert.That(reader.OpenSegment(TestSegmentPath), Is.True);
+
+        // Each frame lives in its own page-aligned block with a zero-padded tail. Without padding-gap traversal the reader stops
+        // after block 0 (the first zero FrameLength reads as end-of-data); with WR-02 it jumps each tail and reads all five frames,
+        // validating the CRC chain end-to-end.
+        for (int i = 0; i < blocks; i++)
+        {
+            Assert.That(reader.TryReadNext(out var ch, out var body), Is.True, $"frame {i} must be read across the padding gap");
+            Assert.That(ch.ChunkType, Is.EqualTo((ushort)WalChunkType.Transaction));
+            var recHeader = MemoryMarshal.Read<WalRecordHeader>(body);
+            Assert.That(recHeader.LSN, Is.EqualTo(10 + i));
+        }
+
+        Assert.That(reader.TryReadNext(out _, out _), Is.False, "trailing zero pages are genuine end-of-data");
+        Assert.That(reader.WasTruncated, Is.False, "padding tails are not truncation");
+        Assert.That(reader.RecordsRead, Is.EqualTo(blocks));
+        Assert.That(reader.LastValidLSN, Is.EqualTo(10 + blocks - 1));
+    }
 }
