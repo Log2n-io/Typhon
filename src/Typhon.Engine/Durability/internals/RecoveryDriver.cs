@@ -45,6 +45,7 @@ internal sealed class RecoveryDriver
     {
         public bool HasSpawn;
         public bool HasDestroy;
+        public bool HasEnabledChange;
         public ushort ArchetypeId;
         public ushort EnabledBits;
         public long Tsn;        // spawn (born) TSN when HasSpawn
@@ -166,7 +167,9 @@ internal sealed class RecoveryDriver
 
                 case RecordKind.Lifecycle when r.Op == (byte)LifecycleOp.SetEnabledBits:
                     // Absolute set; records arrive in LSN order so the last write (incl. the Spawn's own bits) wins.
-                    GetAgg(entities, r.EntityId).EnabledBits = r.EnabledBits;
+                    var enableAgg = GetAgg(entities, r.EntityId);
+                    enableAgg.EnabledBits = r.EnabledBits;
+                    enableAgg.HasEnabledChange = true;
                     break;
 
                 // CollectionDelta / BulkManifest are applied in later increments (TSN still tracked above).
@@ -178,11 +181,16 @@ internal sealed class RecoveryDriver
             // No Spawn in the window → the record targets a pre-existing (checkpointed) entity already loaded into the EntityMap.
             if (!agg.HasSpawn)
             {
-                // Base-entity Destroy: tombstone the existing record in place (DiedTSN). A base SetEnabledBits / value update is a
-                // later increment (same TryGet→modify→Upsert primitive); skip here.
+                // Base-entity Destroy wins over any enabled change (net not-alive); otherwise apply a base-entity enabled-bits
+                // change in place. A base-entity value update (AddCompRev to the existing chain) is a later increment.
                 if (agg.HasDestroy)
                 {
                     applier.ApplyDestroyToExisting(entityIdRaw, agg.DestroyTsn);
+                    result.RecordsApplied++;
+                }
+                else if (agg.HasEnabledChange)
+                {
+                    applier.ApplySetEnabledBitsToExisting(entityIdRaw, agg.EnabledBits);
                     result.RecordsApplied++;
                 }
 

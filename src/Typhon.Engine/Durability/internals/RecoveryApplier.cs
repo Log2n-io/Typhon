@@ -39,6 +39,15 @@ internal sealed unsafe class RecoveryApplier : IDisposable
     // EntityAccessor.GetComponentInfo's Versioned/SingleVersion setup, but threaded through THIS ChangeSet. Flushed at Dispose.
     private readonly Dictionary<ComponentTable, ComponentInfo> _infoByTable = new();
 
+    // Per-index-segment accessor cache for the secondary-index rebuild (RB-01). Keyed by segment because several indexed fields can share one index segment; reusing
+    // one accessor per segment matches the live commit's hoisted-accessor pattern. Flushed at Dispose.
+    private readonly Dictionary<ChunkBasedSegment<PersistentStore>, IndexAccessorBox> _indexAccessors = new();
+
+    private sealed class IndexAccessorBox
+    {
+        public ChunkAccessor<PersistentStore> Accessor;
+    }
+
     public RecoveryApplier(DatabaseEngine dbe)
     {
         ArgumentNullException.ThrowIfNull(dbe);
@@ -136,6 +145,27 @@ internal sealed unsafe class RecoveryApplier : IDisposable
         _engineState.EntityMap.Upsert(key, readBuf, ref _mapAccessor, _changeSet);
     }
 
+    /// <summary>
+    /// Applies a committed absolute enabled-bits change to a pre-existing (checkpointed) entity — the base-entity counterpart of
+    /// the spawn-time bits folded by <see cref="ApplySpawnedEntity"/>. Sets the record's EnabledBits in place (flat path) and
+    /// writes it back dirty-marked. Idempotent: an absolute set re-applies cleanly; a missing entity is a no-op.
+    /// </summary>
+    public void ApplySetEnabledBitsToExisting(long entityIdRaw, ushort enabledBits)
+    {
+        var eid = EntityId.FromRaw(entityIdRaw);
+        EnsureArchetype(eid.ArchetypeId);
+
+        var key = eid.EntityKey;
+        byte* readBuf = stackalloc byte[EntityRecordAccessor.MaxRecordSize];
+        if (!_engineState.EntityMap.TryGet(key, readBuf, ref _mapAccessor))
+        {
+            return;
+        }
+
+        EntityRecordAccessor.GetHeader(readBuf).EnabledBits = enabledBits;
+        _engineState.EntityMap.Upsert(key, readBuf, ref _mapAccessor, _changeSet);
+    }
+
     // Allocates a content chunk holding the payload and a committed single-element revision chain pointing at it — exactly the
     // spawn→commit end-state the live ComponentRevisionManager produces (AllocCompRevStorage creates the isolated element, then
     // the live ElementRevisionHandle.Commit clears the isolation flag). Returns the chain-root chunk id (the slot's location).
@@ -144,12 +174,17 @@ internal sealed unsafe class RecoveryApplier : IDisposable
         var info = GetRecoveryInfo(table);
 
         var contentChunkId = table.ComponentSegment.AllocateChunk(false, _changeSet);
-        var dst = info.CompContentAccessor.GetChunkAsSpan(contentChunkId, true);
-        payload.AsSpan().CopyTo(dst); // the emitter captured chunk[0..storageSize] from offset 0 → write it back at offset 0
+        byte* contentBase = info.CompContentAccessor.GetChunkAddress(contentChunkId, true);
+        // Value lives at offset ComponentOverhead (the read/write paths skip the overhead) — symmetric with the slot emit.
+        payload.AsSpan().CopyTo(new Span<byte>(contentBase + info.ComponentOverhead, payload.Length));
 
         var compRevChunkId = ComponentRevisionManager.AllocCompRevStorage(info, tsn, 0, contentChunkId, pk);
         var handle = ComponentRevisionManager.GetRevisionElement(ref info.CompRevTableAccessor, compRevChunkId, 0);
         handle.Commit(tsn); // element TSN already == tsn; this clears IsolationFlag → the revision is committed/visible
+
+        // RB-01: recovery never trusts persisted secondary indexes — rebuild this entity's index entries from the recovered value. The index value for a Versioned
+        // component is the chain-root chunk id (index queries resolve it through CompRevTable), exactly the slot location returned below.
+        RebuildVersionedIndexEntries(table, contentBase, compRevChunkId);
         return compRevChunkId;
     }
 
@@ -158,8 +193,47 @@ internal sealed unsafe class RecoveryApplier : IDisposable
         var info = GetRecoveryInfo(table);
         var contentChunkId = table.ComponentSegment.AllocateChunk(false, _changeSet);
         var dst = info.CompContentAccessor.GetChunkAsSpan(contentChunkId, true);
-        payload.AsSpan().CopyTo(dst);
+        payload.AsSpan().CopyTo(dst[info.ComponentOverhead..]); // value lives at offset ComponentOverhead — symmetric with the slot emit
         return contentChunkId;
+    }
+
+    // Rebuilds the secondary-index entries for one recovered Versioned component (RB-01). The index value is the chain-root chunk id (queries resolve it through
+    // CompRevTable). Reuses the live BTree Add primitive; for an AllowMultiple index the returned element id is written back into the component tail exactly as
+    // FinalizeSpawns does, so later index removals resolve. Only secondary indexes on the shared ComponentTable (flat path) — cluster archetypes use per-archetype
+    // cluster B+Trees and are out of scope here (their recovery is P2-gated).
+    private void RebuildVersionedIndexEntries(ComponentTable table, byte* contentBase, int compRevChunkId)
+    {
+        var fields = table.IndexedFieldInfos;
+        if (fields == null || fields.Length == 0)
+        {
+            return;
+        }
+
+        for (int i = 0; i < fields.Length; i++)
+        {
+            ref var ifi = ref fields[i];
+            var index = ifi.PersistentIndex;
+            var box = GetIndexAccessorBox(index.Segment);
+            if (ifi.AllowMultiple)
+            {
+                *(int*)(contentBase + ifi.OffsetToIndexElementId) = index.Add(contentBase + ifi.OffsetToField, compRevChunkId, ref box.Accessor, out _);
+            }
+            else
+            {
+                index.Add(contentBase + ifi.OffsetToField, compRevChunkId, ref box.Accessor);
+            }
+        }
+    }
+
+    private IndexAccessorBox GetIndexAccessorBox(ChunkBasedSegment<PersistentStore> segment)
+    {
+        if (!_indexAccessors.TryGetValue(segment, out var box))
+        {
+            box = new IndexAccessorBox { Accessor = segment.CreateChunkAccessor(_changeSet) };
+            _indexAccessors[segment] = box;
+        }
+
+        return box;
     }
 
     private ComponentInfo GetRecoveryInfo(ComponentTable table)
@@ -229,6 +303,13 @@ internal sealed unsafe class RecoveryApplier : IDisposable
             }
         }
 
+        foreach (var box in _indexAccessors.Values)
+        {
+            box.Accessor.CommitChanges();
+            box.Accessor.Dispose();
+        }
+
+        _indexAccessors.Clear();
         _infoByTable.Clear();
     }
 }

@@ -476,41 +476,53 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
     }
 
     /// <summary>
-    /// Writes data larger than the staging buffer in aligned chunks.
+    /// Writes a drained batch larger than the staging buffer. The CRC chain must be patched over the WHOLE batch in one pass: a record-batch chunk can be up to
+    /// <see cref="RecordCodec.DefaultMaxChunkSize"/> (~64 KB) and a single committed frame up to the commit-buffer capacity (megabytes), so a chunk routinely straddles
+    /// a staging-sized write boundary. Patching per-write-slice (the old behaviour) left any straddling chunk's footer CRC at its zero placeholder, which recovery then
+    /// reads as a CRC break and treats as a torn tail — silently truncating the WAL at that point and losing every record after it. So patch first, then stream.
     /// </summary>
+    /// <remarks>
+    /// Patching happens in place on the drained region of the commit buffer. The WAL writer is the buffer's single consumer and producers never touch a frame once it is
+    /// published (they only claim space ahead of the tail), so mutating the published bytes here races with nothing; the region is recycled (cleared) only on the next
+    /// buffer swap, well after this write completes. Intermediate slices are exactly <see cref="_stagingBufferSize"/> (a 4096 multiple), so the batch lands contiguously
+    /// on disk — identical bytes to what the single-write path would produce — with zero padding only after the final slice.
+    /// </remarks>
     private void WriteInChunks(ReadOnlySpan<byte> data)
     {
         var segment = _segmentManager.ActiveSegment;
-        int offset = 0;
 
+        // Patch the entire batch's CRC chain in one pass before any byte reaches disk (see remarks). `data` aliases the pinned commit buffer, so a writable view over the
+        // same memory is sound — the bytes are mutable; the ReadOnlySpan is only an access restriction on this seam.
+        fixed (byte* dataPtr = data)
+        {
+            PatchChunkCrcs(new Span<byte>(dataPtr, data.Length), data.Length);
+        }
+
+        int offset = 0;
         while (offset < data.Length)
         {
-            var remaining = data.Length - offset;
-            var chunkDataLen = Math.Min(remaining, _stagingBufferSize);
-            var chunkWriteLen = AlignUp(chunkDataLen, PageSize);
+            var sliceLen = Math.Min(data.Length - offset, _stagingBufferSize);
+            var writeLen = AlignUp(sliceLen, PageSize);
 
-            // Copy chunk to staging buffer
-            data.Slice(offset, chunkDataLen).CopyTo(new Span<byte>(_stagingBuffer, _stagingBufferSize));
+            // Copy the already-patched slice to the aligned staging buffer (the O_DIRECT write source must be page-aligned; the commit buffer is only 64-byte aligned).
+            data.Slice(offset, sliceLen).CopyTo(new Span<byte>(_stagingBuffer, _stagingBufferSize));
 
-            // Zero-pad
-            var padLen = chunkWriteLen - chunkDataLen;
+            // Zero-pad the tail — only ever non-empty on the final slice, since intermediate slices are a whole _stagingBufferSize (page multiple) and stay contiguous.
+            var padLen = writeLen - sliceLen;
             if (padLen > 0)
             {
-                new Span<byte>(_stagingBuffer + chunkDataLen, padLen).Clear();
+                new Span<byte>(_stagingBuffer + sliceLen, padLen).Clear();
             }
 
-            // Patch chunk CRCs before writing to disk
-            PatchChunkCrcs(new Span<byte>(_stagingBuffer, _stagingBufferSize), chunkDataLen);
-
-            var writeSpan = new ReadOnlySpan<byte>(_stagingBuffer, chunkWriteLen);
+            var writeSpan = new ReadOnlySpan<byte>(_stagingBuffer, writeLen);
 
             var flushStart = Stopwatch.GetTimestamp();
             _fileIO.WriteAligned(segment.Handle, segment.WriteOffset, writeSpan);
             RecordFlushLatency(flushStart);
 
-            segment.WriteOffset += chunkWriteLen;
-            Interlocked.Add(ref _totalBytesWritten, chunkWriteLen);
-            offset += chunkDataLen;
+            segment.WriteOffset += writeLen;
+            Interlocked.Add(ref _totalBytesWritten, writeLen);
+            offset += sliceLen;
         }
     }
 

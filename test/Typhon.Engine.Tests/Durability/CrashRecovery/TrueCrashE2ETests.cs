@@ -541,4 +541,73 @@ internal sealed class TrueCrashE2ETests
         using var tx = dbe.CreateQuickTransaction();
         Assert.That(tx.IsAlive(entity), Is.True, "the entity must be alive exactly once after the idempotent re-apply");
     }
+
+    /// <summary>
+    /// Recovery must honour an enabled-bits change to a CHECKPOINTED entity — the base-entity counterpart of the in-window
+    /// enabled-bits case. The spawn is checkpointed below the recovery window; only the later disable is replayed, so recovery
+    /// applies it in place to the already-loaded record. After a crash the disabled component must read back disabled.
+    /// </summary>
+    [Test]
+    [CancelAfter(15_000)]
+    public void DisableComponentOnCheckpointedEntity_SurvivesCrash()
+    {
+        const int count = 10;
+        var entityIds = new EntityId[count];
+
+        using (var scope1 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope1.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<CompA>();
+            dbe.InitializeArchetypes();
+
+            long spawnHighLsn;
+            using (var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate))
+            {
+                for (int i = 0; i < count; i++)
+                {
+                    using var tx = uow.CreateTransaction();
+                    var comp = new CompA(i + 1, i, i);
+                    entityIds[i] = tx.Spawn<CompAArch>(CompAArch.A.Set(in comp));
+                    tx.Commit();
+                }
+
+                uow.Flush();
+                spawnHighLsn = dbe.DurabilityLog.LastAppendedLsn;
+            }
+
+            dbe.ForceCheckpoint();
+            Assert.That(dbe.CheckpointManager.WaitForCheckpoint(TimeSpan.FromSeconds(5)), Is.True, "checkpoint cycle must complete");
+            Assert.That(dbe.CheckpointManager.CheckpointLsn, Is.GreaterThanOrEqualTo(spawnHighLsn),
+                "the spawns must be checkpointed below the recovery window (base-entity scenario)");
+
+            using (var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate))
+            {
+                for (int i = 0; i < count; i += 2)
+                {
+                    using var tx = uow.CreateTransaction();
+                    tx.OpenMut(entityIds[i]).Disable(CompAArch.A);
+                    tx.Commit();
+                }
+
+                uow.Flush();
+            }
+
+            dbe.SimulateHardCrash();
+        }
+
+        using (var scope2 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope2.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<CompA>();
+            dbe.InitializeArchetypes();
+
+            using var tx = dbe.CreateQuickTransaction();
+            for (int i = 0; i < count; i++)
+            {
+                Assert.That(tx.IsAlive(entityIds[i]), Is.True, $"checkpointed entity {i} must remain alive");
+                Assert.That(tx.Open(entityIds[i]).IsEnabled(CompAArch.A), Is.EqualTo(i % 2 != 0),
+                    $"checkpointed entity {i}: the enabled-bit change must survive (even=disabled, odd=enabled)");
+            }
+        }
+    }
 }

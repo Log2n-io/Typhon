@@ -1466,8 +1466,12 @@ public unsafe partial class Transaction : EntityAccessor
                     continue;
                 }
 
+                // The content chunk is laid out [ComponentOverhead][value]; the logical value lives at offset ComponentOverhead — the same offset the read and write
+                // paths apply (EntityAccessor.ReadEcsComponentDataRaw / WriteEcsComponentData). Log the VALUE, not the raw chunk prefix: an overhead-bearing (indexed)
+                // component otherwise logs its overhead bytes plus a truncated value, silently dropping the trailing bytes from the WAL — invisible until crash recovery.
+                var overhead = info.ComponentTable.ComponentOverhead;
                 var payload = info.CompContentAccessor.GetChunkAsReadOnlySpan(cri.CurCompContentChunkId);
-                batch.AddSlot(cacheEntry.Key, componentTypeId, payload[..storageSize]);
+                batch.AddSlot(cacheEntry.Key, componentTypeId, payload.Slice(overhead, storageSize));
             }
         }
 

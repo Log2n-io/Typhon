@@ -279,43 +279,10 @@ internal sealed class WalRecovery : IDisposable
             }
         }
 
-        // ═══════════════════════════════════════════════════════════
-        // Phase 5: Replay committed transaction records
-        // ═══════════════════════════════════════════════════════════
-
-        if (dbe != null)
-        {
-            // Phase 8: Recovery:Redo span — covers committed transaction record replay.
-            var redoScope = TyphonEvent.BeginDurabilityRecoveryRedo();
-            try
-            {
-                int uowsReplayed = 0;
-                var redoStart = Stopwatch.GetTimestamp();
-                foreach (var kvp in uowStates)
-                {
-                    if (!kvp.Value.HasCommit)
-                    {
-                        continue; // Skip voided UoWs
-                    }
-
-                    // Replay records in LSN order
-                    foreach (var (recordHeader, recordPayload) in kvp.Value.Records.OrderBy(r => r.Header.LSN))
-                    {
-                        var header = recordHeader;
-                        WalReplayHelper.ReplayRecord(dbe, ref header, recordPayload);
-                        result.RecordsReplayed++;
-                    }
-                    uowsReplayed++;
-                }
-                redoScope.RecordsReplayed = result.RecordsReplayed;
-                redoScope.UowsReplayed = uowsReplayed;
-                redoScope.DurUs = (uint)Math.Min((Stopwatch.GetTimestamp() - redoStart) * 1_000_000L / Stopwatch.Frequency, uint.MaxValue);
-            }
-            finally
-            {
-                redoScope.Dispose();
-            }
-        }
+        // Phase 5 (v1 committed-transaction replay via WalReplayHelper) deleted: the WAL v2 RecoveryDriver owns record apply now
+        // (DatabaseEngine.RunWalV2Recovery, post-archetype-init). This in-ctor scan keeps only what the v2 path does not yet own —
+        // the recovery frontier (LastValidLSN), FPI torn-page repair (until checkpoint v2 / P1.3), and voiding pending UoWs. The
+        // dbe argument is always null here; Phase 6 below is likewise dead and removed with the rest of the v1 read path later.
 
         // ═══════════════════════════════════════════════════════════
         // Phase 6: Replay TickFence entries (SV crash recovery)
@@ -349,7 +316,6 @@ internal sealed class WalRecovery : IDisposable
         // Phase 7: Finalize
         // ═══════════════════════════════════════════════════════════
 
-        WalReplayHelper.ResetReplayState();
         result.ElapsedMicroseconds = ElapsedUs(startTicks);
         return result;
     }
