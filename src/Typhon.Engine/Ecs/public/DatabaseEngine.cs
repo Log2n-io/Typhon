@@ -4602,9 +4602,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         // Read with a throwaway IO when no backend is injected; the WAL writer's handles coexist (segments open with sharing).
         var walIO = _injectedWalIo ?? new WalFileIO();
+        RecoveryDriver.Result result;
         try
         {
-            new RecoveryDriver().Run(walIO, walDir, this, checkpointLsn);
+            result = new RecoveryDriver().Run(walIO, walDir, this, checkpointLsn);
         }
         finally
         {
@@ -4613,6 +4614,29 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 walIO.Dispose();
             }
         }
+
+        SealRecovery(result.MaxLsn, checkpointLsn);
+    }
+
+    /// <summary>
+    /// Phase 6 — SEAL (03-recovery.md §9). After the recovery window has been applied (its pages are dirty in the cache), run one
+    /// checkpoint that consolidates them into the data file and advances CheckpointLSN past the window. The cycle's target LSN is
+    /// the WAL's <see cref="WalManager.DurableLsn"/>, which is 0 on a freshly-opened writer — so first seed it to the replayed
+    /// frontier (which IS durable on disk). The advance lets the now-redundant WAL segments recycle (CK-04), and makes the
+    /// recovered state survive a SECOND crash without re-replaying. No-op when nothing past the checkpoint was replayed.
+    /// </summary>
+    private void SealRecovery(long frontierLsn, long checkpointLsn)
+    {
+        if (frontierLsn <= checkpointLsn || CheckpointManager == null)
+        {
+            return;
+        }
+
+        WalManager.SeedDurableLsn(frontierLsn);
+        CheckpointManager.ForceCheckpoint();
+        // A timeout here is non-fatal: the recovered state is already correct in the page cache for this session's reads — it just
+        // isn't consolidated to the data file yet, so it falls back to being re-replayed on the next open (soft recovery).
+        CheckpointManager.WaitForCheckpoint(TimeSpan.FromSeconds(30));
     }
 
     /// <summary>

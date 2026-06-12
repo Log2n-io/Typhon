@@ -20,10 +20,11 @@ internal sealed class RecoveryDriver
         public int RecordsApplied;
         public int TxCommitted;
         public long MaxTsn;
+        public long MaxLsn; // highest LSN seen in the recovery window — the frontier the post-recovery seal consolidates to
     }
 
-    // Materialized record (scalar fields only — payloads are not needed for the lifecycle apply in increment 1). Copied during
-    // the scan because the reader's body span is invalidated by the next TryReadNext.
+    // Materialized record. Copied during the scan because the reader's body span is invalidated by the next TryReadNext;
+    // Slot payloads are copied too (D4: recovery memory/time is not a design driver — a straight copy is fine).
     private sealed class Rec
     {
         public long Lsn;
@@ -32,8 +33,27 @@ internal sealed class RecoveryDriver
         public byte Op;
         public long EntityId;
         public ushort ArchetypeId;
+        public ushort ComponentTypeId;
         public ushort EnabledBits;
         public bool IsFence;
+        public byte[] Payload;
+    }
+
+    // Accumulates one committed entity's records across the window (records of a transaction are NOT grouped by entity on the
+    // wire — LOG-07 emits all Spawns, then all Slots — so we key by EntityId and assemble per entity before the single insert).
+    private sealed class EntityAgg
+    {
+        public bool HasSpawn;
+        public bool HasDestroy;
+        public ushort ArchetypeId;
+        public ushort EnabledBits;
+        public long Tsn;        // spawn (born) TSN when HasSpawn
+        public long DestroyTsn; // the destroying transaction's TSN — DiedTSN for a base-entity tombstone
+
+        // ComponentTypeId → latest committed value. A component can be written more than once in the window (spawn-init then a
+        // post-spawn update); records arrive in LSN order, so overwriting collapses each component's history to its final value
+        // (and avoids allocating an orphaned chain per superseded revision).
+        public readonly Dictionary<ushort, RecoveryApplier.SlotData> Slots = [];
     }
 
     /// <summary>
@@ -79,6 +99,11 @@ internal sealed class RecoveryDriver
                             continue;
                         }
 
+                        if (view.Lsn > result.MaxLsn)
+                        {
+                            result.MaxLsn = view.Lsn;
+                        }
+
                         if (view.IsTxCommit)
                         {
                             committed.Add(view.Tsn);
@@ -88,18 +113,23 @@ internal sealed class RecoveryDriver
                         {
                             Lsn = view.Lsn, Tsn = view.Tsn, Kind = view.Kind, Op = view.Op,
                             EntityId = view.EntityId, ArchetypeId = view.ArchetypeId,
-                            EnabledBits = view.EnabledBits, IsFence = view.IsFence,
+                            ComponentTypeId = view.ComponentTypeId, EnabledBits = view.EnabledBits, IsFence = view.IsFence,
+                            Payload = view.Kind == RecordKind.Slot && view.Payload.Length > 0 ? view.Payload.ToArray() : null,
                         });
                     }
                 }
             }
         }
 
-        // Phase 3: apply committed (or fence) records in strict ascending LSN order (AP-11).
+        // Phase 3: assemble each committed entity from its records, then build-and-insert (approach B). Records are processed in
+        // ascending LSN order (AP-11) but assembled into per-entity aggregates keyed by EntityId — a transaction emits all its
+        // Spawns before all its Slots (LOG-07), so an entity's Spawn and Slots are not contiguous on the wire.
         records.Sort(static (a, b) => a.Lsn.CompareTo(b.Lsn));
 
         using var guard = EpochGuard.Enter(dbe.EpochManager);
         using var applier = new RecoveryApplier(dbe);
+
+        var entities = new Dictionary<long, EntityAgg>();
         foreach (var r in records)
         {
             if (!r.IsFence && !committed.Contains(r.Tsn))
@@ -107,12 +137,68 @@ internal sealed class RecoveryDriver
                 continue;
             }
 
-            // Increment 1: entity lifecycle Spawn. Destroy / SetEnabledBits / Slot.Upsert / CollectionDelta land in increment 2.
-            if (r.Kind == RecordKind.Lifecycle && r.Op == (byte)LifecycleOp.Spawn)
+            applier.Track(r.Tsn); // RB-05 watermark over every applicable record
+
+            switch (r.Kind)
             {
-                applier.ApplySpawn(r.EntityId, r.ArchetypeId, r.EnabledBits, r.Tsn);
-                result.RecordsApplied++;
+                case RecordKind.Lifecycle when r.Op == (byte)LifecycleOp.Spawn:
+                    var spawnAgg = GetAgg(entities, r.EntityId);
+                    spawnAgg.HasSpawn = true;
+                    spawnAgg.ArchetypeId = r.ArchetypeId;
+                    spawnAgg.EnabledBits = r.EnabledBits;
+                    spawnAgg.Tsn = r.Tsn;
+                    break;
+
+                case RecordKind.Slot when r.Op == (byte)SlotOp.Upsert:
+                    GetAgg(entities, r.EntityId).Slots[r.ComponentTypeId] = new RecoveryApplier.SlotData
+                    {
+                        ComponentTypeId = r.ComponentTypeId,
+                        Payload = r.Payload ?? [],
+                        Tsn = r.Tsn,
+                    };
+                    break;
+
+                case RecordKind.Lifecycle when r.Op == (byte)LifecycleOp.Destroy:
+                    var destroyAgg = GetAgg(entities, r.EntityId);
+                    destroyAgg.HasDestroy = true;
+                    destroyAgg.DestroyTsn = r.Tsn;
+                    break;
+
+                case RecordKind.Lifecycle when r.Op == (byte)LifecycleOp.SetEnabledBits:
+                    // Absolute set; records arrive in LSN order so the last write (incl. the Spawn's own bits) wins.
+                    GetAgg(entities, r.EntityId).EnabledBits = r.EnabledBits;
+                    break;
+
+                // CollectionDelta / BulkManifest are applied in later increments (TSN still tracked above).
             }
+        }
+
+        foreach (var (entityIdRaw, agg) in entities)
+        {
+            // No Spawn in the window → the record targets a pre-existing (checkpointed) entity already loaded into the EntityMap.
+            if (!agg.HasSpawn)
+            {
+                // Base-entity Destroy: tombstone the existing record in place (DiedTSN). A base SetEnabledBits / value update is a
+                // later increment (same TryGet→modify→Upsert primitive); skip here.
+                if (agg.HasDestroy)
+                {
+                    applier.ApplyDestroyToExisting(entityIdRaw, agg.DestroyTsn);
+                    result.RecordsApplied++;
+                }
+
+                continue;
+            }
+
+            // Spawned AND destroyed within the window → net not-alive: don't insert (and don't create its revision chains), exactly
+            // as the live FinalizeSpawns skips a spawn+destroy entity. Post-recovery reads happen at a TSN past the window, so the
+            // historical alive-then-dead transition is not observable — absence == dead for IsAlive.
+            if (agg.HasDestroy)
+            {
+                continue;
+            }
+
+            applier.ApplySpawnedEntity(entityIdRaw, agg.ArchetypeId, agg.EnabledBits, agg.Tsn, agg.Slots.Values);
+            result.RecordsApplied++;
         }
 
         result.TxCommitted = committed.Count;
@@ -125,5 +211,16 @@ internal sealed class RecoveryDriver
         }
 
         return result;
+    }
+
+    private static EntityAgg GetAgg(Dictionary<long, EntityAgg> entities, long entityId)
+    {
+        if (!entities.TryGetValue(entityId, out var agg))
+        {
+            agg = new EntityAgg();
+            entities[entityId] = agg;
+        }
+
+        return agg;
     }
 }

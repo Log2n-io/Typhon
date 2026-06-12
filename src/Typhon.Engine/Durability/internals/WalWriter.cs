@@ -148,6 +148,13 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
     /// <summary>The highest LSN that has been durably written to stable media.</summary>
     public long DurableLsn => Interlocked.Read(ref _durableLsn);
 
+    /// <summary>
+    /// Seeds the durable watermark to a value already durable on disk from a prior lifecycle — used by crash recovery to mark the
+    /// replayed WAL frontier as durable so the post-recovery seal checkpoint targets it (the cycle's targetLsn is DurableLsn, which
+    /// is otherwise 0 on a fresh-opened writer). Monotonic; safe to call before the writer has produced any records this session.
+    /// </summary>
+    internal void SeedDurableLsn(long lsn) => AdvanceDurable(lsn);
+
     /// <summary>Whether the writer thread is currently running.</summary>
     public bool IsRunning => _thread != null && _thread.IsAlive;
 

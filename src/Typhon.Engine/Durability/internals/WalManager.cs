@@ -127,6 +127,9 @@ internal sealed class WalManager : ResourceNode
     /// </summary>
     public void RequestFlush() => _writer?.RequestFlush();
 
+    /// <summary>Seeds the durable watermark to a frontier already durable on disk (crash-recovery seal — see <see cref="WalWriter.SeedDurableLsn"/>).</summary>
+    public void SeedDurableLsn(long lsn) => _writer?.SeedDurableLsn(lsn);
+
     // ═══════════════════════════════════════════════════════════════
     // FPI Search (on-the-fly repair)
     // ═══════════════════════════════════════════════════════════════
