@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Threading;
 
 namespace Typhon.Engine.Internals;
 
@@ -74,6 +75,13 @@ internal sealed class WalSegmentManager : IDisposable
     /// if all records have been checkpointed.
     /// </summary>
     private readonly List<(string Path, long LastLSN)> _sealedSegments = new();
+
+    /// <summary>
+    /// Serializes all <see cref="_sealedSegments"/> access (CK-07 / TXW-7): the WAL writer thread adds on rotation,
+    /// the checkpoint thread removes on reclaim, and introspection readers enumerate — without this the plain
+    /// <see cref="List{T}"/> can corrupt under concurrent structural mutation. Off all hot paths.
+    /// </summary>
+    private readonly Lock _sealedLock = new();
 
     /// <summary>The currently active segment for writing.</summary>
     public WalSegmentContext ActiveSegment { get; private set; }
@@ -198,7 +206,12 @@ internal sealed class WalSegmentManager : IDisposable
                 _fileIO.Delete(valid[i].Path);
                 continue;
             }
-            _sealedSegments.Add((valid[i].Path, lastLsn));
+
+            // Single-threaded open path, but locked for consistency with the concurrent writers (CK-07).
+            lock (_sealedLock)
+            {
+                _sealedSegments.Add((valid[i].Path, lastLsn));
+            }
         }
 
         return maxId;
@@ -275,8 +288,11 @@ internal sealed class WalSegmentManager : IDisposable
 
         ActiveSegment = newSegment;
 
-        // Track the sealed segment for checkpoint-based reclamation, then close its handle
-        _sealedSegments.Add((oldSegment.Path, oldSegment.LastLSN));
+        // Track the sealed segment for checkpoint-based reclamation (CK-07: under the list lock), then close its handle
+        lock (_sealedLock)
+        {
+            _sealedSegments.Add((oldSegment.Path, oldSegment.LastLSN));
+        }
         oldSegment.Dispose();
 
         // Replenish pre-allocated pool
@@ -294,14 +310,20 @@ internal sealed class WalSegmentManager : IDisposable
     {
         int reclaimed = 0;
 
-        for (int i = _sealedSegments.Count - 1; i >= 0; i--)
+        // CK-07: the whole iterate+RemoveAt+Delete runs under the list lock. Reclaim is at checkpoint cadence (low
+        // frequency), so holding the lock across the deletes is correctness-over-micro-contention — it also keeps a
+        // concurrent GetAllSegmentPaths / SealedSegmentCount from observing a torn view.
+        lock (_sealedLock)
         {
-            var (path, lastLSN) = _sealedSegments[i];
-            if (lastLSN < checkpointLSN)
+            for (int i = _sealedSegments.Count - 1; i >= 0; i--)
             {
-                _fileIO.Delete(path);
-                _sealedSegments.RemoveAt(i);
-                reclaimed++;
+                var (path, lastLSN) = _sealedSegments[i];
+                if (lastLSN < checkpointLSN)
+                {
+                    _fileIO.Delete(path);
+                    _sealedSegments.RemoveAt(i);
+                    reclaimed++;
+                }
             }
         }
 
@@ -311,7 +333,16 @@ internal sealed class WalSegmentManager : IDisposable
     /// <summary>
     /// Returns the number of sealed segments awaiting reclamation.
     /// </summary>
-    public int SealedSegmentCount => _sealedSegments.Count;
+    public int SealedSegmentCount
+    {
+        get
+        {
+            lock (_sealedLock)
+            {
+                return _sealedSegments.Count;
+            }
+        }
+    }
 
     /// <summary>
     /// Total byte size of the WAL across all segment files — sealed segments counted at full segment size plus
@@ -413,10 +444,14 @@ internal sealed class WalSegmentManager : IDisposable
     /// </summary>
     internal List<string> GetAllSegmentPaths()
     {
-        var paths = new List<string>(_sealedSegments.Count + 1);
-        foreach (var (path, _) in _sealedSegments)
+        List<string> paths;
+        lock (_sealedLock)
         {
-            paths.Add(path);
+            paths = new List<string>(_sealedSegments.Count + 1);
+            foreach (var (path, _) in _sealedSegments)
+            {
+                paths.Add(path);
+            }
         }
 
         if (ActiveSegment != null)

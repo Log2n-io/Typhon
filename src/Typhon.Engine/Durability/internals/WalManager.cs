@@ -66,6 +66,10 @@ internal sealed class WalManager : ResourceNode
     /// <summary>The highest LSN durably written to stable media.</summary>
     public long DurableLsn => _writer?.DurableLsn ?? 0;
 
+    /// <summary>Highest LSN claimed so far (mirrors <see cref="DurabilityLog.LastAppendedLsn"/>). Used by the checkpoint
+    /// barrier (CK-02) to flush the WAL through everything appended before capturing dirty pages.</summary>
+    public long LastAppendedLsn => (CommitBuffer?.NextLsn ?? 1) - 1;
+
     /// <summary>Whether the WAL writer thread is running.</summary>
     public bool IsRunning => _writer?.IsRunning ?? false;
 

@@ -128,6 +128,13 @@ public class ResourceOptions
     /// </summary>
     public int CheckpointIntervalMs { get; set; } = 30000;  // 30 seconds
 
+    /// <summary>
+    /// Bounded budget (milliseconds) for the checkpoint cycle's WAL durability barrier waits (CK-02). On timeout the
+    /// cycle raises a transient <see cref="WalBackPressureTimeoutException"/>, which the failure classification (CK-06)
+    /// treats as <see cref="DurabilityHealth.Degraded"/> + retry-next-cycle — never a permanent stall.
+    /// </summary>
+    public int CheckpointBarrierTimeoutMs { get; set; } = 30000;  // 30 seconds
+
     // ═══════════════════════════════════════════════════════════════
     // BACKUP
     // ═══════════════════════════════════════════════════════════════

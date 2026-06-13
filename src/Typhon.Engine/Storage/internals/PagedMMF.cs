@@ -44,7 +44,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     internal const int PageRawDataSize          = PageSize - PageHeaderSize;
     internal const int PageSizePow2             = 13;                                   // 2^( PageSizePow2 = PageSize
     internal const int ChunkStartAlignment      = 64;                                   // Cache line — ceiling for chunk-start alignment (see ChunkBasedSegment)
-    internal const int DatabaseFormatRevision   = 1;
+    internal const int DatabaseFormatRevision   = 2;   // v2 (CK-05): meta pair at pages 0–1, no backward compat (v1 files refused)
     internal const ulong MinimumCacheSize       = DefaultMemPageCount * PageSize;
     internal const int WriteCachePageSize       = 1024 * 1024;
 
@@ -852,8 +852,9 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         _memPagesInfo[memPageIndex].CrcVerified = false;
 
         // Load the page from disk, if it's stored there already. (won't be the case for new pages)
-        // The load is async and not part of the returned task but stored in the PageInfo
-        var pageOffset = filePageIndex * (long)PageSize;
+        // The load is async and not part of the returned task but stored in the PageInfo.
+        // MapReadOffset is identity for normal pages; for an A/B-paired page (CK-05 meta pair) it resolves the current slot.
+        var pageOffset = MapReadOffset(filePageIndex);
         var loadPage = (pageOffset + PageSize) <= _fileSize;
         if (loadPage)
         {
@@ -1553,6 +1554,22 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         TrackFileGrowth(pageOffset + PageSize);
     }
 
+    /// <summary>
+    /// Maps a logical file-page index to the on-disk byte offset to read it from. The identity mapping by default; a
+    /// derived store overrides it for A/B-paired pages (CK-05) whose current content alternates between two physical
+    /// slots — e.g. the meta pair, where logical page 0 reads from the current slot. Used on the cold page-cache miss.
+    /// </summary>
+    protected virtual long MapReadOffset(int filePageIndex) => filePageIndex * (long)PageSize;
+
+    /// <summary>
+    /// Whether a file page is persisted outside the normal checkpoint dirty-write path (its durability is owned
+    /// elsewhere) and must therefore be skipped by <see cref="CollectDirtyMemPageIndices"/>. False by default; a
+    /// derived store returns true for its A/B-paired protected pages (CK-05 meta pair), written only by the
+    /// alternation path. Defence-in-depth: such pages are never DC-marked, but this guarantees they are never written
+    /// in-place at their slot-A offset by a checkpoint.
+    /// </summary>
+    protected virtual bool IsExternallyPersisted(int filePageIndex) => false;
+
     internal void IncrementDirty(int memPageIndex)
     {
         var pi = _memPagesInfo[memPageIndex];
@@ -1724,7 +1741,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         for (int i = 0; i < MemPagesCount; i++)
         {
             var pi = _memPagesInfo[i];
-            if (pi != null && pi.DirtyCounter > 0 && pi.PageState != PageState.Free)
+            if (pi != null && pi.DirtyCounter > 0 && pi.PageState != PageState.Free && !IsExternallyPersisted(pi.FilePageIndex))
             {
                 dirty.Add(i);
             }

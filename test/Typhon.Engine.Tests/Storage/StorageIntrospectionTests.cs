@@ -50,8 +50,10 @@ class StorageIntrospectionTests : TestBase<StorageIntrospectionTests>
         var types = new StoragePageType[pageCount];
         dbe.ClassifyAllPages(types);
 
-        Assert.That(types[0], Is.EqualTo(StoragePageType.Root), "page 0 is the reserved root header page");
-        Assert.That(types[1], Is.EqualTo(StoragePageType.Occupancy), "page 1 is the occupancy-segment root");
+        // v2 (CK-05): pages 0–1 are the meta pair (root header + bootstrap, A/B slots), occupancy root moved to page 2.
+        Assert.That(types[0], Is.EqualTo(StoragePageType.Root), "page 0 is the meta pair slot A (root header + bootstrap)");
+        Assert.That(types[1], Is.EqualTo(StoragePageType.Root), "page 1 is the meta pair slot B");
+        Assert.That(types[2], Is.EqualTo(StoragePageType.Occupancy), "page 2 is the occupancy-segment root");
         Assert.That(types, Does.Contain(StoragePageType.Component), "at least one component page is classified");
         Assert.That(types, Does.Contain(StoragePageType.Occupancy));
     }

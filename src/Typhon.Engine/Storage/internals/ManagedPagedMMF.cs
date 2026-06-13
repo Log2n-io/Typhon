@@ -71,12 +71,13 @@ public class ManagedPagedMMFOptions : PagedMMFOptions
 }
 
 // ============================================================================================================================================================
-// Pages of an empty file
+// Pages of an empty file (v2 layout — CK-05)
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
-// 0: Root file header
-// 1: Occupancy segment root page
-// 2: Reserved page for occupancy map growth
-// 3: Reserved page for occupancy map next map data (in case we need more than 500 pages to store the occupancy map)
+// 0: Meta pair slot A (root file header + bootstrap dictionary; A/B alternation — the current valid content is in slot A or B)
+// 1: Meta pair slot B
+// 2: Occupancy segment root page
+// 3: Reserved page for occupancy map growth
+// 4: Reserved page for occupancy map next map data (in case we need more than 500 pages to store the occupancy map)
 // ============================================================================================================================================================
 
 /// <summary>
@@ -93,15 +94,21 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
 {
     #region Constants
 
-    internal const int InitialReservedPageCount = 4;
-    private const int OccupancySegmentRootPageIndex = 1;
+    // v2 layout (CK-05): pages 0–1 are the meta pair (A/B slots), occupancy root at page 2, growth reserve at 3–4.
+    internal const int InitialReservedPageCount = 5;
+    private const int OccupancySegmentRootPageIndex = 2;
     internal const string HeaderSignature = "TyphonDatabase";
+
+    // The two physical slots of the meta pair (CK-05). The current valid content alternates between them.
+    private const int MetaSlotA = 0;
+    private const int MetaSlotB = 1;
 
     // Bootstrap dictionary keys (storage layer)
     // ReSharper disable InconsistentNaming
     internal const string BK_OccupancyMapSPI = "OccupancyMapSPI";
     internal const string BK_OccupancyReserved = "OccupancyReserved";
-    internal const string BK_CheckpointLSN = "CheckpointLSN";
+    // {CheckpointLSN: long, CleanShutdown: bool} packed as Int3 — flips atomically with the meta generation (M12, CK-05).
+    internal const string BK_DurabilityWatermarks = "DurabilityWatermarks";
     // ReSharper restore InconsistentNaming
 
     #endregion
@@ -111,6 +118,12 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
     private BitmapL3 _occupancyMap;
     private int _occupancyNextReservedPageIndex;
     private int _occupancyNextReservedMapPageIndex;
+
+    // Meta-pair (CK-05) alternation state: the slot holding the current valid meta content and its generation. Every meta
+    // write goes to the OTHER slot (PersistMetaNow), so the valid slot is never in-flight. Serialized by _metaLock.
+    private int _metaCurrentSlot;          // MetaSlotA or MetaSlotB — the current valid slot
+    private ulong _metaGeneration;
+    private readonly Lock _metaLock = new();
 
     /// <summary>
     /// Bootstrap dictionary: key-value metadata stored as a compact byte stream on page 0.
@@ -254,14 +267,13 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
         using var guard = EpochGuard.Enter(EpochManager);
         var epoch = guard.Epoch;
 
+        // Write the identity header into the in-memory meta page; the bootstrap + CRC + generation are stamped by
+        // PersistMetaNow below (the genesis alternation write).
         RequestPageEpoch(0, epoch, out var memPageIdx);
         var latched = TryLatchPageExclusive(memPageIdx);
         Debug.Assert(latched, "TryLatchPageExclusive failed on root page during file creation");
         var page = GetPage(memPageIdx);
 
-        // Set header information
-        var cs = CreateChangeSet();
-        cs.AddByMemPageIndex(memPageIdx);
         ref var rootFileHeader = ref page.StructAt<RootFileHeader>(PageBaseHeaderSize);
         fixed (byte* headerSignature = rootFileHeader.HeaderSignature)
         {
@@ -272,45 +284,47 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
         {
             StringExtensions.StoreString(Options.DatabaseName, databaseName, 64);
         }
+        UnlatchPageExclusive(memPageIdx);
 
         Logger.LogInformation("Initialize DiskPageAllocator service with root at page {PageId}", OccupancySegmentRootPageIndex);
 
-        // Initialize the occupancy segment and map
+        // Initialize the occupancy segment (root at page 2) and map — pages 0–1 are the meta pair.
         _segments = new ConcurrentDictionary<int, LogicalSegment<PersistentStore>>();
-
+        var cs = CreateChangeSet();
         _occupancySegment = CreateOccupancySegment(OccupancySegmentRootPageIndex, PageBlockType.OccupancyMap, 1, cs);
 
         // ReSharper disable InconsistentlySynchronizedField
         _occupancyMap = new BitmapL3(_occupancySegment);
 
-        // The first two pages are already manually allocated (file header and occupancy segment root page)
-        _occupancyMap.SetL0(0);
-        _occupancyMap.SetL0(1);
+        // Pre-allocated pages: 0–1 meta pair, 2 occupancy root.
+        _occupancyMap.SetL0(MetaSlotA);
+        _occupancyMap.SetL0(MetaSlotB);
+        _occupancyMap.SetL0(OccupancySegmentRootPageIndex);
 
-        // Reserve pages to use when the occupancy map needs to grow, we need to reserve because we can't allocate them by the time the map is full
-        _occupancyNextReservedPageIndex = 2;
-        _occupancyNextReservedMapPageIndex = 3;
+        // Reserve pages to use when the occupancy map needs to grow (can't allocate them once the map is full).
+        _occupancyNextReservedPageIndex = 3;
+        _occupancyNextReservedMapPageIndex = 4;
         _occupancyMap.SetL0(_occupancyNextReservedPageIndex);
         _occupancyMap.SetL0(_occupancyNextReservedMapPageIndex);
         // ReSharper restore InconsistentlySynchronizedField
 
-        // Initialize bootstrap dictionary with core occupancy SPIs
+        // Initialize bootstrap dictionary with core occupancy SPIs + an empty durability watermark block.
         Bootstrap.SetInt(BK_OccupancyMapSPI, OccupancySegmentRootPageIndex);
         Bootstrap.Set(BK_OccupancyReserved, BootstrapDictionary.Value.FromInt2(_occupancyNextReservedPageIndex, _occupancyNextReservedMapPageIndex));
+        WriteDurabilityWatermarks(0, false);
 
-        // Serialize bootstrap stream to page 0
-        byte* bootstrapAddr = GetMemPageAddress(memPageIdx) + BootstrapStreamOffset;
-        int maxBootstrapBytes = PageSize - BootstrapStreamOffset;
-        Bootstrap.WriteTo(bootstrapAddr, maxBootstrapBytes);
-
-        UnlatchPageExclusive(memPageIdx);
+        // Persist the structural (occupancy) pages, then write the genesis meta page (generation 1) via the alternation path.
         cs.SaveChanges();
-        FlushToDisk();
+        PersistMetaNow();
     }
 
     protected override void OnFileLoading()
     {
         base.OnFileLoading();
+
+        // CK-05: select + load the current meta slot into the cached meta page (or throw if both slots are corrupt)
+        // BEFORE reading the identity header — the header itself lives in the current slot.
+        LoadMeta();
 
         using var guard = EpochGuard.Enter(EpochManager);
         var epoch = guard.Epoch;
@@ -597,28 +611,11 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
     /// Serialize the bootstrap dictionary to page 0 at <see cref="BootstrapStreamOffset"/>.
     /// Latches page 0 exclusively during write.
     /// </summary>
-    internal unsafe void SaveBootstrap(ChangeSet changeSet = null)
+    internal void SaveBootstrap(ChangeSet changeSet = null)
     {
-        using var guard = EpochGuard.Enter(EpochManager);
-        var epoch = guard.Epoch;
-
-        RequestPageEpoch(0, epoch, out var memPageIdx);
-        var latched = TryLatchPageExclusive(memPageIdx);
-        Debug.Assert(latched, "TryLatchPageExclusive failed on root page during bootstrap save");
-
-        var cs = changeSet ?? CreateChangeSet();
-        cs.AddByMemPageIndex(memPageIdx);
-
-        byte* pageAddr = GetMemPageAddress(memPageIdx);
-        byte* streamAddr = pageAddr + BootstrapStreamOffset;
-        int maxBytes = PageSize - BootstrapStreamOffset;
-        Bootstrap.WriteTo(streamAddr, maxBytes);
-
-        UnlatchPageExclusive(memPageIdx);
-        if (changeSet == null)
-        {
-            cs.SaveChanges();
-        }
+        // The bootstrap lives on the meta page — persist it via the CK-05 alternation path, not an in-place page write.
+        // changeSet is retained for source compatibility but unused (the meta page is not DC-tracked; PersistMetaNow owns it).
+        PersistMetaNow();
     }
 
     /// <summary>
@@ -638,6 +635,153 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
     }
 
     // ═══════════════════════════════════════════════════════════════
+    // Meta pair (CK-05) — A/B slot alternation for the root/bootstrap page
+    // ═══════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Persists the in-memory meta page (root file header + bootstrap dictionary) by writing it to the ALTERNATE slot
+    /// with the next generation + a fresh CRC, fsyncing, then flipping the current-slot pointer (CK-05). The
+    /// current-valid slot is never overwritten, so a torn write can never destroy the only good copy. One
+    /// <see cref="_metaLock"/> serializes every meta writer (checkpoint-LSN flip, bootstrap/schema saves, clean-shutdown).
+    /// </summary>
+    internal unsafe void PersistMetaNow()
+    {
+        lock (_metaLock)
+        {
+            using var guard = EpochGuard.Enter(EpochManager);
+            var epoch = guard.Epoch;
+
+            RequestPageEpoch(0, epoch, out var memPageIdx);
+            var latched = TryLatchPageExclusive(memPageIdx);
+            Debug.Assert(latched, "TryLatchPageExclusive failed on the meta page during PersistMetaNow");
+
+            byte* pageAddr = GetMemPageAddress(memPageIdx);
+            var pageSpan = new Span<byte>(pageAddr, PageSize);
+
+            // Serialize the bootstrap into the in-memory meta page, then stamp the next generation + CRC. The meta page
+            // is CRC'd now (unlike the v1 root page, which was checksum-exempt) — the CRC is the torn-slot detector.
+            Bootstrap.WriteTo(pageAddr + BootstrapStreamOffset, PageSize - BootstrapStreamOffset);
+
+            var nextGen = _metaGeneration + 1;
+            PageBaseHeader.WritePairGeneration(pageSpan, nextGen);
+            ((PageBaseHeader*)pageAddr)->PageChecksum = WalCrc.ComputeSkipping(pageSpan, PageBaseHeader.PageChecksumOffset, PageBaseHeader.PageChecksumSize);
+
+            // Write the full image to the alternate slot and fsync BEFORE flipping the current pointer.
+            var targetSlot = MetaSlotA + MetaSlotB - _metaCurrentSlot;   // the other slot
+            WritePageDirect(targetSlot, pageSpan);
+            FlushToDisk();
+
+            UnlatchPageExclusive(memPageIdx);
+
+            _metaCurrentSlot = targetSlot;
+            _metaGeneration = nextGen;
+        }
+    }
+
+    /// <summary>
+    /// Reads both meta-pair slots at open and selects the current one — the highest pair generation among CRC-valid
+    /// slots — loading its image into the cached meta page (logical page 0). Both-invalid throws (the database cannot
+    /// be opened; never a silent fallback). Sets <see cref="_metaCurrentSlot"/> / <see cref="_metaGeneration"/>.
+    /// </summary>
+    private unsafe void LoadMeta()
+    {
+        using var guard = EpochGuard.Enter(EpochManager);
+        var epoch = guard.Epoch;
+
+        // _metaCurrentSlot defaults to MetaSlotA, so this cold read loads physical slot A into the cached meta page.
+        RequestPageEpoch(0, epoch, out var memPageIdx);
+        byte* pageAddr = GetMemPageAddress(memPageIdx);
+        var slotASpan = new Span<byte>(pageAddr, PageSize);
+        var aValid = IsMetaSlotValid(slotASpan, out var genA);
+
+        Span<byte> slotB = new byte[PageSize];
+        var bValid = false;
+        ulong genB = 0;
+        if ((MetaSlotB + 1L) * PageSize <= FileSize)
+        {
+            ReadPageDirect(MetaSlotB, slotB);
+            bValid = IsMetaSlotValid(slotB, out genB);
+        }
+
+        if (!aValid && !bValid)
+        {
+            throw new InvalidOperationException(
+                $"Both meta-pair slots (pages 0 and 1) are corrupt — the database cannot be opened. File: {Options.BuildDatabasePathFileName()}");
+        }
+
+        if (bValid && (!aValid || genB > genA))
+        {
+            slotB.CopyTo(slotASpan);   // make the cached meta page hold slot B's (current) content
+            _metaCurrentSlot = MetaSlotB;
+            _metaGeneration = genB;
+        }
+        else
+        {
+            _metaCurrentSlot = MetaSlotA;
+            _metaGeneration = genA;
+        }
+    }
+
+    /// <summary>A meta slot is valid iff its CRC matches and its pair generation is &gt; 0 (0 = never written via alternation).</summary>
+    private static bool IsMetaSlotValid(ReadOnlySpan<byte> slot, out ulong generation)
+    {
+        generation = 0;
+        var storedCrc = MemoryMarshal.Read<uint>(slot.Slice(PageBaseHeader.PageChecksumOffset));
+        var computedCrc = WalCrc.ComputeSkipping(slot, PageBaseHeader.PageChecksumOffset, PageBaseHeader.PageChecksumSize);
+        if (storedCrc != computedCrc)
+        {
+            return false;
+        }
+        generation = PageBaseHeader.ReadPairGeneration(slot);
+        return generation > 0;
+    }
+
+    /// <inheritdoc />
+    protected override long MapReadOffset(int filePageIndex)
+        => filePageIndex == 0 ? _metaCurrentSlot * (long)PageSize : base.MapReadOffset(filePageIndex);
+
+    /// <inheritdoc />
+    protected override bool IsExternallyPersisted(int filePageIndex) => filePageIndex is MetaSlotA or MetaSlotB;
+
+    // ── Durability watermark block (CheckpointLSN + CleanShutdown), packed Int3, flipped atomically by the meta generation ──
+
+    private (long CheckpointLsn, bool CleanShutdown) ReadDurabilityWatermarks()
+    {
+        if (!Bootstrap.TryGet(BK_DurabilityWatermarks, out var v))
+        {
+            return (0, false);
+        }
+        var lsn = (uint)v.GetInt(0) | ((long)v.GetInt(1) << 32);
+        return (lsn, v.GetInt(2) != 0);
+    }
+
+    private void WriteDurabilityWatermarks(long checkpointLsn, bool cleanShutdown)
+        => Bootstrap.Set(BK_DurabilityWatermarks, BootstrapDictionary.Value.FromInt3((int)checkpointLsn, (int)(checkpointLsn >> 32), cleanShutdown ? 1 : 0));
+
+    /// <summary>The persisted checkpoint-LSN watermark (0 on a fresh database).</summary>
+    internal long CheckpointLsnWatermark => ReadDurabilityWatermarks().CheckpointLsn;
+
+    /// <summary>The persisted clean-shutdown flag.</summary>
+    internal bool CleanShutdownWatermark => ReadDurabilityWatermarks().CleanShutdown;
+
+    /// <summary>Test hook (CK-05): the physical slot (0 or 1) currently holding the valid meta content.</summary>
+    internal int MetaCurrentSlotForTest => _metaCurrentSlot;
+
+    /// <summary>Test hook (CK-05): the current meta generation.</summary>
+    internal ulong MetaGenerationForTest => _metaGeneration;
+
+    /// <summary>Sets the clean-shutdown flag (preserving CheckpointLSN) and persists the meta page atomically (CK-05).</summary>
+    internal void SetCleanShutdown(bool cleanShutdown)
+    {
+        lock (_metaLock)
+        {
+            var w = ReadDurabilityWatermarks();
+            WriteDurabilityWatermarks(w.CheckpointLsn, cleanShutdown);
+            PersistMetaNow();
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
     // Checkpoint Support
     // ═══════════════════════════════════════════════════════════════
 
@@ -646,24 +790,10 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
     /// to the <see cref="RootFileHeader"/> on page 0. Called after the occupancy map grows and new reserved pages are allocated.
     /// </summary>
     /// <remarks>Caller must hold <see cref="_occupancyMapAccess"/> exclusive lock.</remarks>
-    private unsafe void UpdateOccupancyReservedPages()
+    private void UpdateOccupancyReservedPages()
     {
-        using var guard = EpochGuard.Enter(EpochManager);
-        var epoch = guard.Epoch;
-
-        RequestPageEpoch(0, epoch, out var memPageIdx);
-        var latched = TryLatchPageExclusive(memPageIdx);
-        Debug.Assert(latched, "TryLatchPageExclusive failed on root page during occupancy reserved pages update");
-
-        var cs = CreateChangeSet();
-        cs.AddByMemPageIndex(memPageIdx);
-
         Bootstrap.Set(BK_OccupancyReserved, BootstrapDictionary.Value.FromInt2(_occupancyNextReservedPageIndex, _occupancyNextReservedMapPageIndex));
-        byte* bootstrapAddr = GetMemPageAddress(memPageIdx) + BootstrapStreamOffset;
-        Bootstrap.WriteTo(bootstrapAddr, PageSize - BootstrapStreamOffset);
-
-        UnlatchPageExclusive(memPageIdx);
-        cs.SaveChanges();
+        PersistMetaNow();
     }
 
     /// <summary>
@@ -672,27 +802,16 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
     /// </summary>
     /// <param name="checkpointLSN">The new checkpoint LSN to persist.</param>
     /// <param name="epochManager">Epoch manager for page access.</param>
-    internal unsafe void UpdateCheckpointLSN(long checkpointLSN, EpochManager epochManager)
+    internal void UpdateCheckpointLSN(long checkpointLSN, EpochManager epochManager)
     {
-        using var guard = EpochGuard.Enter(epochManager);
-        var epoch = guard.Epoch;
-
-        RequestPageEpoch(0, epoch, out var memPageIdx);
-        var latched = TryLatchPageExclusive(memPageIdx);
-        Debug.Assert(latched, "TryLatchPageExclusive failed on root page during checkpoint LSN update");
-
-        var cs = CreateChangeSet();
-        cs.AddByMemPageIndex(memPageIdx);
-
-        Bootstrap.SetLong(BK_CheckpointLSN, checkpointLSN);
-        byte* bootstrapAddr = GetMemPageAddress(memPageIdx) + BootstrapStreamOffset;
-        Bootstrap.WriteTo(bootstrapAddr, PageSize - BootstrapStreamOffset);
-
-        UnlatchPageExclusive(memPageIdx);
-        cs.SaveChanges();
-
-        // Fsync to make the checkpoint LSN durable
-        FlushToDisk();
+        // Advance the checkpoint-LSN watermark (preserving CleanShutdown) and flip the meta pair — the generation flip
+        // is the atomic, fsynced commit point (CK-05). epochManager is unused now (PersistMetaNow uses the MMF's own).
+        lock (_metaLock)
+        {
+            var w = ReadDurabilityWatermarks();
+            WriteDurabilityWatermarks(checkpointLSN, w.CleanShutdown);
+            PersistMetaNow();
+        }
     }
 
     #region IMetricSource Implementation

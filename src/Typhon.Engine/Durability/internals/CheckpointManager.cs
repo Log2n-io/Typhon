@@ -1,4 +1,6 @@
 using JetBrains.Annotations;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using System;
 using System.Diagnostics;
 using System.Threading;
@@ -14,10 +16,10 @@ namespace Typhon.Engine.Internals;
 /// <para>
 /// The checkpoint pipeline per cycle:
 /// <list type="number">
-///   <item>Capture <c>DurableLsn</c> from <see cref="WalManager"/> atomically</item>
+///   <item>Durability barrier: flush the WAL through <c>LastAppendedLsn</c>, then capture <c>barrierLsn = DurableLsn</c> (CK-01/CK-02)</item>
 ///   <item>Collect dirty memory page indices from the page cache</item>
 ///   <item>Write dirty pages to the data file (without decrementing DirtyCounter)</item>
-///   <item>Fsync the data file</item>
+///   <item>Flush the WAL through the post-capture <c>LastAppendedLsn</c> (CK-02), then fsync the data file</item>
 ///   <item>Decrement DirtyCounter for each written page (re-dirtied pages stay &gt; 0)</item>
 ///   <item>Transition UoW entries from WalDurable → Committed</item>
 ///   <item>Advance CheckpointLSN in the file header + fsync</item>
@@ -32,7 +34,7 @@ namespace Typhon.Engine.Internals;
 /// </para>
 /// </remarks>
 [PublicAPI]
-internal sealed class CheckpointManager : ResourceNode, IMetricSource
+internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
 {
     // ═══════════════════════════════════════════════════════════════
     // Dependencies
@@ -61,9 +63,19 @@ internal sealed class CheckpointManager : ResourceNode, IMetricSource
 
     private long _checkpointLsn;
     private volatile Exception _fatalError;
+    private volatile DurabilityHealth _health = DurabilityHealth.Ok;
     private volatile bool _forceRequested;
     private volatile bool _crashStop;
     private long _consecutiveGatedCycles;
+
+    /// <summary>Engine logger (wired by <see cref="DatabaseEngine"/>). Defaults to a no-op so direct unit construction
+    /// (e.g. CheckpointManagerTests) never NREs in the <c>[LoggerMessage]</c> paths.</summary>
+    private ILogger _logger = NullLogger.Instance;
+
+    /// <summary>Test seam (A1.12): when set, invoked once at the start of every cycle so a fixture can inject a
+    /// transient/fatal fault to exercise CK-06 classification. Null in production — a single null-check on the
+    /// background checkpoint thread, off every hot path.</summary>
+    internal Action CycleFaultInjector { get; set; }
 
     /// <summary>Max passes per cycle to retry pages skipped because a writer was active, before the coverage gate blocks the LSN advance (CK-03). Skip windows are
     /// accessor-scoped (~µs), so the second pass almost always clears them.</summary>
@@ -128,6 +140,14 @@ internal sealed class CheckpointManager : ResourceNode, IMetricSource
 
     /// <summary>Whether a fatal I/O error has occurred during checkpointing.</summary>
     public bool HasFatalError => _fatalError != null;
+
+    /// <summary>Current durability health (CK-06). <see cref="DurabilityHealth.Degraded"/> means the last cycle hit a
+    /// transient stall and will retry next tick; <see cref="DurabilityHealth.Fatal"/> means periodic checkpointing
+    /// has halted (the shutdown path still attempts one last-chance flush).</summary>
+    public DurabilityHealth Health => _health;
+
+    /// <summary>Sets the engine logger used by the CK-06 <c>[LoggerMessage]</c> paths. Null resets to a no-op logger.</summary>
+    internal ILogger Logger { set => _logger = value ?? NullLogger.Instance; }
 
     /// <summary>Total number of checkpoint cycles completed.</summary>
     public long TotalCheckpoints => Interlocked.Read(ref _totalCheckpoints);
@@ -284,7 +304,11 @@ internal sealed class CheckpointManager : ResourceNode, IMetricSource
             // transaction commit + last periodic checkpoint.
             // _crashStop suppresses the shutdown flush for hard-crash simulation: the engine is modelling a power cut, so no final cycle may push dirty pages to
             // the data file (the committed data must survive only via WAL replay).
-            if (_fatalError == null && !_crashStop)
+            //
+            // CK-06 / 04 §7: the shutdown flush is attempted even after a fatal latch — a last-chance cycle may still
+            // get committed data to the data file. Only _crashStop (power-cut simulation) suppresses it. Best-effort:
+            // RunCheckpointCycle classifies its own failures and never rethrows, so this can't escape the loop.
+            if (!_crashStop)
             {
                 var finalLsn = _walManager.DurableLsn;
                 RunCheckpointCycle(finalLsn, CheckpointReason.Shutdown);
@@ -292,7 +316,7 @@ internal sealed class CheckpointManager : ResourceNode, IMetricSource
         }
         catch (Exception ex)
         {
-            _fatalError = ex;
+            ClassifyCycleFailure(ex);
         }
     }
 
@@ -319,8 +343,22 @@ internal sealed class CheckpointManager : ResourceNode, IMetricSource
                 return;
             }
 
+            // Test seam (A1.12): lets CheckpointResilienceTests inject a transient/fatal fault to exercise CK-06
+            // classification. Null in production — one negligible null-check on the background thread.
+            CycleFaultInjector?.Invoke();
+
             // Step 0: Reset FPI bitmap — new modifications from this point need fresh FPIs
             _mmf.FpiBitmap?.ClearAll();
+
+            // Step 1: Durability barrier (CK-01/CK-02). Flush the WAL through everything appended so far, then take the
+            // post-flush DurableLsn as the cycle's authoritative high-water (barrierLsn). The checkpoint advances to
+            // THIS — not the stale loop-sampled targetLsn — so any records appended since the loop's trigger are now
+            // durable and safely covered. A timeout here throws WalBackPressureTimeoutException (transient → CK-06
+            // retry). The WaitContext gives the whole cycle one shared, bounded deadline budget.
+            var ctx = WaitContext.FromTimeout(TimeSpan.FromMilliseconds(_resourceOptions.CheckpointBarrierTimeoutMs));
+            _walManager.RequestFlush();
+            _walManager.WaitForDurable(_walManager.LastAppendedLsn, ref ctx);
+            long barrierLsn = _walManager.DurableLsn;
 
             // Step 2: Collect dirty pages
             int[] dirtyPages;
@@ -359,6 +397,13 @@ internal sealed class CheckpointManager : ResourceNode, IMetricSource
 
                         if (writtenThisPass > 0)
                         {
+                            // CK-02 flush2: the captured page copies just written may reflect records up to the current
+                            // LastAppendedLsn. Flush the WAL through that point BEFORE the data fsync makes those bytes
+                            // durable, so the data file can never hold a change whose record could still be lost
+                            // (captured ⊆ durable, composing with AP-01 — 04 §3).
+                            _walManager.RequestFlush();
+                            _walManager.WaitForDurable(_walManager.LastAppendedLsn, ref ctx);
+
                             using (var fsyncScope = TyphonEvent.BeginCheckpointFsync())
                             {
                                 _mmf.FlushToDisk();
@@ -411,9 +456,10 @@ internal sealed class CheckpointManager : ResourceNode, IMetricSource
                     Interlocked.Add(ref _totalUowTransitioned, transitioned);
                 }
 
-                // Step 7: Advance CheckpointLSN in file header + fsync
-                _mmf.UpdateCheckpointLSN(targetLsn, _epochManager);
-                Interlocked.Exchange(ref _checkpointLsn, targetLsn);
+                // Step 7: Advance CheckpointLSN in file header + fsync — to barrierLsn (the post-flush durable
+                // high-water established at step 1), NOT the stale loop-sampled targetLsn (CK-02/CK-03).
+                _mmf.UpdateCheckpointLSN(barrierLsn, _epochManager);
+                Interlocked.Exchange(ref _checkpointLsn, barrierLsn);
 
                 // Step 8: Recycle WAL segments
                 var segmentManager = _walManager.SegmentManager;
@@ -423,7 +469,7 @@ internal sealed class CheckpointManager : ResourceNode, IMetricSource
                     try
                     {
                         var tickFenceLsn = _lastTickFenceLsnProvider?.Invoke() ?? 0;
-                        var trimLsn = tickFenceLsn > 0 ? Math.Min(targetLsn, tickFenceLsn) : targetLsn;
+                        var trimLsn = tickFenceLsn > 0 ? Math.Min(barrierLsn, tickFenceLsn) : barrierLsn;
                         var recycled = segmentManager.MarkReclaimable(trimLsn);
                         recycleScope.RecycledCount = recycled;
                         Interlocked.Add(ref _totalSegmentsRecycled, recycled);
@@ -440,10 +486,17 @@ internal sealed class CheckpointManager : ResourceNode, IMetricSource
             }
 
             Interlocked.Increment(ref _totalCheckpoints);
+
+            // A cycle that completed without throwing clears a prior Degraded state. A gated cycle (the coverage gate
+            // working as designed) is NOT an error, so it also lands here as Ok. Fatal is terminal — never downgraded.
+            if (_health != DurabilityHealth.Fatal)
+            {
+                _health = DurabilityHealth.Ok;
+            }
         }
         catch (Exception ex)
         {
-            _fatalError = ex;
+            ClassifyCycleFailure(ex);
             return;
         }
         finally
@@ -468,6 +521,38 @@ internal sealed class CheckpointManager : ResourceNode, IMetricSource
     /// test sets this on an otherwise-idle engine, so in practice no cycle is in flight.)
     /// </summary>
     internal void PrepareCrashStop() => _crashStop = true;
+
+    // ═══════════════════════════════════════════════════════════════
+    // Failure classification (CK-06)
+    // ═══════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// CK-06 failure classification. A <b>transient</b> cycle exception — any <see cref="TyphonException"/> whose
+    /// <see cref="TyphonException.IsTransient"/> is set (WAL / page-cache back-pressure, lock or IO timeout) — is
+    /// logged and retried on the next cycle; it MUST NEVER latch the subsystem (the STO-12 anti-pattern). Anything
+    /// else is <b>fatal</b>: latched into <see cref="HasFatalError"/> and surfaced via <see cref="Health"/>, halting
+    /// periodic cycles — but the shutdown path still attempts one last-chance flush (04 §7).
+    /// </summary>
+    private void ClassifyCycleFailure(Exception ex)
+    {
+        if (ex is TyphonException { IsTransient: true })
+        {
+            _health = DurabilityHealth.Degraded;
+            LogCheckpointTransient(ex);
+        }
+        else
+        {
+            _fatalError = ex;
+            _health = DurabilityHealth.Fatal;
+            LogCheckpointFatal(ex);
+        }
+    }
+
+    [LoggerMessage(LogLevel.Warning, "Checkpoint cycle hit a transient failure (Health=Degraded); retrying on the next cycle")]
+    private partial void LogCheckpointTransient(Exception ex);
+
+    [LoggerMessage(LogLevel.Error, "Checkpoint cycle hit a FATAL failure (Health=Fatal); periodic checkpointing halted (shutdown flush still attempted)")]
+    private partial void LogCheckpointFatal(Exception ex);
 
     // ═══════════════════════════════════════════════════════════════
     // Dispose

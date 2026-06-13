@@ -38,6 +38,12 @@ internal struct LogicalSegmentHeader
     /// introspection (Module 15) can classify every page without re-deriving ownership from context. Only meaningful on the root page.
     /// </summary>
     public StorageSegmentKind Kind;
+    /// <summary>
+    /// CK-05 A/B slot-pairing: the physical file-page index of this directory page's TWIN slot (the alternate of the two slots the directory page's
+    /// current content alternates between). Set once at allocation, immutable thereafter, identical in both slots. <c>0</c> = "no twin" (a normal,
+    /// non-directory page, or a page that predates C2). Present on every directory page — the root page and each map-extension page.
+    /// </summary>
+    public int TwinPageIndex;
 }
 
 /// <summary>

@@ -915,7 +915,9 @@ class WalRecoveryTests : TestBase<WalRecoveryTests>
         var id1 = registry.AllocateUowId();
         registry.LoadFromDiskRaw();
 
-        const int targetPage = 5;
+        // v2 (CK-05): pages 0–4 are reserved (meta pair + occupancy) and the engine owns low pages from 5 up; allocate a
+        // genuinely-free page so the FPI repair targets a page nothing else writes.
+        var targetPage = mmf.AllocatePage();
 
         // Build a valid page filled with 0xAA + valid CRC
         var goodPageData = BuildPageWithCrc(targetPage, 0xAA);
@@ -969,7 +971,9 @@ class WalRecoveryTests : TestBase<WalRecoveryTests>
         var id1 = registry.AllocateUowId();
         registry.LoadFromDiskRaw();
 
-        const int targetPage = 5;
+        // v2 (CK-05): pages 0–4 are reserved (meta pair + occupancy) and the engine owns low pages from 5 up; allocate a
+        // genuinely-free page so the FPI repair targets a page nothing else writes.
+        var targetPage = mmf.AllocatePage();
 
         // Build a valid page with 0xAA pattern + CRC (highly compressible)
         var goodPageData = FpiCompressionTests.BuildPageWithCrc(targetPage, 0xAA);

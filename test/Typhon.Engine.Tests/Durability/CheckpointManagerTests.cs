@@ -280,7 +280,7 @@ public class CheckpointManagerTests : AllocatorTestBase
         _walManager = CreateWalManager();
         ProduceWalRecords(_walManager);
 
-        var memPageIdx = DirtyRootPage();
+        var memPageIdx = DirtyRegularPage();
 
         _mmf.IncrementActiveChunkWriters(memPageIdx); // pin → checkpoint capture CAS(ACW,-1,0) fails → page skipped
         try
@@ -312,7 +312,7 @@ public class CheckpointManagerTests : AllocatorTestBase
         _walManager = CreateWalManager();
         ProduceWalRecords(_walManager);
 
-        var memPageIdx = DirtyRootPage();
+        var memPageIdx = DirtyRegularPage();
 
         using var ckpt = new CheckpointManager(_mmf, _uowRegistry, _walManager, _resourceOptions, _epochManager, _stagingPool, AllocationResource);
         var durableLsn = _walManager.DurableLsn;
@@ -331,12 +331,14 @@ public class CheckpointManagerTests : AllocatorTestBase
         Assert.That(ckpt.ConsecutiveGatedCycles, Is.EqualTo(0), "a fully-covered cycle resets the gate counter");
     }
 
-    /// <summary>Dirties the root page (page 0) without saving, so it is collected by the next checkpoint but stays dirty. Returns its in-memory page index.</summary>
-    private int DirtyRootPage()
+    /// <summary>Allocates a regular data page and dirties it without saving, so it is collected by the next checkpoint but stays dirty. Returns its in-memory
+    /// page index. (Not the meta pair, pages 0–1 — those are CK-05-alternation-managed and excluded from the checkpoint dirty-write.)</summary>
+    private int DirtyRegularPage()
     {
         using var guard = EpochGuard.Enter(_epochManager);
         var cs = _mmf.CreateChangeSet();
-        _mmf.RequestPageEpoch(0, guard.Epoch, out var memPageIdx);
+        var filePageIndex = _mmf.AllocatePage(cs);
+        _mmf.RequestPageEpoch(filePageIndex, guard.Epoch, out var memPageIdx);
         _mmf.TryLatchPageExclusive(memPageIdx);
         cs.AddByMemPageIndex(memPageIdx);
         _mmf.UnlatchPageExclusive(memPageIdx);
@@ -475,8 +477,8 @@ public class CheckpointManagerTests : AllocatorTestBase
         var durableLsn = _walManager.DurableLsn;
         ckpt.RunCheckpointCycle(durableLsn);
 
-        // Read the CheckpointLSN from the bootstrap dictionary to verify persistence
-        Assert.That(_mmf.Bootstrap.GetLong(ManagedPagedMMF.BK_CheckpointLSN), Is.EqualTo(durableLsn));
+        // Read the CheckpointLSN from the durability watermark block (CK-05) to verify persistence
+        Assert.That(_mmf.CheckpointLsnWatermark, Is.EqualTo(durableLsn));
     }
 
     // ═══════════════════════════════════════════════════════════════

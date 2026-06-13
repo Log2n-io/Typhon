@@ -1,5 +1,6 @@
 ﻿using JetBrains.Annotations;
 using System;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
 namespace Typhon.Engine;
@@ -62,4 +63,22 @@ public struct PageBaseHeader
 
     /// <summary>Size in bytes of <see cref="PageChecksum"/> (for CRC skip region).</summary>
     public const int PageChecksumSize = 4;
+
+    /// <summary>
+    /// Byte offset of the A/B slot-pairing generation counter (CK-05), in the reserved header region (offset 16, the
+    /// first free 8-aligned slot after <see cref="ModificationCounter"/>). <c>0</c> = "not a pair slot" (every normal
+    /// page). Protected pages (the meta pair; segment-directory twins in C2) stamp a monotonic <see cref="ulong"/> here;
+    /// the higher valid generation among a pair's two slots is the current one. CRC-covered (it is outside the 8–11 skip
+    /// region). Accessed by offset rather than a struct field so <c>sizeof(PageBaseHeader)</c> stays 16 and no dependent
+    /// page layout (e.g. <c>LogicalSegmentHeader.Offset = PageBaseHeader.Size</c>) shifts.
+    /// </summary>
+    public const int PairGenerationOffset = 16;
+
+    /// <summary>Reads the CK-05 pair generation (<see cref="PairGenerationOffset"/>) from a page image.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static ulong ReadPairGeneration(ReadOnlySpan<byte> page) => MemoryMarshal.Read<ulong>(page.Slice(PairGenerationOffset));
+
+    /// <summary>Writes the CK-05 pair generation (<see cref="PairGenerationOffset"/>) into a page image.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void WritePairGeneration(Span<byte> page, ulong generation) => MemoryMarshal.Write(page.Slice(PairGenerationOffset), in generation);
 }

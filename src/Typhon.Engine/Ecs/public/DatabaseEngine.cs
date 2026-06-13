@@ -772,7 +772,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         var lastSegmentId = 0L; // Floor only — WalSegmentManager.Initialize scans the on-disk directory and continues past the highest existing id.
         // Checkpoint frontier for the reopen reconcile: WAL segments whose records are all below this are already in the
         // data file and get reclaimed; segments with records ≥ this are retained for crash recovery (REC-04 / WR-01).
-        var checkpointLsn = MMF.Bootstrap.GetLong(ManagedPagedMMF.BK_CheckpointLSN);
+        var checkpointLsn = MMF.CheckpointLsnWatermark;
         WalManager.Initialize(lastSegmentId, lastLSN > 0 ? lastLSN + 1 : 1, checkpointLsn);
         WalManager.Logger = Logger;
         WalManager.Start();
@@ -786,7 +786,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         long initialCheckpointLsn;
         using (EpochGuard.Enter(EpochManager))
         {
-            initialCheckpointLsn = MMF.Bootstrap.GetLong(ManagedPagedMMF.BK_CheckpointLSN);
+            initialCheckpointLsn = MMF.CheckpointLsnWatermark;
         }
 
         StagingBufferPool = new StagingBufferPool(MemoryAllocator, _durabilityNode);
@@ -799,6 +799,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         CheckpointManager = new CheckpointManager(MMF, UowRegistry, WalManager, _options.Resources, EpochManager, StagingBufferPool, _durabilityNode,
             initialCheckpointLsn, () => _lastTickFenceLSN);
+        CheckpointManager.Logger = Logger;
         CheckpointManager.Start();
 
         // Wire demand-driven flush: when page cache backpressure fires, immediately wake
@@ -2968,9 +2969,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         {
             // Loading path: read SPIs from bootstrap
             var spi = MMF.Bootstrap.GetInt(BK_UowRegistrySPI);
-            var checkpointLSN = MMF.Bootstrap.GetLong(ManagedPagedMMF.BK_CheckpointLSN);
+            var checkpointLSN = MMF.CheckpointLsnWatermark;
             // Clean-shutdown HEAD marker (see field docs): capture both LSNs now; InitializeArchetypes decides trust.
-            _cleanShutdownAtOpen = MMF.Bootstrap.GetInt(BK_CleanShutdown) == 1;
+            _cleanShutdownAtOpen = MMF.CleanShutdownWatermark;
             _checkpointLsnAtOpen = checkpointLSN;
             var segment = MMF.GetSegment(spi);
             UowRegistry = new UowRegistry(segment, MMF, EpochManager, MemoryAllocator, this);
@@ -3552,10 +3553,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// </remarks>
     private void MarkCleanShutdown()
     {
-        MMF.Bootstrap.SetInt(BK_CleanShutdown, 1);
-        MMF.SaveBootstrap();
-        MMF.FlushToDisk();
-        var checkpointLsn = MMF.Bootstrap.GetLong(ManagedPagedMMF.BK_CheckpointLSN);
+        MMF.SetCleanShutdown(true);
+        var checkpointLsn = MMF.CheckpointLsnWatermark;
         LogCleanShutdownMarked(checkpointLsn);
         LogWalWatermarksSnapshot("close", checkpointLsn);
     }
@@ -4105,11 +4104,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         LastOpenVersionedHeadRebuildCount = 0;
         _headsTrusted = _cleanShutdownAtOpen
             && (_migratedComponents == null || _migratedComponents.Count == 0);
-        if (MMF.Bootstrap.GetInt(BK_CleanShutdown) != 0)
+        if (MMF.CleanShutdownWatermark)
         {
-            MMF.Bootstrap.SetInt(BK_CleanShutdown, 0);
-            MMF.SaveBootstrap();
-            MMF.FlushToDisk();
+            MMF.SetCleanShutdown(false);
         }
         LogVersionedHeadReopenDecision(_headsTrusted, _cleanShutdownAtOpen, _checkpointLsnAtOpen);
         LogWalWatermarksSnapshot("open", _checkpointLsnAtOpen);
@@ -4597,7 +4594,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         long checkpointLsn;
         using (EpochGuard.Enter(EpochManager))
         {
-            checkpointLsn = MMF.Bootstrap.GetLong(ManagedPagedMMF.BK_CheckpointLSN);
+            checkpointLsn = MMF.CheckpointLsnWatermark;
         }
 
         // Read with a throwaway IO when no backend is injected; the WAL writer's handles coexist (segments open with sharing).
