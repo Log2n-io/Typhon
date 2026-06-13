@@ -56,7 +56,7 @@ public partial class DatabaseEngine
             }
         }
 
-        // Reserved root / header pages (page index < 4) — unless free.
+        // Reserved root / header pages (page index < InitialReservedPageCount: meta pair, occupancy root + its twin, occupancy growth reserves) — unless free.
         var rootEnd = Math.Min(ManagedPagedMMF.InitialReservedPageCount, pageCount);
         for (var p = 0; p < rootEnd; p++)
         {
@@ -78,6 +78,17 @@ public partial class DatabaseEngine
                 {
                     pages[page] = type;
                 }
+            }
+        }
+
+        // CK-05 (C2) directory twins — each shadows a directory page (the primary it pairs with); classify it the same so
+        // no allocated page reads as Unknown. The primary has already been classified above (a root via its segment, or a
+        // reserved page via the root range), so mirror it. Runs last: the twin always reflects its primary's final type.
+        foreach (var (primary, twin) in MMF.DirectoryPairs)
+        {
+            if ((uint)twin < (uint)pageCount && (uint)primary < (uint)pageCount && pages[twin] != StoragePageType.Free)
+            {
+                pages[twin] = pages[primary];
             }
         }
     }
@@ -738,15 +749,15 @@ public partial class DatabaseEngine
 
     /// <summary>
     /// Maps an occupancy-segment page (by its ordinal within the occupancy segment, 0 = root) to the contiguous range of file pages whose allocation bits it
-    /// stores. The root page's data area is shorter than every subsequent page's (it shares the page with the segment's fixed index section), so it governs
-    /// fewer pages — a uniform per-page assumption would misalign every range after the root. Used by the Database File Map (Module 15, A6) to render an
-    /// occupancy page as a mini allocation-map of the region it governs; the bits themselves come from <see cref="ManagedPagedMMF.ReadOccupancyBits"/>.
+    /// stores. With the directory-only root (v4) the root page holds ONLY the segment's page directory — it stores no bitmap words, so it governs zero file
+    /// pages; every subsequent page stores the full <see cref="PagedMMF.PageRawDataSize"/> of L0 words. Used by the Database File Map (Module 15, A6) to render
+    /// an occupancy page as a mini allocation-map of the region it governs; the bits themselves come from <see cref="ManagedPagedMMF.ReadOccupancyBits"/>.
     /// </summary>
     internal (long FirstGovernedPage, int GovernedCount) GetOccupancyPageGovernedRange(int occupancyPageOrdinal)
     {
-        // One allocation bit governs one file page. The root page stores (PageRawDataSize - index section) bytes of bitmap; subsequent pages store the full
-        // PageRawDataSize. ×8 converts bytes → bits → governed pages.
-        const int rootGoverned = (PagedMMF.PageRawDataSize - LogicalSegment<PersistentStore>.RootHeaderIndexSectionLength) * 8;
+        // One allocation bit governs one file page. The directory-only root stores no bitmap words (rootGoverned == 0); each data page stores the full
+        // PageRawDataSize. ×8 converts bytes → bits → governed pages. Data-page ordinal k (k >= 1) governs file pages [(k-1)·otherGoverned, k·otherGoverned).
+        const int rootGoverned = (PagedMMF.PageRawDataSize - LogicalSegment<PersistentStore>.RootHeaderIndexSectionLength) * 8; // == 0 under the v4 layout
         const int otherGoverned = PagedMMF.PageRawDataSize * 8;
 
         if (occupancyPageOrdinal <= 0)
@@ -787,8 +798,9 @@ public partial class DatabaseEngine
     /// <list type="bullet">
     /// <item><b>Popcount canary</b> — the count of set bits in the occupancy bitmap must equal the sum of every registered segment's <c>Pages.Length</c>,
     /// plus each segment's directory-map extension pages (the pages outside the root that hold the page-index list when the segment owns more than 500 data
-    /// pages — they are bit-set but not part of <c>Pages</c>), plus the four reserved root pages (0..3), plus the two occupancy-reserve pages held by the
-    /// page-allocator machinery. Any orphan (bit set, no claimant) or phantom (claimant, bit clear) is reported as a hard durability/structural bug.</item>
+    /// pages — they are bit-set but not part of <c>Pages</c>), plus each directory page's CK-05 twin (the alternate slot, bit-set but in no segment list),
+    /// plus the reserved root pages (0..InitialReservedPageCount-1), plus the occupancy-reserve pages (data, map-extension, and the map-extension twin) held by
+    /// the page-allocator machinery. Any orphan (bit set, no claimant) or phantom (claimant, bit clear) is reported as a hard durability/structural bug.</item>
     /// <item><b>Chunk-segment capacity</b> — for every <see cref="ChunkBasedSegment{TStore}"/>, <c>AllocatedChunkCount + FreeChunkCount</c> must equal
     /// <c>ChunkCapacity</c>. Desync indicates the segment's chunk free-list drifted from its on-page chunk bitmaps.</item>
     /// </list>
@@ -843,8 +855,8 @@ public partial class DatabaseEngine
         {
             owned[p >> 6] |= 1L << (p & 0x3F);
         }
-        // Occupancy reserves — the two pages held outside any segment for occupancy-machinery growth.
-        var (dataReserve, mapReserve) = MMF.ReservedOccupancyPages;
+        // Occupancy reserves — the pages held outside any segment for occupancy-machinery growth (data, map-extension, and the map-extension twin).
+        var (dataReserve, mapReserve, mapTwinReserve) = MMF.ReservedOccupancyPages;
         if ((uint)dataReserve < (uint)pageCount)
         {
             owned[dataReserve >> 6] |= 1L << (dataReserve & 0x3F);
@@ -852,6 +864,19 @@ public partial class DatabaseEngine
         if ((uint)mapReserve < (uint)pageCount)
         {
             owned[mapReserve >> 6] |= 1L << (mapReserve & 0x3F);
+        }
+        if ((uint)mapTwinReserve < (uint)pageCount)
+        {
+            owned[mapTwinReserve >> 6] |= 1L << (mapTwinReserve & 0x3F);
+        }
+
+        // CK-05 (C2) directory twins — each is bit-set in the occupancy bitmap but lives in no segment's page list; the pair state owns them.
+        foreach (var (_, twin) in MMF.DirectoryPairs)
+        {
+            if ((uint)twin < (uint)pageCount)
+            {
+                owned[twin >> 6] |= 1L << (twin & 0x3F);
+            }
         }
 
         // Compare word-by-word — orphans = bits set in `words` but not in `owned`, phantoms = vice versa.

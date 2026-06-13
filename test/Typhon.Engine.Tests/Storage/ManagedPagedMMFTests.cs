@@ -258,8 +258,13 @@ public class ManagedPagedMMFTests
                 var root = (addr[0] & (byte)PageBlockFlags.IsLogicalSegmentRoot) != 0;
                 var offset = root ? LogicalSegment<PersistentStore>.RootHeaderIndexSectionLength : 0;
                 var rd = new Span<int>(addr + PagedMMF.PageHeaderSize + offset, (PagedMMF.PageRawDataSize - offset) / sizeof(int));
-                rd[0] = i;
-                rd[^1] = i + 1000;
+                // Directory-only root (v4): the root page carries no data (offset == PageRawDataSize → empty span). Only data
+                // pages (segment page 1+) round-trip user data.
+                if (rd.Length > 0)
+                {
+                    rd[0] = i;
+                    rd[^1] = i + 1000;
+                }
                 pmmf.UnlatchPageExclusive(memPageIdx);
             }
             cs.SaveChanges();
@@ -280,6 +285,11 @@ public class ManagedPagedMMFTests
                 var root = (addr[0] & (byte)PageBlockFlags.IsLogicalSegmentRoot) != 0;
                 var offset = root ? LogicalSegment<PersistentStore>.RootHeaderIndexSectionLength : 0;
                 var rd = new Span<int>(addr + PagedMMF.PageHeaderSize + offset, (PagedMMF.PageRawDataSize - offset) / sizeof(int));
+                // Directory-only root (v4): the root page carries no data — nothing to verify on it.
+                if (rd.Length == 0)
+                {
+                    continue;
+                }
                 Assert.That(rd[0], Is.EqualTo(i));
                 Assert.That(rd[^1], Is.EqualTo(i + 1000));
             }
@@ -646,12 +656,16 @@ Here come the drones!";
         Assert.That(rwsl.SharedUsedCounter, Is.EqualTo(0));
     }
 
-    [Test, CancelAfter(10_000)]
-    [Property("MemPageCount", 50000)]       // Must be larger than maxBeforeGrow defined below
+    [Test, CancelAfter(30_000)]
+    [Property("MemPageCount", 66000)]       // Must be larger than maxBeforeGrow defined below (all pages dirty until SaveChanges)
     public void GrowOccupancyMapTest()
     {
-        const int maxBeforeGrow = 
-            ((PagedMMF.PageRawDataSize - LogicalSegment<PersistentStore>.RootHeaderIndexSectionLength) * 8) - ManagedPagedMMF.InitialReservedPageCount - 25;
+        // Directory-only root (v4): the occupancy segment's FIRST DATA page governs the full PageRawDataSize × 8 = 64000
+        // file pages (the directory-only root governs none), so the occupancy map grows once total allocations approach
+        // 64000 — up from 48000 under the old root-holds-bitmap layout. Size the segment just under that boundary; the
+        // subsequent +10 grow (plus directory/twin overhead) pushes total allocations past it and forces the occupancy grow.
+        const int maxBeforeGrow =
+            (PagedMMF.PageRawDataSize * 8) - ManagedPagedMMF.InitialReservedPageCount - 25;
         
         int rootSegmentIndex, segmentTotalLength;
         ReadOnlySpan<int> segmentPages;
@@ -703,9 +717,11 @@ Here come the drones!";
     [Property("MemPageCount", 2600)]        // 2510 data pages + map/bitmap overhead; dirty pages are non-evictable until SaveChanges()
     public void LogicalSegmentGrowTest()
     {
-        const int initialSize = 10;         // Header = 10
-        const int firstGrowSize = 510;      // Header = 500, Map #1 (new) = 10
-        const int secondGrowSize = 2510;    // Header = 500, Map #1 = 2000, Map #2 (new) = 10
+        // v4 directory-only root: the root directory holds RootHeaderIndexSectionCount (2000) page-index entries; overflow spills
+        // to map-extension directory pages of NextHeadersIndexSectionCount (2000) entries each.
+        const int initialSize = 10;         // root directory = 10 entries
+        const int firstGrowSize = 510;      // root directory = 510 entries (all fit in the 2000-entry root; no map extension)
+        const int secondGrowSize = 2510;    // root directory = 2000 entries, Map #1 (new) = 510 entries
         {
             using var scope = _serviceProvider.CreateScope();
             var pmmf = scope.ServiceProvider.GetRequiredService<ManagedPagedMMF>();
@@ -719,7 +735,7 @@ Here come the drones!";
             s0.Grow(secondGrowSize, true, cs);
             cs.SaveChanges();
         }
-        
+
     }
 
     /// <summary>

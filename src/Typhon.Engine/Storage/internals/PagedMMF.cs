@@ -44,7 +44,12 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     internal const int PageRawDataSize          = PageSize - PageHeaderSize;
     internal const int PageSizePow2             = 13;                                   // 2^( PageSizePow2 = PageSize
     internal const int ChunkStartAlignment      = 64;                                   // Cache line — ceiling for chunk-start alignment (see ChunkBasedSegment)
-    internal const int DatabaseFormatRevision   = 2;   // v2 (CK-05): meta pair at pages 0–1, no backward compat (v1 files refused)
+    // v4 (CK-05 C2, directory-only root): every logical segment's root page now holds ONLY its page directory (the full
+    // 8000-byte raw-data area = 2000 entries), carrying no segment data — so the CK-05 twin protects only the immutable
+    // directory, never live data. The occupancy genesis therefore reserves one extra page (the occupancy bitmap's first
+    // data page) and segments always span >= 2 pages. v3 (segment-directory twins, occupancy reserve = Int3) and earlier
+    // are refused — no backward compat.
+    internal const int DatabaseFormatRevision   = 4;
     internal const ulong MinimumCacheSize       = DefaultMemPageCount * PageSize;
     internal const int WriteCachePageSize       = 1024 * 1024;
 
@@ -1570,6 +1575,23 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// </summary>
     protected virtual bool IsExternallyPersisted(int filePageIndex) => false;
 
+    /// <summary>
+    /// Hook for the protected-page (CK-05) write redirect. When <paramref name="filePageIndex"/> is a protected segment-
+    /// directory page, a derived store writes <paramref name="image"/> to the page's alternate slot (stamping
+    /// <c>PairGeneration = gen+1</c> + a fresh CRC), fsyncs, and flips the in-memory current slot — returning <c>true</c>
+    /// so the caller skips the normal in-place write + CRC. Base: not protected → <c>false</c> (caller writes in place).
+    /// <paramref name="image"/> is the page's live or staging buffer and is mutated in place (generation + checksum).
+    /// Called from both write paths (<see cref="SavePages"/> structural, <see cref="WritePagesForCheckpoint"/> checkpoint).
+    /// </summary>
+    protected virtual unsafe bool TryPersistProtectedPage(int filePageIndex, byte* image) => false;
+
+    /// <summary>
+    /// Whether a file page is a protected segment-directory page (CK-05, C2) — i.e. its writes must be redirected to an
+    /// alternate slot. Lets the structural-save path partition such pages out before coalescing contiguous in-place writes.
+    /// Base: false. A derived store returns true for any page currently registered in its directory-pair state.
+    /// </summary>
+    protected virtual bool IsProtectedPage(int filePageIndex) => false;
+
     internal void IncrementDirty(int memPageIndex)
     {
         var pi = _memPagesInfo[memPageIndex];
@@ -1870,19 +1892,32 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             // Release the sentinel — writers can resume.
             Interlocked.Exchange(ref pi.ActiveChunkWriters, 0);
 
-            // Increment ChangeRevision and compute CRC on the staging copy (not the live page)
-            if (pi.FilePageIndex > 0)
+            // Increment ChangeRevision and compute CRC on the staging copy (not the live page).
+            var filePageIndex = pi.FilePageIndex;
+            var redirected = false;
+            if (filePageIndex > 0)
             {
                 var stagingHeader = (PageBaseHeader*)staging.Pointer;
                 ++stagingHeader->ChangeRevision;
-                stagingHeader->PageChecksum = WalCrc.ComputeSkipping(staging.Span, PageBaseHeader.PageChecksumOffset, PageBaseHeader.PageChecksumSize);
+
+                // CK-05 (C2): a dirty segment-directory page is redirected to its alternate slot (PairGeneration + CRC stamped
+                // on this staging copy, write, fsync, flip — all inside TryPersistProtectedPage). Non-directory pages fall
+                // through to the normal in-place CRC + write below.
+                redirected = TryPersistProtectedPage(filePageIndex, staging.Pointer);
+                if (!redirected)
+                {
+                    stagingHeader->PageChecksum = WalCrc.ComputeSkipping(staging.Span, PageBaseHeader.PageChecksumOffset, PageBaseHeader.PageChecksumSize);
+                }
             }
 
-            // Write staging buffer to the data file (synchronous — checkpoint runs on dedicated thread)
-            var filePageIndex = pi.FilePageIndex;
-            var pageOffset = filePageIndex * (long)PageSize;
-            RandomAccess.Write(_fileHandle, staging.Span, pageOffset);
-            TrackFileGrowth(pageOffset + PageSize);
+            // Write staging buffer to the data file (synchronous — checkpoint runs on dedicated thread). Skipped when the
+            // page was already written (and fsynced) to its alternate slot by the protected-page redirect above.
+            if (!redirected)
+            {
+                var pageOffset = filePageIndex * (long)PageSize;
+                RandomAccess.Write(_fileHandle, staging.Span, pageOffset);
+                TrackFileGrowth(pageOffset + PageSize);
+            }
 
             // Partition in place: written pages to the front [0, writtenCount), skipped pages to the back [writtenCount, length). Swap (never overwrite) so the
             // caller can retry exactly the skipped tail in a later pass (coverage gate, CK-03) instead of losing track of which pages still need writing.
@@ -1915,16 +1950,81 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         var flushBeginTs = flushScope.Header.StartTimestamp;
         var flushPageCount = memPageIndices.Length;
 
+        var memPageBaseAddr = _memPagesAddr;
+
         // We want to generate as few IO operations as possible, so we sort the pages to identify the ones that are contiguous in the file
         Array.Sort(memPageIndices, (x, y) => x - y);
 
+        // CK-05 (C2): protected segment-directory pages must be written to their ALTERNATE slot (gen+1 + CRC + fsync + flip,
+        // all inside PersistProtectedPage) — they cannot be coalesced with their in-place neighbors. Handle them individually
+        // here and build `normalPages` (sorted, protected pages removed) for the coalesced in-place path below. memPageIndices
+        // is left intact so the continuation's DecrementDirty still releases the protected pages' DirtyCounter.
+        // The common structural flush touches ZERO protected pages (pure data), so scan first — a cheap dictionary probe per
+        // page, no allocation — and only build the partitioned `normalPages` list when a protected page is actually present.
+        // (The previous version allocated a full-length List<int> on EVERY flush and discarded it whenever protectedCount==0.)
+        int[] normalPages = memPageIndices;
+        var hasProtected = false;
+        for (int i = 0; i < memPageIndices.Length; i++)
+        {
+            var fpi = _memPagesInfo[memPageIndices[i]].FilePageIndex;
+            if (fpi > 0 && IsProtectedPage(fpi))
+            {
+                hasProtected = true;
+                break;
+            }
+        }
+
+        if (hasProtected)
+        {
+            var normal = new List<int>(memPageIndices.Length);
+            for (int i = 0; i < memPageIndices.Length; i++)
+            {
+                var pi = _memPagesInfo[memPageIndices[i]];
+                if (pi.FilePageIndex > 0 && IsProtectedPage(pi.FilePageIndex))
+                {
+                    // Wait for any pending IO read so the live page is complete, bump ChangeRevision, then redirect the write.
+                    var ioTask = pi.IOReadTask;
+                    if (ioTask != null && !ioTask.IsCompletedSuccessfully)
+                    {
+                        ioTask.GetAwaiter().GetResult();
+                    }
+
+                    var headerAddr = (PageBaseHeader*)(memPageBaseAddr + (pi.MemPageIndex * (long)PageSize));
+                    ++headerAddr->ChangeRevision;
+                    TryPersistProtectedPage(pi.FilePageIndex, (byte*)headerAddr);
+                }
+                else
+                {
+                    normal.Add(memPageIndices[i]);
+                }
+            }
+
+            // Sorted, protected pages removed; empty if every page was protected (handled by the length==0 branch below).
+            normalPages = normal.ToArray();
+        }
+
+        if (normalPages.Length == 0)
+        {
+            // Every page was a protected directory page — already written + fsynced + flipped. Just release DirtyCounter.
+            foreach (int memPageIndex in memPageIndices)
+            {
+                DecrementDirty(memPageIndex);
+            }
+
+            if (flushSpanId != 0)
+            {
+                TyphonEvent.EmitPageCacheFlushCompleted(flushSpanId, flushBeginTs, flushPageCount, Stopwatch.GetTimestamp());
+            }
+
+            return Task.CompletedTask;
+        }
+
         var operations = new List<(int memPageIndex, int length)>();
 
-        var curPageInfo = _memPagesInfo[memPageIndices[0]];
-        var curOperation = (memPageIndex: memPageIndices[0], length: 1);
-        var memPageBaseAddr = _memPagesAddr;
+        var curPageInfo = _memPagesInfo[normalPages[0]];
+        var curOperation = (memPageIndex: normalPages[0], length: 1);
 
-        for (int i = 1; i < memPageIndices.Length; i++)
+        for (int i = 1; i < normalPages.Length; i++)
         {
             // Increment the ChangeRevision for the page (File Page 0 is the file header, it's a different format so ignore it)
             if (curPageInfo.FilePageIndex > 0)
@@ -1944,7 +2044,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                 headerAddr->PageChecksum = WalCrc.ComputeSkipping(pageSpan, PageBaseHeader.PageChecksumOffset, PageBaseHeader.PageChecksumSize);
             }
 
-            var nextMemPageIndex = memPageIndices[i];
+            var nextMemPageIndex = normalPages[i];
             var nextPageInfo = _memPagesInfo[nextMemPageIndex];
             if ((curPageInfo.MemPageIndex+1)==nextPageInfo.MemPageIndex && (curPageInfo.FilePageIndex+1)==nextPageInfo.FilePageIndex)
             {

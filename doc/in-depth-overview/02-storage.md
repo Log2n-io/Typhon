@@ -133,16 +133,20 @@ CRC verification is **lazy**. `EnsurePageVerified` (line ~1436) runs only the fi
 
 [`ManagedPagedMMF`](../../src/Typhon.Engine/Storage/internals/ManagedPagedMMF.cs) extends `PagedMMF` with what makes the file actually a *database*: a known root layout, an occupancy bitmap, and a bootstrap key/value store.
 
-### The first four pages of an empty file
+### The first eight pages of an empty file (format v4)
 
 ```
-Page 0: Root file header     — magic + format revision + bootstrap dictionary
-Page 1: Occupancy segment root — LogicalSegment carrying the BitmapL3
-Page 2: Reserved for occupancy growth (pre-allocated, currently unused)
-Page 3: Reserved for the occupancy bitmap's next map page (pre-allocated, currently unused)
+Page 0: Meta slot A          — magic + format revision + bootstrap dictionary (CK-05 A/B meta pair)
+Page 1: Meta slot B          — the alternate meta slot
+Page 2: Occupancy segment root — directory-only LogicalSegment (lists [2, 4]); CK-05 directory page → twinned
+Page 3: Occupancy root TWIN   — the root's second physical slot (CK-05)
+Page 4: Occupancy first data page — the BitmapL3 L0 words live here (the directory-only root carries no data)
+Page 5: Reserved for occupancy growth (next data page)
+Page 6: Reserved for the occupancy bitmap's next map-extension directory page
+Page 7: Reserved for that map-extension page's TWIN (it is itself a directory page → needs a twin)
 ```
 
-`InitialReservedPageCount = 4`. Pages 2 and 3 are pre-allocated so the *first* occupancy grow doesn't need to chain through the allocator that's itself trying to grow.
+`InitialReservedPageCount = 8`. The reserves are pre-allocated so the *first* occupancy grow doesn't need to chain through the allocator that's itself trying to grow. The **directory-only root (v4)** is why the occupancy bitmap needs a *separate* first data page (page 4): the root page now holds only the segment's page directory, no bitmap words.
 
 ### `RootFileHeader` — about 108 bytes
 
@@ -153,7 +157,7 @@ On disk at page 0, offset `PageBaseHeaderSize` (64), there's a small identity he
 unsafe internal struct RootFileHeader
 {
     public fixed byte HeaderSignature[32];    // "TyphonDatabase"
-    public int        DatabaseFormatRevision; // currently 1
+    public int        DatabaseFormatRevision; // currently 4 (CK-05 twins + directory-only root)
     public ulong      DatabaseFilesChunkSize;
     public fixed byte DatabaseName[64];       // verified on load
 }
@@ -175,7 +179,7 @@ Keys are conventional engine prefixes — `OccupancyMapSPI`, `OccupancyReserved`
 
 ### Occupancy bitmap — `BitmapL3` on a `LogicalSegment`
 
-The free-page tracking lives in [`BitmapL3`](../../src/Typhon.Engine/Storage/internals/ManagedPagedMMF.BitmapL3.cs) — a three-level summarized bitmap stored *in the file itself* as the raw data of a `LogicalSegment<PersistentStore>`. Each L0 long covers 64 pages of the file; one segment-page worth of L0 longs (`PageRawDataSize / 8 = 1000`) covers 64 000 file pages, which is roughly **500 MiB of file data per occupancy page**.
+The free-page tracking lives in [`BitmapL3`](../../src/Typhon.Engine/Storage/internals/ManagedPagedMMF.BitmapL3.cs) — a three-level summarized bitmap stored *in the file itself* as the raw data of a `LogicalSegment<PersistentStore>`. Each L0 long covers 64 pages of the file; one *data* page worth of L0 longs (`PageRawDataSize / 8 = 1000`) covers 64 000 file pages, which is roughly **500 MiB of file data per occupancy data page**. With the directory-only root (v4) the occupancy segment's root holds only the page directory — no bitmap words — so the L0 words start on the segment's first data page (genesis page 4). Bit mutations keep their data page dirty-until-checkpoint (even on allocation paths that pass no `ChangeSet`), so a torn/evicted occupancy page can never silently drop a freshly-set bit.
 
 When occupancy gets full, `GrowOccupancySegment` consumes the pre-allocated `_occupancyNextReservedPageIndex`, allocates a fresh reserve, and the cycle continues. The L1/L2 summary levels live in heap memory (`Memory<long>` arrays) — they're rebuilt on load from the L0 bitmap (source of truth).
 
@@ -189,21 +193,21 @@ A *segment* is a typed view of a sequence of file pages. The base class [`Logica
 
 ### `LogicalSegment<TStore>` — page-list segment
 
-The root page reserves a 2000-byte (500 × 4 B) index section listing the first 500 pages of the segment. If the segment grows beyond 500 pages, additional **index pages** are chained — each holding 2000 (= `PageRawDataSize / sizeof(int)`) more page indices.
+**Directory-only root (v4).** The root page is a *pure directory page*: its entire 8000-byte raw-data area lists the first 2000 pages of the segment — it carries **no** segment data. If the segment grows beyond 2000 pages, additional **map-extension pages** are chained, each holding another 2000 (= `PageRawDataSize / sizeof(int)`) page indices. Because the root holds no data, the CK-05 twin that shadows every directory page (§7) protects only the immutable directory — never live data — and directory addressing is uniform (root and every extension page hold the same number of entries). One consequence: a segment always spans **at least 2 pages** (the directory root + at least one data page); the allocators clamp to this minimum.
 
 Two relevant constants:
 
 | Constant | Value | Meaning |
 |---|---|---|
-| `RootHeaderIndexSectionCount` | 500 | Page indices stored on the root page |
-| `NextHeadersIndexSectionCount` | 2000 | Page indices stored on each subsequent index page |
+| `RootHeaderIndexSectionCount` | 2000 | Page indices on the directory-only root page (= `NextHeadersIndexSectionCount`) |
+| `NextHeadersIndexSectionCount` | 2000 | Page indices stored on each map-extension page |
 
 Forward traversal goes through the linked list in [`LogicalSegmentHeader`](../../src/Typhon.Engine/Storage/internals/LogicalSegment.cs) (lives at offset `PageBaseHeader.Size = 64` inside each segment page, in the metadata zone):
 
-- `LogicalSegmentNextMapPBID` — next index page (`0` = end)
+- `LogicalSegmentNextMapPBID` — next map-extension directory page (`0` = end)
 - `LogicalSegmentNextRawDataPBID` — next data page (`0` = end)
 
-The root page has only `PageRawDataSize - RootHeaderIndexSectionLength = 6000` bytes of usable data (the directory eats the rest); subsequent data pages have the full 8000.
+The root page holds **no** usable data (the directory fills the whole `PageRawDataSize`); every data page (segment page 1+) has the full 8000 bytes.
 
 `Grow(newLength, ...)` is `lock`-protected and `volatile`-publishes the new `_pages` array — concurrent reads always see a consistent index view. `GetPage(i, epoch, ...)` resolves the i-th segment page index through `_store.RequestPageEpoch`, returning a [`PageAccessor`](../../src/Typhon.Engine/Storage/public/PageAccessor.cs) (a thin wrapper over the page address with typed `Metadata<T>` / `RawData<T>` / `StructAt<T>` slicing).
 
@@ -211,11 +215,11 @@ The root page has only `PageRawDataSize - RootHeaderIndexSectionLength = 6000` b
 
 Stores fixed-size chunks (minimum stride 8 B). Each page reserves part of its 128-byte metadata zone for a per-page occupancy bitmap; chunks are allocated by setting bits in that bitmap via `Interlocked.Or`. Three precomputed values keep `GetChunkLocation` branch-free:
 
-- `ChunkCountRootPage` — chunks per root page (minus the 2000 B directory + alignment padding)
-- `ChunkCountPerPage` — chunks per non-root page
+- `ChunkCountRootPage` — chunks per root page. With the directory-only root (v4) the directory fills the whole root, so this is **always 0** — chunk 0 lives on segment page 1, not the root.
+- `ChunkCountPerPage` — chunks per data (non-root) page
 - `_divMagic` — magic multiplier for `chunkIdx / ChunkCountPerPage` (multiply + shift, ~3 cycles, vs 20–80 for division)
 
-Alignment padding ensures chunks start at stride-aligned absolute page offsets — for `stride = 128`, the root page wastes 112 B and each other page wastes 64 B (because `PageHeaderSize = 192` isn't a multiple of 128). For `stride = 64`, padding is zero.
+Alignment padding ensures chunks start at stride-aligned absolute page offsets — for `stride = 128`, each data page wastes 64 B (because `PageHeaderSize = 192` isn't a multiple of 128). For `stride = 64`, padding is zero. (The root carries no chunks, so its alignment is moot.)
 
 #### The lock-free forward singly-linked list
 

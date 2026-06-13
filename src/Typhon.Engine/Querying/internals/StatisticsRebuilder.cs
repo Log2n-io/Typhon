@@ -98,12 +98,22 @@ internal static class StatisticsRebuilder
         using var guard = EpochGuard.Enter(epochManager);
         var epoch = guard.Epoch;
 
-        for (int pageIndex = 0; pageIndex < totalPages; pageIndex += pageInterval)
+        // Directory-only root (v4): the root page (index 0) holds no chunks, so start sampling at the first DATA page. This
+        // keeps the very first sample from being wasted on the empty directory page and — critically under sampling — keeps the
+        // page stride aligned to where the data actually lives (otherwise a small segment whose entities all sit on page 1 is
+        // entirely skipped by an even stride starting at page 0).
+        int firstDataPage = rootChunkCount > 0 ? 0 : Math.Min(1, totalPages - 1);
+        for (int pageIndex = firstDataPage; pageIndex < totalPages; pageIndex += pageInterval)
         {
             bool isRoot = (pageIndex == 0);
             int maxChunks = isRoot ? rootChunkCount : otherChunkCount;
             int bitmapLongs = isRoot ? bitmapLongsRoot : bitmapLongsOther;
             int dataOffset = isRoot ? rootDataOffset : otherDataOffset;
+
+            // Global chunk 0 is the reserved null sentinel; it sits on the page holding the segment's first chunk — the root when
+            // the root carries chunks (legacy), else data page 1 under the v4 directory-only root. Hoisted out of the inner loop so
+            // the sentinel is skipped with a single per-page bool instead of recomputing the global chunk id for every sampled chunk.
+            bool pageHoldsChunkZero = rootChunkCount > 0 ? isRoot : (pageIndex == 1);
 
             var page = segment.GetPage(pageIndex, epoch, out _);
             var bitmap = page.MetadataReadOnly<long>();
@@ -122,8 +132,9 @@ internal static class StatisticsRebuilder
                         break;
                     }
 
-                    // Skip chunk 0 on root page (null sentinel)
-                    if (isRoot && chunkInPage == 0)
+                    // Skip the reserved chunk 0 (null sentinel). Sampling the uninitialized sentinel would feed a garbage key below
+                    // the computed min. Under the v4 directory-only root chunk 0 lives on data page 1, not the root (see pageHoldsChunkZero).
+                    if (pageHoldsChunkZero && chunkInPage == 0)
                     {
                         continue;
                     }

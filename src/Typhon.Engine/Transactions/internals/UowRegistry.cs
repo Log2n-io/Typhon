@@ -11,7 +11,8 @@ namespace Typhon.Engine.Internals;
 /// Persistent registry entry for a single UoW slot. Slot index = UoW ID.
 /// </summary>
 /// <remarks>
-/// 40 bytes divides evenly into both root page (6000/40=150) and overflow page (8000/40=200) data areas — zero waste.
+/// 40 bytes divides evenly into a page's 8000-byte data area (8000/40=200) — zero waste. With the directory-only root (v4)
+/// the registry stores entries only on data pages (segment page 1+); the root page holds the segment's page directory.
 /// <c>Free = 0</c> ensures that zeroed pages are automatically all-free entries.
 /// </remarks>
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
@@ -47,8 +48,10 @@ internal unsafe class UowRegistry : IDisposable
     // ═══════════════════════════════════════════════════════════════
 
     private  const int EntrySize        = 40;
-    internal const int RootCapacity     = 150;      // 6000 / 40
-    internal const int OverflowCapacity = 200;      // 8000 / 40
+    // Directory-only root (v4): the segment's root page holds only the page directory, so the registry stores no entries on
+    // it — every data page (segment page 1+) holds the full 8000/40 = 200 entries. There is no longer a distinct (smaller)
+    // root capacity.
+    internal const int PerPageCapacity  = 200;      // 8000 / 40
     private  const int MaxUowId         = 32767;    // 15-bit max
     private  const int BitmapWords      = 512;      // 32768 / 64
 
@@ -650,12 +653,8 @@ internal unsafe class UowRegistry : IDisposable
             return;
         }
 
-        // Calculate pages needed
-        var pagesNeeded = 1; // Root page
-        if (needed > RootCapacity)
-        {
-            pagesNeeded += (needed - RootCapacity + OverflowCapacity - 1) / OverflowCapacity;
-        }
+        // Calculate pages needed: 1 directory root (holds no entries) + ceil(needed / PerPageCapacity) data pages.
+        var pagesNeeded = 1 + ((needed + PerPageCapacity - 1) / PerPageCapacity);
 
         if (pagesNeeded > _segment.Length)
         {
@@ -690,13 +689,13 @@ internal unsafe class UowRegistry : IDisposable
     /// </summary>
     private static int ComputeCapacity(int pageCount)
     {
-        if (pageCount <= 0)
+        if (pageCount <= 1)
         {
-            return 0;
+            return 0; // only the directory root (or nothing) — holds no entries
         }
 
-        // Root page: 150 entries. Each overflow page: 200 entries.
-        return RootCapacity + ((pageCount - 1) * OverflowCapacity);
+        // Directory-only root (v4): page 0 is the page directory; each data page holds PerPageCapacity entries.
+        return (pageCount - 1) * PerPageCapacity;
     }
 
     // ═══════════════════════════════════════════════════════════════

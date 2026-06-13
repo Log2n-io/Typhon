@@ -499,10 +499,9 @@ class UowRegistryTests : TestBase<UowRegistryTests>
     [Test]
     public void Registry_Capacity_MatchesDesign()
     {
-        // Root page: 6000 / 40 = 150
-        Assert.That(UowRegistry.RootCapacity, Is.EqualTo(150));
-        // Overflow page: 8000 / 40 = 200
-        Assert.That(UowRegistry.OverflowCapacity, Is.EqualTo(200));
+        // Directory-only root (v4): the root page holds only the segment's page directory — no entries. Every data page
+        // (segment page 1+) holds the full 8000 / 40 = 200 entries.
+        Assert.That(UowRegistry.PerPageCapacity, Is.EqualTo(200));
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -635,8 +634,8 @@ class UowRegistryTests : TestBase<UowRegistryTests>
         using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
         var registry = dbe.UowRegistry;
 
-        // Fill all 150 slots in the root page to verify the immediate-failure parameterless overload still works
-        // We don't fill all 32767 slots (too expensive), so we test the WaitContext overload with expired deadline
+        // v4: capacity is PerPageCapacity (200) per data page, with no special root-page capacity. We don't fill all 32767 slots
+        // (too expensive), so we verify the immediate-failure parameterless overload and the WaitContext overload with an expired deadline.
         var id = registry.AllocateUowId();
         registry.Release(id);
 
@@ -655,7 +654,7 @@ class UowRegistryTests : TestBase<UowRegistryTests>
         using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
         var registry = dbe.UowRegistry;
 
-        // Fill all root page slots to set up a scenario
+        // Allocate a batch of slots (still far below the 32767 max) to set up a scenario
         const int fillCount = 100;
         var ids = new ushort[fillCount];
         for (int i = 0; i < fillCount; i++)
@@ -797,29 +796,28 @@ class UowRegistryTests : TestBase<UowRegistryTests>
     // ═══════════════════════════════════════════════════════════════
 
     [Test]
-    public void Registry_EnsureCapacity_GrowsBeyondRootCapacity()
+    public void Registry_EnsureCapacity_GrowsBeyondInitialCapacity()
     {
-        // Exercises UowRegistry.EnsureCapacity (lines 522-542):
-        // When a slot index >= _currentCapacity is claimed, the segment grows to accommodate it.
-        // RootCapacity = 150 (one page), OverflowCapacity = 200 per page.
+        // Exercises UowRegistry.EnsureCapacity: when a slot index >= _currentCapacity is claimed, the segment grows.
+        // Directory-only root (v4): the genesis registry is 2 pages (directory root + 1 data page), so the initial capacity
+        // is exactly one data page = PerPageCapacity (200). Claiming slot 200 grows it to 3 pages → 2 data pages = 400.
         using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
         var registry = dbe.UowRegistry;
 
-        Assert.That(registry.CurrentCapacity, Is.EqualTo(UowRegistry.RootCapacity),
-            "Initial capacity should be RootCapacity (150)");
+        Assert.That(registry.CurrentCapacity, Is.EqualTo(UowRegistry.PerPageCapacity),
+            "Initial capacity should be one data page (200)");
 
-        // Allocate 160 IDs — the 151st triggers EnsureCapacity growth
-        const int allocCount = 160;
+        // Allocate 201 IDs (slots 1..201). Slot 200 (>= capacity 200) triggers the grow.
+        const int allocCount = 201;
         var ids = new ushort[allocCount];
         for (int i = 0; i < allocCount; i++)
         {
             ids[i] = registry.AllocateUowId();
         }
 
-        // After allocating 160 slots (0 reserved, 1-160 used), capacity should have grown
-        // to RootCapacity + OverflowCapacity = 150 + 200 = 350
-        Assert.That(registry.CurrentCapacity, Is.EqualTo(UowRegistry.RootCapacity + UowRegistry.OverflowCapacity),
-            "Capacity should grow to 350 after exceeding root page");
+        // After the grow the segment is 3 pages → 2 data pages × 200 = 400.
+        Assert.That(registry.CurrentCapacity, Is.EqualTo(2 * UowRegistry.PerPageCapacity),
+            "Capacity should grow to 400 (2 data pages) after exceeding the first data page");
         Assert.That(registry.ActiveCount, Is.EqualTo(allocCount));
 
         // Cleanup
@@ -832,21 +830,20 @@ class UowRegistryTests : TestBase<UowRegistryTests>
     [Test]
     public void Registry_EnsureCapacity_MultipleOverflowPages()
     {
-        // Verify growth across multiple overflow pages (350 → 550 → ...)
+        // Verify growth across multiple data pages (200 → 400 → 600).
         using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
         var registry = dbe.UowRegistry;
 
-        // Allocate enough IDs to trigger two overflow page growths
-        // After 351st slot: needs 3 pages → capacity = 150 + 2*200 = 550
-        const int allocCount = 360;
+        // Allocate enough IDs to trigger two growths: slot 200 → 400, slot 400 → 600 (4 pages = 3 data pages).
+        const int allocCount = 401;
         var ids = new ushort[allocCount];
         for (int i = 0; i < allocCount; i++)
         {
             ids[i] = registry.AllocateUowId();
         }
 
-        Assert.That(registry.CurrentCapacity, Is.EqualTo(UowRegistry.RootCapacity + 2 * UowRegistry.OverflowCapacity),
-            "Capacity should grow to 550 after exceeding first overflow page");
+        Assert.That(registry.CurrentCapacity, Is.EqualTo(3 * UowRegistry.PerPageCapacity),
+            "Capacity should grow to 600 (3 data pages) after exceeding the second data page");
 
         // Cleanup
         foreach (var id in ids)

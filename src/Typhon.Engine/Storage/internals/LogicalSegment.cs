@@ -51,19 +51,23 @@ internal struct LogicalSegmentHeader
 /// </summary>
 /// <remarks>
 /// Logical Segment is made of several Pages which IDs are stored in a dedicated private section of its raw data.
-/// The segment can easily be shrunk/grown by removing/adding more pages. The first page of the Logical Segment is split in two parts
-///  - The Page Directory: 500 entries that reference the first 500 pages of the Logical Segment, overflown data is stored into
-///    subsequent dedicated pages that store only indices, so 2000 per page.
-///  - The segment first raw data, which is 6000 bytes, instead of 8000 for all subsequent pages.
+/// The segment can easily be shrunk/grown by removing/adding more pages. The first page (the ROOT) is a pure <b>directory
+/// page</b>: its entire 8000-byte raw-data area holds the page directory — 2000 entries that reference the first 2000 pages
+/// of the segment. Beyond 2000 pages, overflow entries spill into dedicated map-extension pages (also 2000 entries each).
+/// The root carries <b>no</b> segment data, so the CK-05 twin that shadows every directory page protects only the immutable
+/// directory, never live data, and root/extension directory addressing stays uniform. Consequently a segment always spans
+/// at least 2 pages (the directory root + at least one data page); the allocators clamp to this minimum.
 /// The segment also maintain a linked list in the Page Header to allow faster forward traversal.
 /// There is some basic API that allow to store/enumerate fixed size elements, indexed into the logical segment.
 /// </remarks>
 [PublicAPI]
 public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageStore
 {
-    internal const int RootHeaderIndexSectionCount = 500;
-    internal const int RootHeaderIndexSectionLength = RootHeaderIndexSectionCount * sizeof(int);
     internal const int NextHeadersIndexSectionCount = PagedMMF.PageRawDataSize / sizeof(int);
+    // Directory-only root (v4): the root page's whole raw-data area is the page directory, so it holds the SAME number of
+    // entries as a map-extension page. This makes the root carry no segment data — the CK-05 twin protects only directory.
+    internal const int RootHeaderIndexSectionCount = NextHeadersIndexSectionCount;
+    internal const int RootHeaderIndexSectionLength = RootHeaderIndexSectionCount * sizeof(int);
 
     protected TStore _store;
 
@@ -291,6 +295,15 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
 
     internal virtual bool Create(PageBlockType type, StorageSegmentKind kind, Span<int> filePageIndices, bool clear, ChangeSet changeSet = null)
     {
+        // Directory-only root (v4): the root page holds only the segment's page directory and carries no data, so every segment
+        // needs at least one data page beyond it (a 1-page segment would have ChunkCountRootPage==0 → zero usable chunks).
+        // The persistent allocators (AllocateSegment / AllocateChunkBasedSegment) clamp the page count to >= 2, but this is the
+        // single choke point through which ALL creation funnels — transient component/index segments (ComponentTable), the
+        // cluster segment (DatabaseEngine), genesis occupancy — so enforce the invariant here so any caller that under-allocates
+        // (today, or a future StartingSize tuned to 1) fails loudly in Debug/test rather than silently producing a 0-chunk segment.
+        Debug.Assert(filePageIndices.Length >= 2,
+            $"A v4 directory-only-root segment requires at least 2 pages (directory root + >= 1 data page); got {filePageIndices.Length}.");
+
         // The kind is persisted into the root page's header by CreateOrGrow (read back by Load) — set it before so the root-page write captures it.
         _kind = kind;
         // Phase 5: Storage:Segment:Create event. First page id doubles as the segment identifier.
@@ -403,6 +416,14 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
                     }
                     ref var lsh = ref page.StructAt<LogicalSegmentHeader>(LogicalSegmentHeader.Offset);
                     lsh.LogicalSegmentNextMapPBID = ((curIndexMapIndex + 1) < mapIndices.Length) ? mapIndices[curIndexMapIndex + 1] : 0;
+                    // CK-05 (C2): a NEW map-extension directory page gets a twin (a second physical slot it alternates between)
+                    // so a torn write can never corrupt the segment's page directory. The root's twin is stamped in the
+                    // data-page loop below; here we cover only the extension pages (curIndexMapIndex > 0). Idempotent on a store
+                    // that returns 0 (transient — not protected).
+                    if (isNewPage && (curIndexMapIndex > 0))
+                    {
+                        lsh.TwinPageIndex = _store.GetOrAllocateDirectoryTwin(curMapPageIndex, changeSet);
+                    }
                     isPageDirty = true;
                 }
 
@@ -553,6 +574,10 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
             if (i == 0)
             {
                 lsh.Kind = _kind;
+                // CK-05 (C2): the root is a directory page — give it a twin so a torn root write can't brick the segment.
+                // Stamped only at Create (growFrom == 0 reaches i == 0); on Grow the root keeps its existing twin. A
+                // transient store returns 0 ("no twin"); the occupancy root resolves to its pre-reserved twin (page 3).
+                lsh.TwinPageIndex = _store.GetOrAllocateDirectoryTwin(filePageIndices[0], changeSet);
             }
 
             // Durability: see comment in the map-page-update block above — CP-04 race defence needs DC ≥ 2 BEFORE the

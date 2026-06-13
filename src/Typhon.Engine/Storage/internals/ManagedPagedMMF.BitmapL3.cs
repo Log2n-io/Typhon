@@ -58,8 +58,8 @@ public partial class ManagedPagedMMF
             var (pageIndex, pageOffset) = LogicalSegment<PersistentStore>.GetItemLocation<long>(l0Offset);
             var epoch = _segment.Store.EpochManager.GlobalEpoch;
             var page = _segment.GetPageExclusive(pageIndex, epoch, out var memPageIdx);
-            var dataOffset = page.IsRoot ? LogicalSegment<PersistentStore>.RootHeaderIndexSectionLength : 0;
-            var data = page.RawData<long>(dataOffset, (PageRawDataSize - dataOffset) / sizeof(long));
+            Debug.Assert(!page.IsRoot, "v4: occupancy L0/L1 words never resolve to the directory-only root (GetItemLocation routes them to data pages)");
+            var data = page.RawData<long>(0, PageRawDataSize / sizeof(long));   // always offset 0 — the old root-branch was dead, removed
             {
                 var prevL0 = Interlocked.Or(ref data[pageOffset], l0Mask);
                 if ((prevL0 & l0Mask) != 0)
@@ -71,7 +71,7 @@ public partial class ManagedPagedMMF
 
                 if (data[pageOffset] != prevL0)
                 {
-                    changeSet?.AddByMemPageIndex(memPageIdx);
+                    MarkOccupancyPageDurable(memPageIdx, changeSet);
                 }
 
                 if (prevL0 != -1 && (prevL0 | l0Mask) == -1)
@@ -102,6 +102,28 @@ public partial class ManagedPagedMMF
             return true;
         }
 
+        /// <summary>
+        /// Keeps an occupancy bitmap data page durable after a bit change. With a ChangeSet the page rides the UoW lifecycle
+        /// (AddByMemPageIndex → IncrementDirty, ReleaseExcessDirtyMarks caps at 1). WITHOUT one (archetype / cluster / entity-map
+        /// allocations pass <c>null</c>), the bit would otherwise be set in memory only — and since the directory-only root (v4)
+        /// moved the L0 words off the always-resident segment root onto a plain data page, that page can be evicted between
+        /// allocations and reload stale, dropping the bit so the same pages get handed out twice (and losing the bit across a
+        /// reopen). <see cref="IPageStore.EnsureDirtyAtLeast"/> holds it dirty until the next checkpoint persists it, then it is
+        /// safely evictable again (disk now carries the bit).
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private void MarkOccupancyPageDurable(int memPageIdx, ChangeSet changeSet)
+        {
+            if (changeSet != null)
+            {
+                changeSet.AddByMemPageIndex(memPageIdx);
+            }
+            else
+            {
+                _segment.Store.EnsureDirtyAtLeast(memPageIdx, 1);
+            }
+        }
+
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
         public bool SetL1(int index, ChangeSet changeSet = null)
         {
@@ -111,8 +133,8 @@ public partial class ManagedPagedMMF
             var (pageIndex, pageOffset) = LogicalSegment<PersistentStore>.GetItemLocation<long>(l0Offset);
             var epoch = _segment.Store.EpochManager.GlobalEpoch;
             var page = _segment.GetPageExclusive(pageIndex, epoch, out var memPageIdx);
-            var dataOffset = page.IsRoot ? LogicalSegment<PersistentStore>.RootHeaderIndexSectionLength : 0;
-            var data = page.RawData<long>(dataOffset, (PageRawDataSize - dataOffset) / sizeof(long));
+            Debug.Assert(!page.IsRoot, "v4: occupancy L0/L1 words never resolve to the directory-only root (GetItemLocation routes them to data pages)");
+            var data = page.RawData<long>(0, PageRawDataSize / sizeof(long));   // always offset 0 — the old root-branch was dead, removed
             {
                 // CAS, not OR: bulk-allocate the entire L1 word IFF every bit is currently zero. The previous implementation used `Interlocked.Or(...)`
                 // which can't be undone — when the L1 word turned out to be partially occupied, the function returned false but had already set every
@@ -130,7 +152,7 @@ public partial class ManagedPagedMMF
 
                 if (data[pageOffset] != prevL0)
                 {
-                    changeSet?.AddByMemPageIndex(memPageIdx);
+                    MarkOccupancyPageDurable(memPageIdx, changeSet);
                 }
 
                 if (prevL0 != -1 && (prevL0 | l0Mask) == -1)
@@ -171,13 +193,13 @@ public partial class ManagedPagedMMF
             var (pageIndex, pageOffset) = LogicalSegment<PersistentStore>.GetItemLocation<long>(l0Offset);
             var epoch = _segment.Store.EpochManager.GlobalEpoch;
             var page = _segment.GetPageExclusive(pageIndex, epoch, out var memPageIdx);
-            var dataOff = page.IsRoot ? LogicalSegment<PersistentStore>.RootHeaderIndexSectionLength : 0;
-            var data = page.RawData<long>(dataOff, (PageRawDataSize - dataOff) / sizeof(long));
+            Debug.Assert(!page.IsRoot, "v4: occupancy L0/L1 words never resolve to the directory-only root (GetItemLocation routes them to data pages)");
+            var data = page.RawData<long>(0, PageRawDataSize / sizeof(long));   // always offset 0 — the old root-branch was dead, removed
             {
                 var prevL0 = Interlocked.And(ref data[pageOffset], l0ClearMask);
                 if ((prevL0 & l0SetMask) != 0)
                 {
-                    changeSet?.AddByMemPageIndex(memPageIdx);
+                    MarkOccupancyPageDurable(memPageIdx, changeSet);
                 }
 
                 if ((prevL0 == -1) && ((prevL0 & l0ClearMask) != -1))
@@ -216,8 +238,8 @@ public partial class ManagedPagedMMF
             var (pageIndex, pageOffset) = LogicalSegment<PersistentStore>.GetItemLocation<long>(offset);
             var epoch = _segment.Store.EpochManager.GlobalEpoch;
             var page = _segment.GetPage(pageIndex, epoch, out _);
-            var dataOff = page.IsRoot ? LogicalSegment<PersistentStore>.RootHeaderIndexSectionLength : 0;
-            var data = page.RawDataReadOnly<long>(dataOff, (PageRawDataSize - dataOff) / sizeof(long));
+            Debug.Assert(!page.IsRoot, "v4: occupancy L0/L1 words never resolve to the directory-only root (GetItemLocation routes them to data pages)");
+            var data = page.RawDataReadOnly<long>(0, PageRawDataSize / sizeof(long));   // always offset 0 — the old root-branch was dead, removed
             return (data[pageOffset] & mask) != 0L;
         }
 
@@ -251,8 +273,8 @@ public partial class ManagedPagedMMF
                         if (pageId != curPageId)
                         {
                             var page = _segment.GetPage(pageId, epoch, out _);
-                            var dataOff = page.IsRoot ? LogicalSegment<PersistentStore>.RootHeaderIndexSectionLength : 0;
-                            curDataSpan = page.RawDataReadOnly<long>(dataOff, (PageRawDataSize - dataOff) / sizeof(long));
+                            Debug.Assert(!page.IsRoot, "v4: occupancy L0/L1 words never resolve to the directory-only root (GetItemLocation routes them to data pages)");
+                            curDataSpan = page.RawDataReadOnly<long>(0, PageRawDataSize / sizeof(long));   // always offset 0 — the old root-branch was dead, removed
                             curPageId = pageId;
                         }
                         var data = curDataSpan;
@@ -501,8 +523,8 @@ public partial class ManagedPagedMMF
                 if (pageId != curPageId)
                 {
                     var page = _segment.GetPage(pageId, epoch, out _);
-                    var dataOff = page.IsRoot ? LogicalSegment<PersistentStore>.RootHeaderIndexSectionLength : 0;
-                    curData = page.RawDataReadOnly<long>(dataOff, (PageRawDataSize - dataOff) / sizeof(long));
+                    Debug.Assert(!page.IsRoot, "v4: occupancy L0/L1 words never resolve to the directory-only root (GetItemLocation routes them to data pages)");
+                    curData = page.RawDataReadOnly<long>(0, PageRawDataSize / sizeof(long));   // always offset 0 — the old root-branch was dead, removed
                     curPageId = pageId;
                 }
                 dest[i] = curData[offset];

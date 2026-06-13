@@ -106,17 +106,19 @@ class ChunkAccessorTests
     public void TearDown() => (_serviceProvider as IDisposable)?.Dispose();
 
     /// <summary>
-    /// Return the first chunk index on a given segment page for TestChunkLarge (2048-byte stride).
-    /// Page 0: chunk 1 (chunk 0 is reserved). Page N >= 1: chunk 2 + (N-1)*3.
+    /// Return the first chunk index on the (<paramref name="pageIndex"/>)-th CHUNK-bearing page for TestChunkLarge (2048-byte
+    /// stride). With the directory-only root (v4) the root — segment page 0 — holds no chunks (chunk 0 lives on segment page
+    /// 1), so chunk-bearing page 0 is segment page 1 (chunks 0,1,2; chunk 0 is the reserved sentinel), page 1 is segment page
+    /// 2 (chunks 3,4,5), and so on — 3 chunks per data page.
     /// </summary>
     private static int FirstChunkOnPage(int pageIndex)
     {
         if (pageIndex == 0)
         {
-            return 1;
+            return 1;   // first data page holds chunks 0,1,2 — chunk 0 is the reserved sentinel
         }
 
-        return 2 + (pageIndex - 1) * 3;
+        return pageIndex * 3;
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -660,7 +662,10 @@ class ChunkAccessorTests
 
     [Test]
     [CancelAfter(5000)]
-    [Property("MemPageCount", 16)]
+    // 24-page cache: the directory-only root (v4) adds fixed structural pages to the epoch-protected working set (a separate
+    // segment directory root + the 2-page occupancy segment), so the old 16-page budget no longer leaves room to cycle the 12
+    // pressure pages. 24 keeps real eviction pressure (the ~12 stale Phase-1 pages must still be evicted) with headroom.
+    [Property("MemPageCount", 24)]
     public unsafe void EpochProtection_PreventsEviction()
     {
         using var pmmf = _serviceProvider.GetRequiredService<ManagedPagedMMF>();

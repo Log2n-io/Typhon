@@ -86,6 +86,33 @@ class StatisticsRebuildTests : TestBase<StatisticsRebuildTests>
     }
 
     [Test]
+    public void RebuildAll_SmallSegment_UnderStride_SamplesDataPage1_NotEmpty()
+    {
+        using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        RegisterComponents(dbe);
+        dbe.InitializeArchetypes();
+        var ct = dbe.GetComponentTable<CompD>();
+
+        // ~50 entities — few enough that they all live on segment DATA page 1 (the v4 directory-only root holds no chunks, so the
+        // first data page is page 1).
+        for (int i = 0; i < 50; i++)
+        {
+            CreateAndCommitCompD(dbe, 1.0f, i, 1.0);
+        }
+
+        // Sample with an EVEN page stride. Under v4 the root (page 0) holds zero chunks, so a stride starting at page 0 would sample
+        // pages 0,2,4,... and entirely SKIP page 1 — where every entity lives — yielding zero samples and empty statistics. The fix
+        // starts sampling at the first DATA page. This proves the small-segment sampled path produces non-empty stats.
+        StatisticsRebuilder.RebuildAll(ct, dbe.EpochManager, pageInterval: 2);
+
+        var stats = ct.IndexStats[1]; // B field
+        Assert.That(stats.HyperLogLog, Is.Not.Null, "sampling a small segment must reach data page 1 — not skip it under an even stride starting at the empty root");
+        Assert.That(stats.DistinctValues, Is.GreaterThan(0), "the sampled small segment must yield distinct values, not an empty estimate");
+        Assert.That(stats.Histogram, Is.Not.Null);
+        Assert.That(stats.Histogram.TotalCount, Is.GreaterThan(0), "the histogram must be populated from data page 1");
+    }
+
+    [Test]
     public void RebuildAll_AllIndexedFields_SinglePass()
     {
         using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();

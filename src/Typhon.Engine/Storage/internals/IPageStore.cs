@@ -164,6 +164,16 @@ public unsafe interface IPageStore
     void AllocatePages(ref Span<int> pageIds, int startFrom, ChangeSet changeSet);
 
     /// <summary>
+    /// Returns the twin (second physical slot) for a segment-directory page (CK-05, C2), allocating it on first request.
+    /// Called by <see cref="LogicalSegment{TStore}.CreateOrGrow"/> when it initializes a directory page (root or
+    /// map-extension), to stamp <see cref="LogicalSegmentHeader.TwinPageIndex"/>. Idempotent — an already-paired page
+    /// returns its existing twin with no allocation.
+    /// <para>Persistent: allocates/returns the twin and registers the pair state.</para>
+    /// <para>Transient: returns <c>0</c> ("no twin") — transient segments are never persisted, so they are not protected.</para>
+    /// </summary>
+    int GetOrAllocateDirectoryTwin(int primaryPageIndex, ChangeSet changeSet);
+
+    /// <summary>
     /// Create a <see cref="ChangeSet"/> for tracking dirty pages during growth or maintenance.
     /// <para>Persistent: returns <c>new ChangeSet(mmf)</c>.</para>
     /// <para>Transient: returns <c>null</c> (no dirty tracking needed). CBS/LS handle null ChangeSets.</para>

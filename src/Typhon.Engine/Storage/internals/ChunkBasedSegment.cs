@@ -119,9 +119,11 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
     }
 
     /// <summary>
-    /// Byte offset within this segment's root page where chunk 0 begins — after the page header, the
-    /// logical-segment directory section, and stride-alignment padding. Surfaced read-only for the Database
-    /// File Map decoders (Module 15, A2), which slice chunks straight out of a page body.
+    /// Byte offset within this segment's root page where chunk 0 <i>would</i> begin — after the page header, the
+    /// logical-segment directory section, and stride-alignment padding. With the directory-only root (v4) the directory
+    /// fills the whole raw-data area, so the root holds no chunks (<see cref="ChunkCountRootPage"/> == 0) and this offset
+    /// lands at the page end; it is never used to address a chunk. Surfaced read-only for the Database File Map decoders
+    /// (Module 15, A2), which gate on <see cref="ChunkCountRootPage"/> before slicing, so they never read at this offset.
     /// </summary>
     public int RootDataOffset => PagedMMF.PageHeaderSize + RootHeaderIndexSectionLength + _rootAlignmentPadding;
 
@@ -152,12 +154,10 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
             // We do this inline because ReserveChunk(index, clearContent:true) needs a ChunkAccessor which requires an epoch scope — unavailable during segment
             // creation.
             //
-            // Guard on ChunkCountRootPage > 0: for large strides (e.g. fat cluster slots) a chunk may fit a non-root page (PageRawDataSize) but NOT the root
-            // page, which loses RootHeaderIndexSectionLength to the segment directory — so ChunkCountRootPage == 0 and chunk 0 lives on page 1, not the root.
-            // Clearing a full Stride at RootChunkDataOffset on the root would then overrun the root page's raw data into the next page's LogicalSegmentHeader
-            // (zeroing NextRawDataPBID and truncating the forward chain). ChunkCountRootPage > 0 ⟺ RootChunkDataOffset + Stride ≤ PageRawDataSize, so the
-            // clear is overrun-free exactly when it runs. (base.Create already zeroed the page's raw data via clear: true, so skipping it on a chunk-less root
-            // is safe.)
+            // Guard on ChunkCountRootPage > 0: with the directory-only root (v4) the root page's entire raw-data area is the segment's page directory, so it
+            // holds ZERO chunks (ChunkCountRootPage == 0 for every stride) and chunk 0 lives on page 1, not the root. The guard is therefore never taken today —
+            // it stays as a defensive invariant: clearing a full Stride at RootChunkDataOffset on a chunk-less root would overrun into the next page's header.
+            // ChunkCountRootPage > 0 ⟺ RootChunkDataOffset + Stride ≤ PageRawDataSize, so the clear is overrun-free exactly when it would run.
             if (i == 0 && ChunkCountRootPage > 0)
             {
                 page.RawData<byte>(RootChunkDataOffset, Stride).Clear();

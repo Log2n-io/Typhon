@@ -2944,16 +2944,20 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         if (MMF.IsDatabaseFileCreating)
         {
-            // Creating path: allocate a 1-page segment for the registry (150 entries)
+            // Creating path: allocate the registry segment. AllocateSegment clamps to the 2-page minimum (directory-only
+            // root, v4), so the root holds the page directory and the entries live on the data page(s) — 200 per page.
             var cs = MMF.CreateChangeSet();
             var segment = MMF.AllocateSegment(PageBlockType.None, 1, cs, StorageSegmentKind.System);
 
-            // Clear the data area so all entries start as Free (State = 0)
-            var page = segment.GetPageExclusive(0, epoch, out var memPageIdx);
-            cs.AddByMemPageIndex(memPageIdx);
-            var offset = LogicalSegment<PersistentStore>.RootHeaderIndexSectionLength;
-            page.RawData<byte>(offset, PagedMMF.PageRawDataSize - offset).Clear();
-            MMF.UnlatchPageExclusive(memPageIdx);
+            // Clear the data pages so all entries start as Free (State = 0). With a directory-only root the registry entries
+            // live on the data pages (segment page 1+), not the root — clear each of them.
+            for (int sp = 1; sp < segment.Length; sp++)
+            {
+                var page = segment.GetPageExclusive(sp, epoch, out var memPageIdx);
+                cs.AddByMemPageIndex(memPageIdx);
+                page.RawData<byte>().Clear();
+                MMF.UnlatchPageExclusive(memPageIdx);
+            }
 
             // Write SPI to root header
             MMF.RequestPageEpoch(0, epoch, out _);
