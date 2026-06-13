@@ -41,6 +41,7 @@ public enum TyphonErrorCode
     BulkSessionAlreadyActive        = 7005,
     BulkSessionClosed               = 7006,
     BulkLoadCheckpointTimeout       = 7007,
+    CommitDurabilityUncertain       = 7008,
 
     // 8xxx — Runtime / Scheduler
     InvalidSystemAccess             = 8001,

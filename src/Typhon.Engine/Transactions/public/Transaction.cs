@@ -48,6 +48,54 @@ public unsafe partial class Transaction : EntityAccessor
     private ChunkAccessor<PersistentStore> _clusterCommitClusterAccessor;
     private bool _hasClusterCommitAccessors;
 
+    // AP-01 (Append-before-publish): the commit pipeline splits each component entry into a PREPARE half (all fallible work — conflict
+    // detect/resolve, index/spatial B+Tree mutation, cluster Phase-A index updates, view notify) and a non-throwing PUBLISH half
+    // (IsolationFlag clear + TSN stamp, LCRI/CommitSequence bump, cluster Phase-B HEAD→slot memcpy, handler-lock release). PrepareComponent
+    // records one PublishEntry here; the entries are drained by PublishComponent AFTER the WAL Append, so no change is made visible before
+    // its records are appended. ElementRevisionHandle is a ref struct (cannot be stored), so the handle is re-derived in publish from the
+    // blittable (FirstChunkId, CurRevisionIndex). Pooled, reused across pooled Transaction lifetimes; cleared after each commit.
+    private List<PublishEntry> _publishEntries;
+
+    // AP-01 Debug guard: set true after the WAL Append phase, asserted when the PUBLISH phase begins so any future reorder that publishes before
+    // appending trips loudly in Debug builds. Reset at the start of each commit (pooled Transaction reuse).
+    private bool _appendPhaseEnteredThisCommit;
+
+    // Drain cursor into _publishEntries: entries [0, _publishDrainIndex) have been fully published (and their retained handler locks released). On a
+    // mid-drain throw the abort path releases only [_publishDrainIndex, Count), so each retained lock is released exactly once.
+    private int _publishDrainIndex;
+
+    /// <summary>
+    /// Blittable per-component-entry publish descriptor recorded by <see cref="PrepareComponent"/> and consumed by <see cref="PublishComponent"/>
+    /// after the WAL Append (AP-01). Carries everything publish needs to re-derive the revision handle and finish the commit without re-reading
+    /// mutable chain state. <see cref="LockHeld"/> tracks whether PREPARE retained the per-entity revision-chain exclusive lock (handler path),
+    /// which PUBLISH releases after clearing IsolationFlag (the detect→publish atomic region required by concurrent conflict resolution).
+    /// </summary>
+    private struct PublishEntry
+    {
+        public ComponentInfo Info;
+        public long Pk;
+        public int FirstChunkId;
+        public int CurCompContentChunkId;
+        public short CurRevisionIndex;
+        public short LastCommitRevisionIndex;
+        public bool IsClusterEntity;
+        public bool Created;
+        public bool LockHeld;
+
+        // Resolved physical location of the committing revision element, captured in PREPARE so PUBLISH reconstructs the handle without a locking walk.
+        public int ElementChunkId;
+        public bool ElementIsFirst;
+        public short ElementIndexInChunk;
+
+        // Cluster Phase-B coordinates resolved by PrepareClusterVersionedSlot (so publish needs no second EntityMap lookup).
+        // ClusterCopyPending == true ⇒ a committed HEAD value must be copied into (ArchId, ClusterChunkId, SlotIndex)'s CompSlot.
+        public bool ClusterCopyPending;
+        public ushort ArchId;
+        public int ClusterChunkId;
+        public byte SlotIndex;
+        public byte CompSlot;
+    }
+
     /// <summary>The UoW that owns this transaction (null for legacy <c>CreateTransaction()</c> path, UoW ID effectively 0).</summary>
     internal UnitOfWork OwningUnitOfWork { get; private set; }
 
@@ -954,11 +1002,11 @@ public unsafe partial class Transaction : EntityAccessor
         return compRev.GetRevisionElement(compRevInfo.CurRevisionIndex);
     }
 
-    /// <summary>Action struct for commit iteration: delegates to <see cref="CommitComponentCore"/>.</summary>
-    private struct CommitAction : IEntryAction
+    /// <summary>Action struct for commit PREPARE iteration: delegates to <see cref="PrepareComponent"/>.</summary>
+    private struct PrepareAction : IEntryAction
     {
         public Transaction Tx;
-        public void Process(ref CommitContext ctx) => Tx.CommitComponentCore(ref ctx);
+        public void Process(ref CommitContext ctx) => Tx.PrepareComponent(ref ctx);
     }
 
     /// <summary>Action struct for rollback iteration: delegates to <see cref="RollbackComponent"/>.</summary>
@@ -969,10 +1017,13 @@ public unsafe partial class Transaction : EntityAccessor
     }
 
     /// <summary>
-    /// Commits a single component revision: acquires revision chain lock (when handler provided), detects/resolves conflicts,
-    /// updates indices, clears IsolationFlag, and updates LCRI.
+    /// PREPARE half of the AP-01 commit split: all fallible work for one component revision — acquires the revision chain lock (when a handler is
+    /// provided; the lock is RETAINED for <see cref="PublishComponent"/> so detect→publish stays atomic for concurrent conflict resolution), detects
+    /// and resolves write-write conflicts, mutates secondary/spatial/cluster (Phase-A) indexes, and notifies views — then records a
+    /// <see cref="PublishEntry"/>. It does NOT clear IsolationFlag, does NOT bump LCRI/CommitSequence, and does NOT copy to the cluster slot: those are
+    /// the visibility acts, deferred to PublishComponent AFTER the WAL Append (AP-01: append before publish).
     /// </summary>
-    private void CommitComponentCore(ref CommitContext context)
+    private void PrepareComponent(ref CommitContext context)
     {
         var pk = context.PrimaryKey;
         var info = context.Info;
@@ -999,7 +1050,9 @@ public unsafe partial class Transaction : EntityAccessor
         // Capture readCompChunkId before AddCompRev shifts PrevCompContentChunkId
         var readCompChunkId = compRevInfo.PrevCompContentChunkId;
 
-        // When a handler is provided, hold the per-entity revision chain lock during detect-resolve-commit to prevent TOCTOU races
+        // When a handler is provided, hold the per-entity revision chain lock during detect-resolve-commit to prevent TOCTOU races.
+        // AP-01: the lock is RETAINED past Append and released by PublishComponent, so [detect, resolve-against-committed, IsolationFlag clear] is
+        // one atomic region — required for concurrent conflict resolution to compose (ConcurrencyConflictTests #8).
         var lockHeld = false;
         if (conflictSolver != null)
         {
@@ -1020,7 +1073,7 @@ public unsafe partial class Transaction : EntityAccessor
                     ref compRevTableAccessor, firstChunkId, compRevInfo.CurCompContentChunkId, TSN);
                 if (fixedIndex < 0)
                 {
-                    ThrowHelper.ThrowInvalidOp("CommitComponentCore: revision entry lost after chain compaction");
+                    ThrowHelper.ThrowInvalidOp("PrepareComponent: revision entry lost after chain compaction");
                 }
                 compRevInfo.CurRevisionIndex = fixedIndex;
                 elementHandle = compRev.GetRevisionElement(fixedIndex);
@@ -1033,17 +1086,22 @@ public unsafe partial class Transaction : EntityAccessor
             }
         }
 
+        var publishRecorded = false;
         try
         {
             DetectAndResolveConflict(ref context, pk, info, ref compRevInfo, compRev,
                 ref elementHandle, lastCommitRevisionIndex, readCompChunkId, lockHeld, TSN, UowId, _dbe);
 
-            // Commit the revision: update indices, clear IsolationFlag, update LastCommitRevisionIndex.
-            // Cluster entities use per-archetype B+Trees/R-Trees, NOT per-ComponentTable shared indexes.
-            // Detect cluster entity to suppress per-table index ops and use per-archetype ops instead.
+            // Maintain indices/spatial (fallible PREPARE work). The visibility acts — IsolationFlag clear, LCRI/CommitSequence bump, cluster HEAD copy —
+            // are deferred to PublishComponent (AP-01). Cluster entities use per-archetype B+Trees/R-Trees, NOT per-ComponentTable shared indexes.
             var archId = EntityId.FromRaw(pk).ArchetypeId;
             var commitMeta = ArchetypeRegistry.GetMetadata(archId);
             bool isClusterEntity = commitMeta.IsClusterEligible && commitMeta.VersionedSlotMask != 0 && _dbe._archetypeStates[archId]?.ClusterState != null;
+
+            var clusterCopyPending = false;
+            var clusterChunkId = 0;
+            byte slotIndex = 0;
+            byte compSlot = 0;
 
             if (!isClusterEntity)
             {
@@ -1087,11 +1145,11 @@ public unsafe partial class Transaction : EntityAccessor
             }
             else
             {
-                // Cluster path — update per-archetype B+Tree indexes, copy HEAD to cluster slot,
-                // and notify views. Per-ComponentTable shared indexes are SUPPRESSED for cluster entities.
-                // copyToCluster is false for spawns (FinalizeSpawns handles cluster copy for those).
+                // Cluster path — Phase A only here (per-archetype B+Tree index updates + view notify). Phase B (HEAD→cluster slot copy) is the
+                // visibility act, deferred to PublishComponent. copyToCluster is false for spawns (FinalizeSpawns handles cluster copy for those).
                 bool copyToCluster = (compRevInfo.Operations & ComponentInfo.OperationType.Created) == 0;
-                CommitClusterVersionedSlot(pk, commitMeta, compRevInfo, readCompChunkId, info.ComponentTable, info.ComponentTypeId, copyToCluster);
+                PrepareClusterVersionedSlot(pk, commitMeta, compRevInfo, readCompChunkId, info.ComponentTable, info.ComponentTypeId, copyToCluster,
+                    out clusterCopyPending, out clusterChunkId, out slotIndex, out compSlot);
             }
 
             // Periodic flush: bound dirty counter inflation for large transactions
@@ -1113,16 +1171,37 @@ public unsafe partial class Transaction : EntityAccessor
                 _changeSet.ReleaseExcessDirtyMarks();
             }
 
-            elementHandle.Commit(TSN);
-            compRev.SetLastCommitRevisionIndex(Math.Max(lastCommitRevisionIndex, compRevInfo.CurRevisionIndex));
-            if ((compRevInfo.Operations & ComponentInfo.OperationType.Created) == 0)
+            // Record the publish descriptor — drained by PublishComponent after the WAL Append (AP-01).
+            _publishEntries ??= new List<PublishEntry>(64);
+            // Capture the committing element's physical coordinates from the already-resolved handle (DetectAndResolveConflict updates elementHandle by ref
+            // to point at the final CurRevisionIndex), so PUBLISH reconstructs the handle with no locking walk (AP-03).
+            _publishEntries.Add(new PublishEntry
             {
-                compRev.IncrementCommitSequence();
-            }
+                Info = info,
+                Pk = pk,
+                FirstChunkId = firstChunkId,
+                CurCompContentChunkId = compRevInfo.CurCompContentChunkId,
+                CurRevisionIndex = compRevInfo.CurRevisionIndex,
+                LastCommitRevisionIndex = lastCommitRevisionIndex,
+                IsClusterEntity = isClusterEntity,
+                Created = (compRevInfo.Operations & ComponentInfo.OperationType.Created) != 0,
+                LockHeld = lockHeld,
+                ElementChunkId = elementHandle.ChunkId,
+                ElementIsFirst = elementHandle.IsFirst,
+                ElementIndexInChunk = elementHandle.ElementIndex,
+                ClusterCopyPending = clusterCopyPending,
+                ArchId = archId,
+                ClusterChunkId = clusterChunkId,
+                SlotIndex = slotIndex,
+                CompSlot = compSlot,
+            });
+            publishRecorded = true;
         }
         finally
         {
-            if (lockHeld)
+            // If PREPARE failed before recording the descriptor, PublishComponent will not run for this entry — release the retained lock here so it
+            // is not orphaned. On success the lock stays held until PublishComponent clears IsolationFlag and releases it.
+            if (lockHeld && !publishRecorded)
             {
                 ref var lockHeader = ref compRevTableAccessor.GetChunk<CompRevStorageHeader>(firstChunkId);
                 lockHeader.Control.ExitExclusiveAccess();
@@ -1143,15 +1222,112 @@ public unsafe partial class Transaction : EntityAccessor
     }
 
     /// <summary>
-    /// Combined cluster commit: update per-archetype B+Tree indexes, notify views, and optionally copy the
-    /// committed Versioned component value to the cluster slot (HEAD cache for bulk iteration).
-    /// Single EntityMap lookup and compSlot scan instead of the two separate passes that UpdateClusterIndexesAtCommit
-    /// and CopyVersionedHeadToCluster used to perform independently.
-    /// <paramref name="copyToCluster"/> is false for spawns (FinalizeSpawns handles cluster copy for those).
+    /// PUBLISH half of the AP-01 commit split: makes one prepared component revision visible. Non-throwing by construction (AP-03) — re-derives the
+    /// revision handle (an <see cref="ComponentRevisionManager.ElementRevisionHandle"/> is a ref struct and cannot be carried across the Append), stamps
+    /// TSN + clears IsolationFlag (the publication act), bumps LCRI/CommitSequence, copies the committed HEAD value into the cluster slot (Phase B), and
+    /// releases the per-entity revision-chain lock retained by <see cref="PrepareComponent"/>. MUST run only after the transaction's WAL Append.
     /// </summary>
-    private void CommitClusterVersionedSlot(long pk, ArchetypeMetadata meta, ComponentInfo.CompRevInfo compRevInfo, int readCompChunkId, 
-        ComponentTable table, int componentTypeId, bool copyToCluster)
+    private void PublishComponent(in PublishEntry e)
     {
+        var info = e.Info;
+        ref var compRevTableAccessor = ref info.CompRevTableAccessor;
+
+        // Reconstruct the revision handle from the coordinates resolved in PREPARE (no locking walk — AP-03) and clear IsolationFlag (THE publication act).
+        var elementHandle = new ComponentRevisionManager.ElementRevisionHandle(ref compRevTableAccessor, e.ElementChunkId, e.ElementIsFirst, e.ElementIndexInChunk);
+        elementHandle.Commit(TSN);
+
+        // LCRI / CommitSequence bookkeeping — header field writes (under the retained handler lock when LockHeld).
+        ref var header = ref compRevTableAccessor.GetChunk<CompRevStorageHeader>(e.FirstChunkId, true);
+        header.LastCommitRevisionIndex = (short)Math.Max(e.LastCommitRevisionIndex, e.CurRevisionIndex);
+        if (!e.Created)
+        {
+            header.CommitSequence++;
+        }
+
+        // Cluster Phase B: copy the committed HEAD value into the cluster slot (visible to bulk iteration).
+        if (e.ClusterCopyPending)
+        {
+            PublishClusterVersionedSlot(e);
+        }
+
+        // Release the per-entity revision-chain lock retained by PrepareComponent (handler path).
+        if (e.LockHeld)
+        {
+            ref var lockHeader = ref compRevTableAccessor.GetChunk<CompRevStorageHeader>(e.FirstChunkId);
+            lockHeader.Control.ExitExclusiveAccess();
+        }
+    }
+
+    /// <summary>
+    /// Drains the prepared component publish descriptors (AP-01 PUBLISH pass). Runs after the WAL Append. Also releases any retained handler locks.
+    /// </summary>
+    private void PublishPreparedComponents()
+    {
+        // AP-01 [fatal][silent]: no change may be made visible before its records are appended. This guard trips loudly in Debug if a future change
+        // reorders the publish phase ahead of AppendToWal.
+        Debug.Assert(_appendPhaseEnteredThisCommit, "AP-01 violation: PUBLISH reached before the WAL Append phase ran");
+
+        if (_publishEntries == null || _publishEntries.Count == 0)
+        {
+            return;
+        }
+
+        // Advance the cursor only after each entry is FULLY published (PublishComponent releases its retained lock last), so a mid-drain throw leaves
+        // [_publishDrainIndex, Count) for the abort path to release — never double-releasing an already-published entry's lock.
+        while (_publishDrainIndex < _publishEntries.Count)
+        {
+            PublishComponent(_publishEntries[_publishDrainIndex]);
+            _publishDrainIndex++;
+        }
+
+        // Cluster Phase-B may have created lazy-cached accessors during this drain — release them.
+        DisposeClusterCommitAccessors();
+        _publishEntries.Clear();
+        _publishDrainIndex = 0;
+    }
+
+    /// <summary>
+    /// Releases any per-entity revision-chain locks retained by <see cref="PrepareComponent"/> that have not yet been published. Called on the commit
+    /// abort/exception path so a failure between PREPARE and PUBLISH never orphans a held lock. Idempotent: clears <see cref="_publishEntries"/>.
+    /// </summary>
+    private void ReleaseRetainedPublishLocks()
+    {
+        if (_publishEntries == null || _publishEntries.Count == 0)
+        {
+            return;
+        }
+
+        // Release only the entries not yet published this commit ([_publishDrainIndex, Count)); entries below the cursor already released their lock in
+        // PublishComponent. This makes lock release exactly-once across the success path, the pre-publish throw, and a mid-drain throw.
+        for (int i = _publishDrainIndex; i < _publishEntries.Count; i++)
+        {
+            var e = _publishEntries[i];
+            if (e.LockHeld)
+            {
+                ref var lockHeader = ref e.Info.CompRevTableAccessor.GetChunk<CompRevStorageHeader>(e.FirstChunkId);
+                lockHeader.Control.ExitExclusiveAccess();
+            }
+        }
+
+        _publishEntries.Clear();
+        _publishDrainIndex = 0;
+    }
+
+    /// <summary>
+    /// PREPARE half of the cluster commit (AP-01): updates per-archetype B+Tree indexes (Phase A) and notifies views, and resolves the cluster-slot
+    /// coordinates for the deferred Phase-B copy. Phase B (the HEAD→cluster-slot memcpy — the visibility act) is performed by
+    /// <see cref="PublishClusterVersionedSlot"/> after the WAL Append. Single EntityMap lookup; the resolved coordinates are returned so publish does
+    /// not repeat it. <paramref name="copyToCluster"/> is false for spawns (FinalizeSpawns handles cluster copy for those).
+    /// </summary>
+    private void PrepareClusterVersionedSlot(long pk, ArchetypeMetadata meta, ComponentInfo.CompRevInfo compRevInfo, int readCompChunkId,
+        ComponentTable table, int componentTypeId, bool copyToCluster,
+        out bool clusterCopyPending, out int outClusterChunkId, out byte outSlotIndex, out byte outCompSlot)
+    {
+        clusterCopyPending = false;
+        outClusterChunkId = 0;
+        outSlotIndex = 0;
+        outCompSlot = 0;
+
         var archId = meta.ArchetypeId;
         var es = _dbe._archetypeStates[archId];
         var clusterState = es.ClusterState;
@@ -1169,6 +1345,7 @@ public unsafe partial class Transaction : EntityAccessor
             return;
         }
         int compSlot = compSlotByte;
+        outCompSlot = compSlotByte;
 
         // Lazy-cache accessors by archetype — reused across all entities in the same commit batch
         if (!_hasClusterCommitAccessors || _clusterCommitArchId != archId)
@@ -1194,6 +1371,11 @@ public unsafe partial class Transaction : EntityAccessor
         int clusterChunkId = ClusterEntityRecordAccessor.GetClusterChunkId(recordBuf);
         byte slotIndex = ClusterEntityRecordAccessor.GetSlotIndex(recordBuf);
         int clusterLocation = clusterChunkId * 64 + slotIndex;
+        outClusterChunkId = clusterChunkId;
+        outSlotIndex = slotIndex;
+
+        // Phase B (HEAD→cluster slot copy) is required iff a committed value exists and this is not a spawn — deferred to PublishClusterVersionedSlot.
+        clusterCopyPending = copyToCluster && compRevInfo.CurCompContentChunkId != 0;
 
         // Phase A: Update per-archetype B+Tree indexes for this component's indexed fields
         if (hasIndexes)
@@ -1285,23 +1467,42 @@ public unsafe partial class Transaction : EntityAccessor
             }
         }
 
-        // Phase B: Copy committed value to cluster slot (HEAD cache for bulk iteration).
-        // Skipped for spawns — FinalizeSpawns handles initial cluster copy.
-        if (copyToCluster && compRevInfo.CurCompContentChunkId != 0)
+        // Phase B (HEAD→cluster slot copy) is deferred to PublishClusterVersionedSlot (AP-01). The cluster dirty bit it sets is what later drives
+        // DetectClusterMigrations at tick fence (spatial per-cell index — same deferred-update pattern as SV cluster spatial, Issue #230 Phase 3).
+    }
+
+    /// <summary>
+    /// PUBLISH half of the cluster commit (AP-01): copies the committed HEAD value into the entity's cluster slot (visible to bulk iteration) and marks
+    /// the cluster chunk dirty. Non-throwing — uses the coordinates resolved by <see cref="PrepareClusterVersionedSlot"/> (no EntityMap re-lookup) and
+    /// re-establishes the lazy-cached cluster accessors (the PREPARE pass disposes them per component type). MUST run only after the WAL Append.
+    /// </summary>
+    private void PublishClusterVersionedSlot(in PublishEntry e)
+    {
+        var archId = e.ArchId;
+        var es = _dbe._archetypeStates[archId];
+        var clusterState = es.ClusterState;
+        var table = e.Info.ComponentTable;
+
+        // Re-establish lazy-cached accessors by archetype — reused across consecutive same-archetype entries in the publish drain.
+        if (!_hasClusterCommitAccessors || _clusterCommitArchId != archId)
         {
-            var layout = clusterState.Layout;
-            byte* srcAddr = _clusterCommitContentAccessor.GetChunkAddress(compRevInfo.CurCompContentChunkId);
-            byte* clusterBase = _clusterCommitClusterAccessor.GetChunkAddress(clusterChunkId, true);
-
-            int compSize = layout.ComponentSize(compSlot);
-            byte* dstSlot = clusterBase + layout.ComponentOffset(compSlot) + slotIndex * compSize;
-            Unsafe.CopyBlockUnaligned(dstSlot, srcAddr + table.ComponentOverhead, (uint)compSize);
-
-            clusterState.SetDirty(clusterChunkId, slotIndex);
+            DisposeClusterCommitAccessors();
+            _clusterCommitMapAccessor = es.EntityMap.Segment.CreateChunkAccessor();
+            _clusterCommitContentAccessor = table.ComponentSegment.CreateChunkAccessor();
+            _clusterCommitClusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor();
+            _clusterCommitArchId = archId;
+            _hasClusterCommitAccessors = true;
         }
 
-        // Spatial per-cell cluster index: migration detection runs at tick fence via DetectClusterMigrations (dirty bit already set by cluster copy above).
-        // Same deferred-update pattern as SV cluster spatial. Issue #230 Phase 3 Option B.
+        var layout = clusterState.Layout;
+        byte* srcAddr = _clusterCommitContentAccessor.GetChunkAddress(e.CurCompContentChunkId);
+        byte* clusterBase = _clusterCommitClusterAccessor.GetChunkAddress(e.ClusterChunkId, true);
+
+        int compSize = layout.ComponentSize(e.CompSlot);
+        byte* dstSlot = clusterBase + layout.ComponentOffset(e.CompSlot) + e.SlotIndex * compSize;
+        Unsafe.CopyBlockUnaligned(dstSlot, srcAddr + table.ComponentOverhead, (uint)compSize);
+
+        clusterState.SetDirty(e.ClusterChunkId, e.SlotIndex);
     }
 
     private void DisposeClusterCommitAccessors()
@@ -1494,12 +1695,14 @@ public unsafe partial class Transaction : EntityAccessor
         }
     }
 
-    /// <summary>Serialize to WAL, transition to Committed, and record metrics.</summary>
-    private void PersistAndFinalize(ref UnitOfWorkContext ctx, long startTicks)
+    /// <summary>
+    /// AP-01 APPEND step: builds the transaction's WAL batch from prepared state and appends it to the commit buffer, returning the batch's highest LSN
+    /// (0 when nothing was appended). This is the point of no return (AP-02) — it runs AFTER all PREPARE work (so conflict-resolved values are logged)
+    /// and BEFORE any publish. BL-01: a SuppressWalSerialization UoW (BulkLoad path) appends nothing; page dirty marking still happens via the PREPARE
+    /// pass so the checkpoint flushes the data, and BulkLoadSession.CompleteBulkLoad emits BulkEnd as the bulk's durability anchor.
+    /// </summary>
+    private long AppendToWal(ref UnitOfWorkContext ctx)
     {
-        // WAL serialization (after conflict resolution, before state transition). BL-01: when the owning UoW has SuppressWalSerialization (BulkLoad path),
-        // skip per-row WAL. Page dirty marking still happens via CommitComponentCore so the checkpoint flushes the data; BulkLoadSession.CompleteBulkLoad
-        // runs a synchronous checkpoint + emits BulkEnd as the bulk's durability anchor. See claude/design/Durability/BulkLoad/02-write-path.md.
         long walHighLsn = 0;
         if (State != TransactionState.Created && OwningUnitOfWork?.SuppressWalSerialization != true)
         {
@@ -1524,21 +1727,49 @@ public unsafe partial class Transaction : EntityAccessor
             }
         }
 
-        // Durability wait for Immediate mode
+        _appendPhaseEnteredThisCommit = true; // AP-01 guard: the append phase has run; publish is now permitted.
+        return walHighLsn;
+    }
+
+    /// <summary>
+    /// AP-01 WAIT/finalize step: for Immediate durability, waits until the appended LSN is durable, then transitions the transaction to Committed and
+    /// records metrics. Runs AFTER publish (so the per-entity handler locks are already released — the wait never spans an fsync while holding them).
+    /// A wait timeout here occurs post-publish: the transaction is logically committed (AP-02), so the exception means "durability uncertain", not
+    /// "rolled back" (the publish-then-surface contract; the exception type is refined in the AP-02/AP-03 hardening step).
+    /// </summary>
+    private void WaitAndFinalize(ref UnitOfWorkContext ctx, long walHighLsn, long startTicks)
+    {
+        TyphonException durabilityUncertain = null;
+
+        // Durability wait for Immediate mode. Publish already ran (AP-01), so the transaction is logically committed: a wait failure here (back-pressure
+        // timeout or fatal writer error) MUST NOT roll back (AP-02). Capture it, finish the Committed transition, then surface it as
+        // CommitDurabilityUncertainException so the caller learns "committed, durability unconfirmed" rather than "rolled back".
         if (walHighLsn > 0 && OwningUnitOfWork?.DurabilityMode == DurabilityMode.Immediate)
         {
             Debug.Assert(_dbe.WalManager != null);
             _dbe.WalManager.RequestFlush();
             var wc = ComposeWaitContext(ref ctx, TimeoutOptions.Current.DefaultCommitTimeout);
-            _dbe.WalManager.WaitForDurable(walHighLsn, ref wc);
+            try
+            {
+                _dbe.WalManager.WaitForDurable(walHighLsn, ref wc);
+            }
+            catch (TyphonException ex)
+            {
+                durabilityUncertain = ex;
+            }
         }
 
-        // New state
+        // New state — the transaction reaches Committed even when durability is unconfirmed (AP-02: Append is the point of no return).
         TransitionTo(TransactionState.Committed);
 
         // Record commit duration for observability
         var elapsedUs = (Stopwatch.GetTimestamp() - startTicks) * 1_000_000 / Stopwatch.Frequency;
         _dbe?.RecordCommitDuration(elapsedUs);
+
+        if (durabilityUncertain != null)
+        {
+            throw new CommitDurabilityUncertainException(walHighLsn, durabilityUncertain);
+        }
     }
 
     public bool Commit(ref UnitOfWorkContext ctx, ConcurrencyConflictHandler handler = null)
@@ -1619,8 +1850,11 @@ public unsafe partial class Transaction : EntityAccessor
             context.TailTSN = _dbe.TransactionChain.MinTSN;
             _dbe.TransactionChain.Control.ExitSharedAccess();
 
-            // Prepare ECS destroy operations: create component-level tombstone revisions BEFORE CommitComponentCore so it can handle index removal,
-            // WAL, and cleanup.
+            _appendPhaseEnteredThisCommit = false; // AP-01 guard reset (pooled Transaction reuse).
+            _publishDrainIndex = 0;
+
+            // Prepare ECS destroy operations: create component-level tombstone revisions in the PREPARE pass so it can handle index removal, WAL, and
+            // cleanup. The entity-level destroy visibility (DiedTSN) is applied later, in the PUBLISH pass (FlushEcsPendingOperations).
             PrepareEcsDestroys();
 
             _dbe.LogCommitPhase(TSN, "CommitComponentCore");
@@ -1628,8 +1862,9 @@ public unsafe partial class Transaction : EntityAccessor
             // Phase 6: Data:Transaction:Validate span over the per-component-type validation pass.
             using var validateScope = TyphonEvent.BeginDataTransactionValidate(TSN, _componentInfos.Count);
 
-            // Process every Component Type and their components (old CRUD path — Versioned only)
-            var commitAction = new CommitAction { Tx = this };
+            // Process every Component Type and their components (old CRUD path — Versioned only). AP-01: this is the PREPARE pass — all fallible work,
+            // no visibility. The matching PUBLISH pass (PublishPreparedComponents) runs after the WAL Append.
+            var prepareAction = new PrepareAction { Tx = this };
             foreach (var kvp in _componentInfos)
             {
                 var info = kvp.Value;
@@ -1669,7 +1904,7 @@ public unsafe partial class Transaction : EntityAccessor
 
                     try
                     {
-                        kvp.Value.ForEachMutableEntry(ref context, ref commitAction);
+                        kvp.Value.ForEachMutableEntry(ref context, ref prepareAction);
                     }
                     finally
                     {
@@ -1698,6 +1933,7 @@ public unsafe partial class Transaction : EntityAccessor
                 }
             }
 
+            // ── PREPARE complete. Deferred-cleanup enqueue is prepare-side bookkeeping (no visibility) — it runs before Append. ──
             _dbe.LogCommitPhase(TSN, "DeferredCleanup");
 
             // Enqueue current transaction's entities for deferred cleanup (single lock acquire for all entities).
@@ -1709,18 +1945,28 @@ public unsafe partial class Transaction : EntityAccessor
                 _deferredEnqueueBatch.Clear();
             }
 
-            // Flush ECS pending operations (spawns, destroys, enable/disable)
-            _dbe.LogCommitPhase(TSN, "EcsFlush");
-            FlushEcsPendingOperations();
-
-            // Check if any conflicts were detected during the commit loop
+            // Conflicts are detected during the PREPARE pass — capture the flag before Append (AP-02: all validation precedes the point of no return).
             if (conflictSolver is { HasConflict: true })
             {
                 hasConflict = true;
             }
 
-            _dbe.LogCommitPhase(TSN, "PersistAndFinalize");
-            PersistAndFinalize(ref ctx, startTicks);
+            // ── AP-01: APPEND before PUBLISH. Build + append the WAL batch from the prepared (conflict-resolved) state. This is the point of no
+            //    return (AP-02): nothing above made any change visible. ──
+            _dbe.LogCommitPhase(TSN, "Append");
+            var walHighLsn = AppendToWal(ref ctx);
+
+            // ── PUBLISH (AP-01): now make the transaction's changes visible. Drain the component publish descriptors (clear IsolationFlag, bump
+            //    LCRI/CommitSequence, copy HEAD→cluster slot, release retained handler locks), then flush ECS pending operations (EntityMap spawn
+            //    inserts via FinalizeSpawns, DiedTSN destroys, EnabledBits). Every visibility act happens strictly after the Append. ──
+            _dbe.LogCommitPhase(TSN, "Publish");
+            PublishPreparedComponents();
+            FlushEcsPendingOperations();
+
+            // ── WAIT (Immediate) + transition to Committed. Publish already ran and released handler locks, so the durability wait never spans a held
+            //    lock; a wait timeout here means durability-uncertain, not rollback (AP-02). ──
+            _dbe.LogCommitPhase(TSN, "WaitAndFinalize");
+            WaitAndFinalize(ref ctx, walHighLsn, startTicks);
             _dbe.LogCommitPhase(TSN, "Complete");
             scope.ConflictDetected = hasConflict;
             return true;
@@ -1728,6 +1974,9 @@ public unsafe partial class Transaction : EntityAccessor
         }
         finally
         {
+            // AP-01 safety net: if the commit threw between PREPARE and PUBLISH, retained handler locks would otherwise be orphaned. On the success
+            // path PublishPreparedComponents already drained and cleared _publishEntries, so this is a no-op.
+            ReleaseRetainedPublishLocks();
             scope.Dispose();
         }
     }

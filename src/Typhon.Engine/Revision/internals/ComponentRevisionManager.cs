@@ -27,6 +27,12 @@ internal ref struct ComponentRevisionManager
             _elementIndex = elementIndex;
         }
 
+        // The resolved physical location of this revision element. Captured during PREPARE (where the locking walk is allowed) so the AP-01 PUBLISH pass
+        // can reconstruct the handle without re-running the locking GetRevisionElement walk (AP-03: publish acquires no bounded-timeout lock).
+        public int ChunkId => _chunkId;
+        public bool IsFirst => _isFirst;
+        public short ElementIndex => _elementIndex;
+
         public unsafe ref CompRevStorageElement Element
         {
             get
