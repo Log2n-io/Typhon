@@ -315,6 +315,26 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
         }
     }
 
+    /// <summary>
+    /// Crash-recovery occupancy re-derive (03 §7 / rule CK-09): replaces the persisted occupancy bitmap with the authoritative <paramref name="owned"/> set (built by
+    /// <see cref="DatabaseEngine.BuildOwnedPageBitmap"/> from the final segment ownership) and recomputes the allocator's skip-level summaries. A wholesale overwrite
+    /// heals a CRC-torn occupancy page (the FPI replacement for the bitmap) and reclaims pages a torn checkpoint leaked. Recovery-only: call AFTER all rebuild passes
+    /// (segments / reserves / directory twins final) and BEFORE the seal, so the seal checkpoint persists the corrected bitmap. Dirtied pages ride
+    /// <paramref name="changeSet"/>.
+    /// </summary>
+    internal int RederiveOccupancy(ReadOnlySpan<long> owned, ChangeSet changeSet)
+    {
+        _occupancyMapAccess.EnterExclusiveAccess(ref WaitContext.Null);
+        try
+        {
+            return _occupancyMap.OverwriteFromDerived(owned, changeSet);
+        }
+        finally
+        {
+            _occupancyMapAccess.ExitExclusiveAccess();
+        }
+    }
+
     unsafe protected override void OnFileCreating()
     {
         base.OnFileCreating();

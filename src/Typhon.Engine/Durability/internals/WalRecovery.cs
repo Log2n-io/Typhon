@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
-using System.Linq;
 using System.Runtime.InteropServices;
 using Typhon.Schema.Definition;
 
@@ -16,16 +15,6 @@ internal class UowScanState
     public bool HasBegin;
     public bool HasCommit;
     public List<(WalRecordHeader Header, byte[] Payload)> Records = [];
-}
-
-/// <summary>
-/// Tracks the most recent FPI for a given file page index during WAL scan.
-/// </summary>
-internal class FpiScanEntry
-{
-    public long LSN;
-    public byte[] PageData;
-    public FpiMetadata Metadata;
 }
 
 /// <summary>
@@ -70,11 +59,10 @@ internal sealed class WalRecovery : IDisposable
     }
 
     /// <summary>
-    /// Runs the full 7-phase recovery algorithm:
-    /// Phase 1 — Discover segments, Phase 2 — Scan records + collect FPIs + collect TickFences,
-    /// Phase 3 — Cross-reference with registry, Phase 4 — FPI torn-page repair,
-    /// Phase 5 — Replay committed transaction records, Phase 6 — Replay TickFence entries (SV recovery),
-    /// Phase 7 — Finalize.
+    /// Runs the in-ctor recovery scan (v1 path, being retired):
+    /// Phase 1 — Discover segments, Phase 2 — Scan records + collect TickFences, Phase 3 — Cross-reference with registry,
+    /// Phase 6 — Replay TickFence entries (SV recovery), Phase 7 — Finalize. (Phase 4 FPI repair + Phase 5 committed-replay were deleted: FPI is retired — the
+    /// rebuild net heals torn pages — and the WAL v2 RecoveryDriver owns record apply.)
     /// </summary>
     /// <param name="registry">The UoW registry (loaded via <see cref="UowRegistry.LoadFromDiskRaw"/>).</param>
     /// <param name="checkpointLSN">LSN up to which data is already checkpointed. 0 = scan all.</param>
@@ -116,11 +104,10 @@ internal sealed class WalRecovery : IDisposable
         }
 
         // ═══════════════════════════════════════════════════════════
-        // Phase 2: Scan records, build committed set + collect FPIs + collect TickFences
+        // Phase 2: Scan records, build committed set + collect TickFences
         // ═══════════════════════════════════════════════════════════
 
         var uowStates = new Dictionary<ushort, UowScanState>();
-        var fpiMap = new Dictionary<int, FpiScanEntry>();
         var tickFenceEntries = new List<TickFenceScanEntry>();
         var clusterTickFenceEntries = new List<ClusterTickFenceScanEntry>();
 
@@ -148,10 +135,6 @@ internal sealed class WalRecovery : IDisposable
 
                     switch ((WalChunkType)chunkHeader.ChunkType)
                     {
-                        case WalChunkType.FullPageImage:
-                            CollectFpiChunk(fpiMap, body);
-                            break;
-
                         case WalChunkType.Transaction:
                             ProcessTransactionChunk(uowStates, body, checkpointLSN);
                             break;
@@ -225,64 +208,13 @@ internal sealed class WalRecovery : IDisposable
             undoScope.Dispose();
         }
 
-        // ═══════════════════════════════════════════════════════════
-        // Phase 4: FPI torn-page repair (BEFORE replay)
-        // ═══════════════════════════════════════════════════════════
-
-        if (_mmf != null && fpiMap.Count > 0)
-        {
-            // Phase 8: Recovery:FPI span — covers torn-page repair.
-            var fpiScope = TyphonEvent.BeginDurabilityRecoveryFpi(fpiMap.Count);
-            try
-            {
-                var pageBuffer = new byte[PagedMMF.PageSize];
-                int mismatches = 0;
-                foreach (var kvp in fpiMap)
-                {
-                    var filePageIndex = kvp.Key;
-                    var fpiEntry = kvp.Value;
-
-                    // Read the current page from disk
-                    _mmf.ReadPageDirect(filePageIndex, pageBuffer);
-
-                    // Read stored CRC; if 0 the page was never checkpointed — skip
-                    var storedCrc = MemoryMarshal.Read<uint>(pageBuffer.AsSpan(PageBaseHeader.PageChecksumOffset));
-                    if (storedCrc == 0)
-                    {
-                        continue;
-                    }
-
-                    // Compute CRC; if it matches the page is consistent — skip
-                    var computedCrc = WalCrc.ComputeSkipping(pageBuffer, PageBaseHeader.PageChecksumOffset, PageBaseHeader.PageChecksumSize);
-                    if (computedCrc == storedCrc)
-                    {
-                        continue;
-                    }
-
-                    // CRC mismatch — page is torn, restore from FPI
-                    mismatches++;
-                    _mmf.WritePageDirect(filePageIndex, fpiEntry.PageData);
-                    result.FpiRecordsApplied++;
-                }
-
-                if (result.FpiRecordsApplied > 0)
-                {
-                    _mmf.FlushToDisk();
-                }
-
-                fpiScope.RepairedCount = result.FpiRecordsApplied;
-                fpiScope.Mismatches = mismatches;
-            }
-            finally
-            {
-                fpiScope.Dispose();
-            }
-        }
+        // Phase 4 (FPI torn-page repair) deleted in increment D — the rebuild net replaces FPI: derived structures rebuild (RB-01), occupancy re-derives (CK-09),
+        // and a torn primary page heals-by-apply or fails the open loudly via suspect resolution (RB-04, DatabaseEngine.ResolveSuspectPrimaryPages).
 
         // Phase 5 (v1 committed-transaction replay via WalReplayHelper) deleted: the WAL v2 RecoveryDriver owns record apply now
         // (DatabaseEngine.RunWalV2Recovery, post-archetype-init). This in-ctor scan keeps only what the v2 path does not yet own —
-        // the recovery frontier (LastValidLSN), FPI torn-page repair (until checkpoint v2 / P1.3), and voiding pending UoWs. The
-        // dbe argument is always null here; Phase 6 below is likewise dead and removed with the rest of the v1 read path later.
+        // the recovery frontier (LastValidLSN) and voiding pending UoWs. The dbe argument is always null here; Phase 6 below is
+        // likewise dead and removed with the rest of the v1 read path later.
 
         // ═══════════════════════════════════════════════════════════
         // Phase 6: Replay TickFence entries (SV crash recovery)
@@ -365,71 +297,6 @@ internal sealed class WalRecovery : IDisposable
 
         // Buffer the record for potential replay
         state.Records.Add((header, payload.ToArray()));
-    }
-
-    /// <summary>
-    /// Collects an FPI chunk body into the map, keeping only the highest-LSN entry per file page index.
-    /// FPI body layout: [LSN (8B)] [FpiMetadata (16B)] [page data (variable)].
-    /// Handles both compressed (LZ4) and uncompressed FPI payloads.
-    /// </summary>
-    private static void CollectFpiChunk(Dictionary<int, FpiScanEntry> fpiMap, ReadOnlySpan<byte> body)
-    {
-        // Minimum body: LSN (8) + FpiMetadata (16) = 24 bytes
-        if (body.Length < sizeof(long) + FpiMetadata.SizeInBytes)
-        {
-            return; // Malformed FPI chunk — skip
-        }
-
-        var lsn = MemoryMarshal.Read<long>(body);
-        var meta = MemoryMarshal.Read<FpiMetadata>(body.Slice(sizeof(long)));
-        var pagePayload = body.Slice(sizeof(long) + FpiMetadata.SizeInBytes);
-
-        byte[] pageData;
-        if (meta.CompressionAlgo != FpiCompression.AlgoNone)
-        {
-            // Compressed FPI — decompress the page payload
-            if (meta.CompressionAlgo != FpiCompression.AlgoLZ4)
-            {
-                return; // Unknown compression algorithm — skip
-            }
-
-            pageData = new byte[meta.UncompressedSize];
-            var decompressedSize = FpiCompression.Decompress(pagePayload, pageData);
-            if (decompressedSize != meta.UncompressedSize)
-            {
-                return; // Decompression failure — skip
-            }
-        }
-        else
-        {
-            // Uncompressed FPI — validate size and extract
-            if (pagePayload.Length < PagedMMF.PageSize)
-            {
-                return; // Malformed — skip
-            }
-
-            pageData = pagePayload.Slice(0, PagedMMF.PageSize).ToArray();
-        }
-
-        if (fpiMap.TryGetValue(meta.FilePageIndex, out var existing))
-        {
-            // Keep only the most recent FPI (highest LSN)
-            if (lsn > existing.LSN)
-            {
-                existing.LSN = lsn;
-                existing.PageData = pageData;
-                existing.Metadata = meta;
-            }
-        }
-        else
-        {
-            fpiMap[meta.FilePageIndex] = new FpiScanEntry
-            {
-                LSN = lsn,
-                PageData = pageData,
-                Metadata = meta,
-            };
-        }
     }
 
     /// <summary>

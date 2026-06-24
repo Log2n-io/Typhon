@@ -790,6 +790,89 @@ public partial class DatabaseEngine
     }
 
     /// <summary>
+    /// Builds the authoritative "owned" page bitmap — one bit per file page, set iff some structure claims that page: every registered segment's <c>Pages</c>,
+    /// their directory-map extension pages, the reserved root range (0..<see cref="ManagedPagedMMF.InitialReservedPageCount"/>), the occupancy reserves, and
+    /// the CK-05 directory twins. This is the SAME reconstruction the popcount canary in <see cref="RunStorageIntegrityCheck"/> validates against the persisted
+    /// bitmap, and the crash-path occupancy re-derive (<see cref="ManagedPagedMMF.RederiveOccupancy"/>) adopts it wholesale — occupancy is a DERIVED structure,
+    /// never trusted post-crash (the FPI replacement for the bitmap). The returned array is sized to cover <c>max(occupancy capacity, file page count)</c>,
+    /// matching the occupancy bitmap's own word count.
+    /// </summary>
+    /// <param name="segClaimedPages">Count of segment-claimed pages within the file (diagnostic, surfaced by the integrity report).</param>
+    internal long[] BuildOwnedPageBitmap(out int segClaimedPages)
+    {
+        var pageCount = MMF.StorageFilePageCount;
+        var capacity = MMF.OccupancyCapacityPages;
+        var wordCount = (Math.Max(capacity, pageCount) + 63) / 64;
+        var owned = new long[wordCount];
+        var segments = MMF.RegisteredSegments;
+
+        var claimed = 0;
+        foreach (var seg in segments)
+        {
+            foreach (var page in seg.Pages)
+            {
+                if ((uint)page < (uint)pageCount)
+                {
+                    owned[page >> 6] |= 1L << (page & 0x3F);
+                    claimed++;
+                }
+            }
+        }
+
+        // Directory-map extension pages — outside Pages but bit-set; reachable via LogicalSegmentNextMapPBID.
+        using (var dirMapGuard = EpochGuard.Enter(EpochManager))
+        {
+            var extBuf = new List<int>();
+            foreach (var seg in segments)
+            {
+                extBuf.Clear();
+                seg.CollectDirectoryMapExtensionPages(dirMapGuard.Epoch, extBuf);
+                foreach (var p in extBuf)
+                {
+                    if ((uint)p < (uint)pageCount)
+                    {
+                        owned[p >> 6] |= 1L << (p & 0x3F);
+                    }
+                }
+            }
+        }
+
+        // Reserved roots — pages 0..InitialReservedPageCount-1 are part of the file header layout, always allocated.
+        var rootEnd = Math.Min(ManagedPagedMMF.InitialReservedPageCount, pageCount);
+        for (var p = 0; p < rootEnd; p++)
+        {
+            owned[p >> 6] |= 1L << (p & 0x3F);
+        }
+
+        // Occupancy reserves — the pages held outside any segment for occupancy-machinery growth (data, map-extension, and the map-extension twin).
+        var (dataReserve, mapReserve, mapTwinReserve) = MMF.ReservedOccupancyPages;
+        if ((uint)dataReserve < (uint)pageCount)
+        {
+            owned[dataReserve >> 6] |= 1L << (dataReserve & 0x3F);
+        }
+        if ((uint)mapReserve < (uint)pageCount)
+        {
+            owned[mapReserve >> 6] |= 1L << (mapReserve & 0x3F);
+        }
+        if ((uint)mapTwinReserve < (uint)pageCount)
+        {
+            owned[mapTwinReserve >> 6] |= 1L << (mapTwinReserve & 0x3F);
+        }
+
+        // CK-05 (C2) directory twins — each is bit-set in the occupancy bitmap but lives in no segment's page list; the pair state owns them.
+        foreach (var (_, twin) in MMF.DirectoryPairs)
+        {
+            if ((uint)twin < (uint)pageCount)
+            {
+                owned[twin >> 6] |= 1L << (twin & 0x3F);
+            }
+        }
+
+        segClaimedPages = claimed;
+        return owned;
+    }
+
+    /// <summary>
     /// Audits storage-level invariants and returns every violation found. Pure read-only — touches the occupancy bitmap, the segment registry, and each
     /// segment's forward header chain; no data-page mutation, no allocation beyond a small issue list. Safe to call at any time on a live engine.
     /// </summary>
@@ -818,66 +901,8 @@ public partial class DatabaseEngine
         var words = new long[wordCount];
         MMF.ReadOccupancyBits(words);
 
-        // Pass 2: build an "owned" bitmap by ORing in every claimant — segments + their dir-map ext pages + reserves + reserved-root range.
-        var owned = new long[wordCount];
-        var segClaimedTotal = 0;
-        foreach (var seg in segments)
-        {
-            foreach (var page in seg.Pages)
-            {
-                if ((uint)page < (uint)pageCount)
-                {
-                    owned[page >> 6] |= 1L << (page & 0x3F);
-                    segClaimedTotal++;
-                }
-            }
-        }
-        // Directory-map extension pages — outside Pages but bit-set; reachable via LogicalSegmentNextMapPBID.
-        using (var dirMapGuard = EpochGuard.Enter(EpochManager))
-        {
-            var extBuf = new List<int>();
-            foreach (var seg in segments)
-            {
-                extBuf.Clear();
-                seg.CollectDirectoryMapExtensionPages(dirMapGuard.Epoch, extBuf);
-                foreach (var p in extBuf)
-                {
-                    if ((uint)p < (uint)pageCount)
-                    {
-                        owned[p >> 6] |= 1L << (p & 0x3F);
-                    }
-                }
-            }
-        }
-        // Reserved roots — pages 0..InitialReservedPageCount-1 are part of the file header layout, always allocated.
-        var rootEnd = Math.Min(ManagedPagedMMF.InitialReservedPageCount, pageCount);
-        for (var p = 0; p < rootEnd; p++)
-        {
-            owned[p >> 6] |= 1L << (p & 0x3F);
-        }
-        // Occupancy reserves — the pages held outside any segment for occupancy-machinery growth (data, map-extension, and the map-extension twin).
-        var (dataReserve, mapReserve, mapTwinReserve) = MMF.ReservedOccupancyPages;
-        if ((uint)dataReserve < (uint)pageCount)
-        {
-            owned[dataReserve >> 6] |= 1L << (dataReserve & 0x3F);
-        }
-        if ((uint)mapReserve < (uint)pageCount)
-        {
-            owned[mapReserve >> 6] |= 1L << (mapReserve & 0x3F);
-        }
-        if ((uint)mapTwinReserve < (uint)pageCount)
-        {
-            owned[mapTwinReserve >> 6] |= 1L << (mapTwinReserve & 0x3F);
-        }
-
-        // CK-05 (C2) directory twins — each is bit-set in the occupancy bitmap but lives in no segment's page list; the pair state owns them.
-        foreach (var (_, twin) in MMF.DirectoryPairs)
-        {
-            if ((uint)twin < (uint)pageCount)
-            {
-                owned[twin >> 6] |= 1L << (twin & 0x3F);
-            }
-        }
+        // Pass 2: the authoritative "owned" bitmap (every claimant). Shared with the crash-path occupancy re-derive so the canary and the heal agree by construction.
+        var owned = BuildOwnedPageBitmap(out var segClaimedTotal);
 
         // Compare word-by-word — orphans = bits set in `words` but not in `owned`, phantoms = vice versa.
         var bitsSet = 0;

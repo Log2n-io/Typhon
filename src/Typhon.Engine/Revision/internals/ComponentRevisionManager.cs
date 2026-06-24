@@ -2,6 +2,7 @@ using JetBrains.Annotations;
 using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
+using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Internals;
 
@@ -381,6 +382,241 @@ internal ref struct ComponentRevisionManager
 
         // Is the component totally deleted? Return true, otherwise false
         return (tempFirstHeader[0].ItemCount == 1 && tempElements[0].ComponentChunkId == 0);
+    }
+
+    /// <summary>
+    /// Recovery scrub (03-recovery.md §6, D1): collapses one entity's revision chain to exactly its <b>HEAD</b> — the highest-TSN committed
+    /// (<see cref="CompRevStorageElement.IsolationFlag"/>==0, non-void) element — freeing every other element's content chunk and every overflow table chunk,
+    /// then writing the head alone into the first chunk (<c>ItemCount=1, ChainLength=1, NextChunkId=0, FirstItemIndex=0</c>, UowId cleared).
+    /// Unlike <see cref="CleanUpUnusedEntriesCore"/> it keeps <b>no sentinel</b>: a crash leaves no active readers (D1 — the history horizon resets at crash),
+    /// so the read baseline a sentinel protects does not exist. Uncommitted (IsolationFlag==1) elements belong to transactions whose commit marker never became
+    /// durable; their content is freed. Single-threaded recovery use only — no concurrent access, so the chunk <c>Control</c> lock is neither held nor needed
+    /// (the field is preserved by writing individual header fields, never the whole header).
+    /// </summary>
+    /// <returns>
+    /// <c>true</c> (informational — no caller action required) if the chain had <b>no committed head</b> (only voided/uncommitted elements) and was reduced to
+    /// a single void element so the entity reads as invisible. <c>false</c> if a committed head was kept — including a <b>tombstone</b> head
+    /// (<c>ComponentChunkId == 0</c>), the canonical "deleted entity" state, filtered by the read path. Either way the chain is left valid (ItemCount==1) and
+    /// the caller need not touch the EntityMap.
+    /// </returns>
+    internal static unsafe bool ScrubChainToHead(ComponentTable ct, int firstChunkId, ref ChunkAccessor<PersistentStore> compRevTableAccessor, 
+        ref ChunkAccessor<PersistentStore> compContentAccessor)
+    {
+        ref var firstHeader = ref compRevTableAccessor.GetChunk<CompRevStorageHeader>(firstChunkId);
+        var hasCollections = ct.HasCollections;
+        var chainLength = firstHeader.ChainLength;
+        var commitSequence = firstHeader.CommitSequence;
+        var entityPk = firstHeader.EntityPK;
+
+        // (1) Collect every overflow table chunk (the whole chain except the first chunk) by following the NextChunkId
+        // linkage. After scrub the head lives alone in the first chunk, so all overflow chunks are freed unconditionally.
+        Span<int> overflowChunks = (chainLength < 128) ? stackalloc int[chainLength] : new int[chainLength];
+        var overflowCount = 0;
+        {
+            var next = firstHeader.NextChunkId;
+            var guard = chainLength + 4;                                  // cycle guard — a corrupted chain must not loop forever
+            while (next != 0 && guard-- > 0)
+            {
+                overflowChunks[overflowCount++] = next;
+                next = compRevTableAccessor.GetChunk<CompRevStorageHeader>(next).NextChunkId;
+            }
+        }
+
+        // (2) Walk the elements to find the head (highest-TSN committed element); collect every non-head content chunk.
+        CompRevStorageElement head = default;
+        var hasHead = false;
+        Span<int> contentToFree = (firstHeader.ItemCount < 128) ? stackalloc int[firstHeader.ItemCount] : new int[firstHeader.ItemCount];
+        var contentCount = 0;
+        {
+            using var enumerator = new RevisionEnumerator(ref compRevTableAccessor, firstChunkId, false, true);
+            while (enumerator.MoveNext())
+            {
+                ref var el = ref enumerator.Current;
+                if (el.IsVoid)
+                {
+                    continue;
+                }
+
+                if (el.IsolationFlag)
+                {
+                    // Uncommitted at crash → rolled back; free its content (a delete entry has ComponentChunkId==0 → no-op).
+                    contentToFree[contentCount++] = el.ComponentChunkId;
+                    continue;
+                }
+
+                if (!hasHead || el.TSN > head.TSN)
+                {
+                    if (hasHead)
+                    {
+                        contentToFree[contentCount++] = head.ComponentChunkId;
+                    }
+                    head = el;
+                    hasHead = true;
+                }
+                else
+                {
+                    contentToFree[contentCount++] = el.ComponentChunkId;
+                }
+            }
+        }
+
+        // (3) Free non-head content chunks + all overflow table chunks AFTER the enumerator is disposed (the circular buffer
+        // must not be mutated mid-walk — the use-after-free discipline of CleanUpUnusedEntriesCore).
+        for (var i = 0; i < contentCount; i++)
+        {
+            FreeCompContentChunk(ct, ref compContentAccessor, contentToFree[i], hasCollections);
+        }
+        for (var i = 0; i < overflowCount; i++)
+        {
+            ct.CompRevTableSegment.FreeChunk(overflowChunks[i]);
+        }
+
+        // (4) Rewrite the first chunk to hold exactly the head. Write individual fields (NEVER the whole header) so the
+        // Control field at offset 4 is preserved — same discipline as CleanUpUnusedEntriesCore.
+        var destSpan = compRevTableAccessor.GetChunkAsSpan(firstChunkId, true);
+        destSpan.Split(out Span<CompRevStorageHeader> destHeader, out Span<CompRevStorageElement> destElements);
+        destHeader[0].NextChunkId = 0;
+        destHeader[0].FirstItemIndex = 0;
+        destHeader[0].ChainLength = 1;
+        destHeader[0].CommitSequence = commitSequence;
+        destHeader[0].EntityPK = entityPk;
+
+        if (!hasHead)
+        {
+            // No committed revision survived (only voided / uncommitted elements — their transactions never became durable).
+            // Leave a single VOID element so the entity reads as invisible/deleted via the normal chain walk. The root chunk +
+            // EntityMap entry remain — a rare, harmless residual (a checkpointed chunk that held only uncommitted revisions);
+            // it is not orphan-reclaimed because it is still EntityMap-reachable.
+            destElements[0] = default;                       // all-zero ⇒ IsVoid ⇒ invisible to readers
+            destHeader[0].ItemCount = 1;
+            destHeader[0].FirstItemIndex = 0;
+            destHeader[0].LastCommitRevisionIndex = -1;
+            return true;
+        }
+
+        head.UowId = 0;                 // §6: UowId cleared — the writing transaction is meaningless post-crash (registry is volatile)
+        head.IsolationFlag = false;
+        destElements[0] = head;
+        destHeader[0].ItemCount = 1;
+        destHeader[0].LastCommitRevisionIndex = 0;
+
+        // A committed head — live or tombstone — is kept as the single surviving element. The entity stays in the EntityMap;
+        // a tombstone is filtered by the read path. Only the no-committed-head case above drops the entity.
+        return false;
+    }
+
+    /// <summary>
+    /// Scans a Versioned component table's <see cref="ComponentTable.CompRevTableSegment"/> for revision-chain heads — allocated chunks that are NOT the
+    /// <see cref="CompRevStorageHeader.NextChunkId"/> overflow target of another chunk — filtered to <paramref name="archetypeId"/> (the PK's low 12 bits).
+    /// Returns <c>EntityPK → first(root)-chunk-id</c>.
+    /// Two passes:
+    /// (1) collect the overflow set
+    /// (2) heads = allocated ∧ not-overflow ∧ archetype-match. Shared by EntityMap rebuild (<see cref="DatabaseEngine"/>) and recovery scrub
+    /// (03-recovery.md §6) so the two scans never drift. Returns an empty map for a null / non-Versioned / empty table.
+    /// </summary>
+    internal static Dictionary<long, int> EnumerateVersionedChainHeads(ComponentTable table, ushort archetypeId)
+    {
+        var heads = new Dictionary<long, int>();
+        if (table?.CompRevTableSegment == null || table.StorageMode != StorageMode.Versioned)
+        {
+            return heads;
+        }
+
+        var segment = table.CompRevTableSegment;
+        var capacity = segment.ChunkCapacity;
+        if (capacity == 0 || segment.AllocatedChunkCount == 0)
+        {
+            return heads;
+        }
+
+        var accessor = segment.CreateChunkAccessor();
+
+        // Pass 1: every chunk referenced as another chunk's NextChunkId is an overflow chunk, not a head.
+        var overflowSet = new HashSet<int>();
+        for (var chunkId = 0; chunkId < capacity; chunkId++)
+        {
+            if (!segment.IsChunkAllocated(chunkId))
+            {
+                continue;
+            }
+
+            ref var hdr = ref accessor.GetChunk<CompRevStorageHeader>(chunkId, true);
+            if (hdr.NextChunkId != 0)
+            {
+                overflowSet.Add(hdr.NextChunkId);
+            }
+        }
+
+        // Pass 2: heads = allocated chunks not in the overflow set, owned by this archetype.
+        for (var chunkId = 0; chunkId < capacity; chunkId++)
+        {
+            if (!segment.IsChunkAllocated(chunkId) || overflowSet.Contains(chunkId))
+            {
+                continue;
+            }
+
+            ref var hdr = ref accessor.GetChunk<CompRevStorageHeader>(chunkId);
+            var pk = hdr.EntityPK;
+            if ((pk & 0xFFF) != archetypeId)
+            {
+                continue;
+            }
+
+            heads[pk] = chunkId;
+        }
+
+        accessor.Dispose();
+        return heads;
+    }
+
+    /// <summary>
+    /// Recovery orphan sweep (03-recovery.md §6): after a table's chains have been scrubbed to their heads, free every allocated
+    /// chunk no longer reachable — a revision-table chunk that is not a chain root, or a content chunk that no surviving head
+    /// references. These are chunks leaked by pre-crash operations interrupted between allocation and linking. Post-scrub each
+    /// chain is exactly its root (NextChunkId==0), so <paramref name="reachableRoots"/> (the chains' root chunk ids) is the full
+    /// set of reachable revision-table chunks, and the roots' single head elements yield the only reachable content chunks.
+    /// Orphan content is freed with a plain <c>FreeChunk</c> (NOT <see cref="FreeCompContentChunk"/>): a never-linked chunk's
+    /// collection-buffer ids are unreliable, so its buffers are not released — a rare, bounded residual (standalone collection
+    /// buffer orphans are out of scope here). Reserved chunk 0 (the null sentinel) reports unallocated, so it is never swept.
+    /// </summary>
+    internal static void SweepTableOrphans(ComponentTable table, HashSet<int> reachableRoots, ref ChunkAccessor<PersistentStore> revAccessor)
+    {
+        var revSeg = table.CompRevTableSegment;
+        var contentSeg = table.ComponentSegment;
+        if (revSeg == null || contentSeg == null)
+        {
+            return;
+        }
+
+        // Reachable content = the single head element's ComponentChunkId of each surviving chain root.
+        var reachableContent = new HashSet<int>(reachableRoots.Count);
+        foreach (var rootChunkId in reachableRoots)
+        {
+            revAccessor.GetChunkAsSpan(rootChunkId).Split(out Span<CompRevStorageHeader> _, out Span<CompRevStorageElement> els);
+            var cc = els[0].ComponentChunkId;
+            if (cc != 0)
+            {
+                reachableContent.Add(cc);
+            }
+        }
+
+        // Free orphan revision-table chunks (allocated, not a chain root).
+        for (var chunkId = 0; chunkId < revSeg.ChunkCapacity; chunkId++)
+        {
+            if (revSeg.IsChunkAllocated(chunkId) && !reachableRoots.Contains(chunkId))
+            {
+                revSeg.FreeChunk(chunkId);
+            }
+        }
+
+        // Free orphan content chunks (allocated, referenced by no surviving head).
+        for (var chunkId = 0; chunkId < contentSeg.ChunkCapacity; chunkId++)
+        {
+            if (contentSeg.IsChunkAllocated(chunkId) && !reachableContent.Contains(chunkId))
+            {
+                contentSeg.FreeChunk(chunkId);
+            }
+        }
     }
 
     /// <summary>

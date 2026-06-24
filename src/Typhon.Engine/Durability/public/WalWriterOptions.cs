@@ -38,10 +38,4 @@ public sealed class WalWriterOptions
     /// Default: true (safe default for Immediate mode support).
     /// </summary>
     public bool UseFUA { get; set; } = true;
-
-    /// <summary>
-    /// Whether to LZ4-compress FPI page payloads in WAL records. Reduces WAL bandwidth for compressible pages.
-    /// Incompressible pages (e.g., random data) automatically fall back to uncompressed. Default: false.
-    /// </summary>
-    public bool EnableFpiCompression { get; set; }
 }

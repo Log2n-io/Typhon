@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using Typhon.Engine;
 
 namespace Typhon.Engine.Internals;
 
@@ -82,8 +81,8 @@ internal sealed class RecoveryDriver
                 // Phase 1+2: scan CRC-valid chunk bodies → records; collect committed-tx TSNs from TxCommit markers (LOG-04).
                 while (reader.TryReadNext(out var ch, out var body))
                 {
-                    // Only RecordBatch chunks carry v2 records. FPI / other v1 chunk types (still emitted until P1.3 deletes FPI)
-                    // are orthogonal — skip them so they aren't misparsed as records.
+                    // Only RecordBatch chunks carry v2 records. Other chunk types (TickFence / Bulk*, or a stale FullPageImage in an old segment — FPI is
+                    // retired, increment D) are orthogonal — skip them so they aren't misparsed as records.
                     if (ch.ChunkType != (ushort)WalChunkType.Transaction)
                     {
                         continue;

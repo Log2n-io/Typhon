@@ -1,5 +1,7 @@
 // unset
 
+using System.Runtime.CompilerServices;
+
 namespace Typhon.Engine.Internals;
 
 /// <summary>
@@ -60,4 +62,47 @@ internal abstract class BTreeBase<TStore> : IBTreeIndex where TStore : struct, I
     /// <see cref="QueryResolverHelper.EncodeThreshold"/>. Returns 0 for empty trees.
     /// </summary>
     public abstract long GetMaxKeyAsLong();
+
+    /// <summary>Number of preallocated directory chunks (0-3) every shared index segment reserves for its chunk-0 BTree directory. Up to 20 index slots for
+    /// 64-byte chunks. Node chunks live at chunkId &gt;= this.</summary>
+    internal const int DirectoryChunkCount = 4;
+
+    /// <summary>
+    /// Torn-safe reset of a shared index segment to empty — used by crash recovery before fresh index trees are (re)built (RB-01). Frees every node chunk
+    /// (chunkId &gt;= <see cref="DirectoryChunkCount"/>) via the allocation bitmap ONLY — it never reads chunk content, so a torn on-disk index node page is
+    /// reclaimed without being parsed (the precondition for retiring FPI on index pages) — then zeroes the chunk-0 directory header so a subsequent fresh
+    /// <c>RegisterInDirectory</c> re-registers every tree from an empty directory. The four directory chunks (0-3) stay allocated and are reused.
+    /// </summary>
+    internal static unsafe void ClearSharedSegment(ChunkBasedSegment<TStore> segment, ChangeSet changeSet)
+    {
+        if (segment == null)
+        {
+            return;
+        }
+
+        using var guard = EpochGuard.Enter(segment.Store.EpochManager);
+
+        // Free node chunks by bitmap only — torn-safe: a torn node page is reclaimed, never parsed (FreeChunk touches only the page's occupancy metadata).
+        var capacity = segment.ChunkCapacity;
+        for (var chunkId = DirectoryChunkCount; chunkId < capacity; chunkId++)
+        {
+            if (segment.IsChunkAllocated(chunkId))
+            {
+                segment.FreeChunk(chunkId);
+            }
+        }
+
+        // Zero the directory header (chunk 0) so the directory reads as empty; fresh trees re-register from slot 0, overwriting the stale entries.
+        var accessor = segment.CreateChunkAccessor(changeSet);
+        try
+        {
+            var addr = accessor.GetChunkAddress(0, true);
+            ref var header = ref Unsafe.AsRef<BTreeDirectoryHeader>(addr);
+            header.EntryCount = 0;
+        }
+        finally
+        {
+            accessor.Dispose();
+        }
+    }
 }

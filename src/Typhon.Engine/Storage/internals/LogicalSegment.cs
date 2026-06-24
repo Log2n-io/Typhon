@@ -112,15 +112,67 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
     }
 
     /// <summary>
+    /// Fault <paramref name="filePageIndex"/> into the page cache and acquire its exclusive latch with NO eviction window
+    /// (#2 fix). The epoch tag does not pin a not-yet-latched slot — the grow path tags pages with a bare
+    /// <see cref="EpochManager.GlobalEpoch"/> snapshot (it cannot hold an <see cref="EpochGuard"/> across the fetch, which
+    /// blocks on page-cache back-pressure — an EBR pin held across a blocking wait deadlocks reclamation), and that
+    /// snapshot goes stale the moment the global epoch advances. So the just-faulted slot can be evicted+reused before we
+    /// latch it; writing/unlatching it then corrupts another thread's page. Defence: <see cref="IPageStore.IncrementSlotRefCount"/>
+    /// pins the one slot across the request→latch gap (Interlocked, no reclamation stall), and a bounded retry re-faults on
+    /// the rare residual miss. We NEVER proceed without the latch — exhausting retries throws rather than writing a slot we
+    /// don't own.
+    /// </summary>
+    private int RequestExclusiveForGrow(int filePageIndex, long epoch, bool verifyCrc)
+    {
+        const int maxAttempts = 64;
+        for (var attempt = 0; ; attempt++)
+        {
+            int memPageIndex;
+            if (verifyCrc)
+            {
+                _store.RequestPageEpoch(filePageIndex, epoch, out memPageIndex);
+            }
+            else
+            {
+                _store.RequestPageEpochUnchecked(filePageIndex, epoch, out memPageIndex);
+            }
+
+            // Pin the slot so it cannot be evicted between here and the latch, then latch. Once latched (PageState=Exclusive)
+            // the page is eviction-proof on its own, so the SlotRefCount pin can be dropped immediately. The drop MUST run
+            // even if TryLatchPageExclusive throws (e.g. PageCache lock-timeout) — otherwise the SlotRefCount leaks, the page
+            // becomes permanently un-evictable, and accumulated leaks fill the cache → back-pressure stalls grows that hold a
+            // page latch → the checkpoint spins forever in CopyPageWithSeqlock on that latched page. Hence try/finally.
+            _store.IncrementSlotRefCount(memPageIndex);
+            bool latched;
+            try
+            {
+                latched = _store.TryLatchPageExclusive(memPageIndex);
+            }
+            finally
+            {
+                _store.DecrementSlotRefCount(memPageIndex);
+            }
+            if (latched)
+            {
+                return memPageIndex;
+            }
+
+            if (attempt >= maxAttempts)
+            {
+                throw new InvalidOperationException(
+                    $"LogicalSegment grow could not exclusively latch file page {filePageIndex} after {maxAttempts} attempts (page-cache slot contention).");
+            }
+        }
+    }
+
+    /// <summary>
     /// Get a typed <see cref="PageAccessor"/> for a segment page with exclusive latch.
     /// Caller must be inside an <see cref="EpochGuard"/> scope.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public PageAccessor GetPageExclusive(int segmentPageIndex, long epoch, out int memPageIndex)
     {
-        _store.RequestPageEpoch(Pages[segmentPageIndex], epoch, out memPageIndex);
-        var latched = _store.TryLatchPageExclusive(memPageIndex);
-        Debug.Assert(latched, "TryLatchPageExclusive failed after RequestPageEpoch — page should be Idle");
+        memPageIndex = RequestExclusiveForGrow(Pages[segmentPageIndex], epoch, verifyCrc: true);
         return _store.GetPage(memPageIndex);
     }
 
@@ -131,9 +183,7 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal PageAccessor GetPageExclusiveUnchecked(int segmentPageIndex, long epoch, out int memPageIndex)
     {
-        _store.RequestPageEpochUnchecked(Pages[segmentPageIndex], epoch, out memPageIndex);
-        var latched = _store.TryLatchPageExclusive(memPageIndex);
-        Debug.Assert(latched, "TryLatchPageExclusive failed after RequestPageEpochUnchecked — page should be Idle");
+        memPageIndex = RequestExclusiveForGrow(Pages[segmentPageIndex], epoch, verifyCrc: false);
         return _store.GetPage(memPageIndex);
     }
 
@@ -155,9 +205,7 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public unsafe byte* GetPageAddressExclusive(int segmentPageIndex, long epoch, out int memPageIndex)
     {
-        _store.RequestPageEpoch(Pages[segmentPageIndex], epoch, out memPageIndex);
-        var latched = _store.TryLatchPageExclusive(memPageIndex);
-        Debug.Assert(latched, "TryLatchPageExclusive failed after RequestPageEpoch — page should be Idle");
+        memPageIndex = RequestExclusiveForGrow(Pages[segmentPageIndex], epoch, verifyCrc: true);
         return _store.GetMemPageAddress(memPageIndex);
     }
 
@@ -391,9 +439,7 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
                 // If it's a new page, initialize it (skip CRC — page will be fully overwritten)
                 if (isNewPage)
                 {
-                    _store.RequestPageEpochUnchecked(curMapPageIndex, epoch, out memPageIdx);
-                    var latched = _store.TryLatchPageExclusive(memPageIdx);
-                    Debug.Assert(latched, "TryLatchPageExclusive failed after RequestPageEpochUnchecked");
+                    memPageIdx = RequestExclusiveForGrow(curMapPageIndex, epoch, verifyCrc: false);
                     page = _store.GetPage(memPageIdx);
                     hasPage = true;
 
@@ -408,9 +454,7 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
                 {
                     if (hasPage == false)
                     {
-                        _store.RequestPageEpoch(curMapPageIndex, epoch, out memPageIdx);
-                        var latched = _store.TryLatchPageExclusive(memPageIdx);
-                        Debug.Assert(latched, "TryLatchPageExclusive failed after RequestPageEpoch");
+                        memPageIdx = RequestExclusiveForGrow(curMapPageIndex, epoch, verifyCrc: true);
                         page = _store.GetPage(memPageIdx);
                         hasPage = true;
                     }
@@ -432,9 +476,7 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
                 {
                     if (hasPage == false)
                     {
-                        _store.RequestPageEpoch(curMapPageIndex, epoch, out memPageIdx);
-                        var latched = _store.TryLatchPageExclusive(memPageIdx);
-                        Debug.Assert(latched, "TryLatchPageExclusive failed after RequestPageEpoch");
+                        memPageIdx = RequestExclusiveForGrow(curMapPageIndex, epoch, verifyCrc: true);
                         page = _store.GetPage(memPageIdx);
                         hasPage = true;
                     }
@@ -457,9 +499,7 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
                         // The current page is full, we need on fetch one more... just to store the termination 0 value
                         else
                         {
-                            _store.RequestPageEpochUnchecked(mapIndices[curIndexMapIndex + 1], epoch, out var endMemIdx);
-                            var endLatched = _store.TryLatchPageExclusive(endMemIdx);
-                            Debug.Assert(endLatched, "TryLatchPageExclusive failed after RequestPageEpochUnchecked");
+                            var endMemIdx = RequestExclusiveForGrow(mapIndices[curIndexMapIndex + 1], epoch, verifyCrc: false);
                             var endPage = _store.GetPage(endMemIdx);
                             InitHeader(endPage.Address, PageClearMode.Header, PageBlockFlags.IsLogicalSegment, type, 1);
                             changeSet?.AddByMemPageIndex(endMemIdx);
@@ -527,9 +567,7 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
         if (growFrom > 0)
         {
             var oldTailFilePage = filePageIndices[growFrom - 1];
-            _store.RequestPageEpoch(oldTailFilePage, epoch, out var oldTailMemIdx);
-            var oldTailLatched = _store.TryLatchPageExclusive(oldTailMemIdx);
-            Debug.Assert(oldTailLatched, "TryLatchPageExclusive failed on old-tail page during Grow chain-patch");
+            var oldTailMemIdx = RequestExclusiveForGrow(oldTailFilePage, epoch, verifyCrc: true);
             var oldTailPage = _store.GetPage(oldTailMemIdx);
             ref var oldTailLsh = ref oldTailPage.StructAt<LogicalSegmentHeader>(LogicalSegmentHeader.Offset);
             oldTailLsh.LogicalSegmentNextRawDataPBID = filePageIndices[growFrom];
@@ -554,9 +592,7 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
         for (var i = growFrom; i < filePageIndices.Length; i++)
         {
             var pageIndex = filePageIndices[i];
-            _store.RequestPageEpochUnchecked(pageIndex, epoch, out var memPageIdx);
-            var latched = _store.TryLatchPageExclusive(memPageIdx);
-            Debug.Assert(latched, "TryLatchPageExclusive failed after RequestPageEpochUnchecked");
+            var memPageIdx = RequestExclusiveForGrow(pageIndex, epoch, verifyCrc: false);
             var page = _store.GetPage(memPageIdx);
 
             if (clear)

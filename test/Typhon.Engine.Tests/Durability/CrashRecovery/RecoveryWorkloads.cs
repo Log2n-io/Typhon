@@ -179,6 +179,45 @@ internal sealed class IndexedFlatWorkload : IRecoveryWorkload
 }
 
 /// <summary>
+/// N CompD entities whose multi-value index A (<c>[Index(AllowMultiple)]</c> float) and C (double) deliberately REPEAT — the <c>count</c> entities spread over
+/// <c>groups</c> distinct A/C values, so each multi-value key holds several entities. B stays unique (<c>= i</c>, the unique index forbids duplicates). Substrate for
+/// the multi-value index-rebuild test: post-crash the rebuilt A index must return EVERY entity (all duplicate-key buffer members), not just one per key (RB-01).
+/// </summary>
+internal sealed class MultiValueDupKeyWorkload : IRecoveryWorkload
+{
+    private readonly int _count;
+    private readonly int _groups;
+
+    public MultiValueDupKeyWorkload(int count, int groups)
+    {
+        _count = count;
+        _groups = groups;
+    }
+
+    public string Name => "MultiValueDupKey";
+
+    public void Register(DatabaseEngine dbe)
+    {
+        dbe.RegisterComponentFromAccessor<CompD>();
+        Archetype<CompDArch>.Touch();
+    }
+
+    public void Execute(UnitOfWork uow, RecoveryShadowModel shadow)
+    {
+        using var tx = uow.CreateTransaction();
+        for (int i = 0; i < _count; i++)
+        {
+            var g = i % _groups;
+            var d = new CompD(g * 1.5f, i, g * 2.5);   // A & C repeat across groups (multi-value duplicate keys); B = i is unique
+            var id = tx.Spawn<CompDArch>(CompDArch.D.Set(in d));
+            shadow.RecordSpawn(id);
+        }
+
+        tx.Commit();
+    }
+}
+
+/// <summary>
 /// N SvIndexed entities (all-SingleVersion + indexed ⇒ cluster-eligible storage) spawned in one committed transaction. The flat-only applier does not restore cluster
 /// storage, so this is the substrate for the cluster-axis measurement.
 /// </summary>
@@ -232,4 +271,35 @@ public struct SvIndexed
 internal class SvIndexedArch : Archetype<SvIndexedArch>
 {
     public static readonly Comp<SvIndexed> S = Register<SvIndexed>();
+}
+
+// ── The rare NON-rebuildable EntityMap residual: a non-cluster archetype that still owns a SingleVersion slot. An archetype is forced off the cluster path when it has a
+//    Transient component with an indexed field (DatabaseEngine.InitializeArchetypes), so {SV slot + Transient-indexed slot} lands on the legacy flat path. Its SV slot
+//    location has no persisted source (no cluster EntityKeys[N], no revision chain), so a torn EntityMap page there must loud-fail (RB-04), not silent-heal. Used by the
+//    IsEntityMapRebuildable classifier test. Id 951 is unused. ──
+
+[Component("Typhon.Schema.UnitTest.SvForFlat", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+public struct SvForFlat
+{
+    public int V;
+
+    public SvForFlat(int v) => V = v;
+}
+
+[Component("Typhon.Schema.UnitTest.TransientIndexed", 1, StorageMode = StorageMode.Transient)]
+[StructLayout(LayoutKind.Sequential)]
+public struct TransientIndexed
+{
+    [Index]
+    public int T;
+
+    public TransientIndexed(int t) => T = t;
+}
+
+[Archetype(951)]
+internal class FlatSvArch : Archetype<FlatSvArch>
+{
+    public static readonly Comp<SvForFlat> S = Register<SvForFlat>();
+    public static readonly Comp<TransientIndexed> T = Register<TransientIndexed>();
 }

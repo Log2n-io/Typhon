@@ -623,7 +623,6 @@ public static class TelemetryConfig
     public static readonly bool DurabilityRecoveryDiscoverActive;
     public static readonly bool DurabilityRecoverySegmentActive;
     public static readonly bool DurabilityRecoveryRecordActive;
-    public static readonly bool DurabilityRecoveryFpiActive;
     public static readonly bool DurabilityRecoveryRedoActive;
     public static readonly bool DurabilityRecoveryUndoActive;
     public static readonly bool DurabilityRecoveryTickFenceActive;
@@ -1431,7 +1430,6 @@ public static class TelemetryConfig
                 new Node("Discover"),
                 new Node("Segment"),
                 new Node("Record"),
-                new Node("FPI"),
                 new Node("Redo"),
                 new Node("Undo"),
                 new Node("TickFence"),
@@ -1469,7 +1467,6 @@ public static class TelemetryConfig
         DurabilityRecoveryDiscoverActive  = durabilityMap["Durability:Recovery:Discover"];
         DurabilityRecoverySegmentActive   = durabilityMap["Durability:Recovery:Segment"];
         DurabilityRecoveryRecordActive    = durabilityMap["Durability:Recovery:Record"];
-        DurabilityRecoveryFpiActive       = durabilityMap["Durability:Recovery:FPI"];
         DurabilityRecoveryRedoActive      = durabilityMap["Durability:Recovery:Redo"];
         DurabilityRecoveryUndoActive      = durabilityMap["Durability:Recovery:Undo"];
         DurabilityRecoveryTickFenceActive = durabilityMap["Durability:Recovery:TickFence"];

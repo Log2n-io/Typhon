@@ -1,7 +1,6 @@
 using JetBrains.Annotations;
 using Microsoft.Extensions.Logging;
 using System;
-using System.Runtime.InteropServices;
 
 namespace Typhon.Engine.Internals;
 
@@ -102,6 +101,10 @@ internal sealed class WalManager : ResourceNode
 
         SegmentManager = new WalSegmentManager(_fileIO, _options.WalDirectory, _options.SegmentSize, _options.PreAllocateSegments, _options.UseFUA);
         SegmentManager.Initialize(lastSegmentId, firstLSN, checkpointLsn);
+        // Continue the LSN sequence from the active segment's first-record LSN. The commit buffer's counter is constructed at 1; on a reopen (firstLSN > 1) it must be
+        // advanced to match, or record LSNs restart at 1 below the segment header AND below a prior session's CheckpointLSN — the latter makes recovery drop the whole
+        // post-reopen window (LOG-08). Monotonic + pre-Start, so a fresh writer (firstLSN == 1) is a no-op.
+        CommitBuffer.SeedNextLsn(firstLSN);
         _writer = new WalWriter(CommitBuffer, SegmentManager, _fileIO, _options, _allocator, this);
         _initialized = true;
     }
@@ -133,103 +136,6 @@ internal sealed class WalManager : ResourceNode
 
     /// <summary>Seeds the durable watermark to a frontier already durable on disk (crash-recovery seal — see <see cref="WalWriter.SeedDurableLsn"/>).</summary>
     public void SeedDurableLsn(long lsn) => _writer?.SeedDurableLsn(lsn);
-
-    // ═══════════════════════════════════════════════════════════════
-    // FPI Search (on-the-fly repair)
-    // ═══════════════════════════════════════════════════════════════
-
-    /// <summary>
-    /// Scans all WAL segments for the most recent Full-Page Image (FPI) matching the given file page index. Returns the page data (8192 bytes) if found,
-    /// or null if no FPI exists. Handles both compressed (LZ4) and uncompressed FPI payloads.
-    /// Used by <see cref="PagedMMF.TryRepairPageFromFpi"/> for on-the-fly repair during normal operation.
-    /// </summary>
-    internal byte[] SearchFpiForPage(int filePageIndex)
-    {
-        if (SegmentManager == null)
-        {
-            return null;
-        }
-
-        var segmentPaths = SegmentManager.GetAllSegmentPaths();
-        if (segmentPaths.Count == 0)
-        {
-            return null;
-        }
-
-        byte[] bestPageData = null;
-        long bestLSN = -1;
-
-        using var reader = new WalSegmentReader(_fileIO);
-
-        foreach (var path in segmentPaths)
-        {
-            if (!reader.OpenSegment(path))
-            {
-                continue;
-            }
-
-            while (reader.TryReadNext(out var chunkHeader, out var body))
-            {
-                if ((WalChunkType)chunkHeader.ChunkType != WalChunkType.FullPageImage)
-                {
-                    continue;
-                }
-
-                // FPI body: [LSN (8B)] [FpiMetadata (16B)] [page data]
-                if (body.Length < sizeof(long) + FpiMetadata.SizeInBytes)
-                {
-                    continue;
-                }
-
-                var lsn = MemoryMarshal.Read<long>(body);
-                var meta = MemoryMarshal.Read<FpiMetadata>(body.Slice(sizeof(long)));
-
-                if (meta.FilePageIndex != filePageIndex)
-                {
-                    continue;
-                }
-
-                if (lsn <= bestLSN)
-                {
-                    continue;
-                }
-
-                var pagePayload = body.Slice(sizeof(long) + FpiMetadata.SizeInBytes);
-
-                if (meta.CompressionAlgo != FpiCompression.AlgoNone)
-                {
-                    // Compressed FPI — decompress the page payload
-                    if (meta.CompressionAlgo != FpiCompression.AlgoLZ4)
-                    {
-                        continue; // Unknown algorithm — try older FPI
-                    }
-
-                    var decompressed = new byte[meta.UncompressedSize];
-                    var decompressedSize = FpiCompression.Decompress(pagePayload, decompressed);
-                    if (decompressedSize != meta.UncompressedSize)
-                    {
-                        continue; // Decompression failure — try older FPI
-                    }
-
-                    bestLSN = lsn;
-                    bestPageData = decompressed;
-                }
-                else
-                {
-                    // Uncompressed FPI — validate and extract
-                    if (pagePayload.Length < PagedMMF.PageSize)
-                    {
-                        continue;
-                    }
-
-                    bestLSN = lsn;
-                    bestPageData = pagePayload.Slice(0, PagedMMF.PageSize).ToArray();
-                }
-            }
-        }
-
-        return bestPageData;
-    }
 
     // ═══════════════════════════════════════════════════════════════
     // Dispose

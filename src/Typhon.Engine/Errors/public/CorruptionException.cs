@@ -41,13 +41,14 @@ public class CorruptionException : StorageException
 
 /// <summary>
 /// CRC32C checksum mismatch on a data page — the page is torn or corrupted.
-/// Thrown when on-load verification detects a mismatch and FPI repair is unavailable or fails.
+/// Thrown when on-load (OnLoad) verification detects a mismatch outside recovery — there is no repair (FPI was retired; recovery heals torn pages via the
+/// rebuild net).
 /// </summary>
 [PublicAPI]
 public class PageCorruptionException : CorruptionException
 {
     public PageCorruptionException(int pageIndex, uint expectedCrc, uint computedCrc) : base(TyphonErrorCode.PageChecksumMismatch, "PageCache", pageIndex,
-        $"CRC mismatch: stored=0x{expectedCrc:X8}, computed=0x{computedCrc:X8}. FPI repair failed or unavailable.")
+        $"CRC mismatch: stored=0x{expectedCrc:X8}, computed=0x{computedCrc:X8}. Page is torn/corrupted (no on-load repair).")
     {
         ExpectedCrc = expectedCrc;
         ComputedCrc = computedCrc;

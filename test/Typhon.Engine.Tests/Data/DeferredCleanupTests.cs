@@ -58,6 +58,135 @@ class DeferredCleanupTests : TestBase<DeferredCleanupTests>
         }
     }
 
+    // A1.8 (03-recovery.md §6): recovery SCRUB collapses a multi-revision chain to exactly its HEAD — the highest-TSN committed
+    // value — and is idempotent. Built directly against ComponentRevisionManager.ScrubChainToHead (the per-chain primitive the
+    // recovery Phase-4 loop invokes), using a held tail transaction to retain history the way a checkpointed pre-crash chain would.
+    [Test]
+    public void Scrub_CollapsesMultiRevisionChain_ToHeadValue_Idempotent()
+    {
+        using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        RegisterComponents(dbe);
+        dbe.InitializeArchetypes();
+
+        // A held tail transaction blocks lazy cleanup, so the chain retains every committed revision (as a checkpointed chain can).
+        using var tail = dbe.CreateQuickTransaction();
+
+        EntityId e;
+        {
+            using var t = dbe.CreateQuickTransaction();
+            var a = new CompA(10);
+            e = t.Spawn<CompAArch>(CompAArch.A.Set(in a));
+            t.Commit();
+        }
+        foreach (var v in new[] { 20, 30, 40, 50 })
+        {
+            using var t = dbe.CreateQuickTransaction();
+            ref var a = ref t.OpenMut(e).Write(CompAArch.A);
+            a = new CompA(v);
+            t.Commit();
+        }
+
+        // 5 committed revisions (10,20,30,40,50) — cleanup is blocked by the held tail.
+        using (var tc = dbe.CreateQuickTransaction())
+        {
+            Assert.That(tc.GetRevisionCount<CompA>((long)e.RawValue), Is.EqualTo(5), "precondition: the held tail retains 5 revisions");
+        }
+
+        var table = dbe.GetComponentTable<CompA>();
+        var archetypeId = (ushort)((long)e.RawValue & 0xFFF);
+        var heads = ComponentRevisionManager.EnumerateVersionedChainHeads(table, archetypeId);
+        Assert.That(heads.ContainsKey((long)e.RawValue), Is.True, "the shared scan must find the entity's chain head");
+        var firstChunkId = heads[(long)e.RawValue];
+
+        void Scrub()
+        {
+            using var guard = EpochGuard.Enter(dbe.EpochManager);
+            var cs = dbe.MMF.CreateChangeSet();
+            var rev = table.CompRevTableSegment.CreateChunkAccessor(cs);
+            var content = table.ComponentSegment.CreateChunkAccessor(cs);
+            ComponentRevisionManager.ScrubChainToHead(table, firstChunkId, ref rev, ref content);
+            rev.Dispose();
+            content.Dispose();
+            cs.SaveChanges();
+        }
+
+        Scrub();
+
+        using (var tv = dbe.CreateQuickTransaction())
+        {
+            Assert.That(tv.GetRevisionCount<CompA>((long)e.RawValue), Is.EqualTo(1), "scrub collapses the chain to a single head revision");
+            Assert.That(tv.Open(e).Read(CompAArch.A).A, Is.EqualTo(50), "the surviving head is the highest-TSN committed value");
+        }
+
+        // Idempotent (AP-12): scrubbing an already-collapsed chain is a no-op.
+        Scrub();
+        using (var tv = dbe.CreateQuickTransaction())
+        {
+            Assert.That(tv.GetRevisionCount<CompA>((long)e.RawValue), Is.EqualTo(1), "re-scrub is idempotent");
+            Assert.That(tv.Open(e).Read(CompAArch.A).A, Is.EqualTo(50));
+        }
+    }
+
+    // A1.8 (03-recovery.md §6): the recovery orphan sweep frees chunks leaked by an interrupted pre-crash op (allocated but
+    // never linked into a chain), while leaving every reachable chunk — and the surviving entity's data — intact.
+    [Test]
+    public void SweepOrphans_FreesUnreachableChunks_KeepsReachableData()
+    {
+        using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        RegisterComponents(dbe);
+        dbe.InitializeArchetypes();
+
+        EntityId e;
+        {
+            using var t = dbe.CreateQuickTransaction();
+            var a = new CompA(10);
+            e = t.Spawn<CompAArch>(CompAArch.A.Set(in a));
+            t.Commit();
+        }
+
+        var table = dbe.GetComponentTable<CompA>();
+        var archetypeId = (ushort)((long)e.RawValue & 0xFFF);
+
+        int rootChunkId, reachableContent, orphanRev, orphanContent;
+        System.Collections.Generic.HashSet<int> reachableRoots;
+        {
+            using var guard = EpochGuard.Enter(dbe.EpochManager);   // accessors require an ambient epoch scope (as ScrubVersionedChains holds)
+
+            var heads = ComponentRevisionManager.EnumerateVersionedChainHeads(table, archetypeId);
+            rootChunkId = heads[(long)e.RawValue];
+            reachableRoots = new System.Collections.Generic.HashSet<int>(heads.Values);
+
+            var acc = table.CompRevTableSegment.CreateChunkAccessor();
+            acc.GetChunkAsSpan(rootChunkId).Split(out System.Span<CompRevStorageHeader> _, out System.Span<CompRevStorageElement> els);
+            reachableContent = els[0].ComponentChunkId;
+            acc.Dispose();
+
+            // Simulate chunks leaked by an interrupted pre-crash op: allocate but never link them into a chain.
+            var csAlloc = dbe.MMF.CreateChangeSet();
+            orphanRev = table.CompRevTableSegment.AllocateChunk(false, csAlloc);
+            orphanContent = table.ComponentSegment.AllocateChunk(false, csAlloc);
+            csAlloc.SaveChanges();
+            Assert.That(table.CompRevTableSegment.IsChunkAllocated(orphanRev), Is.True, "precondition: orphan rev chunk allocated");
+            Assert.That(table.ComponentSegment.IsChunkAllocated(orphanContent), Is.True, "precondition: orphan content chunk allocated");
+
+            var cs = dbe.MMF.CreateChangeSet();
+            var rev = table.CompRevTableSegment.CreateChunkAccessor(cs);
+            ComponentRevisionManager.SweepTableOrphans(table, reachableRoots, ref rev);
+            rev.Dispose();
+            cs.SaveChanges();
+        }
+
+        Assert.That(table.CompRevTableSegment.IsChunkAllocated(orphanRev), Is.False, "orphan rev chunk must be freed");
+        Assert.That(table.ComponentSegment.IsChunkAllocated(orphanContent), Is.False, "orphan content chunk must be freed");
+        Assert.That(table.CompRevTableSegment.IsChunkAllocated(rootChunkId), Is.True, "reachable chain root must be kept");
+        Assert.That(table.ComponentSegment.IsChunkAllocated(reachableContent), Is.True, "reachable content chunk must be kept");
+
+        using (var tv = dbe.CreateQuickTransaction())
+        {
+            Assert.That(tv.Open(e).Read(CompAArch.A).A, Is.EqualTo(10), "the surviving entity must still read its committed value");
+        }
+    }
+
     [Test]
     public void DeferredCleanup_QueueMechanics_EnqueueAndProcess()
     {

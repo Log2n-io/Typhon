@@ -608,8 +608,7 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
     private int _dirChunkId;
     private int _dirEntryOffset;
 
-    /// <summary>Number of preallocated directory chunks (0-3). Provides up to 20 index slots for 64-byte chunks.</summary>
-    internal const int DirectoryChunkCount = 4;
+    // DirectoryChunkCount hoisted to BTreeBase<TStore> (inherited here) so the torn-safe ClearSharedSegment helper can reference it without a TKey.
 
     /// <summary>Hard cap on secondary indexes per segment (could be raised later).</summary>
     internal const int MaxDirectoryEntries = 20;

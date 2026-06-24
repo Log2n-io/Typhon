@@ -108,15 +108,6 @@ internal ref partial struct DurabilityRecoverySegmentEvent
     public byte Truncated;
 }
 
-[TraceEvent(TraceEventKind.DurabilityRecoveryFpi, EmitEncoder = true)]
-internal ref partial struct DurabilityRecoveryFpiEvent
-{
-    [BeginParam]
-    public int FpiCount;
-    public int RepairedCount;
-    public int Mismatches;
-}
-
 [TraceEvent(TraceEventKind.DurabilityRecoveryRedo, EmitEncoder = true)]
 internal ref partial struct DurabilityRecoveryRedoEvent
 {

@@ -440,7 +440,7 @@ internal sealed class WalSegmentManager : IDisposable
 
     /// <summary>
     /// Returns paths of all known WAL segment files: sealed segments (awaiting reclamation) plus the active segment.
-    /// Used by <see cref="WalManager.SearchFpiForPage"/> for on-the-fly FPI lookup.
+    /// Used by the recovery scan to read every retained segment.
     /// </summary>
     internal List<string> GetAllSegmentPaths()
     {

@@ -347,9 +347,6 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
             // classification. Null in production — one negligible null-check on the background thread.
             CycleFaultInjector?.Invoke();
 
-            // Step 0: Reset FPI bitmap — new modifications from this point need fresh FPIs
-            _mmf.FpiBitmap?.ClearAll();
-
             // Step 1: Durability barrier (CK-01/CK-02). Flush the WAL through everything appended so far, then take the
             // post-flush DurableLsn as the cycle's authoritative high-water (barrierLsn). The checkpoint advances to
             // THIS — not the stale loop-sampled targetLsn — so any records appended since the loop's trigger are now

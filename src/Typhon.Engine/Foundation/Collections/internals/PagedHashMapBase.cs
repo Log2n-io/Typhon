@@ -516,6 +516,17 @@ internal abstract unsafe partial class PagedHashMapBase<TStore> where TStore : s
         // Reserve chunk 0 for the meta and clear it
         _segment.ReserveChunk(0, true, changeSet);
 
+        InitializeEmptyState(initialBuckets, changeSet);
+    }
+
+    /// <summary>
+    /// Allocate the directory + initial bucket chunks and write the empty meta state, assuming chunk 0 (the meta chunk) is already reserved. Shared by
+    /// <see cref="InitializeCreate"/> (fresh map) and <see cref="ClearForRebuild"/> (crash-recovery reset of an existing map whose chunk 0 is preserved).
+    /// </summary>
+    private void InitializeEmptyState(int initialBuckets, ChangeSet changeSet)
+    {
+        Debug.Assert(initialBuckets > 0 && BitOperations.IsPow2(initialBuckets));
+
         var accessor = _segment.CreateChunkAccessor(changeSet);
         try
         {
@@ -597,6 +608,34 @@ internal abstract unsafe partial class PagedHashMapBase<TStore> where TStore : s
         {
             accessor.Dispose();
         }
+    }
+
+    /// <summary>
+    /// Reset an existing map back to empty for a crash-recovery rebuild: free every bucket / directory / overflow chunk (everything but the reserved meta
+    /// chunk 0) by the segment occupancy bitmap, then re-allocate an empty directory + <see cref="N0"/> buckets and reset <see cref="PackedMeta"/> /
+    /// <see cref="_entryCount"/>. The map is then repopulated via <c>InsertDuringRebuild</c> from the authoritative source (revision chains / cluster data).
+    /// <para>
+    /// Torn-safe by construction: freeing is a pure occupancy-bitmap operation — a CRC-torn page is reclaimed without ever being parsed. This is the
+    /// EntityMap analogue of <c>BTreeBase.ClearSharedSegment</c> (Phase 2), making the EntityMap a derived-on-crash structure (03-recovery.md §7).
+    /// </para>
+    /// </summary>
+    internal void ClearForRebuild(ChangeSet changeSet)
+    {
+        using var guard = EpochGuard.Enter(_segment.Store.EpochManager);
+
+        // Free all bucket / directory / overflow chunks by bitmap only (chunk 0 — the meta — is kept reserved). FreeChunk touches only occupancy metadata,
+        // never the page content, so a torn page is reclaimed without being read.
+        var capacity = _segment.ChunkCapacity;
+        for (var chunkId = 1; chunkId < capacity; chunkId++)
+        {
+            if (_segment.IsChunkAllocated(chunkId))
+            {
+                _segment.FreeChunk(chunkId);
+            }
+        }
+
+        // Re-allocate an empty directory + N0 buckets over the preserved meta chunk and reset the in-memory + persisted meta to (level 0, next 0, count 0).
+        InitializeEmptyState(_n0, changeSet);
     }
 
     // ═══════════════════════════════════════════════════════════════════════

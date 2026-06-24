@@ -619,6 +619,17 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
 
     private void BuildIndexedFieldInfo(bool load, ChangeSet changeSet = null, HashSet<int> newIndexFieldIds = null)
     {
+        // Crash recovery (RB-01): persisted secondary indexes are never trusted post-crash. On the crash path (a WAL window exists at open), clear the shared
+        // index segments torn-safely — FreeChunk by bitmap, never reading a (possibly torn) node page — and force EVERY indexed field into create-mode so the
+        // trees are recreated EMPTY here. Phase-5 (DatabaseEngine.RebuildSecondaryIndexes, after apply+scrub) repopulates them from the final HEAD data.
+        if (load && DBE.WalFilesPresentAtOpen)
+        {
+            BTreeBase<PersistentStore>.ClearSharedSegment(DefaultIndexSegment, changeSet);
+            BTreeBase<PersistentStore>.ClearSharedSegment(String64IndexSegment, changeSet);
+            ClearMultiValueTail(changeSet);
+            newIndexFieldIds = CollectAllIndexedFieldIds(newIndexFieldIds);
+        }
+
         var l = new List<IndexedFieldInfo>();
 
         var ro = ComponentOverhead;
@@ -655,6 +666,139 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
         for (var i = 0; i < IndexedFieldInfos.Length; i++)
         {
             IndexStats[i] = new IndexStatistics(IndexedFieldInfos[i].Index);
+        }
+    }
+
+    /// <summary>
+    /// Crash-path clear of the multi-value (AllowMultiple) index version-history tail (<see cref="TailVSBS"/>). The current-value HEAD buffers live in the
+    /// DefaultIndexSegment and are cleared with the BTree nodes by <see cref="BTreeBase{TStore}.ClearSharedSegment"/>; the TAIL holds superseded
+    /// VersionedIndexEntry history (temporal queries) which collapses at crash (D1). Freeing its data chunks (chunkId &gt;= 1; chunk 0 is segment-reserved) leaves
+    /// an empty tail — the Phase-5 rebuild re-Adds each entity once, producing fresh HEAD buffers and no history. Torn-safe: FreeChunk touches only the page
+    /// occupancy bitmap, and the crash-path RecoveryOnly mode defers CRC verification.
+    /// </summary>
+    private void ClearMultiValueTail(ChangeSet changeSet)
+    {
+        if (TailIndexSegment == null)
+        {
+            return;
+        }
+
+        using var guard = EpochGuard.Enter(DBE.EpochManager);
+        var capacity = TailIndexSegment.ChunkCapacity;
+        for (var chunkId = 1; chunkId < capacity; chunkId++)
+        {
+            if (TailIndexSegment.IsChunkAllocated(chunkId))
+            {
+                TailIndexSegment.FreeChunk(chunkId);
+            }
+        }
+    }
+
+    /// <summary>Returns every indexed FieldId in this table's schema, unioned with <paramref name="seed"/> (any migration-new fields). Used on the crash path to
+    /// force all secondary indexes into create-mode so they are rebuilt from data rather than loaded (RB-01).</summary>
+    private HashSet<int> CollectAllIndexedFieldIds(HashSet<int> seed)
+    {
+        var all = seed != null ? new HashSet<int>(seed) : new HashSet<int>();
+        for (var i = 0; i < Definition.MaxFieldId; i++)
+        {
+            var f = Definition[i];
+            if (f != null && f.HasIndex)
+            {
+                all.Add(f.FieldId);
+            }
+        }
+
+        return all;
+    }
+
+    // Per-index-segment accessor box for the Phase-5 rebuild: a class field gives a stable `ref box.Accessor` (a Dictionary value can't be passed by ref), and
+    // several indexed fields can share one index segment, so one accessor per segment matches the live commit's hoisted-accessor pattern.
+    private sealed class IndexAccessorBox
+    {
+        public ChunkAccessor<PersistentStore> Accessor;
+    }
+
+    /// <summary>
+    /// Phase-5 crash-recovery rebuild (03-recovery.md §7, RB-01) of this Versioned table's secondary indexes. For each chain head <c>(EntityPK → rootChunkId)</c>
+    /// in <paramref name="heads"/>, reads the head's content chunk (root element[0].ComponentChunkId) and re-inserts <c>key → rootChunkId</c> into every secondary
+    /// index — the index value for a Versioned component is the chain ROOT (queries resolve it through CompRevTable), never the content chunk. A tombstone head
+    /// (ComponentChunkId == 0, a deleted entity) carries no index entry. Called once per containing archetype on an index that was emptied at open
+    /// (<see cref="BuildIndexedFieldInfo"/> crash path), so the union across archetypes forms the complete index. Multi-value writes the element id back to the
+    /// component tail so later removals resolve. Reads only — never parses a persisted index node page (the precondition for retiring FPI on index pages).
+    /// </summary>
+    internal void RebuildSecondaryIndexEntriesFromHeads(Dictionary<long, int> heads, ChangeSet changeSet)
+    {
+        if (IndexedFieldInfos.Length == 0 || heads.Count == 0 || StorageMode != StorageMode.Versioned)
+        {
+            return;
+        }
+
+        // A multi-value index writes the returned elementId back into the component tail, so the content chunk must be dirty-marked (and committed) — but only when
+        // some field is AllowMultiple; a unique-only table reads the content read-only.
+        var anyMultiValue = false;
+        for (var i = 0; i < IndexedFieldInfos.Length; i++)
+        {
+            if (IndexedFieldInfos[i].AllowMultiple)
+            {
+                anyMultiValue = true;
+                break;
+            }
+        }
+
+        using var guard = EpochGuard.Enter(DBE.EpochManager);
+        var revAccessor = CompRevTableSegment.CreateChunkAccessor(changeSet);
+        var contentAccessor = ComponentSegment.CreateChunkAccessor(changeSet);
+        var idxAccessors = new Dictionary<ChunkBasedSegment<PersistentStore>, IndexAccessorBox>();
+        try
+        {
+            foreach (var kv in heads)
+            {
+                var rootChunkId = kv.Value;
+                revAccessor.GetChunkAsSpan(rootChunkId).Split(out Span<CompRevStorageHeader> _, out Span<CompRevStorageElement> els);
+                var contentChunkId = els[0].ComponentChunkId;
+                if (contentChunkId == 0)
+                {
+                    continue; // tombstone head (deleted entity) — no index entry
+                }
+
+                var contentBase = contentAccessor.GetChunkAddress(contentChunkId, anyMultiValue);
+                for (var i = 0; i < IndexedFieldInfos.Length; i++)
+                {
+                    ref var ifi = ref IndexedFieldInfos[i];
+                    var index = ifi.PersistentIndex;
+                    if (!idxAccessors.TryGetValue(index.Segment, out var box))
+                    {
+                        box = new IndexAccessorBox { Accessor = index.Segment.CreateChunkAccessor(changeSet) };
+                        idxAccessors[index.Segment] = box;
+                    }
+
+                    var keyAddr = contentBase + ifi.OffsetToField;
+                    if (ifi.AllowMultiple)
+                    {
+                        *(int*)(contentBase + ifi.OffsetToIndexElementId) = index.Add(keyAddr, rootChunkId, ref box.Accessor, out _);
+                    }
+                    else
+                    {
+                        index.Add(keyAddr, rootChunkId, ref box.Accessor);
+                    }
+                }
+            }
+        }
+        finally
+        {
+            foreach (var box in idxAccessors.Values)
+            {
+                box.Accessor.CommitChanges();
+                box.Accessor.Dispose();
+            }
+
+            if (anyMultiValue)
+            {
+                contentAccessor.CommitChanges(); // persist the elementId back-writes
+            }
+
+            contentAccessor.Dispose();
+            revAccessor.Dispose();
         }
     }
 

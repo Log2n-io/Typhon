@@ -723,32 +723,6 @@ public class TraceEventEncodeEquivalenceTests
     }
 
     [Test]
-    public void DurabilityRecoveryFpiEvent_StructEncode_MatchesCodec()
-    {
-        var ev = new DurabilityRecoveryFpiEvent
-        {
-            Header = new TraceSpanHeader
-            {
-                ThreadSlot = ThreadSlot,
-                StartTimestamp = StartTs,
-                SpanId = SpanId,
-                ParentSpanId = ParentSpanId,
-                TraceIdHi = TraceIdHi,
-                TraceIdLo = TraceIdLo,
-            },
-            FpiCount = 101,
-            RepairedCount = 202,
-            Mismatches = 303,
-        };
-
-        Span<byte> bufStruct = stackalloc byte[256];
-        ev.EncodeTo(bufStruct, EndTs, out var lenStruct);
-
-        var golden = Convert.FromHexString("4100E50744443333222211111111000000000000DDDDCCCCBBBBAAAAF0DEBC9A78563412010F0F0F0F0F0F0F0FF0F0F0F0F0F0F0F065000000CA0000002F010000");
-        AssertSpanEqualsGolden(bufStruct, lenStruct, golden);
-    }
-
-    [Test]
     public void DurabilityRecoveryRedoEvent_StructEncode_MatchesCodec()
     {
         var ev = new DurabilityRecoveryRedoEvent

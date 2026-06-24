@@ -12,8 +12,8 @@ internal enum WalChunkType : ushort
     /// <summary>Transaction record: component Create/Update/Delete.</summary>
     Transaction = 1,
 
-    /// <summary>Full-Page Image for torn-page repair.</summary>
-    FullPageImage = 2,
+    // 2 was FullPageImage (torn-page repair) — retired in increment D (FPI deleted; the rebuild net replaces it). The value is left as a gap rather than reused
+    // so old segments containing FullPageImage chunks are skipped (unknown type) rather than mis-parsed.
 
     /// <summary>Tick fence: snapshot of dirty SingleVersion component data at tick boundary.</summary>
     TickFence = 3,
@@ -30,13 +30,13 @@ internal enum WalChunkType : ushort
 }
 
 /// <summary>
-/// 8-byte generic chunk header written before every WAL chunk (transaction record or FPI).
+/// 8-byte generic chunk header written before every WAL chunk (transaction record or fence).
 /// </summary>
 /// <remarks>
 /// <para>
 /// Producers write <see cref="PrevCRC"/> = 0 and the footer CRC = 0 as placeholders. The single-threaded WAL writer (<see cref="WalWriter"/>) patches both
-/// fields after staging buffer copy and before disk write — this centralizes CRC chain management and eliminates the PrevCRC chain break that occurred when
-/// FPI records interleaved with transaction records.
+/// fields after staging buffer copy and before disk write — this centralizes CRC chain management so the PrevCRC chain stays unbroken across interleaved
+/// chunk types.
 /// </para>
 /// <para>
 /// <see cref="ChunkSize"/> enables forward-compatible skipping of unknown chunk types.

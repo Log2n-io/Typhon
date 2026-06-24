@@ -111,6 +111,77 @@ unsafe class RawValuePagedHashMapTests
         Assert.That(EntityRecordAccessor.GetLocation(readBuf, 1), Is.EqualTo(200));
     }
 
+    // ── ClearForRebuild: the crash-recovery reset used to make the EntityMap derived-on-crash (03-recovery.md §7). Frees every bucket/overflow chunk by bitmap, resets the
+    //    directory + meta to empty, then repopulates via the rebuild insert primitive. ──
+    [Test]
+    public void ClearForRebuild_EmptiesAndAllowsRebuild()
+    {
+        using var mpmmf = _serviceProvider.GetRequiredService<ManagedPagedMMF>();
+        var em = _serviceProvider.GetRequiredService<EpochManager>();
+        int valueSize = EntityRecordAccessor.RecordSize(2);
+        int stride = RawValuePagedHashMap<long, PersistentStore>.RecommendedStride(valueSize);
+        var segment = mpmmf.AllocateChunkBasedSegment(PageBlockType.None, 10, stride);
+
+        var map = RawValuePagedHashMap<long, PersistentStore>.Create(segment, 4, valueSize);
+
+        // Populate enough to force several bucket splits (n0=4) so ClearForRebuild has real bucket/overflow chunks to free.
+        const int n = 500;
+        byte* record = stackalloc byte[valueSize];
+        using (EpochGuard.Enter(em))
+        {
+            var accessor = segment.CreateChunkAccessor();
+            for (int i = 1; i <= n; i++)
+            {
+                EntityRecordAccessor.InitializeRecord(record, 2);
+                EntityRecordAccessor.GetHeader(record).BornTSN = i;
+                EntityRecordAccessor.SetLocation(record, 0, i * 10);
+                map.Insert(i, record, ref accessor, null);
+            }
+            accessor.Dispose();
+        }
+        Assert.That(map.EntryCount, Is.EqualTo(n));
+
+        // Clear: free every bucket/overflow chunk by bitmap, reset directory + meta to empty.
+        map.ClearForRebuild(null);
+        Assert.That(map.EntryCount, Is.EqualTo(0), "ClearForRebuild must reset the entry count to 0");
+
+        byte* readBuf = stackalloc byte[valueSize];
+        using (EpochGuard.Enter(em))
+        {
+            var accessor = segment.CreateChunkAccessor();
+            Assert.That(map.TryGet(1, readBuf, ref accessor), Is.False, "every pre-clear key must miss after ClearForRebuild");
+            Assert.That(map.TryGet(n, readBuf, ref accessor), Is.False);
+            accessor.Dispose();
+        }
+
+        // Rebuild into the cleared map via the recovery insert primitive, with different values to prove the new content is what is read back.
+        using (EpochGuard.Enter(em))
+        {
+            var accessor = segment.CreateChunkAccessor();
+            for (int i = 1; i <= n; i++)
+            {
+                EntityRecordAccessor.InitializeRecord(record, 2);
+                EntityRecordAccessor.GetHeader(record).BornTSN = i * 2;
+                EntityRecordAccessor.SetLocation(record, 0, i * 20);
+                map.InsertDuringRebuild(i, record, ref accessor, null);
+            }
+            accessor.Dispose();
+        }
+        Assert.That(map.EntryCount, Is.EqualTo(n), "rebuild via InsertDuringRebuild must repopulate the cleared map");
+
+        using (EpochGuard.Enter(em))
+        {
+            var accessor = segment.CreateChunkAccessor();
+            for (int i = 1; i <= n; i++)
+            {
+                Assert.That(map.TryGet(i, readBuf, ref accessor), Is.True, $"rebuilt entry {i} not found");
+                Assert.That(EntityRecordAccessor.GetHeader(readBuf).BornTSN, Is.EqualTo(i * 2));
+                Assert.That(EntityRecordAccessor.GetLocation(readBuf, 0), Is.EqualTo(i * 20));
+            }
+            accessor.Dispose();
+        }
+    }
+
     [Test]
     public void InsertAndGet_MultipleEntries()
     {

@@ -155,6 +155,21 @@ internal sealed unsafe class WalCommitBuffer : IDisposable
     public long NextLsn => Interlocked.Read(ref _nextLsn);
 
     /// <summary>
+    /// Seeds the LSN allocator so the next record claimed gets LSN == <paramref name="lsn"/>. Called once from <see cref="WalManager.Initialize"/> BEFORE the
+    /// writer thread starts (single-threaded — plain write, no barrier needed for a ≤64-bit field), to continue the global LSN sequence past the durability
+    /// frontier on reopen. Without it the counter restarts at 1 every session; a reopened session's records then fall below a prior session's persisted
+    /// CheckpointLSN, and recovery skips the entire post-reopen window as already-consolidated (silent data loss — LOG-08). Monotonic: never lowers the
+    /// counter, so a fresh writer (frontier 1) is unaffected.
+    /// </summary>
+    internal void SeedNextLsn(long lsn)
+    {
+        if (lsn > _nextLsn)
+        {
+            _nextLsn = lsn;
+        }
+    }
+
+    /// <summary>
     /// Highest LSN contained in the frames returned by the most recent <see cref="TryDrain"/> call (0 if that drain returned nothing). Consumer-thread only. The WAL
     /// writer advances its durable watermark to this value after the drained bytes are physically written and flushed, so <see cref="WalWriter.DurableLsn"/> never
     /// exceeds what reached stable media (LOG-05). Replaces the old <c>NextLsn - 1</c> peek, which counted claims that had been assigned an LSN but not yet drained (TXW-2).

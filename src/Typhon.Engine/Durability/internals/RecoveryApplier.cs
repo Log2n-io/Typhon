@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using Typhon.Engine;
 using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Internals;
@@ -38,15 +37,6 @@ internal sealed unsafe class RecoveryApplier : IDisposable
     // Per-ComponentTable recovery ComponentInfo (content + revision-table accessors bound to the recovery ChangeSet). Mirrors
     // EntityAccessor.GetComponentInfo's Versioned/SingleVersion setup, but threaded through THIS ChangeSet. Flushed at Dispose.
     private readonly Dictionary<ComponentTable, ComponentInfo> _infoByTable = new();
-
-    // Per-index-segment accessor cache for the secondary-index rebuild (RB-01). Keyed by segment because several indexed fields can share one index segment; reusing
-    // one accessor per segment matches the live commit's hoisted-accessor pattern. Flushed at Dispose.
-    private readonly Dictionary<ChunkBasedSegment<PersistentStore>, IndexAccessorBox> _indexAccessors = new();
-
-    private sealed class IndexAccessorBox
-    {
-        public ChunkAccessor<PersistentStore> Accessor;
-    }
 
     public RecoveryApplier(DatabaseEngine dbe)
     {
@@ -182,9 +172,9 @@ internal sealed unsafe class RecoveryApplier : IDisposable
         var handle = ComponentRevisionManager.GetRevisionElement(ref info.CompRevTableAccessor, compRevChunkId, 0);
         handle.Commit(tsn); // element TSN already == tsn; this clears IsolationFlag → the revision is committed/visible
 
-        // RB-01: recovery never trusts persisted secondary indexes — rebuild this entity's index entries from the recovered value. The index value for a Versioned
-        // component is the chain-root chunk id (index queries resolve it through CompRevTable), exactly the slot location returned below.
-        RebuildVersionedIndexEntries(table, contentBase, compRevChunkId);
+        // RB-01: recovery never trusts persisted secondary indexes. Apply writes ONLY primary data (content + chain); the secondary indexes are cleared at open
+        // on the crash path and rebuilt wholesale from final HEAD data in Phase-5 (DatabaseEngine.RebuildSecondaryIndexes), so populating them here would
+        // double-insert against that rebuild. contentBase is still used above (payload copy).
         return compRevChunkId;
     }
 
@@ -195,45 +185,6 @@ internal sealed unsafe class RecoveryApplier : IDisposable
         var dst = info.CompContentAccessor.GetChunkAsSpan(contentChunkId, true);
         payload.AsSpan().CopyTo(dst[info.ComponentOverhead..]); // value lives at offset ComponentOverhead — symmetric with the slot emit
         return contentChunkId;
-    }
-
-    // Rebuilds the secondary-index entries for one recovered Versioned component (RB-01). The index value is the chain-root chunk id (queries resolve it through
-    // CompRevTable). Reuses the live BTree Add primitive; for an AllowMultiple index the returned element id is written back into the component tail exactly as
-    // FinalizeSpawns does, so later index removals resolve. Only secondary indexes on the shared ComponentTable (flat path) — cluster archetypes use per-archetype
-    // cluster B+Trees and are out of scope here (their recovery is P2-gated).
-    private void RebuildVersionedIndexEntries(ComponentTable table, byte* contentBase, int compRevChunkId)
-    {
-        var fields = table.IndexedFieldInfos;
-        if (fields == null || fields.Length == 0)
-        {
-            return;
-        }
-
-        for (int i = 0; i < fields.Length; i++)
-        {
-            ref var ifi = ref fields[i];
-            var index = ifi.PersistentIndex;
-            var box = GetIndexAccessorBox(index.Segment);
-            if (ifi.AllowMultiple)
-            {
-                *(int*)(contentBase + ifi.OffsetToIndexElementId) = index.Add(contentBase + ifi.OffsetToField, compRevChunkId, ref box.Accessor, out _);
-            }
-            else
-            {
-                index.Add(contentBase + ifi.OffsetToField, compRevChunkId, ref box.Accessor);
-            }
-        }
-    }
-
-    private IndexAccessorBox GetIndexAccessorBox(ChunkBasedSegment<PersistentStore> segment)
-    {
-        if (!_indexAccessors.TryGetValue(segment, out var box))
-        {
-            box = new IndexAccessorBox { Accessor = segment.CreateChunkAccessor(_changeSet) };
-            _indexAccessors[segment] = box;
-        }
-
-        return box;
     }
 
     private ComponentInfo GetRecoveryInfo(ComponentTable table)
@@ -303,13 +254,6 @@ internal sealed unsafe class RecoveryApplier : IDisposable
             }
         }
 
-        foreach (var box in _indexAccessors.Values)
-        {
-            box.Accessor.CommitChanges();
-            box.Accessor.Dispose();
-        }
-
-        _indexAccessors.Clear();
         _infoByTable.Clear();
     }
 }

@@ -158,7 +158,6 @@ public class WalRecordHeaderTests
     public void ChunkType_Values_MatchSpec()
     {
         Assert.That((ushort)WalChunkType.Transaction, Is.EqualTo(1));
-        Assert.That((ushort)WalChunkType.FullPageImage, Is.EqualTo(2));
     }
 
     #endregion

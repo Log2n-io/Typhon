@@ -9,11 +9,16 @@ namespace Typhon.Engine;
 [PublicAPI]
 public enum PageChecksumVerification
 {
-    /// <summary>Verify page CRC on every load from disk. Detects corruption on first access and triggers FPI repair.</summary>
+    /// <summary>Verify page CRC on every load from disk. Detects corruption on first access and throws (no repair — FPI was retired; recovery heals via the rebuild net).</summary>
     OnLoad,
 
     /// <summary>Only verify page CRC during crash recovery. Normal operation skips CRC checks for lower overhead.</summary>
     RecoveryOnly,
+
+    /// <summary>Crash-recovery suspect mode: compute the CRC and, on mismatch, RECORD the page as suspect (never throw, never FPI-repair) so the post-apply
+    /// resolution can heal it (derived → rebuilt; orphaned primary → in-window-replaced) or fail the open loudly (RB-04) if it holds live primary data. The
+    /// engine sets this on the crash path and restores the configured mode once recovery completes.</summary>
+    RecoverySuspect,
 }
 
 /// <summary>

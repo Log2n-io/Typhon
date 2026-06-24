@@ -310,6 +310,12 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// <see cref="InitializeArchetypes"/>. 0 on a trusted (clean) reopen; &gt;0 after a crash or on a legacy database.</summary>
     internal int LastOpenVersionedHeadRebuildCount;
 
+    /// <summary>True when WAL segment files exist at open (a crash left a recovery window). Captured ONCE in <see cref="InitializeArchetypes"/> before any
+    /// ComponentTable loads. Gates the crash-path secondary-index clear+rebuild (RB-01): the load ctors read it to clear+recreate indexes fresh (torn-safe),
+    /// and <see cref="RunWalV2Recovery"/> reads the SAME flag to fire the Phase-5 rebuild — so clear and rebuild always agree (clearing without rebuilding would
+    /// leave indexes empty). Distinct from <see cref="_headsTrusted"/>, which can be false on a clean migration reopen with no WAL window (indexes load normally).</summary>
+    internal bool WalFilesPresentAtOpen { get; private set; }
+
     /// <summary>Test-only: when set, <see cref="Dispose"/> skips <c>MarkCleanShutdown</c>, reproducing an unclean shutdown
     /// (a real crash also never writes the marker). Unit tests cannot abort the process — same convention as the
     /// <c>BulkLoadRecoveryTests</c> incomplete-bulk path.</summary>
@@ -773,7 +779,20 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // Checkpoint frontier for the reopen reconcile: WAL segments whose records are all below this are already in the
         // data file and get reclaimed; segments with records ≥ this are retained for crash recovery (REC-04 / WR-01).
         var checkpointLsn = MMF.CheckpointLsnWatermark;
-        WalManager.Initialize(lastSegmentId, lastLSN > 0 ? lastLSN + 1 : 1, checkpointLsn);
+        // LSN must stay globally monotonic across sessions. Continue strictly above the durability frontier — the higher of the recovered WAL frontier (crash path) and
+        // the persisted CheckpointLSN (clean-reopen path, where NO WAL recovery ran so lastLSN is 0). Using lastLSN alone restarts the reopened writer at LSN 1, below a
+        // prior session's CheckpointLSN; RecoveryDriver then skips the entire post-reopen window as already-consolidated (LOG-08 — silent loss of durably-acked commits).
+        var frontierLsn = Math.Max(lastLSN, checkpointLsn);
+        WalManager.Initialize(lastSegmentId, frontierLsn > 0 ? frontierLsn + 1 : 1, checkpointLsn);
+        // Seed the durable watermark to the reopen frontier so it MATCHES LastAppendedLsn (= NextLsn-1 = frontierLsn). Initialize advances NextLsn to
+        // frontierLsn+1 (LOG-08, LSN monotonic across sessions); without a matching durable seed, DurableLsn stays 0 while LastAppendedLsn=frontierLsn, so
+        // the very first checkpoint barrier (CK-02 waits DurableLsn ≥ LastAppendedLsn) blocks for an LSN no frame will ever publish on an idle reopened
+        // engine — a 30 s WalBackPressureTimeout per dispose. These LSNs were durable in the prior session (recovered from disk), so seeding is correct.
+        // The crash-recovery path also seeds DurableLsn to its replayed frontier; AdvanceDurable is a monotonic max, so the two are idempotent.
+        if (frontierLsn > 0)
+        {
+            WalManager.SeedDurableLsn(frontierLsn);
+        }
         WalManager.Logger = Logger;
         WalManager.Start();
     }
@@ -791,11 +810,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         StagingBufferPool = new StagingBufferPool(MemoryAllocator, _durabilityNode);
 
-        // Enable FPI capture — creates FpiBitmap internally using cache page count
-        MMF.EnableFpiCapture(WalManager, _options.Wal.EnableFpiCompression);
-
-        // Activate CRC verification mode — recovery is complete, so OnLoad checks are now safe
-        MMF.SetPageChecksumVerification(_options.Resources.PageChecksumVerification);
+        // CRC verification mode. CLEAN reopen → activate the configured mode (OnLoad) now; the in-ctor WalRecovery is done and on-load corruption detection is
+        // wanted. CRASH path → stay in RecoveryOnly through the v2 recovery: the ComponentTable index clear (at registration) and RunWalV2Recovery's
+        // apply/scrub/rebuild load persisted pages, and a torn index/occupancy page must NOT throw before the rebuild net replaces it (RB-01/CK-09) — FPI has been
+        // retired (increment D), so there is no on-load repair fallback. InitializeArchetypes restores the configured mode after RunWalV2Recovery completes.
+        MMF.SetPageChecksumVerification(WalFilesPresentAtOpen ? PageChecksumVerification.RecoverySuspect : _options.Resources.PageChecksumVerification);
 
         CheckpointManager = new CheckpointManager(MMF, UowRegistry, WalManager, _options.Resources, EpochManager, StagingBufferPool, _durabilityNode,
             initialCheckpointLsn, () => _lastTickFenceLSN);
@@ -2983,6 +3002,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             var walDir = _options.Wal?.WalDirectory;
             if (walDir != null && System.IO.Directory.Exists(walDir) && System.IO.Directory.GetFiles(walDir, "*.wal").Length > 0)
             {
+                // A crash left a WAL window. Gate the crash-path secondary-index clear+rebuild (RB-01) on this, captured HERE at open — before component
+                // registration builds the ComponentTables — so the clear in BuildIndexedFieldInfo sees it. RunWalV2Recovery reads the same flag for the
+                // matching Phase-5 rebuild, so clear and rebuild always agree.
+                WalFilesPresentAtOpen = true;
+
                 // Two-phase WAL recovery: LoadFromDiskRaw preserves Pending entries for WAL cross-referencing
                 UowRegistry.LoadFromDiskRaw();
                 // Reuse the injected WAL IO when present (same backend that wrote the segments reads them back); otherwise a throwaway production IO.
@@ -2992,8 +3016,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 {
                     using var recovery = new WalRecovery(recoveryFileIO, walDir, MMF);
                     // Pass null for dbe: replay is deferred until component tables are registered (system schema auto-loading, #57)
-                    // Open-time instrumentation (#diagnose-open): the WAL scan reads every segment to collect FPIs, so its
-                    // cost is O(accumulated WAL since last checkpoint) — a candidate contributor to a slow open. Time it.
+                    // Open-time instrumentation (#diagnose-open): the WAL scan reads every retained segment, so its cost is
+                    // O(accumulated WAL since last checkpoint) — a candidate contributor to a slow open. Time it.
                     var walStart = Stopwatch.GetTimestamp();
                     _lastRecoveryResult = recovery.Recover(UowRegistry, checkpointLSN, null);
                     var walMs = (Stopwatch.GetTimestamp() - walStart) * 1000.0 / Stopwatch.Frequency;
@@ -4580,6 +4604,13 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // EntityMaps, and the page cache are online — the correct place, unlike the never-wired in-ctor WalRecovery(dbe:null)
         // that runs before component metadata exists (TXW-1). No-op on a clean reopen (the WAL window is empty).
         RunWalV2Recovery();
+
+        // Recovery is now complete — restore the configured CRC verification mode (deferred to RecoveryOnly at open on the crash path, see
+        // InitializeCheckpointManager) so normal operation gets on-load corruption detection again.
+        if (WalFilesPresentAtOpen)
+        {
+            MMF.SetPageChecksumVerification(_options.Resources.PageChecksumVerification);
+        }
     }
 
     /// <summary>
@@ -4590,7 +4621,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     private void RunWalV2Recovery()
     {
         var walDir = _options.Wal?.WalDirectory;
-        if (walDir == null || !System.IO.Directory.Exists(walDir) || System.IO.Directory.GetFiles(walDir, "*.wal").Length == 0)
+        if (!WalFilesPresentAtOpen)
         {
             return;
         }
@@ -4616,7 +4647,173 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             }
         }
 
+        LastWalV2RecoveryResult = result;
+        LastWalV2RecoveryCheckpointLsn = checkpointLsn;
+
+        // Phase 4 — SCRUB (03-recovery.md §6, D1): now that the WAL window is applied, collapse every Versioned revision chain
+        // to its HEAD so the consolidated base carries no pre-crash MVCC history. Runs before the seal so its mutations are
+        // consolidated into the data file by the same checkpoint.
+        ScrubVersionedChains();
+
+        // Phase 5 — REBUILD (03-recovery.md §7, RB-01): repopulate every Versioned table's secondary indexes from the now-final chain HEADs. The indexes were
+        // emptied at open (ComponentTable.BuildIndexedFieldInfo crash path); this rebuild replaces FPI repair of torn checkpointed index pages. Before the seal so
+        // the same checkpoint consolidates the rebuilt index pages.
+        RebuildSecondaryIndexes();
+
+        // Phase 6 — SUSPECT RESOLUTION (03-recovery.md §9, RB-04): now that derived structures are rebuilt and chains scrubbed, classify every page that failed
+        // CRC during recovery (RecoverySuspect mode). Derived/orphaned suspects are already healed (rebuilt / freed by scrub); a suspect page still holding a live
+        // primary chunk is unhealable torn data → fail the open loudly. Before the seal so a loud failure aborts before the data file is rewritten.
+        ResolveSuspectPrimaryPages();
+
         SealRecovery(result.MaxLsn, checkpointLsn);
+
+        // Phase 6b — OCCUPANCY RE-DERIVE (03-recovery.md §7, rule CK-09): the occupancy bitmap is a DERIVED structure — post-crash it is never trusted but rebuilt
+        // wholesale from the authoritative page ownership. Replaces FPI repair of a torn checkpointed occupancy page and reclaims pages a torn checkpoint leaked. Runs
+        // AFTER the seal because the seal checkpoint can still grow segments (e.g. EntityMap bucket pages allocated as it flushes deferred work), so page ownership is
+        // final only afterwards. The corrected bitmap is held dirty (DC > 0, so it can't be evicted stale) and consolidated by the next checkpoint / clean shutdown;
+        // if this session crashes again first, recovery simply re-derives (idempotent).
+        RederiveOccupancyOnCrash();
+    }
+
+    /// <summary>
+    /// Phase 6b — OCCUPANCY RE-DERIVE (03-recovery.md §7, rule CK-09). Rebuilds the occupancy bitmap from the authoritative page ownership
+    /// (<see cref="BuildOwnedPageBitmap"/>) and adopts it wholesale via <see cref="ManagedPagedMMF.RederiveOccupancy"/>. The occupancy bitmap is derived, so a
+    /// CRC-torn occupancy page is healed by replacement (the FPI substitute) and any page a torn checkpoint leaked (bit set, no claimant) is reclaimed. Builds the
+    /// owned set first (it takes its own short-lived epoch scope for the directory-map walk), then performs the overwrite under a fresh epoch guard so the page writes
+    /// see a stable epoch. Crash-path only; runs after the seal (see call site) so it sees the final page ownership, and the dirtied bitmap pages are held dirty until
+    /// the next checkpoint / clean shutdown consolidates them.
+    /// </summary>
+    private void RederiveOccupancyOnCrash()
+    {
+        if (DisableOccupancyRederiveForTest)
+        {
+            return;
+        }
+
+        var owned = BuildOwnedPageBitmap(out _);
+
+        using var guard = EpochGuard.Enter(EpochManager);
+        var changeSet = MMF.CreateChangeSet();
+        try
+        {
+            LastOpenOccupancyRederiveWordsChanged = MMF.RederiveOccupancy(owned, changeSet);
+        }
+        finally
+        {
+            changeSet.SaveChanges();
+        }
+    }
+
+    /// <summary>
+    /// Phase 6 — SUSPECT RESOLUTION (03-recovery.md §9, RB-04). Drains the pages that failed CRC during recovery (recorded by <see cref="PagedMMF"/> in
+    /// <see cref="PageChecksumVerification.RecoverySuspect"/> mode) and decides each one's fate from the POST-apply/scrub/rebuild state:
+    /// <list type="bullet">
+    /// <item><b>derived</b> (Index/Spatial/Occupancy) → healed: rebuilt unconditionally (RB-01), so a torn one was discarded.</item>
+    /// <item><b>orphaned primary</b> → healed: the entity was re-created in-window and scrub freed the old (torn) chunk, so the page holds no live chunk.</item>
+    /// <item><b>live primary</b> → a torn page still backing an allocated chunk is unhealable lost data → <b>fail the open loudly</b> with a diagnostic bundle
+    /// (RB-04); never a silent open.</item>
+    /// </list>
+    /// "Live primary page" is computed forward: every file page that backs an allocated chunk of a primary <see cref="ChunkBasedSegment{TStore}"/> — the same
+    /// chunk→page map the rebuild uses. EntityMap pages fall out naturally (their bucket chunks are allocated ⇒ live ⇒ loud-fail; rebuild is deferred).
+    /// </summary>
+    private void ResolveSuspectPrimaryPages()
+    {
+        var suspects = MMF.DrainSuspectPages();
+        if (suspects.Length == 0)
+        {
+            return;
+        }
+
+        var suspectSet = new HashSet<int>(suspects);
+        using var guard = EpochGuard.Enter(EpochManager);
+
+        foreach (var seg in MMF.RegisteredSegments)
+        {
+            if (IsDerivedSegmentKind(seg.Kind) || seg is not ChunkBasedSegment<PersistentStore> cbs)
+            {
+                continue; // derived → rebuilt; non-chunk segments carry no live primary chunk addressable this way
+            }
+
+            // A rebuilt EntityMap segment (crash path, RebuildEntityMapOnCrash) was discarded by ClearForRebuild and re-derived from authoritative cluster /
+            // chain data, so a CRC-torn page on it is already healed — it must not trip the RB-04 loud-fail. (A non-rebuildable EntityMap — a non-cluster
+            // archetype with an SV slot — is NOT in this set, so it still loud-fails: never silent-heal to a lossy map.)
+            if (seg.Kind == StorageSegmentKind.EntityMap && _crashRebuiltEntityMapSegments.Contains(cbs.RootPageIndex))
+            {
+                continue;
+            }
+
+            var capacity = cbs.ChunkCapacity;
+            for (var chunkId = 0; chunkId < capacity; chunkId++)
+            {
+                if (!cbs.IsChunkAllocated(chunkId))
+                {
+                    continue;
+                }
+
+                var (segPage, _) = cbs.GetChunkLocation(chunkId);
+                var filePage = cbs.Pages[segPage];
+                if (suspectSet.Contains(filePage))
+                {
+                    // RB-04: a CRC-failing primary page still backs a live chunk — its content is genuinely lost (not covered/replaced by the recovery window).
+                    ThrowHelper.ThrowCorruption(
+                        $"{seg.Kind}Segment",
+                        filePage,
+                        $"suspect {seg.Kind} page {filePage} still backs live chunk {chunkId} — unhealable torn primary data, not covered by the recovery window; "
+                        + "failing the open rather than serving corrupt data (RB-04)");
+                }
+            }
+        }
+
+        // Any suspect not matched above is derived (rebuilt) or an orphaned primary page (in-window-replaced, scrub-freed) → healed.
+    }
+
+    /// <summary>Page classes whose CRC-failing pages are HEALED by unconditional rebuild during recovery (RB-01) rather than repaired/feared: secondary indexes,
+    /// spatial indexes, and the occupancy bitmap. Everything else (component/revision content, EntityMap, collections, cluster, string table, system) is primary —
+    /// a CRC failure there is heal-or-loud-fail (RB-04). Post-FPI (increment D) this predicate is the ONLY thing standing between a torn page and silent corruption,
+    /// so its boundary is asserted directly by <c>SuspectPageClassification_PartitionsDerivedVsPrimary</c>. Internal for that test.</summary>
+    internal static bool IsDerivedSegmentKind(StorageSegmentKind kind)
+        => kind is StorageSegmentKind.Index or StorageSegmentKind.Spatial or StorageSegmentKind.Occupancy;
+
+    /// <summary>
+    /// Phase 5 — REBUILD (03-recovery.md §7, RB-01). After apply+scrub, rebuild every Versioned table's secondary indexes from the final chain HEADs. The indexes
+    /// were emptied at open on the crash path (<see cref="ComponentTable.BuildIndexedFieldInfo"/>), so a torn checkpointed index page is replaced by rebuild rather
+    /// than FPI repair. Mirrors <see cref="RebuildEntityMapsFromPersistedData"/>'s archetype/slot walk; a table shared across archetypes accumulates each
+    /// archetype's heads into the one (already-empty) index. SingleVersion indexed components are cluster-eligible and rebuilt on the cluster path, not here.
+    /// </summary>
+    private void RebuildSecondaryIndexes()
+    {
+        using var guard = EpochGuard.Enter(EpochManager);
+        var changeSet = MMF.CreateChangeSet();
+        try
+        {
+            foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+            {
+                var state = _archetypeStates[meta.ArchetypeId];
+                if (state?.SlotToComponentTable == null)
+                {
+                    continue;
+                }
+
+                for (var slot = 0; slot < meta.ComponentCount; slot++)
+                {
+                    var table = state.SlotToComponentTable[slot];
+                    if (table == null || table.StorageMode != StorageMode.Versioned || table.IndexedFieldInfos.Length == 0)
+                    {
+                        continue;
+                    }
+
+                    var heads = ComponentRevisionManager.EnumerateVersionedChainHeads(table, meta.ArchetypeId);
+                    if (heads.Count > 0)
+                    {
+                        table.RebuildSecondaryIndexEntriesFromHeads(heads, changeSet);
+                    }
+                }
+            }
+        }
+        finally
+        {
+            changeSet.SaveChanges();
+        }
     }
 
     /// <summary>
@@ -4656,10 +4853,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// SV limitation: SingleVersion components don't have CompRevTableSegment. SV slot locations
     /// can't be recovered by this scan. EntityMap persistence (the primary path) covers SV.
     /// </remarks>
-    private unsafe void RebuildEntityMapsFromPersistedData()
+    private void RebuildEntityMapsFromPersistedData()
     {
         using var guard = EpochGuard.Enter(EpochManager);
-        var recordBuf = stackalloc byte[EntityRecordAccessor.MaxRecordSize];
 
         foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
         {
@@ -4669,164 +4865,420 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 continue;
             }
 
-            // Skip archetypes that were loaded from persisted EntityMap segment (O(1) reopen path).
-            // BUT: if migration invalidated the EntityMap (hasMigratedSlot → fresh allocation), the
-            // EntityMap will be empty despite persisted SPI > 0. Check EntryCount to distinguish.
+            // Crash path (03-recovery.md §7): the EntityMap is a derived-on-crash structure. The persisted EntityMap is NOT trusted on a crash — it may be
+            // CRC-torn, or stale relative to this session's post-shutdown checkpoints (RebuildEntityMapsFromPersistedData's clean-reopen skip would otherwise
+            // keep a stale loaded map and silently drop those entities). Discard it and re-derive every entry from the authoritative source: the cluster
+            // occupancy walk for cluster archetypes, the Versioned chain heads for flat archetypes. A NON-rebuildable archetype (a non-cluster archetype that
+            // still owns an SV slot) falls through to the clean/legacy path below and keeps the RB-04 loud-fail on a torn EntityMap page (never silent-heal to
+            // a lossy map). This runs before WAL apply (RunWalV2Recovery), so every downstream consumer sees a freshly-derived map. (Mixed cluster archetypes:
+            // RebuildVersionedHeadFromChain in InitializeArchetypes runs earlier and reads the not-yet-rebuilt EntityMap — harmless on the common
+            // no-prior-shutdown crash, where the map is fresh and that pass no-ops; a prior-shutdown mixed-cluster ordering refinement is a documented residual.)
+            if (WalFilesPresentAtOpen && IsEntityMapRebuildable(meta) && !DisableEntityMapRebuildForTest)
+            {
+                RebuildEntityMapOnCrash(meta, state);
+                continue;
+            }
+
+            // Clean / legacy reopen: skip archetypes that were loaded from a persisted EntityMap segment (O(1) reopen path). BUT: if migration invalidated the
+            // EntityMap (hasMigratedSlot → fresh allocation), the EntityMap will be empty despite persisted SPI > 0. Check EntryCount to distinguish.
             if (_persistedArchetypes.TryGetValue(meta.ArchetypeId, out var p) && p.Arch.EntityMapSPI > 0
                 && state.EntityMap.EntryCount > 0)
             {
                 continue;
             }
 
-            // Phase 1: Scan each Versioned slot's CompRevTableSegment to find chain heads
-            // slotMaps[slot] = { EntityPK → compRevFirstChunkId }
-            var slotMaps = new Dictionary<long, int>[meta.ComponentCount];
-            var anySlotPopulated = false;
+            // Flat (legacy / non-cluster) chain-head rebuild, shared with the crash-path rebuild (RebuildEntityMapOnCrash) so the two never drift — the only
+            // difference is the insert primitive (plain Insert here vs InsertDuringRebuild after a ClearForRebuild on the crash path).
+            var mapCs = MMF.CreateChangeSet();
+            BuildFlatEntityMapEntries(meta, state, mapCs, duringRebuild: false);
+        }
+    }
 
-            for (var slot = 0; slot < meta.ComponentCount; slot++)
+    /// <summary>
+    /// Scan this archetype's Versioned revision chains (<see cref="ComponentRevisionManager.EnumerateVersionedChainHeads"/>) and insert one EntityRecord per
+    /// chain head into the EntityMap, keyed by entity key with the chain root as each Versioned slot's location. SV / non-Versioned slots get location 0 (no
+    /// chain to recover from). Shared by the clean/legacy reopen path (<see cref="RebuildEntityMapsFromPersistedData"/>, <paramref name="duringRebuild"/> =
+    /// false) and the crash-recovery rebuild (<see cref="RebuildEntityMapOnCrash"/>, <paramref name="duringRebuild"/> = true, where the map was just emptied
+    /// by <c>ClearForRebuild</c> so the faster split-aware <c>InsertDuringRebuild</c> is used).
+    /// </summary>
+    private unsafe void BuildFlatEntityMapEntries(ArchetypeMetadata meta, ArchetypeEngineState state, ChangeSet mapCs, bool duringRebuild)
+    {
+        var recordBuf = stackalloc byte[EntityRecordAccessor.MaxRecordSize];
+
+        // Phase 1: Scan each Versioned slot's CompRevTableSegment to find chain heads. slotMaps[slot] = { EntityPK → compRevFirstChunkId }.
+        var slotMaps = new Dictionary<long, int>[meta.ComponentCount];
+        var anySlotPopulated = false;
+
+        for (var slot = 0; slot < meta.ComponentCount; slot++)
+        {
+            var table = state.SlotToComponentTable[slot];
+            if (table?.CompRevTableSegment == null || table.StorageMode != StorageMode.Versioned)
             {
-                var table = state.SlotToComponentTable[slot];
-                if (table?.CompRevTableSegment == null || table.StorageMode != StorageMode.Versioned)
-                {
-                    slotMaps[slot] = null;
-                    continue;
-                }
-
-                var segment = table.CompRevTableSegment;
-                var capacity = segment.ChunkCapacity;
-                if (capacity == 0 || segment.AllocatedChunkCount == 0)
-                {
-                    slotMaps[slot] = null;
-                    continue;
-                }
-
-                // Pass 1: Collect overflow set (chunks that are NextChunkId of another chunk)
-                var overflowSet = new HashSet<int>();
-                var accessor = segment.CreateChunkAccessor();
-
-                for (var chunkId = 0; chunkId < capacity; chunkId++)
-                {
-                    if (!segment.IsChunkAllocated(chunkId))
-                    {
-                        continue;
-                    }
-
-                    ref var hdr = ref accessor.GetChunk<CompRevStorageHeader>(chunkId, true);
-                    if (hdr.NextChunkId != 0)
-                    {
-                        overflowSet.Add(hdr.NextChunkId);
-                    }
-                }
-
-                // Pass 2: Chain heads = allocated chunks NOT in overflow set, filtered by archetype
-                var chainHeads = new Dictionary<long, int>();
-
-                for (var chunkId = 0; chunkId < capacity; chunkId++)
-                {
-                    if (!segment.IsChunkAllocated(chunkId))
-                    {
-                        continue;
-                    }
-
-                    if (overflowSet.Contains(chunkId))
-                    {
-                        continue; // Overflow chunk, not a chain head
-                    }
-
-                    ref var hdr = ref accessor.GetChunk<CompRevStorageHeader>(chunkId);
-                    var pk = hdr.EntityPK;
-
-                    // Filter: only this archetype's entities (PK lower 12 bits = ArchetypeId)
-                    if ((pk & 0xFFF) != meta.ArchetypeId)
-                    {
-                        continue;
-                    }
-
-                    chainHeads[pk] = chunkId;
-                }
-
-                accessor.Dispose();
-                slotMaps[slot] = chainHeads;
-
-                if (chainHeads.Count > 0)
-                {
-                    anySlotPopulated = true;
-                }
-            }
-
-            if (!anySlotPopulated)
-            {
+                slotMaps[slot] = null;
                 continue;
             }
 
-            // Phase 2: Build EntityRecords from collected slot data
-            // Union all entity PKs across slots
-            var allEntityPKs = new HashSet<long>();
+            var segment = table.CompRevTableSegment;
+            if (segment.ChunkCapacity == 0 || segment.AllocatedChunkCount == 0)
+            {
+                slotMaps[slot] = null;
+                continue;
+            }
+
+            // Shared two-pass chain-head scan (overflow set → heads), reused by recovery scrub (03-recovery.md §6) so the two never drift. Returns
+            // EntityPK → root-chunk-id for this archetype's chains in this Versioned slot.
+            slotMaps[slot] = ComponentRevisionManager.EnumerateVersionedChainHeads(table, meta.ArchetypeId);
+            if (slotMaps[slot].Count > 0)
+            {
+                anySlotPopulated = true;
+            }
+        }
+
+        if (!anySlotPopulated)
+        {
+            return;
+        }
+
+        // Phase 2: Union all entity PKs across slots, then build + insert one record each.
+        var allEntityPKs = new HashSet<long>();
+        for (var slot = 0; slot < meta.ComponentCount; slot++)
+        {
+            if (slotMaps[slot] != null)
+            {
+                foreach (var pk in slotMaps[slot].Keys)
+                {
+                    allEntityPKs.Add(pk);
+                }
+            }
+        }
+
+        long maxEntityKey = 0;
+        foreach (var pk in allEntityPKs)
+        {
+            var entityKey = pk >> 12;
+
+            var allSlotsPresent = true;
             for (var slot = 0; slot < meta.ComponentCount; slot++)
             {
-                if (slotMaps[slot] != null)
+                if (slotMaps[slot] == null)
                 {
-                    foreach (var pk in slotMaps[slot].Keys)
+                    EntityRecordAccessor.SetLocation(recordBuf, slot, 0); // SV / non-Versioned slot — no chain location to recover
+                    continue;
+                }
+
+                if (!slotMaps[slot].TryGetValue(pk, out var compRevFirstChunkId))
+                {
+                    allSlotsPresent = false;
+                    break;
+                }
+
+                EntityRecordAccessor.SetLocation(recordBuf, slot, compRevFirstChunkId);
+            }
+
+            if (!allSlotsPresent)
+            {
+                continue; // Entity missing from a Versioned slot — inconsistent, skip
+            }
+
+            ref var header = ref EntityRecordAccessor.GetHeader(recordBuf);
+            header.BornTSN = 0; // Always visible (committed before checkpoint)
+            header.DiedTSN = 0; // Live entity
+            header.EnabledBits = (ushort)((1 << meta.ComponentCount) - 1); // All components enabled
+
+            var mapAccessor = state.EntityMap.Segment.CreateChunkAccessor(mapCs);
+            if (duringRebuild)
+            {
+                state.EntityMap.InsertDuringRebuild(entityKey, recordBuf, ref mapAccessor, mapCs);
+            }
+            else
+            {
+                state.EntityMap.Insert(entityKey, recordBuf, ref mapAccessor, mapCs);
+            }
+            mapAccessor.Dispose();
+
+            if (entityKey > maxEntityKey)
+            {
+                maxEntityKey = entityKey;
+            }
+        }
+
+        if (maxEntityKey > 0)
+        {
+            state.NextEntityKey = maxEntityKey;
+        }
+    }
+
+    /// <summary>
+    /// Root page indexes of EntityMap segments rebuilt from authoritative data during this crash recovery (<see cref="RebuildEntityMapOnCrash"/>). A suspect
+    /// (CRC-torn) page on one of these segments is healed — it was discarded by <c>ClearForRebuild</c> and re-derived — so <see cref="ResolveSuspectPrimaryPages"/>
+    /// must not loud-fail it (RB-04). Keyed by <see cref="LogicalSegment{TStore}.RootPageIndex"/> (stable across reload) rather than instance identity, since the
+    /// segment iterated at resolution may be a different wrapper than the one rebuilt. Populated only on the crash path, read once at suspect resolution.
+    /// </summary>
+    private readonly HashSet<int> _crashRebuiltEntityMapSegments = new();
+
+    /// <summary>Diagnostic: number of archetypes whose EntityMap was rebuilt on the crash path during the last open. Test-observable genuineness signal.</summary>
+    internal int LastOpenCrashEntityMapRebuildCount;
+
+    /// <summary>Diagnostic: number of occupancy L0 words the crash-path re-derive (<see cref="RederiveOccupancyOnCrash"/>) corrected on the last open. Test-observable
+    /// genuineness signal — &gt; 0 with FPI disabled proves the re-derive (not FPI) healed the torn / stale occupancy bitmap (CK-09).</summary>
+    internal int LastOpenOccupancyRederiveWordsChanged;
+
+    /// <summary>Diagnostic: the <see cref="RecoveryDriver.Result"/> of the last crash-path WAL v2 recovery (design 03 §1: every result field is test-asserted — a
+    /// RecordsScanned-only assertion hides a recovery that never applies). Default when no crash recovery ran this open.</summary>
+    internal RecoveryDriver.Result LastWalV2RecoveryResult;
+
+    /// <summary>Diagnostic: the checkpoint-LSN threshold used by the last WAL v2 recovery (records at/below it are skipped as already-consolidated). Test-observable so a
+    /// regression can assert the recovery window's record LSNs sit ABOVE it (the post-reopen-window-loss class: a reopened session whose record LSNs fall below a prior
+    /// session's persisted CheckpointLSN is silently dropped).</summary>
+    internal long LastWalV2RecoveryCheckpointLsn;
+
+    /// <summary>Test-only kill switch for the crash-path EntityMap rebuild (genuineness probe): when set, recovery falls back to trusting the persisted EntityMap so a
+    /// proof-gate test can confirm the rebuild — not FPI or the loaded map — is what recovers a torn EntityMap.</summary>
+    internal static bool DisableEntityMapRebuildForTest;
+
+    /// <summary>Test-only kill switch for the crash-path occupancy re-derive (genuineness probe): when set, recovery trusts the persisted occupancy bitmap so a
+    /// proof-gate test can confirm the re-derive — not FPI — is what heals a torn occupancy page (<see cref="RederiveOccupancyOnCrash"/>).</summary>
+    internal static bool DisableOccupancyRederiveForTest;
+
+    /// <summary>
+    /// Whether this archetype's EntityMap can be fully re-derived from persisted data on a crash. True for cluster archetypes (the cluster slots persist
+    /// EntityKeys[N] + EnabledBits[C] + the live OccupancyBits — fully self-describing) and for non-cluster archetypes whose non-Transient slots are all
+    /// Versioned (chain heads carry every location). False only for the rare non-cluster archetype that still owns a SingleVersion slot (reachable via a
+    /// Transient-*indexed* slot, see InitializeArchetypes cluster-eligibility): its SV slot location has no persisted source, so a torn EntityMap page there
+    /// must loud-fail (RB-04) rather than silent-heal to a lossy map. (03-recovery.md §7.)
+    /// </summary>
+    internal bool IsEntityMapRebuildable(ArchetypeMetadata meta)
+    {
+        if (meta.IsClusterEligible)
+        {
+            return true;
+        }
+
+        var state = _archetypeStates[meta.ArchetypeId];
+        if (state?.SlotToComponentTable == null)
+        {
+            return false;
+        }
+
+        for (var slot = 0; slot < meta.ComponentCount; slot++)
+        {
+            var table = state.SlotToComponentTable[slot];
+            if (table != null && table.StorageMode == StorageMode.SingleVersion)
+            {
+                return false; // non-cluster SV slot — unrecoverable location
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Crash-path EntityMap rebuild (03-recovery.md §7): discard the persisted (possibly CRC-torn, FPI-only-protected) EntityMap and re-derive it from the
+    /// authoritative source — the cluster occupancy walk for cluster archetypes, the Versioned chain heads for flat archetypes. The EntityMap analogue of the
+    /// Phase 2 index clear+rebuild, making the EntityMap a derived-on-crash structure. Runs from <see cref="RebuildEntityMapsFromPersistedData"/> (over every
+    /// archetype) before WAL apply, so the applier sees a clean map. Only called for rebuildable archetypes (<see cref="IsEntityMapRebuildable"/>).
+    /// </summary>
+    private void RebuildEntityMapOnCrash(ArchetypeMetadata meta, ArchetypeEngineState state)
+    {
+        LastOpenCrashEntityMapRebuildCount++;
+        var cs = MMF.CreateChangeSet();
+        try
+        {
+            using var guard = EpochGuard.Enter(EpochManager);
+
+            // Discard the persisted EntityMap (a torn page is reclaimed by bitmap, never parsed) and re-derive every entry from authoritative data.
+            state.EntityMap.ClearForRebuild(cs);
+
+            if (meta.IsClusterEligible)
+            {
+                RebuildClusterEntityMapEntries(meta, state, cs);
+            }
+            else
+            {
+                BuildFlatEntityMapEntries(meta, state, cs, duringRebuild: true);
+            }
+
+            _crashRebuiltEntityMapSegments.Add(state.EntityMap.Segment.RootPageIndex);
+        }
+        finally
+        {
+            cs.SaveChanges();
+        }
+    }
+
+    /// <summary>
+    /// Re-derive a cluster archetype's EntityMap from the cluster segment alone. Walks every live slot of every active cluster (the same occupancy-bit walk
+    /// as <see cref="ArchetypeClusterState.RebuildIndexesFromData"/>) and rebuilds the <c>ClusterEntityRecord</c> from self-describing cluster state: the
+    /// EntityKey from <c>EntityKeys[slot]</c>, the per-entity enabled mask reconstructed from the per-component <c>EnabledBits[C]</c> bitmaps, and each
+    /// Versioned slot's compRevFirstChunkId from the chain-head scan. BornTSN/DiedTSN = 0 (live, committed before checkpoint — same convention as the flat
+    /// rebuild). Inserted via the split-aware <c>InsertDuringRebuild</c> into the just-cleared map.
+    /// </summary>
+    private unsafe void RebuildClusterEntityMapEntries(ArchetypeMetadata meta, ArchetypeEngineState state, ChangeSet cs)
+    {
+        var clusterState = state.ClusterState;
+        if (clusterState?.ClusterSegment == null)
+        {
+            return; // pure-Transient cluster — no persistent data to rebuild from
+        }
+
+        var layout = clusterState.Layout;
+        var slotToVi = layout.SlotToVersionedIndex;
+
+        // Versioned chain heads per slot (compRevFirstChunkId keyed by EntityPK) — the same source the flat rebuild uses for the per-slot location.
+        var chainHeads = new Dictionary<long, int>[meta.ComponentCount];
+        if (meta.VersionedSlotMask != 0 && slotToVi != null)
+        {
+            for (var slot = 0; slot < meta.ComponentCount; slot++)
+            {
+                if (slotToVi[slot] < 0)
+                {
+                    continue;
+                }
+
+                var table = state.SlotToComponentTable[slot];
+                if (table?.CompRevTableSegment != null && table.StorageMode == StorageMode.Versioned
+                    && table.CompRevTableSegment.ChunkCapacity > 0 && table.CompRevTableSegment.AllocatedChunkCount > 0)
+                {
+                    chainHeads[slot] = ComponentRevisionManager.EnumerateVersionedChainHeads(table, meta.ArchetypeId);
+                }
+            }
+        }
+
+        var recordBuf = stackalloc byte[ClusterEntityRecordAccessor.RecordSize(meta.VersionedSlotCount)];
+        var clusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor();
+        long maxEntityKey = 0;
+        try
+        {
+            for (var c = 0; c < clusterState.ActiveClusterCount; c++)
+            {
+                var chunkId = clusterState.ActiveClusterIds[c];
+                byte* clusterBase = clusterAccessor.GetChunkAddress(chunkId);
+                ulong occupancy = *(ulong*)clusterBase;
+
+                while (occupancy != 0)
+                {
+                    var slotIndex = BitOperations.TrailingZeroCount(occupancy);
+                    occupancy &= occupancy - 1;
+
+                    var entityPK = *(long*)(clusterBase + layout.EntityIdsOffset + slotIndex * 8);
+                    var entityKey = EntityId.FromRaw(entityPK).EntityKey;
+
+                    ClusterEntityRecordAccessor.InitializeRecord(recordBuf, meta.VersionedSlotCount);
+                    ref var header = ref ClusterEntityRecordAccessor.GetHeader(recordBuf);
+                    header.BornTSN = 0; // committed before checkpoint → always visible
+                    header.DiedTSN = 0; // live (occupancy bit set)
+
+                    // Reconstruct the per-entity 16-bit enabled mask from the cluster's per-component EnabledBits[c] (bit slotIndex set ⇒ component c enabled).
+                    ushort enabledMask = 0;
+                    for (var comp = 0; comp < meta.ComponentCount; comp++)
                     {
-                        allEntityPKs.Add(pk);
+                        var compEnabled = *(ulong*)(clusterBase + layout.EnabledBitsOffset(comp));
+                        if ((compEnabled & (1UL << slotIndex)) != 0)
+                        {
+                            enabledMask |= (ushort)(1 << comp);
+                        }
+                    }
+                    header.EnabledBits = enabledMask;
+
+                    ClusterEntityRecordAccessor.SetClusterChunkId(recordBuf, chunkId);
+                    ClusterEntityRecordAccessor.SetSlotIndex(recordBuf, (byte)slotIndex);
+
+                    if (slotToVi != null)
+                    {
+                        for (var slot = 0; slot < meta.ComponentCount; slot++)
+                        {
+                            var vi = slotToVi[slot];
+                            if (vi < 0)
+                            {
+                                continue;
+                            }
+
+                            var head = 0;
+                            chainHeads[slot]?.TryGetValue(entityPK, out head);
+                            ClusterEntityRecordAccessor.SetCompRevFirstChunkId(recordBuf, vi, head);
+                        }
+                    }
+
+                    var mapAccessor = state.EntityMap.Segment.CreateChunkAccessor(cs);
+                    state.EntityMap.InsertDuringRebuild(entityKey, recordBuf, ref mapAccessor, cs);
+                    mapAccessor.Dispose();
+
+                    if (entityKey > maxEntityKey)
+                    {
+                        maxEntityKey = entityKey;
                     }
                 }
             }
+        }
+        finally
+        {
+            clusterAccessor.Dispose();
+        }
 
-            long maxEntityKey = 0;
-            var mapCs = MMF.CreateChangeSet();
+        if (maxEntityKey > 0)
+        {
+            state.NextEntityKey = maxEntityKey;
+        }
+    }
 
-            foreach (var pk in allEntityPKs)
+    /// <summary>
+    /// Recovery Phase-4 SCRUB (03-recovery.md §6, D1): after the WAL window has been applied, collapse every Versioned revision
+    /// chain to its HEAD — the highest-TSN committed element — freeing all older revisions' content chunks and the chain's
+    /// overflow table chunks. The history horizon resets at crash (D1): post-recovery there are no readers of pre-crash
+    /// snapshots, so no MVCC history is retained. Chain roots (the first chunks the EntityMap references) are preserved in place,
+    /// so the EntityMap stays valid and locations are unchanged. Cluster HEAD values are unaffected — scrub keeps the head's
+    /// content chunk, so the values written by <see cref="ArchetypeClusterState.RebuildVersionedHeadFromChain"/> + the WAL apply
+    /// remain correct. Invoked only on the crash path (WAL files present); a clean reopen keeps its chains for lazy cleanup.
+    /// </summary>
+    private void ScrubVersionedChains()
+    {
+        using var guard = EpochGuard.Enter(EpochManager);
+        var changeSet = MMF.CreateChangeSet();
+        try
+        {
+            foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
             {
-                var entityKey = pk >> 12;
+                var state = _archetypeStates[meta.ArchetypeId];
+                if (state?.SlotToComponentTable == null)
+                {
+                    continue;
+                }
 
-                // Build locations for each Versioned slot
-                var allSlotsPresent = true;
                 for (var slot = 0; slot < meta.ComponentCount; slot++)
                 {
-                    if (slotMaps[slot] == null)
+                    var table = state.SlotToComponentTable[slot];
+
+                    // Shared chain-head scan (same source as the EntityMap rebuild). Empty for null / non-Versioned / empty tables.
+                    var heads = ComponentRevisionManager.EnumerateVersionedChainHeads(table, meta.ArchetypeId);
+                    if (heads.Count == 0)
                     {
-                        // SV or non-Versioned slot — can't recover location, set to 0
-                        EntityRecordAccessor.SetLocation(recordBuf, slot, 0);
                         continue;
                     }
 
-                    if (!slotMaps[slot].TryGetValue(pk, out var compRevFirstChunkId))
+                    var revAccessor = table.CompRevTableSegment.CreateChunkAccessor(changeSet);
+                    var contentAccessor = table.ComponentSegment.CreateChunkAccessor(changeSet);
+                    try
                     {
-                        allSlotsPresent = false;
-                        break;
+                        foreach (var firstChunkId in heads.Values)
+                        {
+                            ComponentRevisionManager.ScrubChainToHead(table, firstChunkId, ref revAccessor, ref contentAccessor);
+                        }
+
+                        // Orphan sweep (§6): every chain is now collapsed to its root, so reclaim any chunk leaked by an
+                        // interrupted pre-crash op — allocated but unreachable from a chain root or a surviving head's content.
+                        ComponentRevisionManager.SweepTableOrphans(table, new HashSet<int>(heads.Values), ref revAccessor);
                     }
-
-                    EntityRecordAccessor.SetLocation(recordBuf, slot, compRevFirstChunkId);
-                }
-
-                if (!allSlotsPresent)
-                {
-                    continue; // Entity missing from a Versioned slot — inconsistent, skip
-                }
-
-                // Build entity record header
-                ref var header = ref EntityRecordAccessor.GetHeader(recordBuf);
-                header.BornTSN = 0; // Always visible (committed before checkpoint)
-                header.DiedTSN = 0; // Live entity
-                header.EnabledBits = (ushort)((1 << meta.ComponentCount) - 1); // All components enabled
-
-                // Insert into entity map
-                var mapAccessor = state.EntityMap.Segment.CreateChunkAccessor(mapCs);
-                state.EntityMap.Insert(entityKey, recordBuf, ref mapAccessor, mapCs);
-                mapAccessor.Dispose();
-
-                if (entityKey > maxEntityKey)
-                {
-                    maxEntityKey = entityKey;
+                    finally
+                    {
+                        revAccessor.Dispose();
+                        contentAccessor.Dispose();
+                    }
                 }
             }
-
-            // Resume entity key counter from max existing key
-            if (maxEntityKey > 0)
-            {
-                state.NextEntityKey = maxEntityKey;
-            }
+        }
+        finally
+        {
+            changeSet.SaveChanges();
         }
     }
 

@@ -32,7 +32,6 @@ public class BulkManifestTests
     {
         // Defensive: the existing chunk types must keep their numeric values for backward compat.
         Assert.That((int)WalChunkType.Transaction, Is.EqualTo(1));
-        Assert.That((int)WalChunkType.FullPageImage, Is.EqualTo(2));
         Assert.That((int)WalChunkType.TickFence, Is.EqualTo(3));
         Assert.That((int)WalChunkType.ClusterTickFence, Is.EqualTo(4));
     }

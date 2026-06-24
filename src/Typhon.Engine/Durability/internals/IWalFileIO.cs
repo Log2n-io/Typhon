@@ -66,8 +66,7 @@ internal interface IWalFileIO : IDisposable
 
     /// <summary>
     /// Opens a WAL segment file for read-only access with sharing that allows concurrent writers.
-    /// Used by <see cref="WalSegmentReader"/> and <see cref="WalManager.SearchFpiForPage"/> where
-    /// the active segment may be held open by the <see cref="WalWriter"/>.
+    /// Used by <see cref="WalSegmentReader"/> (recovery scan) where the active segment may be held open by the <see cref="WalWriter"/>.
     /// </summary>
     /// <param name="path">File path for the segment.</param>
     /// <returns>A safe handle to the opened segment file (read-only).</returns>
