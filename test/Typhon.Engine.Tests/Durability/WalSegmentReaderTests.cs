@@ -109,7 +109,7 @@ public class WalSegmentReaderTests : AllocatorTestBase
 
             // Compute footer CRC over [chunkOffset, chunkOffset + chunkSize - 4)
             var crcSpan = data.AsSpan(chunkOffset, chunkSize - WalChunkFooter.SizeInBytes);
-            var footerCrc = WalCrc.Compute(crcSpan);
+            var footerCrc = Crc32CUtil.Compute(crcSpan);
 
             // Write WalChunkFooter (4 bytes) at end of chunk
             var footerOffset = chunkOffset + chunkSize - WalChunkFooter.SizeInBytes;
@@ -377,7 +377,7 @@ public class WalSegmentReaderTests : AllocatorTestBase
         // (only the chain link is broken)
         var chunk2Size = WalChunkHeader.SizeInBytes + WalRecordHeader.SizeInBytes + payload2.Length + WalChunkFooter.SizeInBytes;
         var crcSpan = segmentData.AsSpan(chunk2Start, chunk2Size - WalChunkFooter.SizeInBytes);
-        var newFooterCrc = WalCrc.Compute(crcSpan);
+        var newFooterCrc = Crc32CUtil.Compute(crcSpan);
         var chunk2FooterOffset = chunk2Start + chunk2Size - WalChunkFooter.SizeInBytes;
         Unsafe.As<byte, uint>(ref segmentData[chunk2FooterOffset]) = newFooterCrc;
 
@@ -488,7 +488,7 @@ public class WalSegmentReaderTests : AllocatorTestBase
             payload.AsSpan().CopyTo(data.AsSpan(bodyOffset + WalRecordHeader.SizeInBytes));
 
             var crcSpan = data.AsSpan(chunkOffset, chunkSize - WalChunkFooter.SizeInBytes);
-            var footerCrc = WalCrc.Compute(crcSpan);
+            var footerCrc = Crc32CUtil.Compute(crcSpan);
             Unsafe.As<byte, uint>(ref data[chunkOffset + chunkSize - WalChunkFooter.SizeInBytes]) = footerCrc;
 
             lastFooterCrc = footerCrc;

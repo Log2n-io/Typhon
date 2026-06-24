@@ -1339,7 +1339,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                 return;
             }
 
-            // RecoveryOnly mode: skip on-load checks (recovery handles torn pages via WalRecovery Phase 4 / rebuild)
+            // RecoveryOnly mode: skip on-load checks (recovery heals torn pages via the rebuild net + suspect-page resolution, RB-01/RB-04)
             if (_pageChecksumVerification == PageChecksumVerification.RecoveryOnly)
             {
                 pi.CrcVerified = true;
@@ -1366,7 +1366,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
             // Compute CRC over the page, skipping the checksum field itself
             var pageSpan = new ReadOnlySpan<byte>((byte*)pageAddr, PageSize);
-            var computedCrc = WalCrc.ComputeSkipping(pageSpan, PageBaseHeader.PageChecksumOffset, PageBaseHeader.PageChecksumSize);
+            var computedCrc = Crc32CUtil.ComputeSkipping(pageSpan, PageBaseHeader.PageChecksumOffset, PageBaseHeader.PageChecksumSize);
 
             if (computedCrc == storedCrc)
             {
@@ -1758,7 +1758,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                 redirected = TryPersistProtectedPage(filePageIndex, staging.Pointer);
                 if (!redirected)
                 {
-                    stagingHeader->PageChecksum = WalCrc.ComputeSkipping(staging.Span, PageBaseHeader.PageChecksumOffset, PageBaseHeader.PageChecksumSize);
+                    stagingHeader->PageChecksum = Crc32CUtil.ComputeSkipping(staging.Span, PageBaseHeader.PageChecksumOffset, PageBaseHeader.PageChecksumSize);
                 }
             }
 
@@ -1818,8 +1818,8 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         var hasProtected = false;
         for (int i = 0; i < memPageIndices.Length; i++)
         {
-            var fpi = _memPagesInfo[memPageIndices[i]].FilePageIndex;
-            if (fpi > 0 && IsProtectedPage(fpi))
+            var filePageIdx = _memPagesInfo[memPageIndices[i]].FilePageIndex;
+            if (filePageIdx > 0 && IsProtectedPage(filePageIdx))
             {
                 hasProtected = true;
                 break;
@@ -1893,7 +1893,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
                 // Compute CRC over the updated page so the on-disk copy is self-consistent (CP-07 equivalent for SavePages)
                 var pageSpan = new ReadOnlySpan<byte>((byte*)headerAddr, PageSize);
-                headerAddr->PageChecksum = WalCrc.ComputeSkipping(pageSpan, PageBaseHeader.PageChecksumOffset, PageBaseHeader.PageChecksumSize);
+                headerAddr->PageChecksum = Crc32CUtil.ComputeSkipping(pageSpan, PageBaseHeader.PageChecksumOffset, PageBaseHeader.PageChecksumSize);
             }
 
             var nextMemPageIndex = normalPages[i];
@@ -1926,7 +1926,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             ++headerAddr->ChangeRevision;
 
             var pageSpan = new ReadOnlySpan<byte>((byte*)headerAddr, PageSize);
-            headerAddr->PageChecksum = WalCrc.ComputeSkipping(pageSpan, PageBaseHeader.PageChecksumOffset, PageBaseHeader.PageChecksumSize);
+            headerAddr->PageChecksum = Crc32CUtil.ComputeSkipping(pageSpan, PageBaseHeader.PageChecksumOffset, PageBaseHeader.PageChecksumSize);
         }
 
         // Don't forget to add the last operation
@@ -1939,8 +1939,8 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         long batchEndOffset = 0;
         for (int i = 0; i < operations.Count; i++)
         {
-            var opFpi = _memPagesInfo[operations[i].memPageIndex].FilePageIndex;
-            var end = (opFpi + operations[i].length) * (long)PageSize;
+            var opFilePageIdx = _memPagesInfo[operations[i].memPageIndex].FilePageIndex;
+            var end = (opFilePageIdx + operations[i].length) * (long)PageSize;
             if (end > batchEndOffset)
             {
                 batchEndOffset = end;

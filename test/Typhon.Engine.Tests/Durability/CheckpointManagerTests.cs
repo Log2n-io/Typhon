@@ -478,7 +478,7 @@ public class CheckpointManagerTests : AllocatorTestBase
         ckpt.RunCheckpointCycle(durableLsn);
 
         // Read the CheckpointLSN from the durability watermark block (CK-05) to verify persistence
-        Assert.That(_mmf.CheckpointLsnWatermark, Is.EqualTo(durableLsn));
+        Assert.That(DurabilityWatermarks.ReadCheckpointLsn(_mmf), Is.EqualTo(durableLsn));
     }
 
     // ═══════════════════════════════════════════════════════════════

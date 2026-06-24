@@ -1,4 +1,4 @@
-﻿using JetBrains.Annotations;
+using JetBrains.Annotations;
 using Microsoft.Extensions.Logging;
 using System;
 using System.Collections.Concurrent;
@@ -116,8 +116,6 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
     // ReSharper disable InconsistentNaming
     internal const string BK_OccupancyMapSPI = "OccupancyMapSPI";
     internal const string BK_OccupancyReserved = "OccupancyReserved";
-    // {CheckpointLSN: long, CleanShutdown: bool} packed as Int3 — flips atomically with the meta generation (M12, CK-05).
-    internal const string BK_DurabilityWatermarks = "DurabilityWatermarks";
     // ReSharper restore InconsistentNaming
 
     #endregion
@@ -400,11 +398,12 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
         _occupancyMap.SetL0(_occupancyNextReservedMapTwinPageIndex, cs);
         // ReSharper restore InconsistentlySynchronizedField
 
-        // Initialize bootstrap dictionary with core occupancy SPIs + an empty durability watermark block.
+        // Initialize bootstrap dictionary with core occupancy SPIs. The durability watermark block (owned by the
+        // durability layer, see DurabilityWatermarks) needs no genesis entry — an absent key reads as (CheckpointLSN=0,
+        // CleanShutdown=false), the correct fresh-database state; the first checkpoint writes the real value.
         Bootstrap.SetInt(BK_OccupancyMapSPI, OccupancySegmentRootPageIndex);
         Bootstrap.Set(BK_OccupancyReserved,
             BootstrapDictionary.Value.FromInt3(_occupancyNextReservedPageIndex, _occupancyNextReservedMapPageIndex, _occupancyNextReservedMapTwinPageIndex));
-        WriteDurabilityWatermarks(0, false);
 
         // Persist the structural (occupancy) pages, then write the genesis meta page (generation 1) via the alternation path.
         cs.SaveChanges();
@@ -467,11 +466,11 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
     public LogicalSegment<PersistentStore> GetSegment(int filePageIndex)
     {
         var dic = _segments;
-        return dic?.GetOrAdd(filePageIndex, fpid =>
+        return dic?.GetOrAdd(filePageIndex, pageIdx =>
         {
             var segment = new LogicalSegment<PersistentStore>(new PersistentStore(this));
-            ResolveDirectoryPairsForLoad(fpid);   // CK-05 (C2): register directory-page slot state before the load walks them
-            segment.Load(fpid);
+            ResolveDirectoryPairsForLoad(pageIdx);   // CK-05 (C2): register directory-page slot state before the load walks them
+            segment.Load(pageIdx);
             return segment;
         });
     }
@@ -836,7 +835,7 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
 
             var nextGen = _metaGeneration + 1;
             PageBaseHeader.WritePairGeneration(pageSpan, nextGen);
-            ((PageBaseHeader*)pageAddr)->PageChecksum = WalCrc.ComputeSkipping(pageSpan, PageBaseHeader.PageChecksumOffset, PageBaseHeader.PageChecksumSize);
+            ((PageBaseHeader*)pageAddr)->PageChecksum = Crc32CUtil.ComputeSkipping(pageSpan, PageBaseHeader.PageChecksumOffset, PageBaseHeader.PageChecksumSize);
 
             // Write the full image to the alternate slot and fsync BEFORE flipping the current pointer.
             var targetSlot = MetaSlotA + MetaSlotB - _metaCurrentSlot;   // the other slot
@@ -847,6 +846,22 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
 
             _metaCurrentSlot = targetSlot;
             _metaGeneration = nextGen;
+        }
+    }
+
+    /// <summary>
+    /// Runs <paramref name="mutate"/> against the in-memory bootstrap dictionary and atomically persists the meta pair
+    /// (alternate-slot flip + fsync, CK-05), all under the single meta lock. WAL-ignorant: the storage layer treats the
+    /// bootstrap values as opaque bytes — durability-layer owners (e.g. <c>DurabilityWatermarks</c>) supply the meaning.
+    /// Holding the lock across <paramref name="mutate"/> keeps a read-modify-write of one bootstrap field atomic with
+    /// respect to the flip. Used for synchronous saves outside the checkpoint cycle.
+    /// </summary>
+    internal void MutateBootstrapAndPersist(Action mutate)
+    {
+        lock (_metaLock)
+        {
+            mutate();
+            PersistMetaNow();
         }
     }
 
@@ -902,7 +917,7 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
     {
         generation = 0;
         var storedCrc = MemoryMarshal.Read<uint>(slot.Slice(PageBaseHeader.PageChecksumOffset));
-        var computedCrc = WalCrc.ComputeSkipping(slot, PageBaseHeader.PageChecksumOffset, PageBaseHeader.PageChecksumSize);
+        var computedCrc = Crc32CUtil.ComputeSkipping(slot, PageBaseHeader.PageChecksumOffset, PageBaseHeader.PageChecksumSize);
         if (storedCrc != computedCrc)
         {
             return false;
@@ -940,43 +955,11 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
     /// </remarks>
     protected override bool IsExternallyPersisted(int filePageIndex) => filePageIndex is MetaSlotA or MetaSlotB;
 
-    // ── Durability watermark block (CheckpointLSN + CleanShutdown), packed Int3, flipped atomically by the meta generation ──
-
-    private (long CheckpointLsn, bool CleanShutdown) ReadDurabilityWatermarks()
-    {
-        if (!Bootstrap.TryGet(BK_DurabilityWatermarks, out var v))
-        {
-            return (0, false);
-        }
-        var lsn = (uint)v.GetInt(0) | ((long)v.GetInt(1) << 32);
-        return (lsn, v.GetInt(2) != 0);
-    }
-
-    private void WriteDurabilityWatermarks(long checkpointLsn, bool cleanShutdown)
-        => Bootstrap.Set(BK_DurabilityWatermarks, BootstrapDictionary.Value.FromInt3((int)checkpointLsn, (int)(checkpointLsn >> 32), cleanShutdown ? 1 : 0));
-
-    /// <summary>The persisted checkpoint-LSN watermark (0 on a fresh database).</summary>
-    internal long CheckpointLsnWatermark => ReadDurabilityWatermarks().CheckpointLsn;
-
-    /// <summary>The persisted clean-shutdown flag.</summary>
-    internal bool CleanShutdownWatermark => ReadDurabilityWatermarks().CleanShutdown;
-
     /// <summary>Test hook (CK-05): the physical slot (0 or 1) currently holding the valid meta content.</summary>
     internal int MetaCurrentSlotForTest => _metaCurrentSlot;
 
     /// <summary>Test hook (CK-05): the current meta generation.</summary>
     internal ulong MetaGenerationForTest => _metaGeneration;
-
-    /// <summary>Sets the clean-shutdown flag (preserving CheckpointLSN) and persists the meta page atomically (CK-05).</summary>
-    internal void SetCleanShutdown(bool cleanShutdown)
-    {
-        lock (_metaLock)
-        {
-            var w = ReadDurabilityWatermarks();
-            WriteDurabilityWatermarks(w.CheckpointLsn, cleanShutdown);
-            PersistMetaNow();
-        }
-    }
 
     // ═══════════════════════════════════════════════════════════════
     // Segment-directory A/B slot-pairing (CK-05, C2)
@@ -1027,7 +1010,7 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
 
             var span = new Span<byte>(image, PageSize);
             PageBaseHeader.WritePairGeneration(span, newGen);
-            ((PageBaseHeader*)image)->PageChecksum = WalCrc.ComputeSkipping(span, PageBaseHeader.PageChecksumOffset, PageBaseHeader.PageChecksumSize);
+            ((PageBaseHeader*)image)->PageChecksum = Crc32CUtil.ComputeSkipping(span, PageBaseHeader.PageChecksumOffset, PageBaseHeader.PageChecksumSize);
 
             WritePageDirect(alternate, span);
             FlushToDisk();
@@ -1138,24 +1121,6 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
         Bootstrap.Set(BK_OccupancyReserved,
             BootstrapDictionary.Value.FromInt3(_occupancyNextReservedPageIndex, _occupancyNextReservedMapPageIndex, _occupancyNextReservedMapTwinPageIndex));
         PersistMetaNow();
-    }
-
-    /// <summary>
-    /// Updates the <see cref="RootFileHeader.CheckpointLSN"/> field in page 0 and flushes to disk. Called by the Checkpoint Manager after dirty pages have
-    /// been written and fsynced.
-    /// </summary>
-    /// <param name="checkpointLSN">The new checkpoint LSN to persist.</param>
-    /// <param name="epochManager">Epoch manager for page access.</param>
-    internal void UpdateCheckpointLSN(long checkpointLSN, EpochManager epochManager)
-    {
-        // Advance the checkpoint-LSN watermark (preserving CleanShutdown) and flip the meta pair — the generation flip
-        // is the atomic, fsynced commit point (CK-05). epochManager is unused now (PersistMetaNow uses the MMF's own).
-        lock (_metaLock)
-        {
-            var w = ReadDurabilityWatermarks();
-            WriteDurabilityWatermarks(checkpointLSN, w.CleanShutdown);
-            PersistMetaNow();
-        }
     }
 
     #region IMetricSource Implementation

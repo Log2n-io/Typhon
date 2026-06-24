@@ -128,7 +128,7 @@ class WalRecoveryTests : TestBase<WalRecoveryTests>
 
             // Compute CRC over [0, ChunkSize - 4) and write footer
             var crcSpan = data.AsSpan(recordOffset, chunkSize - WalChunkFooter.SizeInBytes);
-            var crc = WalCrc.Compute(crcSpan);
+            var crc = Crc32CUtil.Compute(crcSpan);
             Unsafe.As<byte, uint>(ref data[recordOffset + chunkSize - WalChunkFooter.SizeInBytes]) = crc;
             prevFooterCrc = crc;
 

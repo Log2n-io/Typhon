@@ -701,7 +701,7 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
 
                 // 2. Compute CRC over [0, ChunkSize - FooterSize) — header + body
                 var crcSpan = stagingData.Slice(chunkOffset, chunkHeader.ChunkSize - WalChunkFooter.SizeInBytes);
-                var crc = WalCrc.Compute(crcSpan);
+                var crc = Crc32CUtil.Compute(crcSpan);
 
                 // 3. Write footer CRC
                 Unsafe.As<byte, uint>(ref stagingData[chunkOffset + chunkHeader.ChunkSize - WalChunkFooter.SizeInBytes]) = crc;

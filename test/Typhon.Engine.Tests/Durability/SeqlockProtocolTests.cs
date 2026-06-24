@@ -140,7 +140,7 @@ public class SeqlockProtocolTests : AllocatorTestBase
         var storedCrc = Unsafe.As<byte, uint>(ref page[PageBaseHeader.PageChecksumOffset]);
         if (storedCrc != 0)
         {
-            var computedCrc = WalCrc.ComputeSkipping(page, PageBaseHeader.PageChecksumOffset, PageBaseHeader.PageChecksumSize);
+            var computedCrc = Crc32CUtil.ComputeSkipping(page, PageBaseHeader.PageChecksumOffset, PageBaseHeader.PageChecksumSize);
             Assert.That(computedCrc, Is.EqualTo(storedCrc), "Page CRC mismatch after checkpoint");
         }
     }
@@ -307,7 +307,7 @@ public class SeqlockProtocolTests : AllocatorTestBase
         // Verify CRC is valid and non-zero
         var storedCrc = Unsafe.As<byte, uint>(ref diskPage[PageBaseHeader.PageChecksumOffset]);
         Assert.That(storedCrc, Is.Not.EqualTo(0u), "CRC should be stamped (non-zero)");
-        var computedCrc = WalCrc.ComputeSkipping(diskPage, PageBaseHeader.PageChecksumOffset, PageBaseHeader.PageChecksumSize);
+        var computedCrc = Crc32CUtil.ComputeSkipping(diskPage, PageBaseHeader.PageChecksumOffset, PageBaseHeader.PageChecksumSize);
         Assert.That(computedCrc, Is.EqualTo(storedCrc), "CRC on disk should match computed CRC");
 
         // Verify ChangeRevision was incremented

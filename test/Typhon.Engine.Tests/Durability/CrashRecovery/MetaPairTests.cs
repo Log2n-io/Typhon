@@ -85,7 +85,7 @@ public class MetaPairTests : AllocatorTestBase
 
         for (var i = 1; i <= 4; i++)
         {
-            _mmf.UpdateCheckpointLSN(i * 10, _epochManager);
+            DurabilityWatermarks.UpdateCheckpointLsn(_mmf, i * 10);
             Assert.That(_mmf.MetaGenerationForTest, Is.EqualTo(prevGen + 1), "each meta write bumps the generation by 1");
             Assert.That(_mmf.MetaCurrentSlotForTest, Is.Not.EqualTo(prevSlot), "each meta write flips to the other slot");
             prevGen = _mmf.MetaGenerationForTest;
@@ -104,8 +104,8 @@ public class MetaPairTests : AllocatorTestBase
     public void TornCurrentSlot_ReopenSelectsSibling()
     {
         _mmf = Open(fresh: true);
-        _mmf.UpdateCheckpointLSN(50, _epochManager);    // the sibling will hold CheckpointLSN 50
-        _mmf.UpdateCheckpointLSN(100, _epochManager);   // the current slot holds CheckpointLSN 100
+        DurabilityWatermarks.UpdateCheckpointLsn(_mmf, 50);    // the sibling will hold CheckpointLSN 50
+        DurabilityWatermarks.UpdateCheckpointLsn(_mmf, 100);   // the current slot holds CheckpointLSN 100
         var currentSlot = _mmf.MetaCurrentSlotForTest;
 
         // Tear the current (newest) slot — simulate a torn write that never completed.
@@ -116,7 +116,7 @@ public class MetaPairTests : AllocatorTestBase
 
         // Reopen — LoadMeta must select the valid sibling (CheckpointLSN 50), never fail.
         _mmf = Open(fresh: false);
-        Assert.That(_mmf.CheckpointLsnWatermark, Is.EqualTo(50L), "reopen falls back to the valid sibling slot, not the torn current slot");
+        Assert.That(DurabilityWatermarks.ReadCheckpointLsn(_mmf), Is.EqualTo(50L), "reopen falls back to the valid sibling slot, not the torn current slot");
         Assert.That(_mmf.MetaCurrentSlotForTest, Is.Not.EqualTo(currentSlot), "the torn slot is not selected as current");
     }
 
@@ -126,7 +126,7 @@ public class MetaPairTests : AllocatorTestBase
     public void BothSlotsCorrupt_OpenFailsLoudly()
     {
         _mmf = Open(fresh: true);
-        _mmf.UpdateCheckpointLSN(100, _epochManager);
+        DurabilityWatermarks.UpdateCheckpointLsn(_mmf, 100);
 
         _mmf.WritePageDirect(0, GarbagePage());
         _mmf.WritePageDirect(1, GarbagePage());
@@ -147,13 +147,26 @@ public class MetaPairTests : AllocatorTestBase
     public void DurabilityWatermarks_SurviveReopen()
     {
         _mmf = Open(fresh: true);
-        _mmf.UpdateCheckpointLSN(4242, _epochManager);
-        _mmf.SetCleanShutdown(true);
+        DurabilityWatermarks.UpdateCheckpointLsn(_mmf, 4242);
+        DurabilityWatermarks.SetCleanShutdown(_mmf, true);
         _mmf.Dispose();
         _mmf = null;
 
         _mmf = Open(fresh: false);
-        Assert.That(_mmf.CheckpointLsnWatermark, Is.EqualTo(4242L), "CheckpointLSN survives reopen via the watermark block");
-        Assert.That(_mmf.CleanShutdownWatermark, Is.True, "CleanShutdown survives reopen, packed alongside CheckpointLSN");
+        Assert.That(DurabilityWatermarks.ReadCheckpointLsn(_mmf), Is.EqualTo(4242L), "CheckpointLSN survives reopen via the watermark block");
+        Assert.That(DurabilityWatermarks.ReadCleanShutdown(_mmf), Is.True, "CleanShutdown survives reopen, packed alongside CheckpointLSN");
+    }
+
+    [Test]
+    [CancelAfter(5000)]
+    [VerifiesRule("CK-05")]
+    public void FreshDatabase_WatermarksReadAsZeroAndClean()
+    {
+        // Genesis writes NO watermark entry (M12: the durability layer owns it). An absent key must read as the
+        // correct fresh-database state — (CheckpointLSN=0, CleanShutdown=false) — so deleting the genesis init is safe.
+        _mmf = Open(fresh: true);
+
+        Assert.That(DurabilityWatermarks.ReadCheckpointLsn(_mmf), Is.EqualTo(0L), "a fresh database has no checkpoint watermark yet");
+        Assert.That(DurabilityWatermarks.ReadCleanShutdown(_mmf), Is.False, "a fresh database is not marked clean-shutdown");
     }
 }

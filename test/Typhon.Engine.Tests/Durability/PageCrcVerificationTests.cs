@@ -65,7 +65,7 @@ public class PageCrcVerificationTests : AllocatorTestBase
             page[i] = fillByte;
         }
 
-        var crc = WalCrc.ComputeSkipping(page, PageBaseHeader.PageChecksumOffset, PageBaseHeader.PageChecksumSize);
+        var crc = Crc32CUtil.ComputeSkipping(page, PageBaseHeader.PageChecksumOffset, PageBaseHeader.PageChecksumSize);
         Unsafe.As<byte, uint>(ref page[PageBaseHeader.PageChecksumOffset]) = crc;
 
         return page;

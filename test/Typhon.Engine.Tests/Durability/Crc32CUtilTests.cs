@@ -5,18 +5,18 @@ using System.Text;
 namespace Typhon.Engine.Tests;
 
 /// <summary>
-/// Tests for <see cref="WalCrc"/> CRC32C implementation.
+/// Tests for <see cref="Crc32CUtil"/> CRC32C implementation.
 /// Verifies against known test vectors and edge cases.
 /// </summary>
 [TestFixture]
-public class WalCrcTests
+public class Crc32CUtilTests
 {
     #region Known Test Vectors
 
     [Test]
     public void Compute_EmptySpan_ReturnsZero()
     {
-        var result = WalCrc.Compute(ReadOnlySpan<byte>.Empty);
+        var result = Crc32CUtil.Compute(ReadOnlySpan<byte>.Empty);
 
         Assert.That(result, Is.EqualTo(0x00000000u));
     }
@@ -28,7 +28,7 @@ public class WalCrcTests
         // This is the universally published reference for the Castagnoli polynomial.
         var data = Encoding.ASCII.GetBytes("123456789");
 
-        var result = WalCrc.Compute(data);
+        var result = Crc32CUtil.Compute(data);
 
         Assert.That(result, Is.EqualTo(0xE3069283u));
     }
@@ -38,8 +38,8 @@ public class WalCrcTests
     {
         var data = new byte[32];
 
-        var result1 = WalCrc.Compute(data);
-        var result2 = WalCrc.Compute(data);
+        var result1 = Crc32CUtil.Compute(data);
+        var result2 = Crc32CUtil.Compute(data);
 
         Assert.That(result1, Is.EqualTo(result2));
         Assert.That(result1, Is.Not.EqualTo(0u));
@@ -51,8 +51,8 @@ public class WalCrcTests
         var data = new byte[32];
         Array.Fill(data, (byte)0xFF);
 
-        var result1 = WalCrc.Compute(data);
-        var result2 = WalCrc.Compute(data);
+        var result1 = Crc32CUtil.Compute(data);
+        var result2 = Crc32CUtil.Compute(data);
 
         Assert.That(result1, Is.EqualTo(result2));
         Assert.That(result1, Is.Not.EqualTo(0u));
@@ -61,7 +61,7 @@ public class WalCrcTests
     [Test]
     public void Compute_SingleByte_NonZero()
     {
-        var result = WalCrc.Compute(new byte[] { 0x00 });
+        var result = Crc32CUtil.Compute(new byte[] { 0x00 });
 
         Assert.That(result, Is.Not.EqualTo(0u));
     }
@@ -80,7 +80,7 @@ public class WalCrcTests
             0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         };
 
-        var result = WalCrc.Compute(data);
+        var result = Crc32CUtil.Compute(data);
 
         Assert.That(result, Is.EqualTo(0xD9963A56u));
     }
@@ -102,12 +102,12 @@ public class WalCrcTests
         // Compute with skipping bytes [36..40) (the CRC field position in WalRecordHeader)
         var skipOffset = 36;
         var skipLength = 4;
-        var crcWithSkip = WalCrc.ComputeSkipping(data, skipOffset, skipLength);
+        var crcWithSkip = Crc32CUtil.ComputeSkipping(data, skipOffset, skipLength);
 
         // Compute reference: same data but with the skip region zeroed
         var dataWithZeros = (byte[])data.Clone();
         Array.Clear(dataWithZeros, skipOffset, skipLength);
-        var crcReference = WalCrc.Compute(dataWithZeros);
+        var crcReference = Crc32CUtil.Compute(dataWithZeros);
 
         Assert.That(crcWithSkip, Is.EqualTo(crcReference));
     }
@@ -121,11 +121,11 @@ public class WalCrcTests
             data[i] = (byte)(i + 1);
         }
 
-        var crcWithSkip = WalCrc.ComputeSkipping(data, 0, 4);
+        var crcWithSkip = Crc32CUtil.ComputeSkipping(data, 0, 4);
 
         var dataWithZeros = (byte[])data.Clone();
         Array.Clear(dataWithZeros, 0, 4);
-        var crcReference = WalCrc.Compute(dataWithZeros);
+        var crcReference = Crc32CUtil.Compute(dataWithZeros);
 
         Assert.That(crcWithSkip, Is.EqualTo(crcReference));
     }
@@ -139,11 +139,11 @@ public class WalCrcTests
             data[i] = (byte)(i + 1);
         }
 
-        var crcWithSkip = WalCrc.ComputeSkipping(data, 28, 4);
+        var crcWithSkip = Crc32CUtil.ComputeSkipping(data, 28, 4);
 
         var dataWithZeros = (byte[])data.Clone();
         Array.Clear(dataWithZeros, 28, 4);
-        var crcReference = WalCrc.Compute(dataWithZeros);
+        var crcReference = Crc32CUtil.Compute(dataWithZeros);
 
         Assert.That(crcWithSkip, Is.EqualTo(crcReference));
     }
@@ -154,10 +154,10 @@ public class WalCrcTests
         var data = new byte[16];
         Array.Fill(data, (byte)0xAA);
 
-        var crcWithSkip = WalCrc.ComputeSkipping(data, 0, 16);
+        var crcWithSkip = Crc32CUtil.ComputeSkipping(data, 0, 16);
 
         var zeros = new byte[16];
-        var crcReference = WalCrc.Compute(zeros);
+        var crcReference = Crc32CUtil.Compute(zeros);
 
         Assert.That(crcWithSkip, Is.EqualTo(crcReference));
     }
@@ -170,7 +170,7 @@ public class WalCrcTests
         var rng = new Random(99);
         rng.NextBytes(page);
 
-        var crcSkipping = WalCrc.ComputeSkipping(
+        var crcSkipping = Crc32CUtil.ComputeSkipping(
             page,
             PageBaseHeader.PageChecksumOffset,
             PageBaseHeader.PageChecksumSize);
@@ -178,7 +178,7 @@ public class WalCrcTests
         // Reference: same page with the checksum field zeroed
         var pageZeroed = (byte[])page.Clone();
         Array.Clear(pageZeroed, PageBaseHeader.PageChecksumOffset, PageBaseHeader.PageChecksumSize);
-        var crcReference = WalCrc.Compute(pageZeroed);
+        var crcReference = Crc32CUtil.Compute(pageZeroed);
 
         Assert.That(crcSkipping, Is.EqualTo(crcReference));
         Assert.That(crcSkipping, Is.Not.EqualTo(0u));
@@ -196,8 +196,8 @@ public class WalCrcTests
         var rng = new Random(42);
         rng.NextBytes(data);
 
-        var crc1 = WalCrc.Compute(data);
-        var crc2 = WalCrc.Compute(data);
+        var crc1 = Crc32CUtil.Compute(data);
+        var crc2 = Crc32CUtil.Compute(data);
 
         Assert.That(crc1, Is.EqualTo(crc2));
         Assert.That(crc1, Is.Not.EqualTo(0u));
@@ -212,7 +212,7 @@ public class WalCrcTests
             var data = new byte[len];
             Array.Fill(data, (byte)0x42);
 
-            var crc = WalCrc.Compute(data);
+            var crc = Crc32CUtil.Compute(data);
 
             Assert.That(crc, Is.Not.EqualTo(0u), $"Length {len} produced zero CRC");
         }
@@ -224,8 +224,8 @@ public class WalCrcTests
         var data1 = Encoding.UTF8.GetBytes("Hello, World!");
         var data2 = Encoding.UTF8.GetBytes("Hello, World?");
 
-        var crc1 = WalCrc.Compute(data1);
-        var crc2 = WalCrc.Compute(data2);
+        var crc1 = Crc32CUtil.Compute(data1);
+        var crc2 = Crc32CUtil.Compute(data2);
 
         Assert.That(crc1, Is.Not.EqualTo(crc2));
     }
@@ -240,7 +240,7 @@ public class WalCrcTests
             header[i] = (byte)i;
         }
 
-        var crc = WalCrc.Compute(header);
+        var crc = Crc32CUtil.Compute(header);
 
         Assert.That(crc, Is.Not.EqualTo(0u));
     }

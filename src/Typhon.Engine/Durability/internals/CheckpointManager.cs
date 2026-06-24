@@ -453,9 +453,9 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
                     Interlocked.Add(ref _totalUowTransitioned, transitioned);
                 }
 
-                // Step 7: Advance CheckpointLSN in file header + fsync — to barrierLsn (the post-flush durable
-                // high-water established at step 1), NOT the stale loop-sampled targetLsn (CK-02/CK-03).
-                _mmf.UpdateCheckpointLSN(barrierLsn, _epochManager);
+                // Step 7: Advance CheckpointLSN in the meta-pair watermark block + fsync — to barrierLsn (the post-flush durable high-water established at
+                // step 1), NOT the stale loop-sampled targetLsn (CK-02/CK-03).
+                DurabilityWatermarks.UpdateCheckpointLsn(_mmf, barrierLsn);
                 Interlocked.Exchange(ref _checkpointLsn, barrierLsn);
 
                 // Step 8: Recycle WAL segments

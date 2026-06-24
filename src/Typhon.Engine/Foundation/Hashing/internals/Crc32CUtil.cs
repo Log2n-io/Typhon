@@ -20,7 +20,7 @@ namespace Typhon.Engine.Internals;
 /// yielding ~8 bytes/3 cycles at ~4 GHz.
 /// </para>
 /// </remarks>
-internal static class WalCrc
+internal static class Crc32CUtil
 {
     /// <summary>
     /// Compute CRC32C over a data span.

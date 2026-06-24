@@ -242,7 +242,7 @@ class WalIntegrationTests : TestBase
             var storedCrc = BitConverter.ToUInt32(page, PageBaseHeader.PageChecksumOffset);
             if (storedCrc != 0)
             {
-                var computedCrc = WalCrc.ComputeSkipping(page, PageBaseHeader.PageChecksumOffset, PageBaseHeader.PageChecksumSize);
+                var computedCrc = Crc32CUtil.ComputeSkipping(page, PageBaseHeader.PageChecksumOffset, PageBaseHeader.PageChecksumSize);
                 if (computedCrc == storedCrc)
                 {
                     result.Add(i);

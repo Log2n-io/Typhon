@@ -187,7 +187,7 @@ internal sealed class WalSegmentReader : IDisposable
 
         // Compute CRC over [0, ChunkSize - 4) — header + body
         var crcSpan = _segmentData.AsSpan(_recordOffset, chunkHeader.ChunkSize - WalChunkFooter.SizeInBytes);
-        var computedCrc = WalCrc.Compute(crcSpan);
+        var computedCrc = Crc32CUtil.Compute(crcSpan);
 
         if (computedCrc != footerCrc)
         {

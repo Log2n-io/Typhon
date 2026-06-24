@@ -12,7 +12,7 @@ namespace Typhon.Engine.Internals;
 /// (required for O_DIRECT / <c>FILE_FLAG_NO_BUFFERING</c>).
 /// </para>
 /// <para>
-/// <see cref="HeaderCRC"/> is computed using <see cref="WalCrc.ComputeSkipping"/> with the CRC field treated as zeros (self-referencing CRC pattern).
+/// <see cref="HeaderCRC"/> is computed using <see cref="Crc32CUtil.ComputeSkipping"/> with the CRC field treated as zeros (self-referencing CRC pattern).
 /// </para>
 /// </remarks>
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
@@ -27,7 +27,7 @@ internal unsafe struct WalSegmentHeader
     /// <summary>Total size of this header struct in bytes (one page).</summary>
     public const int SizeInBytes = 4096;
 
-    /// <summary>Byte offset of <see cref="HeaderCRC"/> within the struct, for <see cref="WalCrc.ComputeSkipping"/>.</summary>
+    /// <summary>Byte offset of <see cref="HeaderCRC"/> within the struct, for <see cref="Crc32CUtil.ComputeSkipping"/>.</summary>
     public const int HeaderCrcOffset = 36; // 4 + 4 + 8 + 8 + 8 + 4 = 36
 
     /// <summary>File magic number. Must equal <see cref="MagicValue"/>.</summary>
@@ -77,7 +77,7 @@ internal unsafe struct WalSegmentHeader
         fixed (WalSegmentHeader* self = &this)
         {
             var span = new ReadOnlySpan<byte>(self, SizeInBytes);
-            HeaderCRC = WalCrc.ComputeSkipping(span, HeaderCrcOffset, sizeof(uint));
+            HeaderCRC = Crc32CUtil.ComputeSkipping(span, HeaderCrcOffset, sizeof(uint));
         }
     }
 
@@ -101,7 +101,7 @@ internal unsafe struct WalSegmentHeader
         fixed (WalSegmentHeader* self = &this)
         {
             var span = new ReadOnlySpan<byte>(self, SizeInBytes);
-            var computedCrc = WalCrc.ComputeSkipping(span, HeaderCrcOffset, sizeof(uint));
+            var computedCrc = Crc32CUtil.ComputeSkipping(span, HeaderCrcOffset, sizeof(uint));
             return computedCrc == storedCrc;
         }
     }

@@ -1,4 +1,4 @@
-﻿using JetBrains.Annotations;
+using JetBrains.Annotations;
 using System;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -47,7 +47,7 @@ public struct PageBaseHeader
     /// <summary>
     /// CRC32C checksum of the page contents, excluding this field itself.
     /// Zero means "never checksummed" (correct sentinel for pages that predate FPI support).
-    /// Computed via <c>WalCrc.ComputeSkipping(pageSpan, PageChecksumOffset, PageChecksumSize)</c>.
+    /// Computed via <c>Crc32CUtil.ComputeSkipping(pageSpan, PageChecksumOffset, PageChecksumSize)</c>.
     /// </summary>
     public uint PageChecksum;
 

@@ -778,7 +778,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         var lastSegmentId = 0L; // Floor only — WalSegmentManager.Initialize scans the on-disk directory and continues past the highest existing id.
         // Checkpoint frontier for the reopen reconcile: WAL segments whose records are all below this are already in the
         // data file and get reclaimed; segments with records ≥ this are retained for crash recovery (REC-04 / WR-01).
-        var checkpointLsn = MMF.CheckpointLsnWatermark;
+        var checkpointLsn = DurabilityWatermarks.ReadCheckpointLsn(MMF);
         // LSN must stay globally monotonic across sessions. Continue strictly above the durability frontier — the higher of the recovered WAL frontier (crash path) and
         // the persisted CheckpointLSN (clean-reopen path, where NO WAL recovery ran so lastLSN is 0). Using lastLSN alone restarts the reopened writer at LSN 1, below a
         // prior session's CheckpointLSN; RecoveryDriver then skips the entire post-reopen window as already-consolidated (LOG-08 — silent loss of durably-acked commits).
@@ -805,7 +805,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         long initialCheckpointLsn;
         using (EpochGuard.Enter(EpochManager))
         {
-            initialCheckpointLsn = MMF.CheckpointLsnWatermark;
+            initialCheckpointLsn = DurabilityWatermarks.ReadCheckpointLsn(MMF);
         }
 
         StagingBufferPool = new StagingBufferPool(MemoryAllocator, _durabilityNode);
@@ -2992,9 +2992,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         {
             // Loading path: read SPIs from bootstrap
             var spi = MMF.Bootstrap.GetInt(BK_UowRegistrySPI);
-            var checkpointLSN = MMF.CheckpointLsnWatermark;
+            var checkpointLSN = DurabilityWatermarks.ReadCheckpointLsn(MMF);
             // Clean-shutdown HEAD marker (see field docs): capture both LSNs now; InitializeArchetypes decides trust.
-            _cleanShutdownAtOpen = MMF.CleanShutdownWatermark;
+            _cleanShutdownAtOpen = DurabilityWatermarks.ReadCleanShutdown(MMF);
             _checkpointLsnAtOpen = checkpointLSN;
             var segment = MMF.GetSegment(spi);
             UowRegistry = new UowRegistry(segment, MMF, EpochManager, MemoryAllocator, this);
@@ -3581,8 +3581,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// </remarks>
     private void MarkCleanShutdown()
     {
-        MMF.SetCleanShutdown(true);
-        var checkpointLsn = MMF.CheckpointLsnWatermark;
+        DurabilityWatermarks.SetCleanShutdown(MMF, true);
+        var checkpointLsn = DurabilityWatermarks.ReadCheckpointLsn(MMF);
         LogCleanShutdownMarked(checkpointLsn);
         LogWalWatermarksSnapshot("close", checkpointLsn);
     }
@@ -4132,9 +4132,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         LastOpenVersionedHeadRebuildCount = 0;
         _headsTrusted = _cleanShutdownAtOpen
             && (_migratedComponents == null || _migratedComponents.Count == 0);
-        if (MMF.CleanShutdownWatermark)
+        if (DurabilityWatermarks.ReadCleanShutdown(MMF))
         {
-            MMF.SetCleanShutdown(false);
+            DurabilityWatermarks.SetCleanShutdown(MMF, false);
         }
         LogVersionedHeadReopenDecision(_headsTrusted, _cleanShutdownAtOpen, _checkpointLsnAtOpen);
         LogWalWatermarksSnapshot("open", _checkpointLsnAtOpen);
@@ -4629,7 +4629,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         long checkpointLsn;
         using (EpochGuard.Enter(EpochManager))
         {
-            checkpointLsn = MMF.CheckpointLsnWatermark;
+            checkpointLsn = DurabilityWatermarks.ReadCheckpointLsn(MMF);
         }
 
         // Read with a throwaway IO when no backend is injected; the WAL writer's handles coexist (segments open with sharing).

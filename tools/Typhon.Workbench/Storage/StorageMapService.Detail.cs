@@ -162,7 +162,7 @@ public sealed partial class StorageMapService
         var read = engine.TryReadPageBody(pageIndex, body);
         var header = read ? MemoryMarshal.Read<PageBaseHeader>(body) : default;
         var crcStatus = read ? ClassifyCrc(body, header.PageChecksum) : StorageCrcStatus.Unverified;
-        var liveCrc = read ? WalCrc.ComputeSkipping(body, PageBaseHeader.PageChecksumOffset, PageBaseHeader.PageChecksumSize) : 0u;
+        var liveCrc = read ? Crc32CUtil.ComputeSkipping(body, PageBaseHeader.PageChecksumOffset, PageBaseHeader.PageChecksumSize) : 0u;
 
         var ownerId = map.OwnerSegmentId[cell];
 
@@ -573,7 +573,7 @@ public sealed partial class StorageMapService
         {
             return StorageCrcStatus.Unverified;
         }
-        var live = WalCrc.ComputeSkipping(body, PageBaseHeader.PageChecksumOffset, PageBaseHeader.PageChecksumSize);
+        var live = Crc32CUtil.ComputeSkipping(body, PageBaseHeader.PageChecksumOffset, PageBaseHeader.PageChecksumSize);
         return live == storedChecksum ? StorageCrcStatus.Verified : StorageCrcStatus.Failed;
     }
 
