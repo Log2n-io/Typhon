@@ -4901,7 +4901,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// false) and the crash-recovery rebuild (<see cref="RebuildEntityMapOnCrash"/>, <paramref name="duringRebuild"/> = true, where the map was just emptied
     /// by <c>ClearForRebuild</c> so the faster split-aware <c>InsertDuringRebuild</c> is used).
     /// </summary>
-    private unsafe void BuildFlatEntityMapEntries(ArchetypeMetadata meta, ArchetypeEngineState state, ChangeSet mapCs, bool duringRebuild)
+    private unsafe void BuildFlatEntityMapEntries(ArchetypeMetadata meta, ArchetypeEngineState state, ChangeSet mapCs, bool duringRebuild,
+        Dictionary<long, ushort> enabledSnapshot = null)
     {
         var recordBuf = stackalloc byte[EntityRecordAccessor.MaxRecordSize];
 
@@ -4983,7 +4984,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             ref var header = ref EntityRecordAccessor.GetHeader(recordBuf);
             header.BornTSN = 0; // Always visible (committed before checkpoint)
             header.DiedTSN = 0; // Live entity
-            header.EnabledBits = (ushort)((1 << meta.ComponentCount) - 1); // All components enabled
+            // Preserve the persisted (non-derivable) EnabledBits when available; fall back to all-enabled only when the entity has no snapshot entry
+            // (fresh/legacy rebuild, or a torn EntityMap page). A WAL replay window re-applies any enable/disable that post-dates the snapshot.
+            header.EnabledBits = enabledSnapshot != null && enabledSnapshot.TryGetValue(entityKey, out var preservedBits) ? 
+                preservedBits : (ushort)((1 << meta.ComponentCount) - 1);
 
             var mapAccessor = state.EntityMap.Segment.CreateChunkAccessor(mapCs);
             if (duringRebuild)
@@ -5086,16 +5090,22 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         {
             using var guard = EpochGuard.Enter(EpochManager);
 
+            // EnabledBits are NON-derivable authoritative state (orthogonal to the chain/cluster data the rebuild re-derives), so snapshot them from
+            // the persisted EntityMap BEFORE it is discarded — re-deriving the map alone resets them (flat: hardcoded all-enabled; cluster: from the
+            // denormalized EnabledBits[C]) and silently loses every enable/disable not re-applied by a WAL replay window. A torn EntityMap page yields
+            // garbage keys that won't match the authoritative keys the rebuild looks up, so torn entries simply fall back (WAL-corrected on a hard crash).
+            var enabledSnapshot = SnapshotEntityMapEnabledBits(state);
+
             // Discard the persisted EntityMap (a torn page is reclaimed by bitmap, never parsed) and re-derive every entry from authoritative data.
             state.EntityMap.ClearForRebuild(cs);
 
             if (meta.IsClusterEligible)
             {
-                RebuildClusterEntityMapEntries(meta, state, cs);
+                RebuildClusterEntityMapEntries(meta, state, cs, enabledSnapshot);
             }
             else
             {
-                BuildFlatEntityMapEntries(meta, state, cs, duringRebuild: true);
+                BuildFlatEntityMapEntries(meta, state, cs, duringRebuild: true, enabledSnapshot);
             }
 
             _crashRebuiltEntityMapSegments.Add(state.EntityMap.Segment.RootPageIndex);
@@ -5107,13 +5117,46 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     }
 
     /// <summary>
+    /// Collects per-entity <c>EnabledBits</c> from the persisted EntityMap (keyed by EntityKey) so the crash rebuild can preserve this non-derivable state.
+    /// Best-effort: a torn EntityMap page produces garbage keys that the rebuild's authoritative-key lookup will not match, so those entries fall back.
+    /// </summary>
+    private static Dictionary<long, ushort> SnapshotEntityMapEnabledBits(ArchetypeEngineState state)
+    {
+        var snapshot = new Dictionary<long, ushort>();
+        if (state?.EntityMap == null || state.EntityMap.EntryCount == 0)
+        {
+            // Nothing persisted to preserve (e.g. a no-checkpoint crash where the map was never flushed); the WAL replay window is the
+            // authoritative source for enabled-bits in that case. Skipping the empty-map walk also avoids perturbing the replay path.
+            return snapshot;
+        }
+
+        var accessor = state.EntityMap.Segment.CreateChunkAccessor();
+        var action = new EnabledBitsSnapshotAction { Snapshot = snapshot };
+        state.EntityMap.ForEachEntry(ref accessor, ref action);
+        accessor.Dispose();
+        return snapshot;
+    }
+
+    private struct EnabledBitsSnapshotAction : RawValuePagedHashMap<long, PersistentStore>.IEntryAction<long>
+    {
+        public Dictionary<long, ushort> Snapshot;
+
+        public unsafe bool Process(long key, byte* value)
+        {
+            Snapshot[key] = EntityRecordAccessor.GetHeader(value).EnabledBits;
+            return true;
+        }
+    }
+
+    /// <summary>
     /// Re-derive a cluster archetype's EntityMap from the cluster segment alone. Walks every live slot of every active cluster (the same occupancy-bit walk
     /// as <see cref="ArchetypeClusterState.RebuildIndexesFromData"/>) and rebuilds the <c>ClusterEntityRecord</c> from self-describing cluster state: the
     /// EntityKey from <c>EntityKeys[slot]</c>, the per-entity enabled mask reconstructed from the per-component <c>EnabledBits[C]</c> bitmaps, and each
     /// Versioned slot's compRevFirstChunkId from the chain-head scan. BornTSN/DiedTSN = 0 (live, committed before checkpoint — same convention as the flat
     /// rebuild). Inserted via the split-aware <c>InsertDuringRebuild</c> into the just-cleared map.
     /// </summary>
-    private unsafe void RebuildClusterEntityMapEntries(ArchetypeMetadata meta, ArchetypeEngineState state, ChangeSet cs)
+    private unsafe void RebuildClusterEntityMapEntries(ArchetypeMetadata meta, ArchetypeEngineState state, ChangeSet cs,
+        Dictionary<long, ushort> enabledSnapshot = null)
     {
         var clusterState = state.ClusterState;
         if (clusterState?.ClusterSegment == null)
@@ -5168,14 +5211,24 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     header.BornTSN = 0; // committed before checkpoint → always visible
                     header.DiedTSN = 0; // live (occupancy bit set)
 
-                    // Reconstruct the per-entity 16-bit enabled mask from the cluster's per-component EnabledBits[c] (bit slotIndex set ⇒ component c enabled).
-                    ushort enabledMask = 0;
-                    for (var comp = 0; comp < meta.ComponentCount; comp++)
+                    // Prefer the preserved (non-derivable) EnabledBits from the persisted EntityMap; otherwise reconstruct the per-entity 16-bit mask from
+                    // the cluster's per-component EnabledBits[c] (bit slotIndex set ⇒ component c enabled), written by EntityRef.Enable/Disable. NOTE: the
+                    // durable crash-survival of that cluster copy is the open gap tracked in #398 — this fallback is only as good as what was checkpointed.
+                    ushort enabledMask;
+                    if (enabledSnapshot != null && enabledSnapshot.TryGetValue(entityKey, out var preservedBits))
                     {
-                        var compEnabled = *(ulong*)(clusterBase + layout.EnabledBitsOffset(comp));
-                        if ((compEnabled & (1UL << slotIndex)) != 0)
+                        enabledMask = preservedBits;
+                    }
+                    else
+                    {
+                        enabledMask = 0;
+                        for (var comp = 0; comp < meta.ComponentCount; comp++)
                         {
-                            enabledMask |= (ushort)(1 << comp);
+                            var compEnabled = *(ulong*)(clusterBase + layout.EnabledBitsOffset(comp));
+                            if ((compEnabled & (1UL << slotIndex)) != 0)
+                            {
+                                enabledMask |= (ushort)(1 << comp);
+                            }
                         }
                     }
                     header.EnabledBits = enabledMask;
@@ -5222,18 +5275,23 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     }
 
     /// <summary>
-    /// Recovery Phase-4 SCRUB (03-recovery.md §6, D1): after the WAL window has been applied, collapse every Versioned revision
-    /// chain to its HEAD — the highest-TSN committed element — freeing all older revisions' content chunks and the chain's
-    /// overflow table chunks. The history horizon resets at crash (D1): post-recovery there are no readers of pre-crash
-    /// snapshots, so no MVCC history is retained. Chain roots (the first chunks the EntityMap references) are preserved in place,
-    /// so the EntityMap stays valid and locations are unchanged. Cluster HEAD values are unaffected — scrub keeps the head's
-    /// content chunk, so the values written by <see cref="ArchetypeClusterState.RebuildVersionedHeadFromChain"/> + the WAL apply
-    /// remain correct. Invoked only on the crash path (WAL files present); a clean reopen keeps its chains for lazy cleanup.
+    /// Recovery Phase-4 SCRUB (03-recovery.md §6, D1): after the WAL window has been applied, collapse every Versioned revision chain to its HEAD — the
+    /// highest-TSN committed element — freeing all older revisions' content chunks and the chain's overflow table chunks. The history horizon resets at
+    /// crash (D1): post-recovery there are no readers of pre-crash snapshots, so no MVCC history is retained. Chain roots (the first chunks the EntityMap
+    /// references) are preserved in place, so the EntityMap stays valid and locations are unchanged. Cluster HEAD values are unaffected — scrub keeps the
+    /// head's content chunk, so the values written by <see cref="ArchetypeClusterState.RebuildVersionedHeadFromChain"/> + the WAL apply remain correct.
+    /// Invoked only on the crash path (WAL files present); a clean reopen keeps its chains for lazy cleanup.
     /// </summary>
     private void ScrubVersionedChains()
     {
         using var guard = EpochGuard.Enter(EpochManager);
         var changeSet = MMF.CreateChangeSet();
+
+        // RB-05: a consolidating checkpoint can advance committed revision TSNs into the data file WITHOUT leaving them in the WAL window (which then recovers
+        // empty). The persisted BK_NextFreeTSN is only refreshed on a clean shutdown, so on a hard crash NextFreeTSN can land BELOW the newest consolidated
+        // revision — every post-recovery reader then snapshots before it and MVCC hides the latest value. The scrub already visits every committed chain head,
+        // so track the max surviving TSN here and advance the allocator past it.
+        long maxRecoveredTsn = 0;
         try
         {
             foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
@@ -5261,7 +5319,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     {
                         foreach (var firstChunkId in heads.Values)
                         {
-                            ComponentRevisionManager.ScrubChainToHead(table, firstChunkId, ref revAccessor, ref contentAccessor);
+                            ComponentRevisionManager.ScrubChainToHead(table, firstChunkId, ref revAccessor, ref contentAccessor, out var headTsn);
+                            if (headTsn > maxRecoveredTsn)
+                            {
+                                maxRecoveredTsn = headTsn;
+                            }
                         }
 
                         // Orphan sweep (§6): every chain is now collapsed to its root, so reclaim any chunk leaked by an
@@ -5274,6 +5336,13 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                         contentAccessor.Dispose();
                     }
                 }
+            }
+
+            // Advance the TSN allocator past the newest committed revision found in the persisted chains, so post-recovery readers can see a consolidated
+            // revision whose WAL window recovered empty (it would otherwise be MVCC-invisible at a too-low snapshot — RB-05).
+            if (maxRecoveredTsn > TransactionChain.NextFreeId)
+            {
+                TransactionChain.SetNextFreeId(maxRecoveredTsn);
             }
         }
         finally

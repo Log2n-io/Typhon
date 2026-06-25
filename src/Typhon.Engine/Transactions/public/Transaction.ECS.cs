@@ -2771,7 +2771,9 @@ public unsafe partial class Transaction
                     NotifyViewsForEnableDisable(entityId, meta, engineState, oldBits, newBits);
                 }
 
-                // Update
+                // Update the EntityMap record (the per-entity index read by Open). The committed cluster EnabledBits[C] is kept in sync by
+                // EntityRef.Enable/Disable (the immediate-visibility write); its DURABLE persistence on the cluster path is tracked under #398
+                // (the same enabled-bits crash-durability gap), so it is intentionally NOT re-written here without a covering cluster test.
                 EntityRecordAccessor.GetHeader(readBuf).EnabledBits = newBits;
                 engineState.EntityMap.Upsert(entityId.EntityKey, readBuf, ref accessor, _changeSet);
             }

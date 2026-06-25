@@ -44,3 +44,22 @@ internal enum DamageType
 /// <param name="Seed">Seed for the deterministic random choices used by <see cref="DamageType.Reordered"/>.</param>
 /// <param name="TornWriteFraction">For <see cref="DamageType.TornWrite"/>: the fraction of the crash write that survived, in [0, 1].</param>
 internal readonly record struct DamageModel(DamageType Type, int Seed = 0, float TornWriteFraction = 0.5f);
+
+/// <summary>
+/// How a data-file page is left after a simulated crash during checkpoint (Layer 2, P1.5). Applied by
+/// <see cref="ChaosPageIO.DamagePageOnDisk"/> to a specific page in the <b>real</b> data file after the crash, before the engine reopens
+/// (per <c>claude/design/Durability/crash-recovery-testing.md</c> §5.2.3). FPI repair is gone (increment D); recovery now heals a torn page
+/// by re-deriving it (rebuild net, RB-01) or fails the open loudly (RB-04) if it still backs a live primary chunk.
+/// </summary>
+internal enum PageDamageType
+{
+    /// <summary>The page is left untouched — models a checkpoint that crashed BEFORE writing this page (its on-disk content is the pre-checkpoint
+    /// version, covered by the WAL window since the cycle never advanced CheckpointLSN).</summary>
+    MissedPage,
+
+    /// <summary>The second 4 KiB half of the page is overwritten with 0xFF — a torn write whose two sectors disagree, so the page CRC fails on load.</summary>
+    TornPage,
+
+    /// <summary>The whole page is zero-filled — models a write into a freshly-allocated region that never received data; CRC fails on load.</summary>
+    ZeroPage,
+}

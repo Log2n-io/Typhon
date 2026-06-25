@@ -399,9 +399,10 @@ internal ref struct ComponentRevisionManager
     /// (<c>ComponentChunkId == 0</c>), the canonical "deleted entity" state, filtered by the read path. Either way the chain is left valid (ItemCount==1) and
     /// the caller need not touch the EntityMap.
     /// </returns>
-    internal static unsafe bool ScrubChainToHead(ComponentTable ct, int firstChunkId, ref ChunkAccessor<PersistentStore> compRevTableAccessor, 
-        ref ChunkAccessor<PersistentStore> compContentAccessor)
+    internal static unsafe bool ScrubChainToHead(ComponentTable ct, int firstChunkId, ref ChunkAccessor<PersistentStore> compRevTableAccessor,
+        ref ChunkAccessor<PersistentStore> compContentAccessor, out long headTsn)
     {
+        headTsn = 0;   // max committed TSN surviving in this chain (0 if no committed head) — fed to NextFreeTSN recovery (RB-05)
         ref var firstHeader = ref compRevTableAccessor.GetChunk<CompRevStorageHeader>(firstChunkId);
         var hasCollections = ct.HasCollections;
         var chainLength = firstHeader.ChainLength;
@@ -494,6 +495,7 @@ internal ref struct ComponentRevisionManager
             return true;
         }
 
+        headTsn = head.TSN;             // RB-05: the surviving head's TSN — NextFreeTSN must be advanced past it on recovery
         head.UowId = 0;                 // §6: UowId cleared — the writing transaction is meaningless post-crash (registry is volatile)
         head.IsolationFlag = false;
         destElements[0] = head;

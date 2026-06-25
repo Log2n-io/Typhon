@@ -275,6 +275,17 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// </summary>
     internal Action OnBackpressure { get; set; }
 
+    // ── Test-only crash-recovery fault injection (P1.5 crash sweep). Null in production → zero overhead (one predictable branch). ──
+    // The interceptors RECORD (and may throw to abort mid-cycle); they do NOT replace the real I/O — reads and _fileSize stay real, so a
+    // reopened engine recovers through the genuine path. ChaosPageIO wires these, then damages specific pages in the real file post-crash.
+
+    /// <summary>Test hook: invoked with the file page index at the START of every physical page write (checkpoint / direct / async). May throw to simulate a
+    /// crash mid-write; otherwise the real <c>RandomAccess.Write</c> proceeds. Null in production.</summary>
+    internal Action<int> PageWriteInterceptor { get; set; }
+
+    /// <summary>Test hook: invoked at each <see cref="FlushToDisk"/> fsync barrier (records the durability boundary for crash simulation). Null in production.</summary>
+    internal Action FlushToDiskInterceptor { get; set; }
+
     /// <summary>Stable identifier of the backing file path (hash of the path string), recorded on Storage:FileHandle events.</summary>
     private int _filePathId;
 
@@ -1406,6 +1417,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// </summary>
     internal void WritePageDirect(int filePageIndex, ReadOnlySpan<byte> source)
     {
+        PageWriteInterceptor?.Invoke(filePageIndex);   // test-only crash injection; throws to abort mid-write
         var pageOffset = filePageIndex * (long)PageSize;
         RandomAccess.Write(_fileHandle, source, pageOffset);
         TrackFileGrowth(pageOffset + PageSize);
@@ -1599,6 +1611,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// </summary>
     internal void FlushToDisk()
     {
+        FlushToDiskInterceptor?.Invoke();   // test-only: records the fsync barrier for crash simulation
         if (_fileHandle != null && !_fileHandle.IsInvalid)
         {
             RandomAccess.FlushToDisk(_fileHandle);
@@ -1766,6 +1779,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             // page was already written (and fsynced) to its alternate slot by the protected-page redirect above.
             if (!redirected)
             {
+                PageWriteInterceptor?.Invoke(filePageIndex);   // test-only crash injection; throws to abort the checkpoint mid-cycle
                 var pageOffset = filePageIndex * (long)PageSize;
                 RandomAccess.Write(_fileHandle, staging.Span, pageOffset);
                 TrackFileGrowth(pageOffset + PageSize);
@@ -1994,6 +2008,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         // _fileSize here — before the bytes physically land — would let the read gate (FetchPageToMemoryOnMiss, "loadPage = offset+PageSize <=
         // _fileSize") authorize a disk read of a page whose WriteAsync hasn't extended the file yet, yielding a 0-byte read past EOF. _fileSize
         // must only ever reflect DURABLE bytes; SavePages advances it in its post-FlushToDisk continuation, before any page becomes evictable.
+        PageWriteInterceptor?.Invoke(filePageIndex);   // test-only crash injection; throws to abort the async structural write
         _metrics.PageWrittenToDiskCount += length;
         _metrics.WrittenOperationCount++;
 
