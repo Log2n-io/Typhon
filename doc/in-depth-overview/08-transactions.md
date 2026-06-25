@@ -7,10 +7,10 @@ Transactions are how mutations enter Typhon. A `Transaction` is the unit of *iso
 This is the doc to read when you want to know what `tx.Commit()` actually does, what `DurabilityMode` controls, why transactions are single-thread-affine, and where the engine puts the seam between "isolation" and "durability".
 
 <a href="assets/typhon-uow-lifecycle-states.svg">
-  <img src="assets/typhon-uow-lifecycle-states.svg" width="678" alt="UoW lifecycle states">
+  <img src="assets/typhon-uow-lifecycle-states.svg" width="750" alt="UoW lifecycle states">
 </a>
 <br>
-<sub>The two interacting state machines: the UoW lifecycle (Idle → Pending → WalDurable → Committed, plus the crash-recovery Void path) and the Transaction lifecycle (Pool → Created → InProgress → Committed/Rollbacked). <code>DurabilityMode</code> drives the Pending → WalDurable transition; each UoW state also carries its durability guarantee — Volatile (crash → data lost) → Durable (crash → replayed from WAL) → Checkpointed (crash → nothing to replay).</sub>
+<sub>The two interacting state machines: the UoW lifecycle (Idle → Pending → WalDurable → Committed; a crash before WAL-durability discards the transaction — no TxCommit marker, LOG-04) and the Transaction lifecycle (Pool → Created → InProgress → Committed/Rollbacked). <code>DurabilityMode</code> drives the Pending → WalDurable transition; each UoW state also carries its durability guarantee — Volatile (crash → data lost) → Durable (crash → replayed from WAL) → Checkpointed (crash → nothing to replay).</sub>
 
 ---
 
@@ -88,7 +88,7 @@ The UoW pre-allocates the shared `ChangeSet` before allocating the `UowId`. That
 `UnitOfWork` itself has no "commit" method — *transactions* commit, the UoW *flushes*. Lifecycle:
 
 1. `CreateUnitOfWork` → state `Pending`, `UowId` allocated, shared `ChangeSet` created (if applicable).
-2. Each `tx.Commit()` writes revision elements (stamped with `UowId`) and, in WAL mode, serializes a UoW-prefixed WAL record via `WalSerializer.SerializeToWal` (`Transactions/internals/WalSerializer.cs`).
+2. Each `tx.Commit()` writes revision elements (stamped with `UowId`) and appends its **logical record batch** to the WAL via `DurabilityLog.Append` — the batch is assembled by `CommitBatchBuilder` and encoded by the single `RecordCodec` (`Durability/internals/`).
 3. `uow.Flush()` or `uow.FlushAsync()` (or `Dispose` for non-`Deferred`) advances state to `WalDurable` and calls `UowRegistry.RecordCommit(uowId, 0, ChangeSet)` to mark the slot as committed-in-the-registry.
 4. The checkpoint later transitions `WalDurable → Committed` once data pages are fsynced ([11-durability](11-durability.md) §5).
 
@@ -154,9 +154,8 @@ Commit walks every modified component type and, per entity:
    - Updates `LastCommitRevisionIndex`, increments `CommitSequence`, clears the revision element's `IsolationFlag`.
 4. `FlushEcsPendingOperations` → `FinalizeSpawns` — walks pending spawns from `Transaction.ECS.cs`, allocates final `EntityRecord`s, stamps `BornTSN = TSN`, copies into the cluster layout for cluster-eligible archetypes.
 5. `PersistAndFinalize`:
-   - In WAL mode: `WalSerializer.SerializeToWal(...)` writes the UoW-prefixed record set to the WAL ring buffer.
-   - For `DurabilityMode.Immediate` in WAL mode: `_dbe.WalManager.RequestFlush()` then `_dbe.WalManager.WaitForDurable(lsn, ref ctx)`.
-   - For `DurabilityMode.Immediate` in WAL-less mode: flush all `ChangeSet` pages and `MMF.FlushToDisk()` before returning.
+   - Appends the transaction's logical record batch to the WAL: `DurabilityLog.Append(ref batch, ref wc)` — built by `CommitBatchBuilder`, encoded by `RecordCodec`, claimed into the commit buffer via `WalCommitBuffer.TryClaim`. (There is no WAL-less mode — [ADR-054](../../claude/adr/054-remove-no-wal-mode.md); a disk-free run registers an in-memory `IWalFileIO`.)
+   - For `DurabilityMode.Immediate`: `_dbe.WalManager.RequestFlush()` then `_dbe.WalManager.WaitForDurable(highLsn, ref ctx)` blocks until the FUA write completes.
    - Transition state to `Committed`, record duration metric.
 
 ### 3.4 `ConcurrencyConflictHandler`
@@ -271,7 +270,7 @@ public void Release(ushort uowId, ChangeSet externalCs = null);
 
 ### 5.4 Recovery integration
 
-On engine start, `LoadFromDiskRaw` scans every entry up to `_currentCapacity`, rebuilds both bitmaps, counts `Pending`/`WalDurable`/`Committed`/`Void` slots. WAL recovery then promotes `Pending → WalDurable` for UoWs whose commit marker survived; whatever's left in `Pending` gets voided via `VoidRemainingPending`. See [11-durability](11-durability.md) §7 for the full sequence.
+On engine start, `LoadFromDiskRaw` scans every entry up to `_currentCapacity`, rebuilds both bitmaps, counts `Pending`/`WalDurable`/`Committed`/`Void` slots. The surviving v1 `WalRecovery` scan then promotes `Pending → WalDurable` for UoWs whose commit marker survived; whatever's left in `Pending` gets voided via `VoidRemainingPending`. See [11-durability](11-durability.md) §7 for the full sequence. **This persisted-registry recovery path is the surviving v1 mechanism**, slated for removal as the registry is demoted to a volatile allocator ([11-durability §8](11-durability.md)); commit fate for the v2 logical records is already the WAL `TxCommit` marker.
 
 ---
 
@@ -342,12 +341,6 @@ Plus `PoolCount` (idle transactions in the pool, max 16) and `ActiveCount` (curr
 <br>
 <sub>Which layer owns each step of the commit path — Application / Data Engine / Durability / Storage swimlanes, from <code>CreateUnitOfWork</code> through conflict detection, <code>ApplyChanges</code> (clear IsolationFlag), WAL serialize, and the durability decision.</sub>
 
-<a href="assets/typhon-uow-registry-lifecycle.svg">
-  <img src="assets/typhon-uow-registry-lifecycle.svg" width="1200" alt="UoW registry lifecycle">
-</a>
-<br>
-<sub>The <code>UowRegistryEntry</code> state machine: Free → Pending → WalDurable → Committed (slot released back to Free when no live reader can see the UoW), plus the crash-recovery Pending → Void path.</sub>
-
 <a href="assets/typhon-uow-data-impact.svg">
   <img src="assets/typhon-uow-data-impact.svg" width="1200" alt="UoW impact on data">
 </a>
@@ -355,14 +348,14 @@ Plus `PoolCount` (idle transactions in the pool, max 16) and `ActiveCount` (curr
 <sub>Step-by-step data impact of a UoW: allocate <code>UowId</code> from the registry, rent a <code>UnitOfWorkContext</code>, ECS operations stamp the <code>UowId</code> at write time, commit clears the IsolationFlag, and the registry entry advances as durability progresses.</sub>
 
 <a href="assets/typhon-immediate-commit-sequence.svg">
-  <img src="assets/typhon-immediate-commit-sequence.svg" width="1200" alt="Immediate commit sequence">
+  <img src="assets/typhon-immediate-commit-sequence.svg" width="1145" alt="Immediate commit sequence">
 </a>
 <br>
-<sub>The Immediate-durability commit sequence: conflict check → <code>ApplyChanges</code> → clear IsolationFlag → <code>WalSerializer.SerializeToWal</code> → <code>WalManager.RequestFlush</code> → block on <code>WaitForDurable(lsn)</code> until the FUA write completes.</sub>
+<sub>The Immediate-durability commit sequence: conflict check → <code>ApplyChanges</code> → clear IsolationFlag → <code>DurabilityLog.Append</code> → <code>WalManager.RequestFlush</code> → block on <code>WaitForDurable(lsn)</code> until the FUA write completes.</sub>
 
 ---
 
 - [01-foundation](01-foundation.md) — `UnitOfWorkContext`, `WaitContext`, `Deadline`, `EpochManager` (the primitives every transaction operation sits on)
 - [05-revision](05-revision.md) — how `UowId` is encoded into revision elements and consumed by the visibility check
 - [06-ecs](06-ecs.md) — `Spawn` / `Destroy` live on `Transaction`; the commit pipeline calls `PrepareEcsDestroys` → `FlushEcsPendingOperations` → `FinalizeSpawns` → cluster-versioned slot commit
-- [11-durability](11-durability.md) — WAL integration (`SerializeToWal`, `RequestFlush`, `WaitForDurable`), checkpoint pipeline, the `Pending → WalDurable → Committed → Free` UoW state machine
+- [11-durability](11-durability.md) — WAL integration (`DurabilityLog.Append`, `RequestFlush`, `WaitForDurable`), the checkpoint v2 cycle, the `Pending → WalDurable → Committed → Free` UoW state machine (transitional — being demoted, §8)

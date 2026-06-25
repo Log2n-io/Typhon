@@ -2,17 +2,17 @@
 
 **Code:** [`src/Typhon.Engine/Storage/`](../../src/Typhon.Engine/Storage/)
 
-Storage is the physical layer: a memory-mapped file managed by a page cache, segments built on top of pages, and accessors that hold short-lived, JIT-inlined views into chunk memory. Everything above this layer — MVCC revision chains, B+Tree indexes, the ECS component tables, even the WAL's full-page-image capture — bottoms out here. The shape of this layer (8 KB pages, two-pass clock-sweep eviction, generic `<TStore>` segments) is what makes the higher layers cheap.
+Storage is the physical layer: a memory-mapped file managed by a page cache, segments built on top of pages, and accessors that hold short-lived, JIT-inlined views into chunk memory. Everything above this layer — MVCC revision chains, B+Tree indexes, the ECS component tables, even the page CRC + seqlock snapshots the checkpoint relies on — bottoms out here. The shape of this layer (8 KB pages, two-pass clock-sweep eviction, generic `<TStore>` segments) is what makes the higher layers cheap.
 
 Because the cache is a fixed pool with on-demand load + clock-sweep eviction, **the database file can be arbitrarily larger than the cache** — resident memory is bounded by `DatabaseCacheSize`, not by database size. Persistent component data, B+Tree indexes, the per-archetype `EntityMap`, and the free-space bitmap all live in this paged store, so data volume and entity count scale with *disk*, not memory. The lone exception is **Transient** components (`TransientComponentSegment`), which are in-memory only by design. This larger-than-RAM property is routine for SQL and embedded engines (SQLite, LMDB) but sets Typhon apart from in-memory ECS frameworks, where the entire world must fit in process memory.
 
-You read this doc when you're: tuning page-cache pressure, understanding why a benchmark stalls, designing a new on-disk structure, debugging dirty-counter inflation, or reading the engine's most allocation-sensitive code (`ChunkAccessor`, `ChunkBasedSegment`). The narrative is bottom-up — file → pages → segments → accessors → cross-cutting concerns (dirty tracking, backpressure, FPI).
+You read this doc when you're: tuning page-cache pressure, understanding why a benchmark stalls, designing a new on-disk structure, debugging dirty-counter inflation, or reading the engine's most allocation-sensitive code (`ChunkAccessor`, `ChunkBasedSegment`). The narrative is bottom-up — file → pages → segments → accessors → cross-cutting concerns (dirty tracking, backpressure, page CRC + seqlock).
 
 <a href="assets/typhon-storage-overview.svg">
   <img src="assets/typhon-storage-overview.svg" width="1200" alt="Storage layer overview">
 </a>
 <br>
-<sub>The layered storage model: two <code>IPageStore</code> backends (<code>PersistentStore</code> over the page cache, heap-backed <code>TransientStore</code>), the <code>PagedMMF</code> / <code>ManagedPagedMMF</code> cache core, the generic <code>&lt;TStore&gt;</code> segment hierarchy (<code>ChunkBasedSegment</code> extends <code>LogicalSegment</code>; VSBS / StringTable compose a chunk segment), the hot-path accessors, and the cross-cutting dirty-tracking / backpressure / FPI machinery.</sub>
+<sub>The layered storage model: two <code>IPageStore</code> backends (<code>PersistentStore</code> over the page cache, heap-backed <code>TransientStore</code>), the <code>PagedMMF</code> / <code>ManagedPagedMMF</code> cache core, the generic <code>&lt;TStore&gt;</code> segment hierarchy (<code>ChunkBasedSegment</code> extends <code>LogicalSegment</code>; VSBS / StringTable compose a chunk segment), the hot-path accessors, and the cross-cutting dirty-tracking / backpressure / page-CRC machinery.</sub>
 
 ---
 
@@ -35,7 +35,7 @@ Cross-cutting concerns sit alongside this layered core:
 
 - **Dirty tracking** — [`ChangeSet`](../../src/Typhon.Engine/Storage/internals/ChangeSet.cs) — coordinates `DirtyCounter` / `ActiveChunkWriters` lifecycle for a UoW.
 - **Backpressure** — [`IPageCacheBackpressureStrategy`](../../src/Typhon.Engine/Storage/internals/IPageCacheBackpressureStrategy.cs) / [`WaitForIOStrategy`](../../src/Typhon.Engine/Storage/internals/WaitForIOStrategy.cs) — what happens when the clock-sweep finds nothing evictable.
-- **FPI capture & seqlock** — full-page-image WAL records for torn-page recovery.
+- **Page CRC & seqlock** — CRC32C torn-write *detection* + consistent checkpoint snapshots (no FPI; recovery rebuilds — see §7).
 - **Storage introspection** — [`StorageMapTypes`](../../src/Typhon.Engine/Storage/public/StorageMapTypes.cs) — the read-only surface Workbench's Database File Map uses.
 
 ---
@@ -125,7 +125,7 @@ When both passes fail, the **backpressure path** kicks in (see §6). The clock h
 
 `AllocateMemoryPageCore` has a fast prefix path: if `filePageIndex - 1` is already cached in `memPageIndex N`, the allocator tries `N + 1` first. This lets sequential page reads coalesce into a single disk write later when both pages flush.
 
-CRC verification is **lazy**. `EnsurePageVerified` (line ~1436) runs only the first time a page is touched after load. If `PageChecksumVerification.RecoveryOnly` is set (the default until recovery completes), it's skipped entirely. After recovery, `DatabaseEngine` flips the mode to `OnLoad` — every fresh load verifies, then `CrcVerified` is cached until the slot is reused. On mismatch, FPI repair is attempted (§7); failing that, a `PageCorruptionException` propagates.
+CRC verification is **lazy**. `EnsurePageVerified` (line ~1436) runs only the first time a page is touched after load. If `PageChecksumVerification.RecoveryOnly` is set (the default until recovery completes), it's skipped entirely. After recovery, `DatabaseEngine` flips the mode to `OnLoad` — every fresh load verifies, then `CrcVerified` is cached until the slot is reused. On mismatch *during recovery* the page is recorded **suspect** — rebuilt if it backs a derived structure, or a loud failure if it still backs a live primary chunk (§7, and [11-durability §6](11-durability.md)); during normal operation a `PageCorruptionException` propagates.
 
 ---
 
@@ -355,43 +355,32 @@ Independent of the strategy, the moment the allocator decides backpressure is ne
 
 ---
 
-## 7. FPI capture & seqlock writes
+## 7. Page CRC & seqlock writes
 
-Two mechanisms work together to make torn-page recovery possible: a **seqlock counter** on every page detects in-flight writes; **Full-Page Image (FPI)** WAL records carry the before-image needed to repair a torn page.
+Two mechanisms let the checkpoint snapshot a live page **consistently and verifiably** without blocking writers: a **seqlock counter** on every page detects in-flight writes, and a **CRC32C** on every page detects a torn write after a crash. There is **no FPI** — the Minimal-WAL redesign retired full-page images entirely; torn pages are healed by re-derivation or fail the open loudly (see [11-durability §6](11-durability.md)).
 
 ### The seqlock — `ModificationCounter`
 
-Every page header has a `ModificationCounter : int`. Convention: **even = quiescent, odd = mid-modification**. `TryLatchPageExclusive` (line ~1262 in `PagedMMF.cs`) bumps it from even → odd before any writes touch the payload; `UnlatchPageExclusive` (line ~1303) bumps it odd → even after. Readers can detect a torn read by sampling the counter before *and* after their copy and rejecting the result on mismatch.
+Every page header has a `ModificationCounter : int`. Convention: **even = quiescent, odd = mid-modification**. `TryLatchPageExclusive` (≈ `PagedMMF.cs:1262`) bumps it from even → odd before any writes touch the payload; `UnlatchPageExclusive` (≈ `:1303`) bumps it odd → even after. Readers can detect a torn read by sampling the counter before *and* after their copy and rejecting the result on mismatch.
 
-`CopyPageWithSeqlock` (line ~1697) is the consumer used by checkpoint: it spins while the counter is odd, copies the page into staging, and re-checks the counter — if it changed, retry. There's a 100 ms warning threshold; if the counter has been odd that long, the page is skipped this cycle (a writer is hung, but the dirty bit and DC keep it in the next cycle's set).
+`CopyPageWithSeqlock` (≈ `:1697`) is the consumer used by checkpoint: it spins while the counter is odd, copies the page into staging, and re-checks the counter — if it changed, retry. There's a 100 ms warning threshold; if the counter has been odd that long, the page is **skipped** this cycle (a writer is hung or simply in flight). A skipped page holds the checkpoint's coverage gate back (CK-03) but keeps its dirty bit / DC so the next cycle re-captures it.
 
-Critically — `InitHeader` in `LogicalSegment.cs` (line ~498) **preserves `ModificationCounter` across header clears**. Zeroing it while a page is latched would leave the counter odd after unlatch and lock `CopyPageWithSeqlock` in a spin forever.
+Critically — `InitHeader` in `LogicalSegment.cs` (≈ `:498`) **preserves `ModificationCounter` across header clears**. Zeroing it while a page is latched would leave the counter odd after unlatch and lock `CopyPageWithSeqlock` in a spin forever.
 
-### FPI — Full-Page Image WAL records
+### The CRC — `PageChecksum`
 
-Enabled by `EnableFpiCapture(walManager, enableFpiCompression)` (called by `DatabaseEngine` after WAL init). Once enabled:
+Every page header also carries a `PageChecksum : uint`. It is a CRC32C ([`Crc32CUtil.ComputeSkipping`](../../src/Typhon.Engine/Foundation/) in `Foundation/`, hardware-accelerated, ~0.4 µs/8 KB) over the whole page *except* the 4-byte checksum field. The checkpoint stamps it **on the staging-buffer copy** at write time (so it reflects exactly the bytes that hit disk), and `EnsurePageVerified` checks it on load (`OnLoad` mode) and during recovery. The CRC helper lives in `Foundation/`, not `Storage/` — by design, the storage layer holds **zero** `Wal` / `Lsn` / `Fpi` identifiers (grep-enforced).
 
-- The first time per checkpoint cycle a page enters `Exclusive` state, `TryLatchPageExclusive` calls `WriteFpiRecord` to emit an FPI WAL record carrying the page's *current* (before-image) bytes.
-- A bit in [`FpiBitmap`](../../src/Typhon.Engine/Durability/internals/FpiBitmap.cs) is set via `Interlocked.Or`, returning the prior value — set-and-test in one shot. The "first dirty per cycle" gate means at most one FPI per page per checkpoint, which bounds WAL bandwidth.
-- The FPI bitmap is cleared at the start of every checkpoint cycle (Step 0 of the pipeline — see [11-durability](11-durability.md)).
-- FPI is **best-effort**. If the WAL ring is full or the write throws, the bit is cleared (so the next cycle retries) and the page proceeds without an FPI. The next checkpoint cycle catches up.
-- When `enableFpiCompression = true`, page payloads are LZ4-compressed; incompressible pages auto-fall-back to raw.
+### Torn-page safety — detect, then rebuild or loud-fail (no FPI)
 
-### `TryRepairPageFromFpi` — torn page recovery
+When `EnsurePageVerified` finds a stored CRC that doesn't match the recomputed one, the response depends on the page's role (full table in [11-durability §6](11-durability.md)):
 
-In `EnsurePageVerified` (line ~1436): if a page's stored CRC doesn't match the computed CRC, `TryRepairPageFromFpi(memPageIndex, filePageIndex, storedCrc, computedCrc)` is called. It:
-
-1. Searches the WAL for the most recent FPI matching `filePageIndex` (`_walManager.SearchFpiForPage`).
-2. Validates the FPI's own CRC (it has a `PageChecksum` in its header).
-3. Copies the FPI bytes into the in-memory page **and** writes them directly to disk (`WritePageDirect`).
-4. Logs a warning.
-
-If no FPI exists (e.g., the file predates FPI capture) or the FPI itself is corrupt, the method returns `false` and `EnsurePageVerified` throws `PageCorruptionException`.
-
-The intersection with checkpoint: see the **8-step checkpoint pipeline** in [11-durability](11-durability.md). Step 0 clears the FPI bitmap; Steps 2-8 collect, write, fsync, decrement DC, transition UoWs, advance the LSN, and recycle WAL segments.
+- **Derived pages** (Index, Spatial, Occupancy) — discarded and **rebuilt** from primary data during recovery (RB-01 / CK-09). Always healable.
+- **Primary pages** (component/revision content, EntityMap, cluster, collections, string table, system) — recorded **suspect**; after rebuild, a suspect page that no longer backs a live chunk is healed, but one that still backs a live primary chunk **fails the open loudly** (RB-04). A torn primary is never silently served as intact.
+- **Structural meta / segment-directory pages** — protected by checkpoint v2's **A/B slot-pairing**: the current-valid slot is never overwritten, so a torn write can't destroy the only good copy.
 
 <a href="assets/typhon-checkpoint-pipeline.svg">
-  <img src="assets/typhon-checkpoint-pipeline.svg" width="1200" alt="Checkpoint pipeline">
+  <img src="assets/typhon-checkpoint-pipeline.svg" width="812" alt="Checkpoint v2 pipeline">
 </a>
 
 ---
@@ -442,5 +431,5 @@ The advisory lock file (`<DatabaseName>.lock` in `DatabaseDirectory`) is created
 - [01-foundation](01-foundation.md) — `EpochManager` / `EpochGuard` (page protection), `AccessControlSmall` (page state locks), `CacheLinePaddedInt` (clock hand), memory allocators (page cache pinning)
 - [05-revision](05-revision.md) — MVCC revision storage uses `ChunkBasedSegment` + `ChunkAccessor` and threads its `ChangeSet` through writes
 - [06-ecs](06-ecs.md) — `ComponentTable` is the ECS-side consumer of segments; `EpochRefreshInterval = 128` drives `ReleaseExcessDirtyMarks`
-- [11-durability](11-durability.md) — the 8-step checkpoint pipeline; FPI capture integrated with the WAL writer
+- [11-durability](11-durability.md) — the checkpoint v2 cycle; page CRC + seqlock snapshots; torn-page rebuild/loud-fail
 - [13-resources](13-resources.md) — `PagedMMF` registers itself as a `ResourceNode` (memory + I/O metrics on the `Storage` subtree)

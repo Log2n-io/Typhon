@@ -22,7 +22,7 @@ The series follows the engine's folder layout — every `src/Typhon.Engine/<Fold
 | # | Chapter | Covers |
 |---|---|---|
 | **01** | [Foundation](01-foundation.md) | Synchronization primitives (AccessControl, Deadline, WaitContext, AdaptiveWaiter), epoch-based reclamation, false-sharing avoidance, concurrent collections, the memory allocator, hosting helpers. The pile of primitives every other subsystem stands on. |
-| **02** | [Storage](02-storage.md) | The paged memory-mapped file (PagedMMF) and its accessors. Page cache, clock-sweep eviction, segments (`LogicalSegment`, `ChunkBasedSegment`), `ChunkAccessor` SOA layout, dirty tracking via ChangeSet, backpressure, FPI capture, seqlock writes. |
+| **02** | [Storage](02-storage.md) | The paged memory-mapped file (PagedMMF) and its accessors. Page cache, clock-sweep eviction, segments (`LogicalSegment`, `ChunkBasedSegment`), `ChunkAccessor` SOA layout, dirty tracking via ChangeSet, backpressure, page CRC + seqlock writes. |
 | **03** | [Indexing](03-indexing.md) | B+Tree as the universal index. Node layout, capacity variants (L16/L32/L64/String64), the two-phase `SpinWriteLock`, `OlcLatch` for optimistic reads, structural mutations (split/merge), multi-tree segments. |
 | **04** | [Schema](04-schema.md) | Component and field definitions. The `FieldType` enum (including AABB/BSphere/Unsigned/DoubleFloat flags), persistence via `ComponentR1` / `FieldR1` / `ArchetypeR1` / `SchemaHistoryR1` system entities, schema evolution (eager migration on reopen), the diff model. |
 | **05** | [Revision (MVCC)](05-revision.md) | How snapshot isolation actually works. `CompRevStorageElement` layout (12 B with packed TSN + UowId + IsolationFlag), revision chains, write-time UowId stamping, the snapshot read walk, `EnabledBits` overrides. |
@@ -31,7 +31,7 @@ The series follows the engine's folder layout — every `src/Typhon.Engine/<Fold
 | **08** | [Transactions](08-transactions.md) | `UnitOfWork`, `Transaction`, the TransactionChain (singly-linked, CAS PushHead), `UowRegistry`, durability modes (Deferred/GroupCommit/Immediate), deferred cleanup, deadlines. The mutation entry point. |
 | **09** | [Querying](09-querying.md) | `EcsQuery`, DNF predicate parsing, plan building, the pipeline executor, the view system (`EcsView`, `ViewDeltaRingBuffer`, delta computation), statistics (HLL/MCV/Histogram), selectivity estimation. Plus a brief Subscriptions section. |
 | **10** | [Runtime](10-runtime.md) | The scheduler. TickDriver, tracks (Engine-Pre / Public / Engine-Post), DAG construction from access patterns, worker threads, the parallel fence, overload management. |
-| **11** | [Durability](11-durability.md) | WAL writer (group commit), wire format (chunk types, record header, FPI), checkpoint pipeline (8 steps), recovery (7 phases), the UoW state machine, fail-fast (per ADR). |
+| **11** | [Durability](11-durability.md) | WAL v2 writer (group commit), wire format (chunk types, logical records via `RecordCodec`), checkpoint v2 (barrier → coverage gate → A/B meta flip → recycle), recovery (`RecoveryDriver` + scrub/rebuild, no FPI), the UoW state machine (transitional), fail-fast (per ADR). |
 | **12** | [Observability](12-observability.md) | Zero-overhead typed event pipeline (`TyphonEvent.Begin*`/`Emit*`), gate flags (`TelemetryConfig`), the ~217 event kinds, source location attribution, wire protocol, profiler engine pipeline, Workbench viewer, OTel integration. |
 | **13** | [Resources](13-resources.md) | The resource graph — every long-lived engine object as `IResource`. Metrics (Memory/Capacity/DiskIO/Throughput/Duration), snapshots, alerts, configuration (`ResourceOptions`), exhaustion policies. |
 | **14** | [Errors](14-errors.md) | The exception hierarchy, error codes, the `Result<TValue,TStatus>` zero-cost pattern, status enums, the throw-don't-retry philosophy. |
@@ -72,7 +72,7 @@ Use the table above as an index. Each chapter's section headers in its own ToC t
 Typhon's layering is mostly strict: lower layers don't know about upper layers. Cross-cutting concerns (Observability, Resources, Errors) thread through everything.
 
 <a href="assets/typhon-architecture-layers.svg">
-  <img src="assets/typhon-architecture-layers.svg" width="1101" alt="Typhon architecture layers">
+  <img src="assets/typhon-architecture-layers.svg" width="1200" alt="Typhon architecture layers">
 </a>
 <br>
 <sub>The full layer stack (high → low): Apps → Subscriptions/Runtime → Querying (← Spatial) → Transactions → ECS → Revision/Schema → Indexing → Storage → Foundation, with representative components per layer. Durability runs parallel (commit → WAL, checkpoint → storage); Observability / Resources / Errors thread through all layers; Hosting and Profiler are satellites.</sub>
@@ -109,7 +109,6 @@ Terms that show up across multiple chapters. Each entry points to where the type
 | **`EntityLink<T>`** | Typed entity reference (polymorphic over archetype hierarchy) | [06-ecs](06-ecs.md) |
 | **`EntityRef`** | `ref struct` working handle returned by `Open`/`OpenMut` | [06-ecs](06-ecs.md) |
 | **Epoch / `EpochGuard`** | Per-thread page protection — pages tagged ≥ MinActiveEpoch can't be evicted | [01-foundation](01-foundation.md) |
-| **FPI** | Full Page Image — the WAL-resident copy of a page captured at first modification per checkpoint cycle | [11-durability](11-durability.md), [02-storage](02-storage.md) |
 | **LSN** | Log Sequence Number — monotonic position in the WAL stream | [11-durability](11-durability.md) |
 | **MVCC** | Multi-Version Concurrency Control — Typhon's snapshot isolation model | [05-revision](05-revision.md) |
 | **`OlcLatch`** | Optimistic lock-coupling latch (32 bits) used by B+Tree readers | [01-foundation](01-foundation.md), [03-indexing](03-indexing.md) |

@@ -170,7 +170,7 @@ Sparse by design — gaps left for related categories to grow contiguously. Appr
 | 165–172 | **Storage / Memory** | DirtyWalk, Segment Create/Grow/Load, ChunkSegmentGrow, FileHandle, OccupancyMapGrow, AlignmentWaste |
 | 173–186 | **Data plane** | Transaction Init/Prepare/Validate/Conflict/Cleanup, MVCC ChainWalk / VersionCleanup, B+Tree Search/RangeScan/Rebalance/BulkInsert/Root/NodeCow |
 | 187–213 | **Query / ECS:Query / ECS:View** | Parse, DNF, Plan, Estimate, IndexScan, Iterate, Filter, Pagination, plus ECS depth |
-| 214–234 | **Durability** | WAL split (QueueDrain/OsWrite/Signal), GroupCommit, Queue, Buffer, Frame, Backpressure; Checkpoint depth; Recovery (7 phases); UoW state/deadline |
+| 214–234 | **Durability** | WAL split (QueueDrain/OsWrite/Signal), GroupCommit, Queue, Buffer, Frame, Backpressure; Checkpoint depth; Recovery; UoW state/deadline |
 | 235–240 | **Subscription dispatch** | Subscriber, DeltaBuild, DeltaSerialize, TransitionBeginSync, Cleanup, DirtyBitmapSupplement |
 | 241–245 | Scheduler follow-ups (#289, #311, #327) | MetronomeWait (span), OverloadDetector (instant), RuntimePhaseSpan, QueueTickEnd, SchedulerSystemArchetype |
 | 246 | Fallback | `NamedSpan` — user-defined span with inline UTF-8 name (was 200 until 2026-05-10, reassigned to avoid collision with `EcsQueryMaskAnd`; wire format bumped from v7 to v8) |

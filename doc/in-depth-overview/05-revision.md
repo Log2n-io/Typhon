@@ -125,7 +125,7 @@ At commit time the only Revision-layer mutation is **clearing the IsolationFlag*
 Why does this matter? Two reasons:
 
 1. **Cleanup correctness.** The deferred cleanup path uses `IsolationFlag == true` as the signal that "an active uncommitted transaction wrote this; do not touch the chunk it points to even if its TSN looks old" — see `CleanUpUnusedEntriesCore` line 256. If UowIds were stamped at commit, cleanup would have no way to identify the writing UoW from the element alone.
-2. **WAL replay.** Replay walks the WAL stream and writes revision elements directly (`WalReplayHelper.cs:170`); the UowId is in the record. Stamping at write time means the same `AddCompRev` contract applies in both live writes and recovery.
+2. **Crash recovery.** Recovery rebuilds committed revisions directly from the logical WAL records — `RecoveryApplier.CreateVersionedChainRoot` (`Durability/internals/`) allocates the content chunk and a single committed revision-chain root via `ComponentRevisionManager.AllocCompRevStorage`, committing it at the record's TSN — reconstructing the same committed chain shape the live spawn/commit path produces.
 
 ### Insert path
 
@@ -294,7 +294,7 @@ Called by:
 
 - `Transaction.ECS.cs` — `OpenMut(id).Write<T>(...)` and `Destroy(id)` paths, **at the moment of mutation**.
 - `Transaction.cs` — `DetectAndResolveConflict` and `RelocateRevisionEntry` (commit-time conflict resolution; these append *additional* entries to handle write-write races, not the original write).
-- `WalReplayHelper.cs` (analogous path) — during recovery, when replaying logged mutations.
+- *(Crash recovery does **not** go through `AddCompRev`: `RecoveryApplier` in `Durability/internals/` rebuilds committed chain roots directly via `ComponentRevisionManager.AllocCompRevStorage`.)*
 
 **Not called at commit.** The commit step (`Transaction.CommitComponentCore`) clears `IsolationFlag` on already-stamped entries and updates `LastCommitRevisionIndex` on the chain header. The TSN on the entry was set when the mutation happened; the UowId likewise. If a commit needs to *insert* additional entries (because of conflict resolution), that goes through `AddCompRev` too — but the original user-driven mutation already wrote its entry well before the commit started.
 

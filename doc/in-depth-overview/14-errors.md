@@ -115,7 +115,7 @@ Every engine exception derives from this and carries an `ErrorCode`. The numeric
 I/O errors, page faults, segment-level problems.
 
 - [`CorruptionException`](../../src/Typhon.Engine/Errors/public/CorruptionException.cs) — generic integrity violation (`ComponentName`, `PageIndex`). Never transient.
-- [`PageCorruptionException`](../../src/Typhon.Engine/Errors/public/CorruptionException.cs) — CRC32C mismatch on a data page; carries `ExpectedCrc` / `ComputedCrc`. Thrown when on-load verification fails *and* FPI repair is unavailable or itself failed. See [02-storage](02-storage.md) for CRC checks and [11-durability](11-durability.md) for FPI repair.
+- [`PageCorruptionException`](../../src/Typhon.Engine/Errors/public/CorruptionException.cs) — CRC32C mismatch on a data page; carries `ExpectedCrc` / `ComputedCrc`. Thrown on on-load verification failure during normal operation. During recovery a torn page is instead recorded *suspect* and either healed by rebuild (derived structures) or fails the open loudly (primary data, RB-04) — there is no FPI repair. See [02-storage §7](02-storage.md) for CRC checks and [11-durability §6](11-durability.md) for torn-page safety.
 - [`DatabaseLockedException`](../../src/Typhon.Engine/Errors/public/DatabaseLockedException.cs) — the `.lock` file is held by another process; carries `OwnerPid`, `OwnerMachine`, `StartedAt`. The message instructs to close the other process or delete the `.lock` file if it crashed.
 
 ### Durability family — `DurabilityException`
