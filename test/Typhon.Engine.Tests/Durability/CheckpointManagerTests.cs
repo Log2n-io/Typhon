@@ -229,9 +229,13 @@ public class CheckpointManagerTests : AllocatorTestBase
         var durableLsn = _walManager.DurableLsn;
         ckpt.RunCheckpointCycle(durableLsn);
 
-        Assert.That(ckpt.CheckpointLsn, Is.EqualTo(durableLsn));
+        Assert.That(ckpt.CheckpointLsn, Is.EqualTo(durableLsn), "the checkpoint advances the CheckpointLSN to the durable high-water");
         Assert.That(ckpt.TotalCheckpoints, Is.EqualTo(1));
-        Assert.That(ckpt.TotalPagesWritten, Is.EqualTo(0));
+        // The original `TotalPagesWritten == 0` assertion was removed: it is obsolete under WAL-v2. SaveChanges defers
+        // page flushes to the checkpoint, so CreateTestInfrastructure's UowRegistry bootstrap is still dirty here, and
+        // every cycle also persists its own CheckpointLSN watermark into cached pages — a checkpoint is therefore never
+        // a zero-page no-op (empirically each cycle writes its watermark/metadata). The invariant this test guards is
+        // the LSN advance asserted above. (The per-cycle metadata re-write is noted for a separate efficiency look.)
     }
 
     [Test]

@@ -186,10 +186,10 @@ internal sealed class ArchetypeRegistryLifecycleTests : TestBase<ArchetypeRegist
 
         var asm = alc.LoadFromAssemblyPath(schemaDllPath);
 
-        // Pick a known archetype type from the fixture schema. GuildArch has a single CompGuild — a small,
+        // Pick a known archetype type from the fixture schema. GuildArch registers a single Guild component — a small,
         // well-defined registration surface for the test.
         var guildArchType = asm.GetType("Typhon.Workbench.Fixtures.GuildArch", throwOnError: true)!;
-        var compGuildType = asm.GetType("Typhon.Workbench.Fixtures.CompGuild", throwOnError: true)!;
+        var guildCompType = asm.GetType("Typhon.Workbench.Fixtures.Guild", throwOnError: true)!;
 
         // Trigger the static ctor on Archetype<GuildArch> via reflection so the components get declared and
         // the metadata gets finalised. This mirrors what `Archetype<T>.Touch()` would do if we could call
@@ -202,7 +202,7 @@ internal sealed class ArchetypeRegistryLifecycleTests : TestBase<ArchetypeRegist
         // Register engine-use refcount, then unregister. For collectible-ALC types, UnregisterEngineUse
         // tears down every entry — releasing the static refs that would otherwise pin the ALC.
         var archetypes = new HashSet<Type> { guildArchType };
-        var components = new HashSet<Type> { compGuildType };
+        var components = new HashSet<Type> { guildCompType };
         ArchetypeRegistry.RegisterEngineUse(archetypes, components);
         ArchetypeRegistry.UnregisterEngineUse(archetypes, components);
 
@@ -214,7 +214,7 @@ internal sealed class ArchetypeRegistryLifecycleTests : TestBase<ArchetypeRegist
         // explicit nullification makes the intent unambiguous and the test deterministic.
         // ReSharper disable RedundantAssignment
         guildArchType = null!;
-        compGuildType = null!;
+        guildCompType = null!;
         closedArchetype = null!;
         metadataProp = null!;
         asm = null!;

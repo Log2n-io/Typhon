@@ -26,7 +26,11 @@ public class OlcBTreeTests
             .AddScopedManagedPagedMemoryMappedFile(options =>
             {
                 options.DatabaseName = $"olcbt_{TestContext.CurrentContext.Test.Name}"[..Math.Min(63, $"olcbt_{TestContext.CurrentContext.Test.Name}".Length)];
-                options.DatabaseCacheSize = (ulong)(PagedMMF.DefaultMemPageCount * PagedMMF.PageSize);
+                // 256 pages (DefaultMemPageCount) is a cache-stress size; the concurrent enumerate-during-write tests
+                // (EnumerateLeaves/FullIntegration) hold epoch scopes over a growing tree and cannot run that tight —
+                // they dead-locked on PageCacheBackpressureTimeout. Dedicated cache-stress coverage lives in
+                // OlcBTreeStressTests / OlcBTreeRaceStressTests; this functional fixture gets an adequate cache.
+                options.DatabaseCacheSize = (ulong)(8192 * PagedMMF.PageSize);
                 options.PagesDebugPattern = true;
             });
 

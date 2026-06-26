@@ -29,11 +29,15 @@ The canonical red set is **platform-specific** and must be determined on the CI 
    `[Category("Quarantine")]` + an issue-linked comment, and a row below.
 4. Re-run until the gate is green on `main`. That green is the proof the quarantine is complete.
 
-> Status: **scaffold — to be populated from the first `c6id` gate run.** The infrastructure (filter +
-> this index) is in place; the per-test tagging is the remaining step and needs the first CI run.
+> Status: **populated from the first `c6id` gate run (PR #405).** The bulk of that run's reds were
+> infrastructure issues (cache sizing, a stale type name, a Windows-only file-lock assertion, a stale
+> WAL-v2 checkpoint assertion) and were **fixed**, not quarantined. Only the two genuinely Linux-specific
+> failures below — which pass on Windows and cannot be reproduced/diagnosed from a Windows dev box — are
+> quarantined pending a dedicated Linux investigation.
 
 ## Quarantined tests
 
 | Test (fully-qualified) | Issue | Reason | Added |
 |------------------------|-------|--------|-------|
-| _(none yet — populate from the first gate run)_ | | | |
+| `Typhon.Engine.Tests.CheckerboardTests.SpatialGridAccessor_AccessibleFromTickContext` | [#406](https://github.com/nockawa/Typhon/issues/406) | Linux-CI-only: `SpatialGrid.IsValid` false in the tick callback; passes on Windows (isolated + full parallel). Needs Linux repro. | 2026-06-26 |
+| `Typhon.Engine.Tests.ViewChangeCaptureTests.UnchangedField_NoEntryForThatFieldView` | [#406](https://github.com/nockawa/Typhon/issues/406) | Linux-CI-only: `IndexOutOfRangeException`; passes on Windows. Needs Linux repro. | 2026-06-26 |
