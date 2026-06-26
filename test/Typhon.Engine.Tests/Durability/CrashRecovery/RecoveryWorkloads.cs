@@ -224,8 +224,16 @@ internal sealed class MultiValueDupKeyWorkload : IRecoveryWorkload
 internal sealed class ClusterAllSvWorkload : IRecoveryWorkload
 {
     private readonly int _count;
+    private readonly DurabilityDiscipline _discipline;
 
-    public ClusterAllSvWorkload(int count = 10) => _count = count;
+    // discipline TickFence (default): the SV spawn values are checkpoint-durable only (a hard crash before a checkpoint recovers them alive-but-default
+    // — by design, #395 Face B's "non-guarantee"). discipline Commit: the spawn WAL-logs its SV values per-commit (#395 Face B fix / D5), so they
+    // survive a hard crash with NO checkpoint — the per-commit-durable mode the differential oracle's "SurvivesCrash" assertion needs.
+    public ClusterAllSvWorkload(int count = 10, DurabilityDiscipline discipline = DurabilityDiscipline.TickFence)
+    {
+        _count = count;
+        _discipline = discipline;
+    }
 
     public string Name => "ClusterAllSv";
 
@@ -237,7 +245,7 @@ internal sealed class ClusterAllSvWorkload : IRecoveryWorkload
 
     public void Execute(UnitOfWork uow, RecoveryShadowModel shadow)
     {
-        using var tx = uow.CreateTransaction();
+        using var tx = uow.CreateTransaction(_discipline);
         for (int i = 0; i < _count; i++)
         {
             var s = new SvIndexed(i * 7, i);
@@ -247,6 +255,103 @@ internal sealed class ClusterAllSvWorkload : IRecoveryWorkload
 
         tx.Commit();
     }
+}
+
+/// <summary>
+/// The P2 <b>MixedDiscipline</b> workload (design 08 §5 / §T-6): a cluster-eligible all-SingleVersion archetype written under a MIX of durability
+/// disciplines in interleaved transactions — a TickFence (default, ≤1-tick-loss) noise write followed by a <see cref="DurabilityDiscipline.Commit"/>
+/// write that overwrites BOTH components with their final values. Because the differential oracle asserts every recorded entity's exact post-recovery
+/// state, the workload makes the asserted state entirely Commit-durable: the Commit write is the last writer on every component, so each captured value
+/// is the zero-loss Commit value (the spawn + TickFence values are deliberately transient and overwritten). This proves Commit-discipline WRITES
+/// survive every crash boundary despite interleaved TickFence churn. (Commit-discipline SPAWNS — the value carried by the spawn itself rather than a
+/// later write — are #395 Face B, covered by <see cref="ClusterAllSvWorkload"/> under <see cref="DurabilityDiscipline.Commit"/>; a plain TickFence
+/// <see cref="ClusterAllSvWorkload"/> remains checkpoint-durable only, the documented non-guarantee.)
+/// </summary>
+internal sealed class MixedDisciplineWorkload : IRecoveryWorkload
+{
+    private readonly int _count;
+
+    public MixedDisciplineWorkload(int count = 8) => _count = count;
+
+    public string Name => "MixedDiscipline";
+
+    public void Register(DatabaseEngine dbe)
+    {
+        dbe.RegisterComponentFromAccessor<MixA>();
+        dbe.RegisterComponentFromAccessor<MixB>();
+        Archetype<MixArch>.Touch();
+    }
+
+    public void Execute(UnitOfWork uow, RecoveryShadowModel shadow)
+    {
+        var ids = new List<EntityId>(_count);
+
+        // Phase 1: spawn with placeholder values (default/TickFence discipline). The cluster SV spawn values are not WAL-durable on their own; the
+        // Commit writes below carry the entity into durability.
+        using (var tx = uow.CreateTransaction())
+        {
+            for (int i = 0; i < _count; i++)
+            {
+                var id = tx.Spawn<MixArch>(MixArch.A.Set(new MixA(-1)), MixArch.B.Set(new MixB(-1)));
+                shadow.RecordSpawn(id);
+                ids.Add(id);
+            }
+
+            tx.Commit();
+        }
+
+        // Phase 2: TickFence (default discipline) noise write on A — NOT WAL-durable; the Phase-3 Commit write is the last writer on A, so the
+        // captured/recovered value is the Commit value, never this noise.
+        using (var tx = uow.CreateTransaction())
+        {
+            foreach (var id in ids)
+            {
+                tx.OpenMut(id).Write(MixArch.A).X = unchecked((int)0xBADBAD);
+            }
+
+            tx.Commit();
+        }
+
+        // Phase 3: Commit discipline — overwrite BOTH components with their final, zero-loss values (last writer on every asserted field).
+        using (var tx = uow.CreateTransaction(DurabilityDiscipline.Commit))
+        {
+            for (int i = 0; i < ids.Count; i++)
+            {
+                var e = tx.OpenMut(ids[i]);
+                e.Write(MixArch.A).X = i + 1_000;
+                e.Write(MixArch.B).Y = i + 2_000;
+            }
+
+            tx.Commit();
+        }
+    }
+}
+
+// ── MixedDiscipline workload archetype: all-SingleVersion, non-indexed ⇒ cluster-eligible (DatabaseEngine.InitializeArchetypes). Id 952 is unused. ──
+
+[Component("Typhon.Schema.UnitTest.MixA", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+public struct MixA
+{
+    public int X;
+
+    public MixA(int x) => X = x;
+}
+
+[Component("Typhon.Schema.UnitTest.MixB", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+public struct MixB
+{
+    public int Y;
+
+    public MixB(int y) => Y = y;
+}
+
+[Archetype(952)]
+internal class MixArch : Archetype<MixArch>
+{
+    public static readonly Comp<MixA> A = Register<MixA>();
+    public static readonly Comp<MixB> B = Register<MixB>();
 }
 
 // ── An all-SingleVersion, indexed component + archetype: all-SV + a non-Transient indexed field ⇒ cluster-eligible (DatabaseEngine.InitializeArchetypes), the cluster

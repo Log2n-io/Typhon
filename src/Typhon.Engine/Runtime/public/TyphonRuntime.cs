@@ -8,6 +8,7 @@ using System.Numerics;
 using System.Runtime.CompilerServices;
 using Typhon.Engine.internals;
 using Typhon.Profiler;
+using Typhon.Schema.Definition;
 
 namespace Typhon.Engine;
 
@@ -84,7 +85,7 @@ public sealed partial class TyphonRuntime : IDisposable
     private readonly int[] _checkerboardBlackCount;
 
     // Cached delegate — avoids per-TickContext allocation from method group conversion
-    private readonly Func<DurabilityMode, Transaction> _createSideTxDelegate;
+    private readonly SideTransactionFactory _createSideTxDelegate;
 
     // First-tick flag
     private bool _firstTickExecuted;
@@ -423,9 +424,11 @@ public sealed partial class TyphonRuntime : IDisposable
     /// The caller owns the returned Transaction and must Commit + Dispose it.
     /// Side-transactions are NOT visible to the current tick's main Transactions (snapshot isolation).
     /// </summary>
-    public Transaction CreateSideTransaction(DurabilityMode durability = DurabilityMode.Immediate) => Engine.CreateQuickTransaction(durability);
+    public Transaction CreateSideTransaction(DurabilityMode durability = DurabilityMode.Immediate,
+        DurabilityDiscipline discipline = DurabilityDiscipline.TickFence) => Engine.CreateQuickTransaction(durability, discipline);
 
-    private Transaction CreateSideTransactionInternal(DurabilityMode durability) => Engine.CreateQuickTransaction(durability);
+    private Transaction CreateSideTransactionInternal(DurabilityMode durability, DurabilityDiscipline discipline)
+        => Engine.CreateQuickTransaction(durability, discipline);
 
     // ═══════════════════════════════════════════════════════════════
     // #197: Change filter resolution

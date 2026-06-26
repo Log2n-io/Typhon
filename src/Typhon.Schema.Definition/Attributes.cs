@@ -20,6 +20,14 @@ public sealed class ComponentAttribute : Attribute
     /// <summary>Storage mode for this component. Default is <see cref="StorageMode.Versioned"/> (full MVCC).</summary>
     public StorageMode StorageMode { get; set; } = StorageMode.Versioned;
 
+    /// <summary>
+    /// Default durability discipline for this component when its <see cref="StorageMode"/> is <see cref="StorageMode.SingleVersion"/>.
+    /// Default is <see cref="DurabilityDiscipline.TickFence"/> (batched, ≤1-tick loss).
+    /// Set to <see cref="DurabilityDiscipline.Commit"/> to make any transaction that writes this component commit-durable (zero-loss, atomic) for all of its
+    /// writes (CM-02 uniformity). Ignored for <see cref="StorageMode.Versioned"/> (always commit-scoped) and <see cref="StorageMode.Transient"/> (never durable).
+    /// </summary>
+    public DurabilityDiscipline DefaultDiscipline { get; set; } = DurabilityDiscipline.TickFence;
+
     public ComponentAttribute(string name, int revision)
     {
         Name = name;

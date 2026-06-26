@@ -4,13 +4,14 @@ using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Internals;
 
-// Applies committed WAL v2 records back into engine state during crash recovery, reusing the engine's own write primitives
-// (the design's "one write path"). P1.2: rebuilds a committed spawned entity — the EntityRecord plus, per spawn-init Slot, a
-// committed revision-chain root holding the component value — by BUILDING the full record then InsertNew once, mirroring the
-// live FinalizeSpawns (approach B; the live engine has no in-place location update — a Versioned location is written once at
-// spawn and stays fixed, revisions append within the chain). Flat (non-cluster) path. Destroy / SetEnabledBits / component-
-// update Slots / cluster path / collections follow in later increments. Runs single-threaded under one epoch scope with a
-// dedicated ChangeSet (so applied page mutations are captured by the sealing checkpoint). See 03-recovery.md §3.
+// Applies committed WAL v2 records back into engine state during crash recovery, reusing the engine's own write primitives (the design's "one write path").
+// P1.2: rebuilds a committed spawned entity — the EntityRecord plus, per spawn-init Slot, a committed revision-chain root holding the component value — by
+// BUILDING the full record then InsertNew once, mirroring the live FinalizeSpawns (approach B; the live engine has no in-place location update — a Versioned
+// location is written once at spawn and stays fixed, revisions append within the chain). Both the flat (non-cluster) path and the cluster path are wired:
+// a cluster-eligible archetype reconstructs the entity into a CLUSTER slot (ClaimSlot + SoA value write + ClusterEntityRecord), mirroring the live
+// FinalizeSpawns cluster branch — this is what makes Commit-discipline SingleVersion values WAL-recoverable (#392 AC-2/AC-7). Destroy / SetEnabledBits /
+// collections follow in later increments. Runs single-threaded under one epoch scope with a dedicated ChangeSet (so applied page mutations are captured by the
+// sealing checkpoint). See 03-recovery.md §3.
 
 internal sealed unsafe class RecoveryApplier : IDisposable
 {
@@ -33,6 +34,10 @@ internal sealed unsafe class RecoveryApplier : IDisposable
     private ArchetypeMetadata _metadata;
     private int _componentCount;
     private ChunkAccessor<PersistentStore> _mapAccessor;
+
+    // Per-archetype cluster SoA accessor (set only when the current archetype is cluster-eligible with a PersistentStore ClusterSegment).
+    private bool _hasClusterAccessor;
+    private ChunkAccessor<PersistentStore> _clusterAccessor;
 
     // Per-ComponentTable recovery ComponentInfo (content + revision-table accessors bound to the recovery ChangeSet). Mirrors
     // EntityAccessor.GetComponentInfo's Versioned/SingleVersion setup, but threaded through THIS ChangeSet. Flushed at Dispose.
@@ -67,6 +72,12 @@ internal sealed unsafe class RecoveryApplier : IDisposable
     {
         Track(bornTsn);
         EnsureArchetype(archetypeId);
+
+        if (_hasClusterAccessor)
+        {
+            ApplySpawnedEntityToCluster(entityIdRaw, enabledBits, bornTsn, slots);
+            return;
+        }
 
         var key = EntityId.FromRaw(entityIdRaw).EntityKey;
 
@@ -106,6 +117,83 @@ internal sealed unsafe class RecoveryApplier : IDisposable
                     StorageMode.SingleVersion => CreateSingleVersionContent(table, slot.Payload),
                     _ => 0, // Transient values are never logged
                 };
+            }
+        }
+
+        _engineState.EntityMap.InsertNew(key, recordPtr, ref _mapAccessor, _changeSet);
+    }
+
+    /// <summary>
+    /// Cluster counterpart of <see cref="ApplySpawnedEntity"/>: reconstructs a committed spawned entity into a CLUSTER slot — claims a slot, writes each
+    /// committed component value into the cluster SoA (the HEAD; for Versioned it also builds the revision-chain root and records its chunkId), writes the
+    /// EntityId + per-slot EnabledBits into the cluster, and inserts the ClusterEntityRecord. Mirrors the live FinalizeSpawns cluster branch. Spatial
+    /// cell-routing and AABBs are rebuilt wholesale on reopen, so a plain (non-spatial) ClaimSlot is used. RB-01: secondary indexes are NOT populated here
+    /// — they are rebuilt from final HEAD data at open. Idempotent (AP-12): a re-applied entity already in the loaded map is skipped.
+    /// </summary>
+    private void ApplySpawnedEntityToCluster(long entityIdRaw, ushort enabledBits, long bornTsn, IReadOnlyCollection<SlotData> slots)
+    {
+        var key = EntityId.FromRaw(entityIdRaw).EntityKey;
+        byte* recordPtr = stackalloc byte[EntityRecordAccessor.MaxRecordSize];
+
+        if (_engineState.EntityMap.TryGet(key, recordPtr, ref _mapAccessor))
+        {
+            return; // idempotent re-apply
+        }
+
+        var clusterState = _engineState.ClusterState;
+        var layout = clusterState.Layout;
+
+        var (clusterChunkId, slotIdx) = clusterState.ClaimSlot(ref _clusterAccessor, _changeSet);
+        byte* clusterBase = _clusterAccessor.GetChunkAddress(clusterChunkId, true);
+
+        // Build the ClusterEntityRecord (19 bytes base + 4 bytes per Versioned slot).
+        ClusterEntityRecordAccessor.InitializeRecord(recordPtr, _metadata.VersionedSlotCount);
+        ref var header = ref ClusterEntityRecordAccessor.GetHeader(recordPtr);
+        header.BornTSN = bornTsn;
+        header.EnabledBits = enabledBits;
+        ClusterEntityRecordAccessor.SetClusterChunkId(recordPtr, clusterChunkId);
+        ClusterEntityRecordAccessor.SetSlotIndex(recordPtr, (byte)slotIdx);
+
+        if (slots != null)
+        {
+            foreach (var slot in slots)
+            {
+                if (!_metadata.TryGetSlot(slot.ComponentTypeId, out var slotIndex))
+                {
+                    continue; // foreign / malformed record — tolerate
+                }
+
+                var table = _engineState.SlotToComponentTable[slotIndex];
+                if (table.StorageMode == StorageMode.Transient)
+                {
+                    continue; // Transient values are never logged
+                }
+
+                // Write the committed value into the cluster SoA HEAD slot (payload is value-only; its length is the component storage size == ComponentSize).
+                int compSize = layout.ComponentSize(slotIndex);
+                byte* dst = clusterBase + layout.ComponentOffset(slotIndex) + slotIdx * compSize;
+                slot.Payload.AsSpan().CopyTo(new Span<byte>(dst, compSize));
+
+                // Versioned: also rebuild the revision-chain root and record its chunkId (the cluster slot is the HEAD cache over the chain).
+                if (table.StorageMode == StorageMode.Versioned)
+                {
+                    int vi = layout.SlotToVersionedIndex[slotIndex];
+                    if (vi >= 0)
+                    {
+                        var chainRoot = CreateVersionedChainRoot(table, entityIdRaw, slot.Tsn, slot.Payload);
+                        ClusterEntityRecordAccessor.SetCompRevFirstChunkId(recordPtr, vi, chainRoot);
+                    }
+                }
+            }
+        }
+
+        // Write the full EntityId and per-slot EnabledBits into the cluster SoA (occupancy bit was set by ClaimSlot).
+        *(long*)(clusterBase + layout.EntityIdsOffset + slotIdx * 8) = entityIdRaw;
+        for (int slot = 0; slot < _componentCount; slot++)
+        {
+            if ((enabledBits & (1 << slot)) != 0)
+            {
+                *(ulong*)(clusterBase + layout.EnabledBitsOffset(slot)) |= 1UL << slotIdx;
             }
         }
 
@@ -225,6 +313,12 @@ internal sealed unsafe class RecoveryApplier : IDisposable
             _mapAccessor.CommitChanges();
             _mapAccessor.Dispose();
         }
+        if (_hasClusterAccessor)
+        {
+            _clusterAccessor.CommitChanges();
+            _clusterAccessor.Dispose();
+            _hasClusterAccessor = false;
+        }
 
         _engineState = _dbe._archetypeStates[archId];
         _metadata = ArchetypeRegistry.GetMetadata(archId);
@@ -232,6 +326,15 @@ internal sealed unsafe class RecoveryApplier : IDisposable
         _mapAccessor = _engineState.EntityMap.Segment.CreateChunkAccessor(_changeSet);
         _hasAccessor = true;
         _lastArchId = archId;
+
+        // Cluster-eligible archetypes reconstruct into the cluster SoA (ClusterSegment is the PersistentStore primary for SV/Versioned/mixed; a
+        // pure-Transient cluster has no ClusterSegment and is never durable, so it stays on the flat no-op path).
+        var clusterState = _engineState.ClusterState;
+        if (_metadata.IsClusterEligible && clusterState?.ClusterSegment != null)
+        {
+            _clusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor(_changeSet);
+            _hasClusterAccessor = true;
+        }
     }
 
     public void Dispose()
@@ -241,6 +344,12 @@ internal sealed unsafe class RecoveryApplier : IDisposable
             _mapAccessor.CommitChanges();
             _mapAccessor.Dispose();
             _hasAccessor = false;
+        }
+        if (_hasClusterAccessor)
+        {
+            _clusterAccessor.CommitChanges();
+            _clusterAccessor.Dispose();
+            _hasClusterAccessor = false;
         }
 
         foreach (var info in _infoByTable.Values)

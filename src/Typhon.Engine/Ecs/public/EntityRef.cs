@@ -118,6 +118,15 @@ public unsafe ref struct EntityRef
                 var table = _engineState.SlotToComponentTable[slot];
                 return ref _accessor.ReadEcsComponentData<T>(table, chunkId);
             }
+            // Commit-discipline read-your-own-writes: see this tx's staged value (point reads only; bulk spans read HEAD).
+            if (_accessor.Discipline == DurabilityDiscipline.Commit)
+            {
+                byte* stagedPtr = _accessor.TryGetStagedPtr(typeof(T), (long)_id.RawValue);
+                if (stagedPtr != null)
+                {
+                    return ref Unsafe.AsRef<T>(stagedPtr);
+                }
+            }
             return ref Unsafe.AsRef<T>(_clusterBase + _clusterLayout.ComponentOffset(slot) + _clusterSlotIndex * _clusterLayout.ComponentSize(slot));
         }
 
@@ -169,6 +178,23 @@ public unsafe ref struct EntityRef
 
             // SV cluster fast path: direct pointer arithmetic into SoA array.
             // Page was already marked dirty at resolve time (OpenMut → GetChunkAddress(dirty:true)).
+            byte* svHeadPtr = _clusterBase + _clusterLayout.ComponentOffset(slot) + _clusterSlotIndex * _clusterLayout.ComponentSize(slot);
+            var svTable = _engineState.SlotToComponentTable[slot];
+
+            // CM-02: a DefaultDiscipline=Commit component escalates the whole transaction to Commit on first touch.
+            if (svTable.Discipline == DurabilityDiscipline.Commit)
+            {
+                _accessor.ResolveCommitDiscipline(svTable);
+            }
+
+            // Commit discipline (Variant A): stage the write — leave the cluster HEAD untouched, no dirty bit, no shadow capture (CM-01).
+            // The exact B+Tree index is reconciled at commit (read old key from HEAD, new from the staged slot).
+            if (_accessor.Discipline == DurabilityDiscipline.Commit)
+            {
+                return ref _accessor.StageClusterCommitWrite<T>(
+                    svTable, comp._componentTypeId, (long)_id.RawValue, _clusterChunkId * 64 + _clusterSlotIndex, svHeadPtr);
+            }
+
             // Shadow capture for per-archetype B+Tree index maintenance (first write per entity per tick)
             if (clusterState.IndexSlots != null)
             {
@@ -179,8 +205,9 @@ public unsafe ref struct EntityRef
                 }
             }
 
+            _accessor.NoteSvInPlaceWrite();   // CM-02: an in-place TickFence write happened — blocks late auto-escalation to Commit
             clusterState.SetDirty(_clusterChunkId, _clusterSlotIndex);
-            return ref Unsafe.AsRef<T>(_clusterBase + _clusterLayout.ComponentOffset(slot) + _clusterSlotIndex * _clusterLayout.ComponentSize(slot));
+            return ref Unsafe.AsRef<T>(svHeadPtr);
         }
 
         {
@@ -194,7 +221,14 @@ public unsafe ref struct EntityRef
                 return ref Unsafe.AsRef<T>((byte*)rawPtr + table.ComponentOverhead);
             }
 
-            if (table.HasShadowableIndexes)
+            // CM-02: a DefaultDiscipline=Commit component escalates the whole tx to Commit before the (skipped) shadow capture below.
+            if (table.StorageMode == StorageMode.SingleVersion && table.Discipline == DurabilityDiscipline.Commit)
+            {
+                _accessor.ResolveCommitDiscipline(table);
+            }
+
+            // Commit discipline stages and reconciles indexes at commit — skip the per-tick shadow capture (which feeds the fence-time Move).
+            if (table.HasShadowableIndexes && _accessor.Discipline != DurabilityDiscipline.Commit)
             {
                 _accessor.ShadowIndexedFields<T>(table, chunkId, _id);
             }
@@ -223,6 +257,15 @@ public unsafe ref struct EntityRef
                 int chunkId = _locations[slot];
                 var table = _engineState.SlotToComponentTable[slot];
                 return ref _accessor.ReadEcsComponentData<T>(table, chunkId);
+            }
+            // Commit-discipline read-your-own-writes: see this tx's staged value (point reads only; bulk spans read HEAD).
+            if (_accessor.Discipline == DurabilityDiscipline.Commit)
+            {
+                byte* stagedPtr = _accessor.TryGetStagedPtr(typeof(T), (long)_id.RawValue);
+                if (stagedPtr != null)
+                {
+                    return ref Unsafe.AsRef<T>(stagedPtr);
+                }
             }
             return ref Unsafe.AsRef<T>(_clusterBase + _clusterLayout.ComponentOffset(slot) + _clusterSlotIndex * _clusterLayout.ComponentSize(slot));
         }
@@ -257,6 +300,20 @@ public unsafe ref struct EntityRef
 
             // SV cluster fast path
             var clusterState = _engineState.ClusterState;
+            byte* svHeadPtr = _clusterBase + _clusterLayout.ComponentOffset(slot) + _clusterSlotIndex * _clusterLayout.ComponentSize(slot);
+            var svTable = _engineState.SlotToComponentTable[slot];
+
+            // CM-02: a DefaultDiscipline=Commit component escalates the whole transaction to Commit on first touch.
+            if (svTable.Discipline == DurabilityDiscipline.Commit)
+            {
+                _accessor.ResolveCommitDiscipline(svTable);
+            }
+
+            // Commit discipline (Variant A): stage the write — HEAD untouched, no dirty/shadow (CM-01). Index reconciled at commit.
+            if (_accessor.Discipline == DurabilityDiscipline.Commit)
+            {
+                return ref _accessor.StageClusterCommitWrite<T>(svTable, typeId, (long)_id.RawValue, _clusterChunkId * 64 + _clusterSlotIndex, svHeadPtr);
+            }
 
             // Shadow capture for per-archetype B+Tree index maintenance (first write per entity per tick)
             if (clusterState.IndexSlots != null)
@@ -268,8 +325,9 @@ public unsafe ref struct EntityRef
                 }
             }
 
+            _accessor.NoteSvInPlaceWrite();   // CM-02: an in-place TickFence write happened — blocks late auto-escalation to Commit
             clusterState.SetDirty(_clusterChunkId, _clusterSlotIndex);
-            return ref Unsafe.AsRef<T>(_clusterBase + _clusterLayout.ComponentOffset(slot) + _clusterSlotIndex * _clusterLayout.ComponentSize(slot));
+            return ref Unsafe.AsRef<T>(svHeadPtr);
         }
 
         {
@@ -283,7 +341,14 @@ public unsafe ref struct EntityRef
                 return ref Unsafe.AsRef<T>((byte*)rawPtr + table.ComponentOverhead);
             }
 
-            if (table.HasShadowableIndexes)
+            // CM-02: a DefaultDiscipline=Commit component escalates the whole tx to Commit before the (skipped) shadow capture below.
+            if (table.StorageMode == StorageMode.SingleVersion && table.Discipline == DurabilityDiscipline.Commit)
+            {
+                _accessor.ResolveCommitDiscipline(table);
+            }
+
+            // Commit discipline stages and reconciles indexes at commit — skip the per-tick shadow capture (which feeds the fence-time Move).
+            if (table.HasShadowableIndexes && _accessor.Discipline != DurabilityDiscipline.Commit)
             {
                 _accessor.ShadowIndexedFields<T>(table, chunkId, _id);
             }

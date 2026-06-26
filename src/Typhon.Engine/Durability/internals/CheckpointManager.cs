@@ -77,8 +77,17 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     /// background checkpoint thread, off every hot path.</summary>
     internal Action CycleFaultInjector { get; set; }
 
-    /// <summary>Max passes per cycle to retry pages skipped because a writer was active, before the coverage gate blocks the LSN advance (CK-03). Skip windows are
-    /// accessor-scoped (~µs), so the second pass almost always clears them.</summary>
+    /// <summary>
+    /// Wired by <see cref="DatabaseEngine"/> to <c>PersistArchetypeState</c>. Invoked at the START of every checkpoint cycle (before the durability
+    /// barrier) so the per-archetype segment pointers (EntityMap / cluster-segment SPIs in the <c>ArchetypeR1</c> table, plus NextEntityKey + EntityMap
+    /// meta) are updated and ride THIS cycle's barrier + dirty-page flush. Without this a checkpoint consolidates a cluster/EntityMap's DATA pages into
+    /// the data file but leaves the durable ArchetypeR1 still pointing at 0/stale — so a hard crash after the checkpoint reopens an orphaned
+    /// (unreachable) base and loses the entities (#395). Null until the engine wires it (early/test cycles no-op).
+    /// </summary>
+    internal Action PersistDurableMetadataHook { get; set; }
+
+    /// <summary>Max passes per cycle to retry pages skipped because a writer was active, before the coverage gate blocks the LSN advance (CK-03). Skip windows
+    /// are accessor-scoped (~µs), so the second pass almost always clears them.</summary>
     private const int MaxCoveragePasses = 3;
 
     // ═══════════════════════════════════════════════════════════════
@@ -347,6 +356,12 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
             // classification. Null in production — one negligible null-check on the background thread.
             CycleFaultInjector?.Invoke();
 
+            // Persist per-archetype durable metadata (segment SPIs, NextEntityKey, EntityMap meta) into the ArchetypeR1 table BEFORE the barrier, so
+            // its WAL records and dirty pages are flushed by THIS cycle. This makes the consolidated cluster/EntityMap base reachable on reopen after a
+            // hard crash (CK-09 family / #395) — the checkpoint already writes the data pages; this records the pointers to them. Idempotent and cheap
+            // (skips archetypes whose state is unchanged).
+            PersistDurableMetadataHook?.Invoke();
+
             // Step 1: Durability barrier (CK-01/CK-02). Flush the WAL through everything appended so far, then take the
             // post-flush DurableLsn as the cycle's authoritative high-water (barrierLsn). The checkpoint advances to
             // THIS — not the stale loop-sampled targetLsn — so any records appended since the loop's trigger are now
@@ -401,7 +416,7 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
                             _walManager.RequestFlush();
                             _walManager.WaitForDurable(_walManager.LastAppendedLsn, ref ctx);
 
-                            using (var fsyncScope = TyphonEvent.BeginCheckpointFsync())
+                            using (TyphonEvent.BeginCheckpointFsync())
                             {
                                 _mmf.FlushToDisk();
                             }

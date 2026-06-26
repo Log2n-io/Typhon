@@ -1,6 +1,7 @@
 using NUnit.Framework;
 using System;
 using System.Linq;
+using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Tests.Runtime;
 
@@ -26,6 +27,10 @@ public class AccessDagDerivationTests
     private struct CompA { public int V; }
     private struct CompB { public int V; }
     private struct CompC { public int V; }
+
+    // SingleVersion component for the CM-04 / AC-05 rejection test (issue #392).
+    [Component("Typhon.Test.Cm04.SvComp", 1, StorageMode = StorageMode.SingleVersion)]
+    private struct Cm04SvComp { public int V; }
 
     private class Sys : CallbackSystem
     {
@@ -105,6 +110,22 @@ public class AccessDagDerivationTests
     }
 
     // ── R×W plain detection ───────────────────────────────────────────
+
+    // ── CM-04 / AC-05: ReadsSnapshot requires a Versioned component (issue #392) ──
+    [Test]
+    public void ReadsSnapshot_OnSingleVersionComponent_ThrowsAtBuild()
+    {
+        var schedule = RuntimeSchedule.Create(Options())
+            .PublicTrack.DeclareDag("Test")
+            .Phases(Phase.Input, Phase.Simulation, Phase.Output, Phase.Cleanup)
+            .DefaultPhase(Phase.Simulation)
+            .Add(new Sys { ConfigureAction = b => b.Name("Reader").Phase(Phase.Simulation).ReadsSnapshot<Cm04SvComp>() });
+
+        var ex = Assert.Throws<InvalidOperationException>(() => schedule.Build(_registry.Runtime));
+        Assert.That(ex.Message, Does.Contain("'Reader'"));
+        Assert.That(ex.Message, Does.Contain("ReadsSnapshot"));
+        Assert.That(ex.Message, Does.Contain("Versioned"));
+    }
 
     [Test]
     public void RW_PlainReadWithSamePhaseWriter_Throws()

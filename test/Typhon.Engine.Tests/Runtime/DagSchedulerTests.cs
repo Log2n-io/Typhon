@@ -94,6 +94,29 @@ public class DagSchedulerTests
         Assert.That(executed, Does.Contain("D"));
     }
 
+    // ── Host-crash guard (#395 follow-up). The tick runs on the timer thread — a raw Thread. An exception escaping the inner per-system handlers (e.g.
+    //    from the tick-start hook, or the entity-set prepare phase — the `ViewBase` teardown-race NullReferenceException that aborted the test host
+    //    under load) MUST be caught by ExecuteCallbacks's outer safety net and surfaced via UnhandledExceptionCallback, NOT propagate out of TimerLoop
+    //    and ABORT THE PROCESS. Without the net this test would crash the test host instead of failing. ──
+    [Test]
+    public void TickThread_UnhandledOrchestrationException_SurfacedNotHostCrash()
+    {
+        Exception captured = null;
+        using var scheduler = NewDag(workerCount: 1)
+            .CallbackSystem("S", _ => { })
+            .Build(_registry.Runtime);
+        scheduler.UnhandledExceptionCallback = (_, _, ex) => Interlocked.CompareExchange(ref captured, ex, null);
+        scheduler.TickStartCallback = _ => throw new InvalidOperationException("simulated tick-orchestration fault");
+
+        scheduler.Start();
+        SpinWait.SpinUntil(() => captured != null, TimeSpan.FromSeconds(5));
+        scheduler.Shutdown();
+
+        Assert.That(captured, Is.Not.Null,
+            "tick-thread outer safety net did not fire — an orchestration exception escaped ExecuteCallbacks and would have aborted the host");
+        Assert.That(captured, Is.TypeOf<InvalidOperationException>());
+    }
+
     // ═══════════════════════════════════════════════════════════════
     // Correctness: Multi-threaded mode
     // ═══════════════════════════════════════════════════════════════

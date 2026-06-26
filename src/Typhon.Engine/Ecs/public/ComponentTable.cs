@@ -176,6 +176,13 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
     // ── Storage mode (immutable after construction) ──
     public StorageMode StorageMode { get; private set; }
 
+    /// <summary>
+    /// Default durability discipline for this component, resolved from <c>[Component(DefaultDiscipline=…)]</c>.
+    /// Only consulted for <see cref="StorageMode.SingleVersion"/>; a transaction writing a
+    /// <see cref="DurabilityDiscipline.Commit"/> component is committed-durable for all of its writes (CM-02).
+    /// </summary>
+    public DurabilityDiscipline Discipline { get; private set; }
+
     // ── Persistent segments (Versioned & SingleVersion) ──
     public ChunkBasedSegment<PersistentStore> ComponentSegment { get; private set; }
     public ChunkBasedSegment<PersistentStore> CompRevTableSegment { get; private set; }
@@ -411,6 +418,7 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
         DBE = dbe;
         Definition = definition;
         StorageMode = storageMode;
+        Discipline = definition.DefaultDiscipline;
 
         if (storageMode == StorageMode.Transient)
         {
@@ -473,6 +481,7 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
         DBE = dbe;
         Definition = definition;
         StorageMode = storageMode;
+        Discipline = definition.DefaultDiscipline;
 
         // Transient data doesn't survive restart — create a fresh empty table
         if (storageMode == StorageMode.Transient)

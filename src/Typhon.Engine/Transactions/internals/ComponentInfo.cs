@@ -79,6 +79,24 @@ internal sealed class ComponentInfo
     /// <summary>Per-entity (primary key → component-revision info) working set for this transaction.</summary>
     internal Dictionary<long, CompRevInfo> SingleCache;
 
+    /// <summary>One Commit-discipline staged write: where the value lives in the tx staging buffer, plus the HEAD location captured at write time.</summary>
+    public struct StagedSlot
+    {
+        /// <summary>0-based offset into the transaction's native staging buffer (presence in <see cref="CommitStaged"/> means "staged").</summary>
+        public int Offset;
+
+        /// <summary>HEAD location captured at stage time so publish needs no EntityMap re-lookup: cluster ⇒ clusterChunkId*64+slotIndex; flat ⇒ content
+        /// chunkId.</summary>
+        public int Location;
+    }
+
+    /// <summary>
+    /// Commit-discipline (SingleVersion) staging map for this transaction: entity primary key → <see cref="StagedSlot"/>. Lazily allocated on the first
+    /// Commit-discipline write to this component. Kept separate from <see cref="SingleCache"/> so staging entries never collide with the Versioned
+    /// revision-chain consumers (rollback iteration, cluster resolution). See <c>claude/design/Ecs/committed-storage-mode.md</c> (issue #392).
+    /// </summary>
+    internal Dictionary<long, StagedSlot> CommitStaged;
+
     public void AddNew(long pk, CompRevInfo entry) => SingleCache.Add(pk, entry);
 
     /// <summary>

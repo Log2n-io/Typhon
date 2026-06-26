@@ -4,6 +4,7 @@ using NUnit.Framework;
 using System;
 using System.IO;
 using System.Linq;
+using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Tests;
 
@@ -11,14 +12,15 @@ namespace Typhon.Engine.Tests;
 /// The T-5 differential recovery oracle (design 03 §4.2, 08 T-5) exercised at one crash point. Each test runs a workload to durability, hard-crashes
 /// (<see cref="DatabaseEngine.SimulateHardCrash"/>), reopens to drive WAL v2 recovery, then asserts the recovered engine reproduces a <see cref="RecoveryShadowModel"/>
 /// captured just before the crash. This is the differential regression lock for the P1.2 flat-path recovery (increments 1–8 generalized from hand-picked asserts into a
-/// property) and the evidence generator that adjudicates the two remaining gaps:
+/// property) and the evidence generator that adjudicated the two gaps it originally surfaced — both now FIXED and green:
 /// <list type="bullet">
-/// <item><b>index axis</b> (<see cref="IndexedFlat_IndexAxis_MatchesBroadScan"/>) — a recovered <i>indexed</i> archetype whose secondary B+Tree is not rebuilt.</item>
-/// <item><b>cluster axis</b> (<see cref="ClusterAllSv_PrimaryAxis_SurvivesCrash"/>) — a recovered all-SingleVersion (cluster-eligible) archetype the flat-only applier
-/// does not restore.</item>
+/// <item><b>index axis</b> (<see cref="IndexedFlat_IndexAxis_MatchesBroadScan"/>) — a recovered <i>indexed</i> archetype's secondary B+Tree, now
+/// rebuilt at recovery (RB-01).</item>
+/// <item><b>cluster axis</b> (<see cref="ClusterAllSv_PrimaryAxis_SurvivesCrash"/>) — a recovered all-SingleVersion (cluster-eligible) archetype:
+/// spawned under the Commit discipline its SV values are now WAL-logged per-commit and restored exactly (#395 Face B / design D5).</item>
 /// </list>
-/// Both are quarantined RED (<c>KnownIssue-395-*</c>): the test asserts the desired post-fix behaviour and goes green when the corresponding increment lands, exactly as
-/// the One True Crash Test gated P1.2. The harness mirrors <see cref="TrueCrashE2ETests"/>; the full crash sweep (A1.2) is P1.5 and reuses this oracle over many crash points.
+/// The harness mirrors <see cref="TrueCrashE2ETests"/>; the full crash sweep (A1.2, <see cref="WalCrashSweepTests"/>) reuses this oracle over many
+/// crash points.
 /// </summary>
 [TestFixture]
 internal sealed class DifferentialRecoveryOracleTests
@@ -265,16 +267,18 @@ internal sealed class DifferentialRecoveryOracleTests
         });
     }
 
-    // ── AC6 — cluster-axis measurement: P2-gated, NOT a P1 recovery-routing bug ──
-    // The oracle established (record-kind counts: spawns=10, slots=0, with and without a tick-fence) that cluster/SingleVersion spawn VALUES are checkpoint-durable,
-    // not WAL-durable per-commit: the spawn path deliberately does not set the cluster fence dirty bitmap (Transaction.ECS.cs:1522), so neither the per-commit log nor
-    // the tick-fence carries the value. An Immediate commit makes an SV value durable only at the next checkpoint; per-commit SV WAL durability is the Committed
-    // discipline (P2 / design D5). So a window cluster/SV spawn recovers alive-but-default — a phantom — until P2. (Spawn IS logged but its value is not: an atomicity
-    // nuance flagged for P2.) This is therefore not a RecoveryApplier routing fix; it goes green when P2 makes SV values WAL-durable.
+    // ── AC6 — cluster-axis recovery under the Commit discipline (#395 Face B — FIXED) ──
+    // The oracle originally established (record-kind counts: spawns=10, slots=0) that a TickFence cluster/SingleVersion spawn logs its lifecycle but
+    // NOT its values — the spawn copies them into the cluster SoA (checkpoint-durable) without emitting Slot records, so a hard crash before a
+    // checkpoint recovered the entity alive-but-default (a phantom). That was #395 Face B, deferred to "the Committed discipline makes per-commit SV
+    // WAL durability" (design D5). It is now FIXED: BuildCommitBatch emits a Slot upsert per SingleVersion spawn value when the tx is
+    // Commit-discipline, and recovery aggregates the Spawn + Slots and applies them together (ApplySpawnedEntity → cluster slot claim + SoA write). So
+    // an all-SV cluster archetype spawned under Commit discipline recovers EXACTLY across a hard crash with NO checkpoint. (A plain TickFence spawn is
+    // still checkpoint-durable only — the documented non-guarantee, not a bug.)
     [Test]
     [CancelAfter(15_000)]
-    [Category("KnownIssue-395-sv-durability-p2")]
-    public void ClusterAllSv_PrimaryAxis_SurvivesCrash() => RecoverWith(new ClusterAllSvWorkload(10), RecoveryOracle.AssertPrimaryAxis);
+    public void ClusterAllSv_PrimaryAxis_SurvivesCrash()
+        => RecoverWith(new ClusterAllSvWorkload(10, DurabilityDiscipline.Commit), RecoveryOracle.AssertPrimaryAxis);
 
     // ── Scale: a large indexed workload forces the recovery index rebuild to split the B+Tree across many nodes — stresses the apply loop + RB-01 (index.Add) at scale ──
     [Test]

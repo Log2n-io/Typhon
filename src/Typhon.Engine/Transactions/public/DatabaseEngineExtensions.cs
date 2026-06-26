@@ -1,4 +1,5 @@
 using JetBrains.Annotations;
+using Typhon.Schema.Definition;
 
 namespace Typhon.Engine;
 
@@ -13,6 +14,10 @@ public static class DatabaseEngineExtensions
     /// </summary>
     /// <param name="dbe">The database engine.</param>
     /// <param name="durabilityMode">Controls when WAL records become crash-safe. Default is <see cref="DurabilityMode.Deferred"/>.</param>
+    /// <param name="discipline">
+    /// Durability discipline for SingleVersion-layout writes (<see cref="DurabilityDiscipline.TickFence"/> default, or
+    /// <see cref="DurabilityDiscipline.Commit"/> for zero-loss, atomic, commit-scoped writes). Fixed for the transaction.
+    /// </param>
     /// <returns>A transaction whose <see cref="System.IDisposable.Dispose"/> also disposes the owning UoW.</returns>
     /// <remarks>
     /// This is a convenience wrapper for the common single-transaction pattern:
@@ -24,11 +29,12 @@ public static class DatabaseEngineExtensions
     /// </code>
     /// </remarks>
     [return: TransfersOwnership]
-    public static Transaction CreateQuickTransaction(this DatabaseEngine dbe, DurabilityMode durabilityMode = DurabilityMode.Deferred)
+    public static Transaction CreateQuickTransaction(this DatabaseEngine dbe, DurabilityMode durabilityMode = DurabilityMode.Deferred,
+        DurabilityDiscipline discipline = DurabilityDiscipline.TickFence)
     {
         var uow = dbe.CreateUnitOfWork(durabilityMode);
         dbe.LogUowLifecycle("CreateQuickTransaction: UoW created, calling CreateTransaction");
-        var tx = uow.CreateTransaction();
+        var tx = uow.CreateTransaction(discipline);
         dbe.LogQuickTxCreated(tx.TSN);
         tx.OwnsUnitOfWork = true;
         return tx;

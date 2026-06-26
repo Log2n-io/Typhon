@@ -3,6 +3,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Threading;
+using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Internals;
 
@@ -216,7 +217,7 @@ internal class TransactionChain : ResourceNode, IDebugPropertiesProvider
     /// Lock-free transaction creation. No lock acquired — uses ConcurrentQueue for pooling, atomic TSN increment, and CAS-based PushHead.
     /// </summary>
     [return: TransfersOwnership]
-    public Transaction CreateTransaction(DatabaseEngine dbe, UnitOfWork uow = null, bool readOnly = false)
+    public Transaction CreateTransaction(DatabaseEngine dbe, UnitOfWork uow = null, bool readOnly = false, DurabilityDiscipline discipline = DurabilityDiscipline.TickFence)
     {
         if (_activeCount >= _maxActiveTransactions)
         {
@@ -228,7 +229,7 @@ internal class TransactionChain : ResourceNode, IDebugPropertiesProvider
             t = new Transaction();
         }
 
-        t.Init(dbe, Interlocked.Increment(ref _nextFreeId), uow, readOnly);
+        t.Init(dbe, Interlocked.Increment(ref _nextFreeId), uow, readOnly, discipline);
 
         // Gauge: cumulative "transactions created" counter. Single convergence point — every call path (UnitOfWork.CreateTransaction,
         // DatabaseEngine.CreateQuickTransaction, DatabaseEngine.CreateReadOnlyTransaction) funnels through this method, so one

@@ -127,7 +127,7 @@ public unsafe partial class Transaction : EntityAccessor
         }
     }
 
-    public void Init(DatabaseEngine dbe, long tsn, UnitOfWork uow = null, bool readOnly = false)
+    public void Init(DatabaseEngine dbe, long tsn, UnitOfWork uow = null, bool readOnly = false, DurabilityDiscipline discipline = DurabilityDiscipline.TickFence)
     {
         // Residual risk: _dbe.MMF.CreateChangeSet allocates and could throw OOM in extreme conditions, dropping the span.
         // Per project policy this is acceptable for a hot per-tx path.
@@ -148,6 +148,10 @@ public unsafe partial class Transaction : EntityAccessor
         _committedOperationCount = null;
         _deletedComponentCount = 0;
         _entityOperationCount = 0;
+        // Durability discipline (SingleVersion layout only). Explicit Commit is final; TickFence (explicit or default)
+        // stays open so a DefaultDiscipline=Commit component can escalate the whole tx on first touch (CM-02).
+        _discipline = discipline;
+        _didInPlaceSvWrite = false;
         _changeSet = readOnly ? null : (uow?.ChangeSet ?? _dbe.MMF.CreateChangeSet());
         State = TransactionState.Created;
         TSN = tsn;
@@ -1238,7 +1242,7 @@ public unsafe partial class Transaction : EntityAccessor
 
         // LCRI / CommitSequence bookkeeping — header field writes (under the retained handler lock when LockHeld).
         ref var header = ref compRevTableAccessor.GetChunk<CompRevStorageHeader>(e.FirstChunkId, true);
-        header.LastCommitRevisionIndex = (short)Math.Max(e.LastCommitRevisionIndex, e.CurRevisionIndex);
+        header.LastCommitRevisionIndex = Math.Max(e.LastCommitRevisionIndex, e.CurRevisionIndex);
         if (!e.Created)
         {
             header.CommitSequence++;
@@ -1381,90 +1385,12 @@ public unsafe partial class Transaction : EntityAccessor
         if (hasIndexes)
         {
             // Read new and old field values from CONTENT CHUNKS (not cluster slot — cluster hasn't been updated yet).
-            byte* newComp = compRevInfo.CurCompContentChunkId != 0 ? 
+            byte* newComp = compRevInfo.CurCompContentChunkId != 0 ?
                 _clusterCommitContentAccessor.GetChunkAddress(compRevInfo.CurCompContentChunkId) + table.ComponentOverhead : null;
-            byte* oldComp = readCompChunkId != 0 ? 
+            byte* oldComp = readCompChunkId != 0 ?
                 _clusterCommitContentAccessor.GetChunkAddress(readCompChunkId) + table.ComponentOverhead : null;
 
-            // Find the index slot for this component
-            for (int ixs = 0; ixs < clusterState.IndexSlots.Length; ixs++)
-            {
-                ref var ixSlot = ref clusterState.IndexSlots[ixs];
-                if (ixSlot.Slot != compSlot)
-                {
-                    continue;
-                }
-
-                for (int fi = 0; fi < ixSlot.Fields.Length; fi++)
-                {
-                    ref var field = ref ixSlot.Fields[fi];
-                    var idxAccessor = field.Index.Segment.CreateChunkAccessor(_changeSet);
-                    try
-                    {
-                        if (newComp != null && oldComp != null)
-                        {
-                            // Update: move from old key to new key
-                            field.Index.Move(oldComp + field.FieldOffset, newComp + field.FieldOffset, clusterLocation, ref idxAccessor);
-                        }
-                        else if (newComp != null)
-                        {
-                            // Insert (first commit after spawn)
-                            field.Index.Add(newComp + field.FieldOffset, clusterLocation, ref idxAccessor);
-                        }
-                        else if (oldComp != null)
-                        {
-                            // Delete
-                            field.Index.Remove(oldComp + field.FieldOffset, out _, ref idxAccessor);
-                        }
-
-                        // Widen zone map with new value
-                        if (newComp != null)
-                        {
-                            field.ZoneMap?.Widen(clusterChunkId, newComp + field.FieldOffset);
-                        }
-
-                        // Notify views of index change (delta buffer for incremental views)
-                        var viewTable = es.SlotToComponentTable[ixSlot.Slot];
-                        var views = viewTable.ViewRegistry.GetViewsForField(fi);
-                        for (int v = 0; v < views.Length; v++)
-                        {
-                            var reg = views[v];
-                            if (reg.View.IsDisposed)
-                            {
-                                continue;
-                            }
-
-                            if (newComp != null && oldComp != null)
-                            {
-                                // Move: emit old and new keys
-                                var oldKey = KeyBytes8.FromPointer(oldComp + field.FieldOffset, field.FieldSize);
-                                var newKey = KeyBytes8.FromPointer(newComp + field.FieldOffset, field.FieldSize);
-                                byte flags = (byte)(fi & 0x3F);
-                                reg.DeltaBuffer.TryAppend(entityKey, oldKey, newKey, TSN, flags, reg.ComponentTag);
-                            }
-                            else if (newComp != null)
-                            {
-                                // Add: isCreation flag
-                                var newKey = KeyBytes8.FromPointer(newComp + field.FieldOffset, field.FieldSize);
-                                byte flags = (byte)((fi & 0x3F) | 0x40); // isCreation
-                                reg.DeltaBuffer.TryAppend(entityKey, default, newKey, TSN, flags, reg.ComponentTag);
-                            }
-                            else if (oldComp != null)
-                            {
-                                // Remove: isDeletion flag
-                                var oldKey = KeyBytes8.FromPointer(oldComp + field.FieldOffset, field.FieldSize);
-                                byte flags = (byte)((fi & 0x3F) | 0x80); // isDeletion
-                                reg.DeltaBuffer.TryAppend(entityKey, oldKey, default, TSN, flags, reg.ComponentTag);
-                            }
-                        }
-                    }
-                    finally
-                    {
-                        idxAccessor.Dispose();
-                    }
-                }
-                break; // Found the matching index slot
-            }
+            ReconcileClusterIndexAndViews(es, clusterState, compSlot, clusterChunkId, clusterLocation, entityKey, oldComp, newComp);
         }
 
         // Phase B (HEAD→cluster slot copy) is deferred to PublishClusterVersionedSlot (AP-01). The cluster dirty bit it sets is what later drives
@@ -1513,6 +1439,275 @@ public unsafe partial class Transaction : EntityAccessor
             _clusterCommitContentAccessor.Dispose();
             _clusterCommitClusterAccessor.Dispose();
             _hasClusterCommitAccessors = false;
+        }
+    }
+
+    /// <summary>
+    /// Reconciles the per-archetype B+Tree index(es) and view delta buffers for one component slot of one cluster entity, given the field-value
+    /// base pointers BEFORE (<paramref name="oldComp"/>) and AFTER (<paramref name="newComp"/>) the change (each already past the component overhead;
+    /// null means absent). Move when both are present, Add on insert, Remove on delete. Shared by the Versioned cluster commit
+    /// (<see cref="PrepareClusterVersionedSlot"/>, value pointers into content chunks) and the Commit-discipline staged publish
+    /// (<see cref="PublishStagedCommitWrites"/>, old = cluster HEAD, new = staging buffer).
+    /// </summary>
+    private void ReconcileClusterIndexAndViews(ArchetypeEngineState es, ArchetypeClusterState clusterState, int compSlot, int clusterChunkId,
+        int clusterLocation, long entityKey, byte* oldComp, byte* newComp)
+    {
+        for (int ixs = 0; ixs < clusterState.IndexSlots.Length; ixs++)
+        {
+            ref var ixSlot = ref clusterState.IndexSlots[ixs];
+            if (ixSlot.Slot != compSlot)
+            {
+                continue;
+            }
+
+            for (int fi = 0; fi < ixSlot.Fields.Length; fi++)
+            {
+                ref var field = ref ixSlot.Fields[fi];
+                var idxAccessor = field.Index.Segment.CreateChunkAccessor(_changeSet);
+                try
+                {
+                    if (newComp != null && oldComp != null)
+                    {
+                        // Update: move from old key to new key
+                        field.Index.Move(oldComp + field.FieldOffset, newComp + field.FieldOffset, clusterLocation, ref idxAccessor);
+                    }
+                    else if (newComp != null)
+                    {
+                        // Insert (first commit after spawn)
+                        field.Index.Add(newComp + field.FieldOffset, clusterLocation, ref idxAccessor);
+                    }
+                    else if (oldComp != null)
+                    {
+                        // Delete
+                        field.Index.Remove(oldComp + field.FieldOffset, out _, ref idxAccessor);
+                    }
+
+                    // Widen zone map with new value
+                    if (newComp != null)
+                    {
+                        field.ZoneMap?.Widen(clusterChunkId, newComp + field.FieldOffset);
+                    }
+
+                    // Notify views of index change (delta buffer for incremental views)
+                    var viewTable = es.SlotToComponentTable[ixSlot.Slot];
+                    var views = viewTable.ViewRegistry.GetViewsForField(fi);
+                    for (int v = 0; v < views.Length; v++)
+                    {
+                        var reg = views[v];
+                        if (reg.View.IsDisposed)
+                        {
+                            continue;
+                        }
+
+                        if (newComp != null && oldComp != null)
+                        {
+                            // Move: emit old and new keys
+                            var oldKey = KeyBytes8.FromPointer(oldComp + field.FieldOffset, field.FieldSize);
+                            var newKey = KeyBytes8.FromPointer(newComp + field.FieldOffset, field.FieldSize);
+                            byte flags = (byte)(fi & 0x3F);
+                            reg.DeltaBuffer.TryAppend(entityKey, oldKey, newKey, TSN, flags, reg.ComponentTag);
+                        }
+                        else if (newComp != null)
+                        {
+                            // Add: isCreation flag
+                            var newKey = KeyBytes8.FromPointer(newComp + field.FieldOffset, field.FieldSize);
+                            byte flags = (byte)((fi & 0x3F) | 0x40); // isCreation
+                            reg.DeltaBuffer.TryAppend(entityKey, default, newKey, TSN, flags, reg.ComponentTag);
+                        }
+                        else if (oldComp != null)
+                        {
+                            // Remove: isDeletion flag
+                            var oldKey = KeyBytes8.FromPointer(oldComp + field.FieldOffset, field.FieldSize);
+                            byte flags = (byte)((fi & 0x3F) | 0x80); // isDeletion
+                            reg.DeltaBuffer.TryAppend(entityKey, oldKey, default, TSN, flags, reg.ComponentTag);
+                        }
+                    }
+                }
+                finally
+                {
+                    idxAccessor.Dispose();
+                }
+            }
+            break; // Found the matching index slot
+        }
+    }
+
+    /// <summary>
+    /// PUBLISH pass for Commit-discipline (SingleVersion) staged writes (issue #392, Variant A). Runs AFTER the WAL Append (AP-01). For each staged
+    /// (component, entity): re-resolves the cluster slot, reconciles the exact B+Tree index (old key from the still-unpublished HEAD, new key from the
+    /// staged slot — matching Versioned, CM-05/AC-11) and notifies views, copies the staged bytes into the cluster HEAD (the visibility act), then marks
+    /// the slot dirty (drives spatial migration at the fence and a benign last-writer-wins fence re-emit — CM-03). Spatial / zone maps stay fence-batched
+    /// for all modes (decision #31). No-op when nothing was staged. Commit discipline currently targets cluster-eligible archetypes only.
+    /// </summary>
+    /// <summary>Benchmark-only hook (#392 AC-5): runs just the staged-commit PUBLISH pass on an already-staged, not-yet-committed transaction, so the
+    /// per-component publish cost can be measured in isolation from BUILD/APPEND/WAIT. Idempotent for non-indexed components (re-memcpy +
+    /// re-SetDirty).</summary>
+    internal void PublishStagedForBenchmark() => PublishStagedCommitWrites();
+
+    private void PublishStagedCommitWrites()
+    {
+        if (_commitStagingBuffer == null)
+        {
+            return;
+        }
+
+        foreach (var kvp in _componentInfos)
+        {
+            var info = kvp.Value;
+            if (info.CommitStaged == null || info.ComponentTable.StorageMode != StorageMode.SingleVersion)
+            {
+                continue;
+            }
+
+            foreach (var staged in info.CommitStaged)
+            {
+                PublishStagedEntry(info, staged.Key, staged.Value);
+            }
+        }
+
+        DisposeClusterCommitAccessors();
+    }
+
+    /// <summary>Publishes one Commit-discipline staged write to its HEAD (index reconcile → HEAD memcpy → dirty mark), dispatching to the cluster SoA
+    /// slot or, for a non-cluster archetype, the entity's content chunk. Uses the HEAD location captured at stage time (<see cref="ComponentInfo.StagedSlot"/>)
+    /// — no EntityMap re-lookup (the writing tx never relocates the entity it is writing). See <see cref="PublishStagedCommitWrites"/>.</summary>
+    private void PublishStagedEntry(ComponentInfo info, long pk, ComponentInfo.StagedSlot stagedSlot)
+    {
+        var componentTypeId = info.ComponentTypeId;
+        var entityId = EntityId.FromRaw(pk);
+        var archId = entityId.ArchetypeId;
+        var meta = ArchetypeRegistry.GetMetadata(archId);
+        var es = _dbe._archetypeStates[archId];
+        if (!meta.TryGetSlot(componentTypeId, out byte compSlotByte))
+        {
+            return;
+        }
+        int compSlot = compSlotByte;
+        byte* staged = _commitStagingBuffer + stagedSlot.Offset;
+        var clusterState = es?.ClusterState;
+
+        // Non-cluster (flat) archetype: publish to the entity's content chunk HEAD instead of a cluster SoA slot (Location = content chunkId).
+        if (clusterState == null || !meta.IsClusterEligible)
+        {
+            PublishStagedFlatEntry(info, stagedSlot.Location, entityId.EntityKey, staged);
+            return;
+        }
+
+        // Lazy-cache the per-archetype cluster accessor (reused across consecutive same-archetype staged entries; map/content accessors kept for parity
+        // with the Versioned publish that shares these fields).
+        if (!_hasClusterCommitAccessors || _clusterCommitArchId != archId)
+        {
+            DisposeClusterCommitAccessors();
+            _clusterCommitMapAccessor = es.EntityMap.Segment.CreateChunkAccessor();
+            _clusterCommitContentAccessor = es.SlotToComponentTable[compSlot].ComponentSegment.CreateChunkAccessor();
+            _clusterCommitClusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor();
+            _clusterCommitArchId = archId;
+            _hasClusterCommitAccessors = true;
+        }
+
+        // Coords captured at stage time — no per-component EntityMap re-lookup (Location = clusterChunkId*64 + slotIndex).
+        int clusterLocation = stagedSlot.Location;
+        int clusterChunkId = clusterLocation >> 6;
+        byte slotIndex = (byte)(clusterLocation & 63);
+
+        var layout = clusterState.Layout;
+        byte* clusterBase = _clusterCommitClusterAccessor.GetChunkAddress(clusterChunkId, true);
+        int compSize = layout.ComponentSize(compSlot);
+        byte* headPtr = clusterBase + layout.ComponentOffset(compSlot) + slotIndex * compSize;
+
+        // Exact-index reconcile BEFORE the HEAD memcpy: old key still lives in the HEAD slot, new key in the staged slot (CM-05/AC-11).
+        if (clusterState.IndexSlots != null)
+        {
+            ReconcileClusterIndexAndViews(es, clusterState, compSlot, clusterChunkId, clusterLocation, entityId.EntityKey, headPtr, staged);
+        }
+
+        // Visibility act: publish the staged value to the cluster HEAD, then mark dirty (CM-03: memcpy THEN dirty).
+        Unsafe.CopyBlockUnaligned(headPtr, staged, (uint)compSize);
+        clusterState.SetDirty(clusterChunkId, slotIndex);
+    }
+
+    /// <summary>
+    /// Publishes one Commit-discipline staged write to a non-cluster entity's content chunk HEAD using the chunkId captured at stage time (no EntityMap
+    /// re-lookup): reconciles the table's exact B+Tree index(es) (old key from the still-unpublished HEAD, new key from the staged slot — CM-05/AC-11),
+    /// copies the staged value into the chunk HEAD (the visibility act), then marks the chunk dirty for the tick fence.
+    /// </summary>
+    private void PublishStagedFlatEntry(ComponentInfo info, int chunkId, long entityKey, byte* staged)
+    {
+        if (chunkId == 0)
+        {
+            return;
+        }
+
+        var table = info.ComponentTable;
+        byte* headPtr = info.CompContentAccessor.GetChunkAddress(chunkId, true) + info.ComponentOverhead;
+
+        // Exact-index reconcile BEFORE the HEAD memcpy: old key still lives in the chunk HEAD, new key in the staged slot.
+        if (table.HasShadowableIndexes)
+        {
+            ReconcileFlatIndexAndViews(table, chunkId, entityKey, headPtr, staged);
+        }
+
+        // Visibility act: publish the staged value to the chunk HEAD, then mark dirty (CM-03: memcpy THEN dirty).
+        Unsafe.CopyBlockUnaligned(headPtr, staged, (uint)table.ComponentStorageSize);
+        table.DirtyBitmap?.Set(chunkId);
+    }
+
+    /// <summary>
+    /// Flat (non-cluster) counterpart of <see cref="ReconcileClusterIndexAndViews"/>: updates each indexed field's table B+Tree from <paramref name="oldComp"/>
+    /// (the chunk HEAD field base, pre-publish) to <paramref name="newComp"/> (the staged slot) and notifies views. Mirrors the fence-time
+    /// <c>ProcessShadowFieldEntries</c> Move branch, but runs at commit (the Commit-discipline write skips shadow capture). The B+Tree value is the entity's
+    /// content chunkId; for an AllowMultiple index the element id (in the chunk overhead, untouched by the value memcpy) is moved and written back.
+    /// </summary>
+    private void ReconcileFlatIndexAndViews(ComponentTable table, int chunkId, long entityKey, byte* oldComp, byte* newComp)
+    {
+        var fields = table.IndexedFieldInfos;
+        for (int fi = 0; fi < fields.Length; fi++)
+        {
+            ref var ifi = ref fields[fi];
+            // oldComp/newComp point at the component DATA (the chunk HEAD past its overhead, and the staging slot — both
+            // data-relative). IndexedFieldInfo.OffsetToField, however, is measured from the CHUNK BASE so it INCLUDES the
+            // overhead (matching the fence path ProcessShadowFieldEntries, which reads at GetChunkAddress(chunkId) + OffsetToField).
+            // Rebase to a data-relative offset before indexing into the two data pointers — adding the chunk-base OffsetToField
+            // directly would double-count ComponentOverhead and read the key from the wrong location.
+            int dataFieldOffset = ifi.OffsetToField - table.ComponentOverhead;
+            var oldKey = KeyBytes8.FromPointer(oldComp + dataFieldOffset, ifi.Size);
+            byte* newFieldPtr = newComp + dataFieldOffset;
+            var newKey = KeyBytes8.FromPointer(newFieldPtr, ifi.Size);
+            if (oldKey.RawValue == newKey.RawValue)
+            {
+                continue;
+            }
+
+            var index = ifi.PersistentIndex;
+            var idxAccessor = index.Segment.CreateChunkAccessor(_changeSet);
+            try
+            {
+                if (index.AllowMultiple)
+                {
+                    // Element id lives in the chunk overhead (chunk base = HEAD field base − ComponentOverhead); the value memcpy never touches it.
+                    int* elementIdPtr = (int*)(oldComp - table.ComponentOverhead + ifi.OffsetToIndexElementId);
+                    *elementIdPtr = index.MoveValue(&oldKey, newFieldPtr, *elementIdPtr, chunkId, ref idxAccessor, out _, out _);
+                }
+                else
+                {
+                    index.Move(&oldKey, newFieldPtr, chunkId, ref idxAccessor);
+                }
+
+                var views = table.ViewRegistry.GetViewsForField(fi);
+                for (int v = 0; v < views.Length; v++)
+                {
+                    var reg = views[v];
+                    if (reg.View.IsDisposed)
+                    {
+                        continue;
+                    }
+                    reg.DeltaBuffer.TryAppend(entityKey, oldKey, newKey, TSN, (byte)(fi & 0x3F), reg.ComponentTag);
+                }
+            }
+            finally
+            {
+                idxAccessor.Dispose();
+            }
         }
     }
 
@@ -1646,6 +1841,46 @@ public unsafe partial class Transaction : EntityAccessor
                 var s = _spawnedEntities[i];
                 batch.AddSpawn((long)s.Id.RawValue, s.Id.ArchetypeId, s.EnabledBits);
             }
+
+            // #395 Face B (design D5): under Commit discipline a spawn must be ATOMICALLY durable — also WAL-log its SingleVersion component VALUES
+            // (one Slot upsert each). Without this the spawn lifecycle is logged but the SV values are not (they only ride the cluster SoA / content
+            // chunk, persisted by the next checkpoint), so a hard crash before that checkpoint recovers the entity alive-but-default — a phantom.
+            // Recovery aggregates the Spawn + these Slots by EntityId and applies them together (ApplySpawnedEntity → cluster slot claim + SoA value
+            // write), so the entity recovers with its values. TickFence spawns stay checkpoint-durable by design (no per-commit SV WAL). Versioned
+            // spawn values are already logged via their revision chains (SingleCache loop below); Transient is never logged. Read from the
+            // spawn-staging content chunk (entry.Loc[slot]) — FinalizeSpawns runs later (PUBLISH), so the cluster SoA is not populated yet, but the
+            // value already sits at ComponentOverhead in the staging chunk.
+            if (_discipline == DurabilityDiscipline.Commit)
+            {
+                for (int i = 0; i < _spawnedEntities.Count; i++)
+                {
+                    var s = _spawnedEntities[i];
+                    if (_pendingDestroys != null && _pendingDestroys.Contains(s.Id))
+                    {
+                        continue;   // spawned and destroyed in the same tx — nothing to restore
+                    }
+
+                    var slotTables = _dbe._archetypeStates[s.Id.ArchetypeId].SlotToComponentTable;
+                    for (int slot = 0; slot < slotTables.Length; slot++)
+                    {
+                        var table = slotTables[slot];
+                        if (table == null || table.StorageMode != StorageMode.SingleVersion)
+                        {
+                            continue;   // Versioned already logged (chains); Transient never logged
+                        }
+
+                        int locChunkId = s.Loc[slot];
+                        if (locChunkId <= 0)
+                        {
+                            continue;   // component not provided at spawn
+                        }
+
+                        var info = GetComponentInfo(table.Definition.POCOType);
+                        var payload = info.CompContentAccessor.GetChunkAsReadOnlySpan(locChunkId);
+                        batch.AddSlot((long)s.Id.RawValue, (ushort)info.ComponentTypeId, payload.Slice(info.ComponentOverhead, table.ComponentStorageSize));
+                    }
+                }
+            }
         }
 
         // Component values: one Slot upsert per modified component (skip reads and deletes — deletes ride the entity-destroy record).
@@ -1673,6 +1908,17 @@ public unsafe partial class Transaction : EntityAccessor
                 var overhead = info.ComponentTable.ComponentOverhead;
                 var payload = info.CompContentAccessor.GetChunkAsReadOnlySpan(cri.CurCompContentChunkId);
                 batch.AddSlot(cacheEntry.Key, componentTypeId, payload.Slice(overhead, storageSize));
+            }
+
+            // Commit-discipline (SingleVersion) staged writes: the value lives in the native staging buffer (offset is 1-based), already sliced past
+            // the component overhead. Logged as an ordinary Slot record; the batch's Committed flag is telemetry (recovery applies it like any
+            // tick-fence slot record — last-writer-wins by LSN, AC-7).
+            if (info.CommitStaged != null)
+            {
+                foreach (var staged in info.CommitStaged)
+                {
+                    batch.AddSlot(staged.Key, componentTypeId, new ReadOnlySpan<byte>(_commitStagingBuffer + staged.Value.Offset, storageSize));
+                }
             }
         }
 
@@ -1711,7 +1957,7 @@ public unsafe partial class Transaction : EntityAccessor
             {
                 _commitBatchArena ??= new CommitBatchArena();
                 _commitBatchArena.Reset();
-                var batch = new CommitBatchBuilder(_commitBatchArena, TSN, UowId);
+                var batch = new CommitBatchBuilder(_commitBatchArena, TSN, UowId, committedDiscipline: _discipline == DurabilityDiscipline.Commit);
                 BuildCommitBatch(ref batch);
                 if (!batch.IsEmpty)
                 {
@@ -1962,6 +2208,9 @@ public unsafe partial class Transaction : EntityAccessor
             _dbe.LogCommitPhase(TSN, "Publish");
             PublishPreparedComponents();
             FlushEcsPendingOperations();
+            // Commit-discipline (SingleVersion) staged writes: publish to cluster HEAD + reconcile exact indexes (after FinalizeSpawns so a staged
+            // write to a same-tx-spawned entity resolves in the EntityMap). Variant A / issue #392.
+            PublishStagedCommitWrites();
 
             // ── WAIT (Immediate) + transition to Committed. Publish already ran and released handler locks, so the durability wait never spans a held
             //    lock; a wait timeout here means durability-uncertain, not rollback (AP-02). ──

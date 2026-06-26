@@ -316,6 +316,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// leave indexes empty). Distinct from <see cref="_headsTrusted"/>, which can be false on a clean migration reopen with no WAL window (indexes load normally).</summary>
     internal bool WalFilesPresentAtOpen { get; private set; }
 
+    /// <summary>Gates the checkpoint-time <c>PersistArchetypeState</c> hook (#395 / CK-10). False during open + recovery (so the recovery seal — a
+    /// ForceCheckpoint — does NOT persist segment SPIs mid-rebuild); set true at the end of <c>InitializeArchetypes</c> so every steady-state
+    /// checkpoint records them.</summary>
+    private volatile bool _archetypeSpiPersistArmed;
+
     /// <summary>Test-only: when set, <see cref="Dispose"/> skips <c>MarkCleanShutdown</c>, reproducing an unclean shutdown
     /// (a real crash also never writes the marker). Unit tests cannot abort the process — same convention as the
     /// <c>BulkLoadRecoveryTests</c> incomplete-bulk path.</summary>
@@ -819,6 +824,18 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         CheckpointManager = new CheckpointManager(MMF, UowRegistry, WalManager, _options.Resources, EpochManager, StagingBufferPool, _durabilityNode,
             initialCheckpointLsn, () => _lastTickFenceLSN);
         CheckpointManager.Logger = Logger;
+        // Persist per-archetype segment SPIs at every checkpoint so a consolidated cluster/EntityMap base is reachable on reopen after a hard crash
+        // (#395). Idempotent and skip-unchanged, so a steady-state cycle is nearly free. Runs at cycle start (before the barrier) so its WAL records +
+        // dirty pages ride the same cycle. Armed only AFTER InitializeArchetypes completes (incl. the recovery seal), so the seal — itself a
+        // ForceCheckpoint — keeps its original behaviour and does NOT persist SPIs mid-recovery (the rebuilt segments are sealed first; the first
+        // steady-state checkpoint then records them). #395.
+        CheckpointManager.PersistDurableMetadataHook = () =>
+        {
+            if (_archetypeSpiPersistArmed)
+            {
+                PersistArchetypeState();
+            }
+        };
         CheckpointManager.Start();
 
         // Wire demand-driven flush: when page cache backpressure fires, immediately wake
@@ -3645,9 +3662,20 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             }
 
             var arch = persisted.Arch;
-            arch.EntityMapSPI = state.EntityMap.Segment.RootPageIndex;
-            arch.ClusterSegmentSPI = state.ClusterState?.ClusterSegment?.RootPageIndex ?? 0;
-            arch.NextEntityKey = Interlocked.Read(ref state.NextEntityKey);
+            var newEntityMapSpi = state.EntityMap.Segment.RootPageIndex;
+            var newClusterSpi = state.ClusterState?.ClusterSegment?.RootPageIndex ?? 0;
+            var newNextKey = Interlocked.Read(ref state.NextEntityKey);
+
+            // Skip archetypes whose persisted state is already current. The segment SPIs are stable once allocated, so a steady-state checkpoint with no
+            // spawns persists nothing — this is what makes it cheap enough to run at EVERY checkpoint (#395), not just at clean shutdown.
+            if (arch.EntityMapSPI == newEntityMapSpi && arch.ClusterSegmentSPI == newClusterSpi && arch.NextEntityKey == newNextKey)
+            {
+                continue;
+            }
+
+            arch.EntityMapSPI = newEntityMapSpi;
+            arch.ClusterSegmentSPI = newClusterSpi;
+            arch.NextEntityKey = newNextKey;
 
             // EntityMap's meta chunk tracks the total entry count, but FlushMetaToChunk is otherwise only called during a bucket split. For append-only
             // workloads that never split (e.g. a session with fewer entries than n0 × 0.75 × bucketCapacity), the persisted meta count stays at 0 from
@@ -3665,6 +3693,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             // rebuilt from cluster data at startup by RebuildCellState + RebuildClusterAabbs.
 
             SystemCrud.Update(archetypesTable, persisted.ChunkId, ref arch, EpochManager, cs);
+            // refresh the cache so the next checkpoint's skip-check sees the persisted values
+            _persistedArchetypes[meta.ArchetypeId] = (persisted.ChunkId, arch);
             anyUpdated = true;
         }
 
@@ -4320,7 +4350,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
             bool isFreshAllocation;
             if (!hasMigratedSlot && _persistedArchetypes.TryGetValue(meta.ArchetypeId, out var persisted) && persisted.Arch.EntityMapSPI > 0
-                && MMF.TryLoadChunkBasedSegment(persisted.Arch.EntityMapSPI, stride, out var loadedSegment))
+                && MMF.TryLoadChunkBasedSegment(persisted.Arch.EntityMapSPI, stride, out var loadedSegment, WalFilesPresentAtOpen))
             {
                 // Reload existing EntityMap from persisted segment (O(1) reopen)
                 var em = RawValuePagedHashMap<long, PersistentStore>.Open(loadedSegment, 256, meta._entityRecordSize);
@@ -4383,7 +4413,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 {
                     ChunkBasedSegment<PersistentStore> loadedCluster = null;
                     var loaded = !isPureTransient && MMF.TryLoadChunkBasedSegment(
-                        clusterPersisted.Arch.ClusterSegmentSPI, meta.ClusterLayout.ClusterStride, out loadedCluster);
+                        clusterPersisted.Arch.ClusterSegmentSPI, meta.ClusterLayout.ClusterStride, out loadedCluster, WalFilesPresentAtOpen);
 
                     // TransientStore segment always created fresh on reopen (Transient data doesn't survive restart)
                     ChunkBasedSegment<TransientStore> transientClusterSegment = default;
@@ -4611,6 +4641,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         {
             MMF.SetPageChecksumVerification(_options.Resources.PageChecksumVerification);
         }
+
+        // Open + recovery (incl. the seal) are done — arm the checkpoint-time SPI persistence (#395 / CK-10). From here every steady-state checkpoint
+        // records the per-archetype segment SPIs so a consolidated cluster/EntityMap base is reachable on reopen after a hard crash.
+        _archetypeSpiPersistArmed = true;
     }
 
     /// <summary>
@@ -5596,6 +5630,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
     [LoggerMessage(LogLevel.Debug, "CreateQuickTransaction: Tx #{tsn} created")]
     internal partial void LogQuickTxCreated(long tsn);
+
+    [LoggerMessage(LogLevel.Information,
+        "Tx #{tsn} escalated to Commit discipline by component '{componentName}' (DefaultDiscipline=Commit) — all writes in this " +
+        "transaction are now commit-durable (CM-02)")]
+    internal partial void LogDisciplineEscalated(long tsn, string componentName);
 
     [LoggerMessage(LogLevel.Debug, "Tx #{tsn} commit: CreateComponent<{componentName}> pk={pk}: {step}")]
     internal partial void LogCommitCreateComponent(long tsn, string componentName, long pk, string step);

@@ -138,7 +138,7 @@ class SideTransactionTests : TestBase<SideTransactionTests>
     public void SideTransaction_CreateSideTransaction_Available()
     {
         using var dbe = SetupEngine();
-        Func<DurabilityMode, Transaction> capturedFactory = null;
+        SideTransactionFactory capturedFactory = null;
         var captured = 0;
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>

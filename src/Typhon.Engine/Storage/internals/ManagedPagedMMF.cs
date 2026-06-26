@@ -668,8 +668,14 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
         return segment;
     }
 
-    /// <summary>Try to load a segment. Returns false (instead of asserting) if the root page is already registered.</summary>
-    public bool TryLoadChunkBasedSegment(int filePageIndex, int stride, out ChunkBasedSegment<PersistentStore> result)
+    /// <summary>
+    /// Try to load a segment. Returns false (instead of asserting) if the root page is already registered. When
+    /// <paramref name="tolerateTornForRebuild"/> is set (the crash-recovery path), a structurally-incomplete segment — one a prior aborted checkpoint left
+    /// with a torn directory↔chain or an uninitialized root — also returns false (after un-registering the partial load) rather than throwing, so the
+    /// caller can fall back to a fresh allocation that WAL replay rebuilds (RB-01 / 03 §7: the persisted SPI is a hint on the crash path, not trusted). On
+    /// the clean path it stays strict — a torn segment with no WAL to recover from is genuine, loud-worthy corruption.
+    /// </summary>
+    public bool TryLoadChunkBasedSegment(int filePageIndex, int stride, out ChunkBasedSegment<PersistentStore> result, bool tolerateTornForRebuild = false)
     {
         result = null;
         var dic = _segments;
@@ -685,8 +691,20 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
         }
 
         ResolveDirectoryPairsForLoad(filePageIndex);   // CK-05 (C2): register directory-page slot state before the load walks them
-        if (!segment.Load(filePageIndex))
+        try
         {
+            if (!segment.Load(filePageIndex))
+            {
+                dic.TryRemove(filePageIndex, out _);
+                return false;
+            }
+        }
+        catch (InvalidOperationException) when (tolerateTornForRebuild)
+        {
+            // The persisted SPI points at a segment a prior aborted checkpoint left structurally incomplete (it wrote the ArchetypeR1 SPI page but not
+            // all of the segment's pages; CK-03's coverage gate held CheckpointLSN back, so the full WAL window is intact). Discard the partial load
+            // and let the caller fresh-allocate + WAL-replay instead of trusting it (#395 / RB-01).
+            dic.TryRemove(filePageIndex, out _);
             return false;
         }
 

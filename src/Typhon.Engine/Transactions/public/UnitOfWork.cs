@@ -2,6 +2,7 @@ using JetBrains.Annotations;
 using System;
 using System.Threading;
 using System.Threading.Tasks;
+using Typhon.Schema.Definition;
 
 namespace Typhon.Engine;
 
@@ -104,8 +105,12 @@ public sealed class UnitOfWork : IDisposable
     /// </summary>
     /// <exception cref="ObjectDisposedException">The UoW has been disposed.</exception>
     /// <exception cref="InvalidOperationException">The UoW is not in <see cref="UnitOfWorkState.Pending"/> state.</exception>
+    /// <param name="discipline">
+    /// Durability discipline for SingleVersion-layout writes (<see cref="DurabilityDiscipline.TickFence"/> default, or
+    /// <see cref="DurabilityDiscipline.Commit"/> for zero-loss, atomic, commit-scoped writes). Fixed for the transaction.
+    /// </param>
     [return: TransfersOwnership]
-    public Transaction CreateTransaction()
+    public Transaction CreateTransaction(DurabilityDiscipline discipline = DurabilityDiscipline.TickFence)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (_state != UnitOfWorkState.Pending)
@@ -115,7 +120,7 @@ public sealed class UnitOfWork : IDisposable
 
         Interlocked.Increment(ref _transactionCount);
         _dbe.RecordTransactionCreated();
-        return _dbe.TransactionChain.CreateTransaction(_dbe, this);
+        return _dbe.TransactionChain.CreateTransaction(_dbe, this, discipline: discipline);
     }
 
     /// <summary>

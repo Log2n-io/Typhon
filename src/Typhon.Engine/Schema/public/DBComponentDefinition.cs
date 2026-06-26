@@ -41,6 +41,12 @@ public class DBComponentDefinition
 
     public StorageMode StorageMode { get; internal set; }
 
+    /// <summary>
+    /// Default durability discipline (from <c>[Component(DefaultDiscipline=…)]</c>). Only meaningful for
+    /// <see cref="StorageMode.SingleVersion"/>; <see cref="DurabilityDiscipline.TickFence"/> otherwise.
+    /// </summary>
+    public DurabilityDiscipline DefaultDiscipline { get; internal set; }
+
     public int ComponentStorageSize { get; private set; }
 
     /// <summary>
@@ -135,11 +141,13 @@ public class DBComponentDefinition
         public bool DoesFieldTypeSupportIndex() => (Type >= FieldType.Byte) && ((FieldType)((int)Type&0xFF) <= FieldType.String64);
     }
 
-    internal DBComponentDefinition(string name, int revision, StorageMode storageMode = StorageMode.Versioned)
+    internal DBComponentDefinition(string name, int revision, StorageMode storageMode = StorageMode.Versioned,
+        DurabilityDiscipline defaultDiscipline = DurabilityDiscipline.TickFence)
     {
         Name = name;
         Revision = revision;
         StorageMode = storageMode;
+        DefaultDiscipline = defaultDiscipline;
         _fieldsByName = new Dictionary<string, Field>();
     }
 

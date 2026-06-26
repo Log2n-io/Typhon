@@ -259,13 +259,28 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
             return;
         }
 
-        if (_workerCount == 1)
+        // Outer safety net — this runs on the timer thread (HighResolutionTimerServiceBase.TimerLoop), a RAW thread with no catch of its own. An
+        // exception escaping a tick here would propagate unhandled and ABORT THE PROCESS (a "Test host process crashed" / production host crash) —
+        // strictly worse than a dropped tick. The single-threaded path (ExecuteTickSingleThreaded) runs the whole tick inline on this thread, so it has
+        // no other net; the multi-threaded path's worker exceptions are already netted in WorkerLoop, but its coordination code runs here too. Mirror
+        // the WorkerLoop net: log loudly, surface via the hook, drop this tick. (A persistently-throwing tick keeps being surfaced every tick rather
+        // than silently — the hook can escalate to graceful shutdown.)
+        try
         {
-            ExecuteTickSingleThreaded(actualTick);
+            if (_workerCount == 1)
+            {
+                ExecuteTickSingleThreaded(actualTick);
+            }
+            else
+            {
+                ExecuteTickMultiThreaded(actualTick);
+            }
         }
-        else
+        catch (Exception ex)
         {
-            ExecuteTickMultiThreaded(actualTick);
+            LogSystemException(-1, "<tick driver>", ex);
+            try { UnhandledExceptionCallback?.Invoke(-1, "<tick driver>", ex); }
+            catch { /* swallow — the callback itself threw; we are the last line of defense before the host aborts */ }
         }
     }
 

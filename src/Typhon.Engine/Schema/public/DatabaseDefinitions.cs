@@ -130,7 +130,7 @@ public class DatabaseDefinitions
             throw new InvalidOperationException($"Missing the ComponentAttribute on the type {t} declaration");
         }
 
-        var compDef = new DBComponentDefinition(ca.Name ?? t.Name, ca.Revision, ca.StorageMode) { POCOType = t };
+        var compDef = new DBComponentDefinition(ca.Name ?? t.Name, ca.Revision, ca.StorageMode, ca.DefaultDiscipline) { POCOType = t };
 
         lock (_componentLock)
         {

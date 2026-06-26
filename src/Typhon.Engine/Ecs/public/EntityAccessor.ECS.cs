@@ -2,7 +2,10 @@
 // These are the methods EntityRef delegates to for Read/Write operations.
 
 using System;
+using System.Collections.Generic;
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using Typhon.Schema.Definition;
 
 namespace Typhon.Engine;
@@ -334,6 +337,13 @@ public unsafe partial class EntityAccessor
     {
         var info = GetComponentInfo(typeof(T));
         byte* ptr = table.StorageMode == StorageMode.Transient ? info.TransientCompContentAccessor.GetChunkAddress(chunkId) : info.CompContentAccessor.GetChunkAddress(chunkId);
+        // Commit-discipline read-your-own-writes: return this tx's staged value if it has staged this (component, entity). The chunk's inline
+        // entityPK (offset 0 for SV/Transient) keys the staging map.
+        if (_discipline == DurabilityDiscipline.Commit && table.StorageMode == StorageMode.SingleVersion
+            && info.CommitStaged != null && info.CommitStaged.TryGetValue(*(long*)ptr, out var slot))
+        {
+            return ref Unsafe.AsRef<T>(_commitStagingBuffer + slot.Offset);
+        }
         return ref Unsafe.AsRef<T>(ptr + info.ComponentOverhead);
     }
 
@@ -356,6 +366,23 @@ public unsafe partial class EntityAccessor
     internal ref T WriteEcsComponentData<T>(ComponentTable table, int chunkId) where T : unmanaged
     {
         var info = GetComponentInfo(typeof(T));
+
+        // Commit discipline (SingleVersion, Variant A): stage the write — leave the chunk HEAD untouched and unmarked (CM-01). The HEAD still holds the
+        // pre-write value, so seed the staging slot from it for partial-write correctness. CM-02 escalation first (so DefaultDiscipline=Commit applies).
+        if (table.StorageMode == StorageMode.SingleVersion)
+        {
+            if (table.Discipline == DurabilityDiscipline.Commit)
+            {
+                ResolveCommitDiscipline(table);
+            }
+            if (_discipline == DurabilityDiscipline.Commit)
+            {
+                byte* head = info.CompContentAccessor.GetChunkAddress(chunkId);
+                // Flat location is the content chunkId (captured for the no-re-lookup publish).
+                return ref StageCommitWriteCore<T>(info, *(long*)head, chunkId, head + info.ComponentOverhead);
+            }
+        }
+
         byte* ptr;
         if (table.StorageMode == StorageMode.Transient)
         {
@@ -364,6 +391,7 @@ public unsafe partial class EntityAccessor
         else
         {
             ptr = info.CompContentAccessor.GetChunkAddress(chunkId, true);
+            _didInPlaceSvWrite = true;   // CM-02: a TickFence in-place SingleVersion write happened — blocks late escalation to Commit
         }
         table.DirtyBitmap?.Set(chunkId);
         return ref Unsafe.AsRef<T>(ptr + info.ComponentOverhead);
@@ -394,6 +422,136 @@ public unsafe partial class EntityAccessor
             var oldKey = KeyBytes8.FromPointer(ptr + ifi.OffsetToField, ifi.Size);
             buffers[i].Append(chunkId, pk, oldKey);
         }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Committed durability discipline — Variant A staging (issue #392)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    private const int InitialCommitStagingCapacity = 4096;
+
+    /// <summary>
+    /// CM-02 discipline resolution, invoked from the write path for a <see cref="DurabilityDiscipline.Commit"/>-defaulted
+    /// <see cref="StorageMode.SingleVersion"/> component. Escalates this accessor's whole transaction to Commit on first touch (so
+    /// every subsequent write is commit-durable), and rejects escalation if a TickFence in-place write has already happened (we cannot
+    /// retroactively make an applied write atomic). Idempotent and cheap once escalated. Callers gate on
+    /// <c>table.Discipline == Commit</c> so the TickFence hot path never reaches here for a non-Commit component.
+    /// </summary>
+    internal void ResolveCommitDiscipline(ComponentTable table)
+    {
+        if (_discipline == DurabilityDiscipline.Commit)
+        {
+            return;
+        }
+
+        if (_didInPlaceSvWrite)
+        {
+            throw new InvalidOperationException(
+                $"Component '{table.Name}' is declared DefaultDiscipline=Commit, but this transaction has already performed a TickFence " +
+                "in-place write. Create the transaction with discipline: DurabilityDiscipline.Commit before writing any component so the " +
+                "whole transaction is commit-durable (CM-02 uniformity).");
+        }
+
+        _discipline = DurabilityDiscipline.Commit;
+        _dbe?.LogDisciplineEscalated(TSN, table.Name);
+    }
+
+    /// <summary>
+    /// Native staging buffer for Commit-discipline SingleVersion writes (Variant A). Lazily allocated on the first staged write and
+    /// freed by <see cref="FreeCommitStaging"/> on transaction reset. Native (not a managed <c>byte[]</c>) so a staged write can return a
+    /// stable <c>ref T</c> into it. A staged ref is invalidated by the next staging allocation that grows the buffer
+    /// (the same contract as a <c>ref</c> into a <c>List&lt;T&gt;</c> via CollectionsMarshal); the common write-then-commit idiom is always safe.
+    /// </summary>
+    private protected byte* _commitStagingBuffer;
+    private protected int _commitStagingCapacity;
+    private protected int _commitStagingUsed;
+
+    /// <summary>Reserve <paramref name="size"/> bytes in the native staging buffer; returns the 0-based offset.</summary>
+    private int StageAlloc(int size)
+    {
+        var off = _commitStagingUsed;
+        var need = off + size;
+        if (need > _commitStagingCapacity)
+        {
+            var newCap = _commitStagingCapacity == 0 ? InitialCommitStagingCapacity : _commitStagingCapacity;
+            while (newCap < need)
+            {
+                newCap *= 2;
+            }
+            _commitStagingBuffer = (byte*)NativeMemory.Realloc(_commitStagingBuffer, (nuint)newCap);
+            _commitStagingCapacity = newCap;
+        }
+        _commitStagingUsed = need;
+        return off;
+    }
+
+    /// <summary>Free the native staging buffer (idempotent) and reset its bump pointer. Called from the transaction reset path.</summary>
+    private protected void FreeCommitStaging()
+    {
+        if (_commitStagingBuffer != null)
+        {
+            NativeMemory.Free(_commitStagingBuffer);
+            _commitStagingBuffer = null;
+        }
+        _commitStagingCapacity = 0;
+        _commitStagingUsed = 0;
+    }
+
+    /// <summary>
+    /// Variant-A staging core: on the first Commit-discipline write to (component, entity) this transaction, reserve a staging slot and seed it
+    /// with the current HEAD value (so partial writes are correct), then return a mutable ref into the staging buffer. The cluster/chunk HEAD is
+    /// NOT touched until commit publish (CM-01).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal ref T StageCommitWriteCore<T>(ComponentInfo info, long pk, int location, byte* headDataPtr) where T : unmanaged
+    {
+        var size = info.ComponentTable.ComponentStorageSize;
+        Debug.Assert(sizeof(T) == size, "Commit-discipline staging assumes the component IS T (SingleVersion layout)");
+        info.CommitStaged ??= new Dictionary<long, ComponentInfo.StagedSlot>();
+        ref var slot = ref CollectionsMarshal.GetValueRefOrAddDefault(info.CommitStaged, pk, out var exists);
+        if (!exists)
+        {
+            slot.Offset = StageAlloc(size);
+            slot.Location = location;                           // captured at stage time — publish uses it, no EntityMap re-lookup
+            Unsafe.CopyBlockUnaligned(_commitStagingBuffer + slot.Offset, headDataPtr, (uint)size);   // seed from HEAD (partial-write correctness)
+        }
+        return ref Unsafe.AsRef<T>(_commitStagingBuffer + slot.Offset);
+    }
+
+    /// <summary>
+    /// Records that a TickFence in-place SingleVersion write has happened (called from the cluster write path, the counterpart of the flag set inline by
+    /// <see cref="WriteEcsComponentData{T}"/> for the non-cluster path). Blocks a later CM-02 auto-escalation to Commit, which could no longer make the
+    /// already-applied write atomic. One bool store — negligible beside the cluster <c>SetDirty</c> on the same path.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal void NoteSvInPlaceWrite() => _didInPlaceSvWrite = true;
+
+    /// <summary>
+    /// Cluster-path entry point for Commit-discipline staging — resolves the ComponentInfo, then stages (see <see cref="StageCommitWriteCore{T}"/>).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal ref T StageClusterCommitWrite<T>(ComponentTable table, int componentTypeId, long pk, int clusterLocation, byte* clusterHeadPtr) where T : unmanaged
+    {
+        var info = GetComponentInfoByTypeId(componentTypeId, typeof(T));
+        return ref StageCommitWriteCore<T>(info, pk, clusterLocation, clusterHeadPtr);
+    }
+
+    /// <summary>
+    /// Read-your-own-writes: returns a pointer to this transaction's staged value for (component, entity), or null if not staged. Consulted only
+    /// when <see cref="Discipline"/> is Commit (a per-tx constant), and never creates a ComponentInfo.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal byte* TryGetStagedPtr(Type componentType, long pk)
+    {
+        if (_commitStagingBuffer == null || !_componentInfos.TryGetValue(componentType, out var info) || info.CommitStaged == null)
+        {
+            return null;
+        }
+        if (!info.CommitStaged.TryGetValue(pk, out var slot))
+        {
+            return null;
+        }
+        return _commitStagingBuffer + slot.Offset;
     }
 
     // ═══════════════════════════════════════════════════════════════════════

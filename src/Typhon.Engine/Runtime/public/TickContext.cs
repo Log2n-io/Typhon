@@ -1,8 +1,16 @@
 using JetBrains.Annotations;
-using System;
 using System.Collections.Generic;
+using Typhon.Schema.Definition;
 
 namespace Typhon.Engine;
+
+/// <summary>
+/// Factory for side-transactions created from a <see cref="TickContext"/>. The <paramref name="discipline"/> selects the
+/// durability discipline for SingleVersion-layout writes (<see cref="DurabilityDiscipline.TickFence"/> default, or
+/// <see cref="DurabilityDiscipline.Commit"/> for zero-loss, atomic, commit-scoped writes).
+/// </summary>
+[PublicAPI]
+public delegate Transaction SideTransactionFactory(DurabilityMode mode, DurabilityDiscipline discipline = DurabilityDiscipline.TickFence);
 
 /// <summary>
 /// Context passed to CallbackSystem and QuerySystem delegates during tick execution.
@@ -68,9 +76,10 @@ public struct TickContext
     /// </summary>
     /// <remarks>
     /// Use for economy-critical operations (trades, purchases, progression) that must be durable immediately, independent of the main tick's commit.
+    /// Pass <see cref="DurabilityDiscipline.Commit"/> to make SingleVersion-layout writes zero-loss, atomic and commit-scoped (no revision chain).
     /// Null when running without a DatabaseEngine.
     /// </remarks>
-    public Func<DurabilityMode, Transaction> CreateSideTransaction { get; init; }
+    public SideTransactionFactory CreateSideTransaction { get; init; }
 
     /// <summary>
     /// Inclusive start index into <see cref="ClusterIds"/> for this worker's assigned cluster range. Used by cluster-native systems that iterate

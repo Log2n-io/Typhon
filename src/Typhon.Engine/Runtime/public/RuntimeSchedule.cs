@@ -2,6 +2,8 @@ using JetBrains.Annotations;
 using Microsoft.Extensions.Logging;
 using System;
 using System.Collections.Generic;
+using System.Reflection;
+using Typhon.Schema.Definition;
 
 namespace Typhon.Engine;
 
@@ -320,6 +322,27 @@ public sealed class RuntimeSchedule
             {
                 ValidateSameDag(reg.Before, reg.Name, dag, nameToDagId);
                 explicitEdges.Add((reg.Name, reg.Before));
+            }
+        }
+
+        // Phase 2a.5 — CM-04 (runtime-scheduling AC-05, issue #392): ReadsSnapshot requires MVCC history to freeze to, which only the Versioned layout has.
+        // Reject ReadsSnapshot on any non-Versioned component at Build() (SingleVersion under either durability discipline, or Transient).
+        foreach (var (reg, _) in allRegs)
+        {
+            if (reg.Access?.ReadsSnapshot == null)
+            {
+                continue; // engine-internal / access-less systems carry no declarations to validate
+            }
+            foreach (var snapType in reg.Access.ReadsSnapshot)
+            {
+                var attr = snapType.GetCustomAttribute<ComponentAttribute>();
+                if (attr != null && attr.StorageMode != StorageMode.Versioned)
+                {
+                    throw new InvalidOperationException(
+                        $"System '{reg.Name}' declares ReadsSnapshot<{snapType.Name}>, but '{snapType.Name}' is a {attr.StorageMode} component. " +
+                        "Snapshot reads require MVCC history — only Versioned components have it. Use Reads/ReadsFresh, or make the component Versioned " +
+                        "(CM-04 / runtime-scheduling.md AC-05).");
+                }
             }
         }
 

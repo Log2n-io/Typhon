@@ -20,8 +20,11 @@ namespace Typhon.Engine.Tests;
 ///   the entities in the WAL window, with and without a consolidating mid-workload checkpoint.</item>
 /// </list>
 /// Page <i>corruption</i> (torn/zero) is exercised in <c>SuspectPageTests</c> (A1.11), where the damaged page's segment kind is known and the
-/// heal-vs-RB-04-loud-fail outcome can be asserted precisely. <c>ClusterAllSv</c> is excluded (P2 SV-durability unimplemented — the known
-/// <c>KnownIssue-395-sv-durability-p2</c> red). Category <c>CrashSweep</c> so the boundary fan-out can be sampled in PR CI / run full nightly.
+/// heal-vs-RB-04-loud-fail outcome can be asserted precisely. The cluster axis is covered by the <c>MixedDiscipline</c> cells below (Commit-discipline
+/// writes over every boundary) and by <c>DifferentialRecoveryOracleTests.ClusterAllSv_PrimaryAxis_SurvivesCrash</c> (Commit-discipline SV spawns, #395 Face B,
+/// at the no-checkpoint crash point — the recovery path is identical Slot-record application at every boundary the MixedDiscipline cells already sweep). Both
+/// now green (#395 SV-durability is implemented: Face A = checkpoint persists segment SPIs, CK-10; Face B = Commit-discipline spawns WAL-log SV values, D5).
+/// Category <c>CrashSweep</c> so the boundary fan-out can be sampled in PR CI / run full nightly.
 /// </summary>
 [TestFixture]
 [Category("CrashSweep")]
@@ -43,6 +46,7 @@ internal sealed class WalCrashSweepTests
         "LifecycleChurn" => new LifecycleChurnWorkload(1234, 24),
         "IndexedFlat" => new IndexedFlatWorkload(10),
         "MultiValueDupKey" => new MultiValueDupKeyWorkload(12, 3),
+        "MixedDiscipline" => new MixedDisciplineWorkload(8),
         _ => throw new ArgumentException($"unknown workload '{name}'", nameof(name)),
     };
 
@@ -259,6 +263,138 @@ internal sealed class WalCrashSweepTests
 
             // Crash the synchronous checkpoint at the Nth page write. RunCheckpointCycle swallows the ChaosSimulatedCrashException (CK-06) and
             // returns WITHOUT advancing CheckpointLSN — pages 1..N-1 may be on disk, but the coverage gate keeps the whole WAL window live.
+            var chaos = new ChaosPageIO();
+            chaos.WireTo(mmf);
+            chaos.SetCrashAtPageWrite(crashAtWrite);
+            dbe.CheckpointManager.RunCheckpointCycle(dbe.WalManager.DurableLsn);
+            chaos.Unwire(mmf);
+
+            dbe.SimulateHardCrash();
+        }
+
+        using (var scope2 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope2.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            workload.Register(dbe);
+            dbe.InitializeArchetypes();
+            RecoveryOracle.AssertPrimaryAxis(dbe, shadow);
+        }
+    }
+
+    // ── P2: MixedDiscipline (08 §5) joins the sweep ─────────────────────────────────────────────────────────────────
+    // A cluster-eligible all-SV archetype written under interleaved TickFence + Commit transactions. The asserted state is the Commit-durable
+    // last-writer values, so the oracle proves recovery reproduces them at every boundary despite the TickFence churn. Cluster + Commit-write means the
+    // entity rides the Commit slot records through RecoveryApplier's cluster reconstruction (the path #392 built), not the pure-SV-spawn path that
+    // excludes ClusterAllSv.
+
+    private static IEnumerable<TestCaseData> MixedDisciplinePageAxisCases()
+    {
+        foreach (var n in CrashBoundaries)
+        {
+            yield return new TestCaseData(n).SetName($"PageAxis_MixedDiscipline_N{n}");
+        }
+    }
+
+    [Test]
+    [CancelAfter(20_000)]
+    [VerifiesRule("AP-12")]
+    public void MixedDiscipline_WalWindow_Recover_OracleHolds()
+    {
+        var workload = new MixedDisciplineWorkload(8);
+        var shadow = new RecoveryShadowModel();
+
+        using (var scope1 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope1.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            workload.Register(dbe);
+            dbe.InitializeArchetypes();
+            using (var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate))
+            {
+                workload.Execute(uow, shadow);
+                uow.Flush();
+            }
+
+            shadow.CaptureValues(dbe);
+            dbe.SimulateHardCrash();
+        }
+
+        using (var scope2 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope2.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            workload.Register(dbe);
+            dbe.InitializeArchetypes();
+            RecoveryOracle.AssertPrimaryAxis(dbe, shadow);
+        }
+    }
+
+    // #395 Face A (consolidation-orphan) — FIXED. A consolidating checkpoint followed by a hard crash used to LOSE the cluster entities entirely: the
+    // checkpoint wrote the cluster DATA pages (OccupancyBits / EntityKeys / SoA) to the data file but the per-archetype segment SPIs in the durable
+    // ArchetypeR1 table were recorded only at clean shutdown, so reopen found ArchetypeR1.ClusterSegmentSPI == 0, took the fresh-allocation path, and
+    // rebuilt from an empty cluster (ActiveClusterCount == 0). The fix persists the SPIs at every checkpoint
+    // (CheckpointManager.PersistDurableMetadataHook → DatabaseEngine.PersistArchetypeState, run before the cycle's barrier), so the consolidated base
+    // is reachable on reopen and the EntityMap rebuild re-derives the entities from the cluster occupancy. (NB: this is distinct from #395 Face B — a
+    // plain SV cluster *spawn* value is not WAL-durable per-commit, so ClusterAllSv, which never checkpoints and never Commit-writes, stays red; that
+    // is the Committed discipline's job.)
+    [Test]
+    [CancelAfter(20_000)]
+    [VerifiesRule("AP-12")]
+    public void MixedDiscipline_WalWindow_MidCheckpoint_OracleHolds()
+    {
+        var workload = new MixedDisciplineWorkload(8);
+        var shadow = new RecoveryShadowModel();
+
+        using (var scope1 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope1.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            workload.Register(dbe);
+            dbe.InitializeArchetypes();
+            using (var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate))
+            {
+                workload.Execute(uow, shadow);
+                uow.Flush();
+            }
+
+            // Consolidate the Commit-discipline writes into the data file (CheckpointLSN advances past their LSNs), then hard-crash with an empty WAL
+            // window — recovery must restore the cluster SV state from the persisted base alone.
+            dbe.ForceCheckpoint();
+            dbe.CheckpointManager.WaitForCheckpoint(TimeSpan.FromSeconds(10));
+
+            shadow.CaptureValues(dbe);
+            dbe.SimulateHardCrash();
+        }
+
+        using (var scope2 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope2.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            workload.Register(dbe);
+            dbe.InitializeArchetypes();
+            RecoveryOracle.AssertPrimaryAxis(dbe, shadow);
+        }
+    }
+
+    [Test]
+    [CancelAfter(20_000)]
+    [TestCaseSource(nameof(MixedDisciplinePageAxisCases))]
+    [VerifiesRule("CK-03")]
+    public void MixedDiscipline_PageAxis_CheckpointCrashAtBoundary_OracleHolds(int crashAtWrite)
+    {
+        var workload = new MixedDisciplineWorkload(8);
+        var shadow = new RecoveryShadowModel();
+
+        using (var scope1 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope1.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            var mmf = scope1.ServiceProvider.GetRequiredService<ManagedPagedMMF>();
+            workload.Register(dbe);
+            dbe.InitializeArchetypes();
+            using (var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate))
+            {
+                workload.Execute(uow, shadow);
+                uow.Flush();
+            }
+
+            shadow.CaptureValues(dbe);
+
             var chaos = new ChaosPageIO();
             chaos.WireTo(mmf);
             chaos.SetCrashAtPageWrite(crashAtWrite);
