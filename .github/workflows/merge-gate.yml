@@ -67,7 +67,6 @@ jobs:
           sky launch bench/aws/ci.sky.yaml --down -y \
             --env RUN_ENGINE=${{ needs.changes.outputs.engine }} \
             --env RUN_WORKBENCH=${{ needs.changes.outputs.workbench }} \
-            --env RUN_COVERAGE=${{ needs.changes.outputs.engine }} \
             --env RUN_ID=${{ github.run_id }}
 
       # if: always() — we want the report surfaced precisely when the gate FAILED.

@@ -1,0 +1,74 @@
+# Coverage task — OPT-IN, NON-blocking. Collects code coverage over the engine suite and ships the
+# publishable report (coverage/reports/{latest.md,charts}) + updated history for the runner to commit.
+# Design: claude/design/Infrastructure/ci-merge-gate.md
+#
+# Coverage is HARDWARE-INDEPENDENT (statement coverage is the same on any box), so unlike the benchmark
+# it can be committed from CI without a reference-hardware constraint. It is a separate Debug instrumented
+# pass — deliberately NOT on the per-PR gate (it would roughly double the gate's wall-clock).
+#
+# Launched by .github/workflows/coverage.yml (run-coverage label / workflow_dispatch):
+#   sky launch bench/aws/coverage.sky.yaml --down -y --env RUN_ID=<id>
+name: typhon-coverage
+
+resources:
+  cloud: aws
+  instance_type: c6id.8xlarge
+  region: eu-west-1
+
+workdir: .
+
+file_mounts:
+  /outputs:
+    source: s3://typhon-traces
+    mode: MOUNT
+
+envs:
+  RUN_ID: "local"
+
+setup: |
+  set -euo pipefail
+  DEV=$(lsblk -dno NAME,MODEL | grep -i 'Instance Storage' | head -1 | awk '{print $1}')
+  sudo mkfs.ext4 -F "/dev/$DEV"
+  sudo mkdir -p /nvme && sudo mount "/dev/$DEV" /nvme
+  sudo chown "$(whoami)" /nvme
+  curl -sSL https://dot.net/v1/dotnet-install.sh | bash -s -- --channel 10.0
+  export DOTNET_ROOT="$HOME/.dotnet"
+  export PATH="$DOTNET_ROOT:$DOTNET_ROOT/tools:$PATH"
+  dotnet tool install --global dotnet-coverage
+  dotnet build -c Debug test/Typhon.Engine.Tests/Typhon.Engine.Tests.csproj
+
+run: |
+  set -uo pipefail
+  export DOTNET_ROOT="$HOME/.dotnet"
+  export PATH="$DOTNET_ROOT:$DOTNET_ROOT/tools:$PATH"
+  WORKERS=$(( $(nproc --all) / 2 ))
+  [ "$WORKERS" -lt 1 ] && WORKERS=1
+  cd ~/sky_workdir
+  RC=0
+
+  dotnet-coverage collect -o /nvme/coverage-report.xml -f xml \
+    dotnet test test/Typhon.Engine.Tests/Typhon.Engine.Tests.csproj --no-build -c Debug \
+    --filter "Category!=Quarantine" -- NUnit.NumberOfTestWorkers=$WORKERS 2>&1 | tee /nvme/coverage.log
+  [ "${PIPESTATUS[0]}" -ne 0 ] && RC=1
+
+  if [ -f /nvme/coverage-report.xml ]; then
+    # Regenerate the tracked report set + append to history in-place (HW-independent → safe to publish).
+    python3 coverage/scripts/report_generator.py \
+      --coverage-xml /nvme/coverage-report.xml \
+      --history coverage/history/results.jsonl \
+      --config coverage/config.json \
+      --output-dir coverage/reports \
+      --source-dir src/Typhon.Engine || true
+  else
+    echo "coverage collection produced no report"; RC=1
+  fi
+
+  # Ship the publishable artifact (report set + updated history) + raw log for the runner to commit.
+  DEST="/outputs/coverage/${RUN_ID}"
+  mkdir -p "$DEST/reports"
+  cp -r coverage/reports/. "$DEST/reports/" || true
+  cp coverage/history/results.jsonl "$DEST/results.jsonl" || true
+  cp /nvme/coverage.log "$DEST/coverage.log" || true
+
+  echo "Coverage finished with RC=$RC"
+  exit $RC

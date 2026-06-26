@@ -10,7 +10,7 @@
 #
 # Launched by .github/workflows/merge-gate.yml — NOT meant for manual use:
 #   sky launch bench/aws/ci.sky.yaml --down -y \
-#     --env RUN_ENGINE=true --env RUN_WORKBENCH=false --env RUN_COVERAGE=true --env RUN_ID=<id>
+#     --env RUN_ENGINE=true --env RUN_WORKBENCH=false --env RUN_ID=<id>
 name: typhon-ci-gate
 
 resources:
@@ -29,7 +29,6 @@ envs:
   # Defaults are "false"/"local"; the workflow overrides them per run via --env.
   RUN_ENGINE: "false"
   RUN_WORKBENCH: "false"
-  RUN_COVERAGE: "false"
   RUN_ID: "local"
 
 setup: |
@@ -41,13 +40,13 @@ setup: |
   sudo chown "$(whoami)" /nvme
   # .NET 10 SDK
   curl -sSL https://dot.net/v1/dotnet-install.sh | bash -s -- --channel 10.0
-  export PATH="$HOME/.dotnet:$HOME/.dotnet/tools:$PATH"
+  # DOTNET_ROOT lets apphost-based child processes (the test host) locate the runtime; PATH alone isn't enough.
+  export DOTNET_ROOT="$HOME/.dotnet"
+  export PATH="$DOTNET_ROOT:$DOTNET_ROOT/tools:$PATH"
   # Node 22 — only the Workbench client needs it, but installing unconditionally keeps the
   # task simple and the cost is a few seconds amortised against the test run.
   curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
   sudo apt-get install -y nodejs
-  # dotnet-coverage for the (separate, Debug) coverage pass.
-  dotnet tool install --global dotnet-coverage
   # Build the solution once in Release — shared by the engine + workbench .NET test runs.
   dotnet restore Typhon.slnx
   dotnet build Typhon.slnx -c Release --no-restore
@@ -56,7 +55,13 @@ setup: |
 # script to continue so every suite's result and artifacts are collected before we exit RC.
 run: |
   set -uo pipefail
-  export PATH="$HOME/.dotnet:$HOME/.dotnet/tools:$PATH"
+  export DOTNET_ROOT="$HOME/.dotnet"
+  export PATH="$DOTNET_ROOT:$DOTNET_ROOT/tools:$PATH"
+  # Match the dev machine's parallelism: NUnit workers = ProcessorCount / 2 (16 on both a 7950X and a
+  # 32-vCPU c6id.8xlarge). The assembly default is LevelOfParallelism(4); this runsettings override raises
+  # it to the dev-machine value. Deliberately NOT the full vCPU count — 30 oversubscribes and destabilises.
+  WORKERS=$(( $(nproc --all) / 2 ))
+  [ "$WORKERS" -lt 1 ] && WORKERS=1
   REPO=~/sky_workdir
   OUT=/nvme/ci-out                 # write locally first; copy to the S3 mount once at the end
   mkdir -p "$OUT"
@@ -72,7 +77,7 @@ run: |
          -c Release --no-build \
          --filter "Category!=Quarantine" \
          --logger "trx;LogFileName=engine.trx" --results-directory "$OUT" \
-         2>&1 | tee "$OUT/engine.log"
+         -- NUnit.NumberOfTestWorkers=$WORKERS 2>&1 | tee "$OUT/engine.log"
     then echo "- ✅ engine suite passed" >> "$S"
     else RC=1; echo "- ❌ engine suite FAILED" >> "$S"
     fi
@@ -106,28 +111,9 @@ run: |
     echo "" >> "$S"
   fi
 
-  # --- Coverage: REPORT-ONLY, never affects RC. Separate Debug instrumented pass. ---
-  if [ "$RUN_COVERAGE" = "true" ]; then
-    echo "## Coverage" >> "$S"
-    dotnet build -c Debug test/Typhon.Engine.Tests/Typhon.Engine.Tests.csproj 2>&1 | tee "$OUT/coverage-build.log"
-    dotnet-coverage collect -o "$OUT/coverage-report.xml" -f xml \
-      dotnet test test/Typhon.Engine.Tests/Typhon.Engine.Tests.csproj --no-build -c Debug \
-      2>&1 | tee "$OUT/coverage.log" || true
-    if [ -f "$OUT/coverage-report.xml" ]; then
-      python3 coverage/scripts/report_generator.py \
-        --coverage-xml "$OUT/coverage-report.xml" \
-        --history coverage/history/results.jsonl \
-        --config coverage/config.json \
-        --output-dir "$OUT/coverage-report" \
-        --source-dir src/Typhon.Engine || true
-      [ -f "$OUT/coverage-report/latest.md" ] && cat "$OUT/coverage-report/latest.md" >> "$S"
-    else
-      echo "- ⚠️ coverage collection produced no report" >> "$S"
-    fi
-    echo "" >> "$S"
-  fi
+  # Coverage is NOT part of the gate — it's opt-in (run-coverage label / dispatch → coverage.yml + coverage.sky.yaml).
 
-  # Ship everything (summary + trx + logs + coverage) to the S3 mount for the runner to pull.
+  # Ship everything (summary + trx + logs) to the S3 mount for the runner to pull.
   DEST="/outputs/ci/${RUN_ID}"
   mkdir -p "$DEST"
   cp -r "$OUT/." "$DEST/" || true

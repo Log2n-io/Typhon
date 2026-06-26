@@ -95,7 +95,13 @@ internal sealed class EpochThreadRegistry : IDisposable
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public int PinCurrentThread(long epoch)
     {
-        if (_threadRegistry != this)
+        // Re-claim a slot if this thread isn't registered in THIS registry, OR its cached [ThreadStatic] index has
+        // escaped the valid range. The bounds guard is defence-in-depth: under heavy multi-registry churn (a fresh
+        // EpochManager per test on a high-core box) a stale thread-static index has been observed reaching the
+        // `_slots[slot]` read out of bounds (IndexOutOfRange under parallel CI). A fresh claim recovers correctly.
+        // The (uint) cast folds the negative case into one compare, so the guard is a single register compare on the
+        // hot path. NOTE: this stops the crash; the underlying cause of the stale index is still under investigation.
+        if (_threadRegistry != this || (uint)_threadSlotIndex >= (uint)MaxSlots)
         {
             ClaimSlot();
         }

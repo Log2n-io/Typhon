@@ -9,17 +9,22 @@ SkyPilot tasks for ephemeral AWS instances. Two uses share this folder:
 
 ## CI use (automated — not operator-run)
 
-Two tasks are launched by GitHub Actions, not by hand. Full design:
+Three tasks are launched by GitHub Actions, not by hand. Full design:
 `claude/design/Infrastructure/ci-merge-gate.md`.
 
 - **`ci.sky.yaml`** — the PR **merge gate**. `.github/workflows/merge-gate.yml` detects changed areas
   and blocks on `sky launch ci.sky.yaml --down`; the exit code becomes the required status check.
-  Runs the engine full suite (minus `[Category("Quarantine")]`), the workbench suites, and coverage on
-  a `c6id.8xlarge`. Reports land in `s3://typhon-traces/ci/<run_id>/` and are surfaced on the PR.
+  Runs the engine full suite (minus `[Category("Quarantine")]`) and the workbench suites on a
+  `c6id.8xlarge`, with NUnit parallelism set to the dev-machine value (`ProcessorCount/2` = 16). Reports
+  land in `s3://typhon-traces/ci/<run_id>/` and are surfaced on the PR.
 - **`benchmark.sky.yaml`** — opt-in **reference benchmark** on `m5d.metal`.
   `.github/workflows/benchmark.yml` launches it when a PR gets the `run-benchmark` label or the
   workflow is dispatched. Results (`s3://typhon-traces/benchmark/<run_id>/`) are committed back as the
   public artifact. `m5d.metal` is the public, reproducible reference — anyone can launch it to compare.
+- **`coverage.sky.yaml`** — opt-in **code coverage** on `c6id.8xlarge`. `.github/workflows/coverage.yml`
+  launches it on the `run-coverage` label or dispatch; the refreshed report + history are committed back
+  (coverage is hardware-independent). Kept **off** the per-PR gate — a second instrumented pass roughly
+  doubles the gate's wall-clock.
 
 The AntHill runbook below is for **manual** trace-capture runs, unrelated to CI.
 
@@ -40,8 +45,9 @@ sky check aws        # must report: AWS: enabled
 
 | File | Purpose |
 |------|---------|
-| `ci.sky.yaml`             | **CI** merge-gate task — `c6id.8xlarge`, engine/workbench/coverage (driven by `merge-gate.yml`) |
+| `ci.sky.yaml`             | **CI** merge-gate task — `c6id.8xlarge`, engine + workbench (driven by `merge-gate.yml`) |
 | `benchmark.sky.yaml`      | **CI** reference benchmark — `m5d.metal`, opt-in (driven by `benchmark.yml`) |
+| `coverage.sky.yaml`       | **CI** code coverage — `c6id.8xlarge`, opt-in (driven by `coverage.yml`) |
 | `anthill-bench.sky.yaml`  | Production task — `m6idn.metal`, the 500K-ant scenario |
 | `anthill-dryrun.sky.yaml` | Dry-run task — `c5d.metal`, a small trace-on scenario |
 | `run.sh`                  | Thin wrapper — launches the production task with `--down` |

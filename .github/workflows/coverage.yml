@@ -1,0 +1,68 @@
+name: Coverage
+
+# OPT-IN, NON-blocking code coverage — same model as the Benchmark workflow. Never gates a merge.
+# Triggers: add the `run-coverage` label to a PR, or run manually.
+# Coverage is hardware-independent, so CI commits the refreshed report directly.
+# Design: claude/design/Infrastructure/ci-merge-gate.md
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [labeled]            # fires once when the `run-coverage` label is added
+
+permissions:
+  contents: write              # commit the refreshed coverage report + history
+
+jobs:
+  coverage:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.label.name == 'run-coverage'
+    runs-on: ubuntu-latest
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: eu-west-1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+
+      - name: Install SkyPilot
+        run: python3 -m pip install --quiet "skypilot[aws]"
+
+      - name: Run coverage on c6id
+        run: sky launch bench/aws/coverage.sky.yaml --down -y --env RUN_ID=${{ github.run_id }}
+
+      - name: Pull results from S3
+        if: always()
+        run: |
+          mkdir -p cov-out
+          aws s3 sync "s3://typhon-traces/coverage/${{ github.run_id }}/" cov-out/ || true
+
+      - name: Render report on the check page
+        if: always()
+        run: |
+          if [ -f cov-out/reports/latest.md ]; then
+            cat cov-out/reports/latest.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "_No coverage report produced._" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Commit refreshed coverage report
+        if: success()
+        run: |
+          [ -f cov-out/results.jsonl ] || { echo "no results to commit"; exit 0; }
+          cp cov-out/results.jsonl coverage/history/results.jsonl
+          rm -rf coverage/reports
+          mkdir -p coverage/reports
+          cp -r cov-out/reports/. coverage/reports/
+          git config user.name  "typhon-coverage-bot"
+          git config user.email "noreply@typhondb.io"
+          git add coverage/history/results.jsonl coverage/reports
+          if git diff --cached --quiet; then
+            echo "No coverage changes to commit."
+          else
+            git commit -m "coverage: record coverage run [skip ci]"
+            git push
+          fi
