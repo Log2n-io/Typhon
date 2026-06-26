@@ -1,0 +1,83 @@
+name: Benchmark
+
+# OPT-IN, NON-blocking benchmark on the m5d.metal reference box. Never gates a merge.
+# Triggers: add the `run-benchmark` label to a PR, or run manually with a profile.
+# The reference numbers + history are published ONLY from here (m5d.metal); local /benchmark
+# is dev-only and never commits. Design: claude/design/Infrastructure/ci-merge-gate.md
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Benchmark profile
+        type: choice
+        default: regression
+        options: [regression, btree-fast, btree-medium, btree-full]
+  pull_request:
+    types: [labeled]            # fires once when the `run-benchmark` label is added
+
+# Needs write access to push the single history+report commit back to the PR branch.
+permissions:
+  contents: write
+
+jobs:
+  benchmark:
+    # Runs ONLY on explicit opt-in — never on a normal PR/push.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.label.name == 'run-benchmark'
+    runs-on: ubuntu-latest
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: eu-west-1
+      PROFILE: ${{ github.event.inputs.profile || 'regression' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Check out the PR head branch so we can commit the refreshed report back to it.
+          ref: ${{ github.head_ref || github.ref_name }}
+
+      - name: Install SkyPilot
+        run: python3 -m pip install --quiet "skypilot[aws]"
+
+      - name: Run benchmark on m5d.metal
+        run: |
+          sky launch bench/aws/benchmark.sky.yaml --down -y \
+            --env PROFILE="$PROFILE" \
+            --env RUN_ID=${{ github.run_id }}
+
+      - name: Pull results from S3
+        if: always()
+        run: |
+          mkdir -p bench-out
+          aws s3 sync "s3://typhon-traces/benchmark/${{ github.run_id }}/" bench-out/ || true
+
+      - name: Render report on the check page
+        if: always()
+        run: |
+          if [ -f bench-out/reports/latest.md ]; then
+            cat bench-out/reports/latest.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "_No benchmark report produced._" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # Publish the reference artifact: copy the m5d.metal-produced history + reports into the repo
+      # and make ONE commit. No re-trigger loop — this workflow only fires on label/dispatch.
+      - name: Commit refreshed reference report
+        if: success()
+        run: |
+          [ -f bench-out/results.jsonl ] || { echo "no results to commit"; exit 0; }
+          cp bench-out/results.jsonl benchmark/history/results.jsonl
+          rm -rf benchmark/reports
+          mkdir -p benchmark/reports
+          cp -r bench-out/reports/. benchmark/reports/
+          git config user.name  "typhon-benchmark-bot"
+          git config user.email "noreply@typhondb.io"
+          git add benchmark/history/results.jsonl benchmark/reports
+          if git diff --cached --quiet; then
+            echo "No benchmark changes to commit."
+          else
+            git commit -m "benchmark: record ${PROFILE} run on m5d.metal [skip ci]"
+            git push
+          fi

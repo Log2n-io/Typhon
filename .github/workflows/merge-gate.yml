@@ -1,0 +1,149 @@
+name: Merge Gate
+
+# The single required PR check. Detects changed areas, runs the heavy correctness suites on an
+# ephemeral c6id.8xlarge via SkyPilot (engine / workbench / coverage) and the TLA+ specs on a free
+# runner, then an aggregate `gate` job reports one definitive green/red.
+# Design + rationale: claude/design/Infrastructure/ci-merge-gate.md
+#
+# Folds in the retired engine-ci.yml + workbench-ci.yml.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Back-to-back pushes within a PR cancel the older run instead of queueing.
+concurrency:
+  group: merge-gate-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ---- Change detection: emit boolean flags consumed by the heavy jobs + passed to the VM. ----
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      engine: ${{ steps.filter.outputs.engine }}
+      workbench: ${{ steps.filter.outputs.workbench }}
+      tla: ${{ steps.filter.outputs.tla }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            engine:
+              - 'src/Typhon.Engine/**'
+              - 'test/Typhon.Engine.Tests/**'
+              - 'Typhon.slnx'
+            workbench:
+              - 'tools/Typhon.Workbench/**'
+              - 'Typhon.slnx'
+            tla:
+              - 'src/Typhon.Engine/Durability/**'
+
+  # ---- Heavy correctness suites on the c6id (engine / workbench / coverage). ----
+  aws-gate:
+    needs: changes
+    if: ${{ needs.changes.outputs.engine == 'true' || needs.changes.outputs.workbench == 'true' }}
+    runs-on: ubuntu-latest
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: eu-west-1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SkyPilot
+        run: python3 -m pip install --quiet "skypilot[aws]"
+
+      # Blocking launch: sky propagates the VM's run: exit code, so a test failure on the VM
+      # fails this step → this job → the gate. --down tears the instance down either way.
+      - name: Run correctness gate on c6id
+        run: |
+          sky launch bench/aws/ci.sky.yaml --down -y \
+            --env RUN_ENGINE=${{ needs.changes.outputs.engine }} \
+            --env RUN_WORKBENCH=${{ needs.changes.outputs.workbench }} \
+            --env RUN_COVERAGE=${{ needs.changes.outputs.engine }} \
+            --env RUN_ID=${{ github.run_id }}
+
+      # if: always() — we want the report surfaced precisely when the gate FAILED.
+      - name: Pull reports from S3
+        if: always()
+        run: |
+          mkdir -p ci-out
+          aws s3 sync "s3://typhon-traces/ci/${{ github.run_id }}/" ci-out/ || true
+
+      - name: Render report on the check page
+        if: always()
+        run: |
+          if [ -f ci-out/summary.md ]; then
+            cat ci-out/summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "_No summary produced (the VM may have failed before writing one)._" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload raw artifacts (.trx / coverage / logs)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-reports
+          path: ci-out/**
+          if-no-files-found: ignore
+
+  # ---- TLA+ specs on a free runner (Java only — must NOT consume the c6id). ----
+  tla:
+    needs: changes
+    if: ${{ needs.changes.outputs.tla == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The specs live in the separate typhon-claude repo (claude/ is gitignored here).
+      - name: Checkout typhon-claude (TLA specs)
+        uses: actions/checkout@v4
+        with:
+          repository: nockawa/typhon-claude
+          ssh-key: ${{ secrets.TYPHON_CLAUDE_DEPLOY_KEY }}
+          path: typhon-claude
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '11'    # runs the pinned tla2tools v1.7.4
+
+      - name: Model-check all specs + genuineness mutants
+        working-directory: typhon-claude/claude/rules/tla
+        run: |
+          set -e
+          for spec in CheckpointProtocol CommitRecovery CommittedDiscipline; do
+            echo "::group::TLC $spec (expect GREEN)"
+            ./run-tlc.sh "$spec"
+            echo "::endgroup::"
+            echo "::group::TLC $spec mutant (expect VIOLATION)"
+            ./run-tlc.sh "$spec" mutant --expect-violation
+            echo "::endgroup::"
+          done
+
+  # ---- The ONLY required check. Aggregates: skipped → pass, failure/cancelled → fail. ----
+  gate:
+    needs: [changes, aws-gate, tla]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Compute verdict
+        run: |
+          changes='${{ needs.changes.result }}'
+          aws='${{ needs.aws-gate.result }}'
+          tla='${{ needs.tla.result }}'
+          echo "changes=$changes  aws-gate=$aws  tla=$tla"
+          fail=0
+          # changes must succeed; aws-gate/tla may legitimately be 'skipped' (nothing relevant changed).
+          [ "$changes" = "success" ] || { echo "change-detection failed"; fail=1; }
+          case "$aws" in failure|cancelled) echo "aws-gate failed"; fail=1 ;; esac
+          case "$tla" in failure|cancelled) echo "tla failed"; fail=1 ;; esac
+          if [ "$fail" -ne 0 ]; then echo "Merge gate: RED"; exit 1; fi
+          echo "Merge gate: GREEN"

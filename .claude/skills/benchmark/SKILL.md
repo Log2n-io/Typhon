@@ -8,6 +8,14 @@ argument-hint: [--quick] [--report-only] [--list] [--btree-fast] [--btree-medium
 
 Run Typhon regression benchmarks, record results to history, and generate trend reports with regression detection.
 
+> **Local runs are dev-only and DO NOT publish.** The public benchmark artifact
+> (`benchmark/reports/{latest.md,charts/}` + `benchmark/history/results.jsonl`) is written **only by
+> CI on the `m5d.metal` reference box** — benchmark numbers are hardware-dependent, so mixing a dev
+> machine into the tracked trend would corrupt it. This skill therefore writes to the gitignored
+> scratch dir `benchmark/.local/` and never commits. To publish reference numbers, run the
+> **Benchmark** GitHub workflow (label a PR `run-benchmark`, or dispatch it). See
+> `claude/design/Infrastructure/ci-merge-gate.md`.
+
 **Comparison mode:** Each run is compared against the **immediately previous run** (not an averaged baseline). This gives a clear trend view.
 
 **Noise filtering:** Benchmarks are automatically classified as "noisy" (filtered from regressions) when:
@@ -43,10 +51,10 @@ Then read `benchmark/config.json` and display the configured thresholds per benc
 Skip benchmark execution. Regenerate reports from existing history:
 
 ```bash
-python3 benchmark/scripts/report_generator.py --history benchmark/history/results.jsonl --config benchmark/config.json --output-dir benchmark/reports
+python3 benchmark/scripts/report_generator.py --history benchmark/.local/results.jsonl --config benchmark/config.json --output-dir benchmark/.local/reports
 ```
 
-Read `benchmark/reports/latest.md` and display a condensed summary.
+Read `benchmark/.local/reports/latest.md` and display a condensed summary.
 
 ### `/benchmark --quick`
 
@@ -132,31 +140,22 @@ cd test/Typhon.Benchmark && dotnet run -c Release --no-build -- --allCategories 
 #### Step 4: Generate Report
 
 ```bash
-python3 benchmark/scripts/report_generator.py --bdn-results test/Typhon.Benchmark/BenchmarkDotNet.Artifacts/results --history benchmark/history/results.jsonl --config benchmark/config.json --output-dir benchmark/reports
+python3 benchmark/scripts/report_generator.py --bdn-results test/Typhon.Benchmark/BenchmarkDotNet.Artifacts/results --history benchmark/.local/results.jsonl --config benchmark/config.json --output-dir benchmark/.local/reports
 ```
 
 #### Step 5: Display Summary
 
-Read `benchmark/reports/latest.md` and display a condensed summary to the user:
+Read `benchmark/.local/reports/latest.md` and display a condensed summary to the user:
 
 - Total benchmarks run
 - **Regressions found** (list each with name + % change) — highlight prominently
 - **Improvements found** (list each with name + % change)
 - Stable benchmark count
-- Link to full report: `benchmark/reports/latest.md`
+- Link to full report: `benchmark/.local/reports/latest.md`
 
-#### Step 6: Prompt for History Commit
+#### Step 6: Do NOT publish
 
-Ask the user:
-
-**Question:** "Benchmark results have been appended to history. Commit the updated history?"
-**Header:** "Commit"
-**Options:**
-- `Yes, commit history` (description: "Commit benchmark/history/results.jsonl with the new run data")
-- `No, skip commit` (description: "Keep the local changes without committing")
-
-If yes, commit only `benchmark/history/results.jsonl`:
-```bash
-git add benchmark/history/results.jsonl
-git commit -m "benchmark: record regression benchmark results"
-```
+Local benchmark runs are **dev-only**. The results live in the gitignored `benchmark/.local/` and
+are **never committed** — the public reference artifact is produced solely by CI on `m5d.metal`
+(label a PR `run-benchmark`, or dispatch the **Benchmark** workflow). Do not stage or commit anything
+from this run.

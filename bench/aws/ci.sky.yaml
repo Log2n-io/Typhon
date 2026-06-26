@@ -1,0 +1,136 @@
+# Correctness merge-gate task — runs the heavy PR checks on an ephemeral c6id.8xlarge
+# and writes a Markdown summary + raw test artifacts (.trx / cobertura / logs) to S3 for
+# the GitHub Actions runner to surface on the PR. Design: claude/design/Infrastructure/ci-merge-gate.md
+#
+# The c6id is VIRTUALIZED (not bare metal): pass/fail correctness doesn't need bare-metal
+# topology accuracy, and its local NVMe speeds the real MMF/WAL I/O the engine tests perform.
+#
+# Which suites run is driven by the RUN_* env flags the workflow passes (true/false), so a
+# single boot runs only what the PR actually touched.
+#
+# Launched by .github/workflows/merge-gate.yml — NOT meant for manual use:
+#   sky launch bench/aws/ci.sky.yaml --down -y \
+#     --env RUN_ENGINE=true --env RUN_WORKBENCH=false --env RUN_COVERAGE=true --env RUN_ID=<id>
+name: typhon-ci-gate
+
+resources:
+  cloud: aws
+  instance_type: c6id.8xlarge
+  region: eu-west-1            # MUST match the typhon-traces S3 bucket region
+
+workdir: .                     # the repo root — synced to ~/sky_workdir on the instance
+
+file_mounts:
+  /outputs:
+    source: s3://typhon-traces
+    mode: MOUNT                # writes to /outputs replicate to the bucket
+
+envs:
+  # Defaults are "false"/"local"; the workflow overrides them per run via --env.
+  RUN_ENGINE: "false"
+  RUN_WORKBENCH: "false"
+  RUN_COVERAGE: "false"
+  RUN_ID: "local"
+
+setup: |
+  set -euo pipefail
+  # Local instance-store NVMe is ephemeral and not auto-mounted — format + mount it.
+  DEV=$(lsblk -dno NAME,MODEL | grep -i 'Instance Storage' | head -1 | awk '{print $1}')
+  sudo mkfs.ext4 -F "/dev/$DEV"
+  sudo mkdir -p /nvme && sudo mount "/dev/$DEV" /nvme
+  sudo chown "$(whoami)" /nvme
+  # .NET 10 SDK
+  curl -sSL https://dot.net/v1/dotnet-install.sh | bash -s -- --channel 10.0
+  export PATH="$HOME/.dotnet:$HOME/.dotnet/tools:$PATH"
+  # Node 22 — only the Workbench client needs it, but installing unconditionally keeps the
+  # task simple and the cost is a few seconds amortised against the test run.
+  curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+  sudo apt-get install -y nodejs
+  # dotnet-coverage for the (separate, Debug) coverage pass.
+  dotnet tool install --global dotnet-coverage
+  # Build the solution once in Release — shared by the engine + workbench .NET test runs.
+  dotnet restore Typhon.slnx
+  dotnet build Typhon.slnx -c Release --no-restore
+
+# NOTE: do not use `set -e` here — we run several suites, capture each exit code, and want the
+# script to continue so every suite's result and artifacts are collected before we exit RC.
+run: |
+  set -uo pipefail
+  export PATH="$HOME/.dotnet:$HOME/.dotnet/tools:$PATH"
+  REPO=~/sky_workdir
+  OUT=/nvme/ci-out                 # write locally first; copy to the S3 mount once at the end
+  mkdir -p "$OUT"
+  cd "$REPO"
+  RC=0
+  S="$OUT/summary.md"
+  { echo "# Typhon CI Gate — run ${RUN_ID}"; echo ""; } > "$S"
+
+  # --- Engine: full suite MINUS the quarantined known-reds (Release, clean — the gate) ---
+  if [ "$RUN_ENGINE" = "true" ]; then
+    echo "## Engine tests" >> "$S"
+    if dotnet test test/Typhon.Engine.Tests/Typhon.Engine.Tests.csproj \
+         -c Release --no-build \
+         --filter "Category!=Quarantine" \
+         --logger "trx;LogFileName=engine.trx" --results-directory "$OUT" \
+         2>&1 | tee "$OUT/engine.log"
+    then echo "- ✅ engine suite passed" >> "$S"
+    else RC=1; echo "- ❌ engine suite FAILED" >> "$S"
+    fi
+    echo "" >> "$S"
+  fi
+
+  # --- Workbench: TS toolchain + .NET tests (BLOCKING); Playwright e2e is deferred (P5) ---
+  if [ "$RUN_WORKBENCH" = "true" ]; then
+    echo "## Workbench" >> "$S"
+    (
+      cd "$REPO/tools/Typhon.Workbench/ClientApp"
+      npm ci --no-audit --no-fund && \
+      npm run generate-types && \
+      npx tsc --noEmit && \
+      npm run lint && \
+      npx vitest run && \
+      npm run build
+    ) 2>&1 | tee "$OUT/workbench-client.log"
+    if [ "${PIPESTATUS[0]}" -eq 0 ]; then echo "- ✅ client toolchain (typecheck/lint/vitest/build) passed" >> "$S"
+    else RC=1; echo "- ❌ client toolchain FAILED" >> "$S"
+    fi
+    if dotnet test test/Typhon.Workbench.Tests/Typhon.Workbench.Tests.csproj \
+         -c Release --no-build \
+         --logger "trx;LogFileName=workbench.trx" --results-directory "$OUT" \
+         2>&1 | tee "$OUT/workbench-dotnet.log"
+    then echo "- ✅ workbench .NET tests passed" >> "$S"
+    else RC=1; echo "- ❌ workbench .NET tests FAILED" >> "$S"
+    fi
+    # TODO(P5): Playwright e2e — non-blocking, report-only. Needs wb-dev servers (:5200/:5173) +
+    # a headless browser provisioned on the VM. Deferred until the specs are proven stable.
+    echo "" >> "$S"
+  fi
+
+  # --- Coverage: REPORT-ONLY, never affects RC. Separate Debug instrumented pass. ---
+  if [ "$RUN_COVERAGE" = "true" ]; then
+    echo "## Coverage" >> "$S"
+    dotnet build -c Debug test/Typhon.Engine.Tests/Typhon.Engine.Tests.csproj 2>&1 | tee "$OUT/coverage-build.log"
+    dotnet-coverage collect -o "$OUT/coverage-report.xml" -f xml \
+      dotnet test test/Typhon.Engine.Tests/Typhon.Engine.Tests.csproj --no-build -c Debug \
+      2>&1 | tee "$OUT/coverage.log" || true
+    if [ -f "$OUT/coverage-report.xml" ]; then
+      python3 coverage/scripts/report_generator.py \
+        --coverage-xml "$OUT/coverage-report.xml" \
+        --history coverage/history/results.jsonl \
+        --config coverage/config.json \
+        --output-dir "$OUT/coverage-report" \
+        --source-dir src/Typhon.Engine || true
+      [ -f "$OUT/coverage-report/latest.md" ] && cat "$OUT/coverage-report/latest.md" >> "$S"
+    else
+      echo "- ⚠️ coverage collection produced no report" >> "$S"
+    fi
+    echo "" >> "$S"
+  fi
+
+  # Ship everything (summary + trx + logs + coverage) to the S3 mount for the runner to pull.
+  DEST="/outputs/ci/${RUN_ID}"
+  mkdir -p "$DEST"
+  cp -r "$OUT/." "$DEST/" || true
+
+  echo "CI gate finished with RC=$RC"
+  exit $RC

@@ -483,6 +483,12 @@ def generate_charts(all_history, analysis, config, output_dir, last_n):
     charts_dir = os.path.join(output_dir, "charts")
     os.makedirs(charts_dir, exist_ok=True)
 
+    # Wipe stale charts before regenerating: removed/renamed areas must not leave orphaned SVGs
+    # behind, since the charts/ dir is now tracked in git (see ci-merge-gate design doc).
+    for _stale in os.listdir(charts_dir):
+        if _stale.endswith(".svg"):
+            os.remove(os.path.join(charts_dir, _stale))
+
     chart_count = 0
 
     # Overall coverage trend

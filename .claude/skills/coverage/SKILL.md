@@ -85,14 +85,16 @@ Read `coverage/reports/latest.md` and display a condensed summary to the user:
 
 Ask the user:
 
-**Question:** "Coverage results have been appended to history. Commit the updated history?"
+**Question:** "Coverage results have been appended to history. Commit the updated report?"
 **Header:** "Commit"
 **Options:**
-- `Yes, commit history` (description: "Commit coverage/history/results.jsonl with the new run data")
+- `Yes, commit report` (description: "Commit the history + rendered report (latest.md + charts)")
 - `No, skip commit` (description: "Keep the local changes without committing")
 
-If yes, commit only `coverage/history/results.jsonl`:
+The rendered report (`coverage/reports/latest.md` + `coverage/reports/charts/`) is now **tracked** —
+`latest.md` embeds the charts, so they must be committed together to avoid broken images. Coverage is
+hardware-independent, so committing from a local run is fine. If yes, commit the full set:
 ```bash
-git add coverage/history/results.jsonl
+git add coverage/history/results.jsonl coverage/reports/latest.md coverage/reports/charts
 git commit -m "coverage: record code coverage results"
 ```

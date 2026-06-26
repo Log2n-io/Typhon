@@ -1,0 +1,82 @@
+# Benchmark task — runs Typhon.Benchmark on bare-metal m5d.metal, the PUBLIC, REPRODUCIBLE
+# reference platform. Opt-in only (label / workflow_dispatch); NEVER a merge blocker.
+# Design: claude/design/Infrastructure/ci-merge-gate.md
+#
+# Bare metal (stable cores / real NUMA) is REQUIRED here for trustworthy numbers — unlike the
+# correctness gate, which runs on a cheap virtualized c6id. m5d.metal is a public AWS instance
+# type, so anyone can launch it and reproduce the figures.
+#
+# The VM appends the new run to its synced copy of benchmark/history/results.jsonl and regenerates
+# benchmark/reports/{latest.md,charts/}, then ships them to S3. The GitHub Actions runner pulls
+# them and makes the single commit (the VM has no push creds). Local `/benchmark` never publishes.
+#
+# Launched by .github/workflows/benchmark.yml:
+#   sky launch bench/aws/benchmark.sky.yaml --down -y --env PROFILE=regression --env RUN_ID=<id>
+name: typhon-benchmark
+
+resources:
+  cloud: aws
+  instance_type: m5d.metal      # bare metal + local NVMe — the reference hardware
+  region: eu-west-1
+
+workdir: .
+
+file_mounts:
+  /outputs:
+    source: s3://typhon-traces
+    mode: MOUNT
+
+envs:
+  PROFILE: "regression"          # regression | btree-fast | btree-medium | btree-full
+  RUN_ID: "local"
+
+setup: |
+  set -euo pipefail
+  DEV=$(lsblk -dno NAME,MODEL | grep -i 'Instance Storage' | head -1 | awk '{print $1}')
+  sudo mkfs.ext4 -F "/dev/$DEV"
+  sudo mkdir -p /nvme && sudo mount "/dev/$DEV" /nvme
+  sudo chown "$(whoami)" /nvme
+  curl -sSL https://dot.net/v1/dotnet-install.sh | bash -s -- --channel 10.0
+  export PATH="$HOME/.dotnet:$PATH"
+  dotnet build -c Release test/Typhon.Benchmark/Typhon.Benchmark.csproj
+
+run: |
+  set -uo pipefail
+  export PATH="$HOME/.dotnet:$PATH"
+  REPO=~/sky_workdir
+  cd "$REPO"
+
+  # Map the profile to BDN args (mirrors the /benchmark skill).
+  case "$PROFILE" in
+    regression)   BDN_ARGS="--allCategories Regression" ;;
+    btree-fast)   BDN_ARGS="--btree-fast" ;;
+    btree-medium) BDN_ARGS="--btree-medium" ;;
+    btree-full)   BDN_ARGS="--btree-full" ;;
+    *) echo "Unknown PROFILE='$PROFILE'"; exit 2 ;;
+  esac
+
+  # Clean stale BDN artifacts so exploratory data can't pollute the regression report.
+  rm -rf test/Typhon.Benchmark/BenchmarkDotNet.Artifacts/results
+
+  RC=0
+  ( cd test/Typhon.Benchmark && dotnet run -c Release --no-build -- $BDN_ARGS --exporters json ) \
+    2>&1 | tee /nvme/benchmark.log
+  [ "${PIPESTATUS[0]}" -ne 0 ] && RC=1
+
+  # Append to history + regenerate the tracked report set (latest.md + charts) in-place.
+  python3 benchmark/scripts/report_generator.py \
+    --bdn-results test/Typhon.Benchmark/BenchmarkDotNet.Artifacts/results \
+    --history benchmark/history/results.jsonl \
+    --config benchmark/config.json \
+    --output-dir benchmark/reports || true
+
+  # Ship the updated tracked artifact (history + reports) + the raw log to S3 for the runner to
+  # commit. RUN_ID namespaces the run; the runner reads from this prefix.
+  DEST="/outputs/benchmark/${RUN_ID}"
+  mkdir -p "$DEST/reports"
+  cp benchmark/history/results.jsonl "$DEST/results.jsonl" || true
+  cp -r benchmark/reports/. "$DEST/reports/" || true
+  cp /nvme/benchmark.log "$DEST/benchmark.log" || true
+
+  echo "Benchmark finished with RC=$RC"
+  exit $RC
