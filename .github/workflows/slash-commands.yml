@@ -1,0 +1,80 @@
+name: Slash Commands
+
+# PR-comment ChatOps: comment `/coverage` or `/benchmark [profile]` on a PR to fire the opt-in
+# workflows — a re-runnable, PR-page trigger without the label remove/re-add dance.
+#
+# IMPORTANT: `issue_comment` workflows ALWAYS run from the DEFAULT branch's definition (main), so this
+# file only takes effect once it's on main. It dispatches coverage.yml / benchmark.yml against the PR's
+# OWN head branch via workflow_dispatch.
+#
+# Usage:
+#   /coverage
+#   /benchmark                 (profile defaults to `regression`)
+#   /benchmark btree-full      (regression | btree-fast | btree-medium | btree-full)
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  actions: write          # dispatch coverage.yml / benchmark.yml
+  pull-requests: write    # post the confirmation comment
+  issues: write           # 👍 the triggering comment
+
+jobs:
+  dispatch:
+    # Only: PR comments (not issues) · trusted authors · a recognised command.
+    if: >-
+      github.event.issue.pull_request &&
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) &&
+      (startsWith(github.event.comment.body, '/coverage') || startsWith(github.event.comment.body, '/benchmark'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Acknowledge + resolve PR branch + dispatch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.issue.number }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+          BODY: ${{ github.event.comment.body }}
+        run: |
+          set -euo pipefail
+
+          # 👍 the comment immediately so the user sees the command was accepted.
+          gh api -X POST "repos/$REPO/issues/comments/$COMMENT_ID/reactions" -f content='+1' >/dev/null || true
+
+          # Resolve the PR's head branch. workflow_dispatch runs against a branch ref, so fork PRs
+          # (head branch not in this repo) can't be targeted — reject them clearly.
+          INFO=$(gh pr view "$PR" --repo "$REPO" --json headRefName,isCrossRepository)
+          REF=$(echo "$INFO" | jq -r .headRefName)
+          if [ "$(echo "$INFO" | jq -r .isCrossRepository)" = "true" ]; then
+            gh pr comment "$PR" --repo "$REPO" \
+              --body "⚠️ Slash commands only work on same-repo PR branches, not forks. Use **Actions → Run workflow** instead."
+            exit 0
+          fi
+
+          # First token = command, second = optional benchmark profile.
+          CMD=$(printf '%s' "$BODY" | awk '{print $1}')
+          ARG=$(printf '%s' "$BODY" | awk '{print $2}')
+          ACTIONS="https://github.com/$REPO/actions/workflows"
+
+          case "$CMD" in
+            /coverage)
+              gh workflow run coverage.yml --repo "$REPO" --ref "$REF"
+              gh pr comment "$PR" --repo "$REPO" \
+                --body "📊 **Coverage** triggered on \`$REF\` → [watch it]($ACTIONS/coverage.yml)"
+              ;;
+            /benchmark)
+              PROFILE="${ARG:-regression}"
+              case "$PROFILE" in
+                regression|btree-fast|btree-medium|btree-full) ;;
+                *)
+                  gh pr comment "$PR" --repo "$REPO" \
+                    --body "⚠️ Unknown benchmark profile \`$PROFILE\`. Use: \`regression\` · \`btree-fast\` · \`btree-medium\` · \`btree-full\`."
+                  exit 0 ;;
+              esac
+              gh workflow run benchmark.yml --repo "$REPO" --ref "$REF" -f profile="$PROFILE"
+              gh pr comment "$PR" --repo "$REPO" \
+                --body "🏎️ **Benchmark** (\`$PROFILE\`) triggered on \`$REF\` → [watch it]($ACTIONS/benchmark.yml)"
+              ;;
+          esac
