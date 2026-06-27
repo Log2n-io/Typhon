@@ -1,26 +1,22 @@
-# Correctness merge-gate task — runs the heavy PR checks on a WARM, REUSED c6id.8xlarge
-# and writes a Markdown summary + raw test artifacts (.trx / logs) to S3 for the GitHub
-# Actions runner to surface on the PR. Design: claude/design/Infrastructure/ci-merge-gate.md
+# Correctness merge-gate task — runs the heavy PR checks on an ephemeral c6id.8xlarge
+# and writes a Markdown summary + raw test artifacts (.trx / cobertura / logs) to S3 for
+# the GitHub Actions runner to surface on the PR. Design: claude/design/Infrastructure/ci-merge-gate.md
 #
-# WARM-CLUSTER MODEL: the workflow runs `sky launch -c typhon-ci-gate -i <N>` (NOT `--down`).
-# `-c <name>` reuses the cluster if it exists (or starts it if autostopped, or creates it if
-# absent); setup: is idempotent so reuse is cheap; the per-PR compile is incremental in run:;
-# `-i <N>` autostops the cluster after N idle minutes (STOP, not terminate → $0 compute, the
-# EBS root persists). This trades the ephemeral model's $0-idle for ~$5/mo of always-on EBS
-# (disk_size kept small on purpose) in exchange for skipping provision + toolchain install
-# (~100 s) and a full build (~46 s → incremental) on every run. Rationale + cost model in the
-# design doc. The c6id is VIRTUALIZED — correctness doesn't need bare-metal topology.
+# The c6id is VIRTUALIZED (not bare metal): pass/fail correctness doesn't need bare-metal
+# topology accuracy, and its local NVMe speeds the real MMF/WAL I/O the engine tests perform.
 #
-# Which suites run is driven by the RUN_* env flags the workflow passes (true/false).
+# Which suites run is driven by the RUN_* env flags the workflow passes (true/false), so a
+# single boot runs only what the PR actually touched.
+#
+# Launched by .github/workflows/merge-gate.yml — NOT meant for manual use:
+#   sky launch bench/aws/ci.sky.yaml --down -y \
+#     --env RUN_ENGINE=true --env RUN_WORKBENCH=false --env RUN_ID=<id>
 name: typhon-ci-gate
 
 resources:
   cloud: aws
   instance_type: c6id.8xlarge
   region: eu-west-1            # MUST match the typhon-traces S3 bucket region
-  disk_size: 50               # EBS root (gp3). Small ON PURPOSE: a WARM/persistent cluster bills this
-                              # 24/7 even while stopped — the 256 GB SkyPilot default would be ~$24/mo;
-                              # 50 GB (ample for SDK + Node + repo + bin/obj + NuGet) is ~$4.6/mo.
 
 workdir: .                     # the repo root — synced to ~/sky_workdir on the instance
 
@@ -35,21 +31,25 @@ envs:
   RUN_WORKBENCH: "false"
   RUN_ID: "local"
 
-# setup: runs ONCE per cluster creation (NOT on `sky exec`). On a WARM/persistent cluster everything
-# here lands on the EBS root and survives stop/start, so each PR run skips it. The per-PR build lives
-# in run: (incremental on a warm cluster). No /nvme mount — the engine tests write their DBs under
-# /tmp (EBS root) already, so the instance-store NVMe was never on the test I/O path.
 setup: |
   set -euo pipefail
+  # Local instance-store NVMe is ephemeral and not auto-mounted — format + mount it.
+  DEV=$(lsblk -dno NAME,MODEL | grep -i 'Instance Storage' | head -1 | awk '{print $1}')
+  sudo mkfs.ext4 -F "/dev/$DEV"
+  sudo mkdir -p /nvme && sudo mount "/dev/$DEV" /nvme
+  sudo chown "$(whoami)" /nvme
+  # .NET 10 SDK
+  curl -sSL https://dot.net/v1/dotnet-install.sh | bash -s -- --channel 10.0
+  # DOTNET_ROOT lets apphost-based child processes (the test host) locate the runtime; PATH alone isn't enough.
   export DOTNET_ROOT="$HOME/.dotnet"
   export PATH="$DOTNET_ROOT:$DOTNET_ROOT/tools:$PATH"
-  # IDEMPOTENT — `sky launch -c` re-runs setup on EVERY (re)use of the warm cluster, so each guard
-  # skips work already on the persistent EBS root. On a warm cluster this is a few seconds; on first
-  # creation it's the full install.
-  [ -x "$DOTNET_ROOT/dotnet" ] || { curl -sSL https://dot.net/v1/dotnet-install.sh | bash -s -- --channel 10.0; }
-  command -v node >/dev/null 2>&1 || { curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -; sudo apt-get install -y nodejs; }
-  # Warm the NuGet cache (persists in ~/.nuget); incremental on reuse. The compile is in run: per PR.
-  dotnet restore Typhon.slnx || true
+  # Node 22 — only the Workbench client needs it, but installing unconditionally keeps the
+  # task simple and the cost is a few seconds amortised against the test run.
+  curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+  sudo apt-get install -y nodejs
+  # Build the solution once in Release — shared by the engine + workbench .NET test runs.
+  dotnet restore Typhon.slnx
+  dotnet build Typhon.slnx -c Release --no-restore
 
 # NOTE: do not use `set -e` here — we run several suites, capture each exit code, and want the
 # script to continue so every suite's result and artifacts are collected before we exit RC.
@@ -57,17 +57,14 @@ run: |
   set -uo pipefail
   export DOTNET_ROOT="$HOME/.dotnet"
   export PATH="$DOTNET_ROOT:$DOTNET_ROOT/tools:$PATH"
-  REPO=~/sky_workdir
-  cd "$REPO"
-  # Per-PR build (setup: no longer builds). On a WARM cluster `sky exec` syncs this PR's code over the
-  # prior checkout, so this recompiles only what changed; on a cold/first run it's a full build.
-  dotnet build Typhon.slnx -c Release
   # NOTE on parallelism: a single 16-worker `dotnet test` process is BOTH slow (the suite's 116
   # [NonParallelizable] fixtures pin it ~91% serial) AND flaky (parallel fixtures collide on the
   # engine's process-static state). The engine block below instead shards into K serial (workers=1)
   # PROCESSES via bench/aws/shard.py — see that file's header + the design doc for the rationale.
-  OUT=~/ci-out                     # EBS root (no /nvme; tests already use /tmp). Cleared each run.
-  rm -rf "$OUT"; mkdir -p "$OUT"
+  REPO=~/sky_workdir
+  OUT=/nvme/ci-out                 # write locally first; copy to the S3 mount once at the end
+  mkdir -p "$OUT"
+  cd "$REPO"
   RC=0
   S="$OUT/summary.md"
   { echo "# Typhon CI Gate — run ${RUN_ID}"; echo ""; } > "$S"

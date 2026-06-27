@@ -50,12 +50,6 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.engine == 'true' || needs.changes.outputs.workbench == 'true' }}
     runs-on: ubuntu-latest
-    # ONE warm c6id is reused across all PRs (see the launch step). Two runs must never `sky launch`
-    # it at once, so serialize this job GLOBALLY (queue, do NOT cancel — a running gate is valid).
-    # The workflow-level concurrency above still cancels superseded runs of the SAME branch.
-    concurrency:
-      group: typhon-ci-warm-cluster
-      cancel-in-progress: false
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -66,14 +60,11 @@ jobs:
       - name: Install SkyPilot
         run: python3 -m pip install --quiet "skypilot[aws]"
 
-      # Blocking launch onto a WARM, REUSED cluster. `-c typhon-ci-gate` reuses it if UP, starts it
-      # if autostopped, or creates it if absent; setup: is idempotent so reuse is cheap and the build
-      # is incremental in run:. `-i 5` autostops after 5 idle minutes (STOP → $0 compute, EBS root
-      # persists) — NO `--down`. sky blocks and propagates the VM's run: exit code, so a test failure
-      # fails this step → this job → the gate.
-      - name: Run correctness gate on the warm c6id
+      # Blocking launch: sky propagates the VM's run: exit code, so a test failure on the VM
+      # fails this step → this job → the gate. --down tears the instance down either way.
+      - name: Run correctness gate on c6id
         run: |
-          sky launch -c typhon-ci-gate -i 5 -y bench/aws/ci.sky.yaml \
+          sky launch bench/aws/ci.sky.yaml --down -y \
             --env RUN_ENGINE=${{ needs.changes.outputs.engine }} \
             --env RUN_WORKBENCH=${{ needs.changes.outputs.workbench }} \
             --env RUN_ID=${{ github.run_id }}
