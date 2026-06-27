@@ -58,10 +58,13 @@ run: |
   export DOTNET_ROOT="$HOME/.dotnet"
   export PATH="$DOTNET_ROOT:$DOTNET_ROOT/tools:$PATH"
   # Match the dev machine's parallelism: NUnit workers = ProcessorCount / 2 (16 on both a 7950X and a
-  # 32-vCPU c6id.8xlarge). The assembly default is LevelOfParallelism(4); this runsettings override raises
-  # it to the dev-machine value. Deliberately NOT the full vCPU count — 30 oversubscribes and destabilises.
+  # 32-vCPU c6id.8xlarge). The assembly default is LevelOfParallelism(4); a runsettings <NumberOfTestWorkers>
+  # overrides it — the `-- NUnit.NumberOfTestWorkers=N` CLI form is NOT honoured by the adapter (verified: no
+  # speedup). --settings replaces the auto-discovered file, so carry test.runsettings' DefaultTimeout too.
   WORKERS=$(( $(nproc --all) / 2 ))
   [ "$WORKERS" -lt 1 ] && WORKERS=1
+  RUNSETTINGS=/nvme/ci.runsettings
+  printf '<RunSettings><NUnit><NumberOfTestWorkers>%s</NumberOfTestWorkers><DefaultTimeout>10000</DefaultTimeout></NUnit></RunSettings>\n' "$WORKERS" > "$RUNSETTINGS"
   REPO=~/sky_workdir
   OUT=/nvme/ci-out                 # write locally first; copy to the S3 mount once at the end
   mkdir -p "$OUT"
@@ -77,7 +80,7 @@ run: |
          -c Release --no-build \
          --filter "Category!=Quarantine" \
          --logger "trx;LogFileName=engine.trx" --results-directory "$OUT" \
-         -- NUnit.NumberOfTestWorkers=$WORKERS 2>&1 | tee "$OUT/engine.log"
+         --settings "$RUNSETTINGS" 2>&1 | tee "$OUT/engine.log"
     then echo "- ✅ engine suite passed" >> "$S"
     else RC=1; echo "- ❌ engine suite FAILED" >> "$S"
     fi

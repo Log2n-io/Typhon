@@ -16,6 +16,7 @@ namespace Typhon.Engine.Tests.Profiler;
 /// capture + TraceLog ETLX conversion) — they run longer than the sub-300 ms guideline but well under the 15 s timeout.
 /// </remarks>
 [TestFixture]
+[NonParallelizable] // activates the global profiler emission pipeline; must not run concurrently with other fixtures
 public sealed class CpuSampleParserTests
 {
     private string _tempDir;

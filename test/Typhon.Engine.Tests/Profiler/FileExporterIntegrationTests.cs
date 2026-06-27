@@ -20,6 +20,7 @@ namespace Typhon.Engine.Tests.Profiler;
 /// Tests run serially within <see cref="TyphonProfiler"/>'s lifecycle lock, so attaching/starting/stopping doesn't race with other fixtures.
 /// </remarks>
 [TestFixture]
+[NonParallelizable] // activates the global profiler emission pipeline; must not run concurrently with other fixtures
 public class FileExporterIntegrationTests
 {
     private string _tempPath;

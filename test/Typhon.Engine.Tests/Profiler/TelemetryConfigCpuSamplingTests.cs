@@ -13,6 +13,7 @@ namespace Typhon.Engine.Tests.Profiler;
 /// CpuSampling-specific) and cannot be re-exercised in-process after the static constructor has run — it is covered by the #351 end-to-end verification.
 /// </remarks>
 [TestFixture]
+[NonParallelizable] // activates the global profiler emission pipeline; must not run concurrently with other fixtures
 public sealed class TelemetryConfigCpuSamplingTests
 {
     [Test]

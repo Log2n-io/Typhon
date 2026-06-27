@@ -10,6 +10,7 @@ namespace Typhon.Engine.Tests.Profiler;
 /// the QPC anchor, the graceful-degrade contract, and that a <c>.nettrace</c> companion is produced.
 /// </summary>
 [TestFixture]
+[NonParallelizable] // activates the global profiler emission pipeline; must not run concurrently with other fixtures
 public sealed class CpuSamplerSessionTests
 {
     private string _tempDir;

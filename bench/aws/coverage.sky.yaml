@@ -43,12 +43,14 @@ run: |
   export PATH="$DOTNET_ROOT:$DOTNET_ROOT/tools:$PATH"
   WORKERS=$(( $(nproc --all) / 2 ))
   [ "$WORKERS" -lt 1 ] && WORKERS=1
+  RUNSETTINGS=/nvme/cov.runsettings
+  printf '<RunSettings><NUnit><NumberOfTestWorkers>%s</NumberOfTestWorkers><DefaultTimeout>10000</DefaultTimeout></NUnit></RunSettings>\n' "$WORKERS" > "$RUNSETTINGS"
   cd ~/sky_workdir
   RC=0
 
   dotnet-coverage collect -o /nvme/coverage-report.xml -f xml \
     dotnet test test/Typhon.Engine.Tests/Typhon.Engine.Tests.csproj --no-build -c Debug \
-    --filter "Category!=Quarantine" -- NUnit.NumberOfTestWorkers=$WORKERS 2>&1 | tee /nvme/coverage.log
+    --filter "Category!=Quarantine" --settings "$RUNSETTINGS" 2>&1 | tee /nvme/coverage.log
   [ "${PIPESTATUS[0]}" -ne 0 ] && RC=1
 
   if [ -f /nvme/coverage-report.xml ]; then

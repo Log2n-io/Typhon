@@ -10,6 +10,7 @@ namespace Typhon.Engine.Tests.Profiler;
 /// the design (claude/design/Profiler/11-query-definition-export.md §4.6).
 /// </summary>
 [TestFixture]
+[NonParallelizable] // mutates the process-static QueryDefinitionDescribeTracker; a parallel fixture pollutes its dedup state
 public class QueryDefinitionDescribeOnceTests
 {
     [SetUp]

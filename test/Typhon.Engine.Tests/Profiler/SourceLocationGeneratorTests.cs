@@ -17,6 +17,7 @@ namespace Typhon.Engine.Tests.Profiler;
 /// the interceptor wiring is correct — a malformed interceptor signature fails the build.
 /// </remarks>
 [TestFixture]
+[NonParallelizable] // activates the global profiler emission pipeline; must not run concurrently with other fixtures
 public class SourceLocationGeneratorTests
 {
     [Test]
