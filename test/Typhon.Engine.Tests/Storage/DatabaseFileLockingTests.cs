@@ -194,6 +194,7 @@ class DatabaseFileLockingTests
     }
 
     [Test]
+    [Category("Sensitive")] // file-lock/IO timing — flaky under parallel CPU load; runs in the gate's serial quiet pass
     public void CorruptLockFile_Removed()
     {
         var dbName = "lock_corrupt";

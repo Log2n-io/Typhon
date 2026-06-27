@@ -57,14 +57,10 @@ run: |
   set -uo pipefail
   export DOTNET_ROOT="$HOME/.dotnet"
   export PATH="$DOTNET_ROOT:$DOTNET_ROOT/tools:$PATH"
-  # Match the dev machine's parallelism: NUnit workers = ProcessorCount / 2 (16 on both a 7950X and a
-  # 32-vCPU c6id.8xlarge). The assembly default is LevelOfParallelism(4); a runsettings <NumberOfTestWorkers>
-  # overrides it — the `-- NUnit.NumberOfTestWorkers=N` CLI form is NOT honoured by the adapter (verified: no
-  # speedup). --settings replaces the auto-discovered file, so carry test.runsettings' DefaultTimeout too.
-  WORKERS=$(( $(nproc --all) / 2 ))
-  [ "$WORKERS" -lt 1 ] && WORKERS=1
-  RUNSETTINGS=/nvme/ci.runsettings
-  printf '<RunSettings><NUnit><NumberOfTestWorkers>%s</NumberOfTestWorkers><DefaultTimeout>10000</DefaultTimeout></NUnit></RunSettings>\n' "$WORKERS" > "$RUNSETTINGS"
+  # NOTE on parallelism: a single 16-worker `dotnet test` process is BOTH slow (the suite's 116
+  # [NonParallelizable] fixtures pin it ~91% serial) AND flaky (parallel fixtures collide on the
+  # engine's process-static state). The engine block below instead shards into K serial (workers=1)
+  # PROCESSES via bench/aws/shard.py — see that file's header + the design doc for the rationale.
   REPO=~/sky_workdir
   OUT=/nvme/ci-out                 # write locally first; copy to the S3 mount once at the end
   mkdir -p "$OUT"
@@ -73,16 +69,16 @@ run: |
   S="$OUT/summary.md"
   { echo "# Typhon CI Gate — run ${RUN_ID}"; echo ""; } > "$S"
 
-  # --- Engine: full suite MINUS the quarantined known-reds (Release, clean — the gate) ---
+  # --- Engine: sharded suite MINUS the quarantined known-reds (Release, clean — the gate) ---
+  # K parallel `dotnet test` processes (workers=1 each) on the 32-vCPU box. Writes shard{0..K-1}.trx
+  # + shardS.trx (the serial Sensitive pass) + per-shard logs to $OUT; prints a summary table to
+  # engine.log; exits non-zero if ANY shard fails. Coverage is gap-proof (shard 0 is a catch-all).
   if [ "$RUN_ENGINE" = "true" ]; then
     echo "## Engine tests" >> "$S"
-    if dotnet test test/Typhon.Engine.Tests/Typhon.Engine.Tests.csproj \
-         -c Release --no-build \
-         --filter "Category!=Quarantine" \
-         --logger "trx;LogFileName=engine.trx" --results-directory "$OUT" \
-         --settings "$RUNSETTINGS" 2>&1 | tee "$OUT/engine.log"
-    then echo "- ✅ engine suite passed" >> "$S"
-    else RC=1; echo "- ❌ engine suite FAILED" >> "$S"
+    if SHARD_REPO="$REPO" SHARD_CONFIG=Release python3 bench/aws/shard.py run \
+         --results-dir "$OUT" 2>&1 | tee "$OUT/engine.log"
+    then echo "- ✅ engine suite passed (sharded: K×workers=1 + serial Sensitive pass)" >> "$S"
+    else RC=1; echo "- ❌ engine suite FAILED (sharded)" >> "$S"
     fi
     echo "" >> "$S"
   fi

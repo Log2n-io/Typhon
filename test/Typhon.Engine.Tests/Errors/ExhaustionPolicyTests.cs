@@ -60,6 +60,7 @@ class ExhaustionPolicyTests : TestBase<ExhaustionPolicyTests>
     }
 
     [Test]
+    [Category("Sensitive")] // pool-recovery timing — flaky under parallel CPU load; runs in the gate's serial quiet pass
     public void TransactionPool_RecoveryAfterDispose_AllowsNewTransaction()
     {
         using var scope = ServiceProvider.CreateScope();

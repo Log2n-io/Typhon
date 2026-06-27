@@ -181,13 +181,14 @@ class SimdKwayMergeTests : TestBase<SimdKwayMergeTests>
     }
 
     [Test]
+    [Category("Sensitive")] // heavy/longest test — runs in the gate's serial quiet pass to avoid starving parallel shards
     public void Simd_LargeEntityCount_CorrectResults()
     {
         using var dbe = SetupEngine();
-        SpawnClQUnits(dbe, 2000, i => i); // Score = 0..1999
+        SpawnClQUnits(dbe, 1000, i => i); // Score = 0..999 (halved volumetry — was 2000; ~2× faster, same SIMD path)
         using var tx = dbe.CreateQuickTransaction();
-        var result = tx.Query<ClQUnit>().WhereField<ClQStats>(s => s.Score >= 1900).Execute();
-        Assert.That(result, Has.Count.EqualTo(100)); // 1900..1999
+        var result = tx.Query<ClQUnit>().WhereField<ClQStats>(s => s.Score >= 900).Execute();
+        Assert.That(result, Has.Count.EqualTo(100)); // 900..999
     }
 
     [Test]

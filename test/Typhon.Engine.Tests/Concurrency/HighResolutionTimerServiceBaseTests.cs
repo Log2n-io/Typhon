@@ -119,6 +119,7 @@ public class HighResolutionTimerServiceBaseTests
     }
 
     [Test]
+    [Category("Sensitive")] // wall-clock calibration assertion — flaky under parallel CPU load; runs in the gate's serial quiet pass
     public void Calibration_Reasonable()
     {
         HighResolutionTimerServiceBase.ResetCalibrationSleepThreshold();

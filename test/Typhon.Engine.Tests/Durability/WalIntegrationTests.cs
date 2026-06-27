@@ -1186,6 +1186,7 @@ class WalIntegrationTests : TestBase
     }
 
     [Test]
+    [Category("Sensitive")] // WAL atomicity timing — flaky under parallel CPU load; runs in the gate's serial quiet pass
     [CancelAfter(15000)]
     public void WAL_CriticalTrade_ImmediateAtomicity()
     {

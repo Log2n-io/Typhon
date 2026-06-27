@@ -95,6 +95,7 @@ class LiveFenceCostModelTests
     }
 
     [Test]
+    [Category("Sensitive")] // allocation-count assertion — flaky under parallel CPU load; runs in the gate's serial quiet pass
     public void UpdatePhase_HotLoop_AllocatesNothing()
     {
         var model = new LiveFenceCostModel(Seed);
