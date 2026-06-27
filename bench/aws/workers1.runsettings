@@ -1,0 +1,11 @@
+<RunSettings>
+  <!-- Each CI shard runs at ONE NUnit worker: a single process at workers=1 is a
+       clean serial run (the known-green dev config) and cannot collide on the
+       suite's process-static state. Parallelism comes from running K of these
+       processes concurrently, not from workers within a process. DefaultTimeout
+       mirrors test.runsettings (a 10 s per-test deadlock guard). -->
+  <NUnit>
+    <NumberOfTestWorkers>1</NumberOfTestWorkers>
+    <DefaultTimeout>10000</DefaultTimeout>
+  </NUnit>
+</RunSettings>
