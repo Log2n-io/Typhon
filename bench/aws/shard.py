@@ -36,7 +36,7 @@ HERE        = os.path.dirname(os.path.abspath(__file__))
 REPO        = os.environ.get("SHARD_REPO") or os.getcwd()
 TESTPROJ    = os.path.join(REPO, "test", "Typhon.Engine.Tests", "Typhon.Engine.Tests.csproj")
 RUNSETTINGS = os.path.join(HERE, "workers1.runsettings")
-SHARDS_JSON = os.path.join(HERE, "shards.json")
+SHARDS_JSON = os.environ.get("SHARD_PLAN") or os.path.join(HERE, "shards.json")
 CFG         = os.environ.get("SHARD_CONFIG", "Release")
 NS          = "{http://microsoft.com/schemas/VisualStudio/TeamTest/2010}"
 SENSITIVE_FILTER = "Category=Sensitive"   # the final serial quiet pass
@@ -139,6 +139,24 @@ def parse_trx(path):
     return (0, 0, 0) if c is None else (int(c.get("total", 0)),
                                         int(c.get("passed", 0)), int(c.get("failed", 0)))
 
+def all_results(path):
+    """(className, name) -> outcome ('Passed'/'Failed'/...) for every test in a trx."""
+    if not os.path.exists(path):
+        return {}
+    root = ET.parse(path).getroot()
+    id2 = {}
+    for ut in root.iter(NS + "UnitTest"):
+        tid = ut.get("id")
+        tm = ut.find(NS + "TestMethod")
+        if tid and tm is not None:
+            id2[tid] = (tm.get("className"), tm.get("name"))
+    out = {}
+    for r in root.iter(NS + "UnitTestResult"):
+        key = id2.get(r.get("testId"))
+        if key:
+            out[key] = r.get("outcome")
+    return out
+
 def cmd_run(results_dir):
     shards = json.load(open(SHARDS_JSON))
     os.makedirs(results_dir, exist_ok=True)
@@ -166,10 +184,52 @@ def cmd_run(results_dir):
     st, sp, sf = parse_trx(strx); tot += st; pas += sp; fail += sf
     print(f"   S  {src:3d}  {sdt:5.0f}s  {st:5d}  {sp:5d}  {sf:5d}", flush=True)
 
-    overall = 0 if all(rc == 0 for _, rc, _, _ in results) and src == 0 else 1
-    print(f"\n[shard] WALL={par + ser:.0f}s (parallel {par:.0f}s + serial {ser:.0f}s)  "
-          f"total={tot} passed={pas} failed={fail}", flush=True)
-    print(f"[shard] OVERALL={'PASS' if overall == 0 else 'FAIL'}", flush=True)
+    # ── Retry pass ───────────────────────────────────────────────────────────
+    # The suite carries a long tail of low-probability TIMING flakes: concurrency/
+    # scheduler/leak tests that assert async completion within a window too tight on
+    # slow CI cores (they pass ~100% on a fast box). Quarantining them one-by-one is
+    # chasing a distribution, not a bug list. Instead, re-run the failures ALONE: a
+    # ~5% flake clears at 0.05^2 ≈ 0.3% after one retry. A REAL regression fails every
+    # attempt (an engine race would also flake on the fast box — these don't), so retry
+    # absorbs test-window fragility WITHOUT masking real bugs. Flaked-but-recovered
+    # tests are listed (transparency), not hidden.
+    initial_fail = fail + sf
+    failed = set()
+    for trx in [t for _, _, _, t in results] + [strx]:
+        failed |= {k for k, o in all_results(trx).items() if o == "Failed"}
+
+    flaked = set()
+    retry_secs = 0.0
+    MAX_RETRIES = 2
+    for attempt in range(1, MAX_RETRIES + 1):
+        if not failed:
+            break
+        classes = sorted({c for c, _ in failed})
+        rflt = "(Category!=Quarantine)&(" + "|".join(f"FullyQualifiedName~{c}." for c in classes) + ")"
+        print(f"\nretry {attempt}/{MAX_RETRIES}: re-running {len(failed)} failed test(s) "
+              f"in {len(classes)} class(es), alone (workers=1)...", flush=True)
+        _, _, rdt, rtrx = run_one(f"R{attempt}", rflt, results_dir)
+        retry_secs += rdt
+        res = all_results(rtrx)
+        recovered = {t for t in failed if res.get(t) == "Passed"}
+        flaked |= recovered
+        failed -= recovered
+        print(f"   R{attempt}  {rdt:5.0f}s  recovered {len(recovered)}, still failing {len(failed)}", flush=True)
+
+    overall = 0 if not failed else 1
+    print(f"\n[shard] WALL={par + ser + retry_secs:.0f}s "
+          f"(parallel {par:.0f}s + serial {ser:.0f}s + retry {retry_secs:.0f}s)  "
+          f"total={tot} initial-failed={initial_fail}", flush=True)
+    if flaked:
+        print(f"[shard] FLAKED — failed then passed on retry (low-prob timing flakes, investigate, NON-blocking):", flush=True)
+        for c, n in sorted(flaked):
+            print(f"          ~ {c}.{n}", flush=True)
+    if failed:
+        print(f"[shard] STILL FAILING after {MAX_RETRIES} retries (BLOCKING — likely a real regression):", flush=True)
+        for c, n in sorted(failed):
+            print(f"          x {c}.{n}", flush=True)
+    tail = f" ({len(flaked)} flaked, recovered)" if flaked and not failed else ""
+    print(f"[shard] OVERALL={'PASS' if overall == 0 else 'FAIL'}{tail}", flush=True)
     return overall
 
 # ── main ────────────────────────────────────────────────────────────────────

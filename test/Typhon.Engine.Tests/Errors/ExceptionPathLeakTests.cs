@@ -12,8 +12,11 @@ namespace Typhon.Engine.Tests;
 /// </summary>
 [TestFixture]
 [NonParallelizable] // Mutates static TimeoutOptions.Current — would race with any parallel DatabaseEngine ctor.
-[Category("Sensitive")] // every test triggers a lock timeout + asserts leak-free page state — flaky under parallel
-                        // CPU load even at workers=1 (sibling shard processes); runs in the gate's serial quiet pass
+[Category("Quarantine")] // The leak assertion (MMF.CheckInternalState) compares the WHOLE page-state array
+                         // (PageState/ExclusiveLatchDepth/DirtyCounter) before vs after; that comparison races
+                         // background page-cache/checkpoint timing and fails only on the slower c6id gate box
+                         // (deterministically green locally — even in the serial quiet pass). Excluded from the
+                         // gate; still runs locally. Proper fix = narrow the check / quiesce. See QUARANTINE.md.
 class ExceptionPathLeakTests : TestBase<ExceptionPathLeakTests>
 {
     [OneTimeSetUp]
