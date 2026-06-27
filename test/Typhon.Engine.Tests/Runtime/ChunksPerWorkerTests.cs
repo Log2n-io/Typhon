@@ -123,6 +123,8 @@ class ChunksPerWorkerTests : TestBase<ChunksPerWorkerTests>
     /// This test verifies that every spawned entity is actually iterated when <c>chunksPerWorker = 2</c>.
     /// </summary>
     [Test]
+    [Category("Sensitive")] // dispatches the DAG + counts processed entities; worker dispatch starves under parallel
+                            // CPU load (entities-visited=0). Runs in the gate's serial quiet pass.
     public void Oversubscribed_AllEntitiesAreVisited()
     {
         const int entityCount = 256;
@@ -190,6 +192,8 @@ class ChunksPerWorkerTests : TestBase<ChunksPerWorkerTests>
     /// Pre-fix, the buggy <c>chunkIndex</c> would have indexed slot 1 on the second chunk and thrown.
     /// </summary>
     [Test]
+    [Category("Sensitive")] // dispatches the DAG + counts processed entities; worker dispatch starves under parallel
+                            // CPU load (seen=0). Runs in the gate's serial quiet pass.
     public void WorkerCount1_TwoX_SingleWorkerHandlesBothChunks()
     {
         const int entityCount = 8;

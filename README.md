@@ -32,10 +32,10 @@ The runtime doesn't sit on top of the database — it runs inside it.
 - **Views & Change Tracking** — Incremental entity-set monitoring across transactions (added/removed/modified detection) with ring-buffer delta streaming
 - **B+Tree Indexes** — Cache-aligned 128-byte nodes with optimistic lock coupling and specialized key-size variants
 - **Spatial Indexing** — Page-backed wide R-Tree for AABB / Radius / Ray / Frustum / kNN queries, plus a per-cell cluster broadphase (`SpatialGrid`) with BMI2 Morton-encoded cell keys and multi-resolution `SimTier` dispatch for near/far/coarse simulation budgets
-- **Write-Ahead Logging** — WAL with configurable durability modes (Deferred, GroupCommit, Immediate) and coalesced tick-boundary snapshots via `TickFence` / `ClusterTickFence` chunks for the runtime tick loop
-- **Page Integrity** — CRC32C checksums, full-page images, and checkpoint-based recovery
+- **Write-Ahead Logging** — WAL (v2, always on) with configurable durability modes (Deferred, GroupCommit, Immediate) and coalesced tick-boundary snapshots via `TickFence` / `ClusterTickFence` chunks for the runtime tick loop
+- **Page Integrity** — CRC32C checksums, suspect-page detection, and crash-recovery rebuild (index + EntityMap); full-page images were retired in favor of a rebuild-based torn-page net
 - **Schema Versioning** — Component revisions with field-level migration support
-- **Three Storage Modes** — Versioned (full MVCC + WAL), SingleVersion (last-writer-wins, tick-fence WAL), Transient (heap-only, no persistence)
+- **Three Storage Modes** — Versioned (full MVCC + WAL), SingleVersion (last-writer-wins; per-tx TickFence or **Committed** durability discipline — atomic, zero-loss, no revision chain), Transient (heap-only, no persistence)
 - **Configurable Durability** — Choose per-UnitOfWork whether data is deferred, group-committed, or immediately fsynced
 - **Game Server Runtime** — Tick-based micro-task `DagScheduler` with any-worker parallel dispatch, per-system change filters, typed MPSC event queues, side-transactions, cluster dormancy with staggered heartbeat wake, checkerboard Red/Black dispatch, and a 4-level overload response hierarchy (tick-rate modulation, player shedding)
 - **Subscription Server + Client SDK** — TCP delta streaming of published views with MemoryPack serialization, per-client incremental sync, backpressure-driven resync, and a zero-engine-dependency `Typhon.Client` assembly for game clients
@@ -84,7 +84,7 @@ Typhon is in **active development** targeting an alpha release. Current state:
 - [x] B+Tree indexes with optimistic lock coupling
 - [x] Component-level durability options
 - [x] Write-Ahead Logging with configurable durability modes
-- [x] Page integrity (CRC32C, full-page images, checkpoints)
+- [x] Page integrity (CRC32C, suspect-mode rebuild, checkpoints)
 - [x] Query engine with filtering, sorting, and navigation
 - [x] Views and incremental change tracking
 - [x] ECS archetype system with source-generated accessors
@@ -102,7 +102,7 @@ Typhon is in **active development** targeting an alpha release. Current state:
 - [x] HashMap collections with key-size specialization
 - [x] Workbench dev UI (data browsing, profiler viewer, System DAG view, Data Flow timeline, Access Matrix, internal data API)
 - [x] Public/Internal API namespace split + `TYPHON008` analyzer
-- [ ] Crash recovery testing
+- [x] Crash recovery (WAL v2 replay, scrub + index/EntityMap rebuild, suspect-mode)
 - [ ] Backup and restore
 
 ## Project Structure
@@ -172,3 +172,5 @@ This project has had quite a journey:
 - **Q2 2026 alpha push** — Game-server runtime (`DagScheduler`, parallel system dispatch, overload management), entity clusters with cluster-native SIMD query execution, dual page store abstraction (`PersistentStore` + `TransientStore`), spatial indexing (page-backed R-Tree + spatial grid cluster broadphase), multi-resolution `SimTier` dispatch with cluster dormancy and checkerboard, TCP subscription server with zero-engine-dependency client SDK, and a deep-trace runtime profiler with live-streaming viewer
 - **Q2 2026 Workbench buildout** — Internal Data API + System DAG view (#306, #314, #322), static schema export and Schema Inspector (#326), Data Flow Timeline + Access Matrix panels with cross-panel selection and hover linking (#327)
 - **Q2 2026 API hardening** — Public/Internal namespace migration, accessibility flips, friend-list audit, and leak-tightening pass: ~430 internal types now in `Typhon.Engine.Internals` enforced by the `TYPHON008` analyzer (#329)
+- **Q2 2026 durability redesign** — Minimal WAL (WAL v2 format, `RecoveryDriver`, checkpoint v2 A/B slot-pairing), the **Committed** durability discipline (#392), cluster crash durability (#395), BulkLoad write path + storage hardening (#383), and retirement of full-page images in favor of a suspect-mode rebuild recovery net (#399, #401)
+- **Q2 2026 Workbench redesign** — shell rebuild (Stages 0–4), read-only Data Browser, zoomable Database File Map, off-CPU + integrated CPU-sample profiling, Track→DAG / Critical Path rework, the AntHill validation harness, and **Query Console** Phase 1 — write/execute/browse queries against a live store (#379, #390)

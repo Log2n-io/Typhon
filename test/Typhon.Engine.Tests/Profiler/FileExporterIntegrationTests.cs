@@ -21,6 +21,8 @@ namespace Typhon.Engine.Tests.Profiler;
 /// </remarks>
 [TestFixture]
 [NonParallelizable] // activates the global profiler emission pipeline; must not run concurrently with other fixtures
+[Category("Sensitive")] // live emit→async-drain→file roundtrip; the drain window is starved under parallel CPU load
+                        // (slower c6id cores miss it), dropping a kind-correlated subset. Runs in the serial quiet pass.
 public class FileExporterIntegrationTests
 {
     private string _tempPath;

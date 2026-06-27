@@ -8,7 +8,7 @@ Both pipelines run on dedicated background threads. Commit-time work on the appl
 
 > **This chapter describes the "Minimal WAL" redesign (v2).** The WAL now carries **logical** records — `(EntityId, ComponentTypeId)` and a value, never pages or chunk ids — written by a single `RecordCodec`, and recovery re-applies them through the engine's own write primitives (`RecoveryApplier`) and then **rebuilds** derived structures instead of repairing pages. Full-Page Images are gone. The full design lives in [`claude/design/Durability/MinimalWal/`](../../claude/design/Durability/MinimalWal/); correctness is gated on invariant rules (`claude/rules/durability.md`), a crash-sim sweep, and TLA+ specs.
 >
-> **Transitional note:** the v1 **persisted UoW Registry** and the v1 `WalRecovery` scan still exist and run alongside the v2 path (§7, §8) — their removal is the P2 "Committed discipline" phase. Commit *fate* for logical records is already decided by the WAL commit marker, not the registry.
+> **Transitional note:** the v1 **persisted UoW Registry** and the v1 `WalRecovery` scan still exist and run alongside the v2 path (§7, §8). Commit *fate* for logical records is already decided by the WAL commit marker, not the registry, so the registry is redundant for fate — but its removal is an independent, still-pending cleanup (not part of the now-shipped Committed discipline).
 
 This doc covers the WAL (writer, segments, wire format), the checkpoint (v2 cycle, staging pool, A/B meta-pair), recovery (`RecoveryDriver` + the surviving v1 scan), torn-page safety without FPI, and the durability invariants that hold across all of them.
 
@@ -86,6 +86,10 @@ Under `Immediate`, the commit path calls `WalManager.RequestFlush()` and then bl
 
 [`DurabilityOverride`](../../src/Typhon.Engine/Transactions/public/DurabilityMode.cs) is a per-transaction escalation knob (`Default`, `Immediate`) — a single `tx.Commit(DurabilityOverride.Immediate)` forces an FUA flush for one transaction inside an otherwise-Deferred UoW, for mixed workloads.
 
+### `DurabilityDiscipline` (separate enum — not an extension of `DurabilityOverride`)
+
+[`DurabilityDiscipline`](../../src/Typhon.Schema.Definition/DurabilityDiscipline.cs) is a **distinct enum** — `TickFence` (default) and `Commit` — selecting the per-component *durability discipline* for a **SingleVersion**-layout component. It is **not** a new `DurabilityOverride` value and **not** a new `StorageMode`: it is an orthogonal axis layered on the existing per-UoW timing knob. `TickFence` keeps the default in-place, last-writer-wins, tick-fence-batched behavior (≤1-tick loss). `Commit` stages writes per transaction and makes them atomic + zero-loss durable at `Transaction.Commit` via a logical-redo WAL record, then publishes in place — read-committed, O(1) rollback, **no revision chain**. It applies only to SingleVersion (Versioned is always commit-scoped; Transient is never durable). Authoritative spec: [`claude/design/Ecs/committed-storage-mode.md`](../../claude/design/Ecs/committed-storage-mode.md).
+
 ---
 
 ## 3. Wire format
@@ -155,7 +159,7 @@ After the header, the body carries the **logical address** (`EntityId : long`, `
 - `TxBegin` — first record of a transaction's batch.
 - `TxCommit` — **the commit marker (LOG-04)**. Set on the last record of the batch. A one-record batch carries both.
 - `FenceRecord` — a tick-fence snapshot record (committed individually, no Tx markers).
-- `Committed` — Committed-discipline marker (reserved for the P2 phase).
+- `Committed` — Committed-discipline marker. Tags records produced under `DurabilityDiscipline.Commit`; per rule CM-06, a Commit-discipline spawn WAL-logs its SingleVersion values (a `Slot` upsert per spawn value) so a cluster all-SV archetype recovers exactly across a crash with no checkpoint.
 
 The batch is built by [`CommitBatchBuilder`](../../src/Typhon.Engine/Durability/internals/CommitBatchBuilder.cs), which buckets entries by category so the codec always emits them in **LOG-07 order** (Spawn → Slot/CollectionDelta → Destroy/SetEnabledBits → BulkManifest) — a mis-ordered batch is unconstructible by API shape, so a `Slot` can never arrive before its entity's `Spawn`.
 
@@ -289,7 +293,7 @@ Recovery runs at engine open, before any transaction is accepted. In the current
 | 6 — TickFence replay | Apply `TickFence` (per-SV-table) and `ClusterTickFence` (per-archetype) entries — SingleVersion / cluster state that has no per-record WAL trail. |
 | 7 — Finalize | Emit stats. |
 
-> Phase 4 (FPI repair) and Phase 5 (committed-transaction replay via the old `WalReplayHelper`) are **deleted** — the v2 `RecoveryDriver` owns logical-record apply, and rebuild replaces FPI. This pass and the persisted `UowRegistry` it consults are slated for removal in the P2 "Committed discipline" phase.
+> Phase 4 (FPI repair) and Phase 5 (committed-transaction replay via the old `WalReplayHelper`) are **deleted** — the v2 `RecoveryDriver` owns logical-record apply, and rebuild replaces FPI. This surviving pass and the persisted `UowRegistry` it consults are slated for removal in an independent, still-pending cleanup (the Committed discipline has already shipped and does not depend on it).
 
 ### 7.2 v2 logical apply — `RecoveryDriver` + `RecoveryApplier`
 
@@ -354,7 +358,7 @@ Free → Pending → Void → Free                          (crash recovery)
 - `WalDurable → Committed` via `UowRegistry.TransitionWalDurableToCommitted()`, invoked by the checkpoint (§5).
 - `Pending → Void` during recovery's cross-reference phase (`VoidRemainingPending`); a committed bitmap then filters ghost revisions for post-crash visibility.
 
-> **Why this is transitional.** Under the Minimal-WAL design, commit fate is the WAL `TxCommit` marker (§7.2), so the persisted registry is redundant for *fate*; its remaining role is post-crash ghost-visibility filtering. The registry is **being demoted to a volatile in-memory id allocator** — the persistence, the `Void` state, and the committed bitmap are removed in the P2 "Committed discipline" phase. They are documented here because they are still present in the current code.
+> **Why this is transitional.** Under the Minimal-WAL design, commit fate is the WAL `TxCommit` marker (§7.2), so the persisted registry is redundant for *fate*; its remaining role is post-crash ghost-visibility filtering. The registry is **to be demoted to a volatile in-memory id allocator** — dropping the persistence, the `Void` state, and the committed bitmap — as an independent, still-pending cleanup (not gated on the now-shipped Committed discipline). They are documented here because they are still present in, and run from, the current code.
 
 ---
 

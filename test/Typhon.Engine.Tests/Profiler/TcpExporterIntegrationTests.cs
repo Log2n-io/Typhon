@@ -21,6 +21,8 @@ namespace Typhon.Engine.Tests.Profiler;
 /// </remarks>
 [TestFixture]
 [NonParallelizable] // shares static TyphonProfiler state with other fixtures running in parallel.
+[Category("Sensitive")] // live emit→async-drain→TCP roundtrip; the network drain is starved under parallel CPU load
+                        // (same failure mode as FileExporterIntegrationTests). Runs in the serial quiet pass.
 public class TcpExporterIntegrationTests
 {
     private const int DiscoveryPort = 0; // ask OS for a free port
