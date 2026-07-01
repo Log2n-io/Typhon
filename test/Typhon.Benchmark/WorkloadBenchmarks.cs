@@ -116,20 +116,28 @@ public class WorkloadBenchmarks
         // Pre-grow EntityMap to avoid bucket splits during measurement.
         // Spawn+destroy 200K entities so the hashmap allocates enough buckets upfront.
         // RawValueHashMap never shrinks — buckets stay allocated after destroy.
+        // Committed in chunks: a single commit's WAL frame must fit the commit buffer
+        // (WalRingBufferSizeBytes/2 = 4 MiB by default); 200K spawns in one commit is ~18 MB
+        // and throws WalClaimTooLargeException. 20K * ~92 B ≈ 1.8 MB keeps each commit well under.
         const int preGrowCount = 200_000;
+        const int preGrowChunk = 20_000;
         var preGrowIds = new EntityId[preGrowCount];
+        for (int start = 0; start < preGrowCount; start += preGrowChunk)
         {
+            int end = Math.Min(start + preGrowChunk, preGrowCount);
             using var gt = _dbe.CreateQuickTransaction();
-            for (int i = 0; i < preGrowCount; i++)
+            for (int i = start; i < end; i++)
             {
                 var comp = new WorkComp { Value = i, Timestamp = 12345 };
                 preGrowIds[i] = gt.Spawn<WorkArch>(WorkArch.Work.Set(in comp));
             }
             gt.Commit();
         }
+        for (int start = 0; start < preGrowCount; start += preGrowChunk)
         {
+            int end = Math.Min(start + preGrowChunk, preGrowCount);
             using var dt = _dbe.CreateQuickTransaction();
-            for (int i = 0; i < preGrowCount; i++)
+            for (int i = start; i < end; i++)
             {
                 dt.Destroy(preGrowIds[i]);
             }

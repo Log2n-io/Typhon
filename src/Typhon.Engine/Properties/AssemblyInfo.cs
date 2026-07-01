@@ -15,6 +15,9 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("AntHill.Core")]
 [assembly: InternalsVisibleTo("AntHill.Demo")]
 [assembly: InternalsVisibleTo("Typhon.Benchmark")]
+// Added 2026-06-29: competitive benchmark harness needs InMemoryWalFileIO for zero-disk D0 CPU measurement
+// (same genuine internal reuse as Typhon.Benchmark — measures the commit path without WAL-writer disk noise).
+[assembly: InternalsVisibleTo("Typhon.CompetitiveBenchmark")]
 [assembly: InternalsVisibleTo("Typhon.Client.Tests")]
 [assembly: InternalsVisibleTo("Typhon.Engine.Tests")]
 [assembly: InternalsVisibleTo("Typhon.IOProfileRunner")]

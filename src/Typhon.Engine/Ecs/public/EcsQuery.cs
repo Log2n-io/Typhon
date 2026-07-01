@@ -2151,8 +2151,9 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 return executeCount;
             }
 
-            int count = 0;
-            CollectMatching((_, _) => count++);
+            // Aggregation broad scan: count matches in place via the map's optimistic, copy-free CountEntries (no per-entity snapshot copy, no delegate) —
+            // recovers the pre-#374 scan speed while keeping the OLC concurrency guarantee. Pending spawns (read-your-own-writes) are folded in by CountMatching.
+            int count = CountMatching();
             scope.ScanMode = EcsQueryScanMode.Broad;
             scope.ResultCount = count;
             return count;
@@ -2217,8 +2218,8 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 return hasMatch;
             }
 
-            bool found = false;
-            CollectMatching((_, _) => found = true, true);
+            // Existence broad scan: short-circuit via the map's optimistic, copy-free AnyEntry (mirrors CountMatching; folds in pending spawns).
+            bool found = AnyMatching();
             scope.ScanMode = EcsQueryScanMode.Broad;
             scope.Found = found;
             return found;
@@ -2279,6 +2280,62 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             CollectMatchingCore(_mask256, onMatch, stopOnFirst);
             CollectPendingSpawns(_mask256, onMatch, stopOnFirst);
         }
+    }
+
+    /// <summary>
+    /// Aggregation broad scan for <see cref="Count"/>: counts matching entities via the map's copy-free <c>CountEntries</c>, then folds in matching pending
+    /// spawns (read-your-own-writes). The EntityMap walk allocates nothing and uses no delegate; the pending-spawn closure is only created when the current
+    /// transaction actually has uncommitted spawns (empty for read-only queries — the common case).
+    /// </summary>
+    private int CountMatching()
+    {
+        int total = _useLargeMask ? CountMatchingCore(_maskLarge) : CountMatchingCore(_mask256);
+
+        var pending = _tx.PendingSpawns;
+        if (pending != null && pending.Count > 0)
+        {
+            int pendingCount = 0;
+            if (_useLargeMask)
+            {
+                CollectPendingSpawns(_maskLarge, (_, _) => pendingCount++, false);
+            }
+            else
+            {
+                CollectPendingSpawns(_mask256, (_, _) => pendingCount++, false);
+            }
+            total += pendingCount;
+        }
+
+        return total;
+    }
+
+    /// <summary>
+    /// Existence broad scan for <see cref="Any"/>: short-circuits via the map's copy-free <c>AnyEntry</c>, then checks matching pending spawns if the EntityMap
+    /// had no match.
+    /// </summary>
+    private bool AnyMatching()
+    {
+        if (_useLargeMask ? AnyMatchingCore(_maskLarge) : AnyMatchingCore(_mask256))
+        {
+            return true;
+        }
+
+        var pending = _tx.PendingSpawns;
+        if (pending != null && pending.Count > 0)
+        {
+            bool found = false;
+            if (_useLargeMask)
+            {
+                CollectPendingSpawns(_maskLarge, (_, _) => found = true, true);
+            }
+            else
+            {
+                CollectPendingSpawns(_mask256, (_, _) => found = true, true);
+            }
+            return found;
+        }
+
+        return false;
     }
 
     /// <summary>Collect full entity data for foreach enumeration. Dispatches to generic core.</summary>
@@ -2487,6 +2544,118 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         }
     }
 
+    /// <summary>
+    /// Aggregation counterpart of <see cref="CollectMatchingCore"/>: iterate matching archetypes and count visible/enabled-filtered entities via the map's
+    /// optimistic, copy-free <c>CountEntries</c>. The JIT fully specializes per TMask type. EntityMap only (pending spawns handled by the caller).
+    /// </summary>
+    private int CountMatchingCore<TMask>(TMask mask) where TMask : struct, IArchetypeMask<TMask>
+    {
+        long txTsn = _tx.TSN;
+        var dbe = _tx.DBE;
+        bool hasT2 = HasT2;
+        int total = 0;
+
+        for (int archBit = 0; archBit <= mask.MaxId; archBit++)
+        {
+            if (!mask.Test((ushort)archBit))
+            {
+                continue;
+            }
+
+            var meta = ArchetypeRegistry.GetMetadata((ushort)archBit);
+            if (meta == null)
+            {
+                continue;
+            }
+            var engineState = dbe._archetypeStates[meta.ArchetypeId];
+            if (engineState?.EntityMap == null || engineState.SlotToComponentTable == null)
+            {
+                continue;
+            }
+
+            ushort reqEnabled = 0, reqDisabled = 0;
+            if (hasT2 && !ResolveT2Masks(meta, out reqEnabled, out reqDisabled))
+            {
+                continue;
+            }
+
+            var accessor = engineState.EntityMap.Segment.CreateChunkAccessor();
+            var pred = new BroadScanPredicate
+            {
+                Meta = meta,
+                TxTsn = txTsn,
+                EnabledBitsOverrides = dbe.EnabledBitsOverrides,
+                HasT2 = hasT2,
+                RequiredEnabled = reqEnabled,
+                RequiredDisabled = reqDisabled,
+                PendingEnableDisable = _tx.PendingEnableDisable,
+                PendingDestroys = _tx.PendingDestroys,
+            };
+            total += engineState.EntityMap.CountEntries(ref accessor, ref pred);
+            accessor.Dispose();
+        }
+
+        return total;
+    }
+
+    /// <summary>
+    /// Existence counterpart of <see cref="CollectMatchingCore"/>: short-circuits on the first matching entity in any matching archetype via the map's
+    /// optimistic, copy-free <c>AnyEntry</c>. The JIT fully specializes per TMask type. EntityMap only (pending spawns handled by the caller).
+    /// </summary>
+    private bool AnyMatchingCore<TMask>(TMask mask) where TMask : struct, IArchetypeMask<TMask>
+    {
+        long txTsn = _tx.TSN;
+        var dbe = _tx.DBE;
+        bool hasT2 = HasT2;
+
+        for (int archBit = 0; archBit <= mask.MaxId; archBit++)
+        {
+            if (!mask.Test((ushort)archBit))
+            {
+                continue;
+            }
+
+            var meta = ArchetypeRegistry.GetMetadata((ushort)archBit);
+            if (meta == null)
+            {
+                continue;
+            }
+            var engineState = dbe._archetypeStates[meta.ArchetypeId];
+            if (engineState?.EntityMap == null || engineState.SlotToComponentTable == null)
+            {
+                continue;
+            }
+
+            ushort reqEnabled = 0, reqDisabled = 0;
+            if (hasT2 && !ResolveT2Masks(meta, out reqEnabled, out reqDisabled))
+            {
+                continue;
+            }
+
+            var accessor = engineState.EntityMap.Segment.CreateChunkAccessor();
+            var pred = new BroadScanPredicate
+            {
+                Meta = meta,
+                TxTsn = txTsn,
+                EnabledBitsOverrides = dbe.EnabledBitsOverrides,
+                HasT2 = hasT2,
+                RequiredEnabled = reqEnabled,
+                RequiredDisabled = reqDisabled,
+                PendingEnableDisable = _tx.PendingEnableDisable,
+                PendingDestroys = _tx.PendingDestroys,
+            };
+            bool found = engineState.EntityMap.AnyEntry(ref accessor, ref pred);
+            accessor.Dispose();
+
+            if (found)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /// <summary>JIT-specialized variant for full entity data collection (foreach enumeration).</summary>
     private void CollectMatchingFullCore<TMask>(TMask mask, List<(EntityId, ArchetypeMetadata, ushort, EntityLocations)> results) where TMask : struct, IArchetypeMask<TMask>
     {
@@ -2603,6 +2772,69 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 Found = true;
                 return false; // Stop iteration
             }
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Side-effect-free match test for the optimistic, copy-free aggregation paths (<see cref="CountMatchingCore"/> / <see cref="AnyMatchingCore"/>). Mirrors
+    /// the filter half of <see cref="BroadScanAction"/> (MVCC visibility + pending-destroy + resolved EnabledBits + T2) with no callback, so it is pure and safe
+    /// to re-evaluate when an optimistic bucket read is rejected. Reads only the EntityRecord header and lookup dictionaries — never dereferences past the value
+    /// pointer — so a torn read produces a wrong-but-harmless bool that the map's version validation discards.
+    /// </summary>
+    private struct BroadScanPredicate : RawValuePagedHashMap<long, PersistentStore>.IEntryPredicate<long>
+    {
+        public ArchetypeMetadata Meta;
+        public long TxTsn;
+        public EnabledBitsOverrides EnabledBitsOverrides;
+        public bool HasT2;
+        public ushort RequiredEnabled;
+        public ushort RequiredDisabled;
+        public Dictionary<EntityId, ushort> PendingEnableDisable;
+        public HashSet<EntityId> PendingDestroys;
+
+        public bool Matches(long key, byte* value)
+        {
+            ref var header = ref EntityRecordAccessor.GetHeader(value);
+
+            // Visibility check (MVCC)
+            if (header.BornTSN != 0 && header.BornTSN > TxTsn)
+            {
+                return false; // Not yet born
+            }
+            if (header.DiedTSN != 0 && header.DiedTSN <= TxTsn)
+            {
+                return false; // Dead
+            }
+
+            var entityId = new EntityId(key, Meta.ArchetypeId);
+
+            // Skip entities pending destroy in this transaction
+            if (PendingDestroys != null && PendingDestroys.Contains(entityId))
+            {
+                return false;
+            }
+
+            // Resolve EnabledBits: MVCC overrides first, then pending enable/disable overlay
+            ushort bits = EnabledBitsOverrides.ResolveEnabledBits(key, header.EnabledBits, TxTsn);
+            if (PendingEnableDisable != null && PendingEnableDisable.TryGetValue(entityId, out ushort pendingBits))
+            {
+                bits = pendingBits;
+            }
+
+            // T2 check
+            if (HasT2)
+            {
+                if ((bits & RequiredEnabled) != RequiredEnabled)
+                {
+                    return false;
+                }
+                if ((bits & RequiredDisabled) != 0)
+                {
+                    return false;
+                }
+            }
+
             return true;
         }
     }

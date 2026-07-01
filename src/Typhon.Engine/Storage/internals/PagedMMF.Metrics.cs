@@ -14,10 +14,16 @@ public partial class PagedMMF
     [PublicAPI]
     internal class Metrics
     {
-        /// Approximately the number of page requests that successfully hit the cache 
+        /// Approximately the number of page requests that successfully hit the cache. Counted only while the profiler is
+        /// active (the increment is gated by <see cref="TelemetryConfig.ProfilerActive"/> at the call site) — it sits on
+        /// the hottest path in the engine (3-4× per point read, every reader thread), so an always-on increment bounced
+        /// one shared cache line across every core and crippled concurrent-read scaling. A stat must never tax the path
+        /// it measures; with the profiler off the JIT folds the increment away entirely.
         public int MemPageCacheHit;
-        
-        /// Approximately the number of page requests that missed the cache and had to be allocated again
+
+        /// Approximately the number of page requests that missed the cache and had to be allocated again. Gated by
+        /// <see cref="TelemetryConfig.ProfilerActive"/> too, so the hit/miss pair (and the derived hit-rate) is either
+        /// both-counted or both-zero — never a misleading 0%-hit reading when profiling is off.
         public int MemPageCacheMiss;
         
         /// Approximately the number of pages that were read from disk

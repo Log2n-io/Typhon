@@ -21,6 +21,8 @@ The runtime doesn't sit on top of the database — it runs inside it.
 
 ## Key Features
 
+📚 This is a curated highlight reel — see the full **[Feature Catalog](doc/feature-set/README.md)** for every capability, categorized and cross-linked to source and tests.
+
 - **Microsecond Operations** — Optimized for µs-level latency with pinned memory, SIMD, and lock-free reads
 - **ACID Transactions** — Full transactional semantics with optimistic concurrency control
 - **MVCC Snapshot Isolation** — Readers never block writers; each transaction sees a consistent snapshot
@@ -29,15 +31,17 @@ The runtime doesn't sit on top of the database — it runs inside it.
 - **Workbench Dev UI** — A local, browser-based companion (ASP.NET Core + React/Vite) — *DataGrip for Typhon*, not just a profiler. Open a recorded `.typhon-trace`, attach to a live engine over TCP, or open a `.typhon` database file directly. **Performance:** per-tick profiler timeline with CPU-sample + off-CPU overlays, Top Spans, Call Tree, Critical Path, System DAG. **Data & schema:** component/archetype browsers, Schema Inspector, a zoomable Hilbert-curve Database File Map, live Resource Tree. **Queries:** catalog, plan tree, per-execution inspector — all in a dockable, persisted workspace
 - **Entity Clusters** — SoA batched storage co-locating up to 64 entities per cluster, with cluster-native SIMD predicate evaluation (AVX-512 / AVX2 / scalar dispatch), zone-map pruning, and k-way sorted merge
 - **Query Engine** — Typed queries with `Where`, `With`/`Without` filters, polymorphic iteration, OR logic, navigation joins, and a cluster execution path that routes filtered scans through SIMD gather-compare on cluster SoA columns
-- **Views & Change Tracking** — Incremental entity-set monitoring across transactions (added/removed/modified detection) with ring-buffer delta streaming
-- **B+Tree Indexes** — Cache-aligned 128-byte nodes with optimistic lock coupling and specialized key-size variants
+- **Entity Relationships** — Typed `EntityLink<T>` references for 1:1, 1:N, and N:M relationships, with declarative cascade delete and reactive FK-joined queries
+- **Views & Change Tracking** — Incremental entity-set monitoring (added/removed/modified detection) via ring-buffer delta streaming for indexed queries — opaque/unindexed predicates still work but fall back to a full re-scan per refresh; SingleVersion/Transient view support is still being validated end-to-end
+- **B+Tree Indexes** — Cache-aligned 256-byte nodes with optimistic lock coupling and specialized key-size variants
 - **Spatial Indexing** — Page-backed wide R-Tree for AABB / Radius / Ray / Frustum / kNN queries, plus a per-cell cluster broadphase (`SpatialGrid`) with BMI2 Morton-encoded cell keys and multi-resolution `SimTier` dispatch for near/far/coarse simulation budgets
 - **Write-Ahead Logging** — WAL (v2, always on) with configurable durability modes (Deferred, GroupCommit, Immediate) and coalesced tick-boundary snapshots via `TickFence` / `ClusterTickFence` chunks for the runtime tick loop
 - **Page Integrity** — CRC32C checksums, suspect-page detection, and crash-recovery rebuild (index + EntityMap); full-page images were retired in favor of a rebuild-based torn-page net
-- **Schema Versioning** — Component revisions with field-level migration support
+- **Schema Versioning** — Component/field-level revisions with migration functions, compatible-evolution support, and audit history; automatic archetype layout-drift detection at database open is still landing
 - **Three Storage Modes** — Versioned (full MVCC + WAL), SingleVersion (last-writer-wins; per-tx TickFence or **Committed** durability discipline — atomic, zero-loss, no revision chain), Transient (heap-only, no persistence)
 - **Configurable Durability** — Choose per-UnitOfWork whether data is deferred, group-committed, or immediately fsynced
-- **Game Server Runtime** — Tick-based micro-task `DagScheduler` with any-worker parallel dispatch, per-system change filters, typed MPSC event queues, side-transactions, cluster dormancy with staggered heartbeat wake, checkerboard Red/Black dispatch, and a 4-level overload response hierarchy (tick-rate modulation, player shedding)
+- **Bulk Load Session** — Opt-in exclusive write path for fast dataset ingestion, batching writes through a recycled Transaction and committing the whole load atomically behind a checkpoint barrier
+- **Game Server Runtime** — Tick-based micro-task `DagScheduler` with any-worker parallel dispatch, per-system change filters, typed MPSC event queues, side-transactions, cluster dormancy with staggered heartbeat wake, checkerboard Red/Black dispatch, and a growing overload response ladder (system throttling, tick-rate modulation up to 6x, a last-resort player-shedding callback) — still evolving, with finer-grained escalation designed but not a current priority
 - **Subscription Server + Client SDK** — TCP delta streaming of published views with MemoryPack serialization, per-client incremental sync, backpressure-driven resync, and a zero-engine-dependency `Typhon.Client` assembly for game clients
 - **Observability** — Runtime telemetry, metrics, and diagnostics with zero-cost JIT-eliminated toggles
 - **Deep-Trace Profiler** — Per-tick Gantt and flame-graph visualization via a `.typhon-trace` binary format, live TCP streaming to a React/Vite viewer, and optional `dotnet-trace` CPU sampling correlation for full managed-stack profiles
@@ -125,7 +129,7 @@ Typhon/
 │   │   ├── Storage/                # Pages, cache, segments, PagedMMF / IPageStore / PersistentStore / TransientStore
 │   │   ├── Transactions/           # MVCC transactions, UnitOfWork, change capture
 │   │   ├── Revision/               # Revision chains, deferred cleanup
-│   │   ├── Durability/             # WAL, checkpointing, recovery, FPI capture
+│   │   ├── Durability/             # WAL, checkpointing (A/B slot-pairing), crash recovery & rebuild
 │   │   ├── Runtime/                # DagScheduler, tick loop, systems, overload management, queues
 │   │   ├── Subscriptions/          # TCP delta streaming server, published views
 │   │   ├── Profiler/               # In-engine typed-event profiler (codecs in Typhon.Profiler/)

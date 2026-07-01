@@ -1187,4 +1187,187 @@ unsafe class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStore> where
         return visited;
     }
 
+    /// <summary>
+    /// Side-effect-free predicate for the optimistic in-place aggregation paths (<see cref="CountEntries{TPred}"/> / <see cref="AnyEntry{TPred}"/>).
+    /// </summary>
+    internal interface IEntryPredicate<in TK> where TK : unmanaged
+    {
+        /// <summary>
+        /// Return true if the entry counts as a match. MUST be pure: it runs on a yet-to-be-validated (possibly torn) optimistic read and may be re-invoked
+        /// when the bucket snapshot is rejected, so it must not mutate shared state nor dereference data beyond <paramref name="key"/> / <paramref name="value"/>.
+        /// </summary>
+        bool Matches(TK key, byte* value);
+    }
+
+    /// <summary>
+    /// Count live entries matching <paramref name="pred"/>, under the same per-bucket OLC read protocol as <see cref="ForEachEntry{TAction}"/> but WITHOUT the
+    /// per-entry snapshot copy: because counting is reversible, each bucket is evaluated in place and simply re-counted if a concurrent writer (insert / overflow
+    /// append / split) invalidates the read. The predicate runs on the live, un-copied bytes during the optimistic walk; counts are clamped to
+    /// <c>_bucketCapacity</c> and chunk ids range-checked, so a torn read can never index past a chunk — it only yields a bogus per-bucket tally that the
+    /// version validation discards before it reaches the running total. Snapshot semantics match ForEachEntry: an entry present for the whole scan is counted
+    /// exactly once; an entry concurrently inserted / removed / relocated may or may not be counted.
+    /// </summary>
+    internal int CountEntries<TPred>(ref ChunkAccessor<TStore> accessor, ref TPred pred) where TPred : struct, IEntryPredicate<TKey>
+    {
+        int total = 0;
+        var (_, _, bucketCount) = ReadMeta();
+
+        for (int b = 0; b < bucketCount; b++)
+        {
+            while (true)   // OLC retry for this bucket
+            {
+                int chunkCapacity = Segment.ChunkCapacity;
+                long packed = PackedMeta;
+                int headId = GetBucketChunkId(b, ref accessor);
+                if (headId < 0)
+                {
+                    break;   // empty bucket
+                }
+                if ((uint)headId >= (uint)chunkCapacity)
+                {
+                    continue;   // torn directory read — retry
+                }
+
+                byte* headAddr = accessor.GetChunkAddress(headId);
+                var latch = new OlcLatch(ref GetHeader(headAddr).OlcVersion);
+                int version = latch.ReadVersion();
+                if (version == 0)
+                {
+                    continue;   // bucket write-locked — retry
+                }
+
+                int bucketMatches = 0;
+                bool retry = false;
+                int chunkId = headId;
+                for (int walk = 0; chunkId >= 0; walk++)
+                {
+                    if ((uint)chunkId >= (uint)chunkCapacity || walk > chunkCapacity)
+                    {
+                        retry = true;   // torn OverflowChunkId or cycle from a repurposed chunk
+                        break;
+                    }
+
+                    byte* addr = accessor.GetChunkAddress(chunkId);
+                    ref readonly var header = ref GetHeader(addr);
+                    int rawCount = header.EntryCount;
+                    int count = rawCount <= _bucketCapacity ? rawCount : _bucketCapacity;
+                    int nextId = header.OverflowChunkId;
+
+                    TKey* keys = KeysPtr(addr);
+                    for (int i = 0; i < count; i++)
+                    {
+                        if (pred.Matches(keys[i], ValueAt(addr, i)))
+                        {
+                            bucketMatches++;
+                        }
+                    }
+
+                    chunkId = nextId;
+                }
+
+                if (retry)
+                {
+                    continue;
+                }
+
+                // Validate the bucket stayed quiescent for the whole read: no writer bumped the head version, no split changed the directory. On failure,
+                // discard this attempt's tally and re-count the bucket from the head.
+                if (!latch.ValidateVersion(version) || PackedMeta != packed)
+                {
+                    continue;
+                }
+
+                total += bucketMatches;
+                break;   // bucket complete
+            }
+        }
+
+        return total;
+    }
+
+    /// <summary>
+    /// Existence check: returns true as soon as a VALIDATED bucket contains an entry matching <paramref name="pred"/>. Same optimistic in-place / no-copy
+    /// protocol as <see cref="CountEntries{TPred}"/>; a candidate seen on a torn read is only trusted once the bucket version validates, so a false positive can
+    /// never escape. Short-circuits the walk on the first candidate and the scan on the first validated match.
+    /// </summary>
+    internal bool AnyEntry<TPred>(ref ChunkAccessor<TStore> accessor, ref TPred pred) where TPred : struct, IEntryPredicate<TKey>
+    {
+        var (_, _, bucketCount) = ReadMeta();
+
+        for (int b = 0; b < bucketCount; b++)
+        {
+            while (true)   // OLC retry for this bucket
+            {
+                int chunkCapacity = Segment.ChunkCapacity;
+                long packed = PackedMeta;
+                int headId = GetBucketChunkId(b, ref accessor);
+                if (headId < 0)
+                {
+                    break;   // empty bucket
+                }
+                if ((uint)headId >= (uint)chunkCapacity)
+                {
+                    continue;   // torn directory read — retry
+                }
+
+                byte* headAddr = accessor.GetChunkAddress(headId);
+                var latch = new OlcLatch(ref GetHeader(headAddr).OlcVersion);
+                int version = latch.ReadVersion();
+                if (version == 0)
+                {
+                    continue;   // bucket write-locked — retry
+                }
+
+                bool candidate = false;
+                bool retry = false;
+                int chunkId = headId;
+                for (int walk = 0; chunkId >= 0 && !candidate; walk++)
+                {
+                    if ((uint)chunkId >= (uint)chunkCapacity || walk > chunkCapacity)
+                    {
+                        retry = true;
+                        break;
+                    }
+
+                    byte* addr = accessor.GetChunkAddress(chunkId);
+                    ref readonly var header = ref GetHeader(addr);
+                    int rawCount = header.EntryCount;
+                    int count = rawCount <= _bucketCapacity ? rawCount : _bucketCapacity;
+                    int nextId = header.OverflowChunkId;
+
+                    TKey* keys = KeysPtr(addr);
+                    for (int i = 0; i < count; i++)
+                    {
+                        if (pred.Matches(keys[i], ValueAt(addr, i)))
+                        {
+                            candidate = true;
+                            break;
+                        }
+                    }
+
+                    chunkId = nextId;
+                }
+
+                if (retry)
+                {
+                    continue;
+                }
+
+                // Trust the candidate only once the bucket snapshot validates.
+                if (!latch.ValidateVersion(version) || PackedMeta != packed)
+                {
+                    continue;
+                }
+
+                if (candidate)
+                {
+                    return true;
+                }
+                break;   // bucket had no match
+            }
+        }
+
+        return false;
+    }
+
 }

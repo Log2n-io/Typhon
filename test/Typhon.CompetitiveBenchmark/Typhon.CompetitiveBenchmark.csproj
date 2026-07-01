@@ -1,0 +1,52 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <StartupObject>Typhon.CompetitiveBenchmark.Program</StartupObject>
+    <Platforms>AnyCPU</Platforms>
+    <LangVersion>default</LangVersion>
+    <Nullable>disable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- Stable steady-state micro-measurement: fully optimize every path before the first measured call
+         (eliminates tiered-JIT-promotion-mid-measurement artifacts). BDN does this via process isolation. -->
+    <TieredCompilation>false</TieredCompilation>
+    <TieredPGO>false</TieredPGO>
+  </PropertyGroup>
+
+  <!-- Competitor engine bindings (versions locked per the benchmark plan, §2 / §11) -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.9" />
+    <PackageReference Include="DuckDB.NET.Data.Full" Version="1.5.3" />
+    <PackageReference Include="rocksdb" Version="10.10.1.1747" />
+    <PackageReference Include="LightningDB" Version="0.21.0" />
+    <PackageReference Include="LiteDB" Version="5.0.21" />
+    <PackageReference Include="Microsoft.FASTER.Core" Version="2.6.5" />
+    <PackageReference Include="Friflo.Engine.ECS" Version="3.6.0" />
+  </ItemGroup>
+
+  <!-- Harness deps -->
+  <ItemGroup>
+    <PackageReference Include="BenchmarkDotNet" Version="0.15.8" />
+    <PackageReference Include="HdrHistogram" Version="2.5.0" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.8" />
+    <PackageReference Include="Microsoft.Extensions.Logging" Version="10.0.8" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.8" />
+  </ItemGroup>
+
+  <!-- Typhon under test -->
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Typhon.Engine\Typhon.Engine.csproj" />
+  </ItemGroup>
+
+  <!-- Typhon source generators / analyzers (needed for [Component] / Archetype<T> code-gen) -->
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Typhon.Analyzers\Typhon.Analyzers.csproj"
+                      ReferenceOutputAssembly="false"
+                      OutputItemType="Analyzer" />
+    <ProjectReference Include="..\..\src\Typhon.Generators\Typhon.Generators.csproj"
+                      ReferenceOutputAssembly="false"
+                      OutputItemType="Analyzer" />
+  </ItemGroup>
+
+</Project>
