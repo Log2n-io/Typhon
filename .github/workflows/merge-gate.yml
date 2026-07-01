@@ -38,10 +38,8 @@ jobs:
             engine:
               - 'src/Typhon.Engine/**'
               - 'test/Typhon.Engine.Tests/**'
-              - 'Typhon.slnx'
             workbench:
               - 'tools/Typhon.Workbench/**'
-              - 'Typhon.slnx'
             tla:
               - 'src/Typhon.Engine/Durability/**'
 

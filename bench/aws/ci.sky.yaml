@@ -47,9 +47,17 @@ setup: |
   # task simple and the cost is a few seconds amortised against the test run.
   curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
   sudo apt-get install -y nodejs
-  # Build the solution once in Release — shared by the engine + workbench .NET test runs.
-  dotnet restore Typhon.slnx
-  dotnet build Typhon.slnx -c Release --no-restore
+  # Build ONLY the test projects the gate actually runs — this deliberately EXCLUDES the benchmark
+  # projects (Typhon.Benchmark, Typhon.CompetitiveBenchmark): they are opt-in (benchmark.yml) and
+  # never execute in the merge gate. Building per-project (vs. the whole .slnx) also avoids restoring
+  # their heavy native deps (RocksDB / LMDB / FASTER / DuckDB / ...). shard.py and the workbench run
+  # both use --no-build, so the bins they need must be produced here. Each build implicitly restores.
+  if [ "$RUN_ENGINE" = "true" ]; then
+    dotnet build test/Typhon.Engine.Tests/Typhon.Engine.Tests.csproj -c Release
+  fi
+  if [ "$RUN_WORKBENCH" = "true" ]; then
+    dotnet build test/Typhon.Workbench.Tests/Typhon.Workbench.Tests.csproj -c Release
+  fi
 
 # NOTE: do not use `set -e` here — we run several suites, capture each exit code, and want the
 # script to continue so every suite's result and artifacts are collected before we exit RC.
