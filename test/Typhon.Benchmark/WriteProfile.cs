@@ -78,20 +78,27 @@ static class WriteProfile
         Archetype<WpSvArch>.Touch();
         dbe.InitializeArchetypes();
 
-        // Pre-grow EntityMap
+        // Pre-grow EntityMap. Committed in chunks: a single commit's WAL frame must fit the
+        // commit buffer (WalRingBufferSizeBytes/2 = 4 MiB); 200K spawns in one commit is ~18 MB
+        // and throws WalClaimTooLargeException. 20K keeps each commit well under.
         var pg = new EntityId[200_000];
-        using (var gt = dbe.CreateQuickTransaction())
+        const int pgChunk = 20_000;
+        for (int start = 0; start < pg.Length; start += pgChunk)
         {
-            for (int i = 0; i < pg.Length; i++)
+            int end = Math.Min(start + pgChunk, pg.Length);
+            using var gt = dbe.CreateQuickTransaction();
+            for (int i = start; i < end; i++)
             {
                 var c = new WpVersioned { Value = i, Timestamp = 12345 };
                 pg[i] = gt.Spawn<WpVersionedArch>(WpVersionedArch.Data.Set(in c));
             }
             gt.Commit();
         }
-        using (var dt = dbe.CreateQuickTransaction())
+        for (int start = 0; start < pg.Length; start += pgChunk)
         {
-            for (int i = 0; i < pg.Length; i++) dt.Destroy(pg[i]);
+            int end = Math.Min(start + pgChunk, pg.Length);
+            using var dt = dbe.CreateQuickTransaction();
+            for (int i = start; i < end; i++) dt.Destroy(pg[i]);
             dt.Commit();
         }
         dbe.FlushDeferredCleanups();

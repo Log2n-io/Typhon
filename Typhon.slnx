@@ -22,6 +22,7 @@
         <Project Path="test/Typhon.ARPG.Shell/Typhon.ARPG.Shell.csproj" />
         <Project Path="test/Typhon.Benchmark/Typhon.Benchmark.csproj" />
         <Project Path="test/Typhon.Client.Tests/Typhon.Client.Tests.csproj" />
+        <Project Path="test/Typhon.CompetitiveBenchmark/Typhon.CompetitiveBenchmark.csproj" />
         <Project Path="test/Typhon.Engine.Tests/Typhon.Engine.Tests.csproj" />
         <Project Path="test/Typhon.IOProfileRunner/Typhon.IOProfileRunner.csproj" />
         <Project Path="test/Typhon.MonitoringDemo/Typhon.MonitoringDemo.csproj" />

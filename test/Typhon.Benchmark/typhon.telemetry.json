@@ -1,7 +1,7 @@
 {
   "Typhon": {
     "Profiler": {
-      "Enabled": true,
+      "Enabled": false,
       "GcTracing":         { "Enabled": false },
       "MemoryAllocations": { "Enabled": false },
       "CpuSampling":       { "Enabled": false },

@@ -86,7 +86,18 @@ public class ManagedPagedMMFTests
             var guard = EpochGuard.Enter(epochManager);
             pmmf.RequestPageEpoch(0, epochManager.GlobalEpoch, out var memPageIndex);
             metrics = pmmf.GetMetrics();
-            Assert.That(metrics.MemPageCacheHit, Is.GreaterThan(cacheHit));
+
+            // The cache-hit counter is profiler-gated (it sits on the hottest path — see PagedMMF.FetchPageToMemory).
+            // With the profiler active it must increment on this hit; with it off the increment is JIT-folded away, so
+            // the counter must stay flat — that flatness IS the zero-cost guarantee the gate exists to provide.
+            if (TelemetryConfig.ProfilerActive)
+            {
+                Assert.That(metrics.MemPageCacheHit, Is.GreaterThan(cacheHit), "hit counter must increment while the profiler is active");
+            }
+            else
+            {
+                Assert.That(metrics.MemPageCacheHit, Is.EqualTo(cacheHit), "hit counter must stay flat (zero cost) while the profiler is off");
+            }
             guard.Dispose();
         }
 

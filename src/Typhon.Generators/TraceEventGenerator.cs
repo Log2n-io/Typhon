@@ -1509,12 +1509,22 @@ namespace Typhon.Engine.Profiler
         {
             sb.Append(indent).AppendLine("    [MethodImpl(MethodImplOptions.AggressiveInlining)]");
             sb.Append(indent).Append("    public static void Emit").Append(model.KindName).Append('(').Append(buildParamList(false)).AppendLine(")");
-            sb.Append(indent).Append("        => Emit").Append(model.KindName).Append("(Stopwatch.GetTimestamp()");
+            sb.Append(indent).AppendLine("    {");
+            // Gate BEFORE capturing the timestamp. Stopwatch.GetTimestamp() is QueryPerformanceCounter (~8ns) with an observable
+            // side effect the JIT cannot dead-code-eliminate. An expression body ("=> EmitX(Stopwatch.GetTimestamp(), ...)") hoists
+            // the QPC into the argument list, ahead of the gate in the target overload, so every gated instant event paid the QPC
+            // even when disabled — a ~5x regression on the hot epoch/lock emit hooks. Gating first lets the static-readonly check DCE it.
+            sb.Append(indent).Append("        if (!global::Typhon.Engine.TelemetryConfig.").Append(model.Gate).AppendLine(")");
+            sb.Append(indent).AppendLine("        {");
+            sb.Append(indent).AppendLine("            return;");
+            sb.Append(indent).AppendLine("        }");
+            sb.Append(indent).Append("        Emit").Append(model.KindName).Append("(Stopwatch.GetTimestamp()");
             foreach (var p in model.PayloadFields)
             {
                 sb.Append(", ").Append(char.ToLowerInvariant(p.FieldName[0])).Append(p.FieldName.Substring(1));
             }
             sb.AppendLine(");");
+            sb.Append(indent).AppendLine("    }");
             sb.AppendLine();
         }
 

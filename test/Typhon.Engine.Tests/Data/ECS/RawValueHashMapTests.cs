@@ -760,4 +760,202 @@ unsafe class RawValuePagedHashMapTests
         }
         Assert.That(new HashSet<long>(collector.Keys), Has.Count.EqualTo(total));
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // CountEntries / AnyEntry (optimistic in-place, copy-free aggregation)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // Matches every entry — quiescent count must equal the live set size.
+    private struct CountAll : RawValuePagedHashMap<long, PersistentStore>.IEntryPredicate<long>
+    {
+        public bool Matches(long key, byte* value) => true;
+    }
+
+    // Selective predicate — matches even keys only.
+    private struct CountEven : RawValuePagedHashMap<long, PersistentStore>.IEntryPredicate<long>
+    {
+        public bool Matches(long key, byte* value) => (key & 1L) == 0L;
+    }
+
+    // Matches a single target key — used to assert AnyEntry existence semantics.
+    private struct MatchKey : RawValuePagedHashMap<long, PersistentStore>.IEntryPredicate<long>
+    {
+        public long Target;
+        public bool Matches(long key, byte* value) => key == Target;
+    }
+
+    [Test]
+    public void CountEntries_Quiescent_CountsAllAndFiltered()
+    {
+        using var mpmmf = _serviceProvider.GetRequiredService<ManagedPagedMMF>();
+        var em = _serviceProvider.GetRequiredService<EpochManager>();
+        int valueSize = EntityRecordAccessor.RecordSize(2);
+        int stride = RawValuePagedHashMap<long, PersistentStore>.RecommendedStride(valueSize);
+        var segment = mpmmf.AllocateChunkBasedSegment(PageBlockType.None, 10, stride);
+        var map = RawValuePagedHashMap<long, PersistentStore>.Create(segment, 4, valueSize);
+
+        const int total = 2000; // forces many splits + overflow chains from the n0=4 start
+        byte* record = stackalloc byte[valueSize];
+        EntityRecordAccessor.InitializeRecord(record, 2);
+        using (EpochGuard.Enter(em))
+        {
+            var accessor = segment.CreateChunkAccessor();
+            for (long k = 1; k <= total; k++)
+            {
+                map.Insert(k, record, ref accessor, null);
+            }
+            accessor.Dispose();
+        }
+
+        using (EpochGuard.Enter(em))
+        {
+            var accessor = segment.CreateChunkAccessor();
+            var all = new CountAll();
+            var even = new CountEven();
+            int countAll = map.CountEntries(ref accessor, ref all);
+            int countEven = map.CountEntries(ref accessor, ref even);
+            accessor.Dispose();
+
+            Assert.That(countAll, Is.EqualTo(total), "CountAll must visit every live entry once");
+            Assert.That(countEven, Is.EqualTo(total / 2), "CountEven must count only even keys");
+        }
+    }
+
+    [Test]
+    public void AnyEntry_Quiescent_ExistenceSemantics()
+    {
+        using var mpmmf = _serviceProvider.GetRequiredService<ManagedPagedMMF>();
+        var em = _serviceProvider.GetRequiredService<EpochManager>();
+        int valueSize = EntityRecordAccessor.RecordSize(1);
+        int stride = RawValuePagedHashMap<long, PersistentStore>.RecommendedStride(valueSize);
+        var segment = mpmmf.AllocateChunkBasedSegment(PageBlockType.None, 10, stride);
+        var map = RawValuePagedHashMap<long, PersistentStore>.Create(segment, 4, valueSize);
+
+        // Empty map — nothing matches.
+        using (EpochGuard.Enter(em))
+        {
+            var accessor = segment.CreateChunkAccessor();
+            var all = new CountAll();
+            Assert.That(map.AnyEntry(ref accessor, ref all), Is.False, "empty map has no entries");
+            accessor.Dispose();
+        }
+
+        const int total = 500;
+        byte* record = stackalloc byte[valueSize];
+        EntityRecordAccessor.InitializeRecord(record, 1);
+        using (EpochGuard.Enter(em))
+        {
+            var accessor = segment.CreateChunkAccessor();
+            for (long k = 1; k <= total; k++)
+            {
+                map.Insert(k, record, ref accessor, null);
+            }
+            accessor.Dispose();
+        }
+
+        using (EpochGuard.Enter(em))
+        {
+            var accessor = segment.CreateChunkAccessor();
+            var all = new CountAll();
+            var hit = new MatchKey { Target = 250 };
+            var miss = new MatchKey { Target = total + 9999 };
+            Assert.That(map.AnyEntry(ref accessor, ref all), Is.True, "non-empty map matches CountAll");
+            Assert.That(map.AnyEntry(ref accessor, ref hit), Is.True, "existing key is found");
+            Assert.That(map.AnyEntry(ref accessor, ref miss), Is.False, "absent key is not found");
+            accessor.Dispose();
+        }
+    }
+
+    // CountEntries shares ForEachEntry's OLC protocol but evaluates the predicate on the LIVE (pre-validation) bytes; range checks keep every access in-bounds and
+    // the per-bucket version validation discards any tally taken from a torn snapshot. So a scan racing a writer must never crash (no ValueAt OOB) and must always
+    // return a count within [0, total] — never a phantom over-count from a validation escape.
+    [Test]
+    public void CountEntries_ConcurrentWriterScans_NoTornReadSaneCount()
+    {
+        using var mpmmf = _serviceProvider.GetRequiredService<ManagedPagedMMF>();
+        var em = _serviceProvider.GetRequiredService<EpochManager>();
+        int valueSize = EntityRecordAccessor.RecordSize(2);
+        int stride = RawValuePagedHashMap<long, PersistentStore>.RecommendedStride(valueSize);
+        var segment = mpmmf.AllocateChunkBasedSegment(PageBlockType.None, 10, stride);
+        var map = RawValuePagedHashMap<long, PersistentStore>.Create(segment, 4, valueSize);
+
+        const int total = 4000;
+        Exception failure = null;
+        var done = false;
+
+        var writer = new Thread(() =>
+        {
+            try
+            {
+                byte* record = stackalloc byte[valueSize];
+                EntityRecordAccessor.InitializeRecord(record, 2);
+                for (long k = 1; k <= total; k++)
+                {
+                    using var guard = EpochGuard.Enter(em);
+                    var accessor = segment.CreateChunkAccessor();
+                    map.Insert(k, record, ref accessor, null);
+                    accessor.Dispose();
+                }
+            }
+            catch (Exception ex)
+            {
+                Interlocked.CompareExchange(ref failure, ex, null);
+            }
+            finally
+            {
+                Volatile.Write(ref done, true);
+            }
+        });
+
+        var readers = new Thread[3];
+        for (var t = 0; t < readers.Length; t++)
+        {
+            readers[t] = new Thread(() =>
+            {
+                try
+                {
+                    while (!Volatile.Read(ref done))
+                    {
+                        using var guard = EpochGuard.Enter(em);
+                        var accessor = segment.CreateChunkAccessor();
+                        var all = new CountAll();
+                        int c = map.CountEntries(ref accessor, ref all);
+                        accessor.Dispose();
+                        if (c < 0 || c > total)
+                        {
+                            Interlocked.CompareExchange(ref failure, new Exception($"insane count {c} (expected [0,{total}])"), null);
+                            break;
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Interlocked.CompareExchange(ref failure, ex, null);
+                }
+            });
+        }
+
+        writer.Start();
+        foreach (var r in readers)
+        {
+            r.Start();
+        }
+        Assert.That(writer.Join(TimeSpan.FromSeconds(10)), Is.True, "writer did not finish");
+        foreach (var r in readers)
+        {
+            Assert.That(r.Join(TimeSpan.FromSeconds(10)), Is.True, "reader did not finish");
+        }
+
+        Assert.That(failure, Is.Null, () => failure!.ToString());
+
+        // Final quiescent count sees the full set exactly.
+        using (EpochGuard.Enter(em))
+        {
+            var accessor = segment.CreateChunkAccessor();
+            var all = new CountAll();
+            int finalCount = map.CountEntries(ref accessor, ref all);
+            accessor.Dispose();
+            Assert.That(finalCount, Is.EqualTo(total));
+        }
+    }
 }

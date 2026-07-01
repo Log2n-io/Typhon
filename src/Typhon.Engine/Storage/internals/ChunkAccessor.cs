@@ -16,7 +16,7 @@ namespace Typhon.Engine.Internals;
 /// <para><b>Three-tier hot path:</b></para>
 /// <list type="number">
 ///   <item>MRU check — branch-prediction-friendly for repeated access to same page</item>
-///   <item>SIMD Vector256 search — parallel scan of 16 cached page indices</item>
+///   <item>SIMD Vector256 search — parallel scan of all <see cref="Capacity"/> cached page indices</item>
 ///   <item>Clock-hand eviction — O(1) amortized, cannot fail (no pinned slots)</item>
 /// </list>
 /// <para>Pages are protected from eviction by their epoch tag, not by ref-counting.
@@ -27,17 +27,17 @@ namespace Typhon.Engine.Internals;
 [StructLayout(LayoutKind.Sequential)]
 public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, IPageStore
 {
-    // === SOA layout for SIMD search (1 cache line) ===
-    private fixed int _pageIndices[16];        // 64 bytes — segment page indices, SIMD searchable
+    // === SOA layout for SIMD search (2 cache lines) ===
+    private fixed int _pageIndices[32];        // 128 bytes — segment page indices, SIMD searchable
 
-    // === Base addresses for direct pointer arithmetic (2 cache lines) ===
-    private fixed long _baseAddresses[16];     // 128 bytes — raw data address per slot
+    // === Base addresses for direct pointer arithmetic (4 cache lines) ===
+    private fixed long _baseAddresses[32];     // 256 bytes — raw data address per slot
 
     // === Compact state ===
-    private ushort _dirtyFlags;                // 2 bytes — bitmask of dirty slots
+    private uint _dirtyFlags;                  // 4 bytes — bitmask of dirty slots (one bit per slot, needs 32 bits)
     private byte _clockHand;                   // 1 byte — eviction cursor
     private byte _mruSlot;                     // 1 byte — most recently used slot
-    private byte _usedSlots;                   // 1 byte — high water mark (0-16)
+    private byte _usedSlots;                   // 1 byte — high water mark (0-32)
 
     // === Cached hot-path values ===
     private int _stride;                       // 4 bytes — chunk size in bytes
@@ -54,7 +54,12 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
     private byte* _memPagesBaseAddr;           // 8 bytes
 
     // === Constants ===
-    private const int Capacity = 16;
+    // Per-accessor warm window. Sized so a worker's hot index/directory pages stay slot-resident across lookups whose
+    // leaf/chain pages churn through the rest of the window — at 16 the hot pages were evicted between lookups, forcing
+    // a per-access re-pin (SlotRefCount Interlocked inc/dec + AccessEpoch CAS) on shared PageInfo lines that bounced
+    // across all cores and capped concurrent-read scaling. 32 doubles the clock-hand runway so they survive.
+    private const int Capacity = 32;
+    private const int CapacityMask = Capacity - 1;   // power-of-two window → branch-free clock-hand wrap
     private const int InvalidPageIndex = -1;
 
 
@@ -106,7 +111,7 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
         // Initialize page indices to invalid (-1). Other arrays are zero-initialized by struct init.
         fixed (int* pageIndices = _pageIndices)
         {
-            Unsafe.InitBlockUnaligned(pageIndices, 0xFF, 64);
+            Unsafe.InitBlockUnaligned(pageIndices, 0xFF, Capacity * sizeof(int));
         }
 
     }
@@ -141,7 +146,7 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void MarkSlotDirty(int slot)
     {
-        var mask = (ushort)(1 << slot);
+        var mask = 1u << slot;
         if ((_dirtyFlags & mask) == 0)
         {
             _dirtyFlags |= mask;
@@ -190,7 +195,7 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
     /// Get read-only reference to chunk. Safe for the lifetime of the enclosing <see cref="EpochGuard"/>.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
-    public ref readonly T GetChunkReadOnly<T>(int chunkId) where T : unmanaged => ref GetChunk<T>(chunkId, false);
+    public ref readonly T GetChunkReadOnly<T>(int chunkId) where T : unmanaged => ref GetChunk<T>(chunkId);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
     public Span<byte> GetChunkAsSpan(int index, bool dirtyPage = false) => new(GetChunkAddress(index, dirtyPage), _stride);
@@ -232,19 +237,16 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
         {
             var target = Vector256.Create(si);
 
-            var v0 = Vector256.Load(indices);
-            var mask0 = Vector256.Equals(v0, target).ExtractMostSignificantBits();
-            if (mask0 != 0)
+            // Const-trip loop over the window in Vector256<int> (8-slot) strides — JIT-unrolled under AggressiveOptimization.
+            for (int baseSlot = 0; baseSlot < Capacity; baseSlot += Vector256<int>.Count)
             {
-                MarkSlotDirty(BitOperations.TrailingZeroCount(mask0));
-                return;
-            }
-
-            var v1 = Vector256.Load(indices + 8);
-            var mask1 = Vector256.Equals(v1, target).ExtractMostSignificantBits();
-            if (mask1 != 0)
-            {
-                MarkSlotDirty(8 + BitOperations.TrailingZeroCount(mask1));
+                var v = Vector256.Load(indices + baseSlot);
+                var mask = Vector256.Equals(v, target).ExtractMostSignificantBits();
+                if (mask != 0)
+                {
+                    MarkSlotDirty(baseSlot + BitOperations.TrailingZeroCount(mask));
+                    return;
+                }
             }
         }
     }
@@ -265,14 +267,14 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
         // Decrement ACW for currently dirty slots
         if (_dirtyFlags != 0)
         {
-            var flags = (int)_dirtyFlags;
+            var flags = _dirtyFlags;
             while (flags != 0)
             {
                 var bit = BitOperations.TrailingZeroCount(flags);
                 var memPageIndex = GetMemPageIndexFromSlot(bit);
                 _changeSet?.AddByMemPageIndex(memPageIndex);
                 _store.DecrementActiveChunkWriters(memPageIndex);
-                flags &= ~(1 << bit);
+                flags &= ~(1u << bit);
             }
             _dirtyFlags = 0;
         }
@@ -306,18 +308,14 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
         {
             var target = Vector256.Create(pageIndex);
 
-            var v0 = Vector256.Load(indices);
-            var mask0 = Vector256.Equals(v0, target).ExtractMostSignificantBits();
-            if (mask0 != 0)
+            for (int baseSlot = 0; baseSlot < Capacity; baseSlot += Vector256<int>.Count)
             {
-                return _store.TryLatchPageExclusive(GetMemPageIndexFromSlot(BitOperations.TrailingZeroCount(mask0)));
-            }
-
-            var v1 = Vector256.Load(indices + 8);
-            var mask1 = Vector256.Equals(v1, target).ExtractMostSignificantBits();
-            if (mask1 != 0)
-            {
-                return _store.TryLatchPageExclusive(GetMemPageIndexFromSlot(8 + BitOperations.TrailingZeroCount(mask1)));
+                var v = Vector256.Load(indices + baseSlot);
+                var mask = Vector256.Equals(v, target).ExtractMostSignificantBits();
+                if (mask != 0)
+                {
+                    return _store.TryLatchPageExclusive(GetMemPageIndexFromSlot(baseSlot + BitOperations.TrailingZeroCount(mask)));
+                }
             }
         }
 
@@ -335,19 +333,15 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
         {
             var target = Vector256.Create(pageIndex);
 
-            var v0 = Vector256.Load(indices);
-            var mask0 = Vector256.Equals(v0, target).ExtractMostSignificantBits();
-            if (mask0 != 0)
+            for (int baseSlot = 0; baseSlot < Capacity; baseSlot += Vector256<int>.Count)
             {
-                _store.UnlatchPageExclusive(GetMemPageIndexFromSlot(BitOperations.TrailingZeroCount(mask0)));
-                return;
-            }
-
-            var v1 = Vector256.Load(indices + 8);
-            var mask1 = Vector256.Equals(v1, target).ExtractMostSignificantBits();
-            if (mask1 != 0)
-            {
-                _store.UnlatchPageExclusive(GetMemPageIndexFromSlot(8 + BitOperations.TrailingZeroCount(mask1)));
+                var v = Vector256.Load(indices + baseSlot);
+                var mask = Vector256.Equals(v, target).ExtractMostSignificantBits();
+                if (mask != 0)
+                {
+                    _store.UnlatchPageExclusive(GetMemPageIndexFromSlot(baseSlot + BitOperations.TrailingZeroCount(mask)));
+                    return;
+                }
             }
         }
     }
@@ -379,7 +373,7 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
     /// CRITICAL HOT PATH: Get chunk address with maximum performance.
     /// Three-tier optimization:
     /// 1. MRU check (branch prediction friendly for repeated access)
-    /// 2. SIMD search (parallel scan of 16 slots)
+    /// 2. SIMD search (parallel scan of all slots)
     /// 3. Clock-hand eviction (O(1) amortized, cannot fail)
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
@@ -405,22 +399,16 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
         {
             var target = Vector256.Create(pageIndex);
 
-            // Search first 8 slots
-            var v0 = Vector256.Load(indices);
-            var mask0 = Vector256.Equals(v0, target).ExtractMostSignificantBits();
-            if (mask0 != 0)
+            // Const-trip loop over the window in Vector256<int> (8-slot) strides — JIT-unrolled under AggressiveOptimization.
+            for (int baseSlot = 0; baseSlot < Capacity; baseSlot += Vector256<int>.Count)
             {
-                var slot = BitOperations.TrailingZeroCount(mask0);
-                return GetFromSlot(slot, pageIndex, offset, dirty);
-            }
-
-            // Search second 8 slots
-            var v1 = Vector256.Load(indices + 8);
-            var mask1 = Vector256.Equals(v1, target).ExtractMostSignificantBits();
-            if (mask1 != 0)
-            {
-                var slot = 8 + BitOperations.TrailingZeroCount(mask1);
-                return GetFromSlot(slot, pageIndex, offset, dirty);
+                var v = Vector256.Load(indices + baseSlot);
+                var mask = Vector256.Equals(v, target).ExtractMostSignificantBits();
+                if (mask != 0)
+                {
+                    var slot = baseSlot + BitOperations.TrailingZeroCount(mask);
+                    return GetFromSlot(slot, pageIndex, offset, dirty);
+                }
             }
         }
 
@@ -450,34 +438,6 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
     // ═══════════════════════════════════════════════════════════════════════
 
     /// <summary>
-    /// Cold path: throws when a stale or invalid ChunkId exceeds the segment's capacity.
-    /// Separated from the hot path to avoid polluting the instruction cache.
-    /// </summary>
-    [MethodImpl(MethodImplOptions.NoInlining)]
-    private void ThrowChunkIdOutOfRange(int chunkId, int capacity)
-    {
-        // Collect diagnostic state for the most recently used slot to help trace stale data origins
-        var mru = _mruSlot;
-        var mruPageIdx = _pageIndices[mru];
-        var memIdx = mruPageIdx >= 0 && mru < _usedSlots ? GetMemPageIndexFromSlot(mru) : -1;
-        // Diagnostic page info is only available for PersistentStore (MMF-backed pages)
-        var diagInfo = "";
-        if (typeof(TStore) == typeof(PersistentStore) && memIdx >= 0)
-        {
-            var ps = Unsafe.As<TStore, PersistentStore>(ref _store);
-            var pi = ps.Mmf.GetPageInfoForDiagnostic(memIdx);
-            diagInfo = $"DC={pi.DirtyCounter} ACW={pi.ActiveChunkWriters} SlotRef={pi.SlotRefCount} " +
-                       $"Epoch={pi.AccessEpoch} State={pi.PageState} CrcOk={pi.CrcVerified}. ";
-        }
-
-        throw new InvalidOperationException(
-            $"ChunkAccessor.GetChunkAddress: chunkId {chunkId} exceeds segment capacity {capacity}. " +
-            $"MRU slot={mru} pageIdx={mruPageIdx} memIdx={memIdx} " +
-            diagInfo +
-            "This indicates a stale ChunkId read from evicted page data.");
-    }
-
-    /// <summary>
     /// Cache miss slow path: clock-hand eviction, load new page.
     /// </summary>
     [MethodImpl(MethodImplOptions.NoInlining)] // Keep hot paths small
@@ -502,10 +462,10 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
         }
 
         // Clock-hand: advance, skip MRU
-        var hand = (byte)((_clockHand + 1) & 0xF);
+        var hand = (byte)((_clockHand + 1) & CapacityMask);
         if (hand == _mruSlot)
         {
-            hand = (byte)((hand + 1) & 0xF);
+            hand = (byte)((hand + 1) & CapacityMask);
         }
         _clockHand = hand;
         return hand;
@@ -533,7 +493,7 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
         }
 
         var memPageIndex = GetMemPageIndexFromSlot(slot);
-        var mask = 1 << slot;
+        var mask = 1u << slot;
 
         if (_changeSet != null)
         {
@@ -542,7 +502,7 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
             {
                 _changeSet.AddByMemPageIndex(memPageIndex);
                 _changeSet.DeferEviction(memPageIndex | unchecked((int)0x80000000));
-                _dirtyFlags = (ushort)(_dirtyFlags & ~mask);
+                _dirtyFlags &= ~mask;
             }
             else
             {
@@ -555,7 +515,7 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
             if ((_dirtyFlags & mask) != 0)
             {
                 _store.DecrementActiveChunkWriters(memPageIndex);
-                _dirtyFlags = (ushort)(_dirtyFlags & ~mask);
+                _dirtyFlags &= ~mask;
             }
             _store.DecrementSlotRefCount(memPageIndex);
         }

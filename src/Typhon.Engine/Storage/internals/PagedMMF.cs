@@ -836,7 +836,14 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         // see claude/scratch/jit-using.md for the EH-region-defeats-inlining mechanism.
         if (_memPageIndexByFilePageIndex.TryGetValue(filePageIndex, out memPageIndex))
         {
-            ++_metrics.MemPageCacheHit;
+            // Cache-hit stat — PROFILER-GATED. This is the hottest increment in the engine (3-4× per point read, every
+            // reader thread); as an always-on shared-field `++` it bounced one cache line across all cores and halved
+            // concurrent-read throughput at 8+ threads. ProfilerActive is a JIT-folded static, so with the profiler off
+            // this whole branch is eliminated — a hit-rate statistic must not tax the path it measures.
+            if (TelemetryConfig.ProfilerActive)
+            {
+                ++_metrics.MemPageCacheHit;
+            }
             return true;
         }
 
@@ -846,7 +853,12 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     [MethodImpl(MethodImplOptions.NoInlining)]
     private bool FetchPageToMemoryOnMiss(int filePageIndex, out int memPageIndex, long timeout, CancellationToken cancellationToken)
     {
-        ++_metrics.MemPageCacheMiss;
+        // Profiler-gated, paired with MemPageCacheHit so the derived hit-rate is both-counted or both-zero. This is the
+        // cold path (a miss already does disk I/O), so the gate is for coherence, not perf.
+        if (TelemetryConfig.ProfilerActive)
+        {
+            ++_metrics.MemPageCacheMiss;
+        }
 
         // Synchronous span brackets only the kickoff, not the async disk-read tail. Same tradeoff as PageCacheDiskWrite in SavePageInternal:
         // the raw async wait isn't captured, but in return we get (a) zero allocations on the fetch path, (b) no closure/display-class
