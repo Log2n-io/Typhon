@@ -3,7 +3,7 @@
 # Automatically adds new issues to the "Typhon dev" GitHub Project
 # and performs basic housekeeping when issues/PRs are updated.
 #
-# Project: https://github.com/users/nockawa/projects/7
+# Project: https://github.com/orgs/Log2n-io/projects/1
 #
 # IMPORTANT: This workflow requires a Personal Access Token (PAT) stored as
 # the repository secret PROJECT_TOKEN. The default GITHUB_TOKEN cannot access
@@ -18,16 +18,15 @@ on:
     types: [opened, closed]
 
 env:
-  # User-owned project (not organization)
-  # Project ID from: gh api graphql -f query='{ user(login: "nockawa") { projectV2(number: 7) { id } } }'
-  PROJECT_ID: PVT_kwHOAud1ac4BNdCj
+  # Organization-owned project: https://github.com/orgs/Log2n-io/projects/1
+  # Project ID from: gh api graphql -f query='{ organization(login: "Log2n-io") { projectV2(number: 1) { id } } }'
+  PROJECT_ID: PVT_kwDOEcGj5M4Bb-8P
   # Field IDs for Status field
-  STATUS_FIELD_ID: PVTSSF_lAHOAud1ac4BNdCjzg8cXYI
-  # Status option IDs
-  STATUS_BACKLOG: "47fc9ee4"
-  STATUS_IN_PROGRESS: "a0a7aab6"
-  STATUS_REVIEW: "fadead67"
-  STATUS_DONE: "12503e99"
+  STATUS_FIELD_ID: PVTSSF_lADOEcGj5M4Bb-8PzhWrH1A
+  # Status option IDs (org project #1 has: Todo / In Progress / Done)
+  STATUS_TODO: "f75ad846"
+  STATUS_IN_PROGRESS: "47fc9ee4"
+  STATUS_DONE: "98236657"
 
 jobs:
   # Automatically add new issues to the project
@@ -40,8 +39,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
         run: |
-          # Use GraphQL to add item to user-owned project
-          # This avoids the "unknown owner type" error with gh project item-add
+          # Use GraphQL to add item to the org-owned project (works for both user and org projects)
 
           ISSUE_NODE_ID="${{ github.event.issue.node_id }}"
 
@@ -216,7 +214,7 @@ jobs:
               ' -f project="$PROJECT_ID" --jq ".data.node.items.nodes[] | select(.content.id == \"$ISSUE_NODE_ID\") | .id")
 
               if [ -n "$ITEM_ID" ]; then
-                # Update status to Review
+                # Update status to In Progress (org project #1 has no Review status)
                 gh api graphql -f query='
                   mutation($project: ID!, $item: ID!, $field: ID!, $value: String!) {
                     updateProjectV2ItemFieldValue(input: {
@@ -230,9 +228,9 @@ jobs:
                       }
                     }
                   }
-                ' -f project="$PROJECT_ID" -f item="$ITEM_ID" -f field="$STATUS_FIELD_ID" -f value="$STATUS_REVIEW"
+                ' -f project="$PROJECT_ID" -f item="$ITEM_ID" -f field="$STATUS_FIELD_ID" -f value="$STATUS_IN_PROGRESS"
 
-                echo "✅ Updated issue #$ISSUE_NUM status to Review"
+                echo "✅ Updated issue #$ISSUE_NUM status to In Progress"
               fi
             fi
           else
