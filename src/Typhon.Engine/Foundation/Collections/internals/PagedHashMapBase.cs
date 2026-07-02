@@ -598,8 +598,10 @@ internal abstract unsafe partial class PagedHashMapBase<TStore> where TStore : s
         {
             ref readonly var meta = ref accessor.GetChunkReadOnly<PagedHashMapMeta>(0);
 
-            Debug.Assert(meta.N0 == _n0, "N0 mismatch between meta chunk and constructor parameter");
-            Debug.Assert(((meta.Flags & 1) != 0) == _allowMultiple, "AllowMultiple mismatch between meta chunk and constructor parameter");
+            CheckConfig.Require(CheckConfig.Enabled, meta.N0 == _n0,
+                $"N0 mismatch between meta chunk and constructor parameter (store corruption or schema drift)");
+            CheckConfig.Require(CheckConfig.Enabled, ((meta.Flags & 1) != 0) == _allowMultiple,
+                $"AllowMultiple mismatch between meta chunk and constructor parameter (store corruption or schema drift)");
 
             PackedMeta = meta.PackedMeta;
             _entryCount = meta.EntryCount;

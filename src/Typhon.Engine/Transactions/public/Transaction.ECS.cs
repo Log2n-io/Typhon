@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using Typhon.Schema.Definition;
@@ -104,7 +103,7 @@ public unsafe partial class Transaction
     internal SpatialQuery<T> SpatialQuery<T>() where T : unmanaged
     {
         var table = _dbe.GetComponentTable<T>();
-        Debug.Assert(table?.SpatialIndex != null, $"Component {typeof(T).Name} has no [SpatialIndex]");
+        CheckConfig.Require(CheckConfig.Enabled, table?.SpatialIndex != null, $"Component {typeof(T).Name} has no [SpatialIndex]");
         return new SpatialQuery<T>(table.SpatialIndex);
     }
 
@@ -227,9 +226,13 @@ public unsafe partial class Transaction
     public EntityId Spawn<TArch>(params ReadOnlySpan<ComponentValue> values) where TArch : Archetype<TArch>
     {
         var meta = Archetype<TArch>.Metadata;
-        Debug.Assert(meta != null, $"Archetype {typeof(TArch).Name} not registered");
-        Debug.Assert(_dbe._archetypeStates[meta.ArchetypeId]?.EntityMap != null,
-            $"Archetype {typeof(TArch).Name} EntityMap not initialized — call DatabaseEngine.InitializeArchetypes first");
+        CheckConfig.Require(CheckConfig.Enabled, meta != null, $"Archetype {typeof(TArch).Name} not registered");
+        // Inline-guard (not Require): the array-indexed condition can throw IndexOutOfRange, so the JIT can't DCE it — the
+        // folded gate must short-circuit before it, keeping this per-entity Spawn path zero-cost when strict mode is off.
+        if (CheckConfig.Enabled && _dbe._archetypeStates[meta.ArchetypeId]?.EntityMap == null)
+        {
+            ThrowHelper.ThrowInvalidOp($"Archetype {typeof(TArch).Name} EntityMap not initialized — call DatabaseEngine.InitializeArchetypes first");
+        }
 
         var scope = TyphonEvent.BeginEcsSpawn(meta.ArchetypeId);
         // PROFILING-SPAN-NO-THROW-BEGIN — body MUST NOT throw. SpawnInternal is engine-internal (allocation + B+Tree insert + MVCC).
@@ -250,8 +253,8 @@ public unsafe partial class Transaction
     public void SpawnBatch<TArch>(Span<EntityId> ids, params ComponentValue[] sharedValues) where TArch : Archetype<TArch>
     {
         var meta = Archetype<TArch>.Metadata;
-        Debug.Assert(meta != null, $"Archetype {typeof(TArch).Name} not registered");
-        Debug.Assert(_dbe._archetypeStates[meta.ArchetypeId]?.EntityMap != null,
+        CheckConfig.Require(CheckConfig.Enabled, meta != null, $"Archetype {typeof(TArch).Name} not registered");
+        CheckConfig.Require(CheckConfig.Enabled, _dbe._archetypeStates[meta.ArchetypeId]?.EntityMap != null,
             $"Archetype {typeof(TArch).Name} EntityMap not initialized");
 
         EnsureMutable();
@@ -345,9 +348,10 @@ public unsafe partial class Transaction
     public int SpawnBatchAllocate<TArch>(int count, Span<EntityId> ids) where TArch : Archetype<TArch>
     {
         var meta = Archetype<TArch>.Metadata;
-        Debug.Assert(meta != null, $"Archetype {typeof(TArch).Name} not registered");
-        Debug.Assert(_dbe._archetypeStates[meta.ArchetypeId]?.EntityMap != null, $"Archetype {typeof(TArch).Name} EntityMap not initialized");
-        Debug.Assert(ids.Length >= count, "ids span must be at least count elements");
+        CheckConfig.Require(CheckConfig.Enabled, meta != null, $"Archetype {typeof(TArch).Name} not registered");
+        CheckConfig.Require(CheckConfig.Enabled, _dbe._archetypeStates[meta.ArchetypeId]?.EntityMap != null,
+            $"Archetype {typeof(TArch).Name} EntityMap not initialized");
+        CheckConfig.Require(CheckConfig.Enabled, ids.Length >= count, $"ids span must be at least count elements");
 
         if (count == 0)
         {
@@ -430,7 +434,7 @@ public unsafe partial class Transaction
     /// </summary>
     public void SpawnBatchWriteAll<T>(int baseIndex, int count, Comp<T> comp, ReadOnlySpan<T> values) where T : unmanaged
     {
-        Debug.Assert(values.Length >= count, "values span must be at least count elements");
+        CheckConfig.Require(CheckConfig.Enabled, values.Length >= count, $"values span must be at least count elements");
         if (count == 0)
         {
             return;
@@ -473,7 +477,7 @@ public unsafe partial class Transaction
 
         for (int i = 0; i < ids.Length; i++)
         {
-            Debug.Assert(!ids[i].IsNull, "Cannot destroy null entity");
+            CheckConfig.Require(CheckConfig.Enabled, !ids[i].IsNull, $"Cannot destroy null entity");
             int cascadeCount = 0;
             DestroyInternal(ids[i], 0, ref cascadeCount);
         }
@@ -645,7 +649,7 @@ public unsafe partial class Transaction
         State = TransactionState.InProgress;
         AssertThreadAffinity();
 
-        Debug.Assert(!id.IsNull, "Cannot destroy null entity");
+        CheckConfig.Require(CheckConfig.Enabled, !id.IsNull, $"Cannot destroy null entity");
 
         var scope = TyphonEvent.BeginEcsDestroy(id.RawValue);
         // PROFILING-SPAN-NO-THROW-BEGIN — body MUST NOT throw. DestroyInternal is engine-internal (cascade traversal + tombstone marking).
@@ -691,7 +695,7 @@ public unsafe partial class Transaction
         State = TransactionState.InProgress;
         AssertThreadAffinity();
 
-        Debug.Assert(!id.IsNull, "Cannot destroy null entity");
+        CheckConfig.Require(CheckConfig.Enabled, !id.IsNull, $"Cannot destroy null entity");
 
         var scope = TyphonEvent.BeginEcsDestroy(id.RawValue);
         scope.Tsn = TSN;

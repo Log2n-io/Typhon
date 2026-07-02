@@ -142,9 +142,7 @@ public unsafe partial class Transaction : EntityAccessor
         _isDisposed = false;
         IsReadOnly = readOnly;
         OwningUnitOfWork = uow;
-#if DEBUG
-        _debugOwningThreadId = Environment.CurrentManagedThreadId;
-#endif
+        _owningThreadId = Environment.CurrentManagedThreadId;   // #422: affinity field promoted out of #if DEBUG (see EntityAccessor)
         _committedOperationCount = null;
         _deletedComponentCount = 0;
         _entityOperationCount = 0;
@@ -212,8 +210,7 @@ public unsafe partial class Transaction : EntityAccessor
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void TransitionTo(TransactionState newState)
     {
-        Debug.Assert(IsLegalTransition(State, newState),
-            $"Illegal transaction state transition: {State} → {newState}");
+        CheckConfig.Require(CheckConfig.Enabled, IsLegalTransition(State, newState), $"Illegal transaction state transition: {State} → {newState}");
         State = newState;
     }
 

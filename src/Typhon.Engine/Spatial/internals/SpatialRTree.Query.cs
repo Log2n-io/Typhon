@@ -1,5 +1,4 @@
 using System;
-using System.Diagnostics;
 using System.Runtime.CompilerServices;
 
 namespace Typhon.Engine.Internals;
@@ -211,7 +210,8 @@ internal unsafe partial class SpatialRTree<TStore>
                         }
                         else
                         {
-                            Debug.Fail("Spatial query DFS stack overflow — results may be incomplete");
+                            // Tier-0 always-on record (#422): latch-safe — never throw here (we hold an OLC read latch).
+                            SpatialRTreeDiagnostics.RecordDfsStackOverflow("AABB");
                         }
                     }
                 }
@@ -431,7 +431,8 @@ internal unsafe partial class SpatialRTree<TStore>
                         }
                         else
                         {
-                            Debug.Fail("Spatial query DFS stack overflow — results may be incomplete");
+                            // Tier-0 always-on record (#422): latch-safe — never throw here (we hold an OLC read latch).
+                            SpatialRTreeDiagnostics.RecordDfsStackOverflow("occupant");
                         }
                     }
                 }
@@ -1053,7 +1054,8 @@ internal unsafe partial class SpatialRTree<TStore>
                             }
                             else
                             {
-                                Debug.Fail("Spatial frustum query DFS stack overflow — results may be incomplete");
+                                // Tier-0 always-on record (#422): latch-safe — never throw under the OLC read latch.
+                                SpatialRTreeDiagnostics.RecordDfsStackOverflow("frustum");
                             }
                         }
                     }
@@ -1075,7 +1077,8 @@ internal unsafe partial class SpatialRTree<TStore>
                             }
                             else
                             {
-                                Debug.Fail("Spatial frustum query DFS stack overflow — results may be incomplete");
+                                // Tier-0 always-on record (#422): latch-safe — never throw under the OLC read latch.
+                                SpatialRTreeDiagnostics.RecordDfsStackOverflow("frustum");
                             }
                         }
                     }
@@ -1380,7 +1383,8 @@ internal unsafe partial class SpatialRTree<TStore>
                             }
                             else
                             {
-                                Debug.Fail("Spatial count query DFS stack overflow — results may be incomplete");
+                                // Tier-0 always-on record (#422): latch-safe — never throw under the OLC read latch.
+                                SpatialRTreeDiagnostics.RecordDfsStackOverflow("count");
                             }
                         }
                     }
@@ -1418,7 +1422,8 @@ internal unsafe partial class SpatialRTree<TStore>
                                 }
                                 else
                                 {
-                                    Debug.Fail("Spatial count query DFS stack overflow — results may be incomplete");
+                                    // Tier-0 always-on record (#422): latch-safe — never throw under the OLC read latch.
+                                    SpatialRTreeDiagnostics.RecordDfsStackOverflow("count");
                                 }
                             }
                         }
@@ -1457,7 +1462,8 @@ internal unsafe partial class SpatialRTree<TStore>
                                 }
                                 else
                                 {
-                                    Debug.Fail("Spatial count query DFS stack overflow — results may be incomplete");
+                                    // Tier-0 always-on record (#422): latch-safe — never throw under the OLC read latch.
+                                    SpatialRTreeDiagnostics.RecordDfsStackOverflow("count");
                                 }
                             }
                         }

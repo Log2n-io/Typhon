@@ -211,7 +211,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     public EcsQuery<TArchetype> Enabled<T>() where T : unmanaged
     {
         int typeId = ArchetypeRegistry.GetComponentTypeId<T>();
-        Debug.Assert(typeId >= 0, $"Component {typeof(T).Name} not registered");
+        CheckConfig.Require(CheckConfig.Enabled, typeId >= 0, $"Component {typeof(T).Name} not registered");
         // Phase 7: ECS:Query:Constraint:Enabled instant.
         TyphonEvent.EmitEcsQueryConstraintEnabled((ushort)Math.Min(typeId, ushort.MaxValue), 1);
         AddEnabledTypeId(typeId);
@@ -222,7 +222,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     public EcsQuery<TArchetype> Disabled<T>() where T : unmanaged
     {
         int typeId = ArchetypeRegistry.GetComponentTypeId<T>();
-        Debug.Assert(typeId >= 0, $"Component {typeof(T).Name} not registered");
+        CheckConfig.Require(CheckConfig.Enabled, typeId >= 0, $"Component {typeof(T).Name} not registered");
         // Phase 7: ECS:Query:Constraint:Enabled instant (enableBit=0 means Disabled).
         TyphonEvent.EmitEcsQueryConstraintEnabled((ushort)Math.Min(typeId, ushort.MaxValue), 0);
         AddDisabledTypeId(typeId);
@@ -384,7 +384,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     {
         ThrowIfSpatialAlreadySet();
         _spatialTable = _tx.DBE.GetComponentTable<T>();
-        Debug.Assert(_spatialTable?.SpatialIndex != null, $"Component {typeof(T).Name} has no [SpatialIndex]");
+        CheckConfig.Require(CheckConfig.Enabled, _spatialTable?.SpatialIndex != null, $"Component {typeof(T).Name} has no [SpatialIndex]");
         _spatialQueryType = SpatialQueryType.Radius;
         _spatialParams[0] = centerX; _spatialParams[1] = centerY; _spatialParams[2] = centerZ; _spatialParams[3] = radius;
         // Phase 7: ECS:Query:Spatial:Attach instant. queryBox encodes the bounding box of the radius sphere.
@@ -397,7 +397,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     {
         ThrowIfSpatialAlreadySet();
         _spatialTable = _tx.DBE.GetComponentTable<T>();
-        Debug.Assert(_spatialTable?.SpatialIndex != null, $"Component {typeof(T).Name} has no [SpatialIndex]");
+        CheckConfig.Require(CheckConfig.Enabled, _spatialTable?.SpatialIndex != null, $"Component {typeof(T).Name} has no [SpatialIndex]");
         _spatialQueryType = SpatialQueryType.AABB;
         _spatialParams[0] = minX; _spatialParams[1] = minY; _spatialParams[2] = minZ;
         _spatialParams[3] = maxX; _spatialParams[4] = maxY; _spatialParams[5] = maxZ;
@@ -412,7 +412,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     {
         ThrowIfSpatialAlreadySet();
         _spatialTable = _tx.DBE.GetComponentTable<T>();
-        Debug.Assert(_spatialTable?.SpatialIndex != null, $"Component {typeof(T).Name} has no [SpatialIndex]");
+        CheckConfig.Require(CheckConfig.Enabled, _spatialTable?.SpatialIndex != null, $"Component {typeof(T).Name} has no [SpatialIndex]");
         _spatialQueryType = SpatialQueryType.Ray;
         _spatialParams[0] = originX; _spatialParams[1] = originY; _spatialParams[2] = originZ;
         _spatialParams[3] = dirX; _spatialParams[4] = dirY; _spatialParams[5] = dirZ; _spatialParams[6] = maxDist;

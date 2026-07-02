@@ -55,6 +55,8 @@ internal static class ProfilerBootstrap
     internal static void Initialize()
     {
         TelemetryConfig.EnsureInitialized();
+        // Bake the strict-mode gate (#422) before any hot path JITs, same rationale as the telemetry gate above.
+        CheckConfig.EnsureInitialized();
 
         if (TelemetryConfig.ProfilerActive && !SpilloverRingPool.IsInitialized)
         {

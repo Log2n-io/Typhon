@@ -382,7 +382,9 @@ internal partial struct AccessControl
                     var curThread = Environment.CurrentManagedThreadId;
                     if (ld.ThreadId != curThread)
                     {
-                        Debug.Assert(false);
+                        // Tier-0 always-on guard (#422): releasing an exclusive lock from a thread that does not own it is a
+                        // lock-protocol violation — continuing would corrupt the lock word (Debug.Assert(false) was stripped in Release).
+                        ThrowHelper.ThrowCorruption("AccessControl", -1, "Exclusive lock released from a thread that does not own it (lock-protocol corruption)");
                     }
 
                     ld.State = IdleState;
@@ -482,7 +484,9 @@ internal partial struct AccessControl
                     var curThread = Environment.CurrentManagedThreadId;
                     if (ld.ThreadId != curThread)
                     {
-                        Debug.Assert(false);
+                        // Tier-0 always-on guard (#422): demoting an exclusive lock from a thread that does not own it is a
+                        // lock-protocol violation — continuing would corrupt the lock word (Debug.Assert(false) was stripped in Release).
+                        ThrowHelper.ThrowCorruption("AccessControl", -1, "Exclusive lock demoted from a thread that does not own it (lock-protocol corruption)");
                     }
 
                     ld.ThreadId = 0;

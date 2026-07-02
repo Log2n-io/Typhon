@@ -1,5 +1,4 @@
 using System;
-using System.Diagnostics;
 using JetBrains.Annotations;
 
 namespace Typhon.Engine;
@@ -68,9 +67,10 @@ public sealed class PointInTimeAccessor : IDisposable
     /// </summary>
     public void Attach(DatabaseEngine dbe, int workerCount)
     {
-        Debug.Assert(!_disposed, "PointInTimeAccessor used after disposal");
+        CheckConfig.Require(CheckConfig.Enabled, !_disposed, $"PointInTimeAccessor used after disposal");
 
-        Debug.Assert(_dbe == null || _dbe == dbe, "PointInTimeAccessor.Attach called with a different DatabaseEngine than the initial Attach");
+        CheckConfig.Require(CheckConfig.Enabled, _dbe == null || _dbe == dbe,
+            $"PointInTimeAccessor.Attach called with a different DatabaseEngine than the initial Attach");
         _dbe ??= dbe;
 
         // Resize array if worker count changed
@@ -103,9 +103,9 @@ public sealed class PointInTimeAccessor : IDisposable
     /// </summary>
     public EntityAccessor GetWorkerAccessor(int workerId)
     {
-        Debug.Assert(!_disposed, "PointInTimeAccessor used after disposal");
-        Debug.Assert(IsAttached, "PointInTimeAccessor used before Attach");
-        Debug.Assert(workerId >= 0 && workerId < _workerAccessors.Length,
+        CheckConfig.Require(CheckConfig.Enabled, !_disposed, $"PointInTimeAccessor used after disposal");
+        CheckConfig.Require(CheckConfig.Enabled, IsAttached, $"PointInTimeAccessor used before Attach");
+        CheckConfig.Require(CheckConfig.Enabled, workerId >= 0 && workerId < _workerAccessors.Length,
             $"workerId {workerId} out of range [0, {_workerAccessors.Length})");
 
         var acc = _workerAccessors[workerId];
@@ -125,8 +125,8 @@ public sealed class PointInTimeAccessor : IDisposable
     /// </summary>
     public void AdvanceSnapshot()
     {
-        Debug.Assert(!_disposed, "PointInTimeAccessor used after disposal");
-        Debug.Assert(IsAttached, "PointInTimeAccessor.AdvanceSnapshot called before Attach");
+        CheckConfig.Require(CheckConfig.Enabled, !_disposed, $"PointInTimeAccessor used after disposal");
+        CheckConfig.Require(CheckConfig.Enabled, IsAttached, $"PointInTimeAccessor.AdvanceSnapshot called before Attach");
         var newTsn = _dbe.TransactionChain.AllocateTSN();
         TSN = newTsn;
 
@@ -142,7 +142,7 @@ public sealed class PointInTimeAccessor : IDisposable
     /// </summary>
     public void FlushWorker(int workerId)
     {
-        Debug.Assert(!_disposed, "PointInTimeAccessor used after disposal");
+        CheckConfig.Require(CheckConfig.Enabled, !_disposed, $"PointInTimeAccessor used after disposal");
         if (workerId >= 0 && workerId < _workerCount)
         {
             _workerAccessors[workerId]?.RefreshEpochScope();
