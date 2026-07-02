@@ -309,15 +309,29 @@ Cluster storage is opt-in per archetype (`IsClusterEligible` on `ArchetypeMetada
 
 ¹ The lone exception: if you `Spawn<T>` an entity whose component set includes SV fields, and then `Rollback`, the freshly-allocated SV chunks are freed and the entity is never published to the `EntityMap`, so its SV bytes effectively vanish with it. *Mutating an existing entity's SV slot* is the unrollbackable case.
 
+### `DurabilityDiscipline` — a second, orthogonal axis on SingleVersion
+
+The table above describes `SingleVersion` under its default discipline, [`DurabilityDiscipline.TickFence`](../../src/Typhon.Schema.Definition/DurabilityDiscipline.cs). A second discipline, `Commit`, is selected **per transaction** and is **not a fourth `StorageMode`** — it shares the identical SV cluster layout and only changes the rows below for the writes it covers:
+
+| Aspect | `TickFence` (default) | `Commit` |
+|---|---|---|
+| Visibility to other transactions | immediate — dirty read, before your tx commits | only at `Transaction.Commit` — read-committed, no partial visibility |
+| Rollback | cannot be reverted | **O(1)** — the staged value is discarded; HEAD was never touched |
+| Durability | tick-fence WAL, batched at tick boundary (≤1-tick loss) | zero-loss, atomic — WAL'd at `Transaction.Commit` (per `DurabilityMode`), no checkpoint required |
+| Conflict detection | none — last-writer-wins | none — last-writer-wins (unchanged) |
+| Revision chain | none | none |
+
+`Commit` stages writes into a per-transaction buffer (the SV slot itself is untouched until commit), then publishes them in place — read-committed isolation and O(1) rollback without paying for MVCC. It applies only to `SingleVersion` (`Versioned` is always commit-scoped; `Transient` is never durable). See [11-durability](11-durability.md) for the wire format and `claude/design/Ecs/committed-storage-mode.md` for the full spec.
+
 ### What this really means
 
-**Versioned is the only mode inside the transaction's ACID envelope.** SV and Transient writes leak out of the transaction in three ways:
+**Versioned is the only mode inside the transaction's ACID envelope — under the default `TickFence` discipline.** SV and Transient writes leak out of the transaction in three ways:
 
 1. **No isolation**: another transaction (or a PTA worker) reading the same SV/Transient slot during your transaction sees the post-write value immediately, not a snapshot. Multiple concurrent writers on the same SV slot race with no synchronization — "developer owns concurrency" for SV/Transient mutations.
 2. **No atomicity**: if you write to several SV components and then crash or rollback, the writes that already retired stay. There is no "all or nothing".
 3. **Durability follows the tick, not the commit**: SV writes ride the tick-fence WAL pipeline (`DirtyBitmap` → tick-boundary persistence). Whether your transaction commits or rolls back doesn't change what's persisted.
 
-A transaction around SV writes still gives you *thread affinity* and a *consistent read snapshot for any Versioned components in the same archetype*, but it does **not** give you the right to undo an SV mutation. If that matters, use Versioned.
+A transaction around SV writes still gives you *thread affinity* and a *consistent read snapshot for any Versioned components in the same archetype*, but it does **not** give you the right to undo an SV mutation. If that matters, use Versioned — or escalate the SV component to `DurabilityDiscipline.Commit`, above, if you need atomicity and rollback but not snapshot isolation or temporal queries.
 
 ### Picking a mode
 

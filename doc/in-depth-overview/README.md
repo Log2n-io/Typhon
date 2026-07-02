@@ -104,6 +104,7 @@ Terms that show up across multiple chapters. Each entry points to where the type
 | **`CompRevStorageElement`** | The 12-byte revision element — TSN + UowId + IsolationFlag | [05-revision](05-revision.md) |
 | **DAG** | The directed acyclic graph of systems, edges derived from access patterns | [10-runtime](10-runtime.md) |
 | **`Deadline`** | Monotonic absolute timeout (8 B struct) | [01-foundation](01-foundation.md) |
+| **`DurabilityDiscipline`** | Per-transaction escalation for `SingleVersion` components: `TickFence` (default) or `Commit` (atomic, zero-loss, O(1) rollback) | [06-ecs](06-ecs.md), [11-durability](11-durability.md) |
 | **DurabilityMode** | `Deferred` / `GroupCommit` / `Immediate` — per-UoW persistence policy | [08-transactions](08-transactions.md), [11-durability](11-durability.md) |
 | **`EntityId`** | 64-bit ID: 52-bit monotonic key + 12-bit ArchetypeId | [06-ecs](06-ecs.md) |
 | **`EntityLink<T>`** | Typed entity reference (polymorphic over archetype hierarchy) | [06-ecs](06-ecs.md) |
