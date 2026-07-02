@@ -38,10 +38,10 @@ jobs:
       - name: Add issue to project
         env:
           GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+          ISSUE_NODE_ID: ${{ github.event.issue.node_id }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
         run: |
           # Use GraphQL to add item to the org-owned project (works for both user and org projects)
-
-          ISSUE_NODE_ID="${{ github.event.issue.node_id }}"
 
           gh api graphql -f query='
             mutation($project: ID!, $issue: ID!) {
@@ -53,7 +53,7 @@ jobs:
             }
           ' -f project="$PROJECT_ID" -f issue="$ISSUE_NODE_ID"
 
-          echo "✅ Added issue #${{ github.event.issue.number }} to Typhon dev project"
+          echo "✅ Added issue #$ISSUE_NUMBER to Typhon dev project"
 
   # Update project status when issues are closed
   update-status-on-close:
@@ -64,8 +64,9 @@ jobs:
       - name: Update status to Done
         env:
           GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+          ISSUE_NODE_ID: ${{ github.event.issue.node_id }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
         run: |
-          ISSUE_NODE_ID="${{ github.event.issue.node_id }}"
 
           # Get the project item ID for this issue
           ITEM_ID=$(gh api graphql -f query='
@@ -104,9 +105,9 @@ jobs:
               }
             ' -f project="$PROJECT_ID" -f item="$ITEM_ID" -f field="$STATUS_FIELD_ID" -f value="$STATUS_DONE"
 
-            echo "✅ Updated issue #${{ github.event.issue.number }} status to Done"
+            echo "✅ Updated issue #$ISSUE_NUMBER status to Done"
           else
-            echo "⚠️ Could not find project item for issue #${{ github.event.issue.number }}"
+            echo "⚠️ Could not find project item for issue #$ISSUE_NUMBER"
           fi
 
   # Update project status when issues are reopened
@@ -118,8 +119,9 @@ jobs:
       - name: Update status to In Progress
         env:
           GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+          ISSUE_NODE_ID: ${{ github.event.issue.node_id }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
         run: |
-          ISSUE_NODE_ID="${{ github.event.issue.node_id }}"
 
           # Get the project item ID for this issue
           ITEM_ID=$(gh api graphql -f query='
@@ -158,9 +160,9 @@ jobs:
               }
             ' -f project="$PROJECT_ID" -f item="$ITEM_ID" -f field="$STATUS_FIELD_ID" -f value="$STATUS_IN_PROGRESS"
 
-            echo "✅ Updated issue #${{ github.event.issue.number }} status to In Progress"
+            echo "✅ Updated issue #$ISSUE_NUMBER status to In Progress"
           else
-            echo "⚠️ Could not find project item for issue #${{ github.event.issue.number }}"
+            echo "⚠️ Could not find project item for issue #$ISSUE_NUMBER"
           fi
 
   # Link PRs to issues and update status
@@ -172,11 +174,13 @@ jobs:
       - name: Extract issue number and update status
         env:
           GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+          # Pass untrusted, user-controlled values through env vars — NEVER inline ${{ … }} into the shell body. A PR title
+          # like `("strict mode")` or `$(…)` inlined into `run:` is parsed/executed by bash (GitHub Actions script injection).
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BRANCH: ${{ github.event.pull_request.head.ref }}
         run: |
           # Extract issue number from PR title or branch name
           # Supports formats: "fix #123", "feature/123-name", "fix/123-name"
-          PR_TITLE="${{ github.event.pull_request.title }}"
-          PR_BRANCH="${{ github.event.pull_request.head.ref }}"
 
           # Try to extract from title first (e.g., "Fix #123: description")
           ISSUE_NUM=$(echo "$PR_TITLE" | grep -oE '#[0-9]+' | head -1 | tr -d '#' || true)
@@ -190,7 +194,7 @@ jobs:
             echo "Found linked issue: #$ISSUE_NUM"
 
             # Get issue node ID
-            ISSUE_NODE_ID=$(gh api "/repos/${{ github.repository }}/issues/$ISSUE_NUM" --jq '.node_id')
+            ISSUE_NODE_ID=$(gh api "/repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUM" --jq '.node_id')
 
             if [ -n "$ISSUE_NODE_ID" ]; then
               # Get the project item ID
@@ -246,9 +250,10 @@ jobs:
       - name: Update linked issue status
         env:
           GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+          # Untrusted, user-controlled — passed via env, never inlined into the shell body (script-injection safe).
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BRANCH: ${{ github.event.pull_request.head.ref }}
         run: |
-          PR_TITLE="${{ github.event.pull_request.title }}"
-          PR_BRANCH="${{ github.event.pull_request.head.ref }}"
 
           # Extract issue number
           ISSUE_NUM=$(echo "$PR_TITLE" | grep -oE '#[0-9]+' | head -1 | tr -d '#' || true)
@@ -260,10 +265,10 @@ jobs:
             echo "PR merged, updating issue #$ISSUE_NUM"
 
             # Close the issue
-            gh issue close $ISSUE_NUM --repo ${{ github.repository }} || true
+            gh issue close "$ISSUE_NUM" --repo "$GITHUB_REPOSITORY" || true
 
             # Get issue node ID
-            ISSUE_NODE_ID=$(gh api "/repos/${{ github.repository }}/issues/$ISSUE_NUM" --jq '.node_id')
+            ISSUE_NODE_ID=$(gh api "/repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUM" --jq '.node_id')
 
             if [ -n "$ISSUE_NODE_ID" ]; then
               # Get project item and update status to Done
