@@ -10,7 +10,7 @@ Run Typhon regression benchmarks, record results to history, and generate trend 
 
 > **Local runs are dev-only and DO NOT publish.** The public benchmark artifact
 > (`benchmark/reports/{latest.md,charts/}` + `benchmark/history/results.jsonl`) is written **only by
-> CI on the `m5d.metal` reference box** — benchmark numbers are hardware-dependent, so mixing a dev
+> CI on the `z1d.metal` reference box** — benchmark numbers are hardware-dependent, so mixing a dev
 > machine into the tracked trend would corrupt it. This skill therefore writes to the gitignored
 > scratch dir `benchmark/.local/` and never commits. To publish reference numbers, run the
 > **Benchmark** GitHub workflow (label a PR `run-benchmark`, or dispatch it). See
@@ -156,6 +156,6 @@ Read `benchmark/.local/reports/latest.md` and display a condensed summary to the
 #### Step 6: Do NOT publish
 
 Local benchmark runs are **dev-only**. The results live in the gitignored `benchmark/.local/` and
-are **never committed** — the public reference artifact is produced solely by CI on `m5d.metal`
+are **never committed** — the public reference artifact is produced solely by CI on `z1d.metal`
 (label a PR `run-benchmark`, or dispatch the **Benchmark** workflow). Do not stage or commit anything
 from this run.

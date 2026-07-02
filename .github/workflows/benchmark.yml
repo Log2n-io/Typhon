@@ -1,8 +1,8 @@
 name: Benchmark
 
-# OPT-IN, NON-blocking benchmark on the m5d.metal reference box. Never gates a merge.
+# OPT-IN, NON-blocking benchmark on the z1d.metal reference box. Never gates a merge.
 # Triggers: add the `run-benchmark` label to a PR, or run manually with a profile.
-# The reference numbers + history are published ONLY from here (m5d.metal); local /benchmark
+# The reference numbers + history are published ONLY from here (z1d.metal); local /benchmark
 # is dev-only and never commits. Design: claude/design/Infrastructure/ci-merge-gate.md
 
 on:
@@ -41,7 +41,7 @@ jobs:
       - name: Install SkyPilot
         run: python3 -m pip install --quiet "skypilot[aws]"
 
-      - name: Run benchmark on m5d.metal
+      - name: Run benchmark on z1d.metal
         run: |
           sky launch bench/aws/benchmark.sky.yaml --down -y \
             --env PROFILE="$PROFILE" \
@@ -55,14 +55,25 @@ jobs:
 
       - name: Render report on the check page
         if: always()
+        env:
+          # Branch the bot commits the charts to (below). Passed via env, never inlined into the
+          # script body, to avoid shell injection from a crafted ref name (same hygiene as #448).
+          REF: ${{ github.head_ref || github.ref_name }}
         run: |
           if [ -f bench-out/reports/latest.md ]; then
-            cat bench-out/reports/latest.md >> "$GITHUB_STEP_SUMMARY"
+            # The report's chart links are relative (`charts/foo.svg`) — correct when latest.md is
+            # viewed in the repo file browser, but broken on the Actions step summary, which has no
+            # repo-relative base. Rewrite them to absolute raw URLs pinned to the branch the charts
+            # are committed to (the end-of-run commit below has landed by the time this summary is
+            # displayed). Only the step-summary copy is rewritten; the committed latest.md keeps its
+            # relative links.
+            sed "s#](charts/#](https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${REF}/benchmark/reports/charts/#g" \
+              bench-out/reports/latest.md >> "$GITHUB_STEP_SUMMARY"
           else
             echo "_No benchmark report produced._" >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      # Publish the reference artifact: copy the m5d.metal-produced history + reports into the repo
+      # Publish the reference artifact: copy the z1d.metal-produced history + reports into the repo
       # and make ONE commit. No re-trigger loop — this workflow only fires on label/dispatch.
       - name: Commit refreshed reference report
         if: success()
@@ -78,6 +89,6 @@ jobs:
           if git diff --cached --quiet; then
             echo "No benchmark changes to commit."
           else
-            git commit -m "benchmark: record ${PROFILE} run on m5d.metal [skip ci]"
+            git commit -m "benchmark: record ${PROFILE} run on z1d.metal [skip ci]"
             git push
           fi

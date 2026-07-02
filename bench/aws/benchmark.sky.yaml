@@ -1,10 +1,15 @@
-# Benchmark task — runs Typhon.Benchmark on bare-metal m5d.metal, the PUBLIC, REPRODUCIBLE
+# Benchmark task — runs Typhon.Benchmark on bare-metal z1d.metal, the PUBLIC, REPRODUCIBLE
 # reference platform. Opt-in only (label / workflow_dispatch); NEVER a merge blocker.
 # Design: claude/design/Infrastructure/ci-merge-gate.md
 #
 # Bare metal (stable cores / real NUMA) is REQUIRED here for trustworthy numbers — unlike the
-# correctness gate, which runs on a cheap virtualized c6id. m5d.metal is a public AWS instance
+# correctness gate, which runs on a cheap virtualized c6id. z1d.metal is a public AWS instance
 # type, so anyone can launch it and reproduce the figures.
+#
+# Why z1d.metal (not m5d.metal): z1d is AWS's high-frequency box — Intel Xeon Platinum 8151 at a
+# sustained ~3.4 GHz all-core turbo (vs the 8259CL @ 2.5 GHz on m5d.metal). Most of Typhon's
+# regression suite is single-thread latency, so per-core clock dominates; 48 vCPU (24 cores × 2 SMT,
+# single socket / single NUMA) is ample for the ≤16-thread contention benchmarks.
 #
 # The VM appends the new run to its synced copy of benchmark/history/results.jsonl and regenerates
 # benchmark/reports/{latest.md,charts/}, then ships them to S3. The GitHub Actions runner pulls
@@ -16,7 +21,7 @@ name: typhon-benchmark
 
 resources:
   cloud: aws
-  instance_type: m5d.metal      # bare metal + local NVMe — the reference hardware
+  instance_type: z1d.metal      # bare metal + local NVMe, high-frequency Xeon — the reference hardware
   region: eu-west-1
 
 workdir: .

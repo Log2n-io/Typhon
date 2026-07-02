@@ -280,7 +280,7 @@ claude/
 **/BenchmarkDotNet.Artifacts*
 
 # Benchmark + coverage published reports (latest.md + charts/) are now TRACKED so they render on
-# GitHub and feed the doc-site. The benchmark public artifact is written ONLY by CI on m5d.metal
+# GitHub and feed the doc-site. The benchmark public artifact is written ONLY by CI on z1d.metal
 # (see claude/design/Infrastructure/ci-merge-gate.md); local `/benchmark` writes to the scratch
 # dir below and never publishes.
 benchmark/.local/
