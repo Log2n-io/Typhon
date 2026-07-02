@@ -1,0 +1,63 @@
+<?xml version='1.0' encoding='utf-8'?>
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="360" viewBox="0 0 720 360">
+  <rect x="0" y="0" width="720" height="360" fill="#FFFFFF" />
+  <text x="360.0" y="24.0" text-anchor="middle" font-family="&quot;Segoe UI&quot;, Arial, sans-serif" font-size="14" font-weight="bold" fill="#333333">BTreeMicroBenchmarks.Delete_Reinsert</text>
+  <line x1="80" y1="280.0" x2="690" y2="280.0" stroke="#E0E0E0" stroke-width="1" />
+  <line x1="80" y1="250.0" x2="690" y2="250.0" stroke="#E0E0E0" stroke-width="1" />
+  <line x1="80" y1="220.0" x2="690" y2="220.0" stroke="#E0E0E0" stroke-width="1" />
+  <line x1="80" y1="190.0" x2="690" y2="190.0" stroke="#E0E0E0" stroke-width="1" />
+  <line x1="80" y1="160.0" x2="690" y2="160.0" stroke="#E0E0E0" stroke-width="1" />
+  <line x1="80" y1="130.00000000000003" x2="690" y2="130.00000000000003" stroke="#E0E0E0" stroke-width="1" />
+  <line x1="80" y1="100.00000000000003" x2="690" y2="100.00000000000003" stroke="#E0E0E0" stroke-width="1" />
+  <line x1="80" y1="70.00000000000003" x2="690" y2="70.00000000000003" stroke="#E0E0E0" stroke-width="1" />
+  <line x1="80" y1="40.0" x2="690" y2="40.0" stroke="#E0E0E0" stroke-width="1" />
+  <text x="72" y="284.0" text-anchor="end" font-family="&quot;Segoe UI&quot;, Arial, sans-serif" font-size="11" fill="#666666">0.40</text>
+  <text x="72" y="254.0" text-anchor="end" font-family="&quot;Segoe UI&quot;, Arial, sans-serif" font-size="11" fill="#666666">0.50</text>
+  <text x="72" y="224.0" text-anchor="end" font-family="&quot;Segoe UI&quot;, Arial, sans-serif" font-size="11" fill="#666666">0.60</text>
+  <text x="72" y="194.0" text-anchor="end" font-family="&quot;Segoe UI&quot;, Arial, sans-serif" font-size="11" fill="#666666">0.70</text>
+  <text x="72" y="164.0" text-anchor="end" font-family="&quot;Segoe UI&quot;, Arial, sans-serif" font-size="11" fill="#666666">0.80</text>
+  <text x="72" y="134.00000000000003" text-anchor="end" font-family="&quot;Segoe UI&quot;, Arial, sans-serif" font-size="11" fill="#666666">0.90</text>
+  <text x="72" y="104.00000000000003" text-anchor="end" font-family="&quot;Segoe UI&quot;, Arial, sans-serif" font-size="11" fill="#666666">1.00</text>
+  <text x="72" y="74.00000000000003" text-anchor="end" font-family="&quot;Segoe UI&quot;, Arial, sans-serif" font-size="11" fill="#666666">1.10</text>
+  <text x="72" y="44.0" text-anchor="end" font-family="&quot;Segoe UI&quot;, Arial, sans-serif" font-size="11" fill="#666666">1.20</text>
+  <text x="72" y="32" text-anchor="end" font-family="&quot;Segoe UI&quot;, Arial, sans-serif" font-size="11" fill="#999999">(us)</text>
+  <polyline points="80.0,253.3 135.5,264.3 190.9,245.5 246.4,253.3 301.8,250.5 357.3,251.0 412.7,257.5 468.2,264.3 523.6,232.3 579.1,229.3 634.5,231.3 690.0,52.4" fill="none" stroke="#4A90D9" stroke-width="2" />
+  <line x1="80.0" y1="250.2" x2="80.0" y2="256.4" stroke="#4A90D9" stroke-width="1" stroke-opacity="0.5" />
+  <circle cx="80.0" cy="253.3" r="4" fill="#4A90D9" />
+  <line x1="135.5" y1="262.3" x2="135.5" y2="266.3" stroke="#4A90D9" stroke-width="1" stroke-opacity="0.5" />
+  <circle cx="135.5" cy="264.3" r="4" fill="#4A90D9" />
+  <line x1="190.9" y1="244.6" x2="190.9" y2="246.4" stroke="#4A90D9" stroke-width="1" stroke-opacity="0.5" />
+  <circle cx="190.9" cy="245.5" r="4" fill="#4A90D9" />
+  <line x1="246.4" y1="248.2" x2="246.4" y2="258.5" stroke="#4A90D9" stroke-width="1" stroke-opacity="0.5" />
+  <circle cx="246.4" cy="253.3" r="4" fill="#4A90D9" />
+  <line x1="301.8" y1="244.2" x2="301.8" y2="256.7" stroke="#4A90D9" stroke-width="1" stroke-opacity="0.5" />
+  <circle cx="301.8" cy="250.5" r="4" fill="#4A90D9" />
+  <line x1="357.3" y1="247.5" x2="357.3" y2="254.6" stroke="#4A90D9" stroke-width="1" stroke-opacity="0.5" />
+  <circle cx="357.3" cy="251.0" r="4" fill="#4A90D9" />
+  <line x1="412.7" y1="254.2" x2="412.7" y2="260.9" stroke="#4A90D9" stroke-width="1" stroke-opacity="0.5" />
+  <circle cx="412.7" cy="257.5" r="4" fill="#4A90D9" />
+  <line x1="468.2" y1="261.7" x2="468.2" y2="266.8" stroke="#4A90D9" stroke-width="1" stroke-opacity="0.5" />
+  <circle cx="468.2" cy="264.3" r="4" fill="#4A90D9" />
+  <line x1="523.6" y1="222.9" x2="523.6" y2="241.7" stroke="#4A90D9" stroke-width="1" stroke-opacity="0.5" />
+  <circle cx="523.6" cy="232.3" r="4" fill="#4A90D9" />
+  <line x1="579.1" y1="225.1" x2="579.1" y2="233.4" stroke="#4A90D9" stroke-width="1" stroke-opacity="0.5" />
+  <circle cx="579.1" cy="229.3" r="4" fill="#4A90D9" />
+  <line x1="634.5" y1="227.1" x2="634.5" y2="235.5" stroke="#4A90D9" stroke-width="1" stroke-opacity="0.5" />
+  <circle cx="634.5" cy="231.3" r="4" fill="#4A90D9" />
+  <line x1="690.0" y1="51.8" x2="690.0" y2="53.0" stroke="#4A90D9" stroke-width="1" stroke-opacity="0.5" />
+  <circle cx="690.0" cy="52.4" r="4" fill="#D94A4A" />
+  <text x="80.0" y="294.0" text-anchor="end" font-family="&quot;Segoe UI&quot;, Arial, sans-serif" font-size="10" fill="#666666" transform="rotate(-45, 80.0, 294.0)">3d7678e</text>
+  <text x="135.5" y="294.0" text-anchor="end" font-family="&quot;Segoe UI&quot;, Arial, sans-serif" font-size="10" fill="#666666" transform="rotate(-45, 135.5, 294.0)">28c1510</text>
+  <text x="190.9" y="294.0" text-anchor="end" font-family="&quot;Segoe UI&quot;, Arial, sans-serif" font-size="10" fill="#666666" transform="rotate(-45, 190.9, 294.0)">8f4c3fb</text>
+  <text x="246.4" y="294.0" text-anchor="end" font-family="&quot;Segoe UI&quot;, Arial, sans-serif" font-size="10" fill="#666666" transform="rotate(-45, 246.4, 294.0)">949195e</text>
+  <text x="301.8" y="294.0" text-anchor="end" font-family="&quot;Segoe UI&quot;, Arial, sans-serif" font-size="10" fill="#666666" transform="rotate(-45, 301.8, 294.0)">eaf2f3d</text>
+  <text x="357.3" y="294.0" text-anchor="end" font-family="&quot;Segoe UI&quot;, Arial, sans-serif" font-size="10" fill="#666666" transform="rotate(-45, 357.3, 294.0)">3b941bb</text>
+  <text x="412.7" y="294.0" text-anchor="end" font-family="&quot;Segoe UI&quot;, Arial, sans-serif" font-size="10" fill="#666666" transform="rotate(-45, 412.7, 294.0)">e4d8090</text>
+  <text x="468.2" y="294.0" text-anchor="end" font-family="&quot;Segoe UI&quot;, Arial, sans-serif" font-size="10" fill="#666666" transform="rotate(-45, 468.2, 294.0)">5358aa1</text>
+  <text x="523.6" y="294.0" text-anchor="end" font-family="&quot;Segoe UI&quot;, Arial, sans-serif" font-size="10" fill="#666666" transform="rotate(-45, 523.6, 294.0)">14bd129</text>
+  <text x="579.1" y="294.0" text-anchor="end" font-family="&quot;Segoe UI&quot;, Arial, sans-serif" font-size="10" fill="#666666" transform="rotate(-45, 579.1, 294.0)">4c584e1</text>
+  <text x="634.5" y="294.0" text-anchor="end" font-family="&quot;Segoe UI&quot;, Arial, sans-serif" font-size="10" fill="#666666" transform="rotate(-45, 634.5, 294.0)">4c584e1</text>
+  <text x="690.0" y="294.0" text-anchor="end" font-family="&quot;Segoe UI&quot;, Arial, sans-serif" font-size="10" fill="#666666" transform="rotate(-45, 690.0, 294.0)">cb6caaf</text>
+  <line x1="80" y1="40" x2="80" y2="280" stroke="#333333" stroke-width="1" />
+  <line x1="80" y1="280" x2="690" y2="280" stroke="#333333" stroke-width="1" />
+</svg>
