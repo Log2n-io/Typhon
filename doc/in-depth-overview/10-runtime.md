@@ -113,7 +113,7 @@ A DAG is built once at `RuntimeSchedule.Build()` time and never mutates. Each sy
 
 Once phases and explicit edges are known, the deriver walks each DAG's systems and:
 
-1. **Validates conflicts** as hard errors (W×W with no ordering, R×W plain without `ReadsFresh` / `ReadsSnapshot`, resource W×W, `ExclusivePhase` violations).
+1. **Validates conflicts** as hard errors (W×W with no ordering, R×W plain without `ReadsFresh` / `ReadsSnapshot`, resource W×W, `ExclusivePhase` violations). `ReadsSnapshot` on a non-`Versioned` component (`SingleVersion` or `Transient`) is *also* a hard `Build()`-time error — SV/Transient have no per-tick consistent snapshot to give, regardless of `DurabilityDiscipline` (rule AC-05 / CM-04).
 2. **Emits intra-phase edges**: `ReadsFresh` ⇒ writer-before-reader, `ReadsSnapshot` ⇒ reader-before-writer (snapshot is the previous-tick value, so the writer can run concurrently *after* the reader started), event producer-before-consumer, resource R/W ordering.
 3. **Emits cross-phase edges only on conflict** (post-2026-05-07 change): a phase-(N+1) system with no access conflict against a phase-N system can run concurrently with it. Phase order is still a coarse contract, but no longer an all-to-all barrier.
 

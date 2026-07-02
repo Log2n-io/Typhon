@@ -45,6 +45,8 @@ Every component declares a **storage mode** — `Versioned` (default), `SingleVe
 
 So the **commit path, MVCC conflict detection, `Rollback`, and `DurabilityMode`** sections below govern *Versioned component data*. For SV/Transient components a transaction still gives you entity-lifecycle atomicity, thread affinity, and a consistent read snapshot — but their *data* writes land immediately, can't be rolled back, and don't ride the commit-WAL. See [06-ecs §8](06-ecs.md) for the full per-mode contract.
 
+**Exception:** a `SingleVersion` component written under `DurabilityDiscipline.Commit` (an escalation from the `TickFence` default, selected per transaction) *does* get commit-scoped visibility, all-or-nothing atomicity, O(1) `Rollback`, and commit-WAL durability — without the revision chain or snapshot isolation Versioned pays for. See [06-ecs §8](06-ecs.md) ("`DurabilityDiscipline` — a second, orthogonal axis on SingleVersion").
+
 The doc walks the stack bottom-up: durability semantics (`UnitOfWork` + `DurabilityMode`), then isolation (`Transaction`, commit), then the chain and registry that back them, then deadlines and metrics.
 
 ---
