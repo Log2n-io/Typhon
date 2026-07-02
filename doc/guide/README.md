@@ -4,6 +4,8 @@ A practical, read-as-you-go guide to **building on** Typhon. It's task-oriented:
 
 > 📖 **Looking for internals?** The [in-depth overview](../in-depth-overview/README.md) is the contributor/power-user reference (struct layouts, algorithms, invariants). This guide links into it whenever you want to go deeper. Start here; go there when you need to.
 
+> 🔍 **Looking for a specific feature?** The [feature catalog](../feature-set/README.md) is the lookup reference — every feature, one page each, with usage snippets and guarantees, organized for Ctrl-F rather than read-through. This guide teaches you the shape of Typhon end-to-end; come back to the catalog once you know what you're looking for.
+
 ---
 
 ## 🐍 What Typhon is 🐍
