@@ -147,6 +147,10 @@ internal sealed class BoundsSyncSystem : QuerySystem
 }
 
 // Apply a little attrition every tick — a Versioned write, so it goes through the transaction.
+// No access declared on Position: Combat doesn't touch it, so it has no conflict with
+// MovementSystem and runs alongside it for free — no ReadsSnapshot/ReadsFresh needed (and
+// ReadsSnapshot couldn't apply here anyway: Position is SingleVersion, which has no revision
+// history to snapshot — see ch.5 §3).
 internal sealed class CombatSystem : QuerySystem
 {
     private readonly EcsView<Unit> _units;
@@ -156,7 +160,6 @@ internal sealed class CombatSystem : QuerySystem
         .Name("Combat")
         .Phase(Phase.Simulation)
         .Input(() => _units)
-        .ReadsSnapshot<Position>()
         .Writes<Health>();
 
     protected override void Execute(TickContext ctx)

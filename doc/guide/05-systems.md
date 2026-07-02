@@ -136,7 +136,9 @@ The read variants are the interesting part, because they answer *"which version 
 | `ReadsFresh<T>` | I want **this tick's** value | ordered **after** the writer (writer → me) |
 | `ReadsSnapshot<T>` | **last tick's** value is fine | ordered **before** the writer — so we can run **concurrently** |
 
-> 💡 **Why three kinds of read?** Because "do I need the freshest value?" is a real design choice with a real cost. `ReadsFresh` is correctness when you depend on this tick's write — but it serialises you behind the writer. `ReadsSnapshot` says *"yesterday's value is good enough"* — and that one word lets the engine run your reader **alongside** the writer instead of after it, which is often the difference between a tick fitting in budget and not. In our skirmish, a `CombatSystem` that decides targets from positions can `ReadsSnapshot<Position>`: acting on positions that are one tick stale is invisible at 60 Hz, and it means combat and movement run in parallel instead of in sequence.
+> 💡 **Why three kinds of read?** Because "do I need the freshest value?" is a real design choice with a real cost. `ReadsFresh` is correctness when you depend on this tick's write — but it serialises you behind the writer. `ReadsSnapshot` says *"yesterday's value is good enough"* — and that one word lets the engine run your reader **alongside** the writer instead of after it, which is often the difference between a tick fitting in budget and not. One restriction: `ReadsSnapshot<T>` only applies to a **Versioned** `T` — SingleVersion and Transient have no revision history to hand out a stale-but-consistent copy of, and the engine rejects the declaration at `Build()` time if you try (rule CM-04 / `runtime-scheduling.md` AC-05).
+>
+> Our skirmish's `Position` is SingleVersion ([ch.2](02-modeling.md)), so a system can't `ReadsSnapshot<Position>` — it would need `ReadsFresh<Position>` instead (correct, but serialised behind `MovementSystem`) or Position would need to be Versioned. `CombatSystem` sidesteps the question entirely: it doesn't touch `Position` at all, so it has **no declared conflict** with `MovementSystem` and runs alongside it for free, no snapshot needed.
 
 ```csharp
 internal sealed class CombatSystem : QuerySystem
@@ -148,16 +150,14 @@ internal sealed class CombatSystem : QuerySystem
         .Name("Combat")
         .Phase(Phase.Simulation)
         .Input(() => _units)
-        .ReadsSnapshot<Position>()        // last tick's positions — runs alongside Movement
         .Writes<Health>();                // Versioned write → transactional (see §5)
 
     protected override void Execute(TickContext ctx)
     {
         foreach (EntityId id in ctx.Entities)
         {
-            // … find an enemy in range using last-tick positions, then:
-            var e = ctx.Transaction.OpenMut(id);
-            e.Write(Unit.Health).Current -= 10;   // Versioned → goes through the transaction
+            ref var hp = ref ctx.Transaction.OpenMut(id).Write(Unit.Health);
+            if (hp.Current > 0) hp.Current -= 1;   // Versioned → goes through the transaction
         }
     }
 }

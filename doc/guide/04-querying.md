@@ -17,6 +17,8 @@ Everything starts from `tx.Query<TArchetype>()`.
 
 ### Which entities — by component shape
 
+> `Shield`/`Stunned`/`Weapon` below are illustrative — they aren't part of the running `doc/guide/example` model (which only has `Position`/`Bounds`/`Health`/`Velocity`/`Team`). The methods themselves are real and verified against source; this snippet just isn't one you can run as-is.
+
 ```csharp
 tx.Query<Unit>()
   .With<Shield>()        // only units that also have a Shield component
@@ -74,14 +76,14 @@ HashSet<EntityId> ids = q.Execute();   // materialise all matches
 int n               = q.Count();       // just how many
 bool any            = q.Any();         // does at least one match?
 
-foreach (EntityId id in q)             // stream them, no set allocation
+foreach (EntityId id in q)             // iterate matches without a HashSet
 {
     var hp = tx.Open(id).Read(Unit.Health);
     // …react to each match…
 }
 ```
 
-`Execute` is the workhorse; `Count`/`Any` short-circuit when you don't need the entities; the `foreach` form streams without building a `HashSet`.
+`Execute` is the workhorse; `Count`/`Any` short-circuit when you don't need the entities; the `foreach` form iterates its own pre-collected match list instead of building a `HashSet` — cheaper than `Execute`, but not fully allocation-free streaming.
 
 > 💡 **Know which scan you triggered.** `Execute` picks one of three paths automatically: a **targeted** scan when you used `WhereField` (index-driven), a **spatial** scan when you used a spatial predicate (spatial-index-driven), or a **broad** scan otherwise (walk the archetype, apply any `Where` predicate per entity). The takeaway for cost: a `WhereField`/spatial query stays cheap as the archetype grows; a pure-`Where` query is linear in archetype size. Both are correct — choose with your data sizes in mind.
 

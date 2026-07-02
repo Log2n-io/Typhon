@@ -151,21 +151,21 @@ Typhon/
 │   ├── Typhon.Shell/               # Interactive database shell (tsh)
 │   └── Typhon.Shell.Extensibility/ # Shell extension points
 ├── test/
-│   ├── Typhon.Engine.Tests/        # NUnit test suite (3500+ tests)
-│   ├── Typhon.Client.Tests/        # Client SDK tests
-│   ├── Typhon.Workbench.Tests/     # Workbench server-side tests
-│   ├── Typhon.Benchmark/           # BenchmarkDotNet performance tests
-│   ├── Typhon.ARPG.Schema/         # Example ARPG game schema
-│   ├── Typhon.ARPG.Shell/          # Shell demo with ARPG data
-│   ├── Typhon.MonitoringDemo/      # Observability demo
-│   ├── Typhon.IOProfileRunner/     # Storage I/O profiling sandbox
-│   ├── Typhon.Scheduler.POC/       # DagScheduler POC harness
-│   ├── Typhon.SqliteBenchmark/     # Comparative SQLite benchmark
-│   └── AntHill/                    # Godot-based ant-colony demo (runtime + clusters + spatial tiers)
+│   ├── Typhon.Engine.Tests/         # NUnit test suite (3500+ tests)
+│   ├── Typhon.Analyzers.Tests/      # Roslyn analyzer tests
+│   ├── Typhon.Client.Tests/         # Client SDK tests
+│   ├── Typhon.Workbench.Tests/      # Workbench server-side tests
+│   ├── Typhon.Benchmark/            # BenchmarkDotNet performance tests
+│   ├── Typhon.CompetitiveBenchmark/ # Comparative benchmark vs SQLite/RocksDB/LMDB/FASTER
+│   ├── Typhon.ARPG.Schema/          # Example ARPG game schema
+│   ├── Typhon.ARPG.Shell/           # Shell demo with ARPG data
+│   ├── Typhon.MonitoringDemo/       # Observability demo
+│   └── Typhon.IOProfileRunner/      # Storage I/O profiling sandbox
 ├── tools/
 │   ├── Typhon.Workbench/           # Local dev UI (ASP.NET Core 10 + React 19/Vite) — data browsing, schema, profiler, System DAG, Data Flow timeline, Access Matrix
-│   ├── Typhon.Workbench.Fixtures/  # Dev-only test fixture generators consumed by the Workbench DEBUG tabs
-│   └── CheckDurations/             # Helper utility for tick-duration analysis
+│   └── Typhon.Workbench.Fixtures/  # Dev-only test fixture generators consumed by the Workbench DEBUG tabs
+├── demo/
+│   └── AntHill/                    # Godot-based ant-colony demo (runtime + clusters + spatial tiers)
 ├── claude/                         # Architecture docs, ADRs, design specs (separate nested git repo)
 └── benchmark/                      # Benchmark results
 ```

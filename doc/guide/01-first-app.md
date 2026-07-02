@@ -15,29 +15,6 @@ using Microsoft.Extensions.DependencyInjection;
 using Typhon.Engine;            // DatabaseEngine, EntityId, transactions, queries
 using Typhon.Schema.Definition; // [Component], [Archetype], Comp<T>
 
-// ── 1. Declare components (plain structs) ──────────────────────────────
-[Component("Skirmish.Position", 1, StorageMode = StorageMode.Versioned)]
-public struct Position
-{
-    public float X, Y;
-    public Position(float x, float y) { X = x; Y = y; }
-}
-
-[Component("Skirmish.Health", 1, StorageMode = StorageMode.Versioned)]
-public struct Health
-{
-    public int Current, Max;
-    public Health(int current, int max) { Current = current; Max = max; }
-}
-
-// ── 2. Declare an archetype (the shape of an entity) ───────────────────
-[Archetype(1)]
-public sealed partial class Unit : Archetype<Unit>
-{
-    public static readonly Comp<Position> Position = Register<Position>();
-    public static readonly Comp<Health>   Health   = Register<Health>();
-}
-
 // ── 3. Build the engine (once, at startup) ─────────────────────────────
 var services = new ServiceCollection()
     .AddLogging()
@@ -88,6 +65,32 @@ using (var tx = dbe.CreateQuickTransaction())
                     .Where<Health>(h => h.Current < h.Max)
                     .Execute();
     Console.WriteLine($"{wounded.Count} wounded unit(s)");
+}
+
+// ── 1. Declare components (plain structs) ──────────────────────────────
+// C# requires top-level statements to precede type declarations in the same
+// file, so the types come last here. In a real project you'd likely split
+// them into a second file instead — see doc/guide/example/Model.cs.
+[Component("Skirmish.Position", 1, StorageMode = StorageMode.Versioned)]
+public struct Position
+{
+    public float X, Y;
+    public Position(float x, float y) { X = x; Y = y; }
+}
+
+[Component("Skirmish.Health", 1, StorageMode = StorageMode.Versioned)]
+public struct Health
+{
+    public int Current, Max;
+    public Health(int current, int max) { Current = current; Max = max; }
+}
+
+// ── 2. Declare an archetype (the shape of an entity) ───────────────────
+[Archetype(1)]
+public sealed partial class Unit : Archetype<Unit>
+{
+    public static readonly Comp<Position> Position = Register<Position>();
+    public static readonly Comp<Health>   Health   = Register<Health>();
 }
 ```
 

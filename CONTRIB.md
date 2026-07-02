@@ -56,9 +56,9 @@ The goal is to create a system where:
 │        ▼                   ▼                   ▼                   ▼        │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
 │  │                    GITHUB PROJECT (Source of Truth)                 │    │
-│  │  ┌─────────┐  ┌──────────┐  ┌────────────┐  ┌─────────┐  ┌───────┐  │    │
-│  │  │ Backlog │─►│ Research │─►│ Ready/Todo │─►│In Prog. │─►│ Done  │  │    │
-│  │  └─────────┘  └──────────┘  └────────────┘  └─────────┘  └───────┘  │    │
+│  ┌─────────┐        ┌──────────────┐        ┌─────────┐                │    │
+│  │  Todo   │───────►│ In Progress  │───────►│  Done   │                │    │
+│  └─────────┘        └──────────────┘        └─────────┘                │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │        │                                                       │            │
 │        ▼                                                       ▼            │
@@ -75,6 +75,8 @@ The goal is to create a system where:
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
+
+> 📌 **The Status field is now 3-state** (`Todo` / `In Progress` / `Done`), simplified from an earlier 6-state field (`Backlog`/`Research`/`Ready`/`In Progress`/`Review`/`Done`) as part of the org migration to `log2n-io`. Ideation, research, and design all sit at `Todo` — what stage a `Todo` item is actually at is tracked by which `claude/` doc (if any) it links to, not by a distinct Status value. The Lifecycle Stages section below reflects this.
 
 ### Core Principles
 
@@ -135,7 +137,7 @@ gh release create v0.1.0 --title "v0.1.0 - Telemetry Foundation" --generate-note
 When linking to `claude/` docs in GitHub issues, use the `main` branch:
 
 ```markdown
-[Design Doc](https://github.com/nockawa/Typhon/blob/main/claude/design/FeatureName.md)
+[Design Doc](https://github.com/log2n-io/Typhon/blob/main/claude/design/FeatureName.md)
 ```
 
 ---
@@ -149,7 +151,7 @@ When linking to `claude/` docs in GitHub issues, use the `main` branch:
 | Artifact | Location | Required Fields |
 |----------|----------|-----------------|
 | Idea doc | `claude/ideas/[category]/Name.md` | Date, Status, The Idea, Why It Matters |
-| GitHub Issue | Optional (if worth tracking) | Label: `idea`, Status: `Backlog` |
+| GitHub Issue | Optional (if worth tracking) | Label: `idea`, Status: `Todo` |
 
 **Claude's Role:**
 - Prompt: "Should I capture this as an idea doc?"
@@ -170,7 +172,7 @@ When linking to `claude/` docs in GitHub issues, use the `main` branch:
 | Artifact | Location | Required Fields |
 |----------|----------|-----------------|
 | Research doc | `claude/research/[category]/Name.md` | Context, Questions, Options, Recommendation |
-| GitHub Issue | Required | Label: `research`, Status: `Research` |
+| GitHub Issue | Required | Label: `research`, Status: `Todo` |
 | Linked ADRs | `claude/adr/` | Created when key decisions are made |
 
 **Claude's Role:**
@@ -193,7 +195,7 @@ When linking to `claude/` docs in GitHub issues, use the `main` branch:
 | Artifact | Location | Required Fields |
 |----------|----------|-----------------|
 | Design doc | `claude/design/[category]/Name.md` | Summary, Goals, Non-Goals, Design, Testing Strategy |
-| GitHub Issue | Required | Label: `enhancement`/`bug`, Status: `Ready` |
+| GitHub Issue | Required | Label: `enhancement`/`bug`, Status: `Todo` |
 | Branch | `feature/xxx` or `fix/xxx` | Created when work begins |
 
 **Claude's Role:**
@@ -252,8 +254,7 @@ When linking to `claude/` docs in GitHub issues, use the `main` branch:
 **Example Claude Code Prompts:**
 ```
 "/complete-task 42"  ← closes issue, archives design, updates docs
-"/weekly-review"  ← see what was completed this week
-"/mountain-view"  ← how much work remains overall
+"What got done this week, and what's stale?"  ← /weekly-review was never implemented; ask Claude directly
 "Create an ADR for the decision to use circular buffers for revision chains"
 ```
 
@@ -356,7 +357,7 @@ Both approaches end in the same state: issue In Progress, branch created, Rider 
 1. **Review GitHub Project** — Status fields accurate? Stale items? Anything stuck?
 2. **Check `ideas/`** — Anything to promote or archive?
 3. **Check `research/`** — Any stale research?
-4. **Ask Claude:** `/weekly-review` for a full status summary
+4. **Ask Claude** to walk the project board and `ideas/`/`research/` for stale items — `/weekly-review` (below) was never implemented as a dedicated skill
 
 ---
 
@@ -481,48 +482,6 @@ Actions:
 6. Report summary
 ```
 
-### Skill: `/weekly-review` — Generate Weekly Summary
-
-```markdown
----
-name: weekly-review
-description: Generate weekly development summary
----
-
-Analyzes:
-- Git commits this week
-- Issues closed/opened
-- Docs created/modified
-- Project board changes
-
-Output:
-- Progress summary
-- Stale items warning
-- Suggested cleanups
-- Phase alignment check
-```
-
-### Skill: `/mountain-view` — How Big Is the Mountain?
-
-```markdown
----
-name: mountain-view
-description: Show the full scope of remaining work
----
-
-Aggregates:
-- Backlog items with estimates
-- In-progress work
-- Research items pending
-- Ideas worth exploring
-
-Output:
-- Total estimated effort remaining
-- Breakdown by Area
-- Breakdown by Priority
-- Risk areas (large items, stale items)
-```
-
 ### Hook: Post-Commit Analysis
 
 ```yaml
@@ -567,7 +526,7 @@ jobs:
     steps:
       - name: Add new issues to project
         if: github.event_name == 'issues' && github.event.action == 'opened'
-        run: gh project item-add 7 --owner nockawa --url ${{ github.event.issue.html_url }}
+        run: gh project item-add 1 --owner Log2n-io --url ${{ github.event.issue.html_url }}
 
       - name: Move to Done on close
         if: github.event_name == 'issues' && github.event.action == 'closed'
@@ -619,8 +578,8 @@ jobs:
 
 | Field | Type | Values | Purpose |
 |-------|------|--------|---------|
-| Status | Single-select | Backlog, Research, Ready, In Progress, Review, Done | Workflow stage |
-| Area | Single-select | Database, MVCC, Transactions, Indexes, Schema, Storage, Memory, Concurrency, Primitives | Subsystem |
+| Status | Single-select | Todo, In Progress, Done | Workflow stage |
+| Area | Single-select | Database, MVCC, Transactions, Indexes, Schema, Storage, Memory, Concurrency, Primitives, Observability, Execution, Errors, Workbench | Subsystem |
 | Estimate | Single-select | XS, S, M, L, XL | Effort sizing |
 | Priority | Single-select | P0, P1, P2, P3 | Urgency |
 | Target | Date | Target dates | Roadmap positioning |
@@ -637,7 +596,7 @@ Rider's built-in Task Management connects directly to GitHub Issues and provides
 
 | Setting | Value |
 |---------|-------|
-| Server URL | `https://github.com/nockawa/Typhon` |
+| Server URL | `https://github.com/log2n-io/Typhon` |
 | API Token | Personal access token with `repo` scope |
 | Search query | `assignee:nockawa state:open` |
 
@@ -674,7 +633,7 @@ This produces commit messages like `#42: Query engine foundation`, automatically
 | Setting | Value |
 |---------|-------|
 | Pattern | `#(\d+)` |
-| Link URL | `https://github.com/nockawa/Typhon/issues/$1` |
+| Link URL | `https://github.com/log2n-io/Typhon/issues/$1` |
 
 This makes `#42` references in code comments, commit messages, and changelogs clickable — jumping straight to the GitHub issue.
 
@@ -791,38 +750,6 @@ Claude: "Excellent! Let me wrap this up:
   [If yes to 2]: What was the key decision?"
 ```
 
-### Weekly Review
-
-```
-Developer: "/weekly-review"
-
-Claude: "📊 Week of Jan 20-25, 2026
-
-COMPLETED:
-  - #42 Query Engine foundation
-  - #45 AccessControl telemetry
-
-IN PROGRESS:
-  - #47 PagedMMF telemetry (3 days active)
-
-OPENED:
-  - #50 Query Caching research
-
-⚠️ ATTENTION:
-  - ideas/AsyncCheckpoint.md hasn't been touched in 45 days
-  - research/PersistentViews.md concluded but no design doc yet
-
-📈 MOUNTAIN VIEW:
-  - Backlog: 15 items (~6-8 weeks estimated)
-  - Current phase: 60% complete
-  - Largest items: Query System (XL), WAL (L)
-
-SUGGESTED ACTIONS:
-  1. Archive or promote AsyncCheckpoint idea
-  2. Create design doc for PersistentViews or park it
-  3. Break down Query System into smaller issues"
-```
-
 ---
 
 ## Decisions Made
@@ -832,7 +759,7 @@ These questions were resolved during implementation:
 1. **Iterations/Sprints:** → **Continuous flow** (not sprints)
 2. **Milestones:** → **Phases** via project field (Telemetry, Query, WAL, Reliability, Infrastructure)
 3. **Sub-issues:** → **Yes**, use sub-issues under Phase parent issues
-4. **Notifications:** → Deferred for now (manual `/weekly-review` provides stale detection)
+4. **Notifications:** → Deferred for now (`/weekly-review` was never implemented — stale-item detection is manual today)
 
 ---
 
@@ -841,29 +768,35 @@ These questions were resolved during implementation:
 The following has been implemented:
 
 ### GitHub Project Fields
-- Status: Backlog → Research → Ready → In Progress → Review → Done
+- Status: Todo → In Progress → Done
 - Priority: P0-Critical, P1-High, P2-Medium, P3-Low
 - Phase: Telemetry, Query, WAL, Reliability, Infrastructure
-- Area: Database, MVCC, Transactions, Indexes, Schema, Storage, Memory, Concurrency, Primitives
+- Area: Database, MVCC, Transactions, Indexes, Schema, Storage, Memory, Concurrency, Primitives, Observability, Execution, Errors, Workbench
 - Estimate: XS, S, M, L, XL
 - Target: (date field for Roadmap view)
 
 ### Claude Code Skills
 - `/dev-status` — Show current development status
+- `/start-research #XX` — Start research on an issue
+- `/start-design #XX` — Start design for an issue
 - `/start-task #XX` — Begin work on an issue
 - `/start-subtask #XX` — Start a sub-issue (update status, validate dependencies, update design doc)
 - `/complete-subtask #XX` — Complete a sub-issue (close, check parent checkbox, update design doc)
 - `/complete-task #XX` — Finish work, update artifacts
 - `/create-issue` — Create new issue with all fields
-- `/weekly-review` — Weekly progress summary
-- `/mountain-view` — Full backlog analysis
+- `/implement-feature` — Implement a GitHub issue end-to-end (plan → build → test → review)
+- `/new-panel` — Scaffold a new Workbench panel
+- `/benchmark` — Benchmark regression tracking
+- `/coverage` — Code coverage analysis and trend reports
+- `/profile` — Profile a benchmark workload with dotTrace
+- `/wb-dev` — Start/stop/status the Workbench dev servers
 
 ### Rider Configuration
-- **Task Server:** GitHub → `nockawa/Typhon`, filter: `assignee:nockawa state:open`
+- **Task Server:** GitHub → `log2n-io/Typhon`, filter: `assignee:nockawa state:open`
 - **Changelist name:** `${id} ${summary}`
 - **Branch template:** `feature/${id}-${summary}` (lowercased)
 - **Commit message:** `#${id}: ${summary}` (per-server → Commit Message tab)
-- **Issue navigation:** `#(\d+)` → `https://github.com/nockawa/Typhon/issues/$1`
+- **Issue navigation:** `#(\d+)` → `https://github.com/log2n-io/Typhon/issues/$1`
 
 ### GitHub Actions
 - `.github/workflows/project-sync.yml` — Auto-add issues, sync status on close/merge
@@ -872,7 +805,7 @@ The following has been implemented:
 
 ## References
 
-- [claude/README.md](claude/README.md) — Document lifecycle system
+- [claude/CLAUDE.md](claude/CLAUDE.md) — Document lifecycle system
 - [.claude/skills/](.claude/skills/) — Claude Code skills
-- [GitHub Project](https://github.com/users/nockawa/projects/7) — Source of truth for work tracking
+- [GitHub Project](https://github.com/orgs/Log2n-io/projects/1) — Source of truth for work tracking
 - [GitHub Projects Best Practices](https://docs.github.com/en/issues/planning-and-tracking-with-projects/learning-about-projects/best-practices-for-projects)

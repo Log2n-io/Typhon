@@ -42,7 +42,7 @@ public sealed partial class Hero : Archetype<Hero, Unit>   // Hero = Unit's comp
 }
 ```
 
-A `Hero` *is-a* `Unit` for typed references: `EntityLink<Unit>` accepts a `Hero`. Use `EntityLink<T>` to point one entity at another with compile-time safety:
+A `Hero` *is-a* `Unit` for typed references: `EntityLink<Unit>` accepts a `Hero`. Use `EntityLink<T>` to point one entity at another — a typed, self-documenting reference. One caveat: `T` is a contract, not an enforced guarantee — the implicit conversion from `EntityId` accepts *any* entity, with no compile-time or runtime check that it's actually a `T` (or descendant).
 
 ```csharp
 [Component("Skirmish.Target", 1)]
@@ -172,7 +172,7 @@ var nearby = tx.Query<Unit>()
                .Execute();
 ```
 
-> ⚠️ **A rule the engine enforces.** A `[SpatialIndex]` field is mutated through the `WriteSpatial` **barrier**, not a plain assignment (an analyzer flags the plain write). So a system that moves entities mirrors each point into its box:
+> ⚠️ **A convention the analyzer flags, not a runtime-enforced rule.** A `[SpatialIndex]` field should be mutated through the `WriteSpatial` **barrier**, not a plain assignment — `ClusterRef.GetSpan<T>`/`Get<T>` calls that touch a spatial-indexed component get a build-time `TYPHON009` **warning** (not an error, and it doesn't guard `EntityRef.Write` at all — nothing stops a plain write from compiling or running, it just silently skips the spatial-index refresh). To get the warning, reference `Typhon.Analyzers.csproj` as an analyzer too — the same `OutputItemType="Analyzer"` pattern as the generator reference earlier in this chapter — without it the plain write compiles silently and the index goes stale. So a system that moves entities mirrors each point into its box:
 >
 > ```csharp
 > cluster.WriteSpatial(Unit.Bounds, slot, new Bounds { Box = new AABB2F { MinX = x, MaxX = x, MinY = y, MaxY = y } });
