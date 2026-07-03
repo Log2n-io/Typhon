@@ -660,6 +660,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         EpochManager = epochManager;
         Watchdog = watchdog;
         _logger = log;
+        // Register a process-wide sink for the always-on spatial DFS-overflow warning (#422, Tier-0). First non-null wins;
+        // the counter records regardless, so this only enables the human-readable warning.
+        SpatialRTreeDiagnostics.DiagnosticsLogger ??= log;
         _options = options;
         _injectedWalIo = injectedWalIo;
         MemoryAllocator = memoryAllocator;

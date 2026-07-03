@@ -10,7 +10,7 @@ Run Typhon regression benchmarks, record results to history, and generate trend 
 
 > **Local runs are dev-only and DO NOT publish.** The public benchmark artifact
 > (`benchmark/reports/{latest.md,charts/}` + `benchmark/history/results.jsonl`) is written **only by
-> CI on the `m5d.metal` reference box** — benchmark numbers are hardware-dependent, so mixing a dev
+> CI on the `z1d.metal` reference box** — benchmark numbers are hardware-dependent, so mixing a dev
 > machine into the tracked trend would corrupt it. This skill therefore writes to the gitignored
 > scratch dir `benchmark/.local/` and never commits. To publish reference numbers, run the
 > **Benchmark** GitHub workflow (label a PR `run-benchmark`, or dispatch it). See
@@ -135,6 +135,12 @@ rm -rf test/Typhon.Benchmark/BenchmarkDotNet.Artifacts/results
 cd test/Typhon.Benchmark && dotnet run -c Release --no-build -- --allCategories Regression --exporters json
 ```
 
+> **Note — do NOT add `--iterationTime`/`--warmupCount` here.** A 2026-07-03 A/B/C proved global BDN mutators are not
+> fidelity-safe for this suite: `--iterationTime 250` turned 16 previously-stable benchmarks noisy (e.g. `Eviction_17Chunks`
+> 0.9%→11.9% CoV, `VersionedWriteCommit` 2%→27%) because the wall-time lives in the µs/ms benchmarks that *need* the full
+> measurement window; `--warmupCount 2` saved only ~2% for real damage. `[MemoryDiagnoser]` stays (GC is a tracked signal).
+> The fidelity-safe way to cut time is trimming param grids (coverage), not shortening measurement.
+
 **IMPORTANT:** This step can take up to ~12 minutes, which exceeds the Bash tool's 10-minute max timeout. Run this command **in the background** (`run_in_background: true`) and poll with `TaskOutput` (use `block: true, timeout: 600000`). Let the user know benchmarks are running before starting the background task.
 
 #### Step 4: Generate Report
@@ -156,6 +162,6 @@ Read `benchmark/.local/reports/latest.md` and display a condensed summary to the
 #### Step 6: Do NOT publish
 
 Local benchmark runs are **dev-only**. The results live in the gitignored `benchmark/.local/` and
-are **never committed** — the public reference artifact is produced solely by CI on `m5d.metal`
+are **never committed** — the public reference artifact is produced solely by CI on `z1d.metal`
 (label a PR `run-benchmark`, or dispatch the **Benchmark** workflow). Do not stage or commit anything
 from this run.

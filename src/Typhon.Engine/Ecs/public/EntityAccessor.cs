@@ -3,7 +3,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using JetBrains.Annotations;
 using Typhon.Schema.Definition;
@@ -36,9 +35,9 @@ public partial class EntityAccessor : IDisposable
     internal DatabaseEngine DBE => _dbe;
     private protected EpochManager _epochManager;
 
-#if DEBUG
-    private protected int _debugOwningThreadId;
-#endif
+    // Thread that created this accessor. Promoted out of #if DEBUG (#422) so the strict-mode thread-affinity check compiles
+    // always-on. The check itself is gated by CheckConfig.Enabled, so this 4-byte field is the only unconditional cost.
+    private protected int _owningThreadId;
 
     private protected Dictionary<Type, ComponentInfo> _componentInfos;
 
@@ -107,23 +106,24 @@ public partial class EntityAccessor : IDisposable
         // Runtime integration (#211) will add proper per-worker epoch cleanup hooks.
         _ = _epochManager.EnterScope();
         _isDisposed = false;
-#if DEBUG
-        _debugOwningThreadId = Environment.CurrentManagedThreadId;
-#endif
+        _owningThreadId = Environment.CurrentManagedThreadId;
         _entityOperationCount = 0;
         _changeSet = _dbe.MMF.CreateChangeSet();
         TSN = tsn;
     }
 
-    [Conditional("DEBUG")]
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private protected void AssertThreadAffinity()
     {
-#if DEBUG
-        Debug.Assert(
-            _debugOwningThreadId == Environment.CurrentManagedThreadId,
-            "EntityAccessor thread affinity violation: current thread differs from the creating thread. " +
-            "Each EntityAccessor instance must be used only from its creating thread.");
-#endif
+        // Inline-guard form (not CheckConfig.Require): short-circuits on the JIT-folded gate BEFORE reading Environment.CurrentManagedThreadId, so the per-op
+        // TLS read is skipped entirely when strict mode is off (the whole body folds away — CheckConfig.Enabled is a static readonly). A throw is safe
+        // here — a call-boundary check, never reached while holding an OLC latch.
+        if (CheckConfig.Enabled && _owningThreadId != Environment.CurrentManagedThreadId)
+        {
+            ThrowHelper.ThrowInvalidOp(
+                "EntityAccessor thread affinity violation: current thread differs from the creating thread. " +
+                "Each EntityAccessor instance must be used only from its creating thread.");
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -332,9 +332,7 @@ public partial class EntityAccessor : IDisposable
     {
         _dbe = null;
         _epochManager = null;
-#if DEBUG
-        _debugOwningThreadId = 0;
-#endif
+        _owningThreadId = 0;
         if (_hasEntityMapCache)
         {
             _entityMapCacheAccessor.Dispose();

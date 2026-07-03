@@ -82,10 +82,11 @@ public class SystemAccessValidatorTests
         }
     }
 
-#if DEBUG
     [Test]
-    public void AssertWrite_Undeclared_ThrowsInDebug()
+    public void AssertWrite_Undeclared_ThrowsUnderDeclaredAccess()
     {
+        Assume.That(CheckConfig.DeclaredAccessActive, Is.True,
+            "Requires strict-mode declared-access (typhon.telemetry.json Checks:DeclaredAccess=true); AssertWrite is no-op otherwise (#422).");
         var d = new SystemAccessDescriptor();
         d.Writes.Add(typeof(CompA)); // CompA declared, CompB NOT declared
         SystemAccessValidator.EnterSystem(d, "DriftySystem");
@@ -104,7 +105,6 @@ public class SystemAccessValidatorTests
             SystemAccessValidator.LeaveSystem();
         }
     }
-#endif
 
     // ─── Push/pop semantics ───────────────────────────────────────────
 
@@ -240,10 +240,11 @@ public class SystemAccessValidatorTests
         Assert.That(observed, Is.True);
     }
 
-#if DEBUG
     [Test]
-    public void DispatchedSystem_AssertWriteForUndeclaredType_ThrowsInDebug()
+    public void DispatchedSystem_AssertWriteForUndeclaredType_ThrowsUnderDeclaredAccess()
     {
+        Assume.That(CheckConfig.DeclaredAccessActive, Is.True,
+            "Requires strict-mode declared-access (typhon.telemetry.json Checks:DeclaredAccess=true); AssertWrite is no-op otherwise (#422).");
         Exception captured = null;
         var sys = new CapturingSystem
         {
@@ -276,7 +277,6 @@ public class SystemAccessValidatorTests
         Assert.That(iae.SystemName, Is.EqualTo("BSys"));
         Assert.That(iae.UndeclaredType, Is.EqualTo(typeof(CompB)));
     }
-#endif
 
     [Test]
     public void DispatchedSystem_AfterExecution_ContextIsCleared()

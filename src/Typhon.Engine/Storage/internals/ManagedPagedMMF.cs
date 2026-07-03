@@ -580,7 +580,10 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
         var segment = new LogicalSegment<PersistentStore>(new PersistentStore(this));
         if (!dic.TryAdd(pages[0], segment))
         {
-            Debug.Fail("Segment root page already registered in dictionary — duplicate allocation");
+            // Tier-0 always-on guard (#422): the predicate already runs in Release; a duplicate segment-root means the page
+            // allocator/free-list handed out a page still owned by another segment — allocator corruption. Fail-fast instead
+            // of silently continuing (Debug.Fail was compiled out of Release, so the old code fell through into the corruption).
+            ThrowHelper.ThrowCorruption("ManagedPagedMMF", pages[0], "Segment root page already registered — duplicate allocation");
         }
 
         if (!segment.Create(type, kind, pages, false, changeSet))
@@ -632,7 +635,8 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
         var segment = new ChunkBasedSegment<PersistentStore>(EpochManager, new PersistentStore(this), stride);
         if (!dic.TryAdd(pages[0], segment))
         {
-            Debug.Fail("Segment root page already registered in dictionary — duplicate allocation");
+            // Tier-0 always-on guard (#422): duplicate chunk-segment root = allocator corruption; fail-fast (see AllocateSegment).
+            ThrowHelper.ThrowCorruption("ManagedPagedMMF", pages[0], "Segment root page already registered — duplicate allocation");
         }
 
         if (!segment.Create(type, kind, pages, false, changeSet))
@@ -655,7 +659,8 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
         var segment = new ChunkBasedSegment<PersistentStore>(EpochManager, new PersistentStore(this), stride);
         if (dic.TryAdd(filePageIndex, segment) == false)
         {
-            Debug.Fail("Segment root page already registered in dictionary — duplicate allocation");
+            // Tier-0 always-on guard (#422): duplicate root page on load = on-disk directory / allocator corruption; fail-fast.
+            ThrowHelper.ThrowCorruption("ManagedPagedMMF", filePageIndex, "Segment root page already registered — duplicate allocation");
         }
 
         ResolveDirectoryPairsForLoad(filePageIndex);   // CK-05 (C2): register directory-page slot state before the load walks them

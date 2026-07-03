@@ -1,8 +1,8 @@
 name: Benchmark
 
-# OPT-IN, NON-blocking benchmark on the m5d.metal reference box. Never gates a merge.
+# OPT-IN, NON-blocking benchmark on the z1d.metal reference box. Never gates a merge.
 # Triggers: add the `run-benchmark` label to a PR, or run manually with a profile.
-# The reference numbers + history are published ONLY from here (m5d.metal); local /benchmark
+# The reference numbers + history are published ONLY from here (z1d.metal); local /benchmark
 # is dev-only and never commits. Design: claude/design/Infrastructure/ci-merge-gate.md
 
 on:
@@ -16,9 +16,11 @@ on:
   pull_request:
     types: [labeled]            # fires once when the `run-benchmark` label is added
 
-# Needs write access to push the single history+report commit back to the PR branch.
+# contents: write — push the single history+report commit back to the PR branch.
+# pull-requests: write — post/update the sticky report-link comment on the PR.
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   benchmark:
@@ -41,7 +43,7 @@ jobs:
       - name: Install SkyPilot
         run: python3 -m pip install --quiet "skypilot[aws]"
 
-      - name: Run benchmark on m5d.metal
+      - name: Run benchmark on z1d.metal
         run: |
           sky launch bench/aws/benchmark.sky.yaml --down -y \
             --env PROFILE="$PROFILE" \
@@ -53,17 +55,9 @@ jobs:
           mkdir -p bench-out
           aws s3 sync "s3://typhon-traces/benchmark/${{ github.run_id }}/" bench-out/ || true
 
-      - name: Render report on the check page
-        if: always()
-        run: |
-          if [ -f bench-out/reports/latest.md ]; then
-            cat bench-out/reports/latest.md >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "_No benchmark report produced._" >> "$GITHUB_STEP_SUMMARY"
-          fi
-
-      # Publish the reference artifact: copy the m5d.metal-produced history + reports into the repo
-      # and make ONE commit. No re-trigger loop — this workflow only fires on label/dispatch.
+      # Publish the reference artifact FIRST — BEFORE rendering the step summary — so the summary can
+      # pin its chart links to the just-pushed commit SHA (no race). Makes ONE commit; no re-trigger
+      # loop (this workflow only fires on label/dispatch).
       - name: Commit refreshed reference report
         if: success()
         run: |
@@ -78,6 +72,74 @@ jobs:
           if git diff --cached --quiet; then
             echo "No benchmark changes to commit."
           else
-            git commit -m "benchmark: record ${PROFILE} run on m5d.metal [skip ci]"
+            git commit -m "benchmark: record ${PROFILE} run on z1d.metal [skip ci]"
             git push
           fi
+
+      - name: Render report on the check page
+        if: always()
+        run: |
+          if [ -f bench-out/reports/latest.md ]; then
+            # The report's chart links are relative (`charts/foo.svg`) — correct in the repo file browser,
+            # but broken on the Actions step summary, which has no repo-relative base. Rewrite them to
+            # absolute raw URLs pinned to the CURRENT commit SHA. The Commit step above already pushed the
+            # fresh charts at this SHA (on success), so the link is immutable and never races the push — a
+            # branch-ref link (the previous approach) embedded whatever the branch tree was when the summary
+            # rendered, which is BEFORE the commit landed, so it showed the stale (pre-run) chart. The SHA is
+            # a git hash (no injection risk), so it is safe to inline. (On failure the Commit step is skipped
+            # and the charts may 404, but the report text still renders.) The committed latest.md keeps its
+            # relative links.
+            SHA=$(git rev-parse HEAD)
+            sed "s#](charts/#](https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${SHA}/benchmark/reports/charts/#g" \
+              bench-out/reports/latest.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "_No benchmark report produced._" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # Post (or update) a sticky comment on the PR linking to the committed report. Reliable on the
+      # label trigger (the PR is in the event payload); best-effort on workflow_dispatch (looks up an
+      # open PR for the branch, no-ops if none). Idempotent via a hidden marker so repeat runs update
+      # one comment instead of spamming. Best-effort: a failed comment never fails the benchmark.
+      - name: Comment report link on the PR
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Passed via env, never inlined into the script body, for shell-injection hygiene.
+          PR_FROM_EVENT: ${{ github.event.pull_request.number }}
+          HEAD_REF: ${{ github.head_ref || github.ref_name }}
+        run: |
+          set -u
+          # Only comment when THIS run produced a fresh report.
+          [ -f bench-out/reports/latest.md ] || { echo "no fresh report — skipping PR comment"; exit 0; }
+
+          # Resolve the PR number: event payload first (label trigger), else an open PR for the
+          # branch (workflow_dispatch). No PR → nothing to comment on.
+          PR="$PR_FROM_EVENT"
+          if [ -z "$PR" ]; then
+            PR=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$HEAD_REF" --state open --json number --jq '.[0].number // empty')
+          fi
+          [ -n "$PR" ] || { echo "no open PR for '$HEAD_REF' — skipping PR comment"; exit 0; }
+
+          SHA=$(git rev-parse HEAD)          # the commit holding the refreshed report (prior step)
+          SHORT=$(git rev-parse --short HEAD)
+          URL="https://github.com/${GITHUB_REPOSITORY}/blob/${SHA}/benchmark/reports/latest.md"
+          MARKER="<!-- typhon-benchmark-report -->"
+          # Marker on its OWN line (\n after it): an HTML comment at the START of a line opens a CommonMark raw-HTML
+          # block that swallows the rest of that line, so same-line markdown (the [link], **bold**) renders as literal
+          # text. printf builds the two lines without the YAML block indentation that would otherwise prefix line 2 with
+          # spaces and turn it into a markdown code block. Single-quoted format → the backticks/`$` are literal.
+          BODY=$(printf '%s\n📊 **Benchmark (`%s`)** finished — [full report](%s) · commit `%s`' "$MARKER" "$PROFILE" "$URL" "$SHORT")
+
+          # Replace-in-place: DELETE any previous benchmark comment(s), then POST a fresh one — so this run's
+          # comment lands at the BOTTOM of the PR and fires a notification. (A PATCH edits the old comment
+          # silently at its original timeline position — invisible as new activity, which is why a run can look
+          # like it "didn't post".) Still exactly one benchmark comment at a time, found via the hidden marker
+          # (jq reads it from env to avoid quoting into the filter). The loop deletes any duplicates too. All
+          # best-effort: a comment failure never fails the benchmark.
+          for CID in $(MARKER="$MARKER" gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" --paginate \
+              --jq '.[] | select(.body | contains(env.MARKER)) | .id'); do
+            gh api -X DELETE "repos/${GITHUB_REPOSITORY}/issues/comments/${CID}" \
+              && echo "Removed previous benchmark comment $CID" || echo "delete $CID failed (non-fatal)"
+          done
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" -f body="$BODY" \
+            && echo "Posted fresh benchmark comment on PR #$PR" || echo "comment post failed (non-fatal)"

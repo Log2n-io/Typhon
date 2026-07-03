@@ -1,14 +1,16 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
+using System.Runtime.CompilerServices;
 
 namespace Typhon.Engine.Internals;
 
 /// <summary>
-/// Debug-only runtime safety net for declared system access (RFC 07 — Unit 4). The scheduler tags each worker thread with the currently-executing
+/// Runtime safety net for declared system access (RFC 07 — Unit 4). The scheduler tags each worker thread with the currently-executing
 /// system's <see cref="SystemAccessDescriptor"/> via <see cref="EnterSystem"/>; <see cref="EntityRef.Write{T}"/> calls
-/// <see cref="AssertWrite{T}"/> to verify the type was declared. All three public methods are <see cref="ConditionalAttribute"/>-stripped from
-/// RELEASE builds — call sites disappear at compile time, so the dispatch path takes zero overhead in production.
+/// <see cref="AssertWrite{T}"/> to verify the type was declared. All three methods are runtime-gated by
+/// <see cref="CheckConfig.DeclaredAccessActive"/> — strict mode's separate declared-access opt-in (#422), off by default. When off, each body is
+/// JIT dead-code-eliminated (the gate is a <c>static readonly bool</c>), so the dispatch path takes zero overhead in production and the descriptor
+/// stack is never populated (only <see cref="EnterSystem"/> writes it, and it early-returns).
 /// </summary>
 /// <remarks>
 /// <para>
@@ -35,11 +37,21 @@ internal static class SystemAccessValidator
 
     /// <summary>
     /// Push the given descriptor as the current thread's active system context.
-    /// Compiled out in RELEASE — call sites strip entirely (zero dispatch-path overhead in production).
+    /// No-op unless <see cref="CheckConfig.DeclaredAccessActive"/> (JIT-folded away when off).
     /// Each call must be paired with a matching <see cref="LeaveSystem"/> in a finally block.
     /// </summary>
-    [Conditional("DEBUG")]
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void EnterSystem(SystemAccessDescriptor descriptor, string systemName)
+    {
+        // Fast/slow split: the tiny gate inlines into the caller so the folded-false gate erases the call entirely when off.
+        if (CheckConfig.DeclaredAccessActive)
+        {
+            EnterSystemCore(descriptor, systemName);
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void EnterSystemCore(SystemAccessDescriptor descriptor, string systemName)
     {
         var stack = Frames ??= new Stack<(SystemAccessDescriptor, string)>(8);
         stack.Push((Current, CurrentSystemName));
@@ -47,9 +59,18 @@ internal static class SystemAccessValidator
         CurrentSystemName = systemName;
     }
 
-    /// <summary>Restore the previous descriptor + name. Compiled out in RELEASE.</summary>
-    [Conditional("DEBUG")]
+    /// <summary>Restore the previous descriptor + name. No-op unless <see cref="CheckConfig.DeclaredAccessActive"/>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void LeaveSystem()
+    {
+        if (CheckConfig.DeclaredAccessActive)
+        {
+            LeaveSystemCore();
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void LeaveSystemCore()
     {
         var (prev, prevName) = Frames.Pop();
         Current = prev;
@@ -58,11 +79,24 @@ internal static class SystemAccessValidator
 
     /// <summary>
     /// Assert that the currently-executing system declared <see cref="SystemBuilder.Writes{T}"/> or <see cref="SystemBuilder.SideWrites{T}"/>.
-    /// Compiled out in RELEASE. Skips the check when no system context is active (e.g., direct test code outside scheduler dispatch),
-    /// or when the active descriptor has no declarations (transitional — system hasn't migrated yet).
+    /// No-op unless <see cref="CheckConfig.DeclaredAccessActive"/> (the one costly strict-mode check — 2 <c>HashSet</c> lookups per write — so it
+    /// has its own opt-in). Skips the check when no system context is active (e.g., direct test code outside scheduler dispatch), or when the
+    /// active descriptor has no declarations (transitional — system hasn't migrated yet).
     /// </summary>
-    [Conditional("DEBUG")]
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void AssertWrite<T>() where T : unmanaged
+    {
+        // Fast/slow split (#422): the gate is the ONLY thing on the per-Write<T> hot path. When DeclaredAccessActive is off
+        // (the default) this inlines into EntityRef.Write and the folded-false gate erases the call — zero cost. The core (2
+        // HashSet lookups + typeof) is too large to inline, hence NoInlining to keep the hot path small.
+        if (CheckConfig.DeclaredAccessActive)
+        {
+            AssertWriteCore<T>();
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void AssertWriteCore<T>() where T : unmanaged
     {
         var current = Current;
         if (current == null)

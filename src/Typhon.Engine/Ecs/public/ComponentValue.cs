@@ -1,5 +1,4 @@
 using System;
-using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using JetBrains.Annotations;
@@ -32,7 +31,10 @@ public unsafe struct ComponentValue
     /// <summary>Create a ComponentValue from raw bytes. Used by reflection-based callers (Shell CLI).</summary>
     internal static ComponentValue CreateFromRaw(int componentTypeId, byte* data, int dataSize)
     {
-        Debug.Assert(dataSize <= MaxPayloadSize, $"Data size {dataSize} exceeds max payload {MaxPayloadSize}");
+        if (CheckConfig.Enabled && dataSize > MaxPayloadSize)
+        {
+            ThrowHelper.ThrowInvalidOp($"Data size {dataSize} exceeds max payload {MaxPayloadSize}");
+        }
         var cv = new ComponentValue();
         Unsafe.AsRef(in cv.ComponentTypeId) = componentTypeId;
         Unsafe.AsRef(in cv.DataSize) = dataSize;
@@ -43,7 +45,10 @@ public unsafe struct ComponentValue
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static ComponentValue Create<T>(int componentTypeId, in T value) where T : unmanaged
     {
-        Debug.Assert(sizeof(T) <= MaxPayloadSize, $"Component size {sizeof(T)} exceeds max payload {MaxPayloadSize}");
+        if (CheckConfig.Enabled && sizeof(T) > MaxPayloadSize)
+        {
+            ThrowHelper.ThrowInvalidOp($"Component size {sizeof(T)} exceeds max payload {MaxPayloadSize}");
+        }
         var cv = new ComponentValue();
         Unsafe.AsRef(in cv.ComponentTypeId) = componentTypeId;
         Unsafe.AsRef(in cv.DataSize) = sizeof(T);
@@ -54,7 +59,10 @@ public unsafe struct ComponentValue
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal T Read<T>() where T : unmanaged
     {
-        Debug.Assert(sizeof(T) == DataSize, $"Read<{typeof(T).Name}> size {sizeof(T)} != stored DataSize {DataSize}");
+        if (CheckConfig.Enabled && sizeof(T) != DataSize)
+        {
+            ThrowHelper.ThrowInvalidOp($"Read<{typeof(T).Name}> size {sizeof(T)} != stored DataSize {DataSize}");
+        }
         return Unsafe.ReadUnaligned<T>(ref _data[0]);
     }
 }

@@ -1,9 +1,13 @@
 {
-    "_comment": "Test-only telemetry config. Enables the Tracy-style profiler for ProfilerActive==true so TyphonEvent producer tests can exercise the on-path. Concurrency stays off — ConcurrencyTracingStressTests is [Explicit] and requires running with TYPHON__PROFILER__CONCURRENCY__ENABLED=true env var.",
+    "_comment": "Test-only telemetry config. Enables the Tracy-style profiler for ProfilerActive==true so TyphonEvent producer tests can exercise the on-path. Concurrency stays off — ConcurrencyTracingStressTests is [Explicit] and requires running with TYPHON__PROFILER__CONCURRENCY__ENABLED=true env var. Checks (strict mode, #422) run suite-wide so the converted user-facing guards actively catch misuse; DeclaredAccess is on so the SystemAccessValidator net is exercised.",
     "Typhon": {
         "Profiler": {
             "Enabled": true,
             "CpuSampling": { "Enabled": true }
+        },
+        "Checks": {
+            "Enabled": true,
+            "DeclaredAccess": true
         }
     }
 }

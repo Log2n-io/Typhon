@@ -321,7 +321,7 @@ public class BootstrapDictionary
         // Verify sentinel
         if (src < limit)
         {
-            Debug.Assert(*src == (byte)ValueType.End, "Bootstrap stream missing end sentinel");
+            CheckConfig.Require(CheckConfig.Enabled, *src == (byte)ValueType.End, $"Bootstrap stream missing end sentinel (malformed on-disk metadata)");
         }
     }
 

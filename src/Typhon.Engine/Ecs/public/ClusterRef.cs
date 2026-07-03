@@ -1,5 +1,4 @@
 using System;
-using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Threading;
@@ -101,8 +100,11 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     public Span<T> GetSpan<T>(Comp<T> comp) where T : unmanaged
     {
         var slot = _meta.GetSlot(comp._componentTypeId);
-        Debug.Assert((_meta.VersionedSlotMask & (1 << slot)) == 0,
-            $"GetSpan on Versioned component bypasses revision chain. Use GetReadOnlySpan for reads, OpenMut+Write for writes.");
+        if (CheckConfig.Enabled && (_meta.VersionedSlotMask & (1 << slot)) != 0)
+        {
+            ThrowHelper.ThrowInvalidOp(
+                $"GetSpan on Versioned component bypasses revision chain. Use GetReadOnlySpan for reads, OpenMut+Write for writes.");
+        }
         return new Span<T>(ResolveBase(slot) + _layout.ComponentOffset(slot), _layout.ClusterSize);
     }
 
@@ -119,7 +121,10 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     public ref T Get<T>(Comp<T> comp, int slotIndex) where T : unmanaged
     {
         var slot = _meta.GetSlot(comp._componentTypeId);
-        Debug.Assert((_meta.VersionedSlotMask & (1 << slot)) == 0, "Get on Versioned component bypasses revision chain. Use OpenMut+Write for writes.");
+        if (CheckConfig.Enabled && (_meta.VersionedSlotMask & (1 << slot)) != 0)
+        {
+            ThrowHelper.ThrowInvalidOp($"Get on Versioned component bypasses revision chain. Use OpenMut+Write for writes.");
+        }
         return ref Unsafe.Add(ref Unsafe.AsRef<T>(ResolveBase(slot) + _layout.ComponentOffset(slot)), slotIndex);
     }
 
@@ -194,10 +199,16 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     public void WriteSpatial<T>(Comp<T> comp, int slotIndex, in T newValue) where T : unmanaged
     {
         var slot = _meta.GetSlot(comp._componentTypeId);
-        Debug.Assert((_meta.VersionedSlotMask & (1 << slot)) == 0, $"WriteSpatial on Versioned component bypasses revision chain.");
-        Debug.Assert(_state != null && _state.SpatialSlot.HasSpatialIndex && _state.SpatialSlot.Slot == slot,
-            "WriteSpatial requires the archetype's spatial-indexed component (the one marked [SpatialIndex]). " +
-            "For non-spatial fields, use GetSpan or Get.");
+        // Hottest path (AntHill per-entity-per-tick spatial write): inline-guard form so the gate JIT-folds to nothing when strict mode is off (#422 AC#6).
+        if (CheckConfig.Enabled && (_meta.VersionedSlotMask & (1 << slot)) != 0)
+        {
+            ThrowHelper.ThrowInvalidOp($"WriteSpatial on Versioned component bypasses revision chain.");
+        }
+        if (CheckConfig.Enabled && (_state == null || !_state.SpatialSlot.HasSpatialIndex || _state.SpatialSlot.Slot != slot))
+        {
+            ThrowHelper.ThrowInvalidOp(
+                $"WriteSpatial requires the archetype's spatial-indexed component (marked [SpatialIndex]). For non-spatial fields, use GetSpan or Get.");
+        }
 
         var spatialSlot = _state.SpatialSlot;
         var slotBytes = ResolveBase(slot) + _layout.ComponentOffset(slot) + slotIndex * sizeof(T);

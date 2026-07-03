@@ -677,7 +677,8 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             if (ioTask != null && !ioTask.IsCompletedSuccessfully)
             {
                 var bytesRead = ioTask.GetAwaiter().GetResult();
-                Debug.Assert(bytesRead == PageSize, $"Short disk read for filePageIndex={filePageIndex}: got {bytesRead}, expected {PageSize}");
+                CheckConfig.Require(CheckConfig.Enabled, bytesRead == PageSize,
+                    $"Short disk read for filePageIndex={filePageIndex}: got {bytesRead}, expected {PageSize} (corrupt/truncated file)");
                 pi.ResetIOCompletionTask();
             }
 

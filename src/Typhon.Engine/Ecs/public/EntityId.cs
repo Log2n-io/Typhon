@@ -1,5 +1,4 @@
 using System;
-using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using JetBrains.Annotations;
@@ -48,8 +47,14 @@ public readonly struct EntityId : IEquatable<EntityId>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal EntityId(long entityKey, ushort archetypeId)
     {
-        Debug.Assert(entityKey >= 0, "EntityKey must be non-negative");
-        Debug.Assert(archetypeId <= 0xFFF, "ArchetypeId must fit in 12 bits (max 4095)");
+        if (CheckConfig.Enabled && entityKey < 0)
+        {
+            ThrowHelper.ThrowInvalidOp($"EntityKey must be non-negative");
+        }
+        if (CheckConfig.Enabled && archetypeId > 0xFFF)
+        {
+            ThrowHelper.ThrowInvalidOp($"ArchetypeId must fit in 12 bits (max 4095)");
+        }
         _value = ((ulong)entityKey << 12) | ((ulong)archetypeId & 0xFFF);
     }
 
