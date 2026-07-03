@@ -55,8 +55,7 @@ var runtime = TyphonRuntime.Create(engine, sched => { /* register systems */ }, 
   calls the *other* method and never registers a `ProfilerLaunchOverride`. Always pass a delegate
   explicitly to reach this hook.
 - **Cannot enable profiling from a closed master gate.** The delegate only runs once
-  `typhon.telemetry.json`'s master `Typhon:Profiler:Enabled` (or the legacy `Typhon:Telemetry:Enabled` +
-  `Typhon:Telemetry:Profiler:Enabled` pair) is already on; it can add or change *where* output goes
+  `typhon.telemetry.json`'s master `Typhon:Profiler:Enabled` is already on; it can add or change *where* output goes
   (trace file / live port), not flip profiling on for a session where it's off. If the resulting
   config still has no output channel, nothing is exported.
 - **Best-effort.** Profiler startup — including your delegate — runs inside a try/catch that never

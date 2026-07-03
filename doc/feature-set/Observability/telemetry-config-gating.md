@@ -67,8 +67,6 @@ _logger.LogInformation(TelemetryConfig.GetConfigurationSummary());
   the equivalent check.
 - One resolved value gates two independent consumers — [distributed tracing](./distributed-tracing.md) spans and
   the typed-event Profiler — so enabling/disabling a subsystem affects both uniformly.
-- The legacy `Typhon:Telemetry:*` config namespace is still read via a back-compat shim for one release (emits a
-  deprecation warning to `Console.Error`); new code should use `Typhon:Profiler:*`.
 
 ## 🧪 Tests
 - [TelemetryConfigResolverTests](../../../test/Typhon.Engine.Tests/Observability/TelemetryConfigResolverTests.cs) — parent-implies-children resolution: parent-off cascades to children despite explicit `true`, explicit leaf override wins, implicit leaf inherits parent

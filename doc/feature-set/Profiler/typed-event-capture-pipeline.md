@@ -47,10 +47,9 @@ finally
 }
 ```
 
-| Option (`Typhon:Telemetry:*`) | Default | Effect |
+| Option (`Typhon:Profiler:*`) | Default | Effect |
 |---|---|---|
-| `Enabled` | `false` | Master telemetry gate; forces every subsystem below off regardless of its own flag |
-| `Profiler.Enabled` | `false` | Producer gate for this pipeline; `false` makes every `BeginXxx` fold to `return default;` at JIT time |
+| `Enabled` | `false` | Master producer gate for this pipeline; `false` makes every `BeginXxx` fold to `return default;` at JIT time |
 
 ## ⚠️ Guarantees & limits
 

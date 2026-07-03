@@ -47,7 +47,7 @@ Examples:
 
 ### 1. Fetch the issue & locate the design doc
 
-- `mcp__GitHub__get_issue` — owner `nockawa`, repo `Typhon`, issue number `<N>`.
+- `mcp__GitHub__get_issue` — owner `log2n-io`, repo `Typhon`, issue number `<N>`.
 - The issue body MUST link a **design doc** (under `claude/design/`). Find that link.
 - Read the design doc **in full** — it is the source of truth for the plan. Read the code it references to verify current state.
 - If no design doc is linked, or it cannot be found → **stop and ask the user** for the design-doc path (this is an impediment — see [Impediments](#impediments--when-to-stop)). The plan cannot be built without it.

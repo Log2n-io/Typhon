@@ -6,7 +6,7 @@ argument-hint: (no arguments)
 
 # Show Typhon Development Status
 
-Display the current state of work from the GitHub Project, including active items, phase progress, and items needing attention.
+Display the current state of work from the GitHub Project, including active items, upcoming work, and items needing attention.
 
 ## Help
 
@@ -21,10 +21,10 @@ Arguments:
   --help, -h      Show this help
 
 What it does:
-  1. Shows current phase and In Progress items
-  2. Lists Ready items (next to pick up)
+  1. Shows In Progress items
+  2. Lists Todo items (next to pick up)
   3. Flags items needing attention (stale, critical)
-  4. Provides mountain view summary (totals, effort, phases)
+  4. Provides mountain view summary (totals by status)
 
 Examples:
   /dev-status
@@ -32,15 +32,15 @@ Examples:
 
 ## What to Display
 
-### 1. Current Phase
+### 1. Active Milestone / Epic
 
-Query the GitHub Project for items with Phase field set to identify the active phase. Look for the parent Phase issue (title starts with "Phase:").
+The legacy **Phase** field was retired in the org-board migration. Group active work by **Milestone** (release maturity carried on Features) or by parent **Epic** instead — read these per issue via `mcp__GitHub__get_issue` (`milestone`, `parent_issue_url`).
 
 ### 2. In Progress Items
 
 Query items where Status = "In Progress". **Always pipe `gh project item-list` directly to Python** (see `.claude/skills/_helpers.md` Section 2):
 ```bash
-gh project item-list 7 --owner nockawa --limit 200 --format json 2>&1 | python3 -c "
+gh project item-list 1 --owner Log2n-io --limit 200 --format json 2>&1 | python3 -c "
 import json, sys
 items = json.load(sys.stdin)['items']
 for item in items:
@@ -57,23 +57,23 @@ for item in items:
 
 Parse the output to filter and format. For each In Progress item, show:
 - Issue number and title
-- Area, Priority, Estimate
+- Area (issue-level; may be blank on the board)
 - Branch (if mentioned in issue body)
 - Design Doc (if field is set)
 
-### 3. Ready Items
+### 3. Todo Items
 
-Query items where Status = "Ready" - these are ready to be picked up next.
+Query items where Status = "Todo" - these are ready to be picked up next.
 
 ### 4. Items Needing Attention
 
 Flag issues that:
 - Have Status = "In Progress" but no recent activity (check issue last updated date)
-- Have Status = "Research" for more than 14 days
+- Have Status = "Todo" for more than 14 days
 - Are P0-Critical and not In Progress
 
 To check issue activity, use `mcp__GitHub__get_issue` with:
-- owner: `"nockawa"`
+- owner: `"log2n-io"`
 - repo: `"Typhon"`
 - issue_number: `<number>`
 
@@ -82,42 +82,36 @@ The returned object includes `updated_at` which can be used to determine stalene
 ### 5. Mountain View Summary
 
 Calculate totals:
-- Count of items by Status
-- Sum of estimates (XS=1, S=2, M=4, L=8, XL=16 points)
-- Breakdown by Phase
+- Count of items by Status (Todo / In Progress / Done)
+- Breakdown by Area (issue-level field; read per issue when needed)
 
 ## Output Format
 
 ```
 Typhon Development Status
 
-Current Phase: [Phase Name]
-   Parent: #XX -- N/M sub-issues done
+Active Milestone: [name]  (or Epic #XX -- N/M sub-issues done)
 
 In Progress (N):
-   #XX Title [Area, Priority, Estimate]
+   #XX Title [Area]
        Branch: feature/XX-name (if known)
        Design: path/to/design.md (if set)
 
-Ready (N):
-   #XX Title [Area, Priority, Estimate] -- has design / needs design
-
-Research (N):
-   #XX Title [Priority, Estimate]
+Todo (N):
+   #XX Title [Area] -- has design / needs design
 
 Needs Attention:
    #XX reason (e.g., "no activity for N days", "P0 not started")
 
 Mountain View:
-   Backlog: N items | Research: N | Ready: N | In Progress: N
-   Estimated effort: ~X points remaining
-   By Phase: Telemetry N, Query N, ...
+   Todo: N | In Progress: N | Done: N
+   By Area: <area> N, ...
 
 Suggested: [Pick up #XX or continue #YY]
 ```
 
 ## Implementation
 
-Use `gh project item-list 7 --owner nockawa --limit 200 --format json` piped to Python to get all project items, then filter and format the output.
+Use `gh project item-list 1 --owner Log2n-io --limit 200 --format json` piped to Python to get all project items, then filter and format the output.
 
 For activity checks on individual issues, use `mcp__GitHub__get_issue` to get the `updated_at` field.

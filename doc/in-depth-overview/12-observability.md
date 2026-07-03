@@ -116,8 +116,6 @@ Log it once at startup so you have a clear record of what was on for the run.
 }
 ```
 
-A `[Obsolete]` back-compat shim recognises the legacy `Typhon:Telemetry:*` namespace; the new namespace is `Typhon:Profiler:*`. `LegacyConfigDetected` flips to `true` when the shim engages.
-
 ---
 
 ## 3. The typed-event pipeline

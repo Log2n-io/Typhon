@@ -58,7 +58,7 @@ Examples:
 ### 1. Fetch Sub-Issue Details
 
 Use `mcp__GitHub__get_issue` with:
-- owner: `"nockawa"`
+- owner: `"log2n-io"`
 - repo: `"Typhon"`
 - issue_number: `<number>`
 
@@ -86,7 +86,7 @@ Options:
 Fetch the parent issue and verify it's "In Progress":
 
 Use `mcp__GitHub__get_issue` with:
-- owner: `"nockawa"`
+- owner: `"log2n-io"`
 - repo: `"Typhon"`
 - issue_number: `<parent_number>`
 
@@ -124,7 +124,7 @@ If all prior sub-issues are checked (or there are none before this one), skip si
 
 ```bash
 # Step 1: Find the item ID by piping directly to Python (no temp files)
-gh project item-list 7 --owner nockawa --limit 200 --format json 2>&1 | python3 -c "
+gh project item-list 1 --owner Log2n-io --limit 200 --format json 2>&1 | python3 -c "
 import json, sys
 items = json.load(sys.stdin)['items']
 for item in items:
@@ -135,13 +135,13 @@ print('NOT_FOUND')
 " <sub_issue_number>
 
 # Step 1b: If NOT_FOUND, add the sub-issue to the project board first
-# gh project item-add 7 --owner nockawa --url https://github.com/nockawa/Typhon/issues/<sub_issue_number>
+# gh project item-add 1 --owner Log2n-io --url https://github.com/Log2n-io/Typhon/issues/<sub_issue_number>
 # Then re-run step 1
 
 # Step 2: Update status to In Progress (using the item ID from step 1)
-gh project item-edit --project-id PVT_kwHOAud1ac4BNdCj --id <item_id> \
-  --field-id PVTSSF_lAHOAud1ac4BNdCjzg8cXYI \
-  --single-select-option-id a0a7aab6  # "In Progress"
+gh project item-edit --project-id PVT_kwDOEcGj5M4Bb-8P --id <item_id> \
+  --field-id PVTSSF_lADOEcGj5M4Bb-8PzhWrH1A \
+  --single-select-option-id 47fc9ee4  # "In Progress"
 ```
 
 ### 6. Update Design Doc Status (if exists)
@@ -185,7 +185,7 @@ If no parent can be detected and the user doesn't provide one:
 
 ### Sub-issue not on project board
 If the project item lookup returns NOT_FOUND:
-- **Add the sub-issue to the project board** with `gh project item-add 7 --owner nockawa --url <issue_url>`
+- **Add the sub-issue to the project board** with `gh project item-add 1 --owner Log2n-io --url <issue_url>`
 - Re-fetch the project data and find the new item ID
 - Then update its status to In Progress as normal
 - Report that the sub-issue was added to the board
@@ -211,14 +211,11 @@ Options:
 ## Status Field Option IDs
 
 For reference:
-- Backlog: `11d8e01f`
-- Research: `6aea77c6`
-- Ready: `303600de`
-- In Progress: `a0a7aab6`
-- Review: `fadead67`
-- Done: `12503e99`
+- Todo: `f75ad846`
+- In Progress: `47fc9ee4`
+- Done: `98236657`
 
 ## Field IDs
 
-- Status: `PVTSSF_lAHOAud1ac4BNdCjzg8cXYI`
-- Project ID: `PVT_kwHOAud1ac4BNdCj`
+- Status: `PVTSSF_lADOEcGj5M4Bb-8PzhWrH1A`
+- Project ID: `PVT_kwDOEcGj5M4Bb-8P`

@@ -46,15 +46,15 @@ Examples:
 
 ### Case 1: No arguments provided
 
-Fetch Ready and Backlog items from the project. **Always pipe `gh project item-list` directly to Python** (see `.claude/skills/_helpers.md` Section 2):
+Fetch Todo items from the project. **Always pipe `gh project item-list` directly to Python** (see `.claude/skills/_helpers.md` Section 2):
 
 ```bash
-gh project item-list 7 --owner nockawa --limit 200 --format json 2>&1 | python3 -c "
+gh project item-list 1 --owner Log2n-io --limit 200 --format json 2>&1 | python3 -c "
 import json, sys
 items = json.load(sys.stdin)['items']
 for item in items:
     s = item.get('status', '')
-    if s in ('Ready', 'Backlog'):
+    if s == 'Todo':
         n = item.get('content', {}).get('number', '?')
         t = item.get('title', 'untitled')
         p = item.get('priority', '?')
@@ -63,11 +63,11 @@ for item in items:
 "
 ```
 
-Use the output to filter for items with Status = "Ready" or "Backlog". Then use `AskUserQuestion` to present a choice:
+Use the output to filter for items with Status = "Todo". Then use `AskUserQuestion` to present a choice:
 
 **Question:** "Which issue would you like to start working on?"
 **Header:** "Issue"
-**Options** (up to 4, prioritize Ready items first, then Backlog by priority):
+**Options** (up to 4, prioritize Todo items):
 - `#<number> - <title>` (description: "[Status] [Priority] [Area]") -- for each candidate issue
 - `Create a new issue` (description: "I'll help you create one right now")
 
@@ -87,7 +87,7 @@ If $ARGUMENTS is not empty and not a number (doesn't match `^\d+$` after strippi
 
 If "Create a new issue": proceed to **Inline Issue Creation** with the title pre-filled.
 
-If "Search existing issues": use `mcp__GitHub__search_issues` with q: `"repo:nockawa/Typhon $ARGUMENTS"` and present matching issues via `AskUserQuestion`.
+If "Search existing issues": use `mcp__GitHub__search_issues` with q: `"repo:log2n-io/Typhon $ARGUMENTS"` and present matching issues via `AskUserQuestion`.
 
 ## Inline Issue Creation
 
@@ -98,10 +98,10 @@ Follow the `/create-issue` skill workflow directly:
 1. **Gather info** -- Use `AskUserQuestion` to collect:
    - Title (if not already provided from $ARGUMENTS)
    - Description (ask the user to describe what needs to be done)
-   - Type labels, Area, Priority, Phase, Estimate (use the same questions as `/create-issue`)
+   - Issue Type, labels, Area, Product, Milestone (use the same questions as `/create-issue`)
 
 2. **Create the issue** -- Use `mcp__GitHub__create_issue` with:
-   - owner: `"nockawa"`
+   - owner: `"log2n-io"`
    - repo: `"Typhon"`
    - title: `"<title>"`
    - body: `"<description>"`
@@ -119,7 +119,7 @@ This makes `/start-task` a one-stop command: describe what you want to work on, 
 ### 1. Fetch Issue Details
 
 Use `mcp__GitHub__get_issue` with:
-- owner: `"nockawa"`
+- owner: `"log2n-io"`
 - repo: `"Typhon"`
 - issue_number: `<number>`
 
@@ -132,7 +132,7 @@ If no design doc exists and this is an enhancement (not a bug fix):
 - If yes, create `claude/design/<IssueName>.md` using the design template
 - Add a link to the design doc in the issue body under "Related Documents"
   - **IMPORTANT:** Use absolute URLs in issue bodies (see `.claude/skills/_helpers.md` rule #9):
-    `[claude/design/<path>](https://github.com/nockawa/Typhon/blob/main/claude/design/<path>)`
+    `[claude/design/<path>](https://github.com/Log2n-io/Typhon/blob/main/claude/design/<path>)`
 
 ### 3. Update Project Status
 
@@ -140,7 +140,7 @@ If no design doc exists and this is an enhancement (not a bug fix):
 
 ```bash
 # Step 1: Find the item ID by piping directly to Python (no temp files)
-gh project item-list 7 --owner nockawa --limit 200 --format json 2>&1 | python3 -c "
+gh project item-list 1 --owner Log2n-io --limit 200 --format json 2>&1 | python3 -c "
 import json, sys
 items = json.load(sys.stdin)['items']
 for item in items:
@@ -151,9 +151,9 @@ print('NOT_FOUND')
 " <issue_number>
 
 # Step 2: Update status field (using the item ID from step 1)
-gh project item-edit --project-id PVT_kwHOAud1ac4BNdCj --id <item_id> \
-  --field-id PVTSSF_lAHOAud1ac4BNdCjzg8cXYI \
-  --single-select-option-id a0a7aab6  # "In Progress"
+gh project item-edit --project-id PVT_kwDOEcGj5M4Bb-8P --id <item_id> \
+  --field-id PVTSSF_lADOEcGj5M4Bb-8PzhWrH1A \
+  --single-select-option-id 47fc9ee4  # "In Progress"
 ```
 
 ### 4. Branch Creation
@@ -227,29 +227,16 @@ Ready to implement!
 ## Status Field Option IDs
 
 For reference:
-- Backlog: `11d8e01f`
-- Research: `6aea77c6`
-- Ready: `303600de`
-- In Progress: `a0a7aab6`
-- Review: `fadead67`
-- Done: `12503e99`
+- Todo: `f75ad846`
+- In Progress: `47fc9ee4`
+- Done: `98236657`
 
 ## Field Reference
 
 ### Project ID
-- `PVT_kwHOAud1ac4BNdCj`
+- `PVT_kwDOEcGj5M4Bb-8P`
 
 ### Status Field
-- Field ID: `PVTSSF_lAHOAud1ac4BNdCjzg8cXYI`
+- Field ID: `PVTSSF_lADOEcGj5M4Bb-8PzhWrH1A`
 
-### Priority Field
-- Field ID: `PVTSSF_lAHOAud1ac4BNdCjzg8c8uQ`
-
-### Phase Field
-- Field ID: `PVTSSF_lAHOAud1ac4BNdCjzg8c8uU`
-
-### Area Field
-- Field ID: `PVTSSF_lAHOAud1ac4BNdCjzg8cX_E`
-
-### Estimate Field
-- Field ID: `PVTSSF_lAHOAud1ac4BNdCjzg8cYEU`
+> Priority/Estimate are unconfigured and Area/Product are issue-level on the org board — see `.claude/skills/_helpers.md` § Field Reference. These skills only set Status.

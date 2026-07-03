@@ -20,11 +20,10 @@ the safety net, and an explicit host call never conflict.
 
 ## 💻 Usage
 ```csharp
-// 1. Drop next to the executable (or set TYPHON__TELEMETRY__* env vars) — no code required:
+// 1. Drop next to the executable (or set TYPHON__PROFILER__* env vars) — no code required:
 // typhon.telemetry.json
 // {
-//   "Typhon": { "Telemetry": { "Enabled": true,
-//       "Profiler": { "Enabled": true, "Trace": "session.typhon-trace" } } }
+//   "Typhon": { "Profiler": { "Enabled": true, "Trace": "session.typhon-trace" } }
 // }
 
 using Typhon.Engine;

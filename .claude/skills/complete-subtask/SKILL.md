@@ -57,7 +57,7 @@ Examples:
 ### 1. Fetch Sub-Issue Details
 
 Use `mcp__GitHub__get_issue` with:
-- owner: `"nockawa"`
+- owner: `"log2n-io"`
 - repo: `"Typhon"`
 - issue_number: `<number>`
 
@@ -89,7 +89,7 @@ Options:
 ### 3. Close the Sub-Issue
 
 Use `mcp__GitHub__update_issue` with:
-- owner: `"nockawa"`
+- owner: `"log2n-io"`
 - repo: `"Typhon"`
 - issue_number: `<number>`
 - state: `"closed"`
@@ -100,7 +100,7 @@ Use `mcp__GitHub__update_issue` with:
 
 ```bash
 # Step 1: Find the item ID by piping directly to Python (no temp files)
-gh project item-list 7 --owner nockawa --limit 200 --format json 2>&1 | python3 -c "
+gh project item-list 1 --owner Log2n-io --limit 200 --format json 2>&1 | python3 -c "
 import json, sys
 items = json.load(sys.stdin)['items']
 for item in items:
@@ -111,13 +111,13 @@ print('NOT_FOUND')
 " <sub_issue_number>
 
 # Step 1b: If NOT_FOUND, add the sub-issue to the project board first
-# gh project item-add 7 --owner nockawa --url https://github.com/nockawa/Typhon/issues/<sub_issue_number>
+# gh project item-add 1 --owner Log2n-io --url https://github.com/Log2n-io/Typhon/issues/<sub_issue_number>
 # Then re-run step 1
 
 # Step 2: Update status to Done (using the item ID from step 1)
-gh project item-edit --project-id PVT_kwHOAud1ac4BNdCj --id <item_id> \
-  --field-id PVTSSF_lAHOAud1ac4BNdCjzg8cXYI \
-  --single-select-option-id 12503e99  # "Done"
+gh project item-edit --project-id PVT_kwDOEcGj5M4Bb-8P --id <item_id> \
+  --field-id PVTSSF_lADOEcGj5M4Bb-8PzhWrH1A \
+  --single-select-option-id 98236657  # "Done"
 ```
 
 ### 5. Check Checkbox in Parent Issue
@@ -125,7 +125,7 @@ gh project item-edit --project-id PVT_kwHOAud1ac4BNdCj --id <item_id> \
 **Step 5a:** Fetch the parent issue to get its current body.
 
 Use `mcp__GitHub__get_issue` with:
-- owner: `"nockawa"`
+- owner: `"log2n-io"`
 - repo: `"Typhon"`
 - issue_number: `<parent_number>`
 
@@ -142,7 +142,7 @@ If the checkbox line also contains a description, preserve it. Only change `[ ]`
 **Step 5c:** Update the parent issue body with the modified content.
 
 Use `mcp__GitHub__update_issue` with:
-- owner: `"nockawa"`
+- owner: `"log2n-io"`
 - repo: `"Typhon"`
 - issue_number: `<parent_number>`
 - body: `"<modified body with checkbox checked>"`
@@ -205,14 +205,11 @@ If the design doc doesn't have a `**Status:**` line:
 ## Status Field Option IDs
 
 For reference:
-- Backlog: `11d8e01f`
-- Research: `6aea77c6`
-- Ready: `303600de`
-- In Progress: `a0a7aab6`
-- Review: `fadead67`
-- Done: `12503e99`
+- Todo: `f75ad846`
+- In Progress: `47fc9ee4`
+- Done: `98236657`
 
 ## Field IDs
 
-- Status: `PVTSSF_lAHOAud1ac4BNdCjzg8cXYI`
-- Project ID: `PVT_kwHOAud1ac4BNdCj`
+- Status: `PVTSSF_lADOEcGj5M4Bb-8PzhWrH1A`
+- Project ID: `PVT_kwDOEcGj5M4Bb-8P`

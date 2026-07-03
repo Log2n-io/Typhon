@@ -74,8 +74,7 @@ TYPHON__PROFILER__GAUGES__ENABLED=false dotnet run
   `MemoryAllocations` or `Gauges`.
 - Gates resolve once, at class load — editing the JSON/env after the process starts has no effect until restart.
 - Effective precedence, highest to lowest: environment variables → `typhon.telemetry.json` → built-in
-  (all-`false`) defaults. The legacy `Typhon:Telemetry:Profiler:*` namespace still works via a deprecated
-  back-compat shim (logs a warning to `stderr`); target `Typhon:Profiler:*` going forward.
+  (all-`false`) defaults. Keys live under the `Typhon:Profiler:*` namespace.
 - Measured overhead with GcTracing + MemoryAllocations + Gauges all on: under 1% scheduler-thread cost on
   tested workloads.
 - `ProfilerOptions` tuning is not yet exposed on the standard zero-code path (`AddTyphonProfiler` +

@@ -43,12 +43,4 @@ public static class TelemetryServiceExtensions
         TelemetryConfig.EnsureInitialized();
         return services;
     }
-
-    /// <summary>
-    /// Renamed to <see cref="AddTyphonProfiler(IServiceCollection)"/> in the Phase 0 namespace cleanup.
-    /// This delegating shim is provided for one release and will be removed in the next minor.
-    /// </summary>
-    [Obsolete("Renamed to AddTyphonProfiler. The legacy name is provided for one release and will be removed in the next minor.")]
-    public static IServiceCollection AddTyphonTelemetry(this IServiceCollection services)
-        => AddTyphonProfiler(services);
 }

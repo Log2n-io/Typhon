@@ -45,7 +45,7 @@ Examples:
 ### 1. Verify Issue State
 
 Use `mcp__GitHub__get_issue` with:
-- owner: `"nockawa"`
+- owner: `"log2n-io"`
 - repo: `"Typhon"`
 - issue_number: `<number>`
 
@@ -56,7 +56,7 @@ Confirm the issue is currently open and has been worked on.
 **Step 2a: Check for existing PRs** (open or merged):
 
 Use `mcp__GitHub__search_issues` with:
-- q: `"repo:nockawa/Typhon type:pr <number>"`
+- q: `"repo:log2n-io/Typhon type:pr <number>"`
 
 This returns PRs that mention the issue number.
 
@@ -95,7 +95,7 @@ Options:
 - Create the PR:
 
 Use `mcp__GitHub__create_pull_request` with:
-- owner: `"nockawa"`
+- owner: `"log2n-io"`
 - repo: `"Typhon"`
 - title: `"<summary derived from issue title>"`
 - body: `"<summary derived from issue body>"`
@@ -122,10 +122,10 @@ If the `claude/` repo has a matching branch with commits ahead of main, also cre
 - Create the PR:
 
 Use `mcp__GitHub__create_pull_request` with:
-- owner: `"nockawa"`
+- owner: `"log2n-io"`
 - repo: `"Typhon-docs"` (or the actual `claude/` remote repo name — check with `cd claude && git remote get-url origin && cd ..`)
 - title: `"Docs: <same summary as main PR>"`
-- body: `"Documentation updates for nockawa/Typhon#<issue_number>"`
+- body: `"Documentation updates for log2n-io/Typhon#<issue_number>"`
 - head: `"<branch_name>"`
 - base: `"main"`
 
@@ -143,7 +143,7 @@ Report both PR URLs.
 ### 3. Close the Issue
 
 Use `mcp__GitHub__update_issue` with:
-- owner: `"nockawa"`
+- owner: `"log2n-io"`
 - repo: `"Typhon"`
 - issue_number: `<number>`
 - state: `"closed"`
@@ -154,7 +154,7 @@ Use `mcp__GitHub__update_issue` with:
 
 ```bash
 # Step 1: Find the item ID by piping directly to Python (no temp files)
-gh project item-list 7 --owner nockawa --limit 200 --format json 2>&1 | python3 -c "
+gh project item-list 1 --owner Log2n-io --limit 200 --format json 2>&1 | python3 -c "
 import json, sys
 items = json.load(sys.stdin)['items']
 for item in items:
@@ -165,9 +165,9 @@ print('NOT_FOUND')
 " <issue_number>
 
 # Step 2: Update status to Done (using the item ID from step 1)
-gh project item-edit --project-id PVT_kwHOAud1ac4BNdCj --id <item_id> \
-  --field-id PVTSSF_lAHOAud1ac4BNdCjzg8cXYI \
-  --single-select-option-id 12503e99  # "Done"
+gh project item-edit --project-id PVT_kwDOEcGj5M4Bb-8P --id <item_id> \
+  --field-id PVTSSF_lADOEcGj5M4Bb-8PzhWrH1A \
+  --single-select-option-id 98236657  # "Done"
 ```
 
 ### 5. Check for Design Doc
@@ -274,14 +274,11 @@ Work complete!
 ## Status Field Option IDs
 
 For reference:
-- Backlog: `11d8e01f`
-- Research: `6aea77c6`
-- Ready: `303600de`
-- In Progress: `a0a7aab6`
-- Review: `fadead67`
-- Done: `12503e99`
+- Todo: `f75ad846`
+- In Progress: `47fc9ee4`
+- Done: `98236657`
 
 ## Field IDs
 
-- Status: `PVTSSF_lAHOAud1ac4BNdCjzg8cXYI`
-- Project ID: `PVT_kwHOAud1ac4BNdCj`
+- Status: `PVTSSF_lADOEcGj5M4Bb-8PzhWrH1A`
+- Project ID: `PVT_kwDOEcGj5M4Bb-8P`

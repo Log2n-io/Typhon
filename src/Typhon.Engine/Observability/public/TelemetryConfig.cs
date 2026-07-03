@@ -2,10 +2,8 @@
 
 using JetBrains.Annotations;
 using Microsoft.Extensions.Configuration;
-using System;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
-using System.Linq;
 using System.Runtime.CompilerServices;
 
 namespace Typhon.Engine;
@@ -35,14 +33,6 @@ namespace Typhon.Engine;
 ///   <item>Built-in defaults (all disabled)</item>
 /// </list>
 /// </para>
-///
-/// <para>
-/// <b>Namespace migration (Phase 0):</b> the configuration namespace was flattened from
-/// <c>Typhon:Telemetry:Profiler:*</c> to <c>Typhon:Profiler:*</c>. The legacy paths are still
-/// read via a back-compat shim in this release; the shim emits a deprecation warning to
-/// <c>Console.Error</c> when activated and will be removed in the next minor. See
-/// <see cref="LegacyConfigDetected"/>.
-/// </para>
 /// </summary>
 /// <remarks>
 /// Environment variable naming uses double underscore (<c>__</c>) as hierarchy separator
@@ -52,7 +42,6 @@ namespace Typhon.Engine;
 /// TYPHON__PROFILER__GCTRACING__ENABLED=true
 /// TYPHON__PROFILER__SCHEDULER__GAUGES__STRAGGLERGAP__ENABLED=true
 /// </code>
-/// The legacy paths (<c>TYPHON__TELEMETRY__PROFILER__*</c>) are also accepted for one release.
 /// </remarks>
 [PublicAPI]
 [ExcludeFromCodeCoverage]
@@ -67,9 +56,7 @@ public static class TelemetryConfig
     /// regardless of individual component settings.
     /// </summary>
     /// <remarks>
-    /// Reads from <c>Typhon:Profiler:Enabled</c>. The back-compat shim recognises
-    /// <c>Typhon:Telemetry:Enabled AND Typhon:Telemetry:Profiler:Enabled</c> as the legacy
-    /// equivalent (both must be <c>true</c>).
+    /// Reads from <c>Typhon:Profiler:Enabled</c>.
     /// </remarks>
     public static readonly bool Enabled;
 
@@ -91,7 +78,7 @@ public static class TelemetryConfig
 
     /// <summary>
     /// Whether to capture per-(system, archetype) entity-touch counts at parallel-query completion (Workbench Data Flow module).
-    /// Reads from <c>Typhon:Telemetry:Scheduler:ArchetypeTouches</c> (legacy fallback: <c>Typhon:Profiler:Scheduler:ArchetypeTouches:Enabled</c>).
+    /// Reads from <c>Typhon:Profiler:Scheduler:ArchetypeTouches:Enabled</c>.
     /// Default <c>true</c>. JIT dead-code-eliminates the capture path when <c>false</c>.
     /// </summary>
     public static readonly bool SchedulerArchetypeTouchesActive;
@@ -298,10 +285,9 @@ public static class TelemetryConfig
     // ═══════════════════════════════════════════════════════════════════════════
     // SPATIAL TRACING (Phase 3 — see 03-spatial.md)
     // ═══════════════════════════════════════════════════════════════════════════
-    // Greenfield namespace. The legacy `Typhon:Telemetry:Spatial:Enabled` flag was deleted in
-    // Phase 0; this Spatial subtree is brand-new with no back-compat fallback. Default-OFF
-    // for everything except `ClusterMigration:Execute` which preserves the pre-Phase-3 behavior
-    // of kind 60 (the only Spatial event that already shipped).
+    // Greenfield namespace under `Typhon:Profiler:Spatial:*`. Default-OFF for everything except
+    // `ClusterMigration:Execute` which preserves the pre-Phase-3 behavior of kind 60 (the only
+    // Spatial event that already shipped).
 
     /// <summary>Combined gate for the entire Spatial subsystem (parent of all Spatial:* leaves).</summary>
     public static readonly bool SpatialActive;
@@ -655,13 +641,6 @@ public static class TelemetryConfig
     /// </summary>
     internal static readonly ProfilerLaunchConfig ProfilerLaunch;
 
-    /// <summary>
-    /// True if any value was read from the legacy <c>Typhon:Telemetry:*</c> namespace via the back-compat shim,
-    /// or if any legacy key was present in the loaded configuration. A deprecation warning is emitted to
-    /// <c>Console.Error</c> at static-class load when this flag is set.
-    /// </summary>
-    public static readonly bool LegacyConfigDetected;
-
     // ═══════════════════════════════════════════════════════════════════════════
     // STATIC CONSTRUCTOR - Runs once on first access to any static member
     // ═══════════════════════════════════════════════════════════════════════════
@@ -676,68 +655,38 @@ public static class TelemetryConfig
         // a host parses its own args and injects the launch config through DI (AddTyphonProfiler); see ProfilerBootstrap.
         ProfilerLaunch = ProfilerLaunchConfig.FromConfiguration(config);
 
-        var legacyDetected = false;
-
         // ─── Master switch ─────────────────────────────────────────────────────
         // Typhon:Profiler:Enabled is the master. A Trace/Live key in config also implies "enabled" — declaring an
         // output channel turns the profiler on. The producer gate is a JIT-folded static, so it must resolve from this
         // ambient config here, before hot paths compile — it cannot come from DI, which is built later.
-        // Legacy: required Typhon:Telemetry:Enabled AND Typhon:Telemetry:Profiler:Enabled (both must be true).
-        Enabled = ReadMasterEnabled(config, ref legacyDetected) || ProfilerLaunch.IsActive;
+        Enabled = ReadBool(config, "Typhon:Profiler:Enabled", false) || ProfilerLaunch.IsActive;
         ProfilerEnabled = Enabled;
         ProfilerActive = Enabled;
 
         // ─── Profiler children (live) ──────────────────────────────────────────
-        ProfilerGcTracingEnabled = ReadBoolFallback(config,
-            "Typhon:Profiler:GcTracing:Enabled",
-            "Typhon:Telemetry:Profiler:GcTracing:Enabled",
-            false, ref legacyDetected);
+        ProfilerGcTracingEnabled = ReadBool(config, "Typhon:Profiler:GcTracing:Enabled", false);
         ProfilerGcTracingActive = ProfilerActive && ProfilerGcTracingEnabled;
 
-        ProfilerMemoryAllocationsEnabled = ReadBoolFallback(config,
-            "Typhon:Profiler:MemoryAllocations:Enabled",
-            "Typhon:Telemetry:Profiler:MemoryAllocations:Enabled",
-            false, ref legacyDetected);
+        ProfilerMemoryAllocationsEnabled = ReadBool(config, "Typhon:Profiler:MemoryAllocations:Enabled", false);
         ProfilerMemoryAllocationsActive = ProfilerActive && ProfilerMemoryAllocationsEnabled;
 
-        // CpuSampling is a new key (post-#351) — no Typhon:Telemetry:* legacy predecessor, so a plain ReadBool.
         ProfilerCpuSamplingEnabled = ReadBool(config, "Typhon:Profiler:CpuSampling:Enabled", false);
         ProfilerCpuSamplingActive = ProfilerActive && ProfilerCpuSamplingEnabled;
 
-        ProfilerGaugesEnabled = ReadBoolFallback(config,
-            "Typhon:Profiler:Gauges:Enabled",
-            "Typhon:Telemetry:Profiler:Gauges:Enabled",
-            false, ref legacyDetected);
+        ProfilerGaugesEnabled = ReadBool(config, "Typhon:Profiler:Gauges:Enabled", false);
         ProfilerGaugesActive = ProfilerActive && ProfilerGaugesEnabled;
 
         // ─── Scheduler (live) ──────────────────────────────────────────────────
-        // Legacy keys had a structural shape (Telemetry:Scheduler:Track*) — the back-compat fallback
-        // remaps them to the new Profiler:Scheduler:Gauges:* tree.
-        SchedulerEnabled = ReadBoolFallback(config,
-            "Typhon:Profiler:Scheduler:Enabled",
-            "Typhon:Telemetry:Scheduler:Enabled",
-            false, ref legacyDetected);
+        SchedulerEnabled = ReadBool(config, "Typhon:Profiler:Scheduler:Enabled", false);
         SchedulerActive = Enabled && SchedulerEnabled;
 
-        SchedulerTrackTransitionLatency = ReadBoolFallback(config,
-            "Typhon:Profiler:Scheduler:Gauges:TransitionLatency:Enabled",
-            "Typhon:Telemetry:Scheduler:TrackTransitionLatency",
-            true, ref legacyDetected);
-        SchedulerTrackWorkerUtilization = ReadBoolFallback(config,
-            "Typhon:Profiler:Scheduler:Gauges:WorkerUtilization:Enabled",
-            "Typhon:Telemetry:Scheduler:TrackWorkerUtilization",
-            true, ref legacyDetected);
-        SchedulerTrackStragglerGap = ReadBoolFallback(config,
-            "Typhon:Profiler:Scheduler:Gauges:StragglerGap:Enabled",
-            "Typhon:Telemetry:Scheduler:TrackStragglerGap",
-            true, ref legacyDetected);
-        SchedulerArchetypeTouchesActive = ReadBoolFallback(config,
-            "Typhon:Telemetry:Scheduler:ArchetypeTouches",
-            "Typhon:Profiler:Scheduler:ArchetypeTouches:Enabled",
-            true, ref legacyDetected);
+        SchedulerTrackTransitionLatency = ReadBool(config, "Typhon:Profiler:Scheduler:Gauges:TransitionLatency:Enabled", true);
+        SchedulerTrackWorkerUtilization = ReadBool(config, "Typhon:Profiler:Scheduler:Gauges:WorkerUtilization:Enabled", true);
+        SchedulerTrackStragglerGap = ReadBool(config, "Typhon:Profiler:Scheduler:Gauges:StragglerGap:Enabled", true);
+        SchedulerArchetypeTouchesActive = ReadBool(config, "Typhon:Profiler:Scheduler:ArchetypeTouches:Enabled", true);
 
         // ─── Concurrency subtree (Phase 1 + Phase 2 final shape) ───────────────
-        // Greenfield namespace — no legacy fallback (the dead Typhon:Telemetry:* tree had no Concurrency concept).
+        // Greenfield namespace under Typhon:Profiler:Concurrency:*.
         // Resolver implements parent-implies-children: Concurrency:Enabled = false makes all leaves false even if
         // their own Enabled key is true; Concurrency:Enabled = true (with master Profiler on) flips everything on
         // by default, with per-leaf overrides.
@@ -843,7 +792,7 @@ public static class TelemetryConfig
         ConcurrencyOlcLatchValidationFailActive   = concurrencyMap["Concurrency:OlcLatch:ValidationFail"];
 
         // ─── Spatial subtree (Phase 3 final shape) ─────────────────────────────
-        // Greenfield. No legacy fallback (Phase 0 deleted the dead Typhon:Telemetry:Spatial:* tree).
+        // Greenfield namespace under Typhon:Profiler:Spatial:*.
         // Default-off everywhere; operators flip Profiler:Spatial:Enabled = true to opt into the subtree.
         var spatialTree = new Node("Spatial",
         [
@@ -1473,21 +1422,6 @@ public static class TelemetryConfig
 
         DurabilityUowStateActive    = durabilityMap["Durability:UoW:State"];
         DurabilityUowDeadlineActive = durabilityMap["Durability:UoW:Deadline"];
-
-        // ─── Legacy-presence detection ─────────────────────────────────────────
-        // Even if no fallback fired (e.g., user has only dead-family keys with no live consumers),
-        // any populated Typhon:Telemetry:* subtree warrants the deprecation warning.
-        if (!legacyDetected && config.GetSection("Typhon:Telemetry").GetChildren().Any())
-        {
-            legacyDetected = true;
-        }
-
-        LegacyConfigDetected = legacyDetected;
-
-        if (legacyDetected)
-        {
-            EmitDeprecationWarning();
-        }
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -1512,66 +1446,6 @@ public static class TelemetryConfig
             return defaultValue;
         }
         return int.TryParse(v, out var i) ? i : defaultValue;
-    }
-
-    private static bool ReadBoolFallback(
-        IConfiguration config,
-        string newKey,
-        string oldKey,
-        bool defaultValue,
-        ref bool legacyDetected)
-    {
-        var newVal = config[newKey];
-        if (!string.IsNullOrEmpty(newVal))
-        {
-            return bool.TryParse(newVal, out var b) ? b : defaultValue;
-        }
-
-        var oldVal = config[oldKey];
-        if (!string.IsNullOrEmpty(oldVal))
-        {
-            legacyDetected = true;
-            return bool.TryParse(oldVal, out var b) ? b : defaultValue;
-        }
-
-        return defaultValue;
-    }
-
-    private static bool ReadMasterEnabled(IConfiguration config, ref bool legacyDetected)
-    {
-        // Prefer the new namespace.
-        var newMaster = config["Typhon:Profiler:Enabled"];
-        if (!string.IsNullOrEmpty(newMaster))
-        {
-            return bool.TryParse(newMaster, out var b) && b;
-        }
-
-        // Legacy: required Typhon:Telemetry:Enabled AND Typhon:Telemetry:Profiler:Enabled (both must be true).
-        var legacyOuter = config["Typhon:Telemetry:Enabled"];
-        var legacyInner = config["Typhon:Telemetry:Profiler:Enabled"];
-        if (!string.IsNullOrEmpty(legacyOuter) || !string.IsNullOrEmpty(legacyInner))
-        {
-            legacyDetected = true;
-            var outerOn = !string.IsNullOrEmpty(legacyOuter) && bool.TryParse(legacyOuter, out var o) && o;
-            var innerOn = !string.IsNullOrEmpty(legacyInner) && bool.TryParse(legacyInner, out var i) && i;
-            return outerOn && innerOn;
-        }
-
-        return false;
-    }
-
-    private static void EmitDeprecationWarning()
-    {
-        try
-        {
-            Console.Error.WriteLine(
-                "[Typhon.Profiler] Configuration paths under 'Typhon:Telemetry:*' are deprecated; use 'Typhon:Profiler:*' instead. " +
-                "The legacy paths are still read via a back-compat shim in this release but will be removed in the next minor.");
-        }
-        catch
-        {
-            // Console may not be available in some hosting scenarios — suppress to avoid disrupting startup.
-        }
     }
 
     private static (IConfiguration config, string loadedPath) BuildConfiguration()
@@ -1635,7 +1509,6 @@ public static class TelemetryConfig
          Typhon Profiler Configuration:
            Config File: {LoadedConfigurationFile ?? "(none - using defaults/env vars)"}
            Master Enabled: {Enabled}
-           Legacy Config Detected: {LegacyConfigDetected}
 
            Profiler: Active={ProfilerActive}
              GcTracing={ProfilerGcTracingEnabled} (Active={ProfilerGcTracingActive}),

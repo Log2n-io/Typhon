@@ -38,7 +38,7 @@ What it does:
   2. Checks for existing ideas documents to seed from
   3. Creates research doc (single file or deep directory)
   4. Handles source ideas docs (archive/cross-ref/leave)
-  5. Updates project status to Research
+  5. Updates project status to Todo
 
 Examples:
   /start-research #42
@@ -50,15 +50,15 @@ Examples:
 
 ### Case 1: No arguments provided
 
-Fetch Backlog and Research items from the project. **Always pipe `gh project item-list` directly to Python** (see `.claude/skills/_helpers.md` Section 2):
+Fetch Todo items from the project. **Always pipe `gh project item-list` directly to Python** (see `.claude/skills/_helpers.md` Section 2):
 
 ```bash
-gh project item-list 7 --owner nockawa --limit 200 --format json 2>&1 | python3 -c "
+gh project item-list 1 --owner Log2n-io --limit 200 --format json 2>&1 | python3 -c "
 import json, sys
 items = json.load(sys.stdin)['items']
 for item in items:
     s = item.get('status', '')
-    if s in ('Backlog', 'Research'):
+    if s == 'Todo':
         n = item.get('content', {}).get('number', '?')
         t = item.get('title', 'untitled')
         p = item.get('priority', '?')
@@ -67,11 +67,11 @@ for item in items:
 "
 ```
 
-Use the output to filter for items with Status = "Backlog" (prioritize these -- they're the ones most likely to need research). Then use `AskUserQuestion` to present a choice:
+Use the output to filter for items with Status = "Todo". Then use `AskUserQuestion` to present a choice:
 
 **Question:** "Which issue would you like to start research on?"
 **Header:** "Issue"
-**Options** (up to 4, prioritize Backlog items by priority):
+**Options** (up to 4, prioritize Todo items):
 - `#<number> - <title>` (description: "[Status] [Priority] [Area]") -- for each candidate issue
 - `Create a new issue` (description: "I'll help you create one right now")
 
@@ -91,7 +91,7 @@ If $ARGUMENTS (after removing `--deep`) is not empty and not a number (doesn't m
 
 If "Create a new issue": proceed to **Inline Issue Creation** with the title pre-filled.
 
-If "Search existing issues": use `mcp__GitHub__search_issues` with q: `"repo:nockawa/Typhon $ARGUMENTS"` and present matching issues via `AskUserQuestion`.
+If "Search existing issues": use `mcp__GitHub__search_issues` with q: `"repo:log2n-io/Typhon $ARGUMENTS"` and present matching issues via `AskUserQuestion`.
 
 ## Inline Issue Creation
 
@@ -102,10 +102,10 @@ Follow the `/create-issue` skill workflow directly:
 1. **Gather info** -- Use `AskUserQuestion` to collect:
    - Title (if not already provided from $ARGUMENTS)
    - Description (ask the user to describe what needs to be done)
-   - Type labels, Area, Priority, Phase, Estimate (use the same questions as `/create-issue`)
+   - Issue Type, labels, Area, Product, Milestone (use the same questions as `/create-issue`)
 
 2. **Create the issue** -- Use `mcp__GitHub__create_issue` with:
-   - owner: `"nockawa"`
+   - owner: `"log2n-io"`
    - repo: `"Typhon"`
    - title: `"<title>"`
    - body: `"<description>"`
@@ -121,18 +121,18 @@ Follow the `/create-issue` skill workflow directly:
 ### 1. Fetch Issue Details
 
 Use `mcp__GitHub__get_issue` with:
-- owner: `"nockawa"`
+- owner: `"log2n-io"`
 - repo: `"Typhon"`
 - issue_number: `<number>`
 
 ### 2. Status Guard
 
-Check the issue's current project status. If the issue is already **past** "Research" (i.e., status is "Ready", "In Progress", "Review", or "Done"), warn the user:
+Check the issue's current project status. If the issue is already **past** "Todo" (i.e., status is "In Progress" or "Done"), warn the user:
 
-**Question:** "Issue #<number> is already at '<current status>'. Starting research would move it back to 'Research'. Proceed?"
+**Question:** "Issue #<number> is already at '<current status>'. Starting research would move it back to 'Todo'. Proceed?"
 **Header:** "Status"
 **Options:**
-- `Proceed anyway` (description: "Move status back to Research and create the research doc")
+- `Proceed anyway` (description: "Move status back to Todo and create the research doc")
 - `Cancel` (description: "Don't change anything")
 
 If "Cancel", stop and report that no changes were made.
@@ -323,15 +323,15 @@ If one or more ideas documents were selected in step 3, ask **for each one**:
 
 ### 7. Update GitHub Issue
 
-#### Update Project Status to Research
+#### Update Project Status to Todo
 
-Get the project item ID and update Status to "Research".
+Get the project item ID and update Status to "Todo".
 
 **Project item lookup:** Read `.claude/skills/_helpers.md` Section 2 for the robust patterns.
 
 ```bash
 # Step 1: Find the item ID by piping directly to Python (no temp files)
-gh project item-list 7 --owner nockawa --limit 200 --format json 2>&1 | python3 -c "
+gh project item-list 1 --owner Log2n-io --limit 200 --format json 2>&1 | python3 -c "
 import json, sys
 items = json.load(sys.stdin)['items']
 for item in items:
@@ -342,9 +342,9 @@ print('NOT_FOUND')
 " <issue_number>
 
 # Step 2: Update status field (using the item ID from step 1)
-gh project item-edit --project-id PVT_kwHOAud1ac4BNdCj --id <item_id> \
-  --field-id PVTSSF_lAHOAud1ac4BNdCjzg8cXYI \
-  --single-select-option-id 6aea77c6  # "Research"
+gh project item-edit --project-id PVT_kwDOEcGj5M4Bb-8P --id <item_id> \
+  --field-id PVTSSF_lADOEcGj5M4Bb-8PzhWrH1A \
+  --single-select-option-id f75ad846  # "Todo"
 ```
 
 #### Link Research Doc in Issue Body
@@ -360,7 +360,7 @@ Fetch the current issue body, append a "Related Documents" section (if not alrea
 **Step 3:** Update the issue body:
 
 Use `mcp__GitHub__update_issue` with:
-- owner: `"nockawa"`
+- owner: `"log2n-io"`
 - repo: `"Typhon"`
 - issue_number: `<number>`
 - body: `"<updated body with research doc link>"`
@@ -370,7 +370,7 @@ Example addition to append:
 
 ## Related Documents
 
-- Research: [`claude/research/<path>`](https://github.com/nockawa/Typhon/blob/main/claude/research/<path>)
+- Research: [`claude/research/<path>`](https://github.com/Log2n-io/Typhon/blob/main/claude/research/<path>)
 ```
 
 If the issue body already has a "Related Documents" section, append the research doc link to it instead of creating a new section.
@@ -382,7 +382,7 @@ Starting research on #<number>: <title>
 
   Research doc: claude/research/<path>
    -> Mode: Standard / Deep (directory with README.md + 01-context-and-questions.md)
-  Status updated: <old> -> Research
+  Status updated: <old> -> Todo
   Ideas used: claude/ideas/<path> -> Archived / Cross-referenced / Left as-is
    (or "None -- started fresh")
 
@@ -392,29 +392,16 @@ Ready to research!
 ## Status Field Option IDs
 
 For reference:
-- Backlog: `11d8e01f`
-- Research: `6aea77c6`
-- Ready: `303600de`
-- In Progress: `a0a7aab6`
-- Review: `fadead67`
-- Done: `12503e99`
+- Todo: `f75ad846`
+- In Progress: `47fc9ee4`
+- Done: `98236657`
 
 ## Field Reference
 
 ### Project ID
-- `PVT_kwHOAud1ac4BNdCj`
+- `PVT_kwDOEcGj5M4Bb-8P`
 
 ### Status Field
-- Field ID: `PVTSSF_lAHOAud1ac4BNdCjzg8cXYI`
+- Field ID: `PVTSSF_lADOEcGj5M4Bb-8PzhWrH1A`
 
-### Priority Field
-- Field ID: `PVTSSF_lAHOAud1ac4BNdCjzg8c8uQ`
-
-### Phase Field
-- Field ID: `PVTSSF_lAHOAud1ac4BNdCjzg8c8uU`
-
-### Area Field
-- Field ID: `PVTSSF_lAHOAud1ac4BNdCjzg8cX_E`
-
-### Estimate Field
-- Field ID: `PVTSSF_lAHOAud1ac4BNdCjzg8cYEU`
+> Priority/Estimate are unconfigured and Area/Product are issue-level on the org board — see `.claude/skills/_helpers.md` § Field Reference. These skills only set Status.
