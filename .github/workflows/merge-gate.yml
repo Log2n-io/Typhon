@@ -29,6 +29,8 @@ jobs:
       engine: ${{ steps.filter.outputs.engine }}
       workbench: ${{ steps.filter.outputs.workbench }}
       tla: ${{ steps.filter.outputs.tla }}
+      # `[no-ut]` in the PR head commit message → skip the heavy aws-gate suites (self-declared small-fix bypass).
+      skip_ut: ${{ steps.ut.outputs.skip_ut }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -43,10 +45,29 @@ jobs:
             tla:
               - 'src/Typhon.Engine/Durability/**'
 
+      # Opt-out for genuine small fixes: `[no-ut]` in the head commit message skips the heavy aws-gate
+      # unit-test suites. Reads pull_request.head.sha (NOT the working-tree HEAD — on a PR that is the
+      # synthetic merge commit, whose auto-message never carries the token); falls back to github.sha on push.
+      - name: Detect [no-ut] skip token
+        id: ut
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          SHA='${{ github.event.pull_request.head.sha || github.sha }}'
+          MSG=$(gh api "repos/${{ github.repository }}/commits/$SHA" --jq '.commit.message')
+          if grep -qiE '\[no-ut\]' <<<"$MSG"; then
+            echo "skip_ut=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::[no-ut] found in $SHA — skipping the aws-gate unit-test suites."
+          else
+            echo "skip_ut=false" >> "$GITHUB_OUTPUT"
+          fi
+
   # ---- Heavy correctness suites on the c6id (engine / workbench / coverage). ----
   aws-gate:
     needs: changes
-    if: ${{ needs.changes.outputs.engine == 'true' || needs.changes.outputs.workbench == 'true' }}
+    if: >-
+      (needs.changes.outputs.engine == 'true' || needs.changes.outputs.workbench == 'true')
+      && needs.changes.outputs.skip_ut != 'true'
     runs-on: ubuntu-latest
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}

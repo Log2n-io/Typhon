@@ -295,7 +295,9 @@ public class EcsQueryBenchmarks : IDisposable
 // B1. SpawnBatch: loop vs shared vs SOA
 // ═══════════════════════════════════════════════════════════════════════
 
-[SimpleJob(warmupCount: 3, iterationCount: 10)]
+// iterationCount normalized 10→5 to match the rest of the Regression suite (was an anomalous outlier and the
+// 2nd-slowest group). 5 iterations remain statistically ample here. (#422 benchmark-runtime tuning.)
+[SimpleJob(warmupCount: 3, iterationCount: 5)]
 [MemoryDiagnoser]
 [BenchmarkCategory("ECS", "Regression")]
 public class SpawnBatchBenchmarks : IDisposable
