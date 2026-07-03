@@ -1,137 +1,149 @@
 # Benchmark Regression Report
 
-**Date:** 2026-07-02T22:40:41Z
-**Commit:** d49948b (feature/422-strict-mode-checks)
+**Date:** 2026-07-03T05:36:59Z
+**Commit:** c3de71a (feature/422-strict-mode-checks)
 **Environment:** Intel Xeon Platinum 8151 CPU 3.40GHz | Linux Ubuntu 22.04.5 LTS (Jammy Jellyfish) | .NET 10.0.9
 
 ## Summary
 
 | Status | Count |
 |--------|-------|
-| Regression | 0 |
-| Improvement | 0 |
-| Stable | 0 |
-| Noisy (filtered) | 0 |
-| Insufficient Data | 91 |
+| Regression | 3 |
+| Improvement | 5 |
+| Stable | 61 |
+| Noisy (filtered) | 22 |
+| Insufficient Data | 0 |
 
 ## Regressions
 
-No regressions detected.
+> [!WARNING]
+> 3 benchmark(s) show performance regression
+
+| Benchmark | Current | Previous | Change | Threshold |
+|-----------|---------|----------|--------|-----------|
+| AccessControlBenchmarks.SharedLock_Contended (ThreadCount=4) | 1.27 us | 922.75 ns | +37.2% | 10% |
+| EpochGuardBenchmarks.MinActiveEpoch_WhilePinned | 18.55 ns | 16.89 ns | +9.8% | 8% |
+| ChunkAccessorBenchmarks.Eviction_17Chunks | 6.17 ns | 5.64 ns | +9.5% | 8% |
+
+![AccessControlBenchmarks.SharedLock_Contended (ThreadCount=4)](charts/AccessControlBenchmarks.SharedLock_Contended_ThreadCount_4.svg)
+
+![EpochGuardBenchmarks.MinActiveEpoch_WhilePinned](charts/EpochGuardBenchmarks.MinActiveEpoch_WhilePinned.svg)
+
+![ChunkAccessorBenchmarks.Eviction_17Chunks](charts/ChunkAccessorBenchmarks.Eviction_17Chunks.svg)
 
 ## Improvements
 
-No improvements detected.
+| Benchmark | Current | Previous | Change |
+|-----------|---------|----------|--------|
+| String64Benchmarks.Compare_Order | 4.21 ns | 5.03 ns | -16.3% |
+| ClusterRegressionBenchmarks.ClusterRandomAccess_Mixed | 26.05 us | 33.63 us | -22.5% |
+| EcsQueryBenchmarks.PolymorphicQuery_Count | 262.22 us | 401.33 us | -34.7% |
+| EcsQueryBenchmarks.Enabled_Query_Count | 253.82 us | 402.35 us | -36.9% |
+| EcsQueryBenchmarks.ExactQuery_Count | 119.35 us | 192.31 us | -37.9% |
 
 <details>
-<summary>Stable Benchmarks (0)</summary>
+<summary>Stable Benchmarks (61)</summary>
 
-No stable benchmarks.
+| Benchmark | Current | Previous | Change |
+|-----------|---------|----------|--------|
+| AccessControlBenchmarks.SharedLock_Contended (ThreadCount=2) | 1.04 us | 1.17 us | -11.6% |
+| AccessControlBenchmarks.SharedLock_Uncontended (ThreadCount=2) | 19.82 ns | 18.94 ns | +4.7% |
+| AccessControlSmallBenchmarks.Promotion_SharedToExclusive | 44.37 ns | 45.38 ns | -2.2% |
+| BTreeMicroBenchmarks.Delete_Reinsert | 950.27 ns | 925.86 ns | +2.6% |
+| BTreeMicroBenchmarks.Insert_Random | 474.29 ns | 479.07 ns | -1.0% |
+| BTreeMicroBenchmarks.Insert_Sequential | 394.88 ns | 386.63 ns | +2.1% |
+| BTreeMicroBenchmarks.Lookup_Miss | 338.14 ns | 341.46 ns | -1.0% |
+| BTreeMicroBenchmarks.SequentialScan_100 | 258.46 ns | 273.78 ns | -5.6% |
+| CascadeDeleteBenchmarks.CascadeDeleteAll (ParentCount=10&ChildrenPerParent=10) | 2.38 us | 2.30 us | +3.7% |
+| CascadeDeleteBenchmarks.CascadeDeleteAll (ParentCount=10&ChildrenPerParent=100) | 2.36 us | 2.35 us | +0.6% |
+| CascadeDeleteBenchmarks.CascadeDeleteAll (ParentCount=100&ChildrenPerParent=10) | 14.38 us | 14.94 us | -3.8% |
+| CascadeDeleteBenchmarks.CascadeDeleteAll (ParentCount=100&ChildrenPerParent=100) | 15.09 us | 14.89 us | +1.3% |
+| ChunkAccessorBenchmarks.CommitChanges_AllDirty | 178.11 ns | 171.46 ns | +3.9% |
+| ChunkAccessorBenchmarks.Dispose_16Slots | 161.95 ns | 166.66 ns | -2.8% |
+| ClusterRegressionBenchmarks.ClusterIteration_MixedSvVersioned | 18.55 us | 18.20 us | +1.9% |
+| ClusterRegressionBenchmarks.ClusterIteration_SV | 15.72 us | 16.69 us | -5.8% |
+| ClusterRegressionBenchmarks.IndexedQuery_1Percent | 11.54 us | 11.60 us | -0.5% |
+| ClusterRegressionBenchmarks.OrderedQuery_Take100 | 17.68 us | 17.96 us | -1.6% |
+| ClusterRegressionBenchmarks.VersionedWriteCommit | 149.35 us | 151.73 us | -1.6% |
+| ComponentTableBenchmarks.CreateEntity_SingleComponent | 6.57 us | 6.22 us | +5.6% |
+| ComponentTableBenchmarks.ReadComponent_ById | 1.61 us | 1.66 us | -2.5% |
+| ComponentTableBenchmarks.UpdateComponent_SingleField | 4.58 us | 4.25 us | +7.8% |
+| EcsQueryBenchmarks.EnableDisable_1000 | 343.66 us | 350.65 us | -2.0% |
+| EcsQueryBenchmarks.Query_Any | 1.57 us | 1.56 us | +1.2% |
+| EcsQueryBenchmarks.WhereField_Count | 678.78 us | 706.80 us | -4.0% |
+| EpochGuardBenchmarks.EnterExit | 10.32 ns | 10.96 ns | -5.8% |
+| EpochGuardBenchmarks.NestedThreeLevels | 19.68 ns | 18.64 ns | +5.5% |
+| IndexLookupBenchmarks.DeleteEntity_SingleComponent | 9.94 us | 8.58 us | +15.9% |
+| IndexLookupBenchmarks.PrimaryKey_BatchRandom | 40.64 us | 42.86 us | -5.2% |
+| IndexLookupBenchmarks.PrimaryKey_BatchSequential | 33.90 us | 36.54 us | -7.2% |
+| IndexLookupBenchmarks.PrimaryKey_PointLookup | 1.61 us | 1.62 us | -0.9% |
+| PagedMMFBenchmarks.CacheHit | 12.45 ns | 11.04 ns | +12.7% |
+| PagedMMFBenchmarks.PageAllocation | 1.55 us | 1.56 us | -0.1% |
+| RevisionBenchmarks.Read_10Versions | 1.62 us | 1.60 us | +1.2% |
+| RevisionBenchmarks.Read_50Versions | 1.58 us | 1.65 us | -4.2% |
+| RevisionBenchmarks.Read_SingleVersion | 1.62 us | 1.66 us | -2.3% |
+| SpawnBatchBenchmarks.SingleSpawnLoop (EntityCount=100) | 50.95 us | 52.75 us | -3.4% |
+| SpawnBatchBenchmarks.SingleSpawnLoop (EntityCount=1000) | 531.52 us | 538.73 us | -1.3% |
+| SpawnBatchBenchmarks.SpawnBatch_SOA (EntityCount=100) | 37.93 us | 39.33 us | -3.6% |
+| SpawnBatchBenchmarks.SpawnBatch_SOA (EntityCount=1000) | 387.06 us | 424.34 us | -8.8% |
+| SpawnBatchBenchmarks.SpawnBatch_SharedValues (EntityCount=100) | 42.36 us | 46.89 us | -9.7% |
+| SpawnBatchBenchmarks.SpawnBatch_SharedValues (EntityCount=1000) | 441.32 us | 501.21 us | -11.9% |
+| StrictModeOffPathBenchmarks.EmptyMethod (LoopCount=1024) | 484.91 ns | 467.78 ns | +3.7% |
+| StrictModeOffPathBenchmarks.Require_ConditionFalse_OffPath (LoopCount=1024) | 9.56 us | 10.07 us | -5.0% |
+| StrictModeOffPathBenchmarks.Require_ConditionTrue_OffPath (LoopCount=1024) | 9.78 us | 9.53 us | +2.6% |
+| TransactionBenchmarks.Transaction_BulkRead (EntityCount=100) | 31.64 us | 32.90 us | -3.8% |
+| TransactionBenchmarks.Transaction_BulkRead (EntityCount=1000) | 325.14 us | 341.54 us | -4.8% |
+| TransactionBenchmarks.Transaction_BulkUpdate (EntityCount=100) | 120.22 us | 119.44 us | +0.6% |
+| TransactionBenchmarks.Transaction_BulkUpdate (EntityCount=1000) | 1.25 ms | 1.20 ms | +3.8% |
+| TransactionBenchmarks.Transaction_CreateReadCommit (EntityCount=100) | 6.64 us | 6.80 us | -2.3% |
+| TransactionBenchmarks.Transaction_CreateReadCommit (EntityCount=1000) | 6.67 us | 6.59 us | +1.2% |
+| TyphonEventOffPathBenchmarks.BeginBTreeInsert_OffPath (LoopCount=1024) | 2.57 us | 2.58 us | -0.1% |
+| TyphonEventOffPathBenchmarks.BeginCheckpointCycle_OffPath (LoopCount=1024) | 4.64 us | 4.62 us | +0.4% |
+| TyphonEventOffPathBenchmarks.BeginEcsSpawn_OffPath (LoopCount=1024) | 3.86 us | 4.11 us | -6.2% |
+| TyphonEventOffPathBenchmarks.BeginEcsSpawn_WithOptional_OffPath (LoopCount=1024) | 5.14 us | 5.15 us | -0.2% |
+| TyphonEventOffPathBenchmarks.EmptyMethod (LoopCount=1024) | 467.55 ns | 484.44 ns | -3.5% |
+| WorkloadBenchmarks.CrudLifecycle | 8.87 us | 9.26 us | -4.2% |
+| WorkloadBenchmarks.MultiComponent_Crud | 9.26 us | 8.67 us | +6.8% |
+| WorkloadBenchmarks.ReadHeavy_90_10 | 55.67 us | 57.48 us | -3.2% |
+| WorkloadBenchmarks.WriteHeavy_Batch | 500.30 us | 483.84 us | +3.4% |
+| WorkloadBenchmarks.WriteHeavy_SvIndexed_Batch | 677.87 us | 652.65 us | +3.9% |
 
 </details>
 
 <details>
-<summary>Noisy Benchmarks (0) — filtered from regression detection</summary>
+<summary>Noisy Benchmarks (22) — filtered from regression detection</summary>
 
-No noisy benchmarks.
+| Benchmark | Current | Previous | Change | Reason |
+|-----------|---------|----------|--------|--------|
+| EpochGuardBenchmarks.MinActiveEpoch | 1.00 ns | 1.12 ns | -10.4% | abs delta 0.12ns < 0.5ns threshold |
+| AccessControlBenchmarks.SharedLock_Contended (ThreadCount=8) | 4.32 us | 4.62 us | -6.4% | high variance (CoV 44%) |
+| String64Benchmarks.Compare_Equal | 4.82 ns | 4.65 ns | +3.7% | abs delta 0.17ns < 0.5ns threshold |
+| AccessControlSmallBenchmarks.SharedLock_Uncontended | 17.29 ns | 16.98 ns | +1.9% | abs delta 0.32ns < 0.5ns threshold |
+| AccessControlBenchmarks.SharedLock_Uncontended (ThreadCount=4) | 18.74 ns | 19.05 ns | -1.6% | abs delta 0.31ns < 0.5ns threshold |
+| AccessControlBenchmarks.ExclusiveLock_Uncontended (ThreadCount=4) | 21.49 ns | 21.82 ns | -1.5% | abs delta 0.33ns < 0.5ns threshold |
+| AccessControlBenchmarks.Promotion_SharedToExclusive (ThreadCount=2) | 44.24 ns | 43.88 ns | +0.8% | abs delta 0.36ns < 0.5ns threshold |
+| ChunkAccessorBenchmarks.MRU_Hit | 3.07 ns | 3.10 ns | -0.7% | abs delta 0.02ns < 0.5ns threshold |
+| AccessControlBenchmarks.Promotion_SharedToExclusive (ThreadCount=8) | 44.49 ns | 44.20 ns | +0.6% | abs delta 0.29ns < 0.5ns threshold |
+| AccessControlBenchmarks.ExclusiveLock_Uncontended (ThreadCount=8) | 21.76 ns | 21.85 ns | -0.4% | abs delta 0.09ns < 0.5ns threshold |
+| PagedMMFBenchmarks.CacheMiss | 9.48 ns | 9.52 ns | -0.4% | abs delta 0.04ns < 0.5ns threshold |
+| AccessControlBenchmarks.ExclusiveLock_Uncontended (ThreadCount=2) | 21.96 ns | 21.87 ns | +0.4% | abs delta 0.09ns < 0.5ns threshold |
+| String64Benchmarks.HashCode | 15.47 ns | 15.41 ns | +0.4% | abs delta 0.05ns < 0.5ns threshold |
+| AccessControlBenchmarks.Promotion_SharedToExclusive (ThreadCount=4) | 43.86 ns | 44.01 ns | -0.3% | abs delta 0.15ns < 0.5ns threshold |
+| String64Benchmarks.Construct_FromString | 19.90 ns | 19.84 ns | +0.3% | abs delta 0.06ns < 0.5ns threshold |
+| FindNextUnsetBenchmarks.FindNextUnset_Sparse25 | 6.01 ns | 5.99 ns | +0.3% | abs delta 0.02ns < 0.5ns threshold |
+| FindNextUnsetBenchmarks.FindNextUnset_AlmostFull | 5.98 ns | 5.99 ns | -0.2% | abs delta 0.01ns < 0.5ns threshold |
+| AccessControlSmallBenchmarks.ExclusiveLock_Uncontended | 24.74 ns | 24.78 ns | -0.2% | abs delta 0.05ns < 0.5ns threshold |
+| FindNextUnsetBenchmarks.FindNextUnset_Dense | 6.00 ns | 5.99 ns | +0.1% | abs delta 0.01ns < 0.5ns threshold |
+| BTreeMicroBenchmarks.Lookup_Hit | 362.71 ns | 362.40 ns | +0.1% | abs delta 0.31ns < 0.5ns threshold |
+| AccessControlBenchmarks.SharedLock_Uncontended (ThreadCount=8) | 18.76 ns | 18.75 ns | +0.1% | abs delta 0.01ns < 0.5ns threshold |
+| ChunkAccessorBenchmarks.SIMD_Hit_4Chunks | 3.08 ns | 3.08 ns | +0.1% | abs delta 0.00ns < 0.5ns threshold |
 
 </details>
 
 <details>
-<summary>Insufficient Data (91)</summary>
+<summary>Insufficient Data (0)</summary>
 
-| Benchmark | Current |
-|-----------|---------|
-| AccessControlBenchmarks.ExclusiveLock_Uncontended (ThreadCount=2) | 21.87 ns |
-| AccessControlBenchmarks.ExclusiveLock_Uncontended (ThreadCount=4) | 21.82 ns |
-| AccessControlBenchmarks.ExclusiveLock_Uncontended (ThreadCount=8) | 21.85 ns |
-| AccessControlBenchmarks.Promotion_SharedToExclusive (ThreadCount=2) | 43.88 ns |
-| AccessControlBenchmarks.Promotion_SharedToExclusive (ThreadCount=4) | 44.01 ns |
-| AccessControlBenchmarks.Promotion_SharedToExclusive (ThreadCount=8) | 44.20 ns |
-| AccessControlBenchmarks.SharedLock_Contended (ThreadCount=2) | 1.17 us |
-| AccessControlBenchmarks.SharedLock_Contended (ThreadCount=4) | 922.75 ns |
-| AccessControlBenchmarks.SharedLock_Contended (ThreadCount=8) | 4.62 us |
-| AccessControlBenchmarks.SharedLock_Uncontended (ThreadCount=2) | 18.94 ns |
-| AccessControlBenchmarks.SharedLock_Uncontended (ThreadCount=4) | 19.05 ns |
-| AccessControlBenchmarks.SharedLock_Uncontended (ThreadCount=8) | 18.75 ns |
-| AccessControlSmallBenchmarks.ExclusiveLock_Uncontended | 24.78 ns |
-| AccessControlSmallBenchmarks.Promotion_SharedToExclusive | 45.38 ns |
-| AccessControlSmallBenchmarks.SharedLock_Uncontended | 16.98 ns |
-| BTreeMicroBenchmarks.Delete_Reinsert | 925.86 ns |
-| BTreeMicroBenchmarks.Insert_Random | 479.07 ns |
-| BTreeMicroBenchmarks.Insert_Sequential | 386.63 ns |
-| BTreeMicroBenchmarks.Lookup_Hit | 362.40 ns |
-| BTreeMicroBenchmarks.Lookup_Miss | 341.46 ns |
-| BTreeMicroBenchmarks.SequentialScan_100 | 273.78 ns |
-| CascadeDeleteBenchmarks.CascadeDeleteAll (ParentCount=10&ChildrenPerParent=10) | 2.30 us |
-| CascadeDeleteBenchmarks.CascadeDeleteAll (ParentCount=10&ChildrenPerParent=100) | 2.35 us |
-| CascadeDeleteBenchmarks.CascadeDeleteAll (ParentCount=100&ChildrenPerParent=10) | 14.94 us |
-| CascadeDeleteBenchmarks.CascadeDeleteAll (ParentCount=100&ChildrenPerParent=100) | 14.89 us |
-| ChunkAccessorBenchmarks.CommitChanges_AllDirty | 171.46 ns |
-| ChunkAccessorBenchmarks.Dispose_16Slots | 166.66 ns |
-| ChunkAccessorBenchmarks.Eviction_17Chunks | 5.64 ns |
-| ChunkAccessorBenchmarks.MRU_Hit | 3.10 ns |
-| ChunkAccessorBenchmarks.SIMD_Hit_4Chunks | 3.08 ns |
-| ClusterRegressionBenchmarks.ClusterIteration_MixedSvVersioned | 18.20 us |
-| ClusterRegressionBenchmarks.ClusterIteration_SV | 16.69 us |
-| ClusterRegressionBenchmarks.ClusterRandomAccess_Mixed | 33.63 us |
-| ClusterRegressionBenchmarks.IndexedQuery_1Percent | 11.60 us |
-| ClusterRegressionBenchmarks.OrderedQuery_Take100 | 17.96 us |
-| ClusterRegressionBenchmarks.VersionedWriteCommit | 151.73 us |
-| ComponentTableBenchmarks.CreateEntity_SingleComponent | 6.22 us |
-| ComponentTableBenchmarks.ReadComponent_ById | 1.66 us |
-| ComponentTableBenchmarks.UpdateComponent_SingleField | 4.25 us |
-| EcsQueryBenchmarks.EnableDisable_1000 | 350.65 us |
-| EcsQueryBenchmarks.Enabled_Query_Count | 402.35 us |
-| EcsQueryBenchmarks.ExactQuery_Count | 192.31 us |
-| EcsQueryBenchmarks.PolymorphicQuery_Count | 401.33 us |
-| EcsQueryBenchmarks.Query_Any | 1.56 us |
-| EcsQueryBenchmarks.WhereField_Count | 706.80 us |
-| EpochGuardBenchmarks.EnterExit | 10.96 ns |
-| EpochGuardBenchmarks.MinActiveEpoch | 1.12 ns |
-| EpochGuardBenchmarks.MinActiveEpoch_WhilePinned | 16.89 ns |
-| EpochGuardBenchmarks.NestedThreeLevels | 18.64 ns |
-| FindNextUnsetBenchmarks.FindNextUnset_AlmostFull | 5.99 ns |
-| FindNextUnsetBenchmarks.FindNextUnset_Dense | 5.99 ns |
-| FindNextUnsetBenchmarks.FindNextUnset_Sparse25 | 5.99 ns |
-| IndexLookupBenchmarks.DeleteEntity_SingleComponent | 8.58 us |
-| IndexLookupBenchmarks.PrimaryKey_BatchRandom | 42.86 us |
-| IndexLookupBenchmarks.PrimaryKey_BatchSequential | 36.54 us |
-| IndexLookupBenchmarks.PrimaryKey_PointLookup | 1.62 us |
-| PagedMMFBenchmarks.CacheHit | 11.04 ns |
-| PagedMMFBenchmarks.CacheMiss | 9.52 ns |
-| PagedMMFBenchmarks.PageAllocation | 1.56 us |
-| RevisionBenchmarks.Read_10Versions | 1.60 us |
-| RevisionBenchmarks.Read_50Versions | 1.65 us |
-| RevisionBenchmarks.Read_SingleVersion | 1.66 us |
-| SpawnBatchBenchmarks.SingleSpawnLoop (EntityCount=100) | 52.75 us |
-| SpawnBatchBenchmarks.SingleSpawnLoop (EntityCount=1000) | 538.73 us |
-| SpawnBatchBenchmarks.SpawnBatch_SOA (EntityCount=100) | 39.33 us |
-| SpawnBatchBenchmarks.SpawnBatch_SOA (EntityCount=1000) | 424.34 us |
-| SpawnBatchBenchmarks.SpawnBatch_SharedValues (EntityCount=100) | 46.89 us |
-| SpawnBatchBenchmarks.SpawnBatch_SharedValues (EntityCount=1000) | 501.21 us |
-| StrictModeOffPathBenchmarks.EmptyMethod (LoopCount=1024) | 467.78 ns |
-| StrictModeOffPathBenchmarks.Require_ConditionFalse_OffPath (LoopCount=1024) | 10.07 us |
-| StrictModeOffPathBenchmarks.Require_ConditionTrue_OffPath (LoopCount=1024) | 9.53 us |
-| String64Benchmarks.Compare_Equal | 4.65 ns |
-| String64Benchmarks.Compare_Order | 5.03 ns |
-| String64Benchmarks.Construct_FromString | 19.84 ns |
-| String64Benchmarks.HashCode | 15.41 ns |
-| TransactionBenchmarks.Transaction_BulkRead (EntityCount=100) | 32.90 us |
-| TransactionBenchmarks.Transaction_BulkRead (EntityCount=1000) | 341.54 us |
-| TransactionBenchmarks.Transaction_BulkUpdate (EntityCount=100) | 119.44 us |
-| TransactionBenchmarks.Transaction_BulkUpdate (EntityCount=1000) | 1.20 ms |
-| TransactionBenchmarks.Transaction_CreateReadCommit (EntityCount=100) | 6.80 us |
-| TransactionBenchmarks.Transaction_CreateReadCommit (EntityCount=1000) | 6.59 us |
-| TyphonEventOffPathBenchmarks.BeginBTreeInsert_OffPath (LoopCount=1024) | 2.58 us |
-| TyphonEventOffPathBenchmarks.BeginCheckpointCycle_OffPath (LoopCount=1024) | 4.62 us |
-| TyphonEventOffPathBenchmarks.BeginEcsSpawn_OffPath (LoopCount=1024) | 4.11 us |
-| TyphonEventOffPathBenchmarks.BeginEcsSpawn_WithOptional_OffPath (LoopCount=1024) | 5.15 us |
-| TyphonEventOffPathBenchmarks.EmptyMethod (LoopCount=1024) | 484.44 ns |
-| WorkloadBenchmarks.CrudLifecycle | 9.26 us |
-| WorkloadBenchmarks.MultiComponent_Crud | 8.67 us |
-| WorkloadBenchmarks.ReadHeavy_90_10 | 57.48 us |
-| WorkloadBenchmarks.WriteHeavy_Batch | 483.84 us |
-| WorkloadBenchmarks.WriteHeavy_SvIndexed_Batch | 652.65 us |
+No benchmarks with insufficient data.
 
 </details>
 
