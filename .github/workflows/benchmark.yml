@@ -130,14 +130,16 @@ jobs:
           # spaces and turn it into a markdown code block. Single-quoted format → the backticks/`$` are literal.
           BODY=$(printf '%s\n📊 **Benchmark (`%s`)** finished — [full report](%s) · commit `%s`' "$MARKER" "$PROFILE" "$URL" "$SHORT")
 
-          # Sticky: PATCH our previous comment if present, else POST a new one. jq reads the marker
-          # from env (env.MARKER) to avoid quoting it into the filter.
-          CID=$(MARKER="$MARKER" gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" --paginate \
-            --jq '.[] | select(.body | contains(env.MARKER)) | .id' | head -1)
-          if [ -n "$CID" ]; then
-            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${CID}" -f body="$BODY" \
-              && echo "Updated sticky comment $CID on PR #$PR" || echo "comment update failed (non-fatal)"
-          else
-            gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" -f body="$BODY" \
-              && echo "Created sticky comment on PR #$PR" || echo "comment create failed (non-fatal)"
-          fi
+          # Replace-in-place: DELETE any previous benchmark comment(s), then POST a fresh one — so this run's
+          # comment lands at the BOTTOM of the PR and fires a notification. (A PATCH edits the old comment
+          # silently at its original timeline position — invisible as new activity, which is why a run can look
+          # like it "didn't post".) Still exactly one benchmark comment at a time, found via the hidden marker
+          # (jq reads it from env to avoid quoting into the filter). The loop deletes any duplicates too. All
+          # best-effort: a comment failure never fails the benchmark.
+          for CID in $(MARKER="$MARKER" gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" --paginate \
+              --jq '.[] | select(.body | contains(env.MARKER)) | .id'); do
+            gh api -X DELETE "repos/${GITHUB_REPOSITORY}/issues/comments/${CID}" \
+              && echo "Removed previous benchmark comment $CID" || echo "delete $CID failed (non-fatal)"
+          done
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" -f body="$BODY" \
+            && echo "Posted fresh benchmark comment on PR #$PR" || echo "comment post failed (non-fatal)"
