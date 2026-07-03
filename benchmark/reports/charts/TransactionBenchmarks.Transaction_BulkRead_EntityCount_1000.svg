@@ -17,13 +17,16 @@
   <text x="72" y="32" text-anchor="end" font-family="&quot;Segoe UI&quot;, Arial, sans-serif" font-size="11" fill="#999999">(us)</text>
   <line x1="80" y1="280.0" x2="690" y2="280.0" stroke="#FFA500" stroke-width="1.5" stroke-dasharray="6,4" />
   <text x="686" y="276.0" text-anchor="end" font-family="&quot;Segoe UI&quot;, Arial, sans-serif" font-size="10" fill="#FFA500">target: 260.00 us</text>
-  <polyline points="80.0,84.3 690.0,123.7" fill="none" stroke="#4A90D9" stroke-width="2" />
+  <polyline points="80.0,84.3 385.0,123.7 690.0,111.1" fill="none" stroke="#4A90D9" stroke-width="2" />
   <line x1="80.0" y1="80.5" x2="80.0" y2="88.1" stroke="#4A90D9" stroke-width="1" stroke-opacity="0.5" />
   <circle cx="80.0" cy="84.3" r="4" fill="#4A90D9" />
-  <line x1="690.0" y1="86.3" x2="690.0" y2="161.0" stroke="#4A90D9" stroke-width="1" stroke-opacity="0.5" />
-  <circle cx="690.0" cy="123.7" r="4" fill="#4A90D9" />
+  <line x1="385.0" y1="86.3" x2="385.0" y2="161.0" stroke="#4A90D9" stroke-width="1" stroke-opacity="0.5" />
+  <circle cx="385.0" cy="123.7" r="4" fill="#4A90D9" />
+  <line x1="690.0" y1="104.6" x2="690.0" y2="117.7" stroke="#4A90D9" stroke-width="1" stroke-opacity="0.5" />
+  <circle cx="690.0" cy="111.1" r="4" fill="#4A90D9" />
   <text x="80.0" y="294.0" text-anchor="end" font-family="&quot;Segoe UI&quot;, Arial, sans-serif" font-size="10" fill="#666666" transform="rotate(-45, 80.0, 294.0)">d49948b</text>
-  <text x="690.0" y="294.0" text-anchor="end" font-family="&quot;Segoe UI&quot;, Arial, sans-serif" font-size="10" fill="#666666" transform="rotate(-45, 690.0, 294.0)">c3de71a</text>
+  <text x="385.0" y="294.0" text-anchor="end" font-family="&quot;Segoe UI&quot;, Arial, sans-serif" font-size="10" fill="#666666" transform="rotate(-45, 385.0, 294.0)">c3de71a</text>
+  <text x="690.0" y="294.0" text-anchor="end" font-family="&quot;Segoe UI&quot;, Arial, sans-serif" font-size="10" fill="#666666" transform="rotate(-45, 690.0, 294.0)">2a3e303</text>
   <line x1="80" y1="40" x2="80" y2="280" stroke="#333333" stroke-width="1" />
   <line x1="80" y1="280" x2="690" y2="280" stroke="#333333" stroke-width="1" />
 </svg>
