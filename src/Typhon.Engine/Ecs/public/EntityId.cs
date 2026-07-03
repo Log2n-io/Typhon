@@ -47,8 +47,14 @@ public readonly struct EntityId : IEquatable<EntityId>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal EntityId(long entityKey, ushort archetypeId)
     {
-        CheckConfig.Require(CheckConfig.Enabled, entityKey >= 0, $"EntityKey must be non-negative");
-        CheckConfig.Require(CheckConfig.Enabled, archetypeId <= 0xFFF, $"ArchetypeId must fit in 12 bits (max 4095)");
+        if (CheckConfig.Enabled && entityKey < 0)
+        {
+            ThrowHelper.ThrowInvalidOp($"EntityKey must be non-negative");
+        }
+        if (CheckConfig.Enabled && archetypeId > 0xFFF)
+        {
+            ThrowHelper.ThrowInvalidOp($"ArchetypeId must fit in 12 bits (max 4095)");
+        }
         _value = ((ulong)entityKey << 12) | ((ulong)archetypeId & 0xFFF);
     }
 

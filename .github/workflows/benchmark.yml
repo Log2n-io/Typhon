@@ -16,9 +16,11 @@ on:
   pull_request:
     types: [labeled]            # fires once when the `run-benchmark` label is added
 
-# Needs write access to push the single history+report commit back to the PR branch.
+# contents: write — push the single history+report commit back to the PR branch.
+# pull-requests: write — post/update the sticky report-link comment on the PR.
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   benchmark:
@@ -91,4 +93,46 @@ jobs:
           else
             git commit -m "benchmark: record ${PROFILE} run on z1d.metal [skip ci]"
             git push
+          fi
+
+      # Post (or update) a sticky comment on the PR linking to the committed report. Reliable on the
+      # label trigger (the PR is in the event payload); best-effort on workflow_dispatch (looks up an
+      # open PR for the branch, no-ops if none). Idempotent via a hidden marker so repeat runs update
+      # one comment instead of spamming. Best-effort: a failed comment never fails the benchmark.
+      - name: Comment report link on the PR
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Passed via env, never inlined into the script body, for shell-injection hygiene.
+          PR_FROM_EVENT: ${{ github.event.pull_request.number }}
+          HEAD_REF: ${{ github.head_ref || github.ref_name }}
+        run: |
+          set -u
+          # Only comment when THIS run produced a fresh report.
+          [ -f bench-out/reports/latest.md ] || { echo "no fresh report — skipping PR comment"; exit 0; }
+
+          # Resolve the PR number: event payload first (label trigger), else an open PR for the
+          # branch (workflow_dispatch). No PR → nothing to comment on.
+          PR="$PR_FROM_EVENT"
+          if [ -z "$PR" ]; then
+            PR=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$HEAD_REF" --state open --json number --jq '.[0].number // empty')
+          fi
+          [ -n "$PR" ] || { echo "no open PR for '$HEAD_REF' — skipping PR comment"; exit 0; }
+
+          SHA=$(git rev-parse HEAD)          # the commit holding the refreshed report (prior step)
+          SHORT=$(git rev-parse --short HEAD)
+          URL="https://github.com/${GITHUB_REPOSITORY}/blob/${SHA}/benchmark/reports/latest.md"
+          MARKER="<!-- typhon-benchmark-report -->"
+          BODY="${MARKER} 📊 **Benchmark (\`${PROFILE}\`)** finished — [full report](${URL}) · commit \`${SHORT}\`"
+
+          # Sticky: PATCH our previous comment if present, else POST a new one. jq reads the marker
+          # from env (env.MARKER) to avoid quoting it into the filter.
+          CID=$(MARKER="$MARKER" gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" --paginate \
+            --jq '.[] | select(.body | contains(env.MARKER)) | .id' | head -1)
+          if [ -n "$CID" ]; then
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${CID}" -f body="$BODY" \
+              && echo "Updated sticky comment $CID on PR #$PR" || echo "comment update failed (non-fatal)"
+          else
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" -f body="$BODY" \
+              && echo "Created sticky comment on PR #$PR" || echo "comment create failed (non-fatal)"
           fi

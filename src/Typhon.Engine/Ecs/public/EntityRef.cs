@@ -99,9 +99,16 @@ public unsafe ref struct EntityRef
     public ref readonly T Read<T>(Comp<T> comp) where T : unmanaged
     {
         byte slot = _archetype.GetSlot(comp._componentTypeId);
-        CheckConfig.Require(CheckConfig.Enabled, slot < _archetype.ComponentCount,
-            $"Slot {slot} out of range for archetype with {_archetype.ComponentCount} components");
-        CheckConfig.Require(CheckConfig.Enabled, (_enabledBits & (1 << slot)) != 0, $"Component at slot {slot} is disabled");
+        // Hot path: guaranteed-fold inline guard (not CheckConfig.Require) — the interpolated-string handler
+        // materializes a 32-byte struct per call even when off (~9ns); `CheckConfig.Enabled &&` folds to nothing (#422 AC#6).
+        if (CheckConfig.Enabled && slot >= _archetype.ComponentCount)
+        {
+            ThrowHelper.ThrowInvalidOp($"Slot {slot} out of range for archetype with {_archetype.ComponentCount} components");
+        }
+        if (CheckConfig.Enabled && (_enabledBits & (1 << slot)) == 0)
+        {
+            ThrowHelper.ThrowInvalidOp($"Component at slot {slot} is disabled");
+        }
 
         if (_clusterBase != null)
         {
@@ -141,12 +148,22 @@ public unsafe ref struct EntityRef
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public ref T Write<T>(Comp<T> comp) where T : unmanaged
     {
-        CheckConfig.Require(CheckConfig.Enabled, _writable, $"EntityRef opened as read-only — use OpenMut for writes");
+        if (CheckConfig.Enabled && !_writable)
+        {
+            ThrowHelper.ThrowInvalidOp($"EntityRef opened as read-only — use OpenMut for writes");
+        }
         SystemAccessValidator.AssertWrite<T>();
         byte slot = _archetype.GetSlot(comp._componentTypeId);
-        CheckConfig.Require(CheckConfig.Enabled, slot < _archetype.ComponentCount,
-            $"Slot {slot} out of range for archetype with {_archetype.ComponentCount} components");
-        CheckConfig.Require(CheckConfig.Enabled, (_enabledBits & (1 << slot)) != 0, $"Component at slot {slot} is disabled");
+        // Hot path: guaranteed-fold inline guard (not CheckConfig.Require) — the interpolated-string handler
+        // materializes a 32-byte struct per call even when off (~9ns); `CheckConfig.Enabled &&` folds to nothing (#422 AC#6).
+        if (CheckConfig.Enabled && slot >= _archetype.ComponentCount)
+        {
+            ThrowHelper.ThrowInvalidOp($"Slot {slot} out of range for archetype with {_archetype.ComponentCount} components");
+        }
+        if (CheckConfig.Enabled && (_enabledBits & (1 << slot)) == 0)
+        {
+            ThrowHelper.ThrowInvalidOp($"Component at slot {slot} is disabled");
+        }
 
         if (_clusterBase != null)
         {
@@ -246,9 +263,15 @@ public unsafe ref struct EntityRef
     public ref readonly T Read<T>() where T : unmanaged
     {
         int typeId = ArchetypeRegistry.GetComponentTypeId<T>();
-        CheckConfig.Require(CheckConfig.Enabled, typeId >= 0, $"Component type {typeof(T).Name} not registered");
+        if (CheckConfig.Enabled && typeId < 0)
+        {
+            ThrowHelper.ThrowInvalidOp($"Component type {typeof(T).Name} not registered");
+        }
         byte slot = _archetype.GetSlot(typeId);
-        CheckConfig.Require(CheckConfig.Enabled, (_enabledBits & (1 << slot)) != 0, $"Component {typeof(T).Name} at slot {slot} is disabled");
+        if (CheckConfig.Enabled && (_enabledBits & (1 << slot)) == 0)
+        {
+            ThrowHelper.ThrowInvalidOp($"Component {typeof(T).Name} at slot {slot} is disabled");
+        }
 
         if (_clusterBase != null)
         {
@@ -281,12 +304,21 @@ public unsafe ref struct EntityRef
     /// For SingleVersion with indexes: shadows old field values on first write per tick for deferred index maintenance.</summary>
     public ref T Write<T>() where T : unmanaged
     {
-        CheckConfig.Require(CheckConfig.Enabled, _writable, $"EntityRef opened as read-only — use OpenMut for writes");
+        if (CheckConfig.Enabled && !_writable)
+        {
+            ThrowHelper.ThrowInvalidOp($"EntityRef opened as read-only — use OpenMut for writes");
+        }
         SystemAccessValidator.AssertWrite<T>();
         int typeId = ArchetypeRegistry.GetComponentTypeId<T>();
-        CheckConfig.Require(CheckConfig.Enabled, typeId >= 0, $"Component type {typeof(T).Name} not registered");
+        if (CheckConfig.Enabled && typeId < 0)
+        {
+            ThrowHelper.ThrowInvalidOp($"Component type {typeof(T).Name} not registered");
+        }
         byte slot = _archetype.GetSlot(typeId);
-        CheckConfig.Require(CheckConfig.Enabled, (_enabledBits & (1 << slot)) != 0, $"Component {typeof(T).Name} at slot {slot} is disabled");
+        if (CheckConfig.Enabled && (_enabledBits & (1 << slot)) == 0)
+        {
+            ThrowHelper.ThrowInvalidOp($"Component {typeof(T).Name} at slot {slot} is disabled");
+        }
 
         if (_clusterBase != null)
         {
@@ -534,7 +566,10 @@ public unsafe ref struct EntityRef
     /// <summary>Disable a component by handle. Stages the change for commit.</summary>
     public void Disable<T>(Comp<T> comp) where T : unmanaged
     {
-        CheckConfig.Require(CheckConfig.Enabled, _writable, $"EntityRef opened as read-only");
+        if (CheckConfig.Enabled && !_writable)
+        {
+            ThrowHelper.ThrowInvalidOp($"EntityRef opened as read-only");
+        }
         byte slot = _archetype.GetSlot(comp._componentTypeId);
         _enabledBits &= (ushort)~(1 << slot);
         _accessor.StageEnableDisable(_id, _enabledBits);
@@ -550,7 +585,10 @@ public unsafe ref struct EntityRef
     /// <summary>Enable a component by handle. Stages the change for commit.</summary>
     public void Enable<T>(Comp<T> comp) where T : unmanaged
     {
-        CheckConfig.Require(CheckConfig.Enabled, _writable, $"EntityRef opened as read-only");
+        if (CheckConfig.Enabled && !_writable)
+        {
+            ThrowHelper.ThrowInvalidOp($"EntityRef opened as read-only");
+        }
         byte slot = _archetype.GetSlot(comp._componentTypeId);
         _enabledBits |= (ushort)(1 << slot);
         _accessor.StageEnableDisable(_id, _enabledBits);
