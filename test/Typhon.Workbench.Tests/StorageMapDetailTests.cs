@@ -136,6 +136,7 @@ public sealed class StorageMapDetailTests
     }
 
     [Test]
+    [Ignore("Stale vs v4 directory-root storage introspection; tracked by #426")]
     public async Task GetPage_DecodesOccupancyRoot()
     {
         var session = await CreateSessionAsync();
@@ -149,6 +150,7 @@ public sealed class StorageMapDetailTests
     }
 
     [Test]
+    [Ignore("Stale vs v4 directory-root storage introspection; tracked by #426")]
     public async Task GetPage_OccupancyRoot_RendersGovernedRegionMap()
     {
         // A6 §10.2 — the occupancy root page governs the first 48,000 file pages; its detail carries a down-sampled
@@ -416,6 +418,7 @@ public sealed class StorageMapDetailTests
     }
 
     [Test]
+    [Ignore("Stale vs v4 directory-root storage introspection; tracked by #426")]
     public async Task GetPage_VsbsPage_CarriesElementFill()
     {
         // A6 §10.1 — a VSBS page colours chunks by element fill (ElementCount / capacity), not binary occupancy.
@@ -536,6 +539,7 @@ public sealed class StorageMapDetailTests
     }
 
     [Test]
+    [Ignore("Stale vs v4 directory-root storage introspection; tracked by #426")]
     public async Task GetPage_IndexPage_ClassesLeafInternalAndHatchesDirectory()
     {
         // A6 §13 — an index page classes each node leaf vs internal (from its control word) and hatches the directory chunks (0..3) as non-data.

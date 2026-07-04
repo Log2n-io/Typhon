@@ -125,7 +125,10 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Log2n-io/Typhon-Claude
-          ssh-key: ${{ secrets.TYPHON_CLAUDE_DEPLOY_KEY }}
+          # Cross-repo private checkout: the default GITHUB_TOKEN is scoped to this repo only and 404s on Typhon-Claude.
+          # A fine-grained PAT (Contents:read on Typhon-Claude) resolves the ref and auths the fetch. ref pins to main.
+          ref: main
+          token: ${{ secrets.TYPHON_CLAUDE_TOKEN }}
           path: typhon-claude
 
       - uses: actions/setup-java@v4
