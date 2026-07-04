@@ -25,6 +25,27 @@ groups per-subsystem option types (`Resources`, `Timeouts`, `DeferredCleanup`, `
 
 ## 💻 Usage
 
+Most apps set options through the one-line `AddTyphon` surface — its `Configure*` delegates target
+the very option types this page documents:
+
+```csharp
+services.AddTyphon(o => o
+    .DatabaseFile(@"C:\Data\MyGame\game.typhon")
+    .ConfigureStorage(s => s.DatabaseCacheSize = 65536UL * 8192)   // 512 MiB page cache
+    .ConfigureEngine(e =>
+    {
+        e.Resources.MaxActiveTransactions = 2000;
+        e.Wal.UseFUA       = false;                                // GroupCommit workload, no per-write FUA
+        e.Statistics       = null;                                 // disable background stats worker
+    }));
+
+var engine = services.BuildServiceProvider().GetRequiredService<DatabaseEngine>();
+```
+
+`AddTyphon` folds those `Configure*` delegates into the **per-`Add*` configuration surface** below —
+reach for it directly when you need finer control over service lifetimes, or want to configure or
+substitute a single subsystem. `configure` is optional on every `Add*` call; omit it to run on defaults.
+
 ```csharp
 var services = new ServiceCollection();
 services.AddLogging(b => b.AddFilter((_, level) => level >= LogLevel.Warning));
@@ -44,9 +65,8 @@ services
     .AddDatabaseEngine(engineOpts =>
     {
         engineOpts.Resources.MaxActiveTransactions = 2000;
-        engineOpts.Wal.WalDirectory = @"C:\Data\MyGame\wal";
-        engineOpts.Wal.UseFUA       = false;           // GroupCommit workload, no per-write FUA
-        engineOpts.Statistics       = null;            // disable background stats worker
+        engineOpts.Wal.UseFUA       = false;          // GroupCommit workload, no per-write FUA
+        engineOpts.Statistics       = null;           // disable background stats worker
     });
 
 var provider = services.BuildServiceProvider();

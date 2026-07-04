@@ -30,6 +30,7 @@ public sealed class TyphonOptions
     private readonly List<Action<DatabaseEngineOptions>> _engine = [];
     private readonly List<Action<DatabaseEngine>> _componentRegistrations = [];
     private readonly List<Action> _archetypeRegistrations = [];
+    private SpatialGridConfig? _spatialGrid;
 
     /// <summary>
     /// Sets the database file. The canonical extension is <c>.typhon</c>; any extension is stripped and the file stem
@@ -110,6 +111,21 @@ public sealed class TyphonOptions
         return this;
     }
 
+    /// <summary>
+    /// Configures the engine-wide spatial grid — required when a registered archetype has a <c>[SpatialIndex]</c> field.
+    /// The one-line setup applies this in the narrow window after archetypes are touched and before
+    /// <see cref="DatabaseEngine.InitializeArchetypes"/> (which <see cref="ServiceCollectionExtensions.AddTyphon"/> /
+    /// <see cref="DatabaseEngine.Open(string,Action{TyphonOptions},Microsoft.Extensions.Logging.ILoggerFactory)"/> run for
+    /// you), so you don't have to reach for the manual <c>Add*</c> chain just to call
+    /// <see cref="DatabaseEngine.ConfigureSpatialGrid"/>. Only the first create of a spatial database needs this — the grid
+    /// config is persisted, so a later reopen reconstructs it without this call.
+    /// </summary>
+    public TyphonOptions ConfigureSpatialGrid(SpatialGridConfig config)
+    {
+        _spatialGrid = config;
+        return this;
+    }
+
     // ── Internal bridge to the existing Add* extension methods ──
     // Each configurator folds the accumulated delegates into one Action (or null when none were added, so the underlying
     // Add* method applies its defaults untouched).
@@ -136,6 +152,16 @@ public sealed class TyphonOptions
         foreach (var touch in _archetypeRegistrations)
         {
             touch();
+        }
+    }
+
+    /// <summary>Applies the captured spatial-grid config (if any). Must run AFTER the archetypes are touched and BEFORE
+    /// <c>InitializeArchetypes</c> — the engine builds the grid + per-archetype spatial state during that call.</summary>
+    internal void ApplySpatialGridConfig(DatabaseEngine engine)
+    {
+        if (_spatialGrid.HasValue)
+        {
+            engine.ConfigureSpatialGrid(_spatialGrid.Value);
         }
     }
 

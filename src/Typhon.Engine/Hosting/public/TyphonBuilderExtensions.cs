@@ -264,10 +264,13 @@ public static class ServiceCollectionExtensions
                     try
                     {
                         // Order matters: register component storage on this engine, put the archetypes' shapes in the
-                        // registry, THEN wire per-archetype state — InitializeArchetypes only wires archetypes that are in
-                        // the registry and whose components are all registered.
+                        // registry, apply the spatial-grid config (needed by spatial archetypes), THEN wire per-archetype
+                        // state — InitializeArchetypes only wires archetypes that are in the registry and whose components
+                        // are all registered, and it consumes the pending spatial-grid config while building per-archetype
+                        // spatial state (so ConfigureSpatialGrid MUST land before it).
                         options.ApplyComponentRegistrations(engine);
                         options.ApplyArchetypeRegistrations();
+                        options.ApplySpatialGridConfig(engine);
                         engine.InitializeArchetypes();
                         return engine;
                     }

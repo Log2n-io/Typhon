@@ -1,8 +1,10 @@
 using System;
 using System.IO;
+using System.Numerics;
 using System.Reflection;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
+using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Tests;
 
@@ -146,6 +148,40 @@ public class TyphonSetupTests
             "a mid-teardown throw must not leak the owned ServiceProvider — Dispose() disposes it in a finally");
     }
 
+    // The one-line setup can configure the spatial grid: Open() applies ConfigureSpatialGrid in the pre-InitializeArchetypes
+    // window it otherwise closes. A spatial archetype REQUIRES a grid (InitializeArchetypes throws without one), so a clean
+    // Open + a working spatial query proves the grid landed — no dropping to the manual Add* chain.
+    [Test]
+    public void Open_WithSpatialArchetype_ConfiguresGridThroughOpen()
+    {
+        using var dbe = DatabaseEngine.Open(DbPath("spatial"), options =>
+        {
+            options
+                .Register<SetupSpatialBox>()
+                .RegisterArchetype<SetupSpatialArch>()
+                .ConfigureSpatialGrid(new SpatialGridConfig(Vector2.Zero, new Vector2(1000f, 1000f), cellSize: 50f));
+            ConfigureWalForTest(options);
+        });
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.Spawn<SetupSpatialArch>(SetupSpatialArch.Box.Set(new SetupSpatialBox { Box = Aabb(100f, 100f) }));
+            tx.Spawn<SetupSpatialArch>(SetupSpatialArch.Box.Set(new SetupSpatialBox { Box = Aabb(900f, 900f) }));
+            tx.Commit();
+        }
+
+        dbe.WriteTickFence(1);   // outside the runtime, refresh the spatial index once so WhereNearby can filter
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            int near = tx.Query<SetupSpatialArch>().WhereNearby<SetupSpatialBox>(100f, 100f, 0f, 50f).Count();
+            Assert.That(near, Is.EqualTo(1),
+                "the grid was configured through Open() — exactly one of the two entities is within 50 units of (100,100)");
+        }
+    }
+
+    private static AABB2F Aabb(float x, float y) => new AABB2F { MinX = x, MaxX = x, MinY = y, MaxY = y };
+
     // AC5 (multi-register) — several Register<T> calls all take effect (distinct closed generics).
     [Test]
     public void AddTyphon_MultipleRegister_AllComponentsUsable()
@@ -233,4 +269,19 @@ public class TyphonSetupTests
             Assert.That(read.A, Is.EqualTo(42));
         }
     }
+}
+
+// Spatial component + cluster-eligible archetype for the ConfigureSpatialGrid-through-Open test. Mirrors the guide model
+// (a SingleVersion component carrying a [SpatialIndex] AABB). A spatial archetype REQUIRES a grid, so a successful Open
+// proves ConfigureSpatialGrid landed in the pre-InitializeArchetypes window. Archetype id 212 avoids the 200-211 range.
+[Component("Typhon.Schema.SetupTest.SpatialBox", 1, StorageMode = StorageMode.SingleVersion)]
+public struct SetupSpatialBox
+{
+    [SpatialIndex(2f)] public AABB2F Box;
+}
+
+[Archetype(212)]
+class SetupSpatialArch : Archetype<SetupSpatialArch>
+{
+    public static readonly Comp<SetupSpatialBox> Box = Register<SetupSpatialBox>();
 }

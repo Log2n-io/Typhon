@@ -157,11 +157,13 @@ When entities live in space and you ask "what's near here?", a field scan is the
 public struct Bounds { [SpatialIndex(2f)] public AABB2F Box; }   // 2f = movement margin
 ```
 
-Configure a grid once at startup (before `InitializeArchetypes`):
+Configure the grid as part of the one-line setup — add `ConfigureSpatialGrid` to the `Open` / `AddTyphon` options and it's applied automatically before the archetypes are wired:
 
 ```csharp
-dbe.ConfigureSpatialGrid(new SpatialGridConfig(
-    worldMin: Vector2.Zero, worldMax: new Vector2(1000f, 1000f), cellSize: 50f));
+using var dbe = DatabaseEngine.Open("game.typhon", o => o
+    .Register<Position>().Register<Bounds>().RegisterArchetype<Unit>()
+    .ConfigureSpatialGrid(new SpatialGridConfig(
+        worldMin: Vector2.Zero, worldMax: new Vector2(1000f, 1000f), cellSize: 50f)));
 ```
 
 Then query by geometry — spatial queries are materialised with `Execute()`:
@@ -210,4 +212,4 @@ You can now design a data model: archetypes, the storage mode per component, ind
 
 ## 🧩 The types you'll touch
 
-`[Component(StorageMode = …)]` · `[Index]` / `[Index(AllowMultiple = true)]` · `[SpatialIndex]` on an `AABB2F` field · `Point2F` / `Point3F` · `EntityLink<T>` · `Archetype<TSelf, TParent>` (inheritance) · generated `ReadAll` / `ReadWriteAll` · `dbe.ConfigureSpatialGrid` · `dbe.WriteTickFence` · `tx.Query<T>().WhereNearby/WhereInAABB/WhereRay` · `cluster.WriteSpatial`.
+`[Component(StorageMode = …)]` · `[Index]` / `[Index(AllowMultiple = true)]` · `[SpatialIndex]` on an `AABB2F` field · `Point2F` / `Point3F` · `EntityLink<T>` · `Archetype<TSelf, TParent>` (inheritance) · generated `ReadAll` / `ReadWriteAll` · `ConfigureSpatialGrid` (in the `Open`/`AddTyphon` options) · `dbe.WriteTickFence` · `tx.Query<T>().WhereNearby/WhereInAABB/WhereRay` · `cluster.WriteSpatial`.

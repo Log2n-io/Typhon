@@ -5,43 +5,27 @@
 // It walks the guide's arc (declare -> spawn -> read -> transact -> query -> view -> tick)
 // printing checkable text to the console. The data model + systems live in Model.cs.
 
-using Microsoft.Extensions.DependencyInjection;
 using System;
 using System.Numerics;
 using System.Threading;
 using Typhon.Engine;
-using Typhon.Engine.Internals;   // ManagedPagedMMFOptions (for EnsureFileDeleted)
 using Typhon.Schema.Definition;
 using SkirmishGuide;
 
-// ── Build the engine (ch.1) ──────────────────────────────────────────────
-var services = new ServiceCollection()
-    .AddLogging()
-    .AddResourceRegistry()
-    .AddMemoryAllocator()
-    .AddEpochManager()
-    .AddHighResolutionSharedTimer()
-    .AddDeadlineWatchdog()
-    .AddScopedManagedPagedMemoryMappedFile(o =>
-    {
-        o.DatabaseName      = "skirmish-guide";
-        o.DatabaseDirectory = ".";
-    })
-    .AddScopedDatabaseEngine(_ => { });
+// ── Open the engine + register schema + spatial grid (ch.1 / ch.2) ────────
+// Fresh DB each run: wipe any prior bundle before opening.
+new PagedMMFOptions { DatabaseName = "skirmish-guide", DatabaseDirectory = "." }.EnsureFileDeleted();
 
-using var provider = services.BuildServiceProvider();
-provider.EnsureFileDeleted<ManagedPagedMMFOptions>();   // fresh DB each run
-var dbe = provider.GetRequiredService<DatabaseEngine>();
-
-// ── Register schema + spatial grid (ch.1 / ch.2) ─────────────────────────
-dbe.RegisterComponentFromAccessor<Position>();
-dbe.RegisterComponentFromAccessor<Bounds>();
-dbe.RegisterComponentFromAccessor<Health>();
-dbe.RegisterComponentFromAccessor<Velocity>();
-dbe.RegisterComponentFromAccessor<Team>();
-Unit.Touch();
-dbe.ConfigureSpatialGrid(new SpatialGridConfig(Vector2.Zero, new Vector2(1000f, 1000f), cellSize: 50f));
-dbe.InitializeArchetypes();
+// One call: names the database, registers the components + archetype, configures the spatial grid
+// (required by the [SpatialIndex] on Bounds), and wires the archetypes — a ready-to-use engine.
+using var dbe = DatabaseEngine.Open("skirmish-guide.typhon", o => o
+    .Register<Position>()
+    .Register<Bounds>()
+    .Register<Health>()
+    .Register<Velocity>()
+    .Register<Team>()
+    .RegisterArchetype<Unit>()
+    .ConfigureSpatialGrid(new SpatialGridConfig(Vector2.Zero, new Vector2(1000f, 1000f), cellSize: 50f)));
 
 // ════════════════════════════════════════════════════════════════════════
 Banner("ch.1 — spawn, read, query");
