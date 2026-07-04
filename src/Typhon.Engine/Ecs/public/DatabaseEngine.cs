@@ -704,6 +704,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
     public bool IsDisposed { get; private set; }
 
+    // Test-only seam: when set, DisposeCore throws at the very start of teardown (simulates a failing step, e.g. a full
+    // disk during the final checkpoint) so tests can prove Dispose()'s finally still releases the owned provider. §11 / #147.
+    internal bool ThrowInDisposeCoreForTest { get; set; }
+
     protected override void Dispose(bool disposing)
     {
         if (IsDisposed)
@@ -711,8 +715,49 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             return;
         }
 
+        try
+        {
+            DisposeCore(disposing);
+        }
+        finally
+        {
+            // Set BEFORE the owned-provider disposal so the provider's re-entrant disposal of this same singleton
+            // short-circuits at the IsDisposed guard above.
+            IsDisposed = true;
+
+            // Open() path only: dispose the private container this engine owns (null on the DI path — the host owns it
+            // there). In a FINALLY so a throw from a teardown step in DisposeCore (e.g. PersistEngineState on a full disk)
+            // still releases the container — otherwise the owned provider's threads (watchdog, timer) + native memory would
+            // leak. The provider also disposes the rest of the engine-graph singletons (ResourceRegistry, EpochManager,
+            // MMF, ...); MMF was already disposed in DisposeCore and its Dispose is idempotent. Guarded so a dispose-time
+            // provider fault can't mask an in-flight teardown exception.
+            if (disposing)
+            {
+                var ownedProvider = _ownedProvider;
+                _ownedProvider = null;
+                try
+                {
+                    ownedProvider?.Dispose();
+                }
+                catch
+                {
+                    // ignored — a teardown exception (if any) is the diagnostic one; cleanup must not mask it.
+                }
+            }
+        }
+    }
+
+    // Engine teardown, split out so Dispose() can guarantee owned-provider disposal in a finally (see there). A throw from
+    // any step here propagates out of Dispose() after the finally has released the owned container.
+    private void DisposeCore(bool disposing)
+    {
         if (disposing)
         {
+            if (ThrowInDisposeCoreForTest)
+            {
+                throw new InvalidOperationException("Simulated teardown-step failure (ThrowInDisposeCoreForTest).");
+            }
+
             // Statistics worker must stop before checkpoint (it holds epoch guards during scans)
             StatisticsWorker?.Dispose();
             StatisticsWorker = null;
@@ -770,19 +815,6 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             }
         }
         base.Dispose(disposing);
-        IsDisposed = true;
-
-        // Open() path only: dispose the private container this engine owns (null on the DI path — the host owns it there).
-        // Done LAST, strictly after IsDisposed = true, so the provider's disposal of this same singleton re-enters
-        // Dispose(bool) and short-circuits at the guard above. The provider also disposes the rest of the engine-graph
-        // singletons (ResourceRegistry, EpochManager, MMF, ...); MMF was already disposed above and its Dispose is
-        // idempotent — the same double-dispose the host-DI path performs when a host disposes its ServiceProvider.
-        if (disposing)
-        {
-            var ownedProvider = _ownedProvider;
-            _ownedProvider = null;
-            ownedProvider?.Dispose();
-        }
     }
 
     private void InitializeWalManager()

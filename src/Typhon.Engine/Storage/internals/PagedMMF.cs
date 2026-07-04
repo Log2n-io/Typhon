@@ -623,7 +623,9 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
         if (disposing)
         {
-            Logger.LogInformation("Disposing Virtual Disk Manager");
+            // Null-conditional Logger throughout: an early ctor throw (e.g. options.Validate at construction, before Logger
+            // is assigned) still registers this node in the resource tree, so Dispose can run on a half-constructed instance.
+            Logger?.LogInformation("Disposing Virtual Disk Manager");
             if (_fileHandle != null)
             {
                 TyphonEvent.EmitStorageFileHandle(1, _filePathId, 0);
@@ -639,7 +641,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             // built) still registers this node in the resource tree, so Dispose can run on a half-constructed instance.
             _backpressureStrategy?.Dispose();
 
-            Logger.LogInformation("Virtual Disk Manager disposed");
+            Logger?.LogInformation("Virtual Disk Manager disposed");
         }
         IsDisposed = true;
         base.Dispose(disposing);

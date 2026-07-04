@@ -19,13 +19,13 @@ internal sealed class PagedMMFOptionsValidator<TO> : IValidateOptions<TO> where 
 }
 
 /// <summary>
-/// Validates the <b>wired</b> knobs of <see cref="DatabaseEngineOptions.Resources"/> at DI options-resolution time. Only the
-/// fields that actually drive engine behavior are range-checked: <see cref="ResourceOptions.MaxActiveTransactions"/> (the
-/// transaction-chain cap), <see cref="ResourceOptions.WalRingBufferSizeBytes"/> (commit-buffer capacity), and the two
-/// checkpoint timers. The remaining <see cref="ResourceOptions"/> fields are vestigial — referenced only by the never-called
-/// budget <see cref="ResourceOptions.Validate"/> — and are deliberately NOT validated, to avoid guarding knobs that govern
-/// nothing (the same reason <c>MemoryAllocatorOptions</c> / <c>ResourceRegistryOptions</c>, which carry only a diagnostic
-/// Name, get no validator at all). See issue #148.
+/// Validates the <b>wired</b> knobs of <see cref="DatabaseEngineOptions"/> at DI options-resolution time: the
+/// <see cref="ResourceOptions"/> settings (<see cref="ResourceOptions.MaxActiveTransactions"/>,
+/// <see cref="ResourceOptions.WalRingBufferSizeBytes"/>, and the two checkpoint timers) and, when present, the
+/// <see cref="WalWriterOptions"/> knobs (segment / staging-buffer sizes, group-commit interval, pre-allocation). Only
+/// fields that actually drive engine behavior are checked — the aspirational memory-budget knobs that used to live on
+/// <see cref="ResourceOptions"/> were removed as vestigial in #148 (the same reason <c>MemoryAllocatorOptions</c> /
+/// <c>ResourceRegistryOptions</c>, which carry only a diagnostic Name, get no validator at all). See issue #148.
 /// </summary>
 [UsedImplicitly]
 internal sealed class DatabaseEngineOptionsValidator : IValidateOptions<DatabaseEngineOptions>
@@ -58,6 +58,33 @@ internal sealed class DatabaseEngineOptionsValidator : IValidateOptions<Database
         if (resources.CheckpointBarrierTimeoutMs <= 0)
         {
             failures.Add($"Resources.CheckpointBarrierTimeoutMs must be > 0 (was {resources.CheckpointBarrierTimeoutMs}).");
+        }
+
+        // WalWriterOptions is the real WAL config (unlike the removed vestigial ResourceOptions budget knobs). Validate its
+        // wired invariants when present; the engine tolerates a null Wal by deriving defaults, so a null is not an error here.
+        var wal = options.Wal;
+        if (wal != null)
+        {
+            if (wal.SegmentSize == 0)
+            {
+                failures.Add($"Wal.SegmentSize must be > 0 (was {wal.SegmentSize}).");
+            }
+
+            // Documented constraint: the O_DIRECT staging buffer must be a positive multiple of 4096.
+            if (wal.StagingBufferSize <= 0 || (wal.StagingBufferSize % 4096) != 0)
+            {
+                failures.Add($"Wal.StagingBufferSize must be a positive multiple of 4096 (was {wal.StagingBufferSize}).");
+            }
+
+            if (wal.GroupCommitIntervalMs <= 0)
+            {
+                failures.Add($"Wal.GroupCommitIntervalMs must be > 0 (was {wal.GroupCommitIntervalMs}).");
+            }
+
+            if (wal.PreAllocateSegments < 0)
+            {
+                failures.Add($"Wal.PreAllocateSegments must be >= 0 (was {wal.PreAllocateSegments}).");
+            }
         }
 
         return failures.Count == 0 ? ValidateOptionsResult.Success : ValidateOptionsResult.Fail(failures);

@@ -6,7 +6,6 @@ using PrettyPrompt;
 using PrettyPrompt.Completion;
 using PrettyPrompt.Documents;
 using PrettyPrompt.Highlighting;
-using Typhon.Shell.Extensibility;
 using Typhon.Shell.Session;
 
 namespace Typhon.Shell;

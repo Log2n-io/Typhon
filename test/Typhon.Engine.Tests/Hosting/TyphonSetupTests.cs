@@ -115,6 +115,37 @@ public class TyphonSetupTests
         Assert.DoesNotThrow(() => File.Delete(dataFile));
     }
 
+    // §11 / 6a — a throw from an engine teardown step must NOT leak the owned ServiceProvider. Dispose() runs teardown in a
+    // try and releases the owned container in a finally, so a mid-teardown failure (here forced via ThrowInDisposeCoreForTest,
+    // modelling e.g. a full disk during the final checkpoint) still disposes the provider while the original error propagates.
+    [Test]
+    public void Open_TeardownThrows_StillDisposesOwnedProvider()
+    {
+        var ownedProviderField = typeof(DatabaseEngine).GetField("_ownedProvider", BindingFlags.NonPublic | BindingFlags.Instance);
+        Assert.That(ownedProviderField, Is.Not.Null, "test depends on DatabaseEngine._ownedProvider");
+
+        var dbe = DatabaseEngine.Open(DbPath("teardownthrow"), options =>
+        {
+            options.Register<CompA>().RegisterArchetype<CompAArch>();
+            ConfigureWalForTest(options);
+        });
+
+        // Capture the owned provider before Dispose() nulls it in its finally.
+        var ownedProvider = (ServiceProvider)ownedProviderField.GetValue(dbe);
+        Assert.That(ownedProvider, Is.Not.Null, "Open() must attach the owned provider");
+
+        dbe.ThrowInDisposeCoreForTest = true;
+
+        // The teardown exception must still surface to the caller (the finally does not swallow it)...
+        Assert.Throws<InvalidOperationException>(() => dbe.Dispose());
+
+        // ...yet the owned provider must have been disposed anyway, so its singletons (watchdog/timer threads, allocator)
+        // don't leak. Resolving from a disposed provider throws.
+        Assert.Throws<ObjectDisposedException>(
+            () => ownedProvider.GetService(typeof(IResourceRegistry)),
+            "a mid-teardown throw must not leak the owned ServiceProvider — Dispose() disposes it in a finally");
+    }
+
     // AC5 (multi-register) — several Register<T> calls all take effect (distinct closed generics).
     [Test]
     public void AddTyphon_MultipleRegister_AllComponentsUsable()

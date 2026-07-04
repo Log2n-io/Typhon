@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -9,7 +10,6 @@ using System.Text;
 using System.Threading;
 using Microsoft.Extensions.Logging;
 using Spectre.Console;
-using Typhon.Engine;
 using Typhon.Schema.Definition;
 using Typhon.Shell.Formatting;
 using Typhon.Shell.Parsing;
@@ -146,6 +146,7 @@ internal sealed class CommandExecutor
             "echo"          => ExecuteEcho(tokens, 1),
             "help"          => ExecuteHelp(tokens, 1),
             "migrate"       => ExecuteMigrate(tokens, 1),
+            "migrate-legacy" => ExecuteMigrateLegacy(tokens, 1),
             "history"       => ExecuteHistory(),
             "pause"         => ExecutePause(tokens, 1),
             "exit" or "quit" => CommandResult.Exit(),
@@ -211,6 +212,101 @@ internal sealed class CommandExecutor
 
         var message = _session.OpenDatabase(path);
         return CommandResult.Markup($"  [green]{Markup.Escape(message)}[/]");
+    }
+
+    // The v4 on-disk header signature (mirrors the internal ManagedPagedMMF.HeaderSignature). Hard-coded here because the
+    // engine constant is internal; it is a stable format identifier.
+    private const string LegacyHeaderSignature = "TyphonDatabase";
+
+    // Import a pre-bundle legacy database FILE ({name}.bin) into a {name}.typhon bundle DIRECTORY. The v4 data-file format
+    // is byte-identical between the legacy .bin and the bundle's inner 'data' file (#450 only changed the container), so
+    // this is a MOVE, not a conversion. Safe-by-refusal on the WAL: the legacy shared wal/ can't be attributed to one DB.
+    private CommandResult ExecuteMigrateLegacy(List<Token> tokens, int pos)
+    {
+        var path = ExpectPath(tokens, ref pos);
+        if (path == null)
+        {
+            return CommandResult.Error("Syntax error: migrate-legacy <path-to-.bin>");
+        }
+
+        var binPath = Path.GetFullPath(path);
+        if (!File.Exists(binPath) && File.Exists(binPath + ".bin"))
+        {
+            binPath += ".bin";
+        }
+
+        if (!File.Exists(binPath))
+        {
+            return CommandResult.Error($"Error: legacy database file not found: '{binPath}'.");
+        }
+
+        if (!LooksLikeTyphonDatabase(binPath))
+        {
+            return CommandResult.Error($"Error: '{binPath}' is not a Typhon database file (the '{LegacyHeaderSignature}' header signature was not found).");
+        }
+
+        var dir = Path.GetDirectoryName(binPath);
+        if (dir == null)
+        {
+            return CommandResult.Error($"Error: cannot resolve the directory of '{binPath}'.");
+        }
+
+        var name = Path.GetFileNameWithoutExtension(binPath);
+        var bundle = Path.Combine(dir, $"{name}.typhon");
+
+        if (Directory.Exists(bundle) || File.Exists(bundle))
+        {
+            return CommandResult.Error($"Error: target bundle already exists: '{bundle}'. Remove it (or pick a different name) and retry.");
+        }
+
+        // Clean-WAL precondition: the legacy shared wal/ can't be attributed to a single database, so we refuse to migrate a
+        // database that may still have un-checkpointed commits in an adjacent wal/. A clean close checkpoints the WAL into
+        // the data file — this importer only MOVES that file, it does not replay a WAL.
+        var legacyWal = Path.Combine(dir, "wal");
+        if (Directory.Exists(legacyWal) && Directory.GetFileSystemEntries(legacyWal).Length > 0)
+        {
+            return CommandResult.Error(
+                $"Error: a non-empty legacy WAL directory '{legacyWal}' is present. It may hold un-checkpointed changes that " +
+                "cannot be attributed to this database. Reopen and cleanly close the database (which checkpoints the WAL) " +
+                "before migrating, or remove the wal/ directory if you are certain it is obsolete.");
+        }
+
+        try
+        {
+            Directory.CreateDirectory(bundle);
+            File.Move(binPath, Path.Combine(bundle, "data"));
+        }
+        catch (Exception ex)
+        {
+            return CommandResult.Error($"Error: migration failed: {ex.Message}");
+        }
+
+        return CommandResult.Markup(
+            $"  [green]Migrated to bundle '{Markup.Escape(bundle)}'[/] [grey](moved '{Markup.Escape(Path.GetFileName(binPath))}' → data).[/]\n" +
+            $"  [grey]Open it with:[/] [cyan]open {Markup.Escape(bundle)}[/]");
+    }
+
+    private static bool LooksLikeTyphonDatabase(string binPath)
+    {
+        // The signature lives in page 0 (at PageBaseHeaderSize). Rather than depend on the exact offset, scan the first page
+        // for the distinctive ASCII signature — a false positive in a non-Typhon file's first 8 KB is negligible.
+        Span<byte> probe = stackalloc byte[8192];
+        int read;
+        using (var fs = new FileStream(binPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+        {
+            read = fs.Read(probe);
+        }
+
+        ReadOnlySpan<byte> sig = "TyphonDatabase"u8;
+        for (var i = 0; i + sig.Length <= read; i++)
+        {
+            if (probe.Slice(i, sig.Length).SequenceEqual(sig))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private CommandResult ExecuteClose()
@@ -1129,6 +1225,7 @@ internal sealed class CommandExecutor
         sb.AppendLine("    [cyan]open[/] <path>                      Open (or create) a database");
         sb.AppendLine("    [cyan]close[/]                            Close current database");
         sb.AppendLine("    [cyan]info[/]                             Show database summary");
+        sb.AppendLine("    [cyan]migrate-legacy[/] <path.bin>         Import a pre-bundle .bin into a .typhon bundle");
         sb.AppendLine();
         sb.AppendLine("  [yellow]Schema:[/]");
         sb.AppendLine("    [cyan]load-schema[/] <path>               Load component types from assembly");
@@ -1198,7 +1295,8 @@ internal sealed class CommandExecutor
     {
         var text = command switch
         {
-            "open"          => "  open <path>\n    Opens a database file. Creates it if it doesn't exist.\n    Closes any currently open database first.",
+            "open"          => "  open <path>\n    Opens a .typhon database (a directory). Creates it if it doesn't exist.\n    Closes any currently open database first.",
+            "migrate-legacy" => "  migrate-legacy <path-to-.bin>\n    Imports a legacy pre-bundle database file (.bin) into a {name}.typhon\n    bundle directory (moves the data file — the on-disk format is unchanged).\n    The .bin's filename must be its original database name (verified on open).\n    Refuses if the target bundle already exists or a non-empty legacy wal/ is\n    present (cleanly close the database first to checkpoint the WAL).",
             "close"         => "  close\n    Closes the current database and releases the file lock.\n    Warns if a transaction is active.",
             "info"          => "  info\n    Shows database summary: path, component count, transaction state.",
             "load-schema"   => "  load-schema <path>\n    Loads component types from a compiled .NET assembly (.dll).\n    Can be called before or after opening a database.\n    Multiple assemblies can be loaded (additive).",

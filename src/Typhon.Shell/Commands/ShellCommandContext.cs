@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using Typhon.Engine;
 using Typhon.Shell.Extensibility;
 using Typhon.Shell.Session;
 

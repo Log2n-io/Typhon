@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using Terminal.Gui.App;
@@ -7,7 +6,6 @@ using Terminal.Gui.Drawing;
 using Terminal.Gui.Input;
 using Terminal.Gui.ViewBase;
 using Terminal.Gui.Views;
-using Typhon.Engine;
 using Typhon.Shell.Session;
 using Attribute = Terminal.Gui.Drawing.Attribute;
 

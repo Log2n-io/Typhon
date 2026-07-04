@@ -122,6 +122,30 @@ class OptionsValidationTests
         Assert.That(ex.Message, Does.Contain(knob), "the failure message must name the offending knob");
     }
 
+    [TestCase("SegmentSize")]
+    [TestCase("StagingBufferSize")]
+    [TestCase("GroupCommitIntervalMs")]
+    [TestCase("PreAllocateSegments")]
+    public void DatabaseEngine_InvalidWalKnob_FailsWithSpecificMessage(string knob)
+    {
+        var sp = new ServiceCollection()
+            .AddScopedDatabaseEngine(o =>
+            {
+                o.Wal = new WalWriterOptions();
+                switch (knob)
+                {
+                    case "SegmentSize": o.Wal.SegmentSize = 0; break;
+                    case "StagingBufferSize": o.Wal.StagingBufferSize = 4097; break;  // not a multiple of 4096
+                    case "GroupCommitIntervalMs": o.Wal.GroupCommitIntervalMs = 0; break;
+                    case "PreAllocateSegments": o.Wal.PreAllocateSegments = -1; break;
+                }
+            })
+            .BuildServiceProvider();
+
+        var ex = Assert.Throws<OptionsValidationException>(() => _ = sp.GetRequiredService<IOptions<DatabaseEngineOptions>>().Value);
+        Assert.That(ex.Message, Does.Contain(knob), "the failure message must name the offending Wal knob");
+    }
+
     // ── MemoryAllocatorOptions / ResourceRegistryOptions: no validator (only a diagnostic Name) ──
 
     [Test]

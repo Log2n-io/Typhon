@@ -111,7 +111,7 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     /// <param name="mmf">The managed paged memory-mapped file (data file storage).</param>
     /// <param name="uowRegistry">Unit of Work registry for state transitions.</param>
     /// <param name="walManager">WAL manager for reading DurableLsn and segment reclamation.</param>
-    /// <param name="resourceOptions">Configuration (CheckpointIntervalMs, CheckpointMaxDirtyPages).</param>
+    /// <param name="resourceOptions">Configuration (CheckpointIntervalMs, CheckpointBarrierTimeoutMs).</param>
     /// <param name="epochManager">Epoch manager for page access.</param>
     /// <param name="stagingPool">Pre-allocated staging buffer pool for snapshot-based checkpoint writes.</param>
     /// <param name="parent">Parent resource node.</param>

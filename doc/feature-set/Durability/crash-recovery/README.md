@@ -28,18 +28,7 @@ complete.
 using Typhon.Engine;
 
 var services = new ServiceCollection();
-services
-    .AddResourceRegistry()
-    .AddMemoryAllocator()
-    .AddEpochManager()
-    .AddHighResolutionSharedTimer()
-    .AddDeadlineWatchdog()
-    .AddManagedPagedMMF(opts =>
-    {
-        opts.DatabaseName      = "skirmish";
-        opts.DatabaseDirectory = @"C:\data\skirmish";
-    })
-    .AddDatabaseEngine(engineOpts => engineOpts.Wal = new WalWriterOptions { WalDirectory = @"C:\data\skirmish\wal" });
+services.AddTyphon(o => o.DatabaseFile(@"C:\data\skirmish\skirmish.typhon"));
 
 var serviceProvider = services.BuildServiceProvider();
 

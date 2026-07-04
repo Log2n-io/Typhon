@@ -11,35 +11,19 @@ By the end you'll recognise the five things every Typhon program does: **declare
 Here it is end-to-end. We'll walk through it piece by piece below.
 
 ```csharp
-using Microsoft.Extensions.DependencyInjection;
 using Typhon.Engine;            // DatabaseEngine, EntityId, transactions, queries
 using Typhon.Schema.Definition; // [Component], [Archetype], Comp<T>
 
-// ── 3. Build the engine (once, at startup) ─────────────────────────────
-var services = new ServiceCollection()
-    .AddLogging()
-    .AddResourceRegistry()
-    .AddMemoryAllocator()
-    .AddEpochManager()
-    .AddHighResolutionSharedTimer()
-    .AddDeadlineWatchdog()
-    .AddScopedManagedPagedMemoryMappedFile(o =>
-    {
-        o.DatabaseName      = "skirmish";
-        o.DatabaseDirectory = ".";
-    })
-    .AddScopedDatabaseEngine(_ => { });
+// ── 3. Open the engine (once, at startup) ──────────────────────────────
+// One call: names the on-disk database (a "skirmish.typhon" directory in the
+// working folder), registers your components + archetype, and returns a
+// ready-to-use engine. `using var` flushes and releases the file lock at scope end.
+using var dbe = DatabaseEngine.Open("skirmish.typhon", o => o
+    .Register<Position>()
+    .Register<Health>()
+    .RegisterArchetype<Unit>());
 
-using var provider = services.BuildServiceProvider();
-var dbe = provider.GetRequiredService<DatabaseEngine>();
-
-// ── 4. Register your schema (once, after building the engine) ──────────
-dbe.RegisterComponentFromAccessor<Position>();
-dbe.RegisterComponentFromAccessor<Health>();
-Unit.Touch();                  // make the archetype known before wiring
-dbe.InitializeArchetypes();    // connect archetype slots to component storage
-
-// ── 5. Spawn an entity (a write — needs a transaction) ─────────────────
+// ── 4. Spawn an entity (a write — needs a transaction) ─────────────────
 EntityId soldier;
 using (var tx = dbe.CreateQuickTransaction())
 {
@@ -49,7 +33,7 @@ using (var tx = dbe.CreateQuickTransaction())
     tx.Commit();
 }
 
-// ── 6. Read it back (a read — sees a consistent snapshot) ──────────────
+// ── 5. Read it back (a read — sees a consistent snapshot) ──────────────
 using (var tx = dbe.CreateQuickTransaction())
 {
     var e   = tx.Open(soldier);
@@ -58,7 +42,7 @@ using (var tx = dbe.CreateQuickTransaction())
     Console.WriteLine($"HP {hp.Current}/{hp.Max} at ({pos.X}, {pos.Y})");
 }
 
-// ── 7. Query (find entities matching a predicate) ──────────────────────
+// ── 6. Query (find entities matching a predicate) ──────────────────────
 using (var tx = dbe.CreateQuickTransaction())
 {
     var wounded = tx.Query<Unit>()
@@ -124,22 +108,11 @@ public sealed partial class Unit : Archetype<Unit>
 - Each `Register<T>()` declares a component slot; the static `Comp<T>` handle (`Unit.Position`) is how you refer to that slot when spawning, reading, and querying.
 - **`partial` matters:** marking the archetype `partial` lets Typhon's source generator add typed bulk accessors (`Unit.ReadAll` / `ReadWriteAll`). We don't use them in this chapter — they need the generator wired into your project, a [ch.2](02-modeling.md) topic — but adding `partial` now costs nothing and saves a change later.
 
-### 3. Build the engine once
+### 3. Open the engine
 
-The engine is assembled through the standard .NET service collection. The chain registers the engine's moving parts (logging, memory, paging, timers) and finally the `DatabaseEngine` itself. **`AddLogging()` is required** — the engine logs through `ILogger`, and resolution fails without it. You do this **once at startup** and hand `dbe` around — there's exactly one engine per process.
+`DatabaseEngine.Open` is the one-line setup. It names the on-disk database (the path's stem becomes the database name — here a `skirmish.typhon` directory in the working folder), registers your schema, and hands back a **ready-to-use** engine. `Register<T>()` registers each component type and creates its storage; `RegisterArchetype<Unit>()` makes the archetype's shape known and wires its slots to that storage — so you can `Spawn` immediately, with no separate init call. Do this **once at startup** and hand `dbe` around — there's exactly one engine per process. `using var` disposes it (flushing dirty pages, releasing the file lock) at the end of scope.
 
-> 💡 **Why a struct-by-struct setup and not `new DatabaseEngine()`?** The engine is a composition of independently-configurable subsystems (page cache, allocator, timers). Wiring them through DI lets you tune or substitute any one of them — and lets the engine register itself as an observable resource. For a real app you'd wrap this chain in one helper and forget about it.
-
-### 4. Register your schema
-
-```csharp
-dbe.RegisterComponentFromAccessor<Position>();
-dbe.RegisterComponentFromAccessor<Health>();
-Unit.Touch();                  // make the archetype known
-dbe.InitializeArchetypes();    // wire archetype slots to component storage
-```
-
-Before you can spawn anything, the engine has to learn your schema. `RegisterComponentFromAccessor<T>()` registers each component type and creates its storage. `Unit.Touch()` forces the archetype's static initialisation so the engine sees it. `InitializeArchetypes()` then connects every archetype's slots to the right component storage. Do this once, after building the engine and before the first transaction.
+> 💡 **Hosting in a DI app?** The same fluent options work through `services.AddTyphon(o => o.DatabaseFile("skirmish.typhon").Register<Position>()…)`, which composes the engine into your service collection and registers it as an observable resource; `Open()` is the standalone equivalent that owns a private container for you. Under the hood the engine is a composition of independently-configurable subsystems (page cache, allocator, timers) — the `Configure*` methods on the options (`ConfigureStorage`, `ConfigureEngine`, …) let you tune any of them when you need to.
 
 ### 5. Writes go through a transaction
 
@@ -199,4 +172,4 @@ This program creates and reads data once. A real simulation runs **systems** ove
 
 ## 🧩 The types you'll touch
 
-`[Component]` / `[Archetype]` · `Archetype<T>` + `Comp<T>` · `DatabaseEngine` (`RegisterComponentFromAccessor` / `InitializeArchetypes`) · `EntityId` / `EntityRef` (`Open` / `Read`) · `Transaction` (via `CreateQuickTransaction`) · `EcsQuery` (via `tx.Query<Unit>()`).
+`[Component]` / `[Archetype]` · `Archetype<T>` + `Comp<T>` · `DatabaseEngine.Open` (`Register<T>` / `RegisterArchetype<T>`) · `EntityId` / `EntityRef` (`Open` / `Read`) · `Transaction` (via `CreateQuickTransaction`) · `EcsQuery` (via `tx.Query<Unit>()`).

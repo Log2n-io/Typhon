@@ -16,20 +16,10 @@ The cache holds a fixed number of 8192-byte slots in natively-addressed, memory-
 The cache itself is internal plumbing — application code never calls into it directly. What you control is its size and the timeouts around it, at engine startup:
 
 ```csharp
-services.AddResourceRegistry();
-services.AddMemoryAllocator();
-services.AddEpochManager();
-
-services
-    .AddManagedPagedMMF(options =>
-    {
-        options.DatabaseName = "GameWorld";
-        options.DatabaseCacheSize = 64 * 1024 * 1024; // 64 MiB = 8192 pages
-    })
-    .AddDatabaseEngine(options =>
-    {
-        options.Timeouts.PageCacheBackpressureTimeout = TimeSpan.FromSeconds(10);
-    });
+services.AddTyphon(o => o
+    .DatabaseFile("GameWorld.typhon")
+    .ConfigureStorage(s => s.DatabaseCacheSize = 64 * 1024 * 1024)              // 64 MiB = 8192 pages
+    .ConfigureEngine(e => e.Timeouts.PageCacheBackpressureTimeout = TimeSpan.FromSeconds(10)));
 
 var dbe = services.BuildServiceProvider().GetRequiredService<DatabaseEngine>();
 

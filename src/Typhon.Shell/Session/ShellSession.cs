@@ -4,7 +4,6 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
-using Typhon.Engine;
 using Typhon.Shell.Extensibility;
 
 namespace Typhon.Shell.Session;

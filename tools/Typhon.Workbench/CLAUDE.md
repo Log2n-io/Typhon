@@ -1,6 +1,6 @@
 # Typhon Workbench
 
-The Workbench is a local developer tool that opens a `.typhon` file or attaches to a live engine and surfaces data browsing, schema inspection, query authoring,
+The Workbench is a local developer tool that opens a `.typhon` database (a directory) or attaches to a live engine and surfaces data browsing, schema inspection, query authoring,
 profiling, and tracing in one professional-grade UI. Think **JetBrains DataGrip for Typhon** — not a profiler-with-extras.
 
 ## Stack
@@ -39,7 +39,7 @@ tools/Typhon.Workbench/
 
 ## Authority order for schema
 
-When loading a `.typhon` file, the authority order is **binaries > database file > Workbench**. If the loaded schema assembly doesn't match the file's recorded
+When loading a `.typhon` database, the authority order is **binaries > database > Workbench**. If the loaded schema assembly doesn't match the file's recorded
 schema hash, we report an incompatibility banner — we never silently trust Workbench's interpretation over what the engine or binary declared.
 
 ## Phase plan

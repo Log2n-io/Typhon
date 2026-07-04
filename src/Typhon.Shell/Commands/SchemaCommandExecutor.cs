@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Reflection;
 using System.Text;
 using Spectre.Console;
-using Typhon.Engine;
 using Typhon.Schema.Definition;
 using Typhon.Shell.Parsing;
 using Typhon.Shell.Session;

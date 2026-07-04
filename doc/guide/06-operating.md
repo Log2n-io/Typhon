@@ -43,7 +43,7 @@ It opens three kinds of thing, and the views light up according to which one you
 
 - **A trace file** (`.typhon-trace`) — a recorded run, opened offline. The full performance story.
 - **A live engine** — *attach* to a running process over TCP and watch ticks stream in as they happen.
-- **A database file** (`.typhon`) — open the on-disk store directly to inspect its schema and physical layout, no trace needed.
+- **A database** (a `.typhon` directory) — open the on-disk store directly to inspect its schema and physical layout, no trace needed.
 
 **What you get today**, organised by what you're trying to understand:
 
@@ -56,7 +56,7 @@ It opens three kinds of thing, and the views light up according to which one you
 *Understand the queries* (trace):
 - **Query Catalog**, **Query Plan Tree**, and **Execution Inspector** — every query definition seen in the run, its plan (structural or with per-execution stats overlaid), and a drill-down into individual executions' phase breakdowns.
 
-*Understand the data model & storage* (database file):
+*Understand the data model & storage* (a `.typhon` database):
 - **Component / Archetype browsers** and the **Schema Inspector** — survey every registered component (size, field count, entity count, indexes), inspect struct layout, indexes, and the systems that read/write or react to a component.
 - **Database File Map** — a zoomable Hilbert-curve map of the actual data file: per-page fill, write-age, residency, segment/chunk structure, with search and pathology highlighting (e.g. under-filled pages). The physical truth of where your bytes live.
 - **Resource Tree** — the engine's live resource graph (cache, WAL, pools…) as a navigable tree.
@@ -65,7 +65,7 @@ The shell ties it together: a dockable, persisted multi-panel workspace, a `Ctrl
 
 **How to open it.** Start it with `pwsh -File wb-dev.ps1 start` from the repo root (it launches the backend on `:5200` and the UI on `:5173`), browse to `http://localhost:5173`, and from the welcome screen pick **Open .typhon File**, **Open .typhon-trace**, or **Attach to Engine**. For an attach session, run your engine with the profiler's TCP exporter enabled (`typhon.telemetry.json`, above) and point the Workbench at the port; for a trace, just open the `.typhon-trace` the run left behind.
 
-> ⚠️ The performance views need profiler data — a `.typhon-trace` from a **profiler-enabled run**, or a live attach to an engine started with the TCP exporter on. Open a `.typhon` database file with the profiler off and you still get the schema and File-Map views, but the timeline has nothing to show.
+> ⚠️ The performance views need profiler data — a `.typhon-trace` from a **profiler-enabled run**, or a live attach to an engine started with the TCP exporter on. Open a `.typhon` database (directory) with the profiler off and you still get the schema and File-Map views, but the timeline has nothing to show.
 
 ---
 

@@ -15,17 +15,7 @@ Opening a database acquires two independent locks. The OS-level one is the real 
 
 ```csharp
 var services = new ServiceCollection();
-services.AddResourceRegistry();
-services.AddMemoryAllocator();
-services.AddEpochManager();
-
-services
-    .AddScopedManagedPagedMemoryMappedFile(options =>
-    {
-        options.DatabaseName = "GameWorld";
-        options.DatabaseDirectory = @"C:\Data\Saves";
-    })
-    .AddScopedDatabaseEngine();
+services.AddTyphon(o => o.DatabaseFile(@"C:\Data\Saves\GameWorld.typhon"));
 
 var sp = services.BuildServiceProvider();
 

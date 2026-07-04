@@ -16,104 +16,11 @@ public class ResourceOptionsTests
     {
         var options = new ResourceOptions();
 
-        // Page Cache defaults
-        Assert.That(options.PageCachePages, Is.EqualTo(256), "Default PageCachePages should be 256 (2 MB)");
-        Assert.That(options.MaxPageCachePages, Is.EqualTo(16384), "Default MaxPageCachePages should be 16384 (128 MB)");
-
-        // Transaction defaults
         Assert.That(options.MaxActiveTransactions, Is.EqualTo(1000));
-        Assert.That(options.TransactionPoolSize, Is.EqualTo(16));
-
-        // WAL defaults
         Assert.That(options.WalRingBufferSizeBytes, Is.EqualTo(8 * 1024 * 1024), "Default WAL ring buffer should be 8 MB");
-        Assert.That(options.WalBackPressureThreshold, Is.EqualTo(0.8));
-        Assert.That(options.WalMaxSegmentSizeBytes, Is.EqualTo(64L << 20), "Default WAL segment should be 64 MB");
-        Assert.That(options.WalMaxSegments, Is.EqualTo(4));
-
-        // Checkpoint defaults
-        Assert.That(options.CheckpointMaxDirtyPages, Is.EqualTo(10000));
         Assert.That(options.CheckpointIntervalMs, Is.EqualTo(30000), "Default checkpoint interval should be 30 seconds");
-
-        // Backup defaults
-        Assert.That(options.ShadowBufferPages, Is.EqualTo(512), "Default shadow buffer should be 512 pages (4 MB)");
-
-        // Overall budget
-        Assert.That(options.TotalMemoryBudgetBytes, Is.EqualTo(4L << 30), "Default budget should be 4 GB");
-    }
-
-    [Test]
-    public void ResourceOptions_Validate_PassesWithDefaultValues()
-    {
-        var options = new ResourceOptions();
-
-        Assert.DoesNotThrow(() => options.Validate());
-    }
-
-    [Test]
-    public void ResourceOptions_Validate_PassesWithLargeBudget()
-    {
-        var options = new ResourceOptions
-        {
-            PageCachePages = 262144,           // 2 GB
-            WalRingBufferSizeBytes = 16 << 20, // 16 MB
-            WalMaxSegments = 8,
-            WalMaxSegmentSizeBytes = 128L << 20, // 128 MB (1 GB total WAL)
-            ShadowBufferPages = 1024,          // 8 MB
-            TotalMemoryBudgetBytes = 8L << 30  // 8 GB
-        };
-
-        Assert.DoesNotThrow(() => options.Validate());
-    }
-
-    [Test]
-    public void ResourceOptions_Validate_ThrowsWhenFixedAllocationsExceedBudget()
-    {
-        var options = new ResourceOptions
-        {
-            // Request more than the budget allows
-            PageCachePages = 262144,           // 2 GB
-            WalRingBufferSizeBytes = 4 << 20,  // 4 MB
-            WalMaxSegments = 4,
-            WalMaxSegmentSizeBytes = 256L << 20, // 256 MB each = 1 GB total
-            ShadowBufferPages = 131072,        // 1 GB
-            TotalMemoryBudgetBytes = 1L << 30  // Only 1 GB budget!
-        };
-
-        var ex = Assert.Throws<InvalidOperationException>(() => options.Validate());
-        Assert.That(ex.Message, Does.Contain("Resource configuration requires"));
-        Assert.That(ex.Message, Does.Contain("but budget is only"));
-    }
-
-    [Test]
-    public void ResourceOptions_CalculateFixedAllocationBytes_CorrectCalculation()
-    {
-        var options = new ResourceOptions
-        {
-            PageCachePages = 256,              // 256 * 8KB = 2 MB
-            WalRingBufferSizeBytes = 4 << 20,  // 4 MB
-            WalMaxSegments = 4,
-            WalMaxSegmentSizeBytes = 64L << 20, // 64 MB each = 256 MB
-            ShadowBufferPages = 512            // 512 * 8KB = 4 MB
-        };
-
-        var expected = (256L * 8192) + (4 << 20) + (4 * (64L << 20)) + (512L * 8192);
-        // = 2 MB + 4 MB + 256 MB + 4 MB = 266 MB
-
-        Assert.That(options.CalculateFixedAllocationBytes(), Is.EqualTo(expected));
-    }
-
-    [Test]
-    public void ResourceOptions_CalculateAvailableBudgetBytes_CorrectCalculation()
-    {
-        var options = new ResourceOptions
-        {
-            TotalMemoryBudgetBytes = 1L << 30 // 1 GB
-        };
-
-        var fixedBytes = options.CalculateFixedAllocationBytes();
-        var expectedAvailable = options.TotalMemoryBudgetBytes - fixedBytes;
-
-        Assert.That(options.CalculateAvailableBudgetBytes(), Is.EqualTo(expectedAvailable));
+        Assert.That(options.CheckpointBarrierTimeoutMs, Is.EqualTo(30000), "Default checkpoint barrier timeout should be 30 seconds");
+        Assert.That(options.PageChecksumVerification, Is.EqualTo(PageChecksumVerification.OnLoad));
     }
 
     #endregion
@@ -475,7 +382,7 @@ public class ResourceOptionsTests
     {
         var options = new DatabaseEngineOptions();
 
-        Assert.That(options.Resources.PageCachePages, Is.EqualTo(256));
+        Assert.That(options.Resources.CheckpointIntervalMs, Is.EqualTo(30000));
         Assert.That(options.Resources.MaxActiveTransactions, Is.EqualTo(1000));
     }
 
