@@ -50,7 +50,6 @@ public sealed class ProfilerSourceControllerTests
     }
 
     [Test]
-    [Ignore("Pre-existing Linux-CI path-assumption failure; tracked by #426")]
     public void ResolveAbsolutePath_AlreadyAbsolute_DoesNotJoinWorkspaceRoot()
     {
         var input = OperatingSystem.IsWindows() ? @"C:\Other\repo\Foo.cs" : "/other/repo/Foo.cs";
@@ -72,7 +71,6 @@ public sealed class ProfilerSourceControllerTests
     }
 
     [Test]
-    [Ignore("Pre-existing Linux-CI path-assumption failure; tracked by #426")]
     public async Task GetSource_AbsolutePath_BypassesWorkspaceGuardAndReadsFile()
     {
         // PDB-resolved system attribution paths (e.g. AntHill at C:\Dev\github\Typhon\test\AntHill)
@@ -204,7 +202,6 @@ public sealed class ProfilerSourceControllerTests
     }
 
     [Test]
-    [Ignore("Pre-existing Linux-CI path-assumption failure; tracked by #426")]
     public async Task GetSource_CSharpFile_ReturnsEnclosingMethodBlock()
     {
         var filePath = Path.Combine(_tempRoot, "method-target.cs");
