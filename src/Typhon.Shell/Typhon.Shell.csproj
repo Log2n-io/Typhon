@@ -14,7 +14,6 @@
         <PackageReference Include="Spectre.Console" Version="0.55.2" />
         <PackageReference Include="Spectre.Console.Cli" Version="0.55.0" />
         <PackageReference Include="PrettyPrompt" Version="4.1.1" />
-        <PackageReference Include="Terminal.Gui" Version="2.1.0" />
         <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.8" />
         <PackageReference Include="Microsoft.Extensions.Logging" Version="10.0.8" />
         <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.8" />
@@ -22,7 +21,6 @@
     </ItemGroup>
 
     <ItemGroup>
-        <ProjectReference Include="..\..\test\Typhon.ARPG.Shell\Typhon.ARPG.Shell.csproj" />
         <ProjectReference Include="..\Typhon.Engine\Typhon.Engine.csproj" />
         <ProjectReference Include="..\Typhon.Schema.Definition\Typhon.Schema.Definition.csproj" />
         <ProjectReference Include="..\Typhon.Shell.Extensibility\Typhon.Shell.Extensibility.csproj" />

@@ -9,7 +9,7 @@
     <ItemGroup>
         <ProjectReference Include="..\..\src\Typhon.Shell.Extensibility\Typhon.Shell.Extensibility.csproj" />
         <ProjectReference Include="..\..\src\Typhon.Engine\Typhon.Engine.csproj" />
-        <ProjectReference Include="..\Typhon.ARPG.Schema\Typhon.ARPG.Schema.csproj" />
+        <ProjectReference Include="..\..\test\Typhon.ARPG.Schema\Typhon.ARPG.Schema.csproj" />
     </ItemGroup>
 
 </Project>

@@ -3,8 +3,8 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
-using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Json;
 using Spectre.Console;
 using Typhon.Schema.Definition;
 using Typhon.Shell.Parsing;
@@ -25,6 +25,22 @@ internal sealed class DiagnosticCommandExecutor
         _session = session;
     }
 
+    // ── Machine-readable output (CI / monitoring probes) ───────
+    // Several diagnostics double as scriptable probes: when the shell's output format is 'json'
+    // (set via 'set format json' or 'tsh --format json'), they emit a stable JSON document instead
+    // of the Spectre table, so the output pipes cleanly into jq / monitoring.
+    private static readonly JsonSerializerOptions JsonOpts = new()
+    {
+        WriteIndented = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+    };
+
+    private bool WantsJson => string.Equals(_session.Format, "json", StringComparison.OrdinalIgnoreCase);
+
+    private static CommandResult Json(object data) => CommandResult.Ok(JsonSerializer.Serialize(data, JsonOpts));
+
+    private readonly record struct DbStatSegment(string Name, int ChunkBytes, long Used, long Cap, double Fill, int Pages, long DataBytes);
+
     /// <summary>
     /// Dispatches a diagnostic command. Returns null if the command is not recognized as diagnostic.
     /// </summary>
@@ -33,10 +49,6 @@ internal sealed class DiagnosticCommandExecutor
         return command switch
         {
             "cache-stats"      => ExecuteCacheStats(),
-            "cache-pages"      => ExecuteCachePages(tokens, 1),
-            "page-dump"        => ExecutePageDump(tokens, 1),
-            "segments"         => ExecuteSegments(),
-            "segment-detail"   => ExecuteSegmentDetail(tokens, 1),
             "btree"            => ExecuteBTree(tokens, 1),
             "btree-dump"       => ExecuteBTreeDump(tokens, 1),
             "btree-validate"   => ExecuteBTreeValidate(tokens, 1),
@@ -44,12 +56,10 @@ internal sealed class DiagnosticCommandExecutor
             "transactions"     => ExecuteTransactions(),
             "mvcc-stats"       => ExecuteMvccStats(tokens, 1),
             "memory"           => ExecuteMemory(),
-            "resources"        => ExecuteResources(tokens, 1),
+            "resources"        => ExecuteResources(),
             "stats-show"       => ExecuteStatsShow(tokens, 1),
             "stats-rebuild"    => ExecuteStatsRebuild(tokens, 1),
             "db-stats"         => ExecuteDbStats(),
-            "list-archetypes"  => ExecuteListArchetypes(),
-            "entity-info"      => ExecuteEntityInfo(tokens, 1),
             _                  => null
         };
     }
@@ -74,6 +84,31 @@ internal sealed class DiagnosticCommandExecutor
         var totalPages = extra.FreeMemPageCount + extra.AllocatingMemPageCount +
                          extra.IdleMemPageCount + extra.ExclusiveMemPageCount;
         var totalBytes = (long)totalPages * PagedMMF.PageSize;
+
+        if (WantsJson)
+        {
+            var totalReq = metrics.MemPageCacheHit + metrics.MemPageCacheMiss;
+            return Json(new
+            {
+                totalPages,
+                totalBytes,
+                free = extra.FreeMemPageCount,
+                idle = extra.IdleMemPageCount,
+                exclusive = extra.ExclusiveMemPageCount,
+                dirty = extra.DirtyPageCount,
+                allocating = extra.AllocatingMemPageCount,
+                cacheHit = metrics.MemPageCacheHit,
+                cacheMiss = metrics.MemPageCacheMiss,
+                hitRate = totalReq > 0 ? (double)metrics.MemPageCacheHit / totalReq : (double?)null,
+                readsFromDisk = metrics.ReadFromDiskCount,
+                writesToDisk = metrics.PageWrittenToDiskCount,
+                writeOps = metrics.WrittenOperationCount,
+                epochProtected = extra.EpochProtectedPageCount,
+                slotReferenced = extra.SlotRefPageCount,
+                backpressureWaits = extra.BackpressureWaitCount,
+            });
+        }
+
         sb.AppendLine($"  [grey]Total pages:[/]     [white]{totalPages}[/] [grey]({FormatBytes(totalBytes)})[/]");
 
         sb.AppendLine("  [grey]State breakdown:[/]");
@@ -118,199 +153,6 @@ internal sealed class DiagnosticCommandExecutor
         return CommandResult.Markup(sb.ToString().TrimEnd());
     }
 
-    private CommandResult ExecuteCachePages(List<Token> tokens, int pos)
-    {
-        if (!RequireDatabase(out var error))
-        {
-            return error;
-        }
-
-        // Parse optional where clause
-        string filterState = null;
-
-        if (pos < tokens.Count && tokens[pos].Kind == TokenKind.Identifier &&
-            tokens[pos].Value.Equals("where", StringComparison.OrdinalIgnoreCase))
-        {
-            pos++;
-            while (pos < tokens.Count && tokens[pos].Kind == TokenKind.Identifier)
-            {
-                var key = tokens[pos].Value.ToLowerInvariant();
-                pos++;
-                if (pos < tokens.Count && tokens[pos].Kind == TokenKind.Equals)
-                {
-                    pos++;
-                    if (pos < tokens.Count && tokens[pos].Kind != TokenKind.End)
-                    {
-                        var value = tokens[pos].Value;
-                        pos++;
-                        switch (key)
-                        {
-                            case "state":
-                                filterState = value.ToLowerInvariant();
-                                break;
-                            default:
-                                return CommandResult.Error($"Error: Unknown filter key '{key}'. Valid: state");
-                        }
-                    }
-                }
-            }
-        }
-
-        // Use GetMemPageExtraInfo for the state breakdown since we can't iterate memory pages directly
-        var mmf = _session.Engine.MMF;
-        var metrics = mmf.GetMetrics();
-        metrics.GetMemPageExtraInfo(out var extra);
-
-        var sb = new StringBuilder();
-        sb.AppendLine("  [white]Memory Page State Summary[/]");
-        sb.AppendLine("  [grey]──────────────────────────────────────[/]");
-
-        var states = new (string Name, int Count)[]
-        {
-            ("Free", extra.FreeMemPageCount),
-            ("Allocating", extra.AllocatingMemPageCount),
-            ("Idle", extra.IdleMemPageCount),
-            ("Exclusive", extra.ExclusiveMemPageCount),
-            ("Dirty", extra.DirtyPageCount),
-        };
-
-        sb.AppendLine("  [grey]State          Count[/]");
-        sb.AppendLine("  [grey]─────          ─────[/]");
-
-        foreach (var (name, count) in states)
-        {
-            if (filterState != null && !name.Equals(filterState, StringComparison.OrdinalIgnoreCase))
-            {
-                continue;
-            }
-
-            sb.AppendLine($"  {name,-14} {count}");
-        }
-
-        sb.AppendLine();
-        sb.AppendLine($"  [grey]Pending I/O reads:[/] [white]{extra.PendingIOReadCount}[/]");
-        sb.AppendLine($"  [grey]Clock sweep range:[/] [white]{extra.MinClockSweepCounter}–{extra.MaxClockSweepCounter}[/]");
-
-        return CommandResult.Markup(sb.ToString().TrimEnd());
-    }
-
-    private CommandResult ExecutePageDump(List<Token> tokens, int pos)
-    {
-        if (!RequireDatabase(out var error))
-        {
-            return error;
-        }
-
-        if (pos >= tokens.Count || tokens[pos].Kind != TokenKind.Integer)
-        {
-            return CommandResult.Error("Syntax error: page-dump <pageNumber> [--raw]");
-        }
-
-        var pageIndex = int.Parse(tokens[pos].Value, CultureInfo.InvariantCulture);
-        pos++;
-
-        var raw = false;
-        if (pos < tokens.Count && tokens[pos].Kind == TokenKind.DoubleDash)
-        {
-            pos++;
-            if (pos < tokens.Count && tokens[pos].Value.Equals("raw", StringComparison.OrdinalIgnoreCase))
-            {
-                raw = true;
-            }
-        }
-
-        var mmf = _session.Engine.MMF;
-        var epochManager = _session.Engine.EpochManager;
-        using var guard = EpochGuard.Enter(epochManager);
-        var epoch = epochManager.GlobalEpoch;
-
-        if (!mmf.RequestPageEpoch(pageIndex, epoch, out var memPageIdx))
-        {
-            return CommandResult.Error($"Error: Could not access page {pageIndex}.");
-        }
-
-        unsafe
-        {
-            var pageAddr = mmf.GetMemPageAddress(memPageIdx);
-            var sb = new StringBuilder();
-
-            if (raw)
-            {
-                // Raw hex dump of the entire page via direct pointer
-                var wholePage = new ReadOnlySpan<byte>(pageAddr, PagedMMF.PageSize);
-                for (var offset = 0; offset < wholePage.Length; offset += 16)
-                {
-                    sb.Append($"  {offset:X4}: ");
-                    var end = Math.Min(offset + 16, wholePage.Length);
-                    for (var j = offset; j < end; j++)
-                    {
-                        sb.Append($"{wholePage[j]:X2} ");
-                        if (j == offset + 7)
-                        {
-                            sb.Append(' ');
-                        }
-                    }
-
-                    sb.Append(' ');
-                    for (var j = offset; j < end; j++)
-                    {
-                        var b = wholePage[j];
-                        sb.Append(b is >= 32 and < 127 ? (char)b : '.');
-                    }
-
-                    sb.AppendLine();
-                }
-            }
-            else
-            {
-                // Structured view: parse the PageBaseHeader from the header span
-                var headerSpan = new ReadOnlySpan<byte>(pageAddr, PagedMMF.PageHeaderSize);
-                var baseHeader = MemoryMarshal.Read<PageBaseHeader>(headerSpan);
-
-                sb.AppendLine($"  [white]Page {pageIndex} — Structured View[/]");
-                sb.AppendLine("  [grey]══════════════════════════════════════[/]");
-                sb.AppendLine();
-                sb.AppendLine("  [white]PageBaseHeader[/]");
-                sb.AppendLine("  [grey]──────────────────────────────────────[/]");
-                sb.AppendLine($"  [grey]Flags:[/]           [white]{baseHeader.Flags}[/]");
-                sb.AppendLine($"  [grey]Type:[/]            [white]{baseHeader.Type}[/]");
-                sb.AppendLine($"  [grey]FormatRevision:[/]  [white]{baseHeader.FormatRevision}[/]");
-                sb.AppendLine($"  [grey]ChangeRevision:[/]  [white]{baseHeader.ChangeRevision}[/]");
-                sb.AppendLine();
-
-                // Hex dump of first 128 bytes of raw data area
-                sb.AppendLine("  [white]Data Preview (first 128 bytes)[/]");
-                sb.AppendLine("  [grey]──────────────────────────────────────[/]");
-                var rawData = new ReadOnlySpan<byte>(pageAddr + PagedMMF.PageHeaderSize, PagedMMF.PageRawDataSize);
-                var previewLen = Math.Min(128, rawData.Length);
-                for (var offset = 0; offset < previewLen; offset += 16)
-                {
-                    sb.Append($"  {offset:X4}: ");
-                    var end = Math.Min(offset + 16, previewLen);
-                    for (var j = offset; j < end; j++)
-                    {
-                        sb.Append($"{rawData[j]:X2} ");
-                        if (j == offset + 7)
-                        {
-                            sb.Append(' ');
-                        }
-                    }
-
-                    sb.Append("  ");
-                    for (var j = offset; j < end; j++)
-                    {
-                        var b = rawData[j];
-                        sb.Append(b is >= 32 and < 127 ? (char)b : '.');
-                    }
-
-                    sb.AppendLine();
-                }
-            }
-
-            return raw ? CommandResult.Ok(sb.ToString().TrimEnd()) : CommandResult.Markup(sb.ToString().TrimEnd());
-        }
-    }
-
     // ── Database Volumetry ──────────────────────────────────────
 
     private CommandResult ExecuteDbStats()
@@ -320,22 +162,65 @@ internal sealed class DiagnosticCommandExecutor
             return error;
         }
 
-        var sb = new StringBuilder();
         var mmf = _session.Engine.MMF;
-
-        // ── File Pages ──
         var capPages = mmf.OccupancyCapacityPages;
         var capBytes = (long)capPages * PagedMMF.PageSize;
 
+        long totalChunksUsed = 0;
+        long totalChunksCap = 0;
+        long totalDataBytes = 0;
+        var totalPages = 0;
+        var rows = new List<DbStatSegment>();
+
+        void Collect(string name, ChunkBasedSegment<PersistentStore> seg)
+        {
+            if (seg == null)
+            {
+                return;
+            }
+
+            var used = (long)seg.AllocatedChunkCount;
+            var cap = (long)seg.ChunkCapacity;
+            var pages = seg.Length;
+            var dataBytes = used * seg.Stride;
+            totalChunksUsed += used;
+            totalChunksCap += cap;
+            totalDataBytes += dataBytes;
+            totalPages += pages;
+            rows.Add(new DbStatSegment(name, seg.Stride, used, cap, cap > 0 ? (double)used / cap : 0.0, pages, dataBytes));
+        }
+
+        foreach (var (name, table) in GetComponentTables())
+        {
+            Collect($"{name}.Data", table.ComponentSegment);
+            Collect($"{name}.RevTable", table.CompRevTableSegment);
+            Collect($"{name}.PK_Index", table.DefaultIndexSegment);
+            Collect($"{name}.Str64_Index", table.String64IndexSegment);
+            Collect($"{name}.Tail_Index", table.TailIndexSegment);
+        }
+
+        var totalFill = totalChunksCap > 0 ? (double)totalChunksUsed / totalChunksCap : 0.0;
+
+        if (WantsJson)
+        {
+            return Json(new
+            {
+                capacityPages = capPages,
+                capacityBytes = capBytes,
+                pageSize = PagedMMF.PageSize,
+                segments = rows,
+                totals = new { chunksUsed = totalChunksUsed, chunksCap = totalChunksCap, fill = totalFill, pages = totalPages, dataBytes = totalDataBytes },
+            });
+        }
+
+        var sb = new StringBuilder();
         sb.AppendLine("  [white]File Pages[/]");
         sb.AppendLine("  [grey]──────────────────────────────────────────────────────────────────────────[/]");
         sb.AppendLine($"  [grey]Capacity:[/]        [white]{capPages:N0}[/] pages  [grey]({FormatBytes(capBytes)})[/]");
         sb.AppendLine($"  [grey]Page size:[/]       [white]{PagedMMF.PageSize:N0} B[/]");
         sb.AppendLine();
 
-        // ── Per-component segment breakdown ──
-        var tables = GetComponentTables();
-        if (tables.Count == 0)
+        if (rows.Count == 0)
         {
             sb.AppendLine("  [yellow]No component tables registered.[/]");
             return CommandResult.Markup(sb.ToString().TrimEnd());
@@ -345,144 +230,14 @@ internal sealed class DiagnosticCommandExecutor
         sb.AppendLine("  [grey]Segment                    ChunkSz   Used     Cap       Fill      Pages  Data Size[/]");
         sb.AppendLine("  [grey]─────────────────────────   ───────   ──────   ───────   ───────   ─────  ─────────[/]");
 
-        long totalChunksUsed = 0;
-        long totalChunksCap = 0;
-        long totalDataBytes = 0;
-        int totalPages = 0;
-
-        foreach (var (name, table) in tables)
+        foreach (var r in rows)
         {
-            AppendDbStatsSegmentRow(sb, $"{name}.Data", table.ComponentSegment, ref totalChunksUsed, ref totalChunksCap, ref totalDataBytes, ref totalPages);
-            AppendDbStatsSegmentRow(sb, $"{name}.RevTable", table.CompRevTableSegment, ref totalChunksUsed, ref totalChunksCap, ref totalDataBytes, ref totalPages);
-
-            if (table.DefaultIndexSegment != null)
-            {
-                AppendDbStatsSegmentRow(sb, $"{name}.PK_Index", table.DefaultIndexSegment, ref totalChunksUsed, ref totalChunksCap, ref totalDataBytes, ref totalPages);
-            }
-
-            if (table.String64IndexSegment != null)
-            {
-                AppendDbStatsSegmentRow(sb, $"{name}.Str64_Index", table.String64IndexSegment, ref totalChunksUsed, ref totalChunksCap, ref totalDataBytes, ref totalPages);
-            }
-
-            if (table.TailIndexSegment != null)
-            {
-                AppendDbStatsSegmentRow(sb, $"{name}.Tail_Index", table.TailIndexSegment, ref totalChunksUsed, ref totalChunksCap, ref totalDataBytes, ref totalPages);
-            }
+            var chunkSz = r.ChunkBytes < 1024 ? $"{r.ChunkBytes} B" : $"{r.ChunkBytes / 1024.0:F1} KB";
+            sb.AppendLine($"  {Markup.Escape(r.Name),-27} {chunkSz,7}   {r.Used,6:N0}   {r.Cap,7:N0}   {r.Fill,7:P1}   {r.Pages,5:N0}  {FormatBytes(r.DataBytes)}");
         }
 
         sb.AppendLine("  [grey]─────────────────────────   ───────   ──────   ───────   ───────   ─────  ─────────[/]");
-        var totalFill = totalChunksCap > 0 ? (double)totalChunksUsed / totalChunksCap : 0.0;
         sb.AppendLine($"  {"[white]Total[/]",-35} {"",9}   {totalChunksUsed,6:N0}   {totalChunksCap,7:N0}   {totalFill,7:P1}   {totalPages,5:N0}  [white]{FormatBytes(totalDataBytes)}[/]");
-
-        return CommandResult.Markup(sb.ToString().TrimEnd());
-    }
-
-    private static void AppendDbStatsSegmentRow(StringBuilder sb, string name, ChunkBasedSegment<PersistentStore> seg,
-        ref long totalChunksUsed, ref long totalChunksCap, ref long totalDataBytes, ref int totalPages)
-    {
-        if (seg == null)
-        {
-            return;
-        }
-
-        var used = seg.AllocatedChunkCount;
-        var cap = seg.ChunkCapacity;
-        var fill = cap > 0 ? (double)used / cap : 0.0;
-        var pages = seg.Length;
-        var dataBytes = (long)used * seg.Stride;
-
-        totalChunksUsed += used;
-        totalChunksCap += cap;
-        totalDataBytes += dataBytes;
-        totalPages += pages;
-
-        var chunkSz = seg.Stride < 1024 ? $"{seg.Stride} B" : $"{seg.Stride / 1024.0:F1} KB";
-        sb.AppendLine($"  {Markup.Escape(name),-27} {chunkSz,7}   {used,6:N0}   {cap,7:N0}   {fill,7:P1}   {pages,5:N0}  {FormatBytes(dataBytes)}");
-    }
-
-    // ── Segment Diagnostics ───────────────────────────────────
-
-    private CommandResult ExecuteSegments()
-    {
-        if (!RequireDatabase(out var error))
-        {
-            return error;
-        }
-
-        var sb = new StringBuilder();
-        sb.AppendLine("  [grey]Segment               ChunkSize  Occupancy  Chunks (used/total)[/]");
-        sb.AppendLine("  [grey]─────────────────     ─────────  ─────────  ───────────────────[/]");
-
-        var tables = GetComponentTables();
-        if (tables.Count == 0)
-        {
-            sb.AppendLine("  [yellow]No component tables registered.[/]");
-            return CommandResult.Markup(sb.ToString().TrimEnd());
-        }
-
-        foreach (var (name, table) in tables)
-        {
-            AppendSegmentRow(sb, $"{name}.Data", table.ComponentSegment);
-            AppendSegmentRow(sb, $"{name}.RevTable", table.CompRevTableSegment);
-
-            if (table.DefaultIndexSegment != null)
-            {
-                AppendSegmentRow(sb, $"{name}.PK_Index", table.DefaultIndexSegment);
-            }
-
-            if (table.String64IndexSegment != null)
-            {
-                AppendSegmentRow(sb, $"{name}.Str64_Index", table.String64IndexSegment);
-            }
-        }
-
-        return CommandResult.Markup(sb.ToString().TrimEnd());
-    }
-
-    private static void AppendSegmentRow(StringBuilder sb, string name, ChunkBasedSegment<PersistentStore> seg)
-    {
-        if (seg == null)
-        {
-            return;
-        }
-
-        var used = seg.AllocatedChunkCount;
-        var total = seg.ChunkCapacity;
-        var pct = total > 0 ? (double)used / total : 0.0;
-        sb.AppendLine($"  {Markup.Escape(name),-21} {seg.Stride + " B",-10} {pct:P1,-10} {used:N0} / {total:N0}");
-    }
-
-    private CommandResult ExecuteSegmentDetail(List<Token> tokens, int pos)
-    {
-        if (!RequireDatabase(out var error))
-        {
-            return error;
-        }
-
-        if (pos >= tokens.Count || tokens[pos].Kind == TokenKind.End)
-        {
-            return CommandResult.Error("Syntax error: segment-detail <Component.Segment>");
-        }
-
-        var segName = tokens[pos].Value;
-        var seg = ResolveSegment(segName);
-        if (seg == null)
-        {
-            return CommandResult.Error($"Error: Segment '{segName}' not found. Use 'segments' to list available segments.");
-        }
-
-        var sb = new StringBuilder();
-        sb.AppendLine($"  [white]{Markup.Escape(segName)} — ChunkBasedSegment<PersistentStore>[/]");
-        sb.AppendLine("  [grey]──────────────────────────────────────[/]");
-        sb.AppendLine($"  [grey]Chunk size:[/]      [white]{seg.Stride} bytes[/]");
-
-        var used = seg.AllocatedChunkCount;
-        var total = seg.ChunkCapacity;
-        var pct = total > 0 ? (double)used / total : 0.0;
-        sb.AppendLine($"  [grey]Occupancy:[/]       [white]{pct:P1}[/] [grey]({used:N0} / {total:N0} chunks)[/]");
-        sb.AppendLine($"  [grey]Free chunks:[/]     [white]{seg.FreeChunkCount:N0}[/]");
-        sb.AppendLine($"  [grey]Root page cap:[/]   [white]{seg.ChunkCountRootPage} chunks[/]");
 
         return CommandResult.Markup(sb.ToString().TrimEnd());
     }
@@ -517,6 +272,20 @@ internal sealed class DiagnosticCommandExecutor
         var used = seg.AllocatedChunkCount;
         var total = seg.ChunkCapacity;
         var pct = total > 0 ? (double)used / total : 0.0;
+
+        if (WantsJson)
+        {
+            return Json(new
+            {
+                index = indexName,
+                multi = btree.AllowMultiple,
+                totalNodes = used,
+                chunkCapacity = total,
+                fillFactor = pct,
+                nodeSizeBytes = seg.Stride,
+            });
+        }
+
         sb.AppendLine($"  [grey]Total nodes:[/]     [white]{used:N0}[/]");
         sb.AppendLine($"  [grey]Chunk capacity:[/]  [white]{total:N0}[/]");
         sb.AppendLine($"  [grey]Fill factor:[/]     [white]{pct:P1}[/]");
@@ -800,6 +569,34 @@ internal sealed class DiagnosticCommandExecutor
         }
 
         var chain = _session.Engine.TransactionChain;
+
+        if (WantsJson)
+        {
+            var list = new List<object>();
+            var node = chain.Head;
+            var walked = 0;
+            while (node != null && walked < 50)
+            {
+                list.Add(new
+                {
+                    tsn = node.TSN,
+                    state = node.State.ToString(),
+                    current = _session.Transaction != null && node.TSN == _session.Transaction.TSN,
+                });
+                node = node.Next;
+                walked++;
+            }
+
+            return Json(new
+            {
+                active = chain.ActiveCount,
+                minTsn = chain.MinTSN,
+                nextTsn = chain.NextFreeId,
+                truncated = node != null,
+                transactions = list,
+            });
+        }
+
         var sb = new StringBuilder();
         sb.AppendLine("  [white]Active Transactions[/]");
         sb.AppendLine("  [grey]──────────────────────────────────────[/]");
@@ -856,24 +653,18 @@ internal sealed class DiagnosticCommandExecutor
         var revSeg = table.CompRevTableSegment;
         var allocated = revSeg.AllocatedChunkCount;
 
-        var sb = new StringBuilder();
-        sb.AppendLine($"  [white]MVCC Statistics — {Markup.Escape(componentName)}[/]");
-        sb.AppendLine("  [grey]──────────────────────────────────────[/]");
-
         var dataSeg = table.ComponentSegment;
-        sb.AppendLine($"  [grey]Data chunks:[/]       [white]{dataSeg.AllocatedChunkCount:N0} / {dataSeg.ChunkCapacity:N0}[/]");
-        sb.AppendLine($"  [grey]Revision chunks:[/]   [white]{allocated:N0} / {revSeg.ChunkCapacity:N0}[/]");
 
-        // Walk revision headers to compute statistics
+        // Walk revision headers to compute statistics (shared by the JSON probe and the table).
+        var totalItems = 0L;
+        var maxChain = 0;
+        var singleRevCount = 0;
+        var multiChunkCount = 0;
+        var entityCount = 0;
+
         if (allocated > 0)
         {
             using var accessor = revSeg.CreateChunkAccessor();
-            var totalItems = 0L;
-            var maxChain = 0;
-            var singleRevCount = 0;
-            var multiChunkCount = 0;
-            var entityCount = 0;
-
             unsafe
             {
                 for (var i = 0; i < allocated; i++)
@@ -907,16 +698,40 @@ internal sealed class DiagnosticCommandExecutor
                     }
                 }
             }
+        }
 
-            if (entityCount > 0)
+        if (WantsJson)
+        {
+            return Json(new
             {
-                sb.AppendLine($"  [grey]Entities tracked:[/]  [white]{entityCount:N0}[/]");
-                sb.AppendLine($"  [grey]Total revisions:[/]   [white]{totalItems:N0}[/]");
-                sb.AppendLine($"  [grey]Avg revs/entity:[/]   [white]{(double)totalItems / entityCount:F2}[/]");
-                sb.AppendLine($"  [grey]Max chain length:[/]  [white]{maxChain}[/]");
-                sb.AppendLine($"  [grey]Single-revision:[/]   [white]{singleRevCount:N0}[/] [grey]({(double)singleRevCount / entityCount:P1})[/]");
-                sb.AppendLine($"  [grey]Multi-chunk chains:[/] [white]{multiChunkCount:N0}[/]");
-            }
+                component = componentName,
+                dataChunksUsed = dataSeg.AllocatedChunkCount,
+                dataChunksCap = dataSeg.ChunkCapacity,
+                revChunksUsed = allocated,
+                revChunksCap = revSeg.ChunkCapacity,
+                entitiesTracked = entityCount,
+                totalRevisions = totalItems,
+                avgRevsPerEntity = entityCount > 0 ? (double)totalItems / entityCount : 0.0,
+                maxChainLength = maxChain,
+                singleRevision = singleRevCount,
+                multiChunkChains = multiChunkCount,
+            });
+        }
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"  [white]MVCC Statistics — {Markup.Escape(componentName)}[/]");
+        sb.AppendLine("  [grey]──────────────────────────────────────[/]");
+        sb.AppendLine($"  [grey]Data chunks:[/]       [white]{dataSeg.AllocatedChunkCount:N0} / {dataSeg.ChunkCapacity:N0}[/]");
+        sb.AppendLine($"  [grey]Revision chunks:[/]   [white]{allocated:N0} / {revSeg.ChunkCapacity:N0}[/]");
+
+        if (entityCount > 0)
+        {
+            sb.AppendLine($"  [grey]Entities tracked:[/]  [white]{entityCount:N0}[/]");
+            sb.AppendLine($"  [grey]Total revisions:[/]   [white]{totalItems:N0}[/]");
+            sb.AppendLine($"  [grey]Avg revs/entity:[/]   [white]{(double)totalItems / entityCount:F2}[/]");
+            sb.AppendLine($"  [grey]Max chain length:[/]  [white]{maxChain}[/]");
+            sb.AppendLine($"  [grey]Single-revision:[/]   [white]{singleRevCount:N0}[/] [grey]({(double)singleRevCount / entityCount:P1})[/]");
+            sb.AppendLine($"  [grey]Multi-chunk chains:[/] [white]{multiChunkCount:N0}[/]");
         }
 
         return CommandResult.Markup(sb.ToString().TrimEnd());
@@ -932,33 +747,46 @@ internal sealed class DiagnosticCommandExecutor
         }
 
         var snapshot = _session.ResourceGraph.GetSnapshot();
-        var sb = new StringBuilder();
-        sb.AppendLine("  [white]Memory Usage[/]");
-        sb.AppendLine("  [grey]──────────────────────────────────────[/]");
 
-        // Group by top-level subsystem
-        var subsystems = new[] { "Storage", "DataEngine", "Durability", "Allocation" };
+        var subsystemNames = new[] { "Storage", "DataEngine", "Durability", "Allocation" };
+        var subsystems = new List<(string Name, long Bytes)>();
         var totalBytes = 0L;
-
-        foreach (var subsystem in subsystems)
+        foreach (var subsystem in subsystemNames)
         {
-            var path = $"Root/{subsystem}";
-            var mem = snapshot.GetSubtreeMemory(path);
+            var mem = snapshot.GetSubtreeMemory($"Root/{subsystem}");
             if (mem > 0)
             {
-                sb.AppendLine($"  [grey]{subsystem,-18}[/] [white]{FormatBytes(mem)}[/]");
+                subsystems.Add((subsystem, mem));
                 totalBytes += mem;
             }
         }
 
-        // Also check for nodes not under known subsystems
         var allMem = snapshot.Nodes.Values
             .Where(n => n.Memory.HasValue)
             .Sum(n => n.Memory.Value.AllocatedBytes);
+        var otherBytes = allMem > totalBytes ? allMem - totalBytes : 0L;
 
-        if (allMem > totalBytes)
+        if (WantsJson)
         {
-            sb.AppendLine($"  [grey]{"Other",-18}[/] [white]{FormatBytes(allMem - totalBytes)}[/]");
+            return Json(new
+            {
+                subsystems = subsystems.Select(s => new { name = s.Name, bytes = s.Bytes }),
+                other = otherBytes,
+                total = allMem,
+            });
+        }
+
+        var sb = new StringBuilder();
+        sb.AppendLine("  [white]Memory Usage[/]");
+        sb.AppendLine("  [grey]──────────────────────────────────────[/]");
+        foreach (var (name, bytes) in subsystems)
+        {
+            sb.AppendLine($"  [grey]{name,-18}[/] [white]{FormatBytes(bytes)}[/]");
+        }
+
+        if (otherBytes > 0)
+        {
+            sb.AppendLine($"  [grey]{"Other",-18}[/] [white]{FormatBytes(otherBytes)}[/]");
         }
 
         sb.AppendLine("  [grey]──────────────────────────────────────[/]");
@@ -969,46 +797,18 @@ internal sealed class DiagnosticCommandExecutor
 
     // ── Resource Graph ────────────────────────────────────────
 
-    private CommandResult ExecuteResources(List<Token> tokens, int pos)
+    private CommandResult ExecuteResources()
     {
         if (!RequireDatabase(out var error))
         {
             return error;
         }
 
-        // Check for --flat flag
-        var flat = false;
-        if (pos < tokens.Count && tokens[pos].Kind == TokenKind.DoubleDash)
-        {
-            pos++;
-            if (pos < tokens.Count && tokens[pos].Value.Equals("flat", StringComparison.OrdinalIgnoreCase))
-            {
-                flat = true;
-            }
-        }
+        // The interactive Terminal.Gui explorer was removed (superseded by the Workbench Resource Tree panel).
+        // 'resources' now always prints the resource graph as a table; a trailing '--flat' is accepted for
+        // backward compatibility and ignored.
 
-        if (!flat)
-        {
-            // Non-flat mode requires interactive terminal
-            if (Console.IsInputRedirected)
-            {
-                return CommandResult.Error("Error: 'resources' (interactive) requires a terminal. Use 'resources --flat' in pipe/batch mode.");
-            }
-
-            // Launch Terminal.Gui TUI
-            try
-            {
-                var explorer = new Tui.ResourceExplorer(_session);
-                explorer.Run();
-                return CommandResult.Ok();
-            }
-            catch (Exception ex)
-            {
-                return CommandResult.Error($"Error launching resource explorer: {ex.Message}");
-            }
-        }
-
-        // Flat mode: enumerate all resources as a table
+        // Enumerate all resources as a table
         var snapshot = _session.ResourceGraph.GetSnapshot();
         var sb = new StringBuilder();
         sb.AppendLine("  [grey]Resource                            Type            Memory    Capacity[/]");
@@ -1052,39 +852,6 @@ internal sealed class DiagnosticCommandExecutor
         }
 
         return result;
-    }
-
-    private ChunkBasedSegment<PersistentStore> ResolveSegment(string name)
-    {
-        // Format: ComponentName.SegmentSuffix (e.g., ARPG.Position.Data, ARPG.Position.PK_Index)
-        var dotPos = name.LastIndexOf('.');
-        if (dotPos < 0)
-        {
-            return null;
-        }
-
-        var componentName = name[..dotPos];
-        var suffix = name[(dotPos + 1)..];
-
-        if (!_session.ComponentTypes.TryGetValue(componentName, out var componentType))
-        {
-            return null;
-        }
-
-        var table = _session.Engine.GetComponentTable(componentType);
-        if (table == null)
-        {
-            return null;
-        }
-
-        return suffix.ToLowerInvariant() switch
-        {
-            "data"        => table.ComponentSegment,
-            "revtable"    => table.CompRevTableSegment,
-            "pk_index"    => table.DefaultIndexSegment,
-            "str64_index" => table.String64IndexSegment,
-            _             => null
-        };
     }
 
     private (BTreeBase<PersistentStore> Tree, string Error) ResolveIndex(string name)
@@ -1538,147 +1305,4 @@ internal sealed class DiagnosticCommandExecutor
 
     private static string Pct(int part, int total) => total > 0 ? $"{(double)part / total:P1}" : "0.0%";
 
-    // ═══════════════════════════════════════════════════════════════
-    // ECS Diagnostics
-    // ═══════════════════════════════════════════════════════════════
-
-    private CommandResult ExecuteListArchetypes()
-    {
-        var sb = new StringBuilder();
-        sb.AppendLine("  [white]Registered Archetypes[/]");
-        sb.AppendLine("  [grey]══════════════════════════════════════════════════════════════════[/]");
-
-        var dbe = _session.Engine;
-        var states = dbe._archetypeStates;
-        int count = 0;
-
-        for (int id = 0; id < states.Length; id++)
-        {
-            var state = states[id];
-            if (state == null)
-            {
-                continue;
-            }
-
-            var meta = ArchetypeRegistry.GetMetadata((ushort)id);
-            if (meta == null)
-            {
-                continue;
-            }
-
-            count++;
-            long entityCount = state.EntityMap?.EntryCount ?? 0;
-            string parentName = meta.ParentArchetypeId == 0xFFFF
-                ? "(root)"
-                : ArchetypeRegistry.GetMetadata(meta.ParentArchetypeId)?.ArchetypeType?.Name ?? "?";
-
-            sb.AppendLine($"  [white]{Markup.Escape(meta.ArchetypeType?.Name ?? "?")}[/]  " +
-                          $"[grey]Id=[/][yellow]{meta.ArchetypeId}[/]  " +
-                          $"[grey]Components=[/][yellow]{meta.ComponentCount}[/]  " +
-                          $"[grey]Parent=[/][yellow]{Markup.Escape(parentName)}[/]  " +
-                          $"[grey]Entities=[/][yellow]{entityCount}[/]");
-
-            // List component slots
-            if (state.SlotToComponentTable != null)
-            {
-                for (int slot = 0; slot < meta.ComponentCount; slot++)
-                {
-                    var table = state.SlotToComponentTable[slot];
-                    string compName = meta._slotToComponentType?[slot]?.Name ?? "?";
-                    string mode = table?.StorageMode.ToString() ?? "?";
-                    sb.AppendLine($"    [grey]Slot {slot}:[/] [white]{Markup.Escape(compName)}[/] [grey]({mode})[/]");
-                }
-            }
-
-            // List cascade targets
-            if (meta._cascadeTargets != null && meta._cascadeTargets.Count > 0)
-            {
-                foreach (var target in meta._cascadeTargets)
-                {
-                    string childName = target.ChildArchetypeType?.Name ?? "?";
-                    sb.AppendLine($"    [grey]Cascade →[/] [red]{Markup.Escape(childName)}[/] [grey](FK slot {target.FkSlotIndex})[/]");
-                }
-            }
-        }
-
-        sb.AppendLine($"\n  [grey]Total:[/] [white]{count} archetype(s)[/]");
-        return CommandResult.Markup(sb.ToString().TrimEnd());
-    }
-
-    private CommandResult ExecuteEntityInfo(List<Token> tokens, int pos)
-    {
-        if (tokens.Count <= pos)
-        {
-            return CommandResult.Error("Syntax error: entity-info <entityId>\n  entityId is the raw packed value (EntityKey << 12 | ArchetypeId).");
-        }
-
-        if (!long.TryParse(tokens[pos].Value, out long rawId))
-        {
-            return CommandResult.Error($"Error: '{tokens[pos].Value}' is not a valid integer.");
-        }
-
-        var entityId = EntityId.FromRaw(rawId);
-        var meta = ArchetypeRegistry.GetMetadata(entityId.ArchetypeId);
-        if (meta == null)
-        {
-            return CommandResult.Error($"Error: ArchetypeId {entityId.ArchetypeId} not registered.");
-        }
-
-        var dbe = _session.Engine;
-        var engineState = dbe._archetypeStates[meta.ArchetypeId];
-        if (engineState?.EntityMap == null)
-        {
-            return CommandResult.Error($"Error: Archetype {meta.ArchetypeType?.Name} has no EntityMap.");
-        }
-
-        // Look up in EntityMap
-        int recordSize = meta._entityRecordSize;
-        var readBuf = new byte[recordSize];
-
-        var epochManager = dbe.EpochManager;
-        var epochDepth = epochManager.EnterScope();
-        try
-        {
-            var accessor = engineState.EntityMap.Segment.CreateChunkAccessor();
-            unsafe
-            {
-                fixed (byte* ptr = readBuf)
-                {
-                    bool found = engineState.EntityMap.TryGet(entityId.EntityKey, ptr, ref accessor);
-                    accessor.Dispose();
-
-                    if (!found)
-                    {
-                        return CommandResult.Error($"Error: Entity {entityId} not found in EntityMap.");
-                    }
-
-                    ref var header = ref EntityRecordAccessor.GetHeader(ptr);
-                    var sb = new StringBuilder();
-                    sb.AppendLine($"  [white]Entity {entityId}[/]");
-                    sb.AppendLine("  [grey]══════════════════════════════════════[/]");
-                    sb.AppendLine($"  [grey]Archetype:[/]    [yellow]{Markup.Escape(meta.ArchetypeType?.Name ?? "?")}[/] [grey](Id={meta.ArchetypeId})[/]");
-                    sb.AppendLine($"  [grey]EntityKey:[/]    [white]{entityId.EntityKey}[/]");
-                    sb.AppendLine($"  [grey]BornTSN:[/]      [white]{header.BornTSN}[/]{(header.BornTSN == 0 ? " [grey](genesis)[/]" : "")}");
-                    sb.AppendLine($"  [grey]DiedTSN:[/]      [white]{header.DiedTSN}[/]{(header.DiedTSN == 0 ? " [grey](alive)[/]" : " [red](dead)[/]")}");
-                    sb.AppendLine($"  [grey]EnabledBits:[/]  [white]0x{header.EnabledBits:X4}[/] [grey]({Convert.ToString(header.EnabledBits, 2).PadLeft(meta.ComponentCount, '0')})[/]");
-
-                    sb.AppendLine($"  [grey]Locations:[/]");
-                    for (int slot = 0; slot < meta.ComponentCount; slot++)
-                    {
-                        int chunkId = EntityRecordAccessor.GetLocation(ptr, slot);
-                        string compName = meta._slotToComponentType?[slot]?.Name ?? "?";
-                        bool enabled = (header.EnabledBits & (1 << slot)) != 0;
-                        string enabledTag = enabled ? "[green]ON[/]" : "[grey]off[/]";
-                        sb.AppendLine($"    [grey]Slot {slot}:[/] [white]{Markup.Escape(compName)}[/] → ChunkId [yellow]{chunkId}[/]  {enabledTag}");
-                    }
-
-                    return CommandResult.Markup(sb.ToString().TrimEnd());
-                }
-            }
-        }
-        finally
-        {
-            epochManager.ExitScope(epochDepth);
-        }
-    }
 }
