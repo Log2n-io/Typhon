@@ -33,7 +33,7 @@ export default function OpenFileTab({ onOpen, isOpening }: Props) {
  <label className="shrink-0 text-fs-lg text-muted-foreground">Database file</label>
  <div className="min-h-0 flex-1">
  <FileBrowser
- extensionFilter={['.bin', '.typhon']}
+ extensionFilter={['.typhon']}
  recentKind="db"
  onSelectionChange={(paths) => setSelectedPath(paths[0] ?? null)}
  onActivate={(p) => setSelectedPath(p)}
@@ -46,7 +46,7 @@ export default function OpenFileTab({ onOpen, isOpening }: Props) {
  Or paste absolute path
  </label>
  <Input
- placeholder="C:\path\to\database.bin"
+ placeholder="C:\path\to\database.typhon"
  value={pastedPath}
  onChange={(e) => setPastedPath(e.target.value)}
  spellCheck={false}

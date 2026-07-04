@@ -108,8 +108,8 @@ public sealed class SessionLifecycleTests
             progress: null,
             ct: default,
             databaseName: databaseName);
-        Assert.That(File.Exists(result.TyphonFilePath), Is.True,
-            $"Fixture generation failed: {result.TyphonFilePath} not produced");
+        Assert.That(Directory.Exists(result.TyphonFilePath), Is.True,
+            $"Fixture generation failed: {result.TyphonFilePath} bundle not produced");
         return result.TyphonFilePath;
     }
 }

@@ -52,7 +52,14 @@ public sealed class FileBrowserService
                 var attr = File.GetAttributes(entry);
                 var isDir = (attr & FileAttributes.Directory) == FileAttributes.Directory;
                 var name = Path.GetFileName(entry);
-                if (isDir)
+                if (isDir && name.EndsWith(".typhon", StringComparison.OrdinalIgnoreCase))
+                {
+                    // A .typhon directory IS a database bundle — present it as one openable "file" row (sized by its data
+                    // file), not a folder to descend into (the user never navigates data/db.lock/wal directly).
+                    var (size, lastWrite) = BundleSizeAndTime(entry);
+                    entries.Add(new FileEntryDto(name, entry, "file", size, lastWrite, false));
+                }
+                else if (isDir)
                 {
                     entries.Add(new FileEntryDto(name, entry, "dir", null, null, false));
                 }
@@ -60,8 +67,7 @@ public sealed class FileBrowserService
                 {
                     var info = new FileInfo(entry);
                     var isSchema = name.EndsWith(".schema.dll", StringComparison.OrdinalIgnoreCase);
-                    var (size, lastWrite) = EffectiveSizeAndTime(entry, info);
-                    entries.Add(new FileEntryDto(name, entry, "file", size, lastWrite, isSchema));
+                    entries.Add(new FileEntryDto(name, entry, "file", info.Length, info.LastWriteTimeUtc, isSchema));
                 }
             }
             catch
@@ -92,37 +98,37 @@ public sealed class FileBrowserService
 
         if (Directory.Exists(full))
         {
+            if (name.EndsWith(".typhon", StringComparison.OrdinalIgnoreCase))
+            {
+                // A .typhon directory is a database bundle — report it as an openable "file" sized by its data file.
+                var (bundleSize, bundleWrite) = BundleSizeAndTime(full);
+                return new FileEntryDto(name, full, "file", bundleSize, bundleWrite, false);
+            }
             return new FileEntryDto(name, full, "dir", null, null, false);
         }
         if (File.Exists(full))
         {
             var info = new FileInfo(full);
             var isSchema = name.EndsWith(".schema.dll", StringComparison.OrdinalIgnoreCase);
-            var (size, lastWrite) = EffectiveSizeAndTime(full, info);
-            return new FileEntryDto(name, full, "file", size, lastWrite, isSchema);
+            return new FileEntryDto(name, full, "file", info.Length, info.LastWriteTimeUtc, isSchema);
         }
         throw new WorkbenchException(404, "path_not_found", $"Path not found: {path}");
     }
 
     /// <summary>
-    /// Size + last-write time to report for a file. A <c>.typhon</c> file is an empty marker — the actual database lives
-    /// in the sibling <c>{stem}.bin</c> (the engine derives both names from the marker stem; see
-    /// <c>EngineLifecycle</c> / <c>PagedMMFOptions.BuildDatabaseFileName</c>). So for a marker we report the <c>.bin</c>'s
-    /// size + mtime, which is what the user means by "the database size". Every other file (and a marker whose <c>.bin</c>
-    /// is somehow absent) reports its own stats unchanged.
+    /// Size + last-write time to report for a <c>.typhon</c> database bundle directory — "the database size" the user
+    /// means is the size of the bundle's <c>data</c> file. Falls back to the directory's own mtime when the data file is
+    /// absent (an empty or partially-created bundle).
     /// </summary>
-    private static (long? Size, DateTime LastWrite) EffectiveSizeAndTime(string path, FileInfo info)
+    private static (long? Size, DateTime LastWrite) BundleSizeAndTime(string bundleDir)
     {
-        if (path.EndsWith(".typhon", StringComparison.OrdinalIgnoreCase))
+        var dataPath = Path.Combine(bundleDir, "data");
+        if (File.Exists(dataPath))
         {
-            var binPath = Path.ChangeExtension(path, ".bin");
-            if (File.Exists(binPath))
-            {
-                var binInfo = new FileInfo(binPath);
-                return (binInfo.Length, binInfo.LastWriteTimeUtc);
-            }
+            var dataInfo = new FileInfo(dataPath);
+            return (dataInfo.Length, dataInfo.LastWriteTimeUtc);
         }
-        return (info.Length, info.LastWriteTimeUtc);
+        return (null, Directory.GetLastWriteTimeUtc(bundleDir));
     }
 
     private static IEnumerable<string> EnumerateSafe(string directory)

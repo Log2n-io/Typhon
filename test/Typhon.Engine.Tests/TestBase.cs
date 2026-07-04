@@ -445,10 +445,11 @@ abstract class TestBase<T> : TestBase
 
         try
         {
-            var dbFile = Path.Combine(_testDatabaseDir, $"{CurrentDatabaseName}.bin");
-            if (File.Exists(dbFile))
+            // A database is a {name}.typhon bundle directory (data + db.lock inside) — remove the whole bundle.
+            var bundle = Path.Combine(_testDatabaseDir, $"{CurrentDatabaseName}.typhon");
+            if (Directory.Exists(bundle))
             {
-                File.Delete(dbFile);
+                Directory.Delete(bundle, recursive: true);
             }
         }
         catch

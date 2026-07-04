@@ -178,9 +178,9 @@ public sealed class FixtureConfigTests
             ct: CancellationToken.None, databaseName: "swg-v2");
         Assert.That(result.WasCreated, Is.True);
         Assert.That(Path.GetFileName(result.TyphonFilePath), Is.EqualTo("swg-v2.typhon"));
-        Assert.That(File.Exists(result.TyphonFilePath), Is.True);
-        var fixtureDir = Path.GetDirectoryName(result.TyphonFilePath)!;
-        Assert.That(File.Exists(Path.Combine(fixtureDir, "swg-v2.bin")), Is.True);
+        // TyphonFilePath is the {name}.typhon bundle DIRECTORY; the data file lives inside it.
+        Assert.That(Directory.Exists(result.TyphonFilePath), Is.True);
+        Assert.That(File.Exists(Path.Combine(result.TyphonFilePath, "data")), Is.True);
     }
 
     [Test]

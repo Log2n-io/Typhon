@@ -4,6 +4,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -666,6 +667,15 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         _options = options;
         _injectedWalIo = injectedWalIo;
         MemoryAllocator = memoryAllocator;
+
+        // Resolve the WAL directory to {bundle}/wal when the caller left it null (the bundle-format default). This MUST run HERE — before
+        // InitializeUowRegistry() below — because the reopen path reads _options.Wal.WalDirectory to decide whether WAL segments are present and recovery must
+        // run (WalFilesPresentAtOpen). Deriving it later (in InitializeWalManager) would leave that read seeing null, silently skipping crash recovery under
+        // the default config. Keeps each database's WAL private to its .typhon bundle; an explicit WalDirectory is honored as-is. (This writes back into
+        // _options.Wal — safe because every DI path resolves ONE engine per DatabaseEngineOptions instance, and two databases each get their own
+        // provider/options; sharing one options across two engines is not a supported path.)
+        _options.Wal?.WalDirectory ??= Path.Combine(MMF.BundleDirectory, "wal");
+
         _durabilityNode = resourceRegistry.Durability;
         TimeoutOptions.Current = _options.Timeouts;
         _componentCollectionSegmentByStride = new ConcurrentDictionary<int, ChunkBasedSegment<PersistentStore>>();
@@ -761,8 +771,20 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         }
         base.Dispose(disposing);
         IsDisposed = true;
+
+        // Open() path only: dispose the private container this engine owns (null on the DI path — the host owns it there).
+        // Done LAST, strictly after IsDisposed = true, so the provider's disposal of this same singleton re-enters
+        // Dispose(bool) and short-circuits at the guard above. The provider also disposes the rest of the engine-graph
+        // singletons (ResourceRegistry, EpochManager, MMF, ...); MMF was already disposed above and its Dispose is
+        // idempotent — the same double-dispose the host-DI path performs when a host disposes its ServiceProvider.
+        if (disposing)
+        {
+            var ownedProvider = _ownedProvider;
+            _ownedProvider = null;
+            ownedProvider?.Dispose();
+        }
     }
-    
+
     private void InitializeWalManager()
     {
         var walOptions = _options.Wal;
@@ -771,6 +793,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             throw new InvalidOperationException(
                 "WAL is mandatory: DatabaseEngineOptions.Wal must not be null. For no-disk-I/O scenarios (tests, benchmarks), register an in-memory IWalFileIO instead.");
         }
+
+        // WalDirectory was already resolved to {bundle}/wal (when left null) early in the constructor — it MUST be done
+        // before InitializeUowRegistry() reads it for the reopen-recovery decision, so it is not re-derived here.
 
         // Use the host-injected WAL file-IO when supplied (tests register an InMemoryWalFileIO to exercise the full WAL pipeline with no disk I/O);
         // otherwise construct the production file-based implementation. WalManager does NOT dispose this backend: production WalFileIO is stateless
@@ -907,7 +932,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// in bytes.
     /// </summary>
     /// <remarks>
-    /// Consumed by <see cref="Profiler.GaugeSnapshotEmitter"/> once per scheduler tick; cost is O(ComponentTables + Archetypes).
+    /// Consumed by <see cref="GaugeSnapshotEmitter"/> once per scheduler tick; cost is O(ComponentTables + Archetypes).
     /// Reads are non-synchronized — the returned value is best-effort and can lag by a tick's worth of allocations. That's
     /// acceptable for an observability gauge but unsafe to use for allocation decisions.
     /// </remarks>
@@ -3020,7 +3045,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             UowRegistry = new UowRegistry(segment, MMF, EpochManager, MemoryAllocator, this);
 
             var walDir = _options.Wal?.WalDirectory;
-            if (walDir != null && System.IO.Directory.Exists(walDir) && System.IO.Directory.GetFiles(walDir, "*.wal").Length > 0)
+            if (walDir != null && Directory.Exists(walDir) && Directory.GetFiles(walDir, "*.wal").Length > 0)
             {
                 // A crash left a WAL window. Gate the crash-path secondary-index clear+rebuild (RB-01) on this, captured HERE at open — before component
                 // registration builds the ComponentTables — so the clear in BuildIndexedFieldInfo sees it. RunWalV2Recovery reads the same flag for the
@@ -3042,9 +3067,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     _lastRecoveryResult = recovery.Recover(UowRegistry, checkpointLSN, null);
                     var walMs = (Stopwatch.GetTimestamp() - walStart) * 1000.0 / Stopwatch.Frequency;
                     long walBytes = 0;
-                    foreach (var f in System.IO.Directory.GetFiles(walDir, "*.wal"))
+                    foreach (var f in Directory.GetFiles(walDir, "*.wal"))
                     {
-                        walBytes += new System.IO.FileInfo(f).Length;
+                        walBytes += new FileInfo(f).Length;
                     }
                     LogWalRecoveryTiming(walMs, walBytes);
                 }

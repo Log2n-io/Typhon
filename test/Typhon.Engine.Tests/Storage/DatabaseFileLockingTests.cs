@@ -25,19 +25,22 @@ class DatabaseFileLockingTests
     {
         Log.CloseAndFlush();
 
-        // Clean up test files — best effort
+        // Clean up the test directory (bundle directories + any planted files) — best effort.
         try
         {
             if (Directory.Exists(_testDir))
             {
-                foreach (var file in Directory.GetFiles(_testDir))
-                {
-                    try { File.Delete(file); } catch { }
-                }
+                Directory.Delete(_testDir, recursive: true);
             }
         }
         catch { }
     }
+
+    // A database is a {name}.typhon bundle directory; the single-writer lock (db.lock) and the paged data file (data)
+    // live inside it.
+    private string BundleDir(string dbName) => Path.Combine(_testDir, $"{dbName}.typhon");
+    private string LockPath(string dbName) => Path.Combine(BundleDir(dbName), "db.lock");
+    private string DataPath(string dbName) => Path.Combine(BundleDir(dbName), "data");
 
     /// <summary>
     /// Creates a DI service provider configured for the given database name.
@@ -74,11 +77,19 @@ class DatabaseFileLockingTests
         return sp;
     }
 
+    // Plant a lock file inside the bundle before the engine opens. EnsureFileDeleted (in BuildServiceProvider) removed the
+    // bundle, so recreate the directory first — the lock lives inside it.
+    private void PlantLock(string dbName, object lockContent)
+    {
+        Directory.CreateDirectory(BundleDir(dbName));
+        File.WriteAllText(LockPath(dbName), lockContent is string s ? s : JsonSerializer.Serialize(lockContent));
+    }
+
     [Test]
     public void LockFile_Created_Deleted()
     {
         var dbName = "lock_create";
-        var lockPath = Path.Combine(_testDir, $"{dbName}.lock");
+        var lockPath = LockPath(dbName);
 
         var sp = BuildServiceProvider(dbName);
         var dbe = sp.GetRequiredService<DatabaseEngine>();
@@ -103,7 +114,7 @@ class DatabaseFileLockingTests
     public void StaleLock_DeadPid()
     {
         var dbName = "lock_stale";
-        var lockPath = Path.Combine(_testDir, $"{dbName}.lock");
+        var lockPath = LockPath(dbName);
 
         // Build provider first (cleans up), then plant lock file before engine creation
         var sp = BuildServiceProvider(dbName);
@@ -116,12 +127,12 @@ class DatabaseFileLockingTests
         }
 
         // Plant stale lock file AFTER EnsureFileDeleted but BEFORE engine creation
-        File.WriteAllText(lockPath, JsonSerializer.Serialize(new
+        PlantLock(dbName, new
         {
             pid = deadPid,
             startedAt = DateTimeOffset.UtcNow.AddHours(-1).ToString("o"),
             machineName = Environment.MachineName
-        }));
+        });
 
         // Opening database should succeed (stale lock detected and removed)
         var dbe = sp.GetRequiredService<DatabaseEngine>();
@@ -138,17 +149,16 @@ class DatabaseFileLockingTests
     public void LiveLock_Throws()
     {
         var dbName = "lock_live";
-        var lockPath = Path.Combine(_testDir, $"{dbName}.lock");
 
         // Build provider first, then plant lock file
         var sp = BuildServiceProvider(dbName);
 
-        File.WriteAllText(lockPath, JsonSerializer.Serialize(new
+        PlantLock(dbName, new
         {
             pid = Environment.ProcessId,
             startedAt = DateTimeOffset.UtcNow.ToString("o"),
             machineName = Environment.MachineName
-        }));
+        });
 
         // Opening database should throw DatabaseLockedException
         var ex = Assert.Throws<DatabaseLockedException>(() => sp.GetRequiredService<DatabaseEngine>());
@@ -156,41 +166,28 @@ class DatabaseFileLockingTests
         Assert.That(ex.OwnerMachine, Is.EqualTo(Environment.MachineName));
 
         (sp as IDisposable)?.Dispose();
-
-        // Clean up
-        if (File.Exists(lockPath))
-        {
-            File.Delete(lockPath);
-        }
     }
 
     [Test]
     public void CrossMachineLock_Throws()
     {
         var dbName = "lock_remote";
-        var lockPath = Path.Combine(_testDir, $"{dbName}.lock");
 
         // Build provider first, then plant lock file
         var sp = BuildServiceProvider(dbName);
 
-        File.WriteAllText(lockPath, JsonSerializer.Serialize(new
+        PlantLock(dbName, new
         {
             pid = 1,
             startedAt = DateTimeOffset.UtcNow.ToString("o"),
             machineName = "REMOTE-SERVER-42"
-        }));
+        });
 
         // Opening database should throw — can't verify remote PID, treat as live
         var ex = Assert.Throws<DatabaseLockedException>(() => sp.GetRequiredService<DatabaseEngine>());
         Assert.That(ex.OwnerMachine, Is.EqualTo("REMOTE-SERVER-42"));
 
         (sp as IDisposable)?.Dispose();
-
-        // Clean up
-        if (File.Exists(lockPath))
-        {
-            File.Delete(lockPath);
-        }
     }
 
     [Test]
@@ -198,11 +195,11 @@ class DatabaseFileLockingTests
     public void CorruptLockFile_Removed()
     {
         var dbName = "lock_corrupt";
-        var lockPath = Path.Combine(_testDir, $"{dbName}.lock");
+        var lockPath = LockPath(dbName);
 
         // Build provider first, then plant corrupt lock file
         var sp = BuildServiceProvider(dbName);
-        File.WriteAllText(lockPath, "this is not valid json {{{");
+        PlantLock(dbName, "this is not valid json {{{");
 
         // Opening database should succeed (corrupt lock file removed with warning)
         var dbe = sp.GetRequiredService<DatabaseEngine>();
@@ -219,28 +216,28 @@ class DatabaseFileLockingTests
     public void FileShare_AllowsRead()
     {
         var dbName = "lock_share_r";
-        var dbPath = Path.Combine(_testDir, $"{dbName}.bin");
+        var dataPath = DataPath(dbName);
 
         var sp = BuildServiceProvider(dbName);
         var dbe = sp.GetRequiredService<DatabaseEngine>();
 
-        // Another reader should be able to open the file for reading
-        using var readHandle = File.OpenHandle(dbPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        // Another reader should be able to open the data file for reading
+        using var readHandle = File.OpenHandle(dataPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
         Assert.That(readHandle.IsInvalid, Is.False, "Read-only access should succeed while database is open");
 
         (sp as IDisposable)?.Dispose();
     }
 
     [Test]
-    // Windows-only: the OS enforces mandatory file-share locking, so a second ReadWrite open of the held .bin throws.
+    // Windows-only: the OS enforces mandatory file-share locking, so a second ReadWrite open of the held data file throws.
     // POSIX file sharing is advisory (the open succeeds), so this OS-level guard does not exist on Linux/macOS. Typhon's
-    // cross-platform single-writer protection is the .lock file (see LiveLock_Throws / CrossMachineLock_Throws); this
+    // cross-platform single-writer protection is the db.lock file (see LiveLock_Throws / CrossMachineLock_Throws); this
     // test covers only the extra Windows mandatory-lock layer.
     [Platform("Win")]
     public void FileShare_PreventsWrite()
     {
         var dbName = "lock_share_w";
-        var dbPath = Path.Combine(_testDir, $"{dbName}.bin");
+        var dataPath = DataPath(dbName);
 
         var sp = BuildServiceProvider(dbName);
         var dbe = sp.GetRequiredService<DatabaseEngine>();
@@ -248,22 +245,22 @@ class DatabaseFileLockingTests
         // Another writer should be blocked
         Assert.Throws<IOException>(() =>
         {
-            using var writeHandle = File.OpenHandle(dbPath, FileMode.Open, FileAccess.ReadWrite, FileShare.Read);
+            using var writeHandle = File.OpenHandle(dataPath, FileMode.Open, FileAccess.ReadWrite, FileShare.Read);
         });
 
         (sp as IDisposable)?.Dispose();
     }
 
     [Test]
-    public void EnsureDeleted_RemovesLock()
+    public void EnsureDeleted_RemovesBundle()
     {
         var dbName = "lock_ensure";
-        var lockPath = Path.Combine(_testDir, $"{dbName}.lock");
-        var dbPath = Path.Combine(_testDir, $"{dbName}.bin");
+        var bundle = BundleDir(dbName);
 
-        // Create both files manually
-        File.WriteAllText(dbPath, "dummy");
-        File.WriteAllText(lockPath, "dummy");
+        // Create the bundle with a data file + lock inside
+        Directory.CreateDirectory(bundle);
+        File.WriteAllText(DataPath(dbName), "dummy");
+        File.WriteAllText(LockPath(dbName), "dummy");
 
         var options = new PagedMMFOptions
         {
@@ -272,8 +269,7 @@ class DatabaseFileLockingTests
         };
         options.EnsureFileDeleted();
 
-        Assert.That(File.Exists(dbPath), Is.False, "Database file should be deleted");
-        Assert.That(File.Exists(lockPath), Is.False, "Lock file should be deleted");
+        Assert.That(Directory.Exists(bundle), Is.False, "The database bundle directory should be deleted");
     }
 
     private static bool IsProcessAlive(int pid)

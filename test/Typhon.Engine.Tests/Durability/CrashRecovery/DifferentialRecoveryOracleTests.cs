@@ -609,7 +609,7 @@ internal sealed class DifferentialRecoveryOracleTests
     /// the recomputed CRC will mismatch, exactly a torn write of a checkpointed page.</summary>
     private void TearDataFilePage(int filePageIndex)
     {
-        var dbPath = Directory.GetFiles(_dbDir, "*.bin").Single();
+        var dbPath = Path.Combine(_dbDir, $"{CurrentDatabaseName}.typhon", "data");
         using var fs = new FileStream(dbPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
         var offset = (long)filePageIndex * PagedMMF.PageSize + PagedMMF.PageHeaderSize + 32; // skip the page header (keep the stored CRC), corrupt chunk data
         var garbage = new byte[256];

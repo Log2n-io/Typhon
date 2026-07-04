@@ -70,17 +70,17 @@ internal sealed class ShellSession : IDisposable
             CloseDatabase();
         }
 
-        // The engine names database files as "{DatabaseName}.bin" automatically.
-        // The user may provide a path like "mydb", "mydb.bin", or "mydb.typhon" —
-        // we strip any extension and use the stem as the DatabaseName.
+        // A Typhon database is a "{DatabaseName}.typhon" bundle directory (data + db.lock + wal/ live inside it). The user
+        // may provide a path like "mydb" or "mydb.typhon" — we strip any extension and use the stem as the DatabaseName.
         var fullPath = Path.GetFullPath(path);
         var directory = Path.GetDirectoryName(fullPath);
         _databaseName = Path.GetFileNameWithoutExtension(fullPath);
 
-        // The actual file on disk is always {DatabaseName}.bin (engine convention)
+        // _databasePath is the bundle directory (kept as the canonical path — reload-schema round-trips it back through
+        // OpenDatabase). "new" means the bundle's data file doesn't exist yet.
         Debug.Assert(directory != null, nameof(directory) + " != null");
-        _databasePath = Path.Combine(directory, $"{_databaseName}.bin");
-        var isNew = !File.Exists(_databasePath);
+        _databasePath = Path.Combine(directory, $"{_databaseName}.typhon");
+        var isNew = !File.Exists(Path.Combine(_databasePath, "data"));
 
         var services = new ServiceCollection();
         services
@@ -112,17 +112,11 @@ internal sealed class ShellSession : IDisposable
             .AddSingleton<IWalFileIO>(_ => NoWal ? new InMemoryWalFileIO() : new WalFileIO())
             .AddDatabaseEngine(engineOpts =>
             {
-                var walDir = Path.Combine(directory, "wal");
-                if (!NoWal)
-                {
-                    // In-memory WAL needs no real directory; only the on-disk backend does.
-                    Directory.CreateDirectory(walDir);
-                }
                 engineOpts.Wal = new WalWriterOptions
                 {
-                    WalDirectory = walDir,
-                    // Shell uses Deferred durability — WAL is only needed for checkpoint-driven page flushing.
-                    // FUA off since we don't need per-write durability guarantees in tsh.
+                    // WalDirectory left null — the engine derives {bundle}/wal inside the .typhon bundle (and the
+                    // in-memory --nowal backend needs no real directory anyway).
+                    // Shell uses Deferred durability; FUA off since tsh doesn't need per-write durability.
                     UseFUA = false
                 };
             });

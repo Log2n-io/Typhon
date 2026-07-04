@@ -20,7 +20,7 @@ public static class DatabaseSchema
     /// <summary>
     /// Inspects a database file and returns a report of its persisted schema state. Opens a temporary engine instance, reads system tables, and disposes.
     /// </summary>
-    /// <param name="path">Path to the database file (with or without .bin extension).</param>
+    /// <param name="path">Path to the database (the <c>.typhon</c> bundle directory, or any path whose stem is the database name).</param>
     /// <returns>A <see cref="DatabaseSchemaReport"/> with all persisted component and field metadata.</returns>
     public static DatabaseSchemaReport Inspect(string path)
     {
@@ -49,20 +49,15 @@ public static class DatabaseSchema
 
             // Read version/schema fields from bootstrap + header
             var bootstrap = engine.MMF.Bootstrap;
-            int sysSchemaRevision = bootstrap.GetInt(DatabaseEngine.BK_SystemSchemaRevision);
-            int userSchemaVersion = bootstrap.GetInt(DatabaseEngine.BK_UserSchemaVersion);
+            var sysSchemaRevision = bootstrap.GetInt(DatabaseEngine.BK_SystemSchemaRevision);
+            var userSchemaVersion = bootstrap.GetInt(DatabaseEngine.BK_UserSchemaVersion);
 
-            int dbFormatRevision;
-            string dbName;
-            unsafe
-            {
-                using var guard = EpochGuard.Enter(engine.EpochManager);
-                engine.MMF.RequestPageEpoch(0, guard.Epoch, out var memPageIdx);
-                var page = engine.MMF.GetPage(memPageIdx);
-                ref var h = ref page.StructAt<RootFileHeader>(PagedMMF.PageBaseHeaderSize);
-                dbFormatRevision = h.DatabaseFormatRevision;
-                dbName = h.DatabaseNameString;
-            }
+            using var guard = EpochGuard.Enter(engine.EpochManager);
+            engine.MMF.RequestPageEpoch(0, guard.Epoch, out var memPageIdx);
+            var page = engine.MMF.GetPage(memPageIdx);
+            ref var h = ref page.StructAt<RootFileHeader>(PagedMMF.PageBaseHeaderSize);
+            var dbFormatRevision = h.DatabaseFormatRevision;
+            var dbName = h.DatabaseNameString;
 
             // Build component reports from persisted data
             var components = new List<ComponentSchemaReport>();
@@ -148,7 +143,7 @@ public static class DatabaseSchema
         }
         finally
         {
-            (sp as IDisposable)?.Dispose();
+            sp.Dispose();
         }
     }
 

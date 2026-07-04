@@ -52,13 +52,8 @@ public static class ServiceCollectionExtensions
 
         if (configure != null)
         {
+            // No validator: MemoryAllocatorOptions carries only a diagnostic Name — nothing that can be misconfigured. #148
             optionsBuilder.Configure(configure);
-
-            optionsBuilder.Validate(_ =>
-            {
-                // TODO Add validation logic
-                return true;
-            });
         }
     }
 
@@ -101,13 +96,8 @@ public static class ServiceCollectionExtensions
 
         if (configure != null)
         {
+            // No validator: ResourceRegistryOptions carries only a diagnostic Name — nothing that can be misconfigured. #148
             optionsBuilder.Configure(configure);
-
-            optionsBuilder.Validate(_ =>
-            {
-                // TODO Add validation logic
-                return true;
-            });
         }
     }
 
@@ -208,6 +198,101 @@ public static class ServiceCollectionExtensions
         Action<DatabaseEngineOptions> configure = null) =>
         AddDatabaseEngine(services, ServiceLifetime.Transient, configure);
 
+    /// <summary>
+    /// One-line Typhon setup: composes the full engine service graph (memory allocator, resource registry, timers, epoch manager, storage, engine) and, at
+    /// first resolve, applies the configured component + archetype registrations and runs <c>InitializeArchetypes</c> — so the resolved
+    /// <see cref="DatabaseEngine"/> is ready to use. All from a single <see cref="TyphonOptions"/> fluent block. The individual <c>Add*</c> methods remain
+    /// available for power users who need finer control (they own <c>InitializeArchetypes</c> themselves).
+    /// </summary>
+    /// <example>
+    /// <code>
+    /// services.AddTyphon(o => o.DatabaseFile("game.typhon").Register&lt;Position&gt;().RegisterArchetype&lt;Player&gt;());
+    /// </code>
+    /// </example>
+    public static IServiceCollection AddTyphon(this IServiceCollection services, Action<TyphonOptions> configure)
+    {
+        ArgumentNullException.ThrowIfNull(configure);
+
+        var options = new TyphonOptions();
+        configure(options);
+
+        services
+            .AddResourceRegistry()
+            .AddMemoryAllocator(options.MemoryAllocatorConfigurator)
+            .AddEpochManager()
+            .AddHighResolutionSharedTimer()
+            .AddDeadlineWatchdog()
+            .AddManagedPagedMMF(options.StorageConfigurator)
+            .AddDatabaseEngine(options.EngineConfigurator);
+
+        // Always decorate: the hook applies any Register<T> calls AND runs InitializeArchetypes, so the resolved engine is
+        // fully open and ready to use — the point of the one-line setup. Even with zero user components the engine still
+        // needs InitializeArchetypes (its own system components must be wired). The power-user AddDatabaseEngine path is
+        // untouched — callers there run InitializeArchetypes themselves.
+        DecorateDatabaseEngineForInitialization(services, options);
+
+        return services;
+    }
+
+    // Wraps the DatabaseEngine service descriptor so, at first resolve, the fully-constructed engine has its Register<T>
+    // components applied and then InitializeArchetypes() run — leaving a ready-to-use engine. Kept local to AddTyphon so
+    // the power-user AddDatabaseEngine path (no TyphonOptions in the container) is untouched. Both steps run exactly once
+    // (singleton first-resolve); register-once is load-bearing — RegisterComponentFromAccessor builds a ComponentTable and
+    // persists schema and is not idempotent, and InitializeArchetypes wires per-engine archetype state once.
+    private static void DecorateDatabaseEngineForInitialization(IServiceCollection services, TyphonOptions options)
+    {
+        for (var i = services.Count - 1; i >= 0; i--)
+        {
+            var descriptor = services[i];
+            if (descriptor.ServiceType != typeof(DatabaseEngine))
+            {
+                continue;
+            }
+
+            var innerFactory = descriptor.ImplementationFactory;
+            if (innerFactory == null)
+            {
+                // AddDatabaseEngine always registers via a factory; nothing to decorate otherwise.
+                return;
+            }
+
+            services[i] = ServiceDescriptor.Describe(
+                typeof(DatabaseEngine),
+                sp =>
+                {
+                    var engine = (DatabaseEngine)innerFactory(sp);
+                    try
+                    {
+                        // Order matters: register component storage on this engine, put the archetypes' shapes in the
+                        // registry, THEN wire per-archetype state — InitializeArchetypes only wires archetypes that are in
+                        // the registry and whose components are all registered.
+                        options.ApplyComponentRegistrations(engine);
+                        options.ApplyArchetypeRegistrations();
+                        engine.InitializeArchetypes();
+                        return engine;
+                    }
+                    catch
+                    {
+                        // Post-construction init failed — dispose the engine we built (releases its MMF handle) before the
+                        // exception unwinds: the DI container never took ownership of it (this factory hasn't returned). The
+                        // cleanup dispose is itself guarded so a teardown throw can't mask the original init failure.
+                        try
+                        {
+                            engine.Dispose();
+                        }
+                        catch
+                        {
+                            // ignored — the original init exception is the diagnostic one
+                        }
+
+                        throw;
+                    }
+                },
+                descriptor.Lifetime);
+            return;
+        }
+    }
+
     private static IServiceCollection AddPagedMMF<TS, TO>(
         this IServiceCollection services,
         ServiceLifetime lifetime,
@@ -219,12 +304,9 @@ public static class ServiceCollectionExtensions
             var optionsBuilder = services.AddOptions<TO>();
             optionsBuilder.Configure(configure);
 
-            optionsBuilder.Validate(_ =>
-            {
-                
-                // TODO Add validation logic for PagedMemoryMappedFileOptions
-                return true;
-            });
+            // Fail fast at DI resolution by delegating to PagedMMFOptions' own Validate() (the single source of truth for
+            // storage-config rules), surfacing its specific rule message. #148
+            services.AddSingleton<IValidateOptions<TO>>(new PagedMMFOptionsValidator<TO>());
         }
 
         var serviceDescriptor = lifetime switch
@@ -273,12 +355,8 @@ public static class ServiceCollectionExtensions
         {
             optionsBuilder.Configure(configure);
 
-            optionsBuilder.Validate(_ =>
-            {
-                
-                // TODO Add validation logic for PagedMemoryMappedFileOptions
-                return true;
-            });
+            // Range-check the wired Resources knobs at DI resolution (see DatabaseEngineOptionsValidator). #148
+            services.AddSingleton<IValidateOptions<DatabaseEngineOptions>>(new DatabaseEngineOptionsValidator());
         }
 
         var serviceDescriptor = lifetime switch

@@ -22,8 +22,10 @@ class AdaptiveFenceCostTests
     private static string MakeDir(string suffix)
     {
         var dir = Path.Combine(Path.GetTempPath(), "Typhon.Tests", nameof(AdaptiveFenceCostTests), suffix);
+        // Wipe wholesale — a database is now a {name}.typhon bundle DIRECTORY, so deleting only top-level files would
+        // leave a stale bundle behind for the engine to reopen.
+        if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true);
         Directory.CreateDirectory(dir);
-        foreach (var f in Directory.GetFiles(dir)) File.Delete(f);
         return dir;
     }
 

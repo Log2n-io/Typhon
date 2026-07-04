@@ -20,6 +20,7 @@ public enum TyphonErrorCode
     PageChecksumMismatch            = 2005,
     PageCacheBackpressureTimeout    = 2006,
     DatabaseLocked                  = 2007,
+    InvalidDatabaseBundle           = 2008,
 
     // 3xxx — Component
     SchemaValidation                = 3001,

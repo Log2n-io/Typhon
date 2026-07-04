@@ -82,8 +82,6 @@ public sealed class EngineLifecycle : IDisposable
 
         Directory.CreateDirectory(directory);
         var databaseName = Path.GetFileNameWithoutExtension(fullPath);
-        var walDir = Path.Combine(directory, "wal");
-        Directory.CreateDirectory(walDir);
 
         // Windows doesn't release MMF file handles synchronously on Dispose — a fresh POST arriving
         // milliseconds after a DELETE can hit a transient sharing violation. Retry briefly before
@@ -94,7 +92,7 @@ public sealed class EngineLifecycle : IDisposable
         {
             try
             {
-                return TryOpenOnce(fullPath, directory, databaseName, walDir, schemaDllPaths, registeredSchemaDirs);
+                return TryOpenOnce(fullPath, directory, databaseName, schemaDllPaths, registeredSchemaDirs);
             }
             catch (WorkbenchException wb) when (wb.ErrorCode == "file_locked" && attempt < maxAttempts)
             {
@@ -107,7 +105,6 @@ public sealed class EngineLifecycle : IDisposable
         string fullPath,
         string directory,
         string databaseName,
-        string walDir,
         string[] schemaDllPaths,
         string[] registeredSchemaDirs)
     {
@@ -149,7 +146,7 @@ public sealed class EngineLifecycle : IDisposable
                 {
                     engineOpts.Wal = new WalWriterOptions
                     {
-                        WalDirectory = walDir,
+                        // WalDirectory left null — the engine derives {bundle}/wal inside the .typhon bundle.
                         UseFUA = false
                     };
                 });

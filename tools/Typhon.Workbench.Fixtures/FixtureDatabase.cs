@@ -236,8 +236,9 @@ internal static class FixtureDatabase
         // `outputDir` root — see the xmldoc above. `PrepareOutputDirectory` wipes this leaf wholesale on regenerate,
         // so this scoping is also what keeps a force-regen of DB-A from blowing away DB-B's files.
         var absOut = Path.Combine(Path.GetFullPath(outputDir), safeName);
+        // The engine creates the database as a "{safeName}.typhon" bundle directory (data + db.lock + wal/ inside) under
+        // absOut. typhonPath is that bundle — the single openable path handed back to the Workbench.
         var typhonPath = Path.Combine(absOut, $"{safeName}.typhon");
-        var binPath = Path.Combine(absOut, $"{safeName}.bin");
         // ADR-055: the schema assembly is no longer copied per-database — it's resolved from the Workbench's own
         // deployment directory at open time. Report that shared, always-current location rather than a per-DB copy.
         var schemaDllPath = Path.Combine(AppContext.BaseDirectory, "Typhon.Workbench.Fixtures.schema.dll");
@@ -246,7 +247,7 @@ internal static class FixtureDatabase
 
         // Reuse only when nothing has changed. Force = unconditional wipe. Different config hash = treat as a fresh
         // request (the old DB doesn't match what the user is now asking for — silently reusing would mislead them).
-        var databaseExists = File.Exists(typhonPath) && File.Exists(binPath);
+        var databaseExists = File.Exists(Path.Combine(typhonPath, "data"));
         var hashMatches = databaseExists && File.Exists(configHashPath)
             && string.Equals(File.ReadAllText(configHashPath).Trim(), requestedHash, StringComparison.Ordinal);
         if (databaseExists && hashMatches && !force)
@@ -314,8 +315,7 @@ internal static class FixtureDatabase
             engine.ForceCheckpoint();
         }
 
-        progress?.Report(new FixtureProgressReport("Writing marker", 0, 0));
-        WriteTyphonMarker(absOut, safeName);
+        // The engine already materialised the "{safeName}.typhon" bundle directory — no separate marker file needed.
         // ADR-055: no schema-DLL copy — the Workbench resolves the (single, current) schema assembly from its own
         // deployment directory on open, so a per-DB copy would only ever go stale.
         File.WriteAllText(configHashPath, requestedHash);
@@ -863,14 +863,11 @@ internal static class FixtureDatabase
             Directory.Delete(dir, recursive: true);
         }
         Directory.CreateDirectory(dir);
-        Directory.CreateDirectory(Path.Combine(dir, "wal"));
+        // No wal/ creation — the engine derives {bundle}/wal inside the .typhon bundle it creates under this directory.
     }
 
     private static ServiceProvider BuildEngineServices(string directory, string databaseName)
     {
-        var walDir = Path.Combine(directory, "wal");
-        Directory.CreateDirectory(walDir);
-
         var services = new ServiceCollection();
         services
             .AddLogging(b =>
@@ -906,7 +903,7 @@ internal static class FixtureDatabase
                 // same on-disk shape consumers see.
                 opts.Wal = new WalWriterOptions
                 {
-                    WalDirectory = walDir,
+                    // WalDirectory left null — the engine derives {bundle}/wal inside the .typhon bundle.
                     // FUA off — fixture generation doesn't need per-write durability; group-commit + final fsync is enough.
                     UseFUA = false
                 };
@@ -920,15 +917,6 @@ internal static class FixtureDatabase
                 opts.Resources.WalRingBufferSizeBytes = 64 * 1024 * 1024;
             });
         return services.BuildServiceProvider();
-    }
-
-    private static void WriteTyphonMarker(string outDir, string databaseName)
-    {
-        var marker = Path.Combine(outDir, $"{databaseName}.typhon");
-        if (!File.Exists(marker))
-        {
-            File.WriteAllText(marker, string.Empty);
-        }
     }
 
 }

@@ -35,15 +35,25 @@ public class PagedMMFOptions
 
     internal bool OverrideDatabaseCacheMinSize { get; set; }
 
+    /// <summary>
+    /// Deletes the entire database bundle directory (<see cref="BundleDirectory"/>) — data file, lock, and WAL. A Typhon
+    /// database is one directory, so "delete the database" is a single recursive directory delete. Must only be called
+    /// when the database is <b>closed</b>: an open <c>data</c> handle would block the recursive delete (the throw is
+    /// swallowed, potentially leaving a half-deleted bundle).
+    /// </summary>
     public void EnsureFileDeleted()
     {
         try
         {
-            var pfn = BuildDatabasePathFileName();
-            DeleteAndWait(pfn);
+            // "Delete the database" must also clear a legacy/foreign FILE sitting at the bundle path (e.g. the old marker):
+            // DeleteDirectoryAndWait only understands directories, so without this a later open would hard-fail on the
+            // File.Exists guard in PagedMMF's ctor. The caller explicitly asked to wipe, so removing the file is safe here.
+            if (File.Exists(BundleDirectory))
+            {
+                File.Delete(BundleDirectory);
+            }
 
-                var lockPath = Path.Combine(DatabaseDirectory, $"{DatabaseName}.lock");
-                DeleteAndWait(lockPath);
+            DeleteDirectoryAndWait(BundleDirectory);
         }
         catch (Exception)
         {
@@ -52,21 +62,20 @@ public class PagedMMFOptions
     }
 
     /// <summary>
-    /// Deletes a file and polls until the NTFS pending-delete completes.
-    /// On Windows, <see cref="File.Delete"/> returns immediately but the directory entry
-    /// removal is deferred — subsequent operations on the same path can fail without this wait.
+    /// Deletes a directory recursively and polls until the NTFS pending-delete completes. On Windows, <see cref="Directory.Delete(string, bool)"/> returns
+    /// before the directory entry is actually removed — subsequent operations on the same path can fail without this wait.
     /// </summary>
-    private static void DeleteAndWait(string path, int maxWaitMs = 500)
+    private static void DeleteDirectoryAndWait(string path, int maxWaitMs = 500)
     {
-        if (!File.Exists(path))
+        if (!Directory.Exists(path))
         {
             return;
         }
 
-        File.Delete(path);
+        Directory.Delete(path, recursive: true);
         var sw = new System.Diagnostics.Stopwatch();
         sw.Start();
-        while (File.Exists(path) && sw.ElapsedMilliseconds < maxWaitMs)
+        while (Directory.Exists(path) && sw.ElapsedMilliseconds < maxWaitMs)
         {
             Thread.Sleep(1);
         }
@@ -143,6 +152,14 @@ public class PagedMMFOptions
         return success;
     }
     
-    internal string BuildDatabaseFileName() => $"{DatabaseName}.bin";
-    internal string BuildDatabasePathFileName() => Path.Combine(DatabaseDirectory, BuildDatabaseFileName());
+    /// <summary>
+    /// The database bundle directory — <c>{DatabaseDirectory}/{DatabaseName}.typhon</c>. A Typhon database <b>is</b> this
+    /// single directory; the paged data file (<c>data</c>), the single-writer lock (<c>db.lock</c>), and the WAL segment
+    /// directory (<c>wal/</c>) all live inside it. See <c>claude/design/Storage/typhon-bundle-format.md</c>.
+    /// </summary>
+    public string BundleDirectory => Path.Combine(DatabaseDirectory, $"{DatabaseName}.typhon");
+
+    // Fixed internal name — the bundle directory carries the identity, so the data file inside needs no name/extension.
+    internal static string BuildDatabaseFileName() => "data";
+    internal string BuildDatabasePathFileName() => Path.Combine(BundleDirectory, BuildDatabaseFileName());
 }

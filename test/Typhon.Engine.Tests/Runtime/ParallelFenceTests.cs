@@ -164,11 +164,13 @@ class ParallelFenceTests : TestBase<ParallelFenceTests>
         // Build a WAL-enabled engine so RunParallelFence's WAL-mode gate actually dispatches the parallel
         // Prep/Migrate/Finalize phases (not the serial fallback). Mirrors AntHill's setup: WAL + WalFileIO.
         var walDir = Path.Combine(Path.GetTempPath(), "Typhon.Tests", nameof(ParallelFenceTests), "Wal_StressTest");
-        Directory.CreateDirectory(walDir);
         var dbDir = Path.Combine(Path.GetTempPath(), "Typhon.Tests", nameof(ParallelFenceTests), "Db_StressTest");
+        // Wipe wholesale — the database is a {name}.typhon bundle DIRECTORY; deleting only top-level files would leave a
+        // stale bundle for the engine to reopen.
+        if (Directory.Exists(walDir)) Directory.Delete(walDir, recursive: true);
+        if (Directory.Exists(dbDir)) Directory.Delete(dbDir, recursive: true);
+        Directory.CreateDirectory(walDir);
         Directory.CreateDirectory(dbDir);
-        foreach (var f in Directory.GetFiles(walDir)) File.Delete(f);
-        foreach (var f in Directory.GetFiles(dbDir)) File.Delete(f);
 
         var services = new ServiceCollection()
             .AddLogging(b => b.SetMinimumLevel(Microsoft.Extensions.Logging.LogLevel.Warning))
@@ -287,11 +289,14 @@ class ParallelFenceTests : TestBase<ParallelFenceTests>
     public void SingleThreadedParallelFence_AppliesMigrations()
     {
         var walDir = Path.Combine(Path.GetTempPath(), "Typhon.Tests", nameof(ParallelFenceTests), "Wal_SingleThreaded");
-        Directory.CreateDirectory(walDir);
         var dbDir = Path.Combine(Path.GetTempPath(), "Typhon.Tests", nameof(ParallelFenceTests), "Db_SingleThreaded");
+        // Start clean. The database is now a {name}.typhon bundle DIRECTORY under dbDir — deleting only top-level files
+        // (the old .bin) would leave the stale bundle behind, and the engine would reopen it with prior entities. Wipe the
+        // directories wholesale.
+        if (Directory.Exists(walDir)) Directory.Delete(walDir, recursive: true);
+        if (Directory.Exists(dbDir)) Directory.Delete(dbDir, recursive: true);
+        Directory.CreateDirectory(walDir);
         Directory.CreateDirectory(dbDir);
-        foreach (var f in Directory.GetFiles(walDir)) File.Delete(f);
-        foreach (var f in Directory.GetFiles(dbDir)) File.Delete(f);
 
         var services = new ServiceCollection()
             .AddLogging(b => b.SetMinimumLevel(LogLevel.Warning))

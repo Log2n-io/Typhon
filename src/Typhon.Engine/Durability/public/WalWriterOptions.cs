@@ -8,8 +8,12 @@ namespace Typhon.Engine;
 [PublicAPI]
 public sealed class WalWriterOptions
 {
-    /// <summary>Directory where WAL segment files are stored.</summary>
-    public string WalDirectory { get; set; } = "wal";
+    /// <summary>
+    /// Directory where WAL segment files are stored. Leave <see langword="null"/> (the default) to let the engine derive <c>{bundle}/wal</c> inside the
+    /// database's <c>.typhon</c> bundle — this keeps each database's WAL private and drops the old cwd-relative shared <c>wal/</c>. Set explicitly only to
+    /// place the WAL elsewhere.
+    /// </summary>
+    public string WalDirectory { get; set; }
 
     /// <summary>
     /// GroupCommit flush interval in milliseconds. The WAL writer auto-flushes at this interval when using <see cref="DurabilityMode.GroupCommit"/>. Default: 5ms.

@@ -50,8 +50,9 @@ class OperationalToolingTests : TestBase<OperationalToolingTests>
 
     private string GetDatabasePath()
     {
+        // DatabaseSchema.Inspect/ValidateEvolution take the bundle path (they strip it to name+dir), not the inner data file.
         var options = ServiceProvider.GetRequiredService<IOptions<ManagedPagedMMFOptions>>().Value;
-        return options.BuildDatabasePathFileName();
+        return options.BundleDirectory;
     }
 
     // ── Inspect() Tests ──

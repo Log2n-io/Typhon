@@ -255,6 +255,9 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
     protected readonly PagedMMFOptions Options;
     protected readonly ILogger<PagedMMF> Logger;
+
+    /// <summary>The database bundle directory (<c>{name}.typhon</c>). The <c>data</c> file, <c>db.lock</c>, and <c>wal/</c> live inside it.</summary>
+    internal string BundleDirectory => Options.BundleDirectory;
     
     private protected readonly PinnedMemoryBlock MemPages;
     private unsafe byte* _memPagesAddr;
@@ -329,7 +332,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// <summary>File pages whose CRC failed while in <see cref="PageChecksumVerification.RecoverySuspect"/> mode — recorded instead of repaired/thrown so the
     /// engine's post-apply resolution can classify each (derived → rebuilt, orphaned primary → healed, live primary → loud-fail RB-04). Concurrent because page
     /// loads may run on the background checkpoint/IO threads during recovery.</summary>
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<int, byte> _suspectPages = new();
+    private readonly ConcurrentDictionary<int, byte> _suspectPages = new();
 
     /// <summary>Returns the recorded suspect file pages and clears the set. Called once by recovery after apply+scrub+rebuild to resolve them (heal or loud-fail).</summary>
     internal int[] DrainSuspectPages()
@@ -357,6 +360,20 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         Options = options;
         Logger = logger;
 
+        // A Typhon database is a "{name}.typhon" DIRECTORY. If a FILE occupies that path it is a legacy or foreign artifact (the old 0-byte Workbench marker,
+        // or a stray/pre-bundle file) — reject with a clear, typed error instead of letting the Directory.CreateDirectory (further down) throw an opaque
+        // IOException. Checked here, BEFORE any resource (the pinned page cache, the lock file) is acquired, so the throw leaks nothing and propagates
+        // untyped-unwrapped (the try's catch below rewraps every exception). Removal/migration is the caller's call — we never silently delete on the open path
+        // (the file may hold a real legacy database).
+        if (File.Exists(Options.BundleDirectory))
+        {
+            throw new StorageException(
+                TyphonErrorCode.InvalidDatabaseBundle,
+                $"Cannot open Typhon database: a file exists at the bundle path '{Options.BundleDirectory}', but a Typhon " +
+                $"database must be a '{Options.DatabaseName}.typhon' directory. This looks like a legacy or foreign artifact " +
+                "(e.g. a pre-bundle data file or the old Workbench marker) — remove or migrate it, then retry.");
+        }
+
         // Create the cache of the page, pin it and keeps its address
         var cacheSize = Options.DatabaseCacheSize;
         MemPages = memoryAllocator.AllocatePinned("PageCache", this, (int)cacheSize, true, 64);
@@ -380,6 +397,10 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
         try
         {
+            // The database is a bundle directory ({name}.typhon) — ensure it exists before the lock + data files that live inside it. Idempotent: a no-op when
+            // reopening an existing bundle.
+            Directory.CreateDirectory(Options.BundleDirectory);
+
             // Acquire advisory lock file before opening the database
             _lockFilePath = BuildLockFilePath();
             AcquireLockFile();
@@ -423,7 +444,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
     #region Lock File
 
-    private string BuildLockFilePath() => Path.Combine(Options.DatabaseDirectory, $"{Options.DatabaseName}.lock");
+    private string BuildLockFilePath() => Path.Combine(Options.BundleDirectory, "db.lock");
 
     /// <summary>
     /// Checks for an existing advisory lock file and creates a new one.
@@ -614,7 +635,9 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
             _memPagesInfo = null;
             _memPagesAddr = null;
-            _backpressureStrategy.Dispose();
+            // Null-safe: an early ctor throw (e.g. the InvalidDatabaseBundle rejection above, raised before the strategy is
+            // built) still registers this node in the resource tree, so Dispose can run on a half-constructed instance.
+            _backpressureStrategy?.Dispose();
 
             Logger.LogInformation("Virtual Disk Manager disposed");
         }
