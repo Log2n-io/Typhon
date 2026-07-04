@@ -27,8 +27,7 @@ internal sealed class TshPromptCallbacks : PromptCallbacks
         "create", "read", "update", "delete",
         "set", "help", "history", "exit", "quit",
         // Phase 2: Diagnostics
-        "cache-stats", "cache-pages", "page-dump",
-        "segments", "segment-detail",
+        "cache-stats",
         "btree", "btree-dump", "btree-validate",
         "revisions", "mvcc-stats",
         "transactions", "memory", "resources",
@@ -73,7 +72,7 @@ internal sealed class TshPromptCallbacks : PromptCallbacks
         "begin", "commit", "rollback", "create", "read", "update", "delete",
         "set", "help", "history", "exit", "quit", "true", "false",
         // Phase 2
-        "cache-stats", "cache-pages", "page-dump", "segments", "segment-detail",
+        "cache-stats",
         "btree", "btree-dump", "btree-validate", "revisions", "mvcc-stats",
         "transactions", "memory", "resources", "stats-show", "stats-rebuild", "where",
         // Phase 5
@@ -326,10 +325,6 @@ internal sealed class TshPromptCallbacks : PromptCallbacks
             "quit"          => "Exit the shell",
             // Phase 2: Diagnostics
             "cache-stats"    => "Page cache hit rate & state breakdown",
-            "cache-pages"    => "Memory page state summary",
-            "page-dump"      => "Inspect page header + hex data",
-            "segments"       => "List all segments with occupancy",
-            "segment-detail" => "Detailed segment info",
             "btree"          => "B+Tree index statistics",
             "btree-dump"     => "Dump B+Tree nodes",
             "btree-validate" => "Validate B+Tree consistency",
@@ -337,7 +332,7 @@ internal sealed class TshPromptCallbacks : PromptCallbacks
             "mvcc-stats"     => "MVCC revision statistics",
             "transactions"   => "Active transaction list",
             "memory"         => "Memory usage by subsystem",
-            "resources"      => "Resource graph explorer",
+            "resources"      => "Resource graph as a table",
             "stats-show"     => "Index statistics & histogram",
             "stats-rebuild"  => "Rebuild histograms for indexes",
             // Phase 5: Schema Inspection

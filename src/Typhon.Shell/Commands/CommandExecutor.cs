@@ -1251,23 +1251,20 @@ internal sealed class CommandExecutor
         sb.AppendLine("    [cyan]schema-history[/]                   Show schema change audit trail");
         sb.AppendLine("    [cyan]schema-export[/] [[component]]        Export persisted schema (respects format)");
         sb.AppendLine();
-        sb.AppendLine("  [yellow]Diagnostics:[/]");
-        sb.AppendLine("    [cyan]db-stats[/]                           Database volumetry: pages, segments, chunks, bytes");
-        sb.AppendLine("    [cyan]cache-stats[/]                        Page cache hit rate & state breakdown");
-        sb.AppendLine("    [cyan]cache-pages[/] [[where state=...]]      Memory page state summary");
-        sb.AppendLine("    [cyan]page-dump[/] <N> [[--raw]]              Inspect page header + data");
-        sb.AppendLine("    [cyan]segments[/]                           List all segments with occupancy");
-        sb.AppendLine("    [cyan]segment-detail[/] <Comp.Seg>          Detailed segment info");
-        sb.AppendLine("    [cyan]btree[/] <Comp.Field>                 B+Tree index statistics");
+        sb.AppendLine("  [yellow]Diagnostics ([grey]'set format json' emits CI-parseable output[/]):[/]");
+        sb.AppendLine("    [cyan]db-stats[/]                           Database volumetry: pages, segments, chunks, bytes  [grey](json)[/]");
+        sb.AppendLine("    [cyan]cache-stats[/]                        Page cache hit rate & state breakdown  [grey](json)[/]");
+        sb.AppendLine("    [cyan]memory[/]                             Memory usage by subsystem  [grey](json)[/]");
+        sb.AppendLine("    [cyan]transactions[/]                       Active transaction list  [grey](json)[/]");
+        sb.AppendLine("    [cyan]btree[/] <Comp.Field>                 B+Tree index statistics  [grey](json)[/]");
         sb.AppendLine("    [cyan]btree-dump[/] <Comp.Field> [[--level/chunk N]]  Dump B+Tree nodes");
-        sb.AppendLine("    [cyan]btree-validate[/] <Comp.Field>        Validate B+Tree consistency");
+        sb.AppendLine("    [cyan]btree-validate[/] <Comp.Field>        Validate B+Tree consistency (CI assertion)");
         sb.AppendLine("    [cyan]revisions[/] <id> <comp>              Show entity revision chain");
-        sb.AppendLine("    [cyan]mvcc-stats[/] <comp>                  MVCC revision statistics");
-        sb.AppendLine("    [cyan]transactions[/]                       Active transaction list");
-        sb.AppendLine("    [cyan]memory[/]                             Memory usage by subsystem");
-        sb.AppendLine("    [cyan]resources[/] [[--flat]]                 Resource graph (TUI or flat table)");
+        sb.AppendLine("    [cyan]mvcc-stats[/] <comp>                  MVCC revision statistics  [grey](json)[/]");
+        sb.AppendLine("    [cyan]resources[/]                          Resource graph as a table");
         sb.AppendLine("    [cyan]stats-show[/] <Comp.Field|Comp|--all>    Index statistics & histogram");
         sb.AppendLine("    [cyan]stats-rebuild[/] <Comp.Field|Comp|--all>  Rebuild histograms");
+        sb.AppendLine("  [grey]    Deep page/segment/MVCC exploration now lives in the Workbench GUI; btree*/stats-show/revisions/mvcc-stats are provisional (retire on Workbench parity).[/]");
         sb.AppendLine();
         sb.AppendLine("  [yellow]Shell:[/]");
         sb.AppendLine("    [cyan]set[/] [[key [[value]]]]                View/change shell settings");
@@ -1315,20 +1312,16 @@ internal sealed class CommandExecutor
             "help"          => "  help [command]\n    Shows help for all commands or a specific command.",
             "history"       => "  history\n    Shows recent command history.",
             "exit" or "quit" => "  exit / quit\n    Exits the shell.",
-            "db-stats"       => "  db-stats\n    Database volumetry overview: file pages (allocated/capacity), per-component\n    segment breakdown (chunks, bytes, fill%), and totals.",
-            "cache-stats"    => "  cache-stats\n    Shows page cache hit rate, state breakdown (free/idle/shared/exclusive/dirty),\n    and disk I/O counters.",
-            "cache-pages"    => "  cache-pages [where state=<state>]\n    Summarizes memory page states. Optional filter by state name\n    (free, idle, shared, exclusive, dirty, allocating).",
-            "page-dump"      => "  page-dump <pageNumber> [--raw]\n    Displays structured page header info and a data preview.\n    With --raw, shows a full hex dump of the entire 8KB page.",
-            "segments"       => "  segments\n    Lists all segments (data, revision, index) with chunk size,\n    occupancy percentage, and used/total chunk counts.",
-            "segment-detail" => "  segment-detail <Component.Segment>\n    Shows detailed info for a named segment.\n    Segments: CompName.Data, CompName.RevTable, CompName.PK_Index, CompName.Str64_Index",
-            "btree"          => "  btree <Component.Field>\n    Shows B+Tree index statistics: node count, capacity, fill factor.\n    Use CompName.PK for the primary key index.",
-            "btree-dump"     => "  btree-dump <Component.Field> [--level N | --chunk N]\n    Dumps B+Tree structure. --chunk N shows raw hex of a specific node.",
-            "btree-validate" => "  btree-validate <Component.Field>\n    Runs consistency checks on a B+Tree index.\n    Reports pass/fail with error details.",
-            "revisions"      => "  revisions <entityId> <component>\n    Shows the MVCC revision chain for an entity: chain length,\n    item count, first revision number.",
-            "mvcc-stats"     => "  mvcc-stats <component>\n    Aggregates MVCC statistics: entity count, total revisions,\n    average revisions per entity, max chain length.",
-            "transactions"   => "  transactions\n    Lists active transactions with TSN and state.\n    Shows MinTSN and NextTSN from the transaction chain.",
-            "memory"         => "  memory\n    Shows memory usage grouped by engine subsystem\n    (Storage, DataEngine, Durability, Allocation).",
-            "resources"      => "  resources [--flat]\n    Without --flat: launches interactive Terminal.Gui resource explorer.\n    With --flat: prints all resource nodes as a table.",
+            "db-stats"       => "  db-stats\n    Database volumetry overview: file pages (allocated/capacity), per-component\n    segment breakdown (chunks, bytes, fill%), and totals.\n    Honors 'set format json' → CI/monitoring probe.",
+            "cache-stats"    => "  cache-stats\n    Shows page cache hit rate, state breakdown (free/idle/exclusive/dirty),\n    and disk I/O counters.\n    Honors 'set format json' → CI/monitoring probe.",
+            "btree"          => "  btree <Component.Field>\n    Shows B+Tree index statistics: node count, capacity, fill factor.\n    Use CompName.PK for the primary key index. Honors 'set format json'.\n    Provisional: retires when the Workbench ships an index-stats panel.",
+            "btree-dump"     => "  btree-dump <Component.Field> [--level N | --chunk N]\n    Dumps B+Tree structure. --chunk N shows raw hex of a specific node.\n    Provisional: retires when the Workbench ships a B+Tree walker.",
+            "btree-validate" => "  btree-validate <Component.Field>\n    Runs consistency checks on a B+Tree index.\n    Reports pass/fail with error details (CI integrity assertion).",
+            "revisions"      => "  revisions <entityId> <component>\n    Shows the MVCC revision chain for an entity: chain length,\n    item count, first revision number.\n    Provisional: retires when the Workbench ships MVCC time-travel.",
+            "mvcc-stats"     => "  mvcc-stats <component>\n    Aggregates MVCC statistics: entity count, total revisions,\n    average revisions per entity, max chain length. Honors 'set format json'.\n    Provisional: retires when the Workbench ships an MVCC panel.",
+            "transactions"   => "  transactions\n    Lists active transactions with TSN and state.\n    Shows MinTSN and NextTSN from the transaction chain.\n    Honors 'set format json' → CI/monitoring probe.",
+            "memory"         => "  memory\n    Shows memory usage grouped by engine subsystem\n    (Storage, DataEngine, Durability, Allocation).\n    Honors 'set format json' → CI/monitoring probe.",
+            "resources"      => "  resources\n    Prints the resource graph (memory + capacity per node) as a table.\n    The interactive explorer was removed — use the Workbench Resource Tree for a GUI.",
             "stats-show"     => "  stats-show <Component.Field> | <Component> | --all\n    Shows index statistics: entry count, min/max key, and histogram\n    distribution (if built). Use stats-rebuild to build histograms first.\n    Examples: stats-show Player.Gold, stats-show Player, stats-show --all",
             "stats-rebuild"  => "  stats-rebuild <Component.Field> | <Component> | --all\n    Rebuilds equi-width histograms via full index scan.\n    Reports entity count, key range, and elapsed time per index.\n    Examples: stats-rebuild Player.Gold, stats-rebuild Player, stats-rebuild --all",
             "schema-fields"  => "  schema-fields <component>\n    Shows persisted FieldId assignments, types, offsets, and sizes.\n    Accepts short name (e.g. 'Player') or full schema name.",
