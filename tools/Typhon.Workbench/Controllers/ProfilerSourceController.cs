@@ -107,11 +107,11 @@ public sealed class ProfilerSourceController : ControllerBase
         // a relative path with `..` segments from escaping; an absolute path from the trace manifest
         // is already a deliberate target. This endpoint requires the bootstrap token, so an attacker
         // can't address arbitrary local files via the browser.
-        // NOTE: Path.IsPathRooted("/_/...") returns true on Windows (any leading /) so we must check
-        // the repo-relative `/_/` prefix BEFORE the rooted-path branch.
+        // The `/_/` repo-relative prefix must be checked BEFORE the absolute branch — on Linux a `/_/…` path
+        // is itself fully-qualified. A fully-qualified path (drive/UNC on Windows, /-rooted on Linux) is a
+        // deliberate absolute target that bypasses the workspace-root traversal guard (#426).
         var isRepoRelative = path.StartsWith("/_/", StringComparison.Ordinal);
-        var isAbsolute = !isRepoRelative && Path.IsPathRooted(path)
-            && (path.Length >= 2 && (path[1] == ':' || path.StartsWith("\\\\", StringComparison.Ordinal) || path.StartsWith("//", StringComparison.Ordinal)));
+        var isAbsolute = !isRepoRelative && Path.IsPathFullyQualified(path);
         var fullPath = Path.GetFullPath(ResolveAbsolutePath(path, workspaceRoot));
         if (!isAbsolute)
         {
@@ -218,13 +218,12 @@ public sealed class ProfilerSourceController : ControllerBase
             }
             return Path.GetFullPath(Path.Combine(workspaceRoot, relative));
         }
-        // True absolute path (drive letter or UNC) — PDB-resolved system paths (#302) live outside
-        // the Typhon workspace root (e.g. AntHill at C:\Dev\github\Typhon\test\AntHill\…).
-        if (Path.IsPathRooted(repoRelative)
-            && repoRelative.Length >= 2
-            && (repoRelative[1] == ':'
-                || repoRelative.StartsWith("\\\\", StringComparison.Ordinal)
-                || repoRelative.StartsWith("//", StringComparison.Ordinal)))
+        // A fully-qualified path is a deliberate absolute target — PDB-resolved system paths (#302) live
+        // outside the Typhon workspace root (e.g. AntHill at C:\Dev\github\Typhon\test\AntHill\…).
+        // Path.IsPathFullyQualified is OS-agnostic: drive-letter / UNC on Windows, /-rooted on Linux, while a
+        // bare-relative path stays relative on both. The old hand-rolled drive-letter check treated a POSIX
+        // absolute path as relative and joined it onto the workspace root on Linux (#426).
+        if (Path.IsPathFullyQualified(repoRelative))
         {
             return Path.GetFullPath(repoRelative);
         }

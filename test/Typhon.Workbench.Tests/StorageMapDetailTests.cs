@@ -51,6 +51,23 @@ public sealed class StorageMapDetailTests
         return JsonSerializer.Deserialize<T>(await resp.Content.ReadAsStringAsync(), Json)!;
     }
 
+    // The first non-root page of a chunk-based segment — where the chunks live in v4 (#426): the directory-only
+    // root page carries zero chunks, so per-chunk fill/class arrays only appear on data pages. Resolved from the
+    // segment's page list (root-first ordinal order), so it never assumes a contiguous or fixed layout. Returns
+    // -1 when the segment has no non-root page.
+    private async Task<int> FirstDataPageAsync(SessionDto session, int segmentId)
+    {
+        var detail = await GetOkAsync<StorageSegmentDetailDto>(session, $"segment/{segmentId}");
+        foreach (var p in detail.Pages)
+        {
+            if (p != detail.RootPageIndex)
+            {
+                return p;
+            }
+        }
+        return -1;
+    }
+
     [Test]
     public async Task GetRegions_ExposesDetailTileSize()
     {
@@ -136,30 +153,45 @@ public sealed class StorageMapDetailTests
     }
 
     [Test]
-    [Ignore("Stale vs v4 directory-root storage introspection; tracked by #426")]
     public async Task GetPage_DecodesOccupancyRoot()
     {
+        // v4 (#426): the occupancy segment no longer sits at a fixed page index (page 1 is now the directory-only
+        // Root page) — discover its root from the segment table instead of hardcoding the index.
         var session = await CreateSessionAsync();
-        var page = await GetOkAsync<StoragePageDetailDto>(session, "page/1");
+        var regions = await GetOkAsync<StorageRegionsDto>(session, "regions");
+        var occupancy = Array.Find(regions.Segments, s => s.Kind == "Occupancy");
+        Assert.That(occupancy, Is.Not.Null, "the demo database has an occupancy segment");
 
-        Assert.That(page.PageIndex, Is.EqualTo(1));
-        Assert.That(page.ByteOffset, Is.EqualTo(8192L));
+        var page = await GetOkAsync<StoragePageDetailDto>(session, $"page/{occupancy!.RootPageIndex}");
+
+        Assert.That(page.PageIndex, Is.EqualTo(occupancy.RootPageIndex));
+        Assert.That(page.ByteOffset, Is.EqualTo((long)occupancy.RootPageIndex * 8192L));
         Assert.That(page.PageType, Is.EqualTo("Occupancy"));
         Assert.That(page.CrcStatus, Is.AnyOf("Unverified", "Verified", "Failed"));
         Assert.That(page.Residency, Is.AnyOf("OnDiskOnly", "ResidentClean", "ResidentDirty"));
     }
 
     [Test]
-    [Ignore("Stale vs v4 directory-root storage introspection; tracked by #426")]
-    public async Task GetPage_OccupancyRoot_RendersGovernedRegionMap()
+    public async Task GetPage_OccupancyPage_RendersGovernedRegionMap()
     {
-        // A6 §10.2 — the occupancy root page governs the first 48,000 file pages; its detail carries a down-sampled
-        // allocation region-map of that range. The bits come from ReadOccupancyBits (zero data-page I/O).
+        // A6 §10.2 — an occupancy page's detail carries a down-sampled allocation region-map of the file-page range it
+        // governs (bits from ReadOccupancyBits, zero data-page I/O). v4 (#426): the directory-only root occupancy page
+        // governs ZERO pages (it stores only the segment directory, no bitmap words); the first *data* page (ordinal 1)
+        // is the one that governs from file page 0. Probe that, discovered from the segment's page list.
         var session = await CreateSessionAsync();
-        var page = await GetOkAsync<StoragePageDetailDto>(session, "page/1");
+        var regions = await GetOkAsync<StorageRegionsDto>(session, "regions");
+        var occupancy = Array.Find(regions.Segments, s => s.Kind == "Occupancy");
+        Assert.That(occupancy, Is.Not.Null, "the demo database has an occupancy segment");
+        var dataPage = await FirstDataPageAsync(session, occupancy!.Id);
+        if (dataPage < 0)
+        {
+            Assert.Ignore("the occupancy segment has no data page (the root governs nothing under v4)");
+            return;
+        }
+        var page = await GetOkAsync<StoragePageDetailDto>(session, $"page/{dataPage}");
 
         Assert.That(page.PageType, Is.EqualTo("Occupancy"));
-        Assert.That(page.OccupancyFirstPage, Is.EqualTo(0L), "the root occupancy page governs from file page 0");
+        Assert.That(page.OccupancyFirstPage, Is.EqualTo(0L), "the first occupancy data page governs from file page 0");
         Assert.That(page.OccupancyGovernedCount, Is.GreaterThan(0));
         Assert.That(page.OccupancyGridCols, Is.GreaterThan(0));
 
@@ -418,7 +450,6 @@ public sealed class StorageMapDetailTests
     }
 
     [Test]
-    [Ignore("Stale vs v4 directory-root storage introspection; tracked by #426")]
     public async Task GetPage_VsbsPage_CarriesElementFill()
     {
         // A6 §10.1 — a VSBS page colours chunks by element fill (ElementCount / capacity), not binary occupancy.
@@ -431,8 +462,17 @@ public sealed class StorageMapDetailTests
             return;
         }
 
-        var page = await GetOkAsync<StoragePageDetailDto>(session, $"page/{vsbs.RootPageIndex}");
-        Assert.That(page.ChunkFill, Is.Not.Empty, "a VSBS page carries a per-chunk element fill array");
+        // v4 (#426): the directory-only root page carries zero chunks — the chunks (and their fill array) live on
+        // the segment's non-root data pages. Probe the first data page.
+        var dataPage = await FirstDataPageAsync(session, vsbs.Id);
+        if (dataPage < 0)
+        {
+            Assert.Ignore("the VSBS segment has no non-root data page");
+            return;
+        }
+
+        var page = await GetOkAsync<StoragePageDetailDto>(session, $"page/{dataPage}");
+        Assert.That(page.ChunkFill, Is.Not.Empty, "a VSBS data page carries a per-chunk element fill array");
         Assert.That(Convert.FromBase64String(page.ChunkFill).Length, Is.EqualTo(page.ChunkTotal));
     }
 
@@ -539,7 +579,6 @@ public sealed class StorageMapDetailTests
     }
 
     [Test]
-    [Ignore("Stale vs v4 directory-root storage introspection; tracked by #426")]
     public async Task GetPage_IndexPage_ClassesLeafInternalAndHatchesDirectory()
     {
         // A6 §13 — an index page classes each node leaf vs internal (from its control word) and hatches the directory chunks (0..3) as non-data.
@@ -552,14 +591,28 @@ public sealed class StorageMapDetailTests
             return;
         }
 
-        var page = await GetOkAsync<StoragePageDetailDto>(session, $"page/{index.RootPageIndex}");
+        // v4 (#426): the directory-only root page carries zero chunks — the shared B-tree directory chunks and the
+        // nodes live on the first data page. Its FirstChunkId is 0 (root holds no chunks), so chunk 0 there is still
+        // the directory — the assertions below hold unchanged once retargeted off the root.
+        var dataPage = await FirstDataPageAsync(session, index.Id);
+        if (dataPage < 0)
+        {
+            Assert.Ignore("the index segment has no non-root data page");
+            return;
+        }
+
+        var page = await GetOkAsync<StoragePageDetailDto>(session, $"page/{dataPage}");
         Assert.That(page.ChunkClass, Is.Not.Empty, "an index page carries a per-chunk class array");
+        Assert.That(page.FirstChunkId, Is.EqualTo(0), "the first data page starts at global chunk 0 (the root holds none in v4)");
         var cls = Convert.FromBase64String(page.ChunkClass);
         Assert.That(cls.Length, Is.EqualTo(page.ChunkTotal));
-        // Chunk 0 (firstChunkId 0 on the root page) is the shared B-tree directory — hatched, not read as a node.
+        // Chunk 0 (firstChunkId 0 on the first data page) is the shared B-tree directory — hatched, not read as a node.
         Assert.That(cls[0], Is.EqualTo((byte)StorageChunkClass.NonData));
 
-        // Find a node (leaf or internal) on the page and decode it; its decoded role must match the L3 class.
+        // Cross-check: if this index holds any B-tree nodes, a Leaf/Internal-classed chunk must decode to that role.
+        // The demo's index segments are the engine's schema-catalog indexes and can be directory-only (no nodes) — the
+        // directory-hatch verification above is then the full extent of what this demo exercises, and the test passes
+        // on it rather than being skipped wholesale (#426).
         var nodeGlobalId = -1;
         string expectedRole = null;
         for (var i = 0; i < cls.Length; i++)
@@ -571,15 +624,12 @@ public sealed class StorageMapDetailTests
                 break;
             }
         }
-        if (nodeGlobalId < 0)
+        if (nodeGlobalId >= 0)
         {
-            Assert.Ignore("no B-tree node on the index root page");
-            return;
+            var node = await GetOkAsync<StorageChunkDto>(session, $"chunk/{index.Id}/{nodeGlobalId}");
+            Assert.That(node.Decoder, Is.EqualTo("index"));
+            Assert.That(Array.Find(node.Cells, c => c.Label == "Role")!.Value, Is.EqualTo(expectedRole));
         }
-
-        var node = await GetOkAsync<StorageChunkDto>(session, $"chunk/{index.Id}/{nodeGlobalId}");
-        Assert.That(node.Decoder, Is.EqualTo("index"));
-        Assert.That(Array.Find(node.Cells, c => c.Label == "Role")!.Value, Is.EqualTo(expectedRole));
     }
 
     [Test]
