@@ -137,15 +137,18 @@ jobs:
           java-version: '11'    # runs the pinned tla2tools v1.7.4
 
       - name: Model-check all specs + genuineness mutants
-        working-directory: typhon-claude/claude/rules/tla
+        # Typhon-Claude's repo root IS the claude/ content, so the specs sit at rules/tla (no extra claude/ segment).
+        working-directory: typhon-claude/rules/tla
         run: |
           set -e
+          # Invoke via `bash` (not ./) so a missing exec bit — common when the script is committed from Windows —
+          # doesn't fail the run with "Permission denied".
           for spec in CheckpointProtocol CommitRecovery CommittedDiscipline; do
             echo "::group::TLC $spec (expect GREEN)"
-            ./run-tlc.sh "$spec"
+            bash run-tlc.sh "$spec"
             echo "::endgroup::"
             echo "::group::TLC $spec mutant (expect VIOLATION)"
-            ./run-tlc.sh "$spec" mutant --expect-violation
+            bash run-tlc.sh "$spec" mutant --expect-violation
             echo "::endgroup::"
           done
 
