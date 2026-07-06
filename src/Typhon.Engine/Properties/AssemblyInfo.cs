@@ -8,7 +8,7 @@ using System.Runtime.CompilerServices;
 // driven by genuine internal-implementation reuse (refactor to the public surface if possible).
 
 // Production friend assemblies
-[assembly: InternalsVisibleTo("tsh")]                       // Typhon.Shell (AssemblyName=tsh)
+[assembly: InternalsVisibleTo("typhon")]                    // Typhon.Shell / CLI (AssemblyName=typhon, #428)
 [assembly: InternalsVisibleTo("Typhon.Workbench")]
 
 // Test / sample friend assemblies
@@ -29,7 +29,7 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("Typhon.Workbench.Fixtures.schema")]
 
 // Dropped 2026-05-11 — verified not needed by the mechanical audit (build succeeds without them):
-//   "Typhon.Shell"               — redundant: Shell's AssemblyName is `tsh`, not `Typhon.Shell`.
+//   "Typhon.Shell"               — redundant: Shell's AssemblyName is `typhon`, not `Typhon.Shell`.
 //   "Typhon.Shell.Extensibility" — builds clean.
 //   "Typhon.Workbench.Fixtures"  — builds clean.
 //   "Typhon.ARPG.Shell"          — builds clean.

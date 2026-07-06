@@ -9,16 +9,16 @@ internal static class PromptBuilder
     {
         if (!session.IsOpen)
         {
-            return "tsh> ";
+            return "typhon> ";
         }
 
         if (!session.HasTransaction)
         {
-            return $"tsh:{session.DatabaseName}> ";
+            return $"typhon:{session.DatabaseName}> ";
         }
 
         var tsn = session.Transaction.TSN;
         var dirty = session.IsDirty ? "*" : "";
-        return $"tsh:{session.DatabaseName}[tx:{tsn}{dirty}]> ";
+        return $"typhon:{session.DatabaseName}[tx:{tsn}{dirty}]> ";
     }
 }

@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Reflection;
 using System.Threading;
 using PrettyPrompt;
 using PrettyPrompt.Highlighting;
@@ -13,6 +14,27 @@ namespace Typhon.Shell;
 
 internal static class Program
 {
+    /// <summary>
+    /// The tool version, single-sourced from the assembly's informational version (stamped by MinVer at build
+    /// time, e.g. <c>0.0.0-alpha.0.114</c>). The trailing <c>+&lt;sha&gt;</c> build metadata is trimmed for display.
+    /// Surfaced by <c>typhon --version</c> and the interactive banner so both always reflect the real package version.
+    /// </summary>
+    internal static readonly string Version = ResolveVersion();
+
+    private static string ResolveVersion()
+    {
+        var informational = Assembly.GetExecutingAssembly()
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+
+        if (string.IsNullOrEmpty(informational))
+        {
+            return "0.0.0";
+        }
+
+        var plus = informational.IndexOf('+');
+        return plus >= 0 ? informational.Substring(0, plus) : informational;
+    }
+
     private static int Main(string[] args)
     {
         try
@@ -20,8 +42,8 @@ internal static class Program
             var app = new CommandApp<TSHCommand>();
             app.Configure(config =>
             {
-                config.SetApplicationName("tsh");
-                config.SetApplicationVersion("0.1.0");
+                config.SetApplicationName("typhon");
+                config.SetApplicationVersion(Version);
             });
 
             return app.Run(args);
@@ -44,7 +66,7 @@ internal static class Program
 }
 
 /// <summary>
-/// The single Spectre.Console.Cli command that handles all tsh invocation modes:
+/// The single Spectre.Console.Cli command that handles all `typhon` invocation modes:
 /// interactive REPL, single-command (-c), script (--exec), and pipe mode.
 /// </summary>
 internal sealed class TSHCommand : Command<TSHCommand.Settings>
@@ -124,11 +146,11 @@ internal sealed class TSHCommand : Command<TSHCommand.Settings>
             }
         }
 
-        // Execute .tshrc files: global (~/.tshrc) first, then local (./.tshrc)
+        // Execute .typhonrc files: global (~/.typhonrc) first, then local (./.typhonrc)
         var rcFiles = new[]
         {
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".tshrc"),
-            Path.Combine(Directory.GetCurrentDirectory(), ".tshrc"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".typhonrc"),
+            Path.Combine(Directory.GetCurrentDirectory(), ".typhonrc"),
         };
 
         foreach (var rcFile in rcFiles)
@@ -205,7 +227,7 @@ internal sealed class TSHCommand : Command<TSHCommand.Settings>
 
     private static int RunInteractive(ShellSession session, CommandExecutor executor)
     {
-        AnsiConsole.MarkupLine("[grey]Typhon Shell v0.1.0[/]");
+        AnsiConsole.MarkupLine($"[grey]Typhon Shell v{Program.Version}[/]");
         AnsiConsole.MarkupLine("[grey]Type 'help' for commands, 'exit' to quit.[/]");
         Console.WriteLine();
 
@@ -213,11 +235,11 @@ internal sealed class TSHCommand : Command<TSHCommand.Settings>
 
         var historyPath = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-            ".tsh_history");
+            ".typhon_history");
 
         var config = new PromptConfiguration(
-            prompt: new FormattedString("tsh> ",
-                new FormatSpan(0, 3, AnsiColor.BrightCyan))
+            prompt: new FormattedString("typhon> ",
+                new FormatSpan(0, 6, AnsiColor.BrightCyan))
         );
 
         var prompt = new Prompt(
@@ -233,7 +255,7 @@ internal sealed class TSHCommand : Command<TSHCommand.Settings>
                 // Update prompt to reflect current session state (db name, transaction, dirty flag)
                 var promptText = PromptBuilder.Build(session);
                 config.Prompt = new FormattedString(promptText,
-                    new FormatSpan(0, 3, AnsiColor.BrightCyan));
+                    new FormatSpan(0, 6, AnsiColor.BrightCyan));
 
                 var response = prompt.ReadLineAsync().GetAwaiter().GetResult();
                 if (!response.IsSuccess)

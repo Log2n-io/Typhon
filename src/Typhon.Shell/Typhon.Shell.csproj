@@ -4,11 +4,31 @@
         <OutputType>Exe</OutputType>
         <TargetFramework>net10.0</TargetFramework>
         <LangVersion>default</LangVersion>
-        <PackAsTool>true</PackAsTool>
-        <ToolCommandName>tsh</ToolCommandName>
         <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-        <AssemblyName>tsh</AssemblyName>
+        <PackAsTool>true</PackAsTool>
+        <!-- The single command the SDK maps in DotnetToolSettings.xml (one command per tool — dotnet/sdk#10014).
+             `typhon` also sidesteps the Teleport `tsh` PATH collision. The old `tsh` alias is dropped (D-5): the
+             SDK cannot expose a second command, and pre-alpha `tsh` was never published, so there is nothing to
+             preserve. AssemblyName follows the command so the packed entry DLL is `typhon.dll`. -->
+        <ToolCommandName>typhon</ToolCommandName>
+        <AssemblyName>typhon</AssemblyName>
     </PropertyGroup>
+
+    <!-- ============ NuGet packaging (#428) — the `typhon` CLI as a global/local dotnet tool ============
+         Identity, symbols, Source Link, license and MinVer versioning are inherited from Directory.Build.props;
+         only the tool-specific id/description/tags/readme live here. NuGet package IDs are globally unique, so the
+         tool cannot share the engine's `Typhon` id — it is `Typhon.Cli` and installs a command named `typhon` (D-1). -->
+    <PropertyGroup>
+        <PackageId>Typhon.Cli</PackageId>
+        <Description>The `typhon` command-line tool for the Typhon database engine — an interactive shell (REPL) plus scripting for creating, opening, querying, and inspecting Typhon databases. Install as a global or local .NET tool. Pre-alpha — expect breaking changes.</Description>
+        <PackageTags>typhon;database;cli;dotnet-tool;repl;ecs;acid;shell</PackageTags>
+        <PackageReadmeFile>PACKAGE.md</PackageReadmeFile>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <!-- Package README (the NuGet.org landing page) — short and tool-scoped, not the repo README. -->
+        <None Include="PACKAGE.md" Pack="true" PackagePath="" />
+    </ItemGroup>
 
     <ItemGroup>
         <PackageReference Include="Spectre.Console" Version="0.55.2" />
