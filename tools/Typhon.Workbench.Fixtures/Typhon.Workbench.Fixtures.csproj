@@ -14,6 +14,8 @@
 
     <ItemGroup>
         <ProjectReference Include="..\..\src\Typhon.Engine\Typhon.Engine.csproj" />
+        <!-- Direct ref (#427): Schema.Definition ships bundled inside the Typhon package, no longer transitive via the engine. -->
+        <ProjectReference Include="..\..\src\Typhon.Schema.Definition\Typhon.Schema.Definition.csproj" />
         <!-- Needed by TraceFixtureBuilder / MockTcpProfilerServer for TraceFileHeader, TraceFileWriter,
              LiveStreamProtocol, TraceBlockEncoder. -->
         <ProjectReference Include="..\..\src\Typhon.Profiler\Typhon.Profiler.csproj" />

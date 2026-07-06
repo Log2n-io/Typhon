@@ -15,6 +15,13 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\..\src\Typhon.Engine\Typhon.Engine.csproj" />
+    <!-- Direct refs (#427): Schema.Definition/Profiler ship bundled inside the Typhon package and no longer flow
+         transitively via the engine; JetBrains.Annotations is compile-only (#434). -->
+    <ProjectReference Include="..\..\..\src\Typhon.Schema.Definition\Typhon.Schema.Definition.csproj" />
+    <ProjectReference Include="..\..\..\src\Typhon.Profiler\Typhon.Profiler.csproj" />
+    <PackageReference Include="JetBrains.Annotations" Version="2025.2.4" PrivateAssets="all" />
+    <!-- AddConsole() sink: no longer flows transitively now that the engine dropped Logging.Console (#434). -->
+    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.8" />
     <ProjectReference Include="..\..\..\src\Typhon.Analyzers\Typhon.Analyzers.csproj"
                       ReferenceOutputAssembly="false" OutputItemType="Analyzer" />
     <ProjectReference Include="..\..\..\src\Typhon.Generators\Typhon.Generators.csproj"

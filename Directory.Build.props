@@ -29,4 +29,47 @@
     <CompilerVisibleProperty Include="TyphonRepoRoot" />
   </ItemGroup>
 
+  <!--
+    ============ Packaging & versioning foundation (Feature #435 — Distribution & Packaging) ============
+
+    Shared across every project so the packages produced from this repo (the `Typhon` engine NuGet and the
+    `Typhon.Cli` dotnet tool) get consistent identity, versioning, symbols and Source Link. Non-packable
+    projects (tests, tools, demos) inherit these harmlessly — the metadata only takes effect when packing.
+
+    Versioning: MinVer derives the version from git tags (decision D-2). No version tag exists yet, so builds
+    resolve to `0.0.0-alpha.0.<height>` — already a prerelease on the 0.0.x line, so we can never accidentally
+    ship a `1.0.0`. The first real release is tagged `0.0.1-alpha.1`. Packages publish PRERELEASE-ONLY through
+    pre-alpha (enforced in release CI, #430).
+
+    Source Link: in-box in the .NET 8+ SDK (no PackageReference needed). PublishRepositoryUrl + EmbedUntrackedSources
+    enable it for this GitHub-hosted repo; DeterministicSourcePaths + PathMap are already set above.
+    ContinuousIntegrationBuild is set by the release workflow only (#430), keeping local packs reproducible too.
+  -->
+  <PropertyGroup>
+    <Authors>Log2n</Authors>
+    <Company>Log2n</Company>
+    <Product>Typhon</Product>
+    <Copyright>Copyright 2026 Log2n</Copyright>
+    <PackageProjectUrl>https://typhondb.io</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/log2n-io/Typhon</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageLicenseFile>LICENSE.md</PackageLicenseFile>
+    <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
+
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="MinVer" Version="7.0.0" PrivateAssets="all" />
+  </ItemGroup>
+
+  <!-- The license file, packed into every package produced from this repo (paired with PackageLicenseFile above
+       so a pack can never fail NU5030 "license file not found"). -->
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)LICENSE.md" Pack="true" PackagePath="" Visible="false" />
+  </ItemGroup>
+
 </Project>

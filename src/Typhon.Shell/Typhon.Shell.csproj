@@ -18,6 +18,8 @@
         <PackageReference Include="Microsoft.Extensions.Logging" Version="10.0.8" />
         <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.8" />
         <PackageReference Include="Microsoft.Extensions.Options" Version="10.0.8" />
+        <!-- Compile-only: [PublicAPI] markers no longer flow transitively from the engine (#434). -->
+        <PackageReference Include="JetBrains.Annotations" Version="2025.2.4" PrivateAssets="all" />
     </ItemGroup>
 
     <ItemGroup>

@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <IsPackable>false</IsPackable>
+    <EnforceExtendedAnalyzerRules>true</EnforceExtendedAnalyzerRules>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="5.3.0" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.CodeAnalysis.Analyzers" Version="5.3.0" PrivateAssets="all" />
+  </ItemGroup>
+
+  <!--
+    The CONSUMER-facing generator, shipped inside the `Typhon` package (#427).
+
+    Single source of truth: ArchetypeAccessorGenerator lives in Typhon.Generators (used by the engine's own
+    build); this project links ONLY that one file so the packaged analyzer assembly contains nothing else.
+    The engine-only generators (SourceLocationGenerator, TraceEventGenerator) are deliberately excluded —
+    TraceEventGenerator emits its attribute definitions via RegisterPostInitializationOutput, which runs before
+    the compilation exists and therefore cannot be gated by assembly name; bundling it would leak engine-internal
+    attributes into every consumer compilation (CS0436). Shipping only this generator is what #427 specifies.
+  -->
+  <ItemGroup>
+    <Compile Include="..\Typhon.Generators\ArchetypeAccessorGenerator.cs" Link="ArchetypeAccessorGenerator.cs" />
+  </ItemGroup>
+
+</Project>

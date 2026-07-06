@@ -4,13 +4,15 @@
         <TargetFramework>net10.0</TargetFramework>
         <LangVersion>default</LangVersion>
         <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+        <!-- Ships bundled inside the `Typhon` package (#427); never packed standalone. -->
+        <IsPackable>false</IsPackable>
     </PropertyGroup>
 
     <ItemGroup>
         <PackageReference Include="K4os.Compression.LZ4" Version="1.3.8" />
         <!-- Consumed by enum decorations (JetBrains.Annotations.UsedImplicitly) on the wire-format enums
              and by [PublicAPI] markers on codec methods. Version matches Typhon.Engine for consistency. -->
-        <PackageReference Include="JetBrains.Annotations" Version="2025.2.4" />
+        <PackageReference Include="JetBrains.Annotations" Version="2025.2.4" PrivateAssets="all" />
     </ItemGroup>
 
     <ItemGroup>

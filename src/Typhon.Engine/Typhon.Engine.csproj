@@ -25,7 +25,8 @@
     </PropertyGroup>
 
     <ItemGroup>
-        <PackageReference Include="JetBrains.Annotations" Version="2025.2.4" />
+        <!-- Compile-only: [PublicAPI]/[UsedImplicitly] markers must not flow to consumers as a runtime dep (#434). -->
+        <PackageReference Include="JetBrains.Annotations" Version="2025.2.4" PrivateAssets="all" />
         <PackageReference Include="MemoryPack" Version="1.21.4" />
         <PackageReference Include="Microsoft.Diagnostics.NETCore.Client" Version="0.2.661903" />
 <PackageReference Include="Microsoft.Extensions.Configuration" Version="10.0.8" />
@@ -36,7 +37,6 @@
         <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.8" />
         <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.8" />
         <PackageReference Include="Microsoft.Extensions.Logging" Version="10.0.8" />
-        <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.8" />
         <PackageReference Include="Microsoft.Extensions.Options" Version="10.0.8" />
         <PackageReference Include="K4os.Compression.LZ4" Version="1.3.8" />
         <!-- Windows-only: ETW kernel-tracing pump for thread context-switch profiling (EtwSchedulingPump).
@@ -49,10 +49,56 @@
         <!-- Reference the Roslyn analyzer for ChunkAccessor enforcement -->
         <ProjectReference Include="..\Typhon.Analyzers\Typhon.Analyzers.csproj" ReferenceOutputAssembly="false" OutputItemType="Analyzer" />
         <ProjectReference Include="..\Typhon.Generators\Typhon.Generators.csproj" ReferenceOutputAssembly="false" OutputItemType="Analyzer" />
-        <ProjectReference Include="..\Typhon.Profiler\Typhon.Profiler.csproj" />
-        <ProjectReference Include="..\Typhon.Protocol\Typhon.Protocol.csproj" />
-        <ProjectReference Include="..\Typhon.Schema.Definition\Typhon.Schema.Definition.csproj" />
+        <!-- Build-order only (NOT an analyzer here — the full Typhon.Generators above already provides the generator
+             for the engine's own compilation). This guarantees the minimal consumer-generator assembly is built
+             before the engine packs it under analyzers/ (see the None item below). -->
+        <ProjectReference Include="..\Typhon.Generators.Consumer\Typhon.Generators.Consumer.csproj" ReferenceOutputAssembly="false" PrivateAssets="all" />
+        <!-- Bundled siblings (#427): all three are PUBLIC API and ship *inside* the one `Typhon` package
+             (their DLLs are injected into lib/net10.0 by AddBundledSiblingAssembliesToPackage below).
+             PrivateAssets="all" keeps them as compile references for the engine itself while excluding them from
+             the package's NuGet <dependency> list — no `Typhon.Profiler`/`Protocol`/`Schema.Definition` packages
+             exist, so a dependency on them would break consumer restore. Consequence: their types no longer flow
+             transitively through the engine to other in-solution projects, so any project that uses them
+             references them DIRECTLY (see those csprojs). External package consumers get the types from lib/. -->
+        <ProjectReference Include="..\Typhon.Profiler\Typhon.Profiler.csproj" PrivateAssets="all" />
+        <ProjectReference Include="..\Typhon.Protocol\Typhon.Protocol.csproj" PrivateAssets="all" />
+        <ProjectReference Include="..\Typhon.Schema.Definition\Typhon.Schema.Definition.csproj" PrivateAssets="all" />
     </ItemGroup>
+
+    <!-- ============ NuGet packaging (#427) ============ -->
+    <PropertyGroup>
+        <PackageId>Typhon</PackageId>
+        <Description>Typhon is a real-time, low-latency ACID database engine built on an ECS architecture with MVCC snapshot isolation, targeting microsecond-level performance. This package bundles the engine with its profiler, wire protocol, and schema-definition APIs. Pre-alpha — expect breaking changes.</Description>
+        <PackageTags>database;acid;ecs;mvcc;embedded;realtime;low-latency;in-memory;storage-engine</PackageTags>
+        <PackageReadmeFile>PACKAGE.md</PackageReadmeFile>
+        <!-- Structural/framework validation of the produced package. API-compat baseline (vs a prior published
+             version) activates once the first alpha is on NuGet.org (#430). -->
+        <EnablePackageValidation>true</EnablePackageValidation>
+        <!-- Inject the bundled sibling DLLs into lib/ (see the target below). -->
+        <TargetsForTfmSpecificBuildOutput>$(TargetsForTfmSpecificBuildOutput);AddBundledSiblingAssembliesToPackage</TargetsForTfmSpecificBuildOutput>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <!-- Package README (the NuGet.org landing page) — short and package-scoped, not the repo README. -->
+        <None Include="PACKAGE.md" Pack="true" PackagePath="" />
+        <!-- Consumer-facing source generator: ArchetypeAccessorGenerator emits the ref-struct accessors for a
+             consumer's [Archetype] types, so it must run in the consumer's compilation → shipped under analyzers/.
+             We ship the dedicated Typhon.Generators.Consumer assembly (that one generator ONLY), not the full
+             Typhon.Generators: TraceEventGenerator emits its attributes via post-initialization output, which
+             cannot be gated by assembly name and would leak engine-internal types into every consumer (CS0436). -->
+        <None Include="..\Typhon.Generators.Consumer\bin\$(Configuration)\netstandard2.0\Typhon.Generators.Consumer.dll"
+              Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
+    </ItemGroup>
+
+    <!-- Add the three bundled sibling assemblies (compiled + copied local via the PrivateAssets="all" refs above)
+         into the package's lib/net10.0, making `Typhon` one self-contained package. -->
+    <Target Name="AddBundledSiblingAssembliesToPackage" DependsOnTargets="ResolveReferences">
+        <ItemGroup>
+            <BuildOutputInPackage Include="$(TargetDir)Typhon.Profiler.dll" />
+            <BuildOutputInPackage Include="$(TargetDir)Typhon.Protocol.dll" />
+            <BuildOutputInPackage Include="$(TargetDir)Typhon.Schema.Definition.dll" />
+        </ItemGroup>
+    </Target>
 
     <ItemGroup>
         <!-- IDE folder hints: keep partial halves grouped under their primary file in Solution Explorer.
