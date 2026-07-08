@@ -402,13 +402,13 @@ export function toggleViewSystemsQueriesNav(): void {
  *     Without this fallback, clicking "Dev Fixture" on Welcome silently no-ops — the bug Loïc caught with
  *     Playwright after the initial panel landing.</item>
  * </list>
- * DEBUG-only on the server side, but the toggle itself is always wired — the panel's own capability probe
- * (`/api/fixtures/capability`) renders the "not available" cold state in Release builds, so clicks never
- * silently fail.
+ * Shipped in Release (#433); the toggle is always wired — the panel's own capability probe
+ * (`/api/fixtures/capability`) renders a "not available" cold state should the probe ever fail, so clicks
+ * never silently fail.
  */
 export function toggleViewDevFixture(): void {
   if (registeredApi !== null) {
-    toggleDockPanel('dev-fixture', 'DevFixture', 'Dev Fixture');
+    toggleDockPanel('dev-fixture', 'DevFixture', 'Sample database');
     return;
   }
   // Defer the store import to avoid a top-level circular dep risk (the store is harmless but lighter to

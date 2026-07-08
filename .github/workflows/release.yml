@@ -1,0 +1,140 @@
+name: Release
+
+# Packs the `Typhon` engine + the `Typhon.Cli` tool (+ symbols) and publishes them to NuGet.org.
+# Triggered by pushing a prerelease-shaped tag (e.g. `0.0.1-alpha.1`) or a manual dispatch. The publish step
+# runs behind a GitHub environment approval and uses NuGet Trusted Publishing (keyless OIDC) — no stored API key.
+# Design + rationale: claude/scratch/distribution-packaging-plan-2026-07-06.md §3 (#430), Feature #435.
+#
+# ────────────────────────────────────────────────────────────────────────────────────────────────────────────
+# OWNER-ONLY PROVISIONING (must exist before the first publish — I can't do these):
+#   1. A nuget.org account (or Organization) that will own the `Typhon` + `Typhon.Cli` IDs. Both IDs are unclaimed
+#      today — the first successful publish creates them under the pushing owner.
+#   2. ONE NuGet Trusted Publishing policy (nuget.org → your username → Trusted Publishing → Add). A policy is
+#      OWNER-scoped — it covers ALL packages owned by the chosen owner, so one policy publishes both IDs. Fields:
+#      Policy Owner = you (individual) or the Log2n organization; Repository Owner `log2n-io`; Repository `Typhon`;
+#      Workflow File `release.yml` (file name only, no path); Environment `nuget-release`.
+#      ⚠ For a PRIVATE repo the policy is *pending-active for 7 days* until the FIRST successful publish locks
+#        the repo/owner IDs — do a real publish within 7 days of creating it (restartable anytime).
+#   3. A repository secret `NUGET_USER` = your nuget.org profile name / username (NOT your email). MFA on the
+#      account does not affect OIDC publishing (it's keyless — MFA only gates interactive login).
+#   4. A GitHub environment named `nuget-release` with a required reviewer (this is the approval gate) — create it
+#      BEFORE the first run, or GitHub auto-creates it unprotected and the publish proceeds without approval.
+# Pre-alpha is PRERELEASE-ONLY: the version must carry a `-<label>` (e.g. `-alpha.1`). Cutting the first STABLE
+# release later is a deliberate act — remove the "Enforce prerelease-only" guard below.
+# ────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+on:
+  push:
+    tags:
+      # Prerelease-shaped tags only: the literal `-` requires a prerelease label, so a bare/stable tag
+      # (e.g. `0.0.1`) never triggers a publish. The guard step below is the authoritative enforcement.
+      - '*.*.*-*'
+  workflow_dispatch:
+
+# Least privilege by default; the publish job opts into `id-token: write` for OIDC.
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ---- Pack both packages, enforce prerelease-only, and gate on the packaging smoke tests. ----
+  pack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # MinVer derives the version from git tags/height — it needs full history, not a shallow clone.
+          fetch-depth: 0
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      # Node is required only for the CLI pack: `dotnet pack` of Typhon.Cli builds the Workbench SPA (the
+      # BuildClientApp MSBuild target shells out to npm) so `typhon ui` ships wwwroot. The engine pack needs no Node.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # Deterministic client install (lockfile-exact). The subsequent CLI pack's BuildClientApp target then builds
+      # the SPA into wwwroot from this node_modules.
+      - name: Restore Workbench client (npm ci)
+        working-directory: tools/Typhon.Workbench/ClientApp
+        run: npm ci
+
+      # ContinuousIntegrationBuild=true makes the build deterministic + normalises Source Link paths. Symbols
+      # (.snupkg) + package validation are already configured in Directory.Build.props / the engine csproj.
+      - name: Pack the engine (Typhon)
+        run: dotnet pack src/Typhon.Engine/Typhon.Engine.csproj -c Release -p:ContinuousIntegrationBuild=true -o artifacts
+
+      - name: Pack the CLI tool (Typhon.Cli)
+        run: dotnet pack src/Typhon.Shell/Typhon.Shell.csproj -c Release -p:ContinuousIntegrationBuild=true -o artifacts
+
+      # Derive the shipped version from the produced engine nupkg (authoritative — MinVer sets it in a build
+      # target, so it can't be read via evaluation), then FAIL if it has no `-<label>` prerelease segment. This is
+      # belt-and-suspenders over the tag filter and also covers workflow_dispatch (height-based MinVer versions).
+      - name: Enforce prerelease-only
+        id: version
+        run: |
+          set -euo pipefail
+          NUPKG=$(ls artifacts/Typhon.*.nupkg | grep -v '\.snupkg$' | grep -v '/Typhon\.Cli\.' | head -1)
+          VERSION=$(basename "$NUPKG" | sed -E 's/^Typhon\.(.*)\.nupkg$/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          case "$VERSION" in
+            *-*) echo "::notice::prerelease OK: $VERSION" ;;
+            *)   echo "::error::Version '$VERSION' is a STABLE release; pre-alpha is prerelease-only. Remove this guard deliberately to cut a stable release."; exit 1 ;;
+          esac
+
+      # The anti-"packaging silently broke" gates: prove the engine package's generator fires in a real consumer
+      # build, and that the CLI tool installs + runs. A broken package fails here, before publish.
+      - name: Consumer smoke test (engine package)
+        run: bash scripts/consumer-smoke-test.sh artifacts
+
+      - name: CLI tool smoke test (Typhon.Cli)
+        run: bash scripts/cli-tool-smoke-test.sh artifacts
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: nupkgs
+          path: |
+            artifacts/*.nupkg
+            artifacts/*.snupkg
+          if-no-files-found: error
+
+  # ---- Publish to NuGet.org behind an environment approval, using keyless OIDC (no stored API key). ----
+  publish:
+    needs: pack
+    runs-on: ubuntu-latest
+    environment: nuget-release        # required-reviewer approval gate (owner-configured)
+    permissions:
+      contents: read
+      id-token: write                 # lets GitHub mint the OIDC token NuGet/login exchanges for a short-lived key
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: nupkgs
+          path: artifacts
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      # Exchanges the GitHub OIDC token for a short-lived (~1h) nuget.org API key via Trusted Publishing.
+      # Requires the Trusted Publishing policy + NUGET_USER secret from the provisioning checklist above.
+      - name: NuGet Trusted Publishing login
+        id: login
+        uses: NuGet/login@v1
+        with:
+          user: ${{ secrets.NUGET_USER }}
+
+      # Pushes packages AND symbols (.snupkg) in one glob. --skip-duplicate makes a re-run idempotent.
+      - name: Push to NuGet.org
+        run: >-
+          dotnet nuget push "artifacts/*.nupkg"
+          --api-key "${{ steps.login.outputs.NUGET_API_KEY }}"
+          --source https://api.nuget.org/v3/index.json
+          --skip-duplicate

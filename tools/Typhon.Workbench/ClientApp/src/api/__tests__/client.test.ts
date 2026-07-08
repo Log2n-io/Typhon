@@ -9,6 +9,14 @@ vi.mock('@/stores/useSessionStore', () => ({
   },
 }));
 
+// Control the bootstrap token the client reads (#429). Hoisted so the vi.mock factory can reference it.
+const { getBootstrapTokenMock } = vi.hoisted(() => ({
+  getBootstrapTokenMock: vi.fn<() => string | null>(() => null),
+}));
+vi.mock('@/api/bootstrapToken', () => ({
+  getBootstrapToken: getBootstrapTokenMock,
+}));
+
 interface FetchInit {
   method?: string;
   headers?: HeadersInit;
@@ -110,5 +118,39 @@ describe('customFetch', () => {
     expect((caught as FetchError).status).toBe(502);
     // No title/detail — synthetic problem `{ status: 502 }` → message falls back to `HTTP 502`.
     expect((caught as FetchError).message).toBe('HTTP 502');
+  });
+
+  // Capturing variant of stubFetch: records the RequestInit so a test can assert on the outgoing headers.
+  function stubFetchCapturing(response: Response): () => RequestInit | undefined {
+    let captured: RequestInit | undefined;
+    globalThis.fetch = vi.fn((_url: string, init?: RequestInit) => {
+      captured = init;
+      return Promise.resolve(response);
+    }) as unknown as typeof fetch;
+    return () => captured;
+  }
+
+  it('attaches X-Workbench-Token when a bootstrap token is present (typhon ui)', async () => {
+    getBootstrapTokenMock.mockReturnValue('abc123');
+    const init = stubFetchCapturing(
+      new Response(JSON.stringify({}), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    );
+
+    await customFetch('/api/anything');
+
+    const headers = new Headers(init()?.headers);
+    expect(headers.get('X-Workbench-Token')).toBe('abc123');
+  });
+
+  it('omits X-Workbench-Token when no bootstrap token (Vite dev-proxy injects it server-side)', async () => {
+    getBootstrapTokenMock.mockReturnValue(null);
+    const init = stubFetchCapturing(
+      new Response(JSON.stringify({}), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    );
+
+    await customFetch('/api/anything');
+
+    const headers = new Headers(init()?.headers);
+    expect(headers.has('X-Workbench-Token')).toBe(false);
   });
 });

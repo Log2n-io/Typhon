@@ -7,10 +7,11 @@ import {
  DialogTitle,
 } from '@/components/ui/dialog';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { usePostApiSessionsAttach, usePostApiSessionsFile, usePostApiSessionsTrace } from '@/api/generated/sessions/sessions';
-import { useRecentFilesStore, type RecentFileState } from '@/stores/useRecentFilesStore';
+import { usePostApiSessionsAttach, usePostApiSessionsTrace } from '@/api/generated/sessions/sessions';
+import { useRecentFilesStore } from '@/stores/useRecentFilesStore';
 import { useSessionStore } from '@/stores/useSessionStore';
-import { logError, logInfo, logWarn } from '@/stores/useLogStore';
+import { useOpenDatabaseFile } from '@/hooks/useOpenDatabaseFile';
+import { logError, logInfo } from '@/stores/useLogStore';
 import { extractDetail } from './connectErrors';
 import RecentFilesTab from './tabs/RecentFilesTab';
 import OpenFileTab from './tabs/OpenFileTab';
@@ -37,7 +38,9 @@ export default function ConnectDialog({ open, initialTab, onOpenChange }: Props)
  const [openingPath, setOpeningPath] = useState<string | null>(null);
  const setSession = useSessionStore((s) => s.setSession);
  const recordRecent = useRecentFilesStore((s) => s.record);
- const postFile = usePostApiSessionsFile();
+ // Shared open-file flow (also used by the `typhon ui <db>` startup auto-open, #429). `postFile` is the
+ // underlying mutation, kept for the pending spinner and the error pill below.
+ const { openDatabaseFile, mutation: postFile } = useOpenDatabaseFile();
  const postTrace = usePostApiSessionsTrace();
  const postAttach = usePostApiSessionsAttach();
 
@@ -48,53 +51,12 @@ export default function ConnectDialog({ open, initialTab, onOpenChange }: Props)
  }, [open, initialTab]);
 
  const handleOpen = async (filePath: string, schemaDllPaths: string[]) => {
- logInfo(`Opening database: ${filePath}`, {
- filePath,
- explicitSchemaDlls: schemaDllPaths,
- });
  setOpeningPath(filePath);
  try {
- const response = await postFile.mutateAsync({
- data: {
- filePath,
- schemaDllPaths: schemaDllPaths.length > 0 ? schemaDllPaths : undefined,
- },
- });
- const dto = response.data;
- setSession(dto);
- recordRecent({
- filePath: dto.filePath ?? filePath,
- schemaDllPaths: (dto.schemaDllPaths as string[] | null | undefined) ?? schemaDllPaths,
- lastOpenedAt: new Date().toISOString(),
- lastState: (dto.state as RecentFileState) ?? 'Ready',
- kind: 'db',
- });
-
- const resolvedDlls = (dto.schemaDllPaths as string[] | null | undefined) ?? [];
- const diagnostics = (dto.schemaDiagnostics ?? []) as Array<{
- componentName?: string | null;
- kind?: string | null;
- detail?: string | null;
- }>;
- const sessionState = dto.state ?? 'Ready';
- const logLevel = sessionState === 'Incompatible' ? logError : sessionState === 'Ready' ? logInfo : logWarn;
- logLevel(
- `Session opened — state: ${sessionState} (${dto.loadedComponentTypes ?? 0} component types loaded)`,
- {
- sessionId: dto.sessionId,
- filePath: dto.filePath ?? filePath,
- schemaStatus: dto.schemaStatus,
- schemaDllPaths: resolvedDlls,
- diagnostics: diagnostics.length > 0 ? diagnostics : undefined,
- },
- );
+ await openDatabaseFile(filePath, schemaDllPaths);
  onOpenChange(false);
- } catch (err) {
- logError(`Failed to open database: ${filePath}`, {
- filePath,
- error: extractDetail(err) || String(err),
- });
- throw err;
+ } catch {
+ // Already logged by useOpenDatabaseFile; the error pill below surfaces postFile.error for retry.
  } finally {
  setOpeningPath(null);
  }

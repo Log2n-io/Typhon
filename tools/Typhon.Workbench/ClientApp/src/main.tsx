@@ -4,6 +4,11 @@ import { QueryClient, QueryClientProvider, QueryCache, MutationCache } from '@ta
 import App from './App';
 import { logError } from './stores/useLogStore';
 import { shouldSilence } from './lib/silenceErrors';
+import { captureLaunchParamsFromUrl } from '@/api/bootstrapToken';
+
+// Capture the bootstrap token (and optional db path) handed to us in the launch-URL fragment by `typhon ui`,
+// BEFORE any API request is made. In Vite dev this is a no-op (no fragment). See @/api/bootstrapToken.
+captureLaunchParamsFromUrl();
 // Load dockview's own stylesheet BEFORE globals.css so our theme-variable overrides in
 // globals.css come later in the cascade and win on equal-specificity selectors like
 // `.dockview-theme-dark`. Without this, the theme appears on the shell but dockview panels

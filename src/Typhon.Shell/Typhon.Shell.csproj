@@ -34,12 +34,11 @@
         <PackageReference Include="Spectre.Console" Version="0.55.2" />
         <PackageReference Include="Spectre.Console.Cli" Version="0.55.0" />
         <PackageReference Include="PrettyPrompt" Version="4.1.1" />
-        <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.8" />
-        <PackageReference Include="Microsoft.Extensions.Logging" Version="10.0.8" />
-        <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.8" />
-        <PackageReference Include="Microsoft.Extensions.Options" Version="10.0.8" />
         <!-- Compile-only: [PublicAPI] markers no longer flow transitively from the engine (#434). -->
         <PackageReference Include="JetBrains.Annotations" Version="2025.2.4" PrivateAssets="all" />
+        <!-- Microsoft.Extensions.{DependencyInjection,Logging,Logging.Console,Options} were explicit refs, but the
+             Microsoft.AspNetCore.App FrameworkReference (added for `typhon ui`, #429) already provides them at the
+             framework version — keeping explicit PackageReferences here triggers NU1510 and pins a redundant version. -->
     </ItemGroup>
 
     <ItemGroup>
@@ -47,5 +46,37 @@
         <ProjectReference Include="..\Typhon.Schema.Definition\Typhon.Schema.Definition.csproj" />
         <ProjectReference Include="..\Typhon.Shell.Extensibility\Typhon.Shell.Extensibility.csproj" />
     </ItemGroup>
+
+    <!-- `typhon ui` folds the Workbench in-process (#429, decision D-6). Referencing the ASP.NET (Web SDK) Workbench
+         from this console tool pulls in ASP.NET Core (hence the FrameworkReference — the shared framework isn't
+         implied for Microsoft.NET.Sdk) plus the pre-built SPA under wwwroot. Consequences (accepted): the tool is
+         larger and requires the ASP.NET Core 10 runtime, and building the CLI now transitively runs the Workbench's
+         client build (Node needed only when wwwroot is stale — never at the tool's runtime). -->
+    <ItemGroup>
+        <FrameworkReference Include="Microsoft.AspNetCore.App" />
+        <ProjectReference Include="..\..\tools\Typhon.Workbench\Typhon.Workbench.csproj" />
+    </ItemGroup>
+
+    <!-- Bundle the pre-built Workbench SPA into the packed tool (#429). A referenced Web project's static web
+         assets flow to the referencing app only via a runtime manifest (great for `dotnet run` in dev, which
+         serves them from source) — they are NOT copied into a console tool's publish output, so the packaged
+         `typhon` would ship without the SPA. `PackAsTool` packs the *publish* output, so we inject the built
+         `wwwroot` into ResolvedFileToPublish. The glob runs inside the target (not at evaluation), after the
+         Workbench project reference — and thus its `BuildClientApp` npm step — has produced wwwroot. -->
+    <PropertyGroup>
+        <WorkbenchWwwroot>$(MSBuildThisFileDirectory)..\..\tools\Typhon.Workbench\wwwroot</WorkbenchWwwroot>
+    </PropertyGroup>
+
+    <Target Name="_IncludeWorkbenchSpaInPublish"
+            BeforeTargets="ComputeResolvedFilesToPublishList"
+            Condition="Exists('$(WorkbenchWwwroot)')">
+        <ItemGroup>
+            <_WorkbenchSpaFile Include="$(WorkbenchWwwroot)\**\*" />
+            <ResolvedFileToPublish Include="@(_WorkbenchSpaFile)">
+                <RelativePath>wwwroot\%(RecursiveDir)%(Filename)%(Extension)</RelativePath>
+                <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+            </ResolvedFileToPublish>
+        </ItemGroup>
+    </Target>
 
 </Project>

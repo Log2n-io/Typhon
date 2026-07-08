@@ -107,11 +107,11 @@ describe('DevFixturePanel — cold states', () => {
     expect(screen.getByText('Checking capability…')).toBeDefined();
   });
 
-  it('shows "not available in this build" when the capability probe fails (Release build)', async () => {
+  it('shows a "not available" cold state when the capability probe fails', async () => {
     mockCapability404();
     renderPanel();
     await waitFor(() => {
-      expect(screen.getByText(/Dev Fixture is not available in this build/i)).toBeDefined();
+      expect(screen.getByText(/sample database feature isn't available/i)).toBeDefined();
     });
   });
 

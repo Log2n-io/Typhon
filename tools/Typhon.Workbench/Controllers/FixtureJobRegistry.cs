@@ -1,4 +1,3 @@
-#if DEBUG
 using System.Collections.Concurrent;
 using Typhon.Workbench.Fixtures;
 
@@ -31,9 +30,9 @@ public sealed record FixtureJobStateDto(
 public sealed record FixtureCreateResultDto(string TyphonFilePath, string SchemaDllPath, int TotalEntities, bool WasCreated);
 
 /// <summary>
-/// One running Dev Fixture generation. Wraps the background <c>Task</c>, the <see cref="CancellationTokenSource"/> the
+/// One running sample-database generation. Wraps the background <c>Task</c>, the <see cref="CancellationTokenSource"/> the
 /// DELETE endpoint trips, and a mutable state snapshot the GET endpoint reads under a lock. Single-process, in-memory —
-/// the Workbench restarts wipe pending jobs; that's fine for a DEBUG-only dev tool.
+/// Workbench restarts wipe pending jobs; that's fine for an interactive local tool.
 /// </summary>
 internal sealed class FixtureJob
 {
@@ -94,10 +93,9 @@ internal sealed class FixtureJob
 }
 
 /// <summary>
-/// Process-lifetime registry of Dev Fixture generation jobs. A static <see cref="ConcurrentDictionary{TKey,TValue}"/>
-/// because the registry's lifetime matches the application's — the same shape as <see cref="FixturesController.MockServers"/>
-/// for the in-process mock profiler servers. DEBUG-only by file gating; the controller never references this type in
-/// Release builds.
+/// Process-lifetime registry of sample-database generation jobs. A static <see cref="ConcurrentDictionary{TKey,TValue}"/>
+/// because the registry's lifetime matches the application's. Shipped in Release (#433) — the sample-database
+/// <c>create</c>/<c>jobs</c> endpoints in <see cref="FixturesController"/> depend on it.
 /// </summary>
 internal static class FixtureJobRegistry
 {
@@ -140,4 +138,3 @@ internal static class FixtureJobRegistry
         }
     }
 }
-#endif

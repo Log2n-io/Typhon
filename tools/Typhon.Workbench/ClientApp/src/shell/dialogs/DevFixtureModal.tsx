@@ -50,9 +50,9 @@ export default function DevFixtureModal(): React.JSX.Element {
         data-testid="devfixture-modal"
       >
         <DialogHeader className="px-4 pt-4">
-          <DialogTitle>Dev Fixture</DialogTitle>
+          <DialogTitle>Create sample database</DialogTitle>
           <DialogDescription className="text-fs-base">
-            Generate (or reuse) a populated test database, then open it. DEBUG-only.
+            Generate (or reuse) a populated sample database, then open it to explore Typhon.
           </DialogDescription>
         </DialogHeader>
         <div className="max-h-[75vh] overflow-auto">

@@ -1,0 +1,41 @@
+name: Pack Check
+
+# Cheap PR gate that catches "packaging silently broke" before merge: packs the `Typhon` engine package and runs
+# the consumer smoke test (a fresh project that adds the package, defines an [Archetype], and must compile + run —
+# which only works if the bundled source generator shipped and fired). Engine-only + no Node, so it stays fast;
+# the full tool+ui pack (which needs Node for the Workbench SPA) is validated on release (release.yml).
+# Design: claude/scratch/distribution-packaging-plan-2026-07-06.md §3 (#430), Feature #435.
+#
+# To make this block merges, add "pack-check" to the branch-protection required checks (owner action).
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pack-check-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pack-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # MinVer derives the version from git history; a full clone avoids a shallow-clone version warning.
+          fetch-depth: 0
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Pack the engine (Typhon)
+        run: dotnet pack src/Typhon.Engine/Typhon.Engine.csproj -c Release -o artifacts
+
+      # The crux: a clean-feed consumer build must compile `Unit.ReadAll(...)` (proves the ArchetypeAccessorGenerator
+      # shipped inside the package AND ran in the consumer's compilation) and then open a DB + spawn/read.
+      - name: Consumer smoke test (engine package)
+        run: bash scripts/consumer-smoke-test.sh artifacts

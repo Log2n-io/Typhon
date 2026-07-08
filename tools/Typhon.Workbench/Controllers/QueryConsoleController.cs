@@ -20,7 +20,7 @@ namespace Typhon.Workbench.Controllers;
 /// <item><c>POST /api/sessions/{id}/query/parse</c> — round-trip DSL → <see cref="QuerySpecDto"/> for chip-mode rebuild.</item>
 /// </list>
 /// <para>All error paths surface as <c>WorkbenchException</c> with stable codes (see plan deviation D7). The global
-/// <c>WorkbenchExceptionHandler</c> in <c>Program.cs</c> turns them into RFC 7807 <see cref="ProblemDetails"/>; this
+/// <c>WorkbenchExceptionHandler</c> in <c>WorkbenchHost</c> turns them into RFC 7807 <see cref="ProblemDetails"/>; this
 /// controller only catches the controller-local <see cref="SessionNotFoundException"/> for the 404 case.</para>
 /// </remarks>
 [ApiController]
@@ -69,7 +69,7 @@ public sealed partial class QueryConsoleController : ControllerBase
         }
         catch (WorkbenchException)
         {
-            // Propagate to the global WorkbenchExceptionHandler in Program.cs for uniform RFC 7807 mapping with
+            // Propagate to the global WorkbenchExceptionHandler in WorkbenchHost for uniform RFC 7807 mapping with
             // the stable error code (e.g. invalid_query_syntax, unknown_archetype, multi_component_where_…).
             throw;
         }

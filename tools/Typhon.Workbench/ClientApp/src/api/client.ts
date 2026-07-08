@@ -1,4 +1,5 @@
 import { useSessionStore } from '@/stores/useSessionStore';
+import { getBootstrapToken } from '@/api/bootstrapToken';
 
 /**
  * Error raised by {@link customFetch} for any non-2xx response. Carries the parsed RFC 7807
@@ -38,6 +39,12 @@ export const customFetch = async <T>(url: string, init?: RequestInit): Promise<T
   }
   if (token && !headers.has('X-Session-Token')) {
     headers.set('X-Session-Token', token);
+  }
+  // Bootstrap token (#429): present only when served by the `typhon ui` host (captured from the launch-URL
+  // fragment). Under the Vite dev-proxy this is null and the proxy injects the header server-side instead.
+  const bootstrapToken = getBootstrapToken();
+  if (bootstrapToken && !headers.has('X-Workbench-Token')) {
+    headers.set('X-Workbench-Token', bootstrapToken);
   }
   headers.set('X-Workbench-Api', '1');
 

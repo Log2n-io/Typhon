@@ -297,8 +297,8 @@ export default function DevFixturePanel(_props: IDockviewPanelProps): React.JSX.
   if (!capabilityAvailable) {
     return (
       <CenteredMessage>
-        <p className="text-fs-base text-muted-foreground">Dev Fixture is not available in this build.</p>
-        <p className="mt-1 text-fs-sm text-muted-foreground">The <code className="rounded bg-muted px-1">/api/fixtures/*</code> endpoints are <code className="rounded bg-muted px-1">#if DEBUG</code>-gated; a Release build of the Workbench omits them.</p>
+        <p className="text-fs-base text-muted-foreground">The sample database feature isn't available.</p>
+        <p className="mt-1 text-fs-sm text-muted-foreground">The <code className="rounded bg-muted px-1">/api/fixtures/capability</code> probe did not report availability.</p>
       </CenteredMessage>
     );
   }
@@ -357,7 +357,7 @@ export default function DevFixturePanel(_props: IDockviewPanelProps): React.JSX.
         <div className="rounded-md border border-dashed border-amber-500/40 bg-amber-950/10 p-3 text-fs-base text-muted-foreground">
           <div className="mb-1 flex items-center gap-2 text-foreground">
             <Sparkles className="h-4 w-4 text-amber-400" />
-            <span className="font-semibold">Dev fixture database</span>
+            <span className="font-semibold">Sample database</span>
           </div>
           <p>
             Generates a populated SWG-inspired Typhon database with deterministic data, then opens it. Pick a preset for

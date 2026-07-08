@@ -44,6 +44,13 @@ internal static class Program
             {
                 config.SetApplicationName("typhon");
                 config.SetApplicationVersion(Version);
+
+                // `typhon ui [database]` launches the Workbench UI (#429). The REPL remains the default command,
+                // so `typhon`, `typhon <db>`, `typhon -c …` are unchanged; only the literal `ui` verb branches here.
+                config.AddCommand<UiCommand>("ui")
+                    .WithDescription("Launch the Typhon Workbench UI in your browser.")
+                    .WithExample(["ui"])
+                    .WithExample(["ui", "mydb.typhon"]);
             });
 
             return app.Run(args);

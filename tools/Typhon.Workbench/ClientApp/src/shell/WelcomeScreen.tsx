@@ -81,10 +81,10 @@ export default function WelcomeScreen() {
  variant="outline"
  className="flex h-auto flex-col items-center gap-2 border-amber-500/40 px-6 py-4 text-fs-lg"
  onClick={() => toggleViewDevFixture()}
- title="DEBUG build only — open the Dev Fixture panel to configure + generate a populated test database"
+ title="Create a populated sample database to explore Typhon immediately"
  >
  <Sparkles className="h-5 w-5 text-amber-400" />
- <span>Dev Fixture</span>
+ <span>Sample database</span>
  </Button>
  )}
  </div>

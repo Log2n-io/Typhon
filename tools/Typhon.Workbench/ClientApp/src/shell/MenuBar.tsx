@@ -179,11 +179,11 @@ export default function MenuBar() {
  {isViewVisible('SystemsQueriesNav', kind) && (
  <MenubarItem onClick={toggleViewSystemsQueriesNav}>Systems &amp; Queries</MenubarItem>
  )}
- {/* Dev Fixture (DEBUG-only on the server). Session-independent (scope 'any') — the user generates a fixture
-     regardless of any open session; opening the result establishes a new session. The panel itself shows a
-     "not available in this build" cold state if `/api/fixtures/capability` returns 404. */}
+ {/* Create sample database. Session-independent (scope 'any') — the user generates a sample DB regardless of
+     any open session; opening the result establishes a new session. Shipped in Release (#433); the panel still
+     shows a "not available" cold state if `/api/fixtures/capability` ever fails to report availability. */}
  {isViewVisible('DevFixture', kind) && (
- <MenubarItem onClick={toggleViewDevFixture}>Dev Fixture…</MenubarItem>
+ <MenubarItem onClick={toggleViewDevFixture}>Create sample database…</MenubarItem>
  )}
  {ANY_ZONE_D_VIEW_ACTIVE && <MenubarSeparator />}
  {/* Resource Tree — the open-session navigator; hidden outside an open .typhon file (no resources to show). */}
