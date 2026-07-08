@@ -17,6 +17,7 @@
 
     <ItemGroup>
         <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.0" />
+        <PackageReference Include="Microsoft.OpenApi" Version="2.7.5" />
         <PackageReference Include="Scalar.AspNetCore" Version="2.9.0" />
         <!-- Roslyn syntax API — ProfilerSourceController parses C# files to crop the inline source
              preview to the enclosing method block. -->
@@ -42,9 +43,7 @@
         <ClientAppSource Include="ClientApp\index.html;ClientApp\package.json;ClientApp\tsconfig.json;ClientApp\vite.config.ts;ClientApp\tailwind.config.ts" />
     </ItemGroup>
 
-    <Target Name="BuildClientApp" BeforeTargets="Build"
-            Inputs="@(ClientAppSource)"
-            Outputs="wwwroot\index.html">
+    <Target Name="BuildClientApp" BeforeTargets="Build" Inputs="@(ClientAppSource)" Outputs="wwwroot\index.html">
         <Message Importance="high" Text="Building Typhon Workbench client (sources changed or first build)..." />
         <Exec Command="npm install --no-audit --no-fund" WorkingDirectory="ClientApp" />
         <Exec Command="npm run build" WorkingDirectory="ClientApp" />

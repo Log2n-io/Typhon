@@ -15,10 +15,11 @@ name: Release
 #      Workflow File `release.yml` (file name only, no path); Environment `nuget-release`.
 #      ⚠ For a PRIVATE repo the policy is *pending-active for 7 days* until the FIRST successful publish locks
 #        the repo/owner IDs — do a real publish within 7 days of creating it (restartable anytime).
-#   3. A repository secret `NUGET_USER` = the nuget.org account name that OWNS the policy (NOT an email). The token
-#      exchange matches `user` to the policy owner, so for an ORG-owned policy this is the ORGANIZATION's name, and
-#      for an individual policy it's your username. MFA does not affect OIDC publishing (keyless — MFA only gates
-#      interactive login). A wrong value 401s at the login step BEFORE push, so no version is consumed — fix + re-run.
+#   3. A repository secret `NUGET_USER` = the nuget.org username of the person who CREATED the policy (NOT the
+#      policy owner, NOT an email). Even for an ORG-owned policy this is the individual creator's personal username
+#      — nuget.org's token exchange keys on the creator ("No matching trust policy owned by user 'X'" if wrong).
+#      MFA does not affect OIDC publishing (keyless — MFA only gates interactive login). A wrong value 401s at the
+#      login step BEFORE the push, so no version is consumed — just fix the secret and re-run the failed job.
 #   4. A GitHub environment named `nuget-release` with a required reviewer (this is the approval gate) — create it
 #      BEFORE the first run, or GitHub auto-creates it unprotected and the publish proceeds without approval.
 # Pre-alpha is PRERELEASE-ONLY: the version must carry a `-<label>` (e.g. `-alpha.1`). Cutting the first STABLE

@@ -20,8 +20,8 @@
          tool cannot share the engine's `Typhon` id — it is `Typhon.Cli` and installs a command named `typhon` (D-1). -->
     <PropertyGroup>
         <PackageId>Typhon.Cli</PackageId>
-        <Description>The `typhon` command-line tool for the Typhon database engine — an interactive shell (REPL) plus scripting for creating, opening, querying, and inspecting Typhon databases. Install as a global or local .NET tool. Pre-alpha — expect breaking changes.</Description>
-        <PackageTags>typhon;database;cli;dotnet-tool;repl;ecs;acid;shell</PackageTags>
+        <Description>The `typhon` command-line tool for the Typhon database engine — an interactive shell (REPL) and script runner, plus the Typhon Workbench, a local database GUI launched with `typhon ui` (browse data, inspect schema, author queries, profile and trace). Install as a global or local .NET tool. Pre-alpha — expect breaking changes.</Description>
+        <PackageTags>typhon;database;cli;dotnet-tool;repl;ecs;acid;shell;workbench;ui;gui</PackageTags>
         <PackageReadmeFile>PACKAGE.md</PackageReadmeFile>
     </PropertyGroup>
 
@@ -31,11 +31,11 @@
     </ItemGroup>
 
     <ItemGroup>
-        <PackageReference Include="Spectre.Console" Version="0.55.2" />
+        <PackageReference Include="Spectre.Console" Version="0.57.2" />
         <PackageReference Include="Spectre.Console.Cli" Version="0.55.0" />
-        <PackageReference Include="PrettyPrompt" Version="4.1.1" />
+        <PackageReference Include="PrettyPrompt" Version="6.0.4" />
         <!-- Compile-only: [PublicAPI] markers no longer flow transitively from the engine (#434). -->
-        <PackageReference Include="JetBrains.Annotations" Version="2025.2.4" PrivateAssets="all" />
+        <PackageReference Include="JetBrains.Annotations" Version="2026.2.0" PrivateAssets="all" />
         <!-- Microsoft.Extensions.{DependencyInjection,Logging,Logging.Console,Options} were explicit refs, but the
              Microsoft.AspNetCore.App FrameworkReference (added for `typhon ui`, #429) already provides them at the
              framework version — keeping explicit PackageReferences here triggers NU1510 and pins a redundant version. -->
@@ -67,9 +67,7 @@
         <WorkbenchWwwroot>$(MSBuildThisFileDirectory)..\..\tools\Typhon.Workbench\wwwroot</WorkbenchWwwroot>
     </PropertyGroup>
 
-    <Target Name="_IncludeWorkbenchSpaInPublish"
-            BeforeTargets="ComputeResolvedFilesToPublishList"
-            Condition="Exists('$(WorkbenchWwwroot)')">
+    <Target Name="_IncludeWorkbenchSpaInPublish" BeforeTargets="ComputeResolvedFilesToPublishList" Condition="Exists('$(WorkbenchWwwroot)')">
         <ItemGroup>
             <_WorkbenchSpaFile Include="$(WorkbenchWwwroot)\**\*" />
             <ResolvedFileToPublish Include="@(_WorkbenchSpaFile)">

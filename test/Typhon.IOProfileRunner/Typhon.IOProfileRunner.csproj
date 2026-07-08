@@ -19,7 +19,7 @@
   </ItemGroup>
   <ItemGroup>
     <!-- AddConsole() sink: no longer flows transitively now that the engine dropped Logging.Console (#434). -->
-    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.8" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.9" />
   </ItemGroup>
 
   <ItemGroup>
