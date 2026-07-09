@@ -13,7 +13,7 @@
           "src": ".api-bin"
         }
       ],
-      "dest": "api",
+      "dest": "api/ref",
       "filter": "filterConfig.yml"
     }
   ],
@@ -29,18 +29,31 @@
       { "files": ["**.md", "toc.yml"], "src": "../benchmark/reports", "dest": "benchmarks" }
     ],
     "resource": [
+      { "files": ["favicon.svg"] },
       { "files": ["assets/**"], "src": "in-depth-overview", "dest": "overview" },
       { "files": ["charts/**"], "src": "../benchmark/reports", "dest": "benchmarks" }
     ],
     "template": [
       "default",
-      "modern"
+      "modern",
+      "templates/typhon"
     ],
     "globalMetadata": {
       "_appName": "Typhon",
       "_appTitle": "Typhon Documentation",
       "_appFooter": "© 2026 Log2n",
-      "_enableSearch": true
+      "_appFaviconPath": "favicon.svg",
+      "_appLogoPath": "favicon.svg",
+      "_enableSearch": true,
+      "_gitContribute": {
+        "repo": "https://github.com/Log2n-io/Typhon",
+        "branch": "main"
+      }
+    },
+    "sitemap": {
+      "baseUrl": "https://doc.typhondb.io/latest/",
+      "priority": 0.5,
+      "changefreq": "weekly"
     },
     "dest": "_site"
   }

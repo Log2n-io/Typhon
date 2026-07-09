@@ -1,0 +1,42 @@
+/* Typhon brand theme for the DocFX "modern" template (Bootstrap 5.3).
+ *
+ * Brand tokens mirror the typhondb.io apex (src/styles/global.css): orange #ff8c00
+ * accent, Inter body + JetBrains Mono code, loaded from the same Google Fonts CDN the
+ * apex uses (kept identical so the two properties read as one brand). The apex is
+ * dark-only; this docs site KEEPS DocFX's light/dark switcher but carries the orange
+ * accent into both themes — docs get read in bright rooms, so forcing dark is hostile.
+ *
+ * Theming hook: the DocFX modern template documents overriding Bootstrap's
+ * `--bs-link-color-rgb` / `--bs-link-hover-color-rgb` (RGB triplets) as THE supported
+ * way to recolor. We also set `--bs-primary-rgb` (buttons / active states) and the
+ * font-family variables. `@import` must stay first in the file (CSS rule ordering). */
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+:root {
+  /* Fonts — the apex stacks verbatim; the system fallbacks render cleanly if the
+     webfont is blocked (offline / privacy extensions) without a layout shift. */
+  --bs-body-font-family: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --bs-font-monospace: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* Accent — LIGHT mode. Link TEXT uses a darker orange (#c26900) so it clears
+     WCAG-AA contrast on white (the pure brand #ff8c00 is ~2.9:1 on white — fails).
+     The pure brand orange is reserved for non-text accents via --bs-primary. */
+  --bs-link-color-rgb: 194, 105, 0;          /* #c26900 */
+  --bs-link-hover-color-rgb: 143, 77, 0;     /* #8f4d00 */
+  --bs-primary-rgb: 255, 140, 0;             /* #ff8c00 — brand orange */
+}
+
+/* Accent — DARK mode: the apex aesthetic. Brand orange has ample contrast on the
+   dark surface, and the -bright variant (#ffa033) is the hover, exactly as the apex. */
+[data-bs-theme="dark"] {
+  --bs-link-color-rgb: 255, 140, 0;          /* #ff8c00 */
+  --bs-link-hover-color-rgb: 255, 160, 51;   /* #ffa033 — --color-typhon-bright */
+  --bs-primary-rgb: 255, 140, 0;
+}
+
+/* Text selection — brand orange on the deep background, matching the apex ::selection. */
+::selection {
+  background-color: #ff8c00;
+  color: #0c0c12;
+}

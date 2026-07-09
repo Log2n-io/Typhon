@@ -1,0 +1,101 @@
+name: Build docs (doc.typhondb.io)
+
+# Builds the DocFX site and deploys it to GitHub Pages at doc.typhondb.io.
+# PRs build only (verify DocFX compiles + links resolve); pushes to main build AND deploy.
+#
+# The build MUST go through scripts/build-docs.sh, not a bare `docfx docfx.json`:
+# Typhon's public attributes (TraceEvent, BeginParam, ...) are source-generated, so DocFX's
+# own Roslyn compile of the source fails (CS0246). The script instead reads API from the
+# BUILT Shell assemblies (which already ran the generators + carry all transitive deps),
+# weaves the hand-authored API landing into the regenerated api/toc.yml, then renders.
+# Design: claude/design/Misc/documentation-site.md
+#
+# Supersedes the retired build-documentation.yml (dead branches, unpinned global docfx,
+# one-shot build against source, published doc/live).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - doc/**
+      - src/**/*.cs                       # API reference is generated from the assemblies — keep it fresh
+      - src/**/*.csproj
+      - benchmark/reports/**              # a fresh CI benchmark commit auto-rebuilds the Benchmarks tab
+      - scripts/build-docs.sh
+      - scripts/stage-api-bin.sh
+      - .config/dotnet-tools.json         # pinned DocFX version
+      - .github/workflows/build-docs.yml
+  pull_request:
+    branches: [main]
+    paths:
+      - doc/**
+      - src/**/*.cs
+      - src/**/*.csproj
+      - benchmark/reports/**
+      - scripts/build-docs.sh
+      - scripts/stage-api-bin.sh
+      - .config/dotnet-tools.json
+      - .github/workflows/build-docs.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never cancel an in-progress Pages deployment (would leave the site half-published); let it
+# finish, then run the next. Queued build-only runs are cheap. (GitHub's recommended Pages pattern.)
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest              # DocFX + Roslyn are cross-platform; the .sh scripts run natively here
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Restore pinned DocFX (parity with local build)
+        run: dotnet tool restore
+
+      # Builds Typhon.Shell -> its bin carries the 4 public DLLs + XML docs AND every transitive
+      # dependency, so DocFX resolves all references (a library bin omits the NuGet deps).
+      - name: Build Shell (API assemblies + XML docs + transitive deps)
+        run: dotnet build src/Typhon.Shell -c Release
+
+      - name: Build docs (stage API -> docfx metadata into api/ref + build)
+        run: sh scripts/build-docs.sh Release
+
+      # Serve under /latest/ (relocatable — DocFX links are page-relative) so a future switcher can
+      # add /vX.Y/ siblings without moving files. CNAME pins the custom domain; the root redirect sends
+      # doc.typhondb.io/ -> /latest/; .nojekyll stops Pages' Jekyll from dropping underscore-prefixed dirs.
+      - name: Assemble /latest tree + CNAME + root redirect + robots
+        run: |
+          mkdir -p _publish/latest
+          cp -r doc/_site/* _publish/latest/
+          echo "doc.typhondb.io" > _publish/CNAME
+          printf '<!doctype html><meta charset="utf-8"><title>Typhon Documentation</title><meta http-equiv="refresh" content="0; url=/latest/"><a href="/latest/">Typhon Documentation</a>' > _publish/index.html
+          # robots.txt must sit at the HOST root (crawlers only read /robots.txt); DocFX emits
+          # sitemap.xml inside the site bundle, which lands under /latest/, so point there.
+          printf 'User-agent: *\nAllow: /\n\nSitemap: https://doc.typhondb.io/latest/sitemap.xml\n' > _publish/robots.txt
+          touch _publish/.nojekyll
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _publish
+
+  deploy:
+    # Build-only on PRs; deploy only when main advances.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

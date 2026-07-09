@@ -280,12 +280,11 @@ claude/
 **/BenchmarkDotNet.Artifacts*
 
 # DocFX documentation site (doc.typhondb.io) — generated build outputs (#440).
-# Tracked by hand: docfx.json, filterConfig.yml, toc.yml, index.md, api/index.md, section content.
-# Ignored (generated): the built site, API YAML, docfx cache, staged assemblies.
+# Tracked by hand: docfx.json, filterConfig.yml, toc.yml, index.md, api/index.md, api/toc.yml, section content.
+# Ignored (generated): the built site, the API metadata tree (api/ref/), docfx cache, staged assemblies.
 doc/_site/
 doc/obj/
-doc/api/*.yml
-doc/api/.manifest
+doc/api/ref/
 doc/.api-bin/
 
 # Benchmark + coverage published reports (latest.md + charts/) are now TRACKED so they render on

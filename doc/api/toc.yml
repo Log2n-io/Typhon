@@ -1,0 +1,11 @@
+# HAND-AUTHORED, STABLE — do NOT let a tool regenerate this file.
+#
+# `docfx metadata` writes the generated API tree into api/ref/ (see docfx.json
+# metadata.dest), so this toc is never overwritten. It puts the Overview landing
+# above the reference tree and includes the generated api/ref/toc.yml. Because it
+# is stable, the API landing's left TOC survives EVERY build path — including the
+# all-in-one `docfx doc/docfx.json --serve` that used to wipe the old injected toc.
+- name: Overview
+  href: index.md
+- name: Reference
+  href: ref/toc.yml
