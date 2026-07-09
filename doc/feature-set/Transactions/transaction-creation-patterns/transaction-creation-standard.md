@@ -1,3 +1,9 @@
+---
+uid: feature-transactions-transaction-creation-patterns-transaction-creation-standard
+title: 'Standard Transaction Creation (UnitOfWork + CreateTransaction)'
+description: 'Open a UnitOfWork once, draw as many transactions from it as the batch needs.'
+---
+
 # Standard Transaction Creation (UnitOfWork + CreateTransaction)
 > Open a `UnitOfWork` once, draw as many transactions from it as the batch needs.
 
@@ -67,7 +73,7 @@ Console.WriteLine(uow.CommittedTransactionCount);
 
 ## 🧪 Tests
 
-- [UnitOfWorkTests](../../../../test/Typhon.Engine.Tests/Execution/UnitOfWorkTests.cs) —
+- [UnitOfWorkTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Execution/UnitOfWorkTests.cs) —
   `UoW_CreateTransaction_ReturnsValidTx`, `UoW_MultipleTransactions_ShareIdentity` (shared `OwningUnitOfWork`
   identity), `MultipleUoWs_ConcurrentAccess` (independent UoWs read/write concurrently)
 

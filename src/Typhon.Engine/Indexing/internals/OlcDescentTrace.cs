@@ -30,7 +30,7 @@ internal static class OlcDescentTrace
     public static Action<int, int, int, int, int> RecordStep;
 
     /// <summary>
-    /// Called from <see cref="Storage.Segments.ChunkBasedSegment{TStore}.GetChunkLocation"/> right
+    /// Called from <see cref="ChunkBasedSegment{TStore}.GetChunkLocation"/> right
     /// before it throws on an out-of-range chunk-id. Lets tests dump captured descent traces with
     /// a deterministic forensic record of how the bogus id propagated to the page-cache lookup.
     /// </summary>

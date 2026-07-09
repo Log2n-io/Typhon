@@ -1,3 +1,9 @@
+---
+uid: feature-revision-revision-chain-storage
+title: 'Revision Chain Storage (on-disk layout)'
+description: 'The fixed-size, append-friendly layout that holds every live revision of a Versioned component on disk.'
+---
+
 # Revision Chain Storage (on-disk layout)
 > The fixed-size, append-friendly layout that holds every live revision of a `Versioned` component on disk.
 
@@ -58,7 +64,7 @@ foreach (var seg in dbe.EnumerateStorageSegments())
 
 ## 🧪 Tests
 
-- [CompRevStorageElementTests](../../../test/Typhon.Engine.Tests/Data/CompRevStorageElementTests.cs) — layout-level unit tests: `Sizeof_Is12Bytes`, `ChunkCapacity_Root_Is3`/`ChunkCapacity_Overflow_Is5`, bitfield independence of `TSN`/`IsolationFlag`/`UowId`/`ComponentChunkId`, `Void`/`IsVoid` tombstone semantics
+- [CompRevStorageElementTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/CompRevStorageElementTests.cs) — layout-level unit tests: `Sizeof_Is12Bytes`, `ChunkCapacity_Root_Is3`/`ChunkCapacity_Overflow_Is5`, bitfield independence of `TSN`/`IsolationFlag`/`UowId`/`ComponentChunkId`, `Void`/`IsVoid` tombstone semantics
 
 ## 🔗 Related
 
@@ -66,7 +72,7 @@ foreach (var seg in dbe.EnumerateStorageSegments())
 - Related feature: [Revision Append & Chain Growth](./revision-append-write-path.md) (what populates this layout),
   [MVCC Snapshot Visibility](./mvcc-snapshot-visibility.md) (the reader that walks this chain)
 - Sibling: [Storage Mode: Versioned](../Ecs/storage-modes/storage-mode-versioned.md) — Versioned mode is the ECS-facing side of this on-disk layout
-- Source: [`ComponentRevisionManager`](../../../src/Typhon.Engine/Revision/internals/ComponentRevisionManager.cs), [`CompRevStorageHeader`/`CompRevStorageElement`](../../../src/Typhon.Engine/Ecs/public/ComponentTable.cs), [`RevisionEnumerator`](../../../src/Typhon.Engine/Revision/internals/RevisionEnumerator.cs)
+- Source: [`ComponentRevisionManager`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Revision/internals/ComponentRevisionManager.cs), [`CompRevStorageHeader`/`CompRevStorageElement`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/ComponentTable.cs), [`RevisionEnumerator`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Revision/internals/RevisionEnumerator.cs)
 
 <!-- Deep dive: claude/design/Revision/01-revision-chain-storage.md, claude/overview/04-data.md §4.6 Revision Chains -->
 <!-- ADR: claude/adr/023-circular-buffer-revision-chains.md, claude/adr/027-even-sized-hot-path-structs.md -->

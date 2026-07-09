@@ -1,3 +1,9 @@
+---
+uid: feature-observability-telemetry-config-gating
+title: 'Telemetry Configuration & Gating'
+description: 'One hierarchical static-readonly bool surface that gates both tracing and the typed-event profiler at zero cost when off.'
+---
+
 # Telemetry Configuration & Gating
 > One hierarchical static-readonly bool surface that gates both tracing and the typed-event profiler at zero cost when off.
 
@@ -69,9 +75,9 @@ _logger.LogInformation(TelemetryConfig.GetConfigurationSummary());
   the typed-event Profiler — so enabling/disabling a subsystem affects both uniformly.
 
 ## 🧪 Tests
-- [TelemetryConfigResolverTests](../../../test/Typhon.Engine.Tests/Observability/TelemetryConfigResolverTests.cs) — parent-implies-children resolution: parent-off cascades to children despite explicit `true`, explicit leaf override wins, implicit leaf inherits parent
-- [TelemetryConfigGateShapeTests](../../../test/Typhon.Engine.Tests/Observability/TelemetryConfigGateShapeTests.cs) — enforces every `*Active` field is `public static readonly bool` (the structural invariant the JIT dead-code-elimination guarantee depends on)
-- [TelemetryConfigCpuSamplingTests](../../../test/Typhon.Engine.Tests/Profiler/TelemetryConfigCpuSamplingTests.cs) — end-to-end resolution of a real flag from `typhon.telemetry.json`, composed `XxxActive` derivation, and `GetConfigurationSummary()` diagnostics
+- [TelemetryConfigResolverTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Observability/TelemetryConfigResolverTests.cs) — parent-implies-children resolution: parent-off cascades to children despite explicit `true`, explicit leaf override wins, implicit leaf inherits parent
+- [TelemetryConfigGateShapeTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Observability/TelemetryConfigGateShapeTests.cs) — enforces every `*Active` field is `public static readonly bool` (the structural invariant the JIT dead-code-elimination guarantee depends on)
+- [TelemetryConfigCpuSamplingTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Profiler/TelemetryConfigCpuSamplingTests.cs) — end-to-end resolution of a real flag from `typhon.telemetry.json`, composed `XxxActive` derivation, and `GetConfigurationSummary()` diagnostics
 
 ## 🔗 Related
 - Sibling: [Distributed Tracing (Activity API)](./distributed-tracing.md) — one of the two consumers this gating surface controls

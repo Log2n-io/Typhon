@@ -1,3 +1,9 @@
+---
+uid: feature-foundation-memory-allocators
+title: 'Memory Allocators'
+description: 'Pinned/unmanaged memory primitives every page cache, segment, and hash-map layers on for stable, GC-immune addresses.'
+---
+
 # Memory Allocators
 > Pinned/unmanaged memory primitives every page cache, segment, and hash-map layers on for stable, GC-immune addresses.
 
@@ -45,10 +51,10 @@ internal sealed class MyCache : IMemoryResource
 - **Profiler-attributed** — every alloc/free carries a 16-bit source tag so allocation volume can be attributed back to the originating subsystem when memory tracing is enabled; zero cost when it's off.
 
 ## 🧪 Tests
-- [MemoryAllocatorInstrumentationTests](../../../test/Typhon.Engine.Tests/Memory/MemoryAllocatorInstrumentationTests.cs) — `PinnedBytes`/`PinnedLiveBlocks` counters, peak-never-regresses, source-tag attribution and default "unattributed" tag.
-- [BlockAllocatorTests](../../../test/Typhon.Engine.Tests/Memory/BlockAllocatorTests.cs) — fixed-stride slot alloc/free/freelist reuse via `BlockAllocator`.
-- [StructAllocatorTests](../../../test/Typhon.Engine.Tests/Memory/BlockAllocatorTests.cs) — typed slots with `ICleanable` reset-on-free via `StructAllocator<T>` (same file as `BlockAllocatorTests`).
-- [ChainedBlockAllocatorTests](../../../test/Typhon.Engine.Tests/Memory/ChainedBlockAllocatorTests.cs) — linked-chain block growth via `ChainedBlockAllocator`.
+- [MemoryAllocatorInstrumentationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Memory/MemoryAllocatorInstrumentationTests.cs) — `PinnedBytes`/`PinnedLiveBlocks` counters, peak-never-regresses, source-tag attribution and default "unattributed" tag.
+- [BlockAllocatorTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Memory/BlockAllocatorTests.cs) — fixed-stride slot alloc/free/freelist reuse via `BlockAllocator`.
+- [StructAllocatorTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Memory/BlockAllocatorTests.cs) — typed slots with `ICleanable` reset-on-free via `StructAllocator<T>` (same file as `BlockAllocatorTests`).
+- [ChainedBlockAllocatorTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Memory/ChainedBlockAllocatorTests.cs) — linked-chain block growth via `ChainedBlockAllocator`.
 
 ## 🔗 Related
 

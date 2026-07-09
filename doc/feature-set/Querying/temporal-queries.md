@@ -1,3 +1,9 @@
+---
+uid: feature-querying-temporal-queries
+title: 'Temporal Queries (Point-in-Time Read & Revision History)'
+description: 'Opt-in per-component history retention enabling reads of past state and full revision timelines.'
+---
+
 # Temporal Queries (Point-in-Time Read & Revision History)
 > Opt-in per-component history retention enabling reads of past state and full revision timelines.
 

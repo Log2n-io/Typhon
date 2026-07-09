@@ -444,8 +444,6 @@ internal static class ArchetypeRegistry
     }
 
     /// <summary>
-    /// Build an ArchetypeMaskLarge with bits set for all archetypes that declare a component with the given type ID.
-    /// <summary>
     /// Find the first archetype that contains a component with the given type ID.
     /// Used by Shell CLI for dynamic archetype discovery when creating entities by component name.
     /// Returns null if no archetype contains this component type.
@@ -463,7 +461,9 @@ internal static class ArchetypeRegistry
         return null;
     }
 
-    /// Used when <see cref="MaxArchetypeId"/> > 255.
+    /// <summary>
+    /// Build an <see cref="ArchetypeMaskLarge"/> with bits set for all archetypes that declare a component with the given type ID.
+    /// Used when <see cref="MaxArchetypeId"/> &gt; 255.
     /// </summary>
     internal static ArchetypeMaskLarge GetComponentMaskLarge(int componentTypeId)
     {

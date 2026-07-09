@@ -7,9 +7,22 @@ using Typhon.Engine.internals;
 
 namespace Typhon.Engine;
 
+/// <summary>
+/// Dependency-injection registration for the Typhon engine and its subsystems. <see cref="AddTyphon"/> is the one-line
+/// entry point most hosts want — it composes the whole service graph and leaves a ready-to-use <see cref="DatabaseEngine"/>.
+/// The individual <c>Add*</c> methods, each offered in Singleton / Scoped / Transient lifetime variants, compose that graph
+/// piece by piece for callers who need finer control over lifetimes or want to substitute a subsystem.
+/// </summary>
 [PublicAPI]
 public static class ServiceCollectionExtensions
 {
+    /// <summary>
+    /// Registers the engine's pinned-memory provider — <see cref="IMemoryAllocator"/>, backed by <see cref="MemoryAllocator"/> — as a singleton. Supplies
+    /// GC-stable memory blocks to every other subsystem; depends on <see cref="IResourceRegistry"/>.
+    /// </summary>
+    /// <param name="services">The service collection to add to.</param>
+    /// <param name="configure">Optional configuration of <see cref="MemoryAllocatorOptions"/>. May be <see langword="null"/> to accept the defaults.</param>
+    /// <returns>The same <see cref="IServiceCollection"/>, for chaining.</returns>
     public static IServiceCollection AddMemoryAllocator(this IServiceCollection services, Action<MemoryAllocatorOptions> configure = null)
     {
         ConfigureMemoryAllocatorOptions(services, configure);
@@ -22,6 +35,10 @@ public static class ServiceCollectionExtensions
         return services;
     }
 
+    /// <summary>Scoped-lifetime variant of <see cref="AddMemoryAllocator"/>.</summary>
+    /// <param name="services">The service collection to add to.</param>
+    /// <param name="configure">Optional configuration of <see cref="MemoryAllocatorOptions"/>. May be <see langword="null"/> to accept the defaults.</param>
+    /// <returns>The same <see cref="IServiceCollection"/>, for chaining.</returns>
     public static IServiceCollection AddScopedMemoryAllocator(this IServiceCollection services, Action<MemoryAllocatorOptions> configure = null)
     {
         ConfigureMemoryAllocatorOptions(services, configure);
@@ -34,6 +51,10 @@ public static class ServiceCollectionExtensions
         return services;
     }
 
+    /// <summary>Transient-lifetime variant of <see cref="AddMemoryAllocator"/>.</summary>
+    /// <param name="services">The service collection to add to.</param>
+    /// <param name="configure">Optional configuration of <see cref="MemoryAllocatorOptions"/>. May be <see langword="null"/> to accept the defaults.</param>
+    /// <returns>The same <see cref="IServiceCollection"/>, for chaining.</returns>
     public static IServiceCollection AddTransientMemoryAllocator(this IServiceCollection services, Action<MemoryAllocatorOptions> configure = null)
     {
         ConfigureMemoryAllocatorOptions(services, configure);
@@ -57,6 +78,13 @@ public static class ServiceCollectionExtensions
         }
     }
 
+    /// <summary>
+    /// Registers <see cref="IResourceRegistry"/> — backed by <see cref="ResourceRegistry"/> — as a singleton. The registry owns the engine's shared runtime
+    /// resources (timer wheel, synchronization, storage bookkeeping) that the allocator, timers, epoch manager, and storage all draw on.
+    /// </summary>
+    /// <param name="services">The service collection to add to.</param>
+    /// <param name="configure">Optional configuration of <see cref="ResourceRegistryOptions"/>. May be <see langword="null"/> to accept the defaults.</param>
+    /// <returns>The same <see cref="IServiceCollection"/>, for chaining.</returns>
     public static IServiceCollection AddResourceRegistry(this IServiceCollection services, Action<ResourceRegistryOptions> configure = null)
     {
         ConfigureResourceRegistryOptions(services, configure);
@@ -68,6 +96,10 @@ public static class ServiceCollectionExtensions
         return services;
     }
 
+    /// <summary>Scoped-lifetime variant of <see cref="AddResourceRegistry"/>.</summary>
+    /// <param name="services">The service collection to add to.</param>
+    /// <param name="configure">Optional configuration of <see cref="ResourceRegistryOptions"/>. May be <see langword="null"/> to accept the defaults.</param>
+    /// <returns>The same <see cref="IServiceCollection"/>, for chaining.</returns>
     public static IServiceCollection AddScopedResourceRegistry(this IServiceCollection services, Action<ResourceRegistryOptions> configure = null)
     {
         ConfigureResourceRegistryOptions(services, configure);
@@ -79,6 +111,10 @@ public static class ServiceCollectionExtensions
         return services;
     }
 
+    /// <summary>Transient-lifetime variant of <see cref="AddResourceRegistry"/>.</summary>
+    /// <param name="services">The service collection to add to.</param>
+    /// <param name="configure">Optional configuration of <see cref="ResourceRegistryOptions"/>. May be <see langword="null"/> to accept the defaults.</param>
+    /// <returns>The same <see cref="IServiceCollection"/>, for chaining.</returns>
     public static IServiceCollection AddTransientResourceRegistry(this IServiceCollection services, Action<ResourceRegistryOptions> configure = null)
     {
         ConfigureResourceRegistryOptions(services, configure);
@@ -101,6 +137,12 @@ public static class ServiceCollectionExtensions
         }
     }
 
+    /// <summary>
+    /// Registers the singleton <see cref="HighResolutionSharedTimerService"/> — one shared high-resolution timer that the deadline/timeout machinery drives,
+    /// rather than each component running its own. Depends on <see cref="IResourceRegistry"/>.
+    /// </summary>
+    /// <param name="services">The service collection to add to.</param>
+    /// <returns>The same <see cref="IServiceCollection"/>, for chaining.</returns>
     public static IServiceCollection AddHighResolutionSharedTimer(this IServiceCollection services)
     {
         services.Add(ServiceDescriptor.Singleton(sp =>
@@ -112,6 +154,12 @@ public static class ServiceCollectionExtensions
         return services;
     }
 
+    /// <summary>
+    /// Registers the singleton <see cref="DeadlineWatchdog"/> — enforces per-operation deadlines by watching the shared timer and tripping work that overruns.
+    /// Depends on <see cref="IResourceRegistry"/> and <see cref="HighResolutionSharedTimerService"/>.
+    /// </summary>
+    /// <param name="services">The service collection to add to.</param>
+    /// <returns>The same <see cref="IServiceCollection"/>, for chaining.</returns>
     public static IServiceCollection AddDeadlineWatchdog(this IServiceCollection services)
     {
         services.Add(ServiceDescriptor.Singleton(sp =>
@@ -123,6 +171,12 @@ public static class ServiceCollectionExtensions
         return services;
     }
 
+    /// <summary>
+    /// Registers the singleton <see cref="EpochManager"/> — the epoch-based reclamation coordinator that keeps a memory page alive while any reader still holds
+    /// a raw pointer into it, so eviction or reuse can never pull memory out from under an in-flight read. Depends on <see cref="IResourceRegistry"/>.
+    /// </summary>
+    /// <param name="services">The service collection to add to.</param>
+    /// <returns>The same <see cref="IServiceCollection"/>, for chaining.</returns>
     public static IServiceCollection AddEpochManager(this IServiceCollection services)
     {
         services.Add(ServiceDescriptor.Singleton(sp =>
@@ -133,6 +187,9 @@ public static class ServiceCollectionExtensions
         return services;
     }
 
+    /// <summary>Scoped-lifetime variant of <see cref="AddEpochManager"/>.</summary>
+    /// <param name="services">The service collection to add to.</param>
+    /// <returns>The same <see cref="IServiceCollection"/>, for chaining.</returns>
     public static IServiceCollection AddScopedEpochManager(this IServiceCollection services)
     {
         services.Add(ServiceDescriptor.Scoped(sp =>
@@ -143,6 +200,9 @@ public static class ServiceCollectionExtensions
         return services;
     }
 
+    /// <summary>Transient-lifetime variant of <see cref="AddEpochManager"/>.</summary>
+    /// <param name="services">The service collection to add to.</param>
+    /// <returns>The same <see cref="IServiceCollection"/>, for chaining.</returns>
     public static IServiceCollection AddTransientEpochManager(this IServiceCollection services)
     {
         services.Add(ServiceDescriptor.Transient(sp =>
@@ -153,46 +213,92 @@ public static class ServiceCollectionExtensions
         return services;
     }
 
+    /// <summary>
+    /// Registers <see cref="PagedMMF"/> — the low-level paged memory-mapped file store (raw pages, page cache, checkpoint) — as a singleton, configured via
+    /// <paramref name="configure"/>. Most callers want <see cref="AddManagedPagedMMF"/> or <see cref="AddTyphon"/> instead.
+    /// </summary>
+    /// <param name="services">The service collection to add to.</param>
+    /// <param name="configure">Optional configuration of <see cref="PagedMMFOptions"/>. May be <see langword="null"/> to accept the defaults.</param>
+    /// <returns>The same <see cref="IServiceCollection"/>, for chaining.</returns>
     public static IServiceCollection AddPagedMemoryMappedFile(
         this IServiceCollection services,
         Action<PagedMMFOptions> configure = null) =>
         services.AddPagedMMF<PagedMMF, PagedMMFOptions>(ServiceLifetime.Singleton, configure);
 
+    /// <summary>Scoped-lifetime variant of <see cref="AddPagedMemoryMappedFile"/>.</summary>
+    /// <param name="services">The service collection to add to.</param>
+    /// <param name="configure">Optional configuration of <see cref="PagedMMFOptions"/>. May be <see langword="null"/> to accept the defaults.</param>
+    /// <returns>The same <see cref="IServiceCollection"/>, for chaining.</returns>
     public static IServiceCollection AddScopedPagedMemoryMappedFile(
         this IServiceCollection services,
         Action<PagedMMFOptions> configure = null) =>
         services.AddPagedMMF<PagedMMF, PagedMMFOptions>(ServiceLifetime.Scoped, configure);
 
+    /// <summary>Transient-lifetime variant of <see cref="AddPagedMemoryMappedFile"/>.</summary>
+    /// <param name="services">The service collection to add to.</param>
+    /// <param name="configure">Optional configuration of <see cref="PagedMMFOptions"/>. May be <see langword="null"/> to accept the defaults.</param>
+    /// <returns>The same <see cref="IServiceCollection"/>, for chaining.</returns>
     public static IServiceCollection AddTransientPagedMemoryMappedFile(
         this IServiceCollection services,
         Action<PagedMMFOptions> configure = null) =>
         services.AddPagedMMF<PagedMMF, PagedMMFOptions>(ServiceLifetime.Transient, configure);
 
+    /// <summary>
+    /// Registers <see cref="ManagedPagedMMF"/> — the segment-aware store the engine builds on, layering logical segments, occupancy tracking, and epoch
+    /// integration over <see cref="PagedMMF"/> — as a singleton, configured via <paramref name="configure"/>.
+    /// </summary>
+    /// <param name="services">The service collection to add to.</param>
+    /// <param name="configure">Optional configuration of <see cref="ManagedPagedMMFOptions"/>. May be <see langword="null"/> to accept the defaults.</param>
+    /// <returns>The same <see cref="IServiceCollection"/>, for chaining.</returns>
     public static IServiceCollection AddManagedPagedMMF(
         this IServiceCollection services,
         Action<ManagedPagedMMFOptions> configure = null) =>
         services.AddPagedMMF<ManagedPagedMMF, ManagedPagedMMFOptions>(ServiceLifetime.Singleton, configure);
 
+    /// <summary>Scoped-lifetime variant of <see cref="AddManagedPagedMMF"/>.</summary>
+    /// <param name="services">The service collection to add to.</param>
+    /// <param name="configure">Optional configuration of <see cref="ManagedPagedMMFOptions"/>. May be <see langword="null"/> to accept the defaults.</param>
+    /// <returns>The same <see cref="IServiceCollection"/>, for chaining.</returns>
     public static IServiceCollection AddScopedManagedPagedMemoryMappedFile(
         this IServiceCollection services,
         Action<ManagedPagedMMFOptions> configure = null) =>
         services.AddPagedMMF<ManagedPagedMMF, ManagedPagedMMFOptions>(ServiceLifetime.Scoped, configure);
 
+    /// <summary>Transient-lifetime variant of <see cref="AddManagedPagedMMF"/>.</summary>
+    /// <param name="services">The service collection to add to.</param>
+    /// <param name="configure">Optional configuration of <see cref="ManagedPagedMMFOptions"/>. May be <see langword="null"/> to accept the defaults.</param>
+    /// <returns>The same <see cref="IServiceCollection"/>, for chaining.</returns>
     public static IServiceCollection AddTransientManagedPagedMemoryMappedFile(
         this IServiceCollection services,
         Action<ManagedPagedMMFOptions> configure = null) =>
         services.AddPagedMMF<ManagedPagedMMF, ManagedPagedMMFOptions>(ServiceLifetime.Transient, configure);
 
+    /// <summary>
+    /// Registers the top-level <see cref="DatabaseEngine"/> — Typhon's ACID/ECS engine — as a singleton, configured via <paramref name="configure"/>. This is
+    /// the power-user path: unlike <see cref="AddTyphon"/>, the caller owns component/archetype registration and must call
+    /// <see cref="DatabaseEngine.InitializeArchetypes"/> before the engine is used.
+    /// </summary>
+    /// <param name="services">The service collection to add to.</param>
+    /// <param name="configure">Optional configuration of <see cref="DatabaseEngineOptions"/>. May be <see langword="null"/> to accept the defaults.</param>
+    /// <returns>The same <see cref="IServiceCollection"/>, for chaining.</returns>
     public static IServiceCollection AddDatabaseEngine(
         this IServiceCollection services,
         Action<DatabaseEngineOptions> configure = null) =>
         AddDatabaseEngine(services, ServiceLifetime.Singleton, configure);
 
+    /// <summary>Scoped-lifetime variant of <see cref="AddDatabaseEngine"/>.</summary>
+    /// <param name="services">The service collection to add to.</param>
+    /// <param name="configure">Optional configuration of <see cref="DatabaseEngineOptions"/>. May be <see langword="null"/> to accept the defaults.</param>
+    /// <returns>The same <see cref="IServiceCollection"/>, for chaining.</returns>
     public static IServiceCollection AddScopedDatabaseEngine(
         this IServiceCollection services,
         Action<DatabaseEngineOptions> configure = null) =>
         AddDatabaseEngine(services, ServiceLifetime.Scoped, configure);
 
+    /// <summary>Transient-lifetime variant of <see cref="AddDatabaseEngine"/>.</summary>
+    /// <param name="services">The service collection to add to.</param>
+    /// <param name="configure">Optional configuration of <see cref="DatabaseEngineOptions"/>. May be <see langword="null"/> to accept the defaults.</param>
+    /// <returns>The same <see cref="IServiceCollection"/>, for chaining.</returns>
     public static IServiceCollection AddTransientDatabaseEngine(
         this IServiceCollection services,
         Action<DatabaseEngineOptions> configure = null) =>
@@ -405,6 +511,13 @@ public static class ServiceCollectionExtensions
         return services;
     }
 
+    /// <summary>
+    /// Resolves the <typeparamref name="TO"/> storage options from <paramref name="provider"/> and deletes the entire database bundle they point at (data file,
+    /// lock, and WAL). Intended for tests and tooling that reset a database between runs; the database must be <b>closed</b> first — see
+    /// <see cref="PagedMMFOptions.EnsureFileDeleted"/>.
+    /// </summary>
+    /// <typeparam name="TO">The storage options type (a <see cref="PagedMMFOptions"/> subtype) whose bundle location is deleted.</typeparam>
+    /// <param name="provider">The service provider to resolve the options from; a scope is created internally.</param>
     public static void EnsureFileDeleted<TO>(this IServiceProvider provider) where TO : PagedMMFOptions
     {
         using var scope = provider.CreateScope();

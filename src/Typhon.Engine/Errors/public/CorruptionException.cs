@@ -47,6 +47,12 @@ public class CorruptionException : StorageException
 [PublicAPI]
 public class PageCorruptionException : CorruptionException
 {
+    /// <summary>
+    /// Creates a new <see cref="PageCorruptionException"/> for a page whose stored CRC does not match its computed CRC.
+    /// </summary>
+    /// <param name="pageIndex">Index of the page that failed verification.</param>
+    /// <param name="expectedCrc">CRC32C stored in the page header.</param>
+    /// <param name="computedCrc">CRC32C recomputed from the page contents.</param>
     public PageCorruptionException(int pageIndex, uint expectedCrc, uint computedCrc) : base(TyphonErrorCode.PageChecksumMismatch, "PageCache", pageIndex,
         $"CRC mismatch: stored=0x{expectedCrc:X8}, computed=0x{computedCrc:X8}. Page is torn/corrupted (no on-load repair).")
     {

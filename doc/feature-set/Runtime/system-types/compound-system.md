@@ -1,3 +1,9 @@
+---
+uid: feature-runtime-system-types-compound-system
+title: 'CompoundSystem'
+description: 'Group related sub-systems'' registration under one Configure call — one node from the outside, parallel inside.'
+---
+
 # CompoundSystem
 > Group related sub-systems' registration under one `Configure` call — one node from the outside, parallel inside.
 
@@ -60,7 +66,7 @@ dag.CallbackSystem("Cleanup", ctx => ctx.FlushDestroys(), after: "Steering");
 
 ## 🧪 Tests
 
-- [ClassBasedSystemTests](../../../../test/Typhon.Engine.Tests/Runtime/ClassBasedSystemTests.cs) — `Add_CompoundSystem_ExpandsSubSystems`, `Add_NullCompoundSystem_ThrowsArgumentNull`
+- [ClassBasedSystemTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/ClassBasedSystemTests.cs) — `Add_CompoundSystem_ExpandsSubSystems`, `Add_NullCompoundSystem_ThrowsArgumentNull`
 
 ## 🔗 Related
 

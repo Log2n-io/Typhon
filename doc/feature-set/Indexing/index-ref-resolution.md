@@ -1,3 +1,9 @@
+---
+uid: feature-indexing-index-ref-resolution
+title: 'Index Handle Resolution (IndexRef)'
+description: 'Resolve an index once on the cold path, then reuse the handle for free on every hot-path call.'
+---
+
 # Index Handle Resolution (IndexRef)
 > Resolve an index once on the cold path, then reuse the handle for free on every hot-path call.
 
@@ -57,8 +63,8 @@ using (var tx = dbe.CreateQuickTransaction())
 
 ## 🧪 Tests
 
-- [IndexRefTests](../../../test/Typhon.Engine.Tests/Data/IndexRefTests.cs) — `GetPKIndexRef`/`GetIndexRef` success and failure paths (unregistered type, non-indexed field), plus the `Validate()` staleness check
-- [BulkEnumerateTests](../../../test/Typhon.Engine.Tests/Data/BulkEnumerateTests.cs) — `StaleIndexRef_Throws` exercises the same staleness check on the hot-path `Transaction.EnumerateIndex` call
+- [IndexRefTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/IndexRefTests.cs) — `GetPKIndexRef`/`GetIndexRef` success and failure paths (unregistered type, non-indexed field), plus the `Validate()` staleness check
+- [BulkEnumerateTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/BulkEnumerateTests.cs) — `StaleIndexRef_Throws` exercises the same staleness check on the hot-path `Transaction.EnumerateIndex` call
 
 ## 🔗 Related
 

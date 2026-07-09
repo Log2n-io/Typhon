@@ -512,6 +512,7 @@ public class SourceLocationGenerator : IIncrementalGenerator
             fileIdMap[files[i]] = i;
         }
 
+        sb.AppendLine("        /// <summary>Repo-relative source file paths, indexed by <see cref=\"Entry.FileId\"/>.</summary>");
         sb.AppendLine("        public static readonly string[] Files = new string[]");
         sb.AppendLine("        {");
         foreach (var f in files)
@@ -524,8 +525,15 @@ public class SourceLocationGenerator : IIncrementalGenerator
         sb.AppendLine();
 
         // Entries: id → (fileId, line, method, kind-byte derived from base name).
+        sb.AppendLine("        /// <summary>One interceptable call site — the (file, line, method, kind) tuple behind a span record's siteId.</summary>");
+        sb.AppendLine("        /// <param name=\"Id\">1-based site id as carried in span records (0 = unknown source).</param>");
+        sb.AppendLine("        /// <param name=\"FileId\">Index into <see cref=\"Files\"/>.</param>");
+        sb.AppendLine("        /// <param name=\"Line\">1-based line number of the call site.</param>");
+        sb.AppendLine("        /// <param name=\"Method\">Name of the method containing the call site.</param>");
+        sb.AppendLine("        /// <param name=\"KindByte\">Reserved — always 0 in v1; decoding relies on the wire record's own kind byte.</param>");
         sb.AppendLine("        public readonly record struct Entry(ushort Id, ushort FileId, int Line, string Method, byte KindByte);");
         sb.AppendLine();
+        sb.AppendLine("        /// <summary>All interceptable call sites, ordered by site id (<c>All[i].Id == i + 1</c>).</summary>");
         sb.AppendLine("        public static readonly Entry[] All = new Entry[]");
         sb.AppendLine("        {");
         for (int i = 0; i < sites.Count; i++)

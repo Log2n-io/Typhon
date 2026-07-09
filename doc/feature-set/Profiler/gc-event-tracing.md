@@ -1,3 +1,9 @@
+---
+uid: feature-profiler-gc-event-tracing
+title: 'GC Event Tracing'
+description: 'See every .NET garbage collection and EE-suspension pause on the same timeline as your transactions.'
+---
+
 # GC Event Tracing
 > See every .NET garbage collection and EE-suspension pause on the same timeline as your transactions.
 
@@ -71,8 +77,8 @@ TyphonProfiler.Stop();   // optional; ordinary shutdown detaches the listener an
 
 ## 🧪 Tests
 
-- [GcTracingHostTests](../../../test/Typhon.Engine.Tests/Profiler/GcTracingHostTests.cs) — ingestion-thread → `TyphonEvent` emit path, records injected directly into the queue to exercise processing independent of a real GC
-- [GcEventListenerTests](../../../test/Typhon.Engine.Tests/Profiler/GcEventListenerTests.cs) — `IsGcSuspendReason` filter that keeps CPU-sampler-induced EE suspensions out of the GC track
+- [GcTracingHostTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Profiler/GcTracingHostTests.cs) — ingestion-thread → `TyphonEvent` emit path, records injected directly into the queue to exercise processing independent of a real GC
+- [GcEventListenerTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Profiler/GcEventListenerTests.cs) — `IsGcSuspendReason` filter that keeps CPU-sampler-induced EE suspensions out of the GC track
 
 ## 🔗 Related
 

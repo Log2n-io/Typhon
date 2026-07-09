@@ -1,3 +1,9 @@
+---
+uid: feature-ecs-entity-clusters
+title: 'Entity Clusters (Batched SoA Storage)'
+description: 'GPU-inspired batched SoA storage that turns per-entity hashmap/page lookups into sequential array scans.'
+---
+
 # Entity Clusters (Batched SoA Storage)
 > GPU-inspired batched SoA storage that turns per-entity hashmap/page lookups into sequential array scans.
 
@@ -61,9 +67,9 @@ pos.X += 1;
 
 ## 🧪 Tests
 
-- [ClusterStorageTests](../../../test/Typhon.Engine.Tests/Data/ECS/ClusterStorageTests.cs) — cluster sizing/cache-line-aligned stride, `GetClusterEnumerator` bulk iteration, random-access read/write/destroy through the cluster
-- [ClusterDirtyTests](../../../test/Typhon.Engine.Tests/Data/ECS/ClusterDirtyTests.cs) — `MarkCurrentDirty`/per-slot dirty-bitmap semantics, tick-fence snapshot clearing, writes lost if dirty isn't marked
-- [ClusterVersionedTests](../../../test/Typhon.Engine.Tests/Data/ECS/ClusterVersionedTests.cs) — `Versioned` HEAD stored in the cluster with the revision chain kept separate, bulk iteration seeing the latest HEAD after a write
+- [ClusterStorageTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/ClusterStorageTests.cs) — cluster sizing/cache-line-aligned stride, `GetClusterEnumerator` bulk iteration, random-access read/write/destroy through the cluster
+- [ClusterDirtyTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/ClusterDirtyTests.cs) — `MarkCurrentDirty`/per-slot dirty-bitmap semantics, tick-fence snapshot clearing, writes lost if dirty isn't marked
+- [ClusterVersionedTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/ClusterVersionedTests.cs) — `Versioned` HEAD stored in the cluster with the revision chain kept separate, bulk iteration seeing the latest HEAD after a write
 
 ## 🔗 Related
 

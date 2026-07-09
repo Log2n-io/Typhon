@@ -41,6 +41,14 @@ public readonly struct ExecutionPlan
     /// <summary>Estimated cardinality per evaluator (parallel array, same order).</summary>
     public readonly long[] EstimatedCounts;
 
+    /// <summary>Builds an execution plan describing the primary scan stream and its selectivity-ordered filter chain.</summary>
+    /// <param name="primaryFieldIndex">Sets <see cref="PrimaryFieldIndex"/>: -1 to scan the PK index, >= 0 to scan a secondary index.</param>
+    /// <param name="primaryKeyType">Sets <see cref="PrimaryKeyType"/>: key type of the primary secondary index (valid only when <paramref name="primaryFieldIndex"/> >= 0).</param>
+    /// <param name="scanMin">Sets <see cref="PrimaryScanMin"/>: inclusive lower bound of the primary scan range.</param>
+    /// <param name="scanMax">Sets <see cref="PrimaryScanMax"/>: inclusive upper bound of the primary scan range.</param>
+    /// <param name="descending">Sets <see cref="Descending"/>: iterate the primary stream in descending order.</param>
+    /// <param name="orderedEvaluators">Sets <see cref="OrderedEvaluators"/>: filters ordered most-selective first.</param>
+    /// <param name="estimatedCounts">Sets <see cref="EstimatedCounts"/>: estimated cardinality per evaluator (parallel to <paramref name="orderedEvaluators"/>).</param>
     public ExecutionPlan(int primaryFieldIndex, KeyType primaryKeyType, long scanMin, long scanMax, bool descending, FieldEvaluator[] orderedEvaluators, 
         long[] estimatedCounts)
     {
@@ -56,6 +64,7 @@ public readonly struct ExecutionPlan
     /// <summary>True when the primary stream uses a secondary index (not PK scan).</summary>
     public bool UsesSecondaryIndex => PrimaryFieldIndex >= 0;
 
+    /// <summary>Returns a human-readable description of the primary scan and its ordered filter chain (for diagnostics).</summary>
     public override string ToString()
     {
         var sb = new StringBuilder();

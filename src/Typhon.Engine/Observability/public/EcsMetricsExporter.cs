@@ -15,12 +15,25 @@ namespace Typhon.Engine;
 [ExcludeFromCodeCoverage]
 public sealed class EcsMetricsExporter : IDisposable
 {
+    /// <summary>
+    /// The OpenTelemetry <see cref="System.Diagnostics.Metrics.Meter"/> name under which all ECS instruments are published.
+    /// </summary>
     public const string MeterName = "Typhon.ECS";
+
+    /// <summary>
+    /// The Meter version reported to OpenTelemetry.
+    /// </summary>
     public const string MeterVersion = "1.0.0";
 
     private readonly DatabaseEngine _dbe;
     private readonly Meter _meter;
 
+    /// <summary>
+    /// Creates the exporter and registers the ECS observable instruments on a new <see cref="System.Diagnostics.Metrics.Meter"/>.
+    /// The instruments read live engine state on collection; no work is done until an OTel consumer polls them.
+    /// </summary>
+    /// <param name="dbe">The engine whose archetype and component-table state is sampled. Must not be <c>null</c>.</param>
+    /// <exception cref="System.ArgumentNullException"><paramref name="dbe"/> is <c>null</c>.</exception>
     public EcsMetricsExporter(DatabaseEngine dbe)
     {
         ArgumentNullException.ThrowIfNull(dbe);
@@ -29,6 +42,9 @@ public sealed class EcsMetricsExporter : IDisposable
         RegisterInstruments();
     }
 
+    /// <summary>
+    /// The OpenTelemetry <see cref="System.Diagnostics.Metrics.Meter"/> that owns the ECS observable instruments.
+    /// </summary>
     public Meter Meter => _meter;
 
     private void RegisterInstruments()
@@ -136,5 +152,8 @@ public sealed class EcsMetricsExporter : IDisposable
         return meta?.ArchetypeType?.Name ?? archetypeId.ToString();
     }
 
+    /// <summary>
+    /// Disposes the underlying <see cref="System.Diagnostics.Metrics.Meter"/>, unregistering every ECS instrument.
+    /// </summary>
     public void Dispose() => _meter.Dispose();
 }

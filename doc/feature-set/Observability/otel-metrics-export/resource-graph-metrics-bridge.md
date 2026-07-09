@@ -1,3 +1,9 @@
+---
+uid: feature-observability-otel-metrics-export-resource-graph-metrics-bridge
+title: 'Resource Graph Metrics Bridge'
+description: 'Every Resource System node, exposed as a standard System.Diagnostics.Metrics.Meter for any OTel exporter to pick up.'
+---
+
 # Resource Graph Metrics Bridge
 > Every Resource System node, exposed as a standard `System.Diagnostics.Metrics.Meter` for any OTel exporter to pick up.
 
@@ -77,7 +83,7 @@ services.AddOpenTelemetry().WithMetrics(builder => builder
   OTLP/Grafana and Prometheus scraping.
 
 ## 🧪 Tests
-- [ObservabilityBridgeTests](../../../../test/Typhon.Engine.Tests/Observability/Bridge/ObservabilityBridgeTests.cs) — `OTelMetricNameBuilder` name/path normalization and snake_casing, `ResourceMetricsExporter` snapshot lifecycle, per-kind metric opt-out, and `MeterListener`-observed instrument registration
+- [ObservabilityBridgeTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Observability/Bridge/ObservabilityBridgeTests.cs) — `OTelMetricNameBuilder` name/path normalization and snake_casing, `ResourceMetricsExporter` snapshot lifecycle, per-kind metric opt-out, and `MeterListener`-observed instrument registration
 
 ## 🔗 Related
 

@@ -1,3 +1,9 @@
+---
+uid: feature-ecs-component-collections
+title: 'Component Collections'
+description: 'Per-entity variable-length lists — owned data or entity-reference lists — without breaking fixed-size component layout.'
+---
+
 # Component Collections
 > Per-entity variable-length lists — owned data or entity-reference lists — without breaking fixed-size component layout.
 
@@ -83,9 +89,9 @@ foreach (ref readonly Waypoint wp in tx.GetReadOnlyCollectionEnumerator(ref read
 
 ## 🧪 Tests
 
-- [ComponentCollectionTests](../../../test/Typhon.Engine.Tests/Data/ComponentCollectionTests.cs) — `Versioned` create/read/update, reference-count bump, copy-on-write clone on shared-buffer mutation, destroy frees the buffer
-- [SvComponentCollectionTests](../../../test/Typhon.Engine.Tests/Data/ECS/SvComponentCollectionTests.cs) — `SingleVersion` in-place update (no new buffer), migrate/rollback buffer lifecycle, registering one on `Transient` throws
-- [ClusterComponentCollectionTests](../../../test/Typhon.Engine.Tests/Data/ECS/ClusterComponentCollectionTests.cs) — collection field on a clustered `Versioned` archetype: spawn/update/migrate/destroy
+- [ComponentCollectionTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ComponentCollectionTests.cs) — `Versioned` create/read/update, reference-count bump, copy-on-write clone on shared-buffer mutation, destroy frees the buffer
+- [SvComponentCollectionTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/SvComponentCollectionTests.cs) — `SingleVersion` in-place update (no new buffer), migrate/rollback buffer lifecycle, registering one on `Transient` throws
+- [ClusterComponentCollectionTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/ClusterComponentCollectionTests.cs) — collection field on a clustered `Versioned` archetype: spawn/update/migrate/destroy
 
 ## 🔗 Related
 

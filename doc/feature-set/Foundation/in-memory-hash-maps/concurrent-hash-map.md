@@ -1,3 +1,9 @@
+---
+uid: feature-foundation-in-memory-hash-maps-concurrent-hash-map
+title: 'ConcurrentHashMap\'
+description: 'Striped, lock-free-read hash set/map — the replacement for ConcurrentDictionary on a shared hot path.'
+---
+
 # ConcurrentHashMap\<TKey[, TValue]\>
 > Striped, lock-free-read hash set/map — the replacement for `ConcurrentDictionary<TKey,TValue>` on a shared hot path.
 
@@ -47,7 +53,7 @@ cache.Dispose();
 - `internal` (`Typhon.Engine.Internals`) — engine plumbing only.
 
 ## 🧪 Tests
-- [ConcurrentHashMapTests](../../../../test/Typhon.Engine.Tests/Collections/ConcurrentInMemoryHashMapTests.cs) — striped lock-free reads (OLC retry on a raced write), per-stripe CAS writes, `Clear()` all-stripe locking, concurrent disjoint-key inserts.
+- [ConcurrentHashMapTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Collections/ConcurrentInMemoryHashMapTests.cs) — striped lock-free reads (OLC retry on a raced write), per-stripe CAS writes, `Clear()` all-stripe locking, concurrent disjoint-key inserts.
 
 ## 🔗 Related
 - Parent feature: [In-Memory Hash Maps](./README.md)

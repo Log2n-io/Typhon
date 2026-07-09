@@ -1,3 +1,9 @@
+---
+uid: feature-runtime-tick-execution-engine-execution-modes
+title: 'Execution Modes'
+description: 'Today: a fixed-timestep tick loop (plus a single-threaded debug variant); event-driven and hybrid request/response modes are designed but not yet built.'
+---
+
 # Execution Modes
 > Today: a fixed-timestep tick loop (plus a single-threaded debug variant); event-driven and hybrid request/response modes are designed but not yet built.
 
@@ -72,8 +78,8 @@ using var debugRuntime = TyphonRuntime.Create(engine, configureSchedule,
 
 ## 🧪 Tests
 
-- [TyphonRuntimeTests](../../../../test/Typhon.Engine.Tests/Runtime/TyphonRuntimeTests.cs) — `SingleThreadedMode_TransactionWorks` proves `WorkerCount = 1` still gives systems a valid Transaction
-- [DagSchedulerTests](../../../../test/Typhon.Engine.Tests/Runtime/DagSchedulerTests.cs) — `SingleThreadedMode_Works`, `SingleThreadedMode_PipelineSystem_AllChunksProcessed` — deterministic in-order execution of the same DAG
+- [TyphonRuntimeTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/TyphonRuntimeTests.cs) — `SingleThreadedMode_TransactionWorks` proves `WorkerCount = 1` still gives systems a valid Transaction
+- [DagSchedulerTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/DagSchedulerTests.cs) — `SingleThreadedMode_Works`, `SingleThreadedMode_PipelineSystem_AllChunksProcessed` — deterministic in-order execution of the same DAG
 
 ## 🔗 Related
 

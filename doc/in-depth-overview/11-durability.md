@@ -1,6 +1,12 @@
+---
+uid: overview-durability
+title: '11 — Durability'
+description: 'Durability is what makes Typhon ACID''s "D". The contract is the usual one: once Commit() returns under a durable mode, the change survives a process or…'
+---
+
 # 11 — Durability
 
-**Code:** [`src/Typhon.Engine/Durability/`](../../src/Typhon.Engine/Durability/)
+**Code:** [`src/Typhon.Engine/Durability/`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Engine/Durability)
 
 Durability is what makes Typhon ACID's "D". The contract is the usual one: once `Commit()` returns under a durable mode, the change survives a process or machine crash. Two cooperating pipelines deliver it — a **Write-Ahead Log** that hardens transaction effects into a sequential journal at commit time, and a **Checkpoint** that periodically writes dirty data pages to the main data file and recycles the WAL.
 
@@ -28,7 +34,7 @@ The durability layer sits between transactions (which produce changes) and stora
 
 ### Fail-fast on WAL write error (per ADR)
 
-A WAL write I/O failure is *not* recoverable in-place. The writer catches the exception, latches it, and every subsequent attempt to wait for durability throws [`WalWriteException`](../../src/Typhon.Engine/Errors/public/WalWriteException.cs) (`IsTransient = false`). There is no retry, no degraded mode, no partial-commit window — the engine refuses further durable commits until restart. This is the entire mechanism: a single sticky `_fatalError` field on [`WalWriter`](../../src/Typhon.Engine/Durability/internals/WalWriter.cs) propagated through `WaitForDurable`.
+A WAL write I/O failure is *not* recoverable in-place. The writer catches the exception, latches it, and every subsequent attempt to wait for durability throws [`WalWriteException`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Errors/public/WalWriteException.cs) (`IsTransient = false`). There is no retry, no degraded mode, no partial-commit window — the engine refuses further durable commits until restart. This is the entire mechanism: a single sticky `_fatalError` field on [`WalWriter`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/internals/WalWriter.cs) propagated through `WaitForDurable`.
 
 The rationale (per ADR) is that any half-broken WAL is worse than a stopped engine: it can silently produce phantom commits, corrupt the LSN chain, or hide further failures. Fail-fast keeps the contract simple — either the WAL is healthy or the engine is down.
 
@@ -48,7 +54,7 @@ WAL segments whose `LastLSN < CheckpointLSN` can be deleted. Recovery only needs
 
 ## 2. WAL writer
 
-[`Durability/internals/WalWriter.cs`](../../src/Typhon.Engine/Durability/internals/WalWriter.cs), [`WalManager.cs`](../../src/Typhon.Engine/Durability/internals/WalManager.cs), [`WalCommitBuffer.cs`](../../src/Typhon.Engine/Durability/internals/WalCommitBuffer.cs)
+[`Durability/internals/WalWriter.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/internals/WalWriter.cs), [`WalManager.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/internals/WalManager.cs), [`WalCommitBuffer.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/internals/WalCommitBuffer.cs)
 
 The WAL writer is a single dedicated OS thread:
 
@@ -58,7 +64,7 @@ The WAL writer is a single dedicated OS thread:
 | Priority | `ThreadPriority.AboveNormal` |
 | Background | true |
 
-It is the single consumer of an MPSC (multi-producer, single-consumer) commit buffer ([`WalCommitBuffer`](../../src/Typhon.Engine/Durability/internals/WalCommitBuffer.cs)). Application threads commit a transaction by claiming space via an atomic tail-increment (`TryClaim` → `Interlocked.Add`, which maps to `LOCK XADD` on x64), writing the record batch into the claimed span, then publishing a frame. The writer drains published frames, copies them into a 4096-byte-aligned staging buffer, patches the chunk CRC chain over the **whole drained batch at once**, and writes that buffer to the active segment file with `RandomAccess.Write`. (Patching the entire batch in one shot is what fixed a v1 bug where a chunk straddling a 256 KB write-slice boundary could be left with a zero footer CRC.)
+It is the single consumer of an MPSC (multi-producer, single-consumer) commit buffer ([`WalCommitBuffer`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/internals/WalCommitBuffer.cs)). Application threads commit a transaction by claiming space via an atomic tail-increment (`TryClaim` → `Interlocked.Add`, which maps to `LOCK XADD` on x64), writing the record batch into the claimed span, then publishing a frame. The writer drains published frames, copies them into a 4096-byte-aligned staging buffer, patches the chunk CRC chain over the **whole drained batch at once**, and writes that buffer to the active segment file with `RandomAccess.Write`. (Patching the entire batch in one shot is what fixed a v1 bug where a chunk straddling a 256 KB write-slice boundary could be left with a zero footer CRC.)
 
 The transport — MPSC buffer, dedicated writer thread, segment management, FUA I/O — is **unchanged from v1**. Only the record *format* (§3) and the recovery/checkpoint logic above it (§5, §7) were redesigned.
 
@@ -68,11 +74,11 @@ Default is **8 MB total** (`ResourceOptions.WalRingBufferSizeBytes = 8 * 1024 * 
 
 ### GroupCommit (default mode)
 
-[`WalWriterOptions.GroupCommitIntervalMs = 5`](../../src/Typhon.Engine/Durability/public/WalWriterOptions.cs) — the WAL writer auto-flushes the staging buffer every 5 ms when running under [`DurabilityMode.GroupCommit`](../../src/Typhon.Engine/Transactions/public/DurabilityMode.cs). Commit latency is ~1-2 µs (the producer doesn't block), and data-at-risk is bounded by the GroupCommit interval.
+[`WalWriterOptions.GroupCommitIntervalMs = 5`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/public/WalWriterOptions.cs) — the WAL writer auto-flushes the staging buffer every 5 ms when running under [`DurabilityMode.GroupCommit`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Transactions/public/DurabilityMode.cs). Commit latency is ~1-2 µs (the producer doesn't block), and data-at-risk is bounded by the GroupCommit interval.
 
 ### Three durability modes
 
-[`DurabilityMode`](../../src/Typhon.Engine/Transactions/public/DurabilityMode.cs) is specified per **UnitOfWork**, not per transaction:
+[`DurabilityMode`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Transactions/public/DurabilityMode.cs) is specified per **UnitOfWork**, not per transaction:
 
 | Mode | Commit latency | Data-at-risk | Use case |
 |---|---|---|---|
@@ -84,11 +90,11 @@ Under `Immediate`, the commit path calls `WalManager.RequestFlush()` and then bl
 
 ### `DurabilityOverride`
 
-[`DurabilityOverride`](../../src/Typhon.Engine/Transactions/public/DurabilityMode.cs) is a per-transaction escalation knob (`Default`, `Immediate`) — a single `tx.Commit(DurabilityOverride.Immediate)` forces an FUA flush for one transaction inside an otherwise-Deferred UoW, for mixed workloads.
+[`DurabilityOverride`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Transactions/public/DurabilityMode.cs) is a per-transaction escalation knob (`Default`, `Immediate`) — a single `tx.Commit(DurabilityOverride.Immediate)` forces an FUA flush for one transaction inside an otherwise-Deferred UoW, for mixed workloads.
 
 ### `DurabilityDiscipline` (separate enum — not an extension of `DurabilityOverride`)
 
-[`DurabilityDiscipline`](../../src/Typhon.Schema.Definition/DurabilityDiscipline.cs) is a **distinct enum** — `TickFence` (default) and `Commit` — selecting the per-component *durability discipline* for a **SingleVersion**-layout component. It is **not** a new `DurabilityOverride` value and **not** a new `StorageMode`: it is an orthogonal axis layered on the existing per-UoW timing knob. `TickFence` keeps the default in-place, last-writer-wins, tick-fence-batched behavior (≤1-tick loss). `Commit` stages writes per transaction and makes them atomic + zero-loss durable at `Transaction.Commit` via a logical-redo WAL record, then publishes in place — read-committed, O(1) rollback, **no revision chain**. It applies only to SingleVersion (Versioned is always commit-scoped; Transient is never durable). Authoritative spec: [`claude/design/Ecs/committed-storage-mode.md`](../../claude/design/Ecs/committed-storage-mode.md).
+[`DurabilityDiscipline`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Schema.Definition/DurabilityDiscipline.cs) is a **distinct enum** — `TickFence` (default) and `Commit` — selecting the per-component *durability discipline* for a **SingleVersion**-layout component. It is **not** a new `DurabilityOverride` value and **not** a new `StorageMode`: it is an orthogonal axis layered on the existing per-UoW timing knob. `TickFence` keeps the default in-place, last-writer-wins, tick-fence-batched behavior (≤1-tick loss). `Commit` stages writes per transaction and makes them atomic + zero-loss durable at `Transaction.Commit` via a logical-redo WAL record, then publishes in place — read-committed, O(1) rollback, **no revision chain**. It applies only to SingleVersion (Versioned is always commit-scoped; Transient is never durable). Authoritative spec: [`claude/design/Ecs/committed-storage-mode.md`](../../claude/design/Ecs/committed-storage-mode.md).
 
 ---
 
@@ -103,7 +109,7 @@ Every WAL chunk has the same envelope:
 └────────────────────┴──────────────┴─────────────────┘
 ```
 
-[`WalChunkHeader`](../../src/Typhon.Engine/Durability/internals/WalChunkHeader.cs) (8 bytes, `Pack = 1`):
+[`WalChunkHeader`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/internals/WalChunkHeader.cs) (8 bytes, `Pack = 1`):
 
 | Field | Type | Notes |
 |---|---|---|
@@ -115,7 +121,7 @@ Every WAL chunk has the same envelope:
 
 ### Chunk types
 
-[`WalChunkType`](../../src/Typhon.Engine/Durability/internals/WalChunkHeader.cs):
+[`WalChunkType`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/internals/WalChunkHeader.cs):
 
 | Value | Type | Body |
 |---|---|---|
@@ -130,7 +136,7 @@ TickFence and ClusterTickFence are SingleVersion / cluster-storage recovery chun
 
 ### 3.1 Logical records (`RecordCodec` / `RecordFormat`)
 
-[`RecordFormat.cs`](../../src/Typhon.Engine/Durability/internals/RecordFormat.cs), [`RecordCodec.cs`](../../src/Typhon.Engine/Durability/internals/RecordCodec.cs)
+[`RecordFormat.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/internals/RecordFormat.cs), [`RecordCodec.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/internals/RecordCodec.cs)
 
 A `Transaction` chunk's body is a **batch of logical records**, serialized by the single `RecordCodec` (the *only* module allowed to read/write WAL record bytes). Each record begins with a 24-byte common header:
 
@@ -145,7 +151,7 @@ A `Transaction` chunk's body is a **batch of logical records**, serialized by th
 
 After the header, the body carries the **logical address** (`EntityId : long`, `ComponentTypeId : ushort`) plus kind-specific data — never a page index, chunk id, or buffer handle (LOG-06: collection-handle byte ranges are explicitly zeroed before they reach the log).
 
-**Record kinds** ([`RecordKind`](../../src/Typhon.Engine/Durability/internals/RecordFormat.cs)):
+**Record kinds** ([`RecordKind`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/internals/RecordFormat.cs)):
 
 | Value | Kind | Carries | Apply (idempotent) |
 |---|---|---|---|
@@ -154,14 +160,14 @@ After the header, the body carries the **logical address** (`EntityId : long`, `
 | `3` | `CollectionDelta` | EntityId, ComponentTypeId, FieldId, op, index, element | folded, then applied as a `Set` |
 | `4` | `BulkManifest` | sessionId, begin LSN, entity/component counts | orphan detection only |
 
-**Record flags** ([`RecordFlags`](../../src/Typhon.Engine/Durability/internals/RecordFormat.cs)):
+**Record flags** ([`RecordFlags`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/internals/RecordFormat.cs)):
 
 - `TxBegin` — first record of a transaction's batch.
 - `TxCommit` — **the commit marker (LOG-04)**. Set on the last record of the batch. A one-record batch carries both.
 - `FenceRecord` — a tick-fence snapshot record (committed individually, no Tx markers).
 - `Committed` — Committed-discipline marker. Tags records produced under `DurabilityDiscipline.Commit`; per rule CM-06, a Commit-discipline spawn WAL-logs its SingleVersion values (a `Slot` upsert per spawn value) so a cluster all-SV archetype recovers exactly across a crash with no checkpoint.
 
-The batch is built by [`CommitBatchBuilder`](../../src/Typhon.Engine/Durability/internals/CommitBatchBuilder.cs), which buckets entries by category so the codec always emits them in **LOG-07 order** (Spawn → Slot/CollectionDelta → Destroy/SetEnabledBits → BulkManifest) — a mis-ordered batch is unconstructible by API shape, so a `Slot` can never arrive before its entity's `Spawn`.
+The batch is built by [`CommitBatchBuilder`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/internals/CommitBatchBuilder.cs), which buckets entries by category so the codec always emits them in **LOG-07 order** (Spawn → Slot/CollectionDelta → Destroy/SetEnabledBits → BulkManifest) — a mis-ordered batch is unconstructible by API shape, so a `Slot` can never arrive before its entity's `Spawn`.
 
 > **`WalRecordHeader.cs` is legacy.** The 32-byte `WalRecordHeader` struct from v1 still exists in the tree but is **not** the logical-record format — `RecordFormat.RecordHeader` (24 B) is what `RecordCodec` reads and writes.
 
@@ -169,9 +175,9 @@ The batch is built by [`CommitBatchBuilder`](../../src/Typhon.Engine/Durability/
 
 ## 4. Segment management
 
-[`WalSegmentManager`](../../src/Typhon.Engine/Durability/internals/WalSegmentManager.cs)
+[`WalSegmentManager`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/internals/WalSegmentManager.cs)
 
-WAL records are written into fixed-size segment files named `{segmentId:D16}.wal` in the configured WAL directory (default `wal/`). Each segment starts with a 4096-byte `WalSegmentHeader` ([file](../../src/Typhon.Engine/Durability/internals/WalSegmentHeader.cs)) carrying magic (`TYFW`), version, segment ID, first/prev LSN, and a CRC32C — sized for one aligned disk page so the first record sits at a 4096-byte boundary (required for `O_DIRECT` / `FILE_FLAG_NO_BUFFERING`).
+WAL records are written into fixed-size segment files named `{segmentId:D16}.wal` in the configured WAL directory (default `wal/`). Each segment starts with a 4096-byte `WalSegmentHeader` ([file](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/internals/WalSegmentHeader.cs)) carrying magic (`TYFW`), version, segment ID, first/prev LSN, and a CRC32C — sized for one aligned disk page so the first record sits at a 4096-byte boundary (required for `O_DIRECT` / `FILE_FLAG_NO_BUFFERING`).
 
 ### Defaults
 
@@ -189,18 +195,18 @@ When the active segment passes 75 % utilization, the writer seals it, opens the 
 
 ### File flags by platform
 
-[`WalFileIO.OpenSegment`](../../src/Typhon.Engine/Durability/internals/WalFileIO.cs):
+[`WalFileIO.OpenSegment`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/internals/WalFileIO.cs):
 
 - **Windows** — `FILE_FLAG_NO_BUFFERING` bypasses the OS page cache; FUA (`FILE_FLAG_WRITE_THROUGH`) adds per-write durability.
 - **Linux / macOS** — `NoBuffering` is omitted; durability relies on `FileOptions.WriteThrough` (FUA on supporting hardware) plus explicit `RandomAccess.FlushToDisk` (`fsync`/`fdatasync`).
 
-`IWalFileIO` is the internal I/O seam; tests substitute [`InMemoryWalFileIO`](../../src/Typhon.Engine/Durability/internals/InMemoryWalFileIO.cs) to run the full pipeline without disk (the supported "no disk" mode — there is no no-WAL mode, [ADR-054](../../claude/adr/054-remove-no-wal-mode.md)).
+`IWalFileIO` is the internal I/O seam; tests substitute [`InMemoryWalFileIO`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/internals/InMemoryWalFileIO.cs) to run the full pipeline without disk (the supported "no disk" mode — there is no no-WAL mode, [ADR-054](../../claude/adr/054-remove-no-wal-mode.md)).
 
 ---
 
 ## 5. Checkpoint (v2)
 
-[`Durability/internals/CheckpointManager.cs`](../../src/Typhon.Engine/Durability/internals/CheckpointManager.cs)
+[`Durability/internals/CheckpointManager.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/internals/CheckpointManager.cs)
 
 The checkpoint is a single dedicated OS thread:
 
@@ -233,7 +239,7 @@ A **flush-only cycle** (`FlushOnlyCycle` — capture + write + DC-decrement, *no
 
 The meta page (root header + bootstrap dictionary + the `DurabilityWatermarks` block) and every segment-directory page occupy **two physical slots**. A write always targets the *non-current* slot with `PairGeneration = current+1` + a fresh CRC, fsyncs, then flips the in-memory current pointer. The current-valid slot is **never** overwritten, so a torn write can't destroy the only good copy — reopen selects the highest-generation CRC-valid slot; both-invalid fails the open loudly. This replaces FPI for the structural pages that rebuild (§6) can't re-derive.
 
-### [`DurabilityWatermarks`](../../src/Typhon.Engine/Durability/internals/DurabilityWatermarks.cs)
+### [`DurabilityWatermarks`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/internals/DurabilityWatermarks.cs)
 
 The watermark block persisted in the meta-pair carries:
 
@@ -244,7 +250,7 @@ The watermark block persisted in the meta-pair carries:
 
 `UpdateCheckpointLsn` advances the LSN and flips the meta pair atomically; `Read` / `ReadCheckpointLsn` / `ReadCleanShutdown` are used at open. (`NextFreeTSN` is *not* persisted here — it is restored from the recovered records, RB-05, §7.)
 
-### [`StagingBufferPool`](../../src/Typhon.Engine/Durability/internals/StagingBufferPool.cs)
+### [`StagingBufferPool`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/internals/StagingBufferPool.cs)
 
 Pre-allocated, 4096-byte-aligned, page-sized buffers for snapshot-based checkpoint writes:
 
@@ -283,7 +289,7 @@ Recovery runs at engine open, before any transaction is accepted. In the current
 
 ### 7.1 v1 scan — `WalRecovery` (surviving)
 
-[`Durability/internals/WalRecovery.cs`](../../src/Typhon.Engine/Durability/internals/WalRecovery.cs) — invoked from `DatabaseEngine` open as `new WalRecovery(...).Recover(UowRegistry, checkpointLSN, …)`. It still performs:
+[`Durability/internals/WalRecovery.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/internals/WalRecovery.cs) — invoked from `DatabaseEngine` open as `new WalRecovery(...).Recover(UowRegistry, checkpointLSN, …)`. It still performs:
 
 | Phase | What it does |
 |---|---|
@@ -297,7 +303,7 @@ Recovery runs at engine open, before any transaction is accepted. In the current
 
 ### 7.2 v2 logical apply — `RecoveryDriver` + `RecoveryApplier`
 
-[`RecoveryDriver.cs`](../../src/Typhon.Engine/Durability/internals/RecoveryDriver.cs) (`Run(walIO, walDir, dbe, checkpointLsn)`) runs **after** archetype initialization and owns the logical-record apply:
+[`RecoveryDriver.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/internals/RecoveryDriver.cs) (`Run(walIO, walDir, dbe, checkpointLsn)`) runs **after** archetype initialization and owns the logical-record apply:
 
 ```
 SCAN          read segments in LSN order; CRC-chain-check every chunk; truncate at first mismatch (LOG-03);
@@ -309,7 +315,7 @@ APPLY         strict ascending LSN (AP-11), idempotent (AP-12), via RecoveryAppl
 RESTORE TSN   NextFreeTSN resumed past the max recovered TSN (RB-05)
 ```
 
-[`RecoveryApplier`](../../src/Typhon.Engine/Durability/internals/RecoveryApplier.cs) reuses the **same** primitives the live commit path uses — `EntityMap.InsertNew` / `Upsert`, `ComponentRevisionManager.AllocCompRevStorage` for committed chain roots (mirroring `FinalizeSpawns`), `DiedTSN` for destroy — so there is no second write path, the structural fix for the whole `WalReplayHelper` bug class. Because every apply is idempotent, a crash *during* recovery is safe: CK-04 holds WAL recycling until the post-recovery seal, so a re-run sees the same window over a further-applied base (AP-12).
+[`RecoveryApplier`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/internals/RecoveryApplier.cs) reuses the **same** primitives the live commit path uses — `EntityMap.InsertNew` / `Upsert`, `ComponentRevisionManager.AllocCompRevStorage` for committed chain roots (mirroring `FinalizeSpawns`), `DiedTSN` for destroy — so there is no second write path, the structural fix for the whole `WalReplayHelper` bug class. Because every apply is idempotent, a crash *during* recovery is safe: CK-04 holds WAL recycling until the post-recovery seal, so a re-run sees the same window over a further-applied base (AP-12).
 
 ### 7.3 Scrub, rebuild, seal
 
@@ -322,7 +328,7 @@ After apply, `DatabaseEngine.RunWalV2Recovery` completes the base:
 
 ### Page checksum verification
 
-[`PageChecksumVerification`](../../src/Typhon.Engine/Resources/public/ResourceOptions.cs):
+[`PageChecksumVerification`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Resources/public/ResourceOptions.cs):
 
 | Mode | Behavior |
 |---|---|
@@ -333,13 +339,13 @@ During the crash path the engine stays in `RecoveryOnly` through apply (there is
 
 ### Recovery metrics
 
-The v2 driver returns a `RecoveryDriver.Result` (`SegmentsScanned`, `RecordsScanned`, `RecordsApplied`, `TxCommitted`, `MaxTsn`, `MaxLsn`) — every field is test-asserted. The surviving v1 pass returns [`WalRecoveryResult`](../../src/Typhon.Engine/Durability/public/WalRecoveryResult.cs) (`SegmentsScanned`, `UowsPromoted`, `UowsVoided`, `TickFenceChunksProcessed`, `BulkBeginCount`/`BulkEndCount`, `LastValidLSN`, `ElapsedMicroseconds`; its `FpiRecordsApplied` field remains for binary-compat but is never populated).
+The v2 driver returns a `RecoveryDriver.Result` (`SegmentsScanned`, `RecordsScanned`, `RecordsApplied`, `TxCommitted`, `MaxTsn`, `MaxLsn`) — every field is test-asserted. The surviving v1 pass returns [`WalRecoveryResult`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/public/WalRecoveryResult.cs) (`SegmentsScanned`, `UowsPromoted`, `UowsVoided`, `TickFenceChunksProcessed`, `BulkBeginCount`/`BulkEndCount`, `LastValidLSN`, `ElapsedMicroseconds`; its `FpiRecordsApplied` field remains for binary-compat but is never populated).
 
 ---
 
 ## 8. UoW state machine (transitional)
 
-[`UnitOfWorkState`](../../src/Typhon.Engine/Transactions/public/DurabilityMode.cs) — one byte, five states. Owned by the [`UowRegistry`](../../src/Typhon.Engine/Transactions/internals/UowRegistry.cs) (see [08-transactions](08-transactions.md)); transitions are one-way.
+[`UnitOfWorkState`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Transactions/public/DurabilityMode.cs) — one byte, five states. Owned by the [`UowRegistry`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Transactions/internals/UowRegistry.cs) (see [08-transactions](08-transactions.md)); transitions are one-way.
 
 | Value | State | Meaning |
 |---|---|---|
@@ -367,9 +373,9 @@ Free → Pending → Void → Free                          (crash recovery)
 The full contract:
 
 - Any WAL write I/O failure is captured in `WalWriter._fatalError` (single field).
-- `WaitForDurable` checks this field first; if non-null, throws [`WalWriteException`](../../src/Typhon.Engine/Errors/public/WalWriteException.cs) (`IsTransient = false`). Restart required.
+- `WaitForDurable` checks this field first; if non-null, throws [`WalWriteException`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Errors/public/WalWriteException.cs) (`IsTransient = false`). Restart required.
 - The writer thread is *not* restarted in-process. No retry, no fallback, no degraded mode.
-- Related: [`WalClaimTooLargeException`](../../src/Typhon.Engine/Errors/public/WalClaimTooLargeException.cs) (a single record exceeds the ring buffer's capacity), [`WalSegmentException`](../../src/Typhon.Engine/Errors/public/WalSegmentException.cs) (segment file malformed). A checkpoint cycle's *transient* exception retries next cycle; a *fatal* latch surfaces in `DurabilitySnapshot.Health` (CK-06).
+- Related: [`WalClaimTooLargeException`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Errors/public/WalClaimTooLargeException.cs) (a single record exceeds the ring buffer's capacity), [`WalSegmentException`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Errors/public/WalSegmentException.cs) (segment file malformed). A checkpoint cycle's *transient* exception retries next cycle; a *fatal* latch surfaces in `DurabilitySnapshot.Health` (CK-06).
 
 The reasoning (per ADR): every alternative — buffer-and-retry, degraded read-only mode, partial commits — opens a hole in the durability contract. A stopped engine is the only state where "`Commit()` returned ⇒ data is durable" is unambiguously true.
 

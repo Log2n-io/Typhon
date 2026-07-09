@@ -1,3 +1,9 @@
+---
+uid: feature-subscriptions-priority-overload-throttling
+title: 'Subscription Priority & Overload Throttling'
+description: 'Tag Views Critical/Normal/Low so the server protects player-state delivery when the tick budget is blown.'
+---
+
 # Subscription Priority & Overload Throttling
 > Tag Views Critical/Normal/Low so the server protects player-state delivery when the tick budget is blown.
 

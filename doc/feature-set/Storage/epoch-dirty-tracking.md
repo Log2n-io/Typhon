@@ -1,3 +1,9 @@
+---
+uid: feature-storage-epoch-dirty-tracking
+title: 'Epoch-Based Page Protection & Dirty-Page Tracking'
+description: 'Per-page eviction safety built from an epoch tag plus three counters, replacing per-page reference counting entirely.'
+---
+
 # Epoch-Based Page Protection & Dirty-Page Tracking
 > Per-page eviction safety built from an epoch tag plus three counters, replacing per-page reference counting entirely.
 
@@ -62,9 +68,9 @@ catch (PageCacheBackpressureTimeoutException ex)
 
 ## 🧪 Tests
 
-- [EpochPageCacheTests](../../../test/Typhon.Engine.Tests/Storage/EpochPageCacheTests.cs) — epoch-tagged page stays protected while a scope is active, becomes evictable only after scope exit
-- [ChangeSetConservationTests](../../../test/Typhon.Engine.Tests/Storage/ChangeSetConservationTests.cs) — `DirtyCounter` conservation across add/release/reset/checkpoint-ack, never over- or under-releases
-- [CheckpointManagerTests](../../../test/Typhon.Engine.Tests/Durability/CheckpointManagerTests.cs) — `ActiveChunkWriters` coverage gate blocks checkpoint capture on a pinned page and unblocks once released
+- [EpochPageCacheTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Storage/EpochPageCacheTests.cs) — epoch-tagged page stays protected while a scope is active, becomes evictable only after scope exit
+- [ChangeSetConservationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Storage/ChangeSetConservationTests.cs) — `DirtyCounter` conservation across add/release/reset/checkpoint-ack, never over- or under-releases
+- [CheckpointManagerTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/CheckpointManagerTests.cs) — `ActiveChunkWriters` coverage gate blocks checkpoint capture on a pinned page and unblocks once released
 
 ## 🔗 Related
 

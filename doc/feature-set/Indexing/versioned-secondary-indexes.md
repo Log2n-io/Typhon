@@ -1,3 +1,9 @@
+---
+uid: feature-indexing-versioned-secondary-indexes
+title: 'Versioned (HEAD/TAIL) Secondary Indexes for MVCC'
+description: 'The mechanism that keeps AllowMultiple index membership correct across updates and deletes on Versioned components.'
+---
+
 # Versioned (HEAD/TAIL) Secondary Indexes for MVCC
 > The mechanism that keeps `AllowMultiple` index membership correct across updates and deletes on `Versioned` components.
 
@@ -84,7 +90,7 @@ using var g9 = tx2.EnumerateIndex<GuildMember, long>(guildIndex, 9, 9); // Aria
 
 ## 🧪 Tests
 
-- [VersionedIndexTests](../../../test/Typhon.Engine.Tests/Data/VersionedIndexTests.cs) — Phase 1 (`AllocateTailBuffer_AddAndReadEntry`, lazy TAIL allocation) and Phase 2 (`Update_IndexedField_TailHasTombstoneAndActive`, `Delete_Entity_TailHasTombstone`, `Update_BackfillsTail_AllEntriesPresent`): HEAD+TAIL maintenance on create/update/delete
+- [VersionedIndexTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/VersionedIndexTests.cs) — Phase 1 (`AllocateTailBuffer_AddAndReadEntry`, lazy TAIL allocation) and Phase 2 (`Update_IndexedField_TailHasTombstoneAndActive`, `Delete_Entity_TailHasTombstone`, `Update_BackfillsTail_AllEntriesPresent`): HEAD+TAIL maintenance on create/update/delete
 
 ## 🔗 Related
 

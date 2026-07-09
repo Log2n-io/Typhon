@@ -1,3 +1,9 @@
+---
+uid: feature-indexing-btree-key-variants
+title: 'Specialized B+Tree Key-Size Variants'
+description: 'One cache-aligned B+Tree node layout per key width, picked automatically from the field''s type — invisible to application code.'
+---
+
 # Specialized B+Tree Key-Size Variants
 > One cache-aligned B+Tree node layout per key width, picked automatically from the field's type — invisible to application code.
 
@@ -56,8 +62,8 @@ foreach (var entry in found)
 
 ## 🧪 Tests
 
-- [BtreeTests](../../../test/Typhon.Engine.Tests/Data/BTreeTests.cs) — `ForwardInsertionTest`/`ForwardFloatInsertionTest`/`ReverseInsertionTest`/`ReverseString64InsertionTest` exercise all four key-width tiers (`int`/`L32`, `float`/`L32`, `byte`/`L16`, `String64`) through the shared `BTree<TKey, TStore>` algorithm
-- [OlcLatchTests](../../../test/Typhon.Engine.Tests/Data/OlcLatchTests.cs) — chunk-size verification (`Index16Chunk_Size_Is256Bytes`, `Index32Chunk_Size_Is256Bytes`, `Index64Chunk_Size_Is256Bytes`, `Index32Chunk_Capacity_Is29`) confirms the per-variant node layout the table above documents
+- [BtreeTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/BTreeTests.cs) — `ForwardInsertionTest`/`ForwardFloatInsertionTest`/`ReverseInsertionTest`/`ReverseString64InsertionTest` exercise all four key-width tiers (`int`/`L32`, `float`/`L32`, `byte`/`L16`, `String64`) through the shared `BTree<TKey, TStore>` algorithm
+- [OlcLatchTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/OlcLatchTests.cs) — chunk-size verification (`Index16Chunk_Size_Is256Bytes`, `Index32Chunk_Size_Is256Bytes`, `Index64Chunk_Size_Is256Bytes`, `Index32Chunk_Capacity_Is29`) confirms the per-variant node layout the table above documents
 
 ## 🔗 Related
 

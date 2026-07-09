@@ -1,3 +1,9 @@
+---
+uid: feature-resources-metric-reporting
+title: 'Metric Reporting (IMetricSource / IMetricWriter)'
+description: 'Zero-cost-until-asked metric collection for every significant engine resource.'
+---
+
 # Metric Reporting (IMetricSource / IMetricWriter)
 > Zero-cost-until-asked metric collection for every significant engine resource.
 
@@ -85,9 +91,9 @@ resourceGraph.ResetAllPeaks(); // start a new peak-measurement window
   for their numbers aggregated on the owning `ComponentTable`/cache/allocator instead.
 
 ## 🧪 Tests
-- [MetricSourceTests](../../../test/Typhon.Engine.Tests/Resources/MetricSourceTests.cs) — `IMetricWriter`/`IMetricSource` contract,
+- [MetricSourceTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Resources/MetricSourceTests.cs) — `IMetricWriter`/`IMetricSource` contract,
   partial-metrics reporting, `GetMetricSources` tree walk (self-inclusion, skipping non-sources, from-root traversal)
-- [MetricTypesTests](../../../test/Typhon.Engine.Tests/Resources/MetricTypesTests.cs) — the 5 metric-kind value types
+- [MetricTypesTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Resources/MetricTypesTests.cs) — the 5 metric-kind value types
   (Memory/Capacity/DiskIO/Throughput/Duration), `CapacityMetrics.Utilization` edge cases, `MetricNames` constants
 
 ## 🔗 Related

@@ -1,3 +1,9 @@
+---
+uid: guide-transactions
+title: '3 — Changing data: transactions & durability'
+description: 'Every change to your data enters Typhon through a transaction. Chapter 1 used the one-line CreateQuickTransaction(); this chapter opens the box: the two…'
+---
+
 # 3 — Changing data: transactions & durability
 
 Every change to your data enters Typhon through a **transaction**. Chapter 1 used the one-line `CreateQuickTransaction()`; this chapter opens the box: the two layers a transaction sits in, how `Commit` and `Rollback` behave, how you trade commit latency against crash-safety, and — crucially — what "transactional" actually means for each storage mode.

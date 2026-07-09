@@ -1,3 +1,9 @@
+---
+uid: feature-profiler-custom-named-spans
+title: 'Custom Application-Defined Spans'
+description: 'A reserved wire-format span kind for app-defined names, designed to nest into the profiler flame graph — not yet callable from application code.'
+---
+
 # Custom Application-Defined Spans
 > A reserved wire-format span kind for app-defined names, designed to nest into the profiler flame graph — not yet callable from application code.
 

@@ -1,3 +1,9 @@
+---
+uid: feature-foundation-high-resolution-timers-dedicated-timer
+title: 'Dedicated Timer (HighResolutionTimerService)'
+description: 'A single periodic callback on its own thread, isolated from every other timer in the engine.'
+---
+
 # Dedicated Timer (HighResolutionTimerService)
 > A single periodic callback on its own thread, isolated from every other timer in the engine.
 
@@ -46,8 +52,8 @@ heartbeat.Dispose(); // stops the thread, removes from the resource tree
 - `MeanTimingErrorUs`/`MaxTimingErrorUs`/`InvocationCount`/`MissedTicks` are available both as direct properties and through `IMetricSource` resource-graph snapshots.
 
 ## 🧪 Tests
-- [HighResolutionTimerServiceTests](../../../../test/Typhon.Engine.Tests/Concurrency/HighResolutionTimerServiceTests.cs) — fire-rate accuracy, callback timestamp delivery, exception-in-callback doesn't kill the timer, per-tick/callback metrics.
-- [HighResolutionTimerServiceBaseTests](../../../../test/Typhon.Engine.Tests/Concurrency/HighResolutionTimerServiceBaseTests.cs) — `Start()`/`Dispose()` thread lifecycle, calibration, invalid-interval/null-callback validation.
+- [HighResolutionTimerServiceTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Concurrency/HighResolutionTimerServiceTests.cs) — fire-rate accuracy, callback timestamp delivery, exception-in-callback doesn't kill the timer, per-tick/callback metrics.
+- [HighResolutionTimerServiceBaseTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Concurrency/HighResolutionTimerServiceBaseTests.cs) — `Start()`/`Dispose()` thread lifecycle, calibration, invalid-interval/null-callback validation.
 
 ## 🔗 Related
 

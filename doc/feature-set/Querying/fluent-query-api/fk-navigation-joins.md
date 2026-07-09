@@ -1,3 +1,9 @@
+---
+uid: feature-querying-fluent-query-api-fk-navigation-joins
+title: 'Foreign-Key Navigation Joins (L4)'
+description: 'Join across an entity-reference field — filter source entities by predicates on the target entity they point to.'
+---
+
 # Foreign-Key Navigation Joins (L4)
 > Join across an entity-reference field — filter source entities by predicates on the target entity they point to.
 
@@ -66,8 +72,8 @@ foreach (var playerId in view) { /* player is in a guild with Level >= 10 */ }
 
 ## 🧪 Tests
 
-- [EcsNavigationTests](../../../../test/Typhon.Engine.Tests/Data/ECS/EcsNavigationTests.cs) — source+target predicate combination, `Count()`, and `ToView()` incremental refresh on either side
-- [StatisticsRebuildTests](../../../../test/Typhon.Engine.Tests/Data/Query/StatisticsRebuildTests.cs) — `NavigationView_ToView_NoTargetPredicates_Throws` / `NavigationQuery_OneShot_NoTargetPredicates_Works`: the target-predicate requirement is `ToView()`-only
+- [EcsNavigationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/EcsNavigationTests.cs) — source+target predicate combination, `Count()`, and `ToView()` incremental refresh on either side
+- [StatisticsRebuildTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/Query/StatisticsRebuildTests.cs) — `NavigationView_ToView_NoTargetPredicates_Throws` / `NavigationQuery_OneShot_NoTargetPredicates_Works`: the target-predicate requirement is `ToView()`-only
 
 ## 🔗 Related
 

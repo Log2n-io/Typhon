@@ -1,3 +1,9 @@
+---
+uid: feature-runtime-system-types-pipeline-system
+title: 'PipelineSystem'
+description: 'Reactive multi-stage gather/process/scatter system for bulk entity processing — full execution model pending Patate.'
+---
+
 # PipelineSystem
 > Reactive multi-stage gather/process/scatter system for bulk entity processing — full execution model pending Patate.
 
@@ -62,9 +68,9 @@ dag.Add(new RenderPipeline());   // throws NotSupportedException — pending Pat
 
 ## 🧪 Tests
 
-- [DagSchedulerTests](../../../../test/Typhon.Engine.Tests/Runtime/DagSchedulerTests.cs) — `PipelineSystem_AllChunksProcessed`, `PipelineSystem_MultiWorkerDistribution`, `PipelineSystem_ChunksResetEachTick` — the working lambda/fixed-chunk-count dispatch path
-- [ClassBasedSystemTests](../../../../test/Typhon.Engine.Tests/Runtime/ClassBasedSystemTests.cs) — `Add_PipelineSystem_ThrowsNotSupported` — class-based registration rejection
-- [TyphonRuntimeTests](../../../../test/Typhon.Engine.Tests/Runtime/TyphonRuntimeTests.cs) — `PipelineSystem_DoesNotReceiveTransaction` — no `TickContext` entity machinery
+- [DagSchedulerTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/DagSchedulerTests.cs) — `PipelineSystem_AllChunksProcessed`, `PipelineSystem_MultiWorkerDistribution`, `PipelineSystem_ChunksResetEachTick` — the working lambda/fixed-chunk-count dispatch path
+- [ClassBasedSystemTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/ClassBasedSystemTests.cs) — `Add_PipelineSystem_ThrowsNotSupported` — class-based registration rejection
+- [TyphonRuntimeTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/TyphonRuntimeTests.cs) — `PipelineSystem_DoesNotReceiveTransaction` — no `TickContext` entity machinery
 
 ## 🔗 Related
 

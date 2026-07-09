@@ -1,3 +1,9 @@
+---
+uid: feature-foundation-in-memory-hash-maps-non-concurrent-hash-map
+title: 'Non-Concurrent HashMap\'
+description: 'Single-threaded open-addressing hash set/map — the default replacement for HashSet/Dictionary on a hot path.'
+---
+
 # Non-Concurrent HashMap\<TKey[, TValue]\>
 > Single-threaded open-addressing hash set/map — the default replacement for `HashSet<T>`/`Dictionary<TKey,TValue>` on a hot path.
 
@@ -52,8 +58,8 @@ cache.Dispose();
 - `internal` (`Typhon.Engine.Internals`) — engine plumbing only.
 
 ## 🧪 Tests
-- [HashMapTests](../../../../test/Typhon.Engine.Tests/Collections/InMemoryHashMapTests.cs) — `TryAdd`/`Contains`/`TryGetValue`/`TryRemove`/`GetOrAdd`/`Clone()`, backward-shift delete, resize at 0.75 load factor.
-- [HashMapPartitionTests](../../../../test/Typhon.Engine.Tests/Collections/HashMapPartitionTests.cs) — `GetPartitionEnumerator` contiguous-range slicing for manual parallel iteration.
+- [HashMapTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Collections/InMemoryHashMapTests.cs) — `TryAdd`/`Contains`/`TryGetValue`/`TryRemove`/`GetOrAdd`/`Clone()`, backward-shift delete, resize at 0.75 load factor.
+- [HashMapPartitionTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Collections/HashMapPartitionTests.cs) — `GetPartitionEnumerator` contiguous-range slicing for manual parallel iteration.
 
 ## 🔗 Related
 - Parent feature: [In-Memory Hash Maps](./README.md)

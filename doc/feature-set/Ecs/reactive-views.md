@@ -1,3 +1,9 @@
+---
+uid: feature-ecs-reactive-views
+title: 'Reactive Views (EcsView)'
+description: 'Persistent, incrementally-maintained query results — documented in full under Querying, since ToView() is a terminal method on EcsQuery.'
+---
+
 # Reactive Views (EcsView)
 > Persistent, incrementally-maintained query results — documented in full under Querying, since `ToView()` is a terminal method on `EcsQuery`.
 

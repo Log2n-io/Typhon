@@ -1,3 +1,9 @@
+---
+uid: feature-indexing-btree-node-layout-tuning
+title: 'B+Tree Node Layout and Capacity Tuning'
+description: 'Cache-line-aware 256-byte node layout, the product of a multi-phase profiling effort — invisible to, and not configured by, application code.'
+---
+
 # B+Tree Node Layout and Capacity Tuning
 > Cache-line-aware 256-byte node layout, the product of a multi-phase profiling effort — invisible to, and not configured by, application code.
 
@@ -51,8 +57,8 @@ using var found = tx.EnumerateIndex<Player, int>(idIndex, minKey: 100, maxKey: 2
 
 ## 🧪 Tests
 
-- [OlcLatchTests](../../../test/Typhon.Engine.Tests/Data/OlcLatchTests.cs) — `Index16Chunk_Size_Is256Bytes`/`Index32Chunk_Size_Is256Bytes`/`Index64Chunk_Size_Is256Bytes`/`Index32Chunk_Capacity_Is29`: pins the fixed 256-byte node size and per-tier capacity this feature describes
-- [BTreeTests](../../../test/Typhon.Engine.Tests/Data/BTreeTests.cs) — exercises trees built at these exact node capacities across all four key-width tiers, indirectly validating the layout under real insert/remove/range-scan traffic
+- [OlcLatchTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/OlcLatchTests.cs) — `Index16Chunk_Size_Is256Bytes`/`Index32Chunk_Size_Is256Bytes`/`Index64Chunk_Size_Is256Bytes`/`Index32Chunk_Capacity_Is29`: pins the fixed 256-byte node size and per-tier capacity this feature describes
+- [BTreeTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/BTreeTests.cs) — exercises trees built at these exact node capacities across all four key-width tiers, indirectly validating the layout under real insert/remove/range-scan traffic
 
 ## 🔗 Related
 

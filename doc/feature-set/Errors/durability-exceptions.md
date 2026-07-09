@@ -1,3 +1,9 @@
+---
+uid: feature-errors-durability-exceptions
+title: 'Durability (WAL / BulkLoad / Commit) Exceptions'
+description: 'Typed, fail-fast failures from the WAL writer, the commit pipeline''s durability wait, and BulkLoad session lifecycle.'
+---
+
 # Durability (WAL / BulkLoad / Commit) Exceptions
 > Typed, fail-fast failures from the WAL writer, the commit pipeline's durability wait, and BulkLoad session lifecycle.
 
@@ -67,8 +73,8 @@ catch (BulkLoadCheckpointTimeoutException ex)
 
 ## 🧪 Tests
 
-- [WalCommitBufferTests](../../../test/Typhon.Engine.Tests/Durability/WalCommitBufferTests.cs) — an over-capacity claim throws `WalClaimTooLargeException`; a ring-buffer claim that outlives its deadline throws `WalBackPressureTimeoutException`.
-- [BulkLoadApiSurfaceTests](../../../test/Typhon.Engine.Tests/Durability/BulkLoadApiSurfaceTests.cs) — a second concurrent `BeginBulkLoad` throws `BulkSessionAlreadyActiveException` (`ActiveBulkSessionId`); any call after `Dispose`/`CompleteBulkLoad` throws `BulkSessionClosedException` (`CompleteBulkLoad`, `Destroy`).
+- [WalCommitBufferTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/WalCommitBufferTests.cs) — an over-capacity claim throws `WalClaimTooLargeException`; a ring-buffer claim that outlives its deadline throws `WalBackPressureTimeoutException`.
+- [BulkLoadApiSurfaceTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/BulkLoadApiSurfaceTests.cs) — a second concurrent `BeginBulkLoad` throws `BulkSessionAlreadyActiveException` (`ActiveBulkSessionId`); any call after `Dispose`/`CompleteBulkLoad` throws `BulkSessionClosedException` (`CompleteBulkLoad`, `Destroy`).
 
 ## 🔗 Related
 

@@ -1,3 +1,9 @@
+---
+uid: feature-durability-durability-modes-committed-discipline
+title: 'Committed Durability Discipline'
+description: 'Zero-loss, atomic writes on Typhon''s cheapest component layout — without paying for an MVCC revision chain.'
+---
+
 # Committed Durability Discipline
 > Zero-loss, atomic writes on Typhon's cheapest component layout — without paying for an MVCC revision chain.
 
@@ -75,8 +81,8 @@ side.Commit();
 
 ## 🧪 Tests
 
-- [CommittedDisciplineTests](../../../../test/Typhon.Engine.Tests/Data/ECS/CommittedDisciplineTests.cs) — arena staging/publish, read-your-own-writes, rollback-discards-staged, `DefaultDiscipline` escalation, cluster and non-cluster archetypes
-- [CommittedDisciplineRecoveryTests](../../../../test/Typhon.Engine.Tests/Durability/CrashRecovery/CommittedDisciplineRecoveryTests.cs) — hard-crash proof: a `Commit`-discipline write survives as an ordinary Slot record with zero discipline-specific recovery code
+- [CommittedDisciplineTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/CommittedDisciplineTests.cs) — arena staging/publish, read-your-own-writes, rollback-discards-staged, `DefaultDiscipline` escalation, cluster and non-cluster archetypes
+- [CommittedDisciplineRecoveryTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/CrashRecovery/CommittedDisciplineRecoveryTests.cs) — hard-crash proof: a `Commit`-discipline write survives as an ordinary Slot record with zero discipline-specific recovery code
 
 ## 🔗 Related
 

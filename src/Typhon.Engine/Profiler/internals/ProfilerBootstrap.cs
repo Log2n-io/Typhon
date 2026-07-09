@@ -71,6 +71,7 @@ internal static class ProfilerBootstrap
     /// <see cref="TyphonRuntime.Create"/>. A no-op when the producer gate is closed (the common case). Best-effort — a startup failure (port busy, unwritable
     /// trace path) is logged and swallowed so the host runs without profiling.
     /// </summary>
+    /// <param name="runtime">The runtime to attach the profiler to.</param>
     /// <param name="serviceProvider">Optional — when supplied, a host override registered via <c>AddTyphonProfiler</c> is resolved from it.</param>
     internal static void TryStart(TyphonRuntime runtime, IServiceProvider serviceProvider)
     {

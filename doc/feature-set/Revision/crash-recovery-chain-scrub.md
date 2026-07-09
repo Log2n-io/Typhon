@@ -1,3 +1,9 @@
+---
+uid: feature-revision-crash-recovery-chain-scrub
+title: 'Crash-Recovery Chain Scrub & Orphan Sweep'
+description: 'After a crash, every Versioned component''s revision history collapses back to its single committed value.'
+---
+
 # Crash-Recovery Chain Scrub & Orphan Sweep
 > After a crash, every Versioned component's revision history collapses back to its single committed value.
 
@@ -79,12 +85,12 @@ foreach (var seg in engine.EnumerateStorageSegments())
 
 ## 🧪 Tests
 
-- [DeferredCleanupTests](../../../test/Typhon.Engine.Tests/Data/DeferredCleanupTests.cs) — `Scrub_CollapsesMultiRevisionChain_ToHeadValue_Idempotent` (built directly against `ScrubChainToHead`, verifies the single-committed-HEAD collapse and idempotency) and `SweepOrphans_FreesUnreachableChunks_KeepsReachableData` (frees an interrupted-alloc orphan chunk while keeping the reachable chain root and content intact)
+- [DeferredCleanupTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/DeferredCleanupTests.cs) — `Scrub_CollapsesMultiRevisionChain_ToHeadValue_Idempotent` (built directly against `ScrubChainToHead`, verifies the single-committed-HEAD collapse and idempotency) and `SweepOrphans_FreesUnreachableChunks_KeepsReachableData` (frees an interrupted-alloc orphan chunk while keeping the reachable chain root and content intact)
 
 ## 🔗 Related
 
 - Related feature: [Crash Recovery (RecoveryDriver)](../Durability/crash-recovery/README.md), [Rebuild of Derived Structures](../Durability/crash-recovery/rebuild-derived-structures.md), [Revision Chain Storage](./revision-chain-storage.md)
-- Source: [`ComponentRevisionManager.ScrubChainToHead` / `SweepTableOrphans` / `EnumerateVersionedChainHeads`](../../../src/Typhon.Engine/Revision/internals/ComponentRevisionManager.cs), [`DatabaseEngine.ScrubVersionedChains`](../../../src/Typhon.Engine/Ecs/public/DatabaseEngine.cs)
+- Source: [`ComponentRevisionManager.ScrubChainToHead` / `SweepTableOrphans` / `EnumerateVersionedChainHeads`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Revision/internals/ComponentRevisionManager.cs), [`DatabaseEngine.ScrubVersionedChains`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/DatabaseEngine.cs)
 
 <!-- Deep dive: claude/overview/06-durability.md §6.5 — Crash Recovery (RecoveryDriver) -->
 <!-- Design: claude/design/Durability/MinimalWal/03-recovery.md §6 — Phase 4 SCRUB + orphan sweep -->

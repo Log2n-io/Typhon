@@ -1,3 +1,8 @@
+// CS1591: this file declares public-accessibility types that live in the internal namespace (Phase 2b entanglement, see
+// claude/research/PublicVsInternalApiClassification.md). They are excluded from the published API reference, so consumer-facing
+// doc coverage is not enforced here.
+#pragma warning disable 1591
+
 using System;
 using System.Diagnostics;
 using System.Numerics;
@@ -475,7 +480,7 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
     /// Evict a slot: flush dirty state and handle page protection counters.
     /// <para>
     /// <b>Transaction path</b> (ChangeSet present): SlotRefCount and ACW decrements are deferred to
-    /// <see cref="ChangeSet.DeferEviction"/> because <see cref="Transaction.FlushAndRefreshEpoch"/> can
+    /// <see cref="ChangeSet.DeferEviction"/> because <see cref="EntityAccessor.FlushAndRefreshEpoch"/> can
     /// advance the epoch while callers still hold raw <c>byte*</c> or <c>ref T</c> pointers to evicted
     /// pages. SlotRefCount &gt; 0 prevents <see cref="PagedMMF.TryAcquire"/> from reusing the memory page.
     /// </para>
@@ -525,7 +530,7 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
 
     /// <summary>
     /// Load a page into a slot via epoch-protected access.
-    /// Increments <see cref="PageInfo.SlotRefCount"/> to prevent PagedMMF from evicting the page
+    /// Increments <see cref="PagedMMF.PageInfo.SlotRefCount"/> to prevent PagedMMF from evicting the page
     /// while it is cached in this accessor (callers may hold raw pointers to the page memory).
     /// </summary>
     private void LoadIntoSlot(int slot, int pageIndex)

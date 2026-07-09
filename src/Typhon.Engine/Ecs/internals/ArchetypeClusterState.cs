@@ -97,18 +97,14 @@ internal sealed unsafe class ArchetypeClusterState
     internal int FenceProcessBitmapClusterCount;
 
     /// <summary>
-    /// Grow <see cref="FenceDirtyBits"/> and supporting per-cluster arrays to an upper-bound size that the parallel Migrate phase will never exceed. Called by
-    /// TickDriver between the Prep and Migrate phase dispatches — guarantees worker threads never need to <c>Array.Resize</c> a buffer during their parallel
-    /// apply.
-    /// </summary>
-    /// <param name="upperBound">Worst-case maximum cluster chunk ID + 1 that this fence tick could touch. Typically, <c>PrimarySegmentCapacity +
-    /// PendingMigrationCount</c> — one new cluster per migration in the worst case.</param>
-    /// <summary>
     /// Apply a contiguous run of <see cref="DirtyBitDelta"/> entries to <see cref="FenceDirtyBits"/>. Called from <see cref="DatabaseEngine.FlushDirtyBitDeltas"/>
     /// after each chunk's Migrate phase completes — the chunk's worker-local buffer is sorted by archetypeId, then this method applies all deltas for one
     /// archetype under a single <see cref="_finalizeLock"/> acquisition. Plain bit ops (no Interlocked) are correct under the lock:
     /// only one worker writes to this archetype's FenceDirtyBits at a time, eliminating cross-worker cache-line false-sharing on adjacent chunkIds.
     /// </summary>
+    /// <param name="buffer">Worker-local list of <see cref="DirtyBitDelta"/> entries, sorted by archetypeId; this archetype's run is contiguous.</param>
+    /// <param name="offset">Index of the first entry in <paramref name="buffer"/> belonging to this archetype's run.</param>
+    /// <param name="count">Number of contiguous entries starting at <paramref name="offset"/> to apply; a value &lt;= 0 is a no-op.</param>
     internal void ApplyDirtyBitDeltas(List<DirtyBitDelta> buffer, int offset, int count)
     {
         if (count <= 0)
@@ -215,6 +211,13 @@ internal sealed unsafe class ArchetypeClusterState
         }
     }
 
+    /// <summary>
+    /// Grow <see cref="FenceDirtyBits"/> and supporting per-cluster arrays to an upper-bound size that the parallel Migrate phase will never exceed. Called by
+    /// TickDriver between the Prep and Migrate phase dispatches — guarantees worker threads never need to <c>Array.Resize</c> a buffer during their parallel
+    /// apply.
+    /// </summary>
+    /// <param name="upperBound">Worst-case maximum cluster chunk ID + 1 that this fence tick could touch. Typically, <c>PrimarySegmentCapacity +
+    /// PendingMigrationCount</c> — one new cluster per migration in the worst case.</param>
     internal void PreSizeMigrationBuffers(int upperBound)
     {
         if (upperBound <= 0)
@@ -379,12 +382,12 @@ internal sealed unsafe class ArchetypeClusterState
     // ═══════════════════════════════════════════════════════════════════════
 
     /// <summary>Per-archetype pending migration queue. Populated by cell-crossing detection in
-    /// <c>DetectClusterMigrations</c>, drained by <see cref="ExecuteMigrations"/> at the tick fence.
+    /// <c>DetectClusterMigrations</c>, drained by <see cref="DatabaseEngine.ExecuteMigrations"/> at the tick fence.
     /// Null until the first cell-crossing is detected.</summary>
     internal MigrationRequest[] PendingMigrations;
 
     /// <summary>Number of valid entries in <see cref="PendingMigrations"/>. Reset to zero at the start
-    /// of every <see cref="ExecuteMigrations"/> call.</summary>
+    /// of every <see cref="DatabaseEngine.ExecuteMigrations"/> call.</summary>
     internal int PendingMigrationCount;
 
     /// <summary>Telemetry counter: number of migrations executed in the most recently completed tick.</summary>
@@ -395,7 +398,7 @@ internal sealed unsafe class ArchetypeClusterState
     /// <see cref="SpatialGridConfig.MigrationHysteresisRatio"/>.</summary>
     public int LastTickHysteresisAbsorbedCount;
 
-    /// <summary>Telemetry counter: wall-clock duration of <see cref="ExecuteMigrations"/> in milliseconds,
+    /// <summary>Telemetry counter: wall-clock duration of <see cref="DatabaseEngine.ExecuteMigrations"/> in milliseconds,
     /// for the most recently completed tick.</summary>
     public double LastTickMigrationExecuteMs;
 
@@ -505,7 +508,7 @@ internal sealed unsafe class ArchetypeClusterState
 
     /// <summary>
     /// Per-archetype <see cref="DirtyBitmapRing"/> consumed by <c>SpatialInterestSystem</c> for delta queries and the 64-tick staleness fallback
-    /// (issue #230 Phase 3). Populated at <see cref="InitializeSpatial"/>; archived at the tick fence. Relocated from <see cref="ClusterSpatialSlot.DirtyRing"/>
+    /// (issue #230 Phase 3). Populated at <see cref="InitializeSpatial"/>; archived at the tick fence. Relocated from <c>ClusterSpatialSlot.DirtyRing</c>
     /// to decouple the ring from the legacy per-entity tree that's being removed in Phase 3 — the ring's lifecycle belongs to the archetype's cluster state,
     /// not to any particular spatial index implementation.
     /// </summary>
@@ -2376,7 +2379,7 @@ internal sealed unsafe class ArchetypeClusterState
     /// <b>Slot-level work.</b> <see cref="ClearSlotMetadata"/> returns the occupancy bitmap as it was BEFORE the clear, so the method can tell (a) whether the
     /// slot was actually occupied (no-op release on a free slot is silently absorbed — no cell-count decrement, no drain handling) and (b) whether clearing
     /// this single bit transitioned the cluster from non-empty to empty in one observation. Cell-entity bookkeeping
-    /// (<see cref="DecrementCellEntityCountOnRelease"/>) fires only on the genuinely-was-occupied path to keep <see cref="CellDescriptor.EntityCount"/>
+    /// (<see cref="DecrementCellEntityCountOnRelease"/>) fires only on the genuinely-was-occupied path to keep <see cref="CellState.EntityCount"/>
     /// consistent with the occupancy bitmaps under repeated-release idempotence.
     /// </para>
     /// <para>
@@ -2405,13 +2408,13 @@ internal sealed unsafe class ArchetypeClusterState
     /// <param name="accessor">Chunk accessor bound to the <see cref="PersistentStore"/> segment — provides the in-memory address of the cluster chunk for
     /// direct metadata mutation.</param>
     /// <param name="clusterChunkId">Chunk id of the cluster containing the slot to release.</param>
-    /// <param name="slotIndex">Zero-based index of the slot within the cluster (0..<see cref="ClusterLayout.ClusterSize"/>-1). The slot's occupancy bit,
+    /// <param name="slotIndex">Zero-based index of the slot within the cluster (0..<see cref="ArchetypeClusterInfo.ClusterSize"/>-1). The slot's occupancy bit,
     /// enabled bits, and entity key are all cleared.</param>
     /// <param name="changeSet">Change set threaded through for WAL / dirty-page bookkeeping on the persistent segment writes performed
     /// by <see cref="ClearSlotMetadata"/>.</param>
     /// <param name="grid">
     /// Optional spatial grid. When non-null <em>and</em> <see cref="ClusterCellMap"/> is populated for the released cluster, this method maintains the cell
-    /// descriptor: <see cref="CellDescriptor.EntityCount"/> always decrements (only on genuinely-was-occupied releases), and a going-empty cluster is removed
+    /// descriptor: <see cref="CellState.EntityCount"/> always decrements (only on genuinely-was-occupied releases), and a going-empty cluster is removed
     /// from its cell's pool segment at finalise time. Pass <c>null</c> when the archetype has no spatial slot — the cell bookkeeping is then a no-op.
     /// </param>
     /// <param name="deferFinalize">
@@ -2804,6 +2807,8 @@ internal sealed unsafe class ArchetypeClusterState
     /// <param name="grid">The engine's configured spatial grid. Used to size the per-archetype <see cref="CellClusterPool"/> so its per-cell arrays cover
     /// every valid cell key. Under Q10 the pool is per-archetype — each cluster-spatial archetype sharing the grid gets its own instance sized to the
     /// grid's cell count.</param>
+    /// <param name="archetypeId">Numeric id of this archetype, stored into <see cref="ArchetypeId"/>; keys this archetype's per-cell cluster claims within the
+    /// shared grid so scans only walk its own clusters. Defaults to 0.</param>
     public void InitializeSpatial(ComponentTable[] slotToTable, SpatialGrid grid, int archetypeId = 0)
     {
         ArchetypeId = archetypeId;

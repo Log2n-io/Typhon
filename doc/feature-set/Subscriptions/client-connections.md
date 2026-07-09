@@ -1,3 +1,9 @@
+---
+uid: feature-subscriptions-client-connections
+title: 'Client Connections & Lifecycle'
+description: 'Every accepted socket becomes a stable ClientContext handle, with disconnect cleanup handled automatically.'
+---
+
 # Client Connections & Lifecycle
 > Every accepted socket becomes a stable `ClientContext` handle, with disconnect cleanup handled automatically.
 
@@ -66,10 +72,10 @@ runtime.SetSubscriptions(client, worldStatePub, inventoryPub);
 
 ## 🧪 Tests
 
-- [SubscriptionIntegrationTests](../../../test/Typhon.Engine.Tests/Runtime/Subscriptions/SubscriptionIntegrationTests.cs)
+- [SubscriptionIntegrationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/SubscriptionIntegrationTests.cs)
   — `Client_Connects_And_ReceivesTickDelta_WithSpawnedEntity`: accept → `ClientContext` → subscribe → receive,
   end to end over a real socket
-- [SubscriptionStressTests](../../../test/Typhon.Engine.Tests/Runtime/Subscriptions/SubscriptionStressTests.cs) —
+- [SubscriptionStressTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/SubscriptionStressTests.cs) —
   `RapidConnectDisconnect_NoServerCrash`: concurrent connect/disconnect churn exercises the idempotent cleanup path
 
 ## 🔗 Related

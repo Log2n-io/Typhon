@@ -319,7 +319,7 @@ internal sealed class ProfilerConsumerThread : HighResolutionTimerServiceBase
     /// <remarks>
     /// <b>Why a loop:</b> a single <see cref="DrainAndFanOut"/> pass drains as many records as fit in <c>_mergeScratch</c> (typ. 500 KB). On
     /// shutdown from a bursty workload (e.g., checkpoint-after-spawn) a single slot can hold more than that — the tail stays in the ring and is
-    /// lost when <see cref="Dispose"/> tears the slots down. Looping until every producer ring reports <c>IsEmpty</c> (bounded by a large safety
+    /// lost when <c>Dispose</c> tears the slots down. Looping until every producer ring reports <c>IsEmpty</c> (bounded by a large safety
     /// cap to prevent runaway if a producer somehow writes after <c>GcTracingHost.Dispose</c> + <c>StopTimer</c>) captures the full tail.
     /// </remarks>
     internal void FinalDrainAndComplete()

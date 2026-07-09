@@ -9,7 +9,7 @@ namespace Typhon.Profiler;
 /// <summary>
 /// <see cref="ICacheChunkSink"/> implementation for live sessions: writes LZ4-compressed chunk bytes back-to-back to a
 /// caller-provided <see cref="Stream"/> (typically a temp file). No headers, no section table, no trailer — chunks only.
-/// The owning <see cref="AttachSessionRuntime"/> keeps the manifest in memory and serves chunks via offset+length lookups.
+/// The owning <c>AttachSessionRuntime</c> keeps the manifest in memory and serves chunks via offset+length lookups.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -30,6 +30,11 @@ public sealed class AppendOnlyChunkSink : ICacheChunkSink
     private byte[] _lz4Buffer;
     private bool _disposed;
 
+    /// <summary>Wrap a writable stream as a chunk sink.</summary>
+    /// <param name="stream">Destination for compressed chunk bytes. Must be writable.</param>
+    /// <param name="ownsStream">When <c>true</c>, <see cref="Dispose"/> also disposes <paramref name="stream"/>.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="stream"/> is <c>null</c>.</exception>
+    /// <exception cref="ArgumentException"><paramref name="stream"/> is not writable.</exception>
     public AppendOnlyChunkSink(Stream stream, bool ownsStream)
     {
         ArgumentNullException.ThrowIfNull(stream);
@@ -42,11 +47,17 @@ public sealed class AppendOnlyChunkSink : ICacheChunkSink
         _lz4Buffer = new byte[LZ4Codec.MaximumOutputSize(TraceFileCacheConstants.ByteCap)];
     }
 
+    /// <inheritdoc/>
+    /// <remarks>Always <c>false</c> — live mode keeps trailer metadata in memory and never seals a trailer.</remarks>
     public bool SupportsTrailer => false;
 
     /// <summary>The current write position in the underlying stream — equals total compressed bytes appended so far.</summary>
     public long Position => _stream.Position;
 
+    /// <inheritdoc/>
+    /// <remarks>Flushes the stream after each append so a separate reader (the live chunk endpoint) can see the bytes immediately.</remarks>
+    /// <exception cref="ArgumentException"><paramref name="uncompressedRecords"/> is empty.</exception>
+    /// <exception cref="InvalidOperationException">LZ4 compression produced a non-positive length.</exception>
     public (long CacheOffset, uint CompressedLength, uint UncompressedLength) AppendChunk(ReadOnlySpan<byte> uncompressedRecords)
     {
         if (uncompressedRecords.IsEmpty)
@@ -76,6 +87,9 @@ public sealed class AppendOnlyChunkSink : ICacheChunkSink
         return (offset, (uint)compressedLength, (uint)uncompressedRecords.Length);
     }
 
+    /// <inheritdoc/>
+    /// <remarks>Not supported by the live sink — always throws <see cref="NotSupportedException"/>. Gate on <see cref="SupportsTrailer"/>.</remarks>
+    /// <exception cref="NotSupportedException">Always — live mode keeps trailer metadata in memory.</exception>
     public void WriteTrailer(
         IReadOnlyList<TickSummary> tickSummaries,
         in GlobalMetricsFixed globalMetrics,
@@ -91,6 +105,7 @@ public sealed class AppendOnlyChunkSink : ICacheChunkSink
         IReadOnlyList<SystemArchetypeTouchSummary> systemArchetypeTouches) =>
         throw new NotSupportedException("AppendOnlyChunkSink does not support a trailer (live mode keeps metadata in memory).");
 
+    /// <summary>Flushes the stream a final time and, if this sink owns it, disposes it. Idempotent; never throws.</summary>
     public void Dispose()
     {
         if (_disposed)

@@ -12,8 +12,11 @@ namespace Typhon.Profiler;
 /// </summary>
 public readonly struct ThreadInfoEventData
 {
+    /// <summary>Producer thread slot (0-255) this identity record claims.</summary>
     public byte ThreadSlot { get; }
+    /// <summary>Emit timestamp in <c>Stopwatch.GetTimestamp()</c> ticks (slot-claim time).</summary>
     public long Timestamp { get; }
+    /// <summary>.NET managed thread id of the producer thread.</summary>
     public int ManagedThreadId { get; }
 
     /// <summary>UTF-8-encoded name bytes, sliced from the original record. Caller converts to string on demand.</summary>
@@ -22,6 +25,7 @@ public readonly struct ThreadInfoEventData
     /// <summary>Producer-thread category — drives the viewer's filter tree's Main/Workers/Other split.</summary>
     public ThreadKind Kind { get; }
 
+    /// <summary>Constructs the decoded thread-info record from its wire fields.</summary>
     public ThreadInfoEventData(byte threadSlot, long timestamp, int managedThreadId, ReadOnlyMemory<byte> nameUtf8, ThreadKind kind)
     {
         ThreadSlot = threadSlot;
@@ -49,6 +53,7 @@ public static class ThreadInfoEventCodec
 {
     private const int PrefixSize = TraceRecordHeader.CommonHeaderSize + 4 + 2;
 
+    /// <summary>Total wire size in bytes of a ThreadInfo record whose name is <paramref name="nameByteCount"/> UTF-8 bytes.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static int ComputeSize(int nameByteCount) => PrefixSize + nameByteCount + 1;
 

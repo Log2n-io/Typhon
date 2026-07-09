@@ -1,3 +1,9 @@
+---
+uid: feature-runtime-index
+title: 'Runtime'
+description: 'The Runtime is Typhon''s game-server execution layer: a DAG-scheduled, multi-threaded tick loop that dispatches developer-defined systems against the ECS…'
+---
+
 # Runtime
 > The Runtime is Typhon's game-server execution layer: a DAG-scheduled, multi-threaded tick loop that dispatches developer-defined systems against the ECS data layer and automates their UoW/Transaction lifecycle. Systems declare phase and read/write access so the scheduler derives safe parallel execution automatically, scope dispatch to spatial simulation tiers, and skip entirely when nothing relevant changed. An overload detector and always-on per-tick telemetry let the server degrade gracefully under a load spike — throttling systems, slowing the tick rate, or signalling game code to shed load — instead of falling over.
 

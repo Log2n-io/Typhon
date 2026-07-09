@@ -1,3 +1,9 @@
+---
+uid: feature-runtime-declarative-system-scheduling
+title: 'Declarative System Scheduling (Track → DAG → Phase, Auto-DAG)'
+description: 'Systems declare read/write access and a phase; the scheduler derives the DAG and rejects unsafe conflicts at Build().'
+---
+
 # Declarative System Scheduling (Track → DAG → Phase, Auto-DAG)
 > Systems declare read/write access and a phase; the scheduler derives the DAG and rejects unsafe conflicts at Build().
 
@@ -71,9 +77,9 @@ protected override void Configure(SystemBuilder b) => b
 
 ## 🧪 Tests
 
-- [AccessDagDerivationTests](../../../test/Typhon.Engine.Tests/Runtime/AccessDagDerivationTests.cs) — W×W same-phase throws, `.After()`/`.Before()` disambiguation, `ReadsFresh`/`ReadsSnapshot` edge derivation, `ReadsSnapshot` on SingleVersion rejected
-- [SystemBuilderFluentTests](../../../test/Typhon.Engine.Tests/Runtime/SystemBuilderFluentTests.cs) — `Reads`/`Writes`/`ReadsFresh`/`ReadsSnapshot` declaration API, dedup, `Before`/`After` cycle detection
-- [SystemAccessValidatorTests](../../../test/Typhon.Engine.Tests/Runtime/SystemAccessValidatorTests.cs) — DEBUG-only assert that `EntityRef.Write<T>()` matches the system's declared writes
+- [AccessDagDerivationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/AccessDagDerivationTests.cs) — W×W same-phase throws, `.After()`/`.Before()` disambiguation, `ReadsFresh`/`ReadsSnapshot` edge derivation, `ReadsSnapshot` on SingleVersion rejected
+- [SystemBuilderFluentTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/SystemBuilderFluentTests.cs) — `Reads`/`Writes`/`ReadsFresh`/`ReadsSnapshot` declaration API, dedup, `Before`/`After` cycle detection
+- [SystemAccessValidatorTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/SystemAccessValidatorTests.cs) — DEBUG-only assert that `EntityRef.Write<T>()` matches the system's declared writes
 
 ## 🔗 Related
 - Parent feature: [Runtime](./README.md)

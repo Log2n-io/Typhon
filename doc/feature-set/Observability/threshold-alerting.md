@@ -1,3 +1,9 @@
+---
+uid: feature-observability-threshold-alerting
+title: 'Threshold-Based Resource Alerting'
+description: 'Warning/Critical alerts on resource health transitions, with automatic root-cause tracing to the upstream bottleneck.'
+---
+
 # Threshold-Based Resource Alerting
 > Warning/Critical alerts on resource health transitions, with automatic root-cause tracing to the upstream bottleneck.
 
@@ -70,7 +76,7 @@ ResourceAlert alert = generator.GenerateAlert(snapshot, "Root/DataEngine/Transac
   `SnapshotInterval`, not real time.
 
 ## 🧪 Tests
-- [ObservabilityBridgeTests](../../../test/Typhon.Engine.Tests/Observability/Bridge/ObservabilityBridgeTests.cs) — `ResourceAlertGenerator` Warning/Critical threshold crossings plus `FindRootCause` attribution across the wait-dependency graph, and `ResourceMetricsService` escalation-only alert firing (no re-alert on recovery)
+- [ObservabilityBridgeTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Observability/Bridge/ObservabilityBridgeTests.cs) — `ResourceAlertGenerator` Warning/Critical threshold crossings plus `FindRootCause` attribution across the wait-dependency graph, and `ResourceMetricsService` escalation-only alert firing (no re-alert on recovery)
 
 ## 🔗 Related
 - Related feature: [Resource-Aware Health Checks](./health-checks.md)

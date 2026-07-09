@@ -1,3 +1,9 @@
+---
+uid: feature-runtime-system-types-query-system
+title: 'QuerySystem'
+description: 'Reactive per-entity system that auto-skips when nothing relevant changed, with optional automatic multi-core chunking.'
+---
+
 # QuerySystem
 > Reactive per-entity system that auto-skips when nothing relevant changed, with optional automatic multi-core chunking.
 
@@ -100,9 +106,9 @@ dag.QuerySystem("GameRules", ctx => { foreach (var id in ctx.Entities) { /* ... 
 
 ## 🧪 Tests
 
-- [ChangeFilterTests](../../../../test/Typhon.Engine.Tests/Runtime/ChangeFilterTests.cs) — reactive skip when nothing dirty, OR logic across filtered types, `ctx.Entities == dirtySet ∪ Added`
-- [ScheduleValidationTests](../../../../test/Typhon.Engine.Tests/Runtime/ScheduleValidationTests.cs) — `Build()` rejects missing `Input`, `Parallel()`/`ChangeFilter()` without `Input`
-- [ParallelQueryTests](../../../../test/Typhon.Engine.Tests/Runtime/ParallelQueryTests.cs) — `b.Parallel()` chunk dispatch, `ctx.Accessor` vs. `WritesVersioned()` → `ctx.Transaction`
+- [ChangeFilterTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/ChangeFilterTests.cs) — reactive skip when nothing dirty, OR logic across filtered types, `ctx.Entities == dirtySet ∪ Added`
+- [ScheduleValidationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/ScheduleValidationTests.cs) — `Build()` rejects missing `Input`, `Parallel()`/`ChangeFilter()` without `Input`
+- [ParallelQueryTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/ParallelQueryTests.cs) — `b.Parallel()` chunk dispatch, `ctx.Accessor` vs. `WritesVersioned()` → `ctx.Transaction`
 
 ## 🔗 Related
 

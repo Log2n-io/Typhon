@@ -41,7 +41,7 @@ internal abstract partial class BTree<TKey, TStore>
         internal OlcLatch GetLatch(ref ChunkAccessor<TStore> accessor) => new OlcLatch(ref _storage.GetOlcVersionRef(ChunkId, ref accessor));
 
         /// <summary>
-        /// Pre-dirties the page containing this node so that <see cref="ChunkAccessor<TStore>.MarkSlotDirty"/>
+        /// Pre-dirties the page containing this node so that <see cref="ChunkAccessor{TStore}.MarkSlotDirty"/>
         /// increments ActiveChunkWriters BEFORE the OLC TryWriteLock modifies the page.
         /// This ensures checkpoint skips pages with in-flight OLC mutations.
         /// Must be called before every TryWriteLock/SpinWriteLock on a write path.
@@ -333,7 +333,7 @@ internal abstract partial class BTree<TKey, TStore>
 
         /// <summary>
         /// Handles a promoted key from a child split during insert. Either inserts the promoted key at this internal node, spills to a sibling, or splits
-        /// this node (returning a new promoted key). Called iteratively during upward propagation from <see cref="BTree{TKey}.InsertIterative"/>.
+        /// this node (returning a new promoted key). Called iteratively during upward propagation from <see cref="BTree{TKey,TStore}.InsertIterative"/>.
         /// </summary>
         internal KeyValueItem? HandlePromotedInsert(int childIndex, KeyValueItem middle, ref NodeRelatives relatives, ref ChunkAccessor<TStore> accessor, ref ChunkAccessor<TStore> sibAccessor)
         {
@@ -572,7 +572,7 @@ internal abstract partial class BTree<TKey, TStore>
         
         /// <summary>
         /// Handles a child merge during remove. Removes the separator key from this internal node, then borrows from a sibling or merges with a sibling if
-        /// below half-full. Called iteratively during upward propagation from <see cref="BTree{TKey}.RemoveIterative"/>.
+        /// below half-full. Called iteratively during upward propagation from <see cref="BTree{TKey,TStore}.RemoveIterative"/>.
         /// </summary>
         internal bool HandleChildMerge(int childIndex, ref NodeRelatives relatives, ref ChunkAccessor<TStore> accessor, ref ChunkAccessor<TStore> sibAccessor)
         {

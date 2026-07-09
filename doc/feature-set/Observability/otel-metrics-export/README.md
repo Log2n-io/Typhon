@@ -1,3 +1,9 @@
+---
+uid: feature-observability-otel-metrics-export-index
+title: 'OpenTelemetry Metrics Export'
+description: 'Observable-pattern OTel Meter exporters that snapshot internal state and expose it as gauges/counters for Prometheus/OTLP scraping.'
+---
+
 # OpenTelemetry Metrics Export
 > Observable-pattern OTel `Meter` exporters that snapshot internal state and expose it as gauges/counters for Prometheus/OTLP scraping.
 
@@ -45,7 +51,7 @@ attached pays nothing beyond — for the Resource Graph bridge — the backgroun
   operation volume — these are gauges over current state, not per-event counters.
 
 ## 🧪 Tests
-- [ObservabilityBridgeTests](../../../../test/Typhon.Engine.Tests/Observability/Bridge/ObservabilityBridgeTests.cs) — exercises the shared observable-callback pattern (snapshot-backed gauges, per-kind opt-out, `MeterListener` instrument registration) via the Resource Graph bridge; the ECS exporter sub-feature has no dedicated coverage yet
+- [ObservabilityBridgeTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Observability/Bridge/ObservabilityBridgeTests.cs) — exercises the shared observable-callback pattern (snapshot-backed gauges, per-kind opt-out, `MeterListener` instrument registration) via the Resource Graph bridge; the ECS exporter sub-feature has no dedicated coverage yet
 
 ## 🔗 Related
 

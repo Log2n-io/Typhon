@@ -1,3 +1,9 @@
+---
+uid: feature-querying-view-factory-pooling
+title: 'ViewFactory — Parameterized Queries & View Pooling'
+description: 'Reusable query templates with a Rent/Return view pool — planned, to remove per-session view setup cost.'
+---
+
 # ViewFactory — Parameterized Queries & View Pooling
 > Reusable query templates with a Rent/Return view pool — planned, to remove per-session view setup cost.
 

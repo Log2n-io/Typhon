@@ -1,0 +1,557 @@
+- name: Overview
+  href: README.md
+- name: Durability
+  href: Durability/README.md
+  items:
+    - name: BulkLoad Write Path
+      href: Durability/bulk-load.md
+    - name: Commit Pipeline (append-before-publish)
+      href: Durability/commit-pipeline.md
+    - name: 'Formal Proofs & Invariant Rules'
+      href: Durability/correctness-proofs.md
+    - name: 'Durability Health & Introspection'
+      href: Durability/durability-introspection.md
+    - name: 'Page Checksums & Seqlock Snapshots'
+      href: Durability/page-checksums-seqlock.md
+    - name: Point-in-Time Incremental Backup
+      href: Durability/pit-backup.md
+    - name: Write-Ahead Log (WAL v2 logical records)
+      href: Durability/wal-v2.md
+    - name: Checkpoint v2 (SnapshotStore pipeline)
+      href: Durability/checkpoint-v2/README.md
+      items:
+        - name: A/B Protected-Page Slot-Pairing
+          href: Durability/checkpoint-v2/protected-page-pairing.md
+    - name: Crash Recovery (RecoveryDriver)
+      href: Durability/crash-recovery/README.md
+      items:
+        - name: 'Rebuild of Derived Structures (scrub + rebuild, no FPI)'
+          href: Durability/crash-recovery/rebuild-derived-structures.md
+    - name: Durability Modes
+      href: Durability/durability-modes/README.md
+      items:
+        - name: Committed Durability Discipline
+          href: Durability/durability-modes/committed-discipline.md
+- name: Ecs
+  href: Ecs/README.md
+  items:
+    - name: Component Collections
+      href: Ecs/component-collections.md
+    - name: 'Entity & Archetype Model'
+      href: Ecs/entity-archetype-model.md
+    - name: Entity Clusters (Batched SoA Storage)
+      href: Ecs/entity-clusters.md
+    - name: Entity Relationships
+      href: Ecs/entity-relationships.md
+    - name: Query System (EcsQuery)
+      href: Ecs/query-system.md
+    - name: Reactive Views (EcsView)
+      href: Ecs/reactive-views.md
+    - name: 'Schema Versioning & Migration'
+      href: Ecs/schema-versioning-migration.md
+    - name: 'Entity Lifecycle & CRUD API'
+      href: Ecs/entity-lifecycle-crud/README.md
+      items:
+        - name: 'Batch & SoA Spawn'
+          href: Ecs/entity-lifecycle-crud/batch-soa-spawn.md
+        - name: Enable/Disable Components
+          href: Ecs/entity-lifecycle-crud/enable-disable-components.md
+        - name: Generated Multi-Component Accessors
+          href: Ecs/entity-lifecycle-crud/generated-multi-component-accessors.md
+    - name: Storage Modes
+      href: Ecs/storage-modes/README.md
+      items:
+        - name: Committed Durability Discipline
+          href: Ecs/storage-modes/storage-mode-committed.md
+        - name: SingleVersion (Tick-Fence Durability)
+          href: Ecs/storage-modes/storage-mode-singleversion.md
+        - name: Transient
+          href: Ecs/storage-modes/storage-mode-transient.md
+        - name: Versioned
+          href: Ecs/storage-modes/storage-mode-versioned.md
+- name: Errors
+  href: Errors/README.md
+  items:
+    - name: Durability (WAL / BulkLoad / Commit) Exceptions
+      href: Errors/durability-exceptions.md
+    - name: Error Code Classification
+      href: Errors/error-codes.md
+    - name: 'TyphonException Hierarchy & Catalog'
+      href: Errors/exception-hierarchy.md
+    - name: Resource Exhaustion Handling
+      href: Errors/resource-exhaustion-handling.md
+    - name: 'Result<TValue,TStatus> Hot-Path Result Type'
+      href: Errors/result-type.md
+    - name: Runtime/Scheduler Declared-Access Validation
+      href: Errors/runtime-access-validation.md
+    - name: 'Schema & Constraint Violation Exceptions'
+      href: Errors/schema-constraint-exceptions.md
+    - name: 'Storage & Corruption Exceptions'
+      href: Errors/storage-corruption-exceptions.md
+    - name: 'Timeout Exceptions & Deadline Propagation'
+      href: Errors/timeout-exceptions-deadlines.md
+    - name: IsTransient Retry Hint
+      href: Errors/transience-hint.md
+- name: Foundation
+  href: Foundation/README.md
+  items:
+    - name: 'Concurrent Bitmaps & Collections'
+      href: Foundation/concurrent-bitmaps-collections.md
+    - name: Hardware-Accelerated CRC32C Checksums
+      href: Foundation/crc32c-checksums.md
+    - name: 'Deadline & Timeout Propagation'
+      href: Foundation/deadline-timeout-propagation.md
+    - name: Epoch-Based Resource Protection
+      href: Foundation/epoch-based-resource-protection.md
+    - name: Memory Allocators
+      href: Foundation/memory-allocators.md
+    - name: Page-Backed Linear Hash Map
+      href: Foundation/paged-linear-hash-map.md
+    - name: 'Reader-Writer & Resource Lifecycle Locks'
+      href: Foundation/access-control-lock-family/README.md
+      items:
+        - name: AccessControlSmall (compact RW lock)
+          href: Foundation/access-control-lock-family/access-control-small.md
+        - name: AccessControl (full-featured RW lock)
+          href: Foundation/access-control-lock-family/access-control.md
+        - name: ResourceAccessControl (3-mode lifecycle lock)
+          href: Foundation/access-control-lock-family/resource-access-control.md
+    - name: High-Resolution Timers
+      href: Foundation/high-resolution-timers/README.md
+      items:
+        - name: Dedicated Timer (HighResolutionTimerService)
+          href: Foundation/high-resolution-timers/dedicated-timer.md
+        - name: Shared Timer (HighResolutionSharedTimerService)
+          href: Foundation/high-resolution-timers/shared-timer.md
+    - name: In-Memory Hash Maps
+      href: Foundation/in-memory-hash-maps/README.md
+      items:
+        - name: 'ConcurrentHashMap<TKey[, TValue]>'
+          href: Foundation/in-memory-hash-maps/concurrent-hash-map.md
+        - name: 'Non-Concurrent HashMap<TKey[, TValue]>'
+          href: Foundation/in-memory-hash-maps/non-concurrent-hash-map.md
+- name: Hosting
+  href: Hosting/README.md
+  items:
+    - name: Clean-Slate Database Deletion
+      href: Hosting/ensure-file-deleted.md
+    - name: Profiler Launch Override Hook
+      href: Hosting/profiler-launch-override-hook.md
+    - name: Pluggable WAL I/O Backend (IWalFileIO seam)
+      href: Hosting/wal-io-injection-seam.md
+    - name: DI Engine Bootstrap Chain
+      href: Hosting/di-bootstrap-chain/README.md
+      items:
+        - name: Singleton/Scoped/Transient Lifetime Variants
+          href: Hosting/di-bootstrap-chain/lifetime-variants.md
+    - name: Engine Options Configuration Surface
+      href: Hosting/engine-options-configuration/README.md
+      items:
+        - name: Options Validation Hooks
+          href: Hosting/engine-options-configuration/options-validation-stubs.md
+- name: Indexing
+  href: Indexing/README.md
+  items:
+    - name: Batched Index Maintenance for Bulk Commits
+      href: Indexing/batched-index-maintenance.md
+    - name: 'Index Diagnostics & Consistency Checking'
+      href: Indexing/btree-diagnostics.md
+    - name: Specialized B+Tree Key-Size Variants
+      href: Indexing/btree-key-variants.md
+    - name: B+Tree Node Layout and Capacity Tuning
+      href: Indexing/btree-node-layout-tuning.md
+    - name: Compound Move/MoveValue (field-update fast path)
+      href: Indexing/compound-move-operations.md
+    - name: Index Handle Resolution (IndexRef)
+      href: Indexing/index-ref-resolution.md
+    - name: Lookup and Range-Scan Operations
+      href: Indexing/lookup-and-range-scan.md
+    - name: Optimistic Lock Coupling (per-node concurrency)
+      href: Indexing/olc-concurrency.md
+    - name: TAIL Retention / Garbage Collection
+      href: Indexing/tail-garbage-collection.md
+    - name: Temporal (Point-in-Time) Index Query
+      href: Indexing/temporal-index-query.md
+    - name: Transaction-Local Index Overlay (Read-Your-Own-Writes)
+      href: Indexing/transaction-local-index-overlay.md
+    - name: Versioned (HEAD/TAIL) Secondary Indexes for MVCC
+      href: Indexing/versioned-secondary-indexes.md
+    - name: Secondary Index Storage Modes
+      href: Indexing/secondary-index-storage-modes/README.md
+      items:
+        - name: Multi-Value Secondary Index (AllowMultiple)
+          href: Indexing/secondary-index-storage-modes/multi-value-secondary-index.md
+        - name: Unique (Single-Value) Secondary Index
+          href: Indexing/secondary-index-storage-modes/unique-secondary-index.md
+- name: Observability
+  href: Observability/README.md
+  items:
+    - name: Distributed Tracing (Activity API)
+      href: Observability/distributed-tracing.md
+    - name: Resource-Aware Health Checks
+      href: Observability/health-checks.md
+    - name: Per-Domain Named Metrics Catalog
+      href: Observability/per-domain-metrics-catalog.md
+    - name: Runtime-Gated Correctness Checks (Strict Mode)
+      href: Observability/strict-mode-checks.md
+    - name: 'Telemetry Configuration & Gating'
+      href: Observability/telemetry-config-gating.md
+    - name: Threshold-Based Resource Alerting
+      href: Observability/threshold-alerting.md
+    - name: OpenTelemetry Metrics Export
+      href: Observability/otel-metrics-export/README.md
+      items:
+        - name: ECS Metrics Exporter
+          href: Observability/otel-metrics-export/ecs-metrics-exporter.md
+        - name: Resource Graph Metrics Bridge
+          href: Observability/otel-metrics-export/resource-graph-metrics-bridge.md
+- name: Profiler
+  href: Profiler/README.md
+  items:
+    - name: Built-in Engine Instrumentation Catalog
+      href: Profiler/builtin-subsystem-instrumentation.md
+    - name: Integrated CPU Sampling (Statistical Call Tree)
+      href: Profiler/cpu-sampling-calltree.md
+    - name: Custom Application-Defined Spans
+      href: Profiler/custom-named-spans.md
+    - name: Domain-Specific Tracing Instrumentation Expansion
+      href: Profiler/domain-tracing-expansion.md
+    - name: Per-Tick Gauge/Metric Snapshots
+      href: Profiler/gauge-snapshots.md
+    - name: GC Event Tracing
+      href: Profiler/gc-event-tracing.md
+    - name: Lock-Contention Forensics (Deep Diagnostics)
+      href: Profiler/lock-contention-diagnostics.md
+    - name: Off-CPU Thread Scheduling Capture (Windows)
+      href: Profiler/offcpu-thread-scheduling.md
+    - name: 'Configuration & Performance Tuning'
+      href: Profiler/profiler-configuration-tuning.md
+    - name: 'Profiler Session Lifecycle & Zero-Code Bootstrap'
+      href: Profiler/profiler-lifecycle-bootstrap.md
+    - name: 'Query Definition & Execution Export'
+      href: Profiler/query-definition-export.md
+    - name: Span Source Attribution (Go-to-Source)
+      href: Profiler/source-attribution.md
+    - name: Typed-Event Capture Pipeline
+      href: Profiler/typed-event-capture-pipeline.md
+    - name: Unmanaged Memory Allocation Tracing
+      href: Profiler/unmanaged-allocation-tracing.md
+    - name: Trace Export
+      href: Profiler/trace-export/README.md
+      items:
+        - name: File-Based Trace Export (.typhon-trace)
+          href: Profiler/trace-export/file-trace-export.md
+        - name: Live TCP Streaming Export
+          href: Profiler/trace-export/live-tcp-trace-export.md
+- name: Querying
+  href: Querying/README.md
+  items:
+    - name: 'Execution Planning & Pipeline Execution'
+      href: Querying/execution-planning-pipeline.md
+    - name: 'Result Ordering & Pagination'
+      href: Querying/ordering-pagination.md
+    - name: 'Persistent Views — Incremental Refresh & Delta Tracking'
+      href: Querying/persistent-views.md
+    - name: Spatial Query Predicates
+      href: Querying/spatial-predicates.md
+    - name: Statistics Infrastructure (HLL / MCV / Histogram)
+      href: Querying/statistics-infrastructure.md
+    - name: 'Temporal Queries (Point-in-Time Read & Revision History)'
+      href: Querying/temporal-queries.md
+    - name: 'ViewFactory — Parameterized Queries & View Pooling'
+      href: Querying/view-factory-pooling.md
+    - name: 'Fluent Query API & Predicate Parsing'
+      href: Querying/fluent-query-api/README.md
+      items:
+        - name: Foreign-Key Navigation Joins (L4)
+          href: Querying/fluent-query-api/fk-navigation-joins.md
+        - name: OR Disjunction (DNF Predicates)
+          href: Querying/fluent-query-api/or-disjunction.md
+        - name: Opaque Post-Filter Predicates (Where)
+          href: Querying/fluent-query-api/where-opaque-postfilter.md
+        - name: Indexed Field Predicates (WhereField)
+          href: Querying/fluent-query-api/wherefield-indexed-predicate.md
+- name: Resources
+  href: Resources/README.md
+  items:
+    - name: Debug Properties Drill-Down (IDebugPropertiesProvider)
+      href: Resources/debug-properties-drilldown.md
+    - name: 'Exhaustion Policy & ResourceExhaustedException'
+      href: Resources/exhaustion-policy-handling.md
+    - name: Metric Reporting (IMetricSource / IMetricWriter)
+      href: Resources/metric-reporting.md
+    - name: Observability Bridge (Resources to OTel/Health/Alerts)
+      href: Resources/observability-bridge-resources.md
+    - name: Owner-Aggregates Granularity Strategy
+      href: Resources/owner-aggregates-granularity.md
+    - name: Resource Budget Configuration (ResourceOptions)
+      href: Resources/resource-budgets-options.md
+    - name: Resource Tree Mutation Notifications
+      href: Resources/resource-tree-mutation-notifications.md
+    - name: Resource Tree Registry
+      href: Resources/resource-tree-registry.md
+    - name: 'DI Registration & Wiring'
+      href: Resources/resources-di-wiring.md
+    - name: 'Snapshot & Query API'
+      href: Resources/snapshot-query-api/README.md
+      items:
+        - name: Root-Cause Cascade Analysis (FindRootCause)
+          href: Resources/snapshot-query-api/root-cause-cascade-analysis.md
+- name: Revision
+  href: Revision/README.md
+  items:
+    - name: 'Crash-Recovery Chain Scrub & Orphan Sweep'
+      href: Revision/crash-recovery-chain-scrub.md
+    - name: MVCC Snapshot Visibility
+      href: Revision/mvcc-snapshot-visibility.md
+    - name: Chain Walk Correctness Under Compaction
+      href: Revision/mvcc-visibility-walk.md
+    - name: Write-Conflict Baseline Tracking
+      href: Revision/optimistic-conflict-baseline.md
+    - name: 'Revision Append & Chain Growth'
+      href: Revision/revision-append-write-path.md
+    - name: Revision Chain Storage (on-disk layout)
+      href: Revision/revision-chain-storage.md
+    - name: 'Revision Garbage Collection & Compaction'
+      href: Revision/revision-gc-compaction.md
+- name: Runtime
+  href: Runtime/README.md
+  items:
+    - name: Data-Driven Timers / Scheduled Entities
+      href: Runtime/data-driven-timers.md
+    - name: 'Declarative System Scheduling (Track → DAG → Phase, Auto-DAG)'
+      href: Runtime/declarative-system-scheduling.md
+    - name: Overload Management
+      href: Runtime/overload-management.md
+    - name: Parallel Entity Processing (QuerySystem.Parallel)
+      href: Runtime/parallel-entity-processing.md
+    - name: 'Reactive Dispatch: Change Filters & Run Conditions'
+      href: Runtime/reactive-dispatch-change-filters.md
+    - name: Side-Transactions for Immediate Durability
+      href: Runtime/side-transactions.md
+    - name: 'Telemetry & Runtime Inspection'
+      href: Runtime/telemetry-runtime-inspection.md
+    - name: Typed Event Queues
+      href: Runtime/typed-event-queues.md
+    - name: Declarative Scheduling — Auto-DAG (RFC 07)
+      href: Runtime/declarative-scheduling/README.md
+      items:
+        - name: 'Access Declarations & Build-Time Conflict Detection'
+          href: Runtime/declarative-scheduling/access-conflict-detection.md
+        - name: Track → DAG → Phase Partitioning
+          href: Runtime/declarative-scheduling/track-dag-phase-partitioning.md
+    - name: 'Spatial Tiers & Adaptive Dispatch'
+      href: Runtime/spatial-tiers-adaptive-dispatch/README.md
+      items:
+        - name: Checkerboard (Red/Black) Dispatch
+          href: Runtime/spatial-tiers-adaptive-dispatch/checkerboard-dispatch.md
+        - name: Cluster Dormancy (Sleep/Wake)
+          href: Runtime/spatial-tiers-adaptive-dispatch/cluster-dormancy.md
+        - name: 'Tier-Filtered & Amortized Dispatch'
+          href: Runtime/spatial-tiers-adaptive-dispatch/tier-filtered-amortized-dispatch.md
+    - name: System Types
+      href: Runtime/system-types/README.md
+      items:
+        - name: CallbackSystem
+          href: Runtime/system-types/callback-system.md
+        - name: ChunkedCallbackSystem — Chunk-Parallel Non-Entity Work
+          href: Runtime/system-types/chunked-callback-system.md
+        - name: CompoundSystem
+          href: Runtime/system-types/compound-system.md
+        - name: PipelineSystem
+          href: Runtime/system-types/pipeline-system.md
+        - name: QuerySystem
+          href: Runtime/system-types/query-system.md
+    - name: Tick-Based Execution Engine
+      href: Runtime/tick-execution-engine/README.md
+      items:
+        - name: Execution Modes
+          href: Runtime/tick-execution-engine/execution-modes.md
+        - name: Parallel Tick Fence
+          href: Runtime/tick-execution-engine/parallel-tick-fence.md
+        - name: 'Worker Pool & Threading Model'
+          href: Runtime/tick-execution-engine/worker-pool-threading.md
+    - name: 'Tick Lifecycle & Transaction Management'
+      href: Runtime/tick-lifecycle/README.md
+      items:
+        - name: Parallel Tick Fence (WriteTickFence)
+          href: Runtime/tick-lifecycle/parallel-tick-fence.md
+        - name: Side-Transactions (Immediate Durability)
+          href: Runtime/tick-lifecycle/side-transactions.md
+- name: Schema
+  href: Schema/README.md
+  items:
+    - name: Component Family Classification
+      href: Schema/component-family-classification.md
+    - name: 'Component & Field Schema Declaration'
+      href: Schema/component-field-declaration.md
+    - name: 'FieldId Stability & Rename Tracking'
+      href: Schema/fieldid-stability.md
+    - name: User-Defined Migration Functions
+      href: Schema/migration-functions.md
+    - name: Migration Progress Tracking
+      href: Schema/migration-progress-tracking.md
+    - name: Schema History Audit Log
+      href: Schema/schema-history-audit.md
+    - name: 'Offline Schema Inspection & Dry-Run Validation'
+      href: Schema/schema-inspection-dryrun.md
+    - name: Schema Validation on Reopen
+      href: Schema/schema-validation.md
+    - name: System Schema Persistence
+      href: Schema/system-schema-persistence.md
+    - name: tsh Schema Shell Commands
+      href: Schema/tsh-schema-commands.md
+    - name: 'Workbench Per-Session Schema Loading & ALC Reload'
+      href: Schema/workbench-schema-loading.md
+    - name: Compatible Schema Evolution (Auto-Migration)
+      href: Schema/compatible-evolution/README.md
+      items:
+        - name: Migration Execution Strategy
+          href: Schema/compatible-evolution/migration-execution-strategy.md
+- name: Spatial
+  href: Spatial/README.md
+  items:
+    - name: Checkerboard Dispatch
+      href: Spatial/checkerboard-dispatch.md
+    - name: Cluster Dormancy (Sleep / Wake)
+      href: Spatial/cluster-dormancy.md
+    - name: Cluster Spatial Queries
+      href: Spatial/cluster-spatial-queries.md
+    - name: Fat-AABB Incremental Update
+      href: Spatial/fat-aabb-update.md
+    - name: Spatial Architecture Overview
+      href: Spatial/spatial-architecture-overview.md
+    - name: Category Filtering
+      href: Spatial/spatial-category-filtering.md
+    - name: Spatially-Coherent Entity Clustering
+      href: Spatial/spatial-coherent-clustering.md
+    - name: 'Spatial Grid Configuration & Tier Control'
+      href: Spatial/spatial-grid-config.md
+    - name: Interest Management (Delta Spatial Queries)
+      href: Spatial/spatial-interest-management.md
+    - name: Spatial Query API (AABB / Radius / Ray / Frustum / kNN / Count)
+      href: Spatial/spatial-query-api.md
+    - name: Trigger Volumes (Enter / Leave / Stay)
+      href: Spatial/spatial-trigger-volumes.md
+    - name: Tiered Simulation Dispatch
+      href: Spatial/tiered-simulation-dispatch.md
+    - name: 'Field Attribute & Schema Integration'
+      href: Spatial/spatial-field-attribute/README.md
+      items:
+        - name: Storage-Mode Compatibility (SingleVersion / Versioned)
+          href: Spatial/spatial-field-attribute/spatial-storage-mode-compat.md
+    - name: Spatial R-Tree Index
+      href: Spatial/spatial-rtree-index/README.md
+      items:
+        - name: Static / Dynamic Tree Separation
+          href: Spatial/spatial-rtree-index/spatial-rtree-static-dynamic.md
+- name: Storage
+  href: Storage/README.md
+  items:
+    - name: 'Epoch-Based Page Protection & Dirty-Page Tracking'
+      href: Storage/epoch-dirty-tracking.md
+    - name: 'Database File Locking & Lifecycle'
+      href: Storage/file-locking-lifecycle.md
+    - name: 'Page Allocation & Occupancy Tracking'
+      href: Storage/page-allocation-occupancy.md
+    - name: 'Memory-Mapped Page Cache & Clock-Sweep Eviction'
+      href: Storage/page-cache.md
+    - name: Page Compression (Future)
+      href: Storage/page-compression-future.md
+    - name: 'Page Integrity — CRC32C, Seqlock Snapshots & A/B Page Pairing'
+      href: Storage/page-integrity.md
+    - name: 'Segment & Chunk-Based Allocation Engine'
+      href: Storage/segment-chunk-allocation.md
+    - name: 'Storage Introspection & Integrity Diagnostics'
+      href: Storage/storage-introspection.md
+    - name: String Table Storage
+      href: Storage/string-table.md
+    - name: Variable-Sized Buffer Storage (VSBS)
+      href: Storage/vsbs.md
+    - name: Pluggable Storage Backend (Persistent vs Transient)
+      href: Storage/pluggable-storage-backend/README.md
+      items:
+        - name: Persistent Store (MMF-backed)
+          href: Storage/pluggable-storage-backend/persistent-store.md
+        - name: Transient Store (heap-backed)
+          href: Storage/pluggable-storage-backend/transient-store.md
+- name: Subscriptions
+  href: Subscriptions/README.md
+  items:
+    - name: 'Backpressure & Resync Recovery'
+      href: Subscriptions/backpressure-resync.md
+    - name: 'Client Connections & Lifecycle'
+      href: Subscriptions/client-connections.md
+    - name: Incremental Sync
+      href: Subscriptions/incremental-sync.md
+    - name: 'Subscription Priority & Overload Throttling'
+      href: Subscriptions/priority-overload-throttling.md
+    - name: Published/System-Input View Separation
+      href: Subscriptions/published-view-isolation.md
+    - name: 'Reference C# Client SDK'
+      href: Subscriptions/reference-client-sdk.md
+    - name: Subscription Server Configuration
+      href: Subscriptions/server-configuration.md
+    - name: 'Subscription Telemetry & Tracing'
+      href: Subscriptions/subscription-telemetry.md
+    - name: 'TCP Transport & Wire Format'
+      href: Subscriptions/wire-transport.md
+    - name: 'Per-Tick Delta Computation & Encoding'
+      href: Subscriptions/delta-computation/README.md
+      items:
+        - name: Component-Level Dirty Encoding (v1)
+          href: Subscriptions/delta-computation/delta-encoding-component-dirty.md
+        - name: Per-Field Dirty Encoding (v1.1)
+          href: Subscriptions/delta-computation/delta-encoding-per-field-dirty.md
+    - name: Published Views
+      href: Subscriptions/published-views/README.md
+      items:
+        - name: Per-client View Factories
+          href: Subscriptions/published-views/per-client-views.md
+        - name: Shared (World-State) Views
+          href: Subscriptions/published-views/shared-views.md
+    - name: Subscription Management (SetSubscriptions)
+      href: Subscriptions/subscription-management/README.md
+      items:
+        - name: Client-Initiated Subscriptions (v2)
+          href: Subscriptions/subscription-management/subscription-client-initiated.md
+        - name: Server-Driven Subscriptions (v1)
+          href: Subscriptions/subscription-management/subscription-server-driven.md
+- name: Transactions
+  href: Transactions/README.md
+  items:
+    - name: Bulk Load Session
+      href: Transactions/bulk-load-session.md
+    - name: Commit / Rollback Pipeline (ACID Commit Path)
+      href: Transactions/commit-rollback-pipeline.md
+    - name: 'Deadline & Cooperative Cancellation'
+      href: Transactions/deadline-cancellation.md
+    - name: Optimistic Concurrency Conflict Resolution
+      href: Transactions/optimistic-conflict-resolution.md
+    - name: 'Transaction Lifecycle, Thread Affinity & Pooling'
+      href: Transactions/transaction-lifecycle-pooling.md
+    - name: Unit of Work (durability boundary)
+      href: Transactions/unit-of-work.md
+    - name: 'UoW Identity & Crash-Safe Recovery Boundary'
+      href: Transactions/uow-identity-crash-recovery.md
+    - name: SingleVersion Durability Discipline (TickFence / Commit)
+      href: Transactions/durability-discipline/README.md
+      items:
+        - name: Commit Discipline (Variant-A Staging)
+          href: Transactions/durability-discipline/durability-discipline-commit.md
+        - name: TickFence Discipline (Default)
+          href: Transactions/durability-discipline/durability-discipline-tickfence.md
+    - name: Durability Modes (Deferred / GroupCommit / Immediate)
+      href: Transactions/durability-modes/README.md
+      items:
+        - name: Per-Transaction Durability Override
+          href: Transactions/durability-modes/durability-override-escalation.md
+    - name: Transaction Creation Patterns
+      href: Transactions/transaction-creation-patterns/README.md
+      items:
+        - name: 'CreateQuickTransaction (single-shot, auto-dispose)'
+          href: Transactions/transaction-creation-patterns/transaction-creation-quick.md
+        - name: CreateReadOnlyTransaction (snapshot reads)
+          href: Transactions/transaction-creation-patterns/transaction-creation-readonly.md
+        - name: Standard Transaction Creation (UnitOfWork + CreateTransaction)
+          href: Transactions/transaction-creation-patterns/transaction-creation-standard.md

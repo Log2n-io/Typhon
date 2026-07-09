@@ -15,12 +15,19 @@ namespace Typhon.Profiler;
 /// </remarks>
 public readonly struct GaugeValue
 {
+    /// <summary>Which gauge this value belongs to.</summary>
     public GaugeId Id { get; }
+
+    /// <summary>On-wire representation of <see cref="RawValue"/>.</summary>
     public GaugeValueKind Kind { get; }
 
     /// <summary>Raw 64-bit container. For <see cref="GaugeValueKind.U32Count"/>/<see cref="GaugeValueKind.U32PercentHundredths"/> only the low 32 bits are significant.</summary>
     public ulong RawValue { get; }
 
+    /// <summary>Construct a gauge value from its raw container. Prefer the typed <c>From*</c> factories for correct encoding.</summary>
+    /// <param name="id">Gauge identifier.</param>
+    /// <param name="kind">On-wire value kind.</param>
+    /// <param name="rawValue">Raw 64-bit payload (signed values stored as their i64 bit-pattern).</param>
     public GaugeValue(GaugeId id, GaugeValueKind kind, ulong rawValue)
     {
         Id = id;
@@ -44,9 +51,16 @@ public readonly struct GaugeValue
     /// <summary>Size of the (id, kind) tag preceding every field payload on the wire: 2 + 1 = 3 bytes.</summary>
     public const int GaugeFieldPrefixSize = 3;
 
+    /// <summary>Build a <see cref="GaugeValueKind.U32Count"/> value.</summary>
     public static GaugeValue FromU32(GaugeId id, uint value) => new(id, GaugeValueKind.U32Count, value);
+
+    /// <summary>Build a <see cref="GaugeValueKind.U64Bytes"/> value.</summary>
     public static GaugeValue FromU64(GaugeId id, ulong value) => new(id, GaugeValueKind.U64Bytes, value);
+
+    /// <summary>Build a <see cref="GaugeValueKind.I64Signed"/> value (stored as its i64 bit-pattern).</summary>
     public static GaugeValue FromI64(GaugeId id, long value) => new(id, GaugeValueKind.I64Signed, unchecked((ulong)value));
+
+    /// <summary>Build a <see cref="GaugeValueKind.U32PercentHundredths"/> value (e.g. 5025 = 50.25%).</summary>
     public static GaugeValue FromPercentHundredths(GaugeId id, uint valueHundredths) => new(id, GaugeValueKind.U32PercentHundredths, valueHundredths);
 }
 
@@ -55,12 +69,27 @@ public readonly struct GaugeValue
 /// </summary>
 public readonly struct PerTickSnapshotData
 {
+    /// <summary>Typhon thread slot the snapshot was emitted on.</summary>
     public byte ThreadSlot { get; }
+
+    /// <summary>Emit timestamp, in Stopwatch ticks.</summary>
     public long Timestamp { get; }
+
+    /// <summary>Tick number the snapshot was taken at.</summary>
     public uint TickNumber { get; }
+
+    /// <summary>Reserved flags word; writers currently emit 0.</summary>
     public uint Flags { get; }
+
+    /// <summary>Decoded gauge values carried by this snapshot, in wire order.</summary>
     public GaugeValue[] Values { get; }
 
+    /// <summary>Construct a decoded per-tick snapshot.</summary>
+    /// <param name="threadSlot">Typhon thread slot.</param>
+    /// <param name="timestamp">Emit timestamp, in Stopwatch ticks.</param>
+    /// <param name="tickNumber">Tick number.</param>
+    /// <param name="flags">Reserved flags word.</param>
+    /// <param name="values">Decoded gauge values.</param>
     public PerTickSnapshotData(byte threadSlot, long timestamp, uint tickNumber, uint flags, GaugeValue[] values)
     {
         ThreadSlot = threadSlot;

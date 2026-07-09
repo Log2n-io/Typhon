@@ -1,3 +1,9 @@
+---
+uid: feature-subscriptions-subscription-telemetry
+title: 'Subscription Telemetry & Tracing'
+description: 'Per-tick counters for Output-phase cost and delta volume, plus a tracing span around the whole phase.'
+---
+
 # Subscription Telemetry & Tracing
 > Per-tick counters for Output-phase cost and delta volume, plus a tracing span around the whole phase.
 
@@ -53,7 +59,7 @@ Console.WriteLine($"output={tick.OutputPhaseMs}ms " +
 
 ## 🧪 Tests
 
-- [TraceEventEncodeEquivalenceTests](../../../test/Typhon.Engine.Tests/Profiler/TraceEventEncodeEquivalenceTests.cs)
+- [TraceEventEncodeEquivalenceTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Profiler/TraceEventEncodeEquivalenceTests.cs)
   — `RuntimeSubscriptionOutputExecuteEvent_StructEncode_MatchesCodec`: binary encode of the Output-phase span,
   including its still-placeholder stat fields (client count, views refreshed, deltas pushed, overflow count)
 

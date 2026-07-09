@@ -74,7 +74,7 @@ public interface IMetricSource
     /// </summary>
     /// <remarks>
     /// <para>
-    /// Called by ResourceGraph.ResetPeaks() to enable windowed peak measurements. After displaying
+    /// Called by <see cref="IResourceGraph.ResetAllPeaks"/> to enable windowed peak measurements. After displaying
     /// or exporting peak values, this method resets them so subsequent peaks represent new maxima
     /// since the last reset.
     /// </para>

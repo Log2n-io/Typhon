@@ -30,7 +30,7 @@ internal struct UowRegistryEntry
 }
 
 /// <summary>
-/// Persistent UoW ID allocator with crash-recovery support. Manages a flat array of <see cref="UowRegistryEntry"/> in a growing <see cref="LogicalSegment<PersistentStore>"/>.
+/// Persistent UoW ID allocator with crash-recovery support. Manages a flat array of <see cref="UowRegistryEntry"/> in a growing <see cref="LogicalSegment{PersistentStore}"/>.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -87,7 +87,7 @@ internal unsafe class UowRegistry : IDisposable
 
     /// <summary>
     /// Semaphore signaled by <see cref="Release"/> when a slot becomes free.
-    /// Waiters in <see cref="AllocateUowId(ref WaitContext)"/> block on this semaphore instead of spin-polling.
+    /// Waiters in <see cref="AllocateUowId(ref WaitContext, ChangeSet)"/> block on this semaphore instead of spin-polling.
     /// </summary>
     /// <remarks>
     /// Uses <see cref="SemaphoreSlim"/> instead of <see cref="ManualResetEventSlim"/> to eliminate
@@ -158,6 +158,10 @@ internal unsafe class UowRegistry : IDisposable
     /// </summary>
     /// <param name="wc">
     /// Wait context with deadline and cancellation token. If <c>Unsafe.IsNullRef</c>, uses unbounded wait.
+    /// </param>
+    /// <param name="externalCs">
+    /// Optional <see cref="ChangeSet"/> threaded into the entry initialization (and any segment growth it triggers) so dirty marks on the touched pages
+    /// are tracked by the caller's unit of work. When <see langword="null"/>, a transient change set is created and committed internally.
     /// </param>
     /// <exception cref="ResourceExhaustedException">All slots are in use and the deadline expired.</exception>
     /// <exception cref="OperationCanceledException">The cancellation token was triggered while waiting.</exception>
@@ -545,8 +549,8 @@ internal unsafe class UowRegistry : IDisposable
     }
 
     /// <summary>
-    /// Acquires an exclusive latch on a segment page with spin-retry for concurrent access. Unlike <see cref="LogicalSegment<PersistentStore>.GetPageExclusive"/> which
-    /// asserts on latch failure, this method handles contention from concurrent AllocateUowId/Release calls on the same page.
+    /// Acquires an exclusive latch on a segment page with spin-retry for concurrent access. Unlike <see cref="LogicalSegment{PersistentStore}.GetPageExclusive"/>
+    /// which asserts on latch failure, this method handles contention from concurrent AllocateUowId/Release calls on the same page.
     /// </summary>
     private PageAccessor LatchPageExclusive(int segPageIndex, long epoch, out int memPageIdx)
     {

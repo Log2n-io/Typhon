@@ -1,3 +1,9 @@
+---
+uid: feature-spatial-spatial-trigger-volumes
+title: 'Trigger Volumes (Enter / Leave / Stay)'
+description: 'Per-region occupant diffing against the R-Tree(s) emits Enter/Leave/Stay events at a configurable per-region frequency.'
+---
+
 # Trigger Volumes (Enter / Leave / Stay)
 > Per-region occupant diffing against the R-Tree(s) emits Enter/Leave/Stay events at a configurable per-region frequency.
 
@@ -56,13 +62,13 @@ triggers.DestroyRegion(zone);
 
 ## 🧪 Tests
 
-- [SpatialTriggerTests](../../../test/Typhon.Engine.Tests/Data/SpatialIndex/SpatialTriggerTests.cs) — region lifecycle + generation-checked handle reuse, `Enter`/`Leave`/`StayInside` event completeness, `EvalFrequency_SkipsTicks`
+- [SpatialTriggerTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/SpatialIndex/SpatialTriggerTests.cs) — region lifecycle + generation-checked handle reuse, `Enter`/`Leave`/`StayInside` event completeness, `EvalFrequency_SkipsTicks`
 
 ## 🔗 Related
 
-- Source: [src/Typhon.Engine/Spatial/internals/SpatialTriggerSystem.cs](../../../src/Typhon.Engine/Spatial/internals/SpatialTriggerSystem.cs)
-- Source: [src/Typhon.Engine/Spatial/public/SpatialRegionHandle.cs](../../../src/Typhon.Engine/Spatial/public/SpatialRegionHandle.cs) (`TargetTreeMode`)
-- Source: [src/Typhon.Engine/Spatial/public/SpatialTriggerResult.cs](../../../src/Typhon.Engine/Spatial/public/SpatialTriggerResult.cs)
+- Source: [src/Typhon.Engine/Spatial/internals/SpatialTriggerSystem.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/SpatialTriggerSystem.cs)
+- Source: [src/Typhon.Engine/Spatial/public/SpatialRegionHandle.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/public/SpatialRegionHandle.cs) (`TargetTreeMode`)
+- Source: [src/Typhon.Engine/Spatial/public/SpatialTriggerResult.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/public/SpatialTriggerResult.cs)
 - Related catalog entry: [Spatial Category Filtering](./spatial-category-filtering.md), [Spatial R-Tree Index](./spatial-rtree-index/README.md)
 
 <!-- Deep dive: claude/design/Spatial/SpatialIndex/08-game-features.md (Feature F3 — Trigger Volumes: algorithm, static-cache strategy, frequency budget) -->

@@ -1,3 +1,9 @@
+---
+uid: feature-foundation-crc32c-checksums
+title: 'Hardware-Accelerated CRC32C Checksums'
+description: 'SSE4.2/ARM-intrinsic CRC32C checksum primitive that backs every page and WAL-record integrity check.'
+---
+
 # Hardware-Accelerated CRC32C Checksums
 > SSE4.2/ARM-intrinsic CRC32C checksum primitive that backs every page and WAL-record integrity check.
 
@@ -35,7 +41,7 @@ tx.Commit();
 - Hardware acceleration requires SSE4.2 (x86, ubiquitous since 2008) or ARMv8-A; older hardware silently uses the slower software table with no behavior change.
 
 ## 🧪 Tests
-- [Crc32CUtilTests](../../../test/Typhon.Engine.Tests/Durability/Crc32CUtilTests.cs) — canonical CRC32C test vectors (`"123456789"` → `0xE3069283`), empty-span zero result, determinism.
+- [Crc32CUtilTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/Crc32CUtilTests.cs) — canonical CRC32C test vectors (`"123456789"` → `0xE3069283`), empty-span zero result, determinism.
 
 ## 🔗 Related
 

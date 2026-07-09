@@ -1,3 +1,9 @@
+---
+uid: feature-durability-pit-backup
+title: 'Point-in-Time Incremental Backup'
+description: 'Forward-incremental .pack backups scoped to changed pages; restore reassembles a base and heals it through crash recovery''s RecoveryDriver.'
+---
+
 # Point-in-Time Incremental Backup
 > Forward-incremental `.pack` backups scoped to changed pages; restore reassembles a base and heals it through crash recovery's RecoveryDriver.
 

@@ -14,7 +14,7 @@ namespace Typhon.Protocol;
 [MemoryPackable]
 public partial struct ComponentFieldUpdate
 {
-    /// <summary>Component type identifier (ComponentTable.TypeId).</summary>
+    /// <summary>Component type identifier, assigned when the component type is registered.</summary>
     public ushort ComponentId;
 
     /// <summary>

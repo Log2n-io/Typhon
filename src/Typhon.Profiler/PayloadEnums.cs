@@ -78,7 +78,7 @@ public enum CheckpointReason : byte
     /// <summary>Periodic timer wake (CheckpointIntervalMs elapsed).</summary>
     Periodic = 0,
 
-    /// <summary>Explicit <see cref="Typhon.Engine.DatabaseEngine.ForceCheckpoint"/> call (page cache backpressure or user-initiated).</summary>
+    /// <summary>Explicit <c>DatabaseEngine.ForceCheckpoint</c> call (page cache backpressure or user-initiated).</summary>
     Forced = 1,
 
     /// <summary>Shutdown — final checkpoint before process exit.</summary>

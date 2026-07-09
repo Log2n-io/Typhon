@@ -1,3 +1,9 @@
+---
+uid: feature-runtime-parallel-entity-processing
+title: 'Parallel Entity Processing (QuerySystem.Parallel)'
+description: 'Multi-core entity chunking that skips per-chunk Transaction overhead for non-Versioned writes.'
+---
+
 # Parallel Entity Processing (QuerySystem.Parallel)
 > Multi-core entity chunking that skips per-chunk Transaction overhead for non-Versioned writes.
 
@@ -83,8 +89,8 @@ public class MovementSystem : QuerySystem
 
 ## 🧪 Tests
 
-- [ParallelQueryTests](../../../test/Typhon.Engine.Tests/Runtime/ParallelQueryTests.cs) — all four dispatch paths (`ParallelQuery_NonVersioned_ChunkReceivesAccessor`, `ParallelQuery_WritesVersioned_ChunkReceivesTransaction`), chunk partitioning, chunk-throw isolation
-- [ChunksPerWorkerTests](../../../test/Typhon.Engine.Tests/Runtime/ChunksPerWorkerTests.cs) — `ChunksPerWorker` oversubscription factor vs. worker-count cap and entity-count cap
+- [ParallelQueryTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/ParallelQueryTests.cs) — all four dispatch paths (`ParallelQuery_NonVersioned_ChunkReceivesAccessor`, `ParallelQuery_WritesVersioned_ChunkReceivesTransaction`), chunk partitioning, chunk-throw isolation
+- [ChunksPerWorkerTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/ChunksPerWorkerTests.cs) — `ChunksPerWorker` oversubscription factor vs. worker-count cap and entity-count cap
 
 ## 🔗 Related
 

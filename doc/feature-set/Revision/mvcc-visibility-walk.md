@@ -1,3 +1,9 @@
+---
+uid: feature-revision-mvcc-visibility-walk
+title: 'Chain Walk Correctness Under Compaction'
+description: 'The visibility walk scans a Versioned component''s whole revision chain rather than stopping at the first too-new entry — because background revision GC can…'
+---
+
 # Chain Walk Correctness Under Compaction
 > The visibility walk scans a `Versioned` component's whole revision chain rather than stopping at the first too-new entry — because background revision GC can reorder entries physically without changing their TSNs.
 
@@ -46,13 +52,13 @@ causes a read to regress to an older or wrong revision.
 
 ## 🧪 Tests
 
-- [ChaosStressTests](../../../test/Typhon.Engine.Tests/Data/ChaosStressTests.cs) — `RevisionChainDepth_DeepChainWithCleanup` and `SentinelRevision_StaggeredReaderRelease` interleave writes with staggered/out-of-order reader release so background compaction runs concurrently with reads, then assert every reader still resolves its own snapshot correctly (no regression to a stale or wrong revision)
+- [ChaosStressTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ChaosStressTests.cs) — `RevisionChainDepth_DeepChainWithCleanup` and `SentinelRevision_StaggeredReaderRelease` interleave writes with staggered/out-of-order reader release so background compaction runs concurrently with reads, then assert every reader still resolves its own snapshot correctly (no regression to a stale or wrong revision)
 
 ## 🔗 Related
 
 - Parent feature: [MVCC Snapshot Visibility](./mvcc-snapshot-visibility.md)
 - Sibling: [Revision Garbage Collection & Compaction](./revision-gc-compaction.md) — the background compactor whose relocations this walk must tolerate
-- Source: [`RevisionChainReader.WalkChain`](../../../src/Typhon.Engine/Transactions/internals/RevisionWalker.cs), [`RevisionEnumerator`](../../../src/Typhon.Engine/Revision/internals/RevisionEnumerator.cs)
+- Source: [`RevisionChainReader.WalkChain`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Transactions/internals/RevisionWalker.cs), [`RevisionEnumerator`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Revision/internals/RevisionEnumerator.cs)
 
 <!-- Deep dive: claude/design/Revision/02-mvcc-visibility.md §5 — The chain is not TSN-sorted -->
 <!-- ADR: claude/adr/003-mvcc-snapshot-isolation.md -->

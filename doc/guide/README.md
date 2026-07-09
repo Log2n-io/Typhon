@@ -1,3 +1,9 @@
+---
+uid: guide-index
+title: 'Typhon — User Guide'
+description: 'A practical, read-as-you-go guide to building on Typhon. It''s task-oriented: enough to design your data, write and read it safely, query it, and run it on a…'
+---
+
 # Typhon — User Guide
 
 A practical, read-as-you-go guide to **building on** Typhon. It's task-oriented: enough to design your data, write and read it safely, query it, and run it on a tick — without the engine internals.
@@ -51,7 +57,7 @@ Read **chapter 1** to get productive. Come back for the rest when the moment arr
 | **5** | [Systems & the tick loop](05-systems.md) | run logic over your data every tick, in parallel |
 | **6** | [Operating & going deeper](06-operating.md) | observe, set resource budgets, handle errors, find the deep docs |
 
-> 📦 **Run it, don't just read it.** Every snippet in this guide is mirrored in a small runnable project — [`example/`](example/). `dotnet run --project doc/guide/example` walks the whole arc (spawn → read → transact → query → view → tick) and prints what each chapter describes.
+> 📦 **Run it, don't just read it.** Every snippet in this guide is mirrored in a small runnable project — [`example/`](https://github.com/Log2n-io/Typhon/tree/main/doc/guide/example). `dotnet run --project doc/guide/example` walks the whole arc (spawn → read → transact → query → view → tick) and prints what each chapter describes.
 
 ## 🧩 The types you'll touch (whole guide)
 

@@ -1,3 +1,9 @@
+---
+uid: feature-indexing-tail-garbage-collection
+title: 'TAIL Retention / Garbage Collection'
+description: 'Bounds TAIL version-history growth via boundary-sentinel-preserving pruning — built and tested, not yet auto-triggered.'
+---
+
 # TAIL Retention / Garbage Collection
 > Bounds TAIL version-history growth via boundary-sentinel-preserving pruning — built and tested, not yet auto-triggered.
 
@@ -69,7 +75,7 @@ using (var tx = dbe.CreateQuickTransaction())
 
 ## 🧪 Tests
 
-- [VersionedIndexTests](../../../test/Typhon.Engine.Tests/Data/VersionedIndexTests.cs) — Phase 5 `GC Tests` region: `TailGC_PruneOldEntries_KeepsBoundarySentinel`, `TailGC_DeadChain_FullyRemoved`, `TailGC_NoOldEntries_NothingPruned` — drives `TailGarbageCollector.Prune` directly, in isolation from any auto-trigger
+- [VersionedIndexTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/VersionedIndexTests.cs) — Phase 5 `GC Tests` region: `TailGC_PruneOldEntries_KeepsBoundarySentinel`, `TailGC_DeadChain_FullyRemoved`, `TailGC_NoOldEntries_NothingPruned` — drives `TailGarbageCollector.Prune` directly, in isolation from any auto-trigger
 
 ## 🔗 Related
 

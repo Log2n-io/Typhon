@@ -58,7 +58,10 @@ namespace Typhon.Engine.Profiler
     [AttributeUsage(AttributeTargets.Struct, AllowMultiple = false, Inherited = false)]
     public sealed class TraceEventAttribute : Attribute
     {
+        /// <summary>Declares the struct as the producer of the given trace-event kind.</summary>
+        /// <param name=""kind"">Trace-event kind this struct produces.</param>
         public TraceEventAttribute(TraceEventKind kind) { Kind = kind; }
+        /// <summary>Trace-event kind this struct produces.</summary>
         public TraceEventKind Kind { get; }
         /// <summary>Codec class containing the OptX mask constants. Required only if any field is [Optional].</summary>
         public Type Codec { get; set; }
@@ -811,6 +814,26 @@ namespace Typhon.Engine.Profiler
         return char.ToLowerInvariant(pascal[0]) + pascal.Substring(1);
     }
 
+    /// <summary>
+    /// Humanize a PascalCase property name for generated DTO doc comments (e.g. "DirtyPageCount" → "dirty page count",
+    /// "LsnValue" → "lsn value"). Word breaks are inserted before an upper-case letter that starts a new word — i.e.
+    /// preceded by a lower-case letter, or the last letter of an acronym run followed by a lower-case letter.
+    /// </summary>
+    private static string HumanizeName(string name)
+    {
+        var sb = new StringBuilder(name.Length + 8);
+        for (int i = 0; i < name.Length; i++)
+        {
+            char c = name[i];
+            if (i > 0 && char.IsUpper(c) && (char.IsLower(name[i - 1]) || (i + 1 < name.Length && char.IsLower(name[i + 1]))))
+            {
+                sb.Append(' ');
+            }
+            sb.Append(char.ToLowerInvariant(c));
+        }
+        return sb.ToString();
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // Emit: TraceEventModel → DTO + decoder source code (Phase 1D)
     // ═══════════════════════════════════════════════════════════════════════
@@ -845,6 +868,7 @@ namespace Typhon.Engine.Profiler
         // KindByte override — surfaces the numeric TraceEventKind value for in-process filtering. Marked
         // [JsonIgnore] on the abstract base so it never ends up on the wire (the JsonPolymorphic discriminator
         // is the on-wire kind). Override here returns a compile-time constant.
+        sb.AppendLine("    /// <inheritdoc/>");
         sb.Append("    public override byte KindByte => (byte)global::Typhon.Profiler.TraceEventKind.").Append(model.KindName).AppendLine(";");
         sb.AppendLine();
 
@@ -853,6 +877,7 @@ namespace Typhon.Engine.Profiler
         // we append "Payload" so the consumer-observed base value keeps its semantic.
         foreach (var p in model.PayloadFields)
         {
+            sb.Append("    /// <summary><c>").Append(model.KindName).Append("</c> event payload — ").Append(HumanizeName(p.FieldName)).AppendLine(".</summary>");
             sb.Append("    public ").Append(p.TypeFqn).Append(' ').Append(DtoPropertyName(p.FieldName)).AppendLine(" { get; init; }");
         }
 
@@ -863,6 +888,8 @@ namespace Typhon.Engine.Profiler
             // Use the encoder-side property name (e.g., _dirtyPageCount → DirtyPageCount). Apply the same
             // collision-rename that required fields get.
             string dtoName = DtoPropertyName(opt.PropertyName);
+            sb.Append("    /// <summary>Optional <c>").Append(model.KindName).Append("</c> event payload — ").Append(HumanizeName(opt.PropertyName))
+                .AppendLine(". <c>null</c> when the wire record omits it.</summary>");
             sb.Append("    public ").Append(opt.TypeFqn).Append("? ").Append(dtoName).AppendLine(" { get; init; }");
         }
 
@@ -1001,11 +1028,13 @@ namespace Typhon.Engine.Profiler
         sb.Append("public sealed record ").Append(model.StructName).AppendLine("Dto : global::Typhon.Profiler.Events.TraceEventDto");
         sb.AppendLine("{");
 
+        sb.AppendLine("    /// <inheritdoc/>");
         sb.Append("    public override byte KindByte => (byte)global::Typhon.Profiler.TraceEventKind.").Append(model.KindName).AppendLine(";");
         sb.AppendLine();
 
         foreach (var p in model.PayloadFields)
         {
+            sb.Append("    /// <summary><c>").Append(model.KindName).Append("</c> event payload — ").Append(HumanizeName(p.FieldName)).AppendLine(".</summary>");
             sb.Append("    public ").Append(p.TypeFqn).Append(' ').Append(DtoPropertyName(p.FieldName)).AppendLine(" { get; init; }");
         }
 

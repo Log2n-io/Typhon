@@ -1,3 +1,9 @@
+---
+uid: feature-querying-statistics-infrastructure
+title: 'Statistics Infrastructure (HLL / MCV / Histogram)'
+description: 'Background-maintained per-field statistics that let the query planner see data skew instead of guessing uniform distribution.'
+---
+
 # Statistics Infrastructure (HLL / MCV / Histogram)
 > Background-maintained per-field statistics that let the query planner see data skew instead of guessing uniform distribution.
 
@@ -58,9 +64,9 @@ var veterans = tx.Query<PlayerArch>()
 
 ## 🧪 Tests
 
-- [StatisticsRebuildTests](../../../test/Typhon.Engine.Tests/Data/Query/StatisticsRebuildTests.cs) — background worker lifecycle, mutation-threshold-triggered rebuild, atomic torn-read-free swap, sampling, and the `String64`-field skip
-- [HyperLogLogTests](../../../test/Typhon.Engine.Tests/Data/Query/HyperLogLogTests.cs) — HLL cardinality estimate accuracy (unique, skewed, and merged sketches)
-- [MostCommonValuesTests](../../../test/Typhon.Engine.Tests/Data/Query/MostCommonValuesTests.cs) — MCV top-100 identification on Zipf-skewed data, exact-count lookup hit/miss
+- [StatisticsRebuildTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/Query/StatisticsRebuildTests.cs) — background worker lifecycle, mutation-threshold-triggered rebuild, atomic torn-read-free swap, sampling, and the `String64`-field skip
+- [HyperLogLogTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/Query/HyperLogLogTests.cs) — HLL cardinality estimate accuracy (unique, skewed, and merged sketches)
+- [MostCommonValuesTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/Query/MostCommonValuesTests.cs) — MCV top-100 identification on Zipf-skewed data, exact-count lookup hit/miss
 
 ## 🔗 Related
 

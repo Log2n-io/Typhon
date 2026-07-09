@@ -1,3 +1,9 @@
+---
+uid: feature-subscriptions-delta-computation-delta-encoding-per-field-dirty
+title: 'Per-Field Dirty Encoding (v1.1)'
+description: 'Planned: shrink Modified updates further by sending only the fields that changed inside a dirty component.'
+---
+
 # Per-Field Dirty Encoding (v1.1)
 > Planned: shrink Modified updates further by sending only the fields that changed inside a dirty component.
 

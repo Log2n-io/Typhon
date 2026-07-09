@@ -1,3 +1,9 @@
+---
+uid: feature-observability-index
+title: 'Observability'
+description: 'Zero-overhead telemetry infrastructure for Typhon: a single hierarchical static-readonly gating surface shared by the typed-event Profiler, a…'
+---
+
 # Observability
 > Zero-overhead telemetry infrastructure for Typhon: a single hierarchical static-readonly gating surface shared by the typed-event Profiler, a `System.Diagnostics.Activity`-based tracing surface for correlating Typhon with a host's own OTLP trace, OpenTelemetry metrics export from the Resource Graph and ECS layer, and resource-derived health checks / threshold alerting for production monitoring.
 

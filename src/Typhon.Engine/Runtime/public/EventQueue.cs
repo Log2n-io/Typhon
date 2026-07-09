@@ -8,7 +8,7 @@ namespace Typhon.Engine;
 /// </summary>
 /// <remarks>
 /// Per-tick telemetry accumulators (peak depth, overflow count, produced/consumed counts) live here so the scheduler can read them without
-/// caring about <typeparamref name="T"/>. The accumulators are reset at tick start by <see cref="Reset"/>; readers that want the previous
+/// caring about the concrete <see cref="EventQueue{T}"/>. The accumulators are reset at tick start by <see cref="Reset"/>; readers that want the previous
 /// tick's data must read before <c>Reset</c> runs (the scheduler reads them in its end-of-tick QueueTickEnd emission, then resets).
 /// </remarks>
 [PublicAPI]
@@ -46,8 +46,8 @@ public abstract class EventQueueBase
     public uint Consumed { get; protected set; }
 
     /// <summary>
-    /// Stable identifier assigned by the runtime at registration. Used as <see cref="QueueTickSummary.QueueId"/> and as the index into
-    /// the <see cref="CacheSectionId.QueueNameTable"/>. Set by the runtime when the queue is registered with the scheduler;
+    /// Stable identifier assigned by the runtime at registration. Used as <see cref="Typhon.Profiler.QueueTickSummary.QueueId"/> and as the index into
+    /// the <see cref="Typhon.Profiler.CacheSectionId.QueueNameTable"/>. Set by the runtime when the queue is registered with the scheduler;
     /// 0xFFFF means "unassigned" (queue created outside a scheduler context — telemetry not emitted for it).
     /// </summary>
     public ushort QueueId { get; internal set; } = ushort.MaxValue;

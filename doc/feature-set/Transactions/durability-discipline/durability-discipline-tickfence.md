@@ -1,3 +1,9 @@
+---
+uid: feature-transactions-durability-discipline-durability-discipline-tickfence
+title: 'TickFence Discipline (Default)'
+description: 'The default, lowest-cost SingleVersion write — durable at the next tick fence, not at commit.'
+---
+
 # TickFence Discipline (Default)
 > The default, lowest-cost `SingleVersion` write — durable at the next tick fence, not at commit.
 
@@ -63,10 +69,10 @@ using var tx2 = uow.CreateTransaction(discipline: DurabilityDiscipline.TickFence
 
 ## 🧪 Tests
 
-- [StorageModeTickFenceTests](../../../../test/Typhon.Engine.Tests/Data/StorageModeTickFenceTests.cs) —
+- [StorageModeTickFenceTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/StorageModeTickFenceTests.cs) —
   `WriteTickFence_ClearsDirtyBitmap` (in-place write, dirty-bitmap batching), `WriteTickFence_VersionedAndTransient_Skipped`
   (discipline only applies to `SingleVersion`)
-- [TickFenceE2ETests](../../../../test/Typhon.Engine.Tests/Durability/TickFenceE2ETests.cs) — end-to-end
+- [TickFenceE2ETests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/TickFenceE2ETests.cs) — end-to-end
   write/reopen survival, last-write-wins across multiple updates, multi-entity recovery, only-dirty-entities-written
 
 ## 🔗 Related

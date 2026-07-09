@@ -5,7 +5,7 @@ namespace Typhon.Engine;
 
 /// <summary>
 /// Accumulator for a system's declared read/write access (RFC 07 — System Access Declarations + Auto-DAG). Populated by <see cref="SystemBuilder"/> declaration
-/// methods, copied into <see cref="SystemRegistration"/>, then onto <see cref="SystemDefinition.Access"/> at <see cref="RuntimeSchedule.Build"/> time.
+/// methods, copied into <see cref="Dag.SystemRegistration"/>, then onto <see cref="SystemDefinition.Access"/> at <see cref="RuntimeSchedule.Build"/> time.
 /// </summary>
 /// <remarks>
 /// Unit 2 of the auto-DAG migration: storage only. Conflict detection (W×W errors, R×W-plain errors, derived edges) lands in Unit 3. All sets default to

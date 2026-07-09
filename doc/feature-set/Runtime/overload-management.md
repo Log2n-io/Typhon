@@ -1,3 +1,9 @@
+---
+uid: feature-runtime-overload-management
+title: 'Overload Management'
+description: 'Single-writer state machine that throttles systems and slows the tick rate so a load spike degrades instead of crashing.'
+---
+
 # Overload Management
 > Single-writer state machine that throttles systems and slows the tick rate so a load spike degrades instead of crashing.
 
@@ -69,7 +75,7 @@ var level = runtime.CurrentOverloadLevel; // OverloadLevel.Normal / SystemThrott
 
 ## 🧪 Tests
 
-- [OverloadTests](../../../test/Typhon.Engine.Tests/Runtime/OverloadTests.cs) — `OverloadDetectorTests` (pure state-machine escalation/de-escalation hysteresis, tick-rate multiplier ladder) and `OverloadThrottleTests` (`ThrottledTickDivisor`, `CanShed`, telemetry recording)
+- [OverloadTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/OverloadTests.cs) — `OverloadDetectorTests` (pure state-machine escalation/de-escalation hysteresis, tick-rate multiplier ladder) and `OverloadThrottleTests` (`ThrottledTickDivisor`, `CanShed`, telemetry recording)
 
 ## 🔗 Related
 - Related feature: [Telemetry & Runtime Inspection](./telemetry-runtime-inspection.md)

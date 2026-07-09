@@ -65,7 +65,7 @@ public class TimeoutOptions
     public TimeSpan SegmentAllocationLockTimeout { get; set; } = TimeSpan.FromSeconds(10);
 
     /// <summary>
-    /// Default timeout for <see cref="Transaction.Commit()"/> when called without an explicit
+    /// Default timeout for <see cref="Transaction.Commit(ConcurrencyConflictHandler)"/> when called without an explicit
     /// <see cref="UnitOfWorkContext"/>. Individual lock timeouts (5-10s) provide tighter bounds within this limit.
     /// </summary>
     public TimeSpan DefaultCommitTimeout { get; set; } = TimeSpan.FromSeconds(30);

@@ -104,5 +104,6 @@ public sealed record OtherTraceEventDto : TraceEventDto
     /// <summary>Span duration in microseconds, when <see cref="IsSpan"/> is true.</summary>
     public double? DurationUs { get; init; }
 
+    /// <inheritdoc/>
     public override byte KindByte => (byte)OriginalKind;
 }

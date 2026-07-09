@@ -189,22 +189,6 @@ internal static partial class TyphonEvent
     // ═══════════════════════════════════════════════════════════════════════
 
     /// <summary>
-    /// Publish a typed event to its owner slot's ring buffer and restore the parent scope's TLS open-span ID. Called from every typed event
-    /// struct's <c>Dispose</c> method via a generic constraint that lets the JIT inline the full encode path for each concrete event type.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// <b>The <c>allows ref struct</c> constraint</b> (C# 13) permits <typeparamref name="T"/> to be a <c>ref struct</c> — which every Phase 1
-    /// typed event is. Without it, the generic constraint would reject ref-struct instantiations. With it, the JIT specializes this method for
-    /// each event type, inlining <see cref="ITraceEventEncoder.ComputeSize"/> and <see cref="ITraceEventEncoder.EncodeTo"/> at the call site.
-    /// </para>
-    /// <para>
-    /// <b>Default-struct detection:</b> when <paramref name="spanId"/> is zero the event was returned from a short-circuit path
-    /// (profiler disabled, registry full, suppressed). In that case the Dispose is a no-op — nothing was reserved, nothing to publish, no TLS to
-    /// restore.
-    /// </para>
-    /// </remarks>
-    /// <summary>
     /// Chain-aware reservation. Tries the slot's current <see cref="ThreadSlot.ChainTail"/>; on overflow, attempts
     /// to acquire a spillover from <see cref="SpilloverRingPool"/>, link it onto the chain, and reserve there.
     /// Returns the ring the reservation landed on via <paramref name="reservedOn"/> so the caller can publish to
@@ -271,6 +255,22 @@ internal static partial class TyphonEvent
         return false;
     }
 
+    /// <summary>
+    /// Publish a typed event to its owner slot's ring buffer and restore the parent scope's TLS open-span ID. Called from every typed event
+    /// struct's <c>Dispose</c> method via a generic constraint that lets the JIT inline the full encode path for each concrete event type.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The <c>allows ref struct</c> constraint</b> (C# 13) permits <typeparamref name="T"/> to be a <c>ref struct</c> — which every Phase 1
+    /// typed event is. Without it, the generic constraint would reject ref-struct instantiations. With it, the JIT specializes this method for
+    /// each event type, inlining <see cref="ITraceEventEncoder.ComputeSize"/> and <see cref="ITraceEventEncoder.EncodeTo"/> at the call site.
+    /// </para>
+    /// <para>
+    /// <b>Default-struct detection:</b> when <paramref name="spanId"/> is zero the event was returned from a short-circuit path
+    /// (profiler disabled, registry full, suppressed). In that case the Dispose is a no-op — nothing was reserved, nothing to publish, no TLS to
+    /// restore.
+    /// </para>
+    /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static void PublishEvent<T>(ref T evt, byte threadSlot, ulong previousSpanId, ulong spanId) where T : struct, ITraceEventEncoder, allows ref struct
     {
@@ -503,14 +503,9 @@ internal static partial class TyphonEvent
     // slot is owned by the caller, not looked up per call)
     // ═══════════════════════════════════════════════════════════════════════
 
-    /// <summary>
-    /// GC-ingestion-internal: emit a <see cref="TraceEventKind.GcStart"/> instant record. The caller's <paramref name="slot"/> must be the
-    /// ingestion thread's own claimed slot — preserving the per-slot SPSC invariant without any locking on the ring itself.
-    /// </summary>
-    /// <remarks>
-    /// Does not participate in the <c>CurrentOpenSpanId</c> parent-linking scheme — GC events are process-level and independent of any ambient
-    /// Typhon span. Does not read <c>Activity.Current</c> either.
-    /// </remarks>
+    // GC-ingestion-internal: emit a GcStart instant record. The caller's slot must be the ingestion thread's own claimed slot —
+    // preserving the per-slot SPSC invariant without any locking on the ring itself. Does not participate in the CurrentOpenSpanId
+    // parent-linking scheme — GC events are process-level and independent of any ambient Typhon span. Does not read Activity.Current either.
     // EmitGcStart / EmitGcEnd are generator-emitted via [TraceEvent(Shape=Instant, ExternalSlot=true)]
     // declarations in InstantEvents.cs. Caller passes the GC-ingestion thread's slot explicitly.
 
@@ -575,21 +570,11 @@ internal static partial class TyphonEvent
     // Memory allocation / gauge snapshot — called from MemoryAllocator and DagScheduler
     // ═══════════════════════════════════════════════════════════════════════
 
-    /// <summary>
-    /// Emit a <see cref="TraceEventKind.MemoryAllocEvent"/> instant record. Called from <c>MemoryAllocator.AllocatePinned</c> /
-    /// <c>AllocateArray</c> (direction=<see cref="MemoryAllocDirection.Alloc"/>) and <c>MemoryAllocator.Remove</c>
-    /// (direction=<see cref="MemoryAllocDirection.Free"/>).
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// Gated on <see cref="TelemetryConfig.ProfilerMemoryAllocationsActive"/> (separate knob from the master profiler gate) so operators can run
-    /// the profiler for span tracing without paying per-alloc event cost. The first line's <c>if (!active) return</c> dead-code-eliminates
-    /// in Tier 1 JIT when the flag is off.
-    /// </para>
-    /// <para>
-    /// Runs on whichever thread allocates/frees — claims that thread's own ring slot, preserving the per-slot SPSC invariant.
-    /// </para>
-    /// </remarks>
+    // Emit a MemoryAllocEvent instant record. Called from MemoryAllocator.AllocatePinned / AllocateArray (direction=Alloc) and
+    // MemoryAllocator.Remove (direction=Free). Gated on TelemetryConfig.ProfilerMemoryAllocationsActive (separate knob from the master
+    // profiler gate) so operators can run the profiler for span tracing without paying per-alloc event cost. The first line's
+    // `if (!active) return` dead-code-eliminates in Tier 1 JIT when the flag is off. Runs on whichever thread allocates/frees —
+    // claims that thread's own ring slot, preserving the per-slot SPSC invariant.
     // EmitMemoryAlloc is generator-emitted via [TraceEvent(TraceEventKind.MemoryAllocEvent, Shape=Instant)] in InstantEvents.cs.
 
     /// <summary>
@@ -648,10 +633,8 @@ internal static partial class TyphonEvent
     public static long SnapshotSkippedNullRing => SSnapshotSkippedNullRing;
     public static long SnapshotSkippedRingFull => SSnapshotSkippedRingFull;
 
-    /// <summary>Scheduler-internal: emit a <see cref="TraceEventKind.SystemSkipped"/> marker.</summary>
-    /// <remarks>
-    /// Phase 4 (#282) extended the payload (wire-additive): <paramref name="wouldBeChunkCount"/> and <paramref name="successorsUnblocked"/> are new fields.
-    /// </remarks>
+    // Scheduler-internal: emit a SystemSkipped marker. Phase 4 (#282) extended the payload (wire-additive):
+    // wouldBeChunkCount and successorsUnblocked are new fields.
     // EmitSystemSkipped is generator-emitted via [TraceEvent(TraceEventKind.SystemSkipped, Shape=Instant)] in InstantEvents.cs.
     // Signature: EmitSystemSkipped(long timestamp, ushort systemIdx, byte skipReason, ushort wouldBeChunkCount, ushort successorsUnblocked).
 

@@ -26,9 +26,18 @@ public enum ResourceMutationKind
 [PublicAPI]
 public readonly struct ResourceMutationEventArgs
 {
+    /// <summary>Whether the node was added or removed (<see cref="ResourceMutationKind.Mutated"/> is a reserved forward-compat slot, not raised).</summary>
     public ResourceMutationKind Kind { get; init; }
+
+    /// <summary><see cref="IResource.Id"/> of the node that was added or removed.</summary>
     public string NodeId { get; init; }
+
+    /// <summary><see cref="IResource.Id"/> of the parent the node was attached to or detached from.</summary>
     public string ParentId { get; init; }
+
+    /// <summary><see cref="ResourceType"/> of the affected node.</summary>
     public ResourceType Type { get; init; }
+
+    /// <summary>UTC time at which the mutation was raised.</summary>
     public DateTime Timestamp { get; init; }
 }

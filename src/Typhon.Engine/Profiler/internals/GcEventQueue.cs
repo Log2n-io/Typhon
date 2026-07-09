@@ -33,6 +33,7 @@ internal sealed class GcEventQueue
     /// <summary>
     /// Create a queue with <paramref name="capacity"/> slots. Must be a power of 2.
     /// </summary>
+    /// <param name="capacity">Ring capacity in records. Must be a power of two ≥ 2.</param>
     /// <param name="wake">Signaled every time a record is successfully enqueued. Owned externally (typically by <see cref="GcIngestionThread"/>).</param>
     public GcEventQueue(int capacity, AutoResetEvent wake)
     {

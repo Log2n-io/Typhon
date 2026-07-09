@@ -1,3 +1,9 @@
+---
+uid: feature-ecs-storage-modes-storage-mode-versioned
+title: 'Versioned'
+description: 'Full MVCC snapshot isolation and zero-loss durability for data that can never be lost or read torn.'
+---
+
 # Versioned
 > Full MVCC snapshot isolation and zero-loss durability for data that can never be lost or read torn.
 
@@ -59,7 +65,7 @@ tx2.Commit();                 // new revision becomes HEAD, durable
 
 ## 🧪 Tests
 
-- [EcsSpawnMvccTests](../../../../test/Typhon.Engine.Tests/Data/ECS/EcsSpawnMvccTests.cs) — copy-on-write on `Write`, concurrent transaction still seeing old data, rollback freeing the new chunk, revision-chain creation
+- [EcsSpawnMvccTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/EcsSpawnMvccTests.cs) — copy-on-write on `Write`, concurrent transaction still seeing old data, rollback freeing the new chunk, revision-chain creation
 
 ## 🔗 Related
 

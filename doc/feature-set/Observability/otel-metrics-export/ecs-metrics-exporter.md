@@ -1,3 +1,9 @@
+---
+uid: feature-observability-otel-metrics-export-ecs-metrics-exporter
+title: 'ECS Metrics Exporter'
+description: 'Per-archetype EntityMap health and per-component-type transient memory, as zero-cost OTel gauges.'
+---
+
 # ECS Metrics Exporter
 > Per-archetype EntityMap health and per-component-type transient memory, as zero-cost OTel gauges.
 

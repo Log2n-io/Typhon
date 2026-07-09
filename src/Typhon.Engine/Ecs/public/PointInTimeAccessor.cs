@@ -149,6 +149,7 @@ public sealed class PointInTimeAccessor : IDisposable
         }
     }
 
+    /// <summary>Detaches this accessor and disposes every per-worker <see cref="EntityAccessor"/> it owns; idempotent.</summary>
     public void Dispose()
     {
         if (_disposed)

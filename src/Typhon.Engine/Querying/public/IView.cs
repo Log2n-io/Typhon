@@ -11,7 +11,12 @@ namespace Typhon.Engine;
 /// </remarks>
 public interface IView
 {
+    /// <summary>Process-unique identifier for this view, assigned at construction.</summary>
     int ViewId { get; }
+
+    /// <summary>Indices of the indexed fields this view depends on; drives which component mutations notify the view.</summary>
     int[] FieldDependencies { get; }
+
+    /// <summary>True once the view has been disposed and its buffers released.</summary>
     bool IsDisposed { get; }
 }

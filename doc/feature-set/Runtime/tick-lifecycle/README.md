@@ -1,3 +1,9 @@
+---
+uid: feature-runtime-tick-lifecycle-index
+title: 'Tick Lifecycle & Transaction Management'
+description: 'Runtime-owned UoW per tick and auto-created per-system Transactions — the developer never commits or disposes a Transaction manually.'
+---
+
 # Tick Lifecycle & Transaction Management
 > Runtime-owned UoW per tick and auto-created per-system Transactions — the developer never commits or disposes a Transaction manually.
 

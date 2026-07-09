@@ -73,16 +73,23 @@ public readonly struct EntityId : IEquatable<EntityId>
         get => _value;
     }
 
+    /// <summary>Returns <see langword="true"/> when <paramref name="other"/> has the same packed identifier value.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool Equals(EntityId other) => _value == other._value;
 
+    /// <summary>Returns <see langword="true"/> when <paramref name="obj"/> is an <see cref="EntityId"/> equal to this one.</summary>
     public override bool Equals(object obj) => obj is EntityId other && Equals(other);
 
+    /// <summary>Hash of the packed 64-bit identifier value.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public override int GetHashCode() => _value.GetHashCode();
 
+    /// <summary>Value equality of two <see cref="EntityId"/> values.</summary>
     public static bool operator ==(EntityId left, EntityId right) => left._value == right._value;
+
+    /// <summary>Value inequality of two <see cref="EntityId"/> values.</summary>
     public static bool operator !=(EntityId left, EntityId right) => left._value != right._value;
 
+    /// <summary>Human-readable form, e.g. <c>Entity(Key=42, Arch=3)</c>, or <c>Entity(Null)</c> for the null entity.</summary>
     public override string ToString() => IsNull ? "Entity(Null)" : $"Entity(Key={EntityKey}, Arch={ArchetypeId})";
 }

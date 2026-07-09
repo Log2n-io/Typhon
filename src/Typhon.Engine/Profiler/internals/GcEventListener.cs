@@ -19,7 +19,7 @@ namespace Typhon.Engine.Internals;
 /// <b>Ctor-during-base-ctor footgun:</b> the documented-and-important rule for <see cref="EventListener"/> is that
 /// <see cref="OnEventSourceCreated"/> can fire for already-alive sources <i>before</i> our derived constructor body completes. The
 /// <c>Microsoft-Windows-DotNETRuntime</c> source is always already alive, so we <i>will</i> see that early callback. The <c>_ready</c>
-/// gate pattern ensures we latch the source pointer but defer <see cref="EnableEvents(EventSource, EventLevel, EventKeywords)"/> until the
+/// gate pattern ensures we latch the source pointer but defer <see cref="EventListener.EnableEvents(EventSource, EventLevel, EventKeywords)"/> until the
 /// queue field is confirmed assigned; the ctor tail then enables once ready.
 /// </para>
 /// <para>

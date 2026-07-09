@@ -1,6 +1,12 @@
+---
+uid: overview-runtime
+title: '10 — Runtime'
+description: 'Runtime is the engine''s heartbeat — a tick-driven scheduler that runs a static DAG of systems on a worker pool. A dedicated timer thread (the TickDriver)…'
+---
+
 # 10 — Runtime
 
-**Code:** [`src/Typhon.Engine/Runtime/`](../../src/Typhon.Engine/Runtime/)
+**Code:** [`src/Typhon.Engine/Runtime/`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Engine/Runtime)
 
 Runtime is the engine's heartbeat — a tick-driven scheduler that runs a static **DAG** of systems on a worker pool. A dedicated timer thread (the `TickDriver`) beats at a fixed rate; workers wake on each beat, dispatch ready systems by their access compatibility, and go back to sleep. There is no central dispatcher thread: every dispatch decision happens on a worker, in parallel.
 
@@ -27,7 +33,7 @@ The execution sequence at runtime is: **TickDriver fires → workers wake → fo
 
 ## 2. TickDriver — the metronome
 
-[`Runtime/public/DagScheduler.cs`](../../src/Typhon.Engine/Runtime/public/DagScheduler.cs) derives from [`HighResolutionTimerServiceBase`](../../src/Typhon.Engine/Foundation/Concurrency/internals/HighResolutionTimerServiceBase.cs) ([01-foundation §3](01-foundation.md)).
+[`Runtime/public/DagScheduler.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Runtime/public/DagScheduler.cs) derives from [`HighResolutionTimerServiceBase`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Foundation/Concurrency/internals/HighResolutionTimerServiceBase.cs) ([01-foundation §3](01-foundation.md)).
 
 | Property | Value |
 |---|---|
@@ -60,7 +66,7 @@ On wait completion the base class invokes the `OnWaitComplete` hook, which emits
 
 ## 3. Tracks
 
-[`Runtime/public/Track.cs`](../../src/Typhon.Engine/Runtime/public/Track.cs), [`Runtime/public/RuntimeSchedule.cs`](../../src/Typhon.Engine/Runtime/public/RuntimeSchedule.cs)
+[`Runtime/public/Track.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Runtime/public/Track.cs), [`Runtime/public/RuntimeSchedule.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Runtime/public/RuntimeSchedule.cs)
 
 Every schedule has three built-in tracks in execution order:
 
@@ -93,7 +99,7 @@ var scheduler = schedule.Build(parent: registry.Runtime, logger);
 
 ## 4. The DAG
 
-[`Runtime/public/Dag.cs`](../../src/Typhon.Engine/Runtime/public/Dag.cs), [`Runtime/public/SystemDefinition.cs`](../../src/Typhon.Engine/Runtime/public/SystemDefinition.cs)
+[`Runtime/public/Dag.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Runtime/public/Dag.cs), [`Runtime/public/SystemDefinition.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Runtime/public/SystemDefinition.cs)
 
 A DAG is built once at `RuntimeSchedule.Build()` time and never mutates. Each system gets a `SystemDefinition` — immutable except for a few per-tick fields:
 
@@ -109,7 +115,7 @@ A DAG is built once at `RuntimeSchedule.Build()` time and never mutates. Each sy
 
 ### `AccessDagDeriver` — derive edges from declared access
 
-[`Runtime/internals/AccessDagDeriver.cs`](../../src/Typhon.Engine/Runtime/internals/AccessDagDeriver.cs)
+[`Runtime/internals/AccessDagDeriver.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Runtime/internals/AccessDagDeriver.cs)
 
 Once phases and explicit edges are known, the deriver walks each DAG's systems and:
 
@@ -123,7 +129,7 @@ The result is a single static graph the scheduler walks every tick.
 
 ## 5. Systems
 
-[`Runtime/public/SystemType.cs`](../../src/Typhon.Engine/Runtime/public/SystemType.cs)
+[`Runtime/public/SystemType.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Runtime/public/SystemType.cs)
 
 Three execution shapes:
 
@@ -148,7 +154,7 @@ The user code **must not** commit or dispose its `Transaction` — the scheduler
 
 ### `TickContext`
 
-[`Runtime/public/TickContext.cs`](../../src/Typhon.Engine/Runtime/public/TickContext.cs)
+[`Runtime/public/TickContext.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Runtime/public/TickContext.cs)
 
 The struct handed to every `CallbackSystem` / `QuerySystem` body:
 
@@ -177,7 +183,7 @@ public struct TickContext {
 
 ## 6. Workers
 
-[`Runtime/public/DagScheduler.cs`](../../src/Typhon.Engine/Runtime/public/DagScheduler.cs) → `WorkerLoop`
+[`Runtime/public/DagScheduler.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Runtime/public/DagScheduler.cs) → `WorkerLoop`
 
 | Property | Value |
 |---|---|
@@ -223,7 +229,7 @@ Failure isolation: if a system throws, the worker marks `_systemFailed[sysIdx] =
 
 ## 7. Parallel fence
 
-[`Runtime/public/TyphonRuntime.cs:RunParallelFence`](../../src/Typhon.Engine/Runtime/public/TyphonRuntime.cs), [`Runtime/internals/Fence/`](../../src/Typhon.Engine/Runtime/internals/Fence/)
+[`Runtime/public/TyphonRuntime.cs:RunParallelFence`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Runtime/public/TyphonRuntime.cs), [`Runtime/internals/Fence/`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Engine/Runtime/internals/Fence)
 
 At tick end, after all user systems committed, the engine runs the **tick fence** — migration applies, AABB refresh, shadow drain, spatial maintenance. By default this runs in parallel on the Engine-Post track:
 
@@ -254,7 +260,7 @@ The split is also why `EnableParallelFence` exists as an off switch in `RuntimeO
 
 ## 8. Overload management
 
-[`Runtime/internals/OverloadDetector.cs`](../../src/Typhon.Engine/Runtime/internals/OverloadDetector.cs), [`Runtime/public/OverloadOptions.cs`](../../src/Typhon.Engine/Runtime/public/OverloadOptions.cs), [`Runtime/public/OverloadLevel.cs`](../../src/Typhon.Engine/Runtime/public/OverloadLevel.cs)
+[`Runtime/internals/OverloadDetector.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Runtime/internals/OverloadDetector.cs), [`Runtime/public/OverloadOptions.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Runtime/public/OverloadOptions.cs), [`Runtime/public/OverloadLevel.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Runtime/public/OverloadLevel.cs)
 
 The overload detector runs once per tick on the TickDriver. Single writer — no synchronization.
 
@@ -291,7 +297,7 @@ The chain is sticky in both directions — `EscalationTicks` consecutive overrun
 
 ## 9. Lifecycle
 
-[`Runtime/public/TyphonRuntime.cs`](../../src/Typhon.Engine/Runtime/public/TyphonRuntime.cs)
+[`Runtime/public/TyphonRuntime.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Runtime/public/TyphonRuntime.cs)
 
 `TyphonRuntime` wraps `DatabaseEngine` + `DagScheduler` and runs the per-tick UoW / Transaction discipline so game code never sees commit plumbing.
 

@@ -352,8 +352,8 @@ internal static unsafe class IndexMaintainer
     /// </summary>
     /// <param name="headBufferId">Root chunk ID of the HEAD buffer.</param>
     /// <param name="tailVSBS">The TAIL VSBS for VersionedIndexEntry storage.</param>
-    /// <param name="headAccessor">ChunkAccessor<PersistentStore> for the BTree's segment (HEAD buffer lives here).</param>
-    /// <param name="tailAccessor">ChunkAccessor<PersistentStore> for the TailIndexSegment.</param>
+    /// <param name="headAccessor"><see cref="ChunkAccessor{PersistentStore}"/> for the BTree's segment (HEAD buffer lives here).</param>
+    /// <param name="tailAccessor"><see cref="ChunkAccessor{PersistentStore}"/> for the TailIndexSegment.</param>
     /// <param name="info">ComponentInfo for looking up creation TSNs via the revision chain.</param>
     /// <param name="excludeChainId">Chain ID to skip during backfill (entity just arrived at this key via MoveValue).</param>
     /// <param name="includeChainId">Chain ID to include even though it's been removed from HEAD (entity just left via MoveValue/RemoveValue).</param>

@@ -1,3 +1,9 @@
+---
+uid: feature-querying-fluent-query-api-where-opaque-postfilter
+title: 'Opaque Post-Filter Predicates (Where)'
+description: 'Arbitrary per-entity C# predicate evaluated after a broad archetype scan — for logic the index system can''t express.'
+---
+
 # Opaque Post-Filter Predicates (Where)
 > Arbitrary per-entity C# predicate evaluated after a broad archetype scan — for logic the index system can't express.
 
@@ -51,7 +57,7 @@ using var view = tx.Query<PlayerArch>()
 
 ## 🧪 Tests
 
-- [EcsQueryTests](../../../../test/Typhon.Engine.Tests/Data/ECS/EcsQueryTests.cs) — `Where_*`: field-delegate filtering, empty/all-match edges, two-component combination, foreach, and pull-mode view refresh
+- [EcsQueryTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/EcsQueryTests.cs) — `Where_*`: field-delegate filtering, empty/all-match edges, two-component combination, foreach, and pull-mode view refresh
 
 ## 🔗 Related
 

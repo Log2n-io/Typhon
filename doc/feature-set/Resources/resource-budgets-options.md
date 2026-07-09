@@ -1,3 +1,9 @@
+---
+uid: feature-resources-resource-budgets-options
+title: 'Resource Budget Configuration (ResourceOptions)'
+description: 'Startup-time sizing of every fixed/growable resource limit, with a Validate() sanity check.'
+---
+
 # Resource Budget Configuration (ResourceOptions)
 > Startup-time sizing of every fixed/growable resource limit, with a Validate() sanity check.
 
@@ -74,7 +80,7 @@ services.AddDatabaseEngine(opt =>
   when a given limit is hit.
 
 ## 🧪 Tests
-- [ResourceOptionsTests](../../../test/Typhon.Engine.Tests/Resources/ResourceOptionsTests.cs) — defaults, `Validate()` pass/fail against
+- [ResourceOptionsTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Resources/ResourceOptionsTests.cs) — defaults, `Validate()` pass/fail against
   the memory budget, `CalculateFixedAllocationBytes`/`CalculateAvailableBudgetBytes`, `DatabaseEngineOptions.Resources` wiring
 
 ## 🔗 Related

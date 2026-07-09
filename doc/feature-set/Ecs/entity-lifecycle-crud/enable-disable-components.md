@@ -1,3 +1,9 @@
+---
+uid: feature-ecs-entity-lifecycle-crud-enable-disable-components
+title: 'Enable/Disable Components'
+description: 'O(1) bit-flip to toggle a component''s participation without freeing its data, copying it, or migrating the entity.'
+---
+
 # Enable/Disable Components
 > O(1) bit-flip to toggle a component's participation without freeing its data, copying it, or migrating the entity.
 
@@ -71,7 +77,7 @@ HashSet<EntityId> moving2 = rtx.Query<Unit>().Enabled<Velocity>().Execute();
 
 ## 🧪 Tests
 
-- [EnableDisableTests](../../../../test/Typhon.Engine.Tests/Data/ECS/EnableDisableTests.cs) — enabled-bits-after-spawn (full/partial), Enable/Disable bit-flip and data preservation across re-enable, commit persistence, MVCC (older transaction still sees pre-disable bits), multiple toggles in one transaction (last state wins), disable-then-destroy, all-disabled-but-entity-still-alive, same-transaction query visibility of a pending toggle
+- [EnableDisableTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/EnableDisableTests.cs) — enabled-bits-after-spawn (full/partial), Enable/Disable bit-flip and data preservation across re-enable, commit persistence, MVCC (older transaction still sees pre-disable bits), multiple toggles in one transaction (last state wins), disable-then-destroy, all-disabled-but-entity-still-alive, same-transaction query visibility of a pending toggle
 
 ## 🔗 Related
 

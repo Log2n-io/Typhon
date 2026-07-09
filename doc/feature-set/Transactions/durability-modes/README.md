@@ -1,3 +1,9 @@
+---
+uid: feature-transactions-durability-modes-index
+title: 'Durability Modes (Deferred / GroupCommit / Immediate)'
+description: 'Per-UoW control of WAL flush timing — trade commit latency for the data-at-risk window on crash.'
+---
+
 # Durability Modes (Deferred / GroupCommit / Immediate)
 > Per-UoW control of WAL flush timing — trade commit latency for the data-at-risk window on crash.
 
@@ -78,7 +84,7 @@ trade.Commit();               // blocks ~15-85µs — WAL FUA complete before re
 
 ## 🧪 Tests
 
-- [WalIntegrationTests](../../../../test/Typhon.Engine.Tests/Durability/WalIntegrationTests.cs) —
+- [WalIntegrationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/WalIntegrationTests.cs) —
   `WAL_GameTick_DeferredBatch_FlushAtEnd` (batched `Deferred` commits + single end-of-tick flush),
   `WAL_CriticalTrade_ImmediateAtomicity` (`Immediate` zero-loss trade), `WAL_MixedDurability_AllModesCoexist`
   (all three modes running concurrently), `WAL_Commit_DurableLsnAdvances` (parametrized across all three modes)

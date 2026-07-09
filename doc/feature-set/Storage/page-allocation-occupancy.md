@@ -1,3 +1,9 @@
+---
+uid: feature-storage-page-allocation-occupancy
+title: 'Page Allocation & Occupancy Tracking'
+description: 'A 3-level bitmap that allocates and tracks every 8KB page in the database file, growing the file automatically as needed.'
+---
+
 # Page Allocation & Occupancy Tracking
 > A 3-level bitmap that allocates and tracks every 8KB page in the database file, growing the file automatically as needed.
 
@@ -46,9 +52,9 @@ foreach (var seg in db.EnumerateStorageSegments())
 
 ## 🧪 Tests
 
-- [BitmapL3FreeRangeTests](../../../test/Typhon.Engine.Tests/Storage/BitmapL3FreeRangeTests.cs) — `ManagedPagedMMF.FreePages` contiguous-range bit-flip and subsequent reallocation
-- [ManagedPagedMMFTests](../../../test/Typhon.Engine.Tests/Storage/ManagedPagedMMFTests.cs) — L0/L1 bitmap find/set primitives, occupancy map save/reload, map growth
-- [BootstrapDictionaryTests](../../../test/Typhon.Engine.Tests/Storage/BootstrapDictionaryTests.cs) — root-page key/value round-trip backing the occupancy segment's persisted bootstrap entries
+- [BitmapL3FreeRangeTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Storage/BitmapL3FreeRangeTests.cs) — `ManagedPagedMMF.FreePages` contiguous-range bit-flip and subsequent reallocation
+- [ManagedPagedMMFTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Storage/ManagedPagedMMFTests.cs) — L0/L1 bitmap find/set primitives, occupancy map save/reload, map growth
+- [BootstrapDictionaryTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Storage/BootstrapDictionaryTests.cs) — root-page key/value round-trip backing the occupancy segment's persisted bootstrap entries
 
 ## 🔗 Related
 

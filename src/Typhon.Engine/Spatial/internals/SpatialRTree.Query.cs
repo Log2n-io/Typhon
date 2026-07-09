@@ -47,6 +47,9 @@ internal unsafe partial class SpatialRTree<TStore>
     /// </summary>
     /// <param name="queryCoords">CoordCount doubles: [min0, min1, ..., max0, max1, ...]</param>
     /// <param name="changeSet">ChangeSet for page access tracking</param>
+    /// <param name="categoryMask">
+    /// Category bitmask; when non-zero, only entities whose category mask contains all of these bits match. Pass <c>0</c> (default) to disable category filtering.
+    /// </param>
     internal AABBQueryEnumerator QueryAABB(ReadOnlySpan<double> queryCoords, ChangeSet changeSet = null, uint categoryMask = 0)
         => new(this, queryCoords, changeSet, categoryMask);
 

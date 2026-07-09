@@ -1,3 +1,9 @@
+---
+uid: feature-runtime-telemetry-runtime-inspection
+title: 'Telemetry & Runtime Inspection'
+description: 'Always-on, zero-allocation per-tick telemetry your game code can read directly — no exporter required.'
+---
+
 # Telemetry & Runtime Inspection
 > Always-on, zero-allocation per-tick telemetry your game code can read directly — no exporter required.
 
@@ -54,7 +60,7 @@ for (var n = ring.OldestAvailableTick; n <= ring.NewestTick; n++)
 
 ## 🧪 Tests
 
-- [TickTelemetryRingTests](../../../test/Typhon.Engine.Tests/Runtime/TickTelemetryRingTests.cs) — record/read round-trip, ring-wrap eviction of the oldest tick, out-of-window `GetTick` throws
+- [TickTelemetryRingTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/TickTelemetryRingTests.cs) — record/read round-trip, ring-wrap eviction of the oldest tick, out-of-window `GetTick` throws
 
 ## 🔗 Related
 - Related feature: [Subscription Telemetry & Tracing](../Subscriptions/subscription-telemetry.md)

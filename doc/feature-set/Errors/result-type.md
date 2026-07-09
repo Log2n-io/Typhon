@@ -1,3 +1,9 @@
+---
+uid: feature-errors-result-type
+title: 'Result Hot-Path Result Type'
+description: 'Zero-allocation dual-generic result struct for hot-path lookups that expect a miss — no exceptions, no boxing, no branch on access.'
+---
+
 # Result<TValue,TStatus> Hot-Path Result Type
 > Zero-allocation dual-generic result struct for hot-path lookups that expect a miss — no exceptions, no boxing, no branch on access.
 
@@ -54,7 +60,7 @@ The same `Result<TValue, TStatus>` struct is `public` and generic, so your own p
 
 ## 🧪 Tests
 
-- [ResultTests](../../../test/Typhon.Engine.Tests/Errors/ResultTests.cs) — success/failure construction, `IsSuccess`/`IsFailure`, default-value-on-failure `Value` access (the "misuse without checking `IsSuccess` first" case), and status-enum round-tripping for `BTreeLookupStatus`/`RevisionReadStatus`.
+- [ResultTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Errors/ResultTests.cs) — success/failure construction, `IsSuccess`/`IsFailure`, default-value-on-failure `Value` access (the "misuse without checking `IsSuccess` first" case), and status-enum round-tripping for `BTreeLookupStatus`/`RevisionReadStatus`.
 
 ## 🔗 Related
 

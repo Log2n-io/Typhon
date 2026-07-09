@@ -1,3 +1,9 @@
+---
+uid: feature-ecs-storage-modes-index
+title: 'Storage Modes'
+description: 'Pick durability and write cost per component type — from microsecond ACID to nanosecond scratch memory, in one engine.'
+---
+
 # Storage Modes
 > Pick durability and write cost per component type — from microsecond ACID to nanosecond scratch memory, in one engine.
 
@@ -45,8 +51,8 @@ without paying for a revision chain.
 
 ## 🧪 Tests
 
-- [StorageModeReadWriteTests](../../../../test/Typhon.Engine.Tests/Data/StorageModeReadWriteTests.cs) — an entity mixing all three modes, uniform `Read`/`Write` across them, per-mode rollback/dirty-bitmap behavior
-- [StorageModeInfrastructureTests](../../../../test/Typhon.Engine.Tests/Data/StorageModeInfrastructureTests.cs) — `[Component(StorageMode = ...)]` attribute defaults/overrides, per-mode segment allocation differences
+- [StorageModeReadWriteTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/StorageModeReadWriteTests.cs) — an entity mixing all three modes, uniform `Read`/`Write` across them, per-mode rollback/dirty-bitmap behavior
+- [StorageModeInfrastructureTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/StorageModeInfrastructureTests.cs) — `[Component(StorageMode = ...)]` attribute defaults/overrides, per-mode segment allocation differences
 
 ## 🔗 Related
 

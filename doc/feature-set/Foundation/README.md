@@ -1,3 +1,9 @@
+---
+uid: feature-foundation-index
+title: 'Foundation'
+description: 'Typhon''s lowest-level building blocks — lock-free synchronization primitives, epoch-based memory safety, monotonic deadline/timeout propagation,…'
+---
+
 # Foundation
 > Typhon's lowest-level building blocks — lock-free synchronization primitives, epoch-based memory safety, monotonic deadline/timeout propagation, pinned-memory allocators, and high-performance collections — that every other engine layer (storage, ECS, durability, query) is built on. Nearly the entire surface is `internal` engine plumbing (a few types, like `EpochManager` and `IMemoryResource`, are C# `public` but namespaced under `Typhon.Engine.Internals`); the only types meant for direct application use are `Deadline`, `WaitContext`, and `UnitOfWorkContext` — the timeout/cancellation values threaded into every `Commit()`.
 

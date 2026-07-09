@@ -1,3 +1,9 @@
+---
+uid: feature-spatial-checkerboard-dispatch
+title: 'Checkerboard Dispatch'
+description: 'Red/Black two-phase parallel dispatch so neighbor-touching systems never race across a cell boundary.'
+---
+
 # Checkerboard Dispatch
 > Red/Black two-phase parallel dispatch so neighbor-touching systems never race across a cell boundary.
 
@@ -64,11 +70,11 @@ schedule.QuerySystem("Pheromone_Diffuse", ctx =>
 
 ## 🧪 Tests
 
-- [CheckerboardTests](../../../test/Typhon.Engine.Tests/Runtime/CheckerboardTests.cs) — `Checkerboard_TwoPhases_BothExecute`, `Checkerboard_RedBlack_NoOverlap`, `Checkerboard_ZeroRedClusters_BlackStillRuns`, `Checkerboard_RequiresParallel_Throws`, `Checkerboard_WithDormancy_SleepingSkipped`, `Checkerboard_NoTierFilter_StillSplits`
+- [CheckerboardTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/CheckerboardTests.cs) — `Checkerboard_TwoPhases_BothExecute`, `Checkerboard_RedBlack_NoOverlap`, `Checkerboard_ZeroRedClusters_BlackStillRuns`, `Checkerboard_RequiresParallel_Throws`, `Checkerboard_WithDormancy_SleepingSkipped`, `Checkerboard_NoTierFilter_StillSplits`
 
 ## 🔗 Related
 
-- Source: [src/Typhon.Engine/Runtime/public/Dag.cs](../../../src/Typhon.Engine/Runtime/public/Dag.cs) (`QuerySystem` `checkerboard:` parameter), [SystemBuilder.cs](../../../src/Typhon.Engine/Runtime/public/SystemBuilder.cs) (`Checkerboard()`), [TyphonRuntime.cs](../../../src/Typhon.Engine/Runtime/public/TyphonRuntime.cs) (`SplitCheckerboardClusters`, two-phase prepare/re-dispatch)
+- Source: [src/Typhon.Engine/Runtime/public/Dag.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Runtime/public/Dag.cs) (`QuerySystem` `checkerboard:` parameter), [SystemBuilder.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Runtime/public/SystemBuilder.cs) (`Checkerboard()`), [TyphonRuntime.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Runtime/public/TyphonRuntime.cs) (`SplitCheckerboardClusters`, two-phase prepare/re-dispatch)
 - Related catalog entry: [Tiered Simulation Dispatch](./tiered-simulation-dispatch.md) (the tier filter checkerboard composes with)
 - Sibling: [Checkerboard (Red/Black) Dispatch](../Runtime/spatial-tiers-adaptive-dispatch/checkerboard-dispatch.md) — same feature cataloged from the Runtime/dispatch angle rather than the spatial-grid angle
 

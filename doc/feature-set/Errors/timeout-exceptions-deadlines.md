@@ -1,3 +1,9 @@
+---
+uid: feature-errors-timeout-exceptions-deadlines
+title: 'Timeout Exceptions & Deadline Propagation'
+description: 'Configurable, finite deadlines replace infinite waits, turning every contention hang into a typed, catchable timeout exception.'
+---
+
 # Timeout Exceptions & Deadline Propagation
 > Configurable, finite deadlines replace infinite waits, turning every contention hang into a typed, catchable timeout exception.
 
@@ -84,8 +90,8 @@ catch (TyphonTimeoutException ex)
 
 ## 🧪 Tests
 
-- [DeadlinePropagationTests](../../../test/Typhon.Engine.Tests/Errors/DeadlinePropagationTests.cs) — `TimeoutOptions` defaults/overrides, `AccessControl`/`ResourceAccessControl` lock contention throwing `LockTimeoutException` once the deadline expires, and `TestWaitContext` expiry semantics.
-- [TyphonExceptionTests](../../../test/Typhon.Engine.Tests/Errors/TyphonExceptionTests.cs) — `LockTimeoutException`/`TransactionTimeoutException` typed properties (`ResourceName`/`TransactionId`/`WaitDuration`) and the `catch (TyphonTimeoutException)` mid-granularity roundtrip.
+- [DeadlinePropagationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Errors/DeadlinePropagationTests.cs) — `TimeoutOptions` defaults/overrides, `AccessControl`/`ResourceAccessControl` lock contention throwing `LockTimeoutException` once the deadline expires, and `TestWaitContext` expiry semantics.
+- [TyphonExceptionTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Errors/TyphonExceptionTests.cs) — `LockTimeoutException`/`TransactionTimeoutException` typed properties (`ResourceName`/`TransactionId`/`WaitDuration`) and the `catch (TyphonTimeoutException)` mid-granularity roundtrip.
 
 ## 🔗 Related
 

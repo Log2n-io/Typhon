@@ -1,3 +1,9 @@
+---
+uid: feature-transactions-durability-discipline-durability-discipline-commit
+title: 'Commit Discipline (Variant-A Staging)'
+description: 'Atomic, zero-loss SingleVersion writes — durable and visible together at Commit(), with no revision chain.'
+---
+
 # Commit Discipline (Variant-A Staging)
 > Atomic, zero-loss `SingleVersion` writes — durable and visible together at `Commit()`, with no revision chain.
 
@@ -79,10 +85,10 @@ side.Commit();
 
 ## 🧪 Tests
 
-- [CommittedDisciplineTests](../../../../test/Typhon.Engine.Tests/Data/ECS/CommittedDisciplineTests.cs) —
+- [CommittedDisciplineTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/CommittedDisciplineTests.cs) —
   staging/publish (`CommitDiscipline_Write_PublishesAtCommit`), read-your-own-writes, rollback discards staged
   values (`CommitDiscipline_Rollback_DiscardsStaged`), multi-write atomicity, indexed-field commit cost
-- [CommittedDisciplineRecoveryTests](../../../../test/Typhon.Engine.Tests/Durability/CrashRecovery/CommittedDisciplineRecoveryTests.cs)
+- [CommittedDisciplineRecoveryTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/CrashRecovery/CommittedDisciplineRecoveryTests.cs)
   — zero-loss crash survival, mixed `Commit`/`TickFence` writes under churn, indexed cluster spawn across a
   consolidating checkpoint crash
 

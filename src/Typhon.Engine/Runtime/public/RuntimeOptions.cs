@@ -100,5 +100,9 @@ public class RuntimeOptions
 [PublicAPI]
 public sealed record FenceCostModel(float MigrationCost, float AabbCost, float ShadowCost, float SpatialCost)
 {
+    /// <summary>
+    /// Default coefficients, calibrated against AntHill traces: migration ≈ 33.3 µs/entity, AABB recompute ≈ 2.4 µs/cluster.
+    /// Shadow and Spatial coefficients are placeholders (1.0) pending measurement — override them for shadow-heavy or spatial workloads.
+    /// </summary>
     public static readonly FenceCostModel Default = new(33.3f, 2.4f, 1f, 1f);
 }

@@ -1,3 +1,9 @@
+---
+uid: feature-schema-migration-functions
+title: 'User-Defined Migration Functions'
+description: 'Register a pure transform to carry data through a breaking schema change — type narrowing, semantic conversions, field split/merge.'
+---
+
 # User-Defined Migration Functions
 > Register a pure transform to carry data through a breaking schema change — type narrowing, semantic conversions, field split/merge.
 
@@ -69,8 +75,8 @@ Track progress on large migrations via `dbe.OnMigrationProgress`.
 
 ## 🧪 Tests
 
-- [MigrationFunctionTests](../../../test/Typhon.Engine.Tests/Data/Schema/MigrationFunctionTests.cs) — typed single-step and chained (V1→V2→V3) migrations, byte-level migration, per-entity failure logging + `SchemaMigrationException`, missing-path throws, duplicate registration
-- [MigrationRegistryTests](../../../test/Typhon.Engine.Tests/Data/Schema/MigrationRegistryTests.cs) — pure registry: name/revision-ordering validation, BFS chain resolution (direct/multi-step/no-path), zero-init sanity check on registration
+- [MigrationFunctionTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/Schema/MigrationFunctionTests.cs) — typed single-step and chained (V1→V2→V3) migrations, byte-level migration, per-entity failure logging + `SchemaMigrationException`, missing-path throws, duplicate registration
+- [MigrationRegistryTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/Schema/MigrationRegistryTests.cs) — pure registry: name/revision-ordering validation, BFS chain resolution (direct/multi-step/no-path), zero-init sanity check on registration
 
 ## 🔗 Related
 

@@ -1,3 +1,9 @@
+---
+uid: feature-resources-snapshot-query-api-index
+title: 'Snapshot & Query API'
+description: 'Pull a consistent-enough, point-in-time snapshot of the whole resource tree, then query it for memory, capacity, and rate answers.'
+---
+
 # Snapshot & Query API
 > Pull a consistent-enough, point-in-time snapshot of the whole resource tree, then query it for memory, capacity, and rate answers.
 
@@ -76,12 +82,12 @@ resourceGraph.ResetAllPeaks(); // start a fresh peak-measurement window across a
 
 ## 🧪 Tests
 
-- [ResourceSnapshotTests](../../../../test/Typhon.Engine.Tests/Resources/ResourceSnapshotTests.cs) — snapshot capture, subtree scoping,
+- [ResourceSnapshotTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Resources/ResourceSnapshotTests.cs) — snapshot capture, subtree scoping,
   `GetSubtreeMemory`/`FindMostUtilized`/`FindByType`/`GetSubtree`, throughput rate computation, thread-safe concurrent `GetSnapshot` calls
 
 ## 🔗 Related
 
-- Source: [src/Typhon.Engine/Resources/public/IResourceGraph.cs](../../../../src/Typhon.Engine/Resources/public/IResourceGraph.cs), [src/Typhon.Engine/Resources/public/ResourceGraph.cs](../../../../src/Typhon.Engine/Resources/public/ResourceGraph.cs), [src/Typhon.Engine/Resources/public/ResourceSnapshot.cs](../../../../src/Typhon.Engine/Resources/public/ResourceSnapshot.cs)
+- Source: [src/Typhon.Engine/Resources/public/IResourceGraph.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Resources/public/IResourceGraph.cs), [src/Typhon.Engine/Resources/public/ResourceGraph.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Resources/public/ResourceGraph.cs), [src/Typhon.Engine/Resources/public/ResourceSnapshot.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Resources/public/ResourceSnapshot.cs)
 - Sub-features: [Root-Cause Cascade Analysis (FindRootCause)](./root-cause-cascade-analysis.md)
 - Sibling: [Metric Reporting](../metric-reporting.md) — the per-node data this API freezes into a snapshot.
 

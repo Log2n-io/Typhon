@@ -1,3 +1,9 @@
+---
+uid: feature-spatial-spatial-coherent-clustering
+title: 'Spatially-Coherent Entity Clustering'
+description: 'Every entity in a cluster shares one grid cell, so spatial bookkeeping is per-cluster, not per-entity.'
+---
+
 # Spatially-Coherent Entity Clustering
 > Every entity in a cluster shares one grid cell, so spatial bookkeeping is per-cluster, not per-entity.
 
@@ -76,15 +82,15 @@ wt.Commit();
 
 ## 🧪 Tests
 
-- [ClusterSpatialCoherenceTests](../../../test/Typhon.Engine.Tests/Data/ECS/ClusterSpatialCoherenceTests.cs) — cluster-cell invariant at spawn/overflow (`Spawn_ManyEntitiesInSameCell_LandInSameCluster`, `Spawn_BeyondClusterCapacity_AllocatesSecondClusterInSameCell`), grid-config opt-in guards, reopen rebuild
-- [ClusterMigrationTests](../../../test/Typhon.Engine.Tests/Data/ECS/ClusterMigrationTests.cs) — hysteresis (`PositionChangeWithinHysteresis_NoMigration`/`_BeyondHysteresis_Migrates`), atomic cross-cluster migration incl. Transient data, empty-cluster deallocation, reopen remapping
+- [ClusterSpatialCoherenceTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/ClusterSpatialCoherenceTests.cs) — cluster-cell invariant at spawn/overflow (`Spawn_ManyEntitiesInSameCell_LandInSameCluster`, `Spawn_BeyondClusterCapacity_AllocatesSecondClusterInSameCell`), grid-config opt-in guards, reopen rebuild
+- [ClusterMigrationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/ClusterMigrationTests.cs) — hysteresis (`PositionChangeWithinHysteresis_NoMigration`/`_BeyondHysteresis_Migrates`), atomic cross-cluster migration incl. Transient data, empty-cluster deallocation, reopen remapping
 
 ## 🔗 Related
 
-- Source: [src/Typhon.Engine/Spatial/internals/CellClusterPool.cs](../../../src/Typhon.Engine/Spatial/internals/CellClusterPool.cs)
-- Source: [src/Typhon.Engine/Spatial/internals/MigrationRequest.cs](../../../src/Typhon.Engine/Spatial/internals/MigrationRequest.cs)
-- Source: [src/Typhon.Engine/Ecs/internals/ArchetypeClusterState.cs](../../../src/Typhon.Engine/Ecs/internals/ArchetypeClusterState.cs) (`ClaimSlotInCell`, `RebuildCellState`, `RebuildClusterAabbs`)
-- Source: [src/Typhon.Engine/Ecs/public/DatabaseEngine.cs](../../../src/Typhon.Engine/Ecs/public/DatabaseEngine.cs) (`DetectClusterMigrations`, `ExecuteMigrations`, `ConfigureSpatialGrid`)
+- Source: [src/Typhon.Engine/Spatial/internals/CellClusterPool.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/CellClusterPool.cs)
+- Source: [src/Typhon.Engine/Spatial/internals/MigrationRequest.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/MigrationRequest.cs)
+- Source: [src/Typhon.Engine/Ecs/internals/ArchetypeClusterState.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/internals/ArchetypeClusterState.cs) (`ClaimSlotInCell`, `RebuildCellState`, `RebuildClusterAabbs`)
+- Source: [src/Typhon.Engine/Ecs/public/DatabaseEngine.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/DatabaseEngine.cs) (`DetectClusterMigrations`, `ExecuteMigrations`, `ConfigureSpatialGrid`)
 - Related catalog entry: [Entity Clusters](../Ecs/entity-clusters.md) (the base SoA storage this constrains)
 - Related catalog entry: [Spatial Grid Configuration & Tier Control](./spatial-grid-config.md) (the grid this clustering shares)
 - Related catalog entry: [Cluster Spatial Queries](./cluster-spatial-queries.md) (the query layer this coherence makes cheap)

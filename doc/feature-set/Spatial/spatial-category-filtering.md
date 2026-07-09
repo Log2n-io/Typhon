@@ -1,3 +1,9 @@
+---
+uid: feature-spatial-spatial-category-filtering
+title: 'Category Filtering'
+description: 'Bitmask pruning skips whole subtrees and clusters before geometry tests — AND-conjunctive at the R-Tree, any-bit-overlap at the cluster broadphase.'
+---
+
 # Category Filtering
 > Bitmask pruning skips whole subtrees and clusters before geometry tests — AND-conjunctive at the R-Tree, any-bit-overlap at the cluster broadphase.
 
@@ -54,16 +60,16 @@ foreach (var hit in dbe.ClusterSpatialQuery<UnitArch>().AABB(box, categoryMask: 
 
 ## 🧪 Tests
 
-- [SpatialRTreeTests](../../../test/Typhon.Engine.Tests/Data/SpatialIndex/SpatialRTreeTests.cs) — R-Tree AND-conjunctive leaf test and union-mask pruning (`Query_WithCategoryMask_FiltersCorrectly`, `CategoryMask_WithBruteForce_RandomData`, `SetEntryCategoryMask_UpdatesLeafAndAncestors`)
-- [CellSpatialIndexTests](../../../test/Typhon.Engine.Tests/Data/SpatialGrid/CellSpatialIndexTests.cs) — per-cluster `CategoryMask` storage and any-bit-overlap union computation for the cluster broadphase
+- [SpatialRTreeTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/SpatialIndex/SpatialRTreeTests.cs) — R-Tree AND-conjunctive leaf test and union-mask pruning (`Query_WithCategoryMask_FiltersCorrectly`, `CategoryMask_WithBruteForce_RandomData`, `SetEntryCategoryMask_UpdatesLeafAndAncestors`)
+- [CellSpatialIndexTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/SpatialGrid/CellSpatialIndexTests.cs) — per-cluster `CategoryMask` storage and any-bit-overlap union computation for the cluster broadphase
 
 ## 🔗 Related
 
-- Source: [src/Typhon.Engine/Spatial/internals/SpatialNodeHelper.cs](../../../src/Typhon.Engine/Spatial/internals/SpatialNodeHelper.cs) (leaf/union mask storage and refit)
-- Source: [src/Typhon.Engine/Spatial/internals/SpatialRTree.Query.cs](../../../src/Typhon.Engine/Spatial/internals/SpatialRTree.Query.cs) (per-enumerator pruning and leaf test)
-- Source: [src/Typhon.Engine/Spatial/public/ClusterSpatialAabb.cs](../../../src/Typhon.Engine/Spatial/public/ClusterSpatialAabb.cs) (per-cluster category union)
-- Source: [src/Typhon.Engine/Spatial/public/ClusterSpatialQuery.cs](../../../src/Typhon.Engine/Spatial/public/ClusterSpatialQuery.cs) (public query entry point)
-- Source: [src/Typhon.Schema.Definition/Attributes.cs](../../../src/Typhon.Schema.Definition/Attributes.cs) (`SpatialIndexAttribute.Category`, OR-disjunctive semantics documented inline)
+- Source: [src/Typhon.Engine/Spatial/internals/SpatialNodeHelper.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/SpatialNodeHelper.cs) (leaf/union mask storage and refit)
+- Source: [src/Typhon.Engine/Spatial/internals/SpatialRTree.Query.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/SpatialRTree.Query.cs) (per-enumerator pruning and leaf test)
+- Source: [src/Typhon.Engine/Spatial/public/ClusterSpatialAabb.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/public/ClusterSpatialAabb.cs) (per-cluster category union)
+- Source: [src/Typhon.Engine/Spatial/public/ClusterSpatialQuery.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/public/ClusterSpatialQuery.cs) (public query entry point)
+- Source: [src/Typhon.Schema.Definition/Attributes.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Schema.Definition/Attributes.cs) (`SpatialIndexAttribute.Category`, OR-disjunctive semantics documented inline)
 - Related catalog entry: [Spatial Query API](./spatial-query-api.md), [Spatial Query Predicates](../Querying/spatial-predicates.md)
 
 <!-- Deep dive: claude/design/Spatial/SpatialIndex/08-game-features.md (Feature F1 — Category Filtering: design rationale, bit-width choice, node-layout impact) -->

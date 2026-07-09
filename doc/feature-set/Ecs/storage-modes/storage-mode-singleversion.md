@@ -1,3 +1,9 @@
+---
+uid: feature-ecs-storage-modes-storage-mode-singleversion
+title: 'SingleVersion (Tick-Fence Durability)'
+description: 'In-place writes at near-zero cost, durable to the last completed game tick.'
+---
+
 # SingleVersion (Tick-Fence Durability)
 > In-place writes at near-zero cost, durable to the last completed game tick.
 
@@ -69,8 +75,8 @@ dbe.WriteTickFence(tickNumber);  // batches every dirty SingleVersion component 
 
 ## 🧪 Tests
 
-- [StorageModeTickFenceTests](../../../../test/Typhon.Engine.Tests/Data/StorageModeTickFenceTests.cs) — `WriteTickFence` dirty-bitmap serialization, Versioned/Transient correctly skipped
-- [TickFenceE2ETests](../../../../test/Typhon.Engine.Tests/Durability/TickFenceE2ETests.cs) — crash/reopen recovery to the last completed tick fence, multi-entity and multi-update recovery
+- [StorageModeTickFenceTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/StorageModeTickFenceTests.cs) — `WriteTickFence` dirty-bitmap serialization, Versioned/Transient correctly skipped
+- [TickFenceE2ETests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/TickFenceE2ETests.cs) — crash/reopen recovery to the last completed tick fence, multi-entity and multi-update recovery
 
 ## 🔗 Related
 

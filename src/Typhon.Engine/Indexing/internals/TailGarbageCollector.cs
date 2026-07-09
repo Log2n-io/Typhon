@@ -35,7 +35,7 @@ internal static class TailGarbageCollector
     /// <param name="tailVSBS">The TAIL VSBS containing version history entries.</param>
     /// <param name="tailBufferId">The root chunk ID of the TAIL buffer to prune.</param>
     /// <param name="retentionTSN">Entries with TSN below this may be pruned (oldest active transaction TSN).</param>
-    /// <param name="accessor">ChunkAccessor<PersistentStore> for the TailIndexSegment.</param>
+    /// <param name="accessor"><see cref="ChunkAccessor{PersistentStore}"/> for the TAIL index segment.</param>
     /// <param name="newTailBufferId">Return the ID of the new TAIL VSBS buffer</param>
     /// <returns>Number of entries removed.</returns>
     internal static int Prune(VariableSizedBufferSegment<VersionedIndexEntry, PersistentStore> tailVSBS, int tailBufferId, long retentionTSN, 

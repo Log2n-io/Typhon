@@ -1,3 +1,9 @@
+---
+uid: feature-transactions-index
+title: 'Transactions'
+description: 'Implements Typhon''s three-tier execution model (DatabaseEngine → UnitOfWork → Transaction): the durability'
+---
+
 # Transactions
 
 > Implements Typhon's three-tier execution model (`DatabaseEngine` → `UnitOfWork` → `Transaction`): the durability

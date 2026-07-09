@@ -9,7 +9,7 @@ namespace Typhon.Engine.Internals;
 /// <b>Wire-format invariance.</b> This struct never appears on the wire as a single blob. The codec methods take individual fields as separate
 /// arguments (ThreadSlot, StartTimestamp, ...). Phase 1 of the #294 refactor only changes how the producer-side struct lays them out in memory;
 /// the codec call signatures are unchanged and the produced bytes are byte-for-byte identical. Verified by
-/// <see cref="Typhon.Engine.Tests.Profiler.TraceEventEncodeEquivalenceTests"/>.
+/// <c>TraceEventEncodeEquivalenceTests</c>.
 /// </para>
 /// <para>
 /// <b>Public field rather than property.</b> The producer-side path (<c>BeginX</c> factories, <c>EncodeTo</c>, <c>Dispose</c>) reads and writes

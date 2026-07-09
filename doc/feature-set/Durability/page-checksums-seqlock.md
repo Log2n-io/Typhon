@@ -1,3 +1,9 @@
+---
+uid: feature-durability-page-checksums-seqlock
+title: 'Page Checksums & Seqlock Snapshots'
+description: 'CRC32C torn-page detection on every page, paired with a lock-free seqlock so checkpoints snapshot live pages without blocking writers.'
+---
+
 # Page Checksums & Seqlock Snapshots
 > CRC32C torn-page detection on every page, paired with a lock-free seqlock so checkpoints snapshot live pages without blocking writers.
 
@@ -57,9 +63,9 @@ catch (PageCorruptionException ex)
 
 ## 🧪 Tests
 
-- [PageCrcVerificationTests](../../../test/Typhon.Engine.Tests/Durability/PageCrcVerificationTests.cs) — lazy CRC verification on page load (`OnLoad` mode), mismatch throws `PageCorruptionException`
-- [SeqlockProtocolTests](../../../test/Typhon.Engine.Tests/Durability/SeqlockProtocolTests.cs) — modification-counter seqlock protocol, checkpoint CRC stamping, concurrent snapshot consistency
-- [Crc32CUtilTests](../../../test/Typhon.Engine.Tests/Durability/Crc32CUtilTests.cs) — the CRC32C algorithm itself against known test vectors
+- [PageCrcVerificationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/PageCrcVerificationTests.cs) — lazy CRC verification on page load (`OnLoad` mode), mismatch throws `PageCorruptionException`
+- [SeqlockProtocolTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/SeqlockProtocolTests.cs) — modification-counter seqlock protocol, checkpoint CRC stamping, concurrent snapshot consistency
+- [Crc32CUtilTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/Crc32CUtilTests.cs) — the CRC32C algorithm itself against known test vectors
 
 ## 🔗 Related
 

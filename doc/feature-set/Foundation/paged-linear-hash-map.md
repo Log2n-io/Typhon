@@ -1,3 +1,9 @@
+---
+uid: feature-foundation-paged-linear-hash-map
+title: 'Page-Backed Linear Hash Map'
+description: 'O(1) exact-match key/value index, persisted in fixed-size chunks, with crash-safe rebuild instead of WAL logging.'
+---
+
 # Page-Backed Linear Hash Map
 > O(1) exact-match key/value index, persisted in fixed-size chunks, with crash-safe rebuild instead of WAL logging.
 
@@ -61,7 +67,7 @@ var reopened = PagedHashMap<long, int, PersistentStore>.Open(segment);
 - One hash map owns its `ChunkBasedSegment` exclusively — chunk 0 is hardcoded as its meta chunk, so multiple maps cannot share a segment.
 
 ## 🧪 Tests
-- [PagedHashMapTests](../../../test/Typhon.Engine.Tests/Data/HashMapTests.cs) — meta/directory struct layout, linear-hash bucket resolution across splits, `Create`/`Open` round-trip, insert/lookup/remove over a `ChunkAccessor`.
+- [PagedHashMapTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/HashMapTests.cs) — meta/directory struct layout, linear-hash bucket resolution across splits, `Create`/`Open` round-trip, insert/lookup/remove over a `ChunkAccessor`.
 
 ## 🔗 Related
 

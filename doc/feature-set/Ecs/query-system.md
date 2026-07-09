@@ -1,3 +1,9 @@
+---
+uid: feature-ecs-query-system
+title: 'Query System (EcsQuery)'
+description: 'Three-tier constraint evaluation with planner-chosen broad or targeted scan, indexed predicates, FK joins, and spatial filters.'
+---
+
 # Query System (EcsQuery)
 > Three-tier constraint evaluation with planner-chosen broad or targeted scan, indexed predicates, FK joins, and spatial filters.
 
@@ -72,9 +78,9 @@ using EcsView<Factory> view = tx.Query<Factory>()
 
 ## 🧪 Tests
 
-- [EcsQueryTests](../../../test/Typhon.Engine.Tests/Data/ECS/EcsQueryTests.cs) — Tier1/Tier2/Tier3 broad scan (`With`/`Without`/`Exclude`/`Enabled`/`Disabled`/opaque `Where`), contradiction short-circuit, `Count`/`Any`
-- [EcsQueryTargetedScanTests](../../../test/Typhon.Engine.Tests/Data/ECS/EcsQueryTargetedScanTests.cs) — `WhereField` targeted (index-first) scan vs. broad-scan equivalence, `OrderByField`/`Skip`/`Take`, guard-throws for missing `WhereField`/`OrderBy`
-- [EcsNavigationTests](../../../test/Typhon.Engine.Tests/Data/ECS/EcsNavigationTests.cs) — `NavigateField` FK join combining source and target predicates, `Count`, incremental view over a join
+- [EcsQueryTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/EcsQueryTests.cs) — Tier1/Tier2/Tier3 broad scan (`With`/`Without`/`Exclude`/`Enabled`/`Disabled`/opaque `Where`), contradiction short-circuit, `Count`/`Any`
+- [EcsQueryTargetedScanTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/EcsQueryTargetedScanTests.cs) — `WhereField` targeted (index-first) scan vs. broad-scan equivalence, `OrderByField`/`Skip`/`Take`, guard-throws for missing `WhereField`/`OrderBy`
+- [EcsNavigationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/EcsNavigationTests.cs) — `NavigateField` FK join combining source and target predicates, `Count`, incremental view over a join
 
 ## 🔗 Related
 

@@ -39,15 +39,33 @@ public readonly struct Phase : IEquatable<Phase>
     /// <summary>The Cleanup phase — runs last by default. Reserved for systems that finalise tick state (archetype cleanup, index updates, etc.).</summary>
     public static readonly Phase Cleanup = new("Cleanup");
 
+    /// <summary>Ordinal equality on <see cref="Name"/>.</summary>
+    /// <param name="other">The phase to compare with.</param>
+    /// <returns><c>true</c> when both names are ordinally equal.</returns>
     public bool Equals(Phase other) => string.Equals(Name, other.Name, StringComparison.Ordinal);
 
+    /// <summary>Ordinal equality — <c>true</c> when <paramref name="obj"/> is a <see cref="Phase"/> with an equal <see cref="Name"/>.</summary>
+    /// <param name="obj">The object to compare with.</param>
+    /// <returns><c>true</c> when <paramref name="obj"/> is an equal <see cref="Phase"/>.</returns>
     public override bool Equals(object obj) => obj is Phase p && Equals(p);
 
+    /// <summary>Ordinal hash of <see cref="Name"/>; <c>0</c> when the name is <c>null</c>.</summary>
+    /// <returns>The hash code.</returns>
     public override int GetHashCode() => Name?.GetHashCode(StringComparison.Ordinal) ?? 0;
 
+    /// <summary>Ordinal equality operator — see <see cref="Equals(Phase)"/>.</summary>
+    /// <param name="a">Left operand.</param>
+    /// <param name="b">Right operand.</param>
+    /// <returns><c>true</c> when the phases are equal.</returns>
     public static bool operator ==(Phase a, Phase b) => a.Equals(b);
 
+    /// <summary>Ordinal inequality operator — negation of <see cref="Equals(Phase)"/>.</summary>
+    /// <param name="a">Left operand.</param>
+    /// <param name="b">Right operand.</param>
+    /// <returns><c>true</c> when the phases differ.</returns>
     public static bool operator !=(Phase a, Phase b) => !a.Equals(b);
 
+    /// <summary>The phase <see cref="Name"/>, or <c>"&lt;unset&gt;"</c> when the name is <c>null</c>.</summary>
+    /// <returns>The phase name, for diagnostic output.</returns>
     public override string ToString() => Name ?? "<unset>";
 }

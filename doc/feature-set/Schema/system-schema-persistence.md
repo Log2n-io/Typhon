@@ -1,3 +1,9 @@
+---
+uid: feature-schema-system-schema-persistence
+title: 'System Schema Persistence'
+description: 'A Typhon database file describes its own component/field metadata — no external schema file needed.'
+---
+
 # System Schema Persistence
 > A Typhon database file describes its own component/field metadata — no external schema file needed.
 
@@ -41,8 +47,8 @@ There is no direct API for this layer — it activates automatically on `Registe
 
 ## 🧪 Tests
 
-- [FieldIdStabilityTests](../../../test/Typhon.Engine.Tests/Data/Schema/FieldIdStabilityTests.cs) — `FieldR1_RoundTrip_SameSession` walks `ComponentR1` chunks and reads nested `FieldR1` entries directly via `SystemCrud.Read`
-- [SchemaManifestTests](../../../test/Typhon.Engine.Tests/Data/Schema/SchemaManifestTests.cs) — persisted assembly manifest (`AssemblyR1`) dedup and `ComponentR1`/`ArchetypeR1.AssemblyId` linkage, core-vs-user-assembly exclusion
+- [FieldIdStabilityTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/Schema/FieldIdStabilityTests.cs) — `FieldR1_RoundTrip_SameSession` walks `ComponentR1` chunks and reads nested `FieldR1` entries directly via `SystemCrud.Read`
+- [SchemaManifestTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/Schema/SchemaManifestTests.cs) — persisted assembly manifest (`AssemblyR1`) dedup and `ComponentR1`/`ArchetypeR1.AssemblyId` linkage, core-vs-user-assembly exclusion
 
 ## 🔗 Related
 

@@ -1,3 +1,9 @@
+---
+uid: feature-ecs-entity-lifecycle-crud-index
+title: 'Entity Lifecycle & CRUD API'
+description: 'Zero-copy EntityRef accessor for Spawn, Open, Read, Write, Destroy, Enable/Disable — the sole entity manipulation API.'
+---
+
 # Entity Lifecycle & CRUD API
 > Zero-copy EntityRef accessor for Spawn, Open, Read, Write, Destroy, Enable/Disable — the sole entity manipulation API.
 
@@ -85,9 +91,9 @@ dtx.Commit();
 
 ## 🧪 Tests
 
-- [EntitySpawnTests](../../../../test/Typhon.Engine.Tests/Data/ECS/EntitySpawnTests.cs) — Spawn/Open/OpenMut/Read/Write core paths, `TryOpen` on a stale id, rollback-doesn't-leak-chunks
-- [EntityDestroyTests](../../../../test/Typhon.Engine.Tests/Data/ECS/EntityDestroyTests.cs) — Destroy tombstoning, visibility after commit vs. same-transaction, cascade through `EntityLink`
-- [EnableDisableTests](../../../../test/Typhon.Engine.Tests/Data/ECS/EnableDisableTests.cs) — Enable/Disable bit-flip semantics, data preservation across re-enable, MVCC visibility of enabled-bits history
+- [EntitySpawnTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/EntitySpawnTests.cs) — Spawn/Open/OpenMut/Read/Write core paths, `TryOpen` on a stale id, rollback-doesn't-leak-chunks
+- [EntityDestroyTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/EntityDestroyTests.cs) — Destroy tombstoning, visibility after commit vs. same-transaction, cascade through `EntityLink`
+- [EnableDisableTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/EnableDisableTests.cs) — Enable/Disable bit-flip semantics, data preservation across re-enable, MVCC visibility of enabled-bits history
 
 ## 🔗 Related
 

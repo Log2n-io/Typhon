@@ -10,6 +10,16 @@ using Typhon.Schema.Definition;
 
 namespace Typhon.Engine;
 
+/// <summary>
+/// A single MVCC snapshot-isolated transaction: the unit of ECS reads and mutations (Spawn / Open / Destroy, component reads and writes) executed against
+/// the snapshot fixed at its <see cref="EntityAccessor.TSN"/>. Obtained from a <see cref="UnitOfWork"/> (or the convenience
+/// <see cref="DatabaseEngineExtensions.CreateQuickTransaction"/>) and finished with <see cref="Commit(ConcurrencyConflictHandler)"/> or
+/// <see cref="Rollback()"/>.
+/// </summary>
+/// <remarks>
+/// Instances are pooled and reused; do not hold a reference past <see cref="Dispose"/>. Transactions are single-thread-affine — only the thread that created
+/// one may call its members. A write-write conflict at commit is resolved by the optional <see cref="ConcurrencyConflictHandler"/> (default: last-writer-wins).
+/// </remarks>
 [PublicAPI]
 [DebuggerDisplay("TSN {TSN}, State: {State}")]
 public unsafe partial class Transaction : EntityAccessor
@@ -17,15 +27,26 @@ public unsafe partial class Transaction : EntityAccessor
     private const int RandomAccessCachedPagesCount = 8;
     private const int DeferredEnqueueBatchCapacity = 256;
 
+    /// <summary>Lifecycle state of a <see cref="Transaction"/>. Transitions are one-way (see <see cref="Transaction.State"/>).</summary>
     public enum TransactionState
     {
+        /// <summary>Default/unset value; not a live transaction.</summary>
         Invalid = 0,
+
+        /// <summary>Created, but no operation has been performed yet.</summary>
         Created,            // New object, no operation done yet
+
+        /// <summary>At least one operation has been added to the transaction.</summary>
         InProgress,         // At least one operation added to the transaction
+
+        /// <summary>Rolled back explicitly by the caller or automatically during dispose.</summary>
         Rollbacked,         // Was rollbacked by the user or during dispose
+
+        /// <summary>Committed by the caller.</summary>
         Committed           // Was committed by the user
     }
 
+    /// <summary>Current lifecycle state of this transaction.</summary>
     public TransactionState State { get; private set; }
 
     private int? _committedOperationCount;
@@ -108,8 +129,13 @@ public unsafe partial class Transaction : EntityAccessor
     /// <summary>UoW ID for revision stamping. 0 until UoW Registry (#51) assigns real IDs.</summary>
     internal ushort UowId => OwningUnitOfWork?.UowId ?? 0;
 
+    /// <summary>Intrusive link to the next transaction in the engine's transaction chain. Managed by the engine; not intended for external use.</summary>
     public Transaction Next { get; internal set; }
 
+    /// <summary>
+    /// Number of component operations this transaction carries: the sum of cached entries across every touched component type plus components deleted during
+    /// rollback bookkeeping. Computed lazily on first access and cached.
+    /// </summary>
     public int CommittedOperationCount
     {
         get
@@ -127,6 +153,15 @@ public unsafe partial class Transaction : EntityAccessor
         }
     }
 
+    /// <summary>
+    /// (Re)initializes this pooled transaction instance for a new lease: enters an epoch scope, binds the engine and owning unit of work, fixes the MVCC
+    /// snapshot at <paramref name="tsn"/>, and selects the durability discipline. Called by the engine when a transaction is created; not for direct use.
+    /// </summary>
+    /// <param name="dbe">Owning database engine.</param>
+    /// <param name="tsn">Transaction sequence number that fixes this transaction's MVCC read snapshot.</param>
+    /// <param name="uow">Owning unit of work, or <see langword="null"/> for the standalone path (UoW id 0).</param>
+    /// <param name="readOnly">When <see langword="true"/>, no <see cref="ChangeSet"/> or UoW is allocated and all writes are forbidden.</param>
+    /// <param name="discipline">Durability discipline applied to SingleVersion-layout writes for the transaction's lifetime.</param>
     public void Init(DatabaseEngine dbe, long tsn, UnitOfWork uow = null, bool readOnly = false, DurabilityDiscipline discipline = DurabilityDiscipline.TickFence)
     {
         // Residual risk: _dbe.MMF.CreateChangeSet allocates and could throw OOM in extreme conditions, dropping the span.
@@ -224,6 +259,11 @@ public unsafe partial class Transaction : EntityAccessor
         _ => false,
     };
 
+    /// <summary>
+    /// Ends the transaction and returns it to the pool: auto-rolls back if it was not committed, processes any deferred cleanups it was gating, flushes its
+    /// accessors, exits the epoch scope, and removes it from the transaction chain. Disposes the owning <see cref="UnitOfWork"/> when this transaction owns it
+    /// (the <see cref="DatabaseEngineExtensions.CreateQuickTransaction"/> path). Idempotent.
+    /// </summary>
     public override void Dispose()
     {
         // Dispose transient batch accessors first — safe even on double-dispose or if never created
@@ -332,18 +372,37 @@ public unsafe partial class Transaction : EntityAccessor
     // Component Collections & Enumerators
     // ═══════════════════════════════════════════════════════════════════════
 
+    /// <summary>
+    /// Creates a mutable accessor over a <see cref="ComponentCollection{T}"/> field, bound to this transaction's <see cref="ChangeSet"/> so edits are tracked
+    /// for commit/rollback.
+    /// </summary>
+    /// <typeparam name="T">Unmanaged element type of the collection.</typeparam>
+    /// <param name="field">Reference to the collection field to wrap.</param>
+    /// <returns>A mutable accessor over the collection's backing buffer.</returns>
     public ComponentCollectionAccessor<T> CreateComponentCollectionAccessor<T>(ref ComponentCollection<T> field) where T : unmanaged
     {
         AssertThreadAffinity();
         return new ComponentCollectionAccessor<T>(_changeSet, _dbe.GetComponentCollectionVSBS<T>(), ref field);
     }
 
+    /// <summary>
+    /// Returns a read-only enumerator that streams the elements of a <see cref="ComponentCollection{T}"/> field without allocating.
+    /// </summary>
+    /// <typeparam name="T">Unmanaged element type of the collection.</typeparam>
+    /// <param name="field">Reference to the collection field to enumerate.</param>
+    /// <returns>A read-only, zero-copy enumerator over the collection.</returns>
     public ReadOnlyCollectionEnumerator<T> GetReadOnlyCollectionEnumerator<T>(ref ComponentCollection<T> field) where T : unmanaged
     {
         AssertThreadAffinity();
         return new ReadOnlyCollectionEnumerator<T>(_dbe.GetComponentCollectionVSBS<T>(), field._bufferId);
     }
 
+    /// <summary>
+    /// Returns the reference count of the buffer backing a <see cref="ComponentCollection{T}"/> field (number of entities currently sharing that buffer).
+    /// </summary>
+    /// <typeparam name="T">Unmanaged element type of the collection.</typeparam>
+    /// <param name="field">Reference to the collection field to inspect.</param>
+    /// <returns>The backing buffer's reference count.</returns>
     public int GetComponentCollectionRefCounter<T>(ref ComponentCollection<T> field) where T : unmanaged
     {
         AssertThreadAffinity();
@@ -353,25 +412,34 @@ public unsafe partial class Transaction : EntityAccessor
         return a.RefCounter;
     }
     
+    /// <summary>Zero-copy, read-only <c>foreach</c> enumerator over the elements of a component collection buffer.</summary>
+    /// <typeparam name="T">Unmanaged element type of the collection.</typeparam>
     [PublicAPI]
     public ref struct ReadOnlyCollectionEnumerator<T> where T : unmanaged
     {
         private BufferEnumerator<T, PersistentStore> _enumerator;
 
+        /// <summary>Creates the enumerator over the buffer identified by <paramref name="bufferId"/> within <paramref name="vsbs"/>.</summary>
+        /// <param name="vsbs">Segment holding the collection's variable-sized buffers.</param>
+        /// <param name="bufferId">Root chunk id of the buffer to enumerate.</param>
         public ReadOnlyCollectionEnumerator(VariableSizedBufferSegment<T, PersistentStore> vsbs, int bufferId)
         {
             _enumerator = vsbs.EnumerateBuffer(bufferId);
         }
 
+        /// <summary>Returns this enumerator (enables the <c>foreach</c> pattern).</summary>
         public ReadOnlyCollectionEnumerator<T> GetEnumerator() => this;
 
+        /// <summary>Zero-copy reference to the current element. Valid until the next <see cref="MoveNext"/> call.</summary>
         public ref readonly T Current
         {
             get => ref _enumerator.Current;
         }
-        
+
+        /// <summary>Advances to the next element; returns <see langword="false"/> when the buffer is exhausted.</summary>
         public bool MoveNext() => _enumerator.MoveNext();
 
+        /// <summary>Releases the underlying buffer enumerator (unpins accessed pages).</summary>
         public void Dispose() => _enumerator.Dispose();
     }
 
@@ -457,6 +525,7 @@ public unsafe partial class Transaction : EntityAccessor
             _disposed = false;
         }
 
+        /// <summary>Returns this enumerator (enables the <c>foreach</c> pattern).</summary>
         public IndexEntityEnumerator<T, TKey> GetEnumerator() => this;
 
         /// <summary>Convenience accessor — copies the component into a tuple. Prefer <see cref="CurrentComponent"/> for zero-copy.</summary>
@@ -471,6 +540,10 @@ public unsafe partial class Transaction : EntityAccessor
         /// <summary>The index key of the current entry.</summary>
         public TKey CurrentKey => _currentKey;
 
+        /// <summary>
+        /// Advances to the next index entry visible at this transaction's snapshot (skipping entries hidden by MVCC), positioning <see cref="Current"/> /
+        /// <see cref="CurrentComponent"/>. Returns <see langword="false"/> when the range is exhausted.
+        /// </summary>
         public bool MoveNext()
         {
             if (_isAllowMultiple)
@@ -564,6 +637,7 @@ public unsafe partial class Transaction : EntityAccessor
             }
         }
 
+        /// <summary>Releases the underlying B+Tree range enumerator and its accessors (unpins accessed pages). Idempotent.</summary>
         public void Dispose()
         {
             if (_disposed)
@@ -1708,6 +1782,14 @@ public unsafe partial class Transaction : EntityAccessor
         }
     }
 
+    /// <summary>
+    /// Discards all changes made by this transaction, tagging the rollback as <see cref="Typhon.Profiler.TransactionRollbackReason.Explicit"/>.
+    /// </summary>
+    /// <param name="ctx">Unit-of-work context carrying the deadline / cancellation used for any lock waits during rollback.</param>
+    /// <returns>
+    /// <see langword="true"/> if the transaction was rolled back (or had nothing to do because no operation was performed); <see langword="false"/> if it was
+    /// already committed or rolled back.
+    /// </returns>
     public bool Rollback(ref UnitOfWorkContext ctx) => Rollback(ref ctx, Typhon.Profiler.TransactionRollbackReason.Explicit);
 
     /// <summary>Phase 6: rollback with an explicit <paramref name="reason"/> threaded into the kind 21 payload (D3).</summary>
@@ -1812,6 +1894,13 @@ public unsafe partial class Transaction : EntityAccessor
         }
     }
 
+    /// <summary>
+    /// Discards all changes made by this transaction, using an unbounded (no-timeout) context.
+    /// </summary>
+    /// <returns>
+    /// <see langword="true"/> if the transaction was rolled back (or had nothing to do because no operation was performed); <see langword="false"/> if it was
+    /// already committed or rolled back.
+    /// </returns>
     public bool Rollback()
     {
         var ctx = UnitOfWorkContext.None;
@@ -2015,6 +2104,21 @@ public unsafe partial class Transaction : EntityAccessor
         }
     }
 
+    /// <summary>
+    /// Commits this transaction: processes every modified component, appends the WAL batch (the point of no return), then publishes the changes so they become
+    /// visible to later transactions. When <paramref name="handler"/> is supplied, each write-write conflict is surfaced to it for resolution; otherwise the
+    /// last write wins.
+    /// </summary>
+    /// <param name="ctx">Unit-of-work context carrying the deadline / cancellation used for lock and durability waits.</param>
+    /// <param name="handler">Optional write-write conflict resolver. <see langword="null"/> to accept the default last-writer-wins behavior.</param>
+    /// <returns>
+    /// <see langword="true"/> if the transaction committed (including read-only and empty transactions); <see langword="false"/> if it was already committed or
+    /// rolled back.
+    /// </returns>
+    /// <exception cref="CommitDurabilityUncertainException">
+    /// The commit is durably past its point of no return (records were appended) but the durability wait did not confirm — the write is committed, its
+    /// on-media durability unconfirmed. Only reachable on the FUA/Immediate durability path.
+    /// </exception>
     public bool Commit(ref UnitOfWorkContext ctx, ConcurrencyConflictHandler handler = null)
     {
         AssertThreadAffinity();
@@ -2227,6 +2331,18 @@ public unsafe partial class Transaction : EntityAccessor
         }
     }
 
+    /// <summary>
+    /// Commits this transaction using the default commit timeout (<see cref="TimeoutOptions.DefaultCommitTimeout"/>). See
+    /// <see cref="Commit(ref UnitOfWorkContext, ConcurrencyConflictHandler)"/> for the full contract.
+    /// </summary>
+    /// <param name="handler">Optional write-write conflict resolver. <see langword="null"/> to accept the default last-writer-wins behavior.</param>
+    /// <returns>
+    /// <see langword="true"/> if the transaction committed (including read-only and empty transactions); <see langword="false"/> if it was already committed or
+    /// rolled back.
+    /// </returns>
+    /// <exception cref="CommitDurabilityUncertainException">
+    /// The write is committed but its on-media durability was not confirmed within the wait. Only reachable on the FUA/Immediate durability path.
+    /// </exception>
     public bool Commit(ConcurrencyConflictHandler handler = null)
     {
         var ctx = UnitOfWorkContext.FromTimeout(TimeoutOptions.Current.DefaultCommitTimeout);

@@ -222,11 +222,21 @@ public readonly struct Deadline : IEquatable<Deadline>
     // Equality
     // ═══════════════════════════════════════════════════════════════════════
 
+    /// <summary>Value equality: <c>true</c> if both deadlines carry the same absolute monotonic tick value.</summary>
+    /// <param name="other">The deadline to compare against.</param>
     public bool Equals(Deadline other) => _ticks == other._ticks;
+    /// <inheritdoc/>
     public override bool Equals(object obj) => obj is Deadline other && Equals(other);
+    /// <inheritdoc/>
     public override int GetHashCode() => _ticks.GetHashCode();
 
+    /// <summary>Value equality: <c>true</c> if both deadlines carry the same absolute monotonic tick value.</summary>
+    /// <param name="left">Left operand.</param>
+    /// <param name="right">Right operand.</param>
     public static bool operator ==(Deadline left, Deadline right) => left._ticks == right._ticks;
+    /// <summary>Value inequality: <c>true</c> if the deadlines carry different absolute monotonic tick values.</summary>
+    /// <param name="left">Left operand.</param>
+    /// <param name="right">Right operand.</param>
     public static bool operator !=(Deadline left, Deadline right) => left._ticks != right._ticks;
 
     /// <inheritdoc />

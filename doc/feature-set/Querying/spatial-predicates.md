@@ -1,3 +1,9 @@
+---
+uid: feature-querying-spatial-predicates
+title: 'Spatial Query Predicates'
+description: 'R-Tree-backed AABB, radius, and ray filters attached directly to a fluent ECS query.'
+---
+
 # Spatial Query Predicates
 > R-Tree-backed AABB, radius, and ray filters attached directly to a fluent ECS query.
 
@@ -60,11 +66,11 @@ var hit = t.Query<UnitArch>()
 
 ## 🧪 Tests
 
-- [SpatialEcsIntegrationTests](../../../test/Typhon.Engine.Tests/Data/SpatialIndex/SpatialEcsIntegrationTests.cs) — `WhereInAABB`/`Count`/`Any`, composition with `Where`/`WhereField`, and the one-spatial-predicate-per-query guard
+- [SpatialEcsIntegrationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/SpatialIndex/SpatialEcsIntegrationTests.cs) — `WhereInAABB`/`Count`/`Any`, composition with `Where`/`WhereField`, and the one-spatial-predicate-per-query guard
 
 ## 🔗 Related
 
-- Source: [src/Typhon.Engine/Ecs/public/EcsQuery.cs](../../../src/Typhon.Engine/Ecs/public/EcsQuery.cs)
+- Source: [src/Typhon.Engine/Ecs/public/EcsQuery.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/EcsQuery.cs)
 - Sibling: [Spatial Query API (AABB / Radius / Ray / Frustum / kNN / Count)](../Spatial/spatial-query-api.md) — the underlying R-Tree query algorithms this feature exposes through the fluent builder
 
 <!-- Deep dive: claude/overview/05-query.md (§5.12 ECS Query API — spatial predicates) -->

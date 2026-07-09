@@ -1,6 +1,12 @@
+---
+uid: overview-ecs
+title: '06 — ECS'
+description: 'Typhon''s data model is ECS — Entity, Component, System. Entities are 64-bit identifiers, components are blittable unmanaged structs, and archetypes declare…'
+---
+
 # 06 — ECS
 
-**Code:** [`src/Typhon.Engine/Ecs/`](../../src/Typhon.Engine/Ecs/)
+**Code:** [`src/Typhon.Engine/Ecs/`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Engine/Ecs)
 
 Typhon's data model is ECS — Entity, Component, System. Entities are 64-bit identifiers, components are blittable `unmanaged` structs, and archetypes declare which components an entity has. The ECS API in this folder is what application code actually touches: `Spawn`, `Destroy`, `Open`, `OpenMut`, plus the supporting types (`EntityId`, `EntityRef`, `Comp<T>`, `EntityLink<T>`, `PointInTimeAccessor`, `ClusterRef<TArch>`).
 
@@ -18,9 +24,9 @@ If you've used Unity DOTS, Bevy, or flecs the shape will feel familiar — but T
 
 | Concept | What it is |
 |---|---|
-| **Entity** | A unique identifier ([`EntityId`](../../src/Typhon.Engine/Ecs/public/EntityId.cs)). Holds no data of its own. |
+| **Entity** | A unique identifier ([`EntityId`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/EntityId.cs)). Holds no data of its own. |
 | **Component** | An `unmanaged` struct attached to an entity. Components are *data*, not behaviour. |
-| **Archetype** | A typed shape — the set of components an entity has. Declared as a C# class inheriting [`Archetype<TSelf>`](../../src/Typhon.Engine/Ecs/public/Archetype.cs). |
+| **Archetype** | A typed shape — the set of components an entity has. Declared as a C# class inheriting [`Archetype<TSelf>`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/Archetype.cs). |
 | **System** | Behaviour — runs in the scheduler ([10-runtime](10-runtime.md)). Reads/writes components via accessors. |
 
 Every entity belongs to exactly one archetype, fixed at spawn time. Components are stored archetype-major: all `Position` data for archetype `Ant` is contiguous, separately from the `Position` data for archetype `Building`. This is the standard ECS layout — branch-free iteration, cache-friendly scans.
@@ -58,7 +64,7 @@ Parent components are inherited; slot indices start with the parent's. No diamon
 
 ### `EntityId`
 
-[`Ecs/public/EntityId.cs`](../../src/Typhon.Engine/Ecs/public/EntityId.cs)
+[`Ecs/public/EntityId.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/EntityId.cs)
 
 8 bytes, packed:
 
@@ -81,7 +87,7 @@ public readonly struct EntityId : IEquatable<EntityId>
 
 ### `EntityLink<T>` — typed references
 
-[`Ecs/public/EntityLink.cs`](../../src/Typhon.Engine/Ecs/public/EntityLink.cs)
+[`Ecs/public/EntityLink.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/EntityLink.cs)
 
 Compile-time-safe wrapper. `EntityLink<Building>` accepts `Building`, `House`, or any descendant — polymorphic at the archetype level.
 
@@ -100,7 +106,7 @@ Stored inline — implicit conversions to and from `EntityId` keep the call site
 
 ### `Comp<T>` — typed component handle
 
-[`Ecs/public/Comp.cs`](../../src/Typhon.Engine/Ecs/public/Comp.cs)
+[`Ecs/public/Comp.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/Comp.cs)
 
 ```csharp
 public readonly struct Comp<T> where T : unmanaged
@@ -114,7 +120,7 @@ public readonly struct Comp<T> where T : unmanaged
 
 ### `ComponentValue` — spawn-time payload
 
-[`Ecs/public/ComponentValue.cs`](../../src/Typhon.Engine/Ecs/public/ComponentValue.cs)
+[`Ecs/public/ComponentValue.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/ComponentValue.cs)
 
 128-byte struct: 12-byte header (`ComponentTypeId` + `DataSize` + pad) + 112-byte inline payload + 4-byte tail pad. `MaxPayloadSize = 112`.
 
@@ -128,7 +134,7 @@ These live on `Transaction` ([08-transactions](08-transactions.md)) — they're 
 
 ### `Spawn<TArch>`
 
-[`Transactions/public/Transaction.ECS.cs:147`](../../src/Typhon.Engine/Transactions/public/Transaction.ECS.cs)
+[`Transactions/public/Transaction.ECS.cs:147`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Transactions/public/Transaction.ECS.cs)
 
 ```csharp
 EntityId id = tx.Spawn<Ant>(
@@ -146,13 +152,13 @@ So a spawn is visible to *this* transaction immediately, visible to *other* tran
 
 ### `Destroy(EntityId)`
 
-[`Transactions/public/Transaction.ECS.cs:562`](../../src/Typhon.Engine/Transactions/public/Transaction.ECS.cs)
+[`Transactions/public/Transaction.ECS.cs:562`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Transactions/public/Transaction.ECS.cs)
 
 ```csharp
 tx.Destroy(id);
 ```
 
-Marks the entity for destruction. The `EntityRecord` is stamped with a `DeadTSN`. Other transactions still see the entity until their snapshot TSN passes `DeadTSN`. Cleanup of revision storage happens lazily via the [`DeferredCleanupManager`](../../src/Typhon.Engine/Ecs/internals/DeferredCleanupManager.cs) once no active snapshot can see the entity any more.
+Marks the entity for destruction. The `EntityRecord` is stamped with a `DeadTSN`. Other transactions still see the entity until their snapshot TSN passes `DeadTSN`. Cleanup of revision storage happens lazily via the [`DeferredCleanupManager`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/internals/DeferredCleanupManager.cs) once no active snapshot can see the entity any more.
 
 ### `SpawnBatch<TArch>`
 
@@ -171,7 +177,7 @@ Reading and mutating components flows through accessors. Three flavours, dependi
 
 ### `EntityAccessor` — base read accessor
 
-[`Ecs/public/EntityAccessor.cs`](../../src/Typhon.Engine/Ecs/public/EntityAccessor.cs), [`EntityAccessor.ECS.cs`](../../src/Typhon.Engine/Ecs/public/EntityAccessor.ECS.cs)
+[`Ecs/public/EntityAccessor.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/EntityAccessor.cs), [`EntityAccessor.ECS.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/EntityAccessor.ECS.cs)
 
 ```csharp
 EntityRef e = accessor.Open(id);                    // read-only
@@ -189,7 +195,7 @@ Inside a `Transaction`, `OpenMut` upgrades to the full mutating path: the transa
 
 ### `PointInTimeAccessor` — parallel reads
 
-[`Ecs/public/PointInTimeAccessor.cs`](../../src/Typhon.Engine/Ecs/public/PointInTimeAccessor.cs)
+[`Ecs/public/PointInTimeAccessor.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/PointInTimeAccessor.cs)
 
 For parallel query systems that read at a single frozen MVCC snapshot across many worker threads.
 
@@ -207,7 +213,7 @@ PTA is the right tool when the workload is "read a lot, in parallel, at one cons
 
 ### `ArchetypeAccessor<TArch>` — fast path
 
-[`Ecs/public/ArchetypeAccessor.cs`](../../src/Typhon.Engine/Ecs/public/ArchetypeAccessor.cs)
+[`Ecs/public/ArchetypeAccessor.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/ArchetypeAccessor.cs)
 
 ```csharp
 ArchetypeAccessor<Ant> ants = accessor.For<Ant>();
@@ -218,7 +224,7 @@ Pre-bound to a specific archetype. Bypasses epoch checks, archetype lookup, and 
 
 ### Generated accessors — `ReadAll` / `ReadWriteAll`
 
-`EntityRef` resolves components one at a time (`e.Read(Ant.Position)`). When you want *all* of an archetype's components at once with compile-time field names, Typhon generates them. [`ArchetypeAccessorGenerator`](../../src/Typhon.Generators/ArchetypeAccessorGenerator.cs) is an incremental Roslyn source generator that, for every `[Archetype]` **`partial`** class, emits:
+`EntityRef` resolves components one at a time (`e.Read(Ant.Position)`). When you want *all* of an archetype's components at once with compile-time field names, Typhon generates them. [`ArchetypeAccessorGenerator`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Generators/ArchetypeAccessorGenerator.cs) is an incremental Roslyn source generator that, for every `[Archetype]` **`partial`** class, emits:
 
 - a `Refs` ref struct (read-only) and a `MutRefs` ref struct (mutable), one typed field per component, and
 - static `ReadAll(tx, id)` → `Refs` and `ReadWriteAll(tx, id)` → `MutRefs` methods,
@@ -245,7 +251,7 @@ Inheritance flows through: `FlyingAnt.ReadAll(tx, id)` exposes the parent's `Pos
 
 ## 6. `EntityRef` — the working handle
 
-[`Ecs/public/EntityRef.cs`](../../src/Typhon.Engine/Ecs/public/EntityRef.cs)
+[`Ecs/public/EntityRef.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/EntityRef.cs)
 
 A `ref struct` returned by `Open` / `OpenMut`. Carries the entity's location data inline (a `fixed int[16]` array of chunk IDs, one per component slot) plus optional cluster-storage fields.
 
@@ -268,7 +274,7 @@ For high-density archetypes (think hundreds of thousands of Ants), Typhon suppor
 
 ### `ClusterRef<TArch>`
 
-[`Ecs/public/ClusterRef.cs`](../../src/Typhon.Engine/Ecs/public/ClusterRef.cs)
+[`Ecs/public/ClusterRef.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/ClusterRef.cs)
 
 ```csharp
 foreach (var cluster in accessor.GetClusterEnumerator<Ant>())
@@ -292,7 +298,7 @@ Cluster storage is opt-in per archetype (`IsClusterEligible` on `ArchetypeMetada
 
 ## 8. Storage modes
 
-[`Typhon.Schema.Definition/StorageMode.cs`](../../src/Typhon.Schema.Definition/StorageMode.cs) — set per component type via the `StorageMode` argument on its `[Component]` attribute (`[Component("name", rev, StorageMode = StorageMode.SingleVersion)]`); the default is `Versioned`. Three modes, very different contracts.
+[`Typhon.Schema.Definition/StorageMode.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Schema.Definition/StorageMode.cs) — set per component type via the `StorageMode` argument on its `[Component]` attribute (`[Component("name", rev, StorageMode = StorageMode.SingleVersion)]`); the default is `Versioned`. Three modes, very different contracts.
 
 ### The contract per mode
 
@@ -311,7 +317,7 @@ Cluster storage is opt-in per archetype (`IsClusterEligible` on `ArchetypeMetada
 
 ### `DurabilityDiscipline` — a second, orthogonal axis on SingleVersion
 
-The table above describes `SingleVersion` under its default discipline, [`DurabilityDiscipline.TickFence`](../../src/Typhon.Schema.Definition/DurabilityDiscipline.cs). A second discipline, `Commit`, is selected **per transaction** and is **not a fourth `StorageMode`** — it shares the identical SV cluster layout and only changes the rows below for the writes it covers:
+The table above describes `SingleVersion` under its default discipline, [`DurabilityDiscipline.TickFence`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Schema.Definition/DurabilityDiscipline.cs). A second discipline, `Commit`, is selected **per transaction** and is **not a fourth `StorageMode`** — it shares the identical SV cluster layout and only changes the rows below for the writes it covers:
 
 | Aspect | `TickFence` (default) | `Commit` |
 |---|---|---|
@@ -380,17 +386,17 @@ The Versioned-write restriction on the base `EntityAccessor` and PTA is structur
 
 You don't need this to *use* the ECS API, but here's what's happening underneath. Detail in [05-revision](05-revision.md) and [02-storage](02-storage.md).
 
-- **`EntityMap`** — per-archetype, persistent hash map keyed by `EntityKey`. Stores `EntityRecord` (chunk IDs per slot + `BornTSN` / `DeadTSN` + `EnabledBits`). Implemented via [`PagedHashMap`](../../src/Typhon.Engine/Foundation/Collections/internals/PagedHashMap.cs) on top of `ComponentSegment`.
-- **`EntityRecord`** ([file](../../src/Typhon.Engine/Ecs/public/EntityRecord.cs)) — the per-entity row in the EntityMap. The `EnabledBits`, `BornTSN`, `DeadTSN`, and the locations of each component chunk.
-- **`ArchetypeMetadata`** ([file](../../src/Typhon.Engine/Ecs/internals/ArchetypeMetadata.cs)) — runtime descriptor: slot count, per-slot component type IDs, Versioned/Transient slot masks, cluster layout if eligible.
-- **`ArchetypeRegistry`** ([file](../../src/Typhon.Engine/Ecs/internals/ArchetypeRegistry.cs)) — global registry; assigns slot indices on first finalization, handles parent-child slot ordering.
-- **`EnabledBitsOverrides`** ([file](../../src/Typhon.Engine/Ecs/internals/EnabledBitsOverrides.cs)) — MVCC-aware override map for per-entity enable bit changes that haven't been committed to the `EntityRecord` yet. `ResolveEnabledBits(entityKey, baseEnabledBits, TSN)` gives the snapshot-correct view.
-- **`EnabledBitsHistory`** ([file](../../src/Typhon.Engine/Ecs/internals/EnabledBitsHistory.cs)) — historical record of EnabledBits changes for MVCC visibility queries.
-- **`FieldShadowBuffer`** ([file](../../src/Typhon.Engine/Ecs/internals/FieldShadowBuffer.cs)) — captures the *old index key* (8 bytes, `ChunkId / EntityPK / OldKey`) for each indexed-field mutation so the deferred B+Tree maintenance pass can locate and update the entry. **Does not buffer the new value itself** — the value mutation is direct.
-- **`DirtyBitmap`** + **`DirtyBitmapRing`** ([dirty](../../src/Typhon.Engine/Ecs/internals/DirtyBitmap.cs)) — track which entities have been mutated this tick; consumed by view-system delta computation ([09-querying](09-querying.md)).
-- **`ZoneMapArray`** ([file](../../src/Typhon.Engine/Ecs/internals/ZoneMapArray.cs)) — per-cluster min/max summaries used by query planning for skip-on-mismatch optimization.
-- **`SimdPredicateEvaluator`** ([file](../../src/Typhon.Engine/Ecs/internals/SimdPredicateEvaluator.cs)) — vectorized predicate evaluation over cluster contents.
-- **`DeferredCleanupManager`** ([file](../../src/Typhon.Engine/Ecs/internals/DeferredCleanupManager.cs)) — tail-driven garbage collection of revision chain elements that no active snapshot can see any more.
+- **`EntityMap`** — per-archetype, persistent hash map keyed by `EntityKey`. Stores `EntityRecord` (chunk IDs per slot + `BornTSN` / `DeadTSN` + `EnabledBits`). Implemented via [`PagedHashMap`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Foundation/Collections/internals/PagedHashMap.cs) on top of `ComponentSegment`.
+- **`EntityRecord`** ([file](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/EntityRecord.cs)) — the per-entity row in the EntityMap. The `EnabledBits`, `BornTSN`, `DeadTSN`, and the locations of each component chunk.
+- **`ArchetypeMetadata`** ([file](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/internals/ArchetypeMetadata.cs)) — runtime descriptor: slot count, per-slot component type IDs, Versioned/Transient slot masks, cluster layout if eligible.
+- **`ArchetypeRegistry`** ([file](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/internals/ArchetypeRegistry.cs)) — global registry; assigns slot indices on first finalization, handles parent-child slot ordering.
+- **`EnabledBitsOverrides`** ([file](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/internals/EnabledBitsOverrides.cs)) — MVCC-aware override map for per-entity enable bit changes that haven't been committed to the `EntityRecord` yet. `ResolveEnabledBits(entityKey, baseEnabledBits, TSN)` gives the snapshot-correct view.
+- **`EnabledBitsHistory`** ([file](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/internals/EnabledBitsHistory.cs)) — historical record of EnabledBits changes for MVCC visibility queries.
+- **`FieldShadowBuffer`** ([file](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/internals/FieldShadowBuffer.cs)) — captures the *old index key* (8 bytes, `ChunkId / EntityPK / OldKey`) for each indexed-field mutation so the deferred B+Tree maintenance pass can locate and update the entry. **Does not buffer the new value itself** — the value mutation is direct.
+- **`DirtyBitmap`** + **`DirtyBitmapRing`** ([dirty](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/internals/DirtyBitmap.cs)) — track which entities have been mutated this tick; consumed by view-system delta computation ([09-querying](09-querying.md)).
+- **`ZoneMapArray`** ([file](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/internals/ZoneMapArray.cs)) — per-cluster min/max summaries used by query planning for skip-on-mismatch optimization.
+- **`SimdPredicateEvaluator`** ([file](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/internals/SimdPredicateEvaluator.cs)) — vectorized predicate evaluation over cluster contents.
+- **`DeferredCleanupManager`** ([file](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/internals/DeferredCleanupManager.cs)) — tail-driven garbage collection of revision chain elements that no active snapshot can see any more.
 
 ### Commit pipeline (where ECS hits transactions)
 
@@ -405,7 +411,7 @@ After commit, the changes are visible to any new snapshot. Active snapshots with
 
 ### Epoch interaction
 
-The ECS resolve path enters an `EpochGuard` ([01-foundation §4](01-foundation.md)) on every entity read — page accessors need this protection so the page cache can't evict a page mid-read. There's an `EpochRefreshInterval = 128` constant ([`EntityAccessor.cs:32`](../../src/Typhon.Engine/Ecs/public/EntityAccessor.cs)) — every 128 entity ops on a `Transaction`, the engine refreshes the pinned epoch and flushes the change set to release excess dirty marks ([02-storage §5](02-storage.md)). This bounds how long a single transaction can hold pages dirty.
+The ECS resolve path enters an `EpochGuard` ([01-foundation §4](01-foundation.md)) on every entity read — page accessors need this protection so the page cache can't evict a page mid-read. There's an `EpochRefreshInterval = 128` constant ([`EntityAccessor.cs:32`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/EntityAccessor.cs)) — every 128 entity ops on a `Transaction`, the engine refreshes the pinned epoch and flushes the change set to release excess dirty marks ([02-storage §5](02-storage.md)). This bounds how long a single transaction can hold pages dirty.
 
 ---
 

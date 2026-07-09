@@ -1,3 +1,9 @@
+---
+uid: guide-modeling
+title: '2 — Modeling your world'
+description: 'Chapter 1 showed the data loop. This chapter is about design: how to shape your data so the engine works with you. Four decisions live here — what your…'
+---
+
 # 2 — Modeling your world
 
 Chapter 1 showed the data loop. This chapter is about **design**: how to shape your data so the engine works *with* you. Four decisions live here — what your components and archetypes are, which **storage mode** each component uses, which fields you **index**, and whether you need **spatial** queries. Get these right and the rest of Typhon falls into place; get them wrong and you'll fight the engine.

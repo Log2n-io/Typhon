@@ -1,3 +1,9 @@
+---
+uid: feature-transactions-transaction-lifecycle-pooling
+title: 'Transaction Lifecycle, Thread Affinity & Pooling'
+description: 'The internals that make per-tick transaction churn cheap and misuse fail fast instead of corrupting state.'
+---
+
 # Transaction Lifecycle, Thread Affinity & Pooling
 > The internals that make per-tick transaction churn cheap and misuse fail fast instead of corrupting state.
 
@@ -89,12 +95,12 @@ catch (InvalidOperationException)
 
 ## 🧪 Tests
 
-- [TransactionChainTests](../../../test/Typhon.Engine.Tests/Data/TransactionChainTests.cs) —
+- [TransactionChainTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/TransactionChainTests.cs) —
   `MPSC_ConcurrentCreates_AllTSNsUnique` (lock-free `PushHead` under concurrent creation),
   `MinTSN_DisposeTail_Advances` (MVCC-GC horizon on tail dispose), `Stress_ConcurrentCreateDispose_ActiveCountZeroAtEnd`;
   the file's second fixture `TransactionChainMaxActiveTests` covers the `maxActiveTransactions` cap and
   `ResourceExhaustedException`
-- [TransactionTests](../../../test/Typhon.Engine.Tests/Data/TransactionTests.cs) — `TransitionTo_IllegalTransition_DebugAssertFails`
+- [TransactionTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/TransactionTests.cs) — `TransitionTo_IllegalTransition_DebugAssertFails`
   (state-machine legality), `CrudAfterCommitOrRollback_ThrowsInvalidOperation`, `Dispose_Idempotent_SecondCallNoOp`
 
 ## 🔗 Related

@@ -1,3 +1,9 @@
+---
+uid: feature-spatial-cluster-spatial-queries
+title: 'Cluster Spatial Queries'
+description: 'Per-cell broadphase + per-entity narrowphase AABB/Radius queries for cluster-eligible archetypes.'
+---
+
 # Cluster Spatial Queries
 > Per-cell broadphase + per-entity narrowphase AABB/Radius queries for cluster-eligible archetypes.
 
@@ -61,16 +67,16 @@ var nearby = t.Query<AntArch>()
 
 ## 🧪 Tests
 
-- [ClusterSpatialTests](../../../test/Typhon.Engine.Tests/Data/ECS/ClusterSpatialTests.cs) — `SpatialQuery_AABB_ReturnsClusterEntities`/`SpatialQuery_Radius_ReturnsClusterEntities` (2D broadphase+narrowphase correctness)
-- [ClusterSpatial3DTests](../../../test/Typhon.Engine.Tests/Data/ECS/ClusterSpatial3DTests.cs) — 3D Z-axis AABB/Radius filtering, Z-boundary overlap edge cases
-- [CellSpatialIndexTests](../../../test/Typhon.Engine.Tests/Data/SpatialGrid/CellSpatialIndexTests.cs) — per-cell cluster-AABB array growth/swap-removal, category-union computation backing the broadphase
+- [ClusterSpatialTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/ClusterSpatialTests.cs) — `SpatialQuery_AABB_ReturnsClusterEntities`/`SpatialQuery_Radius_ReturnsClusterEntities` (2D broadphase+narrowphase correctness)
+- [ClusterSpatial3DTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/ClusterSpatial3DTests.cs) — 3D Z-axis AABB/Radius filtering, Z-boundary overlap edge cases
+- [CellSpatialIndexTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/SpatialGrid/CellSpatialIndexTests.cs) — per-cell cluster-AABB array growth/swap-removal, category-union computation backing the broadphase
 
 ## 🔗 Related
 
-- Source: [src/Typhon.Engine/Spatial/public/ClusterSpatialQuery.cs](../../../src/Typhon.Engine/Spatial/public/ClusterSpatialQuery.cs)
-- Source: [src/Typhon.Engine/Spatial/public/AabbClusterEnumerator.cs](../../../src/Typhon.Engine/Spatial/public/AabbClusterEnumerator.cs)
-- Source: [src/Typhon.Engine/Spatial/public/ClusterSpatialAabb.cs](../../../src/Typhon.Engine/Spatial/public/ClusterSpatialAabb.cs)
-- Source: [src/Typhon.Engine/Spatial/internals/CellSpatialIndex.cs](../../../src/Typhon.Engine/Spatial/internals/CellSpatialIndex.cs)
+- Source: [src/Typhon.Engine/Spatial/public/ClusterSpatialQuery.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/public/ClusterSpatialQuery.cs)
+- Source: [src/Typhon.Engine/Spatial/public/AabbClusterEnumerator.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/public/AabbClusterEnumerator.cs)
+- Source: [src/Typhon.Engine/Spatial/public/ClusterSpatialAabb.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/public/ClusterSpatialAabb.cs)
+- Source: [src/Typhon.Engine/Spatial/internals/CellSpatialIndex.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/CellSpatialIndex.cs)
 - Related catalog entry: [Spatial Query API](./spatial-query-api.md) (the per-entity R-Tree path for non-cluster archetypes)
 - Related catalog entry: [Entity Clusters](../Ecs/entity-clusters.md)
 

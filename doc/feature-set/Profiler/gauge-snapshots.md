@@ -1,3 +1,9 @@
+---
+uid: feature-profiler-gauge-snapshots
+title: 'Per-Tick Gauge/Metric Snapshots'
+description: 'One packed record per tick exposes memory, page-cache, WAL, and transaction counters to the trace viewer.'
+---
+
 # Per-Tick Gauge/Metric Snapshots
 > One packed record per tick exposes memory, page-cache, WAL, and transaction counters to the trace viewer.
 
@@ -80,7 +86,7 @@ payload's `{gaugeId, valueKind, value}` triples.
 
 ## 🧪 Tests
 
-- [PerTickSnapshotEventCodecTests](../../../test/Typhon.Engine.Tests/Profiler/PerTickSnapshotEventCodecTests.cs) — wire round-trip for every `GaugeValueKind` variant plus empty-payload and boundary-size edge cases
+- [PerTickSnapshotEventCodecTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Profiler/PerTickSnapshotEventCodecTests.cs) — wire round-trip for every `GaugeValueKind` variant plus empty-payload and boundary-size edge cases
 
 ## 🔗 Related
 

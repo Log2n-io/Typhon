@@ -1,3 +1,9 @@
+---
+uid: guide-first-app
+title: '1 — Start here: your first Typhon app'
+description: 'This chapter gets a working Typhon program in front of you. You''ll declare a tiny data model (the start of a skirmish game — units with a position and…'
+---
+
 # 1 — Start here: your first Typhon app
 
 This chapter gets a working Typhon program in front of you. You'll declare a tiny data model (the start of a skirmish game — units with a position and health), open an engine, spawn an entity, read it back, and run a query. No internals, no tuning — just the shape of a real Typhon app.

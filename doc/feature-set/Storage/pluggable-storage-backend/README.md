@@ -1,3 +1,9 @@
+---
+uid: feature-storage-pluggable-storage-backend-index
+title: 'Pluggable Storage Backend (Persistent vs Transient)'
+description: 'One set of segment/index code, JIT-specialized per backend, so Transient components get heap speed for free.'
+---
+
 # Pluggable Storage Backend (Persistent vs Transient)
 > One set of segment/index code, JIT-specialized per backend, so `Transient` components get heap speed for free.
 
@@ -44,7 +50,7 @@ tracking instructions left in it — not a cheap no-op call, an absent one.
 
 ## 🧪 Tests
 
-- [StorageModeInfrastructureTests](../../../../test/Typhon.Engine.Tests/Data/StorageModeInfrastructureTests.cs) — per-component backend selection via `[Component(StorageMode = ...)]`; confirms Versioned/SV/Transient never share a segment
+- [StorageModeInfrastructureTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/StorageModeInfrastructureTests.cs) — per-component backend selection via `[Component(StorageMode = ...)]`; confirms Versioned/SV/Transient never share a segment
 
 ## 🔗 Related
 

@@ -1,3 +1,9 @@
+---
+uid: feature-errors-storage-corruption-exceptions
+title: 'Storage & Corruption Exceptions'
+description: 'Typed failures for storage I/O, CRC32C page corruption, and another-process database locks.'
+---
+
 # Storage & Corruption Exceptions
 > Typed failures for storage I/O, CRC32C page corruption, and another-process database locks.
 
@@ -44,9 +50,9 @@ catch (StorageException ex)
 
 ## 🧪 Tests
 
-- [PageCrcVerificationTests](../../../test/Typhon.Engine.Tests/Durability/PageCrcVerificationTests.cs) — a CRC32C mismatch on `OnLoad` verification throws `PageCorruptionException`; contrasting zero-CRC, `RecoveryOnly`, and root-page paths that correctly skip verification without throwing.
-- [DatabaseFileLockingTests](../../../test/Typhon.Engine.Tests/Storage/DatabaseFileLockingTests.cs) — a live same-machine lock and an unverifiable cross-machine lock both throw `DatabaseLockedException` (`OwnerPid`/`OwnerMachine`); a stale local-PID lock is cleared instead of throwing.
-- [TyphonExceptionTests](../../../test/Typhon.Engine.Tests/Errors/TyphonExceptionTests.cs) — `CorruptionException` property and `IsTransient == false` assertions.
+- [PageCrcVerificationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/PageCrcVerificationTests.cs) — a CRC32C mismatch on `OnLoad` verification throws `PageCorruptionException`; contrasting zero-CRC, `RecoveryOnly`, and root-page paths that correctly skip verification without throwing.
+- [DatabaseFileLockingTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Storage/DatabaseFileLockingTests.cs) — a live same-machine lock and an unverifiable cross-machine lock both throw `DatabaseLockedException` (`OwnerPid`/`OwnerMachine`); a stale local-PID lock is cleared instead of throwing.
+- [TyphonExceptionTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Errors/TyphonExceptionTests.cs) — `CorruptionException` property and `IsTransient == false` assertions.
 
 ## 🔗 Related
 - Source: `src/Typhon.Engine/Errors/public/StorageException.cs`, `CorruptionException.cs`, `DatabaseLockedException.cs`

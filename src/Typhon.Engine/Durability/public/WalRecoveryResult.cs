@@ -23,7 +23,10 @@ public struct WalRecoveryResult
     /// <summary>Number of records replayed during recovery.</summary>
     public int RecordsReplayed;
 
-    /// <summary>Number of FPI records applied for torn-page repair.</summary>
+    /// <summary>
+    /// Always <c>0</c>. Full-page-image (FPI) torn-page repair was retired; torn-page protection is now the recovery rebuild net (scrub + index rebuild +
+    /// suspect-mode). The field is retained for result-shape compatibility and is never incremented.
+    /// </summary>
     public int FpiRecordsApplied;
 
     /// <summary>Number of TickFence chunks processed during recovery.</summary>

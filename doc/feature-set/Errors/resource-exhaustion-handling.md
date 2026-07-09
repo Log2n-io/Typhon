@@ -1,3 +1,9 @@
+---
+uid: feature-errors-resource-exhaustion-handling
+title: 'Resource Exhaustion Handling'
+description: 'Every bounded resource declares how it fails — fail fast, wait, evict, or degrade — instead of hanging or throwing a generic error.'
+---
+
 # Resource Exhaustion Handling
 > Every bounded resource declares how it fails — fail fast, wait, evict, or degrade — instead of hanging or throwing a generic error.
 
@@ -61,8 +67,8 @@ catch (ResourceExhaustedException ex)
 
 ## 🧪 Tests
 
-- [ExhaustionPolicyTests](../../../test/Typhon.Engine.Tests/Errors/ExhaustionPolicyTests.cs) — `FailFast` enforced at real boundaries (transaction pool over `MaxActiveTransactions`, `ChunkBasedSegment.AllocateChunk(s)`) and recovery once a slot frees up; `ResourceNode.ExhaustionPolicy` metadata tagging per policy value.
-- [ResourceOptionsTests](../../../test/Typhon.Engine.Tests/Resources/ResourceOptionsTests.cs) — `ExhaustionPolicy` enum completeness, `ResourceExhaustedException` construction/message/`Utilization` (incl. zero-limit edge case).
+- [ExhaustionPolicyTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Errors/ExhaustionPolicyTests.cs) — `FailFast` enforced at real boundaries (transaction pool over `MaxActiveTransactions`, `ChunkBasedSegment.AllocateChunk(s)`) and recovery once a slot frees up; `ResourceNode.ExhaustionPolicy` metadata tagging per policy value.
+- [ResourceOptionsTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Resources/ResourceOptionsTests.cs) — `ExhaustionPolicy` enum completeness, `ResourceExhaustedException` construction/message/`Utilization` (incl. zero-limit edge case).
 
 ## 🔗 Related
 - Related feature: [IsTransient retry hint](./transience-hint.md)

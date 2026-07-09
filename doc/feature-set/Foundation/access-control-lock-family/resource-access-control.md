@@ -1,3 +1,9 @@
+---
+uid: feature-foundation-access-control-lock-family-resource-access-control
+title: 'ResourceAccessControl (3-mode lifecycle lock)'
+description: '32-bit Accessing/Modify/Destroy lock where structural growth doesn''t block concurrent readers.'
+---
+
 # ResourceAccessControl (3-mode lifecycle lock)
 > 32-bit Accessing/Modify/Destroy lock where structural growth doesn't block concurrent readers.
 
@@ -53,7 +59,7 @@ if (!_access.EnterDestroy(ref ctx))
 - `internal` type — engine plumbing, not callable from application code.
 
 ## 🧪 Tests
-- [ResourceAccessControlTests](../../../../test/Typhon.Engine.Tests/Concurrency/ResourceAccessControlTests.cs) — Accessing/Modify compatibility, `MODIFY_PENDING` blocking new Accessing while a Modify/promote drains, promote/demote, Destroy's terminal drain-then-die semantics.
+- [ResourceAccessControlTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Concurrency/ResourceAccessControlTests.cs) — Accessing/Modify compatibility, `MODIFY_PENDING` blocking new Accessing while a Modify/promote drains, promote/demote, Destroy's terminal drain-then-die semantics.
 
 ## 🔗 Related
 - Parent feature: [Reader-Writer & Resource Lifecycle Locks](./README.md)

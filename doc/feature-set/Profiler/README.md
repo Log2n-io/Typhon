@@ -1,3 +1,9 @@
+---
+uid: feature-profiler-index
+title: 'Profiler'
+description: 'Typhon''s engine-embedded, zero-allocation typed-event profiler: any-thread ~25-50ns span/instant capture into per-thread ring buffers, drained by a…'
+---
+
 # Profiler
 > Typhon's engine-embedded, zero-allocation typed-event profiler: any-thread ~25-50ns span/instant capture into per-thread ring buffers, drained by a dedicated consumer thread and exported to a versioned `.typhon-trace` file and/or a live TCP feed for the Workbench trace viewer. Built-in instrumentation covers transactions, the B+Tree, page cache, WAL, checkpoint, and ECS automatically; opt-in extensions on the same pipeline add GC events, native memory tracking, per-tick gauges, CPU sampling, off-CPU scheduling, source attribution, query definition export, and domain-specific forensic tracing, each independently gated and zero-cost when off.
 

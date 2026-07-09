@@ -1,3 +1,9 @@
+---
+uid: feature-spatial-index
+title: 'Spatial'
+description: 'Typhon''s spatial layer gives any component field a declarative [SpatialIndex] — backing it with a page-backed, crash-safe R-Tree for ad-hoc…'
+---
+
 # Spatial
 > Typhon's spatial layer gives any component field a declarative `[SpatialIndex]` — backing it with a page-backed, crash-safe R-Tree for ad-hoc AABB/Radius/Ray/Frustum/kNN queries, or with the cluster-aware spatial grid for archetypes already using batched SoA storage. On top of that grid, a tiered-simulation system lets game code assign per-cell simulation frequency, sleep idle clusters, and parallelize neighbor-touching systems safely — so a large world spends its CPU budget where the player actually is.
 

@@ -1,0 +1,37 @@
+# DocFX API filter — document ONLY the true public consumer surface.
+#
+# Typhon's public/internal boundary is a NAMESPACE split enforced by analyzer
+# TYPHON008 (see claude/research/PublicVsInternalApiClassification.md):
+#   Typhon.Engine           = public consumer surface (keep)
+#   Typhon.Engine.Internals = engine-internal. Some types here are CLR-public only
+#                             because they were too entangled to flip to `internal`
+#                             during the migration ("promoted back to public") — they
+#                             are still NOT consumer API, so we exclude the namespace.
+# We also drop generator-emitted profiler machinery and the generated trace-event
+# DTO catalog: mechanism/wire-schema, not hand-authored consumer API.
+#
+# Rules are first-match-wins.
+apiRules:
+
+# 1. Engine internals namespace (incl. the entangled "promoted-back-to-public" types).
+- exclude:
+    uidRegex: ^Typhon\.Engine\.Internals(\.|$)
+
+# 2. Generator-emitted profiler infrastructure: TraceEventAttribute, BeginParamAttribute,
+#    OptionalAttribute, TraceEventShape, Generated.SourceLocations. The trailing (\.|$)
+#    means this does NOT touch the public Typhon.Engine.ProfilerLaunchConfig / ProfilerLauncher.
+- exclude:
+    uidRegex: ^Typhon\.Engine\.Profiler(\.|$)
+
+# 3. Source-generated trace-event DTO catalog (~211 *EventDto decoders) — the profiler
+#    wire schema, not consumer-facing API. Re-include this rule's namespace if external
+#    trace-analysis tools ever need typed access to decoded events.
+- exclude:
+    uidRegex: ^Typhon\.Profiler\.Events(\.|$)
+
+# 4. Standard: hide members explicitly opted out of IntelliSense.
+- exclude:
+    hasAttribute:
+      uid: System.ComponentModel.EditorBrowsableAttribute
+      ctorArguments:
+      - System.ComponentModel.EditorBrowsableState.Never

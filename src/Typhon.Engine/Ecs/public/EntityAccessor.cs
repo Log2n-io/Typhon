@@ -75,6 +75,7 @@ public partial class EntityAccessor : IDisposable
     /// <summary>True once any in-place (TickFence) SingleVersion write has been applied — blocks late escalation to Commit (CM-02).</summary>
     private protected bool _didInPlaceSvWrite;
 
+    /// <summary>Transaction sequence number defining this accessor's MVCC read snapshot; entity visibility is evaluated against this value.</summary>
     public long TSN { get; private protected set; }
 
     /// <summary>
@@ -84,6 +85,7 @@ public partial class EntityAccessor : IDisposable
     /// </summary>
     internal virtual void PrepareForMutation() { }
 
+    /// <summary>Creates a new <see cref="EntityAccessor"/> with empty component-lookup caches; an internal init path binds it before use.</summary>
     public EntityAccessor()
     {
         _componentInfos = new Dictionary<Type, ComponentInfo>(ComponentInfosMaxCapacity);
@@ -367,6 +369,10 @@ public partial class EntityAccessor : IDisposable
         _changeSet = null;
     }
 
+    /// <summary>
+    /// Releases the accessor's cached chunk accessors, drops excess dirty-page marks, and resets its state for reuse. A bare accessor holds no persistent epoch
+    /// scope, so none is exited here; <see cref="Transaction"/> overrides this to add a thread-affinity check and exit its own epoch scope.
+    /// </summary>
     public virtual void Dispose()
     {
         if (_isDisposed)

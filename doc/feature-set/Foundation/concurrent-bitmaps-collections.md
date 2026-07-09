@@ -1,3 +1,9 @@
+---
+uid: feature-foundation-concurrent-bitmaps-collections
+title: 'Concurrent Bitmaps & Collections'
+description: 'Lock-free/CAS-guarded occupancy bitmaps (flat and 3-level) plus a pick/putback slot array for high-contention tracking.'
+---
+
 # Concurrent Bitmaps & Collections
 > Lock-free/CAS-guarded occupancy bitmaps (flat and 3-level) plus a pick/putback slot array for high-contention tracking.
 
@@ -50,8 +56,8 @@ if (pool.Pick(index, out var owned))      // atomic claim; false = already taken
 - `BitmapL3Any` carries no synchronization at all — single-threaded use only; it exists primarily as the no-overhead baseline against which `ConcurrentBitmapL3Any`'s locking cost is benchmarked.
 
 ## 🧪 Tests
-- [ConcurrentBitmapL3AllTests](../../../test/Typhon.Engine.Tests/Collections/ConcurrentBitmapL3AllTests.cs) — `ConcurrentBitmapL3All` lock-free CAS set/clear, hierarchical `FindNextUnsetL0`/L1 skip-full-regions, multi-bank `Grow()`.
-- [ConcurrentBitmapL3Test](../../../test/Typhon.Engine.Tests/Collections/ConcurrentBitmapL3Test.cs) — `ConcurrentBitmapL3Any` set-bit enumeration across the L1/L2 summary hierarchy.
+- [ConcurrentBitmapL3AllTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Collections/ConcurrentBitmapL3AllTests.cs) — `ConcurrentBitmapL3All` lock-free CAS set/clear, hierarchical `FindNextUnsetL0`/L1 skip-full-regions, multi-bank `Grow()`.
+- [ConcurrentBitmapL3Test](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Collections/ConcurrentBitmapL3Test.cs) — `ConcurrentBitmapL3Any` set-bit enumeration across the L1/L2 summary hierarchy.
 
 ## 🔗 Related
 

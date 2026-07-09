@@ -1354,7 +1354,7 @@ public sealed partial class TyphonRuntime : IDisposable
         return ComputeChunkCount(entityList.Count, sysIdx);
     }
 
-    /// <summary>Paths 3 & 4: Versioned fallback — materialize entity list (same as original path).</summary>
+    /// <summary>Paths 3 &amp; 4: Versioned fallback — materialize entity list (same as original path).</summary>
     private int PrepareVersionedFallback(int sysIdx, bool hasChangeFilter)
     {
         PooledEntityList entityList;
@@ -1449,7 +1449,7 @@ public sealed partial class TyphonRuntime : IDisposable
         sys.CallbackAction(ctx);
     }
 
-    /// <summary>Paths 1 & 2: Non-Versioned chunk execution with per-worker EntityAccessor from per-system PTA.</summary>
+    /// <summary>Paths 1 &amp; 2: Non-Versioned chunk execution with per-worker EntityAccessor from per-system PTA.</summary>
     private void ExecuteChunkWithAccessor(int sysIdx, int chunkIndex, int totalChunks, int workerId)
     {
         var pta = _parallelAccessors[sysIdx];
@@ -1670,7 +1670,7 @@ public sealed partial class TyphonRuntime : IDisposable
         _checkerboardBlackCount[sysIdx] = blackCount;
     }
 
-    /// <summary>Paths 3 & 4: Versioned fallback — per-chunk Transaction (original path).</summary>
+    /// <summary>Paths 3 &amp; 4: Versioned fallback — per-chunk Transaction (original path).</summary>
     private void ExecuteChunkWithTransaction(int sysIdx, int chunkIndex, int totalChunks)
     {
         var fullList = _parallelEntityLists[sysIdx];
@@ -1966,8 +1966,6 @@ public sealed partial class TyphonRuntime : IDisposable
     }
 
     /// <summary>
-    /// Wraps a tick phase with paired profiler boundary events. When <see cref="TelemetryConfig.ProfilerActive"/> is false the JIT folds both
-    /// <summary>
     /// Parallel cluster tick fence orchestration. Runs on TickDriver. Resets the shared <see cref="FenceContext"/>, drains dormancy wake requests, runs the
     /// serial component-table fences, then triggers ONE <see cref="DagScheduler.DispatchDeferredTracks"/> call. The scheduler walks the four chained Fence-DAG
     /// exec systems (Prep → Migrate → AabbRefresh → Finalize) via the declared <c>.After()</c> edges — each phase's typed <c>Prepare(FenceContext)</c> builds
@@ -2027,7 +2025,9 @@ public sealed partial class TyphonRuntime : IDisposable
         }
     }
 
-    /// Emit calls to no-ops — this method compiles to just <c>action()</c>.
+    /// <summary>
+    /// Wraps a tick phase with paired profiler boundary events. When <see cref="TelemetryConfig.ProfilerActive"/> is false the JIT folds both Emit calls to
+    /// no-ops — this method compiles to just <c>action()</c>.
     /// </summary>
     private void InspectorPhase(TickPhase phase, Action action)
     {

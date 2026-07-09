@@ -1,3 +1,9 @@
+---
+uid: feature-runtime-declarative-scheduling-index
+title: 'Declarative Scheduling — Auto-DAG (RFC 07)'
+description: 'Systems declare phase and read/write access; the scheduler derives the DAG and rejects unsafe overlaps at Build().'
+---
+
 # Declarative Scheduling — Auto-DAG (RFC 07)
 > Systems declare phase and read/write access; the scheduler derives the DAG and rejects unsafe overlaps at Build().
 

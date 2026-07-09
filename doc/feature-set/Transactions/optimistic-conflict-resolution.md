@@ -1,3 +1,9 @@
+---
+uid: feature-transactions-optimistic-conflict-resolution
+title: 'Optimistic Concurrency Conflict Resolution'
+description: 'Plug a handler into Commit to reconcile write-write conflicts per entity, instead of accepting silent last-writer-wins.'
+---
+
 # Optimistic Concurrency Conflict Resolution
 > Plug a handler into `Commit` to reconcile write-write conflicts per entity, instead of accepting silent last-writer-wins.
 
@@ -63,14 +69,14 @@ t.Commit(RebaseDelta);          // conflicting writers rebase instead of clobber
 
 ## 🧪 Tests
 
-- [ConcurrencyConflictTests](../../../test/Typhon.Engine.Tests/Data/ConcurrencyConflictTests.cs) — no-handler
+- [ConcurrencyConflictTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ConcurrencyConflictTests.cs) — no-handler
   last-writer-wins, delta-rebase and `TakeCommitted`/`TakeRead` resolutions, per-entity handler invocation on
   multi-entity commits, concurrent-thread rebase race, `ConcurrencyConflictSolver` thread-local reuse
 
 ## 🔗 Related
 
 - Related feature: [Write-Conflict Baseline Tracking](../Revision/optimistic-conflict-baseline.md) (the underlying per-entity baseline/CommitSequence mechanism), [Unit of Work](./unit-of-work.md)
-- Source: [`ConcurrencyConflictSolver`](../../../src/Typhon.Engine/Transactions/public/ConcurrencyConflictSolver.cs), [`Transaction.DetectAndResolveConflict`/`Commit`](../../../src/Typhon.Engine/Transactions/public/Transaction.cs), [`CommitContext`](../../../src/Typhon.Engine/Transactions/internals/CommitContext.cs)
+- Source: [`ConcurrencyConflictSolver`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Transactions/public/ConcurrencyConflictSolver.cs), [`Transaction.DetectAndResolveConflict`/`Commit`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Transactions/public/Transaction.cs), [`CommitContext`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Transactions/internals/CommitContext.cs)
 
 <!-- Deep dive: claude/design/Transactions/transaction-overview.md §4.2 (#42-conflict-detection--two-paths) -->
 <!-- ADR: 003 — MVCC Snapshot Isolation — claude/adr/003-mvcc-snapshot-isolation.md -->

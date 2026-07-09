@@ -5,6 +5,10 @@
         <Configurations>Debug;Release</Configurations>
         <Platforms>AnyCPU</Platforms>
         <LangVersion>default</LangVersion>
+        <!-- XML doc file: ships in the package for IntelliSense and feeds the published API reference.
+             Doc-comment warnings are promoted to errors so drift cannot land silently. -->
+        <GenerateDocumentationFile>true</GenerateDocumentationFile>
+        <WarningsAsErrors>$(WarningsAsErrors);CS1570;CS1571;CS1572;CS1573;CS1574;CS1580;CS1581;CS1584;CS1587;CS1589;CS1590;CS1591;CS1592;CS1710;CS1711;CS1712;CS1723;CS1734;CS1735</WarningsAsErrors>
         <!-- Ships bundled inside the `Typhon` package (#427); never packed standalone. -->
         <IsPackable>false</IsPackable>
     </PropertyGroup>

@@ -27,8 +27,8 @@ public enum AlertSeverity
 /// </summary>
 /// <remarks>
 /// <para>
-/// Alerts include root cause analysis using <see cref="ResourceSnapshot.FindRootCause"/> and
-/// cascading effect detection using <see cref="ResourceSnapshot.FindContentionHotspots"/>.
+/// Alerts carry root-cause analysis via <see cref="ResourceSnapshot.FindRootCause"/>, tracing back from the
+/// symptomatic resource to the most-utilized upstream dependency driving the pressure.
 /// </para>
 /// <example>
 /// <code>
@@ -36,7 +36,6 @@ public enum AlertSeverity
 /// // Severity: Critical
 /// // Title: DataEngine/TransactionPool at 95% utilization
 /// // Root Cause: Durability/WALRingBuffer (98% utilization)
-/// // Cascading Effects: [Storage/PageCache, DataEngine/IndexMaintainer]
 /// </code>
 /// </example>
 /// </remarks>

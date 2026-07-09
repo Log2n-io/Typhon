@@ -1,3 +1,9 @@
+---
+uid: feature-revision-index
+title: 'Revision'
+description: 'The per-component MVCC revision-chain subsystem: stores every live version of a Versioned-mode component in a compact on-disk circular buffer, appends…'
+---
+
 # Revision
 > The per-component MVCC revision-chain subsystem: stores every live version of a `Versioned`-mode component in a compact on-disk circular buffer, appends rather than overwrites on every write, and resolves snapshot-isolated reads against that chain by transaction TSN. The same chain backs commit-time conflict detection and is reclaimed — by live garbage collection and by post-crash scrub — once no active transaction can still see an old version.
 

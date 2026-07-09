@@ -89,13 +89,20 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
         get => _layout.FullMask;
     }
 
-    /// <summary>Get a mutable span of component data for all N slots (SoA array).
-    /// For Versioned components, use <see cref="GetReadOnlySpan{T}"/> — writing directly to the cluster slot
-    /// bypasses the revision chain and breaks MVCC snapshot isolation.</summary>
     /// <summary>Resolve the correct base pointer for a component slot (Transient → _transientBase, else → _base).</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private byte* ResolveBase(byte slot) => (_transientBase != null && (_meta.TransientSlotMask & (1 << slot)) != 0) ? _transientBase : _base;
 
+    /// <summary>
+    /// Get a mutable span of the component's data across all N slots (its SoA array). For Versioned components use <see cref="GetReadOnlySpan{T}"/> instead —
+    /// writing directly to the cluster slot bypasses the revision chain and breaks MVCC snapshot isolation.
+    /// </summary>
+    /// <typeparam name="T">Component value type.</typeparam>
+    /// <param name="comp">Handle identifying the component within the archetype.</param>
+    /// <returns>A mutable span of length <see cref="ClusterSize"/> over the component's SoA array.</returns>
+    /// <exception cref="InvalidOperationException">
+    /// Thrown, when strict checks are enabled (<see cref="CheckConfig.Enabled"/>), if <typeparamref name="T"/> is a Versioned component.
+    /// </exception>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public Span<T> GetSpan<T>(Comp<T> comp) where T : unmanaged
     {

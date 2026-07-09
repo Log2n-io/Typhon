@@ -1,3 +1,9 @@
+---
+uid: feature-schema-schema-validation
+title: 'Schema Validation on Reopen'
+description: 'Compares persisted schema against your current struct on every reopen and refuses to touch data it can''t reconcile safely.'
+---
+
 # Schema Validation on Reopen
 > Compares persisted schema against your current struct on every reopen and refuses to touch data it can't reconcile safely.
 
@@ -59,8 +65,8 @@ dbe.RegisterComponentFromAccessor<Player>(schemaValidation: SchemaValidationMode
 
 ## 🧪 Tests
 
-- [SchemaValidatorTests](../../../test/Typhon.Engine.Tests/Data/Schema/SchemaValidatorTests.cs) — pure diff/classification algorithm: identical/added/removed/widened/narrowed/breaking, all valid and invalid widening pairs, rename-as-informational
-- [SchemaValidationIntegrationTests](../../../test/Typhon.Engine.Tests/Data/Schema/SchemaValidationIntegrationTests.cs) — reopen cycles: identical no-op, widening allowed, breaking throws `SchemaValidationException`, `SchemaValidationMode.Skip` bypass, `SchemaDowngradeException`
+- [SchemaValidatorTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/Schema/SchemaValidatorTests.cs) — pure diff/classification algorithm: identical/added/removed/widened/narrowed/breaking, all valid and invalid widening pairs, rename-as-informational
+- [SchemaValidationIntegrationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/Schema/SchemaValidationIntegrationTests.cs) — reopen cycles: identical no-op, widening allowed, breaking throws `SchemaValidationException`, `SchemaValidationMode.Skip` bypass, `SchemaDowngradeException`
 
 ## 🔗 Related
 

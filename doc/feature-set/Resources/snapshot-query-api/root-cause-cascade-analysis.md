@@ -1,3 +1,9 @@
+---
+uid: feature-resources-snapshot-query-api-root-cause-cascade-analysis
+title: 'Root-Cause Cascade Analysis (FindRootCause)'
+description: 'Trace a high-utilization symptom node back through a known dependency chain to find what''s actually backed up.'
+---
+
 # Root-Cause Cascade Analysis (FindRootCause)
 > Trace a high-utilization symptom node back through a known dependency chain to find what's actually backed up.
 
@@ -59,13 +65,13 @@ NodeSnapshot strict = snapshot.FindRootCause("DataEngine/TransactionPool", highU
 
 ## 🧪 Tests
 
-- [ResourceOptionsTests](../../../../test/Typhon.Engine.Tests/Resources/ResourceOptionsTests.cs) — `FindRootCause` region: chain
+- [ResourceOptionsTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Resources/ResourceOptionsTests.cs) — `FindRootCause` region: chain
   tracing through multiple hops, custom/default threshold behavior, missing-node and `Root/`-prefix handling, most-utilized-dependency
   selection
 
 ## 🔗 Related
 
-- Source: [src/Typhon.Engine/Resources/public/ResourceSnapshot.cs](../../../../src/Typhon.Engine/Resources/public/ResourceSnapshot.cs)
+- Source: [src/Typhon.Engine/Resources/public/ResourceSnapshot.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Resources/public/ResourceSnapshot.cs)
 - Parent feature: [Snapshot & Query API](./README.md)
 - Sibling: [Threshold-Based Resource Alerting](../../Observability/threshold-alerting.md) — `FindRootCause` is the shared root-cause tracing machinery behind both (cross-category).
 

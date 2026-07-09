@@ -1,3 +1,9 @@
+---
+uid: feature-spatial-tiered-simulation-dispatch
+title: 'Tiered Simulation Dispatch'
+description: 'One simulation tier per spatial cell, four dispatch frequencies, zero per-entity distance checks.'
+---
+
 # Tiered Simulation Dispatch
 > One simulation tier per spatial cell, four dispatch frequencies, zero per-entity distance checks.
 
@@ -94,12 +100,12 @@ var viewportView = tx.Query<Ant>().ToView().WithTier(SimTier.Tier0);
 
 ## 🧪 Tests
 
-- [TierDispatchTests](../../../test/Typhon.Engine.Tests/Runtime/TierDispatchTests.cs) — tier-list rebuild/invalidation, `Tier(...)`/`CellAmortize` dispatch scoping, `View.WithTier`, tier×view AND-combination throw, `TierBudgetMetrics`
+- [TierDispatchTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/TierDispatchTests.cs) — tier-list rebuild/invalidation, `Tier(...)`/`CellAmortize` dispatch scoping, `View.WithTier`, tier×view AND-combination throw, `TierBudgetMetrics`
 
 ## 🔗 Related
 
-- Source: [src/Typhon.Engine/Runtime/public/SimTier.cs](../../../src/Typhon.Engine/Runtime/public/SimTier.cs), [Dag.cs](../../../src/Typhon.Engine/Runtime/public/Dag.cs), [SystemBuilder.cs](../../../src/Typhon.Engine/Runtime/public/SystemBuilder.cs)
-- Source: [src/Typhon.Engine/Ecs/internals/TierClusterIndex.cs](../../../src/Typhon.Engine/Ecs/internals/TierClusterIndex.cs), [TyphonRuntime.cs](../../../src/Typhon.Engine/Runtime/public/TyphonRuntime.cs) (tier-scoped dispatch, budget metrics)
+- Source: [src/Typhon.Engine/Runtime/public/SimTier.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Runtime/public/SimTier.cs), [Dag.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Runtime/public/Dag.cs), [SystemBuilder.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Runtime/public/SystemBuilder.cs)
+- Source: [src/Typhon.Engine/Ecs/internals/TierClusterIndex.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/internals/TierClusterIndex.cs), [TyphonRuntime.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Runtime/public/TyphonRuntime.cs) (tier-scoped dispatch, budget metrics)
 - Related catalog entry: [Spatial Grid Configuration & Tier Control](./spatial-grid-config.md) (per-cell tier assignment, `SpatialGridAccessor`)
 - Sibling: [Tier-Filtered & Amortized Dispatch](../Runtime/spatial-tiers-adaptive-dispatch/tier-filtered-amortized-dispatch.md) — same feature cataloged from the Runtime/dispatch angle rather than the spatial-grid angle
 

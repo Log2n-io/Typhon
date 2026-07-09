@@ -197,6 +197,7 @@ internal ref struct ComponentRevisionManager
     /// <param name="nextMinTSN">The minimal TSN to keep revisions</param>
     /// <param name="compRevTableAccessor">Accessor for the revision table segment</param>
     /// <param name="compContentAccessor">Accessor for the component content segment</param>
+    /// <param name="deferredChunkFrees">Optional list collecting content chunks to free in a later pass; when <c>null</c>, freed chunks are released immediately</param>
     /// <returns><c>true</c> if the component is fully deleted (single tombstone remaining), <c>false</c> otherwise</returns>
     /// <remarks>
     /// <para>This method is transaction-agnostic and can be called from both the transaction commit path and the lazy cleanup path.</para>

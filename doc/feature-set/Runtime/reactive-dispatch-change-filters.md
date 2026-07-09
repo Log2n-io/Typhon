@@ -1,3 +1,9 @@
+---
+uid: feature-runtime-reactive-dispatch-change-filters
+title: 'Reactive Dispatch: Change Filters & Run Conditions'
+description: 'Skip systems that have nothing to do — proactively via a predicate, reactively via dirty-entity tracking.'
+---
+
 # Reactive Dispatch: Change Filters & Run Conditions
 > Skip systems that have nothing to do — proactively via a predicate, reactively via dirty-entity tracking.
 
@@ -85,8 +91,8 @@ dag.QuerySystem("GameRules", ctx => { foreach (var id in ctx.Entities) { /* ... 
 
 ## 🧪 Tests
 
-- [ChangeFilterTests](../../../test/Typhon.Engine.Tests/Runtime/ChangeFilterTests.cs) — `dirtySet ∪ Added` narrowing, OR logic across multiple filtered types, no-filter runs every tick
-- [ShouldRunTests](../../../test/Typhon.Engine.Tests/Runtime/ShouldRunTests.cs) — proactive gate evaluated before View refresh, successors still dispatch on skip, dynamic per-tick predicate
+- [ChangeFilterTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/ChangeFilterTests.cs) — `dirtySet ∪ Added` narrowing, OR logic across multiple filtered types, no-filter runs every tick
+- [ShouldRunTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/ShouldRunTests.cs) — proactive gate evaluated before View refresh, successors still dispatch on skip, dynamic per-tick predicate
 
 ## 🔗 Related
 - Sibling feature: [QuerySystem](./system-types/query-system.md)

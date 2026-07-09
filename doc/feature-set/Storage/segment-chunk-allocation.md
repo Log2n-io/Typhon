@@ -1,3 +1,9 @@
+---
+uid: feature-storage-segment-chunk-allocation
+title: 'Segment & Chunk-Based Allocation Engine'
+description: 'Multi-page directories and fixed-size slot allocation — the substrate every component, index, and revision chain is built from.'
+---
+
 # Segment & Chunk-Based Allocation Engine
 > Multi-page directories and fixed-size slot allocation — the substrate every component, index, and revision chain is built from.
 
@@ -38,9 +44,9 @@ foreach (var seg in db.EnumerateStorageSegments().Where(s => s.IsChunkBased))
 
 ## 🧪 Tests
 
-- [ChunkAccessorTests](../../../test/Typhon.Engine.Tests/Storage/ChunkAccessorTests.cs) — SIMD-searchable MRU page cache, clock-hand eviction, exclusive latch acquire/release
-- [ChunkBasedSegmentBitmapL3Tests](../../../test/Typhon.Engine.Tests/Storage/ChunkBasedSegmentBitmapL3Tests.cs) — chunk allocate/free, L0/L1/L2 bitmap invariants, capacity growth
-- [ManagedPagedMMFTests](../../../test/Typhon.Engine.Tests/Storage/ManagedPagedMMFTests.cs) — `LogicalSegmentGrowTest`: directory-only v4 root growing into a map-extension chain
+- [ChunkAccessorTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Storage/ChunkAccessorTests.cs) — SIMD-searchable MRU page cache, clock-hand eviction, exclusive latch acquire/release
+- [ChunkBasedSegmentBitmapL3Tests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Storage/ChunkBasedSegmentBitmapL3Tests.cs) — chunk allocate/free, L0/L1/L2 bitmap invariants, capacity growth
+- [ManagedPagedMMFTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Storage/ManagedPagedMMFTests.cs) — `LogicalSegmentGrowTest`: directory-only v4 root growing into a map-extension chain
 
 ## 🔗 Related
 

@@ -1,3 +1,9 @@
+---
+uid: feature-transactions-durability-discipline-index
+title: 'SingleVersion Durability Discipline (TickFence / Commit)'
+description: 'Per-transaction knob that picks how a SingleVersion write becomes durable, orthogonal to DurabilityMode.'
+---
+
 # SingleVersion Durability Discipline (TickFence / Commit)
 > Per-transaction knob that picks how a `SingleVersion` write becomes durable, orthogonal to `DurabilityMode`.
 
@@ -49,10 +55,10 @@ transaction makes is commit-staged.
 
 ## 🧪 Tests
 
-- [CommittedDisciplineTests](../../../../test/Typhon.Engine.Tests/Data/ECS/CommittedDisciplineTests.cs) —
+- [CommittedDisciplineTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/CommittedDisciplineTests.cs) —
   `DefaultDiscipline_Commit_EscalatesTransaction` covers the CM-02 uniform-per-transaction escalation rule that
   makes the two disciplines mutually exclusive within one transaction
-- [StorageModeTickFenceTests](../../../../test/Typhon.Engine.Tests/Data/StorageModeTickFenceTests.cs) — the
+- [StorageModeTickFenceTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/StorageModeTickFenceTests.cs) — the
   default `TickFence` path this knob overrides
 
 ## 🔗 Related

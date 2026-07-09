@@ -36,6 +36,9 @@ public sealed class ExporterQueue : IDisposable
     /// <summary>Total batches dropped due to a full queue. Read by diagnostics.</summary>
     public long DroppedBatches => _droppedBatches;
 
+    /// <summary>Create a queue bounded to <paramref name="boundedCapacity"/> batches; excess enqueues drop-newest once full.</summary>
+    /// <param name="boundedCapacity">Maximum batches held before drop-newest engages. Must be ≥ 1.</param>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="boundedCapacity"/> is less than 1.</exception>
     public ExporterQueue(int boundedCapacity)
     {
         if (boundedCapacity < 1)
@@ -86,5 +89,6 @@ public sealed class ExporterQueue : IDisposable
     public IEnumerable<TraceRecordBatch> GetConsumingEnumerable(CancellationToken cancellationToken)
         => _queue.GetConsumingEnumerable(cancellationToken);
 
+    /// <summary>Dispose the underlying <see cref="BlockingCollection{T}"/>. Call after the exporter thread has exited its consume loop.</summary>
     public void Dispose() => _queue.Dispose();
 }

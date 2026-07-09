@@ -1,3 +1,9 @@
+---
+uid: feature-ecs-index
+title: 'Ecs'
+description: 'Typhon''s archetype-based Entity-Component-System is the primary application-facing data model and read/write path: structured 64-bit entity identity, C#…'
+---
+
 # Ecs
 > Typhon's archetype-based Entity-Component-System is the primary application-facing data model and read/write path: structured 64-bit entity identity, C# archetype classes, and typed zero-copy `Comp<T>` handles resolve any entity's components in O(1). Each component type independently picks a storage mode — `Versioned` (full MVCC), `SingleVersion` (tick-fence durable), or `Transient` (heap-only) — with a `Committed` discipline escalation for atomic zero-loss writes without a revision chain, layered under a three-tier query/reactive-view system, typed entity relationships with cascade delete, and a batched cluster storage engine that turns bulk iteration into ~50x-faster sequential array scans.
 

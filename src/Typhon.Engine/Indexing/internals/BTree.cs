@@ -1,4 +1,9 @@
-﻿// unset
+﻿// CS1591: this file declares public-accessibility types that live in the internal namespace (Phase 2b entanglement, see
+// claude/research/PublicVsInternalApiClassification.md). They are excluded from the published API reference, so consumer-facing
+// doc coverage is not enforced here.
+#pragma warning disable 1591
+
+// unset
 
 using JetBrains.Annotations;
 using System;
@@ -47,8 +52,8 @@ internal struct BTreeHeader
 /// <summary>
 /// Header of the BTree directory stored at the start of chunk 0.
 /// Tracks how many BTree entries are registered in this segment.
-/// Directory chunks are zeroed on first reservation (<see cref="ChunkBasedSegment<TStore>.ReserveChunk(int,bool)"/>), so <see cref="EntryCount"/> == 0 reliably
-/// means "empty directory".
+/// Directory chunks are zeroed on first reservation (<see cref="ChunkBasedSegment{TStore}.ReserveChunk(int, bool, ChangeSet)"/>),
+/// so <see cref="EntryCount"/> == 0 reliably means "empty directory".
 /// </summary>
 [StructLayout(LayoutKind.Sequential, Pack = 2)]
 internal struct BTreeDirectoryHeader

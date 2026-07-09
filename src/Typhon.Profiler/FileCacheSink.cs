@@ -18,6 +18,9 @@ public sealed class FileCacheSink : ICacheChunkSink
     private bool _trailerWritten;
     private bool _disposed;
 
+    /// <summary>Wrap a <see cref="TraceFileCacheWriter"/>. The sink takes ownership: disposing it disposes the writer and its stream.</summary>
+    /// <param name="writer">Cache writer to append chunks and trailer sections to.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="writer"/> is <c>null</c>.</exception>
     public FileCacheSink(TraceFileCacheWriter writer)
     {
         ArgumentNullException.ThrowIfNull(writer);
@@ -32,8 +35,12 @@ public sealed class FileCacheSink : ICacheChunkSink
         return new FileCacheSink(new TraceFileCacheWriter(stream));
     }
 
+    /// <inheritdoc/>
+    /// <remarks>Always <c>true</c> — this replay sink writes a full trailer and sealed cache header.</remarks>
     public bool SupportsTrailer => true;
 
+    /// <inheritdoc/>
+    /// <remarks>Opens the <see cref="CacheSectionId.FoldedChunkData"/> section on the first call.</remarks>
     public (long CacheOffset, uint CompressedLength, uint UncompressedLength) AppendChunk(ReadOnlySpan<byte> uncompressedRecords)
     {
         if (!_foldedSectionOpen)
@@ -44,6 +51,8 @@ public sealed class FileCacheSink : ICacheChunkSink
         return _writer.AppendLz4Chunk(uncompressedRecords);
     }
 
+    /// <inheritdoc/>
+    /// <exception cref="InvalidOperationException">The trailer has already been written.</exception>
     public void WriteTrailer(
         IReadOnlyList<TickSummary> tickSummaries,
         in GlobalMetricsFixed globalMetrics,
@@ -113,6 +122,7 @@ public sealed class FileCacheSink : ICacheChunkSink
         _trailerWritten = true;
     }
 
+    /// <summary>Disposes the owned <see cref="TraceFileCacheWriter"/> (and its underlying stream). Idempotent.</summary>
     public void Dispose()
     {
         if (_disposed)

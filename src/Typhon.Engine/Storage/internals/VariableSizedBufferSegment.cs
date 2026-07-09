@@ -1,4 +1,9 @@
-﻿// unset
+﻿// CS1591: this file declares public-accessibility types that live in the internal namespace (Phase 2b entanglement, see
+// claude/research/PublicVsInternalApiClassification.md). They are excluded from the published API reference, so consumer-facing
+// doc coverage is not enforced here.
+#pragma warning disable 1591
+
+// unset
 
 using JetBrains.Annotations;
 using System;
@@ -228,7 +233,7 @@ public unsafe class VariableSizedBufferSegmentBase<TStore> where TStore : struct
 /// <remarks>
 /// The segment stores multiple buffers containing a variable size of a uniform element type.
 /// The internal structure is simple:
-///  - The segment is based from <see cref="ChunkBasedSegment<TStore>"/>, each chunk stores a given number of elements (may be variable because we also use
+///  - The segment is based from <see cref="ChunkBasedSegment{TStore}"/>, each chunk stores a given number of elements (may be variable because we also use
 ///    the chunk's data for internal data storage).
 ///  - Chunks are linked together to form a forward linked list allowing a sequential processing of the buffer (we maintain two linked-list, one for enumeration
 ///    using the Accessor and the other one to locate free chunks).
@@ -236,7 +241,7 @@ public unsafe class VariableSizedBufferSegmentBase<TStore> where TStore : struct
 ///    chunks containing free entries.
 ///  - Elements can be removed, the chunk is then packed to store the occupied entries at first positions, elements are located by their ChunkId and then
 ///    a linear search into it.
-///  - Reading the whole buffer requires nested loop pattern using the <see cref="VariableSizedBufferAccessor{T}"/> accessor.
+///  - Reading the whole buffer requires nested loop pattern using the <see cref="VariableSizedBufferAccessor{T, TStore}"/> accessor.
 ///  - Empty chunks are being removed (if exclusive access can be made) during enumeration via the ReadOnlyAccessor.
 ///  - There is no API for Random access of an element inside a given buffer, it could be done but would be slow.
 /// </remarks>
@@ -506,6 +511,7 @@ public class VariableSizedBufferSegment<T, TStore> : VariableSizedBufferSegmentB
 /// </summary>
 /// <typeparam name="T">The unmanaged element type stored in the buffer.</typeparam>
 /// <typeparam name="TExtraHeader">The unmanaged struct appended after the root header in the root chunk.</typeparam>
+/// <typeparam name="TStore">The <see cref="IPageStore"/> implementation backing the segment's chunks (persistent or transient).</typeparam>
 [PublicAPI]
 public class VariableSizedBufferSegment<T, TExtraHeader, TStore> : VariableSizedBufferSegment<T, TStore> where T : unmanaged where TExtraHeader : unmanaged where TStore : struct, IPageStore
 {
@@ -519,6 +525,7 @@ public class VariableSizedBufferSegment<T, TExtraHeader, TStore> : VariableSized
 /// This is a ref struct to ensure stack allocation and zero GC pressure.
 /// </summary>
 /// <typeparam name="T">The unmanaged element type</typeparam>
+/// <typeparam name="TStore">The <see cref="IPageStore"/> implementation backing the buffer's chunks.</typeparam>
 [PublicAPI]
 public ref struct BufferEnumerator<T, TStore> where T : unmanaged where TStore : struct, IPageStore
 {

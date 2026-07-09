@@ -1,3 +1,9 @@
+---
+uid: feature-storage-pluggable-storage-backend-persistent-store
+title: 'Persistent Store (MMF-backed)'
+description: 'The default backend — every durable component''s segments run through the memory-mapped page cache at zero abstraction cost.'
+---
+
 # Persistent Store (MMF-backed)
 > The default backend — every durable component's segments run through the memory-mapped page cache at zero abstraction cost.
 
@@ -54,7 +60,7 @@ What you actually configure is the page cache the store wraps — see
 
 ## 🧪 Tests
 
-- [ManagedPagedMMFTests](../../../../test/Typhon.Engine.Tests/Storage/ManagedPagedMMFTests.cs) — segment/chunk allocation exercised directly through `PersistentStore` (every `AllocateSegment`/`AllocateChunkBasedSegment` call wraps one)
+- [ManagedPagedMMFTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Storage/ManagedPagedMMFTests.cs) — segment/chunk allocation exercised directly through `PersistentStore` (every `AllocateSegment`/`AllocateChunkBasedSegment` call wraps one)
 
 ## 🔗 Related
 

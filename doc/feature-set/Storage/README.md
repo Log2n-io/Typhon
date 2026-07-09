@@ -1,3 +1,9 @@
+---
+uid: feature-storage-index
+title: 'Storage'
+description: 'The persistence layer underlying every Typhon data structure: a memory-mapped, 8 KiB-page cache with clock-sweep eviction and epoch-based concurrency…'
+---
+
 # Storage
 > The persistence layer underlying every Typhon data structure: a memory-mapped, 8 KiB-page cache with clock-sweep eviction and epoch-based concurrency safety, layered on allocation abstractions that go file-page occupancy → multi-page segments → fixed-size chunks. Pluggable persistent and transient backends share that one substrate, and integrity (CRC32C + A/B pairing), file locking, and read-only introspection round out what makes the on-disk file safe and inspectable.
 

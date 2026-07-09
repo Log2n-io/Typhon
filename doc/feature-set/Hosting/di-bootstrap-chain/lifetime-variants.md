@@ -1,3 +1,9 @@
+---
+uid: feature-hosting-di-bootstrap-chain-lifetime-variants
+title: 'Singleton/Scoped/Transient Lifetime Variants'
+description: 'Every Add* that has a lifetime choice ships as Add..., AddScoped..., and AddTransient... twins.'
+---
+
 # Singleton/Scoped/Transient Lifetime Variants
 > Every `Add*` that has a lifetime choice ships as `Add...`, `AddScoped...`, and `AddTransient...` twins.
 
@@ -94,11 +100,11 @@ using (var scope2 = provider.CreateScope())
 
 ## 🧪 Tests
 
-- [DatabaseFileLockingTests](../../../../test/Typhon.Engine.Tests/Storage/DatabaseFileLockingTests.cs) — builds a manual Scoped chain (`AddScopedManagedPagedMemoryMappedFile` + `AddScopedDatabaseEngine`) outside `TestBase`, then verifies scope-disposal tears the engine (and its lock file) down
+- [DatabaseFileLockingTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Storage/DatabaseFileLockingTests.cs) — builds a manual Scoped chain (`AddScopedManagedPagedMemoryMappedFile` + `AddScopedDatabaseEngine`) outside `TestBase`, then verifies scope-disposal tears the engine (and its lock file) down
 
 ## 🔗 Related
 
-- Source: [`TyphonBuilderExtensions.cs`](../../../../src/Typhon.Engine/Hosting/public/TyphonBuilderExtensions.cs)
+- Source: [`TyphonBuilderExtensions.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Hosting/public/TyphonBuilderExtensions.cs)
 - Reference consumer: `test/Typhon.Engine.Tests/TestBase.cs`
 - Related feature: [Pluggable WAL I/O Backend](../wal-io-injection-seam.md)
 - Parent feature: [DI Engine Bootstrap Chain](./README.md)

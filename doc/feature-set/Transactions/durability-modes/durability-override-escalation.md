@@ -1,3 +1,9 @@
+---
+uid: feature-transactions-durability-modes-durability-override-escalation
+title: 'Per-Transaction Durability Override'
+description: 'Escalate one critical operation to zero-loss durability without raising the durability mode of the surrounding batch.'
+---
+
 # Per-Transaction Durability Override
 > Escalate one critical operation to zero-loss durability without raising the durability mode of the surrounding batch.
 
@@ -81,7 +87,7 @@ void GrantRareDrop(ref TickContext ctx, EntityId playerId, ItemId item)
 
 ## 🧪 Tests
 
-- [SideTransactionTests](../../../../test/Typhon.Engine.Tests/Runtime/SideTransactionTests.cs) — the
+- [SideTransactionTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/SideTransactionTests.cs) — the
   `ctx.CreateSideTransaction(DurabilityMode.Immediate)` escalation idiom: independent commit, snapshot-isolation
   invisibility to the main tick transaction, caller-owned lifecycle
 

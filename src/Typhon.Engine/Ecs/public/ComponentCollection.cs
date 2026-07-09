@@ -4,6 +4,12 @@ using Typhon.Schema.Definition;
 
 namespace Typhon.Engine;
 
+/// <summary>
+/// Mutable accessor for a collection-typed component field — the variable-sized element list backing a <see cref="ComponentCollection{T}"/> value. Appends
+/// reach the owning field by <c>ref</c>, transparently performing copy-on-write when the buffer is shared across MVCC revisions. Must be disposed; disposal
+/// commits the pending buffer writes.
+/// </summary>
+/// <typeparam name="T">Unmanaged element type of the collection.</typeparam>
 [PublicAPI]
 public ref struct ComponentCollectionAccessor<T> : IDisposable where T : unmanaged
 {
@@ -13,6 +19,10 @@ public ref struct ComponentCollectionAccessor<T> : IDisposable where T : unmanag
     private readonly int _initialBufferId;
     private readonly ChangeSet _changeSet;
 
+    /// <summary>Binds an accessor to collection field <paramref name="field"/> and its backing buffer segment, capturing a chunk accessor from <paramref name="changeSet"/>.</summary>
+    /// <param name="changeSet">Change set the buffer mutations are threaded through (dirty tracking and commit).</param>
+    /// <param name="vsbs">Backing variable-sized buffer segment that stores the collection's elements.</param>
+    /// <param name="field">Reference to the collection field being accessed; <see cref="Add"/> updates its buffer id in place.</param>
     public ComponentCollectionAccessor(ChangeSet changeSet, VariableSizedBufferSegment<T, PersistentStore> vsbs, ref ComponentCollection<T> field)
     {
         _vsbs = vsbs;
@@ -22,12 +32,18 @@ public ref struct ComponentCollectionAccessor<T> : IDisposable where T : unmanag
         _initialBufferId = field._bufferId;
     }
 
+    /// <summary>Commits the pending buffer writes and releases the underlying chunk accessor.</summary>
     public void Dispose()
     {
         _ca.CommitChanges();
         _ca.Dispose();
     }
 
+    /// <summary>
+    /// Appends <paramref name="value"/> to the collection, allocating the backing buffer on first use. Under <see cref="StorageMode.Versioned"/> storage, a
+    /// buffer shared with another revision (copy-on-write) is cloned before mutation; a solely-owned buffer is appended in place.
+    /// </summary>
+    /// <param name="value">Element to append.</param>
     public void Add(T value)
     {
         // First time adding an item?
@@ -51,6 +67,7 @@ public ref struct ComponentCollectionAccessor<T> : IDisposable where T : unmanag
         _vsbs.AddElement(_field._bufferId, value, ref _ca);
     }
 
+    /// <summary>Total number of elements currently in the collection.</summary>
     public int ElementCount
     {
         get
@@ -60,6 +77,9 @@ public ref struct ComponentCollectionAccessor<T> : IDisposable where T : unmanag
         }
     }
 
+    /// <summary>Copies every element into <paramref name="dest"/>.</summary>
+    /// <param name="dest">Destination span; must be at least <see cref="ElementCount"/> elements long.</param>
+    /// <returns>The number of elements copied, or <c>0</c> when <paramref name="dest"/> is too small (in which case nothing is copied).</returns>
     public int GetAllElements(Span<T> dest)
     {
         using var a = new VariableSizedBufferAccessor<T, PersistentStore>(_vsbs, _field._bufferId);
@@ -78,6 +98,8 @@ public ref struct ComponentCollectionAccessor<T> : IDisposable where T : unmanag
         return destI;
     }
 
+    /// <summary>Allocates and returns a new array containing every element of the collection.</summary>
+    /// <returns>A newly allocated array of length <see cref="ElementCount"/>.</returns>
     public T[] GetAllElements()
     {
         using var a = new VariableSizedBufferAccessor<T, PersistentStore>(_vsbs, _field._bufferId);

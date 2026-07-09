@@ -1,3 +1,9 @@
+---
+uid: feature-profiler-lock-contention-diagnostics
+title: 'Lock-Contention Forensics (Deep Diagnostics)'
+description: 'Post-mortem visibility into which threads waited on which locks, for how long, and why.'
+---
+
 # Lock-Contention Forensics (Deep Diagnostics)
 > Post-mortem visibility into which threads waited on which locks, for how long, and why.
 

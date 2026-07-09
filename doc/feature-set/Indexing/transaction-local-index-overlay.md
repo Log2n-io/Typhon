@@ -1,3 +1,9 @@
+---
+uid: feature-indexing-transaction-local-index-overlay
+title: 'Transaction-Local Index Overlay (Read-Your-Own-Writes)'
+description: 'Planned per-transaction overlay so index lookups see that transaction''s own uncommitted writes.'
+---
+
 # Transaction-Local Index Overlay (Read-Your-Own-Writes)
 > Planned per-transaction overlay so index lookups see that transaction's own uncommitted writes.
 

@@ -11,7 +11,7 @@ namespace Typhon.Engine;
 /// <remarks>
 /// This is a ref struct wrapping a single <c>byte*</c>. The JIT elides the wrapper entirely when methods are inlined,
 /// producing identical machine code to hand-written pointer arithmetic.
-/// For heavy-duty internal use (e.g., <see cref="LogicalSegment.InitHeader"/>, <see cref="ChunkAccessor"/>),
+/// For heavy-duty internal use (e.g., <see cref="LogicalSegment{TStore}.InitHeader"/>, <see cref="ChunkAccessor{TStore}"/>),
 /// use <see cref="Address"/> to get the raw pointer.
 /// </remarks>
 [PublicAPI]

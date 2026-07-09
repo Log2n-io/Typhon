@@ -6,11 +6,18 @@ using System.Diagnostics;
 
 namespace Typhon.Engine;
 
+/// <summary>
+/// Default <see cref="IResource"/> implementation: a concrete tree node backed by a thread-safe child collection. Subclass to override
+/// <see cref="Count"/> or <see cref="DisposeWithParent"/>, or to add metrics via <see cref="IMetricSource"/>.
+/// </summary>
 [DebuggerDisplay("{Id}, Children: {_children.Count})")]
 [PublicAPI]
 public class ResourceNode : IResource
 {
+    /// <inheritdoc />
     public string Id { get; }
+
+    /// <inheritdoc />
     public string Name { get; }
 
     /// <summary>
@@ -19,10 +26,19 @@ public class ResourceNode : IResource
     /// </summary>
     public virtual int? Count => null;
 
+    /// <inheritdoc />
     public ResourceType Type { get; }
+
+    /// <inheritdoc />
     public IResource Parent { get; }
+
+    /// <inheritdoc />
     public IEnumerable<IResource> Children => _children.Values;
+
+    /// <inheritdoc />
     public DateTime CreatedAt { get; }
+
+    /// <inheritdoc />
     public IResourceRegistry Owner { get; }
 
     /// <summary>
@@ -40,6 +56,7 @@ public class ResourceNode : IResource
     /// </summary>
     public virtual bool DisposeWithParent => true;
 
+    /// <inheritdoc />
     public bool RegisterChild(IResource child)
     {
         if (!_children.TryAdd(child.Id, child))
@@ -57,6 +74,7 @@ public class ResourceNode : IResource
         return true;
     }
 
+    /// <inheritdoc />
     public bool RemoveChild(IResource resource)
     {
         if (!_children.TryRemove(resource.Id, out _))
@@ -76,6 +94,16 @@ public class ResourceNode : IResource
 
     private readonly ConcurrentDictionary<string, IResource> _children = new();
 
+    /// <summary>
+    /// Creates a node and registers it under <paramref name="parent"/>, inheriting the parent's <see cref="Owner"/>.
+    /// </summary>
+    /// <param name="id">Stable identifier, unique among <paramref name="parent"/>'s children. Defaults to the runtime type name when <c>null</c>.</param>
+    /// <param name="type">Resource classification.</param>
+    /// <param name="parent">Parent node; must be non-null (the root is created internally). This node is added to its children.</param>
+    /// <param name="exhaustionPolicy">
+    /// Diagnostic metadata describing how this node reacts when its capacity is exhausted. <see cref="ExhaustionPolicy.None"/> for structural nodes.
+    /// </param>
+    /// <param name="name">Human-readable display label. Defaults to <paramref name="id"/> when <c>null</c>.</param>
     public ResourceNode(string id, ResourceType type, IResource parent, ExhaustionPolicy exhaustionPolicy = ExhaustionPolicy.None, string name = null)
     {
         Id = id ?? $"{GetType().Name}";
@@ -103,12 +131,18 @@ public class ResourceNode : IResource
         CreatedAt = DateTime.UtcNow;
     }
 
+    /// <summary>Disposes this node and, recursively, every child whose <see cref="DisposeWithParent"/> is <c>true</c>.</summary>
     public void Dispose()
     {
         Dispose(true);
         GC.SuppressFinalize(this);
     }
 
+    /// <summary>
+    /// Releases child resources. When <paramref name="disposing"/> is <c>true</c>, cascades disposal to each child except those whose
+    /// <see cref="DisposeWithParent"/> is <c>false</c> (their lifecycle is owned elsewhere), then clears the child set.
+    /// </summary>
+    /// <param name="disposing"><c>true</c> when called from <see cref="Dispose()"/>; <c>false</c> from a finalizer, in which case this is a no-op.</param>
     protected virtual void Dispose(bool disposing)
     {
         if (!disposing)

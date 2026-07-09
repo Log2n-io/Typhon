@@ -47,6 +47,14 @@ public sealed class TraceFileCacheWriter : IDisposable
     private bool _disposed;
     private bool _finalized;
 
+    /// <summary>
+    /// Opens a cache writer over <paramref name="stream"/>, reserving header + section-table space so the first section write lands at
+    /// <see cref="SectionsStartOffset"/>. The stream must be seekable — the writer rewinds once at finalize to patch the header and section table.
+    /// The writer takes ownership and disposes it in <see cref="Dispose"/>.
+    /// </summary>
+    /// <param name="stream">Seekable, writable output stream for the <c>.typhon-trace-cache</c> file.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="stream"/> is <c>null</c>.</exception>
+    /// <exception cref="ArgumentException"><paramref name="stream"/> is not seekable.</exception>
     public TraceFileCacheWriter(Stream stream)
     {
         _stream = stream ?? throw new ArgumentNullException(nameof(stream));
@@ -277,6 +285,10 @@ public sealed class TraceFileCacheWriter : IDisposable
         _finalized = true;
     }
 
+    /// <summary>
+    /// Disposes the writer and the underlying stream. If <see cref="Finalize"/> was never called the file is left unfinalized (callers may treat
+    /// it as a build-in-progress artifact). Idempotent.
+    /// </summary>
     public void Dispose()
     {
         if (_disposed)

@@ -477,7 +477,7 @@ unsafe class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStore> where
 
     /// <summary>
     /// Locate <paramref name="key"/> and invoke <see cref="IRawValueUpdater.Update"/> on the value bytes
-    /// while holding the bucket's OLC write lock and with the page registered as dirty in <paramref name="changeSet"/>.
+    /// while holding the bucket's OLC write lock and marking the touched chunk dirty through <paramref name="accessor"/>.
     /// Single chain scan, single dirty mark, single OLC critical section — used to mutate a few bytes of an
     /// existing value in place without paying for a TryGet+Upsert pair (two scans, two OLC ops, one full-record stack copy + rewrite).
     /// </summary>

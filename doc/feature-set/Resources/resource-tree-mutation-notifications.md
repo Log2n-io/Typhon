@@ -1,3 +1,9 @@
+---
+uid: feature-resources-resource-tree-mutation-notifications
+title: 'Resource Tree Mutation Notifications'
+description: 'Live add/remove events from the resource graph — no polling required.'
+---
+
 # Resource Tree Mutation Notifications
 > Live add/remove events from the resource graph — no polling required.
 
@@ -61,7 +67,7 @@ the tree updates without a refresh.
   look up the actual node via `IResourceRegistry.FindByPath` if more detail is needed.
 
 ## 🧪 Tests
-- [ResourceRegistryMutationTests](../../../test/Typhon.Engine.Tests/Resources/ResourceRegistryMutationTests.cs) — Added/Removed events,
+- [ResourceRegistryMutationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Resources/ResourceRegistryMutationTests.cs) — Added/Removed events,
   duplicate-register no-op, throwing-subscriber isolation, unsubscribe stops delivery
 
 ## 🔗 Related

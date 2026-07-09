@@ -1,3 +1,9 @@
+---
+uid: feature-resources-observability-bridge-resources
+title: 'Observability Bridge (Resources to OTel/Health/Alerts)'
+description: 'Turns resource-graph snapshots into OpenTelemetry metrics, a health status, and threshold alerts.'
+---
+
 # Observability Bridge (Resources to OTel/Health/Alerts)
 > Turns resource-graph snapshots into OpenTelemetry metrics, a health status, and threshold alerts.
 
@@ -86,7 +92,7 @@ metricsService.Start();
   thread — a persistently throwing health check degrades silently rather than crashing.
 
 ## 🧪 Tests
-- [ObservabilityBridgeTests](../../../test/Typhon.Engine.Tests/Observability/Bridge/ObservabilityBridgeTests.cs) — OTel metric-name
+- [ObservabilityBridgeTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Observability/Bridge/ObservabilityBridgeTests.cs) — OTel metric-name
   building, `ResourceMetricsExporter` instrument registration/gating, `ResourceHealthChecker` threshold tiers, `ResourceAlertGenerator`
   root-cause attribution and transition-only alerting, `ResourceMetricsService` start/stop/force-update events
 

@@ -1,3 +1,9 @@
+---
+uid: feature-hosting-wal-io-injection-seam
+title: 'Pluggable WAL I/O Backend (IWalFileIO seam)'
+description: 'Swap the WAL''s disk backend for an in-memory one and run the full WAL + checkpoint pipeline with zero disk I/O.'
+---
+
 # Pluggable WAL I/O Backend (IWalFileIO seam)
 > Swap the WAL's disk backend for an in-memory one and run the full WAL + checkpoint pipeline with zero disk I/O.
 
@@ -66,11 +72,11 @@ nothing is injected.
 
 ## 🧪 Tests
 
-- [WalIntegrationTests](../../../test/Typhon.Engine.Tests/Durability/WalIntegrationTests.cs) — registers `AddSingleton<IWalFileIO>(new WalFileIO())` to swap in the real disk-backed implementation and runs the full WAL/checkpoint/reopen/crash-recovery pipeline against it — the documented alternative to the default in-memory backend
+- [WalIntegrationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/WalIntegrationTests.cs) — registers `AddSingleton<IWalFileIO>(new WalFileIO())` to swap in the real disk-backed implementation and runs the full WAL/checkpoint/reopen/crash-recovery pipeline against it — the documented alternative to the default in-memory backend
 
 ## 🔗 Related
 
-- Source: [`TyphonBuilderExtensions.cs`](../../../src/Typhon.Engine/Hosting/public/TyphonBuilderExtensions.cs) (`CreateDatabaseEngine`), [`IWalFileIO.cs`](../../../src/Typhon.Engine/Durability/internals/IWalFileIO.cs), [`InMemoryWalFileIO.cs`](../../../src/Typhon.Engine/Durability/internals/InMemoryWalFileIO.cs), [`WalFileIO.cs`](../../../src/Typhon.Engine/Durability/internals/WalFileIO.cs)
+- Source: [`TyphonBuilderExtensions.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Hosting/public/TyphonBuilderExtensions.cs) (`CreateDatabaseEngine`), [`IWalFileIO.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/internals/IWalFileIO.cs), [`InMemoryWalFileIO.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/internals/InMemoryWalFileIO.cs), [`WalFileIO.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/internals/WalFileIO.cs)
 - Sibling: [Write-Ahead Log (WAL v2 logical records)](../Durability/wal-v2.md) — the durability pipeline this seam swaps the disk backend under, unchanged.
 - Sibling: [Pluggable Storage Backend (Persistent vs Transient)](../Storage/pluggable-storage-backend/README.md) — the analogous backend-injection seam for page storage instead of WAL.
 

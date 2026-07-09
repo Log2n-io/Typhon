@@ -1,3 +1,9 @@
+---
+uid: feature-subscriptions-wire-transport
+title: 'TCP Transport & Wire Format'
+description: 'One length-prefixed, MemoryPack-serialized message per client per tick over TCP_NODELAY.'
+---
+
 # TCP Transport & Wire Format
 > One length-prefixed, MemoryPack-serialized message per client per tick over TCP_NODELAY.
 
@@ -57,12 +63,12 @@ conn.OnTickDelta += tickDelta =>
 
 ## 🧪 Tests
 
-- [ProtocolTests](../../../test/Typhon.Engine.Tests/Runtime/Subscriptions/ProtocolTests.cs) —
+- [ProtocolTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/ProtocolTests.cs) —
   `TickDeltaMessage`/`ViewDeltaMessage` MemoryPack round-trips, including the full multi-View Added/Modified/Removed
   message shape
-- [FrameReaderTests](../../../test/Typhon.Client.Tests/FrameReaderTests.cs) — length-prefixed frame reading:
+- [FrameReaderTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Client.Tests/FrameReaderTests.cs) — length-prefixed frame reading:
   fragmentation, buffer growth, zero/negative/excessive length rejection
-- [SendBufferTests](../../../test/Typhon.Engine.Tests/Runtime/Subscriptions/SendBufferTests.cs) — the per-client
+- [SendBufferTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/SendBufferTests.cs) — the per-client
   ring buffer the I/O thread drains: wraparound, capacity, fill percentage
 
 ## 🔗 Related

@@ -3,7 +3,7 @@ using System.Runtime.CompilerServices;
 namespace Typhon.Engine.Internals;
 
 /// <summary>
-/// Generates unique 64-bit <see cref="Typhon.TraceEvent.SpanId"/> values for the producer hot path with zero atomic operations and zero
+/// Generates unique 64-bit <see cref="TraceSpanHeader.SpanId"/> values for the producer hot path with zero atomic operations and zero
 /// shared cache lines.
 /// </summary>
 /// <remarks>

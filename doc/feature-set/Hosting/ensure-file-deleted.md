@@ -1,3 +1,9 @@
+---
+uid: feature-hosting-ensure-file-deleted
+title: 'Clean-Slate Database Deletion'
+description: 'Delete a Typhon database''s .typhon bundle directory before opening it fresh.'
+---
+
 # Clean-Slate Database Deletion
 > Delete a Typhon database's `.typhon` bundle directory before opening it fresh.
 
@@ -57,11 +63,11 @@ var engine = sp.GetRequiredService<DatabaseEngine>();
 
 ## 🧪 Tests
 
-- [DatabaseFileLockingTests](../../../test/Typhon.Engine.Tests/Storage/DatabaseFileLockingTests.cs) — `EnsureDeleted_RemovesLock` asserts both the `.bin` and `.lock` files are removed; every other test in the fixture calls `sp.EnsureFileDeleted<ManagedPagedMMFOptions>()` as its clean-slate setup step
+- [DatabaseFileLockingTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Storage/DatabaseFileLockingTests.cs) — `EnsureDeleted_RemovesLock` asserts both the `.bin` and `.lock` files are removed; every other test in the fixture calls `sp.EnsureFileDeleted<ManagedPagedMMFOptions>()` as its clean-slate setup step
 
 ## 🔗 Related
 
-- Source: [`TyphonBuilderExtensions.cs`](../../../src/Typhon.Engine/Hosting/public/TyphonBuilderExtensions.cs) (`EnsureFileDeleted<TO>`), [`PagedMMFOptions.cs`](../../../src/Typhon.Engine/Storage/public/PagedMMFOptions.cs) (`EnsureFileDeleted`)
+- Source: [`TyphonBuilderExtensions.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Hosting/public/TyphonBuilderExtensions.cs) (`EnsureFileDeleted<TO>`), [`PagedMMFOptions.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/public/PagedMMFOptions.cs) (`EnsureFileDeleted`)
 - Sibling: [Engine Options Configuration Surface](engine-options-configuration/README.md) — resolves the same `IOptions<TO>` this feature deletes the backing file for.
 
 <!-- Deep dive: claude/design/Hosting/di-extensions.md, claude/overview/03-storage.md -->

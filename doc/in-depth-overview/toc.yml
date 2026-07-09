@@ -1,0 +1,30 @@
+- name: Reading this series
+  href: README.md
+- name: 01 — Foundation
+  href: 01-foundation.md
+- name: 02 — Storage
+  href: 02-storage.md
+- name: 03 — Indexing
+  href: 03-indexing.md
+- name: 04 — Schema
+  href: 04-schema.md
+- name: 05 — Revision
+  href: 05-revision.md
+- name: 06 — ECS
+  href: 06-ecs.md
+- name: 07 — Spatial
+  href: 07-spatial.md
+- name: 08 — Transactions
+  href: 08-transactions.md
+- name: 09 — Querying
+  href: 09-querying.md
+- name: 10 — Runtime
+  href: 10-runtime.md
+- name: 11 — Durability
+  href: 11-durability.md
+- name: 12 — Observability
+  href: 12-observability.md
+- name: 13 — Resources
+  href: 13-resources.md
+- name: 14 — Errors
+  href: 14-errors.md

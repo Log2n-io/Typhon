@@ -1,3 +1,9 @@
+---
+uid: feature-storage-file-locking-lifecycle
+title: 'Database File Locking & Lifecycle'
+description: 'Two-layer protection against two processes opening the same database file, plus safe create/open/delete handling.'
+---
+
 # Database File Locking & Lifecycle
 > Two-layer protection against two processes opening the same database file, plus safe create/open/delete handling.
 
@@ -54,7 +60,7 @@ sp.EnsureFileDeleted<ManagedPagedMMFOptions>();
 
 ## 🧪 Tests
 
-- [DatabaseFileLockingTests](../../../test/Typhon.Engine.Tests/Storage/DatabaseFileLockingTests.cs) — full scenario matrix: stale/live/cross-machine/corrupt lock files, `FileShare` enforcement, `EnsureFileDeleted`
+- [DatabaseFileLockingTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Storage/DatabaseFileLockingTests.cs) — full scenario matrix: stale/live/cross-machine/corrupt lock files, `FileShare` enforcement, `EnsureFileDeleted`
 
 ## 🔗 Related
 

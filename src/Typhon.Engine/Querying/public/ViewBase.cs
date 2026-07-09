@@ -7,8 +7,8 @@ using System.Threading;
 namespace Typhon.Engine;
 
 /// <summary>
-/// Non-generic base class for <see cref="View{T}"/>, <see cref="View{T1,T2}"/>, and <see cref="OrView{T}"/>.
-/// Contains entity set management, delta tracking, disposal, and globally unique ViewId generation.
+/// Non-generic base class for <see cref="EcsView{TArchetype}"/> and <see cref="NavigationView{TSource,TTarget}"/>.
+/// Contains entity set management, delta tracking, disposal, and process-unique ViewId generation.
 /// </summary>
 public abstract class ViewBase : IView, IDisposable, IEnumerable<long>
 {
@@ -19,6 +19,7 @@ public abstract class ViewBase : IView, IDisposable, IEnumerable<long>
     private int _addedCount;
     private int _removedCount;
     private int _modifiedCount;
+    /// <summary>Field predicate evaluators applied during refresh. Empty for pull-mode views with no WHERE clause.</summary>
     protected readonly FieldEvaluator[] Evaluators;
     private long _lastRefreshTSN;
     private int _disposed;
@@ -44,8 +45,13 @@ public abstract class ViewBase : IView, IDisposable, IEnumerable<long>
         _cachedPlans = plans;
     }
 
+    /// <inheritdoc/>
     public int ViewId { get; }
+
+    /// <inheritdoc/>
     public int[] FieldDependencies { get; }
+
+    /// <inheritdoc/>
     public bool IsDisposed => _disposed != 0;
     internal ViewDeltaRingBuffer DeltaBuffer { get; }
 
@@ -96,12 +102,26 @@ public abstract class ViewBase : IView, IDisposable, IEnumerable<long>
 
     /// <summary>True if this View is used as a system input in the DAG scheduler.</summary>
     public bool IsSystemInput { get; internal set; }
+    /// <summary>Number of entities currently in the view.</summary>
     public int Count => _entityIds.Count;
+
+    /// <summary>Transaction sequence number (TSN) of the most recent refresh.</summary>
     public long LastRefreshTSN => _lastRefreshTSN;
+
+    /// <summary>
+    /// True when the delta ring buffer overflowed since the last refresh, forcing a full re-scan.
+    /// After overflow, per-field <c>Modified</c> tracking is lost — only Added/Removed are reported.
+    /// </summary>
     public bool HasOverflow => _overflowDetected;
+
+    /// <summary>Cached execution plan for the primary query branch, or <c>default</c> when the view has no cached plan.</summary>
     public ExecutionPlan ExecutionPlan => _cachedPlans is { Length: > 0 } ? _cachedPlans[0] : default;
+
+    /// <summary>True when this view was built with a cached execution plan.</summary>
     public bool HasCachedPlan => _cachedPlans != null;
 
+    /// <summary>Returns <c>true</c> when the entity with the given primary key is currently in the view.</summary>
+    /// <param name="pk">Entity primary key.</param>
     public bool Contains(long pk) => _entityIds.Contains(pk);
 
     internal void AddEntityDirect(long pk) => _entityIds.TryAdd(pk);
@@ -109,8 +129,13 @@ public abstract class ViewBase : IView, IDisposable, IEnumerable<long>
     /// <summary>Direct access to the entity set for callers that need to populate it (e.g., PipelineExecutor during ToView).</summary>
     internal HashMap<long> EntityIdsInternal => _entityIds;
 
+    /// <summary>
+    /// Returns a zero-allocation <see cref="ViewDelta"/> over the entities added, removed, and modified since the last
+    /// <see cref="ClearDelta"/>. The returned struct is only valid until the next <see cref="ClearDelta"/> call.
+    /// </summary>
     public ViewDelta GetDelta() => new(_deltas, _addedCount, _removedCount, _modifiedCount);
 
+    /// <summary>Clears accumulated delta tracking, invalidating any <see cref="ViewDelta"/> previously returned by <see cref="GetDelta"/>.</summary>
     public void ClearDelta()
     {
         _deltas.Clear();
@@ -125,16 +150,24 @@ public abstract class ViewBase : IView, IDisposable, IEnumerable<long>
 
     IEnumerator IEnumerable.GetEnumerator() => ((IEnumerable<long>)_entityIds).GetEnumerator();
 
+    /// <summary>Records the TSN of the current refresh, surfaced by <see cref="LastRefreshTSN"/>.</summary>
+    /// <param name="tsn">Transaction sequence number of the refresh.</param>
     protected void SetLastRefreshTSN(long tsn) => _lastRefreshTSN = tsn;
 
+    /// <summary>Sets the overflow flag surfaced by <see cref="HasOverflow"/>.</summary>
+    /// <param name="value">New overflow state.</param>
     protected void SetOverflowDetected(bool value) => _overflowDetected = value;
 
+    /// <summary>Atomically transitions the view to the disposed state. Returns <c>true</c> on the first call, <c>false</c> if already disposed.</summary>
     protected bool TryMarkDisposed() => Interlocked.Exchange(ref _disposed, 1) == 0;
 
+    /// <summary>First cached execution plan, or <c>default</c> when the view has no cached plan.</summary>
     protected ExecutionPlan CachedPlan => _cachedPlans is { Length: > 0 } ? _cachedPlans[0] : default;
 
+    /// <summary>All cached execution plans (one per OR branch), or <c>null</c> when the view has no cached plan.</summary>
     protected ExecutionPlan[] CachedPlans => _cachedPlans;
 
+    /// <summary>True when cached execution plans are present.</summary>
     protected bool HasCachedPlanInternal => _cachedPlans != null;
 
     /// <summary>Drain the ring buffer, evaluate predicates, and update entity set and delta tracking.</summary>
@@ -180,6 +213,9 @@ public abstract class ViewBase : IView, IDisposable, IEnumerable<long>
     /// <summary>Deregister from all owning ViewRegistries. Called during disposal.</summary>
     protected abstract void DeregisterFromRegistries();
 
+    /// <summary>
+    /// Deregisters the view from all owning registries and releases the delta ring buffer and entity set. Idempotent — subsequent calls are no-ops.
+    /// </summary>
     public void Dispose()
     {
         if (!TryMarkDisposed())
@@ -198,6 +234,13 @@ public abstract class ViewBase : IView, IDisposable, IEnumerable<long>
         _modifiedCount = 0;
     }
 
+    /// <summary>
+    /// Updates the entity set and delta tracking for one entity given its previous and new membership: adds it, removes it,
+    /// or marks it <c>Modified</c> when membership is unchanged but the entity remains in the view.
+    /// </summary>
+    /// <param name="pk">Entity primary key.</param>
+    /// <param name="wasInView">Whether the entity was in the view before this change.</param>
+    /// <param name="shouldBeInView">Whether the entity should be in the view after this change.</param>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     protected void ApplyDelta(long pk, bool wasInView, bool shouldBeInView)
     {

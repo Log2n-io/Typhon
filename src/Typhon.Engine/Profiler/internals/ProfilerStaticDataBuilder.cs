@@ -395,7 +395,7 @@ internal static class ProfilerStaticDataBuilder
     /// Why: <see cref="ArchetypeRegistry.GetComponentTypeId"/> returns -1 for unknown types and the previous
     /// <c>ResolveComponentTypeId</c> returned 0 for null POCOTypes — both are sentinels and multiple components hit them,
     /// producing duplicate IDs in the trace's component-definitions table. Downstream consumers (the Workbench
-    /// <see cref="Typhon.Workbench.Schema.TraceSchemaProvider"/>) build dictionaries keyed by ID and would either crash
+    /// <c>Typhon.Workbench.Schema.TraceSchemaProvider</c>) build dictionaries keyed by ID and would either crash
     /// (the original bug) or silently lose entries (the <c>TryAdd</c> fix). With unique negative sentinels, every
     /// component has a distinct ID — Workbench panels list every system table individually rather than collapsing them.
     ///

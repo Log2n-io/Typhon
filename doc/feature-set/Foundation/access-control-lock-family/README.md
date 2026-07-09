@@ -1,3 +1,9 @@
+---
+uid: feature-foundation-access-control-lock-family-index
+title: 'Reader-Writer & Resource Lifecycle Locks'
+description: 'CAS-only, allocation-free spin-locks every concurrent engine structure embeds for shared/exclusive or lifecycle access.'
+---
+
 # Reader-Writer & Resource Lifecycle Locks
 > CAS-only, allocation-free spin-locks every concurrent engine structure embeds for shared/exclusive or lifecycle access.
 
@@ -25,9 +31,9 @@ All three pack their entire state into a single atomic word (8, 4, and 4 bytes r
 - Contention surfaces through the profiler's trace-event stream (`TyphonEvent.Emit*`, gated and JIT-eliminated when the profiler is off) — not an opt-in callback interface.
 
 ## 🧪 Tests
-- [AccessControlTests](../../../../test/Typhon.Engine.Tests/Concurrency/AccessControlTests.cs) — full-featured RW lock: shared/exclusive/promote-demote, fairness under contention, deadline+cancellation wiring.
-- [AccessControlSmallTests](../../../../test/Typhon.Engine.Tests/Concurrency/AccessControlSmallTests.cs) — compact RW lock: idle/shared/exclusive transitions, misuse-throws contract.
-- [ResourceAccessControlTests](../../../../test/Typhon.Engine.Tests/Concurrency/ResourceAccessControlTests.cs) — 3-mode Accessing/Modify/Destroy semantics, `MODIFY_PENDING` fairness, promote/demote.
+- [AccessControlTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Concurrency/AccessControlTests.cs) — full-featured RW lock: shared/exclusive/promote-demote, fairness under contention, deadline+cancellation wiring.
+- [AccessControlSmallTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Concurrency/AccessControlSmallTests.cs) — compact RW lock: idle/shared/exclusive transitions, misuse-throws contract.
+- [ResourceAccessControlTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Concurrency/ResourceAccessControlTests.cs) — 3-mode Accessing/Modify/Destroy semantics, `MODIFY_PENDING` fairness, promote/demote.
 
 ## 🔗 Related
 - Sub-features: [AccessControl](./access-control.md), [AccessControlSmall](./access-control-small.md), [ResourceAccessControl](./resource-access-control.md)

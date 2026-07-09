@@ -1,3 +1,9 @@
+---
+uid: feature-indexing-lookup-and-range-scan
+title: 'Lookup and Range-Scan Operations'
+description: 'Lock-free point lookups and ordered range scans over any secondary index, MVCC-correct at your transaction''s snapshot.'
+---
+
 # Lookup and Range-Scan Operations
 > Lock-free point lookups and ordered range scans over any secondary index, MVCC-correct at your transaction's snapshot.
 
@@ -47,8 +53,8 @@ if (point.MoveNext())
 
 ## 🧪 Tests
 
-- [BulkEnumerateTests](../../../test/Typhon.Engine.Tests/Data/BulkEnumerateTests.cs) — `SecondaryIndex_UniqueField`/`SecondaryIndex_AllowMultiple`/`StaleIndexRef_Throws`/`ZeroCopy_ReadReturnsRefIntoPageMemory`: `Transaction.EnumerateIndex` ascending order, zero-copy reads, MVCC visibility (`MVCC_Visibility`, `DeletedEntity_Skipped`)
-- [BtreeTests](../../../test/Typhon.Engine.Tests/Data/BTreeTests.cs) — `RangeScan_TightBounds_OnlyQualifyingEntries`/`RangeScan_MultiLeaf_CorrectOrdering`/`RangeScanDescending_ReturnsReverseOrder`/`RangeScan_AfterDeletions_CorrectEntries`: the leaf-chain range-scan machinery underneath `EnumerateIndex`
+- [BulkEnumerateTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/BulkEnumerateTests.cs) — `SecondaryIndex_UniqueField`/`SecondaryIndex_AllowMultiple`/`StaleIndexRef_Throws`/`ZeroCopy_ReadReturnsRefIntoPageMemory`: `Transaction.EnumerateIndex` ascending order, zero-copy reads, MVCC visibility (`MVCC_Visibility`, `DeletedEntity_Skipped`)
+- [BtreeTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/BTreeTests.cs) — `RangeScan_TightBounds_OnlyQualifyingEntries`/`RangeScan_MultiLeaf_CorrectOrdering`/`RangeScanDescending_ReturnsReverseOrder`/`RangeScan_AfterDeletions_CorrectEntries`: the leaf-chain range-scan machinery underneath `EnumerateIndex`
 
 ## 🔗 Related
 

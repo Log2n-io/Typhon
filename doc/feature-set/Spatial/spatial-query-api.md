@@ -1,3 +1,9 @@
+---
+uid: feature-spatial-spatial-query-api
+title: 'Spatial Query API (AABB / Radius / Ray / Frustum / kNN / Count)'
+description: 'Six query algorithms over the per-component R-Tree, from zero-allocation engine hot loops to composable fluent ECS filters.'
+---
+
 # Spatial Query API (AABB / Radius / Ray / Frustum / kNN / Count)
 > Six query algorithms over the per-component R-Tree, from zero-allocation engine hot loops to composable fluent ECS filters.
 
@@ -64,14 +70,14 @@ var rayHits = t.Query<UnitArch>()
 
 ## 🧪 Tests
 
-- [SpatialQueryTests](../../../test/Typhon.Engine.Tests/Data/SpatialIndex/SpatialQueryTests.cs) — `SpatialQuery<T>` Radius/Ray/Frustum/kNN traversal correctness vs a brute-force reference, ray/AABB intersection edge cases
-- [SpatialEcsIntegrationTests](../../../test/Typhon.Engine.Tests/Data/SpatialIndex/SpatialEcsIntegrationTests.cs) — public fluent `WhereInAABB`/`WhereNearby`/`WhereRay`, composition with `WhereField`/`Where`, and the "one spatial predicate per query"/foreach guard exceptions
+- [SpatialQueryTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/SpatialIndex/SpatialQueryTests.cs) — `SpatialQuery<T>` Radius/Ray/Frustum/kNN traversal correctness vs a brute-force reference, ray/AABB intersection edge cases
+- [SpatialEcsIntegrationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/SpatialIndex/SpatialEcsIntegrationTests.cs) — public fluent `WhereInAABB`/`WhereNearby`/`WhereRay`, composition with `WhereField`/`Where`, and the "one spatial predicate per query"/foreach guard exceptions
 
 ## 🔗 Related
 
-- Source: [src/Typhon.Engine/Spatial/internals/SpatialQuery.cs](../../../src/Typhon.Engine/Spatial/internals/SpatialQuery.cs) (engine-internal handle, all six algorithms)
-- Source: [src/Typhon.Engine/Spatial/internals/SpatialRTree.Query.cs](../../../src/Typhon.Engine/Spatial/internals/SpatialRTree.Query.cs) (enumerator implementations)
-- Source: [src/Typhon.Engine/Ecs/public/EcsQuery.cs](../../../src/Typhon.Engine/Ecs/public/EcsQuery.cs) (public fluent surface)
+- Source: [src/Typhon.Engine/Spatial/internals/SpatialQuery.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/SpatialQuery.cs) (engine-internal handle, all six algorithms)
+- Source: [src/Typhon.Engine/Spatial/internals/SpatialRTree.Query.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/SpatialRTree.Query.cs) (enumerator implementations)
+- Source: [src/Typhon.Engine/Ecs/public/EcsQuery.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/EcsQuery.cs) (public fluent surface)
 - Related catalog entry: [Querying / Spatial Query Predicates](../Querying/spatial-predicates.md) (fluent composition rules)
 - Related catalog entry: [Spatial R-Tree Index](./spatial-rtree-index/README.md) (the index structure these queries run against)
 - Overview: [Spatial Architecture Overview](./spatial-architecture-overview.md) — how this fits with the separate spatial grid

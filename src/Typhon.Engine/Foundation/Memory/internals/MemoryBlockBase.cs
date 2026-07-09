@@ -16,8 +16,8 @@ internal abstract class MemoryBlockBase : MemoryManager<byte>, IMemoryResource, 
     public abstract Memory<byte> DataAsMemory { get; }
 
     /// <summary>
-    /// Interned call-site tag (see <see cref="Profiler.MemoryAllocSource"/>). Stored so the symmetric free-side
-    /// <see cref="Profiler.TraceEventKind.MemoryAllocEvent"/> can carry the same tag as its alloc pair. <c>0</c> means unattributed.
+    /// Interned call-site tag (see <see cref="Typhon.Profiler.MemoryAllocSource"/>). Stored so the symmetric free-side
+    /// <see cref="Typhon.Profiler.TraceEventKind.MemoryAllocEvent"/> can carry the same tag as its alloc pair. <c>0</c> means unattributed.
     /// </summary>
     public ushort SourceTag { get; }
 

@@ -1,3 +1,9 @@
+---
+uid: feature-foundation-deadline-timeout-propagation
+title: 'Deadline & Timeout Propagation'
+description: 'Monotonic absolute deadlines bundled with cooperative cancellation, shared by reference through every nested call so timeouts never accumulate.'
+---
+
 # Deadline & Timeout Propagation
 > Monotonic absolute deadlines bundled with cooperative cancellation, shared by reference through every nested call so timeouts never accumulate.
 
@@ -49,10 +55,10 @@ catch (TyphonTimeoutException)
 - A background watchdog polls registered deadlines at 200Hz (~5ms resolution) to fire `CancellationToken`s for code paths that need to observe expiry without spinning — an internal mechanism, not directly exposed.
 
 ## 🧪 Tests
-- [DeadlineTests](../../../test/Typhon.Engine.Tests/Concurrency/DeadlineTests.cs) — monotonic expiry: default/zero/infinite states, `FromTimeout` conversion, `Min()` composition.
-- [WaitContextTests](../../../test/Typhon.Engine.Tests/Concurrency/WaitContextTests.cs) — deadline+cancellation composition, `ShouldStop` short-circuiting, `FromTimeout`/`FromToken` construction.
-- [UnitOfWorkContextTests](../../../test/Typhon.Engine.Tests/Concurrency/UnitOfWorkContextTests.cs) — 24-byte struct layout, `ThrowIfCancelled`, holdoff begin/end nesting that suppresses cancellation without disabling the deadline.
-- [TransactionUnitOfWorkContextTests](../../../test/Typhon.Engine.Tests/Concurrency/TransactionUnitOfWorkContextTests.cs) — `Commit(ref ctx)`/`Rollback(ref ctx)` propagation end-to-end, expired-deadline and cancelled-token paths matching the usage sample above.
+- [DeadlineTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Concurrency/DeadlineTests.cs) — monotonic expiry: default/zero/infinite states, `FromTimeout` conversion, `Min()` composition.
+- [WaitContextTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Concurrency/WaitContextTests.cs) — deadline+cancellation composition, `ShouldStop` short-circuiting, `FromTimeout`/`FromToken` construction.
+- [UnitOfWorkContextTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Concurrency/UnitOfWorkContextTests.cs) — 24-byte struct layout, `ThrowIfCancelled`, holdoff begin/end nesting that suppresses cancellation without disabling the deadline.
+- [TransactionUnitOfWorkContextTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Concurrency/TransactionUnitOfWorkContextTests.cs) — `Commit(ref ctx)`/`Rollback(ref ctx)` propagation end-to-end, expired-deadline and cancelled-token paths matching the usage sample above.
 
 ## 🔗 Related
 

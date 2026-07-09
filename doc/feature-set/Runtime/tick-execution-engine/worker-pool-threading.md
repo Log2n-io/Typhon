@@ -1,3 +1,9 @@
+---
+uid: feature-runtime-tick-execution-engine-worker-pool-threading
+title: 'Worker Pool & Threading Model'
+description: 'Core allocation between a dedicated tick-metronome thread and a pool of worker threads that execute the system DAG in parallel.'
+---
+
 # Worker Pool & Threading Model
 > Core allocation between a dedicated tick-metronome thread and a pool of worker threads that execute the system DAG in parallel.
 
@@ -66,8 +72,8 @@ Console.WriteLine($"{runtime.Scheduler.WorkerCount} workers, tick {runtime.Curre
 
 ## 🧪 Tests
 
-- [DagSchedulerTests](../../../../test/Typhon.Engine.Tests/Runtime/DagSchedulerTests.cs) — `MultiWorker_DependencyRespected` (any-worker CAS dispatch), `Shutdown_Clean` (worker join on teardown)
-- [TyphonRuntimeTests](../../../../test/Typhon.Engine.Tests/Runtime/TyphonRuntimeTests.cs) — `Start_Shutdown_Clean` — TickDriver + worker pool full lifecycle
+- [DagSchedulerTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/DagSchedulerTests.cs) — `MultiWorker_DependencyRespected` (any-worker CAS dispatch), `Shutdown_Clean` (worker join on teardown)
+- [TyphonRuntimeTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/TyphonRuntimeTests.cs) — `Start_Shutdown_Clean` — TickDriver + worker pool full lifecycle
 
 ## 🔗 Related
 

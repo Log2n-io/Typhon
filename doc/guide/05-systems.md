@@ -1,3 +1,9 @@
+---
+uid: guide-systems
+title: '5 — Systems & the tick loop'
+description: 'Everything so far you drove by hand: you opened a transaction, did one thing, let it go. A real simulation or game server doesn''t work that way — it runs…'
+---
+
 # 5 — Systems & the tick loop
 
 Everything so far you drove **by hand**: you opened a transaction, did one thing, let it go. A real simulation or game server doesn't work that way — it runs the *same logic over all its data, continuously, every frame*. That's what the **runtime** gives you: a metronome that beats at a fixed rate, and a graph of **systems** that run over your entities on every beat — in parallel, with the per-tick transaction plumbing handled for you.

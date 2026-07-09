@@ -1,3 +1,9 @@
+---
+uid: feature-runtime-tick-lifecycle-parallel-tick-fence
+title: 'Parallel Tick Fence (WriteTickFence)'
+description: 'Spreads the post-tick WriteTickFence step — cluster migrations, AABB refresh, WAL publish — across the worker pool instead of running it serially on one thread.'
+---
+
 # Parallel Tick Fence (WriteTickFence)
 > Spreads the post-tick WriteTickFence step — cluster migrations, AABB refresh, WAL publish — across the worker pool instead of running it serially on one thread.
 

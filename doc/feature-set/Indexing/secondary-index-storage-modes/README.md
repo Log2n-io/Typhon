@@ -1,3 +1,9 @@
+---
+uid: feature-indexing-secondary-index-storage-modes-index
+title: 'Secondary Index Storage Modes'
+description: 'Unique vs AllowMultiple: the per-field choice that decides an index''s on-disk value shape and per-entity storage cost.'
+---
+
 # Secondary Index Storage Modes
 > Unique vs AllowMultiple: the per-field choice that decides an index's on-disk value shape and per-entity storage cost.
 
@@ -56,8 +62,8 @@ storage footprint and commit cost.
 
 ## 🧪 Tests
 
-- [BtreeTests](../../../../test/Typhon.Engine.Tests/Data/BTreeTests.cs) — unique vs. `AllowMultiple` B+Tree value representation side by side (`CheckTree`/`CheckRemove` vs. `CheckMultipleTree`/`CheckByteMultipleTree`/`CheckFloatMultipleTree`)
-- [BulkEnumerateTests](../../../../test/Typhon.Engine.Tests/Data/BulkEnumerateTests.cs) — `SecondaryIndex_UniqueField`/`SecondaryIndex_AllowMultiple` show both modes read through the identical `Transaction.EnumerateIndex` surface
+- [BtreeTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/BTreeTests.cs) — unique vs. `AllowMultiple` B+Tree value representation side by side (`CheckTree`/`CheckRemove` vs. `CheckMultipleTree`/`CheckByteMultipleTree`/`CheckFloatMultipleTree`)
+- [BulkEnumerateTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/BulkEnumerateTests.cs) — `SecondaryIndex_UniqueField`/`SecondaryIndex_AllowMultiple` show both modes read through the identical `Transaction.EnumerateIndex` surface
 
 ## 🔗 Related
 

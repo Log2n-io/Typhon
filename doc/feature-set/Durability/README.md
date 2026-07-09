@@ -1,3 +1,9 @@
+---
+uid: feature-durability-index
+title: 'Durability'
+description: 'Crash-safe persistence for Typhon: a logical Write-Ahead Log (WAL v2) backs an append-before-publish commit pipeline and per-transaction durability…'
+---
+
 # Durability
 > Crash-safe persistence for Typhon: a logical Write-Ahead Log (WAL v2) backs an append-before-publish commit pipeline and per-transaction durability controls, while a checkpoint pipeline consolidates dirty pages under CRC32C + seqlock protection and a recovery driver rebuilds — never repairs — derived structures from the durably-committed prefix. Every protocol claim is backed by invariant rules and TLA+ models, not tests alone; BulkLoad (throughput) and point-in-time backup (external recovery points) are opt-in paths layered on the same WAL.
 

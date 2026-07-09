@@ -1,3 +1,9 @@
+---
+uid: feature-runtime-system-types-index
+title: 'System Types'
+description: 'Five system base classes for every shape of per-tick work — proactive, reactive, chunk-parallel, multi-stage, and grouped.'
+---
+
 # System Types
 > Five system base classes for every shape of per-tick work — proactive, reactive, chunk-parallel, multi-stage, and grouped.
 
@@ -55,8 +61,8 @@ same DAG and the same tick; class-based registration is required to use RFC-07 a
 
 ## 🧪 Tests
 
-- [ClassBasedSystemTests](../../../../test/Typhon.Engine.Tests/Runtime/ClassBasedSystemTests.cs) — all five base types registered side-by-side, mixed lambda/class dispatch, name/null validation
-- [ScheduleValidationTests](../../../../test/Typhon.Engine.Tests/Runtime/ScheduleValidationTests.cs) — `Build()`-time rejections shared across system types (duplicate names, invalid `ChunksPerWorker`, `Parallel`/`ChangeFilter` without `Input`)
+- [ClassBasedSystemTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/ClassBasedSystemTests.cs) — all five base types registered side-by-side, mixed lambda/class dispatch, name/null validation
+- [ScheduleValidationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/ScheduleValidationTests.cs) — `Build()`-time rejections shared across system types (duplicate names, invalid `ChunksPerWorker`, `Parallel`/`ChangeFilter` without `Input`)
 
 ## 🔗 Related
 

@@ -1,3 +1,9 @@
+---
+uid: feature-profiler-source-attribution
+title: 'Span Source Attribution (Go-to-Source)'
+description: 'Every span you see in the Workbench knows the exact file, line, and method that emitted it — one click away.'
+---
+
 # Span Source Attribution (Go-to-Source)
 > Every span you see in the Workbench knows the exact file, line, and method that emitted it — one click away.
 
@@ -74,9 +80,9 @@ Editor handoff and workspace-root resolution are configured once in the Workbenc
 
 ## 🧪 Tests
 
-- [SourceLocationGeneratorTests](../../../test/Typhon.Engine.Tests/Profiler/SourceLocationGeneratorTests.cs) — the emitted `SourceLocations` table is well-formed: non-empty, deterministic ordering, repo-relative paths, IDs starting at 1, no duplicates
-- [SourceLocationManifestRoundTripTests](../../../test/Typhon.Engine.Tests/Profiler/SourceLocationManifestRoundTripTests.cs) — manifest write/read round-trip in the trace trailer, including header offset patching
-- [SystemSourceResolverByTokenTests](../../../test/Typhon.Engine.Tests/Profiler/SystemSourceResolverByTokenTests.cs) — resolving a user-registered system by `(module, metadataToken)` (the CPU-sample-frame path, no live `MethodInfo`) plus a regression guard on the existing delegate-based path
+- [SourceLocationGeneratorTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Profiler/SourceLocationGeneratorTests.cs) — the emitted `SourceLocations` table is well-formed: non-empty, deterministic ordering, repo-relative paths, IDs starting at 1, no duplicates
+- [SourceLocationManifestRoundTripTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Profiler/SourceLocationManifestRoundTripTests.cs) — manifest write/read round-trip in the trace trailer, including header offset patching
+- [SystemSourceResolverByTokenTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Profiler/SystemSourceResolverByTokenTests.cs) — resolving a user-registered system by `(module, metadataToken)` (the CPU-sample-frame path, no live `MethodInfo`) plus a regression guard on the existing delegate-based path
 
 ## 🔗 Related
 

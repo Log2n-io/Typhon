@@ -1,3 +1,9 @@
+---
+uid: feature-querying-fluent-query-api-wherefield-indexed-predicate
+title: 'Indexed Field Predicates (WhereField)'
+description: 'Expression-parsed predicate that drives a targeted B+Tree scan and powers incrementally-maintained reactive views.'
+---
+
 # Indexed Field Predicates (WhereField)
 > Expression-parsed predicate that drives a targeted B+Tree scan and powers incrementally-maintained reactive views.
 
@@ -67,9 +73,9 @@ using var view = tx.Query<PlayerArch>()
 
 ## 🧪 Tests
 
-- [EcsQueryTargetedScanTests](../../../../test/Typhon.Engine.Tests/Data/ECS/EcsQueryTargetedScanTests.cs) — targeted B+Tree scan vs. broad-scan equivalence, `Count`/`Any`, `ExecuteOrdered` guard throws
-- [TransientIndexTests](../../../../test/Typhon.Engine.Tests/Data/ECS/TransientIndexTests.cs) — `WhereField` index-driven scan on the Transient storage discipline, with a non-primary filter
-- [EcsHardeningTests](../../../../test/Typhon.Engine.Tests/Data/ECS/EcsHardeningTests.cs) — `Query_WhereField_SeesPendingSpawns`: deferred-compiled fallback so uncommitted spawns are still visible
+- [EcsQueryTargetedScanTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/EcsQueryTargetedScanTests.cs) — targeted B+Tree scan vs. broad-scan equivalence, `Count`/`Any`, `ExecuteOrdered` guard throws
+- [TransientIndexTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/TransientIndexTests.cs) — `WhereField` index-driven scan on the Transient storage discipline, with a non-primary filter
+- [EcsHardeningTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/EcsHardeningTests.cs) — `Query_WhereField_SeesPendingSpawns`: deferred-compiled fallback so uncommitted spawns are still visible
 
 ## 🔗 Related
 

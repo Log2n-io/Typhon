@@ -1,10 +1,16 @@
+---
+uid: overview-querying
+title: '09 — Querying'
+description: 'Querying is the read side of Typhon''s ECS data model. Application code asks "give me the entities matching these constraints"; the engine turns that into an…'
+---
+
 # 09 — Querying
 
-**Code:** [`src/Typhon.Engine/Querying/`](../../src/Typhon.Engine/Querying/) (+ a short tour of [`src/Typhon.Engine/Subscriptions/`](../../src/Typhon.Engine/Subscriptions/) in §8)
+**Code:** [`src/Typhon.Engine/Querying/`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Engine/Querying) (+ a short tour of [`src/Typhon.Engine/Subscriptions/`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Engine/Subscriptions) in §8)
 
 Querying is the read side of Typhon's ECS data model. Application code asks "give me the entities matching these constraints"; the engine turns that into an execution plan, scans the smallest possible amount of state, and streams matching primary keys into a caller-owned container. On top of that one-shot pipeline sits a **view system** — long-lived, incrementally maintained sets of entity IDs that get push-notified by writers and report `Added` / `Removed` / `Modified` deltas back to the consumer.
 
-This doc covers both layers. The query builder ([`EcsQuery<TArchetype>`](../../src/Typhon.Engine/Ecs/public/EcsQuery.cs)) actually lives in `Ecs/` because it's archetype-shaped — but every plumbing piece behind it (`ExpressionParser`, `PlanBuilder`, `ExecutionPlan`, `FieldEvaluator`, `PipelineExecutor`, statistics) lives in `Querying/`. The view types (`IView`, `ViewBase`, `ViewDelta`, `ViewDeltaRingBuffer`, `ViewRegistry`) live in `Querying/` too. `EcsView<TArch>` lives in `Ecs/` for the same reason as `EcsQuery`.
+This doc covers both layers. The query builder ([`EcsQuery<TArchetype>`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/EcsQuery.cs)) actually lives in `Ecs/` because it's archetype-shaped — but every plumbing piece behind it (`ExpressionParser`, `PlanBuilder`, `ExecutionPlan`, `FieldEvaluator`, `PipelineExecutor`, statistics) lives in `Querying/`. The view types (`IView`, `ViewBase`, `ViewDelta`, `ViewDeltaRingBuffer`, `ViewRegistry`) live in `Querying/` too. `EcsView<TArch>` lives in `Ecs/` for the same reason as `EcsQuery`.
 
 <a href="assets/typhon-query-overview.svg">
   <img src="assets/typhon-query-overview.svg" width="691" alt="Query engine — component overview">
@@ -26,7 +32,7 @@ There are two distinct query paths and one shared planner.
 Both go through the same machinery:
 
 1. **`ExpressionParser`** — `Expression<Func<T, bool>>` lambdas are normalized to Disjunctive Normal Form (OR of ANDs), one `FieldPredicate[]` per OR branch.
-2. **`QueryResolverHelper.ResolveEvaluators`** — `FieldPredicate` (string field name + op + boxed value) becomes `FieldEvaluator` (16 B: field index, key type, op, byte branch index, 8-byte widened threshold). String64 predicates are **rejected here** ([`QueryResolverHelper.cs:93`](../../src/Typhon.Engine/Querying/internals/QueryResolverHelper.cs)) — `KeyType.String64` exists for the index/statistics layer only; no scalar comparator for it.
+2. **`QueryResolverHelper.ResolveEvaluators`** — `FieldPredicate` (string field name + op + boxed value) becomes `FieldEvaluator` (16 B: field index, key type, op, byte branch index, 8-byte widened threshold). String64 predicates are **rejected here** ([`QueryResolverHelper.cs:93`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Querying/internals/QueryResolverHelper.cs)) — `KeyType.String64` exists for the index/statistics layer only; no scalar comparator for it.
 3. **`PlanBuilder`** — picks the most selective indexed field as the primary scan (via `AdvancedSelectivityEstimator`), narrows its key range, orders the rest of the evaluators by ascending estimated cardinality (most selective first → short-circuit), builds an `ExecutionPlan`.
 4. **`PipelineExecutor`** — iterates the primary B+Tree, walks the MVCC revision chain (or reads SV/Transient component data directly), evaluates non-primary predicates inline, streams matching entity PKs into a caller-provided `HashMap<long>` / `List<long>`.
 
@@ -42,7 +48,7 @@ Views layer on top of (4) by registering an `IView` with the per-`ComponentTable
 
 ## 2. Query API — `EcsQuery<TArchetype>`
 
-[`Ecs/public/EcsQuery.cs`](../../src/Typhon.Engine/Ecs/public/EcsQuery.cs)
+[`Ecs/public/EcsQuery.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/EcsQuery.cs)
 
 Constructed via `tx.Query<TArchetype>()` (polymorphic — includes descendant archetypes) or `tx.QueryExact<TArchetype>()` (only the exact archetype). The struct is mutated fluently; each call returns the modified struct value.
 
@@ -87,7 +93,7 @@ Three ordered execution paths inside `ExecuteOrdered`:
 
 ### `EcsNavigationQueryBuilder<TArch, TSource, TTarget>`
 
-[`Ecs/public/EcsNavigationQueryBuilder.cs`](../../src/Typhon.Engine/Ecs/public/EcsNavigationQueryBuilder.cs)
+[`Ecs/public/EcsNavigationQueryBuilder.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/EcsNavigationQueryBuilder.cs)
 
 ```csharp
 tx.Query<Worker>()
@@ -96,7 +102,7 @@ tx.Query<Worker>()
   .Execute();
 ```
 
-FK-join query. Created from `EcsQuery.NavigateField<TSource, TTarget>(fkSelector)`. The FK selector must reference a `long` field on the source component. Wraps a plain [`NavigationQueryBuilder<TSource, TTarget>`](../../src/Typhon.Engine/Querying/public/NavigationQueryBuilder.cs) for the planner-side resolution. `Execute()` scans each target archetype's `EntityMap`, looks up the FK index on the source table, and joins. `ToView()` registers with **both** source and target `ViewRegistry` (deletions to the target invalidate the view, which is why target predicates are mandatory).
+FK-join query. Created from `EcsQuery.NavigateField<TSource, TTarget>(fkSelector)`. The FK selector must reference a `long` field on the source component. Wraps a plain [`NavigationQueryBuilder<TSource, TTarget>`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Querying/public/NavigationQueryBuilder.cs) for the planner-side resolution. `Execute()` scans each target archetype's `EntityMap`, looks up the FK index on the source table, and joins. `ToView()` registers with **both** source and target `ViewRegistry` (deletions to the target invalidate the view, which is why target predicates are mandatory).
 
 ---
 
@@ -104,7 +110,7 @@ FK-join query. Created from `EcsQuery.NavigateField<TSource, TTarget>(fkSelector
 
 ### `ExpressionParser` — DNF with a 16-branch cap
 
-[`Querying/internals/ExpressionParser.cs`](../../src/Typhon.Engine/Querying/internals/ExpressionParser.cs)
+[`Querying/internals/ExpressionParser.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Querying/internals/ExpressionParser.cs)
 
 `ParseDnf<T>(Expression<Func<T, bool>>)`:
 
@@ -112,11 +118,11 @@ FK-join query. Created from `EcsQuery.NavigateField<TSource, TTarget>(fkSelector
 2. Apply DNF rewrite (distribute `&&` over `||`).
 3. Collect leaves into `FieldPredicate[][]` — outer = OR branches, inner = AND predicates per branch.
 
-**Branch cap:** `MaxDnfBranches = 16` ([`ExpressionParser.cs:23`](../../src/Typhon.Engine/Querying/internals/ExpressionParser.cs)). DNF normalization can blow up exponentially — `(A||B) && (C||D) && (E||F)` produces 2×2×2 = 8 branches; five ANDed pairs would explode past 16. Hit the cap → `InvalidOperationException` with a message telling you to split the query or reduce ANDed OR pairs. The cap aligns with the OR-mode view's 16-bit branch bitmap (see §5).
+**Branch cap:** `MaxDnfBranches = 16` ([`ExpressionParser.cs:23`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Querying/internals/ExpressionParser.cs)). DNF normalization can blow up exponentially — `(A||B) && (C||D) && (E||F)` produces 2×2×2 = 8 branches; five ANDed pairs would explode past 16. Hit the cap → `InvalidOperationException` with a message telling you to split the query or reduce ANDed OR pairs. The cap aligns with the OR-mode view's 16-bit branch bitmap (see §5).
 
 ### `PlanBuilder`
 
-[`Querying/internals/PlanBuilder.cs`](../../src/Typhon.Engine/Querying/internals/PlanBuilder.cs)
+[`Querying/internals/PlanBuilder.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Querying/internals/PlanBuilder.cs)
 
 Singleton (`PlanBuilder.Instance`). Two stages:
 
@@ -127,7 +133,7 @@ Singleton (`PlanBuilder.Instance`). Two stages:
 
 ### `ExecutionPlan`
 
-[`Querying/public/ExecutionPlan.cs`](../../src/Typhon.Engine/Querying/public/ExecutionPlan.cs)
+[`Querying/public/ExecutionPlan.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Querying/public/ExecutionPlan.cs)
 
 `readonly struct` (16-byte fixed fields + two arrays):
 
@@ -145,7 +151,7 @@ Singleton (`PlanBuilder.Instance`). Two stages:
 
 ### `FieldEvaluator`
 
-[`Querying/public/FieldEvaluator.cs`](../../src/Typhon.Engine/Querying/public/FieldEvaluator.cs)
+[`Querying/public/FieldEvaluator.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Querying/public/FieldEvaluator.cs)
 
 ```csharp
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
@@ -170,7 +176,7 @@ public struct FieldEvaluator  // exactly 16 bytes
 
 ## 4. Execution — `PipelineExecutor`
 
-[`Querying/internals/PipelineExecutor.cs`](../../src/Typhon.Engine/Querying/internals/PipelineExecutor.cs)
+[`Querying/internals/PipelineExecutor.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Querying/internals/PipelineExecutor.cs)
 
 Singleton (`PipelineExecutor.Instance`). Three public methods:
 
@@ -198,7 +204,7 @@ For an `AllowMultiple = true` index, the B+Tree exposes `EnumerateRangeMultiple(
 
 ### `ExecuteFullScan` (it's not on `PipelineExecutor`)
 
-The wrapper `ExecuteFullScan(plan, evaluators, table, tx, HashMap<long> result)` lives on **[`EcsViewFieldReader`](../../src/Typhon.Engine/Ecs/public/EcsView.cs)** (`Ecs/public/EcsView.cs:864`), not on `PipelineExecutor`. The typed subclass `EcsViewFieldReader<T>` simply delegates to `PipelineExecutor.Instance.Execute(...)`. It exists as a thin abstraction so `EcsView` can call the executor without knowing the component type — the `EcsView` is parameterized by `TArchetype`, the field reader carries the component `T`. `ExecuteOrderedScan` and `CountScan` follow the same pattern.
+The wrapper `ExecuteFullScan(plan, evaluators, table, tx, HashMap<long> result)` lives on **[`EcsViewFieldReader`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/EcsView.cs)** (`Ecs/public/EcsView.cs:864`), not on `PipelineExecutor`. The typed subclass `EcsViewFieldReader<T>` simply delegates to `PipelineExecutor.Instance.Execute(...)`. It exists as a thin abstraction so `EcsView` can call the executor without knowing the component type — the `EcsView` is parameterized by `TArchetype`, the field reader carries the component `T`. `ExecuteOrderedScan` and `CountScan` follow the same pattern.
 
 ### What's not there (audit clarifications)
 
@@ -208,7 +214,7 @@ There is **no** "batch 256 PKs into a stackalloc buffer" mechanism. There is no 
 
 ## 5. View system
 
-[`Querying/public/IView.cs`](../../src/Typhon.Engine/Querying/public/IView.cs), [`Querying/public/ViewBase.cs`](../../src/Typhon.Engine/Querying/public/ViewBase.cs), [`Ecs/public/EcsView.cs`](../../src/Typhon.Engine/Ecs/public/EcsView.cs)
+[`Querying/public/IView.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Querying/public/IView.cs), [`Querying/public/ViewBase.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Querying/public/ViewBase.cs), [`Ecs/public/EcsView.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/EcsView.cs)
 
 ### `IView` — registry-facing contract
 
@@ -259,7 +265,7 @@ EntityId-facing surface:
 
 ### `DeltaKind` and `ViewDelta`
 
-[`Querying/internals/DeltaKind.cs`](../../src/Typhon.Engine/Querying/internals/DeltaKind.cs), [`Querying/public/ViewDelta.cs`](../../src/Typhon.Engine/Querying/public/ViewDelta.cs)
+[`Querying/internals/DeltaKind.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Querying/internals/DeltaKind.cs), [`Querying/public/ViewDelta.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Querying/public/ViewDelta.cs)
 
 ```csharp
 internal enum DeltaKind : byte { Added = 0, Removed = 1, Modified = 2 }
@@ -281,7 +287,7 @@ When an OR view has N branches (1 ≤ N ≤ 16), each entity in `_entityIds` als
 
 ### `ViewRegistry`
 
-[`Querying/internals/ViewRegistry.cs`](../../src/Typhon.Engine/Querying/internals/ViewRegistry.cs)
+[`Querying/internals/ViewRegistry.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Querying/internals/ViewRegistry.cs)
 
 One per `ComponentTable`. Maps `fieldIndex → ViewRegistration[]` (copy-on-write — readers are lock-free, writers take a `Lock`).
 
@@ -298,7 +304,7 @@ On `RegisterView(IView, DeltaBuffer)` the registry inserts a `ViewRegistration` 
 
 ### `ViewDeltaRingBuffer`
 
-[`Querying/internals/ViewDeltaRingBuffer.cs`](../../src/Typhon.Engine/Querying/internals/ViewDeltaRingBuffer.cs)
+[`Querying/internals/ViewDeltaRingBuffer.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Querying/internals/ViewDeltaRingBuffer.cs)
 
 MPSC lock-free ring buffer. Per-view. **Default capacity 4096** (must be a power of two). SOA layout — separate arrays for the 24-byte `ViewDeltaEntry`, the 8-byte `tsn`, the 1-byte `flags`, the 1-byte `componentTag`, the 1-byte `written` marker — each starting at a 64-byte cache-line boundary, all backed by a **single `IMemoryAllocator.AllocatePinned` block** so the buffer accounts as one resource node.
 
@@ -326,13 +332,13 @@ The planner can't pick the most selective index without per-field cardinality es
 
 ### `StatisticsWorker`
 
-[`Querying/internals/StatisticsWorker.cs`](../../src/Typhon.Engine/Querying/internals/StatisticsWorker.cs)
+[`Querying/internals/StatisticsWorker.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Querying/internals/StatisticsWorker.cs)
 
 Dedicated background thread. Wakes every `PollIntervalMs`. For each `ComponentTable`: if `MutationsSinceRebuild` exceeds `MutationThreshold` and entity count ≥ `MinEntitiesForRebuild`, it triggers a `StatisticsRebuilder.RebuildAll(...)` pass. Page-granularity sampling kicks in above `SamplingMinEntities`.
 
 ### `StatisticsOptions`
 
-[`Querying/public/StatisticsOptions.cs`](../../src/Typhon.Engine/Querying/public/StatisticsOptions.cs)
+[`Querying/public/StatisticsOptions.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Querying/public/StatisticsOptions.cs)
 
 | Property | Default | Meaning |
 |---|---|---|
@@ -344,25 +350,25 @@ Dedicated background thread. Wakes every `PollIntervalMs`. For each `ComponentTa
 
 ### `HyperLogLog`
 
-[`Querying/internals/HyperLogLog.cs`](../../src/Typhon.Engine/Querying/internals/HyperLogLog.cs)
+[`Querying/internals/HyperLogLog.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Querying/internals/HyperLogLog.cs)
 
 Cardinality estimator. **Precision 12 → 4096 registers → 4 KB per sketch**. Hashes input via the Murmur3 64-bit finalizer (3 xor-shifts + 2 multiplies — keys are already long-encoded). `EstimateCardinality()` applies the Flajolet et al. harmonic-mean estimator with LinearCounting small-range correction (no 32-bit large-range correction — the 64-bit hash space doesn't need it). Immutable after build; rebuilds produce a fresh instance and atomic-swap onto `IndexStatistics`.
 
 ### `MostCommonValues` (MCV)
 
-[`Querying/internals/MostCommonValues.cs`](../../src/Typhon.Engine/Querying/internals/MostCommonValues.cs)
+[`Querying/internals/MostCommonValues.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Querying/internals/MostCommonValues.cs)
 
 Top-100 values by count. Entries are sorted by value (not by count) for **O(log K) binary search** on equality probes. `TotalEntities` and `RemainingEntries` let the estimator interpolate counts for values not in the top-K. ~1.8 KB per field. Immutable after build.
 
 ### `Histogram`
 
-[`Querying/internals/Histogram.cs`](../../src/Typhon.Engine/Querying/internals/Histogram.cs)
+[`Querying/internals/Histogram.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Querying/internals/Histogram.cs)
 
 Equi-width: **100 buckets** spanning `[MinValue, MaxValue]`. ~1.6 KB per field. `BucketCount[i]` is the number of entries falling into bucket *i*. O(1) bucket lookup. Handles ranges that span the signed-long boundary (e.g., order-preserving float encoding) via unsigned subtraction.
 
 ### `AdvancedSelectivityEstimator`
 
-[`Querying/internals/AdvancedSelectivityEstimator.cs`](../../src/Typhon.Engine/Querying/internals/AdvancedSelectivityEstimator.cs)
+[`Querying/internals/AdvancedSelectivityEstimator.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Querying/internals/AdvancedSelectivityEstimator.cs)
 
 Singleton (`AdvancedSelectivityEstimator.Instance`). The priority chain:
 
@@ -382,7 +388,7 @@ A transaction can `Spawn` an entity and then immediately query — the query mus
 
 `EcsQuery` handles this in two places:
 
-- **Targeted scan** (`WhereField` path): after the index-driven scan, `ExecuteTargeted` calls `CollectPendingSpawnsWithFieldFilter(result)` ([`EcsQuery.cs:1983`](../../src/Typhon.Engine/Ecs/public/EcsQuery.cs)). For each entry in `tx.PendingSpawns`: skip if in `PendingDestroys`, skip if not in archetype mask, then evaluate the **compiled predicate** (`_pendingSpawnFieldFilter`) via `tx.Open(id).TryRead<T>(out value) && predicate(value)`. The compiled `Func<T,bool>` is deferred — it's only `.Compile()`d on first invocation (Expression.Compile costs ~100+ µs) and cached in a closure.
+- **Targeted scan** (`WhereField` path): after the index-driven scan, `ExecuteTargeted` calls `CollectPendingSpawnsWithFieldFilter(result)` ([`EcsQuery.cs:1983`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/EcsQuery.cs)). For each entry in `tx.PendingSpawns`: skip if in `PendingDestroys`, skip if not in archetype mask, then evaluate the **compiled predicate** (`_pendingSpawnFieldFilter`) via `tx.Open(id).TryRead<T>(out value) && predicate(value)`. The compiled `Func<T,bool>` is deferred — it's only `.Compile()`d on first invocation (Expression.Compile costs ~100+ µs) and cached in a closure.
 - **Broad scan** (opaque `Where<T>(Func<T,bool>)`): pending spawns are reached by `CollectMatching`, which enumerates archetype `EntityMap`s — but `tx.Open(id)` resolves to the pending-spawn data, so opaque `Where` filters work transparently for pending entities.
 
 `PendingDestroys` is checked first in both paths — an entity that was spawned and then destroyed in the same transaction is invisible to its own queries.
@@ -391,13 +397,13 @@ A transaction can `Spawn` an entity and then immediately query — the query mus
 
 ## 8. Subscriptions — pushing views to external clients
 
-**Code:** [`src/Typhon.Engine/Subscriptions/`](../../src/Typhon.Engine/Subscriptions/)
+**Code:** [`src/Typhon.Engine/Subscriptions/`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Engine/Subscriptions)
 
 Subscriptions are how Typhon ships view state to external clients (game clients, web dashboards, observer processes). The subscription layer reuses the same `ViewBase` infrastructure — a "published" view is just an `IView` with extra subscriber tracking.
 
 ### `PublishedView` and `PublishedViewRegistry`
 
-[`Subscriptions/public/PublishedView.cs`](../../src/Typhon.Engine/Subscriptions/public/PublishedView.cs), [`Subscriptions/public/PublishedViewRegistry.cs`](../../src/Typhon.Engine/Subscriptions/public/PublishedViewRegistry.cs)
+[`Subscriptions/public/PublishedView.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Subscriptions/public/PublishedView.cs), [`Subscriptions/public/PublishedViewRegistry.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Subscriptions/public/PublishedViewRegistry.cs)
 
 Two flavours:
 
@@ -408,7 +414,7 @@ Two flavours:
 
 ### `ClientConnection` and the I/O pipeline
 
-[`Subscriptions/internals/ClientConnection.cs`](../../src/Typhon.Engine/Subscriptions/internals/ClientConnection.cs)
+[`Subscriptions/internals/ClientConnection.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Subscriptions/internals/ClientConnection.cs)
 
 One per connected TCP client. Holds:
 
@@ -422,7 +428,7 @@ One per connected TCP client. Holds:
 
 ### `TcpSubscriptionServer` and `SubscriptionOutputPhase`
 
-[`TcpSubscriptionServer.cs`](../../src/Typhon.Engine/Subscriptions/internals/TcpSubscriptionServer.cs), [`SubscriptionOutputPhase.cs`](../../src/Typhon.Engine/Subscriptions/internals/SubscriptionOutputPhase.cs)
+[`TcpSubscriptionServer.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Subscriptions/internals/TcpSubscriptionServer.cs), [`SubscriptionOutputPhase.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Subscriptions/internals/SubscriptionOutputPhase.cs)
 
 The TCP listener spawns one accept loop and per-connection read tasks. The **Output phase** runs once per scheduler tick (after all systems complete) and walks each `ClientConnection`:
 

@@ -54,6 +54,18 @@ public readonly struct SpatialGridConfig
     /// <summary>Total number of descriptor slots. Equals <see cref="KeySpaceDim"/>² for Morton keys.</summary>
     public readonly int CellCount;
 
+    /// <summary>
+    /// Build a grid configuration and precompute the derived cell dimensions. World bounds are half-open: <paramref name="worldMin"/> is inclusive,
+    /// <paramref name="worldMax"/> is exclusive.
+    /// </summary>
+    /// <param name="worldMin">World-space minimum corner (inclusive).</param>
+    /// <param name="worldMax">World-space maximum corner (exclusive); must be strictly greater than <paramref name="worldMin"/> on both axes.</param>
+    /// <param name="cellSize">Cell size in world units; must be &gt; 0.</param>
+    /// <param name="migrationHysteresisRatio">Per-axis dead zone as a fraction of cell size (default 0.05). Reserved for the Phase 3 migration path.</param>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <paramref name="cellSize"/> is not positive, or the derived per-axis key-space dimension exceeds the 32 768 limit of the 32-bit Morton encoding.
+    /// </exception>
+    /// <exception cref="ArgumentException"><paramref name="worldMax"/> is not strictly greater than <paramref name="worldMin"/> on both axes.</exception>
     public SpatialGridConfig(Vector2 worldMin, Vector2 worldMax, float cellSize, float migrationHysteresisRatio = 0.05f)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(cellSize);

@@ -1,3 +1,9 @@
+---
+uid: feature-hosting-engine-options-configuration-index
+title: 'Engine Options Configuration Surface'
+description: 'IOptions-based configuration for every engine service, set with a configure delegate on each Add*() call.'
+---
+
 # Engine Options Configuration Surface
 > `IOptions<T>`-based configuration for every engine service, set with a `configure` delegate on each `Add*()` call.
 
@@ -99,12 +105,12 @@ var engine   = provider.GetRequiredService<DatabaseEngine>();
 
 ## 🧪 Tests
 
-- [ResourceOptionsTests](../../../../test/Typhon.Engine.Tests/Resources/ResourceOptionsTests.cs) — `DatabaseEngineOptions.Resources` composite property and its defaults (`DatabaseEngineOptions_HasResourceOptionsProperty` / `_ResourceOptions_HasDefaults`)
-- [TransactionChainTests](../../../../test/Typhon.Engine.Tests/Data/TransactionChainTests.cs) — `TransactionChainMaxActiveTests` fixture configures `AddScopedDatabaseEngine(options => options.Resources.MaxActiveTransactions = ...)` and proves the `configure` delegate value actually reaches and is enforced by the running engine
+- [ResourceOptionsTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Resources/ResourceOptionsTests.cs) — `DatabaseEngineOptions.Resources` composite property and its defaults (`DatabaseEngineOptions_HasResourceOptionsProperty` / `_ResourceOptions_HasDefaults`)
+- [TransactionChainTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/TransactionChainTests.cs) — `TransactionChainMaxActiveTests` fixture configures `AddScopedDatabaseEngine(options => options.Resources.MaxActiveTransactions = ...)` and proves the `configure` delegate value actually reaches and is enforced by the running engine
 
 ## 🔗 Related
 
-- Source: [`TyphonBuilderExtensions.cs`](../../../../src/Typhon.Engine/Hosting/public/TyphonBuilderExtensions.cs), [`DatabaseEngine.cs` — `DatabaseEngineOptions`](../../../../src/Typhon.Engine/Ecs/public/DatabaseEngine.cs), [`PagedMMFOptions.cs`](../../../../src/Typhon.Engine/Storage/public/PagedMMFOptions.cs), [`WalWriterOptions.cs`](../../../../src/Typhon.Engine/Durability/public/WalWriterOptions.cs)
+- Source: [`TyphonBuilderExtensions.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Hosting/public/TyphonBuilderExtensions.cs), [`DatabaseEngine.cs` — `DatabaseEngineOptions`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/DatabaseEngine.cs), [`PagedMMFOptions.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/public/PagedMMFOptions.cs), [`WalWriterOptions.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/public/WalWriterOptions.cs)
 - Sub-features: [Options Validation Hooks](./options-validation-stubs.md)
 - Sibling: [DI Engine Bootstrap Chain](../di-bootstrap-chain/README.md) — the `Add*()` calls this surface's `configure` delegates bind options onto.
 

@@ -1,3 +1,9 @@
+---
+uid: feature-querying-fluent-query-api-index
+title: 'Fluent Query API & Predicate Parsing'
+description: 'Archetype-rooted fluent query builder that parses C# lambdas into index-driven plans — structural constraints, indexed/opaque predicates, OR disjunction,…'
+---
+
 # Fluent Query API & Predicate Parsing
 > Archetype-rooted fluent query builder that parses C# lambdas into index-driven plans — structural constraints, indexed/opaque predicates, OR disjunction, and FK navigation joins, all off one entry point.
 
@@ -34,12 +40,12 @@ Application code needs a single, type-safe entry point for finding entities — 
 
 ## 🧪 Tests
 
-- [EcsQueryTests](../../../../test/Typhon.Engine.Tests/Data/ECS/EcsQueryTests.cs) — archetype-mask With/Without/Exclude, Enabled/Disabled bitmaps, Count/Any, foreach, and unsupported-clause-combo guards
+- [EcsQueryTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/EcsQueryTests.cs) — archetype-mask With/Without/Exclude, Enabled/Disabled bitmaps, Count/Any, foreach, and unsupported-clause-combo guards
 
 ## 🔗 Related
 
 - Sibling: [Query System (EcsQuery)](../../Ecs/query-system.md) — the Ecs-category entry point this whole category is the deep-dive extension of
-- Source: [src/Typhon.Engine/Ecs/public/EcsQuery.cs](../../../../src/Typhon.Engine/Ecs/public/EcsQuery.cs)
+- Source: [src/Typhon.Engine/Ecs/public/EcsQuery.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/EcsQuery.cs)
 - Sub-features: [Indexed Field Predicates (WhereField)](./wherefield-indexed-predicate.md), [Opaque Post-Filter Predicates (Where)](./where-opaque-postfilter.md), [OR Disjunction (DNF Predicates)](./or-disjunction.md), [Foreign-Key Navigation Joins (L4)](./fk-navigation-joins.md)
 
 <!-- Deep dive: claude/overview/05-query.md §5.1, §5.2, §5.9, §5.10, §5.12 -->

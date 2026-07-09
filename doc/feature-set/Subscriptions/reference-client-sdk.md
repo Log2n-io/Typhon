@@ -1,3 +1,9 @@
+---
+uid: feature-subscriptions-reference-client-sdk
+title: 'Reference C# Client SDK'
+description: 'A drop-in Typhon.Client library that turns wire bytes into a ready-to-read local entity cache.'
+---
+
 # Reference C# Client SDK
 > A drop-in `Typhon.Client` library that turns wire bytes into a ready-to-read local entity cache.
 
@@ -72,14 +78,14 @@ conn.OnDisconnected += (_, ex) => LogDisconnect(ex);
 
 ## 🧪 Tests
 
-- [DeltaProcessingTests](../../../test/Typhon.Client.Tests/DeltaProcessingTests.cs) — Added/Modified/Removed/
+- [DeltaProcessingTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Client.Tests/DeltaProcessingTests.cs) — Added/Modified/Removed/
   SyncComplete/Resync/Disconnect dispatch over a fake server, plus lazy-subscription for server-pushed Views the
   client hasn't named locally yet
-- [ViewSubscriptionTests](../../../test/Typhon.Client.Tests/ViewSubscriptionTests.cs) — the per-View entity cache
+- [ViewSubscriptionTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Client.Tests/ViewSubscriptionTests.cs) — the per-View entity cache
   itself: add/remove/modify, sync/resync state resets
-- [CachedEntityTests](../../../test/Typhon.Client.Tests/CachedEntityTests.cs) — `Get<T>`/`TryGet<T>` decode
+- [CachedEntityTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Client.Tests/CachedEntityTests.cs) — `Get<T>`/`TryGet<T>` decode
   guarantees: missing component, size mismatch
-- [TyphonConnectionIntegrationTests](../../../test/Typhon.Client.Tests/Integration/TyphonConnectionIntegrationTests.cs)
+- [TyphonConnectionIntegrationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Client.Tests/Integration/TyphonConnectionIntegrationTests.cs)
   — `Client_Connects_SubscribesAndReceivesAddedEntity`: real socket, real server, end to end
 
 ## 🔗 Related

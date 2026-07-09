@@ -134,6 +134,7 @@ internal sealed class ArchetypeClusterInfo
     /// Pass 0 when the archetype has no multi-value indexed fields (no tail reserved).
     /// </param>
     /// <param name="versionedSlotMask">Bitmask of Versioned component slots (0 for pure-SV archetypes).</param>
+    /// <param name="transientSlotMask">Bitmask of Transient component slots (0 when the archetype has no Transient components).</param>
     /// <returns>A fully initialized <see cref="ArchetypeClusterInfo"/>.</returns>
     /// <exception cref="InvalidOperationException">Thrown if components are too large to fit even N=8 in one page.</exception>
     public static ArchetypeClusterInfo Compute(int componentCount, ReadOnlySpan<int> componentSizes, int multipleIndexedFieldCount = 0, 

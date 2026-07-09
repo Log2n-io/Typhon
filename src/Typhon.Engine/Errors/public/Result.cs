@@ -10,6 +10,8 @@ namespace Typhon.Engine;
 /// <typeparamref name="TValue"/> is the data; <typeparamref name="TStatus"/> is a per-subsystem byte enum.
 /// Convention: status value 0 = Success in all enums.
 /// </summary>
+/// <typeparam name="TValue">Unmanaged value returned on success; read only after checking <see cref="IsSuccess"/>.</typeparam>
+/// <typeparam name="TStatus">Unmanaged byte-sized status enum where 0 denotes success.</typeparam>
 [PublicAPI]
 [StructLayout(LayoutKind.Sequential)]
 public readonly struct Result<TValue, TStatus>

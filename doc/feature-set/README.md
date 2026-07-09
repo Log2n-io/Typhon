@@ -1,3 +1,9 @@
+---
+uid: feature-index
+title: 'Typhon Feature Catalog'
+description: 'Documentation for every feature in src/Typhon.Engine, tagged Public (usable by application developers embedding Typhon) or Internal (engine machinery, for…'
+---
+
 # Typhon Feature Catalog
 
 > Documentation for every feature in `src/Typhon.Engine`, tagged **Public** (usable by application developers embedding Typhon) or **Internal** (engine machinery, for contributors). Each entry covers what it's for, what problem it solves, and how it works. Scoped to the engine itself — Workbench, TyphonShell, and Patate (apps built on Typhon) are out of scope.

@@ -1,3 +1,9 @@
+---
+uid: feature-ecs-entity-relationships
+title: 'Entity Relationships'
+description: 'Typed EntityLink references plus declarative cascade delete and reactive FK joins.'
+---
+
 # Entity Relationships
 > Typed `EntityLink<T>` references plus declarative cascade delete and reactive FK joins.
 
@@ -83,15 +89,15 @@ tx.Destroy(bagId);
 
 ## 🧪 Tests
 
-- [CascadeDeleteTests](../../../test/Typhon.Engine.Tests/Data/ECS/CascadeDeleteTests.cs) — cascade graph validation, multi-level and mixed-ownership cascade, already-dead children, same-transaction cascade
-- [EcsHardeningTests](../../../test/Typhon.Engine.Tests/Data/ECS/EcsHardeningTests.cs) — `EntityLink<T>` implicit conversion round-trip, null detection, `IsAlive`/`Open` via a link, deep cascade hierarchies
-- [EcsNavigationTests](../../../test/Typhon.Engine.Tests/Data/ECS/EcsNavigationTests.cs) — `NavigateField` reactive FK join, combined source/target predicates, incremental view over the join
+- [CascadeDeleteTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/CascadeDeleteTests.cs) — cascade graph validation, multi-level and mixed-ownership cascade, already-dead children, same-transaction cascade
+- [EcsHardeningTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/EcsHardeningTests.cs) — `EntityLink<T>` implicit conversion round-trip, null detection, `IsAlive`/`Open` via a link, deep cascade hierarchies
+- [EcsNavigationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/EcsNavigationTests.cs) — `NavigateField` reactive FK join, combined source/target predicates, incremental view over the join
 
 ## 🔗 Related
 
 - Source: `src/Typhon.Engine/Ecs/public/EntityLink.cs`, `src/Typhon.Engine/Ecs/public/EcsNavigationQueryBuilder.cs`,
   `src/Typhon.Engine/Ecs/internals/ArchetypeRegistry.cs` (cascade graph validation)
-- Related features: [Query System](./query-system.md), [Automatic Secondary Indexes](../Indexing/automatic-secondary-indexes/README.md),
-  [ECS Query API](../Querying/ecs-query-api/README.md)
+- Related features: [Query System](./query-system.md), [Automatic Secondary Indexes](../Indexing/secondary-index-storage-modes/README.md),
+  [ECS Query API](../Querying/README.md)
 
 <!-- Deep dive: claude/design/Ecs/08-entity-relationships.md -->

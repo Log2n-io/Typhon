@@ -1,3 +1,9 @@
+---
+uid: feature-foundation-high-resolution-timers-index
+title: 'High-Resolution Timers'
+description: 'Self-calibrating sub-millisecond periodic timers (Sleep→Yield→Spin) powering the deadline watchdog, telemetry flush, and epoch advancement.'
+---
+
 # High-Resolution Timers
 > Self-calibrating sub-millisecond periodic timers (Sleep→Yield→Spin) powering the deadline watchdog, telemetry flush, and epoch advancement.
 
@@ -27,9 +33,9 @@ A three-phase wait (`Thread.Sleep(1)` while far from the target → `Thread.Yiel
 - Per-tick and per-callback metrics (tick count, missed ticks, mean/max timing error, invocation counts) are exposed through `IMetricSource`, so they appear in resource graph snapshots and any OTel bridge built on it — no separate instrumentation needed.
 
 ## 🧪 Tests
-- [HighResolutionTimerServiceBaseTests](../../../../test/Typhon.Engine.Tests/Concurrency/HighResolutionTimerServiceBaseTests.cs) — shared wait-loop mechanics common to both flavors: thread lifecycle, calibration, dispose/double-dispose.
-- [HighResolutionTimerServiceTests](../../../../test/Typhon.Engine.Tests/Concurrency/HighResolutionTimerServiceTests.cs) — dedicated timer: fire rate, callback timestamps, drift-free metronome scheduling.
-- [HighResolutionSharedTimerServiceTests](../../../../test/Typhon.Engine.Tests/Concurrency/HighResolutionSharedTimerServiceTests.cs) — shared timer: multiple independent registrations, idle-when-empty, per-registration disposal.
+- [HighResolutionTimerServiceBaseTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Concurrency/HighResolutionTimerServiceBaseTests.cs) — shared wait-loop mechanics common to both flavors: thread lifecycle, calibration, dispose/double-dispose.
+- [HighResolutionTimerServiceTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Concurrency/HighResolutionTimerServiceTests.cs) — dedicated timer: fire rate, callback timestamps, drift-free metronome scheduling.
+- [HighResolutionSharedTimerServiceTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Concurrency/HighResolutionSharedTimerServiceTests.cs) — shared timer: multiple independent registrations, idle-when-empty, per-registration disposal.
 
 ## 🔗 Related
 

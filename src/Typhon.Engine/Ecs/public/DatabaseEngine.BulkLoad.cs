@@ -32,9 +32,9 @@ public partial class DatabaseEngine
     /// that opened it may call methods on it. Regular transactions can run concurrently and see the pre-bulk snapshot.
     /// </para>
     /// <para>
-    /// <b>P1 status:</b> the returned session's Spawn / Update / Destroy / CompleteBulkLoad methods throw <see cref="System.NotImplementedException"/>;
-    /// <see cref="BulkLoadSession.Dispose"/> works (releases the gate).
-    /// Implementation lands in P2 (issue <a href="https://github.com/nockawa/Typhon/issues/380">#380</a>).
+    /// Mutate through the returned session's <see cref="BulkLoadSession.Spawn{TArch}"/>, <see cref="BulkLoadSession.Update{T}"/>, and
+    /// <see cref="BulkLoadSession.Destroy"/>, then call <see cref="BulkLoadSession.CompleteBulkLoad"/> to commit and checkpoint the bulk durably. Disposing
+    /// without completing discards it — none of the bulk's revisions become visible (UR-03).
     /// </para>
     /// </remarks>
     /// <param name="options">Optional configuration. Defaults to a new <see cref="BulkLoadOptions"/> if <see langword="null"/>.</param>

@@ -1,6 +1,12 @@
+---
+uid: overview-foundation
+title: '01 — Foundation'
+description: 'Foundation is the pile of primitives every other engine subsystem stands on: locks, deadlines, epoch-based reclamation, concurrent collections, the memory…'
+---
+
 # 01 — Foundation
 
-**Code:** [`src/Typhon.Engine/Foundation/`](../../src/Typhon.Engine/Foundation/) (+ [`src/Typhon.Engine/Hosting/`](../../src/Typhon.Engine/Hosting/) helpers, folded in §9)
+**Code:** [`src/Typhon.Engine/Foundation/`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Engine/Foundation) (+ [`src/Typhon.Engine/Hosting/`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Engine/Hosting) helpers, folded in §9)
 
 Foundation is the pile of primitives every other engine subsystem stands on: locks, deadlines, epoch-based reclamation, concurrent collections, the memory allocator, and a handful of host-side helpers. Nothing here knows about ECS, MVCC, the WAL, or the scheduler — it's deliberately the bottom of the dependency graph.
 
@@ -20,7 +26,7 @@ Three lock types — different bit budgets, different access models. All three e
 
 ### `AccessControl` — 64-bit reader-writer lock
 
-[`Foundation/Concurrency/internals/AccessControl.cs`](../../src/Typhon.Engine/Foundation/Concurrency/internals/AccessControl.cs)
+[`Foundation/Concurrency/internals/AccessControl.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Foundation/Concurrency/internals/AccessControl.cs)
 
 Reader-writer with explicit waiter tracking. 8 bytes. Use this when you need both directions and waiter starvation isn't acceptable.
 
@@ -51,7 +57,7 @@ All blocking entries take `ref WaitContext` (see §2). Pass `ref WaitContext.Nul
 
 ### `AccessControlSmall` — 32-bit, no waiter tracking
 
-[`Foundation/Concurrency/internals/AccessControlSmall.cs`](../../src/Typhon.Engine/Foundation/Concurrency/internals/AccessControlSmall.cs)
+[`Foundation/Concurrency/internals/AccessControlSmall.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Foundation/Concurrency/internals/AccessControlSmall.cs)
 
 Compact 4-byte variant. Use this when the lock is small or numerous (per-row, per-bucket) and you don't need waiter accounting.
 
@@ -65,7 +71,7 @@ No re-entrancy. No promoter logic. Same `WaitContext` integration.
 
 ### `ResourceAccessControl` — 3-mode lifecycle lock
 
-[`Foundation/Concurrency/internals/ResourceAccessControl.cs`](../../src/Typhon.Engine/Foundation/Concurrency/internals/ResourceAccessControl.cs)
+[`Foundation/Concurrency/internals/ResourceAccessControl.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Foundation/Concurrency/internals/ResourceAccessControl.cs)
 
 For protecting resources that grow/extend rather than mutate in-place (append-only stores, segment chains). 4 bytes, three modes:
 
@@ -88,7 +94,7 @@ Critically: **MODIFY is compatible with ACCESSING**. A writer that's appending t
 
 ### Telemetry
 
-All three primitives emit typed events via [`TyphonEvent.Emit*`](../../src/Typhon.Engine/Observability/) calls — the events are JIT-eliminated when gates are off (see [12-observability](12-observability.md)). The hand-rolled `Telemetry` partial of `AccessControl` ([`AccessControl.Telemetry.cs`](../../src/Typhon.Engine/Foundation/Concurrency/internals/AccessControl.Telemetry.cs)) still uses `#if TELEMETRY` and is mid-migration.
+All three primitives emit typed events via [`TyphonEvent.Emit*`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Engine/Observability) calls — the events are JIT-eliminated when gates are off (see [12-observability](12-observability.md)). The hand-rolled `Telemetry` partial of `AccessControl` ([`AccessControl.Telemetry.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Foundation/Concurrency/internals/AccessControl.Telemetry.cs)) still uses `#if TELEMETRY` and is mid-migration.
 
 ---
 
@@ -98,7 +104,7 @@ The whole synchronization layer is built around **monotonic deadlines** rather t
 
 ### `Deadline`
 
-[`Foundation/Concurrency/public/Deadline.cs`](../../src/Typhon.Engine/Foundation/Concurrency/public/Deadline.cs)
+[`Foundation/Concurrency/public/Deadline.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Foundation/Concurrency/public/Deadline.cs)
 
 `readonly struct Deadline`, 8 bytes. Wraps an absolute `Stopwatch.GetTimestamp()` value. Two sentinels:
 
@@ -116,7 +122,7 @@ while (!deadline.IsExpired) { /* ... */ }
 
 ### `WaitContext`
 
-[`Foundation/Concurrency/public/WaitContext.cs`](../../src/Typhon.Engine/Foundation/Concurrency/public/WaitContext.cs)
+[`Foundation/Concurrency/public/WaitContext.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Foundation/Concurrency/public/WaitContext.cs)
 
 `readonly struct WaitContext`, 16 bytes: `Deadline` + `CancellationToken`. This is the *real* parameter passed to every blocking lock primitive.
 
@@ -133,7 +139,7 @@ WaitContext.FromTimeout(timeout, token);
 
 ### `UnitOfWorkContext`
 
-[`Foundation/Concurrency/public/UnitOfWorkContext.cs`](../../src/Typhon.Engine/Foundation/Concurrency/public/UnitOfWorkContext.cs)
+[`Foundation/Concurrency/public/UnitOfWorkContext.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Foundation/Concurrency/public/UnitOfWorkContext.cs)
 
 `struct UnitOfWorkContext`, 24 bytes. Embeds a `WaitContext` (16 B) + `UowId` (2 B) + holdoff counter (4 B). Passed by `ref` through every operation inside a Unit of Work.
 
@@ -143,7 +149,7 @@ Lock sites pass `ref ctx.WaitContext` directly — no construction cost, the JIT
 
 ### `HoldoffScope` — defer cancellation across critical sections
 
-[`Foundation/Concurrency/internals/HoldoffScope.cs`](../../src/Typhon.Engine/Foundation/Concurrency/internals/HoldoffScope.cs)
+[`Foundation/Concurrency/internals/HoldoffScope.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Foundation/Concurrency/internals/HoldoffScope.cs)
 
 Some sequences must not be cancelled mid-flight — a B+Tree node split, a chain unlink. Enter a holdoff and `ThrowIfCancelled` becomes a no-op until you exit. Nests.
 
@@ -157,13 +163,13 @@ SplitBTreeNode(ref ctx);   // cancellation deferred
 
 ### `BackpressureContext`
 
-[`Foundation/Concurrency/internals/BackpressureContext.cs`](../../src/Typhon.Engine/Foundation/Concurrency/internals/BackpressureContext.cs)
+[`Foundation/Concurrency/internals/BackpressureContext.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Foundation/Concurrency/internals/BackpressureContext.cs)
 
 24-ish-byte struct: resource path + `WaitContext` + retry count. Each bounded resource (WAL ring, page cache, transaction pool) creates one at entry and passes it by ref through retry iterations. `ShouldGiveUp` delegates to `WaitContext.ShouldStop`. Pure plumbing for "wait then retry, give up at deadline".
 
 ### `AdaptiveWaiter`
 
-[`Foundation/Concurrency/internals/AdaptiveWaiter.cs`](../../src/Typhon.Engine/Foundation/Concurrency/internals/AdaptiveWaiter.cs)
+[`Foundation/Concurrency/internals/AdaptiveWaiter.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Foundation/Concurrency/internals/AdaptiveWaiter.cs)
 
 Wraps .NET's `SpinWait` with `WaitContext` integration. Progression:
 
@@ -180,7 +186,7 @@ Must not be copied after first use — `_spinner.Count` tracks progression.
 
 ## 3. Timers
 
-[`Foundation/Concurrency/internals/HighResolutionTimerService.cs`](../../src/Typhon.Engine/Foundation/Concurrency/internals/HighResolutionTimerService.cs), [`HighResolutionSharedTimerService.cs`](../../src/Typhon.Engine/Foundation/Concurrency/internals/HighResolutionSharedTimerService.cs)
+[`Foundation/Concurrency/internals/HighResolutionTimerService.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Foundation/Concurrency/internals/HighResolutionTimerService.cs), [`HighResolutionSharedTimerService.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Foundation/Concurrency/internals/HighResolutionSharedTimerService.cs)
 
 Two flavours of high-resolution timer:
 
@@ -191,9 +197,9 @@ Two flavours of high-resolution timer:
 
 Both wake at the nearest next callback, no wasted ticks. The shared service's callback contract: target <100 µs execution, no blocking calls — a slow callback delays every subsequent callback in that cycle. The service tracks a `SlowInvocationCount` per registration (>100 µs).
 
-[`DeadlineWatchdog`](../../src/Typhon.Engine/Foundation/Concurrency/internals/DeadlineWatchdog.cs) is the canonical consumer: registered with the shared timer at **200 Hz (5 ms)**, scans a priority queue of `(Deadline, CancellationTokenSource)` pairs, fires cancellation when the deadline passes. No dedicated thread of its own. Registration is lazy — if no deadlines are ever registered, no timer overhead is incurred.
+[`DeadlineWatchdog`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Foundation/Concurrency/internals/DeadlineWatchdog.cs) is the canonical consumer: registered with the shared timer at **200 Hz (5 ms)**, scans a priority queue of `(Deadline, CancellationTokenSource)` pairs, fires cancellation when the deadline passes. No dedicated thread of its own. Registration is lazy — if no deadlines are ever registered, no timer overhead is incurred.
 
-`ITimerRegistration` ([definition](../../src/Typhon.Engine/Foundation/Concurrency/internals/ITimerRegistration.cs)) is the disposable handle: name, interval, invocation count, last/max duration, slow count, IsActive.
+`ITimerRegistration` ([definition](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Foundation/Concurrency/internals/ITimerRegistration.cs)) is the disposable handle: name, interval, invocation count, last/max duration, slow count, IsActive.
 
 ---
 
@@ -203,7 +209,7 @@ Typhon uses an epoch model for safe memory and page reclamation. The page cache 
 
 ### `EpochManager`
 
-[`Foundation/Concurrency/internals/EpochManager.cs`](../../src/Typhon.Engine/Foundation/Concurrency/internals/EpochManager.cs) — one per `DatabaseEngine`.
+[`Foundation/Concurrency/internals/EpochManager.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Foundation/Concurrency/internals/EpochManager.cs) — one per `DatabaseEngine`.
 
 Holds the `GlobalEpoch` (monotonic `long`, starts at 1 — `0` means "not pinned"). Exposes:
 
@@ -216,7 +222,7 @@ Implements `IResource` + `IMetricSource` — exposes capacity (`_activeSlotCount
 
 ### `EpochGuard`
 
-[`Foundation/Concurrency/internals/EpochGuard.cs`](../../src/Typhon.Engine/Foundation/Concurrency/internals/EpochGuard.cs)
+[`Foundation/Concurrency/internals/EpochGuard.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Foundation/Concurrency/internals/EpochGuard.cs)
 
 `ref struct` RAII handle. Always use in a `using` block.
 
@@ -230,7 +236,7 @@ Outermost `Dispose` advances the global epoch. Nested scopes don't — they shar
 
 ### `EpochThreadRegistry` + `PaddedEpochSlot`
 
-[`Foundation/Concurrency/internals/EpochThreadRegistry.cs`](../../src/Typhon.Engine/Foundation/Concurrency/internals/EpochThreadRegistry.cs)
+[`Foundation/Concurrency/internals/EpochThreadRegistry.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Foundation/Concurrency/internals/EpochThreadRegistry.cs)
 
 Fixed array of 256 per-thread slots. Each slot is a `PaddedEpochSlot` — **64 bytes wide** (one cache line) to eliminate false sharing between threads pinning concurrently:
 
@@ -252,7 +258,7 @@ A thread can only be registered in one registry at a time — encountering a dif
 
 ## 5. False-sharing avoidance
 
-[`Foundation/Concurrency/internals/CacheLinePadded.cs`](../../src/Typhon.Engine/Foundation/Concurrency/internals/CacheLinePadded.cs)
+[`Foundation/Concurrency/internals/CacheLinePadded.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Foundation/Concurrency/internals/CacheLinePadded.cs)
 
 ```csharp
 [StructLayout(LayoutKind.Explicit, Size = 64)]
@@ -268,7 +274,7 @@ This is non-negotiable in hot-path code: any time you put independently-mutated 
 
 ## 6. Collections
 
-All collections live under [`Foundation/Collections/internals/`](../../src/Typhon.Engine/Foundation/Collections/internals/). They're `internal` types — exposed to engine code, not part of the public surface — but worth knowing if you're reading engine internals.
+All collections live under [`Foundation/Collections/internals/`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Engine/Foundation/Collections/internals). They're `internal` types — exposed to engine code, not part of the public surface — but worth knowing if you're reading engine internals.
 
 ### Hash maps
 
@@ -303,19 +309,19 @@ The L3 bitmaps are the underlying mechanism for fast occupancy queries in [02-st
 
 ### Utilities
 
-- [`HashUtils`](../../src/Typhon.Engine/Foundation/Collections/internals/HashUtils.cs) — common hashing helpers.
+- [`HashUtils`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Foundation/Collections/internals/HashUtils.cs) — common hashing helpers.
 
 ---
 
 ## 7. Memory allocator
 
-[`Foundation/Memory/internals/`](../../src/Typhon.Engine/Foundation/Memory/internals/)
+[`Foundation/Memory/internals/`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Engine/Foundation/Memory/internals)
 
 The allocator is a tracked, observable resource — every allocation goes through `MemoryAllocator` and gets accounted for in the resource graph ([13-resources](13-resources.md)).
 
 ### `MemoryAllocator`
 
-[`MemoryAllocator.cs`](../../src/Typhon.Engine/Foundation/Memory/internals/MemoryAllocator.cs)
+[`MemoryAllocator.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Foundation/Memory/internals/MemoryAllocator.cs)
 
 Two primary entry points:
 
@@ -328,17 +334,17 @@ PinnedMemoryBlock AllocatePinned(string id, IResource parent, int size, bool zer
 
 Tracks `_totalAllocatedBytes`, `_peakAllocatedBytes`, `_cumulativeAllocations`, `_cumulativeDeallocations` (grand totals) and `_pinnedBytes`, `_peakPinnedBytes`, `_pinnedLiveBlocks` (unmanaged-only). The grand totals feed the resource graph; the pinned-only counters back the `MemoryUnmanagedTotalBytes / PeakBytes / LiveBlocks` gauges.
 
-`IMemoryResource` ([interface](../../src/Typhon.Engine/Foundation/Memory/internals/IMemoryResource.cs)) is what owners implement to report their own `EstimatedMemorySize` — a separate channel from the allocator's bookkeeping (used by types that aren't allocator-tracked, like in-engine pools).
+`IMemoryResource` ([interface](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Foundation/Memory/internals/IMemoryResource.cs)) is what owners implement to report their own `EstimatedMemorySize` — a separate channel from the allocator's bookkeeping (used by types that aren't allocator-tracked, like in-engine pools).
 
 ### Block & struct allocators
 
 Layered on top of `MemoryAllocator`:
 
-- [`BlockAllocator`](../../src/Typhon.Engine/Foundation/Memory/internals/BlockAllocator.cs) / [`BlockAllocatorBase`](../../src/Typhon.Engine/Foundation/Memory/internals/BlockAllocatorBase.cs) — fixed-size block pools
-- [`ChainedBlockAllocator`](../../src/Typhon.Engine/Foundation/Memory/internals/ChainedBlockAllocator.cs) — chain of blocks for variable-size sequences
-- [`StructAllocator`](../../src/Typhon.Engine/Foundation/Memory/internals/StructAllocator.cs) / [`UnmanagedStructAllocator`](../../src/Typhon.Engine/Foundation/Memory/internals/UnmanagedStructAllocator.cs) — typed slab allocators for `unmanaged` value types
-- [`MemoryBlockArray`](../../src/Typhon.Engine/Foundation/Memory/internals/MemoryBlockArray.cs) / [`PinnedMemoryBlock`](../../src/Typhon.Engine/Foundation/Memory/internals/PinnedMemoryBlock.cs) — block handles
-- [`StoreSpan`](../../src/Typhon.Engine/Foundation/Memory/internals/StoreSpan.cs) — span helpers over the above
+- [`BlockAllocator`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Foundation/Memory/internals/BlockAllocator.cs) / [`BlockAllocatorBase`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Foundation/Memory/internals/BlockAllocatorBase.cs) — fixed-size block pools
+- [`ChainedBlockAllocator`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Foundation/Memory/internals/ChainedBlockAllocator.cs) — chain of blocks for variable-size sequences
+- [`StructAllocator`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Foundation/Memory/internals/StructAllocator.cs) / [`UnmanagedStructAllocator`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Foundation/Memory/internals/UnmanagedStructAllocator.cs) — typed slab allocators for `unmanaged` value types
+- [`MemoryBlockArray`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Foundation/Memory/internals/MemoryBlockArray.cs) / [`PinnedMemoryBlock`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Foundation/Memory/internals/PinnedMemoryBlock.cs) — block handles
+- [`StoreSpan`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Foundation/Memory/internals/StoreSpan.cs) — span helpers over the above
 
 These are the building blocks Typhon's persistence layer ([02-storage](02-storage.md)) uses to materialize page-backed data structures in unmanaged memory.
 
@@ -346,11 +352,11 @@ These are the building blocks Typhon's persistence layer ([02-storage](02-storag
 
 ## 8. Hosting helpers
 
-[`Hosting/`](../../src/Typhon.Engine/Hosting/) — small, used everywhere.
+[`Hosting/`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Engine/Hosting) — small, used everywhere.
 
 ### `SpanStream` and span helpers
 
-[`Hosting/public/String64.cs`](../../src/Typhon.Engine/Hosting/public/String64.cs) (file also hosts `MathHelpers`, `StringExtensions`)
+[`Hosting/public/String64.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Hosting/public/String64.cs) (file also hosts `MathHelpers`, `StringExtensions`)
 
 `ref struct SpanStream` — zero-alloc cursor over a `Span<byte>` for reading/writing serialized payloads. `PopSpan(n)`, `PopRef<T>()`, `Pop<T>()`. Used in WAL serialization, schema persistence, network encode paths.
 
@@ -358,33 +364,33 @@ These are the building blocks Typhon's persistence layer ([02-storage](02-storag
 
 ### `MathExtensions`
 
-[`Hosting/public/MathExtensions.cs`](../../src/Typhon.Engine/Hosting/public/MathExtensions.cs)
+[`Hosting/public/MathExtensions.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Hosting/public/MathExtensions.cs)
 
 Friendly formatters: `FriendlySize(bytes)`, `FriendlyAmount(count)`, `FriendlyTime(timespan)`, `Bandwidth(bytes, duration)`, `TicksToSeconds`, `TotalSeconds`. Plus power-of-two helpers (`IsPowerOf2`, `NextPowerOf2`).
 
 ### Ownership attributes
 
-[`Hosting/internals/`](../../src/Typhon.Engine/Hosting/internals/) — `[NoCopy]`, `[AllowCopy]`, `[TransfersOwnership]`. Markers that document ownership invariants on struct types (e.g., `UnitOfWorkContext` is `[NoCopy]`). Not enforced by the compiler, but used by code review and the engine's own analyzers.
+[`Hosting/internals/`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Engine/Hosting/internals) — `[NoCopy]`, `[AllowCopy]`, `[TransfersOwnership]`. Markers that document ownership invariants on struct types (e.g., `UnitOfWorkContext` is `[NoCopy]`). Not enforced by the compiler, but used by code review and the engine's own analyzers.
 
 ---
 
 ## 9. Schema definition types (sibling project)
 
-Some types Typhon engine users *will* touch don't live in `Typhon.Engine` — they live in the sibling [`Typhon.Schema.Definition`](../../src/Typhon.Schema.Definition/) project. This is the package you reference when defining components.
+Some types Typhon engine users *will* touch don't live in `Typhon.Engine` — they live in the sibling [`Typhon.Schema.Definition`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Schema.Definition) project. This is the package you reference when defining components.
 
 | Type | What it is |
 |---|---|
-| [`String64`](../../src/Typhon.Schema.Definition/String64.cs) | 64-byte fixed-width inline string (no GC, blittable) |
-| [`Variant`](../../src/Typhon.Schema.Definition/Variant.cs) | Tagged-union value for runtime-typed fields |
-| [`PackedDateTime`](../../src/Typhon.Schema.Definition/PackedDateTime.cs) | Compact 8-byte timestamp |
-| [`SpatialTypes`](../../src/Typhon.Schema.Definition/SpatialTypes.cs) (`Point2F/3F/4F/2D/3D/4D`, `QuaternionF/D`, AABB/BSphere variants) | Geometric primitive types |
-| [`ISpatialBox`](../../src/Typhon.Schema.Definition/ISpatialBox.cs) | Marker interface for spatial query payloads |
-| [`FieldType`](../../src/Typhon.Schema.Definition/FieldType.cs) | Enum of supported component field kinds (full set incl. `Unsigned` / `DoubleFloat` flags and AABB/BSphere variants) |
-| [`Attributes`](../../src/Typhon.Schema.Definition/Attributes.cs) | Component / field attributes (`[SpatialIndex]`, `[Unique]`, etc.) |
-| [`StorageMode`](../../src/Typhon.Schema.Definition/StorageMode.cs) | Per-component storage policy: Versioned / SingleVersion / Transient |
-| [`DurabilityDiscipline`](../../src/Typhon.Schema.Definition/DurabilityDiscipline.cs) | Per-transaction escalation for `SingleVersion` components: `TickFence` (default, batched) or `Commit` (atomic, zero-loss, O(1) rollback) — see [06-ecs §8](06-ecs.md) |
-| [`MurmurHash2`](../../src/Typhon.Schema.Definition/MurmurHash2.cs) | Hash algorithm used in keying / partitioning |
-| [`ComponentCollection`](../../src/Typhon.Schema.Definition/ComponentCollection.cs) | Container type for component metadata |
+| [`String64`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Schema.Definition/String64.cs) | 64-byte fixed-width inline string (no GC, blittable) |
+| [`Variant`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Schema.Definition/Variant.cs) | Tagged-union value for runtime-typed fields |
+| [`PackedDateTime`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Schema.Definition/PackedDateTime.cs) | Compact 8-byte timestamp |
+| [`SpatialTypes`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Schema.Definition/SpatialTypes.cs) (`Point2F/3F/4F/2D/3D/4D`, `QuaternionF/D`, AABB/BSphere variants) | Geometric primitive types |
+| [`ISpatialBox`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Schema.Definition/ISpatialBox.cs) | Marker interface for spatial query payloads |
+| [`FieldType`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Schema.Definition/FieldType.cs) | Enum of supported component field kinds (full set incl. `Unsigned` / `DoubleFloat` flags and AABB/BSphere variants) |
+| [`Attributes`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Schema.Definition/Attributes.cs) | Component / field attributes (`[SpatialIndex]`, `[Unique]`, etc.) |
+| [`StorageMode`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Schema.Definition/StorageMode.cs) | Per-component storage policy: Versioned / SingleVersion / Transient |
+| [`DurabilityDiscipline`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Schema.Definition/DurabilityDiscipline.cs) | Per-transaction escalation for `SingleVersion` components: `TickFence` (default, batched) or `Commit` (atomic, zero-loss, O(1) rollback) — see [06-ecs §8](06-ecs.md) |
+| [`MurmurHash2`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Schema.Definition/MurmurHash2.cs) | Hash algorithm used in keying / partitioning |
+| [`ComponentCollection`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Schema.Definition/ComponentCollection.cs) | Container type for component metadata |
 
 These exist in a separate project because schema definitions need to be referenced by both the engine and external code-generators / tooling without pulling in the full engine surface. See [04-schema](04-schema.md) for how the engine consumes them.
 

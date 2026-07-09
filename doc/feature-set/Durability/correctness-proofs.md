@@ -1,3 +1,9 @@
+---
+uid: feature-durability-correctness-proofs
+title: 'Formal Proofs & Invariant Rules'
+description: 'Typhon''s crash-safety claims are gated on falsifiable proofs — invariant rules, TLA+ models, and a crash-simulation sweep — not on tests happening to pass.'
+---
+
 # Formal Proofs & Invariant Rules
 > Typhon's crash-safety claims are gated on falsifiable proofs — invariant rules, TLA+ models, and a crash-simulation sweep — not on tests happening to pass.
 
@@ -82,8 +88,8 @@ var engine = serviceProvider.GetRequiredService<DatabaseEngine>();   // throws C
 
 ## 🧪 Tests
 
-- [WalCrashSweepTests](../../../test/Typhon.Engine.Tests/Durability/CrashRecovery/WalCrashSweepTests.cs) — the full crash sweep: page-axis (checkpoint crash at every write boundary) and WAL-window axis, oracle-verified at each boundary
-- [DifferentialRecoveryOracleTests](../../../test/Typhon.Engine.Tests/Durability/CrashRecovery/DifferentialRecoveryOracleTests.cs) — the T-5 differential oracle itself: recovered state vs. an independent shadow model at one crash point
+- [WalCrashSweepTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/CrashRecovery/WalCrashSweepTests.cs) — the full crash sweep: page-axis (checkpoint crash at every write boundary) and WAL-window axis, oracle-verified at each boundary
+- [DifferentialRecoveryOracleTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/CrashRecovery/DifferentialRecoveryOracleTests.cs) — the T-5 differential oracle itself: recovered state vs. an independent shadow model at one crash point
 
 ## 🔗 Related
 

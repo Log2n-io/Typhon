@@ -29,14 +29,14 @@ public sealed record ProfilerLaunchConfig
     /// <summary>The default port used when <c>--live</c> is given without an explicit number.</summary>
     public const int DefaultLivePort = 9100;
 
-    /// <summary>Path to the .typhon-trace file the <see cref="Exporters.FileExporter"/> writes to, or <c>null</c> for no file output.</summary>
+    /// <summary>Path to the .typhon-trace file the <see cref="FileExporter"/> writes to, or <c>null</c> for no file output.</summary>
     public string TraceFilePath { get; init; }
 
-    /// <summary>TCP port the <see cref="Exporters.TcpExporter"/> listens on, or <c>-1</c> for no live exporter.</summary>
+    /// <summary>TCP port the <see cref="TcpExporter"/> listens on, or <c>-1</c> for no live exporter.</summary>
     public int LivePort { get; init; } = -1;
 
     /// <summary>
-    /// If &gt; 0, <see cref="Exporters.TcpExporter.Initialize"/> blocks up to this many milliseconds waiting for the
+    /// If &gt; 0, <see cref="TcpExporter.Initialize"/> blocks up to this many milliseconds waiting for the
     /// first live client to connect. Lets the host pause at startup until the workbench is attached. <c>0</c> disables
     /// the wait — Initialize returns immediately and clients connect when they connect.
     /// </summary>
@@ -151,7 +151,7 @@ public sealed record ProfilerLaunchConfig
     /// <summary>
     /// Combine two configs — fields explicitly set in <paramref name="overrideWith"/> win over <c>this</c>.
     /// "Set" means "different from the field's sentinel": <see cref="TraceFilePath"/> non-null, <see cref="LivePort"/>
-    /// &ge; 0, <see cref="LiveWaitMs"/> &gt; 0. Use as <c>env.MergedWith(args)</c> for the standard "CLI overrides env"
+    /// ≥ 0, <see cref="LiveWaitMs"/> &gt; 0. Use as <c>env.MergedWith(args)</c> for the standard "CLI overrides env"
     /// precedence.
     /// </summary>
     public ProfilerLaunchConfig MergedWith(ProfilerLaunchConfig overrideWith)

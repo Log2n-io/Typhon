@@ -1,3 +1,9 @@
+---
+uid: feature-transactions-transaction-creation-patterns-index
+title: 'Transaction Creation Patterns'
+description: 'Three ways to obtain a Transaction, depending on how long the work lives and whether it writes at all.'
+---
+
 # Transaction Creation Patterns
 > Three ways to obtain a `Transaction`, depending on how long the work lives and whether it writes at all.
 
@@ -43,10 +49,10 @@ no durability mode, no registry slot, no `ChangeSet`.
 
 ## 🧪 Tests
 
-- [UnitOfWorkTests](../../../../test/Typhon.Engine.Tests/Execution/UnitOfWorkTests.cs) — standard pattern
+- [UnitOfWorkTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Execution/UnitOfWorkTests.cs) — standard pattern
   (`UoW_CreateTransaction_ReturnsValidTx`, `UoW_MultipleTransactions_ShareIdentity`) and quick-transaction pattern
   (`QuickTx_*`) side by side
-- [TransactionChainTests](../../../../test/Typhon.Engine.Tests/Data/TransactionChainTests.cs) — read-only pattern
+- [TransactionChainTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/TransactionChainTests.cs) — read-only pattern
   (`ReadOnly_*`): no `UnitOfWork`, throws on write, snapshot isolation
 
 ## 🔗 Related

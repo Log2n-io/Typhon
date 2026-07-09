@@ -1,3 +1,9 @@
+---
+uid: feature-storage-string-table
+title: 'String Table Storage'
+description: 'UTF-8 string storage spread across linked fixed-size chunks, for strings too long to hold inline.'
+---
+
 # String Table Storage
 > UTF-8 string storage spread across linked fixed-size chunks, for strings too long to hold inline.
 
@@ -48,7 +54,7 @@ The returned `int` (root chunk id) is the only handle needed to reload or delete
 
 ## 🧪 Tests
 
-- [ManagedPagedMMFTests](../../../test/Typhon.Engine.Tests/Storage/ManagedPagedMMFTests.cs) — `StringTableTest`: store/load/delete round-trip of a string spanning multiple chained chunks
+- [ManagedPagedMMFTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Storage/ManagedPagedMMFTests.cs) — `StringTableTest`: store/load/delete round-trip of a string spanning multiple chained chunks
 
 ## 🔗 Related
 

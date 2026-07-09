@@ -1,3 +1,9 @@
+---
+uid: feature-foundation-access-control-lock-family-access-control-small
+title: 'AccessControlSmall (compact RW lock)'
+description: '32-bit reader-writer lock for thousands of embedded per-node/per-page latches with short critical sections.'
+---
+
 # AccessControlSmall (compact RW lock)
 > 32-bit reader-writer lock for thousands of embedded per-node/per-page latches with short critical sections.
 
@@ -46,7 +52,7 @@ finally { node.Latch.Exit(exclusive: true); }
 - `internal` type — engine plumbing, not callable from application code.
 
 ## 🧪 Tests
-- [AccessControlSmallTests](../../../../test/Typhon.Engine.Tests/Concurrency/AccessControlSmallTests.cs) — idle/shared/exclusive transitions, misuse throws (exit without enter, wrong-thread exit), multi-thread blocking.
+- [AccessControlSmallTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Concurrency/AccessControlSmallTests.cs) — idle/shared/exclusive transitions, misuse throws (exit without enter, wrong-thread exit), multi-thread blocking.
 
 ## 🔗 Related
 - Parent feature: [Reader-Writer & Resource Lifecycle Locks](./README.md)

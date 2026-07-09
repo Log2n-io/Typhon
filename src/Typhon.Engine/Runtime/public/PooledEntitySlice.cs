@@ -67,10 +67,17 @@ public readonly struct PooledEntitySlice : IReadOnlyCollection<EntityId>
             _index = -1;
         }
 
+        /// <summary>Entity at the current position. Valid only after a <see cref="MoveNext"/> that returned <c>true</c>.</summary>
         public EntityId Current => _array[_start + _index];
         object IEnumerator.Current => Current;
+
+        /// <summary>Advances to the next entity in the slice. Returns <c>false</c> once the slice is exhausted.</summary>
         public bool MoveNext() => ++_index < _count;
+
+        /// <summary>Resets the enumerator to before the first entity.</summary>
         public void Reset() => _index = -1;
+
+        /// <summary>No-op — the enumerator holds no unmanaged resources and does not own the backing array.</summary>
         public void Dispose() { }
     }
 }

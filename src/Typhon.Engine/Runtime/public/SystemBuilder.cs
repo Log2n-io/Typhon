@@ -301,57 +301,77 @@ public sealed class SystemBuilder
     // ─── Batch overloads (RFC 07 / Q1 — verbosity relief) ───
     // Identical to calling the single-T variant N times. Generated for arities 2..6.
 
+    /// <summary>Batch form of <see cref="Reads{T}"/>: declares reads of all listed component types.</summary>
     public SystemBuilder Reads<T1, T2>() where T1 : unmanaged where T2 : unmanaged => Reads<T1>().Reads<T2>();
 
+    /// <summary>Batch form of <see cref="Reads{T}"/>: declares reads of all listed component types.</summary>
     public SystemBuilder Reads<T1, T2, T3>() where T1 : unmanaged where T2 : unmanaged where T3 : unmanaged => Reads<T1>().Reads<T2>().Reads<T3>();
 
+    /// <summary>Batch form of <see cref="Reads{T}"/>: declares reads of all listed component types.</summary>
     public SystemBuilder Reads<T1, T2, T3, T4>() where T1 : unmanaged where T2 : unmanaged where T3 : unmanaged where T4 : unmanaged 
         => Reads<T1>().Reads<T2>().Reads<T3>().Reads<T4>();
 
+    /// <summary>Batch form of <see cref="Reads{T}"/>: declares reads of all listed component types.</summary>
     public SystemBuilder Reads<T1, T2, T3, T4, T5>() where T1 : unmanaged where T2 : unmanaged where T3 : unmanaged where T4 : unmanaged where T5 : unmanaged
         => Reads<T1>().Reads<T2>().Reads<T3>().Reads<T4>().Reads<T5>();
 
+    /// <summary>Batch form of <see cref="Reads{T}"/>: declares reads of all listed component types.</summary>
     public SystemBuilder Reads<T1, T2, T3, T4, T5, T6>() where T1 : unmanaged where T2 : unmanaged where T3 : unmanaged where T4 : unmanaged where T5 : unmanaged
         where T6 : unmanaged => Reads<T1>().Reads<T2>().Reads<T3>().Reads<T4>().Reads<T5>().Reads<T6>();
 
+    /// <summary>Batch form of <see cref="Writes{T}"/>: declares writes of all listed component types.</summary>
     public SystemBuilder Writes<T1, T2>() where T1 : unmanaged where T2 : unmanaged => Writes<T1>().Writes<T2>();
 
+    /// <summary>Batch form of <see cref="Writes{T}"/>: declares writes of all listed component types.</summary>
     public SystemBuilder Writes<T1, T2, T3>() where T1 : unmanaged where T2 : unmanaged where T3 : unmanaged => Writes<T1>().Writes<T2>().Writes<T3>();
 
+    /// <summary>Batch form of <see cref="Writes{T}"/>: declares writes of all listed component types.</summary>
     public SystemBuilder Writes<T1, T2, T3, T4>() where T1 : unmanaged where T2 : unmanaged where T3 : unmanaged where T4 : unmanaged 
         => Writes<T1>().Writes<T2>().Writes<T3>().Writes<T4>();
 
+    /// <summary>Batch form of <see cref="Writes{T}"/>: declares writes of all listed component types.</summary>
     public SystemBuilder Writes<T1, T2, T3, T4, T5>() where T1 : unmanaged where T2 : unmanaged where T3 : unmanaged where T4 : unmanaged where T5 : unmanaged
         => Writes<T1>().Writes<T2>().Writes<T3>().Writes<T4>().Writes<T5>();
 
+    /// <summary>Batch form of <see cref="Writes{T}"/>: declares writes of all listed component types.</summary>
     public SystemBuilder Writes<T1, T2, T3, T4, T5, T6>() where T1 : unmanaged where T2 : unmanaged where T3 : unmanaged where T4 : unmanaged
         where T5 : unmanaged where T6 : unmanaged => Writes<T1>().Writes<T2>().Writes<T3>().Writes<T4>().Writes<T5>().Writes<T6>();
 
+    /// <summary>Batch form of <see cref="ReadsFresh{T}"/>: declares fresh reads (each ordered after any same-phase writer) of all listed component types.</summary>
     public SystemBuilder ReadsFresh<T1, T2>() where T1 : unmanaged where T2 : unmanaged => ReadsFresh<T1>().ReadsFresh<T2>();
 
+    /// <summary>Batch form of <see cref="ReadsFresh{T}"/>: declares fresh reads (each ordered after any same-phase writer) of all listed component types.</summary>
     public SystemBuilder ReadsFresh<T1, T2, T3>() where T1 : unmanaged where T2 : unmanaged where T3 : unmanaged
         => ReadsFresh<T1>().ReadsFresh<T2>().ReadsFresh<T3>();
 
+    /// <summary>Batch form of <see cref="ReadsFresh{T}"/>: declares fresh reads (each ordered after any same-phase writer) of all listed component types.</summary>
     public SystemBuilder ReadsFresh<T1, T2, T3, T4>() where T1 : unmanaged where T2 : unmanaged where T3 : unmanaged where T4 : unmanaged
         => ReadsFresh<T1>().ReadsFresh<T2>().ReadsFresh<T3>().ReadsFresh<T4>();
 
+    /// <summary>Batch form of <see cref="ReadsFresh{T}"/>: declares fresh reads (each ordered after any same-phase writer) of all listed component types.</summary>
     public SystemBuilder ReadsFresh<T1, T2, T3, T4, T5>() where T1 : unmanaged where T2 : unmanaged where T3 : unmanaged where T4 : unmanaged
         where T5 : unmanaged => ReadsFresh<T1>().ReadsFresh<T2>().ReadsFresh<T3>().ReadsFresh<T4>().ReadsFresh<T5>();
 
+    /// <summary>Batch form of <see cref="ReadsFresh{T}"/>: declares fresh reads (each ordered after any same-phase writer) of all listed component types.</summary>
     public SystemBuilder ReadsFresh<T1, T2, T3, T4, T5, T6>() where T1 : unmanaged where T2 : unmanaged where T3 : unmanaged where T4 : unmanaged
         where T5 : unmanaged where T6 : unmanaged => ReadsFresh<T1>().ReadsFresh<T2>().ReadsFresh<T3>().ReadsFresh<T4>().ReadsFresh<T5>().ReadsFresh<T6>();
 
+    /// <summary>Batch form of <see cref="ReadsSnapshot{T}"/>: declares snapshot reads (each ordered before any same-phase writer) of all listed component types.</summary>
     public SystemBuilder ReadsSnapshot<T1, T2>() where T1 : unmanaged where T2 : unmanaged => ReadsSnapshot<T1>().ReadsSnapshot<T2>();
 
+    /// <summary>Batch form of <see cref="ReadsSnapshot{T}"/>: declares snapshot reads (each ordered before any same-phase writer) of all listed component types.</summary>
     public SystemBuilder ReadsSnapshot<T1, T2, T3>() where T1 : unmanaged where T2 : unmanaged where T3 : unmanaged
         => ReadsSnapshot<T1>().ReadsSnapshot<T2>().ReadsSnapshot<T3>();
 
+    /// <summary>Batch form of <see cref="ReadsSnapshot{T}"/>: declares snapshot reads (each ordered before any same-phase writer) of all listed component types.</summary>
     public SystemBuilder ReadsSnapshot<T1, T2, T3, T4>() where T1 : unmanaged where T2 : unmanaged where T3 : unmanaged where T4 : unmanaged
         => ReadsSnapshot<T1>().ReadsSnapshot<T2>().ReadsSnapshot<T3>().ReadsSnapshot<T4>();
 
+    /// <summary>Batch form of <see cref="ReadsSnapshot{T}"/>: declares snapshot reads (each ordered before any same-phase writer) of all listed component types.</summary>
     public SystemBuilder ReadsSnapshot<T1, T2, T3, T4, T5>() where T1 : unmanaged where T2 : unmanaged where T3 : unmanaged where T4 : unmanaged
         where T5 : unmanaged => ReadsSnapshot<T1>().ReadsSnapshot<T2>().ReadsSnapshot<T3>().ReadsSnapshot<T4>().ReadsSnapshot<T5>();
 
+    /// <summary>Batch form of <see cref="ReadsSnapshot{T}"/>: declares snapshot reads (each ordered before any same-phase writer) of all listed component types.</summary>
     public SystemBuilder ReadsSnapshot<T1, T2, T3, T4, T5, T6>() where T1 : unmanaged where T2 : unmanaged where T3 : unmanaged where T4 : unmanaged
         where T5 : unmanaged where T6 : unmanaged => ReadsSnapshot<T1>().ReadsSnapshot<T2>().ReadsSnapshot<T3>().ReadsSnapshot<T4>().ReadsSnapshot<T5>().ReadsSnapshot<T6>();
 }
@@ -388,34 +408,63 @@ public sealed class SystemBuilder<TContext> where TContext : class
 
     // Forwarded fluent methods. The typed builder intentionally does NOT expose the untyped
     // ShouldRun(Func<bool>) overload — typed-system authors use the typed signature above.
+    /// <summary>Sets the system's unique name in the DAG.</summary>
     public SystemBuilder<TContext> Name(string name) { _inner.Name(name); return this; }
+    /// <summary>Declares a dependency on another system (this system runs after it).</summary>
     public SystemBuilder<TContext> After(string dependency) { _inner.After(dependency); return this; }
+    /// <summary>Declares dependencies on multiple systems (this system runs after all of them).</summary>
     public SystemBuilder<TContext> AfterAll(params string[] dependencies) { _inner.AfterAll(dependencies); return this; }
+    /// <summary>Declares that this system must run before another (mirror of <see cref="After"/>).</summary>
     public SystemBuilder<TContext> Before(string dependent) { _inner.Before(dependent); return this; }
+    /// <summary>Sets the system's overload priority.</summary>
     public SystemBuilder<TContext> Priority(SystemPriority priority) { _inner.Priority(priority); return this; }
+    /// <summary>Sets the View factory providing the system's entity input.</summary>
     public SystemBuilder<TContext> Input(Func<ViewBase> viewFactory) { _inner.Input(viewFactory); return this; }
+    /// <summary>Sets the component types for change-filtered reactive input. OR logic: entity included if any filtered component was written.</summary>
     public SystemBuilder<TContext> ChangeFilter(params Type[] componentTypes) { _inner.ChangeFilter(componentTypes); return this; }
+    /// <summary>Sets the tick divisor (system runs every Nth tick at normal load).</summary>
     public SystemBuilder<TContext> TickDivisor(int divisor) { _inner.TickDivisor(divisor); return this; }
+    /// <summary>Sets the throttled tick divisor (system runs every Nth tick under overload).</summary>
     public SystemBuilder<TContext> ThrottledTickDivisor(int divisor) { _inner.ThrottledTickDivisor(divisor); return this; }
+    /// <summary>Sets whether this system can be shed entirely under severe overload.</summary>
     public SystemBuilder<TContext> CanShed(bool value) { _inner.CanShed(value); return this; }
+    /// <summary>Enables automatic chunk-parallel execution across workers. QuerySystem only.</summary>
     public SystemBuilder<TContext> Parallel() { _inner.Parallel(); return this; }
+    /// <summary>Enables chunk-parallel execution for a chunked callback with an explicit chunk count, independent of any entity input.</summary>
     public SystemBuilder<TContext> ChunkedParallel(int chunkCount) { _inner.ChunkedParallel(chunkCount); return this; }
+    /// <summary>Declares that this parallel QuerySystem writes Versioned components. Forces per-chunk Transaction fallback instead of the PointInTimeAccessor path.</summary>
     public SystemBuilder<TContext> WritesVersioned() { _inner.WritesVersioned(); return this; }
+    /// <summary>Sets the oversubscription factor for parallel chunk dispatch (worker cap becomes <c>round(WorkerCount × factor)</c>). Must be in <c>[1.0, 64.0]</c>.</summary>
     public SystemBuilder<TContext> ChunksPerWorker(float factor) { _inner.ChunksPerWorker(factor); return this; }
+    /// <summary>Sets the simulation-tier dispatch filter (this system only processes clusters whose cell matches the tier).</summary>
     public SystemBuilder<TContext> Tier(SimTier tier) { _inner.Tier(tier); return this; }
+    /// <summary>Sets the cell-level amortization denominator — the system processes <c>1/N</c> of the tier's clusters per tick. Requires a non-<see cref="SimTier.All"/> tier.</summary>
     public SystemBuilder<TContext> CellAmortize(int denominator) { _inner.CellAmortize(denominator); return this; }
+    /// <summary>Enables two-phase checkerboard dispatch — no two adjacent cells are processed simultaneously. Requires <see cref="Parallel"/>.</summary>
     public SystemBuilder<TContext> Checkerboard() { _inner.Checkerboard(); return this; }
+    /// <summary>Assigns this system to a phase. The phase must be one declared on the owning DAG.</summary>
     public SystemBuilder<TContext> Phase(Phase phase) { _inner.Phase(phase); return this; }
 
+    /// <summary>Declares that this system reads component <typeparamref name="T"/>. See <see cref="SystemBuilder.Reads{T}"/>.</summary>
     public SystemBuilder<TContext> Reads<T>() where T : unmanaged { _inner.Reads<T>(); return this; }
+    /// <summary>Declares a read of <typeparamref name="T"/> ordered after any same-phase writer of it. See <see cref="SystemBuilder.ReadsFresh{T}"/>.</summary>
     public SystemBuilder<TContext> ReadsFresh<T>() where T : unmanaged { _inner.ReadsFresh<T>(); return this; }
+    /// <summary>Declares a read of <typeparamref name="T"/> ordered before any same-phase writer of it. See <see cref="SystemBuilder.ReadsSnapshot{T}"/>.</summary>
     public SystemBuilder<TContext> ReadsSnapshot<T>() where T : unmanaged { _inner.ReadsSnapshot<T>(); return this; }
+    /// <summary>Declares a read of <typeparamref name="T"/> beyond the system's primary View input (cross-entity read).</summary>
     public SystemBuilder<TContext> AdditionalReads<T>() where T : unmanaged { _inner.AdditionalReads<T>(); return this; }
+    /// <summary>Declares that this system mutates component <typeparamref name="T"/>. See <see cref="SystemBuilder.Writes{T}"/>.</summary>
     public SystemBuilder<TContext> Writes<T>() where T : unmanaged { _inner.Writes<T>(); return this; }
+    /// <summary>Declares that this system writes <typeparamref name="T"/> via a side-transaction. Surfaced in tooling but does NOT affect scheduler ordering.</summary>
     public SystemBuilder<TContext> SideWrites<T>() where T : unmanaged { _inner.SideWrites<T>(); return this; }
+    /// <summary>Declares that this system publishes to the given event queue.</summary>
     public SystemBuilder<TContext> WritesEvents(EventQueueBase queue) { _inner.WritesEvents(queue); return this; }
+    /// <summary>Declares that this system consumes from the given event queue.</summary>
     public SystemBuilder<TContext> ReadsEvents(EventQueueBase queue) { _inner.ReadsEvents(queue); return this; }
+    /// <summary>Declares that this system mutates a named resource (e.g., a shared physics-world handle that isn't a component).</summary>
     public SystemBuilder<TContext> WritesResource(string name) { _inner.WritesResource(name); return this; }
+    /// <summary>Declares that this system reads a named resource.</summary>
     public SystemBuilder<TContext> ReadsResource(string name) { _inner.ReadsResource(name); return this; }
+    /// <summary>Marks this system as having exclusive control of its phase — no other system in the same phase may run concurrently.</summary>
     public SystemBuilder<TContext> ExclusivePhase() { _inner.ExclusivePhase(); return this; }
 }

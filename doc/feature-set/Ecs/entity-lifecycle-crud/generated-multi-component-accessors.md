@@ -1,3 +1,9 @@
+---
+uid: feature-ecs-entity-lifecycle-crud-generated-multi-component-accessors
+title: 'Generated Multi-Component Accessors'
+description: 'Source-generated zero-copy Refs/MutRefs structs reading or writing every archetype component in one call.'
+---
+
 # Generated Multi-Component Accessors
 > Source-generated zero-copy Refs/MutRefs structs reading or writing every archetype component in one call.
 
@@ -68,7 +74,7 @@ tx.Commit();
 
 ## 🧪 Tests
 
-- [EntitySpawnTests](../../../../test/Typhon.Engine.Tests/Data/ECS/EntitySpawnTests.cs) — `ReadAll`/`ReadWriteAll` zero-copy round-trip, inherited-archetype field inclusion, mutate-then-verify-persisted
+- [EntitySpawnTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/EntitySpawnTests.cs) — `ReadAll`/`ReadWriteAll` zero-copy round-trip, inherited-archetype field inclusion, mutate-then-verify-persisted
 
 ## 🔗 Related
 

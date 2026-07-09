@@ -13,7 +13,7 @@ namespace Typhon.Engine.Internals;
 /// <remarks>
 /// <para>
 /// Each call to <see cref="OpenSegment"/> returns a synthetic <see cref="SafeFileHandle"/> (not backed by a real file) and creates an in-memory
-/// <see cref="MemorySegment"/> keyed by normalized path. The handle is used solely as a lookup token via <see cref="SafeFileHandle.DangerousGetHandle"/>.
+/// <see cref="MemorySegment"/> keyed by normalized path. The handle is used solely as a lookup token via <see cref="System.Runtime.InteropServices.SafeHandle.DangerousGetHandle"/>.
 /// </para>
 /// <para>
 /// Tests use <see cref="GetSegment"/> to inspect written data for assertions.

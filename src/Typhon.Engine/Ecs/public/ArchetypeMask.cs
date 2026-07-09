@@ -12,17 +12,45 @@ namespace Typhon.Engine;
 /// <c>where TMask : struct, IArchetypeMask&lt;TMask&gt;</c> compiles to direct calls with zero virtual dispatch.
 /// Same pattern as <see cref="IPageStore"/> (PersistentStore/TransientStore).
 /// </summary>
+/// <typeparam name="TSelf">The implementing value type itself (curiously-recurring generic pattern), so set operations return the concrete mask type.</typeparam>
 [PublicAPI]
 public interface IArchetypeMask<TSelf> where TSelf : struct
 {
+    /// <summary>Adds archetype <paramref name="archetypeId"/> to the set (sets its bit).</summary>
+    /// <param name="archetypeId">Archetype ID to include; must be in the range <c>0</c>..<see cref="MaxId"/>.</param>
     void Set(ushort archetypeId);
+
+    /// <summary>Removes archetype <paramref name="archetypeId"/> from the set (clears its bit).</summary>
+    /// <param name="archetypeId">Archetype ID to exclude.</param>
     void Clear(ushort archetypeId);
+
+    /// <summary>Tests whether archetype <paramref name="archetypeId"/> is present in the set.</summary>
+    /// <param name="archetypeId">Archetype ID to test.</param>
+    /// <returns><c>true</c> if the bit is set; otherwise <c>false</c>.</returns>
     bool Test(ushort archetypeId);
+
+    /// <summary>Set intersection (bitwise AND) — inclusion filtering.</summary>
+    /// <param name="other">Mask to intersect with.</param>
+    /// <returns>A new mask containing only the archetypes present in both.</returns>
     TSelf And(in TSelf other);
+
+    /// <summary>Set difference (bitwise AND NOT) — exclusion filtering.</summary>
+    /// <param name="other">Mask whose archetypes are removed from this one.</param>
+    /// <returns>A new mask containing the archetypes present in this mask but not in <paramref name="other"/>.</returns>
     TSelf AndNot(in TSelf other);
+
+    /// <summary>Set union (bitwise OR).</summary>
+    /// <param name="other">Mask to union with.</param>
+    /// <returns>A new mask containing every archetype present in either mask.</returns>
     TSelf Or(in TSelf other);
+
+    /// <summary><c>true</c> when no archetype bits are set.</summary>
     bool IsEmpty { get; }
+
+    /// <summary>Number of archetypes in the set (count of set bits).</summary>
     int PopCount { get; }
+
+    /// <summary>Highest archetype ID this mask can represent.</summary>
     int MaxId { get; }
 }
 

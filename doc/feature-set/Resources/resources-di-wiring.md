@@ -1,3 +1,9 @@
+---
+uid: feature-resources-resources-di-wiring
+title: 'DI Registration & Wiring'
+description: 'Register Typhon services into IServiceCollection and have each one self-attach to the resource graph.'
+---
+
 # DI Registration & Wiring
 > Register Typhon services into `IServiceCollection` and have each one self-attach to the resource graph.
 
@@ -50,7 +56,7 @@ var engine = sp.GetRequiredService<DatabaseEngine>();
 
 - Sibling: [Resource Tree Registry](./resource-tree-registry.md) — the tree these DI extensions attach services into.
 - Sibling: [Resource Budget Configuration](./resource-budgets-options.md) — options object threaded into constructed services via these extensions.
-- Source: [src/Typhon.Engine/Hosting/public/TyphonBuilderExtensions.cs](../../../src/Typhon.Engine/Hosting/public/TyphonBuilderExtensions.cs)
-- Source: [src/Typhon.Engine/Resources/public/ResourceRegistry.cs](../../../src/Typhon.Engine/Resources/public/ResourceRegistry.cs)
+- Source: [src/Typhon.Engine/Hosting/public/TyphonBuilderExtensions.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Hosting/public/TyphonBuilderExtensions.cs)
+- Source: [src/Typhon.Engine/Resources/public/ResourceRegistry.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Resources/public/ResourceRegistry.cs)
 
 <!-- Design: claude/design/Resources/10-di-and-public-surface.md -->

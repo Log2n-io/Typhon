@@ -8,14 +8,15 @@ using K4os.Compression.LZ4;
 namespace Typhon.Profiler;
 
 /// <summary>
-/// Writes a <c>.typhon-trace</c> binary trace file (format v3, the variable-size typed-record layout introduced in the Tracy-style profiler
-/// rewrite). Owns the underlying stream; not thread-safe — callers must serialize writes (the profiler's exporter thread is the only writer).
+/// Writes a <c>.typhon-trace</c> binary trace file — the variable-size typed-record layout introduced in the Tracy-style profiler rewrite
+/// (see <see cref="TraceFileHeader.CurrentVersion"/> for the current format version). Owns the underlying stream; not thread-safe — callers
+/// must serialize writes (the profiler's exporter thread is the only writer).
 /// </summary>
 /// <remarks>
 /// <para>
-/// File layout (v3):
+/// File layout:
 /// <code>
-/// [TraceFileHeader]           64 B, fixed
+/// [TraceFileHeader]           variable — grows with format version
 /// [SystemDefinitionTable]     variable — system DAG definitions
 /// [ArchetypeTable]            variable — archetype ID → name map
 /// [ComponentTypeTable]        variable — component type ID → name map
@@ -39,6 +40,13 @@ public sealed class TraceFileWriter : IDisposable
     /// <summary>Maximum bytes per compressed block. Batches larger than this are split by the exporter before calling <see cref="WriteRecords"/>.</summary>
     public const int MaxBlockBytes = 256 * 1024;
 
+    /// <summary>
+    /// Wraps <paramref name="stream"/> for writing a <c>.typhon-trace</c> file. Call <see cref="WriteHeader"/> once, then the metadata-table writers
+    /// and <see cref="WriteRecords"/> block writers in order — see the type remarks for the layout. The writer takes ownership and disposes the stream
+    /// in <see cref="Dispose"/>.
+    /// </summary>
+    /// <param name="stream">Output stream for the <c>.typhon-trace</c> file.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="stream"/> is <c>null</c>.</exception>
     public TraceFileWriter(Stream stream)
     {
         _stream = stream ?? throw new ArgumentNullException(nameof(stream));
@@ -55,8 +63,8 @@ public sealed class TraceFileWriter : IDisposable
 
     /// <summary>Writes the system definition table. Must be called exactly once after the header.</summary>
     /// <remarks>
-    /// Format v6 (current) appends RFC 07 access declarations per system. Reader negotiates: v5 traces lack
-    /// the trailing fields and the reader fills them with empty defaults.
+    /// Each record carries the RFC 07 access declarations (v6+) and a trailing <see cref="SystemDefinitionRecord.DagId"/> (v11+). The reader only
+    /// accepts v11-or-newer traces (see <see cref="TraceFileReader.MinSupportedVersion"/>), so all trailing fields are always present on read.
     /// </remarks>
     public void WriteSystemDefinitions(ReadOnlySpan<SystemDefinitionRecord> systems)
     {
@@ -552,8 +560,10 @@ public sealed class TraceFileWriter : IDisposable
         _stream.Position = savedPos;
     }
 
+    /// <summary>Flushes buffered bytes to the underlying stream.</summary>
     public void Flush() => _stream.Flush();
 
+    /// <summary>Disposes the writer and closes the underlying stream. Idempotent.</summary>
     public void Dispose()
     {
         if (_disposed)

@@ -1,3 +1,9 @@
+---
+uid: feature-profiler-offcpu-thread-scheduling
+title: 'Off-CPU Thread Scheduling Capture (Windows)'
+description: 'See exactly when and why each engine thread lost the CPU, down to the kernel wait reason.'
+---
+
 # Off-CPU Thread Scheduling Capture (Windows)
 > See exactly when and why each engine thread lost the CPU, down to the kernel wait reason.
 
@@ -83,8 +89,8 @@ TyphonProfiler.Stop();   // optional; ordinary shutdown stops the ETW session an
 
 ## 🧪 Tests
 
-- [EtwSchedulingPumpTests](../../../test/Typhon.Engine.Tests/Profiler/EtwSchedulingPumpTests.cs) — `IsStaleEntry` prune-decision helper (regression test for an unbounded `_threadStates` growth bug); the ETW session itself isn't unit-testable and is exercised only in practice
-- [ThreadSchedulingTests](../../../test/Typhon.Engine.Tests/Profiler/ThreadSchedulingTests.cs) — `ThreadWaitReason` wire-stability and `ThreadContextSwitchEventDto` encode/decode round-trip
+- [EtwSchedulingPumpTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Profiler/EtwSchedulingPumpTests.cs) — `IsStaleEntry` prune-decision helper (regression test for an unbounded `_threadStates` growth bug); the ETW session itself isn't unit-testable and is exercised only in practice
+- [ThreadSchedulingTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Profiler/ThreadSchedulingTests.cs) — `ThreadWaitReason` wire-stability and `ThreadContextSwitchEventDto` encode/decode round-trip
 
 ## 🔗 Related
 

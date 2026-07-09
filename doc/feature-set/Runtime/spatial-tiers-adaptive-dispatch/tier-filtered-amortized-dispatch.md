@@ -1,3 +1,9 @@
+---
+uid: feature-runtime-spatial-tiers-adaptive-dispatch-tier-filtered-amortized-dispatch
+title: 'Tier-Filtered & Amortized Dispatch'
+description: 'Scope a system to clusters in matching tier cells, and optionally process just 1/N of them per tick.'
+---
+
 # Tier-Filtered & Amortized Dispatch
 > Scope a system to clusters in matching tier cells, and optionally process just 1/N of them per tick.
 
@@ -72,13 +78,13 @@ game.QuerySystem("IdleDrift", ctx =>
 
 ## 🧪 Tests
 
-- [TierDispatchTests](../../../../test/Typhon.Engine.Tests/Runtime/TierDispatchTests.cs) — `Build_TierNone_Throws`, `Build_CellAmortizeWithoutTier_Throws`, `TierDispatch_Tier0System_SeesOnlyTier0Entities`, `TierDispatch_CellAmortize_ProcessesEachCellExactlyOncePerCycle`, `TierDispatch_AmortizedDeltaTime_EqualsDeltaTimeTimesAmortize`
+- [TierDispatchTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/TierDispatchTests.cs) — `Build_TierNone_Throws`, `Build_CellAmortizeWithoutTier_Throws`, `TierDispatch_Tier0System_SeesOnlyTier0Entities`, `TierDispatch_CellAmortize_ProcessesEachCellExactlyOncePerCycle`, `TierDispatch_AmortizedDeltaTime_EqualsDeltaTimeTimesAmortize`
 
 ## 🔗 Related
 
-- Source: [src/Typhon.Engine/Runtime/public/SimTier.cs](../../../../src/Typhon.Engine/Runtime/public/SimTier.cs), [SystemBuilder.cs](../../../../src/Typhon.Engine/Runtime/public/SystemBuilder.cs) (`Tier`, `CellAmortize`), [Dag.cs](../../../../src/Typhon.Engine/Runtime/public/Dag.cs) (`tier:`/`cellAmortize:` parameters)
-- Source: [src/Typhon.Engine/Ecs/internals/TierClusterIndex.cs](../../../../src/Typhon.Engine/Ecs/internals/TierClusterIndex.cs) (per-archetype tier-grouped index, dual invalidation, merge cache)
-- Source: [src/Typhon.Engine/Runtime/public/TyphonRuntime.cs](../../../../src/Typhon.Engine/Runtime/public/TyphonRuntime.cs) (`OnParallelQueryPrepare` tier-scoped partition, `BuildTierIndexesAtTickStart`)
+- Source: [src/Typhon.Engine/Runtime/public/SimTier.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Runtime/public/SimTier.cs), [SystemBuilder.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Runtime/public/SystemBuilder.cs) (`Tier`, `CellAmortize`), [Dag.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Runtime/public/Dag.cs) (`tier:`/`cellAmortize:` parameters)
+- Source: [src/Typhon.Engine/Ecs/internals/TierClusterIndex.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/internals/TierClusterIndex.cs) (per-archetype tier-grouped index, dual invalidation, merge cache)
+- Source: [src/Typhon.Engine/Runtime/public/TyphonRuntime.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Runtime/public/TyphonRuntime.cs) (`OnParallelQueryPrepare` tier-scoped partition, `BuildTierIndexesAtTickStart`)
 - Parent feature: [Spatial Tiers & Adaptive Dispatch](./README.md)
 - Same mechanism, cell/grid-configuration angle: [Spatial category — Tiered Simulation Dispatch](../../Spatial/tiered-simulation-dispatch.md)
 

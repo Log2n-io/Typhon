@@ -1,3 +1,9 @@
+---
+uid: feature-transactions-transaction-creation-patterns-transaction-creation-readonly
+title: 'CreateReadOnlyTransaction (snapshot reads)'
+description: 'A Transaction with no UnitOfWork behind it at all — for callers that never write.'
+---
+
 # CreateReadOnlyTransaction (snapshot reads)
 > A `Transaction` with no `UnitOfWork` behind it at all — for callers that never write.
 
@@ -57,7 +63,7 @@ rtx.Commit();   // no-op, returns true — there is nothing buffered to flush
 
 ## 🧪 Tests
 
-- [TransactionChainTests](../../../../test/Typhon.Engine.Tests/Data/TransactionChainTests.cs) —
+- [TransactionChainTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/TransactionChainTests.cs) —
   `ReadOnly_CanRead_ThrowsOnWrite` (read works, every write entry point throws), `ReadOnly_Dispose_ActiveCountZero`,
   `ReadOnly_SnapshotIsolation` (doesn't see later commits), `ReadOnly_PoolRecycling_ClearsFlag` (pool reuse across
   read-only/read-write)

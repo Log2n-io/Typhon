@@ -1,3 +1,9 @@
+---
+uid: feature-errors-transience-hint
+title: 'IsTransient Retry Hint'
+description: 'A virtual flag on every Typhon exception telling callers "this might succeed if you retry" — without the engine ever retrying for you.'
+---
+
 # IsTransient Retry Hint
 > A virtual flag on every Typhon exception telling callers "this might succeed if you retry" — without the engine ever retrying for you.
 
@@ -51,7 +57,7 @@ while (true)
 
 ## 🧪 Tests
 
-- [TyphonExceptionTests](../../../test/Typhon.Engine.Tests/Errors/TyphonExceptionTests.cs) — default-`false` on the base `TyphonException`, opt-in `true` overrides on `LockTimeoutException`/`ResourceExhaustedException`, and non-transient assertions on `StorageException`/`CorruptionException`.
+- [TyphonExceptionTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Errors/TyphonExceptionTests.cs) — default-`false` on the base `TyphonException`, opt-in `true` overrides on `LockTimeoutException`/`ResourceExhaustedException`, and non-transient assertions on `StorageException`/`CorruptionException`.
 
 ## 🔗 Related
 

@@ -1,3 +1,9 @@
+---
+uid: feature-durability-checkpoint-v2-protected-page-pairing
+title: 'A/B Protected-Page Slot-Pairing'
+description: 'Doublewrite-free torn-write protection for the meta page and segment-directory pages that crash recovery can''t re-derive.'
+---
+
 # A/B Protected-Page Slot-Pairing
 > Doublewrite-free torn-write protection for the meta page and segment-directory pages that crash recovery can't re-derive.
 
@@ -42,9 +48,9 @@ t.Commit();
 
 ## 🧪 Tests
 
-- [MetaPairTests](../../../../test/Typhon.Engine.Tests/Durability/CrashRecovery/MetaPairTests.cs) — meta-page A/B slot alternation, torn-slot recovery, generation monotonicity
-- [DirectoryPairTests](../../../../test/Typhon.Engine.Tests/Storage/DirectoryPairTests.cs) — segment-directory twin slot-pairing, same corruption/reopen style for directory pages
-- [ProtectedPairTests](../../../../test/Typhon.Engine.Tests/Durability/CrashRecovery/ProtectedPairTests.cs) — falsifiable proof via a write-log that the current-valid slot is never physically written
+- [MetaPairTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/CrashRecovery/MetaPairTests.cs) — meta-page A/B slot alternation, torn-slot recovery, generation monotonicity
+- [DirectoryPairTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Storage/DirectoryPairTests.cs) — segment-directory twin slot-pairing, same corruption/reopen style for directory pages
+- [ProtectedPairTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/CrashRecovery/ProtectedPairTests.cs) — falsifiable proof via a write-log that the current-valid slot is never physically written
 
 ## 🔗 Related
 

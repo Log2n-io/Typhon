@@ -1,8 +1,14 @@
+---
+uid: overview-resources
+title: '13 — Resources'
+description: 'Typhon doesn''t ship a separate metrics library, nor does it scatter ad-hoc counters across the engine. Every long-lived object — the page cache, the WAL…'
+---
+
 # 13 — Resources
 
-**Code:** [`src/Typhon.Engine/Resources/`](../../src/Typhon.Engine/Resources/) (+ exporters in [`src/Typhon.Engine/Observability/public/`](../../src/Typhon.Engine/Observability/public/))
+**Code:** [`src/Typhon.Engine/Resources/`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Engine/Resources) (+ exporters in [`src/Typhon.Engine/Observability/public/`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Engine/Observability/public))
 
-Typhon doesn't ship a separate metrics library, nor does it scatter ad-hoc counters across the engine. Every long-lived object — the page cache, the WAL ring buffer, the transaction pool, the epoch manager, the scheduler — registers as an [`IResource`](../../src/Typhon.Engine/Resources/public/IResource.cs) under a single hierarchical **resource graph**. The graph is the observability spine: one tree, one snapshot API, one zero-allocation metric write path. Workbench reads it, the OTel exporter reads it, the health checker reads it.
+Typhon doesn't ship a separate metrics library, nor does it scatter ad-hoc counters across the engine. Every long-lived object — the page cache, the WAL ring buffer, the transaction pool, the epoch manager, the scheduler — registers as an [`IResource`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Resources/public/IResource.cs) under a single hierarchical **resource graph**. The graph is the observability spine: one tree, one snapshot API, one zero-allocation metric write path. Workbench reads it, the OTel exporter reads it, the health checker reads it.
 
 The graph is **passive**. Nodes don't push events; consumers pull snapshots when they want them (typically every 1–5 s for monitoring). Snapshot collection costs ~50 ns per node — a 100-node tree snapshots in ~5 µs. No global lock; per-node reads are atomic; cross-node values are read microseconds apart and explicitly described as "approximate."
 
@@ -12,7 +18,7 @@ If you've built on Typhon, you've used this without noticing. If you want to und
 
 ## 1. The graph as observability spine
 
-Every subsystem that owns memory, capacity, throughput or duration registers a node under a fixed set of subsystem roots. Pure grouping nodes (`Storage`, `DataEngine`, …) carry no metrics of their own — they exist to organise the tree. Leaves carry the actual counters via [`IMetricSource`](../../src/Typhon.Engine/Resources/public/IMetricSource.cs).
+Every subsystem that owns memory, capacity, throughput or duration registers a node under a fixed set of subsystem roots. Pure grouping nodes (`Storage`, `DataEngine`, …) carry no metrics of their own — they exist to organise the tree. Leaves carry the actual counters via [`IMetricSource`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Resources/public/IMetricSource.cs).
 
 This unification matters because:
 
@@ -32,7 +38,7 @@ This unification matters because:
 
 ### `IResource` — the node contract
 
-[`Resources/public/IResource.cs`](../../src/Typhon.Engine/Resources/public/IResource.cs)
+[`Resources/public/IResource.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Resources/public/IResource.cs)
 
 Every registered object implements this. It is a tree node plus identity:
 
@@ -55,13 +61,13 @@ public interface IResource : IDisposable
 
 `Id` is the path segment used to address the node (`Storage/PageCache`). `Name` is the user-facing label — often equal to `Id`, but resources with synthetic ids (GUIDs, hex suffixes) override it. `Count` is the optional integer the Workbench tree displays as a badge — `null` for pure grouping nodes.
 
-[`ResourceNode`](../../src/Typhon.Engine/Resources/public/ResourceNode.cs) is the default implementation. It self-registers under its `Parent` in the constructor, holds children in a `ConcurrentDictionary<string, IResource>`, and raises `NodeMutated` events on its owning registry whenever a child is added or removed.
+[`ResourceNode`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Resources/public/ResourceNode.cs) is the default implementation. It self-registers under its `Parent` in the constructor, holds children in a `ConcurrentDictionary<string, IResource>`, and raises `NodeMutated` events on its owning registry whenever a child is added or removed.
 
 ### `IResourceRegistry` — the per-process root
 
-[`Resources/public/IResourceRegistry.cs`](../../src/Typhon.Engine/Resources/public/IResourceRegistry.cs)
+[`Resources/public/IResourceRegistry.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Resources/public/IResourceRegistry.cs)
 
-One per process. Holds the `Root` node plus a fixed set of **subsystem nodes**, every one of which is live in [`ResourceRegistry`](../../src/Typhon.Engine/Resources/public/ResourceRegistry.cs)'s constructor:
+One per process. Holds the `Root` node plus a fixed set of **subsystem nodes**, every one of which is live in [`ResourceRegistry`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Resources/public/ResourceRegistry.cs)'s constructor:
 
 ```csharp
 public interface IResourceRegistry : IDisposable
@@ -107,11 +113,11 @@ public readonly struct ResourceMutationEventArgs
 }
 ```
 
-[`ResourceMutationEventArgs`](../../src/Typhon.Engine/Resources/public/ResourceMutationEventArgs.cs). Subscribers must not throw and must not mutate the graph from within the handler (would re-enter and recursively raise). The registry isolates faulty handlers via per-subscriber `try`/`catch`, but that is best-effort.
+[`ResourceMutationEventArgs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Resources/public/ResourceMutationEventArgs.cs). Subscribers must not throw and must not mutate the graph from within the handler (would re-enter and recursively raise). The registry isolates faulty handlers via per-subscriber `try`/`catch`, but that is best-effort.
 
 ### `ResourceType` — typed nodes
 
-[`Resources/public/IResource.cs`](../../src/Typhon.Engine/Resources/public/IResource.cs) defines a flat enum (`None`, `Node`, `Service`, `Engine`, `TransactionPool`, `Transaction`, `ChangeSet`, `ComponentTable`, `Segment`, `Index`, `Cache`, `File`, `Memory`, `Bitmap`, `Schema`, `Allocator`, `Synchronization`, `WAL`, `Checkpoint`, `Backup`). The enum still carries a `Backup` value, but no node of that type is registered — it's reserved for future use, the same way `ResourceMutationKind.Mutated` is reserved.
+[`Resources/public/IResource.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Resources/public/IResource.cs) defines a flat enum (`None`, `Node`, `Service`, `Engine`, `TransactionPool`, `Transaction`, `ChangeSet`, `ComponentTable`, `Segment`, `Index`, `Cache`, `File`, `Memory`, `Bitmap`, `Schema`, `Allocator`, `Synchronization`, `WAL`, `Checkpoint`, `Backup`). The enum still carries a `Backup` value, but no node of that type is registered — it's reserved for future use, the same way `ResourceMutationKind.Mutated` is reserved.
 
 ---
 
@@ -121,7 +127,7 @@ The metric channel is a separate interface — only nodes with meaningful counte
 
 ### `IMetricSource`
 
-[`Resources/public/IMetricSource.cs`](../../src/Typhon.Engine/Resources/public/IMetricSource.cs)
+[`Resources/public/IMetricSource.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Resources/public/IMetricSource.cs)
 
 ```csharp
 public interface IMetricSource
@@ -137,7 +143,7 @@ public interface IMetricSource
 
 ### `IMetricWriter` — exactly five kinds
 
-[`Resources/public/IMetricWriter.cs`](../../src/Typhon.Engine/Resources/public/IMetricWriter.cs)
+[`Resources/public/IMetricWriter.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Resources/public/IMetricWriter.cs)
 
 The writer surface is deliberately closed. Five methods, five metric kinds:
 
@@ -155,7 +161,7 @@ Names passed to `WriteThroughput` / `WriteDuration` **must be static strings** �
 
 ### `NodeSnapshot` — what a snapshot row looks like
 
-[`Resources/public/NodeSnapshot.cs`](../../src/Typhon.Engine/Resources/public/NodeSnapshot.cs)
+[`Resources/public/NodeSnapshot.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Resources/public/NodeSnapshot.cs)
 
 One per node per snapshot:
 
@@ -181,7 +187,7 @@ Nullable fields = "node didn't write this kind". `CapacityMetrics.Utilization` i
 
 ### `IResourceGraph` — the entry point
 
-[`Resources/public/IResourceGraph.cs`](../../src/Typhon.Engine/Resources/public/IResourceGraph.cs), implementation [`ResourceGraph.cs`](../../src/Typhon.Engine/Resources/public/ResourceGraph.cs).
+[`Resources/public/IResourceGraph.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Resources/public/IResourceGraph.cs), implementation [`ResourceGraph.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Resources/public/ResourceGraph.cs).
 
 ```csharp
 public interface IResourceGraph
@@ -199,7 +205,7 @@ A snapshot walks the tree depth-first; each `IMetricSource` node writes into a p
 
 ### `ResourceSnapshot` — the immutable result
 
-[`Resources/public/ResourceSnapshot.cs`](../../src/Typhon.Engine/Resources/public/ResourceSnapshot.cs)
+[`Resources/public/ResourceSnapshot.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Resources/public/ResourceSnapshot.cs)
 
 ```csharp
 public sealed class ResourceSnapshot
@@ -212,7 +218,7 @@ public sealed class ResourceSnapshot
 
 Snapshots are query-only. Once produced they're safe to read from any thread. The graph keeps a reference to the previous full snapshot and computes `Rates` automatically by differencing throughput counters across timestamps — **rate computation is not part of the public API**. `ComputeRates` is `private` on `ResourceGraph`; consumers just read `snapshot.Rates`.
 
-[`ThroughputRates`](../../src/Typhon.Engine/Resources/public/ThroughputRates.cs) is a path → metric-name → ops/sec dictionary indexed by `rates["Storage/PageCache"]["CacheHits"]`.
+[`ThroughputRates`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Resources/public/ThroughputRates.cs) is a path → metric-name → ops/sec dictionary indexed by `rates["Storage/PageCache"]["CacheHits"]`.
 
 ### Query helpers on the snapshot
 
@@ -234,13 +240,13 @@ The snapshot exposes pure-data queries over the frozen `Nodes` dictionary:
   <img src="assets/typhon-resource-snapshot-flow.svg" width="1200" alt="Resource snapshot collection and export flow">
 </a>
 <br>
-<sub>Snapshot collection → optional rate computation → query helpers / health checks / OTel export. The "OTel Metrics Export" box maps to <a href="../../src/Typhon.Engine/Observability/public/ResourceMetricsExporter.cs"><code>ResourceMetricsExporter</code></a> in code.</sub>
+<sub>Snapshot collection → optional rate computation → query helpers / health checks / OTel export. The "OTel Metrics Export" box maps to <a href="https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Observability/public/ResourceMetricsExporter.cs"><code>ResourceMetricsExporter</code></a> in code.</sub>
 
 ---
 
 ## 5. Configuration — `ResourceOptions`
 
-[`Resources/public/ResourceOptions.cs`](../../src/Typhon.Engine/Resources/public/ResourceOptions.cs)
+[`Resources/public/ResourceOptions.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Resources/public/ResourceOptions.cs)
 
 Lives inside `DatabaseEngineOptions` and is consumed by the components at construction. Set at startup, immutable afterwards. Real defaults — check these against the field declarations:
 
@@ -267,7 +273,7 @@ Lives inside `DatabaseEngineOptions` and is consumed by the components at constr
 
 ## 6. Exhaustion policies
 
-[`Resources/public/ExhaustionPolicy.cs`](../../src/Typhon.Engine/Resources/public/ExhaustionPolicy.cs)
+[`Resources/public/ExhaustionPolicy.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Resources/public/ExhaustionPolicy.cs)
 
 `ExhaustionPolicy` is **diagnostic metadata** on a `ResourceNode`, not a runtime dispatch decision. The actual response code is wired into each component — the enum value on the node tells you "if this resource fills up, what happens?" so the Workbench / health checker can present it.
 
@@ -284,7 +290,7 @@ public enum ExhaustionPolicy
 
 A component can use multiple policies in sequence (page cache: `Evict` clean pages first, then `Wait` if all are pinned). The enum on the node represents the *primary* policy. The policy is hardcoded per component — not configurable — because it's a semantic property: a cache *must* evict, a WAL ring *must* wait, a client-facing limit *must* fail fast.
 
-[`ResourceExhaustedException`](../../src/Typhon.Engine/Resources/public/ResourceExhaustedException.cs) is the canonical exception raised by `FailFast` paths; it carries the offending resource path, its type, and current vs. maximum so the operator gets actionable diagnostics.
+[`ResourceExhaustedException`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Resources/public/ResourceExhaustedException.cs) is the canonical exception raised by `FailFast` paths; it carries the offending resource path, its type, and current vs. maximum so the operator gets actionable diagnostics.
 
 ---
 
@@ -294,7 +300,7 @@ The graph is the data source; alerting and health checks live next door in the O
 
 ### `ResourceAlertGenerator`
 
-[`Observability/public/ResourceAlertGenerator.cs`](../../src/Typhon.Engine/Observability/public/ResourceAlertGenerator.cs)
+[`Observability/public/ResourceAlertGenerator.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Observability/public/ResourceAlertGenerator.cs)
 
 Walks a snapshot, finds capacity-bearing nodes above configured thresholds, and constructs a `ResourceAlert` per crossing. Severity is `Warning` (degraded threshold) or `Critical` (unhealthy threshold). The root-cause field comes from `snapshot.FindRootCause(symptomPath, degradedThreshold)`:
 
@@ -317,9 +323,9 @@ Root-cause attribution is the single supported chain trace — the alert carries
 
 ### `ResourceHealthChecker`
 
-[`Observability/public/ResourceHealthChecker.cs`](../../src/Typhon.Engine/Observability/public/ResourceHealthChecker.cs)
+[`Observability/public/ResourceHealthChecker.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Observability/public/ResourceHealthChecker.cs)
 
-Implements [`ITyphonHealthCheck`](../../src/Typhon.Engine/Observability/public/ITyphonHealthCheck.cs). "Worst-of-all" pattern: the overall status is the most severe state across the tree, so a single overloaded resource is never lost in a sea of green. Critical subsystems (`Durability/WALRingBuffer`, `DataEngine/TransactionPool`) use tighter default thresholds (60 % degraded / 80 % unhealthy) than general nodes (80 / 95).
+Implements [`ITyphonHealthCheck`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Observability/public/ITyphonHealthCheck.cs). "Worst-of-all" pattern: the overall status is the most severe state across the tree, so a single overloaded resource is never lost in a sea of green. Critical subsystems (`Durability/WALRingBuffer`, `DataEngine/TransactionPool`) use tighter default thresholds (60 % degraded / 80 % unhealthy) than general nodes (80 / 95).
 
 The checker reads `ResourceMetricsExporter.CurrentSnapshot` rather than calling `GetSnapshot()` itself — keeps the snapshot cadence centralised in `ResourceMetricsService`.
 
@@ -348,10 +354,10 @@ The cascade in `ResourceNode.Dispose(bool)` checks `node.DisposeWithParent` and 
 
 The OTel-facing classes that consume the graph:
 
-- [`ResourceMetricsExporter`](../../src/Typhon.Engine/Observability/public/ResourceMetricsExporter.cs) — observable-pattern `Meter` instruments named `Typhon.Resources`; OTel callbacks read from a cached snapshot, zero overhead when no consumer listens.
-- [`ResourceMetricsService`](../../src/Typhon.Engine/Observability/public/ResourceMetricsService.cs) — hosted service that periodically updates the cached snapshot.
-- [`OTelMetricNameBuilder`](../../src/Typhon.Engine/Observability/public/OTelMetricNameBuilder.cs) — canonical naming for the exported instruments.
-- [`EcsMetricsExporter`](../../src/Typhon.Engine/Observability/public/EcsMetricsExporter.cs) — ECS-specific exporter, parallel to the resource exporter.
+- [`ResourceMetricsExporter`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Observability/public/ResourceMetricsExporter.cs) — observable-pattern `Meter` instruments named `Typhon.Resources`; OTel callbacks read from a cached snapshot, zero overhead when no consumer listens.
+- [`ResourceMetricsService`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Observability/public/ResourceMetricsService.cs) — hosted service that periodically updates the cached snapshot.
+- [`OTelMetricNameBuilder`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Observability/public/OTelMetricNameBuilder.cs) — canonical naming for the exported instruments.
+- [`EcsMetricsExporter`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Observability/public/EcsMetricsExporter.cs) — ECS-specific exporter, parallel to the resource exporter.
 
 `ResourceHealthChecker` covers the health-check side of the same surface (see §7).
 

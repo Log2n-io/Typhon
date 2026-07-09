@@ -1,3 +1,9 @@
+---
+uid: feature-revision-mvcc-snapshot-visibility
+title: 'MVCC Snapshot Visibility'
+description: 'Reads resolve to the one revision that was committed at-or-before your transaction''s snapshot — never a partial or future write.'
+---
+
 # MVCC Snapshot Visibility
 > Reads resolve to the one revision that was committed at-or-before your transaction's snapshot — never a partial or future write.
 
@@ -82,16 +88,16 @@ ref readonly var hp = ref entity.Read(Hero.Stats);
 
 ## 🧪 Tests
 
-- [EcsSpawnMvccTests](../../../test/Typhon.Engine.Tests/Data/ECS/EcsSpawnMvccTests.cs) — `Write_Versioned_OtherTx_SeesOldData` (no dirty reads), `Write_Versioned_ReadAfterWrite_SeesNewData`/`Read_PendingSpawn_UsesDirectLocation` (read-your-own-writes), `Read_Versioned_UsesRevisionChain`
-- [PointInTimeAccessorTests](../../../test/Typhon.Engine.Tests/Data/PointInTimeAccessorTests.cs) — same visibility rule through the lock-free `PointInTimeAccessor` path (`ReadVersionedComponent_ReturnsCorrectValue`, `OpenDestroyedEntity_TryOpenReturnsFalse`)
-- [ChaosStressTests](../../../test/Typhon.Engine.Tests/Data/ChaosStressTests.cs) — `RevisionChain_RapidUpdatesWithLongReaders` asserts a held snapshot never observes a value change while concurrent writers hammer the same entity
+- [EcsSpawnMvccTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/EcsSpawnMvccTests.cs) — `Write_Versioned_OtherTx_SeesOldData` (no dirty reads), `Write_Versioned_ReadAfterWrite_SeesNewData`/`Read_PendingSpawn_UsesDirectLocation` (read-your-own-writes), `Read_Versioned_UsesRevisionChain`
+- [PointInTimeAccessorTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/PointInTimeAccessorTests.cs) — same visibility rule through the lock-free `PointInTimeAccessor` path (`ReadVersionedComponent_ReturnsCorrectValue`, `OpenDestroyedEntity_TryOpenReturnsFalse`)
+- [ChaosStressTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ChaosStressTests.cs) — `RevisionChain_RapidUpdatesWithLongReaders` asserts a held snapshot never observes a value change while concurrent writers hammer the same entity
 
 ## 🔗 Related
 
 - Related feature: [Revision Chain Storage](./revision-chain-storage.md) (the layout this walks), [Revision Append & Chain Growth](./revision-append-write-path.md)
 - Sub-feature: [Chain Walk Correctness Under Compaction](./mvcc-visibility-walk.md) (why the walk can't break on the first too-new entry)
 - Sibling: [Storage Mode: Versioned](../Ecs/storage-modes/storage-mode-versioned.md) — Versioned mode is the ECS-facing side of this revision chain
-- Source: [`RevisionReadStatus`](../../../src/Typhon.Engine/Revision/public/RevisionReadStatus.cs), [`RevisionChainReader.WalkChain`](../../../src/Typhon.Engine/Transactions/internals/RevisionWalker.cs), [`RevisionEnumerator`](../../../src/Typhon.Engine/Revision/internals/RevisionEnumerator.cs), [`PointInTimeAccessor`](../../../src/Typhon.Engine/Ecs/public/PointInTimeAccessor.cs)
+- Source: [`RevisionReadStatus`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Revision/public/RevisionReadStatus.cs), [`RevisionChainReader.WalkChain`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Transactions/internals/RevisionWalker.cs), [`RevisionEnumerator`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Revision/internals/RevisionEnumerator.cs), [`PointInTimeAccessor`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/PointInTimeAccessor.cs)
 
 <!-- Deep dive: claude/design/Revision/02-mvcc-visibility.md, claude/overview/04-data.md -->
 <!-- ADR: claude/adr/003-mvcc-snapshot-isolation.md -->

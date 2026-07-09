@@ -23,7 +23,7 @@ public static class DatabaseEngineExtensions
     /// This is a convenience wrapper for the common single-transaction pattern:
     /// <code>
     /// using var tx = dbe.CreateQuickTransaction();
-    /// tx.CreateEntity(ref comp);
+    /// tx.Spawn&lt;MyArchetype&gt;();
     /// tx.Commit();
     /// // tx.Dispose() also disposes the backing UoW
     /// </code>

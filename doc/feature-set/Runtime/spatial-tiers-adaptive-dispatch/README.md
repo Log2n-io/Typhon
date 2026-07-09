@@ -1,3 +1,9 @@
+---
+uid: feature-runtime-spatial-tiers-adaptive-dispatch-index
+title: 'Spatial Tiers & Adaptive Dispatch'
+description: 'Per-cluster simulation tiers let systems run near entities every tick and far entities at reduced/amortized/dormant rates.'
+---
+
 # Spatial Tiers & Adaptive Dispatch
 > Per-cluster simulation tiers let systems run near entities every tick and far entities at reduced/amortized/dormant rates.
 
@@ -50,13 +56,13 @@ checkerboard-dispatched at once, and dormancy filters out sleeping clusters unde
 
 ## 🧪 Tests
 
-- [TierDispatchTests](../../../../test/Typhon.Engine.Tests/Runtime/TierDispatchTests.cs) — `TierClusterIndex` rebuild/staleness, tier-filtered dispatch, `CellAmortize`, `AmortizedDeltaTime`
-- [DormancyTests](../../../../test/Typhon.Engine.Tests/Runtime/DormancyTests.cs) — sleep-threshold counter, wake on write/heartbeat, dispatch skips sleeping clusters
-- [CheckerboardTests](../../../../test/Typhon.Engine.Tests/Runtime/CheckerboardTests.cs) — Red/Black two-phase split, no-overlap, composition with tier filtering and dormancy
+- [TierDispatchTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/TierDispatchTests.cs) — `TierClusterIndex` rebuild/staleness, tier-filtered dispatch, `CellAmortize`, `AmortizedDeltaTime`
+- [DormancyTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/DormancyTests.cs) — sleep-threshold counter, wake on write/heartbeat, dispatch skips sleeping clusters
+- [CheckerboardTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/CheckerboardTests.cs) — Red/Black two-phase split, no-overlap, composition with tier filtering and dormancy
 
 ## 🔗 Related
 
-- Source: [src/Typhon.Engine/Runtime/public/SimTier.cs](../../../../src/Typhon.Engine/Runtime/public/SimTier.cs), [TierBudgetMetrics.cs](../../../../src/Typhon.Engine/Runtime/public/TierBudgetMetrics.cs)
+- Source: [src/Typhon.Engine/Runtime/public/SimTier.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Runtime/public/SimTier.cs), [TierBudgetMetrics.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Runtime/public/TierBudgetMetrics.cs)
 - Also cataloged from the spatial-grid side: [Spatial category](../../Spatial/README.md) — [Tiered Simulation Dispatch](../../Spatial/tiered-simulation-dispatch.md), [Cluster Dormancy](../../Spatial/cluster-dormancy.md), [Checkerboard Dispatch](../../Spatial/checkerboard-dispatch.md) cover the same mechanisms from the cell/grid-configuration angle
 - Sub-features: [Tier-Filtered & Amortized Dispatch](./tier-filtered-amortized-dispatch.md), [Cluster Dormancy (Sleep/Wake)](./cluster-dormancy.md), [Checkerboard (Red/Black) Dispatch](./checkerboard-dispatch.md)
 

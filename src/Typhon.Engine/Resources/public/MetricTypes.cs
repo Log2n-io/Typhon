@@ -55,7 +55,7 @@ public readonly record struct ThroughputMetric(string Name, long Count);
 /// </summary>
 /// <param name="Name">Operation name (e.g., "Checkpoint", "Flush").</param>
 /// <param name="LastUs">Duration of the most recent operation in microseconds.</param>
-/// <param name="AvgUs">Simple average (sum/count) in microseconds.</param>
+/// <param name="AvgUs">Average duration in microseconds (averaging method defined by the producing metric source).</param>
 /// <param name="MaxUs">Longest operation observed (high-water mark, resettable).</param>
 [PublicAPI]
 public readonly record struct DurationMetric(string Name, long LastUs, long AvgUs, long MaxUs);

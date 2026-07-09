@@ -1,3 +1,9 @@
+---
+uid: feature-indexing-secondary-index-storage-modes-unique-secondary-index
+title: 'Unique (Single-Value) Secondary Index'
+description: 'One key maps to exactly one entity — the B+Tree value is a chunk-id directly, no buffer indirection, no per-entity overhead.'
+---
+
 # Unique (Single-Value) Secondary Index
 > One key maps to exactly one entity — the B+Tree value is a chunk-id directly, no buffer indirection, no per-entity overhead.
 
@@ -71,8 +77,8 @@ using (var tx = dbe.CreateQuickTransaction())
 
 ## 🧪 Tests
 
-- [BtreeTests](../../../../test/Typhon.Engine.Tests/Data/BTreeTests.cs) — `ForwardInsertionTest`/`ReverseInsertionTest`/`CheckTree`/`CheckRemove` family: Add/Remove correctness for the single-value B+Tree across all key widths, no `ElementId` overhead
-- [BulkEnumerateTests](../../../../test/Typhon.Engine.Tests/Data/BulkEnumerateTests.cs) — `SecondaryIndex_UniqueField`: engine-level round trip through `GetIndexRef` + `Transaction.EnumerateIndex`
+- [BtreeTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/BTreeTests.cs) — `ForwardInsertionTest`/`ReverseInsertionTest`/`CheckTree`/`CheckRemove` family: Add/Remove correctness for the single-value B+Tree across all key widths, no `ElementId` overhead
+- [BulkEnumerateTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/BulkEnumerateTests.cs) — `SecondaryIndex_UniqueField`: engine-level round trip through `GetIndexRef` + `Transaction.EnumerateIndex`
 
 ## 🔗 Related
 

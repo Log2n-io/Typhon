@@ -1,3 +1,9 @@
+---
+uid: feature-querying-fluent-query-api-or-disjunction
+title: 'OR Disjunction (DNF Predicates)'
+description: '|| in a WhereField predicate, normalized to Disjunctive Normal Form and evaluated as independent branches.'
+---
+
 # OR Disjunction (DNF Predicates)
 > `||` in a `WhereField` predicate, normalized to Disjunctive Normal Form and evaluated as independent branches.
 
@@ -49,8 +55,8 @@ var crossed = tx.Query<PlayerArch>()
 
 ## 🧪 Tests
 
-- [ExpressionParserTests](../../../../test/Typhon.Engine.Tests/Data/Query/ExpressionParserTests.cs) — DNF normalization: De Morgan's law, double/triple negation, branch flattening, the 16-branch cap
-- [EcsOrViewTests](../../../../test/Typhon.Engine.Tests/Data/ECS/EcsOrViewTests.cs) — OR-mode `ToView()`: union-of-branches population, per-branch field-crossing in/out, last-branch-fails removal
+- [ExpressionParserTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/Query/ExpressionParserTests.cs) — DNF normalization: De Morgan's law, double/triple negation, branch flattening, the 16-branch cap
+- [EcsOrViewTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/EcsOrViewTests.cs) — OR-mode `ToView()`: union-of-branches population, per-branch field-crossing in/out, last-branch-fails removal
 
 ## 🔗 Related
 

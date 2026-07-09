@@ -1,3 +1,9 @@
+---
+uid: feature-indexing-secondary-index-storage-modes-multi-value-secondary-index
+title: 'Multi-Value Secondary Index (AllowMultiple)'
+description: 'Many entities share one key — the B+Tree value is a growable HEAD buffer of chunk-ids, at a fixed +4-byte-per-entity cost.'
+---
+
 # Multi-Value Secondary Index (AllowMultiple)
 > Many entities share one key — the B+Tree value is a growable HEAD buffer of chunk-ids, at a fixed +4-byte-per-entity cost.
 
@@ -76,8 +82,8 @@ using (var tx = dbe.CreateQuickTransaction())
 
 ## 🧪 Tests
 
-- [BtreeTests](../../../../test/Typhon.Engine.Tests/Data/BTreeTests.cs) — `CheckMultipleTree`/`CheckByteMultipleTree`/`CheckFloatMultipleTree`: HEAD buffer growth, `RemoveValue` by `ElementId`, and BTree-entry cleanup once a key's last element is removed
-- [BulkEnumerateTests](../../../../test/Typhon.Engine.Tests/Data/BulkEnumerateTests.cs) — `SecondaryIndex_AllowMultiple`: multiple entities sharing one key, read back via `GetIndexRef` + `Transaction.EnumerateIndex`
+- [BtreeTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/BTreeTests.cs) — `CheckMultipleTree`/`CheckByteMultipleTree`/`CheckFloatMultipleTree`: HEAD buffer growth, `RemoveValue` by `ElementId`, and BTree-entry cleanup once a key's last element is removed
+- [BulkEnumerateTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/BulkEnumerateTests.cs) — `SecondaryIndex_AllowMultiple`: multiple entities sharing one key, read back via `GetIndexRef` + `Transaction.EnumerateIndex`
 
 ## 🔗 Related
 

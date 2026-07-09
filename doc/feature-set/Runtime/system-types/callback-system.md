@@ -1,3 +1,9 @@
+---
+uid: feature-runtime-system-types-callback-system
+title: 'CallbackSystem'
+description: 'Proactive system that runs every tick for non-entity work — timers, input draining, global state.'
+---
+
 # CallbackSystem
 > Proactive system that runs every tick for non-entity work — timers, input draining, global state.
 
@@ -64,9 +70,9 @@ dag.CallbackSystem("ZoneRotation", ctx => RotateZone(ctx),
 
 ## 🧪 Tests
 
-- [ClassBasedSystemTests](../../../../test/Typhon.Engine.Tests/Runtime/ClassBasedSystemTests.cs) — `Add_CallbackSystem_ExecutesEveryTick`, unnamed-system rejection
-- [ScheduleValidationTests](../../../../test/Typhon.Engine.Tests/Runtime/ScheduleValidationTests.cs) — `Build_ChangeFilterOnCallbackSystem_Throws`, `Build_ParallelOnCallbackSystem_Throws` — no entity input/parallel on a plain `CallbackSystem`
-- [ShouldRunTests](../../../../test/Typhon.Engine.Tests/Runtime/ShouldRunTests.cs) — proactive `ShouldRun` gate: skip cost, successors still dispatch, telemetry recording
+- [ClassBasedSystemTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/ClassBasedSystemTests.cs) — `Add_CallbackSystem_ExecutesEveryTick`, unnamed-system rejection
+- [ScheduleValidationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/ScheduleValidationTests.cs) — `Build_ChangeFilterOnCallbackSystem_Throws`, `Build_ParallelOnCallbackSystem_Throws` — no entity input/parallel on a plain `CallbackSystem`
+- [ShouldRunTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/ShouldRunTests.cs) — proactive `ShouldRun` gate: skip cost, successors still dispatch, telemetry recording
 
 ## 🔗 Related
 

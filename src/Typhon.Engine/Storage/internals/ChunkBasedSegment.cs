@@ -1,3 +1,8 @@
+// CS1591: this file declares public-accessibility types that live in the internal namespace (Phase 2b entanglement, see
+// claude/research/PublicVsInternalApiClassification.md). They are excluded from the published API reference, so consumer-facing
+// doc coverage is not enforced here.
+#pragma warning disable 1591
+
 // unset
 
 using JetBrains.Annotations;
@@ -922,7 +927,7 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
     internal ChunkAccessor<TStore> CreateChunkAccessor(ChangeSet changeSet = null) => new(this, _store, _epochManager, changeSet);
 
     /// <summary>
-    /// Single-entry thread-local cache for warm <see cref="ChunkAccessor"/> reuse.
+    /// Single-entry thread-local cache for warm <see cref="ChunkAccessor{TStore}"/> reuse.
     /// Keeps the 16-entry SIMD page cache warm across repeated BTree operations on the same segment.
     /// </summary>
     private sealed class WarmAccessorCache
@@ -940,7 +945,7 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
     }
 
     /// <summary>
-    /// Rents a warm <see cref="ChunkAccessor"/> from the thread-local cache.
+    /// Rents a warm <see cref="ChunkAccessor{TStore}"/> from the thread-local cache.
     /// On cache hit (same segment + same epoch): swaps ChangeSet only (~1ns).
     /// On cache miss: disposes old, creates new.
     /// Must be paired with <see cref="ReturnWarmAccessor"/> in a finally block.
@@ -974,8 +979,8 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
     }
 
     /// <summary>
-    /// Returns a warm <see cref="ChunkAccessor"/> to the thread-local cache.
-    /// Flushes dirty pages via <see cref="ChunkAccessor.CommitChanges"/> but does NOT dispose —
+    /// Returns a warm <see cref="ChunkAccessor{TStore}"/> to the thread-local cache.
+    /// Flushes dirty pages via <see cref="ChunkAccessor{TStore}.CommitChanges"/> but does NOT dispose —
     /// keeps the 16-entry SIMD page cache warm for the next operation.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -1013,7 +1018,7 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
     }
 
     /// <summary>
-    /// Enters batch mode: suppresses <see cref="ChunkAccessor.CommitChanges"/> on warm accessor return.
+    /// Enters batch mode: suppresses <see cref="ChunkAccessor{TStore}.CommitChanges"/> on warm accessor return.
     /// During batch mode, <c>ActiveChunkWriters</c> stays &gt; 0 on dirty pages, which is safe — the commit
     /// runs under holdoff and completes in bounded time. Call <see cref="ExitBatchMode"/> to flush.
     /// </summary>
@@ -1024,7 +1029,7 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
     }
 
     /// <summary>
-    /// Exits batch mode: re-enables <see cref="ChunkAccessor.CommitChanges"/> on warm accessor return
+    /// Exits batch mode: re-enables <see cref="ChunkAccessor{TStore}.CommitChanges"/> on warm accessor return
     /// and performs a single flush of accumulated dirty pages on both warm accessor caches.
     /// </summary>
     internal static void ExitBatchMode()

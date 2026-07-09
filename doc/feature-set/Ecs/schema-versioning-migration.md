@@ -1,3 +1,9 @@
+---
+uid: feature-ecs-schema-versioning-migration
+title: 'Schema Versioning & Migration'
+description: 'Detects struct/archetype layout drift at database open and migrates data automatically or via your own functions.'
+---
+
 # Schema Versioning & Migration
 > Detects struct/archetype layout drift at database open and migrates data automatically or via your own functions.
 
@@ -80,10 +86,10 @@ tsh> schema-validate
 
 ## 🧪 Tests
 
-- [SchemaEvolutionTests](../../../test/Typhon.Engine.Tests/Data/Schema/SchemaEvolutionTests.cs) — compatible auto-migration: add/remove/reorder fields, safe int→long/float→double widening, surviving indexes
-- [MigrationFunctionTests](../../../test/Typhon.Engine.Tests/Data/Schema/MigrationFunctionTests.cs) — breaking-change `MigrationFunc`/byte-level migration, chained multi-step BFS resolution, missing-migration and duplicate-registration failures
-- [SchemaValidationIntegrationTests](../../../test/Typhon.Engine.Tests/Data/Schema/SchemaValidationIntegrationTests.cs) — `SchemaValidationException` on an unmigrated breaking change, `SchemaDowngradeException`, `Skip` validation mode
-- [SchemaVersioningTests](../../../test/Typhon.Engine.Tests/Data/ECS/SchemaVersioningTests.cs) — archetype-level schema persistence and tamper detection (component-count/revision mismatch hard-fails)
+- [SchemaEvolutionTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/Schema/SchemaEvolutionTests.cs) — compatible auto-migration: add/remove/reorder fields, safe int→long/float→double widening, surviving indexes
+- [MigrationFunctionTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/Schema/MigrationFunctionTests.cs) — breaking-change `MigrationFunc`/byte-level migration, chained multi-step BFS resolution, missing-migration and duplicate-registration failures
+- [SchemaValidationIntegrationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/Schema/SchemaValidationIntegrationTests.cs) — `SchemaValidationException` on an unmigrated breaking change, `SchemaDowngradeException`, `Skip` validation mode
+- [SchemaVersioningTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/SchemaVersioningTests.cs) — archetype-level schema persistence and tamper detection (component-count/revision mismatch hard-fails)
 
 ## 🔗 Related
 

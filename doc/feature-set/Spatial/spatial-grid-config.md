@@ -1,3 +1,9 @@
+---
+uid: feature-spatial-spatial-grid-config
+title: 'Spatial Grid Configuration & Tier Control'
+description: 'One global grid, one cell size, and a per-cell simulation-tier control surface for multi-resolution worlds.'
+---
+
 # Spatial Grid Configuration & Tier Control
 > One global grid, one cell size, and a per-cell simulation-tier control surface for multi-resolution worlds.
 
@@ -57,14 +63,14 @@ schedule.CallbackSystem("TierAssignment", ctx =>
 
 ## 🧪 Tests
 
-- [SpatialGridTests](../../../test/Typhon.Engine.Tests/Data/SpatialGrid/SpatialGridTests.cs) — grid dimension derivation, `WorldToCellKey`/`CellKeyToCoords` round-trips, `SetCellTier` single-bit validation, `KeySpaceDim` overflow throws
-- [CheckerboardTests](../../../test/Typhon.Engine.Tests/Runtime/CheckerboardTests.cs) — `SetCellTierMin_OnlyPromotes`, `ResetAllTiers_BulkSetsAllCells`, `SetTierInAABB_MinSemantics`, `SpatialGridAccessor_AccessibleFromTickContext`/`_MultiObserver_Union` (promote-only tiering, multi-observer union)
+- [SpatialGridTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/SpatialGrid/SpatialGridTests.cs) — grid dimension derivation, `WorldToCellKey`/`CellKeyToCoords` round-trips, `SetCellTier` single-bit validation, `KeySpaceDim` overflow throws
+- [CheckerboardTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/CheckerboardTests.cs) — `SetCellTierMin_OnlyPromotes`, `ResetAllTiers_BulkSetsAllCells`, `SetTierInAABB_MinSemantics`, `SpatialGridAccessor_AccessibleFromTickContext`/`_MultiObserver_Union` (promote-only tiering, multi-observer union)
 
 ## 🔗 Related
 
-- Source: [src/Typhon.Engine/Spatial/public/SpatialGridConfig.cs](../../../src/Typhon.Engine/Spatial/public/SpatialGridConfig.cs)
-- Source: [src/Typhon.Engine/Spatial/public/SpatialGridAccessor.cs](../../../src/Typhon.Engine/Spatial/public/SpatialGridAccessor.cs)
-- Source: [src/Typhon.Engine/Ecs/public/DatabaseEngine.cs](../../../src/Typhon.Engine/Ecs/public/DatabaseEngine.cs) (`ConfigureSpatialGrid`)
+- Source: [src/Typhon.Engine/Spatial/public/SpatialGridConfig.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/public/SpatialGridConfig.cs)
+- Source: [src/Typhon.Engine/Spatial/public/SpatialGridAccessor.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/public/SpatialGridAccessor.cs)
+- Source: [src/Typhon.Engine/Ecs/public/DatabaseEngine.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/DatabaseEngine.cs) (`ConfigureSpatialGrid`)
 - Related catalog entry: [Spatial Query API](./spatial-query-api.md) (the per-component query layer this grid complements)
 - Sibling: [Tiered Simulation Dispatch](./tiered-simulation-dispatch.md) — the primary consumer of the per-cell `SimTier` this feature exposes
 - Overview: [Spatial Architecture Overview](./spatial-architecture-overview.md) — this grid vs. the R-Tree's own, unrelated Layer-1 occupancy filter

@@ -1,3 +1,9 @@
+---
+uid: feature-schema-component-family-classification
+title: 'Component Family Classification'
+description: 'Groups components into semantic families for stable, readable Workbench visualizations.'
+---
+
 # Component Family Classification
 > Groups components into semantic families for stable, readable Workbench visualizations.
 
@@ -62,7 +68,7 @@ There is no API call to make as the application developer — registering the co
 
 ## 🧪 Tests
 
-- [ComponentFamilyResolverTests](../../../test/Typhon.Engine.Tests/Data/Schema/ComponentFamilyResolverTests.cs) — attribute-wins-over-heuristic, per-token heuristic classification (`TestCase` per family), `Misc` fallback, canonical family order
+- [ComponentFamilyResolverTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/Schema/ComponentFamilyResolverTests.cs) — attribute-wins-over-heuristic, per-token heuristic classification (`TestCase` per family), `Misc` fallback, canonical family order
 
 ## 🔗 Related
 

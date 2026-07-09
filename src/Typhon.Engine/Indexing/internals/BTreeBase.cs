@@ -9,7 +9,7 @@ namespace Typhon.Engine.Internals;
 /// used by ComponentTable, selectivity estimation, and diagnostic tools.
 /// </summary>
 /// <remarks>
-/// Replaces the former <c>IBTree</c> interface. Since <see cref="BTree{TKey}"/> was the only implementation,
+/// Replaces the former <c>IBTree</c> interface. Since <see cref="BTree{TKey,TStore}"/> was the only implementation,
 /// an abstract class is a better fit: it avoids interface dispatch overhead and provides a natural home
 /// for shared non-generic operations like <see cref="GetMinKeyAsLong"/> / <see cref="GetMaxKeyAsLong"/>.
 /// Implements <see cref="IBTreeIndex"/> to allow <see cref="IndexedFieldInfo"/> to hold indexes backed by any store type without being generic itself.

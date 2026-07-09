@@ -1,3 +1,9 @@
+---
+uid: feature-indexing-batched-index-maintenance
+title: 'Batched Index Maintenance for Bulk Commits'
+description: 'Commit-path rework that batches secondary-index updates per commit; the accessor-reuse half has shipped, the sorted-apply half has not.'
+---
+
 # Batched Index Maintenance for Bulk Commits
 > Commit-path rework that batches secondary-index updates per commit; the accessor-reuse half has shipped, the sorted-apply half has not.
 

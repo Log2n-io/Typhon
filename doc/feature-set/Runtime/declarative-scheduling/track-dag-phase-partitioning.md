@@ -1,3 +1,9 @@
+---
+uid: feature-runtime-declarative-scheduling-track-dag-phase-partitioning
+title: 'Track → DAG → Phase Partitioning'
+description: 'Tracks order coarse execution stages, DAGs group independent dependency graphs, phases order systems within one DAG.'
+---
+
 # Track → DAG → Phase Partitioning
 > Tracks order coarse execution stages, DAGs group independent dependency graphs, phases order systems within one DAG.
 

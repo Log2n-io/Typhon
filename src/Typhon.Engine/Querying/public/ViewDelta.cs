@@ -4,12 +4,12 @@ using System.Collections.Generic;
 namespace Typhon.Engine;
 
 /// <summary>
-/// A zero-allocation view into the delta state of a <see cref="View{T}"/> or <see cref="View{T1,T2}"/>.
+/// A zero-allocation view into the delta state of a <see cref="ViewBase"/> (e.g. <see cref="EcsView{TArchetype}"/> or
+/// <see cref="NavigationView{TSource,TTarget}"/>).
 /// <para>
 /// <b>Lifetime:</b> This struct references the View's internal delta storage directly — no copies are made.
-/// The data is only valid until the next call to <see cref="View{T}.ClearDelta"/> (or the equivalent on
-/// <see cref="View{T1,T2}"/>). After <c>ClearDelta()</c>, all collections will appear empty.
-/// Do not cache this struct across refresh cycles.
+/// The data is only valid until the next call to <see cref="ViewBase.ClearDelta"/>. After <c>ClearDelta()</c>,
+/// all collections will appear empty. Do not cache this struct across refresh cycles.
 /// </para>
 /// <para>
 /// <b>Typical usage:</b>

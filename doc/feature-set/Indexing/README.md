@@ -1,3 +1,9 @@
+---
+uid: feature-indexing-index
+title: 'Indexing'
+description: 'Concurrent B+Tree secondary indexes — automatically built and maintained per [Index]-tagged ComponentTable field, in four key-width-specialized variants…'
+---
+
 # Indexing
 > Concurrent B+Tree secondary indexes — automatically built and maintained per `[Index]`-tagged `ComponentTable` field, in four key-width-specialized variants under a per-node optimistic-concurrency (OLC) protocol — back point lookups, ordered range scans, and (on `Versioned` components) MVCC-correct historical reconstruction of index membership over time. Primary-key access is no longer part of this surface: the PK B+Tree has been removed in favor of `EntityMap`/ECS entity APIs.
 

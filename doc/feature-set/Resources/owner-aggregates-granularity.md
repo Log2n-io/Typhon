@@ -1,3 +1,9 @@
+---
+uid: feature-resources-owner-aggregates-granularity
+title: 'Owner-Aggregates Granularity Strategy'
+description: 'The rule for what becomes a resource-tree node and what gets rolled up into its owner.'
+---
+
 # Owner-Aggregates Granularity Strategy
 > The rule for what becomes a resource-tree node and what gets rolled up into its owner.
 
@@ -71,12 +77,12 @@ foreach (var (k, v) in ct.GetDebugProperties())     // per-segment breakdown, on
   storage path; a regression there (a segment gaining a node) is a design violation, not a feature.
 
 ## 🧪 Tests
-- [OwnerAggregatesTests](../../../test/Typhon.Engine.Tests/Resources/OwnerAggregatesTests.cs) — `ComponentTable` has zero graph
+- [OwnerAggregatesTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Resources/OwnerAggregatesTests.cs) — `ComponentTable` has zero graph
   children while its `IMetricSource.ReadMetrics` aggregates segment capacity/allocation totals
 
 ## 🔗 Related
 - Companion features: [`metric-reporting.md`](./metric-reporting.md) (the rolled-up surface), [`debug-properties-drilldown.md`](./debug-properties-drilldown.md) (the per-child drill-down)
-- Tests: [`test/Typhon.Engine.Tests/Resources/OwnerAggregatesTests.cs`](../../../test/Typhon.Engine.Tests/Resources/OwnerAggregatesTests.cs)
+- Tests: [`test/Typhon.Engine.Tests/Resources/OwnerAggregatesTests.cs`](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Resources/OwnerAggregatesTests.cs)
 
 <!-- Deep dive: claude/design/Resources/05-granularity-strategy.md -->
 <!-- Decision record: claude/adr/032-resource-system-architecture.md (Decision 3 — Owner Aggregates Pattern) -->

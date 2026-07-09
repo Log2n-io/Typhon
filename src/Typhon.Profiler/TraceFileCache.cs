@@ -76,7 +76,9 @@ public struct CacheHeader
     /// <summary>Padding to 128 bytes. Zero-initialized; readers must ignore.</summary>
     public unsafe fixed byte Reserved[60];
 
+    /// <summary>File magic constant: ASCII "TPCH" (little-endian).</summary>
     public const uint MagicValue = 0x48_43_50_54; // 'T','P','C','H' little-endian
+    /// <summary>Current cache format version written by this build. Matches the expected <see cref="Version"/> on read.</summary>
     public const ushort CurrentVersion = 1;
 
     /// <summary>Byte offset of <see cref="SourceFingerprint"/> from the start of the struct. Single source of truth for callers that
@@ -352,7 +354,9 @@ public struct TickSummary
 
     // 3 bytes of reserved padding to keep the struct 8-byte-aligned (44 B total) and headroom for future v11.x additions
     // without a chunker version bump. Zero on disk.
+    /// <summary>Reserved padding byte keeping the struct 8-byte-aligned; zero on disk.</summary>
     public byte _reservedByte;
+    /// <summary>Reserved padding (u16) keeping the struct 8-byte-aligned; zero on disk.</summary>
     public ushort _reservedUshort;
 }
 
@@ -406,13 +410,21 @@ public struct ChunkManifestEntry
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
 public struct GlobalMetricsFixed
 {
+    /// <summary>Wall-clock start of the trace in microseconds — the origin all µs offsets are measured against.</summary>
     public double GlobalStartUs;
+    /// <summary>Wall-clock end of the trace in microseconds.</summary>
     public double GlobalEndUs;
+    /// <summary>Longest single-tick duration observed across the trace (µs).</summary>
     public double MaxTickDurationUs;
+    /// <summary>Longest single-system duration observed across the trace (µs).</summary>
     public double MaxSystemDurationUs;
+    /// <summary>95th-percentile tick duration across the trace (µs).</summary>
     public double P95TickDurationUs;
+    /// <summary>Total number of records in the trace (after fold).</summary>
     public long TotalEvents;
+    /// <summary>Total number of ticks in the trace.</summary>
     public uint TotalTicks;
+    /// <summary>Number of <see cref="SystemAggregateDuration"/> entries that follow this fixed header in the section.</summary>
     public uint SystemAggregateCount;
 }
 
@@ -423,9 +435,13 @@ public struct GlobalMetricsFixed
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
 public struct SystemAggregateDuration
 {
+    /// <summary>System index in the DAG (matches <see cref="SystemDefinitionRecord.Index"/>).</summary>
     public ushort SystemIndex;
+    /// <summary>Alignment padding; zero on disk.</summary>
     public ushort Padding;
+    /// <summary>Number of times the system ran across the whole trace.</summary>
     public uint InvocationCount;
+    /// <summary>Total wall-clock duration the system accumulated across the trace (µs).</summary>
     public double TotalDurationUs;
 }
 
@@ -436,11 +452,16 @@ public struct SystemAggregateDuration
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
 public struct ChunkWireHeader
 {
+    /// <summary>Envelope magic — <see cref="MagicValue"/>. Lets the client key its chunk cache without an LZ4 decode first.</summary>
     public uint Magic;
+    /// <summary>First tick included in the chunk (inclusive).</summary>
     public uint FromTick;
+    /// <summary>First tick NOT included in the chunk (exclusive).</summary>
     public uint ToTick;
+    /// <summary>Number of records in the chunk (after fold).</summary>
     public uint RecordCount;
 
+    /// <summary>Envelope magic constant: ASCII "TPCK" (little-endian).</summary>
     public const uint MagicValue = 0x4B_43_50_54; // 'T','P','C','K' little-endian
 }
 

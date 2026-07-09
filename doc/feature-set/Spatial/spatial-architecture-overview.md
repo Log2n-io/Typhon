@@ -1,3 +1,9 @@
+---
+uid: feature-spatial-spatial-architecture-overview
+title: 'Spatial Architecture Overview'
+description: 'Two independent spatial mechanisms — a per-component R-Tree for precise geometric queries, and an engine-wide grid for coarse tiering and clustering — that…'
+---
+
 # Spatial Architecture Overview
 > Two independent spatial mechanisms — a per-component R-Tree for precise geometric queries, and an engine-wide grid for coarse tiering and clustering — that share vocabulary but not implementation.
 

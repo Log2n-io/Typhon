@@ -1,3 +1,9 @@
+---
+uid: feature-ecs-storage-modes-storage-mode-transient
+title: 'Transient'
+description: 'Heap-only component storage for scratch data that should never touch disk.'
+---
+
 # Transient
 > Heap-only component storage for scratch data that should never touch disk.
 
@@ -62,8 +68,8 @@ anim.Time += dt;               // ~3-5 ns, no dirty tracking, no WAL
 
 ## 🧪 Tests
 
-- [StorageModeReadWriteTests](../../../../test/Typhon.Engine.Tests/Data/StorageModeReadWriteTests.cs) — `Transient` spawn/read/write, no dirty-bitmap tracking, rollback frees chunks
-- [ClusterTransientTests](../../../../test/Typhon.Engine.Tests/Data/ECS/ClusterTransientTests.cs) — pure-`Transient` cluster has no page-cache segment (heap-only), mixed SV+Transient bulk iteration
+- [StorageModeReadWriteTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/StorageModeReadWriteTests.cs) — `Transient` spawn/read/write, no dirty-bitmap tracking, rollback frees chunks
+- [ClusterTransientTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/ClusterTransientTests.cs) — pure-`Transient` cluster has no page-cache segment (heap-only), mixed SV+Transient bulk iteration
 
 ## 🔗 Related
 

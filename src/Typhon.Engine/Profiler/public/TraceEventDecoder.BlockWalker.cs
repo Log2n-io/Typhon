@@ -19,14 +19,14 @@ namespace Typhon.Profiler.Events;
 /// </para>
 /// <para>
 /// <b>Tick-counter semantics</b> match the legacy decoder: the first <c>TickStart</c> record advances
-/// the counter by one (so a fresh trace starting at tick 1 needs <paramref name="currentTick"/> seeded
+/// the counter by one (so a fresh trace starting at tick 1 needs <c>currentTick</c> seeded
 /// at 0). Continuation chunks (no leading <c>TickStart</c>) seed the counter at the chunk's
 /// <c>FromTick</c> directly.
 /// </para>
 /// <para>
 /// <b>Malformed records</b> (size byte too small, size overruns buffer) abort the walk; partial output
-/// is rolled back (<paramref name="output"/> trimmed to its starting length) and the input
-/// <paramref name="currentTick"/> is restored. This matches the legacy behaviour of returning a clean
+/// is rolled back (<c>output</c> trimmed to its starting length) and the input
+/// <c>currentTick</c> is restored. This matches the legacy behaviour of returning a clean
 /// state on bad input rather than partial-and-undefined.
 /// </para>
 /// </remarks>

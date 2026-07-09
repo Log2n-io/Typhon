@@ -1,3 +1,9 @@
+---
+uid: feature-profiler-builtin-subsystem-instrumentation
+title: 'Built-in Engine Instrumentation Catalog'
+description: 'Every transaction, B+Tree op, page fetch, WAL flush, checkpoint phase, and cluster migration is already traced — no app code required.'
+---
+
 # Built-in Engine Instrumentation Catalog
 > Every transaction, B+Tree op, page fetch, WAL flush, checkpoint phase, and cluster migration is already traced — no app code required.
 
@@ -45,8 +51,8 @@ runtime.Start();
 
 ## 🧪 Tests
 
-- [TyphonEventKindSuppressionTests](../../../test/Typhon.Engine.Tests/Profiler/TyphonEventKindSuppressionTests.cs) — the default suppression deny-list: only `PageCacheFetch` is suppressed by default, the other 9 page-cache kinds and every other subsystem's kinds are open
-- [TraceEventEncodeEquivalenceTests](../../../test/Typhon.Engine.Tests/Profiler/TraceEventEncodeEquivalenceTests.cs) — per-kind wire-encode equivalence across the built-in event set, catching struct-layer vs. codec argument-order/field-thread-through bugs
+- [TyphonEventKindSuppressionTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Profiler/TyphonEventKindSuppressionTests.cs) — the default suppression deny-list: only `PageCacheFetch` is suppressed by default, the other 9 page-cache kinds and every other subsystem's kinds are open
+- [TraceEventEncodeEquivalenceTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Profiler/TraceEventEncodeEquivalenceTests.cs) — per-kind wire-encode equivalence across the built-in event set, catching struct-layer vs. codec argument-order/field-thread-through bugs
 
 ## 🔗 Related
 

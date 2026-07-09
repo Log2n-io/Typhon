@@ -1,3 +1,9 @@
+---
+uid: feature-profiler-trace-export-index
+title: 'Trace Export'
+description: 'Attach durable file capture and/or a live TCP feed to the same profiler session — pick one, both, or neither.'
+---
+
 # Trace Export
 > Attach durable file capture and/or a live TCP feed to the same profiler session — pick one, both, or neither.
 
@@ -47,12 +53,12 @@ construction or profiler start/stop calls are required in application code (see
 
 ## 🧪 Tests
 
-- [FileExporterIntegrationTests](../../../../test/Typhon.Engine.Tests/Profiler/FileExporterIntegrationTests.cs) — file sink attached to a real session, start/emit/stop lifecycle
-- [TcpExporterIntegrationTests](../../../../test/Typhon.Engine.Tests/Profiler/TcpExporterIntegrationTests.cs) — TCP sink attached to a real session, Init/Block frame round-trip
+- [FileExporterIntegrationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Profiler/FileExporterIntegrationTests.cs) — file sink attached to a real session, start/emit/stop lifecycle
+- [TcpExporterIntegrationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Profiler/TcpExporterIntegrationTests.cs) — TCP sink attached to a real session, Init/Block frame round-trip
 
 ## 🔗 Related
 
-- Source: [`src/Typhon.Engine/Profiler/public/IProfilerExporter.cs`](../../../../src/Typhon.Engine/Profiler/public/IProfilerExporter.cs), [`ExporterQueue.cs`](../../../../src/Typhon.Engine/Profiler/public/ExporterQueue.cs)
+- Source: [`src/Typhon.Engine/Profiler/public/IProfilerExporter.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Profiler/public/IProfilerExporter.cs), [`ExporterQueue.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Profiler/public/ExporterQueue.cs)
 - Sub-features: [File-based trace export](./file-trace-export.md), [Live TCP streaming export](./live-tcp-trace-export.md)
 
 <!-- Deep dive: claude/design/Profiler/typhon-profiler.md §6.3-6.5, §7, claude/design/Profiler/profiler-user-manual.md §2, §4 -->

@@ -1,3 +1,9 @@
+---
+uid: feature-storage-page-integrity
+title: 'Page Integrity — CRC32C, Seqlock Snapshots & A/B Page Pairing'
+description: 'Every 8 KiB page is checksummed, torn writes are detected, and structural pages survive a power cut without ever repairing a byte.'
+---
+
 # Page Integrity — CRC32C, Seqlock Snapshots & A/B Page Pairing
 > Every 8 KiB page is checksummed, torn writes are detected, and structural pages survive a power cut without ever repairing a byte.
 
@@ -60,10 +66,10 @@ A third mode, `RecoverySuspect`, exists only on the crash-recovery path — the 
 
 ## 🧪 Tests
 
-- [PageCrcVerificationTests](../../../test/Typhon.Engine.Tests/Durability/PageCrcVerificationTests.cs) — `OnLoad` vs `RecoveryOnly` verification modes, `PageCorruptionException` on a genuine mismatch
-- [SeqlockProtocolTests](../../../test/Typhon.Engine.Tests/Durability/SeqlockProtocolTests.cs) — `ModificationCounter` odd/even latch protocol, checkpoint snapshot consistency under concurrent writers
-- [DirectoryPairTests](../../../test/Typhon.Engine.Tests/Storage/DirectoryPairTests.cs) — A/B slot pairing for segment-directory pages: torn-slot reopen selects the sibling, both-slots-corrupt fails loudly
-- [MetaPairTests](../../../test/Typhon.Engine.Tests/Durability/CrashRecovery/MetaPairTests.cs) — the same A/B pairing guarantees applied to the root meta page
+- [PageCrcVerificationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/PageCrcVerificationTests.cs) — `OnLoad` vs `RecoveryOnly` verification modes, `PageCorruptionException` on a genuine mismatch
+- [SeqlockProtocolTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/SeqlockProtocolTests.cs) — `ModificationCounter` odd/even latch protocol, checkpoint snapshot consistency under concurrent writers
+- [DirectoryPairTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Storage/DirectoryPairTests.cs) — A/B slot pairing for segment-directory pages: torn-slot reopen selects the sibling, both-slots-corrupt fails loudly
+- [MetaPairTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/CrashRecovery/MetaPairTests.cs) — the same A/B pairing guarantees applied to the root meta page
 
 ## 🔗 Related
 

@@ -1,3 +1,9 @@
+---
+uid: feature-schema-tsh-schema-commands
+title: 'tsh Schema Shell Commands'
+description: 'Inspect, diff, validate, and export a database''s persisted schema interactively, without writing code.'
+---
+
 # tsh Schema Shell Commands
 > Inspect, diff, validate, and export a database's persisted schema interactively, without writing code.
 

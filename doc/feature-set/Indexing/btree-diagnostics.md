@@ -1,3 +1,9 @@
+---
+uid: feature-indexing-btree-diagnostics
+title: 'Index Diagnostics & Consistency Checking'
+description: 'Always-on contention counters plus an on-demand structural walk for troubleshooting B+Tree indexes.'
+---
+
 # Index Diagnostics & Consistency Checking
 > Always-on contention counters plus an on-demand structural walk for troubleshooting B+Tree indexes.
 
@@ -77,8 +83,8 @@ TestContext.Out.WriteLine(
 
 ## 🧪 Tests
 
-- [OlcBTreeStressTests](../../../test/Typhon.Engine.Tests/Data/OlcBTreeStressTests.cs) — `LogDiagnostics`/`tree.ResetDiagnostics()`: reads `OptimisticRestarts`/`PessimisticFallbacks`/`SplitCount`/`MergeCount`/`ContentionSplitCount` straight off a stressed tree instance, the same counters this feature documents
-- [BTreeTests](../../../test/Typhon.Engine.Tests/Data/BTreeTests.cs) — pervasive `tree.CheckConsistency(...)` calls exercise the same structural walk (key ordering, parent/child linkage, B-link sibling chaining) that `tsh btree-validate` runs via `DiagnosticCommandExecutor`
+- [OlcBTreeStressTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/OlcBTreeStressTests.cs) — `LogDiagnostics`/`tree.ResetDiagnostics()`: reads `OptimisticRestarts`/`PessimisticFallbacks`/`SplitCount`/`MergeCount`/`ContentionSplitCount` straight off a stressed tree instance, the same counters this feature documents
+- [BTreeTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/BTreeTests.cs) — pervasive `tree.CheckConsistency(...)` calls exercise the same structural walk (key ordering, parent/child linkage, B-link sibling chaining) that `tsh btree-validate` runs via `DiagnosticCommandExecutor`
 
 ## 🔗 Related
 

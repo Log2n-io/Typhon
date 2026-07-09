@@ -1,3 +1,8 @@
+// CS1591: this file declares public-accessibility types that live in the internal namespace (Phase 2b entanglement, see
+// claude/research/PublicVsInternalApiClassification.md). They are excluded from the published API reference, so consumer-facing
+// doc coverage is not enforced here.
+#pragma warning disable 1591
+
 using JetBrains.Annotations;
 using Microsoft.Extensions.Logging;
 using Microsoft.Win32.SafeHandles;
@@ -1540,7 +1545,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
     /// <summary>
     /// Atomically decrements the <see cref="PageInfo.ActiveChunkWriters"/> counter for a page.
-    /// Called by <see cref="ChunkAccessor.CommitChanges"/> and <see cref="ChunkAccessor.EvictSlot"/>
+    /// Called by <see cref="ChunkAccessor{TStore}.CommitChanges"/> and <see cref="ChunkAccessor{TStore}.EvictSlot"/>
     /// when a dirty slot is flushed to the <see cref="ChangeSet"/>.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -1548,7 +1553,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
     /// <summary>
     /// Raises <see cref="PageInfo.DirtyCounter"/> to <paramref name="minValue"/> if it is currently below that threshold.
-    /// Used by <see cref="ChunkAccessor.MarkSlotDirty"/> when re-dirtying a page already tracked by the ChangeSet:
+    /// Used by <see cref="ChunkAccessor{TStore}.MarkSlotDirty"/> when re-dirtying a page already tracked by the ChangeSet:
     /// <see cref="ChangeSet.AddByMemPageIndex"/> is idempotent (HashSet dedup), so subsequent accessor rentals
     /// within the same UoW don't increment DC. If checkpoint has drained DC to 0 in the meantime, this ensures
     /// the page stays dirty (DC &gt;= 1) to prevent premature eviction by the clock-sweep.
@@ -2123,7 +2128,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
     /// <summary>
     /// Returns the FilePageIndex currently stored in a memory page slot.
-    /// Used by <see cref="ChunkAccessor"/> to detect stale cached pointers after page eviction/reuse.
+    /// Used by <see cref="ChunkAccessor{TStore}"/> to detect stale cached pointers after page eviction/reuse.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal int GetFilePageIndex(int memPageIndex) => _memPagesInfo[memPageIndex].FilePageIndex;

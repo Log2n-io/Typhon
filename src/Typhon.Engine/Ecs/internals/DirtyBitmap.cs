@@ -5,7 +5,7 @@ using System.Threading;
 namespace Typhon.Engine.Internals;
 
 /// <summary>
-/// Lock-free per-ComponentTable dirty tracking for <see cref="StorageMode.SingleVersion"/> components.
+/// Lock-free per-ComponentTable dirty tracking for <see cref="Typhon.Schema.Definition.StorageMode.SingleVersion"/> components.
 /// Each bit represents one chunkId in the ComponentSegment. Set atomically via <see cref="Interlocked.Or"/>.
 /// Tick fence (3.4) calls <see cref="Snapshot"/> to atomically swap the bitmap and serialize dirty entries to WAL.
 /// </summary>

@@ -9,8 +9,8 @@ namespace Typhon.Engine;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Ring buffer semantics differ from <see cref="View{T1,T2}"/>:
-/// componentTag=0 entries carry the source entity PK, componentTag=1 entries carry the target entity PK.
+/// Ring buffer semantics differ from a single-entity multi-component <see cref="EcsView{TArchetype}"/>:
+/// componentTag=0 entries carry the source entity PK, componentTag=1 entries carry the target entity PK (a different entity).
 /// Forward navigation (source FK changes or source predicate changes) is 1:1.
 /// Reverse navigation (target predicate changes) requires fan-out: one target change may affect many source entities.
 /// </para>
@@ -101,12 +101,14 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
         }
     }
 
+    /// <inheritdoc/>
     protected override void DeregisterFromRegistries()
     {
         _sourceTable.ViewRegistry.DeregisterView(this);
         _targetTable.ViewRegistry.DeregisterView(this);
     }
 
+    /// <inheritdoc/>
     public override void Refresh(
         Transaction tx,
         [CallerFilePath]   string callerFile = null,
@@ -186,7 +188,7 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
 
     /// <summary>
     /// Handles source predicate field changes (non-FK fields on source component).
-    /// Same boundary-crossing pattern as View&lt;T&gt;.ProcessMultiField, but target is read from FK value.
+    /// Same boundary-crossing pattern as a single-component field-predicate change, but the target is read via the FK value.
     /// </summary>
     private void ProcessSourcePredicateChange(ref ViewDeltaEntry entry, int fieldIndex, bool isCreation, bool isDeletion, Transaction tx)
     {

@@ -1,3 +1,9 @@
+---
+uid: feature-durability-bulk-load
+title: 'BulkLoad Write Path'
+description: 'Skip per-row WAL for mass loads — one checkpoint-backed manifest pair makes the whole load atomic, not each row.'
+---
+
 # BulkLoad Write Path
 > Skip per-row WAL for mass loads — one checkpoint-backed manifest pair makes the whole load atomic, not each row.
 
@@ -67,9 +73,9 @@ catch (BulkLoadCheckpointTimeoutException)
 
 ## 🧪 Tests
 
-- [BulkLoadApiSurfaceTests](../../../test/Typhon.Engine.Tests/Durability/BulkLoadApiSurfaceTests.cs) — session exclusivity/lifecycle, `BeginBulkLoad`/`Dispose`/`CompleteBulkLoad` API surface
-- [BulkLoadWriteTests](../../../test/Typhon.Engine.Tests/Durability/BulkLoadWriteTests.cs) — no per-row WAL, exactly one `BulkBegin`/`BulkEnd` pair, entities invisible until `CompleteBulkLoad`
-- [BulkLoadRecoveryTests](../../../test/Typhon.Engine.Tests/Durability/BulkLoadRecoveryTests.cs) — crash after `BulkBegin` discards the session; crash after `CompleteBulkLoad` survives reopen
+- [BulkLoadApiSurfaceTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/BulkLoadApiSurfaceTests.cs) — session exclusivity/lifecycle, `BeginBulkLoad`/`Dispose`/`CompleteBulkLoad` API surface
+- [BulkLoadWriteTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/BulkLoadWriteTests.cs) — no per-row WAL, exactly one `BulkBegin`/`BulkEnd` pair, entities invisible until `CompleteBulkLoad`
+- [BulkLoadRecoveryTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/BulkLoadRecoveryTests.cs) — crash after `BulkBegin` discards the session; crash after `CompleteBulkLoad` survives reopen
 
 ## 🔗 Related
 

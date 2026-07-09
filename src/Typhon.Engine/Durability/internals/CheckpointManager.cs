@@ -116,6 +116,10 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     /// <param name="stagingPool">Pre-allocated staging buffer pool for snapshot-based checkpoint writes.</param>
     /// <param name="parent">Parent resource node.</param>
     /// <param name="initialCheckpointLsn">Initial checkpoint LSN from file header (0 for fresh database).</param>
+    /// <param name="lastTickFenceLsnProvider">
+    /// Optional callback returning the LSN of the most recently emitted TickFence chunk. The checkpoint reads it while draining so TickFence-discipline
+    /// writes are accounted for; <see langword="null"/> when TickFence tracking is not wired, in which case the LSN is treated as 0.
+    /// </param>
     internal CheckpointManager(ManagedPagedMMF mmf, UowRegistry uowRegistry, WalManager walManager, ResourceOptions resourceOptions, EpochManager epochManager,
         StagingBufferPool stagingPool, IResource parent, long initialCheckpointLsn = 0, Func<long> lastTickFenceLsnProvider = null) :
         base("CheckpointManager", ResourceType.WAL, parent)

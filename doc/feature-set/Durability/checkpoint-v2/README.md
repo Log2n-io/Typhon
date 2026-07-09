@@ -1,3 +1,9 @@
+---
+uid: feature-durability-checkpoint-v2-index
+title: 'Checkpoint v2 (SnapshotStore pipeline)'
+description: 'Background pipeline that consolidates dirty pages into the data file and advances CheckpointLSN only over pages it actually wrote.'
+---
+
 # Checkpoint v2 (SnapshotStore pipeline)
 > Background pipeline that consolidates dirty pages into the data file and advances CheckpointLSN only over pages it actually wrote.
 
@@ -49,8 +55,8 @@ dbe.ForceCheckpoint();
 
 ## 🧪 Tests
 
-- [CheckpointManagerTests](../../../../test/Typhon.Engine.Tests/Durability/CheckpointManagerTests.cs) — coverage gate (skipped vs. released pages), `CheckpointLSN` advancement, timer/force-cycle triggering, WAL segment reclaim
-- [CheckpointResilienceTests](../../../../test/Typhon.Engine.Tests/Durability/CheckpointResilienceTests.cs) — transient-fault retry vs. fatal-fault halt, last-chance flush at shutdown
+- [CheckpointManagerTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/CheckpointManagerTests.cs) — coverage gate (skipped vs. released pages), `CheckpointLSN` advancement, timer/force-cycle triggering, WAL segment reclaim
+- [CheckpointResilienceTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/CheckpointResilienceTests.cs) — transient-fault retry vs. fatal-fault halt, last-chance flush at shutdown
 
 ## 🔗 Related
 

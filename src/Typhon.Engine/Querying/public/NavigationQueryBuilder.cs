@@ -5,6 +5,13 @@ using System.Runtime.CompilerServices;
 
 namespace Typhon.Engine;
 
+/// <summary>
+/// Fluent builder for a navigation (foreign-key join) view: tracks <typeparamref name="TSource"/> entities whose
+/// FK-referenced <typeparamref name="TTarget"/> satisfies the accumulated predicates. Call <see cref="Where"/> one or
+/// more times, then <see cref="ToView"/> to materialize a live <see cref="NavigationView{TSource,TTarget}"/>.
+/// </summary>
+/// <typeparam name="TSource">Source component holding the foreign-key field.</typeparam>
+/// <typeparam name="TTarget">Target component referenced by the foreign key.</typeparam>
 public class NavigationQueryBuilder<TSource, TTarget> where TSource : unmanaged where TTarget : unmanaged
 {
     private readonly DatabaseEngine _dbe;
@@ -18,6 +25,12 @@ public class NavigationQueryBuilder<TSource, TTarget> where TSource : unmanaged 
         _fkFieldName = fkFieldName;
     }
 
+    /// <summary>
+    /// Adds a predicate over source and target fields. The expression may reference both <typeparamref name="TSource"/> and
+    /// <typeparamref name="TTarget"/> fields; each comparison is routed to the matching component's predicate set.
+    /// </summary>
+    /// <param name="predicate">Boolean expression over a source and a target component instance.</param>
+    /// <returns>This builder, for chaining.</returns>
     public NavigationQueryBuilder<TSource, TTarget> Where(Expression<Func<TSource, TTarget, bool>> predicate)
     {
         (FieldPredicate[] forSource, FieldPredicate[] forTarget) = ExpressionParser.Parse(predicate);
@@ -26,6 +39,19 @@ public class NavigationQueryBuilder<TSource, TTarget> where TSource : unmanaged 
         return this;
     }
 
+    /// <summary>
+    /// Builds and registers a live <see cref="NavigationView{TSource,TTarget}"/> from the accumulated predicates, populates
+    /// its initial entity set, and returns it. At least one target predicate is required so target-side changes stay tracked.
+    /// </summary>
+    /// <param name="bufferCapacity">Delta ring-buffer capacity for the view (power of two).</param>
+    /// <param name="callerFile">Automatically captured source file of the call site; do not pass explicitly.</param>
+    /// <param name="callerLine">Automatically captured source line of the call site; do not pass explicitly.</param>
+    /// <param name="callerMethod">Automatically captured calling member name; do not pass explicitly.</param>
+    /// <returns>The registered navigation view, populated with the current matching source entities.</returns>
+    /// <exception cref="InvalidOperationException">
+    /// No predicate was specified, no target predicate was specified, a referenced component is unregistered, or the FK field
+    /// is missing / not marked <c>[ForeignKey]</c> / lacks an <c>[Index(AllowMultiple = true)]</c>.
+    /// </exception>
     public ViewBase ToView(
         int bufferCapacity = ViewDeltaRingBuffer.DefaultCapacity,
         [CallerFilePath]   string callerFile = null,

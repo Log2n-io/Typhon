@@ -1,3 +1,9 @@
+---
+uid: feature-subscriptions-incremental-sync
+title: 'Incremental Sync'
+description: 'New subscriptions to large Views sync in tick-sized batches instead of one giant first delta.'
+---
+
 # Incremental Sync
 > New subscriptions to large Views sync in tick-sized batches instead of one giant first delta.
 
@@ -77,7 +83,7 @@ conn.OnTickDelta += tickDelta =>
 
 ## 🧪 Tests
 
-- [ViewDeltaTests](../../../test/Typhon.Engine.Tests/Runtime/Subscriptions/ViewDeltaTests.cs) —
+- [ViewDeltaTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/ViewDeltaTests.cs) —
   `SubscriptionFlow_EntitiesExistBeforeSubscribe_SyncCapturesThem`/`SubscriptionFlow_RefreshPopulatesView_ThenBeginSync_ThenBuildDelta_NoDoubleAdd`:
   `BeginSync` snapshot capture and Output-phase ordering (no double-Added)
 

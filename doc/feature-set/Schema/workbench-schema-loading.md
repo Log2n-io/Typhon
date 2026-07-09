@@ -1,3 +1,9 @@
+---
+uid: feature-schema-workbench-schema-loading
+title: 'Workbench Per-Session Schema Loading & ALC Reload'
+description: 'Lets you rebuild and re-attach your schema DLL in the Workbench without restarting the host.'
+---
+
 # Workbench Per-Session Schema Loading & ALC Reload
 > Lets you rebuild and re-attach your schema DLL in the Workbench without restarting the host.
 
@@ -48,7 +54,7 @@ There's no API to call from application code — this is the Workbench's own loa
 
 ## 🧪 Tests
 
-- [SchemaLoaderTests](../../../test/Typhon.Workbench.Tests/Schema/SchemaLoaderTests.cs) — missing path (`schema_missing`), invalid assembly (`schema_load_failed`), empty DLL list, real-assembly load through a fresh `WorkbenchAssemblyLoadContext`
+- [SchemaLoaderTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Workbench.Tests/Schema/SchemaLoaderTests.cs) — missing path (`schema_missing`), invalid assembly (`schema_load_failed`), empty DLL list, real-assembly load through a fresh `WorkbenchAssemblyLoadContext`
 
 ## 🔗 Related
 

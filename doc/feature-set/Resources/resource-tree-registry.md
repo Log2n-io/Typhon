@@ -1,3 +1,9 @@
+---
+uid: feature-resources-resource-tree-registry
+title: 'Resource Tree Registry'
+description: 'The hierarchical map of every significant engine resource — self-registering nodes, no orphans, cascade disposal.'
+---
+
 # Resource Tree Registry
 > The hierarchical map of every significant engine resource — self-registering nodes, no orphans, cascade disposal.
 
@@ -58,8 +64,8 @@ registry.Dispose(); // cascades subsystem-by-subsystem in dependency order
 
 ## 🧪 Tests
 
-- [ResourceTreeTests](../../../test/Typhon.Engine.Tests/Resources/ResourceTreeTests.cs) — subsystem structure, registration, ancestors/descendants, path lookup (`GetPath`/`FindByPath`), thread-safe concurrent registration
-- [ResourceRegistryDisposeOrderTests](../../../test/Typhon.Engine.Tests/Resources/ResourceRegistryDisposeOrderTests.cs) — cascade disposal ordering (`DataEngine` tears down before `Storage`/`Durability`/`Synchronization`)
+- [ResourceTreeTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Resources/ResourceTreeTests.cs) — subsystem structure, registration, ancestors/descendants, path lookup (`GetPath`/`FindByPath`), thread-safe concurrent registration
+- [ResourceRegistryDisposeOrderTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Resources/ResourceRegistryDisposeOrderTests.cs) — cascade disposal ordering (`DataEngine` tears down before `Storage`/`Durability`/`Synchronization`)
 
 ## 🔗 Related
 

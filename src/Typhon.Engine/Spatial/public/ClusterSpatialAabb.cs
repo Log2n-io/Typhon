@@ -27,12 +27,27 @@ namespace Typhon.Engine;
 [JetBrains.Annotations.PublicAPI]
 public struct ClusterSpatialAabb
 {
+    /// <summary>Minimum X bound of the cluster's tight AABB, in world units.</summary>
     public float MinX;
+
+    /// <summary>Minimum Y bound of the cluster's tight AABB, in world units.</summary>
     public float MinY;
+
+    /// <summary>Minimum Z bound of the cluster's tight AABB, in world units. Left at the <see cref="Empty"/> sentinel (+inf) for 2D archetypes.</summary>
     public float MinZ;
+
+    /// <summary>Maximum X bound of the cluster's tight AABB, in world units.</summary>
     public float MaxX;
+
+    /// <summary>Maximum Y bound of the cluster's tight AABB, in world units.</summary>
     public float MaxY;
+
+    /// <summary>Maximum Z bound of the cluster's tight AABB, in world units. Left at the <see cref="Empty"/> sentinel (-inf) for 2D archetypes.</summary>
     public float MaxZ;
+
+    /// <summary>
+    /// OR of every entity category mask in the cluster. Lets the per-cell broadphase skip the whole cluster when the query's category mask does not intersect.
+    /// </summary>
     public uint CategoryMask;
 
     /// <summary>Static empty sentinel for ref-returning properties when no spatial data exists.</summary>

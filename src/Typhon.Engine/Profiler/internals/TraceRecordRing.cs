@@ -8,11 +8,11 @@ namespace Typhon.Engine.Internals;
 
 /// <summary>
 /// Per-thread SPSC (single-producer, single-consumer) ring buffer holding <b>variable-size</b> trace records. Producer is the owning thread;
-/// consumer is the profiler's dedicated drain thread. The successor to <see cref="ThreadTraceBuffer"/>, which was fixed-stride.
+/// consumer is the profiler's dedicated drain thread. The successor to <c>ThreadTraceBuffer</c>, which was fixed-stride.
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Why variable-size:</b> the old fixed 64-byte <see cref="Typhon.TraceEvent"/> wasted 27 B per <c>BTreeInsert</c> event on scheduler
+/// <b>Why variable-size:</b> the old fixed 64-byte <c>TraceEvent</c> wasted 27 B per <c>BTreeInsert</c> event on scheduler
 /// fields that were always zero, and forced scheduler events to pay for a trace-context slot they never used. The new layout from
 /// <see cref="TraceRecordHeader"/> lets each record carry exactly the payload it needs — span events drop to ~37 B without trace context, scheduler
 /// chunks drop to ~47 B, and rich transaction commits grow slightly (~63 B) while carrying 4 more fields than the old struct could.
@@ -28,7 +28,7 @@ namespace Typhon.Engine.Internals;
 /// <b>Synchronization:</b> two monotonic 64-bit counters (<c>_head</c> producer-written, <c>_tail</c> consumer-written), each wrapped in a
 /// <see cref="CacheLinePaddedLong"/> so they live on distinct cache lines — avoids the producer/consumer false-sharing ping-pong that is textbook
 /// for SPSC rings (Tracy pads them for the same reason). On x64 TSO, plain field reads and writes of 64-bit primitives are naturally atomic and
-/// ordered, so no <see cref="System.Threading.Volatile"/> fences are needed — same as <see cref="ThreadTraceBuffer"/> does for the same reason
+/// ordered, so no <see cref="System.Threading.Volatile"/> fences are needed — same as <c>ThreadTraceBuffer</c> does for the same reason
 /// (see CLAUDE.md).
 /// </para>
 /// <para>

@@ -1,3 +1,9 @@
+---
+uid: feature-runtime-tick-execution-engine-index
+title: 'Tick-Based Execution Engine'
+description: 'TyphonRuntime — the single host object that turns a registered system schedule into a running, self-recovering, gracefully-shutting-down server.'
+---
+
 # Tick-Based Execution Engine
 > TyphonRuntime — the single host object that turns a registered system schedule into a running, self-recovering, gracefully-shutting-down server.
 
@@ -50,7 +56,7 @@ underlying resources.
 
 ## 🧪 Tests
 
-- [TyphonRuntimeTests](../../../../test/Typhon.Engine.Tests/Runtime/TyphonRuntimeTests.cs) — Create/Start/Shutdown lifecycle, `OnFirstTick`/`OnShutdown` durability, transaction handoff to systems
+- [TyphonRuntimeTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/TyphonRuntimeTests.cs) — Create/Start/Shutdown lifecycle, `OnFirstTick`/`OnShutdown` durability, transaction handoff to systems
 
 ## 🔗 Related
 

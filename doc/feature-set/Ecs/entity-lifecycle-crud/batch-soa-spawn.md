@@ -1,3 +1,9 @@
+---
+uid: feature-ecs-entity-lifecycle-crud-batch-soa-spawn
+title: 'Batch & SoA Spawn'
+description: 'Bulk entity creation — shared-value batches or per-entity SoA spans — amortizing per-call overhead across thousands of entities.'
+---
+
 # Batch & SoA Spawn
 > Bulk entity creation — shared-value batches or per-entity SoA spans — amortizing per-call overhead across thousands of entities.
 
@@ -62,8 +68,8 @@ tx.Commit();
 
 ## 🧪 Tests
 
-- [BatchOperationTests](../../../../test/Typhon.Engine.Tests/Data/ECS/BatchOperationTests.cs) — shared-value and source-generated per-entity SoA `SpawnBatch`, archetype inheritance, `DestroyBatch` incl. cascade
-- [EntitySpawnTests](../../../../test/Typhon.Engine.Tests/Data/ECS/EntitySpawnTests.cs) — shared-value `SpawnBatch` unique-key allocation, zero-value-stays-disabled semantics, commit-then-read-in-new-tx
+- [BatchOperationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/BatchOperationTests.cs) — shared-value and source-generated per-entity SoA `SpawnBatch`, archetype inheritance, `DestroyBatch` incl. cascade
+- [EntitySpawnTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/EntitySpawnTests.cs) — shared-value `SpawnBatch` unique-key allocation, zero-value-stays-disabled semantics, commit-then-read-in-new-tx
 
 ## 🔗 Related
 

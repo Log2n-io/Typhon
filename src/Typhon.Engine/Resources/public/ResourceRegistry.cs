@@ -16,7 +16,7 @@ public sealed class ResourceRegistryOptions
 
 /// <summary>
 /// Default implementation of <see cref="IResourceRegistry"/>.
-/// Creates a hierarchical tree with four subsystem nodes under Root.
+/// Builds a hierarchical tree with eight subsystem nodes under Root, created once at construction.
 /// </summary>
 /// <remarks>
 /// Tree structure:
@@ -27,8 +27,10 @@ public sealed class ResourceRegistryOptions
 /// ├── Durability/       (WAL, Checkpoint)
 /// ├── Allocation/       (MemoryAllocator, Bitmaps)
 /// ├── Synchronization/  (EpochManager, latch pools)
-/// └── Timer/            (HighResolutionSharedTimerService)
-///     └── Dedicated/    (HighResolutionTimerService instances)
+/// ├── Timer/            (HighResolutionSharedTimerService)
+/// │   └── Dedicated/    (HighResolutionTimerService instances)
+/// ├── Runtime/          (DAG scheduler, tick loop, worker pool)
+/// └── Profiler/         (Tracy-style capture pipeline)
 /// </code>
 /// </remarks>
 [PublicAPI]

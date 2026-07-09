@@ -1,3 +1,9 @@
+---
+uid: feature-runtime-declarative-scheduling-access-conflict-detection
+title: 'Access Declarations & Build-Time Conflict Detection'
+description: 'Reads/Writes/ReadsFresh/ReadsSnapshot declare what a system touches; Build() derives safe ordering and rejects unsafe overlaps.'
+---
+
 # Access Declarations & Build-Time Conflict Detection
 > Reads/Writes/ReadsFresh/ReadsSnapshot declare what a system touches; Build() derives safe ordering and rejects unsafe overlaps.
 

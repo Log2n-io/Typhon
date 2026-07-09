@@ -293,62 +293,103 @@ public static class TelemetryConfig
     public static readonly bool SpatialActive;
 
     // Subtree parents
+    /// <summary>Combined gate for the Spatial:Query subtree (AABB/radius/ray/frustum/kNN/count query spans).</summary>
     public static readonly bool SpatialQueryActive;
+    /// <summary>Combined gate for the Spatial:RTree subtree (R-tree structural mutation spans).</summary>
     public static readonly bool SpatialRTreeActive;
+    /// <summary>Combined gate for the Spatial:Grid subtree (uniform-grid cell tier/occupancy spans).</summary>
     public static readonly bool SpatialGridActive;
+    /// <summary>Combined gate for the Spatial:Cell subtree.</summary>
     public static readonly bool SpatialCellActive;
+    /// <summary>Combined gate for the Spatial:Cell:Index subtree (per-cell occupant index add/update/remove spans).</summary>
     public static readonly bool SpatialCellIndexActive;
+    /// <summary>Combined gate for the Spatial:ClusterMigration subtree (cross-cell cluster migration spans).</summary>
     public static readonly bool SpatialClusterMigrationActive;
+    /// <summary>Combined gate for the Spatial:TierIndex subtree (tier-index rebuild spans).</summary>
     public static readonly bool SpatialTierIndexActive;
+    /// <summary>Combined gate for the Spatial:Maintain subtree (index-maintenance spans on entity insert/update).</summary>
     public static readonly bool SpatialMaintainActive;
+    /// <summary>Combined gate for the Spatial:Trigger subtree (spatial-trigger region/eval spans).</summary>
     public static readonly bool SpatialTriggerActive;
+    /// <summary>Combined gate for the Spatial:Trigger:Occupant subtree.</summary>
     public static readonly bool SpatialTriggerOccupantActive;
+    /// <summary>Combined gate for the Spatial:Trigger:Cache subtree.</summary>
     public static readonly bool SpatialTriggerCacheActive;
 
     // Query leaves (kinds 117-122)
+    /// <summary>Combined gate for the Spatial:Query:Aabb span (axis-aligned bounding-box overlap query).</summary>
     public static readonly bool SpatialQueryAabbActive;
+    /// <summary>Combined gate for the Spatial:Query:Radius span (radius/sphere overlap query).</summary>
     public static readonly bool SpatialQueryRadiusActive;
+    /// <summary>Combined gate for the Spatial:Query:Ray span (ray-cast query).</summary>
     public static readonly bool SpatialQueryRayActive;
+    /// <summary>Combined gate for the Spatial:Query:Frustum span (frustum-culling query).</summary>
     public static readonly bool SpatialQueryFrustumActive;
+    /// <summary>Combined gate for the Spatial:Query:Knn span (k-nearest-neighbour query).</summary>
     public static readonly bool SpatialQueryKnnActive;
+    /// <summary>Combined gate for the Spatial:Query:Count span (count-only spatial query).</summary>
     public static readonly bool SpatialQueryCountActive;
 
     // RTree structural leaves (kinds 123-126)
+    /// <summary>Combined gate for the Spatial:RTree:Insert span.</summary>
     public static readonly bool SpatialRTreeInsertActive;
+    /// <summary>Combined gate for the Spatial:RTree:Remove span.</summary>
     public static readonly bool SpatialRTreeRemoveActive;
+    /// <summary>Combined gate for the Spatial:RTree:NodeSplit span.</summary>
     public static readonly bool SpatialRTreeNodeSplitActive;
+    /// <summary>Combined gate for the Spatial:RTree:BulkLoad span (bulk STR-pack load).</summary>
     public static readonly bool SpatialRTreeBulkLoadActive;
 
     // Grid leaves (kinds 127-129)
+    /// <summary>Combined gate for the Spatial:Grid:CellTierChange span (cell promoted/demoted between density tiers).</summary>
     public static readonly bool SpatialGridCellTierChangeActive;
+    /// <summary>Combined gate for the Spatial:Grid:OccupancyChange span.</summary>
     public static readonly bool SpatialGridOccupancyChangeActive;
+    /// <summary>Combined gate for the Spatial:Grid:ClusterCellAssign span (cluster assigned to a grid cell).</summary>
     public static readonly bool SpatialGridClusterCellAssignActive;
 
     // Cell:Index leaves (kinds 130-132)
+    /// <summary>Combined gate for the Spatial:Cell:Index:Add span.</summary>
     public static readonly bool SpatialCellIndexAddActive;
+    /// <summary>Combined gate for the Spatial:Cell:Index:Update span.</summary>
     public static readonly bool SpatialCellIndexUpdateActive;
+    /// <summary>Combined gate for the Spatial:Cell:Index:Remove span.</summary>
     public static readonly bool SpatialCellIndexRemoveActive;
 
     // ClusterMigration leaves (kinds 133-135; Execute = existing kind 60)
+    /// <summary>Combined gate for the Spatial:ClusterMigration:Detect span (migration-needed detection).</summary>
     public static readonly bool SpatialClusterMigrationDetectActive;
+    /// <summary>Combined gate for the Spatial:ClusterMigration:Queue span (migration enqueue).</summary>
     public static readonly bool SpatialClusterMigrationQueueActive;
+    /// <summary>Combined gate for the Spatial:ClusterMigration:Execute span (migration apply; legacy kind 60, on by default).</summary>
     public static readonly bool SpatialClusterMigrationExecuteActive;
+    /// <summary>Combined gate for the Spatial:ClusterMigration:Hysteresis span (hysteresis suppression of a migration).</summary>
     public static readonly bool SpatialClusterMigrationHysteresisActive;
 
     // TierIndex leaves (kinds 136-137)
+    /// <summary>Combined gate for the Spatial:TierIndex:Rebuild span.</summary>
     public static readonly bool SpatialTierIndexRebuildActive;
+    /// <summary>Combined gate for the Spatial:TierIndex:VersionSkip span (rebuild skipped because the version was unchanged).</summary>
     public static readonly bool SpatialTierIndexVersionSkipActive;
 
     // Maintain leaves (kinds 138-141)
+    /// <summary>Combined gate for the Spatial:Maintain:Insert span.</summary>
     public static readonly bool SpatialMaintainInsertActive;
+    /// <summary>Combined gate for the Spatial:Maintain:UpdateSlowPath span.</summary>
     public static readonly bool SpatialMaintainUpdateSlowPathActive;
+    /// <summary>Combined gate for the Spatial:Maintain:AabbValidate span.</summary>
     public static readonly bool SpatialMaintainAabbValidateActive;
+    /// <summary>Combined gate for the Spatial:Maintain:BackPointerWrite span.</summary>
     public static readonly bool SpatialMaintainBackPointerWriteActive;
 
     // Trigger leaves (kinds 142-145)
+    /// <summary>Combined gate for the Spatial:Trigger:Region span.</summary>
     public static readonly bool SpatialTriggerRegionActive;
+    /// <summary>Combined gate for the Spatial:Trigger:Eval span (trigger-region evaluation).</summary>
     public static readonly bool SpatialTriggerEvalActive;
+    /// <summary>Combined gate for the Spatial:Trigger:Occupant:Diff span (enter/exit occupant diff).</summary>
     public static readonly bool SpatialTriggerOccupantDiffActive;
+    /// <summary>Combined gate for the Spatial:Trigger:Cache:Invalidate span.</summary>
     public static readonly bool SpatialTriggerCacheInvalidateActive;
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -359,31 +400,49 @@ public static class TelemetryConfig
     // (UoW, Tx Lifecycle, Subscription) tracing per-leaf.
 
     // Scheduler subtree parents
+    /// <summary>Combined gate for the Scheduler:System subtree (per-system execution/queue-wait spans).</summary>
     public static readonly bool SchedulerSystemActive;
+    /// <summary>Combined gate for the Scheduler:Worker subtree (worker idle/wake spans).</summary>
     public static readonly bool SchedulerWorkerActive;
+    /// <summary>Combined gate for the Scheduler:Dispense span (work-item dispense to workers).</summary>
     public static readonly bool SchedulerDispenseActive;
+    /// <summary>Combined gate for the Scheduler:Dependency subtree (dependency-ready/fan-out spans).</summary>
     public static readonly bool SchedulerDependencyActive;
+    /// <summary>Combined gate for the Scheduler:Overload subtree (overload level-change/shed spans).</summary>
     public static readonly bool SchedulerOverloadActive;
+    /// <summary>Combined gate for the Scheduler:Graph subtree (DAG build/rebuild spans).</summary>
     public static readonly bool SchedulerGraphActive;
 
     // Scheduler:System leaves (kinds 146-149)
+    /// <summary>Combined gate for the Scheduler:System:StartExecution span.</summary>
     public static readonly bool SchedulerSystemStartExecutionActive;
+    /// <summary>Combined gate for the Scheduler:System:Completion span.</summary>
     public static readonly bool SchedulerSystemCompletionActive;
+    /// <summary>Combined gate for the Scheduler:System:QueueWait span (time a system waited in its queue before running).</summary>
     public static readonly bool SchedulerSystemQueueWaitActive;
+    /// <summary>Combined gate for the Scheduler:System:SingleThreaded span.</summary>
     public static readonly bool SchedulerSystemSingleThreadedActive;
 
     // Scheduler:Worker leaves (kinds 150-152)
+    /// <summary>Combined gate for the Scheduler:Worker:Idle span.</summary>
     public static readonly bool SchedulerWorkerIdleActive;
+    /// <summary>Combined gate for the Scheduler:Worker:Wake span.</summary>
     public static readonly bool SchedulerWorkerWakeActive;
+    /// <summary>Combined gate for the Scheduler:Worker:BetweenTick span (worker gap between ticks).</summary>
     public static readonly bool SchedulerWorkerBetweenTickActive;
 
     // Scheduler:Dependency leaves (kinds 154-155)
+    /// <summary>Combined gate for the Scheduler:Dependency:Ready span (a system's dependencies became satisfied).</summary>
     public static readonly bool SchedulerDependencyReadyActive;
+    /// <summary>Combined gate for the Scheduler:Dependency:FanOut span.</summary>
     public static readonly bool SchedulerDependencyFanOutActive;
 
     // Scheduler:Overload leaves (kinds 156-158)
+    /// <summary>Combined gate for the Scheduler:Overload:LevelChange span.</summary>
     public static readonly bool SchedulerOverloadLevelChangeActive;
+    /// <summary>Combined gate for the Scheduler:Overload:SystemShed span (a system shed under overload).</summary>
     public static readonly bool SchedulerOverloadSystemShedActive;
+    /// <summary>Combined gate for the Scheduler:Overload:TickMultiplier span.</summary>
     public static readonly bool SchedulerOverloadTickMultiplierActive;
 
     // Scheduler:Overload:Detector leaf (kind 242 — issue #289 follow-up)
@@ -406,41 +465,65 @@ public static class TelemetryConfig
     public static readonly bool SchedulerQueueTickEndActive;
 
     // Scheduler:Graph leaves (kinds 159-160)
+    /// <summary>Combined gate for the Scheduler:Graph:Build span (initial DAG build).</summary>
     public static readonly bool SchedulerGraphBuildActive;
+    /// <summary>Combined gate for the Scheduler:Graph:Rebuild span (DAG rebuild after a schema/system change).</summary>
     public static readonly bool SchedulerGraphRebuildActive;
 
     // Runtime subtree parents
+    /// <summary>Combined gate for the Runtime tracing subtree (UoW phase, transaction lifecycle, subscription spans).</summary>
     public static readonly bool RuntimeActive;
+    /// <summary>Combined gate for the Runtime:Phase subtree (unit-of-work create/flush spans).</summary>
     public static readonly bool RuntimePhaseActive;
+    /// <summary>Combined gate for the Runtime:Transaction subtree (transaction lifecycle spans).</summary>
     public static readonly bool RuntimeTransactionActive;
+    /// <summary>Combined gate for the Runtime:Subscription subtree (change-subscription delivery spans).</summary>
     public static readonly bool RuntimeSubscriptionActive;
+    /// <summary>Combined gate for the Runtime:Subscription:Output subtree (subscriber output execute/cleanup spans).</summary>
     public static readonly bool RuntimeSubscriptionOutputActive;
 
     // Runtime:Phase leaves (kinds 161-162)
+    /// <summary>Combined gate for the Runtime:Phase:UoWCreate span (unit-of-work creation).</summary>
     public static readonly bool RuntimePhaseUoWCreateActive;
+    /// <summary>Combined gate for the Runtime:Phase:UoWFlush span (unit-of-work flush).</summary>
     public static readonly bool RuntimePhaseUoWFlushActive;
 
     // Runtime:Transaction leaves (kind 163)
+    /// <summary>Combined gate for the Runtime:Transaction:Lifecycle span.</summary>
     public static readonly bool RuntimeTransactionLifecycleActive;
 
     // Runtime:Subscription leaves (Phase 4: kind 164; Phase 9: kinds 235-240)
+    /// <summary>Combined gate for the Runtime:Subscription:Output:Execute span (running a subscriber's output callback).</summary>
     public static readonly bool RuntimeSubscriptionOutputExecuteActive;
 
     // Phase 9 (#287) Subscription depth leaves
+    /// <summary>Combined gate for the Runtime:Subscription:Subscriber span (per-subscriber delivery).</summary>
     public static readonly bool RuntimeSubscriptionSubscriberActive;
+    /// <summary>Combined gate for the Runtime:Subscription:Delta:Build span (building a change delta).</summary>
     public static readonly bool RuntimeSubscriptionDeltaBuildActive;
+    /// <summary>Combined gate for the Runtime:Subscription:Delta:Serialize span (serializing a change delta).</summary>
     public static readonly bool RuntimeSubscriptionDeltaSerializeActive;
+    /// <summary>Combined gate for the Runtime:Subscription:Transition:BeginSync span.</summary>
     public static readonly bool RuntimeSubscriptionTransitionBeginSyncActive;
+    /// <summary>Combined gate for the Runtime:Subscription:Output:Cleanup span.</summary>
     public static readonly bool RuntimeSubscriptionOutputCleanupActive;
+    /// <summary>Combined gate for the Runtime:Subscription:Delta:DirtyBitmapSupplement span.</summary>
     public static readonly bool RuntimeSubscriptionDeltaDirtyBitmapSupplementActive;
 
     // Runtime:WriteTickFence subtree — per-table (251-253) + per-archetype cluster (254-256) fence spans
+    /// <summary>Combined gate for the Runtime:WriteTickFence subtree (per-table and per-archetype cluster write-fence spans).</summary>
     public static readonly bool RuntimeWriteTickFenceActive;
+    /// <summary>Combined gate for the Runtime:WriteTickFence:Table span (per-table fence cost).</summary>
     public static readonly bool RuntimeWriteTickFenceTableActive;
+    /// <summary>Combined gate for the Runtime:WriteTickFence:Shadow span (shadow-copy portion of a table fence).</summary>
     public static readonly bool RuntimeWriteTickFenceShadowActive;
+    /// <summary>Combined gate for the Runtime:WriteTickFence:Spatial span (spatial-index portion of a table fence).</summary>
     public static readonly bool RuntimeWriteTickFenceSpatialActive;
+    /// <summary>Combined gate for the Runtime:WriteTickFence:Cluster span (per-archetype cluster fence cost).</summary>
     public static readonly bool RuntimeWriteTickFenceClusterActive;
+    /// <summary>Combined gate for the Runtime:WriteTickFence:Cluster:Shadow span.</summary>
     public static readonly bool RuntimeWriteTickFenceClusterShadowActive;
+    /// <summary>Combined gate for the Runtime:WriteTickFence:Cluster:Spatial span.</summary>
     public static readonly bool RuntimeWriteTickFenceClusterSpatialActive;
 
     /// <summary>
@@ -467,20 +550,33 @@ public static class TelemetryConfig
     // Memory:AlignmentWaste (kind 172) is the only Memory event flag.
 
     // Storage subtree parents
+    /// <summary>Combined gate for the Storage tracing subtree (page-cache, segment, file-handle, occupancy-map spans).</summary>
     public static readonly bool StorageActive;
+    /// <summary>Combined gate for the Storage:PageCache subtree.</summary>
     public static readonly bool StoragePageCacheActive;
+    /// <summary>Combined gate for the Storage:Segment subtree (segment create/grow/load spans).</summary>
     public static readonly bool StorageSegmentActive;
+    /// <summary>Combined gate for the Storage:ChunkSegment subtree.</summary>
     public static readonly bool StorageChunkSegmentActive;
+    /// <summary>Combined gate for the Storage:FileHandle span (OS file-handle lifecycle).</summary>
     public static readonly bool StorageFileHandleActive;
+    /// <summary>Combined gate for the Storage:OccupancyMap subtree.</summary>
     public static readonly bool StorageOccupancyMapActive;
 
     // Storage leaves (kinds 165-171)
+    /// <summary>Combined gate for the Storage:PageCache:DirtyWalk span (walk of dirty pages during checkpoint).</summary>
     public static readonly bool StoragePageCacheDirtyWalkActive;
+    /// <summary>Combined gate for the Storage:Segment:Create span.</summary>
     public static readonly bool StorageSegmentCreateActive;
+    /// <summary>Combined gate for the Storage:Segment:Grow span.</summary>
     public static readonly bool StorageSegmentGrowActive;
+    /// <summary>Combined gate for the Storage:Segment:Load span.</summary>
     public static readonly bool StorageSegmentLoadActive;
+    /// <summary>Combined gate for the Storage:ChunkSegment:Grow span.</summary>
     public static readonly bool StorageChunkSegmentGrowActive;
+    /// <summary>Combined gate for the Storage:FileHandle span (OS file-handle open/close).</summary>
     public static readonly bool StorageFileHandleEnabledActive;
+    /// <summary>Combined gate for the Storage:OccupancyMap:Grow span.</summary>
     public static readonly bool StorageOccupancyMapGrowActive;
 
     /// <summary>
@@ -491,9 +587,11 @@ public static class TelemetryConfig
     public static readonly int StoragePageCacheCompletionThresholdMs;
 
     // Memory subtree parents
+    /// <summary>Combined gate for the Memory tracing subtree.</summary>
     public static readonly bool MemoryActive;
 
     // Memory leaves (kind 172)
+    /// <summary>Combined gate for the Memory:AlignmentWaste span (bytes lost to alignment padding on an allocation).</summary>
     public static readonly bool MemoryAlignmentWasteActive;
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -504,30 +602,49 @@ public static class TelemetryConfig
     // suppression list so that flipping the parent on doesn't drown the ring in events.
 
     // Data subtree parents
+    /// <summary>Combined gate for the Data-plane tracing subtree (transaction, MVCC, B+Tree index spans).</summary>
     public static readonly bool DataActive;
+    /// <summary>Combined gate for the Data:Transaction subtree (init/prepare/validate/conflict/cleanup spans).</summary>
     public static readonly bool DataTransactionActive;
+    /// <summary>Combined gate for the Data:MVCC subtree (version chain-walk and cleanup spans).</summary>
     public static readonly bool DataMvccActive;
+    /// <summary>Combined gate for the Data:Index subtree.</summary>
     public static readonly bool DataIndexActive;
+    /// <summary>Combined gate for the Data:Index:BTree subtree (B+Tree search/scan/mutation spans).</summary>
     public static readonly bool DataIndexBTreeActive;
 
     // Data:Transaction leaves (kinds 173-177)
+    /// <summary>Combined gate for the Data:Transaction:Init span.</summary>
     public static readonly bool DataTransactionInitActive;
+    /// <summary>Combined gate for the Data:Transaction:Prepare span.</summary>
     public static readonly bool DataTransactionPrepareActive;
+    /// <summary>Combined gate for the Data:Transaction:Validate span (commit-time conflict validation).</summary>
     public static readonly bool DataTransactionValidateActive;
+    /// <summary>Combined gate for the Data:Transaction:Conflict span (write-write conflict detected).</summary>
     public static readonly bool DataTransactionConflictActive;
+    /// <summary>Combined gate for the Data:Transaction:Cleanup span.</summary>
     public static readonly bool DataTransactionCleanupActive;
 
     // Data:MVCC leaves (kinds 178-179)
+    /// <summary>Combined gate for the Data:MVCC:ChainWalk span (walking a version chain to the visible revision).</summary>
     public static readonly bool DataMvccChainWalkActive;
+    /// <summary>Combined gate for the Data:MVCC:VersionCleanup span (reclaiming obsolete versions).</summary>
     public static readonly bool DataMvccVersionCleanupActive;
 
     // Data:Index:BTree leaves (kinds 180-186)
+    /// <summary>Combined gate for the Data:Index:BTree:Search span (point lookup).</summary>
     public static readonly bool DataIndexBTreeSearchActive;
+    /// <summary>Combined gate for the Data:Index:BTree:RangeScan span.</summary>
     public static readonly bool DataIndexBTreeRangeScanActive;
+    /// <summary>Combined gate for the Data:Index:BTree:RangeScan:Revalidate span (optimistic scan revalidation after a version change).</summary>
     public static readonly bool DataIndexBTreeRangeScanRevalidateActive;
+    /// <summary>Combined gate for the Data:Index:BTree:RebalanceFallback span (fallback to a pessimistic rebalance).</summary>
     public static readonly bool DataIndexBTreeRebalanceFallbackActive;
+    /// <summary>Combined gate for the Data:Index:BTree:BulkInsert span.</summary>
     public static readonly bool DataIndexBTreeBulkInsertActive;
+    /// <summary>Combined gate for the Data:Index:BTree:Root span (root split/replace).</summary>
     public static readonly bool DataIndexBTreeRootActive;
+    /// <summary>Combined gate for the Data:Index:BTree:NodeCow span (copy-on-write of a B+Tree node).</summary>
     public static readonly bool DataIndexBTreeNodeCowActive;
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -535,47 +652,81 @@ public static class TelemetryConfig
     // ═══════════════════════════════════════════════════════════════════════════
 
     // Query subtree parents
+    /// <summary>Combined gate for the Query tracing subtree (parse/plan/execute spans).</summary>
     public static readonly bool QueryActive;
+    /// <summary>Combined gate for the Query:Parse subtree (query-string parsing spans).</summary>
     public static readonly bool QueryParseActive;
+    /// <summary>Combined gate for the Query:Plan subtree (planning/optimization spans).</summary>
     public static readonly bool QueryPlanActive;
+    /// <summary>Combined gate for the Query:Execute subtree (execution spans).</summary>
     public static readonly bool QueryExecuteActive;
 
     // Query leaves (kinds 187-198)
+    /// <summary>Combined gate for the Query:Parse leaf span (same gate as <see cref="QueryParseActive"/>).</summary>
     public static readonly bool QueryParseEnabledActive;
+    /// <summary>Combined gate for the Query:Parse:DNF span (disjunctive-normal-form conversion).</summary>
     public static readonly bool QueryParseDnfActive;
+    /// <summary>Combined gate for the Query:Plan leaf span (same gate as <see cref="QueryPlanActive"/>).</summary>
     public static readonly bool QueryPlanEnabledActive;
+    /// <summary>Combined gate for the Query:Estimate span (cardinality/cost estimation).</summary>
     public static readonly bool QueryEstimateActive;
+    /// <summary>Combined gate for the Query:Plan:PrimarySelect span (primary access-path selection).</summary>
     public static readonly bool QueryPlanPrimarySelectActive;
+    /// <summary>Combined gate for the Query:Plan:Sort span (sort planning).</summary>
     public static readonly bool QueryPlanSortActive;
+    /// <summary>Combined gate for the Query:Execute:IndexScan span.</summary>
     public static readonly bool QueryExecuteIndexScanActive;
+    /// <summary>Combined gate for the Query:Execute:Iterate span (result iteration).</summary>
     public static readonly bool QueryExecuteIterateActive;
+    /// <summary>Combined gate for the Query:Execute:Filter span (residual predicate filtering).</summary>
     public static readonly bool QueryExecuteFilterActive;
+    /// <summary>Combined gate for the Query:Execute:Pagination span (skip/take pagination).</summary>
     public static readonly bool QueryExecutePaginationActive;
+    /// <summary>Combined gate for the Query:Execute:StorageMode span (per-storage-mode execution path).</summary>
     public static readonly bool QueryExecuteStorageModeActive;
+    /// <summary>Combined gate for the Query:Count span (count-only execution).</summary>
     public static readonly bool QueryCountActive;
 
     // ECS subtree parents (and depth from Phase 7)
+    /// <summary>Combined gate for the ECS tracing subtree (query-construction and view-maintenance spans).</summary>
     public static readonly bool EcsActive;
+    /// <summary>Combined gate for the ECS:Query subtree (archetype-query construction spans).</summary>
     public static readonly bool EcsQueryActive;
+    /// <summary>Combined gate for the ECS:View subtree (materialized-view refresh spans).</summary>
     public static readonly bool EcsViewActive;
 
     // ECS:Query depth leaves (kinds 199-203)
+    /// <summary>Combined gate for the ECS:Query:Construct span (query object construction).</summary>
     public static readonly bool EcsQueryConstructActive;
+    /// <summary>Combined gate for the ECS:Query:MaskAnd span (component-mask AND intersection).</summary>
     public static readonly bool EcsQueryMaskAndActive;
+    /// <summary>Combined gate for the ECS:Query:SubtreeExpand span (archetype-subtree expansion).</summary>
     public static readonly bool EcsQuerySubtreeExpandActive;
+    /// <summary>Combined gate for the ECS:Query:Constraint:Enabled span (enabled-constraint evaluation).</summary>
     public static readonly bool EcsQueryConstraintEnabledActive;
+    /// <summary>Combined gate for the ECS:Query:Spatial:Attach span (attaching a spatial constraint to a query).</summary>
     public static readonly bool EcsQuerySpatialAttachActive;
 
     // ECS:View depth leaves (kinds 204-213)
+    /// <summary>Combined gate for the ECS:View:RefreshPull span (pull-based view refresh).</summary>
     public static readonly bool EcsViewRefreshPullActive;
+    /// <summary>Combined gate for the ECS:View:IncrementalDrain span (draining buffered deltas into a view).</summary>
     public static readonly bool EcsViewIncrementalDrainActive;
+    /// <summary>Combined gate for the ECS:View:DeltaBuffer:Overflow span (delta buffer overflowed, forcing a full refresh).</summary>
     public static readonly bool EcsViewDeltaBufferOverflowActive;
+    /// <summary>Combined gate for the ECS:View:ProcessEntry span (processing one view entry).</summary>
     public static readonly bool EcsViewProcessEntryActive;
+    /// <summary>Combined gate for the ECS:View:ProcessEntryOr span (processing an OR-clause view entry).</summary>
     public static readonly bool EcsViewProcessEntryOrActive;
+    /// <summary>Combined gate for the ECS:View:RefreshFull span (full view rebuild).</summary>
     public static readonly bool EcsViewRefreshFullActive;
+    /// <summary>Combined gate for the ECS:View:RefreshFullOr span (full rebuild of an OR-clause view).</summary>
     public static readonly bool EcsViewRefreshFullOrActive;
+    /// <summary>Combined gate for the ECS:View:Registry:Register span (view registration).</summary>
     public static readonly bool EcsViewRegistryRegisterActive;
+    /// <summary>Combined gate for the ECS:View:Registry:Deregister span (view deregistration).</summary>
     public static readonly bool EcsViewRegistryDeregisterActive;
+    /// <summary>Combined gate for the ECS:View:DeltaCache:Miss span (delta-cache miss).</summary>
     public static readonly bool EcsViewDeltaCacheMissActive;
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -583,38 +734,63 @@ public static class TelemetryConfig
     // ═══════════════════════════════════════════════════════════════════════════
 
     // Durability subtree parents
+    /// <summary>Combined gate for the Durability tracing subtree (WAL, checkpoint, recovery, UoW spans).</summary>
     public static readonly bool DurabilityActive;
+    /// <summary>Combined gate for the Durability:WAL subtree (write-ahead-log spans).</summary>
     public static readonly bool DurabilityWalActive;
+    /// <summary>Combined gate for the Durability:Checkpoint subtree (checkpoint spans).</summary>
     public static readonly bool DurabilityCheckpointActive;
+    /// <summary>Combined gate for the Durability:Recovery subtree (crash-recovery spans).</summary>
     public static readonly bool DurabilityRecoveryActive;
+    /// <summary>Combined gate for the Durability:UoW subtree (unit-of-work durability spans).</summary>
     public static readonly bool DurabilityUowActive;
 
     // Durability:WAL leaves (kinds 214-221)
+    /// <summary>Combined gate for the Durability:WAL:QueueDrain span (draining the commit queue to the WAL writer).</summary>
     public static readonly bool DurabilityWalQueueDrainActive;
+    /// <summary>Combined gate for the Durability:WAL:OsWrite span (OS write of a WAL buffer).</summary>
     public static readonly bool DurabilityWalOsWriteActive;
+    /// <summary>Combined gate for the Durability:WAL:Signal span (post-flush signal to waiting committers).</summary>
     public static readonly bool DurabilityWalSignalActive;
+    /// <summary>Combined gate for the Durability:WAL:GroupCommit span (group-commit batch).</summary>
     public static readonly bool DurabilityWalGroupCommitActive;
+    /// <summary>Combined gate for the Durability:WAL:Queue span (commit-queue enqueue).</summary>
     public static readonly bool DurabilityWalQueueActive;
+    /// <summary>Combined gate for the Durability:WAL:Buffer span (WAL buffer fill/rotate).</summary>
     public static readonly bool DurabilityWalBufferActive;
+    /// <summary>Combined gate for the Durability:WAL:Frame span (per-frame WAL encoding).</summary>
     public static readonly bool DurabilityWalFrameActive;
+    /// <summary>Combined gate for the Durability:WAL:Backpressure span (commit throttled by WAL backpressure).</summary>
     public static readonly bool DurabilityWalBackpressureActive;
 
     // Durability:Checkpoint depth (kinds 222-224)
+    /// <summary>Combined gate for the Durability:Checkpoint:WriteBatch span (writing a batch of dirty pages).</summary>
     public static readonly bool DurabilityCheckpointWriteBatchActive;
+    /// <summary>Combined gate for the Durability:Checkpoint:Backpressure span (checkpoint throttled by backpressure).</summary>
     public static readonly bool DurabilityCheckpointBackpressureActive;
+    /// <summary>Combined gate for the Durability:Checkpoint:Sleep span (checkpoint pacing sleep).</summary>
     public static readonly bool DurabilityCheckpointSleepActive;
 
     // Durability:Recovery leaves (kinds 225-232)
+    /// <summary>Combined gate for the Durability:Recovery:Start span (recovery session start).</summary>
     public static readonly bool DurabilityRecoveryStartActive;
+    /// <summary>Combined gate for the Durability:Recovery:Discover span (discovering WAL segments to replay).</summary>
     public static readonly bool DurabilityRecoveryDiscoverActive;
+    /// <summary>Combined gate for the Durability:Recovery:Segment span (replaying one WAL segment).</summary>
     public static readonly bool DurabilityRecoverySegmentActive;
+    /// <summary>Combined gate for the Durability:Recovery:Record span (applying one WAL record).</summary>
     public static readonly bool DurabilityRecoveryRecordActive;
+    /// <summary>Combined gate for the Durability:Recovery:Redo span (redo pass).</summary>
     public static readonly bool DurabilityRecoveryRedoActive;
+    /// <summary>Combined gate for the Durability:Recovery:Undo span (undo of uncommitted effects).</summary>
     public static readonly bool DurabilityRecoveryUndoActive;
+    /// <summary>Combined gate for the Durability:Recovery:TickFence span (replaying a write-tick fence boundary).</summary>
     public static readonly bool DurabilityRecoveryTickFenceActive;
 
     // Durability:UoW leaves (kinds 233-234)
+    /// <summary>Combined gate for the Durability:UoW:State span (unit-of-work state transition).</summary>
     public static readonly bool DurabilityUowStateActive;
+    /// <summary>Combined gate for the Durability:UoW:Deadline span (unit-of-work deadline check).</summary>
     public static readonly bool DurabilityUowDeadlineActive;
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -636,7 +812,7 @@ public static class TelemetryConfig
     /// <summary>
     /// The profiler launch config resolved from the file/environment layer only — <c>typhon.telemetry.json</c> plus <c>TYPHON__PROFILER__*</c> variables. The
     /// process command line is deliberately NOT read here: a host parses its own arguments and injects the launch config through DI (<c>AddTyphonProfiler</c>),
-    /// which <see cref="ProfilerBootstrap"/> merges on top of this. An active value here also turns <see cref="ProfilerActive"/> on — declaring an output
+    /// which <see cref="Typhon.Engine.internals.ProfilerBootstrap"/> merges on top of this. An active value here also turns <see cref="ProfilerActive"/> on — declaring an output
     /// channel in config enables the profiler.
     /// </summary>
     internal static readonly ProfilerLaunchConfig ProfilerLaunch;

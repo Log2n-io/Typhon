@@ -1,3 +1,9 @@
+---
+uid: feature-profiler-unmanaged-allocation-tracing
+title: 'Unmanaged Memory Allocation Tracing'
+description: 'See every native (unmanaged) allocation and free on the profiler timeline, tagged by subsystem.'
+---
+
 # Unmanaged Memory Allocation Tracing
 > See every native (unmanaged) allocation and free on the profiler timeline, tagged by subsystem.
 
@@ -73,7 +79,7 @@ into.
 
 ## 🧪 Tests
 
-- [MemoryAllocatorInstrumentationTests](../../../test/Typhon.Engine.Tests/Memory/MemoryAllocatorInstrumentationTests.cs) — pinned-byte/live-block counters, source-tag propagation, managed-vs-pinned accounting separation (the counter half the gauge track reads; the gated event-emit half is off by default in tests)
+- [MemoryAllocatorInstrumentationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Memory/MemoryAllocatorInstrumentationTests.cs) — pinned-byte/live-block counters, source-tag propagation, managed-vs-pinned accounting separation (the counter half the gauge track reads; the gated event-emit half is off by default in tests)
 
 ## 🔗 Related
 

@@ -8,83 +8,120 @@ using System.Text;
 
 namespace Typhon.Schema.Definition;
 
+/// <summary>Single-precision 2D point / vector.</summary>
 [PublicAPI]
 public struct Point2F
 {
+    /// <summary>X coordinate.</summary>
     public float X;
+    /// <summary>Y coordinate.</summary>
     public float Y;
 }
 
+/// <summary>Single-precision 3D point / vector.</summary>
 [PublicAPI]
 public struct Point3F
 {
+    /// <summary>X coordinate.</summary>
     public float X;
+    /// <summary>Y coordinate.</summary>
     public float Y;
+    /// <summary>Z coordinate.</summary>
     public float Z;
 }
 
+/// <summary>Single-precision 4D point / vector (homogeneous coordinates).</summary>
 [PublicAPI]
 public struct Point4F
 {
+    /// <summary>X coordinate.</summary>
     public float X;
-    public float Y; 
+    /// <summary>Y coordinate.</summary>
+    public float Y;
+    /// <summary>Z coordinate.</summary>
     public float Z;
+    /// <summary>W coordinate.</summary>
     public float W;
 }
 
+/// <summary>Double-precision 2D point / vector.</summary>
 [PublicAPI]
 public struct Point2D
 {
+    /// <summary>X coordinate.</summary>
     public double X;
+    /// <summary>Y coordinate.</summary>
     public double Y;
 }
 
+/// <summary>Double-precision 3D point / vector.</summary>
 [PublicAPI]
 public struct Point3D
 {
+    /// <summary>X coordinate.</summary>
     public double X;
+    /// <summary>Y coordinate.</summary>
     public double Y;
+    /// <summary>Z coordinate.</summary>
     public double Z;
 }
 
+/// <summary>Double-precision 4D point / vector (homogeneous coordinates).</summary>
 [PublicAPI]
 public struct Point4D
 {
+    /// <summary>X coordinate.</summary>
     public double X;
+    /// <summary>Y coordinate.</summary>
     public double Y;
+    /// <summary>Z coordinate.</summary>
     public double Z;
+    /// <summary>W coordinate.</summary>
     public double W;
 }
 
+/// <summary>Single-precision quaternion. <see cref="X"/>, <see cref="Y"/>, <see cref="Z"/> are the vector part; <see cref="W"/> is the scalar part.</summary>
 [PublicAPI]
 public struct QuaternionF
 {
+    /// <summary>X component of the vector part.</summary>
     public float X;
+    /// <summary>Y component of the vector part.</summary>
     public float Y;
+    /// <summary>Z component of the vector part.</summary>
     public float Z;
+    /// <summary>W scalar component.</summary>
     public float W;
 }
 
+/// <summary>Double-precision quaternion. <see cref="X"/>, <see cref="Y"/>, <see cref="Z"/> are the vector part; <see cref="W"/> is the scalar part.</summary>
 [PublicAPI]
 public struct QuaternionD
 {
+    /// <summary>X component of the vector part.</summary>
     public double X;
+    /// <summary>Y component of the vector part.</summary>
     public double Y;
+    /// <summary>Z component of the vector part.</summary>
     public double Z;
+    /// <summary>W scalar component.</summary>
     public double W;
 }
 
+/// <summary>Marker type for a variable-length string field (<see cref="FieldType.String"/>); its payload lives in the component's variable-size buffer, not inline.</summary>
 public struct VarString
 {
 
 }
 
+/// <summary>A fixed 1024-byte inline UTF-8 string buffer — a blittable, fixed-size component field that stores its characters in place (no heap allocation).</summary>
 [PublicAPI]
 public unsafe struct String1024
 {
     private const int Size = 1024;
     private fixed byte _data[1024];
 
+    /// <summary>Gets or sets the string value, encoded as inline UTF-8 and null-terminated. The setter truncates input that does not fit the buffer.</summary>
     public string AsString
     {
         get
@@ -104,12 +141,12 @@ public unsafe struct String1024
                 var sizeRequired = Encoding.UTF8.GetByteCount(c, inLength);
                 if (sizeRequired < Size)
                 {
-                    var l = Encoding.UTF8.GetBytes(c, inLength, a, 63);
+                    var l = Encoding.UTF8.GetBytes(c, inLength, a, Size - 1);
                     a[l] = 0;            // Null terminator
                 }
                 else
                 {
-                    Span<byte> buffer = stackalloc byte[sizeRequired];
+                    Span<byte> buffer = (sizeRequired < 4096) ? stackalloc byte[sizeRequired] : new byte[sizeRequired];
                     Encoding.UTF8.GetBytes(value.AsSpan(), buffer);
                     Span<byte> d = new Span<byte>(a, Size);
                     buffer.Slice(0, Size).CopyTo(d);
@@ -120,6 +157,10 @@ public unsafe struct String1024
     }
 }
 
+/// <summary>
+/// A fixed 64-byte inline UTF-8 string buffer — a blittable, fixed-size component field that stores up to 63 bytes plus a null terminator in place (no heap
+/// allocation). Input that does not fit is truncated to the buffer size. Comparison, equality, and hashing operate byte-wise over the inline buffer.
+/// </summary>
 [PublicAPI]
 [DebuggerDisplay("String: {AsString}")]
 public unsafe struct String64 : IComparable<String64>, IEquatable<String64>
@@ -140,6 +181,7 @@ public unsafe struct String64 : IComparable<String64>, IEquatable<String64>
         }
     }
 
+    /// <summary>Returns a pointer to the first byte of the 64-byte inline buffer for read/write access. Valid only while the containing storage stays fixed in memory.</summary>
     public byte* GetStringContentAddr()
     {
         fixed (byte* a = _data)
@@ -148,6 +190,7 @@ public unsafe struct String64 : IComparable<String64>, IEquatable<String64>
         }
     }
 
+    /// <summary>Read-only counterpart of <see cref="GetStringContentAddr"/>, callable on a <c>readonly</c> instance. Valid only while the containing storage stays fixed in memory.</summary>
     public readonly byte* GetStringContentAddrReaOnly()
     {
         fixed (byte* a = _data)
@@ -156,6 +199,7 @@ public unsafe struct String64 : IComparable<String64>, IEquatable<String64>
         }
     }
 
+    /// <summary>Exposes the 64-byte inline buffer as a mutable <see cref="Span{T}"/> of bytes. Valid only while the containing storage stays fixed in memory.</summary>
     public Span<byte> AsSpan()
     {
         fixed (byte* a = _data)
@@ -164,6 +208,7 @@ public unsafe struct String64 : IComparable<String64>, IEquatable<String64>
         }
     }
 
+    /// <summary>Exposes the 64-byte inline buffer as a <see cref="ReadOnlySpan{T}"/> of bytes. Valid only while the containing storage stays fixed in memory.</summary>
     public readonly ReadOnlySpan<byte> AsReadOnlySpan()
     {
         fixed (byte* a = _data)
@@ -172,8 +217,10 @@ public unsafe struct String64 : IComparable<String64>, IEquatable<String64>
         }
     }
 
+    /// <summary>Creates a <see cref="String64"/> from a managed string, encoding it as inline UTF-8 (truncated to fit the 64-byte buffer).</summary>
     public static implicit operator String64(string str) => new() { AsString = str };
 
+    /// <summary>Gets or sets the string value, encoded as inline UTF-8 and null-terminated. The setter truncates input that does not fit the 64-byte buffer.</summary>
     public string AsString
     {
         get
@@ -193,7 +240,7 @@ public unsafe struct String64 : IComparable<String64>, IEquatable<String64>
                 var sizeRequired = Encoding.UTF8.GetByteCount(c, inLength);
                 if (sizeRequired < Size)
                 {
-                    var l = Encoding.UTF8.GetBytes(c, inLength, a, 63);
+                    var l = Encoding.UTF8.GetBytes(c, inLength, a, Size - 1);
                     a[l] = 0;            // Null terminator
                 }
                 else
@@ -315,15 +362,25 @@ public unsafe struct String64 : IComparable<String64>, IEquatable<String64>
         }
     }
 
+    /// <summary>Ordinal byte-wise comparison of the two inline buffers.</summary>
+    /// <param name="other">The value to compare against.</param>
+    /// <returns>Negative, zero, or positive per lexicographic byte ordering.</returns>
     public int CompareTo(String64 other) => AsSpan().SequenceCompareTo(other.AsSpan());
 
+    /// <summary>Byte-wise equality of the two inline buffers.</summary>
+    /// <param name="other">The value to compare against.</param>
+    /// <returns><c>true</c> when the buffers are byte-for-byte equal.</returns>
     public bool Equals(String64 other) => other.AsSpan().SequenceEqual(AsSpan());
 
+    /// <summary>Byte-wise equality; <c>false</c> when <paramref name="obj"/> is not a <see cref="String64"/>.</summary>
     public override bool Equals(object obj) => obj is String64 other && Equals(other);
 
+    /// <summary>32-bit <see cref="MurmurHash2"/> over the inline buffer bytes.</summary>
     public override int GetHashCode() => (int)MurmurHash2.Hash(AsSpan());
 
+    /// <summary>Byte-wise equality.</summary>
     public static bool operator ==(String64 left, String64 right) => left.Equals(right);
 
+    /// <summary>Byte-wise inequality.</summary>
     public static bool operator !=(String64 left, String64 right) => !left.Equals(right);
 }

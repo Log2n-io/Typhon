@@ -1,3 +1,9 @@
+---
+uid: feature-querying-execution-planning-pipeline
+title: 'Execution Planning & Pipeline Execution'
+description: 'Picks the most selective index as the scan driver and streams results into your collection — no full-table scans, minimal allocation.'
+---
+
 # Execution Planning & Pipeline Execution
 > Picks the most selective index as the scan driver and streams results into your collection — no full-table scans, minimal allocation.
 
@@ -56,9 +62,9 @@ Console.WriteLine(view.ExecutionPlan);
 
 ## 🧪 Tests
 
-- [PlanBuilderAndExecutorTests](../../../test/Typhon.Engine.Tests/Data/Query/PlanBuilderAndExecutorTests.cs) — selectivity-ascending predicate ordering, tie-breaking, `OrderBy`-pins-primary-scan, `ExecutionPlan.ToString()` diagnostics
-- [PipelineExecutorCombinedPathTests](../../../test/Typhon.Engine.Tests/Data/Query/PipelineExecutorCombinedPathTests.cs) — fused `Count()` path, dual-bound range scans, and MVCC-snapshot-isolated plan execution on Versioned/SV storage
-- [FieldEvaluatorTests](../../../test/Typhon.Engine.Tests/Data/Query/FieldEvaluatorTests.cs) — the compiled `FieldEvaluator` struct's per-`CompareOp`/`KeyType` correctness that the hot-path filter chain runs
+- [PlanBuilderAndExecutorTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/Query/PlanBuilderAndExecutorTests.cs) — selectivity-ascending predicate ordering, tie-breaking, `OrderBy`-pins-primary-scan, `ExecutionPlan.ToString()` diagnostics
+- [PipelineExecutorCombinedPathTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/Query/PipelineExecutorCombinedPathTests.cs) — fused `Count()` path, dual-bound range scans, and MVCC-snapshot-isolated plan execution on Versioned/SV storage
+- [FieldEvaluatorTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/Query/FieldEvaluatorTests.cs) — the compiled `FieldEvaluator` struct's per-`CompareOp`/`KeyType` correctness that the hot-path filter chain runs
 
 ## 🔗 Related
 

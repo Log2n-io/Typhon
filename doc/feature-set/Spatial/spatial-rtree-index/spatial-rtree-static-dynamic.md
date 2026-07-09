@@ -1,3 +1,9 @@
+---
+uid: feature-spatial-spatial-rtree-index-spatial-rtree-static-dynamic
+title: 'Static / Dynamic Tree Separation'
+description: 'A component''s spatial field lands in one of two independent R-Trees — tick-fence-exempt static, or fat-AABB-maintained dynamic — chosen once at schema time.'
+---
+
 # Static / Dynamic Tree Separation
 > A component's spatial field lands in one of two independent R-Trees — tick-fence-exempt static, or fat-AABB-maintained dynamic — chosen once at schema time.
 
@@ -56,13 +62,13 @@ dbe.WriteTickFence(tickNumber);   // never visits TerrainPiece's static tree —
 
 ## 🧪 Tests
 
-- [SpatialEcsIntegrationTests](../../../../test/Typhon.Engine.Tests/Data/SpatialIndex/SpatialEcsIntegrationTests.cs) — `Schema_StaticMode_SetsFieldInfoMode`/`Schema_DefaultMode_IsDynamic` (mode selection at registration), `StaticComponent_InsertAndQuery`/`StaticComponent_Remove_Works`, `StaticComponent_TickFenceSkipped` (unconditional maintenance skip)
-- [SpatialBulkLoadTests](../../../../test/Typhon.Engine.Tests/Data/SpatialIndex/SpatialBulkLoadTests.cs) — the internal STR `SpatialRTree.BulkLoad` primitive: valid-tree construction, query correctness vs brute force, category-mask filtering
+- [SpatialEcsIntegrationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/SpatialIndex/SpatialEcsIntegrationTests.cs) — `Schema_StaticMode_SetsFieldInfoMode`/`Schema_DefaultMode_IsDynamic` (mode selection at registration), `StaticComponent_InsertAndQuery`/`StaticComponent_Remove_Works`, `StaticComponent_TickFenceSkipped` (unconditional maintenance skip)
+- [SpatialBulkLoadTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/SpatialIndex/SpatialBulkLoadTests.cs) — the internal STR `SpatialRTree.BulkLoad` primitive: valid-tree construction, query correctness vs brute force, category-mask filtering
 
 ## 🔗 Related
 
-- Source: [src/Typhon.Engine/Spatial/internals/SpatialIndexState.cs](../../../../src/Typhon.Engine/Spatial/internals/SpatialIndexState.cs)
-- Source: [src/Typhon.Engine/Spatial/internals/SpatialRTree.BulkLoad.cs](../../../../src/Typhon.Engine/Spatial/internals/SpatialRTree.BulkLoad.cs) (internal STR construction primitive)
+- Source: [src/Typhon.Engine/Spatial/internals/SpatialIndexState.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/SpatialIndexState.cs)
+- Source: [src/Typhon.Engine/Spatial/internals/SpatialRTree.BulkLoad.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/SpatialRTree.BulkLoad.cs) (internal STR construction primitive)
 - Parent feature: [Spatial R-Tree Index](./README.md)
 - Sibling: [Fat-AABB Incremental Update](../fat-aabb-update.md) — only `Dynamic`-mode fields (this feature's default) receive fat-AABB maintenance; `Static` fields never do
 - Sibling: [Spatial Query API](../spatial-query-api.md) — querying is identical regardless of which tree a field's mode lands it in

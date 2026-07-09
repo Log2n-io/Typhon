@@ -1,3 +1,9 @@
+---
+uid: feature-storage-vsbs
+title: 'Variable-Sized Buffer Storage (VSBS)'
+description: 'Linked-chunk buffer storage for variable-length, ref-counted data — the substrate behind per-entity collections and multi-value indexes.'
+---
+
 # Variable-Sized Buffer Storage (VSBS)
 > Linked-chunk buffer storage for variable-length, ref-counted data — the substrate behind per-entity collections and multi-value indexes.
 
@@ -56,8 +62,8 @@ foreach (var itemId in rt.GetReadOnlyCollectionEnumerator(ref loaded.Inventory))
 
 ## 🧪 Tests
 
-- [ComponentCollectionTests](../../../test/Typhon.Engine.Tests/Data/ComponentCollectionTests.cs) — create/read/update, `RefCounter` sharing, copy-on-write clone-on-first-write, destroy frees the buffer
-- [ManagedPagedMMFTests](../../../test/Typhon.Engine.Tests/Storage/ManagedPagedMMFTests.cs) — low-level `VariableSizedBufferSegment` chain allocation, buffer cloning, and delete mechanics
+- [ComponentCollectionTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ComponentCollectionTests.cs) — create/read/update, `RefCounter` sharing, copy-on-write clone-on-first-write, destroy frees the buffer
+- [ManagedPagedMMFTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Storage/ManagedPagedMMFTests.cs) — low-level `VariableSizedBufferSegment` chain allocation, buffer cloning, and delete mechanics
 
 ## 🔗 Related
 

@@ -1,3 +1,9 @@
+---
+uid: feature-transactions-bulk-load-session
+title: 'Bulk Load Session'
+description: 'An opt-in, exclusive write path that batches writes through a recycled Transaction and commits the whole load atomically.'
+---
+
 # Bulk Load Session
 > An opt-in, exclusive write path that batches writes through a recycled Transaction and commits the whole load atomically.
 
@@ -58,12 +64,12 @@ session.CompleteBulkLoad();   // blocks: commit + forced checkpoint + manifest d
 - **Concurrent readers unaffected** — regular `UnitOfWork`s keep running during the session and see the pre-bulk MVCC snapshot throughout.
 
 ## 🧪 Tests
-- [BulkLoadApiSurfaceTests](../../../test/Typhon.Engine.Tests/Durability/BulkLoadApiSurfaceTests.cs) — session
+- [BulkLoadApiSurfaceTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/BulkLoadApiSurfaceTests.cs) — session
   API shape: exclusivity (`BeginBulkLoad_TwiceWithoutClosing_Throws`), closed-session guards, option defaults
-- [BulkLoadWriteTests](../../../test/Typhon.Engine.Tests/Durability/BulkLoadWriteTests.cs) — entities visible only
+- [BulkLoadWriteTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/BulkLoadWriteTests.cs) — entities visible only
   after `CompleteBulkLoad`, exactly-one bulk-begin/bulk-end WAL record pair (no per-row records), transaction-recycle
   threshold crossing
-- [BulkLoadRecoveryTests](../../../test/Typhon.Engine.Tests/Durability/BulkLoadRecoveryTests.cs) — crash after
+- [BulkLoadRecoveryTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/BulkLoadRecoveryTests.cs) — crash after
   bulk-begin loses everything, crash after `CompleteBulkLoad` survives reopen in full
 
 ## 🔗 Related

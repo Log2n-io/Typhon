@@ -1,0 +1,47 @@
+{
+  "metadata": [
+    {
+      "comment": "API is read from BUILT assemblies + XML docs (staged by scripts/stage-api-bin.sh), NOT recompiled from source — source-generated attributes (TraceEvent, BeginParam) are invisible to DocFX's Roslyn and would fail the source compile. Run a dotnet build + stage-api-bin before docfx.",
+      "src": [
+        {
+          "files": [
+            "Typhon.Engine.dll",
+            "Typhon.Profiler.dll",
+            "Typhon.Protocol.dll",
+            "Typhon.Schema.Definition.dll"
+          ],
+          "src": ".api-bin"
+        }
+      ],
+      "dest": "api",
+      "filter": "filterConfig.yml"
+    }
+  ],
+  "build": {
+    "content": [
+      { "files": ["toc.yml", "index.md"] },
+      { "files": ["api/**.yml", "api/index.md"] },
+      { "files": ["**.md", "toc.yml"], "src": "in-depth-overview", "dest": "overview" },
+      { "files": ["**.md", "toc.yml"], "src": "guide", "dest": "guides", "exclude": ["example/**"] },
+      { "files": ["**.md", "toc.yml"], "src": "feature-set", "dest": "guides/feature-catalog" },
+      { "files": ["**.md", "toc.yml"], "src": "tools", "dest": "tools" },
+      { "files": ["**.md", "toc.yml"], "src": "demos", "dest": "demos" },
+      { "files": ["**.md", "toc.yml"], "src": "../benchmark/reports", "dest": "benchmarks" }
+    ],
+    "resource": [
+      { "files": ["assets/**"], "src": "in-depth-overview", "dest": "overview" },
+      { "files": ["charts/**"], "src": "../benchmark/reports", "dest": "benchmarks" }
+    ],
+    "template": [
+      "default",
+      "modern"
+    ],
+    "globalMetadata": {
+      "_appName": "Typhon",
+      "_appTitle": "Typhon Documentation",
+      "_appFooter": "© 2026 Log2n",
+      "_enableSearch": true
+    },
+    "dest": "_site"
+  }
+}

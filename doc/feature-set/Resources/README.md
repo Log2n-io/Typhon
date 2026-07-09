@@ -1,3 +1,9 @@
+---
+uid: feature-resources-index
+title: 'Resources'
+description: 'A runtime resource graph that tracks every significant engine resource (storage, transactions, durability, allocation, synchronization, timers, runtime,…'
+---
+
 # Resources
 > A runtime resource graph that tracks every significant engine resource (storage, transactions, durability, allocation, synchronization, timers, runtime, profiler) in a fixed 8-branch hierarchical tree, lets components report metrics/budgets/debug detail through a handful of pull-based interfaces, and exposes point-in-time snapshots with query and root-cause helpers for diagnostics, monitoring, and exhaustion handling.
 

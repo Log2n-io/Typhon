@@ -1,3 +1,9 @@
+---
+uid: feature-foundation-epoch-based-resource-protection
+title: 'Epoch-Based Resource Protection'
+description: 'Lock-free scheme that keeps in-flight cache pages alive with 2 obligations per transaction, not per-page ref-counting.'
+---
+
 # Epoch-Based Resource Protection
 > Lock-free scheme that keeps in-flight cache pages alive with 2 obligations per transaction, not per-page ref-counting.
 
@@ -48,8 +54,8 @@ int liveThreads = epochs.ActiveSlotCount;
 - Page reclamation under heavy, sustained concurrency can lag further behind than a ref-counted scheme would, trading some extra cache pressure for the lock-free guarantee.
 
 ## 🧪 Tests
-- [EpochManagerTests](../../../test/Typhon.Engine.Tests/Concurrency/EpochManagerTests.cs) — enter/exit scope epoch advancement, nested scopes, `MinActiveEpoch` across multiple threads, thread-death slot reclamation, registry exhaustion.
-- [EpochPageCacheTests](../../../test/Typhon.Engine.Tests/Storage/EpochPageCacheTests.cs) — epoch-tagged pages surviving eviction while a scope is active, eviction unblocked after scope exit.
+- [EpochManagerTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Concurrency/EpochManagerTests.cs) — enter/exit scope epoch advancement, nested scopes, `MinActiveEpoch` across multiple threads, thread-death slot reclamation, registry exhaustion.
+- [EpochPageCacheTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Storage/EpochPageCacheTests.cs) — epoch-tagged pages surviving eviction while a scope is active, eviction unblocked after scope exit.
 
 ## 🔗 Related
 

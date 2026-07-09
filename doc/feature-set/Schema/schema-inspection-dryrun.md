@@ -1,3 +1,9 @@
+---
+uid: feature-schema-schema-inspection-dryrun
+title: 'Offline Schema Inspection & Dry-Run Validation'
+description: 'Read a database''s persisted schema, or simulate a code upgrade against it, without opening it for real.'
+---
+
 # Offline Schema Inspection & Dry-Run Validation
 > Read a database's persisted schema, or simulate a code upgrade against it, without opening it for real.
 
@@ -50,7 +56,7 @@ if (!result.IsValid)
 
 ## 🧪 Tests
 
-- [OperationalToolingTests](../../../test/Typhon.Engine.Tests/Data/Schema/OperationalToolingTests.cs) — `Inspect_ReturnsComponentsAndFields` (offline read of persisted components/fields), `ValidateEvolution_CompatibleChange_IsValid` (dry-run reports `NeedsMigration`/`HasMigrationPath` without mutating)
+- [OperationalToolingTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/Schema/OperationalToolingTests.cs) — `Inspect_ReturnsComponentsAndFields` (offline read of persisted components/fields), `ValidateEvolution_CompatibleChange_IsValid` (dry-run reports `NeedsMigration`/`HasMigrationPath` without mutating)
 
 ## 🔗 Related
 

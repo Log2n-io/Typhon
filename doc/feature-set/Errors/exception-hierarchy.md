@@ -1,3 +1,9 @@
+---
+uid: feature-errors-exception-hierarchy
+title: 'TyphonException Hierarchy & Catalog'
+description: 'A single-rooted, typed exception tree with numeric codes, an IsTransient hint, and a catalog of every concrete failure type.'
+---
+
 # TyphonException Hierarchy & Catalog
 > A single-rooted, typed exception tree with numeric codes, an `IsTransient` hint, and a catalog of every concrete failure type.
 
@@ -65,7 +71,7 @@ catch (TyphonException ex)
 
 ## 🧪 Tests
 
-- [TyphonExceptionTests](../../../test/Typhon.Engine.Tests/Errors/TyphonExceptionTests.cs) — the hierarchy itself: `LockTimeoutException`/`TransactionTimeoutException` are both `TyphonTimeoutException`, every leaf is a `TyphonException`, three-granularity catch-block roundtrip (`CatchGranularity_*`), and `ErrorCode`/`IsTransient` per leaf type.
+- [TyphonExceptionTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Errors/TyphonExceptionTests.cs) — the hierarchy itself: `LockTimeoutException`/`TransactionTimeoutException` are both `TyphonTimeoutException`, every leaf is a `TyphonException`, three-granularity catch-block roundtrip (`CatchGranularity_*`), and `ErrorCode`/`IsTransient` per leaf type.
 
 ## 🔗 Related
 

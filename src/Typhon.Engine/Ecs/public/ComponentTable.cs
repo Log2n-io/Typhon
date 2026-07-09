@@ -15,7 +15,7 @@ namespace Typhon.Engine;
 /// </summary>
 /// <remarks>
 /// <p>
-/// The <see cref="ComponentTable.CompRevTableSegment"/> is a <see cref="ChunkBasedSegment<PersistentStore>"/> with chunks of <see cref="ComponentRevisionManager.CompRevChunkSize"/> bytes.
+/// The <see cref="ComponentTable.CompRevTableSegment"/> is a <see cref="ChunkBasedSegment{PersistentStore}"/> with chunks of <see cref="ComponentRevisionManager.CompRevChunkSize"/> bytes.
 /// Data is stored as a chain of chunks, the first one contains this header and is followed by <see cref="ComponentRevisionManager.CompRevCountInRoot"/> number
 /// of <see cref="CompRevStorageElement"/> elements (currently 3 with 12-byte elements).
 /// The following chunks in the chain have just an integer as header (giving the next chunk in the chain) and can
@@ -149,11 +149,15 @@ internal struct IndexedFieldInfo
     internal BTreeBase<TransientStore> TransientIndex => (BTreeBase<TransientStore>)Index;
 }
 
+/// <summary>Bit flags describing optional storage features enabled on a <see cref="ComponentTable"/>.</summary>
 [PublicAPI]
 [Flags]
 public enum ComponentTableFlags
 {
+    /// <summary>No optional features.</summary>
     None                = 0x00,
+
+    /// <summary>The component declares at least one collection-typed field (variable-sized buffer storage).</summary>
     HasCollections      = 0x01
 }
 
@@ -174,6 +178,10 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
     private const int MainIndexSegmentStartingSize = 4;
 
     // ── Storage mode (immutable after construction) ──
+    /// <summary>
+    /// Storage discipline for this component, fixed at construction: <see cref="StorageMode.Versioned"/> (MVCC revision chains),
+    /// <see cref="StorageMode.SingleVersion"/> (in-place, tick-boundary maintenance), or <see cref="StorageMode.Transient"/> (heap-backed, not persisted).
+    /// </summary>
     public StorageMode StorageMode { get; private set; }
 
     /// <summary>
@@ -184,10 +192,19 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
     public DurabilityDiscipline Discipline { get; private set; }
 
     // ── Persistent segments (Versioned & SingleVersion) ──
+    /// <summary>Segment holding the component data chunks (the field payloads). Null in <see cref="StorageMode.Transient"/> mode.</summary>
     public ChunkBasedSegment<PersistentStore> ComponentSegment { get; private set; }
+
+    /// <summary>Segment holding the MVCC revision chains. Non-null only for <see cref="StorageMode.Versioned"/> storage.</summary>
     public ChunkBasedSegment<PersistentStore> CompRevTableSegment { get; private set; }
+
+    /// <summary>Segment backing the primary-key B+Tree and every non-<see cref="String64"/> secondary index.</summary>
     public ChunkBasedSegment<PersistentStore> DefaultIndexSegment { get; private set; }
+
+    /// <summary>Segment backing the <see cref="String64"/>-keyed secondary indexes.</summary>
     public ChunkBasedSegment<PersistentStore> String64IndexSegment { get; private set; }
+
+    /// <summary>Segment backing the version-history tail for AllowMultiple secondary indexes. Null when the component has no multi-value index.</summary>
     public ChunkBasedSegment<PersistentStore> TailIndexSegment { get; private set; }
 
     /// <summary>
@@ -278,10 +295,16 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
 
     internal void ClearDestroyedChunkIds() => _destroyedChunkIds.Clear();
 
+    /// <summary>Size in bytes of a single component's field payload (excludes MVCC and index overhead).</summary>
     public int ComponentStorageSize => Definition.ComponentStorageSize;
+
+    /// <summary>Schema definition (fields, indexes, layout) of the component type stored in this table.</summary>
     public DBComponentDefinition Definition { get; private set; }
 
+    /// <summary>Optional storage features enabled on this table (see <see cref="ComponentTableFlags"/>).</summary>
     public ComponentTableFlags Flags => _flags;
+
+    /// <summary><c>true</c> when the component declares at least one collection-typed field (<see cref="ComponentTableFlags.HasCollections"/> is set).</summary>
     public bool HasCollections => (_flags & ComponentTableFlags.HasCollections) != 0;
 
     internal DatabaseEngine DBE { get; private set; }
@@ -289,7 +312,7 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
     internal int ComponentTotalSize => Definition.ComponentStorageTotalSize;
 
     /// <summary>
-    /// Stable WAL type identifier derived from <see cref="LogicalSegment<PersistentStore>.RootPageIndex"/>. Set during registration.
+    /// Stable WAL type identifier derived from <see cref="LogicalSegment{PersistentStore}.RootPageIndex"/>. Set during registration.
     /// Used to identify component types in WAL records for crash recovery replay.
     /// </summary>
     internal ushort WalTypeId { get; set; }
@@ -411,6 +434,16 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
 
     #endregion
     
+    /// <summary>
+    /// Creates a new (empty) component table, allocating its data, revision, and index segments. For <see cref="StorageMode.Transient"/> the segments are
+    /// heap-backed and no MVCC revision chain is allocated.
+    /// </summary>
+    /// <param name="dbe">Owning database engine.</param>
+    /// <param name="definition">Schema definition of the component type stored here.</param>
+    /// <param name="parent">Resource-tree parent (the owning <see cref="DatabaseEngine"/>).</param>
+    /// <param name="storageMode">Storage discipline: <see cref="StorageMode.Versioned"/> (default, MVCC), <see cref="StorageMode.SingleVersion"/>, or <see cref="StorageMode.Transient"/>.</param>
+    /// <param name="exhaustionPolicy">Resource-exhaustion policy forwarded to the base <see cref="ResourceNode"/>.</param>
+    /// <param name="changeSet">Change set threading segment-growth dirty marks through the allocation; may be <c>null</c>.</param>
     public ComponentTable(DatabaseEngine dbe, DBComponentDefinition definition, IResource parent, StorageMode storageMode = StorageMode.Versioned,
         ExhaustionPolicy exhaustionPolicy = ExhaustionPolicy.None, ChangeSet changeSet = null) :
         base($"ComponentTable_{definition.Name}", ResourceType.ComponentTable, parent, exhaustionPolicy)
@@ -470,9 +503,21 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
     /// Load constructor: restores a ComponentTable from previously persisted segment root page indices.
     /// Used during database reopen to reconnect to existing on-disk data instead of allocating fresh segments.
     /// </summary>
+    /// <param name="dbe">Owning database engine.</param>
+    /// <param name="definition">Schema definition of the component type stored here.</param>
+    /// <param name="parent">Resource-tree parent (the owning <see cref="DatabaseEngine"/>).</param>
+    /// <param name="componentSPI">Persisted root-page index (SPI) of the component data segment to reload.</param>
+    /// <param name="versionSPI">Persisted SPI of the MVCC revision-chain segment; used only for <see cref="StorageMode.Versioned"/>.</param>
+    /// <param name="defaultIndexSPI">Persisted SPI of the default index segment (primary key and non-<see cref="String64"/> secondary indexes).</param>
+    /// <param name="string64IndexSPI">Persisted SPI of the <see cref="String64"/> index segment.</param>
+    /// <param name="tailIndexSPI">Persisted SPI of the multi-value index version-history tail; <c>0</c> when the component has no AllowMultiple index.</param>
     /// <param name="storageMode">Storage mode from persisted ComponentR1 metadata.</param>
+    /// <param name="exhaustionPolicy">Resource-exhaustion policy forwarded to the base <see cref="ResourceNode"/>.</param>
     /// <param name="newIndexFieldIds">Optional set of FieldIds for newly added indexes that need creating instead of loading.
     /// When non-null, indexes for these fields are created fresh; all other indexes are loaded from disk.</param>
+    /// <param name="changeSet">Change set threading segment-load dirty marks through the allocation; may be <c>null</c>.</param>
+    /// <param name="restoreCollectionInfo">When <c>true</c>, reconnect the component-collection buffer map to the persisted segments (user tables); when
+    /// <c>false</c>, start with an empty map (system tables, which re-derive their collection info from runtime registration).</param>
     internal ComponentTable(DatabaseEngine dbe, DBComponentDefinition definition, IResource parent, int componentSPI, int versionSPI, int defaultIndexSPI,
         int string64IndexSPI, int tailIndexSPI = 0, StorageMode storageMode = StorageMode.Versioned, ExhaustionPolicy exhaustionPolicy = ExhaustionPolicy.None,
         HashSet<int> newIndexFieldIds = null, ChangeSet changeSet = null, bool restoreCollectionInfo = false) :
@@ -1023,6 +1068,8 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
         return index;
     }
 
+    /// <summary>Releases the table's owned persistent and transient segments (and the heap-backed transient stores). Idempotent — a second call is a no-op.</summary>
+    /// <param name="disposing"><c>true</c> when disposing deterministically; <c>false</c> when running from the finalizer.</param>
     protected override void Dispose(bool disposing)
     {
         if (ComponentSegment == null && TransientComponentSegment == null)

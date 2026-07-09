@@ -12,8 +12,8 @@ public sealed class ClientContext
     public int ConnectionId { get; internal init; }
 
     /// <summary>
-    /// Game-specific player identity. Set by game code via <see cref="TyphonRuntime.SetClientData{T}"/> (future).
-    /// For v1, game code sets this after connection via callback.
+    /// Game-specific player identity. Game code sets this after connection (e.g. from a connect callback); the engine
+    /// treats it as an opaque payload and never inspects it.
     /// </summary>
     public object UserData { get; set; }
 }

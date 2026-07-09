@@ -1,3 +1,9 @@
+---
+uid: feature-storage-storage-introspection
+title: 'Storage Introspection & Integrity Diagnostics'
+description: 'Read-only APIs that expose the database file''s page/segment topology and audit it for corruption.'
+---
+
 # Storage Introspection & Integrity Diagnostics
 > Read-only APIs that expose the database file's page/segment topology and audit it for corruption.
 
@@ -56,7 +62,7 @@ if (!report.IsHealthy)
 
 ## 🧪 Tests
 
-- [StorageIntrospectionTests](../../../test/Typhon.Engine.Tests/Storage/StorageIntrospectionTests.cs) — segment enumeration, page classification (no page ever `Unknown`), occupancy-bit reads, and the zero-disk-read guarantee
+- [StorageIntrospectionTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Storage/StorageIntrospectionTests.cs) — segment enumeration, page classification (no page ever `Unknown`), occupancy-bit reads, and the zero-disk-read guarantee
 
 ## 🔗 Related
 

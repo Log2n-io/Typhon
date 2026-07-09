@@ -1,3 +1,9 @@
+---
+uid: feature-resources-exhaustion-policy-handling
+title: 'Exhaustion Policy & ResourceExhaustedException'
+description: 'A typed exception for bounded resources hitting their limit, plus policy metadata that documents — but does not yet drive — the response.'
+---
+
 # Exhaustion Policy & ResourceExhaustedException
 > A typed exception for bounded resources hitting their limit, plus policy metadata that documents — but does not yet drive — the response.
 
@@ -71,9 +77,9 @@ Console.WriteLine(node.ExhaustionPolicy); // ExhaustionPolicy.Wait — describes
   API before assuming a uniform exception contract engine-wide.
 
 ## 🧪 Tests
-- [ResourceOptionsTests](../../../test/Typhon.Engine.Tests/Resources/ResourceOptionsTests.cs) — `ExhaustionPolicy` enum values,
+- [ResourceOptionsTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Resources/ResourceOptionsTests.cs) — `ExhaustionPolicy` enum values,
   `ResourceExhaustedException` construction/utilization/message formatting
-- [ExhaustionPolicyTests](../../../test/Typhon.Engine.Tests/Errors/ExhaustionPolicyTests.cs) — real FailFast enforcement at
+- [ExhaustionPolicyTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Errors/ExhaustionPolicyTests.cs) — real FailFast enforcement at
   `TransactionPool.CreateTransaction` and `ChunkBasedSegment.AllocateChunk`/`AllocateChunks`, `ResourceNode.ExhaustionPolicy` metadata
 
 ## 🔗 Related

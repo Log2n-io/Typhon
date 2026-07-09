@@ -17,7 +17,7 @@ namespace Typhon.Engine;
 /// </para>
 /// <para>
 /// <see cref="Register{T}"/> is AOT-safe: it captures a <b>closed-generic</b> delegate to
-/// <see cref="DatabaseEngine.RegisterComponentFromAccessor{T}"/> at configuration time, when <typeparamref name="T"/> is
+/// <see cref="DatabaseEngine.RegisterComponentFromAccessor{T}"/> at configuration time, when its component type <c>T</c> is
 /// statically known. No <see cref="Type"/>-keyed reflection (<c>MakeGenericType</c> / <c>MakeGenericMethod</c>) is used on
 /// this path, so the trimmer preserves every instantiation.
 /// </para>

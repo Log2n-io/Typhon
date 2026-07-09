@@ -1,3 +1,9 @@
+---
+uid: feature-profiler-trace-export-file-trace-export
+title: 'File-Based Trace Export (.typhon-trace)'
+description: 'Write the whole session to a versioned binary file for offline post-mortem analysis in the Workbench.'
+---
+
 # File-Based Trace Export (.typhon-trace)
 > Write the whole session to a versioned binary file for offline post-mortem analysis in the Workbench.
 
@@ -70,11 +76,11 @@ var provider = services.BuildServiceProvider();
 
 ## 🧪 Tests
 
-- [FileExporterIntegrationTests](../../../../test/Typhon.Engine.Tests/Profiler/FileExporterIntegrationTests.cs) — start/emit/stop round-trips every typed event through the written `.typhon-trace`, plus CPU-sample trailer embedding and header offset patching
+- [FileExporterIntegrationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Profiler/FileExporterIntegrationTests.cs) — start/emit/stop round-trips every typed event through the written `.typhon-trace`, plus CPU-sample trailer embedding and header offset patching
 
 ## 🔗 Related
 
-- Source: [`src/Typhon.Engine/Profiler/internals/FileExporter.cs`](../../../../src/Typhon.Engine/Profiler/internals/FileExporter.cs)
+- Source: [`src/Typhon.Engine/Profiler/internals/FileExporter.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Profiler/internals/FileExporter.cs)
 - Parent feature: [Trace Export](./README.md)
 - Sibling: [Live TCP Streaming Export](./live-tcp-trace-export.md) — the other trace-export sink; both can attach to the same session at once
 

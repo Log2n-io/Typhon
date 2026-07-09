@@ -22,6 +22,11 @@ public readonly struct CpuSampleRecord
     /// <summary>0-based index into the section's interned stack table.</summary>
     public uint StackIndex { get; }
 
+    /// <summary>Construct a CPU stack sample.</summary>
+    /// <param name="qpc">QPC timestamp of the sample.</param>
+    /// <param name="threadSlot">Typhon thread slot, or <c>-1</c> for a non-Typhon thread.</param>
+    /// <param name="sampleType">0 = Managed (on-CPU), 1 = External (off-CPU).</param>
+    /// <param name="stackIndex">0-based index into the section's interned stack table.</param>
     public CpuSampleRecord(long qpc, int threadSlot, byte sampleType, uint stackIndex)
     {
         Qpc = qpc;
@@ -58,6 +63,11 @@ public readonly struct CpuFrameSymbol
     /// <summary>True when the frame resolved to a source location (<see cref="FileId"/> / <see cref="Line"/> are usable).</summary>
     public bool HasSource => Line != 0;
 
+    /// <summary>Construct a resolved frame symbol.</summary>
+    /// <param name="frameId">Section-local frame id.</param>
+    /// <param name="fileId">Index into the shared <c>FileTable</c>; meaningful only when <paramref name="line"/> is non-zero.</param>
+    /// <param name="line">1-based source line, or 0 when the frame has no resolved source.</param>
+    /// <param name="method">Display name of the method; <c>null</c> is coerced to the empty string.</param>
     public CpuFrameSymbol(ushort frameId, ushort fileId, uint line, string method)
     {
         FrameId = frameId;

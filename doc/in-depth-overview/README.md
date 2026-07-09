@@ -1,3 +1,9 @@
+---
+uid: overview-index
+title: 'Typhon — In-Depth Overview'
+description: 'This series is the architectural reference for the Typhon engine: how it''s structured, what each subsystem does, how the pieces fit together. It''s aimed at…'
+---
+
 # Typhon — In-Depth Overview
 
 This series is the **architectural reference** for the Typhon engine: how it's structured, what each subsystem does, how the pieces fit together. It's aimed at two audiences:
@@ -157,7 +163,7 @@ src/Typhon.Engine/<Folder>/
 
 - `public/` types live in the `Typhon.Engine` namespace.
 - `internals/` types live in the `Typhon.Engine.Internals` namespace.
-- The [`TYPHON008` Roslyn analyzer](../../src/Typhon.Analyzers/InternalApiLeakAnalyzer.cs) enforces that public-surface types don't leak `internals/` types in their signatures (parameters, return types, generic constraints, etc.).
+- The [`TYPHON008` Roslyn analyzer](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Analyzers/InternalApiLeakAnalyzer.cs) enforces that public-surface types don't leak `internals/` types in their signatures (parameters, return types, generic constraints, etc.).
 
 When this series links to source files, the URL tells you instantly which side of the line you're looking at. A user of the engine should be able to reason about everything in `public/`; an engine contributor will care about both.
 

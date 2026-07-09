@@ -1,3 +1,9 @@
+---
+uid: feature-subscriptions-backpressure-resync
+title: 'Backpressure & Resync Recovery'
+description: 'A full client send buffer drops one tick''s delta and triggers an automatic full-state resync — never an unbounded queue.'
+---
+
 # Backpressure & Resync Recovery
 > A full client send buffer drops one tick's delta and triggers an automatic full-state resync — never an unbounded queue.
 
@@ -54,13 +60,13 @@ conn.OnTickDelta += tickDelta =>
 
 ## 🧪 Tests
 
-- [SubscriptionStressTests](../../../test/Typhon.Engine.Tests/Runtime/Subscriptions/SubscriptionStressTests.cs) —
+- [SubscriptionStressTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/SubscriptionStressTests.cs) —
   `Backpressure_SlowClient_TriggersResync`: a slow client with a small `SendBufferCapacity` overflows and gets
   flagged for resync
-- [SendBufferTests](../../../test/Typhon.Engine.Tests/Runtime/Subscriptions/SendBufferTests.cs) —
+- [SendBufferTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/SendBufferTests.cs) —
   `TryWrite_ExceedsCapacity_Fails`/`FillPercentage_CorrectAtVariousLevels`: the overflow/threshold mechanics
   underneath backpressure
-- [DeltaProcessingTests](../../../test/Typhon.Client.Tests/DeltaProcessingTests.cs) —
+- [DeltaProcessingTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Client.Tests/DeltaProcessingTests.cs) —
   `Resync_ClearsCacheAndFiresCallback`: client-side handling of the `Resync` event
 
 ## 🔗 Related

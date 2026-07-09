@@ -1,3 +1,9 @@
+---
+uid: feature-subscriptions-published-views-shared-views
+title: 'Shared (World-State) Views'
+description: 'One View instance, refreshed and diffed once per tick, fanned out to every subscriber.'
+---
+
 # Shared (World-State) Views
 > One View instance, refreshed and diffed once per tick, fanned out to every subscriber.
 
@@ -64,9 +70,9 @@ runtime.SetSubscriptions(clientContext, worldNpcs);
 
 ## 🧪 Tests
 
-- [SubscriptionStressTests](../../../../test/Typhon.Engine.Tests/Runtime/Subscriptions/SubscriptionStressTests.cs) —
+- [SubscriptionStressTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/SubscriptionStressTests.cs) —
   `MultiClient_50Clients_SharedView_AllReceiveDeltas`: one shared View fanned out to 50 concurrent subscribers
-- [ViewDeltaTests](../../../../test/Typhon.Engine.Tests/Runtime/Subscriptions/ViewDeltaTests.cs) —
+- [ViewDeltaTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/ViewDeltaTests.cs) —
   `DeltaBuilder_SharedView_ProducesCorrectDelta`/`DeltaBuilder_SecondCall_OnlyNewEntities`: delta correctness across
   ticks for a shared `PublishedView`
 

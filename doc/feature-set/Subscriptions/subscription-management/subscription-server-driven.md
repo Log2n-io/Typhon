@@ -1,3 +1,9 @@
+---
+uid: feature-subscriptions-subscription-management-subscription-server-driven
+title: 'Server-Driven Subscriptions (v1)'
+description: 'Game code calls SetSubscriptions whenever game state changes; the runtime applies the transition next tick.'
+---
+
 # Server-Driven Subscriptions (v1)
 > Game code calls `SetSubscriptions` whenever game state changes; the runtime applies the transition next tick.
 
@@ -47,9 +53,9 @@ runtime.SetSubscriptions(client, pubC, pubD, pubE);
 
 ## 🧪 Tests
 
-- [SubscriptionTransitionTests](../../../../test/Typhon.Engine.Tests/Runtime/Subscriptions/SubscriptionTransitionTests.cs)
+- [SubscriptionTransitionTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/SubscriptionTransitionTests.cs)
   — the diff-based transition `SetSubscriptions` relies on (subscribed/unsubscribed/kept sets)
-- [SubscriptionStressTests](../../../../test/Typhon.Engine.Tests/Runtime/Subscriptions/SubscriptionStressTests.cs) —
+- [SubscriptionStressTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/SubscriptionStressTests.cs) —
   `ConcurrentSetSubscriptions_LastWriterWins_NoCorruption`: last-call-wins under concurrent calls from multiple
   worker threads
 

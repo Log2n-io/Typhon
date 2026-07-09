@@ -1,6 +1,12 @@
+---
+uid: overview-storage
+title: '02 — Storage'
+description: 'Storage is the physical layer: a memory-mapped file managed by a page cache, segments built on top of pages, and accessors that hold short-lived,…'
+---
+
 # 02 — Storage
 
-**Code:** [`src/Typhon.Engine/Storage/`](../../src/Typhon.Engine/Storage/)
+**Code:** [`src/Typhon.Engine/Storage/`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Engine/Storage)
 
 Storage is the physical layer: a memory-mapped file managed by a page cache, segments built on top of pages, and accessors that hold short-lived, JIT-inlined views into chunk memory. Everything above this layer — MVCC revision chains, B+Tree indexes, the ECS component tables, even the page CRC + seqlock snapshots the checkpoint relies on — bottoms out here. The shape of this layer (8 KB pages, two-pass clock-sweep eviction, generic `<TStore>` segments) is what makes the higher layers cheap.
 
@@ -22,27 +28,27 @@ Three concentric layers, each with one obvious type:
 
 | Layer | Type | What it owns |
 |---|---|---|
-| **Page cache** | [`PagedMMF`](../../src/Typhon.Engine/Storage/internals/PagedMMF.cs) | A pinned slab of `N × 8 KB` memory backing the data file. Allocates / evicts pages by clock-sweep. |
-| **Database manager** | [`ManagedPagedMMF`](../../src/Typhon.Engine/Storage/internals/ManagedPagedMMF.cs) | Page 0 root header + bootstrap dictionary + occupancy bitmap. Allocates / frees *file* pages. |
-| **Segments + accessors** | [`LogicalSegment<TStore>`](../../src/Typhon.Engine/Storage/internals/LogicalSegment.cs), [`ChunkBasedSegment<TStore>`](../../src/Typhon.Engine/Storage/internals/ChunkBasedSegment.cs), [`ChunkAccessor<TStore>`](../../src/Typhon.Engine/Storage/internals/ChunkAccessor.cs) | Logical pages grouped into segments; fixed-size chunks allocated within segments; SOA-cached accessors for hot-path chunk reads/writes. |
+| **Page cache** | [`PagedMMF`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/internals/PagedMMF.cs) | A pinned slab of `N × 8 KB` memory backing the data file. Allocates / evicts pages by clock-sweep. |
+| **Database manager** | [`ManagedPagedMMF`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/internals/ManagedPagedMMF.cs) | Page 0 root header + bootstrap dictionary + occupancy bitmap. Allocates / frees *file* pages. |
+| **Segments + accessors** | [`LogicalSegment<TStore>`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/internals/LogicalSegment.cs), [`ChunkBasedSegment<TStore>`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/internals/ChunkBasedSegment.cs), [`ChunkAccessor<TStore>`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/internals/ChunkAccessor.cs) | Logical pages grouped into segments; fixed-size chunks allocated within segments; SOA-cached accessors for hot-path chunk reads/writes. |
 
-Two backends share the segment / accessor code via the [`IPageStore`](../../src/Typhon.Engine/Storage/internals/IPageStore.cs) struct-generic interface:
+Two backends share the segment / accessor code via the [`IPageStore`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/internals/IPageStore.cs) struct-generic interface:
 
-- [`PersistentStore`](../../src/Typhon.Engine/Storage/internals/PersistentStore.cs) — wraps `ManagedPagedMMF`. The JIT inlines every delegation; assembly is identical to non-generic code.
-- [`TransientStore`](../../src/Typhon.Engine/Storage/internals/TransientStore.cs) — heap-backed, no cache, no dirty tracking. The dirty-tracking methods are no-ops; `typeof(TStore)` branches in `ChunkAccessor` dead-code-eliminate the persistence machinery for transient components.
+- [`PersistentStore`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/internals/PersistentStore.cs) — wraps `ManagedPagedMMF`. The JIT inlines every delegation; assembly is identical to non-generic code.
+- [`TransientStore`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/internals/TransientStore.cs) — heap-backed, no cache, no dirty tracking. The dirty-tracking methods are no-ops; `typeof(TStore)` branches in `ChunkAccessor` dead-code-eliminate the persistence machinery for transient components.
 
 Cross-cutting concerns sit alongside this layered core:
 
-- **Dirty tracking** — [`ChangeSet`](../../src/Typhon.Engine/Storage/internals/ChangeSet.cs) — coordinates `DirtyCounter` / `ActiveChunkWriters` lifecycle for a UoW.
-- **Backpressure** — [`IPageCacheBackpressureStrategy`](../../src/Typhon.Engine/Storage/internals/IPageCacheBackpressureStrategy.cs) / [`WaitForIOStrategy`](../../src/Typhon.Engine/Storage/internals/WaitForIOStrategy.cs) — what happens when the clock-sweep finds nothing evictable.
+- **Dirty tracking** — [`ChangeSet`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/internals/ChangeSet.cs) — coordinates `DirtyCounter` / `ActiveChunkWriters` lifecycle for a UoW.
+- **Backpressure** — [`IPageCacheBackpressureStrategy`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/internals/IPageCacheBackpressureStrategy.cs) / [`WaitForIOStrategy`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/internals/WaitForIOStrategy.cs) — what happens when the clock-sweep finds nothing evictable.
 - **Page CRC & seqlock** — CRC32C torn-write *detection* + consistent checkpoint snapshots (no FPI; recovery rebuilds — see §7).
-- **Storage introspection** — [`StorageMapTypes`](../../src/Typhon.Engine/Storage/public/StorageMapTypes.cs) — the read-only surface Workbench's Database File Map uses.
+- **Storage introspection** — [`StorageMapTypes`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/public/StorageMapTypes.cs) — the read-only surface Workbench's Database File Map uses.
 
 ---
 
 ## 2. PagedMMF — the page cache
 
-[`PagedMMF`](../../src/Typhon.Engine/Storage/internals/PagedMMF.cs) is the foundation. It owns a single backing file (the database) and a fixed-size pool of in-memory pages. Pages are loaded on demand and evicted when the pool is full.
+[`PagedMMF`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/internals/PagedMMF.cs) is the foundation. It owns a single backing file (the database) and a fixed-size pool of in-memory pages. Pages are loaded on demand and evicted when the pool is full.
 
 ### Page layout — 64 + 128 + 8000 = 8192
 
@@ -59,17 +65,17 @@ Constants defined on `PagedMMF`:
 | Constant | Value | Meaning |
 |---|---|---|
 | `PageSize` | 8192 | One page |
-| `PageBaseHeaderSize` | 64 | Bytes reserved for [`PageBaseHeader`](../../src/Typhon.Engine/Storage/public/PageBaseHeader.cs) |
+| `PageBaseHeaderSize` | 64 | Bytes reserved for [`PageBaseHeader`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/public/PageBaseHeader.cs) |
 | `PageMetadataSize` | 128 | Per-page metadata (e.g. chunk occupancy bitmap) |
 | `PageHeaderSize` | 192 | `PageBaseHeaderSize + PageMetadataSize` |
 | `PageRawDataSize` | 8000 | What user code actually writes to |
 | `PageSizePow2` | 13 | `2^13 = 8192` (used for shift-instead-of-divide) |
 
-The base header is a small struct ([`PageBaseHeader`](../../src/Typhon.Engine/Storage/public/PageBaseHeader.cs)) with `Flags`, `Type`, `FormatRevision`, `ChangeRevision` (incremented every disk write), `PageChecksum` (CRC32C over the page, skipping the checksum field itself), and `ModificationCounter` (the **seqlock counter** used for torn-page detection — see §7). The header struct itself only occupies the first 24 bytes; the rest of the 64-byte zone is reserved for forward compatibility.
+The base header is a small struct ([`PageBaseHeader`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/public/PageBaseHeader.cs)) with `Flags`, `Type`, `FormatRevision`, `ChangeRevision` (incremented every disk write), `PageChecksum` (CRC32C over the page, skipping the checksum field itself), and `ModificationCounter` (the **seqlock counter** used for torn-page detection — see §7). The header struct itself only occupies the first 24 bytes; the rest of the 64-byte zone is reserved for forward compatibility.
 
 ### `PageInfo` and `PageState`
 
-Each in-memory page has a sidecar [`PageInfo`](../../src/Typhon.Engine/Storage/internals/PagedMMF.PageInfo.cs) tracking:
+Each in-memory page has a sidecar [`PageInfo`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/internals/PagedMMF.PageInfo.cs) tracking:
 
 - `MemPageIndex` / `FilePageIndex` — slot ↔ file mapping
 - `PageState` — current state machine value (see below)
@@ -99,7 +105,7 @@ State transitions are protected by `StateSyncRoot`. The Idle → Exclusive trans
 
 ### Default cache size — 256 × 8 KB = 2 MB
 
-`DefaultMemPageCount = 256`. `DatabaseCacheSize` on [`PagedMMFOptions`](../../src/Typhon.Engine/Storage/public/PagedMMFOptions.cs) defaults to `256 × 8192 = 2 MB`, which is *also* the minimum (`MinimumCacheSize`).
+`DefaultMemPageCount = 256`. `DatabaseCacheSize` on [`PagedMMFOptions`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/public/PagedMMFOptions.cs) defaults to `256 × 8192 = 2 MB`, which is *also* the minimum (`MinimumCacheSize`).
 
 **2 MB is deliberately tiny.** It's a development-default chosen to keep the cache under constant pressure — at this size eviction, backpressure, and the dirty-counter machinery all exercise heavily, so bugs in those paths surface early instead of hiding behind a roomy cache. It is **not** a recommended production value: pick a `DatabaseCacheSize` you're comfortable running your workload against (Workbench's stress harness routinely uses 8 192-page / 64 MB caches; real servers go much higher).
 
@@ -107,7 +113,7 @@ The validator enforces only two things: the size must be a multiple of the page 
 
 ### Two-pass clock-sweep eviction
 
-When a new page is requested and no `Free` slot exists, `AllocateMemoryPageCore` (in [`PagedMMF.cs`](../../src/Typhon.Engine/Storage/internals/PagedMMF.cs)) runs **two passes** over the page array:
+When a new page is requested and no `Free` slot exists, `AllocateMemoryPageCore` (in [`PagedMMF.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/internals/PagedMMF.cs)) runs **two passes** over the page array:
 
 ```
 Pass 1 (counter-respecting):  scan up to 2 × N slots
@@ -131,7 +137,7 @@ CRC verification is **lazy**. `EnsurePageVerified` (line ~1436) runs only the fi
 
 ## 3. ManagedPagedMMF — the database file manager
 
-[`ManagedPagedMMF`](../../src/Typhon.Engine/Storage/internals/ManagedPagedMMF.cs) extends `PagedMMF` with what makes the file actually a *database*: a known root layout, an occupancy bitmap, and a bootstrap key/value store.
+[`ManagedPagedMMF`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/internals/ManagedPagedMMF.cs) extends `PagedMMF` with what makes the file actually a *database*: a known root layout, an occupancy bitmap, and a bootstrap key/value store.
 
 ### The first eight pages of an empty file (format v4)
 
@@ -167,7 +173,7 @@ Total ~108 bytes. Everything *dynamic* — SPIs for segments, the checkpoint LSN
 
 ### `BootstrapDictionary` — typed key/value on page 0
 
-[`BootstrapDictionary`](../../src/Typhon.Engine/Storage/internals/BootstrapDictionary.cs) is a compact tagged-value stream. On disk:
+[`BootstrapDictionary`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/internals/BootstrapDictionary.cs) is a compact tagged-value stream. On disk:
 
 ```
 [StreamLength:2B] [TypeTag:1B][Key:UTF8+NUL][Value:N bytes] ... [0xFF]
@@ -179,7 +185,7 @@ Keys are conventional engine prefixes — `OccupancyMapSPI`, `OccupancyReserved`
 
 ### Occupancy bitmap — `BitmapL3` on a `LogicalSegment`
 
-The free-page tracking lives in [`BitmapL3`](../../src/Typhon.Engine/Storage/internals/ManagedPagedMMF.BitmapL3.cs) — a three-level summarized bitmap stored *in the file itself* as the raw data of a `LogicalSegment<PersistentStore>`. Each L0 long covers 64 pages of the file; one *data* page worth of L0 longs (`PageRawDataSize / 8 = 1000`) covers 64 000 file pages, which is roughly **500 MiB of file data per occupancy data page**. With the directory-only root (v4) the occupancy segment's root holds only the page directory — no bitmap words — so the L0 words start on the segment's first data page (genesis page 4). Bit mutations keep their data page dirty-until-checkpoint (even on allocation paths that pass no `ChangeSet`), so a torn/evicted occupancy page can never silently drop a freshly-set bit.
+The free-page tracking lives in [`BitmapL3`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/internals/ManagedPagedMMF.BitmapL3.cs) — a three-level summarized bitmap stored *in the file itself* as the raw data of a `LogicalSegment<PersistentStore>`. Each L0 long covers 64 pages of the file; one *data* page worth of L0 longs (`PageRawDataSize / 8 = 1000`) covers 64 000 file pages, which is roughly **500 MiB of file data per occupancy data page**. With the directory-only root (v4) the occupancy segment's root holds only the page directory — no bitmap words — so the L0 words start on the segment's first data page (genesis page 4). Bit mutations keep their data page dirty-until-checkpoint (even on allocation paths that pass no `ChangeSet`), so a torn/evicted occupancy page can never silently drop a freshly-set bit.
 
 When occupancy gets full, `GrowOccupancySegment` consumes the pre-allocated `_occupancyNextReservedPageIndex`, allocates a fresh reserve, and the cycle continues. The L1/L2 summary levels live in heap memory (`Memory<long>` arrays) — they're rebuilt on load from the L0 bitmap (source of truth).
 
@@ -189,7 +195,7 @@ When occupancy gets full, `GrowOccupancySegment` consumes the pre-allocated `_oc
 
 ## 4. Segments & accessors
 
-A *segment* is a typed view of a sequence of file pages. The base class [`LogicalSegment<TStore>`](../../src/Typhon.Engine/Storage/internals/LogicalSegment.cs) handles the page-list bookkeeping; [`ChunkBasedSegment<TStore>`](../../src/Typhon.Engine/Storage/internals/ChunkBasedSegment.cs) adds fixed-size chunk allocation on top.
+A *segment* is a typed view of a sequence of file pages. The base class [`LogicalSegment<TStore>`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/internals/LogicalSegment.cs) handles the page-list bookkeeping; [`ChunkBasedSegment<TStore>`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/internals/ChunkBasedSegment.cs) adds fixed-size chunk allocation on top.
 
 ### `LogicalSegment<TStore>` — page-list segment
 
@@ -202,14 +208,14 @@ Two relevant constants:
 | `RootHeaderIndexSectionCount` | 2000 | Page indices on the directory-only root page (= `NextHeadersIndexSectionCount`) |
 | `NextHeadersIndexSectionCount` | 2000 | Page indices stored on each map-extension page |
 
-Forward traversal goes through the linked list in [`LogicalSegmentHeader`](../../src/Typhon.Engine/Storage/internals/LogicalSegment.cs) (lives at offset `PageBaseHeader.Size = 64` inside each segment page, in the metadata zone):
+Forward traversal goes through the linked list in [`LogicalSegmentHeader`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/internals/LogicalSegment.cs) (lives at offset `PageBaseHeader.Size = 64` inside each segment page, in the metadata zone):
 
 - `LogicalSegmentNextMapPBID` — next map-extension directory page (`0` = end)
 - `LogicalSegmentNextRawDataPBID` — next data page (`0` = end)
 
 The root page holds **no** usable data (the directory fills the whole `PageRawDataSize`); every data page (segment page 1+) has the full 8000 bytes.
 
-`Grow(newLength, ...)` is `lock`-protected and `volatile`-publishes the new `_pages` array — concurrent reads always see a consistent index view. `GetPage(i, epoch, ...)` resolves the i-th segment page index through `_store.RequestPageEpoch`, returning a [`PageAccessor`](../../src/Typhon.Engine/Storage/public/PageAccessor.cs) (a thin wrapper over the page address with typed `Metadata<T>` / `RawData<T>` / `StructAt<T>` slicing).
+`Grow(newLength, ...)` is `lock`-protected and `volatile`-publishes the new `_pages` array — concurrent reads always see a consistent index view. `GetPage(i, epoch, ...)` resolves the i-th segment page index through `_store.RequestPageEpoch`, returning a [`PageAccessor`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/public/PageAccessor.cs) (a thin wrapper over the page address with typed `Metadata<T>` / `RawData<T>` / `StructAt<T>` slicing).
 
 ### `ChunkBasedSegment<TStore>` — fixed-stride allocator
 
@@ -246,7 +252,7 @@ Phase A is the linearization point — once it succeeds, the page is "removed" a
 
 ### `ChunkAccessor<TStore>` — the hot-path accessor
 
-[`ChunkAccessor<TStore>`](../../src/Typhon.Engine/Storage/internals/ChunkAccessor.cs) is the type the ECS / Indexing / Revision layers actually hold across operations. It's a `struct` (no heap allocation), tagged `[NoCopy]`, with pure **Structure-of-Arrays** layout for SIMD search:
+[`ChunkAccessor<TStore>`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/internals/ChunkAccessor.cs) is the type the ECS / Indexing / Revision layers actually hold across operations. It's a `struct` (no heap allocation), tagged `[NoCopy]`, with pure **Structure-of-Arrays** layout for SIMD search:
 
 ```csharp
 private fixed int  _pageIndices[16];    // 64 bytes — SIMD-searchable
@@ -290,7 +296,7 @@ DC and ACW are independent dimensions:
 
 ### `ChangeSet` — the per-UoW dirty page set
 
-[`ChangeSet`](../../src/Typhon.Engine/Storage/internals/ChangeSet.cs) wraps a `HashSet<int>` of memory-page indices touched during a UoW. Public surface:
+[`ChangeSet`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/internals/ChangeSet.cs) wraps a `HashSet<int>` of memory-page indices touched during a UoW. Public surface:
 
 | Method | What it does |
 |---|---|
@@ -300,7 +306,7 @@ DC and ACW are independent dimensions:
 | `Reset()` | Rollback path — decrements `DC` once per tracked page. |
 | `DeferEviction(entry)` / `FlushDeferredEvictions()` | Per-eviction `SlotRefCount` / `ACW` decrements that the persistent-store `ChunkAccessor` queues when a slot gets evicted mid-UoW, drained at commit. |
 
-`ChangeSet` is pooled via [`PagedMMF.RentChangeSet`](../../src/Typhon.Engine/Storage/internals/PagedMMF.cs) + `ReturnChangeSet` — a `ConcurrentBag<ChangeSet>` keeps reusable instances. Pool rental is the normal pattern; the `new ChangeSet(this)` path is only the cold start.
+`ChangeSet` is pooled via [`PagedMMF.RentChangeSet`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/internals/PagedMMF.cs) + `ReturnChangeSet` — a `ConcurrentBag<ChangeSet>` keeps reusable instances. Pool rental is the normal pattern; the `new ChangeSet(this)` path is only the cold start.
 
 ### `ReleaseExcessDirtyMarks` and the 128-op refresh
 
@@ -334,7 +340,7 @@ internal interface IPageCacheBackpressureStrategy : IDisposable
 }
 ```
 
-[`WaitForIOStrategy`](../../src/Typhon.Engine/Storage/internals/WaitForIOStrategy.cs) is the default — a `ManualResetEventSlim` waited up to 50 ms per iteration, signalled by `PagedMMF.DecrementDirty` when a page's `DC` reaches 0. Each retry re-checks `BackpressureContext.ShouldGiveUp` (see [01-foundation §2](01-foundation.md)) against `TimeoutOptions.Current.PageCacheBackpressureTimeout`; if it expires, a `PageCacheBackpressureTimeoutException` propagates.
+[`WaitForIOStrategy`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/internals/WaitForIOStrategy.cs) is the default — a `ManualResetEventSlim` waited up to 50 ms per iteration, signalled by `PagedMMF.DecrementDirty` when a page's `DC` reaches 0. Each retry re-checks `BackpressureContext.ShouldGiveUp` (see [01-foundation §2](01-foundation.md)) against `TimeoutOptions.Current.PageCacheBackpressureTimeout`; if it expires, a `PageCacheBackpressureTimeoutException` propagates.
 
 The factory hook on `PagedMMFOptions`:
 
@@ -351,7 +357,7 @@ Independent of the strategy, the moment the allocator decides backpressure is ne
 
 ### `PageCacheGaugeSnapshot` — what the profiler sees
 
-[`PageCacheGaugeSnapshot`](../../src/Typhon.Engine/Storage/internals/PageCacheGaugeSnapshot.cs) is the per-tick sampled view exposed to the profiler. Mutually-exclusive buckets (`FreePages` / `CleanUsedPages` / `DirtyUsedPages` / `ExclusivePages`) sum to `TotalPages`; overlay counters (`EpochProtectedPages`, `PendingIoReads`) are independent and may include pages from any bucket. Workbench renders the buckets as a stacked area chart — the mutually-exclusive invariant is what keeps that visualization honest.
+[`PageCacheGaugeSnapshot`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/internals/PageCacheGaugeSnapshot.cs) is the per-tick sampled view exposed to the profiler. Mutually-exclusive buckets (`FreePages` / `CleanUsedPages` / `DirtyUsedPages` / `ExclusivePages`) sum to `TotalPages`; overlay counters (`EpochProtectedPages`, `PendingIoReads`) are independent and may include pages from any bucket. Workbench renders the buckets as a stacked area chart — the mutually-exclusive invariant is what keeps that visualization honest.
 
 ---
 
@@ -369,7 +375,7 @@ Critically — `InitHeader` in `LogicalSegment.cs` (≈ `:498`) **preserves `Mod
 
 ### The CRC — `PageChecksum`
 
-Every page header also carries a `PageChecksum : uint`. It is a CRC32C ([`Crc32CUtil.ComputeSkipping`](../../src/Typhon.Engine/Foundation/) in `Foundation/`, hardware-accelerated, ~0.4 µs/8 KB) over the whole page *except* the 4-byte checksum field. The checkpoint stamps it **on the staging-buffer copy** at write time (so it reflects exactly the bytes that hit disk), and `EnsurePageVerified` checks it on load (`OnLoad` mode) and during recovery. The CRC helper lives in `Foundation/`, not `Storage/` — by design, the storage layer holds **zero** `Wal` / `Lsn` / `Fpi` identifiers (grep-enforced).
+Every page header also carries a `PageChecksum : uint`. It is a CRC32C ([`Crc32CUtil.ComputeSkipping`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Engine/Foundation) in `Foundation/`, hardware-accelerated, ~0.4 µs/8 KB) over the whole page *except* the 4-byte checksum field. The checkpoint stamps it **on the staging-buffer copy** at write time (so it reflects exactly the bytes that hit disk), and `EnsurePageVerified` checks it on load (`OnLoad` mode) and during recovery. The CRC helper lives in `Foundation/`, not `Storage/` — by design, the storage layer holds **zero** `Wal` / `Lsn` / `Fpi` identifiers (grep-enforced).
 
 ### Torn-page safety — detect, then rebuild or loud-fail (no FPI)
 
@@ -387,7 +393,7 @@ When `EnsurePageVerified` finds a stored CRC that doesn't match the recomputed o
 
 ## 8. Storage introspection
 
-The Workbench's Database File Map (Module 15) reads the engine's storage state without touching data pages — everything comes from in-memory engine structures. The surface lives in [`StorageMapTypes`](../../src/Typhon.Engine/Storage/public/StorageMapTypes.cs) and on `ManagedPagedMMF` itself:
+The Workbench's Database File Map (Module 15) reads the engine's storage state without touching data pages — everything comes from in-memory engine structures. The surface lives in [`StorageMapTypes`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/public/StorageMapTypes.cs) and on `ManagedPagedMMF` itself:
 
 | Type | Purpose |
 |---|---|
@@ -395,7 +401,7 @@ The Workbench's Database File Map (Module 15) reads the engine's storage state w
 | `StorageSegmentKind` enum | Runtime role of a logical segment (`Component` / `Revision` / `Index` / `Cluster` / `Vsbs` / `StringTable` / `Occupancy` / `Other`) |
 | `StorageSegmentDescriptor` | Read-only snapshot of one segment: root page, kind, owned pages, chunk-layout constants (stride, root/per-page chunk counts, data offsets) |
 
-`ManagedPagedMMF` ([`ManagedPagedMMF.StorageMap.cs`](../../src/Typhon.Engine/Storage/internals/ManagedPagedMMF.StorageMap.cs)) exposes:
+`ManagedPagedMMF` ([`ManagedPagedMMF.StorageMap.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/internals/ManagedPagedMMF.StorageMap.cs)) exposes:
 
 - `StorageFilePageCount` — total file pages
 - `StoragePageSize` — `8192`
@@ -407,7 +413,7 @@ The Workbench's Database File Map (Module 15) reads the engine's storage state w
 
 ## 9. Configuration
 
-[`PagedMMFOptions`](../../src/Typhon.Engine/Storage/public/PagedMMFOptions.cs) is the only configuration surface in this layer:
+[`PagedMMFOptions`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/public/PagedMMFOptions.cs) is the only configuration surface in this layer:
 
 | Property | Default | Meaning |
 |---|---|---|

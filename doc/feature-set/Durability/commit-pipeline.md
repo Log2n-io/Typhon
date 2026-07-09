@@ -1,3 +1,9 @@
+---
+uid: feature-durability-commit-pipeline
+title: 'Commit Pipeline (append-before-publish)'
+description: 'Transaction.Commit''s VALIDATE→PREPARE→BUILD→APPEND→PUBLISH→WAIT ordering guarantees nothing is visible before its WAL record is appended, and publish never…'
+---
+
 # Commit Pipeline (append-before-publish)
 > Transaction.Commit's VALIDATE→PREPARE→BUILD→APPEND→PUBLISH→WAIT ordering guarantees nothing is visible before its WAL record is appended, and publish never rolls back.
 
@@ -45,7 +51,7 @@ catch (CommitDurabilityUncertainException ex)
 
 ## 🧪 Tests
 
-- [AppendBeforePublishTests](../../../test/Typhon.Engine.Tests/Durability/CrashRecovery/AppendBeforePublishTests.cs) — proves visible-implies-appended (AP-01) and that a concurrent reader never observes a value ahead of its WAL append, on the real WAL pipeline
+- [AppendBeforePublishTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/CrashRecovery/AppendBeforePublishTests.cs) — proves visible-implies-appended (AP-01) and that a concurrent reader never observes a value ahead of its WAL append, on the real WAL pipeline
 
 ## 🔗 Related
 

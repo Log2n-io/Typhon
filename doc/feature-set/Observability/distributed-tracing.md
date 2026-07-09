@@ -1,3 +1,9 @@
+---
+uid: feature-observability-distributed-tracing
+title: 'Distributed Tracing (Activity API)'
+description: 'A centralized System.Diagnostics.ActivitySource and OTel-semantic attribute constants for correlating Typhon with an application''s own OTLP trace.'
+---
+
 # Distributed Tracing (Activity API)
 > A centralized `System.Diagnostics.ActivitySource` and OTel-semantic attribute constants for correlating Typhon with an application's own OTLP trace.
 

@@ -1,3 +1,9 @@
+---
+uid: feature-ecs-storage-modes-storage-mode-committed
+title: 'Committed Durability Discipline'
+description: 'Zero-loss, atomic commits on the SingleVersion layout — without paying for a Versioned revision chain.'
+---
+
 # Committed Durability Discipline
 > Zero-loss, atomic commits on the SingleVersion layout — without paying for a Versioned revision chain.
 
@@ -72,8 +78,8 @@ side.Commit();
 
 ## 🧪 Tests
 
-- [CommittedDisciplineTests](../../../../test/Typhon.Engine.Tests/Data/ECS/CommittedDisciplineTests.cs) — arena staging, publish-at-commit, read-your-own-writes, rollback discards the arena, cluster and non-cluster paths
-- [CommittedDisciplineRecoveryTests](../../../../test/Typhon.Engine.Tests/Durability/CrashRecovery/CommittedDisciplineRecoveryTests.cs) — crash recovery of `Commit`-discipline writes through ordinary WAL replay
+- [CommittedDisciplineTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/CommittedDisciplineTests.cs) — arena staging, publish-at-commit, read-your-own-writes, rollback discards the arena, cluster and non-cluster paths
+- [CommittedDisciplineRecoveryTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/CrashRecovery/CommittedDisciplineRecoveryTests.cs) — crash recovery of `Commit`-discipline writes through ordinary WAL replay
 
 ## 🔗 Related
 

@@ -1,3 +1,9 @@
+---
+uid: feature-profiler-domain-tracing-expansion
+title: 'Domain-Specific Tracing Instrumentation Expansion'
+description: 'Nine new domains of forensic-grade tracing — locks, spatial, scheduler, storage, MVCC, query, durability — zero cost when off.'
+---
+
 # Domain-Specific Tracing Instrumentation Expansion
 > Nine new domains of forensic-grade tracing — locks, spatial, scheduler, storage, MVCC, query, durability — zero cost when off.
 
@@ -90,8 +96,8 @@ if (TelemetryConfig.DataMvccChainWalkActive)
 
 ## 🧪 Tests
 
-- [TelemetryConfigResolverTests](../../../test/Typhon.Engine.Tests/Observability/TelemetryConfigResolverTests.cs) — the Tier-2 parent-implies-children resolution formula: parent off disables children even if explicitly enabled, explicit leaf override wins when the parent is on
-- [ConcurrencyTracingStressTests](../../../test/Typhon.Engine.Tests/Concurrency/ConcurrencyTracingStressTests.cs) — end-to-end stress test for the Concurrency domain under real `AccessControl` contention; `[Explicit]` since it needs the domain's flag enabled via env var/JSON, with the fixture's own doc comment showing how
+- [TelemetryConfigResolverTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Observability/TelemetryConfigResolverTests.cs) — the Tier-2 parent-implies-children resolution formula: parent off disables children even if explicitly enabled, explicit leaf override wins when the parent is on
+- [ConcurrencyTracingStressTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Concurrency/ConcurrencyTracingStressTests.cs) — end-to-end stress test for the Concurrency domain under real `AccessControl` contention; `[Explicit]` since it needs the domain's flag enabled via env var/JSON, with the fixture's own doc comment showing how
 
 ## 🔗 Related
 

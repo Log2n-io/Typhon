@@ -1,3 +1,9 @@
+---
+uid: feature-profiler-query-definition-export
+title: 'Query Definition & Execution Export'
+description: 'Every View/EcsQuery describes its shape once, then tags each run so you can trace it back to the code that issued it.'
+---
+
 # Query Definition & Execution Export
 > Every View/EcsQuery describes its shape once, then tags each run so you can trace it back to the code that issued it.
 
@@ -71,9 +77,9 @@ view.Refresh(tx);                   // scheduler-driven refresh falls back to th
   per-archetype-subtree stats in that view.
 
 ## 🧪 Tests
-- [EcsQueryIdTests](../../../test/Typhon.Engine.Tests/Querying/EcsQueryIdTests.cs) — `EcsQuery<T>.EcsQueryId` is monotonic and unique under concurrent construction
-- [QuerySourceLocationTests](../../../test/Typhon.Engine.Tests/Querying/QuerySourceLocationTests.cs) — `[CallerFilePath]`/`[CallerLineNumber]`/`[CallerMemberName]` substitution at user call sites, stored on the constructed `View`/`EcsQuery`
-- [QueryDefinitionDescribeOnceTests](../../../test/Typhon.Engine.Tests/Profiler/QueryDefinitionDescribeOnceTests.cs) — "describe each query identity exactly once per session" dedup semantics on `QueryDefinitionDescribeTracker`
+- [EcsQueryIdTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Querying/EcsQueryIdTests.cs) — `EcsQuery<T>.EcsQueryId` is monotonic and unique under concurrent construction
+- [QuerySourceLocationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Querying/QuerySourceLocationTests.cs) — `[CallerFilePath]`/`[CallerLineNumber]`/`[CallerMemberName]` substitution at user call sites, stored on the constructed `View`/`EcsQuery`
+- [QueryDefinitionDescribeOnceTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Profiler/QueryDefinitionDescribeOnceTests.cs) — "describe each query identity exactly once per session" dedup semantics on `QueryDefinitionDescribeTracker`
 
 ## 🔗 Related
 - Sibling features: [Span Source Attribution](./source-attribution.md), [Typed-Event Capture Pipeline](./typed-event-capture-pipeline.md)

@@ -1,3 +1,9 @@
+---
+uid: feature-observability-per-domain-metrics-catalog
+title: 'Per-Domain Named Metrics Catalog'
+description: 'A documented target list of ~40 fixed-name OTel instruments (typhon.tx., typhon.wal., typhon.lock.*...) — not yet wired to any exporter.'
+---
+
 # Per-Domain Named Metrics Catalog
 > A documented target list of ~40 fixed-name OTel instruments (typhon.tx.*, typhon.wal.*, typhon.lock.*...) — not yet wired to any exporter.
 

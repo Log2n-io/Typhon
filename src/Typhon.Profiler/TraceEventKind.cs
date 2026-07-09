@@ -940,7 +940,7 @@ public enum TraceEventKind : byte
     /// <see cref="SchedulerChunk"/> (per-system) and <see cref="EcsQueryExecute"/> (per-archetype) leave separate. Feeds the
     /// Workbench Data Flow module's <c>archetype/*</c>, <c>system-archetype/*</c>, and <c>component-family/*</c> track families.
     /// Payload: <c>systemIndex: u16, archetypeId: u16, entityCount: i32, chunkCount: i32</c> = 12 bytes after the span header.
-    /// Gated by <see cref="Typhon.Engine.Observability.TelemetryConfig.SchedulerArchetypeTouchesActive"/>.
+    /// Gated by <c>TelemetryConfig.SchedulerArchetypeTouchesActive</c>.
     /// </summary>
     SchedulerSystemArchetype = 245,
 

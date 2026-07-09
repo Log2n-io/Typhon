@@ -1,6 +1,12 @@
+---
+uid: overview-spatial
+title: '07 — Spatial'
+description: 'Spatial indexing in Typhon answers "which entities are near this point / inside this box / hit by this ray?" — the kinds of queries games, simulations, and…'
+---
+
 # 07 — Spatial
 
-**Code:** [`src/Typhon.Engine/Spatial/`](../../src/Typhon.Engine/Spatial/) (+ geometric primitives in [`src/Typhon.Schema.Definition/SpatialTypes.cs`](../../src/Typhon.Schema.Definition/SpatialTypes.cs))
+**Code:** [`src/Typhon.Engine/Spatial/`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Engine/Spatial) (+ geometric primitives in [`src/Typhon.Schema.Definition/SpatialTypes.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Schema.Definition/SpatialTypes.cs))
 
 Spatial indexing in Typhon answers "which entities are near this point / inside this box / hit by this ray?" — the kinds of queries games, simulations, and geospatial workloads run thousands of times per tick. The subsystem is two complementary structures stacked on top of each other:
 
@@ -19,14 +25,14 @@ Two structures, two purposes:
 
 | Structure | Granularity | Use |
 |---|---|---|
-| **`SpatialGrid`** ([`Spatial/internals/SpatialGrid.cs`](../../src/Typhon.Engine/Spatial/internals/SpatialGrid.cs)) | Coarse — world divided into cells of `CellSize` world units | Broadphase: locate the handful of cells overlapping a query, iterate the clusters bucketed in them |
-| **`SpatialRTree<TStore>`** ([`Spatial/internals/SpatialRTree.cs`](../../src/Typhon.Engine/Spatial/internals/SpatialRTree.cs)) | Fine — per-entity (or per-cluster) AABB hierarchy | Narrowphase: AABB / radius / ray / frustum / kNN; subtree-shortcut counting |
+| **`SpatialGrid`** ([`Spatial/internals/SpatialGrid.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/SpatialGrid.cs)) | Coarse — world divided into cells of `CellSize` world units | Broadphase: locate the handful of cells overlapping a query, iterate the clusters bucketed in them |
+| **`SpatialRTree<TStore>`** ([`Spatial/internals/SpatialRTree.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/SpatialRTree.cs)) | Fine — per-entity (or per-cluster) AABB hierarchy | Narrowphase: AABB / radius / ray / frustum / kNN; subtree-shortcut counting |
 
 The grid is **one per `DatabaseEngine`** — configured once at startup via `DatabaseEngine.ConfigureSpatialGrid(SpatialGridConfig)` before archetypes are initialized. All spatial archetypes share it. Per-archetype differences (tier filters, category masks) are layered above; the grid itself is uniform.
 
-R-Trees are **per `ComponentTable`** — a component table only has one when its declaring field carries `[SpatialIndex]`. The tree's state lives on [`SpatialIndexState`](../../src/Typhon.Engine/Spatial/internals/SpatialIndexState.cs), which the `ComponentTable` exposes as a non-null `SpatialIndex` property when the component is spatial. With per-component `SpatialMode` (Static or Dynamic), exactly one of `StaticTree`/`DynamicTree` is non-null per component table.
+R-Trees are **per `ComponentTable`** — a component table only has one when its declaring field carries `[SpatialIndex]`. The tree's state lives on [`SpatialIndexState`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/SpatialIndexState.cs), which the `ComponentTable` exposes as a non-null `SpatialIndex` property when the component is spatial. With per-component `SpatialMode` (Static or Dynamic), exactly one of `StaticTree`/`DynamicTree` is non-null per component table.
 
-Cluster archetypes ([06-ecs §7](06-ecs.md)) plug into the grid through [`ArchetypeClusterState`](../../src/Typhon.Engine/Ecs/internals/ArchetypeClusterState.cs): each cluster carries a `ClusterSpatialAabb` (six floats + category mask, [`ClusterSpatialAabb.cs`](../../src/Typhon.Engine/Spatial/public/ClusterSpatialAabb.cs)) summarising every entity it holds, and the grid's [`CellState`](../../src/Typhon.Engine/Spatial/internals/CellDescriptor.cs) tracks how many clusters and entities sit in each cell. That bookkeeping is what makes the grid useful as a broadphase: an AABB query maps to a small set of cells, each cell yields a small set of clusters, and only those clusters are visited at the entity level.
+Cluster archetypes ([06-ecs §7](06-ecs.md)) plug into the grid through [`ArchetypeClusterState`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/internals/ArchetypeClusterState.cs): each cluster carries a `ClusterSpatialAabb` (six floats + category mask, [`ClusterSpatialAabb.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/public/ClusterSpatialAabb.cs)) summarising every entity it holds, and the grid's [`CellState`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/CellDescriptor.cs) tracks how many clusters and entities sit in each cell. That bookkeeping is what makes the grid useful as a broadphase: an AABB query maps to a small set of cells, each cell yields a small set of clusters, and only those clusters are visited at the entity level.
 
 Per-entity (non-clustered) archetypes use the R-Tree directly — there's no grid bucketing for them. The grid only earns its keep when clustering compresses many entities into one bucket.
 
@@ -38,7 +44,7 @@ The grid divides 2D world space into fixed-size cells. It's deliberately 2D even
 
 ### `SpatialGridConfig`
 
-[`Spatial/public/SpatialGridConfig.cs`](../../src/Typhon.Engine/Spatial/public/SpatialGridConfig.cs)
+[`Spatial/public/SpatialGridConfig.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/public/SpatialGridConfig.cs)
 
 Immutable, validated at construction:
 
@@ -52,11 +58,11 @@ Immutable, validated at construction:
 | `CellCount` | Derived. `KeySpaceDim²` for Morton, `GridWidth × GridHeight` otherwise. |
 | `InverseCellSize` | Precomputed `1 / CellSize`. |
 
-Cell keys are encoded via [`MortonKeys`](../../src/Typhon.Engine/Spatial/internals/MortonKeys.cs) (Z-order curve) when `SpatialConfig.UseMortonCellKeys` is true — that's the production default. Morton interleaves 16 bits per axis into a 32-bit key, capping each axis at 32 768; the constructor throws if you exceed that. The fallback row-major form (`cellY * GridWidth + cellX`) is kept behind a const-bool flag for diagnostics.
+Cell keys are encoded via [`MortonKeys`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/MortonKeys.cs) (Z-order curve) when `SpatialConfig.UseMortonCellKeys` is true — that's the production default. Morton interleaves 16 bits per axis into a 32-bit key, capping each axis at 32 768; the constructor throws if you exceed that. The fallback row-major form (`cellY * GridWidth + cellX`) is kept behind a const-bool flag for diagnostics.
 
 ### `SpatialGrid` and `CellState`
 
-[`Spatial/internals/SpatialGrid.cs`](../../src/Typhon.Engine/Spatial/internals/SpatialGrid.cs), [`Spatial/internals/CellDescriptor.cs`](../../src/Typhon.Engine/Spatial/internals/CellDescriptor.cs)
+[`Spatial/internals/SpatialGrid.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/SpatialGrid.cs), [`Spatial/internals/CellDescriptor.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/CellDescriptor.cs)
 
 The grid owns a flat `CellState[]` of length `CellCount`. Each `CellState` is **64 bytes — one full cache line**, by `[StructLayout(LayoutKind.Explicit, Size = 64)]`:
 
@@ -71,7 +77,7 @@ The grid owns a flat `CellState[]` of length `CellCount`. Each `CellState` is **
 
 The cache-line padding is non-negotiable — fence workers concurrently mutate `EntityCount`/`ClusterCount` for *different* cells, and without padding adjacent cells would false-share.
 
-Per-cell **cluster lists** (which clusters live in a cell, per archetype) don't live on `CellState` — they're per archetype, stored inside each `ArchetypeClusterState`'s own [`CellClusterPool`](../../src/Typhon.Engine/Spatial/internals/CellClusterPool.cs) / [`CellSpatialIndex`](../../src/Typhon.Engine/Spatial/internals/CellSpatialIndex.cs). The grid is the shared global counter; archetypes own their own per-cell linkage.
+Per-cell **cluster lists** (which clusters live in a cell, per archetype) don't live on `CellState` — they're per archetype, stored inside each `ArchetypeClusterState`'s own [`CellClusterPool`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/CellClusterPool.cs) / [`CellSpatialIndex`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/CellSpatialIndex.cs). The grid is the shared global counter; archetypes own their own per-cell linkage.
 
 All grid state is **transient** — nothing in `CellState` is persisted. After a database reopen, `RebuildCellState` reconstructs it by replaying entity positions.
 
@@ -91,7 +97,7 @@ Out-of-bounds inputs are clamped to the grid extent. NaN / infinite inputs **thr
 
 ### `SpatialGridAccessor`
 
-[`Spatial/public/SpatialGridAccessor.cs`](../../src/Typhon.Engine/Spatial/public/SpatialGridAccessor.cs)
+[`Spatial/public/SpatialGridAccessor.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/public/SpatialGridAccessor.cs)
 
 8-byte `readonly struct` — the game-facing handle exposed on `TickContext.SpatialGrid`. Thin wrapper over `SpatialGrid` for tier assignment (`SetCellTier`, `SetCellTierMin`, `ResetAllTiers`, `SetTierInAABB`) and coordinate queries. `IsValid` is false when the engine has no configured grid (non-spatial games or shutdown).
 
@@ -103,9 +109,9 @@ The R-Tree is Typhon's narrowphase. Entries are **fat AABBs** — each entity's 
 
 ### Variants and layout
 
-One implementation, four variants — selected by [`SpatialVariant`](../../src/Typhon.Engine/Spatial/public/SpatialVariant.cs): `R2Df32`, `R3Df32`, `R2Df64`, `R3Df64`. The layout is described by a [`SpatialNodeDescriptor`](../../src/Typhon.Engine/Spatial/internals/SpatialNodeDescriptor.cs) — a `readonly struct` of node-layout constants the JIT promotes to literal values, so generic code over `SpatialRTree<TStore>` doesn't pay polymorphism cost.
+One implementation, four variants — selected by [`SpatialVariant`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/public/SpatialVariant.cs): `R2Df32`, `R3Df32`, `R2Df64`, `R3Df64`. The layout is described by a [`SpatialNodeDescriptor`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/SpatialNodeDescriptor.cs) — a `readonly struct` of node-layout constants the JIT promotes to literal values, so generic code over `SpatialRTree<TStore>` doesn't pay polymorphism cost.
 
-Each node is one chunk of a [`ChunkBasedSegment<TStore>`](../../src/Typhon.Engine/Storage/internals/ChunkBasedSegment.cs) — **512 B for 2D and 3D-f32, 768 B for 3D-f64**. The layout is **SOA within the node** (separate arrays for coordinates / IDs / category masks rather than an array of entry structs), which keeps geometric scans dense. Header layout:
+Each node is one chunk of a [`ChunkBasedSegment<TStore>`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/internals/ChunkBasedSegment.cs) — **512 B for 2D and 3D-f32, 768 B for 3D-f64**. The layout is **SOA within the node** (separate arrays for coordinates / IDs / category masks rather than an array of entry structs), which keeps geometric scans dense. Header layout:
 
 ```
 [ OlcVersion(4) | Control(4) | ParentChunkId(4) | NodeMBR(coords) | UnionCategoryMask(4) ]
@@ -124,7 +130,7 @@ Tree metadata (root chunk id, node count, entity count, depth, variant) lives in
 
 ### Concurrency model — `SpinWriteLock` (its own variant)
 
-Each R-Tree node has a 32-bit [`OlcLatch`](../../src/Typhon.Engine/Foundation/Concurrency/internals/OlcLatch.cs) embedded in its header. Reads use optimistic concurrency control — capture the version before the read, do the work, validate after; restart if anything changed. Writes need exclusive access, and the R-Tree takes it through a **plain `SpinWait` loop**:
+Each R-Tree node has a 32-bit [`OlcLatch`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Foundation/Concurrency/internals/OlcLatch.cs) embedded in its header. Reads use optimistic concurrency control — capture the version before the read, do the work, validate after; restart if anything changed. Writes need exclusive access, and the R-Tree takes it through a **plain `SpinWait` loop**:
 
 ```csharp
 private static void SpinWriteLock(byte* nodeBase, out OlcLatch latch)
@@ -151,11 +157,11 @@ Tree-level metadata writes (`SyncMetadata` on chunk 0) take a separate **plain `
 
 ### Operations
 
-[`SpatialRTree.Insert.cs`](../../src/Typhon.Engine/Spatial/internals/SpatialRTree.Insert.cs), [`SpatialRTree.Query.cs`](../../src/Typhon.Engine/Spatial/internals/SpatialRTree.Query.cs), [`SpatialRTree.Remove.cs`](../../src/Typhon.Engine/Spatial/internals/SpatialRTree.Remove.cs), [`SpatialRTree.Split.cs`](../../src/Typhon.Engine/Spatial/internals/SpatialRTree.Split.cs), [`SpatialRTree.BulkLoad.cs`](../../src/Typhon.Engine/Spatial/internals/SpatialRTree.BulkLoad.cs)
+[`SpatialRTree.Insert.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/SpatialRTree.Insert.cs), [`SpatialRTree.Query.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/SpatialRTree.Query.cs), [`SpatialRTree.Remove.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/SpatialRTree.Remove.cs), [`SpatialRTree.Split.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/SpatialRTree.Split.cs), [`SpatialRTree.BulkLoad.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/SpatialRTree.BulkLoad.cs)
 
 | Operation | Notes |
 |---|---|
-| **Insert** | OLC descent picks the best leaf (smallest MBR enlargement, tie-break smallest area). Write-locks the leaf, appends, refits MBR up the recorded descent path. Splits when the leaf is full ([Split.cs](../../src/Typhon.Engine/Spatial/internals/SpatialRTree.Split.cs)). Restarts on OLC version mismatch — capped at 255 restart attempts before a hard fail. |
+| **Insert** | OLC descent picks the best leaf (smallest MBR enlargement, tie-break smallest area). Write-locks the leaf, appends, refits MBR up the recorded descent path. Splits when the leaf is full ([Split.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/SpatialRTree.Split.cs)). Restarts on OLC version mismatch — capped at 255 restart attempts before a hard fail. |
 | **Remove** | Reads the back-pointer to get `(leafChunkId, slotIndex)` directly — O(1), no descent. Swap-with-last in the leaf, refit MBR, walk ancestors bottom-up via `ParentChunkId`. When the last entry leaves a non-root leaf, the leaf chunk is recycled (`RemoveEmptyLeaf`). |
 | **QueryAABB** | Stack-based DFS, OLC validate per node, leaf-level overlap test fully unrolled for 2D and 3D. Returns `AABBQueryEnumerator` (ref struct, zero allocation). |
 | **QueryRadius** | Coarse filter — converts radius to enclosing AABB. False positive rate ~21 % (2D) / ~48 % (3D). Caller post-filters by squared distance. |
@@ -176,9 +182,9 @@ Category masks are **archetype-level** in cluster archetypes (every entity in an
 
 ## 4. Geometric predicates
 
-The geometric primitives — `AABB2F/3F/2D/3D`, `BSphere2F/3F/2D/3D` — live in the sibling [`Typhon.Schema.Definition`](../../src/Typhon.Schema.Definition/SpatialTypes.cs) project, not in `Typhon.Engine`. That's because schema-defined component fields need to reference them without dragging in the full engine. See [01-foundation §9](01-foundation.md#9-schema-definition-types-sibling-project) for why this split exists.
+The geometric primitives — `AABB2F/3F/2D/3D`, `BSphere2F/3F/2D/3D` — live in the sibling [`Typhon.Schema.Definition`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Schema.Definition/SpatialTypes.cs) project, not in `Typhon.Engine`. That's because schema-defined component fields need to reference them without dragging in the full engine. See [01-foundation §9](01-foundation.md#9-schema-definition-types-sibling-project) for why this split exists.
 
-Helpers ([`Spatial/internals/SpatialGeometry.cs`](../../src/Typhon.Engine/Spatial/internals/SpatialGeometry.cs)) — all `[MethodImpl(AggressiveInlining)]`, scalar-only in v1 (SOA layout enables drop-in SIMD later):
+Helpers ([`Spatial/internals/SpatialGeometry.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/SpatialGeometry.cs)) — all `[MethodImpl(AggressiveInlining)]`, scalar-only in v1 (SOA layout enables drop-in SIMD later):
 
 | Predicate / op | Variants |
 |---|---|
@@ -211,7 +217,7 @@ public struct Position
 }
 ```
 
-[`SpatialIndexAttribute`](../../src/Typhon.Schema.Definition/Attributes.cs) (lines 138–169) carries:
+[`SpatialIndexAttribute`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Schema.Definition/Attributes.cs) (lines 138–169) carries:
 
 | Property | Meaning |
 |---|---|
@@ -220,11 +226,11 @@ public struct Position
 | `Mode` | `Dynamic` (default — fat-AABB updates at tick fence) or `Static` (bulk-loaded once, skipped by the tick fence). |
 | `Category` | Archetype-level 32-bit mask used by the cluster broadphase. Defaults to `uint.MaxValue` (accept every query). |
 
-At schema registration, the engine reads the attribute, infers the `SpatialFieldType` from the field's C# type (`AABB2F`, `BSphere3F`, …), builds a [`SpatialFieldInfo`](../../src/Typhon.Engine/Spatial/public/SpatialFieldInfo.cs), allocates the right R-Tree variant via `SpatialNodeDescriptor.ForVariant`, and stores everything in a `SpatialIndexState` on the component table. Cluster archetypes that contain a spatial component also get registered on the state's `ClusterArchetypes` list for fan-out at query time.
+At schema registration, the engine reads the attribute, infers the `SpatialFieldType` from the field's C# type (`AABB2F`, `BSphere3F`, …), builds a [`SpatialFieldInfo`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/public/SpatialFieldInfo.cs), allocates the right R-Tree variant via `SpatialNodeDescriptor.ForVariant`, and stores everything in a `SpatialIndexState` on the component table. Cluster archetypes that contain a spatial component also get registered on the state's `ClusterArchetypes` list for fan-out at query time.
 
 ### Query operators
 
-`EcsQuery<TArchetype>` ([06-ecs §5](06-ecs.md), [09-querying](09-querying.md)) exposes three spatial filters — defined in [`Ecs/public/EcsQuery.cs`](../../src/Typhon.Engine/Ecs/public/EcsQuery.cs):
+`EcsQuery<TArchetype>` ([06-ecs §5](06-ecs.md), [09-querying](09-querying.md)) exposes three spatial filters — defined in [`Ecs/public/EcsQuery.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/EcsQuery.cs):
 
 ```csharp
 tx.Query<Ant>()
@@ -242,8 +248,8 @@ tx.Query<Ant>()
 
 Each operator records the query type and parameters on the `EcsQuery`, then `Execute` dispatches to the appropriate spatial path:
 
-- For **cluster archetypes**: through `ClusterSpatialQuery<TArch>` ([`Spatial/public/ClusterSpatialQuery.cs`](../../src/Typhon.Engine/Spatial/public/ClusterSpatialQuery.cs)) → per-cell broadphase via `SpatialGrid.WorldToCellRange` → for each overlapping cell, scan its `CellSpatialIndex` clusters → narrowphase per cluster reads entity AABBs and tests against the query.
-- For **per-entity archetypes**: through `SpatialQuery<T>` ([`Spatial/internals/SpatialQuery.cs`](../../src/Typhon.Engine/Spatial/internals/SpatialQuery.cs)) → directly hits the R-Tree's `QueryAABB` / `QueryRadius` / `QueryRay` enumerators.
+- For **cluster archetypes**: through `ClusterSpatialQuery<TArch>` ([`Spatial/public/ClusterSpatialQuery.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/public/ClusterSpatialQuery.cs)) → per-cell broadphase via `SpatialGrid.WorldToCellRange` → for each overlapping cell, scan its `CellSpatialIndex` clusters → narrowphase per cluster reads entity AABBs and tests against the query.
+- For **per-entity archetypes**: through `SpatialQuery<T>` ([`Spatial/internals/SpatialQuery.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/SpatialQuery.cs)) → directly hits the R-Tree's `QueryAABB` / `QueryRadius` / `QueryRay` enumerators.
 
 Both paths emit an `Ecs:Query:Spatial:Attach` instant event so traces show the bounding region the predicate is filtering on.
 
@@ -253,11 +259,11 @@ The `Debug.Assert` inside each `Where*` method requires the component to carry `
 
 ## 6. Insert / Query / Remove flows
 
-When a spatially-indexed component changes value, the index has to stay coherent. The mechanics differ slightly between Versioned and SingleVersion/Transient components (see [05-revision](05-revision.md) / [06-ecs §8](06-ecs.md)), but the index-side work funnels through [`SpatialMaintainer`](../../src/Typhon.Engine/Spatial/internals/SpatialMaintainer.cs).
+When a spatially-indexed component changes value, the index has to stay coherent. The mechanics differ slightly between Versioned and SingleVersion/Transient components (see [05-revision](05-revision.md) / [06-ecs §8](06-ecs.md)), but the index-side work funnels through [`SpatialMaintainer`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/SpatialMaintainer.cs).
 
 ### Insert (entity spawned)
 
-Triggered at `FinalizeSpawns` for SingleVersion/Transient and at commit for Versioned. [`SpatialMaintainer.InsertSpatial`](../../src/Typhon.Engine/Spatial/internals/SpatialMaintainer.cs):
+Triggered at `FinalizeSpawns` for SingleVersion/Transient and at commit for Versioned. [`SpatialMaintainer.InsertSpatial`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/SpatialMaintainer.cs):
 
 1. Read the tight bounds from the component data via `ReadAndValidateBounds`. Degenerate bounds (NaN / inverted) emit a warning and **skip** the index — the entity exists in ECS, but isn't queryable spatially.
 2. Enlarge tight → fat AABB by `Margin`.
@@ -265,11 +271,11 @@ Triggered at `FinalizeSpawns` for SingleVersion/Transient and at commit for Vers
 4. Write the back-pointer via `SpatialBackPointerHelper.Write(ref bpAccessor, componentChunkId, leafChunkId, (short)slotIndex, treeSelector)` so future updates / removes are O(1).
 5. Layer-1 (optional, when `CellSize > 0` on the field): increment the per-cell occupancy map.
 
-For cluster archetypes the path is different — `ClusterRef.WriteSpatial` ([`Ecs/public/ClusterRef.cs`](../../src/Typhon.Engine/Ecs/public/ClusterRef.cs)) updates the cluster's `ClusterSpatialAabb` inline (CAS per axis), sets the cluster's bit in `ClusterProcessBitmap`, and flags axes for shrink rescan or cells for migration as needed. The tick fence then processes those flags in bulk.
+For cluster archetypes the path is different — `ClusterRef.WriteSpatial` ([`Ecs/public/ClusterRef.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/ClusterRef.cs)) updates the cluster's `ClusterSpatialAabb` inline (CAS per axis), sets the cluster's bit in `ClusterProcessBitmap`, and flags axes for shrink rescan or cells for migration as needed. The tick fence then processes those flags in bulk.
 
 ### Update (component value changes)
 
-Triggered at the tick fence for SV/Transient and at commit for Versioned. [`SpatialMaintainer.UpdateSpatialCore`](../../src/Typhon.Engine/Spatial/internals/SpatialMaintainer.cs):
+Triggered at the tick fence for SV/Transient and at commit for Versioned. [`SpatialMaintainer.UpdateSpatialCore`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/SpatialMaintainer.cs):
 
 1. Read current tight bounds, validate.
 2. Read the back-pointer → leaf chunk id + slot index.
@@ -280,7 +286,7 @@ The fast/slow ratio is monitored via the `SpatialMaintainerEscapeRate` telemetry
 
 ### Remove (entity destroyed)
 
-[`SpatialMaintainer.RemoveFromSpatial`](../../src/Typhon.Engine/Spatial/internals/SpatialMaintainer.cs):
+[`SpatialMaintainer.RemoveFromSpatial`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/SpatialMaintainer.cs):
 
 1. Read the back-pointer. If `LeafChunkId == 0`, the entity was never inserted (degenerate bounds at spawn) — skip.
 2. Route to the correct tree (Static or Dynamic) via the back-pointer's `TreeSelector`.
@@ -290,14 +296,14 @@ The fast/slow ratio is monitored via the `SpatialMaintainerEscapeRate` telemetry
 
 ### Cluster migration
 
-When an entity in a cluster archetype moves into a different grid cell (with hysteresis around the boundary so jitter at the edge doesn't oscillate), the tick fence migrates it: removes the cluster slot's contribution from the source cell's `EntityCount`, adds it to the destination cell, and updates the per-cell cluster lists. This is the [`MigrationRequest`](../../src/Typhon.Engine/Spatial/internals/MigrationRequest.cs) / [`SpatialMaintainer`](../../src/Typhon.Engine/Spatial/internals/SpatialMaintainer.cs) path — outside the per-entity R-Tree, but the reason `CellState.EntityCount` exists. A migration storm (many migrations per tick) emits a warning — usually means a viewport warp, teleport, or unphysical speed.
+When an entity in a cluster archetype moves into a different grid cell (with hysteresis around the boundary so jitter at the edge doesn't oscillate), the tick fence migrates it: removes the cluster slot's contribution from the source cell's `EntityCount`, adds it to the destination cell, and updates the per-cell cluster lists. This is the [`MigrationRequest`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/MigrationRequest.cs) / [`SpatialMaintainer`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/SpatialMaintainer.cs) path — outside the per-entity R-Tree, but the reason `CellState.EntityCount` exists. A migration storm (many migrations per tick) emits a warning — usually means a viewport warp, teleport, or unphysical speed.
 
 ### Trigger and interest systems
 
 Two further consumers sit on the spatial index:
 
-- [`SpatialTriggerSystem`](../../src/Typhon.Engine/Spatial/internals/SpatialTriggerSystem.cs) — volume occupancy tracking ("which entities are inside this static AABB?"). Uses `QueryAABBOccupants` to populate occupant bitmaps indexed by component chunk id, with `_mutationVersion`-driven invalidation when the tree changes.
-- [`SpatialInterestSystem`](../../src/Typhon.Engine/Spatial/internals/SpatialInterestSystem.cs) — observer-driven interest management for distributed scenarios.
+- [`SpatialTriggerSystem`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/SpatialTriggerSystem.cs) — volume occupancy tracking ("which entities are inside this static AABB?"). Uses `QueryAABBOccupants` to populate occupant bitmaps indexed by component chunk id, with `_mutationVersion`-driven invalidation when the tree changes.
+- [`SpatialInterestSystem`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/SpatialInterestSystem.cs) — observer-driven interest management for distributed scenarios.
 
 Both are lazily created on first use (`GetOrCreateTriggerSystem` / `GetOrCreateInterestSystem` on `SpatialIndexState`).
 

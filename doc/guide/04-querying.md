@@ -1,3 +1,9 @@
+---
+uid: guide-querying
+title: '4 — Querying & views'
+description: 'Spawning and reading by id only gets you so far. Real work means asking questions of your data — "every wounded unit on team 3", "everything within 15…'
+---
+
 # 4 — Querying & views
 
 Spawning and reading by id only gets you so far. Real work means asking questions of your data — *"every wounded unit on team 3"*, *"everything within 15 metres of here"*, *"what changed since last tick?"*. That's this chapter. It's the most feature-dense in the guide, because querying is where you'll spend a lot of your time.

@@ -1,3 +1,9 @@
+---
+uid: feature-runtime-tick-execution-engine-parallel-tick-fence
+title: 'Parallel Tick Fence'
+description: 'Spreads the post-tick WriteTickFence step — cluster migrations, AABB refresh, WAL publish — across the worker pool instead of running it on one thread.'
+---
+
 # Parallel Tick Fence
 > Spreads the post-tick `WriteTickFence` step — cluster migrations, AABB refresh, WAL publish — across the worker pool instead of running it on one thread.
 
@@ -61,9 +67,9 @@ using var runtime = TyphonRuntime.Create(engine, schedule => { /* ... */ }, opti
 
 ## 🧪 Tests
 
-- [ParallelFenceTests](../../../../test/Typhon.Engine.Tests/Runtime/ParallelFenceTests.cs) — opt-in/opt-out fence correctness, migration storms, spawn+mutation ticks, no-corruption/no-duplicate-chunk-execution
-- [AdaptiveFenceCostTests](../../../../test/Typhon.Engine.Tests/Runtime/AdaptiveFenceCostTests.cs) — `AdaptiveFenceCost` on/off, cost-model recalibration from measured wall-time
-- [FenceWorkPlanPackTests](../../../../test/Typhon.Engine.Tests/Runtime/FenceWorkPlanPackTests.cs) — chunk bin-packing against oversubscription cap and per-unit cost
+- [ParallelFenceTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/ParallelFenceTests.cs) — opt-in/opt-out fence correctness, migration storms, spawn+mutation ticks, no-corruption/no-duplicate-chunk-execution
+- [AdaptiveFenceCostTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/AdaptiveFenceCostTests.cs) — `AdaptiveFenceCost` on/off, cost-model recalibration from measured wall-time
+- [FenceWorkPlanPackTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/FenceWorkPlanPackTests.cs) — chunk bin-packing against oversubscription cap and per-unit cost
 
 ## 🔗 Related
 

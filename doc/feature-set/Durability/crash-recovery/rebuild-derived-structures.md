@@ -1,3 +1,9 @@
+---
+uid: feature-durability-crash-recovery-rebuild-derived-structures
+title: 'Rebuild of Derived Structures (scrub + rebuild, no FPI)'
+description: 'Derived structures — indexes, EntityMap, occupancy — are never repaired after a crash; they''re discarded and rebuilt from primary data.'
+---
+
 # Rebuild of Derived Structures (scrub + rebuild, no FPI)
 > Derived structures — indexes, EntityMap, occupancy — are never repaired after a crash; they're discarded and rebuilt from primary data.
 
@@ -68,9 +74,9 @@ catch (CorruptionException ex)
 
 ## 🧪 Tests
 
-- [DifferentialRecoveryOracleTests](../../../../test/Typhon.Engine.Tests/Durability/CrashRecovery/DifferentialRecoveryOracleTests.cs) — index axis (RB-01: secondary B+Tree rebuilt at recovery) and cluster axis (EntityMap/SV rebuild) proofs
-- [WalIntegrationTests](../../../../test/Typhon.Engine.Tests/Durability/WalIntegrationTests.cs) — `WAL_Destroy_TombstonedEntitiesExcludedFromEntityMapRebuild`: EntityMap rebuild on reopen correctly excludes tombstoned entities
-- [RawValueHashMapTests](../../../../test/Typhon.Engine.Tests/Data/ECS/RawValueHashMapTests.cs) — `ClearForRebuild`/`InsertDuringRebuild` on the hash map backing the EntityMap, the primitive the rebuild phase drives
+- [DifferentialRecoveryOracleTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/CrashRecovery/DifferentialRecoveryOracleTests.cs) — index axis (RB-01: secondary B+Tree rebuilt at recovery) and cluster axis (EntityMap/SV rebuild) proofs
+- [WalIntegrationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/WalIntegrationTests.cs) — `WAL_Destroy_TombstonedEntitiesExcludedFromEntityMapRebuild`: EntityMap rebuild on reopen correctly excludes tombstoned entities
+- [RawValueHashMapTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/RawValueHashMapTests.cs) — `ClearForRebuild`/`InsertDuringRebuild` on the hash map backing the EntityMap, the primitive the rebuild phase drives
 
 ## 🔗 Related
 

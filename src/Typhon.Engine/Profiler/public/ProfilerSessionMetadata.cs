@@ -79,6 +79,27 @@ public sealed class ProfilerSessionMetadata
     /// <summary>Resource-graph pre-order tree snapshot. v7+ trace section. Empty when no resource graph is available.</summary>
     public ResourceGraphNodeRecord[] ResourceGraphNodes { get; }
 
+    /// <summary>
+    /// Construct session metadata from captured engine/runtime tables. Every optional array defaults to empty (never <c>null</c>);
+    /// <see cref="RuntimeConfig"/> defaults to <c>null</c> when no engine config is available.
+    /// </summary>
+    /// <param name="systems">System DAG metadata; empty when started outside a runtime context.</param>
+    /// <param name="archetypes">Archetype id → name table for the viewer.</param>
+    /// <param name="componentTypes">Component-type id → CLR name table for the viewer.</param>
+    /// <param name="workerCount">Scheduler worker-thread count at session start; <c>0</c> when standalone.</param>
+    /// <param name="baseTickRate">Target tick rate in Hz; <c>0</c> for non-runtime profiling.</param>
+    /// <param name="startTimestamp"><c>Stopwatch.GetTimestamp()</c> anchor captured at session start.</param>
+    /// <param name="stopwatchFrequency"><c>Stopwatch.Frequency</c> at session start, for tick → wall-clock conversion.</param>
+    /// <param name="startedUtc">UTC wall-clock time the session started.</param>
+    /// <param name="samplingSessionStartQpc">CPU-sampling QPC anchor; <c>0</c> when no EventPipe sampling companion is running.</param>
+    /// <param name="tracks">Track table (top of the runtime partitioning hierarchy); empty without a scheduler.</param>
+    /// <param name="dags">DAG table; empty without a scheduler.</param>
+    /// <param name="componentDefinitions">Rich component-type definitions; empty when no engine is attached.</param>
+    /// <param name="archetypeDefinitions">Rich archetype definitions; empty when no engine is attached.</param>
+    /// <param name="indexCatalog">Per-(component, field) index catalog; empty when no engine is attached.</param>
+    /// <param name="runtimeConfig">Engine runtime-config snapshot, or <c>null</c> when unavailable.</param>
+    /// <param name="eventQueues">Per-queue static schema; empty when no queues are registered.</param>
+    /// <param name="resourceGraphNodes">Resource-graph pre-order tree snapshot; empty when unavailable.</param>
     public ProfilerSessionMetadata(SystemDefinitionRecord[] systems, ArchetypeRecord[] archetypes, ComponentTypeRecord[] componentTypes, int workerCount,
         float baseTickRate, long startTimestamp, long stopwatchFrequency, DateTime startedUtc, long samplingSessionStartQpc = 0, TrackRecord[] tracks = null,
         DagRecord[] dags = null, ComponentDefinitionRecord[] componentDefinitions = null, ArchetypeDefinitionRecord[] archetypeDefinitions = null,

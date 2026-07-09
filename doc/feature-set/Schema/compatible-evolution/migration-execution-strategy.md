@@ -1,3 +1,9 @@
+---
+uid: feature-schema-compatible-evolution-migration-execution-strategy
+title: 'Migration Execution Strategy'
+description: 'Migration runs eagerly and synchronously at database open — before any user transaction — with progress events and an offline dry-run check.'
+---
+
 # Migration Execution Strategy
 > Migration runs eagerly and synchronously at database open — before any user transaction — with progress events and an offline dry-run check.
 
@@ -78,8 +84,8 @@ if (!result.IsValid)
 
 ## 🧪 Tests
 
-- [OperationalToolingTests](../../../../test/Typhon.Engine.Tests/Data/Schema/OperationalToolingTests.cs) — `MigrationProgress_EventsFiredInOrder` (monotonic phase sequence, `Analyzing`→`Complete`), `ValidateEvolution_CompatibleChange_IsValid` (offline dry-run, no mutation)
-- [SchemaEvolutionTests](../../../../test/Typhon.Engine.Tests/Data/Schema/SchemaEvolutionTests.cs) — `BulkMigration_Performance` times a 10K-entity eager migration, illustrating the synchronous startup cost
+- [OperationalToolingTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/Schema/OperationalToolingTests.cs) — `MigrationProgress_EventsFiredInOrder` (monotonic phase sequence, `Analyzing`→`Complete`), `ValidateEvolution_CompatibleChange_IsValid` (offline dry-run, no mutation)
+- [SchemaEvolutionTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/Schema/SchemaEvolutionTests.cs) — `BulkMigration_Performance` times a 10K-entity eager migration, illustrating the synchronous startup cost
 
 ## 🔗 Related
 

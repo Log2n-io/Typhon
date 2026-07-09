@@ -1,3 +1,9 @@
+---
+uid: feature-subscriptions-subscription-management-subscription-client-initiated
+title: 'Client-Initiated Subscriptions (v2)'
+description: 'Clients request their own subscription changes; the server validates before applying them.'
+---
+
 # Client-Initiated Subscriptions (v2)
 > Clients request their own subscription changes; the server validates before applying them.
 

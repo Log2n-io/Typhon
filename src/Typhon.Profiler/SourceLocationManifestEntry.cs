@@ -23,6 +23,7 @@ public readonly struct SourceLocationManifestEntry
     /// <summary>Containing-method short name for display ("BTree.Insert", "ChunkedTransaction.CommitChanges", ...).</summary>
     public string Method { get; }
 
+    /// <summary>Constructs a manifest entry. A <c>null</c> <paramref name="method"/> is stored as the empty string.</summary>
     public SourceLocationManifestEntry(ushort id, ushort fileId, uint line, byte kind, string method)
     {
         Id = id;

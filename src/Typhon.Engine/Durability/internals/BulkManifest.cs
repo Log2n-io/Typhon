@@ -10,9 +10,9 @@ namespace Typhon.Engine.Internals;
 /// <remarks>
 /// <para>
 /// <b>BulkBegin</b> is emitted (as a *placeholder* — empty page-range list, zero entity counts) when
-/// <see cref="Typhon.Engine.Transactions.DatabaseEngine.BeginBulkLoad"/> opens a session. It anchors the bulk's
+/// <see cref="Typhon.Engine.DatabaseEngine.BeginBulkLoad"/> opens a session. It anchors the bulk's
 /// LSN in the WAL stream. <b>BulkEnd</b> is emitted (with the final manifest) by
-/// <see cref="Typhon.Engine.Transactions.BulkLoadSession.CompleteBulkLoad"/> after the synchronous checkpoint completes.
+/// <see cref="Typhon.Engine.BulkLoadSession.CompleteBulkLoad"/> after the synchronous checkpoint completes.
 /// </para>
 /// <para>
 /// <b>Recovery contract:</b> a bulk session is durable iff both <c>BulkBegin</c> and <c>BulkEnd</c> are on disk

@@ -1,3 +1,9 @@
+---
+uid: feature-schema-component-field-declaration
+title: 'Component & Field Schema Declaration'
+description: 'Declare a struct, decorate its fields, and Typhon turns it into a fully-indexed, persisted component type.'
+---
+
 # Component & Field Schema Declaration
 > Declare a struct, decorate its fields, and Typhon turns it into a fully-indexed, persisted component type.
 

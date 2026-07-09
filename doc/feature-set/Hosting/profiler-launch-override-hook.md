@@ -1,3 +1,9 @@
+---
+uid: feature-hosting-profiler-launch-override-hook
+title: 'Profiler Launch Override Hook'
+description: 'Adjust the resolved profiler launch config in code, on top of file/env, without giving up zero-code defaults.'
+---
+
 # Profiler Launch Override Hook
 > Adjust the resolved profiler launch config in code, on top of file/env, without giving up zero-code defaults.
 
@@ -66,12 +72,12 @@ var runtime = TyphonRuntime.Create(engine, sched => { /* register systems */ }, 
 
 ## 🧪 Tests
 
-- [ProfilerLaunchConfigTests](../../../test/Typhon.Engine.Tests/Profiler/ProfilerLaunchConfigTests.cs) — `MergedWith` precedence (`MergedWith_OverrideTraceWinsWhenSet`, `_BaseRetainedWhenOverrideUnset`, `_NullOverride_ReturnsBase`) and `TypicalLayering_ConfigFirstThenArgsOverride`, which its own comment ties directly to "the `AddTyphonProfiler` hook"; no fixture calls `AddTyphonProfiler` itself — this covers the merge logic the delegate composes over
+- [ProfilerLaunchConfigTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Profiler/ProfilerLaunchConfigTests.cs) — `MergedWith` precedence (`MergedWith_OverrideTraceWinsWhenSet`, `_BaseRetainedWhenOverrideUnset`, `_NullOverride_ReturnsBase`) and `TypicalLayering_ConfigFirstThenArgsOverride`, which its own comment ties directly to "the `AddTyphonProfiler` hook"; no fixture calls `AddTyphonProfiler` itself — this covers the merge logic the delegate composes over
 
 ## 🔗 Related
 
-- Source: [`TyphonBuilderExtensions.cs`](../../../src/Typhon.Engine/Hosting/public/TyphonBuilderExtensions.cs) (`AddTyphonProfiler`), [`ProfilerBootstrap.cs`](../../../src/Typhon.Engine/Profiler/internals/ProfilerBootstrap.cs) (`TryStart`), [`ProfilerLaunchConfig.cs`](../../../src/Typhon.Engine/Profiler/public/ProfilerLaunchConfig.cs), [`TyphonRuntime.cs`](../../../src/Typhon.Engine/Runtime/public/TyphonRuntime.cs) (`Create`)
-- Colliding overload: [`TelemetryServiceExtensions.cs`](../../../src/Typhon.Engine/Observability/public/TelemetryServiceExtensions.cs) (`AddTyphonProfiler(IServiceCollection)`, no delegate)
+- Source: [`TyphonBuilderExtensions.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Hosting/public/TyphonBuilderExtensions.cs) (`AddTyphonProfiler`), [`ProfilerBootstrap.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Profiler/internals/ProfilerBootstrap.cs) (`TryStart`), [`ProfilerLaunchConfig.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Profiler/public/ProfilerLaunchConfig.cs), [`TyphonRuntime.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Runtime/public/TyphonRuntime.cs) (`Create`)
+- Colliding overload: [`TelemetryServiceExtensions.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Observability/public/TelemetryServiceExtensions.cs) (`AddTyphonProfiler(IServiceCollection)`, no delegate)
 - Sibling: [Profiler Session Lifecycle & Zero-Code Bootstrap](../Profiler/profiler-lifecycle-bootstrap.md) — the zero-code self-wiring this hook layers an override on top of.
 
 <!-- Deep dive: claude/design/Profiler/README.md, claude/design/Profiler/profiler-user-manual.md -->

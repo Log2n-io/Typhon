@@ -1,3 +1,9 @@
+---
+uid: feature-runtime-spatial-tiers-adaptive-dispatch-cluster-dormancy
+title: 'Cluster Dormancy (Sleep/Wake)'
+description: 'Clusters untouched for N ticks sleep and are skipped by every dispatch path, waking within one tick of being written to.'
+---
+
 # Cluster Dormancy (Sleep/Wake)
 > Clusters untouched for N ticks sleep and are skipped by every dispatch path, waking within one tick of being written to.
 
@@ -67,13 +73,13 @@ arbitrary game code.
 
 ## 🧪 Tests
 
-- [DormancyTests](../../../../test/Typhon.Engine.Tests/Runtime/DormancyTests.cs) — `SleepAfterThreshold`, `SleepingClusterSkippedInDispatch`, `WakeRequest_Transition`, `HeartbeatWake`, `NoOverhead_WhenNoSleeping`, `SleepCounterReset_OnWrite`
+- [DormancyTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/DormancyTests.cs) — `SleepAfterThreshold`, `SleepingClusterSkippedInDispatch`, `WakeRequest_Transition`, `HeartbeatWake`, `NoOverhead_WhenNoSleeping`, `SleepCounterReset_OnWrite`
 
 ## 🔗 Related
 
-- Source: [src/Typhon.Engine/Runtime/internals/DormancyReporter.cs](../../../../src/Typhon.Engine/Runtime/internals/DormancyReporter.cs) (thread-local deferred wake requests, single-threaded drain)
-- Source: [src/Typhon.Engine/Ecs/internals/ArchetypeClusterState.cs](../../../../src/Typhon.Engine/Ecs/internals/ArchetypeClusterState.cs) (`DormancySweep`, `ProcessWakeRequest`, `TransitionWakePendingToActive`)
-- Source: [src/Typhon.Engine/Ecs/public/ClusterSleepState.cs](../../../../src/Typhon.Engine/Ecs/public/ClusterSleepState.cs)
+- Source: [src/Typhon.Engine/Runtime/internals/DormancyReporter.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Runtime/internals/DormancyReporter.cs) (thread-local deferred wake requests, single-threaded drain)
+- Source: [src/Typhon.Engine/Ecs/internals/ArchetypeClusterState.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/internals/ArchetypeClusterState.cs) (`DormancySweep`, `ProcessWakeRequest`, `TransitionWakePendingToActive`)
+- Source: [src/Typhon.Engine/Ecs/public/ClusterSleepState.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/ClusterSleepState.cs)
 - Parent feature: [Spatial Tiers & Adaptive Dispatch](./README.md)
 - Same mechanism, full configuration walkthrough: [Spatial category — Cluster Dormancy (Sleep / Wake)](../../Spatial/cluster-dormancy.md)
 

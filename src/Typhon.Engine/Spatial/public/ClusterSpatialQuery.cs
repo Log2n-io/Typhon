@@ -15,13 +15,14 @@ namespace Typhon.Engine;
 /// Without it, the per-cell index is never populated and querying throws <see cref="InvalidOperationException"/>.
 /// </para>
 /// <para>
-/// <b>Current scope.</b> Dynamic-mode archetypes only; Static mode still uses the legacy per-entity <c>SpatialQuery{T}</c>. 2D f32 bounds only. No overflow
-/// R-Tree — the broadphase is a linear scan over all clusters in each cell, which is optimal for typical AntHill cell populations (≤80 clusters).
+/// <b>Current scope.</b> 2D and 3D f32 bounds (AABB2F/AABB3F and BSphere2F/BSphere3F); f64 tiers (AABB2D/AABB3D) throw <see cref="NotSupportedException"/>
+/// pending a follow-up sub-issue of #228. Queries traverse both the per-cell dynamic and static indexes. No overflow R-Tree — the broadphase is a linear
+/// scan over all clusters in each cell, which is optimal for typical AntHill cell populations (≤80 clusters).
 /// </para>
 /// <para>
-/// <b>Implementation.</b> This generic entry point exists to provide the tier-aware public API surface with JIT-specialized <typeparamref name="TBox"/>
-/// dispatch. The actual state machine lives on <see cref="Aabb2fEnumerator"/>, which is also consumed directly by engine-internal non-generic consumers via
-/// <see cref="ArchetypeClusterState.QueryAabb2F"/>. Both entry points drive the same iterator — the generic layer adds tier validation; the non-generic layer
+/// <b>Implementation.</b> This generic entry point exists to provide the tier-aware public API surface with a JIT-specialized dispatch path per concrete box
+/// type. The actual state machine lives on <see cref="AabbClusterEnumerator"/>, which is also consumed directly by engine-internal non-generic consumers via
+/// <see cref="ArchetypeClusterState.QueryAabb"/>. Both entry points drive the same iterator — the generic layer adds tier validation; the non-generic layer
 /// is used by consumers that iterate cluster archetypes at runtime (<c>SpatialTriggerSystem</c>, <c>SpatialInterestSystem</c>, <c>EcsQuery</c>).
 /// </para>
 /// <para>
@@ -183,21 +184,37 @@ public readonly ref struct ClusterSpatialQuery<TArch> where TArch : Archetype<TA
 /// </summary>
 public readonly struct ClusterSpatialQueryResult
 {
+    /// <summary>Entity id of the matched entity.</summary>
     public readonly long EntityId;
+
+    /// <summary>Chunk id of the cluster holding the matched entity, within the archetype's cluster storage segment.</summary>
     public readonly int ClusterChunkId;
+
+    /// <summary>Slot index of the matched entity within its cluster.</summary>
     public readonly int SlotIndex;
 
     /// <summary>Squared distance from the query center to the closest point on the entity's AABB. Populated by Radius queries; always <c>0</c> for AABB
     /// queries. Used by <see cref="ArchetypeClusterState.QueryNearest"/> for top-k sorting. Issue #230 Phase 3.</summary>
     public readonly float DistanceSq;
 
-    /// <summary>Entity's tight AABB, read by the narrowphase. For 2D archetypes <c>MinZ</c>/<c>MaxZ</c> reflect the query's Z range (typically infinity
-    /// sentinels) and should be ignored — read only <c>MinX</c>/<c>MinY</c>/<c>MaxX</c>/<c>MaxY</c>. Lets callers skip a second component-table read.</summary>
+    /// <summary>
+    /// Minimum X of the entity's tight AABB, as read by the narrowphase. Reading these bounds off the result lets callers skip a second component-table read.
+    /// </summary>
     public readonly float MinX;
+
+    /// <summary>Minimum Y of the entity's tight AABB.</summary>
     public readonly float MinY;
+
+    /// <summary>Minimum Z of the entity's tight AABB. For 2D archetypes this reflects the query's Z range (typically an infinity sentinel) and should be ignored.</summary>
     public readonly float MinZ;
+
+    /// <summary>Maximum X of the entity's tight AABB.</summary>
     public readonly float MaxX;
+
+    /// <summary>Maximum Y of the entity's tight AABB.</summary>
     public readonly float MaxY;
+
+    /// <summary>Maximum Z of the entity's tight AABB. For 2D archetypes this reflects the query's Z range (typically an infinity sentinel) and should be ignored.</summary>
     public readonly float MaxZ;
 
     internal ClusterSpatialQueryResult(long entityId, int clusterChunkId, int slotIndex, float minX, float minY, float minZ, float maxX, float maxY, float maxZ,

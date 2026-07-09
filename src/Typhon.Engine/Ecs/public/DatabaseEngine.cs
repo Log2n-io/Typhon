@@ -15,49 +15,103 @@ using Typhon.Schema.Definition;
 
 namespace Typhon.Engine;
 
+/// <summary>
+/// Persisted schema descriptor for a single field of a component (revision-1 layout). Stored inside the owning component's
+/// <see cref="ComponentR1.Fields"/> collection to make the database self-describing.
+/// </summary>
 [StructLayout(LayoutKind.Sequential)]
 [PublicAPI]
 public struct FieldR1
 {
+    /// <summary>Fully-qualified schema name of this field-descriptor record ("Typhon.Schema.Field").</summary>
     public const string SchemaName = "Typhon.Schema.Field";
 
+    /// <summary>Field name as declared on the component POCO.</summary>
     public String64 Name;
 
+    /// <summary>Stable numeric id of the field within its component.</summary>
     public int FieldId;
+
+    /// <summary>Logical field type.</summary>
     public FieldType Type;
+
+    /// <summary>For an enum field, the primitive type backing the enum; equal to <see cref="Type"/> for non-enum fields.</summary>
     public FieldType UnderlyingType;
+
+    /// <summary>Root page index (SPI) of this field's dedicated index segment; 0 when the field has no such segment.</summary>
     public uint IndexSPI;
+
+    /// <summary><c>true</c> when the field is declared static — not stored per entity, and excluded from <see cref="ComponentR1.FieldCount"/>.</summary>
     public bool IsStatic;
+
+    /// <summary><c>true</c> when the field is indexed.</summary>
     public bool HasIndex;
+
+    /// <summary><c>true</c> when the field's index permits multiple entries per key (multi-value index).</summary>
     public bool IndexAllowMultiple;
+
+    /// <summary>Element count when the field is a fixed-length array; 0 for scalar fields (see <see cref="IsArray"/>).</summary>
     public int ArrayLength;
+
+    /// <summary>Byte offset of the field within the component's per-entity storage.</summary>
     public int OffsetInComponentStorage;
+
+    /// <summary>Byte size of the field within the component's per-entity storage.</summary>
     public int SizeInComponentStorage;
+
+    /// <summary><c>true</c> when <see cref="ArrayLength"/> &gt; 0, i.e. the field is a fixed-length array.</summary>
     public bool IsArray => ArrayLength > 0;
 }
 
+/// <summary>
+/// Persisted schema descriptor for a registered component (revision-1 layout). One row per component; makes the database self-describing and
+/// enables load-time schema validation against the runtime component definitions.
+/// </summary>
 [Component(SchemaName, 1)]
 [StructLayout(LayoutKind.Sequential)]
 [PublicAPI]
 public struct ComponentR1
 {
+    /// <summary>Fully-qualified schema name of this record ("Typhon.Schema.Component").</summary>
     public const string SchemaName = "Typhon.Schema.Component";
 
+    /// <summary>Registered component schema name.</summary>
     public String64 Name;
+
+    /// <summary>Full CLR type name of the POCO backing this component.</summary>
     public String64 POCOType;
+
+    /// <summary>Size in bytes of the component's per-entity data (pure struct, excluding overhead).</summary>
     public int CompSize;
+
+    /// <summary>Per-entity storage overhead in bytes for this component's layout; 0 when the layout carries no overhead.</summary>
     public int CompOverhead;
 
+    /// <summary>Root page index (SPI) of the component data segment.</summary>
     public int ComponentSPI;
+
+    /// <summary>Root page index (SPI) of the component's revision-table segment; 0 when the component has no revision chain (non-Versioned).</summary>
     public int VersionSPI;
+
+    /// <summary>Root page index (SPI) of the default value index segment; 0 when the component has no such index.</summary>
     public int DefaultIndexSPI;
+
+    /// <summary>Root page index (SPI) of the <see cref="String64"/> value index segment; 0 when absent.</summary>
     public int String64IndexSPI;
+
+    /// <summary>Root page index (SPI) of the tail (multi-value) index segment; 0 when absent.</summary>
     public int TailIndexSPI;
 
+    /// <summary>Field descriptors for this component in declaration order, stored inline as a variable-size collection.</summary>
     public ComponentCollection<FieldR1> Fields;
 
+    /// <summary>Schema revision of the component definition, from its <c>[Component(..., revision)]</c> attribute.</summary>
     public int SchemaRevision;
+
+    /// <summary>Number of non-static fields (static fields are not counted).</summary>
     public int FieldCount;
+
+    /// <summary>The component's <see cref="Typhon.Schema.Definition.StorageMode"/>, persisted as its underlying byte value.</summary>
     public byte StorageMode;
 
     /// <summary>AssemblyR1 row id (chunkId) of the assembly that declares this component. 0 = core engine assembly (implicit, never in the manifest).</summary>
@@ -73,6 +127,7 @@ public struct ComponentR1
 [PublicAPI]
 public struct ArchetypeR1
 {
+    /// <summary>Fully-qualified schema name of this record ("Typhon.Schema.Archetype").</summary>
     public const string SchemaName = "Typhon.Schema.Archetype";
 
     /// <summary>Archetype CLR type name (e.g., "Building").</summary>
@@ -87,6 +142,7 @@ public struct ArchetypeR1
     /// <summary>Total component count (own + inherited).</summary>
     public byte ComponentCount;
 
+    /// <summary>Reserved padding to preserve field alignment; unused.</summary>
     public byte _pad0, _pad1, _pad2;
 
     /// <summary>Schema revision from [Archetype(Id, Revision)].</summary>
@@ -107,6 +163,7 @@ public struct ArchetypeR1
     /// <summary>AssemblyR1 row id (chunkId) of the assembly that declares this archetype. 0 = core engine assembly (implicit, never in the manifest).</summary>
     public ushort AssemblyId;
 
+    /// <summary>Sentinel <see cref="ParentArchetypeId"/> value meaning "no parent" (a root archetype).</summary>
     public const ushort NoParent = 0xFFFF;
 }
 
@@ -120,14 +177,22 @@ public struct ArchetypeR1
 [PublicAPI]
 public struct AssemblyR1
 {
+    /// <summary>Fully-qualified schema name of this record ("Typhon.Schema.Assembly").</summary>
     public const string SchemaName = "Typhon.Schema.Assembly";
 
     /// <summary>Assembly simple name (e.g. "AntHill.Core") — the resolution key.</summary>
     public String64 SimpleName;
 
+    /// <summary>Assembly version, major component.</summary>
     public int VerMajor;
+
+    /// <summary>Assembly version, minor component.</summary>
     public int VerMinor;
+
+    /// <summary>Assembly version, build component.</summary>
     public int VerBuild;
+
+    /// <summary>Assembly version, revision component.</summary>
     public int VerRevision;
 
     /// <summary>Public-key-token packed little-endian into a u64; 0 = unsigned assembly.</summary>
@@ -140,8 +205,13 @@ public struct AssemblyR1
 [PublicAPI]
 public enum SchemaChangeKind
 {
+    /// <summary>Backward-compatible change with no breaking edits; existing data is read as-is, no migration ran.</summary>
     Compatible,
+
+    /// <summary>Breaking change that required migrating existing entities to the new layout.</summary>
     Migration,
+
+    /// <summary>Change originating from an engine/system-component upgrade.</summary>
     SystemUpgrade,
 }
 
@@ -153,17 +223,37 @@ public enum SchemaChangeKind
 [PublicAPI]
 public struct SchemaHistoryR1
 {
+    /// <summary>Fully-qualified schema name of this record ("Typhon.Schema.History").</summary>
     public const string SchemaName = "Typhon.Schema.History";
 
+    /// <summary>When the change was recorded, as <see cref="System.DateTime.UtcNow"/> ticks.</summary>
     public long Timestamp;
+
+    /// <summary>Schema name of the component whose definition changed.</summary>
     public String64 ComponentName;
+
+    /// <summary>Component schema revision before the change.</summary>
     public int FromRevision;
+
+    /// <summary>Component schema revision after the change.</summary>
     public int ToRevision;
+
+    /// <summary>Number of fields added by the change.</summary>
     public int FieldsAdded;
+
+    /// <summary>Number of fields removed by the change.</summary>
     public int FieldsRemoved;
+
+    /// <summary>Number of fields whose type changed or widened.</summary>
     public int FieldsTypeChanged;
+
+    /// <summary>Number of entities migrated to the new layout; 0 when no migration ran.</summary>
     public int EntitiesMigrated;
+
+    /// <summary>Wall-clock duration of the migration in milliseconds; 0 when no migration ran.</summary>
     public int ElapsedMilliseconds;
+
+    /// <summary>Classification of the change (see <see cref="SchemaChangeKind"/>).</summary>
     public SchemaChangeKind Kind;
 }
 
@@ -174,16 +264,11 @@ public struct SchemaHistoryR1
 public class DatabaseEngineOptions
 {
     /// <summary>
-    /// Resource budget and limit configuration.
+    /// Resource knobs for the engine subsystems: max concurrent transactions, WAL ring-buffer size, checkpoint cadence, and page-CRC policy.
     /// </summary>
     /// <remarks>
-    /// <para>
-    /// Contains settings for page cache size, transaction limits, WAL configuration,
-    /// checkpoint behavior, and overall memory budget.
-    /// </para>
-    /// <para>
-    /// Call <see cref="ResourceOptions.Validate"/> to verify configuration before engine creation.
-    /// </para>
+    /// Range-validated at DI resolution by the engine's options validator — no separate pre-flight call is required. Page-cache sizing lives on
+    /// <see cref="PagedMMFOptions.DatabaseCacheSize"/>, not here.
     /// </remarks>
     public ResourceOptions Resources { get; set; } = new();
 
@@ -240,7 +325,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
     internal IMemoryAllocator                   MemoryAllocator { get; }
 
-    /// <summary>Shared WAL staging buffer pool — exposed to the profiler's gauge emitter. Null when WAL is disabled. Do not keep references across engine lifecycle boundaries.</summary>
+    /// <summary>
+    /// Shared WAL staging buffer pool — exposed to the profiler's gauge emitter. Present for the engine's lifetime and cleared to null on disposal;
+    /// do not keep references across engine lifecycle boundaries.
+    /// </summary>
     internal StagingBufferPool StagingBufferPool { get; private set; }
 
     // Bootstrap dictionary keys (engine layer)
@@ -482,8 +570,13 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// <summary>Exposes the migration registry for dry-run validation.</summary>
     internal MigrationRegistry MigrationRegistry => _migrationRegistry;
 
+    /// <summary>Registry of the component and archetype schema definitions registered on this engine instance.</summary>
     public DatabaseDefinitions DBD { get; }
+
+    /// <summary>Backing paged memory-mapped file store holding all persisted segments of this database.</summary>
     public ManagedPagedMMF MMF { get; }
+
+    /// <summary>Epoch manager coordinating safe, lock-free memory reclamation across concurrent readers and writers.</summary>
     public EpochManager EpochManager { get; private set; }
     internal DeadlineWatchdog Watchdog { get; }
 
@@ -596,7 +689,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     internal UowRegistry UowRegistry { get; private set; }
 
     /// <summary>
-    /// Optional WAL manager for durability. Null when WAL is not configured.
+    /// WAL manager driving durability. WAL is mandatory, so this is present for the engine's lifetime; it is cleared to null only on disposal.
     /// </summary>
     internal WalManager WalManager { get; private set; }
 
@@ -606,8 +699,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     internal IDurabilityLog DurabilityLog { get; private set; }
 
     /// <summary>
-    /// Optional checkpoint manager. Null when WAL is not configured. Periodically flushes dirty data pages
-    /// and advances CheckpointLSN to enable WAL segment recycling.
+    /// Checkpoint manager. WAL is mandatory, so this is present for the engine's lifetime (cleared to null only on disposal). Periodically flushes dirty
+    /// data pages and advances CheckpointLSN to enable WAL segment recycling.
     /// </summary>
     internal CheckpointManager CheckpointManager { get; private set; }
     internal StatisticsWorker StatisticsWorker { get; private set; }
@@ -702,12 +795,18 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         InitializeStatisticsWorker();
     }
 
+    /// <summary><c>true</c> once the engine has been disposed; further operations on it are invalid.</summary>
     public bool IsDisposed { get; private set; }
 
     // Test-only seam: when set, DisposeCore throws at the very start of teardown (simulates a failing step, e.g. a full
     // disk during the final checkpoint) so tests can prove Dispose()'s finally still releases the owned provider. §11 / #147.
     internal bool ThrowInDisposeCoreForTest { get; set; }
 
+    /// <summary>
+    /// Releases engine resources following the standard dispose pattern. Idempotent — a no-op once <see cref="IsDisposed"/> is set. Runs the core teardown
+    /// inside a try/finally so an owned service provider is still released even if a teardown step throws.
+    /// </summary>
+    /// <param name="disposing"><c>true</c> when called from <see cref="System.IDisposable.Dispose"/>; <c>false</c> when called from the finalizer.</param>
     protected override void Dispose(bool disposing)
     {
         if (IsDisposed)
@@ -2147,8 +2246,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     ///   <item>Remove the old spatial R-Tree back-pointer and insert a new one at the new <c>clusterLocation</c></item>
     ///   <item>Upsert the EntityMap <see cref="ClusterEntityRecordAccessor"/> with the new (chunkId, slot)</item>
     ///   <item><see cref="ArchetypeClusterState.ReleaseSlot"/> on the source (clears occupancy, decrements cell.EntityCount, detaches empty clusters)</item>
-    ///   <item>Update <paramref name="dirtyBits"/> in place: clear the source bit (so WAL publish does not serialize a cleared source), set the destination
-    ///         bit (so the destination's new content IS serialized by the subsequent ClusterTickFence WAL publish loop)</item>
+    ///   <item>Record the dirty-bit transition — clear the source bit (so WAL publish won't serialize a cleared source) and set the destination bit (so the
+    ///         destination's new content IS serialized by the subsequent ClusterTickFence WAL publish loop). On the parallel path the transition is appended to
+    ///         the worker-local <paramref name="dirtyBuffer"/> as a <see cref="DirtyBitDelta"/>; on the serial path (null buffer) it is applied directly to the
+    ///         archetype's <see cref="ArchetypeClusterState.FenceDirtyBits"/></item>
     /// </list>
     ///
     /// <para><b>WAL atomicity.</b> All writes flow through a single <see cref="ChangeSet"/> scoped to this method, so either the entire migration batch lands
@@ -2156,10 +2257,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// migration is durable within the tick that triggered it.</para>
     ///
     /// <para><b>Destination-cluster growth.</b> If <c>ClaimSlotInCell</c> allocates a brand-new cluster whose chunk id exceeds the current
-    /// <paramref name="dirtyBits"/> length, the snapshot array is grown in place via <see cref="Array.Resize{T}(ref T[], int)"/> so the destination slot bit
-    /// can be set and survive the subsequent WAL publish. The caller's local reference receives the grown array via the <c>ref</c> parameter. The archived
-    /// <see cref="DirtyBitmapRing"/> and <see cref="ArchetypeClusterState.PreviousTickDirtySnapshot"/> both observe the grown array, keeping interest
-    /// management and next-tick change dispatch consistent.</para>
+    /// <see cref="ArchetypeClusterState.FenceDirtyBits"/> length, the array is grown on demand: the serial path calls
+    /// <see cref="ArchetypeClusterState.GrowFenceDirtyBitsForChunkId"/> before setting the bit, while the parallel path defers the set to
+    /// <see cref="ArchetypeClusterState.ApplyDirtyBitDeltas"/>, which grows the array once under its finalize lock when draining the buffer. Either way the
+    /// destination slot bit survives the subsequent WAL publish.</para>
     /// </remarks>
     private unsafe void ExecuteMigrations(ArchetypeClusterState clusterState, ArchetypeEngineState engineState, ushort archetypeId, int sliceStart, 
         int sliceCount, ChangeSet changeSet, List<DirtyBitDelta> dirtyBuffer = null)
@@ -3646,8 +3747,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// <summary>
     /// Records the clean-shutdown flag so the next open can trust the persisted Versioned-component HEAD values and skip
     /// the O(entities) <see cref="ArchetypeClusterState.RebuildVersionedHeadFromChain"/> walk. Sets
-    /// <see cref="BK_CleanShutdown"/> = 1 and fsyncs it on its own. The flag is deliberately NOT keyed on
-    /// <see cref="ManagedPagedMMF.BK_CheckpointLSN"/>: a bulk-generated DB closes cleanly with CheckpointLSN == 0 yet its
+    /// <see cref="BK_CleanShutdown"/> = 1 and fsyncs it on its own. The flag is deliberately NOT keyed on the checkpoint LSN watermark
+    /// (<see cref="DurabilityWatermarks.ReadCheckpointLsn"/>): a bulk-generated DB closes cleanly with CheckpointLSN == 0 yet its
     /// HEADs are current in the data file, so trust must not depend on the LSN value.
     /// </summary>
     /// <remarks>
@@ -3909,6 +4010,20 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         }
     }
 
+    /// <summary>
+    /// Registers component type <typeparamref name="T"/> with the engine: builds its schema definition from the component accessor, validates it against any
+    /// persisted schema for the same component name, and creates or loads the backing <see cref="ComponentTable"/>.
+    /// </summary>
+    /// <remarks>
+    /// When a persisted schema exists for this component, <paramref name="schemaValidation"/> governs how differences are reconciled. A Transient component may
+    /// not declare a <c>ComponentCollection</c> field — that combination is rejected at registration.
+    /// </remarks>
+    /// <typeparam name="T">A closed unmanaged value type tagged with <c>[Component]</c>.</typeparam>
+    /// <param name="changeSet">Optional change set to enlist the registration writes in.</param>
+    /// <param name="schemaValidation">How a persisted schema is reconciled with the runtime type; default <see cref="SchemaValidationMode.Enforce"/>.</param>
+    /// <param name="storageModeOverride">Optional <see cref="StorageMode"/> overriding the mode declared on the component.</param>
+    /// <returns><see langword="true"/> on success; <see langword="false"/> when the component definition could not be built.</returns>
+    /// <exception cref="InvalidOperationException">A Transient component declares a <c>ComponentCollection</c> field.</exception>
     public bool RegisterComponentFromAccessor<T>(ChangeSet changeSet = null, SchemaValidationMode schemaValidation = SchemaValidationMode.Enforce,
         StorageMode? storageModeOverride = null) where T : unmanaged
     {
@@ -4166,12 +4281,16 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         _migrationRegistry.RegisterByte(componentName, fromRevision, toRevision, oldSize, newSize, func);
     }
 
+    /// <summary>Returns the <see cref="ComponentTable"/> registered for <typeparamref name="T"/>, or <see langword="null"/> if none is registered.</summary>
+    /// <typeparam name="T">The registered unmanaged component type.</typeparam>
     public ComponentTable GetComponentTable<T>() where T : unmanaged => GetComponentTable(typeof(T));
 
+    /// <summary>Returns the <see cref="ComponentTable"/> registered for <paramref name="type"/>, or <see langword="null"/> if it is not registered.</summary>
+    /// <param name="type">The registered component type.</param>
     public ComponentTable GetComponentTable(Type type) => _componentTableByType.GetValueOrDefault(type);
 
     /// <summary>
-    /// Looks up a <see cref="ComponentTable"/> by its WAL type ID (derived from <see cref="ChunkBasedSegment<PersistentStore>.RootPageIndex"/>).
+    /// Looks up a <see cref="ComponentTable"/> by its WAL type ID (derived from <see cref="LogicalSegment{PersistentStore}.RootPageIndex"/>).
     /// Returns null if the type ID is unknown.
     /// </summary>
     internal ComponentTable GetComponentTableByWalTypeId(ushort id) => _componentTableByWalTypeId.GetValueOrDefault(id);

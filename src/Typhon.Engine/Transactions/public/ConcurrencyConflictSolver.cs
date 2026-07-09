@@ -18,9 +18,9 @@ namespace Typhon.Engine;
 /// </para>
 /// <para>The four data views are:</para>
 /// <list type="bullet">
-/// <item><description><see cref="ReadData{T}"/>: the component state at the time of <c>ReadEntity</c> (our transaction's snapshot baseline).</description></item>
+/// <item><description><see cref="ReadData{T}"/>: the component state our transaction read (its snapshot baseline).</description></item>
 /// <item><description><see cref="CommittedData{T}"/>: the latest committed state by another transaction (the value that caused the conflict).</description></item>
-/// <item><description><see cref="CommittingData{T}"/>: the dirty-write state from our <c>UpdateEntity</c> call (what we intended to commit).</description></item>
+/// <item><description><see cref="CommittingData{T}"/>: the dirty-write state our transaction staged (what we intended to commit).</description></item>
 /// <item><description><see cref="ToCommitData{T}"/>: the output buffer — initialized with <c>CommittingData</c> (last writer wins). The handler writes the resolved value here.</description></item>
 /// </list>
 /// <para>
@@ -76,7 +76,7 @@ public unsafe class ConcurrencyConflictSolver
     /// <summary>Returns a ref to the latest committed state by another transaction (the conflicting value).</summary>
     public ref T CommittedData<T>() where T : unmanaged => ref Unsafe.AsRef<T>(_committedData);
 
-    /// <summary>Returns a ref to our dirty-write state from <c>UpdateEntity</c> (what we intended to commit).</summary>
+    /// <summary>Returns a ref to our transaction's dirty-write state (what we intended to commit).</summary>
     public ref T CommittingData<T>() where T : unmanaged => ref Unsafe.AsRef<T>(_committingData);
 
     /// <summary>Returns a ref to the output buffer. Write the resolved value here. Initialized with <see cref="CommittingData{T}"/>.</summary>

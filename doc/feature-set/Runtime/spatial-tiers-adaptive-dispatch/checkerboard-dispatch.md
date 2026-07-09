@@ -1,3 +1,9 @@
+---
+uid: feature-runtime-spatial-tiers-adaptive-dispatch-checkerboard-dispatch
+title: 'Checkerboard (Red/Black) Dispatch'
+description: 'Two-phase Red/Black parallel dispatch so neighbor-touching systems never race across a cell boundary.'
+---
+
 # Checkerboard (Red/Black) Dispatch
 > Two-phase Red/Black parallel dispatch so neighbor-touching systems never race across a cell boundary.
 
@@ -69,12 +75,12 @@ game.QuerySystem("Pheromone_Diffuse", ctx =>
 
 ## 🧪 Tests
 
-- [CheckerboardTests](../../../../test/Typhon.Engine.Tests/Runtime/CheckerboardTests.cs) — `Checkerboard_TwoPhases_BothExecute`, `Checkerboard_RedBlack_NoOverlap`, `Checkerboard_RequiresParallel_Throws`, `Checkerboard_WithDormancy_SleepingSkipped`
+- [CheckerboardTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/CheckerboardTests.cs) — `Checkerboard_TwoPhases_BothExecute`, `Checkerboard_RedBlack_NoOverlap`, `Checkerboard_RequiresParallel_Throws`, `Checkerboard_WithDormancy_SleepingSkipped`
 
 ## 🔗 Related
 
-- Source: [src/Typhon.Engine/Runtime/public/TyphonRuntime.cs](../../../../src/Typhon.Engine/Runtime/public/TyphonRuntime.cs) (`SplitCheckerboardClusters`, `OnParallelQueryPrepare`/`OnParallelQueryCleanup` two-phase protocol)
-- Source: [src/Typhon.Engine/Runtime/public/SystemBuilder.cs](../../../../src/Typhon.Engine/Runtime/public/SystemBuilder.cs) (`Checkerboard()`), [Dag.cs](../../../../src/Typhon.Engine/Runtime/public/Dag.cs) (`checkerboard:` parameter)
+- Source: [src/Typhon.Engine/Runtime/public/TyphonRuntime.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Runtime/public/TyphonRuntime.cs) (`SplitCheckerboardClusters`, `OnParallelQueryPrepare`/`OnParallelQueryCleanup` two-phase protocol)
+- Source: [src/Typhon.Engine/Runtime/public/SystemBuilder.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Runtime/public/SystemBuilder.cs) (`Checkerboard()`), [Dag.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Runtime/public/Dag.cs) (`checkerboard:` parameter)
 - Parent feature: [Spatial Tiers & Adaptive Dispatch](./README.md)
 - Same mechanism, cell/grid-configuration angle: [Spatial category — Checkerboard Dispatch](../../Spatial/checkerboard-dispatch.md)
 

@@ -1,3 +1,9 @@
+---
+uid: feature-runtime-system-types-chunked-callback-system
+title: 'ChunkedCallbackSystem — Chunk-Parallel Non-Entity Work'
+description: 'Fan a CallbackSystem''s body out across N workers for SIMD sweeps, reductions, and other non-entity chunkable work.'
+---
+
 # ChunkedCallbackSystem — Chunk-Parallel Non-Entity Work
 > Fan a CallbackSystem's body out across N workers for SIMD sweeps, reductions, and other non-entity chunkable work.
 
@@ -105,7 +111,7 @@ scheduler.Start();
 
 ## 🧪 Tests
 
-- [TypedContextSystemTests](../../../../test/Typhon.Engine.Tests/Runtime/TypedContextSystemTests.cs) — `ChunkedCallbackSystem<TContext>` binding via `RegisterContext`, typed `ShouldRun`/`Prepare` (skip/dispatch/-1 fallback), unbound-system `Start()` throw, untyped variant still works
+- [TypedContextSystemTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/TypedContextSystemTests.cs) — `ChunkedCallbackSystem<TContext>` binding via `RegisterContext`, typed `ShouldRun`/`Prepare` (skip/dispatch/-1 fallback), unbound-system `Start()` throw, untyped variant still works
 
 ## 🔗 Related
 

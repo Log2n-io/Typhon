@@ -1,3 +1,9 @@
+---
+uid: feature-profiler-typed-event-capture-pipeline
+title: 'Typed-Event Capture Pipeline'
+description: 'Any-thread, ~25-50ns, zero-allocation event capture that costs nothing when the profiler is off.'
+---
+
 # Typed-Event Capture Pipeline
 > Any-thread, ~25-50ns, zero-allocation event capture that costs nothing when the profiler is off.
 
@@ -64,9 +70,9 @@ finally
 
 ## 🧪 Tests
 
-- [TraceRecordRingTests](../../../test/Typhon.Engine.Tests/Profiler/Events/TraceRecordRingTests.cs) — reserve/publish/drain, size rounding, overflow, wrap-sentinel handling, SPSC producer/consumer correctness under real concurrency
-- [TraceRecordChainTests](../../../test/Typhon.Engine.Tests/Profiler/Events/TraceRecordChainTests.cs) — the spillover chain (`TraceRecordRing.Next`, `ThreadSlot.ChainHead`/`ChainTail`) that absorbs bursts overflowing a slot's primary ring
-- [BeginFactoryParameterTests](../../../test/Typhon.Engine.Tests/Profiler/BeginFactoryParameterTests.cs) — per-kind `BeginXxx` factory field assignment, and the suppressed/disabled-gate short-circuit that returns `default`
+- [TraceRecordRingTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Profiler/Events/TraceRecordRingTests.cs) — reserve/publish/drain, size rounding, overflow, wrap-sentinel handling, SPSC producer/consumer correctness under real concurrency
+- [TraceRecordChainTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Profiler/Events/TraceRecordChainTests.cs) — the spillover chain (`TraceRecordRing.Next`, `ThreadSlot.ChainHead`/`ChainTail`) that absorbs bursts overflowing a slot's primary ring
+- [BeginFactoryParameterTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Profiler/BeginFactoryParameterTests.cs) — per-kind `BeginXxx` factory field assignment, and the suppressed/disabled-gate short-circuit that returns `default`
 
 ## 🔗 Related
 

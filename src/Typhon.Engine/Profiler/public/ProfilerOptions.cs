@@ -21,9 +21,9 @@ public sealed class ProfilerOptions
 
     /// <summary>
     /// Capacity of the consumer's per-pass merge scratch buffer in <b>bytes</b>. Drains from all slots accumulate here before sorting and slicing into
-    /// <see cref="TraceRecordBatch"/>es. Default: 4 MB — sized so a single drain pass can absorb a heavy burst (tens of thousands of records from a gcChurn-class
-    /// workload) without leaving bytes in the producer rings for a subsequent pass. Trades a modest L2 cache miss (a 4 MB buffer spills out of L2 on most CPUs)
-    /// for drastically reduced drain-cycle coupling — under the observability "better to over-buffer than drop" priority, this is the right trade.
+    /// <see cref="TraceRecordBatch"/>es. Default: 512 KB — large enough that a single drain pass absorbs a typical burst without leaving bytes in the
+    /// producer rings for a subsequent pass. Must be at least <see cref="TraceRecordBatchPool.MaxPayloadBytes"/> (enforced by <see cref="Validate"/>).
+    /// Under the observability "better to over-buffer than drop" priority, raise this when a workload shows records carrying over between drain passes.
     /// </summary>
     public int MergeBufferBytes { get; set; } = 512 * 1024;
 

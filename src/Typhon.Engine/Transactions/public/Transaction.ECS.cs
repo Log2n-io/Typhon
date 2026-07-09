@@ -220,9 +220,14 @@ public unsafe partial class Transaction
     // Spawn
     // ═══════════════════════════════════════════════════════════════════════
 
+    /// <summary>
+    /// Spawns a new entity of archetype <typeparamref name="TArch"/> with the supplied initial component values.
     /// Components not covered by <paramref name="values"/> are zero-initialized and disabled.
     /// The entity is stored in a pending map and inserted into the LinearHash at commit with BornTSN = TSN.
     /// </summary>
+    /// <typeparam name="TArch">Concrete archetype type of the entity to spawn.</typeparam>
+    /// <param name="values">Initial component values; components omitted here are zero-initialized and disabled.</param>
+    /// <returns>The id of the newly-spawned entity.</returns>
     public EntityId Spawn<TArch>(params ReadOnlySpan<ComponentValue> values) where TArch : Archetype<TArch>
     {
         var meta = Archetype<TArch>.Metadata;

@@ -1,3 +1,9 @@
+---
+uid: feature-subscriptions-index
+title: 'Subscriptions'
+description: 'Server-driven, View-based client state replication: the runtime publishes query Views, diffs them against connected clients'' subscription sets each tick,…'
+---
+
 # Subscriptions
 > Server-driven, View-based client state replication: the runtime publishes query Views, diffs them against connected clients' subscription sets each tick, and pushes a single MemoryPack-encoded `TickDelta` over TCP per client per tick — turning "subscribe to a query" into automatic incremental sync without the developer writing networking, change-detection, or serialization code.
 

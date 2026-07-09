@@ -1,3 +1,9 @@
+---
+uid: feature-transactions-commit-rollback-pipeline
+title: 'Commit / Rollback Pipeline (ACID Commit Path)'
+description: 'The two methods that end a transaction — Commit makes writes durable and visible as one atomic unit, Rollback always unwinds them completely.'
+---
+
 # Commit / Rollback Pipeline (ACID Commit Path)
 > The two methods that end a transaction — `Commit` makes writes durable and visible as one atomic unit, `Rollback` always unwinds them completely.
 
@@ -53,10 +59,10 @@ tx.Rollback();    // infinite deadline (UnitOfWorkContext.None)
 - **A lock timeout mid-commit is still possible** — holdoff suppresses the cooperative cancellation check, not lock-acquisition failure; a `LockTimeoutException` can surface before the WAL append, leaving the transaction `InProgress` and requiring an explicit `Rollback()`.
 
 ## 🧪 Tests
-- [TransactionTests](../../../test/Typhon.Engine.Tests/Data/TransactionTests.cs) — `DoubleCommit_ReturnsFalse`,
+- [TransactionTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/TransactionTests.cs) — `DoubleCommit_ReturnsFalse`,
   `DoubleRollback_ReturnsFalse`, `CrudAfterCommitOrRollback_ThrowsInvalidOperation`, `Rollback_*` series (created/
   updated/deleted/multi-component), `Commit_AfterRollback_ReturnsFalse`, `Dispose_UncommittedTransaction_AutoRollbacks`
-- [TransactionUnitOfWorkContextTests](../../../test/Typhon.Engine.Tests/Concurrency/TransactionUnitOfWorkContextTests.cs)
+- [TransactionUnitOfWorkContextTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Concurrency/TransactionUnitOfWorkContextTests.cs)
   — `Commit`/`Rollback` overloads taking `ref UnitOfWorkContext`: expired-deadline-at-entry throw,
   already-committed/rolled-back returning `false`, holdoff correctness mid-commit
 

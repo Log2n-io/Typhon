@@ -1,3 +1,9 @@
+---
+uid: feature-querying-ordering-pagination
+title: 'Result Ordering & Pagination'
+description: 'Sorted, paged query results driven directly off a B+Tree index scan — no full-scan-then-sort.'
+---
+
 # Result Ordering & Pagination
 > Sorted, paged query results driven directly off a B+Tree index scan — no full-scan-then-sort.
 
@@ -60,8 +66,8 @@ var allByLevel = tx.Query<PlayerArch>()
 
 ## 🧪 Tests
 
-- [EcsQueryTargetedScanTests](../../../test/Typhon.Engine.Tests/Data/ECS/EcsQueryTargetedScanTests.cs) — ascending/descending `ExecuteOrdered`, `Skip`/`Take` windowing, and the `OrderBy`/`Skip`-without-prerequisite guard throws
-- [SimdKwayMergeTests](../../../test/Typhon.Engine.Tests/Data/ECS/SimdKwayMergeTests.cs) — k-way merge across a polymorphic archetype subtree stays globally ordered under `Skip`/`Take`
+- [EcsQueryTargetedScanTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/EcsQueryTargetedScanTests.cs) — ascending/descending `ExecuteOrdered`, `Skip`/`Take` windowing, and the `OrderBy`/`Skip`-without-prerequisite guard throws
+- [SimdKwayMergeTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/SimdKwayMergeTests.cs) — k-way merge across a polymorphic archetype subtree stays globally ordered under `Skip`/`Take`
 
 ## 🔗 Related
 

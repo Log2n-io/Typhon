@@ -1,3 +1,9 @@
+---
+uid: feature-transactions-unit-of-work
+title: 'Unit of Work (durability boundary)'
+description: 'Batches one or more Transactions under a single flush/durability boundary.'
+---
+
 # Unit of Work (durability boundary)
 > Batches one or more Transactions under a single flush/durability boundary.
 
@@ -63,7 +69,7 @@ Console.WriteLine(uow.CommittedTransactionCount);
 
 ## 🧪 Tests
 
-- [UnitOfWorkTests](../../../test/Typhon.Engine.Tests/Execution/UnitOfWorkTests.cs) — lifecycle (`Create`/`Dispose`
+- [UnitOfWorkTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Execution/UnitOfWorkTests.cs) — lifecycle (`Create`/`Dispose`
   state transitions), shared UoW identity across transactions, durability-mode preservation, registry-backed
   `UowId` allocation, empty-UoW `Flush`/`FlushAsync`
 

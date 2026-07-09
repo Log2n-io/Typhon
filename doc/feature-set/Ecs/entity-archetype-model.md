@@ -1,3 +1,9 @@
+---
+uid: feature-ecs-entity-archetype-model
+title: 'Entity & Archetype Model'
+description: 'Structured 64-bit entity identity, C# class-hierarchy archetypes, and typed zero-copy component handles — the schema backbone of every other ECS feature.'
+---
+
 # Entity & Archetype Model
 > Structured 64-bit entity identity, C# class-hierarchy archetypes, and typed zero-copy component handles — the schema backbone of every other ECS feature.
 
@@ -73,8 +79,8 @@ t.Commit();
 
 ## 🧪 Tests
 
-- [EntityIdTests](../../../test/Typhon.Engine.Tests/Data/ECS/EntityIdTests.cs) — `EntityId` 64-bit packing (`EntityKey`/`ArchetypeId`), null semantics, equality, raw-value round-trip
-- [ArchetypeRegistrationTests](../../../test/Typhon.Engine.Tests/Data/ECS/ArchetypeRegistrationTests.cs) — archetype registration, parent-first slot inheritance, component-type dedup across archetypes, subtree building
+- [EntityIdTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/EntityIdTests.cs) — `EntityId` 64-bit packing (`EntityKey`/`ArchetypeId`), null semantics, equality, raw-value round-trip
+- [ArchetypeRegistrationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/ArchetypeRegistrationTests.cs) — archetype registration, parent-first slot inheritance, component-type dedup across archetypes, subtree building
 
 ## 🔗 Related
 

@@ -22,7 +22,7 @@ namespace Typhon.Engine.Internals;
 /// </para>
 /// <para>
 /// <b>Lazy buffer allocation:</b> the 256 <see cref="ThreadSlot"/> stubs are allocated at class init (~25 KB total — just headers + a couple of fields
-/// each). The ~128 KB <see cref="ThreadTraceBuffer"/> backing array is allocated inside <c>ClaimSlot</c> on first claim and reused across re-claims
+/// each). The ~128 KB <see cref="TraceRecordRing"/> backing array is allocated inside <c>ClaimSlot</c> on first claim and reused across re-claims
 /// of the same slot. Unused slots stay null-buffer and consume no event memory.
 /// </para>
 /// <para>
@@ -43,7 +43,7 @@ internal static class ThreadSlotRegistry
     /// <summary>
     /// Default per-slot variable-size SPSC ring buffer capacity in bytes. 4 MB holds ~100K minimum-size records — deep headroom to
     /// absorb any realistic burst (full IOProfileRunner workload, or a tight spawn-loop emitting hundreds of thousands of EcsSpawn
-    /// records in <1s) without the producer hitting drop-newest. Size progression: 128 KB → 1 MB → 4 MB as progressively heavier
+    /// records in &lt;1s) without the producer hitting drop-newest. Size progression: 128 KB → 1 MB → 4 MB as progressively heavier
     /// workloads uncovered producer-side ring-full drops at each tier.
     /// </summary>
     /// <remarks>

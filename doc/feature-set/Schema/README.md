@@ -1,3 +1,9 @@
+---
+uid: feature-schema-index
+title: 'Schema'
+description: 'The typed metadata layer over every component: attribute-driven struct declarations reflect into persisted field/index definitions whose FieldIds survive…'
+---
+
 # Schema
 > The typed metadata layer over every component: attribute-driven struct declarations reflect into persisted field/index definitions whose FieldIds survive reordering, renames, and reopens. On every database open, the persisted layout is diffed against the running code and classified by compatibility — additions, removals, reorders, and lossless widenings migrate automatically, while genuinely breaking changes require a registered migration function rather than silently losing data. Operational tooling (offline inspection, dry-run validation, progress events, an audit log, tsh shell commands, and Workbench ALC reload) makes every one of those changes observable and verifiable before and during a real deployment.
 

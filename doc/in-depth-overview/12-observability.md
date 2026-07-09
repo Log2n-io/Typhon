@@ -1,6 +1,12 @@
+---
+uid: overview-observability
+title: '12 — Observability'
+description: 'Typhon''s observability story is not "scatter Activity spans everywhere and let an OTel exporter sort it out." That model puts an unconditional method call…'
+---
+
 # 12 — Observability
 
-**Code:** [`src/Typhon.Engine/Observability/`](../../src/Typhon.Engine/Observability/) + [`src/Typhon.Engine/Profiler/`](../../src/Typhon.Engine/Profiler/) (merged into one doc — engine-side observability + the in-process profiler share a single zero-overhead philosophy and a single producer pipeline)
+**Code:** [`src/Typhon.Engine/Observability/`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Engine/Observability) + [`src/Typhon.Engine/Profiler/`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Engine/Profiler) (merged into one doc — engine-side observability + the in-process profiler share a single zero-overhead philosophy and a single producer pipeline)
 
 Typhon's observability story is *not* "scatter `Activity` spans everywhere and let an OTel exporter sort it out." That model puts an unconditional method call on every hot path and bets the runtime can elide it cheaply enough. Typhon takes the other side of that bet. The hot paths emit **typed events** through a producer pipeline that the JIT can dead-code-eliminate at Tier-1 compilation — when the relevant gate is off, the call site folds to nothing, and the engine pays zero CPU for telemetry it isn't using.
 
@@ -22,7 +28,7 @@ The observability surface is a single pipeline:
 
 | Layer | What it is |
 |---|---|
-| **Gate flags** | ~200 `public static readonly bool XxxActive` in [`TelemetryConfig`](../../src/Typhon.Engine/Observability/public/TelemetryConfig.cs). JIT folds disabled branches to no-ops. |
+| **Gate flags** | ~200 `public static readonly bool XxxActive` in [`TelemetryConfig`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Observability/public/TelemetryConfig.cs). JIT folds disabled branches to no-ops. |
 | **Typed events** | Engine call sites call `TyphonEvent.Begin*Event(...)` / `TyphonEvent.Emit*(...)`. Each event is a `ref struct` carrying its payload; `Dispose` publishes the record. |
 | **Wire encoding** | Records land in a per-thread SPSC ring buffer (1 MB SOA). A consumer thread drains, compresses, and hands off to exporters. |
 | **Exporters** | File (`.typhon-trace`), TCP (live stream), and OTel meters for resource-graph metrics. |
@@ -34,7 +40,7 @@ A note on `Activity`: `TyphonActivitySource` exists in the public surface, but t
 
 ## 2. Gate flags — `TelemetryConfig`
 
-[`Observability/public/TelemetryConfig.cs`](../../src/Typhon.Engine/Observability/public/TelemetryConfig.cs)
+[`Observability/public/TelemetryConfig.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Observability/public/TelemetryConfig.cs)
 
 A static class holding ~200 `public static readonly bool XxxActive` flags. Each one resolves at class-load time from `typhon.telemetry.json` + environment variables, then never changes. The `static readonly` qualifier is load-bearing — it's what lets the JIT treat `if (TelemetryConfig.XxxActive) { ... }` as dead code when `XxxActive` is false at Tier-1 compilation.
 
@@ -56,7 +62,7 @@ The full prefix is mandatory at the call site — there is no `AccessControlActi
 
 ### Parent-implies-children resolution
 
-[`TelemetryConfigResolver.cs`](../../src/Typhon.Engine/Observability/public/TelemetryConfigResolver.cs) walks a tree of `Node`s and resolves each leaf as `master && parent && self`. Flipping `Typhon:Profiler:Concurrency:Enabled = true` turns on every Concurrency sub-leaf at once unless a leaf is explicitly set to `false`. The 30-odd subsystem trees are defined inline in the `TelemetryConfig` static constructor — read it directly if you need the exact shape; the trees match the directories under [`Profiler/internals/`](../../src/Typhon.Engine/Profiler/internals/).
+[`TelemetryConfigResolver.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Observability/public/TelemetryConfigResolver.cs) walks a tree of `Node`s and resolves each leaf as `master && parent && self`. Flipping `Typhon:Profiler:Concurrency:Enabled = true` turns on every Concurrency sub-leaf at once unless a leaf is explicitly set to `false`. The 30-odd subsystem trees are defined inline in the `TelemetryConfig` static constructor — read it directly if you need the exact shape; the trees match the directories under [`Profiler/internals/`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Engine/Profiler/internals).
 
 ### Initialization
 
@@ -67,7 +73,7 @@ public static void EnsureInitialized() => _ = Enabled;
 
 Touching any static field triggers the static constructor. `EnsureInitialized()` is the public entry point — it forces the static-ctor *before* hot paths get JIT'd, so the gates are baked into the IL at Tier-1 compilation.
 
-The engine calls it automatically via `[ModuleInitializer]` in [`ProfilerBootstrap.Initialize()`](../../src/Typhon.Engine/Profiler/internals/ProfilerBootstrap.cs):
+The engine calls it automatically via `[ModuleInitializer]` in [`ProfilerBootstrap.Initialize()`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Profiler/internals/ProfilerBootstrap.cs):
 
 ```csharp
 [ModuleInitializer]
@@ -143,11 +149,11 @@ var idx = ThreadSlotRegistry.GetOrAssignSlot();          // claim TLS slot
 
 The `ProfilerActive` check is the JIT-fold seam. When false, the entire prologue body — including the suppressed-kinds array load, the slot registry call, and the timestamp capture — collapses to `return default`. Zero CPU at the call site.
 
-[`Profiler/internals/TyphonEvent.cs`](../../src/Typhon.Engine/Profiler/internals/TyphonEvent.cs) owns the prologue (`BeginPrologue`) and the publishing path (`Publish<T>` with a `where T : struct, ITraceEventEncoder, allows ref struct` constraint that lets the JIT inline the full encode for each concrete event type).
+[`Profiler/internals/TyphonEvent.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Profiler/internals/TyphonEvent.cs) owns the prologue (`BeginPrologue`) and the publishing path (`Publish<T>` with a `where T : struct, ITraceEventEncoder, allows ref struct` constraint that lets the JIT inline the full encode for each concrete event type).
 
 ### `TraceEventKind` — ~217 kinds across Phases 2-8
 
-[`src/Typhon.Profiler/TraceEventKind.cs`](../../src/Typhon.Profiler/TraceEventKind.cs) — wire-stable byte enum, public so external decoders (Workbench client, offline tools) can read trace files.
+[`src/Typhon.Profiler/TraceEventKind.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Profiler/TraceEventKind.cs) — wire-stable byte enum, public so external decoders (Workbench client, offline tools) can read trace files.
 
 Sparse by design — gaps left for related categories to grow contiguously. Approximate inventory:
 
@@ -180,11 +186,11 @@ Total declared kinds: **~217**. Earlier docs claimed 37 / 38 — that was the co
 
 ### Per-kind suppression deny-list
 
-[`TyphonEvent.cs:68-99`](../../src/Typhon.Engine/Profiler/internals/TyphonEvent.cs) — a `bool[256]` indexed by `TraceEventKind`. When entry is true, `BeginPrologue` short-circuits even if the gate is on. Reserved for truly extreme-frequency kinds (≥10⁵/sec on realistic workloads — `PageCacheFetch`, `DataMvccChainWalk`, `DataIndexBTreeSearch`, `EcsViewProcessEntry`, `DurabilityWalFrame`, …). Diagnostic-grade kinds (per-tick, per-UoW) are gated solely by their JSON category. Operators flip via `TyphonEvent.UnsuppressKind(kind)` for ad-hoc deep-diving.
+[`TyphonEvent.cs:68-99`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Profiler/internals/TyphonEvent.cs) — a `bool[256]` indexed by `TraceEventKind`. When entry is true, `BeginPrologue` short-circuits even if the gate is on. Reserved for truly extreme-frequency kinds (≥10⁵/sec on realistic workloads — `PageCacheFetch`, `DataMvccChainWalk`, `DataIndexBTreeSearch`, `EcsViewProcessEntry`, `DurabilityWalFrame`, …). Diagnostic-grade kinds (per-tick, per-UoW) are gated solely by their JSON category. Operators flip via `TyphonEvent.UnsuppressKind(kind)` for ad-hoc deep-diving.
 
 ### Per-thread ring buffer — 1 MB SOA
 
-[`ThreadSlotRegistry.cs:54`](../../src/Typhon.Engine/Profiler/internals/ThreadSlotRegistry.cs)
+[`ThreadSlotRegistry.cs:54`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Profiler/internals/ThreadSlotRegistry.cs)
 
 ```csharp
 private const int DefaultBufferCapacity = 1 * 1024 * 1024;  // 1 MB per slot
@@ -200,13 +206,13 @@ Earlier docs said 128 KB. The size has been raised twice (128 KB → 1 MB → 4 
 
 ### Spillover ring pool
 
-[`SpilloverRingPool.cs`](../../src/Typhon.Engine/Profiler/internals/SpilloverRingPool.cs) — chained backup buffers that absorb the gap between *gate-open* and *consumer-running*. Allocated eagerly in `ProfilerBootstrap.Initialize` so events emitted during host startup (pre-`TyphonProfiler.Start`) don't drop.
+[`SpilloverRingPool.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Profiler/internals/SpilloverRingPool.cs) — chained backup buffers that absorb the gap between *gate-open* and *consumer-running*. Allocated eagerly in `ProfilerBootstrap.Initialize` so events emitted during host startup (pre-`TyphonProfiler.Start`) don't drop.
 
 ---
 
 ## 4. Source location instrumentation
 
-[`Profiler/internals/TraceSpanHeader.cs`](../../src/Typhon.Engine/Profiler/internals/TraceSpanHeader.cs), [`src/Typhon.Generators/SourceLocationGenerator.cs`](../../src/Typhon.Generators/SourceLocationGenerator.cs)
+[`Profiler/internals/TraceSpanHeader.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Profiler/internals/TraceSpanHeader.cs), [`src/Typhon.Generators/SourceLocationGenerator.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Generators/SourceLocationGenerator.cs)
 
 Every span carries a `SourceLocationId` — a compile-time-assigned `ushort` that maps to (file, line, method, kind). A C# 14 interceptor mechanism bakes the literal id into the IL at each call site:
 
@@ -224,7 +230,7 @@ Wire-level: when the event has `SpanFlagsHasSourceLocation` set (bit 1 of the `S
 
 ## 5. Wire protocol
 
-[`src/Typhon.Profiler/TraceRecordHeader.cs`](../../src/Typhon.Profiler/TraceRecordHeader.cs) — record layout. [`LiveStreamProtocol.cs`](../../src/Typhon.Profiler/LiveStreamProtocol.cs) — TCP envelope.
+[`src/Typhon.Profiler/TraceRecordHeader.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Profiler/TraceRecordHeader.cs) — record layout. [`LiveStreamProtocol.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Profiler/LiveStreamProtocol.cs) — TCP envelope.
 
 ### Record layout
 
@@ -237,7 +243,7 @@ Every record starts with the **common header** (12 B, little-endian):
 | 3 | `u8 ThreadSlot` | Producer slot index (0..255). |
 | 4..11 | `i64 StartTimestamp` | `Stopwatch.GetTimestamp()` at Begin (span) or Emit (instant). |
 
-For span records (kind ≥ 10 with carve-outs per `TraceEventKindExtensions.IsSpan` — see [`TraceEventKind.cs:1062`](../../src/Typhon.Profiler/TraceEventKind.cs)), a **span header extension** (25 B) follows:
+For span records (kind ≥ 10 with carve-outs per `TraceEventKindExtensions.IsSpan` — see [`TraceEventKind.cs:1062`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Profiler/TraceEventKind.cs)), a **span header extension** (25 B) follows:
 
 | Offset | Field | Notes |
 |---|---|---|
@@ -268,7 +274,7 @@ Init + FileTable + SourceLocationManifest are sent once during the handshake. Af
 
 ### `Chunker` version — v16
 
-[`TraceFileCache.cs:553`](../../src/Typhon.Profiler/TraceFileCache.cs):
+[`TraceFileCache.cs:553`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Profiler/TraceFileCache.cs):
 
 ```csharp
 public const ushort CurrentChunkerVersion = 16;
@@ -276,7 +282,7 @@ public const ushort CurrentChunkerVersion = 16;
 
 The chunker version stamps the Workbench-side cache. Bumped on any change that affects how records fold into the on-disk cache (new sections, decode-semantic changes). Earlier docs cited v8 — the version has advanced through schema changes for component definitions (v13), system-archetype touches (v15), and the NamedSpan kind reassignment (v16).
 
-The trace **file** format also has its own version — [`TraceFileHeader.cs:149`](../../src/Typhon.Profiler/TraceFileHeader.cs):
+The trace **file** format also has its own version — [`TraceFileHeader.cs:149`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Profiler/TraceFileHeader.cs):
 
 ```csharp
 public const ushort CurrentVersion = 11;  // Track→DAG partitioning (#354)
@@ -288,7 +294,7 @@ v11 adds the Tracks + DAGs tables to support the Track→DAG hierarchy [10-runti
 
 ## 6. ETW off-CPU pump
 
-[`Profiler/internals/EtwSchedulingPump.cs`](../../src/Typhon.Engine/Profiler/internals/EtwSchedulingPump.cs)
+[`Profiler/internals/EtwSchedulingPump.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Profiler/internals/EtwSchedulingPump.cs)
 
 Windows-only, opt-in. Gated on `RuntimeThreadSchedulingActive`. Opens the singleton NT Kernel Logger ETW session with the `ContextSwitch` + `Dispatcher` keywords, runs `TraceEventSession.Source.Process()` on a dedicated thread, and emits one `ThreadContextSwitch` record (kind 254) per ON-CPU slice closed for a Typhon-registered OS thread.
 
@@ -305,7 +311,7 @@ Output: off-CPU gaps visible in the Workbench timeline overlaid on the affected 
 
 ## 7. Profiler engine pipeline
 
-[`Profiler/internals/ProfilerBootstrap.cs`](../../src/Typhon.Engine/Profiler/internals/ProfilerBootstrap.cs), [`ProfilerConsumerThread.cs`](../../src/Typhon.Engine/Profiler/internals/ProfilerConsumerThread.cs), [`Profiler/public/ProfilerLauncher.cs`](../../src/Typhon.Engine/Profiler/public/ProfilerLauncher.cs)
+[`Profiler/internals/ProfilerBootstrap.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Profiler/internals/ProfilerBootstrap.cs), [`ProfilerConsumerThread.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Profiler/internals/ProfilerConsumerThread.cs), [`Profiler/public/ProfilerLauncher.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Profiler/public/ProfilerLauncher.cs)
 
 <a href="assets/typhon-profiler-architecture.svg">
   <img src="assets/typhon-profiler-architecture.svg" width="1200" alt="Profiler architecture">
@@ -338,7 +344,7 @@ Output: off-CPU gaps visible in the Workbench timeline overlaid on the affected 
 
 ### `TraceFileCache`
 
-[`TraceFileCache.cs`](../../src/Typhon.Profiler/TraceFileCache.cs), [`IncrementalCacheBuilder.cs`](../../src/Typhon.Profiler/IncrementalCacheBuilder.cs)
+[`TraceFileCache.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Profiler/TraceFileCache.cs), [`IncrementalCacheBuilder.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Profiler/IncrementalCacheBuilder.cs)
 
 The Workbench reads trace files through a **sidecar cache** (`.typhon-trace-cache`) that holds folded sections for fast pan/zoom:
 - Per-thread record chunks (LZ4 verbatim).
@@ -349,7 +355,7 @@ The cache's `ChunkerVersion` is independent of the trace-file version. Mismatche
 
 ### CPU sampling integration
 
-When `ProfilerCpuSamplingActive` is on, the bootstrap starts an in-process `CpuSamplerSession` via .NET's EventPipe. Samples land in a temp `.nettrace` file; at session stop, [`CpuSampleParser`](../../src/Typhon.Engine/Profiler/internals/CpuSampleParser.cs) transcodes and resolves symbols off-thread (the parse can take seconds — running it during shutdown overlap is the optimisation). Results land in the trace file's `CpuSampleSection` (v10+) where the Workbench overlays them on the timeline.
+When `ProfilerCpuSamplingActive` is on, the bootstrap starts an in-process `CpuSamplerSession` via .NET's EventPipe. Samples land in a temp `.nettrace` file; at session stop, [`CpuSampleParser`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Profiler/internals/CpuSampleParser.cs) transcodes and resolves symbols off-thread (the parse can take seconds — running it during shutdown overlap is the optimisation). Results land in the trace file's `CpuSampleSection` (v10+) where the Workbench overlays them on the timeline.
 
 ---
 
@@ -361,7 +367,7 @@ When `ProfilerCpuSamplingActive` is on, the bootstrap starts an in-process `CpuS
 <br>
 <sub>Workbench viewer flow: file mode (chunk-based lazy load via the v16 sidecar cache, decode ~217 kinds) and live mode (SSE) feed a shared model rendered to canvas; OPFS persists chunk bytes client-side.</sub>
 
-[`tools/Typhon.Workbench/Controllers/ProfilerController.cs`](../../tools/Typhon.Workbench/Controllers/ProfilerController.cs), [`Sessions/TraceSessionRuntime.cs`](../../tools/Typhon.Workbench/Sessions/TraceSessionRuntime.cs), [`ClientApp/src/libs/profiler/`](../../tools/Typhon.Workbench/ClientApp/src/libs/profiler/)
+[`tools/Typhon.Workbench/Controllers/ProfilerController.cs`](https://github.com/Log2n-io/Typhon/blob/main/tools/Typhon.Workbench/Controllers/ProfilerController.cs), [`Sessions/TraceSessionRuntime.cs`](https://github.com/Log2n-io/Typhon/blob/main/tools/Typhon.Workbench/Sessions/TraceSessionRuntime.cs), [`ClientApp/src/libs/profiler/`](https://github.com/Log2n-io/Typhon/tree/main/tools/Typhon.Workbench/ClientApp/src/libs/profiler)
 
 The viewer is split between an ASP.NET Core server (`tools/Typhon.Workbench/`) and a TypeScript SPA (`ClientApp/`).
 
@@ -374,15 +380,15 @@ The viewer is split between an ASP.NET Core server (`tools/Typhon.Workbench/`) a
 
 ### Client side (`ClientApp/src/libs/profiler/`)
 - **Phase 4 cache v16** — the client mirrors the server's `TraceFileCache` schema. Mismatched versions trigger a rebuild.
-- **OPFS chunk store** — [`cache/opfsChunkStore.ts`](../../tools/Typhon.Workbench/ClientApp/src/libs/profiler/cache/opfsChunkStore.ts) persists LZ4 chunk bytes verbatim in the browser's Origin Private File System. Calls `navigator.storage.persist()` to keep the browser from evicting under pressure. OPFS failures are caught and treated as "best-effort optimisation" — the server-backed fetch path always works.
-- **SSE live mode** — the client's chunk decoder ([`decode/chunkDecoder.ts`](../../tools/Typhon.Workbench/ClientApp/src/libs/profiler/decode/chunkDecoder.ts)) consumes the same wire format whether the source is OPFS, server cache, or live SSE.
+- **OPFS chunk store** — [`cache/opfsChunkStore.ts`](https://github.com/Log2n-io/Typhon/blob/main/tools/Typhon.Workbench/ClientApp/src/libs/profiler/cache/opfsChunkStore.ts) persists LZ4 chunk bytes verbatim in the browser's Origin Private File System. Calls `navigator.storage.persist()` to keep the browser from evicting under pressure. OPFS failures are caught and treated as "best-effort optimisation" — the server-backed fetch path always works.
+- **SSE live mode** — the client's chunk decoder ([`decode/chunkDecoder.ts`](https://github.com/Log2n-io/Typhon/blob/main/tools/Typhon.Workbench/ClientApp/src/libs/profiler/decode/chunkDecoder.ts)) consumes the same wire format whether the source is OPFS, server cache, or live SSE.
 - **Worker pool** — record decoding and SOA layout happen in Web Workers so the main thread stays responsive during pan/zoom.
 
 ---
 
 ## 9. OTel integration
 
-[`Observability/public/`](../../src/Typhon.Engine/Observability/public/)
+[`Observability/public/`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Engine/Observability/public)
 
 Separate from the typed-event pipeline — this is **resource-graph metrics** flowing to OTel meters, not span/trace export.
 
@@ -392,15 +398,15 @@ Separate from the typed-event pipeline — this is **resource-graph metrics** fl
 
 | Type | Purpose |
 |---|---|
-| [`ObservabilityBridgeExtensions`](../../src/Typhon.Engine/Observability/public/ObservabilityBridgeExtensions.cs) | `AddTyphonObservabilityBridge(...)` DI extension. Wires the snapshot loop, exporter, alert generator, health checker. |
-| [`ObservabilityBridgeOptions`](../../src/Typhon.Engine/Observability/public/ObservabilityBridgeOptions.cs) | Snapshot interval, per-path health thresholds. |
-| [`ResourceMetricsExporter`](../../src/Typhon.Engine/Observability/public/ResourceMetricsExporter.cs) | Reads `IResourceGraph` snapshots and exposes them through `Meter` "Typhon.Resources". Observable-instrument pattern: OTel callbacks read a cached snapshot — zero overhead when no consumer is listening. |
-| [`ResourceMetricsService`](../../src/Typhon.Engine/Observability/public/ResourceMetricsService.cs) | `IHostedService` that periodically calls `exporter.UpdateSnapshot()`. |
-| [`OTelMetricNameBuilder`](../../src/Typhon.Engine/Observability/public/OTelMetricNameBuilder.cs) | Maps resource-graph paths to OTel-compliant metric names. |
-| [`EcsMetricsExporter`](../../src/Typhon.Engine/Observability/public/EcsMetricsExporter.cs) | Separate exporter for ECS-specific gauges (per-archetype entity counts, etc.). |
-| [`ResourceHealthChecker`](../../src/Typhon.Engine/Observability/public/ResourceHealthChecker.cs) | Implements `ITyphonHealthCheck` against `ResourceMetricsExporter`'s snapshot + threshold config. |
-| [`ResourceAlertGenerator`](../../src/Typhon.Engine/Observability/public/ResourceAlertGenerator.cs) | Promotes snapshot anomalies into structured alerts (Severity / SymptomPath / RootCausePath / Timestamp). |
-| [`TraceIdEnricher`](../../src/Typhon.Engine/Observability/public/TraceIdEnricher.cs) | Serilog enricher that copies `Activity.Current.TraceId/SpanId` into log events for log↔trace correlation. Zero allocation when no `Activity` is active. |
+| [`ObservabilityBridgeExtensions`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Observability/public/ObservabilityBridgeExtensions.cs) | `AddTyphonObservabilityBridge(...)` DI extension. Wires the snapshot loop, exporter, alert generator, health checker. |
+| [`ObservabilityBridgeOptions`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Observability/public/ObservabilityBridgeOptions.cs) | Snapshot interval, per-path health thresholds. |
+| [`ResourceMetricsExporter`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Observability/public/ResourceMetricsExporter.cs) | Reads `IResourceGraph` snapshots and exposes them through `Meter` "Typhon.Resources". Observable-instrument pattern: OTel callbacks read a cached snapshot — zero overhead when no consumer is listening. |
+| [`ResourceMetricsService`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Observability/public/ResourceMetricsService.cs) | `IHostedService` that periodically calls `exporter.UpdateSnapshot()`. |
+| [`OTelMetricNameBuilder`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Observability/public/OTelMetricNameBuilder.cs) | Maps resource-graph paths to OTel-compliant metric names. |
+| [`EcsMetricsExporter`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Observability/public/EcsMetricsExporter.cs) | Separate exporter for ECS-specific gauges (per-archetype entity counts, etc.). |
+| [`ResourceHealthChecker`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Observability/public/ResourceHealthChecker.cs) | Implements `ITyphonHealthCheck` against `ResourceMetricsExporter`'s snapshot + threshold config. |
+| [`ResourceAlertGenerator`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Observability/public/ResourceAlertGenerator.cs) | Promotes snapshot anomalies into structured alerts (Severity / SymptomPath / RootCausePath / Timestamp). |
+| [`TraceIdEnricher`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Observability/public/TraceIdEnricher.cs) | Serilog enricher that copies `Activity.Current.TraceId/SpanId` into log events for log↔trace correlation. Zero allocation when no `Activity` is active. |
 
 The resource-graph snapshot is built in [13-resources](13-resources.md). This section is just the path from `IResourceGraph` → OTel meters → Prometheus/OTLP backend.
 

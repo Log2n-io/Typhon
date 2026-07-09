@@ -158,9 +158,8 @@ public sealed class UnitOfWork : IDisposable
     }
 
     /// <summary>
-    /// Synchronous flush. Forces all pending data to stable storage.
-    /// For WAL mode: signals WAL writer and waits for durable LSN.
-    /// For WAL-less mode: behavior depends on <see cref="DurabilityMode"/>.
+    /// Synchronous flush: signals the WAL writer and waits for this UoW's records to reach the durable LSN, then transitions the UoW to
+    /// <see cref="UnitOfWorkState.WalDurable"/>. No-op when the UoW is no longer <see cref="UnitOfWorkState.Pending"/>. WAL is mandatory (ADR-054).
     /// </summary>
     public void Flush()
     {

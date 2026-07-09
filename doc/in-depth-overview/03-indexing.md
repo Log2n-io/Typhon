@@ -1,10 +1,16 @@
+---
+uid: overview-indexing
+title: '03 — Indexing'
+description: 'Indexing in Typhon is one mechanism: a B+Tree specialised at compile time for the key width. There is no separate "primary key index", "secondary index" or…'
+---
+
 # 03 — Indexing
 
-**Code:** [`src/Typhon.Engine/Indexing/`](../../src/Typhon.Engine/Indexing/)
+**Code:** [`src/Typhon.Engine/Indexing/`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Engine/Indexing)
 
 Indexing in Typhon is one mechanism: a **B+Tree** specialised at compile time for the key width. There is no separate "primary key index", "secondary index" or "uniqueness constraint" implementation — the same `BTree<TKey, TStore>` powers all three. The variants (`L16BTree`, `L32BTree`, `L64BTree`, `String64BTree`) exist purely to size the node layout to the key width so that every node is exactly **256 bytes** (or 64 B for `String64BTree`), keying capacity off the key size rather than off some configured fan-out.
 
-The tree is **concurrent** by design: readers descend lock-free via Optimistic Lock Coupling ([`OlcLatch`](../../src/Typhon.Engine/Indexing/internals/OlcLatch.cs)), writers use a two-phase spin-then-yield lock that never pays the Windows 15 ms timer-tick penalty, and obsolete nodes are reclaimed via epoch deferral ([01-foundation §4](01-foundation.md)). It's also a **B-link tree** — every node carries a `HighKey` upper bound and a `NextChunk` pointer so a writer can split a node without coordinating with traversing readers; the readers follow the right-link to find the key that's now on the new sibling.
+The tree is **concurrent** by design: readers descend lock-free via Optimistic Lock Coupling ([`OlcLatch`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Indexing/internals/OlcLatch.cs)), writers use a two-phase spin-then-yield lock that never pays the Windows 15 ms timer-tick penalty, and obsolete nodes are reclaimed via epoch deferral ([01-foundation §4](01-foundation.md)). It's also a **B-link tree** — every node carries a `HighKey` upper bound and a `NextChunk` pointer so a writer can split a node without coordinating with traversing readers; the readers follow the right-link to find the key that's now on the new sibling.
 
 If you've used the engine before, you've used this code path. Every PK lookup, every secondary-index probe, every range scan in the query planner goes through it.
 
@@ -19,9 +25,9 @@ If you've used the engine before, you've used this code path. Every PK lookup, e
 - **Uniqueness constraints** (`[Unique]` is a unique secondary index — `AllowMultiple = false`).
 - **Multi-value indexes** (`AllowMultiple = true`) — values per key are stored in a `VariableSizedBufferSegment` whose buffer head ID lives in the BTree's value slot.
 
-The `TStore` generic threads through to [`IPageStore`](../../src/Typhon.Engine/Storage/internals/IPageStore.cs) — concretely `PersistentStore` (WAL-backed, durable) or `TransientStore` (in-memory only, no WAL). The BTree code is identical for both; the store dictates whether mutations get journalled.
+The `TStore` generic threads through to [`IPageStore`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/internals/IPageStore.cs) — concretely `PersistentStore` (WAL-backed, durable) or `TransientStore` (in-memory only, no WAL). The BTree code is identical for both; the store dictates whether mutations get journalled.
 
-The user-facing handle is [`IndexRef`](../../src/Typhon.Engine/Indexing/public/IndexRef.cs) — opaque, reusable, with a captured `IndexLayoutVersion` for O(1) staleness detection after schema evolution. Resolve once via `DatabaseEngine.GetPKIndexRef<T>()` / `GetIndexRef<T, TKey>()`, then reuse on the hot path.
+The user-facing handle is [`IndexRef`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Indexing/public/IndexRef.cs) — opaque, reusable, with a captured `IndexLayoutVersion` for O(1) staleness detection after schema evolution. Resolve once via `DatabaseEngine.GetPKIndexRef<T>()` / `GetIndexRef<T, TKey>()`, then reuse on the hot path.
 
 ---
 
@@ -48,7 +54,7 @@ Every node carries the same header fields at the same offsets (so a generic `Bas
 
 ### `BTree<TKey, TStore> : BTreeBase<TStore>`
 
-[`BTree.cs`](../../src/Typhon.Engine/Indexing/internals/BTree.cs), [`BTreeBase.cs`](../../src/Typhon.Engine/Indexing/internals/BTreeBase.cs)
+[`BTree.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Indexing/internals/BTree.cs), [`BTreeBase.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Indexing/internals/BTreeBase.cs)
 
 `BTreeBase<TStore>` is the non-generic surface used by `ComponentTable`, the query planner, and `IndexedFieldInfo` — it doesn't know `TKey`. `BTree<TKey, TStore>` is the typed implementation; concrete instantiations (e.g. `IntSingleBTree<TStore>`, `LongMultipleBTree<TStore>`) bind both type parameters and pick a node-storage strategy.
 
@@ -70,10 +76,10 @@ Each numeric variant is a 256 B struct sized so the key/value arrays plus the fi
 
 | Variant | Key types | Key size | Capacity | Node size | Source |
 |---|---|---|---|---|---|
-| `L16BTree` | `sbyte`, `byte`, `short`, `ushort`, `char` | 2 B (slot-wise) | **38** | 256 B | [`L16BTree.cs`](../../src/Typhon.Engine/Indexing/internals/L16BTree.cs) — `Index16Chunk.Capacity = 38` |
-| `L32BTree` | `int`, `uint`, `float` | 4 B | **29** | 256 B | [`L32BTree.cs`](../../src/Typhon.Engine/Indexing/internals/L32BTree.cs) — `Index32Chunk.Capacity = 29` |
-| `L64BTree` | `long`, `ulong`, `double` | 8 B | **19** | 256 B | [`L64BTree.cs`](../../src/Typhon.Engine/Indexing/internals/L64BTree.cs) — `Index64Chunk.Capacity = 19` |
-| `String64BTree` | `String64` | 64 B | **4** | 64 B × 5 segments | [`String64BTree.cs`](../../src/Typhon.Engine/Indexing/internals/String64BTree.cs) — `IndexString64Chunk.Capacity = 4` |
+| `L16BTree` | `sbyte`, `byte`, `short`, `ushort`, `char` | 2 B (slot-wise) | **38** | 256 B | [`L16BTree.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Indexing/internals/L16BTree.cs) — `Index16Chunk.Capacity = 38` |
+| `L32BTree` | `int`, `uint`, `float` | 4 B | **29** | 256 B | [`L32BTree.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Indexing/internals/L32BTree.cs) — `Index32Chunk.Capacity = 29` |
+| `L64BTree` | `long`, `ulong`, `double` | 8 B | **19** | 256 B | [`L64BTree.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Indexing/internals/L64BTree.cs) — `Index64Chunk.Capacity = 19` |
+| `String64BTree` | `String64` | 64 B | **4** | 64 B × 5 segments | [`String64BTree.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Indexing/internals/String64BTree.cs) — `IndexString64Chunk.Capacity = 4` |
 
 The L16 storage is slightly subtle: keys are stored as 2 B regardless of whether `TKey` is 1 B (sbyte/byte) or 2 B (short/ushort/char). The variant exists per key type to give the JIT a monomorphised search routine.
 
@@ -97,7 +103,7 @@ Two primitives, two regimes.
 
 ### Readers — `OlcLatch` (optimistic, lock-free)
 
-[`OlcLatch.cs`](../../src/Typhon.Engine/Indexing/internals/OlcLatch.cs)
+[`OlcLatch.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Indexing/internals/OlcLatch.cs)
 
 `OlcLatch` is a 32-bit field embedded in every node's `OlcVersion` slot:
 
@@ -115,7 +121,7 @@ A failed validation emits a `Concurrency:OlcLatch:ValidationFail` event ([12-obs
 
 ### Writers — `SpinWriteLock` (two-phase, yield-capped)
 
-[`BTree.cs SpinWriteLock`](../../src/Typhon.Engine/Indexing/internals/BTree.cs)
+[`BTree.cs SpinWriteLock`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Indexing/internals/BTree.cs)
 
 Acquiring a writer latch is via `OlcLatch.TryWriteLock()` which `CAS`-sets bit 0. If that fails, `SpinWriteLock` walks two phases — **deliberately avoiding `Thread.Sleep(1)`**, which on Windows stalls for ~15 ms (one timer-tick), an eternity at the latch hold times this code targets.
 
@@ -157,7 +163,7 @@ All operations live on `BTree<TKey, TStore>`. Public entry points work in two pa
 
 ### `Add(key, value, ref accessor, out bufferRootId)` — Insert
 
-[`BTree.Insert.cs`](../../src/Typhon.Engine/Indexing/internals/BTree.Insert.cs)
+[`BTree.Insert.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Indexing/internals/BTree.Insert.cs)
 
 OLC fast path: descend optimistically, validate the leaf version, `TryWriteLock` the leaf, retry-on-CAS-failure or fall through. The slow path `InsertIterative` descends with full path recording, handles overflow by spill-left → spill-right → split, and propagates separator-key updates back up the path.
 
@@ -172,7 +178,7 @@ Returns the `ElementId` (slot index within the buffer for multi-value; record ID
 
 ### `Remove(key, out value, ref accessor)` — Delete
 
-[`BTree.Remove.cs`](../../src/Typhon.Engine/Indexing/internals/BTree.Remove.cs)
+[`BTree.Remove.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Indexing/internals/BTree.Remove.cs)
 
 OLC fast path: descend optimistically, find the leaf, `TryWriteLock` and remove if no SMO is required. Pessimistic fallback `RemoveCorePessimistic` is full path recording, with `borrow-left` → `borrow-right` → `merge-left` → `merge-right` for underflow.
 
@@ -180,7 +186,7 @@ For **multi-value indexes**, `Remove(key, ...)` removes the *whole key* (and its
 
 ### `TryGet(key, ref accessor)` — Lookup
 
-[`BTree.cs TryGet`](../../src/Typhon.Engine/Indexing/internals/BTree.cs)
+[`BTree.cs TryGet`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Indexing/internals/BTree.cs)
 
 Pure OLC: descent reads versions only, never writes. Returns `Result<int, BTreeLookupStatus>` (`Found`/`NotFound`). After `MaxOptimisticRestarts = 3` failed restarts, falls through to `TryGetPessimistic` which loops on OLC indefinitely (still no writes — pessimistic here means "no retry budget", not "take a lock").
 
@@ -188,7 +194,7 @@ For multi-value indexes, use `TryGetMultiple` which returns a `VariableSizedBuff
 
 ### `EnumerateRange(min, max)` / `EnumerateRangeDescending` / `EnumerateRangeMultiple` — RangeScan
 
-[`BTree.RangeEnumerator.cs`](../../src/Typhon.Engine/Indexing/internals/BTree.RangeEnumerator.cs)
+[`BTree.RangeEnumerator.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Indexing/internals/BTree.RangeEnumerator.cs)
 
 A `ref struct` enumerator that seeks the start leaf and walks the leaf-chain forward (via `NextChunk`) or backward (via `PrevChunk`). Per-leaf OLC validation: read the leaf version before reading the items, validate after; on validation failure, re-read just that leaf from the beginning/end.
 
@@ -204,7 +210,7 @@ The caller **must be inside an epoch scope** ([01-foundation §4](01-foundation.
 
 ### `RemoveValue(key, elementId, value, ref accessor, preserveEmptyBuffer)` — multi-value removal
 
-[`BTree.cs RemoveValue`](../../src/Typhon.Engine/Indexing/internals/BTree.cs)
+[`BTree.cs RemoveValue`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Indexing/internals/BTree.cs)
 
 This is **not** "remove by key" — `RemoveValue` removes *one value from a multi-value key's buffer*. Important: a multi-value index entry holds many values per key (e.g., "all entities with `Status = Active`"), and the engine often needs to remove one element while leaving the rest of the buffer intact.
 
@@ -217,11 +223,11 @@ Flow:
 5. WriteUnlock the leaf (version bump now visible to OLC readers).
 6. If the buffer is now empty *and* `preserveEmptyBuffer == false`, remove the BTree key entry too (via `RemoveCorePessimistic`) and delete the buffer.
 
-The `preserveEmptyBuffer = true` mode keeps the key alive even when the buffer is empty — needed by temporal indexes ([`TemporalIndexQuery.cs`](../../src/Typhon.Engine/Indexing/internals/TemporalIndexQuery.cs), [`VersionedIndexEntry.cs`](../../src/Typhon.Engine/Indexing/internals/VersionedIndexEntry.cs)) where the HEAD buffer chains to a TAIL of older versions; dropping the HEAD would unlink the entire history.
+The `preserveEmptyBuffer = true` mode keeps the key alive even when the buffer is empty — needed by temporal indexes ([`TemporalIndexQuery.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Indexing/internals/TemporalIndexQuery.cs), [`VersionedIndexEntry.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Indexing/internals/VersionedIndexEntry.cs)) where the HEAD buffer chains to a TAIL of older versions; dropping the HEAD would unlink the entire history.
 
 ### `Move(oldKey, newKey, value)` / `MoveValue(...)` — compound move
 
-[`BTree.Move.cs`](../../src/Typhon.Engine/Indexing/internals/BTree.Move.cs)
+[`BTree.Move.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Indexing/internals/BTree.Move.cs)
 
 Atomically removes from one key and inserts under another — used when an indexed field changes value on update. Same-leaf fast path takes one write lock; different-leaf path locks the two leaves in `ChunkId` order to avoid deadlock. Falls back to a fully pessimistic remove+insert pair under contention.
 
@@ -233,7 +239,7 @@ Two SMOs (Structure Modification Operations) extend or shrink the tree's shape.
 
 ### NodeSplit
 
-[`BTree.NodeWrapper.cs SplitRight`](../../src/Typhon.Engine/Indexing/internals/BTree.NodeWrapper.cs), per-variant `SplitRight` in [`L16BTree.cs`](../../src/Typhon.Engine/Indexing/internals/L16BTree.cs) et al.
+[`BTree.NodeWrapper.cs SplitRight`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Indexing/internals/BTree.NodeWrapper.cs), per-variant `SplitRight` in [`L16BTree.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Indexing/internals/L16BTree.cs) et al.
 
 Triggered when a leaf is full and neither neighbour can absorb a spill (or under contention with a hot leaf at ≥ half capacity). Allocates a new right sibling, moves the upper half of the items to it, and:
 
@@ -247,7 +253,7 @@ Counted via `SplitCount` and (for contention-triggered splits) `ContentionSplitC
 
 ### NodeMerge
 
-[`BTree.NodeWrapper.cs MergeLeft`](../../src/Typhon.Engine/Indexing/internals/BTree.NodeWrapper.cs), per-variant `MergeLeft` in `L16BTree.cs` et al.
+[`BTree.NodeWrapper.cs MergeLeft`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Indexing/internals/BTree.NodeWrapper.cs), per-variant `MergeLeft` in `L16BTree.cs` et al.
 
 Triggered when a node falls below half capacity and neighbours can't borrow more (`borrow-left`/`borrow-right` are tried first). Merges the right node into the left, marks the right as obsolete (via `OlcLatch.MarkObsolete`), and adds it to the `DeferredNodeList` for epoch-deferred reclamation. The left's `HighKey` inherits the right's, preserving the B-link invariant.
 
@@ -272,7 +278,7 @@ Chunk 2:  [ ... ]
 Chunk 3:  [ ... ]
 ```
 
-### [`BTreeDirectoryHeader`](../../src/Typhon.Engine/Indexing/internals/BTree.cs)
+### [`BTreeDirectoryHeader`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Indexing/internals/BTree.cs)
 
 ```csharp
 [StructLayout(LayoutKind.Sequential, Pack = 2)]
@@ -281,7 +287,7 @@ internal struct BTreeDirectoryHeader {
 }
 ```
 
-### [`BTreeDirectoryEntry`](../../src/Typhon.Engine/Indexing/internals/BTree.cs) — 12 bytes per BTree
+### [`BTreeDirectoryEntry`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Indexing/internals/BTree.cs) — 12 bytes per BTree
 
 ```csharp
 [StructLayout(LayoutKind.Sequential, Pack = 2)]
@@ -301,7 +307,7 @@ Importantly: each BTree on a shared segment has its **own** root and count in th
 
 ## 8. Telemetry spans
 
-B+Tree mutation paths emit typed events ([12-observability](12-observability.md)) — the events are JIT-eliminated when their gates are off. Definitions live in [`BTreeEvents.cs`](../../src/Typhon.Engine/Profiler/internals/BTreeEvents.cs):
+B+Tree mutation paths emit typed events ([12-observability](12-observability.md)) — the events are JIT-eliminated when their gates are off. Definitions live in [`BTreeEvents.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Profiler/internals/BTreeEvents.cs):
 
 | Span event | Where emitted | Payload |
 |---|---|---|

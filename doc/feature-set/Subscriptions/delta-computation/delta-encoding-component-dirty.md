@@ -1,3 +1,9 @@
+---
+uid: feature-subscriptions-delta-computation-delta-encoding-component-dirty
+title: 'Component-Level Dirty Encoding (v1)'
+description: 'Today''s wire encoding: a Modified entity sends the full bytes of every component that actually changed.'
+---
+
 # Component-Level Dirty Encoding (v1)
 > Today's wire encoding: a Modified entity sends the full bytes of every component that actually changed.
 
@@ -58,10 +64,10 @@ conn.OnTickDelta += tickDelta =>
 
 ## 🧪 Tests
 
-- [ProtocolTests](../../../../test/Typhon.Engine.Tests/Runtime/Subscriptions/ProtocolTests.cs) —
+- [ProtocolTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/ProtocolTests.cs) —
   `ComponentFieldUpdate_AllFieldsDirty_V1Format`: verifies the v1 wire convention (`FieldDirtyBits = ~0UL`, full
   component bytes)
-- [ViewDeltaTests](../../../../test/Typhon.Engine.Tests/Runtime/Subscriptions/ViewDeltaTests.cs) —
+- [ViewDeltaTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/ViewDeltaTests.cs) —
   `DeltaBuilder_SharedView_ProducesCorrectDelta`: Added entities carry full component snapshot bytes
 
 ## 🔗 Related

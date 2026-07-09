@@ -1,3 +1,9 @@
+---
+uid: feature-subscriptions-published-views-per-client-views
+title: 'Per-client View Factories'
+description: 'A Func that builds a fresh, parameterized View for each subscriber.'
+---
+
 # Per-client View Factories
 > A `Func<ClientContext, ViewBase>` that builds a fresh, parameterized View for each subscriber.
 

@@ -92,6 +92,7 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
         _query = query;
     }
 
+    /// <summary>Removes this view from its query registry so it stops receiving change notifications; invoked during teardown.</summary>
     protected override void DeregisterFromRegistries() => _registry?.DeregisterView(this);
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -139,8 +140,13 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
 
         internal EntityIdEnumerator(HashMap<long>.Enumerator inner) => _inner = inner;
 
+        /// <summary>Returns this enumerator, enabling <c>foreach</c> directly over it.</summary>
         public EntityIdEnumerator GetEnumerator() => this;
+
+        /// <summary>The <see cref="EntityId"/> at the current position.</summary>
         public EntityId Current => EntityId.FromRaw(_inner.Current);
+
+        /// <summary>Advances to the next entity; returns <see langword="false"/> when the view is exhausted.</summary>
         public bool MoveNext() => _inner.MoveNext();
     }
 
@@ -197,6 +203,15 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
             0, 0, 0, ownerSystemIdx);
     }
 
+    /// <summary>
+    /// Recomputes the view's membership against <paramref name="tx"/>'s snapshot; the <see cref="Added"/> and <see cref="Removed"/> collections reflect the
+    /// changes since the previous refresh. The caller-info parameters are captured automatically for diagnostics and should not be supplied explicitly.
+    /// </summary>
+    /// <param name="tx">Transaction whose snapshot the view is refreshed against.</param>
+    /// <param name="callerFile">Auto-captured source file of the call site (diagnostics).</param>
+    /// <param name="callerLine">Auto-captured source line of the call site (diagnostics).</param>
+    /// <param name="callerMethod">Auto-captured calling member name (diagnostics).</param>
+    /// <exception cref="ObjectDisposedException">The view has already been disposed.</exception>
     public override void Refresh(
         Transaction tx,
         [CallerFilePath]   string callerFile = null,
@@ -776,7 +791,7 @@ internal abstract class EcsViewFieldReader
 }
 
 /// <summary>
-/// Typed implementation that reads component <typeparamref name="T"/> via <see cref="Transaction.Open"/> + <see cref="EntityRef.TryRead{T}"/>.
+/// Typed implementation that reads component <typeparamref name="T"/> via <see cref="EntityAccessor.Open(EntityId)"/> + <see cref="EntityRef.TryRead{T}"/>.
 /// </summary>
 internal sealed unsafe class EcsViewFieldReader<T> : EcsViewFieldReader where T : unmanaged
 {

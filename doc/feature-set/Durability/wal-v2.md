@@ -1,3 +1,9 @@
+---
+uid: feature-durability-wal-v2
+title: 'Write-Ahead Log (WAL v2 logical records)'
+description: 'The single source of durability truth: logical (EntityId, ComponentTypeId) records, one codec, a sequential CRC-chained log.'
+---
+
 # Write-Ahead Log (WAL v2 logical records)
 > The single source of durability truth: logical `(EntityId, ComponentTypeId)` records, one codec, a sequential CRC-chained log.
 
@@ -64,10 +70,10 @@ tx.Commit();   // batch appended now; durable on the next GroupCommit flush
 
 ## 🧪 Tests
 
-- [WalCommitBufferTests](../../../test/Typhon.Engine.Tests/Durability/WalCommitBufferTests.cs) — producer-side lock-free claim/publish/drain/overflow semantics
-- [WalWriterTests](../../../test/Typhon.Engine.Tests/Durability/WalWriterTests.cs) — writer-thread drain/flush pipeline, FUA vs. buffered durability
-- [WalRecordHeaderTests](../../../test/Typhon.Engine.Tests/Durability/WalRecordHeaderTests.cs) — on-disk logical record/frame/chunk layout (the `(EntityId, ComponentTypeId)` format itself)
-- [WalIntegrationTests](../../../test/Typhon.Engine.Tests/Durability/WalIntegrationTests.cs) — end-to-end WAL pipeline across all three `DurabilityMode`s with real disk I/O
+- [WalCommitBufferTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/WalCommitBufferTests.cs) — producer-side lock-free claim/publish/drain/overflow semantics
+- [WalWriterTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/WalWriterTests.cs) — writer-thread drain/flush pipeline, FUA vs. buffered durability
+- [WalRecordHeaderTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/WalRecordHeaderTests.cs) — on-disk logical record/frame/chunk layout (the `(EntityId, ComponentTypeId)` format itself)
+- [WalIntegrationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/WalIntegrationTests.cs) — end-to-end WAL pipeline across all three `DurabilityMode`s with real disk I/O
 
 ## 🔗 Related
 

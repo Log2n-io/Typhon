@@ -1,3 +1,9 @@
+---
+uid: feature-subscriptions-server-configuration
+title: 'Subscription Server Configuration'
+description: 'One options object tunes the TCP listener''s port, capacity, and backpressure behavior.'
+---
+
 # Subscription Server Configuration
 > One options object tunes the TCP listener's port, capacity, and backpressure behavior.
 
@@ -61,7 +67,7 @@ var runtimeOptions = new RuntimeOptions
 
 ## 🧪 Tests
 
-- [SubscriptionStressTests](../../../test/Typhon.Engine.Tests/Runtime/Subscriptions/SubscriptionStressTests.cs) —
+- [SubscriptionStressTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/SubscriptionStressTests.cs) —
   `Backpressure_SlowClient_TriggersResync` sets a non-default `SendBufferCapacity` and shows it changing overflow
   behavior — the one place a config knob is verified to take effect end-to-end
 

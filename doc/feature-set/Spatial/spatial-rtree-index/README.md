@@ -1,3 +1,9 @@
+---
+uid: feature-spatial-spatial-rtree-index-index
+title: 'Spatial R-Tree Index'
+description: 'Page-backed R-Tree attached to a component field, giving sub-microsecond AABB/radius/ray queries shared across every archetype that uses it.'
+---
+
 # Spatial R-Tree Index
 > Page-backed R-Tree attached to a component field, giving sub-microsecond AABB/radius/ray queries shared across every archetype that uses it.
 
@@ -31,9 +37,9 @@ Annotate a component field holding an `AABB2F`/`AABB3F`/`BSphere2F`/`BSphere3F` 
 
 ## 🧪 Tests
 
-- [SpatialRTreeTests](../../../../test/Typhon.Engine.Tests/Data/SpatialIndex/SpatialRTreeTests.cs) — insert/split/remove correctness across all 4 variants, AABB query vs brute force, category-mask pruning
-- [SpatialNodeDescriptorTests](../../../../test/Typhon.Engine.Tests/Data/SpatialIndex/SpatialNodeDescriptorTests.cs) — node capacities/header sizes/SOA layout match the design doc, per variant
-- [SpatialRTreeBulkTests](../../../../test/Typhon.Engine.Tests/Data/SpatialIndex/SpatialRTreeBulkTests.cs) — many sequential inserts, `TreeValidator` structural invariant checks
+- [SpatialRTreeTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/SpatialIndex/SpatialRTreeTests.cs) — insert/split/remove correctness across all 4 variants, AABB query vs brute force, category-mask pruning
+- [SpatialNodeDescriptorTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/SpatialIndex/SpatialNodeDescriptorTests.cs) — node capacities/header sizes/SOA layout match the design doc, per variant
+- [SpatialRTreeBulkTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/SpatialIndex/SpatialRTreeBulkTests.cs) — many sequential inserts, `TreeValidator` structural invariant checks
 
 ## 🔗 Related
 

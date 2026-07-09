@@ -1,3 +1,9 @@
+---
+uid: feature-transactions-uow-identity-crash-recovery
+title: 'UoW Identity & Crash-Safe Recovery Boundary'
+description: 'A bounded 15-bit ID stamps every revision a UoW writes — crash recovery erases unconfirmed work instantly, with no replay.'
+---
+
 # UoW Identity & Crash-Safe Recovery Boundary
 > A bounded 15-bit ID stamps every revision a UoW writes — crash recovery erases unconfirmed work instantly, with no replay.
 
@@ -59,7 +65,7 @@ catch (ResourceExhaustedException ex)
   later, unrelated UoW can be assigned the same value.
 
 ## 🧪 Tests
-- [UowRegistryTests](../../../test/Typhon.Engine.Tests/Execution/UowRegistryTests.cs) — ID allocation/release,
+- [UowRegistryTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Execution/UowRegistryTests.cs) — ID allocation/release,
   crash-recovery voiding of `Pending` entries (`Registry_CrashRecovery_VoidsPending`,
   `Registry_TwoPhaseRecovery_FullWorkflow`), back-pressure wait/timeout/cancellation, capacity growth beyond the
   initial registry size

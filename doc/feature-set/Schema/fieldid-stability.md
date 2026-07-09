@@ -1,3 +1,9 @@
+---
+uid: feature-schema-fieldid-stability
+title: 'FieldId Stability & Rename Tracking'
+description: 'Field identity survives reordering, insertion, removal, and renames — your indexes never silently point at the wrong field.'
+---
+
 # FieldId Stability & Rename Tracking
 > Field identity survives reordering, insertion, removal, and renames — your indexes never silently point at the wrong field.
 
@@ -56,8 +62,8 @@ dbe.RegisterComponentFromAccessor<Player>();
 
 ## 🧪 Tests
 
-- [FieldIdResolverTests](../../../test/Typhon.Engine.Tests/Data/Schema/FieldIdResolverTests.cs) — pure resolver algorithm: name matching, `PreviousName` renames (incl. circular swaps), explicit `FieldId` conflicts, overflow, gap-skipping for new ids
-- [FieldIdStabilityTests](../../../test/Typhon.Engine.Tests/Data/Schema/FieldIdStabilityTests.cs) — end-to-end reopen cycles proving ids/index survive add/remove/rename
+- [FieldIdResolverTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/Schema/FieldIdResolverTests.cs) — pure resolver algorithm: name matching, `PreviousName` renames (incl. circular swaps), explicit `FieldId` conflicts, overflow, gap-skipping for new ids
+- [FieldIdStabilityTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/Schema/FieldIdStabilityTests.cs) — end-to-end reopen cycles proving ids/index survive add/remove/rename
 
 ## 🔗 Related
 

@@ -37,7 +37,12 @@ public class SchemaMigrationException : TyphonException
     /// <summary>Detailed failure records for each entity.</summary>
     public IReadOnlyList<MigrationFailure> Failures { get; }
 
-    public SchemaMigrationException(string componentName, IReadOnlyList<MigrationFailure> failures) : 
+    /// <summary>
+    /// Creates a new <see cref="SchemaMigrationException"/> aggregating the entities that failed migration.
+    /// </summary>
+    /// <param name="componentName">Name of the component schema being migrated.</param>
+    /// <param name="failures">One record per entity that could not be migrated.</param>
+    public SchemaMigrationException(string componentName, IReadOnlyList<MigrationFailure> failures) :
         base(TyphonErrorCode.SchemaMigration, FormatMessage(componentName, failures))
     {
         ComponentName = componentName;

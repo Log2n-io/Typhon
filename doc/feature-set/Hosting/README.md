@@ -1,3 +1,9 @@
+---
+uid: feature-hosting-index
+title: 'Hosting'
+description: 'A thin Microsoft.Extensions.DependencyInjection integration seam: extension methods that register the engine''s top-level singletons (resource registry,…'
+---
+
 # Hosting
 > A thin `Microsoft.Extensions.DependencyInjection` integration seam: extension methods that register the engine's top-level singletons (resource registry, allocator, epoch manager, timer, watchdog, paged MMF, database engine) and bind their option types via `IOptions<T>`, giving an application a single canonical chain to bootstrap a working `DatabaseEngine`. Singleton/Scoped/Transient twins let test and tooling hosts scope an engine instance per DI scope, an injectable `IWalFileIO` seam swaps the WAL's disk backend for an in-memory one, and small conveniences (`AddTyphonProfiler`, `EnsureFileDeleted`) round out startup/teardown for tests and tooling.
 

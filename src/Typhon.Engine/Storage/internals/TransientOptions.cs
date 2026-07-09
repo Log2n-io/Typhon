@@ -12,7 +12,7 @@ public class TransientOptions
 {
     /// <summary>
     /// Hard memory cap for transient page allocation. When exceeded, <see cref="TransientStore.AllocatePages"/>
-    /// throws <see cref="InsufficientMemoryException"/>. Default: 256 MB.
+    /// throws <see cref="System.InsufficientMemoryException"/>. Default: 256 MB.
     /// </summary>
     public long MaxMemoryBytes { get; set; } = 256 * 1024 * 1024;
 

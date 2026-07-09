@@ -1,3 +1,9 @@
+---
+uid: feature-schema-migration-progress-tracking
+title: 'Migration Progress Tracking'
+description: 'A phase-by-phase event stream for observing long-running schema migrations as they happen.'
+---
+
 # Migration Progress Tracking
 > A phase-by-phase event stream for observing long-running schema migrations as they happen.
 
@@ -40,7 +46,7 @@ dbe.RegisterComponentFromAccessor<PlayerV2>();
 
 ## 🧪 Tests
 
-- [OperationalToolingTests](../../../test/Typhon.Engine.Tests/Data/Schema/OperationalToolingTests.cs) — `MigrationProgress_EventsFiredInOrder` asserts the phase list starts at `Analyzing`, ends at `Complete`, and is monotonically non-decreasing
+- [OperationalToolingTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/Schema/OperationalToolingTests.cs) — `MigrationProgress_EventsFiredInOrder` asserts the phase list starts at `Analyzing`, ends at `Complete`, and is monotonically non-decreasing
 
 ## 🔗 Related
 

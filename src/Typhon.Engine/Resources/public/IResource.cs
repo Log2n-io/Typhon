@@ -4,6 +4,10 @@ using System.Collections.Generic;
 
 namespace Typhon.Engine;
 
+/// <summary>
+/// Classification of a resource-graph node, used for filtering (e.g. by <see cref="ResourceSnapshot.FindByType"/>) and for display.
+/// Values are grouped by engine layer (structural, service, transaction, storage, persistence, metadata, synchronization, durability).
+/// </summary>
 [PublicAPI]
 public enum ResourceType
 {
@@ -104,9 +108,14 @@ public enum ResourceType
     Backup = 72
 }
 
+/// <summary>
+/// A node in Typhon's runtime resource graph: a named, typed element of the engine tree that owns child resources and participates in
+/// lifecycle (disposal) and diagnostic snapshotting. Nodes with measurable state additionally implement <see cref="IMetricSource"/>.
+/// </summary>
 [PublicAPI]
 public interface IResource : IDisposable
 {
+    /// <summary>Stable identifier, unique among siblings. Forms one segment of the node's tree path (e.g. "PageCache" in "Storage/PageCache").</summary>
     string Id { get; }
 
     /// <summary>
@@ -121,12 +130,34 @@ public interface IResource : IDisposable
     /// </summary>
     int? Count { get; }
 
+    /// <summary>Classification of this resource, used for filtering and display.</summary>
     ResourceType Type { get; }
+
+    /// <summary>Parent node in the tree, or <c>null</c> for the root.</summary>
     IResource Parent { get; }
+
+    /// <summary>Direct child resources, in no particular order.</summary>
     IEnumerable<IResource> Children { get; }
+
+    /// <summary>UTC timestamp captured when this node was constructed.</summary>
     DateTime CreatedAt { get; }
+
+    /// <summary>Registry that owns the tree this node belongs to.</summary>
     IResourceRegistry Owner { get; }
-    
+
+    /// <summary>
+    /// Attaches <paramref name="child"/> under this node and raises <see cref="IResourceRegistry.NodeMutated"/> with
+    /// <see cref="ResourceMutationKind.Added"/>.
+    /// </summary>
+    /// <param name="child">The resource to attach.</param>
+    /// <returns><c>true</c> if attached; <c>false</c> if a child with the same <see cref="Id"/> is already registered.</returns>
     bool RegisterChild(IResource child);
+
+    /// <summary>
+    /// Detaches <paramref name="resource"/> from this node and raises <see cref="IResourceRegistry.NodeMutated"/> with
+    /// <see cref="ResourceMutationKind.Removed"/>.
+    /// </summary>
+    /// <param name="resource">The child resource to detach.</param>
+    /// <returns><c>true</c> if detached; <c>false</c> if it was not a child of this node.</returns>
     bool RemoveChild(IResource resource);
 }

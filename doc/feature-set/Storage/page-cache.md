@@ -1,3 +1,9 @@
+---
+uid: feature-storage-page-cache
+title: 'Memory-Mapped Page Cache & Clock-Sweep Eviction'
+description: 'The 8 KiB page cache underneath every Typhon structure — clock-sweep eviction and async I/O instead of trusting the OS, with backpressure instead of…'
+---
+
 # Memory-Mapped Page Cache & Clock-Sweep Eviction
 > The 8 KiB page cache underneath every Typhon structure — clock-sweep eviction and async I/O instead of trusting the OS, with backpressure instead of crashing when full.
 
@@ -53,7 +59,7 @@ catch (PageCacheBackpressureTimeoutException ex)
 
 ## 🧪 Tests
 
-- [PagedMMFTests](../../../test/Typhon.Engine.Tests/Storage/PagedMMFTests.cs) — `SequentialWrites` (contiguous mem-pages batch into a single disk write), `ReliabilityTest` (concurrent read/write under deliberate cache pressure, forcing repeated clock-sweep eviction)
+- [PagedMMFTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Storage/PagedMMFTests.cs) — `SequentialWrites` (contiguous mem-pages batch into a single disk write), `ReliabilityTest` (concurrent read/write under deliberate cache pressure, forcing repeated clock-sweep eviction)
 
 ## 🔗 Related
 

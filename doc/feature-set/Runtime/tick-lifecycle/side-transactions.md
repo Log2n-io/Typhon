@@ -1,3 +1,9 @@
+---
+uid: feature-runtime-tick-lifecycle-side-transactions
+title: 'Side-Transactions (Immediate Durability)'
+description: 'A transaction you open and commit from inside a tick system that becomes durable on its own, independent of whether the tick''s main UoW ever flushes.'
+---
+
 # Side-Transactions (Immediate Durability)
 > A transaction you open and commit from inside a tick system that becomes durable on its own, independent of whether the tick's main UoW ever flushes.
 

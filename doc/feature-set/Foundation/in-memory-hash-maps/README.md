@@ -1,3 +1,9 @@
+---
+uid: feature-foundation-in-memory-hash-maps-index
+title: 'In-Memory Hash Maps'
+description: 'Open-addressing hash set/map types that replace HashSet/Dictionary/ConcurrentDictionary on hot paths, with near-zero GC pressure.'
+---
+
 # In-Memory Hash Maps
 > Open-addressing hash set/map types that replace `HashSet`/`Dictionary`/`ConcurrentDictionary` on hot paths, with near-zero GC pressure.
 
@@ -24,8 +30,8 @@ Both variants use open addressing with linear probing over a single flat entry a
 - Not a drop-in replacement for every use of `Dictionary`: no ordered enumeration/range queries (use a B+Tree for that), and short-lived collections under ~100 entries don't justify the `Dispose()` discipline.
 
 ## 🧪 Tests
-- [HashMapTests](../../../../test/Typhon.Engine.Tests/Collections/InMemoryHashMapTests.cs) — non-concurrent set/map: open addressing, backward-shift delete, resize at load factor.
-- [ConcurrentHashMapTests](../../../../test/Typhon.Engine.Tests/Collections/ConcurrentInMemoryHashMapTests.cs) — striped concurrent set/map: lock-free reads, per-stripe CAS writes.
+- [HashMapTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Collections/InMemoryHashMapTests.cs) — non-concurrent set/map: open addressing, backward-shift delete, resize at load factor.
+- [ConcurrentHashMapTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Collections/ConcurrentInMemoryHashMapTests.cs) — striped concurrent set/map: lock-free reads, per-stripe CAS writes.
 
 ## 🔗 Related
 - Sub-features: [Non-Concurrent HashMap](./non-concurrent-hash-map.md), [ConcurrentHashMap](./concurrent-hash-map.md)

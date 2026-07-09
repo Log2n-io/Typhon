@@ -1,3 +1,9 @@
+---
+uid: feature-schema-schema-history-audit
+title: 'Schema History Audit Log'
+description: 'Every schema change ever applied to the database, permanently recorded and queryable.'
+---
+
 # Schema History Audit Log
 > Every schema change ever applied to the database, permanently recorded and queryable.
 
@@ -54,7 +60,7 @@ tsh> schema-history
 
 ## 🧪 Tests
 
-- [OperationalToolingTests](../../../test/Typhon.Engine.Tests/Data/Schema/OperationalToolingTests.cs) — `SchemaHistory_RecordedOnFieldAdd` (entry recorded with correct `Kind`/field-count deltas), `SchemaHistory_SparseKeys_ReturnsAll` (history readable at a high PK offset)
+- [OperationalToolingTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/Schema/OperationalToolingTests.cs) — `SchemaHistory_RecordedOnFieldAdd` (entry recorded with correct `Kind`/field-count deltas), `SchemaHistory_SparseKeys_ReturnsAll` (history readable at a high PK offset)
 
 ## 🔗 Related
 

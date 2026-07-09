@@ -1,3 +1,9 @@
+---
+uid: feature-resources-debug-properties-drilldown
+title: 'Debug Properties Drill-Down (IDebugPropertiesProvider)'
+description: 'An ad-hoc, allocation-tolerant key/value dictionary for per-resource diagnostic drill-down.'
+---
+
 # Debug Properties Drill-Down (IDebugPropertiesProvider)
 > An ad-hoc, allocation-tolerant key/value dictionary for per-resource diagnostic drill-down.
 
@@ -70,13 +76,13 @@ if (node is IDebugPropertiesProvider provider)
   `MemoryBlockArray`, `MemoryBlockBase`, and `StagingBufferPool`.
 
 ## 🧪 Tests
-- [OwnerAggregatesTests](../../../test/Typhon.Engine.Tests/Resources/OwnerAggregatesTests.cs) — `ComponentTable.GetDebugProperties()`
+- [OwnerAggregatesTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Resources/OwnerAggregatesTests.cs) — `ComponentTable.GetDebugProperties()`
   per-segment breakdown (`ComponentSegment.*`, `CompRevTableSegment.*`, `DefaultIndexSegment.*`, `String64IndexSegment.*` when present),
   values match live segment state after entity creation
 
 ## 🔗 Related
 
-- Source: [`IDebugPropertiesProvider.cs`](../../../src/Typhon.Engine/Resources/public/IDebugPropertiesProvider.cs)
+- Source: [`IDebugPropertiesProvider.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Resources/public/IDebugPropertiesProvider.cs)
 - Related: [Metric Reporting](./metric-reporting.md) — the structured, zero-allocation counterpart this complements.
 
 <!-- Deep dive: claude/design/Resources/09-resource-observability-implementations.md, claude/design/Resources/05-granularity-strategy.md -->

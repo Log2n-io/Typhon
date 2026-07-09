@@ -1,3 +1,9 @@
+---
+uid: feature-indexing-compound-move-operations
+title: 'Compound Move/MoveValue (field-update fast path)'
+description: 'Atomic remove+insert for indexed-field updates — one traversal, one lock on the common same-leaf case.'
+---
+
 # Compound Move/MoveValue (field-update fast path)
 > Atomic remove+insert for indexed-field updates — one traversal, one lock on the common same-leaf case.
 
@@ -74,8 +80,8 @@ new keys land.
 
 ## 🧪 Tests
 
-- [OlcBTreeTests](../../../test/Typhon.Engine.Tests/Data/OlcBTreeTests.cs) — `#114 — Compound Move/MoveValue` region: same-leaf/cross-leaf `Move`, deadlock-free opposite-direction moves, `MoveValue` same-leaf/cross-leaf/last-element-removes-key, and the old-key-not-found/new-key-exists failure paths
-- [ClusterIndexTests](../../../test/Typhon.Engine.Tests/Data/ECS/ClusterIndexTests.cs) — `TickFence_FieldMutation_BTreeMoveExecuted`: end-to-end exercise of the same `Move` operation via the cluster/SV tick-fence deferred commit path
+- [OlcBTreeTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/OlcBTreeTests.cs) — `#114 — Compound Move/MoveValue` region: same-leaf/cross-leaf `Move`, deadlock-free opposite-direction moves, `MoveValue` same-leaf/cross-leaf/last-element-removes-key, and the old-key-not-found/new-key-exists failure paths
+- [ClusterIndexTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/ClusterIndexTests.cs) — `TickFence_FieldMutation_BTreeMoveExecuted`: end-to-end exercise of the same `Move` operation via the cluster/SV tick-fence deferred commit path
 
 ## 🔗 Related
 

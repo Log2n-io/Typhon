@@ -35,8 +35,8 @@ public partial class PagedMMF
         public bool CrcVerified;
 
         /// <summary>
-        /// Number of <see cref="ChunkAccessor"/> instances that have marked this page dirty in their local
-        /// <c>_dirtyFlags</c> bitmask but have not yet flushed via <see cref="ChunkAccessor.CommitChanges"/>.
+        /// Number of <see cref="ChunkAccessor{TStore}"/> instances that have marked this page dirty in their local
+        /// <c>_dirtyFlags</c> bitmask but have not yet flushed via <see cref="ChunkAccessor{TStore}.CommitChanges"/>.
         /// <para>
         /// While &gt; 0, the page may contain partially-written B+Tree data (e.g., a node with odd OLC version).
         /// <see cref="WritePagesForCheckpoint"/> skips such pages to avoid writing inconsistent snapshots to disk.
@@ -50,7 +50,7 @@ public partial class PagedMMF
         public int ActiveChunkWriters;
 
         /// <summary>
-        /// Number of <see cref="ChunkAccessor"/> slots currently referencing this memory page.
+        /// Number of <see cref="ChunkAccessor{TStore}"/> slots currently referencing this memory page.
         /// While &gt; 0, the page memory must not be reused — callers may hold raw <c>byte*</c> or
         /// <c>ref T</c> pointers derived from the slot's cached base address.
         /// <para>
@@ -59,8 +59,8 @@ public partial class PagedMMF
         /// snapshot a page with SlotRefCount &gt; 0 as long as ACW == 0.
         /// </para>
         /// <para>
-        /// Incremented in <see cref="ChunkAccessor.LoadIntoSlot"/>, decremented (deferred) in
-        /// <see cref="ChunkAccessor.EvictSlot"/> and (immediate) in <see cref="ChunkAccessor.Dispose"/>.
+        /// Incremented in <see cref="ChunkAccessor{TStore}.LoadIntoSlot"/>, decremented (deferred) in
+        /// <see cref="ChunkAccessor{TStore}.EvictSlot"/> and (immediate) in <see cref="ChunkAccessor{TStore}.Dispose"/>.
         /// </para>
         /// </summary>
         public int SlotRefCount;

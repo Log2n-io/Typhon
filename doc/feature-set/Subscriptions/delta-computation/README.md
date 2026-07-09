@@ -1,3 +1,9 @@
+---
+uid: feature-subscriptions-delta-computation-index
+title: 'Per-Tick Delta Computation & Encoding'
+description: 'Each tick, the engine figures out exactly what changed in a published View and encodes only that.'
+---
+
 # Per-Tick Delta Computation & Encoding
 > Each tick, the engine figures out exactly what changed in a published View and encodes only that.
 
@@ -46,10 +52,10 @@ travel.
 
 ## 🧪 Tests
 
-- [ViewDeltaTests](../../../../test/Typhon.Engine.Tests/Runtime/Subscriptions/ViewDeltaTests.cs) —
+- [ViewDeltaTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/ViewDeltaTests.cs) —
   `DeltaBuilder_SharedView_ProducesCorrectDelta`/`DeltaBuilder_SecondCall_OnlyNewEntities`: Added/Modified/Removed
   computed once per View, not once per client
-- [SubscriptionStressTests](../../../../test/Typhon.Engine.Tests/Runtime/Subscriptions/SubscriptionStressTests.cs)
+- [SubscriptionStressTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/SubscriptionStressTests.cs)
   — `HighEntityChurn_SpawnDestroy_DeltasConsistent`: sustained spawn/destroy churn under an active subscription
 
 ## 🔗 Related

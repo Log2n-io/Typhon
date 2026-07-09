@@ -1,3 +1,9 @@
+---
+uid: feature-runtime-data-driven-timers
+title: 'Data-Driven Timers / Scheduled Entities'
+description: 'Model respawns, expiries, and cooldowns as queryable entities — no separate timer subsystem.'
+---
+
 # Data-Driven Timers / Scheduled Entities
 > Model respawns, expiries, and cooldowns as queryable entities — no separate timer subsystem.
 

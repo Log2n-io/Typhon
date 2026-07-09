@@ -1,3 +1,9 @@
+---
+uid: feature-profiler-profiler-configuration-tuning
+title: 'Configuration & Performance Tuning'
+description: 'Dial each profiler subsystem on or off, and tune the drain pipeline, without touching a build.'
+---
+
 # Configuration & Performance Tuning
 > Dial each profiler subsystem on or off, and tune the drain pipeline, without touching a build.
 
@@ -85,8 +91,8 @@ TYPHON__PROFILER__GAUGES__ENABLED=false dotnet run
   `ConsumerCadence` and spillover sizing first.
 
 ## 🧪 Tests
-- [TelemetryConfigGateShapeTests](../../../test/Typhon.Engine.Tests/Observability/TelemetryConfigGateShapeTests.cs) — enforces every `*Active` gate field is `public static readonly bool`, the structural precondition the JIT dead-code-elimination claim depends on
-- [TelemetryConfigCpuSamplingTests](../../../test/Typhon.Engine.Tests/Profiler/TelemetryConfigCpuSamplingTests.cs) — one gate worked end-to-end: reads from `typhon.telemetry.json`, composes `Active = ProfilerActive && Enabled`, surfaces in `GetConfigurationSummary`
+- [TelemetryConfigGateShapeTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Observability/TelemetryConfigGateShapeTests.cs) — enforces every `*Active` gate field is `public static readonly bool`, the structural precondition the JIT dead-code-elimination claim depends on
+- [TelemetryConfigCpuSamplingTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Profiler/TelemetryConfigCpuSamplingTests.cs) — one gate worked end-to-end: reads from `typhon.telemetry.json`, composes `Active = ProfilerActive && Enabled`, surfaces in `GetConfigurationSummary`
 
 ## 🔗 Related
 - Sibling: [Profiler Session Lifecycle & Zero-Code Bootstrap](./profiler-lifecycle-bootstrap.md) — reads this config to decide which exporters and subsystems to start

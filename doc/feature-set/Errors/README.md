@@ -1,3 +1,9 @@
+---
+uid: feature-errors-index
+title: 'Errors'
+description: 'Typhon''s unified error model: a single-rooted exception hierarchy with numeric error codes and an IsTransient retry hint, finite per-subsystem timeouts that…'
+---
+
 # Errors
 > Typhon's unified error model: a single-rooted exception hierarchy with numeric error codes and an `IsTransient` retry hint, finite per-subsystem timeouts that replace infinite hangs, `ExhaustionPolicy`-driven bounded-resource failures, and a DEBUG-only declared-access validator. For expected non-error outcomes on hot paths, a zero-allocation `Result<TValue,TStatus>` struct replaces exceptions entirely — retrying is always the caller's decision, the engine never retries on its own.
 

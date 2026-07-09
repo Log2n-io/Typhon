@@ -13,7 +13,7 @@ namespace Typhon.Engine;
 /// own <see cref="Name"/> / <see cref="Index"/> without threading them through manually.
 /// </para>
 /// <para>
-/// <b>Lifecycle.</b> <see cref="Name"/> is set immediately after <c>Configure(SystemBuilder)</c> returns inside <see cref="RuntimeSchedule.Add(QuerySystem)"/>
+/// <b>Lifecycle.</b> <see cref="Name"/> is set immediately after <c>Configure(SystemBuilder)</c> returns inside <see cref="Dag.Add(QuerySystem)"/>
 /// (and siblings). <see cref="Index"/> is set when <see cref="RuntimeSchedule.Build"/> assigns the system its DAG position. Both are <c>null</c> / <c>-1</c> prior
 /// to registration — do not rely on them inside <c>Configure</c>.
 /// </para>

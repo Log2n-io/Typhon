@@ -1,3 +1,9 @@
+---
+uid: feature-subscriptions-published-view-isolation
+title: 'Published/System-Input View Separation'
+description: 'A View used to drive client subscriptions can never double as a system''s query input, or vice versa.'
+---
+
 # Published/System-Input View Separation
 > A View used to drive client subscriptions can never double as a system's query input, or vice versa.
 
@@ -42,7 +48,7 @@ runtime.PublishView("world_npcs", npcViewForSubs);   // OK — distinct instance
 
 ## 🧪 Tests
 
-- [ViewSeparationTests](../../../test/Typhon.Engine.Tests/Runtime/Subscriptions/ViewSeparationTests.cs) —
+- [ViewSeparationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/ViewSeparationTests.cs) —
   `UseAsSystemInput_ThenPublish_Throws`/`PublishView_SameInstanceTwice_Throws` cover both violation directions;
   `SeparateViewInstances_SameQuery_NoConflict` shows the correct fix (two instances)
 

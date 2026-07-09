@@ -1,3 +1,9 @@
+---
+uid: feature-runtime-side-transactions
+title: 'Side-Transactions for Immediate Durability'
+description: 'Commit economy-critical writes durably mid-tick, independent of the tick''s main UoW.'
+---
+
 # Side-Transactions for Immediate Durability
 > Commit economy-critical writes durably mid-tick, independent of the tick's main UoW.
 
@@ -70,7 +76,7 @@ protected override void Execute(TickContext ctx)
 
 ## 🧪 Tests
 
-- [SideTransactionTests](../../../test/Typhon.Engine.Tests/Runtime/SideTransactionTests.cs) — independent commit survives the enclosing tick, invisible to the calling system's own `ctx.Transaction`, caller owns lifecycle
+- [SideTransactionTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/SideTransactionTests.cs) — independent commit survives the enclosing tick, invisible to the calling system's own `ctx.Transaction`, caller owns lifecycle
 
 ## 🔗 Related
 

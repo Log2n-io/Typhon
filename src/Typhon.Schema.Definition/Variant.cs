@@ -24,25 +24,54 @@ namespace Typhon.Schema.Definition;
 [PublicAPI]
 public readonly struct Variant : IComparable<Variant>, IEquatable<Variant>
 {
+    /// <summary>Creates a variant holding the boolean <paramref name="value"/>.</summary>
+    /// <param name="value">The value to store.</param>
     public Variant(bool value)      => _text.SetVariant(value);
+    /// <summary>Creates a variant holding the signed-byte <paramref name="value"/>.</summary>
+    /// <param name="value">The value to store.</param>
     public Variant(sbyte value)     => _text.SetVariant(value);
+    /// <summary>Creates a variant holding the 16-bit integer <paramref name="value"/>.</summary>
+    /// <param name="value">The value to store.</param>
     public Variant(short value)     => _text.SetVariant(value);
+    /// <summary>Creates a variant holding the 32-bit integer <paramref name="value"/>.</summary>
+    /// <param name="value">The value to store.</param>
     public Variant(int value)       => _text.SetVariant(value);
 
+    /// <summary>Creates a variant holding the 64-bit integer <paramref name="value"/>.</summary>
+    /// <param name="value">The value to store.</param>
     public Variant(long value)      => _text.SetVariant(value);
 
+    /// <summary>Creates a variant holding the string <paramref name="value"/>.</summary>
+    /// <param name="value">The string to store; its UTF-8 payload must fit in 61 bytes (64 minus the 3-byte type tag).</param>
+    /// <param name="truncate"><c>true</c> to silently truncate an over-long string to fit; <c>false</c> to throw instead.</param>
+    /// <exception cref="InvalidOperationException"><paramref name="value"/> exceeds the 61-byte payload and <paramref name="truncate"/> is <c>false</c>.</exception>
     public Variant(string value, bool truncate)
     {
         _text.SetVariant(value, truncate);
     }
 
+    /// <summary>Extracts the stored string. See <see cref="AsString"/>.</summary>
+    /// <exception cref="InvalidOperationException">The stored type is not <see cref="FieldType.String"/>.</exception>
     public static explicit operator string(Variant v) => v.AsString();
+    /// <summary>Extracts the stored boolean. See <see cref="AsBool"/>.</summary>
+    /// <exception cref="InvalidOperationException">The stored type is not <see cref="FieldType.Boolean"/>.</exception>
     public static explicit operator bool(Variant v) => v.AsBool();
+    /// <summary>Extracts the stored signed byte. See <see cref="AsByte"/>.</summary>
+    /// <exception cref="InvalidOperationException">The stored type is not <see cref="FieldType.Byte"/>.</exception>
     public static explicit operator sbyte(Variant v) => v.AsByte();
+    /// <summary>Extracts the stored 16-bit integer. See <see cref="AsShort"/>.</summary>
+    /// <exception cref="InvalidOperationException">The stored type is not <see cref="FieldType.Short"/>.</exception>
     public static explicit operator short(Variant v) => v.AsShort();
+    /// <summary>Extracts the stored 32-bit integer. See <see cref="AsInt"/>.</summary>
+    /// <exception cref="InvalidOperationException">The stored type is not <see cref="FieldType.Int"/>.</exception>
     public static explicit operator int(Variant v) => v.AsInt();
+    /// <summary>Extracts the stored 64-bit integer. See <see cref="AsLong"/>.</summary>
+    /// <exception cref="InvalidOperationException">The stored type is not <see cref="FieldType.Long"/>.</exception>
     public static explicit operator long(Variant v) => v.AsLong();
 
+    /// <summary>Returns the stored value as a string.</summary>
+    /// <returns>The decoded string payload.</returns>
+    /// <exception cref="InvalidOperationException">The stored type is not <see cref="FieldType.String"/>.</exception>
     unsafe public string AsString()
     {
         CheckAssertType(FieldType.String);
@@ -52,6 +81,9 @@ public readonly struct Variant : IComparable<Variant>, IEquatable<Variant>
         }
     }
 
+    /// <summary>Returns the stored value as a boolean.</summary>
+    /// <returns>The decoded boolean.</returns>
+    /// <exception cref="InvalidOperationException">The stored type is not <see cref="FieldType.Boolean"/>.</exception>
     unsafe public bool AsBool()
     {
         CheckAssertType(FieldType.Boolean);
@@ -59,6 +91,9 @@ public readonly struct Variant : IComparable<Variant>, IEquatable<Variant>
         return a[3] == (byte)'1';
     }
 
+    /// <summary>Returns the stored value as a signed byte.</summary>
+    /// <returns>The decoded <c>sbyte</c>.</returns>
+    /// <exception cref="InvalidOperationException">The stored type is not <see cref="FieldType.Byte"/>.</exception>
     public sbyte AsByte()
     {
         CheckAssertType(FieldType.Byte);
@@ -66,6 +101,9 @@ public readonly struct Variant : IComparable<Variant>, IEquatable<Variant>
         return sbyte.Parse(spanUtf8);
     }
 
+    /// <summary>Returns the stored value as a 16-bit integer.</summary>
+    /// <returns>The decoded <c>short</c>.</returns>
+    /// <exception cref="InvalidOperationException">The stored type is not <see cref="FieldType.Short"/>.</exception>
     public short AsShort()
     {
         CheckAssertType(FieldType.Short);
@@ -73,6 +111,9 @@ public readonly struct Variant : IComparable<Variant>, IEquatable<Variant>
         return short.Parse(spanUtf8);
     }
 
+    /// <summary>Returns the stored value as a 32-bit integer.</summary>
+    /// <returns>The decoded <c>int</c>.</returns>
+    /// <exception cref="InvalidOperationException">The stored type is not <see cref="FieldType.Int"/>.</exception>
     public int AsInt()
     {
         CheckAssertType(FieldType.Int);
@@ -80,6 +121,9 @@ public readonly struct Variant : IComparable<Variant>, IEquatable<Variant>
         return int.Parse(spanUtf8);
     }
 
+    /// <summary>Returns the stored value as a 64-bit integer.</summary>
+    /// <returns>The decoded <c>long</c>.</returns>
+    /// <exception cref="InvalidOperationException">The stored type is not <see cref="FieldType.Long"/>.</exception>
     public long AsLong()
     {
         CheckAssertType(FieldType.Long);
@@ -95,6 +139,7 @@ public readonly struct Variant : IComparable<Variant>, IEquatable<Variant>
         }
     }
 
+    /// <summary>Formats the stored value as <c>"value (type)"</c> (e.g. <c>"42 (int)"</c>); returns an empty string when the stored type is unrecognized.</summary>
     public override string ToString()
     {
         switch (FieldType)
@@ -125,6 +170,10 @@ public readonly struct Variant : IComparable<Variant>, IEquatable<Variant>
         _text = text;
     }
 
+    /// <summary>
+    /// The type of the stored value, decoded from the leading two-character type tag; <see cref="FieldType.None"/> when the buffer is not a valid
+    /// <c>"tt:data"</c> encoding.
+    /// </summary>
     public FieldType FieldType
     {
         get
@@ -155,15 +204,25 @@ public readonly struct Variant : IComparable<Variant>, IEquatable<Variant>
         }
     }
 
+    /// <summary>Ordinal byte-wise comparison of the two variants' encoded buffers (type tag included).</summary>
+    /// <param name="other">The value to compare against.</param>
+    /// <returns>Negative, zero, or positive per lexicographic byte ordering.</returns>
     public int CompareTo(Variant other) => _text.AsReadOnlySpan().SequenceCompareTo(other._text.AsReadOnlySpan());
 
+    /// <summary>Byte-wise equality of the two variants' encoded buffers — equal only when both the type tag and payload match.</summary>
+    /// <param name="other">The value to compare against.</param>
+    /// <returns><c>true</c> when the encodings are byte-for-byte equal.</returns>
     public bool Equals(Variant other) => other._text.AsReadOnlySpan().SequenceEqual(_text.AsReadOnlySpan());
 
+    /// <summary>Byte-wise equality; <c>false</c> when <paramref name="obj"/> is not a <see cref="Variant"/>.</summary>
     public override bool Equals(object obj) => obj is Variant other && Equals(other);
 
+    /// <summary>32-bit <see cref="MurmurHash2"/> over the encoded buffer bytes.</summary>
     public override int GetHashCode() => (int)MurmurHash2.Hash(_text.AsReadOnlySpan());
 
+    /// <summary>Byte-wise equality.</summary>
     public static bool operator ==(Variant left, Variant right) => left.Equals(right);
 
+    /// <summary>Byte-wise inequality.</summary>
     public static bool operator !=(Variant left, Variant right) => !left.Equals(right);
 }

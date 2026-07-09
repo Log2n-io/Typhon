@@ -1,3 +1,9 @@
+---
+uid: feature-errors-schema-constraint-exceptions
+title: 'Schema & Constraint Violation Exceptions'
+description: 'Typed failures for "the engine refuses to proceed": incompatible schema, failed migration, version downgrade, duplicate key.'
+---
+
 # Schema & Constraint Violation Exceptions
 > Typed failures for "the engine refuses to proceed": incompatible schema, failed migration, version downgrade, duplicate key.
 
@@ -70,8 +76,8 @@ catch (UniqueConstraintViolationException)
 
 ## 🧪 Tests
 
-- [MigrationFunctionTests](../../../test/Typhon.Engine.Tests/Data/Schema/MigrationFunctionTests.cs) — a throwing user migration function surfaces as `SchemaMigrationException` (per-entity `MigrationFailure`); a breaking change with no registered migration surfaces as `SchemaValidationException`.
-- [SchemaValidationIntegrationTests](../../../test/Typhon.Engine.Tests/Data/Schema/SchemaValidationIntegrationTests.cs) — breaking field/index changes on reopen throw `SchemaValidationException` (`Diff`); a persisted revision newer than the runtime struct throws `SchemaDowngradeException`.
+- [MigrationFunctionTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/Schema/MigrationFunctionTests.cs) — a throwing user migration function surfaces as `SchemaMigrationException` (per-entity `MigrationFailure`); a breaking change with no registered migration surfaces as `SchemaValidationException`.
+- [SchemaValidationIntegrationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/Schema/SchemaValidationIntegrationTests.cs) — breaking field/index changes on reopen throw `SchemaValidationException` (`Diff`); a persisted revision newer than the runtime struct throws `SchemaDowngradeException`.
 
 ## 🔗 Related
 

@@ -122,7 +122,7 @@ internal static class CpuSampleParser
     }
 
     /// <summary>
-    /// Per-parse interning state + the <see cref="ThreadSample"/> handler. One instance lives for a single <see cref="Parse"/> call; not thread-safe by
+    /// Per-parse interning state + the <see cref="SampleProfilerTraceEventParser.ThreadSample"/> handler. One instance lives for a single <see cref="Parse"/> call; not thread-safe by
     /// design — <c>source.Process()</c> dispatches events single-threaded.
     /// </summary>
     private sealed class ParseContext

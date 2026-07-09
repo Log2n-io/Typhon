@@ -1,3 +1,9 @@
+---
+uid: feature-durability-durability-modes-index
+title: 'Durability Modes'
+description: 'Per-Unit-of-Work control over when WAL records become crash-safe — pick latency vs. data-at-risk per workload.'
+---
+
 # Durability Modes
 > Per-Unit-of-Work control over when WAL records become crash-safe — pick latency vs. data-at-risk per workload.
 
@@ -77,8 +83,8 @@ tx2.Commit();                  // blocks ~15-85µs — durable on the data file'
 
 ## 🧪 Tests
 
-- [UnitOfWorkTests](../../../../test/Typhon.Engine.Tests/Execution/UnitOfWorkTests.cs) — mode fixed per UoW, `Flush()`/`FlushAsync()` semantics, `Deferred` not flushing on dispose
-- [WalIntegrationTests](../../../../test/Typhon.Engine.Tests/Durability/WalIntegrationTests.cs) — `Deferred`/`GroupCommit`/`Immediate` exercised across dirty-page and reopen scenarios
+- [UnitOfWorkTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Execution/UnitOfWorkTests.cs) — mode fixed per UoW, `Flush()`/`FlushAsync()` semantics, `Deferred` not flushing on dispose
+- [WalIntegrationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/WalIntegrationTests.cs) — `Deferred`/`GroupCommit`/`Immediate` exercised across dirty-page and reopen scenarios
 
 ## 🔗 Related
 

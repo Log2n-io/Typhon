@@ -1,3 +1,9 @@
+---
+uid: feature-foundation-high-resolution-timers-shared-timer
+title: 'Shared Timer (HighResolutionSharedTimerService)'
+description: 'One thread multiplexing many periodic callbacks, each at its own rate, waking only when the soonest one is due.'
+---
+
 # Shared Timer (HighResolutionSharedTimerService)
 > One thread multiplexing many periodic callbacks, each at its own rate, waking only when the soonest one is due.
 
@@ -52,8 +58,8 @@ telemetryReg.Dispose();  // unregisters; thread keeps running for the remaining 
 - Per-registration metrics (`InvocationCount`, `LastCallbackDuration`, `MaxCallbackDuration`, `SlowInvocationCount`) are available on the `ITimerRegistration` handle; aggregate timer metrics (tick count, missed ticks, timing error) are available on the service itself and via `IMetricSource`.
 
 ## 🧪 Tests
-- [HighResolutionSharedTimerServiceTests](../../../../test/Typhon.Engine.Tests/Concurrency/HighResolutionSharedTimerServiceTests.cs) — multiple independent registrations, dispose deactivates without stopping the thread, idles when nothing is due.
-- [DeadlineWatchdogTests](../../../../test/Typhon.Engine.Tests/Concurrency/DeadlineWatchdogTests.cs) — the engine's own 200Hz consumer registered on this timer.
+- [HighResolutionSharedTimerServiceTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Concurrency/HighResolutionSharedTimerServiceTests.cs) — multiple independent registrations, dispose deactivates without stopping the thread, idles when nothing is due.
+- [DeadlineWatchdogTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Concurrency/DeadlineWatchdogTests.cs) — the engine's own 200Hz consumer registered on this timer.
 
 ## 🔗 Related
 

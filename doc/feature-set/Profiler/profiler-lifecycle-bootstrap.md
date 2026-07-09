@@ -1,3 +1,9 @@
+---
+uid: feature-profiler-profiler-lifecycle-bootstrap
+title: 'Profiler Session Lifecycle & Zero-Code Bootstrap'
+description: 'Turn profiling on with a config file — no startup/shutdown code, and no lost trace on crash or exit.'
+---
+
 # Profiler Session Lifecycle & Zero-Code Bootstrap
 > Turn profiling on with a config file — no startup/shutdown code, and no lost trace on crash or exit.
 
@@ -67,8 +73,8 @@ TyphonProfiler.Stop();
   mutating exporters while running throws `InvalidOperationException`.
 
 ## 🧪 Tests
-- [ProfilerSessionMetadataBuilderTests](../../../test/Typhon.Engine.Tests/Profiler/ProfilerSessionMetadataBuilderTests.cs) — session metadata composition (systems/archetypes/component types derived from `RuntimeOptions`); per the fixture's own remarks, the full `ProfilerBootstrap.TryStart` self-wiring path gates on a `static readonly` flag and can't be unit-tested in isolation, so this covers the part that can be
-- [FileExporterIntegrationTests](../../../test/Typhon.Engine.Tests/Profiler/FileExporterIntegrationTests.cs) — exercises `TyphonProfiler.Start`/`Stop` end-to-end (start, emit, stop-finalizes) as part of the file-export round-trip
+- [ProfilerSessionMetadataBuilderTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Profiler/ProfilerSessionMetadataBuilderTests.cs) — session metadata composition (systems/archetypes/component types derived from `RuntimeOptions`); per the fixture's own remarks, the full `ProfilerBootstrap.TryStart` self-wiring path gates on a `static readonly` flag and can't be unit-tested in isolation, so this covers the part that can be
+- [FileExporterIntegrationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Profiler/FileExporterIntegrationTests.cs) — exercises `TyphonProfiler.Start`/`Stop` end-to-end (start, emit, stop-finalizes) as part of the file-export round-trip
 
 ## 🔗 Related
 - Sibling: [Configuration & Performance Tuning](./profiler-configuration-tuning.md) — the config this bootstrap reads to decide which exporters and subsystems to start

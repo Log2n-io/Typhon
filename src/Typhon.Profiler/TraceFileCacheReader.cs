@@ -57,6 +57,14 @@ public sealed class TraceFileCacheReader : IDisposable
     private CacheHeader _header;
     private bool _disposed;
 
+    /// <summary>
+    /// Opens a cache reader over <paramref name="stream"/>, validating the magic, cache version, and chunker version, then eagerly loading the
+    /// small sections. The stream must be seekable; the reader takes ownership and disposes it in <see cref="Dispose"/>.
+    /// </summary>
+    /// <param name="stream">Seekable stream positioned at the start of a <c>.typhon-trace-cache</c> file.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="stream"/> is <c>null</c>.</exception>
+    /// <exception cref="ArgumentException"><paramref name="stream"/> is not seekable.</exception>
+    /// <exception cref="System.IO.InvalidDataException">The magic, cache version, or chunker version does not match this reader.</exception>
     public TraceFileCacheReader(Stream stream)
     {
         _stream = stream ?? throw new ArgumentNullException(nameof(stream));
@@ -105,11 +113,17 @@ public sealed class TraceFileCacheReader : IDisposable
         }
     }
 
+    /// <summary>Per-tick source-file index, loaded eagerly at construction.</summary>
     public IReadOnlyList<TickIndexEntry> TickIndex => _tickIndex;
+    /// <summary>Per-tick overview rollups, loaded eagerly at construction. Drives the viewer's timeline.</summary>
     public IReadOnlyList<TickSummary> TickSummaries => _tickSummaries;
+    /// <summary>Chunk manifest addressing folded chunk payloads in the cache file, loaded eagerly at construction.</summary>
     public IReadOnlyList<ChunkManifestEntry> ChunkManifest => _chunkManifest;
+    /// <summary>Trace-wide aggregate metrics (the fixed header of the GlobalMetrics section), loaded eagerly at construction.</summary>
     public ref readonly GlobalMetricsFixed GlobalMetrics => ref _globalMetrics;
+    /// <summary>Per-system trace-wide duration aggregates, loaded eagerly at construction. Empty when the section is absent.</summary>
     public IReadOnlyList<SystemAggregateDuration> SystemAggregates => _systemAggregates;
+    /// <summary>Interned span-name id → name map. Empty when the source carried no span-name table.</summary>
     public IReadOnlyDictionary<int, string> SpanNames => _spanNames;
 
     /// <summary>v12 per-(tick, system) rollup rows. Empty for v11-or-older caches.</summary>
@@ -286,6 +300,7 @@ public sealed class TraceFileCacheReader : IDisposable
         }
     }
 
+    /// <summary>Disposes the reader and closes the underlying stream. Idempotent.</summary>
     public void Dispose()
     {
         if (_disposed)

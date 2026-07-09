@@ -1,3 +1,9 @@
+---
+uid: feature-durability-crash-recovery-index
+title: 'Crash Recovery (RecoveryDriver)'
+description: 'Scans the WAL''s durably-committed prefix and replays it, in strict LSN order, through the engine''s own write primitives.'
+---
+
 # Crash Recovery (RecoveryDriver)
 > Scans the WAL's durably-committed prefix and replays it, in strict LSN order, through the engine's own write primitives.
 
@@ -68,9 +74,9 @@ catch (CorruptionException ex)
 
 ## 🧪 Tests
 
-- [TrueCrashE2ETests](../../../../test/Typhon.Engine.Tests/Durability/CrashRecovery/TrueCrashE2ETests.cs) — the "One True Crash Test": hard-crash via `SimulateHardCrash` with data only in the WAL, reopen replays it byte-for-byte
-- [WalRecoveryTests](../../../../test/Typhon.Engine.Tests/Durability/WalRecoveryTests.cs) — the recovery orchestrator: commit-marker fate resolution, promoting committed UoWs and voiding pending ones
-- [DifferentialRecoveryOracleTests](../../../../test/Typhon.Engine.Tests/Durability/CrashRecovery/DifferentialRecoveryOracleTests.cs) — recovered state compared byte-for-byte against a pre-crash shadow model
+- [TrueCrashE2ETests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/CrashRecovery/TrueCrashE2ETests.cs) — the "One True Crash Test": hard-crash via `SimulateHardCrash` with data only in the WAL, reopen replays it byte-for-byte
+- [WalRecoveryTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/WalRecoveryTests.cs) — the recovery orchestrator: commit-marker fate resolution, promoting committed UoWs and voiding pending ones
+- [DifferentialRecoveryOracleTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/CrashRecovery/DifferentialRecoveryOracleTests.cs) — recovered state compared byte-for-byte against a pre-crash shadow model
 
 ## 🔗 Related
 

@@ -1,3 +1,9 @@
+---
+uid: feature-observability-strict-mode-checks
+title: 'Runtime-Gated Correctness Checks (Strict Mode)'
+description: 'Opt-in, JSON/env-var-driven runtime checks that turn silent API-misuse and engine-corruption into loud, catchable errors — at zero cost when off.'
+---
+
 # Runtime-Gated Correctness Checks (Strict Mode)
 > Opt-in, JSON/env-var-driven runtime checks that turn silent API-misuse and engine-corruption into loud, catchable errors — at zero cost when off.
 
@@ -87,10 +93,10 @@ CheckConfig.Require(CheckConfig.Enabled, slot < archetype.ComponentCount,
   (obtained via a local clone + Debug build), so strict mode's surface is exactly the checks a user can act on.
 
 ## 🧪 Tests
-- [CheckConfigTests](../../../test/Typhon.Engine.Tests/Observability/CheckConfigTests.cs) — `Require`/`Record` primitives (throw on failure, no-op when off), the gate-field-shape reflection invariant, a lazy-message probe proving interpolation arguments aren't evaluated on the passing path, and a suite-config canary
-- [StrictModeMisuseTests](../../../test/Typhon.Engine.Tests/Observability/StrictModeMisuseTests.cs) — integration: write-through-readonly, destroy-null, and cross-thread transaction use all throw under strict mode
-- [Tier0GuardsTests](../../../test/Typhon.Engine.Tests/Observability/Tier0GuardsTests.cs) — wrong-thread exclusive release/demote throw `CorruptionException`; the DFS-overflow record increments its counter and never throws
-- [SystemAccessValidatorTests](../../../test/Typhon.Engine.Tests/Runtime/SystemAccessValidatorTests.cs) — `AssertWrite<T>` throws for an undeclared write under `DeclaredAccess`, passes for declared, and respects the per-thread push/pop scope
+- [CheckConfigTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Observability/CheckConfigTests.cs) — `Require`/`Record` primitives (throw on failure, no-op when off), the gate-field-shape reflection invariant, a lazy-message probe proving interpolation arguments aren't evaluated on the passing path, and a suite-config canary
+- [StrictModeMisuseTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Observability/StrictModeMisuseTests.cs) — integration: write-through-readonly, destroy-null, and cross-thread transaction use all throw under strict mode
+- [Tier0GuardsTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Observability/Tier0GuardsTests.cs) — wrong-thread exclusive release/demote throw `CorruptionException`; the DFS-overflow record increments its counter and never throws
+- [SystemAccessValidatorTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/SystemAccessValidatorTests.cs) — `AssertWrite<T>` throws for an undeclared write under `DeclaredAccess`, passes for declared, and respects the per-thread push/pop scope
 
 ## 🔗 Related
 - Sibling: [Telemetry Configuration & Gating](telemetry-config-gating.md) — the profiler/tracing gate this mirrors (same `static readonly` JIT-fold mechanism and config source)

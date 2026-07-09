@@ -14,6 +14,9 @@ public enum EventType : byte
     /// <summary>Incremental sync for a View is complete. Normal delta flow begins.</summary>
     SyncComplete,
 
-    /// <summary>Backpressure overflow — this tick's delta is a full snapshot replacing the local cache.</summary>
+    /// <summary>
+    /// A backpressure overflow forced the server to drop this client's deltas. The client must discard its local cache for the View; the server restarts
+    /// incremental sync and re-streams the full View state over subsequent ticks, ending with a <see cref="SyncComplete"/> event.
+    /// </summary>
     Resync
 }

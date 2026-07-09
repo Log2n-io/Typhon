@@ -1,3 +1,9 @@
+---
+uid: feature-transactions-deadline-cancellation
+title: 'Deadline & Cooperative Cancellation'
+description: 'A single absolute deadline rides every transaction commit, aborting cleanly before work starts and never leaving a partial commit behind.'
+---
+
 # Deadline & Cooperative Cancellation
 > A single absolute deadline rides every transaction commit, aborting cleanly before work starts and never leaving a partial commit behind.
 
@@ -50,13 +56,13 @@ catch (TyphonTimeoutException)
 
 ## 🧪 Tests
 
-- [TransactionUnitOfWorkContextTests](../../../test/Typhon.Engine.Tests/Concurrency/TransactionUnitOfWorkContextTests.cs)
+- [TransactionUnitOfWorkContextTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Concurrency/TransactionUnitOfWorkContextTests.cs)
   — `Commit`/`Rollback(ref UnitOfWorkContext)`: expired-deadline and cancelled-token throw at entry,
   expired-during-holdoff still commits, holdoff nesting counter, `ComposeWaitContext_*` deadline-composition cases
-- [UnitOfWorkContextTests](../../../test/Typhon.Engine.Tests/Concurrency/UnitOfWorkContextTests.cs) — the
+- [UnitOfWorkContextTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Concurrency/UnitOfWorkContextTests.cs) — the
   `UnitOfWorkContext` struct itself: 24-byte size, `FromTimeout`/`None`, holdoff enter/exit semantics
   (`ThrowIfCancelled` becomes a no-op inside holdoff, throws again after exit)
-- [DeadlineWatchdogTests](../../../test/Typhon.Engine.Tests/Concurrency/DeadlineWatchdogTests.cs) — the 200Hz
+- [DeadlineWatchdogTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Concurrency/DeadlineWatchdogTests.cs) — the 200Hz
   watchdog firing `CancellationToken`s for deadlines near expiry, so parked (not spinning) waiters observe
   cancellation
 

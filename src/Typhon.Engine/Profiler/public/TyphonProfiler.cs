@@ -454,15 +454,20 @@ public static class TyphonProfiler
 
     /// <summary>Diagnostic: batches/records the consumer fanned out (snapshot at Stop).</summary>
     public static long TotalBatchesFannedOut { get; private set; }
+    /// <summary>Diagnostic: total records the consumer fanned out to exporters (snapshot at <see cref="Stop"/>).</summary>
     public static long TotalRecordsFannedOut { get; private set; }
 
     /// <summary>Diagnostic: batches/records the FIRST attached exporter actually processed (snapshot at Stop).</summary>
     public static long FirstExporterBatchesProcessed { get; private set; }
+    /// <summary>Diagnostic: records the first attached exporter actually processed (snapshot at <see cref="Stop"/>).</summary>
     public static long FirstExporterRecordsProcessed { get; private set; }
 
     /// <summary>Diagnostic: how many final-drain passes ran before the consumer's <c>AllSlotsEmpty</c> returned true.</summary>
     public static long FinalDrainPasses { get; private set; }
+    /// <summary>Diagnostic: how many final-drain passes drained zero bytes before the loop gave up (snapshot at <see cref="Stop"/>).</summary>
     public static long FinalDrainZeroProgressPasses { get; private set; }
+
+    /// <summary>Diagnostic: bytes still pending across all producer rings when the final drain stopped (snapshot at <see cref="Stop"/>). Non-zero means tail records were lost.</summary>
     public static long FinalDrainPendingBytes { get; private set; }
 
     /// <summary>Snapshot of total spillover-buffer acquires across the session, captured at <see cref="Stop"/> time. Each acquire corresponds to one chain-extension on a slot's overflow.</summary>
@@ -471,6 +476,7 @@ public static class TyphonProfiler
     /// <summary>Snapshot of total spillover-pool exhaustions captured at <see cref="Stop"/> time — overflow events that found the pool empty and fell back to the drop path. Non-zero means the configured <c>SpilloverBufferCount</c> was undersized for the workload.</summary>
     public static long SpilloverPoolExhaustedCount { get; private set; }
 
+    /// <summary>Diagnostic: multi-line per-slot state dump captured at <see cref="Stop"/>, or <c>"(not captured)"</c> when no snapshot was taken.</summary>
     public static string SlotStateDump => SSlotStateDump ?? "(not captured)";
     private static string SSlotStateDump;
 

@@ -100,7 +100,7 @@ internal sealed class ComponentInfo
     public void AddNew(long pk, CompRevInfo entry) => SingleCache.Add(pk, entry);
 
     /// <summary>
-    /// Disposes the ChunkAccessor<PersistentStore> fields to flush dirty pages.
+    /// Disposes the <see cref="ChunkAccessor{PersistentStore}"/> fields to flush dirty pages.
     /// </summary>
     public void DisposeAccessors()
     {

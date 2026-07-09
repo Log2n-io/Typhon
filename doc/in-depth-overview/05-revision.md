@@ -1,6 +1,12 @@
+---
+uid: overview-revision
+title: '05 — Revision (MVCC)'
+description: '💡 Scope. Typhon supports three per-component storage modes — Versioned (full MVCC), SingleVersion (in-place, no isolation), and Transient (in-memory, no…'
+---
+
 # 05 — Revision (MVCC)
 
-**Code:** [`src/Typhon.Engine/Revision/`](../../src/Typhon.Engine/Revision/) (+ [`Ecs/public/ComponentTable.cs`](../../src/Typhon.Engine/Ecs/public/ComponentTable.cs) where `CompRevStorageElement` lives, [`Ecs/internals/EnabledBitsOverrides.cs`](../../src/Typhon.Engine/Ecs/internals/EnabledBitsOverrides.cs) / [`EnabledBitsHistory.cs`](../../src/Typhon.Engine/Ecs/internals/EnabledBitsHistory.cs), [`Transactions/internals/RevisionWalker.cs`](../../src/Typhon.Engine/Transactions/internals/RevisionWalker.cs))
+**Code:** [`src/Typhon.Engine/Revision/`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Engine/Revision) (+ [`Ecs/public/ComponentTable.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/ComponentTable.cs) where `CompRevStorageElement` lives, [`Ecs/internals/EnabledBitsOverrides.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/internals/EnabledBitsOverrides.cs) / [`EnabledBitsHistory.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/internals/EnabledBitsHistory.cs), [`Transactions/internals/RevisionWalker.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Transactions/internals/RevisionWalker.cs))
 
 > 💡 **Scope.** Typhon supports three per-component storage modes — **Versioned** (full MVCC), **SingleVersion** (in-place, no isolation), and **Transient** (in-memory, no persistence). 
 > 
@@ -37,7 +43,7 @@ Why it matters for performance: the read path is **lock-free in the common singl
 
 ## 2. Revision element layout
 
-[`Ecs/public/ComponentTable.cs:89`](../../src/Typhon.Engine/Ecs/public/ComponentTable.cs)
+[`Ecs/public/ComponentTable.cs:89`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/ComponentTable.cs)
 
 ```csharp
 [StructLayout(LayoutKind.Sequential, Pack = 2)]
@@ -135,7 +141,7 @@ For the very first write to an entity's component, the chain doesn't exist yet. 
 
 ## 4. Snapshot read path
 
-The shared walk logic lives in [`Transactions/internals/RevisionWalker.cs`](../../src/Typhon.Engine/Transactions/internals/RevisionWalker.cs) — `RevisionChainReader.WalkChain`. Conceptually:
+The shared walk logic lives in [`Transactions/internals/RevisionWalker.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Transactions/internals/RevisionWalker.cs) — `RevisionChainReader.WalkChain`. Conceptually:
 
 ```
 input:  compRevFirstChunkId, transactionTSN
@@ -220,7 +226,7 @@ After this, the writing transaction can see its own change (it caches `CurCompCo
 
 ### `EnabledBitsOverrides`
 
-[`Ecs/internals/EnabledBitsOverrides.cs`](../../src/Typhon.Engine/Ecs/internals/EnabledBitsOverrides.cs)
+[`Ecs/internals/EnabledBitsOverrides.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/internals/EnabledBitsOverrides.cs)
 
 Engine-wide `ConcurrentDictionary<long entityKey, EnabledBitsHistory>`. **Transaction-local** in the sense that uncommitted bit changes route through here at commit time — when a commit changes `EnabledBits` and older transactions are still active, the *old* bits get recorded into the override history before the inline value is updated. The fast path is the common case: `_overrideCount == 0` → no dictionary lookup, return the inline bits directly.
 
@@ -235,7 +241,7 @@ public ushort ResolveEnabledBits(long entityKey, ushort inlineBits, long txTsn)
 
 ### `EnabledBitsHistory`
 
-[`Ecs/internals/EnabledBitsHistory.cs`](../../src/Typhon.Engine/Ecs/internals/EnabledBitsHistory.cs)
+[`Ecs/internals/EnabledBitsHistory.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/internals/EnabledBitsHistory.cs)
 
 Per-entity sorted list of `(changeTSN, oldBits)` pairs. `ResolveAt(txTsn, currentBits)` walks newest-to-oldest: if any `changeTSN > txTsn`, return the corresponding `oldBits` — that's what the older transaction was seeing before the change. Otherwise the inline (current) bits are correct.
 
@@ -249,7 +255,7 @@ This is structurally separate from the revision chain because EnabledBits is so 
 
 ## 7. Read result model
 
-[`Revision/public/RevisionReadStatus.cs`](../../src/Typhon.Engine/Revision/public/RevisionReadStatus.cs)
+[`Revision/public/RevisionReadStatus.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Revision/public/RevisionReadStatus.cs)
 
 The chain walk returns a `Result<CompRevInfo, RevisionReadStatus>`. The status enum is the entire MVCC visibility contract distilled to one byte:
 
@@ -276,7 +282,7 @@ The `Deleted` variant is what enables **time-travel reads of deleted entities**:
 
 ## 8. ComponentRevisionManager
 
-[`Revision/internals/ComponentRevisionManager.cs`](../../src/Typhon.Engine/Revision/internals/ComponentRevisionManager.cs)
+[`Revision/internals/ComponentRevisionManager.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Revision/internals/ComponentRevisionManager.cs)
 
 The static orchestrator for everything above. Not a class you instantiate — a `ref struct` namespace for the chain primitives. The non-trivial operations:
 

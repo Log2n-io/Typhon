@@ -1,6 +1,12 @@
+---
+uid: overview-transactions
+title: '08 — Transactions'
+description: 'Transactions are how mutations enter Typhon. A Transaction is the unit of isolation (MVCC snapshot, conflict detection, rollback) sitting inside a…'
+---
+
 # 08 — Transactions
 
-**Code:** [`src/Typhon.Engine/Transactions/`](../../src/Typhon.Engine/Transactions/)
+**Code:** [`src/Typhon.Engine/Transactions/`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Engine/Transactions)
 
 Transactions are how mutations enter Typhon. A `Transaction` is the unit of *isolation* (MVCC snapshot, conflict detection, rollback) sitting inside a `UnitOfWork` — the unit of *durability* (when WAL records become crash-safe). Together with the `TransactionChain` (visibility horizon) and the `UowRegistry` (persistent UoW ID allocator), they form the commit pipeline that bridges ECS mutations ([06-ecs](06-ecs.md)) and the WAL ([11-durability](11-durability.md)).
 
@@ -53,7 +59,7 @@ The doc walks the stack bottom-up: durability semantics (`UnitOfWork` + `Durabil
 
 ## 2. UnitOfWork — the durability boundary
 
-[`Transactions/public/UnitOfWork.cs`](../../src/Typhon.Engine/Transactions/public/UnitOfWork.cs)
+[`Transactions/public/UnitOfWork.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Transactions/public/UnitOfWork.cs)
 
 A `UnitOfWork` is one *durability decision*. It allocates a `UowId` from the registry, batches one-or-more `Transaction`s, and decides when the WAL records or dirty pages cross from "in-process buffer" to "on stable storage".
 
@@ -67,7 +73,7 @@ tx1.Commit();
 
 ### 2.1 `DurabilityMode`
 
-[`Transactions/public/DurabilityMode.cs`](../../src/Typhon.Engine/Transactions/public/DurabilityMode.cs)
+[`Transactions/public/DurabilityMode.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Transactions/public/DurabilityMode.cs)
 
 Three values, all sit at the UoW level (per-transaction override exists in the type system as `DurabilityOverride` but is not wired into any commit overload — Commit takes only `(ref UnitOfWorkContext, ConcurrencyConflictHandler)`).
 
@@ -102,7 +108,7 @@ In WAL mode the `ChangeSet` accumulates dirty-page marks that *never* get balanc
 
 ## 3. Transaction — isolation, mutation, commit
 
-[`Transactions/public/Transaction.cs`](../../src/Typhon.Engine/Transactions/public/Transaction.cs), [`Transaction.ECS.cs`](../../src/Typhon.Engine/Transactions/public/Transaction.ECS.cs)
+[`Transactions/public/Transaction.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Transactions/public/Transaction.cs), [`Transaction.ECS.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Transactions/public/Transaction.ECS.cs)
 
 `Transaction` extends `EntityAccessor` ([06-ecs](06-ecs.md) §5) — the same `Open` / `OpenMut` surface that read-only accessors use, plus mutation hooks (`Spawn`, `Destroy`, write paths) and the `Commit` / `Rollback` finalization.
 
@@ -122,7 +128,7 @@ using var tx  = dbe.CreateQuickTransaction();
 using var tx  = dbe.CreateReadOnlyTransaction();
 ```
 
-`CreateQuickTransaction` ([`DatabaseEngineExtensions.cs`](../../src/Typhon.Engine/Transactions/public/DatabaseEngineExtensions.cs)) is sugar that creates a UoW, creates a transaction inside it, and sets `tx.OwnsUnitOfWork = true` — `Dispose` propagates and disposes the owning UoW.
+`CreateQuickTransaction` ([`DatabaseEngineExtensions.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Transactions/public/DatabaseEngineExtensions.cs)) is sugar that creates a UoW, creates a transaction inside it, and sets `tx.OwnsUnitOfWork = true` — `Dispose` propagates and disposes the owning UoW.
 
 ### 3.2 Read-only path
 
@@ -142,7 +148,7 @@ public bool Commit(ref UnitOfWorkContext ctx, ConcurrencyConflictHandler handler
 public bool Commit(ConcurrencyConflictHandler handler = null); // synthesizes ctx from TimeoutOptions.Current.DefaultCommitTimeout
 ```
 
-There is no `Commit(DurabilityOverride)` overload — `DurabilityOverride` is defined in [`DurabilityMode.cs`](../../src/Typhon.Engine/Transactions/public/DurabilityMode.cs) but is not referenced by any production code path. Likewise no `tx.Durability` property, no `tx.WaitForDurability()` method, no `DurabilityGuarantee` enum — those exist in older design sketches and never reached the engine.
+There is no `Commit(DurabilityOverride)` overload — `DurabilityOverride` is defined in [`DurabilityMode.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Transactions/public/DurabilityMode.cs) but is not referenced by any production code path. Likewise no `tx.Durability` property, no `tx.WaitForDurability()` method, no `DurabilityGuarantee` enum — those exist in older design sketches and never reached the engine.
 
 Commit walks every modified component type and, per entity:
 
@@ -162,7 +168,7 @@ Commit walks every modified component type and, per entity:
 
 ### 3.4 `ConcurrencyConflictHandler`
 
-[`Transactions/internals/CommitContext.cs`](../../src/Typhon.Engine/Transactions/internals/CommitContext.cs):
+[`Transactions/internals/CommitContext.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Transactions/internals/CommitContext.cs):
 
 ```csharp
 public delegate void ConcurrencyConflictHandler(ref ConcurrencyConflictSolver solver);
@@ -180,7 +186,7 @@ The whole rollback body runs inside a `ctx.EnterHoldoff()` block — once you've
 
 ## 4. TransactionChain — visibility horizon
 
-[`Transactions/internals/TransactionChain.cs`](../../src/Typhon.Engine/Transactions/internals/TransactionChain.cs)
+[`Transactions/internals/TransactionChain.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Transactions/internals/TransactionChain.cs)
 
 One instance per `DatabaseEngine`. Owns the live set of `Transaction`s, the global TSN counter, and the transaction pool.
 
@@ -231,7 +237,7 @@ internal long AllocateTSN() => Interlocked.Increment(ref _nextFreeId);
 
 ## 5. UowRegistry — persistent UoW slots
 
-[`Transactions/internals/UowRegistry.cs`](../../src/Typhon.Engine/Transactions/internals/UowRegistry.cs)
+[`Transactions/internals/UowRegistry.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Transactions/internals/UowRegistry.cs)
 
 The chain stores live transactions in memory; the **registry** stores UoW slots *persistently* so crash recovery can decide which UoWs reached `WalDurable` and which were `Pending` at crash time (and must have their writes voided).
 
@@ -278,7 +284,7 @@ On engine start, `LoadFromDiskRaw` scans every entry up to `_currentCapacity`, r
 
 ## 6. DeferredCleanupManager — tail-driven cleanup
 
-[`Ecs/internals/DeferredCleanupManager.cs`](../../src/Typhon.Engine/Ecs/internals/DeferredCleanupManager.cs)
+[`Ecs/internals/DeferredCleanupManager.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/internals/DeferredCleanupManager.cs)
 
 When a transaction commits, the entities it modified can't have their old revisions freed immediately — older live transactions might still be reading them. The DCM holds those cleanup requests keyed by the *blocking TSN* (the tail's TSN at the time of commit) and releases them when the tail finally moves past.
 
@@ -298,7 +304,7 @@ Reverse-indexed by `(ComponentTable, PrimaryKey)` for O(1) dedup so an entity to
 
 ## 7. Deadlines & timeouts
 
-[`Foundation/Concurrency/public/UnitOfWorkContext.cs`](../../src/Typhon.Engine/Foundation/Concurrency/public/UnitOfWorkContext.cs), [`Ecs/public/TimeoutOptions.cs`](../../src/Typhon.Engine/Ecs/public/TimeoutOptions.cs)
+[`Foundation/Concurrency/public/UnitOfWorkContext.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Foundation/Concurrency/public/UnitOfWorkContext.cs), [`Ecs/public/TimeoutOptions.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/TimeoutOptions.cs)
 
 Every commit takes a `ref UnitOfWorkContext` — see [01-foundation §2](01-foundation.md). When you call `tx.Commit()` without a context, the engine synthesizes one from:
 

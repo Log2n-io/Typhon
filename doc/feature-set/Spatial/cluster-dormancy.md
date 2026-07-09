@@ -1,3 +1,9 @@
+---
+uid: feature-spatial-cluster-dormancy
+title: 'Cluster Dormancy (Sleep / Wake)'
+description: 'Clusters with no component writes for N ticks sleep and skip dispatch entirely, waking within one tick of being touched.'
+---
+
 # Cluster Dormancy (Sleep / Wake)
 > Clusters with no component writes for N ticks sleep and skip dispatch entirely, waking within one tick of being touched.
 
@@ -77,14 +83,14 @@ schedule.QuerySystem("IdleDrift", ctx =>
 
 ## 🧪 Tests
 
-- [DormancyTests](../../../test/Typhon.Engine.Tests/Runtime/DormancyTests.cs) — `SleepAfterThreshold`/`SleepingClusterSkippedInDispatch`, deferred `WakeRequest_Transition`/`DuplicateWakeDeduplication`, `HeartbeatWake`, `SetDirty_WakesSleepingCluster` vs `WriteSpatial` not waking, cluster-removal count bookkeeping
+- [DormancyTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/DormancyTests.cs) — `SleepAfterThreshold`/`SleepingClusterSkippedInDispatch`, deferred `WakeRequest_Transition`/`DuplicateWakeDeduplication`, `HeartbeatWake`, `SetDirty_WakesSleepingCluster` vs `WriteSpatial` not waking, cluster-removal count bookkeeping
 
 ## 🔗 Related
 
-- Source: [src/Typhon.Engine/Ecs/internals/ArchetypeClusterState.cs](../../../src/Typhon.Engine/Ecs/internals/ArchetypeClusterState.cs) (`DormancySweep`, `ProcessWakeRequest`, `TransitionWakePendingToActive`, `SetDirty`)
-- Source: [src/Typhon.Engine/Runtime/internals/DormancyReporter.cs](../../../src/Typhon.Engine/Runtime/internals/DormancyReporter.cs) (thread-local deferred wake requests)
-- Source: [src/Typhon.Engine/Runtime/public/TyphonRuntime.cs](../../../src/Typhon.Engine/Runtime/public/TyphonRuntime.cs) (`OnParallelQueryPrepare` dormancy filter, `BuildTierIndexesAtTickStart` wake transition)
-- Source: [src/Typhon.Engine/Ecs/public/ClusterSleepState.cs](../../../src/Typhon.Engine/Ecs/public/ClusterSleepState.cs)
+- Source: [src/Typhon.Engine/Ecs/internals/ArchetypeClusterState.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/internals/ArchetypeClusterState.cs) (`DormancySweep`, `ProcessWakeRequest`, `TransitionWakePendingToActive`, `SetDirty`)
+- Source: [src/Typhon.Engine/Runtime/internals/DormancyReporter.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Runtime/internals/DormancyReporter.cs) (thread-local deferred wake requests)
+- Source: [src/Typhon.Engine/Runtime/public/TyphonRuntime.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Runtime/public/TyphonRuntime.cs) (`OnParallelQueryPrepare` dormancy filter, `BuildTierIndexesAtTickStart` wake transition)
+- Source: [src/Typhon.Engine/Ecs/public/ClusterSleepState.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/ClusterSleepState.cs)
 - Related catalog entry: [Tiered Simulation Dispatch](./tiered-simulation-dispatch.md) (the tier filter dormancy composes with)
 - Related catalog entry: [Spatially-Coherent Entity Clustering](./spatial-coherent-clustering.md) (`WriteSpatial`, cluster/dirty-bitmap fundamentals)
 - Sibling: [Cluster Dormancy (Sleep/Wake)](../Runtime/spatial-tiers-adaptive-dispatch/cluster-dormancy.md) — same feature cataloged from the Runtime/dispatch angle rather than the spatial-grid angle

@@ -1,3 +1,9 @@
+---
+uid: guide-operating
+title: '6 — Operating & going deeper'
+description: 'You can now model, write, query, and run a world. This last chapter is about living with a running engine: seeing inside it, giving it sensible memory…'
+---
+
 # 6 — Operating & going deeper
 
 You can now model, write, query, and run a world. This last chapter is about *living with* a running engine: seeing inside it, giving it sensible memory budgets, handling the errors it can throw — and knowing where to go when this guide runs out.

@@ -1,3 +1,9 @@
+---
+uid: feature-storage-page-compression-future
+title: 'Page Compression (Future)'
+description: 'Planned LZ4-style adapter for cold/historical data and backups — deliberately absent from v1 to protect microsecond-latency paths.'
+---
+
 # Page Compression (Future)
 > Planned LZ4-style adapter for cold/historical data and backups — deliberately absent from v1 to protect microsecond-latency paths.
 

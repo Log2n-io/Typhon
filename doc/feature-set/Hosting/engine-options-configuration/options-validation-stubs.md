@@ -1,3 +1,9 @@
+---
+uid: feature-hosting-engine-options-configuration-options-validation-stubs
+title: 'Options Validation Hooks'
+description: 'The AddOptions().Validate(...) wiring exists on every options type today, but its predicate is a no-op stub.'
+---
+
 # Options Validation Hooks
 > The `AddOptions<T>().Validate(...)` wiring exists on every options type today, but its predicate is a no-op stub.
 
@@ -69,11 +75,11 @@ services
 
 ## 🧪 Tests
 
-- [ResourceOptionsTests](../../../../test/Typhon.Engine.Tests/Resources/ResourceOptionsTests.cs) — the real, callable `ResourceOptions.Validate()`: passes on defaults/large budgets, throws `InvalidOperationException` with a readable message when fixed allocations exceed `TotalMemoryBudgetBytes`; no test exercises the `Add*()`-wired `.Validate(_ => true)` stub itself (there is nothing to assert — it never rejects)
+- [ResourceOptionsTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Resources/ResourceOptionsTests.cs) — the real, callable `ResourceOptions.Validate()`: passes on defaults/large budgets, throws `InvalidOperationException` with a readable message when fixed allocations exceed `TotalMemoryBudgetBytes`; no test exercises the `Add*()`-wired `.Validate(_ => true)` stub itself (there is nothing to assert — it never rejects)
 
 ## 🔗 Related
 
-- Source: [`TyphonBuilderExtensions.cs`](../../../../src/Typhon.Engine/Hosting/public/TyphonBuilderExtensions.cs) (`ConfigureMemoryAllocatorOptions`, `ConfigureResourceRegistryOptions`, `AddPagedMMF`, `AddDatabaseEngine` — the four `.Validate(_ => true)` sites), [`ResourceOptions.cs` — `Validate()`](../../../../src/Typhon.Engine/Resources/public/ResourceOptions.cs), [`PagedMMFOptions.cs` — `IsValid`/`Validate`](../../../../src/Typhon.Engine/Storage/public/PagedMMFOptions.cs)
+- Source: [`TyphonBuilderExtensions.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Hosting/public/TyphonBuilderExtensions.cs) (`ConfigureMemoryAllocatorOptions`, `ConfigureResourceRegistryOptions`, `AddPagedMMF`, `AddDatabaseEngine` — the four `.Validate(_ => true)` sites), [`ResourceOptions.cs` — `Validate()`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Resources/public/ResourceOptions.cs), [`PagedMMFOptions.cs` — `IsValid`/`Validate`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/public/PagedMMFOptions.cs)
 - Parent feature: [Engine Options Configuration Surface](./README.md)
 - Sibling: [DI Engine Bootstrap Chain](../di-bootstrap-chain/README.md) — the `Add*()` calls whose `configure` delegate this stubbed hook should fail-fast on.
 

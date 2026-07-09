@@ -269,8 +269,8 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     // ═══════════════════════════════════════════════════════════════════════
 
     /// <summary>
-    /// Filter entities by a component field predicate. Evaluated per-entity during broad scan via <see cref="Transaction.Open"/> + <see cref="EntityRef.TryRead{T}"/>.
-    /// Multiple Where calls chain as AND (each must pass).
+    /// Filter entities by a component field predicate. Evaluated per-entity during broad scan via <see cref="EntityAccessor.Open(EntityId)"/> +
+    /// <see cref="EntityRef.TryRead{T}"/>. Multiple Where calls chain as AND (each must pass).
     /// </summary>
     /// <remarks>Targeted scan (index-first) is not yet available — always uses broad scan.</remarks>
     public EcsQuery<TArchetype> Where<T>(Func<T, bool> predicate) where T : unmanaged
@@ -2930,8 +2930,10 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             _index = -1;
         }
 
+        /// <summary>The <see cref="EntityRef"/> resolved at the current position.</summary>
         public EntityRef Current => _current;
 
+        /// <summary>Advances to the next matching entity, applying the WHERE post-filter; returns <see langword="false"/> at the end.</summary>
         public bool MoveNext()
         {
             while (true)
@@ -2965,6 +2967,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             }
         }
 
+        /// <summary>No-op; the enumerator holds no resources requiring release.</summary>
         public void Dispose() { }
     }
 }

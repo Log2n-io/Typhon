@@ -1,6 +1,12 @@
+---
+uid: overview-schema
+title: '04 — Schema'
+description: 'Typhon is schema-first. Every component you store has a declared structure — fields, types, offsets, indexes — and that structure is persisted alongside the…'
+---
+
 # 04 — Schema
 
-**Code:** [`src/Typhon.Engine/Schema/`](../../src/Typhon.Engine/Schema/) + sibling project [`src/Typhon.Schema.Definition/`](../../src/Typhon.Schema.Definition/)
+**Code:** [`src/Typhon.Engine/Schema/`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Engine/Schema) + sibling project [`src/Typhon.Schema.Definition/`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Schema.Definition)
 
 Typhon is **schema-first**. Every component you store has a declared structure — fields, types, offsets, indexes — and that structure is persisted alongside the data. When you reopen a database, the engine reads the persisted schema, compares it to the runtime structs you've registered, and either accepts the match, evolves the layout in place, or refuses to open. There is no untyped storage and no "schemaless" fast path.
 
@@ -22,7 +28,7 @@ Three principles drive the design:
 2. **Every component is persisted.** The schema itself is stored in the database — as **system components** (`ComponentR1`, `FieldR1`, `ArchetypeR1`, `SchemaHistoryR1`) — using the same `ComponentTable` machinery that user components use. Schema *is* data, just system data.
 3. **Schema evolution is eager, not lazy.** When you reopen a database with a changed C# definition, the engine resolves the difference *before* WAL replay begins. By the time application code is allowed to write, the on-disk layout already matches the runtime layout. There is no per-read fixup, no shadow field map at query time.
 
-The user-facing types — `FieldType`, `[Component]`, `[Field]`, `String64`, `Variant`, spatial primitives — live in a sibling project [`Typhon.Schema.Definition`](../../src/Typhon.Schema.Definition/) so that codegen, tooling, and external consumers can reference the schema vocabulary without pulling in the full engine. See [01-foundation §9](01-foundation.md) for the full list.
+The user-facing types — `FieldType`, `[Component]`, `[Field]`, `String64`, `Variant`, spatial primitives — live in a sibling project [`Typhon.Schema.Definition`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Schema.Definition) so that codegen, tooling, and external consumers can reference the schema vocabulary without pulling in the full engine. See [01-foundation §9](01-foundation.md) for the full list.
 
 ---
 
@@ -30,7 +36,7 @@ The user-facing types — `FieldType`, `[Component]`, `[Field]`, `String64`, `Va
 
 ### `FieldType` enum
 
-[`Typhon.Schema.Definition/FieldType.cs`](../../src/Typhon.Schema.Definition/FieldType.cs)
+[`Typhon.Schema.Definition/FieldType.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Schema.Definition/FieldType.cs)
 
 The closed set of types Typhon understands for a component field. It's a `[Flags]` enum, but only two flag bits are mixed with the base values — `Unsigned` (256) and `DoubleFloat` (512) — so each combination still names exactly one storage kind.
 
@@ -52,7 +58,7 @@ Modifier bits keep the relationship explicit: `Double` *is* `DoubleFloat | Float
 
 ### `DBComponentDefinition` and `Field`
 
-[`Schema/public/DBComponentDefinition.cs`](../../src/Typhon.Engine/Schema/public/DBComponentDefinition.cs)
+[`Schema/public/DBComponentDefinition.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Schema/public/DBComponentDefinition.cs)
 
 The runtime descriptor for one revision of one component. Built by `DatabaseDefinitions.CreateFromAccessor<T>()` via reflection over the struct's public fields.
 
@@ -107,7 +113,7 @@ public class Field
 
 ### Attributes
 
-[`Typhon.Schema.Definition/Attributes.cs`](../../src/Typhon.Schema.Definition/Attributes.cs) — applied to the struct or its fields:
+[`Typhon.Schema.Definition/Attributes.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Schema.Definition/Attributes.cs) — applied to the struct or its fields:
 
 | Attribute | Target | Effect |
 |---|---|---|
@@ -122,7 +128,7 @@ public class Field
 
 ## 3. Schema persistence — the system components
 
-[`Ecs/public/DatabaseEngine.cs:17–137`](../../src/Typhon.Engine/Ecs/public/DatabaseEngine.cs)
+[`Ecs/public/DatabaseEngine.cs:17–137`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/DatabaseEngine.cs)
 
 Schemas are persisted as **system components** — ordinary `ComponentTable` entries managed by the engine itself. Four schemas are defined; the `R1` suffix means *revision 1 of the system schema* (the schema-of-the-schema). If the system schema ever needs to change in a non-backward-compatible way, an `R2` set will be added alongside.
 
@@ -225,7 +231,7 @@ On reopen, `LoadSystemSchemaR1` reads bootstrap, reconstructs the system tables 
 
 ### `SystemCrud` — the bare-bones helper
 
-[`Schema/internals/SystemCrud.cs`](../../src/Typhon.Engine/Schema/internals/SystemCrud.cs)
+[`Schema/internals/SystemCrud.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Schema/internals/SystemCrud.cs)
 
 System schema entries are written through a stripped-down CRUD helper: no MVCC, no WAL, no conflict detection, no revision tracking. The chunkId allocated by `ComponentSegment.AllocateChunk` *is* the stable identifier. Why so minimal? Schema mutations happen during bootstrap (under an exclusive registration lock) or during eager migration (the database isn't open for traffic yet) — none of the MVCC / WAL machinery applies. The full `ComponentTable` plumbing kicks in for user data only.
 
@@ -233,7 +239,7 @@ System schema entries are written through a stripped-down CRUD helper: no MVCC, 
 
 ## 4. Schema evolution
 
-[`Schema/internals/SchemaEvolutionEngine.cs`](../../src/Typhon.Engine/Schema/internals/SchemaEvolutionEngine.cs), [`SchemaValidator.cs`](../../src/Typhon.Engine/Schema/internals/SchemaValidator.cs)
+[`Schema/internals/SchemaEvolutionEngine.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Schema/internals/SchemaEvolutionEngine.cs), [`SchemaValidator.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Schema/internals/SchemaValidator.cs)
 
 When `RegisterComponentFromAccessor<T>()` runs against a DB that already has a `ComponentR1` for that name, the engine computes a `SchemaDiff` between persisted and runtime, classifies it, and acts.
 
@@ -268,7 +274,7 @@ For breaking changes, `MigrateWithFunction` runs the user's `MigrationChain` per
 
 ### `MigrationFailure` — per-entity diagnostic
 
-[`Errors/public/SchemaMigrationException.cs`](../../src/Typhon.Engine/Errors/public/SchemaMigrationException.cs)
+[`Errors/public/SchemaMigrationException.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Errors/public/SchemaMigrationException.cs)
 
 A breaking migration may have entities whose data the user function refuses (e.g., negative value where the new type is unsigned). Per-entity exceptions are caught and accumulated; old segments stay untouched if any failure occurs.
 
@@ -314,7 +320,7 @@ The two public entry points on `DatabaseEngine`:
 
 ### `RegisterComponentFromAccessor<T>()`
 
-[`Ecs/public/DatabaseEngine.cs:3527`](../../src/Typhon.Engine/Ecs/public/DatabaseEngine.cs)
+[`Ecs/public/DatabaseEngine.cs:3527`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/DatabaseEngine.cs)
 
 ```csharp
 public bool RegisterComponentFromAccessor<T>(
@@ -342,7 +348,7 @@ Returns `true` on first registration; `false` if the component was already regis
 
 ### `RegisterComponentByType(Type)`
 
-[`Ecs/public/DatabaseEngine.cs:3502`](../../src/Typhon.Engine/Ecs/public/DatabaseEngine.cs)
+[`Ecs/public/DatabaseEngine.cs:3502`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/DatabaseEngine.cs)
 
 The non-generic overload for runtime-discovered types — e.g. the Workbench loading a `*.schema.dll` into a collectible `AssemblyLoadContext`. Internally `MakeGenericMethod`s `RegisterComponentFromAccessor<T>` and unwraps `TargetInvocationException` via `ExceptionDispatchInfo` so `SchemaValidationException` / `SchemaDowngradeException` / `SchemaMigrationException` surface with their original stack traces, not wrapped.
 
@@ -368,7 +374,7 @@ Throws `ArgumentException` if `componentType` is a reference type or an open gen
 
 ### `SchemaDiff` shape
 
-[`Schema/public/SchemaDiff.cs`](../../src/Typhon.Engine/Schema/public/SchemaDiff.cs)
+[`Schema/public/SchemaDiff.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Schema/public/SchemaDiff.cs)
 
 ```csharp
 public class SchemaDiff
@@ -402,7 +408,7 @@ Format-revision compatibility is binary: a given engine build understands exactl
 
 ### Offline inspection — `DatabaseSchema.Inspect` & `ValidateEvolution`
 
-[`Schema/public/DatabaseSchema.cs`](../../src/Typhon.Engine/Schema/public/DatabaseSchema.cs)
+[`Schema/public/DatabaseSchema.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Schema/public/DatabaseSchema.cs)
 
 Two static utilities open a temporary engine read-only:
 

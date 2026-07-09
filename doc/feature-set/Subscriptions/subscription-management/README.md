@@ -1,3 +1,9 @@
+---
+uid: feature-subscriptions-subscription-management-index
+title: 'Subscription Management (SetSubscriptions)'
+description: 'Atomic, idempotent, diff-based API to set a client''s full subscription list each tick.'
+---
+
 # Subscription Management (SetSubscriptions)
 > Atomic, idempotent, diff-based API to set a client's full subscription list each tick.
 
@@ -40,7 +46,7 @@ client never observes an intermediate state. Today, the full list is always supp
 
 ## 🧪 Tests
 
-- [SubscriptionTransitionTests](../../../../test/Typhon.Engine.Tests/Runtime/Subscriptions/SubscriptionTransitionTests.cs)
+- [SubscriptionTransitionTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/SubscriptionTransitionTests.cs)
   — `ComputeTransition` diff logic: empty→new, all→empty, partial overlap, identical-set no-op, and the
   `Subscribed` event's `ViewName`
 

@@ -1,3 +1,9 @@
+---
+uid: feature-querying-index
+title: 'Querying'
+description: 'The query and view engine: a single archetype-rooted fluent API (tx.Query()) parses C# lambda predicates — indexed-field, opaque, OR-disjunctive, spatial,…'
+---
+
 # Querying
 > The query and view engine: a single archetype-rooted fluent API (`tx.Query<T>()`) parses C# lambda predicates — indexed-field, opaque, OR-disjunctive, spatial, or FK-join — into selectivity-driven execution plans run through a batched streaming pipeline. Persistent Views cache a query's matching entity set and refresh it in microseconds via lock-free commit-time change capture instead of full re-query; point-in-time history and parameterized view pooling are still on the roadmap.
 

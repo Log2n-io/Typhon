@@ -1,3 +1,9 @@
+---
+uid: feature-transactions-transaction-creation-patterns-transaction-creation-quick
+title: 'CreateQuickTransaction (single-shot, auto-dispose)'
+description: 'One call gives you a UnitOfWork and a Transaction fused into a single disposable.'
+---
+
 # CreateQuickTransaction (single-shot, auto-dispose)
 > One call gives you a `UnitOfWork` and a `Transaction` fused into a single disposable.
 
@@ -64,7 +70,7 @@ using (var tx2 = dbe.CreateQuickTransaction())
 
 ## 🧪 Tests
 
-- [UnitOfWorkTests](../../../../test/Typhon.Engine.Tests/Execution/UnitOfWorkTests.cs) —
+- [UnitOfWorkTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Execution/UnitOfWorkTests.cs) —
   `QuickTx_CommitThenDispose_CleanLifecycle` (fused UoW+tx dispose ordering), `QuickTx_DisposesUoW`,
   `QuickTx_DurabilityMode_Passthrough` (mode flows through to the hidden `UnitOfWork`)
 

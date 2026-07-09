@@ -4,7 +4,7 @@ using System;
 namespace Typhon.Engine;
 
 /// <summary>
-/// Thrown by <c>DatabaseEngine.BeginBulkLoad</c> when a bulk session is already open. BulkLoad is exclusive in v1 — only one session at a time per engine.
+/// Thrown by <see cref="DatabaseEngine.BeginBulkLoad"/> when a bulk session is already open. BulkLoad is exclusive in v1 — only one session per engine.
 /// Regular <see cref="UnitOfWork"/>s continue to run.
 /// </summary>
 [PublicAPI]

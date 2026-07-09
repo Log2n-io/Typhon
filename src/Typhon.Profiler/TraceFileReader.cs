@@ -10,8 +10,9 @@ using System.Text;
 namespace Typhon.Profiler;
 
 /// <summary>
-/// Reads a <c>.typhon-trace</c> binary trace file (format v3 — variable-size typed records). Provides sequential block-by-block access,
-/// yielding a raw byte span that the caller walks as a sequence of size-prefixed records.
+/// Reads a <c>.typhon-trace</c> binary trace file — the variable-size typed-record layout (see <see cref="TraceFileHeader.CurrentVersion"/> for the
+/// current format version; <see cref="MinSupportedVersion"/> is the oldest still accepted). Provides sequential block-by-block access, yielding a raw
+/// byte span that the caller walks as a sequence of size-prefixed records.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -70,6 +71,13 @@ public sealed class TraceFileReader : IDisposable
     public IReadOnlyDictionary<int, string> SpanNames => _spanNames;
     private readonly Dictionary<int, string> _spanNames = new();
 
+    /// <summary>
+    /// Wraps <paramref name="stream"/> for reading a <c>.typhon-trace</c> file. Call <see cref="ReadHeader"/> and the metadata-table readers, then
+    /// iterate <see cref="ReadNextBlock"/> — see the type remarks for the full sequence. The reader takes ownership and disposes the stream in
+    /// <see cref="Dispose"/>.
+    /// </summary>
+    /// <param name="stream">Input stream positioned at the start of a <c>.typhon-trace</c> file.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="stream"/> is <c>null</c>.</exception>
     public TraceFileReader(Stream stream)
     {
         _stream = stream ?? throw new ArgumentNullException(nameof(stream));
@@ -672,6 +680,7 @@ public sealed class TraceFileReader : IDisposable
         return _spanNames;
     }
 
+    /// <summary>Disposes the reader, returns any pooled block buffer to <see cref="ArrayPool{T}"/>, and closes the underlying stream. Idempotent.</summary>
     public void Dispose()
     {
         if (_disposed)

@@ -1,3 +1,9 @@
+---
+uid: feature-errors-runtime-access-validation
+title: 'Runtime/Scheduler Declared-Access Validation'
+description: 'DEBUG-only InvalidAccessException when a system writes a component it never declared.'
+---
+
 # Runtime/Scheduler Declared-Access Validation
 > DEBUG-only `InvalidAccessException` when a system writes a component it never declared.
 
@@ -75,7 +81,7 @@ catch (InvalidAccessException ex)
 
 ## 🧪 Tests
 
-- [SystemAccessValidatorTests](../../../test/Typhon.Engine.Tests/Runtime/SystemAccessValidatorTests.cs) — an undeclared write throws `InvalidAccessException` (`SystemName`/`UndeclaredType`); a no-declarations system passes silently (migration-window exemption); a declared write passes.
+- [SystemAccessValidatorTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/SystemAccessValidatorTests.cs) — an undeclared write throws `InvalidAccessException` (`SystemName`/`UndeclaredType`); a no-declarations system passes silently (migration-window exemption); a declared write passes.
 
 ## 🔗 Related
 

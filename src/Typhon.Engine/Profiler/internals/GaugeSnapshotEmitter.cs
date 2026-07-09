@@ -50,7 +50,7 @@ internal static class GaugeSnapshotEmitter
     /// <param name="uowRegistry">Optional — if provided, emits <c>UowRegistryActiveCount</c> + <c>UowRegistryVoidCount</c>.</param>
     /// <param name="walManager">
     /// Optional — if provided and WAL is enabled, emits the <see cref="WalCommitBuffer"/> occupancy gauges plus
-    /// <see cref="GaugeId.WalCommitBufferCapacity"/> (first-call only). Pass <c>null</c> when WAL is disabled or the caller
+    /// <see cref="GaugeId.WalCommitBufferCapacityBytes"/> (first-call only). Pass <c>null</c> when WAL is disabled or the caller
     /// doesn't want WAL gauges in this snapshot.
     /// </param>
     /// <param name="stagingBufferPool">

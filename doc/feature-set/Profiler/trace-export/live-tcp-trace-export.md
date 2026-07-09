@@ -1,3 +1,9 @@
+---
+uid: feature-profiler-trace-export-live-tcp-trace-export
+title: 'Live TCP Streaming Export'
+description: 'Stream a running session over TCP so the Workbench can watch a process tick-by-tick, right now.'
+---
+
 # Live TCP Streaming Export
 > Stream a running session over TCP so the Workbench can watch a process tick-by-tick, right now.
 
@@ -60,11 +66,11 @@ var runtime = TyphonRuntime.Create(dbe, schedule =>
 
 ## 🧪 Tests
 
-- [TcpExporterIntegrationTests](../../../../test/Typhon.Engine.Tests/Profiler/TcpExporterIntegrationTests.cs) — Init/Block frame round-trip over a loopback socket, plus `LiveWaitMs`/live-connect-timeout blocking-vs-non-blocking connect behavior
+- [TcpExporterIntegrationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Profiler/TcpExporterIntegrationTests.cs) — Init/Block frame round-trip over a loopback socket, plus `LiveWaitMs`/live-connect-timeout blocking-vs-non-blocking connect behavior
 
 ## 🔗 Related
 
-- Source: [`src/Typhon.Engine/Profiler/internals/TcpExporter.cs`](../../../../src/Typhon.Engine/Profiler/internals/TcpExporter.cs)
+- Source: [`src/Typhon.Engine/Profiler/internals/TcpExporter.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Profiler/internals/TcpExporter.cs)
 - Parent feature: [Trace Export](./README.md)
 - Sibling: [File-Based Trace Export (.typhon-trace)](./file-trace-export.md) — the other trace-export sink; both can attach to the same session at once
 

@@ -1,3 +1,9 @@
+---
+uid: feature-runtime-typed-event-queues
+title: 'Typed Event Queues'
+description: 'Lock-free single-producer→single-consumer ring buffers for signalling between systems within a tick.'
+---
+
 # Typed Event Queues
 > Lock-free single-producer→single-consumer ring buffers for signalling between systems within a tick.
 
@@ -103,8 +109,8 @@ public class LootDropSystem : QuerySystem
 
 ## 🧪 Tests
 
-- [EventQueueTests](../../../test/Typhon.Engine.Tests/Runtime/EventQueueTests.cs) — push/drain round-trip, push-past-capacity throws, power-of-2 capacity, reference-type slot clearing on drain/reset
-- [EventQueueIntegrationTests](../../../test/Typhon.Engine.Tests/Runtime/EventQueueIntegrationTests.cs) — producer→consumer handoff across a DAG edge, `ctx.ConsumedQueues` wiring, reactive skip when empty
+- [EventQueueTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/EventQueueTests.cs) — push/drain round-trip, push-past-capacity throws, power-of-2 capacity, reference-type slot clearing on drain/reset
+- [EventQueueIntegrationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/EventQueueIntegrationTests.cs) — producer→consumer handoff across a DAG edge, `ctx.ConsumedQueues` wiring, reactive skip when empty
 
 ## 🔗 Related
 

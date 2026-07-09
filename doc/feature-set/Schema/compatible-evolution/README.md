@@ -1,3 +1,9 @@
+---
+uid: feature-schema-compatible-evolution-index
+title: 'Compatible Schema Evolution (Auto-Migration)'
+description: 'Reopen with an added, removed, reordered, or safely-widened field and Typhon migrates every entity automatically — no migration code, no index rebuild.'
+---
+
 # Compatible Schema Evolution (Auto-Migration)
 > Reopen with an added, removed, reordered, or safely-widened field and Typhon migrates every entity automatically — no migration code, no index rebuild.
 
@@ -84,7 +90,7 @@ using (var dbe = host.Services.GetRequiredService<DatabaseEngine>())
 
 ## 🧪 Tests
 
-- [SchemaEvolutionTests](../../../../test/Typhon.Engine.Tests/Data/Schema/SchemaEvolutionTests.cs) — add/remove/reorder/widen (int→long, float→double, sign extension) individually and combined, surviving indexes, multi-entity and bulk (10K) migration
+- [SchemaEvolutionTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/Schema/SchemaEvolutionTests.cs) — add/remove/reorder/widen (int→long, float→double, sign extension) individually and combined, surviving indexes, multi-entity and bulk (10K) migration
 
 ## 🔗 Related
 

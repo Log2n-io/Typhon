@@ -333,7 +333,7 @@ internal abstract partial class BTree<TKey, TStore>
 
     /// <summary>
     /// Enumerates an AllowMultiple BTree in key order, expanding each key's VSBS buffer to yield <see cref="ReadOnlySpan{Int32}"/>
-    /// chunks of values. Wraps <see cref="RangeEnumerator"/> for leaf traversal and <see cref="VariableSizedBufferAccessor{T}"/>
+    /// chunks of values. Wraps <see cref="RangeEnumerator"/> for leaf traversal and <see cref="VariableSizedBufferAccessor{T,TStore}"/>
     /// for per-key buffer expansion.
     /// </summary>
     /// <remarks>

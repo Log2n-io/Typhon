@@ -1,3 +1,9 @@
+---
+uid: feature-indexing-temporal-index-query
+title: 'Temporal (Point-in-Time) Index Query'
+description: 'Reconstructs which entities held a key''s value at a past TSN by replaying the index''s append-only version history.'
+---
+
 # Temporal (Point-in-Time) Index Query
 > Reconstructs which entities held a key's value at a past TSN by replaying the index's append-only version history.
 
@@ -61,7 +67,7 @@ List<int> chainIdsActiveAtTsn = TemporalIndexQuery.Query(
 
 ## 🧪 Tests
 
-- [VersionedIndexTests](../../../test/Typhon.Engine.Tests/Data/VersionedIndexTests.cs) — Phase 3 `Temporal Query Tests` region: `TemporalQuery_NoMutation_FallsBackToHead`, `TemporalQuery_AtCreate_ReturnsEntity`, `TemporalQuery_OldKey_AfterUpdate_SingleEntity_StillVisible`/`_MultiEntity_CorrectCount`, `TemporalQuery_AfterBackfill_ReturnsCorrectSnapshot`
+- [VersionedIndexTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/VersionedIndexTests.cs) — Phase 3 `Temporal Query Tests` region: `TemporalQuery_NoMutation_FallsBackToHead`, `TemporalQuery_AtCreate_ReturnsEntity`, `TemporalQuery_OldKey_AfterUpdate_SingleEntity_StillVisible`/`_MultiEntity_CorrectCount`, `TemporalQuery_AfterBackfill_ReturnsCorrectSnapshot`
 
 ## 🔗 Related
 

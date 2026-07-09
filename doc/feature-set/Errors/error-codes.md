@@ -1,3 +1,9 @@
+---
+uid: feature-errors-error-codes
+title: 'Error Code Classification'
+description: 'A numeric TyphonErrorCode per failure, grouped into subsystem ranges, for logging and metrics — not for catching.'
+---
+
 # Error Code Classification
 > A numeric `TyphonErrorCode` per failure, grouped into subsystem ranges, for logging and metrics — not for catching.
 
@@ -51,7 +57,7 @@ catch (TyphonException ex)
 
 ## 🧪 Tests
 
-- [TyphonExceptionTests](../../../test/Typhon.Engine.Tests/Errors/TyphonExceptionTests.cs) — `ErrorCodeUniqueness_NoDuplicateValues` guards the whole `TyphonErrorCode` enum against colliding numeric values; per-type `ErrorCode` assignment is asserted alongside each exception's other properties (e.g. `LockTimeoutException_Properties`, `CorruptionException_Properties`).
+- [TyphonExceptionTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Errors/TyphonExceptionTests.cs) — `ErrorCodeUniqueness_NoDuplicateValues` guards the whole `TyphonErrorCode` enum against colliding numeric values; per-type `ErrorCode` assignment is asserted alongside each exception's other properties (e.g. `LockTimeoutException_Properties`, `CorruptionException_Properties`).
 
 ## 🔗 Related
 

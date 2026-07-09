@@ -19,15 +19,20 @@ public struct EntityRecordHeader
 {
     // BornTSN: 48-bit transaction sequence number when entity was created+committed
     // 0 = genesis entity (always visible)
+    /// <summary>Upper 32 bits of the 48-bit BornTSN; combine with <see cref="BornTsnLow"/> via <see cref="BornTSN"/>.</summary>
     public uint BornTsnHigh;
+    /// <summary>Lower 16 bits of the 48-bit BornTSN; combine with <see cref="BornTsnHigh"/> via <see cref="BornTSN"/>.</summary>
     public ushort BornTsnLow;
 
     // DiedTSN: 48-bit transaction sequence number when entity was destroyed+committed
     // 0 = alive
+    /// <summary>Upper 32 bits of the 48-bit DiedTSN; combine with <see cref="DiedTsnLow"/> via <see cref="DiedTSN"/>. 0 = alive.</summary>
     public uint DiedTsnHigh;
+    /// <summary>Lower 16 bits of the 48-bit DiedTSN; combine with <see cref="DiedTsnHigh"/> via <see cref="DiedTSN"/>. 0 = alive.</summary>
     public ushort DiedTsnLow;
 
     // Per-component enable mask: bit N set = component slot N is enabled
+    /// <summary>Per-component enable mask: bit N set means component slot N is enabled.</summary>
     public ushort EnabledBits;
 
     /// <summary>48-bit BornTSN packed as upper 32 + lower 16.</summary>

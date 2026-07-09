@@ -99,10 +99,18 @@ public struct PooledEntityList : IReadOnlyCollection<EntityId>
             _index = -1;
         }
 
+        /// <summary>The entity at the current position.</summary>
         public EntityId Current => _array[_index];
         object IEnumerator.Current => Current;
+
+        /// <summary>Advances to the next entity.</summary>
+        /// <returns><c>true</c> if another entity is available; <c>false</c> once the segment is exhausted.</returns>
         public bool MoveNext() => ++_index < _count;
+
+        /// <summary>Resets the enumerator to before the first entity.</summary>
         public void Reset() => _index = -1;
+
+        /// <summary>No-op — the enumerator holds no resources to release.</summary>
         public void Dispose() { }
     }
 }

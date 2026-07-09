@@ -1,3 +1,9 @@
+---
+uid: feature-querying-persistent-views
+title: 'Persistent Views — Incremental Refresh & Delta Tracking'
+description: 'A live, indexed query result set that updates itself in microseconds instead of being re-run every tick.'
+---
+
 # Persistent Views — Incremental Refresh & Delta Tracking
 > A live, indexed query result set that updates itself in microseconds instead of being re-run every tick.
 
@@ -65,12 +71,12 @@ while (running)
 
 ## 🧪 Tests
 
-- [EcsIncrementalViewTests](../../../test/Typhon.Engine.Tests/Data/ECS/EcsIncrementalViewTests.cs) — incremental refresh (field crosses in/out), `GetDelta` Added/Removed/Modified, `CompactDelta` net-change collapsing, overflow recovery via full re-query, Pull-mode fallback
-- [EcsOrViewTests](../../../test/Typhon.Engine.Tests/Data/ECS/EcsOrViewTests.cs) — OR mode per-entity branch bitmap, entity stays in view while any branch matches
-- [EcsViewTests](../../../test/Typhon.Engine.Tests/Data/ECS/EcsViewTests.cs) — base `ToView`/`Refresh` mechanics, `Contains`, delta clearing, dispose semantics
-- [ViewChangeCaptureTests](../../../test/Typhon.Engine.Tests/Data/Query/ViewChangeCaptureTests.cs) — commit-time ring-buffer delta entries (before/after keys, multi-field changes, disposed-view skip)
-- [ViewRegistryTests](../../../test/Typhon.Engine.Tests/Data/Query/ViewRegistryTests.cs) — view registration/deregistration bookkeeping behind commit-time change notification
-- [EcsViewMultiFieldTests](../../../test/Typhon.Engine.Tests/Data/ECS/EcsViewMultiFieldTests.cs) — two ANDed `WhereField` predicates on one view: per-field crossing only re-evaluates that predicate
+- [EcsIncrementalViewTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/EcsIncrementalViewTests.cs) — incremental refresh (field crosses in/out), `GetDelta` Added/Removed/Modified, `CompactDelta` net-change collapsing, overflow recovery via full re-query, Pull-mode fallback
+- [EcsOrViewTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/EcsOrViewTests.cs) — OR mode per-entity branch bitmap, entity stays in view while any branch matches
+- [EcsViewTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/EcsViewTests.cs) — base `ToView`/`Refresh` mechanics, `Contains`, delta clearing, dispose semantics
+- [ViewChangeCaptureTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/Query/ViewChangeCaptureTests.cs) — commit-time ring-buffer delta entries (before/after keys, multi-field changes, disposed-view skip)
+- [ViewRegistryTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/Query/ViewRegistryTests.cs) — view registration/deregistration bookkeeping behind commit-time change notification
+- [EcsViewMultiFieldTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/EcsViewMultiFieldTests.cs) — two ANDed `WhereField` predicates on one view: per-field crossing only re-evaluates that predicate
 
 ## 🔗 Related
 

@@ -1,3 +1,9 @@
+---
+uid: feature-spatial-spatial-interest-management
+title: 'Interest Management (Delta Spatial Queries)'
+description: 'Per-observer "what changed near me since tick T" queries in O(dirty × observers), not O(everything in view × observers).'
+---
+
 # Interest Management (Delta Spatial Queries)
 > Per-observer "what changed near me since tick T" queries in O(dirty × observers), not O(everything in view × observers).
 
@@ -59,14 +65,14 @@ interest.UnregisterObserver(observer);
 
 ## 🧪 Tests
 
-- [SpatialInterestTests](../../../test/Typhon.Engine.Tests/Data/SpatialIndex/SpatialInterestTests.cs) — observer lifecycle + generation-checked handle reuse, `UpdateObserverBounds`, dirty-entity delta reporting in/out of region
+- [SpatialInterestTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/SpatialIndex/SpatialInterestTests.cs) — observer lifecycle + generation-checked handle reuse, `UpdateObserverBounds`, dirty-entity delta reporting in/out of region
 
 ## 🔗 Related
 
-- Source: [src/Typhon.Engine/Spatial/internals/SpatialInterestSystem.cs](../../../src/Typhon.Engine/Spatial/internals/SpatialInterestSystem.cs) (observer registry, inverted dirty-set delta query, full-sync fallback)
-- Source: [src/Typhon.Engine/Spatial/public/SpatialObserverHandle.cs](../../../src/Typhon.Engine/Spatial/public/SpatialObserverHandle.cs) (public handle type)
-- Source: [src/Typhon.Engine/Spatial/public/SpatialChangeResult.cs](../../../src/Typhon.Engine/Spatial/public/SpatialChangeResult.cs) (public result type)
-- Source: [src/Typhon.Engine/Ecs/internals/DirtyBitmapRing.cs](../../../src/Typhon.Engine/Ecs/internals/DirtyBitmapRing.cs) (64-tick archival ring, multi-tick OR accumulation)
+- Source: [src/Typhon.Engine/Spatial/internals/SpatialInterestSystem.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/SpatialInterestSystem.cs) (observer registry, inverted dirty-set delta query, full-sync fallback)
+- Source: [src/Typhon.Engine/Spatial/public/SpatialObserverHandle.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/public/SpatialObserverHandle.cs) (public handle type)
+- Source: [src/Typhon.Engine/Spatial/public/SpatialChangeResult.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/public/SpatialChangeResult.cs) (public result type)
+- Source: [src/Typhon.Engine/Ecs/internals/DirtyBitmapRing.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/internals/DirtyBitmapRing.cs) (64-tick archival ring, multi-tick OR accumulation)
 - Related catalog entry: [Category Filtering](./spatial-category-filtering.md) (the AND-conjunctive mask semantics this feature reuses)
 
 <!-- Deep dive: claude/design/Spatial/SpatialIndex/08-game-features.md (Feature F4 — Interest Management: inverted dirty-set rationale, ring buffer design, Tier 1/Tier 2 split) -->

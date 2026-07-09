@@ -16,26 +16,67 @@ namespace Typhon.Profiler;
 /// <summary>Decoded form of a <see cref="TraceEventKind.QueryDefinitionDescribe"/> record.</summary>
 public readonly struct QueryDefinitionDescribeData
 {
+    /// <summary>Typhon thread slot the definition was emitted on.</summary>
     public byte ThreadSlot { get; }
+
+    /// <summary>Emit timestamp, in Stopwatch ticks.</summary>
     public long Timestamp { get; }
+
+    /// <summary>Definition kind: 0 = View, 1 = EcsQuery.</summary>
     public byte Kind { get; }                       // 0 = View, 1 = EcsQuery
+
+    /// <summary>Local identifier — a ViewId or EcsQueryId depending on <see cref="Kind"/>.</summary>
     public uint LocalId { get; }                    // ViewId or EcsQueryId
+
+    /// <summary>Component type id the query targets.</summary>
     public ushort TargetComponentType { get; }
+
+    /// <summary>Field index used for the primary index scan, or <c>-1</c> when there is no index scan.</summary>
     public short PrimaryIndexFieldIdx { get; }      // -1 = no index scan
+
+    /// <summary>Field index the results are sorted on, or <c>-1</c> when unsorted.</summary>
     public short SortFieldIdx { get; }              // -1 = unsorted
+
+    /// <summary>Sort direction: non-zero for descending, 0 for ascending.</summary>
     public byte SortDescending { get; }
+
+    /// <summary>Interned file id of the query's definition site (indexes the trace's <c>FileTable</c>).</summary>
     public ushort DefinitionSourceFileId { get; }
+
+    /// <summary>Source line of the query's definition site.</summary>
     public int DefinitionSourceLine { get; }
+
+    /// <summary>Interned method id of the query's definition site.</summary>
     public ushort DefinitionSourceMethodId { get; }
 
     /// <summary>Per-evaluator shape: 4 bytes each (FieldIdx u16, Op u8, Reserved u8). Total bytes = <c>EvaluatorCount * 4</c>.</summary>
     public ReadOnlyMemory<byte> EvaluatorBlob { get; }
+
+    /// <summary>Number of evaluator entries packed in <see cref="EvaluatorBlob"/>.</summary>
     public ushort EvaluatorCount { get; }
 
     /// <summary>Per-field-dep: 2 bytes each (u16). Total bytes = <c>FieldDependencyCount * 2</c>.</summary>
     public ReadOnlyMemory<byte> FieldDependenciesBlob { get; }
+
+    /// <summary>Number of field-dependency entries packed in <see cref="FieldDependenciesBlob"/>.</summary>
     public ushort FieldDependencyCount { get; }
 
+    /// <summary>Construct a decoded query-definition descriptor.</summary>
+    /// <param name="threadSlot">Typhon thread slot.</param>
+    /// <param name="timestamp">Emit timestamp, in Stopwatch ticks.</param>
+    /// <param name="kind">0 = View, 1 = EcsQuery.</param>
+    /// <param name="localId">ViewId or EcsQueryId, per <paramref name="kind"/>.</param>
+    /// <param name="targetComponentType">Component type id the query targets.</param>
+    /// <param name="primaryIndexFieldIdx">Primary index-scan field index, or <c>-1</c>.</param>
+    /// <param name="sortFieldIdx">Sort field index, or <c>-1</c>.</param>
+    /// <param name="sortDescending">Non-zero for descending sort.</param>
+    /// <param name="definitionSourceFileId">Interned file id of the definition site.</param>
+    /// <param name="definitionSourceLine">Source line of the definition site.</param>
+    /// <param name="definitionSourceMethodId">Interned method id of the definition site.</param>
+    /// <param name="evaluatorCount">Number of evaluator entries in <paramref name="evaluatorBlob"/>.</param>
+    /// <param name="evaluatorBlob">Packed evaluator entries (4 bytes each).</param>
+    /// <param name="fieldDependencyCount">Number of field-dependency entries in <paramref name="fieldDependenciesBlob"/>.</param>
+    /// <param name="fieldDependenciesBlob">Packed field-dependency entries (2 bytes each).</param>
     public QueryDefinitionDescribeData(byte threadSlot, long timestamp, byte kind, uint localId, ushort targetComponentType, short primaryIndexFieldIdx,
         short sortFieldIdx, byte sortDescending, ushort definitionSourceFileId, int definitionSourceLine, ushort definitionSourceMethodId,
         ushort evaluatorCount, ReadOnlyMemory<byte> evaluatorBlob, ushort fieldDependencyCount, ReadOnlyMemory<byte> fieldDependenciesBlob)
@@ -197,12 +238,23 @@ public static class QueryDefinitionDescribeEventCodec
 /// <summary>Decoded form of a <see cref="TraceEventKind.QueryArgs"/> record.</summary>
 public readonly struct QueryArgsData
 {
+    /// <summary>Typhon thread slot the args were emitted on.</summary>
     public byte ThreadSlot { get; }
+
+    /// <summary>Emit timestamp, in Stopwatch ticks.</summary>
     public long Timestamp { get; }
+
+    /// <summary>Number of threshold constants packed in <see cref="ThresholdsBlob"/>.</summary>
     public ushort EvaluatorCount { get; }
+
     /// <summary>Packed array of i64 widened threshold constants — <c>EvaluatorCount * 8</c> bytes.</summary>
     public ReadOnlyMemory<byte> ThresholdsBlob { get; }
 
+    /// <summary>Construct decoded per-execution query args.</summary>
+    /// <param name="threadSlot">Typhon thread slot.</param>
+    /// <param name="timestamp">Emit timestamp, in Stopwatch ticks.</param>
+    /// <param name="evaluatorCount">Number of thresholds in <paramref name="thresholdsBlob"/>.</param>
+    /// <param name="thresholdsBlob">Packed i64 threshold constants (8 bytes each).</param>
     public QueryArgsData(byte threadSlot, long timestamp, ushort evaluatorCount, ReadOnlyMemory<byte> thresholdsBlob)
     {
         ThreadSlot = threadSlot;
@@ -229,9 +281,13 @@ public readonly struct QueryArgsData
 /// </remarks>
 public static class QueryArgsEventCodec
 {
+    /// <summary>Fixed-prefix size: 12 B common header + 2 B EvaluatorCount = 14 B.</summary>
     public const int FixedPrefixSize = TraceRecordHeader.CommonHeaderSize + 2;
+
+    /// <summary>Bytes per threshold entry (i64).</summary>
     public const int ThresholdSize = 8;
 
+    /// <summary>Compute the exact on-wire size for the given number of threshold entries.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static int ComputeSize(int evaluatorCount) => FixedPrefixSize + evaluatorCount * ThresholdSize;
 

@@ -1,3 +1,9 @@
+---
+uid: feature-profiler-cpu-sampling-calltree
+title: 'Integrated CPU Sampling (Statistical Call Tree)'
+description: 'See exactly where CPU cycles burn, down to the method and source line, with no external profiler.'
+---
+
 # Integrated CPU Sampling (Statistical Call Tree)
 > See exactly where CPU cycles burn, down to the method and source line, with no external profiler.
 
@@ -77,9 +83,9 @@ TyphonProfiler.Stop();   // session stops, stream is parsed off-thread, samples 
   session is running; it is deleted once parsed, never a trace-adjacent deliverable.
 
 ## 🧪 Tests
-- [CpuSamplerSessionTests](../../../test/Typhon.Engine.Tests/Profiler/CpuSamplerSessionTests.cs) — session lifecycle idempotency, QPC anchor, graceful-degrade when EventPipe diagnostics are unavailable
-- [CpuSampleParserTests](../../../test/Typhon.Engine.Tests/Profiler/CpuSampleParserTests.cs) — `.nettrace` parse + symbol resolution driven against a real in-process capture of a CPU-burning workload
-- [CpuSampleSectionRoundTripTests](../../../test/Typhon.Engine.Tests/Profiler/CpuSampleSectionRoundTripTests.cs) — CPU-sample trailer section write/read, absent-section case, and hard rejection of pre-v11 traces
+- [CpuSamplerSessionTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Profiler/CpuSamplerSessionTests.cs) — session lifecycle idempotency, QPC anchor, graceful-degrade when EventPipe diagnostics are unavailable
+- [CpuSampleParserTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Profiler/CpuSampleParserTests.cs) — `.nettrace` parse + symbol resolution driven against a real in-process capture of a CPU-burning workload
+- [CpuSampleSectionRoundTripTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Profiler/CpuSampleSectionRoundTripTests.cs) — CPU-sample trailer section write/read, absent-section case, and hard rejection of pre-v11 traces
 
 ## 🔗 Related
 - Sibling features: [Configuration & Performance Tuning](./profiler-configuration-tuning.md), [Profiler Session Lifecycle & Zero-Code Bootstrap](./profiler-lifecycle-bootstrap.md), [GC Event Tracing](./gc-event-tracing.md)

@@ -1,3 +1,9 @@
+---
+uid: feature-spatial-spatial-field-attribute-spatial-storage-mode-compat
+title: 'Storage-Mode Compatibility (SingleVersion / Versioned)'
+description: 'The same [SpatialIndex] field works on SingleVersion and Versioned components — only when the tree catches up differs.'
+---
+
 # Storage-Mode Compatibility (SingleVersion / Versioned)
 > The same `[SpatialIndex]` field works on SingleVersion and Versioned components — only *when* the tree catches up differs.
 
@@ -85,11 +91,11 @@ using (var tx = dbe.CreateQuickTransaction())
 
 ## 🧪 Tests
 
-- [SpatialEcsIntegrationTests](../../../../test/Typhon.Engine.Tests/Data/SpatialIndex/SpatialEcsIntegrationTests.cs) — `SingleVersion` tick-fence-batched update timing (`SpatialQuery_CountAndAny_RespectSpatialPredicate` via `WriteTickFence`), schema registration on both `SingleVersion` and `Versioned` spatial components
+- [SpatialEcsIntegrationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/SpatialIndex/SpatialEcsIntegrationTests.cs) — `SingleVersion` tick-fence-batched update timing (`SpatialQuery_CountAndAny_RespectSpatialPredicate` via `WriteTickFence`), schema registration on both `SingleVersion` and `Versioned` spatial components
 
 ## 🔗 Related
 
-- Source: [src/Typhon.Engine/Spatial/internals/SpatialMaintainer.cs](../../../../src/Typhon.Engine/Spatial/internals/SpatialMaintainer.cs)
+- Source: [src/Typhon.Engine/Spatial/internals/SpatialMaintainer.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/SpatialMaintainer.cs)
 - Parent feature: [Field Attribute & Schema Integration](./README.md)
 - Sibling: [Storage Modes](../../Ecs/storage-modes/README.md) — the `SingleVersion`/`Versioned`/`Transient` disciplines this compatibility table is defined against
 

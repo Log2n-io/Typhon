@@ -7,24 +7,43 @@ using System.Threading;
 
 namespace Typhon.Engine;
 
+/// <summary>
+/// Configuration for a <see cref="PagedMMF"/> / <see cref="ManagedPagedMMF"/> store: which database (name + directory), how large the page cache is, and a
+/// couple of diagnostics. A Typhon database is a single on-disk bundle directory (<see cref="BundleDirectory"/>); these options locate and size it.
+/// </summary>
 [PublicAPI]
 public class PagedMMFOptions
 {
+    /// <summary>Maximum length, in UTF-8 bytes, allowed for <see cref="DatabaseName"/> and <see cref="DatabaseFileName"/>.</summary>
     public const int DatabaseNameMaxUtf8Size = 63;
-    
+
     private string _databaseFileName;
+    /// <summary>
+    /// The database name — also the stem of the bundle directory (<see cref="BundleDirectory"/>). Must match <c>^[A-Za-z0-9_-]+$</c> and fit within
+    /// <see cref="DatabaseNameMaxUtf8Size"/> UTF-8 bytes. Default: <c>TyphonDB</c>.
+    /// </summary>
     public string DatabaseName { get; set; } = "TyphonDB";
+    /// <summary>The absolute form of <see cref="DatabaseDirectory"/>.</summary>
     public string DatabaseAbsoluteDirectory
     {
         get => Path.GetFullPath(DatabaseDirectory);
     }
+    /// <summary>Directory that contains the database bundle. Default: the current working directory.</summary>
     public string DatabaseDirectory { get; set; } = Environment.CurrentDirectory;
+    /// <summary>
+    /// Configured database file-name prefix; falls back to <see cref="DatabaseName"/> when unset. Subject to the same character and length rules.
+    /// </summary>
     public string DatabaseFileName
     {
         get => _databaseFileName ?? DatabaseName;
         set => _databaseFileName = value;
     }
+    /// <summary>
+    /// Page-cache size, in bytes. Must be a multiple of the page size, at least the engine minimum, and at most 4 GiB. Default:
+    /// <see cref="PagedMMF.DefaultMemPageCount"/> × <see cref="PagedMMF.PageSize"/>.
+    /// </summary>
     public ulong DatabaseCacheSize { get; set; } = PagedMMF.DefaultMemPageCount * PagedMMF.PageSize;
+    /// <summary>When <c>true</c>, fills newly-allocated pages with a recognizable debug pattern (development/testing). Default <c>false</c>.</summary>
     public bool PagesDebugPattern { get; set; }
 
     /// <summary>
@@ -81,6 +100,7 @@ public class PagedMMFOptions
         }
     }
     
+    /// <summary>Whether the current configuration passes validation (name, directory, and cache-size rules). <c>true</c> when every rule holds.</summary>
     public bool IsValid => Validate(true, out _);
     internal bool Validate(bool silent, out string validation)
     {

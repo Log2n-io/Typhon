@@ -1,3 +1,9 @@
+---
+uid: feature-revision-revision-gc-compaction
+title: 'Revision Garbage Collection & Compaction'
+description: 'Automatic, bounded-memory reclamation of old MVCC revisions once no active transaction can see them.'
+---
+
 # Revision Garbage Collection & Compaction
 > Automatic, bounded-memory reclamation of old MVCC revisions once no active transaction can see them.
 
@@ -84,17 +90,17 @@ Console.WriteLine($"pending={props["DeferredCleanup.QueueSize"]} processed={prop
 
 ## 🧪 Tests
 
-- [DeferredCleanupTests](../../../test/Typhon.Engine.Tests/Data/DeferredCleanupTests.cs) — tail-blocked cleanup on commit/dispose/rollback, queue dedup and TSN-bucket migration, partial-queue processing with sentinel preservation, matches the doc's own Usage sample almost line for line
-- [ChaosStressTests](../../../test/Typhon.Engine.Tests/Data/ChaosStressTests.cs) — `RevisionChainDepth_DeepChainWithCleanup` (500+ revisions reclaimed as staggered readers release oldest-first), `SentinelRevision_StaggeredReaderRelease` (reverse-order release stresses the sentinel boundary when `nextMinTSN` doesn't match the first kept entry's TSN)
+- [DeferredCleanupTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/DeferredCleanupTests.cs) — tail-blocked cleanup on commit/dispose/rollback, queue dedup and TSN-bucket migration, partial-queue processing with sentinel preservation, matches the doc's own Usage sample almost line for line
+- [ChaosStressTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ChaosStressTests.cs) — `RevisionChainDepth_DeepChainWithCleanup` (500+ revisions reclaimed as staggered readers release oldest-first), `SentinelRevision_StaggeredReaderRelease` (reverse-order release stresses the sentinel boundary when `nextMinTSN` doesn't match the first kept entry's TSN)
 
 ## 🔗 Related
 
 - Related feature: [Revision Chain Storage](./revision-chain-storage.md) (the layout this reclaims space within),
   [MVCC Snapshot Visibility](./mvcc-snapshot-visibility.md) (the reader the sentinel revision protects)
 - Sibling: [Chain Walk Correctness Under Compaction](./mvcc-visibility-walk.md) — the visibility-side counterpart that tolerates this compactor's relocations
-- Source: [`ComponentRevisionManager.CleanUpUnusedEntriesCore`](../../../src/Typhon.Engine/Revision/internals/ComponentRevisionManager.cs),
-  [`DeferredCleanupManager`](../../../src/Typhon.Engine/Ecs/internals/DeferredCleanupManager.cs),
-  [`DeferredCleanupOptions`](../../../src/Typhon.Engine/Ecs/public/DeferredCleanupOptions.cs)
+- Source: [`ComponentRevisionManager.CleanUpUnusedEntriesCore`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Revision/internals/ComponentRevisionManager.cs),
+  [`DeferredCleanupManager`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/internals/DeferredCleanupManager.cs),
+  [`DeferredCleanupOptions`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/DeferredCleanupOptions.cs)
 
 <!-- Deep dive: claude/design/Revision/03-revision-gc-compaction.md, claude/overview/04-data.md §4.9 GC & Space Reclamation -->
 <!-- ADR: claude/adr/035-deferred-cleanup-hybrid-gc.md -->

@@ -1,3 +1,9 @@
+---
+uid: feature-durability-durability-introspection
+title: 'Durability Health & Introspection'
+description: 'See whether WAL/checkpoint durability is keeping up — health state, cycle stats, honest watermarks — without reaching into engine internals.'
+---
+
 # Durability Health & Introspection
 > See whether WAL/checkpoint durability is keeping up — health state, cycle stats, honest watermarks — without reaching into engine internals.
 
@@ -46,8 +52,8 @@ long bytesFlushed = walWriter.Throughput.First(t => t.Name == "BytesWritten").Co
 
 ## 🧪 Tests
 
-- [CheckpointResilienceTests](../../../test/Typhon.Engine.Tests/Durability/CheckpointResilienceTests.cs) — `Degraded` transient-fault retry vs. `Fatal` halt-with-last-chance-flush health transitions
-- [DurableLsnHonestyTests](../../../test/Typhon.Engine.Tests/Durability/CrashRecovery/DurableLsnHonestyTests.cs) — `DurableLsn` never exceeds the highest LSN physically written (the honest-watermark fix, LOG-05)
+- [CheckpointResilienceTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/CheckpointResilienceTests.cs) — `Degraded` transient-fault retry vs. `Fatal` halt-with-last-chance-flush health transitions
+- [DurableLsnHonestyTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/CrashRecovery/DurableLsnHonestyTests.cs) — `DurableLsn` never exceeds the highest LSN physically written (the honest-watermark fix, LOG-05)
 
 ## 🔗 Related
 

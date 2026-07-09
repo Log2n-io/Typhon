@@ -1,3 +1,9 @@
+---
+uid: feature-indexing-olc-concurrency
+title: 'Optimistic Lock Coupling (per-node concurrency)'
+description: 'Lock-free index reads and leaf-only write latching replace whole-tree locking — transparent to your code.'
+---
+
 # Optimistic Lock Coupling (per-node concurrency)
 > Lock-free index reads and leaf-only write latching replace whole-tree locking — transparent to your code.
 
@@ -64,9 +70,9 @@ No tuning knobs — there is nothing to configure. OLC is the only concurrency p
 
 ## 🧪 Tests
 
-- [OlcLatchTests](../../../test/Typhon.Engine.Tests/Data/OlcLatchTests.cs) — the per-node latch primitive itself: `TryWriteLock`/`WriteUnlock`/`ReadVersion`/`ValidateVersion`/`MarkObsolete`, plus `Concurrent_ReadersAndWriter_VersionConsistency`
-- [OlcBTreeTests](../../../test/Typhon.Engine.Tests/Data/OlcBTreeTests.cs) — tree-level optimistic reads racing writers (`TryGet_ConcurrentReadersWithOneWriter_ReadersGetCorrectValues`), concurrent splits/merges, and epoch-deferred node reclamation (`DeferredDeallocation_*`)
-- [OlcBTreeStressTests](../../../test/Typhon.Engine.Tests/Data/OlcBTreeStressTests.cs) — `[Explicit]` 32-thread mixed read/write/remove stress variant of the same scenarios, for restart/fallback/split/merge paths that need heavier contention to trigger
+- [OlcLatchTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/OlcLatchTests.cs) — the per-node latch primitive itself: `TryWriteLock`/`WriteUnlock`/`ReadVersion`/`ValidateVersion`/`MarkObsolete`, plus `Concurrent_ReadersAndWriter_VersionConsistency`
+- [OlcBTreeTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/OlcBTreeTests.cs) — tree-level optimistic reads racing writers (`TryGet_ConcurrentReadersWithOneWriter_ReadersGetCorrectValues`), concurrent splits/merges, and epoch-deferred node reclamation (`DeferredDeallocation_*`)
+- [OlcBTreeStressTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/OlcBTreeStressTests.cs) — `[Explicit]` 32-thread mixed read/write/remove stress variant of the same scenarios, for restart/fallback/split/merge paths that need heavier contention to trigger
 
 ## 🔗 Related
 

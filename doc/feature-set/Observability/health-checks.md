@@ -1,3 +1,9 @@
+---
+uid: feature-observability-health-checks
+title: 'Resource-Aware Health Checks'
+description: 'A framework-agnostic Healthy/Degraded/Unhealthy verdict, derived from live resource utilization, for cheap liveness/readiness polling.'
+---
+
 # Resource-Aware Health Checks
 > A framework-agnostic Healthy/Degraded/Unhealthy verdict, derived from live resource utilization, for cheap liveness/readiness polling.
 
@@ -68,7 +74,7 @@ Console.WriteLine(detail.Description); // "Storage/PageCache at 92% utilization 
   with the threshold-alerting side of the same bridge.
 
 ## 🧪 Tests
-- [ObservabilityBridgeTests](../../../test/Typhon.Engine.Tests/Observability/Bridge/ObservabilityBridgeTests.cs) — `ResourceHealthChecker.CheckHealth`/`GetDetailedResult` threshold crossings (Healthy/Degraded/Unhealthy), custom per-path thresholds, and worst-of-all composite status
+- [ObservabilityBridgeTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Observability/Bridge/ObservabilityBridgeTests.cs) — `ResourceHealthChecker.CheckHealth`/`GetDetailedResult` threshold crossings (Healthy/Degraded/Unhealthy), custom per-path thresholds, and worst-of-all composite status
 
 ## 🔗 Related
 - Sibling: [Threshold-Based Resource Alerting](./threshold-alerting.md) — same resource snapshot; adds root-cause attribution and push notifications on top of this Healthy/Degraded/Unhealthy classification

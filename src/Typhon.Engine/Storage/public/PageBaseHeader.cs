@@ -5,26 +5,40 @@ using System.Runtime.InteropServices;
 
 namespace Typhon.Engine;
 
+/// <summary>Bit flags stamped in the first byte of a page's <see cref="PageBaseHeader"/>, describing the page's role in a logical segment.</summary>
 [Flags]
 public enum PageBlockFlags : byte
 {
+    /// <summary>No flags set.</summary>
     None                 = 0x00,
+    /// <summary>The page is free — not allocated to any segment.</summary>
     IsFree               = 0x01,
+    /// <summary>The page belongs to a logical segment.</summary>
     IsLogicalSegment     = 0x02,
+    /// <summary>The page is the root page of its logical segment.</summary>
     IsLogicalSegmentRoot = 0x04
 }
 
+/// <summary>Coarse structural category of a page, stored in <see cref="PageBaseHeader.Type"/>.</summary>
 public enum PageBlockType : byte
 {
+    /// <summary>No specific block type.</summary>
     None = 0,
+    /// <summary>The page holds part of the occupancy bitmap.</summary>
     OccupancyMap,
 }
 
+/// <summary>
+/// The fixed 16-byte header at the start of every storage page: role flags, block type, format/change revisions, a CRC32C checksum, and a seqlock-style
+/// modification counter for torn-page detection. Laid out sequentially with 4-byte packing and kept at exactly 16 bytes so page-layout offsets stay stable.
+/// </summary>
 [PublicAPI]
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
 public struct PageBaseHeader
 {
+    /// <summary>Byte offset of this header within a page — always <c>0</c> (the header sits at the page start).</summary>
     public static readonly int Offset;
+    /// <summary>Size of the header in bytes.</summary>
     unsafe public static readonly int Size = sizeof(PageBaseHeader);
 
     /// <summary>
@@ -46,7 +60,7 @@ public struct PageBaseHeader
 
     /// <summary>
     /// CRC32C checksum of the page contents, excluding this field itself.
-    /// Zero means "never checksummed" (correct sentinel for pages that predate FPI support).
+    /// Zero is the sentinel for a page that has not yet been checksummed.
     /// Computed via <c>Crc32CUtil.ComputeSkipping(pageSpan, PageChecksumOffset, PageChecksumSize)</c>.
     /// </summary>
     public uint PageChecksum;

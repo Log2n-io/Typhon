@@ -1,3 +1,9 @@
+---
+uid: feature-revision-optimistic-conflict-baseline
+title: 'Write-Conflict Baseline Tracking'
+description: 'Every revision append remembers the value it replaced, so commit-time conflict detection and resolution have something to compare against.'
+---
+
 # Write-Conflict Baseline Tracking
 > Every revision append remembers the value it replaced, so commit-time conflict detection and resolution have something to compare against.
 
@@ -76,13 +82,13 @@ t1.Commit(ConflictHandler);   // result: A == 120, not 90 (ours) or 130 (theirs)
 
 ## 🧪 Tests
 
-- [ConcurrencyConflictTests](../../../test/Typhon.Engine.Tests/Data/ConcurrencyConflictTests.cs) — the canonical suite: no-conflict pass-through, no-handler last-wins, handler-based delta rebase/`TakeCommitted`/`TakeRead`, multi-entity (all-conflict and partial-conflict) handler dispatch, concurrent-thread rebase race
+- [ConcurrencyConflictTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ConcurrencyConflictTests.cs) — the canonical suite: no-conflict pass-through, no-handler last-wins, handler-based delta rebase/`TakeCommitted`/`TakeRead`, multi-entity (all-conflict and partial-conflict) handler dispatch, concurrent-thread rebase race
 
 ## 🔗 Related
 
 - Related feature: [Revision Append & Chain Growth](./revision-append-write-path.md) (where Prev/Cur are first set), [MVCC Snapshot Visibility](./mvcc-snapshot-visibility.md)
 - Sibling: [Optimistic Conflict Resolution](../Transactions/optimistic-conflict-resolution.md) — the `Transaction.Commit` handler surface that consumes this baseline
-- Source: [`ComponentRevisionManager.AddCompRev`/`FindRevisionIndexByChunkId`](../../../src/Typhon.Engine/Revision/internals/ComponentRevisionManager.cs), [`Transaction.DetectAndResolveConflict`](../../../src/Typhon.Engine/Transactions/public/Transaction.cs), [`ConcurrencyConflictSolver`](../../../src/Typhon.Engine/Transactions/public/ConcurrencyConflictSolver.cs)
+- Source: [`ComponentRevisionManager.AddCompRev`/`FindRevisionIndexByChunkId`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Revision/internals/ComponentRevisionManager.cs), [`Transaction.DetectAndResolveConflict`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Transactions/public/Transaction.cs), [`ConcurrencyConflictSolver`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Transactions/public/ConcurrencyConflictSolver.cs)
 
 <!-- Deep dive: claude/design/Revision/01-revision-chain-storage.md, claude/design/Revision/03-revision-gc-compaction.md §3 -->
 <!-- ADR: claude/adr/003-mvcc-snapshot-isolation.md -->

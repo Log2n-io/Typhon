@@ -1,0 +1,16 @@
+- name: Overview
+  href: index.md
+- name: Workbench
+  items:
+  - name: Overview
+    href: workbench/index.md
+  - name: Panels & Views
+    href: workbench/panels.md
+  - name: Keyboard & Palette
+    href: workbench/keyboard.md
+- name: CLI
+  items:
+  - name: Overview
+    href: cli/index.md
+  - name: Scripting & CI
+    href: cli/scripting.md

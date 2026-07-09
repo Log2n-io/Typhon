@@ -1,3 +1,9 @@
+---
+uid: feature-storage-pluggable-storage-backend-transient-store
+title: 'Transient Store (heap-backed)'
+description: 'Pinned heap blocks standing in for the page cache, so Transient components get raw-memory speed through the same segment code.'
+---
+
 # Transient Store (heap-backed)
 > Pinned heap blocks standing in for the page cache, so `Transient` components get raw-memory speed through the same segment code.
 
@@ -70,8 +76,8 @@ services.AddDatabaseEngine(options =>
 
 ## 🧪 Tests
 
-- [TransientSegmentGrowthRegressionTests](../../../../test/Typhon.Engine.Tests/Storage/TransientSegmentGrowthRegressionTests.cs) — page-address stability across `TransientStore`'s internal array growth (a bug `PersistentStore`'s stable base pointer doesn't share)
-- [StorageModeInfrastructureTests](../../../../test/Typhon.Engine.Tests/Data/StorageModeInfrastructureTests.cs) — `Transient`-declared components allocate transient segments/chunks and carry no WAL type id
+- [TransientSegmentGrowthRegressionTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Storage/TransientSegmentGrowthRegressionTests.cs) — page-address stability across `TransientStore`'s internal array growth (a bug `PersistentStore`'s stable base pointer doesn't share)
+- [StorageModeInfrastructureTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/StorageModeInfrastructureTests.cs) — `Transient`-declared components allocate transient segments/chunks and carry no WAL type id
 
 ## 🔗 Related
 

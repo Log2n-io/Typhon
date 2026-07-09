@@ -1,3 +1,9 @@
+---
+uid: feature-spatial-fat-aabb-update
+title: 'Fat-AABB Incremental Update'
+description: 'Margin-enlarged bounds absorb small moves for ~25ns, with no tree mutation.'
+---
+
 # Fat-AABB Incremental Update
 > Margin-enlarged bounds absorb small moves for ~25ns, with no tree mutation.
 
@@ -56,13 +62,13 @@ wtx.Commit();
 
 ## 🧪 Tests
 
-- [ClusterSpatialTests](../../../test/Typhon.Engine.Tests/Data/ECS/ClusterSpatialTests.cs) — `TickFence_SmallMove_NoEscape_FastPath` (containment, no tree mutation) and `TickFence_MovedEntity_FatAABBEscape_RTreeUpdated` (remove+reinsert on escape)
-- [SpatialPerfTests](../../../test/Typhon.Engine.Tests/Data/SpatialIndex/SpatialPerfTests.cs) — `Bench_ContainmentCheck_2Df32` measures the fast-path containment check cost
+- [ClusterSpatialTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/ClusterSpatialTests.cs) — `TickFence_SmallMove_NoEscape_FastPath` (containment, no tree mutation) and `TickFence_MovedEntity_FatAABBEscape_RTreeUpdated` (remove+reinsert on escape)
+- [SpatialPerfTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/SpatialIndex/SpatialPerfTests.cs) — `Bench_ContainmentCheck_2Df32` measures the fast-path containment check cost
 
 ## 🔗 Related
 
-- Source: [src/Typhon.Engine/Spatial/internals/SpatialMaintainer.cs](../../../src/Typhon.Engine/Spatial/internals/SpatialMaintainer.cs)
-- Source: [src/Typhon.Engine/Spatial/internals/SpatialBackPointer.cs](../../../src/Typhon.Engine/Spatial/internals/SpatialBackPointer.cs)
+- Source: [src/Typhon.Engine/Spatial/internals/SpatialMaintainer.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/SpatialMaintainer.cs)
+- Source: [src/Typhon.Engine/Spatial/internals/SpatialBackPointer.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/SpatialBackPointer.cs)
 - Sibling: [Spatial R-Tree Index](./spatial-rtree-index/README.md) — the tree structure fat-AABB entries are stored and refit in
 - Sibling: [Static / Dynamic Tree Separation](./spatial-rtree-index/spatial-rtree-static-dynamic.md) — only `Dynamic`-mode fields receive fat-AABB maintenance; `Static` fields never do
 

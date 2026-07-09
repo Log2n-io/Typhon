@@ -25,6 +25,7 @@ public sealed class DagBuilder
     /// <param name="name">Unique name identifying this system.</param>
     /// <param name="action">Delegate invoked once per tick on a single worker.</param>
     /// <param name="priority">Scheduling priority (enforcement deferred to #201).</param>
+    /// <param name="shouldRun">Optional predicate — when it returns <c>false</c>, the system is skipped for that tick.</param>
     public DagBuilder AddCallbackSystem(string name, Action<TickContext> action, SystemPriority priority = SystemPriority.Normal, Func<bool> shouldRun = null)
         => AddCallbackSystemInternal(name, action, priority, shouldRun, null);
 
@@ -108,6 +109,7 @@ public sealed class DagBuilder
     /// <param name="totalChunks">Number of chunks to distribute across workers.</param>
     /// <param name="priority">Scheduling priority (enforcement deferred to #201).</param>
     /// <param name="shouldRun">Optional predicate — if false, system is skipped.</param>
+    /// <param name="instance">Optional class-based system instance backing this registration; <c>null</c> for a delegate-only pipeline system.</param>
     public DagBuilder AddPipelineSystem(string name, Action<int, int> chunkAction, int totalChunks, SystemPriority priority = SystemPriority.Normal,
         Func<bool> shouldRun = null, ISystem instance = null)
     {

@@ -1,3 +1,9 @@
+---
+uid: feature-hosting-di-bootstrap-chain-index
+title: 'DI Engine Bootstrap Chain'
+description: 'One using, one fluent chain of Add* calls — wires the engine''s singletons into your DI container.'
+---
+
 # DI Engine Bootstrap Chain
 > One `using`, one fluent chain of `Add*` calls — wires the engine's singletons into your DI container.
 
@@ -83,11 +89,11 @@ var engine = serviceProvider.GetRequiredService<DatabaseEngine>();
 
 ## 🧪 Tests
 
-- [DatabaseFileLockingTests](../../../../test/Typhon.Engine.Tests/Storage/DatabaseFileLockingTests.cs) — builds the full `Add*` chain by hand (outside `TestBase`) and exercises both the happy path and wiring-adjacent failure modes (stale/live/cross-machine lock, corrupt lock file)
+- [DatabaseFileLockingTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Storage/DatabaseFileLockingTests.cs) — builds the full `Add*` chain by hand (outside `TestBase`) and exercises both the happy path and wiring-adjacent failure modes (stale/live/cross-machine lock, corrupt lock file)
 
 ## 🔗 Related
 
-- Source: [`TyphonBuilderExtensions.cs`](../../../../src/Typhon.Engine/Hosting/public/TyphonBuilderExtensions.cs)
+- Source: [`TyphonBuilderExtensions.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Hosting/public/TyphonBuilderExtensions.cs)
 - Reference consumer: `tools/Typhon.Workbench/Sessions/EngineLifecycle.cs`
 - Related feature: [Pluggable WAL I/O Backend](../wal-io-injection-seam.md)
 - Sub-features: [Singleton/Scoped/Transient Lifetime Variants](./lifetime-variants.md)

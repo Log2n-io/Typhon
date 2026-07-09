@@ -27,7 +27,7 @@ public readonly struct WaitContext
     // ═══════════════════════════════════════════════════════════════════════
 
     /// <summary>
-    /// Absolute monotonic deadline via <see cref="Stopwatch.GetTimestamp"/>.
+    /// Absolute monotonic deadline via <see cref="System.Diagnostics.Stopwatch.GetTimestamp"/>.
     /// <c>default</c> = <see cref="Deadline.Zero"/> (already expired).
     /// <see cref="Deadline.Infinite"/> = no timeout.
     /// </summary>

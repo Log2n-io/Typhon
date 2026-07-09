@@ -1,3 +1,9 @@
+---
+uid: feature-spatial-spatial-field-attribute-index
+title: 'Field Attribute & Schema Integration'
+description: 'Declare a component field as spatially indexed, validated against schema rules the moment the component is registered.'
+---
+
 # Field Attribute & Schema Integration
 > Declare a component field as spatially indexed, validated against schema rules the moment the component is registered.
 
@@ -69,12 +75,12 @@ SpatialFieldType type = spatial.SpatialFieldType;     // AABB3F
 
 ## 🧪 Tests
 
-- [SpatialFieldTypeTests](../../../../test/Typhon.Engine.Tests/Data/SpatialIndex/SpatialFieldTypeTests.cs) — `[SpatialIndex]` reflection (margin/cellSize), `FieldType.FromType` mapping for all 8 supported types, `SpatialFieldInfo.ToVariant`/`IsSphere`
-- [SpatialEcsIntegrationTests](../../../../test/Typhon.Engine.Tests/Data/SpatialIndex/SpatialEcsIntegrationTests.cs) — schema validation at registration (`Schema_TransientWithSpatialIndex_Throws`, `Schema_ValidSpatialField_CreatesSpatialIndex`, `Schema_NoSpatialField_NullSpatialIndex`, `Schema_CellSizeZero_NoHashmap`)
+- [SpatialFieldTypeTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/SpatialIndex/SpatialFieldTypeTests.cs) — `[SpatialIndex]` reflection (margin/cellSize), `FieldType.FromType` mapping for all 8 supported types, `SpatialFieldInfo.ToVariant`/`IsSphere`
+- [SpatialEcsIntegrationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/SpatialIndex/SpatialEcsIntegrationTests.cs) — schema validation at registration (`Schema_TransientWithSpatialIndex_Throws`, `Schema_ValidSpatialField_CreatesSpatialIndex`, `Schema_NoSpatialField_NullSpatialIndex`, `Schema_CellSizeZero_NoHashmap`)
 
 ## 🔗 Related
 
-- Source: [src/Typhon.Engine/Spatial/internals/SpatialIndexState.cs](../../../../src/Typhon.Engine/Spatial/internals/SpatialIndexState.cs), [src/Typhon.Engine/Spatial/public/SpatialFieldInfo.cs](../../../../src/Typhon.Engine/Spatial/public/SpatialFieldInfo.cs), [src/Typhon.Schema.Definition/Attributes.cs](../../../../src/Typhon.Schema.Definition/Attributes.cs)
+- Source: [src/Typhon.Engine/Spatial/internals/SpatialIndexState.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/SpatialIndexState.cs), [src/Typhon.Engine/Spatial/public/SpatialFieldInfo.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/public/SpatialFieldInfo.cs), [src/Typhon.Schema.Definition/Attributes.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Schema.Definition/Attributes.cs)
 - Sub-features: [Storage-Mode Compatibility (SingleVersion / Versioned)](./spatial-storage-mode-compat.md)
 - Sibling: [Spatial R-Tree Index](../spatial-rtree-index/README.md) — the index structure this attribute configures
 - Overview: [Spatial Architecture Overview](../spatial-architecture-overview.md) — how this fits with the separate spatial grid

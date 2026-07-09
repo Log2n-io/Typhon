@@ -1,3 +1,9 @@
+---
+uid: feature-foundation-access-control-lock-family-access-control
+title: 'AccessControl (full-featured RW lock)'
+description: '64-bit reader-writer lock with waiter fairness, in-place promotion, and contention tracking.'
+---
+
 # AccessControl (full-featured RW lock)
 > 64-bit reader-writer lock with waiter fairness, in-place promotion, and contention tracking.
 
@@ -56,7 +62,7 @@ if (_control.EnterSharedAccess(ref ctx))
 - `internal` type — engine plumbing, not callable from application code.
 
 ## 🧪 Tests
-- [AccessControlTests](../../../../test/Typhon.Engine.Tests/Concurrency/AccessControlTests.cs) — shared/exclusive acquisition, in-place promote/demote, timeout and cancellation paths, `WasContended` sticky bit, multi-thread blocking/contention.
+- [AccessControlTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Concurrency/AccessControlTests.cs) — shared/exclusive acquisition, in-place promote/demote, timeout and cancellation paths, `WasContended` sticky bit, multi-thread blocking/contention.
 
 ## 🔗 Related
 - Parent feature: [Reader-Writer & Resource Lifecycle Locks](./README.md)

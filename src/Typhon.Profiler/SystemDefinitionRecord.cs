@@ -39,7 +39,7 @@ public sealed class SystemDefinitionRecord
     /// <summary>Phase token name (RFC 07 §Q3) the system runs in. Empty string when no phase was declared.</summary>
     public string PhaseName { get; init; } = string.Empty;
 
-    /// <summary>True iff the system runs alone in its phase (no concurrent peers; <see cref="SystemBuilder.ExclusivePhase"/>).</summary>
+    /// <summary>True iff the system runs alone in its phase (no concurrent peers) — declared via <c>SystemBuilder.ExclusivePhase()</c>.</summary>
     public bool IsExclusivePhase { get; init; }
 
     /// <summary>Component type names declared with <c>Reads&lt;T&gt;()</c> — ambiguous-staleness reads.</summary>

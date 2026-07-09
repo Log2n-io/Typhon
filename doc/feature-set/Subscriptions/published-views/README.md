@@ -1,3 +1,9 @@
+---
+uid: feature-subscriptions-published-views-index
+title: 'Published Views'
+description: 'Register a View as a subscribable target — one shared instance or one per client — and get a handle clients can subscribe to.'
+---
+
 # Published Views
 > Register a View as a subscribable target — one shared instance or one per client — and get a handle clients can subscribe to.
 
@@ -46,7 +52,7 @@ it is included in a `SetSubscriptions` call.
 
 ## 🧪 Tests
 
-- [ViewSeparationTests](../../../../test/Typhon.Engine.Tests/Runtime/Subscriptions/ViewSeparationTests.cs) — name
+- [ViewSeparationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/ViewSeparationTests.cs) — name
   uniqueness (`ArgumentException`), single-publish rule (`InvalidOperationException`), the `IsPublished` flag, and
   that two separate View instances over the same query don't conflict
 
