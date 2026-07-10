@@ -50,7 +50,6 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
-          show_full_output: true   # TEMP (debugging): unmask the Claude SDK error in the log; remove once green
           prompt: |
             You are the automated issue-triage bot for ${{ github.repository }}, a pre-alpha
             .NET real-time ACID database engine. Triage issue #${{ github.event.issue.number }}.
