@@ -48,7 +48,8 @@
       "_gitContribute": {
         "repo": "https://github.com/Log2n-io/Typhon",
         "branch": "main"
-      }
+      },
+      "_googleAnalyticsTagId": "G-NJ9FF28G41"
     },
     "sitemap": {
       "baseUrl": "https://doc.typhondb.io/latest/",

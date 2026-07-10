@@ -101,6 +101,14 @@
             <BuildOutputInPackage Include="$(TargetDir)Typhon.Profiler.dll" />
             <BuildOutputInPackage Include="$(TargetDir)Typhon.Protocol.dll" />
             <BuildOutputInPackage Include="$(TargetDir)Typhon.Schema.Definition.dll" />
+            <!-- Ship each sibling's XML doc next to its DLL so consumers get inline IntelliSense
+                 (Quick Doc) for Profiler/Protocol/Schema.Definition types too — not just Engine.
+                 These siblings are IsPackable=false, so this bundle is their ONLY delivery path;
+                 without the .xml here the DLLs ship doc-less. Guarded by Exists in case doc
+                 generation is ever turned off for a sibling. -->
+            <BuildOutputInPackage Include="$(TargetDir)Typhon.Profiler.xml" Condition="Exists('$(TargetDir)Typhon.Profiler.xml')" />
+            <BuildOutputInPackage Include="$(TargetDir)Typhon.Protocol.xml" Condition="Exists('$(TargetDir)Typhon.Protocol.xml')" />
+            <BuildOutputInPackage Include="$(TargetDir)Typhon.Schema.Definition.xml" Condition="Exists('$(TargetDir)Typhon.Schema.Definition.xml')" />
         </ItemGroup>
     </Target>
 

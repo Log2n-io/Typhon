@@ -37,7 +37,8 @@ the strongly-typed, zero-copy component accessors for it at compile time.
 
 ## Links
 
-- Website & docs: <https://typhondb.io>
+- Documentation: <https://doc.typhondb.io>
+- Website: <https://typhondb.io>
 - Source: <https://github.com/log2n-io/Typhon>
 
 ## License

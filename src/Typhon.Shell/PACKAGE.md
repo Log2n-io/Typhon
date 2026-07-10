@@ -65,7 +65,8 @@ Inside the REPL, type `help` for the full command list and `exit` to quit. Start
 
 ## Links
 
-- Website & docs: <https://typhondb.io>
+- Documentation: <https://doc.typhondb.io>
+- Website: <https://typhondb.io>
 - Source: <https://github.com/log2n-io/Typhon>
 
 ## License

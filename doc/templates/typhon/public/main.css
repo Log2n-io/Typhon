@@ -40,3 +40,65 @@
   background-color: #ff8c00;
   color: #0c0c12;
 }
+
+/* ---- Diagram / image lightbox (see public/main.js) ---------------------------
+   Full-screen overlay for zooming large SVG diagrams (vector-crisp via svg-pan-zoom)
+   and raster screenshots. Dark backdrop regardless of the page theme — you're
+   inspecting a figure, and the apex's dark surface is the right canvas for it. */
+body.tphn-lb-lock { overflow: hidden; }
+
+.tphn-lb {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: none;
+  flex-direction: column;
+  background: rgba(12, 12, 18, 0.95);      /* --color-deep, translucent */
+}
+.tphn-lb.is-open { display: flex; }
+
+.tphn-lb-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.55rem 1rem;
+  color: #f0f0f5;
+  font-size: 0.85rem;
+  border-bottom: 1px solid #ffffff1a;
+}
+.tphn-lb-hint { color: #9595a8; }
+.tphn-lb-orig { margin-left: auto; color: #ffa033; text-decoration: none; }
+.tphn-lb-orig:hover { text-decoration: underline; }
+.tphn-lb-x {
+  background: none;
+  border: none;
+  color: #f0f0f5;
+  font-size: 1.6rem;
+  line-height: 1;
+  padding: 0 0.35rem;
+  cursor: pointer;
+}
+.tphn-lb-x:hover { color: #ff8c00; }
+
+.tphn-lb-stage {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  cursor: grab;
+}
+.tphn-lb-stage:active { cursor: grabbing; }
+.tphn-lb-stage > svg { width: 100%; height: 100%; display: block; }
+.tphn-lb-img { max-width: 100%; max-height: 100%; will-change: transform; user-select: none; }
+.tphn-lb-msg { color: #9595a8; margin-top: 20vh; }
+
+/* svg-pan-zoom's built-in zoom controls — tint to the brand palette. */
+.tphn-lb .svg-pan-zoom-control-background { fill: #14141e; stroke: #ffffff1a; opacity: 0.9; }
+.tphn-lb .svg-pan-zoom-control:hover .svg-pan-zoom-control-background { fill: #1a1a28; }
+
+/* Signal that diagrams/images are interactive. */
+article a[href$=".svg"] { cursor: zoom-in; display: inline-block; }
+article img { cursor: zoom-in; }
