@@ -14,8 +14,21 @@ name: Project Sync
 on:
   issues:
     types: [opened, closed, reopened]
-  pull_request:
+  # pull_request_target (NOT pull_request): secrets — including PROJECT_TOKEN — are withheld from `pull_request` runs that
+  # originate in a fork, so board sync failed for every external contributor's PR (gh exits 4 on an empty GH_TOKEN).
+  # pull_request_target runs in the BASE repo's context, so the secret is available.
+  #
+  # SAFETY — pull_request_target is only sound because this workflow never trusts fork content:
+  #   1. It does NOT check out the PR's code (no actions/checkout), so no attacker-supplied code is ever executed.
+  #   2. The only fork-controlled values it reads (PR title, head ref) are passed via `env:`, never inlined into `run:`.
+  #   3. `permissions: {}` below strips GITHUB_TOKEN of all scopes.
+  # Adding a checkout of the PR head, or inlining ${{ … }} of any user-controlled field into a shell body, would turn this
+  # into a repository-takeover vector. Do neither.
+  pull_request_target:
     types: [opened, closed]
+
+# The jobs authenticate exclusively with the PROJECT_TOKEN PAT; GITHUB_TOKEN needs no scopes at all.
+permissions: {}
 
 env:
   # Organization-owned project: https://github.com/orgs/Log2n-io/projects/1
@@ -168,7 +181,7 @@ jobs:
   # Link PRs to issues and update status
   link-pr-to-issue:
     name: Link PR and Update Status
-    if: github.event_name == 'pull_request' && github.event.action == 'opened'
+    if: github.event_name == 'pull_request_target' && github.event.action == 'opened'
     runs-on: ubuntu-latest
     steps:
       - name: Extract issue number and update status
@@ -244,7 +257,7 @@ jobs:
   # Update status when PR is merged
   update-on-merge:
     name: Update Status on Merge
-    if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true
+    if: github.event_name == 'pull_request_target' && github.event.action == 'closed' && github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     steps:
       - name: Update linked issue status
