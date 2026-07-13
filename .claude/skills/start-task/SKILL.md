@@ -1,7 +1,7 @@
 ---
 name: start-task
 description: Start working on a GitHub issue - updates status, creates branch, verifies design
-argument-hint: [issue number or title]
+argument-hint: "[issue number or title]"
 ---
 
 # Start Work on a GitHub Issue

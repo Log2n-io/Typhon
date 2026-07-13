@@ -1,7 +1,7 @@
 ---
 name: implement-feature
 description: Implement a GitHub issue end-to-end — scope it (whole issue or specific phases), build an acceptance-criteria plan from its design doc, get the plan approved, then develop autonomously with tests and a mandatory code review.
-argument-hint: [issue number]
+argument-hint: "[issue number]"
 ---
 
 # Implement a Feature from a GitHub Issue

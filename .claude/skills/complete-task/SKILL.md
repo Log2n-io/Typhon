@@ -1,7 +1,7 @@
 ---
 name: complete-task
 description: Complete work on a GitHub issue - close issue, update artifacts, prompt for doc updates
-argument-hint: [issue number]
+argument-hint: "[issue number]"
 ---
 
 # Complete Work on a GitHub Issue

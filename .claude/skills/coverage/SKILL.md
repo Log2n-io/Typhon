@@ -1,7 +1,7 @@
 ---
 name: coverage
 description: Run code coverage analysis, track class-level results, and generate trend reports
-argument-hint: [--report-only]
+argument-hint: "[--report-only]"
 ---
 
 # Code Coverage Tracking

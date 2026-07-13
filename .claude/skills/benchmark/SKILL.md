@@ -1,7 +1,7 @@
 ---
 name: benchmark
 description: Run regression benchmarks, track results, and generate trend reports
-argument-hint: [--quick] [--report-only] [--list] [--btree-fast] [--btree-medium] [--btree-full]
+argument-hint: "[--quick] [--report-only] [--list] [--btree-fast] [--btree-medium] [--btree-full]"
 ---
 
 # Benchmark Regression Tracking

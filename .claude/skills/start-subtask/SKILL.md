@@ -1,7 +1,7 @@
 ---
 name: start-subtask
 description: Start working on a sub-issue of an umbrella issue - updates status, validates dependencies, updates design doc
-argument-hint: [sub-issue number]
+argument-hint: "[sub-issue number]"
 ---
 
 # Start Working on a Sub-Issue (Subtask)

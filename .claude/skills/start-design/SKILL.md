@@ -1,7 +1,7 @@
 ---
 name: start-design
 description: Start design for a GitHub issue - creates design doc from research/ideas, updates status to Todo
-argument-hint: [issue number or title] [--deep]
+argument-hint: "[issue number or title] [--deep]"
 ---
 
 # Start Design for a GitHub Issue

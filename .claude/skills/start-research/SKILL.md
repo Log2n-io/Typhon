@@ -1,7 +1,7 @@
 ---
 name: start-research
 description: Start research on a GitHub issue - creates research doc, links ideas, updates status
-argument-hint: [issue number or title] [--deep]
+argument-hint: "[issue number or title] [--deep]"
 ---
 
 # Start Research on a GitHub Issue

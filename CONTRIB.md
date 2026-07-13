@@ -388,7 +388,7 @@ Output:
 ---
 name: create-issue
 description: Create a GitHub issue and add it to the Typhon dev project
-argument-hint: [title] or leave empty for interactive mode
+argument-hint: "[title] or leave empty for interactive mode"
 ---
 
 Actions:
@@ -405,7 +405,7 @@ Actions:
 ---
 name: start-task
 description: Start working on a GitHub issue
-argument-hint: [issue number or title]
+argument-hint: "[issue number or title]"
 ---
 
 Actions:
@@ -424,7 +424,7 @@ Actions:
 ---
 name: start-subtask
 description: Start working on a sub-issue of an umbrella issue
-argument-hint: [sub-issue number]
+argument-hint: "[sub-issue number]"
 ---
 
 Actions:
@@ -441,7 +441,7 @@ Actions:
 ---
 name: complete-subtask
 description: Complete a sub-issue of an umbrella issue
-argument-hint: [sub-issue number]
+argument-hint: "[sub-issue number]"
 ---
 
 Actions:
@@ -470,7 +470,7 @@ Actions:
 ---
 name: complete-task
 description: Mark work complete and update all artifacts
-argument-hint: [issue number]
+argument-hint: "[issue number]"
 ---
 
 Actions:

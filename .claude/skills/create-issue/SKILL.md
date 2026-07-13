@@ -1,7 +1,7 @@
 ---
 name: create-issue
 description: Create a GitHub issue and add it to the Typhon org project
-argument-hint: [title] or leave empty for interactive mode
+argument-hint: "[title] or leave empty for interactive mode"
 ---
 
 # Create GitHub Issue for Typhon

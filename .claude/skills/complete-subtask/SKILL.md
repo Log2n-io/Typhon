@@ -1,7 +1,7 @@
 ---
 name: complete-subtask
 description: Complete a sub-issue of an umbrella issue - close it, check parent checkbox, update design doc
-argument-hint: [sub-issue number]
+argument-hint: "[sub-issue number]"
 ---
 
 # Complete a Sub-Issue (Subtask)
