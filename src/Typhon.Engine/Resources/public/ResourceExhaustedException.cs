@@ -1,5 +1,6 @@
 using JetBrains.Annotations;
 using System;
+using System.Globalization;
 
 namespace Typhon.Engine;
 
@@ -109,6 +110,9 @@ public class ResourceExhaustedException : TyphonException
     /// </summary>
     public override bool IsTransient => true;
 
+    // InvariantCulture: this is a diagnostic/log-facing message. Without it, N0/F1 use the ambient CurrentCulture (e.g. "1 000" / "95,0%" under en-FR) — locale-dependent output.
     private static string FormatMessage(string resourcePath, long currentUsage, long limit) =>
-        $"Resource '{resourcePath}' exhausted: {currentUsage:N0} / {limit:N0} ({(limit > 0 ? (double)currentUsage / limit * 100 : 100):F1}% utilization)";
+        string.Create(
+            CultureInfo.InvariantCulture,
+            $"Resource '{resourcePath}' exhausted: {currentUsage:N0} / {limit:N0} ({(limit > 0 ? (double)currentUsage / limit * 100 : 100):F1}% utilization)");
 }

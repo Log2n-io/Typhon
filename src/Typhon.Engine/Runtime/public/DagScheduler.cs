@@ -1121,7 +1121,8 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     {
         for (var i = 0; i < AllSystemCount; i++)
         {
-            if (_isReady[i].Value != 1)
+            // Acquire load: pairs with the release in MarkSystemReady, so observing ready==1 guarantees this worker also sees TotalChunks/_remainingChunks for system i.
+            if (Volatile.Read(ref _isReady[i].Value) != 1)
             {
                 continue;
             }
@@ -1438,7 +1439,8 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
 
         Systems[sysIdx].TotalChunks = totalChunks;
         _remainingChunks[sysIdx].Value = totalChunks;
-        // MEMORY: relies on x86 TSO for store ordering — needs release/acquire barrier on ARM
+        // Publish: MarkSystemReady stores _isReady with release semantics, ordering the two data stores above ahead of the ready flag. Workers gate on _isReady
+        // with an acquire load (FindReadySystem), so a worker that observes ready==1 also observes TotalChunks/_remainingChunks. Correct on arm64; free on x64 (TSO).
         MarkSystemReady(sysIdx);
     }
 
@@ -1714,7 +1716,8 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private void MarkSystemReady(int sysIdx) => _isReady[sysIdx].Value = 1;
+    // Release store: orders the preceding TotalChunks/_remainingChunks writes ahead of the ready flag (paired with the acquire load in FindReadySystem). Free on x64 (TSO); stlr on arm64.
+    private void MarkSystemReady(int sysIdx) => Volatile.Write(ref _isReady[sysIdx].Value, 1);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void RecordFirstChunkGrab(int sysIdx, long timestamp)

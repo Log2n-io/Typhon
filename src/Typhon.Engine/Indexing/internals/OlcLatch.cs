@@ -21,12 +21,12 @@ internal readonly ref struct OlcLatch
 
     /// <summary>
     /// Read version. Returns 0 if locked or obsolete (caller must restart).
-    /// On x64 (TSO), loads are never reordered with other loads — no acquire barrier needed.
+    /// Acquire load: orders the caller's subsequent node reads after this version snapshot. Free on x64 (TSO — plain mov); emits ldar on arm64.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public int ReadVersion()
     {
-        int v = _version;
+        int v = Volatile.Read(ref _version);
         return (v & 0b11) == 0 ? v : 0;  // locked (bit 0) or obsolete (bit 1) -> restart
     }
 
@@ -36,7 +36,7 @@ internal readonly ref struct OlcLatch
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool ValidateVersion(int expected)
     {
-        var actual = _version;
+        var actual = Volatile.Read(ref _version);  // acquire: pairs with the release in WriteUnlock
         if (actual == expected)
         {
             return true;
@@ -54,7 +54,7 @@ internal readonly ref struct OlcLatch
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool ValidateVersionLocked(int expectedUnlockedVersion)
     {
-        var actual = _version;
+        var actual = Volatile.Read(ref _version);  // acquire: pairs with the release in WriteUnlock
         var expectedLocked = expectedUnlockedVersion | 1;
         if (actual == expectedLocked)
         {
@@ -93,10 +93,10 @@ internal readonly ref struct OlcLatch
     public void WriteUnlock()
     {
         // Increment version (bits 2-31), clear locked (bit 0), preserve obsolete (bit 1)
-        // On x64 (TSO), stores are never reordered with other stores — no release barrier needed.
+        // Release store: publishes every write made under the lock before the unlock is visible. Free on x64 (TSO — plain mov); emits stlr on arm64.
         int v = _version;
         var newV = ((v >> 2) + 1) << 2 | (v & 0b10);  // version++, keep obsolete, clear lock
-        _version = newV;
+        Volatile.Write(ref _version, newV);
         TyphonEvent.EmitConcurrencyOlcLatchWriteUnlock((uint)v, (uint)newV);
     }
 
@@ -116,7 +116,7 @@ internal readonly ref struct OlcLatch
     /// This avoids unnecessary version bumps that would cause cascading restarts.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void AbortWriteLock() => _version = _version & ~0b1;  // Clear locked bit (bit 0) without changing version counter or obsolete bit
+    public void AbortWriteLock() => Volatile.Write(ref _version, _version & ~0b1);  // Release-clear locked bit (bit 0), leaving version counter and obsolete bit unchanged
 
     /// <summary>Check if locked (for diagnostics only).</summary>
     public bool IsLocked => (_version & 0b1) != 0;

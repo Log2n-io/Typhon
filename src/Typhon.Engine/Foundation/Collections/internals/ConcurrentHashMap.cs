@@ -169,7 +169,8 @@ internal unsafe class ConcurrentHashMap<TKey> : IDisposable where TKey : unmanag
         {
             ref var stripe = ref _stripes[stripeIdx];
 
-            int version = stripe.OlcVersion;
+            // Acquire load: orders the following entries/mask/slot reads after this version snapshot (paired with the release in ReleaseStripeLock).
+            int version = Volatile.Read(ref stripe.OlcVersion);
             if ((version & 1) != 0)
             {
                 Thread.SpinWait(1);
@@ -200,7 +201,7 @@ internal unsafe class ConcurrentHashMap<TKey> : IDisposable where TKey : unmanag
                 idx = (idx + 1) & mask;
             }
 
-            if (stripe.OlcVersion != version)
+            if (Volatile.Read(ref stripe.OlcVersion) != version)
             {
                 continue;
             }
@@ -422,10 +423,11 @@ internal unsafe class ConcurrentHashMap<TKey> : IDisposable where TKey : unmanag
     /// <summary>
     /// Release stripe lock and increment version.
     /// OlcVersion is odd (locked): adding 1 makes it even (unlocked) and increments the version in bits 1-31.
-    /// On x64, store-store ordering (TSO) guarantees all prior writes are visible before this version bump.
+    /// Release store: publishes every write made under the lock before the version bump becomes visible.
+    /// Free on x64 (TSO stores are already release-ordered — compiles to a plain mov); emits stlr on arm64, where store-store ordering is not guaranteed.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void ReleaseStripeLock(ref Stripe stripe) => stripe.OlcVersion += 1;
+    private static void ReleaseStripeLock(ref Stripe stripe) => Volatile.Write(ref stripe.OlcVersion, stripe.OlcVersion + 1);
 
     // ═══════════════════════════════════════════════════════════════════════
     // Private — backward shift deletion (per-stripe)

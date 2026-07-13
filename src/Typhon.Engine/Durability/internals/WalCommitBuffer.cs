@@ -424,7 +424,7 @@ internal sealed unsafe class WalCommitBuffer : IDisposable
         if (_swapState == SwapRequested)
         {
             var atBoundary = scanPos >= BufferCapacity;
-            var atPadding = !atBoundary && ((WalFrameHeader*)(buffer + scanPos))->FrameLength == WalFrameHeader.PaddingSentinel;
+            var atPadding = !atBoundary && Volatile.Read(ref ((WalFrameHeader*)(buffer + scanPos))->FrameLength) == WalFrameHeader.PaddingSentinel;  // acquire
             if (atBoundary || atPadding)
             {
                 PerformSwap(buffer);
@@ -442,7 +442,9 @@ internal sealed unsafe class WalCommitBuffer : IDisposable
         while (scanPos < tail && scanPos < BufferCapacity)
         {
             var frameHeader = (WalFrameHeader*)(buffer + scanPos);
-            var frameLength = frameHeader->FrameLength;
+            // Acquire load: pairs with the producer's Interlocked.Exchange release on FrameLength, so the RecordCount/LastLsn/payload reads below observe the
+            // fully-published frame. Free on x64 (TSO); emits ldar on arm64, where a plain load would be relaxed and could see a published flag before its data.
+            var frameLength = Volatile.Read(ref frameHeader->FrameLength);
 
             if (frameLength == 0)
             {
@@ -536,7 +538,7 @@ internal sealed unsafe class WalCommitBuffer : IDisposable
         else
         {
             var frameHeader = (WalFrameHeader*)(buffer + _drainPosition);
-            if (frameHeader->FrameLength == WalFrameHeader.PaddingSentinel)
+            if (Volatile.Read(ref frameHeader->FrameLength) == WalFrameHeader.PaddingSentinel)  // acquire: pairs with producer release on FrameLength
             {
                 atEnd = true;
             }
@@ -600,7 +602,7 @@ internal sealed unsafe class WalCommitBuffer : IDisposable
         while (_drainPosition < BufferCapacity)
         {
             var frameHeader = (WalFrameHeader*)(buffer + _drainPosition);
-            var frameLength = frameHeader->FrameLength;
+            var frameLength = Volatile.Read(ref frameHeader->FrameLength);  // acquire: pairs with the producer's Interlocked.Exchange release on FrameLength
 
             if (frameLength == 0)
             {

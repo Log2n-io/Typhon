@@ -487,10 +487,11 @@ internal unsafe class HashMap<TKey, TValue> : IDisposable where TKey : unmanaged
             newManagedValues = new TValue[newCapacity];
         }
 
-        // Rehash with software prefetch to hide write latency
+        // Rehash with software prefetch to hide write latency.
+        // Sse.IsSupported is a JIT constant: on non-x86 (e.g. arm64) the whole prefetch block is elided; Prefetch0 is x86-only and would otherwise throw.
         for (int i = 0; i < _capacity; i++)
         {
-            if (i + PrefetchLookahead < _capacity)
+            if (Sse.IsSupported && i + PrefetchLookahead < _capacity)
             {
                 byte* future = _entries + (long)(i + PrefetchLookahead) * stride;
                 uint fh = *(uint*)future;

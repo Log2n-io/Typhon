@@ -124,9 +124,9 @@ internal sealed unsafe class ViewDeltaRingBuffer : IDisposable
             _componentTags[index] = componentTag;
 
             // Signal that this slot is ready to consume.
-            // On x86 TSO, the preceding stores are visible before this store to any core
-            // that observes _written[index] == 1.
-            _written[index] = 1;
+            // Release store: guarantees the preceding payload stores are visible to any core that observes _written[index] == 1
+            // (paired with the acquire load in TryPeek). Free on x64 (TSO); emits stlr on arm64, where store-store ordering is not guaranteed.
+            Volatile.Write(ref _written[index], (byte)1);
 
             return true;
         }
@@ -157,9 +157,10 @@ internal sealed unsafe class ViewDeltaRingBuffer : IDisposable
 
         var index = (int)(head & _capacityMask);
 
-        // Spin until the producer has finished writing this slot
+        // Spin until the producer has finished writing this slot.
+        // Acquire load: orders the following payload reads after observing the flag (paired with the release store in TryPush).
         var spinner = new SpinWait();
-        while (_written[index] == 0)
+        while (Volatile.Read(ref _written[index]) == 0)
         {
             spinner.SpinOnce();
         }

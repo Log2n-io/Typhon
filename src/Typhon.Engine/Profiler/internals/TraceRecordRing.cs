@@ -27,9 +27,11 @@ namespace Typhon.Engine.Internals;
 /// <para>
 /// <b>Synchronization:</b> two monotonic 64-bit counters (<c>_head</c> producer-written, <c>_tail</c> consumer-written), each wrapped in a
 /// <see cref="CacheLinePaddedLong"/> so they live on distinct cache lines — avoids the producer/consumer false-sharing ping-pong that is textbook
-/// for SPSC rings (Tracy pads them for the same reason). On x64 TSO, plain field reads and writes of 64-bit primitives are naturally atomic and
-/// ordered, so no <see cref="System.Threading.Volatile"/> fences are needed — same as <c>ThreadTraceBuffer</c> does for the same reason
-/// (see CLAUDE.md).
+/// for SPSC rings (Tracy pads them for the same reason). A 64-bit primitive read/write is naturally atomic on x64, so neither counter tears; but
+/// cross-thread <i>ordering</i> is not free on weakly-ordered architectures. The producer publishes payload bytes before advancing <c>_head</c>, and
+/// the consumer frees space before advancing <c>_tail</c>, so the cursor stores/loads carry release/acquire semantics via
+/// <see cref="System.Threading.Volatile"/> (<c>Publish</c>/<c>Drain</c>/<c>IsEmpty</c>). This is free on x64 (TSO — a plain <c>mov</c>) and emits
+/// <c>stlr</c>/<c>ldar</c> on arm64, where a relaxed store could otherwise expose an advanced cursor before the data it guards.
 /// </para>
 /// <para>
 /// <b>Even-size invariant:</b> all reservations are rounded UP to an even byte count. Since <see cref="Capacity"/> is a power of 2, this guarantees
@@ -122,7 +124,7 @@ internal sealed class TraceRecordRing
     /// Consumer-only non-destructive emptiness check. Returns <c>true</c> when no records are pending for drain. Used by the consumer thread to
     /// decide whether a retiring slot can be freed.
     /// </summary>
-    public bool IsEmpty => _tail.Value == _head.Value;
+    public bool IsEmpty => _tail.Value == Volatile.Read(ref _head.Value);  // acquire on _head: observe the producer's latest published head so a not-yet-drained record isn't mistaken for empty
 
     /// <summary>
     /// Number of bytes pending for drain. Single-writer for both counters, so the math is consistent; still may race across threads, use as an
@@ -220,8 +222,8 @@ internal sealed class TraceRecordRing
             throw new ArgumentOutOfRangeException(nameof(size), $"Record size {evenSize} cannot fit in a buffer of capacity {Capacity}");
         }
 
-        var head = _head.Value;
-        var tail = _tail.Value;
+        var head = _head.Value;                     // producer owns _head — plain read of its own cursor
+        var tail = Volatile.Read(ref _tail.Value);  // acquire: observe the consumer's freed space before deciding to overwrite (pairs with Drain's release)
         var headOffset = (int)(head & _mask);
         var wrapBytes = 0;
 
@@ -259,9 +261,9 @@ internal sealed class TraceRecordRing
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void Publish() =>
-        // On x64 TSO, this plain 64-bit store is naturally release-ordered relative to the preceding payload writes (all writes complete before
-        // any later write is visible). The consumer's plain read of _head sees either the old value or the new value, never a torn 64-bit store.
-        _head.Value = _pendingHead;
+        // Release store: publishes the payload bytes written into the reserved span before the consumer can observe the advanced _head (paired with the
+        // acquire load in Drain/IsEmpty). Free on x64 (TSO); emits stlr on arm64, where a plain store would be relaxed and could expose _head before its data.
+        Volatile.Write(ref _head.Value, _pendingHead);
 
     // ═══════════════════════════════════════════════════════════════════════
     // Consumer API
@@ -279,8 +281,8 @@ internal sealed class TraceRecordRing
     /// </remarks>
     public int Drain(Span<byte> destination)
     {
-        var tail = _tail.Value;
-        var head = _head.Value;
+        var tail = _tail.Value;                     // consumer owns _tail — plain read of its own cursor
+        var head = Volatile.Read(ref _head.Value);  // acquire: pairs with Publish's release so the record bytes copied below are fully visible
         var bytesWritten = 0;
 
         while (tail < head)
@@ -317,7 +319,7 @@ internal sealed class TraceRecordRing
             tail += evenSize;
         }
 
-        _tail.Value = tail;
+        Volatile.Write(ref _tail.Value, tail);  // release: only after the record bytes are copied out may the producer observe the freed space and reuse the slot
         return bytesWritten;
     }
 
