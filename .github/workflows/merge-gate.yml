@@ -152,9 +152,90 @@ jobs:
             echo "::endgroup::"
           done
 
+  # ---- Guard: a closing keyword that would auto-close a PULL REQUEST on merge. ----
+  #
+  # GitHub scans the PR description and every commit message for a bare `KEYWORD #N` adjacency
+  # (close/closes/closed, fix/fixes/fixed, resolve/resolves/resolved) and closes #N when the PR merges
+  # into the default branch. The parser has NO notion of negation — "does not retroactively fix #482"
+  # links and closes exactly like "fixes #482" — and because pull requests and issues share one
+  # numbering space, #N resolving to a PR closes that PR. That is not hypothetical: PR #483's body said
+  # "does not retroactively fix #482", which silently closed the unrelated in-flight PR #482 on merge.
+  # There is no repo/org setting to disable closing keywords, so this check is the only systemic defense.
+  #
+  # Fails ONLY when the referenced number is a pull request — `Closes #123` on a real issue is the
+  # intended, everyday use and stays green.
+  closing-keywords:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+    steps:
+      - name: Reject closing keywords that target a pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+          # Untrusted, user-controlled — passed via env, NEVER inlined into the shell body (script injection).
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -uo pipefail
+
+          # Same two surfaces GitHub itself parses: the PR description and the branch's commit messages.
+          # (Squash-merge concatenates commit messages into the squash body, so a stray keyword in any
+          # commit on the branch is just as live as one in the description.)
+          TEXT=$(printf '%s\n' "$PR_BODY"; gh api "repos/$REPO/pulls/$PR_NUM/commits" --paginate --jq '.[].commit.message')
+
+          # KEYWORD, optional colon, whitespace, #N — GitHub's adjacency rule. An intervening word
+          # ("fix PR #482") breaks the link and is therefore correctly NOT matched here either.
+          # The leading (^|[^[:alnum:]_]) is a word boundary: without it, "postfix #482" trips on the
+          # trailing "fix". Spelled out rather than \b so it does not depend on GNU-grep extensions.
+          NUMS=$(printf '%s\n' "$TEXT" \
+            | grep -oiE '(^|[^[:alnum:]_])(close[sd]?|fix(es|ed)?|resolve[sd]?)[[:space:]]*:?[[:space:]]+#[0-9]+' \
+            | grep -oE '#[0-9]+' | tr -d '#' | sort -un)
+
+          if [ -z "$NUMS" ]; then
+            echo "No closing keywords found — nothing to check."
+            exit 0
+          fi
+
+          fail=0
+          for n in $NUMS; do
+            kind=$(gh api "repos/$REPO/issues/$n" --jq 'if .pull_request then "pr" else "issue" end' 2>/dev/null || echo missing)
+            case "$kind" in
+              pr)
+                echo "::error::Closing keyword targets #$n, which is a PULL REQUEST — merging would auto-close it. Defuse the reference: backtick it (\`#$n\`), write 'PR #$n', or rephrase."
+                fail=1
+                ;;
+              missing)
+                echo "::warning::Closing keyword targets #$n, which does not exist in $REPO."
+                ;;
+              *)
+                echo "ok: #$n is an issue — will be closed on merge, as intended."
+                ;;
+            esac
+          done
+
+          if [ "$fail" -ne 0 ]; then
+            {
+              echo "### ❌ Closing keyword targets a pull request"
+              echo
+              echo "GitHub would auto-close it when this PR merges. Its parser matches a bare \`KEYWORD #N\`"
+              echo "adjacency and **ignores negation** — \`does not fix #N\` closes #N just like \`fixes #N\`."
+              echo
+              echo "Fix by breaking the adjacency in the PR description (or the offending commit message):"
+              echo "- \`\\\`#N\\\`\` — backticks"
+              echo "- \`PR #N\` / \`pull request #N\` — an intervening word"
+              echo "- rephrase to avoid close/fix/resolve before the reference"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "Closing keywords: all target issues. OK."
+
   # ---- The ONLY required check. Aggregates: skipped → pass, failure/cancelled → fail. ----
   gate:
-    needs: [changes, aws-gate, tla]
+    needs: [changes, aws-gate, tla, closing-keywords]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -163,11 +244,14 @@ jobs:
           changes='${{ needs.changes.result }}'
           aws='${{ needs.aws-gate.result }}'
           tla='${{ needs.tla.result }}'
-          echo "changes=$changes  aws-gate=$aws  tla=$tla"
+          keywords='${{ needs.closing-keywords.result }}'
+          echo "changes=$changes  aws-gate=$aws  tla=$tla  closing-keywords=$keywords"
           fail=0
-          # changes must succeed; aws-gate/tla may legitimately be 'skipped' (nothing relevant changed).
+          # changes must succeed; aws-gate/tla may legitimately be 'skipped' (nothing relevant changed),
+          # and closing-keywords is 'skipped' on push/workflow_dispatch (no PR body to scan).
           [ "$changes" = "success" ] || { echo "change-detection failed"; fail=1; }
           case "$aws" in failure|cancelled) echo "aws-gate failed"; fail=1 ;; esac
           case "$tla" in failure|cancelled) echo "tla failed"; fail=1 ;; esac
+          case "$keywords" in failure|cancelled) echo "closing-keywords guard failed"; fail=1 ;; esac
           if [ "$fail" -ne 0 ]; then echo "Merge gate: RED"; exit 1; fi
           echo "Merge gate: GREEN"
