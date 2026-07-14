@@ -185,15 +185,31 @@ jobs:
           # Same two surfaces GitHub itself parses: the PR description and the branch's commit messages.
           # (Squash-merge concatenates commit messages into the squash body, so a stray keyword in any
           # commit on the branch is just as live as one in the description.)
-          TEXT=$(printf '%s\n' "$PR_BODY"; gh api "repos/$REPO/pulls/$PR_NUM/commits" --paginate --jq '.[].commit.message')
+          #
+          # The description is Markdown, and GitHub does NOT parse references inside fenced blocks or
+          # inline code spans — so strip those first. Without this the guard flags any doc that merely
+          # *quotes* a closing keyword, including the backticked form its own error message recommends.
+          BODY=$(printf '%s\n' "$PR_BODY" \
+            | awk 'BEGIN { fence = 0 } /^[[:space:]]*```/ { fence = !fence; next } !fence' \
+            | sed 's/`[^`]*`//g')
+
+          # Commit messages are plain text to GitHub's parser — backticks do NOT defuse a keyword there.
+          # So they are scanned raw, with no stripping.
+          COMMITS=$(gh api "repos/$REPO/pulls/$PR_NUM/commits" --paginate --jq '.[].commit.message')
+
+          TEXT=$(printf '%s\n%s\n' "$BODY" "$COMMITS")
 
           # KEYWORD, optional colon, whitespace, #N — GitHub's adjacency rule. An intervening word
           # ("fix PR #482") breaks the link and is therefore correctly NOT matched here either.
           # The leading (^|[^[:alnum:]_]) is a word boundary: without it, "postfix #482" trips on the
           # trailing "fix". Spelled out rather than \b so it does not depend on GNU-grep extensions.
+          #
+          # The trailing `|| true` is load-bearing. The step's shell is `bash -e` and we add pipefail, so
+          # a grep that matches NOTHING (exit 1 — i.e. the healthy, common case) would propagate and kill
+          # the script before it prints anything, failing every clean PR. Do not remove it.
           NUMS=$(printf '%s\n' "$TEXT" \
             | grep -oiE '(^|[^[:alnum:]_])(close[sd]?|fix(es|ed)?|resolve[sd]?)[[:space:]]*:?[[:space:]]+#[0-9]+' \
-            | grep -oE '#[0-9]+' | tr -d '#' | sort -un)
+            | grep -oE '#[0-9]+' | tr -d '#' | sort -un || true)
 
           if [ -z "$NUMS" ]; then
             echo "No closing keywords found — nothing to check."
