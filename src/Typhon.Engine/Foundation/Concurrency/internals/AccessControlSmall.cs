@@ -19,6 +19,13 @@ namespace Typhon.Engine.Internals;
 /// Use this when memory is constrained and you don't need waiter tracking.</para>
 /// <para>For blocking operations, pass <c>ref WaitContext</c> to control timeout and cancellation.
 /// Use <c>ref WaitContext.Null</c> for infinite wait with zero overhead.</para>
+/// <para><b>Thread limit: 32,767 simultaneously-live threads.</b> The thread id occupies bits 16-31 of a
+/// signed <see cref="int"/>, so a managed thread id of 32,768 or above would set the sign bit and
+/// <see cref="LockedByThreadId"/> would sign-extend on read. This is half the 65,535 that
+/// <see cref="AccessControl"/> supports, and it is an accepted bound: the runtime allocates managed thread
+/// ids lowest-available-first (ids are recycled when threads die), so the ceiling applies to threads alive
+/// at the same instant, not to threads created over the process lifetime. 32K concurrent threads is far
+/// beyond any workload this engine targets.</para>
 /// </remarks>
 [StructLayout(LayoutKind.Sequential)]
 [PublicAPI]
@@ -30,7 +37,7 @@ internal struct AccessControlSmall
     // Bit layout, from least to most significant:
     // 15 Shared counter        (bits 0-14, max 32,767)
     //  1 Contention flag       (bit 15)
-    // 16 Thread Id             (bits 16-31)
+    // 16 Thread Id             (bits 16-31, max 32,767 — signed backing field, see <remarks>)
 
     private const int ThreadIdShift = 16;
     private const int SharedUsedCounterMask = 0x0000_7FFF;  // Bits 0-14 (15 bits, max 32,767)
