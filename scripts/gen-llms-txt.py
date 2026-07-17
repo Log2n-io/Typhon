@@ -7,7 +7,7 @@ Emits three artifacts into ``doc/_site`` (pure build output — never committed)
                           docs (H1, blockquote, ``##`` file-lists, ``## Optional``).
                           Relocated to the HOST ROOT at deploy time.
   2. ``llms-full.txt``  — Guide + Key Concepts + In-Depth Overview concatenated as
-                          one normalized-markdown corpus (~0.55 MB).
+                          one normalized-markdown corpus (61 pages, ~0.65 MB).
   3. per-page ``.md``   — ``<page>.html.md`` for all conceptual pages: clean
                           markdown, no frontmatter, no DocFX link syntax.
 
