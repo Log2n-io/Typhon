@@ -196,6 +196,8 @@
       href: Observability/strict-mode-checks.md
     - name: 'Telemetry Configuration & Gating'
       href: Observability/telemetry-config-gating.md
+    - name: 'Telemetry Flags Reference (generated)'
+      href: Observability/telemetry-flags-reference.md
     - name: Threshold-Based Resource Alerting
       href: Observability/threshold-alerting.md
     - name: OpenTelemetry Metrics Export
