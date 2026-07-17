@@ -57,7 +57,7 @@ conn.OnTickDelta += tickDelta =>
 - **Length-prefixed framing** — `[4-byte LE length][MemoryPack payload]`; the client reads the prefix to know exactly how many bytes to buffer before decoding.
 - **Serialize-once for shared state** — steady-state clients with no pending events, no per-client Views, and an Active subscription set matching exactly the shared Views computed that tick reuse one pre-built frame (one `MemoryPackSerializer.Serialize` call, N buffer writes). Clients with events, in-progress sync, or per-client Views fall back to individual serialization.
 - **I/O is off the tick's critical path** — the timer thread only enqueues bytes into per-client buffers; an `ManualResetEventSlim` signal wakes a separate I/O thread that performs the blocking `Socket.Send` calls.
-- **Backpressure, not unbounded growth** — if a client's send buffer is too full to hold the next frame, that tick's delta is dropped and the client is flagged for resync (full snapshot) instead of growing memory or stalling the server (see [Backpressure & Recovery](../../../claude/design/Subscriptions/05-subscriptions.md#backpressure--recovery)).
+- **Backpressure, not unbounded growth** — if a client's send buffer is too full to hold the next frame, that tick's delta is dropped and the client is flagged for resync (full snapshot) instead of growing memory or stalling the server (see Backpressure & Recovery).
 - **No built-in transport security or auth** — v1 treats an established connection as trusted; TLS, auth, and permissions are out of scope for this version.
 - **C#-only wire format today** — MemoryPack is a .NET serializer; cross-language client SDKs would need either a MemoryPack-compatible reader or a future pluggable serializer.
 

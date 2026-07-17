@@ -22,7 +22,7 @@ to any OTLP backend (Jaeger, Grafana Tempo, etc.) alongside the rest of the appl
 supplies matching OTel-semantic attribute-name constants (transaction, entity, index, page-cache, ECS). Spans started on it
 nest automatically under whatever `Activity.Current` the host already has open — no explicit context plumbing — and export
 through the standard OpenTelemetry SDK. **The engine itself does not yet call this source internally**: Transaction, Entity,
-B+Tree, and page-cache operations are instrumented instead through the engine's own [Typed-Event Profiler](../../../claude/overview/09-observability.md#98-typed-event-profiler)
+B+Tree, and page-cache operations are instrumented instead through the engine's own [Typed-Event Profiler](../../in-depth-overview/12-observability.md#3-the-typed-event-pipeline)
 (`TyphonEvent`) — a separate, higher-throughput, non-OTel pipeline consumed by the Typhon Workbench rather than an OTLP
 backend. The Profiler does capture `Activity.Current`'s trace context when a host span is open, so its records nest under
 an application's OTel trace for correlation, but no engine operation materializes as an `Activity` on this `ActivitySource`

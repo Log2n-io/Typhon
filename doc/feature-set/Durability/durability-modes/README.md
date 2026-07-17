@@ -73,7 +73,7 @@ tx2.Commit();                  // blocks ~15-85µs — durable on the data file'
   unconfirmed," never a rollback signal. See the [Commit Pipeline](../commit-pipeline.md) feature.
 - **Known gap:** the `DurabilityOverride` enum (`Default`/`Immediate`, escalating a single transaction inside an
   otherwise `Deferred`/`GroupCommit` UoW) is declared on the public API surface (`DurabilityMode.cs`) per
-  [ADR-005](../../../../claude/adr/005-durability-mode-per-uow.md), but is not yet wired into
+  ADR-005, but is not yet wired into
   `Transaction.Commit()` — there is currently no single-call escalation path for a commit within an existing
   UoW. Today's workaround for a critical operation inside an otherwise low-durability workload: commit it
   through its own `DurabilityMode.Immediate` UoW (`dbe.CreateQuickTransaction(DurabilityMode.Immediate)`), or,

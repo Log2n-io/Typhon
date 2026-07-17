@@ -32,10 +32,10 @@ without paying for a revision chain.
 
 | Sub-feature | Use it for | Write cost (Zen 4)            | Durability |
 |-------------|-----------|-------------------------------|------------|
-| [Versioned](./storage-mode-versioned.md) | Inventory, economy, progression, anything needing snapshot isolation or AS-OF reads | ~150-360 ns                   | Zero loss, full ACID |
-| [SingleVersion (Tick-Fence Durability)](./storage-mode-singleversion.md) | Position, velocity, health, cooldowns — high-frequency, loss-tolerant | ~3-10 ns                      | ≤1 tick loss |
-| [Transient](./storage-mode-transient.md) | Animation state, input buffers, pathfinding scratch, targeting info | ~3-5 ns                       | None — gone on crash |
-| [Committed Durability Discipline](./storage-mode-committed.md) | A `SingleVersion` write that must be atomic and zero-loss without MVCC (teleport, item pickup, currency debit) | ~25 ns stage / ~60 ns publish | Zero loss, atomic, no chain |
+| [Versioned](./storage-mode-versioned.md) | Inventory, economy, progression, anything needing snapshot isolation or AS-OF reads | ~250 ns                       | Zero loss, full ACID |
+| [SingleVersion (Tick-Fence Durability)](./storage-mode-singleversion.md) | Position, velocity, health, cooldowns — high-frequency, loss-tolerant | ~40 ns                        | ≤1 tick loss |
+| [Transient](./storage-mode-transient.md) | Animation state, input buffers, pathfinding scratch, targeting info | ~40 ns                        | None — gone on crash |
+| [Committed Durability Discipline](./storage-mode-committed.md) | A `SingleVersion` write that must be atomic and zero-loss without MVCC (teleport, item pickup, currency debit) | ~40 ns + commit publish       | Zero loss, atomic, no chain |
 
 ## ⚠️ Guarantees & limits
 

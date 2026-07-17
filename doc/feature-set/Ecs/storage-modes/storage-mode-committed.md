@@ -57,8 +57,8 @@ side.Commit();
 
 | Discipline | Write cost (Zen 4) | Durable when | Loss window | Isolation |
 |------------|---------------------|--------------|-------------|-----------|
-| `TickFence` (default) | ~3 ns | at the next tick fence | ≤ 1 tick | tick-fence |
-| `Commit` | ~25 ns stage / ~60 ns publish | at `Commit()` | zero | read-committed |
+| `TickFence` (default) | ~40 ns | at the next tick fence | ≤ 1 tick | tick-fence |
+| `Commit` | ~40 ns + commit publish | at `Commit()` | zero | read-committed |
 
 ## ⚠️ Guarantees & limits
 

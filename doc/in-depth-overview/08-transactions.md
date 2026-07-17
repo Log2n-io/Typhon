@@ -162,7 +162,7 @@ Commit walks every modified component type and, per entity:
    - Updates `LastCommitRevisionIndex`, increments `CommitSequence`, clears the revision element's `IsolationFlag`.
 4. `FlushEcsPendingOperations` → `FinalizeSpawns` — walks pending spawns from `Transaction.ECS.cs`, allocates final `EntityRecord`s, stamps `BornTSN = TSN`, copies into the cluster layout for cluster-eligible archetypes.
 5. `PersistAndFinalize`:
-   - Appends the transaction's logical record batch to the WAL: `DurabilityLog.Append(ref batch, ref wc)` — built by `CommitBatchBuilder`, encoded by `RecordCodec`, claimed into the commit buffer via `WalCommitBuffer.TryClaim`. (There is no WAL-less mode — [ADR-054](../../claude/adr/054-remove-no-wal-mode.md); a disk-free run registers an in-memory `IWalFileIO`.)
+   - Appends the transaction's logical record batch to the WAL: `DurabilityLog.Append(ref batch, ref wc)` — built by `CommitBatchBuilder`, encoded by `RecordCodec`, claimed into the commit buffer via `WalCommitBuffer.TryClaim`. (There is no WAL-less mode — ADR-054; a disk-free run registers an in-memory `IWalFileIO`.)
    - For `DurabilityMode.Immediate`: `_dbe.WalManager.RequestFlush()` then `_dbe.WalManager.WaitForDurable(highLsn, ref ctx)` blocks until the FUA write completes.
    - Transition state to `Committed`, record duration metric.
 

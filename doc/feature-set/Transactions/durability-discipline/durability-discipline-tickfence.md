@@ -43,7 +43,7 @@ using var tx = uow.CreateTransaction();
 ref var pos = ref tx.OpenMut(playerId).Write(Player.Pos);
 pos.X += velocity.X * dt;
 pos.Y += velocity.Y * dt;
-tx.Commit();                  // ~3 ns write; value rides the next tick fence to the WAL
+tx.Commit();                  // ~40 ns write; value rides the next tick fence to the WAL
 
 // Equally explicit, if calling out the choice matters at the call site:
 using var tx2 = uow.CreateTransaction(discipline: DurabilityDiscipline.TickFence);

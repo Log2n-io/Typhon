@@ -12,7 +12,7 @@ description: 'Swap the WAL''s disk backend for an in-memory one and run the full
 ## 🎯 What it solves
 
 WAL and checkpoint are mandatory in Typhon — there is no "no-WAL" engine mode
-([ADR-054](../../../claude/adr/054-remove-no-wal-mode.md)). That's correct for production, but a
+(ADR-054). That's correct for production, but a
 fast inner loop (unit tests, benchmarks, throwaway shell sessions) still needs to avoid touching
 disk on every WAL segment write. This seam lets a host replace the low-level file-IO backend the
 WAL talks to, so tests exercise the exact same durability pipeline as production without a

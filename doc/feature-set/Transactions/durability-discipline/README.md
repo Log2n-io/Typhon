@@ -36,8 +36,8 @@ transaction makes is commit-staged.
 
 | Sub-feature | Use when | Write cost (Zen 4) | Loss window |
 |-------------|----------|---------------------|--------------|
-| [TickFence discipline (default)](./durability-discipline-tickfence.md) | High-frequency, loss-tolerant data (positions, AI state, anything the next tick re-derives) | ~3 ns | ≤ 1 tick |
-| [Commit discipline (Variant-A staging)](./durability-discipline-commit.md) | Atomic, zero-loss writes that don't need snapshot isolation (teleport, item pickup, currency debit) | ~23 ns stage / ~65 ns publish | zero |
+| [TickFence discipline (default)](./durability-discipline-tickfence.md) | High-frequency, loss-tolerant data (positions, AI state, anything the next tick re-derives) | ~40 ns | ≤ 1 tick |
+| [Commit discipline (Variant-A staging)](./durability-discipline-commit.md) | Atomic, zero-loss writes that don't need snapshot isolation (teleport, item pickup, currency debit) | ~40 ns + commit publish | zero |
 
 ## ⚠️ Guarantees & limits
 
