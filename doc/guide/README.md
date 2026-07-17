@@ -56,6 +56,7 @@ Read **chapter 1** to get productive. Come back for the rest when the moment arr
 | **4** | [Querying & views](04-querying.md) | find entities, build reactive views, subscribe to changes |
 | **5** | [Systems & the tick loop](05-systems.md) | run logic over your data every tick, in parallel |
 | **6** | [Operating & going deeper](06-operating.md) | observe, set resource budgets, handle errors, find the deep docs |
+| **★** | [Isolation & durability cheat sheet](isolation-durability-cheatsheet.md) | reassure yourself about a guarantee — the one-page reference to keep open (not a chapter; visit any time) |
 
 > 📦 **Run it, don't just read it.** Every snippet in this guide is mirrored in a small runnable project — [`example/`](https://github.com/Log2n-io/Typhon/tree/main/doc/guide/example). `dotnet run --project doc/guide/example` walks the whole arc (spawn → read → transact → query → view → tick) and prints what each chapter describes.
 

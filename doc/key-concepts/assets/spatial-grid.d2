@@ -1,0 +1,73 @@
+# Spatial acceleration: coarse ConfigureSpatialGrid cells (sparse) → per occupied cell a
+# lazily-allocated PerCellSpatialSlot holding a static and a dynamic R-tree.
+# Render (needs container dimensions → elk layout):
+#   "/c/Program Files/D2/d2.exe" --layout elk --theme 0 spatial-grid.d2 spatial-grid.svg
+direction: right
+
+# ~11px text everywhere (D2 default is 16px).
+**.style.font-size: 11
+
+classes: {
+  empty: { label: ""; width: 100; height: 100; style: { fill: "#f4f4f5"; stroke-dash: 4 } }
+  occ:   { label: ""; width: 100; height: 100; style.fill: "#dbeafe" }
+  dot:   { label: ""; shape: circle; width: 13; height: 13; style.fill: "#f59e0b" }
+  box:   { label: ""; shape: square; width: 13; height: 13; style.fill: "#22c55e" }
+  txt:   { style: { fill: transparent; stroke: transparent } }
+  iconw: { label: ""; style: { fill: transparent; stroke: transparent } }
+}
+
+# The grid is the primary object — uniform square cells convey the spatial partition.
+# Occupied cells pack their shapes with a tight inner grid so content stays < the fixed cell size.
+grid: "Coarse grid — ConfigureSpatialGrid (cells are sparse)" {
+  grid-rows: 4
+  grid-gap: 6
+
+  r1c1.class: empty
+  r1c2.class: empty
+  r1c3: { class: occ; grid-columns: 3; grid-gap: 4; style: { fill: "#dbeafe"; stroke: "#2563eb"; stroke-width: 3 }
+    a.class: dot; b.class: dot; f.class: box }
+  r1c4.class: empty
+
+  r2c1.class: empty
+  r2c2: { class: occ; grid-columns: 2; grid-gap: 4; a.class: dot; f.class: box }
+  r2c3.class: empty
+  r2c4.class: empty
+
+  r3c1.class: empty
+  r3c2.class: empty
+  r3c3.class: empty
+  r3c4: { class: occ; grid-columns: 2; grid-gap: 4; a.class: dot; b.class: dot }
+
+  r4c1.class: empty
+  r4c2.class: empty
+  r4c3.class: empty
+  r4c4.class: empty
+}
+
+# Compact exploded view of one occupied cell.
+detail: "One occupied cell → PerCellSpatialSlot" {
+  s: "static clusters\n(fixed — e.g. food)" { style.fill: "#dcfce7" }
+  d: "dynamic clusters\n(moving — e.g. ants)" { style.fill: "#ffedd5" }
+  si: "StaticIndex — R-tree\nbuilt once · skips the fence" { style.fill: "#dcfce7" }
+  di: "DynamicIndex — R-tree\nrefreshed at fence · fat-AABB" { style.fill: "#ffedd5" }
+  s -> si: "SpatialMode.Static" { style.font-size: 11 }
+  d -> di: "SpatialMode.Dynamic" { style.font-size: 11 }
+}
+
+grid.r1c3 -> detail: "" { style.stroke: "#2563eb" }
+
+# Tight legend — same icons as the grid: orange circle = dynamic, green square = static.
+# Each icon sits in a transparent wrapper so the grid stretches the wrapper, not the icon.
+legend: Legend {
+  near: bottom-center
+  grid-columns: 2
+  grid-gap: 8
+  eiw: { class: iconw; i: "" { width: 20; height: 20; style: { fill: "#f4f4f5"; stroke-dash: 4 } } }
+  et:  "empty cell (no clusters)" { class: txt }
+  oiw: { class: iconw; i: "" { width: 20; height: 20; style.fill: "#dbeafe" } }
+  ot:  "occupied cell" { class: txt }
+  diw: { class: iconw; i: "" { shape: circle; width: 18; height: 18; style.fill: "#f59e0b" } }
+  dt:  "dynamic (moving)" { class: txt }
+  siw: { class: iconw; i: "" { shape: square; width: 18; height: 18; style.fill: "#22c55e" } }
+  st:  "static (fixed)" { class: txt }
+}

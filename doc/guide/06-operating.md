@@ -174,6 +174,8 @@ Where to go from here:
 - **Build something** — the loop from [ch.1](01-first-app.md) is a real, runnable starting point; grow it.
 - **Go deep** when you hit a wall — the **map** in §4 points at the exact reference chapter.
 
-## 🧩 The types you'll touch
+## 🧩 Key concepts & types
 
-`AddTyphonObservabilityBridge` / `ObservabilityBridgeOptions` · `typhon.telemetry.json` (profiler config) · `.typhon-trace` (recorded run) / `.typhon-replay` (saved attach session) · the Workbench (`tools/Typhon.Workbench`, `http://localhost:5173`) · `DatabaseCacheSize` · `DatabaseEngineOptions.Resources` (`TotalMemoryBudgetBytes`) · `WalWriterOptions` · `TyphonException` (`ErrorCode` / `IsTransient`) · `TyphonTimeoutException` · `ResourceExhaustedException` · `UniqueConstraintViolationException` · `SchemaValidationException`.
+**Concepts:** [DatabaseEngine](../key-concepts/database-engine.md) · [Page cache & paged store](../key-concepts/page-cache.md) · [WAL & checkpoint](../key-concepts/wal-checkpoint.md).
+
+**Exact calls:** `AddTyphonObservabilityBridge` / `ObservabilityBridgeOptions` · `typhon.telemetry.json` (profiler config) · `.typhon-trace` (recorded run) / `.typhon-replay` (saved attach session) · the Workbench (`tools/Typhon.Workbench`, `http://localhost:5173`) · `DatabaseCacheSize` · `DatabaseEngineOptions.Resources` (`TotalMemoryBudgetBytes`) · `WalWriterOptions` · `TyphonException` (`ErrorCode` / `IsTransient`) · `TyphonTimeoutException` · `ResourceExhaustedException` · `UniqueConstraintViolationException` · `SchemaValidationException`.

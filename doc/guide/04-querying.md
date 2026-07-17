@@ -142,6 +142,8 @@ When the consumer of a view is remote (a connected client, another process), **s
 
 Everything above runs on one transaction (one thread). When a query system needs to fan a read-only pass across many worker threads at a single consistent snapshot, that's the **`PointInTimeAccessor`** — one frozen TSN, one accessor per worker, zero per-entity locking. It's the read engine behind parallel systems, so it's covered with the runtime in [ch.5](05-systems.md). For now: know that "query a million entities across all cores at one snapshot" is a first-class, supported pattern.
 
+> 💡 **The name is about *parallelism*, not time travel.** `PointInTimeAccessor` freezes one *current* snapshot so every worker reads the same consistent moment — it does **not** read historical/past versions (Typhon has no user-facing as-of-past-version read API). The only "as-of" you get is snapshot isolation: a consistent view fixed at your transaction's start. See the cheat sheet's [naming traps](isolation-durability-cheatsheet.md#8-naming-traps).
+
 > A note on planning: the engine keeps lightweight **statistics** about component data and uses them when choosing how to run targeted scans. Like indexes, it's bookkeeping you benefit from but never maintain.
 
 ---
@@ -153,6 +155,8 @@ You can now find data (one-shot) and observe it (live views). The last big piece
 - **[Chapter 5 — Systems & the tick loop](05-systems.md):** systems, the scheduler, parallel reads with `PointInTimeAccessor`, and how one UoW per tick drives the whole thing.
 - **[Chapter 6 — Operating & going deeper](06-operating.md):** observability, resource budgets, error handling, and the map into the in-depth reference.
 
-## 🧩 The types you'll touch
+## 🧩 Key concepts & types
 
-`tx.Query<TArch>()` → `EcsQuery` · `With` / `Without` / `Exclude` / `Enabled` / `Disabled` · `Where` (broad) vs `WhereField` (indexed) · `WhereNearby` / `WhereInAABB` / `WhereRay` · `OrderByField` / `Skip` / `Take` · `Execute` / `Count` / `Any` / `foreach` · `ToView` → `EcsView` (`Contains` / `Refresh` / `GetDelta` / `ClearDelta`) · `PublishedView` (subscriptions).
+**Concepts:** [Query](../key-concepts/query.md) · [View](../key-concepts/view.md) · [Subscription](../key-concepts/subscription.md) · [Snapshot isolation](../key-concepts/snapshot-isolation.md) · [PointInTimeAccessor](../key-concepts/point-in-time-accessor.md).
+
+**Exact calls:** `tx.Query<TArch>()` → `EcsQuery` · `With` / `Without` / `Exclude` / `Enabled` / `Disabled` · `Where` (broad) vs `WhereField` (indexed) · `WhereNearby` / `WhereInAABB` / `WhereRay` · `OrderByField` / `Skip` / `Take` · `Execute` / `Count` / `Any` / `foreach` · `ToView` → `EcsView` (`Contains` / `Refresh` / `GetDelta` / `ClearDelta`) · `PublishedView` (subscriptions).

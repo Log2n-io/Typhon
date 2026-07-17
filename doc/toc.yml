@@ -1,10 +1,14 @@
-- name: Overview
-  href: in-depth-overview/README.md
 - name: Guides
   href: guide/README.md
+- name: Key Concepts
+  href: key-concepts/README.md
+- name: Feature Catalog
+  href: feature-set/README.md
+- name: Technical Overview
+  href: in-depth-overview/README.md
 - name: Tools
   href: tools/index.md
-- name: API
+- name: API Reference
   href: api/index.md
 - name: Demos
   href: demos/index.md

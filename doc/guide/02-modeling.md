@@ -216,6 +216,8 @@ You can now design a data model: archetypes, the storage mode per component, ind
 - **[Chapter 3 — Changing data](03-transactions.md):** the transaction model in full, durability modes, rollback, and precisely what each storage mode guarantees under a crash.
 - **[Chapter 4 — Querying & views](04-querying.md):** the query API in depth, plus reactive views that stay up to date as data changes.
 
-## 🧩 The types you'll touch
+## 🧩 Key concepts & types
 
-`[Component(StorageMode = …)]` · `[Index]` / `[Index(AllowMultiple = true)]` · `[SpatialIndex]` on an `AABB2F` field · `Point2F` / `Point3F` · `EntityLink<T>` · `Archetype<TSelf, TParent>` (inheritance) · generated `ReadAll` / `ReadWriteAll` · `ConfigureSpatialGrid` (in the `Open`/`AddTyphon` options) · `dbe.WriteTickFence` · `tx.Query<T>().WhereNearby/WhereInAABB/WhereRay` · `cluster.WriteSpatial`.
+**Concepts:** [Component](../key-concepts/component.md) · [Archetype](../key-concepts/archetype.md) · [Storage mode](../key-concepts/storage-mode.md) · [Index](../key-concepts/secondary-index.md) · [Spatial index](../key-concepts/spatial-index.md) · [Schema evolution](../key-concepts/schema-evolution.md) · [EntityLink](../key-concepts/entity-link.md).
+
+**Exact calls:** `[Component(StorageMode = …)]` · `[Index]` / `[Index(AllowMultiple = true)]` · `[SpatialIndex]` on an `AABB2F` field · `Point2F` / `Point3F` · `EntityLink<T>` · `Archetype<TSelf, TParent>` (inheritance) · generated `ReadAll` / `ReadWriteAll` · `ConfigureSpatialGrid` (in the `Open`/`AddTyphon` options) · `dbe.WriteTickFence` · `tx.Query<T>().WhereNearby/WhereInAABB/WhereRay` · `cluster.WriteSpatial`.

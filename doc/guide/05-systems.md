@@ -292,6 +292,8 @@ You can now run logic over your world every tick, in parallel, in real time. Tha
 
 - **[Chapter 6 — Operating & going deeper](06-operating.md):** observing a running engine (telemetry, the profiler), resource budgets, error-handling ground rules, and the map into the in-depth reference for when you outgrow this guide.
 
-## 🧩 The types you'll touch
+## 🧩 Key concepts & types
 
-`TyphonRuntime` (`Create` / `Start` / `Shutdown` / `OnFirstTick` / `OnShutdown` / `CurrentTickNumber`) · `RuntimeSchedule` (`PublicTrack.DeclareDag` / `Phases` / `Add`) · `CallbackSystem` / `QuerySystem` / `PipelineSystem` · `SystemBuilder` (`Name` / `Phase` / `Input` / `Reads` / `ReadsSnapshot` / `ReadsFresh` / `Writes` / `Parallel` / `WritesVersioned` / `After` / `Priority` / `CanShed`) · `Phase` (`Input` / `Simulation` / `Output` / `Cleanup`) · `TickContext` (`Transaction` / `Accessor` / `Entities` / `DeltaTime` / `TickNumber` / `CreateSideTransaction`) · `RuntimeOptions` (`BaseTickRate` / `WorkerCount`).
+**Concepts:** [System](../key-concepts/system.md) · [Typhon runtime](../key-concepts/runtime.md) · [Scheduler & phases](../key-concepts/scheduler.md) · [Tick](../key-concepts/tick.md) · [Transaction](../key-concepts/transaction.md) · [Unit of Work](../key-concepts/unit-of-work.md) · [PointInTimeAccessor](../key-concepts/point-in-time-accessor.md).
+
+**Exact calls:** `TyphonRuntime` (`Create` / `Start` / `Shutdown` / `OnFirstTick` / `OnShutdown` / `CurrentTickNumber`) · `RuntimeSchedule` (`PublicTrack.DeclareDag` / `Phases` / `Add`) · `CallbackSystem` / `QuerySystem` / `PipelineSystem` · `SystemBuilder` (`Name` / `Phase` / `Input` / `Reads` / `ReadsSnapshot` / `ReadsFresh` / `Writes` / `Parallel` / `WritesVersioned` / `After` / `Priority` / `CanShed`) · `Phase` (`Input` / `Simulation` / `Output` / `Cleanup`) · `TickContext` (`Transaction` / `Accessor` / `Entities` / `DeltaTime` / `TickNumber` / `CreateSideTransaction`) · `RuntimeOptions` (`BaseTickRate` / `WorkerCount`).
