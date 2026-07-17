@@ -30,4 +30,11 @@ rm -f doc/api/.manifest 2>/dev/null || true
 
 sh scripts/stage-api-bin.sh "$CONFIG"        # public DLLs + XML docs -> doc/.api-bin
 dotnet docfx doc/docfx.json                   # metadata (-> doc/api/ref) + build (-> doc/_site)
+
+# LLM-facing artifacts: llms.txt (host-root map), llms-full.txt (conceptual corpus),
+# and per-page <page>.html.md — a source-transform over docfx's manifest.json +
+# xrefmap.yml. Validation is baked in: an unresolved xref / .md link or residual
+# DocFX token is a hard error (set -e aborts the build). Never committed — pure
+# build output. Design: claude/design/Misc/llms-txt-generation.md
+python3 scripts/gen-llms-txt.py               # -> doc/_site/{llms.txt,llms-full.txt,**/*.html.md}
 echo "built doc/_site"

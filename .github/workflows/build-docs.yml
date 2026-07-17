@@ -105,6 +105,10 @@ jobs:
         run: |
           mkdir -p _publish/latest
           cp -r doc/_site/* _publish/latest/
+          # llms.txt must sit at the HOST ROOT — coding agents probe /llms.txt on the
+          # domain, not under /latest/. (build-docs.sh emitted it into doc/_site, so a
+          # copy also rides along under /latest/ — harmless; some agents probe both.)
+          cp doc/_site/llms.txt _publish/llms.txt
           echo "doc.typhondb.io" > _publish/CNAME
           printf '<!doctype html><meta charset="utf-8"><title>Typhon Documentation</title><meta http-equiv="refresh" content="0; url=/latest/"><a href="/latest/">Typhon Documentation</a>' > _publish/index.html
           # robots.txt must sit at the HOST root (crawlers only read /robots.txt); DocFX emits
