@@ -441,8 +441,13 @@ def _time_unit(ns_value):
 
 
 def _safe_filename(text):
-    """Replace unsafe characters for filenames."""
-    return re.sub(r'[<>()\=, ]+', '_', text).strip('_')
+    """Replace characters unsafe in a filename OR in the Markdown link that points at it.
+
+    `&` (and `#?%`) matter beyond the filesystem: the report embeds each chart as a Markdown
+    image link, and DocFX resolves that link as a URL — an unescaped `&` splits it at a query
+    string, so the chart 404s on doc.typhondb.io even though the file exists on disk.
+    """
+    return re.sub(r'[<>()=,&#?%\s]+', '_', text).strip('_')
 
 
 def _display_name(entry):

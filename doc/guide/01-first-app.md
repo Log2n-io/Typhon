@@ -176,6 +176,8 @@ This program creates and reads data once. A real simulation runs **systems** ove
 - **[Chapter 2 — Modeling your world](02-modeling.md):** archetypes in depth, indexes for fast lookups, the three **storage modes** (which decide what's ACID, what's fast-and-loose, and what's memory-only), and spatial queries.
 - **[Chapter 3 — Changing data](03-transactions.md):** the real transaction model, durability modes, rollback, and exactly what each storage mode guarantees.
 
-## 🧩 The types you'll touch
+## 🧩 Key concepts & types
 
-`[Component]` / `[Archetype]` · `Archetype<T>` + `Comp<T>` · `DatabaseEngine.Open` (`Register<T>` / `RegisterArchetype<T>`) · `EntityId` / `EntityRef` (`Open` / `Read`) · `Transaction` (via `CreateQuickTransaction`) · `EcsQuery` (via `tx.Query<Unit>()`).
+**Concepts:** [Component](../key-concepts/component.md) · [Archetype](../key-concepts/archetype.md) · [Entity](../key-concepts/entity.md) · [DatabaseEngine](../key-concepts/database-engine.md) · [Transaction](../key-concepts/transaction.md) · [Query](../key-concepts/query.md).
+
+**Exact calls:** `[Component]` / `[Archetype]` · `Archetype<T>` + `Comp<T>` · `DatabaseEngine.Open` (`Register<T>` / `RegisterArchetype<T>`) · `EntityId` / `EntityRef` (`Open` / `Read`) · `Transaction` (via `CreateQuickTransaction`) · `EcsQuery` (via `tx.Query<Unit>()`).

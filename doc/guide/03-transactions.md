@@ -10,6 +10,8 @@ Every change to your data enters Typhon through a **transaction**. Chapter 1 use
 
 This is a **key** chapter. The mental model here is what keeps your data correct under concurrency and crashes.
 
+> 📖 **Two ideas most databases fuse, Typhon keeps separate:** *isolation* (who can see a change) and *durability* (whether it survives a crash). You control them with three independent dials — `StorageMode` (per component), `DurabilityDiscipline` (per transaction), `DurabilityMode` (per UnitOfWork). This chapter tells the story; the **[Isolation & durability cheat sheet](isolation-durability-cheatsheet.md)** is the one-page reference to come back to.
+
 ---
 
 ## 1. Two layers: a UnitOfWork wraps Transactions
@@ -63,9 +65,11 @@ using (var tx = dbe.CreateQuickTransaction())
 
 | Mode | When the WAL is flushed | Commit latency | At risk on crash |
 |---|---|---|---|
-| `Deferred` | only on explicit flush / UoW dispose | lowest | everything since the last flush |
+| `Deferred` | only on explicit flush / UoW dispose | ~1–2 µs | everything since the last flush |
 | `GroupCommit` (default tuning) | automatically, ~every 5 ms | ~1–2 µs | ≤ one flush interval |
-| `Immediate` | fsync on every `Commit` | highest | nothing |
+| `Immediate` | fsync on every `Commit` | ~15–85 µs | nothing |
+
+> 💡 **`Deferred` and `GroupCommit` commit at the same speed** — both just append to the WAL buffer (~1–2 µs) and return. They differ only in *when* that buffer is flushed to disk, i.e. how much you can lose. `Immediate` is the one that pays a real latency cost, because `Commit()` blocks on the fsync.
 
 > 💡 **Why expose this at all?** Durability is a cost you should choose per workload, not have forced on you. A bulk world-load wants `Deferred` — flush once at the end. A game tick wants `GroupCommit` — microsecond commits, at most a few milliseconds of loss if the process dies. A financial-style write wants `Immediate` — never acknowledge a commit that isn't on disk. Same API, three points on the safety/latency curve.
 
@@ -101,12 +105,14 @@ Everything above — isolation, rollback, commit-controlled durability — is th
 |---|---|---|---|
 | Visible to others before `Commit` | no | yes, immediately | yes, immediately |
 | `Rollback` reverts the write | yes | no | no |
-| `Commit` decides durability (`DurabilityMode`) | yes | no — tick-fenced separately | no — never persisted |
+| `Commit` decides durability (`DurabilityMode`) | yes | no — tick-fenced, unless *Commit* discipline (below) | no — never persisted |
 | Concurrent writers | conflict-detected | last write wins | last write wins |
 
 So a transaction is a true ACID envelope **for the Versioned data it touches**. For SV/Transient components, the transaction still gives you three things — thread affinity, a consistent snapshot for any *Versioned* components in the same archetype, and atomic entity create/destroy — but it does **not** give you isolation, rollback, or commit-timed durability on those components' *data*. That's the deal you accepted when you chose the faster mode in [ch.2](02-modeling.md).
 
 The practical guidance: if a value's correctness depends on "did this transaction commit?", it must be Versioned. If it doesn't, a faster mode is free performance.
+
+> 💡 **The middle ground — a `SingleVersion` write that must never be lost.** By default a SingleVersion write is durable only at the next tick fence (≤ 1 tick of loss). When *one specific* write must be atomic **and** zero-loss — a teleport, an item pickup, a currency debit — but you don't need MVCC snapshots or history, open its transaction with the **`Commit` discipline**: `uow.CreateTransaction(discipline: DurabilityDiscipline.Commit)` (or mark the component `[Component(..., DefaultDiscipline = DurabilityDiscipline.Commit)]`). The write is staged, made atomic and zero-loss durable *at* `Commit`, then published in place — without paying for a revision chain. That's a fourth point on the safety curve; the **[cheat sheet](isolation-durability-cheatsheet.md#4-storage-mode-guarantee-matrix)** lays all four side by side.
 
 ---
 
@@ -116,7 +122,10 @@ You can now write, commit, roll back, and reason about what survives a crash and
 
 - **[Chapter 4 — Querying & views](04-querying.md):** finding entities efficiently, and views that stay current as data changes.
 - **[Chapter 5 — Systems & the tick loop](05-systems.md):** how the runtime drives one UoW per tick and one transaction per system, in parallel.
+- **[Isolation & durability cheat sheet](isolation-durability-cheatsheet.md):** the one-page reference — the two clocks, the three dials, the full guarantee matrix, and the crash contract. Bookmark it.
 
-## 🧩 The types you'll touch
+## 🧩 Key concepts & types
 
-`DatabaseEngine.CreateUnitOfWork(DurabilityMode)` · `UnitOfWork.CreateTransaction()` · `CreateQuickTransaction` / `CreateReadOnlyTransaction` · `DurabilityMode` (`Deferred` / `GroupCommit` / `Immediate`) · `Transaction.OpenMut` + `EntityRef.Write<T>` · `Commit()` / `Rollback()`.
+**Concepts** (the mental model — one page each): [Transaction](../key-concepts/transaction.md) · [Unit of Work](../key-concepts/unit-of-work.md) · [Snapshot isolation](../key-concepts/snapshot-isolation.md) · [Storage mode](../key-concepts/storage-mode.md) · [Durability — mode & discipline](../key-concepts/durability.md) · [Tick fence](../key-concepts/tick-fence.md).
+
+**Exact calls:** `DatabaseEngine.CreateUnitOfWork(DurabilityMode)` · `UnitOfWork.CreateTransaction(DurabilityDiscipline)` · `CreateQuickTransaction` / `CreateReadOnlyTransaction` · `Transaction.OpenMut` + `EntityRef.Write<T>` · `Commit()` / `Rollback()`.

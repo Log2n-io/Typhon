@@ -12,7 +12,7 @@ Durability is what makes Typhon ACID's "D". The contract is the usual one: once 
 
 Both pipelines run on dedicated background threads. Commit-time work on the application thread is minimal: serialize the records into a ring buffer, optionally wait for the WAL writer to confirm durability, return. Page writes are deferred — they're a background activity decoupled from the commit path.
 
-> **This chapter describes the "Minimal WAL" redesign (v2).** The WAL now carries **logical** records — `(EntityId, ComponentTypeId)` and a value, never pages or chunk ids — written by a single `RecordCodec`, and recovery re-applies them through the engine's own write primitives (`RecoveryApplier`) and then **rebuilds** derived structures instead of repairing pages. Full-Page Images are gone. The full design lives in [`claude/design/Durability/MinimalWal/`](../../claude/design/Durability/MinimalWal/); correctness is gated on invariant rules (`claude/rules/durability.md`), a crash-sim sweep, and TLA+ specs.
+> **This chapter describes the "Minimal WAL" redesign (v2).** The WAL now carries **logical** records — `(EntityId, ComponentTypeId)` and a value, never pages or chunk ids — written by a single `RecordCodec`, and recovery re-applies them through the engine's own write primitives (`RecoveryApplier`) and then **rebuilds** derived structures instead of repairing pages. Full-Page Images are gone. The full design lives in `claude/design/Durability/MinimalWal/`; correctness is gated on invariant rules (`claude/rules/durability.md`), a crash-sim sweep, and TLA+ specs.
 >
 > **Transitional note:** the v1 **persisted UoW Registry** and the v1 `WalRecovery` scan still exist and run alongside the v2 path (§7, §8). Commit *fate* for logical records is already decided by the WAL commit marker, not the registry, so the registry is redundant for fate — but its removal is an independent, still-pending cleanup (not part of the now-shipped Committed discipline).
 
@@ -94,7 +94,7 @@ Under `Immediate`, the commit path calls `WalManager.RequestFlush()` and then bl
 
 ### `DurabilityDiscipline` (separate enum — not an extension of `DurabilityOverride`)
 
-[`DurabilityDiscipline`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Schema.Definition/DurabilityDiscipline.cs) is a **distinct enum** — `TickFence` (default) and `Commit` — selecting the per-component *durability discipline* for a **SingleVersion**-layout component. It is **not** a new `DurabilityOverride` value and **not** a new `StorageMode`: it is an orthogonal axis layered on the existing per-UoW timing knob. `TickFence` keeps the default in-place, last-writer-wins, tick-fence-batched behavior (≤1-tick loss). `Commit` stages writes per transaction and makes them atomic + zero-loss durable at `Transaction.Commit` via a logical-redo WAL record, then publishes in place — read-committed, O(1) rollback, **no revision chain**. It applies only to SingleVersion (Versioned is always commit-scoped; Transient is never durable). Authoritative spec: [`claude/design/Ecs/committed-storage-mode.md`](../../claude/design/Ecs/committed-storage-mode.md).
+[`DurabilityDiscipline`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Schema.Definition/DurabilityDiscipline.cs) is a **distinct enum** — `TickFence` (default) and `Commit` — selecting the per-component *durability discipline* for a **SingleVersion**-layout component. It is **not** a new `DurabilityOverride` value and **not** a new `StorageMode`: it is an orthogonal axis layered on the existing per-UoW timing knob. `TickFence` keeps the default in-place, last-writer-wins, tick-fence-batched behavior (≤1-tick loss). `Commit` stages writes per transaction and makes them atomic + zero-loss durable at `Transaction.Commit` via a logical-redo WAL record, then publishes in place — read-committed, O(1) rollback, **no revision chain**. It applies only to SingleVersion (Versioned is always commit-scoped; Transient is never durable). Authoritative spec: `claude/design/Ecs/committed-storage-mode.md`.
 
 ---
 
@@ -200,7 +200,7 @@ When the active segment passes 75 % utilization, the writer seals it, opens the 
 - **Windows** — `FILE_FLAG_NO_BUFFERING` bypasses the OS page cache; FUA (`FILE_FLAG_WRITE_THROUGH`) adds per-write durability.
 - **Linux / macOS** — `NoBuffering` is omitted; durability relies on `FileOptions.WriteThrough` (FUA on supporting hardware) plus explicit `RandomAccess.FlushToDisk` (`fsync`/`fdatasync`).
 
-`IWalFileIO` is the internal I/O seam; tests substitute [`InMemoryWalFileIO`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/internals/InMemoryWalFileIO.cs) to run the full pipeline without disk (the supported "no disk" mode — there is no no-WAL mode, [ADR-054](../../claude/adr/054-remove-no-wal-mode.md)).
+`IWalFileIO` is the internal I/O seam; tests substitute [`InMemoryWalFileIO`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/internals/InMemoryWalFileIO.cs) to run the full pipeline without disk (the supported "no disk" mode — there is no no-WAL mode, ADR-054).
 
 ---
 
@@ -387,4 +387,4 @@ The reasoning (per ADR): every alternative — buffer-and-retry, degraded read-o
 - [02-storage](02-storage.md) — DirtyCounter / ActiveChunkWriters, `MMF.OnBackpressure`, page CRC & seqlock snapshots
 - [08-transactions](08-transactions.md) — the UoW registry and state machine, `Transaction.Commit` invoking the WAL via `DurabilityLog.Append`
 - [14-errors](14-errors.md) — `WalWriteException`, `WalClaimTooLargeException`, `WalSegmentException`, `CorruptionException`
-- Design: [`claude/design/Durability/MinimalWal/`](../../claude/design/Durability/MinimalWal/) · Rules: [`claude/rules/durability.md`](../../claude/rules/durability.md)
+- Design: `claude/design/Durability/MinimalWal/` · Rules: `claude/rules/durability.md`

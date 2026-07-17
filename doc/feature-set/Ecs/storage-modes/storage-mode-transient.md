@@ -47,7 +47,7 @@ tx.Commit();
 using var tx2 = dbe.CreateQuickTransaction();
 var e = tx2.OpenMut(id);
 ref var anim = ref e.Write(Actor.Anim);
-anim.Time += dt;               // ~3-5 ns, no dirty tracking, no WAL
+anim.Time += dt;               // ~40 ns write, no dirty tracking, no WAL
 ```
 
 | Option | Default | Effect |
@@ -57,7 +57,7 @@ anim.Time += dt;               // ~3-5 ns, no dirty tracking, no WAL
 ## ⚠️ Guarantees & limits
 
 - All data is lost on crash and on every restart — there is no recovery path, by design.
-- Write/read cost ~3-5 ns — the cheapest mode in the engine, comparable to raw Flecs/DOTS arrays.
+- Write ~40 ns / read ~15 ns — the cheapest mode in the engine (no dirty-tracking, no WAL), in the same class as raw Flecs/DOTS ECS array access.
 - No locking, no torn-data protection, no isolation — "developer owns concurrency" (same model as Unity
   DOTS/Flecs); two concurrent writes to the same component are undefined.
 - An entity can mix `Transient` components with `Versioned`/`SingleVersion` ones; on recovery only the

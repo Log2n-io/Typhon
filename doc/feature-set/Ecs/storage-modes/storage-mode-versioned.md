@@ -57,7 +57,7 @@ tx2.Commit();                 // new revision becomes HEAD, durable
 - Full snapshot isolation: concurrent transactions never see another transaction's uncommitted writes;
   conflicting writes are detected at commit.
 - `tx.Rollback()` discards the staged revision entirely — the prior committed value is untouched.
-- The most expensive mode: ~150-580 ns/write versus ~3-10 ns for `SingleVersion`/`Transient` (copy-on-write
+- The most expensive mode: ~250 ns/write versus ~40 ns for `SingleVersion`/`Transient` — ~6× (copy-on-write
   allocation, revision-chain append, eventual chain GC).
 - Carries per-entity chain memory overhead even when a component is rarely written.
 - Required for `ReadsSnapshot` / temporal "AS OF" reads and TAIL (committed-value) indexes — these guarantees

@@ -58,7 +58,7 @@ dbe.WriteTickFence(tickNumber);  // batches every dirty SingleVersion component 
 
 ## ⚠️ Guarantees & limits
 
-- Write cost ~3-10 ns — an in-place store, no allocation, no revision chain.
+- Write cost ~40 ns — an in-place store into the pinned page (no allocation, no revision chain); ~6× cheaper than a `Versioned` write.
 - Crash recovery to the last completed `WriteTickFence` call — up to one tick of writes can be lost, but state
   is never torn or corrupted.
 - Forgetting to call `WriteTickFence` silently degrades a `SingleVersion` component to `Transient`-like

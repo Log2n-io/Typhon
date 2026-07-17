@@ -70,7 +70,7 @@ conn.OnTickDelta += tickDelta =>
   individual entities are read (and their current data sent) lazily as their batch comes up, so an entity
   changed mid-sync arrives with whatever state it has when its turn comes, not the state at subscribe time.
 - **Fixed batch size, not adaptive** — `SyncBatchSize` is a flat per-tick cap; it does not currently scale down
-  automatically under tick overload (see [Subscription Cost & Overload Integration](../../../claude/design/Subscriptions/05-subscriptions.md#subscription-cost--overload-integration)).
+  automatically under tick overload (see Subscription Cost & Overload Integration).
   Tune it down if large syncs are pushing `OutputPhaseMs` over budget.
 - **Per-client, per-View state** — sync progress is tracked independently for each (client, View) pair; one
   client mid-sync on a View does not block or slow other clients' deltas on the same View.

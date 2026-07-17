@@ -55,6 +55,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The telemetry flag reference (doc/feature-set/Observability/telemetry-flags-reference.md +
+      # typhon.telemetry.template.jsonc) is GENERATED from TelemetryConfig.cs. Regenerate and diff:
+      # if the committed artifacts drift from source, fail with the delta rather than publish a
+      # reference that lies. There is no "should we run the generator?" heuristic — the output is a
+      # pure function of the source, so the diff IS the staleness detector and it cannot miss.
+      # Design: claude/design/doc-accuracy-and-generated-artifacts.md
+      - name: Verify generated telemetry reference is up to date
+        run: python3 scripts/gen-telemetry-reference.py --check
+
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
@@ -68,7 +77,26 @@ jobs:
         run: dotnet build src/Typhon.Shell -c Release
 
       - name: Build docs (stage API -> docfx metadata into api/ref + build)
-        run: sh scripts/build-docs.sh Release
+        shell: bash
+        run: |
+          set -o pipefail                       # without this, tee's exit code would mask a docfx failure
+          sh scripts/build-docs.sh Release 2>&1 | tee /tmp/docfx.log
+
+      # Link/xref integrity gate — the deterministic half of the doc-accuracy design.
+      #
+      # Deliberately NOT `--warningsAsErrors`: `docfx metadata` emits two standing
+      # InvalidAssemblyReference warnings (System.IO.Hashing, Microsoft.Bcl.HashCode — transitive
+      # deps absent from .api-bin) that say nothing about doc content and would fail every run.
+      # Gate instead on exactly the classes that make the PUBLISHED site wrong: dead file links,
+      # dangling anchors, and unresolved xrefs. Baseline at the time of writing: zero of these.
+      - name: Gate on broken links / unresolved xrefs
+        shell: bash
+        run: |
+          if grep -nE "InvalidFileLink|InvalidBookmark|UidNotFound|InvalidXref" /tmp/docfx.log; then
+            echo "::error::Docs contain broken links or unresolved xrefs (listed above). Reproduce locally with: sh scripts/build-docs.sh Release"
+            exit 1
+          fi
+          echo "Link/xref integrity: clean."
 
       # Serve under /latest/ (relocatable — DocFX links are page-relative) so a future switcher can
       # add /vX.Y/ siblings without moving files. CNAME pins the custom domain; the root redirect sends

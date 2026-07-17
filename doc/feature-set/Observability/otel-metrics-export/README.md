@@ -41,7 +41,7 @@ attached pays nothing beyond — for the Resource Graph bridge — the backgroun
 - The two exporters are independent — different `Meter` names (`Typhon.Resources` vs `Typhon.ECS`), different
   registration paths, no shared state. You can wire up either, both, or neither.
 - **Partial coverage** — only resource-graph nodes and ECS archetype/transient state are exported this way today.
-  The broader metrics catalog in [`claude/overview/09-observability.md` §9.2](../../../../claude/overview/09-observability.md#92-metrics)
+  The broader metrics catalog in the [per-domain named-metrics catalog](../per-domain-metrics-catalog.md)
   (transaction counts, lock contention, B+Tree mutations, WAL/checkpoint counters) is captured by the
   [Typed-Event Profiler](../README.md) and `TickTelemetryRing`, not yet bridged into OTel instruments.
 - `EcsMetricsExporter` has no DI registration extension yet (unlike the Resource Graph bridge's

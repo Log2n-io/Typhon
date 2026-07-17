@@ -14,7 +14,7 @@ description: 'Forward-incremental .pack backups scoped to changed pages; restore
 
 A database that only ever recovers to "last checkpoint plus WAL replay" has no answer for disk failure, accidental
 mass-delete, or wanting a snapshot from four hours ago — the WAL itself is recycled after each checkpoint
-([ADR-014](../../../claude/adr/014-no-point-in-time-recovery.md)), so nothing but the live data file survives past
+(ADR-014), so nothing but the live data file survives past
 that point. A naive backup that copies the whole database every time doesn't scale: I/O cost is proportional to
 database size, not to how much actually changed. PIT Backup gives Typhon an external, self-contained recovery
 point whose cost tracks the change rate, without taxing the live transaction path to get it.
@@ -32,9 +32,9 @@ it does after a crash. Backups therefore never capture derived-structure pages a
 backup-specific replay code. Periodic **compaction** collapses the chain into a fresh base to bound restore time; a
 **retention policy** prunes old points.
 
-> Design note: the original draft ([6-part series](../../../claude/design/Durability/PitBackup/README.md)) protected
+> Design note: the original draft (6-part series) protected
 > the live capture window with a scoped Copy-on-Write shadow buffer. That mechanism was dropped in the 2026-06-11
-> redesign ([MinimalWal README §P3, decision D11](../../../claude/design/Durability/MinimalWal/README.md)) in favor
+> redesign (MinimalWal README §P3, decision D11) in favor
 > of plain post-checkpoint reads — consistency is restored at restore time by RecoveryDriver instead of guaranteed at
 > capture time, which is simpler and reuses an already-proven healing path.
 
@@ -73,7 +73,7 @@ typhon-backup verify   --source <backup-dir> [--point <id|datetime>]
 - **Zero transaction-path overhead when idle** — the only steady-state cost is the checkpoint pipeline's one bit-OR per flushed page.
 - **Restore heals, it doesn't trust** — the assembled base is run through `RecoveryDriver`, the identical mechanism crash recovery uses; derived structures are always rebuilt, never restored byte-for-byte.
 - **One backup at a time** — compaction and pruning run offline against `.pack` files only and never touch the live engine.
-- **Fine-grained point-in-time restore is a separate, optional layer** — retaining WAL segments past checkpoint (revising [ADR-014](../../../claude/adr/014-no-point-in-time-recovery.md)) is planned but not part of the base design; without it, restore granularity is "whichever backup point you took."
+- **Fine-grained point-in-time restore is a separate, optional layer** — retaining WAL segments past checkpoint (revising ADR-014) is planned but not part of the base design; without it, restore granularity is "whichever backup point you took."
 
 ## 🔗 Related
 

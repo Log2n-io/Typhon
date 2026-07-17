@@ -14,6 +14,5 @@
   href: 05-systems.md
 - name: 6 — Operating
   href: 06-operating.md
-- name: Feature Catalog
-  href: ../feature-set/toc.yml
-  homepage: ../feature-set/README.md
+- name: Cheat sheet — Isolation & durability
+  href: isolation-durability-cheatsheet.md
