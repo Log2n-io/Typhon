@@ -15,7 +15,7 @@
 
 ### ⚠️ The engine is in active development — pre-alpha, stabilizing fast, not yet production-hardened. ⚠️
 
-Early **[alpha NuGet packages](https://www.nuget.org/packages/Typhon)** and full **[reference documentation](https://doc.typhondb.io)** are now live. Most of the public API is now stable — and you can **[open an issue](https://github.com/Log2n-io/Typhon/issues)** for help, questions, or feedback.
+Early **[alpha NuGet packages](https://www.nuget.org/packages/Typhon)** and full **[reference documentation](https://doc.typhondb.io)** are now live. Most of the public API is now stable — and you can **[open an issue](https://github.com/Log2n-io/Typhon/issues)** or go to the **[discussions](https://github.com/Log2n-io/Typhon/discussions)** for help, questions, or feedback.
 
 
 **A microsecond-latency ACID data engine combining ECS archetype storage with tick-based parallel execution.**
