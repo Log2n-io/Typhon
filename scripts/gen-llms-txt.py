@@ -147,7 +147,10 @@ def resolve_target(target, src, out, xref, errors):
         if href is None:
             errors.append(("xref", uid, src))
             return None
-        return SITE + href
+        hpath, hsep, hfrag = href.partition("#")
+        if hpath in _md_pages:                          # conceptual page -> link its clean-markdown sibling
+            hpath += ".md"
+        return SITE + hpath + (("#" + hfrag) if hsep else "")
     if target.startswith("#"):
         return None                                   # in-page anchor
     if ABS_SCHEME.match(target) or target.startswith("//") or target.startswith("/"):
@@ -160,6 +163,8 @@ def resolve_target(target, src, out, xref, errors):
         if dest is None:
             errors.append(("mdlink", target, src))
             return None
+        if dest in _md_pages:                           # conceptual page -> link its clean-markdown sibling
+            dest += ".md"
         return SITE + dest + frag
     # Relative asset (svg/png/…) — resolve against the page's OUTPUT dir.
     asset = posixpath.normpath(posixpath.join(posixpath.dirname(out), path))
@@ -388,8 +393,9 @@ def sort_key(src):
 
 def run(write):
     t0 = time.time()
-    global _src2out
+    global _src2out, _md_pages
     base, pages, _src2out = load_manifest()
+    _md_pages = {pg["out"] for pg in pages}   # conceptual outputs we emit a `.md` sibling for
     xref = load_xrefmap()
     errors = []           # unresolved xref / mdlink — hard failures
     residual = []         # residual DocFX tokens in emitted output — hard failures
@@ -434,7 +440,7 @@ def run(write):
     for s in full_srcs:
         r = by_src[s]
         full_parts.append(
-            "\n\n<!-- ===== {}{} ===== -->\n\n{}".format(SITE, r["out"], r["md"]))
+            "\n\n<!-- ===== {}{}.md ===== -->\n\n{}".format(SITE, r["out"], r["md"]))
     full_txt = "".join(full_parts)
 
     # llms.txt — sectioned map.
@@ -464,7 +470,7 @@ def run(write):
 def build_index(rows, by_src):
     def line(r):
         d = (": " + r["desc"]) if r["desc"] else ""
-        return "- [{}]({}{}){}".format(r["title"], SITE, r["out"], d)
+        return "- [{}]({}{}.md){}".format(r["title"], SITE, r["out"], d)
 
     out = []
     out.append("# Typhon\n")
@@ -472,8 +478,9 @@ def build_index(rows, by_src):
         "\n> Real-time, low-latency ACID database engine — an ECS architecture "
         "with MVCC snapshot isolation, targeting microsecond-level operations. "
         "This file maps Typhon's conceptual documentation for coding agents "
-        "building on the `Typhon` NuGet package. Every page below has a "
-        "clean-markdown sibling at `<url>.md`. Full corpus: "
+        "building on the `Typhon` NuGet package. Every link below points to the "
+        "clean-markdown (`.md`) version of the page; drop the `.md` suffix for "
+        "the rendered HTML page. Full corpus: "
         "https://doc.typhondb.io/latest/llms-full.txt\n")
     out.append("\n" + read_preamble() + "\n")
 
@@ -506,13 +513,14 @@ def build_index(rows, by_src):
                    "(also shipped as XML docs inside the NuGet package).".format(SITE))
     bench = [r for r in rows if r["src"].startswith("../benchmark/")]
     for r in bench:
-        out.append("- [Benchmarks]({}{}): CI-committed reference-hardware results."
+        out.append("- [Benchmarks]({}{}.md): CI-committed reference-hardware results."
                    .format(SITE, r["out"]))
-    leaves = [r for r in rows
-              if r["src"].startswith("feature-set/")
-              and not re.match(r'^feature-set/[^/]+/README\.md$', r["src"])]
-    leaves.sort(key=lambda r: sort_key(r["src"]))
-    out.extend(line(r) for r in leaves)
+    # Feature-catalog ROOT index only. The full drill-down (subcategory indexes +
+    # every leaf) is reachable from the `## Feature Catalog` category indexes above
+    # — each links every feature in its subsystem — so listing it flat here would
+    # only bloat the map (llmstxt.org: a curated overview, not a sitemap dump).
+    root = [r for r in rows if r["src"] == "feature-set/README.md"]
+    out.extend(line(r) for r in root)
 
     return "\n".join(out) + "\n"
 
@@ -545,8 +553,13 @@ def _validate_index_links(llms, residual):
             continue
         # llms.txt is host-root; llms-full.txt + pages live under /latest/.
         local = os.path.join(SITE_DIR, rel.replace("/", os.sep))
-        if not os.path.exists(local):
-            residual.append(("index-link-404:" + rel, "llms.txt"))
+        if os.path.exists(local):
+            continue
+        # `--check` runs without writing the `.md` siblings; accept a `.html.md`
+        # target when its `.html` base exists (we emit a `.md` for every page).
+        if rel.endswith(".html.md") and os.path.exists(local[:-len(".md")]):
+            continue
+        residual.append(("index-link-404:" + rel, "llms.txt"))
 
 
 def report(errors, residual):
