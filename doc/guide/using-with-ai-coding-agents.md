@@ -60,7 +60,7 @@ and read back. Split into two files so the top-level `Program.cs` stays clean.
 using Typhon.Engine;
 using Typhon.Schema.Definition;
 
-namespace Skirmish;   // (1) types live in a namespace, never the global one
+namespace Skirmish;   // (1) a named namespace is tidier for a real project — the global namespace also works
 
 // (2) a component is a blittable struct, >= 8 bytes, public fields
 [Component("Skirmish.UnitData", 1, StorageMode = StorageMode.Versioned)]  // (9) per-component storage mode
