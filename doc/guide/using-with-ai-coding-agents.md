@@ -39,12 +39,12 @@ API, not a style preference.
 
 | # | Do | Don't |
 |---|----|-------|
-| 1 | Declare `[Component]` / `[Archetype]` types **inside a `namespace`** | Declare them in the global namespace of a top-level-statements file — the source generator can't emit valid code and you get a wall of errors in generated files |
+| 1 | Declare `[Component]` / `[Archetype]` types in **any namespace** — the global namespace of a top-level-statements file works too |
 | 2 | Make components **≥ 8 bytes** with **`public`** fields | Use a single 4-byte field, or `private` padding — the schema sizes on public fields, not `sizeof(T)` |
 | 3 | Query with the fluent builder `tx.Query<TArch>().Where<TComp>(x => …).Count()` | Write LINQ-to-SQL style `tx.Query(x => x.Score >= 50)` — the filtered component is a separate generic argument |
 | 4 | **Read/mutate each entity via `tx.Open(id)`** (query to *find*, open to *read*) | Read directly off the reference the query enumerator yields |
 | 5 | Spawn with `tx.Spawn<TArch>(TArch.Handle.Set(new TComp{…}))` | Pass field values or a constructed instance to `Spawn` |
-| 6 | Bootstrap with `DatabaseEngine.Open(path, …)`, or DI `services.AddTyphon(…)` **plus `AddLogging()`** | `new DatabaseEngine(...)` (no public constructor); DI without `AddLogging()` throws an opaque logger error |
+| 6 | Bootstrap with `DatabaseEngine.Open(path, …)`, or DI `services.AddTyphon(…)` (`AddLogging()` is optional — it's self-registered) | `new DatabaseEngine(...)` (no public constructor) |
 | 7 | `using Typhon.Schema.Definition;` for the attributes | Rely on `using Typhon.Engine;` alone — `Archetype<T>` (base class) and `[Archetype]` (attribute) share a name and collide |
 | 8 | Do all writes **inside a transaction** and `Commit()` | Assume `Commit()` implies durability — that depends on the unit-of-work's durability mode |
 | 9 | Pick a **storage mode per component** (`Versioned` = full ACID, `SingleVersion`, `Transient`, `Committed`) | Treat storage/ACID as a global switch |
@@ -123,8 +123,8 @@ If your agent isn't reading `llms.txt` automatically, paste this block into your
 
 ```text
 Typhon is an ECS database (not SQL) from the `Typhon` NuGet package. Rules:
-- Model data as [Component] blittable structs (>= 8 bytes, public fields), declared inside a namespace
-  (never the global namespace of a top-level-statements file). Add `using Typhon.Schema.Definition;`.
+- Model data as [Component] blittable structs (>= 8 bytes, public fields). Add `using Typhon.Schema.Definition;`.
+  (Any namespace works, including the global namespace of a top-level-statements file.)
 - An archetype is `[Archetype] partial class Foo : Archetype<Foo>` with
   `public static readonly Comp<T> X = Register<T>();`.
 - Open the engine with DatabaseEngine.Open(path, o => o.Register<T>().RegisterArchetype<Foo>()).

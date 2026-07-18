@@ -113,19 +113,6 @@ internal struct AccessControlSmall
 
         public bool Commit() => Interlocked.CompareExchange(ref _source, NewValue, Initial) == Initial;
 
-        public void ForceCommit(Func<int, int> valueToCommit)
-        {
-            while (true)
-            {
-                Fetch();
-                NewValue = valueToCommit(Initial);
-                if (Commit())
-                {
-                    return;
-                }
-            }
-        }
-
         public void Fetch() => Initial = _source;
 
         public bool Wait()
@@ -212,16 +199,21 @@ internal struct AccessControlSmall
     /// <summary>Exits shared (reader) access.</summary>
     public void ExitSharedAccess()
     {
-        var ac = new AtomicChange(ref _data);
-        ac.ForceCommit(d =>
+        // Hand-rolled CAS retry (no delegate) — see #486: a ForceCommit(lambda) here allocated the delegate on this hot path.
+        while (true)
         {
-            var counter = d & SharedUsedCounterMask;
-            if (counter == 0)
+            int initial = _data;
+            if ((initial & SharedUsedCounterMask) == 0)
             {
                 ThrowInvalidOperationException("Exiting shared access without entering it first");
             }
-            return d - 1;
-        });
+
+            int newValue = initial - 1;
+            if (Interlocked.CompareExchange(ref _data, newValue, initial) == initial)
+            {
+                break;
+            }
+        }
 
         TyphonEvent.EmitConcurrencyAccessControlSmallSharedRelease((ushort)Environment.CurrentManagedThreadId);
     }
@@ -302,16 +294,24 @@ internal struct AccessControlSmall
     /// <summary>Exits exclusive (writer) access.</summary>
     public void ExitExclusiveAccess()
     {
-        var ac = new AtomicChange(ref _data);
         var expectedThread = Environment.CurrentManagedThreadId << ThreadIdShift;
-        ac.ForceCommit(d =>
+
+        // Hand-rolled CAS retry (no delegate) — see #486: passing a lambda capturing `expectedThread` to ForceCommit
+        // allocated a display-class instance (24 B) on every exclusive release, on the lock embedded in every page header.
+        while (true)
         {
-            if ((d & ~SharedUsedCounterMask & ~ContentionFlagMask) != expectedThread)
+            int initial = _data;
+            if ((initial & ~SharedUsedCounterMask & ~ContentionFlagMask) != expectedThread)
             {
                 ThrowInvalidOperationException("ExitExclusiveAccess called by a thread that doesn't own the lock");
             }
-            return d & ContentionFlagMask;  // Preserve only contention flag
-        });
+
+            int newValue = initial & ContentionFlagMask;  // Preserve only contention flag
+            if (Interlocked.CompareExchange(ref _data, newValue, initial) == initial)
+            {
+                break;
+            }
+        }
 
         TyphonEvent.EmitConcurrencyAccessControlSmallExclusiveRelease((ushort)Environment.CurrentManagedThreadId);
     }
@@ -376,18 +376,23 @@ internal struct AccessControlSmall
     /// <summary>Demotes from exclusive to shared access. Caller must hold exclusive access.</summary>
     public void DemoteFromExclusiveAccess()
     {
-        var ac = new AtomicChange(ref _data);
         var expectedThread = Environment.CurrentManagedThreadId << ThreadIdShift;
 
-        ac.ForceCommit(d =>
+        // Hand-rolled CAS retry (no delegate) — see #486 (same capturing-lambda allocation as ExitExclusiveAccess).
+        while (true)
         {
-            if ((d & ~SharedUsedCounterMask) != expectedThread)
+            int initial = _data;
+            if ((initial & ~SharedUsedCounterMask) != expectedThread)
             {
                 ThrowInvalidOperationException("DemoteFromExclusiveAccess called by a thread that doesn't own the lock");
             }
+
             // Clear thread ID and set shared counter to 1
-            return 1;
-        });
+            if (Interlocked.CompareExchange(ref _data, 1, initial) == initial)
+            {
+                break;
+            }
+        }
 
         // Demote = ExclusiveRelease + SharedAcquire by same thread (atomic on the lock, two events on the wire).
         var threadId = (ushort)Environment.CurrentManagedThreadId;

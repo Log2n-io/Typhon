@@ -50,8 +50,8 @@ public class SpatialRTreeTests
             {
                 o.DatabaseName = CurrentDatabaseName;
                 o.DatabaseDirectory = _testDatabaseDir;
-                o.DatabaseCacheSize = (ulong)(PagedMMF.DefaultMemPageCount * PagedMMF.PageSize);
-                o.OverrideDatabaseCacheMinSize = true;
+                o.DatabaseCacheSize = (ulong)(PagedMMF.MinimumMemPageCount * PagedMMF.PageSize);
+                o.TestMode = true;
             });
         _serviceProvider = sc.BuildServiceProvider();
         _serviceProvider.EnsureFileDeleted<ManagedPagedMMFOptions>();

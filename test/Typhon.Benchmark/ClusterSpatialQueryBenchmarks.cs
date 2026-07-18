@@ -93,7 +93,7 @@ public class ClusterAabbQueryBenchmarks : IDisposable
               // at 256K pages (2 GiB + 1 byte). Only a small fraction is actually dirty at a time thanks to tick-fence draining.
               o.DatabaseName = $"ClQBench_{EntityCount}_{Environment.ProcessId}";
               o.DatabaseCacheSize = (ulong)(200L * 1024 * PagedMMF.PageSize);
-              o.OverrideDatabaseCacheMinSize = true;
+              o.TestMode = true;
               o.PagesDebugPattern = false;
           })
           .AddInMemoryWalEngine();
@@ -258,7 +258,7 @@ public class ClusterRadiusQueryBenchmarks : IDisposable
           {
               o.DatabaseName = $"ClRBench_{EntityCount}_{Environment.ProcessId}";
               o.DatabaseCacheSize = (ulong)(200L * 1024 * PagedMMF.PageSize);
-              o.OverrideDatabaseCacheMinSize = true;
+              o.TestMode = true;
               o.PagesDebugPattern = false;
           })
           .AddInMemoryWalEngine();

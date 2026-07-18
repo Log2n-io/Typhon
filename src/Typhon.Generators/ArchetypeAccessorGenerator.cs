@@ -102,8 +102,12 @@ public class ArchetypeAccessorGenerator : IIncrementalGenerator
             containingType = containingType.ContainingType;
         }
 
+        // A global-namespace symbol's ContainingNamespace is non-null and its ToDisplayString() yields the literal
+        // "<global namespace>", NOT "". Treat it as empty so Emit takes its top-level path (types are already emitted
+        // with global::-qualified references). Otherwise we'd emit `namespace <global namespace>` — unparseable (#505).
+        var containingNs = symbol.ContainingNamespace;
         return new ArchetypeModel(
-            ns: symbol.ContainingNamespace?.ToDisplayString() ?? "",
+            ns: (containingNs == null || containingNs.IsGlobalNamespace) ? "" : containingNs.ToDisplayString(),
             className: symbol.Name,
             accessibility: accessibility,
             allCompFields: allFields.ToArray(),

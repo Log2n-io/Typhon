@@ -58,11 +58,11 @@ using (var tx = dbe.CreateQuickTransaction())
     Console.WriteLine($"{wounded.Count} wounded unit(s)");
 }
 
-// ── 1. Declare components + archetype (inside a namespace) ─────────────
-// These types must live in a namespace — the archetype source generator can't
-// emit valid code for types in the file's global namespace. Top-level statements
-// can't sit in a namespace, so the types go in a `namespace { }` block after them
-// (in a real project you'd split them into their own file — see doc/guide/example/Model.cs).
+// ── 1. Declare components + archetype ─────────────
+// A named namespace keeps a growing project tidy (and is what you'd use in a real app —
+// see doc/guide/example/Model.cs). The types could equally sit in the file's global
+// namespace; the generator supports both. Top-level statements can't sit in a namespace,
+// so the types go in a `namespace { }` block after them.
 namespace Skirmish
 {
     [Component("Skirmish.Position", 1, StorageMode = StorageMode.Versioned)]
@@ -123,7 +123,18 @@ public sealed partial class Unit : Archetype<Unit>
 
 `DatabaseEngine.Open` is the one-line setup. It names the on-disk database (the path's stem becomes the database name — here a `skirmish.typhon` directory in the working folder), registers your schema, and hands back a **ready-to-use** engine. `Register<T>()` registers each component type and creates its storage; `RegisterArchetype<Unit>()` makes the archetype's shape known and wires its slots to that storage — so you can `Spawn` immediately, with no separate init call. Do this **once at startup** and hand `dbe` around — there's exactly one engine per process. `using var` disposes it (flushing dirty pages, releasing the file lock) at the end of scope.
 
-> 💡 **Hosting in a DI app?** The same fluent options work through `services.AddTyphon(o => o.DatabaseFile("skirmish.typhon").Register<Position>()…)`, which composes the engine into your service collection and registers it as an observable resource; `Open()` is the standalone equivalent that owns a private container for you. Under the hood the engine is a composition of independently-configurable subsystems (page cache, allocator, timers) — the `Configure*` methods on the options (`ConfigureStorage`, `ConfigureEngine`, …) let you tune any of them when you need to.
+> 💡 **Hosting in a DI app?** The same fluent options work through `services.AddTyphon(o => o.DatabaseFile("skirmish.typhon").Register<Position>()…)`, which composes the engine into your service collection and registers it as an observable resource; `Open()` is the standalone equivalent that owns a private container for you. Under the hood the engine is a composition of independently-configurable subsystems (page cache, allocator, timers) — the `Configure*` methods on the options (`ConfigureStorage`, `ConfigureEngine`, …) let you tune any of them when you need to. (Using `AddTyphon` directly, you don't even need to call `AddLogging()` first — it registers a no-op logging backend for you, and defers to your own if you configured one.)
+
+> ⚠️ **The database is persistent — data survives across runs.** `Open("skirmish.typhon")` **creates the directory on first run and reopens it (with all its data) on every run after.** A program that unconditionally `Spawn`s on startup therefore *adds another set of entities every time you run it*. For initial (and evolving) data, use **`o.Seed(revision, tx => { … })`** — you register revision-tagged seed steps, and on every open the engine applies the ones this database hasn't run yet, in order, each in its own durable transaction. A fresh database runs them all; an existing one catches up on whatever is new. It's crash-safe (a step whose transaction never commits re-runs on the next open):
+>
+> ```csharp
+> using var dbe = DatabaseEngine.Open("skirmish.typhon", o => o
+>     .Register<Position>().Register<Health>().RegisterArchetype<Unit>()
+>     .Seed(1, tx => tx.Spawn<Unit>(Unit.Position.Set(new Position(10, 20)), Unit.Health.Set(new Health(100, 100))))
+>     .Seed(2, tx => { /* extra data you introduced in revision 2 — existing databases pick this up on next open */ }));
+> ```
+>
+> For lower-level control there's also `dbe.IsNewlyCreated` (true only on the run that created the bundle). For a throwaway demo you can instead delete the directory first: `if (Directory.Exists(dir)) Directory.Delete(dir, true);`.
 
 ### 5. Writes go through a transaction
 

@@ -43,8 +43,7 @@ catch (PageCacheBackpressureTimeoutException ex)
 
 | Option | Default | Effect |
 |---|---|---|
-| `PagedMMFOptions.DatabaseCacheSize` (via `AddManagedPagedMMF`) | 2 MiB (256 × 8 KiB) | Total cache capacity; must be a multiple of 8 KiB, between 2 MiB and 4 GiB |
-| `ResourceOptions.PageCachePages` / `MaxPageCachePages` | 256 / 16384 | Budget bookkeeping consumed by `ResourceOptions.Validate()` — not auto-synced with `DatabaseCacheSize`; keep both consistent yourself |
+| `PagedMMFOptions.DatabaseCacheSize` (via `AddManagedPagedMMF`, or the fluent `TyphonOptions.PageCacheSize`) | **256 MiB** default | Total cache capacity; must be a multiple of 8 KiB, between 2 MiB and 4 GiB. Below the 64 MiB recommended floor logs a warning (unless the internal `TestMode` is set) |
 | `TimeoutOptions.PageCacheBackpressureTimeout` | 5 s | Max wait for a page to free up before `PageCacheBackpressureTimeoutException` |
 | `TimeoutOptions.PageCacheLockTimeout` | 5 s | Max wait on a page state-transition lock |
 

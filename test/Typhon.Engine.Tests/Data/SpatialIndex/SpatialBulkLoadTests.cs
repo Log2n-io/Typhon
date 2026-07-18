@@ -50,7 +50,7 @@ public class SpatialBulkLoadTests
             {
                 o.DatabaseName = CurrentDatabaseName;
                 o.DatabaseDirectory = _testDatabaseDir;
-                // NOTE: 256 pages (DefaultMemPageCount) is a deliberate cache-stress size used elsewhere, but the
+                // NOTE: 256 pages (MinimumMemPageCount) is a deliberate cache-stress size used elsewhere, but the
                 // SpatialRTree.BulkLoad primitive holds a live working set larger than that and cannot run in it —
                 // it allocates without a ChangeSet/UoW, so the dirty pages never become evictable and a checkpoint
                 // cannot relieve the pressure (see the ci-merge-gate dig). Size the cache to fit the bulk workload.

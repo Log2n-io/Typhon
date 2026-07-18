@@ -33,8 +33,8 @@ public class SpatialPerfTests
             {
                 o.DatabaseName = $"SPT{TestContext.CurrentContext.Test.Name}"[..Math.Min(30, $"SPT{TestContext.CurrentContext.Test.Name}".Length)];
                 o.DatabaseDirectory = _testDatabaseDir;
-                o.DatabaseCacheSize = (ulong)(PagedMMF.DefaultMemPageCount * PagedMMF.PageSize);
-                o.OverrideDatabaseCacheMinSize = true;
+                o.DatabaseCacheSize = (ulong)(PagedMMF.MinimumMemPageCount * PagedMMF.PageSize);
+                o.TestMode = true;
             });
         _serviceProvider = sc.BuildServiceProvider();
         _serviceProvider.EnsureFileDeleted<ManagedPagedMMFOptions>();

@@ -76,6 +76,29 @@ public class TyphonSetupTests
         AssertCompARoundTrips(dbe); // proves CompA was registered by AddTyphon's descriptor decoration
     }
 
+    // #506 item 3: AddTyphon must NOT require the caller to call AddLogging() first. The engine's storage/engine services
+    // take a required ILogger<T>; without a logging backend, resolving DatabaseEngine used to throw an opaque
+    // "No service for type 'ILogger<PagedMMF>'". AddTyphon now self-heals via a no-op AddLogging() (registered with TryAdd,
+    // so a caller who DID configure logging is unaffected). Note: intentionally no services.AddLogging() below.
+    [Test]
+    public void AddTyphon_WithoutAddLogging_StillResolvesWorkingEngine()
+    {
+        var services = new ServiceCollection();
+        services.AddTyphon(options =>
+        {
+            options.DatabaseFile(DbPath("nologtest")).Register<CompA>().RegisterArchetype<CompAArch>();
+            ConfigureWalForTest(options);
+        });
+
+        using var provider = services.BuildServiceProvider();
+
+        DatabaseEngine dbe = null;
+        Assert.That(() => dbe = provider.GetRequiredService<DatabaseEngine>(), Throws.Nothing,
+            "AddTyphon must register a no-op logging backend so DatabaseEngine resolves without an explicit AddLogging() call (#506).");
+        Assert.That(dbe, Is.Not.Null);
+        AssertCompARoundTrips(dbe);
+    }
+
     // AC3 — Open() returns a usable engine that OWNS its private ServiceProvider and disposes it on Dispose. The proof is
     // that the *provider* is disposed — asserting only the .bin handle would be a false positive, because the engine's own
     // teardown disposes the MMF regardless of the owned-provider logic. What the owned-provider disposal uniquely protects

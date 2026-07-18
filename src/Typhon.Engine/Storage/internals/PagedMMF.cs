@@ -23,7 +23,9 @@ namespace Typhon.Engine.Internals;
 [PublicAPI]
 public partial class PagedMMF : ResourceNode, IMemoryResource
 {
-    public const int DefaultMemPageCount = 256;
+    // The minimum page-cache size in PAGES (× PageSize = MinimumCacheSize, the 2 MiB floor). Internal: the public cache-sizing
+    // surface is byte-based (PagedMMFOptions.DatabaseCacheSize / TyphonOptions.PageCacheSize) — see the public *Bytes constants.
+    internal const int MinimumMemPageCount = 256;
 
     #region Events
 
@@ -54,7 +56,9 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     // data page) and segments always span >= 2 pages. v3 (segment-directory twins, occupancy reserve = Int3) and earlier
     // are refused — no backward compat.
     internal const int DatabaseFormatRevision   = 4;
-    internal const ulong MinimumCacheSize       = DefaultMemPageCount * PageSize;
+    internal const ulong MinimumCacheSize       = MinimumMemPageCount * PageSize;      // 2 MiB — the hard floor (see Validate)
+    internal const ulong DefaultDatabaseCacheSize   = 256UL * 1024 * 1024;             // 256 MiB — the shipped production default
+    internal const ulong RecommendedMinimumCacheSize = 64UL * 1024 * 1024;             // 64 MiB — warn below this (unless TestMode)
     internal const int WriteCachePageSize       = 1024 * 1024;
 
     #endregion
@@ -381,6 +385,15 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
         // Create the cache of the page, pin it and keeps its address
         var cacheSize = Options.DatabaseCacheSize;
+
+        // Guidance: a small page cache risks PageCacheBackpressureTimeout when a transaction's working set exceeds it. With a
+        // 256 MiB default this only fires when a size was explicitly set below the recommended floor. Suppressed in TestMode
+        // (unit tests deliberately run a minimal cache to stress eviction).
+        if (!Options.TestMode && cacheSize < RecommendedMinimumCacheSize)
+        {
+            LogSmallPageCache(Logger, cacheSize / (1024UL * 1024UL), RecommendedMinimumCacheSize / (1024UL * 1024UL));
+        }
+
         MemPages = memoryAllocator.AllocatePinned("PageCache", this, (int)cacheSize, true, 64);
         _memPagesAddr = MemPages.DataAsPointer;
 

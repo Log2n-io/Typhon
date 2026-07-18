@@ -250,10 +250,10 @@ The snapshot exposes pure-data queries over the frozen `Nodes` dictionary:
 
 Lives inside `DatabaseEngineOptions` and is consumed by the components at construction. Set at startup, immutable afterwards. Real defaults — check these against the field declarations:
 
+> **Page-cache size is not a `ResourceOptions` knob.** It lives on `PagedMMFOptions.DatabaseCacheSize` (bytes, default **256 MiB**) — set it via `TyphonOptions.PageCacheSize(...)`. The former `PageCachePages`/`MaxPageCachePages` entries were removed in #148.
+
 | Property | Default | Meaning |
 |---|---:|---|
-| `PageCachePages` | `256` | Pages × 8 KB → **2 MB** default page cache |
-| `MaxPageCachePages` | `16384` | Cap for future dynamic resizing — **128 MB** |
 | `MaxActiveTransactions` | `1000` | Hard limit on concurrent transactions; `FailFast` beyond |
 | `TransactionPoolSize` | `16` | Pooled `Transaction` objects; overflow → allocate (`Degrade`) |
 | `WalRingBufferSizeBytes` | `8 << 20` (**8 MB**, not 4 MB) | In-memory WAL stage |

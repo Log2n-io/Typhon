@@ -738,7 +738,7 @@ public class OlcBTreeRaceStressTests
             {
                 o.DatabaseName = $"olcrs_{id:x}";
                 // Generously sized — many segments per scenario over a long run.
-                o.DatabaseCacheSize = (ulong)(PagedMMF.DefaultMemPageCount * PagedMMF.PageSize);
+                o.DatabaseCacheSize = (ulong)(PagedMMF.MinimumMemPageCount * PagedMMF.PageSize);
                 o.PagesDebugPattern = true;
             });
         var sp = sc.BuildServiceProvider();

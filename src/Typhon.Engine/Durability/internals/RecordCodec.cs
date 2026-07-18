@@ -399,7 +399,7 @@ internal static class RecordCodec
                     return false;
                 }
 
-                if (RecordCodec.TryReadRecord(_data[.._chunkBodyEnd], _recordOffset, out var consumed, out view))
+                if (TryReadRecord(_data[.._chunkBodyEnd], _recordOffset, out var consumed, out view))
                 {
                     _recordOffset += consumed;
                     return true;

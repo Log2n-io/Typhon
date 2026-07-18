@@ -103,13 +103,13 @@ internal enum PageState : ushort
 
 State transitions are protected by `StateSyncRoot`. The Idle → Exclusive transition is what `TryLatchPageExclusive` does; it also bumps the seqlock counter from even → odd.
 
-### Default cache size — 256 × 8 KB = 2 MB
+### Default cache size — 256 MiB
 
-`DefaultMemPageCount = 256`. `DatabaseCacheSize` on [`PagedMMFOptions`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/public/PagedMMFOptions.cs) defaults to `256 × 8192 = 2 MB`, which is *also* the minimum (`MinimumCacheSize`).
+`DatabaseCacheSize` on [`PagedMMFOptions`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/public/PagedMMFOptions.cs) defaults to **256 MiB** (`DefaultDatabaseCacheSize`) — a production-sane size for the one primary engine a process normally runs. The hard minimum is **2 MiB** (`MinimumCacheSize` = `MinimumMemPageCount × 8 KiB`); a configured size below the **64 MiB** recommended floor (`RecommendedMinimumCacheSize`) logs a startup warning. Public byte constants — `PagedMMFOptions.DefaultCacheSizeBytes` / `MinimumCacheSizeBytes` / `PageSizeBytes` — expose these in-code.
 
-**2 MB is deliberately tiny.** It's a development-default chosen to keep the cache under constant pressure — at this size eviction, backpressure, and the dirty-counter machinery all exercise heavily, so bugs in those paths surface early instead of hiding behind a roomy cache. It is **not** a recommended production value: pick a `DatabaseCacheSize` you're comfortable running your workload against (Workbench's stress harness routinely uses 8 192-page / 64 MB caches; real servers go much higher).
+**The 2 MiB minimum is deliberately tiny — but it's a *test* profile, not the default.** Unit tests opt into it via the internal `TestMode` flag, which keeps the cache under constant pressure (eviction, backpressure, and the dirty-counter machinery all exercise heavily, so bugs in those paths surface early) *and* suppresses the small-cache warning and the min-size floor. Production leaves `TestMode` off and gets the 256 MiB default; size `DatabaseCacheSize` — or the fluent `TyphonOptions.PageCacheSize(...)` — for your workload's largest single-transaction working set (real servers go much higher).
 
-The validator enforces only two things: the size must be a multiple of the page size, and ≤ 4 GiB. The **4 GiB ceiling is not a hard architectural limit** — it exists purely because the cache is currently a *single* contiguous allocation for all pages. It will be raised substantially soon (by splitting into multiple allocations, or moving to a 64-bit allocation); nothing in the page-cache design depends on staying under 4 GiB.
+The validator enforces: the size must be a multiple of the page size, at least 2 MiB (unless `TestMode`), and ≤ 4 GiB. The **4 GiB ceiling is not a hard architectural limit** — it exists purely because the cache is currently a *single* contiguous allocation for all pages. It will be raised substantially soon (by splitting into multiple allocations, or moving to a 64-bit allocation); nothing in the page-cache design depends on staying under 4 GiB.
 
 ### Two-pass clock-sweep eviction
 

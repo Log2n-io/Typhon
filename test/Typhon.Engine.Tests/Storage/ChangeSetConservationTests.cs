@@ -40,7 +40,7 @@ class ChangeSetConservationTests
                 o.DatabaseName = $"changesetconserv_{Guid.NewGuid():N}";
                 o.DatabaseCacheSize = 128 * PagedMMF.PageSize;
                 o.PagesDebugPattern = false;
-                o.OverrideDatabaseCacheMinSize = true;
+                o.TestMode = true;
             });
         _serviceProvider = services.BuildServiceProvider();
         _serviceProvider.EnsureFileDeleted<PagedMMFOptions>();

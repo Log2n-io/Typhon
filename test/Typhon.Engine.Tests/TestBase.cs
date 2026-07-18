@@ -400,6 +400,7 @@ abstract class TestBase<T> : TestBase
                 options.DatabaseName = CurrentDatabaseName;
                 options.DatabaseDirectory = _testDatabaseDir;
                 options.DatabaseCacheSize = (ulong)dcs;
+                options.TestMode = true; // tests run a deliberately small cache: allow sub-2MiB and suppress the production small-cache warning
                 options.PagesDebugPattern = false;
             })
             .AddScopedDatabaseEngine(ConfigureEngineOptions);

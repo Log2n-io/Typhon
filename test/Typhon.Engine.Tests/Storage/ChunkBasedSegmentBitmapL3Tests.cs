@@ -56,7 +56,7 @@ public class ChunkBasedSegmentBitmapL3Tests
         var hasMemPageCount = TestContext.CurrentContext.Test.Properties.ContainsKey("MemPageCount");
         var memPageCount = hasMemPageCount 
             ? (int)TestContext.CurrentContext.Test.Properties.Get("MemPageCount")! 
-            : PagedMMF.DefaultMemPageCount;
+            : PagedMMF.MinimumMemPageCount;
         var cacheSize = memPageCount * PagedMMF.PageSize;
 
         var serviceCollection = new ServiceCollection();

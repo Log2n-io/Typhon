@@ -36,7 +36,7 @@ unsafe class PagedHashMapTests
             .AddScopedManagedPagedMemoryMappedFile(options =>
             {
                 options.DatabaseName = CurrentDatabaseName;
-                options.DatabaseCacheSize = (ulong)(PagedMMF.DefaultMemPageCount * PagedMMF.PageSize);
+                options.DatabaseCacheSize = (ulong)(PagedMMF.MinimumMemPageCount * PagedMMF.PageSize);
                 options.PagesDebugPattern = true;
             });
 

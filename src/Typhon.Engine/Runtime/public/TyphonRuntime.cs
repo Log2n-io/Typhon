@@ -498,7 +498,7 @@ public sealed partial class TyphonRuntime : IDisposable
                             $"System '{sys.Name}': ChangeFilter type '{sys.ChangeFilterTypes[j].Name}' is not a registered component type.");
                     }
 
-                    if (ct.StorageMode == Schema.Definition.StorageMode.Versioned)
+                    if (ct.StorageMode == StorageMode.Versioned)
                     {
                         throw new InvalidOperationException(
                             $"System '{sys.Name}': ChangeFilter type '{sys.ChangeFilterTypes[j].Name}' uses Versioned storage mode, " +
@@ -1993,7 +1993,7 @@ public sealed partial class TyphonRuntime : IDisposable
             // Serial table fences on TickDriver. Uses the UoW's ChangeSet (single-thread context).
             foreach (var table in Engine.GetAllComponentTables())
             {
-                if (table.StorageMode == Schema.Definition.StorageMode.Versioned || table.DirtyBitmap == null)
+                if (table.StorageMode == StorageMode.Versioned || table.DirtyBitmap == null)
                 {
                     continue;
                 }

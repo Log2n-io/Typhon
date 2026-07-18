@@ -129,6 +129,11 @@ A single archetype freely mixes modes — `Unit` above has all three — because
 
 Component fields are blittable value types: the numeric primitives, `bool`, fixed-width strings (`String64`), spatial types (`Point2F`/`Point3F`, AABBs), and `EntityLink<T>`. That "blittable" constraint is what lets Typhon store and memory-map components without serialization.
 
+> **Two sizing rules that catch newcomers:**
+>
+> 1. **Only `public` fields count toward a component's size.** Typhon derives the stored layout from the struct's **public** fields (not `sizeof(T)`), so a `private` field is invisible to storage — adding `private int _pad` does **not** change anything.
+> 2. **A component must be at least 8 bytes.** Chunk storage has an 8-byte minimum stride. A `Versioned` component with a single 4-byte field (one `int`/`float`) trips `Invalid component/chunk stride: 4 bytes …` at open time. Fix it by adding a **public** field so the struct reaches 8 bytes (e.g. a second `public int`). `SingleVersion`/`Transient` components clear 8 bytes automatically via their internal per-entity key, so this only bites tiny `Versioned` components.
+
 ### Indexes — fast lookup by field value
 
 A plain field can only be found by scanning. Mark it `[Index]` and Typhon maintains a sorted index so you can look it up directly:

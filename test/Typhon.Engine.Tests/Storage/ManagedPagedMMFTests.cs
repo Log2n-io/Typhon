@@ -37,7 +37,7 @@ public class ManagedPagedMMFTests
     public void Setup()
     {
         var o = TestContext.CurrentContext.Test.Properties.ContainsKey("MemPageCount");
-        var dcs = o ? (int)TestContext.CurrentContext.Test.Properties.Get("MemPageCount")! : PagedMMF.DefaultMemPageCount;
+        var dcs = o ? (int)TestContext.CurrentContext.Test.Properties.Get("MemPageCount")! : PagedMMF.MinimumMemPageCount;
         dcs *= PagedMMF.PageSize;
 
         var serviceCollection = new ServiceCollection();

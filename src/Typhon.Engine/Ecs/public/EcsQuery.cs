@@ -7,6 +7,7 @@ using System.Runtime.Intrinsics.X86;
 using System.Threading;
 using JetBrains.Annotations;
 using Typhon.Profiler;
+using Typhon.Schema.Definition;
 
 namespace Typhon.Engine;
 
@@ -2960,11 +2961,46 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 else
                 {
                     var engineState = _tx.DBE._archetypeStates[meta.ArchetypeId];
-                    _current = new EntityRef(id, meta, engineState, _tx, enabledBits, false);
-                    _current.CopyLocationsFrom(in locations, meta.ComponentCount);
+
+                    // The captured EntityLocations are raw EntityMap record values. For SV/Transient slots the raw value
+                    // IS the content chunk (correct). For a Versioned slot it is the revision-chain HEAD
+                    // (compRevFirstChunkId) and must be walked to the snapshot-visible content chunk before EntityRef.Read
+                    // reads _locations[slot] directly on this non-cluster path — otherwise the read returns a stale,
+                    // pre-mutation value (#504). VersionedSlotMask is zeroed for non-cluster archetypes, so detect via the
+                    // component table StorageMode. When any Versioned slot is present, delegate to Transaction.Open, whose
+                    // non-cluster path performs that per-slot MVCC revision-chain walk; pure SV/Transient non-cluster
+                    // archetypes keep the zero-lookup captured-locations fast path.
+                    if (ArchetypeHasVersionedSlot(engineState, meta.ComponentCount))
+                    {
+                        _current = _tx.Open(id);
+                    }
+                    else
+                    {
+                        _current = new EntityRef(id, meta, engineState, _tx, enabledBits, false);
+                        _current.CopyLocationsFrom(in locations, meta.ComponentCount);
+                    }
                 }
                 return true;
             }
+        }
+
+        /// <summary>
+        /// True if any slot of the archetype uses <see cref="StorageMode.Versioned"/>. Routes the non-cluster enumerator
+        /// path: Versioned slots need an MVCC revision-chain walk (performed by <see cref="EntityAccessor.Open(EntityId)"/>) that the raw
+        /// captured locations skip. <c>ArchetypeMetadata.VersionedSlotMask</c> is zeroed for non-cluster archetypes, so this
+        /// scans the component tables directly rather than testing the mask.
+        /// </summary>
+        private static bool ArchetypeHasVersionedSlot(ArchetypeEngineState engineState, int componentCount)
+        {
+            var tables = engineState.SlotToComponentTable;
+            for (int slot = 0; slot < componentCount; slot++)
+            {
+                if (tables[slot].StorageMode == StorageMode.Versioned)
+                {
+                    return true;
+                }
+            }
+            return false;
         }
 
         /// <summary>No-op; the enumerator holds no resources requiring release.</summary>

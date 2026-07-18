@@ -29,7 +29,7 @@ public class OlcBTreeStressTests
             .AddScopedManagedPagedMemoryMappedFile(options =>
             {
                 options.DatabaseName = $"olcst_{TestContext.CurrentContext.Test.Name}"[..Math.Min(63, $"olcst_{TestContext.CurrentContext.Test.Name}".Length)];
-                options.DatabaseCacheSize = (ulong)(PagedMMF.DefaultMemPageCount * PagedMMF.PageSize);
+                options.DatabaseCacheSize = (ulong)(PagedMMF.MinimumMemPageCount * PagedMMF.PageSize);
                 options.PagesDebugPattern = true;
             });
 

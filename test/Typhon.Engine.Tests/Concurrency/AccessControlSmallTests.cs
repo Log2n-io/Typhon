@@ -1521,4 +1521,43 @@ public class AccessControlSmallTests
         Assert.That(readValues.Count, Is.EqualTo(10));
         Assert.That(readValues, Is.All.EqualTo(42));
     }
+
+    // ========================================
+    // Allocation regression guard (#486)
+    // ========================================
+
+    [Test]
+    [CancelAfter(2000)]
+    public void ExclusiveExitAndDemote_AreAllocationFree()
+    {
+        // #486: ExitExclusiveAccess / DemoteFromExclusiveAccess used to pass a capturing lambda to ForceCommit, which
+        // Roslyn compiled to a per-call display-class heap allocation (24 B each). This lock is embedded in every page
+        // header, so that was Gen0 garbage on every exclusive release. The exit paths are now hand-rolled CAS loops with no
+        // delegate. This guard asserts the whole exclusive/demote cycle is allocation-free so a regression fails loudly.
+        var control = new AccessControlSmall();
+
+        // Warm up: JIT the paths before measuring.
+        for (int i = 0; i < 100; i++)
+        {
+            control.EnterExclusiveAccess(ref WaitContext.Null);
+            control.ExitExclusiveAccess();
+            control.EnterExclusiveAccess(ref WaitContext.Null);
+            control.DemoteFromExclusiveAccess();
+            control.ExitSharedAccess();
+        }
+
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        for (int i = 0; i < 1000; i++)
+        {
+            control.EnterExclusiveAccess(ref WaitContext.Null);
+            control.ExitExclusiveAccess();       // was 24 B/call
+            control.EnterExclusiveAccess(ref WaitContext.Null);
+            control.DemoteFromExclusiveAccess();  // was 24 B/call
+            control.ExitSharedAccess();
+        }
+        long delta = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        Assert.That(delta, Is.EqualTo(0),
+            $"exclusive exit/demote must be allocation-free (#486) — allocated {delta} B over 1000 iterations");
+    }
 }

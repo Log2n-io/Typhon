@@ -345,6 +345,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     internal const string BK_UserSchemaVersion      = "UserSchemaVersion";
     internal const string BK_LastTickFenceLSN       = "LastTickFenceLSN";
     internal const string BK_CleanShutdown          = "CleanShutdown";
+    internal const string BK_SeedRevision           = "SeedRevision";
     // ReSharper restore InconsistentNaming
 
     // Transaction counters for observability
@@ -575,6 +576,15 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
     /// <summary>Backing paged memory-mapped file store holding all persisted segments of this database.</summary>
     public ManagedPagedMMF MMF { get; }
+
+    /// <summary>
+    /// <see langword="true"/> when this open <b>created</b> the database bundle (it did not exist before); <see langword="false"/>
+    /// when it reopened an existing one. Use it to gate one-time bootstrap work (initial data, first-run migrations). Note the
+    /// engine already offers a crash-safe, declarative alternative via <see cref="TyphonOptions.Seed"/>; prefer that for
+    /// seeding, and this flag for cheaper conditional logic. It reflects file existence at open, so after a crash mid-initialisation
+    /// it reads <see langword="false"/> — it is not, by itself, a "seeding completed" signal.
+    /// </summary>
+    public bool IsNewlyCreated => MMF.IsDatabaseFileCreating;
 
     /// <summary>Epoch manager coordinating safe, lock-free memory reclamation across concurrent readers and writers.</summary>
     public EpochManager EpochManager { get; private set; }

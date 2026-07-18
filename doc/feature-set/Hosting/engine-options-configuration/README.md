@@ -37,7 +37,7 @@ the very option types this page documents:
 ```csharp
 services.AddTyphon(o => o
     .DatabaseFile(@"C:\Data\MyGame\game.typhon")
-    .ConfigureStorage(s => s.DatabaseCacheSize = 65536UL * 8192)   // 512 MiB page cache
+    .PageCacheSize(512UL * 1024 * 1024)                            // 512 MiB page cache (default is 256 MiB)
     .ConfigureEngine(e =>
     {
         e.Resources.MaxActiveTransactions = 2000;
@@ -88,8 +88,9 @@ var engine   = provider.GetRequiredService<DatabaseEngine>();
 
 ## ⚠️ Guarantees & limits
 
-- `configure` is optional on every `Add*` call — omit it to run on defaults (2 MiB page cache,
-  the engine's minimum; WAL in `./wal`; `UseFUA = true`; etc.).
+- `configure` is optional on every `Add*` call — omit it to run on defaults (256 MiB page cache;
+  WAL in `./wal`; `UseFUA = true`; etc.). The page cache has a 2 MiB minimum floor; running near it
+  risks `PageCacheBackpressureTimeout`, so a below-recommended size logs a startup warning.
 - Options are read once, effectively at `BuildServiceProvider()` for singletons — mutating an
   already-resolved `IOptions<T>.Value` afterward has no effect on a running engine.
 - Calling the same `Add*()` more than once accumulates `Configure` callbacks (every registered

@@ -18,7 +18,7 @@ class EpochPageCacheTests
     public void Setup()
     {
         var o = TestContext.CurrentContext.Test.Properties.ContainsKey("MemPageCount");
-        var dcs = o ? (int)TestContext.CurrentContext.Test.Properties.Get("MemPageCount")! : PagedMMF.DefaultMemPageCount;
+        var dcs = o ? (int)TestContext.CurrentContext.Test.Properties.Get("MemPageCount")! : PagedMMF.MinimumMemPageCount;
         dcs *= PagedMMF.PageSize;
 
         var serviceCollection = new ServiceCollection();
@@ -42,7 +42,7 @@ class EpochPageCacheTests
                 options.DatabaseName = CurrentDatabaseName;
                 options.DatabaseCacheSize = (ulong)dcs;
                 options.PagesDebugPattern = true;
-                options.OverrideDatabaseCacheMinSize = true;
+                options.TestMode = true;
             });
 
         _serviceProvider = _serviceCollection.BuildServiceProvider();

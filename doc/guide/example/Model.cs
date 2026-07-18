@@ -1,5 +1,5 @@
-// Data model + systems for the guide example. Kept in a named namespace so the
-// ArchetypeAccessorGenerator can emit Unit.ReadAll / ReadWriteAll (it needs a real namespace).
+// Data model + systems for the guide example. Kept in a named namespace as a real project would;
+// the ArchetypeAccessorGenerator also supports the global namespace of a top-level-statements file.
 
 using System.Numerics;
 using Typhon.Engine;

@@ -33,7 +33,7 @@ unsafe class RawValuePagedHashMapTests
             .AddScopedManagedPagedMemoryMappedFile(options =>
             {
                 options.DatabaseName = CurrentDatabaseName;
-                options.DatabaseCacheSize = PagedMMF.DefaultMemPageCount * PagedMMF.PageSize;
+                options.DatabaseCacheSize = PagedMMF.MinimumMemPageCount * PagedMMF.PageSize;
                 options.PagesDebugPattern = true;
             });
 

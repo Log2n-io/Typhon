@@ -38,11 +38,22 @@ public class PagedMMFOptions
         get => _databaseFileName ?? DatabaseName;
         set => _databaseFileName = value;
     }
+    /// <summary>The page size in bytes (8 KiB). <see cref="DatabaseCacheSize"/> must be a multiple of this.</summary>
+    public const int PageSizeBytes = PagedMMF.PageSize;
+
+    /// <summary>The minimum permitted <see cref="DatabaseCacheSize"/> in bytes (2 MiB). Values below this fail validation.</summary>
+    public const ulong MinimumCacheSizeBytes = PagedMMF.MinimumCacheSize;
+
+    /// <summary>The default <see cref="DatabaseCacheSize"/> in bytes (256 MiB) — the value used when it is not set explicitly.</summary>
+    public const ulong DefaultCacheSizeBytes = PagedMMF.DefaultDatabaseCacheSize;
+
     /// <summary>
-    /// Page-cache size, in bytes. Must be a multiple of the page size, at least the engine minimum, and at most 4 GiB. Default:
-    /// <see cref="PagedMMF.DefaultMemPageCount"/> × <see cref="PagedMMF.PageSize"/>.
+    /// Page-cache size, in bytes. Must be a multiple of <see cref="PageSizeBytes"/>, at least <see cref="MinimumCacheSizeBytes"/>,
+    /// and at most 4 GiB. Default: <see cref="DefaultCacheSizeBytes"/> (256 MiB). The cache is a GCHandle-pinned byte array, so
+    /// size it for one primary engine per process; a workload whose transaction working set exceeds the cache hits
+    /// <see cref="PageCacheBackpressureTimeoutException"/>. Prefer the fluent <c>TyphonOptions.PageCacheSize(...)</c> to set it.
     /// </summary>
-    public ulong DatabaseCacheSize { get; set; } = PagedMMF.DefaultMemPageCount * PagedMMF.PageSize;
+    public ulong DatabaseCacheSize { get; set; } = DefaultCacheSizeBytes;
     /// <summary>When <c>true</c>, fills newly-allocated pages with a recognizable debug pattern (development/testing). Default <c>false</c>.</summary>
     public bool PagesDebugPattern { get; set; }
 
@@ -52,7 +63,12 @@ public class PagedMMFOptions
     /// </summary>
     internal Func<IPageCacheBackpressureStrategy> BackpressureStrategyFactory { get; set; } = () => new WaitForIOStrategy();
 
-    internal bool OverrideDatabaseCacheMinSize { get; set; }
+    /// <summary>
+    /// Test-only minimal-cache profile. When <c>true</c>: allows a <see cref="DatabaseCacheSize"/> below the 2 MiB minimum
+    /// (so unit tests can stress eviction with a tiny cache) AND suppresses the below-recommended-size warning. Off in
+    /// production, where the small-cache warning and the 2 MiB floor apply. Consolidates the former OverrideDatabaseCacheMinSize.
+    /// </summary>
+    internal bool TestMode { get; set; }
 
     /// <summary>
     /// Deletes the entire database bundle directory (<see cref="BundleDirectory"/>) — data file, lock, and WAL. A Typhon
@@ -150,7 +166,7 @@ public class PagedMMFOptions
             sb.AppendLine($"Database Cache Size must be a multiple of the Page Size ('{PagedMMF.PageSize}').");
             success = false;
         }
-        if (dcs < PagedMMF.MinimumCacheSize && OverrideDatabaseCacheMinSize==false)
+        if (dcs < PagedMMF.MinimumCacheSize && TestMode==false)
         {
             sb.AppendLine($"Database Cache Size must be at least '{PagedMMF.MinimumCacheSize/(1024*1024)}'MiB.");
             success = false;

@@ -322,6 +322,12 @@ public static class ServiceCollectionExtensions
         var options = new TyphonOptions();
         configure(options);
 
+        // Self-heal the most common DI footgun: the engine's storage/engine services take a required ILogger<T>, so
+        // resolving DatabaseEngine without a logging backend throws an opaque "No service for type 'ILogger<PagedMMF>'".
+        // AddLogging registers a no-op LoggerFactory via TryAdd, so it satisfies those loggers WITHOUT overriding a
+        // caller who already configured logging (their providers win). Mirrors DatabaseEngine.Open, which does the same.
+        services.AddLogging();
+
         services
             .AddResourceRegistry()
             .AddMemoryAllocator(options.MemoryAllocatorConfigurator)
@@ -378,6 +384,7 @@ public static class ServiceCollectionExtensions
                         options.ApplyArchetypeRegistrations();
                         options.ApplySpatialGridConfig(engine);
                         engine.InitializeArchetypes();
+                        RunPendingSeedsIfNeeded(engine, options);
                         return engine;
                     }
                     catch
@@ -399,6 +406,43 @@ public static class ServiceCollectionExtensions
                 },
                 descriptor.Lifetime);
             return;
+        }
+    }
+
+    // ── Seeding ──
+    // Applies every registered seed step whose revision > the database's committed seed revision, in ascending order, each in its own durable transaction; the
+    // committed revision is then recorded in the bootstrap key/value store. A fresh database (committed 0) runs every step; an existing one runs only the steps
+    // it has not applied yet — bringing each instance up to date as new steps ship. A step whose transaction never commits re-runs on the next open.
+    //
+    // Durability note: the committed-revision write is a separate meta-page fsync, NOT part of the step's WAL commit, so it cannot be atomic with the step's
+    // data. We record it AFTER the step commits, so a crash in the narrow window between a step's commit and this write re-runs THAT step next open — and since
+    // steps are forward-only, the worst case is a duplicate of that one step's data, never data loss. A fully-atomic marker would require an engine-owned ECS
+    // entity, a new architectural category we deliberately avoid for a setup-time convenience (#506).
+    private static void RunPendingSeedsIfNeeded(DatabaseEngine engine, TyphonOptions options)
+    {
+        var steps = options.SeedSteps; // sorted ascending by revision
+        if (steps.Length == 0)
+        {
+            return; // no seed steps configured
+        }
+
+        int committed = engine.MMF.Bootstrap.GetInt(DatabaseEngine.BK_SeedRevision);
+        foreach (var (revision, step) in steps)
+        {
+            if (revision <= committed)
+            {
+                continue; // already applied
+            }
+
+            using (var tx = engine.CreateQuickTransaction(DurabilityMode.Immediate))
+            {
+                step(tx);
+                tx.Commit();
+            }
+
+            engine.MMF.Bootstrap.SetInt(DatabaseEngine.BK_SeedRevision, revision);
+            engine.MMF.SaveBootstrap();
+            committed = revision;
         }
     }
 

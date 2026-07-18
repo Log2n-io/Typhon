@@ -28,7 +28,7 @@ public static class InterestDirect
             {
                 o.DatabaseName = $"IntDirect{entityCount}";
                 o.DatabaseCacheSize = (ulong)(128L * 1024 * PagedMMF.PageSize);
-                o.OverrideDatabaseCacheMinSize = true;
+                o.TestMode = true;
                 o.PagesDebugPattern = false;
             })
             .AddScopedDatabaseEngine();

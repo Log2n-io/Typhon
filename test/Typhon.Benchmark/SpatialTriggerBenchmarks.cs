@@ -119,7 +119,7 @@ public class TriggerOccupantDensityBenchmarks : IDisposable
             {
                 o.DatabaseName = $"TrigDensity{OccupantCount}";
                 o.DatabaseCacheSize = (ulong)(128L * 1024 * PagedMMF.PageSize);
-                o.OverrideDatabaseCacheMinSize = true;
+                o.TestMode = true;
                 o.PagesDebugPattern = false;
             })
             .AddScopedDatabaseEngine();
@@ -192,7 +192,7 @@ public class TriggerSteadyStateBenchmarks : IDisposable
             {
                 o.DatabaseName = "TrigSteady";
                 o.DatabaseCacheSize = (ulong)(128L * 1024 * PagedMMF.PageSize);
-                o.OverrideDatabaseCacheMinSize = true;
+                o.TestMode = true;
                 o.PagesDebugPattern = false;
             })
             .AddScopedDatabaseEngine();
@@ -259,7 +259,7 @@ public class TriggerTreeScaleBenchmarks : IDisposable
             {
                 o.DatabaseName = $"TrigScale{TotalEntities}";
                 o.DatabaseCacheSize = (ulong)(128L * 1024 * PagedMMF.PageSize);
-                o.OverrideDatabaseCacheMinSize = true;
+                o.TestMode = true;
                 o.PagesDebugPattern = false;
             })
             .AddScopedDatabaseEngine();
@@ -324,7 +324,7 @@ public class TriggerMultiRegionBenchmarks : IDisposable
             {
                 o.DatabaseName = $"TrigMulti{RegionCount}";
                 o.DatabaseCacheSize = (ulong)(128L * 1024 * PagedMMF.PageSize);
-                o.OverrideDatabaseCacheMinSize = true;
+                o.TestMode = true;
                 o.PagesDebugPattern = false;
             })
             .AddScopedDatabaseEngine();
@@ -408,7 +408,7 @@ public class TriggerStaticCacheBenchmarks : IDisposable
             {
                 o.DatabaseName = "TrigStatic";
                 o.DatabaseCacheSize = (ulong)(128L * 1024 * PagedMMF.PageSize);
-                o.OverrideDatabaseCacheMinSize = true;
+                o.TestMode = true;
                 o.PagesDebugPattern = false;
             })
             .AddScopedDatabaseEngine();
@@ -481,7 +481,7 @@ public class TriggerEnterLeaveStormBenchmarks : IDisposable
             {
                 o.DatabaseName = "TrigStorm";
                 o.DatabaseCacheSize = (ulong)(128L * 1024 * PagedMMF.PageSize);
-                o.OverrideDatabaseCacheMinSize = true;
+                o.TestMode = true;
                 o.PagesDebugPattern = false;
             })
             .AddScopedDatabaseEngine();
@@ -563,7 +563,7 @@ public class TriggerFrequencySkipBenchmarks : IDisposable
             {
                 o.DatabaseName = "TrigFreq";
                 o.DatabaseCacheSize = (ulong)(128L * 1024 * PagedMMF.PageSize);
-                o.OverrideDatabaseCacheMinSize = true;
+                o.TestMode = true;
                 o.PagesDebugPattern = false;
             })
             .AddScopedDatabaseEngine();

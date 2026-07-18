@@ -133,6 +133,8 @@
 - name: Hosting
   href: Hosting/README.md
   items:
+    - name: Database Seeding
+      href: Hosting/database-seeding.md
     - name: Clean-Slate Database Deletion
       href: Hosting/ensure-file-deleted.md
     - name: Profiler Launch Override Hook

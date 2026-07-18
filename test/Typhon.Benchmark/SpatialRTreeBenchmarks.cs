@@ -30,7 +30,7 @@ public unsafe class SpatialInsertBenchmarks
             {
                 o.DatabaseName = "SpatInsert";
                 o.DatabaseCacheSize = (ulong)(128L * 1024 * PagedMMF.PageSize);
-                o.OverrideDatabaseCacheMinSize = true;
+                o.TestMode = true;
             });
     }
 
@@ -111,7 +111,7 @@ public unsafe class SpatialQueryBenchmarks
             {
                 o.DatabaseName = "SpatQuery";
                 o.DatabaseCacheSize = (ulong)(128L * 1024 * PagedMMF.PageSize);
-                o.OverrideDatabaseCacheMinSize = true;
+                o.TestMode = true;
             });
     }
 
@@ -266,7 +266,7 @@ public unsafe class SpatialCompoundQueryBenchmarks
             {
                 o.DatabaseName = "SpatCompound";
                 o.DatabaseCacheSize = (ulong)(128L * 1024 * PagedMMF.PageSize);
-                o.OverrideDatabaseCacheMinSize = true;
+                o.TestMode = true;
             });
     }
 
@@ -419,7 +419,7 @@ public unsafe class SpatialCountBenchmarks
             {
                 o.DatabaseName = "SpatCount";
                 o.DatabaseCacheSize = (ulong)(128L * 1024 * PagedMMF.PageSize);
-                o.OverrideDatabaseCacheMinSize = true;
+                o.TestMode = true;
             });
     }
 
@@ -622,7 +622,7 @@ public unsafe class SpatialGameTickBenchmarks
             {
                 o.DatabaseName = "SpatTick";
                 o.DatabaseCacheSize = (ulong)(128L * 1024 * PagedMMF.PageSize);
-                o.OverrideDatabaseCacheMinSize = true;
+                o.TestMode = true;
             });
     }
 

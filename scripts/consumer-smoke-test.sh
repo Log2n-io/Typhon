@@ -60,7 +60,8 @@ cat > smoke.csproj <<XML
 </Project>
 XML
 
-# Named namespace: the ArchetypeAccessorGenerator needs a real namespace to emit Unit.ReadAll/ReadWriteAll.
+# Named namespace here for a realistic multi-file layout. Global (unnamed) namespace is ALSO supported since #505 —
+# the top-level-statement console shape — and is covered by Typhon.Generators.Tests.ArchetypeAccessorGeneratorTests.
 cat > Model.cs <<'CS'
 using Typhon.Engine;            // Archetype<T>, Comp<T>
 using Typhon.Schema.Definition; // [Component], [Archetype], StorageMode
