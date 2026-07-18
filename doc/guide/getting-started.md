@@ -43,6 +43,8 @@ spelling out. Add `[Index]` to a field to make it fast to filter on.
 ```csharp
 using Typhon.Schema.Definition; // [Component], [Field], [Index], [Archetype], Comp<T>
 
+namespace Skirmish;   // component + archetype types must live in a namespace, not the global one
+
 [Component("Skirmish.Position", 1, StorageMode = StorageMode.Versioned)]
 public struct Position
 {

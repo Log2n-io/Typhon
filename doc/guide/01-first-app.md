@@ -19,6 +19,7 @@ Here it is end-to-end. We'll walk through it piece by piece below.
 ```csharp
 using Typhon.Engine;            // DatabaseEngine, EntityId, transactions, queries
 using Typhon.Schema.Definition; // [Component], [Archetype], Comp<T>
+using Skirmish;                 // the component + archetype types declared at the bottom
 
 // ── 3. Open the engine (once, at startup) ──────────────────────────────
 // One call: names the on-disk database (a "skirmish.typhon" directory in the
@@ -57,30 +58,34 @@ using (var tx = dbe.CreateQuickTransaction())
     Console.WriteLine($"{wounded.Count} wounded unit(s)");
 }
 
-// ── 1. Declare components (plain structs) ──────────────────────────────
-// C# requires top-level statements to precede type declarations in the same
-// file, so the types come last here. In a real project you'd likely split
-// them into a second file instead — see doc/guide/example/Model.cs.
-[Component("Skirmish.Position", 1, StorageMode = StorageMode.Versioned)]
-public struct Position
+// ── 1. Declare components + archetype (inside a namespace) ─────────────
+// These types must live in a namespace — the archetype source generator can't
+// emit valid code for types in the file's global namespace. Top-level statements
+// can't sit in a namespace, so the types go in a `namespace { }` block after them
+// (in a real project you'd split them into their own file — see doc/guide/example/Model.cs).
+namespace Skirmish
 {
-    public float X, Y;
-    public Position(float x, float y) { X = x; Y = y; }
-}
+    [Component("Skirmish.Position", 1, StorageMode = StorageMode.Versioned)]
+    public struct Position
+    {
+        public float X, Y;
+        public Position(float x, float y) { X = x; Y = y; }
+    }
 
-[Component("Skirmish.Health", 1, StorageMode = StorageMode.Versioned)]
-public struct Health
-{
-    public int Current, Max;
-    public Health(int current, int max) { Current = current; Max = max; }
-}
+    [Component("Skirmish.Health", 1, StorageMode = StorageMode.Versioned)]
+    public struct Health
+    {
+        public int Current, Max;
+        public Health(int current, int max) { Current = current; Max = max; }
+    }
 
-// ── 2. Declare an archetype (the shape of an entity) ───────────────────
-[Archetype(1)]
-public sealed partial class Unit : Archetype<Unit>
-{
-    public static readonly Comp<Position> Position = Register<Position>();
-    public static readonly Comp<Health>   Health   = Register<Health>();
+    // ── 2. Declare an archetype (the shape of an entity) ───────────────
+    [Archetype(1)]
+    public sealed partial class Unit : Archetype<Unit>
+    {
+        public static readonly Comp<Position> Position = Register<Position>();
+        public static readonly Comp<Health>   Health   = Register<Health>();
+    }
 }
 ```
 

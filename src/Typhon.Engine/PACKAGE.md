@@ -31,6 +31,20 @@ This single package bundles the full public surface:
 A **source generator** ships alongside it: decorate a partial class with `[Archetype]` and Typhon generates
 the strongly-typed, zero-copy component accessors for it at compile time.
 
+## Using with an AI coding agent
+
+Typhon is new — it's in no model's training data, so a coding agent will guess a SQL-shaped API by
+default. Point it at **<https://doc.typhondb.io/llms.txt>** (most agent tools probe it automatically),
+or paste this primer:
+
+> Typhon is an ECS database (not SQL). Model data as `[Component]` blittable structs (≥ 8 bytes, public
+> fields) declared **inside a namespace**; an archetype is `[Archetype] partial class Foo : Archetype<Foo>`
+> with `public static readonly Comp<T> X = Register<T>();`. Open with `DatabaseEngine.Open(...)`; do all
+> writes in `using var tx = dbe.CreateQuickTransaction(); … tx.Commit();`. Query with
+> `tx.Query<Foo>().Where<T>(x => …)` (not LINQ); read an entity via `tx.Open(id).Read(Foo.X)`.
+
+Full guide: <https://doc.typhondb.io/latest/guides/using-with-ai-coding-agents.html>
+
 ## Requirements
 
 - **.NET 10** (`net10.0`).

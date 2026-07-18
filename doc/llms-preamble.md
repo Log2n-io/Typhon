@@ -1,19 +1,27 @@
 <!--
   Preamble injected verbatim into the generated /llms.txt (see scripts/gen-llms-txt.py).
-  Keep it short — it primes an agent BEFORE it reads the map. The distilled
-  agent-guidance gotchas from #498 land here (tracked as #500). HTML comments
-  like this one are stripped from the emitted preamble.
+  Keep it short — it primes an agent BEFORE it reads the map. HTML comments are stripped.
+  The gotchas below are empirically ranked from an agent-consumption study (#498). Full
+  guidance: doc/guide/using-with-ai-coding-agents.md.
 -->
-Typhon is an **ECS database, not SQL**. Before writing code against the `Typhon`
-NuGet package, load the mental model: read **Key Concepts** first, then the **Guide**.
+Typhon is an **ECS database, not SQL**. Load the mental model before writing code: read
+**Key Concepts**, then the **Guide** — and for the idioms coding agents get wrong by default,
+read **Using Typhon with an AI coding agent** (https://doc.typhondb.io/latest/guides/using-with-ai-coding-agents.html).
 
-Non-negotiable idioms an agent gets wrong by default:
+The idioms that trip up first attempts:
 
-- **Data = blittable-struct components**, addressed by `EntityId` — there are no tables, rows, or SQL.
-- **All mutation happens inside a transaction**; `Commit()` returning does *not* imply on-disk durability unless the unit of work uses a durable mode.
-- **Storage mode sets the ACID scope** (Versioned / SingleVersion / Transient / Committed) — pick it per component, it is not a global switch.
-- **Transactions are single-thread-affine**; never share one across threads.
-- **Query with the ECS view API**, not LINQ-to-SQL — see Key Concepts › View.
+- **Data = blittable-struct components** addressed by `EntityId` — no tables, rows, or SQL. A component
+  must be **≥ 8 bytes** and its fields **`public`** (private fields are invisible to the schema).
+- **Component/archetype types must be declared inside a `namespace`** — not the global namespace of a
+  top-level-statements file. Add `using Typhon.Schema.Definition;` for the `[Component]` / `[Archetype]` attributes.
+- **An archetype is** `[Archetype] partial class Foo : Archetype<Foo>` with `public static readonly Comp<T> X = Register<T>();`;
+  spawn via `tx.Spawn<Foo>(Foo.X.Set(new T{…}))`.
+- **All mutation happens inside a transaction.** `Commit()` returning does not imply on-disk durability
+  unless the unit of work uses a durable mode. Open an entity with `tx.OpenMut(id)` to write.
+- **Query with the fluent view API** — `tx.Query<Foo>().Where<T>(x => …).Count()` — **not** LINQ-to-SQL; then
+  **read/mutate each entity via `tx.Open(id)`**, not the query-enumerated reference.
+- **Bootstrap** with `DatabaseEngine.Open(path, …)`, or via DI with `services.AddTyphon(…)` **plus `AddLogging()`**.
+- **Storage mode sets the ACID scope** (Versioned / SingleVersion / Transient / Committed) — chosen per component.
 
-Every page listed below is also available as clean markdown at `<url>.md`, and the
-whole conceptual core is at https://doc.typhondb.io/latest/llms-full.txt.
+Every page below also exists as clean markdown at `<url>.md`; the whole conceptual core is at
+https://doc.typhondb.io/latest/llms-full.txt.
