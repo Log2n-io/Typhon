@@ -90,7 +90,7 @@ Under `Immediate`, the commit path calls `WalManager.RequestFlush()` and then bl
 
 ### `DurabilityOverride`
 
-[`DurabilityOverride`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Transactions/public/DurabilityMode.cs) is a `Default`/`Immediate` enum declared for a *planned* per-transaction escalation knob (ADR-005), but it is **not wired into the engine** — there is no `tx.Commit(DurabilityOverride.Immediate)` overload (`Transaction.Commit` takes only `(ref UnitOfWorkContext, ConcurrencyConflictHandler)`). To give one critical operation zero-loss durability inside an otherwise-`Deferred`/`GroupCommit` batch today, commit it through its own `DurabilityMode.Immediate` UoW — `dbe.CreateQuickTransaction(DurabilityMode.Immediate)`, or `ctx.CreateSideTransaction(DurabilityMode.Immediate)` from a scheduled system.
+[`DurabilityOverride`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Transactions/public/DurabilityMode.cs) is a `Default`/`Immediate` enum declared for a *planned* per-transaction escalation knob (ADR-005), but it is **not wired into the engine** — there is no `tx.Commit(DurabilityOverride.Immediate)` overload; `Transaction.Commit` has no `DurabilityOverride` parameter in either overload (`Commit(ref UnitOfWorkContext, ConcurrencyConflictHandler)` and the convenience `Commit(ConcurrencyConflictHandler)`). To give one critical operation zero-loss durability inside an otherwise-`Deferred`/`GroupCommit` batch today, commit it through its own `DurabilityMode.Immediate` UoW — `dbe.CreateQuickTransaction(DurabilityMode.Immediate)`, or `ctx.CreateSideTransaction(DurabilityMode.Immediate)` from a scheduled system.
 
 ### `DurabilityDiscipline` (separate enum — not an extension of `DurabilityOverride`)
 
