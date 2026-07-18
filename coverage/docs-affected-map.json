@@ -1,0 +1,154 @@
+{
+  "_README": "docs-affected map (issue #490, Layer 2 of claude/design/doc-accuracy-and-generated-artifacts.md). HAND-AUTHORED — unlike coverage/test-affected-map.json (which is generated from coverage runs), this map has no generator: there is no machine signal for 'which doc page describes this file'. Edit it by hand. KEYS are coarse SOURCE-AREA path prefixes (repo-relative, trailing slash). VALUES are the doc pages that describe that area; a value ending in '/' is a directory whose *.md are all included. Values are intentionally GENEROUS (over-include): an extra page in a scoped review is cheap, a missed page is a shipped inaccuracy. Recall is delegated to Layer 3 (the weekly full-corpus audit), NOT to this map. scripts/docs-affected.py resolves changed files -> pages via prefix match and SURFACES unmapped source areas as a map-maintenance nudge. Keys beginning with '_' are metadata and ignored by the resolver.",
+  "_convention": "src/Typhon.Engine/<Subsystem>/  ->  [ in-depth-overview page, key-concepts pages, guide pages, feature-set/<Subsystem>/ , (the agent-guidance page for code-facing subsystems) ]",
+
+  "src/Typhon.Engine/Transactions/": [
+    "doc/in-depth-overview/08-transactions.md",
+    "doc/key-concepts/transaction.md",
+    "doc/key-concepts/unit-of-work.md",
+    "doc/key-concepts/snapshot-isolation.md",
+    "doc/key-concepts/conflict-resolution.md",
+    "doc/key-concepts/point-in-time-accessor.md",
+    "doc/key-concepts/deadlines-timeouts.md",
+    "doc/guide/03-transactions.md",
+    "doc/guide/isolation-durability-cheatsheet.md",
+    "doc/feature-set/Transactions/",
+    "doc/guide/using-with-ai-coding-agents.md"
+  ],
+
+  "src/Typhon.Engine/Ecs/": [
+    "doc/in-depth-overview/06-ecs.md",
+    "doc/key-concepts/entity.md",
+    "doc/key-concepts/component.md",
+    "doc/key-concepts/component-collection.md",
+    "doc/key-concepts/archetype.md",
+    "doc/key-concepts/entity-link.md",
+    "doc/key-concepts/cluster-storage.md",
+    "doc/key-concepts/storage-mode.md",
+    "doc/key-concepts/database-engine.md",
+    "doc/key-concepts/view.md",
+    "doc/key-concepts/bulk-load.md",
+    "doc/guide/01-first-app.md",
+    "doc/guide/02-modeling.md",
+    "doc/feature-set/Ecs/",
+    "doc/guide/using-with-ai-coding-agents.md"
+  ],
+
+  "src/Typhon.Engine/Querying/": [
+    "doc/in-depth-overview/09-querying.md",
+    "doc/key-concepts/query.md",
+    "doc/key-concepts/view.md",
+    "doc/key-concepts/secondary-index.md",
+    "doc/guide/04-querying.md",
+    "doc/feature-set/Querying/",
+    "doc/guide/using-with-ai-coding-agents.md"
+  ],
+
+  "src/Typhon.Engine/Storage/": [
+    "doc/in-depth-overview/02-storage.md",
+    "doc/key-concepts/page-cache.md",
+    "doc/key-concepts/storage-mode.md",
+    "doc/key-concepts/cluster-storage.md",
+    "doc/key-concepts/bulk-load.md",
+    "doc/feature-set/Storage/",
+    "doc/guide/using-with-ai-coding-agents.md"
+  ],
+
+  "src/Typhon.Engine/Durability/": [
+    "doc/in-depth-overview/11-durability.md",
+    "doc/key-concepts/durability.md",
+    "doc/key-concepts/wal-checkpoint.md",
+    "doc/key-concepts/unit-of-work.md",
+    "doc/guide/isolation-durability-cheatsheet.md",
+    "doc/feature-set/Durability/"
+  ],
+
+  "src/Typhon.Engine/Indexing/": [
+    "doc/in-depth-overview/03-indexing.md",
+    "doc/key-concepts/secondary-index.md",
+    "doc/feature-set/Indexing/"
+  ],
+
+  "src/Typhon.Engine/Schema/": [
+    "doc/in-depth-overview/04-schema.md",
+    "doc/key-concepts/schema-evolution.md",
+    "doc/key-concepts/component.md",
+    "doc/key-concepts/archetype.md",
+    "doc/feature-set/Schema/",
+    "doc/guide/using-with-ai-coding-agents.md"
+  ],
+
+  "src/Typhon.Engine/Revision/": [
+    "doc/in-depth-overview/05-revision.md",
+    "doc/key-concepts/schema-evolution.md",
+    "doc/key-concepts/storage-mode.md",
+    "doc/feature-set/Revision/"
+  ],
+
+  "src/Typhon.Engine/Spatial/": [
+    "doc/in-depth-overview/07-spatial.md",
+    "doc/key-concepts/spatial-index.md",
+    "doc/key-concepts/spatial-tiers.md",
+    "doc/feature-set/Spatial/"
+  ],
+
+  "src/Typhon.Engine/Runtime/": [
+    "doc/in-depth-overview/10-runtime.md",
+    "doc/key-concepts/runtime.md",
+    "doc/key-concepts/scheduler.md",
+    "doc/key-concepts/system.md",
+    "doc/key-concepts/tick.md",
+    "doc/key-concepts/tick-context.md",
+    "doc/key-concepts/tick-fence.md",
+    "doc/guide/05-systems.md",
+    "doc/feature-set/Runtime/"
+  ],
+
+  "src/Typhon.Engine/Observability/": [
+    "doc/in-depth-overview/12-observability.md",
+    "doc/key-concepts/observability.md",
+    "doc/feature-set/Observability/"
+  ],
+
+  "src/Typhon.Engine/Profiler/": [
+    "doc/in-depth-overview/12-observability.md",
+    "doc/key-concepts/profiler.md",
+    "doc/feature-set/Profiler/"
+  ],
+
+  "src/Typhon.Engine/Resources/": [
+    "doc/in-depth-overview/13-resources.md",
+    "doc/key-concepts/resources.md",
+    "doc/key-concepts/overload-management.md",
+    "doc/key-concepts/deadlines-timeouts.md",
+    "doc/feature-set/Resources/"
+  ],
+
+  "src/Typhon.Engine/Errors/": [
+    "doc/in-depth-overview/14-errors.md",
+    "doc/key-concepts/errors.md",
+    "doc/feature-set/Errors/"
+  ],
+
+  "src/Typhon.Engine/Foundation/": [
+    "doc/in-depth-overview/01-foundation.md",
+    "doc/key-concepts/deadlines-timeouts.md",
+    "doc/feature-set/Foundation/"
+  ],
+
+  "src/Typhon.Engine/Hosting/": [
+    "doc/key-concepts/database-engine.md",
+    "doc/guide/getting-started.md",
+    "doc/guide/01-first-app.md",
+    "doc/guide/06-operating.md",
+    "doc/feature-set/Hosting/",
+    "doc/guide/using-with-ai-coding-agents.md"
+  ],
+
+  "src/Typhon.Engine/Subscriptions/": [
+    "doc/key-concepts/subscription.md",
+    "doc/feature-set/Subscriptions/"
+  ],
+
+  "src/Typhon.Engine/Properties/": []
+}

@@ -1,0 +1,81 @@
+name: Doc-Accuracy Audit (weekly)
+
+# Layer 3 of the doc-accuracy design (claude/design/doc-accuracy-and-generated-artifacts.md, issue #490).
+# A scheduled whole-corpus Claude sweep — the completeness pass that per-PR scoping (Layer 2) cannot do:
+# cross-page contradictions, stale claims, and enumeration drift across the ENTIRE /doc set. It FILES
+# ISSUES, it does not gate. This is the recall safety net for everything Layer 2's scoped map misses
+# (cross-cutting drift, unmapped source areas, fork-PR changes, always-wrong prose).
+#
+# Auth: same as issue-triage.yml / doc-accuracy-review.yml (CLAUDE_CODE_OAUTH_TOKEN + Claude GitHub App).
+# Runs only on the base repo (schedule/dispatch), so secrets are always present; no fork surface.
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"   # Mondays 06:00 UTC — weekly is enough (drift is a doc bug, not a runtime one)
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write
+  id-token: write
+
+concurrency:
+  group: doc-accuracy-audit
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Claude whole-corpus doc audit
+        uses: anthropics/claude-code-action@v1
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # scoped: gh writes run as issues:write, nothing more
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: |
+            You are the weekly doc-accuracy auditor for ${{ github.repository }}, a pre-alpha .NET
+            real-time ACID database engine. Do the whole-corpus consistency sweep that per-PR review
+            cannot: read across the ENTIRE documentation set and cross-check it against the engine source.
+
+            You FILE ISSUES, you do not gate anything. Precedence rule (do not violate): anything a
+            generator or linter already covers is NOT your job — the telemetry reference, broken links,
+            and dead xrefs are handled by the deterministic Layer 1 gates in build-docs.yml. You own only
+            the irreducible SEMANTIC residue.
+
+            Scope of the doc corpus (hand-written prose only):
+              doc/guide/**, doc/key-concepts/**, doc/in-depth-overview/**, doc/feature-set/**
+            Exclude generated output: doc/_site/**, doc/api/**.
+
+            Step 1 — dedup FIRST (do not refile known findings):
+              gh issue list --repo ${{ github.repository }} --state open --label documentation --search "[doc-audit]" --limit 100
+              Read the titles so you never open a duplicate of an already-open finding.
+
+            Step 2 — audit. Look for, citing exact file:line for BOTH the doc line and the source line:
+              - Prose contradicting code (a claimed default, limit, method name, or behaviour that the
+                current source no longer matches).
+              - Cross-page contradictions (two doc pages stating incompatible facts).
+              - Stale claims (a feature/flag/mode described as present that was removed or renamed).
+              - Enumeration / completeness drift (a page implying "all X are listed here" when they are not).
+              Use Read/Grep/Glob to verify every claim against the source before reporting it. Do not
+              report style, tone, or speculative concerns — only verifiable inaccuracies.
+
+            Step 3 — file at most 5 NEW issues this run, most severe first, each:
+              gh issue create --repo ${{ github.repository }} --label documentation \
+                --title "[doc-audit] <concise one-line summary>" \
+                --body "<doc path:line + quoted wrong sentence; contradicting code path:line; suggested fix>"
+              Skip anything already covered by an open [doc-audit] issue from Step 1.
+              If you found MORE than 5, put the overflow as a checklist in ONE extra summary issue titled
+              "[doc-audit] Weekly sweep — <N> additional findings".
+              If you found NOTHING, file no issues at all — a clean corpus is the goal, not a quota.
+
+            Do NOT set issue Type / assignees / milestone / project (org-level; the maintainer's job).
+            Do NOT edit any files. Only create the issues above.
+          claude_args: |
+            --allowedTools "Read,Grep,Glob,Bash(gh issue list:*),Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue create:*)"
+            --max-turns 100
+            --model claude-sonnet-4-6

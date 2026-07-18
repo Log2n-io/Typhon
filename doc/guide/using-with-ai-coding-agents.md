@@ -34,12 +34,12 @@ change data. You query with a fluent **view** API, not SQL or LINQ-to-SQL.
 
 ## 3. Idioms agents get wrong (give these to your agent)
 
-These are ranked by how often a naive agent trips on them. Each is a hard requirement of the current
-API, not a style preference.
+These are ranked by how often a naive agent trips on them. Most are hard requirements of the current
+API; the rest are strong recommendations.
 
 | # | Do | Don't |
 |---|----|-------|
-| 1 | Declare `[Component]` / `[Archetype]` types in **any namespace** — the global namespace of a top-level-statements file works too |
+| 1 | Declare `[Component]` / `[Archetype]` types in **any namespace** — including the global namespace of a top-level-statements file | Assume they *must* be wrapped in a named `namespace` — the generator supports both; a named one is just tidier for a real project |
 | 2 | Make components **≥ 8 bytes** with **`public`** fields | Use a single 4-byte field, or `private` padding — the schema sizes on public fields, not `sizeof(T)` |
 | 3 | Query with the fluent builder `tx.Query<TArch>().Where<TComp>(x => …).Count()` | Write LINQ-to-SQL style `tx.Query(x => x.Score >= 50)` — the filtered component is a separate generic argument |
 | 4 | **Read/mutate each entity via `tx.Open(id)`** (query to *find*, open to *read*) | Read directly off the reference the query enumerator yields |
@@ -123,9 +123,10 @@ If your agent isn't reading `llms.txt` automatically, paste this block into your
 
 ```text
 Typhon is an ECS database (not SQL) from the `Typhon` NuGet package. Rules:
-- Model data as [Component] blittable structs (>= 8 bytes, public fields). Add `using Typhon.Schema.Definition;`.
-  (Any namespace works, including the global namespace of a top-level-statements file.)
-- An archetype is `[Archetype] partial class Foo : Archetype<Foo>` with
+- Model data as `[Component("Name", 1)]` blittable structs (>= 8 bytes, public fields) — the name + revision
+  are REQUIRED attribute args. Add `using Typhon.Schema.Definition;`. (Any namespace works, including the
+  global namespace of a top-level-statements file.)
+- An archetype is `[Archetype(1)] partial class Foo : Archetype<Foo>` (the id arg is REQUIRED) with
   `public static readonly Comp<T> X = Register<T>();`.
 - Open the engine with DatabaseEngine.Open(path, o => o.Register<T>().RegisterArchetype<Foo>()).
 - All changes happen in a transaction: `using var tx = dbe.CreateQuickTransaction(); … tx.Commit();`.

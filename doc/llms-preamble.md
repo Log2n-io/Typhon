@@ -10,12 +10,12 @@ read **Using Typhon with an AI coding agent** (https://doc.typhondb.io/latest/gu
 
 The idioms that trip up first attempts:
 
-- **Data = blittable-struct components** addressed by `EntityId` — no tables, rows, or SQL. A component
-  must be **≥ 8 bytes** and its fields **`public`** (private fields are invisible to the schema).
+- **Data = blittable-struct components** addressed by `EntityId` — no tables, rows, or SQL. Declare with
+  `[Component("Name", 1)]` (the name + revision are **required** args); a component must be **≥ 8 bytes** with **`public`** fields (private are invisible to the schema).
 - **Add `using Typhon.Schema.Definition;`** for the `[Component]` / `[Archetype]` attributes. Types work in any
   namespace, including the global namespace of a top-level-statements file.
-- **An archetype is** `[Archetype] partial class Foo : Archetype<Foo>` with `public static readonly Comp<T> X = Register<T>();`;
-  spawn via `tx.Spawn<Foo>(Foo.X.Set(new T{…}))`.
+- **An archetype is** `[Archetype(1)] partial class Foo : Archetype<Foo>` with `public static readonly Comp<T> X = Register<T>();`
+  (the `[Archetype]` id arg is **required**); spawn via `tx.Spawn<Foo>(Foo.X.Set(new T{…}))`.
 - **All mutation happens inside a transaction.** `Commit()` returning does not imply on-disk durability
   unless the unit of work uses a durable mode. Open an entity with `tx.OpenMut(id)` to write.
 - **Query with the fluent view API** — `tx.Query<Foo>().Where<T>(x => …).Count()` — **not** LINQ-to-SQL; then
