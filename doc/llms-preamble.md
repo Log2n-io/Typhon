@@ -6,7 +6,7 @@
 -->
 Typhon is an **ECS database, not SQL**. Load the mental model before writing code: read
 **Key Concepts**, then the **Guide** — and for the idioms coding agents get wrong by default,
-read **Using Typhon with an AI coding agent** (https://doc.typhondb.io/latest/guides/using-with-ai-coding-agents.html).
+read **Using Typhon with an AI coding agent** (https://doc.typhondb.io/latest/guides/using-with-ai-coding-agents.html.md).
 
 The idioms that trip up first attempts:
 
@@ -23,5 +23,4 @@ The idioms that trip up first attempts:
 - **Bootstrap** with `DatabaseEngine.Open(path, …)`, or via DI with `services.AddTyphon(…)` (it self-registers a no-op logger, so `AddLogging()` is optional).
 - **Storage mode sets the ACID scope** (Versioned / SingleVersion / Transient / Committed) — chosen per component.
 
-Every page below also exists as clean markdown at `<url>.md`; the whole conceptual core is at
-https://doc.typhondb.io/latest/llms-full.txt.
+The whole conceptual core is also available as one file at https://doc.typhondb.io/latest/llms-full.txt.
