@@ -25,6 +25,8 @@ on:
       - scripts/stage-api-bin.sh
       - .config/dotnet-tools.json         # pinned DocFX version
       - .github/workflows/build-docs.yml
+      - coverage/docs-affected-map.json   # the map-integrity gate validates this
+      - scripts/docs-affected.py
   pull_request:
     branches: [main]
     paths:
@@ -36,6 +38,8 @@ on:
       - scripts/stage-api-bin.sh
       - .config/dotnet-tools.json
       - .github/workflows/build-docs.yml
+      - coverage/docs-affected-map.json
+      - scripts/docs-affected.py
   workflow_dispatch:
 
 permissions:
@@ -63,6 +67,15 @@ jobs:
       # Design: claude/design/doc-accuracy-and-generated-artifacts.md
       - name: Verify generated telemetry reference is up to date
         run: python3 scripts/gen-telemetry-reference.py --check
+
+      # docs-affected map integrity (Layer-1 gate for issue #490's Layer-2 net). The map
+      # (coverage/docs-affected-map.json) is hand-authored with no generator, so a moved/renamed/
+      # deleted doc page can leave an entry pointing at nothing, silently narrowing the Layer-2
+      # reviewer. --validate is BLOCKING on stale entries (deterministic — a path exists or it does
+      # not) and warn-only on unmapped subsystems (Layer 3's weekly audit is the floor for those).
+      # Issue #512. Design: claude/design/doc-accuracy-and-generated-artifacts.md
+      - name: Verify docs-affected map integrity (no stale entries)
+        run: python3 scripts/docs-affected.py --validate
 
       - uses: actions/setup-dotnet@v4
         with:

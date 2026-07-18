@@ -56,14 +56,21 @@ jobs:
           set -euo pipefail
           gh pr diff ${{ github.event.pull_request.number }} --name-only > changed.txt || true
           echo "----- changed files -----"; cat changed.txt || true
+          python3 scripts/docs-affected.py - --format json < changed.txt > affected.json || echo '{}' > affected.json
           REPORT=$(python3 scripts/docs-affected.py - --format text < changed.txt || true)
-          COUNT=$(python3 scripts/docs-affected.py - --format json < changed.txt \
-                    | python3 -c "import sys,json;print(len(json.load(sys.stdin)['pages']))")
+          COUNT=$(python3 -c "import json;print(len(json.load(open('affected.json')).get('pages',[])))")
+          NUDGE=$(python3 -c "import json;d=json.load(open('affected.json'));print(chr(10).join(['- unmapped: '+u for u in d.get('unmapped',[])]+['- stale: '+s for s in d.get('stale',[])]))")
           echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          if [ -n "$NUDGE" ]; then echo "has_nudge=1" >> "$GITHUB_OUTPUT"; else echo "has_nudge=0" >> "$GITHUB_OUTPUT"; fi
           {
             echo "report<<DOCS_AFFECTED_EOF"
             echo "$REPORT"
             echo "DOCS_AFFECTED_EOF"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "nudge<<DOCS_NUDGE_EOF"
+            echo "$NUDGE"
+            echo "DOCS_NUDGE_EOF"
           } >> "$GITHUB_OUTPUT"
 
       - name: Claude doc-accuracy review
@@ -125,3 +132,23 @@ jobs:
             --allowedTools "Read,Grep,Glob,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr comment:*)"
             --max-turns 50
             --model claude-sonnet-4-6
+
+      # If the change touched source with no mapped pages (count 0) but the resolver flagged unmapped
+      # areas or stale entries, the Claude review above is skipped — so post the map-gap nudge
+      # deterministically (no LLM needed). This surfaces the gap on the PR that introduces the
+      # unmapped code — the earliest actionable moment — instead of waiting for the weekly Layer 3
+      # audit to catch the drift and hoping someone back-infers the missing map key. Issue #512.
+      - name: Post map-gap nudge (no pages to review)
+        if: ${{ steps.affected.outputs.count == '0' && steps.affected.outputs.has_nudge == '1' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NUDGE: ${{ steps.affected.outputs.nudge }}
+        run: |
+          {
+            echo "📝 **Doc-accuracy** (advisory · scoped · Layer 2) — no *mapped* doc pages to review for this change, but the docs-affected map has gaps for the touched source:"
+            echo ""
+            echo "$NUDGE"
+            echo ""
+            echo "_Consider adding these to \`coverage/docs-affected-map.json\` so future changes here get per-PR doc review. (Layer 3's weekly whole-corpus audit covers their drift regardless.)_"
+          } > nudge-body.md
+          gh pr comment ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --body-file nudge-body.md

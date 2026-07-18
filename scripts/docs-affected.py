@@ -112,6 +112,54 @@ def resolve(files: list[str], amap: dict) -> dict:
     }
 
 
+def validate_map(amap: dict) -> tuple[list[str], list[str]]:
+    """Whole-map integrity check. Returns (stale, unmapped_subsystems).
+
+    stale    = a mapped page/dir that no longer exists (or a mapped dir with no *.md) — map rot.
+    unmapped = top-level src/Typhon.Engine/<X>/ subsystems with no map key — a coverage gap.
+    """
+    stale: set[str] = set()
+    for key, values in amap.items():
+        for v in values:
+            if v.endswith("/"):
+                base = REPO_ROOT / v
+                if not base.is_dir():
+                    stale.add(f"{v}  (dir missing; mapped by {key})")
+                elif not any(base.rglob("*.md")):
+                    stale.add(f"{v}  (dir has no *.md; mapped by {key})")
+            elif not (REPO_ROOT / v).exists():
+                stale.add(f"{v}  (mapped by {key})")
+
+    unmapped: list[str] = []
+    src_root = REPO_ROOT / "src/Typhon.Engine"
+    if src_root.is_dir():
+        for d in sorted(src_root.iterdir()):
+            if d.is_dir() and d.name not in ("bin", "obj"):
+                prefix = f"src/Typhon.Engine/{d.name}/"
+                if prefix not in amap:
+                    unmapped.append(prefix)
+    return sorted(stale), unmapped
+
+
+def run_validate(amap: dict) -> int:
+    """--validate: BLOCKING on stale (deterministic map rot), ADVISORY on unmapped (Layer 3 is the floor)."""
+    stale, unmapped = validate_map(amap)
+    print(f"# docs-affected map validation — {len(amap)} mapped area(s)")
+    if unmapped:
+        print(f"# WARNING: {len(unmapped)} source subsystem(s) with no map entry "
+              f"(Layer 3's weekly audit still covers their doc drift; add a key for fast Layer-2 coverage):")
+        for u in unmapped:
+            print(f"  {u}")
+    if stale:
+        print(f"# FAIL: {len(stale)} stale map entr(y/ies) — a mapped page/dir no longer exists:")
+        for s in stale:
+            print(f"  {s}")
+        print("# Fix coverage/docs-affected-map.json (a doc page was moved, renamed, or deleted).")
+        return 1
+    print("# OK: every mapped page/dir exists (0 stale).")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -122,9 +170,17 @@ def main() -> int:
             "    git diff --name-only origin/main...HEAD | python3 scripts/docs-affected.py -\n"
         ),
     )
-    ap.add_argument("files", nargs="+", help="Changed files. Use - to read newline-separated paths from stdin.")
+    ap.add_argument("files", nargs="*", help="Changed files. Use - to read newline-separated paths from stdin.")
     ap.add_argument("--format", choices=["text", "json"], default="text")
+    ap.add_argument("--validate", action="store_true",
+                    help="Validate the whole map (ignores file args): exit non-zero on stale entries, warn on unmapped subsystems.")
     args = ap.parse_args()
+
+    if args.validate:
+        return run_validate(load_map())
+
+    if not args.files:
+        ap.error("no files given (pass file paths, or --validate to check the map)")
 
     if "-" in args.files:
         args.files = [f for f in args.files if f != "-"]
