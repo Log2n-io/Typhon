@@ -73,6 +73,14 @@
         <ProjectReference Include="..\Typhon.Schema.Definition\Typhon.Schema.Definition.csproj" PrivateAssets="all" />
     </ItemGroup>
 
+    <ItemGroup>
+        <!-- Single source of truth for the telemetry gate flags (#522). Consumed at engine-build time by the
+             telemetry source generators in Typhon.Generators (TelemetryConfig.g.cs + TelemetryFlagCatalog.g.cs).
+             Engine-build-only: Typhon.Generators is IsPackable=false and never shipped to consumers (only the
+             dedicated Typhon.Generators.Consumer subset ships), so this file never reaches a consumer build. -->
+        <AdditionalFiles Include="Observability\telemetry-flags.jsonc" />
+    </ItemGroup>
+
     <!-- ============ NuGet packaging (#427) ============ -->
     <PropertyGroup>
         <PackageId>Typhon</PackageId>

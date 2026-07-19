@@ -34,6 +34,9 @@
         <PackageReference Include="Spectre.Console" Version="0.57.2" />
         <PackageReference Include="Spectre.Console.Cli" Version="0.55.0" />
         <PackageReference Include="PrettyPrompt" Version="6.0.4" />
+        <!-- Full-screen interactive telemetry editor (`typhon telemetry edit`, #522/T6). Runs on the alternate
+             screen buffer, sequentially with the REPL/Spectre output (never simultaneously). -->
+        <PackageReference Include="Terminal.Gui" Version="2.4.17" />
         <!-- Compile-only: [PublicAPI] markers no longer flow transitively from the engine (#434). -->
         <PackageReference Include="JetBrains.Annotations" Version="2026.2.0" PrivateAssets="all" />
         <!-- Microsoft.Extensions.{DependencyInjection,Logging,Logging.Console,Options} were explicit refs, but the

@@ -60,7 +60,9 @@ jobs:
       - uses: actions/checkout@v4
 
       # The telemetry flag reference (doc/feature-set/Observability/telemetry-flags-reference.md +
-      # typhon.telemetry.template.jsonc) is GENERATED from TelemetryConfig.cs. Regenerate and diff:
+      # typhon.telemetry.template.jsonc) is GENERATED from the catalog (src/Typhon.Engine/Observability/
+      # telemetry-flags.jsonc — the single source of truth; the engine's gate fields are generated from it too).
+      # Regenerate and diff:
       # if the committed artifacts drift from source, fail with the delta rather than publish a
       # reference that lies. There is no "should we run the generator?" heuristic — the output is a
       # pure function of the source, so the diff IS the staleness detector and it cannot miss.

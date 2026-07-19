@@ -51,6 +51,20 @@ internal static class Program
                     .WithDescription("Launch the Typhon Workbench UI in your browser.")
                     .WithExample(["ui"])
                     .WithExample(["ui", "mydb.typhon"]);
+
+                // `typhon telemetry …` authors typhon.telemetry.json in the working directory (#522). Scriptable
+                // verbs over the source-generated flag catalog; the interactive tree lives under `edit`.
+                config.AddBranch("telemetry", tel =>
+                {
+                    tel.SetDescription("Create/update typhon.telemetry.json (telemetry gate flags).");
+                    tel.AddCommand<TelemetryListCommand>("list").WithDescription("List flags with default / explicit / effective state.");
+                    tel.AddCommand<TelemetryEnableCommand>("enable").WithDescription("Set a flag (or subtree root) explicitly on.");
+                    tel.AddCommand<TelemetryDisableCommand>("disable").WithDescription("Set a flag explicitly off.");
+                    tel.AddCommand<TelemetryResetCommand>("reset").WithDescription("Remove an explicit flag (back to inherit).");
+                    tel.AddCommand<TelemetryEffectiveCommand>("effective").WithDescription("Show what would actually emit.");
+                    tel.AddCommand<TelemetryPresetCommand>("preset").WithDescription("Apply a curated preset bundle.");
+                    tel.AddCommand<TelemetryEditCommand>("edit").WithDescription("Interactive tri-state tree editor (full-screen).");
+                });
             });
 
             return app.Run(args);

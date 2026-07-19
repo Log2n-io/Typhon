@@ -1,0 +1,1529 @@
+// GENERATED once by scripts/bootstrap-telemetry-catalog.py from TelemetryConfig.cs (Feature #522, T1).
+// Single source of truth for Typhon's telemetry gate flags. The source generator emits both the
+// perf projection (TelemetryConfig.g.cs) and the runtime catalog (TelemetryFlagCatalog.g.cs) from this;
+// the docs (telemetry-flags-reference.md + typhon.telemetry.template.jsonc) regenerate from it too.
+// `field` = the exact C# field name (an ABI: 96 [TraceEvent(Gate=...)] strings + call sites bind to it).
+// `desc` is user-facing (docs + CLI tooltips). `//` comments are author-only. `kind`: master |
+// compositeActive | rawLeaf | subtreeResolved | group. `default` omitted = false.
+{
+  "prefix": "Typhon:Profiler",
+  "root":
+    {
+      "name": "Profiler",
+      "kind": "master",
+      "field": "ProfilerActive",
+      "desc": "Global profiler enable/disable. When false, all profiler-emitted telemetry is disabled regardless of individual component settings.",
+      "children": [
+        {
+          "name": "GcTracing",
+          "kind": "compositeActive",
+          "field": "ProfilerGcTracingActive",
+          "enabledField": "ProfilerGcTracingEnabled",
+          "desc": "Whether opt-in .NET runtime GC-event tracing is requested by configuration."
+        },
+        {
+          "name": "MemoryAllocations",
+          "kind": "compositeActive",
+          "field": "ProfilerMemoryAllocationsActive",
+          "enabledField": "ProfilerMemoryAllocationsEnabled",
+          "desc": "Whether opt-in per-allocation tracking is requested by configuration."
+        },
+        {
+          "name": "CpuSampling",
+          "kind": "compositeActive",
+          "field": "ProfilerCpuSamplingActive",
+          "enabledField": "ProfilerCpuSamplingEnabled",
+          "desc": "Whether opt-in in-process CPU stack sampling is requested by configuration."
+        },
+        {
+          "name": "Gauges",
+          "kind": "compositeActive",
+          "field": "ProfilerGaugesActive",
+          "enabledField": "ProfilerGaugesEnabled",
+          "desc": "Whether opt-in per-tick gauge snapshots are requested by configuration."
+        },
+        {
+          "name": "Scheduler",
+          "kind": "subtreeResolved",
+          "field": "SchedulerActive",
+          "desc": "Whether Scheduler component telemetry is enabled in configuration.",
+          "children": [
+            {
+              "name": "Gauges",
+              "kind": "group",
+              "children": [
+                {
+                  "name": "TransitionLatency",
+                  "kind": "rawLeaf",
+                  "field": "SchedulerTrackTransitionLatency",
+                  "default": true,
+                  "desc": "Whether to track per-system transition latency."
+                },
+                {
+                  "name": "WorkerUtilization",
+                  "kind": "rawLeaf",
+                  "field": "SchedulerTrackWorkerUtilization",
+                  "default": true,
+                  "desc": "Whether to track per-worker active/idle time breakdown."
+                },
+                {
+                  "name": "StragglerGap",
+                  "kind": "rawLeaf",
+                  "field": "SchedulerTrackStragglerGap",
+                  "default": true,
+                  "desc": "Whether to track straggler gap (parallel efficiency metric for Patate systems)."
+                }
+              ]
+            },
+            {
+              "name": "ArchetypeTouches",
+              "kind": "rawLeaf",
+              "field": "SchedulerArchetypeTouchesActive",
+              "default": true,
+              "desc": "Whether to capture per-(system, archetype) entity-touch counts at parallel-query completion (Workbench Data Flow module). Default true. JIT dead-code-eliminates the capture path when false."
+            },
+            {
+              "name": "System",
+              "kind": "subtreeResolved",
+              "field": "SchedulerSystemActive",
+              "desc": "Combined gate for the Scheduler:System subtree (per-system execution/queue-wait spans).",
+              "children": [
+                {
+                  "name": "StartExecution",
+                  "kind": "subtreeResolved",
+                  "field": "SchedulerSystemStartExecutionActive",
+                  "desc": "Combined gate for the Scheduler:System:StartExecution span."
+                },
+                {
+                  "name": "Completion",
+                  "kind": "subtreeResolved",
+                  "field": "SchedulerSystemCompletionActive",
+                  "desc": "Combined gate for the Scheduler:System:Completion span."
+                },
+                {
+                  "name": "QueueWait",
+                  "kind": "subtreeResolved",
+                  "field": "SchedulerSystemQueueWaitActive",
+                  "desc": "Combined gate for the Scheduler:System:QueueWait span (time a system waited in its queue before running)."
+                },
+                {
+                  "name": "SingleThreaded",
+                  "kind": "subtreeResolved",
+                  "field": "SchedulerSystemSingleThreadedActive",
+                  "desc": "Combined gate for the Scheduler:System:SingleThreaded span."
+                }
+              ]
+            },
+            {
+              "name": "Worker",
+              "kind": "subtreeResolved",
+              "field": "SchedulerWorkerActive",
+              "desc": "Combined gate for the Scheduler:Worker subtree (worker idle/wake spans).",
+              "children": [
+                {
+                  "name": "Idle",
+                  "kind": "subtreeResolved",
+                  "field": "SchedulerWorkerIdleActive",
+                  "desc": "Combined gate for the Scheduler:Worker:Idle span."
+                },
+                {
+                  "name": "Wake",
+                  "kind": "subtreeResolved",
+                  "field": "SchedulerWorkerWakeActive",
+                  "desc": "Combined gate for the Scheduler:Worker:Wake span."
+                },
+                {
+                  "name": "BetweenTick",
+                  "kind": "subtreeResolved",
+                  "field": "SchedulerWorkerBetweenTickActive",
+                  "desc": "Combined gate for the Scheduler:Worker:BetweenTick span (worker gap between ticks)."
+                }
+              ]
+            },
+            {
+              "name": "Dispense",
+              "kind": "subtreeResolved",
+              "field": "SchedulerDispenseActive",
+              "desc": "Combined gate for the Scheduler:Dispense span (work-item dispense to workers)."
+            },
+            {
+              "name": "Dependency",
+              "kind": "subtreeResolved",
+              "field": "SchedulerDependencyActive",
+              "desc": "Combined gate for the Scheduler:Dependency subtree (dependency-ready/fan-out spans).",
+              "children": [
+                {
+                  "name": "Ready",
+                  "kind": "subtreeResolved",
+                  "field": "SchedulerDependencyReadyActive",
+                  "desc": "Combined gate for the Scheduler:Dependency:Ready span (a system's dependencies became satisfied)."
+                },
+                {
+                  "name": "FanOut",
+                  "kind": "subtreeResolved",
+                  "field": "SchedulerDependencyFanOutActive",
+                  "desc": "Combined gate for the Scheduler:Dependency:FanOut span."
+                }
+              ]
+            },
+            {
+              "name": "Overload",
+              "kind": "subtreeResolved",
+              "field": "SchedulerOverloadActive",
+              "desc": "Combined gate for the Scheduler:Overload subtree (overload level-change/shed spans).",
+              "children": [
+                {
+                  "name": "LevelChange",
+                  "kind": "subtreeResolved",
+                  "field": "SchedulerOverloadLevelChangeActive",
+                  "desc": "Combined gate for the Scheduler:Overload:LevelChange span."
+                },
+                {
+                  "name": "SystemShed",
+                  "kind": "subtreeResolved",
+                  "field": "SchedulerOverloadSystemShedActive",
+                  "desc": "Combined gate for the Scheduler:Overload:SystemShed span (a system shed under overload)."
+                },
+                {
+                  "name": "TickMultiplier",
+                  "kind": "subtreeResolved",
+                  "field": "SchedulerOverloadTickMultiplierActive",
+                  "desc": "Combined gate for the Scheduler:Overload:TickMultiplier span."
+                },
+                {
+                  "name": "Detector",
+                  "kind": "subtreeResolved",
+                  "field": "SchedulerOverloadDetectorActive",
+                  "desc": "Combined flag for the per-tick OverloadDetector gauge snapshot (overrunRatio, consecutive counters, level, multiplier)."
+                }
+              ]
+            },
+            {
+              "name": "Graph",
+              "kind": "subtreeResolved",
+              "field": "SchedulerGraphActive",
+              "desc": "Combined gate for the Scheduler:Graph subtree (DAG build/rebuild spans).",
+              "children": [
+                {
+                  "name": "Build",
+                  "kind": "subtreeResolved",
+                  "field": "SchedulerGraphBuildActive",
+                  "desc": "Combined gate for the Scheduler:Graph:Build span (initial DAG build)."
+                },
+                {
+                  "name": "Rebuild",
+                  "kind": "subtreeResolved",
+                  "field": "SchedulerGraphRebuildActive",
+                  "desc": "Combined gate for the Scheduler:Graph:Rebuild span (DAG rebuild after a schema/system change)."
+                }
+              ]
+            },
+            {
+              "name": "Metronome",
+              "kind": "subtreeResolved",
+              "field": "SchedulerMetronomeActive",
+              "desc": "Combined gate for the Scheduler:Metronome subtree.",
+              "children": [
+                {
+                  "name": "Wait",
+                  "kind": "subtreeResolved",
+                  "field": "SchedulerMetronomeWaitActive",
+                  "desc": "Combined flag for the SchedulerMetronomeWait span (kind 241)."
+                }
+              ]
+            },
+            {
+              "name": "Queue",
+              "kind": "subtreeResolved",
+              "field": "SchedulerQueueActive",
+              "desc": "Combined gate for the Scheduler:Queue subtree.",
+              "children": [
+                {
+                  "name": "TickEnd",
+                  "kind": "subtreeResolved",
+                  "field": "SchedulerQueueTickEndActive",
+                  "desc": "Combined flag for the QueueTickEnd instant (kind 244). Per-(tick, queue) rollup emitted at end-of-tick; drives the Workbench Data API queue/&lt;name&gt; tracks (#311 / DAG view backpressure edges)."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "Concurrency",
+          "kind": "subtreeResolved",
+          "field": "ConcurrencyActive",
+          "desc": "Combined Concurrency root gate: master Enabled AND Typhon:Profiler:Concurrency:Enabled.",
+          "children": [
+            {
+              "name": "AccessControl",
+              "kind": "subtreeResolved",
+              "field": "ConcurrencyAccessControlActive",
+              "desc": "Combined gate for the AccessControl subtree.",
+              "children": [
+                {
+                  "name": "SharedAcquire",
+                  "kind": "subtreeResolved",
+                  "field": "ConcurrencyAccessControlSharedAcquireActive",
+                  "desc": "Combined gate for AccessControl shared-acquire events."
+                },
+                {
+                  "name": "SharedRelease",
+                  "kind": "subtreeResolved",
+                  "field": "ConcurrencyAccessControlSharedReleaseActive",
+                  "desc": "Combined gate for AccessControl shared-release events."
+                },
+                {
+                  "name": "ExclusiveAcquire",
+                  "kind": "subtreeResolved",
+                  "field": "ConcurrencyAccessControlExclusiveAcquireActive",
+                  "desc": "Combined gate for AccessControl exclusive-acquire events."
+                },
+                {
+                  "name": "ExclusiveRelease",
+                  "kind": "subtreeResolved",
+                  "field": "ConcurrencyAccessControlExclusiveReleaseActive",
+                  "desc": "Combined gate for AccessControl exclusive-release events."
+                },
+                {
+                  "name": "Promotion",
+                  "kind": "subtreeResolved",
+                  "field": "ConcurrencyAccessControlPromotionActive",
+                  "desc": "Combined gate for AccessControl shared↔exclusive promotion/demotion events."
+                },
+                {
+                  "name": "Contention",
+                  "kind": "subtreeResolved",
+                  "field": "ConcurrencyAccessControlContentionActive",
+                  "desc": "Combined gate for AccessControl contention markers."
+                }
+              ]
+            },
+            {
+              "name": "AccessControlSmall",
+              "kind": "subtreeResolved",
+              "field": "ConcurrencyAccessControlSmallActive",
+              "desc": "Combined gate for the AccessControlSmall subtree.",
+              "children": [
+                {
+                  "name": "SharedAcquire",
+                  "kind": "subtreeResolved",
+                  "field": "ConcurrencyAccessControlSmallSharedAcquireActive",
+                  "desc": "Combined gate for AccessControlSmall shared-acquire events."
+                },
+                {
+                  "name": "SharedRelease",
+                  "kind": "subtreeResolved",
+                  "field": "ConcurrencyAccessControlSmallSharedReleaseActive",
+                  "desc": "Combined gate for AccessControlSmall shared-release events."
+                },
+                {
+                  "name": "ExclusiveAcquire",
+                  "kind": "subtreeResolved",
+                  "field": "ConcurrencyAccessControlSmallExclusiveAcquireActive",
+                  "desc": "Combined gate for AccessControlSmall exclusive-acquire events."
+                },
+                {
+                  "name": "ExclusiveRelease",
+                  "kind": "subtreeResolved",
+                  "field": "ConcurrencyAccessControlSmallExclusiveReleaseActive",
+                  "desc": "Combined gate for AccessControlSmall exclusive-release events."
+                },
+                {
+                  "name": "Contention",
+                  "kind": "subtreeResolved",
+                  "field": "ConcurrencyAccessControlSmallContentionActive",
+                  "desc": "Combined gate for AccessControlSmall contention markers."
+                }
+              ]
+            },
+            {
+              "name": "ResourceAccessControl",
+              "kind": "subtreeResolved",
+              "field": "ConcurrencyResourceAccessControlActive",
+              "desc": "Combined gate for the ResourceAccessControl subtree.",
+              "children": [
+                {
+                  "name": "Accessing",
+                  "kind": "subtreeResolved",
+                  "field": "ConcurrencyResourceAccessControlAccessingActive",
+                  "desc": "Combined gate for ResourceAccessControl Accessing-mode acquire events."
+                },
+                {
+                  "name": "Modify",
+                  "kind": "subtreeResolved",
+                  "field": "ConcurrencyResourceAccessControlModifyActive",
+                  "desc": "Combined gate for ResourceAccessControl Modify-mode acquire events."
+                },
+                {
+                  "name": "Destroy",
+                  "kind": "subtreeResolved",
+                  "field": "ConcurrencyResourceAccessControlDestroyActive",
+                  "desc": "Combined gate for ResourceAccessControl Destroy-mode acquire events."
+                },
+                {
+                  "name": "ModifyPromotion",
+                  "kind": "subtreeResolved",
+                  "field": "ConcurrencyResourceAccessControlModifyPromotionActive",
+                  "desc": "Combined gate for ResourceAccessControl Modify-promotion slow-path events."
+                },
+                {
+                  "name": "Contention",
+                  "kind": "subtreeResolved",
+                  "field": "ConcurrencyResourceAccessControlContentionActive",
+                  "desc": "Combined gate for ResourceAccessControl contention markers."
+                }
+              ]
+            },
+            {
+              "name": "Epoch",
+              "kind": "subtreeResolved",
+              "field": "ConcurrencyEpochActive",
+              "desc": "Combined gate for the Epoch subtree.",
+              "children": [
+                {
+                  "name": "ScopeEnter",
+                  "kind": "subtreeResolved",
+                  "field": "ConcurrencyEpochScopeEnterActive",
+                  "desc": "Combined gate for EpochGuard Enter (PinCurrentThread) events."
+                },
+                {
+                  "name": "ScopeExit",
+                  "kind": "subtreeResolved",
+                  "field": "ConcurrencyEpochScopeExitActive",
+                  "desc": "Combined gate for EpochGuard Dispose events."
+                },
+                {
+                  "name": "Advance",
+                  "kind": "subtreeResolved",
+                  "field": "ConcurrencyEpochAdvanceActive",
+                  "desc": "Combined gate for GlobalEpoch advance events."
+                },
+                {
+                  "name": "Refresh",
+                  "kind": "subtreeResolved",
+                  "field": "ConcurrencyEpochRefreshActive",
+                  "desc": "Combined gate for RefreshScope events."
+                },
+                {
+                  "name": "SlotClaim",
+                  "kind": "subtreeResolved",
+                  "field": "ConcurrencyEpochSlotClaimActive",
+                  "desc": "Combined gate for EpochThreadRegistry slot-claim events."
+                },
+                {
+                  "name": "SlotReclaim",
+                  "kind": "subtreeResolved",
+                  "field": "ConcurrencyEpochSlotReclaimActive",
+                  "desc": "Combined gate for EpochThreadRegistry dead-thread slot-reclaim events."
+                }
+              ]
+            },
+            {
+              "name": "AdaptiveWaiter",
+              "kind": "subtreeResolved",
+              "field": "ConcurrencyAdaptiveWaiterActive",
+              "desc": "Combined gate for the AdaptiveWaiter subtree.",
+              "children": [
+                {
+                  "name": "YieldOrSleep",
+                  "kind": "subtreeResolved",
+                  "field": "ConcurrencyAdaptiveWaiterYieldOrSleepActive",
+                  "desc": "Combined gate for AdaptiveWaiter yield-or-sleep transition events. Phase 2 design (#280) chose transitions only — NOT per-spin — to keep trace volume sane."
+                }
+              ]
+            },
+            {
+              "name": "OlcLatch",
+              "kind": "subtreeResolved",
+              "field": "ConcurrencyOlcLatchActive",
+              "desc": "Combined gate for the OlcLatch subtree.",
+              "children": [
+                {
+                  "name": "WriteLockAttempt",
+                  "kind": "subtreeResolved",
+                  "field": "ConcurrencyOlcLatchWriteLockAttemptActive",
+                  "desc": "Combined gate for OlcLatch TryWriteLock-failure events."
+                },
+                {
+                  "name": "WriteUnlock",
+                  "kind": "subtreeResolved",
+                  "field": "ConcurrencyOlcLatchWriteUnlockActive",
+                  "desc": "Combined gate for OlcLatch WriteUnlock events."
+                },
+                {
+                  "name": "MarkObsolete",
+                  "kind": "subtreeResolved",
+                  "field": "ConcurrencyOlcLatchMarkObsoleteActive",
+                  "desc": "Combined gate for OlcLatch MarkObsolete events."
+                },
+                {
+                  "name": "ValidationFail",
+                  "kind": "subtreeResolved",
+                  "field": "ConcurrencyOlcLatchValidationFailActive",
+                  "desc": "Combined gate for OlcLatch ValidateVersion-failure events."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "Spatial",
+          "kind": "subtreeResolved",
+          "field": "SpatialActive",
+          "desc": "Combined gate for the entire Spatial subsystem (parent of all Spatial:* leaves).",
+          "children": [
+            {
+              "name": "Query",
+              "kind": "subtreeResolved",
+              "field": "SpatialQueryActive",
+              "desc": "Combined gate for the Spatial:Query subtree (AABB/radius/ray/frustum/kNN/count query spans).",
+              "children": [
+                {
+                  "name": "Aabb",
+                  "kind": "subtreeResolved",
+                  "field": "SpatialQueryAabbActive",
+                  "desc": "Combined gate for the Spatial:Query:Aabb span (axis-aligned bounding-box overlap query)."
+                },
+                {
+                  "name": "Radius",
+                  "kind": "subtreeResolved",
+                  "field": "SpatialQueryRadiusActive",
+                  "desc": "Combined gate for the Spatial:Query:Radius span (radius/sphere overlap query)."
+                },
+                {
+                  "name": "Ray",
+                  "kind": "subtreeResolved",
+                  "field": "SpatialQueryRayActive",
+                  "desc": "Combined gate for the Spatial:Query:Ray span (ray-cast query)."
+                },
+                {
+                  "name": "Frustum",
+                  "kind": "subtreeResolved",
+                  "field": "SpatialQueryFrustumActive",
+                  "desc": "Combined gate for the Spatial:Query:Frustum span (frustum-culling query)."
+                },
+                {
+                  "name": "Knn",
+                  "kind": "subtreeResolved",
+                  "field": "SpatialQueryKnnActive",
+                  "desc": "Combined gate for the Spatial:Query:Knn span (k-nearest-neighbour query)."
+                },
+                {
+                  "name": "Count",
+                  "kind": "subtreeResolved",
+                  "field": "SpatialQueryCountActive",
+                  "desc": "Combined gate for the Spatial:Query:Count span (count-only spatial query)."
+                }
+              ]
+            },
+            {
+              "name": "RTree",
+              "kind": "subtreeResolved",
+              "field": "SpatialRTreeActive",
+              "desc": "Combined gate for the Spatial:RTree subtree (R-tree structural mutation spans).",
+              "children": [
+                {
+                  "name": "Insert",
+                  "kind": "subtreeResolved",
+                  "field": "SpatialRTreeInsertActive",
+                  "desc": "Combined gate for the Spatial:RTree:Insert span."
+                },
+                {
+                  "name": "Remove",
+                  "kind": "subtreeResolved",
+                  "field": "SpatialRTreeRemoveActive",
+                  "desc": "Combined gate for the Spatial:RTree:Remove span."
+                },
+                {
+                  "name": "NodeSplit",
+                  "kind": "subtreeResolved",
+                  "field": "SpatialRTreeNodeSplitActive",
+                  "desc": "Combined gate for the Spatial:RTree:NodeSplit span."
+                },
+                {
+                  "name": "BulkLoad",
+                  "kind": "subtreeResolved",
+                  "field": "SpatialRTreeBulkLoadActive",
+                  "desc": "Combined gate for the Spatial:RTree:BulkLoad span (bulk STR-pack load)."
+                }
+              ]
+            },
+            {
+              "name": "Grid",
+              "kind": "subtreeResolved",
+              "field": "SpatialGridActive",
+              "desc": "Combined gate for the Spatial:Grid subtree (uniform-grid cell tier/occupancy spans).",
+              "children": [
+                {
+                  "name": "CellTierChange",
+                  "kind": "subtreeResolved",
+                  "field": "SpatialGridCellTierChangeActive",
+                  "desc": "Combined gate for the Spatial:Grid:CellTierChange span (cell promoted/demoted between density tiers)."
+                },
+                {
+                  "name": "OccupancyChange",
+                  "kind": "subtreeResolved",
+                  "field": "SpatialGridOccupancyChangeActive",
+                  "desc": "Combined gate for the Spatial:Grid:OccupancyChange span."
+                },
+                {
+                  "name": "ClusterCellAssign",
+                  "kind": "subtreeResolved",
+                  "field": "SpatialGridClusterCellAssignActive",
+                  "desc": "Combined gate for the Spatial:Grid:ClusterCellAssign span (cluster assigned to a grid cell)."
+                }
+              ]
+            },
+            {
+              "name": "Cell",
+              "kind": "subtreeResolved",
+              "field": "SpatialCellActive",
+              "desc": "Combined gate for the Spatial:Cell subtree.",
+              "children": [
+                {
+                  "name": "Index",
+                  "kind": "subtreeResolved",
+                  "field": "SpatialCellIndexActive",
+                  "desc": "Combined gate for the Spatial:Cell:Index subtree (per-cell occupant index add/update/remove spans).",
+                  "children": [
+                    {
+                      "name": "Add",
+                      "kind": "subtreeResolved",
+                      "field": "SpatialCellIndexAddActive",
+                      "desc": "Combined gate for the Spatial:Cell:Index:Add span."
+                    },
+                    {
+                      "name": "Update",
+                      "kind": "subtreeResolved",
+                      "field": "SpatialCellIndexUpdateActive",
+                      "desc": "Combined gate for the Spatial:Cell:Index:Update span."
+                    },
+                    {
+                      "name": "Remove",
+                      "kind": "subtreeResolved",
+                      "field": "SpatialCellIndexRemoveActive",
+                      "desc": "Combined gate for the Spatial:Cell:Index:Remove span."
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "name": "ClusterMigration",
+              "kind": "subtreeResolved",
+              "field": "SpatialClusterMigrationActive",
+              "desc": "Combined gate for the Spatial:ClusterMigration subtree (cross-cell cluster migration spans).",
+              "children": [
+                {
+                  "name": "Detect",
+                  "kind": "subtreeResolved",
+                  "field": "SpatialClusterMigrationDetectActive",
+                  "desc": "Combined gate for the Spatial:ClusterMigration:Detect span (migration-needed detection)."
+                },
+                {
+                  "name": "Queue",
+                  "kind": "subtreeResolved",
+                  "field": "SpatialClusterMigrationQueueActive",
+                  "desc": "Combined gate for the Spatial:ClusterMigration:Queue span (migration enqueue)."
+                },
+                {
+                  "name": "Execute",
+                  "kind": "subtreeResolved",
+                  "field": "SpatialClusterMigrationExecuteActive",
+                  "desc": "Combined gate for the Spatial:ClusterMigration:Execute span (migration apply; legacy kind 60, on by default)."
+                },
+                {
+                  "name": "Hysteresis",
+                  "kind": "subtreeResolved",
+                  "field": "SpatialClusterMigrationHysteresisActive",
+                  "desc": "Combined gate for the Spatial:ClusterMigration:Hysteresis span (hysteresis suppression of a migration)."
+                }
+              ]
+            },
+            {
+              "name": "TierIndex",
+              "kind": "subtreeResolved",
+              "field": "SpatialTierIndexActive",
+              "desc": "Combined gate for the Spatial:TierIndex subtree (tier-index rebuild spans).",
+              "children": [
+                {
+                  "name": "Rebuild",
+                  "kind": "subtreeResolved",
+                  "field": "SpatialTierIndexRebuildActive",
+                  "desc": "Combined gate for the Spatial:TierIndex:Rebuild span."
+                },
+                {
+                  "name": "VersionSkip",
+                  "kind": "subtreeResolved",
+                  "field": "SpatialTierIndexVersionSkipActive",
+                  "desc": "Combined gate for the Spatial:TierIndex:VersionSkip span (rebuild skipped because the version was unchanged)."
+                }
+              ]
+            },
+            {
+              "name": "Maintain",
+              "kind": "subtreeResolved",
+              "field": "SpatialMaintainActive",
+              "desc": "Combined gate for the Spatial:Maintain subtree (index-maintenance spans on entity insert/update).",
+              "children": [
+                {
+                  "name": "Insert",
+                  "kind": "subtreeResolved",
+                  "field": "SpatialMaintainInsertActive",
+                  "desc": "Combined gate for the Spatial:Maintain:Insert span."
+                },
+                {
+                  "name": "UpdateSlowPath",
+                  "kind": "subtreeResolved",
+                  "field": "SpatialMaintainUpdateSlowPathActive",
+                  "desc": "Combined gate for the Spatial:Maintain:UpdateSlowPath span."
+                },
+                {
+                  "name": "AabbValidate",
+                  "kind": "subtreeResolved",
+                  "field": "SpatialMaintainAabbValidateActive",
+                  "desc": "Combined gate for the Spatial:Maintain:AabbValidate span."
+                },
+                {
+                  "name": "BackPointerWrite",
+                  "kind": "subtreeResolved",
+                  "field": "SpatialMaintainBackPointerWriteActive",
+                  "desc": "Combined gate for the Spatial:Maintain:BackPointerWrite span."
+                }
+              ]
+            },
+            {
+              "name": "Trigger",
+              "kind": "subtreeResolved",
+              "field": "SpatialTriggerActive",
+              "desc": "Combined gate for the Spatial:Trigger subtree (spatial-trigger region/eval spans).",
+              "children": [
+                {
+                  "name": "Occupant",
+                  "kind": "subtreeResolved",
+                  "field": "SpatialTriggerOccupantActive",
+                  "desc": "Combined gate for the Spatial:Trigger:Occupant subtree.",
+                  "children": [
+                    {
+                      "name": "Diff",
+                      "kind": "subtreeResolved",
+                      "field": "SpatialTriggerOccupantDiffActive",
+                      "desc": "Combined gate for the Spatial:Trigger:Occupant:Diff span (enter/exit occupant diff)."
+                    }
+                  ]
+                },
+                {
+                  "name": "Cache",
+                  "kind": "subtreeResolved",
+                  "field": "SpatialTriggerCacheActive",
+                  "desc": "Combined gate for the Spatial:Trigger:Cache subtree.",
+                  "children": [
+                    {
+                      "name": "Invalidate",
+                      "kind": "subtreeResolved",
+                      "field": "SpatialTriggerCacheInvalidateActive",
+                      "desc": "Combined gate for the Spatial:Trigger:Cache:Invalidate span."
+                    }
+                  ]
+                },
+                {
+                  "name": "Region",
+                  "kind": "subtreeResolved",
+                  "field": "SpatialTriggerRegionActive",
+                  "desc": "Combined gate for the Spatial:Trigger:Region span."
+                },
+                {
+                  "name": "Eval",
+                  "kind": "subtreeResolved",
+                  "field": "SpatialTriggerEvalActive",
+                  "desc": "Combined gate for the Spatial:Trigger:Eval span (trigger-region evaluation)."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "Runtime",
+          "kind": "subtreeResolved",
+          "field": "RuntimeActive",
+          "desc": "Combined gate for the Runtime tracing subtree (UoW phase, transaction lifecycle, subscription spans).",
+          "children": [
+            {
+              "name": "Phase",
+              "kind": "subtreeResolved",
+              "field": "RuntimePhaseActive",
+              "desc": "Combined gate for the Runtime:Phase subtree (unit-of-work create/flush spans).",
+              "children": [
+                {
+                  "name": "UoWCreate",
+                  "kind": "subtreeResolved",
+                  "field": "RuntimePhaseUoWCreateActive",
+                  "desc": "Combined gate for the Runtime:Phase:UoWCreate span (unit-of-work creation)."
+                },
+                {
+                  "name": "UoWFlush",
+                  "kind": "subtreeResolved",
+                  "field": "RuntimePhaseUoWFlushActive",
+                  "desc": "Combined gate for the Runtime:Phase:UoWFlush span (unit-of-work flush)."
+                }
+              ]
+            },
+            {
+              "name": "Transaction",
+              "kind": "subtreeResolved",
+              "field": "RuntimeTransactionActive",
+              "desc": "Combined gate for the Runtime:Transaction subtree (transaction lifecycle spans).",
+              "children": [
+                {
+                  "name": "Lifecycle",
+                  "kind": "subtreeResolved",
+                  "field": "RuntimeTransactionLifecycleActive",
+                  "desc": "Combined gate for the Runtime:Transaction:Lifecycle span."
+                }
+              ]
+            },
+            {
+              "name": "Subscription",
+              "kind": "subtreeResolved",
+              "field": "RuntimeSubscriptionActive",
+              "desc": "Combined gate for the Runtime:Subscription subtree (change-subscription delivery spans).",
+              "children": [
+                {
+                  "name": "Output",
+                  "kind": "subtreeResolved",
+                  "field": "RuntimeSubscriptionOutputActive",
+                  "desc": "Combined gate for the Runtime:Subscription:Output subtree (subscriber output execute/cleanup spans).",
+                  "children": [
+                    {
+                      "name": "Execute",
+                      "kind": "subtreeResolved",
+                      "field": "RuntimeSubscriptionOutputExecuteActive",
+                      "desc": "Combined gate for the Runtime:Subscription:Output:Execute span (running a subscriber's output callback)."
+                    },
+                    {
+                      "name": "Cleanup",
+                      "kind": "subtreeResolved",
+                      "field": "RuntimeSubscriptionOutputCleanupActive",
+                      "desc": "Combined gate for the Runtime:Subscription:Output:Cleanup span."
+                    }
+                  ]
+                },
+                {
+                  "name": "Subscriber",
+                  "kind": "subtreeResolved",
+                  "field": "RuntimeSubscriptionSubscriberActive",
+                  "desc": "Combined gate for the Runtime:Subscription:Subscriber span (per-subscriber delivery)."
+                },
+                {
+                  "name": "Delta",
+                  "kind": "group",
+                  "children": [
+                    {
+                      "name": "Build",
+                      "kind": "subtreeResolved",
+                      "field": "RuntimeSubscriptionDeltaBuildActive",
+                      "desc": "Combined gate for the Runtime:Subscription:Delta:Build span (building a change delta)."
+                    },
+                    {
+                      "name": "Serialize",
+                      "kind": "subtreeResolved",
+                      "field": "RuntimeSubscriptionDeltaSerializeActive",
+                      "desc": "Combined gate for the Runtime:Subscription:Delta:Serialize span (serializing a change delta)."
+                    },
+                    {
+                      "name": "DirtyBitmapSupplement",
+                      "kind": "subtreeResolved",
+                      "field": "RuntimeSubscriptionDeltaDirtyBitmapSupplementActive",
+                      "desc": "Combined gate for the Runtime:Subscription:Delta:DirtyBitmapSupplement span."
+                    }
+                  ]
+                },
+                {
+                  "name": "Transition",
+                  "kind": "group",
+                  "children": [
+                    {
+                      "name": "BeginSync",
+                      "kind": "subtreeResolved",
+                      "field": "RuntimeSubscriptionTransitionBeginSyncActive",
+                      "desc": "Combined gate for the Runtime:Subscription:Transition:BeginSync span."
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "name": "WriteTickFence",
+              "kind": "subtreeResolved",
+              "field": "RuntimeWriteTickFenceActive",
+              "desc": "Combined gate for the Runtime:WriteTickFence subtree (per-table and per-archetype cluster write-fence spans).",
+              "children": [
+                {
+                  "name": "Table",
+                  "kind": "subtreeResolved",
+                  "field": "RuntimeWriteTickFenceTableActive",
+                  "desc": "Combined gate for the Runtime:WriteTickFence:Table span (per-table fence cost)."
+                },
+                {
+                  "name": "Shadow",
+                  "kind": "subtreeResolved",
+                  "field": "RuntimeWriteTickFenceShadowActive",
+                  "desc": "Combined gate for the Runtime:WriteTickFence:Shadow span (shadow-copy portion of a table fence)."
+                },
+                {
+                  "name": "Spatial",
+                  "kind": "subtreeResolved",
+                  "field": "RuntimeWriteTickFenceSpatialActive",
+                  "desc": "Combined gate for the Runtime:WriteTickFence:Spatial span (spatial-index portion of a table fence)."
+                },
+                {
+                  "name": "Cluster",
+                  "kind": "subtreeResolved",
+                  "field": "RuntimeWriteTickFenceClusterActive",
+                  "desc": "Combined gate for the Runtime:WriteTickFence:Cluster span (per-archetype cluster fence cost).",
+                  "children": [
+                    {
+                      "name": "Shadow",
+                      "kind": "subtreeResolved",
+                      "field": "RuntimeWriteTickFenceClusterShadowActive",
+                      "desc": "Combined gate for the Runtime:WriteTickFence:Cluster:Shadow span."
+                    },
+                    {
+                      "name": "Spatial",
+                      "kind": "subtreeResolved",
+                      "field": "RuntimeWriteTickFenceClusterSpatialActive",
+                      "desc": "Combined gate for the Runtime:WriteTickFence:Cluster:Spatial span."
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "name": "ThreadScheduling",
+              "kind": "subtreeResolved",
+              "field": "RuntimeThreadSchedulingActive",
+              "desc": "Whether OS thread scheduling tracing is requested by configuration. When enabled (Windows-only), EtwSchedulingPump opens the NT Kernel Logger and emits one ThreadContextSwitch record per on-CPU slice for every Typhon-registered OS thread. Records carry duration + wait reason so the Workbench can render off-CPU gaps with their cause overlaid on the affected thread's lane."
+            }
+          ]
+        },
+        {
+          "name": "Storage",
+          "kind": "subtreeResolved",
+          "field": "StorageActive",
+          "desc": "Combined gate for the Storage tracing subtree (page-cache, segment, file-handle, occupancy-map spans).",
+          "children": [
+            {
+              "name": "PageCache",
+              "kind": "subtreeResolved",
+              "field": "StoragePageCacheActive",
+              "desc": "Combined gate for the Storage:PageCache subtree.",
+              "children": [
+                {
+                  "name": "DirtyWalk",
+                  "kind": "subtreeResolved",
+                  "field": "StoragePageCacheDirtyWalkActive",
+                  "desc": "Combined gate for the Storage:PageCache:DirtyWalk span (walk of dirty pages during checkpoint)."
+                }
+              ]
+            },
+            {
+              "name": "Segment",
+              "kind": "subtreeResolved",
+              "field": "StorageSegmentActive",
+              "desc": "Combined gate for the Storage:Segment subtree (segment create/grow/load spans).",
+              "children": [
+                {
+                  "name": "Create",
+                  "kind": "subtreeResolved",
+                  "field": "StorageSegmentCreateActive",
+                  "desc": "Combined gate for the Storage:Segment:Create span."
+                },
+                {
+                  "name": "Grow",
+                  "kind": "subtreeResolved",
+                  "field": "StorageSegmentGrowActive",
+                  "desc": "Combined gate for the Storage:Segment:Grow span."
+                },
+                {
+                  "name": "Load",
+                  "kind": "subtreeResolved",
+                  "field": "StorageSegmentLoadActive",
+                  "desc": "Combined gate for the Storage:Segment:Load span."
+                }
+              ]
+            },
+            {
+              "name": "ChunkSegment",
+              "kind": "subtreeResolved",
+              "field": "StorageChunkSegmentActive",
+              "desc": "Combined gate for the Storage:ChunkSegment subtree.",
+              "children": [
+                {
+                  "name": "Grow",
+                  "kind": "subtreeResolved",
+                  "field": "StorageChunkSegmentGrowActive",
+                  "desc": "Combined gate for the Storage:ChunkSegment:Grow span."
+                }
+              ]
+            },
+            {
+              "name": "FileHandle",
+              "kind": "subtreeResolved",
+              "field": "StorageFileHandleEnabledActive",
+              "desc": "Combined gate for the Storage:FileHandle span (OS file-handle lifecycle)."
+            },
+            {
+              "name": "OccupancyMap",
+              "kind": "subtreeResolved",
+              "field": "StorageOccupancyMapActive",
+              "desc": "Combined gate for the Storage:OccupancyMap subtree.",
+              "children": [
+                {
+                  "name": "Grow",
+                  "kind": "subtreeResolved",
+                  "field": "StorageOccupancyMapGrowActive",
+                  "desc": "Combined gate for the Storage:OccupancyMap:Grow span."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "Memory",
+          "kind": "subtreeResolved",
+          "field": "MemoryActive",
+          "desc": "Combined gate for the Memory tracing subtree.",
+          "children": [
+            {
+              "name": "AlignmentWaste",
+              "kind": "subtreeResolved",
+              "field": "MemoryAlignmentWasteActive",
+              "desc": "Combined gate for the Memory:AlignmentWaste span (bytes lost to alignment padding on an allocation)."
+            }
+          ]
+        },
+        {
+          "name": "Data",
+          "kind": "subtreeResolved",
+          "field": "DataActive",
+          "desc": "Combined gate for the Data-plane tracing subtree (transaction, MVCC, B+Tree index spans).",
+          "children": [
+            {
+              "name": "Transaction",
+              "kind": "subtreeResolved",
+              "field": "DataTransactionActive",
+              "desc": "Combined gate for the Data:Transaction subtree (init/prepare/validate/conflict/cleanup spans).",
+              "children": [
+                {
+                  "name": "Init",
+                  "kind": "subtreeResolved",
+                  "field": "DataTransactionInitActive",
+                  "desc": "Combined gate for the Data:Transaction:Init span."
+                },
+                {
+                  "name": "Prepare",
+                  "kind": "subtreeResolved",
+                  "field": "DataTransactionPrepareActive",
+                  "desc": "Combined gate for the Data:Transaction:Prepare span."
+                },
+                {
+                  "name": "Validate",
+                  "kind": "subtreeResolved",
+                  "field": "DataTransactionValidateActive",
+                  "desc": "Combined gate for the Data:Transaction:Validate span (commit-time conflict validation)."
+                },
+                {
+                  "name": "Conflict",
+                  "kind": "subtreeResolved",
+                  "field": "DataTransactionConflictActive",
+                  "desc": "Combined gate for the Data:Transaction:Conflict span (write-write conflict detected)."
+                },
+                {
+                  "name": "Cleanup",
+                  "kind": "subtreeResolved",
+                  "field": "DataTransactionCleanupActive",
+                  "desc": "Combined gate for the Data:Transaction:Cleanup span."
+                }
+              ]
+            },
+            {
+              "name": "MVCC",
+              "kind": "subtreeResolved",
+              "field": "DataMvccActive",
+              "desc": "Combined gate for the Data:MVCC subtree (version chain-walk and cleanup spans).",
+              "children": [
+                {
+                  "name": "ChainWalk",
+                  "kind": "subtreeResolved",
+                  "field": "DataMvccChainWalkActive",
+                  "desc": "Combined gate for the Data:MVCC:ChainWalk span (walking a version chain to the visible revision)."
+                },
+                {
+                  "name": "VersionCleanup",
+                  "kind": "subtreeResolved",
+                  "field": "DataMvccVersionCleanupActive",
+                  "desc": "Combined gate for the Data:MVCC:VersionCleanup span (reclaiming obsolete versions)."
+                }
+              ]
+            },
+            {
+              "name": "Index",
+              "kind": "subtreeResolved",
+              "field": "DataIndexActive",
+              "desc": "Combined gate for the Data:Index subtree.",
+              "children": [
+                {
+                  "name": "BTree",
+                  "kind": "subtreeResolved",
+                  "field": "DataIndexBTreeActive",
+                  "desc": "Combined gate for the Data:Index:BTree subtree (B+Tree search/scan/mutation spans).",
+                  "children": [
+                    {
+                      "name": "Search",
+                      "kind": "subtreeResolved",
+                      "field": "DataIndexBTreeSearchActive",
+                      "desc": "Combined gate for the Data:Index:BTree:Search span (point lookup)."
+                    },
+                    {
+                      "name": "RangeScan",
+                      "kind": "subtreeResolved",
+                      "field": "DataIndexBTreeRangeScanActive",
+                      "desc": "Combined gate for the Data:Index:BTree:RangeScan span.",
+                      "children": [
+                        {
+                          "name": "Revalidate",
+                          "kind": "subtreeResolved",
+                          "field": "DataIndexBTreeRangeScanRevalidateActive",
+                          "desc": "Combined gate for the Data:Index:BTree:RangeScan:Revalidate span (optimistic scan revalidation after a version change)."
+                        }
+                      ]
+                    },
+                    {
+                      "name": "RebalanceFallback",
+                      "kind": "subtreeResolved",
+                      "field": "DataIndexBTreeRebalanceFallbackActive",
+                      "desc": "Combined gate for the Data:Index:BTree:RebalanceFallback span (fallback to a pessimistic rebalance)."
+                    },
+                    {
+                      "name": "BulkInsert",
+                      "kind": "subtreeResolved",
+                      "field": "DataIndexBTreeBulkInsertActive",
+                      "desc": "Combined gate for the Data:Index:BTree:BulkInsert span."
+                    },
+                    {
+                      "name": "Root",
+                      "kind": "subtreeResolved",
+                      "field": "DataIndexBTreeRootActive",
+                      "desc": "Combined gate for the Data:Index:BTree:Root span (root split/replace)."
+                    },
+                    {
+                      "name": "NodeCow",
+                      "kind": "subtreeResolved",
+                      "field": "DataIndexBTreeNodeCowActive",
+                      "desc": "Combined gate for the Data:Index:BTree:NodeCow span (copy-on-write of a B+Tree node)."
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "Query",
+          "kind": "subtreeResolved",
+          "field": "QueryActive",
+          "desc": "Combined gate for the Query tracing subtree (parse/plan/execute spans).",
+          "children": [
+            {
+              "name": "Parse",
+              "kind": "subtreeResolved",
+              "field": "QueryParseEnabledActive",
+              "desc": "Combined gate for the Query:Parse subtree (query-string parsing spans).",
+              "children": [
+                {
+                  "name": "DNF",
+                  "kind": "subtreeResolved",
+                  "field": "QueryParseDnfActive",
+                  "desc": "Combined gate for the Query:Parse:DNF span (disjunctive-normal-form conversion)."
+                }
+              ]
+            },
+            {
+              "name": "Plan",
+              "kind": "subtreeResolved",
+              "field": "QueryPlanEnabledActive",
+              "desc": "Combined gate for the Query:Plan subtree (planning/optimization spans).",
+              "children": [
+                {
+                  "name": "PrimarySelect",
+                  "kind": "subtreeResolved",
+                  "field": "QueryPlanPrimarySelectActive",
+                  "desc": "Combined gate for the Query:Plan:PrimarySelect span (primary access-path selection)."
+                },
+                {
+                  "name": "Sort",
+                  "kind": "subtreeResolved",
+                  "field": "QueryPlanSortActive",
+                  "desc": "Combined gate for the Query:Plan:Sort span (sort planning)."
+                }
+              ]
+            },
+            {
+              "name": "Execute",
+              "kind": "subtreeResolved",
+              "field": "QueryExecuteActive",
+              "desc": "Combined gate for the Query:Execute subtree (execution spans).",
+              "children": [
+                {
+                  "name": "IndexScan",
+                  "kind": "subtreeResolved",
+                  "field": "QueryExecuteIndexScanActive",
+                  "desc": "Combined gate for the Query:Execute:IndexScan span."
+                },
+                {
+                  "name": "Iterate",
+                  "kind": "subtreeResolved",
+                  "field": "QueryExecuteIterateActive",
+                  "desc": "Combined gate for the Query:Execute:Iterate span (result iteration)."
+                },
+                {
+                  "name": "Filter",
+                  "kind": "subtreeResolved",
+                  "field": "QueryExecuteFilterActive",
+                  "desc": "Combined gate for the Query:Execute:Filter span (residual predicate filtering)."
+                },
+                {
+                  "name": "Pagination",
+                  "kind": "subtreeResolved",
+                  "field": "QueryExecutePaginationActive",
+                  "desc": "Combined gate for the Query:Execute:Pagination span (skip/take pagination)."
+                },
+                {
+                  "name": "StorageMode",
+                  "kind": "subtreeResolved",
+                  "field": "QueryExecuteStorageModeActive",
+                  "desc": "Combined gate for the Query:Execute:StorageMode span (per-storage-mode execution path)."
+                }
+              ]
+            },
+            {
+              "name": "Estimate",
+              "kind": "subtreeResolved",
+              "field": "QueryEstimateActive",
+              "desc": "Combined gate for the Query:Estimate span (cardinality/cost estimation)."
+            },
+            {
+              "name": "Count",
+              "kind": "subtreeResolved",
+              "field": "QueryCountActive",
+              "desc": "Combined gate for the Query:Count span (count-only execution)."
+            }
+          ]
+        },
+        {
+          "name": "ECS",
+          "kind": "subtreeResolved",
+          "field": "EcsActive",
+          "desc": "Combined gate for the ECS tracing subtree (query-construction and view-maintenance spans).",
+          "children": [
+            {
+              "name": "Query",
+              "kind": "subtreeResolved",
+              "field": "EcsQueryActive",
+              "desc": "Combined gate for the ECS:Query subtree (archetype-query construction spans).",
+              "children": [
+                {
+                  "name": "Construct",
+                  "kind": "subtreeResolved",
+                  "field": "EcsQueryConstructActive",
+                  "desc": "Combined gate for the ECS:Query:Construct span (query object construction)."
+                },
+                {
+                  "name": "MaskAnd",
+                  "kind": "subtreeResolved",
+                  "field": "EcsQueryMaskAndActive",
+                  "desc": "Combined gate for the ECS:Query:MaskAnd span (component-mask AND intersection)."
+                },
+                {
+                  "name": "SubtreeExpand",
+                  "kind": "subtreeResolved",
+                  "field": "EcsQuerySubtreeExpandActive",
+                  "desc": "Combined gate for the ECS:Query:SubtreeExpand span (archetype-subtree expansion)."
+                },
+                {
+                  "name": "Constraint",
+                  "kind": "group",
+                  "children": [
+                    {
+                      "name": "Enabled",
+                      "kind": "subtreeResolved",
+                      "field": "EcsQueryConstraintEnabledActive",
+                      "desc": "Combined gate for the ECS:Query:Constraint:Enabled span (enabled-constraint evaluation)."
+                    }
+                  ]
+                },
+                {
+                  "name": "Spatial",
+                  "kind": "group",
+                  "children": [
+                    {
+                      "name": "Attach",
+                      "kind": "subtreeResolved",
+                      "field": "EcsQuerySpatialAttachActive",
+                      "desc": "Combined gate for the ECS:Query:Spatial:Attach span (attaching a spatial constraint to a query)."
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "name": "View",
+              "kind": "subtreeResolved",
+              "field": "EcsViewActive",
+              "desc": "Combined gate for the ECS:View subtree (materialized-view refresh spans).",
+              "children": [
+                {
+                  "name": "RefreshPull",
+                  "kind": "subtreeResolved",
+                  "field": "EcsViewRefreshPullActive",
+                  "desc": "Combined gate for the ECS:View:RefreshPull span (pull-based view refresh)."
+                },
+                {
+                  "name": "IncrementalDrain",
+                  "kind": "subtreeResolved",
+                  "field": "EcsViewIncrementalDrainActive",
+                  "desc": "Combined gate for the ECS:View:IncrementalDrain span (draining buffered deltas into a view)."
+                },
+                {
+                  "name": "DeltaBuffer",
+                  "kind": "group",
+                  "children": [
+                    {
+                      "name": "Overflow",
+                      "kind": "subtreeResolved",
+                      "field": "EcsViewDeltaBufferOverflowActive",
+                      "desc": "Combined gate for the ECS:View:DeltaBuffer:Overflow span (delta buffer overflowed, forcing a full refresh)."
+                    }
+                  ]
+                },
+                {
+                  "name": "ProcessEntry",
+                  "kind": "subtreeResolved",
+                  "field": "EcsViewProcessEntryActive",
+                  "desc": "Combined gate for the ECS:View:ProcessEntry span (processing one view entry)."
+                },
+                {
+                  "name": "ProcessEntryOr",
+                  "kind": "subtreeResolved",
+                  "field": "EcsViewProcessEntryOrActive",
+                  "desc": "Combined gate for the ECS:View:ProcessEntryOr span (processing an OR-clause view entry)."
+                },
+                {
+                  "name": "RefreshFull",
+                  "kind": "subtreeResolved",
+                  "field": "EcsViewRefreshFullActive",
+                  "desc": "Combined gate for the ECS:View:RefreshFull span (full view rebuild)."
+                },
+                {
+                  "name": "RefreshFullOr",
+                  "kind": "subtreeResolved",
+                  "field": "EcsViewRefreshFullOrActive",
+                  "desc": "Combined gate for the ECS:View:RefreshFullOr span (full rebuild of an OR-clause view)."
+                },
+                {
+                  "name": "Registry",
+                  "kind": "group",
+                  "children": [
+                    {
+                      "name": "Register",
+                      "kind": "subtreeResolved",
+                      "field": "EcsViewRegistryRegisterActive",
+                      "desc": "Combined gate for the ECS:View:Registry:Register span (view registration)."
+                    },
+                    {
+                      "name": "Deregister",
+                      "kind": "subtreeResolved",
+                      "field": "EcsViewRegistryDeregisterActive",
+                      "desc": "Combined gate for the ECS:View:Registry:Deregister span (view deregistration)."
+                    }
+                  ]
+                },
+                {
+                  "name": "DeltaCache",
+                  "kind": "group",
+                  "children": [
+                    {
+                      "name": "Miss",
+                      "kind": "subtreeResolved",
+                      "field": "EcsViewDeltaCacheMissActive",
+                      "desc": "Combined gate for the ECS:View:DeltaCache:Miss span (delta-cache miss)."
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "Durability",
+          "kind": "subtreeResolved",
+          "field": "DurabilityActive",
+          "desc": "Combined gate for the Durability tracing subtree (WAL, checkpoint, recovery, UoW spans).",
+          "children": [
+            {
+              "name": "WAL",
+              "kind": "subtreeResolved",
+              "field": "DurabilityWalActive",
+              "desc": "Combined gate for the Durability:WAL subtree (write-ahead-log spans).",
+              "children": [
+                {
+                  "name": "QueueDrain",
+                  "kind": "subtreeResolved",
+                  "field": "DurabilityWalQueueDrainActive",
+                  "desc": "Combined gate for the Durability:WAL:QueueDrain span (draining the commit queue to the WAL writer)."
+                },
+                {
+                  "name": "OsWrite",
+                  "kind": "subtreeResolved",
+                  "field": "DurabilityWalOsWriteActive",
+                  "desc": "Combined gate for the Durability:WAL:OsWrite span (OS write of a WAL buffer)."
+                },
+                {
+                  "name": "Signal",
+                  "kind": "subtreeResolved",
+                  "field": "DurabilityWalSignalActive",
+                  "desc": "Combined gate for the Durability:WAL:Signal span (post-flush signal to waiting committers)."
+                },
+                {
+                  "name": "GroupCommit",
+                  "kind": "subtreeResolved",
+                  "field": "DurabilityWalGroupCommitActive",
+                  "desc": "Combined gate for the Durability:WAL:GroupCommit span (group-commit batch)."
+                },
+                {
+                  "name": "Queue",
+                  "kind": "subtreeResolved",
+                  "field": "DurabilityWalQueueActive",
+                  "desc": "Combined gate for the Durability:WAL:Queue span (commit-queue enqueue)."
+                },
+                {
+                  "name": "Buffer",
+                  "kind": "subtreeResolved",
+                  "field": "DurabilityWalBufferActive",
+                  "desc": "Combined gate for the Durability:WAL:Buffer span (WAL buffer fill/rotate)."
+                },
+                {
+                  "name": "Frame",
+                  "kind": "subtreeResolved",
+                  "field": "DurabilityWalFrameActive",
+                  "desc": "Combined gate for the Durability:WAL:Frame span (per-frame WAL encoding)."
+                },
+                {
+                  "name": "Backpressure",
+                  "kind": "subtreeResolved",
+                  "field": "DurabilityWalBackpressureActive",
+                  "desc": "Combined gate for the Durability:WAL:Backpressure span (commit throttled by WAL backpressure)."
+                }
+              ]
+            },
+            {
+              "name": "Checkpoint",
+              "kind": "subtreeResolved",
+              "field": "DurabilityCheckpointActive",
+              "desc": "Combined gate for the Durability:Checkpoint subtree (checkpoint spans).",
+              "children": [
+                {
+                  "name": "WriteBatch",
+                  "kind": "subtreeResolved",
+                  "field": "DurabilityCheckpointWriteBatchActive",
+                  "desc": "Combined gate for the Durability:Checkpoint:WriteBatch span (writing a batch of dirty pages)."
+                },
+                {
+                  "name": "Backpressure",
+                  "kind": "subtreeResolved",
+                  "field": "DurabilityCheckpointBackpressureActive",
+                  "desc": "Combined gate for the Durability:Checkpoint:Backpressure span (checkpoint throttled by backpressure)."
+                },
+                {
+                  "name": "Sleep",
+                  "kind": "subtreeResolved",
+                  "field": "DurabilityCheckpointSleepActive",
+                  "desc": "Combined gate for the Durability:Checkpoint:Sleep span (checkpoint pacing sleep)."
+                }
+              ]
+            },
+            {
+              "name": "Recovery",
+              "kind": "subtreeResolved",
+              "field": "DurabilityRecoveryActive",
+              "desc": "Combined gate for the Durability:Recovery subtree (crash-recovery spans).",
+              "children": [
+                {
+                  "name": "Start",
+                  "kind": "subtreeResolved",
+                  "field": "DurabilityRecoveryStartActive",
+                  "desc": "Combined gate for the Durability:Recovery:Start span (recovery session start)."
+                },
+                {
+                  "name": "Discover",
+                  "kind": "subtreeResolved",
+                  "field": "DurabilityRecoveryDiscoverActive",
+                  "desc": "Combined gate for the Durability:Recovery:Discover span (discovering WAL segments to replay)."
+                },
+                {
+                  "name": "Segment",
+                  "kind": "subtreeResolved",
+                  "field": "DurabilityRecoverySegmentActive",
+                  "desc": "Combined gate for the Durability:Recovery:Segment span (replaying one WAL segment)."
+                },
+                {
+                  "name": "Record",
+                  "kind": "subtreeResolved",
+                  "field": "DurabilityRecoveryRecordActive",
+                  "desc": "Combined gate for the Durability:Recovery:Record span (applying one WAL record)."
+                },
+                {
+                  "name": "Redo",
+                  "kind": "subtreeResolved",
+                  "field": "DurabilityRecoveryRedoActive",
+                  "desc": "Combined gate for the Durability:Recovery:Redo span (redo pass)."
+                },
+                {
+                  "name": "Undo",
+                  "kind": "subtreeResolved",
+                  "field": "DurabilityRecoveryUndoActive",
+                  "desc": "Combined gate for the Durability:Recovery:Undo span (undo of uncommitted effects)."
+                },
+                {
+                  "name": "TickFence",
+                  "kind": "subtreeResolved",
+                  "field": "DurabilityRecoveryTickFenceActive",
+                  "desc": "Combined gate for the Durability:Recovery:TickFence span (replaying a write-tick fence boundary)."
+                }
+              ]
+            },
+            {
+              "name": "UoW",
+              "kind": "subtreeResolved",
+              "field": "DurabilityUowActive",
+              "desc": "Combined gate for the Durability:UoW subtree (unit-of-work durability spans).",
+              "children": [
+                {
+                  "name": "State",
+                  "kind": "subtreeResolved",
+                  "field": "DurabilityUowStateActive",
+                  "desc": "Combined gate for the Durability:UoW:State span (unit-of-work state transition)."
+                },
+                {
+                  "name": "Deadline",
+                  "kind": "subtreeResolved",
+                  "field": "DurabilityUowDeadlineActive",
+                  "desc": "Combined gate for the Durability:UoW:Deadline span (unit-of-work deadline check)."
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+}
