@@ -9,7 +9,7 @@ namespace Typhon.ARPG.Schema;
 /// </summary>
 [Component("ARPG.ActiveSkills", 1)]
 [StructLayout(LayoutKind.Sequential)]
-public struct ActiveSkills
+public partial struct ActiveSkills
 {
     // Skill definition IDs (0 = empty slot)
     [Field] public int Skill1Id;

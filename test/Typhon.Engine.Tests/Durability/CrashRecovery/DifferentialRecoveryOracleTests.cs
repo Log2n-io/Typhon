@@ -736,7 +736,7 @@ internal sealed class DifferentialRecoveryOracleTests
     /// kept). Returns 0 if the map fits on its root page.</summary>
     private static int ResolveEntityMapFilePage(DatabaseEngine dbe, ushort archetypeId)
     {
-        var seg = dbe._archetypeStates[archetypeId].EntityMap.Segment;
+        var seg = dbe._stateByRouting[archetypeId].EntityMap.Segment;
         for (var chunkId = seg.ChunkCapacity - 1; chunkId >= 1; chunkId--) // chunk 0 = meta — never torn here (Open reads it eagerly)
         {
             if (!seg.IsChunkAllocated(chunkId))

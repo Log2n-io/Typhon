@@ -86,7 +86,7 @@ class BatchOperationTests : TestBase<BatchOperationTests>
         for (int i = 0; i < ids.Length; i++)
         {
             Assert.That(ids[i].IsNull, Is.False);
-            Assert.That(ids[i].ArchetypeId, Is.EqualTo(100));
+            Assert.That(ids[i].ArchetypeId, Is.EqualTo(dbe.RoutingIdOf(Archetype<EcsUnit>.Metadata)));
 
             var entity = t.Open(ids[i]);
             ref readonly var p = ref entity.Read(EcsUnit.Position);
@@ -116,7 +116,7 @@ class BatchOperationTests : TestBase<BatchOperationTests>
         Assert.That(ids.Length, Is.EqualTo(2));
         for (int i = 0; i < ids.Length; i++)
         {
-            Assert.That(ids[i].ArchetypeId, Is.EqualTo(101));
+            Assert.That(ids[i].ArchetypeId, Is.EqualTo(dbe.RoutingIdOf(Archetype<EcsSoldier>.Metadata)));
 
             var entity = t.Open(ids[i]);
 

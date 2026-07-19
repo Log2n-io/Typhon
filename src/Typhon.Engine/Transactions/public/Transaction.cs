@@ -94,12 +94,10 @@ public unsafe partial class Transaction : EntityAccessor
     private struct PublishEntry
     {
         public ComponentInfo Info;
-        public long Pk;
         public int FirstChunkId;
         public int CurCompContentChunkId;
         public short CurRevisionIndex;
         public short LastCommitRevisionIndex;
-        public bool IsClusterEntity;
         public bool Created;
         public bool LockHeld;
 
@@ -789,7 +787,7 @@ public unsafe partial class Transaction : EntityAccessor
             return 0;
         }
 
-        var meta = ArchetypeRegistry.GetMetadata(entityId.ArchetypeId);
+        var meta = _dbe.GetMetaByRouting(entityId.ArchetypeId);
         if (meta == null)
         {
             return 0;
@@ -842,7 +840,7 @@ public unsafe partial class Transaction : EntityAccessor
             return false;
         }
 
-        var meta = ArchetypeRegistry.GetMetadata(entityId.ArchetypeId);
+        var meta = _dbe.GetMetaByRouting(entityId.ArchetypeId);
         if (meta == null)
         {
             return false;
@@ -1170,8 +1168,8 @@ public unsafe partial class Transaction : EntityAccessor
             // Maintain indices/spatial (fallible PREPARE work). The visibility acts — IsolationFlag clear, LCRI/CommitSequence bump, cluster HEAD copy —
             // are deferred to PublishComponent (AP-01). Cluster entities use per-archetype B+Trees/R-Trees, NOT per-ComponentTable shared indexes.
             var archId = EntityId.FromRaw(pk).ArchetypeId;
-            var commitMeta = ArchetypeRegistry.GetMetadata(archId);
-            bool isClusterEntity = commitMeta.IsClusterEligible && commitMeta.VersionedSlotMask != 0 && _dbe._archetypeStates[archId]?.ClusterState != null;
+            var commitMeta = _dbe.GetMetaByRouting(archId);
+            bool isClusterEntity = commitMeta.IsClusterEligible && commitMeta.VersionedSlotMask != 0 && _dbe._stateByRouting[archId]?.ClusterState != null;
 
             var clusterCopyPending = false;
             var clusterChunkId = 0;
@@ -1253,12 +1251,10 @@ public unsafe partial class Transaction : EntityAccessor
             _publishEntries.Add(new PublishEntry
             {
                 Info = info,
-                Pk = pk,
                 FirstChunkId = firstChunkId,
                 CurCompContentChunkId = compRevInfo.CurCompContentChunkId,
                 CurRevisionIndex = compRevInfo.CurRevisionIndex,
                 LastCommitRevisionIndex = lastCommitRevisionIndex,
-                IsClusterEntity = isClusterEntity,
                 Created = (compRevInfo.Operations & ComponentInfo.OperationType.Created) != 0,
                 LockHeld = lockHeld,
                 ElementChunkId = elementHandle.ChunkId,
@@ -1476,7 +1472,7 @@ public unsafe partial class Transaction : EntityAccessor
     private void PublishClusterVersionedSlot(in PublishEntry e)
     {
         var archId = e.ArchId;
-        var es = _dbe._archetypeStates[archId];
+        var es = _dbe._stateByRouting[archId];
         var clusterState = es.ClusterState;
         var table = e.Info.ComponentTable;
 
@@ -1647,8 +1643,8 @@ public unsafe partial class Transaction : EntityAccessor
         var componentTypeId = info.ComponentTypeId;
         var entityId = EntityId.FromRaw(pk);
         var archId = entityId.ArchetypeId;
-        var meta = ArchetypeRegistry.GetMetadata(archId);
-        var es = _dbe._archetypeStates[archId];
+        var meta = _dbe.GetMetaByRouting(archId);
+        var es = _dbe._stateByRouting[archId];
         if (!meta.TryGetSlot(componentTypeId, out byte compSlotByte))
         {
             return;
@@ -1946,7 +1942,7 @@ public unsafe partial class Transaction : EntityAccessor
                         continue;   // spawned and destroyed in the same tx — nothing to restore
                     }
 
-                    var slotTables = _dbe._archetypeStates[s.Id.ArchetypeId].SlotToComponentTable;
+                    var slotTables = _dbe._stateByRouting[s.Id.ArchetypeId].SlotToComponentTable;
                     for (int slot = 0; slot < slotTables.Length; slot++)
                     {
                         var table = slotTables[slot];
@@ -1963,7 +1959,8 @@ public unsafe partial class Transaction : EntityAccessor
 
                         var info = GetComponentInfo(table.Definition.POCOType);
                         var payload = info.CompContentAccessor.GetChunkAsReadOnlySpan(locChunkId);
-                        batch.AddSlot((long)s.Id.RawValue, (ushort)info.ComponentTypeId, payload.Slice(info.ComponentOverhead, table.ComponentStorageSize));
+                        // Wire identity is the per-archetype slot (LOG-06); here it's the spawn-iteration slot index.
+                        batch.AddSlot((long)s.Id.RawValue, (ushort)slot, payload.Slice(info.ComponentOverhead, table.ComponentStorageSize));
                     }
                 }
             }
@@ -1988,12 +1985,17 @@ public unsafe partial class Transaction : EntityAccessor
                     continue;
                 }
 
-                // The content chunk is laid out [ComponentOverhead][value]; the logical value lives at offset ComponentOverhead — the same offset the read and write
-                // paths apply (EntityAccessor.ReadEcsComponentDataRaw / WriteEcsComponentData). Log the VALUE, not the raw chunk prefix: an overhead-bearing (indexed)
-                // component otherwise logs its overhead bytes plus a truncated value, silently dropping the trailing bytes from the WAL — invisible until crash recovery.
+                // The content chunk is laid out [ComponentOverhead][value]; the logical value lives at offset ComponentOverhead — the same offset the read and
+                // write paths apply (EntityAccessor.ReadEcsComponentDataRaw / WriteEcsComponentData). Log the VALUE, not the raw chunk prefix: an
+                // overhead-bearing (indexed) component otherwise logs its overhead bytes plus a truncated value, silently dropping the trailing bytes from the
+                // WAL — invisible until crash recovery.
                 var overhead = info.ComponentTable.ComponentOverhead;
                 var payload = info.CompContentAccessor.GetChunkAsReadOnlySpan(cri.CurCompContentChunkId);
-                batch.AddSlot(cacheEntry.Key, componentTypeId, payload.Slice(overhead, storageSize));
+                
+                // Wire identity is the per-archetype slot (LOG-06); the same component sits at different slots in different archetypes, so resolve it from
+                // THIS entity's archetype (routing id embedded in the PK).
+                var slot = (ushort)_dbe.GetMetaByRouting(EntityId.FromRaw(cacheEntry.Key).ArchetypeId).GetSlot(componentTypeId);
+                batch.AddSlot(cacheEntry.Key, slot, payload.Slice(overhead, storageSize));
             }
 
             // Commit-discipline (SingleVersion) staged writes: the value lives in the native staging buffer (offset is 1-based), already sliced past
@@ -2003,7 +2005,8 @@ public unsafe partial class Transaction : EntityAccessor
             {
                 foreach (var staged in info.CommitStaged)
                 {
-                    batch.AddSlot(staged.Key, componentTypeId, new ReadOnlySpan<byte>(_commitStagingBuffer + staged.Value.Offset, storageSize));
+                    var slot = (ushort)_dbe.GetMetaByRouting(EntityId.FromRaw(staged.Key).ArchetypeId).GetSlot(componentTypeId);
+                    batch.AddSlot(staged.Key, slot, new ReadOnlySpan<byte>(_commitStagingBuffer + staged.Value.Offset, storageSize));
                 }
             }
         }

@@ -155,7 +155,7 @@ internal sealed class RecordCodecPropertyTests
     private static Decoded Capture(scoped in RecordView v) => new()
     {
         Kind = v.Kind, Flags = v.Flags, Lsn = v.Lsn, Tsn = v.Tsn, UowEpoch = v.UowEpoch,
-        EntityId = v.EntityId, CompTypeId = v.ComponentTypeId, FieldId = v.FieldId,
+        EntityId = v.EntityId, CompTypeId = v.SlotIndex, FieldId = v.FieldId,
         ArchetypeId = v.ArchetypeId, EnabledBits = v.EnabledBits, Op = v.Op, Index = v.Index,
         BulkSession = v.BulkSessionId, BulkBegin = v.BulkBeginLsn, EntityCount = v.EntityCount,
         CompCount = v.ComponentCount, Payload = v.Payload.ToArray(),
@@ -406,7 +406,7 @@ internal sealed class RecordCodecPropertyTests
     {
         var body = new byte[SlotRecordBody.FixedSize + payload.Length];
         BinaryPrimitives.WriteInt64LittleEndian(body.AsSpan(SlotRecordBody.EntityIdOffset), entityId);
-        BinaryPrimitives.WriteUInt16LittleEndian(body.AsSpan(SlotRecordBody.ComponentTypeIdOffset), compTypeId);
+        BinaryPrimitives.WriteUInt16LittleEndian(body.AsSpan(SlotRecordBody.SlotIndexOffset), compTypeId);
         body[SlotRecordBody.OpOffset] = (byte)SlotOp.Upsert;
         BinaryPrimitives.WriteUInt16LittleEndian(body.AsSpan(SlotRecordBody.PayloadLengthOffset), (ushort)payload.Length);
         payload.CopyTo(body.AsSpan(SlotRecordBody.FixedSize));

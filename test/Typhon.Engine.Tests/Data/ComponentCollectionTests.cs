@@ -10,7 +10,7 @@ namespace Typhon.Engine.Tests;
 [Component(SchemaName, 1)]
 [StructLayout(LayoutKind.Sequential)]
 [PublicAPI]
-public struct CompE_Eng
+public partial struct CompE_Eng
 {
     private const string SchemaName = "Typhon.Schema.UnitTest.CompE";
     

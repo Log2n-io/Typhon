@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Reflection;
 using System.Runtime.CompilerServices;
@@ -29,14 +30,19 @@ internal static class ArchetypeRegistry
     // Static state
     // ═══════════════════════════════════════════════════════════════════════
 
+    // These four maps are WRITTEN only under RegistrationLock but READ lock-free on hot-ish paths (GetComponentTypeId during ComponentInfo creation,
+    // GetMetadata<T> during query build). A plain Dictionary tears under concurrent read+write — parallel test fixtures / Workbench multi-ALC engines
+    // register on one thread while another reads, which surfaced (via Phase-2's GetSlot validation) as a rare flaky "component id 65535 not in archetype".
+    // ConcurrentDictionary makes the lock-free reads safe; the compound read-modify-write sequences stay serialized under RegistrationLock. (#514 Phase 5.)
+
     /// <summary>CLR Type → globally unique ComponentTypeId (deduplication across archetypes).</summary>
-    private static readonly Dictionary<Type, int> ComponentTypeIds = new();
+    private static readonly ConcurrentDictionary<Type, int> ComponentTypeIds = new();
 
     /// <summary>Component schema name → ComponentTypeId (dedup across V1/V2 CLR types sharing the same schema name).</summary>
-    private static readonly Dictionary<string, int> ComponentTypeIdsBySchemaName = new();
+    private static readonly ConcurrentDictionary<string, int> ComponentTypeIdsBySchemaName = new();
 
     /// <summary>ComponentTypeId → CLR Type (reverse lookup for slot-to-type mapping).</summary>
-    private static readonly Dictionary<int, Type> ComponentTypeById = new();
+    private static readonly ConcurrentDictionary<int, Type> ComponentTypeById = new();
 
     private static int NextComponentTypeId;
 
@@ -61,8 +67,9 @@ internal static class ArchetypeRegistry
     /// </summary>
     private static readonly ConditionalWeakTable<Type, PendingArchetype> PendingRegistrations = new();
 
-    /// <summary>CLR Type → ArchetypeMetadata for generic lookup cache.</summary>
-    private static readonly Dictionary<Type, ArchetypeMetadata> MetadataByType = new();
+    /// <summary>CLR Type → ArchetypeMetadata for generic lookup cache. Read lock-free by <see cref="GetMetadata{TArchetype}"/>; see the ConcurrentDictionary
+    /// note above.</summary>
+    private static readonly ConcurrentDictionary<Type, ArchetypeMetadata> MetadataByType = new();
 
     // ─── Lifecycle refcounts ────────────────────────────────────────────────────────────────────────────────
     //
@@ -72,11 +79,19 @@ internal static class ArchetypeRegistry
     // later session that loads the same DLL into a fresh collectible ALC gets a stale view of the registry (cross-ALC type-identity bug).
     //
     // Refcount semantics matter when two engines coexist (e.g. the Workbench's session engine + the Dev Fixture's short-lived engine in the same process):
-    // each holds an independent reference; disposing one must not clear entries the other still uses. Strict counting closes that hole. Locking is single-mutex
-    // (`RefcountLock`) — Init/Dispose are not on the engine's hot path, so a coarse lock is correct + simple.
+    // each holds an independent reference; disposing one must not clear entries the other still uses. Strict counting closes that hole.
     private static readonly Dictionary<Type, int> ArchetypeRefcount = new();
     private static readonly Dictionary<Type, int> ComponentRefcount = new();
-    private static readonly Lock RefcountLock = new();
+
+    // ─── Registration lock (#514 Phase 3) ──────────────────────────────────────────────────────────────────────
+    // A single coarse, REENTRANT mutex (System.Threading.Lock) serialising every mutation of the process-global registry: component/archetype registration
+    // (DeclareComponent / EnsureFinalized), the build-once Freeze() (subtree + cascade graph), and refcount lifecycle (Register/UnregisterEngineUse). This is
+    // what makes concurrent DatabaseEngine.InitializeArchetypes calls safe (parallel test fixtures, Workbench multi-ALC): the shared catalog + cascade graph
+    // are built atomically and exactly once, closing the flaky-test race (Face A sizing was removed in Phase 1; Face B — a per-engine cascade rebuild
+    // double-adding CascadeTargets — is closed here by building the cascade inside the locked, idempotent Freeze). Reentrancy is required: EnsureFinalized
+    // recurses up the parent chain (and RunClassConstructor may re-enter via a static field initializer). Runtime READS stay lock-free — the registry is
+    // immutable once frozen. Init/Dispose are off the hot path, so a coarse lock is correct + simple.
+    private static readonly Lock RegistrationLock = new();
 
     // ═══════════════════════════════════════════════════════════════════════
     // Registration API (called during static initialization)
@@ -86,9 +101,11 @@ internal static class ArchetypeRegistry
     /// Declare a component for an archetype. Called from <see cref="Archetype{TSelf}.Register{T}"/>.
     /// Assigns or reuses a ComponentTypeId and records the pending slot.
     /// </summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static Comp<T> DeclareComponent<TArchetype, T>() where T : unmanaged
     {
+        // Serialise concurrent registrations (parallel test fixtures / Workbench ALCs declare components from separate threads). Reentrant.
+        using var scopeLock = RegistrationLock.EnterScope();
+
         // Allow late registration — static constructors may fire after Freeze() if new archetype types are accessed for the first time (e.g., in test
         // fixtures loaded after engine init). Freeze() will need to be called again to rebuild subtree IDs.
         if (Frozen)
@@ -140,6 +157,10 @@ internal static class ArchetypeRegistry
     /// </summary>
     internal static void EnsureFinalized(Type archetypeType)
     {
+        // Serialise with concurrent registration/freeze. Reentrant: FinalizeArchetypeInternal recurses here for the parent chain, and RunClassConstructor
+        // below may re-enter via a static field initializer (DeclareComponent).
+        using var scopeLock = RegistrationLock.EnterScope();
+
         // First ensure static field initializers have run (DeclareComponent calls)
         RuntimeHelpers.RunClassConstructor(archetypeType.TypeHandle);
 
@@ -506,7 +527,7 @@ internal static class ArchetypeRegistry
         ArgumentNullException.ThrowIfNull(archetypeTypes);
         ArgumentNullException.ThrowIfNull(componentTypes);
 
-        lock (RefcountLock)
+        lock (RegistrationLock)
         {
             foreach (var t in archetypeTypes)
             {
@@ -541,7 +562,7 @@ internal static class ArchetypeRegistry
         ArgumentNullException.ThrowIfNull(archetypeTypes);
         ArgumentNullException.ThrowIfNull(componentTypes);
 
-        lock (RefcountLock)
+        lock (RegistrationLock)
         {
             foreach (var t in archetypeTypes)
             {
@@ -636,7 +657,7 @@ internal static class ArchetypeRegistry
                         }
                         else
                         {
-                            ComponentTypeById.Remove(id);
+                            ComponentTypeById.TryRemove(id, out _);
                         }
                     }
                     // Same fallback discipline for the schema-name → id mapping.
@@ -656,7 +677,7 @@ internal static class ArchetypeRegistry
                         }
                         if (!anyOther)
                         {
-                            ComponentTypeIdsBySchemaName.Remove(schemaName);
+                            ComponentTypeIdsBySchemaName.TryRemove(schemaName, out _);
                         }
                     }
                 }
@@ -705,7 +726,7 @@ internal static class ArchetypeRegistry
             // `AddOrUpdate` would also work — chose `Add` for the explicit assumption-as-assertion semantic.
             MetadataFieldCache.Add(archetypeType, fi);
         }
-        fi.SetValue(null, null);
+        fi!.SetValue(null, null);
     }
 
     /// <summary>
@@ -724,7 +745,7 @@ internal static class ArchetypeRegistry
     /// </summary>
     internal static void ResetForTests()
     {
-        lock (RefcountLock)
+        lock (RegistrationLock)
         {
             // Clear every cached `Archetype<T>._metadata` field BEFORE wiping the registry dicts — same reasoning as in `UnregisterEngineUse`: the per-generic
             // static cache must be invalidated or a later `Archetype<T>.Touch()` returns stale metadata. CWT iteration is via KeyValuePair.
@@ -754,6 +775,9 @@ internal static class ArchetypeRegistry
     /// </summary>
     public static void Freeze()
     {
+        // Lock first, THEN check Frozen — so the check + build + set is atomic and the global derived data (subtree + cascade graph) is built EXACTLY ONCE
+        // across concurrent DatabaseEngine.InitializeArchetypes calls. A late DeclareComponent flips Frozen back to false, so a subsequent Freeze rebuilds.
+        using var scopeLock = RegistrationLock.EnterScope();
         if (Frozen)
         {
             return;
@@ -772,6 +796,10 @@ internal static class ArchetypeRegistry
             CollectSubtree(meta.ArchetypeId, subtree);
             meta.SubtreeArchetypeIds = subtree.ToArray();
         }
+
+        // Build + validate the cascade-delete graph here (once, under the lock) rather than per-engine. The per-engine rebuild was Face B of the flaky race:
+        // two engines concurrently clearing + re-adding CascadeTargets on the shared metadata produced a spurious "cascade diamond". #514 Phase 3.
+        BuildAndValidateCascadeGraph();
 
         Frozen = true;
     }

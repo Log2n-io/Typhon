@@ -9,7 +9,7 @@ namespace Typhon.ARPG.Schema;
 /// </summary>
 [Component("ARPG.ItemData", 1)]
 [StructLayout(LayoutKind.Sequential)]
-public struct ItemData
+public partial struct ItemData
 {
     [Field] [Index(AllowMultiple = true)] public int ItemTypeId;
     [Field] public String64 ItemName;

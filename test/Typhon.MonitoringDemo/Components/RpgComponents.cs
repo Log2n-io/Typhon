@@ -16,7 +16,7 @@ namespace Typhon.MonitoringDemo;
 /// </summary>
 [Component("RPG.Character", 1)]
 [StructLayout(LayoutKind.Sequential)]
-public struct Character
+public partial struct Character
 {
     /// <summary>
     /// Character name
@@ -112,7 +112,7 @@ public struct Character
 /// </summary>
 [Component("RPG.Inventory", 1)]
 [StructLayout(LayoutKind.Sequential)]
-public struct Inventory
+public partial struct Inventory
 {
     /// <summary>
     /// Owner character entity ID
@@ -186,7 +186,7 @@ public struct Inventory
 /// </summary>
 [Component("RPG.Equipment", 1)]
 [StructLayout(LayoutKind.Sequential)]
-public struct Equipment
+public partial struct Equipment
 {
     /// <summary>
     /// Owner character entity ID
@@ -264,7 +264,7 @@ public struct Equipment
 /// </summary>
 [Component("RPG.Skill", 1)]
 [StructLayout(LayoutKind.Sequential)]
-public struct Skill
+public partial struct Skill
 {
     /// <summary>
     /// Owner character entity ID
@@ -335,7 +335,7 @@ public struct Skill
 /// </summary>
 [Component("RPG.Quest", 1)]
 [StructLayout(LayoutKind.Sequential)]
-public struct Quest
+public partial struct Quest
 {
     /// <summary>
     /// Character who has this quest
@@ -407,7 +407,7 @@ public struct Quest
 /// </summary>
 [Component("RPG.WorldPosition", 1)]
 [StructLayout(LayoutKind.Sequential)]
-public struct WorldPosition
+public partial struct WorldPosition
 {
     /// <summary>
     /// Entity this position belongs to
@@ -478,7 +478,7 @@ public struct WorldPosition
 /// </summary>
 [Component("RPG.CombatStats", 1)]
 [StructLayout(LayoutKind.Sequential)]
-public struct CombatStats
+public partial struct CombatStats
 {
     /// <summary>
     /// Entity this belongs to

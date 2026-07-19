@@ -70,7 +70,7 @@ public struct FieldR1
 [Component(SchemaName, 1)]
 [StructLayout(LayoutKind.Sequential)]
 [PublicAPI]
-public struct ComponentR1
+public partial struct ComponentR1
 {
     /// <summary>Fully-qualified schema name of this record ("Typhon.Schema.Component").</summary>
     public const string SchemaName = "Typhon.Schema.Component";
@@ -125,7 +125,7 @@ public struct ComponentR1
 [Component(SchemaName, 1)]
 [StructLayout(LayoutKind.Sequential)]
 [PublicAPI]
-public struct ArchetypeR1
+public partial struct ArchetypeR1
 {
     /// <summary>Fully-qualified schema name of this record ("Typhon.Schema.Archetype").</summary>
     public const string SchemaName = "Typhon.Schema.Archetype";
@@ -133,8 +133,14 @@ public struct ArchetypeR1
     /// <summary>Archetype CLR type name (e.g., "Building").</summary>
     public String64 Name;
 
-    /// <summary>Globally unique archetype ID from [Archetype(Id = N)].</summary>
+    /// <summary>Per-process catalog id (from <c>[Archetype(Id = N)]</c> today; generator-assigned after Phase 5). Identity re-match on reopen is by
+    /// <see cref="Name"/>, not this value — it is not stable across processes once the generator owns numbering.</summary>
     public ushort ArchetypeId;
+
+    /// <summary>Per-DB, engine-assigned archetype routing id — the value embedded in every <see cref="EntityId"/> of this archetype. Assigned monotonically
+    /// (dense) on first registration into this database, persisted here, and restored by <see cref="Name"/> match on reopen so existing EntityIds keep
+    /// resolving. This is the durable per-DB archetype identity used for EntityId routing.</summary>
+    public ushort RoutingId;
 
     /// <summary>Parent archetype ID (0xFFFF = no parent).</summary>
     public ushort ParentArchetypeId;
@@ -143,7 +149,7 @@ public struct ArchetypeR1
     public byte ComponentCount;
 
     /// <summary>Reserved padding to preserve field alignment; unused.</summary>
-    public byte _pad0, _pad1, _pad2;
+    public byte _pad0;
 
     /// <summary>Schema revision from [Archetype(Id, Revision)].</summary>
     public int Revision;
@@ -175,7 +181,7 @@ public struct ArchetypeR1
 [Component(SchemaName, 1)]
 [StructLayout(LayoutKind.Sequential)]
 [PublicAPI]
-public struct AssemblyR1
+public partial struct AssemblyR1
 {
     /// <summary>Fully-qualified schema name of this record ("Typhon.Schema.Assembly").</summary>
     public const string SchemaName = "Typhon.Schema.Assembly";
@@ -221,7 +227,7 @@ public enum SchemaChangeKind
 [Component(SchemaName, 1)]
 [StructLayout(LayoutKind.Sequential)]
 [PublicAPI]
-public struct SchemaHistoryR1
+public partial struct SchemaHistoryR1
 {
     /// <summary>Fully-qualified schema name of this record ("Typhon.Schema.History").</summary>
     public const string SchemaName = "Typhon.Schema.History";
@@ -465,7 +471,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         }
     }
     internal Dictionary<string, (int ChunkId, ComponentR1 Comp)> _persistedComponents;
-    internal Dictionary<ushort, (int ChunkId, ArchetypeR1 Arch)> _persistedArchetypes;
+    /// <summary>Persisted archetype rows, keyed by archetype <see cref="ArchetypeR1.Name"/> (reopen re-match is by name —
+    /// see claude/design/Ecs/SourceGeneratedRegistry/04-solution-design.md §7.1).</summary>
+    internal Dictionary<string, (int ChunkId, ArchetypeR1 Arch)> _persistedArchetypes;
 
     /// <summary>Persisted schema-assembly manifest, keyed by AssemblyId (= AssemblyR1 row chunkId). Loaded eagerly on open so it is readable schemaless.</summary>
     internal Dictionary<ushort, (int ChunkId, AssemblyR1 Asm)> _persistedAssemblies;
@@ -473,8 +481,46 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// <summary>Dedup index: assembly simple name → AssemblyId. Seeded from <see cref="_persistedAssemblies"/> on open; appended as new assemblies are persisted.</summary>
     private Dictionary<string, ushort> _assemblyIdByName;
 
-    /// <summary>Per-engine archetype runtime state, indexed by ArchetypeId. Separates per-engine mutable data from shared schema metadata.</summary>
+    /// <summary>Per-engine archetype runtime state, indexed by per-process catalog id (<see cref="ArchetypeMetadata.ArchetypeId"/>). Separates per-engine
+    /// mutable data from shared schema metadata. Reached from an <see cref="EntityId"/> via <see cref="GetMetaByRouting"/> then the meta's catalog id.</summary>
     internal ArchetypeEngineState[] _archetypeStates;
+
+    // ── Per-DB archetype routing (claude/design/Ecs/SourceGeneratedRegistry/04-solution-design.md §2/§6) ───────────
+    // The EntityId carries a per-DB routing id (low 16 bits), NOT the per-process catalog id. These two per-engine tables translate between the two id spaces:
+    //   _metaByRouting[routingId]        → ArchetypeMetadata   (resolve an EntityId to its archetype)
+    //   _routingByCatalog[catalogId]     → routingId           (compose an EntityId for a known archetype)
+    // Both are fixed-size (RoutingTableSize) so a concurrent registration in another engine can never overflow them — this removes Face A's IndexOutOfRange
+    // sizing coupling (the definitive race closure lands with the Phase 3 registration lock + own-archetype scoping).
+
+    /// <summary>Fixed size for the per-DB routing tables. Matches the per-process catalog cap (12-bit legacy id space); routing ids stay dense below it.</summary>
+    private const int RoutingTableSize = 4096;
+
+    /// <summary>Sentinel for "no routing id assigned to this catalog id in this DB".</summary>
+    internal const ushort NoRoutingId = 0xFFFF;
+
+    /// <summary>routingId → archetype metadata (per-DB). Populated in <see cref="InitializeArchetypes"/>.</summary>
+    internal ArchetypeMetadata[] _metaByRouting;
+
+    /// <summary>routingId → per-engine state (same objects as <see cref="_archetypeStates"/>, routing-indexed). Keeps the hot EntityId→state path single-hop.</summary>
+    internal ArchetypeEngineState[] _stateByRouting;
+
+    /// <summary>catalog id (<see cref="ArchetypeMetadata.ArchetypeId"/>) → per-DB routing id; <see cref="NoRoutingId"/> when this DB has no such archetype.</summary>
+    internal ushort[] _routingByCatalog;
+
+    /// <summary>Monotonic per-DB routing-id high-water mark; resumes above the max persisted routing id on reopen.</summary>
+    private ushort _nextRoutingId;
+
+    /// <summary>Resolve an <see cref="EntityId"/>'s routing id to its archetype metadata. O(1). Returns null for an unknown routing id.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal ArchetypeMetadata GetMetaByRouting(ushort routingId) => (uint)routingId < (uint)_metaByRouting.Length ? _metaByRouting[routingId] : null;
+
+    /// <summary>The per-DB routing id for a known archetype (for composing an <see cref="EntityId"/>). O(1).</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal ushort RoutingIdOf(ArchetypeMetadata meta) => _routingByCatalog[meta.ArchetypeId];
+
+    /// <summary>The per-DB routing id for a catalog archetype id — for tooling (Workbench) that holds catalog ids from the schema and needs the routing id
+    /// that routing-based APIs (e.g. <see cref="Transaction.EnumerateArchetypeEntities"/>) expect. Returns <see cref="NoRoutingId"/> if unmapped.</summary>
+    internal ushort RoutingIdForCatalog(ushort catalogId) => (uint)catalogId < (uint)_routingByCatalog.Length ? _routingByCatalog[catalogId] : NoRoutingId;
     private Dictionary<string, FieldR1[]> _persistedFieldsByComponent;
     private ConcurrentDictionary<int, ChunkBasedSegment<PersistentStore>> _componentCollectionSegmentByStride;
     private ConcurrentDictionary<Type, VariableSizedBufferSegmentBase<PersistentStore>> _componentCollectionVSBSByType;
@@ -1278,7 +1324,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                                 batchBytes = 0;
                             }
 
-                            batch.AddSlot(entityPk, componentTypeId, src.Slice(overhead, stride));
+                            // Wire identity is the per-archetype slot (LOG-06); resolve from this entity's archetype (routing id in the PK).
+                            var slot = (ushort)GetMetaByRouting(EntityId.FromRaw(entityPk).ArchetypeId).GetSlot(componentTypeId);
+                            batch.AddSlot(entityPk, slot, src.Slice(overhead, stride));
                             batchBytes += recOverhead + stride;
                         }
                     }
@@ -1935,7 +1983,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                         }
 
                         var src = clusterBase + layout.ComponentOffset(slot) + slotIndex * compSize;
-                        batch.AddSlot(entityPk, slotTypeIds[d], new ReadOnlySpan<byte>(src, compSize));
+                        // Wire identity is the per-archetype slot (LOG-06); `slot` is that index (durableSlots[d]).
+                        batch.AddSlot(entityPk, (ushort)slot, new ReadOnlySpan<byte>(src, compSize));
                         batchBytes += recOverhead + compSize;
                     }
                 }
@@ -2541,7 +2590,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 //    pre-#TBD TryGet+Upsert pair which did two chain scans + a full-record stack copy + double OLC traversal.
                 //    Returns false if the entity is already gone (destroy race precondition from Q9 says the occupancy pre-mask
                 //    should have filtered this out, but the no-op return preserves the same forgiving semantics as before).
-                var entityKey = entityPK >>> 12;
+                var entityKey = EntityId.FromRaw(entityPK).EntityKey;
                 var clusterLocationUpdater = new ClusterLocationUpdater(dstChunkId, (byte)dstSlot);
                 var updated = engineState.EntityMap.TryUpdateInPlace(entityKey, ref clusterLocationUpdater, ref emAccessor);
                 if (!updated)
@@ -3244,11 +3293,44 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     private const int ComponentCollectionItemCountPerChunk      = 8;
     private const int ComponentCollectionSegmentStartingSize    = 8;
 
-    internal VariableSizedBufferSegment<T, PersistentStore> GetComponentCollectionVSBS<T>() where T : unmanaged =>
-        (VariableSizedBufferSegment<T, PersistentStore>)_componentCollectionVSBSByType.GetOrAdd(typeof(T),
-            _ => new VariableSizedBufferSegment<T, PersistentStore>(GetComponentCollectionSegment<T>()));
+    // Type→typed-delegate dispatch table replacing MakeGenericType+Activator for ComponentCollection<T> backing stores (AOT blocker B2, #409 §1 / #514 Phase 6).
+    // Source-generated component schema providers register each ComponentCollection<T> element type here — T is known at compile time, so the closed generic is
+    // JIT/AOT-resolvable with no runtime code generation. Process-static (the delegate takes the engine as an argument, so it is engine-independent). Populated
+    // during registration (via the generated provider), read during ComponentTable build. Reflection is used only as a fallback for non-generated component types.
+    private static readonly ConcurrentDictionary<Type, Func<DatabaseEngine, ChangeSet, VariableSizedBufferSegmentBase<PersistentStore>>> _collectionVsbsFactories
+        = new();
 
-    internal VariableSizedBufferSegmentBase<PersistentStore> GetComponentCollectionVSBS(Type itemType, ChangeSet changeSet = null) =>
+    /// <summary>
+    /// Registers the AOT-safe backing-store factory for a <see cref="ComponentCollection{T}"/> element type. Called by source-generated component schema
+    /// providers (feature #514) for each collection field — the element type is a compile-time generic argument, so no <c>MakeGenericType</c>/<c>Activator</c>
+    /// is needed. Idempotent.
+    /// </summary>
+    /// <typeparam name="T">The collection's element type.</typeparam>
+    public static void RegisterComponentCollectionFactory<T>() where T : unmanaged =>
+        _collectionVsbsFactories.TryAdd(typeof(T), static (engine, changeSet) => engine.GetComponentCollectionVSBS<T>(changeSet));
+
+    internal VariableSizedBufferSegment<T, PersistentStore> GetComponentCollectionVSBS<T>() where T : unmanaged => GetComponentCollectionVSBS<T>(null);
+
+    internal unsafe VariableSizedBufferSegment<T, PersistentStore> GetComponentCollectionVSBS<T>(ChangeSet changeSet) where T : unmanaged =>
+        (VariableSizedBufferSegment<T, PersistentStore>)_componentCollectionVSBSByType.GetOrAdd(typeof(T),
+            _ => new VariableSizedBufferSegment<T, PersistentStore>(GetComponentCollectionSegment(sizeof(T), changeSet)));
+
+    internal VariableSizedBufferSegmentBase<PersistentStore> GetComponentCollectionVSBS(Type itemType, ChangeSet changeSet = null)
+    {
+        // Preferred path: a source-generated provider registered an AOT-safe factory for this element type (T known at compile time).
+        if (_collectionVsbsFactories.TryGetValue(itemType, out var factory))
+        {
+            return factory(this, changeSet);
+        }
+
+        // Fallback for component types without a source-generated schema provider — constructs the closed generic reflectively (not AOT-safe; see attribute).
+        return CreateComponentCollectionVsbsReflective(itemType, changeSet);
+    }
+
+    [System.Diagnostics.CodeAnalysis.RequiresDynamicCode(
+        "Constructs VariableSizedBufferSegment<T, PersistentStore> via MakeGenericType for a runtime element type. Only reached for component types without a "
+        + "source-generated schema provider; generated components register an AOT-safe factory via RegisterComponentCollectionFactory<T>().")]
+    private VariableSizedBufferSegmentBase<PersistentStore> CreateComponentCollectionVsbsReflective(Type itemType, ChangeSet changeSet) =>
         _componentCollectionVSBSByType.GetOrAdd(itemType,
             type =>
             {
@@ -3827,7 +3909,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 continue;
             }
 
-            if (!_persistedArchetypes.TryGetValue(meta.ArchetypeId, out var persisted))
+            if (!_persistedArchetypes.TryGetValue(meta.ArchetypeType.Name, out var persisted))
             {
                 continue;
             }
@@ -3865,7 +3947,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
             SystemCrud.Update(archetypesTable, persisted.ChunkId, ref arch, EpochManager, cs);
             // refresh the cache so the next checkpoint's skip-check sees the persisted values
-            _persistedArchetypes[meta.ArchetypeId] = (persisted.ChunkId, arch);
+            _persistedArchetypes[meta.ArchetypeType.Name] = (persisted.ChunkId, arch);
             anyUpdated = true;
         }
 
@@ -4384,12 +4466,29 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             RegisterComponentFromAccessor<ArchetypeR1>();
         }
 
-        // Load persisted archetype schemas for validation
-        _persistedArchetypes ??= new Dictionary<ushort, (int, ArchetypeR1)>();
+        // Load persisted archetype schemas for validation (keyed by name — reopen re-match is by name)
+        _persistedArchetypes ??= new Dictionary<string, (int, ArchetypeR1)>();
         LoadPersistedArchetypes();
 
-        // Allocate per-engine state array indexed by ArchetypeId
-        _archetypeStates = new ArchetypeEngineState[ArchetypeRegistry.MaxArchetypeId + 1];
+        // Allocate per-engine state array indexed by per-process catalog id, plus the per-DB routing tables. Fixed sizing (RoutingTableSize) so a concurrent
+        // registration in a peer engine can never overflow these — removes Face A's IndexOutOfRange sizing coupling.
+        _archetypeStates = new ArchetypeEngineState[RoutingTableSize];
+        _metaByRouting = new ArchetypeMetadata[RoutingTableSize];
+        _stateByRouting = new ArchetypeEngineState[RoutingTableSize];
+        _routingByCatalog = new ushort[RoutingTableSize];
+        Array.Fill(_routingByCatalog, NoRoutingId);
+
+        // Resume the routing-id counter above the max already persisted, so archetypes new since the last open get fresh, non-colliding ids while existing
+        // ones keep the routing id embedded in their on-disk EntityIds. Routing id 0 is RESERVED (mirrors the legacy author-set ArchetypeId invariant): an
+        // all-zero EntityId must remain uniquely EntityId.Null, and engine code uses `entityId.ArchetypeId == 0` as a null/invalid sentinel. So ids start at 1.
+        _nextRoutingId = 1;
+        foreach (var kv in _persistedArchetypes)
+        {
+            if (kv.Value.Arch.RoutingId >= _nextRoutingId)
+            {
+                _nextRoutingId = (ushort)(kv.Value.Arch.RoutingId + 1);
+            }
+        }
 
         foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
         {
@@ -4537,8 +4636,15 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 }
             }
 
+            // Reopen re-match by name (claude/design/Ecs/SourceGeneratedRegistry/04-solution-design.md §7.1):
+            // restore this archetype's persisted routing id, or assign a fresh one for a newly-added archetype.
+            var hasPersisted = _persistedArchetypes.TryGetValue(meta.ArchetypeType.Name, out var persisted);
+            var routingId = hasPersisted ? persisted.Arch.RoutingId : _nextRoutingId++;
+            _metaByRouting[routingId] = meta;
+            _routingByCatalog[meta.ArchetypeId] = routingId;
+
             bool isFreshAllocation;
-            if (!hasMigratedSlot && _persistedArchetypes.TryGetValue(meta.ArchetypeId, out var persisted) && persisted.Arch.EntityMapSPI > 0
+            if (!hasMigratedSlot && hasPersisted && persisted.Arch.EntityMapSPI > 0
                 && MMF.TryLoadChunkBasedSegment(persisted.Arch.EntityMapSPI, stride, out var loadedSegment, WalFilesPresentAtOpen))
             {
                 // Reload existing EntityMap from persisted segment (O(1) reopen)
@@ -4565,6 +4671,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 };
                 isFreshAllocation = true;
             }
+
+            // Routing-indexed view of the same state object (populated for both reload and fresh paths).
+            _stateByRouting[routingId] = _archetypeStates[meta.ArchetypeId];
 
             // Create or reload ClusterState for cluster-eligible archetypes.
             if (isClusterEligible)
@@ -4597,7 +4706,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     _archetypeStates[meta.ArchetypeId].ClusterState =
                         ArchetypeClusterState.Create(meta.ClusterLayout, clusterSegment, transientClusterSegment, transientClusterStore);
                 }
-                else if (_persistedArchetypes.TryGetValue(meta.ArchetypeId, out var clusterPersisted)
+                else if (_persistedArchetypes.TryGetValue(meta.ArchetypeType.Name, out var clusterPersisted)
                          && clusterPersisted.Arch.ClusterSegmentSPI > 0)
                 {
                     ChunkBasedSegment<PersistentStore> loadedCluster = null;
@@ -4786,8 +4895,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             }
         }
 
-        // Build and validate cascade delete graph (after all slots connected)
-        ArchetypeRegistry.BuildAndValidateCascadeGraph();
+        // Cascade-delete graph is built + validated once, under the registration lock, inside ArchetypeRegistry.Freeze() (called above) — NOT per-engine.
+        // The old per-engine rebuild here double-added CascadeTargets on the shared metadata under parallel init (Face B of the flaky race). #514 Phase 3.
 
         // Rebuild entity maps from persisted ComponentTable data (entities from prior database sessions). On a clean
         // reopen this is the O(1) persisted-EntityMap fast path; it only walks entities for legacy / migrated DBs.
@@ -5025,7 +5134,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                         continue;
                     }
 
-                    var heads = ComponentRevisionManager.EnumerateVersionedChainHeads(table, meta.ArchetypeId);
+                    var heads = ComponentRevisionManager.EnumerateVersionedChainHeads(table, RoutingIdOf(meta));
                     if (heads.Count > 0)
                     {
                         table.RebuildSecondaryIndexEntriesFromHeads(heads, changeSet);
@@ -5104,7 +5213,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
             // Clean / legacy reopen: skip archetypes that were loaded from a persisted EntityMap segment (O(1) reopen path). BUT: if migration invalidated the
             // EntityMap (hasMigratedSlot → fresh allocation), the EntityMap will be empty despite persisted SPI > 0. Check EntryCount to distinguish.
-            if (_persistedArchetypes.TryGetValue(meta.ArchetypeId, out var p) && p.Arch.EntityMapSPI > 0
+            if (_persistedArchetypes.TryGetValue(meta.ArchetypeType.Name, out var p) && p.Arch.EntityMapSPI > 0
                 && state.EntityMap.EntryCount > 0)
             {
                 continue;
@@ -5151,7 +5260,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
             // Shared two-pass chain-head scan (overflow set → heads), reused by recovery scrub (03-recovery.md §6) so the two never drift. Returns
             // EntityPK → root-chunk-id for this archetype's chains in this Versioned slot.
-            slotMaps[slot] = ComponentRevisionManager.EnumerateVersionedChainHeads(table, meta.ArchetypeId);
+            slotMaps[slot] = ComponentRevisionManager.EnumerateVersionedChainHeads(table, RoutingIdOf(meta));
             if (slotMaps[slot].Count > 0)
             {
                 anySlotPopulated = true;
@@ -5179,7 +5288,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         long maxEntityKey = 0;
         foreach (var pk in allEntityPKs)
         {
-            var entityKey = pk >> 12;
+            var entityKey = EntityId.FromRaw(pk).EntityKey;
 
             var allSlotsPresent = true;
             for (var slot = 0; slot < meta.ComponentCount; slot++)
@@ -5405,7 +5514,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 if (table?.CompRevTableSegment != null && table.StorageMode == StorageMode.Versioned
                     && table.CompRevTableSegment.ChunkCapacity > 0 && table.CompRevTableSegment.AllocatedChunkCount > 0)
                 {
-                    chainHeads[slot] = ComponentRevisionManager.EnumerateVersionedChainHeads(table, meta.ArchetypeId);
+                    chainHeads[slot] = ComponentRevisionManager.EnumerateVersionedChainHeads(table, RoutingIdOf(meta));
                 }
             }
         }
@@ -5530,7 +5639,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     var table = state.SlotToComponentTable[slot];
 
                     // Shared chain-head scan (same source as the EntityMap rebuild). Empty for null / non-Versioned / empty tables.
-                    var heads = ComponentRevisionManager.EnumerateVersionedChainHeads(table, meta.ArchetypeId);
+                    var heads = ComponentRevisionManager.EnumerateVersionedChainHeads(table, RoutingIdOf(meta));
                     if (heads.Count == 0)
                     {
                         continue;
@@ -5595,14 +5704,14 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
             if (SystemCrud.Read(archetypesTable, chunkId, out ArchetypeR1 arch, EpochManager))
             {
-                _persistedArchetypes[arch.ArchetypeId] = (chunkId, arch);
+                _persistedArchetypes[arch.Name.AsString] = (chunkId, arch);
             }
         }
     }
 
     private void ValidateArchetypeSchema(ArchetypeMetadata meta)
     {
-        if (!_persistedArchetypes.TryGetValue(meta.ArchetypeId, out var persisted))
+        if (!_persistedArchetypes.TryGetValue(meta.ArchetypeType.Name, out var persisted))
         {
             return; // new archetype, not persisted yet — OK
         }
@@ -5653,7 +5762,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 continue;
             }
 
-            if (_persistedArchetypes.ContainsKey(meta.ArchetypeId))
+            if (_persistedArchetypes.ContainsKey(meta.ArchetypeType.Name))
             {
                 continue;
             }
@@ -5661,6 +5770,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             // Build and persist the ArchetypeR1 entity
             var arch = BuildArchetypeR1(meta);
             arch.AssemblyId = GetOrCreateAssemblyId(meta.ArchetypeType.Assembly, cs);
+            arch.RoutingId = RoutingIdOf(meta); // per-DB routing id assigned in InitializeArchetypes
 
             // Populate ComponentNames collection via VSBS
             var names = GetArchetypeComponentNames(meta);
@@ -5675,7 +5785,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             }
 
             var chunkId = SystemCrud.Create(archetypesTable, ref arch, EpochManager, cs);
-            _persistedArchetypes[meta.ArchetypeId] = (chunkId, arch);
+            _persistedArchetypes[meta.ArchetypeType.Name] = (chunkId, arch);
             anyNew = true;
         }
 

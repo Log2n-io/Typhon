@@ -245,7 +245,8 @@ public sealed class DataBrowserService
     private static ArchetypeSnapshot Enumerate(DatabaseEngine engine, ushort archetypeId)
     {
         using var tx = engine.CreateReadOnlyTransaction();
-        var ids = tx.EnumerateArchetypeEntities(archetypeId);
+        // archetypeId here is the catalog id (from the schema DTO); EnumerateArchetypeEntities expects the per-DB routing id.
+        var ids = tx.EnumerateArchetypeEntities(engine.RoutingIdForCatalog(archetypeId));
         return new ArchetypeSnapshot(ids.ToArray(), tx.TSN);
     }
 }

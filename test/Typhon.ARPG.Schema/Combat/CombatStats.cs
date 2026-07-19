@@ -10,7 +10,7 @@ namespace Typhon.ARPG.Schema;
 /// </summary>
 [Component("ARPG.CombatStats", 1)]
 [StructLayout(LayoutKind.Sequential)]
-public struct CombatStats
+public partial struct CombatStats
 {
     // Physical damage range
     [Field] public int MinPhysicalDamage;

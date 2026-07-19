@@ -18,7 +18,7 @@ namespace Typhon.Workbench.Tests.DataBrowser;
 // mirroring SchemaControllerTests. Covers the read loop, paging/cap, decode, and error mapping (AC1–7).
 [Component("Workbench.Test.DbPos", 1)]
 [StructLayout(LayoutKind.Sequential)]
-public struct DbPos
+public partial struct DbPos
 {
     public float X, Y, Z;
     public DbPos(float x, float y, float z) { X = x; Y = y; Z = z; }
@@ -26,7 +26,7 @@ public struct DbPos
 
 [Component("Workbench.Test.DbHealth", 1)]
 [StructLayout(LayoutKind.Sequential)]
-public struct DbHealth
+public partial struct DbHealth
 {
     public int Current, Max;
     public DbHealth(int current, int max) { Current = current; Max = max; }
@@ -42,7 +42,7 @@ partial class DbThing : Archetype<DbThing>
 // Exercises the geometric value-type decode path (AABB / point / bounding-sphere / quaternion) end-to-end.
 [Component("Workbench.Test.DbBounds", 1)]
 [StructLayout(LayoutKind.Sequential)]
-public struct DbBounds
+public partial struct DbBounds
 {
     public AABB2F Box;
     public Point2F Center;

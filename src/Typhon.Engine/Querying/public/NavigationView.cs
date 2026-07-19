@@ -66,7 +66,7 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
             var accessor = engineState.EntityMap.Segment.CreateChunkAccessor();
             var collector = new SourceCollector
             {
-                ArchetypeId = meta.ArchetypeId,
+                RoutingId = _sourceTable.DBE.RoutingIdOf(meta),
                 View = this,
                 Tx = tx,
             };
@@ -77,7 +77,7 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
 
     private struct SourceCollector : RawValuePagedHashMap<long, PersistentStore>.IEntryAction<long>
     {
-        public ushort ArchetypeId;
+        public ushort RoutingId;
         public NavigationView<TSource, TTarget> View;
         public Transaction Tx;
 
@@ -89,7 +89,7 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
                 return true;
             }
 
-            var entityId = new EntityId(key, ArchetypeId);
+            var entityId = new EntityId(key, RoutingId);
             var sourcePK = (long)entityId.RawValue;
 
             if (View.EvaluateFullPredicate(sourcePK, Tx))

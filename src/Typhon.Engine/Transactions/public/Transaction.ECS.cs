@@ -104,7 +104,7 @@ public unsafe partial class Transaction
     {
         var table = _dbe.GetComponentTable<T>();
         CheckConfig.Require(CheckConfig.Enabled, table?.SpatialIndex != null, $"Component {typeof(T).Name} has no [SpatialIndex]");
-        return new SpatialQuery<T>(table.SpatialIndex);
+        return new SpatialQuery<T>(table!.SpatialIndex);
     }
 
     /// <summary>
@@ -139,28 +139,29 @@ public unsafe partial class Transaction
     /// <summary>
     /// Non-generic enumeration of every entity in a single exact archetype, visible at this transaction's snapshot (TSN). The runtime counterpart to
     /// <see cref="Query{TArchetype}"/> for tooling that only knows the archetype by its id at runtime (e.g. the Workbench Data Browser). Walks the archetype's
-    /// entity map directly, so it works for both cluster and legacy storage. Entities pending destroy in this transaction are excluded; entities spawned (and not
-    /// yet committed) in this transaction are NOT included — use the typed <see cref="Query{TArchetype}"/> path when read-your-own-writes is required.
+    /// entity map directly, so it works for both cluster and legacy storage. Entities pending destroy in this transaction are excluded; entities spawned (and
+    /// not yet committed) in this transaction are NOT included — use the typed <see cref="Query{TArchetype}"/> path when read-your-own-writes is required.
     /// <para>
     /// Prefer the generic <see cref="Query{TArchetype}"/> whenever the archetype is known at compile time: it adds Tier-1/2/3 filtering, ordering, and paging,
     /// and avoids materializing a <see cref="List{T}"/> of every id. Reach for this overload only when the archetype type is not available statically.
     /// </para>
     /// </summary>
-    /// <param name="archetypeId">The exact archetype to enumerate (no subtree / polymorphic expansion).</param>
+    /// <param name="routingId">The exact archetype to enumerate, identified by its per-DB routing id (the value carried in <see cref="EntityId.ArchetypeId"/>
+    /// and persisted as <c>ArchetypeR1.RoutingId</c>). No subtree / polymorphic expansion.</param>
     /// <returns>
-    /// Entity ids in entity-map iteration order — deterministic for a given snapshot. Empty when the archetype id is unknown or has no engine state. Pair each
+    /// Entity ids in entity-map iteration order — deterministic for a given snapshot. Empty when the routing id is unknown or has no engine state. Pair each
     /// id with <see cref="EntityAccessor.Open"/> + <see cref="EntityRef.ReadRaw"/> to decode component values without a compile-time type.
     /// </returns>
-    public List<EntityId> EnumerateArchetypeEntities(ushort archetypeId)
+    public List<EntityId> EnumerateArchetypeEntities(ushort routingId)
     {
         var results = new List<EntityId>();
-        var states = _dbe._archetypeStates;
-        if (states == null || archetypeId >= states.Length)
+        var states = _dbe._stateByRouting;
+        if (states == null || routingId >= states.Length)
         {
             return results;
         }
 
-        var engineState = states[archetypeId];
+        var engineState = states[routingId];
         if (engineState?.EntityMap == null)
         {
             return results;
@@ -169,7 +170,7 @@ public unsafe partial class Transaction
         var accessor = engineState.EntityMap.Segment.CreateChunkAccessor();
         var action = new ArchetypeEntityCollectAction
         {
-            ArchetypeId = archetypeId,
+            RoutingId = routingId,
             TxTsn = TSN,
             Results = results,
             PendingDestroys = _pendingDestroys,
@@ -186,7 +187,7 @@ public unsafe partial class Transaction
     /// </summary>
     private struct ArchetypeEntityCollectAction : RawValuePagedHashMap<long, PersistentStore>.IEntryAction<long>
     {
-        public ushort ArchetypeId;
+        public ushort RoutingId;
         public long TxTsn;
         public List<EntityId> Results;
         public HashSet<EntityId> PendingDestroys;
@@ -205,7 +206,7 @@ public unsafe partial class Transaction
                 return true;
             }
 
-            var entityId = new EntityId(key, ArchetypeId);
+            var entityId = new EntityId(key, RoutingId);
             if (PendingDestroys != null && PendingDestroys.Contains(entityId))
             {
                 return true;
@@ -234,12 +235,12 @@ public unsafe partial class Transaction
         CheckConfig.Require(CheckConfig.Enabled, meta != null, $"Archetype {typeof(TArch).Name} not registered");
         // Inline-guard (not Require): the array-indexed condition can throw IndexOutOfRange, so the JIT can't DCE it — the
         // folded gate must short-circuit before it, keeping this per-entity Spawn path zero-cost when strict mode is off.
-        if (CheckConfig.Enabled && _dbe._archetypeStates[meta.ArchetypeId]?.EntityMap == null)
+        if (CheckConfig.Enabled && _dbe._archetypeStates[meta!.ArchetypeId]?.EntityMap == null)
         {
             ThrowHelper.ThrowInvalidOp($"Archetype {typeof(TArch).Name} EntityMap not initialized — call DatabaseEngine.InitializeArchetypes first");
         }
 
-        var scope = TyphonEvent.BeginEcsSpawn(meta.ArchetypeId);
+        var scope = TyphonEvent.BeginEcsSpawn(meta!.ArchetypeId);
         // PROFILING-SPAN-NO-THROW-BEGIN — body MUST NOT throw. SpawnInternal is engine-internal (allocation + B+Tree insert + MVCC).
         // If a future change adds a user-callback path, re-tag to variant B.
         scope.Tsn = TSN;
@@ -259,7 +260,7 @@ public unsafe partial class Transaction
     {
         var meta = Archetype<TArch>.Metadata;
         CheckConfig.Require(CheckConfig.Enabled, meta != null, $"Archetype {typeof(TArch).Name} not registered");
-        CheckConfig.Require(CheckConfig.Enabled, _dbe._archetypeStates[meta.ArchetypeId]?.EntityMap != null,
+        CheckConfig.Require(CheckConfig.Enabled, _dbe._archetypeStates[meta!.ArchetypeId]?.EntityMap != null,
             $"Archetype {typeof(TArch).Name} EntityMap not initialized");
 
         EnsureMutable();
@@ -277,7 +278,7 @@ public unsafe partial class Transaction
 
         for (int n = 0; n < count; n++)
         {
-            var entityId = new EntityId(baseKey + n, meta.ArchetypeId);
+            var entityId = new EntityId(baseKey + n, _dbe.RoutingIdOf(meta));
             ids[n] = entityId;
 
             var entry = new SpawnEntry { Id = entityId, EnabledBits = 0 };
@@ -354,7 +355,7 @@ public unsafe partial class Transaction
     {
         var meta = Archetype<TArch>.Metadata;
         CheckConfig.Require(CheckConfig.Enabled, meta != null, $"Archetype {typeof(TArch).Name} not registered");
-        CheckConfig.Require(CheckConfig.Enabled, _dbe._archetypeStates[meta.ArchetypeId]?.EntityMap != null,
+        CheckConfig.Require(CheckConfig.Enabled, _dbe._archetypeStates[meta!.ArchetypeId]?.EntityMap != null,
             $"Archetype {typeof(TArch).Name} EntityMap not initialized");
         CheckConfig.Require(CheckConfig.Enabled, ids.Length >= count, $"ids span must be at least count elements");
 
@@ -387,7 +388,7 @@ public unsafe partial class Transaction
 
         for (int n = 0; n < count; n++)
         {
-            var entityId = new EntityId(baseKey + n, meta.ArchetypeId);
+            var entityId = new EntityId(baseKey + n, _dbe.RoutingIdOf(meta));
             ids[n] = entityId;
 
             ref var entry = ref writeSpan[n];
@@ -447,7 +448,7 @@ public unsafe partial class Transaction
 
         // Resolve everything ONCE — no per-entity dictionary lookups
         var span = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_spawnedEntities);
-        var meta = ArchetypeRegistry.GetMetadata(span[baseIndex].Id.ArchetypeId);
+        var meta = _dbe.GetMetaByRouting(span[baseIndex].Id.ArchetypeId);
         byte slot = meta.GetSlot(comp._componentTypeId);
         var engineState = _dbe._archetypeStates[meta.ArchetypeId];
         var table = engineState.SlotToComponentTable[slot];
@@ -499,7 +500,7 @@ public unsafe partial class Transaction
 
         // Generate unique EntityKey
         long entityKey = Interlocked.Increment(ref engineState.NextEntityKey);
-        var entityId = new EntityId(entityKey, meta.ArchetypeId);
+        var entityId = new EntityId(entityKey, _dbe.RoutingIdOf(meta));
 
         // Pre-build slot-indexed lookup — O(values.Length) once, then O(1) per slot
         Span<int> valueBySlot = stackalloc int[meta.ComponentCount];
@@ -603,7 +604,7 @@ public unsafe partial class Transaction
         }
 
         // Check LinearHash
-        var meta = ArchetypeRegistry.GetMetadata(id.ArchetypeId);
+        var meta = _dbe.GetMetaByRouting(id.ArchetypeId);
         if (meta == null)
         {
             return false;
@@ -765,7 +766,7 @@ public unsafe partial class Transaction
         }
 
         // Check for cascade targets
-        var meta = ArchetypeRegistry.GetMetadata(id.ArchetypeId);
+        var meta = _dbe.GetMetaByRouting(id.ArchetypeId);
         if (meta?._cascadeTargets == null || meta._cascadeTargets.Count == 0)
         {
             return;
@@ -814,7 +815,8 @@ public unsafe partial class Transaction
             for (int i = 0; i < _spawnedEntities.Count; i++)
             {
                 var entry = _spawnedEntities[i];
-                if (entry.Id.ArchetypeId != target.ChildArchetypeId)
+                // entry.Id.ArchetypeId is a routing id; target.ChildArchetypeId is a catalog id — compare in routing space.
+                if (entry.Id.ArchetypeId != _dbe.RoutingIdOf(childMeta))
                 {
                     continue;
                 }
@@ -826,7 +828,7 @@ public unsafe partial class Transaction
                 }
 
                 // For Versioned FK slot: chunkId is compContentChunkId in GetLoc, but need to check SingleCache for COW
-                var spawnMeta = ArchetypeRegistry.GetMetadata(entry.Id.ArchetypeId);
+                var spawnMeta = _dbe.GetMetaByRouting(entry.Id.ArchetypeId);
                 var spawnES = _dbe._archetypeStates[spawnMeta.ArchetypeId];
                 var table = spawnES.SlotToComponentTable[target.FkSlotIndex];
                 var compType = spawnMeta._slotToComponentType[target.FkSlotIndex];
@@ -874,7 +876,8 @@ public unsafe partial class Transaction
                             ref var header = ref compRevAccessor.GetChunk<CompRevStorageHeader>(values[j]);
                             long childPK = header.EntityPK;
                             var childId = Unsafe.As<long, EntityId>(ref childPK);
-                            if (childId.ArchetypeId == target.ChildArchetypeId)
+                            // childId.ArchetypeId is a routing id; target.ChildArchetypeId is a catalog id — compare in routing space.
+                            if (childId.ArchetypeId == _dbe.RoutingIdOf(childMeta))
                             {
                                 result.Add(childId);
                             }
@@ -929,7 +932,7 @@ public unsafe partial class Transaction
             return default;
         }
 
-        var meta = ArchetypeRegistry.GetMetadata(id.ArchetypeId);
+        var meta = _dbe.GetMetaByRouting(id.ArchetypeId);
         if (meta == null)
         {
             return default;
@@ -1333,7 +1336,7 @@ public unsafe partial class Transaction
                 if (alreadySeen) continue;
                 if (seenCount < 16) seenArchetypes[seenCount++] = archId;
 
-                var es = _dbe._archetypeStates[archId];
+                var es = _dbe._stateByRouting[archId];
                 if (es?.EntityMap != null)
                 {
                     es.EntityMap.EnsureCapacity((int)es.EntityMap.EntryCount + _spawnedEntities.Count, _changeSet);
@@ -1907,7 +1910,7 @@ public unsafe partial class Transaction
         scoped Span<int> trSlots, scoped Span<int> trIdxAccessorBase)
     {
         // Cache archetype metadata + compute versioned slot mask
-        ctx.Meta = ArchetypeRegistry.GetMetadata(archetypeId);
+        ctx.Meta = _dbe.GetMetaByRouting(archetypeId);
         ctx.EngineState = _dbe._archetypeStates[ctx.Meta.ArchetypeId];
         ctx.ComponentCount = ctx.Meta.ComponentCount;
         ctx.VersionedMask = 0;
@@ -2218,7 +2221,7 @@ public unsafe partial class Transaction
         {
             foreach (var entityId in _pendingDestroys)
             {
-                var meta = ArchetypeRegistry.GetMetadata(entityId.ArchetypeId);
+                var meta = _dbe.GetMetaByRouting(entityId.ArchetypeId);
                 if (meta == null)
                 {
                     continue;
@@ -2415,7 +2418,7 @@ public unsafe partial class Transaction
                     continue;
                 }
 
-                var meta = ArchetypeRegistry.GetMetadata(entityId.ArchetypeId);
+                var meta = _dbe.GetMetaByRouting(entityId.ArchetypeId);
                 if (meta == null)
                 {
                     continue;
@@ -2753,7 +2756,7 @@ public unsafe partial class Transaction
                 continue;
             }
 
-            var meta = ArchetypeRegistry.GetMetadata(entityId.ArchetypeId);
+            var meta = _dbe.GetMetaByRouting(entityId.ArchetypeId);
             if (meta == null)
             {
                 continue;
@@ -2848,7 +2851,7 @@ public unsafe partial class Transaction
         {
             foreach (var entry in _spawnedEntities)
             {
-                var meta = ArchetypeRegistry.GetMetadata(entry.Id.ArchetypeId);
+                var meta = _dbe.GetMetaByRouting(entry.Id.ArchetypeId);
                 if (meta == null)
                 {
                     continue;

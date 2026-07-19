@@ -263,6 +263,14 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private readonly bool MaskTest(ushort archetypeId) => _useLargeMask ? _maskLarge.Test(archetypeId) : _mask256.Test(archetypeId);
 
+    /// <summary>Mask test for an EntityId-derived <b>routing</b> id (masks are catalog-space; translate routing → catalog first). Returns false for an
+    /// unknown routing id, matching the pre-refactor behaviour of testing an unregistered archetype id.</summary>
+    private readonly bool MaskTestByRouting(ushort routingId)
+    {
+        var m = _tx.DBE.GetMetaByRouting(routingId);
+        return m != null && MaskTest(m.ArchetypeId);
+    }
+
     private readonly int MaskMaxId => _useLargeMask ? _maskLarge.MaxId : _mask256.MaxId;
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -436,6 +444,9 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     /// <summary>Test if an archetype ID matches the query mask. Used by EcsView to filter delta entries.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal readonly bool MaskTestPublic(ushort archetypeId) => MaskTest(archetypeId);
+
+    /// <summary>Public routing-id variant of <see cref="MaskTestPublic"/> for callers that hold an EntityId's routing id (e.g. <c>EcsView</c>).</summary>
+    internal readonly bool MaskTestPublicByRouting(ushort routingId) => MaskTestByRouting(routingId);
 
     // ═══════════════════════════════════════════════════════════════════════
     // OrderBy / Skip / Take
@@ -802,7 +813,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         for (var i = 0; i < pkResult.Count; i++)
         {
             var entityId = EntityId.FromRaw(pkResult[i]);
-            if (!MaskTest(entityId.ArchetypeId))
+            if (!MaskTestByRouting(entityId.ArchetypeId))
             {
                 continue;
             }
@@ -1176,7 +1187,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             foreach (var pk in pkResult)
             {
                 var entityId = EntityId.FromRaw(pk);
-                if (MaskTest(entityId.ArchetypeId))
+                if (MaskTestByRouting(entityId.ArchetypeId))
                 {
                     result.Add(entityId);
                 }
@@ -1925,7 +1936,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                     foreach (var hit in cs.QueryAabb(grid, qMinX, qMinY, qMinZ, qMaxX, qMaxY, qMaxZ))
                     {
                         var entityId = EntityId.FromRaw(hit.EntityId);
-                        if (MaskTest(entityId.ArchetypeId))
+                        if (MaskTestByRouting(entityId.ArchetypeId))
                         {
                             result.Add(entityId);
                         }
@@ -1945,7 +1956,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                     foreach (var hit in cs.QueryRadius(grid, cX, cY, cZ, radius))
                     {
                         var entityId = EntityId.FromRaw(hit.EntityId);
-                        if (MaskTest(entityId.ArchetypeId))
+                        if (MaskTestByRouting(entityId.ArchetypeId))
                         {
                             result.Add(entityId);
                         }
@@ -1996,7 +2007,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 foreach (var hit in tree.QueryAABB(coordSlice))
                 {
                     var entityId = EntityId.FromRaw(hit.EntityId);
-                    if (MaskTest(entityId.ArchetypeId))
+                    if (MaskTestByRouting(entityId.ArchetypeId))
                     {
                         result.Add(entityId);
                     }
@@ -2013,7 +2024,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 foreach (var hit in tree.QueryRadius(center, _spatialParams[3]))
                 {
                     var entityId = EntityId.FromRaw(hit.EntityId);
-                    if (MaskTest(entityId.ArchetypeId))
+                    if (MaskTestByRouting(entityId.ArchetypeId))
                     {
                         result.Add(entityId);
                     }
@@ -2031,7 +2042,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 foreach (var hit in tree.QueryRay(origin, dir, _spatialParams[6]))
                 {
                     var entityId = EntityId.FromRaw(hit.EntityId);
-                    if (MaskTest(entityId.ArchetypeId))
+                    if (MaskTestByRouting(entityId.ArchetypeId))
                     {
                         result.Add(entityId);
                     }
@@ -2065,7 +2076,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             {
                 continue;
             }
-            if (!MaskTest(entry.Id.ArchetypeId))
+            if (!MaskTestByRouting(entry.Id.ArchetypeId))
             {
                 continue;
             }
@@ -2381,7 +2392,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             }
 
             // T1: archetype mask
-            if (!mask.Test(entry.Id.ArchetypeId))
+            if (!mask.Test(_tx.DBE.GetMetaByRouting(entry.Id.ArchetypeId).ArchetypeId))
             {
                 continue;
             }
@@ -2396,7 +2407,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             // T2: check enabled/disabled constraints
             if (hasT2)
             {
-                var meta = ArchetypeRegistry.GetMetadata(entry.Id.ArchetypeId);
+                var meta = _tx.DBE.GetMetaByRouting(entry.Id.ArchetypeId);
                 if (meta == null || !ResolveT2Masks(meta, out ushort reqEnabled, out ushort reqDisabled))
                 {
                     continue;
@@ -2442,7 +2453,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 continue;
             }
 
-            if (!mask.Test(entry.Id.ArchetypeId))
+            if (!mask.Test(_tx.DBE.GetMetaByRouting(entry.Id.ArchetypeId).ArchetypeId))
             {
                 continue;
             }
@@ -2453,7 +2464,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 enabledBits = overrideBits;
             }
 
-            var meta = ArchetypeRegistry.GetMetadata(entry.Id.ArchetypeId);
+            var meta = _tx.DBE.GetMetaByRouting(entry.Id.ArchetypeId);
             if (meta == null)
             {
                 continue;
@@ -2524,6 +2535,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             var action = new BroadScanAction
             {
                 Meta = meta,
+                RoutingId = _tx.DBE.RoutingIdOf(meta),
                 TxTsn = txTsn,
                 EnabledBitsOverrides = dbe.EnabledBitsOverrides,
                 HasT2 = hasT2,
@@ -2584,6 +2596,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             var pred = new BroadScanPredicate
             {
                 Meta = meta,
+                RoutingId = _tx.DBE.RoutingIdOf(meta),
                 TxTsn = txTsn,
                 EnabledBitsOverrides = dbe.EnabledBitsOverrides,
                 HasT2 = hasT2,
@@ -2637,6 +2650,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             var pred = new BroadScanPredicate
             {
                 Meta = meta,
+                RoutingId = _tx.DBE.RoutingIdOf(meta),
                 TxTsn = txTsn,
                 EnabledBitsOverrides = dbe.EnabledBitsOverrides,
                 HasT2 = hasT2,
@@ -2692,6 +2706,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             var action = new BroadScanCollectAction
             {
                 Meta = meta,
+                RoutingId = _tx.DBE.RoutingIdOf(meta),
                 TxTsn = txTsn,
                 EnabledBitsOverrides = dbe.EnabledBitsOverrides,
                 HasT2 = hasT2,
@@ -2713,6 +2728,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     private struct BroadScanAction : RawValuePagedHashMap<long, PersistentStore>.IEntryAction<long>
     {
         public ArchetypeMetadata Meta;
+        public ushort RoutingId;
         public long TxTsn;
         public EnabledBitsOverrides EnabledBitsOverrides;
         public bool HasT2;
@@ -2738,7 +2754,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 return true; // Dead — skip, continue
             }
 
-            var entityId = new EntityId(key, Meta.ArchetypeId);
+            var entityId = new EntityId(key, RoutingId);
 
             // Skip entities pending destroy in this transaction
             if (PendingDestroys != null && PendingDestroys.Contains(entityId))
@@ -2786,6 +2802,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     private struct BroadScanPredicate : RawValuePagedHashMap<long, PersistentStore>.IEntryPredicate<long>
     {
         public ArchetypeMetadata Meta;
+        public ushort RoutingId;
         public long TxTsn;
         public EnabledBitsOverrides EnabledBitsOverrides;
         public bool HasT2;
@@ -2808,7 +2825,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 return false; // Dead
             }
 
-            var entityId = new EntityId(key, Meta.ArchetypeId);
+            var entityId = new EntityId(key, RoutingId);
 
             // Skip entities pending destroy in this transaction
             if (PendingDestroys != null && PendingDestroys.Contains(entityId))
@@ -2843,6 +2860,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     private struct BroadScanCollectAction : RawValuePagedHashMap<long, PersistentStore>.IEntryAction<long>
     {
         public ArchetypeMetadata Meta;
+        public ushort RoutingId;
         public long TxTsn;
         public EnabledBitsOverrides EnabledBitsOverrides;
         public bool HasT2;
@@ -2865,7 +2883,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 return true;
             }
 
-            var entityId = new EntityId(key, Meta.ArchetypeId);
+            var entityId = new EntityId(key, RoutingId);
 
             // Skip entities pending destroy in this transaction
             if (PendingDestroys != null && PendingDestroys.Contains(entityId))

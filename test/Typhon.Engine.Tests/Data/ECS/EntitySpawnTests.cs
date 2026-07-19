@@ -96,7 +96,7 @@ class EntitySpawnTests : TestBase<EntitySpawnTests>
         var id = t.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos), EcsUnit.Velocity.Set(in vel));
 
         Assert.That(id.IsNull, Is.False);
-        Assert.That(id.ArchetypeId, Is.EqualTo(100));
+        Assert.That(id.ArchetypeId, Is.EqualTo(dbe.RoutingIdOf(Archetype<EcsUnit>.Metadata)));
         Assert.That(id.EntityKey, Is.GreaterThan(0));
     }
 
@@ -138,7 +138,7 @@ class EntitySpawnTests : TestBase<EntitySpawnTests>
             EcsUnit.Velocity.Set(in vel),
             EcsSoldier.Health.Set(in hp));
 
-        Assert.That(id.ArchetypeId, Is.EqualTo(101));
+        Assert.That(id.ArchetypeId, Is.EqualTo(dbe.RoutingIdOf(Archetype<EcsSoldier>.Metadata)));
 
         var entity = t.Open(id);
 
@@ -265,7 +265,7 @@ class EntitySpawnTests : TestBase<EntitySpawnTests>
 
         Assert.That(ids[0].IsNull, Is.False);
         Assert.That(ids[99].IsNull, Is.False);
-        Assert.That(ids[0].ArchetypeId, Is.EqualTo(100));
+        Assert.That(ids[0].ArchetypeId, Is.EqualTo(dbe.RoutingIdOf(Archetype<EcsUnit>.Metadata)));
 
         // All entities should be readable
         for (int i = 0; i < 100; i++)

@@ -17,7 +17,7 @@ namespace Typhon.MonitoringDemo;
 /// </summary>
 [Component("Factory.Building", 1)]
 [StructLayout(LayoutKind.Sequential)]
-public struct FactoryBuilding
+public partial struct FactoryBuilding
 {
     /// <summary>
     /// Name of the building type (e.g., "Assembler Mk2")
@@ -96,7 +96,7 @@ public struct FactoryBuilding
 /// </summary>
 [Component("Factory.ConveyorBelt", 1)]
 [StructLayout(LayoutKind.Sequential)]
-public struct ConveyorBelt
+public partial struct ConveyorBelt
 {
     /// <summary>
     /// Belt tier (affects speed)
@@ -161,7 +161,7 @@ public struct ConveyorBelt
 /// </summary>
 [Component("Factory.ItemStack", 1)]
 [StructLayout(LayoutKind.Sequential)]
-public struct ItemStack
+public partial struct ItemStack
 {
     /// <summary>
     /// Item name
@@ -219,7 +219,7 @@ public struct ItemStack
 /// </summary>
 [Component("Factory.Recipe", 1)]
 [StructLayout(LayoutKind.Sequential)]
-public struct Recipe
+public partial struct Recipe
 {
     /// <summary>
     /// Recipe name
@@ -290,7 +290,7 @@ public struct Recipe
 /// </summary>
 [Component("Factory.ProductionQueue", 1)]
 [StructLayout(LayoutKind.Sequential)]
-public struct ProductionQueue
+public partial struct ProductionQueue
 {
     /// <summary>
     /// Building this queue belongs to
@@ -340,7 +340,7 @@ public struct ProductionQueue
 /// </summary>
 [Component("Factory.ResourceNode", 1)]
 [StructLayout(LayoutKind.Sequential)]
-public struct ResourceNode
+public partial struct ResourceNode
 {
     /// <summary>
     /// Resource type name
@@ -412,7 +412,7 @@ public struct ResourceNode
 /// </summary>
 [Component("Factory.PowerGrid", 1)]
 [StructLayout(LayoutKind.Sequential)]
-public struct PowerGrid
+public partial struct PowerGrid
 {
     /// <summary>
     /// Grid identifier

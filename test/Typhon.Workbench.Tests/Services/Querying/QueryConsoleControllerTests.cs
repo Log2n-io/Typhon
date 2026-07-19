@@ -21,7 +21,7 @@ namespace Typhon.Workbench.Tests.Services.Querying;
 /// </summary>
 [Component("Workbench.Test.QCompA", 1)]
 [StructLayout(LayoutKind.Sequential)]
-public struct QCompA
+public partial struct QCompA
 {
     [Index] public int Level;
     [Index(AllowMultiple = true)] public int Faction;

@@ -19,13 +19,13 @@ namespace Typhon.Workbench.Tests.Schema;
 /// carries no schema DLLs.
 /// </summary>
 [TestFixture]
-public sealed class SchemaControllerTests
+public sealed partial class SchemaControllerTests
 {
     // Two deliberately-shaped test components. WbCompA has padding between byte-sized and int-sized fields so
     // the "fields ordered by offset + gaps reveal padding" invariant is testable.
     [Component("Workbench.Test.WbCompA", 1)]
     [StructLayout(LayoutKind.Sequential)]
-    public struct WbCompA
+    public partial struct WbCompA
     {
         public byte Tag;        // offset 0, size 1 — padding (3 bytes) follows to align Counter
         public int Counter;     // offset 4, size 4
@@ -34,7 +34,7 @@ public sealed class SchemaControllerTests
 
     [Component("Workbench.Test.WbCompB", 1)]
     [StructLayout(LayoutKind.Sequential)]
-    public struct WbCompB
+    public partial struct WbCompB
     {
         [Index] public int Key;
         public float Value;

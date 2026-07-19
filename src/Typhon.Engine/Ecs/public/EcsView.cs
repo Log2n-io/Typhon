@@ -171,7 +171,7 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
         // Resolve the archetype's id directly from its metadata so pull-mode views (no _componentTable) still carry a meaningful TargetComponentType on the
         // catalog row. ArchetypeMetadata's ArchetypeId is the same identifier the Workbench Schema panel keys archetypes on.
         var meta = ArchetypeRegistry.GetMetadata<TArchetype>();
-        var targetComponentType = meta?.ArchetypeId ?? (ushort)0;
+        var targetComponentType = meta?.ArchetypeId ?? 0;
         PlanBuilder.EmitDefinitionDescribe(
             Evaluators, _componentTable,
             queryInstanceKind: 1, queryInstanceLocalId: (uint)_query.EcsQueryId,
@@ -372,7 +372,7 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
 
         // Check archetype mask: only process entities from matching archetypes
         var entityId = EntityId.FromRaw(entry.EntityPK);
-        if (!_query.MaskTestPublic(entityId.ArchetypeId))
+        if (!_query.MaskTestPublicByRouting(entityId.ArchetypeId))
         {
             return;
         }
@@ -500,7 +500,7 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
             foreach (var pk in branchResult)
             {
                 var entityId = EntityId.FromRaw(pk);
-                if (!_query.MaskTestPublic(entityId.ArchetypeId))
+                if (!_query.MaskTestPublicByRouting(entityId.ArchetypeId))
                 {
                     continue;
                 }
@@ -516,7 +516,7 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
     private void ProcessEntryOr(ref ViewDeltaEntry entry, int fieldIndex, bool isCreation, bool isDeletion, Transaction tx)
     {
         var entityId = EntityId.FromRaw(entry.EntityPK);
-        if (!_query.MaskTestPublic(entityId.ArchetypeId))
+        if (!_query.MaskTestPublicByRouting(entityId.ArchetypeId))
         {
             return;
         }
@@ -620,7 +620,7 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
                     foreach (var pk in branchResult)
                     {
                         var eid = EntityId.FromRaw(pk);
-                        if (!_query.MaskTestPublic(eid.ArchetypeId))
+                        if (!_query.MaskTestPublicByRouting(eid.ArchetypeId))
                         {
                             continue;
                         }

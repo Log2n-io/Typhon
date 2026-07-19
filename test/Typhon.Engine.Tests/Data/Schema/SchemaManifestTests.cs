@@ -110,9 +110,8 @@ class SchemaManifestTests : TestBase<SchemaManifestTests>
             Assert.That(compX.AssemblyId, Is.Not.Zero, "user component must carry a manifest AssemblyId");
             Assert.That(dbe._persistedAssemblies[compX.AssemblyId].Asm.SimpleName.AsString, Is.EqualTo(testAsmName));
 
-            // Archetype → same row.
-            var archId = Archetype<ManifestArch>.Metadata.ArchetypeId;
-            var arch = dbe._persistedArchetypes[archId].Arch;
+            // Archetype → same row (persisted archetypes are keyed by name).
+            var arch = dbe._persistedArchetypes[typeof(ManifestArch).Name].Arch;
             Assert.That(arch.AssemblyId, Is.EqualTo(compX.AssemblyId), "archetype and its components from one assembly must share a manifest row");
 
             // System component (declared in core Typhon.Engine) → AssemblyId 0, not in the manifest.

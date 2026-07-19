@@ -165,52 +165,40 @@ public class DatabaseDefinitions
     /// </exception>
     public DBComponentDefinition CreateFromAccessor<T>() where T : unmanaged => CreateFromAccessor<T>(null);
 
-    internal DBComponentDefinition CreateFromAccessor<T>(FieldIdResolver resolver) where T : unmanaged => CreateFromAccessor(typeof(T), resolver);
+    internal DBComponentDefinition CreateFromAccessor<T>(FieldIdResolver resolver) where T : unmanaged
+    {
+        // Reflection-free fast path: a source-generated component supplies its schema as pure data. Boxing default(T) once at
+        // registration (never a hot path) lets us reach the interface without adding a generic constraint to every call site.
+        // ReSharper disable once SuspiciousTypeConversion.Global
+        if (default(T) is IComponentSchemaProvider provider)
+        {
+            return BuildFromSpec(provider.GetComponentSchema(), typeof(T), resolver);
+        }
+
+        return CreateFromAccessor(typeof(T), resolver);
+    }
 
     /// <summary>
-    /// Non-generic overload for dry-run validation where the component type is known only at runtime.
+    /// Non-generic overload for dry-run validation where the component type is known only at runtime. Reflects the type's <c>[Component]</c>/<c>[Field]</c>/
+    /// <c>[Index]</c>/<c>[SpatialIndex]</c>/<c>[ForeignKey]</c> metadata into a <see cref="ComponentSchemaSpec"/> and builds it through the shared core.
     /// </summary>
-    internal DBComponentDefinition CreateFromAccessor(Type t, FieldIdResolver resolver = null)
-    {
+    internal DBComponentDefinition CreateFromAccessor(Type t, FieldIdResolver resolver = null) => BuildFromSpec(ReflectComponentSpec(t), t, resolver);
 
+    /// <summary>
+    /// Reflects a <c>[Component]</c>-annotated struct into a pure-data <see cref="ComponentSchemaSpec"/>. This is the ONLY place the schema-build path touches
+    /// <c>GetFields</c>/<c>GetCustomAttribute</c>; source-generated components bypass it entirely by supplying their spec directly.
+    /// </summary>
+    private static ComponentSchemaSpec ReflectComponentSpec(Type t)
+    {
         var ca = t.GetCustomAttribute<ComponentAttribute>();
         if (ca == null)
         {
             throw new InvalidOperationException($"Missing the ComponentAttribute on the type {t} declaration");
         }
 
-        var compDef = new DBComponentDefinition(ca.Name ?? t.Name, ca.Revision, ca.StorageMode, ca.DefaultDiscipline) { POCOType = t };
-
-        lock (_componentLock)
-        {
-            if (_components.TryGetValue(compDef.FullName, out _))
-            {
-                return null;
-            }
-        }
-
         var members = t.GetFields();
+        var fields = new List<ComponentFieldSpec>(members.Length);
 
-        // Validate PreviousName uniqueness: no two runtime fields may claim the same PreviousName
-        if (resolver != null)
-        {
-            var previousNames = new HashSet<string>();
-            foreach (var fi in members)
-            {
-                if (fi.IsStatic)
-                {
-                    continue;
-                }
-
-                var fattr = fi.GetCustomAttribute<FieldAttribute>();
-                if (fattr?.PreviousName != null && !previousNames.Add(fattr.PreviousName))
-                {
-                    throw new InvalidOperationException($"Duplicate PreviousName '{fattr.PreviousName}' declared on multiple fields in component '{ca.Name}'.");
-                }
-            }
-        }
-
-        var fieldId = 0;
         foreach (var fieldInfo in members)
         {
             if (fieldInfo.IsStatic)
@@ -218,63 +206,137 @@ public class DatabaseDefinitions
                 continue;
             }
 
-            var fa = fieldInfo.GetCustomAttribute<FieldAttribute>();
-            var ia = fieldInfo.GetCustomAttribute<IndexAttribute>();
-
-            var (fieldType, fieldUnderlyingType) = DatabaseSchemaExtensions.FromType(fieldInfo.FieldType);
+            var (fieldType, _) = DatabaseSchemaExtensions.FromType(fieldInfo.FieldType);
             if (fieldType == FieldType.None)
             {
                 continue;
             }
 
-            // Name of the field is by default the C# member name, or the one specified by the FieldAttribute
-            var fieldName = fa?.Name ?? fieldInfo.Name;
-            var fieldOffset = Marshal.OffsetOf(t, fieldInfo.Name).ToInt32();
-            var resolvedId = resolver?.ResolveFieldId(fieldName, fa?.PreviousName, fa?.FieldId) ?? (fa?.FieldId ?? fieldId++);
+            var fa = fieldInfo.GetCustomAttribute<FieldAttribute>();
+            var ia = fieldInfo.GetCustomAttribute<IndexAttribute>();
+            var fka = fieldInfo.GetCustomAttribute<ForeignKeyAttribute>();
+            var spa = fieldInfo.GetCustomAttribute<SpatialIndexAttribute>();
 
-            var field = compDef.CreateField(resolvedId, fieldName, fieldType, fieldUnderlyingType, fieldOffset, fieldInfo.FieldType);
+            fields.Add(new ComponentFieldSpec(
+                name: fa?.Name ?? fieldInfo.Name,
+                dotNetType: fieldInfo.FieldType,
+                offset: Marshal.OffsetOf(t, fieldInfo.Name).ToInt32(),
+                previousName: fa?.PreviousName,
+                explicitFieldId: fa?.FieldId,
+                isForeignKey: fka != null,
+                foreignKeyTargetType: fka?.TargetComponentType,
+                hasSpatialIndex: spa != null,
+                spatialMargin: spa?.Margin ?? 0f,
+                spatialCellSize: spa?.CellSize ?? 0f,
+                spatialMode: spa?.Mode ?? SpatialMode.Dynamic,
+                spatialCategory: spa?.Category ?? uint.MaxValue,
+                hasIndex: ia != null,
+                indexAllowMultiple: ia?.AllowMultiple ?? false));
+        }
+
+        return new ComponentSchemaSpec(ca.Name ?? t.Name, ca.Revision, fields.ToArray(), ca.StorageMode, ca.DefaultDiscipline);
+    }
+
+    /// <summary>
+    /// Builds and registers a component definition from a pure-data <see cref="ComponentSchemaSpec"/>. This is the single build core shared by the reflection
+    /// path (<see cref="ReflectComponentSpec"/>) and source-generated components, so both produce byte-identical definitions. Applies field-id resolution
+    /// (schema migration) via <paramref name="resolver"/> exactly as reflection did. Thread-safe; returns null when a definition with the same full name is
+    /// already registered.
+    /// </summary>
+    /// <param name="spec">The component's schema shape.</param>
+    /// <param name="pocoType">The CLR struct backing the component, recorded as <see cref="DBComponentDefinition.POCOType"/>.</param>
+    /// <param name="resolver">Optional field-id resolver reconciling runtime fields against a persisted schema; null for a fresh component.</param>
+    internal DBComponentDefinition BuildFromSpec(in ComponentSchemaSpec spec, Type pocoType, FieldIdResolver resolver)
+    {
+        var compDef = new DBComponentDefinition(spec.Name, spec.Revision, spec.StorageMode, spec.DefaultDiscipline) { POCOType = pocoType };
+
+        lock (_componentLock)
+        {
+            if (_components.ContainsKey(compDef.FullName))
+            {
+                return null;
+            }
+        }
+
+        var specFields = spec.Fields;
+
+        // Validate PreviousName uniqueness: no two runtime fields may claim the same PreviousName (only meaningful when reconciling against a persisted schema).
+        if (resolver != null)
+        {
+            var previousNames = new HashSet<string>();
+            foreach (var f in specFields)
+            {
+                if (f.IsStatic)
+                {
+                    continue;
+                }
+
+                if (f.PreviousName != null && !previousNames.Add(f.PreviousName))
+                {
+                    throw new InvalidOperationException($"Duplicate PreviousName '{f.PreviousName}' declared on multiple fields in component '{spec.Name}'.");
+                }
+            }
+        }
+
+        var fieldId = 0;
+        foreach (var f in specFields)
+        {
+            var (fieldType, fieldUnderlyingType) = DatabaseSchemaExtensions.FromType(f.DotNetType);
+            if (fieldType == FieldType.None)
+            {
+                continue;
+            }
+
+            var resolvedId = resolver?.ResolveFieldId(f.Name, f.PreviousName, f.ExplicitFieldId) ?? (f.ExplicitFieldId ?? fieldId++);
+            var field = compDef.CreateField(resolvedId, f.Name, fieldType, fieldUnderlyingType, f.Offset, f.DotNetType);
+
+            if (f.IsStatic)
+            {
+                field.IsStatic = true;
+            }
+
+            if (f.ArrayLength > 0)
+            {
+                field.ArrayLength = f.ArrayLength;
+            }
 
             // Foreign key processing
-            var fka = fieldInfo.GetCustomAttribute<ForeignKeyAttribute>();
-            if (fka != null)
+            if (f.IsForeignKey)
             {
                 if (fieldType != FieldType.Long)
                 {
-                    throw new InvalidOperationException($"[ForeignKey] on field '{fieldName}' requires type long, but found {fieldType}.");
+                    throw new InvalidOperationException($"[ForeignKey] on field '{f.Name}' requires type long, but found {fieldType}.");
                 }
                 field.IsForeignKey = true;
-                field.ForeignKeyTargetType = fka.TargetComponentType;
+                field.ForeignKeyTargetType = f.ForeignKeyTargetType;
             }
 
             // Spatial index processing
-            var spa = fieldInfo.GetCustomAttribute<SpatialIndexAttribute>();
-            if (spa != null)
+            if (f.HasSpatialIndex)
             {
                 if (!IsSpatialFieldType(field.Type))
                 {
                     throw new InvalidOperationException($"[SpatialIndex] on field '{field.Name}' requires a spatial type (AABB/BSphere), but found {field.Type}.");
                 }
-                if (spa.Margin < 0)
+                if (f.SpatialMargin < 0)
                 {
                     throw new InvalidOperationException($"[SpatialIndex] margin must be non-negative on field '{field.Name}'.");
                 }
                 field.HasSpatialIndex = true;
-                field.SpatialMargin = spa.Margin;
-                field.SpatialCellSize = spa.CellSize;
-                field.SpatialMode = spa.Mode;
-                field.SpatialCategory = spa.Category;
+                field.SpatialMargin = f.SpatialMargin;
+                field.SpatialCellSize = f.SpatialCellSize;
+                field.SpatialMode = f.SpatialMode;
+                field.SpatialCategory = f.SpatialCategory;
                 field.SpatialFieldType = MapToSpatialFieldType(field.Type);
             }
 
-            // Index related data
-            if (ia == null)
+            // Index processing
+            if (f.HasIndex)
             {
-                continue;
+                field.HasIndex = true;
+                field.IndexAllowMultiple = f.IndexAllowMultiple;
+                field.IsIndexAuto = false;
             }
-
-            field.HasIndex = true;
-            field.IndexAllowMultiple = ia.AllowMultiple;
-            field.IsIndexAuto = false;
         }
 
         // Validate spatial index constraints at component level
@@ -289,11 +351,11 @@ public class DatabaseDefinitions
             }
             if (spatialCount > 1)
             {
-                throw new InvalidOperationException($"Component '{ca.Name ?? t.Name}' has {spatialCount} [SpatialIndex] fields, but at most one is allowed.");
+                throw new InvalidOperationException($"Component '{spec.Name}' has {spatialCount} [SpatialIndex] fields, but at most one is allowed.");
             }
-            if (spatialCount > 0 && ca.StorageMode == StorageMode.Transient)
+            if (spatialCount > 0 && spec.StorageMode == StorageMode.Transient)
             {
-                throw new InvalidOperationException($"[SpatialIndex] is not supported on Transient component '{ca.Name ?? t.Name}'.");
+                throw new InvalidOperationException($"[SpatialIndex] is not supported on Transient component '{spec.Name}'.");
             }
         }
 

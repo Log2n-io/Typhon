@@ -25,10 +25,10 @@ internal sealed class BatchOrderTests
         // Add in a deliberately scrambled order.
         b.AddBulkManifest(sessionId: 1, bulkBeginLsn: 0, entityCount: 2, componentCount: 3);
         b.AddDestroy(100);
-        b.AddSlot(200, componentTypeId: 7, payload: [1, 2, 3]);
+        b.AddSlot(200, slotIndex: 7, payload: [1, 2, 3]);
         b.AddSpawn(300, archetypeId: 4, enabledBits: 0);
         b.AddEnabledBits(400, absoluteBits: 9);
-        b.AddCollectionDelta(500, componentTypeId: 8, fieldId: 0, CollectionOp.Append, index: 0, element: [5]);
+        b.AddCollectionDelta(500, slotIndex: 8, fieldId: 0, CollectionOp.Append, index: 0, element: [5]);
 
         var size = RecordCodec.Measure(b, out var recordCount, out _);
         Assert.That(recordCount, Is.EqualTo(6));
@@ -67,7 +67,7 @@ internal sealed class BatchOrderTests
         // A Slot whose body declares 5 payload bytes but whose internal PayloadLength field says 10: the reader must refuse it.
         var body = new byte[SlotRecordBody.FixedSize + 5];
         BinaryPrimitives.WriteInt64LittleEndian(body.AsSpan(SlotRecordBody.EntityIdOffset), 1234);
-        BinaryPrimitives.WriteUInt16LittleEndian(body.AsSpan(SlotRecordBody.ComponentTypeIdOffset), 1);
+        BinaryPrimitives.WriteUInt16LittleEndian(body.AsSpan(SlotRecordBody.SlotIndexOffset), 1);
         body[SlotRecordBody.OpOffset] = (byte)SlotOp.Upsert;
         BinaryPrimitives.WriteUInt16LittleEndian(body.AsSpan(SlotRecordBody.PayloadLengthOffset), 10); // lies — only 5 present
 

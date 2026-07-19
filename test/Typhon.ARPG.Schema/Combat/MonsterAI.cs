@@ -9,7 +9,7 @@ namespace Typhon.ARPG.Schema;
 /// </summary>
 [Component("ARPG.MonsterAI", 1)]
 [StructLayout(LayoutKind.Sequential)]
-public struct MonsterAI
+public partial struct MonsterAI
 {
     [Field] /*[Index(AllowMultiple = true)]*/ public int AIArchetypeId;
 

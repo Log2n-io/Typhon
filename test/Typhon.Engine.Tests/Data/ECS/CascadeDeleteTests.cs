@@ -38,7 +38,8 @@ class CascadeItem : Archetype<CascadeItem>
     public static readonly Comp<ItemData> Item = Register<ItemData>();
 }
 
-[NonParallelizable]
+// [NonParallelizable] removed (#514 Phase 3): it was an incomplete mitigation for the cascade-diamond registry race (Face B).
+// The cascade graph is now built once under the registration lock inside ArchetypeRegistry.Freeze, so these fixtures are parallel-safe.
 class CascadeDeleteTests : TestBase<CascadeDeleteTests>
 {
     [OneTimeSetUp]

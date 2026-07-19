@@ -510,7 +510,7 @@ internal ref struct ComponentRevisionManager
 
     /// <summary>
     /// Scans a Versioned component table's <see cref="ComponentTable.CompRevTableSegment"/> for revision-chain heads — allocated chunks that are NOT the
-    /// <see cref="CompRevStorageHeader.NextChunkId"/> overflow target of another chunk — filtered to <paramref name="archetypeId"/> (the PK's low 12 bits).
+    /// <see cref="CompRevStorageHeader.NextChunkId"/> overflow target of another chunk — filtered to <paramref name="archetypeId"/> (the PK's low 16 bits).
     /// Returns <c>EntityPK → first(root)-chunk-id</c>.
     /// Two passes:
     /// (1) collect the overflow set
@@ -560,7 +560,7 @@ internal ref struct ComponentRevisionManager
 
             ref var hdr = ref accessor.GetChunk<CompRevStorageHeader>(chunkId);
             var pk = hdr.EntityPK;
-            if ((pk & 0xFFF) != archetypeId)
+            if (EntityId.FromRaw(pk).ArchetypeId != archetypeId)
             {
                 continue;
             }

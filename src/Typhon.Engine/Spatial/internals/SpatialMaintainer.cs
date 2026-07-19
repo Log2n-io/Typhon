@@ -514,11 +514,11 @@ internal static unsafe partial class SpatialMaintainer
 
         var dbe = table.DBE;
         var entityId = EntityId.FromRaw(swappedEntityId);
-        if (entityId.ArchetypeId >= dbe._archetypeStates.Length)
+        if (entityId.ArchetypeId >= dbe._stateByRouting.Length)
         {
             return;
         }
-        var archState = dbe._archetypeStates[entityId.ArchetypeId];
+        var archState = dbe._stateByRouting[entityId.ArchetypeId];
         if (archState?.EntityMap == null)
         {
             return;

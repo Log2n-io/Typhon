@@ -6,32 +6,37 @@ using JetBrains.Annotations;
 namespace Typhon.Engine;
 
 /// <summary>
-/// 64-bit entity identifier: 52-bit monotonic EntityKey (upper) + 12-bit ArchetypeId (lower).
+/// 64-bit entity identifier: 48-bit monotonic EntityKey (upper) + 16-bit per-DB archetype routing id (lower).
 /// Routes to the correct per-archetype LinearHash and uniquely identifies an entity within the engine.
 /// </summary>
 /// <remarks>
-/// <para>EntityKey is monotonic per-archetype, never recycled — no ABA problem, no version field needed.</para>
-/// <para>ArchetypeId is a 12-bit value (max 4095) read from the <c>[Archetype(Id = N)]</c> attribute.</para>
+/// <para>EntityKey is monotonic per-archetype, never recycled — no ABA problem, no version field needed. 2^48 ≈ 281 T allocations per archetype.</para>
+/// <para><see cref="ArchetypeId"/> is the low 16 bits: the <b>per-DB, engine-assigned archetype routing id</b> (persisted in <c>ArchetypeR1.RoutingId</c>,
+/// re-matched by name on reopen). Up to 65,536 archetypes composable into one database. The word-aligned 48/16 split needs no mask constant — the routing id
+/// is <c>(ushort)value</c> and the key is <c>value &gt;&gt; 16</c>.</para>
 /// </remarks>
 [StructLayout(LayoutKind.Explicit, Size = 8)]
 [PublicAPI]
 public readonly struct EntityId : IEquatable<EntityId>
 {
+    /// <summary>Number of low bits reserved for the per-DB archetype routing id.</summary>
+    internal const int RoutingBits = 16;
+
     [FieldOffset(0)]
     private readonly ulong _value;
 
-    /// <summary>52-bit monotonic key, unique within the archetype's LinearHash.</summary>
+    /// <summary>48-bit monotonic key, unique within the archetype's LinearHash.</summary>
     public long EntityKey
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        get => (long)(_value >> 12);
+        get => (long)(_value >> RoutingBits);
     }
 
-    /// <summary>12-bit archetype identifier. Routes to the correct per-archetype LinearHash instance.</summary>
+    /// <summary>16-bit per-DB archetype routing id (low bits). Routes to the correct per-archetype storage instance for the owning engine.</summary>
     public ushort ArchetypeId
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        get => (ushort)(_value & 0xFFF);
+        get => (ushort)_value;
     }
 
     /// <summary>True if this is the null/default entity (no entity).</summary>
@@ -47,15 +52,11 @@ public readonly struct EntityId : IEquatable<EntityId>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal EntityId(long entityKey, ushort archetypeId)
     {
-        if (CheckConfig.Enabled && entityKey < 0)
+        if (CheckConfig.Enabled && (ulong)entityKey >= (1UL << (64 - RoutingBits)))
         {
-            ThrowHelper.ThrowInvalidOp($"EntityKey must be non-negative");
+            ThrowHelper.ThrowInvalidOp($"EntityKey must be non-negative and fit in {64 - RoutingBits} bits");
         }
-        if (CheckConfig.Enabled && archetypeId > 0xFFF)
-        {
-            ThrowHelper.ThrowInvalidOp($"ArchetypeId must fit in 12 bits (max 4095)");
-        }
-        _value = ((ulong)entityKey << 12) | ((ulong)archetypeId & 0xFFF);
+        _value = ((ulong)entityKey << RoutingBits) | archetypeId;
     }
 
     /// <summary>Reconstruct an EntityId from a raw packed value (e.g., from <see cref="CompRevStorageHeader.EntityPK"/>).</summary>
