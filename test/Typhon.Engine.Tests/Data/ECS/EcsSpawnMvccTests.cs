@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using Typhon.Schema.Definition;
@@ -16,11 +16,6 @@ class EcsSpawnMvccTests : TestBase<EcsSpawnMvccTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<EcsUnit>.Touch();
-        Archetype<EcsSoldier>.Touch();
-        Archetype<SvTestArchetype>.Touch();
-        Archetype<TransientTestArchetype>.Touch();
-        Archetype<MixedModeArchetype>.Touch();
     }
 
     private DatabaseEngine SetupEngine()

@@ -1,4 +1,4 @@
-using System.Numerics;
+﻿using System.Numerics;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
@@ -80,9 +80,6 @@ class ClusterTransientTests : TestBase<ClusterTransientTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<ClT6MixedSvT>.Touch();
-        Archetype<ClT6PureT>.Touch();
-        Archetype<ClT6ThreeWay>.Touch();
     }
 
     private DatabaseEngine SetupEngine()

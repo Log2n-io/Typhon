@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -16,8 +16,6 @@ class NonGenericEntityAccessTests : TestBase<NonGenericEntityAccessTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<EcsUnit>.Touch();
-        Archetype<EcsSoldier>.Touch();
     }
 
     private DatabaseEngine SetupEngine()

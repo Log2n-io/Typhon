@@ -1464,6 +1464,15 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     public static void RegisterComponentCollectionFactory<T>() where T : unmanaged =>
         CollectionVsbsFactories.AddOrUpdate(typeof(T), static (engine, changeSet) => engine.GetComponentCollectionVSBS<T>(changeSet));
 
+    /// <summary>
+    /// Finalizes an <c>[Archetype]</c> into the process-global catalog (feature #514 Phase 5). Called by the per-assembly generated <c>[ModuleInitializer]</c> for
+    /// every archetype at assembly load — the barrier that replaces the manual <c>Archetype&lt;T&gt;.Touch()</c> startup calls. Runs the archetype's static ctor
+    /// (declaring its <see cref="Comp{T}"/> components) then finalizes it and its parent chain. Idempotent — an already-finalized archetype is a no-op. Public
+    /// because the generated registrar lives in the consumer's own assembly and cannot reach engine internals.
+    /// </summary>
+    /// <param name="archetypeType">The <c>[Archetype]</c> class type to finalize.</param>
+    public static void RegisterArchetype(Type archetypeType) => ArchetypeRegistry.EnsureFinalized(archetypeType, fromBarrier: true);
+
     internal VariableSizedBufferSegment<T, PersistentStore> GetComponentCollectionVSBS<T>() where T : unmanaged => GetComponentCollectionVSBS<T>(null);
 
     internal unsafe VariableSizedBufferSegment<T, PersistentStore> GetComponentCollectionVSBS<T>(ChangeSet changeSet) where T : unmanaged =>

@@ -1,4 +1,4 @@
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using System.Linq;
 
@@ -9,8 +9,6 @@ class WorkbenchArchetypeAccessorTests : TestBase<WorkbenchArchetypeAccessorTests
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<CompAArch>.Touch();
-        Archetype<CompABCArch>.Touch();
     }
 
     [Test]

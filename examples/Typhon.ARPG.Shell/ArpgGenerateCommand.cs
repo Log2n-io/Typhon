@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Diagnostics;
 using Typhon.ARPG.Schema;
 using Typhon.Schema.Definition;
@@ -142,16 +142,6 @@ public sealed class ArpgGenerateCommand : ShellCommand
         }
 
         // Ensure ARPG archetypes are registered and initialized
-        Archetype<CharacterArch>.Touch();
-        Archetype<EquipmentArch>.Touch();
-        Archetype<ActiveSkillsArch>.Touch();
-        Archetype<PositionArch>.Touch();
-        Archetype<ResourceNodeArch>.Touch();
-        Archetype<ItemDataArch>.Touch();
-        Archetype<MonsterArch>.Touch();
-        Archetype<MonsterAIArch>.Touch();
-        Archetype<CraftingRecipeArch>.Touch();
-        Archetype<CraftingStationArch>.Touch();
         context.Engine.InitializeArchetypes();
 
         var sw = Stopwatch.StartNew();

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
@@ -473,9 +473,6 @@ static class ParallelDispatchBenchmark
             dbe.RegisterComponentFromAccessor<BenchComp>();
             dbe.RegisterComponentFromAccessor<PdSvData>();
             dbe.RegisterComponentFromAccessor<PdTransientData>();
-            Archetype<BenchArch>.Touch();
-            Archetype<PdSvArch>.Touch();
-            Archetype<PdTransientArch>.Touch();
 
             dbe.InitializeArchetypes();
 

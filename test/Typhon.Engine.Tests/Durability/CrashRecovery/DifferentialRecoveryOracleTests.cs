@@ -1,4 +1,4 @@
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using NUnit.Framework;
 using System;
@@ -870,12 +870,9 @@ internal sealed class DifferentialRecoveryOracleTests
         var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
 
         dbe.RegisterComponentFromAccessor<SvIndexed>();        // all-SV indexed ⇒ cluster-eligible
-        Archetype<SvIndexedArch>.Touch();
         dbe.RegisterComponentFromAccessor<CompD>();            // all-Versioned ⇒ flat
-        Archetype<CompDArch>.Touch();
         dbe.RegisterComponentFromAccessor<SvForFlat>();        // {SV + Transient-indexed} ⇒ non-cluster with an SV slot
         dbe.RegisterComponentFromAccessor<TransientIndexed>();
-        Archetype<FlatSvArch>.Touch();
         dbe.InitializeArchetypes();
 
         Assert.That(dbe.IsEntityMapRebuildable(Archetype<SvIndexedArch>.Metadata), Is.True,

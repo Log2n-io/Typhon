@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Numerics;
 using System.Reflection;
@@ -269,7 +269,6 @@ public class TyphonSetupTests
         // InitializeArchetypes. AddTyphon's whole value is doing exactly this for you (see the AddTyphon tests, which never
         // call InitializeArchetypes or Touch).
         dbe.RegisterComponentFromAccessor<CompA>();
-        Archetype<CompAArch>.Touch();
         dbe.InitializeArchetypes();
         AssertCompARoundTrips(dbe);
     }

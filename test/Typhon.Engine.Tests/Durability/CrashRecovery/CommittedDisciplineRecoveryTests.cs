@@ -1,4 +1,4 @@
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using NUnit.Framework;
 using System;
@@ -45,8 +45,6 @@ internal sealed class CommittedDisciplineRecoveryTests
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<CmEntity>.Touch();
-        Archetype<CmIdxEntity>.Touch();
     }
 
     [SetUp]

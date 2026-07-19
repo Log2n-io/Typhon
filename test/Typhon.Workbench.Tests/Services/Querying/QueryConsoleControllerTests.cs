@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 using System.Net.Http.Json;
 using System.Runtime.InteropServices;
 using System.Text.Json;
@@ -46,7 +46,6 @@ public sealed class QueryConsoleControllerTests
     public void OneTimeSetup()
     {
         // Force the archetype's static ctor so ArchetypeRegistry picks it up before any session creation runs.
-        Archetype<QArch>.Touch();
     }
 
     [SetUp]

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
@@ -74,8 +74,6 @@ static class WriteProfile
 
         dbe.RegisterComponentFromAccessor<WpVersioned>();
         dbe.RegisterComponentFromAccessor<WpSingleVersion>();
-        Archetype<WpVersionedArch>.Touch();
-        Archetype<WpSvArch>.Touch();
         dbe.InitializeArchetypes();
 
         // Pre-grow EntityMap. Committed in chunks: a single commit's WAL frame must fit the

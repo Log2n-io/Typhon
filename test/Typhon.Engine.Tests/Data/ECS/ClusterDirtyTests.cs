@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Numerics;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
@@ -12,8 +12,6 @@ class ClusterDirtyTests : TestBase<ClusterDirtyTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<ClAnt>.Touch();
-        Archetype<ClUnit>.Touch();
     }
 
     private DatabaseEngine SetupEngine()

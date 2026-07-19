@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
@@ -53,8 +53,6 @@ class ClusterStorageTests : TestBase<ClusterStorageTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<ClAnt>.Touch();
-        Archetype<ClUnit>.Touch();
     }
 
     private DatabaseEngine SetupClusterEngine()

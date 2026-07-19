@@ -1,4 +1,4 @@
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using System;
 
@@ -9,7 +9,6 @@ class ViewChangeCaptureTests : TestBase<ViewChangeCaptureTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<CompDArch>.Touch();
     }
 
     private class TestView : IView, IDisposable

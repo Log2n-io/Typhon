@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Numerics;
@@ -259,15 +259,6 @@ internal static class FixtureDatabase
         PrepareOutputDirectory(absOut);
         ct.ThrowIfCancellationRequested();
 
-        Archetype<GuildArch>.Touch();
-        Archetype<ResourceTypeArch>.Touch();
-        Archetype<RecipeArch>.Touch();
-        Archetype<PlayerArch>.Touch();
-        Archetype<ResourceDepositArch>.Touch();
-        Archetype<StructureArch>.Touch();
-        Archetype<HarvesterArch>.Touch();
-        Archetype<FactoryArch>.Touch();
-        Archetype<ItemArch>.Touch();
 
         using (var sp = BuildEngineServices(absOut, safeName))
         using (var engine = sp.GetRequiredService<DatabaseEngine>())

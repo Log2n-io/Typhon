@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
@@ -55,7 +55,6 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<ClMigUnit>.Touch();
     }
 
     // 100×100 cells over a 1000×1000 world → 10×10 grid. Hysteresis margin = 5 world units.

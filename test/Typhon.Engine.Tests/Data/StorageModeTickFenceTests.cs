@@ -1,4 +1,4 @@
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using Typhon.Schema.Definition;
 
@@ -14,8 +14,6 @@ class StorageModeTickFenceTests : TestBase<StorageModeTickFenceTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<SvTestArchetype>.Touch();
-        Archetype<TransientTestArchetype>.Touch();
     }
 
     private DatabaseEngine SetupEngine()

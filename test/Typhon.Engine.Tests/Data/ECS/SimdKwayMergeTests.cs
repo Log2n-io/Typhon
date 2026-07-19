@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using Typhon.Schema.Definition;
@@ -34,11 +34,6 @@ class SimdKwayMergeTests : TestBase<SimdKwayMergeTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<ClQUnit>.Touch();
-        Archetype<ClQUnit2>.Touch();
-        Archetype<ClQUnit3>.Touch();
-        Archetype<ClQNonCluster>.Touch();
-        Archetype<ClQFloatUnit>.Touch();
     }
 
     private DatabaseEngine SetupEngine()

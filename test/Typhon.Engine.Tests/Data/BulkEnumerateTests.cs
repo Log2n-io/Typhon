@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 
@@ -9,8 +9,6 @@ class BulkEnumerateTests : TestBase<BulkEnumerateTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<CompAArch>.Touch();
-        Archetype<CompDArch>.Touch();
     }
 
     [Test]

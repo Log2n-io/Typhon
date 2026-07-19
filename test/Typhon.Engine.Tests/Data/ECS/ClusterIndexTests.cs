@@ -1,4 +1,4 @@
-using System.Linq;
+﻿using System.Linq;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
@@ -44,8 +44,6 @@ class ClusterIndexTests : TestBase<ClusterIndexTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<ClIdxUnit>.Touch();
-        Archetype<ClUnit>.Touch();
     }
 
     private DatabaseEngine SetupEngine()

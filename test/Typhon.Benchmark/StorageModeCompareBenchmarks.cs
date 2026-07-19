@@ -1,4 +1,4 @@
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using System;
 using System.Diagnostics;
@@ -96,12 +96,6 @@ public class StorageModeCompareBenchmarks : IDisposable
     {
         _databaseName = $"SmCompare_{Environment.ProcessId}";
 
-        Archetype<SmVersionedArch>.Touch();
-        Archetype<SmSingleVersionArch>.Touch();
-        Archetype<SmTransientArch>.Touch();
-        Archetype<SmVersionedIdxArch>.Touch();
-        Archetype<SmSvIdxArch>.Touch();
-        Archetype<SmTransientIdxArch>.Touch();
 
         var dcs = (ulong)(200 * 1024 * PagedMMF.PageSize);
 

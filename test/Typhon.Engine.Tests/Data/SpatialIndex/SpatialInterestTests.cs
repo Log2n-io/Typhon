@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Numerics;
 using Microsoft.Extensions.DependencyInjection;
@@ -13,7 +13,6 @@ class SpatialInterestTests : TestBase<SpatialInterestTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<SpatialShipArchetype>.Touch();
     }
 
     // Issue #230 Phase 3 Option B: cluster spatial archetypes require a configured SpatialGrid.

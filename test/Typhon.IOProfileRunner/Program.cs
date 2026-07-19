@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -247,8 +247,6 @@ public static class Program
         using var scope = sp.CreateScope();
         var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
 
-        Archetype<BlobArch>.Touch();
-        Archetype<TransientBlobArch>.Touch();
         dbe.RegisterComponentFromAccessor<Blob>();
         dbe.RegisterComponentFromAccessor<TransientBlob>();
         dbe.InitializeArchetypes();

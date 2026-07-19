@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using BenchmarkDotNet.Attributes;
@@ -78,7 +78,6 @@ public class ClusterAabbQueryBenchmarks : IDisposable
     [GlobalSetup]
     public void Setup()
     {
-        Archetype<ClQBenchUnit>.Touch();
 
         var sc = new ServiceCollection();
         sc.AddLogging(b => b.SetMinimumLevel(LogLevel.Critical))
@@ -245,7 +244,6 @@ public class ClusterRadiusQueryBenchmarks : IDisposable
     [GlobalSetup]
     public void Setup()
     {
-        Archetype<ClQBenchUnit>.Touch();
 
         var sc = new ServiceCollection();
         sc.AddLogging(b => b.SetMinimumLevel(LogLevel.Critical))

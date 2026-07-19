@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 using System.Net.Http.Json;
 using System.Runtime.InteropServices;
 using System.Text.Json;
@@ -79,8 +79,6 @@ public sealed class DataBrowserControllerTests
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<DbThing>.Touch();
-        Archetype<DbShape>.Touch();
     }
 
     [SetUp]

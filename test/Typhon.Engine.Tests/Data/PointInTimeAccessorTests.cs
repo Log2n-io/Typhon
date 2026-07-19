@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -80,10 +80,6 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<PtaArchVersioned>.Touch();
-        Archetype<PtaArchSingleVersion>.Touch();
-        Archetype<PtaArchTransient>.Touch();
-        Archetype<PtaArchMixed>.Touch();
     }
 
     private DatabaseEngine SetupEngine()

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -64,8 +64,6 @@ public sealed class TyphonAdapter : IEngineAdapter
 
     public void Load(int count)
     {
-        Archetype<SvValArch>.Touch();
-        Archetype<VValArch>.Touch();
 
         var cache = (ulong)(32768 * PagedMMF.PageSize); // 256 MB — holds the cache-resident C0 set hot
 

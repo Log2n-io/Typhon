@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
@@ -54,8 +54,6 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<ClCohUnit>.Touch();
-        Archetype<ClCohUnit2>.Touch();
     }
 
     private static ClCohPos PointAt(float x, float y) =>

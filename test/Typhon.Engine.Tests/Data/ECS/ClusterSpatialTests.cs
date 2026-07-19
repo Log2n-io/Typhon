@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
@@ -85,8 +85,6 @@ class ClusterSpatialTests : TestBase<ClusterSpatialTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<ClSpatialUnit>.Touch();
-        Archetype<ClSpatialStaticUnit>.Touch();
         // ClSpatialNonClusterUnit is no longer touched — the Mixed_* tests that used it were deleted in issue #230 Phase 3 Option B (see note above).
     }
 

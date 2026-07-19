@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 
@@ -14,7 +14,6 @@ class ErrorCaseTests : TestBase<ErrorCaseTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<EcsUnit>.Touch();
     }
 
     private DatabaseEngine SetupEngine()

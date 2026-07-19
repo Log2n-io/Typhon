@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Numerics;
 using Friflo.Engine.ECS;
@@ -49,7 +49,6 @@ public static class C8Runner
 
     private static double MeasureTyphon(int count)
     {
-        Archetype<SvValArch>.Touch();
         var sc = new ServiceCollection();
         sc.AddLogging(b => b.SetMinimumLevel(LogLevel.Critical))
           .AddResourceRegistry().AddMemoryAllocator().AddEpochManager()

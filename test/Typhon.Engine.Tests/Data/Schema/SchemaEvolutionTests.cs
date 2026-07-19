@@ -1,4 +1,4 @@
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
@@ -347,23 +347,6 @@ class SchemaEvolutionTests : TestBase<SchemaEvolutionTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<EvoAddArch>.Touch();
-        Archetype<EvoRemoveArch>.Touch();
-        Archetype<EvoReorderArch>.Touch();
-        Archetype<EvoWidenIntArch>.Touch();
-        Archetype<EvoWidenFloatArch>.Touch();
-        Archetype<EvoCombinedArch>.Touch();
-        Archetype<EvoAddRemoveArch>.Touch();
-        Archetype<EvoSignExtArch>.Touch();
-        Archetype<EvoBulkArch>.Touch();
-        Archetype<EvoAddV2Arch>.Touch();
-        Archetype<EvoRemoveV2Arch>.Touch();
-        Archetype<EvoReorderV2Arch>.Touch();
-        Archetype<EvoWidenIntV2Arch>.Touch();
-        Archetype<EvoSignExtV2Arch>.Touch();
-        Archetype<EvoWidenFloatV2Arch>.Touch();
-        Archetype<EvoCombinedV2Arch>.Touch();
-        Archetype<EvoAddRemoveV2Arch>.Touch();
     }
 
     [Test]

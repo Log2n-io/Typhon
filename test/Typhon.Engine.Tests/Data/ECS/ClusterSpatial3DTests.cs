@@ -1,4 +1,4 @@
-using System.Numerics;
+﻿using System.Numerics;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using Typhon.Schema.Definition;
@@ -20,7 +20,6 @@ class ClusterSpatial3DTests : TestBase<ClusterSpatial3DTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<ClSpatialUnit>.Touch();
     }
 
     private DatabaseEngine SetupEngine()

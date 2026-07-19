@@ -1,4 +1,4 @@
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using System.Collections.Generic;
 using System.Threading.Tasks;
@@ -10,7 +10,6 @@ class DeferredCleanupTests : TestBase<DeferredCleanupTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<CompAArch>.Touch();
     }
 
     [Test]

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -19,7 +19,6 @@ public static class InterestDirect
         Console.WriteLine($"Entities: {entityCount}, Dirty/tick: {dirtyPerTick}, Observers: {observerCount}, Ticks: {ticks}");
         Console.WriteLine();
 
-        Archetype<TrigShipArch>.Touch();
         var sc = new ServiceCollection();
         sc.AddLogging(b => b.SetMinimumLevel(LogLevel.Critical))
             .AddResourceRegistry().AddMemoryAllocator().AddEpochManager()

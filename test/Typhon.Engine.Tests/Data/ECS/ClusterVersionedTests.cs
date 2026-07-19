@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
@@ -63,8 +63,6 @@ class ClusterVersionedTests : TestBase<ClusterVersionedTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<ClVMixed>.Touch();
-        Archetype<ClVTriple>.Touch();
     }
 
     private DatabaseEngine SetupEngine()

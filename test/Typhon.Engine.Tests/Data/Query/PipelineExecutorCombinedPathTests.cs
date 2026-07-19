@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using Typhon.Schema.Definition;
@@ -37,9 +37,6 @@ class PipelineExecutorCombinedPathTests : TestBase<PipelineExecutorCombinedPathT
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<CompDArch>.Touch();
-        Archetype<CompDFArch>.Touch();
-        Archetype<PipeSvArch>.Touch();
     }
 
     private DatabaseEngine SetupEngine()

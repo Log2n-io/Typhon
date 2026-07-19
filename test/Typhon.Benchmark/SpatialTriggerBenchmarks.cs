@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Runtime.InteropServices;
 using BenchmarkDotNet.Attributes;
 using BenchmarkDotNet.Engines;
@@ -110,7 +110,6 @@ public class TriggerOccupantDensityBenchmarks : IDisposable
     [GlobalSetup]
     public void Setup()
     {
-        Archetype<TrigShipArch>.Touch();
         var sc = new ServiceCollection();
         sc.AddLogging(b => b.SetMinimumLevel(LogLevel.Critical))
             .AddResourceRegistry().AddMemoryAllocator().AddEpochManager()
@@ -183,7 +182,6 @@ public class TriggerSteadyStateBenchmarks : IDisposable
     [GlobalSetup]
     public void Setup()
     {
-        Archetype<TrigShipArch>.Touch();
         var sc = new ServiceCollection();
         sc.AddLogging(b => b.SetMinimumLevel(LogLevel.Critical))
             .AddResourceRegistry().AddMemoryAllocator().AddEpochManager()
@@ -250,7 +248,6 @@ public class TriggerTreeScaleBenchmarks : IDisposable
     [GlobalSetup]
     public void Setup()
     {
-        Archetype<TrigShipArch>.Touch();
         var sc = new ServiceCollection();
         sc.AddLogging(b => b.SetMinimumLevel(LogLevel.Critical))
             .AddResourceRegistry().AddMemoryAllocator().AddEpochManager()
@@ -315,7 +312,6 @@ public class TriggerMultiRegionBenchmarks : IDisposable
     [GlobalSetup]
     public void Setup()
     {
-        Archetype<TrigShipArch>.Touch();
         var sc = new ServiceCollection();
         sc.AddLogging(b => b.SetMinimumLevel(LogLevel.Critical))
             .AddResourceRegistry().AddMemoryAllocator().AddEpochManager()
@@ -399,7 +395,6 @@ public class TriggerStaticCacheBenchmarks : IDisposable
     [GlobalSetup]
     public void Setup()
     {
-        Archetype<TrigTerrainArch>.Touch();
         var sc = new ServiceCollection();
         sc.AddLogging(b => b.SetMinimumLevel(LogLevel.Critical))
             .AddResourceRegistry().AddMemoryAllocator().AddEpochManager()
@@ -472,7 +467,6 @@ public class TriggerEnterLeaveStormBenchmarks : IDisposable
     [GlobalSetup]
     public void Setup()
     {
-        Archetype<TrigShipArch>.Touch();
         var sc = new ServiceCollection();
         sc.AddLogging(b => b.SetMinimumLevel(LogLevel.Critical))
             .AddResourceRegistry().AddMemoryAllocator().AddEpochManager()
@@ -554,7 +548,6 @@ public class TriggerFrequencySkipBenchmarks : IDisposable
     [GlobalSetup]
     public void Setup()
     {
-        Archetype<TrigShipArch>.Touch();
         var sc = new ServiceCollection();
         sc.AddLogging(b => b.SetMinimumLevel(LogLevel.Critical))
             .AddResourceRegistry().AddMemoryAllocator().AddEpochManager()

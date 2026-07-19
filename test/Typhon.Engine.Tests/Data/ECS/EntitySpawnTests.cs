@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
@@ -62,8 +62,6 @@ class EntitySpawnTests : TestBase<EntitySpawnTests>
     public void OneTimeSetup()
     {
         // Ensure archetypes are finalized
-        Archetype<EcsUnit>.Touch();
-        Archetype<EcsSoldier>.Touch();
     }
 
     private DatabaseEngine SetupEngine()

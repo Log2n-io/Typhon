@@ -1,4 +1,4 @@
-using MemoryPack;
+﻿using MemoryPack;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using System;
@@ -29,8 +29,6 @@ class SubscriptionStressTests : TestBase<SubscriptionStressTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<EcsUnit>.Touch();
-        Archetype<EcsSoldier>.Touch();
     }
 
     private DatabaseEngine SetupEngine()

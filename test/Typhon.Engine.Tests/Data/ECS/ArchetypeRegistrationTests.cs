@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 using NUnit.Framework;
 using Typhon.Schema.Definition;
 
@@ -70,10 +70,6 @@ class ArchetypeRegistrationTests
     public void OneTimeSetup()
     {
         // Touch ensures: 1) CLR runs field initializers (DeclareComponent), 2) lazy finalization runs
-        Archetype<TestBuilding>.Touch();
-        Archetype<TestHouse>.Touch();
-        Archetype<TestFactory>.Touch();
-        Archetype<TestVehicle>.Touch();
     }
 
     [Test]

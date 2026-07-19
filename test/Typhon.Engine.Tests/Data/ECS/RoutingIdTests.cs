@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using Typhon.Schema.Definition;
@@ -36,8 +36,6 @@ class RoutingIdTests : TestBase<RoutingIdTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<RoutingArchA>.Touch();
-        Archetype<RoutingArchB>.Touch();
     }
 
     private DatabaseEngine NewSession(IServiceScope scope)

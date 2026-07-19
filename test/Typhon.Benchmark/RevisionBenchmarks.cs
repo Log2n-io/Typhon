@@ -1,4 +1,4 @@
-using BenchmarkDotNet.Attributes;
+﻿using BenchmarkDotNet.Attributes;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using System;
@@ -71,7 +71,6 @@ public class RevisionBenchmarks
         _dbe = _serviceProvider.GetRequiredService<DatabaseEngine>();
         _dbe.RegisterComponentFromAccessor<RevComp>();
 
-        Archetype<RevArch>.Touch();
         _dbe.InitializeArchetypes();
 
         // Create entity with 1 version

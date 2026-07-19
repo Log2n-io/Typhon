@@ -38,7 +38,6 @@ class ComponentCollectionTests : TestBase<ComponentCollectionTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<CompAEArch>.Touch();
     }
 
     protected override void RegisterComponents(DatabaseEngine dbe)

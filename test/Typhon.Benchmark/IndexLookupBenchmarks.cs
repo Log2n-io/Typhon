@@ -1,4 +1,4 @@
-using BenchmarkDotNet.Attributes;
+﻿using BenchmarkDotNet.Attributes;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using System;
@@ -72,7 +72,6 @@ public class IndexLookupBenchmarks
         _dbe = _serviceProvider.GetRequiredService<DatabaseEngine>();
         _dbe.RegisterComponentFromAccessor<IdxComp>();
 
-        Archetype<IdxArch>.Touch();
         _dbe.InitializeArchetypes();
 
         // Pre-populate 10K entities

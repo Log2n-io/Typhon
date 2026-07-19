@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 using System.Threading;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
@@ -49,10 +49,6 @@ class StorageModeReadWriteTests : TestBase<StorageModeReadWriteTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<SvTestArchetype>.Touch();
-        Archetype<TransientTestArchetype>.Touch();
-        Archetype<MixedModeArchetype>.Touch();
-        Archetype<EcsUnit>.Touch();
     }
 
     private DatabaseEngine SetupEngine()

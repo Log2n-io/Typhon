@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -23,7 +23,6 @@ public sealed class TyphonConcurrentAdapter : IConcurrentAdapter
 
     public void Load(int totalCount)
     {
-        Archetype<SvValArch>.Touch();
         var sc = new ServiceCollection();
         sc.AddLogging(b => b.SetMinimumLevel(LogLevel.Critical))
           .AddResourceRegistry().AddMemoryAllocator().AddEpochManager()

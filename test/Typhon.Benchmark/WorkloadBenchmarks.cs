@@ -1,4 +1,4 @@
-using BenchmarkDotNet.Attributes;
+﻿using BenchmarkDotNet.Attributes;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using System;
@@ -108,9 +108,6 @@ public class WorkloadBenchmarks
         _dbe.RegisterComponentFromAccessor<WorkCompB>();
         _dbe.RegisterComponentFromAccessor<IndexedSvComp>();
 
-        Archetype<WorkArch>.Touch();
-        Archetype<WorkMultiArch>.Touch();
-        Archetype<IndexedSvArch>.Touch();
         _dbe.InitializeArchetypes();
 
         // Pre-grow EntityMap to avoid bucket splits during measurement.

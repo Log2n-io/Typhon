@@ -1,4 +1,4 @@
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using System;
 using System.Threading;
@@ -18,8 +18,6 @@ class ChangeFilterTests : TestBase<ChangeFilterTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<EcsUnit>.Touch();
-        Archetype<EcsSoldier>.Touch();
     }
 
     private DatabaseEngine SetupEngine()

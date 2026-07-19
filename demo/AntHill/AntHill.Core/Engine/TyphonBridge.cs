@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Concurrent;
 using System.Numerics;
 using System.Threading;
@@ -393,10 +393,6 @@ public sealed class TyphonBridge : IDisposable
         _scope = _serviceProvider.CreateScope();
         DBE = _scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
 
-        Archetype<Ant>.Touch();
-        Archetype<Food>.Touch();
-        Archetype<Nest>.Touch();
-        Archetype<Rock>.Touch();
         DBE.RegisterComponentFromAccessor<WorldBounds>();
         DBE.RegisterComponentFromAccessor<Velocity>();
         DBE.RegisterComponentFromAccessor<Genetics>();

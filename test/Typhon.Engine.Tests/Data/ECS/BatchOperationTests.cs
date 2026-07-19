@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 
@@ -10,10 +10,6 @@ class BatchOperationTests : TestBase<BatchOperationTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<EcsUnit>.Touch();
-        Archetype<EcsSoldier>.Touch();
-        Archetype<CascadeBag>.Touch();
-        Archetype<CascadeItem>.Touch();
     }
 
     private DatabaseEngine SetupEngine()

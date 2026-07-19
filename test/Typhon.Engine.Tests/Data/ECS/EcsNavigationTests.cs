@@ -1,4 +1,4 @@
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 
 namespace Typhon.Engine.Tests;
@@ -13,8 +13,6 @@ class EcsNavigationTests : TestBase<EcsNavigationTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<CompGuildArch>.Touch();
-        Archetype<CompPlayerArch>.Touch();
     }
 
     protected override void RegisterComponents(DatabaseEngine dbe)

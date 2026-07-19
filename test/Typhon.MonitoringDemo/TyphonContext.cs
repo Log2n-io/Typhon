@@ -1,4 +1,4 @@
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using Typhon.Engine;
 
 namespace Typhon.MonitoringDemo;
@@ -66,18 +66,6 @@ public sealed class TyphonContext : IDisposable
     private void RegisterGameComponents()
     {
         // Touch all archetypes to trigger static initialization
-        Archetype<FactoryBuildingArch>.Touch();
-        Archetype<ConveyorBeltArch>.Touch();
-        Archetype<ItemStackArch>.Touch();
-        Archetype<RecipeArch>.Touch();
-        Archetype<ResourceNodeArch>.Touch();
-        Archetype<PowerGridArch>.Touch();
-        Archetype<CharacterArch>.Touch();
-        Archetype<WorldPositionArch>.Touch();
-        Archetype<CombatStatsArch>.Touch();
-        Archetype<SkillArch>.Touch();
-        Archetype<QuestArch>.Touch();
-        Archetype<InventoryArch>.Touch();
 
         // Factory game components
         Engine.RegisterComponentFromAccessor<FactoryBuilding>();

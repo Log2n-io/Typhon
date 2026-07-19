@@ -1,4 +1,4 @@
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using System;
 using System.Runtime.CompilerServices;
@@ -206,14 +206,6 @@ class MigrationFunctionTests : TestBase<MigrationFunctionTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<MigPlayerArch>.Touch();
-        Archetype<MigChainArch>.Touch();
-        Archetype<MigByteArch>.Touch();
-        Archetype<MigFailArch>.Touch();
-        Archetype<MigMissingArch>.Touch();
-        Archetype<MigPlayerV2Arch>.Touch();
-        Archetype<MigChainV3Arch>.Touch();
-        Archetype<MigByteV2Arch>.Touch();
     }
 
     [Test]

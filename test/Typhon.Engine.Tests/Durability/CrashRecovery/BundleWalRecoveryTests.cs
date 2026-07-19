@@ -1,4 +1,4 @@
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using NUnit.Framework;
 using System;
@@ -99,7 +99,6 @@ class BundleWalRecoveryTests
             using var scope1 = provider1.CreateScope();
             var dbe = scope1.ServiceProvider.GetRequiredService<DatabaseEngine>();
             dbe.RegisterComponentFromAccessor<CompA>();
-            Archetype<CompAArch>.Touch();
             dbe.InitializeArchetypes();
 
             using (var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate))
@@ -124,7 +123,6 @@ class BundleWalRecoveryTests
             using var scope2 = provider2.CreateScope();
             var dbe = scope2.ServiceProvider.GetRequiredService<DatabaseEngine>();
             dbe.RegisterComponentFromAccessor<CompA>();
-            Archetype<CompAArch>.Touch();
             dbe.InitializeArchetypes();
 
             using var tx = dbe.CreateQuickTransaction();

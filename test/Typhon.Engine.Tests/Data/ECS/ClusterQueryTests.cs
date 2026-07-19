@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
@@ -122,9 +122,6 @@ class ClusterQueryTests : TestBase<ClusterQueryTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<ClQUnit>.Touch();
-        Archetype<ClQNonCluster>.Touch();
-        Archetype<ClQFloatUnit>.Touch();
     }
 
     private DatabaseEngine SetupEngine()

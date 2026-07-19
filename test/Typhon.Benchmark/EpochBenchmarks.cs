@@ -1,4 +1,4 @@
-using BenchmarkDotNet.Attributes;
+﻿using BenchmarkDotNet.Attributes;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using System;
@@ -310,7 +310,6 @@ public class TransactionBenchmarks
         _dbe = _serviceProvider.GetRequiredService<DatabaseEngine>();
         _dbe.RegisterComponentFromAccessor<BenchComp>();
 
-        Archetype<BenchArch>.Touch();
         _dbe.InitializeArchetypes();
 
         // Pre-populate entities for read/update benchmarks

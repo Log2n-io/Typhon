@@ -1,4 +1,4 @@
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 
 namespace Typhon.Engine.Tests;
@@ -9,7 +9,6 @@ class EnableDisableTests : TestBase<EnableDisableTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<EcsUnit>.Touch();
     }
 
     private DatabaseEngine SetupEngine()

@@ -1,4 +1,4 @@
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using NUnit.Framework;
 using Serilog;
@@ -18,7 +18,6 @@ class TransactionChainTests : TestBase<TransactionChainTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<CompAArch>.Touch();
     }
 
     /// <summary>

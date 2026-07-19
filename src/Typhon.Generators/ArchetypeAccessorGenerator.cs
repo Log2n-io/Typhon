@@ -50,21 +50,39 @@ public partial class ArchetypeAccessorGenerator : IIncrementalGenerator
             transform: static (ctx, ct) => TransformComponent(ctx, ct)
         ).Where(static m => m != null).Collect();
 
+        // Per-assembly archetype registration (feature #514, phase 5 — the barrier). Every concrete, reachable [Archetype] fqn is collected so the generated
+        // [ModuleInitializer] finalizes it at assembly load (via DatabaseEngine.RegisterArchetype → EnsureFinalized), replacing the manual Archetype<T>.Touch()
+        // startup calls. [Archetype] classes always reference the engine (they inherit the engine's Archetype<TSelf>), so the engine-typed finalize call is always
+        // emittable. Abstract/unreachable (private-nested) archetypes are skipped.
+        var archetypePipeline = context.SyntaxProvider.ForAttributeWithMetadataName(
+            fullyQualifiedMetadataName: ArchetypeAttributeFqn,
+            predicate: static (node, _) => node is ClassDeclarationSyntax,
+            transform: static (ctx, _) =>
+            {
+                var symbol = (INamedTypeSymbol)ctx.TargetSymbol;
+                if (symbol.IsAbstract || !IsReachableFromModuleInit(symbol))
+                {
+                    return null;
+                }
+                return symbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+            }
+        ).Where(static s => s != null).Collect();
+
         // (assembly name, whether Typhon.Engine is referenced by this compilation). The engine-typed ComponentCollection<T> factory can only be emitted when the
         // engine is reachable (directly or transitively); a schema-only assembly (references just Typhon.Schema.Definition) registers component specs via the
         // contract-level GeneratedSchemaRegistry and lets collection backing-stores fall back to the runtime reflective path.
         var asmInfo = context.CompilationProvider.Select(static (c, _) =>
             (Name: c.AssemblyName, HasEngine: c.GetTypeByMetadataName("Typhon.Engine.DatabaseEngine") != null));
 
-        context.RegisterSourceOutput(componentPipeline.Combine(asmInfo), static (spc, pair) =>
+        context.RegisterSourceOutput(componentPipeline.Combine(archetypePipeline).Combine(asmInfo), static (spc, pair) =>
         {
-            var (models, info) = pair;
-            if (models.IsDefaultOrEmpty)
+            var ((components, archetypes), info) = pair;
+            if (components.IsDefaultOrEmpty && archetypes.IsDefaultOrEmpty)
             {
                 return;
             }
 
-            spc.AddSource("__TyphonRegistry.g.cs", EmitRegistrar(models, info.Name, info.HasEngine));
+            spc.AddSource("__TyphonRegistry.g.cs", EmitRegistrar(components, archetypes, info.Name, info.HasEngine));
         });
 
         // Cascade-delete graph validation as a BUILD-TIME diagnostic (feature #514, phase 6). Mirrors the runtime ValidateCascadeDfs: a cycle or diamond in the
@@ -701,11 +719,13 @@ public partial class ArchetypeAccessorGenerator : IIncrementalGenerator
     // The spec registration targets Typhon.Schema.Definition (which every schema assembly references) rather than the engine, so schema-only assemblies register
     // too. The collection factory is engine-typed, so it is emitted only when the engine is reachable; otherwise the backing store uses the runtime reflective
     // fallback for that element type.
-    private static string EmitRegistrar(System.Collections.Immutable.ImmutableArray<ComponentGenModel> models, string assemblyName, bool hasEngine)
+    private static string EmitRegistrar(ImmutableArray<ComponentGenModel> models, ImmutableArray<string> archetypeFqns, string assemblyName, bool hasEngine)
     {
-        // Deterministic output: sort by fully-qualified struct name so the emitted registrar is byte-stable regardless of the collection order.
+        // Deterministic output: sort by fully-qualified name so the emitted registrar is byte-stable regardless of the collection order.
         var sorted = models.ToArray();
         Array.Sort(sorted, static (a, b) => string.CompareOrdinal(a.StructFqn, b.StructFqn));
+        var sortedArchetypes = archetypeFqns.ToArray();
+        Array.Sort(sortedArchetypes, StringComparer.Ordinal);
 
         var sb = new StringBuilder(4096);
 
@@ -718,7 +738,7 @@ public partial class ArchetypeAccessorGenerator : IIncrementalGenerator
         sb.AppendLine("{");
         sb.Append("    internal static class __TyphonRegistry_").AppendLine(SanitizeIdentifier(assemblyName));
         sb.AppendLine("    {");
-        sb.AppendLine("        /// <summary>Source-generated reflection-free component registration (feature #514). Runs once at assembly load.</summary>");
+        sb.AppendLine("        /// <summary>Source-generated reflection-free component + archetype registration (feature #514). Runs once at assembly load.</summary>");
         sb.AppendLine("        [global::System.Runtime.CompilerServices.ModuleInitializer]");
         sb.AppendLine("        internal static void Register()");
         sb.AppendLine("        {");
@@ -738,6 +758,17 @@ public partial class ArchetypeAccessorGenerator : IIncrementalGenerator
             sb.Append("            global::Typhon.Schema.Definition.GeneratedSchemaRegistry.RegisterComponent(typeof(").Append(model.StructFqn).AppendLine("),");
             AppendComponentSpec(sb, model, "                ");
             sb.AppendLine("            );");
+        }
+
+        // Archetype finalization barrier (replaces Archetype<T>.Touch()). Archetypes always reference the engine (they derive from Archetype<TSelf>), so
+        // hasEngine is always true here; the guard is belt-and-suspenders. Registered AFTER component specs so the schema data is available for the engine's
+        // later definition build (order is not strictly required — EnsureFinalized assigns component handles independently).
+        if (hasEngine)
+        {
+            foreach (var archFqn in sortedArchetypes)
+            {
+                sb.Append("            global::Typhon.Engine.DatabaseEngine.RegisterArchetype(typeof(").Append(archFqn).AppendLine("));");
+            }
         }
 
         sb.AppendLine("        }");
@@ -905,7 +936,7 @@ public partial class ArchetypeAccessorGenerator
         }
     }
 
-    private static void ValidateCascades(SourceProductionContext spc, System.Collections.Immutable.ImmutableArray<CascadeArchModel> models)
+    private static void ValidateCascades(SourceProductionContext spc, ImmutableArray<CascadeArchModel> models)
     {
         // Build parent→children adjacency from the collected (child, parents[]) edges; dedup edges so redundant FKs don't read as diamonds (only distinct paths do).
         var adjacency = new Dictionary<string, List<string>>();

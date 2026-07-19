@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using Typhon.Schema.Definition;
@@ -33,7 +33,6 @@ class EcsQueryVersionedReadTests : TestBase<EcsQueryVersionedReadTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<Q504Arch>.Touch();
     }
 
     private DatabaseEngine SetupEngine()

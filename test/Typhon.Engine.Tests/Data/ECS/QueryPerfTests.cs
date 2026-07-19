@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 
@@ -18,7 +18,6 @@ class QueryPerfTests : TestBase<QueryPerfTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<CompDArch>.Touch();
     }
 
     private DatabaseEngine SetupWithEntities()

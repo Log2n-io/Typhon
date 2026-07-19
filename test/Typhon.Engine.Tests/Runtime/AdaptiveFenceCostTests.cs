@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Numerics;
 using System.Threading;
@@ -64,7 +64,6 @@ class AdaptiveFenceCostTests
     private static DatabaseEngine SetupSpatialEngine(IServiceProvider sp)
     {
         var dbe = sp.GetRequiredService<DatabaseEngine>();
-        Archetype<ClMigUnit>.Touch();
         dbe.RegisterComponentFromAccessor<ClMigPos>();
         dbe.RegisterComponentFromAccessor<ClMigScratch>();
         dbe.ConfigureSpatialGrid(new SpatialGridConfig(

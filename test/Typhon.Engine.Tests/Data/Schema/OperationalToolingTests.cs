@@ -1,4 +1,4 @@
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using NUnit.Framework;
 using System.Collections.Generic;
@@ -45,7 +45,6 @@ class OperationalToolingTests : TestBase<OperationalToolingTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<OpsCompArch>.Touch();
     }
 
     private string GetDatabasePath()

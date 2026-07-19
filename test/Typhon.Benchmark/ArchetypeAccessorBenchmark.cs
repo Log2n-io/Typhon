@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -431,7 +431,6 @@ static class ArchetypeAccessorBenchmark
             sp.EnsureFileDeleted<ManagedPagedMMFOptions>();
             var dbe = sp.GetRequiredService<DatabaseEngine>();
 
-            Archetype<AaBenchAnt>.Touch();
             dbe.RegisterComponentFromAccessor<AaBenchPosition>();
             dbe.RegisterComponentFromAccessor<AaBenchMovement>();
             dbe.InitializeArchetypes();
@@ -872,7 +871,6 @@ static class ArchetypeAccessorBenchmark
         sp.EnsureFileDeleted<ManagedPagedMMFOptions>();
         var dbe = sp.GetRequiredService<DatabaseEngine>();
 
-        Archetype<AaBenchSpatialUnit>.Touch();
         dbe.RegisterComponentFromAccessor<AaBenchSpatialPos>();
         dbe.RegisterComponentFromAccessor<AaBenchSpatialMeta>();
         dbe.InitializeArchetypes();
@@ -923,7 +921,6 @@ static class ArchetypeAccessorBenchmark
         sp.EnsureFileDeleted<ManagedPagedMMFOptions>();
         var dbe = sp.GetRequiredService<DatabaseEngine>();
 
-        Archetype<AaBenchIdxUnit>.Touch();
         dbe.RegisterComponentFromAccessor<AaBenchPosition>();
         dbe.RegisterComponentFromAccessor<AaBenchIdxData>();
         dbe.InitializeArchetypes();
@@ -1093,7 +1090,6 @@ static class ArchetypeAccessorBenchmark
         sp.EnsureFileDeleted<ManagedPagedMMFOptions>();
         var dbe = sp.GetRequiredService<DatabaseEngine>();
 
-        Archetype<AaBenchMixedCluster>.Touch();
         dbe.RegisterComponentFromAccessor<AaBenchPosition>();
         dbe.RegisterComponentFromAccessor<AaBenchMovement>();
         dbe.RegisterComponentFromAccessor<AaVcHealth>();
@@ -1201,7 +1197,6 @@ static class ArchetypeAccessorBenchmark
         sp.EnsureFileDeleted<ManagedPagedMMFOptions>();
         var dbe = sp.GetRequiredService<DatabaseEngine>();
 
-        Archetype<AaBenchIdxUnit>.Touch();
         dbe.RegisterComponentFromAccessor<AaBenchPosition>();
         dbe.RegisterComponentFromAccessor<AaBenchIdxData>();
         dbe.InitializeArchetypes();
@@ -1354,7 +1349,6 @@ static class ArchetypeAccessorBenchmark
         sp.EnsureFileDeleted<ManagedPagedMMFOptions>();
         var dbe = sp.GetRequiredService<DatabaseEngine>();
 
-        Archetype<AaBenchIdxUnit>.Touch();
         dbe.RegisterComponentFromAccessor<AaBenchPosition>();
         dbe.RegisterComponentFromAccessor<AaBenchIdxData>();
         dbe.InitializeArchetypes();
@@ -1457,7 +1451,6 @@ static class ArchetypeAccessorBenchmark
         sp.EnsureFileDeleted<ManagedPagedMMFOptions>();
         var dbe = sp.GetRequiredService<DatabaseEngine>();
 
-        Archetype<AaBenchIdxUnit>.Touch();
         dbe.RegisterComponentFromAccessor<AaBenchPosition>();
         dbe.RegisterComponentFromAccessor<AaBenchIdxData>();
         dbe.InitializeArchetypes();

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Numerics;
 using Microsoft.Extensions.DependencyInjection;
@@ -30,15 +30,6 @@ public sealed class SwgFixtureFeatureTests
     [OneTimeSetUp]
     public void OneTimeSetUp()
     {
-        Archetype<GuildArch>.Touch();
-        Archetype<ResourceTypeArch>.Touch();
-        Archetype<RecipeArch>.Touch();
-        Archetype<PlayerArch>.Touch();
-        Archetype<ResourceDepositArch>.Touch();
-        Archetype<StructureArch>.Touch();
-        Archetype<HarvesterArch>.Touch();
-        Archetype<FactoryArch>.Touch();
-        Archetype<ItemArch>.Touch();
     }
 
     [SetUp]

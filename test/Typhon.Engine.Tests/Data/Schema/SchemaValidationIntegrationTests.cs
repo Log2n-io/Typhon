@@ -1,4 +1,4 @@
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using System.Runtime.InteropServices;
 using Typhon.Schema.Definition;
@@ -126,10 +126,6 @@ class SchemaValidationIntegrationTests : TestBase<SchemaValidationIntegrationTes
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<CompWidenArch>.Touch();
-        Archetype<CompBreakArch>.Touch();
-        Archetype<CompFieldAddArch>.Touch();
-        Archetype<CompDowngradeArch>.Touch();
     }
 
     [Test]

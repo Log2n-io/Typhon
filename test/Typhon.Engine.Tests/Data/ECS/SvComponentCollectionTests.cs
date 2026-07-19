@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
@@ -71,8 +71,6 @@ class SvComponentCollectionTests : TestBase<SvComponentCollectionTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<SvCcUnit>.Touch();
-        Archetype<SvCcSpatialUnit>.Touch();
     }
 
     private DatabaseEngine SetupEngine()

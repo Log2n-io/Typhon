@@ -1,4 +1,4 @@
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using System.Runtime.InteropServices;
 using Typhon.Schema.Definition;
@@ -130,10 +130,6 @@ class FieldIdStabilityTests : TestBase<FieldIdStabilityTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<CompEvolArch>.Touch();
-        Archetype<CompRemoveArch>.Touch();
-        Archetype<CompRenameArch>.Touch();
-        Archetype<CompIndexArch>.Touch();
     }
 
     [Test]

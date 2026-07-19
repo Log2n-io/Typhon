@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Numerics;
 using Microsoft.Extensions.DependencyInjection;
@@ -19,7 +19,6 @@ class PerCellRTreeTests : TestBase<PerCellRTreeTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<ClCohUnit>.Touch();
     }
 
     private static ClCohPos PointAt(float x, float y) =>

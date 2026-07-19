@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using Typhon.Schema.Definition;
@@ -80,9 +80,6 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<CmEntity>.Touch();
-        Archetype<CmIdxEntity>.Touch();
-        Archetype<CmFlatEntity>.Touch();
     }
 
     private DatabaseEngine SetupEngine()

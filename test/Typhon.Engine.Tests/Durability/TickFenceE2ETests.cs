@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -19,8 +19,6 @@ class TickFenceE2ETests
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<SvTestArchetype>.Touch();
-        Archetype<MixedModeArchetype>.Touch();
     }
 
     private ServiceProvider _serviceProvider;

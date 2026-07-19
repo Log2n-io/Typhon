@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using System;
@@ -33,11 +33,6 @@ class StatisticsRebuildTests : TestBase<StatisticsRebuildTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<CompDArch>.Touch();
-        Archetype<CompFArch>.Touch();
-        Archetype<CompStr64Arch>.Touch();
-        Archetype<CompGuildArch>.Touch();
-        Archetype<CompPlayerArch>.Touch();
     }
 
     private static void CreateAndCommitCompD(DatabaseEngine dbe, float a, int b, double c)

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Linq;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
@@ -40,7 +40,6 @@ class SchemaManifestTests : TestBase<SchemaManifestTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<ManifestArch>.Touch();
     }
 
     [Test]

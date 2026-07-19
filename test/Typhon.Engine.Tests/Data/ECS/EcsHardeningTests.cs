@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
@@ -119,22 +119,12 @@ class EcsHardeningTests : TestBase<EcsHardeningTests>
     public void OneTimeSetup()
     {
         // 3-level hierarchy
-        Archetype<HVehicle>.Touch();
-        Archetype<HCar>.Touch();
-        Archetype<HSportsCar>.Touch();
 
         // Multi-level cascade
-        Archetype<HRegion>.Touch();
-        Archetype<HCity>.Touch();
-        Archetype<HDistrict>.Touch();
 
         // Also touch EcsUnit/EcsSoldier for enable/disable and error tests
-        Archetype<EcsUnit>.Touch();
-        Archetype<EcsSoldier>.Touch();
 
         // Cascade bag/item for EntityLink tests
-        Archetype<CascadeBag>.Touch();
-        Archetype<CascadeItem>.Touch();
     }
 
     private DatabaseEngine SetupEngine()
@@ -510,7 +500,6 @@ class EcsHardeningTests : TestBase<EcsHardeningTests>
         dbe.RegisterComponentFromAccessor<CompSmVersionedMix>();
         dbe.RegisterComponentFromAccessor<CompSmSingleVersion>();
         dbe.RegisterComponentFromAccessor<CompSmTransient>();
-        Archetype<MixedModeArchetype>.Touch();
         dbe.InitializeArchetypes();
         return dbe;
     }

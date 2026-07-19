@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using Typhon.Schema.Definition;
@@ -45,8 +45,6 @@ class CascadeDeleteTests : TestBase<CascadeDeleteTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<CascadeBag>.Touch();
-        Archetype<CascadeItem>.Touch();
     }
 
     private DatabaseEngine SetupEngine()

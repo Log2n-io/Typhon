@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
@@ -16,8 +16,6 @@ class SpatialTriggerTests : TestBase<SpatialTriggerTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<SpatialShipArchetype>.Touch();
-        Archetype<SpatialTerrainArchetype>.Touch();
     }
 
     /// <summary>

@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using Typhon.Schema.Definition;
@@ -75,9 +75,6 @@ class ArchetypeAccessorTests : TestBase<ArchetypeAccessorTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<SvUnit>.Touch();
-        Archetype<VUnit>.Touch();
-        Archetype<MixedUnit>.Touch();
     }
 
     private DatabaseEngine SetupEngine()

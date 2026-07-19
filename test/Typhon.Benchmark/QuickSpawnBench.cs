@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -41,7 +41,6 @@ static class QuickSpawnBench
         sp.EnsureFileDeleted<ManagedPagedMMFOptions>();
         using var dbe = sp.GetRequiredService<DatabaseEngine>();
         dbe.RegisterComponentFromAccessor<BenchComp>();
-        Archetype<BenchArch>.Touch();
         dbe.InitializeArchetypes();
 
         // ── Scenario 1: Create N + Commit ──

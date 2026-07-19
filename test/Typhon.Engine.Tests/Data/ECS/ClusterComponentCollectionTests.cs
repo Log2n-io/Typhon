@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
@@ -53,7 +53,6 @@ class ClusterComponentCollectionTests : TestBase<ClusterComponentCollectionTests
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<ClCcUnit>.Touch();
     }
 
     private DatabaseEngine SetupEngineWithGrid()

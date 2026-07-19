@@ -155,7 +155,16 @@ internal static class ArchetypeRegistry
     /// <summary>
     /// Ensure an archetype type is finalized. Triggers static initialization (field initializers) then calls FinalizeArchetypeInternal if not already done.
     /// </summary>
-    internal static void EnsureFinalized(Type archetypeType)
+    /// <param name="archetypeType">The archetype CLR type to finalize.</param>
+    /// <param name="fromBarrier">
+    /// True when called from the generated <c>[ModuleInitializer]</c> barrier (feature #514 Phase 5). In that mode a cross-ALC collision — the same archetype
+    /// <see cref="Type.FullName"/> already registered from a DIFFERENT <see cref="AssemblyLoadContext"/> — is a tolerated no-op rather than a throw: the barrier
+    /// registers a whole assembly eagerly at load, and a host that both references a schema (default ALC) and loads it collectibly would otherwise poison the
+    /// module initializer (which fails ALL registrations in that assembly). The archetype is already registered by the other ALC, so there is nothing to do; the
+    /// engine's on-demand path (EngineLifecycle / InitializeArchetypes) remains the authority. Genuine authoring errors (duplicate id, &gt;16 components) still
+    /// throw. Non-barrier callers keep the original strict diagnostic (a real cross-ALC bug is surfaced clearly).
+    /// </param>
+    internal static void EnsureFinalized(Type archetypeType, bool fromBarrier = false)
     {
         // Serialise with concurrent registration/freeze. Reentrant: FinalizeArchetypeInternal recurses here for the parent chain, and RunClassConstructor
         // below may re-enter via a static field initializer (DeclareComponent).
@@ -185,6 +194,12 @@ internal static class ArchetypeRegistry
             var existing = Archetypes[attr.Id];
             if (existing.ArchetypeType != archetypeType && existing.ArchetypeType.FullName == archetypeType.FullName)
             {
+                // Barrier mode (eager whole-assembly registration): the slot is already held by an equivalent archetype from another ALC — nothing to do.
+                // Throwing here would poison the [ModuleInitializer] and fail every registration in the assembly. See the fromBarrier remarks.
+                if (fromBarrier)
+                {
+                    return;
+                }
                 throw new InvalidOperationException(
                     $"Archetype '{archetypeType.FullName}' (ID {attr.Id}) is loaded in two different AssemblyLoadContexts. "
                     + "The engine's static archetype registry can hold only one CLR type per archetype ID. "
