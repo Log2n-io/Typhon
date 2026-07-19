@@ -65,7 +65,7 @@ public class TyphonSetupTests
         services.AddLogging();
         services.AddTyphon(options =>
         {
-            options.DatabaseFile(DbPath("ditest")).Register<CompA>().RegisterArchetype<CompAArch>();
+            options.DatabaseFile(DbPath("ditest")).Register<CompA>();
             ConfigureWalForTest(options);
         });
 
@@ -86,7 +86,7 @@ public class TyphonSetupTests
         var services = new ServiceCollection();
         services.AddTyphon(options =>
         {
-            options.DatabaseFile(DbPath("nologtest")).Register<CompA>().RegisterArchetype<CompAArch>();
+            options.DatabaseFile(DbPath("nologtest")).Register<CompA>();
             ConfigureWalForTest(options);
         });
 
@@ -112,7 +112,7 @@ public class TyphonSetupTests
         ServiceProvider ownedProvider;
         var dbe = DatabaseEngine.Open(DbPath("opentest"), options =>
         {
-            options.Register<CompA>().RegisterArchetype<CompAArch>();
+            options.Register<CompA>();
             ConfigureWalForTest(options);
         });
         try
@@ -151,7 +151,7 @@ public class TyphonSetupTests
 
         var dbe = DatabaseEngine.Open(DbPath("teardownthrow"), options =>
         {
-            options.Register<CompA>().RegisterArchetype<CompAArch>();
+            options.Register<CompA>();
             ConfigureWalForTest(options);
         });
 
@@ -181,7 +181,6 @@ public class TyphonSetupTests
         {
             options
                 .Register<SetupSpatialBox>()
-                .RegisterArchetype<SetupSpatialArch>()
                 .ConfigureSpatialGrid(new SpatialGridConfig(Vector2.Zero, new Vector2(1000f, 1000f), cellSize: 50f));
             ConfigureWalForTest(options);
         });
@@ -213,7 +212,7 @@ public class TyphonSetupTests
         services.AddLogging();
         services.AddTyphon(options =>
         {
-            options.DatabaseFile(DbPath("multi")).Register<EcsPosition>().Register<EcsVelocity>().RegisterArchetype<EcsUnit>();
+            options.DatabaseFile(DbPath("multi")).Register<EcsPosition>().Register<EcsVelocity>();
             ConfigureWalForTest(options);
         });
 

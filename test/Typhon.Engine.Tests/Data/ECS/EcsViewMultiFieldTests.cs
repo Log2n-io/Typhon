@@ -1,4 +1,4 @@
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 
 namespace Typhon.Engine.Tests;
@@ -11,9 +11,6 @@ namespace Typhon.Engine.Tests;
 [NonParallelizable]
 class EcsViewMultiFieldTests : TestBase<EcsViewMultiFieldTests>
 {
-    [OneTimeSetUp]
-    public void OneTimeSetup() => Archetype<CompDArch>.Touch();
-
     private DatabaseEngine SetupEngine()
     {
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();

@@ -375,13 +375,13 @@ public static class ServiceCollectionExtensions
                     var engine = (DatabaseEngine)innerFactory(sp);
                     try
                     {
-                        // Order matters: register component storage on this engine, put the archetypes' shapes in the
-                        // registry, apply the spatial-grid config (needed by spatial archetypes), THEN wire per-archetype
-                        // state — InitializeArchetypes only wires archetypes that are in the registry and whose components
-                        // are all registered, and it consumes the pending spatial-grid config while building per-archetype
-                        // spatial state (so ConfigureSpatialGrid MUST land before it).
+                        // Order matters: register component storage on this engine, apply the spatial-grid config (needed by
+                        // spatial archetypes), THEN wire per-archetype state — InitializeArchetypes only wires archetypes that
+                        // are in the registry and whose components are all registered, and it consumes the pending spatial-grid
+                        // config while building per-archetype spatial state (so ConfigureSpatialGrid MUST land before it).
+                        // Archetype shapes are registered automatically at assembly load by the generated [ModuleInitializer]
+                        // barrier (feature #514), so there is no explicit archetype-registration step here anymore.
                         options.ApplyComponentRegistrations(engine);
-                        options.ApplyArchetypeRegistrations();
                         options.ApplySpatialGridConfig(engine);
                         engine.InitializeArchetypes();
                         RunPendingSeedsIfNeeded(engine, options);

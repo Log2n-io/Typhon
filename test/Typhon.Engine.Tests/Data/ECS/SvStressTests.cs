@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 using System.Threading;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
@@ -34,9 +34,6 @@ class SvStressArch : Archetype<SvStressArch>
 [NonParallelizable]
 class SvStressTests : TestBase<SvStressTests>
 {
-    [OneTimeSetUp]
-    public void OneTimeSetup() => Archetype<SvStressArch>.Touch();
-
     private DatabaseEngine SetupEngine()
     {
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();

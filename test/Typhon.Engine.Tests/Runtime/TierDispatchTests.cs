@@ -1,4 +1,4 @@
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using System;
 using System.Collections.Concurrent;
@@ -37,9 +37,6 @@ partial class TierUnit : Archetype<TierUnit>
 [NonParallelizable]
 class TierDispatchTests : TestBase<TierDispatchTests>
 {
-    [OneTimeSetUp]
-    public void OneTimeSetup() => Archetype<TierUnit>.Touch();
-
     private static TierPos PointAt(float x, float y) =>
         new() { Bounds = new AABB2F { MinX = x, MinY = y, MaxX = x, MaxY = y }, Data = 1.0f };
 

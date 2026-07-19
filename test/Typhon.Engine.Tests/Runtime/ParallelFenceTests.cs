@@ -20,9 +20,6 @@ namespace Typhon.Engine.Tests.Runtime;
 [TestFixture]
 class ParallelFenceTests : TestBase<ParallelFenceTests>
 {
-    [OneTimeSetUp]
-    public void OneTimeSetup() => Archetype<EcsUnit>.Touch();
-
     private DatabaseEngine SetupEngine()
     {
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();

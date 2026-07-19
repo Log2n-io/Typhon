@@ -444,9 +444,6 @@ internal static class ArchetypeRegistry
     /// <summary>Number of registered archetypes.</summary>
     public static int Count => RegisteredCount;
 
-    /// <summary>Whether the registry is frozen (no more registrations allowed).</summary>
-    public static bool IsFrozen => Frozen;
-
     /// <summary>Enumerate all registered archetype metadata (non-null entries). The Workbench Schema Inspector accesses this via <c>InternalsVisibleTo</c> —
     /// promoting to public would cascade to <see cref="ArchetypeMetadata"/> and its 50+ fields. The registry freezes after bootstrap, so the result is stable
     /// once the engine is initialized.</summary>
@@ -753,37 +750,6 @@ internal static class ArchetypeRegistry
     /// which is a one-time hit per registration.</para>
     /// </summary>
     private static readonly ConditionalWeakTable<Type, FieldInfo> MetadataFieldCache = new();
-
-    /// <summary>
-    /// Test-only escape hatch: clear all registry state unconditionally. Used by integration tests that need a known-empty baseline before constructing a new
-    /// engine. Production code MUST use the refcounted <see cref="UnregisterEngineUse"/> path — wholesale reset would clobber any other live engine.
-    /// </summary>
-    internal static void ResetForTests()
-    {
-        lock (RegistrationLock)
-        {
-            // Clear every cached `Archetype<T>._metadata` field BEFORE wiping the registry dicts — same reasoning as in `UnregisterEngineUse`: the per-generic
-            // static cache must be invalidated or a later `Archetype<T>.Touch()` returns stale metadata. CWT iteration is via KeyValuePair.
-            foreach (var kvp in MetadataFieldCache)
-            {
-                kvp.Value.SetValue(null, null);
-            }
-            MetadataFieldCache.Clear();
-
-            ComponentTypeIds.Clear();
-            ComponentTypeIdsBySchemaName.Clear();
-            ComponentTypeById.Clear();
-            MetadataByType.Clear();
-            PendingRegistrations.Clear();
-            ArchetypeRefcount.Clear();
-            ComponentRefcount.Clear();
-            Array.Clear(Archetypes);
-            NextComponentTypeId = 0;
-            RegisteredCount = 0;
-            MaxRegisteredArchetypeId = 0;
-            Frozen = false;
-        }
-    }
 
     /// <summary>
     /// Freeze the registry: build SubtreeArchetypeIds for each archetype, prevent further registration. Called by DatabaseEngine before the first transaction.

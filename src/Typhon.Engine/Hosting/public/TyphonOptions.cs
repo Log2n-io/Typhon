@@ -29,7 +29,6 @@ public sealed class TyphonOptions
     private readonly List<Action<ManagedPagedMMFOptions>> _storage = [];
     private readonly List<Action<DatabaseEngineOptions>> _engine = [];
     private readonly List<Action<DatabaseEngine>> _componentRegistrations = [];
-    private readonly List<Action> _archetypeRegistrations = [];
     private SpatialGridConfig? _spatialGrid;
     private readonly List<(int Revision, Action<Transaction> Step)> _seedSteps = [];
 
@@ -71,20 +70,6 @@ public sealed class TyphonOptions
     public TyphonOptions Register<T>() where T : unmanaged
     {
         _componentRegistrations.Add(static engine => engine.RegisterComponentFromAccessor<T>());
-        return this;
-    }
-
-    /// <summary>
-    /// Registers an archetype so entities of it can be spawned. AOT-safe: captures a closed-generic call to
-    /// <see cref="Archetype{TSelf}.Touch"/>, which puts the archetype's shape in the registry before the engine wires its
-    /// per-archetype storage. Register the archetype's component types separately with <see cref="Register{T}"/> — the two
-    /// are orthogonal (shape vs per-engine storage), and the engine only wires an archetype whose components are all
-    /// registered.
-    /// </summary>
-    /// <typeparam name="TArch">The archetype type.</typeparam>
-    public TyphonOptions RegisterArchetype<TArch>() where TArch : Archetype<TArch>
-    {
-        _archetypeRegistrations.Add(static () => Archetype<TArch>.Touch());
         return this;
     }
 
@@ -202,15 +187,6 @@ public sealed class TyphonOptions
         foreach (var register in _componentRegistrations)
         {
             register(engine);
-        }
-    }
-
-    /// <summary>Touches every captured <see cref="RegisterArchetype{TArch}"/> — must run before <c>InitializeArchetypes</c>.</summary>
-    internal void ApplyArchetypeRegistrations()
-    {
-        foreach (var touch in _archetypeRegistrations)
-        {
-            touch();
         }
     }
 

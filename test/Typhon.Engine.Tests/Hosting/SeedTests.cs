@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Runtime.InteropServices;
 using NUnit.Framework;
@@ -31,9 +31,6 @@ public class SeedTests
 {
     private string _dir;
 
-    [OneTimeSetUp]
-    public void OneTimeSetup() => Archetype<SeedItemArch>.Touch();
-
     [SetUp]
     public void SetUp()
     {
@@ -63,7 +60,6 @@ public class SeedTests
     // cache so the reopen/rebuild path doesn't hit the 2 MiB-default page-cache backpressure.
     private static TyphonOptions Common(TyphonOptions o) => o
         .Register<SeedItem>()
-        .RegisterArchetype<SeedItemArch>()
         .ConfigureEngine(e => e.Wal.UseFUA = false)
         .ConfigureStorage(s => s.DatabaseCacheSize = 64UL * 1024 * 1024);
 

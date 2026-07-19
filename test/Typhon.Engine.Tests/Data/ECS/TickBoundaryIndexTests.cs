@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using Typhon.Schema.Definition;
@@ -33,9 +33,6 @@ class TbSvArch : Archetype<TbSvArch>
 [NonParallelizable]
 class TickBoundaryIndexTests : TestBase<TickBoundaryIndexTests>
 {
-    [OneTimeSetUp]
-    public void OneTimeSetup() => Archetype<TbSvArch>.Touch();
-
     private DatabaseEngine SetupEngine()
     {
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();

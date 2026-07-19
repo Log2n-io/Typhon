@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Numerics;
 using System.Runtime.InteropServices;
@@ -63,9 +63,6 @@ public sealed class QuerySpecCompilerSpatialTests
     private string _tempDir;
     private ServiceProvider _sp;
     private DatabaseEngine _engine;
-
-    [OneTimeSetUp]
-    public void OneTimeSetup() => Archetype<SpatArch>.Touch();
 
     [SetUp]
     public void SetUp()

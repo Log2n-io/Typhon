@@ -4,25 +4,6 @@ using System;
 namespace Typhon.Schema.Definition;
 
 /// <summary>
-/// Implemented by source-generated <c>[Component]</c> structs to supply their schema shape to the engine without runtime reflection.
-/// The engine dispatches to <see cref="GetComponentSchema"/> in place of reflecting over the struct's fields and attributes; the returned
-/// <see cref="ComponentSchemaSpec"/> is pure data (offsets are computed once via <see cref="System.Runtime.InteropServices.Marshal.OffsetOf(System.Type,string)"/>
-/// inside the generated method — the only residual runtime call).
-/// </summary>
-/// <remarks>
-/// The generator emits an explicit-interface implementation on the component's <c>partial struct</c>. The engine reaches it by boxing
-/// <c>default(T)</c> once at registration time (never on a hot path). Hand-authored implementations are equally valid and drive the same
-/// engine build core that reflection does, so a source-generated component and a reflected one produce byte-identical definitions.
-/// </remarks>
-[PublicAPI]
-public interface IComponentSchemaProvider
-{
-    /// <summary>Returns the reflection-free schema description for this component.</summary>
-    /// <returns>The component's <see cref="ComponentSchemaSpec"/>.</returns>
-    ComponentSchemaSpec GetComponentSchema();
-}
-
-/// <summary>
 /// Pure-data description of one component revision's schema: its identity, storage/durability defaults, and ordered fields.
 /// Consumed by the engine's single build core (shared by reflection and the source generator) to produce the compiled component definition.
 /// </summary>

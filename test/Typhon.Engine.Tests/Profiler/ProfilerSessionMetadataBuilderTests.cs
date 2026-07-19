@@ -1,4 +1,4 @@
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using Typhon.Engine.Internals;
 
@@ -19,9 +19,6 @@ namespace Typhon.Engine.Tests.Profiler;
 [TestFixture]
 class ProfilerSessionMetadataBuilderTests : TestBase<ProfilerSessionMetadataBuilderTests>
 {
-    [OneTimeSetUp]
-    public void OneTimeSetup() => Archetype<EcsUnit>.Touch();
-
     private DatabaseEngine SetupEngine()
     {
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
