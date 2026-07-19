@@ -146,6 +146,24 @@
         <Compile Update="Indexing\internals\BTree.Remove.cs">
           <DependentUpon>BTree.cs</DependentUpon>
         </Compile>
+        <Compile Update="Ecs\public\DatabaseEngine.BulkLoad.cs">
+          <DependentUpon>DatabaseEngine.cs</DependentUpon>
+        </Compile>
+        <Compile Update="Ecs\public\DatabaseEngine.ClusterMigration.cs">
+          <DependentUpon>DatabaseEngine.cs</DependentUpon>
+        </Compile>
+        <Compile Update="Ecs\public\DatabaseEngine.Logging.cs">
+          <DependentUpon>DatabaseEngine.cs</DependentUpon>
+        </Compile>
+        <Compile Update="Ecs\public\DatabaseEngine.StorageDetail.cs">
+          <DependentUpon>DatabaseEngine.cs</DependentUpon>
+        </Compile>
+        <Compile Update="Ecs\public\DatabaseEngine.StorageIntrospection.cs">
+          <DependentUpon>DatabaseEngine.cs</DependentUpon>
+        </Compile>
+        <Compile Update="Ecs\public\DatabaseEngine.TickFence.cs">
+          <DependentUpon>DatabaseEngine.cs</DependentUpon>
+        </Compile>
     </ItemGroup>
 
 </Project>
