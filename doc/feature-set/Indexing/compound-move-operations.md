@@ -44,7 +44,7 @@ struct Unit
     public int Status;
 }
 
-[Archetype(7)]
+[Archetype]
 partial class UnitArchetype : Archetype<UnitArchetype>
 {
     public static readonly Comp<Unit> U = Register<Unit>();

@@ -372,38 +372,6 @@ internal static class ArchetypeRegistry
     }
 
     /// <summary>
-    /// <b>Superseded</b> by <see cref="UnregisterEngineUse"/> / <see cref="RegisterEngineUse"/>; kept in place to avoid a cascade change in the call sites
-    /// this PR doesn't touch. Removal is tracked as a follow-up.
-    ///
-    /// <para>Historical rationale (still relevant when this method is invoked): rebuild every archetype's slot→Type cache from the current
-    /// <c>ComponentTypeById</c> map. Was the only knob available before the refcounted lifecycle: when the Workbench loaded a schema DLL into a fresh
-    /// AssemblyLoadContext on top of a registry already populated by a prior ALC, <c>EnsureFinalized</c> short-circuited on the existing archetype ids and
-    /// left <c>_slotToComponentType</c> pointing at the first ALC's <see cref="Type"/> instances. This method propagated the latest types into every affected
-    /// archetype.</para>
-    ///
-    /// <para>With the refcounted lifecycle in place, sessions release their registry entries on dispose so the next session starts clean — eliminating the
-    /// cross-ALC slot-staleness this method patched over. Existing callers can keep invoking it (idempotent + cheap), but new code should rely on the lifecycle
-    /// path.</para>
-    /// </summary>
-    public static void RefreshSlotTypes()
-    {
-        for (int i = 0; i < Archetypes.Length; i++)
-        {
-            var meta = Archetypes[i];
-            if (meta == null || meta._slotToComponentType == null)
-            {
-                continue;
-            }
-            var ids = meta._componentTypeIds;
-            var slots = meta._slotToComponentType;
-            for (int s = 0; s < slots.Length; s++)
-            {
-                slots[s] = ComponentTypeById.GetValueOrDefault(ids[s]);
-            }
-        }
-    }
-
-    /// <summary>
     /// Walk the base type chain to find the direct parent archetype type.
     /// Returns null if this is a root archetype (inherits directly from Archetype&lt;TSelf&gt;).
     /// </summary>

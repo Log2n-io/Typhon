@@ -219,13 +219,9 @@ public sealed class EngineLifecycle : IDisposable
                                 Detail: modEx.ToString())];
                         }
                     }
-                    // After a reopen, every session spins up a fresh collectible ALC — the schema DLL's component/archetype
-                    // types are *new* CLR Type instances even when the file is byte-identical. DeclareComponent already
-                    // refreshes the global Type→componentTypeId map through its schema-name dedup path, but EnsureFinalized
-                    // short-circuits on pre-populated archetype slots, leaving _slotToComponentType pointing at the first
-                    // ALC's Type instances. RefreshSlotTypes propagates the current ALC's Types into every archetype so
-                    // reflection-equality lookups (Workbench's GetArchetypesForComponent, etc.) match the session's engine.
-                    Typhon.Engine.Internals.ArchetypeRegistry.RefreshSlotTypes();
+                    // Cross-ALC slot-Type freshness is handled by the refcounted engine-use lifecycle (#514): UnregisterEngineUse clears a collectible ALC's
+                    // registry entries on session dispose, so the next session's RunModuleConstructor barrier repopulates the slot map with THIS ALC's Types —
+                    // no manual RefreshSlotTypes pass needed (retired, #529).
                     schemaDllTicks = System.Diagnostics.Stopwatch.GetTimestamp() - schemaStart;
                     try
                     {

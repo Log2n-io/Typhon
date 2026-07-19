@@ -312,7 +312,7 @@ public static class ServiceCollectionExtensions
     /// </summary>
     /// <example>
     /// <code>
-    /// services.AddTyphon(o => o.DatabaseFile("game.typhon").Register&lt;Position&gt;().RegisterArchetype&lt;Player&gt;());
+    /// services.AddTyphon(o => o.DatabaseFile("game.typhon").Register&lt;Position&gt;()); // archetypes self-register at assembly load (#514)
     /// </code>
     /// </example>
     public static IServiceCollection AddTyphon(this IServiceCollection services, Action<TyphonOptions> configure)

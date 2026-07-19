@@ -36,7 +36,7 @@ struct Player
     public String64 Name;
 }
 
-[Archetype(42)]
+[Archetype]
 partial class PlayerArchetype : Archetype<PlayerArchetype>
 {
     public static readonly Comp<Player> P = Register<Player>();

@@ -39,7 +39,7 @@ public struct InventoryItem
     public int Quantity;
 }
 
-[Archetype(10)]
+[Archetype]
 public class InventoryArch : Archetype<InventoryArch>
 {
     public static readonly Comp<InventoryItem> Data = Register<InventoryItem>();

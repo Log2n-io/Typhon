@@ -31,7 +31,7 @@ allocation. Any write entry point on the returned transaction throws immediately
 [Component("Game.Position", 1, StorageMode = StorageMode.SingleVersion)]
 struct Position { public float X, Y, Z; }
 
-[Archetype(42)]
+[Archetype]
 partial class Unit : Archetype<Unit>
 {
     public static readonly Comp<Position> Pos = Register<Position>();

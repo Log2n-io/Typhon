@@ -39,7 +39,7 @@ API; the rest are strong recommendations.
 
 | # | Do | Don't |
 |---|----|-------|
-| 1 | Declare `[Component("Name", rev)]` / `[Archetype(id)]` types in **any namespace** — including the global namespace of a top-level-statements file | Assume they *must* be wrapped in a named `namespace` — the generator supports both; a named one is just tidier for a real project |
+| 1 | Declare `[Component("Name", rev)]` / `[Archetype]` types in **any namespace** — including the global namespace of a top-level-statements file | Assume they *must* be wrapped in a named `namespace` — the generator supports both; a named one is just tidier for a real project |
 | 2 | Make components **≥ 8 bytes** with **`public`** fields | Use a single 4-byte field, or `private` padding — the schema sizes on public fields, not `sizeof(T)` |
 | 3 | Query with the fluent builder `tx.Query<TArch>().Where<TComp>(x => …).Count()` | Write LINQ-to-SQL style `tx.Query(x => x.Score >= 50)` — the filtered component is a separate generic argument |
 | 4 | **Read/mutate each entity via `tx.Open(id)`** (query to *find*, open to *read*) | Read directly off the reference the query enumerator yields |
@@ -71,7 +71,8 @@ public struct UnitData
 }
 
 // an archetype is the entity's shape: partial class : Archetype<TSelf>, one Comp<T> handle per component
-[Archetype(1)]
+// no id arg — identity is the CLR type name (or [Archetype(Name="…")]); it self-registers at assembly load
+[Archetype]
 public sealed partial class Unit : Archetype<Unit>
 {
     public static readonly Comp<UnitData> Data = Register<UnitData>();
@@ -85,8 +86,7 @@ using Typhon.Engine;
 using Skirmish;
 
 using var dbe = DatabaseEngine.Open("game.typhon", o => o   // (6) bootstrap
-    .Register<UnitData>()
-    .RegisterArchetype<Unit>());
+    .Register<UnitData>());   // components register explicitly; archetypes self-register at assembly load — no RegisterArchetype call
 
 // (5) spawn inside a transaction; (8) Commit
 EntityId id;
@@ -126,9 +126,9 @@ Typhon is an ECS database (not SQL) from the `Typhon` NuGet package. Rules:
 - Model data as `[Component("Name", 1)]` blittable structs (>= 8 bytes, public fields) — the name + revision
   are REQUIRED attribute args. Add `using Typhon.Schema.Definition;`. (Any namespace works, including the
   global namespace of a top-level-statements file.)
-- An archetype is `[Archetype(1)] partial class Foo : Archetype<Foo>` (the id arg is REQUIRED) with
-  `public static readonly Comp<T> X = Register<T>();`.
-- Open the engine with DatabaseEngine.Open(path, o => o.Register<T>().RegisterArchetype<Foo>()).
+- An archetype is `[Archetype] partial class Foo : Archetype<Foo>` (no id arg — identity is the type name, or
+  `[Archetype(Name="…")]`) with `public static readonly Comp<T> X = Register<T>();`. Archetypes self-register at assembly load.
+- Open the engine with DatabaseEngine.Open(path, o => o.Register<T>()) — register components; archetypes need no registration call.
 - All changes happen in a transaction: `using var tx = dbe.CreateQuickTransaction(); … tx.Commit();`.
   Spawn: `tx.Spawn<Foo>(Foo.X.Set(new T{…}))`. Mutate: `tx.OpenMut(id).Write(Foo.X).Field = …`.
 - Query with the fluent view API: `tx.Query<Foo>().Where<T>(x => …).Count()` — NOT LINQ. To read an

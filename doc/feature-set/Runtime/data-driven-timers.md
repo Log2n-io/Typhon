@@ -46,7 +46,7 @@ public struct RespawnData
     public EntityId PlayerId;
 }
 
-[Archetype(300)]
+[Archetype]
 public class RespawnTimer : Archetype<RespawnTimer>
 {
     public static readonly Comp<ScheduleAt> Timer = Register<ScheduleAt>();

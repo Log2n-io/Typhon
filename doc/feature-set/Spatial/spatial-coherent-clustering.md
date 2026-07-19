@@ -40,7 +40,7 @@ public struct AntPos
     public AABB2F Bounds;
 }
 
-[Archetype(50)]
+[Archetype]
 public partial class Ant : Archetype<Ant>
 {
     public static readonly Comp<AntPos> Pos = Register<AntPos>();

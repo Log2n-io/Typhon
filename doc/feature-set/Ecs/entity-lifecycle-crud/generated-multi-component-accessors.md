@@ -29,14 +29,14 @@ component first, routed through the declaring parent class's `Comp<T>` handle fo
 ## 💻 Usage
 
 ```csharp
-[Archetype(100)]
+[Archetype]
 partial class Unit : Archetype<Unit>           // 'partial' required — non-partial archetypes are silently skipped
 {
     public static readonly Comp<Position> Pos = Register<Position>();
     public static readonly Comp<Velocity> Vel = Register<Velocity>();
 }
 
-[Archetype(101)]
+[Archetype]
 partial class Soldier : Archetype<Soldier, Unit>
 {
     public static readonly Comp<Health> Health = Register<Health>();

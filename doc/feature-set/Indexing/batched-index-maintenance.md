@@ -35,7 +35,7 @@ so index operations during a bulk commit still land in entity-iteration order to
 
 ```csharp
 [Component]
-public partial struct ItemData
+public struct ItemData
 {
     [Index(AllowMultiple = true)] public int ItemTypeId;
     [Index(AllowMultiple = true)] public int Rarity;

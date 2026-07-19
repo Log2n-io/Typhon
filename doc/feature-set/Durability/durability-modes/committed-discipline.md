@@ -38,7 +38,7 @@ transaction is commit-staged. Rollback is O(1): discard the arena, HEAD was neve
            DefaultDiscipline = DurabilityDiscipline.Commit)]   // optional: every tx touching this escalates
 struct Wallet { public long Gold; }
 
-[Archetype(42)]
+[Archetype]
 partial class Player : Archetype<Player>
 {
     public static readonly Comp<Position> Pos = Register<Position>();

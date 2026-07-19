@@ -37,7 +37,7 @@ every `SingleVersion` write that transaction makes is staged the same way.
            DefaultDiscipline = DurabilityDiscipline.Commit)]   // optional: every tx touching this escalates
 struct Wallet { public long Gold; }
 
-[Archetype(42)]
+[Archetype]
 partial class Player : Archetype<Player>
 {
     public static readonly Comp<Position> Pos = Register<Position>();

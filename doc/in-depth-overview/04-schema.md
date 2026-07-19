@@ -122,7 +122,7 @@ public class Field
 | `[Index(AllowMultiple = false, OnParentDelete = CascadeAction.None)]` | field | Build a B+Tree index on this field. `AllowMultiple` allows non-unique keys (multi-value index). |
 | `[SpatialIndex(margin, cellSize, Mode = Dynamic, Category = uint.MaxValue)]` | field (AABB / BSphere) | Build a spatial index (R-Tree). At most one per component. Not allowed on Transient. |
 | `[ForeignKey(typeof(TargetComponent))]` | `long` field | Marks the field as an FK reference to another component's PK. |
-| `[Archetype(id, revision = 1, alias = null)]` | class | Marks an ECS archetype with a stable 12-bit id (see [06-ecs](06-ecs.md)). |
+| `[Archetype(revision = 1, alias = null)]` + `Name = ...` + `PreviousName = ...` | class | Marks an ECS archetype. Identity is the CLR type name (or `Name = "…"`); the engine auto-assigns a per-process catalog id + a per-DB routing id — no numeric id is set in source. `PreviousName` keeps identity stable across a rename, matched on reopen (see [06-ecs](06-ecs.md)). |
 
 ---
 
@@ -185,7 +185,7 @@ The `FieldR1` entries for a given `ComponentR1` are stored in its `Fields` `Comp
 public struct ArchetypeR1
 {
     public String64 Name;
-    public ushort ArchetypeId;                       // 12-bit id from [Archetype(Id=N)]
+    public ushort ArchetypeId;                       // per-DB archetype routing id (16-bit, engine-assigned, re-matched by Name on reopen)
     public ushort ParentArchetypeId;                 // 0xFFFF = no parent
     public byte ComponentCount;
     public int Revision;                             // archetype schema revision
