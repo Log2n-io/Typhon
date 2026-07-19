@@ -27,7 +27,7 @@ public struct Player
     [Index] public int Gold;
 }
 
-[Archetype(10)]
+[Archetype]
 public class PlayerArch : Archetype<PlayerArch>
 {
     public static readonly Comp<Player> Data = Register<Player>();

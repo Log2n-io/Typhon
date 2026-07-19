@@ -112,7 +112,7 @@ Terms that show up across multiple chapters. Each entry points to where the type
 | **`Deadline`** | Monotonic absolute timeout (8 B struct) | [01-foundation](01-foundation.md) |
 | **`DurabilityDiscipline`** | Per-transaction escalation for `SingleVersion` components: `TickFence` (default) or `Commit` (atomic, zero-loss, O(1) rollback) | [06-ecs](06-ecs.md), [11-durability](11-durability.md) |
 | **DurabilityMode** | `Deferred` / `GroupCommit` / `Immediate` — per-UoW persistence policy | [08-transactions](08-transactions.md), [11-durability](11-durability.md) |
-| **`EntityId`** | 64-bit ID: 52-bit monotonic key + 12-bit ArchetypeId | [06-ecs](06-ecs.md) |
+| **`EntityId`** | 64-bit ID: 48-bit monotonic key + 16-bit archetype routing id | [06-ecs](06-ecs.md) |
 | **`EntityLink<T>`** | Typed entity reference (polymorphic over archetype hierarchy) | [06-ecs](06-ecs.md) |
 | **`EntityRef`** | `ref struct` working handle returned by `Open`/`OpenMut` | [06-ecs](06-ecs.md) |
 | **Epoch / `EpochGuard`** | Per-thread page protection — pages tagged ≥ MinActiveEpoch can't be evicted | [01-foundation](01-foundation.md) |

@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using Typhon.Schema.Definition;
@@ -16,7 +16,7 @@ struct Q504Data
     public Q504Data(int value) { Value = value; Pad = 0; }
 }
 
-[Archetype(504)]
+[Archetype]
 partial class Q504Arch : Archetype<Q504Arch>
 {
     public static readonly Comp<Q504Data> Data = Register<Q504Data>();
@@ -33,7 +33,6 @@ class EcsQueryVersionedReadTests : TestBase<EcsQueryVersionedReadTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<Q504Arch>.Touch();
     }
 
     private DatabaseEngine SetupEngine()

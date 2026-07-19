@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using Typhon.Schema.Definition;
@@ -16,11 +16,6 @@ class EcsSpawnMvccTests : TestBase<EcsSpawnMvccTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<EcsUnit>.Touch();
-        Archetype<EcsSoldier>.Touch();
-        Archetype<SvTestArchetype>.Touch();
-        Archetype<TransientTestArchetype>.Touch();
-        Archetype<MixedModeArchetype>.Touch();
     }
 
     private DatabaseEngine SetupEngine()
@@ -53,7 +48,7 @@ class EcsSpawnMvccTests : TestBase<EcsSpawnMvccTests>
         // After commit, EntityMap should contain the entity with finalized BornTSN
         var posTable = dbe.GetComponentTable<EcsPosition>();
         Assert.That(posTable.StorageMode, Is.EqualTo(StorageMode.Versioned));
-        var engineState = dbe._archetypeStates[entityId.ArchetypeId];
+        var engineState = dbe._stateByRouting[entityId.ArchetypeId];
         Assert.That(engineState.EntityMap.EntryCount, Is.GreaterThan(0),
             "EntityMap should contain entry after Versioned ECS Spawn+Commit");
     }

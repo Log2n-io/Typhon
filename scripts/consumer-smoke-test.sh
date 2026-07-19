@@ -82,7 +82,7 @@ public struct Health
     public Health(int current, int max) { Current = current; Max = max; }
 }
 
-[Archetype(1)]
+[Archetype]
 public sealed partial class Unit : Archetype<Unit>
 {
     public static readonly Comp<Position> Position = Register<Position>();
@@ -98,8 +98,7 @@ using ConsumerSmoke;
 
 using var dbe = DatabaseEngine.Open("smoke.typhon", o => o
     .Register<Position>()
-    .Register<Health>()
-    .RegisterArchetype<Unit>());
+    .Register<Health>());   // archetypes self-register at assembly load (#514) — no RegisterArchetype call
 
 EntityId soldier;
 using (var tx = dbe.CreateQuickTransaction())

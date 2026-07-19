@@ -1,4 +1,4 @@
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using NUnit.Framework;
 using System;
@@ -42,7 +42,7 @@ public struct ClientTestHealth
     }
 }
 
-[Archetype(200)]
+[Archetype]
 partial class ClientTestUnit : Archetype<ClientTestUnit>
 {
     public static readonly Comp<ClientTestPosition> Position = Register<ClientTestPosition>();
@@ -64,7 +64,6 @@ public class TyphonConnectionIntegrationTests
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<ClientTestUnit>.Touch();
     }
 
     [SetUp]

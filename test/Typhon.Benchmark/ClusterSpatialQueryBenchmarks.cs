@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using BenchmarkDotNet.Attributes;
@@ -39,7 +39,7 @@ struct ClQBenchPos
     public AABB2F Bounds;
 }
 
-[Archetype(550)]
+[Archetype]
 partial class ClQBenchUnit : Archetype<ClQBenchUnit>
 {
     public static readonly Comp<ClQBenchPos> Pos = Register<ClQBenchPos>();
@@ -78,7 +78,6 @@ public class ClusterAabbQueryBenchmarks : IDisposable
     [GlobalSetup]
     public void Setup()
     {
-        Archetype<ClQBenchUnit>.Touch();
 
         var sc = new ServiceCollection();
         sc.AddLogging(b => b.SetMinimumLevel(LogLevel.Critical))
@@ -245,7 +244,6 @@ public class ClusterRadiusQueryBenchmarks : IDisposable
     [GlobalSetup]
     public void Setup()
     {
-        Archetype<ClQBenchUnit>.Touch();
 
         var sc = new ServiceCollection();
         sc.AddLogging(b => b.SetMinimumLevel(LogLevel.Critical))

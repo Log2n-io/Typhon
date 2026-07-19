@@ -1,4 +1,4 @@
-using System.Runtime.CompilerServices;
+﻿using System.Runtime.CompilerServices;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 
@@ -22,7 +22,6 @@ class QuerySourceLocationTests : TestBase<QuerySourceLocationTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<EcsUnit>.Touch();
     }
 
     private DatabaseEngine SetupEngine()

@@ -10,6 +10,9 @@
         <ProjectReference Include="..\..\src\Typhon.Shell.Extensibility\Typhon.Shell.Extensibility.csproj" />
         <ProjectReference Include="..\..\src\Typhon.Engine\Typhon.Engine.csproj" />
         <ProjectReference Include="..\..\test\Typhon.ARPG.Schema\Typhon.ARPG.Schema.csproj" />
+        <!-- #514: the source generator emits the per-assembly [ModuleInitializer] that registers this shell's own archetypes/components at load
+             (the barrier that replaces manual Archetype<T>.Touch() calls). -->
+        <ProjectReference Include="..\..\src\Typhon.Generators.Consumer\Typhon.Generators.Consumer.csproj" ReferenceOutputAssembly="false" OutputItemType="Analyzer" />
     </ItemGroup>
 
 </Project>

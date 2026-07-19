@@ -1,4 +1,4 @@
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using System;
 using System.Numerics;
@@ -15,9 +15,6 @@ namespace Typhon.Engine.Tests.Runtime;
 [NonParallelizable]
 class DormancyTests : TestBase<DormancyTests>
 {
-    [OneTimeSetUp]
-    public void OneTimeSetup() => Archetype<TierUnit>.Touch();
-
     [TearDown]
     public void TearDown() => DormancyReporter.Reset();
 

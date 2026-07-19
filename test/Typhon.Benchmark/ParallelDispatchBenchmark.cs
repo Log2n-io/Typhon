@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
@@ -19,7 +19,7 @@ struct PdSvData
     [Field] public long Timestamp;
 }
 
-[Archetype(550)]
+[Archetype]
 class PdSvArch : Archetype<PdSvArch>
 {
     public static readonly Comp<PdSvData> Data = Register<PdSvData>();
@@ -34,7 +34,7 @@ struct PdTransientData
     [Field] public long Timestamp;
 }
 
-[Archetype(551)]
+[Archetype]
 class PdTransientArch : Archetype<PdTransientArch>
 {
     public static readonly Comp<PdTransientData> Data = Register<PdTransientData>();
@@ -473,9 +473,6 @@ static class ParallelDispatchBenchmark
             dbe.RegisterComponentFromAccessor<BenchComp>();
             dbe.RegisterComponentFromAccessor<PdSvData>();
             dbe.RegisterComponentFromAccessor<PdTransientData>();
-            Archetype<BenchArch>.Touch();
-            Archetype<PdSvArch>.Touch();
-            Archetype<PdTransientArch>.Touch();
 
             dbe.InitializeArchetypes();
 

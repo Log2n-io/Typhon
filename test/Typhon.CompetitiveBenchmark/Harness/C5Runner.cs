@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Buffers.Binary;
 using System.Diagnostics;
 using System.IO;
@@ -64,7 +64,6 @@ public static class C5Runner
 
     private static (double qps, double avgHits) MeasureTyphon(int[] px, int[] py, int[] qx, int[] qy, int count, int queries)
     {
-        Archetype<SpArch>.Touch();
         var sc = new ServiceCollection();
         sc.AddLogging(b => b.SetMinimumLevel(LogLevel.Critical))
           .AddResourceRegistry().AddMemoryAllocator().AddEpochManager()

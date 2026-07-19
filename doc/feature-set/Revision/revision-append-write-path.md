@@ -32,7 +32,7 @@ the writing transaction's TSN and Unit-of-Work id and marked provisional — inv
 [Component("Game.Stats", 1)]                 // StorageMode.Versioned is the default
 struct Stats { public int Hp; public int Mana; }
 
-[Archetype(7)]
+[Archetype]
 partial class Hero : Archetype<Hero>
 {
     public static readonly Comp<Stats> Stats = Register<Stats>();

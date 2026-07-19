@@ -34,7 +34,7 @@ public struct AnimState
     public float Time;
 }
 
-[Archetype(12)]
+[Archetype]
 partial class Actor : Archetype<Actor>
 {
     public static readonly Comp<AnimState> Anim = Register<AnimState>();

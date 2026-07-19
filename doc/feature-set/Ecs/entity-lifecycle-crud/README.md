@@ -35,7 +35,7 @@ struct Position { public float X, Y, Z; }
 [Component("Game.UnitStats", 1, StorageMode = StorageMode.Versioned)]
 struct UnitStats { public int Health, MaxHealth; }
 
-[Archetype(42)]
+[Archetype]
 partial class Unit : Archetype<Unit>
 {
     public static readonly Comp<Position> Pos = Register<Position>();

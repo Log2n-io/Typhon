@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using Typhon.Schema.Definition;
@@ -26,26 +26,25 @@ struct ItemData
     public int Weight;
 }
 
-[Archetype(700)]
+[Archetype]
 class CascadeBag : Archetype<CascadeBag>
 {
     public static readonly Comp<BagData> Bag = Register<BagData>();
 }
 
-[Archetype(701)]
+[Archetype]
 class CascadeItem : Archetype<CascadeItem>
 {
     public static readonly Comp<ItemData> Item = Register<ItemData>();
 }
 
-[NonParallelizable]
+// [NonParallelizable] removed (#514 Phase 3): it was an incomplete mitigation for the cascade-diamond registry race (Face B).
+// The cascade graph is now built once under the registration lock inside ArchetypeRegistry.Freeze, so these fixtures are parallel-safe.
 class CascadeDeleteTests : TestBase<CascadeDeleteTests>
 {
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<CascadeBag>.Touch();
-        Archetype<CascadeItem>.Touch();
     }
 
     private DatabaseEngine SetupEngine()
@@ -70,20 +69,20 @@ class CascadeDeleteTests : TestBase<CascadeDeleteTests>
         // Build cascade graph (requires InitializeArchetypes or explicit call)
         using var dbe = SetupEngine();
 
-        var bagMeta = ArchetypeRegistry.GetMetadata(700);
+        var bagMeta = ArchetypeRegistry.GetMetadata<CascadeBag>();
         Assert.That(bagMeta, Is.Not.Null);
         Assert.That(bagMeta._cascadeTargets, Is.Not.Null);
         Assert.That(bagMeta._cascadeTargets.Count, Is.GreaterThanOrEqualTo(1));
 
         var target = bagMeta._cascadeTargets[0];
-        Assert.That(target.ChildArchetypeId, Is.EqualTo(701)); // CascadeItem
+        Assert.That(target.ChildArchetypeId, Is.EqualTo(ArchetypeRegistry.GetMetadata<CascadeItem>().ArchetypeId));
     }
 
     [Test]
     public void CascadeGraph_ItemHasNoCascadeTargets()
     {
         using var dbe = SetupEngine();
-        var itemMeta = ArchetypeRegistry.GetMetadata(701);
+        var itemMeta = ArchetypeRegistry.GetMetadata<CascadeItem>();
         Assert.That(itemMeta, Is.Not.Null);
         // Item has no children with cascade delete
         Assert.That(itemMeta._cascadeTargets == null || itemMeta._cascadeTargets.Count == 0, Is.True);

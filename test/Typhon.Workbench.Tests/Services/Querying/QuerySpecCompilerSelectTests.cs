@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -33,7 +33,7 @@ public struct SelB
     [Field] public int Bx;
 }
 
-[Archetype(3011)]
+[Archetype]
 partial class SelArch : Archetype<SelArch>
 {
     public static readonly Comp<SelA> A = Register<SelA>();
@@ -59,9 +59,6 @@ public sealed class QuerySpecCompilerSelectTests
     private string _tempDir;
     private ServiceProvider _sp;
     private DatabaseEngine _engine;
-
-    [OneTimeSetUp]
-    public void OneTimeSetup() => Archetype<SelArch>.Touch();
 
     [SetUp]
     public void SetUp()

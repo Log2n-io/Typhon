@@ -1,4 +1,4 @@
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using NUnit.Framework;
 using Serilog;
@@ -24,12 +24,6 @@ class WalIntegrationTests : TestBase
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<CompAArch>.Touch();
-        Archetype<CompDArch>.Touch();
-        Archetype<CompABCArch>.Touch();
-        Archetype<CascadeBag>.Touch();
-        Archetype<CascadeItem>.Touch();
-        Archetype<TbSvArch>.Touch();
     }
 
     private ServiceProvider _serviceProvider;

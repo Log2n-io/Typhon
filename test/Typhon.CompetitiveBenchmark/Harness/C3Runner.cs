@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Buffers.Binary;
 using System.IO;
 using LightningDB;
@@ -50,7 +50,6 @@ public static class C3Runner
 
     private static double MeasureTyphon(int count)
     {
-        Archetype<TripArch>.Touch();
         var sc = new ServiceCollection();
         sc.AddLogging(b => b.SetMinimumLevel(LogLevel.Critical))
           .AddResourceRegistry().AddMemoryAllocator().AddEpochManager()

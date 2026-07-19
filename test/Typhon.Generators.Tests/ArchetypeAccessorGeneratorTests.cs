@@ -1,4 +1,4 @@
-using System.Collections.Immutable;
+﻿using System.Collections.Immutable;
 using System.Linq;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
@@ -72,7 +72,7 @@ using Typhon.Engine;
 using Typhon.Schema.Definition;
 
 [Component(""Repro.Data"", 1)] public struct Data { public int Value; public int Pad; }
-[Archetype(1)] public sealed partial class E : Archetype<E> { public static readonly Comp<Data> D = Register<Data>(); }
+[Archetype] public sealed partial class E : Archetype<E> { public static readonly Comp<Data> D = Register<Data>(); }
 ";
         var (sources, parseErrors) = Run(source);
 
@@ -98,7 +98,7 @@ using Typhon.Schema.Definition;
 namespace Foo
 {
     [Component(""Repro.Data"", 1)] public struct Data { public int Value; public int Pad; }
-    [Archetype(1)] public sealed partial class E : Archetype<E> { public static readonly Comp<Data> D = Register<Data>(); }
+    [Archetype] public sealed partial class E : Archetype<E> { public static readonly Comp<Data> D = Register<Data>(); }
 }
 ";
         var (sources, parseErrors) = Run(source);

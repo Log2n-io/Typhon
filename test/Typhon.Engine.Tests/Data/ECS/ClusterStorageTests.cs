@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
@@ -24,7 +24,7 @@ struct ClMovement
     public ClMovement(float vx, float vy) { VX = vx; VY = vy; }
 }
 
-[Archetype(520)]
+[Archetype]
 partial class ClAnt : Archetype<ClAnt>
 {
     public static readonly Comp<ClPosition> Position = Register<ClPosition>();
@@ -40,7 +40,7 @@ struct ClVHealth
     public ClVHealth(int cur, int max) { Current = cur; Max = max; }
 }
 
-[Archetype(521)]
+[Archetype]
 partial class ClUnit : Archetype<ClUnit>
 {
     public static readonly Comp<ClVHealth> Health = Register<ClVHealth>();
@@ -53,8 +53,6 @@ class ClusterStorageTests : TestBase<ClusterStorageTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<ClAnt>.Touch();
-        Archetype<ClUnit>.Touch();
     }
 
     private DatabaseEngine SetupClusterEngine()

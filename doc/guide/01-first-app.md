@@ -23,12 +23,12 @@ using Skirmish;                 // the component + archetype types declared at t
 
 // ── 3. Open the engine (once, at startup) ──────────────────────────────
 // One call: names the on-disk database (a "skirmish.typhon" directory in the
-// working folder), registers your components + archetype, and returns a
-// ready-to-use engine. `using var` flushes and releases the file lock at scope end.
+// working folder), registers your components (your archetype self-registers at
+// assembly load), and returns a ready-to-use engine. `using var` flushes and
+// releases the file lock at scope end.
 using var dbe = DatabaseEngine.Open("skirmish.typhon", o => o
     .Register<Position>()
-    .Register<Health>()
-    .RegisterArchetype<Unit>());
+    .Register<Health>());
 
 // ── 4. Spawn an entity (a write — needs a transaction) ─────────────────
 EntityId soldier;
@@ -80,7 +80,7 @@ namespace Skirmish
     }
 
     // ── 2. Declare an archetype (the shape of an entity) ───────────────
-    [Archetype(1)]
+    [Archetype]
     public sealed partial class Unit : Archetype<Unit>
     {
         public static readonly Comp<Position> Position = Register<Position>();
@@ -106,7 +106,7 @@ There's no base class, no interface — a component knows nothing about the engi
 ### 2. An archetype is the shape of an entity
 
 ```csharp
-[Archetype(1)]
+[Archetype]
 public sealed partial class Unit : Archetype<Unit>
 {
     public static readonly Comp<Position> Position = Register<Position>();
@@ -114,14 +114,14 @@ public sealed partial class Unit : Archetype<Unit>
 }
 ```
 
-- `[Archetype(1)]` gives it a stable numeric id.
+- `[Archetype]` marks it an archetype. Its identity is the CLR type name `Unit` (or `[Archetype(Name="...")]`); the engine auto-assigns a per-process catalog id and a persisted per-DB routing id — you never pick a number.
 - `Archetype<Unit>` (the class names itself) gives it a compile-time identity.
 - Each `Register<T>()` declares a component slot; the static `Comp<T>` handle (`Unit.Position`) is how you refer to that slot when spawning, reading, and querying.
-- **`partial` matters:** marking the archetype `partial` lets Typhon's source generator add typed bulk accessors (`Unit.ReadAll` / `ReadWriteAll`). We don't use them in this chapter — they need the generator wired into your project, a [ch.2](02-modeling.md) topic — but adding `partial` now costs nothing and saves a change later.
+- **`partial` matters:** Typhon's source generator ships *inside* the `Typhon` package, so it's already active — it's what emits the module-init barrier that self-registers your archetype (above). On a `partial` archetype it *also* generates typed bulk accessors (`Unit.ReadAll` / `ReadWriteAll`); we don't use those until [ch.2](02-modeling.md), but keeping the class `partial` now costs nothing and lets the generator add them without a later change.
 
 ### 3. Open the engine
 
-`DatabaseEngine.Open` is the one-line setup. It names the on-disk database (the path's stem becomes the database name — here a `skirmish.typhon` directory in the working folder), registers your schema, and hands back a **ready-to-use** engine. `Register<T>()` registers each component type and creates its storage; `RegisterArchetype<Unit>()` makes the archetype's shape known and wires its slots to that storage — so you can `Spawn` immediately, with no separate init call. Do this **once at startup** and hand `dbe` around — there's exactly one engine per process. `using var` disposes it (flushing dirty pages, releasing the file lock) at the end of scope.
+`DatabaseEngine.Open` is the one-line setup. It names the on-disk database (the path's stem becomes the database name — here a `skirmish.typhon` directory in the working folder), registers your schema, and hands back a **ready-to-use** engine. `Register<T>()` registers each component type and creates its storage; the archetype needs no registration call — it self-registers at assembly load via a generated module-init barrier, and its slots wire to that storage once its components are registered — so you can `Spawn` immediately, with no separate init call. Do this **once at startup** and hand `dbe` around — there's exactly one engine per process. `using var` disposes it (flushing dirty pages, releasing the file lock) at the end of scope.
 
 > 💡 **Hosting in a DI app?** The same fluent options work through `services.AddTyphon(o => o.DatabaseFile("skirmish.typhon").Register<Position>()…)`, which composes the engine into your service collection and registers it as an observable resource; `Open()` is the standalone equivalent that owns a private container for you. Under the hood the engine is a composition of independently-configurable subsystems (page cache, allocator, timers) — the `Configure*` methods on the options (`ConfigureStorage`, `ConfigureEngine`, …) let you tune any of them when you need to. (Using `AddTyphon` directly, you don't even need to call `AddLogging()` first — it registers a no-op logging backend for you, and defers to your own if you configured one.)
 
@@ -129,7 +129,7 @@ public sealed partial class Unit : Archetype<Unit>
 >
 > ```csharp
 > using var dbe = DatabaseEngine.Open("skirmish.typhon", o => o
->     .Register<Position>().Register<Health>().RegisterArchetype<Unit>()
+>     .Register<Position>().Register<Health>()
 >     .Seed(1, tx => tx.Spawn<Unit>(Unit.Position.Set(new Position(10, 20)), Unit.Health.Set(new Health(100, 100))))
 >     .Seed(2, tx => { /* extra data you introduced in revision 2 — existing databases pick this up on next open */ }));
 > ```
@@ -178,7 +178,7 @@ var wounded = tx.Query<Unit>()
 |---|---|---|
 | 1–2 | Components & archetypes — your data model | ch.2 Modeling |
 | 3 | One engine per process, built at startup | ch.6 Operating |
-| 4 | Register components + archetypes before use | ch.2 Modeling |
+| 4 | Register components; archetypes self-register at load | ch.2 Modeling |
 | 5 | Writes are transactional | ch.3 Transactions |
 | 6 | Reads are snapshot-consistent | ch.3 Transactions |
 | 7 | Querying | ch.4 Querying |
@@ -196,4 +196,4 @@ This program creates and reads data once. A real simulation runs **systems** ove
 
 **Concepts:** [Component](../key-concepts/component.md) · [Archetype](../key-concepts/archetype.md) · [Entity](../key-concepts/entity.md) · [DatabaseEngine](../key-concepts/database-engine.md) · [Transaction](../key-concepts/transaction.md) · [Query](../key-concepts/query.md).
 
-**Exact calls:** `[Component]` / `[Archetype]` · `Archetype<T>` + `Comp<T>` · `DatabaseEngine.Open` (`Register<T>` / `RegisterArchetype<T>`) · `EntityId` / `EntityRef` (`Open` / `Read`) · `Transaction` (via `CreateQuickTransaction`) · `EcsQuery` (via `tx.Query<Unit>()`).
+**Exact calls:** `[Component]` / `[Archetype]` · `Archetype<T>` + `Comp<T>` · `DatabaseEngine.Open` (`Register<T>`) · `EntityId` / `EntityRef` (`Open` / `Read`) · `Transaction` (via `CreateQuickTransaction`) · `EcsQuery` (via `tx.Query<Unit>()`).

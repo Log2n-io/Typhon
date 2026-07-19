@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using Typhon.Schema.Definition;
@@ -9,14 +9,14 @@ namespace Typhon.Engine.Tests;
 // Additional archetype for K-way merge tests (same components as ClQUnit but different archetype)
 // ═══════════════════════════════════════════════════════════════════════
 
-[Archetype(543)]
+[Archetype]
 partial class ClQUnit2 : Archetype<ClQUnit2>
 {
     public static readonly Comp<ClQStats> Stats = Register<ClQStats>();
     public static readonly Comp<ClQTag> Tag = Register<ClQTag>();
 }
 
-[Archetype(544)]
+[Archetype]
 partial class ClQUnit3 : Archetype<ClQUnit3>
 {
     public static readonly Comp<ClQStats> Stats = Register<ClQStats>();
@@ -34,11 +34,6 @@ class SimdKwayMergeTests : TestBase<SimdKwayMergeTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<ClQUnit>.Touch();
-        Archetype<ClQUnit2>.Touch();
-        Archetype<ClQUnit3>.Touch();
-        Archetype<ClQNonCluster>.Touch();
-        Archetype<ClQFloatUnit>.Touch();
     }
 
     private DatabaseEngine SetupEngine()

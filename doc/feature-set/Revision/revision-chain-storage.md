@@ -25,7 +25,7 @@ This is a storage primitive, not something application code allocates or walks d
 [Component("Game.Health", 1)]                 // StorageMode.Versioned is the default
 struct Health { public int Current; public int Max; }
 
-[Archetype(7)]
+[Archetype]
 partial class Unit : Archetype<Unit>
 {
     public static readonly Comp<Health> Health = Register<Health>();

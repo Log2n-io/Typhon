@@ -1,4 +1,4 @@
-using System.Linq;
+﻿using System.Linq;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
@@ -26,7 +26,7 @@ struct ClIdxHealth
     }
 }
 
-[Archetype(525)]
+[Archetype]
 partial class ClIdxUnit : Archetype<ClIdxUnit>
 {
     public static readonly Comp<ClPosition> Position = Register<ClPosition>();
@@ -44,8 +44,6 @@ class ClusterIndexTests : TestBase<ClusterIndexTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<ClIdxUnit>.Touch();
-        Archetype<ClUnit>.Touch();
     }
 
     private DatabaseEngine SetupEngine()

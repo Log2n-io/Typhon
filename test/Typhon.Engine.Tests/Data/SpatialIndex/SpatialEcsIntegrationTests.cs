@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Numerics;
 using System.Runtime.InteropServices;
@@ -58,20 +58,20 @@ public struct SpatialTerrain
     public AABB3F Footprint;
 }
 
-[Archetype(800)]
+[Archetype]
 partial class SpatialShipArchetype : Archetype<SpatialShipArchetype>
 {
     public static readonly Comp<SpatialShip> Ship = Register<SpatialShip>();
     public static readonly Comp<SpatialName> Name = Register<SpatialName>();
 }
 
-[Archetype(801)]
+[Archetype]
 partial class SpatialBuildingArchetype : Archetype<SpatialBuildingArchetype>
 {
     public static readonly Comp<SpatialBuilding> Building = Register<SpatialBuilding>();
 }
 
-[Archetype(802)]
+[Archetype]
 partial class SpatialTerrainArchetype : Archetype<SpatialTerrainArchetype>
 {
     public static readonly Comp<SpatialTerrain> Terrain = Register<SpatialTerrain>();
@@ -87,9 +87,6 @@ class SpatialEcsIntegrationTests : TestBase<SpatialEcsIntegrationTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<SpatialShipArchetype>.Touch();
-        Archetype<SpatialBuildingArchetype>.Touch();
-        Archetype<SpatialTerrainArchetype>.Touch();
     }
 
     // Issue #230 Phase 3 Option B: cluster spatial archetypes require a configured SpatialGrid. The setup helpers must configure one, and the SpatialTerrain
@@ -502,7 +499,6 @@ class SpatialEcsIntegrationTests : TestBase<SpatialEcsIntegrationTests>
     [CancelAfter(5000)]
     public void Schema_StaticMode_SetsFieldInfoMode()
     {
-        Archetype<SpatialTerrainArchetype>.Touch();
         using var dbe = SetupStaticEngine();
         var table = dbe.GetComponentTable<SpatialTerrain>();
         Assert.That(table.SpatialIndex, Is.Not.Null);
@@ -530,7 +526,6 @@ class SpatialEcsIntegrationTests : TestBase<SpatialEcsIntegrationTests>
     [CancelAfter(5000)]
     public void StaticComponent_InsertAndQuery()
     {
-        Archetype<SpatialTerrainArchetype>.Touch();
         using var dbe = SetupStaticEngine();
 
         using (var t = dbe.CreateQuickTransaction())
@@ -563,7 +558,6 @@ class SpatialEcsIntegrationTests : TestBase<SpatialEcsIntegrationTests>
     [CancelAfter(5000)]
     public void StaticComponent_Remove_Works()
     {
-        Archetype<SpatialTerrainArchetype>.Touch();
         using var dbe = SetupStaticEngine();
 
         EntityId terrainId;
@@ -593,7 +587,6 @@ class SpatialEcsIntegrationTests : TestBase<SpatialEcsIntegrationTests>
     [CancelAfter(5000)]
     public void StaticComponent_TickFenceSkipped()
     {
-        Archetype<SpatialTerrainArchetype>.Touch();
         using var dbe = SetupStaticEngine();
 
         // Spawn static terrain

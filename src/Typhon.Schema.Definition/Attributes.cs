@@ -114,16 +114,14 @@ public sealed class ForeignKeyAttribute : Attribute
 }
 
 /// <summary>
-/// Marks a class as an ECS archetype with a globally unique, immutable identifier.
-/// The Id is embedded in every EntityId (12-bit field, max 4095) and must never change once assigned.
+/// Marks a class as an ECS archetype. The archetype's durable identity is its <see cref="Name"/> (defaulting to the declaring CLR type's simple name);
+/// the engine assigns the per-process catalog id and the per-DB routing id automatically, and re-matches persisted archetypes by <see cref="Name"/> — then
+/// <see cref="PreviousName"/> — on reopen (feature #514 D1/D4 — no author-set id).
 /// </summary>
 [AttributeUsage(AttributeTargets.Class, Inherited = false)]
 [PublicAPI]
 public sealed class ArchetypeAttribute : Attribute
 {
-    /// <summary>Globally unique archetype identifier (0-4095). Embedded in persisted EntityIds — immutable once assigned.</summary>
-    public ushort Id { get; }
-
     /// <summary>Schema revision. Increment when the component set changes (add/remove components).</summary>
     public int Revision { get; }
 
@@ -133,13 +131,28 @@ public sealed class ArchetypeAttribute : Attribute
     /// </summary>
     public string Alias { get; }
 
-    /// <summary>Declares an archetype with the given globally unique <paramref name="id"/>.</summary>
-    /// <param name="id">Globally unique archetype identifier, 0-4095 (see <see cref="Id"/>). Immutable once assigned.</param>
+    /// <summary>
+    /// Registered archetype name — the stable schema identity persisted with the data and matched by name when the database is reopened. Optional: defaults to
+    /// the declaring CLR type's simple name when <c>null</c>, so simple cases need no override. Set it to keep the durable identity stable across a class rename
+    /// (the routing id embedded in every existing EntityId is keyed to this name), or to give the archetype a name that differs from its C# type.
+    /// </summary>
+    public string Name { get; set; }
+
+    /// <summary>
+    /// Former <see cref="Name"/> of this archetype, set when it is renamed so the persisted archetype can be matched to the new name on reopen and its routing id
+    /// carried forward. After the first reopen the engine re-stamps the persisted name, so this hint can be dropped in a later release. <c>null</c> when never
+    /// renamed.
+    /// </summary>
+    public string PreviousName { get; set; }
+
+    /// <summary>
+    /// Declares an archetype. Its durable identity is <see cref="Name"/> (defaulting to the declaring CLR type's simple name): the engine assigns the per-process
+    /// catalog id and the per-DB routing id automatically, and re-matches persisted archetypes by <see cref="Name"/> then <see cref="PreviousName"/> on reopen.
+    /// </summary>
     /// <param name="revision">Schema revision (see <see cref="Revision"/>). Defaults to <c>1</c>.</param>
     /// <param name="alias">Optional human-readable label used by the Workbench (see <see cref="Alias"/>). Falls back to the declaring type name when <c>null</c>.</param>
-    public ArchetypeAttribute(ushort id, int revision = 1, string alias = null)
+    public ArchetypeAttribute(int revision = 1, string alias = null)
     {
-        Id = id;
         Revision = revision;
         Alias = alias;
     }

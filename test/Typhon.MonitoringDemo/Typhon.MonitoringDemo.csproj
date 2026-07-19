@@ -39,6 +39,10 @@
     <ProjectReference Include="..\..\src\Typhon.Analyzers\Typhon.Analyzers.csproj"
                       ReferenceOutputAssembly="false"
                       OutputItemType="Analyzer" />
+    <!-- Source-generated component schema providers (feature #514, phase 4). Consumer split = ArchetypeAccessorGenerator only (no TraceEvent post-init leak). -->
+    <ProjectReference Include="..\..\src\Typhon.Generators.Consumer\Typhon.Generators.Consumer.csproj"
+                      ReferenceOutputAssembly="false"
+                      OutputItemType="Analyzer" />
   </ItemGroup>
 
 

@@ -1,4 +1,4 @@
-// Runnable companion to doc/guide. Every snippet in the guide is mirrored here so it
+﻿// Runnable companion to doc/guide. Every snippet in the guide is mirrored here so it
 // is known to compile and run against the current engine. Run with:
 //   dotnet run --project doc/guide/example
 //
@@ -24,7 +24,6 @@ using var dbe = DatabaseEngine.Open("skirmish-guide.typhon", o => o
     .Register<Health>()
     .Register<Velocity>()
     .Register<Team>()
-    .RegisterArchetype<Unit>()
     .ConfigureSpatialGrid(new SpatialGridConfig(Vector2.Zero, new Vector2(1000f, 1000f), cellSize: 50f)));
 
 // ════════════════════════════════════════════════════════════════════════

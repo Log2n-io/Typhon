@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -16,8 +16,6 @@ class NonGenericEntityAccessTests : TestBase<NonGenericEntityAccessTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<EcsUnit>.Touch();
-        Archetype<EcsSoldier>.Touch();
     }
 
     private DatabaseEngine SetupEngine()
@@ -30,8 +28,9 @@ class NonGenericEntityAccessTests : TestBase<NonGenericEntityAccessTests>
         return dbe;
     }
 
-    private static ushort UnitArchetypeId => Archetype<EcsUnit>.Metadata.ArchetypeId;
-    private static ushort SoldierArchetypeId => Archetype<EcsSoldier>.Metadata.ArchetypeId;
+    // EnumerateArchetypeEntities takes the per-DB routing id (the value in EntityId.ArchetypeId), not the catalog id.
+    private static ushort UnitRoutingId(DatabaseEngine dbe) => dbe.RoutingIdOf(Archetype<EcsUnit>.Metadata);
+    private static ushort SoldierRoutingId(DatabaseEngine dbe) => dbe.RoutingIdOf(Archetype<EcsSoldier>.Metadata);
 
     // The registered component name — the same string GetComponentName(slot) returns, and the join key the Workbench uses.
     private static string NameOf<T>(DatabaseEngine dbe) where T : unmanaged => dbe.GetComponentTable<T>().Definition.Name;
@@ -69,7 +68,7 @@ class NonGenericEntityAccessTests : TestBase<NonGenericEntityAccessTests>
         }
 
         using var read = dbe.CreateReadOnlyTransaction();
-        var ids = read.EnumerateArchetypeEntities(UnitArchetypeId);
+        var ids = read.EnumerateArchetypeEntities(UnitRoutingId(dbe));
 
         Assert.That(ids, Has.Count.EqualTo(25));
         Assert.That(new HashSet<EntityId>(ids), Is.EquivalentTo(spawned));
@@ -92,8 +91,8 @@ class NonGenericEntityAccessTests : TestBase<NonGenericEntityAccessTests>
 
         using var read = dbe.CreateReadOnlyTransaction();
 
-        var units = read.EnumerateArchetypeEntities(UnitArchetypeId);
-        var soldiers = read.EnumerateArchetypeEntities(SoldierArchetypeId);
+        var units = read.EnumerateArchetypeEntities(UnitRoutingId(dbe));
+        var soldiers = read.EnumerateArchetypeEntities(SoldierRoutingId(dbe));
 
         // Exact archetype: EcsUnit enumeration must NOT include the EcsSoldier (a descendant), and vice versa.
         Assert.That(units, Does.Contain(unitId));
@@ -120,7 +119,7 @@ class NonGenericEntityAccessTests : TestBase<NonGenericEntityAccessTests>
         }
 
         using var read = dbe.CreateReadOnlyTransaction();
-        var live = read.EnumerateArchetypeEntities(UnitArchetypeId);
+        var live = read.EnumerateArchetypeEntities(UnitRoutingId(dbe));
 
         Assert.That(live, Has.Count.EqualTo(6));
         for (int i = 0; i < 4; i++)
@@ -295,7 +294,7 @@ class NonGenericEntityAccessTests : TestBase<NonGenericEntityAccessTests>
         string positionName = NameOf<EcsPosition>(dbe);
 
         var seenX = new HashSet<float>();
-        foreach (var id in read.EnumerateArchetypeEntities(UnitArchetypeId))
+        foreach (var id in read.EnumerateArchetypeEntities(UnitRoutingId(dbe)))
         {
             var e = read.Open(id);
             int posSlot = SlotByName(e, positionName);
@@ -328,7 +327,7 @@ class NonGenericEntityAccessTests : TestBase<NonGenericEntityAccessTests>
         }
 
         using var read = dbe.CreateReadOnlyTransaction();
-        var ids = read.EnumerateArchetypeEntities(SoldierArchetypeId);
+        var ids = read.EnumerateArchetypeEntities(SoldierRoutingId(dbe));
         Assert.That(ids, Has.Count.EqualTo(1));
 
         var e = read.Open(ids[0]);

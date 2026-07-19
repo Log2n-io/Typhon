@@ -17,6 +17,10 @@
             consumers fall through to siteId = 0 ("unknown source"). See claude/design/observability/10-profiler-source-attribution.md §4.4.
         -->
         <InterceptorsNamespaces>$(InterceptorsNamespaces);Typhon.Generators.Generated</InterceptorsNamespaces>
+        <!-- #514 phase 6 / #409: the schema/registry cluster is AOT-ready — source-generated component providers (no GetFields reflection) + a Type→delegate
+             ComponentCollection dispatch table replacing MakeGenericType/Activator (the reflective fallback is annotated [RequiresDynamicCode]). Engine-wide
+             <IsAotCompatible>true is deliberately NOT enabled here: a spot-check surfaced ~46 pre-existing IL2xxx/IL3xxx warnings in unrelated subsystems
+             (serialization, WAL, general reflection). Enabling it belongs to the broader #409 AOT sweep, not this feature. -->
     </PropertyGroup>
 
     <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
@@ -141,6 +145,24 @@
         </Compile>
         <Compile Update="Indexing\internals\BTree.Remove.cs">
           <DependentUpon>BTree.cs</DependentUpon>
+        </Compile>
+        <Compile Update="Ecs\public\DatabaseEngine.BulkLoad.cs">
+          <DependentUpon>DatabaseEngine.cs</DependentUpon>
+        </Compile>
+        <Compile Update="Ecs\public\DatabaseEngine.ClusterMigration.cs">
+          <DependentUpon>DatabaseEngine.cs</DependentUpon>
+        </Compile>
+        <Compile Update="Ecs\public\DatabaseEngine.Logging.cs">
+          <DependentUpon>DatabaseEngine.cs</DependentUpon>
+        </Compile>
+        <Compile Update="Ecs\public\DatabaseEngine.StorageDetail.cs">
+          <DependentUpon>DatabaseEngine.cs</DependentUpon>
+        </Compile>
+        <Compile Update="Ecs\public\DatabaseEngine.StorageIntrospection.cs">
+          <DependentUpon>DatabaseEngine.cs</DependentUpon>
+        </Compile>
+        <Compile Update="Ecs\public\DatabaseEngine.TickFence.cs">
+          <DependentUpon>DatabaseEngine.cs</DependentUpon>
         </Compile>
     </ItemGroup>
 

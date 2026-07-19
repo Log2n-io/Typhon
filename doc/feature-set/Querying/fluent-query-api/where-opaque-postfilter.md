@@ -27,7 +27,7 @@ public struct Player
     public int Faction;
 }
 
-[Archetype(10)]
+[Archetype]
 public class PlayerArch : Archetype<PlayerArch>
 {
     public static readonly Comp<Player> Data = Register<Player>();

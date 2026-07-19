@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Numerics;
 using BenchmarkDotNet.Attributes;
@@ -38,9 +38,6 @@ public class ClusterRegressionBenchmarks : IDisposable
     [GlobalSetup]
     public void Setup()
     {
-        Archetype<AaBenchAnt>.Touch();
-        Archetype<AaBenchMixedCluster>.Touch();
-        Archetype<AaBenchIdxUnit>.Touch();
 
         var name = $"ClusterRegBench_{Environment.ProcessId}";
         var sc = new ServiceCollection();

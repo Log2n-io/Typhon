@@ -23,7 +23,7 @@ For lower-level control, `DatabaseEngine.IsNewlyCreated` reports whether *this* 
 
 ```csharp
 using var dbe = DatabaseEngine.Open("game.typhon", o => o
-    .Register<Position>().Register<Health>().RegisterArchetype<Unit>()
+    .Register<Position>().Register<Health>()
     .Seed(1, tx => tx.Spawn<Unit>(Unit.Position.Set(new Position(10, 20)), Unit.Health.Set(new Health(100, 100))))
     .Seed(2, tx => { /* data introduced in revision 2 — existing databases pick this up on next open */ }));
 ```

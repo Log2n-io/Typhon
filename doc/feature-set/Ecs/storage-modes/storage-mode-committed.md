@@ -37,7 +37,7 @@ discipline is uniform per transaction).
            DefaultDiscipline = DurabilityDiscipline.Commit)]   // optional: any tx touching Wallet escalates
 public struct Wallet { public long Gold; }
 
-[Archetype(13)]
+[Archetype]
 partial class Player : Archetype<Player>
 {
     public static readonly Comp<Wallet> Wallet = Register<Wallet>();

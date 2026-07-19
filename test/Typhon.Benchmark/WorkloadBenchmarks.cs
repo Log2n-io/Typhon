@@ -1,4 +1,4 @@
-using BenchmarkDotNet.Attributes;
+﻿using BenchmarkDotNet.Attributes;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using System;
@@ -35,13 +35,13 @@ public struct WorkCompB
     public int Category;
 }
 
-[Archetype(502)]
+[Archetype]
 class WorkArch : Archetype<WorkArch>
 {
     public static readonly Comp<WorkComp> Work = Register<WorkComp>();
 }
 
-[Archetype(503)]
+[Archetype]
 class WorkMultiArch : Archetype<WorkMultiArch>
 {
     public static readonly Comp<WorkComp> Work = Register<WorkComp>();
@@ -59,7 +59,7 @@ public struct IndexedSvComp
     public int Score;
 }
 
-[Archetype(504)]
+[Archetype]
 class IndexedSvArch : Archetype<IndexedSvArch>
 {
     public static readonly Comp<WorkComp> Work = Register<WorkComp>();
@@ -108,9 +108,6 @@ public class WorkloadBenchmarks
         _dbe.RegisterComponentFromAccessor<WorkCompB>();
         _dbe.RegisterComponentFromAccessor<IndexedSvComp>();
 
-        Archetype<WorkArch>.Touch();
-        Archetype<WorkMultiArch>.Touch();
-        Archetype<IndexedSvArch>.Touch();
         _dbe.InitializeArchetypes();
 
         // Pre-grow EntityMap to avoid bucket splits during measurement.

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Typhon.Engine;
@@ -35,7 +35,6 @@ static class SpawnProfile
         sp.EnsureFileDeleted<ManagedPagedMMFOptions>();
         var dbe = sp.GetRequiredService<DatabaseEngine>();
         dbe.RegisterComponentFromAccessor<WorkComp>();
-        Archetype<WorkArch>.Touch();
         dbe.InitializeArchetypes();
 
         // Warmup

@@ -1,4 +1,4 @@
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using System.Threading;
 using System.Threading.Tasks;
@@ -15,7 +15,6 @@ class ConcurrencyConflictTests : TestBase<ConcurrencyConflictTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<CompAArch>.Touch();
     }
 
     // ═══════════════════════════════════════════════════════════════

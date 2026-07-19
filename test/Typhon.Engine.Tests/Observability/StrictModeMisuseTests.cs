@@ -1,4 +1,4 @@
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using System;
 using System.Threading;
@@ -20,9 +20,6 @@ namespace Typhon.Engine.Tests.Observability;
 [NonParallelizable]
 class StrictModeMisuseTests : TestBase<StrictModeMisuseTests>
 {
-    [OneTimeSetUp]
-    public void OneTimeSetup() => Archetype<CompAArch>.Touch();
-
     private DatabaseEngine SetupEngine()
     {
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();

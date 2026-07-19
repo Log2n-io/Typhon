@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using Typhon.Schema.Definition;
@@ -31,7 +31,6 @@ internal sealed class SingleTxSpawnWorkload : IRecoveryWorkload
     public void Register(DatabaseEngine dbe)
     {
         dbe.RegisterComponentFromAccessor<CompA>();
-        Archetype<CompAArch>.Touch();
     }
 
     public void Execute(UnitOfWork uow, RecoveryShadowModel shadow)
@@ -70,7 +69,6 @@ internal sealed class LifecycleChurnWorkload : IRecoveryWorkload
     {
         dbe.RegisterComponentFromAccessor<CompA>();
         dbe.RegisterComponentFromAccessor<CompB>();
-        Archetype<CompABArch>.Touch();
     }
 
     public void Execute(UnitOfWork uow, RecoveryShadowModel shadow)
@@ -160,7 +158,6 @@ internal sealed class IndexedFlatWorkload : IRecoveryWorkload
     public void Register(DatabaseEngine dbe)
     {
         dbe.RegisterComponentFromAccessor<CompD>();
-        Archetype<CompDArch>.Touch();
     }
 
     public void Execute(UnitOfWork uow, RecoveryShadowModel shadow)
@@ -199,7 +196,6 @@ internal sealed class MultiValueDupKeyWorkload : IRecoveryWorkload
     public void Register(DatabaseEngine dbe)
     {
         dbe.RegisterComponentFromAccessor<CompD>();
-        Archetype<CompDArch>.Touch();
     }
 
     public void Execute(UnitOfWork uow, RecoveryShadowModel shadow)
@@ -240,7 +236,6 @@ internal sealed class ClusterAllSvWorkload : IRecoveryWorkload
     public void Register(DatabaseEngine dbe)
     {
         dbe.RegisterComponentFromAccessor<SvIndexed>();
-        Archetype<SvIndexedArch>.Touch();
     }
 
     public void Execute(UnitOfWork uow, RecoveryShadowModel shadow)
@@ -279,7 +274,6 @@ internal sealed class MixedDisciplineWorkload : IRecoveryWorkload
     {
         dbe.RegisterComponentFromAccessor<MixA>();
         dbe.RegisterComponentFromAccessor<MixB>();
-        Archetype<MixArch>.Touch();
     }
 
     public void Execute(UnitOfWork uow, RecoveryShadowModel shadow)
@@ -347,7 +341,7 @@ public struct MixB
     public MixB(int y) => Y = y;
 }
 
-[Archetype(952)]
+[Archetype]
 internal class MixArch : Archetype<MixArch>
 {
     public static readonly Comp<MixA> A = Register<MixA>();
@@ -372,7 +366,7 @@ public struct SvIndexed
     }
 }
 
-[Archetype(950)]
+[Archetype]
 internal class SvIndexedArch : Archetype<SvIndexedArch>
 {
     public static readonly Comp<SvIndexed> S = Register<SvIndexed>();
@@ -402,7 +396,7 @@ public struct TransientIndexed
     public TransientIndexed(int t) => T = t;
 }
 
-[Archetype(951)]
+[Archetype]
 internal class FlatSvArch : Archetype<FlatSvArch>
 {
     public static readonly Comp<SvForFlat> S = Register<SvForFlat>();

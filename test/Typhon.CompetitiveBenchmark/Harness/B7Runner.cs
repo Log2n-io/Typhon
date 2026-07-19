@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Diagnostics;
 using System.IO;
 using System.Numerics;
@@ -86,7 +86,6 @@ public static class B7Runner
     // Returns (singleHotMs, parallelHotMs).
     private static (double single, double par) MeasureTyphon(int count)
     {
-        Archetype<SvValArch>.Touch();
         var sc = new ServiceCollection();
         sc.AddLogging(b => b.SetMinimumLevel(LogLevel.Critical))
           .AddResourceRegistry().AddMemoryAllocator().AddEpochManager()

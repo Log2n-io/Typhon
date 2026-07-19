@@ -1,4 +1,4 @@
-using System.Numerics;
+﻿using System.Numerics;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
@@ -48,21 +48,21 @@ struct ClT6VHealth
 // Test archetypes
 // ═══════════════════════════════════════════════════════════════════════════════
 
-[Archetype(620)]
+[Archetype]
 partial class ClT6MixedSvT : Archetype<ClT6MixedSvT>
 {
     public static readonly Comp<ClT6SvPos> Pos = Register<ClT6SvPos>();
     public static readonly Comp<ClT6TransVel> Vel = Register<ClT6TransVel>();
 }
 
-[Archetype(621)]
+[Archetype]
 partial class ClT6PureT : Archetype<ClT6PureT>
 {
     public static readonly Comp<ClT6TransVel> Vel = Register<ClT6TransVel>();
     public static readonly Comp<ClT6TransTag> Tag = Register<ClT6TransTag>();
 }
 
-[Archetype(622)]
+[Archetype]
 partial class ClT6ThreeWay : Archetype<ClT6ThreeWay>
 {
     public static readonly Comp<ClT6SvPos> Pos = Register<ClT6SvPos>();
@@ -80,9 +80,6 @@ class ClusterTransientTests : TestBase<ClusterTransientTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<ClT6MixedSvT>.Touch();
-        Archetype<ClT6PureT>.Touch();
-        Archetype<ClT6ThreeWay>.Touch();
     }
 
     private DatabaseEngine SetupEngine()

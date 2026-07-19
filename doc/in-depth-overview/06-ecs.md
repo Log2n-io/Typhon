@@ -34,7 +34,7 @@ Every entity belongs to exactly one archetype, fixed at spawn time. Components a
 ### Archetype declaration
 
 ```csharp
-[Archetype(Id = 42)]
+[Archetype]
 public sealed partial class Ant : Archetype<Ant>
 {
     public static readonly Comp<Position>  Position  = Register<Position>();
@@ -43,9 +43,11 @@ public sealed partial class Ant : Archetype<Ant>
 }
 ```
 
-The `[Archetype(Id = N)]` attribute gives the archetype a stable 12-bit ID (max 4095). The `Register<T>()` calls declare components — the runtime resolves slot indices lazily on first access. CRTP (`Archetype<Ant>`) gives compile-time type identity without static-init ordering hazards.
+The archetype's **identity is the CLR type name** (or `[Archetype(Name = "…")]` if you want a name decoupled from the class). The engine auto-assigns a per-process **catalog id** and a per-DB **routing id** (persisted in `ArchetypeR1`, re-matched by name on reopen) — no numeric id is set in source, and a DB can hold up to 65,536 archetypes. The `Register<T>()` calls declare components. CRTP (`Archetype<Ant>`) gives compile-time type identity. Archetypes **self-register up-front** via a generated `[ModuleInitializer]` barrier at assembly load — lock-guarded and thread-safe, not lazy first-access reflection.
 
 The class is declared **`partial`** so a source generator can extend it — see **§5 Generated accessors** below. Without `partial` the archetype still works for `Spawn` / `Open` / `OpenMut`, but the generated typed bulk accessors aren't emitted.
+
+To **rename** an archetype (or its backing class) without losing its persisted data, keep the old identity as a hatch: `[Archetype(Name = "NewName", PreviousName = "OldName")]` — the engine matches `PreviousName` against `ArchetypeR1` on reopen and adopts the existing routing id. This mirrors the component/field rename hatches in [04-schema](04-schema.md).
 
 Inheritance is single-parent:
 
@@ -70,14 +72,14 @@ Parent components are inherited; slot indices start with the parent's. No diamon
 
 | Bits | Field |
 |---|---|
-| 0–11 | ArchetypeId (12 bits, max 4095) — routes to per-archetype storage |
-| 12–63 | EntityKey (52 bits, ~4.5 × 10¹⁵) — monotonic per-archetype, never recycled |
+| 0–15 | routingId (16 bits, up to 65,536 per DB) — per-DB archetype routing id; routes to per-archetype storage. Extract with `(ushort)value` |
+| 16–63 | EntityKey (48 bits, ~281 × 10¹²) — monotonic per-archetype, never recycled. Extract with `value >> 16` |
 
 ```csharp
 public readonly struct EntityId : IEquatable<EntityId>
 {
-    public long  EntityKey   { get; }
-    public ushort ArchetypeId { get; }
+    public long  EntityKey   { get; }   // high 48 bits
+    public ushort ArchetypeId { get; }   // low 16 bits — the per-DB archetype routing id
     public bool   IsNull      { get; }
     public static readonly EntityId Null;
 }
@@ -116,7 +118,7 @@ public readonly struct Comp<T> where T : unmanaged
 }
 ```
 
-`Comp<T>` carries the global `ComponentTypeId`. The same component type used in multiple archetypes shares the same `ComponentTypeId`, so the engine can route data correctly regardless of which archetype holds it. Slot resolution happens at runtime via `ArchetypeMetadata.GetSlot(componentTypeId)`.
+`Comp<T>` carries the global `ComponentTypeId` — an **in-memory-only handle** (not persisted, never on the WAL wire; the wire addresses the per-archetype slot instead, see [11-durability](11-durability.md)). The same component type used in multiple archetypes shares the same `ComponentTypeId`, so the engine can route data correctly regardless of which archetype holds it. Slot resolution happens at runtime via `ArchetypeMetadata.GetSlot(componentTypeId)`.
 
 ### `ComponentValue` — spawn-time payload
 
@@ -389,7 +391,7 @@ You don't need this to *use* the ECS API, but here's what's happening underneath
 - **`EntityMap`** — per-archetype, persistent hash map keyed by `EntityKey`. Stores `EntityRecord` (chunk IDs per slot + `BornTSN` / `DeadTSN` + `EnabledBits`). Implemented via [`PagedHashMap`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Foundation/Collections/internals/PagedHashMap.cs) on top of `ComponentSegment`.
 - **`EntityRecord`** ([file](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/EntityRecord.cs)) — the per-entity row in the EntityMap. The `EnabledBits`, `BornTSN`, `DeadTSN`, and the locations of each component chunk.
 - **`ArchetypeMetadata`** ([file](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/internals/ArchetypeMetadata.cs)) — runtime descriptor: slot count, per-slot component type IDs, Versioned/Transient slot masks, cluster layout if eligible.
-- **`ArchetypeRegistry`** ([file](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/internals/ArchetypeRegistry.cs)) — global registry; assigns slot indices on first finalization, handles parent-child slot ordering.
+- **`ArchetypeRegistry`** ([file](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/internals/ArchetypeRegistry.cs)) — global registry; archetypes self-register up-front via a generated `[ModuleInitializer]` barrier at assembly load (lock-guarded, thread-safe), assigning slot indices and handling parent-child slot ordering.
 - **`EnabledBitsOverrides`** ([file](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/internals/EnabledBitsOverrides.cs)) — MVCC-aware override map for per-entity enable bit changes that haven't been committed to the `EntityRecord` yet. `ResolveEnabledBits(entityKey, baseEnabledBits, TSN)` gives the snapshot-correct view.
 - **`EnabledBitsHistory`** ([file](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/internals/EnabledBitsHistory.cs)) — historical record of EnabledBits changes for MVCC visibility queries.
 - **`FieldShadowBuffer`** ([file](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/internals/FieldShadowBuffer.cs)) — captures the *old index key* (8 bytes, `ChunkId / EntityPK / OldKey`) for each indexed-field mutation so the deferred B+Tree maintenance pass can locate and update the entry. **Does not buffer the new value itself** — the value mutation is direct.

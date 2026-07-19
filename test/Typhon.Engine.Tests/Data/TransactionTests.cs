@@ -1,4 +1,4 @@
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using NUnit.Framework;
 using System;
@@ -11,10 +11,6 @@ class TransactionTests : TestBase<TransactionTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<CompAArch>.Touch();
-        Archetype<CompABCArch>.Touch();
-        Archetype<CompABArch>.Touch();
-        Archetype<CompDArch>.Touch();
     }
 
     [Test]

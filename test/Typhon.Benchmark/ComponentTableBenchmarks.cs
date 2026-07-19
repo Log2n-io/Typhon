@@ -1,4 +1,4 @@
-using BenchmarkDotNet.Attributes;
+﻿using BenchmarkDotNet.Attributes;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using System;
@@ -24,7 +24,7 @@ public struct DataBenchComp
     public long Timestamp;
 }
 
-[Archetype(500)]
+[Archetype]
 class DataBenchArch : Archetype<DataBenchArch>
 {
     public static readonly Comp<DataBenchComp> Data = Register<DataBenchComp>();
@@ -70,7 +70,6 @@ public class ComponentTableBenchmarks
         _dbe = _serviceProvider.GetRequiredService<DatabaseEngine>();
         _dbe.RegisterComponentFromAccessor<DataBenchComp>();
 
-        Archetype<DataBenchArch>.Touch();
         _dbe.InitializeArchetypes();
 
         // Pre-populate entities for read/update benchmarks

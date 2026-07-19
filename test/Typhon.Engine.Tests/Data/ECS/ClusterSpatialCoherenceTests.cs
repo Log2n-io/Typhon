@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
@@ -25,7 +25,7 @@ struct ClCohPos
     public float Mass;
 }
 
-[Archetype(840)]
+[Archetype]
 partial class ClCohUnit : Archetype<ClCohUnit>
 {
     public static readonly Comp<ClCohPos> Pos = Register<ClCohPos>();
@@ -41,7 +41,7 @@ struct ClCohPos2
     public AABB2F Bounds;
 }
 
-[Archetype(841)]
+[Archetype]
 partial class ClCohUnit2 : Archetype<ClCohUnit2>
 {
     public static readonly Comp<ClCohPos2> Pos = Register<ClCohPos2>();
@@ -54,8 +54,6 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<ClCohUnit>.Touch();
-        Archetype<ClCohUnit2>.Touch();
     }
 
     private static ClCohPos PointAt(float x, float y) =>

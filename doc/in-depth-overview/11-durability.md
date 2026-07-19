@@ -12,7 +12,7 @@ Durability is what makes Typhon ACID's "D". The contract is the usual one: once 
 
 Both pipelines run on dedicated background threads. Commit-time work on the application thread is minimal: serialize the records into a ring buffer, optionally wait for the WAL writer to confirm durability, return. Page writes are deferred — they're a background activity decoupled from the commit path.
 
-> **This chapter describes the "Minimal WAL" redesign (v2).** The WAL now carries **logical** records — `(EntityId, ComponentTypeId)` and a value, never pages or chunk ids — written by a single `RecordCodec`, and recovery re-applies them through the engine's own write primitives (`RecoveryApplier`) and then **rebuilds** derived structures instead of repairing pages. Full-Page Images are gone. The full design lives in `claude/design/Durability/MinimalWal/`; correctness is gated on invariant rules (`claude/rules/durability.md`), a crash-sim sweep, and TLA+ specs.
+> **This chapter describes the "Minimal WAL" redesign (v2).** The WAL now carries **logical** records — `(EntityId, slot)` (the per-archetype component slot under the EntityId's routing id) and a value, never pages or chunk ids — written by a single `RecordCodec`, and recovery re-applies them through the engine's own write primitives (`RecoveryApplier`) and then **rebuilds** derived structures instead of repairing pages. Full-Page Images are gone. The full design lives in `claude/design/Durability/MinimalWal/`; correctness is gated on invariant rules (`claude/rules/durability.md`), a crash-sim sweep, and TLA+ specs.
 >
 > **Transitional note:** the v1 **persisted UoW Registry** and the v1 `WalRecovery` scan still exist and run alongside the v2 path (§7, §8). Commit *fate* for logical records is already decided by the WAL commit marker, not the registry, so the registry is redundant for fate — but its removal is an independent, still-pending cleanup (not part of the now-shipped Committed discipline).
 
@@ -149,15 +149,15 @@ A `Transaction` chunk's body is a **batch of logical records**, serialized by th
 | `Flags` | `byte` | See flags below |
 | `BodyLength` | `uint` | Kind-specific body bytes after this header |
 
-After the header, the body carries the **logical address** (`EntityId : long`, `ComponentTypeId : ushort`) plus kind-specific data — never a page index, chunk id, or buffer handle (LOG-06: collection-handle byte ranges are explicitly zeroed before they reach the log).
+After the header, the body carries the **logical address** (`EntityId : long`, plus the per-archetype component **slot** — 0..15 — under the EntityId's routing id) plus kind-specific data — never a page index, chunk id, or buffer handle (LOG-06: collection-handle byte ranges are explicitly zeroed before they reach the log).
 
 **Record kinds** ([`RecordKind`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/internals/RecordFormat.cs)):
 
 | Value | Kind | Carries | Apply (idempotent) |
 |---|---|---|---|
-| `1` | `Slot` | EntityId, ComponentTypeId, payload | value overwrite (Versioned HEAD-only) |
+| `1` | `Slot` | EntityId, slot, payload | value overwrite (Versioned HEAD-only) |
 | `2` | `Lifecycle` | EntityId + spawn / destroy / set-enabled-bits | spawn-if-absent / destroy-if-present / absolute mask |
-| `3` | `CollectionDelta` | EntityId, ComponentTypeId, FieldId, op, index, element | folded, then applied as a `Set` |
+| `3` | `CollectionDelta` | EntityId, slot, FieldId, op, index, element | folded, then applied as a `Set` |
 | `4` | `BulkManifest` | sessionId, begin LSN, entity/component counts | orphan detection only |
 
 **Record flags** ([`RecordFlags`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/internals/RecordFormat.cs)):

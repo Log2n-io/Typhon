@@ -1,4 +1,4 @@
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using NUnit.Framework;
 using System.Collections.Generic;
@@ -33,7 +33,7 @@ struct OpsCompV2
 
 // ── Archetype for V1 component (used for Spawn in first scope) ──
 
-[Archetype(340)]
+[Archetype]
 class OpsCompArch : Archetype<OpsCompArch>
 {
     public static readonly Comp<OpsCompV1> Comp = Register<OpsCompV1>();
@@ -45,7 +45,6 @@ class OperationalToolingTests : TestBase<OperationalToolingTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<OpsCompArch>.Touch();
     }
 
     private string GetDatabasePath()

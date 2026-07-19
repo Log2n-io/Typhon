@@ -1,4 +1,4 @@
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 
 namespace Typhon.Engine.Tests;
@@ -10,9 +10,6 @@ namespace Typhon.Engine.Tests;
 [NonParallelizable]
 class StressQueryRepro : TestBase<StressQueryRepro>
 {
-    [OneTimeSetUp]
-    public void OneTimeSetup() => Archetype<CompDArch>.Touch();
-
     [Test]
     [CancelAfter(5000)]
     public void WhereField_1K_Execute_And_GracefulShutdown()

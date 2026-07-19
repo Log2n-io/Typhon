@@ -27,7 +27,7 @@ public struct TerrainPiece
     public AABB3F Footprint;
 }
 
-[Archetype(50)]
+[Archetype]
 partial class TerrainArchetype : Archetype<TerrainArchetype>
 {
     public static readonly Comp<TerrainPiece> Footprint = Register<TerrainPiece>();

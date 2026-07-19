@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
@@ -44,7 +44,7 @@ struct ClQTag
     }
 }
 
-[Archetype(540)]
+[Archetype]
 partial class ClQUnit : Archetype<ClQUnit>
 {
     public static readonly Comp<ClQStats> Stats = Register<ClQStats>();
@@ -80,7 +80,7 @@ struct ClQNCStats
     }
 }
 
-[Archetype(541)]
+[Archetype]
 partial class ClQNonCluster : Archetype<ClQNonCluster>
 {
     public static readonly Comp<ClQNCStats> NCStats = Register<ClQNCStats>();
@@ -105,7 +105,7 @@ struct ClQFloatData
     }
 }
 
-[Archetype(542)]
+[Archetype]
 partial class ClQFloatUnit : Archetype<ClQFloatUnit>
 {
     public static readonly Comp<ClQFloatData> Data = Register<ClQFloatData>();
@@ -122,9 +122,6 @@ class ClusterQueryTests : TestBase<ClusterQueryTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<ClQUnit>.Touch();
-        Archetype<ClQNonCluster>.Touch();
-        Archetype<ClQFloatUnit>.Touch();
     }
 
     private DatabaseEngine SetupEngine()

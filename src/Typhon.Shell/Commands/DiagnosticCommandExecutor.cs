@@ -473,10 +473,10 @@ internal sealed class DiagnosticCommandExecutor
 
         // Resolve entity via EntityMap (ECS path)
         var eid = EntityId.FromRaw(entityId);
-        var meta = ArchetypeRegistry.GetMetadata(eid.ArchetypeId);
+        var meta = _session.Engine.GetMetaByRouting(eid.ArchetypeId);
         if (meta == null)
         {
-            return CommandResult.Error($"Error: ArchetypeId {eid.ArchetypeId} not registered. Use the full EntityId (EntityKey << 12 | ArchetypeId).");
+            return CommandResult.Error($"Error: ArchetypeId {eid.ArchetypeId} not registered. Use the full EntityId (EntityKey << 16 | ArchetypeId).");
         }
 
         // Find the slot for this component in the archetype

@@ -141,7 +141,7 @@ public unsafe partial class EntityAccessor
             return default;
         }
 
-        var meta = ArchetypeRegistry.GetMetadata(id.ArchetypeId);
+        var meta = _dbe.GetMetaByRouting(id.ArchetypeId);
         if (meta == null)
         {
             return default;

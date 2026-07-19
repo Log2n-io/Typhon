@@ -19,7 +19,7 @@ namespace Typhon.Workbench.Tests.Schema;
 /// carries no schema DLLs.
 /// </summary>
 [TestFixture]
-public sealed class SchemaControllerTests
+public sealed partial class SchemaControllerTests
 {
     // Two deliberately-shaped test components. WbCompA has padding between byte-sized and int-sized fields so
     // the "fields ordered by offset + gaps reveal padding" invariant is testable.

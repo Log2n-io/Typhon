@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
@@ -31,13 +31,13 @@ static class WriteProfile
         [Field] public long Timestamp;
     }
 
-    [Archetype(530)]
+    [Archetype]
     class WpVersionedArch : Archetype<WpVersionedArch>
     {
         public static readonly Comp<WpVersioned> Data = Register<WpVersioned>();
     }
 
-    [Archetype(531)]
+    [Archetype]
     class WpSvArch : Archetype<WpSvArch>
     {
         public static readonly Comp<WpSingleVersion> Data = Register<WpSingleVersion>();
@@ -74,8 +74,6 @@ static class WriteProfile
 
         dbe.RegisterComponentFromAccessor<WpVersioned>();
         dbe.RegisterComponentFromAccessor<WpSingleVersion>();
-        Archetype<WpVersionedArch>.Touch();
-        Archetype<WpSvArch>.Touch();
         dbe.InitializeArchetypes();
 
         // Pre-grow EntityMap. Committed in chunks: a single commit's WAL frame must fit the

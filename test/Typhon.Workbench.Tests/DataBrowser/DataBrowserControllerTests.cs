@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 using System.Net.Http.Json;
 using System.Runtime.InteropServices;
 using System.Text.Json;
@@ -32,7 +32,7 @@ public struct DbHealth
     public DbHealth(int current, int max) { Current = current; Max = max; }
 }
 
-[Archetype(2001)]
+[Archetype]
 partial class DbThing : Archetype<DbThing>
 {
     public static readonly Comp<DbPos> Pos = Register<DbPos>();
@@ -58,7 +58,7 @@ public struct DbBounds
     }
 }
 
-[Archetype(2002)]
+[Archetype]
 partial class DbShape : Archetype<DbShape>
 {
     public static readonly Comp<DbBounds> Bounds = Register<DbBounds>();
@@ -71,16 +71,14 @@ public sealed class DataBrowserControllerTests
     private WorkbenchFactory _factory;
     private HttpClient _client;
     private static readonly JsonSerializerOptions Json = new() { PropertyNameCaseInsensitive = true };
-    // The [Archetype(2001)] attribute id IS the runtime ArchetypeId (see EntitySpawnTests). Engine internals
-    // (Archetype<T>.Metadata) aren't visible to this test assembly, so use the literal.
-    private const string ArchId = "2001";
-    private const string ShapeArchId = "2002";
+    // #514 D1: catalog ids are engine-assigned (no author-set [Archetype(Id=N)]), so resolve each archetype's runtime id by type (via Archetype<T>.Metadata,
+    // now visible through InternalsVisibleTo) and format it for the numeric-id REST routes.
+    private static readonly string ArchId = Archetype<DbThing>.Metadata.ArchetypeId.ToString();
+    private static readonly string ShapeArchId = Archetype<DbShape>.Metadata.ArchetypeId.ToString();
 
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<DbThing>.Touch();
-        Archetype<DbShape>.Touch();
     }
 
     [SetUp]

@@ -39,7 +39,7 @@ struct GuildMember
     public String64 Name;
 }
 
-[Archetype(43)]
+[Archetype]
 class MemberArchetype : Archetype<MemberArchetype>
 {
     public static readonly Comp<GuildMember> M = Register<GuildMember>();

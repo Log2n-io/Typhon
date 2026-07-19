@@ -150,5 +150,35 @@
     "doc/feature-set/Subscriptions/"
   ],
 
-  "src/Typhon.Engine/Properties/": []
+  "src/Typhon.Engine/Properties/": [],
+
+  "_siblings": "Sibling projects outside src/Typhon.Engine/ whose public surface is narrated in the docs (added #514: the schema-definition attributes + the source generators + the standalone profiler). csproj/Generators.Consumer shim/Shell diagnostics are packaging/CLI plumbing with no narrative, intentionally left unmapped.",
+
+  "src/Typhon.Schema.Definition/": [
+    "doc/in-depth-overview/04-schema.md",
+    "doc/in-depth-overview/06-ecs.md",
+    "doc/key-concepts/component.md",
+    "doc/key-concepts/archetype.md",
+    "doc/key-concepts/schema-evolution.md",
+    "doc/key-concepts/storage-mode.md",
+    "doc/guide/02-modeling.md",
+    "doc/feature-set/Schema/",
+    "doc/feature-set/Ecs/",
+    "doc/guide/using-with-ai-coding-agents.md"
+  ],
+
+  "src/Typhon.Generators/": [
+    "doc/in-depth-overview/06-ecs.md",
+    "doc/in-depth-overview/04-schema.md",
+    "doc/key-concepts/archetype.md",
+    "doc/key-concepts/component.md",
+    "doc/feature-set/Ecs/",
+    "doc/feature-set/Schema/"
+  ],
+
+  "src/Typhon.Profiler/": [
+    "doc/in-depth-overview/12-observability.md",
+    "doc/key-concepts/profiler.md",
+    "doc/feature-set/Profiler/"
+  ]
 }

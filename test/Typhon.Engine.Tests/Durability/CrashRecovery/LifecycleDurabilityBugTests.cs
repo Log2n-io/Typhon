@@ -1,4 +1,4 @@
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using NUnit.Framework;
 using System;
@@ -103,7 +103,6 @@ internal sealed class LifecycleDurabilityBugTests
     {
         dbe.RegisterComponentFromAccessor<CompA>();
         dbe.RegisterComponentFromAccessor<CompB>();
-        Archetype<CompABArch>.Touch();
     }
 
     // ── Bug 1: enabled-bits durability ──────────────────────────────────────

@@ -12,7 +12,7 @@ namespace Typhon.Engine.Internals;
 /// Abstract base class for hash maps. Provides meta management, directory addressing, bucket resolution, split lock, and factory scaffolding.
 /// Concrete class <see cref="PagedHashMap{TKey,TValue,TStore}"/> provides JIT-specialized hash functions via sizeof(TKey) branching.
 /// </summary>
-internal abstract unsafe partial class PagedHashMapBase<TStore> where TStore : struct, IPageStore
+internal abstract unsafe class PagedHashMapBase<TStore> where TStore : struct, IPageStore
 {
     // ═══════════════════════════════════════════════════════════════════════
     // Fields

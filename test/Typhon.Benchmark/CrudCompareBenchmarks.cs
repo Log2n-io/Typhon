@@ -1,4 +1,4 @@
-using BenchmarkDotNet.Attributes;
+﻿using BenchmarkDotNet.Attributes;
 using BenchmarkDotNet.Configs;
 using BenchmarkDotNet.Jobs;
 using BenchmarkDotNet.Toolchains.InProcess.Emit;
@@ -51,7 +51,6 @@ public class CrudCompareBenchmarks
         _sp.EnsureFileDeleted<ManagedPagedMMFOptions>();
         _dbe = _sp.GetRequiredService<DatabaseEngine>();
         _dbe.RegisterComponentFromAccessor<BenchComp>();
-        Archetype<BenchArch>.Touch();
         _dbe.InitializeArchetypes();
 
         // Pre-populate for read/update benchmarks

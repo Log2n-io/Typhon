@@ -31,7 +31,7 @@ uses it.
 ## 💻 Usage
 
 ```csharp
-[Archetype(42)]
+[Archetype]
 partial class Player : Archetype<Player>
 {
     public static readonly Comp<Position> Pos = Register<Position>();   // StorageMode.SingleVersion

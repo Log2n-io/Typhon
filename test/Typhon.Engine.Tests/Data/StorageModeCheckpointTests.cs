@@ -1,4 +1,4 @@
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using Typhon.Schema.Definition;
 
@@ -7,9 +7,6 @@ namespace Typhon.Engine.Tests;
 [NonParallelizable]
 class StorageModeCheckpointTests : TestBase<StorageModeCheckpointTests>
 {
-    [OneTimeSetUp]
-    public void OneTimeSetup() => Archetype<TransientTestArchetype>.Touch();
-
     [Test]
     public void Transient_PagesNotInMMFDirtyCollection()
     {

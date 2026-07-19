@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 
@@ -10,10 +10,10 @@ namespace Typhon.Engine.Internals;
 /// </summary>
 internal class ArchetypeMetadata
 {
-    /// <summary>Globally unique archetype ID from [Archetype(Id = N)] attribute. Embedded in EntityId.</summary>
+    /// <summary>Globally unique archetype ID from [Archetype] attribute. Embedded in EntityId.</summary>
     public ushort ArchetypeId;
 
-    /// <summary>Schema revision from [Archetype(Id, Revision)] attribute.</summary>
+    /// <summary>Schema revision from [Archetype(Revision)] attribute.</summary>
     public int Revision;
 
     /// <summary>Total component count (own + inherited). Max 16.</summary>
@@ -33,6 +33,16 @@ internal class ArchetypeMetadata
 
     /// <summary>CLR type of the archetype class.</summary>
     public Type ArchetypeType;
+
+    /// <summary>
+    /// Durable schema name — the stable per-DB identity persisted in <c>ArchetypeR1.Name</c> and matched on reopen to restore this archetype's routing id.
+    /// From <c>[Archetype(Name = ...)]</c>; defaults to the CLR type's simple name. This — not the CLR type name — is the durability match key (#514 D4).
+    /// </summary>
+    public string Name;
+
+    /// <summary>Former durable <see cref="Name"/> (from <c>[Archetype(PreviousName = ...)]</c>); matched on reopen after <see cref="Name"/> so a renamed archetype
+    /// keeps its routing id. Null when never renamed.</summary>
+    public string PreviousName;
 
     /// <summary>Optional human-readable label from <c>[Archetype(Alias = ...)]</c>; null when unset (callers fall back to the type name).</summary>
     public string Alias;

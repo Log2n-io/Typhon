@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
@@ -26,7 +26,7 @@ struct SvCcBag
     public ComponentCollection<int> Items;
 }
 
-[Archetype(846)]
+[Archetype]
 partial class SvCcUnit : Archetype<SvCcUnit>
 {
     public static readonly Comp<SvCcBag> Bag = Register<SvCcBag>();
@@ -46,7 +46,7 @@ struct SvCcSpatialBag
     public ComponentCollection<int> Items;
 }
 
-[Archetype(847)]
+[Archetype]
 partial class SvCcSpatialUnit : Archetype<SvCcSpatialUnit>
 {
     public static readonly Comp<SvCcSpatialBag> Bag = Register<SvCcSpatialBag>();
@@ -71,8 +71,6 @@ class SvComponentCollectionTests : TestBase<SvComponentCollectionTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<SvCcUnit>.Touch();
-        Archetype<SvCcSpatialUnit>.Touch();
     }
 
     private DatabaseEngine SetupEngine()

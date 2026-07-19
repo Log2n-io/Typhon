@@ -5,9 +5,11 @@ using System.Runtime.InteropServices;
 namespace Typhon.Engine.Internals;
 
 // WAL v2 record format — logical-truth-only records. See claude/design/Durability/MinimalWal/02-wal-format.md.
-// The log addresses (EntityId, ComponentTypeId) only — never pages, chunks, or bufferIds (LOG-06). One codec
-// (RecordCodec) is the sole reader/writer of these bytes (LOG-02). All multi-byte fields little-endian; layouts
-// are exact and binding — changing one is a format-version bump.
+// The log addresses (EntityId, slot) only — never pages, chunks, or bufferIds, and never the process-global, registration-order ComponentTypeId (LOG-06).
+// Component identity on the wire is the per-archetype SLOT (0..15): the EntityId carries the per-DB routing id (its low 16 bits), and (routingId, slot) is
+// durable by construction — routing via ArchetypeR1.RoutingId, slot via ArchetypeR1.ComponentNames order — so a crash→reopen with a shifted registration
+// order still resolves each record correctly. One codec (RecordCodec) is the sole reader/writer of these bytes (LOG-02). All multi-byte fields little-endian;
+// layouts are exact and binding — changing one is a format-version bump.
 
 /// <summary>Discriminates the four WAL v2 record kinds (02 §3.0, RecordHeader.RecordKind).</summary>
 [PublicAPI]
@@ -131,7 +133,7 @@ internal struct RecordHeader
 internal static class SlotRecordBody
 {
     public const int EntityIdOffset = 0;        // long
-    public const int ComponentTypeIdOffset = 8; // ushort
+    public const int SlotIndexOffset = 8;       // ushort — per-archetype slot (0..15); durable identity, not the dense ComponentTypeId (LOG-06)
     public const int OpOffset = 10;             // byte
     public const int ReservedOffset = 11;       // byte = 0
     public const int PayloadLengthOffset = 12;  // ushort
@@ -155,7 +157,7 @@ internal static class LifecycleRecordBody
 internal static class CollectionDeltaRecordBody
 {
     public const int EntityIdOffset = 0;        // long
-    public const int ComponentTypeIdOffset = 8; // ushort
+    public const int SlotIndexOffset = 8;       // ushort — per-archetype slot (0..15); durable identity, not the dense ComponentTypeId (LOG-06)
     public const int FieldIdOffset = 10;        // ushort
     public const int OpOffset = 12;             // byte
     public const int ReservedOffset = 13;       // byte = 0
@@ -192,7 +194,7 @@ internal ref struct RecordView
 
     // Common body fields (meaning depends on Kind)
     public long EntityId;
-    public ushort ComponentTypeId;
+    public ushort SlotIndex; // Slot/CollectionDelta: the per-archetype component slot (0..15); resolve via EntityId's routing id
     public ushort FieldId;
     public ushort ArchetypeId;
     public ushort EnabledBits;

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Concurrent;
 using System.Numerics;
 using System.Threading;
@@ -22,9 +22,6 @@ class StorageModeStressTests : TestBase<StorageModeStressTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<SvTestArchetype>.Touch();
-        Archetype<TransientTestArchetype>.Touch();
-        Archetype<MixedModeArchetype>.Touch();
     }
 
     private DatabaseEngine SetupEngine()

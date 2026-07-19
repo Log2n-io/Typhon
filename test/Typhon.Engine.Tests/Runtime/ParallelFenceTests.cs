@@ -1,4 +1,4 @@
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using NUnit.Framework;
 using System;
@@ -20,9 +20,6 @@ namespace Typhon.Engine.Tests.Runtime;
 [TestFixture]
 class ParallelFenceTests : TestBase<ParallelFenceTests>
 {
-    [OneTimeSetUp]
-    public void OneTimeSetup() => Archetype<EcsUnit>.Touch();
-
     private DatabaseEngine SetupEngine()
     {
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
@@ -201,7 +198,6 @@ class ParallelFenceTests : TestBase<ParallelFenceTests>
         using var scope = sp.CreateScope();
         var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
 
-        Archetype<Typhon.Engine.Tests.ClMigUnit>.Touch();
         dbe.RegisterComponentFromAccessor<Typhon.Engine.Tests.ClMigPos>();
         dbe.RegisterComponentFromAccessor<Typhon.Engine.Tests.ClMigScratch>();
         dbe.ConfigureSpatialGrid(new SpatialGridConfig(
@@ -327,7 +323,6 @@ class ParallelFenceTests : TestBase<ParallelFenceTests>
         using var scope = sp.CreateScope();
         var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
 
-        Archetype<Typhon.Engine.Tests.ClMigUnit>.Touch();
         dbe.RegisterComponentFromAccessor<Typhon.Engine.Tests.ClMigPos>();
         dbe.RegisterComponentFromAccessor<Typhon.Engine.Tests.ClMigScratch>();
         dbe.ConfigureSpatialGrid(new SpatialGridConfig(

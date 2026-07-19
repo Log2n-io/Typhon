@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -44,25 +44,25 @@ struct PtaTransient
 // Test archetypes
 // ═══════════════════════════════════════════════════════════════════════
 
-[Archetype(900)]
+[Archetype]
 partial class PtaArchVersioned : Archetype<PtaArchVersioned>
 {
     public static readonly Comp<PtaVersioned> Data = Register<PtaVersioned>();
 }
 
-[Archetype(901)]
+[Archetype]
 partial class PtaArchSingleVersion : Archetype<PtaArchSingleVersion>
 {
     public static readonly Comp<PtaSingleVersion> Data = Register<PtaSingleVersion>();
 }
 
-[Archetype(902)]
+[Archetype]
 partial class PtaArchTransient : Archetype<PtaArchTransient>
 {
     public static readonly Comp<PtaTransient> Data = Register<PtaTransient>();
 }
 
-[Archetype(903)]
+[Archetype]
 partial class PtaArchMixed : Archetype<PtaArchMixed>
 {
     public static readonly Comp<PtaVersioned> V = Register<PtaVersioned>();
@@ -80,10 +80,6 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<PtaArchVersioned>.Touch();
-        Archetype<PtaArchSingleVersion>.Touch();
-        Archetype<PtaArchTransient>.Touch();
-        Archetype<PtaArchMixed>.Touch();
     }
 
     private DatabaseEngine SetupEngine()

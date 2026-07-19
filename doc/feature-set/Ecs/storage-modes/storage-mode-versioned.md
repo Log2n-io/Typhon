@@ -34,7 +34,7 @@ public struct Inventory
     public int Quantity;
 }
 
-[Archetype(10)]
+[Archetype]
 partial class Player : Archetype<Player>
 {
     public static readonly Comp<Inventory> Inventory = Register<Inventory>();

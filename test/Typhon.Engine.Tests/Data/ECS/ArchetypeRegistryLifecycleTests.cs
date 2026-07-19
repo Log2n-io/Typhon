@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
@@ -7,6 +7,7 @@ using System.Runtime.Loader;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using Typhon.Engine.Internals;
+using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Tests;
 
@@ -41,8 +42,6 @@ internal sealed class ArchetypeRegistryLifecycleTests : TestBase<ArchetypeRegist
     {
         // Touch makes the archetype types finalised in the registry (default-ALC, so they persist for the
         // process lifetime — they'll stay in the registry across all tests in this fixture, by design).
-        Archetype<SvUnit>.Touch();
-        Archetype<VUnit>.Touch();
     }
 
     [Test]
@@ -186,23 +185,27 @@ internal sealed class ArchetypeRegistryLifecycleTests : TestBase<ArchetypeRegist
 
         var asm = alc.LoadFromAssemblyPath(schemaDllPath);
 
-        // Pick a known archetype type from the fixture schema. GuildArch registers a single Guild component — a small,
-        // well-defined registration surface for the test.
-        var guildArchType = asm.GetType("Typhon.Workbench.Fixtures.GuildArch", throwOnError: true)!;
-        var guildCompType = asm.GetType("Typhon.Workbench.Fixtures.Guild", throwOnError: true)!;
+        // Fire the generated [ModuleInitializer] barrier (feature #514 phase 5) — the Workbench open-world trigger (design §5.2). This registers EVERY [Component]
+        // + [Archetype] in the schema assembly into the global registry at once, exactly as a real session sees it after loading the schema DLL. (Reflection's
+        // GetTypes() does NOT fire the module-init; RunModuleConstructor does, and is idempotent.)
+        RuntimeHelpers.RunModuleConstructor(asm.ManifestModule.ModuleHandle);
 
-        // Trigger the static ctor on Archetype<GuildArch> via reflection so the components get declared and
-        // the metadata gets finalised. This mirrors what `Archetype<T>.Touch()` would do if we could call
-        // it generically at runtime against a Type variable.
-        var closedArchetype = typeof(Archetype<>).MakeGenericType(guildArchType);
-        RuntimeHelpers.RunClassConstructor(guildArchType.TypeHandle);
-        var metadataProp = closedArchetype.GetProperty("Metadata", BindingFlags.NonPublic | BindingFlags.Static);
-        _ = metadataProp!.GetValue(null); // force finalization
-
-        // Register engine-use refcount, then unregister. For collectible-ALC types, UnregisterEngineUse
-        // tears down every entry — releasing the static refs that would otherwise pin the ALC.
-        var archetypes = new HashSet<Type> { guildArchType };
-        var components = new HashSet<Type> { guildCompType };
+        // Mirror the real engine lifecycle: RegisterEngineUse over ALL archetype + component types the barrier registered, then UnregisterEngineUse to release
+        // them (the real engine snapshots GetAllArchetypes() for exactly this on InitializeArchetypes / Dispose). Unregistering only a subset would leak the
+        // archetypes the module-init registered but the test never released — pinning the ALC.
+        var archetypes = new HashSet<Type>();
+        var components = new HashSet<Type>();
+        foreach (var t in asm.GetTypes())
+        {
+            if (t.GetCustomAttribute<ArchetypeAttribute>() != null)
+            {
+                archetypes.Add(t);
+            }
+            if (t.GetCustomAttribute<ComponentAttribute>() != null)
+            {
+                components.Add(t);
+            }
+        }
         ArchetypeRegistry.RegisterEngineUse(archetypes, components);
         ArchetypeRegistry.UnregisterEngineUse(archetypes, components);
 
@@ -213,10 +216,6 @@ internal sealed class ArchetypeRegistryLifecycleTests : TestBase<ArchetypeRegist
         // Even though they go out of scope, the JIT can extend their lifetime to the end of the method;
         // explicit nullification makes the intent unambiguous and the test deterministic.
         // ReSharper disable RedundantAssignment
-        guildArchType = null!;
-        guildCompType = null!;
-        closedArchetype = null!;
-        metadataProp = null!;
         asm = null!;
         alc = null!;
         archetypes = null!;

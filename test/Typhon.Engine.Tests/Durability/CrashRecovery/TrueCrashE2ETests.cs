@@ -3,6 +3,8 @@ using Microsoft.Extensions.Logging;
 using NUnit.Framework;
 using System;
 using System.IO;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 
 namespace Typhon.Engine.Tests;
 
@@ -522,24 +524,78 @@ internal sealed class TrueCrashE2ETests
         dbe.RegisterComponentFromAccessor<CompA>();
         dbe.InitializeArchetypes();
 
-        var entity = new EntityId(1L, 200); // CompAArch = archetype id 200
+        var routingId = dbe.RoutingIdOf(Archetype<CompAArch>.Metadata); // per-DB routing id embedded in EntityIds of CompAArch
+        var entity = new EntityId(1L, routingId);
         const long tsn = 5;
 
         using (EpochGuard.Enter(dbe.EpochManager))
         using (var applier = new RecoveryApplier(dbe))
         {
-            applier.ApplySpawnedEntity((long)entity.RawValue, 200, 0, tsn, Array.Empty<RecoveryApplier.SlotData>());
-            applier.ApplySpawnedEntity((long)entity.RawValue, 200, 0, tsn, Array.Empty<RecoveryApplier.SlotData>()); // re-run
+            applier.ApplySpawnedEntity((long)entity.RawValue, routingId, 0, tsn, Array.Empty<RecoveryApplier.SlotData>());
+            applier.ApplySpawnedEntity((long)entity.RawValue, routingId, 0, tsn, Array.Empty<RecoveryApplier.SlotData>()); // re-run
         }
 
         // NextFreeTSN restore is the driver's responsibility; do it here so a read transaction sees the recovered entity.
         dbe.TransactionChain.SetNextFreeId(tsn + 1);
 
-        Assert.That(dbe._archetypeStates[200].EntityMap.EntryCount, Is.EqualTo(1),
+        Assert.That(dbe._archetypeStates[Archetype<CompAArch>.Metadata.ArchetypeId].EntityMap.EntryCount, Is.EqualTo(1),
             "re-applying the same Spawn must not create a duplicate EntityMap entry");
 
         using var tx = dbe.CreateQuickTransaction();
         Assert.That(tx.IsAlive(entity), Is.True, "the entity must be alive exactly once after the idempotent re-apply");
+    }
+
+    /// <summary>
+    /// LOG-06 (#514 Phase 2): recovery resolves a component-value record by the per-archetype <b>slot</b> carried on the wire —
+    /// never by the process-global, registration-order <c>ComponentTypeId</c>. This is what makes a crash→reopen with a shifted
+    /// registration order safe: (routingId, slot) is durable by construction. White-box test over <see cref="RecoveryApplier"/>:
+    /// a record whose <see cref="RecoveryApplier.SlotData.SlotIndex"/> is a valid slot restores the value at that slot; a record
+    /// whose identity is an out-of-range value — exactly what a stale global <c>ComponentTypeId</c> would decode to in any real
+    /// schema — is tolerated (the entity spawns, the bogus slot is dropped), never mis-mapped onto another component.
+    /// </summary>
+    [Test]
+    [CancelAfter(15_000)]
+    public void RecoveryApplier_ResolvesComponentBySlot_Log06()
+    {
+        using var scope = _serviceProvider.CreateScope();
+        var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+        dbe.RegisterComponentFromAccessor<CompA>();
+        dbe.InitializeArchetypes();
+
+        var meta = Archetype<CompAArch>.Metadata;
+        var routingId = dbe.RoutingIdOf(meta);
+        var slot = meta.GetSlot(ArchetypeRegistry.GetComponentTypeId<CompA>()); // CompA's per-archetype slot in CompAArch
+
+        var v = new CompA(42, 1.5f, 2.5);
+        var payload = new byte[Unsafe.SizeOf<CompA>()];
+        MemoryMarshal.Write(payload, in v);
+
+        const long tsn = 5;
+        var good = new EntityId(1L, routingId);
+        var bogus = new EntityId(2L, routingId);
+
+        using (EpochGuard.Enter(dbe.EpochManager))
+        using (var applier = new RecoveryApplier(dbe))
+        {
+            // Well-formed record — identity is the SLOT → the value is restored at that slot. Enable the slot so it reads back.
+            applier.ApplySpawnedEntity((long)good.RawValue, routingId, (ushort)(1 << slot), tsn,
+                new[] { new RecoveryApplier.SlotData { SlotIndex = slot, Payload = payload, Tsn = tsn } });
+
+            // Out-of-range identity (what a stale registration-order ComponentTypeId decodes to) → tolerated, dropped, no crash.
+            applier.ApplySpawnedEntity((long)bogus.RawValue, routingId, 0, tsn,
+                new[] { new RecoveryApplier.SlotData { SlotIndex = (ushort)meta.ComponentCount, Payload = payload, Tsn = tsn } });
+        }
+
+        dbe.TransactionChain.SetNextFreeId(tsn + 1);
+
+        using var tx = dbe.CreateQuickTransaction();
+        Assert.That(tx.IsAlive(good), Is.True);
+        ref readonly var read = ref tx.Open(good).Read(CompAArch.A);
+        Assert.That(read.A, Is.EqualTo(42), "value recovered at the durable slot");
+        Assert.That(read.B, Is.EqualTo(1.5f));
+        Assert.That(read.C, Is.EqualTo(2.5));
+
+        Assert.That(tx.IsAlive(bogus), Is.True, "an out-of-range (stale-id) slot record must be tolerated, not crash or mis-map recovery");
     }
 
     /// <summary>

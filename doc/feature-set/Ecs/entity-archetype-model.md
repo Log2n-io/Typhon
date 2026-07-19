@@ -15,7 +15,7 @@ A flat `EntityId` with independent per-component tables gives no guarantee that 
 
 ## ⚙️ How it works (in brief)
 
-Archetypes are plain C# classes in a single-inheritance hierarchy, each declaring its components as `static readonly Comp<T>` fields; a derived archetype (e.g. `House : Archetype<House, Building>`) inherits its parent's components at stable slot indices and adds its own. Every `EntityId` packs a 52-bit monotonic `EntityKey` and a 12-bit `ArchetypeId` into one `ulong` — the `ArchetypeId` routes to the entity's archetype, the `EntityKey` is the lookup key within it. Because keys are never recycled, a stale `EntityId` simply misses on lookup; no version/generation field is needed. Opening an entity (`Open`/`OpenMut`) pays one lookup and returns an `EntityRef` that amortizes it across all subsequent `Read`/`Write` calls for that entity. `Comp<T>` is the typed handle used both to declare a component on an archetype and to address it later — slot resolution is O(1) and type-checked by the compiler.
+Archetypes are plain C# classes in a single-inheritance hierarchy, each declaring its components as `static readonly Comp<T>` fields; a derived archetype (e.g. `House : Archetype<House, Building>`) inherits its parent's components at stable slot indices and adds its own. Every `EntityId` packs a 48-bit monotonic `EntityKey` and a 16-bit per-DB archetype routing id into one `ulong` — the routing id routes to the entity's archetype, the `EntityKey` is the lookup key within it. Because keys are never recycled, a stale `EntityId` simply misses on lookup; no version/generation field is needed. Opening an entity (`Open`/`OpenMut`) pays one lookup and returns an `EntityRef` that amortizes it across all subsequent `Read`/`Write` calls for that entity. `Comp<T>` is the typed handle used both to declare a component on an archetype and to address it later — slot resolution is O(1) and type-checked by the compiler.
 
 ## 💻 Usage
 
@@ -34,13 +34,13 @@ public struct HouseData
 }
 
 // ─── Archetype hierarchy ───
-[Archetype(1)]
+[Archetype]
 public class Building : Archetype<Building>
 {
     public static readonly Comp<Placement> Placement = Register<Placement>();
 }
 
-[Archetype(2)]
+[Archetype]
 public class House : Archetype<House, Building>
 {
     public static readonly Comp<HouseData> HouseInfo = Register<HouseData>();
@@ -63,7 +63,7 @@ t.Commit();
 | Constraint | Limit | Effect |
 |---|---|---|
 | Components per archetype | 16 | `[Archetype]` registration throws if exceeded |
-| Registered archetypes | 4,096 (12-bit `ArchetypeId`) | IDs are explicit (`[Archetype(Id = N)]`), not auto-assigned |
+| Registered archetypes | up to 65,536 per database (16-bit per-DB routing id) | Identity is the CLR type name (or `[Archetype(Name = "...")]`); the engine auto-assigns the catalog + per-DB routing ids |
 | `ComponentValue` inline payload | 112 bytes | Larger components use incremental Spawn (`Spawn` + `OpenMut` + `Write`) |
 | Archetype inheritance | single parent only | No diamond inheritance — enforced at registration |
 
@@ -74,12 +74,12 @@ t.Commit();
 - **Zero-copy access**: `Read` returns `ref readonly T`, `Write` returns `ref T` — no struct copies into or out of storage.
 - **Stale references always miss, safely**: `EntityKey` is monotonic and never recycled, so there's no version field and no ABA hazard — a held `EntityId` for a destroyed entity simply fails to resolve.
 - **Polymorphic slot stability**: a component inherited from a parent archetype sits at the same slot index in every descendant, so handles like `Building.Placement` work uniformly across `Building`, `House`, and any other subclass.
-- **`ArchetypeId` is permanent**: it's embedded in every persisted `EntityId`, so it must be assigned explicitly via the attribute and never reused for a different schema.
+- **Archetype identity is the type name, routing is per-DB**: an archetype is identified by its CLR type name (override with `[Archetype(Name = "...")]`); the engine auto-assigns a per-process catalog id and a per-DB routing id (persisted in `ArchetypeR1` and re-matched by name on reopen). The routing id is embedded in every persisted `EntityId`. Renaming stays safe — `[Archetype(Name = "New", PreviousName = "Old")]` re-matches the old name on reopen and carries the data forward.
 - **Component removal is non-structural**: an archetype's component set is fixed after spawn — "removing" a component means disabling it (O(1) bit), not migrating the entity to a different archetype.
 
 ## 🧪 Tests
 
-- [EntityIdTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/EntityIdTests.cs) — `EntityId` 64-bit packing (`EntityKey`/`ArchetypeId`), null semantics, equality, raw-value round-trip
+- [EntityIdTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/EntityIdTests.cs) — `EntityId` 64-bit packing (`EntityKey` / per-DB routing id), null semantics, equality, raw-value round-trip
 - [ArchetypeRegistrationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/ArchetypeRegistrationTests.cs) — archetype registration, parent-first slot inheritance, component-type dedup across archetypes, subtree building
 
 ## 🔗 Related

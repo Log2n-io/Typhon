@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
@@ -36,7 +36,7 @@ struct ClV5SvMov
 }
 
 /// <summary>Mixed SV + Versioned archetype for cluster Phase 5 tests.</summary>
-[Archetype(610)]
+[Archetype]
 partial class ClVMixed : Archetype<ClVMixed>
 {
     public static readonly Comp<ClV5SvPos> Pos = Register<ClV5SvPos>();
@@ -44,7 +44,7 @@ partial class ClVMixed : Archetype<ClVMixed>
 }
 
 /// <summary>Two SV + one Versioned for multi-component cluster testing.</summary>
-[Archetype(611)]
+[Archetype]
 partial class ClVTriple : Archetype<ClVTriple>
 {
     public static readonly Comp<ClV5SvPos> Pos = Register<ClV5SvPos>();
@@ -63,8 +63,6 @@ class ClusterVersionedTests : TestBase<ClusterVersionedTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<ClVMixed>.Touch();
-        Archetype<ClVTriple>.Touch();
     }
 
     private DatabaseEngine SetupEngine()

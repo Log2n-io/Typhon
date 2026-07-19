@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Numerics;
 using System.Runtime.InteropServices;
@@ -33,7 +33,7 @@ public struct SpatMeta
     [Index] public int Level;       // indexed → usable in WHERE / ORDER BY; intentionally NOT spatial
 }
 
-[Archetype(3010)]
+[Archetype]
 partial class SpatArch : Archetype<SpatArch>
 {
     public static readonly Comp<SpatPos> Pos = Register<SpatPos>();
@@ -63,9 +63,6 @@ public sealed class QuerySpecCompilerSpatialTests
     private string _tempDir;
     private ServiceProvider _sp;
     private DatabaseEngine _engine;
-
-    [OneTimeSetUp]
-    public void OneTimeSetup() => Archetype<SpatArch>.Touch();
 
     [SetUp]
     public void SetUp()

@@ -1,4 +1,4 @@
-using BenchmarkDotNet.Attributes;
+﻿using BenchmarkDotNet.Attributes;
 using BenchmarkDotNet.Configs;
 using BenchmarkDotNet.Toolchains.InProcess.Emit;
 using Microsoft.Extensions.DependencyInjection;
@@ -25,7 +25,7 @@ class InProcessConfig : ManualConfig
     }
 }
 
-[Archetype(506)]
+[Archetype]
 class BenchItemArch : Archetype<BenchItemArch>
 {
     public static readonly Comp<ItemData> Item = Register<ItemData>();
@@ -92,7 +92,6 @@ public class QueryViewBenchmarks : IDisposable
         _dbe = _serviceProvider.GetRequiredService<DatabaseEngine>();
         _dbe.RegisterComponentFromAccessor<ItemData>();
 
-        Archetype<BenchItemArch>.Touch();
         _dbe.InitializeArchetypes();
 
         var rng = new Random(42);

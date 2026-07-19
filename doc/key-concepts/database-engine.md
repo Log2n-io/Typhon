@@ -8,7 +8,7 @@ description: 'The root object — one per process. DatabaseEngine.Open names the
 
 > **In one line:** the **root object** — one per process — that owns everything and hands you [transactions](xref:concept-transaction), [queries](xref:concept-query), and the schema.
 
-`DatabaseEngine.Open("skirmish.typhon", o => o.Register<Position>()…RegisterArchetype<Unit>())` is the one-line setup: it names the on-disk database, registers your [components](xref:concept-component) and [archetypes](xref:concept-archetype) (running any [schema migration](xref:concept-schema-evolution) first), and returns a ready-to-use engine. `using var` flushes dirty pages and releases the file lock at scope end. Build it **once at startup** and hand it around.
+`DatabaseEngine.Open("skirmish.typhon", o => o.Register<Position>()…)` is the one-line setup: it names the on-disk database and registers your [components](xref:concept-component) — your [archetypes](xref:concept-archetype) self-register at assembly load — running any [schema migration](xref:concept-schema-evolution) first, and returns a ready-to-use engine. `using var` flushes dirty pages and releases the file lock at scope end. Build it **once at startup** and hand it around.
 
 Under the hood the engine is a composition of independently-configurable subsystems — [page cache](xref:concept-page-cache), allocator, [WAL](xref:concept-wal-checkpoint), timers — tuned through `DatabaseEngineOptions` (or `services.AddTyphon(…)` in a DI app). You declare the envelope; it self-manages the rest.
 
@@ -21,7 +21,7 @@ Under the hood the engine is a composition of independently-configurable subsyst
 
 ## In the API
 
-- [`DatabaseEngine`](xref:Typhon.Engine.DatabaseEngine) — [`Open`](xref:Typhon.Engine.DatabaseEngine.Open*) / `Register<T>` / `RegisterArchetype<T>` / `CreateQuickTransaction` / [`CreateUnitOfWork`](xref:Typhon.Engine.DatabaseEngine.CreateUnitOfWork*).
+- [`DatabaseEngine`](xref:Typhon.Engine.DatabaseEngine) — [`Open`](xref:Typhon.Engine.DatabaseEngine.Open*) / `Register<T>` / `CreateQuickTransaction` / [`CreateUnitOfWork`](xref:Typhon.Engine.DatabaseEngine.CreateUnitOfWork*).
 - [`DatabaseEngineOptions`](xref:Typhon.Engine.DatabaseEngineOptions) — configuration ([`Resources`](xref:Typhon.Engine.DatabaseEngineOptions.Resources), [`Wal`](xref:Typhon.Engine.DatabaseEngineOptions.Wal), `Configure*`).
 
 ## Learn & use

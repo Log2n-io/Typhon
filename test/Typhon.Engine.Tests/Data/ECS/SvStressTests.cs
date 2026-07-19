@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 using System.Threading;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
@@ -20,7 +20,7 @@ struct SvStressData
     public SvStressData(int cat, int val) { Category = cat; Value = val; }
 }
 
-[Archetype(361)]
+[Archetype]
 class SvStressArch : Archetype<SvStressArch>
 {
     public static readonly Comp<SvStressData> Data = Register<SvStressData>();
@@ -34,9 +34,6 @@ class SvStressArch : Archetype<SvStressArch>
 [NonParallelizable]
 class SvStressTests : TestBase<SvStressTests>
 {
-    [OneTimeSetUp]
-    public void OneTimeSetup() => Archetype<SvStressArch>.Touch();
-
     private DatabaseEngine SetupEngine()
     {
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();

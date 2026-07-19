@@ -118,11 +118,11 @@ public class SourceLocationGenerator : IIncrementalGenerator
         string kindName = null;
         if (kindArg.Type is INamedTypeSymbol enumType && enumType.TypeKind == TypeKind.Enum && kindArg.Value != null)
         {
-            long ordinal = System.Convert.ToInt64(kindArg.Value);
+            long ordinal = Convert.ToInt64(kindArg.Value);
             foreach (var m in enumType.GetMembers())
             {
                 if (m is IFieldSymbol fs && fs.IsConst && fs.HasConstantValue && fs.ConstantValue != null
-                    && System.Convert.ToInt64(fs.ConstantValue) == ordinal)
+                    && Convert.ToInt64(fs.ConstantValue) == ordinal)
                 {
                     kindName = fs.Name;
                     break;

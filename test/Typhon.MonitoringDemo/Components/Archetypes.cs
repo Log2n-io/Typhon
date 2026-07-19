@@ -1,4 +1,4 @@
-using Typhon.Engine;
+﻿using Typhon.Engine;
 using Typhon.Schema.Definition;
 
 namespace Typhon.MonitoringDemo;
@@ -13,37 +13,37 @@ namespace Typhon.MonitoringDemo;
 
 // --- Factory Archetypes ---
 
-[Archetype(600)]
+[Archetype]
 class FactoryBuildingArch : Archetype<FactoryBuildingArch>
 {
     public static readonly Comp<FactoryBuilding> Building = Register<FactoryBuilding>();
 }
 
-[Archetype(601)]
+[Archetype]
 class ConveyorBeltArch : Archetype<ConveyorBeltArch>
 {
     public static readonly Comp<ConveyorBelt> Belt = Register<ConveyorBelt>();
 }
 
-[Archetype(602)]
+[Archetype]
 class ItemStackArch : Archetype<ItemStackArch>
 {
     public static readonly Comp<ItemStack> Stack = Register<ItemStack>();
 }
 
-[Archetype(603)]
+[Archetype]
 class RecipeArch : Archetype<RecipeArch>
 {
     public static readonly Comp<Recipe> Recipe = Register<Recipe>();
 }
 
-[Archetype(604)]
+[Archetype]
 class ResourceNodeArch : Archetype<ResourceNodeArch>
 {
     public static readonly Comp<ResourceNode> Node = Register<ResourceNode>();
 }
 
-[Archetype(605)]
+[Archetype]
 class PowerGridArch : Archetype<PowerGridArch>
 {
     public static readonly Comp<PowerGrid> Grid = Register<PowerGrid>();
@@ -51,37 +51,37 @@ class PowerGridArch : Archetype<PowerGridArch>
 
 // --- RPG Archetypes ---
 
-[Archetype(606)]
+[Archetype]
 class CharacterArch : Archetype<CharacterArch>
 {
     public static readonly Comp<Character> Character = Register<Character>();
 }
 
-[Archetype(607)]
+[Archetype]
 class WorldPositionArch : Archetype<WorldPositionArch>
 {
     public static readonly Comp<WorldPosition> Position = Register<WorldPosition>();
 }
 
-[Archetype(608)]
+[Archetype]
 class CombatStatsArch : Archetype<CombatStatsArch>
 {
     public static readonly Comp<CombatStats> Stats = Register<CombatStats>();
 }
 
-[Archetype(609)]
+[Archetype]
 class SkillArch : Archetype<SkillArch>
 {
     public static readonly Comp<Skill> Skill = Register<Skill>();
 }
 
-[Archetype(610)]
+[Archetype]
 class QuestArch : Archetype<QuestArch>
 {
     public static readonly Comp<Quest> Quest = Register<Quest>();
 }
 
-[Archetype(611)]
+[Archetype]
 class InventoryArch : Archetype<InventoryArch>
 {
     public static readonly Comp<Inventory> Item = Register<Inventory>();

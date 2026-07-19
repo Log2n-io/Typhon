@@ -97,7 +97,6 @@ public static class C7Runner
 
         static (ServiceProvider, DatabaseEngine) Build(string dbName, string walDir, bool fresh)
         {
-            Archetype<VValArch>.Touch(); // register the archetype type (else _archetypeStates[id] is out of bounds)
             var sc = new ServiceCollection();
             sc.AddLogging(b => b.SetMinimumLevel(LogLevel.Critical))
               .AddResourceRegistry().AddMemoryAllocator().AddEpochManager()

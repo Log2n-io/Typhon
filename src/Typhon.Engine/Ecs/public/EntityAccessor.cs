@@ -184,9 +184,23 @@ public partial class EntityAccessor : IDisposable
             throw new InvalidOperationException($"The type {componentType} doesn't have a registered Component Table");
         }
 
+        // Resolve the component's in-memory type id. When the passed id and the componentType lookup both miss, fall back to the ComponentTable's POCOType —
+        // the per-engine authority. componentType can be a duplicate Type object from a collectible ALC (#384) that never landed in the global registry,
+        // whereas the table's POCOType is the registered identity the archetype metadata slot map is keyed on. (The table itself is already resolved by
+        // schema name above, so it is correct regardless of which Type object keyed this lookup.)
+        int resolvedTypeId = typeId;
+        if (resolvedTypeId < 0)
+        {
+            resolvedTypeId = ArchetypeRegistry.GetComponentTypeId(componentType);
+            if (resolvedTypeId < 0)
+            {
+                resolvedTypeId = ArchetypeRegistry.GetComponentTypeId(ct.Definition.POCOType);
+            }
+        }
+
         info = new ComponentInfo
         {
-            ComponentTypeId = typeId >= 0 ? typeId : ArchetypeRegistry.GetComponentTypeId(componentType),
+            ComponentTypeId = resolvedTypeId,
             ComponentTable = ct,
             ComponentOverhead = ct.ComponentOverhead,
             SingleCache = new Dictionary<long, ComponentInfo.CompRevInfo>(),

@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using Typhon.Schema.Definition;
@@ -20,7 +20,7 @@ struct TiTransientData
     public TiTransientData(int cat, int val) { Category = cat; Value = val; }
 }
 
-[Archetype(360)]
+[Archetype]
 class TiTransientArch : Archetype<TiTransientArch>
 {
     public static readonly Comp<TiTransientData> Data = Register<TiTransientData>();
@@ -34,9 +34,6 @@ class TiTransientArch : Archetype<TiTransientArch>
 [NonParallelizable]
 class TransientIndexTests : TestBase<TransientIndexTests>
 {
-    [OneTimeSetUp]
-    public void OneTimeSetup() => Archetype<TiTransientArch>.Touch();
-
     private DatabaseEngine SetupEngine()
     {
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();

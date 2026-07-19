@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Diagnostics;
 using Typhon.ARPG.Schema;
 using Typhon.Schema.Definition;
@@ -12,64 +12,64 @@ namespace Typhon.ARPG.Shell;
 // ── ARPG Archetypes ──────────────────────────────────────────────────
 // IDs 400+ to avoid collisions with test archetypes (200-356) and engine archetypes (100-101)
 
-[Archetype(400)]
+[Archetype]
 class CharacterArch : Archetype<CharacterArch>
 {
     public static readonly Comp<CharacterStats> Stats = Register<CharacterStats>();
     public static readonly Comp<PlayerMetadata> Meta = Register<PlayerMetadata>();
 }
 
-[Archetype(401)]
+[Archetype]
 class EquipmentArch : Archetype<EquipmentArch>
 {
     public static readonly Comp<Equipment> Equip = Register<Equipment>();
 }
 
-[Archetype(402)]
+[Archetype]
 class ActiveSkillsArch : Archetype<ActiveSkillsArch>
 {
     public static readonly Comp<ActiveSkills> Skills = Register<ActiveSkills>();
 }
 
-[Archetype(403)]
+[Archetype]
 class PositionArch : Archetype<PositionArch>
 {
     public static readonly Comp<Position> Pos = Register<Position>();
 }
 
-[Archetype(404)]
+[Archetype]
 class ResourceNodeArch : Archetype<ResourceNodeArch>
 {
     public static readonly Comp<ResourceNode> Node = Register<ResourceNode>();
 }
 
-[Archetype(405)]
+[Archetype]
 class ItemDataArch : Archetype<ItemDataArch>
 {
     public static readonly Comp<ItemData> Item = Register<ItemData>();
 }
 
-[Archetype(406)]
+[Archetype]
 class MonsterArch : Archetype<MonsterArch>
 {
     public static readonly Comp<CharacterStats> Stats = Register<CharacterStats>();
     public static readonly Comp<CombatStats> Combat = Register<CombatStats>();
 }
 
-[Archetype(407)]
+[Archetype]
 class MonsterAIArch : Archetype<MonsterAIArch>
 {
     public static readonly Comp<MonsterAI> AI = Register<MonsterAI>();
     public static readonly Comp<Position> Pos = Register<Position>();
 }
 
-[Archetype(408)]
+[Archetype]
 class CraftingRecipeArch : Archetype<CraftingRecipeArch>
 {
     public static readonly Comp<CraftingRecipe> Recipe = Register<CraftingRecipe>();
 }
 
-[Archetype(409)]
+[Archetype]
 class CraftingStationArch : Archetype<CraftingStationArch>
 {
     public static readonly Comp<CraftingStation> Station = Register<CraftingStation>();
@@ -142,16 +142,6 @@ public sealed class ArpgGenerateCommand : ShellCommand
         }
 
         // Ensure ARPG archetypes are registered and initialized
-        Archetype<CharacterArch>.Touch();
-        Archetype<EquipmentArch>.Touch();
-        Archetype<ActiveSkillsArch>.Touch();
-        Archetype<PositionArch>.Touch();
-        Archetype<ResourceNodeArch>.Touch();
-        Archetype<ItemDataArch>.Touch();
-        Archetype<MonsterArch>.Touch();
-        Archetype<MonsterAIArch>.Touch();
-        Archetype<CraftingRecipeArch>.Touch();
-        Archetype<CraftingStationArch>.Touch();
         context.Engine.InitializeArchetypes();
 
         var sw = Stopwatch.StartNew();

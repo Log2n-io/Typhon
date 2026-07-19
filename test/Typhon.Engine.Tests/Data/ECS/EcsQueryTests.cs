@@ -1,4 +1,4 @@
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 
 namespace Typhon.Engine.Tests;
@@ -9,9 +9,6 @@ class EcsQueryTests : TestBase<EcsQueryTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<EcsUnit>.Touch();
-        Archetype<EcsSoldier>.Touch();
-        Archetype<CompDArch>.Touch();
     }
 
     private DatabaseEngine SetupEngine()

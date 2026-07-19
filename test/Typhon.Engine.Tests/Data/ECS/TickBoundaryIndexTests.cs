@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using Typhon.Schema.Definition;
@@ -19,7 +19,7 @@ struct TbSvData
     public TbSvData(int cat, int val) { Category = cat; Value = val; }
 }
 
-[Archetype(320)]
+[Archetype]
 class TbSvArch : Archetype<TbSvArch>
 {
     public static readonly Comp<TbSvData> Data = Register<TbSvData>();
@@ -33,9 +33,6 @@ class TbSvArch : Archetype<TbSvArch>
 [NonParallelizable]
 class TickBoundaryIndexTests : TestBase<TickBoundaryIndexTests>
 {
-    [OneTimeSetUp]
-    public void OneTimeSetup() => Archetype<TbSvArch>.Touch();
-
     private DatabaseEngine SetupEngine()
     {
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();

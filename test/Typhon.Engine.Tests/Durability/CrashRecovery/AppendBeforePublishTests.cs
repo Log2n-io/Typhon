@@ -1,4 +1,4 @@
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using NUnit.Framework;
 using System;
@@ -111,7 +111,6 @@ internal sealed class AppendBeforePublishTests
     {
         var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
         dbe.RegisterComponentFromAccessor<CompA>();
-        Archetype<CompAArch>.Touch();
         dbe.InitializeArchetypes();
         return dbe;
     }

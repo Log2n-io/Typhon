@@ -1,4 +1,4 @@
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using System.Collections.Generic;
 
@@ -9,7 +9,6 @@ class VersionedIndexTests : TestBase<VersionedIndexTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<CompDArch>.Touch();
     }
 
     #region Phase 1 — Infrastructure Tests

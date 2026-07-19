@@ -1,4 +1,4 @@
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using System;
 using System.Collections.Concurrent;
@@ -15,9 +15,6 @@ namespace Typhon.Engine.Tests.Runtime;
 [TestFixture]
 class ChunksPerWorkerTests : TestBase<ChunksPerWorkerTests>
 {
-    [OneTimeSetUp]
-    public void OneTimeSetup() => Archetype<EcsUnit>.Touch();
-
     private DatabaseEngine SetupEngine()
     {
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();

@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 using NUnit.Framework;
 using Typhon.Schema.Definition;
 
@@ -37,27 +37,27 @@ struct FactoryData
 // Test archetypes
 // ═══════════════════════════════════════════════════════════════════════
 
-[Archetype(10)]
+[Archetype]
 class TestBuilding : Archetype<TestBuilding>
 {
     public static readonly Comp<Placement> PlacementComp = Register<Placement>();
     public static readonly Comp<BuildingData> BuildingComp = Register<BuildingData>();
 }
 
-[Archetype(11)]
+[Archetype]
 class TestHouse : Archetype<TestHouse, TestBuilding>
 {
     public static readonly Comp<HouseData> HouseComp = Register<HouseData>();
 }
 
-[Archetype(12)]
+[Archetype]
 class TestFactory : Archetype<TestFactory, TestBuilding>
 {
     public static readonly Comp<FactoryData> FactoryComp = Register<FactoryData>();
 }
 
 // Standalone (no parent)
-[Archetype(20)]
+[Archetype]
 class TestVehicle : Archetype<TestVehicle>
 {
     public static readonly Comp<Placement> VehiclePlacement = Register<Placement>();
@@ -70,19 +70,14 @@ class ArchetypeRegistrationTests
     public void OneTimeSetup()
     {
         // Touch ensures: 1) CLR runs field initializers (DeclareComponent), 2) lazy finalization runs
-        Archetype<TestBuilding>.Touch();
-        Archetype<TestHouse>.Touch();
-        Archetype<TestFactory>.Touch();
-        Archetype<TestVehicle>.Touch();
     }
 
     [Test]
     public void RootArchetype_RegistersWithCorrectId()
     {
-
-        var meta = ArchetypeRegistry.GetMetadata(10);
+        // #514 D1: catalog ids are engine-assigned, so we resolve archetypes by type, not by a literal id.
+        var meta = ArchetypeRegistry.GetMetadata<TestBuilding>();
         Assert.That(meta, Is.Not.Null);
-        Assert.That(meta.ArchetypeId, Is.EqualTo(10));
         Assert.That(meta.ComponentCount, Is.EqualTo(2));
         Assert.That(meta.ParentArchetypeId, Is.EqualTo(ArchetypeMetadata.NoParent));
     }
@@ -92,7 +87,7 @@ class ArchetypeRegistrationTests
     {
         _ = TestBuilding.PlacementComp;
 
-        var meta = ArchetypeRegistry.GetMetadata(10);
+        var meta = ArchetypeRegistry.GetMetadata<TestBuilding>();
         Assert.That(meta.ComponentCount, Is.EqualTo(2));
         Assert.That(meta._componentTypeIds.Length, Is.EqualTo(2));
 
@@ -109,10 +104,9 @@ class ArchetypeRegistrationTests
     {
         _ = TestHouse.HouseComp;
 
-        var meta = ArchetypeRegistry.GetMetadata(11);
-        Assert.That(meta.ArchetypeId, Is.EqualTo(11));
+        var meta = ArchetypeRegistry.GetMetadata<TestHouse>();
         Assert.That(meta.ComponentCount, Is.EqualTo(3)); // 2 from Building + 1 own
-        Assert.That(meta.ParentArchetypeId, Is.EqualTo(10));
+        Assert.That(meta.ParentArchetypeId, Is.EqualTo(ArchetypeRegistry.GetMetadata<TestBuilding>().ArchetypeId));
 
         int placementTypeId = ArchetypeRegistry.GetComponentTypeId<Placement>();
         int buildingTypeId = ArchetypeRegistry.GetComponentTypeId<BuildingData>();
@@ -135,8 +129,8 @@ class ArchetypeRegistrationTests
         Assert.That(typeId, Is.GreaterThanOrEqualTo(0));
 
         // Both should share the same ComponentTypeId
-        var buildingMeta = ArchetypeRegistry.GetMetadata(10);
-        var vehicleMeta = ArchetypeRegistry.GetMetadata(20);
+        var buildingMeta = ArchetypeRegistry.GetMetadata<TestBuilding>();
+        var vehicleMeta = ArchetypeRegistry.GetMetadata<TestVehicle>();
 
         Assert.That(buildingMeta._componentTypeIds[0], Is.EqualTo(typeId));
         Assert.That(vehicleMeta._componentTypeIds[0], Is.EqualTo(typeId));
@@ -148,9 +142,9 @@ class ArchetypeRegistrationTests
         _ = TestHouse.HouseComp;
         _ = TestFactory.FactoryComp;
 
-        var parentMeta = ArchetypeRegistry.GetMetadata(10);
-        Assert.That(parentMeta.ChildArchetypeIds, Does.Contain((ushort)11));
-        Assert.That(parentMeta.ChildArchetypeIds, Does.Contain((ushort)12));
+        var parentMeta = ArchetypeRegistry.GetMetadata<TestBuilding>();
+        Assert.That(parentMeta.ChildArchetypeIds, Does.Contain(ArchetypeRegistry.GetMetadata<TestHouse>().ArchetypeId));
+        Assert.That(parentMeta.ChildArchetypeIds, Does.Contain(ArchetypeRegistry.GetMetadata<TestFactory>().ArchetypeId));
     }
 
     [Test]
@@ -161,16 +155,18 @@ class ArchetypeRegistrationTests
 
         ArchetypeRegistry.Freeze();
 
-        var parentMeta = ArchetypeRegistry.GetMetadata(10);
-        // Subtree of Building: self(10) + House(11) + Factory(12)
-        Assert.That(parentMeta.SubtreeArchetypeIds, Does.Contain((ushort)10));
-        Assert.That(parentMeta.SubtreeArchetypeIds, Does.Contain((ushort)11));
-        Assert.That(parentMeta.SubtreeArchetypeIds, Does.Contain((ushort)12));
+        var parentMeta = ArchetypeRegistry.GetMetadata<TestBuilding>();
+        var houseId = ArchetypeRegistry.GetMetadata<TestHouse>().ArchetypeId;
+        var factoryId = ArchetypeRegistry.GetMetadata<TestFactory>().ArchetypeId;
+        // Subtree of Building: self + House + Factory
+        Assert.That(parentMeta.SubtreeArchetypeIds, Does.Contain(parentMeta.ArchetypeId));
+        Assert.That(parentMeta.SubtreeArchetypeIds, Does.Contain(houseId));
+        Assert.That(parentMeta.SubtreeArchetypeIds, Does.Contain(factoryId));
         Assert.That(parentMeta.SubtreeArchetypeIds.Length, Is.EqualTo(3));
 
-        // Subtree of House: just self(11)
-        var houseMeta = ArchetypeRegistry.GetMetadata(11);
-        Assert.That(houseMeta.SubtreeArchetypeIds, Is.EqualTo(new ushort[] { 11 }));
+        // Subtree of House: just self
+        var houseMeta = ArchetypeRegistry.GetMetadata<TestHouse>();
+        Assert.That(houseMeta.SubtreeArchetypeIds, Is.EqualTo(new[] { houseMeta.ArchetypeId }));
     }
 
     [Test]
@@ -179,8 +175,8 @@ class ArchetypeRegistrationTests
         _ = TestBuilding.PlacementComp;
         _ = TestHouse.HouseComp;
 
-        var buildingMeta = ArchetypeRegistry.GetMetadata(10);
-        var houseMeta = ArchetypeRegistry.GetMetadata(11);
+        var buildingMeta = ArchetypeRegistry.GetMetadata<TestBuilding>();
+        var houseMeta = ArchetypeRegistry.GetMetadata<TestHouse>();
 
         // Building: 2 components → 14 + 2*4 = 22 bytes
         Assert.That(buildingMeta._entityRecordSize, Is.EqualTo(22));

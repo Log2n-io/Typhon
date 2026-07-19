@@ -1,4 +1,4 @@
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using System;
 using System.Runtime.CompilerServices;
@@ -146,31 +146,31 @@ struct MigMissingV2
 
 // ── Archetypes for V1 components (used for Spawn in first scope) ──
 
-[Archetype(410)]
+[Archetype]
 class MigPlayerArch : Archetype<MigPlayerArch>
 {
     public static readonly Comp<MigPlayerV1> Comp = Register<MigPlayerV1>();
 }
 
-[Archetype(411)]
+[Archetype]
 class MigChainArch : Archetype<MigChainArch>
 {
     public static readonly Comp<MigChainV1> Comp = Register<MigChainV1>();
 }
 
-[Archetype(412)]
+[Archetype]
 class MigByteArch : Archetype<MigByteArch>
 {
     public static readonly Comp<MigByteV1> Comp = Register<MigByteV1>();
 }
 
-[Archetype(313)]
+[Archetype]
 class MigFailArch : Archetype<MigFailArch>
 {
     public static readonly Comp<MigFailV1> Comp = Register<MigFailV1>();
 }
 
-[Archetype(314)]
+[Archetype]
 class MigMissingArch : Archetype<MigMissingArch>
 {
     public static readonly Comp<MigMissingV1> Comp = Register<MigMissingV1>();
@@ -178,19 +178,19 @@ class MigMissingArch : Archetype<MigMissingArch>
 
 // V2 archetypes (used for Open().Read() in scope 2 after migration)
 
-[Archetype(315)]
+[Archetype]
 class MigPlayerV2Arch : Archetype<MigPlayerV2Arch>
 {
     public static readonly Comp<MigPlayerV2> Comp = Register<MigPlayerV2>();
 }
 
-[Archetype(316)]
+[Archetype]
 class MigChainV3Arch : Archetype<MigChainV3Arch>
 {
     public static readonly Comp<MigChainV3> Comp = Register<MigChainV3>();
 }
 
-[Archetype(317)]
+[Archetype]
 class MigByteV2Arch : Archetype<MigByteV2Arch>
 {
     public static readonly Comp<MigByteV2> Comp = Register<MigByteV2>();
@@ -206,14 +206,6 @@ class MigrationFunctionTests : TestBase<MigrationFunctionTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<MigPlayerArch>.Touch();
-        Archetype<MigChainArch>.Touch();
-        Archetype<MigByteArch>.Touch();
-        Archetype<MigFailArch>.Touch();
-        Archetype<MigMissingArch>.Touch();
-        Archetype<MigPlayerV2Arch>.Touch();
-        Archetype<MigChainV3Arch>.Touch();
-        Archetype<MigByteV2Arch>.Touch();
     }
 
     [Test]

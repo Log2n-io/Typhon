@@ -85,7 +85,7 @@ public unsafe class EcsNavigationQueryBuilder<TSourceArch, TSource, TTarget> whe
                 var accessor = engineState.EntityMap.Segment.CreateChunkAccessor();
                 var collector = new TargetCollector
                 {
-                    ArchetypeId = meta.ArchetypeId,
+                    RoutingId = _tx.DBE.RoutingIdOf(meta),
                     TargetPKs = targetPKs,
                     TSN = _tx.TSN,
                 };
@@ -123,8 +123,8 @@ public unsafe class EcsNavigationQueryBuilder<TSourceArch, TSource, TTarget> whe
                                 var sourcePK = header.EntityPK;
                                 var sourceEntityId = EntityId.FromRaw(sourcePK);
 
-                                // Archetype mask filter
-                                if (!_query.MaskTestPublic(sourceEntityId.ArchetypeId))
+                                // Archetype mask filter (mask is catalog-space; translate the entity's routing id → catalog id)
+                                if (!_query.MaskTestPublic(_tx.DBE.GetMetaByRouting(sourceEntityId.ArchetypeId).ArchetypeId))
                                 {
                                     continue;
                                 }
@@ -157,7 +157,7 @@ public unsafe class EcsNavigationQueryBuilder<TSourceArch, TSource, TTarget> whe
     /// <summary>Collects visible entity PKs from EntityMap enumeration.</summary>
     private struct TargetCollector : RawValuePagedHashMap<long, PersistentStore>.IEntryAction<long>
     {
-        public ushort ArchetypeId;
+        public ushort RoutingId;
         public List<long> TargetPKs;
         public long TSN;
 
@@ -167,7 +167,7 @@ public unsafe class EcsNavigationQueryBuilder<TSourceArch, TSource, TTarget> whe
             bool visible = header.IsVisibleAt(TSN);
             if (visible)
             {
-                var entityId = new EntityId(key, ArchetypeId);
+                var entityId = new EntityId(key, RoutingId);
                 TargetPKs.Add((long)entityId.RawValue);
             }
             return true; // continue enumeration (ForEachEntry convention: true=continue, false=stop)

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using BenchmarkDotNet.Attributes;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -37,8 +37,6 @@ public class CommittedDisciplineBenchmarks : IDisposable
     [GlobalSetup]
     public void Setup()
     {
-        Archetype<AaBenchAnt>.Touch();
-        Archetype<AaBenchMixedCluster>.Touch();
 
         var name = $"CommittedBench_{Environment.ProcessId}";
         var sc = new ServiceCollection();

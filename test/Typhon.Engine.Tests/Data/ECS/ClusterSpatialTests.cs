@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
@@ -32,7 +32,7 @@ struct ClSpatialMeta
     public long Tag;
 }
 
-[Archetype(830)]
+[Archetype]
 partial class ClSpatialUnit : Archetype<ClSpatialUnit>
 {
     public static readonly Comp<ClSpatialPos> Pos = Register<ClSpatialPos>();
@@ -60,14 +60,14 @@ struct ClSpatialStaticPos
     public AABB3F Bounds;
 }
 
-[Archetype(831)]
+[Archetype]
 partial class ClSpatialNonClusterUnit : Archetype<ClSpatialNonClusterUnit>
 {
     public static readonly Comp<ClSpatialPos> Pos = Register<ClSpatialPos>();
     public static readonly Comp<ClSpatialVData> VData = Register<ClSpatialVData>();
 }
 
-[Archetype(832)]
+[Archetype]
 partial class ClSpatialStaticUnit : Archetype<ClSpatialStaticUnit>
 {
     public static readonly Comp<ClSpatialStaticPos> StaticPos = Register<ClSpatialStaticPos>();
@@ -85,8 +85,6 @@ class ClusterSpatialTests : TestBase<ClusterSpatialTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<ClSpatialUnit>.Touch();
-        Archetype<ClSpatialStaticUnit>.Touch();
         // ClSpatialNonClusterUnit is no longer touched — the Mixed_* tests that used it were deleted in issue #230 Phase 3 Option B (see note above).
     }
 

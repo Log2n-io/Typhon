@@ -1,4 +1,4 @@
-using System.Numerics;
+﻿using System.Numerics;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using Typhon.Schema.Definition;
@@ -12,7 +12,6 @@ class ClusterSpatialAabbRecomputeTests : TestBase<ClusterSpatialAabbRecomputeTes
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<ClCohUnit>.Touch();
     }
 
     private static ClCohPos PointAt(float x, float y) =>

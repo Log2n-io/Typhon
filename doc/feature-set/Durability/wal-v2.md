@@ -1,11 +1,11 @@
 ---
 uid: feature-durability-wal-v2
 title: 'Write-Ahead Log (WAL v2 logical records)'
-description: 'The single source of durability truth: logical (EntityId, ComponentTypeId) records, one codec, a sequential CRC-chained log.'
+description: 'The single source of durability truth: logical (EntityId, slot) records, one codec, a sequential CRC-chained log.'
 ---
 
 # Write-Ahead Log (WAL v2 logical records)
-> The single source of durability truth: logical `(EntityId, ComponentTypeId)` records, one codec, a sequential CRC-chained log.
+> The single source of durability truth: logical `(EntityId, slot)` records, one codec, a sequential CRC-chained log.
 
 **Status:** ✅ Implemented · **Visibility:** Public · **Level:** 🟣 Advanced · **Category:** [Durability](./README.md)
 
@@ -15,7 +15,7 @@ A crash must never lose a write the application was told succeeded, and recovery
 
 ## ⚙️ How it works (in brief)
 
-Every commit assembles its changes — spawns, component upserts, collection edits, destroys — into one batch and hands it to a single codec, which serializes it as logical records into a sequential per-database log. Records are framed in CRC-chained chunks, so a torn last write is detected and the log truncates cleanly at the first invalid chunk rather than being misread. Producer threads (your transactions) claim space in a lock-free buffer; a dedicated writer thread drains it and flushes to disk, optionally with Force-Unit-Access so a confirmed write is physically durable, not just OS-buffered. No record ever names a page, chunk, or buffer — only `(EntityId, ComponentTypeId)` — so the physical placement is re-derived at apply time.
+Every commit assembles its changes — spawns, component upserts, collection edits, destroys — into one batch and hands it to a single codec, which serializes it as logical records into a sequential per-database log. Records are framed in CRC-chained chunks, so a torn last write is detected and the log truncates cleanly at the first invalid chunk rather than being misread. Producer threads (your transactions) claim space in a lock-free buffer; a dedicated writer thread drains it and flushes to disk, optionally with Force-Unit-Access so a confirmed write is physically durable, not just OS-buffered. No record ever names a page, chunk, or buffer — only `(EntityId, slot)`, the per-archetype component slot resolved under the EntityId's routing id — so the physical placement is re-derived at apply time.
 
 ## 💻 Usage
 
@@ -72,7 +72,7 @@ tx.Commit();   // batch appended now; durable on the next GroupCommit flush
 
 - [WalCommitBufferTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/WalCommitBufferTests.cs) — producer-side lock-free claim/publish/drain/overflow semantics
 - [WalWriterTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/WalWriterTests.cs) — writer-thread drain/flush pipeline, FUA vs. buffered durability
-- [WalRecordHeaderTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/WalRecordHeaderTests.cs) — on-disk logical record/frame/chunk layout (the `(EntityId, ComponentTypeId)` format itself)
+- [WalRecordHeaderTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/WalRecordHeaderTests.cs) — on-disk logical record/frame/chunk layout (the `(EntityId, slot)` format itself)
 - [WalIntegrationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/WalIntegrationTests.cs) — end-to-end WAL pipeline across all three `DurabilityMode`s with real disk I/O
 
 ## 🔗 Related

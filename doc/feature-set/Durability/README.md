@@ -15,7 +15,7 @@ description: 'Crash-safe persistence for Typhon: a logical Write-Ahead Log (WAL 
 |---|---|---|---|
 | [Durability Modes](durability-modes/README.md) | Per-Unit-of-Work control over when WAL records become crash-safe — pick latency vs. data-at-risk per workload | ✅ Implemented | 🟢 Start Here |
 | &nbsp;&nbsp;↳ [Committed Durability Discipline](durability-modes/committed-discipline.md) | Zero-loss, atomic writes on Typhon's cheapest component layout (`SingleVersion`) without paying for an MVCC revision chain | ✅ Implemented | 🟣 Advanced |
-| [Write-Ahead Log (WAL v2 logical records)](wal-v2.md) | The single source of durability truth: logical `(EntityId, ComponentTypeId)` records, one codec, a sequential CRC-chained log | ✅ Implemented | 🟣 Advanced |
+| [Write-Ahead Log (WAL v2 logical records)](wal-v2.md) | The single source of durability truth: logical `(EntityId, slot)` records, one codec, a sequential CRC-chained log | ✅ Implemented | 🟣 Advanced |
 | [Commit Pipeline (append-before-publish)](commit-pipeline.md) | `Transaction.Commit`'s VALIDATE→PREPARE→BUILD→APPEND→PUBLISH→WAIT ordering guarantees nothing is visible before its WAL record is appended, and publish never rolls back | ✅ Implemented | 🟣 Advanced |
 | [Checkpoint v2 (SnapshotStore pipeline)](checkpoint-v2/README.md) | Background pipeline that consolidates dirty data pages into the data file, advances `CheckpointLSN` only over pages it actually wrote, and recycles WAL segments | ✅ Implemented | 🟣 Advanced |
 | [Crash Recovery (RecoveryDriver)](crash-recovery/README.md) | On open, scans the WAL's durably-committed prefix and replays it idempotently, in strict LSN order, through the engine's own write primitives | ✅ Implemented | 🟣 Advanced |

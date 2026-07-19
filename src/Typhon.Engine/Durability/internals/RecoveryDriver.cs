@@ -32,7 +32,7 @@ internal sealed class RecoveryDriver
         public byte Op;
         public long EntityId;
         public ushort ArchetypeId;
-        public ushort ComponentTypeId;
+        public ushort SlotIndex; // Slot record: per-archetype component slot (LOG-06), resolved via EntityId's routing id
         public ushort EnabledBits;
         public bool IsFence;
         public byte[] Payload;
@@ -50,9 +50,9 @@ internal sealed class RecoveryDriver
         public long Tsn;        // spawn (born) TSN when HasSpawn
         public long DestroyTsn; // the destroying transaction's TSN — DiedTSN for a base-entity tombstone
 
-        // ComponentTypeId → latest committed value. A component can be written more than once in the window (spawn-init then a
-        // post-spawn update); records arrive in LSN order, so overwriting collapses each component's history to its final value
-        // (and avoids allocating an orphaned chain per superseded revision).
+        // slot → latest committed value. A component can be written more than once in the window (spawn-init then a post-spawn update); records arrive in LSN
+        // order, so overwriting collapses each component's history to its final value (and avoids allocating an orphaned chain per superseded revision).
+        // Keyed by per-archetype slot (the wire identity).
         public readonly Dictionary<ushort, RecoveryApplier.SlotData> Slots = [];
     }
 
@@ -113,7 +113,7 @@ internal sealed class RecoveryDriver
                         {
                             Lsn = view.Lsn, Tsn = view.Tsn, Kind = view.Kind, Op = view.Op,
                             EntityId = view.EntityId, ArchetypeId = view.ArchetypeId,
-                            ComponentTypeId = view.ComponentTypeId, EnabledBits = view.EnabledBits, IsFence = view.IsFence,
+                            SlotIndex = view.SlotIndex, EnabledBits = view.EnabledBits, IsFence = view.IsFence,
                             Payload = view.Kind == RecordKind.Slot && view.Payload.Length > 0 ? view.Payload.ToArray() : null,
                         });
                     }
@@ -150,9 +150,9 @@ internal sealed class RecoveryDriver
                     break;
 
                 case RecordKind.Slot when r.Op == (byte)SlotOp.Upsert:
-                    GetAgg(entities, r.EntityId).Slots[r.ComponentTypeId] = new RecoveryApplier.SlotData
+                    GetAgg(entities, r.EntityId).Slots[r.SlotIndex] = new RecoveryApplier.SlotData
                     {
-                        ComponentTypeId = r.ComponentTypeId,
+                        SlotIndex = r.SlotIndex,
                         Payload = r.Payload ?? [],
                         Tsn = r.Tsn,
                     };

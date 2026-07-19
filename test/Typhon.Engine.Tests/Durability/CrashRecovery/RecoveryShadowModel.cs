@@ -135,9 +135,9 @@ internal sealed class RecoveryShadowModel
     private HashSet<ushort> DistinctArchetypeIds()
     {
         var ids = new HashSet<ushort>();
-        foreach (var e in _entities.Values)
+        foreach (var e in _entities.Keys)
         {
-            ids.Add(e.ArchetypeId);
+            ids.Add(e.ArchetypeId); // EntityId.ArchetypeId is the per-DB routing id (what EnumerateArchetypeEntities expects)
         }
 
         return ids;

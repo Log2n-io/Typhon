@@ -18,7 +18,7 @@ internal sealed unsafe class RecoveryApplier : IDisposable
     /// <summary>One committed component value to restore (logical-truth payload + the TSN of the transaction that committed it).</summary>
     internal struct SlotData
     {
-        public ushort ComponentTypeId;
+        public ushort SlotIndex; // per-archetype component slot (the WAL wire identity, LOG-06)
         public byte[] Payload;
         public long Tsn;
     }
@@ -102,12 +102,14 @@ internal sealed unsafe class RecoveryApplier : IDisposable
         {
             foreach (var slot in slots)
             {
-                // The caller has already collapsed a component's history to its latest committed value (last write wins), so each
-                // slot here is the final value and carries the TSN of the transaction that committed it (which may be later than
-                // the spawn's — a post-spawn Write). The chain element records that TSN; BornTSN stays the spawn's.
-                if (!_metadata.TryGetSlot(slot.ComponentTypeId, out var slotIndex))
+                // The caller has already collapsed a component's history to its latest committed value (last write wins), so each slot here is the final value
+                // and carries the TSN of the transaction that committed it (which may be later than the spawn's — a post-spawn Write). The chain element
+                // records that TSN; BornTSN stays the spawn's. The wire carries the per-archetype slot directly (LOG-06) — no ComponentTypeId→slot lookup
+                // needed. Guard against a malformed/foreign record whose slot exceeds this archetype's component count.
+                var slotIndex = slot.SlotIndex;
+                if (slotIndex >= _metadata.ComponentCount)
                 {
-                    continue; // component is not part of this archetype — tolerate (malformed/foreign record)
+                    continue;
                 }
 
                 var table = _engineState.SlotToComponentTable[slotIndex];
@@ -158,7 +160,8 @@ internal sealed unsafe class RecoveryApplier : IDisposable
         {
             foreach (var slot in slots)
             {
-                if (!_metadata.TryGetSlot(slot.ComponentTypeId, out var slotIndex))
+                var slotIndex = slot.SlotIndex; // per-archetype slot from the wire (LOG-06)
+                if (slotIndex >= _metadata.ComponentCount)
                 {
                     continue; // foreign / malformed record — tolerate
                 }
@@ -320,8 +323,8 @@ internal sealed unsafe class RecoveryApplier : IDisposable
             _hasClusterAccessor = false;
         }
 
-        _engineState = _dbe._archetypeStates[archId];
-        _metadata = ArchetypeRegistry.GetMetadata(archId);
+        _metadata = _dbe.GetMetaByRouting(archId);
+        _engineState = _dbe._stateByRouting[archId];
         _componentCount = _metadata.ComponentCount;
         _mapAccessor = _engineState.EntityMap.Segment.CreateChunkAccessor(_changeSet);
         _hasAccessor = true;

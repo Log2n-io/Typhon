@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 
@@ -15,8 +15,6 @@ class EcsIncrementalViewTests : TestBase<EcsIncrementalViewTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<CompDArch>.Touch();
-        Archetype<CompFArch>.Touch();
     }
 
     private DatabaseEngine SetupEngine()

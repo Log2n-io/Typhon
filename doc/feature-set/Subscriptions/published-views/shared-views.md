@@ -34,7 +34,7 @@ public struct Npc
     [Index] public int Health;
 }
 
-[Archetype(10)]
+[Archetype]
 public class NpcArch : Archetype<NpcArch>
 {
     public static readonly Comp<Npc> Data = Register<Npc>();

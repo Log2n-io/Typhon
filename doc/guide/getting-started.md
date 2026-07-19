@@ -66,7 +66,7 @@ slots. The static `Comp<T>` handles (`Unit.Position`) are how you refer to each 
 querying.
 
 ```csharp
-[Archetype(1)]
+[Archetype]
 public sealed partial class Unit : Archetype<Unit>
 {
     public static readonly Comp<Position> Position = Register<Position>();
@@ -79,8 +79,8 @@ public sealed partial class Unit : Archetype<Unit>
 ## 3. Open the engine, spawn, and read
 
 `DatabaseEngine.Open` is the one-line setup: it names the on-disk database (a `skirmish.typhon` directory in the
-working folder), registers your components and archetype, and hands back a ready-to-use engine. Do this **once at
-startup**; `using var` flushes and releases the file lock at scope end.
+working folder), registers your components (your archetype self-registers at assembly load), and hands back a
+ready-to-use engine. Do this **once at startup**; `using var` flushes and releases the file lock at scope end.
 
 Writes go through a short-lived transaction; reads see a consistent point-in-time snapshot without waiting on writers.
 
@@ -89,8 +89,7 @@ using Typhon.Engine;            // DatabaseEngine, EntityId, transactions, queri
 
 using var dbe = DatabaseEngine.Open("skirmish.typhon", o => o
     .Register<Position>()
-    .Register<Health>()
-    .RegisterArchetype<Unit>());
+    .Register<Health>());
 
 // Spawn an entity (a write — needs a transaction)
 EntityId soldier;

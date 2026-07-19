@@ -5,18 +5,18 @@ using System.Collections.Generic;
 namespace Typhon.Engine.Internals;
 
 // CommitBatchBuilder + its pooled arena. See claude/design/Durability/MinimalWal/01-architecture.md §4.
-// The builder is created per commit; the arena is pooled per transaction (reset, not realloc). Entity ids are
-// raw longs on this seam (52-bit key + 12-bit archetype) — the Durability layer stays free of ECS types, and
-// the codec/builder become a closed, schema-free unit the property tests can exercise without an engine.
+// The builder is created per commit; the arena is pooled per transaction (reset, not realloc). Entity ids are raw longs on this seam (48-bit key + 16-bit
+// per-DB routing id) and component identity is the per-archetype SLOT — the Durability layer stays free of ECS types (the caller resolves the slot), and the
+// codec/builder become a closed, schema-free unit the property tests can exercise without an engine.
 
 /// <summary>One staged batch entry. Payload/handle bytes live in the <see cref="CommitBatchArena"/> via offsets.</summary>
 internal struct BatchEntry
 {
     public RecordKind Kind;
-    public byte Op;             // SlotOp / LifecycleOp / CollectionOp
-    public byte Bucket;         // LOG-07 emission order: 0=Spawn, 1=Slot/CollectionDelta, 2=Destroy/SetEnabledBits, 3=BulkManifest
+    public byte Op;                 // SlotOp / LifecycleOp / CollectionOp
+    public byte Bucket;             // LOG-07 emission order: 0=Spawn, 1=Slot/CollectionDelta, 2=Destroy/SetEnabledBits, 3=BulkManifest
     public long EntityId;
-    public ushort ComponentTypeId;
+    public ushort SlotIndex;        // Slot/CollectionDelta: per-archetype component slot (0..15) — durable identity, resolved via EntityId's routing id
     public ushort FieldId;
     public ushort ArchetypeId;
     public ushort EnabledBits;
@@ -187,26 +187,26 @@ internal ref struct CommitBatchBuilder
             EntityId = entityId, EnabledBits = absoluteBits,
         });
 
-    public readonly void AddSlot(long entityId, ushort componentTypeId, ReadOnlySpan<byte> payload, ReadOnlySpan<uint> handleRanges = default)
+    public readonly void AddSlot(long entityId, ushort slotIndex, ReadOnlySpan<byte> payload, ReadOnlySpan<uint> handleRanges = default)
     {
         var payloadOffset = _arena.AppendPayload(payload);
         var handleRangeOffset = _arena.AppendHandleRanges(handleRanges);
         _arena.Entries.Add(new BatchEntry
         {
             Kind = RecordKind.Slot, Op = (byte)SlotOp.Upsert, Bucket = 1,
-            EntityId = entityId, ComponentTypeId = componentTypeId,
+            EntityId = entityId, SlotIndex = slotIndex,
             PayloadOffset = payloadOffset, PayloadLength = payload.Length,
             HandleRangeOffset = handleRangeOffset, HandleRangeCount = handleRanges.Length,
         });
     }
 
-    public readonly void AddCollectionDelta(long entityId, ushort componentTypeId, ushort fieldId, CollectionOp op, int index, ReadOnlySpan<byte> element)
+    public readonly void AddCollectionDelta(long entityId, ushort slotIndex, ushort fieldId, CollectionOp op, int index, ReadOnlySpan<byte> element)
     {
         var payloadOffset = _arena.AppendPayload(element);
         _arena.Entries.Add(new BatchEntry
         {
             Kind = RecordKind.CollectionDelta, Op = (byte)op, Bucket = 1,
-            EntityId = entityId, ComponentTypeId = componentTypeId, FieldId = fieldId, Index = index,
+            EntityId = entityId, SlotIndex = slotIndex, FieldId = fieldId, Index = index,
             PayloadOffset = payloadOffset, PayloadLength = element.Length,
         });
     }

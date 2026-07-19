@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Linq;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
@@ -15,9 +15,6 @@ class EcsQueryTargetedScanTests : TestBase<EcsQueryTargetedScanTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<CompDArch>.Touch();
-        Archetype<CompFArch>.Touch();
-        Archetype<CompDFArch>.Touch();
     }
 
     private DatabaseEngine SetupEngine()

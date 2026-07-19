@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
@@ -40,19 +40,19 @@ struct HSportsData
     public HSportsData(float turbo) { Turbo = turbo; _pad = 0; }
 }
 
-[Archetype(300)]
+[Archetype]
 class HVehicle : Archetype<HVehicle>
 {
     public static readonly Comp<HVehicleData> Vehicle = Register<HVehicleData>();
 }
 
-[Archetype(301)]
+[Archetype]
 class HCar : Archetype<HCar, HVehicle>
 {
     public static readonly Comp<HCarData> Car = Register<HCarData>();
 }
 
-[Archetype(302)]
+[Archetype]
 class HSportsCar : Archetype<HSportsCar, HCar>
 {
     public static readonly Comp<HSportsData> Sports = Register<HSportsData>();
@@ -89,19 +89,19 @@ struct HDistrictData
     public int Area;
 }
 
-[Archetype(310)]
+[Archetype]
 class HRegion : Archetype<HRegion>
 {
     public static readonly Comp<HRegionData> Data = Register<HRegionData>();
 }
 
-[Archetype(311)]
+[Archetype]
 class HCity : Archetype<HCity>
 {
     public static readonly Comp<HCityData> Data = Register<HCityData>();
 }
 
-[Archetype(312)]
+[Archetype]
 class HDistrict : Archetype<HDistrict>
 {
     public static readonly Comp<HDistrictData> Data = Register<HDistrictData>();
@@ -119,22 +119,12 @@ class EcsHardeningTests : TestBase<EcsHardeningTests>
     public void OneTimeSetup()
     {
         // 3-level hierarchy
-        Archetype<HVehicle>.Touch();
-        Archetype<HCar>.Touch();
-        Archetype<HSportsCar>.Touch();
 
         // Multi-level cascade
-        Archetype<HRegion>.Touch();
-        Archetype<HCity>.Touch();
-        Archetype<HDistrict>.Touch();
 
         // Also touch EcsUnit/EcsSoldier for enable/disable and error tests
-        Archetype<EcsUnit>.Touch();
-        Archetype<EcsSoldier>.Touch();
 
         // Cascade bag/item for EntityLink tests
-        Archetype<CascadeBag>.Touch();
-        Archetype<CascadeItem>.Touch();
     }
 
     private DatabaseEngine SetupEngine()
@@ -510,7 +500,6 @@ class EcsHardeningTests : TestBase<EcsHardeningTests>
         dbe.RegisterComponentFromAccessor<CompSmVersionedMix>();
         dbe.RegisterComponentFromAccessor<CompSmSingleVersion>();
         dbe.RegisterComponentFromAccessor<CompSmTransient>();
-        Archetype<MixedModeArchetype>.Touch();
         dbe.InitializeArchetypes();
         return dbe;
     }

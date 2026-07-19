@@ -1,4 +1,4 @@
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using System;
 using System.Runtime.CompilerServices;
@@ -10,8 +10,6 @@ class SelectivityEstimatorTests : TestBase<SelectivityEstimatorTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<CompDArch>.Touch();
-        Archetype<CompFArch>.Touch();
     }
 
     private static long FloatThreshold(float v)

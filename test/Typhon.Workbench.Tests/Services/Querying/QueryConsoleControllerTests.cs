@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 using System.Net.Http.Json;
 using System.Runtime.InteropServices;
 using System.Text.Json;
@@ -28,7 +28,7 @@ public struct QCompA
     public float Score;        // intentionally non-indexed — exercises the invalid_field rejection path
 }
 
-[Archetype(3001)]
+[Archetype]
 partial class QArch : Archetype<QArch>
 {
     public static readonly Comp<QCompA> A = Register<QCompA>();
@@ -46,7 +46,6 @@ public sealed class QueryConsoleControllerTests
     public void OneTimeSetup()
     {
         // Force the archetype's static ctor so ArchetypeRegistry picks it up before any session creation runs.
-        Archetype<QArch>.Touch();
     }
 
     [SetUp]
@@ -159,9 +158,9 @@ public sealed class QueryConsoleControllerTests
     [Test]
     public async Task Plan_ArchetypeByNumericId_Succeeds()
     {
-        // The Workbench schema browser shows archetypes as "#<id>" — users expect to paste that into FROM.
+        // The Workbench schema browser shows archetypes as "#<id>" — users expect to paste that into FROM. #514 D1: the id is engine-assigned, so resolve it.
         var sessionId = await CreateSessionWithDataAsync();
-        var resp = await PostAsync(sessionId, "plan", new QueryPlanRequest("FROM #3001 WHERE QCompA.Level >= 15"));
+        var resp = await PostAsync(sessionId, "plan", new QueryPlanRequest($"FROM #{Archetype<QArch>.Metadata.ArchetypeId} WHERE QCompA.Level >= 15"));
         resp.EnsureSuccessStatusCode();
     }
 
@@ -170,7 +169,7 @@ public sealed class QueryConsoleControllerTests
     {
         // Bare numeric id without the '#' is the forgiving alternative.
         var sessionId = await CreateSessionWithDataAsync();
-        var resp = await PostAsync(sessionId, "plan", new QueryPlanRequest("FROM 3001 WHERE QCompA.Level >= 15"));
+        var resp = await PostAsync(sessionId, "plan", new QueryPlanRequest($"FROM {Archetype<QArch>.Metadata.ArchetypeId} WHERE QCompA.Level >= 15"));
         resp.EnsureSuccessStatusCode();
     }
 

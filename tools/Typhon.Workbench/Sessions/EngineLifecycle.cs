@@ -194,44 +194,34 @@ public sealed class EngineLifecycle : IDisposable
                 diagnostics = result.Diagnostics;
                 loaded = result.RegisteredCount;
 
-                // Discover + register archetype types. Two-step dance:
-                //   1. RunClassConstructor triggers the archetype's static field initializers — the
-                //      `public static readonly Comp<T> X = Register<T>()` lines which populate
-                //      ArchetypeRegistry's component→archetype slot map.
-                //   2. ArchetypeRegistry.EnsureFinalized assigns the archetype its id and inserts it
-                //      into Archetypes[] so GetAllArchetypes() + ComponentTable.EstimatedEntityCount
-                //      can find it. (RunClassConstructor alone only runs the field inits — the metadata
-                //      insertion happens inside the lazily-invoked Metadata property getter.)
-                // Then InitializeArchetypes wires per-engine archetype storage (EntityMap pages) so
-                // counts are recovered from the MMF-backed state. Per-archetype try/catch keeps one
-                // bad archetype from aborting the rest.
+                // Discover + register archetype types (feature #514 §5.2). Each loaded schema assembly carries a generated `[ModuleInitializer]` barrier
+                // (`__TyphonRegistry_<Assembly>`); RunModuleConstructor fires it, and the CLR runs a module initializer exactly once, before any type in the module.
+                // So a single call per assembly registers ALL of that assembly's components + archetypes — GeneratedSchemaRegistry specs, component-collection
+                // factories, and ArchetypeRegistry finalization — replacing the old per-archetype RunClassConstructor + EnsureFinalized dance (which only ran the
+                // barrier implicitly, off the first archetype's class ctor, then re-finalized each type redundantly). Cross-ALC same-name collisions are tolerated
+                // inside the barrier (EnsureFinalized fromBarrier). Per-assembly try/catch keeps one poisoned module from aborting the others.
+                // Then InitializeArchetypes wires per-engine archetype storage (EntityMap pages) so counts are recovered from the MMF-backed state.
                 if (result.RegisteredCount > 0 && loadedSchema.ArchetypeTypes.Length > 0)
                 {
-                    foreach (var archetypeType in loadedSchema.ArchetypeTypes)
+                    foreach (var asm in loadedSchema.Assemblies)
                     {
                         try
                         {
-                            System.Runtime.CompilerServices.RuntimeHelpers.RunClassConstructor(archetypeType.TypeHandle);
-                            Typhon.Engine.Internals.ArchetypeRegistry.EnsureFinalized(archetypeType);
+                            System.Runtime.CompilerServices.RuntimeHelpers.RunModuleConstructor(asm.ManifestModule.ModuleHandle);
                         }
-                        catch (Exception archEx)
+                        catch (Exception modEx)
                         {
-                            // Per-archetype tolerance — a broken archetype shouldn't block the rest. Surface it as
-                            // a diagnostic so the user has a breadcrumb; swallowing silently meant the Schema
-                            // Inspector could show wrong counts with no visible error.
+                            // A poisoned module initializer (a genuine authoring error in one of the assembly's archetypes) shouldn't block the other assemblies.
+                            // Surface it as a diagnostic so the Schema Inspector has a breadcrumb instead of silently showing wrong counts.
                             diagnostics = [.. diagnostics, new SchemaCompatibility.Diagnostic(
-                                ComponentName: archetypeType.FullName ?? archetypeType.Name,
+                                ComponentName: asm.GetName().Name ?? asm.FullName ?? "(schema assembly)",
                                 Kind: "archetype_finalize_failed",
-                                Detail: archEx.ToString())];
+                                Detail: modEx.ToString())];
                         }
                     }
-                    // After a reopen, every session spins up a fresh collectible ALC — the schema DLL's component/archetype
-                    // types are *new* CLR Type instances even when the file is byte-identical. DeclareComponent already
-                    // refreshes the global Type→componentTypeId map through its schema-name dedup path, but EnsureFinalized
-                    // short-circuits on pre-populated archetype slots, leaving _slotToComponentType pointing at the first
-                    // ALC's Type instances. RefreshSlotTypes propagates the current ALC's Types into every archetype so
-                    // reflection-equality lookups (Workbench's GetArchetypesForComponent, etc.) match the session's engine.
-                    Typhon.Engine.Internals.ArchetypeRegistry.RefreshSlotTypes();
+                    // Cross-ALC slot-Type freshness is handled by the refcounted engine-use lifecycle (#514): UnregisterEngineUse clears a collectible ALC's
+                    // registry entries on session dispose, so the next session's RunModuleConstructor barrier repopulates the slot map with THIS ALC's Types —
+                    // no manual RefreshSlotTypes pass needed (retired, #529).
                     schemaDllTicks = System.Diagnostics.Stopwatch.GetTimestamp() - schemaStart;
                     try
                     {

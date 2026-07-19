@@ -1,4 +1,4 @@
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using NUnit.Framework;
 using System;
@@ -104,8 +104,6 @@ public class AssemblyWarmup
                 dbe.RegisterComponentFromAccessor<CompF>();
 
                 // Initialize ECS archetypes — connects archetype slots to ComponentTables
-                Archetype<CompAArch>.Touch();
-                Archetype<CompDArch>.Touch();
                 dbe.InitializeArchetypes();
 
                 // Spawn, read, update, destroy — exercises transaction lifecycle, MVCC, page cache,

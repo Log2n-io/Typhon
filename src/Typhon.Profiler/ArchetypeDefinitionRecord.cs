@@ -1,4 +1,4 @@
-namespace Typhon.Profiler;
+﻿namespace Typhon.Profiler;
 
 /// <summary>
 /// Rich archetype definition stored in the v7+ <c>ArchetypeDefinitions</c> table of a <c>.typhon-trace</c> file. Carries the parent/child graph, slot-ordered
@@ -17,7 +17,7 @@ public sealed class ArchetypeDefinitionRecord
     /// <summary>Display name (CLR type name).</summary>
     public string Name { get; init; }
 
-    /// <summary>Schema revision from <c>[Archetype(Id, Revision)]</c>.</summary>
+    /// <summary>Schema revision from <c>[Archetype(Revision)]</c>.</summary>
     public int Revision { get; init; }
 
     /// <summary>Parent archetype id, or 0xFFFF for root archetypes.</summary>

@@ -1,8 +1,8 @@
-using Typhon.Schema.Definition;
+﻿using Typhon.Schema.Definition;
 
 namespace AntHill.Core;
 
-[Archetype(100)]
+[Archetype]
 partial class Ant : Archetype<Ant>
 {
     public static readonly Comp<WorldBounds> Bounds = Register<WorldBounds>();
@@ -11,19 +11,19 @@ partial class Ant : Archetype<Ant>
     public static readonly Comp<AntState> State = Register<AntState>();
 }
 
-[Archetype(101)]
+[Archetype]
 partial class Food : Archetype<Food>
 {
     public static readonly Comp<FoodSource> Source = Register<FoodSource>();
 }
 
-[Archetype(102)]
+[Archetype]
 partial class Nest : Archetype<Nest>
 {
     public static readonly Comp<NestInfo> Info = Register<NestInfo>();
 }
 
-[Archetype(103)]
+[Archetype]
 partial class Rock : Archetype<Rock>
 {
     public static readonly Comp<Obstacle> Info = Register<Obstacle>();

@@ -25,7 +25,7 @@ The three nouns again, now with the *why*:
 ### Declaring an archetype
 
 ```csharp
-[Archetype(1)]
+[Archetype]
 public sealed partial class Unit : Archetype<Unit>
 {
     public static readonly Comp<Health>   Health   = Register<Health>();
@@ -36,12 +36,12 @@ public sealed partial class Unit : Archetype<Unit>
 }
 ```
 
-Each `Register<T>()` adds a component slot and returns a `Comp<T>` handle (`Unit.Health`) you use everywhere — spawn, read, query. The `[Archetype(N)]` id is stable; keep it stable across versions.
+Each `Register<T>()` adds a component slot and returns a `Comp<T>` handle (`Unit.Health`) you use everywhere — spawn, read, query. An archetype's identity is its CLR type name (or `[Archetype(Name="...")]`); the engine auto-assigns a per-process catalog id and a persisted per-DB routing id, so there is no numeric id for you to pick or keep stable.
 
 **Archetype inheritance** lets one shape extend another:
 
 ```csharp
-[Archetype(2)]
+[Archetype]
 public sealed partial class Hero : Archetype<Hero, Unit>   // Hero = Unit's components + its own
 {
     public static readonly Comp<Inventory> Inventory = Register<Inventory>();
@@ -67,14 +67,14 @@ var m = Unit.ReadWriteAll(tx, id);     // mutable view
 m.Health.Current -= 10;
 ```
 
-**This needs one bit of project setup:** the generator must be referenced as an *analyzer* in your `.csproj` (alongside the engine reference):
+**Where the generator comes from:** it ships *inside* the `Typhon` package, so if you installed Typhon with `dotnet add package Typhon` it's already active — and it's not optional, because the same generator emits the module-init barrier that registers your archetypes. You wire it by hand only when you reference the engine by *project* instead of by package, as an analyzer:
 
 ```xml
 <ProjectReference Include="path/to/Typhon.Generators.csproj"
                   ReferenceOutputAssembly="false" OutputItemType="Analyzer" />
 ```
 
-Without it, the archetype still works — you just read with `e.Read(...)` instead of `ReadAll`. (That's why ch.1 used `e.Read`: no setup beyond the engine reference.)
+`ReadAll` / `ReadWriteAll` are generated for every `partial` archetype; ch.1 just used `e.Read` because it hadn't introduced them yet.
 
 ---
 
@@ -172,7 +172,7 @@ Configure the grid as part of the one-line setup — add `ConfigureSpatialGrid` 
 
 ```csharp
 using var dbe = DatabaseEngine.Open("game.typhon", o => o
-    .Register<Position>().Register<Bounds>().RegisterArchetype<Unit>()
+    .Register<Position>().Register<Bounds>()
     .ConfigureSpatialGrid(new SpatialGridConfig(
         worldMin: Vector2.Zero, worldMax: new Vector2(1000f, 1000f), cellSize: 50f)));
 ```

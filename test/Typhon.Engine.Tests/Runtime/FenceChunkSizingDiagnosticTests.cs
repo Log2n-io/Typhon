@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Numerics;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
@@ -16,9 +16,6 @@ namespace Typhon.Engine.Tests.Runtime;
 [TestFixture]
 class FenceChunkSizingDiagnosticTests : TestBase<FenceChunkSizingDiagnosticTests>
 {
-    [OneTimeSetUp]
-    public void OneTimeSetup() => Archetype<ClMigUnit>.Touch();
-
     private DatabaseEngine SetupSpatialEngine()
     {
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();

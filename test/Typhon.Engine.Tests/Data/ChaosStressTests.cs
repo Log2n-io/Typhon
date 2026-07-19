@@ -1,4 +1,4 @@
-using JetBrains.Annotations;
+﻿using JetBrains.Annotations;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -28,11 +28,6 @@ class ChaosStressTests : TestBase<ChaosStressTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<CompAArch>.Touch();
-        Archetype<CompBArch>.Touch();
-        Archetype<CompDArch>.Touch();
-        Archetype<CompABArch>.Touch();
-        Archetype<CompABDArch>.Touch();
     }
 
     [SetUp]

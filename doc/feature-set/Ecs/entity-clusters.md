@@ -22,7 +22,7 @@ Eligible archetypes auto-compute a cluster size N (8-64, chosen to maximize enti
 ## 💻 Usage
 
 ```csharp
-[Archetype(100)]
+[Archetype]
 public class Ant : Archetype<Ant>
 {
     public static readonly Comp<Position> Position = Register<Position>();

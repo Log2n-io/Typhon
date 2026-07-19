@@ -1,4 +1,4 @@
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 
 namespace Typhon.Engine.Tests;
@@ -13,7 +13,6 @@ class EcsOrViewTests : TestBase<EcsOrViewTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<CompFArch>.Touch();
     }
 
     private DatabaseEngine SetupEngine()

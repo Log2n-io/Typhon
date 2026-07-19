@@ -181,7 +181,7 @@ internal static class RecordCodec
         {
             case RecordKind.Slot:
                 BinaryPrimitives.WriteInt64LittleEndian(body[SlotRecordBody.EntityIdOffset..], e.EntityId);
-                BinaryPrimitives.WriteUInt16LittleEndian(body[SlotRecordBody.ComponentTypeIdOffset..], e.ComponentTypeId);
+                BinaryPrimitives.WriteUInt16LittleEndian(body[SlotRecordBody.SlotIndexOffset..], e.SlotIndex);
                 body[SlotRecordBody.OpOffset] = e.Op;
                 body[SlotRecordBody.ReservedOffset] = 0;
                 BinaryPrimitives.WriteUInt16LittleEndian(body[SlotRecordBody.PayloadLengthOffset..], (ushort)e.PayloadLength);
@@ -205,7 +205,7 @@ internal static class RecordCodec
 
             case RecordKind.CollectionDelta:
                 BinaryPrimitives.WriteInt64LittleEndian(body[CollectionDeltaRecordBody.EntityIdOffset..], e.EntityId);
-                BinaryPrimitives.WriteUInt16LittleEndian(body[CollectionDeltaRecordBody.ComponentTypeIdOffset..], e.ComponentTypeId);
+                BinaryPrimitives.WriteUInt16LittleEndian(body[CollectionDeltaRecordBody.SlotIndexOffset..], e.SlotIndex);
                 BinaryPrimitives.WriteUInt16LittleEndian(body[CollectionDeltaRecordBody.FieldIdOffset..], e.FieldId);
                 body[CollectionDeltaRecordBody.OpOffset] = e.Op;
                 body[CollectionDeltaRecordBody.ReservedOffset] = 0;
@@ -299,7 +299,7 @@ internal static class RecordCodec
                 }
 
                 view.EntityId = BinaryPrimitives.ReadInt64LittleEndian(body[SlotRecordBody.EntityIdOffset..]);
-                view.ComponentTypeId = BinaryPrimitives.ReadUInt16LittleEndian(body[SlotRecordBody.ComponentTypeIdOffset..]);
+                view.SlotIndex = BinaryPrimitives.ReadUInt16LittleEndian(body[SlotRecordBody.SlotIndexOffset..]);
                 view.Op = body[SlotRecordBody.OpOffset];
                 var payloadLength = BinaryPrimitives.ReadUInt16LittleEndian(body[SlotRecordBody.PayloadLengthOffset..]);
                 if (SlotRecordBody.FixedSize + payloadLength != body.Length)
@@ -329,7 +329,7 @@ internal static class RecordCodec
                 }
 
                 view.EntityId = BinaryPrimitives.ReadInt64LittleEndian(body[CollectionDeltaRecordBody.EntityIdOffset..]);
-                view.ComponentTypeId = BinaryPrimitives.ReadUInt16LittleEndian(body[CollectionDeltaRecordBody.ComponentTypeIdOffset..]);
+                view.SlotIndex = BinaryPrimitives.ReadUInt16LittleEndian(body[CollectionDeltaRecordBody.SlotIndexOffset..]);
                 view.FieldId = BinaryPrimitives.ReadUInt16LittleEndian(body[CollectionDeltaRecordBody.FieldIdOffset..]);
                 view.Op = body[CollectionDeltaRecordBody.OpOffset];
                 view.Index = BinaryPrimitives.ReadInt32LittleEndian(body[CollectionDeltaRecordBody.IndexOffset..]);
@@ -386,9 +386,6 @@ internal static class RecordCodec
             _chunkOpen = false;
         }
 
-        /// <summary>True when a non-RecordBatch chunk type was encountered (a v2 violation — recovery fails the open, 02 §1).</summary>
-        public bool SawUnknownChunkType { get; private set; }
-
         public bool TryRead(out RecordView view)
         {
             while (true)
@@ -426,7 +423,6 @@ internal static class RecordCodec
 
             if (header.ChunkType != (ushort)WalChunkType.Transaction)
             {
-                SawUnknownChunkType = true;
                 return false;
             }
 

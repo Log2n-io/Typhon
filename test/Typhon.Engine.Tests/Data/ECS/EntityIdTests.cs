@@ -13,28 +13,40 @@ class EntityIdTests
     }
 
     [Test]
-    public void Constructor_MaxEntityKey_52Bit()
+    public void Constructor_MaxEntityKey_48Bit()
     {
-        long maxKey = (1L << 52) - 1; // 4,503,599,627,370,495
+        long maxKey = (1L << 48) - 1; // 281,474,976,710,655
         var id = new EntityId(maxKey, 0);
         Assert.That(id.EntityKey, Is.EqualTo(maxKey));
         Assert.That(id.ArchetypeId, Is.EqualTo(0));
     }
 
     [Test]
-    public void Constructor_MaxArchetypeId_4095()
+    public void Constructor_MaxRoutingId_65535()
     {
-        var id = new EntityId(1, 4095);
+        // Routing id is now a full 16-bit field (was 12-bit / max 4095).
+        var id = new EntityId(1, 65535);
         Assert.That(id.EntityKey, Is.EqualTo(1));
-        Assert.That(id.ArchetypeId, Is.EqualTo(4095));
+        Assert.That(id.ArchetypeId, Is.EqualTo(65535));
     }
 
     [Test]
-    public void Constructor_ArchetypeIdBitsMasked()
+    public void Constructor_RoutingIdAndKey_DoNotBleed()
     {
-        // Only lower 12 bits should be used
-        var id = new EntityId(100, 0xABC);
-        Assert.That(id.ArchetypeId, Is.EqualTo(0xABC));
+        // Max key AND max routing id together: neither field must corrupt the other.
+        long maxKey = (1L << 48) - 1;
+        var id = new EntityId(maxKey, 0xFFFF);
+        Assert.That(id.EntityKey, Is.EqualTo(maxKey));
+        Assert.That(id.ArchetypeId, Is.EqualTo(0xFFFF));
+    }
+
+    [Test]
+    public void Constructor_RoutingIdFull16Bits()
+    {
+        // All 16 low bits are significant now (previously only the low 12 were used).
+        var id = new EntityId(100, 0xABCD);
+        Assert.That(id.ArchetypeId, Is.EqualTo(0xABCD));
+        Assert.That(id.EntityKey, Is.EqualTo(100));
     }
 
     [Test]
@@ -109,13 +121,29 @@ class EntityIdTests
     [Test]
     public void RoundTrip_RawValue_Preserves()
     {
-        var id = new EntityId(123456789L, 2048);
+        var id = new EntityId(123456789L, 40000); // routing id > 4095 exercises the widened field
         var raw = id.RawValue;
         Assert.That(raw, Is.Not.EqualTo(0UL));
 
-        // Reconstruct
-        var id2 = new EntityId((long)(raw >> 12), (ushort)(raw & 0xFFF));
+        // Reconstruct via the raw path — 48/16 split.
+        var id2 = EntityId.FromRaw((long)raw);
         Assert.That(id2.EntityKey, Is.EqualTo(id.EntityKey));
         Assert.That(id2.ArchetypeId, Is.EqualTo(id.ArchetypeId));
+        Assert.That(id2, Is.EqualTo(id));
+    }
+
+    [Test]
+    public void RoundTrip_ManyValues_Preserves()
+    {
+        // Sweep keys and routing ids across bit boundaries; every pack/unpack must be lossless and independent.
+        foreach (var key in new long[] { 0, 1, 4095, 4096, 65535, 65536, (1L << 24), (1L << 40), (1L << 48) - 1 })
+        {
+            foreach (var routing in new ushort[] { 0, 1, 4095, 4096, 4097, 32768, 65535 })
+            {
+                var id = new EntityId(key, routing);
+                Assert.That(id.EntityKey, Is.EqualTo(key), $"key {key}, routing {routing}");
+                Assert.That(id.ArchetypeId, Is.EqualTo(routing), $"key {key}, routing {routing}");
+            }
+        }
     }
 }

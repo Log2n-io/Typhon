@@ -1,4 +1,4 @@
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 
 namespace Typhon.Engine.Tests;
@@ -8,8 +8,6 @@ class AdvancedEstimatorTests : TestBase<AdvancedEstimatorTests>
     [OneTimeSetUp]
     public void OneTimeSetup()
     {
-        Archetype<CompDArch>.Touch();
-        Archetype<CompFArch>.Touch();
     }
 
     private static void CreateAndCommitCompD(DatabaseEngine dbe, float a, int b, double c)
