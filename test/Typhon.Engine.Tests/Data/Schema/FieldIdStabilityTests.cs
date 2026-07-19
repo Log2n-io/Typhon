@@ -96,25 +96,25 @@ struct CompIndexV2
 
 // ── Archetypes for V1 components (used for Spawn in first scope) ──
 
-[Archetype(430)]
+[Archetype]
 class CompEvolArch : Archetype<CompEvolArch>
 {
     public static readonly Comp<CompEvolV1> Comp = Register<CompEvolV1>();
 }
 
-[Archetype(331)]
+[Archetype]
 class CompRemoveArch : Archetype<CompRemoveArch>
 {
     public static readonly Comp<CompRemoveV1> Comp = Register<CompRemoveV1>();
 }
 
-[Archetype(332)]
+[Archetype]
 class CompRenameArch : Archetype<CompRenameArch>
 {
     public static readonly Comp<CompRenameV1> Comp = Register<CompRenameV1>();
 }
 
-[Archetype(333)]
+[Archetype]
 class CompIndexArch : Archetype<CompIndexArch>
 {
     public static readonly Comp<CompIndexV1> Comp = Register<CompIndexV1>();

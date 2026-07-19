@@ -142,26 +142,26 @@ public struct CompPlayer
 // ── Shared test archetypes for ECS migration ──
 // IDs 200+ to avoid collisions with ECS test archetypes (EcsUnit=100, EcsSoldier=101, SvTestArchetype=50, etc.)
 
-[Archetype(200)]
+[Archetype]
 class CompAArch : Archetype<CompAArch>
 {
     public static readonly Comp<CompA> A = Register<CompA>();
 }
 
-[Archetype(201)]
+[Archetype]
 class CompDArch : Archetype<CompDArch>
 {
     public static readonly Comp<CompD> D = Register<CompD>();
 }
 
-[Archetype(202)]
+[Archetype]
 class CompAEArch : Archetype<CompAEArch>
 {
     public static readonly Comp<CompA> A = Register<CompA>();
     public static readonly Comp<CompE_Eng> E = Register<CompE_Eng>();
 }
 
-[Archetype(203)]
+[Archetype]
 class CompABCArch : Archetype<CompABCArch>
 {
     public static readonly Comp<CompA> A = Register<CompA>();
@@ -169,20 +169,20 @@ class CompABCArch : Archetype<CompABCArch>
     public static readonly Comp<CompC> C = Register<CompC>();
 }
 
-[Archetype(204)]
+[Archetype]
 class CompABArch : Archetype<CompABArch>
 {
     public static readonly Comp<CompA> A = Register<CompA>();
     public static readonly Comp<CompB> B = Register<CompB>();
 }
 
-[Archetype(205)]
+[Archetype]
 class CompBArch : Archetype<CompBArch>
 {
     public static readonly Comp<CompB> B = Register<CompB>();
 }
 
-[Archetype(206)]
+[Archetype]
 class CompABDArch : Archetype<CompABDArch>
 {
     public static readonly Comp<CompA> A = Register<CompA>();
@@ -190,26 +190,26 @@ class CompABDArch : Archetype<CompABDArch>
     public static readonly Comp<CompD> D = Register<CompD>();
 }
 
-[Archetype(207)]
+[Archetype]
 class CompFArch : Archetype<CompFArch>
 {
     public static readonly Comp<CompF> F = Register<CompF>();
 }
 
-[Archetype(208)]
+[Archetype]
 class CompDFArch : Archetype<CompDFArch>
 {
     public static readonly Comp<CompD> D = Register<CompD>();
     public static readonly Comp<CompF> F = Register<CompF>();
 }
 
-[Archetype(209)]
+[Archetype]
 class CompGuildArch : Archetype<CompGuildArch>
 {
     public static readonly Comp<CompGuild> Guild = Register<CompGuild>();
 }
 
-[Archetype(210)]
+[Archetype]
 class CompPlayerArch : Archetype<CompPlayerArch>
 {
     public static readonly Comp<CompPlayer> Player = Register<CompPlayer>();

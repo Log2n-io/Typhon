@@ -32,7 +32,7 @@ struct ClSpatialMeta
     public long Tag;
 }
 
-[Archetype(830)]
+[Archetype]
 partial class ClSpatialUnit : Archetype<ClSpatialUnit>
 {
     public static readonly Comp<ClSpatialPos> Pos = Register<ClSpatialPos>();
@@ -60,14 +60,14 @@ struct ClSpatialStaticPos
     public AABB3F Bounds;
 }
 
-[Archetype(831)]
+[Archetype]
 partial class ClSpatialNonClusterUnit : Archetype<ClSpatialNonClusterUnit>
 {
     public static readonly Comp<ClSpatialPos> Pos = Register<ClSpatialPos>();
     public static readonly Comp<ClSpatialVData> VData = Register<ClSpatialVData>();
 }
 
-[Archetype(832)]
+[Archetype]
 partial class ClSpatialStaticUnit : Archetype<ClSpatialStaticUnit>
 {
     public static readonly Comp<ClSpatialStaticPos> StaticPos = Register<ClSpatialStaticPos>();

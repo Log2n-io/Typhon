@@ -1,4 +1,4 @@
-using System.Collections.Immutable;
+﻿using System.Collections.Immutable;
 using System.Linq;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
@@ -57,8 +57,8 @@ namespace Typhon.Engine
 using Typhon.Engine;
 using Typhon.Schema.Definition;
 
-[Archetype(1)] public partial class ParentArch : Archetype<ParentArch> { public static readonly Comp<PData> D = Register<PData>(); }
-[Archetype(2)] public partial class ChildArch : Archetype<ChildArch> { public static readonly Comp<CData> D = Register<CData>(); }
+[Archetype] public partial class ParentArch : Archetype<ParentArch> { public static readonly Comp<PData> D = Register<PData>(); }
+[Archetype] public partial class ChildArch : Archetype<ChildArch> { public static readonly Comp<CData> D = Register<CData>(); }
 
 [Component(""Test.PData"", 1)] public struct PData { public int V; public int Pad; }
 [Component(""Test.CData"", 1)] public struct CData { [Index(OnParentDelete = CascadeAction.Delete)] public EntityLink<ParentArch> Link; public int Pad; }
@@ -76,8 +76,8 @@ using Typhon.Schema.Definition;
 using Typhon.Engine;
 using Typhon.Schema.Definition;
 
-[Archetype(1)] public partial class AArch : Archetype<AArch> { public static readonly Comp<AData> D = Register<AData>(); }
-[Archetype(2)] public partial class BArch : Archetype<BArch> { public static readonly Comp<BData> D = Register<BData>(); }
+[Archetype] public partial class AArch : Archetype<AArch> { public static readonly Comp<AData> D = Register<AData>(); }
+[Archetype] public partial class BArch : Archetype<BArch> { public static readonly Comp<BData> D = Register<BData>(); }
 
 [Component(""Test.AData"", 1)] public struct AData { [Index(OnParentDelete = CascadeAction.Delete)] public EntityLink<BArch> Link; public int Pad; }
 [Component(""Test.BData"", 1)] public struct BData { [Index(OnParentDelete = CascadeAction.Delete)] public EntityLink<AArch> Link; public int Pad; }
@@ -95,10 +95,10 @@ using Typhon.Schema.Definition;
 using Typhon.Engine;
 using Typhon.Schema.Definition;
 
-[Archetype(1)] public partial class RootArch : Archetype<RootArch> { public static readonly Comp<RootData> D = Register<RootData>(); }
-[Archetype(2)] public partial class LArch : Archetype<LArch> { public static readonly Comp<LData> D = Register<LData>(); }
-[Archetype(3)] public partial class RArch : Archetype<RArch> { public static readonly Comp<RData> D = Register<RData>(); }
-[Archetype(4)] public partial class LeafArch : Archetype<LeafArch> { public static readonly Comp<LeafFromL> A = Register<LeafFromL>(); public static readonly Comp<LeafFromR> B = Register<LeafFromR>(); }
+[Archetype] public partial class RootArch : Archetype<RootArch> { public static readonly Comp<RootData> D = Register<RootData>(); }
+[Archetype] public partial class LArch : Archetype<LArch> { public static readonly Comp<LData> D = Register<LData>(); }
+[Archetype] public partial class RArch : Archetype<RArch> { public static readonly Comp<RData> D = Register<RData>(); }
+[Archetype] public partial class LeafArch : Archetype<LeafArch> { public static readonly Comp<LeafFromL> A = Register<LeafFromL>(); public static readonly Comp<LeafFromR> B = Register<LeafFromR>(); }
 
 [Component(""Test.RootData"", 1)] public struct RootData { public int V; public int Pad; }
 [Component(""Test.LData"", 1)] public struct LData { [Index(OnParentDelete = CascadeAction.Delete)] public EntityLink<RootArch> Link; public int Pad; }

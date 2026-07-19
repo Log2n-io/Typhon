@@ -26,7 +26,7 @@ struct ClIdxHealth
     }
 }
 
-[Archetype(525)]
+[Archetype]
 partial class ClIdxUnit : Archetype<ClIdxUnit>
 {
     public static readonly Comp<ClPosition> Position = Register<ClPosition>();

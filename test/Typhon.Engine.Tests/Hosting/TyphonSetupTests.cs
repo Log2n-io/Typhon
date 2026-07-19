@@ -301,7 +301,7 @@ public struct SetupSpatialBox
     [SpatialIndex(2f)] public AABB2F Box;
 }
 
-[Archetype(212)]
+[Archetype]
 class SetupSpatialArch : Archetype<SetupSpatialArch>
 {
     public static readonly Comp<SetupSpatialBox> Box = Register<SetupSpatialBox>();

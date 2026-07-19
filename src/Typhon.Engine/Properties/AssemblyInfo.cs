@@ -20,6 +20,9 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("Typhon.CompetitiveBenchmark")]
 [assembly: InternalsVisibleTo("Typhon.Client.Tests")]
 [assembly: InternalsVisibleTo("Typhon.Engine.Tests")]
+// Added 2026-07-19 (#514 D1): archetype catalog ids are now engine-assigned (no author-set [Archetype(Id=N)]), so the Workbench controller tests resolve an
+// archetype's runtime id via Archetype<T>.Metadata instead of a hardcoded literal.
+[assembly: InternalsVisibleTo("Typhon.Workbench.Tests")]
 [assembly: InternalsVisibleTo("Typhon.IOProfileRunner")]
 [assembly: InternalsVisibleTo("Typhon.MonitoringDemo")]
 // Re-added 2026-05-25 (#376 Stage-3 4A): the `with-queries` trace fixture must emit QueryPlan + phase SPAN

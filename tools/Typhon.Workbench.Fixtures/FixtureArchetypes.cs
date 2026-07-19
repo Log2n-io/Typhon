@@ -1,4 +1,4 @@
-using Typhon.Engine;
+﻿using Typhon.Engine;
 using Typhon.Schema.Definition;
 
 namespace Typhon.Workbench.Fixtures;
@@ -17,25 +17,25 @@ namespace Typhon.Workbench.Fixtures;
 // Structure is never spawned directly — only Harvester / Factory are.
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
-[Archetype(820, 1, "Guild")]
+[Archetype(1, "Guild")]
 public class GuildArch : Archetype<GuildArch>
 {
     public static readonly Comp<Guild> Guild = Register<Guild>();
 }
 
-[Archetype(821, 1, "Resource Type")]
+[Archetype(1, "Resource Type")]
 public class ResourceTypeArch : Archetype<ResourceTypeArch>
 {
     public static readonly Comp<ResourceType> ResourceType = Register<ResourceType>();
 }
 
-[Archetype(822, 1, "Receipe")]
+[Archetype(1, "Receipe")]
 public class RecipeArch : Archetype<RecipeArch>
 {
     public static readonly Comp<Recipe> Recipe = Register<Recipe>();
 }
 
-[Archetype(823, 1, "Player")]
+[Archetype(1, "Player")]
 public class PlayerArch : Archetype<PlayerArch>
 {
     public static readonly Comp<Player> Player = Register<Player>();
@@ -45,21 +45,21 @@ public class PlayerArch : Archetype<PlayerArch>
     public static readonly Comp<Session> Session = Register<Session>();
 }
 
-[Archetype(824, 1, "Resource Deposit")]
+[Archetype(1, "Resource Deposit")]
 public class ResourceDepositArch : Archetype<ResourceDepositArch>
 {
     public static readonly Comp<Deposit> Deposit = Register<Deposit>();
     public static readonly Comp<DepositPosition> Position = Register<DepositPosition>();
 }
 
-[Archetype(825, 1, "Structure")]
+[Archetype(1, "Structure")]
 public class StructureArch : Archetype<StructureArch>
 {
     public static readonly Comp<Structure> Structure = Register<Structure>();
     public static readonly Comp<StructureOwner> Owner = Register<StructureOwner>();
 }
 
-[Archetype(826, 1, "Harvester")]
+[Archetype(1, "Harvester")]
 public class HarvesterArch : Archetype<HarvesterArch, StructureArch>
 {
     public static readonly Comp<Hopper> Hopper = Register<Hopper>();
@@ -68,7 +68,7 @@ public class HarvesterArch : Archetype<HarvesterArch, StructureArch>
     public static readonly Comp<StructurePosition> Position = Register<StructurePosition>();
 }
 
-[Archetype(827,1, "Factory")]
+[Archetype(1, "Factory")]
 public class FactoryArch : Archetype<FactoryArch, StructureArch>
 {
     public static readonly Comp<FactoryConfig> Config = Register<FactoryConfig>();
@@ -76,7 +76,7 @@ public class FactoryArch : Archetype<FactoryArch, StructureArch>
     public static readonly Comp<StructurePosition> Position = Register<StructurePosition>();
 }
 
-[Archetype(828, 1, "Item")]
+[Archetype(1, "Item")]
 public class ItemArch : Archetype<ItemArch>
 {
     public static readonly Comp<Item> Item = Register<Item>();

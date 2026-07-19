@@ -92,25 +92,25 @@ struct CompDowngradeV2
 
 // ── Archetypes for V1 components (used for Spawn in first scope) ──
 
-[Archetype(420)]
+[Archetype]
 class CompWidenArch : Archetype<CompWidenArch>
 {
     public static readonly Comp<CompWidenV1> Comp = Register<CompWidenV1>();
 }
 
-[Archetype(321)]
+[Archetype]
 class CompBreakArch : Archetype<CompBreakArch>
 {
     public static readonly Comp<CompBreakV1> Comp = Register<CompBreakV1>();
 }
 
-[Archetype(322)]
+[Archetype]
 class CompFieldAddArch : Archetype<CompFieldAddArch>
 {
     public static readonly Comp<CompFieldAddV1> Comp = Register<CompFieldAddV1>();
 }
 
-[Archetype(323)]
+[Archetype]
 class CompDowngradeArch : Archetype<CompDowngradeArch>
 {
     public static readonly Comp<CompDowngradeV2> Comp = Register<CompDowngradeV2>();

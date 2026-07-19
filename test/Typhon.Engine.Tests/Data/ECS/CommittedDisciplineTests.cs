@@ -23,7 +23,7 @@ struct CmWallet
     public CmWallet(long gold) { Gold = gold; }
 }
 
-[Archetype(530)]
+[Archetype]
 partial class CmEntity : Archetype<CmEntity>
 {
     public static readonly Comp<CmPosition> Position = Register<CmPosition>();
@@ -40,7 +40,7 @@ struct CmTeam
     public int Rank;
 }
 
-[Archetype(531)]
+[Archetype]
 partial class CmIdxEntity : Archetype<CmIdxEntity>
 {
     public static readonly Comp<CmPosition> Position = Register<CmPosition>();
@@ -66,7 +66,7 @@ struct CmTransIdx
     public int Key;
 }
 
-[Archetype(532)]
+[Archetype]
 partial class CmFlatEntity : Archetype<CmFlatEntity>
 {
     public static readonly Comp<CmFlatVal> Val = Register<CmFlatVal>();

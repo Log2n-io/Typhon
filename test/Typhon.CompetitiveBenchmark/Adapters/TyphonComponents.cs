@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 using Typhon.Engine;
 using Typhon.Schema.Definition;
 
@@ -21,13 +21,13 @@ public struct VVal
     [Field] public long Value;
 }
 
-[Archetype(970)]
+[Archetype]
 internal class SvValArch : Archetype<SvValArch>
 {
     public static readonly Comp<SvVal> Data = Register<SvVal>();
 }
 
-[Archetype(971)]
+[Archetype]
 internal class VValArch : Archetype<VValArch>
 {
     public static readonly Comp<VVal> Data = Register<VVal>();
@@ -43,7 +43,7 @@ public struct YcsbRec
     [Field] public long Value;
 }
 
-[Archetype(972)]
+[Archetype]
 internal class YcsbArch : Archetype<YcsbArch>
 {
     public static readonly Comp<YcsbRec> Data = Register<YcsbRec>();
@@ -63,7 +63,7 @@ public struct T2 { [Field] public long V; }
 [StructLayout(LayoutKind.Sequential)]
 public struct T3 { [Field] public long V; }
 
-[Archetype(973)]
+[Archetype]
 internal class TripArch : Archetype<TripArch>
 {
     public static readonly Comp<T1> A = Register<T1>();
@@ -82,7 +82,7 @@ public struct SpPos
     public AABB2F Bounds;
 }
 
-[Archetype(974)]
+[Archetype]
 internal class SpArch : Archetype<SpArch>
 {
     public static readonly Comp<SpPos> Pos = Register<SpPos>();

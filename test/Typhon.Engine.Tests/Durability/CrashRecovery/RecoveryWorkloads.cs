@@ -341,7 +341,7 @@ public struct MixB
     public MixB(int y) => Y = y;
 }
 
-[Archetype(952)]
+[Archetype]
 internal class MixArch : Archetype<MixArch>
 {
     public static readonly Comp<MixA> A = Register<MixA>();
@@ -366,7 +366,7 @@ public struct SvIndexed
     }
 }
 
-[Archetype(950)]
+[Archetype]
 internal class SvIndexedArch : Archetype<SvIndexedArch>
 {
     public static readonly Comp<SvIndexed> S = Register<SvIndexed>();
@@ -396,7 +396,7 @@ public struct TransientIndexed
     public TransientIndexed(int t) => T = t;
 }
 
-[Archetype(951)]
+[Archetype]
 internal class FlatSvArch : Archetype<FlatSvArch>
 {
     public static readonly Comp<SvForFlat> S = Register<SvForFlat>();

@@ -35,13 +35,13 @@ public struct WorkCompB
     public int Category;
 }
 
-[Archetype(502)]
+[Archetype]
 class WorkArch : Archetype<WorkArch>
 {
     public static readonly Comp<WorkComp> Work = Register<WorkComp>();
 }
 
-[Archetype(503)]
+[Archetype]
 class WorkMultiArch : Archetype<WorkMultiArch>
 {
     public static readonly Comp<WorkComp> Work = Register<WorkComp>();
@@ -59,7 +59,7 @@ public struct IndexedSvComp
     public int Score;
 }
 
-[Archetype(504)]
+[Archetype]
 class IndexedSvArch : Archetype<IndexedSvArch>
 {
     public static readonly Comp<WorkComp> Work = Register<WorkComp>();

@@ -21,9 +21,9 @@ class WorkbenchArchetypeAccessorTests : TestBase<WorkbenchArchetypeAccessorTests
         var archetypes = ArchetypeRegistry.GetAllArchetypes().ToArray();
 
         Assert.That(archetypes.Length, Is.GreaterThan(0), "At least one archetype should be registered");
-        // Our test archetypes declared in TestBase should appear.
+        // Our test archetypes declared in TestBase should appear. #514 D1: catalog ids are engine-assigned, so resolve CompAArch's id by type.
         var ids = archetypes.Select(a => (int)a.ArchetypeId).ToArray();
-        Assert.That(ids, Does.Contain(200), "CompAArch (id 200) should be registered");
+        Assert.That(ids, Does.Contain((int)ArchetypeRegistry.GetMetadata<CompAArch>().ArchetypeId), "CompAArch should be registered");
     }
 
     [Test]
@@ -33,7 +33,7 @@ class WorkbenchArchetypeAccessorTests : TestBase<WorkbenchArchetypeAccessorTests
         RegisterComponents(dbe);
         dbe.InitializeArchetypes();
 
-        var compAArch = ArchetypeRegistry.GetAllArchetypes().Single(a => a.ArchetypeId == 200);
+        var compAArch = ArchetypeRegistry.GetMetadata<CompAArch>();
 
         var types = compAArch.GetComponentTypes().ToArray();
         Assert.That(types, Does.Contain(typeof(CompA)), "CompAArch should contain CompA");
@@ -46,7 +46,7 @@ class WorkbenchArchetypeAccessorTests : TestBase<WorkbenchArchetypeAccessorTests
         RegisterComponents(dbe);
         dbe.InitializeArchetypes();
 
-        var count = dbe.GetArchetypeEntityCount(200);
+        var count = dbe.GetArchetypeEntityCount(ArchetypeRegistry.GetMetadata<CompAArch>().ArchetypeId);
         Assert.That(count, Is.EqualTo(0));
     }
 

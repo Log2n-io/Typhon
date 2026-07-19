@@ -25,7 +25,7 @@ class InProcessConfig : ManualConfig
     }
 }
 
-[Archetype(506)]
+[Archetype]
 class BenchItemArch : Archetype<BenchItemArch>
 {
     public static readonly Comp<ItemData> Item = Register<ItemData>();

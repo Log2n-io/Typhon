@@ -20,7 +20,7 @@ struct TiTransientData
     public TiTransientData(int cat, int val) { Category = cat; Value = val; }
 }
 
-[Archetype(360)]
+[Archetype]
 class TiTransientArch : Archetype<TiTransientArch>
 {
     public static readonly Comp<TiTransientData> Data = Register<TiTransientData>();

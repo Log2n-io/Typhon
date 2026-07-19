@@ -24,7 +24,7 @@ public struct IdxComp
     public long Timestamp;
 }
 
-[Archetype(504)]
+[Archetype]
 class IdxArch : Archetype<IdxArch>
 {
     public static readonly Comp<IdxComp> Idx = Register<IdxComp>();

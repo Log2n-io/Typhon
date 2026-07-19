@@ -16,7 +16,7 @@ struct Q504Data
     public Q504Data(int value) { Value = value; Pad = 0; }
 }
 
-[Archetype(504)]
+[Archetype]
 partial class Q504Arch : Archetype<Q504Arch>
 {
     public static readonly Comp<Q504Data> Data = Register<Q504Data>();

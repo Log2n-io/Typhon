@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Text;
 using Typhon.Workbench.Dtos.Query;
 
@@ -276,7 +276,7 @@ public static class DslParser
                 if (c == '#')
                 {
                     // Reserved purely for the '#<archetypeId>' shorthand the Workbench's schema browser uses
-                    // (engine identifies archetypes by their [Archetype(N)] id; there is no friendly name).
+                    // (engine identifies archetypes by their [Archetype] id; there is no friendly name).
                     tokens.Add(new Token(TokenKind.Hash, "#", null, startLine, startColumn));
                     i++;
                     column++;

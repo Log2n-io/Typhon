@@ -58,20 +58,20 @@ public struct SpatialTerrain
     public AABB3F Footprint;
 }
 
-[Archetype(800)]
+[Archetype]
 partial class SpatialShipArchetype : Archetype<SpatialShipArchetype>
 {
     public static readonly Comp<SpatialShip> Ship = Register<SpatialShip>();
     public static readonly Comp<SpatialName> Name = Register<SpatialName>();
 }
 
-[Archetype(801)]
+[Archetype]
 partial class SpatialBuildingArchetype : Archetype<SpatialBuildingArchetype>
 {
     public static readonly Comp<SpatialBuilding> Building = Register<SpatialBuilding>();
 }
 
-[Archetype(802)]
+[Archetype]
 partial class SpatialTerrainArchetype : Archetype<SpatialTerrainArchetype>
 {
     public static readonly Comp<SpatialTerrain> Terrain = Register<SpatialTerrain>();

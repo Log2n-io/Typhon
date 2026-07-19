@@ -6,7 +6,7 @@ using Typhon.Schema.Definition;
 namespace Typhon.Engine.Tests;
 
 // Feature #514 Phase 1 — per-DB archetype routing id. The routing id is engine-assigned (dense, from 1), embedded in every
-// EntityId (low 16 bits), persisted in ArchetypeR1.RoutingId, and restored by NAME on reopen. Author-set [Archetype(Id=N)]
+// EntityId (low 16 bits), persisted in ArchetypeR1.RoutingId, and restored by NAME on reopen. Author-set [Archetype]
 // remains the per-process catalog id (an internal handle); it is NOT what EntityId carries.
 [Component("Typhon.Test.Routing.Val", 1)]
 [StructLayout(LayoutKind.Sequential)]
@@ -17,13 +17,13 @@ struct RoutingVal
     public RoutingVal(int v) { V = v; W = 0; }
 }
 
-[Archetype(990)]
+[Archetype]
 partial class RoutingArchA : Archetype<RoutingArchA>
 {
     public static readonly Comp<RoutingVal> Val = Register<RoutingVal>();
 }
 
-[Archetype(991)]
+[Archetype]
 partial class RoutingArchB : Archetype<RoutingArchB>
 {
     public static readonly Comp<RoutingVal> Val = Register<RoutingVal>();

@@ -1,4 +1,4 @@
-// Data model + systems for the guide example. Kept in a named namespace as a real project would;
+﻿// Data model + systems for the guide example. Kept in a named namespace as a real project would;
 // the ArchetypeAccessorGenerator also supports the global namespace of a top-level-statements file.
 
 using System.Numerics;
@@ -43,7 +43,7 @@ public struct Team
     [Index(AllowMultiple = true)] public int Id;   // many units per team
 }
 
-[Archetype(1)]
+[Archetype]
 public sealed partial class Unit : Archetype<Unit>
 {
     public static readonly Comp<Position> Position = Register<Position>();

@@ -24,7 +24,7 @@ public struct DataBenchComp
     public long Timestamp;
 }
 
-[Archetype(500)]
+[Archetype]
 class DataBenchArch : Archetype<DataBenchArch>
 {
     public static readonly Comp<DataBenchComp> Data = Register<DataBenchComp>();

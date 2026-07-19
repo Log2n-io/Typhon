@@ -36,7 +36,7 @@ struct ClCcBag
     public ComponentCollection<int> Items;
 }
 
-[Archetype(845)]
+[Archetype]
 partial class ClCcUnit : Archetype<ClCcUnit>
 {
     public static readonly Comp<ClCcPos> Pos = Register<ClCcPos>();

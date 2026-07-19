@@ -46,25 +46,25 @@ struct BenchCarData
     [Field] public int _pad;
 }
 
-[Archetype(510)]
+[Archetype]
 class BenchParentArch : Archetype<BenchParentArch>
 {
     public static readonly Comp<BenchParentData> Parent = Register<BenchParentData>();
 }
 
-[Archetype(511)]
+[Archetype]
 class BenchChildArch : Archetype<BenchChildArch>
 {
     public static readonly Comp<BenchChildData> Child = Register<BenchChildData>();
 }
 
-[Archetype(512)]
+[Archetype]
 partial class BenchVehicleArch : Archetype<BenchVehicleArch>
 {
     public static readonly Comp<BenchVehicleData> Vehicle = Register<BenchVehicleData>();
 }
 
-[Archetype(513)]
+[Archetype]
 class BenchCarArch : Archetype<BenchCarArch, BenchVehicleArch>
 {
     public static readonly Comp<BenchCarData> Car = Register<BenchCarData>();

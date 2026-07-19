@@ -33,7 +33,7 @@ public struct SelB
     [Field] public int Bx;
 }
 
-[Archetype(3011)]
+[Archetype]
 partial class SelArch : Archetype<SelArch>
 {
     public static readonly Comp<SelA> A = Register<SelA>();

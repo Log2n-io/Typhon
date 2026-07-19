@@ -20,7 +20,7 @@ struct SvStressData
     public SvStressData(int cat, int val) { Category = cat; Value = val; }
 }
 
-[Archetype(361)]
+[Archetype]
 class SvStressArch : Archetype<SvStressArch>
 {
     public static readonly Comp<SvStressData> Data = Register<SvStressData>();

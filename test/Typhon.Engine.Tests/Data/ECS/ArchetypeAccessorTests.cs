@@ -22,7 +22,7 @@ struct SvVelocity
     public SvVelocity(float dx, float dy) { Dx = dx; Dy = dy; }
 }
 
-[Archetype(150)]
+[Archetype]
 partial class SvUnit : Archetype<SvUnit>
 {
     public static readonly Comp<SvPosition> Position = Register<SvPosition>();
@@ -38,7 +38,7 @@ struct VStats
     public VStats(int hp, int max) { Health = hp; MaxHealth = max; }
 }
 
-[Archetype(151)]
+[Archetype]
 partial class VUnit : Archetype<VUnit>
 {
     public static readonly Comp<VStats> Stats = Register<VStats>();
@@ -62,7 +62,7 @@ struct MixedVData
     public MixedVData(int s) { Score = s; }
 }
 
-[Archetype(152)]
+[Archetype]
 partial class MixedUnit : Archetype<MixedUnit>
 {
     public static readonly Comp<MixedSvPos> Position = Register<MixedSvPos>();

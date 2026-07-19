@@ -24,7 +24,7 @@ public struct RevComp
     public long Timestamp;
 }
 
-[Archetype(505)]
+[Archetype]
 class RevArch : Archetype<RevArch>
 {
     public static readonly Comp<RevComp> Rev = Register<RevComp>();

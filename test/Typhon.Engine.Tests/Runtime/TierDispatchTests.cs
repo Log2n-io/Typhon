@@ -27,7 +27,7 @@ struct TierPos
     public float Data;
 }
 
-[Archetype(860)]
+[Archetype]
 partial class TierUnit : Archetype<TierUnit>
 {
     public static readonly Comp<TierPos> Pos = Register<TierPos>();

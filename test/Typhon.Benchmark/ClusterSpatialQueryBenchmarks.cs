@@ -39,7 +39,7 @@ struct ClQBenchPos
     public AABB2F Bounds;
 }
 
-[Archetype(550)]
+[Archetype]
 partial class ClQBenchUnit : Archetype<ClQBenchUnit>
 {
     public static readonly Comp<ClQBenchPos> Pos = Register<ClQBenchPos>();

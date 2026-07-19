@@ -41,7 +41,7 @@ struct ClMigScratch
     public float Energy;
 }
 
-[Archetype(842)]
+[Archetype]
 partial class ClMigUnit : Archetype<ClMigUnit>
 {
     public static readonly Comp<ClMigPos> Pos = Register<ClMigPos>();

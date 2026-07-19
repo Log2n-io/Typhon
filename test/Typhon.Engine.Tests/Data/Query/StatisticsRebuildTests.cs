@@ -22,7 +22,7 @@ public struct CompStr64
     }
 }
 
-[Archetype(211)]
+[Archetype]
 class CompStr64Arch : Archetype<CompStr64Arch>
 {
     public static readonly Comp<CompStr64> Str64 = Register<CompStr64>();

@@ -45,7 +45,7 @@ public struct Blob
     }
 }
 
-[Archetype(100)]
+[Archetype]
 partial class BlobArch : Archetype<BlobArch>
 {
     public static readonly Comp<Blob> Blob = Register<Blob>();
@@ -81,7 +81,7 @@ public struct TransientBlob
     }
 }
 
-[Archetype(101)]
+[Archetype]
 partial class TransientBlobArch : Archetype<TransientBlobArch>
 {
     public static readonly Comp<TransientBlob> Data = Register<TransientBlob>();

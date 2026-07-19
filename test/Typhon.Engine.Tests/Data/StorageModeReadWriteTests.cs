@@ -10,13 +10,13 @@ namespace Typhon.Engine.Tests;
 // Test archetypes with SV and Transient components
 // ═══════════════════════════════════════════════════════════════════════
 
-[Archetype(50)]
+[Archetype]
 class SvTestArchetype : Archetype<SvTestArchetype>
 {
     public static readonly Comp<CompSmSingleVersion> SvComp = Register<CompSmSingleVersion>();
 }
 
-[Archetype(51)]
+[Archetype]
 class TransientTestArchetype : Archetype<TransientTestArchetype>
 {
     public static readonly Comp<CompSmTransient> TransComp = Register<CompSmTransient>();
@@ -33,7 +33,7 @@ struct CompSmVersionedMix
     public CompSmVersionedMix(int v) { Value = v; }
 }
 
-[Archetype(52)]
+[Archetype]
 class MixedModeArchetype : Archetype<MixedModeArchetype>
 {
     public static readonly Comp<CompSmVersionedMix> Versioned = Register<CompSmVersionedMix>();

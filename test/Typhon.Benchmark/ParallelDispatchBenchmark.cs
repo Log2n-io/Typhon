@@ -19,7 +19,7 @@ struct PdSvData
     [Field] public long Timestamp;
 }
 
-[Archetype(550)]
+[Archetype]
 class PdSvArch : Archetype<PdSvArch>
 {
     public static readonly Comp<PdSvData> Data = Register<PdSvData>();
@@ -34,7 +34,7 @@ struct PdTransientData
     [Field] public long Timestamp;
 }
 
-[Archetype(551)]
+[Archetype]
 class PdTransientArch : Archetype<PdTransientArch>
 {
     public static readonly Comp<PdTransientData> Data = Register<PdTransientData>();

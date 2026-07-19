@@ -133,7 +133,7 @@ public struct ArchetypeR1
     /// <summary>Archetype CLR type name (e.g., "Building").</summary>
     public String64 Name;
 
-    /// <summary>Per-process catalog id (from <c>[Archetype(Id = N)]</c> today; generator-assigned after Phase 5). Identity re-match on reopen is by
+    /// <summary>Per-process catalog id (from <c>[Archetype]</c> today; generator-assigned after Phase 5). Identity re-match on reopen is by
     /// <see cref="Name"/>, not this value — it is not stable across processes once the generator owns numbering.</summary>
     public ushort ArchetypeId;
 
@@ -151,7 +151,7 @@ public struct ArchetypeR1
     /// <summary>Reserved padding to preserve field alignment; unused.</summary>
     public byte _pad0;
 
-    /// <summary>Schema revision from [Archetype(Id, Revision)].</summary>
+    /// <summary>Schema revision from [Archetype(Revision)].</summary>
     public int Revision;
 
     /// <summary>Component schema names in slot order, stored in VSBS.</summary>
@@ -471,8 +471,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         }
     }
     internal Dictionary<string, (int ChunkId, ComponentR1 Comp)> _persistedComponents;
-    /// <summary>Persisted archetype rows, keyed by archetype <see cref="ArchetypeR1.Name"/> (reopen re-match is by name —
-    /// see claude/design/Ecs/SourceGeneratedRegistry/04-solution-design.md §7.1).</summary>
+    /// <summary>Persisted archetype rows, keyed by archetype <see cref="ArchetypeR1.Name"/>. Reopen re-match is by durable name via
+    /// <see cref="TryGetPersistedArchetype"/> — <see cref="ArchetypeMetadata.Name"/> first, then <see cref="ArchetypeMetadata.PreviousName"/> for the #514 D4
+    /// rename hatch — see claude/design/Ecs/SourceGeneratedRegistry/04-solution-design.md §7.1.</summary>
     internal Dictionary<string, (int ChunkId, ArchetypeR1 Arch)> _persistedArchetypes;
 
     /// <summary>Persisted schema-assembly manifest, keyed by AssemblyId (= AssemblyR1 row chunkId). Loaded eagerly on open so it is readable schemaless.</summary>
@@ -1785,6 +1786,19 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     }
 
     /// <summary>
+    /// Re-stamp a persisted component's <see cref="ComponentR1.Name"/> to <paramref name="newName"/> — the component rename carry-forward (#514 D4). Only the
+    /// name changes; the Fields collection handle, segment SPIs, revision and sizes are preserved (read-modify-write of the single row).
+    /// </summary>
+    private void PersistComponentName(int chunkId, string newName)
+    {
+        var cs = MMF.CreateChangeSet();
+        SystemCrud.Read(_componentsTable, chunkId, out ComponentR1 comp, EpochManager);
+        comp.Name = (String64)newName;
+        SystemCrud.Update(_componentsTable, chunkId, ref comp, EpochManager, cs);
+        cs.SaveChanges();
+    }
+
+    /// <summary>
     /// Restores the system schema (FieldR1 and ComponentR1 tables) from persisted SPIs on database reopen.
     /// Populates <see cref="_persistedComponents"/> so that subsequent <see cref="RegisterComponentFromAccessor{T}"/>
     /// / <see cref="RegisterComponentByType"/> calls load existing segments instead of allocating fresh ones.
@@ -2073,7 +2087,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 continue;
             }
 
-            if (!_persistedArchetypes.TryGetValue(meta.ArchetypeType.Name, out var persisted))
+            if (!TryGetPersistedArchetype(meta, out var persisted))
             {
                 continue;
             }
@@ -2110,8 +2124,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             // rebuilt from cluster data at startup by RebuildCellState + RebuildClusterAabbs.
 
             SystemCrud.Update(archetypesTable, persisted.ChunkId, ref arch, EpochManager, cs);
-            // refresh the cache so the next checkpoint's skip-check sees the persisted values
-            _persistedArchetypes[meta.ArchetypeType.Name] = (persisted.ChunkId, arch);
+            // refresh the cache so the next checkpoint's skip-check sees the persisted values (keyed by the durable name — after a rename PersistNewArchetypes
+            // has already re-keyed this entry from PreviousName to meta.Name, so this hits the same slot)
+            _persistedArchetypes[meta.Name] = (persisted.ChunkId, arch);
             anyUpdated = true;
         }
 
@@ -2293,8 +2308,19 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         var componentAttr = typeof(T).GetCustomAttribute<ComponentAttribute>();
         var schemaName = componentAttr?.Name ?? typeof(T).Name;
 
+        // Component rename hatch (#514 D4 — symmetric with the archetype hatch): when the current schema name isn't persisted but the declared
+        // [Component(PreviousName=...)] is, the database was created under the old name. Match that row, load its data (segment SPIs and the (routingId, slot)
+        // WAL wire are both name-independent), and carry the name forward below so the next reopen matches by Name directly.
+        var previousName = componentAttr?.PreviousName;
+        var persistedKey = schemaName;
+        if (previousName != null && _persistedComponents != null
+            && !_persistedComponents.ContainsKey(schemaName) && _persistedComponents.ContainsKey(previousName))
+        {
+            persistedKey = previousName;
+        }
+
         FieldR1[] persistedFields = null;
-        if (_persistedFieldsByComponent != null && _persistedFieldsByComponent.TryGetValue(schemaName, out persistedFields))
+        if (_persistedFieldsByComponent != null && _persistedFieldsByComponent.TryGetValue(persistedKey, out persistedFields))
         {
             resolver = new FieldIdResolver(persistedFields);
         }
@@ -2331,7 +2357,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         ComponentTable componentTable;
 
-        if (_persistedComponents != null && _persistedComponents.TryGetValue(schemaName, out var persisted))
+        if (_persistedComponents != null && _persistedComponents.TryGetValue(persistedKey, out var persisted))
         {
             // Schema validation: compare persisted vs runtime before loading data
             SchemaDiff diff = null;
@@ -2472,6 +2498,23 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
                 // Record in schema history audit trail
                 RecordSchemaHistory(schemaName, diff, migrationResult, persisted.Comp.SchemaRevision, definition.Revision);
+            }
+
+            // Carry the rename forward (#514 D4): the row was matched under the previous name — re-stamp ComponentR1.Name to the current name on disk and
+            // re-key the caches, so the next reopen matches by Name directly and [Component(PreviousName=...)] can be dropped in a later release. Fields,
+            // SPIs and data untouched.
+            if (persistedKey != schemaName)
+            {
+                PersistComponentName(persisted.ChunkId, schemaName);
+                if (_persistedComponents.Remove(persistedKey, out var movedComp))
+                {
+                    movedComp.Comp.Name = (String64)schemaName;
+                    _persistedComponents[schemaName] = movedComp;
+                }
+                if (_persistedFieldsByComponent.Remove(persistedKey, out var movedFields))
+                {
+                    _persistedFieldsByComponent[schemaName] = movedFields;
+                }
             }
         }
         else
@@ -2802,7 +2845,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
             // Reopen re-match by name (claude/design/Ecs/SourceGeneratedRegistry/04-solution-design.md §7.1):
             // restore this archetype's persisted routing id, or assign a fresh one for a newly-added archetype.
-            var hasPersisted = _persistedArchetypes.TryGetValue(meta.ArchetypeType.Name, out var persisted);
+            var hasPersisted = TryGetPersistedArchetype(meta, out var persisted);
             var routingId = hasPersisted ? persisted.Arch.RoutingId : _nextRoutingId++;
             _metaByRouting[routingId] = meta;
             _routingByCatalog[meta.ArchetypeId] = routingId;
@@ -2870,8 +2913,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     _archetypeStates[meta.ArchetypeId].ClusterState =
                         ArchetypeClusterState.Create(meta.ClusterLayout, clusterSegment, transientClusterSegment, transientClusterStore);
                 }
-                else if (_persistedArchetypes.TryGetValue(meta.ArchetypeType.Name, out var clusterPersisted)
-                         && clusterPersisted.Arch.ClusterSegmentSPI > 0)
+                else if (TryGetPersistedArchetype(meta, out var clusterPersisted) && clusterPersisted.Arch.ClusterSegmentSPI > 0)
                 {
                     ChunkBasedSegment<PersistentStore> loadedCluster = null;
                     var loaded = !isPureTransient && MMF.TryLoadChunkBasedSegment(
@@ -3377,8 +3419,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
             // Clean / legacy reopen: skip archetypes that were loaded from a persisted EntityMap segment (O(1) reopen path). BUT: if migration invalidated the
             // EntityMap (hasMigratedSlot → fresh allocation), the EntityMap will be empty despite persisted SPI > 0. Check EntryCount to distinguish.
-            if (_persistedArchetypes.TryGetValue(meta.ArchetypeType.Name, out var p) && p.Arch.EntityMapSPI > 0
-                && state.EntityMap.EntryCount > 0)
+            if (TryGetPersistedArchetype(meta, out var p) && p.Arch.EntityMapSPI > 0 && state.EntityMap.EntryCount > 0)
             {
                 continue;
             }
@@ -3847,6 +3888,26 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         }
     }
 
+    /// <summary>
+    /// Resolve the persisted <see cref="ArchetypeR1"/> row for a runtime archetype on reopen, matching by durable <see cref="ArchetypeMetadata.Name"/> first,
+    /// then by <see cref="ArchetypeMetadata.PreviousName"/> (#514 D4 rename hatch) so a renamed archetype keeps its routing id and data. Returns <c>false</c>
+    /// for a genuinely new archetype. <see cref="PersistNewArchetypes"/> carries the name forward on disk after a <see cref="ArchetypeMetadata.PreviousName"/>
+    /// match, so the fallback only fires on the first reopen following a rename.
+    /// </summary>
+    private bool TryGetPersistedArchetype(ArchetypeMetadata meta, out (int ChunkId, ArchetypeR1 Arch) persisted)
+    {
+        if (_persistedArchetypes.TryGetValue(meta.Name, out persisted))
+        {
+            return true;
+        }
+        if (meta.PreviousName != null && _persistedArchetypes.TryGetValue(meta.PreviousName, out persisted))
+        {
+            return true;
+        }
+        persisted = default;
+        return false;
+    }
+
     private void LoadPersistedArchetypes()
     {
         var archetypesTable = GetComponentTable<ArchetypeR1>();
@@ -3875,7 +3936,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
     private void ValidateArchetypeSchema(ArchetypeMetadata meta)
     {
-        if (!_persistedArchetypes.TryGetValue(meta.ArchetypeType.Name, out var persisted))
+        if (!TryGetPersistedArchetype(meta, out var persisted))
         {
             return; // new archetype, not persisted yet — OK
         }
@@ -3926,8 +3987,25 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 continue;
             }
 
-            if (_persistedArchetypes.ContainsKey(meta.ArchetypeType.Name))
+            // Already persisted under the current durable name — nothing to do.
+            if (_persistedArchetypes.ContainsKey(meta.Name))
             {
+                continue;
+            }
+
+            // Renamed archetype (#514 D4): the runtime declares [Archetype(PreviousName=...)] and the persisted row is still keyed by that former name. Carry
+            // the durable name forward on disk and re-key the in-memory cache, so the rename becomes permanent — after this one reopen the PreviousName hint
+            // can be dropped in a later release. The routing id (the durable EntityId anchor) was already restored by TryGetPersistedArchetype in the routing
+            // pass; only the match key changes here, so existing EntityIds keep resolving. Update mirrors PersistArchetypeState's ComponentNames-preserving
+            // row rewrite.
+            if (meta.PreviousName != null && _persistedArchetypes.TryGetValue(meta.PreviousName, out var renamed))
+            {
+                var renamedArch = renamed.Arch;
+                renamedArch.Name = meta.Name;
+                SystemCrud.Update(archetypesTable, renamed.ChunkId, ref renamedArch, EpochManager, cs);
+                _persistedArchetypes.Remove(meta.PreviousName);
+                _persistedArchetypes[meta.Name] = (renamed.ChunkId, renamedArch);
+                anyNew = true;
                 continue;
             }
 
@@ -3949,7 +4027,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             }
 
             var chunkId = SystemCrud.Create(archetypesTable, ref arch, EpochManager, cs);
-            _persistedArchetypes[meta.ArchetypeType.Name] = (chunkId, arch);
+            _persistedArchetypes[meta.Name] = (chunkId, arch);
             anyNew = true;
         }
 
@@ -3962,7 +4040,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// <summary>Build an ArchetypeR1 header from runtime metadata. ComponentNames must be populated separately via VSBS.</summary>
     internal static ArchetypeR1 BuildArchetypeR1(ArchetypeMetadata meta) => new()
     {
-        Name = meta.ArchetypeType.Name,
+        Name = meta.Name, // durable schema name (#514 D4): [Archetype(Name=...)] override, or the CLR type's simple name by default
         ArchetypeId = meta.ArchetypeId,
         ParentArchetypeId = meta.ParentArchetypeId,
         ComponentCount = meta.ComponentCount,

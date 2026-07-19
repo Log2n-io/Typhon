@@ -19,7 +19,7 @@ struct TbSvData
     public TbSvData(int cat, int val) { Category = cat; Value = val; }
 }
 
-[Archetype(320)]
+[Archetype]
 class TbSvArch : Archetype<TbSvArch>
 {
     public static readonly Comp<TbSvData> Data = Register<TbSvData>();

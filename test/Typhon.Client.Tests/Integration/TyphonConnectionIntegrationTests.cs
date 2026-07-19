@@ -42,7 +42,7 @@ public struct ClientTestHealth
     }
 }
 
-[Archetype(200)]
+[Archetype]
 partial class ClientTestUnit : Archetype<ClientTestUnit>
 {
     public static readonly Comp<ClientTestPosition> Position = Register<ClientTestPosition>();

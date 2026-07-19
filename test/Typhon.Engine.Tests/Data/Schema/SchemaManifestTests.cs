@@ -26,7 +26,7 @@ struct ManifestY
     public float G;
 }
 
-[Archetype(880)]
+[Archetype]
 class ManifestArch : Archetype<ManifestArch>
 {
     public static readonly Comp<ManifestX> X = Register<ManifestX>();

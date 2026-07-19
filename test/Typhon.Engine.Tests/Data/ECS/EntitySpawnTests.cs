@@ -42,14 +42,14 @@ public struct EcsHealth
 // ECS test archetypes
 // ═══════════════════════════════════════════════════════════════════════
 
-[Archetype(100)]
+[Archetype]
 partial class EcsUnit : Archetype<EcsUnit>
 {
     public static readonly Comp<EcsPosition> Position = Register<EcsPosition>();
     public static readonly Comp<EcsVelocity> Velocity = Register<EcsVelocity>();
 }
 
-[Archetype(101)]
+[Archetype]
 partial class EcsSoldier : Archetype<EcsSoldier, EcsUnit>
 {
     public static readonly Comp<EcsHealth> Health = Register<EcsHealth>();

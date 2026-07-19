@@ -33,7 +33,7 @@ public struct SpatMeta
     [Index] public int Level;       // indexed → usable in WHERE / ORDER BY; intentionally NOT spatial
 }
 
-[Archetype(3010)]
+[Archetype]
 partial class SpatArch : Archetype<SpatArch>
 {
     public static readonly Comp<SpatPos> Pos = Register<SpatPos>();

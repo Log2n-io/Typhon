@@ -538,7 +538,7 @@ internal sealed class TrueCrashE2ETests
         // NextFreeTSN restore is the driver's responsibility; do it here so a read transaction sees the recovered entity.
         dbe.TransactionChain.SetNextFreeId(tsn + 1);
 
-        Assert.That(dbe._archetypeStates[200].EntityMap.EntryCount, Is.EqualTo(1),
+        Assert.That(dbe._archetypeStates[Archetype<CompAArch>.Metadata.ArchetypeId].EntityMap.EntryCount, Is.EqualTo(1),
             "re-applying the same Spawn must not create a duplicate EntityMap entry");
 
         using var tx = dbe.CreateQuickTransaction();

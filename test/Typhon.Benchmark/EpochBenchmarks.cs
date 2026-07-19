@@ -263,7 +263,7 @@ public struct BenchComp
     public long Timestamp;
 }
 
-[Archetype(501)]
+[Archetype]
 class BenchArch : Archetype<BenchArch>
 {
     public static readonly Comp<BenchComp> Data = Register<BenchComp>();

@@ -20,7 +20,7 @@ struct PipeSvData
     public PipeSvData(int cat, int score) { Category = cat; Score = score; }
 }
 
-[Archetype(330)]
+[Archetype]
 class PipeSvArch : Archetype<PipeSvArch>
 {
     public static readonly Comp<PipeSvData> Data = Register<PipeSvData>();

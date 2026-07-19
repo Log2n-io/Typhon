@@ -40,19 +40,19 @@ struct HSportsData
     public HSportsData(float turbo) { Turbo = turbo; _pad = 0; }
 }
 
-[Archetype(300)]
+[Archetype]
 class HVehicle : Archetype<HVehicle>
 {
     public static readonly Comp<HVehicleData> Vehicle = Register<HVehicleData>();
 }
 
-[Archetype(301)]
+[Archetype]
 class HCar : Archetype<HCar, HVehicle>
 {
     public static readonly Comp<HCarData> Car = Register<HCarData>();
 }
 
-[Archetype(302)]
+[Archetype]
 class HSportsCar : Archetype<HSportsCar, HCar>
 {
     public static readonly Comp<HSportsData> Sports = Register<HSportsData>();
@@ -89,19 +89,19 @@ struct HDistrictData
     public int Area;
 }
 
-[Archetype(310)]
+[Archetype]
 class HRegion : Archetype<HRegion>
 {
     public static readonly Comp<HRegionData> Data = Register<HRegionData>();
 }
 
-[Archetype(311)]
+[Archetype]
 class HCity : Archetype<HCity>
 {
     public static readonly Comp<HCityData> Data = Register<HCityData>();
 }
 
-[Archetype(312)]
+[Archetype]
 class HDistrict : Archetype<HDistrict>
 {
     public static readonly Comp<HDistrictData> Data = Register<HDistrictData>();

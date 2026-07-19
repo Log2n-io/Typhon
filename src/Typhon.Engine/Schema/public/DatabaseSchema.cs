@@ -193,11 +193,19 @@ public static class DatabaseSchema
                 var componentAttr = componentType.GetCustomAttribute<ComponentAttribute>();
                 var schemaName = componentAttr?.Name ?? componentType.Name;
 
+                // Component rename hatch (#514 D4): preview against the old-named row when the current name isn't persisted but [Component(PreviousName=...)] is.
+                var previousName = componentAttr?.PreviousName;
+                var persistedKey = schemaName;
+                if (previousName != null && engine.PersistedComponents != null
+                    && !engine.PersistedComponents.ContainsKey(schemaName) && engine.PersistedComponents.ContainsKey(previousName))
+                {
+                    persistedKey = previousName;
+                }
+
                 // Build definition with resolver if persisted data exists
                 FieldIdResolver resolver = null;
                 FieldR1[] persistedFields = null;
-                if (engine.PersistedFieldsByComponent != null &&
-                    engine.PersistedFieldsByComponent.TryGetValue(schemaName, out persistedFields))
+                if (engine.PersistedFieldsByComponent != null && engine.PersistedFieldsByComponent.TryGetValue(persistedKey, out persistedFields))
                 {
                     resolver = new FieldIdResolver(persistedFields);
                 }
@@ -212,7 +220,7 @@ public static class DatabaseSchema
                     continue;
                 }
 
-                if (engine.PersistedComponents == null || !engine.PersistedComponents.TryGetValue(schemaName, out var persisted))
+                if (engine.PersistedComponents == null || !engine.PersistedComponents.TryGetValue(persistedKey, out var persisted))
                 {
                     componentResults.Add(new EvolutionComponentResult
                     {

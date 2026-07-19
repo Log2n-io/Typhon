@@ -72,13 +72,13 @@ struct TrigTerrain
     public AABB2F Bounds;
 }
 
-[Archetype(540)]
+[Archetype]
 partial class TrigShipArch : Archetype<TrigShipArch>
 {
     public static readonly Comp<TrigShip> Ship = Register<TrigShip>();
 }
 
-[Archetype(541)]
+[Archetype]
 partial class TrigTerrainArch : Archetype<TrigTerrainArch>
 {
     public static readonly Comp<TrigTerrain> Terrain = Register<TrigTerrain>();

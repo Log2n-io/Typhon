@@ -33,7 +33,7 @@ struct OpsCompV2
 
 // ── Archetype for V1 component (used for Spawn in first scope) ──
 
-[Archetype(340)]
+[Archetype]
 class OpsCompArch : Archetype<OpsCompArch>
 {
     public static readonly Comp<OpsCompV1> Comp = Register<OpsCompV1>();

@@ -28,11 +28,11 @@ unsafe class SchemaVersioningTests : TestBase<SchemaVersioningTests>
     [Test]
     public void BuildArchetypeR1_FromMetadata_CorrectFields()
     {
-        var meta = ArchetypeRegistry.GetMetadata(100); // EcsUnit
+        var meta = ArchetypeRegistry.GetMetadata<EcsUnit>(); // #514 D1: resolve by type, ids are engine-assigned
         Assert.That(meta, Is.Not.Null);
 
         var arch = DatabaseEngine.BuildArchetypeR1(meta);
-        Assert.That(arch.ArchetypeId, Is.EqualTo(100));
+        Assert.That(arch.ArchetypeId, Is.EqualTo(meta.ArchetypeId));
         Assert.That(arch.ComponentCount, Is.EqualTo(2));
         Assert.That(arch.ParentArchetypeId, Is.EqualTo(ArchetypeR1.NoParent));
         Assert.That(arch.Name.AsString, Is.EqualTo("EcsUnit"));
@@ -41,17 +41,17 @@ unsafe class SchemaVersioningTests : TestBase<SchemaVersioningTests>
     [Test]
     public void BuildArchetypeR1_InheritedArchetype_HasParentId()
     {
-        var meta = ArchetypeRegistry.GetMetadata(101); // EcsSoldier
+        var meta = ArchetypeRegistry.GetMetadata<EcsSoldier>();
         var arch = DatabaseEngine.BuildArchetypeR1(meta);
-        Assert.That(arch.ArchetypeId, Is.EqualTo(101));
-        Assert.That(arch.ParentArchetypeId, Is.EqualTo(100));
+        Assert.That(arch.ArchetypeId, Is.EqualTo(meta.ArchetypeId));
+        Assert.That(arch.ParentArchetypeId, Is.EqualTo(ArchetypeRegistry.GetMetadata<EcsUnit>().ArchetypeId));
         Assert.That(arch.ComponentCount, Is.EqualTo(3));
     }
 
     [Test]
     public void GetArchetypeComponentNames_CorrectOrder()
     {
-        var meta = ArchetypeRegistry.GetMetadata(101); // EcsSoldier
+        var meta = ArchetypeRegistry.GetMetadata<EcsSoldier>();
         var names = DatabaseEngine.GetArchetypeComponentNames(meta);
 
         Assert.That(names.Length, Is.EqualTo(3));
@@ -154,9 +154,9 @@ unsafe class SchemaVersioningTests : TestBase<SchemaVersioningTests>
             dbe.RegisterComponentFromAccessor<EcsHealth>();
             dbe.InitializeArchetypes();
 
-            Assert.That(dbe.GetArchetypeEntityCount(100), Is.EqualTo(unitCount),
+            Assert.That(dbe.GetArchetypeEntityCount(ArchetypeRegistry.GetMetadata<EcsUnit>().ArchetypeId), Is.EqualTo(unitCount),
                 "EcsUnit entity count should survive reopen without a bucket split");
-            Assert.That(dbe.GetArchetypeEntityCount(101), Is.EqualTo(soldierCount),
+            Assert.That(dbe.GetArchetypeEntityCount(ArchetypeRegistry.GetMetadata<EcsSoldier>().ArchetypeId), Is.EqualTo(soldierCount),
                 "EcsSoldier entity count should survive reopen without a bucket split");
         }
     }
@@ -190,7 +190,7 @@ unsafe class SchemaVersioningTests : TestBase<SchemaVersioningTests>
 
             var table = dbe.GetComponentTable<ArchetypeR1>();
 
-            // Find and tamper with the EcsUnit record (ArchetypeId = 100)
+            // Find and tamper with the EcsUnit record (matched by name — #514 D1: catalog ids are engine-assigned)
             var cs = dbe.MMF.CreateChangeSet();
             var segment = table.ComponentSegment;
             var capacity = segment.ChunkCapacity;
@@ -201,7 +201,7 @@ unsafe class SchemaVersioningTests : TestBase<SchemaVersioningTests>
                     continue;
                 }
 
-                if (SystemCrud.Read(table, chunkId, out ArchetypeR1 arch, dbe.EpochManager) && arch.ArchetypeId == 100)
+                if (SystemCrud.Read(table, chunkId, out ArchetypeR1 arch, dbe.EpochManager) && arch.Name.AsString == "EcsUnit")
                 {
                     arch.ComponentCount = 99; // corrupt it
                     SystemCrud.Update(table, chunkId, ref arch, dbe.EpochManager, cs);
@@ -264,7 +264,7 @@ unsafe class SchemaVersioningTests : TestBase<SchemaVersioningTests>
                     continue;
                 }
 
-                if (SystemCrud.Read(table, chunkId, out ArchetypeR1 arch, dbe.EpochManager) && arch.ArchetypeId == 100)
+                if (SystemCrud.Read(table, chunkId, out ArchetypeR1 arch, dbe.EpochManager) && arch.Name.AsString == "EcsUnit")
                 {
                     arch.Revision = 999; // corrupt it
                     SystemCrud.Update(table, chunkId, ref arch, dbe.EpochManager, cs);
@@ -318,7 +318,7 @@ unsafe class SchemaVersioningTests : TestBase<SchemaVersioningTests>
                     continue;
                 }
 
-                if (arch.ArchetypeId != 100)
+                if (arch.Name.AsString != "EcsUnit")
                 {
                     continue; // skip non-EcsUnit
                 }

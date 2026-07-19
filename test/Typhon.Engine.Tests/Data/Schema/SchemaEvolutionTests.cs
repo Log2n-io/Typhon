@@ -230,55 +230,55 @@ struct EvoBulkV2
 
 // ── Archetypes for V1 components (used for Spawn in first scope) ──
 
-[Archetype(400)]
+[Archetype]
 class EvoAddArch : Archetype<EvoAddArch>
 {
     public static readonly Comp<EvoAddV1> Comp = Register<EvoAddV1>();
 }
 
-[Archetype(401)]
+[Archetype]
 class EvoRemoveArch : Archetype<EvoRemoveArch>
 {
     public static readonly Comp<EvoRemoveV1> Comp = Register<EvoRemoveV1>();
 }
 
-[Archetype(402)]
+[Archetype]
 class EvoReorderArch : Archetype<EvoReorderArch>
 {
     public static readonly Comp<EvoReorderV1> Comp = Register<EvoReorderV1>();
 }
 
-[Archetype(303)]
+[Archetype]
 class EvoWidenIntArch : Archetype<EvoWidenIntArch>
 {
     public static readonly Comp<EvoWidenIntV1> Comp = Register<EvoWidenIntV1>();
 }
 
-[Archetype(304)]
+[Archetype]
 class EvoWidenFloatArch : Archetype<EvoWidenFloatArch>
 {
     public static readonly Comp<EvoWidenFloatV1> Comp = Register<EvoWidenFloatV1>();
 }
 
-[Archetype(305)]
+[Archetype]
 class EvoCombinedArch : Archetype<EvoCombinedArch>
 {
     public static readonly Comp<EvoCombinedV1> Comp = Register<EvoCombinedV1>();
 }
 
-[Archetype(306)]
+[Archetype]
 class EvoAddRemoveArch : Archetype<EvoAddRemoveArch>
 {
     public static readonly Comp<EvoAddRemoveV1> Comp = Register<EvoAddRemoveV1>();
 }
 
-[Archetype(307)]
+[Archetype]
 class EvoSignExtArch : Archetype<EvoSignExtArch>
 {
     public static readonly Comp<EvoSignExtV1> Comp = Register<EvoSignExtV1>();
 }
 
-[Archetype(308)]
+[Archetype]
 class EvoBulkArch : Archetype<EvoBulkArch>
 {
     public static readonly Comp<EvoBulkV1> Comp = Register<EvoBulkV1>();
@@ -288,49 +288,49 @@ class EvoBulkArch : Archetype<EvoBulkArch>
 // V1 and V2 CLR types sharing the same [Component] name get the SAME ComponentTypeId.
 // InitializeArchetypes connects V1Arch's slots to V2's ComponentTable via schema-name fallback.
 
-[Archetype(309)]
+[Archetype]
 class EvoAddV2Arch : Archetype<EvoAddV2Arch>
 {
     public static readonly Comp<EvoAddV2> Comp = Register<EvoAddV2>();
 }
 
-[Archetype(350)]
+[Archetype]
 class EvoRemoveV2Arch : Archetype<EvoRemoveV2Arch>
 {
     public static readonly Comp<EvoRemoveV2> Comp = Register<EvoRemoveV2>();
 }
 
-[Archetype(351)]
+[Archetype]
 class EvoReorderV2Arch : Archetype<EvoReorderV2Arch>
 {
     public static readonly Comp<EvoReorderV2> Comp = Register<EvoReorderV2>();
 }
 
-[Archetype(352)]
+[Archetype]
 class EvoWidenIntV2Arch : Archetype<EvoWidenIntV2Arch>
 {
     public static readonly Comp<EvoWidenIntV2> Comp = Register<EvoWidenIntV2>();
 }
 
-[Archetype(353)]
+[Archetype]
 class EvoSignExtV2Arch : Archetype<EvoSignExtV2Arch>
 {
     public static readonly Comp<EvoSignExtV2> Comp = Register<EvoSignExtV2>();
 }
 
-[Archetype(354)]
+[Archetype]
 class EvoWidenFloatV2Arch : Archetype<EvoWidenFloatV2Arch>
 {
     public static readonly Comp<EvoWidenFloatV2> Comp = Register<EvoWidenFloatV2>();
 }
 
-[Archetype(355)]
+[Archetype]
 class EvoCombinedV2Arch : Archetype<EvoCombinedV2Arch>
 {
     public static readonly Comp<EvoCombinedV2> Comp = Register<EvoCombinedV2>();
 }
 
-[Archetype(356)]
+[Archetype]
 class EvoAddRemoveV2Arch : Archetype<EvoAddRemoveV2Arch>
 {
     public static readonly Comp<EvoAddRemoveV2> Comp = Register<EvoAddRemoveV2>();

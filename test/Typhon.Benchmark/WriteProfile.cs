@@ -31,13 +31,13 @@ static class WriteProfile
         [Field] public long Timestamp;
     }
 
-    [Archetype(530)]
+    [Archetype]
     class WpVersionedArch : Archetype<WpVersionedArch>
     {
         public static readonly Comp<WpVersioned> Data = Register<WpVersioned>();
     }
 
-    [Archetype(531)]
+    [Archetype]
     class WpSvArch : Archetype<WpSvArch>
     {
         public static readonly Comp<WpSingleVersion> Data = Register<WpSingleVersion>();

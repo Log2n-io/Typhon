@@ -9,14 +9,14 @@ namespace Typhon.Engine.Tests;
 // Additional archetype for K-way merge tests (same components as ClQUnit but different archetype)
 // ═══════════════════════════════════════════════════════════════════════
 
-[Archetype(543)]
+[Archetype]
 partial class ClQUnit2 : Archetype<ClQUnit2>
 {
     public static readonly Comp<ClQStats> Stats = Register<ClQStats>();
     public static readonly Comp<ClQTag> Tag = Register<ClQTag>();
 }
 
-[Archetype(544)]
+[Archetype]
 partial class ClQUnit3 : Archetype<ClQUnit3>
 {
     public static readonly Comp<ClQStats> Stats = Register<ClQStats>();

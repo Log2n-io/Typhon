@@ -70,12 +70,12 @@ public struct SmVersionedIndexed
 // Archetypes (IDs 520-525)
 // ═══════════════════════════════════════════════════════════════════════
 
-[Archetype(520)] class SmVersionedArch : Archetype<SmVersionedArch> { public static readonly Comp<SmVersioned> Data = Register<SmVersioned>(); }
-[Archetype(521)] class SmSingleVersionArch : Archetype<SmSingleVersionArch> { public static readonly Comp<SmSingleVersion> Data = Register<SmSingleVersion>(); }
-[Archetype(522)] class SmTransientArch : Archetype<SmTransientArch> { public static readonly Comp<SmTransient> Data = Register<SmTransient>(); }
-[Archetype(523)] class SmVersionedIdxArch : Archetype<SmVersionedIdxArch> { public static readonly Comp<SmVersionedIndexed> Data = Register<SmVersionedIndexed>(); }
-[Archetype(524)] class SmSvIdxArch : Archetype<SmSvIdxArch> { public static readonly Comp<SmSvIndexed> Data = Register<SmSvIndexed>(); }
-[Archetype(525)] class SmTransientIdxArch : Archetype<SmTransientIdxArch> { public static readonly Comp<SmTransientIndexed> Data = Register<SmTransientIndexed>(); }
+[Archetype] class SmVersionedArch : Archetype<SmVersionedArch> { public static readonly Comp<SmVersioned> Data = Register<SmVersioned>(); }
+[Archetype] class SmSingleVersionArch : Archetype<SmSingleVersionArch> { public static readonly Comp<SmSingleVersion> Data = Register<SmSingleVersion>(); }
+[Archetype] class SmTransientArch : Archetype<SmTransientArch> { public static readonly Comp<SmTransient> Data = Register<SmTransient>(); }
+[Archetype] class SmVersionedIdxArch : Archetype<SmVersionedIdxArch> { public static readonly Comp<SmVersionedIndexed> Data = Register<SmVersionedIndexed>(); }
+[Archetype] class SmSvIdxArch : Archetype<SmSvIdxArch> { public static readonly Comp<SmSvIndexed> Data = Register<SmSvIndexed>(); }
+[Archetype] class SmTransientIdxArch : Archetype<SmTransientIdxArch> { public static readonly Comp<SmTransientIndexed> Data = Register<SmTransientIndexed>(); }
 
 // ═══════════════════════════════════════════════════════════════════════
 // Stopwatch-based Storage Mode Profiler

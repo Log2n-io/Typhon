@@ -15,7 +15,7 @@ struct SeedItem
     public SeedItem(int value) { Value = value; Pad = 0; }
 }
 
-[Archetype(507)]
+[Archetype]
 partial class SeedItemArch : Archetype<SeedItemArch>
 {
     public static readonly Comp<SeedItem> Item = Register<SeedItem>();
