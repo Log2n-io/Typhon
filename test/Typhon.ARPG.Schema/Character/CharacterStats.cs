@@ -9,7 +9,7 @@ namespace Typhon.ARPG.Schema;
 /// </summary>
 [Component("ARPG.CharacterStats", 1)]
 [StructLayout(LayoutKind.Sequential)]
-public partial struct CharacterStats
+public struct CharacterStats
 {
     // Core attributes (affect damage/defense formulas)
     [Field] public int Strength;

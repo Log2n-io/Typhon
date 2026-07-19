@@ -9,7 +9,7 @@ namespace Typhon.ARPG.Schema;
 /// </summary>
 [Component("ARPG.Position", 1)]
 [StructLayout(LayoutKind.Sequential)]
-public partial struct Position
+public struct Position
 {
     [Field] public Point3F Location;
     [Field] public QuaternionF Rotation;

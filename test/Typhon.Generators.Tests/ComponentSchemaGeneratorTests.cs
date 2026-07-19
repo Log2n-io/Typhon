@@ -8,8 +8,10 @@ using Typhon.Generators;
 namespace Typhon.Generators.Tests;
 
 /// <summary>
-/// Tests for the component-schema pipeline of <see cref="ArchetypeAccessorGenerator"/> (feature #514, phase 4): each partial <c>[Component]</c>
-/// struct gets a reflection-free <c>IComponentSchemaProvider</c> implementation; non-partial structs are skipped (the engine falls back to reflection).
+/// Tests for the component-registration pipeline of <see cref="ArchetypeAccessorGenerator"/> (feature #514, phase 5): every <c>[Component]</c> struct in the
+/// assembly is registered from a single generated <c>[ModuleInitializer]</c> (<c>Typhon.Generated.__TyphonRegistry_*</c>) that calls
+/// <c>GeneratedSchemaRegistry.RegisterComponent(typeof(T), new ComponentSchemaSpec(...))</c> — reflection-free, and NOT via an interface on the struct, so
+/// components no longer need to be <c>partial</c>.
 /// </summary>
 [TestFixture]
 class ComponentSchemaGeneratorTests
@@ -47,6 +49,12 @@ namespace Typhon.Schema.Definition
     }
     public struct AABB2F { public float MinX, MinY, MaxX, MaxY; }
     public struct ComponentCollection<T> where T : unmanaged { int _bufferId; }
+    public static class GeneratedSchemaRegistry { public static void RegisterComponent(System.Type t, ComponentSchemaSpec s) { } }
+}
+namespace Typhon.Engine
+{
+    // Presence of this type makes the generator treat the compilation as engine-referencing (HasEngine == true), so the AOT-safe collection factory is emitted.
+    public class DatabaseEngine { public static void RegisterComponentCollectionFactory<T>() where T : unmanaged { } }
 }
 ";
 
@@ -80,13 +88,11 @@ namespace Typhon.Schema.Definition
         return (sources, parseErrors);
     }
 
-    private static string SchemaSource(string[] sources, string structName = null) =>
-        (structName == null
-            ? sources.FirstOrDefault(s => s.Contains("IComponentSchemaProvider"))
-            : sources.FirstOrDefault(s => s.Contains($"struct {structName} :"))) ?? "";
+    // The single per-assembly registrar source (Typhon.Generated.__TyphonRegistry_*), or "" if none was emitted.
+    private static string Registrar(string[] sources) => sources.FirstOrDefault(s => s.Contains("__TyphonRegistry_")) ?? "";
 
     [Test]
-    public void PartialComponent_EmitsSchemaProvider_AllAttributeKinds()
+    public void Component_EmitsModuleInitRegistration_AllAttributeKinds()
     {
         const string source = @"
 using Typhon.Schema.Definition;
@@ -96,11 +102,11 @@ namespace Game
 {
     [Component(""Game.Fk"", 1)]
     [StructLayout(LayoutKind.Sequential)]
-    public partial struct Fk { public long Id; }
+    public struct Fk { public long Id; }
 
     [Component(""Game.Rep"", 3, StorageMode = StorageMode.SingleVersion, DefaultDiscipline = DurabilityDiscipline.Commit)]
     [StructLayout(LayoutKind.Sequential)]
-    public partial struct Rep
+    public struct Rep
     {
         public float X;
 
@@ -118,30 +124,34 @@ namespace Game
 }
 ";
         var (sources, parseErrors) = Run(source);
-        var schema = SchemaSource(sources, "Rep");
+        var reg = Registrar(sources);
 
-        Assert.That(parseErrors, Is.Empty, "Generated schema code must parse. Errors: " + string.Join("; ", parseErrors.Select(d => d.ToString())));
-        Assert.That(schema, Is.Not.Empty, "A schema provider must be generated for the partial [Component] struct.");
+        Assert.That(parseErrors, Is.Empty, "Generated registrar code must parse. Errors: " + string.Join("; ", parseErrors.Select(d => d.ToString())));
+        Assert.That(reg, Is.Not.Empty, "A per-assembly __TyphonRegistry module-init must be generated.");
 
         Assert.Multiple(() =>
         {
-            Assert.That(schema, Does.Contain("partial struct Rep : global::Typhon.Schema.Definition.IComponentSchemaProvider"));
-            Assert.That(schema, Does.Contain("IComponentSchemaProvider.GetComponentSchema()"), "explicit interface implementation");
-            Assert.That(schema, Does.Contain("namespace Game"));
+            // Registrar shape: a module-init in Typhon.Generated that pushes registrations to the engine.
+            Assert.That(reg, Does.Contain("namespace Typhon.Generated"));
+            Assert.That(reg, Does.Contain("internal static class __TyphonRegistry_ComponentGeneratorTestAssembly"));
+            Assert.That(reg, Does.Contain("[global::System.Runtime.CompilerServices.ModuleInitializer]"));
+            // Registration is by type, off the struct — components need not be partial.
+            Assert.That(reg, Does.Contain("global::Typhon.Schema.Definition.GeneratedSchemaRegistry.RegisterComponent(typeof(global::Game.Rep)"));
+            Assert.That(reg, Does.Contain("new global::Typhon.Schema.Definition.ComponentSchemaSpec("));
             // Offsets are the one residual runtime call.
-            Assert.That(schema, Does.Contain("global::System.Runtime.InteropServices.Marshal.OffsetOf<global::Game.Rep>(\"X\")"));
+            Assert.That(reg, Does.Contain("global::System.Runtime.InteropServices.Marshal.OffsetOf<global::Game.Rep>(\"X\")"));
             // Field metadata carried faithfully.
-            Assert.That(schema, Does.Contain("previousName: \"Hitpoints\""));
-            Assert.That(schema, Does.Contain("hasIndex: true, indexAllowMultiple: true"));
-            Assert.That(schema, Does.Contain("isForeignKey: true, foreignKeyTargetType: typeof(global::Game.Fk)"));
-            Assert.That(schema, Does.Contain("hasSpatialIndex: true"));
-            Assert.That(schema, Does.Contain("spatialMargin: 2f"));
-            Assert.That(schema, Does.Contain("spatialCellSize: 4f"));
-            Assert.That(schema, Does.Contain("spatialMode: (global::Typhon.Schema.Definition.SpatialMode)1"));
-            Assert.That(schema, Does.Contain("spatialCategory: 7u"));
+            Assert.That(reg, Does.Contain("previousName: \"Hitpoints\""));
+            Assert.That(reg, Does.Contain("hasIndex: true, indexAllowMultiple: true"));
+            Assert.That(reg, Does.Contain("isForeignKey: true, foreignKeyTargetType: typeof(global::Game.Fk)"));
+            Assert.That(reg, Does.Contain("hasSpatialIndex: true"));
+            Assert.That(reg, Does.Contain("spatialMargin: 2f"));
+            Assert.That(reg, Does.Contain("spatialCellSize: 4f"));
+            Assert.That(reg, Does.Contain("spatialMode: (global::Typhon.Schema.Definition.SpatialMode)1"));
+            Assert.That(reg, Does.Contain("spatialCategory: 7u"));
             // Component-level storage/discipline emitted as casts from the attribute values.
-            Assert.That(schema, Does.Contain("storageMode: (global::Typhon.Schema.Definition.StorageMode)1"));
-            Assert.That(schema, Does.Contain("defaultDiscipline: (global::Typhon.Schema.Definition.DurabilityDiscipline)1"));
+            Assert.That(reg, Does.Contain("storageMode: (global::Typhon.Schema.Definition.StorageMode)1"));
+            Assert.That(reg, Does.Contain("defaultDiscipline: (global::Typhon.Schema.Definition.DurabilityDiscipline)1"));
         });
     }
 
@@ -156,25 +166,26 @@ namespace Game
 {
     [Component(""Game.Bag"", 1)]
     [StructLayout(LayoutKind.Sequential)]
-    public partial struct Bag { public ComponentCollection<int> Items; public int Count; }
+    public struct Bag { public ComponentCollection<int> Items; public int Count; }
 }
 ";
         var (sources, parseErrors) = Run(source);
-        var schema = SchemaSource(sources, "Bag");
+        var reg = Registrar(sources);
 
         Assert.That(parseErrors, Is.Empty, "Generated code must parse. Errors: " + string.Join("; ", parseErrors.Select(d => d.ToString())));
         Assert.Multiple(() =>
         {
             // AOT-safe Type→delegate registration for the collection element type (B2, #409) — replaces MakeGenericType/Activator.
-            Assert.That(schema, Does.Contain("global::Typhon.Engine.DatabaseEngine.RegisterComponentCollectionFactory<int>()"));
-            // GetComponentSchema becomes a block body (register factories, then return the spec).
-            Assert.That(schema, Does.Contain("return new global::Typhon.Schema.Definition.ComponentSchemaSpec("));
+            Assert.That(reg, Does.Contain("global::Typhon.Engine.DatabaseEngine.RegisterComponentCollectionFactory<int>()"));
+            // The schema is registered alongside, by type.
+            Assert.That(reg, Does.Contain("global::Typhon.Schema.Definition.GeneratedSchemaRegistry.RegisterComponent(typeof(global::Game.Bag)"));
         });
     }
 
     [Test]
-    public void NonPartialComponent_IsSkipped()
+    public void NonPartialComponent_IsIncluded()
     {
+        // Feature #514 phase 5: registration moved off the struct into the module-init, so a NON-partial [Component] is now registered like any other.
         const string source = @"
 using Typhon.Schema.Definition;
 
@@ -184,12 +195,46 @@ namespace Game
     public struct Plain { public int Value; public int Pad; }
 }
 ";
-        var (sources, _) = Run(source);
-        Assert.That(SchemaSource(sources), Is.Empty, "A non-partial [Component] struct must not get a generated provider (reflection fallback).");
+        var (sources, parseErrors) = Run(source);
+        var reg = Registrar(sources);
+
+        Assert.That(parseErrors, Is.Empty, "Generated code must parse. Errors: " + string.Join("; ", parseErrors.Select(d => d.ToString())));
+        Assert.That(reg, Does.Contain("global::Typhon.Schema.Definition.GeneratedSchemaRegistry.RegisterComponent(typeof(global::Game.Plain)"),
+            "A non-partial [Component] struct must now be registered from the module-init (no interface, no partial requirement).");
     }
 
     [Test]
-    public void GlobalNamespaceComponent_EmitsParseableTopLevelProvider()
+    public void PrivateNestedComponent_IsSkipped()
+    {
+        // A component nested in a private/protected scope cannot be referenced from the top-level registrar class, so it is skipped (reflection fallback).
+        const string source = @"
+using Typhon.Schema.Definition;
+
+namespace Game
+{
+    internal class Host
+    {
+        [Component(""Game.Secret"", 1)]
+        private struct Secret { public int Value; public int Pad; }
+    }
+
+    [Component(""Game.Visible"", 1)]
+    public struct Visible { public int Value; public int Pad; }
+}
+";
+        var (sources, parseErrors) = Run(source);
+        var reg = Registrar(sources);
+
+        Assert.That(parseErrors, Is.Empty, "Generated code must parse. Errors: " + string.Join("; ", parseErrors.Select(d => d.ToString())));
+        Assert.Multiple(() =>
+        {
+            Assert.That(reg, Does.Contain("GeneratedSchemaRegistry.RegisterComponent(typeof(global::Game.Visible)"), "A reachable component must be registered.");
+            Assert.That(reg, Does.Not.Contain("Secret"), "A private-nested component is unreachable from the registrar and must be skipped.");
+        });
+    }
+
+    [Test]
+    public void GlobalNamespaceComponent_EmitsParseableRegistration()
     {
         const string source = @"
 using Typhon.Schema.Definition;
@@ -197,14 +242,17 @@ using System.Runtime.InteropServices;
 
 [Component(""Repro.Data"", 1)]
 [StructLayout(LayoutKind.Sequential)]
-public partial struct Data { public int Value; public int Pad; }
+public struct Data { public int Value; public int Pad; }
 ";
         var (sources, parseErrors) = Run(source);
-        var schema = SchemaSource(sources);
+        var reg = Registrar(sources);
 
         Assert.That(parseErrors, Is.Empty, "Global-namespace component must parse. Errors: " + string.Join("; ", parseErrors.Select(d => d.ToString())));
-        Assert.That(schema, Does.Contain("partial struct Data : global::Typhon.Schema.Definition.IComponentSchemaProvider"));
-        Assert.That(schema, Does.Not.Contain("namespace "), "A global-namespace component must emit top-level code with no namespace wrapper.");
-        Assert.That(schema, Does.Not.Contain("<global namespace>"));
+        Assert.Multiple(() =>
+        {
+            // The registrar always lives in Typhon.Generated; the global-namespace component is referenced by its global:: type name.
+            Assert.That(reg, Does.Contain("namespace Typhon.Generated"));
+            Assert.That(reg, Does.Contain("global::Typhon.Schema.Definition.GeneratedSchemaRegistry.RegisterComponent(typeof(global::Data)"));
+        });
     }
 }

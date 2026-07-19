@@ -70,7 +70,7 @@ public struct FieldR1
 [Component(SchemaName, 1)]
 [StructLayout(LayoutKind.Sequential)]
 [PublicAPI]
-public partial struct ComponentR1
+public struct ComponentR1
 {
     /// <summary>Fully-qualified schema name of this record ("Typhon.Schema.Component").</summary>
     public const string SchemaName = "Typhon.Schema.Component";
@@ -125,7 +125,7 @@ public partial struct ComponentR1
 [Component(SchemaName, 1)]
 [StructLayout(LayoutKind.Sequential)]
 [PublicAPI]
-public partial struct ArchetypeR1
+public struct ArchetypeR1
 {
     /// <summary>Fully-qualified schema name of this record ("Typhon.Schema.Archetype").</summary>
     public const string SchemaName = "Typhon.Schema.Archetype";
@@ -181,7 +181,7 @@ public partial struct ArchetypeR1
 [Component(SchemaName, 1)]
 [StructLayout(LayoutKind.Sequential)]
 [PublicAPI]
-public partial struct AssemblyR1
+public struct AssemblyR1
 {
     /// <summary>Fully-qualified schema name of this record ("Typhon.Schema.Assembly").</summary>
     public const string SchemaName = "Typhon.Schema.Assembly";
@@ -227,7 +227,7 @@ public enum SchemaChangeKind
 [Component(SchemaName, 1)]
 [StructLayout(LayoutKind.Sequential)]
 [PublicAPI]
-public partial struct SchemaHistoryR1
+public struct SchemaHistoryR1
 {
     /// <summary>Fully-qualified schema name of this record ("Typhon.Schema.History").</summary>
     public const string SchemaName = "Typhon.Schema.History";
@@ -512,7 +512,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
     /// <summary>Resolve an <see cref="EntityId"/>'s routing id to its archetype metadata. O(1). Returns null for an unknown routing id.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal ArchetypeMetadata GetMetaByRouting(ushort routingId) => (uint)routingId < (uint)_metaByRouting.Length ? _metaByRouting[routingId] : null;
+    internal ArchetypeMetadata GetMetaByRouting(ushort routingId) => routingId < (uint)_metaByRouting.Length ? _metaByRouting[routingId] : null;
 
     /// <summary>The per-DB routing id for a known archetype (for composing an <see cref="EntityId"/>). O(1).</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -520,7 +520,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
     /// <summary>The per-DB routing id for a catalog archetype id — for tooling (Workbench) that holds catalog ids from the schema and needs the routing id
     /// that routing-based APIs (e.g. <see cref="Transaction.EnumerateArchetypeEntities"/>) expect. Returns <see cref="NoRoutingId"/> if unmapped.</summary>
-    internal ushort RoutingIdForCatalog(ushort catalogId) => (uint)catalogId < (uint)_routingByCatalog.Length ? _routingByCatalog[catalogId] : NoRoutingId;
+    internal ushort RoutingIdForCatalog(ushort catalogId) => catalogId < (uint)_routingByCatalog.Length ? _routingByCatalog[catalogId] : NoRoutingId;
     private Dictionary<string, FieldR1[]> _persistedFieldsByComponent;
     private ConcurrentDictionary<int, ChunkBasedSegment<PersistentStore>> _componentCollectionSegmentByStride;
     private ConcurrentDictionary<Type, VariableSizedBufferSegmentBase<PersistentStore>> _componentCollectionVSBSByType;
@@ -1445,10 +1445,14 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     private const int ComponentCollectionSegmentStartingSize    = 8;
 
     // Type→typed-delegate dispatch table replacing MakeGenericType+Activator for ComponentCollection<T> backing stores (AOT blocker B2, #409 §1 / #514 Phase 6).
-    // Source-generated component schema providers register each ComponentCollection<T> element type here — T is known at compile time, so the closed generic is
-    // JIT/AOT-resolvable with no runtime code generation. Process-static (the delegate takes the engine as an argument, so it is engine-independent). Populated
-    // during registration (via the generated provider), read during ComponentTable build. Reflection is used only as a fallback for non-generated component types.
-    private static readonly ConcurrentDictionary<Type, Func<DatabaseEngine, ChangeSet, VariableSizedBufferSegmentBase<PersistentStore>>> _collectionVsbsFactories
+    // The generated [ModuleInitializer] registers each ComponentCollection<T> element type here — T is known at compile time, so the closed generic is
+    // JIT/AOT-resolvable with no runtime code generation. Process-static (the delegate takes the engine as an argument, so it is engine-independent).
+    // Read during ComponentTable build; reflection is used only as a fallback for non-registered element types.
+    //
+    // Weak-keyed (ConditionalWeakTable, not ConcurrentDictionary): the module-init registers eagerly at assembly load, so a collectible-ALC schema's element
+    // types must NOT be pinned by this process-static (design §5.2 hard rule / AC5.4 — a strong Type key would leak the ALC). The entry lives exactly as long as
+    // the element Type does; the factory delegate references T only as an ephemeron value, which does not keep the weak key alive.
+    private static readonly ConditionalWeakTable<Type, Func<DatabaseEngine, ChangeSet, VariableSizedBufferSegmentBase<PersistentStore>>> CollectionVsbsFactories
         = new();
 
     /// <summary>
@@ -1458,7 +1462,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// </summary>
     /// <typeparam name="T">The collection's element type.</typeparam>
     public static void RegisterComponentCollectionFactory<T>() where T : unmanaged =>
-        _collectionVsbsFactories.TryAdd(typeof(T), static (engine, changeSet) => engine.GetComponentCollectionVSBS<T>(changeSet));
+        CollectionVsbsFactories.AddOrUpdate(typeof(T), static (engine, changeSet) => engine.GetComponentCollectionVSBS<T>(changeSet));
 
     internal VariableSizedBufferSegment<T, PersistentStore> GetComponentCollectionVSBS<T>() where T : unmanaged => GetComponentCollectionVSBS<T>(null);
 
@@ -1469,9 +1473,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     internal VariableSizedBufferSegmentBase<PersistentStore> GetComponentCollectionVSBS(Type itemType, ChangeSet changeSet = null)
     {
         // Preferred path: a source-generated provider registered an AOT-safe factory for this element type (T known at compile time).
-        if (_collectionVsbsFactories.TryGetValue(itemType, out var factory))
+        if (CollectionVsbsFactories.TryGetValue(itemType, out var factory))
         {
-            return factory(this, changeSet);
+            return factory!(this, changeSet);
         }
 
         // Fallback for component types without a source-generated schema provider — constructs the closed generic reflectively (not AOT-safe; see attribute).

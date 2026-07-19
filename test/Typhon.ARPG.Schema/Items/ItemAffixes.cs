@@ -8,7 +8,7 @@ namespace Typhon.ARPG.Schema;
 /// </summary>
 [Component("ARPG.ItemAffixes", 1)]
 [StructLayout(LayoutKind.Sequential)]
-public partial struct ItemAffixes
+public struct ItemAffixes
 {
     [Field] /*[Index(AllowMultiple = true)]*/ public int AffixTypeId;
 

@@ -10,7 +10,7 @@ namespace Typhon.ARPG.Schema;
 /// </summary>
 [Component("ARPG.CraftingRecipe", 1)]
 [StructLayout(LayoutKind.Sequential)]
-public partial struct CraftingRecipe
+public struct CraftingRecipe
 {
     [Field] /*[Index]*/ public int RecipeId;
     [Field] public String64 RecipeName;

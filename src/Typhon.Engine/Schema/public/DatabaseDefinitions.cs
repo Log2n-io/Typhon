@@ -167,12 +167,13 @@ public class DatabaseDefinitions
 
     internal DBComponentDefinition CreateFromAccessor<T>(FieldIdResolver resolver) where T : unmanaged
     {
-        // Reflection-free fast path: a source-generated component supplies its schema as pure data. Boxing default(T) once at
-        // registration (never a hot path) lets us reach the interface without adding a generic constraint to every call site.
-        // ReSharper disable once SuspiciousTypeConversion.Global
-        if (default(T) is IComponentSchemaProvider provider)
+        // Reflection-free fast path: a source-generated component registered its schema (pure data) via its assembly's [ModuleInitializer], into the
+        // schema-contract-level GeneratedSchemaRegistry. We look it up by CLR type — the schema no longer lives on the struct as an interface impl, so components
+        // need not be `partial` (feature #514 Phase 5). A component absent from the registry (hand-authored / system schema, or a schema-only assembly whose
+        // module-init did not run) falls through to the runtime-reflection build below.
+        if (GeneratedSchemaRegistry.TryGetComponentSpec(typeof(T), out var spec))
         {
-            return BuildFromSpec(provider.GetComponentSchema(), typeof(T), resolver);
+            return BuildFromSpec(spec, typeof(T), resolver);
         }
 
         return CreateFromAccessor(typeof(T), resolver);

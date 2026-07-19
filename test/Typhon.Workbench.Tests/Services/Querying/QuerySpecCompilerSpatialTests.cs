@@ -21,14 +21,14 @@ namespace Typhon.Workbench.Tests.Services.Querying;
 
 [Component("Workbench.Test.SpatPos", 1, StorageMode = StorageMode.SingleVersion)]
 [StructLayout(LayoutKind.Sequential)]
-public partial struct SpatPos
+public struct SpatPos
 {
     [Field] [SpatialIndex(1.0f)] public AABB2F Bounds;
 }
 
 [Component("Workbench.Test.SpatMeta", 1, StorageMode = StorageMode.SingleVersion)]
 [StructLayout(LayoutKind.Sequential)]
-public partial struct SpatMeta
+public struct SpatMeta
 {
     [Index] public int Level;       // indexed → usable in WHERE / ORDER BY; intentionally NOT spatial
 }

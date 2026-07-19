@@ -39,23 +39,32 @@ public partial class ArchetypeAccessorGenerator : IIncrementalGenerator
             spc.AddSource($"{model.ClassName}.g.cs", source);
         });
 
-        // Per-component reflection-free schema provider (feature #514, phase 4). Emits an IComponentSchemaProvider
-        // implementation on each partial [Component] struct so the engine builds the definition from pure data instead
-        // of reflecting over the struct at runtime (offsets stay a one-time Marshal.OffsetOf inside the generated method).
+        // Per-assembly reflection-free component registration (feature #514, phase 5). Every [Component] in the compilation is collected and registered from a
+        // single generated [ModuleInitializer] that runs once at assembly load — populating the engine's Type→ComponentSchemaSpec registry (and each
+        // ComponentCollection<T> AOT-safe factory) BEFORE any DatabaseEngine reads it. This replaces the former IComponentSchemaProvider-on-struct dispatch, so
+        // [Component] structs no longer need to be `partial`. A component the generated top-level registrar cannot reference (private/protected nesting) is
+        // skipped and falls back to runtime reflection.
         var componentPipeline = context.SyntaxProvider.ForAttributeWithMetadataName(
             fullyQualifiedMetadataName: ComponentAttributeFqn,
             predicate: static (node, _) => node is StructDeclarationSyntax,
             transform: static (ctx, ct) => TransformComponent(ctx, ct)
-        );
+        ).Where(static m => m != null).Collect();
 
-        context.RegisterSourceOutput(componentPipeline, static (spc, model) =>
+        // (assembly name, whether Typhon.Engine is referenced by this compilation). The engine-typed ComponentCollection<T> factory can only be emitted when the
+        // engine is reachable (directly or transitively); a schema-only assembly (references just Typhon.Schema.Definition) registers component specs via the
+        // contract-level GeneratedSchemaRegistry and lets collection backing-stores fall back to the runtime reflective path.
+        var asmInfo = context.CompilationProvider.Select(static (c, _) =>
+            (Name: c.AssemblyName, HasEngine: c.GetTypeByMetadataName("Typhon.Engine.DatabaseEngine") != null));
+
+        context.RegisterSourceOutput(componentPipeline.Combine(asmInfo), static (spc, pair) =>
         {
-            if (model == null)
+            var (models, info) = pair;
+            if (models.IsDefaultOrEmpty)
             {
                 return;
             }
 
-            spc.AddSource($"{model.HintName}.schema.g.cs", EmitComponent(model));
+            spc.AddSource("__TyphonRegistry.g.cs", EmitRegistrar(models, info.Name, info.HasEngine));
         });
 
         // Cascade-delete graph validation as a BUILD-TIME diagnostic (feature #514, phase 6). Mirrors the runtime ValidateCascadeDfs: a cycle or diamond in the
@@ -396,21 +405,12 @@ public partial class ArchetypeAccessorGenerator : IIncrementalGenerator
 
     private static ComponentGenModel TransformComponent(GeneratorAttributeSyntaxContext ctx, CancellationToken ct)
     {
-        var structDecl = (StructDeclarationSyntax)ctx.TargetNode;
         var symbol = (INamedTypeSymbol)ctx.TargetSymbol;
 
-        // Must be partial — otherwise we cannot add the interface implementation; the engine falls back to runtime reflection.
-        bool isPartial = false;
-        foreach (var modifier in structDecl.Modifiers)
-        {
-            if (modifier.Text == "partial")
-            {
-                isPartial = true;
-                break;
-            }
-        }
-
-        if (!isPartial)
+        // Registration now happens from a per-assembly [ModuleInitializer] (feature #514 phase 5), NOT via an interface on the struct — so `partial` is no
+        // longer required. The one constraint: the generated top-level registrar class must be able to *reference* the component type, so a struct nested in a
+        // private/protected scope can't be registered from there — skip it (the engine falls back to runtime reflection for it).
+        if (!IsReachableFromModuleInit(symbol))
         {
             return null;
         }
@@ -654,68 +654,115 @@ public partial class ArchetypeAccessorGenerator : IIncrementalGenerator
     // @-escape a generated identifier when it collides with a C# reserved keyword (@keyword is valid and denotes the same identifier).
     private static string EscapeIdentifier(string name) => CSharpKeywords.Contains(name) ? "@" + name : name;
 
-    private static string EmitComponent(ComponentGenModel model)
+    // Whether the generated top-level registrar class (Typhon.Generated.__TyphonRegistry_*) can reference this type: it and every containing type must be
+    // public or internal. A struct nested in a private/protected scope is unreachable from a sibling top-level class, so we skip it (reflection fallback).
+    private static bool IsReachableFromModuleInit(INamedTypeSymbol symbol)
     {
-        var sb = new StringBuilder(2048);
+        for (INamedTypeSymbol t = symbol; t != null; t = t.ContainingType)
+        {
+            var a = t.DeclaredAccessibility;
+            if (a != Accessibility.Public && a != Accessibility.Internal && a != Accessibility.NotApplicable)
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Turn an assembly name into a valid C# identifier suffix for the per-assembly registrar class (keeps distinct assemblies' registrars distinctly named).
+    private static string SanitizeIdentifier(string s)
+    {
+        if (string.IsNullOrEmpty(s))
+        {
+            return "Assembly";
+        }
+        var chars = s.ToCharArray();
+        for (int i = 0; i < chars.Length; i++)
+        {
+            char c = chars[i];
+            if (!char.IsLetterOrDigit(c) && c != '_')
+            {
+                chars[i] = '_';
+            }
+        }
+        var result = new string(chars);
+        if (!char.IsLetter(result[0]) && result[0] != '_')
+        {
+            result = "_" + result;
+        }
+        return result;
+    }
+
+    // Per-assembly reflection-free component registrar (feature #514, phase 5). One [ModuleInitializer] registers every [Component] in the assembly: its
+    // ComponentSchemaSpec (built as pure data, offsets via a one-time Marshal.OffsetOf) into the schema-contract-level GeneratedSchemaRegistry, plus — when this
+    // compilation references the engine — each ComponentCollection<T> AOT-safe factory. Runs once at assembly load, before any DatabaseEngine reads the registry
+    // — which dissolves the flaky lazy-init race and lets [Component] structs drop the `partial` requirement (the schema no longer lives on the struct).
+    //
+    // The spec registration targets Typhon.Schema.Definition (which every schema assembly references) rather than the engine, so schema-only assemblies register
+    // too. The collection factory is engine-typed, so it is emitted only when the engine is reachable; otherwise the backing store uses the runtime reflective
+    // fallback for that element type.
+    private static string EmitRegistrar(System.Collections.Immutable.ImmutableArray<ComponentGenModel> models, string assemblyName, bool hasEngine)
+    {
+        // Deterministic output: sort by fully-qualified struct name so the emitted registrar is byte-stable regardless of the collection order.
+        var sorted = models.ToArray();
+        Array.Sort(sorted, static (a, b) => string.CompareOrdinal(a.StructFqn, b.StructFqn));
+
+        var sb = new StringBuilder(4096);
 
         sb.AppendLine("// <auto-generated/>");
         sb.AppendLine("#nullable disable");
+        sb.AppendLine("#pragma warning disable CA2255 // ModuleInitializer in a schema/app assembly is intended (feature #514)");
         sb.AppendLine("#pragma warning disable CS8019 // Unnecessary using directive");
         sb.AppendLine();
+        sb.AppendLine("namespace Typhon.Generated");
+        sb.AppendLine("{");
+        sb.Append("    internal static class __TyphonRegistry_").AppendLine(SanitizeIdentifier(assemblyName));
+        sb.AppendLine("    {");
+        sb.AppendLine("        /// <summary>Source-generated reflection-free component registration (feature #514). Runs once at assembly load.</summary>");
+        sb.AppendLine("        [global::System.Runtime.CompilerServices.ModuleInitializer]");
+        sb.AppendLine("        internal static void Register()");
+        sb.AppendLine("        {");
 
-        bool hasNamespace = !string.IsNullOrEmpty(model.Namespace);
-        if (hasNamespace)
+        foreach (var model in sorted)
         {
-            sb.Append("namespace ").AppendLine(model.Namespace);
-            sb.AppendLine("{");
-        }
-
-        string indent = hasNamespace ? "    " : "";
-
-        foreach (var parent in model.NestingParents)
-        {
-            sb.Append(indent).AppendLine(parent);
-            sb.Append(indent).AppendLine("{");
-            indent += "    ";
-        }
-
-        sb.Append(indent).Append(model.Accessibility).Append(" partial struct ").Append(model.StructName)
-          .Append(" : global::").Append(SchemaNs).AppendLine(".IComponentSchemaProvider");
-        sb.Append(indent).AppendLine("{");
-
-        string mi = indent + "    ";
-        string bi = mi + "    ";
-
-        sb.Append(mi).Append("/// <summary>Source-generated reflection-free schema for this component (feature #514).</summary>");
-        sb.AppendLine();
-        sb.Append(mi).Append("readonly global::").Append(SchemaNs).Append(".ComponentSchemaSpec global::").Append(SchemaNs)
-          .AppendLine(".IComponentSchemaProvider.GetComponentSchema()");
-
-        // ComponentCollection<T> fields → register their AOT-safe backing-store factories before returning the spec (B2, #409). T is a compile-time generic
-        // argument here, so no MakeGenericType/Activator is needed at runtime. Registration is idempotent and runs once, at component registration time.
-        bool hasCollections = model.CollectionElementFqns.Length > 0;
-        if (hasCollections)
-        {
-            sb.Append(mi).AppendLine("{");
-            foreach (var elemFqn in model.CollectionElementFqns)
+            // ComponentCollection<T> AOT-safe factories (B2, #409): T is a compile-time generic argument — no MakeGenericType/Activator. Idempotent. Only
+            // emittable where the engine is referenced; a schema-only assembly falls back to the engine's runtime reflective path for these element types.
+            if (hasEngine)
             {
-                sb.Append(bi).Append("global::Typhon.Engine.DatabaseEngine.RegisterComponentCollectionFactory<")
-                  .Append(elemFqn).AppendLine(">();");
+                foreach (var elemFqn in model.CollectionElementFqns)
+                {
+                    sb.Append("            global::Typhon.Engine.DatabaseEngine.RegisterComponentCollectionFactory<").Append(elemFqn).AppendLine(">();");
+                }
             }
-            sb.Append(bi).Append("return new global::").Append(SchemaNs).AppendLine(".ComponentSchemaSpec(");
+
+            sb.Append("            global::Typhon.Schema.Definition.GeneratedSchemaRegistry.RegisterComponent(typeof(").Append(model.StructFqn).AppendLine("),");
+            AppendComponentSpec(sb, model, "                ");
+            sb.AppendLine("            );");
         }
-        else
-        {
-            sb.Append(bi).Append("=> new global::").Append(SchemaNs).AppendLine(".ComponentSchemaSpec(");
-        }
-        sb.Append(bi).Append("    ").Append(Quote(model.SchemaName)).AppendLine(",");
-        sb.Append(bi).Append("    ").Append(model.Revision.ToString(System.Globalization.CultureInfo.InvariantCulture)).AppendLine(",");
-        sb.Append(bi).Append("    new global::").Append(SchemaNs).AppendLine(".ComponentFieldSpec[]");
-        sb.Append(bi).AppendLine("    {");
+
+        sb.AppendLine("        }");
+        sb.AppendLine("    }");
+        sb.AppendLine("}");
+
+        return sb.ToString();
+    }
+
+    // Appends a `new global::Typhon.Schema.Definition.ComponentSchemaSpec(...)` expression (no trailing separator) at the given indent. Shared shape with the
+    // engine's reflection path so a generated and a reflected component produce byte-identical definitions.
+    private static void AppendComponentSpec(StringBuilder sb, ComponentGenModel model, string indent)
+    {
+        string fi = indent + "    ";       // spec-argument indent
+        string ei = fi + "    ";           // field-element indent
+
+        sb.Append(indent).Append("new global::").Append(SchemaNs).AppendLine(".ComponentSchemaSpec(");
+        sb.Append(fi).Append(Quote(model.SchemaName)).AppendLine(",");
+        sb.Append(fi).Append(model.Revision.ToString(System.Globalization.CultureInfo.InvariantCulture)).AppendLine(",");
+        sb.Append(fi).Append("new global::").Append(SchemaNs).AppendLine(".ComponentFieldSpec[]");
+        sb.Append(fi).AppendLine("{");
 
         foreach (var f in model.Fields)
         {
-            sb.Append(bi).Append("        new global::").Append(SchemaNs).Append(".ComponentFieldSpec(")
+            sb.Append(ei).Append("new global::").Append(SchemaNs).Append(".ComponentFieldSpec(")
               .Append(Quote(f.SchemaName)).Append(", typeof(").Append(f.FieldTypeFqn).Append("), ")
               .Append("global::System.Runtime.InteropServices.Marshal.OffsetOf<").Append(model.StructFqn).Append(">(")
               .Append(Quote(f.MemberName)).Append(").ToInt32()");
@@ -768,35 +815,17 @@ public partial class ArchetypeAccessorGenerator : IIncrementalGenerator
             sb.AppendLine("),");
         }
 
-        sb.Append(bi).AppendLine("    }");
+        sb.Append(fi).Append("}");
         if (model.StorageModeCast != null)
         {
-            sb.Append(bi).Append("    , storageMode: ").AppendLine(model.StorageModeCast);
+            sb.AppendLine().Append(fi).Append(", storageMode: ").Append(model.StorageModeCast);
         }
         if (model.DisciplineCast != null)
         {
-            sb.Append(bi).Append("    , defaultDiscipline: ").AppendLine(model.DisciplineCast);
+            sb.AppendLine().Append(fi).Append(", defaultDiscipline: ").Append(model.DisciplineCast);
         }
-        sb.Append(bi).AppendLine(");");
-        if (hasCollections)
-        {
-            sb.Append(mi).AppendLine("}");
-        }
-
-        sb.Append(indent).AppendLine("}");
-
-        for (int i = model.NestingParents.Length - 1; i >= 0; i--)
-        {
-            indent = indent.Substring(0, indent.Length - 4);
-            sb.Append(indent).AppendLine("}");
-        }
-
-        if (hasNamespace)
-        {
-            sb.AppendLine("}");
-        }
-
-        return sb.ToString();
+        sb.AppendLine();
+        sb.Append(indent).Append(")");
     }
 }
 

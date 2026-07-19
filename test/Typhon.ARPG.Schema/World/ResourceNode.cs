@@ -9,7 +9,7 @@ namespace Typhon.ARPG.Schema;
 /// </summary>
 [Component("ARPG.ResourceNode", 1)]
 [StructLayout(LayoutKind.Sequential)]
-public partial struct ResourceNode
+public struct ResourceNode
 {
     [Field] [Index(AllowMultiple = true)] public int ResourceTypeId;
 

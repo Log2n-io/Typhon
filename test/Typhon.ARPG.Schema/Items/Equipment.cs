@@ -10,7 +10,7 @@ namespace Typhon.ARPG.Schema;
 /// </summary>
 [Component("ARPG.Equipment", 1)]
 [StructLayout(LayoutKind.Sequential)]
-public partial struct Equipment
+public struct Equipment
 {
     [Field] public long WeaponId;
     [Field] public long OffhandId;

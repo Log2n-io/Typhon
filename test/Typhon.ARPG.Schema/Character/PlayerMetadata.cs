@@ -9,7 +9,7 @@ namespace Typhon.ARPG.Schema;
 /// </summary>
 [Component("ARPG.PlayerMetadata", 1)]
 [StructLayout(LayoutKind.Sequential)]
-public partial struct PlayerMetadata
+public struct PlayerMetadata
 {
     [Field] public String64 CharacterName;
 

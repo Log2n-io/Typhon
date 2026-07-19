@@ -6,32 +6,35 @@ using Typhon.Schema.Definition;
 namespace Typhon.Engine.Tests;
 
 /// <summary>
-/// Proves the Phase-4 acceptance criterion (AC4.1/AC4.2): a source-generated component's reflection-free
-/// <see cref="IComponentSchemaProvider"/> spec produces a <see cref="DBComponentDefinition"/> byte-identical to the one reflection builds.
+/// Proves the source-generated acceptance criterion (AC4.1/AC4.2, updated for #514 phase 5): a source-generated component's reflection-free
+/// <see cref="ComponentSchemaSpec"/> — registered by the assembly's generated <c>[ModuleInitializer]</c> — produces a <see cref="DBComponentDefinition"/>
+/// byte-identical to the one reflection builds.
 /// <para>
-/// <see cref="RepComp"/> hand-implements the interface exactly as the generator will emit it (offsets via <see cref="Marshal.OffsetOf{T}(string)"/>),
-/// covering every attribute kind: a plain scalar, a non-unique index, a unique foreign-key index, and a spatial index. Both the reflection path
-/// (<see cref="DatabaseDefinitions.CreateFromAccessor(Type, FieldIdResolver)"/>) and the spec path (the generic overload's dispatch) feed the same
-/// engine build core, so equivalence is structural — this test guards against future drift.
+/// <see cref="RepComp"/> is a real <c>[Component]</c> (reachable from the registrar, so the generator registers its spec), covering every attribute kind:
+/// a plain scalar, a non-unique index, a unique foreign-key index, and a spatial index. The reflection path
+/// (<see cref="DatabaseDefinitions.CreateFromAccessor(Type, FieldIdResolver)"/>) and the generated-spec path (the generic overload's registry dispatch) feed the
+/// same engine build core, so equivalence is structural — this test guards against future drift. Registration is off the struct now (no
+/// <c>IComponentSchemaProvider</c>), so the component need not be <c>partial</c>.
 /// </para>
 /// </summary>
 class ComponentSchemaSpecEquivalenceTests
 {
-    // FK target — only needs to be a valid Type reference; the FK build path stores the type, it does not validate registration.
+    // FK target — only needs to be a valid Type reference; the FK build path stores the type, it does not validate registration. `internal` so the generated
+    // registrar can reference it (private-nested would be skipped → reflection fallback, defeating the generated-vs-reflection comparison).
     [Component("Typhon.Test.Codegen.FkTarget", 1)]
     [StructLayout(LayoutKind.Sequential)]
-    struct RepFkTarget
+    internal struct RepFkTarget
     {
         [Field] public long Id;
     }
 
     /// <summary>
-    /// Representative component covering all attribute kinds. Hand-implements <see cref="IComponentSchemaProvider"/> to simulate generator output.
-    /// <c>Health</c> carries a <c>PreviousName</c> so the field-id-migration test exercises rename resolution through the spec path.
+    /// Representative component covering all attribute kinds; a real <c>[Component]</c> so the generator registers its spec. <c>Health</c> carries a
+    /// <c>PreviousName</c> so the field-id-migration test exercises rename resolution through the spec path. <c>internal</c> for registrar reachability.
     /// </summary>
     [Component("Typhon.Test.Codegen.Rep", 3, StorageMode = StorageMode.SingleVersion, DefaultDiscipline = DurabilityDiscipline.Commit)]
     [StructLayout(LayoutKind.Sequential)]
-    struct RepComp : IComponentSchemaProvider
+    internal struct RepComp
     {
         [Field] public float X;
 
@@ -47,35 +50,20 @@ class ComponentSchemaSpecEquivalenceTests
         [Field]
         [SpatialIndex(2.0f, cellSize: 4.0f, Mode = SpatialMode.Static, Category = 7)]
         public AABB2F Bounds;
-
-        readonly ComponentSchemaSpec IComponentSchemaProvider.GetComponentSchema() => new(
-            "Typhon.Test.Codegen.Rep",
-            3,
-            new[]
-            {
-                new ComponentFieldSpec("X", typeof(float), Marshal.OffsetOf<RepComp>(nameof(X)).ToInt32()),
-                new ComponentFieldSpec("Health", typeof(int), Marshal.OffsetOf<RepComp>(nameof(Health)).ToInt32(),
-                    previousName: "Hitpoints", hasIndex: true, indexAllowMultiple: true),
-                new ComponentFieldSpec("ParentLink", typeof(long), Marshal.OffsetOf<RepComp>(nameof(ParentLink)).ToInt32(),
-                    isForeignKey: true, foreignKeyTargetType: typeof(RepFkTarget), hasIndex: true, indexAllowMultiple: false),
-                new ComponentFieldSpec("Bounds", typeof(AABB2F), Marshal.OffsetOf<RepComp>(nameof(Bounds)).ToInt32(),
-                    hasSpatialIndex: true, spatialMargin: 2.0f, spatialCellSize: 4.0f, spatialMode: SpatialMode.Static, spatialCategory: 7),
-            },
-            StorageMode.SingleVersion,
-            DurabilityDiscipline.Commit);
     }
 
     [Test]
     public void EngineComponents_TakeSourceGeneratedPath()
     {
-        // AC4.2 regression guard: the engine's own persisted-schema components must build via the generated provider (reflection-free),
-        // not the runtime-reflection fallback. If the generator stops emitting for them, this flips to false.
+        // AC4.2 regression guard: the engine's own persisted-schema components must build via the generated (reflection-free) spec — registered by the engine
+        // assembly's [ModuleInitializer] into the schema-contract-level registry — not the runtime-reflection fallback. If the generator stops emitting for them,
+        // TryGetComponentSpec flips to false.
         Assert.Multiple(() =>
         {
-            Assert.That(default(ComponentR1) is IComponentSchemaProvider, Is.True, "ComponentR1");
-            Assert.That(default(ArchetypeR1) is IComponentSchemaProvider, Is.True, "ArchetypeR1");
-            Assert.That(default(AssemblyR1) is IComponentSchemaProvider, Is.True, "AssemblyR1");
-            Assert.That(default(SchemaHistoryR1) is IComponentSchemaProvider, Is.True, "SchemaHistoryR1");
+            Assert.That(GeneratedSchemaRegistry.TryGetComponentSpec(typeof(ComponentR1), out _), Is.True, "ComponentR1");
+            Assert.That(GeneratedSchemaRegistry.TryGetComponentSpec(typeof(ArchetypeR1), out _), Is.True, "ArchetypeR1");
+            Assert.That(GeneratedSchemaRegistry.TryGetComponentSpec(typeof(AssemblyR1), out _), Is.True, "AssemblyR1");
+            Assert.That(GeneratedSchemaRegistry.TryGetComponentSpec(typeof(SchemaHistoryR1), out _), Is.True, "SchemaHistoryR1");
         });
     }
 

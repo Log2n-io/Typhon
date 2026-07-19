@@ -8,7 +8,7 @@ namespace Typhon.ARPG.Schema;
 /// </summary>
 [Component("ARPG.StatusEffects", 1)]
 [StructLayout(LayoutKind.Sequential)]
-public partial struct StatusEffects
+public struct StatusEffects
 {
     [Field] /*[Index(AllowMultiple = true)]*/ public int EffectTypeId;
 

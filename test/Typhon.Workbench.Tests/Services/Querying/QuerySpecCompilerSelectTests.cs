@@ -19,7 +19,7 @@ namespace Typhon.Workbench.Tests.Services.Querying;
 
 [Component("Workbench.Test.SelA", 1)]
 [StructLayout(LayoutKind.Sequential)]
-public partial struct SelA
+public struct SelA
 {
     [Field] [Index] public int Av;
     [Field] public int Ax;
@@ -27,7 +27,7 @@ public partial struct SelA
 
 [Component("Workbench.Test.SelB", 1)]
 [StructLayout(LayoutKind.Sequential)]
-public partial struct SelB
+public struct SelB
 {
     [Field] [Index] public int Bv;
     [Field] public int Bx;
