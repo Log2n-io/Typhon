@@ -20,8 +20,9 @@ position and a `Transient` animation cursor.
 
 ## ⚙️ How it works (in brief)
 
-`StorageMode` is set via `[Component(StorageMode = ...)]` at registration and is immutable for the life of the
-database (changing it requires recreating the database). `Versioned` keeps a full MVCC revision chain
+`StorageMode` is set via `[Component(StorageMode = ...)]` and is fixed for a given `(component name, revision)`:
+changing how a component is stored requires bumping the `[Component]` revision — re-using the same revision with a
+different mode throws `InvalidOperationException` on reopen. `Versioned` keeps a full MVCC revision chain
 (snapshot isolation, zero loss); `SingleVersion` stores one in-place HEAD slot with WAL tick-fence durability
 (≤1 tick loss); `Transient` is heap-only and never persisted. All three are read and written through the same
 `EntityRef.Read<T>()` / `Write<T>()` calls — only the cost and guarantees differ, not the API. A runtime
@@ -39,7 +40,7 @@ without paying for a revision chain.
 
 ## ⚠️ Guarantees & limits
 
-- `StorageMode` is immutable once a component is registered — there is no in-place migration between modes.
+- `StorageMode` is fixed for a given `(name, revision)`; changing a component's mode requires a new `[Component]` revision (there is no in-place mode migration yet — tracked in #546).
 - An entity can freely mix component types across all three modes (`Spawn`/`Open`/`OpenMut`/`Destroy` work
   uniformly); rollback semantics differ per mode — see each sub-feature.
 - Indexes, spatial queries, and ECS lifecycle (Spawn/Destroy/Enable) are available in all three modes, but with
@@ -52,7 +53,8 @@ without paying for a revision chain.
 ## 🧪 Tests
 
 - [StorageModeReadWriteTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/StorageModeReadWriteTests.cs) — an entity mixing all three modes, uniform `Read`/`Write` across them, per-mode rollback/dirty-bitmap behavior
-- [StorageModeInfrastructureTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/StorageModeInfrastructureTests.cs) — `[Component(StorageMode = ...)]` attribute defaults/overrides, per-mode segment allocation differences
+- [StorageModeInfrastructureTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/StorageModeInfrastructureTests.cs) — `[Component(StorageMode = ...)]` attribute defaults, per-mode segment allocation differences
+- [StorageModeRevisionLockTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/StorageModeRevisionLockTests.cs) — a `(name, revision)` re-declared with a different `StorageMode` on reopen throws
 
 ## 🔗 Related
 

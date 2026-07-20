@@ -325,8 +325,7 @@ The two public entry points on `DatabaseEngine`:
 ```csharp
 public bool RegisterComponentFromAccessor<T>(
     ChangeSet changeSet = null,
-    SchemaValidationMode schemaValidation = SchemaValidationMode.Enforce,
-    StorageMode? storageModeOverride = null
+    SchemaValidationMode schemaValidation = SchemaValidationMode.Enforce
 ) where T : unmanaged
 ```
 
@@ -356,17 +355,16 @@ The non-generic overload for runtime-discovered types — e.g. the Workbench loa
 public bool RegisterComponentByType(
     Type componentType,
     ChangeSet changeSet = null,
-    SchemaValidationMode schemaValidation = SchemaValidationMode.Enforce,
-    StorageMode? storageModeOverride = null);
+    SchemaValidationMode schemaValidation = SchemaValidationMode.Enforce);
 ```
 
 Throws `ArgumentException` if `componentType` is a reference type or an open generic — the `unmanaged` constraint is verified at specialization time by the CLR.
 
 > **Note on the diagram:** Older docs and the embedded SVG still use the name `RegisterComponent<T>()` for the entry point. The actual API surface has been `RegisterComponentFromAccessor<T>` / `RegisterComponentByType` for some time. Don't go looking for `RegisterComponent<T>` in current code.
 
-### Storage mode override
+### StorageMode is fixed per `(name, revision)`
 
-`storageModeOverride` lets a caller force a Versioned-by-default component into SingleVersion or Transient at registration time without editing the struct's `[Component]` attribute. The override is applied to the `DBComponentDefinition` *before* the `ComponentTable` is built so the chunk layout (overhead size, `EntityPKOverheadSize`) reflects the override correctly.
+`StorageMode` comes solely from the component's `[Component]` attribute — there is no per-registration override. On reopen, re-declaring a persisted component at the **same revision** with a different `StorageMode` throws `InvalidOperationException` (`definition.Revision == persisted.Comp.SchemaRevision && declared != persisted`): reinterpreting persisted bytes under a different storage discipline would be silent corruption. Changing how a component is stored requires a new `[Component]` revision. (Full data migration across a mode change on a revision bump is not yet wired — tracked in #546.)
 
 ---
 

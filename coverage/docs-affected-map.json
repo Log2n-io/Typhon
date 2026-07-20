@@ -18,6 +18,7 @@
 
   "src/Typhon.Engine/Ecs/": [
     "doc/in-depth-overview/06-ecs.md",
+    "doc/in-depth-overview/04-schema.md",
     "doc/key-concepts/entity.md",
     "doc/key-concepts/component.md",
     "doc/key-concepts/component-collection.md",
