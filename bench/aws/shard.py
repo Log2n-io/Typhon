@@ -17,7 +17,8 @@ flaky-red -> green. See claude/design/Infrastructure/ci-merge-gate.md.
 
 Modes:
   run  --results-dir DIR        execute the committed shards.json (CI uses this)
-  plan --k K --trx FILE         regenerate shards.json from a trx (maintenance)
+  plan --k K --trx FILE...      regenerate shards.json from one or more trx — pass the
+                                per-shard trx of a gate run to rebalance (maintenance)
 
 `run` is correctness-robust: shard 0 is a CATCH-ALL (negative filter = everything
 not explicitly assigned to shards 1..K-1), so a newly-added test class can never
@@ -82,8 +83,25 @@ def trx_universe(trx_path):
             durs[cls] = durs.get(cls, 0.0) + (p(e) - p(s)).total_seconds()
     return pairs, durs
 
-def cmd_plan(k, trx_path):
-    pairs, weights = trx_universe(trx_path)
+def trx_universe_multi(trx_paths):
+    """Union the universe across several trx — e.g. the per-shard trx of one CI gate
+    run — so the plan can be regenerated directly from a sharded run instead of a
+    single whole-suite trx. Each test class lives in exactly one shard, so a class's
+    duration is taken as the max across files (robust to an accidentally-passed retry
+    trx, which would otherwise double-count it)."""
+    pairs, durs, seen = [], {}, set()
+    for tp in trx_paths:
+        p, d = trx_universe(tp)
+        for fqn, cls in p:
+            if fqn not in seen:
+                seen.add(fqn)
+                pairs.append((fqn, cls))
+        for c, v in d.items():
+            durs[c] = max(durs.get(c, 0.0), v)
+    return pairs, durs
+
+def cmd_plan(k, trx_paths):
+    pairs, weights = trx_universe_multi(trx_paths)
     classes = sorted({cls for _, cls in pairs})
     # greedy longest-processing-time-first bin-pack by class duration
     bins, load = [[] for _ in range(k)], [0.0] * k
@@ -239,7 +257,7 @@ if __name__ == "__main__":
     sub = ap.add_subparsers(dest="cmd", required=True)
     pr = sub.add_parser("run");  pr.add_argument("--results-dir", required=True)
     pp = sub.add_parser("plan"); pp.add_argument("--k", type=int, default=8)
-    pp.add_argument("--trx", required=True)
+    pp.add_argument("--trx", required=True, nargs="+")
     a = ap.parse_args()
     if a.cmd == "plan":
         cmd_plan(a.k, a.trx)
