@@ -8,7 +8,7 @@ description: 'A per-component, design-time choice of memory layout and ACID guar
 
 > **In one line:** a **per-component**, design-time choice of memory layout and ACID guarantees — `Versioned`, `SingleVersion`, or `Transient`.
 
-Set on the `[Component]` attribute and **immutable after registration**. Because it lives on the component *type*, one archetype freely mixes all three. The mode decides whether MVCC/[isolation](xref:concept-snapshot-isolation) exists at all — and what a write costs.
+Set on the `[Component]` attribute and **fixed for a given `(component name, revision)`** — to change the mode, bump the `[Component]` revision; re-using the same revision with a different mode throws `InvalidOperationException` on reopen. Because it lives on the component *type*, one archetype freely mixes all three. The mode decides whether MVCC/[isolation](xref:concept-snapshot-isolation) exists at all — and what a write costs.
 
 | Mode | Isolation | Durability | Write cost (Zen 4) |
 |---|---|---|---|
