@@ -152,7 +152,7 @@ public class HighResolutionTimerServiceTests
 
         using var timer = new HighResolutionTimerService(
             "DriftTest",
-            Stopwatch.Frequency / 50, // 20ms interval
+            Stopwatch.Frequency / 100, // 10ms interval
             (_, _) =>
             {
                 Interlocked.Increment(ref count);
@@ -162,8 +162,8 @@ public class HighResolutionTimerServiceTests
 
         timer.Start();
 
-        // Run for 500ms — expect ~25 invocations with metronome-style (no drift)
-        Thread.Sleep(500);
+        // Run for 250ms at a 10ms interval — expect ~25 invocations with metronome-style (no drift). Half the wall-clock of the original 500ms/20ms form for the same tick count and drift signal.
+        Thread.Sleep(250);
 
         var invocations = Interlocked.Read(ref count);
 

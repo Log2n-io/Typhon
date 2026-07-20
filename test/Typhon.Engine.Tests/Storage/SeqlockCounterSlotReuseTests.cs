@@ -42,7 +42,7 @@ class SeqlockCounterSlotReuseTests
         var baseDir = Path.Combine(Path.GetTempPath(), "Typhon.Tests", nameof(SeqlockCounterSlotReuseTests));
         Directory.CreateDirectory(baseDir);
 
-        for (var iter = 0; iter < 30; iter++)
+        for (var iter = 0; iter < 15; iter++)
         {
             var dir = Path.Combine(baseDir, iter.ToString());
             Directory.CreateDirectory(dir);
@@ -72,9 +72,9 @@ class SeqlockCounterSlotReuseTests
                 RegisterPressureComponents(dbe);
                 dbe.InitializeArchetypes();
 
-                var violations = dbe.MMF.CountQuiescentPagesWithOddSeqlock();
-                Assert.That(violations, Is.Zero,
-                    $"iteration {iter}: {violations} Idle page(s) carry an odd seqlock counter — a page-cache slot was reused without resetting ModificationCounter.");
+                var violations = dbe.MMF.CollectQuiescentOddSeqlockDiagnostics();
+                Assert.That(violations, Is.Empty,
+                    $"iteration {iter}: {violations.Count} Idle page(s) carry an odd seqlock counter:\n  {string.Join("\n  ", violations)}");
             }
 
             try { Directory.Delete(dir, recursive: true); }

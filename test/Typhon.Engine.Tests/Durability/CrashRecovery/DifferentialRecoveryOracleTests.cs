@@ -86,6 +86,10 @@ internal sealed class DifferentialRecoveryOracleTests
                     UseFUA = false,
                     SegmentSize = 4 * 1024 * 1024,
                     PreAllocateSegments = 1,
+                    // Shrink the staging buffer to 8 KiB so a modest frame straddles multiple slice boundaries and exercises the WriteInChunks / cross-slice
+                    // PatchChunkCrcs path — the on-disk frame + recovery are byte-identical regardless of slice size, so this only broadens coverage while
+                    // letting the "exceeds staging buffer" case run at 600 entities instead of the cache-thrashing 4000.
+                    StagingBufferSize = 8 * 1024,
                 };
             });
 
@@ -285,15 +289,16 @@ internal sealed class DifferentialRecoveryOracleTests
     [CancelAfter(15_000)]
     public void IndexedFlat_AtScale_ValuesAndIndexRecover() => AssertIndexedFlatRecovers(600);
 
-    // ── A commit whose WAL batch exceeds the writer's 256 KB staging buffer forces WalWriter.WriteInChunks. That path used to copy + CRC-patch each write-slice
-    // independently, so a record-batch chunk straddling a 256 KB slice boundary kept its zero-placeholder footer CRC — which recovery reads as a CRC break, mistakes for a
-    // torn tail, and truncates at, silently losing every record after it (recovery returned 0 applied). ~4000 CompD entities make the single committed frame > 256 KB,
-    // deterministically exercising the multi-slice write regardless of drain timing. The oracle surfaced this at scale (first mis-attributed to multi-segment rotation —
-    // the WAL was actually a flood of FPI frames hiding an unpatched chunk); the fix patches the whole drained batch before streaming the page-aligned writes. This is the
-    // regression lock for that fix: full value + index recovery proves no chunk was left unpatched across the staging boundary. ──
+    // ── A commit whose WAL batch exceeds the writer's staging buffer forces WalWriter.WriteInChunks. That path used to copy + CRC-patch each write-slice
+    // independently, so a record-batch chunk straddling a slice boundary kept its zero-placeholder footer CRC — which recovery reads as a CRC break, mistakes for a
+    // torn tail, and truncates at, silently losing every record after it (recovery returned 0 applied). The fixture shrinks the staging buffer to 8 KiB (Setup), so
+    // 600 CompD entities make the single committed frame straddle multiple 8 KiB slices, deterministically exercising the multi-slice write regardless of drain timing
+    // — at ~0.3 s instead of the ~7 s the old 4000-entity / 256 KiB-buffer form spent thrashing the page cache. The oracle surfaced this at scale (first mis-attributed
+    // to multi-segment rotation — the WAL was actually a flood of FPI frames hiding an unpatched chunk); the fix patches the whole drained batch before streaming the
+    // page-aligned writes. This is the regression lock for that fix: full value + index recovery proves no chunk was left unpatched across the staging boundary. ──
     [Test]
     [CancelAfter(15_000)]
-    public void IndexedFlat_LargeDrain_ExceedsStagingBuffer_Recovers() => AssertIndexedFlatRecovers(4000);
+    public void IndexedFlat_LargeDrain_ExceedsStagingBuffer_Recovers() => AssertIndexedFlatRecovers(600);
 
     private void AssertIndexedFlatRecovers(int count)
     {

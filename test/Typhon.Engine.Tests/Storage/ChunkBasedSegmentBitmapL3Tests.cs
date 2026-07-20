@@ -507,7 +507,8 @@ public class ChunkBasedSegmentBitmapL3Tests
     {
         // Test that freeing chunks in one L0 group doesn't corrupt other groups.
         // Exhaust all chunks first so freed pages are the ONLY source of free space.
-        var segment = _pmmf.AllocateChunkBasedSegment(PageBlockType.None, 20, 64);
+        // 4 pages ≈ 500 chunks / ~8 L0 groups — enough to prove cross-group isolation without the ~2375-chunk churn of 20 pages (stays well under the L1 boundary either way).
+        var segment = _pmmf.AllocateChunkBasedSegment(PageBlockType.None, 4, 64);
 
         // Allocate ALL chunks to exhaust the segment
         var allChunks = new List<int>();

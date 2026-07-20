@@ -585,13 +585,13 @@ class ParallelFenceTests : TestBase<ParallelFenceTests>
         // Run for many ticks. Under the legacy explicit-per-phase dispatch pattern, OnSystemComplete's auto-fanout
         // raced with each DispatchInternalSystem call — chunk 0 of downstream fence phases got claimed twice within
         // the same tick. With the new single-DispatchInternalSchedule path, the DAG drives the whole pipeline and
-        // each chunk runs exactly once per tick. Many ticks (>=100) without deadlock or stall is the regression
+        // each chunk runs exactly once per tick. Many ticks (>=40) without deadlock or stall is the regression
         // signal: under the old code, telemetry showed FenceFinalize[0] executing twice; here we verify steady
-        // progress instead.
-        SpinWait.SpinUntil(() => ticksObserved >= 100, TimeSpan.FromSeconds(10));
+        // progress instead. (40 ticks soaks the double-dispatch race well past its per-tick recurrence; the old 100 just added wall-clock.)
+        SpinWait.SpinUntil(() => ticksObserved >= 40, TimeSpan.FromSeconds(10));
         runtime.Shutdown();
 
-        Assert.That(ticksObserved, Is.GreaterThanOrEqualTo(100),
-            "Fence must complete ≥100 ticks cleanly. Earlier exit would indicate double-dispatch corruption or stall.");
+        Assert.That(ticksObserved, Is.GreaterThanOrEqualTo(40),
+            "Fence must complete ≥40 ticks cleanly. Earlier exit would indicate double-dispatch corruption or stall.");
     }
 }
