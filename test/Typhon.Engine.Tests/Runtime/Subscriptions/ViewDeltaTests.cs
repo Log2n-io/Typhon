@@ -21,9 +21,9 @@ class ViewDeltaTests : TestBase<ViewDeltaTests>
     private DatabaseEngine SetupEngine()
     {
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
-        dbe.RegisterComponentFromAccessor<EcsPosition>(storageModeOverride: StorageMode.SingleVersion);
-        dbe.RegisterComponentFromAccessor<EcsVelocity>(storageModeOverride: StorageMode.SingleVersion);
-        dbe.RegisterComponentFromAccessor<EcsHealth>(storageModeOverride: StorageMode.SingleVersion);
+        dbe.RegisterComponentFromAccessor<SvEcsPosition>();
+        dbe.RegisterComponentFromAccessor<SvEcsVelocity>();
+        dbe.RegisterComponentFromAccessor<SvEcsHealth>();
         dbe.InitializeArchetypes();
         return dbe;
     }
@@ -37,7 +37,7 @@ class ViewDeltaTests : TestBase<ViewDeltaTests>
     {
         using var dbe = SetupEngine();
         using var viewTx = dbe.CreateQuickTransaction();
-        var view = viewTx.Query<EcsUnit>().ToView();
+        var view = viewTx.Query<SvEcsUnit>().ToView();
 
         // Refresh with no entities
         using var tx = dbe.CreateQuickTransaction();
@@ -53,15 +53,15 @@ class ViewDeltaTests : TestBase<ViewDeltaTests>
     {
         using var dbe = SetupEngine();
         using var viewTx = dbe.CreateQuickTransaction();
-        var view = viewTx.Query<EcsUnit>().ToView();
+        var view = viewTx.Query<SvEcsUnit>().ToView();
 
         // Spawn entities
         using (var tx = dbe.CreateQuickTransaction())
         {
-            var pos = new EcsPosition(1, 2, 3);
-            var vel = new EcsVelocity(0, 0, 0);
-            tx.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos), EcsUnit.Velocity.Set(in vel));
-            tx.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos), EcsUnit.Velocity.Set(in vel));
+            var pos = new SvEcsPosition(1, 2, 3);
+            var vel = new SvEcsVelocity(0, 0, 0);
+            tx.Spawn<SvEcsUnit>(SvEcsUnit.Position.Set(in pos), SvEcsUnit.Velocity.Set(in vel));
+            tx.Spawn<SvEcsUnit>(SvEcsUnit.Position.Set(in pos), SvEcsUnit.Velocity.Set(in vel));
             tx.Commit();
         }
 
@@ -80,14 +80,14 @@ class ViewDeltaTests : TestBase<ViewDeltaTests>
     {
         using var dbe = SetupEngine();
         using var viewTx = dbe.CreateQuickTransaction();
-        var view = viewTx.Query<EcsUnit>().ToView();
+        var view = viewTx.Query<SvEcsUnit>().ToView();
 
         // Spawn entities
         using (var tx = dbe.CreateQuickTransaction())
         {
-            var pos = new EcsPosition(1, 2, 3);
-            var vel = new EcsVelocity(0, 0, 0);
-            tx.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos), EcsUnit.Velocity.Set(in vel));
+            var pos = new SvEcsPosition(1, 2, 3);
+            var vel = new SvEcsVelocity(0, 0, 0);
+            tx.Spawn<SvEcsUnit>(SvEcsUnit.Position.Set(in pos), SvEcsUnit.Velocity.Set(in vel));
             tx.Commit();
         }
 
@@ -115,15 +115,15 @@ class ViewDeltaTests : TestBase<ViewDeltaTests>
     {
         using var dbe = SetupEngine();
         using var viewTx = dbe.CreateQuickTransaction();
-        var view = viewTx.Query<EcsUnit>().ToView();
+        var view = viewTx.Query<SvEcsUnit>().ToView();
 
         // Spawn entity A
         EntityId idA;
         using (var tx = dbe.CreateQuickTransaction())
         {
-            var pos = new EcsPosition(1, 0, 0);
-            var vel = new EcsVelocity(0, 0, 0);
-            idA = tx.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos), EcsUnit.Velocity.Set(in vel));
+            var pos = new SvEcsPosition(1, 0, 0);
+            var vel = new SvEcsVelocity(0, 0, 0);
+            idA = tx.Spawn<SvEcsUnit>(SvEcsUnit.Position.Set(in pos), SvEcsUnit.Velocity.Set(in vel));
             tx.Commit();
         }
 
@@ -138,9 +138,9 @@ class ViewDeltaTests : TestBase<ViewDeltaTests>
         // Spawn entity B
         using (var tx = dbe.CreateQuickTransaction())
         {
-            var pos = new EcsPosition(2, 0, 0);
-            var vel = new EcsVelocity(0, 0, 0);
-            tx.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos), EcsUnit.Velocity.Set(in vel));
+            var pos = new SvEcsPosition(2, 0, 0);
+            var vel = new SvEcsVelocity(0, 0, 0);
+            tx.Spawn<SvEcsUnit>(SvEcsUnit.Position.Set(in pos), SvEcsUnit.Velocity.Set(in vel));
             tx.Commit();
         }
 
@@ -164,7 +164,7 @@ class ViewDeltaTests : TestBase<ViewDeltaTests>
     {
         using var dbe = SetupEngine();
         using var viewTx = dbe.CreateQuickTransaction();
-        var view = viewTx.Query<EcsUnit>().ToView();
+        var view = viewTx.Query<SvEcsUnit>().ToView();
 
         // Simulate tick 1: no clients → RefreshAllViews (empties View, no entities)
         using (var tx = dbe.CreateQuickTransaction())
@@ -185,11 +185,11 @@ class ViewDeltaTests : TestBase<ViewDeltaTests>
         // Spawn entities
         using (var tx = dbe.CreateQuickTransaction())
         {
-            var pos = new EcsPosition(1, 2, 3);
-            var vel = new EcsVelocity(0, 0, 0);
-            tx.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos), EcsUnit.Velocity.Set(in vel));
-            tx.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos), EcsUnit.Velocity.Set(in vel));
-            tx.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos), EcsUnit.Velocity.Set(in vel));
+            var pos = new SvEcsPosition(1, 2, 3);
+            var vel = new SvEcsVelocity(0, 0, 0);
+            tx.Spawn<SvEcsUnit>(SvEcsUnit.Position.Set(in pos), SvEcsUnit.Velocity.Set(in vel));
+            tx.Spawn<SvEcsUnit>(SvEcsUnit.Position.Set(in pos), SvEcsUnit.Velocity.Set(in vel));
+            tx.Spawn<SvEcsUnit>(SvEcsUnit.Position.Set(in pos), SvEcsUnit.Velocity.Set(in vel));
             tx.Commit();
         }
 
@@ -209,15 +209,15 @@ class ViewDeltaTests : TestBase<ViewDeltaTests>
     {
         using var dbe = SetupEngine();
         using var viewTx = dbe.CreateQuickTransaction();
-        var view = viewTx.Query<EcsUnit>().ToView();
+        var view = viewTx.Query<SvEcsUnit>().ToView();
 
         // Spawn entities BEFORE client subscribes
         using (var tx = dbe.CreateQuickTransaction())
         {
-            var pos = new EcsPosition(1, 2, 3);
-            var vel = new EcsVelocity(0, 0, 0);
-            tx.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos), EcsUnit.Velocity.Set(in vel));
-            tx.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos), EcsUnit.Velocity.Set(in vel));
+            var pos = new SvEcsPosition(1, 2, 3);
+            var vel = new SvEcsVelocity(0, 0, 0);
+            tx.Spawn<SvEcsUnit>(SvEcsUnit.Position.Set(in pos), SvEcsUnit.Velocity.Set(in vel));
+            tx.Spawn<SvEcsUnit>(SvEcsUnit.Position.Set(in pos), SvEcsUnit.Velocity.Set(in vel));
             tx.Commit();
         }
 
@@ -243,15 +243,15 @@ class ViewDeltaTests : TestBase<ViewDeltaTests>
     {
         using var dbe = SetupEngine();
         using var viewTx = dbe.CreateQuickTransaction();
-        var view = viewTx.Query<EcsUnit>().ToView();
+        var view = viewTx.Query<SvEcsUnit>().ToView();
 
         // Spawn entities
         using (var tx = dbe.CreateQuickTransaction())
         {
-            var pos = new EcsPosition(1, 2, 3);
-            var vel = new EcsVelocity(0, 0, 0);
-            tx.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos), EcsUnit.Velocity.Set(in vel));
-            tx.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos), EcsUnit.Velocity.Set(in vel));
+            var pos = new SvEcsPosition(1, 2, 3);
+            var vel = new SvEcsVelocity(0, 0, 0);
+            tx.Spawn<SvEcsUnit>(SvEcsUnit.Position.Set(in pos), SvEcsUnit.Velocity.Set(in vel));
+            tx.Spawn<SvEcsUnit>(SvEcsUnit.Position.Set(in pos), SvEcsUnit.Velocity.Set(in vel));
             tx.Commit();
         }
 
@@ -286,7 +286,7 @@ class ViewDeltaTests : TestBase<ViewDeltaTests>
     {
         using var dbe = SetupEngine();
         using var viewTx = dbe.CreateQuickTransaction();
-        var view = viewTx.Query<EcsUnit>().ToView();
+        var view = viewTx.Query<SvEcsUnit>().ToView();
 
         // Tick 1: no entities, subscribe, sync completes immediately
         using (var tx = dbe.CreateQuickTransaction())
@@ -303,11 +303,11 @@ class ViewDeltaTests : TestBase<ViewDeltaTests>
         // Tick 2: spawn 5 entities
         using (var tx = dbe.CreateQuickTransaction())
         {
-            var pos = new EcsPosition(1, 2, 3);
-            var vel = new EcsVelocity(0, 0, 0);
+            var pos = new SvEcsPosition(1, 2, 3);
+            var vel = new SvEcsVelocity(0, 0, 0);
             for (var i = 0; i < 5; i++)
             {
-                tx.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos), EcsUnit.Velocity.Set(in vel));
+                tx.Spawn<SvEcsUnit>(SvEcsUnit.Position.Set(in pos), SvEcsUnit.Velocity.Set(in vel));
             }
 
             tx.Commit();
@@ -326,11 +326,11 @@ class ViewDeltaTests : TestBase<ViewDeltaTests>
         // Tick 3: spawn 3 more
         using (var tx = dbe.CreateQuickTransaction())
         {
-            var pos = new EcsPosition(4, 5, 6);
-            var vel = new EcsVelocity(0, 0, 0);
+            var pos = new SvEcsPosition(4, 5, 6);
+            var vel = new SvEcsVelocity(0, 0, 0);
             for (var i = 0; i < 3; i++)
             {
-                tx.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos), EcsUnit.Velocity.Set(in vel));
+                tx.Spawn<SvEcsUnit>(SvEcsUnit.Position.Set(in pos), SvEcsUnit.Velocity.Set(in vel));
             }
 
             tx.Commit();
@@ -355,17 +355,17 @@ class ViewDeltaTests : TestBase<ViewDeltaTests>
     {
         using var dbe = SetupEngine();
         using var viewTx = dbe.CreateQuickTransaction();
-        var view = viewTx.Query<EcsUnit>().ToView();
+        var view = viewTx.Query<SvEcsUnit>().ToView();
 
         var published = PublishedView.CreateShared("test", view, SubscriptionPriority.Normal);
 
         // Spawn entities
         using (var tx = dbe.CreateQuickTransaction())
         {
-            var pos = new EcsPosition(1, 2, 3);
-            var vel = new EcsVelocity(0, 0, 0);
-            tx.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos), EcsUnit.Velocity.Set(in vel));
-            tx.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos), EcsUnit.Velocity.Set(in vel));
+            var pos = new SvEcsPosition(1, 2, 3);
+            var vel = new SvEcsVelocity(0, 0, 0);
+            tx.Spawn<SvEcsUnit>(SvEcsUnit.Position.Set(in pos), SvEcsUnit.Velocity.Set(in vel));
+            tx.Spawn<SvEcsUnit>(SvEcsUnit.Position.Set(in pos), SvEcsUnit.Velocity.Set(in vel));
             tx.Commit();
         }
 
@@ -388,7 +388,7 @@ class ViewDeltaTests : TestBase<ViewDeltaTests>
     {
         using var dbe = SetupEngine();
         using var viewTx = dbe.CreateQuickTransaction();
-        var view = viewTx.Query<EcsUnit>().ToView();
+        var view = viewTx.Query<SvEcsUnit>().ToView();
 
         var published = PublishedView.CreateShared("test", view, SubscriptionPriority.Normal);
         var builder = new DeltaBuilder();
@@ -396,10 +396,10 @@ class ViewDeltaTests : TestBase<ViewDeltaTests>
         // Tick 1: spawn 2 entities, build delta
         using (var tx = dbe.CreateQuickTransaction())
         {
-            var pos = new EcsPosition(1, 2, 3);
-            var vel = new EcsVelocity(0, 0, 0);
-            tx.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos), EcsUnit.Velocity.Set(in vel));
-            tx.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos), EcsUnit.Velocity.Set(in vel));
+            var pos = new SvEcsPosition(1, 2, 3);
+            var vel = new SvEcsVelocity(0, 0, 0);
+            tx.Spawn<SvEcsUnit>(SvEcsUnit.Position.Set(in pos), SvEcsUnit.Velocity.Set(in vel));
+            tx.Spawn<SvEcsUnit>(SvEcsUnit.Position.Set(in pos), SvEcsUnit.Velocity.Set(in vel));
             tx.Commit();
         }
 
@@ -415,9 +415,9 @@ class ViewDeltaTests : TestBase<ViewDeltaTests>
         // Tick 2: spawn 1 more entity
         using (var tx = dbe.CreateQuickTransaction())
         {
-            var pos = new EcsPosition(4, 5, 6);
-            var vel = new EcsVelocity(0, 0, 0);
-            tx.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos), EcsUnit.Velocity.Set(in vel));
+            var pos = new SvEcsPosition(4, 5, 6);
+            var vel = new SvEcsVelocity(0, 0, 0);
+            tx.Spawn<SvEcsUnit>(SvEcsUnit.Position.Set(in pos), SvEcsUnit.Velocity.Set(in vel));
             tx.Commit();
         }
 

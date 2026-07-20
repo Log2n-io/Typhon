@@ -2251,13 +2251,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// </param>
     /// <param name="changeSet">Optional transactional change set. See <see cref="RegisterComponentFromAccessor{T}"/>.</param>
     /// <param name="schemaValidation">Schema validation policy (default: <see cref="SchemaValidationMode.Enforce"/>).</param>
-    /// <param name="storageModeOverride">Optional override for the storage mode declared by the component.</param>
     /// <returns>Forwarded from <see cref="RegisterComponentFromAccessor{T}"/> — <see langword="true"/> on success.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="componentType"/> is null.</exception>
     /// <exception cref="ArgumentException"><paramref name="componentType"/> is not a closed value type.</exception>
     /// <seealso cref="RegisterComponentFromAccessor{T}"/>
-    public bool RegisterComponentByType(Type componentType, ChangeSet changeSet = null, SchemaValidationMode schemaValidation = SchemaValidationMode.Enforce,
-        StorageMode? storageModeOverride = null)
+    public bool RegisterComponentByType(Type componentType, ChangeSet changeSet = null, SchemaValidationMode schemaValidation = SchemaValidationMode.Enforce)
     {
         ArgumentNullException.ThrowIfNull(componentType);
         if (!componentType.IsValueType || componentType.IsGenericTypeDefinition)
@@ -2270,7 +2268,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         var generic = method.MakeGenericMethod(componentType);
         try
         {
-            return (bool)generic.Invoke(this, [changeSet, schemaValidation, storageModeOverride])!;
+            return (bool)generic.Invoke(this, [changeSet, schemaValidation])!;
         }
         catch (TargetInvocationException tie) when (tie.InnerException != null)
         {
@@ -2292,11 +2290,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// <typeparam name="T">A closed unmanaged value type tagged with <c>[Component]</c>.</typeparam>
     /// <param name="changeSet">Optional change set to enlist the registration writes in.</param>
     /// <param name="schemaValidation">How a persisted schema is reconciled with the runtime type; default <see cref="SchemaValidationMode.Enforce"/>.</param>
-    /// <param name="storageModeOverride">Optional <see cref="StorageMode"/> overriding the mode declared on the component.</param>
     /// <returns><see langword="true"/> on success; <see langword="false"/> when the component definition could not be built.</returns>
     /// <exception cref="InvalidOperationException">A Transient component declares a <c>ComponentCollection</c> field.</exception>
-    public bool RegisterComponentFromAccessor<T>(ChangeSet changeSet = null, SchemaValidationMode schemaValidation = SchemaValidationMode.Enforce,
-        StorageMode? storageModeOverride = null) where T : unmanaged
+    public bool RegisterComponentFromAccessor<T>(ChangeSet changeSet = null, SchemaValidationMode schemaValidation = SchemaValidationMode.Enforce)
+        where T : unmanaged
     {
         // Track this component Type for the registry lifecycle pairing in Dispose. Adding even on early-return / failure branches below is safe:
         // UnregisterEngineUse is idempotent on Types it doesn't know about, and any Type the engine touched MAY have ended up in
@@ -2331,14 +2328,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             return false;
         }
 
-        var storageMode = storageModeOverride ?? definition.StorageMode;
-
-        // Apply storage mode override to definition so computed properties (EntityPKOverheadSize, etc.) reflect the override.
-        // NOTE: this must happen BEFORE ComponentTable construction so the segment layout includes the correct overhead.
-        if (storageModeOverride.HasValue && definition.StorageMode != storageModeOverride.Value)
-        {
-            definition.StorageMode = storageModeOverride.Value;
-        }
+        // StorageMode is fixed by the [Component] attribute for a given (name, revision) — there is no per-registration override. Changing how a component is
+        // stored requires a new [Component] revision. See rules/ecs.md; the reopen path below rejects a same-revision mode change.
+        var storageMode = definition.StorageMode;
 
         // Transient ComponentCollection is not supported (out of scope; its buffers live in a persistent VSBS while the component is heap-volatile, which would
         // orphan them on restart). Fail fast at registration rather than leaking silently. Versioned and SingleVersion ComponentCollection are supported.
@@ -2446,6 +2438,18 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     $"Invalid StorageMode byte {persistedModeByte} for component '{schemaName}'. Expected 0 (Versioned), 1 (SingleVersion), or 2 (Transient).");
             }
             var persistedMode = (StorageMode)persistedModeByte;
+
+            // StorageMode is fixed for a given (component name, revision). A same-revision mode change would silently reinterpret persisted data under a
+            // different storage discipline (e.g. Versioned revision chains read as SingleVersion in-place) — reject it loudly. Changing how a component is
+            // stored requires a new [Component] revision (which routes through the schema-evolution path above). See rules/ecs.md ARCH-01.
+            if (definition.Revision == persisted.Comp.SchemaRevision && definition.StorageMode != persistedMode)
+            {
+                throw new InvalidOperationException(
+                    $"Component '{schemaName}' revision {definition.Revision} is persisted as StorageMode.{persistedMode} but the code now declares "
+                    + $"StorageMode.{definition.StorageMode}. StorageMode is fixed for a given (component, revision) — increase the [Component] revision "
+                    + "to change how the component is stored.");
+            }
+
             if (persistedMode == StorageMode.Transient)
             {
                 componentTable = new ComponentTable(this, definition, this, StorageMode.Transient);

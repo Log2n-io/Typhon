@@ -24,9 +24,9 @@ class ChangeFilterTests : TestBase<ChangeFilterTests>
     {
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
         // Register as SingleVersion so DirtyBitmap is available for change filter tracking
-        dbe.RegisterComponentFromAccessor<EcsPosition>(storageModeOverride: StorageMode.SingleVersion);
-        dbe.RegisterComponentFromAccessor<EcsVelocity>(storageModeOverride: StorageMode.SingleVersion);
-        dbe.RegisterComponentFromAccessor<EcsHealth>(storageModeOverride: StorageMode.SingleVersion);
+        dbe.RegisterComponentFromAccessor<SvEcsPosition>();
+        dbe.RegisterComponentFromAccessor<SvEcsVelocity>();
+        dbe.RegisterComponentFromAccessor<SvEcsHealth>();
         dbe.InitializeArchetypes();
         return dbe;
     }
@@ -43,7 +43,7 @@ class ChangeFilterTests : TestBase<ChangeFilterTests>
         {
             TyphonRuntime.Create(dbe, schedule =>
             {
-                schedule.PublicTrack.DeclareDag("Test").QuerySystem("Bad", _ => { }, changeFilter: [typeof(EcsPosition)]);
+                schedule.PublicTrack.DeclareDag("Test").QuerySystem("Bad", _ => { }, changeFilter: [typeof(SvEcsPosition)]);
             }, new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
         });
     }
@@ -57,13 +57,13 @@ class ChangeFilterTests : TestBase<ChangeFilterTests>
     {
         using var dbe = SetupEngine();
         using var tx = dbe.CreateQuickTransaction();
-        var view = tx.Query<EcsUnit>().ToView();
+        var view = tx.Query<SvEcsUnit>().ToView();
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
             schedule.PublicTrack.DeclareDag("Test").QuerySystem("Filtered", _ => { },
                 input: () => view,
-                changeFilter: [typeof(EcsPosition)]);
+                changeFilter: [typeof(SvEcsPosition)]);
         }, new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
 
         Assert.That(runtime.Scheduler.SystemCount, Is.EqualTo(1));
@@ -75,7 +75,7 @@ class ChangeFilterTests : TestBase<ChangeFilterTests>
     {
         using var dbe = SetupEngine();
         using var tx = dbe.CreateQuickTransaction();
-        var view = tx.Query<EcsUnit>().ToView();
+        var view = tx.Query<SvEcsUnit>().ToView();
 
         var ex = Assert.Throws<InvalidOperationException>(() =>
         {
@@ -103,14 +103,14 @@ class ChangeFilterTests : TestBase<ChangeFilterTests>
         // Pre-spawn entities so the View is non-empty
         using (var tx = dbe.CreateQuickTransaction())
         {
-            var pos = new EcsPosition(1, 2, 3);
-            var vel = new EcsVelocity(0, 0, 0);
-            tx.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos), EcsUnit.Velocity.Set(in vel));
+            var pos = new SvEcsPosition(1, 2, 3);
+            var vel = new SvEcsVelocity(0, 0, 0);
+            tx.Spawn<SvEcsUnit>(SvEcsUnit.Position.Set(in pos), SvEcsUnit.Velocity.Set(in vel));
             tx.Commit();
         }
 
         using var txView = dbe.CreateQuickTransaction();
-        var view = txView.Query<EcsUnit>().ToView();
+        var view = txView.Query<SvEcsUnit>().ToView();
 
         var executeCount = 0;
         var ticksSeen = 0;
@@ -124,7 +124,7 @@ class ChangeFilterTests : TestBase<ChangeFilterTests>
             dag.QuerySystem("Filtered", ctx =>
             {
                 Interlocked.Increment(ref executeCount);
-            }, input: () => view, changeFilter: [typeof(EcsPosition)], after: "Tick");
+            }, input: () => view, changeFilter: [typeof(SvEcsPosition)], after: "Tick");
         }, new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
 
         runtime.Start();
@@ -149,14 +149,14 @@ class ChangeFilterTests : TestBase<ChangeFilterTests>
         EntityId entityId;
         using (var tx = dbe.CreateQuickTransaction())
         {
-            var pos = new EcsPosition(1, 2, 3);
-            var vel = new EcsVelocity(0, 0, 0);
-            entityId = tx.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos), EcsUnit.Velocity.Set(in vel));
+            var pos = new SvEcsPosition(1, 2, 3);
+            var vel = new SvEcsVelocity(0, 0, 0);
+            entityId = tx.Spawn<SvEcsUnit>(SvEcsUnit.Position.Set(in pos), SvEcsUnit.Velocity.Set(in vel));
             tx.Commit();
         }
 
         using var txView = dbe.CreateQuickTransaction();
-        var view = txView.Query<EcsUnit>().ToView();
+        var view = txView.Query<SvEcsUnit>().ToView();
 
         var executeCount = 0;
         var ticksSeen = 0;
@@ -168,14 +168,14 @@ class ChangeFilterTests : TestBase<ChangeFilterTests>
             dag.CallbackSystem("Writer", ctx =>
             {
                 Interlocked.Increment(ref ticksSeen);
-                ref var pos = ref ctx.Transaction.OpenMut(entityId).Write(EcsUnit.Position);
+                ref var pos = ref ctx.Transaction.OpenMut(entityId).Write(SvEcsUnit.Position);
                 pos.X += 1.0f;
             });
 
             dag.QuerySystem("Filtered", ctx =>
             {
                 Interlocked.Increment(ref executeCount);
-            }, input: () => view, changeFilter: [typeof(EcsPosition)], after: "Writer");
+            }, input: () => view, changeFilter: [typeof(SvEcsPosition)], after: "Writer");
         }, new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
 
         runtime.Start();
@@ -200,8 +200,8 @@ class ChangeFilterTests : TestBase<ChangeFilterTests>
         // Diagnostic: verify DirtyBitmap works for SV components
         using var dbe = SetupEngine();
 
-        var posTable = dbe.GetComponentTable(typeof(EcsPosition));
-        Assert.That(posTable, Is.Not.Null, "EcsPosition ComponentTable should exist");
+        var posTable = dbe.GetComponentTable(typeof(SvEcsPosition));
+        Assert.That(posTable, Is.Not.Null, "SvEcsPosition ComponentTable should exist");
         Assert.That(posTable.StorageMode, Is.EqualTo(StorageMode.SingleVersion), "Should be SV");
         Assert.That(posTable.DirtyBitmap, Is.Not.Null, "SV table should have DirtyBitmap");
         Assert.That(posTable.Definition.EntityPKOverheadSize, Is.EqualTo(8), "SV should have EntityPK overhead");
@@ -210,9 +210,9 @@ class ChangeFilterTests : TestBase<ChangeFilterTests>
         EntityId e1;
         using (var tx = dbe.CreateQuickTransaction())
         {
-            var pos = new EcsPosition(1, 2, 3);
-            var vel = new EcsVelocity(0, 0, 0);
-            e1 = tx.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos), EcsUnit.Velocity.Set(in vel));
+            var pos = new SvEcsPosition(1, 2, 3);
+            var vel = new SvEcsVelocity(0, 0, 0);
+            e1 = tx.Spawn<SvEcsUnit>(SvEcsUnit.Position.Set(in pos), SvEcsUnit.Velocity.Set(in vel));
             tx.Commit();
         }
 
@@ -226,12 +226,12 @@ class ChangeFilterTests : TestBase<ChangeFilterTests>
         // Write a component to trigger DirtyBitmap
         using (var tx2 = dbe.CreateQuickTransaction())
         {
-            ref var pos = ref tx2.OpenMut(e1).Write(EcsUnit.Position);
+            ref var pos = ref tx2.OpenMut(e1).Write(SvEcsUnit.Position);
             pos.X = 99f;
             tx2.Commit();
         }
 
-        var clusterState = dbe._archetypeStates[Archetype<EcsUnit>.Metadata.ArchetypeId]?.ClusterState;
+        var clusterState = dbe._archetypeStates[Archetype<SvEcsUnit>.Metadata.ArchetypeId]?.ClusterState;
         if (clusterState != null)
         {
             Assert.That(clusterState.ClusterDirtyBitmap.HasDirty, Is.True, "ClusterDirtyBitmap should be dirty after Write<T>");
@@ -256,16 +256,16 @@ class ChangeFilterTests : TestBase<ChangeFilterTests>
         EntityId e1, e2;
         using (var tx = dbe.CreateQuickTransaction())
         {
-            var pos1 = new EcsPosition(1, 0, 0);
-            var pos2 = new EcsPosition(2, 0, 0);
-            var vel = new EcsVelocity(0, 0, 0);
-            e1 = tx.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos1), EcsUnit.Velocity.Set(in vel));
-            e2 = tx.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos2), EcsUnit.Velocity.Set(in vel));
+            var pos1 = new SvEcsPosition(1, 0, 0);
+            var pos2 = new SvEcsPosition(2, 0, 0);
+            var vel = new SvEcsVelocity(0, 0, 0);
+            e1 = tx.Spawn<SvEcsUnit>(SvEcsUnit.Position.Set(in pos1), SvEcsUnit.Velocity.Set(in vel));
+            e2 = tx.Spawn<SvEcsUnit>(SvEcsUnit.Position.Set(in pos2), SvEcsUnit.Velocity.Set(in vel));
             tx.Commit();
         }
 
         using var txView = dbe.CreateQuickTransaction();
-        var view = txView.Query<EcsUnit>().ToView();
+        var view = txView.Query<SvEcsUnit>().ToView();
 
         var maxEntitiesReceived = 0;
         var ticksSeen = 0;
@@ -280,7 +280,7 @@ class ChangeFilterTests : TestBase<ChangeFilterTests>
                 var tick = Interlocked.Increment(ref ticksSeen);
                 if (tick == 2)
                 {
-                    ref var pos = ref ctx.Transaction.OpenMut(e1).Write(EcsUnit.Position);
+                    ref var pos = ref ctx.Transaction.OpenMut(e1).Write(SvEcsUnit.Position);
                     pos.X = 99f;
                     Interlocked.Exchange(ref writerDone, 1);
                 }
@@ -299,7 +299,7 @@ class ChangeFilterTests : TestBase<ChangeFilterTests>
                         if (count <= prev) break;
                     } while (Interlocked.CompareExchange(ref maxEntitiesReceived, count, prev) != prev);
                 }
-            }, input: () => view, changeFilter: [typeof(EcsPosition)], after: "Writer");
+            }, input: () => view, changeFilter: [typeof(SvEcsPosition)], after: "Writer");
         }, new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
 
         runtime.Start();
@@ -327,18 +327,18 @@ class ChangeFilterTests : TestBase<ChangeFilterTests>
         EntityId soldier;
         using (var tx = dbe.CreateQuickTransaction())
         {
-            var pos = new EcsPosition(1, 0, 0);
-            var vel = new EcsVelocity(0, 0, 0);
-            var hp = new EcsHealth(100, 100);
-            soldier = tx.Spawn<EcsSoldier>(
-                EcsUnit.Position.Set(in pos),
-                EcsUnit.Velocity.Set(in vel),
-                EcsSoldier.Health.Set(in hp));
+            var pos = new SvEcsPosition(1, 0, 0);
+            var vel = new SvEcsVelocity(0, 0, 0);
+            var hp = new SvEcsHealth(100, 100);
+            soldier = tx.Spawn<SvEcsSoldier>(
+                SvEcsUnit.Position.Set(in pos),
+                SvEcsUnit.Velocity.Set(in vel),
+                SvEcsSoldier.Health.Set(in hp));
             tx.Commit();
         }
 
         using var txView = dbe.CreateQuickTransaction();
-        var view = txView.Query<EcsSoldier>().ToView();
+        var view = txView.Query<SvEcsSoldier>().ToView();
 
         var executeCount = 0;
         var ticksSeen = 0;
@@ -352,7 +352,7 @@ class ChangeFilterTests : TestBase<ChangeFilterTests>
                 var tick = Interlocked.Increment(ref ticksSeen);
                 if (tick == 2)
                 {
-                    ref var hp = ref ctx.Transaction.OpenMut(soldier).Write(EcsSoldier.Health);
+                    ref var hp = ref ctx.Transaction.OpenMut(soldier).Write(SvEcsSoldier.Health);
                     hp.Current = 50;
                 }
             });
@@ -364,7 +364,7 @@ class ChangeFilterTests : TestBase<ChangeFilterTests>
                 {
                     Interlocked.Increment(ref executeCount);
                 }
-            }, input: () => view, changeFilter: [typeof(EcsPosition), typeof(EcsHealth)], after: "Writer");
+            }, input: () => view, changeFilter: [typeof(SvEcsPosition), typeof(SvEcsHealth)], after: "Writer");
         }, new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
 
         runtime.Start();
@@ -391,15 +391,15 @@ class ChangeFilterTests : TestBase<ChangeFilterTests>
         // Spawn two entities
         using (var tx = dbe.CreateQuickTransaction())
         {
-            var pos = new EcsPosition(1, 0, 0);
-            var vel = new EcsVelocity(0, 0, 0);
-            tx.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos), EcsUnit.Velocity.Set(in vel));
-            tx.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos), EcsUnit.Velocity.Set(in vel));
+            var pos = new SvEcsPosition(1, 0, 0);
+            var vel = new SvEcsVelocity(0, 0, 0);
+            tx.Spawn<SvEcsUnit>(SvEcsUnit.Position.Set(in pos), SvEcsUnit.Velocity.Set(in vel));
+            tx.Spawn<SvEcsUnit>(SvEcsUnit.Position.Set(in pos), SvEcsUnit.Velocity.Set(in vel));
             tx.Commit();
         }
 
         using var txView = dbe.CreateQuickTransaction();
-        var view = txView.Query<EcsUnit>().ToView();
+        var view = txView.Query<SvEcsUnit>().ToView();
 
         var entityCount = -1;
         var captured = 0;

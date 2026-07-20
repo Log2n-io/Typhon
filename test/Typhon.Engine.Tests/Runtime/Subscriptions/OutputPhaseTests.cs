@@ -25,9 +25,9 @@ class OutputPhaseTests : TestBase<OutputPhaseTests>
     private DatabaseEngine SetupEngine()
     {
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
-        dbe.RegisterComponentFromAccessor<EcsPosition>(storageModeOverride: StorageMode.SingleVersion);
-        dbe.RegisterComponentFromAccessor<EcsVelocity>(storageModeOverride: StorageMode.SingleVersion);
-        dbe.RegisterComponentFromAccessor<EcsHealth>(storageModeOverride: StorageMode.SingleVersion);
+        dbe.RegisterComponentFromAccessor<SvEcsPosition>();
+        dbe.RegisterComponentFromAccessor<SvEcsVelocity>();
+        dbe.RegisterComponentFromAccessor<SvEcsHealth>();
         dbe.InitializeArchetypes();
         return dbe;
     }
@@ -37,7 +37,7 @@ class OutputPhaseTests : TestBase<OutputPhaseTests>
     {
         using var dbe = SetupEngine();
         using var viewTx = dbe.CreateQuickTransaction();
-        var subsView = viewTx.Query<EcsUnit>().ToView();
+        var subsView = viewTx.Query<SvEcsUnit>().ToView();
 
         var spawnedOnTick = -1;
         var clientReady = 0;
@@ -55,9 +55,9 @@ class OutputPhaseTests : TestBase<OutputPhaseTests>
                 // Spawn once
                 if (spawnedOnTick < 0)
                 {
-                    var pos = new EcsPosition(1, 2, 3);
-                    var vel = new EcsVelocity(0, 0, 0);
-                    ctx.Transaction.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos), EcsUnit.Velocity.Set(in vel));
+                    var pos = new SvEcsPosition(1, 2, 3);
+                    var vel = new SvEcsVelocity(0, 0, 0);
+                    ctx.Transaction.Spawn<SvEcsUnit>(SvEcsUnit.Position.Set(in pos), SvEcsUnit.Velocity.Set(in vel));
                     Interlocked.Exchange(ref spawnedOnTick, (int)ctx.TickNumber);
                 }
             });
@@ -147,7 +147,7 @@ class OutputPhaseTests : TestBase<OutputPhaseTests>
     {
         using var dbe = SetupEngine();
         using var viewTx = dbe.CreateQuickTransaction();
-        var subsView = viewTx.Query<EcsUnit>().ToView();
+        var subsView = viewTx.Query<SvEcsUnit>().ToView();
 
         var clientReady = 0;
         var totalSpawned = 0;
@@ -161,9 +161,9 @@ class OutputPhaseTests : TestBase<OutputPhaseTests>
                 // Spawn 5 entities every tick
                 for (var i = 0; i < 5; i++)
                 {
-                    var pos = new EcsPosition(ctx.TickNumber, i, 0);
-                    var vel = new EcsVelocity(0, 0, 0);
-                    ctx.Transaction.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos), EcsUnit.Velocity.Set(in vel));
+                    var pos = new SvEcsPosition(ctx.TickNumber, i, 0);
+                    var vel = new SvEcsVelocity(0, 0, 0);
+                    ctx.Transaction.Spawn<SvEcsUnit>(SvEcsUnit.Position.Set(in pos), SvEcsUnit.Velocity.Set(in vel));
                     Interlocked.Increment(ref totalSpawned);
                 }
             });

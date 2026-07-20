@@ -143,21 +143,8 @@ class StorageModeInfrastructureTests : TestBase<StorageModeInfrastructureTests>
         Assert.That(table.TransientDefaultIndexSegment, Is.Not.Null);
     }
 
-    [Test]
-    public void Register_StorageModeOverride_OverridesAttribute()
-    {
-        using var scope = ServiceProvider.CreateScope();
-        using var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
-
-        // Attribute says Transient, but override says Versioned
-        dbe.RegisterComponentFromAccessor<CompSmTransientOverride>(storageModeOverride: StorageMode.Versioned);
-
-        var table = dbe.GetComponentTable<CompSmTransientOverride>();
-        Assert.That(table.StorageMode, Is.EqualTo(StorageMode.Versioned));
-        Assert.That(table.ComponentSegment, Is.Not.Null, "Override to Versioned → persistent segments");
-        Assert.That(table.CompRevTableSegment, Is.Not.Null);
-        Assert.That(table.TransientComponentSegment, Is.Null);
-    }
+    // (Removed Register_StorageModeOverride_OverridesAttribute: StorageMode is now fixed by the [Component] attribute per (name, revision) — there is no
+    //  per-registration override. Changing a component's storage mode requires a new revision. See rules/ecs.md.)
 
     // ── Chunk allocation smoke tests ──
 

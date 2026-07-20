@@ -34,9 +34,9 @@ class SubscriptionStressTests : TestBase<SubscriptionStressTests>
     private DatabaseEngine SetupEngine()
     {
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
-        dbe.RegisterComponentFromAccessor<EcsPosition>(storageModeOverride: StorageMode.SingleVersion);
-        dbe.RegisterComponentFromAccessor<EcsVelocity>(storageModeOverride: StorageMode.SingleVersion);
-        dbe.RegisterComponentFromAccessor<EcsHealth>(storageModeOverride: StorageMode.SingleVersion);
+        dbe.RegisterComponentFromAccessor<SvEcsPosition>();
+        dbe.RegisterComponentFromAccessor<SvEcsVelocity>();
+        dbe.RegisterComponentFromAccessor<SvEcsHealth>();
         dbe.InitializeArchetypes();
         return dbe;
     }
@@ -90,7 +90,7 @@ class SubscriptionStressTests : TestBase<SubscriptionStressTests>
 
         using var dbe = SetupEngine();
         using var viewTx = dbe.CreateQuickTransaction();
-        var subsView = viewTx.Query<EcsUnit>().ToView();
+        var subsView = viewTx.Query<SvEcsUnit>().ToView();
 
         var spawnCount = 0;
 
@@ -104,9 +104,9 @@ class SubscriptionStressTests : TestBase<SubscriptionStressTests>
                     // Spawn 10 entities per tick for 5 ticks = 50 total
                     for (var i = 0; i < 10; i++)
                     {
-                        var pos = new EcsPosition(ctx.TickNumber, i, 0);
-                        var vel = new EcsVelocity(0, 0, 0);
-                        ctx.Transaction.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos), EcsUnit.Velocity.Set(in vel));
+                        var pos = new SvEcsPosition(ctx.TickNumber, i, 0);
+                        var vel = new SvEcsVelocity(0, 0, 0);
+                        ctx.Transaction.Spawn<SvEcsUnit>(SvEcsUnit.Position.Set(in pos), SvEcsUnit.Velocity.Set(in vel));
                         Interlocked.Increment(ref spawnCount);
                     }
                 }
@@ -203,7 +203,7 @@ class SubscriptionStressTests : TestBase<SubscriptionStressTests>
 
         using var dbe = SetupEngine();
         using var viewTx = dbe.CreateQuickTransaction();
-        var subsView = viewTx.Query<EcsUnit>().ToView();
+        var subsView = viewTx.Query<SvEcsUnit>().ToView();
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
@@ -289,7 +289,7 @@ class SubscriptionStressTests : TestBase<SubscriptionStressTests>
 
         using var dbe = SetupEngine();
         using var viewTx = dbe.CreateQuickTransaction();
-        var subsView = viewTx.Query<EcsUnit>().ToView();
+        var subsView = viewTx.Query<SvEcsUnit>().ToView();
 
         var totalSpawned = 0;
         var clientReady = 0;
@@ -307,9 +307,9 @@ class SubscriptionStressTests : TestBase<SubscriptionStressTests>
                 // Spawn entities every tick
                 for (var i = 0; i < entitiesPerTick; i++)
                 {
-                    var pos = new EcsPosition(ctx.TickNumber, i, 0);
-                    var vel = new EcsVelocity(1, 0, 0);
-                    ctx.Transaction.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos), EcsUnit.Velocity.Set(in vel));
+                    var pos = new SvEcsPosition(ctx.TickNumber, i, 0);
+                    var vel = new SvEcsVelocity(1, 0, 0);
+                    ctx.Transaction.Spawn<SvEcsUnit>(SvEcsUnit.Position.Set(in pos), SvEcsUnit.Velocity.Set(in vel));
                     Interlocked.Increment(ref totalSpawned);
                 }
             });
@@ -397,7 +397,7 @@ class SubscriptionStressTests : TestBase<SubscriptionStressTests>
 
         using var dbe = SetupEngine();
         using var viewTx = dbe.CreateQuickTransaction();
-        var subsView = viewTx.Query<EcsUnit>().ToView();
+        var subsView = viewTx.Query<SvEcsUnit>().ToView();
 
         using var runtime = TyphonRuntime.Create(dbe, schedule =>
         {
@@ -406,9 +406,9 @@ class SubscriptionStressTests : TestBase<SubscriptionStressTests>
                 // Spawn many entities to generate large deltas
                 for (var i = 0; i < 50; i++)
                 {
-                    var pos = new EcsPosition(ctx.TickNumber * 100 + i, i, 0);
-                    var vel = new EcsVelocity(0, 0, 0);
-                    ctx.Transaction.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos), EcsUnit.Velocity.Set(in vel));
+                    var pos = new SvEcsPosition(ctx.TickNumber * 100 + i, i, 0);
+                    var vel = new SvEcsVelocity(0, 0, 0);
+                    ctx.Transaction.Spawn<SvEcsUnit>(SvEcsUnit.Position.Set(in pos), SvEcsUnit.Velocity.Set(in vel));
                 }
             });
         }, new RuntimeOptions
@@ -496,10 +496,10 @@ class SubscriptionStressTests : TestBase<SubscriptionStressTests>
 
         using var dbe = SetupEngine();
         using var viewTx1 = dbe.CreateQuickTransaction();
-        var viewA = viewTx1.Query<EcsUnit>().ToView();
+        var viewA = viewTx1.Query<SvEcsUnit>().ToView();
 
         using var viewTx2 = dbe.CreateQuickTransaction();
-        var viewB = viewTx2.Query<EcsUnit>().ToView();
+        var viewB = viewTx2.Query<SvEcsUnit>().ToView();
 
         var setSubCount = 0;
 
@@ -610,7 +610,7 @@ class SubscriptionStressTests : TestBase<SubscriptionStressTests>
 
         using var dbe = SetupEngine();
         using var viewTx = dbe.CreateQuickTransaction();
-        var subsView = viewTx.Query<EcsUnit>().ToView();
+        var subsView = viewTx.Query<SvEcsUnit>().ToView();
 
         var spawnDone = 0;
 
@@ -623,9 +623,9 @@ class SubscriptionStressTests : TestBase<SubscriptionStressTests>
                 {
                     for (var i = 0; i < entitiesPerTick; i++)
                     {
-                        var pos = new EcsPosition(ctx.TickNumber, i, 0);
-                        var vel = new EcsVelocity(1, 0, 0);
-                        ctx.Transaction.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos), EcsUnit.Velocity.Set(in vel));
+                        var pos = new SvEcsPosition(ctx.TickNumber, i, 0);
+                        var vel = new SvEcsVelocity(1, 0, 0);
+                        ctx.Transaction.Spawn<SvEcsUnit>(SvEcsUnit.Position.Set(in pos), SvEcsUnit.Velocity.Set(in vel));
                     }
 
                     if (ctx.TickNumber == 14)
