@@ -560,6 +560,17 @@ jobs:
           # Warn on orphaned docs
 ```
 
+### Merge-gate CI: opt-out commit tokens
+
+Two independent, case-insensitive tokens can appear in a **PR head commit message** to opt a single run out of a CI workflow. They are read from `pull_request.head.sha` (not the checked-out merge commit, whose synthetic auto-message never carries them), so place the token on the **last commit you push**.
+
+| Token | Skips | When to use |
+|-------|-------|-------------|
+| `[no-ut]` | the heavy `aws-gate` c6id unit-test suites (`merge-gate.yml`) | a genuine small fix you're confident needs no test run — docs, comments, CI/script tweaks. **This unblocks a real gate**, so use it deliberately. |
+| `[no-doc]` | the advisory Layer-2 doc-accuracy review (`doc-accuracy-review.yml`) | a commit that cannot affect doc accuracy — a comment/whitespace tweak, or a follow-up that already reconciled the drift the bot flagged. Only saves a billed Claude turn + a redundant comment (the review never blocks), so the bar is lower. |
+
+They are **orthogonal**: a commit may carry either, both, or neither — one never implies the other, and there is deliberately no combined `[no-ci]` umbrella. Each skip prints a `::notice::` line in the run log, so an opt-out is always visible.
+
 ---
 
 ## Views & Dashboards

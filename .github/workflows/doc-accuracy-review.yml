@@ -47,6 +47,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4   # working tree = the merge ref; Claude reads the post-change pages/source
 
+      # Opt-out for commits that cannot affect doc accuracy (a comment/whitespace tweak, a follow-up that
+      # already reconciled the drift the bot flagged): `[no-doc]` in the head commit message skips this
+      # advisory review — saving a billed Claude turn + a redundant comment. Structural twin of `[no-ut]`
+      # (merge-gate.yml). Reads pull_request.head.sha (NOT the working-tree HEAD — on a PR that is the
+      # synthetic merge commit, whose auto-message never carries the token); falls back to github.sha on push.
+      - name: Detect [no-doc] skip token
+        id: nodoc
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          SHA='${{ github.event.pull_request.head.sha || github.sha }}'
+          MSG=$(gh api "repos/${{ github.repository }}/commits/$SHA" --jq '.commit.message')
+          if grep -qiE '\[no-doc\]' <<<"$MSG"; then
+            echo "skip_doc=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::[no-doc] found in $SHA — skipping the doc-accuracy review."
+          else
+            echo "skip_doc=false" >> "$GITHUB_OUTPUT"
+          fi
+
       # Resolve changed files -> affected doc pages via the docs-affected map. Emits the human-readable
       # report (pages + unmapped/stale nudges) for the prompt, and a page count to gate the LLM step.
       - id: affected
@@ -74,7 +93,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Claude doc-accuracy review
-        if: ${{ steps.affected.outputs.count != '0' }}
+        if: ${{ steps.affected.outputs.count != '0' && steps.nodoc.outputs.skip_doc != 'true' }}
         uses: anthropics/claude-code-action@v1
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # scoped: all gh writes run as pull-requests:write
@@ -139,7 +158,7 @@ jobs:
       # unmapped code — the earliest actionable moment — instead of waiting for the weekly Layer 3
       # audit to catch the drift and hoping someone back-infers the missing map key. Issue #512.
       - name: Post map-gap nudge (no pages to review)
-        if: ${{ steps.affected.outputs.count == '0' && steps.affected.outputs.has_nudge == '1' }}
+        if: ${{ steps.affected.outputs.count == '0' && steps.affected.outputs.has_nudge == '1' && steps.nodoc.outputs.skip_doc != 'true' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NUDGE: ${{ steps.affected.outputs.nudge }}
