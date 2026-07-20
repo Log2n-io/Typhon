@@ -21,7 +21,6 @@ namespace Typhon.Engine.Tests;
 /// One ManagedPagedMMF per scenario, reused across iterations (fresh segment per iter) — avoids per-iter file I/O cost.
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 [Explicit("Long-running race-stress harness for issue #297 — invoke manually")]
 public class OlcBTreeRaceStressTests
 {

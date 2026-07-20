@@ -8,7 +8,6 @@ namespace Typhon.Engine.Tests;
 /// Uses CompD: [Index(AllowMultiple)] float A, [Index] int B, [Index(AllowMultiple)] double C.
 /// Predicate: A > 3.0f AND B > 40 (two indexed fields, both must pass).
 /// </summary>
-[NonParallelizable]
 class EcsViewMultiFieldTests : TestBase<EcsViewMultiFieldTests>
 {
     private DatabaseEngine SetupEngine()

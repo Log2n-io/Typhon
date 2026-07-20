@@ -30,7 +30,6 @@ class TbSvArch : Archetype<TbSvArch>
 // ═══════════════════════════════════════════════════════════════════════════════
 
 [TestFixture]
-[NonParallelizable]
 class TickBoundaryIndexTests : TestBase<TickBoundaryIndexTests>
 {
     private DatabaseEngine SetupEngine()

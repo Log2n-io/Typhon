@@ -7,7 +7,6 @@ namespace Typhon.Engine.Tests;
 /// Tests for OR-mode EcsView (WhereField with OR predicates producing multiple DNF branches).
 /// Uses CompF: [Index(AllowMultiple)] int Gold, [Index] int Rank
 /// </summary>
-[NonParallelizable]
 class EcsOrViewTests : TestBase<EcsOrViewTests>
 {
     [OneTimeSetUp]

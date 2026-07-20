@@ -7,7 +7,6 @@ using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Tests;
 
-[NonParallelizable]
 class SpatialInterestTests : TestBase<SpatialInterestTests>
 {
     [OneTimeSetUp]

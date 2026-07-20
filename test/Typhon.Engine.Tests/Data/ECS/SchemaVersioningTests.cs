@@ -5,7 +5,6 @@ using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Tests;
 
-[NonParallelizable]
 unsafe class SchemaVersioningTests : TestBase<SchemaVersioningTests>
 {
     [OneTimeSetUp]

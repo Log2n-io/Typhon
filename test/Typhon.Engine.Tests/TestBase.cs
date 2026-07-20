@@ -370,7 +370,9 @@ abstract class TestBase<T> : TestBase
     public virtual void Setup()
     {
         var o = TestContext.CurrentContext.Test.Properties.ContainsKey("CacheSize");
-        var dcs = o ? (int)TestContext.CurrentContext.Test.Properties.Get("CacheSize")! : (int)PagedMMF.MinimumCacheSize;
+        // Default cache = 8 MiB. The 2 MiB floor cannot hold a fixture's structural set (schema + index B-trees + hashmaps), forcing constant eviction churn
+        // that is unrepresentative and slow. Fixtures that deliberately exercise a tiny cache / eviction set an explicit [Property("CacheSize", ...)].
+        var dcs = o ? (int)TestContext.CurrentContext.Test.Properties.Get("CacheSize")! : 8 * 1024 * 1024;
 
         // Create a per-fixture temp directory to spread I/O across directories
         _testDatabaseDir = Path.Combine(Path.GetTempPath(), "Typhon.Tests", typeof(T).Name);

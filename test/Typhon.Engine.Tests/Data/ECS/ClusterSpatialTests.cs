@@ -79,7 +79,6 @@ partial class ClSpatialStaticUnit : Archetype<ClSpatialStaticUnit>
 // ═══════════════════════════════════════════════════════════════════════════════
 
 [TestFixture]
-[NonParallelizable]
 class ClusterSpatialTests : TestBase<ClusterSpatialTests>
 {
     [OneTimeSetUp]

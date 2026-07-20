@@ -10,7 +10,6 @@ namespace Typhon.Engine.Tests;
 /// to prevent hangs from deadlocks or infinite loops.
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 public class WalCommitBufferConcurrencyTests : AllocatorTestBase
 {
     // 256 KB per buffer — small enough to trigger swaps quickly

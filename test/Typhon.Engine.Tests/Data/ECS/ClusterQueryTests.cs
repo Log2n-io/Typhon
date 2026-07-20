@@ -115,7 +115,6 @@ partial class ClQFloatUnit : Archetype<ClQFloatUnit>
 // Tests
 // ═══════════════════════════════════════════════════════════════════════
 
-[NonParallelizable]
 [TestFixture]
 class ClusterQueryTests : TestBase<ClusterQueryTests>
 {

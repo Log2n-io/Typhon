@@ -341,7 +341,6 @@ class EvoAddRemoveV2Arch : Archetype<EvoAddRemoveV2Arch>
 /// Each test creates a database with V1 layout, populates it, closes, then reopens with V2 layout.
 /// The migration engine should automatically remap fields and verify data correctness.
 /// </summary>
-[NonParallelizable]
 class SchemaEvolutionTests : TestBase<SchemaEvolutionTests>
 {
     [OneTimeSetUp]

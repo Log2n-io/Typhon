@@ -9,7 +9,6 @@ namespace Typhon.Engine.Tests.Runtime;
 /// Integration tests for event queue wiring through TyphonRuntime — verifies TickContext.ConsumedQueues
 /// and reactive skip behavior when queues are empty/populated.
 /// </summary>
-[NonParallelizable]
 [TestFixture]
 class EventQueueIntegrationTests : TestBase<EventQueueIntegrationTests>
 {

@@ -27,7 +27,6 @@ partial class ClQUnit3 : Archetype<ClQUnit3>
 // Tests
 // ═══════════════════════════════════════════════════════════════════════
 
-[NonParallelizable]
 [TestFixture]
 class SimdKwayMergeTests : TestBase<SimdKwayMergeTests>
 {

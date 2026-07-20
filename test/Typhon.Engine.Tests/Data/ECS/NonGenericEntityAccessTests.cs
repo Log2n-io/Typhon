@@ -10,7 +10,6 @@ namespace Typhon.Engine.Tests;
 // Covers the non-generic / runtime-decode surface used by tooling that knows components only by name / layout at runtime
 // (e.g. the Workbench Data Browser): Transaction.EnumerateArchetypeEntities + EntityRef.ReadRaw / ComponentCount /
 // GetComponentName. Reuses the EcsUnit (100) / EcsSoldier (101) archetypes defined in EntitySpawnTests.cs.
-[NonParallelizable]
 class NonGenericEntityAccessTests : TestBase<NonGenericEntityAccessTests>
 {
     [OneTimeSetUp]

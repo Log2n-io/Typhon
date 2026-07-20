@@ -15,7 +15,6 @@ namespace Typhon.Engine.Tests;
 /// </list>
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 class LegacyBundleArtifactTests
 {
     private const string DbName = "legacy_artifact_db";

@@ -120,7 +120,6 @@ class CompDowngradeArch : Archetype<CompDowngradeArch>
 /// Integration tests verifying schema validation across database reopen cycles.
 /// Each test creates a database with one component layout, closes it, then reopens with a different layout.
 /// </summary>
-[NonParallelizable]
 class SchemaValidationIntegrationTests : TestBase<SchemaValidationIntegrationTests>
 {
     [OneTimeSetUp]

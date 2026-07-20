@@ -13,7 +13,6 @@ namespace Typhon.Engine.Tests;
 /// Part of P0 (issue #333) of the Query Profiling umbrella (#342).
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 class EcsQueryIdTests : TestBase<EcsQueryIdTests>
 {
     [OneTimeSetUp]

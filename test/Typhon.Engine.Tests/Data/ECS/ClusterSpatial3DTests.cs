@@ -14,7 +14,6 @@ namespace Typhon.Engine.Tests;
 // ═══════════════════════════════════════════════════════════════════════════════
 
 [TestFixture]
-[NonParallelizable]
 class ClusterSpatial3DTests : TestBase<ClusterSpatial3DTests>
 {
     [OneTimeSetUp]

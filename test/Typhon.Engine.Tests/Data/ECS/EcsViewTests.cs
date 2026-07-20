@@ -3,7 +3,6 @@ using NUnit.Framework;
 
 namespace Typhon.Engine.Tests;
 
-[NonParallelizable]
 class EcsViewTests : TestBase<EcsViewTests>
 {
     [OneTimeSetUp]

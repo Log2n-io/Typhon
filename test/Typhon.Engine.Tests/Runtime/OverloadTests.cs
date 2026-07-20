@@ -217,7 +217,7 @@ public class OverloadDetectorTests
 // ═══════════════════════════════════════════════════════════════
 
 [TestFixture]
-[NonParallelizable]
+[NonParallelizable] // timing-sensitive: asserts exact per-tick execution counts against a real scheduler; concurrent CPU load from peer fixtures perturbs tick cadence (fails at LoP=8)
 class OverloadThrottleTests : TestBase<OverloadThrottleTests>
 {
     [OneTimeSetUp]

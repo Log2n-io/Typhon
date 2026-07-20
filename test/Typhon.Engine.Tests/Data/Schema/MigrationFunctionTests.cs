@@ -200,7 +200,6 @@ class MigByteV2Arch : Archetype<MigByteV2Arch>
 /// Tests for Phase 4: Migration Functions.
 /// Verifies user-defined migration functions for breaking schema changes, chaining, error handling, and byte-level API.
 /// </summary>
-[NonParallelizable]
 class MigrationFunctionTests : TestBase<MigrationFunctionTests>
 {
     [OneTimeSetUp]

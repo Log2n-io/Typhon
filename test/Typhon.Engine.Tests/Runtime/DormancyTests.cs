@@ -12,7 +12,6 @@ namespace Typhon.Engine.Tests.Runtime;
 /// <c>SetupEngineWithGrid()</c> pattern from <see cref="TierDispatchTests"/>.
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 class DormancyTests : TestBase<DormancyTests>
 {
     [TearDown]

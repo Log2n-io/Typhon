@@ -10,7 +10,6 @@ namespace Typhon.Engine.Tests.Runtime;
 /// entity persistence across ticks, OnFirstTick, OnShutdown, and side-transaction isolation.
 /// Uses a real DatabaseEngine (via TestBase pattern).
 /// </summary>
-[NonParallelizable]
 [TestFixture]
 class TyphonRuntimeTests : TestBase<TyphonRuntimeTests>
 {

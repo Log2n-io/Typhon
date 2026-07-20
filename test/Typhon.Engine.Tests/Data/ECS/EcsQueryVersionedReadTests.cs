@@ -27,7 +27,6 @@ partial class Q504Arch : Archetype<Q504Arch>
 /// <c>.Read</c> returned the revision-chain HEAD (pre-mutation value) instead of the snapshot-visible revision, while
 /// <c>tx.Open(id).Read</c> in the same transaction returned the correct value — two read paths, one snapshot, disagreeing.
 /// </summary>
-[NonParallelizable]
 class EcsQueryVersionedReadTests : TestBase<EcsQueryVersionedReadTests>
 {
     [OneTimeSetUp]

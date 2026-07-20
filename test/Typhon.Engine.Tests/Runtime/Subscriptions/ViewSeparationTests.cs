@@ -7,7 +7,6 @@ namespace Typhon.Engine.Tests.Runtime;
 /// <summary>
 /// Tests that published Views cannot be used as system inputs, and vice versa.
 /// </summary>
-[NonParallelizable]
 [TestFixture]
 class ViewSeparationTests : TestBase<ViewSeparationTests>
 {

@@ -10,7 +10,6 @@ namespace Typhon.Engine.Tests.Runtime;
 /// Side-transactions use Immediate durability and are NOT visible to the main tick Transaction
 /// (snapshot isolation — the main Transaction's TSN is fixed at creation).
 /// </summary>
-[NonParallelizable]
 [TestFixture]
 class SideTransactionTests : TestBase<SideTransactionTests>
 {

@@ -112,7 +112,6 @@ class HDistrict : Archetype<HDistrict>
 // ═══════════════════════════════════════════════════════════════════════════════
 
 [TestFixture]
-[NonParallelizable]
 class EcsHardeningTests : TestBase<EcsHardeningTests>
 {
     [OneTimeSetUp]

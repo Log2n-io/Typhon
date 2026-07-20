@@ -8,7 +8,6 @@ using NUnit.Framework;
 namespace Typhon.Engine.Tests;
 
 [TestFixture]
-[NonParallelizable]
 public class SpatialRTreeTests
 {
     private IServiceProvider _serviceProvider;

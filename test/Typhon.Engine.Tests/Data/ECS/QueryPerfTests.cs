@@ -8,7 +8,6 @@ namespace Typhon.Engine.Tests;
 /// Profiling tests for EcsQuery/View paths. Measures avg time per operation with Stopwatch.
 /// Run with: dotnet test --filter "FullyQualifiedName~QueryPerfTests" -v n
 /// </summary>
-[NonParallelizable]
 class QueryPerfTests : TestBase<QueryPerfTests>
 {
     private const int EntityCount = 1000;

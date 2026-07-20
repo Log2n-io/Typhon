@@ -11,7 +11,6 @@ namespace Typhon.Engine.Tests;
 /// cancellation via Token, and combined scenarios.
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 public class AccessControlTests
 {
     #region NullRef Pattern Tests (Infinite Wait)

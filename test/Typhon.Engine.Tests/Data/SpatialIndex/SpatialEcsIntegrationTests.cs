@@ -81,7 +81,6 @@ partial class SpatialTerrainArchetype : Archetype<SpatialTerrainArchetype>
 // Tests
 // ═══════════════════════════════════════════════════════════════════════
 
-[NonParallelizable]
 class SpatialEcsIntegrationTests : TestBase<SpatialEcsIntegrationTests>
 {
     [OneTimeSetUp]

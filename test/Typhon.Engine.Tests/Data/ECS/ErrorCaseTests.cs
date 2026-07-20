@@ -8,7 +8,6 @@ namespace Typhon.Engine.Tests;
 /// Negative-path tests verifying correct error behavior for ECS API misuse.
 /// Covers: non-existent entities, destroyed entity access, double-destroy, double-commit, post-commit operations.
 /// </summary>
-[NonParallelizable]
 class ErrorCaseTests : TestBase<ErrorCaseTests>
 {
     [OneTimeSetUp]

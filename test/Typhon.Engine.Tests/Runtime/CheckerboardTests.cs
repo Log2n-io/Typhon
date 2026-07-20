@@ -12,7 +12,7 @@ namespace Typhon.Engine.Tests.Runtime;
 /// Reuses the <see cref="TierUnit"/> archetype and grid pattern from <see cref="TierDispatchTests"/>.
 /// </summary>
 [TestFixture]
-[NonParallelizable]
+[NonParallelizable] // timing-sensitive: exercises the real scheduler/tick context; concurrent CPU load from peer fixtures perturbs tick cadence (fails at LoP=8)
 class CheckerboardTests : TestBase<CheckerboardTests>
 {
     private static TierPos PointAt(float x, float y) =>

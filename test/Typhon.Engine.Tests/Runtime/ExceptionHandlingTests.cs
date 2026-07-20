@@ -4,7 +4,6 @@ using System.Threading;
 
 namespace Typhon.Engine.Tests.Runtime;
 
-[NonParallelizable]
 [TestFixture]
 class ExceptionHandlingTests
 {

@@ -13,7 +13,6 @@ namespace Typhon.Engine.Tests;
 /// </summary>
 [TestFixture]
 [Category("WAL")]
-[NonParallelizable]
 class TickFenceE2ETests
 {
     [OneTimeSetUp]

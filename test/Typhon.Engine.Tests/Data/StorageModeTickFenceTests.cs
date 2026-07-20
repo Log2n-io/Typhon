@@ -8,7 +8,6 @@ namespace Typhon.Engine.Tests;
 // TickFence tests — no WAL needed (tests DirtyBitmap integration + skip behavior)
 // ═══════════════════════════════════════════════════════════════════════
 
-[NonParallelizable]
 class StorageModeTickFenceTests : TestBase<StorageModeTickFenceTests>
 {
     [OneTimeSetUp]

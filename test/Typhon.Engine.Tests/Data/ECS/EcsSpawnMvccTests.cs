@@ -10,7 +10,6 @@ namespace Typhon.Engine.Tests;
 /// matching the old CRUD CreateComponent behavior: CompRevStorageHeader with EntityPK,
 /// CompRevStorageElement with IsolationFlag, and CompRevInfo in _componentInfos cache.
 /// </summary>
-[NonParallelizable]
 class EcsSpawnMvccTests : TestBase<EcsSpawnMvccTests>
 {
     [OneTimeSetUp]

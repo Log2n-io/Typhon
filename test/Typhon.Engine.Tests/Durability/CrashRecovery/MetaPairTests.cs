@@ -26,7 +26,7 @@ public class MetaPairTests : AllocatorTestBase
         _epochManager = new EpochManager("MetaPairEpoch", AllocationResource);
         _options = new ManagedPagedMMFOptions
         {
-            DatabaseDirectory = Path.GetTempPath(),
+            DatabaseDirectory = TestDatabaseDir,
             DatabaseName = DbName,
             DatabaseCacheSize = PagedMMF.MinimumCacheSize,
         };

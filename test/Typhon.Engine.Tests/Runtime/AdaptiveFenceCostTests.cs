@@ -15,7 +15,6 @@ namespace Typhon.Engine.Tests.Runtime;
 /// the parallel sub-DAG (which is gated on <c>WalManager != null</c>) — only then do per-chunk timings flow into
 /// <see cref="LiveFenceCostModel"/> via <c>UpdatePhase</c>.
 /// </summary>
-[NonParallelizable]
 [TestFixture]
 class AdaptiveFenceCostTests
 {

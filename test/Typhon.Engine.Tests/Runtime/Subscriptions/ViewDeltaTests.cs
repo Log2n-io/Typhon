@@ -10,7 +10,6 @@ namespace Typhon.Engine.Tests.Runtime;
 /// the subscription Output phase ordering (Refresh → BeginSync → BuildDelta).
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 class ViewDeltaTests : TestBase<ViewDeltaTests>
 {
     [OneTimeSetUp]

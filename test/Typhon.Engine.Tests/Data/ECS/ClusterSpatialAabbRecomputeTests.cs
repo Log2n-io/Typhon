@@ -6,7 +6,6 @@ using Typhon.Schema.Definition;
 namespace Typhon.Engine.Tests;
 
 [TestFixture]
-[NonParallelizable]
 class ClusterSpatialAabbRecomputeTests : TestBase<ClusterSpatialAabbRecomputeTests>
 {
     [OneTimeSetUp]

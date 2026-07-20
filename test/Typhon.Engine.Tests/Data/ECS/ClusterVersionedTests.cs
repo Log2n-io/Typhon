@@ -57,7 +57,6 @@ partial class ClVTriple : Archetype<ClVTriple>
 // ═══════════════════════════════════════════════════════════════════════════════
 
 [TestFixture]
-[NonParallelizable]
 class ClusterVersionedTests : TestBase<ClusterVersionedTests>
 {
     [OneTimeSetUp]

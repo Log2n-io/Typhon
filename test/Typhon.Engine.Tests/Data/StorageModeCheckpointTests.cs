@@ -4,7 +4,6 @@ using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Tests;
 
-[NonParallelizable]
 class StorageModeCheckpointTests : TestBase<StorageModeCheckpointTests>
 {
     [Test]

@@ -22,7 +22,6 @@ namespace Typhon.Engine.Tests;
 [TestFixture]
 [Category("ScaleRepro")]
 [Explicit("Entry point for the stability investigation initiative (residual lost-write at ~700K). Skipped from normal runs; opt-in via --filter Category=ScaleRepro or --filter ClassName=RawValueHashMapScaleRepro.")]
-[NonParallelizable]
 unsafe class RawValueHashMapScaleRepro
 {
     private ServiceProvider _serviceProvider;

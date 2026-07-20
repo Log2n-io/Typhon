@@ -31,7 +31,6 @@ class TiTransientArch : Archetype<TiTransientArch>
 // ═══════════════════════════════════════════════════════════════════════════════
 
 [TestFixture]
-[NonParallelizable]
 class TransientIndexTests : TestBase<TransientIndexTests>
 {
     private DatabaseEngine SetupEngine()

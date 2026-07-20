@@ -65,7 +65,6 @@ struct TransientCcBag
 }
 
 [TestFixture]
-[NonParallelizable]
 class SvComponentCollectionTests : TestBase<SvComponentCollectionTests>
 {
     [OneTimeSetUp]

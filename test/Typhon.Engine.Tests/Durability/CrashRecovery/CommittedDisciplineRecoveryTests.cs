@@ -15,7 +15,6 @@ namespace Typhon.Engine.Tests;
 /// Committed-specific recovery code). Uses the <see cref="CmEntity"/> cluster archetype from <c>CommittedDisciplineTests</c>.
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 internal sealed class CommittedDisciplineRecoveryTests
 {
     private string _dbDir;

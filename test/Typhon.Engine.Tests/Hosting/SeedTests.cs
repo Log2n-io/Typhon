@@ -26,7 +26,6 @@ partial class SeedItemArch : Archetype<SeedItemArch>
 /// each in its own durable transaction. A fresh database runs every step; an existing one runs only the steps it has not
 /// applied yet (bringing instances up to date). Crash-safe: a step whose transaction never commits re-runs on the next open.
 /// </summary>
-[NonParallelizable]
 public class SeedTests
 {
     private string _dir;

@@ -74,7 +74,6 @@ partial class PtaArchMixed : Archetype<PtaArchMixed>
 // Tests
 // ═══════════════════════════════════════════════════════════════════════
 
-[NonParallelizable]
 class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
 {
     [OneTimeSetUp]

@@ -7,7 +7,6 @@ namespace Typhon.Engine.Tests;
 /// Tests for EcsQuery.NavigateField — FK-based navigation joins via the ECS API.
 /// Uses CompPlayer (FK: GuildId → CompGuild) with CompPlayerArch (210) and CompGuildArch (209).
 /// </summary>
-[NonParallelizable]
 class EcsNavigationTests : TestBase<EcsNavigationTests>
 {
     [OneTimeSetUp]

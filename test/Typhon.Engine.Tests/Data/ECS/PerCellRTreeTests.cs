@@ -13,7 +13,6 @@ namespace Typhon.Engine.Tests;
 /// from <see cref="ClusterSpatialCoherenceTests"/>.
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 class PerCellRTreeTests : TestBase<PerCellRTreeTests>
 {
     [OneTimeSetUp]

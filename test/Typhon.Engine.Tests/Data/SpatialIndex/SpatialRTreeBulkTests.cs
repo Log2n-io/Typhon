@@ -11,7 +11,6 @@ namespace Typhon.Engine.Tests;
 /// Separate from SpatialRTreeTests to avoid test interaction issues.
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 public class SpatialRTreeBulkTests
 {
     private IServiceProvider _serviceProvider;

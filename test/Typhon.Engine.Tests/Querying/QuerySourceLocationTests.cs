@@ -16,7 +16,6 @@ namespace Typhon.Engine.Tests;
 /// into the trace events. Those tests will live alongside the P2 implementation.
 /// </remarks>
 [TestFixture]
-[NonParallelizable]
 class QuerySourceLocationTests : TestBase<QuerySourceLocationTests>
 {
     [OneTimeSetUp]

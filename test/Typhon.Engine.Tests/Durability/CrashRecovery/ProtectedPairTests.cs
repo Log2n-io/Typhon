@@ -33,7 +33,7 @@ public class ProtectedPairTests : AllocatorTestBase
         _epochManager = new EpochManager("ProtPairEpoch", AllocationResource);
         _options = new ManagedPagedMMFOptions
         {
-            DatabaseDirectory = Path.GetTempPath(),
+            DatabaseDirectory = TestDatabaseDir,
             DatabaseName = DbName,
             DatabaseCacheSize = (ulong)(512 * PagedMMF.PageSize),
         };

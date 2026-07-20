@@ -67,7 +67,7 @@ public class CheckpointManagerTests : AllocatorTestBase
         var logger = ServiceProvider.GetRequiredService<ILogger<PagedMMF>>();
         var options = new ManagedPagedMMFOptions
         {
-            DatabaseDirectory = Path.GetTempPath(),
+            DatabaseDirectory = TestDatabaseDir,
             DatabaseName = CurrentDatabaseName,
             DatabaseCacheSize = PagedMMF.MinimumCacheSize,
         };

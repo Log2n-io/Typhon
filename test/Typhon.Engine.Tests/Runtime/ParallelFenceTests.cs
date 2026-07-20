@@ -16,7 +16,6 @@ namespace Typhon.Engine.Tests.Runtime;
 /// defaults to true — this fixture adds explicit coverage of the opt-out path and verifies the dispatch wiring
 /// produces the expected scheduler partition.
 /// </summary>
-[NonParallelizable]
 [TestFixture]
 class ParallelFenceTests : TestBase<ParallelFenceTests>
 {

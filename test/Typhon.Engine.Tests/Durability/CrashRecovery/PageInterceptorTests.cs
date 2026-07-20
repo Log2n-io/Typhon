@@ -27,7 +27,7 @@ public class PageInterceptorTests : AllocatorTestBase
         _epochManager = new EpochManager("PageInterceptEpoch", AllocationResource);
         _options = new ManagedPagedMMFOptions
         {
-            DatabaseDirectory = Path.GetTempPath(),
+            DatabaseDirectory = TestDatabaseDir,
             DatabaseName = DbName,
             DatabaseCacheSize = PagedMMF.MinimumCacheSize,
         };

@@ -21,7 +21,6 @@ namespace Typhon.Engine.Tests.Runtime;
 /// All tests are <c>[Explicit]</c> — run manually via <c>dotnet test --filter "FullyQualifiedName~SubscriptionStress"</c>.
 /// </remarks>
 [TestFixture]
-[NonParallelizable]
 class SubscriptionStressTests : TestBase<SubscriptionStressTests>
 {
     private const int StressPort = 19900;

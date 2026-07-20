@@ -1,5 +1,6 @@
 using JetBrains.Annotations;
 using System;
+using System.IO;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using NUnit.Framework;
@@ -18,9 +19,19 @@ public abstract class AllocatorTestBase
     private protected IMemoryAllocator MemoryAllocator => ServiceProvider.GetRequiredService<IMemoryAllocator>();
     protected IResource AllocationResource => ResourceRegistry.Allocation;
 
+    /// <summary>
+    /// Per-fixture isolated database directory. Fixtures that build their own MMF must place it here rather than directly in <see cref="Path.GetTempPath"/>:
+    /// under parallel execution dozens of fixtures create/open/delete DB bundles at once, and sharing the temp root produces "file used by another process"
+    /// contention. A per-fixture subdirectory keeps each fixture's I/O isolated (fixtures parallelize; tests within a fixture run serially).
+    /// </summary>
+    protected string TestDatabaseDir { get; private set; }
+
     [SetUp]
     public virtual void Setup()
     {
+        TestDatabaseDir = Path.Combine(Path.GetTempPath(), "Typhon.Tests", GetType().Name);
+        Directory.CreateDirectory(TestDatabaseDir);
+
         var config = new LoggerConfiguration()
             .MinimumLevel.Warning()
             .Enrich.FromLogContext();
@@ -47,6 +58,12 @@ public abstract class AllocatorTestBase
         if (ServiceProvider is IDisposable disposable)
         {
             disposable.Dispose();
+        }
+
+        if (TestDatabaseDir != null)
+        {
+            try { Directory.Delete(TestDatabaseDir, recursive: true); }
+            catch { /* best-effort cleanup */ }
         }
     }
 }

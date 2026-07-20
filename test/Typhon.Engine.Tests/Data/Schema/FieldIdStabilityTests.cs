@@ -124,7 +124,6 @@ class CompIndexArch : Archetype<CompIndexArch>
 /// Integration tests verifying FieldId stability across database reopen with schema evolution.
 /// Each test creates a database, writes data, closes, reopens with a different schema, and verifies.
 /// </summary>
-[NonParallelizable]
 class FieldIdStabilityTests : TestBase<FieldIdStabilityTests>
 {
     [OneTimeSetUp]

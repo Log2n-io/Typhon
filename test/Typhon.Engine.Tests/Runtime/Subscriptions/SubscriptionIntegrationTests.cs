@@ -14,7 +14,6 @@ namespace Typhon.Engine.Tests.Runtime;
 /// End-to-end integration tests for the subscription server.
 /// Starts a real TyphonRuntime with TCP subscription server, connects a client, and verifies TickDelta messages.
 /// </summary>
-[NonParallelizable]
 [TestFixture]
 class SubscriptionIntegrationTests : TestBase<SubscriptionIntegrationTests>
 {

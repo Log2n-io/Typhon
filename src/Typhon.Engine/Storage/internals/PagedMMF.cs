@@ -1239,6 +1239,16 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                 {
                     _memPageIndexByFilePageIndex.TryRemove(info.FilePageIndex, out _);
                 }
+                // Reset the seqlock ModificationCounter to a known EVEN (quiescent) value as the slot is repurposed. The counter is per-slot memory, never
+                // reset elsewhere — TryLatch/Unlatch only increment it (parity-preserving) and the page-clear path deliberately PRESERVES it. So a slot whose
+                // prior occupant left an ODD value (e.g. an OLC-only page that never touched the counter, over stale/loaded memory) would hand that odd value
+                // to the fresh page, making it look permanently "write-in-progress": CopyPageWithSeqlock then spin-waits the full 100 ms skip timeout on a page
+                // no one is writing, every checkpoint cycle. A page loaded from disk immediately overwrites this with its persisted (even) counter; a freshly
+                // grown page keeps the 0. Done under StateSyncRoot with the slot detached from any accessor (Idle/Free, ACW==0, not dirty), so no reader races.
+                unsafe
+                {
+                    ((PageBaseHeader*)(_memPagesAddr + info.MemPageIndex * (long)PageSize))->ModificationCounter = 0;
+                }
                 info.ResetClockSweepCounter();
                 info.FilePageIndex = -1;
                 info.AccessEpoch = 0;  // Clear epoch tag on reallocation
@@ -1697,10 +1707,10 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// Spins while the page's <see cref="PageBaseHeader.ModificationCounter"/> is odd (writer in progress),
     /// then memcpys the page and validates the counter hasn't changed. Retries on torn reads.
     /// </summary>
-    /// <returns>True if a consistent snapshot was obtained; false if the page was skipped because a writer
-    /// held the modification counter odd for longer than the checkpoint skip threshold (100ms).
-    /// Skipping is safe: the page remains dirty and will be captured in the next checkpoint cycle.</returns>
-    private unsafe bool CopyPageWithSeqlock(byte* pageAddr, byte* destAddr)
+    /// <returns>True if a consistent snapshot was obtained; false if the page was skipped — either because a real exclusive writer held the modification
+    /// counter odd for longer than the checkpoint skip threshold (100ms), or because the counter was odd on a page no writer holds (a stale counter, skipped
+    /// immediately). Skipping is safe: the page remains dirty and will be captured in the next checkpoint cycle.</returns>
+    private unsafe bool CopyPageWithSeqlock(byte* pageAddr, byte* destAddr, int memPageIndex)
     {
         var sw = new SpinWait();
         long oddSpinStart = 0;
@@ -1710,7 +1720,17 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             var counter = ((PageBaseHeader*)pageAddr)->ModificationCounter;
             if ((counter & 1) != 0)
             {
-                // Writer in progress — track how long we've been waiting
+                // A real writer sets PageState=Exclusive BEFORE making the counter odd (TryLatchPageExclusive) and makes it even BEFORE clearing Exclusive
+                // (UnlatchPageExclusive). So an odd counter on a page that is NOT Exclusive-latched is stale — there is no writer to wait for (x64 TSO preserves
+                // that store order, so seeing the odd counter implies the earlier PageState=Exclusive store is visible too). Skip at once instead of burning the
+                // full 100ms timeout. Defensive: TryAcquire resets the counter to even on slot reuse, so a quiescent page should never present odd here.
+                if (_memPagesInfo[memPageIndex].PageState != PageState.Exclusive)
+                {
+                    LogStaleSeqlockCounterSkip(Logger, memPageIndex, counter);
+                    return false;
+                }
+
+                // A real exclusive writer holds the page — track how long we've been waiting
                 if (oddSpinStart == 0)
                 {
                     oddSpinStart = Stopwatch.GetTimestamp();
@@ -1723,9 +1743,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                         // Writer has held the page for >100ms — likely blocked (e.g., waiting for
                         // backpressure to free cache pages). Skip this page to avoid deadlock:
                         // the writer may be waiting for this checkpoint to complete DecrementDirty.
-                        Logger.LogWarning(
-                            "CopyPageWithSeqlock: skipping page after {ElapsedMs:F0}ms — writer holding odd ModificationCounter={Counter}",
-                            elapsedMs, counter);
+                        LogSeqlockWriterHeldSkip(Logger, (int)elapsedMs, counter);
                         return false;
                     }
                 }
@@ -1802,7 +1820,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             // No concurrent OLC writers can start while ACW = -1 (they spin-wait).
             // Page-level latches (TryLatchPageExclusive) are still detected by the seqlock.
             using var staging = stagingPool.Rent();
-            if (!CopyPageWithSeqlock(livePageAddr, staging.Pointer))
+            if (!CopyPageWithSeqlock(livePageAddr, staging.Pointer, memPageIndex))
             {
                 // Page has an active writer (via TryLatchPageExclusive) — skip it. The page stays dirty and will be picked up in the next checkpoint cycle.
                 // This prevents deadlock when the writer is blocked on backpressure waiting for THIS checkpoint to free pages.
@@ -2092,6 +2110,29 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     }
 
     internal unsafe byte* GetMemPageAddress(int memPageIndex) => &_memPagesAddr[memPageIndex * (long)PageSize];
+
+    /// <summary>
+    /// Test/diagnostic invariant check for the seqlock protocol: a quiescent (<see cref="PageState.Idle"/>) page must carry an EVEN
+    /// <see cref="PageBaseHeader.ModificationCounter"/> — an odd value signals a write in progress, but an Idle page has no writer. Returns the number of Idle
+    /// slots whose counter is odd; a correct engine always returns 0. A non-zero result means a slot was reused without resetting the stale counter (guarded in
+    /// <see cref="TryAcquire"/>), which makes <see cref="CopyPageWithSeqlock"/> spin-wait the full skip timeout on a page nobody is writing.
+    /// </summary>
+    internal unsafe int CountQuiescentPagesWithOddSeqlock()
+    {
+        var count = 0;
+        for (var i = 0; i < MemPagesCount; i++)
+        {
+            if (_memPagesInfo[i].PageState != PageState.Idle)
+            {
+                continue;
+            }
+            if ((((PageBaseHeader*)(_memPagesAddr + i * (long)PageSize))->ModificationCounter & 1) != 0)
+            {
+                count++;
+            }
+        }
+        return count;
+    }
 
     /// <summary>Diagnostic snapshot of a page's protection state. Used by ChunkAccessor error reporting.</summary>
     internal (int DirtyCounter, int ActiveChunkWriters, int SlotRefCount, long AccessEpoch, PageState PageState, bool CrcVerified) GetPageInfoForDiagnostic(int memPageIndex)

@@ -43,7 +43,6 @@ class MixedModeArchetype : Archetype<MixedModeArchetype>
 
 // ═══════════════════════════════════════════════════════════════════════
 
-[NonParallelizable]
 class StorageModeReadWriteTests : TestBase<StorageModeReadWriteTests>
 {
     [OneTimeSetUp]

@@ -12,7 +12,6 @@ namespace Typhon.Engine.Tests;
 /// <see cref="TyphonOptions.PageCacheSize"/> knob sets the size; and opening below the 64 MiB recommended minimum logs a
 /// startup warning (suppressed in TestMode).
 /// </summary>
-[NonParallelizable]
 public class PageCacheSizeTests
 {
     private const ulong Mib = 1024UL * 1024UL;

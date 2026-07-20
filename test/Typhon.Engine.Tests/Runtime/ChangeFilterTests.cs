@@ -11,7 +11,6 @@ namespace Typhon.Engine.Tests.Runtime;
 /// Verifies that systems with changeFilter only process entities whose filtered components were written,
 /// that empty dirty sets cause system skip, and that build-time validations work correctly.
 /// </summary>
-[NonParallelizable]
 [TestFixture]
 class ChangeFilterTests : TestBase<ChangeFilterTests>
 {

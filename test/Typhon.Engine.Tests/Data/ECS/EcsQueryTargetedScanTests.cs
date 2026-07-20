@@ -9,7 +9,6 @@ namespace Typhon.Engine.Tests;
 /// Tests for EcsQuery targeted scan (secondary index), OrderBy, Skip, Take.
 /// Uses CompD (indexed fields: [Index] int B, [Index(AllowMultiple)] float A) and CompDArch.
 /// </summary>
-[NonParallelizable]
 class EcsQueryTargetedScanTests : TestBase<EcsQueryTargetedScanTests>
 {
     [OneTimeSetUp]

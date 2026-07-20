@@ -28,7 +28,6 @@ struct ModeLockSingleVersion
 }
 
 [TestFixture]
-[NonParallelizable]
 class StorageModeRevisionLockTests : TestBase<StorageModeRevisionLockTests>
 {
     [OneTimeSetUp]

@@ -11,7 +11,6 @@ namespace Typhon.Engine.Tests.Runtime;
 /// Behavioural tests for the per-system <see cref="SystemDefinition.ChunksPerWorker"/> oversubscription factor.
 /// Verifies that <c>ComputeChunkCount</c> applies the multiplier on the worker-count cap.
 /// </summary>
-[NonParallelizable]
 [TestFixture]
 class ChunksPerWorkerTests : TestBase<ChunksPerWorkerTests>
 {

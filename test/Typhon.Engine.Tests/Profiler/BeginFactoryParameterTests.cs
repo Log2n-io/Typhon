@@ -15,7 +15,6 @@ namespace Typhon.Engine.Tests.Profiler;
 /// self-contained and re-suppresses on teardown.
 /// </remarks>
 [TestFixture]
-[NonParallelizable]
 public sealed class BeginFactoryParameterTests
 {
     // ── Span events with simple value-typed factory params ──

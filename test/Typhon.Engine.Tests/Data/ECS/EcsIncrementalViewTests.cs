@@ -9,7 +9,6 @@ namespace Typhon.Engine.Tests;
 /// Uses CompD (indexed fields: [Index] int B, [Index(AllowMultiple)] float A, [Index(AllowMultiple)] double C)
 /// and CompDArch (archetype 201 with single component CompD).
 /// </summary>
-[NonParallelizable]
 class EcsIncrementalViewTests : TestBase<EcsIncrementalViewTests>
 {
     [OneTimeSetUp]

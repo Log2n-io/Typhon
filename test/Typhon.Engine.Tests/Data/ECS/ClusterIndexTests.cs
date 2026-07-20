@@ -38,7 +38,6 @@ partial class ClIdxUnit : Archetype<ClIdxUnit>
 // ═══════════════════════════════════════════════════════════════════════════════
 
 [TestFixture]
-[NonParallelizable]
 class ClusterIndexTests : TestBase<ClusterIndexTests>
 {
     [OneTimeSetUp]

@@ -6,7 +6,6 @@ using NUnit.Framework;
 namespace Typhon.Engine.Tests;
 
 [TestFixture]
-[NonParallelizable]
 class ClusterDirtyTests : TestBase<ClusterDirtyTests>
 {
     [OneTimeSetUp]
