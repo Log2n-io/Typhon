@@ -1,6 +1,5 @@
 ﻿using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
-using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Tests.Runtime;
 

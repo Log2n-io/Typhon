@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using Microsoft.Extensions.Configuration;
 using NUnit.Framework;
-using Typhon.Engine.Profiler;
 
 namespace Typhon.Engine.Tests.Profiler;
 

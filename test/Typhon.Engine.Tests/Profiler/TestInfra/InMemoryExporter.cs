@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Threading;
-using Typhon.Engine.Profiler;
 
 namespace Typhon.Engine.Tests.Profiler.TestInfra;
 

@@ -3,7 +3,6 @@ using Microsoft.Extensions.Logging;
 using NUnit.Framework;
 using System;
 using System.IO;
-using Typhon.Engine.Internals;
 
 namespace Typhon.Engine.Tests;
 

@@ -5,7 +5,6 @@ using System;
 using System.IO;
 using System.Numerics;
 using System.Threading;
-using Typhon.Engine.Internals;
 using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Tests.Runtime;

@@ -35,21 +35,29 @@
         <None Remove="ClientApp\**" />
     </ItemGroup>
 
-    <!-- Incremental client build: collect TS/TSX/CSS/HTML/JSON sources under ClientApp so MSBuild can compare their mtimes against
-         the built wwwroot bundle. Without this, TypeScript edits are silently ignored on every subsequent `dotnet build` — the server
-         just keeps serving the stale bundle. -->
+    <!-- Incremental client build inputs: hand-written sources + the orval INPUT contract (schema/openapi.json) — NOT the
+         orval-GENERATED output under src/api/generated. orval runs with clean:true and rewrites those generated files (fresh
+         mtimes) on every `npm run build`, so including them here made each build dirty its own inputs and the Inputs/Outputs
+         guard never skipped — a perpetual rebuild. Tracking the contract instead means a real API change still forces a
+         rebuild, while a genuinely no-op build correctly skips. (src/api/client.ts is the hand-written mutator — kept tracked.) -->
     <ItemGroup>
-        <ClientAppSource Include="ClientApp\src\**\*.ts;ClientApp\src\**\*.tsx;ClientApp\src\**\*.css" />
+        <ClientAppSource Include="ClientApp\src\**\*.ts;ClientApp\src\**\*.tsx;ClientApp\src\**\*.css" Exclude="ClientApp\src\api\generated\**" />
+        <ClientAppSource Include="ClientApp\schema\openapi.json" />
         <ClientAppSource Include="ClientApp\index.html;ClientApp\package.json;ClientApp\tsconfig.json;ClientApp\vite.config.ts;ClientApp\tailwind.config.ts" />
     </ItemGroup>
 
-    <Target Name="BuildClientApp" BeforeTargets="Build" Inputs="@(ClientAppSource)" Outputs="wwwroot\index.html">
+    <!-- SkipClientBuild=true lets a caller that has ALREADY produced wwwroot bypass the npm build so it isn't re-run per dotnet
+         invocation. The CI gate builds the SPA once up front (bench/aws/ci.sky.yaml), then builds/tests the .NET projects with
+         this flag; before it, building the CLI, the Workbench, and Typhon.Workbench.Tests each retriggered a full orval+tsc+vite.
+         Default (unset) preserves normal build-on-demand for local dev. -->
+    <Target Name="BuildClientApp" BeforeTargets="Build" Inputs="@(ClientAppSource)" Outputs="wwwroot\index.html"
+            Condition="'$(SkipClientBuild)' != 'true'">
         <Message Importance="high" Text="Building Typhon Workbench client (sources changed or first build)..." />
         <Exec Command="npm install --no-audit --no-fund" WorkingDirectory="ClientApp" />
         <Exec Command="npm run build" WorkingDirectory="ClientApp" />
     </Target>
 
-    <Target Name="PublishClientApp" BeforeTargets="Publish">
+    <Target Name="PublishClientApp" BeforeTargets="Publish" Condition="'$(SkipClientBuild)' != 'true'">
         <Message Importance="high" Text="Building Typhon Workbench client for publish..." />
         <Exec Command="npm install --no-audit --no-fund" WorkingDirectory="ClientApp" />
         <Exec Command="npm run build" WorkingDirectory="ClientApp" />

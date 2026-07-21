@@ -5,7 +5,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using NUnit.Framework;
 using NUnit.Framework.Legacy;
-using Typhon.Engine.Profiler;
 using Typhon.Profiler;
 
 namespace Typhon.Engine.Tests.Profiler.Events;

@@ -1,14 +1,12 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using NUnit.Framework;
-using System;
 using System.IO;
-using Typhon.Engine;
 
 namespace Typhon.Engine.Tests;
 
 /// <summary>
-/// Regression guard for the page-cache seqlock-counter-on-slot-reuse defect. Under a minimum (2 MiB / 256-page) cache the structural working set (schema +
+/// Regression guard for the page-cache seqlock-counter-on-slot-reuse defect. Under an explicit 2 MiB / 256-page cache (below the 8 MiB floor) the structural working set (schema +
 /// many index B-trees) overflows the cache, so eviction recycles slots during <see cref="DatabaseEngine.InitializeArchetypes"/>. A recycled slot used to hand
 /// its stale (possibly odd) seqlock <see cref="PageBaseHeader.ModificationCounter"/> to the fresh page; the checkpoint then treated that quiescent page as
 /// "write-in-progress" and spin-waited the full 100 ms skip timeout on it every cycle (~650 ms per engine close). Fixed by resetting the counter when a slot is
@@ -58,7 +56,9 @@ class SeqlockCounterSlotReuseTests
                 {
                     o.DatabaseName = $"seqlock_reuse_{iter}";
                     o.DatabaseDirectory = dir;
-                    o.DatabaseCacheSize = (ulong)PagedMMF.MinimumCacheSize;
+                    // Pinned to an explicit 2 MiB (256 pages) — the historical floor — so this regression keeps overflowing the
+                    // cache and exercising slot-reuse after MinimumMemPageCount was raised to 8 MiB. TestMode bypasses the floor.
+                    o.DatabaseCacheSize = 256UL * PagedMMF.PageSize;
                     o.TestMode = true;
                     o.PagesDebugPattern = false;
                 })

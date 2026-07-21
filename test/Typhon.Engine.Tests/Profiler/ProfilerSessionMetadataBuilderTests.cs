@@ -1,6 +1,5 @@
 ﻿using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
-using Typhon.Engine.Internals;
 
 namespace Typhon.Engine.Tests.Profiler;
 

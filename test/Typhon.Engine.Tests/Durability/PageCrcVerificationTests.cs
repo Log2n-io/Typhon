@@ -1,7 +1,6 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using NUnit.Framework;
-using System.IO;
 using System.Runtime.CompilerServices;
 
 namespace Typhon.Engine.Tests;

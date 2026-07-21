@@ -2,7 +2,6 @@ using NUnit.Framework;
 using System;
 using System.Diagnostics;
 using System.Threading;
-using Typhon.Engine.Profiler;
 using Typhon.Engine.Tests.Profiler;
 using Typhon.Profiler;
 

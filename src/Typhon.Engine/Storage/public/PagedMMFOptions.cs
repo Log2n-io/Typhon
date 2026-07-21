@@ -41,7 +41,7 @@ public class PagedMMFOptions
     /// <summary>The page size in bytes (8 KiB). <see cref="DatabaseCacheSize"/> must be a multiple of this.</summary>
     public const int PageSizeBytes = PagedMMF.PageSize;
 
-    /// <summary>The minimum permitted <see cref="DatabaseCacheSize"/> in bytes (2 MiB). Values below this fail validation.</summary>
+    /// <summary>The minimum permitted <see cref="DatabaseCacheSize"/> in bytes (8 MiB). Values below this fail validation.</summary>
     public const ulong MinimumCacheSizeBytes = PagedMMF.MinimumCacheSize;
 
     /// <summary>The default <see cref="DatabaseCacheSize"/> in bytes (256 MiB) — the value used when it is not set explicitly.</summary>
@@ -64,9 +64,9 @@ public class PagedMMFOptions
     internal Func<IPageCacheBackpressureStrategy> BackpressureStrategyFactory { get; set; } = () => new WaitForIOStrategy();
 
     /// <summary>
-    /// Test-only minimal-cache profile. When <c>true</c>: allows a <see cref="DatabaseCacheSize"/> below the 2 MiB minimum
+    /// Test-only minimal-cache profile. When <c>true</c>: allows a <see cref="DatabaseCacheSize"/> below the 8 MiB minimum
     /// (so unit tests can stress eviction with a tiny cache) AND suppresses the below-recommended-size warning. Off in
-    /// production, where the small-cache warning and the 2 MiB floor apply. Consolidates the former OverrideDatabaseCacheMinSize.
+    /// production, where the small-cache warning and the 8 MiB floor apply. Consolidates the former OverrideDatabaseCacheMinSize.
     /// </summary>
     internal bool TestMode { get; set; }
 

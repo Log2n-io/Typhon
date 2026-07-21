@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using NUnit.Framework;
-using Typhon.Engine.Internals;
 using Typhon.Profiler;
 
 namespace Typhon.Engine.Tests.Profiler;

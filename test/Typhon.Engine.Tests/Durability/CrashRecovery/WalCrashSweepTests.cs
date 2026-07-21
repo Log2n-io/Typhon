@@ -4,7 +4,6 @@ using NUnit.Framework;
 using System;
 using System.Collections.Generic;
 using System.IO;
-using Typhon.Engine.Internals;
 
 namespace Typhon.Engine.Tests;
 

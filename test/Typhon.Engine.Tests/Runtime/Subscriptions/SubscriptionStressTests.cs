@@ -9,7 +9,6 @@ using System.Net;
 using System.Net.Sockets;
 using System.Threading;
 using Typhon.Protocol;
-using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Tests.Runtime;
 

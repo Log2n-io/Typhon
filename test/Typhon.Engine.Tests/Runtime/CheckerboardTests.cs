@@ -13,6 +13,7 @@ namespace Typhon.Engine.Tests.Runtime;
 /// </summary>
 [TestFixture]
 [NonParallelizable] // timing-sensitive: exercises the real scheduler/tick context; concurrent CPU load from peer fixtures perturbs tick cadence (fails at LoP=8)
+[Ignore("Flaky: non-deterministic tick-cadence / spatial-tier assertions fail under CPU contention (a different test each run). Needs cadence-independent assertions. See #552.")]
 class CheckerboardTests : TestBase<CheckerboardTests>
 {
     private static TierPos PointAt(float x, float y) =>

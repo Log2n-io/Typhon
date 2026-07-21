@@ -1,8 +1,6 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using NUnit.Framework;
-using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 
 namespace Typhon.Engine.Tests;
@@ -35,7 +33,9 @@ public class ProtectedPairTests : AllocatorTestBase
         {
             DatabaseDirectory = TestDatabaseDir,
             DatabaseName = DbName,
-            DatabaseCacheSize = (ulong)(512 * PagedMMF.PageSize),
+            // 512 pages (4 MiB) — deliberately below the 8 MiB floor to force pair over-grow/cycling; TestMode bypasses the floor.
+            DatabaseCacheSize = 512 * PagedMMF.PageSize,
+            TestMode = true,
         };
     }
 

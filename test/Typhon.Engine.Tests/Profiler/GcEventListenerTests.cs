@@ -1,5 +1,4 @@
 using NUnit.Framework;
-using Typhon.Engine.Internals;
 using Typhon.Profiler;
 
 namespace Typhon.Engine.Tests.Profiler;

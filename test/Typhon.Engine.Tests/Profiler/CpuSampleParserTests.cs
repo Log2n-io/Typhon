@@ -2,7 +2,6 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using NUnit.Framework;
-using Typhon.Engine.Internals;
 
 namespace Typhon.Engine.Tests.Profiler;
 

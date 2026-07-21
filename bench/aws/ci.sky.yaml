@@ -55,8 +55,10 @@ setup: |
   if [ "$RUN_ENGINE" = "true" ]; then
     dotnet build test/Typhon.Engine.Tests/Typhon.Engine.Tests.csproj -c Release
   fi
+  # SkipClientBuild=true: do NOT build the SPA here. The run: phase builds wwwroot once (orval → vite build)
+  # before the --no-build test run, so building it here too just ran a full orval+tsc+vite that was thrown away.
   if [ "$RUN_WORKBENCH" = "true" ]; then
-    dotnet build test/Typhon.Workbench.Tests/Typhon.Workbench.Tests.csproj -c Release
+    dotnet build test/Typhon.Workbench.Tests/Typhon.Workbench.Tests.csproj -c Release -p:SkipClientBuild=true
   fi
 
 # NOTE: do not use `set -e` here — we run several suites, capture each exit code, and want the
@@ -94,6 +96,10 @@ run: |
   # --- Workbench: TS toolchain + .NET tests (BLOCKING); Playwright e2e is deferred (P5) ---
   if [ "$RUN_WORKBENCH" = "true" ]; then
     echo "## Workbench" >> "$S"
+    # Single SPA build for the whole gate: generate-types runs orval ONCE; the final `vite build` produces
+    # wwwroot WITHOUT re-running orval/tsc (was `npm run build`, whose `prebuild` reran orval + a second tsc).
+    # vite-plugin-checker still typechecks/lints at build time, so the earlier explicit tsc/lint stay as clear
+    # separate gates. Net: orval 1× + vite 1× (was orval 3× / vite 2× across setup + run).
     (
       cd "$REPO/tools/Typhon.Workbench/ClientApp"
       npm ci --no-audit --no-fund && \
@@ -101,7 +107,7 @@ run: |
       npx tsc --noEmit && \
       npm run lint && \
       npx vitest run && \
-      npm run build
+      npx vite build
     ) 2>&1 | tee "$OUT/workbench-client.log"
     if [ "${PIPESTATUS[0]}" -eq 0 ]; then echo "- ✅ client toolchain (typecheck/lint/vitest/build) passed" >> "$S"
     else RC=1; echo "- ❌ client toolchain FAILED" >> "$S"

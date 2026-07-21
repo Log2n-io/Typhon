@@ -1,7 +1,5 @@
 using System.Diagnostics;
 using NUnit.Framework;
-using Typhon.Engine;
-using Typhon.Engine.Internals;
 
 namespace Typhon.Engine.Tests.Runtime;
 

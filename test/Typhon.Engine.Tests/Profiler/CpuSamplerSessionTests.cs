@@ -1,7 +1,6 @@
 using System;
 using System.IO;
 using NUnit.Framework;
-using Typhon.Engine.Internals;
 
 namespace Typhon.Engine.Tests.Profiler;
 

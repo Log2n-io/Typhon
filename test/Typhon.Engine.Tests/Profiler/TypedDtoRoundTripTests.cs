@@ -1,6 +1,5 @@
 using NUnit.Framework;
 using System;
-using Typhon.Engine.Internals;
 using Typhon.Profiler;
 using Typhon.Profiler.Events;
 

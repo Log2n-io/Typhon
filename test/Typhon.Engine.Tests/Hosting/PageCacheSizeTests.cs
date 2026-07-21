@@ -7,8 +7,8 @@ using NUnit.Framework;
 namespace Typhon.Engine.Tests;
 
 /// <summary>
-/// Page-cache configuration (topic 4): the shipped default is 256 MiB (not the 2 MiB stress floor); the internal
-/// <c>TestMode</c> flag allows a sub-2MiB cache and suppresses the below-recommended-size warning; the discoverable
+/// Page-cache configuration (topic 4): the shipped default is 256 MiB (not the 8 MiB stress floor); the internal
+/// <c>TestMode</c> flag allows a sub-8MiB cache and suppresses the below-recommended-size warning; the discoverable
 /// <see cref="TyphonOptions.PageCacheSize"/> knob sets the size; and opening below the 64 MiB recommended minimum logs a
 /// startup warning (suppressed in TestMode).
 /// </summary>
@@ -45,7 +45,7 @@ public class PageCacheSizeTests
     public void Default_CacheSize_Is256MiB()
     {
         Assert.That(new PagedMMFOptions().DatabaseCacheSize, Is.EqualTo(256UL * Mib),
-            "the shipped default must be the production 256 MiB, not the 2 MiB test-stress floor");
+            "the shipped default must be the production 256 MiB, not the 8 MiB test-stress floor");
     }
 
     [Test]
@@ -53,7 +53,7 @@ public class PageCacheSizeTests
     {
         // The public cache-sizing surface is uniformly in bytes — these constants let a consumer discover the constraints in-code.
         Assert.That(PagedMMFOptions.PageSizeBytes, Is.EqualTo(8 * 1024));
-        Assert.That(PagedMMFOptions.MinimumCacheSizeBytes, Is.EqualTo(2UL * Mib));
+        Assert.That(PagedMMFOptions.MinimumCacheSizeBytes, Is.EqualTo(8UL * Mib));
         Assert.That(PagedMMFOptions.DefaultCacheSizeBytes, Is.EqualTo(256UL * Mib));
         Assert.That(new PagedMMFOptions().DatabaseCacheSize, Is.EqualTo(PagedMMFOptions.DefaultCacheSizeBytes));
     }
@@ -65,13 +65,13 @@ public class PageCacheSizeTests
         {
             DatabaseName = "cache_db",
             DatabaseDirectory = _dir,
-            DatabaseCacheSize = 8192, // one page — a valid multiple but far below the 2 MiB minimum
+            DatabaseCacheSize = 8192, // one page — a valid multiple but far below the 8 MiB minimum
         };
 
-        Assert.That(o.IsValid, Is.False, "a sub-2MiB cache must fail validation without TestMode");
+        Assert.That(o.IsValid, Is.False, "a sub-8MiB cache must fail validation without TestMode");
 
         o.TestMode = true;
-        Assert.That(o.IsValid, Is.True, "TestMode must allow a sub-2MiB cache for eviction-stress tests");
+        Assert.That(o.IsValid, Is.True, "TestMode must allow a sub-8MiB cache for eviction-stress tests");
     }
 
     [Test]
@@ -88,7 +88,7 @@ public class PageCacheSizeTests
     [Test]
     public void SmallCache_LogsWarning_UnlessTestMode()
     {
-        // 8 MiB: a valid size (multiple of the page size, >= 2 MiB floor) but below the 64 MiB recommended minimum.
+        // 8 MiB: a valid size (multiple of the page size, == the 8 MiB floor) but below the 64 MiB recommended minimum.
         var warningsWhenNormal = OpenAndCaptureWarnings(testMode: false);
         Assert.That(warningsWhenNormal.Exists(w => w.Contains("Page cache")), Is.True,
             "opening below the recommended minimum must log a page-cache warning");

@@ -23,9 +23,12 @@ namespace Typhon.Engine.Internals;
 [PublicAPI]
 public partial class PagedMMF : ResourceNode, IMemoryResource
 {
-    // The minimum page-cache size in PAGES (× PageSize = MinimumCacheSize, the 2 MiB floor). Internal: the public cache-sizing
+    // The minimum page-cache size in PAGES (× PageSize = MinimumCacheSize, the 8 MiB floor). Internal: the public cache-sizing
     // surface is byte-based (PagedMMFOptions.DatabaseCacheSize / TyphonOptions.PageCacheSize) — see the public *Bytes constants.
-    internal const int MinimumMemPageCount = 256;
+    // Raised 256→1024 (2→8 MiB): the old 2 MiB floor forced pathological eviction pressure (the seqlock slot-reuse stall) and
+    // is smaller than any real working set; 8 MiB is the smallest sane default. A test that must stress eviction with a truly
+    // tiny cache sets an explicit size under TestMode, which bypasses this floor.
+    internal const int MinimumMemPageCount = 1024;
 
     #region Events
 
@@ -56,7 +59,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     // data page) and segments always span >= 2 pages. v3 (segment-directory twins, occupancy reserve = Int3) and earlier
     // are refused — no backward compat.
     internal const int DatabaseFormatRevision   = 4;
-    internal const ulong MinimumCacheSize       = MinimumMemPageCount * PageSize;      // 2 MiB — the hard floor (see Validate)
+    internal const ulong MinimumCacheSize       = MinimumMemPageCount * PageSize;      // 8 MiB — the hard floor (see Validate)
     internal const ulong DefaultDatabaseCacheSize   = 256UL * 1024 * 1024;             // 256 MiB — the shipped production default
     internal const ulong RecommendedMinimumCacheSize = 64UL * 1024 * 1024;             // 64 MiB — warn below this (unless TestMode)
     internal const int WriteCachePageSize       = 1024 * 1024;
