@@ -38,7 +38,9 @@ describe('dbMapHitTest', () => {
   });
 
   it('regionAtScreen distinguishes the data file from the WAL', () => {
-    const withWal = buildLayout(200, 64 * 1024 * 1024, 4);
+    // showWal: true — the WAL region is opt-in (hidden by default until Module 08); this exercises the hit-test
+    // path for when it is present.
+    const withWal = buildLayout(200, 64 * 1024 * 1024, 4, 1, true);
     expect(regionAtScreen(cam, withWal, 5, 5)).toBe('data');
     const wal = withWal.walRect!;
     const wx = (wal.x + wal.w / 2) * 10;
