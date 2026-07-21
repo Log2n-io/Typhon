@@ -14,6 +14,7 @@ namespace Typhon.Workbench.Tests;
 /// current) copy wins over any stale copy left beside a database — which is the exact failure ADR-055 fixes.
 /// </summary>
 [TestFixture]
+[NonParallelizable] // opens engines via EngineLifecycle.OpenAsync — the schema-compat State check reads the process-global ArchetypeRegistry, which must not race with other engine tests (see #554)
 public sealed class EngineLifecycleManifestTests
 {
     private string _tempDir;

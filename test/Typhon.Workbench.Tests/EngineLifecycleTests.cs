@@ -4,6 +4,7 @@ using Typhon.Workbench.Sessions;
 namespace Typhon.Workbench.Tests;
 
 [TestFixture]
+[NonParallelizable] // opens engines via EngineLifecycle.OpenAsync — the schema-compat State check reads the process-global ArchetypeRegistry, which must not race with other engine tests (see #554)
 public sealed class EngineLifecycleTests
 {
     private string _tempDir;
