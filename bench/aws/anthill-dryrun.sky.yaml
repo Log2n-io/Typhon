@@ -30,6 +30,7 @@ setup: |
 
 run: |
   export PATH="$HOME/.dotnet:$PATH"
+  export TMPDIR=/nvme   # WAL (Path.GetTempPath) on the local NVMe too, not the gp3 root — #466
   cd /nvme
   HARNESS=~/sky_workdir/demo/AntHill/AntHill.Harness
   dotnet "$HARNESS/bin/Release/net10.0/AntHill.Harness.dll" \

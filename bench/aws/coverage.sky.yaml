@@ -41,6 +41,7 @@ run: |
   set -uo pipefail
   export DOTNET_ROOT="$HOME/.dotnet"
   export PATH="$DOTNET_ROOT:$DOTNET_ROOT/tools:$PATH"
+  export TMPDIR=/nvme   # test DBs + WAL (Path.GetTempPath) on the local NVMe, not the gp3 root — WAL cluster ~10x faster (#466)
   WORKERS=$(( $(nproc --all) / 2 ))
   [ "$WORKERS" -lt 1 ] && WORKERS=1
   RUNSETTINGS=/nvme/cov.runsettings

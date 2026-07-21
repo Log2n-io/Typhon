@@ -64,9 +64,22 @@ run: |
   rm -rf test/Typhon.Benchmark/BenchmarkDotNet.Artifacts/results
 
   RC=0
-  ( cd test/Typhon.Benchmark && dotnet run -c Release --no-build -- $BDN_ARGS --exporters json ) \
-    2>&1 | tee /nvme/benchmark.log
+  # Run the benchmark from /nvme so BOTH its DB (DatabaseDirectory defaults to Environment.CurrentDirectory)
+  # and its WAL (TMPDIR / Path.GetTempPath) land on the local instance-store NVMe, not the gp3 EBS root. Those
+  # durability paths are fsync-latency-bound and ~10-40x faster on NVMe (measured 2026-07-21: WAL cluster 3s vs
+  # 32s on gp3; fsync 68us vs 2.77ms), so running on EBS was UNDERSTATING Typhon on write/commit benchmarks.
+  # NVMe is bundled in the box price — free. BDN runs each benchmark in a child process that inherits this cwd,
+  # so its artifacts (incl. per-run DBs) land under /nvme; they're copied back to the tracked project path
+  # afterwards for report_generator. #466  NOTE: this restructure could not be run locally (AWS-only script) —
+  # verify the first NVMe benchmark run writes results under test/Typhon.Benchmark/BenchmarkDotNet.Artifacts/results.
+  BENCH_DLL=$(ls "$REPO"/test/Typhon.Benchmark/bin/Release/net*/Typhon.Benchmark.dll | head -1)
+  ( cd /nvme && TMPDIR=/nvme dotnet "$BENCH_DLL" $BDN_ARGS --exporters json ) 2>&1 | tee /nvme/benchmark.log
   [ "${PIPESTATUS[0]}" -ne 0 ] && RC=1
+  # BDN artifacts followed the /nvme cwd — copy them back to where report_generator expects them.
+  if [ -d /nvme/BenchmarkDotNet.Artifacts ]; then
+    rm -rf test/Typhon.Benchmark/BenchmarkDotNet.Artifacts
+    cp -r /nvme/BenchmarkDotNet.Artifacts test/Typhon.Benchmark/BenchmarkDotNet.Artifacts
+  fi
 
   # Append to history + regenerate the tracked report set (latest.md + charts) in-place.
   python3 benchmark/scripts/report_generator.py \

@@ -30,6 +30,7 @@ setup: |
 
 run: |
   export PATH="$HOME/.dotnet:$PATH"
+  export TMPDIR=/nvme   # WAL (Path.GetTempPath) on the local NVMe too, not the gp3 root — fsync-bound, ~10-40x faster (#466)
   # Profile on fast LOCAL NVMe — cd there so traces + report land on local disk.
   cd /nvme
   HARNESS=~/sky_workdir/demo/AntHill/AntHill.Harness
