@@ -43,7 +43,7 @@ catch (PageCacheBackpressureTimeoutException ex)
 
 | Option | Default | Effect |
 |---|---|---|
-| `PagedMMFOptions.DatabaseCacheSize` (via `AddManagedPagedMMF`, or the fluent `TyphonOptions.PageCacheSize`) | **256 MiB** default | Total cache capacity; must be a multiple of 8 KiB, between 2 MiB and 4 GiB. Below the 64 MiB recommended floor logs a warning (unless the internal `TestMode` is set) |
+| `PagedMMFOptions.DatabaseCacheSize` (via `AddManagedPagedMMF`, or the fluent `TyphonOptions.PageCacheSize`) | **256 MiB** default | Total cache capacity; must be a multiple of 8 KiB, between 8 MiB and 4 GiB. Below the 64 MiB recommended floor logs a warning (unless the internal `TestMode` is set) |
 | `TimeoutOptions.PageCacheBackpressureTimeout` | 5 s | Max wait for a page to free up before `PageCacheBackpressureTimeoutException` |
 | `TimeoutOptions.PageCacheLockTimeout` | 5 s | Max wait on a page state-transition lock |
 
@@ -54,7 +54,7 @@ catch (PageCacheBackpressureTimeoutException ex)
 - The second-chance counter (cap 5) gives hot pages (e.g. B+Tree roots) natural protection without manual pinning or priority tuning — a page can survive up to 5 sweeps before becoming evictable.
 - Sequential file-page access tends to land in contiguous cache memory, batching what would otherwise be many small I/Os into one.
 - Hard constraint: a single transaction's *working set* (distinct pages touched) must fit within the configured cache. If it doesn't, every resident page ends up pinned by that one transaction and allocation deadlocks until `PageCacheBackpressureTimeout` fires. Size the cache to the largest expected transaction, not the average.
-- Cache size is fixed for the life of the open database (2 MiB–4 GiB, multiple of 8 KiB) — no dynamic resizing while running.
+- Cache size is fixed for the life of the open database (8 MiB–4 GiB, multiple of 8 KiB) — no dynamic resizing while running.
 
 ## 🧪 Tests
 

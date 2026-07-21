@@ -54,7 +54,7 @@ catch (PageCacheBackpressureTimeoutException ex)
 
 | Option | Default | Effect |
 |--------|---------|--------|
-| `PagedMMFOptions.DatabaseCacheSize` (or `TyphonOptions.PageCacheSize`) | 256 MiB | Total page-cache budget (bytes); must exceed the largest single transaction's unique-page working set. 2 MiB minimum; below a 64 MiB recommended floor logs a warning |
+| `PagedMMFOptions.DatabaseCacheSize` (or `TyphonOptions.PageCacheSize`) | 256 MiB | Total page-cache budget (bytes); must exceed the largest single transaction's unique-page working set. 8 MiB minimum; below a 64 MiB recommended floor logs a warning |
 | `TimeoutOptions.Current.PageCacheBackpressureTimeout` | 5s | How long allocation waits for a page to become evictable before throwing |
 
 ## ⚠️ Guarantees & limits

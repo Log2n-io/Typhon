@@ -10,7 +10,7 @@ description: 'Persistent components live in a memory-mapped, paged store with a 
 
 You never allocate a page or write a save file — declaring a [component](xref:concept-component) is the whole interaction. The key property: **`DatabaseCacheSize` bounds the resident working set, not how much you can store.** The on-disk database can be many times the cache; cold pages (persistent data, indexes, the entity map) page out and back in on demand — entity count and data size scale with *disk*, not RAM. This is the SQL/SQLite model, and it's what separates Typhon from in-memory ECS frameworks.
 
-The one exception is [`Transient`](xref:concept-storage-mode) components — RAM-only scratch by design, never paged to disk. The default cache is **256 MiB** — a production-sane working set for a single engine; size `DatabaseCacheSize` up for larger workloads and let the engine self-manage eviction. (A 2 MiB minimum exists for tests that deliberately exercise the paging machinery under pressure.)
+The one exception is [`Transient`](xref:concept-storage-mode) components — RAM-only scratch by design, never paged to disk. The default cache is **256 MiB** — a production-sane working set for a single engine; size `DatabaseCacheSize` up for larger workloads and let the engine self-manage eviction. (An 8 MiB minimum exists for tests that deliberately exercise the paging machinery under pressure.)
 
 ## How it relates
 
