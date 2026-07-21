@@ -67,6 +67,10 @@ run: |
   set -uo pipefail
   export DOTNET_ROOT="$HOME/.dotnet"
   export PATH="$DOTNET_ROOT:$DOTNET_ROOT/tools:$PATH"
+  # Test DBs (Path.GetTempPath()) go on the local instance-store NVMe, not the EBS root. The WAL/durability
+  # fixtures are fsync-latency-bound and run ~10x faster on NVMe (measured 2026-07-21: WAL cluster 3s vs 32s on
+  # the gp3 root; fsync 68us vs 2.77ms). /nvme is already mounted (setup) and bundled in the c6id price — free. #466
+  export TMPDIR=/nvme
   # NOTE on parallelism: a single 16-worker `dotnet test` process is BOTH slow (the suite's 116
   # [NonParallelizable] fixtures pin it ~91% serial) AND flaky (parallel fixtures collide on the
   # engine's process-static state). The engine block below instead shards into K serial (workers=1)

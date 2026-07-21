@@ -1,0 +1,10 @@
+# Oneshot invoked every minute by typhon-idle-stop.timer — see idle-stop.sh.
+# Install: copy both units to /etc/systemd/system/, then `systemctl enable --now typhon-idle-stop.timer`.
+[Unit]
+Description=Typhon CI: stop the box after the runner has been idle N minutes
+
+[Service]
+Type=oneshot
+Environment=IDLE_MINUTES=10
+Environment=AWS_REGION=eu-west-1
+ExecStart=/home/ubuntu/typhon-runner/idle-stop.sh

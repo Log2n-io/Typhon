@@ -1,0 +1,12 @@
+# Fires typhon-idle-stop.service every minute (starting 1 min after boot). idle-stop.sh keeps the running
+# count in /run (tmpfs), so the box self-stops after IDLE_MINUTES with no active runner job.
+[Unit]
+Description=Typhon CI: minute tick for the idle self-stop
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+AccuracySec=15s
+
+[Install]
+WantedBy=timers.target

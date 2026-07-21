@@ -65,9 +65,12 @@ jobs:
   # ---- Heavy correctness suites on the c6id (engine / workbench / coverage). ----
   aws-gate:
     needs: changes
+    # Default (SkyPilot ephemeral) path — skipped when the persistent self-hosted runner is enabled (repo variable
+    # GATE_RUNNER=selfhosted, #466); the aws-gate-selfhosted job below runs instead. Rollback = unset the variable.
     if: >-
       (needs.changes.outputs.engine == 'true' || needs.changes.outputs.workbench == 'true')
       && needs.changes.outputs.skip_ut != 'true'
+      && vars.GATE_RUNNER != 'selfhosted'
     runs-on: ubuntu-latest
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -104,6 +107,48 @@ jobs:
             echo "_No summary produced (the VM may have failed before writing one)._" >> "$GITHUB_STEP_SUMMARY"
           fi
 
+      - name: Upload raw artifacts (.trx / coverage / logs)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-reports
+          path: ci-out/**
+          if-no-files-found: ignore
+
+  # ---- Same gate, on the PERSISTENT self-hosted c6id (repo variable GATE_RUNNER=selfhosted). DORMANT until the
+  #      box + power-toggle exist — see bench/aws/runner/ + design/Infrastructure/ci-gate-persistent-runner.md (#466).
+  #      Warm toolchain + bin/obj on the box → incremental build; test DBs on the local NVMe (TMPDIR=/nvme). ----
+  aws-gate-selfhosted:
+    needs: changes
+    if: >-
+      (needs.changes.outputs.engine == 'true' || needs.changes.outputs.workbench == 'true')
+      && needs.changes.outputs.skip_ut != 'true'
+      && vars.GATE_RUNNER == 'selfhosted'
+    runs-on: [self-hosted, linux, typhon-c6id]
+    steps:
+      # clean:false keeps the warm bin/obj (untracked) for an incremental build; test DBs live on /nvme (TMPDIR),
+      # not the worktree, so nothing accumulates there. git reset --hard reverts any tracked edits for isolation.
+      - name: Checkout (keep warm bin/obj)
+        uses: actions/checkout@v4
+        with:
+          clean: false
+      - name: Run correctness gate on the persistent c6id
+        env:
+          RUN_ENGINE: ${{ needs.changes.outputs.engine }}
+          RUN_WORKBENCH: ${{ needs.changes.outputs.workbench }}
+          RUN_ID: ${{ github.run_id }}
+          TMPDIR: /nvme
+        run: |
+          git reset --hard HEAD
+          OUT="$(pwd)/ci-out" REPO="$(pwd)" bash bench/aws/run-gate.sh
+      - name: Render report on the check page
+        if: always()
+        run: |
+          if [ -f ci-out/summary.md ]; then
+            cat ci-out/summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "_No summary produced (the gate may have failed before writing one)._" >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: Upload raw artifacts (.trx / coverage / logs)
         if: always()
         uses: actions/upload-artifact@v4
@@ -251,7 +296,7 @@ jobs:
 
   # ---- The ONLY required check. Aggregates: skipped → pass, failure/cancelled → fail. ----
   gate:
-    needs: [changes, aws-gate, tla, closing-keywords]
+    needs: [changes, aws-gate, aws-gate-selfhosted, tla, closing-keywords]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -259,14 +304,16 @@ jobs:
         run: |
           changes='${{ needs.changes.result }}'
           aws='${{ needs.aws-gate.result }}'
+          awssh='${{ needs.aws-gate-selfhosted.result }}'
           tla='${{ needs.tla.result }}'
           keywords='${{ needs.closing-keywords.result }}'
-          echo "changes=$changes  aws-gate=$aws  tla=$tla  closing-keywords=$keywords"
+          echo "changes=$changes  aws-gate=$aws  aws-gate-selfhosted=$awssh  tla=$tla  closing-keywords=$keywords"
           fail=0
-          # changes must succeed; aws-gate/tla may legitimately be 'skipped' (nothing relevant changed),
-          # and closing-keywords is 'skipped' on push/workflow_dispatch (no PR body to scan).
+          # changes must succeed; the two aws-gate variants + tla may legitimately be 'skipped' (nothing relevant
+          # changed, or the other runner variant is inactive), and closing-keywords is 'skipped' on push/dispatch.
           [ "$changes" = "success" ] || { echo "change-detection failed"; fail=1; }
           case "$aws" in failure|cancelled) echo "aws-gate failed"; fail=1 ;; esac
+          case "$awssh" in failure|cancelled) echo "aws-gate-selfhosted failed"; fail=1 ;; esac
           case "$tla" in failure|cancelled) echo "tla failed"; fail=1 ;; esac
           case "$keywords" in failure|cancelled) echo "closing-keywords guard failed"; fail=1 ;; esac
           if [ "$fail" -ne 0 ]; then echo "Merge gate: RED"; exit 1; fi

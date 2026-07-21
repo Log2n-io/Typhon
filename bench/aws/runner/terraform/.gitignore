@@ -1,0 +1,10 @@
+# Never commit: these hold the webhook secret + real infra state.
+*.tfvars
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.tfstate.lock.info
+# Generated at plan/apply time.
+lambda.zip
+lambda/__pycache__/
+# Keep .terraform.lock.hcl (provider pins) — it SHOULD be committed.

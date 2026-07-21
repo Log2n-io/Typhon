@@ -1,0 +1,17 @@
+# systemd oneshot: format + mount the instance-store NVMe on every boot, BEFORE the GitHub runner service
+# picks up a job. Install: copy to /etc/systemd/system/, `systemctl enable --now typhon-nvme.service`.
+# The runner service (actions.runner.<org>-<repo>.<name>.service) should order After=typhon-nvme.service.
+[Unit]
+Description=Typhon CI: format + mount instance-store NVMe at /nvme
+After=network-online.target
+Wants=network-online.target
+Before=actions.runner.*.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=RUNNER_USER=ubuntu
+ExecStart=/home/ubuntu/typhon-runner/on-start.sh
+
+[Install]
+WantedBy=multi-user.target
