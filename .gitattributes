@@ -1,0 +1,5 @@
+# Shell scripts + systemd units run on Linux — force LF regardless of a contributor's core.autocrlf,
+# so a Windows commit can never ship CRLF that breaks bash/systemd on the CI runner.
+*.sh       text eol=lf
+*.service  text eol=lf
+*.timer    text eol=lf
