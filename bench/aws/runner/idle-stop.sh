@@ -8,7 +8,7 @@
 # it cannot misfire between two back-to-back jobs. (Concurrency section of the design.)
 set -euo pipefail
 
-IDLE_MINUTES="${IDLE_MINUTES:-10}"
+IDLE_MINUTES="${IDLE_MINUTES:-2}"
 REGION="${AWS_REGION:-eu-west-1}"
 STATE=/run/typhon-idle-count      # tmpfs — resets to absent on boot, so a fresh box starts its idle count at 0
 

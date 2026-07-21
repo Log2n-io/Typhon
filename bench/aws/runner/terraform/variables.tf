@@ -41,7 +41,7 @@ variable "webhook_secret" {
 
 variable "max_uptime_min" {
   type    = number
-  default = 120 # backstop: stop a box running longer than this (a normal gate run is ~10 min; idle-stop fires at 10 min idle)
+  default = 120 # backstop: stop a box running longer than this (a normal gate run is ~10 min; idle-stop fires at 2 min idle)
 }
 
 variable "alert_email" {
