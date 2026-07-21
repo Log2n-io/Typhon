@@ -3,7 +3,6 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
-using Typhon.Engine;
 using Typhon.Schema.Definition;
 
 namespace Typhon.Benchmark;

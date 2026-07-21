@@ -129,7 +129,7 @@ internal sealed class ArchetypeRegistryLifecycleTests : TestBase<ArchetypeRegist
     }
 
     /// <summary>
-    /// AC5 — cornerstone test. Loads <c>Typhon.Workbench.Fixtures.schema.dll</c> into a fresh
+    /// AC5 — cornerstone test. Loads <c>Typhon.Samples.Swg.dll</c> into a fresh
     /// <see cref="AssemblyLoadContext"/> with <c>isCollectible: true</c>, invokes the registry's
     /// register + unregister flow against the ALC-loaded archetype Types, then drops every managed
     /// reference + calls <c>ALC.Unload()</c> + forces a GC. The ALC's <see cref="WeakReference"/> must
@@ -144,11 +144,11 @@ internal sealed class ArchetypeRegistryLifecycleTests : TestBase<ArchetypeRegist
     [Test]
     public void CollectibleAlc_UnloadsAfterUnregister()
     {
-        // Resolve the path to Typhon.Workbench.Fixtures.schema.dll — it lives next to the test assembly
+        // Resolve the path to Typhon.Samples.Swg.dll — it lives next to the test assembly
         // in the test output directory (project reference) so we just point the load at our own bin dir.
         var schemaDllPath = Path.Combine(
             Path.GetDirectoryName(typeof(ArchetypeRegistryLifecycleTests).Assembly.Location)!,
-            "Typhon.Workbench.Fixtures.schema.dll");
+            "Typhon.Samples.Swg.dll");
         Assume.That(File.Exists(schemaDllPath), Is.True,
             $"Test prerequisite missing: {schemaDllPath}. Run `dotnet build` to populate the test bin directory.");
 

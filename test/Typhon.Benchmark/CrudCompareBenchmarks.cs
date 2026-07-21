@@ -5,7 +5,6 @@ using BenchmarkDotNet.Toolchains.InProcess.Emit;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using System;
-using Typhon.Engine;
 
 namespace Typhon.Benchmark;
 

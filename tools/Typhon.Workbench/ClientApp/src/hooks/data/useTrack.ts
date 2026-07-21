@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { useSessionStore } from '@/stores/useSessionStore';
 import type { TrackDataResponseDto } from '@/api/generated/model/trackDataResponseDto';
+import { applyWorkbenchAuthHeaders } from '@/api/bootstrapToken';
 
 export function useTrack(
   sessionId: string | null,
@@ -20,9 +21,7 @@ export function useTrack(
       if (from != null) params.set('from', String(from));
       if (to != null) params.set('to', String(to));
       const qs = params.toString() ? `?${params.toString()}` : '';
-      const headers = new Headers();
-      if (token) headers.set('X-Session-Token', token);
-      headers.set('X-Workbench-Api', '1');
+      const headers = applyWorkbenchAuthHeaders(new Headers(), token);
       // trackId may contain '/' (e.g. "tick/summary") — the server uses a catch-all route {**trackId}.
       const res = await fetch(`/api/sessions/${sessionId}/track/${trackId}${qs}`, { signal, headers });
       if (res.status === 202) return null;

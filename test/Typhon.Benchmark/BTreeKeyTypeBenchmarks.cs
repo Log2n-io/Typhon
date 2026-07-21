@@ -1,7 +1,5 @@
 using BenchmarkDotNet.Attributes;
 using System;
-using Typhon.Engine;
-using Typhon.Schema.Definition;
 
 namespace Typhon.Benchmark;
 

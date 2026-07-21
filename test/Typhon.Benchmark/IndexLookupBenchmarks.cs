@@ -4,7 +4,6 @@ using Microsoft.Extensions.Logging;
 using System;
 using System.IO;
 using System.Runtime.InteropServices;
-using Typhon.Engine;
 using Typhon.Schema.Definition;
 
 namespace Typhon.Benchmark;

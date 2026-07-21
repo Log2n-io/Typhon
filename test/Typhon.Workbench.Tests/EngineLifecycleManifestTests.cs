@@ -40,7 +40,7 @@ public sealed class EngineLifecycleManifestTests
         // Workbench's (here, the test's) own deployment directory.
         var fixture = FixtureDatabase.CreateOrReuse(_tempDir, force: true);
         var fixtureDir = Path.GetDirectoryName(fixture.TyphonFilePath)!;
-        Assert.That(File.Exists(Path.Combine(fixtureDir, "Typhon.Workbench.Fixtures.schema.dll")), Is.False,
+        Assert.That(File.Exists(Path.Combine(fixtureDir, "Typhon.Samples.Swg.dll")), Is.False,
             "ADR-055: the schema DLL must NOT be copied next to the database anymore");
 
         using var lifecycle = await EngineLifecycle.OpenAsync(fixture.TyphonFilePath);
@@ -52,7 +52,7 @@ public sealed class EngineLifecycleManifestTests
             Is.True, "the resolved schema DLL must come from the Workbench's own deployment directory");
 
         var required = lifecycle.Engine.GetRequiredAssemblies().Select(a => a.Name).ToArray();
-        Assert.That(required, Does.Contain("Typhon.Workbench.Fixtures.schema"), "the declaring assembly must be recorded in the manifest");
+        Assert.That(required, Does.Contain("Typhon.Samples.Swg"), "the declaring assembly must be recorded in the manifest");
 
         // The original bug: without the schema the per-archetype segments were never registered, so the File Map rendered
         // them Unknown. With the resolved schema loaded, the cluster archetype's segment must be registered.
@@ -69,7 +69,7 @@ public sealed class EngineLifecycleManifestTests
         // BadImageFormatException and the session would not be Ready.)
         var fixture = FixtureDatabase.CreateOrReuse(_tempDir, force: true);
         var fixtureDir = Path.GetDirectoryName(fixture.TyphonFilePath)!;
-        File.WriteAllText(Path.Combine(fixtureDir, "Typhon.Workbench.Fixtures.schema.dll"), "not a real dll — a stale copy");
+        File.WriteAllText(Path.Combine(fixtureDir, "Typhon.Samples.Swg.dll"), "not a real dll — a stale copy");
 
         using var lifecycle = await EngineLifecycle.OpenAsync(fixture.TyphonFilePath);
 
@@ -83,7 +83,7 @@ public sealed class EngineLifecycleManifestTests
     {
         // An explicit user-specified path bypasses manifest resolution entirely (provenance "user-specified").
         var fixture = FixtureDatabase.CreateOrReuse(_tempDir, force: true);
-        var bundledSchema = Path.Combine(AppContext.BaseDirectory, "Typhon.Workbench.Fixtures.schema.dll");
+        var bundledSchema = Path.Combine(AppContext.BaseDirectory, "Typhon.Samples.Swg.dll");
 
         using var lifecycle = await EngineLifecycle.OpenAsync(fixture.TyphonFilePath, [bundledSchema]);
 
@@ -104,8 +104,8 @@ public sealed class EngineLifecycleManifestTests
         // resolves from the registered directory without its engine deps alongside it.
         var registeredDir = Path.Combine(_tempDir, "registered-schema");
         Directory.CreateDirectory(registeredDir);
-        var bundledSchema = Path.Combine(AppContext.BaseDirectory, "Typhon.Workbench.Fixtures.schema.dll");
-        var registeredCopy = Path.Combine(registeredDir, "Typhon.Workbench.Fixtures.schema.dll");
+        var bundledSchema = Path.Combine(AppContext.BaseDirectory, "Typhon.Samples.Swg.dll");
+        var registeredCopy = Path.Combine(registeredDir, "Typhon.Samples.Swg.dll");
         File.Copy(bundledSchema, registeredCopy, overwrite: true);
 
         using var lifecycle = await EngineLifecycle.OpenAsync(fixture.TyphonFilePath, null, [registeredDir]);

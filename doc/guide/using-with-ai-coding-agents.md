@@ -60,22 +60,22 @@ and read back. Split into two files so the top-level `Program.cs` stays clean.
 using Typhon.Engine;
 using Typhon.Schema.Definition;
 
-namespace Skirmish;   // (1) a named namespace is tidier for a real project — the global namespace also works
+namespace Swg;   // (1) a named namespace is tidier for a real project — the global namespace also works
 
 // (2) a component is a blittable struct, >= 8 bytes, public fields
-[Component("Skirmish.UnitData", 1, StorageMode = StorageMode.Versioned)]  // (9) per-component storage mode
-public struct UnitData
+[Component("Swg.HarvesterData", 1, StorageMode = StorageMode.Versioned)]  // (9) per-component storage mode
+public struct HarvesterData
 {
     public int X;
-    public int Health;
+    public int Cargo;
 }
 
 // an archetype is the entity's shape: partial class : Archetype<TSelf>, one Comp<T> handle per component
 // no id arg — identity is the CLR type name (or [Archetype(Name="…")]); it self-registers at assembly load
 [Archetype]
-public sealed partial class Unit : Archetype<Unit>
+public sealed partial class Harvester : Archetype<Harvester>
 {
-    public static readonly Comp<UnitData> Data = Register<UnitData>();
+    public static readonly Comp<HarvesterData> Data = Register<HarvesterData>();
 }
 ```
 
@@ -83,33 +83,33 @@ public sealed partial class Unit : Archetype<Unit>
 
 ```csharp
 using Typhon.Engine;
-using Skirmish;
+using Swg;
 
-using var dbe = DatabaseEngine.Open("game.typhon", o => o   // (6) bootstrap
-    .Register<UnitData>());   // components register explicitly; archetypes self-register at assembly load — no RegisterArchetype call
+using var dbe = DatabaseEngine.Open("field.typhon", o => o   // (6) bootstrap
+    .Register<HarvesterData>());   // components register explicitly; archetypes self-register at assembly load — no RegisterArchetype call
 
 // (5) spawn inside a transaction; (8) Commit
 EntityId id;
 using (var tx = dbe.CreateQuickTransaction())
 {
-    id = tx.Spawn<Unit>(Unit.Data.Set(new UnitData { X = 0, Health = 100 }));
+    id = tx.Spawn<Harvester>(Harvester.Data.Set(new HarvesterData { X = 0, Cargo = 0 }));
     tx.Commit();
 }
 
 // mutate: OpenMut for a writable handle
 using (var tx = dbe.CreateQuickTransaction())
 {
-    tx.OpenMut(id).Write(Unit.Data).Health -= 10;
+    tx.OpenMut(id).Write(Harvester.Data).Cargo += 10;
     tx.Commit();
 }
 
 // (3) query to FIND, (4) Open to READ
 using (var tx = dbe.CreateQuickTransaction())
 {
-    foreach (var e in tx.Query<Unit>())
+    foreach (var e in tx.Query<Harvester>())
     {
-        var u = tx.Open(e.Id).Read(Unit.Data);
-        Console.WriteLine($"X={u.X} Health={u.Health}");   // X=0 Health=90
+        var h = tx.Open(e.Id).Read(Harvester.Data);
+        Console.WriteLine($"X={h.X} Cargo={h.Cargo}");   // X=0 Cargo=10
     }
 }
 ```

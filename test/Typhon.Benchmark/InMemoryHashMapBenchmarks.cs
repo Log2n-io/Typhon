@@ -2,7 +2,6 @@ using BenchmarkDotNet.Attributes;
 using Microsoft.Extensions.DependencyInjection;
 using System;
 using System.Collections.Generic;
-using Typhon.Engine;
 
 namespace Typhon.Benchmark;
 

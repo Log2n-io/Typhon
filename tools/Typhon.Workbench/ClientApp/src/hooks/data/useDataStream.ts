@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { applyWorkbenchAuthHeaders } from '@/api/bootstrapToken';
 
 /**
  * Per-session shared state for the unified data stream (#308 Phase B/C). One open EventSource per
@@ -143,7 +144,7 @@ async function postSubscription(
   try {
     const resp = await fetch(`/api/sessions/${sessionId}${path}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: applyWorkbenchAuthHeaders(new Headers({ 'Content-Type': 'application/json' })),
       body: JSON.stringify({ streamId, events }),
     });
     return resp.ok;

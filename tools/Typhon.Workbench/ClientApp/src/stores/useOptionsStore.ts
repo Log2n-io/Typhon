@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { applyWorkbenchAuthHeaders } from '@/api/bootstrapToken';
 
 /**
  * Mirror of the C# `WorkbenchOptions` schema. Fields stay in sync with
@@ -127,7 +128,7 @@ export const useOptionsStore = create<OptionsState>()((set, get) => ({
     try {
       const resp = await fetch('/api/options/editor', {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: applyWorkbenchAuthHeaders(new Headers({ 'Content-Type': 'application/json' })),
         body: JSON.stringify(editor),
       });
       if (!resp.ok) {
@@ -148,7 +149,7 @@ export const useOptionsStore = create<OptionsState>()((set, get) => ({
     try {
       const resp = await fetch('/api/options/profiler', {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: applyWorkbenchAuthHeaders(new Headers({ 'Content-Type': 'application/json' })),
         body: JSON.stringify(profiler),
       });
       if (!resp.ok) {
@@ -169,7 +170,7 @@ export const useOptionsStore = create<OptionsState>()((set, get) => ({
     try {
       const resp = await fetch('/api/options/schema', {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: applyWorkbenchAuthHeaders(new Headers({ 'Content-Type': 'application/json' })),
         body: JSON.stringify(schema),
       });
       if (!resp.ok) {

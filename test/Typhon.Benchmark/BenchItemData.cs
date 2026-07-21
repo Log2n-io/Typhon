@@ -1,13 +1,15 @@
-﻿using System.Runtime.InteropServices;
+using System.Runtime.InteropServices;
 using Typhon.Schema.Definition;
 
-namespace Typhon.ARPG.Schema;
+namespace Bench;
 
 /// <summary>
-/// Core item data for all item types: equipment, materials, consumables, crafting results.
-/// Items are standalone entities; ownership and location tracked via OwnerId and DropLocation.
+/// Item data for <see cref="Typhon.Benchmark.QueryViewBenchmarks"/>. Local copy of the single struct that benchmark
+/// needs — carried here so the benchmark owns its schema instead of depending on a whole sample/schema project
+/// (a former example schema project was retired in #531). Benchmarks always regenerate their database, so the
+/// standalone identity is safe.
 /// </summary>
-[Component("ARPG.ItemData", 1)]
+[Component("Bench.ItemData", 1)]
 [StructLayout(LayoutKind.Sequential)]
 public struct ItemData
 {

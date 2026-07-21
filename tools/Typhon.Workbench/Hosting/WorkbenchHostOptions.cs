@@ -26,6 +26,21 @@ public sealed class WorkbenchHostOptions
     public string DbPath { get; init; }
 
     /// <summary>
+    /// Optional profiler-trace path to open in the initial Workbench session. Mirrors <see cref="DbPath"/>: when set
+    /// it is handed to the SPA via the launch-URL fragment (never sent to the server) so the browser auto-opens it
+    /// into the profiler (POST <c>/api/sessions/trace</c>); null leaves the profiler closed.
+    /// </summary>
+    public string TracePath { get; init; }
+
+    /// <summary>
+    /// Optional schema-assembly (.dll) path used to interpret <see cref="DbPath"/>. A <c>.typhon</c> database records
+    /// the assembly that defined its schema; without that DLL the Workbench can only show engine internals (0
+    /// archetypes). Handed to the SPA via the launch-URL fragment (like <see cref="DbPath"/>) so the browser passes it
+    /// as an explicit schema DLL when auto-opening the database. Ignored when <see cref="DbPath"/> is null.
+    /// </summary>
+    public string SchemaPath { get; init; }
+
+    /// <summary>
     /// When true the host opens the default browser at the tokenized launch URL once Kestrel is listening. Used by
     /// <c>typhon ui</c>; the standalone host leaves it false (in dev the browser is opened against the Vite server).
     /// </summary>

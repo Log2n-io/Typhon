@@ -166,10 +166,11 @@ Typhon/
 │   ├── Typhon.Workbench.Tests/      # Workbench server-side tests
 │   ├── Typhon.Benchmark/            # BenchmarkDotNet performance tests
 │   ├── Typhon.CompetitiveBenchmark/ # Comparative benchmark vs SQLite/RocksDB/LMDB/FASTER
-│   ├── Typhon.ARPG.Schema/          # Example ARPG game schema
-│   ├── Typhon.ARPG.Shell/           # Shell demo with ARPG data
 │   ├── Typhon.MonitoringDemo/       # Observability demo
+│   ├── Typhon.Samples.Swg.Tests/    # Tests for the canonical SWG sample schema
 │   └── Typhon.IOProfileRunner/      # Storage I/O profiling sandbox
+├── samples/
+│   └── Typhon.Samples.Swg/          # Canonical SWG sample schema (Light + Full) — referenced in-repo, emitted as source by `typhon new`
 ├── tools/
 │   ├── Typhon.Workbench/           # Local dev UI (ASP.NET Core 10 + React 19/Vite) — data browsing, schema, profiler, System DAG, Data Flow timeline, Access Matrix
 │   └── Typhon.Workbench.Fixtures/  # Dev-only test fixture generators consumed by the Workbench DEBUG tabs

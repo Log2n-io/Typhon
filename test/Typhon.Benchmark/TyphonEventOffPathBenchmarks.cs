@@ -1,5 +1,4 @@
 using BenchmarkDotNet.Attributes;
-using Typhon.Engine.Profiler;
 
 namespace Typhon.Benchmark;
 

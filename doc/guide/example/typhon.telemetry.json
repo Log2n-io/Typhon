@@ -1,0 +1,11 @@
+{
+  "Typhon": {
+    "Profiler": {
+      "Enabled": true,
+      "Trace": "captures/guide.typhon-trace",
+      "CpuSampling": { "Enabled": true },
+      "Scheduler":   { "Enabled": true },
+      "Gauges":      { "Enabled": true }
+    }
+  }
+}

@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, useState } from 'react';
 import type { IDockviewPanelProps } from 'dockview-react';
 import { useSessionStore } from '@/stores/useSessionStore';
+import { applyWorkbenchAuthHeaders } from '@/api/bootstrapToken';
 
 /**
  * Inline source-preview panel (issue #293, Phase 5). Lazy-loads `react-syntax-highlighter` so the
@@ -47,8 +48,7 @@ export default function SourcePreviewPanel(props: IDockviewPanelProps): React.JS
     setData(null);
     (async () => {
       try {
-        const headers = new Headers();
-        if (token) headers.set('X-Session-Token', token);
+        const headers = applyWorkbenchAuthHeaders(new Headers(), token);
         const url = `/api/profiler/source?path=${encodeURIComponent(path)}&line=${line}&context=20`;
         const res = await fetch(url, { signal: ctrl.signal, headers });
         if (!res.ok) {

@@ -5,14 +5,13 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using System;
 using System.IO;
-using Typhon.ARPG.Schema;
-using Typhon.Engine;
+using Bench;
 using Typhon.Schema.Definition;
 
 namespace Typhon.Benchmark;
 
 // ═══════════════════════════════════════════════════════════════════════
-// Query & View: ARPG ItemData real-world benchmarks (ECS API)
+// Query & View: ItemData real-world benchmarks (ECS API)
 // ═══════════════════════════════════════════════════════════════════════
 
 class InProcessConfig : ManualConfig

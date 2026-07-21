@@ -6,7 +6,7 @@ namespace Typhon.Shell.Extensibility;
 /// </summary>
 public abstract class ShellCommand
 {
-    /// <summary>Display name used to invoke the command (e.g., "arpg-generate"). Lowercase, hyphen-separated.</summary>
+    /// <summary>Display name used to invoke the command (e.g., "generate-data"). Lowercase, hyphen-separated.</summary>
     public abstract string Name { get; }
 
     /// <summary>One-line description shown in <c>help</c> listing.</summary>

@@ -1,6 +1,5 @@
 using BenchmarkDotNet.Attributes;
 using BenchmarkDotNet.Jobs;
-using System;
 using System.Threading;
 using System.Threading.Tasks;
 

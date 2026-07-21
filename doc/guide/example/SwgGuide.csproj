@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Runnable companion for doc/guide, and the source template `typhon new` emits. It references the canonical SWG
+       sample the way a real consumer project references the published Typhon package: one project reference (the
+       package stand-in, which brings the engine + Schema.Definition transitively) plus the consumer generator that
+       emits the archetype accessors. Every snippet in the guide is mirrored here, so the guide is known to compile
+       and run against the current engine. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>disable</Nullable>
+    <LangVersion>default</LangVersion>
+    <RootNamespace>SwgGuide</RootNamespace>
+    <AssemblyName>SwgGuide</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\samples\Typhon.Samples.Swg\Typhon.Samples.Swg.csproj" />
+    <ProjectReference Include="..\..\..\src\Typhon.Generators.Consumer\Typhon.Generators.Consumer.csproj"
+                      ReferenceOutputAssembly="false" OutputItemType="Analyzer" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Config-driven profiling: the engine self-wires from this file inside TyphonRuntime.Create and writes the
+         .typhon-trace when the engine is disposed. Zero profiling code in Program.cs. -->
+    <None Update="typhon.telemetry.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

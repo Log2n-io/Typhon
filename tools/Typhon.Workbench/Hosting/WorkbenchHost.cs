@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.ApplicationParts;
+using Microsoft.AspNetCore.StaticFiles;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Hosting;
@@ -110,7 +111,7 @@ public static class WorkbenchHost
         {
             spaFiles = new PhysicalFileProvider(spaRoot);
             app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = spaFiles });
-            app.UseStaticFiles(new StaticFileOptions { FileProvider = spaFiles });
+            app.UseStaticFiles(new StaticFileOptions { FileProvider = spaFiles, OnPrepareResponse = NoCacheIndexHtml });
         }
 
         // OpenAPI document at /openapi.json — stable path agreed upon by Orval and the Vite proxy.
@@ -138,7 +139,7 @@ public static class WorkbenchHost
         // Served from the same pinned provider; skipped entirely when no SPA is present (API-only host).
         if (spaFiles is not null)
         {
-            app.MapFallbackToFile("index.html", new StaticFileOptions { FileProvider = spaFiles });
+            app.MapFallbackToFile("index.html", new StaticFileOptions { FileProvider = spaFiles, OnPrepareResponse = NoCacheIndexHtml });
         }
 
         app.Services.RegisterSessionShutdownHook();
@@ -151,14 +152,31 @@ public static class WorkbenchHost
         // Sweep orphan profiler temp files left by prior crashes (LZ4 chunk caches under %TEMP%/typhon-workbench).
         LiveCacheTempFile.SweepOrphans(app.Logger);
 
-        if (options.OpenBrowser)
-        {
-            ScheduleBrowserLaunch(app, options, gate);
-        }
+        // Always announce the tokenized launch URL once Kestrel is listening; a browser is launched too unless --no-browser.
+        ScheduleBrowserLaunch(app, options, gate);
 
         app.Run();
 
         return 0;
+    }
+
+    /// <summary>
+    /// Marks the SPA's <c>index.html</c> as non-cacheable. Vite fingerprints every JS/CSS asset (<c>index-{hash}.js</c>),
+    /// so a rebuild changes those filenames — but <c>index.html</c> keeps its stable URL while pointing at the new hashes.
+    /// If the browser caches the HTML, a republished/upgraded <c>typhon ui</c> keeps booting the OLD bundle (the exact
+    /// trap behind the #429 token-handoff confusion: a "fresh tab" still reused cached HTML → old JS → 401s). Sending
+    /// <c>no-cache, no-store, must-revalidate</c> on the HTML (only) forces a revalidation each load so the new hashed
+    /// assets are picked up immediately; the fingerprinted assets themselves stay freely cacheable.
+    /// </summary>
+    private static void NoCacheIndexHtml(StaticFileResponseContext ctx)
+    {
+        if (ctx.File.Name.Equals("index.html", StringComparison.OrdinalIgnoreCase))
+        {
+            var headers = ctx.Context.Response.Headers;
+            headers.CacheControl = "no-cache, no-store, must-revalidate";
+            headers.Pragma = "no-cache";
+            headers.Expires = "0";
+        }
     }
 
     /// <summary>
@@ -189,9 +207,10 @@ public static class WorkbenchHost
     }
 
     /// <summary>
-    /// Registers a one-shot <see cref="IHostApplicationLifetime.ApplicationStarted"/> callback that opens the
-    /// browser at the tokenized launch URL once Kestrel is actually listening (so the first request never races
-    /// the bind). Best-effort — a failed launch prints the URL for manual opening.
+    /// Registers a one-shot <see cref="IHostApplicationLifetime.ApplicationStarted"/> callback that — once Kestrel is
+    /// actually listening (so the first request never races the bind) — always prints the tokenized launch URL and, when
+    /// <see cref="WorkbenchHostOptions.OpenBrowser"/> is set, opens the browser at it. Best-effort launch: a failure or
+    /// a browser that re-focuses a stale tab is recoverable because the URL is always printed for manual opening.
     /// </summary>
     private static void ScheduleBrowserLaunch(WebApplication app, WorkbenchHostOptions options, BootstrapTokenGate gate)
     {
@@ -199,14 +218,17 @@ public static class WorkbenchHost
         lifetime.ApplicationStarted.Register(() =>
         {
             var launchUrl = BuildLaunchUrl(options, gate.Token);
-            if (BrowserLauncher.TryOpen(launchUrl))
-            {
-                app.Logger.LogInformation("Workbench UI opened in your browser at {Url}", options.Url);
-            }
-            else
-            {
-                app.Logger.LogWarning("Could not open a browser automatically. Open the Workbench manually: {Url}", launchUrl);
-            }
+            // Always surface the tokenized URL (Jupyter-style). The bootstrap token lives in the fragment and is
+            // captured only on a *fresh* page load, so if the OS hands the URL to an already-open :5200 tab (a
+            // fragment-only change doesn't reload the SPA), the auto-open silently keeps the old/absent token and every
+            // request 401s. Printing the URL lets the user paste it into a NEW tab to recover.
+            var opened = options.OpenBrowser && BrowserLauncher.TryOpen(launchUrl);
+            var lead = !options.OpenBrowser
+                ? "Workbench is running. Open this URL in your browser:"
+                : opened
+                    ? "Workbench UI opened in your browser. If it shows a token error or doesn't load, open this URL in a NEW tab:"
+                    : "Could not open a browser automatically. Open this URL in your browser:";
+            app.Logger.LogInformation("{Lead}\n\n    {Url}\n", lead, launchUrl);
         });
     }
 
@@ -223,6 +245,14 @@ public static class WorkbenchHost
         if (!string.IsNullOrEmpty(options.DbPath))
         {
             url += $"&db={Uri.EscapeDataString(options.DbPath)}";
+        }
+        if (!string.IsNullOrEmpty(options.SchemaPath))
+        {
+            url += $"&schema={Uri.EscapeDataString(options.SchemaPath)}";
+        }
+        if (!string.IsNullOrEmpty(options.TracePath))
+        {
+            url += $"&trace={Uri.EscapeDataString(options.TracePath)}";
         }
 
         return url;

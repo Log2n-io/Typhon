@@ -8,7 +8,7 @@ description: 'Chapter 1 showed the data loop. This chapter is about design: how 
 
 Chapter 1 showed the data loop. This chapter is about **design**: how to shape your data so the engine works *with* you. Four decisions live here — what your components and archetypes are, which **storage mode** each component uses, which fields you **index**, and whether you need **spatial** queries. Get these right and the rest of Typhon falls into place; get them wrong and you'll fight the engine.
 
-We'll grow the chapter-1 `Unit` into something a real skirmish would use.
+We'll grow the chapter-1 `Harvester` into something a real harvesting sim would use.
 
 ---
 
@@ -16,61 +16,61 @@ We'll grow the chapter-1 `Unit` into something a real skirmish would use.
 
 The three nouns again, now with the *why*:
 
-- A **component** is a plain `struct` of data — `Position`, `Health`, `Team`. No behaviour, no engine references.
-- An **archetype** is a *fixed set* of components — the shape `Unit = Health + Position + …`. You declare it as a class.
+- A **component** is a plain `struct` of data — `Position`, `Cargo`, `Extractor`. No behaviour, no engine references.
+- An **archetype** is a *fixed set* of components — the shape `Harvester = Cargo + Position + …`. You declare it as a class.
 - An **entity** is one instance of an archetype, addressed by an `EntityId`.
 
-💡 **Why a fixed shape per entity?** Because Typhon stores components **archetype-major**: every `Unit`'s `Position` sits contiguously in memory, separate from every `Building`'s. Iterating "all units' positions" is then a linear walk over packed memory — cache-friendly, branch-free, fast. That contiguity is the whole performance bet of ECS, and it's only possible because the shape is fixed at spawn. The cost: an entity can't grow a new component type after it's spawned (you model that with a different archetype, or an *enabled/disabled* component flag).
+💡 **Why a fixed shape per entity?** Because Typhon stores components **archetype-major**: every `Harvester`'s `Position` sits contiguously in memory, separate from every other archetype's. Iterating "all drones' positions" is then a linear walk over packed memory — cache-friendly, branch-free, fast. That contiguity is the whole performance bet of ECS, and it's only possible because the shape is fixed at spawn. The cost: an entity can't grow a new component type after it's spawned (you model that with a different archetype, or an *enabled/disabled* component flag).
 
 ### Declaring an archetype
 
 ```csharp
 [Archetype]
-public sealed partial class Unit : Archetype<Unit>
+public sealed partial class Harvester : Archetype<Harvester>
 {
-    public static readonly Comp<Health>   Health   = Register<Health>();
-    public static readonly Comp<Position> Position = Register<Position>();
-    public static readonly Comp<Bounds>   Bounds   = Register<Bounds>();
-    public static readonly Comp<Velocity> Velocity = Register<Velocity>();
-    public static readonly Comp<Team>     Team     = Register<Team>();
+    public static readonly Comp<Position>  Position  = Register<Position>();
+    public static readonly Comp<Footprint> Footprint = Register<Footprint>();
+    public static readonly Comp<Cargo>     Cargo     = Register<Cargo>();
+    public static readonly Comp<Drift>     Drift     = Register<Drift>();
+    public static readonly Comp<Extractor> Extractor = Register<Extractor>();
 }
 ```
 
-Each `Register<T>()` adds a component slot and returns a `Comp<T>` handle (`Unit.Health`) you use everywhere — spawn, read, query. An archetype's identity is its CLR type name (or `[Archetype(Name="...")]`); the engine auto-assigns a per-process catalog id and a persisted per-DB routing id, so there is no numeric id for you to pick or keep stable.
+Each `Register<T>()` adds a component slot and returns a `Comp<T>` handle (`Harvester.Cargo`) you use everywhere — spawn, read, query. An archetype's identity is its CLR type name (or `[Archetype(Name="...")]`); the engine auto-assigns a per-process catalog id and a persisted per-DB routing id, so there is no numeric id for you to pick or keep stable.
 
 **Archetype inheritance** lets one shape extend another:
 
 ```csharp
 [Archetype]
-public sealed partial class Hero : Archetype<Hero, Unit>   // Hero = Unit's components + its own
+public sealed partial class Refinery : Archetype<Refinery, Harvester>   // Refinery = Harvester's components + its own
 {
-    public static readonly Comp<Inventory> Inventory = Register<Inventory>();
+    public static readonly Comp<Smelter> Smelter = Register<Smelter>();
 }
 ```
 
-A `Hero` *is-a* `Unit` for typed references: `EntityLink<Unit>` accepts a `Hero`. Use `EntityLink<T>` to point one entity at another — a typed, self-documenting reference. One caveat: `T` is a contract, not an enforced guarantee — the implicit conversion from `EntityId` accepts *any* entity, with no compile-time or runtime check that it's actually a `T` (or descendant).
+A `Refinery` *is-a* `Harvester` for typed references: `EntityLink<Harvester>` accepts a `Refinery`. Use `EntityLink<T>` to point one entity at another — a typed, self-documenting reference. One caveat: `T` is a contract, not an enforced guarantee — the implicit conversion from `EntityId` accepts *any* entity, with no compile-time or runtime check that it's actually a `T` (or descendant).
 
 ```csharp
-[Component("Skirmish.Target", 1)]
-public struct Target { public EntityLink<Unit> Enemy; }   // stores another entity, typed
+[Component("Swg.Assignment", 1)]
+public struct Assignment { public EntityLink<Harvester> Hauler; }   // stores another entity, typed
 ```
 
 ### Reading every component at once — generated accessors
 
-In ch.1 you read one component at a time with `e.Read(Unit.Health)`. For the common "give me everything" case, Typhon's source generator emits typed bulk accessors on any `partial` archetype:
+In ch.1 you read one component at a time with `e.Read(Harvester.Cargo)`. For the common "give me everything" case, Typhon's source generator emits typed bulk accessors on any `partial` archetype:
 
 ```csharp
-var u = Unit.ReadAll(tx, id);          // read-only view of all of Unit's components
-int hp = u.Health.Current;
+var h = Harvester.ReadAll(tx, id);          // read-only view of all of Harvester's components
+int cargo = h.Cargo.Amount;
 
-var m = Unit.ReadWriteAll(tx, id);     // mutable view
-m.Health.Current -= 10;
+var m = Harvester.ReadWriteAll(tx, id);     // mutable view
+m.Cargo.Amount -= 10;
 ```
 
 **Where the generator comes from:** it ships *inside* the `Typhon` package, so if you installed Typhon with `dotnet add package Typhon` it's already active — and it's not optional, because the same generator emits the module-init barrier that registers your archetypes. You wire it by hand only when you reference the engine by *project* instead of by package, as an analyzer:
 
 ```xml
-<ProjectReference Include="path/to/Typhon.Generators.csproj"
+<ProjectReference Include="path/to/Typhon.Generators.Consumer.csproj"
                   ReferenceOutputAssembly="false" OutputItemType="Analyzer" />
 ```
 
@@ -90,36 +90,36 @@ Every component picks a **storage mode**, set on its `[Component]` attribute. Th
 | Survives a crash? | yes (WAL + checkpoint) | to the last tick (tick-fence WAL) | no (memory only) |
 | Cost | highest | low | lowest |
 
-💡 **Why three modes instead of "everything is ACID"?** Because full MVCC isn't free — every Versioned write allocates a new revision and every read may walk a version chain. That's the right price for an account balance or an inventory, where "did this commit?" matters. It's the *wrong* price for a position you overwrite 60 times a second and never need to roll back. Typhon lets you pay per component instead of all-or-nothing.
+💡 **Why three modes instead of "everything is ACID"?** Because full MVCC isn't free — every Versioned write allocates a new revision and every read may walk a version chain. That's the right price for a cargo hold or an inventory, where "did this commit?" matters. It's the *wrong* price for a position you overwrite 60 times a second and never need to roll back. Typhon lets you pay per component instead of all-or-nothing.
 
 The rule of thumb:
 
-- **Versioned** — state where correctness matters: health, inventory, score, anything you'd be upset to lose or see half-updated.
+- **Versioned** — state where correctness matters: cargo, inventory, score, anything you'd be upset to lose or see half-updated.
 - **SingleVersion** — hot fields, last-writer-wins, but you still want them to survive a restart: position, cached AI cost. Persisted at the tick boundary (you can lose at most the last tick on a crash).
-- **Transient** — pure runtime scratch that should *not* survive a restart: per-frame velocity, targeting temporaries.
+- **Transient** — pure runtime scratch that should *not* survive a restart: per-tick drift, targeting temporaries.
 
-Applied to `Unit`:
+Applied to `Harvester`:
 
 ```csharp
-[Component("Skirmish.Health", 1, StorageMode = StorageMode.Versioned)]      // ACID gameplay state
-public struct Health { public int Current, Max; }
+[Component("Swg.Cargo", 1, StorageMode = StorageMode.Versioned)]         // ACID accumulated yield
+public struct Cargo { public int Amount, Capacity; }
 
-[Component("Skirmish.Position", 1, StorageMode = StorageMode.SingleVersion)] // hot, durable, no isolation
+[Component("Swg.Position", 1, StorageMode = StorageMode.SingleVersion)]   // hot, durable, no isolation
 public struct Position { public Point2F P; }
 
-[Component("Skirmish.Bounds", 1, StorageMode = StorageMode.SingleVersion)]   // spatial index lives here ([§4](#4-spatial--querying-by-geometry))
-public struct Bounds { [SpatialIndex(2f)] public AABB2F Box; }
+[Component("Swg.Footprint", 1, StorageMode = StorageMode.SingleVersion)]  // spatial index lives here ([§4](#4-spatial--querying-by-geometry))
+public struct Footprint { [SpatialIndex(2f)] public AABB2F Box; }
 
-[Component("Skirmish.Velocity", 1, StorageMode = StorageMode.Transient)]     // per-tick scratch
-public struct Velocity { public float Dx, Dy; }
+[Component("Swg.Drift", 1, StorageMode = StorageMode.Transient)]          // per-tick movement scratch
+public struct Drift { public float Dx, Dy; }
 
-[Component("Skirmish.Team", 1, StorageMode = StorageMode.Versioned)]
-public struct Team { [Index(AllowMultiple = true)] public int Id; }         // many units per team
+[Component("Swg.Extractor", 1, StorageMode = StorageMode.Versioned)]
+public struct Extractor { [Index(AllowMultiple = true)] public int ResourceKind; public int Rate; }  // many drones per kind
 ```
 
 > ⚠️ **The catch worth knowing now:** a transaction only protects *Versioned* data. An SV/Transient write is visible to everyone the instant it happens and can't be rolled back. Entity creation and destruction are transactional in **all** modes — it's component *data* writes that differ. Chapter 3 spells out exactly what each mode gives up.
 
-A single archetype freely mixes modes — `Unit` above has all three — because the mode lives on each component *type*, not on the archetype. (`Bounds` is the spatial mirror of `Position`; [§4](#4-spatial--querying-by-geometry) explains why spatial indexing wants a separate box.)
+A single archetype freely mixes modes — `Harvester` above has all three — because the mode lives on each component *type*, not on the archetype. (`Footprint` is the spatial mirror of `Position`; [§4](#4-spatial--querying-by-geometry) explains why spatial indexing wants a separate box.)
 
 ---
 
@@ -139,11 +139,11 @@ Component fields are blittable value types: the numeric primitives, `bool`, fixe
 A plain field can only be found by scanning. Mark it `[Index]` and Typhon maintains a sorted index so you can look it up directly:
 
 ```csharp
-public struct Team   { [Index(AllowMultiple = true)] public int Id; }   // many units share a team
-public struct Serial { [Index] public int Number; }                     // unique — duplicates throw
+public struct Extractor { [Index(AllowMultiple = true)] public int ResourceKind; }   // many drones share a kind
+public struct Serial    { [Index] public int Number; }                               // unique — duplicates throw
 ```
 
-- `[Index(AllowMultiple = true)]` allows many entities to share a value — use it for "all units on team 3". This is what `Unit.Team` uses.
+- `[Index(AllowMultiple = true)]` allows many entities to share a value — use it for "all drones extracting kind 3". This is what `Harvester.Extractor` uses.
 - `[Index]` is a **unique** index — inserting a duplicate key throws `UniqueConstraintViolationException`. Use it for identities (a slot, a serial number).
 
 You don't query the index directly — you filter on the field in a normal query (ch.4), and a filter that *targets an indexed field* is served from the index instead of scanning the archetype.
@@ -153,7 +153,7 @@ You don't query the index directly — you filter on the field in a normal query
 Schemas live *in* the database, so reopening with a changed struct is a real operation, not undefined behaviour. The model is deliberately simple from your side:
 
 1. Change the struct (add a field, widen `int`→`long`, …).
-2. Bump the `[Component]` revision (`("Skirmish.Health", 1)` → `2`).
+2. Bump the `[Component]` revision (`("Swg.Cargo", 1)` → `2`).
 3. Reopen. The engine compares persisted vs runtime schema and migrates the stored data **before** your code runs.
 
 For changes the engine can't infer (a field that needs computing from old data) you supply a migration function. The point for *modeling*: you're free to evolve components; you don't hand-write storage migrations for the common cases. The mechanics are in [04-schema](../in-depth-overview/04-schema.md) of the in-depth reference.
@@ -162,17 +162,17 @@ For changes the engine can't infer (a field that needs computing from old data) 
 
 ## 4. Spatial — querying by geometry
 
-When entities live in space and you ask "what's near here?", a field scan is the wrong tool. A spatial index answers geometric queries — but it indexes an **axis-aligned box** (`AABB2F`), not a point. So a point entity carries a small `Bounds` component whose box collapses onto its position, marked `[SpatialIndex]` (this is the `Bounds` we added in §2):
+When entities live in space and you ask "what's near here?", a field scan is the wrong tool. A spatial index answers geometric queries — but it indexes an **axis-aligned box** (`AABB2F`), not a point. So a point entity carries a small `Footprint` component whose box collapses onto its position, marked `[SpatialIndex]` (this is the `Footprint` we added in §2):
 
 ```csharp
-public struct Bounds { [SpatialIndex(2f)] public AABB2F Box; }   // 2f = movement margin
+public struct Footprint { [SpatialIndex(2f)] public AABB2F Box; }   // 2f = movement margin
 ```
 
 Configure the grid as part of the one-line setup — add `ConfigureSpatialGrid` to the `Open` / `AddTyphon` options and it's applied automatically before the archetypes are wired:
 
 ```csharp
-using var dbe = DatabaseEngine.Open("game.typhon", o => o
-    .Register<Position>().Register<Bounds>()
+using var dbe = DatabaseEngine.Open("field.typhon", o => o
+    .Register<Position>().Register<Footprint>()
     .ConfigureSpatialGrid(new SpatialGridConfig(
         worldMin: Vector2.Zero, worldMax: new Vector2(1000f, 1000f), cellSize: 50f)));
 ```
@@ -180,26 +180,26 @@ using var dbe = DatabaseEngine.Open("game.typhon", o => o
 Then query by geometry — spatial queries are materialised with `Execute()`:
 
 ```csharp
-var nearby = tx.Query<Unit>()
-               .WhereNearby<Bounds>(centerX, centerY, 0f, 15f)   // x, y, z, radius
+var nearby = tx.Query<Harvester>()
+               .WhereNearby<Footprint>(centerX, centerY, 0f, 15f)   // x, y, z, radius
                .Execute();
 ```
 
 > ⚠️ **A convention the analyzer flags, not a runtime-enforced rule.** A `[SpatialIndex]` field should be mutated through the `WriteSpatial` **barrier**, not a plain assignment — `ClusterRef.GetSpan<T>`/`Get<T>` calls that touch a spatial-indexed component get a build-time `TYPHON009` **warning** (not an error, and it doesn't guard `EntityRef.Write` at all — nothing stops a plain write from compiling or running, it just silently skips the spatial-index refresh). To get the warning, reference `Typhon.Analyzers.csproj` as an analyzer too — the same `OutputItemType="Analyzer"` pattern as the generator reference earlier in this chapter — without it the plain write compiles silently and the index goes stale. So a system that moves entities mirrors each point into its box:
 >
 > ```csharp
-> cluster.WriteSpatial(Unit.Bounds, slot, new Bounds { Box = new AABB2F { MinX = x, MaxX = x, MinY = y, MaxY = y } });
+> cluster.WriteSpatial(Harvester.Footprint, slot, new Footprint { Box = new AABB2F { MinX = x, MaxX = x, MinY = y, MaxY = y } });
 > ```
 
 The index is maintained at the **tick fence**: inside the runtime ([ch.5](05-systems.md)) it refreshes every tick automatically; from a bare transaction you run `dbe.WriteTickFence(n)` once after spawning before a spatial query.
 
 Three spatial predicates cover the common needs:
 
-- `WhereNearby<T>(x, y, z, radius)` — everything within a radius (our "enemies near me").
+- `WhereNearby<T>(x, y, z, radius)` — everything within a radius (our "drones near a point").
 - `WhereInAABB<T>(minX,…, maxX,…)` — everything inside a box (selection rectangle, region trigger).
-- `WhereRay<T>(origin…, dir…, maxDist)` — first hits along a ray (line of sight, projectiles).
+- `WhereRay<T>(origin…, dir…, maxDist)` — first hits along a ray (line of sight, scans).
 
-That's the user-facing surface. *How* it stays fast as thousands of units move every tick (the broad-phase grid + per-component R-tree, margins, rebuild avoidance) is engine internals — see [07-spatial](../in-depth-overview/07-spatial.md) if you're curious; you don't need it to use spatial queries.
+That's the user-facing surface. *How* it stays fast as thousands of drones move every tick (the broad-phase grid + per-component R-tree, margins, rebuild avoidance) is engine internals — see [07-spatial](../in-depth-overview/07-spatial.md) if you're curious; you don't need it to use spatial queries.
 
 ---
 

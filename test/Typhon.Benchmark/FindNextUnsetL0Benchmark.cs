@@ -7,7 +7,6 @@ using System.Threading;
 using BenchmarkDotNet.Attributes;
 using BenchmarkDotNet.Order;
 using Microsoft.Extensions.DependencyInjection;
-using Typhon.Engine;
 
 namespace Typhon.Benchmark;
 

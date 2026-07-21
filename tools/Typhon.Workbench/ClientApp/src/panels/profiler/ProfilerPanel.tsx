@@ -26,6 +26,7 @@ import { buildTickRows, computeSelectionIdxRange } from '@/libs/profiler/canvas/
 import TickOverview from './sections/TickOverview';
 import TimeArea from './sections/TimeArea';
 import OverloadStrip from './sections/OverloadStrip';
+import { applyWorkbenchAuthHeaders } from '@/api/bootstrapToken';
 
 /**
  * Empty-shell profiler panel. Handles both session kinds:
@@ -63,8 +64,7 @@ export default function ProfilerPanel(props: IDockviewPanelProps) {
     if (!sessionId || disconnecting) return;
     setDisconnecting(true);
     try {
-      const headers = new Headers();
-      if (token) headers.set('X-Session-Token', token);
+      const headers = applyWorkbenchAuthHeaders(new Headers(), token);
       await fetch(`/api/sessions/${sessionId}/profiler/disconnect`, { method: 'POST', headers });
     } catch {
       // Server returns 204 even if the runtime is already disconnected; transient network errors are not

@@ -1,5 +1,9 @@
-﻿using Microsoft.Extensions.DependencyInjection;
+﻿using System.Numerics;
+using Microsoft.Extensions.DependencyInjection;
 using Typhon.Engine;
+using Typhon.Samples.Swg;
+// Disambiguate the SWG schema struct from Typhon.Engine's ResourceType enum (both are in scope via the global usings).
+using ResourceType = Typhon.Samples.Swg.ResourceType;
 
 namespace Typhon.MonitoringDemo;
 
@@ -65,25 +69,41 @@ public sealed class TyphonContext : IDisposable
 
     private void RegisterGameComponents()
     {
-        // Touch all archetypes to trigger static initialization
+        // Register the 20 components of the shared SWG Full schema (Typhon.Samples.Swg). These populate the 9 Full
+        // archetypes: Guild, ResourceType, Recipe, Player, ResourceDeposit, Structure(←Harvester/Factory), Item.
 
-        // Factory game components
-        Engine.RegisterComponentFromAccessor<FactoryBuilding>();
-        Engine.RegisterComponentFromAccessor<ConveyorBelt>();
-        Engine.RegisterComponentFromAccessor<ItemStack>();
+        // Social family
+        Engine.RegisterComponentFromAccessor<Guild>();
+        Engine.RegisterComponentFromAccessor<Membership>();
+        Engine.RegisterComponentFromAccessor<Player>();
+        Engine.RegisterComponentFromAccessor<Wallet>();
+        Engine.RegisterComponentFromAccessor<Session>();
+
+        // Industry family
+        Engine.RegisterComponentFromAccessor<ResourceType>();
         Engine.RegisterComponentFromAccessor<Recipe>();
-        Engine.RegisterComponentFromAccessor<ProductionQueue>();
-        Engine.RegisterComponentFromAccessor<ResourceNode>();
-        Engine.RegisterComponentFromAccessor<PowerGrid>();
+        Engine.RegisterComponentFromAccessor<Deposit>();
+        Engine.RegisterComponentFromAccessor<Structure>();
+        Engine.RegisterComponentFromAccessor<StructureOwner>();
+        Engine.RegisterComponentFromAccessor<Hopper>();
+        Engine.RegisterComponentFromAccessor<HarvesterTarget>();
+        Engine.RegisterComponentFromAccessor<MaintenanceState>();
+        Engine.RegisterComponentFromAccessor<FactoryConfig>();
+        Engine.RegisterComponentFromAccessor<PowerSupply>();
 
-        // RPG components
-        Engine.RegisterComponentFromAccessor<Character>();
-        Engine.RegisterComponentFromAccessor<Inventory>();
-        Engine.RegisterComponentFromAccessor<Equipment>();
-        Engine.RegisterComponentFromAccessor<Skill>();
-        Engine.RegisterComponentFromAccessor<Quest>();
-        Engine.RegisterComponentFromAccessor<WorldPosition>();
-        Engine.RegisterComponentFromAccessor<CombatStats>();
+        // Item family
+        Engine.RegisterComponentFromAccessor<Item>();
+        Engine.RegisterComponentFromAccessor<ItemOwner>();
+
+        // World family (spatial positions)
+        Engine.RegisterComponentFromAccessor<PlayerPosition>();
+        Engine.RegisterComponentFromAccessor<DepositPosition>();
+        Engine.RegisterComponentFromAccessor<StructurePosition>();
+
+        // Spatial archetypes (Player/Deposit/Harvester/Factory positions) are cluster-eligible, so a configured grid
+        // is REQUIRED before InitializeArchetypes (see FixtureDatabase.cs). All positions are placed within [0, 10000].
+        Engine.ConfigureSpatialGrid(new SpatialGridConfig(
+            new Vector2(0f, 0f), new Vector2(10000f, 10000f), cellSize: 100f));
 
         // Initialize archetype storage (LinearHash, etc.)
         Engine.InitializeArchetypes();

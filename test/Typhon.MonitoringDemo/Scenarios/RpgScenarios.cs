@@ -1,10 +1,12 @@
 using System.Diagnostics;
 using Typhon.Engine;
+using Typhon.Samples.Swg;
+using Typhon.Schema.Definition;
 
 namespace Typhon.MonitoringDemo.Scenarios;
 
 /// <summary>
-/// Simulates an active RPG world: NPCs moving, players interacting.
+/// Simulates an active world: players spawning and roaming (PlayerPosition writes).
 /// Balanced CREATE/READ/UPDATE operations.
 /// </summary>
 public class RpgWorldSimulationScenario : IScenario
@@ -12,8 +14,7 @@ public class RpgWorldSimulationScenario : IScenario
     public string Name => "RPG World Simulation";
     public string Description => "Simulates NPC movement, player interactions. Balanced CRUD operations.";
 
-    private readonly List<EntityId> _characterIds = [];
-    private readonly List<EntityId> _positionIds = [];
+    private readonly List<EntityId> _playerIds = [];
 
     public async Task RunAsync(TyphonContext context, ScenarioConfig config, ScenarioStats stats, CancellationToken ct)
     {
@@ -27,6 +28,9 @@ public class RpgWorldSimulationScenario : IScenario
         var workers = Enumerable.Range(0, config.WorkerCount).Select(workerId => Task.Run(async () =>
         {
             var localRand = new Random(42 + workerId);
+            // Per-worker unique AccountId range (Player.AccountId is a unique index).
+            var accountBase = (long)(workerId + 1) << 40;
+            long localSeq = 0;
 
             while (!ct.IsCancellationRequested)
             {
@@ -42,56 +46,62 @@ public class RpgWorldSimulationScenario : IScenario
 
                         if (opType < 20)
                         {
-                            // Spawn new NPC
-                            var npcNames = new[] { "Goblin", "Orc", "Wolf", "Skeleton", "Bandit" };
-                            var character = Character.Create(localRand, npcNames[localRand.Next(npcNames.Length)], true);
-                            var id = t.Spawn<CharacterArch>(CharacterArch.Character.Set(in character));
-                            lock (_characterIds)
+                            // Spawn new player
+                            var player = new Player
                             {
-                                _characterIds.Add(id);
-                            }
-
-                            var pos = WorldPosition.Create(localRand, (long)id.RawValue, localRand.Next(1, 20));
-                            var posId = t.Spawn<WorldPositionArch>(WorldPositionArch.Position.Set(in pos));
-                            lock (_positionIds)
+                                Name = SwgWorkload.S64($"NPC-{workerId}-{localSeq}"), AccountId = accountBase + localSeq++,
+                                Level = localRand.Next(1, 91), ProfessionId = localRand.Next(0, 16), CreatedAt = 0,
+                            };
+                            var membership = new Membership { Guild = EntityLink<GuildArch>.Null, GuildRank = localRand.Next(0, 6) };
+                            var wallet = new Wallet { Credits = localRand.Next(0, 1_000_000), BankCredits = localRand.Next(0, 100_000_000) };
+                            var pos = new PlayerPosition { Bounds = SwgWorkload.RandomBounds(localRand) };
+                            var session = new Session { ConnectionId = 0, LatencyMs = localRand.Next(5, 300) };
+                            var id = t.Spawn<PlayerArch>(
+                                PlayerArch.Player.Set(in player),
+                                PlayerArch.Membership.Set(in membership),
+                                PlayerArch.Wallet.Set(in wallet),
+                                PlayerArch.Position.Set(in pos),
+                                PlayerArch.Session.Set(in session));
+                            lock (_playerIds)
                             {
-                                _positionIds.Add(posId);
+                                _playerIds.Add(id);
                             }
 
                             stats.RecordSuccess((Stopwatch.GetTimestamp() - sw) * 1_000_000 / Stopwatch.Frequency);
                         }
-                        else if (opType < 60 && _positionIds.Count > 0)
+                        else if (opType < 60 && _playerIds.Count > 0)
                         {
                             // Update position (movement)
-                            var id = _positionIds[localRand.Next(_positionIds.Count)];
+                            var id = _playerIds[localRand.Next(_playerIds.Count)];
                             if (t.TryOpen(id, out var entity))
                             {
-                                var pos = entity.Read(WorldPositionArch.Position);
-                                ref var wp = ref t.OpenMut(id).Write(WorldPositionArch.Position);
-                                wp.X = pos.X + (float)(localRand.NextDouble() - 0.5) * 10;
-                                wp.Y = pos.Y + (float)(localRand.NextDouble() - 0.5) * 10;
-                                wp.Rotation = (float)(localRand.NextDouble() * 360);
-                                wp.IsMoving = localRand.Next(2) == 1;
+                                var cur = entity.Read(PlayerArch.Position);
+                                var dx = (float)(localRand.NextDouble() - 0.5) * 20f;
+                                var dy = (float)(localRand.NextDouble() - 0.5) * 20f;
+                                ref var wp = ref t.OpenMut(id).Write(PlayerArch.Position);
+                                wp.Bounds = SwgWorkload.Move(cur.Bounds, dx, dy);
                                 stats.RecordSuccess((Stopwatch.GetTimestamp() - sw) * 1_000_000 / Stopwatch.Frequency);
                             }
                         }
-                        else if (opType < 80 && _characterIds.Count > 0)
+                        else if (opType < 80 && _playerIds.Count > 0)
                         {
-                            // Read character (visibility check, AI)
-                            var id = _characterIds[localRand.Next(_characterIds.Count)];
-                            t.TryOpen(id, out _);
-                            stats.RecordSuccess((Stopwatch.GetTimestamp() - sw) * 1_000_000 / Stopwatch.Frequency);
-                        }
-                        else if (_characterIds.Count > 0)
-                        {
-                            // Update character stats
-                            var id = _characterIds[localRand.Next(_characterIds.Count)];
+                            // Read player (visibility check, AI)
+                            var id = _playerIds[localRand.Next(_playerIds.Count)];
                             if (t.TryOpen(id, out var entity))
                             {
-                                var character = entity.Read(CharacterArch.Character);
-                                ref var wc = ref t.OpenMut(id).Write(CharacterArch.Character);
-                                wc.Health = Math.Min(character.MaxHealth, character.Health + localRand.Next(-10, 20));
-                                wc.Mana = Math.Min(character.MaxMana, character.Mana + localRand.Next(-5, 10));
+                                _ = entity.Read(PlayerArch.Player);
+                            }
+                            stats.RecordSuccess((Stopwatch.GetTimestamp() - sw) * 1_000_000 / Stopwatch.Frequency);
+                        }
+                        else if (_playerIds.Count > 0)
+                        {
+                            // Update player wallet
+                            var id = _playerIds[localRand.Next(_playerIds.Count)];
+                            if (t.TryOpen(id, out var entity))
+                            {
+                                var wallet = entity.Read(PlayerArch.Wallet);
+                                ref var ww = ref t.OpenMut(id).Write(PlayerArch.Wallet);
+                                ww.Credits = Math.Max(0, wallet.Credits + localRand.Next(-100, 200));
                                 stats.RecordSuccess((Stopwatch.GetTimestamp() - sw) * 1_000_000 / Stopwatch.Frequency);
                             }
                         }
@@ -125,17 +135,25 @@ public class RpgWorldSimulationScenario : IScenario
     {
         using var t = engine.CreateQuickTransaction();
 
-        // Create initial characters
-        var playerNames = new[] { "Hero", "Warrior", "Mage", "Rogue", "Cleric" };
+        // Create initial players
         for (var i = 0; i < 50 && !ct.IsCancellationRequested; i++)
         {
-            var character = Character.Create(rand, playerNames[rand.Next(playerNames.Length)], i > 10);
-            var id = t.Spawn<CharacterArch>(CharacterArch.Character.Set(in character));
-            _characterIds.Add(id);
-
-            var pos = WorldPosition.Create(rand, (long)id.RawValue, rand.Next(1, 20));
-            var posId = t.Spawn<WorldPositionArch>(WorldPositionArch.Position.Set(in pos));
-            _positionIds.Add(posId);
+            var player = new Player
+            {
+                Name = SwgWorkload.S64($"Player-{i}"), AccountId = i,
+                Level = rand.Next(1, 91), ProfessionId = rand.Next(0, 16), CreatedAt = i,
+            };
+            var membership = new Membership { Guild = EntityLink<GuildArch>.Null, GuildRank = rand.Next(0, 6) };
+            var wallet = new Wallet { Credits = rand.Next(0, 1_000_000), BankCredits = rand.Next(0, 100_000_000) };
+            var pos = new PlayerPosition { Bounds = SwgWorkload.RandomBounds(rand) };
+            var session = new Session { ConnectionId = i, LatencyMs = rand.Next(5, 300) };
+            var id = t.Spawn<PlayerArch>(
+                PlayerArch.Player.Set(in player),
+                PlayerArch.Membership.Set(in membership),
+                PlayerArch.Wallet.Set(in wallet),
+                PlayerArch.Position.Set(in pos),
+                PlayerArch.Session.Set(in session));
+            _playerIds.Add(id);
         }
 
         t.Commit();
@@ -144,7 +162,7 @@ public class RpgWorldSimulationScenario : IScenario
 }
 
 /// <summary>
-/// Simulates intense combat: damage calculation, health updates.
+/// Simulates intense combat: rapid wallet + player-stat updates.
 /// UPDATE-heavy with high frequency.
 /// </summary>
 public class RpgCombatScenario : IScenario
@@ -152,9 +170,7 @@ public class RpgCombatScenario : IScenario
     public string Name => "RPG Combat";
     public string Description => "Intense battle simulation: damage, healing, skill cooldowns. High-frequency UPDATEs.";
 
-    private readonly List<EntityId> _characterIds = [];
-    private readonly List<EntityId> _combatStatsIds = [];
-    private readonly List<EntityId> _skillIds = [];
+    private readonly List<EntityId> _playerIds = [];
 
     public async Task RunAsync(TyphonContext context, ScenarioConfig config, ScenarioStats stats, CancellationToken ct)
     {
@@ -181,49 +197,45 @@ public class RpgCombatScenario : IScenario
 
                     for (var i = 0; i < actions && !ct.IsCancellationRequested; i++)
                     {
-                        var actionType = localRand.Next(100);
+                        if (_playerIds.Count == 0)
+                        {
+                            break;
+                        }
 
-                        if (actionType < 40 && _characterIds.Count > 0)
+                        var actionType = localRand.Next(100);
+                        var id = _playerIds[localRand.Next(_playerIds.Count)];
+
+                        if (actionType < 40)
                         {
-                            // Deal damage / heal
-                            var id = _characterIds[localRand.Next(_characterIds.Count)];
+                            // Deal damage / heal → wallet credit swing (bounty / repair cost)
                             if (t.TryOpen(id, out var entity))
                             {
-                                var character = entity.Read(CharacterArch.Character);
-                                var damage = localRand.Next(-50, 100); // Negative = heal
-                                ref var wc = ref t.OpenMut(id).Write(CharacterArch.Character);
-                                wc.Health = Math.Clamp(character.Health - damage, 0, character.MaxHealth);
+                                var wallet = entity.Read(PlayerArch.Wallet);
+                                var swing = localRand.Next(-50, 100); // Negative = cost
+                                ref var ww = ref t.OpenMut(id).Write(PlayerArch.Wallet);
+                                ww.Credits = Math.Max(0, wallet.Credits + swing);
                                 stats.RecordSuccess((Stopwatch.GetTimestamp() - sw) * 1_000_000 / Stopwatch.Frequency);
                             }
                         }
-                        else if (actionType < 70 && _combatStatsIds.Count > 0)
+                        else if (actionType < 70)
                         {
-                            // Update combat stats
-                            var id = _combatStatsIds[localRand.Next(_combatStatsIds.Count)];
+                            // Progression → player level / profession tweak
                             if (t.TryOpen(id, out var entity))
                             {
-                                var combatStats = entity.Read(CombatStatsArch.Stats);
-                                ref var ws = ref t.OpenMut(id).Write(CombatStatsArch.Stats);
-                                ws.DamageDealt = combatStats.DamageDealt + localRand.Next(0, 500);
-                                ws.DamageTaken = combatStats.DamageTaken + localRand.Next(0, 200);
-                                ws.Kills = combatStats.Kills;
-                                if (localRand.Next(10) == 0)
-                                {
-                                    ws.Kills++;
-                                }
+                                var player = entity.Read(PlayerArch.Player);
+                                ref var wp = ref t.OpenMut(id).Write(PlayerArch.Player);
+                                wp.Level = Math.Clamp(player.Level + localRand.Next(-1, 2), 1, 90);
                                 stats.RecordSuccess((Stopwatch.GetTimestamp() - sw) * 1_000_000 / Stopwatch.Frequency);
                             }
                         }
-                        else if (_skillIds.Count > 0)
+                        else
                         {
-                            // Toggle skill cooldown
-                            var id = _skillIds[localRand.Next(_skillIds.Count)];
+                            // Bank deposit → wallet bank-credit update
                             if (t.TryOpen(id, out var entity))
                             {
-                                var skill = entity.Read(SkillArch.Skill);
-                                ref var wsk = ref t.OpenMut(id).Write(SkillArch.Skill);
-                                wsk.OnCooldown = !skill.OnCooldown;
-                                wsk.Cooldown = wsk.OnCooldown ? (float)localRand.NextDouble() * 10 : 0;
+                                var wallet = entity.Read(PlayerArch.Wallet);
+                                ref var ww = ref t.OpenMut(id).Write(PlayerArch.Wallet);
+                                ww.BankCredits = wallet.BankCredits + localRand.Next(0, 500);
                                 stats.RecordSuccess((Stopwatch.GetTimestamp() - sw) * 1_000_000 / Stopwatch.Frequency);
                             }
                         }
@@ -257,28 +269,24 @@ public class RpgCombatScenario : IScenario
     {
         using var t = engine.CreateQuickTransaction();
 
-        var combatantNames = new[] { "Fighter", "Berserker", "Archer", "Wizard", "Healer" };
-        var skillNames = new[] { "Slash", "Fireball", "Heal", "Shield Bash", "Backstab" };
-
         for (var i = 0; i < 30 && !ct.IsCancellationRequested; i++)
         {
-            // Create combatant
-            var character = Character.Create(rand, combatantNames[rand.Next(combatantNames.Length)], i > 5);
-            var charId = t.Spawn<CharacterArch>(CharacterArch.Character.Set(in character));
-            _characterIds.Add(charId);
-
-            // Create combat stats
-            var combatStats = CombatStats.Create(rand, (long)charId.RawValue);
-            var statsId = t.Spawn<CombatStatsArch>(CombatStatsArch.Stats.Set(in combatStats));
-            _combatStatsIds.Add(statsId);
-
-            // Create skills
-            for (var j = 0; j < 3; j++)
+            var player = new Player
             {
-                var skill = Skill.Create(rand, (long)charId.RawValue, skillNames[rand.Next(skillNames.Length)]);
-                var skillId = t.Spawn<SkillArch>(SkillArch.Skill.Set(in skill));
-                _skillIds.Add(skillId);
-            }
+                Name = SwgWorkload.S64($"Combatant-{i}"), AccountId = i,
+                Level = rand.Next(1, 91), ProfessionId = rand.Next(0, 16), CreatedAt = i,
+            };
+            var membership = new Membership { Guild = EntityLink<GuildArch>.Null, GuildRank = rand.Next(0, 6) };
+            var wallet = new Wallet { Credits = rand.Next(0, 1_000_000), BankCredits = rand.Next(0, 100_000_000) };
+            var pos = new PlayerPosition { Bounds = SwgWorkload.RandomBounds(rand) };
+            var session = new Session { ConnectionId = i, LatencyMs = rand.Next(5, 300) };
+            var id = t.Spawn<PlayerArch>(
+                PlayerArch.Player.Set(in player),
+                PlayerArch.Membership.Set(in membership),
+                PlayerArch.Wallet.Set(in wallet),
+                PlayerArch.Position.Set(in pos),
+                PlayerArch.Session.Set(in session));
+            _playerIds.Add(id);
         }
 
         t.Commit();
@@ -287,17 +295,16 @@ public class RpgCombatScenario : IScenario
 }
 
 /// <summary>
-/// Simulates quest system: accepting, progressing, completing quests.
-/// Mixed operations with inventory management.
+/// Simulates the loot/quest loop: crafting items (ItemArch spawn with affix collections) and reading player guild state.
+/// Mixed operations.
 /// </summary>
 public class RpgQuestingScenario : IScenario
 {
     public string Name => "RPG Questing";
     public string Description => "Quest acceptance, progress tracking, inventory rewards. Mixed CRUD.";
 
-    private readonly List<EntityId> _characterIds = [];
-    private readonly List<EntityId> _questIds = [];
-    private readonly List<EntityId> _inventoryIds = [];
+    private readonly List<EntityId> _playerIds = [];
+    private readonly List<EntityId> _itemIds = [];
 
     public async Task RunAsync(TyphonContext context, ScenarioConfig config, ScenarioStats stats, CancellationToken ct)
     {
@@ -324,57 +331,65 @@ public class RpgQuestingScenario : IScenario
                     {
                         var opType = localRand.Next(100);
 
-                        if (opType < 20 && _characterIds.Count > 0)
+                        if (opType < 40)
                         {
-                            // Accept new quest
-                            var charId = _characterIds[localRand.Next(_characterIds.Count)];
-                            var quest = Quest.Create(localRand, (long)charId.RawValue, localRand.Next(1, 100));
-                            quest.Status = 0; // Active
-                            quest.ObjectiveProgress = 0;
-                            var questId = t.Spawn<QuestArch>(QuestArch.Quest.Set(in quest));
-                            lock (_questIds)
+                            // Craft/loot a new item (reward) — FK Owner → a bootstrapped player, 0..4 affix CC elements
+                            var it = new Item
                             {
-                                _questIds.Add(questId);
+                                Recipe = EntityLink<RecipeArch>.Null,
+                                ItemType = localRand.Next(0, 50), Quality = localRand.Next(0, 100), Decay = localRand.Next(0, 100),
+                            };
+                            var affixes = localRand.Next(0, 5);
+                            if (affixes > 0)
+                            {
+                                using var cca = t.CreateComponentCollectionAccessor(ref it.Affixes);
+                                for (var a = 0; a < affixes; a++)
+                                {
+                                    cca.Add(new ItemAffix { AffixType = localRand.Next(0, 20), Value = localRand.Next(1, 100) });
+                                }
+                            }
+                            var owner = new ItemOwner { Owner = EntityLink<PlayerArch>.Null };
+                            if (_playerIds.Count > 0)
+                            {
+                                owner.Owner = _playerIds[localRand.Next(_playerIds.Count)];
+                            }
+                            var itemId = t.Spawn<ItemArch>(ItemArch.Item.Set(in it), ItemArch.Owner.Set(in owner));
+                            lock (_itemIds)
+                            {
+                                _itemIds.Add(itemId);
                             }
                             stats.RecordSuccess((Stopwatch.GetTimestamp() - sw) * 1_000_000 / Stopwatch.Frequency);
                         }
-                        else if (opType < 50 && _questIds.Count > 0)
+                        else if (opType < 70 && _itemIds.Count > 0)
                         {
-                            // Progress quest
-                            var id = _questIds[localRand.Next(_questIds.Count)];
+                            // Item wear/repair (progress) — update Decay/Quality
+                            var id = _itemIds[localRand.Next(_itemIds.Count)];
                             if (t.TryOpen(id, out var entity))
                             {
-                                var quest = entity.Read(QuestArch.Quest);
-                                if (quest.Status == 0 && quest.ObjectiveProgress < quest.ObjectiveTarget)
-                                {
-                                    ref var wq = ref t.OpenMut(id).Write(QuestArch.Quest);
-                                    wq.ObjectiveProgress = quest.ObjectiveProgress + 1;
-                                    if (wq.ObjectiveProgress >= quest.ObjectiveTarget)
-                                    {
-                                        wq.Status = 1; // Completed
-                                    }
-                                }
+                                var item = entity.Read(ItemArch.Item);
+                                ref var wi = ref t.OpenMut(id).Write(ItemArch.Item);
+                                wi.Decay = Math.Clamp(item.Decay + localRand.Next(-5, 10), 0, 100);
                                 stats.RecordSuccess((Stopwatch.GetTimestamp() - sw) * 1_000_000 / Stopwatch.Frequency);
                             }
                         }
-                        else if (opType < 70 && _characterIds.Count > 0)
+                        else if (opType < 90 && _playerIds.Count > 0)
                         {
-                            // Add inventory item (reward)
-                            var charId = _characterIds[localRand.Next(_characterIds.Count)];
-                            var slot = localRand.Next(0, 40);
-                            var item = Inventory.Create(localRand, (long)charId.RawValue, slot);
-                            var itemId = t.Spawn<InventoryArch>(InventoryArch.Item.Set(in item));
-                            lock (_inventoryIds)
+                            // Read player guild membership (quest-giver check)
+                            var id = _playerIds[localRand.Next(_playerIds.Count)];
+                            if (t.TryOpen(id, out var entity))
                             {
-                                _inventoryIds.Add(itemId);
+                                _ = entity.Read(PlayerArch.Membership);
                             }
                             stats.RecordSuccess((Stopwatch.GetTimestamp() - sw) * 1_000_000 / Stopwatch.Frequency);
                         }
-                        else if (_inventoryIds.Count > 0)
+                        else if (_itemIds.Count > 0)
                         {
-                            // Read inventory
-                            var id = _inventoryIds[localRand.Next(_inventoryIds.Count)];
-                            t.TryOpen(id, out _);
+                            // Read item (inventory browse)
+                            var id = _itemIds[localRand.Next(_itemIds.Count)];
+                            if (t.TryOpen(id, out var entity))
+                            {
+                                _ = entity.Read(ItemArch.Item);
+                            }
                             stats.RecordSuccess((Stopwatch.GetTimestamp() - sw) * 1_000_000 / Stopwatch.Frequency);
                         }
                     }
@@ -407,20 +422,36 @@ public class RpgQuestingScenario : IScenario
     {
         using var t = engine.CreateQuickTransaction();
 
-        var heroNames = new[] { "Aldric", "Elara", "Theron", "Lyra", "Gareth" };
-
         for (var i = 0; i < 20 && !ct.IsCancellationRequested; i++)
         {
-            var character = Character.Create(rand, heroNames[rand.Next(heroNames.Length)], false);
-            var charId = t.Spawn<CharacterArch>(CharacterArch.Character.Set(in character));
-            _characterIds.Add(charId);
+            var player = new Player
+            {
+                Name = SwgWorkload.S64($"Hero-{i}"), AccountId = i,
+                Level = rand.Next(1, 91), ProfessionId = rand.Next(0, 16), CreatedAt = i,
+            };
+            var membership = new Membership { Guild = EntityLink<GuildArch>.Null, GuildRank = rand.Next(0, 6) };
+            var wallet = new Wallet { Credits = rand.Next(0, 1_000_000), BankCredits = rand.Next(0, 100_000_000) };
+            var pos = new PlayerPosition { Bounds = SwgWorkload.RandomBounds(rand) };
+            var session = new Session { ConnectionId = i, LatencyMs = rand.Next(5, 300) };
+            var charId = t.Spawn<PlayerArch>(
+                PlayerArch.Player.Set(in player),
+                PlayerArch.Membership.Set(in membership),
+                PlayerArch.Wallet.Set(in wallet),
+                PlayerArch.Position.Set(in pos),
+                PlayerArch.Session.Set(in session));
+            _playerIds.Add(charId);
 
-            // Give each character some starting inventory
+            // Give each player some starting items
             for (var j = 0; j < 5; j++)
             {
-                var item = Inventory.Create(rand, (long)charId.RawValue, j);
-                var itemId = t.Spawn<InventoryArch>(InventoryArch.Item.Set(in item));
-                _inventoryIds.Add(itemId);
+                var it = new Item
+                {
+                    Recipe = EntityLink<RecipeArch>.Null,
+                    ItemType = rand.Next(0, 50), Quality = rand.Next(0, 100), Decay = rand.Next(0, 100),
+                };
+                var owner = new ItemOwner { Owner = charId };
+                var itemId = t.Spawn<ItemArch>(ItemArch.Item.Set(in it), ItemArch.Owner.Set(in owner));
+                _itemIds.Add(itemId);
             }
         }
 

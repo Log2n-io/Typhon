@@ -1,13 +1,10 @@
 // Shared raw-fetch + base64 SoA decode helpers for the Database File Map hooks (Module 15). The hooks fetch
 // raw (the useTrack.ts pattern) rather than via Orval — the map is a small, stable shape.
+import { applyWorkbenchAuthHeaders } from '@/api/bootstrapToken';
 
-/** Fetches a JSON endpoint with the Workbench session-token header, throwing a useful message on failure. */
+/** Fetches a JSON endpoint with the Workbench bootstrap + session tokens, throwing a useful message on failure. */
 export async function fetchJson<T>(url: string, token: string | null, signal: AbortSignal): Promise<T> {
-  const headers = new Headers();
-  if (token) {
-    headers.set('X-Session-Token', token);
-  }
-  headers.set('X-Workbench-Api', '1');
+  const headers = applyWorkbenchAuthHeaders(new Headers(), token);
   const res = await fetch(url, { signal, headers });
   if (!res.ok) {
     let detail = `${res.status} ${res.statusText}`;

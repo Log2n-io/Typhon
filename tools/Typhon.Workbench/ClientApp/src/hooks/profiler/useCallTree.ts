@@ -1,5 +1,6 @@
 import { useQuery, type UseQueryResult } from '@tanstack/react-query';
 import { useSessionStore } from '@/stores/useSessionStore';
+import { applyWorkbenchAuthHeaders } from '@/api/bootstrapToken';
 
 /** View-mode axis for the call tree (§8.2). `on-cpu` = Managed samples only; `wall-clock` = all samples. */
 export type CallTreeViewMode = 'on-cpu' | 'wall-clock';
@@ -103,9 +104,8 @@ export function useCallTree(
     refetchInterval: (q) => (q.state.data || q.state.error ? false : 1000),
     queryFn: async ({ signal }) => {
       if (!sessionId) return null;
-      const headers = new Headers();
+      const headers = applyWorkbenchAuthHeaders(new Headers(), token);
       headers.set('Content-Type', 'application/json');
-      if (token) headers.set('X-Session-Token', token);
       const res = await fetch(`/api/sessions/${sessionId}/profiler/calltree`, {
         method: 'POST',
         signal,

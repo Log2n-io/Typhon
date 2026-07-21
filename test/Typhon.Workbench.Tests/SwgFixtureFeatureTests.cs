@@ -5,8 +5,8 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using NUnit.Framework;
 using Typhon.Engine;
+using Typhon.Samples.Swg;
 using Typhon.Schema.Definition;
-using Typhon.Workbench.Fixtures;
 
 namespace Typhon.Workbench.Tests;
 
@@ -67,7 +67,7 @@ public sealed class SwgFixtureFeatureTests
         _engine.RegisterComponentFromAccessor<Player>();
         _engine.RegisterComponentFromAccessor<Wallet>();
         _engine.RegisterComponentFromAccessor<Session>();
-        _engine.RegisterComponentFromAccessor<Typhon.Workbench.Fixtures.ResourceType>();
+        _engine.RegisterComponentFromAccessor<Typhon.Samples.Swg.ResourceType>();
         _engine.RegisterComponentFromAccessor<Recipe>();
         _engine.RegisterComponentFromAccessor<Deposit>();
         _engine.RegisterComponentFromAccessor<Structure>();

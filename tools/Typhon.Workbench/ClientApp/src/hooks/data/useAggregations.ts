@@ -2,6 +2,7 @@ import { useQuery } from '@tanstack/react-query';
 import { useSessionStore } from '@/stores/useSessionStore';
 import type { AggregationQueryDto } from '@/api/generated/model/aggregationQueryDto';
 import type { AggregationResponseDto } from '@/api/generated/model/aggregationResponseDto';
+import { applyWorkbenchAuthHeaders } from '@/api/bootstrapToken';
 
 export function useAggregations(sessionId: string | null, queries: AggregationQueryDto[]) {
   const token = useSessionStore((s) => s.token);
@@ -12,9 +13,7 @@ export function useAggregations(sessionId: string | null, queries: AggregationQu
     staleTime: 30_000,
     queryFn: async ({ signal }) => {
       if (!sessionId || queries.length === 0) return null;
-      const headers = new Headers({ 'Content-Type': 'application/json' });
-      if (token) headers.set('X-Session-Token', token);
-      headers.set('X-Workbench-Api', '1');
+      const headers = applyWorkbenchAuthHeaders(new Headers({ 'Content-Type': 'application/json' }), token);
       const res = await fetch(`/api/sessions/${sessionId}/aggregate`, {
         method: 'POST',
         body: JSON.stringify({ queries }),

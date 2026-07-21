@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <TargetFramework>net10.0</TargetFramework>
+        <LangVersion>default</LangVersion>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <IsPackable>false</IsPackable>
+        <IsTestProject>true</IsTestProject>
+        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <PackageReference Include="NUnit" Version="4.6.1" />
+        <PackageReference Include="NUnit3TestAdapter" Version="6.2.0" />
+        <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.7.0" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <!-- The sample under test. Engine + Schema.Definition flow transitively; the sample's generated [ModuleInitializer]
+             barrier fires when this assembly loads the sample, registering the SWG Light specs. -->
+        <ProjectReference Include="..\..\samples\Typhon.Samples.Swg\Typhon.Samples.Swg.csproj" />
+        <!-- Consumer generator at the call site (interceptors for the Comp<T> accessor path — mirrors Workbench.Tests / MonitoringDemo). -->
+        <ProjectReference Include="..\..\src\Typhon.Generators.Consumer\Typhon.Generators.Consumer.csproj" ReferenceOutputAssembly="false" OutputItemType="Analyzer" />
+    </ItemGroup>
+
+</Project>

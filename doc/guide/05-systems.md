@@ -57,9 +57,9 @@ A system is a class: derive from one of three bases, implement `Configure` (decl
 | **`QuerySystem`** | "do something to every entity in a set" — the workhorse | yes (a View) | one (or one per chunk, parallel) |
 | **`PipelineSystem`** | bulk data-parallel work that isn't per-entity (SIMD sweeps, reductions) | no | none — separate access model |
 
-Most game logic is `QuerySystem`. `CallbackSystem` is for the edges (input in, render out). `PipelineSystem` is advanced and rare — reach for it only when the per-tick transactional model is in your way.
+Most simulation logic is `QuerySystem`. `CallbackSystem` is for the edges (input in, render out). `PipelineSystem` is advanced and rare — reach for it only when the per-tick transactional model is in your way.
 
-### A CallbackSystem — spawn reinforcements
+### A CallbackSystem — deploy new drones
 
 ```csharp
 internal sealed class SpawnSystem : CallbackSystem
@@ -67,38 +67,38 @@ internal sealed class SpawnSystem : CallbackSystem
     protected override void Configure(SystemBuilder b) => b
         .Name("Spawn")
         .Phase(Phase.Input)
-        .Writes<Position>().Writes<Bounds>().Writes<Health>().Writes<Velocity>().Writes<Team>();
+        .Writes<Position>().Writes<Footprint>().Writes<Cargo>().Writes<Drift>().Writes<Extractor>();
 
     protected override void Execute(TickContext ctx)
     {
-        if (ctx.TickNumber == 0 || ctx.TickNumber % 30 != 0) return;   // periodic reinforcement
-        ctx.Transaction.Spawn<Unit>(
-            Unit.Position.Set(new Position { P = new Point2F { X = 0f, Y = 0f } }),
-            Unit.Bounds.Set(new Bounds { Box = new AABB2F { MinX = 0, MaxX = 0, MinY = 0, MaxY = 0 } }),
-            Unit.Health.Set(new Health(100, 100)),
-            Unit.Velocity.Set(new Velocity(1f, 0f)),
-            Unit.Team.Set(new Team { Id = 2 }));
+        if (ctx.TickNumber == 0 || ctx.TickNumber % 30 != 0) return;   // periodic deployment
+        ctx.Transaction.Spawn<Harvester>(
+            Harvester.Position.Set(new Position { P = new Point2F { X = 0f, Y = 0f } }),
+            Harvester.Footprint.Set(new Footprint { Box = new AABB2F { MinX = 0, MaxX = 0, MinY = 0, MaxY = 0 } }),
+            Harvester.Cargo.Set(new Cargo { Amount = 0, Capacity = 1000 }),
+            Harvester.Drift.Set(new Drift { Dx = 4f, Dy = 2f }),
+            Harvester.Extractor.Set(new Extractor { ResourceKind = 1, Rate = 5 }));
         // no Commit — the scheduler commits this system's transaction
     }
 }
 ```
 
-### A QuerySystem — move every unit
+### A QuerySystem — move every drone
 
 `QuerySystem` needs an **input View** — a live `EcsView` ([ch.4](04-querying.md)) that supplies the entity set. You create it once, hold it, and hand the system a factory:
 
 ```csharp
-internal sealed class MovementSystem : QuerySystem
+internal sealed class RoamSystem : QuerySystem
 {
-    private readonly EcsView<Unit> _units;
-    public MovementSystem(EcsView<Unit> units) { _units = units; }
+    private readonly EcsView<Harvester> _drones;
+    public RoamSystem(EcsView<Harvester> drones) { _drones = drones; }
 
     protected override void Configure(SystemBuilder b) => b
-        .Name("Movement")
+        .Name("Roam")
         .Phase(Phase.Simulation)
-        .Input(() => _units)
+        .Input(() => _drones)
         .Parallel()                       // fan across workers (§5)
-        .Reads<Velocity>()                // declared access (§3)
+        .Reads<Drift>()                   // declared access (§3)
         .Writes<Position>();
 
     protected override void Execute(TickContext ctx)
@@ -106,10 +106,10 @@ internal sealed class MovementSystem : QuerySystem
         foreach (EntityId id in ctx.Entities)             // the filtered set for this chunk
         {
             var e = ctx.Accessor.OpenMut(id);             // per-worker accessor (§5)
-            ref readonly var v = ref e.Read(Unit.Velocity);
-            ref var p = ref e.Write(Unit.Position);
-            p.P = new Point2F { X = p.P.X + v.Dx * ctx.DeltaTime,
-                                Y = p.P.Y + v.Dy * ctx.DeltaTime };
+            ref readonly var d = ref e.Read(Harvester.Drift);
+            ref var p = ref e.Write(Harvester.Position);
+            p.P = new Point2F { X = p.P.X + d.Dx * ctx.DeltaTime,
+                                Y = p.P.Y + d.Dy * ctx.DeltaTime };
         }
     }
 }
@@ -126,10 +126,10 @@ internal sealed class MovementSystem : QuerySystem
 This is the part that earns the runtime its keep. In `Configure` you declare what each system touches:
 
 ```csharp
-b.Reads<Velocity>()        // I read Velocity
+b.Reads<Drift>()           // I read Drift
  .Writes<Position>()       // I write Position
  .ReadsResource("Grid")    // I read a named non-component resource
- .WritesEvents(deathQueue) // I publish to an event queue
+ .WritesEvents(fullQueue)  // I publish to an event queue
 ```
 
 From those declarations across *all* systems in a DAG, the engine **derives the execution graph** and **rejects unsafe schedules at build time** — before a single tick runs. Two systems that write the same component in the same phase, with no ordering between them, is a hard error, not a race you discover in production.
@@ -144,26 +144,29 @@ The read variants are the interesting part, because they answer *"which version 
 
 > 💡 **Why three kinds of read?** Because "do I need the freshest value?" is a real design choice with a real cost. `ReadsFresh` is correctness when you depend on this tick's write — but it serialises you behind the writer. `ReadsSnapshot` says *"yesterday's value is good enough"* — and that one word lets the engine run your reader **alongside** the writer instead of after it, which is often the difference between a tick fitting in budget and not. One restriction: `ReadsSnapshot<T>` only applies to a **Versioned** `T` — SingleVersion and Transient have no revision history to hand out a stale-but-consistent copy of, and the engine rejects the declaration at `Build()` time if you try (rule CM-04 / `runtime-scheduling.md` AC-05).
 >
-> Our skirmish's `Position` is SingleVersion ([ch.2](02-modeling.md)), so a system can't `ReadsSnapshot<Position>` — it would need `ReadsFresh<Position>` instead (correct, but serialised behind `MovementSystem`) or Position would need to be Versioned. `CombatSystem` sidesteps the question entirely: it doesn't touch `Position` at all, so it has **no declared conflict** with `MovementSystem` and runs alongside it for free, no snapshot needed.
+> Our sim's `Position` is SingleVersion ([ch.2](02-modeling.md)), so a system can't `ReadsSnapshot<Position>` — it would need `ReadsFresh<Position>` instead (correct, but serialised behind `RoamSystem`) or Position would need to be Versioned. `HarvestSystem` sidesteps the question entirely: it doesn't touch `Position` at all — it reads `Extractor` and writes `Cargo` — so it has **no declared conflict** with `RoamSystem` and runs alongside it for free, no snapshot needed.
 
 ```csharp
-internal sealed class CombatSystem : QuerySystem
+internal sealed class HarvestSystem : QuerySystem
 {
-    private readonly EcsView<Unit> _units;
-    public CombatSystem(EcsView<Unit> units) { _units = units; }
+    private readonly EcsView<Harvester> _drones;
+    public HarvestSystem(EcsView<Harvester> drones) { _drones = drones; }
 
     protected override void Configure(SystemBuilder b) => b
-        .Name("Combat")
+        .Name("Harvest")
         .Phase(Phase.Simulation)
-        .Input(() => _units)
-        .Writes<Health>();                // Versioned write → transactional (see §5)
+        .Input(() => _drones)
+        .Reads<Extractor>()
+        .Writes<Cargo>();                 // Versioned write → transactional (see §5)
 
     protected override void Execute(TickContext ctx)
     {
         foreach (EntityId id in ctx.Entities)
         {
-            ref var hp = ref ctx.Transaction.OpenMut(id).Write(Unit.Health);
-            if (hp.Current > 0) hp.Current -= 1;   // Versioned → goes through the transaction
+            var e = ctx.Transaction.OpenMut(id);
+            ref readonly var ex = ref e.Read(Harvester.Extractor);
+            ref var c = ref e.Write(Harvester.Cargo);
+            if (c.Amount < c.Capacity) c.Amount = Math.Min(c.Capacity, c.Amount + ex.Rate);   // Versioned → goes through the transaction
         }
     }
 }
@@ -184,12 +187,15 @@ You declare the phase list when you create the DAG, and the engine slots each sy
 
 ```csharp
 schedule.PublicTrack
-    .DeclareDag("Game")
+    .DeclareDag("Sim")
     .Phases(Phase.Input, Phase.Simulation)
-    .Add(new SpawnSystem())            // Phase.Input
-    .Add(new MovementSystem(units))    // Phase.Simulation
-    .Add(new CombatSystem(units));     // Phase.Simulation — parallel with Movement
+    .Add(new SpawnSystem())              // Phase.Input
+    .Add(new RoamSystem(drones))         // Phase.Simulation
+    .Add(new FootprintSyncSystem(drones))// Phase.Simulation — after Roam (keeps the spatial index coherent)
+    .Add(new HarvestSystem(drones));     // Phase.Simulation — parallel with Roam
 ```
+
+`FootprintSyncSystem` is the fourth system in the running example — a cluster-native `QuerySystem` that mirrors each moved `Position` into the spatial `Footprint` box through the `WriteSpatial` barrier ([ch.2 §4](02-modeling.md#4-spatial--querying-by-geometry)). It declares `.After("Roam").ReadsFresh<Position>().Writes<Footprint>()`, so it runs once Roam has moved everything this tick.
 
 > 💡 **Phases are a contract, not a barrier wall.** Two systems in the same phase run concurrently *unless* their access declarations conflict. Two systems in adjacent phases only serialise where they actually touch the same data — a phase-N+1 system with no conflict against a phase-N system can overlap it. So you get the readability of "input, then simulate, then render" without paying for a hard stop between every stage. Order what must be ordered; let the engine parallelise the rest.
 
@@ -201,15 +207,15 @@ A `QuerySystem` with `.Parallel()` is **chunked across the worker pool**: the en
 
 How a parallel system touches data depends on what it **writes**:
 
-- **Non-Versioned writes (SingleVersion / Transient)** — the fast path. Each worker gets a per-worker **`ctx.Accessor`** (an `EntityAccessor`) with warm caches and **zero per-entity locking**, riding on a single frozen snapshot (a `PointInTimeAccessor`). This is how `MovementSystem` writes `Position` (SV) across all cores with no contention.
+- **Non-Versioned writes (SingleVersion / Transient)** — the fast path. Each worker gets a per-worker **`ctx.Accessor`** (an `EntityAccessor`) with warm caches and **zero per-entity locking**, riding on a single frozen snapshot (a `PointInTimeAccessor`). This is how `RoamSystem` writes `Position` (SV) across all cores with no contention.
 - **Versioned writes** — declare `.WritesVersioned()`. The engine falls back to a **per-chunk `Transaction`** (via `ctx.Transaction`) because Versioned writes need the full MVCC machinery. Correct, but heavier — which is exactly why hot, overwrite-often data like position is usually SingleVersion ([ch.2](02-modeling.md)).
 
 ```csharp
-b.Input(() => _units).Parallel()
- .Reads<Velocity>().Writes<Position>();      // SV write → ctx.Accessor, lock-free
+b.Input(() => _drones).Parallel()
+ .Reads<Drift>().Writes<Position>();         // SV write → ctx.Accessor, lock-free
 
-b.Input(() => _units).Parallel().WritesVersioned()
- .Writes<Health>();                          // Versioned write → per-chunk ctx.Transaction
+b.Input(() => _drones).Parallel().WritesVersioned()
+ .Writes<Cargo>();                           // Versioned write → per-chunk ctx.Transaction
 ```
 
 > 💡 **The zero-lock read is the whole point.** Under the hood, parallel reads share one `PointInTimeAccessor` — a single frozen TSN that every worker reads against without taking a single per-entity lock, because [snapshot isolation](03-transactions.md) guarantees the snapshot can't move under them. That's how "iterate a million entities across every core at one consistent instant" is a normal operation here, not a feat. It only works because nobody is mutating the versions those readers can see — the same property you bought with *Versioned* storage.
@@ -229,19 +235,19 @@ Two knobs worth knowing (both in `RuntimeOptions`):
 // engine `dbe` already built + schema registered (ch.1–2)
 
 // One long-lived input View for the entity systems:
-EcsView<Unit> units;
+EcsView<Harvester> drones;
 using (var tx = dbe.CreateQuickTransaction())
-    units = tx.Query<Unit>().ToView();
+    drones = tx.Query<Harvester>().ToView();
 
 using var runtime = TyphonRuntime.Create(dbe, schedule =>
 {
     schedule.PublicTrack
-        .DeclareDag("Game")
+        .DeclareDag("Sim")
         .Phases(Phase.Input, Phase.Simulation)
         .Add(new SpawnSystem())
-        .Add(new MovementSystem(units))
-        .Add(new CombatSystem(units));
-        // a real app adds more here — e.g. a spatial-sync system (ch.2's WriteSpatial) and render systems
+        .Add(new RoamSystem(drones))
+        .Add(new FootprintSyncSystem(drones))   // ch.2's WriteSpatial, kept coherent every tick
+        .Add(new HarvestSystem(drones));
 }, new RuntimeOptions
 {
     BaseTickRate = 60,    // ticks per second
@@ -280,7 +286,7 @@ A fixed tick rate is a promise: 60 ticks a second means each tick has ~16 ms. Wh
 b.Name("Decals").Priority(SystemPriority.Low).CanShed(true).TickDivisor(2);
 ```
 
-Under sustained overrun the engine escalates through a sticky chain — throttle low-priority systems, cap per-system entity budgets, slow the tick rate (down to a configurable floor), and finally fire **`OnCriticalOverload`** so *you* decide the last resort (shed players, split the world, refuse connections). The internals are the in-depth reference's job ([10-runtime](../in-depth-overview/10-runtime.md)); what you need to know to *use* it is: **set honest priorities, mark sheddable work sheddable, and the runtime keeps the critical path real-time when the machine can't keep up.**
+Under sustained overrun the engine escalates through a sticky chain — throttle low-priority systems, cap per-system entity budgets, slow the tick rate (down to a configurable floor), and finally fire **`OnCriticalOverload`** so *you* decide the last resort (shed work, split the world, refuse connections). The internals are the in-depth reference's job ([10-runtime](../in-depth-overview/10-runtime.md)); what you need to know to *use* it is: **set honest priorities, mark sheddable work sheddable, and the runtime keeps the critical path real-time when the machine can't keep up.**
 
 > ⚠️ Overload response is about *surviving spikes*, not papering over a too-heavy design. If `Critical` systems alone blow the budget, no amount of shedding helps — that's a modeling/parallelism problem, not a tuning one.
 

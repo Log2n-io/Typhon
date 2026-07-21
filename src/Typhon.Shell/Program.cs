@@ -52,6 +52,20 @@ internal static class Program
                     .WithExample(["ui"])
                     .WithExample(["ui", "mydb.typhon"]);
 
+                // `typhon new <name>` scaffolds a runnable starter project (SWG Light sample + app template + a pinned
+                // Typhon package reference + config-driven profiling), so `dotnet run` writes a trace with zero edits (#532).
+                config.AddCommand<NewCommand>("new")
+                    .WithDescription("Scaffold a new Typhon starter project.")
+                    .WithExample(["new", "MyApp"]);
+
+                // `typhon docs [path]` opens the documentation site (doc.typhondb.io/latest) in the browser.
+                // `doc` is a registered alias so either singular/plural works.
+                config.AddCommand<DocsCommand>("docs")
+                    .WithAlias("doc")
+                    .WithDescription("Open the Typhon documentation in your browser.")
+                    .WithExample(["docs"])
+                    .WithExample(["docs", "guide/getting-started"]);
+
                 // `typhon telemetry …` authors typhon.telemetry.json in the working directory (#522). Scriptable
                 // verbs over the source-generated flag catalog; the interactive tree lives under `edit`.
                 config.AddBranch("telemetry", tel =>
@@ -60,6 +74,7 @@ internal static class Program
                     tel.AddCommand<TelemetryListCommand>("list").WithDescription("List flags with default / explicit / effective state.");
                     tel.AddCommand<TelemetryEnableCommand>("enable").WithDescription("Set a flag (or subtree root) explicitly on.");
                     tel.AddCommand<TelemetryDisableCommand>("disable").WithDescription("Set a flag explicitly off.");
+                    tel.AddCommand<TelemetryTraceCommand>("trace").WithDescription("Set/clear the profiler trace output file (Typhon:Profiler:Trace).");
                     tel.AddCommand<TelemetryResetCommand>("reset").WithDescription("Remove an explicit flag (back to inherit).");
                     tel.AddCommand<TelemetryEffectiveCommand>("effective").WithDescription("Show what would actually emit.");
                     tel.AddCommand<TelemetryPresetCommand>("preset").WithDescription("Apply a curated preset bundle.");

@@ -805,7 +805,7 @@ public static class DslParser
                 RecoverToStage();
                 return null;
             }
-            // Component names are frequently namespaced (e.g. "Typhon.Workbench.Fixture.PlayerPosition"); read the
+            // Component names are frequently namespaced (e.g. "Swg.PlayerPosition"); read the
             // full dotted identifier like every other component-ident stage (WITH / WHERE / ORDER BY) per the §5.1
             // grammar (`spatial-stage ::= 'SPATIAL' component-ident ...`). A bare Consume() stopped at the first dot.
             var component = ParseDottedIdentifier();

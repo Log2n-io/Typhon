@@ -10,6 +10,8 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Typhon.Engine;
 using Typhon.Schema.Definition;
+// Disambiguate the SWG schema struct from Typhon.Engine's ResourceType enum (both are in scope via the global usings).
+using ResourceType = Typhon.Samples.Swg.ResourceType;
 
 namespace Typhon.Workbench.Fixtures;
 
@@ -231,9 +233,10 @@ internal static class FixtureDatabase
         }
         var cfg = config ?? FixtureConfig.Default;
 
-        // Materialise each fixture inside its own per-database sub-directory so the shared sidecars
-        // (`Typhon.Workbench.Fixtures.schema.dll`, the `config-hash`) don't collide when multiple databases share an
-        // `outputDir` root — see the xmldoc above. `PrepareOutputDirectory` wipes this leaf wholesale on regenerate,
+        // Materialise each fixture inside its own per-database sub-directory so the per-database sidecar (the
+        // `config-hash`) doesn't collide when multiple databases share an `outputDir` root — see the xmldoc above.
+        // (The schema DLL is no longer copied per-database; ADR-055 resolves it from the deployment dir.)
+        // `PrepareOutputDirectory` wipes this leaf wholesale on regenerate,
         // so this scoping is also what keeps a force-regen of DB-A from blowing away DB-B's files.
         var absOut = Path.Combine(Path.GetFullPath(outputDir), safeName);
         // The engine creates the database as a "{safeName}.typhon" bundle directory (data + db.lock + wal/ inside) under
@@ -241,7 +244,9 @@ internal static class FixtureDatabase
         var typhonPath = Path.Combine(absOut, $"{safeName}.typhon");
         // ADR-055: the schema assembly is no longer copied per-database — it's resolved from the Workbench's own
         // deployment directory at open time. Report that shared, always-current location rather than a per-DB copy.
-        var schemaDllPath = Path.Combine(AppContext.BaseDirectory, "Typhon.Workbench.Fixtures.schema.dll");
+        // The SWG schema now lives in the canonical sample assembly (#531), deployed alongside the Workbench via the
+        // Workbench → Fixtures → Typhon.Samples.Swg reference chain.
+        var schemaDllPath = Path.Combine(AppContext.BaseDirectory, "Typhon.Samples.Swg.dll");
         var configHashPath = Path.Combine(absOut, ConfigHashFileName);
         var requestedHash = cfg.Hash();
 

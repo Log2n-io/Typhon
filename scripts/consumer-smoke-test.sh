@@ -4,10 +4,11 @@
 #
 # This is the anti-"packaging silently broke" gate. From a *clean* local feed it:
 #   1. installs the `Typhon` package into a fresh console project,
-#   2. defines a [Component]/[Archetype] model,
-#   3. builds it — `Unit.ReadAll(...)` compiles ONLY if the ArchetypeAccessorGenerator shipped
+#   2. compiles the canonical SWG Light schema source (the same .cs the `typhon new` scaffold
+#      emits — samples/Typhon.Samples.Swg/Light/) STANDALONE against the package (#531),
+#   3. builds it — `Harvester.ReadAll(...)` compiles ONLY if the ArchetypeAccessorGenerator shipped
 #      inside the package (analyzers/dotnet/cs) AND ran in the *consumer's* compilation,
-#   4. runs it — opening a real DB, spawning an entity, and reading it back two ways
+#   4. runs it — opening a real DB, spawning a Harvester, and reading it back two ways
 #      (runtime `Read` + generated `ReadAll`).
 #
 # The transitive dependencies (MemoryPack, K4os.LZ4, Microsoft.Extensions.*, diagnostics) are
@@ -18,6 +19,9 @@
 #
 # Exit 0 = PASS. Any non-zero = FAIL (build error, generator missing, runtime mismatch).
 set -euo pipefail
+
+# Absolute script dir, captured BEFORE any `cd` — the SWG Light source is resolved relative to it below.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 FEED="${1:?usage: consumer-smoke-test.sh <feed-dir>}"
 # Windows-form absolute path when on Git Bash/MSYS (`pwd -W`), native path on Linux/CI (`pwd`).
@@ -60,72 +64,55 @@ cat > smoke.csproj <<XML
 </Project>
 XML
 
-# Named namespace here for a realistic multi-file layout. Global (unnamed) namespace is ALSO supported since #505 —
-# the top-level-statement console shape — and is covered by Typhon.Generators.Tests.ArchetypeAccessorGeneratorTests.
-cat > Model.cs <<'CS'
-using Typhon.Engine;            // Archetype<T>, Comp<T>
-using Typhon.Schema.Definition; // [Component], [Archetype], StorageMode
-
-namespace ConsumerSmoke;
-
-[Component("Smoke.Position", 1, StorageMode = StorageMode.Versioned)]
-public struct Position
-{
-    public float X, Y;
-    public Position(float x, float y) { X = x; Y = y; }
-}
-
-[Component("Smoke.Health", 1, StorageMode = StorageMode.Versioned)]
-public struct Health
-{
-    public int Current, Max;
-    public Health(int current, int max) { Current = current; Max = max; }
-}
-
-[Archetype]
-public sealed partial class Unit : Archetype<Unit>
-{
-    public static readonly Comp<Position> Position = Register<Position>();
-    public static readonly Comp<Health>   Health   = Register<Health>();
-}
-CS
+# Compile the ACTUAL SWG Light schema source against the package (not a hand-maintained copy) — this is what
+# proves the sample the scaffold emits is package-compatible standalone, and can never drift from the real source.
+LIGHT_SRC="$SCRIPT_DIR/../samples/Typhon.Samples.Swg/Light"
+[ -d "$LIGHT_SRC" ] || { echo "smoke: SWG Light source not found at $LIGHT_SRC"; exit 1; }
+cp "$LIGHT_SRC"/*.cs "$WORK/"
+echo "smoke: using SWG Light schema from $LIGHT_SRC"
 
 cat > Program.cs <<'CS'
 using System;
+using System.Numerics;
 using Typhon.Engine;
 using Typhon.Schema.Definition;
-using ConsumerSmoke;
+using Typhon.Samples.Swg;
 
+// Footprint carries a [SpatialIndex], so Harvester is cluster-eligible — a grid is required before the archetypes wire.
 using var dbe = DatabaseEngine.Open("smoke.typhon", o => o
-    .Register<Position>()
-    .Register<Health>());   // archetypes self-register at assembly load (#514) — no RegisterArchetype call
+    .Register<Position>().Register<Footprint>().Register<Cargo>().Register<Drift>().Register<Extractor>()
+    .ConfigureSpatialGrid(new SpatialGridConfig(Vector2.Zero, new Vector2(1000f, 1000f), cellSize: 50f)));
+    // archetypes self-register at assembly load (#514) — no RegisterArchetype call
 
-EntityId soldier;
+EntityId drone;
 using (var tx = dbe.CreateQuickTransaction())
 {
-    soldier = tx.Spawn<Unit>(
-        Unit.Position.Set(new Position(10, 20)),
-        Unit.Health.Set(new Health(100, 100)));
+    drone = tx.Spawn<Harvester>(
+        Harvester.Position.Set(new Position { P = new Point2F { X = 10, Y = 20 } }),
+        Harvester.Footprint.Set(new Footprint { Box = new AABB2F { MinX = 10, MaxX = 10, MinY = 20, MaxY = 20 } }),
+        Harvester.Cargo.Set(new Cargo { Amount = 250, Capacity = 1000 }),
+        Harvester.Drift.Set(new Drift { Dx = 0, Dy = 0 }),
+        Harvester.Extractor.Set(new Extractor { ResourceKind = 1, Rate = 5 }));
     tx.Commit();
 }
 
 // (a) Runtime read via the engine API.
 using (var tx = dbe.CreateQuickTransaction())
 {
-    var e = tx.Open(soldier);
-    var pos = e.Read(Unit.Position);
-    var hp = e.Read(Unit.Health);
-    if (hp.Current != 100 || hp.Max != 100 || pos.X != 10f || pos.Y != 20f)
-        throw new Exception($"runtime read mismatch: HP {hp.Current}/{hp.Max} at ({pos.X},{pos.Y})");
+    var e = tx.Open(drone);
+    var pos = e.Read(Harvester.Position);
+    var cargo = e.Read(Harvester.Cargo);
+    if (cargo.Amount != 250 || cargo.Capacity != 1000 || pos.P.X != 10f || pos.P.Y != 20f)
+        throw new Exception($"runtime read mismatch: cargo {cargo.Amount}/{cargo.Capacity} at ({pos.P.X},{pos.P.Y})");
 }
 
-// (b) GENERATED accessor. `Unit.ReadAll` exists ONLY if the ArchetypeAccessorGenerator shipped in the
+// (b) GENERATED accessor. `Harvester.ReadAll` exists ONLY if the ArchetypeAccessorGenerator shipped in the
 //     package and ran in this consumer compilation — this line is the crux of the smoke test.
 using (var tx = dbe.CreateQuickTransaction())
 {
-    var u = Unit.ReadAll(tx, soldier);
-    if (u.Health.Current != 100 || u.Position.X != 10f)
-        throw new Exception($"generated ReadAll mismatch: hp={u.Health.Current} pos.x={u.Position.X}");
+    var h = Harvester.ReadAll(tx, drone);
+    if (h.Cargo.Amount != 250 || h.Position.P.X != 10f)
+        throw new Exception($"generated ReadAll mismatch: cargo={h.Cargo.Amount} pos.x={h.Position.P.X}");
 }
 
 Console.WriteLine("SMOKE OK: package installed, generator fired, DB spawn+read verified.");

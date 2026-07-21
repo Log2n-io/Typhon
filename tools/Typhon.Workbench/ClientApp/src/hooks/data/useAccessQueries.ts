@@ -4,6 +4,7 @@ import type { SystemDefinitionDto } from '@/api/generated/model/systemDefinition
 import type { SystemListDto } from '@/api/generated/model/systemListDto';
 import { useSessionStore } from '@/stores/useSessionStore';
 import { useTopology } from './useTopology';
+import { applyWorkbenchAuthHeaders } from '@/api/bootstrapToken';
 
 /**
  * Helpers around the RFC 07 access declarations carried on {@link TopologyDto.systems}. The data
@@ -88,9 +89,7 @@ function useSystemListQuery(kind: 'who-writes' | 'who-reads', component: string 
     staleTime: Infinity,
     queryFn: async ({ signal }) => {
       if (!sessionId || !component) return null;
-      const headers = new Headers();
-      if (token) headers.set('X-Session-Token', token);
-      headers.set('X-Workbench-Api', '1');
+      const headers = applyWorkbenchAuthHeaders(new Headers(), token);
       const res = await fetch(
         `/api/sessions/${sessionId}/queries/${kind}/${encodeURIComponent(component)}`,
         { signal, headers },

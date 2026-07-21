@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <!--
+        The canonical Typhon sample schema. ONE maintained assembly with two source tiers (feature #531):
+          • Light/  — a minimal, standalone-compilable slice (one archetype, the V/SV/Transient storage-mode range).
+                      This is the source the `typhon new` scaffold emits (feature #532) and the guide's runnable example.
+          • Full/   — Light + the exotic primitives (ComponentCollection, cascade FKs, families, polymorphism, spatial
+                      categories). In-repo consumers (Workbench fixture, MonitoringDemo) reference this assembly.
+
+        Referenced as a compiled assembly (one CLR identity) by in-repo consumers — the #514-hardened path, which keys
+        archetype identity on Type.FullName and rejects the same name loaded in two co-loaded ALCs. The scaffold instead
+        emits the Light *.cs as source into its own project, so it never ships this DLL.
+
+        Dependencies mirror exactly what the published `Typhon` NuGet package provides to a consumer, so the same source
+        compiles both here (three ProjectReferences) and in a scaffolded project (one <PackageReference Include="Typhon" />):
+        the engine (Archetype<>/Comp<>/EntityLink<>), Schema.Definition (attributes + String64/AABB2F/ComponentCollection),
+        and the consumer generator (ArchetypeAccessorGenerator — emits the Comp<T> accessors + the [ModuleInitializer] barrier).
+    -->
+    <PropertyGroup>
+        <TargetFramework>net10.0</TargetFramework>
+        <LangVersion>default</LangVersion>
+        <Nullable>disable</Nullable>
+        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+        <!-- Never packed: the DLL is never shipped; the scaffold distributes Light as source, in-repo consumers reference the project. -->
+        <IsPackable>false</IsPackable>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="..\..\src\Typhon.Engine\Typhon.Engine.csproj" />
+        <!-- Direct ref: Schema.Definition ships bundled inside the Typhon package and is not transitive via the engine (#427). -->
+        <ProjectReference Include="..\..\src\Typhon.Schema.Definition\Typhon.Schema.Definition.csproj" />
+        <!-- The consumer generator subset the Typhon package ships (ArchetypeAccessorGenerator only — no TraceEvent post-init leak). -->
+        <ProjectReference Include="..\..\src\Typhon.Generators.Consumer\Typhon.Generators.Consumer.csproj" ReferenceOutputAssembly="false" OutputItemType="Analyzer" />
+    </ItemGroup>
+
+</Project>

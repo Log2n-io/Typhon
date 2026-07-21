@@ -1,5 +1,5 @@
 import { useSessionStore } from '@/stores/useSessionStore';
-import { getBootstrapToken } from '@/api/bootstrapToken';
+import { applyWorkbenchAuthHeaders } from '@/api/bootstrapToken';
 
 /**
  * Error raised by {@link customFetch} for any non-2xx response. Carries the parsed RFC 7807
@@ -37,16 +37,10 @@ export const customFetch = async <T>(url: string, init?: RequestInit): Promise<T
   if (!headers.has('Content-Type') && init?.body != null) {
     headers.set('Content-Type', 'application/json');
   }
-  if (token && !headers.has('X-Session-Token')) {
-    headers.set('X-Session-Token', token);
-  }
-  // Bootstrap token (#429): present only when served by the `typhon ui` host (captured from the launch-URL
-  // fragment). Under the Vite dev-proxy this is null and the proxy injects the header server-side instead.
-  const bootstrapToken = getBootstrapToken();
-  if (bootstrapToken && !headers.has('X-Workbench-Token')) {
-    headers.set('X-Workbench-Token', bootstrapToken);
-  }
-  headers.set('X-Workbench-Api', '1');
+  // Session token + bootstrap token (#429) + api marker. Bootstrap token is present only under the `typhon ui`
+  // host (captured from the launch-URL fragment); under the Vite dev-proxy it is null and the proxy injects the
+  // header server-side instead. Shared with the hand-rolled profiler fetches via applyWorkbenchAuthHeaders.
+  applyWorkbenchAuthHeaders(headers, token);
 
   const response = await fetch(url, { ...init, headers });
 

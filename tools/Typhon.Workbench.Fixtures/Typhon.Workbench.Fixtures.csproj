@@ -19,6 +19,9 @@
         <!-- Needed by TraceFixtureBuilder / MockTcpProfilerServer for TraceFileHeader, TraceFileWriter,
              LiveStreamProtocol, TraceBlockEncoder. -->
         <ProjectReference Include="..\..\src\Typhon.Profiler\Typhon.Profiler.csproj" />
+        <!-- The SWG schema now lives in the canonical sample assembly (#531). This project keeps only the data generator,
+             which spawns over those archetypes; it references the schema instead of declaring it inline. -->
+        <ProjectReference Include="..\..\samples\Typhon.Samples.Swg\Typhon.Samples.Swg.csproj" />
     </ItemGroup>
 
     <ItemGroup>

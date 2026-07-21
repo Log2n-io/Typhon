@@ -1,6 +1,5 @@
 using BenchmarkDotNet.Attributes;
 using Microsoft.Extensions.DependencyInjection;
-using Typhon.Engine;
 
 namespace Typhon.Benchmark;
 

@@ -13,8 +13,21 @@ vi.mock('@/stores/useSessionStore', () => ({
 const { getBootstrapTokenMock } = vi.hoisted(() => ({
   getBootstrapTokenMock: vi.fn<() => string | null>(() => null),
 }));
+// customFetch delegates header-stamping to applyWorkbenchAuthHeaders; the mock reproduces its (small) contract
+// over the mocked getBootstrapToken. The helper's own behavior is tested authoritatively in bootstrapToken.test.ts.
 vi.mock('@/api/bootstrapToken', () => ({
   getBootstrapToken: getBootstrapTokenMock,
+  applyWorkbenchAuthHeaders: (headers: Headers, sessionToken?: string | null) => {
+    const bootstrapToken = getBootstrapTokenMock();
+    if (bootstrapToken && !headers.has('X-Workbench-Token')) {
+      headers.set('X-Workbench-Token', bootstrapToken);
+    }
+    if (sessionToken && !headers.has('X-Session-Token')) {
+      headers.set('X-Session-Token', sessionToken);
+    }
+    headers.set('X-Workbench-Api', '1');
+    return headers;
+  },
 }));
 
 interface FetchInit {

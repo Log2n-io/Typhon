@@ -1,6 +1,7 @@
 import { useQuery, type UseQueryResult } from '@tanstack/react-query';
 import { useSessionStore } from '@/stores/useSessionStore';
 import type { CallTreeRequest } from './useCallTree';
+import { applyWorkbenchAuthHeaders } from '@/api/bootstrapToken';
 
 /** One time-bin of the sample-density sparkline — `count` in-scope samples starting at `startUs`. */
 export interface SampleDensityBin {
@@ -50,9 +51,7 @@ export function useSampleDensity(
     refetchInterval: (q) => (q.state.data || q.state.error ? false : 1000),
     queryFn: async ({ signal }) => {
       if (!sessionId) return null;
-      const headers = new Headers();
-      headers.set('Content-Type', 'application/json');
-      if (token) headers.set('X-Session-Token', token);
+      const headers = applyWorkbenchAuthHeaders(new Headers({ 'Content-Type': 'application/json' }), token);
       const res = await fetch(`/api/sessions/${sessionId}/profiler/sample-density`, {
         method: 'POST',
         signal,

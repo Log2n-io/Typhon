@@ -23,19 +23,33 @@ internal sealed class TelemetryFile
 
     // path-below-prefix ("" = master) -> explicit bool
     private readonly Dictionary<string, bool> _explicit;
+    // Typhon:Profiler:Trace — a string output path, not a gate flag; null when unset.
+    private string _tracePath;
 
-    private TelemetryFile(string path, Dictionary<string, bool> ov)
+    private TelemetryFile(string path, Dictionary<string, bool> ov, string tracePath)
     {
         Path = path;
         _explicit = ov;
+        _tracePath = tracePath;
     }
 
     public IReadOnlyDictionary<string, bool> Explicit => _explicit;
+
+    /// <summary>The explicit <c>Typhon:Profiler:Trace</c> output-file path, or <c>null</c> when unset. Declaring it
+    /// activates profiling even without the master <c>Enabled</c> flag (an output channel is what makes the profiler live).</summary>
+    public string TracePath => _tracePath;
+
+    /// <summary>Set the profiler trace output path (<c>Typhon:Profiler:Trace</c>).</summary>
+    public void SetTrace(string path) => _tracePath = path;
+
+    /// <summary>Remove the profiler trace output path.</summary>
+    public void ClearTrace() => _tracePath = null;
 
     /// <summary>Load the file (or an empty model if it does not exist).</summary>
     public static TelemetryFile Load(string path)
     {
         var ov = new Dictionary<string, bool>(StringComparer.Ordinal);
+        string tracePath = null;
         if (File.Exists(path))
         {
             using var doc = JsonDocument.Parse(File.ReadAllText(path), new JsonDocumentOptions
@@ -47,9 +61,13 @@ internal sealed class TelemetryFile
                 typhon.TryGetProperty("Profiler", out var profiler))
             {
                 Collect(profiler, "", ov);
+                if (profiler.TryGetProperty("Trace", out var traceEl) && traceEl.ValueKind == JsonValueKind.String)
+                {
+                    tracePath = traceEl.GetString();
+                }
             }
         }
-        return new TelemetryFile(path, ov);
+        return new TelemetryFile(path, ov, tracePath);
     }
 
     private static void Collect(JsonElement node, string path, Dictionary<string, bool> ov)
@@ -135,32 +153,42 @@ internal sealed class TelemetryFile
         sb.AppendLine("// everything else inherits (see the telemetry flags reference). Env vars override this file.");
         sb.AppendLine("{");
         sb.AppendLine("  \"Typhon\": {");
-        EmitChildren(root, sb, 2, "Profiler");
+        EmitChildren(root, sb, 2, "Profiler", _tracePath);
         sb.AppendLine("  }");
         sb.AppendLine("}");
         File.WriteAllText(Path, sb.ToString());
     }
 
-    private static void EmitChildren(EmitNode profilerContent, StringBuilder sb, int indent, string wrapName)
+    private static void EmitChildren(EmitNode profilerContent, StringBuilder sb, int indent, string wrapName, string tracePath)
     {
         var pad = new string(' ', indent * 2);
         sb.AppendLine(pad + "\"" + wrapName + "\": {");
-        EmitBody(profilerContent, sb, indent + 1);
+        EmitBody(profilerContent, sb, indent + 1, tracePath);
         sb.AppendLine(pad + "}");
     }
 
-    private static void EmitBody(EmitNode node, StringBuilder sb, int indent)
+    private static void EmitBody(EmitNode node, StringBuilder sb, int indent, string tracePath = null)
     {
         var pad = new string(' ', indent * 2);
+        var kids = node.Children.OrderBy(k => k.Key, StringComparer.Ordinal).ToList();
+
+        // The trace output path (a string, not a gate flag) leads the Profiler body when set. A trailing comma
+        // follows only if an Enabled flag or a child subtree comes after it.
+        if (!string.IsNullOrEmpty(tracePath))
+        {
+            var following = node.HasValue || kids.Count > 0;
+            sb.AppendLine(pad + "// Profiler trace output file — declaring it activates profiling.");
+            sb.AppendLine(pad + "\"Trace\": " + JsonSerializer.Serialize(tracePath) + (following ? "," : ""));
+        }
+
         if (node.HasValue)
         {
             if (node.Value && !string.IsNullOrEmpty(node.Desc))
             {
                 sb.AppendLine(pad + "// " + node.Desc);
             }
-            sb.AppendLine(pad + "\"Enabled\": " + (node.Value ? "true" : "false") + (node.Children.Count > 0 ? "," : ""));
+            sb.AppendLine(pad + "\"Enabled\": " + (node.Value ? "true" : "false") + (kids.Count > 0 ? "," : ""));
         }
-        var kids = node.Children.OrderBy(k => k.Key, StringComparer.Ordinal).ToList();
         for (int i = 0; i < kids.Count; i++)
         {
             var last = i == kids.Count - 1;

@@ -342,7 +342,7 @@ public sealed class EngineLifecycle : IDisposable
             var resolvedTier = "bundled";
             for (var i = 0; i < searchDirs.Count; i++)
             {
-                // Fast path: {SimpleName}.dll. Fixtures resolve here (file == "Typhon.Workbench.Fixtures.schema.dll").
+                // Fast path: {SimpleName}.dll. The SWG sample schema resolves here (file == "Typhon.Samples.Swg.dll").
                 var direct = Path.Combine(searchDirs[i].Dir, name + ".dll");
                 if (File.Exists(direct))
                 {

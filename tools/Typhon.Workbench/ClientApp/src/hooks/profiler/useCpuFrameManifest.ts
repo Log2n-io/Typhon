@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useSessionStore } from '@/stores/useSessionStore';
 import { useCpuFrameStore, type CpuCategory, type CpuFrameSymbol } from '@/stores/useCpuFrameStore';
+import { applyWorkbenchAuthHeaders } from '@/api/bootstrapToken';
 
 interface CpuFrameManifestDto {
   frames: CpuFrameSymbol[];
@@ -28,8 +29,7 @@ export function useCpuFrameManifest(sessionId: string | null): void {
     refetchInterval: (q) => (q.state.data || q.state.error ? false : 1000),
     queryFn: async ({ signal }) => {
       if (!sessionId) return null;
-      const headers = new Headers();
-      if (token) headers.set('X-Session-Token', token);
+      const headers = applyWorkbenchAuthHeaders(new Headers(), token);
       const res = await fetch(`/api/sessions/${sessionId}/profiler/cpu-frames`, { signal, headers });
       if (res.status === 202) return null;
       if (!res.ok) {

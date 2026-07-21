@@ -1,10 +1,12 @@
 using System.Diagnostics;
 using Typhon.Engine;
+using Typhon.Samples.Swg;
+using Typhon.Schema.Definition;
 
 namespace Typhon.MonitoringDemo.Scenarios;
 
 /// <summary>
-/// Runs both factory and RPG workloads simultaneously.
+/// Runs factory (FactoryArch) and player (PlayerArch) workloads simultaneously.
 /// Tests mixed component types and transaction isolation.
 /// </summary>
 public class MixedWorkloadScenario : IScenario
@@ -13,7 +15,7 @@ public class MixedWorkloadScenario : IScenario
     public string Description => "Factory + RPG simultaneously. Tests mixed component types and isolation.";
 
     private readonly List<EntityId> _factoryIds = [];
-    private readonly List<EntityId> _characterIds = [];
+    private readonly List<EntityId> _playerIds = [];
 
     public async Task RunAsync(TyphonContext context, ScenarioConfig config, ScenarioStats stats, CancellationToken ct)
     {
@@ -52,8 +54,17 @@ public class MixedWorkloadScenario : IScenario
 
                             if (opType < 30)
                             {
-                                var building = FactoryBuilding.Create(localRand, localRand.Next(0, 5));
-                                var id = t.Spawn<FactoryBuildingArch>(FactoryBuildingArch.Building.Set(in building));
+                                var st = new Structure { TypeCode = localRand.Next(0, 10), PlacedAt = i, Maintenance = localRand.Next(0, 100) };
+                                var owner = new StructureOwner { Owner = EntityLink<PlayerArch>.Null };
+                                var fc = new FactoryConfig { Recipe = EntityLink<RecipeArch>.Null, RemainingRuns = localRand.Next(0, 1000) };
+                                var pw = new PowerSupply { CreditsRemaining = localRand.Next() };
+                                var pos = new StructurePosition { Bounds = SwgWorkload.RandomBounds(localRand) };
+                                var id = t.Spawn<FactoryArch>(
+                                    StructureArch.Structure.Set(in st),
+                                    StructureArch.Owner.Set(in owner),
+                                    FactoryArch.Config.Set(in fc),
+                                    FactoryArch.Power.Set(in pw),
+                                    FactoryArch.Position.Set(in pos));
                                 lock (_factoryIds)
                                 {
                                     _factoryIds.Add(id);
@@ -64,15 +75,18 @@ public class MixedWorkloadScenario : IScenario
                                 var id = _factoryIds[localRand.Next(_factoryIds.Count)];
                                 if (t.TryOpen(id, out var entity))
                                 {
-                                    var building = entity.Read(FactoryBuildingArch.Building);
-                                    ref var wb = ref t.OpenMut(id).Write(FactoryBuildingArch.Building);
-                                    wb.Progress = (building.Progress + 0.05f) % 1.0f;
+                                    var power = entity.Read(FactoryArch.Power);
+                                    ref var wp = ref t.OpenMut(id).Write(FactoryArch.Power);
+                                    wp.CreditsRemaining = Math.Max(0, power.CreditsRemaining + localRand.Next(-100, 200));
                                 }
                             }
                             else if (_factoryIds.Count > 0)
                             {
                                 var id = _factoryIds[localRand.Next(_factoryIds.Count)];
-                                t.TryOpen(id, out _);
+                                if (t.TryOpen(id, out var entity))
+                                {
+                                    _ = entity.Read(FactoryArch.Config);
+                                }
                             }
 
                             stats.RecordSuccess((Stopwatch.GetTimestamp() - sw) * 1_000_000 / Stopwatch.Frequency);
@@ -100,13 +114,16 @@ public class MixedWorkloadScenario : IScenario
             }, ct));
         }
 
-        // RPG workers
+        // RPG (player) workers
         for (var workerId = 0; workerId < rpgWorkers; workerId++)
         {
             var wid = workerId + factoryWorkers;
             workers.Add(Task.Run(async () =>
             {
                 var localRand = new Random(42 + wid);
+                // Per-worker unique AccountId range (Player.AccountId is a unique index).
+                var accountBase = (long)(wid + 1) << 40;
+                long localSeq = 0;
 
                 while (!ct.IsCancellationRequested)
                 {
@@ -122,29 +139,44 @@ public class MixedWorkloadScenario : IScenario
 
                             if (opType < 30)
                             {
-                                var names = new[] { "Warrior", "Mage", "Rogue", "Paladin" };
-                                var character = Character.Create(localRand, names[localRand.Next(names.Length)], localRand.Next(2) == 0);
-                                var id = t.Spawn<CharacterArch>(CharacterArch.Character.Set(in character));
-                                lock (_characterIds)
+                                var player = new Player
                                 {
-                                    _characterIds.Add(id);
+                                    Name = SwgWorkload.S64($"P-{wid}-{localSeq}"), AccountId = accountBase + localSeq++,
+                                    Level = localRand.Next(1, 91), ProfessionId = localRand.Next(0, 16), CreatedAt = 0,
+                                };
+                                var membership = new Membership { Guild = EntityLink<GuildArch>.Null, GuildRank = localRand.Next(0, 6) };
+                                var wallet = new Wallet { Credits = localRand.Next(0, 1_000_000), BankCredits = localRand.Next(0, 100_000_000) };
+                                var pos = new PlayerPosition { Bounds = SwgWorkload.RandomBounds(localRand) };
+                                var session = new Session { ConnectionId = 0, LatencyMs = localRand.Next(5, 300) };
+                                var id = t.Spawn<PlayerArch>(
+                                    PlayerArch.Player.Set(in player),
+                                    PlayerArch.Membership.Set(in membership),
+                                    PlayerArch.Wallet.Set(in wallet),
+                                    PlayerArch.Position.Set(in pos),
+                                    PlayerArch.Session.Set(in session));
+                                lock (_playerIds)
+                                {
+                                    _playerIds.Add(id);
                                 }
                             }
-                            else if (opType < 70 && _characterIds.Count > 0)
+                            else if (opType < 70 && _playerIds.Count > 0)
                             {
-                                var id = _characterIds[localRand.Next(_characterIds.Count)];
+                                var id = _playerIds[localRand.Next(_playerIds.Count)];
                                 if (t.TryOpen(id, out var entity))
                                 {
-                                    var character = entity.Read(CharacterArch.Character);
-                                    ref var wc = ref t.OpenMut(id).Write(CharacterArch.Character);
-                                    wc.Health = Math.Min(character.MaxHealth, character.Health + localRand.Next(-20, 30));
-                                    wc.Experience = character.Experience + localRand.Next(10, 100);
+                                    var wallet = entity.Read(PlayerArch.Wallet);
+                                    ref var ww = ref t.OpenMut(id).Write(PlayerArch.Wallet);
+                                    ww.Credits = Math.Max(0, wallet.Credits + localRand.Next(-20, 30));
+                                    ww.BankCredits = wallet.BankCredits + localRand.Next(10, 100);
                                 }
                             }
-                            else if (_characterIds.Count > 0)
+                            else if (_playerIds.Count > 0)
                             {
-                                var id = _characterIds[localRand.Next(_characterIds.Count)];
-                                t.TryOpen(id, out _);
+                                var id = _playerIds[localRand.Next(_playerIds.Count)];
+                                if (t.TryOpen(id, out var entity))
+                                {
+                                    _ = entity.Read(PlayerArch.Player);
+                                }
                             }
 
                             stats.RecordSuccess((Stopwatch.GetTimestamp() - sw) * 1_000_000 / Stopwatch.Frequency);
@@ -182,18 +214,39 @@ public class MixedWorkloadScenario : IScenario
         // Factory entities
         for (var i = 0; i < 30 && !ct.IsCancellationRequested; i++)
         {
-            var building = FactoryBuilding.Create(rand, rand.Next(0, 5));
-            var id = t.Spawn<FactoryBuildingArch>(FactoryBuildingArch.Building.Set(in building));
+            var st = new Structure { TypeCode = rand.Next(0, 10), PlacedAt = i, Maintenance = rand.Next(0, 100) };
+            var owner = new StructureOwner { Owner = EntityLink<PlayerArch>.Null };
+            var fc = new FactoryConfig { Recipe = EntityLink<RecipeArch>.Null, RemainingRuns = rand.Next(0, 1000) };
+            var pw = new PowerSupply { CreditsRemaining = rand.Next() };
+            var pos = new StructurePosition { Bounds = SwgWorkload.RandomBounds(rand) };
+            var id = t.Spawn<FactoryArch>(
+                StructureArch.Structure.Set(in st),
+                StructureArch.Owner.Set(in owner),
+                FactoryArch.Config.Set(in fc),
+                FactoryArch.Power.Set(in pw),
+                FactoryArch.Position.Set(in pos));
             _factoryIds.Add(id);
         }
 
-        // RPG entities
-        var names = new[] { "Hero", "Villain", "NPC", "Monster" };
+        // Player entities
         for (var i = 0; i < 30 && !ct.IsCancellationRequested; i++)
         {
-            var character = Character.Create(rand, names[rand.Next(names.Length)], i > 10);
-            var id = t.Spawn<CharacterArch>(CharacterArch.Character.Set(in character));
-            _characterIds.Add(id);
+            var player = new Player
+            {
+                Name = SwgWorkload.S64($"Player-{i}"), AccountId = i,
+                Level = rand.Next(1, 91), ProfessionId = rand.Next(0, 16), CreatedAt = i,
+            };
+            var membership = new Membership { Guild = EntityLink<GuildArch>.Null, GuildRank = rand.Next(0, 6) };
+            var wallet = new Wallet { Credits = rand.Next(0, 1_000_000), BankCredits = rand.Next(0, 100_000_000) };
+            var pos = new PlayerPosition { Bounds = SwgWorkload.RandomBounds(rand) };
+            var session = new Session { ConnectionId = i, LatencyMs = rand.Next(5, 300) };
+            var id = t.Spawn<PlayerArch>(
+                PlayerArch.Player.Set(in player),
+                PlayerArch.Membership.Set(in membership),
+                PlayerArch.Wallet.Set(in wallet),
+                PlayerArch.Position.Set(in pos),
+                PlayerArch.Session.Set(in session));
+            _playerIds.Add(id);
         }
 
         t.Commit();
@@ -202,7 +255,7 @@ public class MixedWorkloadScenario : IScenario
 }
 
 /// <summary>
-/// Intentionally creates high contention by having many workers update the same entities.
+/// Intentionally creates high contention by having many workers update the same few entities.
 /// Used to test lock behavior and observe contention metrics.
 /// </summary>
 public class HighContentionScenario : IScenario
@@ -242,13 +295,11 @@ public class HighContentionScenario : IScenario
 
                         if (t.TryOpen(id, out var entity))
                         {
-                            var grid = entity.Read(PowerGridArch.Grid);
-                            // Every worker tries to update power grid stats
-                            ref var wg = ref t.OpenMut(id).Write(PowerGridArch.Grid);
-                            wg.Production = grid.Production + (float)(localRand.NextDouble() * 10);
-                            wg.Consumption = grid.Consumption + (float)(localRand.NextDouble() * 5);
-                            wg.BatteryStored = Math.Min(grid.BatteryCapacity, grid.BatteryStored + (float)(localRand.NextDouble() * 100));
-                            wg.IsOverloaded = wg.Consumption > wg.Production;
+                            var wallet = entity.Read(PlayerArch.Wallet);
+                            // Every worker tries to update the same player's wallet
+                            ref var ww = ref t.OpenMut(id).Write(PlayerArch.Wallet);
+                            ww.Credits = Math.Max(0, wallet.Credits + localRand.Next(-50, 100));
+                            ww.BankCredits = wallet.BankCredits + localRand.Next(0, 50);
 
                             stats.RecordSuccess((Stopwatch.GetTimestamp() - sw) * 1_000_000 / Stopwatch.Frequency);
                         }
@@ -280,11 +331,24 @@ public class HighContentionScenario : IScenario
     {
         using var t = engine.CreateQuickTransaction();
 
-        // Create only 5 power grids - these will be the hotspots
+        // Create only 5 players - these will be the hotspots
         for (var i = 0; i < 5 && !ct.IsCancellationRequested; i++)
         {
-            var grid = PowerGrid.Create(rand, i + 1);
-            var id = t.Spawn<PowerGridArch>(PowerGridArch.Grid.Set(in grid));
+            var player = new Player
+            {
+                Name = SwgWorkload.S64($"Hotspot-{i}"), AccountId = i,
+                Level = rand.Next(1, 91), ProfessionId = rand.Next(0, 16), CreatedAt = i,
+            };
+            var membership = new Membership { Guild = EntityLink<GuildArch>.Null, GuildRank = rand.Next(0, 6) };
+            var wallet = new Wallet { Credits = rand.Next(0, 1_000_000), BankCredits = rand.Next(0, 100_000_000) };
+            var pos = new PlayerPosition { Bounds = SwgWorkload.RandomBounds(rand) };
+            var session = new Session { ConnectionId = i, LatencyMs = rand.Next(5, 300) };
+            var id = t.Spawn<PlayerArch>(
+                PlayerArch.Player.Set(in player),
+                PlayerArch.Membership.Set(in membership),
+                PlayerArch.Wallet.Set(in wallet),
+                PlayerArch.Position.Set(in pos),
+                PlayerArch.Session.Set(in session));
             _hotspotIds.Add(id);
         }
 

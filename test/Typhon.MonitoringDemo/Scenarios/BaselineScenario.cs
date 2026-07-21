@@ -1,5 +1,7 @@
 using System.Diagnostics;
 using Typhon.Engine;
+using Typhon.Samples.Swg;
+using Typhon.Schema.Definition;
 
 namespace Typhon.MonitoringDemo.Scenarios;
 
@@ -26,13 +28,26 @@ public class BaselineScenario : IScenario
             var sw = Stopwatch.GetTimestamp();
             try
             {
-                // Pattern 1: Create entity in one transaction, read in another (unit test pattern)
+                // Pattern 1: Create a Player entity in one transaction, read in another (unit test pattern)
                 EntityId entityId;
                 {
                     using var t = engine.CreateQuickTransaction();
 
-                    var building = FactoryBuilding.Create(rand, rand.Next(0, 5));
-                    entityId = t.Spawn<FactoryBuildingArch>(FactoryBuildingArch.Building.Set(in building));
+                    var player = new Player
+                    {
+                        Name = SwgWorkload.S64($"Player-{loopCount}"), AccountId = loopCount,
+                        Level = rand.Next(1, 91), ProfessionId = rand.Next(0, 16), CreatedAt = loopCount,
+                    };
+                    var membership = new Membership { Guild = EntityLink<GuildArch>.Null, GuildRank = rand.Next(0, 6) };
+                    var wallet = new Wallet { Credits = rand.Next(0, 1_000_000), BankCredits = rand.Next(0, 100_000_000) };
+                    var pos = new PlayerPosition { Bounds = SwgWorkload.RandomBounds(rand) };
+                    var session = new Session { ConnectionId = loopCount, LatencyMs = rand.Next(5, 300) };
+                    entityId = t.Spawn<PlayerArch>(
+                        PlayerArch.Player.Set(in player),
+                        PlayerArch.Membership.Set(in membership),
+                        PlayerArch.Wallet.Set(in wallet),
+                        PlayerArch.Position.Set(in pos),
+                        PlayerArch.Session.Set(in session));
 
                     var committed = t.Commit();
                     if (committed)
@@ -55,13 +70,13 @@ public class BaselineScenario : IScenario
 
                     if (t.TryOpen(entityId, out var entity))
                     {
-                        var readBuilding = entity.Read(FactoryBuildingArch.Building);
+                        var readWallet = entity.Read(PlayerArch.Wallet);
                         stats.RecordSuccess((Stopwatch.GetTimestamp() - sw) * 1_000_000 / Stopwatch.Frequency);
 
-                        // Pattern 3: Update the entity
+                        // Pattern 3: Update the entity (credit the player's wallet)
                         sw = Stopwatch.GetTimestamp();
-                        ref var wb = ref t.OpenMut(entityId).Write(FactoryBuildingArch.Building);
-                        wb.Progress = (readBuilding.Progress + 0.1f) % 1.0f;
+                        ref var ww = ref t.OpenMut(entityId).Write(PlayerArch.Wallet);
+                        ww.Credits = readWallet.Credits + rand.Next(1, 1000);
 
                         var committed = t.Commit();
                         if (committed)

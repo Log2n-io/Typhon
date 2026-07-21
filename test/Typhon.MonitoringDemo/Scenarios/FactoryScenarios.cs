@@ -1,10 +1,12 @@
 using System.Diagnostics;
 using Typhon.Engine;
+using Typhon.Samples.Swg;
+using Typhon.Schema.Definition;
 
 namespace Typhon.MonitoringDemo.Scenarios;
 
 /// <summary>
-/// Bootstraps a new factory: creates buildings, belts, and resources.
+/// Bootstraps a new industrial base: creates harvesters, factories, deposits, and recipes.
 /// Heavy on CREATE operations.
 /// </summary>
 public class FactoryBootstrapScenario : IScenario
@@ -14,13 +16,14 @@ public class FactoryBootstrapScenario : IScenario
 
     public async Task RunAsync(TyphonContext context, ScenarioConfig config, ScenarioStats stats, CancellationToken ct)
     {
-        var rand = new Random(42);
         var engine = context.Engine;
         var delayMs = config.TargetOpsPerSecond < int.MaxValue ? 1000.0 / config.TargetOpsPerSecond : 0;
 
         var workers = Enumerable.Range(0, config.WorkerCount).Select(workerId => Task.Run(async () =>
         {
             var localRand = new Random(42 + workerId);
+            // Per-worker monotonic sequence for the one unique-indexed field spawned here (Recipe.Name).
+            long localSeq = 0;
 
             while (!ct.IsCancellationRequested)
             {
@@ -29,7 +32,7 @@ public class FactoryBootstrapScenario : IScenario
                 {
                     using var t = engine.CreateQuickTransaction();
 
-                    // Create a batch of factory entities
+                    // Create a batch of industry entities
                     var batchSize = localRand.Next(5, 20);
 
                     for (var i = 0; i < batchSize && !ct.IsCancellationRequested; i++)
@@ -38,28 +41,65 @@ public class FactoryBootstrapScenario : IScenario
 
                         if (choice < 30)
                         {
-                            // Create a building
-                            var building = FactoryBuilding.Create(localRand, localRand.Next(0, 5));
-                            t.Spawn<FactoryBuildingArch>(FactoryBuildingArch.Building.Set(in building));
+                            // Create a harvester (polymorphic leaf of Structure)
+                            var st = new Structure { TypeCode = localRand.Next(0, 10), PlacedAt = i, Maintenance = localRand.Next(0, 100) };
+                            var owner = new StructureOwner { Owner = EntityLink<PlayerArch>.Null };
+                            var hop = new Hopper { Class = EntityLink<ResourceTypeArch>.Null, Amount = localRand.Next(0, 1000), Rate = localRand.Next(1, 50) };
+                            var tgt = new HarvesterTarget { Deposit = EntityLink<ResourceDepositArch>.Null };
+                            var maint = new MaintenanceState { PaidUntil = localRand.Next() };
+                            var pos = new StructurePosition { Bounds = SwgWorkload.RandomBounds(localRand) };
+                            t.Spawn<HarvesterArch>(
+                                StructureArch.Structure.Set(in st),
+                                StructureArch.Owner.Set(in owner),
+                                HarvesterArch.Hopper.Set(in hop),
+                                HarvesterArch.Target.Set(in tgt),
+                                HarvesterArch.Maintenance.Set(in maint),
+                                HarvesterArch.Position.Set(in pos));
                         }
                         else if (choice < 60)
                         {
-                            // Create a resource node
-                            var node = ResourceNode.Create(localRand, localRand.Next(0, 6));
-                            t.Spawn<ResourceNodeArch>(ResourceNodeArch.Node.Set(in node));
+                            // Create a factory (second polymorphic leaf of Structure)
+                            var st = new Structure { TypeCode = localRand.Next(0, 10), PlacedAt = i, Maintenance = localRand.Next(0, 100) };
+                            var owner = new StructureOwner { Owner = EntityLink<PlayerArch>.Null };
+                            var fc = new FactoryConfig { Recipe = EntityLink<RecipeArch>.Null, RemainingRuns = localRand.Next(0, 1000) };
+                            var pw = new PowerSupply { CreditsRemaining = localRand.Next() };
+                            var pos = new StructurePosition { Bounds = SwgWorkload.RandomBounds(localRand) };
+                            t.Spawn<FactoryArch>(
+                                StructureArch.Structure.Set(in st),
+                                StructureArch.Owner.Set(in owner),
+                                FactoryArch.Config.Set(in fc),
+                                FactoryArch.Power.Set(in pw),
+                                FactoryArch.Position.Set(in pos));
                         }
                         else if (choice < 80)
                         {
-                            // Create a recipe
-                            var recipes = new[] { "Iron Plate", "Copper Wire", "Circuit Board", "Steel Beam" };
-                            var recipe = Recipe.Create(localRand, recipes[localRand.Next(recipes.Length)], localRand.Next(1, 50));
-                            t.Spawn<RecipeArch>(RecipeArch.Recipe.Set(in recipe));
+                            // Create a resource deposit (static-spatial)
+                            var d = new Deposit
+                            {
+                                Type = EntityLink<ResourceTypeArch>.Null,
+                                Quality = localRand.Next(0, 100), Concentration = localRand.Next(0, 100), DepletesAt = localRand.Next(),
+                            };
+                            var pos = new DepositPosition { Bounds = SwgWorkload.RandomBounds(localRand) };
+                            t.Spawn<ResourceDepositArch>(ResourceDepositArch.Deposit.Set(in d), ResourceDepositArch.Position.Set(in pos));
                         }
                         else
                         {
-                            // Create a power grid
-                            var grid = PowerGrid.Create(localRand, localRand.Next(1, 10));
-                            t.Spawn<PowerGridArch>(PowerGridArch.Grid.Set(in grid));
+                            // Create a recipe (unique Name + 1..8 RecipeSlot ComponentCollection elements)
+                            var r = new Recipe
+                            {
+                                Name = SwgWorkload.S64($"R-{workerId}-{localSeq++}"),
+                                Tier = localRand.Next(0, 5), ProfessionReq = localRand.Next(0, 16),
+                                PrimaryClass = EntityLink<ResourceTypeArch>.Null,
+                            };
+                            {
+                                using var cca = t.CreateComponentCollectionAccessor(ref r.Slots);
+                                var slotCount = localRand.Next(1, 9); // 1..8
+                                for (var s = 0; s < slotCount; s++)
+                                {
+                                    cca.Add(new RecipeSlot { SlotIndex = s, ClassReq = localRand.Next(0, 60), MinUnits = localRand.Next(1, 100) });
+                                }
+                            }
+                            t.Spawn<RecipeArch>(RecipeArch.Recipe.Set(in r));
                         }
 
                         stats.RecordSuccess((Stopwatch.GetTimestamp() - sw) * 1_000_000 / Stopwatch.Frequency);
@@ -91,7 +131,7 @@ public class FactoryBootstrapScenario : IScenario
 }
 
 /// <summary>
-/// Simulates ongoing factory production: updates building progress, item stacks.
+/// Simulates ongoing factory production: updates harvester maintenance/hoppers and factory power.
 /// Heavy on UPDATE operations.
 /// </summary>
 public class FactoryProductionScenario : IScenario
@@ -99,8 +139,8 @@ public class FactoryProductionScenario : IScenario
     public string Name => "Factory Production";
     public string Description => "Updates production progress, item quantities. Heavy UPDATE load.";
 
-    private readonly List<EntityId> _buildingIds = [];
-    private readonly List<EntityId> _itemStackIds = [];
+    private readonly List<EntityId> _harvesterIds = [];
+    private readonly List<EntityId> _factoryIds = [];
 
     public async Task RunAsync(TyphonContext context, ScenarioConfig config, ScenarioStats stats, CancellationToken ct)
     {
@@ -125,30 +165,30 @@ public class FactoryProductionScenario : IScenario
 
                     for (var i = 0; i < updates && !ct.IsCancellationRequested; i++)
                     {
-                        if (_buildingIds.Count > 0 && localRand.Next(2) == 0)
+                        if (_harvesterIds.Count > 0 && localRand.Next(2) == 0)
                         {
-                            // Update a building's production progress
-                            var id = _buildingIds[localRand.Next(_buildingIds.Count)];
+                            // Update a harvester's maintenance pool + hopper fill
+                            var id = _harvesterIds[localRand.Next(_harvesterIds.Count)];
                             if (t.TryOpen(id, out var entity))
                             {
-                                var building = entity.Read(FactoryBuildingArch.Building);
-                                ref var wb = ref t.OpenMut(id).Write(FactoryBuildingArch.Building);
-                                wb.Progress = (building.Progress + 0.1f) % 1.0f;
-                                wb.IsActive = localRand.Next(10) > 0;
-                                wb.Efficiency = 0.8f + (float)(localRand.NextDouble() * 0.4);
+                                var hopper = entity.Read(HarvesterArch.Hopper);
+                                var mut = t.OpenMut(id);
+                                ref var wm = ref mut.Write(HarvesterArch.Maintenance);
+                                wm.PaidUntil = localRand.Next();
+                                ref var wh = ref mut.Write(HarvesterArch.Hopper);
+                                wh.Amount = Math.Max(0, hopper.Amount + localRand.Next(-50, 100));
                                 stats.RecordSuccess((Stopwatch.GetTimestamp() - sw) * 1_000_000 / Stopwatch.Frequency);
                             }
                         }
-                        else if (_itemStackIds.Count > 0)
+                        else if (_factoryIds.Count > 0)
                         {
-                            // Update item stack quantity
-                            var id = _itemStackIds[localRand.Next(_itemStackIds.Count)];
+                            // Update factory power reserve
+                            var id = _factoryIds[localRand.Next(_factoryIds.Count)];
                             if (t.TryOpen(id, out var entity))
                             {
-                                var stack = entity.Read(ItemStackArch.Stack);
-                                ref var ws = ref t.OpenMut(id).Write(ItemStackArch.Stack);
-                                ws.Quantity = Math.Min(stack.MaxStackSize, stack.Quantity + localRand.Next(-5, 10));
-                                ws.Quantity = Math.Max(0, ws.Quantity);
+                                var power = entity.Read(FactoryArch.Power);
+                                ref var wp = ref t.OpenMut(id).Write(FactoryArch.Power);
+                                wp.CreditsRemaining = Math.Max(0, power.CreditsRemaining + localRand.Next(-500, 1000));
                                 stats.RecordSuccess((Stopwatch.GetTimestamp() - sw) * 1_000_000 / Stopwatch.Frequency);
                             }
                         }
@@ -180,18 +220,38 @@ public class FactoryProductionScenario : IScenario
 
     private async Task BootstrapEntitiesAsync(DatabaseEngine engine, Random rand, CancellationToken ct)
     {
-        // Create initial entities for updates
+        // Create initial harvesters + factories for updates
         using var t = engine.CreateQuickTransaction();
 
         for (var i = 0; i < 100 && !ct.IsCancellationRequested; i++)
         {
-            var building = FactoryBuilding.Create(rand, rand.Next(0, 5));
-            var id = t.Spawn<FactoryBuildingArch>(FactoryBuildingArch.Building.Set(in building));
-            _buildingIds.Add(id);
+            var st = new Structure { TypeCode = rand.Next(0, 10), PlacedAt = i, Maintenance = rand.Next(0, 100) };
+            var owner = new StructureOwner { Owner = EntityLink<PlayerArch>.Null };
+            var hop = new Hopper { Class = EntityLink<ResourceTypeArch>.Null, Amount = rand.Next(0, 1000), Rate = rand.Next(1, 50) };
+            var tgt = new HarvesterTarget { Deposit = EntityLink<ResourceDepositArch>.Null };
+            var maint = new MaintenanceState { PaidUntil = rand.Next() };
+            var hpos = new StructurePosition { Bounds = SwgWorkload.RandomBounds(rand) };
+            var hid = t.Spawn<HarvesterArch>(
+                StructureArch.Structure.Set(in st),
+                StructureArch.Owner.Set(in owner),
+                HarvesterArch.Hopper.Set(in hop),
+                HarvesterArch.Target.Set(in tgt),
+                HarvesterArch.Maintenance.Set(in maint),
+                HarvesterArch.Position.Set(in hpos));
+            _harvesterIds.Add(hid);
 
-            var stack = ItemStack.Create(rand, rand.Next(1, 20), (long)id.RawValue);
-            var stackId = t.Spawn<ItemStackArch>(ItemStackArch.Stack.Set(in stack));
-            _itemStackIds.Add(stackId);
+            var fst = new Structure { TypeCode = rand.Next(0, 10), PlacedAt = i, Maintenance = rand.Next(0, 100) };
+            var fowner = new StructureOwner { Owner = EntityLink<PlayerArch>.Null };
+            var fc = new FactoryConfig { Recipe = EntityLink<RecipeArch>.Null, RemainingRuns = rand.Next(0, 1000) };
+            var pw = new PowerSupply { CreditsRemaining = rand.Next() };
+            var fpos = new StructurePosition { Bounds = SwgWorkload.RandomBounds(rand) };
+            var fid = t.Spawn<FactoryArch>(
+                StructureArch.Structure.Set(in fst),
+                StructureArch.Owner.Set(in fowner),
+                FactoryArch.Config.Set(in fc),
+                FactoryArch.Power.Set(in pw),
+                FactoryArch.Position.Set(in fpos));
+            _factoryIds.Add(fid);
         }
 
         t.Commit();
@@ -200,7 +260,7 @@ public class FactoryProductionScenario : IScenario
 }
 
 /// <summary>
-/// Simulates supply chain: belts moving items, read-heavy with queries.
+/// Simulates supply chain: read-heavy queries over harvesters/factories interleaved with updates.
 /// Mixed READ/UPDATE operations.
 /// </summary>
 public class FactorySupplyChainScenario : IScenario
@@ -208,8 +268,8 @@ public class FactorySupplyChainScenario : IScenario
     public string Name => "Factory Supply Chain";
     public string Description => "Simulates belts, item movement, and logistics queries. Mixed READ/UPDATE.";
 
-    private readonly List<EntityId> _beltIds = [];
-    private readonly List<EntityId> _buildingIds = [];
+    private readonly List<EntityId> _harvesterIds = [];
+    private readonly List<EntityId> _factoryIds = [];
 
     public async Task RunAsync(TyphonContext context, ScenarioConfig config, ScenarioStats stats, CancellationToken ct)
     {
@@ -236,45 +296,47 @@ public class FactorySupplyChainScenario : IScenario
                     {
                         var opType = localRand.Next(100);
 
-                        if (opType < 40 && _beltIds.Count > 0)
+                        if (opType < 40 && _harvesterIds.Count > 0)
                         {
-                            // Read belt status (logistics query)
-                            var id = _beltIds[localRand.Next(_beltIds.Count)];
-                            t.TryOpen(id, out _);
-                            stats.RecordSuccess((Stopwatch.GetTimestamp() - sw) * 1_000_000 / Stopwatch.Frequency);
-                        }
-                        else if (opType < 70 && _beltIds.Count > 0)
-                        {
-                            // Update belt item count (item movement)
-                            var id = _beltIds[localRand.Next(_beltIds.Count)];
+                            // Read harvester hopper status (logistics query)
+                            var id = _harvesterIds[localRand.Next(_harvesterIds.Count)];
                             if (t.TryOpen(id, out var entity))
                             {
-                                var belt = entity.Read(ConveyorBeltArch.Belt);
-                                ref var wb = ref t.OpenMut(id).Write(ConveyorBeltArch.Belt);
-                                wb.ItemCount = Math.Max(0, belt.ItemCount + localRand.Next(-3, 5));
+                                _ = entity.Read(HarvesterArch.Hopper);
+                            }
+                            stats.RecordSuccess((Stopwatch.GetTimestamp() - sw) * 1_000_000 / Stopwatch.Frequency);
+                        }
+                        else if (opType < 70 && _harvesterIds.Count > 0)
+                        {
+                            // Update harvester hopper fill (item movement)
+                            var id = _harvesterIds[localRand.Next(_harvesterIds.Count)];
+                            if (t.TryOpen(id, out var entity))
+                            {
+                                var hopper = entity.Read(HarvesterArch.Hopper);
+                                ref var wh = ref t.OpenMut(id).Write(HarvesterArch.Hopper);
+                                wh.Amount = Math.Max(0, hopper.Amount + localRand.Next(-30, 50));
                                 stats.RecordSuccess((Stopwatch.GetTimestamp() - sw) * 1_000_000 / Stopwatch.Frequency);
                             }
                         }
-                        else if (opType < 90 && _buildingIds.Count > 0)
+                        else if (opType < 90 && _factoryIds.Count > 0)
                         {
-                            // Read building for supply check
-                            var id = _buildingIds[localRand.Next(_buildingIds.Count)];
-                            t.TryOpen(id, out _);
+                            // Read factory config for supply check
+                            var id = _factoryIds[localRand.Next(_factoryIds.Count)];
+                            if (t.TryOpen(id, out var entity))
+                            {
+                                _ = entity.Read(FactoryArch.Config);
+                            }
                             stats.RecordSuccess((Stopwatch.GetTimestamp() - sw) * 1_000_000 / Stopwatch.Frequency);
                         }
-                        else
+                        else if (_factoryIds.Count > 0)
                         {
-                            // Create new belt connection
-                            if (_buildingIds.Count >= 2)
+                            // Update factory power reserve
+                            var id = _factoryIds[localRand.Next(_factoryIds.Count)];
+                            if (t.TryOpen(id, out var entity))
                             {
-                                var src = _buildingIds[localRand.Next(_buildingIds.Count)];
-                                var dst = _buildingIds[localRand.Next(_buildingIds.Count)];
-                                var belt = ConveyorBelt.Create(localRand, localRand.Next(0, 5), (long)src.RawValue, (long)dst.RawValue);
-                                var id = t.Spawn<ConveyorBeltArch>(ConveyorBeltArch.Belt.Set(in belt));
-                                lock (_beltIds)
-                                {
-                                    _beltIds.Add(id);
-                                }
+                                var power = entity.Read(FactoryArch.Power);
+                                ref var wp = ref t.OpenMut(id).Write(FactoryArch.Power);
+                                wp.CreditsRemaining = Math.Max(0, power.CreditsRemaining + localRand.Next(-100, 200));
                                 stats.RecordSuccess((Stopwatch.GetTimestamp() - sw) * 1_000_000 / Stopwatch.Frequency);
                             }
                         }
@@ -308,22 +370,40 @@ public class FactorySupplyChainScenario : IScenario
     {
         using var t = engine.CreateQuickTransaction();
 
-        // Create buildings first
+        // Create harvesters
         for (var i = 0; i < 50 && !ct.IsCancellationRequested; i++)
         {
-            var building = FactoryBuilding.Create(rand, rand.Next(0, 5));
-            var id = t.Spawn<FactoryBuildingArch>(FactoryBuildingArch.Building.Set(in building));
-            _buildingIds.Add(id);
+            var st = new Structure { TypeCode = rand.Next(0, 10), PlacedAt = i, Maintenance = rand.Next(0, 100) };
+            var owner = new StructureOwner { Owner = EntityLink<PlayerArch>.Null };
+            var hop = new Hopper { Class = EntityLink<ResourceTypeArch>.Null, Amount = rand.Next(0, 1000), Rate = rand.Next(1, 50) };
+            var tgt = new HarvesterTarget { Deposit = EntityLink<ResourceDepositArch>.Null };
+            var maint = new MaintenanceState { PaidUntil = rand.Next() };
+            var pos = new StructurePosition { Bounds = SwgWorkload.RandomBounds(rand) };
+            var id = t.Spawn<HarvesterArch>(
+                StructureArch.Structure.Set(in st),
+                StructureArch.Owner.Set(in owner),
+                HarvesterArch.Hopper.Set(in hop),
+                HarvesterArch.Target.Set(in tgt),
+                HarvesterArch.Maintenance.Set(in maint),
+                HarvesterArch.Position.Set(in pos));
+            _harvesterIds.Add(id);
         }
 
-        // Create belts between buildings
+        // Create factories
         for (var i = 0; i < 100 && !ct.IsCancellationRequested; i++)
         {
-            var src = _buildingIds[rand.Next(_buildingIds.Count)];
-            var dst = _buildingIds[rand.Next(_buildingIds.Count)];
-            var belt = ConveyorBelt.Create(rand, rand.Next(0, 5), (long)src.RawValue, (long)dst.RawValue);
-            var id = t.Spawn<ConveyorBeltArch>(ConveyorBeltArch.Belt.Set(in belt));
-            _beltIds.Add(id);
+            var st = new Structure { TypeCode = rand.Next(0, 10), PlacedAt = i, Maintenance = rand.Next(0, 100) };
+            var owner = new StructureOwner { Owner = EntityLink<PlayerArch>.Null };
+            var fc = new FactoryConfig { Recipe = EntityLink<RecipeArch>.Null, RemainingRuns = rand.Next(0, 1000) };
+            var pw = new PowerSupply { CreditsRemaining = rand.Next() };
+            var pos = new StructurePosition { Bounds = SwgWorkload.RandomBounds(rand) };
+            var id = t.Spawn<FactoryArch>(
+                StructureArch.Structure.Set(in st),
+                StructureArch.Owner.Set(in owner),
+                FactoryArch.Config.Set(in fc),
+                FactoryArch.Power.Set(in pw),
+                FactoryArch.Position.Set(in pos));
+            _factoryIds.Add(id);
         }
 
         t.Commit();

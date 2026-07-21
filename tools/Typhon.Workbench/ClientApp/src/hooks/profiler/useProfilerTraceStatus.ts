@@ -1,5 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { useSessionStore } from '@/stores/useSessionStore';
+import { applyWorkbenchAuthHeaders } from '@/api/bootstrapToken';
 
 /**
  * Polls `GET /api/sessions/{id}/profiler/trace-status` (~3 s) to detect when the source `.typhon-trace`
@@ -23,8 +24,7 @@ export function useProfilerTraceStatus(sessionId: string | null): boolean {
     retry: false,
     queryFn: async ({ signal }) => {
       if (!sessionId) return false;
-      const headers = new Headers();
-      if (token) headers.set('X-Session-Token', token);
+      const headers = applyWorkbenchAuthHeaders(new Headers(), token);
       const res = await fetch(`/api/sessions/${sessionId}/profiler/trace-status`, { signal, headers });
       if (!res.ok) {
         // 409 (wrong session kind) or transient error — treat as "no new version" and keep polling.

@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useSessionStore } from '@/stores/useSessionStore';
 import { useSourceLocationStore } from '@/stores/useSourceLocationStore';
+import { applyWorkbenchAuthHeaders } from '@/api/bootstrapToken';
 
 interface SourceLocationManifestDto {
   files: Array<{ fileId: number; path: string }>;
@@ -28,8 +29,7 @@ export function useProfilerSourceLocations(sessionId: string | null): void {
     retry: false,
     queryFn: async ({ signal }) => {
       if (!sessionId) return null;
-      const headers = new Headers();
-      if (token) headers.set('X-Session-Token', token);
+      const headers = applyWorkbenchAuthHeaders(new Headers(), token);
       const res = await fetch(`/api/sessions/${sessionId}/profiler/source-locations`, {
         signal,
         headers,

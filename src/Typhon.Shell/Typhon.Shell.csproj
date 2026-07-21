@@ -30,6 +30,24 @@
         <None Include="PACKAGE.md" Pack="true" PackagePath="" />
     </ItemGroup>
 
+    <!-- `typhon new` scaffold templates (#532/F2). Embedded from the LIVE in-repo source — the SWG Light sample
+         (Harvester.cs) + the guide's app template (Program.cs/Systems.cs/telemetry.json/.gitignore) — so the CLI's
+         emitted starter can never drift from what the guide teaches and the samples compile. These files live OUTSIDE
+         the project cone (`..\..\`), so the SDK's default `**/*.cs` glob does NOT compile them into typhon.dll; they
+         are embedded only. Explicit LogicalName because MSBuild's default resource naming is unreliable out-of-cone. -->
+    <ItemGroup>
+        <EmbeddedResource Include="..\..\samples\Typhon.Samples.Swg\Light\Harvester.cs" LogicalName="Typhon.Shell.Templates.Harvester.cs" />
+        <EmbeddedResource Include="..\..\doc\guide\example\Program.cs" LogicalName="Typhon.Shell.Templates.Program.cs" />
+        <EmbeddedResource Include="..\..\doc\guide\example\Systems.cs" LogicalName="Typhon.Shell.Templates.Systems.cs" />
+        <EmbeddedResource Include="..\..\doc\guide\example\typhon.telemetry.json" LogicalName="Typhon.Shell.Templates.typhon.telemetry.json" />
+        <EmbeddedResource Include="..\..\doc\guide\example\.gitignore" LogicalName="Typhon.Shell.Templates.gitignore" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <!-- The scaffold logic (ProjectScaffolder) is internal; the test project verifies emitted files match the source. -->
+        <InternalsVisibleTo Include="Typhon.Shell.Tests" />
+    </ItemGroup>
+
     <ItemGroup>
         <PackageReference Include="Spectre.Console" Version="0.57.2" />
         <PackageReference Include="Spectre.Console.Cli" Version="0.55.0" />

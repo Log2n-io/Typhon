@@ -3,7 +3,6 @@
 using BenchmarkDotNet.Attributes;
 using System;
 using System.Runtime.CompilerServices;
-using System.Runtime.InteropServices;
 
 namespace Typhon.Benchmark;
 

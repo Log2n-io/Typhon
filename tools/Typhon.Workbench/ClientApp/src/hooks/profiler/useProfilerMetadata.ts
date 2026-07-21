@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useProfilerSessionStore } from '@/stores/useProfilerSessionStore';
 import { useSessionStore } from '@/stores/useSessionStore';
+import { applyWorkbenchAuthHeaders } from '@/api/bootstrapToken';
 import type { ProfilerMetadataDto } from '@/api/generated/model';
 
 /**
@@ -27,8 +28,7 @@ export function useProfilerMetadata(sessionId: string | null) {
     retry: false,
     queryFn: async ({ signal }) => {
       if (!sessionId) return null;
-      const headers = new Headers();
-      if (token) headers.set('X-Session-Token', token);
+      const headers = applyWorkbenchAuthHeaders(new Headers(), token);
       const res = await fetch(`/api/sessions/${sessionId}/profiler/metadata`, { signal, headers });
       if (res.status === 202) {
         // Not ready yet — return null to let refetchInterval poll again.

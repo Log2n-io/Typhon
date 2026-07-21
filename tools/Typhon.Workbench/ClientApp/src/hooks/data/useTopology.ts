@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { useSessionStore } from '@/stores/useSessionStore';
 import type { TopologyDto } from '@/api/generated/model/topologyDto';
+import { applyWorkbenchAuthHeaders } from '@/api/bootstrapToken';
 
 export function useTopology(sessionId: string | null) {
   const token = useSessionStore((s) => s.token);
@@ -16,9 +17,7 @@ export function useTopology(sessionId: string | null) {
     refetchInterval: (q) => (q.state.data || q.state.error ? false : 2000),
     queryFn: async ({ signal }) => {
       if (!sessionId) return null;
-      const headers = new Headers();
-      if (token) headers.set('X-Session-Token', token);
-      headers.set('X-Workbench-Api', '1');
+      const headers = applyWorkbenchAuthHeaders(new Headers(), token);
       const res = await fetch(`/api/sessions/${sessionId}/topology`, { signal, headers });
       if (res.status === 202) return null;
       if (!res.ok) {

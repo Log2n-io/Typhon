@@ -17,7 +17,7 @@ namespace Typhon.Workbench.Tests;
 /// during entity spawn.
 ///
 /// <para>This test runs against the actual <see cref="EngineLifecycle.OpenAsync"/> path that the
-/// Workbench's <c>SessionsController</c> calls. The fixture schema (`Typhon.Workbench.Fixtures.schema.dll`)
+/// Workbench's <c>SessionsController</c> calls. The fixture schema (`Typhon.Samples.Swg.dll`)
 /// is the one that triggered the original bug — it's loaded twice into separate collectible ALCs in the
 /// real-world failure scenario, exactly what we exercise here.</para>
 /// </summary>

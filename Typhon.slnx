@@ -19,7 +19,6 @@
     </Folder>
     <Folder Name="/test/">
         <Project Path="test/Typhon.Analyzers.Tests/Typhon.Analyzers.Tests.csproj" />
-        <Project Path="test/Typhon.ARPG.Schema/Typhon.ARPG.Schema.csproj" />
         <Project Path="test/Typhon.Benchmark/Typhon.Benchmark.csproj" />
         <Project Path="test/Typhon.Client.Tests/Typhon.Client.Tests.csproj" />
         <Project Path="test/Typhon.CompetitiveBenchmark/Typhon.CompetitiveBenchmark.csproj" />
@@ -27,10 +26,12 @@
         <Project Path="test/Typhon.Generators.Tests/Typhon.Generators.Tests.csproj" />
         <Project Path="test/Typhon.IOProfileRunner/Typhon.IOProfileRunner.csproj" />
         <Project Path="test/Typhon.MonitoringDemo/Typhon.MonitoringDemo.csproj" />
+        <Project Path="test/Typhon.Samples.Swg.Tests/Typhon.Samples.Swg.Tests.csproj" />
+        <Project Path="test/Typhon.Shell.Tests/Typhon.Shell.Tests.csproj" />
         <Project Path="test/Typhon.Workbench.Tests/Typhon.Workbench.Tests.csproj" />
     </Folder>
-    <Folder Name="/examples/">
-        <Project Path="examples/Typhon.ARPG.Shell/Typhon.ARPG.Shell.csproj" />
+    <Folder Name="/samples/">
+        <Project Path="samples/Typhon.Samples.Swg/Typhon.Samples.Swg.csproj" />
     </Folder>
     <Folder Name="/demo/">
         <Project Path="demo/AntHill/AntHill.Core/AntHill.Core.csproj" />

@@ -1,18 +1,17 @@
-﻿using Typhon.Engine;
+using Typhon.Engine;
 using Typhon.Schema.Definition;
 
-namespace Typhon.Workbench.Fixtures;
+namespace Typhon.Samples.Swg;
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-// SWG fixture archetypes — IDs 820–828. The previous fixture occupied 800–806; the gap marks the generation boundary
-// (no persisted DB mixes the two — fixtures are always regenerated fresh). Avoids unit-test (200-series) and engine
-// (100-101) ranges.
+// SWG Full archetypes — 9 archetypes grouping the SwgFullComponents. Ids are engine-assigned (feature #514 — no
+// author-set id); the [Archetype(revision, alias)] arguments are the schema revision and the Workbench display alias.
 //
-// Cluster-eligibility (≥1 SingleVersion/Transient slot, no Transient-with-indexed-field): Player (823),
-// ResourceDeposit (824), Harvester (826), Factory (827) are cluster-eligible. Recipe (822) and Item (828) — the
-// ComponentCollection carriers — are pure Versioned, hence NON-cluster (the original CC storage path).
+// Cluster-eligibility (≥1 SingleVersion/Transient slot, no Transient-with-indexed-field): Player, ResourceDeposit,
+// Harvester, Factory are cluster-eligible. Recipe and Item — the ComponentCollection carriers — are pure Versioned,
+// hence NON-cluster.
 //
-// Polymorphic inheritance: Structure (825) is the abstract base; Harvester (826) and Factory (827) inherit it via CRTP
+// Polymorphic inheritance: Structure is the abstract base; Harvester and Factory inherit it via CRTP
 // (Archetype<TSelf, StructureArch>). Query<StructureArch> matches both leaves; QueryExact<HarvesterArch> only the leaf.
 // Structure is never spawned directly — only Harvester / Factory are.
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════

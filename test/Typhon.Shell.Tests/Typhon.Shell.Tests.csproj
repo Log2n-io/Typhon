@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <TargetFramework>net10.0</TargetFramework>
+        <LangVersion>default</LangVersion>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <IsPackable>false</IsPackable>
+        <IsTestProject>true</IsTestProject>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <PackageReference Include="NUnit" Version="4.6.1" />
+        <PackageReference Include="NUnit3TestAdapter" Version="6.2.0" />
+        <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.7.0" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <!-- The CLI (AssemblyName `typhon`) holds ProjectScaffolder (internal, via InternalsVisibleTo) + the embedded templates. -->
+        <ProjectReference Include="..\..\src\Typhon.Shell\Typhon.Shell.csproj" />
+    </ItemGroup>
+
+    <!-- Typhon.Shell folds in the ASP.NET-hosted Workbench (`typhon ui`); the framework ref must be present to load its assembly graph. -->
+    <ItemGroup>
+        <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    </ItemGroup>
+
+</Project>

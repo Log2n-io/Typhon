@@ -2,21 +2,21 @@ using System.Runtime.InteropServices;
 using Typhon.Engine;
 using Typhon.Schema.Definition;
 
-namespace Typhon.Workbench.Fixtures;
+namespace Typhon.Samples.Swg;
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-// SWG-inspired crafting/industry economy fixture schema.
+// SWG Full — the exhaustive tier that extends SWG Light.
 //
 // A coherent mini-economy: Guilds of Players craft Items from Recipes, gathering Resources (typed by a ResourceType
 // taxonomy) from Deposits via Structures (Harvesters + Factories). The schema is feature-driven, not lore-driven — its
-// purpose is to exercise EVERY engine schema primitive so the Workbench (Schema Browser, Data Browser, Query Console,
-// File Map) has real-world-shaped content to render.
+// purpose is to exercise EVERY engine schema primitive so consumers (the Workbench Schema/Data/Query/File-Map views,
+// MonitoringDemo) have real-world-shaped content to render.
 //
 // Engine features exercised:
 //   • Storage modes: Versioned (default), SingleVersion (positions, MaintenanceState, PowerSupply), Transient (Session)
 //   • Mixed storage on one entity (Player = V + SV + Transient; Harvester/Factory = V + SV)
-//   • ComponentCollection<T> multi-value slots (Recipe.Slots, Item.Affixes) — the replacement for the removed AllowMultiple
-//   • Unique + non-unique indexes; EntityLink<T> typed FKs (10, incl. 2 cascade-delete); self-referential FK
+//   • ComponentCollection<T> multi-value slots (Recipe.Slots, Item.Affixes)
+//   • Unique + non-unique indexes; EntityLink<T> typed FKs (incl. 2 cascade-delete); self-referential FK
 //   • Spatial R-Tree: Static + Dynamic modes, 3 distinct Category bitmasks (Player / Deposit / Structure)
 //   • Per-component Enable/Disable (Session / MaintenanceState / PowerSupply / Deposit)
 //   • Polymorphic archetype inheritance (Structure ← Harvester / Factory)
@@ -30,7 +30,8 @@ namespace Typhon.Workbench.Fixtures;
 // Every field carries [Field] — required by the Typhon.Shell AssemblySchemaLoader (skips unmarked fields) and harmless
 // to the engine registration path (which reads all public fields regardless).
 //
-// Paired with FixtureArchetypes.cs which groups these components into the 9 archetypes (IDs 820–828).
+// Paired with SwgFullArchetypes.cs, which groups these components into the 9 archetypes. Component identities are
+// prefixed "Swg." (matching SWG Light); archetype ids are engine-assigned (feature #514 — no author-set id).
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
 // ── ComponentCollection element payloads (plain blittable structs, NOT components) ──────────────────────────────────
@@ -57,7 +58,7 @@ public struct ItemAffix
 // ── Social family ───────────────────────────────────────────────────────────────────────────────────────────────────
 
 /// <summary>A player guild. Unique by Name; queryable by Faction / MemberCount.</summary>
-[Component("Typhon.Workbench.Fixture.Guild", 1)]
+[Component("Swg.Guild", 1)]
 [ComponentFamily("Social")]
 [StructLayout(LayoutKind.Sequential)]
 public struct Guild
@@ -69,7 +70,7 @@ public struct Guild
 }
 
 /// <summary>A player's guild membership (FK → Guild) plus rank.</summary>
-[Component("Typhon.Workbench.Fixture.Membership", 1)]
+[Component("Swg.Membership", 1)]
 [ComponentFamily("Social")]
 [StructLayout(LayoutKind.Sequential)]
 public struct Membership
@@ -82,7 +83,7 @@ public struct Membership
 /// String64 — PlayerArch is cluster-eligible (SV Position + Transient Session), and cluster archetypes route all
 /// indexes through one fixed-stride segment that can't hold a 64-byte String64 index. AccountId (a long) is the
 /// unique-index demonstration here; the String64 unique index is exercised by Guild/ResourceType/Recipe.</summary>
-[Component("Typhon.Workbench.Fixture.Player", 1)]
+[Component("Swg.Player", 1)]
 [ComponentFamily("Social")]
 [StructLayout(LayoutKind.Sequential)]
 public struct Player
@@ -95,7 +96,7 @@ public struct Player
 }
 
 /// <summary>A player's credit balances.</summary>
-[Component("Typhon.Workbench.Fixture.Wallet", 1)]
+[Component("Swg.Wallet", 1)]
 [ComponentFamily("Social")]
 [StructLayout(LayoutKind.Sequential)]
 public struct Wallet
@@ -106,7 +107,7 @@ public struct Wallet
 
 /// <summary>Transient (heap-only) connection state. Enabled = online, Disabled = offline. Lost on restart by design —
 /// the only Transient-storage representative, and what makes Player cluster-eligible.</summary>
-[Component("Typhon.Workbench.Fixture.Session", 1, StorageMode = StorageMode.Transient)]
+[Component("Swg.Session", 1, StorageMode = StorageMode.Transient)]
 [ComponentFamily("Social")]
 [StructLayout(LayoutKind.Sequential)]
 public struct Session
@@ -118,7 +119,7 @@ public struct Session
 // ── Industry family ─────────────────────────────────────────────────────────────────────────────────────────────────
 
 /// <summary>Resource-class taxonomy node. Unique by Name; self-referential FK (Parent → ResourceType) forms the tree.</summary>
-[Component("Typhon.Workbench.Fixture.ResourceType", 1)]
+[Component("Swg.ResourceType", 1)]
 [ComponentFamily("Industry")]
 [StructLayout(LayoutKind.Sequential)]
 public struct ResourceType
@@ -129,8 +130,8 @@ public struct ResourceType
 }
 
 /// <summary>A crafting recipe. Unique by Name; FK PrimaryClass → ResourceType. Carries 1..8 ingredient slots in a
-/// <see cref="ComponentCollection{T}"/> (multi-value, the AllowMultiple replacement).</summary>
-[Component("Typhon.Workbench.Fixture.Recipe", 1)]
+/// <see cref="ComponentCollection{T}"/> (multi-value).</summary>
+[Component("Swg.Recipe", 1)]
 [ComponentFamily("Industry")]
 [StructLayout(LayoutKind.Sequential)]
 public struct Recipe
@@ -144,7 +145,7 @@ public struct Recipe
 
 /// <summary>A resource deposit instance. FK Type → ResourceType. Enable/Disable models depletion (disabled = depleted,
 /// data stays readable). Paired with DepositPosition (static spatial).</summary>
-[Component("Typhon.Workbench.Fixture.Deposit", 1)]
+[Component("Swg.Deposit", 1)]
 [ComponentFamily("Industry")]
 [StructLayout(LayoutKind.Sequential)]
 public struct Deposit
@@ -157,7 +158,7 @@ public struct Deposit
 
 /// <summary>Abstract structure base (queried via Query&lt;StructureArch&gt; to match Harvester + Factory). Never spawned
 /// directly. StructureOwner.Owner → Player cascades on player delete.</summary>
-[Component("Typhon.Workbench.Fixture.Structure", 1)]
+[Component("Swg.Structure", 1)]
 [ComponentFamily("Industry")]
 [StructLayout(LayoutKind.Sequential)]
 public struct Structure
@@ -168,7 +169,7 @@ public struct Structure
 }
 
 /// <summary>Structure ownership FK → Player, cascade-delete: deleting a player removes their structures.</summary>
-[Component("Typhon.Workbench.Fixture.StructureOwner", 1)]
+[Component("Swg.StructureOwner", 1)]
 [ComponentFamily("Industry")]
 [StructLayout(LayoutKind.Sequential)]
 public struct StructureOwner
@@ -177,7 +178,7 @@ public struct StructureOwner
 }
 
 /// <summary>A harvester's output hopper. FK Class → ResourceType.</summary>
-[Component("Typhon.Workbench.Fixture.Hopper", 1)]
+[Component("Swg.Hopper", 1)]
 [ComponentFamily("Industry")]
 [StructLayout(LayoutKind.Sequential)]
 public struct Hopper
@@ -188,7 +189,7 @@ public struct Hopper
 }
 
 /// <summary>The deposit a harvester is extracting from. FK → ResourceDeposit.</summary>
-[Component("Typhon.Workbench.Fixture.HarvesterTarget", 1)]
+[Component("Swg.HarvesterTarget", 1)]
 [ComponentFamily("Industry")]
 [StructLayout(LayoutKind.Sequential)]
 public struct HarvesterTarget
@@ -197,7 +198,7 @@ public struct HarvesterTarget
 }
 
 /// <summary>SingleVersion maintenance pool. Enable/Disable models broken (disabled) vs operational harvesters.</summary>
-[Component("Typhon.Workbench.Fixture.MaintenanceState", 1, StorageMode = StorageMode.SingleVersion)]
+[Component("Swg.MaintenanceState", 1, StorageMode = StorageMode.SingleVersion)]
 [ComponentFamily("Industry")]
 [StructLayout(LayoutKind.Sequential)]
 public struct MaintenanceState
@@ -206,7 +207,7 @@ public struct MaintenanceState
 }
 
 /// <summary>A factory's production config. FK Recipe → Recipe.</summary>
-[Component("Typhon.Workbench.Fixture.FactoryConfig", 1)]
+[Component("Swg.FactoryConfig", 1)]
 [ComponentFamily("Industry")]
 [StructLayout(LayoutKind.Sequential)]
 public struct FactoryConfig
@@ -216,7 +217,7 @@ public struct FactoryConfig
 }
 
 /// <summary>SingleVersion power reserve. Enable/Disable models idle (disabled, out of credits) factories.</summary>
-[Component("Typhon.Workbench.Fixture.PowerSupply", 1, StorageMode = StorageMode.SingleVersion)]
+[Component("Swg.PowerSupply", 1, StorageMode = StorageMode.SingleVersion)]
 [ComponentFamily("Industry")]
 [StructLayout(LayoutKind.Sequential)]
 public struct PowerSupply
@@ -228,7 +229,7 @@ public struct PowerSupply
 
 /// <summary>A crafted item instance. FK Recipe → Recipe. Carries 0..MaxAffixesPerItem affixes in a
 /// <see cref="ComponentCollection{T}"/>.</summary>
-[Component("Typhon.Workbench.Fixture.Item", 1)]
+[Component("Swg.Item", 1)]
 [ComponentFamily("Item")]
 [StructLayout(LayoutKind.Sequential)]
 public struct Item
@@ -241,7 +242,7 @@ public struct Item
 }
 
 /// <summary>Item ownership FK → Player, cascade-delete: deleting a player removes their items.</summary>
-[Component("Typhon.Workbench.Fixture.ItemOwner", 1)]
+[Component("Swg.ItemOwner", 1)]
 [ComponentFamily("Item")]
 [StructLayout(LayoutKind.Sequential)]
 public struct ItemOwner
@@ -252,7 +253,7 @@ public struct ItemOwner
 // ── World family — three distinct spatial Position structs (one per Category/Mode combination) ───────────────────────
 
 /// <summary>Player location — Dynamic spatial, Category=Player. SingleVersion (hot tick storage).</summary>
-[Component("Typhon.Workbench.Fixture.PlayerPosition", 1, StorageMode = StorageMode.SingleVersion)]
+[Component("Swg.PlayerPosition", 1, StorageMode = StorageMode.SingleVersion)]
 [ComponentFamily("World")]
 [StructLayout(LayoutKind.Sequential)]
 public struct PlayerPosition
@@ -261,7 +262,7 @@ public struct PlayerPosition
 }
 
 /// <summary>Deposit location — Static spatial (immobile, skips tick-fence), Category=Deposit. SingleVersion.</summary>
-[Component("Typhon.Workbench.Fixture.DepositPosition", 1, StorageMode = StorageMode.SingleVersion)]
+[Component("Swg.DepositPosition", 1, StorageMode = StorageMode.SingleVersion)]
 [ComponentFamily("World")]
 [StructLayout(LayoutKind.Sequential)]
 public struct DepositPosition
@@ -271,7 +272,7 @@ public struct DepositPosition
 
 /// <summary>Structure location — Dynamic spatial, Category=Structure. SingleVersion. SHARED by Harvester + Factory
 /// (exercises "same component across archetypes").</summary>
-[Component("Typhon.Workbench.Fixture.StructurePosition", 1, StorageMode = StorageMode.SingleVersion)]
+[Component("Swg.StructurePosition", 1, StorageMode = StorageMode.SingleVersion)]
 [ComponentFamily("World")]
 [StructLayout(LayoutKind.Sequential)]
 public struct StructurePosition

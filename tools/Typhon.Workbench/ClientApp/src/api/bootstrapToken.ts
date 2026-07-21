@@ -13,12 +13,15 @@
 const BOOTSTRAP_TOKEN_KEY = 'wb.bootstrapToken';
 
 let initialDbPath: string | null = null;
+let initialSchemaPaths: string[] = [];
+let initialTracePath: string | null = null;
 // Fallback when sessionStorage is unavailable (private mode / storage disabled): keep the token for this page load only.
 let inMemoryToken: string | null = null;
 
 /**
- * Reads `wbtoken` and optional `db` from the URL fragment, persists the token to sessionStorage, records the db
- * path for the initial session, and strips the fragment. Call once, before the first API request (from main.tsx).
+ * Reads `wbtoken` and optional `db` / `schema` / `trace` from the URL fragment, persists the token to sessionStorage,
+ * records the db / schema / trace paths for the initial session, and strips the fragment. Call once, before the first
+ * API request (from main.tsx).
  */
 export function captureLaunchParamsFromUrl(): void {
   if (typeof window === 'undefined' || !window.location.hash) {
@@ -28,8 +31,10 @@ export function captureLaunchParamsFromUrl(): void {
   const params = new URLSearchParams(window.location.hash.slice(1));
   const token = params.get('wbtoken');
   const db = params.get('db');
+  const schema = params.get('schema');
+  const trace = params.get('trace');
 
-  if (!token && !db) {
+  if (!token && !db && !trace) {
     return;
   }
 
@@ -46,7 +51,17 @@ export function captureLaunchParamsFromUrl(): void {
     initialDbPath = db;
   }
 
-  // Strip the fragment so the token/db never persist in the address bar, browser history, or a referrer header.
+  // Schema assembly for the db auto-open (`typhon ui --open-db` / --schema). Passed as an explicit schema DLL so the
+  // Workbench can interpret the database's archetypes/entities instead of falling back to the incompatible banner.
+  if (schema) {
+    initialSchemaPaths = [schema];
+  }
+
+  if (trace) {
+    initialTracePath = trace;
+  }
+
+  // Strip the fragment so the token/db/schema/trace never persist in the address bar, browser history, or referrer.
   window.history.replaceState(null, '', window.location.pathname + window.location.search);
 }
 
@@ -62,4 +77,40 @@ export function getBootstrapToken(): string | null {
 /** The database path passed via `typhon ui <db>` (URL fragment), or null. Consumed once at startup. */
 export function getInitialDbPath(): string | null {
   return initialDbPath;
+}
+
+/**
+ * Schema-assembly DLL paths passed via `typhon ui --open-db` / `--schema` (URL fragment) for interpreting the
+ * initial database, or an empty array when none was given. Consumed once at startup by the db auto-open.
+ */
+export function getInitialSchemaPaths(): string[] {
+  return initialSchemaPaths;
+}
+
+/** The trace path passed via `typhon ui --trace <path>` / `--open-latest` (URL fragment), or null. Consumed once at startup. */
+export function getInitialTracePath(): string | null {
+  return initialTracePath;
+}
+
+/**
+ * Attaches the Workbench auth headers to a raw-`fetch` {@link Headers} object and returns it: the bootstrap token
+ * (`X-Workbench-Token`, captured from the launch-URL fragment under `typhon ui`), the optional per-session token
+ * (`X-Session-Token`), and the `X-Workbench-Api` marker. This mirrors `customFetch` (api/client.ts) — which is the
+ * single source of this policy and delegates here.
+ *
+ * Hand-rolled `fetch` call sites (the profiler polling hooks that answer 202 while a cache builds — a shape the
+ * Orval-generated client can't express) MUST use this. Under the Vite dev-proxy the missing bootstrap token is
+ * injected server-side, so a raw fetch that only sent `X-Session-Token` still worked; under `typhon ui` there is no
+ * proxy, so an un-tokenized request 401s on the `[RequireBootstrapToken]` filter. Never re-open that gap.
+ */
+export function applyWorkbenchAuthHeaders(headers: Headers, sessionToken?: string | null): Headers {
+  const bootstrapToken = getBootstrapToken();
+  if (bootstrapToken && !headers.has('X-Workbench-Token')) {
+    headers.set('X-Workbench-Token', bootstrapToken);
+  }
+  if (sessionToken && !headers.has('X-Session-Token')) {
+    headers.set('X-Session-Token', sessionToken);
+  }
+  headers.set('X-Workbench-Api', '1');
+  return headers;
 }

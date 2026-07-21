@@ -1,7 +1,4 @@
 using BenchmarkDotNet.Attributes;
-using Typhon.Engine.Internals;
-using Typhon.Engine.Profiler;
-using Typhon.Profiler;
 using System;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;

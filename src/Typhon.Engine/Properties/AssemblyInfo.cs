@@ -35,5 +35,4 @@ using System.Runtime.CompilerServices;
 //   "Typhon.Shell"               — redundant: Shell's AssemblyName is `typhon`, not `Typhon.Shell`.
 //   "Typhon.Shell.Extensibility" — builds clean.
 //   "Typhon.Workbench.Fixtures"  — builds clean.
-//   "Typhon.ARPG.Shell"          — builds clean.
 //   "Typhon.Workbench.Tests"     — builds clean (it goes through Typhon.Workbench's surface only).

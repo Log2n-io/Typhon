@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { getInitialDbPath } from '@/api/bootstrapToken';
+import { getInitialDbPath, getInitialSchemaPaths } from '@/api/bootstrapToken';
 import { useOpenDatabaseFile } from '@/hooks/useOpenDatabaseFile';
 
 /**
@@ -20,7 +20,8 @@ export function useInitialDbAutoOpen(): void {
       return;
     }
     startedRef.current = true;
-    void openDatabaseFile(db, []).catch(() => {
+    // Schema DLLs from `--open-db`/`--schema` (may be empty) so the db opens with its archetypes/entities resolved.
+    void openDatabaseFile(db, getInitialSchemaPaths()).catch(() => {
       // Failure already logged by useOpenDatabaseFile; the welcome screen stays up for a manual retry.
     });
   }, [openDatabaseFile]);

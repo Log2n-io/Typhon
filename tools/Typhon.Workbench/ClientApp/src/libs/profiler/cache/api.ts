@@ -4,14 +4,16 @@
  * Shape mirrors the old standalone viewer's `api.ts` so the cache module ports with minimal edits. Only the
  * URL and auth differ:
  *  - Session-scoped URL: `/api/sessions/{sessionId}/profiler/chunks/{chunkIdx}` (vs. old path-query-param shape).
- *  - X-Session-Token header injected from {@link useSessionStore} for session-token auth.
- *  - X-Workbench-Token is added transparently by the Vite dev proxy (or by a Tauri sidecar in production).
+ *  - X-Session-Token + X-Workbench-Token attached via applyWorkbenchAuthHeaders (api/bootstrapToken).
+ *    Under the Vite dev-proxy the bootstrap token is injected server-side instead; under `typhon ui` the
+ *    helper supplies it from sessionStorage (no proxy exists there).
  *
  * JSON-chunk path (the old `/api/trace/chunk` endpoint) is NOT ported — the Workbench is binary-only. The
  * {@link fetchChunk} stub throws loudly so a stale JSON code path in chunkCache doesn't silently fall back.
  */
 import type { ChunkResponse } from '../model/types';
 import { useSessionStore } from '@/stores/useSessionStore';
+import { applyWorkbenchAuthHeaders } from '@/api/bootstrapToken';
 
 /** Binary-chunk response — raw LZ4 compressed payload + chunk metadata from response headers. */
 export interface BinaryChunkResponse {
@@ -37,8 +39,7 @@ export async function fetchChunkBinary(
 ): Promise<BinaryChunkResponse> {
   const url = `/api/sessions/${sessionId}/profiler/chunks/${chunkIdx}`;
   const token = useSessionStore.getState().token;
-  const headers = new Headers();
-  if (token) headers.set('X-Session-Token', token);
+  const headers = applyWorkbenchAuthHeaders(new Headers(), token);
 
   const res = await fetch(url, { signal, headers });
   if (!res.ok) {

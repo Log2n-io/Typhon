@@ -856,7 +856,7 @@ internal sealed class DiagnosticCommandExecutor
 
     private (BTreeBase<PersistentStore> Tree, string Error) ResolveIndex(string name)
     {
-        // Format: ComponentName.FieldName (e.g., ARPG.Position.PK or ARPG.Position.PlayerId)
+        // Format: ComponentName.FieldName (e.g., Swg.PlayerPosition.PK or Swg.PlayerPosition.PlayerId)
         var dotPos = name.LastIndexOf('.');
         if (dotPos < 0)
         {
@@ -942,7 +942,7 @@ internal sealed class DiagnosticCommandExecutor
 
         var target = tokens[pos].Value;
 
-        // Try as a component name first (handles dotted names like ARPG.Position)
+        // Try as a component name first (handles dotted names like Swg.PlayerPosition)
         if (_session.ComponentTypes.TryGetValue(target, out var componentType))
         {
             var compTable = _session.Engine.GetComponentTable(componentType);
@@ -1016,7 +1016,7 @@ internal sealed class DiagnosticCommandExecutor
 
         var target = tokens[pos].Value;
 
-        // Try as a component name first (handles dotted names like ARPG.Position)
+        // Try as a component name first (handles dotted names like Swg.PlayerPosition)
         if (_session.ComponentTypes.TryGetValue(target, out var componentType))
         {
             var compTable = _session.Engine.GetComponentTable(componentType);

@@ -122,6 +122,46 @@ internal sealed class TelemetryEnableCommand : Command<TelemetryPathSettings>
     }
 }
 
+internal sealed class TelemetryTraceSettings : TelemetryFileSettings
+{
+    [CommandArgument(0, "[path]")]
+    [Description("Profiler trace output file (e.g. captures/app.typhon-trace). Declaring it activates profiling.")]
+    public string TracePath { get; set; }
+
+    [CommandOption("--clear")]
+    [Description("Remove the trace output path (stop writing a trace file).")]
+    public bool Clear { get; set; }
+}
+
+/// <summary><c>typhon telemetry trace &lt;path&gt;</c> — set (or <c>--clear</c>) the <c>Typhon:Profiler:Trace</c> output
+/// path, preserving the gate flags. Unlike the flag verbs, the argument is a file path, not a catalog flag path.</summary>
+internal sealed class TelemetryTraceCommand : Command<TelemetryTraceSettings>
+{
+    protected override int Execute(CommandContext context, TelemetryTraceSettings settings, CancellationToken cancellationToken)
+    {
+        var model = TelemetryFile.Load(TelemetryCommandSupport.FilePath(settings.File));
+
+        if (settings.Clear)
+        {
+            model.ClearTrace();
+            TelemetryCommandSupport.PrintSaved(model, null, "cleared trace output");
+            return 0;
+        }
+
+        var path = settings.TracePath?.Trim();
+        if (string.IsNullOrEmpty(path))
+        {
+            AnsiConsole.MarkupLine("[red]Give a trace file path[/], or use [yellow]--clear[/] to remove it.");
+            AnsiConsole.MarkupLine("  [grey]typhon telemetry trace captures/app.typhon-trace[/]");
+            return 1;
+        }
+
+        model.SetTrace(path);
+        TelemetryCommandSupport.PrintSaved(model, path, $"trace → {Markup.Escape(path)}");
+        return 0;
+    }
+}
+
 internal sealed class TelemetryDisableCommand : Command<TelemetryPathSettings>
 {
     protected override int Execute(CommandContext context, TelemetryPathSettings settings, CancellationToken cancellationToken)
