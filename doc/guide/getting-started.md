@@ -170,8 +170,9 @@ using (var tx = dbe.CreateQuickTransaction())
 ### 3. Query
 
 `Query<Harvester>()` starts a query over all `Harvester` entities; `Where<Cargo>(...)` filters by a component predicate
-(fast here because `Cargo.Amount` is indexed); `Count()` returns how many match (`Execute()` would instead hand back the
-matching `EntityId`s to iterate).
+— `c.Amount < c.Capacity` compares two fields, so this is a broad scan; for index-backed filtering use `WhereField`
+(see [ch.4](04-querying.md)); `Count()` returns how many match (`Execute()` would instead hand back the matching
+`EntityId`s to iterate).
 
 ```csharp
 using (var tx = dbe.CreateQuickTransaction())
