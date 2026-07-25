@@ -1519,6 +1519,13 @@ public unsafe partial class Transaction : EntityAccessor
     private void ReconcileClusterIndexAndViews(ArchetypeEngineState es, ArchetypeClusterState clusterState, int compSlot, int clusterChunkId,
         int clusterLocation, long entityKey, byte* oldComp, byte* newComp)
     {
+        var layout = clusterState.Layout;
+        int slotIndex = clusterLocation & 63;
+        // Cluster chunk base holding the per-entity index element-id tail slot for AllowMultiple fields. Resolved lazily on the first AllowMultiple field
+        // (fetching it forWrite marks the cluster chunk dirty — only wanted when we actually write an element id back). Both callers of this method have just
+        // (re)established _clusterCommitClusterAccessor for this archetype before calling.
+        byte* clusterBase = null;
+
         for (int ixs = 0; ixs < clusterState.IndexSlots.Length; ixs++)
         {
             ref var ixSlot = ref clusterState.IndexSlots[ixs];
@@ -1535,18 +1542,58 @@ public unsafe partial class Transaction : EntityAccessor
                 {
                     if (newComp != null && oldComp != null)
                     {
-                        // Update: move from old key to new key
-                        field.Index.Move(oldComp + field.FieldOffset, newComp + field.FieldOffset, clusterLocation, ref idxAccessor);
+                        // Update: move this entity's entry from the old key to the new key.
+                        if (field.AllowMultiple)
+                        {
+                            // The leaf value for an AllowMultiple index is a VSBS buffer-root id, NOT the clusterLocation — the entity's location lives
+                            // inside the buffer. Plain Move() is unique-only: it overwrites the leaf value with the raw clusterLocation, which the read path
+                            // then treats as a buffer id (finds nothing → the entity vanishes from every scan of that key). Use MoveValue with this entity's
+                            // element id (kept in the cluster tail slot exactly as spawn/destroy do) and write the returned new element id back so a later
+                            // update/destroy still targets the right buffer entry. Mirrors ReconcileFlatIndexAndViews / IndexMaintainer.UpdateIndices.
+                            if (clusterBase == null)
+                            {
+                                clusterBase = _clusterCommitClusterAccessor.GetChunkAddress(clusterChunkId, true);
+                            }
+                            int* elementIdPtr = (int*)(clusterBase + layout.IndexElementIdOffset(field.MultiFieldIndex, slotIndex));
+                            *elementIdPtr = field.Index.MoveValue(oldComp + field.FieldOffset, newComp + field.FieldOffset, *elementIdPtr, clusterLocation,
+                                ref idxAccessor, out _, out _);
+                        }
+                        else
+                        {
+                            field.Index.Move(oldComp + field.FieldOffset, newComp + field.FieldOffset, clusterLocation, ref idxAccessor);
+                        }
                     }
                     else if (newComp != null)
                     {
-                        // Insert (first commit after spawn)
-                        field.Index.Add(newComp + field.FieldOffset, clusterLocation, ref idxAccessor);
+                        // Insert (first commit after spawn): Add returns the per-entity element id for an AllowMultiple index, which must be recorded in the
+                        // cluster tail slot so destroy/update can target this entity's entry (mirrors FinalizeSpawns).
+                        int elementId = field.Index.Add(newComp + field.FieldOffset, clusterLocation, ref idxAccessor);
+                        if (field.AllowMultiple)
+                        {
+                            if (clusterBase == null)
+                            {
+                                clusterBase = _clusterCommitClusterAccessor.GetChunkAddress(clusterChunkId, true);
+                            }
+                            *(int*)(clusterBase + layout.IndexElementIdOffset(field.MultiFieldIndex, slotIndex)) = elementId;
+                        }
                     }
                     else if (oldComp != null)
                     {
-                        // Delete
-                        field.Index.Remove(oldComp + field.FieldOffset, out _, ref idxAccessor);
+                        // Delete: for an AllowMultiple index, RemoveValue removes only this entity's (key, clusterLocation) entry — Remove(key) would wipe the
+                        // whole buffer and drop siblings sharing the value (the same rule the cluster destroy path follows).
+                        if (field.AllowMultiple)
+                        {
+                            if (clusterBase == null)
+                            {
+                                clusterBase = _clusterCommitClusterAccessor.GetChunkAddress(clusterChunkId, true);
+                            }
+                            int elementId = *(int*)(clusterBase + layout.IndexElementIdOffset(field.MultiFieldIndex, slotIndex));
+                            field.Index.RemoveValue(oldComp + field.FieldOffset, elementId, clusterLocation, ref idxAccessor);
+                        }
+                        else
+                        {
+                            field.Index.Remove(oldComp + field.FieldOffset, out _, ref idxAccessor);
+                        }
                     }
 
                     // Widen zone map with new value
