@@ -36,7 +36,7 @@ public sealed class ScaffoldTests
         var dir = Path.Combine(_tempDir, "Demo");
         ProjectScaffolder.Emit(dir, "Demo");
 
-        foreach (var f in new[] { "Harvester.cs", "Program.cs", "Systems.cs", "typhon.telemetry.json", ".gitignore", "Demo.csproj", "README.md" })
+        foreach (var f in new[] { "Character.cs", "Program.cs", "Systems.cs", "typhon.telemetry.json", ".gitignore", "Demo.csproj", "README.md" })
         {
             var p = Path.Combine(dir, f);
             Assert.That(File.Exists(p), Is.True, $"{f} should be emitted");
@@ -51,7 +51,7 @@ public sealed class ScaffoldTests
         var dir = Path.Combine(_tempDir, "Demo");
         ProjectScaffolder.Emit(dir, "Demo");
 
-        AssertByteIdentical(Path.Combine(dir, "Harvester.cs"), Path.Combine(root, "samples", "Typhon.Samples.Swg", "Light", "Harvester.cs"));
+        AssertByteIdentical(Path.Combine(dir, "Character.cs"), Path.Combine(root, "samples", "Typhon.Samples.Swg", "Light", "Character.cs"));
         AssertByteIdentical(Path.Combine(dir, "Program.cs"), Path.Combine(root, "doc", "guide", "example", "Program.cs"));
         AssertByteIdentical(Path.Combine(dir, "Systems.cs"), Path.Combine(root, "doc", "guide", "example", "Systems.cs"));
         AssertByteIdentical(Path.Combine(dir, "typhon.telemetry.json"), Path.Combine(root, "doc", "guide", "example", "typhon.telemetry.json"));

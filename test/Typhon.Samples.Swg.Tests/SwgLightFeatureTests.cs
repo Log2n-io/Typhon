@@ -5,18 +5,18 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using NUnit.Framework;
 using Typhon.Engine;
-using Typhon.Samples.Swg;
 using Typhon.Schema.Definition;
 
-namespace Typhon.Samples.Swg.Tests;
+// Placed UNDER the Shard namespace so bare type names (Wallet, Transform, …) bind to the world-shard Light types via
+// the closest enclosing namespace, not the Full tier's same-named types up in Typhon.Samples.Swg.
+namespace Typhon.Samples.Swg.Shard.Tests;
 
 /// <summary>
-/// Proves SWG Light stands alone and its source-generated accessors fire. Registers ONLY the Light components (the Full
-/// tier's types are present in the same assembly but dormant — <see cref="DatabaseEngine.InitializeArchetypes"/> skips
-/// archetypes whose components weren't registered), then spawns/reads a <see cref="Harvester"/> across all three
-/// storage modes and runs a spatial query. If the consumer generator hadn't emitted the accessors + the
-/// <c>[ModuleInitializer]</c> barrier, neither <c>Harvester.Position.Set(...)</c> nor
-/// <c>RegisterComponentFromAccessor&lt;Position&gt;()</c> would resolve.
+/// Proves the World-Shard Light slice stands alone and its source-generated accessors fire. Registers the six
+/// <see cref="Character"/> components, then spawns/reads a character across all three storage modes, runs a spatial
+/// query, exercises a Versioned wallet transaction (commit + rollback), and enable/disables a component. If the
+/// consumer generator hadn't emitted the accessors + the <c>[ModuleInitializer]</c> barrier, neither
+/// <c>Character.Transform.Set(...)</c> nor <c>RegisterComponentFromAccessor&lt;Transform&gt;()</c> would resolve.
 /// </summary>
 [TestFixture]
 [NonParallelizable]
@@ -31,7 +31,7 @@ public sealed class SwgLightFeatureTests
     [SetUp]
     public void SetUp()
     {
-        _tempDir = Path.Combine(Path.GetTempPath(), "typhon-swg-light", Guid.NewGuid().ToString("N"));
+        _tempDir = Path.Combine(Path.GetTempPath(), "typhon-shard-light", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(_tempDir);
         var walDir = Path.Combine(_tempDir, "wal");
         Directory.CreateDirectory(walDir);
@@ -46,7 +46,7 @@ public sealed class SwgLightFeatureTests
             .AddDeadlineWatchdog()
             .AddScopedManagedPagedMemoryMappedFile(opts =>
             {
-                opts.DatabaseName = "swg-light";
+                opts.DatabaseName = "shard-light";
                 opts.DatabaseDirectory = _tempDir;
                 opts.DatabaseCacheSize = 8192UL * 8192;
                 opts.PagesDebugPattern = false;
@@ -58,14 +58,14 @@ public sealed class SwgLightFeatureTests
         _sp = services.BuildServiceProvider();
         _engine = _sp.GetRequiredService<DatabaseEngine>();
 
-        // Register ONLY the SWG Light components — the Full tier stays dormant.
-        _engine.RegisterComponentFromAccessor<Position>();
-        _engine.RegisterComponentFromAccessor<Footprint>();
-        _engine.RegisterComponentFromAccessor<Cargo>();
-        _engine.RegisterComponentFromAccessor<Drift>();
-        _engine.RegisterComponentFromAccessor<Extractor>();
+        _engine.RegisterComponentFromAccessor<Transform>();
+        _engine.RegisterComponentFromAccessor<Bounds>();
+        _engine.RegisterComponentFromAccessor<Ham>();
+        _engine.RegisterComponentFromAccessor<Faction>();
+        _engine.RegisterComponentFromAccessor<Wallet>();
+        _engine.RegisterComponentFromAccessor<Intent>();
 
-        // Footprint is SingleVersion + spatial ⇒ Harvester is cluster-eligible ⇒ a grid is required before init (#230 Option B).
+        // Bounds is SingleVersion + spatial ⇒ Character is cluster-eligible ⇒ a grid is required before init (#230 Option B).
         _engine.ConfigureSpatialGrid(new SpatialGridConfig(new Vector2(0f, 0f), new Vector2(WorldSize, WorldSize), cellSize: 100f));
         _engine.InitializeArchetypes();
     }
@@ -82,55 +82,46 @@ public sealed class SwgLightFeatureTests
     private static AABB2F Boxed(float x, float y)
         => new() { MinX = x - 1f, MinY = y - 1f, MaxX = x + 1f, MaxY = y + 1f };
 
+    private EntityId SpawnCharacter(Transaction tx, float x, float y, int faction, long credits)
+        => tx.Spawn<Character>(
+            Character.Transform.Set(new Transform { Pos = new Point2F { X = x, Y = y }, Vel = new Point2F { X = 1f, Y = 0f } }),
+            Character.Bounds.Set(new Bounds { Box = Boxed(x, y) }),
+            Character.Ham.Set(new Ham { Health = 80, MaxHealth = 100, Action = 70, MaxAction = 100, Mind = 60, MaxMind = 100 }),
+            Character.Faction.Set(new Faction { Value = faction }),
+            Character.Wallet.Set(new Wallet { Credits = credits }),
+            Character.Intent.Set(new Intent()));
+
     [Test]
-    public void Harvester_RoundTrips_V_SV_Transient()
+    public void Character_RoundTrips_SV_Versioned_Transient()
     {
         EntityId id;
         using (var tx = _engine.CreateQuickTransaction())
         {
-            var position = new Position { P = new Point2F { X = 50f, Y = 60f } };
-            var footprint = new Footprint { Box = Boxed(50f, 60f) };
-            var cargo = new Cargo { Amount = 123, Capacity = 500 };
-            var drift = new Drift { Dx = 1.5f, Dy = -0.5f };
-            var extractor = new Extractor { ResourceKind = 7, Rate = 42 };
-            id = tx.Spawn<Harvester>(
-                Harvester.Position.Set(in position),
-                Harvester.Footprint.Set(in footprint),
-                Harvester.Cargo.Set(in cargo),
-                Harvester.Drift.Set(in drift),
-                Harvester.Extractor.Set(in extractor));
+            id = SpawnCharacter(tx, 50f, 60f, faction: Factions.Hutt, credits: 123);
             Assert.That(tx.Commit(), Is.True);
         }
 
         using (var tx = _engine.CreateQuickTransaction())
         {
             var e = tx.Open(id);
-            Assert.That(e.Read(Harvester.Position).P.X, Is.EqualTo(50f), "SingleVersion component reads back");
-            Assert.That(e.Read(Harvester.Footprint).Box.MinX, Is.EqualTo(49f), "SingleVersion spatial component reads back");
-            Assert.That(e.Read(Harvester.Cargo).Amount, Is.EqualTo(123), "Versioned component reads back");
-            Assert.That(e.Read(Harvester.Extractor).Rate, Is.EqualTo(42), "Versioned indexed component reads back");
-            Assert.That(e.Read(Harvester.Drift).Dx, Is.EqualTo(1.5f), "Transient component reads back in-session");
+            Assert.That(e.Read(Character.Transform).Pos.X, Is.EqualTo(50f), "SingleVersion pose reads back");
+            Assert.That(e.Read(Character.Bounds).Box.MinX, Is.EqualTo(49f), "SingleVersion spatial component reads back");
+            var ham = e.Read(Character.Ham);
+            Assert.That((ham.Health, ham.Action, ham.Mind), Is.EqualTo((80, 70, 60)), "SingleVersion HAM pools read back");
+            Assert.That(e.Read(Character.Faction).Value, Is.EqualTo(Factions.Hutt), "SingleVersion indexed component reads back");
+            Assert.That(e.Read(Character.Wallet).Credits, Is.EqualTo(123), "Versioned wallet reads back");
+            Assert.That(e.Read(Character.Intent).Target.X, Is.EqualTo(0f), "Transient component reads back in-session");
         }
     }
 
     [Test]
-    public void Spatial_Query_Returns_Positioned_Harvesters()
+    public void Spatial_Query_Returns_Positioned_Characters()
     {
         using (var tx = _engine.CreateQuickTransaction())
         {
             for (int i = 0; i < 3; i++)
             {
-                var position = new Position { P = new Point2F { X = 100f + i * 10f, Y = 100f } };
-                var footprint = new Footprint { Box = Boxed(100f + i * 10f, 100f) };
-                var cargo = new Cargo { Amount = 0, Capacity = 100 };
-                var drift = new Drift { Dx = 0f, Dy = 0f };
-                var extractor = new Extractor { ResourceKind = 1, Rate = 1 };
-                tx.Spawn<Harvester>(
-                    Harvester.Position.Set(in position),
-                    Harvester.Footprint.Set(in footprint),
-                    Harvester.Cargo.Set(in cargo),
-                    Harvester.Drift.Set(in drift),
-                    Harvester.Extractor.Set(in extractor));
+                SpawnCharacter(tx, 100f + i * 10f, 100f, faction: Factions.Rebel, credits: 0);
             }
             Assert.That(tx.Commit(), Is.True);
         }
@@ -140,54 +131,73 @@ public sealed class SwgLightFeatureTests
 
         using (var tx = _engine.CreateQuickTransaction())
         {
-            var all = tx.Query<Harvester>().WhereInAABB<Footprint>(0, 0, WorldSize, WorldSize, 0, 0).Execute();
-            Assert.That(all.Count, Is.EqualTo(3), "world-covering AABB query returns all 3 positioned drones");
-
-            var near = tx.Query<Harvester>().WhereInAABB<Footprint>(95, 95, 115, 105, 0, 0).Execute();
-            Assert.That(near.Count, Is.GreaterThanOrEqualTo(1).And.LessThanOrEqualTo(3),
-                "a narrow AABB returns the drones inside it (the SingleVersion spatial index is queryable)");
+            var all = tx.Query<Character>().WhereInAABB<Bounds>(0, 0, WorldSize, WorldSize, 0, 0).Execute();
+            Assert.That(all.Count, Is.EqualTo(3), "world-covering AABB query returns all 3 positioned characters");
         }
     }
 
     [Test]
-    public void EnableDisable_Partitions_Harvesters_By_Drift()
+    public void Wallet_Versioned_Commit_And_Rollback()
+    {
+        EntityId id;
+        using (var tx = _engine.CreateQuickTransaction())
+        {
+            id = SpawnCharacter(tx, 5f, 5f, faction: Factions.Rebel, credits: 100);
+            Assert.That(tx.Commit(), Is.True);
+        }
+
+        // A committed write sticks.
+        using (var tx = _engine.CreateQuickTransaction())
+        {
+            tx.OpenMut(id).Write(Character.Wallet).Credits += 40;
+            Assert.That(tx.Commit(), Is.True);
+        }
+        using (var tx = _engine.CreateQuickTransaction())
+        {
+            Assert.That(tx.Open(id).Read(Character.Wallet).Credits, Is.EqualTo(140), "committed Versioned write persists");
+        }
+
+        // A rolled-back write does not.
+        using (var tx = _engine.CreateQuickTransaction())
+        {
+            tx.OpenMut(id).Write(Character.Wallet).Credits += 5000;
+            tx.Rollback();
+        }
+        using (var tx = _engine.CreateQuickTransaction())
+        {
+            Assert.That(tx.Open(id).Read(Character.Wallet).Credits, Is.EqualTo(140), "rolled-back Versioned write is discarded");
+        }
+    }
+
+    [Test]
+    public void EnableDisable_Partitions_Characters_By_Intent()
     {
         var ids = new EntityId[6];
         using (var tx = _engine.CreateQuickTransaction())
         {
             for (int i = 0; i < 6; i++)
             {
-                var position = new Position { P = new Point2F { X = i, Y = i } };
-                var footprint = new Footprint { Box = Boxed(i, i) };
-                var cargo = new Cargo { Amount = 0, Capacity = 100 };
-                var drift = new Drift { Dx = 1f, Dy = 0f };
-                var extractor = new Extractor { ResourceKind = 2, Rate = 1 };
-                ids[i] = tx.Spawn<Harvester>(
-                    Harvester.Position.Set(in position),
-                    Harvester.Footprint.Set(in footprint),
-                    Harvester.Cargo.Set(in cargo),
-                    Harvester.Drift.Set(in drift),
-                    Harvester.Extractor.Set(in extractor));
+                ids[i] = SpawnCharacter(tx, i, i, faction: Factions.Imperial, credits: 10);
             }
             Assert.That(tx.Commit(), Is.True);
         }
 
-        // Disable Drift on the first two (parked); leave four enabled (roaming).
+        // Disable Intent on the first two (idle); leave four enabled (active).
         using (var tx = _engine.CreateQuickTransaction())
         {
             for (int i = 0; i < 2; i++)
             {
-                tx.OpenMut(ids[i]).Disable(Harvester.Drift);
+                tx.OpenMut(ids[i]).Disable(Character.Intent);
             }
             Assert.That(tx.Commit(), Is.True);
         }
 
         using (var tx = _engine.CreateQuickTransaction())
         {
-            var roaming = tx.Query<Harvester>().Enabled<Drift>().Execute();
-            var parked = tx.Query<Harvester>().Disabled<Drift>().Execute();
-            Assert.That(roaming.Count, Is.EqualTo(4), "4 drones should have Drift ENABLED (roaming)");
-            Assert.That(parked.Count, Is.EqualTo(2), "2 drones should have Drift DISABLED (parked)");
+            var active = tx.Query<Character>().Enabled<Intent>().Execute();
+            var idle = tx.Query<Character>().Disabled<Intent>().Execute();
+            Assert.That(active.Count, Is.EqualTo(4), "4 characters should have Intent ENABLED");
+            Assert.That(idle.Count, Is.EqualTo(2), "2 characters should have Intent DISABLED");
         }
     }
 }

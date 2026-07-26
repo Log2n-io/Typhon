@@ -5,33 +5,36 @@ using Typhon.Schema.Definition;
 namespace Typhon.Samples.Swg;
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-// SWG Full — the exhaustive tier that extends SWG Light.
+// World Shard — Full tier. The rich counterpart to Light's single Character: a living shard of Players (with guilds,
+// wallets, inventories), the Structures they own (Harvesters + Factories), the Resource taxonomy and Deposits they
+// gather from, and the Recipes + Items they craft. Where Light is the minimal slice a newcomer copies, Full is the
+// reference schema that gives the Workbench (Schema / Data / Query / File-Map views) and the MonitoringDemo real,
+// relationship-rich data to render and drive load against.
 //
-// A coherent mini-economy: Guilds of Players craft Items from Recipes, gathering Resources (typed by a ResourceType
-// taxonomy) from Deposits via Structures (Harvesters + Factories). The schema is feature-driven, not lore-driven — its
-// purpose is to exercise EVERY engine schema primitive so consumers (the Workbench Schema/Data/Query/File-Map views,
-// MonitoringDemo) have real-world-shaped content to render.
+// SAME DISCIPLINE AS LIGHT: each component sits in the storage mode its ACCESS PATTERN calls for — never a blanket
+// default. That judgment is the point; the mode is not incidental.
+//   • SingleVersion — hot / high-frequency / loss-tolerant: every spatial Position, a harvester's filling Hopper, a
+//     factory's draining PowerSupply, a harvester's MaintenanceState. Lock-free, no MVCC tax — exactly Light's Transform.
+//   • Versioned — durable, transactional, ACID: identity + progression (Player), the economy (Wallet, Guild.Treasury),
+//     ownership + inventory (Item, StructureOwner, ItemOwner), the durable catalog (ResourceType, Recipe, Deposit).
+//     These are records you must not lose or read torn — what MVCC + WAL are for, touched at event cadence not per tick.
+//   • Transient — pure scratch: Session (online/offline connection state), dropped on restart by design — Light's Intent.
 //
-// Engine features exercised:
-//   • Storage modes: Versioned (default), SingleVersion (positions, MaintenanceState, PowerSupply), Transient (Session)
-//   • Mixed storage on one entity (Player = V + SV + Transient; Harvester/Factory = V + SV)
-//   • ComponentCollection<T> multi-value slots (Recipe.Slots, Item.Affixes)
-//   • Unique + non-unique indexes; EntityLink<T> typed FKs (incl. 2 cascade-delete); self-referential FK
-//   • Spatial R-Tree: Static + Dynamic modes, 3 distinct Category bitmasks (Player / Deposit / Structure)
-//   • Per-component Enable/Disable (Session / MaintenanceState / PowerSupply / Deposit)
-//   • Polymorphic archetype inheritance (Structure ← Harvester / Factory)
-//   • [ComponentFamily] grouping (Social / Industry / World / Item)
+// The relational surface (EntityLink<T> FKs incl. cascade-delete and a self-referential FK, ComponentCollection,
+// [ComponentFamily] grouping, polymorphic Structure) is here because a real shard HAS relationships and a fixture must
+// exercise them for the Workbench to render them — NOT because you should reach for a foreign key by default. Each FK
+// models a genuine ownership / membership / taxonomy edge; being fixture data, none is chased in a hot per-tick loop.
 //
 // NOTE on multi-value FKs: ComponentCollection<T> elements are opaque VSBS payloads and cannot be indexed FKs, so
 // RecipeSlot.ClassReq is a plain resource-type id (int), not an EntityLink. NOTE on spatial: a single shared Position
-// struct cannot present different Category/Mode per archetype (the attribute is compile-time, per-struct), so there are
+// struct cannot present different Category/Mode per archetype (the attribute is per-struct, compile-time), so there are
 // three distinct *Position structs; StructurePosition is still shared by Harvester + Factory.
 //
 // Every field carries [Field] — required by the Typhon.Shell AssemblySchemaLoader (skips unmarked fields) and harmless
 // to the engine registration path (which reads all public fields regardless).
 //
 // Paired with SwgFullArchetypes.cs, which groups these components into the 9 archetypes. Component identities are
-// prefixed "Swg." (matching SWG Light); archetype ids are engine-assigned (feature #514 — no author-set id).
+// prefixed "Swg."; archetype ids are engine-assigned (feature #514 — no author-set id).
 // ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
 // ── ComponentCollection element payloads (plain blittable structs, NOT components) ──────────────────────────────────
@@ -177,8 +180,12 @@ public struct StructureOwner
     [Field] [Index(AllowMultiple = true, OnParentDelete = CascadeAction.Delete)] public EntityLink<PlayerArch> Owner;
 }
 
-/// <summary>A harvester's output hopper. FK Class → ResourceType.</summary>
-[Component("Swg.Hopper", 1)]
+/// <summary>A harvester's output hopper. FK Class → ResourceType. <see cref="Amount"/> is the resource level that
+/// climbs every tick as the harvester extracts — a HOT, high-frequency accumulator, so this is <b>SingleVersion</b>
+/// (like Light's per-tick state), not Versioned: pushing a per-tick counter through MVCC would be pure write tax for
+/// data that needs no isolation or history. Contrast the Versioned Wallet, touched only on an economic event. The
+/// mode changed from Versioned, so the revision is bumped to 2 (StorageMode is immutable per name+revision).</summary>
+[Component("Swg.Hopper", 2, StorageMode = StorageMode.SingleVersion)]
 [ComponentFamily("Industry")]
 [StructLayout(LayoutKind.Sequential)]
 public struct Hopper

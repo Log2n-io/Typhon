@@ -1,86 +1,126 @@
 // Runnable companion to doc/guide, and the source template `typhon new` emits. Every snippet in the guide is mirrored
 // here so it is known to compile and run against the current engine. Run with:
-//   dotnet run --project doc/guide/example
+//   dotnet run --project doc/guide/example              (resumes the existing shard, or deploys a fresh one)
+//   dotnet run --project doc/guide/example -- --reset   (wipes the database and deploys a fresh shard)
 //
-// It walks the guide's arc (declare -> spawn -> read -> transact -> query -> view -> tick) printing checkable text,
-// then confirms the profiler wrote a trace. The data model lives in the Typhon.Samples.Swg assembly (SWG Light); the
-// systems live in Systems.cs. Profiling is config-driven: typhon.telemetry.json turns it on, the engine self-wires it
-// inside TyphonRuntime.Create, and the .typhon-trace is flushed when the engine is disposed — zero profiling code here.
+// It walks the guide's arc on a *real* planet shard: deploy thousands of characters -> read/query at scale -> transact ->
+// spatial queries -> tick the runtime so the shard lives (characters move, regenerate HAM, wander, and trade credits) ->
+// then CLOSE AND REOPEN the database to prove what survives. That last step is the point of a *database*: durable
+// state comes back, and each storage mode comes back differently.
+//
+// The lesson is JUDGMENT, not a feature list: the hot per-tick state (Transform/Ham/Bounds/Faction) is SingleVersion —
+// written lock-free in parallel, no MVCC — while only the economy (Wallet) is Versioned, touched at event cadence. The
+// data model lives in the Typhon.Samples.Swg assembly; the systems live in Systems.cs. Profiling is config-driven:
+// typhon.telemetry.json turns it on, the engine self-wires it inside TyphonRuntime.Create, and the .typhon-trace is
+// flushed when the engine is disposed — zero profiling code here. Open the resulting world-shard.typhon in the
+// Workbench (`typhon ui --open-db`) to browse the shard, and the trace (`typhon ui --open-latest`) to profile it.
 
 using System;
 using System.IO;
 using System.Numerics;
 using System.Threading;
 using Typhon.Engine;
-using Typhon.Samples.Swg;
+using Typhon.Samples.Swg.Shard;
 using Typhon.Schema.Definition;
 using SwgGuide;
 
-// The profiler writes its trace here (see typhon.telemetry.json). Create the folder up front — the exporter opens the
-// file when the runtime starts.
+// Tunables — a real shard so the Workbench has something to explore (a paginated entity browser, a File Map with real
+// occupancy, a dense spatial index) and so the parallel tick systems have enough entities per worker to be worth
+// fanning out. ~15 s end to end in Release. Shrink ShardSize for a faster loop; if you change it, re-tune Place()
+// so the shard still fits the 1000x1000 spatial world.
+const int ShardSize = 20_000;
+const int TickTarget = 200;
+const int StartingCredits = 100;
+
 var tracePath = Path.GetFullPath(Path.Combine("captures", "guide.typhon-trace"));
 Directory.CreateDirectory(Path.GetDirectoryName(tracePath));
+// Snapshot the trace's last-write time BEFORE the run so the completion check can tell a freshly-written trace from a
+// leftover one — WITHOUT deleting anything. Past captures are kept on purpose (that's what `typhon ui --open-latest`
+// browses); a stale file is told apart by its timestamp, not by wiping history.
+var traceBefore = File.Exists(tracePath) ? File.GetLastWriteTimeUtc(tracePath) : DateTime.MinValue;
 
-// Scope the engine so it disposes (and flushes the trace) before we check for the trace file below.
+// The database PERSISTS across runs — it's a database, not a scratch buffer. Pass `--reset` to wipe it and deploy a
+// fresh shard; otherwise a re-run RESUMES the shard that survived the previous run (ch.1 detects which case it's in).
+var reset = Array.IndexOf(args, "--reset") >= 0;
+if (reset)
 {
-    // Fresh DB each run: wipe any prior bundle before opening.
-    new PagedMMFOptions { DatabaseName = "swg-guide", DatabaseDirectory = "." }.EnsureFileDeleted();
+    new PagedMMFOptions { DatabaseName = "world-shard", DatabaseDirectory = "." }.EnsureFileDeleted();
+}
 
-    // One call: names the database, registers the SWG Light components + archetype, configures the spatial grid
-    // (required by the [SpatialIndex] on Footprint), and wires the archetypes — a ready-to-use engine.
-    using var dbe = DatabaseEngine.Open("swg-guide.typhon", o => o
-        .Register<Position>()
-        .Register<Footprint>()
-        .Register<Cargo>()
-        .Register<Drift>()
-        .Register<Extractor>()
-        .ConfigureSpatialGrid(new SpatialGridConfig(Vector2.Zero, new Vector2(1000f, 1000f), cellSize: 50f)));
+EntityId probe = default, mover = default;
+
+// ══ engine scope #1: build the shard, run it, decommission a batch — then dispose (flushing the trace) ══
+{
+    using var dbe = OpenEngine();
 
     // ════════════════════════════════════════════════════════════════════════
-    Banner("ch.1 — spawn, read, query");
+    Banner($"ch.1 — deploy a shard of {ShardSize:N0}");
     // ════════════════════════════════════════════════════════════════════════
 
-    EntityId probe;             // one drone we inspect throughout
-    EntityId mover = default;   // a drone we watch move in ch.5
+    int existing;
     using (var tx = dbe.CreateQuickTransaction())
     {
-        // Deploy six drones across three resource kinds at distinct positions.
-        for (int i = 0; i < 6; i++)
+        existing = tx.Query<Character>().Count();
+    }
+
+    if (existing == 0)
+    {
+        // Empty database (first run, or after --reset): deploy a fresh shard.
+        using (var tx = dbe.CreateQuickTransaction())
         {
-            float x = 100f + i * 20f, y = 100f;
-            var e = tx.Spawn<Harvester>(
-                Harvester.Position.Set(new Position { P = new Point2F { X = x, Y = y } }),
-                Harvester.Footprint.Set(PointFootprint(x, y)),
-                Harvester.Cargo.Set(new Cargo { Amount = 0, Capacity = 1000 }),
-                Harvester.Drift.Set(new Drift { Dx = 5f, Dy = 0f }),
-                Harvester.Extractor.Set(new Extractor { ResourceKind = (i % 3) + 1, Rate = 5 }));
-            if (i == 0) mover = e;
+            for (int i = 0; i < ShardSize; i++)
+            {
+                var (x, y) = Place(i);
+                var e = tx.Spawn<Character>(
+                    Character.Transform.Set(new Transform { Pos = new Point2F { X = x, Y = y }, Vel = new Point2F { X = 3f + (i % 3), Y = 2f } }),
+                    Character.Bounds.Set(PointBounds(x, y)),
+                    Character.Ham.Set(new Ham
+                    {
+                        Health = 40 + (i % 50), MaxHealth = 100,
+                        Action = 40 + (i % 40), MaxAction = 100,
+                        Mind = 40 + (i % 30), MaxMind = 100,
+                    }),
+                    Character.Faction.Set(new Faction { Value = i % 3 }),   // Neutral / Rebel / Imperial
+                    Character.Wallet.Set(new Wallet { Credits = StartingCredits }),
+                    Character.Intent.Set(new Intent()));
+                if (i == 0)
+                {
+                    mover = e;   // we watch character 0 move in ch.5 (Neutral → survives the Imperial decommission)
+                }
+            }
+            // A probe we track throughout — the ONLY character aligned with the Hutt cartel (the shard deploys
+            // Neutral/Rebel/Imperial only), so it is uniquely recoverable after a restart (see FindProbe). Being Hutt
+            // also means it survives the Imperial decommission in ch.5.5.
+            probe = tx.Spawn<Character>(
+                Character.Transform.Set(new Transform { Pos = new Point2F { X = 10f, Y = 20f }, Vel = new Point2F { X = 0f, Y = 0f } }),
+                Character.Bounds.Set(PointBounds(10f, 20f)),
+                Character.Ham.Set(new Ham { Health = 100, MaxHealth = 100, Action = 100, MaxAction = 100, Mind = 100, MaxMind = 100 }),
+                Character.Faction.Set(new Faction { Value = Factions.Hutt }),
+                Character.Wallet.Set(new Wallet { Credits = StartingCredits }),
+                Character.Intent.Set(new Intent()));
+            tx.Commit();
         }
-        probe = tx.Spawn<Harvester>(
-            Harvester.Position.Set(new Position { P = new Point2F { X = 10f, Y = 20f } }),
-            Harvester.Footprint.Set(PointFootprint(10f, 20f)),
-            Harvester.Cargo.Set(new Cargo { Amount = 250, Capacity = 1000 }),
-            Harvester.Drift.Set(new Drift { Dx = 0f, Dy = 0f }),
-            Harvester.Extractor.Set(new Extractor { ResourceKind = 1, Rate = 5 }));
-        tx.Commit();
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            Console.WriteLine($"shard deployed: {tx.Query<Character>().Count():N0} characters");
+        }
     }
-
-    // The spatial index is maintained by the tick fence. Outside the runtime, run it once after spawning so
-    // WhereNearby / WhereInAABB can filter (inside the runtime it runs every tick).
-    dbe.WriteTickFence(1);
-
-    using (var tx = dbe.CreateQuickTransaction())
+    else
     {
-        var e = tx.Open(probe);
-        var pos = e.Read(Harvester.Position);
-        var cargo = e.Read(Harvester.Cargo);
-        Console.WriteLine($"probe drone: cargo {cargo.Amount}/{cargo.Capacity} at ({pos.P.X}, {pos.P.Y})");
-
-        int filling = tx.Query<Harvester>().Where<Cargo>(c => c.Amount < c.Capacity).Count();
-        Console.WriteLine($"drones still filling: {filling}");
-        int total = tx.Query<Harvester>().Count();
-        Console.WriteLine($"total drones: {total}");
+        // Resume: the shard survived a prior run (durable across process restarts). Re-find our probe + a mover to
+        // watch, then continue the walkthrough on the existing data. Wallet/Transform/Ham are durable so state carries
+        // over; Intent is Transient so wander targets start empty — exactly the contrast ch.6 spells out.
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            probe = FindProbe(tx);
+            mover = FindMover(tx, probe);
+        }
+        Console.WriteLine($"resumed existing shard: {existing:N0} characters survived a prior run — pass --reset to redeploy fresh.");
     }
+
+    // The spatial index is maintained by the tick fence. Run it once here so ch.4's WhereNearby can filter: for a fresh
+    // deploy it enters the new characters into the grid; on a resume it rebuilds the grid over the reopened shard.
+    dbe.WriteTickFence(1);
 
     // ════════════════════════════════════════════════════════════════════════
     Banner("ch.2 — generated accessors (ReadAll)");
@@ -88,102 +128,77 @@ Directory.CreateDirectory(Path.GetDirectoryName(tracePath));
 
     using (var tx = dbe.CreateQuickTransaction())
     {
-        var h = Harvester.ReadAll(tx, probe);
-        Console.WriteLine($"ReadAll: kind={h.Extractor.ResourceKind} cargo={h.Cargo.Amount}/{h.Cargo.Capacity} pos=({h.Position.P.X},{h.Position.P.Y})");
+        var c = Character.ReadAll(tx, probe);
+        Console.WriteLine($"probe: faction={c.Faction.Value} credits={c.Wallet.Credits} "
+            + $"HAM={c.Ham.Health}/{c.Ham.Action}/{c.Ham.Mind} pos=({c.Transform.Pos.X},{c.Transform.Pos.Y})");
     }
 
     // ════════════════════════════════════════════════════════════════════════
     Banner("ch.3 — transactions: write, rollback, snapshot");
     // ════════════════════════════════════════════════════════════════════════
 
-    // Explicit UoW + transaction (the form ch.3 opens up).
     using (var uow = dbe.CreateUnitOfWork(DurabilityMode.GroupCommit))
     using (var tx = uow.CreateTransaction())
     {
-        var e = tx.OpenMut(probe);
-        e.Write(Harvester.Cargo).Amount += 100;   // Versioned write
+        tx.OpenMut(probe).Write(Character.Wallet).Credits += 40;   // Versioned write
         tx.Commit();
     }
-    PrintCargo("after committed +100", dbe, probe);
+    PrintWallet("after committed +40 credits", dbe, probe);
 
-    // Rollback: a Versioned write that never lands.
     using (var tx = dbe.CreateQuickTransaction())
     {
-        tx.OpenMut(probe).Write(Harvester.Cargo).Amount += 5000;
+        tx.OpenMut(probe).Write(Character.Wallet).Credits += 5000;
         tx.Rollback();
     }
-    PrintCargo("after rolled-back +5000", dbe, probe);
+    PrintWallet("after rolled-back +5000 credits", dbe, probe);
 
-    // Snapshot isolation: a read-only transaction doesn't see later commits.
     using (var reader = dbe.CreateReadOnlyTransaction())
     {
-        int before = reader.Open(probe).Read(Harvester.Cargo).Amount;
+        long before = reader.Open(probe).Read(Character.Wallet).Credits;
         using (var w = dbe.CreateQuickTransaction())
         {
-            w.OpenMut(probe).Write(Harvester.Cargo).Amount += 50;
+            w.OpenMut(probe).Write(Character.Wallet).Credits += 10;
             w.Commit();
         }
-        int after = reader.Open(probe).Read(Harvester.Cargo).Amount;
+        long after = reader.Open(probe).Read(Character.Wallet).Credits;
         Console.WriteLine($"reader snapshot held: {before} == {after} -> {before == after}");
     }
-    PrintCargo("outside the reader, the +50 is visible", dbe, probe);
 
     // ════════════════════════════════════════════════════════════════════════
-    Banner("ch.4 — queries, spatial, live views");
+    Banner("ch.4 — queries at scale: indexed, scan, spatial, aggregate");
     // ════════════════════════════════════════════════════════════════════════
 
     using (var tx = dbe.CreateQuickTransaction())
     {
-        int kind1 = tx.Query<Harvester>().WhereField<Extractor>(x => x.ResourceKind == 1).Count();   // indexed
-        Console.WriteLine($"kind-1 drones (WhereField, indexed): {kind1}");
+        // index scan (on a SingleVersion component!)
+        int imperials = tx.Query<Character>().WhereField<Faction>(x => x.Value == Factions.Imperial).Count();
+        Console.WriteLine($"Imperial characters (WhereField, indexed on a SingleVersion component): {imperials:N0}");
 
-        var filling = tx.Query<Harvester>().Where<Cargo>(c => c.Amount < c.Capacity).Execute();       // broad scan
-        Console.WriteLine($"filling drones (Where, scan): {filling.Count}");
+        var wounded = tx.Query<Character>().Where<Ham>(h => h.Health < h.MaxHealth).Execute();          // broad scan
+        Console.WriteLine($"wounded characters (Where, scan): {wounded.Count:N0}");
 
-        int near = tx.Query<Harvester>().WhereNearby<Footprint>(120f, 100f, 0f, 50f).Count();         // spatial
-        Console.WriteLine($"drones within 50 of (120,100) (WhereNearby): {near}");
+        int near = tx.Query<Character>().WhereNearby<Bounds>(500, 500, 0, 100).Count();                 // spatial AoI
+        Console.WriteLine($"characters within 100 of the shard centre (WhereNearby, spatial): {near:N0}");
+
+        long totalCredits = SumCredits(tx);                                                           // economy aggregate
+        Console.WriteLine($"total credits in circulation: {totalCredits:N0}");
     }
 
-    // A live view + delta: one view, refreshed across a change.
-    EcsView<Harvester> hauling;
-    using (var tx = dbe.CreateQuickTransaction())
-    {
-        hauling = tx.Query<Harvester>().Where<Cargo>(c => c.Amount > c.Capacity / 2).ToView();
-        hauling.Refresh(tx);                                     // baseline
-        Console.WriteLine($"hauling view initial members: {hauling.Count}");
-
-        tx.OpenMut(probe).Write(Harvester.Cargo).Amount = 900;  // probe crosses half-full
-        tx.Commit();
-    }
-    using (var tx = dbe.CreateQuickTransaction())
-    {
-        hauling.Refresh(tx);                                     // sees the change committed above
-        int added = 0;
-        foreach (var _ in hauling.GetDelta().Added) added++;
-        Console.WriteLine($"hauling view after top-up: {hauling.Count} member(s), {added} added");
-        hauling.ClearDelta();
-    }
-    hauling.Dispose();
-
     // ════════════════════════════════════════════════════════════════════════
-    Banner("ch.5 — systems & the tick loop");
+    Banner($"ch.5 — the shard lives ({TickTarget} ticks)");
     // ════════════════════════════════════════════════════════════════════════
 
-    // One long-lived input View for the entity systems.
-    EcsView<Harvester> drones;
+    EcsView<Character> characters;
     using (var tx = dbe.CreateQuickTransaction())
     {
-        drones = tx.Query<Harvester>().ToView();
+        characters = tx.Query<Character>().ToView();
     }
 
     float startX;
-    int startCount;
     using (var tx = dbe.CreateQuickTransaction())
     {
-        startX = tx.Open(mover).Read(Harvester.Position).P.X;
-        startCount = tx.Query<Harvester>().Count();
+        startX = tx.Open(mover).Read(Character.Transform).Pos.X;
     }
-    Console.WriteLine($"before run: {startCount} drones, mover.x = {startX}");
 
     using (var runtime = TyphonRuntime.Create(dbe, schedule =>
     {
@@ -191,53 +206,156 @@ Directory.CreateDirectory(Path.GetDirectoryName(tracePath));
             .DeclareDag("Sim")
             .Phases(Phase.Input, Phase.Simulation)
             .Add(new SpawnSystem())
-            .Add(new RoamSystem(drones))
-            .Add(new FootprintSyncSystem(drones))
-            .Add(new HarvestSystem(drones));
-    }, new RuntimeOptions { BaseTickRate = 120, WorkerCount = 2 }))
+            .Add(new MoveSystem(characters))
+            .Add(new BoundsSyncSystem(characters))
+            .Add(new RegenSystem(characters))
+            .Add(new WanderSystem(characters))
+            .Add(new TradeSystem());
+    }, new RuntimeOptions { BaseTickRate = 120 }))   // WorkerCount defaults to -1 → max(1, CPUs - 4): use the machine
     {
         runtime.Start();
-        SpinWait.SpinUntil(() => runtime.CurrentTickNumber >= 60, TimeSpan.FromSeconds(5));
+        SpinWait.SpinUntil(() => runtime.CurrentTickNumber >= TickTarget, TimeSpan.FromSeconds(30));
         runtime.Shutdown();
         Console.WriteLine($"ran {runtime.CurrentTickNumber} ticks");
     }
+    characters.Dispose();
+
+    // The shard has been living: characters moved (SingleVersion, lock-free) and credits sloshed between wallets through
+    // atomic Versioned transfers.
+    using (var tx = dbe.CreateQuickTransaction())
+    {
+        var moverPos = tx.Open(mover).Read(Character.Transform).Pos;
+        Console.WriteLine($"mover moved: ({startX:F1}) -> ({moverPos.X:F1}, {moverPos.Y:F1})  (velocity integrated each tick)");
+
+        // Trading has spread the credits. Wallet.Credits isn't indexed (it churns), so wealth queries are plain scans.
+        Console.WriteLine("wealth distribution (Where scan on the un-indexed Wallet.Credits):");
+        Console.WriteLine($"  richer than start (> {StartingCredits}): {tx.Query<Character>().Where<Wallet>(w => w.Credits > StartingCredits).Execute().Count:N0} characters");
+        Console.WriteLine($"  poorer than start (< {StartingCredits}): {tx.Query<Character>().Where<Wallet>(w => w.Credits < StartingCredits).Execute().Count:N0} characters");
+
+        Console.WriteLine($"probe wallet now: {tx.Open(probe).Read(Character.Wallet).Credits} credits");
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    Banner("ch.5.5 — lifecycle: decommission (Destroy)");
+    // ════════════════════════════════════════════════════════════════════════
 
     using (var tx = dbe.CreateQuickTransaction())
     {
-        float endX = tx.Open(mover).Read(Harvester.Position).P.X;
-        int endCount = tx.Query<Harvester>().Count();
-        int probeCargo = tx.Open(probe).Read(Harvester.Cargo).Amount;
-        Console.WriteLine($"after run: {endCount} drones (deployed {endCount - startCount}), probe cargo {probeCargo}");
-        Console.WriteLine($"mover moved: x {startX} -> {endX}  (Drift*dt integrated each tick)");
+        int before = tx.Query<Character>().Count();
+        int destroyed = 0;
+        foreach (var id in tx.Query<Character>().WhereField<Faction>(x => x.Value == Factions.Imperial).Execute())
+        {
+            tx.Destroy(id);
+            destroyed++;
+        }
+        tx.Commit();
+        Console.WriteLine($"the Imperial garrison withdraws — destroyed {destroyed:N0}: shard {before:N0} -> {before - destroyed:N0}");
     }
-
-    drones.Dispose();
 }
-// The engine is disposed here — that flushes the profiler trace to disk.
+// engine #1 disposed here — the profiler trace is finalized to disk.
+
+// ══ engine scope #2: reopen the SAME database — prove what survived, and how each storage mode came back ══
+{
+    Banner("ch.6 — durability: close & reopen");
+
+    using var dbe = OpenEngine();   // no runtime here → no profiling → the ch.5 trace is untouched
+    using var tx = dbe.CreateQuickTransaction();
+
+    Console.WriteLine($"REOPEN — {tx.Query<Character>().Count():N0} characters survived (the Imperial withdrawal persisted)");
+
+    var e = tx.Open(probe);
+    var wallet = e.Read(Character.Wallet);
+    var transform = e.Read(Character.Transform);
+    var ham = e.Read(Character.Ham);
+    var intent = e.Read(Character.Intent);
+    Console.WriteLine($"probe came back:");
+    Console.WriteLine($"   Wallet    (Versioned)     durable → {wallet.Credits} credits");
+    Console.WriteLine($"   Transform (SingleVersion) durable → ({transform.Pos.X:F1}, {transform.Pos.Y:F1})");
+    Console.WriteLine($"   Ham       (SingleVersion) durable → {ham.Health}/{ham.Action}/{ham.Mind} (H/A/M)");
+    Console.WriteLine($"   Intent    (Transient)     RESET   → ({intent.Target.X}, {intent.Target.Y})   (heap-only; dropped on reopen by design)");
+}
 
 Console.WriteLine();
-if (File.Exists(tracePath) && new FileInfo(tracePath).Length > 0)
+if (File.Exists(tracePath) && new FileInfo(tracePath).Length > 0 && File.GetLastWriteTimeUtc(tracePath) > traceBefore)
 {
     Console.WriteLine($"OK — ran end to end; profiler trace written: {tracePath} ({new FileInfo(tracePath).Length:N0} bytes)");
 }
 else
 {
-    Console.WriteLine($"WARN — ran, but no trace at {tracePath}. Check typhon.telemetry.json has a Profiler with Enabled=true and a Trace path.");
+    Console.WriteLine($"WARN — no fresh trace written this run at {tracePath}. Enable profiling in typhon.telemetry.json (a Profiler with a Trace path).");
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────
+static DatabaseEngine OpenEngine() => DatabaseEngine.Open("world-shard.typhon", o => o
+    .Register<Transform>()
+    .Register<Bounds>()
+    .Register<Ham>()
+    .Register<Faction>()
+    .Register<Wallet>()
+    .Register<Intent>()
+    .ConfigureSpatialGrid(new SpatialGridConfig(Vector2.Zero, new Vector2(1000f, 1000f), cellSize: 50f)));
+
+// Deterministic shard placement: a ~45-wide grid spread across the 1000x1000 world (varied positions → spatial density).
+static (float x, float y) Place(int i)
+{
+    // A square-ish grid sized for ShardSize (cols ≈ √ShardSize) at a spacing that keeps the whole shard inside the
+    // 1000x1000 world the spatial grid is configured for: 141 cols x 7 units = 987 wide, 142 rows x 7 = 994 tall.
+    // Bump these together with ShardSize — entities placed outside the world bounds never enter the spatial index.
+    const int cols = 141;
+    const float spacing = 7f;
+    return (5f + (i % cols) * spacing, 5f + (i / cols) * spacing);
+}
+
+// Re-find the tracked probe after a restart: it's the unique character aligned with the Hutt cartel — the shard's own
+// characters are Neutral/Rebel/Imperial, so none collide — which keeps it identifiable across runs. Returns default if
+// no such character exists.
+static EntityId FindProbe(Transaction tx)
+{
+    foreach (var id in tx.Query<Character>().WhereField<Faction>(x => x.Value == Factions.Hutt).Execute())
+    {
+        return id;
+    }
+    return default;
+}
+
+// Pick any surviving character other than the probe to watch over the tick loop.
+static EntityId FindMover(Transaction tx, EntityId probe)
+{
+    foreach (var id in tx.Query<Character>().Execute())
+    {
+        if (!id.Equals(probe))
+        {
+            return id;
+        }
+    }
+    return default;
+}
+
+// The shard's total credits. NOTE: this walks the characters per-entity for clarity; the high-throughput shape is a SoA
+// column sweep over the cluster (GetClusterEnumerator + GetReadOnlySpan) — the constant-cost aggregate Typhon is built
+// for. Kept simple here so the seed stays readable; the guide text points at the columnar version.
+static long SumCredits(Transaction tx)
+{
+    long sum = 0;
+    foreach (var id in tx.Query<Character>().Execute())
+    {
+        sum += tx.Open(id).Read(Character.Wallet).Credits;
+    }
+    return sum;
+}
+
 static void Banner(string title)
 {
     Console.WriteLine();
     Console.WriteLine("== " + title + " ==");
 }
 
-static Footprint PointFootprint(float x, float y)
-    => new Footprint { Box = new AABB2F { MinX = x, MaxX = x, MinY = y, MaxY = y } };
+static Bounds PointBounds(float x, float y)
+    => new Bounds { Box = new AABB2F { MinX = x, MaxX = x, MinY = y, MaxY = y } };
 
-static void PrintCargo(string label, DatabaseEngine dbe, EntityId id)
+static void PrintWallet(string label, DatabaseEngine dbe, EntityId id)
 {
     using var tx = dbe.CreateQuickTransaction();
-    var c = tx.Open(id).Read(Harvester.Cargo);
-    Console.WriteLine($"{label}: cargo {c.Amount}/{c.Capacity}");
+    var w = tx.Open(id).Read(Character.Wallet);
+    Console.WriteLine($"{label}: wallet {w.Credits} credits");
 }

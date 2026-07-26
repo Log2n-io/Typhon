@@ -42,13 +42,13 @@ Inside a transaction you spawn, mutate, and destroy:
 ```csharp
 using (var tx = dbe.CreateQuickTransaction())
 {
-    var e = tx.OpenMut(probe);               // open for mutation
-    e.Write(Harvester.Cargo).Amount += 100;  // Write<T> returns a ref you mutate in place
+    var e = tx.OpenMut(scout);                 // open for mutation
+    e.Write(Character.Wallet).Credits += 100;   // Write<T> returns a ref you mutate in place
     tx.Commit();
 }
 ```
 
-- `OpenMut(id)` opens an entity for writing; `Write(Harvester.Cargo)` returns a `ref` to the component so you mutate it directly.
+- `OpenMut(id)` opens an entity for writing; `Write(Character.Wallet)` returns a `ref` to the component so you mutate it directly.
 - `Spawn<T>(...)` / `Destroy(id)` create and remove entities (ch.1).
 - `Commit()` makes the transaction's changes visible to later snapshots.
 - `Rollback()` (or simply disposing without `Commit`) discards them.
@@ -83,12 +83,12 @@ A transaction reads against a **fixed snapshot** taken when it was created. Ever
 
 ```csharp
 using var reader = dbe.CreateReadOnlyTransaction();   // a pure-read snapshot
-var cargoBefore = reader.Open(probe).Read(Harvester.Cargo).Amount;
+var creditsBefore = reader.Open(scout).Read(Character.Wallet).Credits;
 
-// ... meanwhile, another transaction commits a change to probe's Cargo ...
+// ... meanwhile, another transaction commits a change to scout's Wallet ...
 
-var cargoAgain = reader.Open(probe).Read(Harvester.Cargo).Amount;
-// cargoAgain == cargoBefore — the reader's snapshot didn't move
+var creditsAgain = reader.Open(scout).Read(Character.Wallet).Credits;
+// creditsAgain == creditsBefore — the reader's snapshot didn't move
 ```
 
 > 💡 **Why snapshot isolation?** It's the property that lets readers and writers run concurrently without getting in each other's way: a reader never takes a lock to "hold" the data and never waits for a writer to finish — it just keeps reading its own consistent version. The price is keeping old versions around while someone might still need them, which is exactly what *Versioned* storage pays for and *SingleVersion/Transient* opt out of. Read-only transactions (`CreateReadOnlyTransaction`) make the intent explicit: writes throw, commit is a no-op, and there's no durability bookkeeping.
