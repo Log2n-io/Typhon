@@ -93,6 +93,26 @@ public unsafe partial class EntityAccessor
     internal ComponentInfo GetComponentInfoInternal(int componentTypeId, Type componentType) =>
         GetComponentInfoByTypeId(componentTypeId, componentType);
 
+    /// <summary>
+    /// Walk <paramref name="slot"/>'s revision chain from <paramref name="chainRoot"/> and return the content chunk visible at this accessor's
+    /// <see cref="TSN"/>, or 0 when the chain yields nothing visible.
+    /// <para>
+    /// Called lazily by <see cref="EntityRef"/> on the first read of a Versioned slot. <c>ResolveEntity</c> only stashes the root, so opening an entity
+    /// costs nothing for Versioned components the caller never touches.
+    /// </para>
+    /// </summary>
+    internal int ResolveVersionedContentChunk(ArchetypeMetadata meta, int slot, int chainRoot)
+    {
+        if (chainRoot == 0)
+        {
+            return 0;
+        }
+
+        var info = GetComponentInfoByTypeId(meta._componentTypeIds[slot], meta._slotToComponentType[slot]);
+        var chainResult = RevisionChainReader.WalkChain(ref info.CompRevTableAccessor, chainRoot, TSN, true);
+        return chainResult.IsSuccess ? chainResult.Value.CurCompContentChunkId : 0;
+    }
+
     /// <summary>Open an entity for reading. Throws if not found or not visible.</summary>
     public EntityRef Open(EntityId id)
     {
@@ -159,7 +179,7 @@ public unsafe partial class EntityAccessor
 
         // Skip EpochGuard if we're already in an epoch scope (PTA workers enter once in InitLightweight).
         // This eliminates per-entity PinCurrentThread/UnpinCurrentThread overhead.
-        var needsGuard = !_epochManager.IsCurrentThreadInScope;
+        var needsGuard = !_ownsPersistentEpochScope && !_epochManager.IsCurrentThreadInScope;
         var guard = needsGuard ? EpochGuard.Enter(_epochManager) : default;
 
         // Reuse cached EntityMap accessor for same archetype (avoids creating a fresh ChunkAccessor per entity).
@@ -176,7 +196,11 @@ public unsafe partial class EntityAccessor
             _hasEntityMapCache = true;
         }
 
-        bool found = es.EntityMap.TryGet(id.EntityKey, readBuf, ref _entityMapCacheAccessor);
+        // Hinted lookup: EntityKey is dense and monotonic, so the low-bit hint slot resolves in one bucket-chunk visit — skipping the hash, the bucket
+        // directory read and the chain scan that dominate the plain TryGet. Identical semantics (a stale or colliding hint falls back to the full lookup,
+        // which refreshes it), and the hint array self-allocates on first miss. Transaction.ResolveEntity already took this path; the parallel/PTA path
+        // did not, despite being the one that performs millions of resolves per tick.
+        bool found = es.EntityMap.TryGetWithHint(id.EntityKey, readBuf, ref _entityMapCacheAccessor);
 
         if (needsGuard)
         {
@@ -253,39 +277,33 @@ public unsafe partial class EntityAccessor
             result._clusterChunkId = clusterChunkId;
             result._clusterLayout = es.ClusterState.Layout;
 
-            // For Versioned slots, walk chain and store resolved content chunkId in _locations.
-            // Versioned reads via EntityRef.Read use _locations (not cluster slot) for MVCC correctness.
+            // Versioned slots: stash the revision-chain ROOT and mark the slot pending — do NOT walk the chain here. The walk that turns a root into the
+            // MVCC-visible content chunk is deferred to the first read of that slot (EntityRef.EnsureVersionedResolved), so a caller that touches only
+            // SV/Transient components never pays for it. Measured on the SWG sample: MoveSystem writes Transform alone yet walked Wallet's chain
+            // 4,000,200 times over 200 ticks. Deferring is MVCC-neutral — TSN is fixed for this accessor, so walking later yields the same revision.
             if (meta.VersionedSlotMask != 0)
             {
                 var layout = es.ClusterState.Layout;
-                if (layout.SlotToVersionedIndex == null)
+                if (layout.SlotToVersionedIndex != null)
                 {
-                    goto skipVersionedWalk;
-                }
-                for (int slot = 0; slot < meta.ComponentCount; slot++)
-                {
-                    int vi = layout.SlotToVersionedIndex[slot];
-                    if (vi < 0)
+                    for (int slot = 0; slot < meta.ComponentCount; slot++)
                     {
-                        continue;
-                    }
+                        int vi = layout.SlotToVersionedIndex[slot];
+                        if (vi < 0)
+                        {
+                            continue;
+                        }
 
-                    int compRevFirstChunkId = ClusterEntityRecordAccessor.GetCompRevFirstChunkId(readBuf, vi);
-                    if (compRevFirstChunkId == 0)
-                    {
-                        continue;
-                    }
+                        int compRevFirstChunkId = ClusterEntityRecordAccessor.GetCompRevFirstChunkId(readBuf, vi);
+                        if (compRevFirstChunkId == 0)
+                        {
+                            continue;
+                        }
 
-                    var compTypeId = meta._componentTypeIds[slot];
-                    var info = GetComponentInfoInternal(compTypeId, meta._slotToComponentType[slot]);
-
-                    var chainResult = RevisionChainReader.WalkChain(ref info.CompRevTableAccessor, compRevFirstChunkId, TSN, true);
-                    if (chainResult.IsSuccess)
-                    {
-                        result.SetLocation(slot, chainResult.Value.CurCompContentChunkId);
+                        result.SetChainRoot(slot, compRevFirstChunkId);
+                        result.MarkVersionedPending(slot);
                     }
                 }
-                skipVersionedWalk:;
             }
         }
         else
