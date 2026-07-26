@@ -326,3 +326,17 @@ scratch/
 /typhon.telemetry.json
 /check-durations.csx
 /check-durations.ps1
+# dotTrace snapshots + generated reports. The snapshot is one .dtp plus numbered
+# .dtp.NNNN parts (tens of MB); the '.*' suffix pattern catches those. Reports are
+# regenerated from the snapshot by Reporter.exe and can reach hundreds of MB.
+# NOTE: pattern-based on purpose — test/Typhon.Benchmark/profiling/ holds TRACKED
+# tooling (analyze_profile.py, btree-pattern.xml), so the directory itself must not
+# be ignored. See .claude/skills/profile.
+**/*.dtp
+**/*.dtp.*
+/doc/guide/example/profiling/
+/doc/guide/example/captures/
+
+# Sample/benchmark databases left behind by a run. The engine creates <name>.typhon
+# as a DIRECTORY, so this needs the trailing slash.
+**/*.typhon/
