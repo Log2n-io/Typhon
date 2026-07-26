@@ -113,7 +113,7 @@ public class WorkloadBenchmarks
         // Spawn+destroy 200K entities so the hashmap allocates enough buckets upfront.
         // RawValueHashMap never shrinks — buckets stay allocated after destroy.
         // Committed in chunks: a single commit's WAL frame must fit the commit buffer
-        // (WalRingBufferSizeBytes/2 = 4 MiB by default); 200K spawns in one commit is ~18 MB
+        // (WalRingBufferSizeBytes/2 = 32 MiB by default); 200K spawns in one commit is ~18 MB
         // and throws WalClaimTooLargeException. 20K * ~92 B ≈ 1.8 MB keeps each commit well under.
         const int preGrowCount = 200_000;
         const int preGrowChunk = 20_000;

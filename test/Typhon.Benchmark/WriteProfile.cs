@@ -76,7 +76,7 @@ static class WriteProfile
         dbe.InitializeArchetypes();
 
         // Pre-grow EntityMap. Committed in chunks: a single commit's WAL frame must fit the
-        // commit buffer (WalRingBufferSizeBytes/2 = 4 MiB); 200K spawns in one commit is ~18 MB
+        // commit buffer (WalRingBufferSizeBytes/2 = 32 MiB); 200K spawns in one commit is ~18 MB
         // and throws WalClaimTooLargeException. 20K keeps each commit well under.
         var pg = new EntityId[200_000];
         const int pgChunk = 20_000;

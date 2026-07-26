@@ -80,6 +80,30 @@ internal sealed unsafe class WalCommitBuffer : IDisposable
 
     private readonly ManualResetEventSlim _dataAvailableEvent = new(false);
 
+    /// <summary>
+    /// Producer-side wake-up for a completed buffer swap — the consumer-to-producer direction of <see cref="_dataAvailableEvent"/>.
+    /// </summary>
+    /// <remarks>
+    /// A producer whose claim straddles the buffer boundary must wait for the writer thread to swap buffers. Without a signal it can
+    /// only poll <see cref="_activeBufferIndex"/>, and an <c>AdaptiveWaiter</c> poll degrades to <c>Thread.Sleep(1)</c> — 1 to 15.6 ms
+    /// on Windows depending on the process timer resolution, against a swap that completes in microseconds. Waiting on an event
+    /// instead removes that overshoot: <see cref="ManualResetEventSlim"/> spins briefly before blocking, so a fast swap is caught in
+    /// user mode and a slow one parks the thread rather than burning a core.
+    /// <para>
+    /// Starts SET so a producer that arrives when no swap is pending never blocks. <see cref="TryClaim"/> resets it when it wins
+    /// the swap-request CAS; <see cref="PerformSwap"/> sets it once the new <see cref="_activeBufferIndex"/> is visible. The wait loop re-checks
+    /// <see cref="_activeBufferIndex"/> after every wake, so a spurious or stale signal costs one extra iteration, never correctness.
+    /// </para>
+    /// </remarks>
+    private readonly ManualResetEventSlim _swapCompletedEvent = new(true);
+
+    /// <summary>
+    /// Liveness backstop for the swap wait (milliseconds). Not a polling interval — the writer's signal is the normal wake path.
+    /// This only bounds the cost of a lost wake-up and sets the cadence at which a parked producer re-checks its deadline and
+    /// disposal. Kept small so a cancelled or timed-out claim still fails fast.
+    /// </summary>
+    private const int SwapWaitBackstopMs = 2;
+
     // ═══════════════════════════════════════════════════════════════════════
     // Drain watermark (consumer-thread only — no synchronization needed)
     // ═══════════════════════════════════════════════════════════════════════
@@ -291,8 +315,13 @@ internal sealed unsafe class WalCommitBuffer : IDisposable
 
             if (offset <= BufferCapacity)
             {
-                // Request a buffer swap
-                Interlocked.CompareExchange(ref _swapState, SwapRequested, SwapNormal);
+                // Request a buffer swap. Only the CAS winner arms the completion event — a loser resetting it after the winner's
+                // swap already finished would cost the losing producer one extra bounded wait, so keep that window as narrow as
+                // possible. Correctness never depends on it: the loop below re-reads _activeBufferIndex, which is the truth.
+                if (Interlocked.CompareExchange(ref _swapState, SwapRequested, SwapNormal) == SwapNormal)
+                {
+                    _swapCompletedEvent.Reset();
+                }
 
                 // Wake the consumer so it knows to drain and swap
                 _dataAvailableEvent.Set();
@@ -303,10 +332,10 @@ internal sealed unsafe class WalCommitBuffer : IDisposable
             // Phase 8: Backpressure span — captures how long this producer blocked waiting for the writer thread to swap buffers.
             // Emitted on the calling (producer) thread, not the writer. Parents under whatever span the producer is in (e.g. TransactionPersist).
             var bpStart = System.Diagnostics.Stopwatch.GetTimestamp();
-            var bpScope = TyphonEvent.BeginDurabilityWalBackpressure(0, Environment.CurrentManagedThreadId);
+            var bpScope = TyphonEvent.BeginDurabilityWalBackpressure(0, Environment.CurrentManagedThreadId, 0);
             try
             {
-                var waiter = new AdaptiveWaiter();
+                var retries = 0;
                 while (_activeBufferIndex == bufferIndex)
                 {
                     if (!Unsafe.IsNullRef(ref ctx) && ctx.ShouldStop)
@@ -315,8 +344,16 @@ internal sealed unsafe class WalCommitBuffer : IDisposable
                     }
 
                     ThrowIfDisposed();
-                    waiter.Wait();
+
+                    // Block on the writer's completion signal instead of polling. ManualResetEventSlim spins before parking, so a
+                    // swap that lands in microseconds is caught in user mode; a slow one parks the thread rather than burning a core.
+                    // The bounded timeout is a liveness backstop only — it caps the cost of a lost wake-up (an event reset that
+                    // raced a completing swap) at one iteration, and lets ShouldStop / disposal be re-checked on a fixed cadence.
+                    _swapCompletedEvent.Wait(SwapWaitBackstopMs);
+                    retries++;
                 }
+
+                bpScope.Retries = (ushort)Math.Min(retries, ushort.MaxValue);
                 bpScope.WaitUs = (uint)Math.Min((System.Diagnostics.Stopwatch.GetTimestamp() - bpStart) * 1_000_000L / System.Diagnostics.Stopwatch.Frequency, uint.MaxValue);
             }
             finally
@@ -591,6 +628,10 @@ internal sealed unsafe class WalCommitBuffer : IDisposable
 
         // SwapNormal must be last — some code paths check _swapState
         Interlocked.Exchange(ref _swapState, SwapNormal);
+
+        // Release every producer parked in TryClaim. Set AFTER _activeBufferIndex is published, so a woken producer's re-read of
+        // the index always observes the new buffer.
+        _swapCompletedEvent.Set();
     }
 
     /// <summary>
@@ -694,6 +735,7 @@ internal sealed unsafe class WalCommitBuffer : IDisposable
         _memoryBlock.Dispose();
 
         _dataAvailableEvent.Dispose();
+        _swapCompletedEvent.Dispose();
     }
 }
 

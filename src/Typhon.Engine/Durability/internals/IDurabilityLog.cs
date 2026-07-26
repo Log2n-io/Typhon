@@ -1,4 +1,5 @@
 using JetBrains.Annotations;
+using System;
 
 namespace Typhon.Engine.Internals;
 
@@ -22,6 +23,21 @@ internal interface IDurabilityLog
     /// over-large record (LOG-01).
     /// </summary>
     long Append(ref CommitBatchBuilder batch, ref WaitContext ctx);
+
+    /// <summary>
+    /// Appends a run of columnar tick-fence blocks (#559), copying each cluster's SoA columns straight into the WAL claim with
+    /// no intermediate staging. Returns the highest LSN published, or 0 for an empty run. Throws on back-pressure timeout (LOG-01).
+    /// </summary>
+    long AppendFenceBlocks(
+        ReadOnlySpan<RecordCodec.FenceBlockDescriptor> blocks,
+        ushort archetypeId,
+        long tsn,
+        int entityKeysOffset,
+        ReadOnlySpan<int> slotIndices,
+        ReadOnlySpan<int> componentSizes,
+        ReadOnlySpan<int> componentOffsets,
+        int totalComponentSize,
+        ref WaitContext ctx);
 
     /// <summary>Requests an explicit flush of buffered WAL data (Deferred durability).</summary>
     void RequestFlush();

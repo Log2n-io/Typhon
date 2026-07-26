@@ -190,7 +190,7 @@ public unsafe ref struct EntityRef
                         ShadowClusterIndexedFields(clusterState);
                     }
                 }
-                clusterState.SetDirty(_clusterChunkId, _clusterSlotIndex);
+                clusterState.SetDirty(_clusterChunkId, _clusterSlotIndex, slot);
                 return ref Unsafe.AsRef<T>(_transientClusterBase + _clusterLayout.ComponentOffset(slot) + _clusterSlotIndex * _clusterLayout.ComponentSize(slot));
             }
 
@@ -224,7 +224,7 @@ public unsafe ref struct EntityRef
             }
 
             _accessor.NoteSvInPlaceWrite();   // CM-02: an in-place TickFence write happened — blocks late auto-escalation to Commit
-            clusterState.SetDirty(_clusterChunkId, _clusterSlotIndex);
+            clusterState.SetDirty(_clusterChunkId, _clusterSlotIndex, slot);
             return ref Unsafe.AsRef<T>(svHeadPtr);
         }
 
@@ -359,7 +359,7 @@ public unsafe ref struct EntityRef
             }
 
             _accessor.NoteSvInPlaceWrite();   // CM-02: an in-place TickFence write happened — blocks late auto-escalation to Commit
-            clusterState.SetDirty(_clusterChunkId, _clusterSlotIndex);
+            clusterState.SetDirty(_clusterChunkId, _clusterSlotIndex, slot);
             return ref Unsafe.AsRef<T>(svHeadPtr);
         }
 
