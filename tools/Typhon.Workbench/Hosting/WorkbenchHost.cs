@@ -42,6 +42,11 @@ public static class WorkbenchHost
         // bind cannot come from a dev profile — it is set here. Keep it loopback-only; never a routable interface.
         builder.WebHost.UseUrls(options.Url);
 
+        // Log-verbosity floor. `typhon ui` raises this to Warning so ASP.NET's per-request Hosting.Diagnostics and
+        // lifetime Info logs don't spam the terminal; standalone `dotnet run` keeps Information for dev. The launch
+        // URL is written to the console below (not the logger), so it stays visible even when Info is suppressed.
+        builder.Logging.SetMinimumLevel(options.MinimumLogLevel);
+
         builder.Services
             .AddControllers(o =>
             {
@@ -228,7 +233,9 @@ public static class WorkbenchHost
                 : opened
                     ? "Workbench UI opened in your browser. If it shows a token error or doesn't load, open this URL in a NEW tab:"
                     : "Could not open a browser automatically. Open this URL in your browser:";
-            app.Logger.LogInformation("{Lead}\n\n    {Url}\n", lead, launchUrl);
+            // Console, not the logger: this is essential user-facing output (the tokenized manual-paste URL) and must
+            // stay visible when `typhon ui` raises the log floor to Warning (see WorkbenchHostOptions.MinimumLogLevel).
+            Console.WriteLine($"{lead}\n\n    {launchUrl}\n");
         });
     }
 

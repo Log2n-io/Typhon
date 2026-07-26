@@ -99,6 +99,13 @@ jobs:
       - name: CLI tool smoke test (Typhon.Cli)
         run: bash scripts/cli-tool-smoke-test.sh artifacts
 
+      # The onboarding-loop gate: install the packed CLI, `typhon new`, and `dotnet run` the scaffold against the
+      # packed engine — all from the local feed. Fails the release (blocking publish) if the scaffold pins an engine
+      # version other than the one being shipped, or if the emitted template won't compile/run against it. This is
+      # the exact co-published-pair coherence check the other two smoke tests don't cover.
+      - name: Onboarding-loop smoke test (typhon new → dotnet run)
+        run: bash scripts/onboarding-smoke-test.sh artifacts
+
       - name: Upload packages
         uses: actions/upload-artifact@v4
         with:

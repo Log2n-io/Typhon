@@ -141,14 +141,21 @@ internal sealed class TelemetryTraceCommand : Command<TelemetryTraceSettings>
     {
         var model = TelemetryFile.Load(TelemetryCommandSupport.FilePath(settings.File));
 
-        if (settings.Clear)
+        var path = settings.TracePath?.Trim();
+
+        // Clear intent: the --clear flag, OR a bare verb like `trace clear` / `trace off`. Without this second case a
+        // natural `typhon telemetry trace clear` would silently ARM a trace file literally named "clear" instead of
+        // removing it — the exact footgun that made a cleared-looking config keep writing traces.
+        if (settings.Clear || (path != null && IsClearWord(path)))
         {
             model.ClearTrace();
-            TelemetryCommandSupport.PrintSaved(model, null, "cleared trace output");
+            var how = settings.Clear
+                ? "cleared trace output"
+                : $"cleared trace output (read '{Markup.Escape(path)}' as clear intent — to set a file with that name, give it an extension)";
+            TelemetryCommandSupport.PrintSaved(model, null, how);
             return 0;
         }
 
-        var path = settings.TracePath?.Trim();
         if (string.IsNullOrEmpty(path))
         {
             AnsiConsole.MarkupLine("[red]Give a trace file path[/], or use [yellow]--clear[/] to remove it.");
@@ -160,6 +167,12 @@ internal sealed class TelemetryTraceCommand : Command<TelemetryTraceSettings>
         TelemetryCommandSupport.PrintSaved(model, path, $"trace → {Markup.Escape(path)}");
         return 0;
     }
+
+    // Bare positional words that mean "remove the trace output", so `trace clear`/`trace off` behave like `--clear`
+    // rather than arming a trace file literally named that.
+    private static readonly string[] ClearWords = ["clear", "off", "none", "disable", "disabled", "remove", "false"];
+
+    private static bool IsClearWord(string s) => Array.Exists(ClearWords, w => string.Equals(w, s, StringComparison.OrdinalIgnoreCase));
 }
 
 internal sealed class TelemetryDisableCommand : Command<TelemetryPathSettings>

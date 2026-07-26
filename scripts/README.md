@@ -43,3 +43,29 @@ python3 scripts/build-test-affected-map.py
 ```
 
 Reads `coverage/fixtures.txt` for the fixture list (regenerate that with a one-liner extracting class names from the suite if it's stale).
+
+## typhon-dev.ps1
+
+Run the **local** CLI build as if it were the installed `typhon` dotnet tool. Publishes `src/Typhon.Shell` to
+`artifacts/typhon-dev` (gitignored) and registers a global `typhon-dev` PowerShell function pointing at it.
+
+```powershell
+. scripts/typhon-dev.ps1              # publish (Debug) + register
+. scripts/typhon-dev.ps1 -NoBuild     # re-register only — fast, for a fresh shell
+. scripts/typhon-dev.ps1 -Configuration Release
+
+typhon-dev --version
+typhon-dev ui --open-db               # browse the database in the current directory
+typhon-dev ui --open-latest           # open the newest ./captures/*.typhon-trace
+```
+
+Named `typhon-dev`, not `typhon`, so the globally-installed `Typhon.Cli` tool keeps working untouched and the two can
+be compared side by side. Re-running is idempotent (a re-declared function replaces the previous one) and repoints it
+at the fresh publish, so call it again after any CLI change. Registration lasts for the session; the script prints the
+one-liner to add to `$PROFILE` if you want it permanent.
+
+> **Why it publishes rather than builds.** `typhon ui` serves the Workbench SPA from `AppContext.BaseDirectory/wwwroot`,
+> and that `wwwroot` is injected by a **publish-only** MSBuild target (`_IncludeWorkbenchSpaInPublish`, hooking
+> `ComputeResolvedFilesToPublishList`). A plain `dotnet build` output therefore has no SPA next to `typhon.dll`, and
+> `typhon ui` answers a bare `404` on `/` with no warning — a build output is not a usable CLI. The script warns if
+> `wwwroot` is missing (run `scripts/workbench-bootstrap.ps1` once to build the SPA).

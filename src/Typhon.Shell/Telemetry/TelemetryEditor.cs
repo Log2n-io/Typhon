@@ -26,6 +26,10 @@ internal sealed class TelemetryEditor
     private bool[] _eff;
     private bool _save;
 
+    // Default output path when enabling the trace channel from the editor (F3). A custom path is still settable via
+    // `typhon telemetry trace <path>`; the editor toggles the channel on/off with this sensible default.
+    private const string DefaultTracePath = "captures/app.typhon-trace";
+
     // Transparent normal background (terminal shows through); dark selection bar keeps coloured text readable.
     private Color _bgNormal;
     private Color _bgFocus;
@@ -69,10 +73,24 @@ internal sealed class TelemetryEditor
 
             var refs = BuildRefs();
 
+            // Output-channel row — the axis the flag tree does NOT cover: whether a trace file is written AT ALL.
+            // A trace is armed by this path independently of the master gate (the exact source of the "I disabled it
+            // but it still traces" confusion), so it gets its own prominent row: green when a trace WILL be written,
+            // F3 toggles it on/off. Without this, the editor could set every gate off yet a run would still trace.
+            var traceLabel = new Label
+            {
+                X = 1,
+                Y = 0,
+                Width = Dim.Fill(1),
+                Height = 1,
+                Text = TraceStatusText(),
+            };
+            traceLabel.SetScheme(Fg(string.IsNullOrEmpty(_model.TracePath) ? _fgDefault : On));
+
             var tree = new FlagTree
             {
                 X = 0,
-                Y = 0,
+                Y = Pos.Bottom(traceLabel),
                 Width = Dim.Fill(),
                 Height = Dim.Fill(4), // leave 4 rows for the selection info + 2 legend lines
             };
@@ -114,12 +132,14 @@ internal sealed class TelemetryEditor
             var legendKeys = BuildLegendRow(1, Pos.Bottom(selInfo) + 1,
             [
                 ("Keys:   ", _fgDefault),
-                ("Space / Enter", Footgun),
-                (" = cycle state        ", _fgDefault),
+                ("Space/Enter", Footgun),
+                (" cycle     ", _fgDefault),
+                ("F3", On),
+                (" trace on/off     ", _fgDefault),
                 ("F2", On),
-                (" = save & quit        ", _fgDefault),
+                (" save & quit     ", _fgDefault),
                 ("Esc", Off),
-                (" = cancel & quit", _fgDefault),
+                (" cancel", _fgDefault),
             ]);
 
             tree.Toggle = r =>
@@ -138,6 +158,7 @@ internal sealed class TelemetryEditor
                 Application.RequestStop();
             };
             tree.Cancel = () => Application.RequestStop();
+            tree.ToggleTrace = () => ToggleTrace(traceLabel);
             tree.SelectionChanged += (_, e) =>
             {
                 if (e.NewValue is FlagRef r)
@@ -153,7 +174,7 @@ internal sealed class TelemetryEditor
                 Height = Dim.Fill(),
             };
             win.SetScheme(transparent);
-            win.Add(tree, selInfo);
+            win.Add(traceLabel, tree, selInfo);
             foreach (var v in legendState)
             {
                 win.Add(v);
@@ -330,6 +351,29 @@ internal sealed class TelemetryEditor
         return null;
     }
 
+    /// <summary>The output-channel status line: whether a trace file is written this run, and how to toggle it.</summary>
+    private string TraceStatusText()
+        => string.IsNullOrEmpty(_model.TracePath)
+            ? $"Trace output: (off — no trace file is written)   ·   F3 to enable → {DefaultTracePath}"
+            : $"Trace output: {_model.TracePath}   (a trace is written each run)   ·   F3 to disable";
+
+    /// <summary>Toggle the profiler trace output channel: arm it with <see cref="DefaultTracePath"/> when off, clear it
+    /// when on. This is the axis the flag tree can't reach — clearing it is what actually stops a session from tracing.</summary>
+    private void ToggleTrace(Label label)
+    {
+        if (string.IsNullOrEmpty(_model.TracePath))
+        {
+            _model.SetTrace(DefaultTracePath);
+        }
+        else
+        {
+            _model.ClearTrace();
+        }
+        label.Text = TraceStatusText();
+        label.SetScheme(Fg(string.IsNullOrEmpty(_model.TracePath) ? _fgDefault : On));
+        label.SetNeedsDraw();
+    }
+
     /// <summary>Reference wrapper so the generic tree carries a non-ambiguous, nullable node object.</summary>
     private sealed class FlagRef
     {
@@ -343,6 +387,7 @@ internal sealed class TelemetryEditor
         public Action<FlagRef> Toggle;
         public Action SaveQuit;
         public Action Cancel;
+        public Action ToggleTrace;
 
         protected override bool OnKeyDown(Key key)
         {
@@ -352,6 +397,11 @@ internal sealed class TelemetryEditor
                 {
                     Toggle?.Invoke(SelectedObject);
                 }
+                return true;
+            }
+            if (key == Key.F3)
+            {
+                ToggleTrace?.Invoke();
                 return true;
             }
             if (key == Key.F2)
