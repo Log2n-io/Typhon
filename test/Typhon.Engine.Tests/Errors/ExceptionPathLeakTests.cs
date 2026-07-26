@@ -116,7 +116,8 @@ class ExceptionPathLeakTests : TestBase<ExceptionPathLeakTests>
                 var accessor = segment.CreateChunkAccessor();
                 try
                 {
-                    var enumerator = new RevisionEnumerator(ref accessor, firstChunkId, true, true);
+                    var enumerator = new RevisionEnumerator(ref accessor, firstChunkId, true, true,
+                        WaitContext.FromTimeout(TimeoutOptions.Current.RevisionChainLockTimeout));
                     enumerator.Dispose();
                     Assert.Fail("Expected LockTimeoutException was not thrown");
                 }

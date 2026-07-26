@@ -534,7 +534,10 @@ internal sealed class DiagnosticCommandExecutor
                         sb.AppendLine("  [grey]  #  ChunkId    TSN     UoW   Iso[/]");
                         sb.AppendLine("  [grey]───  ────────  ──────  ────  ───[/]");
 
-                        var enumerator = new RevisionEnumerator(ref compRevAccessor, compRevFirstChunkId, false, true);
+                        // The chain lock is now acquired by the enumerator itself, so it needs a deadline. This is an interactive
+                        // diagnostic dump, not a hot path — the standard revision-chain lock timeout is the right budget.
+                        var enumeratorWc = WaitContext.FromTimeout(TimeoutOptions.Current.RevisionChainLockTimeout);
+                        var enumerator = new RevisionEnumerator(ref compRevAccessor, compRevFirstChunkId, false, true, enumeratorWc);
                         int revIndex = 0;
                         while (enumerator.MoveNext())
                         {

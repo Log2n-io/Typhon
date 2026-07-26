@@ -24,6 +24,13 @@ public unsafe ref struct EntityRef
     internal readonly bool _writable;
     private fixed int _locations[16];
 
+    /// <summary>
+    /// Per-slot revision-chain ROOT chunk ids for Versioned slots (0 = not resolved via point-open). Set by <c>Transaction.ResolveEntity</c> so the
+    /// first <see cref="Write{T}(Comp{T})"/> can re-resolve the <c>CompRevInfo</c> with a direct (fast-path) chain walk instead of a PK-index lookup —
+    /// read-only resolves no longer populate <c>ComponentInfo.SingleCache</c> (deferred-insert: the cache holds only written/spawned entries).
+    /// </summary>
+    private fixed int _chainRoots[16];
+
     // ── Cluster storage fields (non-null when entity uses cluster storage) ──
     internal byte* _clusterBase;                    // Pointer to primary cluster chunk data; null = legacy path
     internal byte* _transientClusterBase;           // Pointer to TransientStore cluster base; null = no Transient segment (or pure-T where _clusterBase is TS)
@@ -55,6 +62,9 @@ public unsafe ref struct EntityRef
 
     /// <summary>Override the chunkId at a specific slot. Used by ResolveEntity for MVCC revision chain resolution.</summary>
     internal void SetLocation(int slot, int chunkId) => _locations[slot] = chunkId;
+
+    /// <summary>Record the revision-chain root chunk id for a Versioned slot (see <c>_chainRoots</c>).</summary>
+    internal void SetChainRoot(int slot, int chainRootChunkId) => _chainRoots[slot] = chainRootChunkId;
 
     /// <summary>Copy locations from a managed byte array.</summary>
     internal void CopyLocationsFrom(byte[] recordBytes, int componentCount)
@@ -171,7 +181,7 @@ public unsafe ref struct EntityRef
             if ((_archetype.VersionedSlotMask & (1 << slot)) != 0)
             {
                 var table = _engineState.SlotToComponentTable[slot];
-                var (newChunkId, rawPtr) = _accessor.EcsVersionedCopyOnWrite(typeof(T), _id, table);
+                var (newChunkId, rawPtr) = _accessor.EcsVersionedCopyOnWrite(typeof(T), _id, table, _chainRoots[slot]);
                 _locations[slot] = newChunkId;
                 return ref Unsafe.AsRef<T>((byte*)rawPtr + table.ComponentOverhead);
             }
@@ -234,7 +244,7 @@ public unsafe ref struct EntityRef
 
             if (table.StorageMode == StorageMode.Versioned)
             {
-                var (newChunkId, rawPtr) = _accessor.EcsVersionedCopyOnWrite(typeof(T), _id, table);
+                var (newChunkId, rawPtr) = _accessor.EcsVersionedCopyOnWrite(typeof(T), _id, table, _chainRoots[slot]);
                 _locations[slot] = newChunkId;
                 return ref Unsafe.AsRef<T>((byte*)rawPtr + table.ComponentOverhead);
             }
@@ -326,7 +336,7 @@ public unsafe ref struct EntityRef
             if ((_archetype.VersionedSlotMask & (1 << slot)) != 0)
             {
                 var table = _engineState.SlotToComponentTable[slot];
-                var (newChunkId, rawPtr) = _accessor.EcsVersionedCopyOnWrite(typeof(T), _id, table);
+                var (newChunkId, rawPtr) = _accessor.EcsVersionedCopyOnWrite(typeof(T), _id, table, _chainRoots[slot]);
                 _locations[slot] = newChunkId;
                 return ref Unsafe.AsRef<T>((byte*)rawPtr + table.ComponentOverhead);
             }
@@ -369,7 +379,7 @@ public unsafe ref struct EntityRef
 
             if (table.StorageMode == StorageMode.Versioned)
             {
-                var (newChunkId, rawPtr) = _accessor.EcsVersionedCopyOnWrite(typeof(T), _id, table);
+                var (newChunkId, rawPtr) = _accessor.EcsVersionedCopyOnWrite(typeof(T), _id, table, _chainRoots[slot]);
                 _locations[slot] = newChunkId;
                 return ref Unsafe.AsRef<T>((byte*)rawPtr + table.ComponentOverhead);
             }

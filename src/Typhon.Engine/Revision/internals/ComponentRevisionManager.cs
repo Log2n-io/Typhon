@@ -89,6 +89,10 @@ internal ref struct ComponentRevisionManager
         return new ElementRevisionHandle(ref accessor, curChunkId, false, (short)indexInChunk);
     }
 
+    // Chain-lock WaitContext for the internal cleanup/maintenance walks below. These are cold paths (deferred
+    // compaction, rollback) — not a transaction's per-entity hot path — so a freshly-armed per-call deadline is fine.
+    private static WaitContext CleanupLockWc => WaitContext.FromTimeout(TimeoutOptions.Current.RevisionChainLockTimeout);
+
     internal static unsafe void AddCompRev(ComponentInfo info, ref ComponentInfo.CompRevInfo compRevInfo, long tsn, ushort uowId, bool isDelete,
         bool lockAlreadyHeld = false)
     {
@@ -233,7 +237,7 @@ internal ref struct ComponentRevisionManager
         var chunksToFreeCount = 0;
 
         {
-            using var enumerator = new RevisionEnumerator(ref compRevTableAccessor, firstChunkId, false, true);
+            using var enumerator = new RevisionEnumerator(ref compRevTableAccessor, firstChunkId, false, true, CleanupLockWc);
             var prevChunkId = enumerator.IndexInChunk == 0 ? enumerator.CurChunkId : 0;
             var maxSkipCount = firstChunkHeader.ItemCount;
 
@@ -430,7 +434,7 @@ internal ref struct ComponentRevisionManager
         Span<int> contentToFree = (firstHeader.ItemCount < 128) ? stackalloc int[firstHeader.ItemCount] : new int[firstHeader.ItemCount];
         var contentCount = 0;
         {
-            using var enumerator = new RevisionEnumerator(ref compRevTableAccessor, firstChunkId, false, true);
+            using var enumerator = new RevisionEnumerator(ref compRevTableAccessor, firstChunkId, false, true, CleanupLockWc);
             while (enumerator.MoveNext())
             {
                 ref var el = ref enumerator.Current;
@@ -655,7 +659,7 @@ internal ref struct ComponentRevisionManager
     /// <returns>The absolute revision index if found; -1 otherwise.</returns>
     internal static short FindRevisionIndexByChunkId(ref ChunkAccessor<PersistentStore> compRevTableAccessor, int firstChunkId, int componentChunkId, long tsn = 0)
     {
-        using var enumerator = new RevisionEnumerator(ref compRevTableAccessor, firstChunkId, false, true);
+        using var enumerator = new RevisionEnumerator(ref compRevTableAccessor, firstChunkId, false, true, CleanupLockWc);
         while (enumerator.MoveNext())
         {
             if (componentChunkId != 0)
@@ -709,7 +713,7 @@ internal ref struct ComponentRevisionManager
         // Special case, the first revision is in the first chunk, we need to walk to the end of the chain and add a new chunk there
         if (firstHeader.FirstItemIndex < CompRevCountInRoot)
         {
-            using var enumerator = new RevisionEnumerator(ref compRevTableAccessor, firstChunkId, false, false);
+            using var enumerator = new RevisionEnumerator(ref compRevTableAccessor, firstChunkId, false, false, CleanupLockWc);
             enumerator.StepToChunk(firstHeader.ChainLength - 1, false);         // Walk to the last chunk in the chain
             enumerator.NextChunkId = compRevTable.AllocateChunk(true, info.CompRevTableAccessor.ChangeSet); // Allocated, clear content to make sure the next chunk ID is 0, set as next
             compRevTableAccessor.DirtyChunk(enumerator.CurChunkId);
@@ -719,7 +723,7 @@ internal ref struct ComponentRevisionManager
         {
             // Locate the first index in the chain, we add a chunk just before it
             var (firstChunkInChain, firstItemIndexInChunk) = CompRevStorageHeader.GetRevisionLocation(firstHeader.FirstItemIndex);
-            using var enumerator = new RevisionEnumerator(ref compRevTableAccessor, firstChunkId, false, false);
+            using var enumerator = new RevisionEnumerator(ref compRevTableAccessor, firstChunkId, false, false, CleanupLockWc);
             enumerator.StepToChunk(firstChunkInChain-1, false);                 // In a circular buffer, the chunk before the first is the last one
 
             // Get the ID of the first chunk in the chain

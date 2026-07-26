@@ -558,8 +558,9 @@ public unsafe partial class EntityAccessor
     // Virtual methods — overridden by Transaction
     // ═══════════════════════════════════════════════════════════════════════
 
-    /// <summary>Copy-on-write for Versioned components. Not supported in base EntityAccessor — throws.</summary>
-    internal virtual (int chunkId, nint ptr) EcsVersionedCopyOnWrite(Type compType, EntityId entityId, ComponentTable table)
+    /// <summary>Copy-on-write for Versioned components. Not supported in base EntityAccessor — throws.
+    /// <paramref name="chainRootChunkId"/> is the revision-chain root captured at resolve time (0 = unknown → PK-index fallback).</summary>
+    internal virtual (int chunkId, nint ptr) EcsVersionedCopyOnWrite(Type compType, EntityId entityId, ComponentTable table, int chainRootChunkId = 0)
         => throw new InvalidOperationException(
             "EntityAccessor does not support Versioned component writes. Use a full Transaction for systems that modify Versioned components.");
 

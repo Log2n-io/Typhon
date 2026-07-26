@@ -56,6 +56,11 @@ public unsafe partial class Transaction : EntityAccessor
     // to flush in a single batch (one lock acquire instead of N). Never re-allocated after warmup.
     private List<DeferredCleanupManager.CleanupEntry> _deferredEnqueueBatch;
 
+    // Composed once per transaction (lazily), reused for every revision-chain lock acquisition on the read/resolve path
+    // so Stopwatch.GetTimestamp() is not re-armed per Versioned slot per entity. Reset in Init(). See ChainLockWaitContext().
+    private WaitContext _chainLockWc;
+    private bool _chainLockWcResolved;
+
     // Hoisted accessors for batch index maintenance (set per component type during Commit)
     private ChunkAccessor<PersistentStore>[] _batchIndexAccessors;
     private ChunkAccessor<PersistentStore> _batchTailAccessor;
@@ -175,6 +180,7 @@ public unsafe partial class Transaction : EntityAccessor
         _isDisposed = false;
         IsReadOnly = readOnly;
         OwningUnitOfWork = uow;
+        _chainLockWcResolved = false;   // recompute the composed chain-lock deadline for this logical transaction
         _owningThreadId = Environment.CurrentManagedThreadId;   // #422: affinity field promoted out of #if DEBUG (see EntityAccessor)
         _committedOperationCount = null;
         _deletedComponentCount = 0;
@@ -900,6 +906,25 @@ public unsafe partial class Transaction : EntityAccessor
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static WaitContext ComposeWaitContext(ref UnitOfWorkContext ctx, TimeSpan subsystemTimeout)
         => WaitContext.FromDeadline(Deadline.Min(ctx.WaitContext.Deadline, Deadline.FromTimeout(subsystemTimeout)));
+
+    /// <summary>
+    /// The <see cref="WaitContext"/> used to acquire a revision-chain lock while READING (resolve/walk), composed ONCE
+    /// per transaction as the tighter of the owning UoW deadline and <c>RevisionChainLockTimeout</c>. Caching it collapses
+    /// the per-walk <c>Stopwatch.GetTimestamp()</c> — previously paid for every Versioned slot of every entity opened — to
+    /// a single QPC per transaction. The deadline is only consulted under lock contention, so a transaction-scoped budget
+    /// is an adequate (and stricter) liveness backstop than a fresh per-acquisition one.
+    /// </summary>
+    internal WaitContext ChainLockWaitContext()
+    {
+        if (!_chainLockWcResolved)
+        {
+            _chainLockWc = OwningUnitOfWork != null
+                ? OwningUnitOfWork.CreateContext(TimeoutOptions.Current.RevisionChainLockTimeout).WaitContext
+                : WaitContext.FromTimeout(TimeoutOptions.Current.RevisionChainLockTimeout);
+            _chainLockWcResolved = true;
+        }
+        return _chainLockWc;
+    }
 
     /// <summary>
     /// Rolls back a single component revision: frees content chunks, voids revision entries, and enqueues for deferred cleanup.

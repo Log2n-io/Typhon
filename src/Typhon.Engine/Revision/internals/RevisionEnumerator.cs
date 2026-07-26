@@ -65,7 +65,7 @@ internal ref struct RevisionEnumerator : IDisposable
     }
 
     public unsafe RevisionEnumerator(ref ChunkAccessor<PersistentStore> compRevTableAccessor, int compRevFirstChunkId, bool exclusiveAccess, bool goToFirstItem,
-        bool skipTimeout = false)
+        WaitContext lockWc)
     {
         _compRevTableAccessor = ref compRevTableAccessor;
         _exclusiveAccess = exclusiveAccess;
@@ -74,9 +74,9 @@ internal ref struct RevisionEnumerator : IDisposable
         _ownsLock = !_header.Control.IsLockedByCurrentThread;
         if (_ownsLock)
         {
-            // skipTimeout: PTA read path — chain lock is uncontended, use infinite deadline to skip Stopwatch.GetTimestamp overhead
-            var wc = skipTimeout ? new WaitContext(Deadline.Infinite, default) : WaitContext.FromTimeout(TimeoutOptions.Current.RevisionChainLockTimeout);
-            if (!_header.Control.Enter(_exclusiveAccess, ref wc))
+            // The chain-lock WaitContext is supplied by the caller — composed ONCE per transaction for reads, or the
+            // infinite PTA context — so Stopwatch.GetTimestamp() is not re-armed per walk. Only consulted under contention.
+            if (!_header.Control.Enter(_exclusiveAccess, ref lockWc))
             {
                 ThrowHelper.ThrowLockTimeout("RevisionChain/Enumerate", TimeoutOptions.Current.RevisionChainLockTimeout);
             }
