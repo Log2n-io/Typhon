@@ -256,7 +256,7 @@ Lives inside `DatabaseEngineOptions` and is consumed by the components at constr
 |---|---:|---|
 | `MaxActiveTransactions` | `1000` | Hard limit on concurrent transactions; `FailFast` beyond |
 | `TransactionPoolSize` | `16` | Pooled `Transaction` objects; overflow → allocate (`Degrade`) |
-| `WalRingBufferSizeBytes` | `8 << 20` (**8 MB**, not 4 MB) | In-memory WAL stage |
+| `WalRingBufferSizeBytes` | `64 << 20` (**64 MB** total, 2 × 32 MB halves) | In-memory WAL stage; sized for tail latency (#559) |
 | `WalBackPressureThreshold` | `0.8` | At this fill ratio, commits start blocking |
 | `WalMaxSegmentSizeBytes` | `64L << 20` (**64 MB**) | Single segment file size |
 | `WalMaxSegments` | `4` | Segments before forced checkpoint |

@@ -37,7 +37,7 @@ var resourceOptions = new ResourceOptions
 {
     PageCachePages         = 262144,      // 2 GB
     MaxActiveTransactions  = 1000,
-    WalRingBufferSizeBytes = 8 << 20,     // 8 MB
+    WalRingBufferSizeBytes = 8 << 20,     // 8 MB — an explicit OVERRIDE; the default is 64 MB
 };
 resourceOptions.Validate();               // throws InvalidOperationException if over budget — call it yourself
 

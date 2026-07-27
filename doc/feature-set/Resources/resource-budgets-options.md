@@ -38,7 +38,7 @@ services.AddDatabaseEngine(opt =>
     {
         PageCachePages = 262144,              // 2 GB (8 KB/page)
         MaxActiveTransactions = 1000,
-        WalRingBufferSizeBytes = 8 << 20,     // 8 MB
+        WalRingBufferSizeBytes = 64 << 20,    // 64 MB (default — 2 × 32 MB halves)
         WalMaxSegments = 4,
         WalMaxSegmentSizeBytes = 64L << 20,   // 64 MB each
         ShadowBufferPages = 512,              // 4 MB
@@ -56,7 +56,7 @@ services.AddDatabaseEngine(opt =>
 | `MaxPageCachePages` | 16384 (128 MB) | Reserved for future dynamic cache sizing; not enforced today |
 | `MaxActiveTransactions` | 1000 | `CreateTransaction` throws `ResourceExhaustedException` beyond this |
 | `TransactionPoolSize` | 16 | Pooled `Transaction` objects; pool miss allocates new (Degrade) |
-| `WalRingBufferSizeBytes` | 8 MB | Commit threads block once the ring drains slower than it fills |
+| `WalRingBufferSizeBytes` | 64 MB | Total pinned; 2 × 32 MB halves. Commit threads block once the ring drains slower than it fills. Sized for tail latency — lower for memory-constrained deployments |
 | `WalBackPressureThreshold` | 0.8 | Fraction of ring capacity where back-pressure kicks in |
 | `WalMaxSegmentSizeBytes` / `WalMaxSegments` | 64 MB / 4 | WAL segment file sizing; exhausting all forces a checkpoint |
 | `CheckpointMaxDirtyPages` | 10000 | Dirty-page threshold that forces an early checkpoint |
