@@ -802,6 +802,22 @@ public partial class DatabaseEngine
                 table.PreviousTickDirtyBitmap ??= Array.Empty<long>();
             }
 
+            // #568 — the declared durability window. Checkpoint archetypes emit NO fence WAL records; their SingleVersion values reach disk through the
+            // checkpoint, the same path cluster STRUCTURE has always used, so a crash costs up to one checkpoint interval of freshness (not existence).
+            //
+            // The gate sits HERE, after the dormancy sweep, the dirty-ring archive, PreviousTickDirtySnapshot and the ComponentTable flag propagation above,
+            // and NOT at the top of the method. The dirty bitmap has eleven consumers and WAL emit is one of them: zone-map recompute, migration detect and
+            // execute, AABB refresh, dormancy, the dirty ring, and both change-filtered dispatch surfaces all read it. Only the emission is optional.
+            //
+            // ClusterDurabilityTests pins both halves — the emission stops, and every other consumer keeps being fed.
+            //
+            // Versioned components are unaffected in either setting: their revision chain is logged at commit and is authoritative (see skipMask below), so
+            // no ClusterDurability value can lose a Versioned write.
+            if (meta.ClusterDurability == ClusterDurability.Checkpoint)
+            {
+                return highestLSN;
+            }
+
             var layout = clusterState.Layout;
             // Slots excluded from fence emission:
             //   Transient — never persisted at all.
@@ -838,10 +854,11 @@ public partial class DatabaseEngine
 
             var entityIdsOffset = layout.EntityIdsOffset;
 
-            // #559 §4.5 — narrow the emitted columns to the component slots actually written this tick. The per-cluster mask is
-            // fail-safe: a writer that did not identify its component recorded AllSlotsWritten, so that cluster emits everything.
-            // Clusters that share the same written-slot mask (the overwhelmingly common case — all clusters of an archetype are
-            // driven by the same systems) share one column set, so the descriptor arrays are computed once per distinct mask.
+            // #559 §4.5 — narrow the emitted columns to the component slots actually written this tick. The mask is a single union per ARCHETYPE, not one per
+            // cluster: per-cluster was implemented and measured first and is slower (+2.1 ms/tick median, ~10 ms spread) because the array is written by every
+            // worker on every dirty-marking write and false-shares. The emitter only ever consumes the union, so the finer granularity bought nothing it could
+            // use — hence one column set for all clusters of the archetype. The union is fail-safe: a writer that did not identify its component recorded
+            // AllSlotsWritten, so the archetype falls back to emitting everything.
             var fenceWritten = clusterState.FenceWrittenSlots;
             var durableMask = 0;
             for (var d = 0; d < durableCount; d++)

@@ -127,8 +127,14 @@ public struct Intent
 /// combining a SingleVersion pose + spatial footprint + HAM pools + faction (the hot, parallel, SoA sim tier), a
 /// Versioned wallet (the ACID economy), and a Transient wander intent. Having SingleVersion slots makes it
 /// cluster-eligible, so the engine stores it SoA and the tick systems iterate it lock-free. Its durable identity is its
-/// type name ("Character"); the engine assigns the catalog + routing ids automatically (feature #514 — no author-set id).</summary>
-[Archetype]
+/// type name ("Character"); the engine assigns the catalog + routing ids automatically (feature #514 — no author-set id).
+///
+/// <para><b>Why <see cref="ClusterDurability.Checkpoint"/>:</b> a character's pose, HAM pools and faction are simulation state — regenerated every tick by
+/// the systems that own them. Logging all of it to the WAL at every tick fence costs about half the tick and buys a freshness guarantee this shard does not
+/// need: after a crash, characters reappearing where they stood at the last checkpoint (30 s) is indistinguishable from the shard having been paused. The
+/// <see cref="Wallet"/> is the counter-example and is deliberately <see cref="StorageMode.Versioned"/> — credits are ACID and unaffected by this setting,
+/// because a Versioned component's revision chain is logged at commit and is authoritative regardless of the archetype's cluster durability.</para></summary>
+[Archetype(ClusterDurability = ClusterDurability.Checkpoint)]
 public sealed partial class Character : Archetype<Character>
 {
     public static readonly Comp<Transform> Transform = Register<Transform>();

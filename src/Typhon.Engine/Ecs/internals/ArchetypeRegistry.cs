@@ -352,6 +352,9 @@ internal static class ArchetypeRegistry
             Name = attr.Name ?? archetypeType.Name,
             PreviousName = attr.PreviousName,
             Alias = attr.Alias,
+            // #568: declared per-archetype durability window for SingleVersion cluster values. Not inherited from the parent archetype — a child owns its own
+            // cluster segment and its own fence work item, so the setting is meaningful (and independently choosable) per concrete archetype.
+            ClusterDurability = attr.ClusterDurability,
             ComponentCount = totalComponentCount,
             ParentArchetypeId = parentArchetypeId,
             ArchetypeType = archetypeType,

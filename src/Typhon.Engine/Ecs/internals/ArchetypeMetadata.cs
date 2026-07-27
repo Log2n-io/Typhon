@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
+using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Internals;
 
@@ -46,6 +47,12 @@ internal class ArchetypeMetadata
 
     /// <summary>Optional human-readable label from <c>[Archetype(Alias = ...)]</c>; null when unset (callers fall back to the type name).</summary>
     public string Alias;
+
+    /// <summary>
+    /// Durability window for this archetype's SingleVersion cluster values, from <c>[Archetype(ClusterDurability = ...)]</c> (#568). Read by the tick fence to
+    /// decide whether to emit WAL records for dirty entities; every other fence duty (dormancy, AABB, dirty ring, change-filtered dispatch) runs regardless.
+    /// </summary>
+    public ClusterDurability ClusterDurability;
 
     // ═══════════════════════════════════════════════════════════════════════
     // Slot mapping
