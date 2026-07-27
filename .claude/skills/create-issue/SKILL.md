@@ -115,10 +115,13 @@ gh project item-edit --project-id PVT_kwDOEcGj5M4Bb-8P --id <ITEM_ID> \
   --field-id PVTSSF_lADOEcGj5M4Bb-8PzhWrH1A --single-select-option-id f75ad846
 ```
 
-### Step 6 (optional): Set Area / Product / Milestone
+### Step 6 (optional): Set Area / Product / Claude Code Discussion / Milestone
 
 - **Milestone** (release maturity): `gh issue edit <number> --repo log2n-io/Typhon --milestone "alpha-1"`
-- **Area / Product** are **issue-level fields** (the same ones Epics carry — e.g. #146 = Area:Execution, Product:Engine), **not** the now-empty project single-selects. `gh` has no dedicated flag yet; set them via the GitHub web UI, or via GraphQL if scripting. Match the parent Epic's values when linking under one.
+- **Area / Product** are **issue-level fields** (the same ones Epics carry — e.g. #146 = Area:Execution, Product:Engine), **not** the now-empty project single-selects. Set them with `setIssueFieldValue` — **full recipe + all field/option IDs in [`../_helpers.md` § "Issue-level custom fields"](../_helpers.md)**. Match the parent Epic's values when linking under one.
+- **Claude Code Discussion** (`IFT_kgDOAqrjLw`, a **text** field): set it to this conversation's
+  `https://claude.ai/code/session_…` URL whenever the issue came out of a Claude Code session. Available on every
+  Issue Type **except `Task`** — skip it there. Same `setIssueFieldValue` mutation, using `textValue`.
 
 ### Step 7 (optional): Link under a parent Epic or Feature (native sub-issue)
 
