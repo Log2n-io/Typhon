@@ -14,11 +14,32 @@ namespace Typhon.Engine;
 public partial class DatabaseEngine
 {
     /// <summary>
-    /// Recompute zone maps for all dirty clusters in the dirty bitmap snapshot.
-    /// Each dirty cluster gets a full min/max scan for each indexed field.
+    /// Recompute zone maps for all dirty clusters in the dirty bitmap snapshot. Each dirty cluster gets a full min/max scan for each indexed field whose
+    /// component was actually written this tick — a field nobody wrote cannot have changed its min/max, so rescanning it reproduces the same two values.
     /// </summary>
+    /// <remarks>
+    /// The narrowing reuses <see cref="ArchetypeClusterState.FenceWrittenSlots"/> (#559 §4.5), snapshotted by the caller immediately before this call. Without
+    /// it an archetype whose indexed field is stable — the common shape: index the classification, scan the value that churns — rescans every dirty cluster
+    /// every tick to recompute an identical answer. On the guide sample (20 001 entities, one indexed field the tick systems never touch) that was ~80 % of
+    /// the fence's Prep phase.
+    /// <para>
+    /// Fail-safe by construction: the union is <see cref="ArchetypeClusterState.AllSlotsWritten"/> when any writer did not identify its component, so an
+    /// unidentified write rescans everything. The failure direction is redundant work, never a stale zone map.
+    /// </para>
+    /// <para>
+    /// Migration does not rely on this pass — <c>ExecuteMigrations</c> widens the destination zone map directly as it moves each entity (see the
+    /// <c>ZoneMap?.Widen(dstChunkId, ...)</c> call below), so a cluster that only gained entities by migration is correct without a rescan here.
+    /// </para>
+    /// </remarks>
     private unsafe void RecomputeClusterZoneMaps(ArchetypeClusterState clusterState, long[] dirtyBits)
     {
+        // Nothing durable-or-indexed was written this tick ⇒ every zone map still describes its cluster exactly. Bail before renting an accessor.
+        var writtenSlots = clusterState.FenceWrittenSlots;
+        if (writtenSlots == 0)
+        {
+            return;
+        }
+
         var clusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor();
         try
         {
@@ -43,6 +64,14 @@ public partial class DatabaseEngine
                 for (var s = 0; s < ixSlots.Length; s++)
                 {
                     ref var ixSlot = ref ixSlots[s];
+
+                    // Skip a component nobody wrote this tick: its values are unchanged, so its zone map's min/max is unchanged. AllSlotsWritten (-1) has
+                    // every bit set, so the fail-safe path takes this branch for every slot and rescans exactly as before.
+                    if ((writtenSlots & (1 << ixSlot.Slot)) == 0)
+                    {
+                        continue;
+                    }
+
                     for (var f = 0; f < ixSlot.Fields.Length; f++)
                     {
                         ixSlot.Fields[f].ZoneMap?.Recompute(clusterChunkId, clusterBase, clusterState.Layout, ixSlot.Slot, ixSlot.Fields[f].FieldOffset);
