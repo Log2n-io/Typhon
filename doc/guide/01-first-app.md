@@ -10,7 +10,9 @@ This chapter gets a working Typhon program in front of you. You'll declare a tin
 
 By the end you'll recognise the five things every Typhon program does: **declare → open → write → read → query.**
 
-> 📦 **This is the scaffold.** The model below is exactly what `typhon new <name>` emits (see [getting started](getting-started.md)) and what the runnable [`example/`](https://github.com/Log2n-io/Typhon/tree/main/doc/guide/example) project runs. You can type it out, or generate it and read along.
+> 📦 **This is the scaffold's data model.** The components and the `Character` archetype below are the same ones `typhon new <name>` emits (see [getting started](getting-started.md)) and that the runnable [`example/`](https://github.com/Log2n-io/Typhon/tree/main/doc/guide/example) project runs. You can type it out, or generate it and read along.
+>
+> Two differences from the generated project, both cosmetic: this chapter shows everything as **one file** so it can be read top to bottom, whereas `typhon new` splits it into `Character.cs` (the model), `Systems.cs` (the tick loop) and `Program.cs`. And the namespace here is `ShardGuide`; the generated files use `Typhon.Samples.Swg.Shard` for the model and `SwgGuide` for the systems, because both are embedded verbatim from this repository.
 
 ---
 
