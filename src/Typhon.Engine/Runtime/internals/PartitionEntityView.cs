@@ -20,6 +20,7 @@ namespace Typhon.Engine.Internals;
 /// </summary>
 internal sealed unsafe class PartitionEntityView : IReadOnlyCollection<EntityId>, IEnumerator<EntityId>
 {
+    // KEEP(ptr): raw byte* field sourced from HashMap.EntriesPtr; a Span cannot be a field on this non-ref enumerator class.
     private byte* _entries;
     private int _start;
     private int _end;

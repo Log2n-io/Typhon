@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Threading;
 
 namespace Typhon.Engine.Internals;
@@ -19,26 +20,26 @@ internal unsafe partial class SpatialRTree<TStore>
         long entityIdForTrace = 0;
         if (TelemetryConfig.SpatialRTreeRemoveActive)
         {
-            byte* leafForTrace = accessor.GetChunkAddress(leafChunkId);
-            entityIdForTrace = SpatialNodeHelper.ReadLeafEntityId(leafForTrace, slotIndex, _desc);
+            ref byte leafForTrace = ref Unsafe.AsRef<byte>(accessor.GetChunkAddress(leafChunkId));
+            entityIdForTrace = SpatialNodeHelper.ReadLeafEntityId(ref leafForTrace, slotIndex, _desc);
         }
         using var removeSpan = TyphonEvent.BeginSpatialRTreeRemove(entityIdForTrace);
 
-        byte* leafBase = accessor.GetChunkAddress(leafChunkId, true);
-        SpinWriteLock(leafBase, out var latch);
+        ref byte leafBase = ref Unsafe.AsRef<byte>(accessor.GetChunkAddress(leafChunkId, true));
+        SpinWriteLock(ref leafBase, out var latch);
 
-        int count = SpatialNodeHelper.GetCount(leafBase);
+        int count = SpatialNodeHelper.GetCount(ref leafBase);
         int lastIndex = count - 1;
         long swappedEntityId = 0;
 
         if (slotIndex != lastIndex)
         {
-            SpatialNodeHelper.CopyLeafEntry(leafBase, lastIndex, slotIndex, _desc);
-            swappedEntityId = SpatialNodeHelper.ReadLeafEntityId(leafBase, slotIndex, _desc);
+            SpatialNodeHelper.CopyLeafEntry(ref leafBase, lastIndex, slotIndex, _desc);
+            swappedEntityId = SpatialNodeHelper.ReadLeafEntityId(ref leafBase, slotIndex, _desc);
         }
 
-        SpatialNodeHelper.SetCount(leafBase, lastIndex);
-        SpatialNodeHelper.RefitLeafMBR(leafBase, _desc);
+        SpatialNodeHelper.SetCount(ref leafBase, lastIndex);
+        SpatialNodeHelper.RefitLeafMBR(ref leafBase, _desc);
         latch.WriteUnlock();
 
         Interlocked.Decrement(ref _entityCount);
@@ -67,30 +68,30 @@ internal unsafe partial class SpatialRTree<TStore>
     /// </summary>
     private void RemoveEmptyLeaf(int leafChunkId, ref ChunkAccessor<TStore> accessor)
     {
-        byte* leafBase = accessor.GetChunkAddress(leafChunkId);
-        int parentChunkId = SpatialNodeHelper.GetParentChunkId(leafBase);
+        ref byte leafBase = ref Unsafe.AsRef<byte>(accessor.GetChunkAddress(leafChunkId));
+        int parentChunkId = SpatialNodeHelper.GetParentChunkId(ref leafBase);
 
-        byte* parentBase = accessor.GetChunkAddress(parentChunkId, true);
-        SpinWriteLock(parentBase, out var parentLatch);
+        ref byte parentBase = ref Unsafe.AsRef<byte>(accessor.GetChunkAddress(parentChunkId, true));
+        SpinWriteLock(ref parentBase, out var parentLatch);
 
         // Find and remove the entry pointing to this leaf
-        int parentCount = SpatialNodeHelper.GetCount(parentBase);
-        int leafIdx = FindChildIndex(parentBase, leafChunkId, parentCount);
+        int parentCount = SpatialNodeHelper.GetCount(ref parentBase);
+        int leafIdx = FindChildIndex(ref parentBase, leafChunkId, parentCount);
 
         if (leafIdx >= 0)
         {
             int lastIdx = parentCount - 1;
             if (leafIdx != lastIdx)
             {
-                SpatialNodeHelper.CopyInternalEntry(parentBase, lastIdx, leafIdx, _desc);
+                SpatialNodeHelper.CopyInternalEntry(ref parentBase, lastIdx, leafIdx, _desc);
 
                 // Update the moved child's parent pointer (it stays in the same parent)
-                int movedChildId = SpatialNodeHelper.ReadInternalChildId(parentBase, leafIdx, _desc);
+                int movedChildId = SpatialNodeHelper.ReadInternalChildId(ref parentBase, leafIdx, _desc);
                 // Parent pointer is unchanged since the child is still in the same parent node
             }
-            SpatialNodeHelper.SetCount(parentBase, lastIdx);
-            SpatialNodeHelper.RefitInternalMBR(parentBase, _desc);
-            RefitInternalUnionMask(parentBase, ref accessor);
+            SpatialNodeHelper.SetCount(ref parentBase, lastIdx);
+            SpatialNodeHelper.RefitInternalMBR(ref parentBase, _desc);
+            RefitInternalUnionMask(ref parentBase, ref accessor);
         }
 
         parentLatch.WriteUnlock();
@@ -108,10 +109,10 @@ internal unsafe partial class SpatialRTree<TStore>
         {
             // Root has single child: collapse (promote child to root)
             int remainingChild = SpatialNodeHelper.ReadInternalChildId(
-                accessor.GetChunkAddress(parentChunkId), 0, _desc);
+                ref Unsafe.AsRef<byte>(accessor.GetChunkAddress(parentChunkId)), 0, _desc);
 
-            byte* newRootBase = accessor.GetChunkAddress(remainingChild, true);
-            SpatialNodeHelper.SetParentChunkId(newRootBase, 0);
+            ref byte newRootBase = ref Unsafe.AsRef<byte>(accessor.GetChunkAddress(remainingChild, true));
+            SpatialNodeHelper.SetParentChunkId(ref newRootBase, 0);
 
             _segment.FreeChunk(_rootChunkId);
             Interlocked.Decrement(ref _nodeCount);
@@ -126,11 +127,11 @@ internal unsafe partial class SpatialRTree<TStore>
     }
 
     /// <summary>Find the index of a child chunk ID in an internal node's entries.</summary>
-    private int FindChildIndex(byte* nodeBase, int childChunkId, int count)
+    private int FindChildIndex(ref byte nodeBase, int childChunkId, int count)
     {
         for (int i = 0; i < count; i++)
         {
-            if (SpatialNodeHelper.ReadInternalChildId(nodeBase, i, _desc) == childChunkId)
+            if (SpatialNodeHelper.ReadInternalChildId(ref nodeBase, i, _desc) == childChunkId)
             {
                 return i;
             }

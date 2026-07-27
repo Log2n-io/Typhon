@@ -32,6 +32,10 @@ namespace Typhon.Engine.Internals;
 [StructLayout(LayoutKind.Sequential)]
 public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, IPageStore
 {
+    // KEEP(ptr): raw page-addressing layer — _baseAddresses holds a raw data address per cached slot and _memPagesBaseAddr
+    // is a byte* into pinned page memory (Span/ref cannot be struct fields); SIMD slot search indexes through them. The
+    // public surface (GetChunk<T> / GetChunkAsSpan) is already ref/span.
+
     // === SOA layout for SIMD search (2 cache lines) ===
     private fixed int _pageIndices[32];        // 128 bytes — segment page indices, SIMD searchable
 

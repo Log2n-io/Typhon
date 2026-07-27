@@ -1,4 +1,5 @@
 using System;
+using System.Runtime.CompilerServices;
 using System.Threading;
 
 namespace Typhon.Engine.Internals;
@@ -16,10 +17,10 @@ internal unsafe partial class SpatialRTree<TStore>
         var splitScope = TyphonEvent.BeginSpatialRTreeNodeSplit(0);
         try
         {
-            byte* leafBase = accessor.GetChunkAddress(fullLeafChunkId, true);
-            SpinWriteLock(leafBase, out var leafLatch);
+            ref byte leafBase = ref Unsafe.AsRef<byte>(accessor.GetChunkAddress(fullLeafChunkId, true));
+            SpinWriteLock(ref leafBase, out var leafLatch);
 
-            int leafCount = SpatialNodeHelper.GetCount(leafBase);
+            int leafCount = SpatialNodeHelper.GetCount(ref leafBase);
             int totalEntries = leafCount + 1;
 
             // Gather all entries (existing + new) into temporary stackalloc buffers
@@ -33,10 +34,10 @@ internal unsafe partial class SpatialRTree<TStore>
 
             for (int i = 0; i < leafCount; i++)
             {
-                SpatialNodeHelper.ReadLeafEntryCoords(leafBase, i, tempCoords.Slice(i * _desc.CoordCount, _desc.CoordCount), _desc);
-                tempIds[i] = SpatialNodeHelper.ReadLeafEntityId(leafBase, i, _desc);
-                tempCompChunkIds[i] = SpatialNodeHelper.ReadLeafCompChunkId(leafBase, i, _desc);
-                tempCategoryMasks[i] = SpatialNodeHelper.ReadLeafCategoryMask(leafBase, i, _desc);
+                SpatialNodeHelper.ReadLeafEntryCoords(ref leafBase, i, tempCoords.Slice(i * _desc.CoordCount, _desc.CoordCount), _desc);
+                tempIds[i] = SpatialNodeHelper.ReadLeafEntityId(ref leafBase, i, _desc);
+                tempCompChunkIds[i] = SpatialNodeHelper.ReadLeafCompChunkId(ref leafBase, i, _desc);
+                tempCategoryMasks[i] = SpatialNodeHelper.ReadLeafCategoryMask(ref leafBase, i, _desc);
             }
             coords.CopyTo(tempCoords.Slice(leafCount * _desc.CoordCount, _desc.CoordCount));
             tempIds[leafCount] = entityId;
@@ -47,24 +48,24 @@ internal unsafe partial class SpatialRTree<TStore>
 
             // Allocate right sibling — NOTE: AllocNode may trigger segment Grow(),
             // invalidating all previously obtained byte* pointers. Re-obtain after.
-            int parentChunkId = SpatialNodeHelper.GetParentChunkId(leafBase);
+            int parentChunkId = SpatialNodeHelper.GetParentChunkId(ref leafBase);
             int rightChunkId = AllocNode(true, parentChunkId, ref accessor, changeSet);
             Interlocked.Increment(ref _nodeCount);
 
             // Re-obtain pointers after potential segment growth
-            leafBase = accessor.GetChunkAddress(fullLeafChunkId, true);
-            leafLatch = GetLatch(leafBase);
-            byte* rightBase = accessor.GetChunkAddress(rightChunkId, true);
+            leafBase = ref Unsafe.AsRef<byte>(accessor.GetChunkAddress(fullLeafChunkId, true));
+            leafLatch = GetLatch(ref leafBase);
+            ref byte rightBase = ref Unsafe.AsRef<byte>(accessor.GetChunkAddress(rightChunkId, true));
 
             // Scatter entries to left and right using bestPerm (includes componentChunkIds and categoryMasks)
-            ScatterLeafEntries(leafBase, fullLeafChunkId, tempCoords, tempIds, tempCompChunkIds, tempCategoryMasks, bestPerm, 0, splitPos);
-            SpatialNodeHelper.SetCount(leafBase, splitPos);
-            SpatialNodeHelper.RefitLeafMBR(leafBase, _desc);
+            ScatterLeafEntries(ref leafBase, fullLeafChunkId, tempCoords, tempIds, tempCompChunkIds, tempCategoryMasks, bestPerm, 0, splitPos);
+            SpatialNodeHelper.SetCount(ref leafBase, splitPos);
+            SpatialNodeHelper.RefitLeafMBR(ref leafBase, _desc);
 
             int rightCount = totalEntries - splitPos;
-            ScatterLeafEntries(rightBase, rightChunkId, tempCoords, tempIds, tempCompChunkIds, tempCategoryMasks, bestPerm, splitPos, totalEntries);
-            SpatialNodeHelper.SetCount(rightBase, rightCount);
-            SpatialNodeHelper.RefitLeafMBR(rightBase, _desc);
+            ScatterLeafEntries(ref rightBase, rightChunkId, tempCoords, tempIds, tempCompChunkIds, tempCategoryMasks, bestPerm, splitPos, totalEntries);
+            SpatialNodeHelper.SetCount(ref rightBase, rightCount);
+            SpatialNodeHelper.RefitLeafMBR(ref rightBase, _desc);
 
             leafLatch.WriteUnlock();
 
@@ -98,18 +99,18 @@ internal unsafe partial class SpatialRTree<TStore>
     /// Writes coords, entityIds, and componentChunkIds. If <see cref="BackPointerSegment"/> is set,
     /// updates back-pointers directly using the stored componentChunkIds (O(1) per entry, no EntityMap lookup).
     /// </summary>
-    private void ScatterLeafEntries(byte* nodeBase, int leafChunkId, Span<double> allCoords, Span<long> allIds, Span<int> allCompChunkIds,
+    private void ScatterLeafEntries(ref byte nodeBase, int leafChunkId, Span<double> allCoords, Span<long> allIds, Span<int> allCompChunkIds,
         Span<uint> allCategoryMasks, Span<int> perm, int permStart, int permEnd)
     {
         for (int i = permStart; i < permEnd; i++)
         {
             int src = perm[i];
             int dst = i - permStart;
-            SpatialNodeHelper.WriteLeafEntryCoords(nodeBase, dst,
+            SpatialNodeHelper.WriteLeafEntryCoords(ref nodeBase, dst,
                 allCoords.Slice(src * _desc.CoordCount, _desc.CoordCount), _desc);
-            SpatialNodeHelper.WriteLeafEntityId(nodeBase, dst, allIds[src], _desc);
-            SpatialNodeHelper.WriteLeafCompChunkId(nodeBase, dst, allCompChunkIds[src], _desc);
-            SpatialNodeHelper.WriteLeafCategoryMask(nodeBase, dst, allCategoryMasks[src], _desc);
+            SpatialNodeHelper.WriteLeafEntityId(ref nodeBase, dst, allIds[src], _desc);
+            SpatialNodeHelper.WriteLeafCompChunkId(ref nodeBase, dst, allCompChunkIds[src], _desc);
+            SpatialNodeHelper.WriteLeafCategoryMask(ref nodeBase, dst, allCategoryMasks[src], _desc);
         }
 
         // Update back-pointers for all scattered entries using stored componentChunkIds
@@ -336,40 +337,41 @@ internal unsafe partial class SpatialRTree<TStore>
             int parentChunkId = path.ChunkIds[level];
             int leftIdx = path.ChildIndices[level];
 
-            byte* parentBase = accessor.GetChunkAddress(parentChunkId, true);
-            SpinWriteLock(parentBase, out var parentLatch);
+            ref byte parentBase = ref Unsafe.AsRef<byte>(accessor.GetChunkAddress(parentChunkId, true));
+            SpinWriteLock(ref parentBase, out var parentLatch);
 
             // Update left child's MBR in parent
-            byte* leftBase = accessor.GetChunkAddress(leftChunkId);
+            ref byte leftBase = ref Unsafe.AsRef<byte>(accessor.GetChunkAddress(leftChunkId));
             for (int c = 0; c < _desc.CoordCount; c++)
             {
-                SpatialNodeHelper.WriteInternalCoord(parentBase, leftIdx, c, SpatialNodeHelper.ReadNodeMBRCoord(leftBase, c, _desc), _desc);
+                SpatialNodeHelper.WriteInternalCoord(ref parentBase, leftIdx, c,
+                    SpatialNodeHelper.ReadNodeMBRCoord(ref leftBase, c, _desc), _desc);
             }
 
-            int parentCount = SpatialNodeHelper.GetCount(parentBase);
+            int parentCount = SpatialNodeHelper.GetCount(ref parentBase);
 
             if (parentCount < _desc.InternalCapacity)
             {
                 // Room in parent: insert right child at end
-                WriteInternalEntry(parentBase, parentCount, childToInsert, ref accessor);
-                SpatialNodeHelper.SetCount(parentBase, parentCount + 1);
+                WriteInternalEntry(ref parentBase, parentCount, childToInsert, ref accessor);
+                SpatialNodeHelper.SetCount(ref parentBase, parentCount + 1);
 
                 // Update right child's parent pointer
-                byte* rightBase = accessor.GetChunkAddress(childToInsert, true);
-                SpatialNodeHelper.SetParentChunkId(rightBase, parentChunkId);
+                ref byte rightBase = ref Unsafe.AsRef<byte>(accessor.GetChunkAddress(childToInsert, true));
+                SpatialNodeHelper.SetParentChunkId(ref rightBase, parentChunkId);
 
-                SpatialNodeHelper.RefitInternalMBR(parentBase, _desc);
-                RefitInternalUnionMask(parentBase, ref accessor);
+                SpatialNodeHelper.RefitInternalMBR(ref parentBase, _desc);
+                RefitInternalUnionMask(ref parentBase, ref accessor);
                 parentLatch.WriteUnlock();
 
                 // Refit remaining ancestors
                 for (int upper = level - 1; upper >= 0; upper--)
                 {
                     int ancestorChunkId = path.ChunkIds[upper];
-                    byte* ancestorBase = accessor.GetChunkAddress(ancestorChunkId, true);
-                    SpinWriteLock(ancestorBase, out var ancestorLatch);
-                    SpatialNodeHelper.RefitInternalMBR(ancestorBase, _desc);
-                    RefitInternalUnionMask(ancestorBase, ref accessor);
+                    ref byte ancestorBase = ref Unsafe.AsRef<byte>(accessor.GetChunkAddress(ancestorChunkId, true));
+                    SpinWriteLock(ref ancestorBase, out var ancestorLatch);
+                    SpatialNodeHelper.RefitInternalMBR(ref ancestorBase, _desc);
+                    RefitInternalUnionMask(ref ancestorBase, ref accessor);
                     ancestorLatch.WriteUnlock();
                 }
                 return;
@@ -390,10 +392,10 @@ internal unsafe partial class SpatialRTree<TStore>
     /// <summary>Split an internal node, returning the new right sibling's chunk ID.</summary>
     private int SplitInternalNode(int nodeChunkId, int newChildChunkId, ref ChunkAccessor<TStore> accessor, ChangeSet changeSet)
     {
-        byte* nodeBase = accessor.GetChunkAddress(nodeChunkId, true);
-        SpinWriteLock(nodeBase, out var nodeLatch);
+        ref byte nodeBase = ref Unsafe.AsRef<byte>(accessor.GetChunkAddress(nodeChunkId, true));
+        SpinWriteLock(ref nodeBase, out var nodeLatch);
 
-        int nodeCount = SpatialNodeHelper.GetCount(nodeBase);
+        int nodeCount = SpatialNodeHelper.GetCount(ref nodeBase);
         int totalEntries = nodeCount + 1;
         int cc = _desc.CoordCount;
 
@@ -405,15 +407,15 @@ internal unsafe partial class SpatialRTree<TStore>
         // Gather existing internal entries
         for (int i = 0; i < nodeCount; i++)
         {
-            SpatialNodeHelper.ReadInternalEntryCoords(nodeBase, i, tempCoords.Slice(i * cc, cc), _desc);
-            tempChildIds[i] = SpatialNodeHelper.ReadInternalChildId(nodeBase, i, _desc);
+            SpatialNodeHelper.ReadInternalEntryCoords(ref nodeBase, i, tempCoords.Slice(i * cc, cc), _desc);
+            tempChildIds[i] = SpatialNodeHelper.ReadInternalChildId(ref nodeBase, i, _desc);
         }
 
         // Add the new child entry
-        byte* newChildBase = accessor.GetChunkAddress(newChildChunkId);
+        ref byte newChildBase = ref Unsafe.AsRef<byte>(accessor.GetChunkAddress(newChildChunkId));
         for (int c = 0; c < cc; c++)
         {
-            tempCoords[nodeCount * cc + c] = SpatialNodeHelper.ReadNodeMBRCoord(newChildBase, c, _desc);
+            tempCoords[nodeCount * cc + c] = SpatialNodeHelper.ReadNodeMBRCoord(ref newChildBase, c, _desc);
         }
         tempChildIds[nodeCount] = newChildChunkId;
 
@@ -421,43 +423,43 @@ internal unsafe partial class SpatialRTree<TStore>
 
         // Allocate right sibling — NOTE: AllocNode may trigger segment Grow(),
         // invalidating all previously obtained byte* pointers. Re-obtain after.
-        int parentChunkId = SpatialNodeHelper.GetParentChunkId(nodeBase);
+        int parentChunkId = SpatialNodeHelper.GetParentChunkId(ref nodeBase);
         int rightChunkId = AllocNode(false, parentChunkId, ref accessor, changeSet);
         Interlocked.Increment(ref _nodeCount);
 
         // Re-obtain pointers after potential segment growth
-        nodeBase = accessor.GetChunkAddress(nodeChunkId, true);
-        nodeLatch = GetLatch(nodeBase);
-        byte* rightBase = accessor.GetChunkAddress(rightChunkId, true);
+        nodeBase = ref Unsafe.AsRef<byte>(accessor.GetChunkAddress(nodeChunkId, true));
+        nodeLatch = GetLatch(ref nodeBase);
+        ref byte rightBase = ref Unsafe.AsRef<byte>(accessor.GetChunkAddress(rightChunkId, true));
 
         // Scatter entries to left (existing node) and right (new sibling)
         for (int i = 0; i < splitPos; i++)
         {
             int src = bestPerm[i];
-            SpatialNodeHelper.WriteInternalEntryCoords(nodeBase, i, tempCoords.Slice(src * cc, cc), _desc);
-            SpatialNodeHelper.WriteInternalChildId(nodeBase, i, tempChildIds[src], _desc);
+            SpatialNodeHelper.WriteInternalEntryCoords(ref nodeBase, i, tempCoords.Slice(src * cc, cc), _desc);
+            SpatialNodeHelper.WriteInternalChildId(ref nodeBase, i, tempChildIds[src], _desc);
         }
-        SpatialNodeHelper.SetCount(nodeBase, splitPos);
-        SpatialNodeHelper.RefitInternalMBR(nodeBase, _desc);
-        RefitInternalUnionMask(nodeBase, ref accessor);
+        SpatialNodeHelper.SetCount(ref nodeBase, splitPos);
+        SpatialNodeHelper.RefitInternalMBR(ref nodeBase, _desc);
+        RefitInternalUnionMask(ref nodeBase, ref accessor);
 
         int rightCount = totalEntries - splitPos;
         for (int i = 0; i < rightCount; i++)
         {
             int src = bestPerm[splitPos + i];
-            SpatialNodeHelper.WriteInternalEntryCoords(rightBase, i, tempCoords.Slice(src * cc, cc), _desc);
-            SpatialNodeHelper.WriteInternalChildId(rightBase, i, tempChildIds[src], _desc);
+            SpatialNodeHelper.WriteInternalEntryCoords(ref rightBase, i, tempCoords.Slice(src * cc, cc), _desc);
+            SpatialNodeHelper.WriteInternalChildId(ref rightBase, i, tempChildIds[src], _desc);
         }
-        SpatialNodeHelper.SetCount(rightBase, rightCount);
-        SpatialNodeHelper.RefitInternalMBR(rightBase, _desc);
-        RefitInternalUnionMask(rightBase, ref accessor);
+        SpatialNodeHelper.SetCount(ref rightBase, rightCount);
+        SpatialNodeHelper.RefitInternalMBR(ref rightBase, _desc);
+        RefitInternalUnionMask(ref rightBase, ref accessor);
 
         // Update children's parent pointers for entries that moved to the right node
         for (int i = 0; i < rightCount; i++)
         {
-            int childId = SpatialNodeHelper.ReadInternalChildId(rightBase, i, _desc);
-            byte* childBase = accessor.GetChunkAddress(childId, true);
-            SpatialNodeHelper.SetParentChunkId(childBase, rightChunkId);
+            int childId = SpatialNodeHelper.ReadInternalChildId(ref rightBase, i, _desc);
+            ref byte childBase = ref Unsafe.AsRef<byte>(accessor.GetChunkAddress(childId, true));
+            SpatialNodeHelper.SetParentChunkId(ref childBase, rightChunkId);
         }
 
         nodeLatch.WriteUnlock();
@@ -469,24 +471,24 @@ internal unsafe partial class SpatialRTree<TStore>
     {
         int newRootChunkId = AllocNode(false, 0, ref accessor, changeSet);
         Interlocked.Increment(ref _nodeCount);
-        byte* newRootBase = accessor.GetChunkAddress(newRootChunkId, true);
+        ref byte newRootBase = ref Unsafe.AsRef<byte>(accessor.GetChunkAddress(newRootChunkId, true));
 
         // Insert old root as child 0
-        WriteInternalEntry(newRootBase, 0, leftChunkId, ref accessor);
+        WriteInternalEntry(ref newRootBase, 0, leftChunkId, ref accessor);
 
         // Insert new sibling as child 1
-        WriteInternalEntry(newRootBase, 1, rightChunkId, ref accessor);
+        WriteInternalEntry(ref newRootBase, 1, rightChunkId, ref accessor);
 
-        SpatialNodeHelper.SetCount(newRootBase, 2);
-        SpatialNodeHelper.RefitInternalMBR(newRootBase, _desc);
-        RefitInternalUnionMask(newRootBase, ref accessor);
+        SpatialNodeHelper.SetCount(ref newRootBase, 2);
+        SpatialNodeHelper.RefitInternalMBR(ref newRootBase, _desc);
+        RefitInternalUnionMask(ref newRootBase, ref accessor);
 
         // Update parent pointers
-        byte* leftBase = accessor.GetChunkAddress(leftChunkId, true);
-        SpatialNodeHelper.SetParentChunkId(leftBase, newRootChunkId);
+        ref byte leftBase = ref Unsafe.AsRef<byte>(accessor.GetChunkAddress(leftChunkId, true));
+        SpatialNodeHelper.SetParentChunkId(ref leftBase, newRootChunkId);
 
-        byte* rightBase = accessor.GetChunkAddress(rightChunkId, true);
-        SpatialNodeHelper.SetParentChunkId(rightBase, newRootChunkId);
+        ref byte rightBase = ref Unsafe.AsRef<byte>(accessor.GetChunkAddress(rightChunkId, true));
+        SpatialNodeHelper.SetParentChunkId(ref rightBase, newRootChunkId);
 
         _rootChunkId = newRootChunkId;
         _depth++;

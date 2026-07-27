@@ -818,10 +818,11 @@ public unsafe partial class Transaction : EntityAccessor
         }
 
         int recordSize = meta._entityRecordSize;
-        byte* buf = stackalloc byte[recordSize];
-        if (es.EntityMap.TryGet(entityId.EntityKey, buf, ref _entityMapCacheAccessor))
+        Span<byte> buf = stackalloc byte[recordSize];
+        ref byte bufRef = ref MemoryMarshal.GetReference(buf);
+        if (es.EntityMap.TryGet(entityId.EntityKey, ref bufRef, ref _entityMapCacheAccessor))
         {
-            return EntityRecordAccessor.GetLocation(buf, slot);
+            return EntityRecordAccessor.GetLocation(ref bufRef, slot);
         }
 
         return 0;
@@ -867,13 +868,14 @@ public unsafe partial class Transaction : EntityAccessor
         // TryGet copies full record, but we only need the header (first 14 bytes).
         // Use full record size to satisfy TryGet's contract, but stackalloc min header.
         int recordSize = meta._entityRecordSize;
-        byte* fullBuf = stackalloc byte[recordSize];
-        if (!es.EntityMap.TryGet(entityId.EntityKey, fullBuf, ref _entityMapCacheAccessor))
+        Span<byte> fullBuf = stackalloc byte[recordSize];
+        ref byte fullBufRef = ref MemoryMarshal.GetReference(fullBuf);
+        if (!es.EntityMap.TryGet(entityId.EntityKey, ref fullBufRef, ref _entityMapCacheAccessor))
         {
             return false;
         }
 
-        ref var header = ref EntityRecordAccessor.GetHeader(fullBuf);
+        ref var header = ref EntityRecordAccessor.GetHeader(ref fullBufRef);
         return header.IsVisibleAt(TSN);
     }
 
@@ -1431,16 +1433,17 @@ public unsafe partial class Transaction : EntityAccessor
 
         // Read entity's cluster location from EntityMap (once)
         int recordSize = meta._entityRecordSize;
-        byte* recordBuf = stackalloc byte[recordSize];
+        Span<byte> recordBuf = stackalloc byte[recordSize];
+        ref byte recordBufRef = ref MemoryMarshal.GetReference(recordBuf);
 
         long entityKey = EntityId.FromRaw(pk).EntityKey;
-        if (!es.EntityMap.TryGet(entityKey, recordBuf, ref _clusterCommitMapAccessor))
+        if (!es.EntityMap.TryGet(entityKey, ref recordBufRef, ref _clusterCommitMapAccessor))
         {
             return;
         }
 
-        int clusterChunkId = ClusterEntityRecordAccessor.GetClusterChunkId(recordBuf);
-        byte slotIndex = ClusterEntityRecordAccessor.GetSlotIndex(recordBuf);
+        int clusterChunkId = ClusterEntityRecordAccessor.GetClusterChunkId(ref recordBufRef);
+        byte slotIndex = ClusterEntityRecordAccessor.GetSlotIndex(ref recordBufRef);
         int clusterLocation = clusterChunkId * 64 + slotIndex;
         outClusterChunkId = clusterChunkId;
         outSlotIndex = slotIndex;
@@ -1452,6 +1455,7 @@ public unsafe partial class Transaction : EntityAccessor
         if (hasIndexes)
         {
             // Read new and old field values from CONTENT CHUNKS (not cluster slot — cluster hasn't been updated yet).
+            // KEEP(ptr): nullable bases (a null ref is not expressible) fed to byte* field.Index.Move/Add/Remove via ReconcileClusterIndexAndViews.
             byte* newComp = compRevInfo.CurCompContentChunkId != 0 ?
                 _clusterCommitContentAccessor.GetChunkAddress(compRevInfo.CurCompContentChunkId) + table.ComponentOverhead : null;
             byte* oldComp = readCompChunkId != 0 ?
@@ -1488,12 +1492,12 @@ public unsafe partial class Transaction : EntityAccessor
         }
 
         var layout = clusterState.Layout;
-        byte* srcAddr = _clusterCommitContentAccessor.GetChunkAddress(e.CurCompContentChunkId);
-        byte* clusterBase = _clusterCommitClusterAccessor.GetChunkAddress(e.ClusterChunkId, true);
+        ref byte srcAddr = ref Unsafe.AsRef<byte>(_clusterCommitContentAccessor.GetChunkAddress(e.CurCompContentChunkId));
+        ref byte clusterBase = ref Unsafe.AsRef<byte>(_clusterCommitClusterAccessor.GetChunkAddress(e.ClusterChunkId, true));
 
         int compSize = layout.ComponentSize(e.CompSlot);
-        byte* dstSlot = clusterBase + layout.ComponentOffset(e.CompSlot) + e.SlotIndex * compSize;
-        Unsafe.CopyBlockUnaligned(dstSlot, srcAddr + table.ComponentOverhead, (uint)compSize);
+        ref byte dstSlot = ref Unsafe.Add(ref clusterBase, layout.ComponentOffset(e.CompSlot) + e.SlotIndex * compSize);
+        Unsafe.CopyBlockUnaligned(ref dstSlot, ref Unsafe.Add(ref srcAddr, table.ComponentOverhead), (uint)compSize);
 
         clusterState.SetDirty(e.ClusterChunkId, e.SlotIndex);
     }
@@ -1516,6 +1520,7 @@ public unsafe partial class Transaction : EntityAccessor
     /// (<see cref="PrepareClusterVersionedSlot"/>, value pointers into content chunks) and the Commit-discipline staged publish
     /// (<see cref="PublishStagedCommitWrites"/>, old = cluster HEAD, new = staging buffer).
     /// </summary>
+    // KEEP(ptr): oldComp/newComp are nullable byte* base pointers (a null ref is not expressible); the non-null branches pass a ref into them to the index.
     private void ReconcileClusterIndexAndViews(ArchetypeEngineState es, ArchetypeClusterState clusterState, int compSlot, int clusterChunkId,
         int clusterLocation, long entityKey, byte* oldComp, byte* newComp)
     {
@@ -1536,23 +1541,23 @@ public unsafe partial class Transaction : EntityAccessor
                     if (newComp != null && oldComp != null)
                     {
                         // Update: move from old key to new key
-                        field.Index.Move(oldComp + field.FieldOffset, newComp + field.FieldOffset, clusterLocation, ref idxAccessor);
+                        field.Index.Move(ref oldComp[field.FieldOffset], ref newComp[field.FieldOffset], clusterLocation, ref idxAccessor);
                     }
                     else if (newComp != null)
                     {
                         // Insert (first commit after spawn)
-                        field.Index.Add(newComp + field.FieldOffset, clusterLocation, ref idxAccessor);
+                        field.Index.Add(ref newComp[field.FieldOffset], clusterLocation, ref idxAccessor);
                     }
                     else if (oldComp != null)
                     {
                         // Delete
-                        field.Index.Remove(oldComp + field.FieldOffset, out _, ref idxAccessor);
+                        field.Index.Remove(ref oldComp[field.FieldOffset], out _, ref idxAccessor);
                     }
 
                     // Widen zone map with new value
                     if (newComp != null)
                     {
-                        field.ZoneMap?.Widen(clusterChunkId, newComp + field.FieldOffset);
+                        field.ZoneMap?.Widen(clusterChunkId, ref Unsafe.AsRef<byte>(newComp + field.FieldOffset));
                     }
 
                     // Notify views of index change (delta buffer for incremental views)
@@ -1569,22 +1574,22 @@ public unsafe partial class Transaction : EntityAccessor
                         if (newComp != null && oldComp != null)
                         {
                             // Move: emit old and new keys
-                            var oldKey = KeyBytes8.FromPointer(oldComp + field.FieldOffset, field.FieldSize);
-                            var newKey = KeyBytes8.FromPointer(newComp + field.FieldOffset, field.FieldSize);
+                            var oldKey = KeyBytes8.FromRef(ref Unsafe.AsRef<byte>(oldComp + field.FieldOffset), field.FieldSize);
+                            var newKey = KeyBytes8.FromRef(ref Unsafe.AsRef<byte>(newComp + field.FieldOffset), field.FieldSize);
                             byte flags = (byte)(fi & 0x3F);
                             reg.DeltaBuffer.TryAppend(entityKey, oldKey, newKey, TSN, flags, reg.ComponentTag);
                         }
                         else if (newComp != null)
                         {
                             // Add: isCreation flag
-                            var newKey = KeyBytes8.FromPointer(newComp + field.FieldOffset, field.FieldSize);
+                            var newKey = KeyBytes8.FromRef(ref Unsafe.AsRef<byte>(newComp + field.FieldOffset), field.FieldSize);
                             byte flags = (byte)((fi & 0x3F) | 0x40); // isCreation
                             reg.DeltaBuffer.TryAppend(entityKey, default, newKey, TSN, flags, reg.ComponentTag);
                         }
                         else if (oldComp != null)
                         {
                             // Remove: isDeletion flag
-                            var oldKey = KeyBytes8.FromPointer(oldComp + field.FieldOffset, field.FieldSize);
+                            var oldKey = KeyBytes8.FromRef(ref Unsafe.AsRef<byte>(oldComp + field.FieldOffset), field.FieldSize);
                             byte flags = (byte)((fi & 0x3F) | 0x80); // isDeletion
                             reg.DeltaBuffer.TryAppend(entityKey, oldKey, default, TSN, flags, reg.ComponentTag);
                         }
@@ -1650,6 +1655,7 @@ public unsafe partial class Transaction : EntityAccessor
             return;
         }
         int compSlot = compSlotByte;
+        // KEEP(ptr): staged derives from the byte* field _commitStagingBuffer and feeds byte* Reconcile*/Publish* helpers — kept byte*.
         byte* staged = _commitStagingBuffer + stagedSlot.Offset;
         var clusterState = es?.ClusterState;
 
@@ -1678,6 +1684,7 @@ public unsafe partial class Transaction : EntityAccessor
         byte slotIndex = (byte)(clusterLocation & 63);
 
         var layout = clusterState.Layout;
+        // KEEP(ptr): headPtr (clusterBase + offset) is passed as the byte* oldComp base to ReconcileClusterIndexAndViews (byte* index APIs) — kept byte*.
         byte* clusterBase = _clusterCommitClusterAccessor.GetChunkAddress(clusterChunkId, true);
         int compSize = layout.ComponentSize(compSlot);
         byte* headPtr = clusterBase + layout.ComponentOffset(compSlot) + slotIndex * compSize;
@@ -1698,6 +1705,7 @@ public unsafe partial class Transaction : EntityAccessor
     /// re-lookup): reconciles the table's exact B+Tree index(es) (old key from the still-unpublished HEAD, new key from the staged slot — CM-05/AC-11),
     /// copies the staged value into the chunk HEAD (the visibility act), then marks the chunk dirty for the tick fence.
     /// </summary>
+    // KEEP(ptr): staged + headPtr feed byte* ReconcileFlatIndexAndViews (index.Move/MoveValue) and Unsafe.CopyBlock — kept byte*.
     private void PublishStagedFlatEntry(ComponentInfo info, int chunkId, long entityKey, byte* staged)
     {
         if (chunkId == 0)
@@ -1725,6 +1733,7 @@ public unsafe partial class Transaction : EntityAccessor
     /// <c>ProcessShadowFieldEntries</c> Move branch, but runs at commit (the Commit-discipline write skips shadow capture). The B+Tree value is the entity's
     /// content chunkId; for an AllowMultiple index the element id (in the chunk overhead, untouched by the value memcpy) is moved and written back.
     /// </summary>
+    // KEEP(ptr): oldComp feeds an int* elementId cursor via pointer subtraction — kept byte*; newComp is the staged-slot base (index key is a ref into it).
     private void ReconcileFlatIndexAndViews(ComponentTable table, int chunkId, long entityKey, byte* oldComp, byte* newComp)
     {
         var fields = table.IndexedFieldInfos;
@@ -1737,9 +1746,9 @@ public unsafe partial class Transaction : EntityAccessor
             // Rebase to a data-relative offset before indexing into the two data pointers — adding the chunk-base OffsetToField
             // directly would double-count ComponentOverhead and read the key from the wrong location.
             int dataFieldOffset = ifi.OffsetToField - table.ComponentOverhead;
-            var oldKey = KeyBytes8.FromPointer(oldComp + dataFieldOffset, ifi.Size);
-            byte* newFieldPtr = newComp + dataFieldOffset;
-            var newKey = KeyBytes8.FromPointer(newFieldPtr, ifi.Size);
+            var oldKey = KeyBytes8.FromRef(ref Unsafe.AsRef<byte>(oldComp + dataFieldOffset), ifi.Size);
+            ref byte newFieldPtr = ref newComp[dataFieldOffset];
+            var newKey = KeyBytes8.FromRef(ref newFieldPtr, ifi.Size);
             if (oldKey.RawValue == newKey.RawValue)
             {
                 continue;
@@ -1753,11 +1762,11 @@ public unsafe partial class Transaction : EntityAccessor
                 {
                     // Element id lives in the chunk overhead (chunk base = HEAD field base − ComponentOverhead); the value memcpy never touches it.
                     int* elementIdPtr = (int*)(oldComp - table.ComponentOverhead + ifi.OffsetToIndexElementId);
-                    *elementIdPtr = index.MoveValue(&oldKey, newFieldPtr, *elementIdPtr, chunkId, ref idxAccessor, out _, out _);
+                    *elementIdPtr = index.MoveValue(ref Unsafe.As<KeyBytes8, byte>(ref oldKey), ref newFieldPtr, *elementIdPtr, chunkId, ref idxAccessor, out _, out _);
                 }
                 else
                 {
-                    index.Move(&oldKey, newFieldPtr, chunkId, ref idxAccessor);
+                    index.Move(ref Unsafe.As<KeyBytes8, byte>(ref oldKey), ref newFieldPtr, chunkId, ref idxAccessor);
                 }
 
                 var views = table.ViewRegistry.GetViewsForField(fi);

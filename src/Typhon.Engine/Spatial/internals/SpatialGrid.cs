@@ -177,16 +177,16 @@ internal sealed unsafe class SpatialGrid
     /// avoiding a double read of the field memory.
     /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static void ReadSpatialCenter2D(byte* fieldPtr, SpatialFieldType fieldType, out float posX, out float posY)
+    public static void ReadSpatialCenter2D(ref byte fieldPtr, SpatialFieldType fieldType, out float posX, out float posY)
     {
         switch (fieldType)
         {
             case SpatialFieldType.AABB2F:
             {
-                float minX = *(float*)fieldPtr;
-                float minY = *(float*)(fieldPtr + sizeof(float));
-                float maxX = *(float*)(fieldPtr + 2 * sizeof(float));
-                float maxY = *(float*)(fieldPtr + 3 * sizeof(float));
+                float minX = Unsafe.As<byte, float>(ref fieldPtr);
+                float minY = Unsafe.As<byte, float>(ref Unsafe.Add(ref fieldPtr, sizeof(float)));
+                float maxX = Unsafe.As<byte, float>(ref Unsafe.Add(ref fieldPtr, 2 * sizeof(float)));
+                float maxY = Unsafe.As<byte, float>(ref Unsafe.Add(ref fieldPtr, 3 * sizeof(float)));
                 posX = (minX + maxX) * 0.5f;
                 posY = (minY + maxY) * 0.5f;
                 return;
@@ -195,10 +195,10 @@ internal sealed unsafe class SpatialGrid
             {
                 // 3D AABB layout is [minX, minY, minZ, maxX, maxY, maxZ]. For 2D cell bucketing we use only the XY center — Z is used at narrowphase.
                 // Issue #230 Phase 3.
-                float minX = *(float*)fieldPtr;
-                float minY = *(float*)(fieldPtr + sizeof(float));
-                float maxX = *(float*)(fieldPtr + 3 * sizeof(float));
-                float maxY = *(float*)(fieldPtr + 4 * sizeof(float));
+                float minX = Unsafe.As<byte, float>(ref fieldPtr);
+                float minY = Unsafe.As<byte, float>(ref Unsafe.Add(ref fieldPtr, sizeof(float)));
+                float maxX = Unsafe.As<byte, float>(ref Unsafe.Add(ref fieldPtr, 3 * sizeof(float)));
+                float maxY = Unsafe.As<byte, float>(ref Unsafe.Add(ref fieldPtr, 4 * sizeof(float)));
                 posX = (minX + maxX) * 0.5f;
                 posY = (minY + maxY) * 0.5f;
                 return;
@@ -206,15 +206,15 @@ internal sealed unsafe class SpatialGrid
             case SpatialFieldType.BSphere2F:
             {
                 // BSphere2F — CenterX, CenterY, Radius
-                posX = *(float*)fieldPtr;
-                posY = *(float*)(fieldPtr + sizeof(float));
+                posX = Unsafe.As<byte, float>(ref fieldPtr);
+                posY = Unsafe.As<byte, float>(ref Unsafe.Add(ref fieldPtr, sizeof(float)));
                 return;
             }
             case SpatialFieldType.BSphere3F:
             {
                 // BSphere3F — CenterX, CenterY, CenterZ, Radius. Same 2D bucketing approach as AABB3F.
-                posX = *(float*)fieldPtr;
-                posY = *(float*)(fieldPtr + sizeof(float));
+                posX = Unsafe.As<byte, float>(ref fieldPtr);
+                posY = Unsafe.As<byte, float>(ref Unsafe.Add(ref fieldPtr, sizeof(float)));
                 return;
             }
             default:
@@ -231,9 +231,9 @@ internal sealed unsafe class SpatialGrid
     /// method does not re-validate.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public int WorldToCellKeyFromSpatialField(byte* fieldPtr, SpatialFieldType fieldType)
+    public int WorldToCellKeyFromSpatialField(ref byte fieldPtr, SpatialFieldType fieldType)
     {
-        ReadSpatialCenter2D(fieldPtr, fieldType, out float posX, out float posY);
+        ReadSpatialCenter2D(ref fieldPtr, fieldType, out float posX, out float posY);
         return WorldToCellKey(posX, posY);
     }
 

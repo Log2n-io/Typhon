@@ -2,6 +2,7 @@ using JetBrains.Annotations;
 using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Internals;
@@ -755,26 +756,25 @@ internal ref struct ComponentRevisionManager
         (int chunkIndexInChain, int indexInChunk) = CompRevStorageHeader.GetRevisionLocation(revisionIndex);
 
         // Walk through the linked list until we find the chunk that is our starting point
-        var header = (CompRevStorageHeader*)accessor.GetChunkAddress(firstChunkId);
-        resChunkId = header->NextChunkId;
+        ref var first = ref MemoryMarshal.AsRef<CompRevStorageHeader>(accessor.GetChunkAsSpan(firstChunkId));
+        resChunkId = first.NextChunkId;
 
-        var first = header;
-        var useLock = !first->Control.IsLockedByCurrentThread;
+        var useLock = !first.Control.IsLockedByCurrentThread;
         if (useLock)
         {
             var wc = WaitContext.FromTimeout(TimeoutOptions.Current.RevisionChainLockTimeout);
-            if (!first->Control.EnterSharedAccess(ref wc))
+            if (!first.Control.EnterSharedAccess(ref wc))
             {
                 ThrowHelper.ThrowLockTimeout("RevisionChain/GetLocation", TimeoutOptions.Current.RevisionChainLockTimeout);
             }
         }
         while (--chunkIndexInChain != 0)
         {
-            resChunkId = *(int*)accessor.GetChunkAddress(resChunkId);
+            resChunkId = MemoryMarshal.Read<int>(accessor.GetChunkAsReadOnlySpan(resChunkId));
         }
         if (useLock)
         {
-            first->Control.ExitSharedAccess();
+            first.Control.ExitSharedAccess();
         }
 
         return (short)indexInChunk;

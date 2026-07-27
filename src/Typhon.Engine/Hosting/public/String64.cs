@@ -73,6 +73,7 @@ public static class StringExtensions
             return false;
         }
 
+        // KEEP(ptr): feeds the pointer-based Encoding.UTF8.GetBytes overload alongside the raw byte* dest param; wrapping only the source side gains nothing.
         fixed (char* c = str)
         {
             Encoding.UTF8.GetBytes(c, str.Length, dest, destMaxSize);

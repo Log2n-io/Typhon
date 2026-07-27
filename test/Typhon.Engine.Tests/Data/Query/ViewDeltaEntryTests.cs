@@ -145,15 +145,15 @@ public class ViewDeltaEntryTests
 
     #endregion
 
-    #region KeyBytes8 FromPointer
+    #region KeyBytes8 FromRef
 
     [Test]
-    public unsafe void KeyBytes8_FromPointer_ReadsCorrectBytes()
+    public unsafe void KeyBytes8_FromRef_ReadsCorrectBytes()
     {
         long source = 0x0102030405060708L;
         byte* ptr = (byte*)&source;
 
-        var kb = KeyBytes8.FromPointer(ptr, 8);
+        var kb = KeyBytes8.FromRef(ref *ptr, 8);
         Assert.That(kb.AsLong(), Is.EqualTo(0x0102030405060708L));
     }
 

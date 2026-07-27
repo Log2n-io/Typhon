@@ -268,13 +268,13 @@ internal static unsafe partial class SpatialMaintainer
     /// Returns false if bounds are degenerate (NaN/Inf/Min>Max).
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal static bool ReadAndValidateBoundsFromPtr(byte* fieldPtr, SpatialFieldInfo fi, Span<double> coords, SpatialNodeDescriptor desc)
+    internal static bool ReadAndValidateBoundsFromPtr(ref byte fieldPtr, SpatialFieldInfo fi, Span<double> coords, SpatialNodeDescriptor desc)
     {
         switch (fi.FieldType)
         {
             case SpatialFieldType.AABB2F:
             {
-                var aabb = *(AABB2F*)fieldPtr;
+                var aabb = Unsafe.As<byte, AABB2F>(ref fieldPtr);
                 if (SpatialGeometry.IsDegenerate(aabb)) { return false; }
                 coords[0] = aabb.MinX; coords[1] = aabb.MinY;
                 coords[2] = aabb.MaxX; coords[3] = aabb.MaxY;
@@ -282,7 +282,7 @@ internal static unsafe partial class SpatialMaintainer
             }
             case SpatialFieldType.AABB3F:
             {
-                var aabb = *(AABB3F*)fieldPtr;
+                var aabb = Unsafe.As<byte, AABB3F>(ref fieldPtr);
                 if (SpatialGeometry.IsDegenerate(aabb)) { return false; }
                 coords[0] = aabb.MinX; coords[1] = aabb.MinY; coords[2] = aabb.MinZ;
                 coords[3] = aabb.MaxX; coords[4] = aabb.MaxY; coords[5] = aabb.MaxZ;
@@ -290,7 +290,7 @@ internal static unsafe partial class SpatialMaintainer
             }
             case SpatialFieldType.BSphere2F:
             {
-                var aabb = SpatialGeometry.Enclosing(*(BSphere2F*)fieldPtr);
+                var aabb = SpatialGeometry.Enclosing(Unsafe.As<byte, BSphere2F>(ref fieldPtr));
                 if (SpatialGeometry.IsDegenerate(aabb)) { return false; }
                 coords[0] = aabb.MinX; coords[1] = aabb.MinY;
                 coords[2] = aabb.MaxX; coords[3] = aabb.MaxY;
@@ -298,7 +298,7 @@ internal static unsafe partial class SpatialMaintainer
             }
             case SpatialFieldType.BSphere3F:
             {
-                var aabb = SpatialGeometry.Enclosing(*(BSphere3F*)fieldPtr);
+                var aabb = SpatialGeometry.Enclosing(Unsafe.As<byte, BSphere3F>(ref fieldPtr));
                 if (SpatialGeometry.IsDegenerate(aabb)) { return false; }
                 coords[0] = aabb.MinX; coords[1] = aabb.MinY; coords[2] = aabb.MinZ;
                 coords[3] = aabb.MaxX; coords[4] = aabb.MaxY; coords[5] = aabb.MaxZ;
@@ -306,7 +306,7 @@ internal static unsafe partial class SpatialMaintainer
             }
             case SpatialFieldType.AABB2D:
             {
-                var aabb = *(AABB2D*)fieldPtr;
+                var aabb = Unsafe.As<byte, AABB2D>(ref fieldPtr);
                 if (SpatialGeometry.IsDegenerate(aabb)) { return false; }
                 coords[0] = aabb.MinX; coords[1] = aabb.MinY;
                 coords[2] = aabb.MaxX; coords[3] = aabb.MaxY;
@@ -314,7 +314,7 @@ internal static unsafe partial class SpatialMaintainer
             }
             case SpatialFieldType.AABB3D:
             {
-                var aabb = *(AABB3D*)fieldPtr;
+                var aabb = Unsafe.As<byte, AABB3D>(ref fieldPtr);
                 if (SpatialGeometry.IsDegenerate(aabb)) { return false; }
                 coords[0] = aabb.MinX; coords[1] = aabb.MinY; coords[2] = aabb.MinZ;
                 coords[3] = aabb.MaxX; coords[4] = aabb.MaxY; coords[5] = aabb.MaxZ;
@@ -322,7 +322,7 @@ internal static unsafe partial class SpatialMaintainer
             }
             case SpatialFieldType.BSphere2D:
             {
-                var aabb = SpatialGeometry.Enclosing(*(BSphere2D*)fieldPtr);
+                var aabb = SpatialGeometry.Enclosing(Unsafe.As<byte, BSphere2D>(ref fieldPtr));
                 if (SpatialGeometry.IsDegenerate(aabb)) { return false; }
                 coords[0] = aabb.MinX; coords[1] = aabb.MinY;
                 coords[2] = aabb.MaxX; coords[3] = aabb.MaxY;
@@ -330,7 +330,7 @@ internal static unsafe partial class SpatialMaintainer
             }
             case SpatialFieldType.BSphere3D:
             {
-                var aabb = SpatialGeometry.Enclosing(*(BSphere3D*)fieldPtr);
+                var aabb = SpatialGeometry.Enclosing(Unsafe.As<byte, BSphere3D>(ref fieldPtr));
                 if (SpatialGeometry.IsDegenerate(aabb)) { return false; }
                 coords[0] = aabb.MinX; coords[1] = aabb.MinY; coords[2] = aabb.MinZ;
                 coords[3] = aabb.MaxX; coords[4] = aabb.MaxY; coords[5] = aabb.MaxZ;
@@ -541,12 +541,13 @@ internal static unsafe partial class SpatialMaintainer
 
         // Read the entity record to get the component chunkId
         byte* recordBuf = stackalloc byte[EntityRecordAccessor.MaxRecordSize];
+        ref byte recordBufRef = ref Unsafe.AsRef<byte>(recordBuf);
         var emAccessor = archState.EntityMap.Segment.CreateChunkAccessor();
         try
         {
-            if (archState.EntityMap.TryGet(entityId.EntityKey, recordBuf, ref emAccessor))
+            if (archState.EntityMap.TryGet(entityId.EntityKey, ref recordBufRef, ref emAccessor))
             {
-                int swappedCompChunkId = EntityRecordAccessor.GetLocation(recordBuf, compSlot);
+                int swappedCompChunkId = EntityRecordAccessor.GetLocation(ref recordBufRef, compSlot);
                 SpatialBackPointerHelper.Write(ref bpAccessor, swappedCompChunkId, leafChunkId, (short)slotIndex, (byte)table.SpatialIndex.FieldInfo.Mode);
             }
         }

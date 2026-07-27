@@ -54,22 +54,22 @@ internal unsafe partial class SpatialRTree<TStore>
         // ── Descent to best leaf ──
         while (true)
         {
-            byte* nodeBase = accessor.GetChunkAddress(nodeChunkId);
-            if (SpatialNodeHelper.IsLeaf(nodeBase))
+            ref byte nodeBase = ref Unsafe.AsRef<byte>(accessor.GetChunkAddress(nodeChunkId));
+            if (SpatialNodeHelper.IsLeaf(ref nodeBase))
             {
                 break;
             }
 
-            var latch = GetLatch(nodeBase);
+            var latch = GetLatch(ref nodeBase);
             int version = latch.ReadVersion();
             if (version == 0)
             {
                 return default; // locked/obsolete → restart
             }
 
-            int count = SpatialNodeHelper.GetCount(nodeBase);
-            int bestChild = ChooseBestChild(nodeBase, coords, count);
-            int childChunkId = SpatialNodeHelper.ReadInternalChildId(nodeBase, bestChild, _desc);
+            int count = SpatialNodeHelper.GetCount(ref nodeBase);
+            int bestChild = ChooseBestChild(ref nodeBase, coords, count);
+            int childChunkId = SpatialNodeHelper.ReadInternalChildId(ref nodeBase, bestChild, _desc);
 
             if (!latch.ValidateVersion(version))
             {
@@ -81,23 +81,23 @@ internal unsafe partial class SpatialRTree<TStore>
         }
 
         // ── Insert into leaf ──
-        byte* leafBase = accessor.GetChunkAddress(nodeChunkId, true);
-        SpinWriteLock(leafBase, out var leafLatch);
+        ref byte leafBase = ref Unsafe.AsRef<byte>(accessor.GetChunkAddress(nodeChunkId, true));
+        SpinWriteLock(ref leafBase, out var leafLatch);
 
-        int leafCount = SpatialNodeHelper.GetCount(leafBase);
+        int leafCount = SpatialNodeHelper.GetCount(ref leafBase);
 
         if (leafCount < _desc.LeafCapacity)
         {
             // Room available: append at leafCount position
-            WriteLeafEntry(leafBase, leafCount, entityId, componentChunkId, coords, categoryMask);
-            SpatialNodeHelper.SetCount(leafBase, leafCount + 1);
+            WriteLeafEntry(ref leafBase, leafCount, entityId, componentChunkId, coords, categoryMask);
+            SpatialNodeHelper.SetCount(ref leafBase, leafCount + 1);
             if (leafCount == 0)
             {
-                SpatialNodeHelper.RefitLeafMBR(leafBase, _desc);
+                SpatialNodeHelper.RefitLeafMBR(ref leafBase, _desc);
             }
             else
             {
-                SpatialNodeHelper.ExpandLeafMBR(leafBase, leafCount, categoryMask, _desc);
+                SpatialNodeHelper.ExpandLeafMBR(ref leafBase, leafCount, categoryMask, _desc);
             }
             leafLatch.WriteUnlock();
 
@@ -117,7 +117,7 @@ internal unsafe partial class SpatialRTree<TStore>
     /// Find the child whose MBR requires minimum enlargement to include the given coords.
     /// Tie-break: prefer child with smallest existing area/volume.
     /// </summary>
-    private int ChooseBestChild(byte* nodeBase, ReadOnlySpan<double> coords, int count)
+    private int ChooseBestChild(ref byte nodeBase, ReadOnlySpan<double> coords, int count)
     {
         int bestChild = 0;
         double bestEnlargement = double.MaxValue;
@@ -129,10 +129,10 @@ internal unsafe partial class SpatialRTree<TStore>
             double c0 = coords[0], c1 = coords[1], c2 = coords[2], c3 = coords[3];
             for (int i = 0; i < count; i++)
             {
-                double cMinX = SpatialNodeHelper.ReadInternalCoord(nodeBase, i, 0, _desc);
-                double cMinY = SpatialNodeHelper.ReadInternalCoord(nodeBase, i, 1, _desc);
-                double cMaxX = SpatialNodeHelper.ReadInternalCoord(nodeBase, i, 2, _desc);
-                double cMaxY = SpatialNodeHelper.ReadInternalCoord(nodeBase, i, 3, _desc);
+                double cMinX = SpatialNodeHelper.ReadInternalCoord(ref nodeBase, i, 0, _desc);
+                double cMinY = SpatialNodeHelper.ReadInternalCoord(ref nodeBase, i, 1, _desc);
+                double cMaxX = SpatialNodeHelper.ReadInternalCoord(ref nodeBase, i, 2, _desc);
+                double cMaxY = SpatialNodeHelper.ReadInternalCoord(ref nodeBase, i, 3, _desc);
 
                 double w = cMaxX - cMinX;
                 double h = cMaxY - cMinY;
@@ -159,8 +159,8 @@ internal unsafe partial class SpatialRTree<TStore>
 
                 for (int d = 0; d < halfCoord; d++)
                 {
-                    double cMin = SpatialNodeHelper.ReadInternalCoord(nodeBase, i, d, _desc);
-                    double cMax = SpatialNodeHelper.ReadInternalCoord(nodeBase, i, d + halfCoord, _desc);
+                    double cMin = SpatialNodeHelper.ReadInternalCoord(ref nodeBase, i, d, _desc);
+                    double cMax = SpatialNodeHelper.ReadInternalCoord(ref nodeBase, i, d + halfCoord, _desc);
                     double eMin = Math.Min(cMin, coords[d]);
                     double eMax = Math.Max(cMax, coords[d + halfCoord]);
                     area *= (cMax - cMin);
@@ -181,21 +181,22 @@ internal unsafe partial class SpatialRTree<TStore>
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private void WriteLeafEntry(byte* nodeBase, int index, long entityId, int componentChunkId, ReadOnlySpan<double> coords, uint categoryMask = uint.MaxValue)
+    private void WriteLeafEntry(ref byte nodeBase, int index, long entityId, int componentChunkId, ReadOnlySpan<double> coords, uint categoryMask = uint.MaxValue)
     {
-        SpatialNodeHelper.WriteLeafEntryCoords(nodeBase, index, coords, _desc);
-        SpatialNodeHelper.WriteLeafEntityId(nodeBase, index, entityId, _desc);
-        SpatialNodeHelper.WriteLeafCompChunkId(nodeBase, index, componentChunkId, _desc);
-        SpatialNodeHelper.WriteLeafCategoryMask(nodeBase, index, categoryMask, _desc);
+        SpatialNodeHelper.WriteLeafEntryCoords(ref nodeBase, index, coords, _desc);
+        SpatialNodeHelper.WriteLeafEntityId(ref nodeBase, index, entityId, _desc);
+        SpatialNodeHelper.WriteLeafCompChunkId(ref nodeBase, index, componentChunkId, _desc);
+        SpatialNodeHelper.WriteLeafCategoryMask(ref nodeBase, index, categoryMask, _desc);
     }
 
-    private void WriteInternalEntry(byte* nodeBase, int index, int childChunkId, ref ChunkAccessor<TStore> accessor)
+    private void WriteInternalEntry(ref byte nodeBase, int index, int childChunkId, ref ChunkAccessor<TStore> accessor)
     {
-        byte* childBase = accessor.GetChunkAddress(childChunkId);
+        ref byte childBase = ref Unsafe.AsRef<byte>(accessor.GetChunkAddress(childChunkId));
         for (int c = 0; c < _desc.CoordCount; c++)
         {
-            SpatialNodeHelper.WriteInternalCoord(nodeBase, index, c, SpatialNodeHelper.ReadNodeMBRCoord(childBase, c, _desc), _desc);
+            SpatialNodeHelper.WriteInternalCoord(ref nodeBase, index, c,
+                SpatialNodeHelper.ReadNodeMBRCoord(ref childBase, c, _desc), _desc);
         }
-        SpatialNodeHelper.WriteInternalChildId(nodeBase, index, childChunkId, _desc);
+        SpatialNodeHelper.WriteInternalChildId(ref nodeBase, index, childChunkId, _desc);
     }
 }

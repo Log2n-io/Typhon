@@ -106,17 +106,17 @@ unsafe class EntityRecordTests
     {
         int componentCount = 4;
         byte* record = stackalloc byte[EntityRecordAccessor.RecordSize(componentCount)];
-        EntityRecordAccessor.InitializeRecord(record, componentCount);
+        EntityRecordAccessor.InitializeRecord(ref Unsafe.AsRef<byte>(record), componentCount);
 
-        EntityRecordAccessor.SetLocation(record, 0, 100);
-        EntityRecordAccessor.SetLocation(record, 1, 200);
-        EntityRecordAccessor.SetLocation(record, 2, 300);
-        EntityRecordAccessor.SetLocation(record, 3, 400);
+        EntityRecordAccessor.SetLocation(ref Unsafe.AsRef<byte>(record), 0, 100);
+        EntityRecordAccessor.SetLocation(ref Unsafe.AsRef<byte>(record), 1, 200);
+        EntityRecordAccessor.SetLocation(ref Unsafe.AsRef<byte>(record), 2, 300);
+        EntityRecordAccessor.SetLocation(ref Unsafe.AsRef<byte>(record), 3, 400);
 
-        Assert.That(EntityRecordAccessor.GetLocation(record, 0), Is.EqualTo(100));
-        Assert.That(EntityRecordAccessor.GetLocation(record, 1), Is.EqualTo(200));
-        Assert.That(EntityRecordAccessor.GetLocation(record, 2), Is.EqualTo(300));
-        Assert.That(EntityRecordAccessor.GetLocation(record, 3), Is.EqualTo(400));
+        Assert.That(EntityRecordAccessor.GetLocation(ref Unsafe.AsRef<byte>(record), 0), Is.EqualTo(100));
+        Assert.That(EntityRecordAccessor.GetLocation(ref Unsafe.AsRef<byte>(record), 1), Is.EqualTo(200));
+        Assert.That(EntityRecordAccessor.GetLocation(ref Unsafe.AsRef<byte>(record), 2), Is.EqualTo(300));
+        Assert.That(EntityRecordAccessor.GetLocation(ref Unsafe.AsRef<byte>(record), 3), Is.EqualTo(400));
     }
 
     [Test]
@@ -124,14 +124,14 @@ unsafe class EntityRecordTests
     {
         int componentCount = 2;
         byte* record = stackalloc byte[EntityRecordAccessor.RecordSize(componentCount)];
-        EntityRecordAccessor.InitializeRecord(record, componentCount);
+        EntityRecordAccessor.InitializeRecord(ref Unsafe.AsRef<byte>(record), componentCount);
 
-        ref var header = ref EntityRecordAccessor.GetHeader(record);
+        ref var header = ref EntityRecordAccessor.GetHeader(ref Unsafe.AsRef<byte>(record));
         header.BornTSN = 42;
         header.EnabledBits = 0b11;
 
-        Assert.That(EntityRecordAccessor.GetHeader(record).BornTSN, Is.EqualTo(42));
-        Assert.That(EntityRecordAccessor.GetHeader(record).EnabledBits, Is.EqualTo(0b11));
+        Assert.That(EntityRecordAccessor.GetHeader(ref Unsafe.AsRef<byte>(record)).BornTSN, Is.EqualTo(42));
+        Assert.That(EntityRecordAccessor.GetHeader(ref Unsafe.AsRef<byte>(record)).EnabledBits, Is.EqualTo(0b11));
     }
 
     [Test]
@@ -141,18 +141,18 @@ unsafe class EntityRecordTests
         int size = EntityRecordAccessor.RecordSize(componentCount);
         byte* src = stackalloc byte[size];
         byte* dst = stackalloc byte[size];
-        EntityRecordAccessor.InitializeRecord(src, componentCount);
-        EntityRecordAccessor.InitializeRecord(dst, componentCount);
+        EntityRecordAccessor.InitializeRecord(ref Unsafe.AsRef<byte>(src), componentCount);
+        EntityRecordAccessor.InitializeRecord(ref Unsafe.AsRef<byte>(dst), componentCount);
 
-        EntityRecordAccessor.SetLocation(src, 0, 10);
-        EntityRecordAccessor.SetLocation(src, 1, 20);
-        EntityRecordAccessor.SetLocation(src, 2, 30);
+        EntityRecordAccessor.SetLocation(ref Unsafe.AsRef<byte>(src), 0, 10);
+        EntityRecordAccessor.SetLocation(ref Unsafe.AsRef<byte>(src), 1, 20);
+        EntityRecordAccessor.SetLocation(ref Unsafe.AsRef<byte>(src), 2, 30);
 
-        EntityRecordAccessor.CopyLocations(src, dst, componentCount);
+        EntityRecordAccessor.CopyLocations(ref Unsafe.AsRef<byte>(src), ref Unsafe.AsRef<byte>(dst), componentCount);
 
-        Assert.That(EntityRecordAccessor.GetLocation(dst, 0), Is.EqualTo(10));
-        Assert.That(EntityRecordAccessor.GetLocation(dst, 1), Is.EqualTo(20));
-        Assert.That(EntityRecordAccessor.GetLocation(dst, 2), Is.EqualTo(30));
+        Assert.That(EntityRecordAccessor.GetLocation(ref Unsafe.AsRef<byte>(dst), 0), Is.EqualTo(10));
+        Assert.That(EntityRecordAccessor.GetLocation(ref Unsafe.AsRef<byte>(dst), 1), Is.EqualTo(20));
+        Assert.That(EntityRecordAccessor.GetLocation(ref Unsafe.AsRef<byte>(dst), 2), Is.EqualTo(30));
     }
 
     [Test]
@@ -165,16 +165,16 @@ unsafe class EntityRecordTests
         // Dirty the memory first
         Unsafe.InitBlock(record, 0xFF, (uint)size);
 
-        EntityRecordAccessor.InitializeRecord(record, componentCount);
+        EntityRecordAccessor.InitializeRecord(ref Unsafe.AsRef<byte>(record), componentCount);
 
-        ref var header = ref EntityRecordAccessor.GetHeader(record);
+        ref var header = ref EntityRecordAccessor.GetHeader(ref Unsafe.AsRef<byte>(record));
         Assert.That(header.BornTSN, Is.EqualTo(0));
         Assert.That(header.DiedTSN, Is.EqualTo(0));
         Assert.That(header.EnabledBits, Is.EqualTo(0));
 
         for (int i = 0; i < componentCount; i++)
         {
-            Assert.That(EntityRecordAccessor.GetLocation(record, i), Is.EqualTo(0));
+            Assert.That(EntityRecordAccessor.GetLocation(ref Unsafe.AsRef<byte>(record), i), Is.EqualTo(0));
         }
     }
 }

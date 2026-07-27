@@ -1316,6 +1316,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                     }
                 }
 
+                // KEEP(ptr): clusterBase→compBase→entityComp feed byte* SIMD EvaluateCluster + FieldEvaluator.Evaluate (those APIs stay byte*).
                 byte* clusterBase = clusterAccessor.GetChunkAddress(clusterChunkId);
                 ulong occupancy = *(ulong*)clusterBase;
                 if (occupancy == 0)
@@ -1689,6 +1690,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                         continue;
                     }
 
+                    // KEEP(ptr): clusterBase→compBase→entityComp feed byte* SIMD EvaluateCluster + FieldEvaluator.Evaluate (those APIs stay byte*).
                     byte* clusterBase = clusterAccessor.GetChunkAddress(clusterChunkId);
                     ulong occupancy = *(ulong*)clusterBase;
                     ulong remaining = candidateBits & occupancy; // intersection with live entities
@@ -2740,9 +2742,9 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         public Dictionary<EntityId, ushort> PendingEnableDisable;
         public HashSet<EntityId> PendingDestroys;
 
-        public bool Process(long key, byte* value)
+        public bool Process(long key, ref byte value)
         {
-            ref var header = ref EntityRecordAccessor.GetHeader(value);
+            ref var header = ref EntityRecordAccessor.GetHeader(ref value);
 
             // Visibility check
             if (header.BornTSN != 0 && header.BornTSN > TxTsn)
@@ -2811,9 +2813,9 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         public Dictionary<EntityId, ushort> PendingEnableDisable;
         public HashSet<EntityId> PendingDestroys;
 
-        public bool Matches(long key, byte* value)
+        public bool Matches(long key, ref byte value)
         {
-            ref var header = ref EntityRecordAccessor.GetHeader(value);
+            ref var header = ref EntityRecordAccessor.GetHeader(ref value);
 
             // Visibility check (MVCC)
             if (header.BornTSN != 0 && header.BornTSN > TxTsn)
@@ -2870,9 +2872,10 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         public Dictionary<EntityId, ushort> PendingEnableDisable;
         public HashSet<EntityId> PendingDestroys;
 
-        public bool Process(long key, byte* value)
+        public bool Process(long key, ref byte value)
         {
-            ref var header = ref EntityRecordAccessor.GetHeader(value);
+            ref byte record = ref value;
+            ref var header = ref EntityRecordAccessor.GetHeader(ref record);
 
             if (header.BornTSN != 0 && header.BornTSN > TxTsn)
             {
@@ -2916,7 +2919,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             var locs = new EntityLocations();
             if (!Meta.IsClusterEligible)
             {
-                EntityRecordAccessor.CopyLocationsTo(value, ref locs, Meta.ComponentCount);
+                EntityRecordAccessor.CopyLocationsTo(ref record, ref locs, Meta.ComponentCount);
             }
 
             Results.Add((entityId, Meta, bits, locs));

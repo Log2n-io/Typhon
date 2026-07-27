@@ -93,6 +93,8 @@ internal static class BTreeExtensions
     [MethodImpl(MethodImplOptions.AggressiveInlining|MethodImplOptions.AggressiveOptimization)]
     public static int Sign(this int x) => (x >> 31) | 1;
 
+    // KEEP(ptr): comparison core — takes a raw T* base and strides through it with pointer arithmetic ((byte*)array +
+    // stride*i); the T* is required so the (TKey*) index buffer can be searched in place without a typed-array copy.
     [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
     unsafe internal static int BinarySearch<T>(T* array, int index, int length, T value, IComparer<T> comparer, int arrayStride) where T : unmanaged
     {
@@ -1103,22 +1105,22 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
         return (1 + adjusted / entriesPerChunk, (adjusted % entriesPerChunk) * BTreeDirectoryEntry.Size);
     }
 
-    public override unsafe int Add(void* keyAddr, int value, ref ChunkAccessor<TStore> accessor) => Add(Unsafe.AsRef<TKey>(keyAddr), value, ref accessor, out _);
-    public override unsafe int Add(void* keyAddr, int value, ref ChunkAccessor<TStore> accessor, out int bufferRootId)
-        => Add(Unsafe.AsRef<TKey>(keyAddr), value, ref accessor, out bufferRootId);
-    public override unsafe bool Remove(void* keyAddr, out int value, ref ChunkAccessor<TStore> accessor)
-        => Remove(Unsafe.AsRef<TKey>(keyAddr), out value, ref accessor);
-    public override unsafe Result<int, BTreeLookupStatus> TryGet(void* keyAddr, ref ChunkAccessor<TStore> accessor)
-        => TryGet(Unsafe.AsRef<TKey>(keyAddr), ref accessor);
-    public override unsafe bool RemoveValue(void* keyAddr, int elementId, int value, ref ChunkAccessor<TStore> accessor, bool preserveEmptyBuffer = false)
-        => RemoveValue(Unsafe.AsRef<TKey>(keyAddr), elementId, value, ref accessor, preserveEmptyBuffer);
-    public override unsafe VariableSizedBufferAccessor<int, TStore> TryGetMultiple(void* keyAddr, ref ChunkAccessor<TStore> accessor)
-        => TryGetMultiple(Unsafe.AsRef<TKey>(keyAddr), ref accessor);
-    public override unsafe bool Move(void* oldKeyAddr, void* newKeyAddr, int value, ref ChunkAccessor<TStore> accessor)
-        => Move(Unsafe.AsRef<TKey>(oldKeyAddr), Unsafe.AsRef<TKey>(newKeyAddr), value, ref accessor);
-    public override unsafe int MoveValue(void* oldKeyAddr, void* newKeyAddr, int elementId, int value,
+    public override int Add(ref byte keyAddr, int value, ref ChunkAccessor<TStore> accessor) => Add(Unsafe.As<byte, TKey>(ref keyAddr), value, ref accessor, out _);
+    public override int Add(ref byte keyAddr, int value, ref ChunkAccessor<TStore> accessor, out int bufferRootId)
+        => Add(Unsafe.As<byte, TKey>(ref keyAddr), value, ref accessor, out bufferRootId);
+    public override bool Remove(ref byte keyAddr, out int value, ref ChunkAccessor<TStore> accessor)
+        => Remove(Unsafe.As<byte, TKey>(ref keyAddr), out value, ref accessor);
+    public override Result<int, BTreeLookupStatus> TryGet(ref byte keyAddr, ref ChunkAccessor<TStore> accessor)
+        => TryGet(Unsafe.As<byte, TKey>(ref keyAddr), ref accessor);
+    public override bool RemoveValue(ref byte keyAddr, int elementId, int value, ref ChunkAccessor<TStore> accessor, bool preserveEmptyBuffer = false)
+        => RemoveValue(Unsafe.As<byte, TKey>(ref keyAddr), elementId, value, ref accessor, preserveEmptyBuffer);
+    public override VariableSizedBufferAccessor<int, TStore> TryGetMultiple(ref byte keyAddr, ref ChunkAccessor<TStore> accessor)
+        => TryGetMultiple(Unsafe.As<byte, TKey>(ref keyAddr), ref accessor);
+    public override bool Move(ref byte oldKeyAddr, ref byte newKeyAddr, int value, ref ChunkAccessor<TStore> accessor)
+        => Move(Unsafe.As<byte, TKey>(ref oldKeyAddr), Unsafe.As<byte, TKey>(ref newKeyAddr), value, ref accessor);
+    public override int MoveValue(ref byte oldKeyAddr, ref byte newKeyAddr, int elementId, int value,
         ref ChunkAccessor<TStore> accessor, out int oldHeadBufferId, out int newHeadBufferId, bool preserveEmptyBuffer = false)
-        => MoveValue(Unsafe.AsRef<TKey>(oldKeyAddr), Unsafe.AsRef<TKey>(newKeyAddr), elementId, value,
+        => MoveValue(Unsafe.As<byte, TKey>(ref oldKeyAddr), Unsafe.As<byte, TKey>(ref newKeyAddr), elementId, value,
             ref accessor, out oldHeadBufferId, out newHeadBufferId, preserveEmptyBuffer);
 
     public int Add(TKey key, int value, ref ChunkAccessor<TStore> accessor) => Add(key, value, ref accessor, out _);

@@ -11,6 +11,9 @@ namespace Typhon.Engine.Internals;
 /// </summary>
 internal static unsafe class SimdPredicateEvaluator
 {
+    // KEEP(ptr): Avx2/Avx512 GatherVector256 + SIMD compare intrinsics take int*/float*/double* base pointers — there is
+    // no managed-ref overload; compBase and the derived typed bases stay raw.
+
     /// <summary>Returns true if the given KeyType can be evaluated via SIMD gather+compare.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static bool IsSimdEligible(KeyType keyType) =>

@@ -3,6 +3,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using System;
 using System.IO;
+using System.Runtime.CompilerServices;
 
 namespace Typhon.Benchmark;
 
@@ -389,7 +390,7 @@ public unsafe class RawValueHashMap_PointBenchmarks
             for (int i = 1; i <= N; i++)
             {
                 *(long*)buf = i * 10;
-                _rawMap.Insert(i, buf, ref acc, null);
+                _rawMap.Insert(i, ref Unsafe.AsRef<byte>(buf), ref acc, null);
             }
             acc.Dispose();
         }
@@ -429,7 +430,7 @@ public unsafe class RawValueHashMap_PointBenchmarks
         byte* buf = stackalloc byte[ValueSize];
         var acc = _rawSegment.CreateChunkAccessor();
         var key = _randomKeys[_opIndex++ % _randomKeys.Length];
-        var found = _rawMap.TryGet(key, buf, ref acc);
+        var found = _rawMap.TryGet(key, ref Unsafe.AsRef<byte>(buf), ref acc);
         acc.Dispose();
         return found;
     }
@@ -470,7 +471,7 @@ public unsafe class RawValueHashMap_PointBenchmarks
         if (_rawMap.Remove(key, ref acc, null))
         {
             *(long*)buf = key * 10;
-            _rawMap.Insert(key, buf, ref acc, null);
+            _rawMap.Insert(key, ref Unsafe.AsRef<byte>(buf), ref acc, null);
         }
         acc.Dispose();
     }

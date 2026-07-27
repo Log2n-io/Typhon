@@ -94,85 +94,40 @@ unsafe public struct IndexString64Chunk
         }
     }
 
+    // Control byte/short layout (little-endian x64/ARM64): byte0-1 = StateFlags (low 16b), byte1 = ContentionHint,
+    // byte2 = Start, byte3 = Count. Formerly poked via `fixed(int* c=&Control); ((byte*)c)[n]` — now pure
+    // bit-arithmetic (same little-endian semantics the pointer form already assumed), no pin, no unsafe.
     public int Count
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
-        get
-        {
-            fixed (int* c = &Control)
-            {
-                return ((byte*)c)[3];
-            }
-        }
+        get => (Control >> 24) & 0xFF;
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
-        set
-        {
-            fixed (int* c = &Control)
-            {
-                ((byte*)c)[3] = (byte)value;
-            }
-        }
+        set => Control = (Control & 0x00FFFFFF) | ((value & 0xFF) << 24);
     }
 
     public int Start
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
-        get
-        {
-            fixed (int* c = &Control)
-            {
-                return ((byte*)c)[2];
-            }
-        }
+        get => (Control >> 16) & 0xFF;
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
-        set
-        {
-            fixed (int* c = &Control)
-            {
-                ((byte*)c)[2] = (byte)value;
-            }
-        }
+        set => Control = (Control & unchecked((int)0xFF00FFFF)) | ((value & 0xFF) << 16);
     }
 
     public int ContentionHint
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
-        get
-        {
-            fixed (int* c = &Control)
-            {
-                return ((byte*)c)[1];
-            }
-        }
+        get => (Control >> 8) & 0xFF;
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
-        set
-        {
-            fixed (int* c = &Control)
-            {
-                ((byte*)c)[1] = (byte)value;
-            }
-        }
+        set => Control = (Control & unchecked((int)0xFFFF00FF)) | ((value & 0xFF) << 8);
     }
 
     public int End => Adjust(Start + Count);
     public NodeStates StateFlags
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
-        get
-        {
-            fixed (int* c = &Control)
-            {
-                return (NodeStates)((short*)c)[0];
-            }
-        }
+        get => (NodeStates)(short)Control;
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
-        set
-        {
-            fixed (int* c = &Control)
-            {
-                ((short*)c)[0] = (short)value;
-            }
-        }
+        set => Control = (Control & unchecked((int)0xFFFF0000)) | (ushort)(short)value;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
@@ -443,6 +398,7 @@ internal abstract class String64BTree<TStore> : BTree<String64, TStore> where TS
         public override int BinarySearch(NodeWrapper node, String64 key, IComparer<String64> comparer, ref ChunkAccessor<TStore> accessor)
         {
             ref readonly var chunk = ref accessor.GetChunkReadOnly<IndexString64Chunk>(node.ChunkId);
+            // KEEP(ptr): search core — fixed pin feeds pointer-based BTreeExtensions.BinarySearch over the 64-byte String64 key buffer.
             fixed (void* keys = chunk.Keys)
             {
                 if (IsRotated(node, ref accessor))

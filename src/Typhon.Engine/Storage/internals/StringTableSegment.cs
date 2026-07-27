@@ -104,6 +104,7 @@ internal class StringTableSegment<TStore> where TStore : struct, IPageStore
 
             accessor.Dispose();
 
+            // KEEP(ptr): interop — Marshal.PtrToStringUTF8 needs a raw pointer; pinning the span is the minimal bridge.
             fixed (byte* d = ustr)
             {
                 return Marshal.PtrToStringUTF8(new IntPtr(d), totalSize);

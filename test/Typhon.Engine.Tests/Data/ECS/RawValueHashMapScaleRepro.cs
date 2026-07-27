@@ -5,6 +5,7 @@ using Serilog;
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Runtime.CompilerServices;
 
 namespace Typhon.Engine.Tests;
 
@@ -152,7 +153,7 @@ unsafe class RawValueHashMapScaleRepro
                         recAsLong[0] = key;
                         recAsLong[1] = key;
                         recAsLong[2] = key;
-                        map.InsertNew(key, record, ref accessor, cs);
+                        map.InsertNew(key, ref Unsafe.AsRef<byte>(record), ref accessor, cs);
                     }
                 }
                 finally
@@ -212,7 +213,7 @@ unsafe class RawValueHashMapScaleRepro
                 for (int i = 0; i < totalEntries; i++)
                 {
                     long key = i + 1;
-                    if (!map.TryGet(key, readBuf, ref accessor))
+                    if (!map.TryGet(key, ref Unsafe.AsRef<byte>(readBuf), ref accessor))
                     {
                         notFound++;
                         if (notFound <= 10)

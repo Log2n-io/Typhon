@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 using NUnit.Framework;
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using System.Threading;
 
 namespace Typhon.Engine.Tests;
@@ -79,17 +80,17 @@ unsafe class RawValuePagedHashMapTests
 
         // Build entity record
         byte* record = stackalloc byte[valueSize];
-        EntityRecordAccessor.InitializeRecord(record, 2);
-        EntityRecordAccessor.GetHeader(record).BornTSN = 42;
-        EntityRecordAccessor.GetHeader(record).EnabledBits = 0b11;
-        EntityRecordAccessor.SetLocation(record, 0, 100);
-        EntityRecordAccessor.SetLocation(record, 1, 200);
+        EntityRecordAccessor.InitializeRecord(ref Unsafe.AsRef<byte>(record), 2);
+        EntityRecordAccessor.GetHeader(ref Unsafe.AsRef<byte>(record)).BornTSN = 42;
+        EntityRecordAccessor.GetHeader(ref Unsafe.AsRef<byte>(record)).EnabledBits = 0b11;
+        EntityRecordAccessor.SetLocation(ref Unsafe.AsRef<byte>(record), 0, 100);
+        EntityRecordAccessor.SetLocation(ref Unsafe.AsRef<byte>(record), 1, 200);
 
         // Insert
         using (EpochGuard.Enter(em))
         {
             var accessor = segment.CreateChunkAccessor();
-            map.Insert(1L, record, ref accessor, null);
+            map.Insert(1L, ref Unsafe.AsRef<byte>(record), ref accessor, null);
             accessor.Dispose();
         }
 
@@ -100,15 +101,15 @@ unsafe class RawValuePagedHashMapTests
         using (EpochGuard.Enter(em))
         {
             var accessor = segment.CreateChunkAccessor();
-            bool found = map.TryGet(1L, readBuf, ref accessor);
+            bool found = map.TryGet(1L, ref Unsafe.AsRef<byte>(readBuf), ref accessor);
             accessor.Dispose();
             Assert.That(found, Is.True);
         }
 
-        Assert.That(EntityRecordAccessor.GetHeader(readBuf).BornTSN, Is.EqualTo(42));
-        Assert.That(EntityRecordAccessor.GetHeader(readBuf).EnabledBits, Is.EqualTo(0b11));
-        Assert.That(EntityRecordAccessor.GetLocation(readBuf, 0), Is.EqualTo(100));
-        Assert.That(EntityRecordAccessor.GetLocation(readBuf, 1), Is.EqualTo(200));
+        Assert.That(EntityRecordAccessor.GetHeader(ref Unsafe.AsRef<byte>(readBuf)).BornTSN, Is.EqualTo(42));
+        Assert.That(EntityRecordAccessor.GetHeader(ref Unsafe.AsRef<byte>(readBuf)).EnabledBits, Is.EqualTo(0b11));
+        Assert.That(EntityRecordAccessor.GetLocation(ref Unsafe.AsRef<byte>(readBuf), 0), Is.EqualTo(100));
+        Assert.That(EntityRecordAccessor.GetLocation(ref Unsafe.AsRef<byte>(readBuf), 1), Is.EqualTo(200));
     }
 
     // ── ClearForRebuild: the crash-recovery reset used to make the EntityMap derived-on-crash (03-recovery.md §7). Frees every bucket/overflow chunk by bitmap, resets the
@@ -132,10 +133,10 @@ unsafe class RawValuePagedHashMapTests
             var accessor = segment.CreateChunkAccessor();
             for (int i = 1; i <= n; i++)
             {
-                EntityRecordAccessor.InitializeRecord(record, 2);
-                EntityRecordAccessor.GetHeader(record).BornTSN = i;
-                EntityRecordAccessor.SetLocation(record, 0, i * 10);
-                map.Insert(i, record, ref accessor, null);
+                EntityRecordAccessor.InitializeRecord(ref Unsafe.AsRef<byte>(record), 2);
+                EntityRecordAccessor.GetHeader(ref Unsafe.AsRef<byte>(record)).BornTSN = i;
+                EntityRecordAccessor.SetLocation(ref Unsafe.AsRef<byte>(record), 0, i * 10);
+                map.Insert(i, ref Unsafe.AsRef<byte>(record), ref accessor, null);
             }
             accessor.Dispose();
         }
@@ -149,8 +150,8 @@ unsafe class RawValuePagedHashMapTests
         using (EpochGuard.Enter(em))
         {
             var accessor = segment.CreateChunkAccessor();
-            Assert.That(map.TryGet(1, readBuf, ref accessor), Is.False, "every pre-clear key must miss after ClearForRebuild");
-            Assert.That(map.TryGet(n, readBuf, ref accessor), Is.False);
+            Assert.That(map.TryGet(1, ref Unsafe.AsRef<byte>(readBuf), ref accessor), Is.False, "every pre-clear key must miss after ClearForRebuild");
+            Assert.That(map.TryGet(n, ref Unsafe.AsRef<byte>(readBuf), ref accessor), Is.False);
             accessor.Dispose();
         }
 
@@ -160,10 +161,10 @@ unsafe class RawValuePagedHashMapTests
             var accessor = segment.CreateChunkAccessor();
             for (int i = 1; i <= n; i++)
             {
-                EntityRecordAccessor.InitializeRecord(record, 2);
-                EntityRecordAccessor.GetHeader(record).BornTSN = i * 2;
-                EntityRecordAccessor.SetLocation(record, 0, i * 20);
-                map.InsertDuringRebuild(i, record, ref accessor, null);
+                EntityRecordAccessor.InitializeRecord(ref Unsafe.AsRef<byte>(record), 2);
+                EntityRecordAccessor.GetHeader(ref Unsafe.AsRef<byte>(record)).BornTSN = i * 2;
+                EntityRecordAccessor.SetLocation(ref Unsafe.AsRef<byte>(record), 0, i * 20);
+                map.InsertDuringRebuild(i, ref Unsafe.AsRef<byte>(record), ref accessor, null);
             }
             accessor.Dispose();
         }
@@ -174,9 +175,9 @@ unsafe class RawValuePagedHashMapTests
             var accessor = segment.CreateChunkAccessor();
             for (int i = 1; i <= n; i++)
             {
-                Assert.That(map.TryGet(i, readBuf, ref accessor), Is.True, $"rebuilt entry {i} not found");
-                Assert.That(EntityRecordAccessor.GetHeader(readBuf).BornTSN, Is.EqualTo(i * 2));
-                Assert.That(EntityRecordAccessor.GetLocation(readBuf, 0), Is.EqualTo(i * 20));
+                Assert.That(map.TryGet(i, ref Unsafe.AsRef<byte>(readBuf), ref accessor), Is.True, $"rebuilt entry {i} not found");
+                Assert.That(EntityRecordAccessor.GetHeader(ref Unsafe.AsRef<byte>(readBuf)).BornTSN, Is.EqualTo(i * 2));
+                Assert.That(EntityRecordAccessor.GetLocation(ref Unsafe.AsRef<byte>(readBuf), 0), Is.EqualTo(i * 20));
             }
             accessor.Dispose();
         }
@@ -200,11 +201,11 @@ unsafe class RawValuePagedHashMapTests
             var accessor = segment.CreateChunkAccessor();
             for (int i = 1; i <= 10; i++)
             {
-                EntityRecordAccessor.InitializeRecord(record, 2);
-                EntityRecordAccessor.GetHeader(record).BornTSN = i * 10;
-                EntityRecordAccessor.SetLocation(record, 0, i * 100);
-                EntityRecordAccessor.SetLocation(record, 1, i * 200);
-                map.Insert(i, record, ref accessor, null);
+                EntityRecordAccessor.InitializeRecord(ref Unsafe.AsRef<byte>(record), 2);
+                EntityRecordAccessor.GetHeader(ref Unsafe.AsRef<byte>(record)).BornTSN = i * 10;
+                EntityRecordAccessor.SetLocation(ref Unsafe.AsRef<byte>(record), 0, i * 100);
+                EntityRecordAccessor.SetLocation(ref Unsafe.AsRef<byte>(record), 1, i * 200);
+                map.Insert(i, ref Unsafe.AsRef<byte>(record), ref accessor, null);
             }
             accessor.Dispose();
         }
@@ -218,10 +219,10 @@ unsafe class RawValuePagedHashMapTests
             var accessor = segment.CreateChunkAccessor();
             for (int i = 1; i <= 10; i++)
             {
-                bool found = map.TryGet(i, readBuf, ref accessor);
+                bool found = map.TryGet(i, ref Unsafe.AsRef<byte>(readBuf), ref accessor);
                 Assert.That(found, Is.True, $"Entry {i} not found");
-                Assert.That(EntityRecordAccessor.GetHeader(readBuf).BornTSN, Is.EqualTo(i * 10));
-                Assert.That(EntityRecordAccessor.GetLocation(readBuf, 0), Is.EqualTo(i * 100));
+                Assert.That(EntityRecordAccessor.GetHeader(ref Unsafe.AsRef<byte>(readBuf)).BornTSN, Is.EqualTo(i * 10));
+                Assert.That(EntityRecordAccessor.GetLocation(ref Unsafe.AsRef<byte>(readBuf), 0), Is.EqualTo(i * 100));
             }
             accessor.Dispose();
         }
@@ -239,13 +240,13 @@ unsafe class RawValuePagedHashMapTests
         var map = RawValuePagedHashMap<long, PersistentStore>.Create(segment, 4, valueSize);
 
         byte* record = stackalloc byte[valueSize];
-        EntityRecordAccessor.InitializeRecord(record, 1);
+        EntityRecordAccessor.InitializeRecord(ref Unsafe.AsRef<byte>(record), 1);
 
         using (EpochGuard.Enter(em))
         {
             var accessor = segment.CreateChunkAccessor();
-            Assert.That(map.Insert(1L, record, ref accessor, null), Is.True);
-            Assert.That(map.Insert(1L, record, ref accessor, null), Is.False);
+            Assert.That(map.Insert(1L, ref Unsafe.AsRef<byte>(record), ref accessor, null), Is.True);
+            Assert.That(map.Insert(1L, ref Unsafe.AsRef<byte>(record), ref accessor, null), Is.False);
             accessor.Dispose();
         }
 
@@ -268,16 +269,16 @@ unsafe class RawValuePagedHashMapTests
         var map = RawValuePagedHashMap<long, PersistentStore>.Create(segment, 4, valueSize);
 
         byte* record = stackalloc byte[valueSize];
-        EntityRecordAccessor.InitializeRecord(record, 2);
-        EntityRecordAccessor.GetHeader(record).BornTSN = 10;
+        EntityRecordAccessor.InitializeRecord(ref Unsafe.AsRef<byte>(record), 2);
+        EntityRecordAccessor.GetHeader(ref Unsafe.AsRef<byte>(record)).BornTSN = 10;
 
         using (EpochGuard.Enter(em))
         {
             var accessor = segment.CreateChunkAccessor();
-            map.Upsert(1L, record, ref accessor, null);
+            map.Upsert(1L, ref Unsafe.AsRef<byte>(record), ref accessor, null);
 
-            EntityRecordAccessor.GetHeader(record).DiedTSN = 50;
-            map.Upsert(1L, record, ref accessor, null);
+            EntityRecordAccessor.GetHeader(ref Unsafe.AsRef<byte>(record)).DiedTSN = 50;
+            map.Upsert(1L, ref Unsafe.AsRef<byte>(record), ref accessor, null);
             accessor.Dispose();
         }
 
@@ -285,12 +286,12 @@ unsafe class RawValuePagedHashMapTests
         using (EpochGuard.Enter(em))
         {
             var accessor = segment.CreateChunkAccessor();
-            map.TryGet(1L, readBuf, ref accessor);
+            map.TryGet(1L, ref Unsafe.AsRef<byte>(readBuf), ref accessor);
             accessor.Dispose();
         }
 
-        Assert.That(EntityRecordAccessor.GetHeader(readBuf).BornTSN, Is.EqualTo(10));
-        Assert.That(EntityRecordAccessor.GetHeader(readBuf).DiedTSN, Is.EqualTo(50));
+        Assert.That(EntityRecordAccessor.GetHeader(ref Unsafe.AsRef<byte>(readBuf)).BornTSN, Is.EqualTo(10));
+        Assert.That(EntityRecordAccessor.GetHeader(ref Unsafe.AsRef<byte>(readBuf)).DiedTSN, Is.EqualTo(50));
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -309,12 +310,12 @@ unsafe class RawValuePagedHashMapTests
         var map = RawValuePagedHashMap<long, PersistentStore>.Create(segment, 4, valueSize);
 
         byte* record = stackalloc byte[valueSize];
-        EntityRecordAccessor.InitializeRecord(record, 1);
+        EntityRecordAccessor.InitializeRecord(ref Unsafe.AsRef<byte>(record), 1);
 
         using (EpochGuard.Enter(em))
         {
             var accessor = segment.CreateChunkAccessor();
-            map.Insert(1L, record, ref accessor, null);
+            map.Insert(1L, ref Unsafe.AsRef<byte>(record), ref accessor, null);
             accessor.Dispose();
         }
 
@@ -373,9 +374,9 @@ unsafe class RawValuePagedHashMapTests
             var accessor = segment.CreateChunkAccessor();
             for (int i = 1; i <= 100; i++)
             {
-                EntityRecordAccessor.InitializeRecord(record, 2);
-                EntityRecordAccessor.GetHeader(record).BornTSN = i;
-                map.Insert(i, record, ref accessor, null);
+                EntityRecordAccessor.InitializeRecord(ref Unsafe.AsRef<byte>(record), 2);
+                EntityRecordAccessor.GetHeader(ref Unsafe.AsRef<byte>(record)).BornTSN = i;
+                map.Insert(i, ref Unsafe.AsRef<byte>(record), ref accessor, null);
             }
             accessor.Dispose();
         }
@@ -389,9 +390,9 @@ unsafe class RawValuePagedHashMapTests
             var accessor = segment.CreateChunkAccessor();
             for (int i = 1; i <= 100; i++)
             {
-                bool found = map.TryGet(i, readBuf, ref accessor);
+                bool found = map.TryGet(i, ref Unsafe.AsRef<byte>(readBuf), ref accessor);
                 Assert.That(found, Is.True, $"Entry {i} not found after splits");
-                Assert.That(EntityRecordAccessor.GetHeader(readBuf).BornTSN, Is.EqualTo(i));
+                Assert.That(EntityRecordAccessor.GetHeader(ref Unsafe.AsRef<byte>(readBuf)).BornTSN, Is.EqualTo(i));
             }
             accessor.Dispose();
         }
@@ -420,10 +421,10 @@ unsafe class RawValuePagedHashMapTests
             var accessor = segment.CreateChunkAccessor();
             for (int i = 1; i <= 20; i++)
             {
-                EntityRecordAccessor.InitializeRecord(record, 2);
-                EntityRecordAccessor.GetHeader(record).BornTSN = i * 10;
-                EntityRecordAccessor.SetLocation(record, 0, i * 100);
-                map.Insert(i, record, ref accessor, null);
+                EntityRecordAccessor.InitializeRecord(ref Unsafe.AsRef<byte>(record), 2);
+                EntityRecordAccessor.GetHeader(ref Unsafe.AsRef<byte>(record)).BornTSN = i * 10;
+                EntityRecordAccessor.SetLocation(ref Unsafe.AsRef<byte>(record), 0, i * 100);
+                map.Insert(i, ref Unsafe.AsRef<byte>(record), ref accessor, null);
             }
             accessor.Dispose();
         }
@@ -444,9 +445,9 @@ unsafe class RawValuePagedHashMapTests
             var accessor = segment.CreateChunkAccessor();
             for (int i = 1; i <= 20; i++)
             {
-                bool found = map.TryGet(i, readBuf, ref accessor);
+                bool found = map.TryGet(i, ref Unsafe.AsRef<byte>(readBuf), ref accessor);
                 Assert.That(found, Is.True, $"Entry {i} not found after EnsureCapacity");
-                Assert.That(EntityRecordAccessor.GetHeader(readBuf).BornTSN, Is.EqualTo(i * 10));
+                Assert.That(EntityRecordAccessor.GetHeader(ref Unsafe.AsRef<byte>(readBuf)).BornTSN, Is.EqualTo(i * 10));
             }
             accessor.Dispose();
         }
@@ -479,9 +480,9 @@ unsafe class RawValuePagedHashMapTests
             var accessor = segment.CreateChunkAccessor();
             for (int i = 1; i <= 150; i++)
             {
-                EntityRecordAccessor.InitializeRecord(record, 2);
-                EntityRecordAccessor.GetHeader(record).BornTSN = i;
-                map.Insert(i, record, ref accessor, null);
+                EntityRecordAccessor.InitializeRecord(ref Unsafe.AsRef<byte>(record), 2);
+                EntityRecordAccessor.GetHeader(ref Unsafe.AsRef<byte>(record)).BornTSN = i;
+                map.Insert(i, ref Unsafe.AsRef<byte>(record), ref accessor, null);
             }
             accessor.Dispose();
         }
@@ -496,9 +497,9 @@ unsafe class RawValuePagedHashMapTests
             var accessor = segment.CreateChunkAccessor();
             for (int i = 1; i <= 150; i++)
             {
-                bool found = map.TryGet(i, readBuf, ref accessor);
+                bool found = map.TryGet(i, ref Unsafe.AsRef<byte>(readBuf), ref accessor);
                 Assert.That(found, Is.True, $"Entry {i} not found");
-                Assert.That(EntityRecordAccessor.GetHeader(readBuf).BornTSN, Is.EqualTo(i));
+                Assert.That(EntityRecordAccessor.GetHeader(ref Unsafe.AsRef<byte>(readBuf)).BornTSN, Is.EqualTo(i));
             }
 
             // Structural integrity check
@@ -526,18 +527,18 @@ unsafe class RawValuePagedHashMapTests
         var map = RawValuePagedHashMap<long, PersistentStore>.Create(segment, 4, valueSize);
 
         byte* record = stackalloc byte[valueSize];
-        EntityRecordAccessor.InitializeRecord(record, componentCount);
-        EntityRecordAccessor.GetHeader(record).BornTSN = 999;
-        EntityRecordAccessor.GetHeader(record).EnabledBits = (ushort)((1 << componentCount) - 1);
+        EntityRecordAccessor.InitializeRecord(ref Unsafe.AsRef<byte>(record), componentCount);
+        EntityRecordAccessor.GetHeader(ref Unsafe.AsRef<byte>(record)).BornTSN = 999;
+        EntityRecordAccessor.GetHeader(ref Unsafe.AsRef<byte>(record)).EnabledBits = (ushort)((1 << componentCount) - 1);
         for (int s = 0; s < componentCount; s++)
         {
-            EntityRecordAccessor.SetLocation(record, s, (s + 1) * 1000);
+            EntityRecordAccessor.SetLocation(ref Unsafe.AsRef<byte>(record), s, (s + 1) * 1000);
         }
 
         using (EpochGuard.Enter(em))
         {
             var accessor = segment.CreateChunkAccessor();
-            map.Insert(42L, record, ref accessor, null);
+            map.Insert(42L, ref Unsafe.AsRef<byte>(record), ref accessor, null);
             accessor.Dispose();
         }
 
@@ -545,16 +546,16 @@ unsafe class RawValuePagedHashMapTests
         using (EpochGuard.Enter(em))
         {
             var accessor = segment.CreateChunkAccessor();
-            bool found = map.TryGet(42L, readBuf, ref accessor);
+            bool found = map.TryGet(42L, ref Unsafe.AsRef<byte>(readBuf), ref accessor);
             accessor.Dispose();
             Assert.That(found, Is.True);
         }
 
-        Assert.That(EntityRecordAccessor.GetHeader(readBuf).BornTSN, Is.EqualTo(999));
-        Assert.That(EntityRecordAccessor.GetHeader(readBuf).EnabledBits, Is.EqualTo((1 << componentCount) - 1));
+        Assert.That(EntityRecordAccessor.GetHeader(ref Unsafe.AsRef<byte>(readBuf)).BornTSN, Is.EqualTo(999));
+        Assert.That(EntityRecordAccessor.GetHeader(ref Unsafe.AsRef<byte>(readBuf)).EnabledBits, Is.EqualTo((1 << componentCount) - 1));
         for (int s = 0; s < componentCount; s++)
         {
-            Assert.That(EntityRecordAccessor.GetLocation(readBuf, s), Is.EqualTo((s + 1) * 1000), $"Location[{s}]");
+            Assert.That(EntityRecordAccessor.GetLocation(ref Unsafe.AsRef<byte>(readBuf), s), Is.EqualTo((s + 1) * 1000), $"Location[{s}]");
         }
     }
 
@@ -576,14 +577,14 @@ unsafe class RawValuePagedHashMapTests
         long largeTsn = (1L << 47) - 1;
 
         byte* record = stackalloc byte[valueSize];
-        EntityRecordAccessor.InitializeRecord(record, 1);
-        EntityRecordAccessor.GetHeader(record).BornTSN = largeTsn;
-        EntityRecordAccessor.GetHeader(record).DiedTSN = largeTsn - 1000;
+        EntityRecordAccessor.InitializeRecord(ref Unsafe.AsRef<byte>(record), 1);
+        EntityRecordAccessor.GetHeader(ref Unsafe.AsRef<byte>(record)).BornTSN = largeTsn;
+        EntityRecordAccessor.GetHeader(ref Unsafe.AsRef<byte>(record)).DiedTSN = largeTsn - 1000;
 
         using (EpochGuard.Enter(em))
         {
             var accessor = segment.CreateChunkAccessor();
-            map.Insert(1L, record, ref accessor, null);
+            map.Insert(1L, ref Unsafe.AsRef<byte>(record), ref accessor, null);
             accessor.Dispose();
         }
 
@@ -591,12 +592,12 @@ unsafe class RawValuePagedHashMapTests
         using (EpochGuard.Enter(em))
         {
             var accessor = segment.CreateChunkAccessor();
-            map.TryGet(1L, readBuf, ref accessor);
+            map.TryGet(1L, ref Unsafe.AsRef<byte>(readBuf), ref accessor);
             accessor.Dispose();
         }
 
-        Assert.That(EntityRecordAccessor.GetHeader(readBuf).BornTSN, Is.EqualTo(largeTsn));
-        Assert.That(EntityRecordAccessor.GetHeader(readBuf).DiedTSN, Is.EqualTo(largeTsn - 1000));
+        Assert.That(EntityRecordAccessor.GetHeader(ref Unsafe.AsRef<byte>(readBuf)).BornTSN, Is.EqualTo(largeTsn));
+        Assert.That(EntityRecordAccessor.GetHeader(ref Unsafe.AsRef<byte>(readBuf)).DiedTSN, Is.EqualTo(largeTsn - 1000));
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -607,7 +608,7 @@ unsafe class RawValuePagedHashMapTests
     private struct KeyCollector : RawValuePagedHashMap<long, PersistentStore>.IEntryAction<long>
     {
         public List<long> Keys;
-        public bool Process(long key, byte* value)
+        public bool Process(long key, ref byte value)
         {
             Keys.Add(key);
             return true;
@@ -621,7 +622,7 @@ unsafe class RawValuePagedHashMapTests
         public long MaxKey;
         public HashSet<long> Seen;
         public bool Ok;
-        public bool Process(long key, byte* value)
+        public bool Process(long key, ref byte value)
         {
             if (key < 1 || key > MaxKey || !Seen.Add(key))
             {
@@ -643,13 +644,13 @@ unsafe class RawValuePagedHashMapTests
 
         const int total = 2000; // forces many splits + overflow chains from the n0=4 start
         byte* record = stackalloc byte[valueSize];
-        EntityRecordAccessor.InitializeRecord(record, 2);
+        EntityRecordAccessor.InitializeRecord(ref Unsafe.AsRef<byte>(record), 2);
         using (EpochGuard.Enter(em))
         {
             var accessor = segment.CreateChunkAccessor();
             for (long k = 1; k <= total; k++)
             {
-                map.Insert(k, record, ref accessor, null);
+                map.Insert(k, ref Unsafe.AsRef<byte>(record), ref accessor, null);
             }
             accessor.Dispose();
         }
@@ -690,12 +691,12 @@ unsafe class RawValuePagedHashMapTests
             try
             {
                 byte* record = stackalloc byte[valueSize];
-                EntityRecordAccessor.InitializeRecord(record, 2);
+                EntityRecordAccessor.InitializeRecord(ref Unsafe.AsRef<byte>(record), 2);
                 for (long k = 1; k <= total; k++)
                 {
                     using var guard = EpochGuard.Enter(em);
                     var accessor = segment.CreateChunkAccessor();
-                    map.Insert(k, record, ref accessor, null);
+                    map.Insert(k, ref Unsafe.AsRef<byte>(record), ref accessor, null);
                     accessor.Dispose();
                 }
             }
@@ -768,20 +769,20 @@ unsafe class RawValuePagedHashMapTests
     // Matches every entry — quiescent count must equal the live set size.
     private struct CountAll : RawValuePagedHashMap<long, PersistentStore>.IEntryPredicate<long>
     {
-        public bool Matches(long key, byte* value) => true;
+        public bool Matches(long key, ref byte value) => true;
     }
 
     // Selective predicate — matches even keys only.
     private struct CountEven : RawValuePagedHashMap<long, PersistentStore>.IEntryPredicate<long>
     {
-        public bool Matches(long key, byte* value) => (key & 1L) == 0L;
+        public bool Matches(long key, ref byte value) => (key & 1L) == 0L;
     }
 
     // Matches a single target key — used to assert AnyEntry existence semantics.
     private struct MatchKey : RawValuePagedHashMap<long, PersistentStore>.IEntryPredicate<long>
     {
         public long Target;
-        public bool Matches(long key, byte* value) => key == Target;
+        public bool Matches(long key, ref byte value) => key == Target;
     }
 
     [Test]
@@ -796,13 +797,13 @@ unsafe class RawValuePagedHashMapTests
 
         const int total = 2000; // forces many splits + overflow chains from the n0=4 start
         byte* record = stackalloc byte[valueSize];
-        EntityRecordAccessor.InitializeRecord(record, 2);
+        EntityRecordAccessor.InitializeRecord(ref Unsafe.AsRef<byte>(record), 2);
         using (EpochGuard.Enter(em))
         {
             var accessor = segment.CreateChunkAccessor();
             for (long k = 1; k <= total; k++)
             {
-                map.Insert(k, record, ref accessor, null);
+                map.Insert(k, ref Unsafe.AsRef<byte>(record), ref accessor, null);
             }
             accessor.Dispose();
         }
@@ -842,13 +843,13 @@ unsafe class RawValuePagedHashMapTests
 
         const int total = 500;
         byte* record = stackalloc byte[valueSize];
-        EntityRecordAccessor.InitializeRecord(record, 1);
+        EntityRecordAccessor.InitializeRecord(ref Unsafe.AsRef<byte>(record), 1);
         using (EpochGuard.Enter(em))
         {
             var accessor = segment.CreateChunkAccessor();
             for (long k = 1; k <= total; k++)
             {
-                map.Insert(k, record, ref accessor, null);
+                map.Insert(k, ref Unsafe.AsRef<byte>(record), ref accessor, null);
             }
             accessor.Dispose();
         }
@@ -888,12 +889,12 @@ unsafe class RawValuePagedHashMapTests
             try
             {
                 byte* record = stackalloc byte[valueSize];
-                EntityRecordAccessor.InitializeRecord(record, 2);
+                EntityRecordAccessor.InitializeRecord(ref Unsafe.AsRef<byte>(record), 2);
                 for (long k = 1; k <= total; k++)
                 {
                     using var guard = EpochGuard.Enter(em);
                     var accessor = segment.CreateChunkAccessor();
-                    map.Insert(k, record, ref accessor, null);
+                    map.Insert(k, ref Unsafe.AsRef<byte>(record), ref accessor, null);
                     accessor.Dispose();
                 }
             }

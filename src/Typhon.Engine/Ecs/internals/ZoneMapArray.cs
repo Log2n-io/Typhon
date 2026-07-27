@@ -15,7 +15,7 @@ namespace Typhon.Engine.Internals;
 /// <para>Staleness: between tick fences, bounds may be wider than actual data (destroyed boundary entity lingers).
 /// False positives acceptable (cluster checked but no match). False negatives impossible.</para>
 /// </remarks>
-internal sealed unsafe class ZoneMapArray
+internal sealed class ZoneMapArray
 {
     private long[] _mins;       // [clusterChunkId] → min value (ordered long, sign-flipped for float/unsigned ordering)
     private long[] _maxs;       // [clusterChunkId] → max value (ordered long, sign-flipped for float/unsigned ordering)
@@ -42,11 +42,11 @@ internal sealed unsafe class ZoneMapArray
     /// Recompute min/max for a single cluster by scanning all occupied entities.
     /// Called at tick fence for each dirty cluster.
     /// </summary>
-    public void Recompute(int clusterChunkId, byte* clusterBase, ArchetypeClusterInfo layout, int compSlot, int fieldOffset)
+    public void Recompute(int clusterChunkId, ref byte clusterBase, ArchetypeClusterInfo layout, int compSlot, int fieldOffset)
     {
         EnsureCapacity(clusterChunkId);
 
-        ulong occupancy = *(ulong*)clusterBase;
+        ulong occupancy = Unsafe.As<byte, ulong>(ref clusterBase);
         if (occupancy == 0)
         {
             _valid[clusterChunkId] = false;
@@ -54,7 +54,7 @@ internal sealed unsafe class ZoneMapArray
         }
 
         int compSize = layout.ComponentSize(compSlot);
-        byte* compBase = clusterBase + layout.ComponentOffset(compSlot);
+        ref byte compBase = ref Unsafe.Add(ref clusterBase, layout.ComponentOffset(compSlot));
 
         long min = long.MaxValue;
         long max = long.MinValue;
@@ -64,8 +64,8 @@ internal sealed unsafe class ZoneMapArray
         {
             int slotIndex = BitOperations.TrailingZeroCount(bits);
             bits &= bits - 1;
-            byte* fieldPtr = compBase + slotIndex * compSize + fieldOffset;
-            long val = ReadFieldAsOrderedLong(fieldPtr);
+            ref byte fieldPtr = ref Unsafe.Add(ref compBase, slotIndex * compSize + fieldOffset);
+            long val = ReadFieldAsOrderedLong(ref fieldPtr);
             if (val < min)
             {
                 min = val;
@@ -85,10 +85,10 @@ internal sealed unsafe class ZoneMapArray
     /// Widen bounds to include a new value (eager, on spawn). Never narrows.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void Widen(int clusterChunkId, byte* fieldPtr)
+    public void Widen(int clusterChunkId, ref byte fieldPtr)
     {
         EnsureCapacity(clusterChunkId);
-        long val = ReadFieldAsOrderedLong(fieldPtr);
+        long val = ReadFieldAsOrderedLong(ref fieldPtr);
 
         if (!_valid[clusterChunkId])
         {
@@ -140,16 +140,16 @@ internal sealed unsafe class ZoneMapArray
     /// For floats: sign-flip so that negative floats sort before positive.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private long ReadFieldAsOrderedLong(byte* ptr)
+    private long ReadFieldAsOrderedLong(ref byte ptr)
     {
         if (_isFloat)
         {
-            return FloatToOrderedLong(*(float*)ptr);
+            return FloatToOrderedLong(Unsafe.As<byte, float>(ref ptr));
         }
 
         if (_isDouble)
         {
-            return DoubleToOrderedLong(*(double*)ptr);
+            return DoubleToOrderedLong(Unsafe.As<byte, double>(ref ptr));
         }
 
         if (_isUnsigned)
@@ -158,22 +158,22 @@ internal sealed unsafe class ZoneMapArray
             // Maps unsigned 0 → signed MIN, unsigned MAX → signed MAX.
             return _fieldSize switch
             {
-                1 => *ptr,                                             // byte: 0..255 fits, no XOR needed
-                2 => *(ushort*)ptr ^ (1L << 15),                       // ushort: XOR bit 15
-                4 => *(uint*)ptr ^ (1L << 31),                         // uint: XOR bit 31
-                8 => *(long*)ptr ^ long.MinValue,                      // ulong: XOR bit 63
-                _ => *(uint*)ptr ^ (1L << 31),
+                1 => ptr,                                                     // byte: 0..255 fits, no XOR needed
+                2 => Unsafe.As<byte, ushort>(ref ptr) ^ (1L << 15),          // ushort: XOR bit 15
+                4 => Unsafe.As<byte, uint>(ref ptr) ^ (1L << 31),            // uint: XOR bit 31
+                8 => Unsafe.As<byte, long>(ref ptr) ^ long.MinValue,        // ulong: XOR bit 63
+                _ => Unsafe.As<byte, uint>(ref ptr) ^ (1L << 31),
             };
         }
 
         Debug.Assert(_fieldSize is 1 or 2 or 4 or 8, $"Unexpected zone map field size: {_fieldSize}");
         return _fieldSize switch
         {
-            1 => *(sbyte*)ptr,
-            2 => *(short*)ptr,
-            4 => *(int*)ptr,
-            8 => *(long*)ptr,
-            _ => *(int*)ptr,
+            1 => Unsafe.As<byte, sbyte>(ref ptr),
+            2 => Unsafe.As<byte, short>(ref ptr),
+            4 => Unsafe.As<byte, int>(ref ptr),
+            8 => Unsafe.As<byte, long>(ref ptr),
+            _ => Unsafe.As<byte, int>(ref ptr),
         };
     }
 

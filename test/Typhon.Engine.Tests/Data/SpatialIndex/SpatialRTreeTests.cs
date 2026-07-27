@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Runtime.CompilerServices;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using NUnit.Framework;
@@ -457,12 +458,12 @@ public void QueryAABB_vs_BruteForce_RandomData(SpatialVariant variant)
         var (leafId, slot) = tree.Insert(100, 0, coords, ref accessor, categoryMask: mask);
 
         // Read back the stored mask
-        byte* leafBase = accessor.GetChunkAddress(leafId);
-        uint readMask = SpatialNodeHelper.ReadLeafCategoryMask(leafBase, slot, desc);
+        ref byte leafBase = ref Unsafe.AsRef<byte>(accessor.GetChunkAddress(leafId));
+        uint readMask = SpatialNodeHelper.ReadLeafCategoryMask(ref leafBase, slot, desc);
         Assert.That(readMask, Is.EqualTo(mask), "Stored category mask should match inserted value");
 
         // Union mask on the node should also have these bits
-        uint unionMask = SpatialNodeHelper.ReadUnionCategoryMask(leafBase, desc);
+        uint unionMask = SpatialNodeHelper.ReadUnionCategoryMask(ref leafBase, desc);
         Assert.That(unionMask & mask, Is.EqualTo(mask), "Union mask should contain entry's bits");
 
         TreeValidator.Validate(tree);
@@ -586,13 +587,13 @@ public void QueryAABB_vs_BruteForce_RandomData(SpatialVariant variant)
         tree.Insert(2, 0, MakeCoords(variant, 10, 0, 15, 5), ref accessor, categoryMask: 0x02);
 
         // Union should have both bits
-        byte* leafBase = accessor.GetChunkAddress(leaf1);
-        Assert.That(SpatialNodeHelper.ReadUnionCategoryMask(leafBase, desc) & 0x03, Is.EqualTo(0x03u), "Union should have both bits before remove");
+        ref byte leafBase = ref Unsafe.AsRef<byte>(accessor.GetChunkAddress(leaf1));
+        Assert.That(SpatialNodeHelper.ReadUnionCategoryMask(ref leafBase, desc) & 0x03, Is.EqualTo(0x03u), "Union should have both bits before remove");
 
         // Remove entity 1 (mask 0x01) — union should lose bit 0
         tree.Remove(leaf1, slot1, ref accessor);
-        leafBase = accessor.GetChunkAddress(leaf1); // Re-read after potential pointer invalidation
-        uint unionAfter = SpatialNodeHelper.ReadUnionCategoryMask(leafBase, desc);
+        leafBase = ref Unsafe.AsRef<byte>(accessor.GetChunkAddress(leaf1)); // Re-read after potential pointer invalidation
+        uint unionAfter = SpatialNodeHelper.ReadUnionCategoryMask(ref leafBase, desc);
         Assert.That(unionAfter & 0x01, Is.EqualTo(0u), "Union should NOT have bit 0 after removing entity with mask 0x01");
         Assert.That(unionAfter & 0x02, Is.EqualTo(0x02u), "Union should still have bit 1");
 

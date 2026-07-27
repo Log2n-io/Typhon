@@ -74,11 +74,8 @@ internal unsafe struct WalSegmentHeader
     public void ComputeAndSetCrc()
     {
         HeaderCRC = 0;
-        fixed (WalSegmentHeader* self = &this)
-        {
-            var span = new ReadOnlySpan<byte>(self, SizeInBytes);
-            HeaderCRC = Crc32CUtil.ComputeSkipping(span, HeaderCrcOffset, sizeof(uint));
-        }
+        var span = MemoryMarshal.AsBytes(MemoryMarshal.CreateReadOnlySpan(in this, 1));
+        HeaderCRC = Crc32CUtil.ComputeSkipping(span, HeaderCrcOffset, sizeof(uint));
     }
 
     /// <summary>
@@ -98,11 +95,8 @@ internal unsafe struct WalSegmentHeader
         }
 
         var storedCrc = HeaderCRC;
-        fixed (WalSegmentHeader* self = &this)
-        {
-            var span = new ReadOnlySpan<byte>(self, SizeInBytes);
-            var computedCrc = Crc32CUtil.ComputeSkipping(span, HeaderCrcOffset, sizeof(uint));
-            return computedCrc == storedCrc;
-        }
+        var span = MemoryMarshal.AsBytes(MemoryMarshal.CreateReadOnlySpan(in this, 1));
+        var computedCrc = Crc32CUtil.ComputeSkipping(span, HeaderCrcOffset, sizeof(uint));
+        return computedCrc == storedCrc;
     }
 }

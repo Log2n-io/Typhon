@@ -3,6 +3,7 @@ using System.Buffers;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using Microsoft.Extensions.Logging;
 using Typhon.Schema.Definition;
 
@@ -96,6 +97,7 @@ internal static class SchemaEvolutionEngine
     /// <summary>
     /// Applies a widening conversion from old type to new type at the given pointers.
     /// </summary>
+    // KEEP(ptr): src/dst are fed to Buffer.MemoryCopy (needs void*); swapping to Unsafe.CopyBlock would drop its dest-size guard (behavior change).
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static unsafe void ApplyWidening(byte* src, byte* dst, FieldType oldType, FieldType newType, int oldSize, int newSize)
     {
@@ -125,25 +127,25 @@ internal static class SchemaEvolutionEngine
         // Vector/Quaternion float → double: per-component promotion
         if (oldType == FieldType.Point2F && newType == FieldType.Point2D)
         {
-            PromoteFloatComponentsToDouble(src, dst, 2);
+            PromoteFloatComponentsToDouble(ref Unsafe.AsRef<byte>(src), ref Unsafe.AsRef<byte>(dst), 2);
             return;
         }
 
         if (oldType == FieldType.Point3F && newType == FieldType.Point3D)
         {
-            PromoteFloatComponentsToDouble(src, dst, 3);
+            PromoteFloatComponentsToDouble(ref Unsafe.AsRef<byte>(src), ref Unsafe.AsRef<byte>(dst), 3);
             return;
         }
 
         if (oldType == FieldType.Point4F && newType == FieldType.Point4D)
         {
-            PromoteFloatComponentsToDouble(src, dst, 4);
+            PromoteFloatComponentsToDouble(ref Unsafe.AsRef<byte>(src), ref Unsafe.AsRef<byte>(dst), 4);
             return;
         }
 
         if (oldType == FieldType.QuaternionF && newType == FieldType.QuaternionD)
         {
-            PromoteFloatComponentsToDouble(src, dst, 4);
+            PromoteFloatComponentsToDouble(ref Unsafe.AsRef<byte>(src), ref Unsafe.AsRef<byte>(dst), 4);
             return;
         }
 
@@ -159,13 +161,13 @@ internal static class SchemaEvolutionEngine
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static unsafe void PromoteFloatComponentsToDouble(byte* src, byte* dst, int componentCount)
+    private static void PromoteFloatComponentsToDouble(ref byte src, ref byte dst, int componentCount)
     {
-        var srcFloats = (float*)src;
-        var dstDoubles = (double*)dst;
+        ref float srcFloats = ref Unsafe.As<byte, float>(ref src);
+        ref double dstDoubles = ref Unsafe.As<byte, double>(ref dst);
         for (int i = 0; i < componentCount; i++)
         {
-            dstDoubles[i] = srcFloats[i];
+            Unsafe.Add(ref dstDoubles, i) = Unsafe.Add(ref srcFloats, i);
         }
     }
 
@@ -262,15 +264,15 @@ internal static class SchemaEvolutionEngine
                     continue;
                 }
 
-                var oldChunk = oldAccessor.GetChunkAddress(chunkId);
-                ref var header = ref Unsafe.AsRef<CompRevStorageHeader>(oldChunk);
+                ref byte oldChunk = ref Unsafe.AsRef<byte>(oldAccessor.GetChunkAddress(chunkId));
+                ref var header = ref Unsafe.As<byte, CompRevStorageHeader>(ref oldChunk);
 
                 if (header.ChainLength < 1 || header.ItemCount < 1)
                 {
                     continue;
                 }
 
-                var headElement = FindHeadElement(ref header, oldChunk, ref oldAccessor);
+                var headElement = FindHeadElement(ref header, ref oldChunk, ref oldAccessor);
 
                 if (headElement.ComponentChunkId <= 0 || headElement.ComponentChunkId >= oldCompSeg.ChunkCapacity || 
                     !oldCompSeg.IsChunkAllocated(headElement.ComponentChunkId))
@@ -280,10 +282,10 @@ internal static class SchemaEvolutionEngine
 
                 newRevSeg.ReserveChunk(chunkId);
 
-                var newChunk = newAccessor.GetChunkAddress(chunkId, true);
-                new Span<byte>(newChunk, ComponentRevisionManager.CompRevChunkSize).Clear();
+                ref byte newChunk = ref Unsafe.AsRef<byte>(newAccessor.GetChunkAddress(chunkId, true));
+                MemoryMarshal.CreateSpan(ref newChunk, ComponentRevisionManager.CompRevChunkSize).Clear();
 
-                ref var newHeader = ref Unsafe.AsRef<CompRevStorageHeader>(newChunk);
+                ref var newHeader = ref Unsafe.As<byte, CompRevStorageHeader>(ref newChunk);
                 newHeader.NextChunkId = 0;
                 newHeader.ChainLength = 1;
                 newHeader.ItemCount = 1;
@@ -292,8 +294,8 @@ internal static class SchemaEvolutionEngine
                 newHeader.CommitSequence = header.CommitSequence;
                 newHeader.EntityPK = header.EntityPK;
 
-                var elements = (CompRevStorageElement*)(newChunk + Unsafe.SizeOf<CompRevStorageHeader>());
-                elements[0] = headElement;
+                ref var elements = ref Unsafe.As<byte, CompRevStorageElement>(ref Unsafe.Add(ref newChunk, Unsafe.SizeOf<CompRevStorageHeader>()));
+                elements = headElement;
             }
         }
         finally
@@ -306,28 +308,28 @@ internal static class SchemaEvolutionEngine
     /// <summary>
     /// Finds the HEAD (most recent) revision element in a revision chain.
     /// </summary>
-    private static unsafe CompRevStorageElement FindHeadElement(ref CompRevStorageHeader header, byte* rootChunk, ref ChunkAccessor<PersistentStore> accessor)
+    private static unsafe CompRevStorageElement FindHeadElement(ref CompRevStorageHeader header, ref byte rootChunk, ref ChunkAccessor<PersistentStore> accessor)
     {
         var headIndex = header.FirstItemIndex + header.ItemCount - 1;
         var (chunkIndex, indexInChunk) = CompRevStorageHeader.GetRevisionLocation(headIndex);
 
         if (chunkIndex == 0)
         {
-            var elements = (CompRevStorageElement*)(rootChunk + Unsafe.SizeOf<CompRevStorageHeader>());
-            return elements[indexInChunk];
+            ref var elements = ref Unsafe.As<byte, CompRevStorageElement>(ref Unsafe.Add(ref rootChunk, Unsafe.SizeOf<CompRevStorageHeader>()));
+            return Unsafe.Add(ref elements, indexInChunk);
         }
 
         // Walk the chain to find the target chunk
-        var currentChunkId = Unsafe.AsRef<int>(rootChunk); // NextChunkId is the first field
+        var currentChunkId = Unsafe.As<byte, int>(ref rootChunk); // NextChunkId is the first field
         for (int i = 1; i < chunkIndex; i++)
         {
-            var chunkPtr = accessor.GetChunkAddress(currentChunkId);
-            currentChunkId = *(int*)chunkPtr;
+            ref byte chunkPtr = ref Unsafe.AsRef<byte>(accessor.GetChunkAddress(currentChunkId));
+            currentChunkId = Unsafe.As<byte, int>(ref chunkPtr);
         }
 
-        var targetChunkPtr = accessor.GetChunkAddress(currentChunkId);
-        var overflowElements = (CompRevStorageElement*)(targetChunkPtr + sizeof(int));
-        return overflowElements[indexInChunk];
+        ref byte targetChunkPtr = ref Unsafe.AsRef<byte>(accessor.GetChunkAddress(currentChunkId));
+        ref var overflowElements = ref Unsafe.As<byte, CompRevStorageElement>(ref Unsafe.Add(ref targetChunkPtr, sizeof(int)));
+        return Unsafe.Add(ref overflowElements, indexInChunk);
     }
 
     /// <summary>
@@ -581,6 +583,7 @@ internal static class SchemaEvolutionEngine
                     continue;
                 }
 
+                // KEEP(ptr): oldPtr feeds Buffer.MemoryCopy (needs void*); kept byte* alongside ReadOnlySpan/FormatHexDump uses.
                 var oldPtr = oldAccessor.GetChunkAddress(chunkId);
 
                 try
@@ -588,6 +591,7 @@ internal static class SchemaEvolutionEngine
                     // Reserve the same ChunkId in the new segment to preserve index references
                     newSeg.ReserveChunk(chunkId);
 
+                    // KEEP(ptr): newPtr feeds Buffer.MemoryCopy (needs void*); kept byte* alongside Span/ExecuteChain uses.
                     var newPtr = newAccessor.GetChunkAddress(chunkId, true);
 
                     // Zero-fill the new chunk so added fields get default values (not stale memory)
@@ -605,11 +609,11 @@ internal static class SchemaEvolutionEngine
 
                     if (usePool)
                     {
-                        ExecuteChainPooled(chain, oldCompData, newPtr + newOverhead, newCompSize, pooledBufA, pooledBufB);
+                        ExecuteChainPooled(chain, oldCompData, ref Unsafe.AsRef<byte>(newPtr + newOverhead), newCompSize, pooledBufA, pooledBufB);
                     }
                     else
                     {
-                        ExecuteChainStackalloc(chain, oldCompData, newPtr + newOverhead, newCompSize, maxBufSize);
+                        ExecuteChainStackalloc(chain, oldCompData, ref Unsafe.AsRef<byte>(newPtr + newOverhead), newCompSize, maxBufSize);
                     }
 
                     entitiesMigrated++;
@@ -617,7 +621,7 @@ internal static class SchemaEvolutionEngine
                 catch (Exception ex)
                 {
                     failures ??= new List<MigrationFailure>();
-                    var hexDump = FormatHexDump(oldPtr + oldOverhead, oldCompSize);
+                    var hexDump = FormatHexDump(ref Unsafe.AsRef<byte>(oldPtr + oldOverhead), oldCompSize);
                     failures.Add(new MigrationFailure
                     {
                         ChunkId = chunkId,
@@ -650,12 +654,12 @@ internal static class SchemaEvolutionEngine
     /// Executes a migration chain using stackalloc double-buffers (for small components ≤1024 bytes).
     /// </summary>
     [MethodImpl(MethodImplOptions.NoInlining)] // NoInlining to contain the stackalloc frame
-    private static unsafe void ExecuteChainStackalloc(MigrationChain chain, ReadOnlySpan<byte> oldData, byte* destPtr, int destSize, int maxBufSize)
+    private static void ExecuteChainStackalloc(MigrationChain chain, ReadOnlySpan<byte> oldData, ref byte destPtr, int destSize, int maxBufSize)
     {
         if (chain.StepCount == 1)
         {
             // Single-step: transform directly into destination
-            var destSpan = new Span<byte>(destPtr, destSize);
+            var destSpan = MemoryMarshal.CreateSpan(ref destPtr, destSize);
             chain.Steps[0].Execute(oldData, destSpan);
             return;
         }
@@ -682,7 +686,7 @@ internal static class SchemaEvolutionEngine
 
             if (isLast)
             {
-                var destSpan = new Span<byte>(destPtr, destSize);
+                var destSpan = MemoryMarshal.CreateSpan(ref destPtr, destSize);
                 step.Execute(src.Slice(0, steps[i - 1].NewSize), destSpan);
             }
             else
@@ -697,11 +701,11 @@ internal static class SchemaEvolutionEngine
     /// <summary>
     /// Executes a migration chain using ArrayPool-rented buffers (for large components &gt;1024 bytes).
     /// </summary>
-    private static unsafe void ExecuteChainPooled(MigrationChain chain, ReadOnlySpan<byte> oldData, byte* destPtr, int destSize, byte[] bufA, byte[] bufB)
+    private static void ExecuteChainPooled(MigrationChain chain, ReadOnlySpan<byte> oldData, ref byte destPtr, int destSize, byte[] bufA, byte[] bufB)
     {
         if (chain.StepCount == 1)
         {
-            var destSpan = new Span<byte>(destPtr, destSize);
+            var destSpan = MemoryMarshal.CreateSpan(ref destPtr, destSize);
             chain.Steps[0].Execute(oldData, destSpan);
             return;
         }
@@ -716,7 +720,7 @@ internal static class SchemaEvolutionEngine
 
             if (isLast)
             {
-                var destSpan = new Span<byte>(destPtr, destSize);
+                var destSpan = MemoryMarshal.CreateSpan(ref destPtr, destSize);
                 step.Execute(currentSrc, destSpan);
             }
             else
@@ -732,13 +736,13 @@ internal static class SchemaEvolutionEngine
     /// <summary>
     /// Formats a hex dump of raw bytes for diagnostic output in migration failure logs.
     /// </summary>
-    private static unsafe string FormatHexDump(byte* ptr, int size)
+    private static string FormatHexDump(ref byte ptr, int size)
     {
         var displaySize = Math.Min(size, 64); // Cap at 64 bytes for readability
         var chars = new char[displaySize * 2];
         for (int i = 0; i < displaySize; i++)
         {
-            var b = ptr[i];
+            var b = Unsafe.Add(ref ptr, i);
             chars[i * 2] = GetHexChar(b >> 4);
             chars[i * 2 + 1] = GetHexChar(b & 0xF);
         }

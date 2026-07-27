@@ -131,7 +131,7 @@ class SpatialGridTests
         fieldData[2] = 200f;  // MaxX (center = 150)
         fieldData[3] = 400f;  // MaxY (center = 300)
 
-        int key = grid.WorldToCellKeyFromSpatialField((byte*)fieldData, SpatialFieldType.AABB2F);
+        int key = grid.WorldToCellKeyFromSpatialField(ref System.Runtime.CompilerServices.Unsafe.AsRef<byte>((byte*)fieldData), SpatialFieldType.AABB2F);
         var (x, y) = grid.CellKeyToCoords(key);
         Assert.That(x, Is.EqualTo(1));  // 150 / 100 = 1
         Assert.That(y, Is.EqualTo(3));  // 300 / 100 = 3
@@ -147,7 +147,7 @@ class SpatialGridTests
         fieldData[1] = 750f;  // CenterY
         fieldData[2] = 25f;   // Radius (irrelevant)
 
-        int key = grid.WorldToCellKeyFromSpatialField((byte*)fieldData, SpatialFieldType.BSphere2F);
+        int key = grid.WorldToCellKeyFromSpatialField(ref System.Runtime.CompilerServices.Unsafe.AsRef<byte>((byte*)fieldData), SpatialFieldType.BSphere2F);
         var (x, y) = grid.CellKeyToCoords(key);
         Assert.That(x, Is.EqualTo(5));
         Assert.That(y, Is.EqualTo(7));

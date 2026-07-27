@@ -19,16 +19,16 @@ namespace Typhon.Engine.Internals;
 /// </summary>
 /// <summary>
 /// Callback shape consumed by <see cref="RawValuePagedHashMap{TKey,TStore}.TryUpdateInPlace"/>. Implementations
-/// receive a pointer to the existing value bytes inside the bucket and mutate them in place. The pointer is
+/// receive a managed reference to the existing value bytes inside the bucket and mutate them in place. The reference is
 /// only valid while the call is on the stack — must not be stored or returned.
 /// <para>
 /// Implementations should be small <c>ref struct</c> or <c>struct</c> types with the actual update parameters
 /// stored as fields, so the JIT can devirtualise the <see cref="Update"/> call and inline the body.
 /// </para>
 /// </summary>
-internal unsafe interface IRawValueUpdater
+internal interface IRawValueUpdater
 {
-    void Update(byte* valueBytes);
+    void Update(ref byte valueBytes);
 }
 
 unsafe class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStore> where TKey : unmanaged, IEquatable<TKey> where TStore : struct, IPageStore
@@ -96,6 +96,8 @@ unsafe class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStore> where
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private TKey* KeysPtr(byte* chunkAddr) => (TKey*)(chunkAddr + _keysOffset);
 
+    // KEEP(ptr): raw variable-size value — the map's by-design raw-value core. Key/value slots are addressed by
+    // computed byte offsets and copied with Unsafe.CopyBlock; the public API wraps these as ref byte at the boundary.
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private byte* ValueAt(byte* chunkAddr, int index)
     {
@@ -252,7 +254,7 @@ unsafe class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStore> where
     /// <summary>
     /// Look up a key using the OLC read protocol. Copies value bytes to <paramref name="valueOut"/>.
     /// </summary>
-    public bool TryGet(TKey key, byte* valueOut, ref ChunkAccessor<TStore> accessor)
+    public bool TryGet(TKey key, ref byte valueOut, ref ChunkAccessor<TStore> accessor)
     {
         uint hash = ComputeHash(key);
 
@@ -278,7 +280,7 @@ unsafe class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStore> where
             if (found)
             {
                 byte* fAddr = accessor.GetChunkAddress(fChunkId);
-                Unsafe.CopyBlock(valueOut, ValueAt(fAddr, fIndex), (uint)_valueSize);
+                Unsafe.CopyBlock(ref valueOut, ref Unsafe.AsRef<byte>(ValueAt(fAddr, fIndex)), (uint)_valueSize);
             }
 
             if (!latch.ValidateVersion(version))
@@ -302,6 +304,7 @@ unsafe class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStore> where
     /// the chunk stays pinned (before OLC validation). Use <see cref="TryGet"/> for safe access.
     /// Returns null if the key is not found.
     /// </summary>
+    // KEEP(ptr): zero-copy in-place accessor with a null sentinel for "not found" — a ref return would need Unsafe.NullRef juggling for no gain.
     public byte* TryGetPtr(TKey key, ref ChunkAccessor<TStore> accessor)
     {
         uint hash = ComputeHash(key);
@@ -347,7 +350,7 @@ unsafe class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStore> where
     // Write helpers (private)
     // ═══════════════════════════════════════════════════════════════════════
 
-    private void AppendEntry(int startChunkId, TKey key, byte* value, ref ChunkAccessor<TStore> accessor, ChangeSet changeSet)
+    private void AppendEntry(int startChunkId, TKey key, ref byte value, ref ChunkAccessor<TStore> accessor, ChangeSet changeSet)
     {
         int chunkId = startChunkId;
 
@@ -360,7 +363,7 @@ unsafe class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStore> where
             {
                 int idx = header.EntryCount;
                 KeysPtr(addr)[idx] = key;
-                Unsafe.CopyBlock(ValueAt(addr, idx), value, (uint)_valueSize);
+                Unsafe.CopyBlock(ref Unsafe.AsRef<byte>(ValueAt(addr, idx)), ref value, (uint)_valueSize);
                 header.EntryCount = (byte)(idx + 1);
                 return;
             }
@@ -394,7 +397,7 @@ unsafe class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStore> where
             ovHeader.Reserved = 0;
             ovHeader.OverflowChunkId = -1;
             KeysPtr(ovAddr)[0] = key;
-            Unsafe.CopyBlock(ValueAt(ovAddr, 0), value, (uint)_valueSize);
+            Unsafe.CopyBlock(ref Unsafe.AsRef<byte>(ValueAt(ovAddr, 0)), ref value, (uint)_valueSize);
 
             // Re-fetch the predecessor chunk last (the OOM/Grow during AllocateChunk above may have evicted it) and publish the link. Any concurrent snapshot
             // of the predecessor now sees a fully-formed new chunk, not a half-initialised zero state.
@@ -449,7 +452,7 @@ unsafe class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStore> where
         return false;
     }
 
-    private bool UpdateInChain(int startChunkId, TKey key, byte* newValue, ref ChunkAccessor<TStore> accessor)
+    private bool UpdateInChain(int startChunkId, TKey key, ref byte newValue, ref ChunkAccessor<TStore> accessor)
     {
         int chunkId = startChunkId;
 
@@ -464,7 +467,7 @@ unsafe class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStore> where
             {
                 if (keys[i].Equals(key))
                 {
-                    Unsafe.CopyBlock(ValueAt(addr, i), newValue, (uint)_valueSize);
+                    Unsafe.CopyBlock(ref Unsafe.AsRef<byte>(ValueAt(addr, i)), ref newValue, (uint)_valueSize);
                     return true;
                 }
             }
@@ -502,7 +505,7 @@ unsafe class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStore> where
             {
                 if (keys[i].Equals(key))
                 {
-                    updater.Update(ValueAt(addr, i));
+                    updater.Update(ref Unsafe.AsRef<byte>(ValueAt(addr, i)));
                     return true;
                 }
             }
@@ -520,7 +523,7 @@ unsafe class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStore> where
     /// <summary>
     /// Insert a key-value pair. Returns true if inserted, false if key already exists.
     /// </summary>
-    public bool Insert(TKey key, byte* value, ref ChunkAccessor<TStore> accessor, ChangeSet changeSet)
+    public bool Insert(TKey key, ref byte value, ref ChunkAccessor<TStore> accessor, ChangeSet changeSet)
     {
         uint hash = ComputeHash(key);
 
@@ -552,7 +555,7 @@ unsafe class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStore> where
                 return false;
             }
 
-            AppendEntry(chunkId, key, value, ref accessor, changeSet);
+            AppendEntry(chunkId, key, ref value, ref accessor, changeSet);
             Interlocked.Increment(ref _entryCount);
 
             // Re-fetch primary for unlock after potential allocation
@@ -568,7 +571,7 @@ unsafe class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStore> where
     /// Insert a key-value pair, skipping duplicate detection. Caller guarantees the key does not exist.
     /// Used for batch inserts of known-unique keys (e.g., freshly generated EntityKeys in FinalizeSpawns).
     /// </summary>
-    public void InsertNew(TKey key, byte* value, ref ChunkAccessor<TStore> accessor, ChangeSet changeSet)
+    public void InsertNew(TKey key, ref byte value, ref ChunkAccessor<TStore> accessor, ChangeSet changeSet)
     {
         uint hash = ComputeHash(key);
 
@@ -593,7 +596,7 @@ unsafe class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStore> where
                 continue;
             }
 
-            AppendEntry(chunkId, key, value, ref accessor, changeSet);
+            AppendEntry(chunkId, key, ref value, ref accessor, changeSet);
             Interlocked.Increment(ref _entryCount);
 
             byte* unlockAddr = accessor.GetChunkAddress(chunkId, true);
@@ -607,7 +610,7 @@ unsafe class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStore> where
     /// <summary>
     /// Insert or update a key-value pair. Returns true if inserted, false if updated.
     /// </summary>
-    public bool Upsert(TKey key, byte* value, ref ChunkAccessor<TStore> accessor, ChangeSet changeSet)
+    public bool Upsert(TKey key, ref byte value, ref ChunkAccessor<TStore> accessor, ChangeSet changeSet)
     {
         uint hash = ComputeHash(key);
 
@@ -632,13 +635,13 @@ unsafe class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStore> where
                 continue;
             }
 
-            if (UpdateInChain(chunkId, key, value, ref accessor))
+            if (UpdateInChain(chunkId, key, ref value, ref accessor))
             {
                 latch.WriteUnlock();
                 return false;
             }
 
-            AppendEntry(chunkId, key, value, ref accessor, changeSet);
+            AppendEntry(chunkId, key, ref value, ref accessor, changeSet);
             Interlocked.Increment(ref _entryCount);
 
             byte* unlockAddr = accessor.GetChunkAddress(chunkId, true);
@@ -1014,14 +1017,14 @@ unsafe class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStore> where
     /// <summary>
     /// Insert without OLC or duplicate check. Single-threaded rebuild/recovery only. Triggers splits.
     /// </summary>
-    internal void InsertDuringRebuild(TKey key, byte* value, ref ChunkAccessor<TStore> accessor, ChangeSet changeSet)
+    internal void InsertDuringRebuild(TKey key, ref byte value, ref ChunkAccessor<TStore> accessor, ChangeSet changeSet)
     {
         uint hash = ComputeHash(key);
         var (level, next, _) = UnpackMeta(PackedMeta);
         int bucket = ResolveBucket(hash, level, next, N0);
         int chunkId = GetBucketChunkId(bucket, ref accessor);
 
-        AppendEntry(chunkId, key, value, ref accessor, changeSet);
+        AppendEntry(chunkId, key, ref value, ref accessor, changeSet);
         _entryCount++;
         TrySplitIfNeeded(ref accessor, changeSet);
     }
@@ -1062,7 +1065,7 @@ unsafe class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStore> where
     internal interface IEntryAction<in TK> where TK : unmanaged
     {
         /// <summary>Process one entry. Return false to stop iteration.</summary>
-        bool Process(TK key, byte* value);
+        bool Process(TK key, ref byte value);
     }
 
     /// <summary>
@@ -1173,7 +1176,7 @@ unsafe class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStore> where
 
                 for (int i = 0; i < n; i++)
                 {
-                    if (!action.Process(keyBuf[i], valPtr + i * _valueSize))
+                    if (!action.Process(keyBuf[i], ref Unsafe.AsRef<byte>(valPtr + i * _valueSize)))
                     {
                         return visited;
                     }
@@ -1196,7 +1199,7 @@ unsafe class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStore> where
         /// Return true if the entry counts as a match. MUST be pure: it runs on a yet-to-be-validated (possibly torn) optimistic read and may be re-invoked
         /// when the bucket snapshot is rejected, so it must not mutate shared state nor dereference data beyond <paramref name="key"/> / <paramref name="value"/>.
         /// </summary>
-        bool Matches(TK key, byte* value);
+        bool Matches(TK key, ref byte value);
     }
 
     /// <summary>
@@ -1256,7 +1259,7 @@ unsafe class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStore> where
                     TKey* keys = KeysPtr(addr);
                     for (int i = 0; i < count; i++)
                     {
-                        if (pred.Matches(keys[i], ValueAt(addr, i)))
+                        if (pred.Matches(keys[i], ref Unsafe.AsRef<byte>(ValueAt(addr, i))))
                         {
                             bucketMatches++;
                         }
@@ -1338,7 +1341,7 @@ unsafe class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStore> where
                     TKey* keys = KeysPtr(addr);
                     for (int i = 0; i < count; i++)
                     {
-                        if (pred.Matches(keys[i], ValueAt(addr, i)))
+                        if (pred.Matches(keys[i], ref Unsafe.AsRef<byte>(ValueAt(addr, i))))
                         {
                             candidate = true;
                             break;

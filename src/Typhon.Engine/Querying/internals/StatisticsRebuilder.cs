@@ -143,40 +143,38 @@ internal static class StatisticsRebuilder
                     var chunkData = page.RawData<byte>(dataOffset + chunkInPage * stride, stride);
                     sampledEntities++;
 
-                    fixed (byte* ptr = chunkData)
+                    ref byte chunkRef = ref System.Runtime.InteropServices.MemoryMarshal.GetReference(chunkData);
+                    for (int f = 0; f < fieldCount; f++)
                     {
-                        for (int f = 0; f < fieldCount; f++)
+                        if (!supported[f])
                         {
-                            if (!supported[f])
+                            continue;
+                        }
+
+                        long key = ExtractKeyAsLong(ref chunkRef, indexedFieldInfos[f].OffsetToField, indexStats[f].KeyType);
+
+                        // HLL
+                        hlls[f].Add(key);
+
+                        // Frequency counting for MCV
+                        ref var count = ref System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault(freqs[f], key, out _);
+                        count++;
+
+                        // Histogram bucketing (order-preserving encoding ensures correct bucket assignment for float/double)
+                        {
+                            long opKey = ToOrderPreserving(key, indexStats[f].KeyType);
+                            int bucket;
+                            if (bucketWidths[f] == 0)
                             {
-                                continue;
+                                bucket = 0;
                             }
-
-                            long key = ExtractKeyAsLong(ptr, indexedFieldInfos[f].OffsetToField, indexStats[f].KeyType);
-
-                            // HLL
-                            hlls[f].Add(key);
-
-                            // Frequency counting for MCV
-                            ref var count = ref System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault(freqs[f], key, out _);
-                            count++;
-
-                            // Histogram bucketing (order-preserving encoding ensures correct bucket assignment for float/double)
+                            else
                             {
-                                long opKey = ToOrderPreserving(key, indexStats[f].KeyType);
-                                int bucket;
-                                if (bucketWidths[f] == 0)
-                                {
-                                    bucket = 0;
-                                }
-                                else
-                                {
-                                    // Unsigned subtraction for OP-encoded cross-zero ranges
-                                    var b = (long)(((ulong)opKey - (ulong)mins[f]) / (ulong)bucketWidths[f]);
-                                    bucket = (int)Math.Min(b, Histogram.BucketCount - 1);
-                                }
-                                bucketCounts[f][bucket]++;
+                                // Unsigned subtraction for OP-encoded cross-zero ranges
+                                var b = (long)(((ulong)opKey - (ulong)mins[f]) / (ulong)bucketWidths[f]);
+                                bucket = (int)Math.Min(b, Histogram.BucketCount - 1);
                             }
+                            bucketCounts[f][bucket]++;
                         }
                     }
                 }
@@ -273,23 +271,23 @@ internal static class StatisticsRebuilder
     /// using the same convention as B+Tree key encoding.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static unsafe long ExtractKeyAsLong(byte* chunkAddr, int offset, KeyType keyType)
+    private static long ExtractKeyAsLong(ref byte chunkAddr, int offset, KeyType keyType)
     {
-        byte* ptr = chunkAddr + offset;
+        ref byte ptr = ref Unsafe.Add(ref chunkAddr, offset);
         return keyType switch
         {
-            KeyType.Bool => *(bool*)ptr ? 1L : 0L,
-            KeyType.Byte => *ptr,
-            KeyType.SByte => *(sbyte*)ptr,
-            KeyType.Short => *(short*)ptr,
-            KeyType.UShort => *(ushort*)ptr,
-            KeyType.Int => *(int*)ptr,
-            KeyType.UInt => *(uint*)ptr,
-            KeyType.Long => *(long*)ptr,
-            KeyType.ULong => (long)*(ulong*)ptr,
-            KeyType.Float => *(int*)ptr,       // IEEE 754 bit pattern
-            KeyType.Double => *(long*)ptr,      // IEEE 754 bit pattern
-            _ => *(long*)ptr
+            KeyType.Bool => Unsafe.As<byte, bool>(ref ptr) ? 1L : 0L,
+            KeyType.Byte => ptr,
+            KeyType.SByte => Unsafe.As<byte, sbyte>(ref ptr),
+            KeyType.Short => Unsafe.As<byte, short>(ref ptr),
+            KeyType.UShort => Unsafe.As<byte, ushort>(ref ptr),
+            KeyType.Int => Unsafe.As<byte, int>(ref ptr),
+            KeyType.UInt => Unsafe.As<byte, uint>(ref ptr),
+            KeyType.Long => Unsafe.As<byte, long>(ref ptr),
+            KeyType.ULong => (long)Unsafe.As<byte, ulong>(ref ptr),
+            KeyType.Float => Unsafe.As<byte, int>(ref ptr),       // IEEE 754 bit pattern
+            KeyType.Double => Unsafe.As<byte, long>(ref ptr),      // IEEE 754 bit pattern
+            _ => Unsafe.As<byte, long>(ref ptr)
         };
     }
 }

@@ -599,34 +599,35 @@ public ref struct VariableSizedBufferAccessor<T, TStore> : IDisposable where T :
     private readonly int _rootHeaderTotalSize;
 
     private int _rootChunkId;
-    private unsafe byte* _rootChunkAddr;
+    private ref byte _rootChunkAddr;
     private ChunkAccessor<TStore> _accessor;
 
     private int _curChunkId;
-    private unsafe byte* _curChunkAddr;
+    private ref byte _curChunkAddr;
 
-    private unsafe byte* _elementAddr;
+    private ref byte _elementAddr;
     private int _elementCount;
 
     public bool IsValid => _rootChunkId != 0;
-    public unsafe ReadOnlySpan<T> ReadOnlyElements => _elementAddr==null ? default : new(_elementAddr, _elementCount);
-    public unsafe Span<T> Elements => new(_elementAddr, _elementCount);
+    public ReadOnlySpan<T> ReadOnlyElements =>
+        Unsafe.IsNullRef(ref _elementAddr) ? default : MemoryMarshal.CreateReadOnlySpan(ref Unsafe.As<byte, T>(ref _elementAddr), _elementCount);
+    public Span<T> Elements => MemoryMarshal.CreateSpan(ref Unsafe.As<byte, T>(ref _elementAddr), _elementCount);
     public void DirtyChunk() => _accessor.DirtyChunk(_curChunkId);
 
-    unsafe public int TotalCount
+    public int TotalCount
     {
         get
         {
-            ref var rh = ref Unsafe.AsRef<VariableSizedBufferRootHeader>(_rootChunkAddr);
+            ref var rh = ref Unsafe.As<byte, VariableSizedBufferRootHeader>(ref _rootChunkAddr);
             return rh.TotalCount;
         }
     }
 
-    unsafe public int RefCounter
+    public int RefCounter
     {
         get
         {
-            ref var rh = ref Unsafe.AsRef<VariableSizedBufferRootHeader>(_rootChunkAddr);
+            ref var rh = ref Unsafe.As<byte, VariableSizedBufferRootHeader>(ref _rootChunkAddr);
             return rh.RefCounter;
         }
     }
@@ -640,8 +641,8 @@ public ref struct VariableSizedBufferAccessor<T, TStore> : IDisposable where T :
 
         _accessor = _segment.CreateChunkAccessor(changeSet);
 
-        _rootChunkAddr = _accessor.GetChunkAddress(rootChunkId);
-        ref var rh = ref Unsafe.AsRef<VariableSizedBufferRootHeader>(_rootChunkAddr);
+        _rootChunkAddr = ref Unsafe.AsRef<byte>(_accessor.GetChunkAddress(rootChunkId));
+        ref var rh = ref Unsafe.As<byte, VariableSizedBufferRootHeader>(ref _rootChunkAddr);
 
         // Enter read mode
         var wc = WaitContext.FromTimeout(TimeoutOptions.Current.SegmentAllocationLockTimeout);
@@ -653,10 +654,10 @@ public ref struct VariableSizedBufferAccessor<T, TStore> : IDisposable where T :
 
         // Switch to the first chunk that contains stored data
         _curChunkId = _rootChunkId;
-        _curChunkAddr = _accessor.GetChunkAddress(_curChunkId);
+        _curChunkAddr = ref Unsafe.AsRef<byte>(_accessor.GetChunkAddress(_curChunkId));
 
-        _elementAddr = _curChunkAddr + (_curChunkId==rootChunkId ? _rootHeaderTotalSize : sizeof(VariableSizedBufferChunkHeader));
-        _elementCount = ((VariableSizedBufferChunkHeader*)_curChunkAddr)->ElementCount;
+        _elementAddr = ref Unsafe.Add(ref _curChunkAddr, _curChunkId==rootChunkId ? _rootHeaderTotalSize : sizeof(VariableSizedBufferChunkHeader));
+        _elementCount = Unsafe.As<byte, VariableSizedBufferChunkHeader>(ref _curChunkAddr).ElementCount;
 
         if (_elementCount == 0) NextChunk();
     }
@@ -664,15 +665,16 @@ public ref struct VariableSizedBufferAccessor<T, TStore> : IDisposable where T :
     unsafe public bool NextChunk()
     {
         // Read next chunk from the current header
-        var nextChunkId = ((VariableSizedBufferChunkHeader*)_curChunkAddr)->NextChunkId;
+        var nextChunkId = Unsafe.As<byte, VariableSizedBufferChunkHeader>(ref _curChunkAddr).NextChunkId;
         var prevChunkId = _curChunkId;
-        var prevChunk = (VariableSizedBufferChunkHeader*)_curChunkAddr;
+        // TODO(cascade): leaf still byte* (feeds the raw pointer-walk chunk-collection loop below).
+        var prevChunk = (VariableSizedBufferChunkHeader*)Unsafe.AsPointer(ref _curChunkAddr);
 
         // Quit if there's no more
         if (nextChunkId == 0)
         {
             _curChunkId = 0;
-            _elementAddr = null;
+            _elementAddr = ref Unsafe.NullRef<byte>();
             return false;
         }
 
@@ -683,7 +685,7 @@ public ref struct VariableSizedBufferAccessor<T, TStore> : IDisposable where T :
         // Check if the chunk is empty, then try to remove it from the storage list
         if (nextChunkElementCount == 0)
         {
-            ref var rootChunk = ref Unsafe.AsRef<VariableSizedBufferRootHeader>(_rootChunkAddr);
+            ref var rootChunk = ref Unsafe.As<byte, VariableSizedBufferRootHeader>(ref _rootChunkAddr);
 
             // Try to promote the Buffer from read to read/write because we need to make changes
             var wcPromote = WaitContext.FromTimeout(TimeoutOptions.Current.SegmentAllocationLockTimeout);
@@ -756,19 +758,19 @@ public ref struct VariableSizedBufferAccessor<T, TStore> : IDisposable where T :
         if (nextChunkAddr == null)
         {
             _curChunkId = 0;
-            _elementAddr = null;
+            _elementAddr = ref Unsafe.NullRef<byte>();
             return false;
         }
 
         _curChunkId = nextChunkId;
-        _curChunkAddr = _accessor.GetChunkAddress(_curChunkId);
-        _elementAddr = _curChunkAddr + (_curChunkId == _rootChunkId ? _rootHeaderTotalSize : sizeof(VariableSizedBufferChunkHeader));
-        _elementCount = ((VariableSizedBufferChunkHeader*)_curChunkAddr)->ElementCount;
+        _curChunkAddr = ref Unsafe.AsRef<byte>(_accessor.GetChunkAddress(_curChunkId));
+        _elementAddr = ref Unsafe.Add(ref _curChunkAddr, _curChunkId == _rootChunkId ? _rootHeaderTotalSize : sizeof(VariableSizedBufferChunkHeader));
+        _elementCount = Unsafe.As<byte, VariableSizedBufferChunkHeader>(ref _curChunkAddr).ElementCount;
 
         return true;
     }
 
-    public unsafe void Dispose()
+    public void Dispose()
     {
         if (!IsValid)
         {
@@ -777,7 +779,7 @@ public ref struct VariableSizedBufferAccessor<T, TStore> : IDisposable where T :
             return;
         }
 
-        ref var h = ref Unsafe.AsRef<VariableSizedBufferRootHeader>(_rootChunkAddr);
+        ref var h = ref Unsafe.As<byte, VariableSizedBufferRootHeader>(ref _rootChunkAddr);
         h.Lock.ExitSharedAccess();
 
         _accessor.Dispose();

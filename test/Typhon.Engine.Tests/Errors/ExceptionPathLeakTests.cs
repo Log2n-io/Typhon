@@ -1,6 +1,7 @@
 ﻿using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using System;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -351,11 +352,11 @@ class ExceptionPathLeakTests : TestBase<ExceptionPathLeakTests>
 
             byte* buf = stackalloc byte[meta._entityRecordSize];
             var accessor = es.EntityMap.Segment.CreateChunkAccessor();
-            bool found = es.EntityMap.TryGet(entityId.EntityKey, buf, ref accessor);
+            bool found = es.EntityMap.TryGet(entityId.EntityKey, ref Unsafe.AsRef<byte>(buf), ref accessor);
             accessor.Dispose();
             Assert.That(found, Is.True, "Entity should exist in EntityMap");
 
-            return EntityRecordAccessor.GetLocation(buf, targetSlot);
+            return EntityRecordAccessor.GetLocation(ref Unsafe.AsRef<byte>(buf), targetSlot);
         }
         finally
         {

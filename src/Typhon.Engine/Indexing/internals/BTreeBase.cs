@@ -20,26 +20,28 @@ internal abstract class BTreeBase<TStore> : IBTreeIndex where TStore : struct, I
     public abstract bool AllowMultiple { get; }
     public abstract int EntryCount { get; }
 
-    public abstract unsafe int Add(void* keyAddr, int value, ref ChunkAccessor<TStore>accessor);
-    public abstract unsafe int Add(void* keyAddr, int value, ref ChunkAccessor<TStore>accessor, out int bufferRootId);
-    public abstract unsafe bool Remove(void* keyAddr, out int value, ref ChunkAccessor<TStore>accessor);
-    public abstract unsafe Result<int, BTreeLookupStatus> TryGet(void* keyAddr, ref ChunkAccessor<TStore>accessor);
-    public abstract unsafe bool RemoveValue(void* keyAddr, int elementId, int value, ref ChunkAccessor<TStore>accessor, bool preserveEmptyBuffer = false);
-    public abstract unsafe VariableSizedBufferAccessor<int, TStore> TryGetMultiple(void* keyAddr, ref ChunkAccessor<TStore>accessor);
+    // Key entry points take the key as a managed ref to its first byte (the concrete BTree<TKey,TStore> reinterprets it as TKey). Perf-neutral vs the former
+    // void* — `ref byte` + Unsafe.As is identical machine code, but lifetime-checked.
+    public abstract int Add(ref byte keyAddr, int value, ref ChunkAccessor<TStore>accessor);
+    public abstract int Add(ref byte keyAddr, int value, ref ChunkAccessor<TStore>accessor, out int bufferRootId);
+    public abstract bool Remove(ref byte keyAddr, out int value, ref ChunkAccessor<TStore>accessor);
+    public abstract Result<int, BTreeLookupStatus> TryGet(ref byte keyAddr, ref ChunkAccessor<TStore>accessor);
+    public abstract bool RemoveValue(ref byte keyAddr, int elementId, int value, ref ChunkAccessor<TStore>accessor, bool preserveEmptyBuffer = false);
+    public abstract VariableSizedBufferAccessor<int, TStore> TryGetMultiple(ref byte keyAddr, ref ChunkAccessor<TStore>accessor);
 
     /// <summary>
     /// Compound move: atomically removes <paramref name="value"/> from <paramref name="oldKeyAddr"/>
     /// and inserts it under <paramref name="newKeyAddr"/>. For unique indexes (!AllowMultiple).
     /// </summary>
     /// <returns>True if the old key was found and moved; false if old key not found.</returns>
-    public abstract unsafe bool Move(void* oldKeyAddr, void* newKeyAddr, int value, ref ChunkAccessor<TStore>accessor);
+    public abstract bool Move(ref byte oldKeyAddr, ref byte newKeyAddr, int value, ref ChunkAccessor<TStore>accessor);
 
     /// <summary>
     /// Compound move for multi-value indexes (AllowMultiple): removes <paramref name="elementId"/>/<paramref name="value"/>
     /// from <paramref name="oldKeyAddr"/>'s buffer and appends <paramref name="value"/> under <paramref name="newKeyAddr"/>.
     /// Returns the new element ID and both HEAD buffer IDs for inline TAIL tracking.
     /// </summary>
-    public abstract unsafe int MoveValue(void* oldKeyAddr, void* newKeyAddr, int elementId, int value, ref ChunkAccessor<TStore>accessor, out int oldHeadBufferId,
+    public abstract int MoveValue(ref byte oldKeyAddr, ref byte newKeyAddr, int elementId, int value, ref ChunkAccessor<TStore>accessor, out int oldHeadBufferId,
         out int newHeadBufferId, bool preserveEmptyBuffer = false);
 
     public abstract void CheckConsistency(ref ChunkAccessor<TStore>accessor);

@@ -87,7 +87,7 @@ public unsafe ref struct AabbClusterEnumerator
     private int _currentBroadphaseSlot;            // next index into _currentCellIndex.ClusterIds to scan
     private ulong _currentOccupancyBits;           // remaining occupied slots in the current cluster (bits cleared as we iterate)
     private int _currentClusterChunkId;            // chunk id of the cluster currently in narrowphase
-    private byte* _currentClusterBase;             // base pointer of that cluster
+    private ref byte _currentClusterBase;          // ref into the cluster's SoA page (managed pointer, GC-safe); moves with the pinned page, no unsafe field.
 
     // Two-pass per-cell iteration: each cell has a StaticIndex and a DynamicIndex, both optional. Issue #230 Phase 3 activated the Static path. The
     // enumerator visits DynamicIndex first, then StaticIndex, then advances to the next cell. _currentCellStaticPass is true when we've already drained
@@ -135,7 +135,7 @@ public unsafe ref struct AabbClusterEnumerator
         _currentBroadphaseSlot = 0;
         _currentOccupancyBits = 0UL;
         _currentClusterChunkId = 0;
-        _currentClusterBase = null;
+        _currentClusterBase = ref Unsafe.NullRef<byte>();
         _currentCellStaticPass = false;
         _currentPerCellSlot = null;
         _current = default;
@@ -158,14 +158,14 @@ public unsafe ref struct AabbClusterEnumerator
         while (true)
         {
             // 1. Drain the current cluster's occupancy bits (narrowphase).
-            if (_currentOccupancyBits != 0UL && _currentClusterBase != null)
+            if (_currentOccupancyBits != 0UL && !Unsafe.IsNullRef(ref _currentClusterBase))
             {
                 int slot = BitOperations.TrailingZeroCount(_currentOccupancyBits);
                 _currentOccupancyBits &= _currentOccupancyBits - 1;
 
                 // Read entity's tight bounds and test against query AABB.
-                byte* fieldPtr = _currentClusterBase + _spatialCompOffset + slot * _spatialCompSize + _spatialFieldOffset;
-                if (!SpatialMaintainer.ReadAndValidateBoundsFromPtr(fieldPtr, _fieldInfo, entityCoords, _descriptor))
+                ref byte fieldPtr = ref Unsafe.Add(ref _currentClusterBase, _spatialCompOffset + slot * _spatialCompSize + _spatialFieldOffset);
+                if (!SpatialMaintainer.ReadAndValidateBoundsFromPtr(ref fieldPtr, _fieldInfo, entityCoords, _descriptor))
                 {
                     continue; // degenerate — skip
                 }
@@ -229,7 +229,7 @@ public unsafe ref struct AabbClusterEnumerator
                     }
                 }
 
-                long entityId = *(long*)(_currentClusterBase + _state.Layout.EntityIdsOffset + slot * 8);
+                long entityId = Unsafe.As<byte, long>(ref Unsafe.Add(ref _currentClusterBase, _state.Layout.EntityIdsOffset + slot * 8));
                 _current = new ClusterSpatialQueryResult(entityId, _currentClusterChunkId, slot, eMinX, eMinY, eMinZ, eMaxX, eMaxY, eMaxZ, distSq);
                 return true;
             }
@@ -279,9 +279,9 @@ public unsafe ref struct AabbClusterEnumerator
                 // Broadphase hit — open the cluster for narrowphase scanning.
                 int chunkId = _currentCellIndex.ClusterIds[idx];
                 EnsureAccessor();
-                _currentClusterBase = _accessor.GetChunkAddress(chunkId);
+                _currentClusterBase = ref Unsafe.AsRef<byte>(_accessor.GetChunkAddress(chunkId));
                 _currentClusterChunkId = chunkId;
-                _currentOccupancyBits = *(ulong*)_currentClusterBase;
+                _currentOccupancyBits = Unsafe.As<byte, ulong>(ref _currentClusterBase);
                 continue; // next iteration will drain occupancy bits
             }
 

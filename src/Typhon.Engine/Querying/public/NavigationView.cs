@@ -81,9 +81,9 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
         public NavigationView<TSource, TTarget> View;
         public Transaction Tx;
 
-        public bool Process(long key, byte* value)
+        public bool Process(long key, ref byte value)
         {
-            ref var header = ref EntityRecordAccessor.GetHeader(value);
+            ref var header = ref EntityRecordAccessor.GetHeader(ref value);
             if (!header.IsVisibleAt(Tx.TSN))
             {
                 return true;

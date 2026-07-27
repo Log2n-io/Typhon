@@ -686,7 +686,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         using var guard = EpochGuard.Enter(EpochManager);
 
         // Hoist stackalloc out of loop — max record size is 78B (14B header + 16 components × 4B)
-        var readBuf = stackalloc byte[EntityRecordAccessor.MaxRecordSize];
+        Span<byte> readBuf = stackalloc byte[EntityRecordAccessor.MaxRecordSize];
+        ref byte readBufRef = ref MemoryMarshal.GetReference(readBuf);
 
         foreach (var entry in toProcess)
         {
@@ -697,14 +698,14 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 continue;
             }
             var accessor = engineState.EntityMap.Segment.CreateChunkAccessor();
-            var found = engineState.EntityMap.TryGet(entry.Id.EntityKey, readBuf, ref accessor);
+            var found = engineState.EntityMap.TryGet(entry.Id.EntityKey, ref readBufRef, ref accessor);
 
             if (found)
             {
                 // Free component chunks
                 for (var slot = 0; slot < meta.ComponentCount; slot++)
                 {
-                    var chunkId = EntityRecordAccessor.GetLocation(readBuf, slot);
+                    var chunkId = EntityRecordAccessor.GetLocation(ref readBufRef, slot);
                     if (chunkId != 0 && engineState.SlotToComponentTable != null)
                     {
                         engineState.SlotToComponentTable[slot].ComponentSegment.FreeChunk(chunkId);
@@ -1200,8 +1201,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     long entityPK = 0;
                     if (table.Definition.EntityPKOverheadSize > 0)
                     {
-                        var chunkPtr = compAccessor.GetChunkAddress(chunkId);
-                        entityPK = *(long*)chunkPtr;
+                        ref byte chunkPtr = ref Unsafe.AsRef<byte>(compAccessor.GetChunkAddress(chunkId));
+                        entityPK = Unsafe.As<byte, long>(ref chunkPtr);
                     }
 
                     dirtyCount++;
@@ -3445,7 +3446,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     private unsafe void BuildFlatEntityMapEntries(ArchetypeMetadata meta, ArchetypeEngineState state, ChangeSet mapCs, bool duringRebuild,
         Dictionary<long, ushort> enabledSnapshot = null)
     {
-        var recordBuf = stackalloc byte[EntityRecordAccessor.MaxRecordSize];
+        // recordBuf is the stackalloc backing storage; recordRef is the ref view passed to EntityMap.Insert / InsertDuringRebuild.
+        Span<byte> recordBuf = stackalloc byte[EntityRecordAccessor.MaxRecordSize];
+        ref byte recordRef = ref MemoryMarshal.GetReference(recordBuf);
 
         // Phase 1: Scan each Versioned slot's CompRevTableSegment to find chain heads. slotMaps[slot] = { EntityPK → compRevFirstChunkId }.
         var slotMaps = new Dictionary<long, int>[meta.ComponentCount];
@@ -3504,7 +3507,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             {
                 if (slotMaps[slot] == null)
                 {
-                    EntityRecordAccessor.SetLocation(recordBuf, slot, 0); // SV / non-Versioned slot — no chain location to recover
+                    EntityRecordAccessor.SetLocation(ref recordRef, slot, 0); // SV / non-Versioned slot — no chain location to recover
                     continue;
                 }
 
@@ -3514,7 +3517,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     break;
                 }
 
-                EntityRecordAccessor.SetLocation(recordBuf, slot, compRevFirstChunkId);
+                EntityRecordAccessor.SetLocation(ref recordRef, slot, compRevFirstChunkId);
             }
 
             if (!allSlotsPresent)
@@ -3522,7 +3525,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 continue; // Entity missing from a Versioned slot — inconsistent, skip
             }
 
-            ref var header = ref EntityRecordAccessor.GetHeader(recordBuf);
+            ref var header = ref EntityRecordAccessor.GetHeader(ref recordRef);
             header.BornTSN = 0; // Always visible (committed before checkpoint)
             header.DiedTSN = 0; // Live entity
             // Preserve the persisted (non-derivable) EnabledBits when available; fall back to all-enabled only when the entity has no snapshot entry
@@ -3533,11 +3536,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             var mapAccessor = state.EntityMap.Segment.CreateChunkAccessor(mapCs);
             if (duringRebuild)
             {
-                state.EntityMap.InsertDuringRebuild(entityKey, recordBuf, ref mapAccessor, mapCs);
+                state.EntityMap.InsertDuringRebuild(entityKey, ref recordRef, ref mapAccessor, mapCs);
             }
             else
             {
-                state.EntityMap.Insert(entityKey, recordBuf, ref mapAccessor, mapCs);
+                state.EntityMap.Insert(entityKey, ref recordRef, ref mapAccessor, mapCs);
             }
             mapAccessor.Dispose();
 
@@ -3682,9 +3685,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     {
         public Dictionary<long, ushort> Snapshot;
 
-        public unsafe bool Process(long key, byte* value)
+        public bool Process(long key, ref byte value)
         {
-            Snapshot[key] = EntityRecordAccessor.GetHeader(value).EnabledBits;
+            Snapshot[key] = EntityRecordAccessor.GetHeader(ref value).EnabledBits;
             return true;
         }
     }
@@ -3728,7 +3731,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             }
         }
 
-        var recordBuf = stackalloc byte[ClusterEntityRecordAccessor.RecordSize(meta.VersionedSlotCount)];
+        // recordBuf is the stackalloc backing storage; recordRef is the ref view passed to EntityMap.InsertDuringRebuild.
+        Span<byte> recordBuf = stackalloc byte[ClusterEntityRecordAccessor.RecordSize(meta.VersionedSlotCount)];
+        ref byte recordRef = ref MemoryMarshal.GetReference(recordBuf);
         var clusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor();
         long maxEntityKey = 0;
         try
@@ -3736,19 +3741,19 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             for (var c = 0; c < clusterState.ActiveClusterCount; c++)
             {
                 var chunkId = clusterState.ActiveClusterIds[c];
-                byte* clusterBase = clusterAccessor.GetChunkAddress(chunkId);
-                ulong occupancy = *(ulong*)clusterBase;
+                ref byte clusterBase = ref Unsafe.AsRef<byte>(clusterAccessor.GetChunkAddress(chunkId));
+                ulong occupancy = Unsafe.As<byte, ulong>(ref clusterBase);
 
                 while (occupancy != 0)
                 {
                     var slotIndex = BitOperations.TrailingZeroCount(occupancy);
                     occupancy &= occupancy - 1;
 
-                    var entityPK = *(long*)(clusterBase + layout.EntityIdsOffset + slotIndex * 8);
+                    var entityPK = Unsafe.As<byte, long>(ref Unsafe.Add(ref clusterBase, layout.EntityIdsOffset + slotIndex * 8));
                     var entityKey = EntityId.FromRaw(entityPK).EntityKey;
 
-                    ClusterEntityRecordAccessor.InitializeRecord(recordBuf, meta.VersionedSlotCount);
-                    ref var header = ref ClusterEntityRecordAccessor.GetHeader(recordBuf);
+                    ClusterEntityRecordAccessor.InitializeRecord(ref recordRef, meta.VersionedSlotCount);
+                    ref var header = ref ClusterEntityRecordAccessor.GetHeader(ref recordRef);
                     header.BornTSN = 0; // committed before checkpoint → always visible
                     header.DiedTSN = 0; // live (occupancy bit set)
 
@@ -3765,7 +3770,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                         enabledMask = 0;
                         for (var comp = 0; comp < meta.ComponentCount; comp++)
                         {
-                            var compEnabled = *(ulong*)(clusterBase + layout.EnabledBitsOffset(comp));
+                            var compEnabled = Unsafe.As<byte, ulong>(ref Unsafe.Add(ref clusterBase, layout.EnabledBitsOffset(comp)));
                             if ((compEnabled & (1UL << slotIndex)) != 0)
                             {
                                 enabledMask |= (ushort)(1 << comp);
@@ -3774,8 +3779,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     }
                     header.EnabledBits = enabledMask;
 
-                    ClusterEntityRecordAccessor.SetClusterChunkId(recordBuf, chunkId);
-                    ClusterEntityRecordAccessor.SetSlotIndex(recordBuf, (byte)slotIndex);
+                    ClusterEntityRecordAccessor.SetClusterChunkId(ref recordRef, chunkId);
+                    ClusterEntityRecordAccessor.SetSlotIndex(ref recordRef, (byte)slotIndex);
 
                     if (slotToVi != null)
                     {
@@ -3789,12 +3794,12 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
                             var head = 0;
                             chainHeads[slot]?.TryGetValue(entityPK, out head);
-                            ClusterEntityRecordAccessor.SetCompRevFirstChunkId(recordBuf, vi, head);
+                            ClusterEntityRecordAccessor.SetCompRevFirstChunkId(ref recordRef, vi, head);
                         }
                     }
 
                     var mapAccessor = state.EntityMap.Segment.CreateChunkAccessor(cs);
-                    state.EntityMap.InsertDuringRebuild(entityKey, recordBuf, ref mapAccessor, cs);
+                    state.EntityMap.InsertDuringRebuild(entityKey, ref recordRef, ref mapAccessor, cs);
                     mapAccessor.Dispose();
 
                     if (entityKey > maxEntityKey)

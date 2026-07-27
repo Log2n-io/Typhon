@@ -20,6 +20,8 @@ internal unsafe class HashMap<TKey> : IDisposable, IEnumerable<TKey> where TKey 
     private const int PrefetchLookahead = 8;
 
     private readonly int _entryStride;
+    // KEEP(ptr): byte* into pinned POH bucket memory, held as a class field (a Span/ref cannot be a class field); hot
+    // probe loops index through it with pointer arithmetic.
     private byte* _entries;
     private byte[] _pohArray; // POH array reference — prevents GC collection
     private int _capacity;
@@ -215,14 +217,14 @@ internal unsafe class HashMap<TKey> : IDisposable, IEnumerable<TKey> where TKey 
 
     public ref struct PartitionEnumerator
     {
-        private readonly byte* _entries;
+        private readonly ref byte _entries;
         private readonly int _end;
         private readonly int _stride;
         private int _index;
 
         internal PartitionEnumerator(byte* entries, int start, int end, int stride)
         {
-            _entries = entries;
+            _entries = ref Unsafe.AsRef<byte>(entries);
             _end = end;
             _stride = stride;
             _index = start - 1;
@@ -235,10 +237,10 @@ internal unsafe class HashMap<TKey> : IDisposable, IEnumerable<TKey> where TKey 
         {
             while (++_index < _end)
             {
-                byte* entry = _entries + (long)_index * _stride;
-                if (*(uint*)entry != 0)
+                ref byte entry = ref Unsafe.Add(ref _entries, (nint)((long)_index * _stride));
+                if (Unsafe.As<byte, uint>(ref entry) != 0)
                 {
-                    Current = *(TKey*)(entry + 4);
+                    Current = Unsafe.As<byte, TKey>(ref Unsafe.Add(ref entry, 4));
                     return true;
                 }
             }

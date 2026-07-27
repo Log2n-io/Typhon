@@ -155,7 +155,8 @@ public unsafe partial class EntityAccessor
 
         // Read from EntityMap — cache the ChunkAccessor for same-archetype repeated lookups
         int recordSize = meta._entityRecordSize;
-        byte* readBuf = stackalloc byte[recordSize];
+        Span<byte> readBuf = stackalloc byte[recordSize];
+        ref byte readBufRef = ref MemoryMarshal.GetReference(readBuf);
 
         // Skip EpochGuard if we're already in an epoch scope (PTA workers enter once in InitLightweight).
         // This eliminates per-entity PinCurrentThread/UnpinCurrentThread overhead.
@@ -176,7 +177,7 @@ public unsafe partial class EntityAccessor
             _hasEntityMapCache = true;
         }
 
-        bool found = es.EntityMap.TryGet(id.EntityKey, readBuf, ref _entityMapCacheAccessor);
+        bool found = es.EntityMap.TryGet(id.EntityKey, ref readBufRef, ref _entityMapCacheAccessor);
 
         if (needsGuard)
         {
@@ -188,7 +189,7 @@ public unsafe partial class EntityAccessor
             return default;
         }
 
-        ref var header = ref EntityRecordAccessor.GetHeader(readBuf);
+        ref var header = ref EntityRecordAccessor.GetHeader(ref readBufRef);
 
         // MVCC visibility check
         if (!header.IsVisibleAt(TSN))
@@ -204,8 +205,8 @@ public unsafe partial class EntityAccessor
         if (meta.IsClusterEligible && es.ClusterState != null)
         {
             // Cluster path: read ClusterEntityRecord → resolve cluster base + slot
-            int clusterChunkId = ClusterEntityRecordAccessor.GetClusterChunkId(readBuf);
-            byte slotIndex = ClusterEntityRecordAccessor.GetSlotIndex(readBuf);
+            int clusterChunkId = ClusterEntityRecordAccessor.GetClusterChunkId(ref readBufRef);
+            byte slotIndex = ClusterEntityRecordAccessor.GetSlotIndex(ref readBufRef);
 
             // Cache cluster accessor for same-archetype repeated lookups
             if (!_hasClusterCache || _clusterCacheArchId != id.ArchetypeId)
@@ -236,17 +237,17 @@ public unsafe partial class EntityAccessor
             // Primary base: PersistentStore for mixed/SV, TransientStore for pure-Transient
             if (es.ClusterState.ClusterSegment != null)
             {
-                result._clusterBase = _clusterCacheAccessor.GetChunkAddress(clusterChunkId, writable);
+                result._clusterBase = ref Unsafe.AsRef<byte>(_clusterCacheAccessor.GetChunkAddress(clusterChunkId, writable));
             }
             else
             {
-                result._clusterBase = _transientClusterCacheAccessor.GetChunkAddress(clusterChunkId, writable);
+                result._clusterBase = ref Unsafe.AsRef<byte>(_transientClusterCacheAccessor.GetChunkAddress(clusterChunkId, writable));
             }
 
             // Mixed archetype: also set TransientStore base
             if (_hasTransientClusterCache && es.ClusterState.ClusterSegment != null)
             {
-                result._transientClusterBase = _transientClusterCacheAccessor.GetChunkAddress(clusterChunkId, writable);
+                result._transientClusterBase = ref Unsafe.AsRef<byte>(_transientClusterCacheAccessor.GetChunkAddress(clusterChunkId, writable));
             }
 
             result._clusterSlotIndex = slotIndex;
@@ -270,7 +271,7 @@ public unsafe partial class EntityAccessor
                         continue;
                     }
 
-                    int compRevFirstChunkId = ClusterEntityRecordAccessor.GetCompRevFirstChunkId(readBuf, vi);
+                    int compRevFirstChunkId = ClusterEntityRecordAccessor.GetCompRevFirstChunkId(ref readBufRef, vi);
                     if (compRevFirstChunkId == 0)
                     {
                         continue;
@@ -291,7 +292,7 @@ public unsafe partial class EntityAccessor
         else
         {
             // Legacy path: per-component locations + Versioned chain walk
-            result.CopyLocationsFrom(readBuf, meta.ComponentCount);
+            result.CopyLocationsFrom(ref readBufRef, meta.ComponentCount);
 
             // For Versioned components: walk revision chain to find visible version.
             // skipTimeout: base EntityAccessor is used by PTA — no concurrent writers, chain lock is uncontended.
@@ -379,7 +380,7 @@ public unsafe partial class EntityAccessor
             {
                 byte* head = info.CompContentAccessor.GetChunkAddress(chunkId);
                 // Flat location is the content chunkId (captured for the no-re-lookup publish).
-                return ref StageCommitWriteCore<T>(info, *(long*)head, chunkId, head + info.ComponentOverhead);
+                return ref StageCommitWriteCore<T>(info, *(long*)head, chunkId, ref Unsafe.AsRef<byte>(head + info.ComponentOverhead));
             }
         }
 
@@ -419,7 +420,7 @@ public unsafe partial class EntityAccessor
         for (int i = 0; i < fields.Length; i++)
         {
             ref var ifi = ref fields[i];
-            var oldKey = KeyBytes8.FromPointer(ptr + ifi.OffsetToField, ifi.Size);
+            var oldKey = KeyBytes8.FromRef(ref Unsafe.AsRef<byte>(ptr + ifi.OffsetToField), ifi.Size);
             buffers[i].Append(chunkId, pk, oldKey);
         }
     }
@@ -503,7 +504,7 @@ public unsafe partial class EntityAccessor
     /// NOT touched until commit publish (CM-01).
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal ref T StageCommitWriteCore<T>(ComponentInfo info, long pk, int location, byte* headDataPtr) where T : unmanaged
+    internal ref T StageCommitWriteCore<T>(ComponentInfo info, long pk, int location, ref byte headDataPtr) where T : unmanaged
     {
         var size = info.ComponentTable.ComponentStorageSize;
         Debug.Assert(sizeof(T) == size, "Commit-discipline staging assumes the component IS T (SingleVersion layout)");
@@ -513,7 +514,7 @@ public unsafe partial class EntityAccessor
         {
             slot.Offset = StageAlloc(size);
             slot.Location = location;                           // captured at stage time — publish uses it, no EntityMap re-lookup
-            Unsafe.CopyBlockUnaligned(_commitStagingBuffer + slot.Offset, headDataPtr, (uint)size);   // seed from HEAD (partial-write correctness)
+            Unsafe.CopyBlockUnaligned(ref *(_commitStagingBuffer + slot.Offset), ref headDataPtr, (uint)size);   // seed from HEAD (partial-write correctness)
         }
         return ref Unsafe.AsRef<T>(_commitStagingBuffer + slot.Offset);
     }
@@ -530,10 +531,10 @@ public unsafe partial class EntityAccessor
     /// Cluster-path entry point for Commit-discipline staging — resolves the ComponentInfo, then stages (see <see cref="StageCommitWriteCore{T}"/>).
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal ref T StageClusterCommitWrite<T>(ComponentTable table, int componentTypeId, long pk, int clusterLocation, byte* clusterHeadPtr) where T : unmanaged
+    internal ref T StageClusterCommitWrite<T>(ComponentTable table, int componentTypeId, long pk, int clusterLocation, ref byte clusterHeadPtr) where T : unmanaged
     {
         var info = GetComponentInfoByTypeId(componentTypeId, typeof(T));
-        return ref StageCommitWriteCore<T>(info, pk, clusterLocation, clusterHeadPtr);
+        return ref StageCommitWriteCore<T>(info, pk, clusterLocation, ref clusterHeadPtr);
     }
 
     /// <summary>

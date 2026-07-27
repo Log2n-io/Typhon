@@ -71,17 +71,17 @@ internal class BasicSelectivityEstimator : ISelectivityEstimator
         {
             // stackalloc 8 bytes — on little-endian x64 the lower bytes contain the correct
             // key value for all key sizes (BTree reads only sizeof(TKey) bytes)
-            var buf = stackalloc byte[8];
-            *(long*)buf = key;
+            Span<byte> buf = stackalloc byte[8];
+            Unsafe.As<byte, long>(ref buf[0]) = key;
 
             if (!index.AllowMultiple)
             {
-                var result = index.TryGet(buf, ref accessor);
+                var result = index.TryGet(ref buf[0], ref accessor);
                 return result.IsSuccess ? 1 : 0;
             }
 
             // Multi-value index: TryGetMultiple returns all values for the key
-            var multiResult = index.TryGetMultiple(buf, ref accessor);
+            var multiResult = index.TryGetMultiple(ref buf[0], ref accessor);
             if (!multiResult.IsValid)
             {
                 return 0;

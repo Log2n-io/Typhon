@@ -35,6 +35,8 @@ internal unsafe class ConcurrentHashMap<TKey> : IDisposable where TKey : unmanag
         public int Capacity;          // power of 2
         public int Mask;              // Capacity - 1
         public int ResizeThreshold;
+        // KEEP(ptr): byte* into pinned POH stripe memory, held as a struct field (a Span/ref cannot be a field); hot
+        // probe loops index through it with pointer arithmetic.
         public byte* Entries;
         public byte[] PohArray;       // POH array reference — prevents GC collection
     }

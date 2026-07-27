@@ -31,6 +31,7 @@ namespace Typhon.Engine;
 [PublicAPI]
 public unsafe class ConcurrencyConflictSolver
 {
+    // KEEP(ptr): raw component-data pointers stored in fields — Span can't be a field; exposed safely via the Unsafe.AsRef<T>() accessors below.
     private byte* _readData;
     private byte* _committedData;
     private byte* _committingData;

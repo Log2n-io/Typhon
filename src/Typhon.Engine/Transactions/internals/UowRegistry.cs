@@ -70,10 +70,10 @@ internal unsafe class UowRegistry : IDisposable
     private readonly PinnedMemoryBlock _bitmapBlock;
 
     /// <summary>Bit=1 means Free (available for allocation). Rebuilt on load.</summary>
-    private readonly ulong* _allocationBitmap;
+    private readonly ulong* _allocationBitmap; // KEEP(ptr): raw bitmap pointer in a field (from PinnedMemoryBlock.DataAsPointer); Span can't be a field.
 
     /// <summary>Bit=1 means Committed or WalDurable. Used only after crash recovery.</summary>
-    private readonly ulong* _committedBitmap;
+    private readonly ulong* _committedBitmap; // KEEP(ptr): raw bitmap pointer in a field; Span can't be a field.
 
     /// <summary>
     /// Visibility horizon. <c>long.MaxValue</c> during normal operation (bitmap never touched). <c>0</c> after crash recovery when voided entries

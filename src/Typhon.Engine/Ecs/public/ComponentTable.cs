@@ -826,14 +826,14 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
                         idxAccessors[index.Segment] = box;
                     }
 
-                    var keyAddr = contentBase + ifi.OffsetToField;
+                    ref byte keyAddr = ref contentBase[ifi.OffsetToField];
                     if (ifi.AllowMultiple)
                     {
-                        *(int*)(contentBase + ifi.OffsetToIndexElementId) = index.Add(keyAddr, rootChunkId, ref box.Accessor, out _);
+                        *(int*)(contentBase + ifi.OffsetToIndexElementId) = index.Add(ref keyAddr, rootChunkId, ref box.Accessor, out _);
                     }
                     else
                     {
-                        index.Add(keyAddr, rootChunkId, ref box.Accessor);
+                        index.Add(ref keyAddr, rootChunkId, ref box.Accessor);
                     }
                 }
             }
@@ -963,8 +963,8 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
                     }
 
                     var chunkAddr = accessor.GetChunkAddress(chunkId);
-                    var keyAddr = chunkAddr + ifi.OffsetToField;
-                    ifi.PersistentIndex.Add(keyAddr, chunkId, ref accessor);
+                    ref byte keyAddr = ref chunkAddr[ifi.OffsetToField];
+                    ifi.PersistentIndex.Add(ref keyAddr, chunkId, ref accessor);
                 }
             }
         }

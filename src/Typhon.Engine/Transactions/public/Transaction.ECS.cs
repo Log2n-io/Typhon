@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Threading;
 using Typhon.Schema.Definition;
 
@@ -192,9 +193,9 @@ public unsafe partial class Transaction
         public List<EntityId> Results;
         public HashSet<EntityId> PendingDestroys;
 
-        public bool Process(long key, byte* value)
+        public bool Process(long key, ref byte value)
         {
-            ref var header = ref EntityRecordAccessor.GetHeader(value);
+            ref var header = ref EntityRecordAccessor.GetHeader(ref value);
 
             // MVCC visibility: not-yet-born or already-died entities are invisible at this snapshot.
             if (header.BornTSN != 0 && header.BornTSN > TxTsn)
@@ -303,7 +304,8 @@ public unsafe partial class Transaction
                             : info.CompContentAccessor.GetChunkAsSpan(chunkId, true);
                         int overhead = table.ComponentOverhead;
                         int copySize = Math.Min(sharedValues[v].DataSize, dst.Length - overhead);
-                        new ReadOnlySpan<byte>((byte*)Unsafe.AsPointer(ref Unsafe.AsRef(in sharedValues[v])) + 12, copySize)
+                        MemoryMarshal.CreateReadOnlySpan(
+                                ref Unsafe.Add(ref Unsafe.As<ComponentValue, byte>(ref Unsafe.AsRef(in sharedValues[v])), 12), copySize)
                             .CopyTo(dst.Slice(overhead));
                         entry.EnabledBits |= (ushort)(1 << slot);
                         break;
@@ -462,9 +464,10 @@ public unsafe partial class Transaction
             ref var entry = ref span[baseIndex + i];
             int chunkId = entry.Loc[slot];
 
-            byte* ptr = isTransient ? info.TransientCompContentAccessor.GetChunkAddress(chunkId, true) : info.CompContentAccessor.GetChunkAddress(chunkId, true);
+            ref byte ptr = ref Unsafe.AsRef<byte>(
+                isTransient ? info.TransientCompContentAccessor.GetChunkAddress(chunkId, true) : info.CompContentAccessor.GetChunkAddress(chunkId, true));
 
-            Unsafe.AsRef<T>(ptr + overhead) = values[i];
+            Unsafe.As<byte, T>(ref Unsafe.Add(ref ptr, overhead)) = values[i];
             entry.EnabledBits |= bitMask;
         }
     }
@@ -531,7 +534,8 @@ public unsafe partial class Transaction
                     info.TransientCompContentAccessor.GetChunkAsSpan(chunkId, true) : info.CompContentAccessor.GetChunkAsSpan(chunkId, true);
                 int overhead = table.ComponentOverhead;
                 int copySize = Math.Min(values[vi].DataSize, dst.Length - overhead);
-                new ReadOnlySpan<byte>((byte*)Unsafe.AsPointer(ref Unsafe.AsRef(in values[vi])) + 12, copySize)
+                MemoryMarshal.CreateReadOnlySpan(
+                        ref Unsafe.Add(ref Unsafe.As<ComponentValue, byte>(ref Unsafe.AsRef(in values[vi])), 12), copySize)
                     .CopyTo(dst.Slice(overhead));
                 entry.EnabledBits |= (ushort)(1 << slot);
             }
@@ -616,11 +620,12 @@ public unsafe partial class Transaction
         }
 
         int recordSize = meta._entityRecordSize;
-        byte* readBuf = stackalloc byte[recordSize];
+        Span<byte> readBuf = stackalloc byte[recordSize];
+        ref byte readBufRef = ref MemoryMarshal.GetReference(readBuf);
 
         using var guard = EpochGuard.Enter(_epochManager);
         var accessor = engineState.EntityMap.Segment.CreateChunkAccessor();
-        bool found = engineState.EntityMap.TryGet(id.EntityKey, readBuf, ref accessor);
+        bool found = engineState.EntityMap.TryGet(id.EntityKey, ref readBufRef, ref accessor);
         accessor.Dispose();
 
         if (!found)
@@ -634,7 +639,7 @@ public unsafe partial class Transaction
             return false;
         }
 
-        return EntityRecordAccessor.GetHeader(readBuf).IsVisibleAt(TSN);
+        return EntityRecordAccessor.GetHeader(ref readBufRef).IsVisibleAt(TSN);
     }
 
     /// <summary>Check whether an entity link target is alive.</summary>
@@ -840,10 +845,10 @@ public unsafe partial class Transaction
                     dataChunkId = cri.CurCompContentChunkId;
                 }
 
-                byte* ptr = table.StorageMode == StorageMode.Transient ? 
-                    info.TransientCompContentAccessor.GetChunkAddress(dataChunkId) : info.CompContentAccessor.GetChunkAddress(dataChunkId);
+                ref byte ptr = ref Unsafe.AsRef<byte>(table.StorageMode == StorageMode.Transient ?
+                    info.TransientCompContentAccessor.GetChunkAddress(dataChunkId) : info.CompContentAccessor.GetChunkAddress(dataChunkId));
 
-                var fkEntityId = *(EntityId*)(ptr + table.ComponentOverhead + target.FkFieldOffset);
+                var fkEntityId = Unsafe.As<byte, EntityId>(ref Unsafe.Add(ref ptr, table.ComponentOverhead + target.FkFieldOffset));
                 if (fkEntityId == parentId)
                 {
                     result.Add(entry.Id);
@@ -995,7 +1000,8 @@ public unsafe partial class Transaction
 
         // Committed entity: read from EntityMap
         int recordSize = meta._entityRecordSize;
-        byte* readBuf = stackalloc byte[recordSize];
+        Span<byte> readBuf = stackalloc byte[recordSize];
+        ref byte readBufRef = ref MemoryMarshal.GetReference(readBuf);
 
         // Transaction already holds an epoch scope (entered during Init) — no per-call EpochGuard needed.
         // Reuse cached EntityMap accessor (same pattern as IsEntityVisible)
@@ -1009,7 +1015,7 @@ public unsafe partial class Transaction
             _entityMapCacheArchId = id.ArchetypeId;
             _hasEntityMapCache = true;
         }
-        bool found = es.EntityMap.TryGet(id.EntityKey, readBuf, ref _entityMapCacheAccessor);
+        bool found = es.EntityMap.TryGet(id.EntityKey, ref readBufRef, ref _entityMapCacheAccessor);
 
         if (!found)
         {
@@ -1022,7 +1028,7 @@ public unsafe partial class Transaction
             return default;
         }
 
-        ref var header = ref EntityRecordAccessor.GetHeader(readBuf);
+        ref var header = ref EntityRecordAccessor.GetHeader(ref readBufRef);
 
         // Visibility check
         if (!header.IsVisibleAt(TSN))
@@ -1045,8 +1051,8 @@ public unsafe partial class Transaction
             if (meta.IsClusterEligible && es.ClusterState != null)
             {
                 // Cluster path: read ClusterEntityRecord → resolve cluster base + slot
-                int clusterChunkId = ClusterEntityRecordAccessor.GetClusterChunkId(readBuf);
-                byte slotIndex = ClusterEntityRecordAccessor.GetSlotIndex(readBuf);
+                int clusterChunkId = ClusterEntityRecordAccessor.GetClusterChunkId(ref readBufRef);
+                byte slotIndex = ClusterEntityRecordAccessor.GetSlotIndex(ref readBufRef);
 
                 // Reuse the cluster cache accessor — keyed by archetype
                 if (!_hasClusterCache || _clusterCacheArchId != id.ArchetypeId)
@@ -1077,17 +1083,17 @@ public unsafe partial class Transaction
                 // Primary base: PersistentStore for mixed/SV, TransientStore for pure-Transient
                 if (es.ClusterState.ClusterSegment != null)
                 {
-                    result._clusterBase = _clusterCacheAccessor.GetChunkAddress(clusterChunkId, writable);
+                    result._clusterBase = ref Unsafe.AsRef<byte>(_clusterCacheAccessor.GetChunkAddress(clusterChunkId, writable));
                 }
                 else
                 {
-                    result._clusterBase = _transientClusterCacheAccessor.GetChunkAddress(clusterChunkId, writable);
+                    result._clusterBase = ref Unsafe.AsRef<byte>(_transientClusterCacheAccessor.GetChunkAddress(clusterChunkId, writable));
                 }
 
                 // Mixed archetype: also set TransientStore base for Transient component reads
                 if (_hasTransientClusterCache && es.ClusterState.ClusterSegment != null)
                 {
-                    result._transientClusterBase = _transientClusterCacheAccessor.GetChunkAddress(clusterChunkId, writable);
+                    result._transientClusterBase = ref Unsafe.AsRef<byte>(_transientClusterCacheAccessor.GetChunkAddress(clusterChunkId, writable));
                 }
 
                 result._clusterSlotIndex = slotIndex;
@@ -1108,7 +1114,7 @@ public unsafe partial class Transaction
                             continue;
                         }
 
-                        int compRevFirstChunkId = ClusterEntityRecordAccessor.GetCompRevFirstChunkId(readBuf, vi);
+                        int compRevFirstChunkId = ClusterEntityRecordAccessor.GetCompRevFirstChunkId(ref readBufRef, vi);
                         if (compRevFirstChunkId == 0)
                         {
                             continue;
@@ -1141,7 +1147,7 @@ public unsafe partial class Transaction
             }
             else
             {
-                result.CopyLocationsFrom(readBuf, meta.ComponentCount);
+                result.CopyLocationsFrom(ref readBufRef, meta.ComponentCount);
 
                 // For Versioned components: resolve MVCC-visible chunkId via SingleCache or revision chain walk.
                 // Location[slot] from EntityMap is compRevFirstChunkId.
@@ -1230,9 +1236,9 @@ public unsafe partial class Transaction
             ComponentRevisionManager.AddCompRev(info, ref cri, TSN, UowId, false);
 
             // Copy old data to new chunk
-            byte* oldPtr = info.CompContentAccessor.GetChunkAddress(oldChunkId);
-            byte* newPtr = info.CompContentAccessor.GetChunkAddress(cri.CurCompContentChunkId, true);
-            Unsafe.CopyBlock(newPtr, oldPtr, (uint)table.ComponentTotalSize);
+            ref byte oldPtr = ref Unsafe.AsRef<byte>(info.CompContentAccessor.GetChunkAddress(oldChunkId));
+            ref byte newPtr = ref Unsafe.AsRef<byte>(info.CompContentAccessor.GetChunkAddress(cri.CurCompContentChunkId, true));
+            Unsafe.CopyBlock(ref newPtr, ref oldPtr, (uint)table.ComponentTotalSize);
 
             // If the component has collections, increment RefCounters for shared collection buffers.
             // The byte copy above duplicated the _bufferId fields — both old and new revisions now
@@ -1241,7 +1247,7 @@ public unsafe partial class Transaction
             {
                 foreach (var kvp in table.ComponentCollectionVSBSByOffset)
                 {
-                    int bufferId = *(int*)(newPtr + table.ComponentOverhead + kvp.Key);
+                    int bufferId = Unsafe.As<byte, int>(ref Unsafe.Add(ref newPtr, table.ComponentOverhead + kvp.Key));
                     if (bufferId != 0)
                     {
                         var accessor = kvp.Value.Segment.CreateChunkAccessor(_changeSet);
@@ -1252,6 +1258,7 @@ public unsafe partial class Transaction
             }
         }
 
+        // KEEP(ptr): ptr escapes as a raw (nint) address in the return tuple — the caller consumes it as a pointer.
         byte* ptr = info.CompContentAccessor.GetChunkAddress(cri.CurCompContentChunkId, true);
         return (cri.CurCompContentChunkId, (nint)ptr);
     }
@@ -1352,7 +1359,8 @@ public unsafe partial class Transaction
         using var guard = EpochGuard.Enter(_epochManager);
 
         // Hoist stackalloc outside the loop — cluster record is the largest: 19B base + 16 × 4B Versioned = 83B (≥ legacy 78B)
-        byte* recordPtr = stackalloc byte[ClusterEntityRecordAccessor.BaseRecordSize + EntityRecordAccessor.MaxComponentCount * sizeof(int)];
+        Span<byte> recordPtr = stackalloc byte[ClusterEntityRecordAccessor.BaseRecordSize + EntityRecordAccessor.MaxComponentCount * sizeof(int)];
+        ref byte recordRef = ref MemoryMarshal.GetReference(recordPtr);
 
         // Hoist all accessors outside the per-entity loop.
         // Track last-used archetype — covers the dominant case (single archetype per TX).
@@ -1380,7 +1388,7 @@ public unsafe partial class Transaction
                 }
 
                 // Build EntityRecord on stack from SpawnEntry
-                ref var header = ref *(EntityRecordHeader*)recordPtr;
+                ref var header = ref Unsafe.As<byte, EntityRecordHeader>(ref recordRef);
                 header = default;
                 header.BornTSN = TSN;
 
@@ -1407,6 +1415,8 @@ public unsafe partial class Transaction
                     // ═══════════════════════════════════════════════════════════════
                     var layout = ctx.ClusterState.Layout;
                     int clusterChunkId, slotIdx;
+                    // KEEP(ptr): clusterBase is the metadata base (OccupancyBits/EnabledBits/EntityIds + *(int*) elementId writes); clusterTransientBase is a
+                    // nullable byte* with ?:-selection (a null ref is not expressible). The per-field index key is a ref into clusterBase.
                     byte* clusterBase; // Primary segment base (has metadata: OccupancyBits, EnabledBits, EntityIds)
                     byte* clusterTransientBase = null; // TransientStore base (only for mixed archetypes)
 
@@ -1425,9 +1435,9 @@ public unsafe partial class Transaction
                                 $"Spatial archetype must provide its spatial component at spawn time (slot {spatialSlotIdx} is missing).");
                         }
                         ref var spatialSrcAccessor = ref ctx.ClusterSrcAccessors[spatialSlotIdx];
-                        byte* spatialSrcAddr = spatialSrcAccessor.GetChunkAddress(spatialSrcChunkId);
-                        byte* spatialFieldPtr = spatialSrcAddr + ctx.SpatialComponentOverheadCached + ctx.SpatialFieldOffsetCached;
-                        computedCellKey = ctx.SpatialGridCached.WorldToCellKeyFromSpatialField(spatialFieldPtr, ctx.SpatialFieldTypeCached);
+                        ref byte spatialSrcAddr = ref Unsafe.AsRef<byte>(spatialSrcAccessor.GetChunkAddress(spatialSrcChunkId));
+                        ref byte spatialFieldPtr = ref Unsafe.Add(ref spatialSrcAddr, ctx.SpatialComponentOverheadCached + ctx.SpatialFieldOffsetCached);
+                        computedCellKey = ctx.SpatialGridCached.WorldToCellKeyFromSpatialField(ref spatialFieldPtr, ctx.SpatialFieldTypeCached);
                     }
 
                     if (ctx.ClusterState.ClusterSegment != null)
@@ -1508,12 +1518,12 @@ public unsafe partial class Transaction
                     // OccupancyBit was already set by ClaimSlot
 
                     // Build ClusterEntityRecord (19 bytes base + 4 bytes per Versioned slot)
-                    ClusterEntityRecordAccessor.InitializeRecord(recordPtr, ctx.Meta.VersionedSlotCount);
-                    ref var clusterHeader = ref ClusterEntityRecordAccessor.GetHeader(recordPtr);
+                    ClusterEntityRecordAccessor.InitializeRecord(ref recordRef, ctx.Meta.VersionedSlotCount);
+                    ref var clusterHeader = ref ClusterEntityRecordAccessor.GetHeader(ref recordRef);
                     clusterHeader.BornTSN = TSN;
                     clusterHeader.EnabledBits = enabledBits;
-                    ClusterEntityRecordAccessor.SetClusterChunkId(recordPtr, clusterChunkId);
-                    ClusterEntityRecordAccessor.SetSlotIndex(recordPtr, (byte)slotIdx);
+                    ClusterEntityRecordAccessor.SetClusterChunkId(ref recordRef, clusterChunkId);
+                    ClusterEntityRecordAccessor.SetSlotIndex(ref recordRef, (byte)slotIdx);
 
                     // Store compRevFirstChunkId for each Versioned slot
                     if (ctx.Meta.VersionedSlotMask != 0)
@@ -1523,13 +1533,13 @@ public unsafe partial class Transaction
                             int vi = layout.SlotToVersionedIndex[slot];
                             if (vi >= 0)
                             {
-                                ClusterEntityRecordAccessor.SetCompRevFirstChunkId(recordPtr, vi, entry.Rev[slot]);
+                                ClusterEntityRecordAccessor.SetCompRevFirstChunkId(ref recordRef, vi, entry.Rev[slot]);
                             }
                         }
                     }
 
                     // Insert ClusterEntityRecord into EntityMap
-                    ctx.EngineState.EntityMap.InsertNew(entry.Id.EntityKey, recordPtr, ref ctx.MapAccessor, _changeSet);
+                    ctx.EngineState.EntityMap.InsertNew(entry.Id.EntityKey, ref recordRef, ref ctx.MapAccessor, _changeSet);
 
                     // Note: cluster pages are marked dirty at page level (GetChunkAddress(dirty:true) above).
                     // Checkpoint persists them. We do NOT set ClusterDirtyBitmap here — that bitmap tracks write mutations for change-filtered dispatch,
@@ -1548,8 +1558,8 @@ public unsafe partial class Transaction
                             for (int fi = 0; fi < ixSlot.Fields.Length; fi++)
                             {
                                 ref var field = ref ixSlot.Fields[fi];
-                                byte* fieldPtr = compBase + field.FieldOffset;
-                                int elementId = field.Index.Add(fieldPtr, clusterLocation, ref ctx.ClusterIdxAccessor);
+                                ref byte fieldPtr = ref compBase[field.FieldOffset];
+                                int elementId = field.Index.Add(ref fieldPtr, clusterLocation, ref ctx.ClusterIdxAccessor);
                                 // For AllowMultiple fields, record elementId in the cluster tail so destroy/migration can call RemoveValue(key,
                                 // elementId, value) — removes only this entity's entry, not the entire buffer at the key (which would wipe all siblings on
                                 // a non-unique index).
@@ -1558,7 +1568,7 @@ public unsafe partial class Transaction
                                 {
                                     *(int*)(clusterBase + layout.IndexElementIdOffset(field.MultiFieldIndex, slotIdx)) = elementId;
                                 }
-                                field.ZoneMap?.Widen(clusterChunkId, fieldPtr);
+                                field.ZoneMap?.Widen(clusterChunkId, ref fieldPtr);
 
                                 // Notify views of creation (isCreation flag so incremental views detect the new entity)
                                 var spawnTable = ctx.EngineState.SlotToComponentTable[ixSlot.Slot];
@@ -1571,7 +1581,7 @@ public unsafe partial class Transaction
                                         continue;
                                     }
 
-                                    var newKey = KeyBytes8.FromPointer(fieldPtr, field.FieldSize);
+                                    var newKey = KeyBytes8.FromRef(ref fieldPtr, field.FieldSize);
                                     byte flags = (byte)((fi & 0x3F) | 0x40); // isCreation
                                     reg.DeltaBuffer.TryAppend(entry.Id.EntityKey, default, newKey, TSN, flags, reg.ComponentTag);
                                 }
@@ -1590,7 +1600,7 @@ public unsafe partial class Transaction
 
                         if (ctx.ClusterState.ClusterCellMap != null)
                         {
-                            if (SpatialMaintainer.ReadAndValidateBoundsFromPtr(spatialFieldPtr, ss.FieldInfo, spawnSpatialCoords, ss.Descriptor))
+                            if (SpatialMaintainer.ReadAndValidateBoundsFromPtr(ref Unsafe.AsRef<byte>(spatialFieldPtr), ss.FieldInfo, spawnSpatialCoords, ss.Descriptor))
                             {
                                 ctx.ClusterState.EnsureClusterAabbsCapacity(clusterChunkId + 1);
                                 ctx.ClusterState.EnsureClusterSpatialIndexSlotCapacity(clusterChunkId + 1);
@@ -1663,6 +1673,7 @@ public unsafe partial class Transaction
                             {
                                 continue;
                             }
+                            // KEEP(ptr): chunkAddr backs the *(long*) EntityPK + *(int*) elementId writes; index.Add takes a ref into it.
                             byte* chunkAddr = ctx.TrCompAccessors[si].GetChunkAddress(srcChunkId, true);
 
                             // Write EntityPK into the chunk's overhead area (TransientIndex expects it there)
@@ -1678,11 +1689,11 @@ public unsafe partial class Transaction
                                 if (ifi.AllowMultiple)
                                 {
                                     *(int*)&chunkAddr[ifi.OffsetToIndexElementId] =
-                                        index.Add(&chunkAddr[ifi.OffsetToField], srcChunkId, ref ctx.TrIdxAccessors[trIdxAccessorBase[si] + i], out _);
+                                        index.Add(ref chunkAddr[ifi.OffsetToField], srcChunkId, ref ctx.TrIdxAccessors[trIdxAccessorBase[si] + i], out _);
                                 }
                                 else
                                 {
-                                    index.Add(&chunkAddr[ifi.OffsetToField], srcChunkId, ref ctx.TrIdxAccessors[trIdxAccessorBase[si] + i]);
+                                    index.Add(ref chunkAddr[ifi.OffsetToField], srcChunkId, ref ctx.TrIdxAccessors[trIdxAccessorBase[si] + i]);
                                 }
                             }
                         }
@@ -1693,14 +1704,14 @@ public unsafe partial class Transaction
                     // ═══════════════════════════════════════════════════════════════
                     // Legacy path: build location array from SpawnEntry
                     // ═══════════════════════════════════════════════════════════════
-                    var locDest = (int*)(recordPtr + EntityRecordAccessor.HeaderSize);
+                    ref int locDest = ref Unsafe.As<byte, int>(ref Unsafe.Add(ref recordRef, EntityRecordAccessor.HeaderSize));
                     for (int slot = 0; slot < ctx.ComponentCount; slot++)
                     {
-                        locDest[slot] = (ctx.VersionedMask & (1 << slot)) != 0 ? entry.Rev[slot] : entry.Loc[slot];
+                        Unsafe.Add(ref locDest, slot) = (ctx.VersionedMask & (1 << slot)) != 0 ? entry.Rev[slot] : entry.Loc[slot];
                     }
 
                     // Insert into EntityMap — skip duplicate check (EntityKey is freshly generated, guaranteed unique)
-                    ctx.EngineState.EntityMap.InsertNew(entry.Id.EntityKey, recordPtr, ref ctx.MapAccessor, _changeSet);
+                    ctx.EngineState.EntityMap.InsertNew(entry.Id.EntityKey, ref recordRef, ref ctx.MapAccessor, _changeSet);
                 }
 
                 // Insert shared ComponentTable secondary indexes — ONLY for non-cluster (legacy) entities.
@@ -1719,6 +1730,7 @@ public unsafe partial class Transaction
                             continue;
                         }
 
+                        // KEEP(ptr): chunkAddr backs the *(long*) EntityPK + *(int*) elementId writes; index.Add takes a ref into it.
                         byte* chunkAddr = ctx.SvCompAccessors[si].GetChunkAddress(chunkId, true);
 
                         // Write inline entityPK at offset 0 (SV indexed components store entityPK in overhead to enable chunkId → entityPK resolution during
@@ -1737,11 +1749,11 @@ public unsafe partial class Transaction
                             if (ifi.AllowMultiple)
                             {
                                 *(int*)&chunkAddr[ifi.OffsetToIndexElementId] =
-                                    index.Add(&chunkAddr[ifi.OffsetToField], chunkId, ref ctx.SvIdxAccessors[svIdxAccessorBase[si] + i], out _);
+                                    index.Add(ref chunkAddr[ifi.OffsetToField], chunkId, ref ctx.SvIdxAccessors[svIdxAccessorBase[si] + i], out _);
                             }
                             else
                             {
-                                index.Add(&chunkAddr[ifi.OffsetToField], chunkId, ref ctx.SvIdxAccessors[svIdxAccessorBase[si] + i]);
+                                index.Add(ref chunkAddr[ifi.OffsetToField], chunkId, ref ctx.SvIdxAccessors[svIdxAccessorBase[si] + i]);
                             }
                         }
                     }
@@ -1761,6 +1773,7 @@ public unsafe partial class Transaction
                             continue;
                         }
 
+                        // KEEP(ptr): chunkAddr backs the *(long*) EntityPK + *(int*) elementId writes; index.Add takes a ref into it.
                         byte* chunkAddr = ctx.TrCompAccessors[si].GetChunkAddress(chunkId, true);
 
                         if (table.Definition.EntityPKOverheadSize > 0)
@@ -1777,11 +1790,11 @@ public unsafe partial class Transaction
                             if (ifi.AllowMultiple)
                             {
                                 *(int*)&chunkAddr[ifi.OffsetToIndexElementId] =
-                                    index.Add(&chunkAddr[ifi.OffsetToField], chunkId, ref ctx.TrIdxAccessors[trIdxAccessorBase[si] + i], out _);
+                                    index.Add(ref chunkAddr[ifi.OffsetToField], chunkId, ref ctx.TrIdxAccessors[trIdxAccessorBase[si] + i], out _);
                             }
                             else
                             {
-                                index.Add(&chunkAddr[ifi.OffsetToField], chunkId, ref ctx.TrIdxAccessors[trIdxAccessorBase[si] + i]);
+                                index.Add(ref chunkAddr[ifi.OffsetToField], chunkId, ref ctx.TrIdxAccessors[trIdxAccessorBase[si] + i]);
                             }
                         }
                     }
@@ -2200,7 +2213,8 @@ public unsafe partial class Transaction
         using var guard = EpochGuard.Enter(_epochManager);
 
         // Hoist stackalloc out of loop — max record size is 78B (14B header + 16 components × 4B)
-        byte* readBuf = stackalloc byte[EntityRecordAccessor.MaxRecordSize];
+        Span<byte> readBuf = stackalloc byte[EntityRecordAccessor.MaxRecordSize];
+        ref byte readBufRef = ref MemoryMarshal.GetReference(readBuf);
 
         // Hoist EntityMap accessor — reuse when archetype matches (same pattern as FinalizeSpawns)
         ushort lastArchId = 0;
@@ -2280,13 +2294,13 @@ public unsafe partial class Transaction
                     }
                 }
 
-                if (engineState.EntityMap.TryGet(entityId.EntityKey, readBuf, ref accessor))
+                if (engineState.EntityMap.TryGet(entityId.EntityKey, ref readBufRef, ref accessor))
                 {
                     // Clear cluster bits if cluster storage is active
                     if (destroyUseCluster)
                     {
-                        int clusterChunkId = ClusterEntityRecordAccessor.GetClusterChunkId(readBuf);
-                        byte slotIndex = ClusterEntityRecordAccessor.GetSlotIndex(readBuf);
+                        int clusterChunkId = ClusterEntityRecordAccessor.GetClusterChunkId(ref readBufRef);
+                        byte slotIndex = ClusterEntityRecordAccessor.GetSlotIndex(ref readBufRef);
 
                         // Remove per-archetype B+Tree entries before releasing the slot.
                         // If the entity was written this tick (shadow bitmap set), skip B+Tree removal here — ProcessClusterShadowEntries at tick fence will
@@ -2300,32 +2314,32 @@ public unsafe partial class Transaction
 
                             if (!hasPendingShadow)
                             {
-                                byte* clusterBase = clusterAccessor.GetChunkAddress(clusterChunkId);
+                                ref byte clusterBase = ref Unsafe.AsRef<byte>(clusterAccessor.GetChunkAddress(clusterChunkId));
                                 var layout = destroyClusterState.Layout;
                                 var ixSlots = destroyClusterState.IndexSlots;
                                 for (int s = 0; s < ixSlots.Length; s++)
                                 {
                                     ref var ixSlot = ref ixSlots[s];
                                     int compSize = layout.ComponentSize(ixSlot.Slot);
-                                    byte* compBase = clusterBase + layout.ComponentOffset(ixSlot.Slot) + slotIndex * compSize;
+                                    ref byte compBase = ref Unsafe.Add(ref clusterBase, layout.ComponentOffset(ixSlot.Slot) + slotIndex * compSize);
                                     int destroyClusterLocation = clusterChunkId * 64 + slotIndex;
                                     for (int fi = 0; fi < ixSlot.Fields.Length; fi++)
                                     {
                                         ref var field = ref ixSlot.Fields[fi];
-                                        byte* fieldPtr = compBase + field.FieldOffset;
-                                        var key = KeyBytes8.FromPointer(fieldPtr, field.FieldSize);
+                                        ref byte fieldPtr = ref Unsafe.Add(ref compBase, field.FieldOffset);
+                                        var key = KeyBytes8.FromRef(ref fieldPtr, field.FieldSize);
                                         // Non-unique index: read the per-entity elementId from the cluster tail and call RemoveValue so only this entity's
                                         // specific (key, clusterLocation) entry is removed — Remove(key) would wipe the entire buffer at the key and corrupt
                                         // sibling entities sharing the same field value. Issue #229 Phase 3.
                                         // Regression test: ClusterIndex_NonUniqueField_DestroyOneEntity_PreservesSiblingsInIndex.
                                         if (field.AllowMultiple)
                                         {
-                                            int elementId = *(int*)(clusterBase + layout.IndexElementIdOffset(field.MultiFieldIndex, slotIndex));
-                                            field.Index.RemoveValue(&key, elementId, destroyClusterLocation, ref destroyClusterIdxAccessor);
+                                            int elementId = Unsafe.As<byte, int>(ref Unsafe.Add(ref clusterBase, layout.IndexElementIdOffset(field.MultiFieldIndex, slotIndex)));
+                                            field.Index.RemoveValue(ref Unsafe.As<KeyBytes8, byte>(ref key), elementId, destroyClusterLocation, ref destroyClusterIdxAccessor);
                                         }
                                         else
                                         {
-                                            field.Index.Remove(&key, out _, ref destroyClusterIdxAccessor);
+                                            field.Index.Remove(ref Unsafe.As<KeyBytes8, byte>(ref key), out _, ref destroyClusterIdxAccessor);
                                         }
 
                                         // Notify views of deletion
@@ -2361,8 +2375,8 @@ public unsafe partial class Transaction
                     }
 
                     // Set DiedTSN (header layout is the same for both cluster and legacy records)
-                    EntityRecordAccessor.GetHeader(readBuf).DiedTSN = TSN;
-                    engineState.EntityMap.Upsert(entityId.EntityKey, readBuf, ref accessor, _changeSet);
+                    EntityRecordAccessor.GetHeader(ref readBufRef).DiedTSN = TSN;
+                    engineState.EntityMap.Upsert(entityId.EntityKey, ref readBufRef, ref accessor, _changeSet);
 
                     // Enqueue for deferred GC (LinearHash removal + chunk freeing when MinTSN advances past DiedTSN)
                     _dbe.EnqueueEcsCleanup(entityId, meta, TSN);
@@ -2405,7 +2419,8 @@ public unsafe partial class Transaction
         ushort lastArchId = 0;
         var emAccessor = default(ChunkAccessor<PersistentStore>);
         bool hasEmAccessor = false;
-        byte* readBuf = stackalloc byte[EntityRecordAccessor.MaxRecordSize];
+        Span<byte> readBuf = stackalloc byte[EntityRecordAccessor.MaxRecordSize];
+        ref byte readBufRef = ref MemoryMarshal.GetReference(readBuf);
 
         try
         {
@@ -2466,7 +2481,7 @@ public unsafe partial class Transaction
                         hasEmAccessor = true;
                     }
 
-                    hasRecord = engineState.EntityMap.TryGet(entityId.EntityKey, readBuf, ref emAccessor);
+                    hasRecord = engineState.EntityMap.TryGet(entityId.EntityKey, ref readBufRef, ref emAccessor);
                 }
 
                 // Cluster Versioned components address their revision chain via the cluster EntityMap record (CompRevFirstChunkId), NOT the per-component PK
@@ -2496,7 +2511,7 @@ public unsafe partial class Transaction
                     }
                     else if (!meta.IsClusterEligible && (table.HasShadowableIndexes || table.SpatialIndex != null) && hasRecord)
                     {
-                        int chunkId = EntityRecordAccessor.GetLocation(readBuf, slot);
+                        int chunkId = EntityRecordAccessor.GetLocation(ref readBufRef, slot);
                         table.TrackDestroyedChunkId(chunkId);
 
                         // If entity was NOT written this tick (no shadow), remove index entries now using current component data value (which matches the index).
@@ -2565,12 +2580,13 @@ public unsafe partial class Transaction
     private static void RemoveIndexEntriesCore<TStore>(ComponentTable table, int chunkId, ref ChunkAccessor<TStore> compAccessor) where TStore : struct, IPageStore
     {
         var fields = table.IndexedFieldInfos;
+        // KEEP(ptr): ptr backs the *(int*) elementId reads (ptr + OffsetToIndexElementId); the index key is a ref into it.
         byte* ptr = compAccessor.GetChunkAddress(chunkId);
 
         for (int i = 0; i < fields.Length; i++)
         {
             ref var ifi = ref fields[i];
-            byte* fieldPtr = ptr + ifi.OffsetToField;
+            ref byte fieldPtr = ref ptr[ifi.OffsetToField];
 
             if (typeof(TStore) == typeof(TransientStore))
             {
@@ -2581,11 +2597,11 @@ public unsafe partial class Transaction
                     if (ifi.AllowMultiple)
                     {
                         int elementId = *(int*)(ptr + ifi.OffsetToIndexElementId);
-                        index.RemoveValue(fieldPtr, elementId, chunkId, ref idxAccessor);
+                        index.RemoveValue(ref fieldPtr, elementId, chunkId, ref idxAccessor);
                     }
                     else
                     {
-                        index.Remove(fieldPtr, out _, ref idxAccessor);
+                        index.Remove(ref fieldPtr, out _, ref idxAccessor);
                     }
                 }
                 finally
@@ -2602,11 +2618,11 @@ public unsafe partial class Transaction
                     if (ifi.AllowMultiple)
                     {
                         int elementId = *(int*)(ptr + ifi.OffsetToIndexElementId);
-                        index.RemoveValue(fieldPtr, elementId, chunkId, ref idxAccessor);
+                        index.RemoveValue(ref fieldPtr, elementId, chunkId, ref idxAccessor);
                     }
                     else
                     {
-                        index.Remove(fieldPtr, out _, ref idxAccessor);
+                        index.Remove(ref fieldPtr, out _, ref idxAccessor);
                     }
                 }
                 finally
@@ -2625,7 +2641,7 @@ public unsafe partial class Transaction
                     continue;
                 }
 
-                var key = KeyBytes8.FromPointer(fieldPtr, ifi.Size);
+                var key = KeyBytes8.FromRef(ref fieldPtr, ifi.Size);
                 byte flags = (byte)((i & 0x3F) | 0x80); // isDeletion flag
                 reg.DeltaBuffer.TryAppend(chunkId, key, default, 0, flags, reg.ComponentTag);
             }
@@ -2687,11 +2703,12 @@ public unsafe partial class Transaction
     private void ResolveClusterVersionedForDestroy(EntityId entityId, ArchetypeMetadata meta, ArchetypeEngineState engineState, long pk)
     {
         var layout = meta.ClusterLayout;
-        byte* record = stackalloc byte[EntityRecordAccessor.MaxRecordSize];
+        Span<byte> record = stackalloc byte[EntityRecordAccessor.MaxRecordSize];
+        ref byte recordRef = ref MemoryMarshal.GetReference(record);
         var emAccessor = engineState.EntityMap.Segment.CreateChunkAccessor();
         try
         {
-            if (!engineState.EntityMap.TryGet(entityId.EntityKey, record, ref emAccessor))
+            if (!engineState.EntityMap.TryGet(entityId.EntityKey, ref recordRef, ref emAccessor))
             {
                 return;
             }
@@ -2704,7 +2721,7 @@ public unsafe partial class Transaction
                     continue;
                 }
 
-                int firstChunkId = ClusterEntityRecordAccessor.GetCompRevFirstChunkId(record, vi);
+                int firstChunkId = ClusterEntityRecordAccessor.GetCompRevFirstChunkId(ref recordRef, vi);
                 if (firstChunkId == 0)
                 {
                     continue;
@@ -2743,7 +2760,8 @@ public unsafe partial class Transaction
         using var guard = EpochGuard.Enter(_epochManager);
 
         // Hoist stackalloc out of loop — max record size is 78B (14B header + 16 components × 4B)
-        byte* readBuf = stackalloc byte[EntityRecordAccessor.MaxRecordSize];
+        Span<byte> readBuf = stackalloc byte[EntityRecordAccessor.MaxRecordSize];
+        ref byte readBufRef = ref MemoryMarshal.GetReference(readBuf);
 
         foreach (var kvp in _pendingEnableDisable)
         {
@@ -2768,9 +2786,9 @@ public unsafe partial class Transaction
             }
 
             var accessor = engineState.EntityMap.Segment.CreateChunkAccessor(_changeSet);
-            if (engineState.EntityMap.TryGet(entityId.EntityKey, readBuf, ref accessor))
+            if (engineState.EntityMap.TryGet(entityId.EntityKey, ref readBufRef, ref accessor))
             {
-                ushort oldBits = EntityRecordAccessor.GetHeader(readBuf).EnabledBits;
+                ushort oldBits = EntityRecordAccessor.GetHeader(ref readBufRef).EnabledBits;
 
                 // Record MVCC override if older transactions exist
                 if (oldBits != newBits)
@@ -2786,8 +2804,8 @@ public unsafe partial class Transaction
                 // Update the EntityMap record (the per-entity index read by Open). The committed cluster EnabledBits[C] is kept in sync by
                 // EntityRef.Enable/Disable (the immediate-visibility write); its DURABLE persistence on the cluster path is tracked under #398
                 // (the same enabled-bits crash-durability gap), so it is intentionally NOT re-written here without a covering cluster test.
-                EntityRecordAccessor.GetHeader(readBuf).EnabledBits = newBits;
-                engineState.EntityMap.Upsert(entityId.EntityKey, readBuf, ref accessor, _changeSet);
+                EntityRecordAccessor.GetHeader(ref readBufRef).EnabledBits = newBits;
+                engineState.EntityMap.Upsert(entityId.EntityKey, ref readBufRef, ref accessor, _changeSet);
             }
             accessor.Dispose();
         }

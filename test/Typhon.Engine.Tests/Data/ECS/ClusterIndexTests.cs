@@ -127,7 +127,7 @@ class ClusterIndexTests : TestBase<ClusterIndexTests>
         try
         {
             int key = 100;
-            var result = field.Index.TryGet(&key, ref accessor);
+            var result = field.Index.TryGet(ref *(byte*)&key, ref accessor);
             Assert.That(result.IsSuccess, Is.True, "Per-archetype B+Tree should contain spawned entity's key");
         }
         finally
@@ -158,7 +158,7 @@ class ClusterIndexTests : TestBase<ClusterIndexTests>
             for (int i = 0; i < 10; i++)
             {
                 int key = i * 10;
-                var result = field.Index.TryGet(&key, ref accessor);
+                var result = field.Index.TryGet(ref *(byte*)&key, ref accessor);
                 Assert.That(result.IsSuccess, Is.True, $"Key {key} should be in per-archetype B+Tree");
             }
         }
@@ -187,7 +187,7 @@ class ClusterIndexTests : TestBase<ClusterIndexTests>
         var accessor = field.Index.Segment.CreateChunkAccessor();
 
         int key = 42;
-        Assert.That(field.Index.TryGet(&key, ref accessor).IsSuccess, Is.True, "Entry should exist before destroy");
+        Assert.That(field.Index.TryGet(ref *(byte*)&key, ref accessor).IsSuccess, Is.True, "Entry should exist before destroy");
         accessor.Dispose();
 
         // Destroy
@@ -199,7 +199,7 @@ class ClusterIndexTests : TestBase<ClusterIndexTests>
 
         // Verify entry removed
         accessor = field.Index.Segment.CreateChunkAccessor();
-        Assert.That(field.Index.TryGet(&key, ref accessor).IsSuccess, Is.False, "Entry should be removed after destroy");
+        Assert.That(field.Index.TryGet(ref *(byte*)&key, ref accessor).IsSuccess, Is.False, "Entry should be removed after destroy");
         accessor.Dispose();
     }
 
@@ -236,8 +236,8 @@ class ClusterIndexTests : TestBase<ClusterIndexTests>
         {
             int newKey = 20;
             int oldKey = 10;
-            Assert.That(field.Index.TryGet(&newKey, ref accessor).IsSuccess, Is.True, "New key should be in B+Tree after tick fence");
-            Assert.That(field.Index.TryGet(&oldKey, ref accessor).IsSuccess, Is.False, "Old key should be removed from B+Tree after tick fence");
+            Assert.That(field.Index.TryGet(ref *(byte*)&newKey, ref accessor).IsSuccess, Is.True, "New key should be in B+Tree after tick fence");
+            Assert.That(field.Index.TryGet(ref *(byte*)&oldKey, ref accessor).IsSuccess, Is.False, "Old key should be removed from B+Tree after tick fence");
         }
         finally
         {
@@ -273,7 +273,7 @@ class ClusterIndexTests : TestBase<ClusterIndexTests>
         try
         {
             int key = 50;
-            Assert.That(field.Index.TryGet(&key, ref accessor).IsSuccess, Is.True, "Key should still exist after no-change write");
+            Assert.That(field.Index.TryGet(ref *(byte*)&key, ref accessor).IsSuccess, Is.True, "Key should still exist after no-change write");
         }
         finally
         {
@@ -446,8 +446,8 @@ class ClusterIndexTests : TestBase<ClusterIndexTests>
         {
             int key77 = 77;
             int key88 = 88;
-            Assert.That(field.Index.TryGet(&key77, ref accessor).IsSuccess, Is.False, "Old value should be removed");
-            Assert.That(field.Index.TryGet(&key88, ref accessor).IsSuccess, Is.False, "Mutated value should be removed");
+            Assert.That(field.Index.TryGet(ref *(byte*)&key77, ref accessor).IsSuccess, Is.False, "Old value should be removed");
+            Assert.That(field.Index.TryGet(ref *(byte*)&key88, ref accessor).IsSuccess, Is.False, "Mutated value should be removed");
         }
         finally
         {

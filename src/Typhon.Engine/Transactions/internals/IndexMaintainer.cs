@@ -14,6 +14,7 @@ internal static unsafe class IndexMaintainer
         var startChunkId = compRevInfo.CompRevTableFirstChunkId;
         if (prevCompChunkId != 0)
         {
+            // KEEP(ptr): base kept byte* for the Span<byte> ctor + *(int*) elementId writes + byte* NotifyViews; the B+Tree index APIs now take a ref into it.
             var prev = info.CompContentAccessor.GetChunkAddress(prevCompChunkId);
             var cur = info.CompContentAccessor.GetChunkAddress(compRevInfo.CurCompContentChunkId, true);
             var prevSpan = new Span<byte>(prev, info.ComponentTable.ComponentTotalSize);
@@ -35,7 +36,7 @@ internal static unsafe class IndexMaintainer
 
                         // Compound MoveValue: atomic remove-from-old + insert-under-new in a single traversal.
                         // With TAIL tracking, preserveEmptyBuffer keeps the old HEAD buffer alive for tombstone writes.
-                        *(int*)&cur[ifi.OffsetToIndexElementId] = index.MoveValue(&prev[ifi.OffsetToField], &cur[ifi.OffsetToField],
+                        *(int*)&cur[ifi.OffsetToIndexElementId] = index.MoveValue(ref prev[ifi.OffsetToField], ref cur[ifi.OffsetToField],
                             *(int*)&prev[ifi.OffsetToIndexElementId], startChunkId, ref accessor,
                             out var oldHeadBufferId, out var newHeadBufferId, tailVSBS != null);
 
@@ -68,7 +69,7 @@ internal static unsafe class IndexMaintainer
                     else
                     {
                         // Unique index — compound Move for atomic single-traversal move
-                        index.Move(&prev[ifi.OffsetToField], &cur[ifi.OffsetToField], startChunkId, ref accessor);
+                        index.Move(ref prev[ifi.OffsetToField], ref cur[ifi.OffsetToField], startChunkId, ref accessor);
                     }
                     accessor.Dispose();
 
@@ -89,6 +90,7 @@ internal static unsafe class IndexMaintainer
         // But only if this is truly a new component (Created operation), not a resurrection (Updated operation with prevCompChunkId == 0)
         else if ((compRevInfo.Operations & ComponentInfo.OperationType.Created) == ComponentInfo.OperationType.Created)
         {
+            // KEEP(ptr): base kept byte* for *(int*) elementId writes + byte* NotifyViews; index.Add takes a ref into it.
             var cur = info.CompContentAccessor.GetChunkAddress(compRevInfo.CurCompContentChunkId, true);
 
             var indexedFieldInfos = info.ComponentTable.IndexedFieldInfos;
@@ -100,12 +102,12 @@ internal static unsafe class IndexMaintainer
                 var accessor = index.Segment.CreateChunkAccessor(changeSet);
                 if (ifi.AllowMultiple)
                 {
-                    *(int*)&cur[ifi.OffsetToIndexElementId] = index.Add(&cur[ifi.OffsetToField], startChunkId, ref accessor, out _);
+                    *(int*)&cur[ifi.OffsetToIndexElementId] = index.Add(ref cur[ifi.OffsetToField], startChunkId, ref accessor, out _);
                     // TAIL write deferred to first mutation — see EnsureTailPopulated
                 }
                 else
                 {
-                    index.Add(&cur[ifi.OffsetToField], startChunkId, ref accessor);
+                    index.Add(ref cur[ifi.OffsetToField], startChunkId, ref accessor);
                 }
                 accessor.Dispose();
             }
@@ -123,6 +125,7 @@ internal static unsafe class IndexMaintainer
 
     internal static void RemoveSecondaryIndices(long pk, ComponentInfo info, int prevCompChunkId, int startChunkId, ChangeSet changeSet, long tsn)
     {
+        // KEEP(ptr): base kept byte* for *(int*) elementId reads + byte* NotifyViews; the B+Tree index APIs now take a ref into it.
         var prev = info.CompContentAccessor.GetChunkAddress(prevCompChunkId);
         var indexedFieldInfos = info.ComponentTable.IndexedFieldInfos;
 
@@ -144,14 +147,14 @@ internal static unsafe class IndexMaintainer
 
                 // When TAIL tracking is active, preserve the BTree key even if the HEAD buffer empties.
                 // This keeps the TAIL version-history buffer reachable for temporal queries.
-                index.RemoveValue(&prev[ifi.OffsetToField], *(int*)&prev[ifi.OffsetToIndexElementId], startChunkId, ref accessor, tailVSBS != null);
+                index.RemoveValue(ref prev[ifi.OffsetToField], *(int*)&prev[ifi.OffsetToIndexElementId], startChunkId, ref accessor, tailVSBS != null);
 
                 // TAIL: backfill + Active + Tombstone for the deleted entity.
                 // preserveEmptyBuffer keeps the key alive so TryGet succeeds after RemoveValue.
                 if (tailVSBS != null)
                 {
                     var tailAccessor = tailVSBS.Segment.CreateChunkAccessor(changeSet);
-                    var headResult = index.TryGet(&prev[ifi.OffsetToField], ref accessor);
+                    var headResult = index.TryGet(ref prev[ifi.OffsetToField], ref accessor);
                     if (headResult.IsSuccess)
                     {
                         var tailBufId = EnsureTailPopulated(headResult.Value, tailVSBS,
@@ -165,7 +168,7 @@ internal static unsafe class IndexMaintainer
             }
             else
             {
-                index.Remove(&prev[ifi.OffsetToField], out _, ref accessor);
+                index.Remove(ref prev[ifi.OffsetToField], out _, ref accessor);
             }
             accessor.Dispose();
         }
@@ -183,6 +186,7 @@ internal static unsafe class IndexMaintainer
         var startChunkId = compRevInfo.CompRevTableFirstChunkId;
         if (prevCompChunkId != 0)
         {
+            // KEEP(ptr): base kept byte* for the Span<byte> ctor + *(int*) elementId writes + byte* NotifyViews; the B+Tree index APIs now take a ref into it.
             var prev = info.CompContentAccessor.GetChunkAddress(prevCompChunkId);
             var cur = info.CompContentAccessor.GetChunkAddress(compRevInfo.CurCompContentChunkId, true);
             var prevSpan = new Span<byte>(prev, info.ComponentTable.ComponentTotalSize);
@@ -200,7 +204,7 @@ internal static unsafe class IndexMaintainer
                     {
                         var tailVSBS = info.ComponentTable.TailVSBS;
 
-                        *(int*)&cur[ifi.OffsetToIndexElementId] = index.MoveValue(&prev[ifi.OffsetToField], &cur[ifi.OffsetToField],
+                        *(int*)&cur[ifi.OffsetToIndexElementId] = index.MoveValue(ref prev[ifi.OffsetToField], ref cur[ifi.OffsetToField],
                             *(int*)&prev[ifi.OffsetToIndexElementId], startChunkId, ref indexAccessors[i],
                             out var oldHeadBufferId, out var newHeadBufferId, tailVSBS != null);
 
@@ -225,7 +229,7 @@ internal static unsafe class IndexMaintainer
                     }
                     else
                     {
-                        index.Move(&prev[ifi.OffsetToField], &cur[ifi.OffsetToField], startChunkId, ref indexAccessors[i]);
+                        index.Move(ref prev[ifi.OffsetToField], ref cur[ifi.OffsetToField], startChunkId, ref indexAccessors[i]);
                     }
 
                     NotifyViews(info.ComponentTable, i, pk, tsn, prev + ifi.OffsetToField, cur + ifi.OffsetToField, ifi.Size, false, false);
@@ -240,6 +244,7 @@ internal static unsafe class IndexMaintainer
         }
         else if ((compRevInfo.Operations & ComponentInfo.OperationType.Created) == ComponentInfo.OperationType.Created)
         {
+            // KEEP(ptr): base kept byte* for *(int*) elementId writes + byte* NotifyViews; index.Add takes a ref into it.
             var cur = info.CompContentAccessor.GetChunkAddress(compRevInfo.CurCompContentChunkId, true);
 
             var indexedFieldInfos = info.ComponentTable.IndexedFieldInfos;
@@ -250,11 +255,11 @@ internal static unsafe class IndexMaintainer
 
                 if (ifi.AllowMultiple)
                 {
-                    *(int*)&cur[ifi.OffsetToIndexElementId] = index.Add(&cur[ifi.OffsetToField], startChunkId, ref indexAccessors[i], out _);
+                    *(int*)&cur[ifi.OffsetToIndexElementId] = index.Add(ref cur[ifi.OffsetToField], startChunkId, ref indexAccessors[i], out _);
                 }
                 else
                 {
-                    index.Add(&cur[ifi.OffsetToField], startChunkId, ref indexAccessors[i]);
+                    index.Add(ref cur[ifi.OffsetToField], startChunkId, ref indexAccessors[i]);
                 }
             }
 
@@ -275,6 +280,7 @@ internal static unsafe class IndexMaintainer
     internal static void RemoveSecondaryIndices(long pk, ComponentInfo info, int prevCompChunkId, int startChunkId, ChangeSet changeSet, long tsn,
         ChunkAccessor<PersistentStore>[] indexAccessors, ref ChunkAccessor<PersistentStore> tailAccessor)
     {
+        // KEEP(ptr): base kept byte* for *(int*) elementId reads + byte* NotifyViews; the B+Tree index APIs now take a ref into it.
         var prev = info.CompContentAccessor.GetChunkAddress(prevCompChunkId);
         var indexedFieldInfos = info.ComponentTable.IndexedFieldInfos;
 
@@ -293,11 +299,11 @@ internal static unsafe class IndexMaintainer
             {
                 var tailVSBS = info.ComponentTable.TailVSBS;
 
-                index.RemoveValue(&prev[ifi.OffsetToField], *(int*)&prev[ifi.OffsetToIndexElementId], startChunkId, ref indexAccessors[i], tailVSBS != null);
+                index.RemoveValue(ref prev[ifi.OffsetToField], *(int*)&prev[ifi.OffsetToIndexElementId], startChunkId, ref indexAccessors[i], tailVSBS != null);
 
                 if (tailVSBS != null)
                 {
-                    var headResult = index.TryGet(&prev[ifi.OffsetToField], ref indexAccessors[i]);
+                    var headResult = index.TryGet(ref prev[ifi.OffsetToField], ref indexAccessors[i]);
                     if (headResult.IsSuccess)
                     {
                         var tailBufId = EnsureTailPopulated(headResult.Value, tailVSBS,
@@ -310,13 +316,14 @@ internal static unsafe class IndexMaintainer
             }
             else
             {
-                index.Remove(&prev[ifi.OffsetToField], out _, ref indexAccessors[i]);
+                index.Remove(ref prev[ifi.OffsetToField], out _, ref indexAccessors[i]);
             }
         }
 
         info.ComponentTable.MutationsSinceRebuild++;
     }
 
+    // KEEP(ptr): beforeFieldPtr/afterFieldPtr are a nullable byte* API boundary — callers pass a derived byte* or null (a null ref is not expressible).
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void NotifyViews(ComponentTable table, int fieldIndex, long pk, long tsn, byte* beforeFieldPtr, byte* afterFieldPtr, int fieldSize,
         bool isCreation, bool isDeletion)
@@ -327,8 +334,8 @@ internal static unsafe class IndexMaintainer
             return;
         }
 
-        var beforeKey = beforeFieldPtr != null ? KeyBytes8.FromPointer(beforeFieldPtr, fieldSize) : default;
-        var afterKey = afterFieldPtr != null ? KeyBytes8.FromPointer(afterFieldPtr, fieldSize) : default;
+        var beforeKey = beforeFieldPtr != null ? KeyBytes8.FromRef(ref Unsafe.AsRef<byte>(beforeFieldPtr), fieldSize) : default;
+        var afterKey = afterFieldPtr != null ? KeyBytes8.FromRef(ref Unsafe.AsRef<byte>(afterFieldPtr), fieldSize) : default;
 
         // Pack flags: [7]=isDeletion, [6]=isCreation, [5:0]=fieldIndex & 0x3F
         var flags = (byte)((fieldIndex & 0x3F) | (isCreation ? 0x40 : 0) | (isDeletion ? 0x80 : 0));

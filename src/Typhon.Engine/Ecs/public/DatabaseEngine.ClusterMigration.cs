@@ -37,7 +37,7 @@ public partial class DatabaseEngine
                     continue;
                 }
 
-                var clusterBase = clusterAccessor.GetChunkAddress(clusterChunkId);
+                ref byte clusterBase = ref Unsafe.AsRef<byte>(clusterAccessor.GetChunkAddress(clusterChunkId));
                 var ixSlots = clusterState.IndexSlots;
 
                 for (var s = 0; s < ixSlots.Length; s++)
@@ -45,7 +45,8 @@ public partial class DatabaseEngine
                     ref var ixSlot = ref ixSlots[s];
                     for (var f = 0; f < ixSlot.Fields.Length; f++)
                     {
-                        ixSlot.Fields[f].ZoneMap?.Recompute(clusterChunkId, clusterBase, clusterState.Layout, ixSlot.Slot, ixSlot.Fields[f].FieldOffset);
+                        ixSlot.Fields[f].ZoneMap?.Recompute(clusterChunkId, ref clusterBase, clusterState.Layout, ixSlot.Slot,
+                            ixSlot.Fields[f].FieldOffset);
                     }
                 }
             }
@@ -210,7 +211,7 @@ public partial class DatabaseEngine
                     continue;
                 }
 
-                var clusterBase = clusterAccessor.GetChunkAddress(clusterChunkId);
+                ref byte clusterBase = ref Unsafe.AsRef<byte>(clusterAccessor.GetChunkAddress(clusterChunkId));
                 var currentCellKey = clusterCellMap[clusterChunkId];
                 if (currentCellKey < 0)
                 {
@@ -229,9 +230,9 @@ public partial class DatabaseEngine
                 {
                     var slotIndex = BitOperations.TrailingZeroCount(remaining);
                     remaining &= remaining - 1;
-                    var entityPK = *(long*)(clusterBase + layout.EntityIdsOffset + slotIndex * 8);
-                    var fieldPtr = clusterBase + compOffset + slotIndex * compSize + ss.FieldOffset;
-                    SpatialGrid.ReadSpatialCenter2D(fieldPtr, fieldType, out var posX, out var posY);
+                    var entityPK = Unsafe.As<byte, long>(ref Unsafe.Add(ref clusterBase, layout.EntityIdsOffset + slotIndex * 8));
+                    ref byte fieldPtr = ref Unsafe.Add(ref clusterBase, compOffset + slotIndex * compSize + ss.FieldOffset);
+                    SpatialGrid.ReadSpatialCenter2D(ref fieldPtr, fieldType, out var posX, out var posY);
                     if (!float.IsFinite(posX) || !float.IsFinite(posY))
                     {
                         throw new InvalidOperationException(
@@ -281,7 +282,7 @@ public partial class DatabaseEngine
     /// during migration. Patches the 4-byte ClusterChunkId and 1-byte SlotIndex fields without rewriting the rest of the record.
     /// Struct (not ref struct) so it can sit on the stack as a local in <see cref="ExecuteMigrations"/> and pass through `ref`.
     /// </summary>
-    private readonly unsafe struct ClusterLocationUpdater : IRawValueUpdater
+    private readonly struct ClusterLocationUpdater : IRawValueUpdater
     {
         private readonly int _chunkId;
         private readonly byte _slotIndex;
@@ -293,10 +294,10 @@ public partial class DatabaseEngine
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public void Update(byte* valueBytes)
+        public void Update(ref byte value)
         {
-            ClusterEntityRecordAccessor.SetClusterChunkId(valueBytes, _chunkId);
-            ClusterEntityRecordAccessor.SetSlotIndex(valueBytes, _slotIndex);
+            ClusterEntityRecordAccessor.SetClusterChunkId(ref value, _chunkId);
+            ClusterEntityRecordAccessor.SetSlotIndex(ref value, _slotIndex);
         }
     }
 
@@ -400,15 +401,16 @@ public partial class DatabaseEngine
                 // checkpoint decremented DC to 0 between detection and execution, the page may have been evicted and
                 // reloaded from disk with stale occupancy data. Skip the migration — the entity was already migrated
                 // in a previous tick and the detection saw phantom occupancy.
-                var srcPrimaryPre = hasClusterAccessor ? clusterAccessor.GetChunkAddress(srcChunkId, true) : transientClusterAccessor.GetChunkAddress(srcChunkId, true);
-                var srcOcc = *(ulong*)srcPrimaryPre;
+                ref byte srcPrimaryPre = ref Unsafe.AsRef<byte>(
+                    hasClusterAccessor ? clusterAccessor.GetChunkAddress(srcChunkId, true) : transientClusterAccessor.GetChunkAddress(srcChunkId, true));
+                var srcOcc = Unsafe.As<byte, ulong>(ref srcPrimaryPre);
                 if ((srcOcc & (1UL << srcSlot)) == 0)
                 {
                     continue;
                 }
 
                 // 1. Read entity id from source slot (needed before any reallocation pointer invalidation).
-                var entityPK = *(long*)(srcPrimaryPre + layout.EntityIdsOffset + srcSlot * 8);
+                var entityPK = Unsafe.As<byte, long>(ref Unsafe.Add(ref srcPrimaryPre, layout.EntityIdsOffset + srcSlot * 8));
 
                 // 1b. Destroyed-in-flight check. The occupancy bit read in step 0 and the entityId read here are NOT atomic together — a concurrent destroy on
                 // the same source slot (FlushPendingDestroys clears occupancy bit then zeros entityId) can land between the two reads. The torn-read tell is
@@ -433,6 +435,7 @@ public partial class DatabaseEngine
                 }
 
                 // 3. Re-fetch source / destination bases after potential segment growth inside ClaimSlotInCell.
+                // KEEP(ptr): nullable bases with ?:-selection (a null ref is not expressible) feeding Unsafe.CopyBlock + *(long*)/*(ulong*) metadata writes — kept byte*.
                 byte* srcBase;
                 byte* dstBase;
                 byte* srcTransBase = null;
@@ -510,8 +513,8 @@ public partial class DatabaseEngine
                         for (var fi = 0; fi < ixSlot.Fields.Length; fi++)
                         {
                             ref var field = ref ixSlot.Fields[fi];
-                            var fieldPtr = dstCompBase + field.FieldOffset;
-                            var key = KeyBytes8.FromPointer(fieldPtr, field.FieldSize);
+                            ref byte fieldPtr = ref dstCompBase[field.FieldOffset];
+                            var key = KeyBytes8.FromRef(ref fieldPtr, field.FieldSize);
                             // For non-unique (AllowMultiple) cluster indexes, read the srcBase elementId from the
                             // source cluster's tail and call RemoveValue — Remove(key) would wipe the entire buffer
                             // at the key and corrupt siblings. srcBase is still the source cluster's bytes (the
@@ -520,16 +523,16 @@ public partial class DatabaseEngine
                             if (field.AllowMultiple)
                             {
                                 var elementId = *(int*)(srcBase + layout.IndexElementIdOffset(field.MultiFieldIndex, srcSlot));
-                                field.Index.RemoveValue(&key, elementId, oldClusterLocation, ref idxAccessor);
-                                var newElementId = field.Index.Add(fieldPtr, newClusterLocation, ref idxAccessor);
+                                field.Index.RemoveValue(ref Unsafe.As<KeyBytes8, byte>(ref key), elementId, oldClusterLocation, ref idxAccessor);
+                                var newElementId = field.Index.Add(ref fieldPtr, newClusterLocation, ref idxAccessor);
                                 *(int*)(dstBase + layout.IndexElementIdOffset(field.MultiFieldIndex, dstSlot)) = newElementId;
                             }
                             else
                             {
-                                field.Index.Remove(&key, out _, ref idxAccessor);
-                                field.Index.Add(fieldPtr, newClusterLocation, ref idxAccessor);
+                                field.Index.Remove(ref Unsafe.As<KeyBytes8, byte>(ref key), out _, ref idxAccessor);
+                                field.Index.Add(ref fieldPtr, newClusterLocation, ref idxAccessor);
                             }
-                            field.ZoneMap?.Widen(dstChunkId, fieldPtr);
+                            field.ZoneMap?.Widen(dstChunkId, ref fieldPtr);
                         }
                     }
                 }
@@ -545,7 +548,7 @@ public partial class DatabaseEngine
                 // If src becomes empty, ReleaseSlot below → FinaliseEmptyClusterCellState removes it from the per-cell index.
                 if (ss.FieldInfo.Mode == SpatialMode.Dynamic && clusterState.ClusterCellMap != null)
                 {
-                    if (SpatialMaintainer.ReadAndValidateBoundsFromPtr(dstFieldPtr, ss.FieldInfo, migrantCoords, ss.Descriptor))
+                    if (SpatialMaintainer.ReadAndValidateBoundsFromPtr(ref Unsafe.AsRef<byte>(dstFieldPtr), ss.FieldInfo, migrantCoords, ss.Descriptor))
                     {
                         clusterState.EnsureClusterAabbsCapacity(dstChunkId + 1);
                         clusterState.EnsureClusterSpatialIndexSlotCapacity(dstChunkId + 1);
@@ -615,24 +618,24 @@ public partial class DatabaseEngine
                         + "TryUpdateInPlace returned false (entity gone). Rolling back dst slot.");
                     if (hasClusterAccessor)
                     {
-                        var dstRollbackBase = clusterAccessor.GetChunkAddress(dstChunkId, true);
-                        Interlocked.And(ref *(long*)dstRollbackBase, ~(1L << dstSlot));
-                        *(long*)(dstRollbackBase + layout.EntityIdsOffset + dstSlot * 8) = 0;
+                        ref byte dstRollbackBase = ref Unsafe.AsRef<byte>(clusterAccessor.GetChunkAddress(dstChunkId, true));
+                        Interlocked.And(ref Unsafe.As<byte, long>(ref dstRollbackBase), ~(1L << dstSlot));
+                        Unsafe.As<byte, long>(ref Unsafe.Add(ref dstRollbackBase, layout.EntityIdsOffset + dstSlot * 8)) = 0;
                         for (var s = 0; s < componentCount; s++)
                         {
                             var ebOff = layout.EnabledBitsOffset(s);
-                            Interlocked.And(ref *(long*)(dstRollbackBase + ebOff), ~(1L << dstSlot));
+                            Interlocked.And(ref Unsafe.As<byte, long>(ref Unsafe.Add(ref dstRollbackBase, ebOff)), ~(1L << dstSlot));
                         }
                     }
                     else if (hasTransientClusterAccessor)
                     {
-                        var dstRollbackBase = transientClusterAccessor.GetChunkAddress(dstChunkId, true);
-                        Interlocked.And(ref *(long*)dstRollbackBase, ~(1L << dstSlot));
-                        *(long*)(dstRollbackBase + layout.EntityIdsOffset + dstSlot * 8) = 0;
+                        ref byte dstRollbackBase = ref Unsafe.AsRef<byte>(transientClusterAccessor.GetChunkAddress(dstChunkId, true));
+                        Interlocked.And(ref Unsafe.As<byte, long>(ref dstRollbackBase), ~(1L << dstSlot));
+                        Unsafe.As<byte, long>(ref Unsafe.Add(ref dstRollbackBase, layout.EntityIdsOffset + dstSlot * 8)) = 0;
                         for (var s = 0; s < componentCount; s++)
                         {
                             var ebOff = layout.EnabledBitsOffset(s);
-                            Interlocked.And(ref *(long*)(dstRollbackBase + ebOff), ~(1L << dstSlot));
+                            Interlocked.And(ref Unsafe.As<byte, long>(ref Unsafe.Add(ref dstRollbackBase, ebOff)), ~(1L << dstSlot));
                         }
                     }
                     // Don't proceed to ReleaseSlot src — the original entity is already gone (its slot was cleared at destroy commit). Don't bump dirtyBits —
@@ -792,13 +795,14 @@ public partial class DatabaseEngine
                             var slotIndex = entry.ChunkId & 0x3F;      // entityIndex → slot
 
                             // Check occupancy (entity may have been destroyed this tick)
+                            // KEEP(ptr): clusterBase backs the *(ulong*) occupancy read; the index key is a ref into it.
                             var clusterBase = clusterAccessor.GetChunkAddress(clusterChunkId);
                             var occupancy = *(ulong*)clusterBase;
                             if ((occupancy & (1UL << slotIndex)) == 0)
                             {
                                 // Entity destroyed — remove old index entry using shadow value
                                 var destroyOldKey = entry.OldKey;
-                                field.Index.Remove(&destroyOldKey, out _, ref idxAccessor);
+                                field.Index.Remove(ref Unsafe.As<KeyBytes8, byte>(ref destroyOldKey), out _, ref idxAccessor);
 
                                 // Notify views of deletion (same pattern as ProcessShadowFieldEntries)
                                 var table = engineState.SlotToComponentTable[ixSlot.Slot];
@@ -821,9 +825,9 @@ public partial class DatabaseEngine
                             // Read current (post-mutation) field value from cluster SoA
                             var compSize = clusterState.Layout.ComponentSize(ixSlot.Slot);
                             var compBase = clusterBase + clusterState.Layout.ComponentOffset(ixSlot.Slot) + slotIndex * compSize;
-                            var fieldPtr = compBase + field.FieldOffset;
+                            ref byte fieldPtr = ref compBase[field.FieldOffset];
                             var oldKey = entry.OldKey;
-                            var newKey = KeyBytes8.FromPointer(fieldPtr, field.FieldSize);
+                            var newKey = KeyBytes8.FromRef(ref fieldPtr, field.FieldSize);
 
                             if (oldKey.RawValue == newKey.RawValue)
                             {
@@ -832,7 +836,7 @@ public partial class DatabaseEngine
 
                             // Update per-archetype B+Tree: remove old key, insert new key, same ClusterLocation value
                             var clusterLocation = entry.ChunkId; // entityIndex = clusterLocation
-                            field.Index.Move(&oldKey, fieldPtr, clusterLocation, ref idxAccessor);
+                            field.Index.Move(ref Unsafe.As<KeyBytes8, byte>(ref oldKey), ref fieldPtr, clusterLocation, ref idxAccessor);
 
                             // Notify registered views (same pattern as ProcessShadowFieldEntries)
                             {
@@ -959,13 +963,13 @@ public partial class DatabaseEngine
                 var destroyOldKey = entry.OldKey;
                 if (index.AllowMultiple)
                 {
-                    var ptr = compAccessor.GetChunkAddress(entry.ChunkId);
-                    var elementId = *(int*)(ptr + ifi.OffsetToIndexElementId);
-                    index.RemoveValue(&destroyOldKey, elementId, entry.ChunkId, ref idxAccessor);
+                    ref byte ptr = ref Unsafe.AsRef<byte>(compAccessor.GetChunkAddress(entry.ChunkId));
+                    var elementId = Unsafe.As<byte, int>(ref Unsafe.Add(ref ptr, ifi.OffsetToIndexElementId));
+                    index.RemoveValue(ref Unsafe.As<KeyBytes8, byte>(ref destroyOldKey), elementId, entry.ChunkId, ref idxAccessor);
                 }
                 else
                 {
-                    index.Remove(&destroyOldKey, out _, ref idxAccessor);
+                    index.Remove(ref Unsafe.As<KeyBytes8, byte>(ref destroyOldKey), out _, ref idxAccessor);
                 }
 
                 // Notify views of deletion
@@ -986,10 +990,11 @@ public partial class DatabaseEngine
             }
 
             // Read current (post-mutation) field value
+            // KEEP(ptr): chunkPtr backs the *(int*) elementId read/write (chunkPtr + OffsetToIndexElementId); the index key is a ref into it.
             var chunkPtr = compAccessor.GetChunkAddress(entry.ChunkId);
-            var newFieldPtr = chunkPtr + ifi.OffsetToField;
+            ref byte newFieldPtr = ref chunkPtr[ifi.OffsetToField];
             var oldKey = entry.OldKey;
-            var newKey = KeyBytes8.FromPointer(newFieldPtr, ifi.Size);
+            var newKey = KeyBytes8.FromRef(ref newFieldPtr, ifi.Size);
 
             // Skip if field value didn't actually change
             if (oldKey.RawValue == newKey.RawValue)
@@ -1001,13 +1006,13 @@ public partial class DatabaseEngine
             if (index.AllowMultiple)
             {
                 var elementId = *(int*)(chunkPtr + ifi.OffsetToIndexElementId);
-                var newElementId = index.MoveValue(&oldKey, newFieldPtr, elementId, entry.ChunkId, ref idxAccessor, out _, out _);
+                var newElementId = index.MoveValue(ref Unsafe.As<KeyBytes8, byte>(ref oldKey), ref newFieldPtr, elementId, entry.ChunkId, ref idxAccessor, out _, out _);
                 // Write back new element ID — page is already dirty from the mutation that triggered shadowing
                 *(int*)(chunkPtr + ifi.OffsetToIndexElementId) = newElementId;
             }
             else
             {
-                index.Move(&oldKey, newFieldPtr, entry.ChunkId, ref idxAccessor);
+                index.Move(ref Unsafe.As<KeyBytes8, byte>(ref oldKey), ref newFieldPtr, entry.ChunkId, ref idxAccessor);
             }
 
             // Notify registered views

@@ -422,10 +422,7 @@ internal sealed class WalSegmentManager : IDisposable
         header.ComputeAndSetCrc();
 
         var headerBytes = new byte[WalSegmentHeader.SizeInBytes];
-        fixed (byte* dst = headerBytes)
-        {
-            *(WalSegmentHeader*)dst = header;
-        }
+        MemoryMarshal.Write(headerBytes, in header);
 
         _fileIO.WriteAligned(context.Handle, 0, headerBytes);
     }

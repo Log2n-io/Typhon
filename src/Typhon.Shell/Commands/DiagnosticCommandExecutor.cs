@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using Spectre.Console;
@@ -504,7 +505,7 @@ internal sealed class DiagnosticCommandExecutor
             {
                 fixed (byte* ptr = readBuf)
                 {
-                    bool found = engineState.EntityMap.TryGet(eid.EntityKey, ptr, ref accessor);
+                    bool found = engineState.EntityMap.TryGet(eid.EntityKey, ref Unsafe.AsRef<byte>(ptr), ref accessor);
                     accessor.Dispose();
 
                     if (!found)
@@ -513,7 +514,7 @@ internal sealed class DiagnosticCommandExecutor
                     }
 
                     // Get the CompRevTable first chunk ID from the EntityRecord location
-                    int compRevFirstChunkId = EntityRecordAccessor.GetLocation(ptr, slot);
+                    int compRevFirstChunkId = EntityRecordAccessor.GetLocation(ref Unsafe.AsRef<byte>(ptr), slot);
                     if (compRevFirstChunkId == 0)
                     {
                         return CommandResult.Error($"Error: Entity {entityId} has no revision chain for '{componentName}' (ChunkId=0).");

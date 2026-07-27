@@ -27,6 +27,8 @@ internal unsafe class HashMap<TKey, TValue> : IDisposable where TKey : unmanaged
 
     private readonly int _entryStride;
     private readonly int _valueOffset;
+    // KEEP(ptr): byte* into pinned POH bucket memory, held as a class field (a Span/ref cannot be a class field); hot
+    // probe loops index through it with pointer arithmetic.
     private byte* _entries;
     private byte[] _pohArray;
     private int _capacity;

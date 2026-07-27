@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using Typhon.Engine.internals;
 using Typhon.Profiler;
 using Typhon.Schema.Definition;
@@ -647,7 +648,7 @@ public sealed partial class TyphonRuntime : IDisposable
                             continue;
                         }
 
-                        var entityPK = *(long*)accessor.GetChunkAddress(chunkId);
+                        var entityPK = MemoryMarshal.Read<long>(accessor.GetChunkAsReadOnlySpan(chunkId));
                         if (view.Contains(entityPK))
                         {
                             span[count++] = EntityId.FromRaw(entityPK);
@@ -728,12 +729,12 @@ public sealed partial class TyphonRuntime : IDisposable
                         {
                             continue;
                         }
-                        byte* clusterBase = clusterAccessor.GetChunkAddress(chunkId);
+                        var clusterSpan = clusterAccessor.GetChunkAsReadOnlySpan(chunkId);
                         while (word != 0)
                         {
                             int bit = BitOperations.TrailingZeroCount((ulong)word);
                             word &= word - 1;
-                            long entityPK = *(long*)(clusterBase + cs.Layout.EntityIdsOffset + bit * 8);
+                            long entityPK = MemoryMarshal.Read<long>(clusterSpan.Slice(cs.Layout.EntityIdsOffset + bit * 8));
                             if (view.Contains(entityPK))
                             {
                                 span[count++] = EntityId.FromRaw(entityPK);
@@ -751,8 +752,8 @@ public sealed partial class TyphonRuntime : IDisposable
                             int bit = BitOperations.TrailingZeroCount((ulong)word);
                             word &= word - 1;
 
-                            byte* clusterBase = clusterAccessor.GetChunkAddress(wordIdx);
-                            long entityPK = *(long*)(clusterBase + cs.Layout.EntityIdsOffset + bit * 8);
+                            var clusterSpan = clusterAccessor.GetChunkAsReadOnlySpan(wordIdx);
+                            long entityPK = MemoryMarshal.Read<long>(clusterSpan.Slice(cs.Layout.EntityIdsOffset + bit * 8));
                             if (view.Contains(entityPK))
                             {
                                 span[count++] = EntityId.FromRaw(entityPK);
@@ -808,7 +809,7 @@ public sealed partial class TyphonRuntime : IDisposable
                         continue;
                     }
 
-                    var entityPK = *(long*)accessor.GetChunkAddress(chunkId);
+                    var entityPK = MemoryMarshal.Read<long>(accessor.GetChunkAsReadOnlySpan(chunkId));
                     if (view.Contains(entityPK))
                     {
                         dirtyInView.TryAdd(entityPK);
@@ -860,8 +861,8 @@ public sealed partial class TyphonRuntime : IDisposable
                         int bit = BitOperations.TrailingZeroCount((ulong)word);
                         word &= word - 1;
 
-                        byte* clusterBase = clusterAccessor.GetChunkAddress(wordIdx);
-                        long entityPK = *(long*)(clusterBase + cs.Layout.EntityIdsOffset + bit * 8);
+                        var clusterSpan = clusterAccessor.GetChunkAsReadOnlySpan(wordIdx);
+                        long entityPK = MemoryMarshal.Read<long>(clusterSpan.Slice(cs.Layout.EntityIdsOffset + bit * 8));
                         if (view.Contains(entityPK))
                         {
                             dirtyInView.TryAdd(entityPK);
@@ -986,8 +987,8 @@ public sealed partial class TyphonRuntime : IDisposable
             int exactCount = 0;
             for (int i = 0; i < tierCount; i++)
             {
-                byte* clusterBase = accessor.GetChunkAddress(tierClusters[i]);
-                exactCount += BitOperations.PopCount(*(ulong*)clusterBase);
+                var clusterSpan = accessor.GetChunkAsReadOnlySpan(tierClusters[i]);
+                exactCount += BitOperations.PopCount(MemoryMarshal.Read<ulong>(clusterSpan));
             }
             if (exactCount == 0)
             {
@@ -999,13 +1000,13 @@ public sealed partial class TyphonRuntime : IDisposable
             int count = 0;
             for (int i = 0; i < tierCount; i++)
             {
-                byte* clusterBase = accessor.GetChunkAddress(tierClusters[i]);
-                ulong bits = *(ulong*)clusterBase;
+                var clusterSpan = accessor.GetChunkAsReadOnlySpan(tierClusters[i]);
+                ulong bits = MemoryMarshal.Read<ulong>(clusterSpan);
                 while (bits != 0)
                 {
                     int slot = BitOperations.TrailingZeroCount(bits);
                     bits &= bits - 1;
-                    long pk = *(long*)(clusterBase + cs.Layout.EntityIdsOffset + slot * 8);
+                    long pk = MemoryMarshal.Read<long>(clusterSpan.Slice(cs.Layout.EntityIdsOffset + slot * 8));
                     if (view.Contains(pk))
                     {
                         span[count++] = EntityId.FromRaw(pk);
@@ -1037,8 +1038,8 @@ public sealed partial class TyphonRuntime : IDisposable
             int exactCount = 0;
             for (int i = 0; i < tierCount; i++)
             {
-                byte* clusterBase = accessor.GetChunkAddress(tierClusters[i]);
-                exactCount += BitOperations.PopCount(*(ulong*)clusterBase);
+                var clusterSpan = accessor.GetChunkAsReadOnlySpan(tierClusters[i]);
+                exactCount += BitOperations.PopCount(MemoryMarshal.Read<ulong>(clusterSpan));
             }
             if (exactCount == 0)
             {
@@ -1050,13 +1051,13 @@ public sealed partial class TyphonRuntime : IDisposable
             int count = 0;
             for (int i = 0; i < tierCount; i++)
             {
-                byte* clusterBase = accessor.GetChunkAddress(tierClusters[i]);
-                ulong bits = *(ulong*)clusterBase;
+                var clusterSpan = accessor.GetChunkAsReadOnlySpan(tierClusters[i]);
+                ulong bits = MemoryMarshal.Read<ulong>(clusterSpan);
                 while (bits != 0)
                 {
                     int slot = BitOperations.TrailingZeroCount(bits);
                     bits &= bits - 1;
-                    long pk = *(long*)(clusterBase + cs.Layout.EntityIdsOffset + slot * 8);
+                    long pk = MemoryMarshal.Read<long>(clusterSpan.Slice(cs.Layout.EntityIdsOffset + slot * 8));
                     if (view.Contains(pk))
                     {
                         span[count++] = EntityId.FromRaw(pk);

@@ -272,6 +272,9 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     internal string BundleDirectory => Options.BundleDirectory;
     
     private protected readonly PinnedMemoryBlock MemPages;
+    // KEEP(ptr): page-cache root — byte* into GCHandle-pinned unmanaged page memory, held as a class field (a Span/ref
+    // cannot be a class field); seqlock header access indexes through it. The public API already exposes span/ref
+    // (GetChunkAsSpan / MemoryMarshal.AsRef).
     private unsafe byte* _memPagesAddr;
 
     protected readonly int MemPagesCount;

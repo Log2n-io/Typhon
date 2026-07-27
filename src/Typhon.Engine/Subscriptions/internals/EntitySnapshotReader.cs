@@ -96,8 +96,7 @@ internal static unsafe class EntitySnapshotReader
             var accessor = table.TransientComponentSegment.CreateChunkAccessor();
             try
             {
-                var ptr = accessor.GetChunkAddress(chunkId);
-                new ReadOnlySpan<byte>(ptr + overhead, componentSize).CopyTo(result);
+                accessor.GetChunkAsReadOnlySpan(chunkId).Slice(overhead, componentSize).CopyTo(result);
             }
             finally
             {
@@ -109,8 +108,7 @@ internal static unsafe class EntitySnapshotReader
             var accessor = table.ComponentSegment.CreateChunkAccessor();
             try
             {
-                var ptr = accessor.GetChunkAddress(chunkId);
-                new ReadOnlySpan<byte>(ptr + overhead, componentSize).CopyTo(result);
+                accessor.GetChunkAsReadOnlySpan(chunkId).Slice(overhead, componentSize).CopyTo(result);
             }
             finally
             {

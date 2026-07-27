@@ -1,5 +1,6 @@
 using System;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using JetBrains.Annotations;
 using Typhon.Schema.Definition;
 
@@ -93,13 +94,14 @@ public unsafe ref struct ArchetypeAccessor<TArch> where TArch : class
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private EntityRef Resolve(EntityId id, bool writable)
     {
-        byte* readBuf = stackalloc byte[_recordSize];
-        if (!_engineState.EntityMap.TryGet(id.EntityKey, readBuf, ref _entityMapAccessor))
+        Span<byte> readBuf = stackalloc byte[_recordSize];
+        ref byte readBufRef = ref MemoryMarshal.GetReference(readBuf);
+        if (!_engineState.EntityMap.TryGet(id.EntityKey, ref readBufRef, ref _entityMapAccessor))
         {
             return default;
         }
 
-        ref var header = ref EntityRecordAccessor.GetHeader(readBuf);
+        ref var header = ref EntityRecordAccessor.GetHeader(ref readBufRef);
         ushort enabledBits = _enabledBitsOverrides.ResolveEnabledBits(id.EntityKey, header.EnabledBits, _tsn);
 
         var result = new EntityRef(id, _archetype, _engineState, _accessor, enabledBits, writable);
@@ -107,17 +109,17 @@ public unsafe ref struct ArchetypeAccessor<TArch> where TArch : class
         if (_hasClusterStorage)
         {
             // Cluster path: read ClusterEntityRecord → resolve cluster base + slot
-            int clusterChunkId = ClusterEntityRecordAccessor.GetClusterChunkId(readBuf);
-            byte slotIndex = ClusterEntityRecordAccessor.GetSlotIndex(readBuf);
+            int clusterChunkId = ClusterEntityRecordAccessor.GetClusterChunkId(ref readBufRef);
+            byte slotIndex = ClusterEntityRecordAccessor.GetSlotIndex(ref readBufRef);
 
             // Primary base: PersistentStore for mixed/SV, TransientStore for pure-Transient
-            result._clusterBase = _clusterState.ClusterSegment != null ? 
-                _clusterAccessor.GetChunkAddress(clusterChunkId, writable) : _transientClusterAccessor.GetChunkAddress(clusterChunkId, writable);
+            result._clusterBase = ref Unsafe.AsRef<byte>(_clusterState.ClusterSegment != null ?
+                _clusterAccessor.GetChunkAddress(clusterChunkId, writable) : _transientClusterAccessor.GetChunkAddress(clusterChunkId, writable));
 
             // Mixed archetype: also set TransientStore base for Transient component reads
             if (_hasTransientCluster && _clusterState.ClusterSegment != null)
             {
-                result._transientClusterBase = _transientClusterAccessor.GetChunkAddress(clusterChunkId, writable);
+                result._transientClusterBase = ref Unsafe.AsRef<byte>(_transientClusterAccessor.GetChunkAddress(clusterChunkId, writable));
             }
 
             result._clusterSlotIndex = slotIndex;
@@ -127,13 +129,13 @@ public unsafe ref struct ArchetypeAccessor<TArch> where TArch : class
             // For Versioned slots, walk chain and populate _locations for MVCC reads
             if (_hasVersionedSlots)
             {
-                ResolveClusterVersionedSlots(readBuf, id, ref result);
+                ResolveClusterVersionedSlots(ref readBufRef, id, ref result);
             }
         }
         else
         {
             // Legacy path: copy per-component locations
-            result.CopyLocationsFrom(readBuf, _archetype.ComponentCount);
+            result.CopyLocationsFrom(ref readBufRef, _archetype.ComponentCount);
 
             // Versioned components: walk revision chain to find visible content chunk.
             // SV/Transient: location from EntityRecord is the direct content chunk — no walk needed.
@@ -151,7 +153,7 @@ public unsafe ref struct ArchetypeAccessor<TArch> where TArch : class
     /// Walks the revision chain for each Versioned slot and stores the visible content chunkId in _locations.
     /// This enables EntityRef.Read to route Versioned reads through the content chunk (MVCC-correct) while SV reads go through the cluster slot (fast path).
     /// </summary>
-    private void ResolveClusterVersionedSlots(byte* record, EntityId id, ref EntityRef result)
+    private void ResolveClusterVersionedSlots(ref byte record, EntityId id, ref EntityRef result)
     {
         var layout = _archetype.ClusterLayout;
         if (layout.SlotToVersionedIndex == null)
@@ -169,7 +171,7 @@ public unsafe ref struct ArchetypeAccessor<TArch> where TArch : class
                 continue;
             }
 
-            int compRevFirstChunkId = ClusterEntityRecordAccessor.GetCompRevFirstChunkId(record, vi);
+            int compRevFirstChunkId = ClusterEntityRecordAccessor.GetCompRevFirstChunkId(ref record, vi);
             if (compRevFirstChunkId == 0)
             {
                 continue;

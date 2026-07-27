@@ -861,7 +861,7 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         var idxAccessor = cs.IndexSegment.CreateChunkAccessor();
         try
         {
-            using var buf = field.Index.TryGetMultiple(&tagKey, ref idxAccessor);
+            using var buf = field.Index.TryGetMultiple(ref *(byte*)&tagKey, ref idxAccessor);
             return buf.IsValid ? buf.TotalCount : 0;
         }
         finally

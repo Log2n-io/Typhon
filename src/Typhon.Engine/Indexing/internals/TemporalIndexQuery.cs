@@ -36,7 +36,7 @@ internal static unsafe class TemporalIndexQuery
 
         // Step 1: Look up the key in the B+Tree to get the HEAD buffer ID
         var accessor = ifi.PersistentIndex.Segment.CreateChunkAccessor(changeSet);
-        var headResult = ifi.PersistentIndex.TryGet(fieldValueAddr, ref accessor);
+        var headResult = ifi.PersistentIndex.TryGet(ref fieldValueAddr[0], ref accessor);
         if (headResult.IsFailure)
         {
             accessor.Dispose();
@@ -102,7 +102,7 @@ internal static unsafe class TemporalIndexQuery
     {
         var result = new List<int>(4);
         var accessor = ifi.PersistentIndex.Segment.CreateChunkAccessor(changeSet);
-        using var bufferAccessor = ifi.PersistentIndex.TryGetMultiple(fieldValueAddr, ref accessor);
+        using var bufferAccessor = ifi.PersistentIndex.TryGetMultiple(ref fieldValueAddr[0], ref accessor);
         accessor.Dispose();
 
         if (!bufferAccessor.IsValid)

@@ -1,6 +1,7 @@
 using System;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Threading;
 using JetBrains.Annotations;
 using Typhon.Schema.Definition;
@@ -29,8 +30,8 @@ namespace Typhon.Engine;
 [PublicAPI]
 public unsafe ref struct ClusterRef<TArch> where TArch : class
 {
-    private readonly byte* _base;
-    private readonly byte* _transientBase;  // TransientStore cluster base; null for pure-SV/V or pure-Transient (where _base IS TS)
+    private readonly ref byte _base;
+    private readonly ref byte _transientBase;  // TransientStore cluster base; null-ref for pure-SV/V or pure-Transient (where _base IS TS)
     private readonly ArchetypeClusterInfo _layout;
     private readonly ArchetypeMetadata _meta;
     private readonly int _chunkId;
@@ -38,8 +39,8 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
 
     internal ClusterRef(byte* basePtr, byte* transientBasePtr, ArchetypeClusterInfo layout, ArchetypeMetadata meta, int chunkId, ArchetypeClusterState state)
     {
-        _base = basePtr;
-        _transientBase = transientBasePtr;
+        _base = ref Unsafe.AsRef<byte>(basePtr);
+        _transientBase = ref Unsafe.AsRef<byte>(transientBasePtr);
         _layout = layout;
         _meta = meta;
         _chunkId = chunkId;
@@ -50,12 +51,12 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     public ulong OccupancyBits
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        get => *(ulong*)_base;
+        get => Unsafe.As<byte, ulong>(ref _base);
     }
 
     /// <summary>Bitmask of entities with component at <paramref name="slot"/> enabled.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public ulong EnabledBits(int slot) => *(ulong*)(_base + _layout.EnabledBitsOffset(slot));
+    public ulong EnabledBits(int slot) => Unsafe.As<byte, ulong>(ref Unsafe.Add(ref _base, _layout.EnabledBitsOffset(slot)));
 
     /// <summary>Combined mask: alive AND component at slot enabled.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -89,9 +90,10 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
         get => _layout.FullMask;
     }
 
-    /// <summary>Resolve the correct base pointer for a component slot (Transient → _transientBase, else → _base).</summary>
+    /// <summary>Resolve the correct base ref for a component slot (Transient → _transientBase, else → _base).</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private byte* ResolveBase(byte slot) => (_transientBase != null && (_meta.TransientSlotMask & (1 << slot)) != 0) ? _transientBase : _base;
+    private ref byte ResolveBase(byte slot) =>
+        ref (!Unsafe.IsNullRef(ref _transientBase) && (_meta.TransientSlotMask & (1 << slot)) != 0) ? ref _transientBase : ref _base;
 
     /// <summary>
     /// Get a mutable span of the component's data across all N slots (its SoA array). For Versioned components use <see cref="GetReadOnlySpan{T}"/> instead —
@@ -112,7 +114,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
             ThrowHelper.ThrowInvalidOp(
                 $"GetSpan on Versioned component bypasses revision chain. Use GetReadOnlySpan for reads, OpenMut+Write for writes.");
         }
-        return new Span<T>(ResolveBase(slot) + _layout.ComponentOffset(slot), _layout.ClusterSize);
+        return MemoryMarshal.CreateSpan(ref Unsafe.As<byte, T>(ref Unsafe.Add(ref ResolveBase(slot), _layout.ComponentOffset(slot))), _layout.ClusterSize);
     }
 
     /// <summary>Get a read-only span of component data for all N slots.</summary>
@@ -120,7 +122,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     public ReadOnlySpan<T> GetReadOnlySpan<T>(Comp<T> comp) where T : unmanaged
     {
         var slot = _meta.GetSlot(comp._componentTypeId);
-        return new ReadOnlySpan<T>(ResolveBase(slot) + _layout.ComponentOffset(slot), _layout.ClusterSize);
+        return MemoryMarshal.CreateReadOnlySpan(ref Unsafe.As<byte, T>(ref Unsafe.Add(ref ResolveBase(slot), _layout.ComponentOffset(slot))), _layout.ClusterSize);
     }
 
     /// <summary>Get a mutable reference to a single component value at the given slot index.</summary>
@@ -132,7 +134,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
         {
             ThrowHelper.ThrowInvalidOp($"Get on Versioned component bypasses revision chain. Use OpenMut+Write for writes.");
         }
-        return ref Unsafe.Add(ref Unsafe.AsRef<T>(ResolveBase(slot) + _layout.ComponentOffset(slot)), slotIndex);
+        return ref Unsafe.Add(ref Unsafe.As<byte, T>(ref Unsafe.Add(ref ResolveBase(slot), _layout.ComponentOffset(slot))), slotIndex);
     }
 
     /// <summary>Get a read-only reference to a single component value at the given slot index.</summary>
@@ -140,20 +142,20 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     public ref readonly T GetReadOnly<T>(Comp<T> comp, int slotIndex) where T : unmanaged
     {
         var slot = _meta.GetSlot(comp._componentTypeId);
-        return ref Unsafe.Add(ref Unsafe.AsRef<T>(ResolveBase(slot) + _layout.ComponentOffset(slot)), slotIndex);
+        return ref Unsafe.Add(ref Unsafe.As<byte, T>(ref Unsafe.Add(ref ResolveBase(slot), _layout.ComponentOffset(slot))), slotIndex);
     }
 
     /// <summary>Entity keys for all N slots. Use with slot index to reconstruct EntityId.</summary>
     public ReadOnlySpan<long> EntityIds
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        get => new(_base + _layout.EntityIdsOffset, _layout.ClusterSize);
+        get => MemoryMarshal.CreateReadOnlySpan(ref Unsafe.As<byte, long>(ref Unsafe.Add(ref _base, _layout.EntityIdsOffset)), _layout.ClusterSize);
     }
 
     /// <summary>Read EntityId for the entity at the given slot (stored as full packed EntityId).</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public EntityId GetEntityId(int slotIndex) =>
-        EntityId.FromRaw(*(long*)(_base + _layout.EntityIdsOffset + slotIndex * 8));
+        EntityId.FromRaw(Unsafe.As<byte, long>(ref Unsafe.Add(ref _base, _layout.EntityIdsOffset + slotIndex * 8)));
 
     /// <summary>The chunk ID of this cluster within the archetype's segment.</summary>
     public int ChunkId
@@ -218,13 +220,13 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
         }
 
         var spatialSlot = _state.SpatialSlot;
-        var slotBytes = ResolveBase(slot) + _layout.ComponentOffset(slot) + slotIndex * sizeof(T);
-        var fieldPtr = slotBytes + spatialSlot.FieldOffset;
+        ref byte slotBytes = ref Unsafe.Add(ref ResolveBase(slot), _layout.ComponentOffset(slot) + slotIndex * sizeof(T));
+        ref byte fieldPtr = ref Unsafe.Add(ref slotBytes, spatialSlot.FieldOffset);
 
         var fieldType = spatialSlot.FieldInfo.FieldType;
         if (fieldType == SpatialFieldType.AABB2F)
         {
-            WriteSpatialAabb2F(slotIndex, slotBytes, fieldPtr, in newValue);
+            WriteSpatialAabb2F(slotIndex, ref slotBytes, ref fieldPtr, in newValue);
         }
         else
         {
@@ -236,20 +238,20 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     /// <summary>AABB2F specialization of <see cref="WriteSpatial{T}"/>. Inlined into the barrier on the AntHill hot path (WorldBounds.Bounds is AABB2F,
     /// point-form-encoded with MinX==MaxX, MinY==MaxY).</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private void WriteSpatialAabb2F<T>(int slotIndex, byte* slotBytes, byte* fieldPtr, in T newValue) where T : unmanaged
+    private void WriteSpatialAabb2F<T>(int slotIndex, ref byte slotBytes, ref byte fieldPtr, in T newValue) where T : unmanaged
     {
         // Read old AABB before overwriting (fieldPtr points at the AABB2F inside the component).
-        ref var oldAabb = ref *(AABB2F*)fieldPtr;
+        ref var oldAabb = ref Unsafe.As<byte, AABB2F>(ref fieldPtr);
         var oldMinX = oldAabb.MinX;
         var oldMinY = oldAabb.MinY;
         var oldMaxX = oldAabb.MaxX;
         var oldMaxY = oldAabb.MaxY;
 
         // Write the new value (full T struct, may include non-spatial fields).
-        *(T*)slotBytes = newValue;
+        Unsafe.As<byte, T>(ref slotBytes) = newValue;
 
         // Re-read the AABB2F from the freshly-written value (handles offset within T).
-        ref var newAabb = ref *(AABB2F*)fieldPtr;
+        ref var newAabb = ref Unsafe.As<byte, AABB2F>(ref fieldPtr);
         var newMinX = newAabb.MinX;
         var newMinY = newAabb.MinY;
         var newMaxX = newAabb.MaxX;

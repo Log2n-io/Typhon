@@ -66,7 +66,7 @@ class TickBoundaryIndexTests : TestBase<TickBoundaryIndexTests>
                 var accessor = field.Index.Segment.CreateChunkAccessor();
                 try
                 {
-                    var result = field.Index.TryGet(&category, ref accessor);
+                    var result = field.Index.TryGet(ref *(byte*)&category, ref accessor);
                     return result.IsSuccess;
                 }
                 finally
@@ -81,7 +81,7 @@ class TickBoundaryIndexTests : TestBase<TickBoundaryIndexTests>
         var accessor2 = ifi.PersistentIndex.Segment.CreateChunkAccessor();
         try
         {
-            var result2 = ifi.PersistentIndex.TryGet(&category, ref accessor2);
+            var result2 = ifi.PersistentIndex.TryGet(ref *(byte*)&category, ref accessor2);
             return result2.IsSuccess;
         }
         finally

@@ -204,6 +204,7 @@ public class BootstrapDictionary
     /// Serialize the dictionary to a byte stream. Format:
     /// [StreamLength:2B] [entries...] [0xFF]
     /// </summary>
+    // KEEP(ptr): byte* stream cursor — *dest++ writes, pointer subtraction for length, and Encoding.UTF8.GetBytes(char*,byte*) interop all require byte*.
     public unsafe int WriteTo(byte* dest, int maxBytes)
     {
         byte* start = dest;
@@ -274,6 +275,7 @@ public class BootstrapDictionary
     /// <summary>
     /// Deserialize the dictionary from a byte stream. Clears existing entries.
     /// </summary>
+    // KEEP(ptr): byte* stream cursor — pointer scan/subtraction and Encoding.UTF8.GetString(byte*) interop require byte*.
     public unsafe void ReadFrom(byte* src, int maxBytes)
     {
         _entries.Clear();
@@ -349,6 +351,7 @@ public class BootstrapDictionary
         _ => 0
     };
 
+    // KEEP(ptr): byte* write cursor — Encoding.UTF8.GetBytes(char*,byte*) interop plus unaligned multi-int writes on the raw destination.
     private static unsafe void WriteValue(byte* dest, Value value)
     {
         switch (value.Type)
@@ -384,6 +387,7 @@ public class BootstrapDictionary
         }
     }
 
+    // KEEP(ptr): ref byte* stream cursor advanced in place — pointer subtraction and Encoding.UTF8.GetString(byte*) interop require byte*.
     private static unsafe Value ReadValue(ref byte* src, byte* limit, ValueType type)
     {
         switch (type)

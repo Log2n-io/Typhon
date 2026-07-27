@@ -165,18 +165,18 @@ internal unsafe partial class SpatialRTree<TStore> where TStore : struct, IPageS
     private int AllocNode(bool isLeaf, int parentChunkId, ref ChunkAccessor<TStore> accessor, ChangeSet changeSet = null)
     {
         int chunkId = _segment.AllocateChunk(false, changeSet);
-        byte* nodeBase = accessor.GetChunkAddress(chunkId, true);
+        ref byte nodeBase = ref Unsafe.AsRef<byte>(accessor.GetChunkAddress(chunkId, true));
 
         // Zero the entire chunk (stride bytes)
-        new Span<byte>(nodeBase, _desc.Stride).Clear();
+        new Span<byte>((byte*)Unsafe.AsPointer(ref nodeBase), _desc.Stride).Clear(); // KEEP(ptr): Span<byte> ctor still byte*
 
         // Initialize header
         // OlcVersion must start at version >= 1 (not 0) because ReadVersion() returns 0 as "locked/obsolete"
         // Set to 0b100 = 4 (version=1, lock=0, obsolete=0)
-        *(int*)nodeBase = 4;
-        SpatialNodeHelper.SetCount(nodeBase, 0);
-        SpatialNodeHelper.SetIsLeaf(nodeBase, isLeaf);
-        SpatialNodeHelper.SetParentChunkId(nodeBase, parentChunkId);
+        Unsafe.As<byte, int>(ref nodeBase) = 4;
+        SpatialNodeHelper.SetCount(ref nodeBase, 0);
+        SpatialNodeHelper.SetIsLeaf(ref nodeBase, isLeaf);
+        SpatialNodeHelper.SetParentChunkId(ref nodeBase, parentChunkId);
         return chunkId;
     }
 
@@ -207,13 +207,13 @@ internal unsafe partial class SpatialRTree<TStore> where TStore : struct, IPageS
     // ── OLC helpers ─────────────────────────────────────────────────────────
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static OlcLatch GetLatch(byte* nodeBase) => new(ref SpatialNodeHelper.OlcVersionRef(nodeBase));
+    private static OlcLatch GetLatch(ref byte nodeBase) => new(ref SpatialNodeHelper.OlcVersionRef(ref nodeBase));
 
     /// <summary>Spin-wait to acquire write lock on a node.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void SpinWriteLock(byte* nodeBase, out OlcLatch latch)
+    private static void SpinWriteLock(ref byte nodeBase, out OlcLatch latch)
     {
-        latch = GetLatch(nodeBase);
+        latch = GetLatch(ref nodeBase);
         SpinWait spin = default;
         while (!latch.TryWriteLock())
         {
@@ -227,17 +227,17 @@ internal unsafe partial class SpatialRTree<TStore> where TStore : struct, IPageS
     /// Recompute an internal node's UnionCategoryMask as the bitwise OR of all children's UnionCategoryMasks.
     /// Must be called after RefitInternalMBR whenever category masks may have changed.
     /// </summary>
-    private void RefitInternalUnionMask(byte* nodeBase, ref ChunkAccessor<TStore> accessor)
+    private void RefitInternalUnionMask(ref byte nodeBase, ref ChunkAccessor<TStore> accessor)
     {
-        int count = SpatialNodeHelper.GetCount(nodeBase);
+        int count = SpatialNodeHelper.GetCount(ref nodeBase);
         uint unionMask = 0;
         for (int i = 0; i < count; i++)
         {
-            int childId = SpatialNodeHelper.ReadInternalChildId(nodeBase, i, _desc);
-            byte* childBase = accessor.GetChunkAddress(childId);
-            unionMask |= SpatialNodeHelper.ReadUnionCategoryMask(childBase, _desc);
+            int childId = SpatialNodeHelper.ReadInternalChildId(ref nodeBase, i, _desc);
+            ref byte childBase = ref Unsafe.AsRef<byte>(accessor.GetChunkAddress(childId));
+            unionMask |= SpatialNodeHelper.ReadUnionCategoryMask(ref childBase, _desc);
         }
-        SpatialNodeHelper.WriteUnionCategoryMask(nodeBase, unionMask, _desc);
+        SpatialNodeHelper.WriteUnionCategoryMask(ref nodeBase, unionMask, _desc);
     }
 
     /// <summary>
@@ -246,10 +246,10 @@ internal unsafe partial class SpatialRTree<TStore> where TStore : struct, IPageS
     /// </summary>
     internal void SetEntryCategoryMask(int leafChunkId, int slotIndex, uint mask, ref ChunkAccessor<TStore> accessor)
     {
-        byte* leafBase = accessor.GetChunkAddress(leafChunkId, true);
-        SpinWriteLock(leafBase, out var latch);
-        SpatialNodeHelper.WriteLeafCategoryMask(leafBase, slotIndex, mask, _desc);
-        SpatialNodeHelper.RefitLeafMBR(leafBase, _desc); // recomputes leaf union mask
+        ref byte leafBase = ref Unsafe.AsRef<byte>(accessor.GetChunkAddress(leafChunkId, true));
+        SpinWriteLock(ref leafBase, out var latch);
+        SpatialNodeHelper.WriteLeafCategoryMask(ref leafBase, slotIndex, mask, _desc);
+        SpatialNodeHelper.RefitLeafMBR(ref leafBase, _desc); // recomputes leaf union mask
         latch.WriteUnlock();
         RefitAncestorsBottomUp(leafChunkId, ref accessor);
     }
@@ -265,12 +265,12 @@ internal unsafe partial class SpatialRTree<TStore> where TStore : struct, IPageS
         int currentChunkId = startChunkId;
         while (true)
         {
-            byte* currentBase = accessor.GetChunkAddress(currentChunkId);
+            ref byte currentBase = ref Unsafe.AsRef<byte>(accessor.GetChunkAddress(currentChunkId));
 
             // OLC-validate the child read to avoid chasing a stale parent pointer after concurrent split
-            var childLatch = GetLatch(currentBase);
+            var childLatch = GetLatch(ref currentBase);
             int childVersion = childLatch.ReadVersion();
-            int parentChunkId = SpatialNodeHelper.GetParentChunkId(currentBase);
+            int parentChunkId = SpatialNodeHelper.GetParentChunkId(ref currentBase);
             if (!childLatch.ValidateVersion(childVersion))
             {
                 // Child was concurrently modified (split changed parent pointer) — re-read
@@ -282,26 +282,27 @@ internal unsafe partial class SpatialRTree<TStore> where TStore : struct, IPageS
                 break;
             }
 
-            byte* parentBase = accessor.GetChunkAddress(parentChunkId, true);
-            SpinWriteLock(parentBase, out var parentLatch);
+            ref byte parentBase = ref Unsafe.AsRef<byte>(accessor.GetChunkAddress(parentChunkId, true));
+            SpinWriteLock(ref parentBase, out var parentLatch);
 
             // Refit the parent's internal entry for this child
-            int parentCount = SpatialNodeHelper.GetCount(parentBase);
+            int parentCount = SpatialNodeHelper.GetCount(ref parentBase);
             for (int i = 0; i < parentCount; i++)
             {
-                if (SpatialNodeHelper.ReadInternalChildId(parentBase, i, _desc) == currentChunkId)
+                if (SpatialNodeHelper.ReadInternalChildId(ref parentBase, i, _desc) == currentChunkId)
                 {
                     // Update this child's MBR in the parent
                     for (int c = 0; c < _desc.CoordCount; c++)
                     {
-                        SpatialNodeHelper.WriteInternalCoord(parentBase, i, c, SpatialNodeHelper.ReadNodeMBRCoord(currentBase, c, _desc), _desc);
+                        SpatialNodeHelper.WriteInternalCoord(ref parentBase, i, c,
+                            SpatialNodeHelper.ReadNodeMBRCoord(ref currentBase, c, _desc), _desc);
                     }
                     break;
                 }
             }
 
-            SpatialNodeHelper.RefitInternalMBR(parentBase, _desc);
-            RefitInternalUnionMask(parentBase, ref accessor);
+            SpatialNodeHelper.RefitInternalMBR(ref parentBase, _desc);
+            RefitInternalUnionMask(ref parentBase, ref accessor);
             parentLatch.WriteUnlock();
 
             currentChunkId = parentChunkId;
@@ -319,19 +320,20 @@ internal unsafe partial class SpatialRTree<TStore> where TStore : struct, IPageS
             int parentChunkId = path.ChunkIds[level];
             int childIdx = path.ChildIndices[level];
 
-            byte* parentBase = accessor.GetChunkAddress(parentChunkId, true);
-            SpinWriteLock(parentBase, out var parentLatch);
+            ref byte parentBase = ref Unsafe.AsRef<byte>(accessor.GetChunkAddress(parentChunkId, true));
+            SpinWriteLock(ref parentBase, out var parentLatch);
 
             // Read child's current NodeMBR and update the parent's entry for that child
-            int childChunkId = SpatialNodeHelper.ReadInternalChildId(parentBase, childIdx, _desc);
-            byte* childBase = accessor.GetChunkAddress(childChunkId);
+            int childChunkId = SpatialNodeHelper.ReadInternalChildId(ref parentBase, childIdx, _desc);
+            ref byte childBase = ref Unsafe.AsRef<byte>(accessor.GetChunkAddress(childChunkId));
             for (int c = 0; c < _desc.CoordCount; c++)
             {
-                SpatialNodeHelper.WriteInternalCoord(parentBase, childIdx, c, SpatialNodeHelper.ReadNodeMBRCoord(childBase, c, _desc), _desc);
+                SpatialNodeHelper.WriteInternalCoord(ref parentBase, childIdx, c,
+                    SpatialNodeHelper.ReadNodeMBRCoord(ref childBase, c, _desc), _desc);
             }
 
-            SpatialNodeHelper.RefitInternalMBR(parentBase, _desc);
-            RefitInternalUnionMask(parentBase, ref accessor);
+            SpatialNodeHelper.RefitInternalMBR(ref parentBase, _desc);
+            RefitInternalUnionMask(ref parentBase, ref accessor);
             parentLatch.WriteUnlock();
         }
     }
@@ -341,7 +343,7 @@ internal unsafe partial class SpatialRTree<TStore> where TStore : struct, IPageS
     /// </summary>
     internal void ReadLeafCoords(int leafChunkId, int slotIndex, Span<double> coords, ref ChunkAccessor<TStore> accessor)
     {
-        byte* leafBase = accessor.GetChunkAddress(leafChunkId);
-        SpatialNodeHelper.ReadLeafEntryCoords(leafBase, slotIndex, coords, _desc);
+        ref byte leafBase = ref Unsafe.AsRef<byte>(accessor.GetChunkAddress(leafChunkId));
+        SpatialNodeHelper.ReadLeafEntryCoords(ref leafBase, slotIndex, coords, _desc);
     }
 }

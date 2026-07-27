@@ -350,8 +350,8 @@ internal sealed unsafe class ArchetypeClusterState
         for (int i = 0; i < count; i++)
         {
             int chunkId = ids[i];
-            byte* clusterBase = hasCluster ? clusterAccessor.GetChunkAddress(chunkId, true) : transientAccessor.GetChunkAddress(chunkId, true);
-            if (*(ulong*)clusterBase != 0)
+            ulong occupancy = hasCluster ? clusterAccessor.GetChunk<ulong>(chunkId, true) : transientAccessor.GetChunk<ulong>(chunkId, true);
+            if (occupancy != 0)
             {
                 continue; // Claim re-filled this cluster after the drain — keep alive
             }
@@ -830,8 +830,7 @@ internal sealed unsafe class ArchetypeClusterState
                 continue;
             }
 
-            byte* clusterBase = accessor.GetChunkAddress(chunkId);
-            ulong occupancy = *(ulong*)clusterBase;
+            ulong occupancy = accessor.GetChunkReadOnly<ulong>(chunkId);
 
             if (occupancy == 0)
             {
@@ -856,8 +855,7 @@ internal sealed unsafe class ArchetypeClusterState
                 continue;
             }
 
-            byte* clusterBase = accessor.GetChunkAddress(chunkId);
-            ulong occupancy = *(ulong*)clusterBase;
+            ulong occupancy = accessor.GetChunkReadOnly<ulong>(chunkId);
 
             if (occupancy == 0)
             {
@@ -889,8 +887,7 @@ internal sealed unsafe class ArchetypeClusterState
         if (FreeClusterHead >= 0)
         {
             int clusterId = FreeClusterHead;
-            byte* clusterBase = accessor.GetChunkAddress(clusterId, true);
-            ref ulong occupancy = ref *(ulong*)clusterBase;
+            ref ulong occupancy = ref accessor.GetChunk<ulong>(clusterId, true);
 
             ulong current = occupancy;
             ulong available = ~current & Layout.FullMask;
@@ -934,10 +931,9 @@ internal sealed unsafe class ArchetypeClusterState
 
         // No free clusters — allocate new one (O(1))
         int newClusterId = AllocateNewCluster(changeSet);
-        byte* newBase = accessor.GetChunkAddress(newClusterId, true);
 
         // Claim slot 0 in the fresh cluster
-        *(ulong*)newBase = 1UL; // OccupancyBit 0 set
+        accessor.GetChunk<ulong>(newClusterId, true) = 1UL; // OccupancyBit 0 set
         FreeClusterHead = Layout.ClusterSize > 1 ? newClusterId : -1;
 
         return (newClusterId, 0);
@@ -952,8 +948,7 @@ internal sealed unsafe class ArchetypeClusterState
         if (FreeClusterHead >= 0)
         {
             int clusterId = FreeClusterHead;
-            byte* clusterBase = accessor.GetChunkAddress(clusterId, true);
-            ref ulong occupancy = ref *(ulong*)clusterBase;
+            ref ulong occupancy = ref accessor.GetChunk<ulong>(clusterId, true);
 
             ulong current = occupancy;
             ulong available = ~current & Layout.FullMask;
@@ -990,8 +985,7 @@ internal sealed unsafe class ArchetypeClusterState
         }
 
         int newClusterId = AllocateNewCluster(null);
-        byte* newBase = accessor.GetChunkAddress(newClusterId, true);
-        *(ulong*)newBase = 1UL;
+        accessor.GetChunk<ulong>(newClusterId, true) = 1UL;
         FreeClusterHead = Layout.ClusterSize > 1 ? newClusterId : -1;
 
         return (newClusterId, 0);
@@ -1017,8 +1011,7 @@ internal sealed unsafe class ArchetypeClusterState
     private int TryClaimSlotInCluster<TStore>(ref ChunkAccessor<TStore> accessor, int clusterChunkId)
         where TStore : struct, IPageStore
     {
-        byte* clusterBase = accessor.GetChunkAddress(clusterChunkId);
-        ref ulong occupancy = ref *(ulong*)clusterBase;
+        ref ulong occupancy = ref accessor.GetChunk<ulong>(clusterChunkId);
 
         ulong current = occupancy;
         ulong available = ~current & Layout.FullMask;
@@ -1152,8 +1145,7 @@ internal sealed unsafe class ArchetypeClusterState
         Interlocked.Increment(ref cell.ClusterCount);
         Interlocked.Increment(ref cell.EntityCount);
 
-        byte* newBase = accessor.GetChunkAddress(newChunkId, true);
-        *(ulong*)newBase = 1UL; // occupancy bit 0
+        accessor.GetChunk<ulong>(newChunkId, true) = 1UL; // occupancy bit 0
 
         // Phase 3: Spatial:Grid:ClusterCellAssign instant — fired when a new cluster is bound to a cell.
         TyphonEvent.EmitSpatialGridClusterCellAssign(newChunkId, cellKey, (ushort)Math.Min(ArchetypeId, ushort.MaxValue));
@@ -1235,8 +1227,7 @@ internal sealed unsafe class ArchetypeClusterState
         Interlocked.Increment(ref cell.ClusterCount);
         Interlocked.Increment(ref cell.EntityCount);
 
-        byte* newBase = accessor.GetChunkAddress(newChunkId, true);
-        *(ulong*)newBase = 1UL;
+        accessor.GetChunk<ulong>(newChunkId, true) = 1UL;
 
         // Phase 3: Spatial:Grid:ClusterCellAssign instant — fired when a new cluster is bound to a cell.
         TyphonEvent.EmitSpatialGridClusterCellAssign(newChunkId, cellKey, (ushort)Math.Min(ArchetypeId, ushort.MaxValue));
@@ -1286,16 +1277,16 @@ internal sealed unsafe class ArchetypeClusterState
             for (int i = 0; i < ActiveClusterCount; i++)
             {
                 int chunkId = ActiveClusterIds[i];
-                byte* clusterBase = clusterAccessor.GetChunkAddress(chunkId);
-                ulong occupancy = *(ulong*)clusterBase;
+                ref byte clusterBase = ref Unsafe.AsRef<byte>(clusterAccessor.GetChunkAddress(chunkId));
+                ulong occupancy = Unsafe.As<byte, ulong>(ref clusterBase);
                 if (occupancy == 0)
                 {
                     continue;
                 }
 
                 int firstSlot = BitOperations.TrailingZeroCount(occupancy);
-                byte* fieldPtr = clusterBase + componentOffset + firstSlot * compStride + ss.FieldOffset;
-                int cellKey = grid.WorldToCellKeyFromSpatialField(fieldPtr, fieldType);
+                ref byte fieldPtr = ref Unsafe.Add(ref clusterBase, componentOffset + firstSlot * compStride + ss.FieldOffset);
+                int cellKey = grid.WorldToCellKeyFromSpatialField(ref fieldPtr, fieldType);
 
                 ClusterCellMap[chunkId] = cellKey;
                 CellClusterPool.AddCluster(cellKey, chunkId);
@@ -1626,8 +1617,8 @@ internal sealed unsafe class ArchetypeClusterState
     internal ClusterSpatialAabb RecomputeClusterAabb(int clusterChunkId, ref ChunkAccessor<PersistentStore> accessor, out int slotsScanned)
     {
         var ss = SpatialSlot;
-        byte* clusterBase = accessor.GetChunkAddress(clusterChunkId);
-        ulong occupancy = *(ulong*)clusterBase;
+        ref byte clusterBase = ref Unsafe.AsRef<byte>(accessor.GetChunkAddress(clusterChunkId));
+        ulong occupancy = Unsafe.As<byte, ulong>(ref clusterBase);
         slotsScanned = BitOperations.PopCount(occupancy);
         int componentOffset = Layout.ComponentOffset(ss.Slot);
         int componentStride = Layout.ComponentSize(ss.Slot);
@@ -1644,8 +1635,8 @@ internal sealed unsafe class ArchetypeClusterState
             int slot = BitOperations.TrailingZeroCount(bits);
             bits &= bits - 1;
 
-            byte* fieldPtr = clusterBase + componentOffset + slot * componentStride + ss.FieldOffset;
-            if (!SpatialMaintainer.ReadAndValidateBoundsFromPtr(fieldPtr, ss.FieldInfo, coords, ss.Descriptor))
+            ref byte fieldPtr = ref Unsafe.Add(ref clusterBase, componentOffset + slot * componentStride + ss.FieldOffset);
+            if (!SpatialMaintainer.ReadAndValidateBoundsFromPtr(ref fieldPtr, ss.FieldInfo, coords, ss.Descriptor))
             {
                 continue; // skip degenerate slot
             }
@@ -2092,8 +2083,8 @@ internal sealed unsafe class ArchetypeClusterState
         List<MigrationRequest> outlierBuffer)
     {
         var ss = SpatialSlot;
-        byte* clusterBase = accessor.GetChunkAddress(clusterChunkId);
-        ulong occupancy = *(ulong*)clusterBase;
+        ref byte clusterBase = ref Unsafe.AsRef<byte>(accessor.GetChunkAddress(clusterChunkId));
+        ulong occupancy = Unsafe.As<byte, ulong>(ref clusterBase);
         int compOffset = Layout.ComponentOffset(ss.Slot);
         int compStride = Layout.ComponentSize(ss.Slot);
 
@@ -2110,8 +2101,8 @@ internal sealed unsafe class ArchetypeClusterState
             int slotIndex = BitOperations.TrailingZeroCount(bits);
             bits &= bits - 1;
 
-            byte* fieldPtr = clusterBase + compOffset + slotIndex * compStride + ss.FieldOffset;
-            SpatialGrid.ReadSpatialCenter2D(fieldPtr, ss.FieldInfo.FieldType, out float posX, out float posY);
+            ref byte fieldPtr = ref Unsafe.Add(ref clusterBase, compOffset + slotIndex * compStride + ss.FieldOffset);
+            SpatialGrid.ReadSpatialCenter2D(ref fieldPtr, ss.FieldInfo.FieldType, out float posX, out float posY);
 
             if (!float.IsFinite(posX) || !float.IsFinite(posY))
             {
@@ -2425,18 +2416,18 @@ internal sealed unsafe class ArchetypeClusterState
     public void ReleaseSlot(ref ChunkAccessor<PersistentStore> accessor, int clusterChunkId, int slotIndex, ChangeSet changeSet, SpatialGrid grid = null,
         bool deferFinalize = false)
     {
-        byte* clusterBase = accessor.GetChunkAddress(clusterChunkId, true);
+        ref byte clusterBase = ref Unsafe.AsRef<byte>(accessor.GetChunkAddress(clusterChunkId, true));
 
         // Release SV ComponentCollection buffers held in this slot BEFORE clearing it — but only on a true destroy.
         // Migration passes deferFinalize:true and is a MOVE: the handle was byte-copied to the destination slot, so the
         // buffer must NOT be freed here. SV CC has no revision chain; the cluster slot is the buffer's sole owner.
         if (!deferFinalize && CollectionSlots != null)
         {
-            ReleaseSlotCollections(clusterBase, slotIndex, changeSet);
+            ReleaseSlotCollections(ref clusterBase, slotIndex, changeSet);
         }
 
         ulong slotMask = 1UL << slotIndex;
-        ulong prevOccupancy = ClearSlotMetadata(clusterBase, slotIndex);
+        ulong prevOccupancy = ClearSlotMetadata(ref clusterBase, slotIndex);
         bool wasOccupied = (prevOccupancy & slotMask) != 0;
         bool clusterDrained = wasOccupied && (prevOccupancy & ~slotMask) == 0;
 
@@ -2475,10 +2466,10 @@ internal sealed unsafe class ArchetypeClusterState
     /// </summary>
     public void ReleaseSlot(ref ChunkAccessor<TransientStore> accessor, int clusterChunkId, int slotIndex, SpatialGrid grid = null, bool deferFinalize = false)
     {
-        byte* clusterBase = accessor.GetChunkAddress(clusterChunkId, true);
+        ref byte clusterBase = ref Unsafe.AsRef<byte>(accessor.GetChunkAddress(clusterChunkId, true));
 
         ulong slotMask = 1UL << slotIndex;
-        ulong prevOccupancy = ClearSlotMetadata(clusterBase, slotIndex);
+        ulong prevOccupancy = ClearSlotMetadata(ref clusterBase, slotIndex);
         bool wasOccupied = (prevOccupancy & slotMask) != 0;
         bool clusterDrained = wasOccupied && (prevOccupancy & ~slotMask) == 0;
 
@@ -2542,15 +2533,15 @@ internal sealed unsafe class ArchetypeClusterState
     /// Release the SingleVersion ComponentCollection buffers held in one cluster slot. Called from <c>ReleaseSlot</c> on a true destroy (not migration),
     /// before the slot data is cleared.
     /// </summary>
-    private void ReleaseSlotCollections(byte* clusterBase, int slotIndex, ChangeSet changeSet)
+    private void ReleaseSlotCollections(ref byte clusterBase, int slotIndex, ChangeSet changeSet)
     {
         var layout = Layout;
         foreach (var cs in CollectionSlots)
         {
-            byte* compBase = clusterBase + layout.ComponentOffset(cs.Slot) + slotIndex * layout.ComponentSize(cs.Slot);
+            ref byte compBase = ref Unsafe.Add(ref clusterBase, layout.ComponentOffset(cs.Slot) + slotIndex * layout.ComponentSize(cs.Slot));
             foreach (var f in cs.Fields)
             {
-                int bufferId = *(int*)(compBase + f.FieldOffset);
+                int bufferId = Unsafe.As<byte, int>(ref Unsafe.Add(ref compBase, f.FieldOffset));
                 if (bufferId != 0)
                 {
                     var ca = f.Vsbs.Segment.CreateChunkAccessor(changeSet);
@@ -2631,19 +2622,19 @@ internal sealed unsafe class ArchetypeClusterState
     /// handling cell-partitioned migrations whose sources share a cluster) compose without lost updates. The EntityId scalar write is independent (different
     /// 8-byte slot per release) so it stays a plain store.
     /// </remarks>
-    private ulong ClearSlotMetadata(byte* clusterBase, int slotIndex)
+    private ulong ClearSlotMetadata(ref byte clusterBase, int slotIndex)
     {
         long slotMask = 1L << slotIndex;
         long inverseMask = ~slotMask;
 
         for (int slot = 0; slot < Layout.ComponentCount; slot++)
         {
-            Interlocked.And(ref *(long*)(clusterBase + Layout.EnabledBitsOffset(slot)), inverseMask);
+            Interlocked.And(ref Unsafe.As<byte, long>(ref Unsafe.Add(ref clusterBase, Layout.EnabledBitsOffset(slot))), inverseMask);
         }
 
-        ulong prevOccupancy = (ulong)Interlocked.And(ref *(long*)clusterBase, inverseMask);
+        ulong prevOccupancy = (ulong)Interlocked.And(ref Unsafe.As<byte, long>(ref clusterBase), inverseMask);
 
-        *(long*)(clusterBase + Layout.EntityIdsOffset + slotIndex * 8) = 0;
+        Unsafe.As<byte, long>(ref Unsafe.Add(ref clusterBase, Layout.EntityIdsOffset + slotIndex * 8)) = 0;
 
         return prevOccupancy;
     }
@@ -2761,6 +2752,7 @@ internal sealed unsafe class ArchetypeClusterState
             for (int c = 0; c < ActiveClusterCount; c++)
             {
                 int chunkId = ActiveClusterIds[c];
+                // KEEP(ptr): clusterBase is the metadata base (*(ulong*) occupancy read + *(int*) elementId write); the per-field index key is a ref into it.
                 byte* clusterBase = clusterAccessor.GetChunkAddress(chunkId);
                 ulong occupancy = *(ulong*)clusterBase;
 
@@ -2778,8 +2770,8 @@ internal sealed unsafe class ArchetypeClusterState
                         for (int f = 0; f < ixSlot.Fields.Length; f++)
                         {
                             ref var field = ref ixSlot.Fields[f];
-                            byte* fieldPtr = compBase + slotIndex * compSize + field.FieldOffset;
-                            int elementId = field.Index.Add(fieldPtr, clusterLocation, ref idxAccessor);
+                            ref byte fieldPtr = ref compBase[slotIndex * compSize + field.FieldOffset];
+                            int elementId = field.Index.Add(ref fieldPtr, clusterLocation, ref idxAccessor);
                             // Rebuild writes a fresh elementId into the cluster tail, overwriting any stale
                             // value from the previous (torn-down) BTree state. Issue #229 Phase 3.
                             if (field.AllowMultiple)
@@ -2883,7 +2875,8 @@ internal sealed unsafe class ArchetypeClusterState
         var clusterAccessor = ClusterSegment.CreateChunkAccessor();
         var mapAccessor = engineState.EntityMap.Segment.CreateChunkAccessor();
         int recordSize = meta._entityRecordSize;
-        byte* recordBuf = stackalloc byte[recordSize];
+        Span<byte> recordBuf = stackalloc byte[recordSize];
+        ref byte recordBufRef = ref MemoryMarshal.GetReference(recordBuf);
 
         // Pre-create accessors for each Versioned slot's tables (hoisted out of entity/slot loops)
         var compRevAccessors = new ChunkAccessor<PersistentStore>[meta.ComponentCount];
@@ -2903,8 +2896,8 @@ internal sealed unsafe class ArchetypeClusterState
             for (int c = 0; c < ActiveClusterCount; c++)
             {
                 int chunkId = ActiveClusterIds[c];
-                byte* clusterBase = clusterAccessor.GetChunkAddress(chunkId, true);
-                ulong occupancy = *(ulong*)clusterBase;
+                ref byte clusterBase = ref Unsafe.AsRef<byte>(clusterAccessor.GetChunkAddress(chunkId, true));
+                ulong occupancy = Unsafe.As<byte, ulong>(ref clusterBase);
 
                 while (occupancy != 0)
                 {
@@ -2912,11 +2905,11 @@ internal sealed unsafe class ArchetypeClusterState
                     occupancy &= occupancy - 1;
 
                     // Read entity key from cluster
-                    long entityPK = *(long*)(clusterBase + Layout.EntityIdsOffset + slotIndex * 8);
+                    long entityPK = Unsafe.As<byte, long>(ref Unsafe.Add(ref clusterBase, Layout.EntityIdsOffset + slotIndex * 8));
                     long entityKey = EntityId.FromRaw(entityPK).EntityKey;
 
                     // Read ClusterEntityRecord from EntityMap to get compRevFirstChunkId
-                    if (!engineState.EntityMap.TryGet(entityKey, recordBuf, ref mapAccessor))
+                    if (!engineState.EntityMap.TryGet(entityKey, ref recordBufRef, ref mapAccessor))
                     {
                         continue;
                     }
@@ -2930,7 +2923,7 @@ internal sealed unsafe class ArchetypeClusterState
                             continue;
                         }
 
-                        int compRevFirstChunkId = ClusterEntityRecordAccessor.GetCompRevFirstChunkId(recordBuf, vi);
+                        int compRevFirstChunkId = ClusterEntityRecordAccessor.GetCompRevFirstChunkId(ref recordBufRef, vi);
                         if (compRevFirstChunkId == 0)
                         {
                             continue;
@@ -2947,10 +2940,10 @@ internal sealed unsafe class ArchetypeClusterState
                         // Read HEAD value from content chunk and copy to cluster slot
                         int headChunkId = chainResult.Value.CurCompContentChunkId;
                         ref var contentAccessor = ref contentAccessors[slot];
-                        byte* srcAddr = contentAccessor.GetChunkAddress(headChunkId);
+                        ref byte srcAddr = ref Unsafe.AsRef<byte>(contentAccessor.GetChunkAddress(headChunkId));
                         int compSize = Layout.ComponentSize(slot);
-                        byte* dstSlot = clusterBase + Layout.ComponentOffset(slot) + slotIndex * compSize;
-                        Unsafe.CopyBlockUnaligned(dstSlot, srcAddr + engineState.SlotToComponentTable[slot].ComponentOverhead, (uint)compSize);
+                        ref byte dstSlot = ref Unsafe.Add(ref clusterBase, Layout.ComponentOffset(slot) + slotIndex * compSize);
+                        Unsafe.CopyBlockUnaligned(ref dstSlot, ref Unsafe.Add(ref srcAddr, engineState.SlotToComponentTable[slot].ComponentOverhead), (uint)compSize);
                     }
                 }
             }

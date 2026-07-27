@@ -54,6 +54,8 @@ internal class ChainedBlockAllocator<T> : ChainedBlockAllocatorBase where T : st
 
     public unsafe ref T SafeAppend(ref T block)
     {
+        // KEEP(ptr): the block header sits at a NEGATIVE offset immediately before the data block — no span covers it, so
+        // pointer arithmetic ((BlockHeader*)dataPtr - 1) is required to reach it. Intrusive-list design.
         var headerPtr = (BlockHeader*)Unsafe.AsPointer(ref block) - 1;
         var wc = WaitContext.FromTimeout(TimeoutOptions.Current.SegmentAllocationLockTimeout);
         if (!headerPtr->AccessControl.EnterExclusiveAccess(ref wc))

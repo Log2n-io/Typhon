@@ -1,5 +1,6 @@
 using System;
 using System.Buffers;
+using System.Runtime.CompilerServices;
 
 namespace Typhon.Engine.Internals;
 
@@ -77,17 +78,17 @@ internal unsafe partial class SpatialRTree<TStore>
                             int leafChunkId = tree.AllocNode(true, 0, ref accessor, changeSet);
                             leafChunkIds[leafIdx] = leafChunkId;
 
-                            byte* leafBase = accessor.GetChunkAddress(leafChunkId, true);
+                            ref byte leafBase = ref Unsafe.AsRef<byte>(accessor.GetChunkAddress(leafChunkId, true));
 
                             for (int j = 0; j < count; j++)
                             {
                                 int srcIdx = sortIndex[start + j];
-                                tree.WriteLeafEntry(leafBase, j, entityIds[srcIdx], componentChunkIds[srcIdx],
+                                tree.WriteLeafEntry(ref leafBase, j, entityIds[srcIdx], componentChunkIds[srcIdx],
                                     coords.Slice(srcIdx * coordCount, coordCount), categoryMasks[srcIdx]);
                             }
 
-                            SpatialNodeHelper.SetCount(leafBase, count);
-                            SpatialNodeHelper.RefitLeafMBR(leafBase, desc);
+                            SpatialNodeHelper.SetCount(ref leafBase, count);
+                            SpatialNodeHelper.RefitLeafMBR(ref leafBase, desc);
                         }
 
                         // The constructor created an initial empty root node that we won't use.
@@ -124,21 +125,21 @@ internal unsafe partial class SpatialRTree<TStore>
                                     nextBuf[nodeIdx] = internalChunkId;
                                     tree._nodeCount++;
 
-                                    byte* internalBase = accessor.GetChunkAddress(internalChunkId, true);
+                                    ref byte internalBase = ref Unsafe.AsRef<byte>(accessor.GetChunkAddress(internalChunkId, true));
 
                                     for (int j = 0; j < count; j++)
                                     {
                                         int childChunkId = currentBuf[start + j];
-                                        tree.WriteInternalEntry(internalBase, j, childChunkId, ref accessor);
+                                        tree.WriteInternalEntry(ref internalBase, j, childChunkId, ref accessor);
 
                                         // Set parent pointer on child
-                                        byte* childBase = accessor.GetChunkAddress(childChunkId, true);
-                                        SpatialNodeHelper.SetParentChunkId(childBase, internalChunkId);
+                                        ref byte childBase = ref Unsafe.AsRef<byte>(accessor.GetChunkAddress(childChunkId, true));
+                                        SpatialNodeHelper.SetParentChunkId(ref childBase, internalChunkId);
                                     }
 
-                                    SpatialNodeHelper.SetCount(internalBase, count);
-                                    SpatialNodeHelper.RefitInternalMBR(internalBase, desc);
-                                    tree.RefitInternalUnionMask(internalBase, ref accessor);
+                                    SpatialNodeHelper.SetCount(ref internalBase, count);
+                                    SpatialNodeHelper.RefitInternalMBR(ref internalBase, desc);
+                                    tree.RefitInternalUnionMask(ref internalBase, ref accessor);
                                 }
 
                                 // Swap buffers

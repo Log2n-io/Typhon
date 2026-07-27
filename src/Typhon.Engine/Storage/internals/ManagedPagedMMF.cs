@@ -97,6 +97,10 @@ public class ManagedPagedMMFOptions : PagedMMFOptions
 [PublicAPI]
 public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugPropertiesProvider
 {
+    // KEEP(ptr): fixed/byte* live only at the file-header + page-image boundaries — RootFileHeader's fixed-buffer
+    // signature/name fields (fixed byte*), the byte* image persist overrides, and byte* page/stream cursors off the
+    // pinned page cache — not a general ref gap.
+
     #region Constants
 
     // v4 layout (CK-05 + directory-only root): pages 0–1 are the meta pair (A/B slots); the occupancy segment's directory is
@@ -863,7 +867,8 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
 
             var nextGen = _metaGeneration + 1;
             PageBaseHeader.WritePairGeneration(pageSpan, nextGen);
-            ((PageBaseHeader*)pageAddr)->PageChecksum = Crc32CUtil.ComputeSkipping(pageSpan, PageBaseHeader.PageChecksumOffset, PageBaseHeader.PageChecksumSize);
+            ref var pageHdr = ref MemoryMarshal.AsRef<PageBaseHeader>(pageSpan);
+            pageHdr.PageChecksum = Crc32CUtil.ComputeSkipping(pageSpan, PageBaseHeader.PageChecksumOffset, PageBaseHeader.PageChecksumSize);
 
             // Write the full image to the alternate slot and fsync BEFORE flipping the current pointer.
             var targetSlot = MetaSlotA + MetaSlotB - _metaCurrentSlot;   // the other slot
@@ -1038,7 +1043,8 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
 
             var span = new Span<byte>(image, PageSize);
             PageBaseHeader.WritePairGeneration(span, newGen);
-            ((PageBaseHeader*)image)->PageChecksum = Crc32CUtil.ComputeSkipping(span, PageBaseHeader.PageChecksumOffset, PageBaseHeader.PageChecksumSize);
+            ref var imageHdr = ref MemoryMarshal.AsRef<PageBaseHeader>(span);
+            imageHdr.PageChecksum = Crc32CUtil.ComputeSkipping(span, PageBaseHeader.PageChecksumOffset, PageBaseHeader.PageChecksumSize);
 
             WritePageDirect(alternate, span);
             FlushToDisk();

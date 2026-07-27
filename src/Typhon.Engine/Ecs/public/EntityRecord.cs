@@ -104,7 +104,7 @@ public struct EntityRecordHeader
 /// Record layout: [EntityRecordHeader (14B)] [Location₀ (4B)] [Location₁ (4B)] ... [Location_{N-1} (4B)]
 /// </summary>
 [PublicAPI]
-public static unsafe class EntityRecordAccessor
+public static class EntityRecordAccessor
 {
     /// <summary>Size of the <see cref="EntityRecordHeader"/> in bytes.</summary>
     public const int HeaderSize = 14;
@@ -121,34 +121,30 @@ public static unsafe class EntityRecordAccessor
 
     /// <summary>Get a reference to the header at the start of the record.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static ref EntityRecordHeader GetHeader(byte* record) => ref Unsafe.AsRef<EntityRecordHeader>(record);
+    public static ref EntityRecordHeader GetHeader(ref byte record) => ref Unsafe.As<byte, EntityRecordHeader>(ref record);
 
     /// <summary>Read the component chunk ID at the given slot index.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static int GetLocation(byte* record, int slot) => *(int*)(record + HeaderSize + slot * sizeof(int));
+    public static int GetLocation(ref byte record, int slot) => Unsafe.As<byte, int>(ref Unsafe.Add(ref record, HeaderSize + slot * sizeof(int)));
 
     /// <summary>Write the component chunk ID at the given slot index.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static void SetLocation(byte* record, int slot, int chunkId) => *(int*)(record + HeaderSize + slot * sizeof(int)) = chunkId;
+    public static void SetLocation(ref byte record, int slot, int chunkId) =>
+        Unsafe.As<byte, int>(ref Unsafe.Add(ref record, HeaderSize + slot * sizeof(int))) = chunkId;
 
     /// <summary>Bulk copy all component locations from one record to another.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static void CopyLocations(byte* src, byte* dst, int componentCount) => 
-        Unsafe.CopyBlock(dst + HeaderSize, src + HeaderSize, (uint)(componentCount * sizeof(int)));
+    public static void CopyLocations(ref byte src, ref byte dst, int componentCount) =>
+        Unsafe.CopyBlock(ref Unsafe.Add(ref dst, HeaderSize), ref Unsafe.Add(ref src, HeaderSize), (uint)(componentCount * sizeof(int)));
 
     /// <summary>Zero-initialize an entire entity record (header + locations).</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static void InitializeRecord(byte* record, int componentCount) => Unsafe.InitBlock(record, 0, (uint)RecordSize(componentCount));
+    public static void InitializeRecord(ref byte record, int componentCount) => Unsafe.InitBlock(ref record, 0, (uint)RecordSize(componentCount));
 
     /// <summary>Copy component locations from a raw record into an <see cref="EntityLocations"/> struct.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal static void CopyLocationsTo(byte* record, ref EntityLocations locs, int componentCount)
-    {
-        fixed (int* dst = locs.Values)
-        {
-            Unsafe.CopyBlock(dst, record + HeaderSize, (uint)(componentCount * sizeof(int)));
-        }
-    }
+    internal static void CopyLocationsTo(ref byte record, ref EntityLocations locs, int componentCount) =>
+        Unsafe.CopyBlock(ref Unsafe.As<EntityLocations, byte>(ref locs), ref Unsafe.Add(ref record, HeaderSize), (uint)(componentCount * sizeof(int)));
 }
 
 /// <summary>
@@ -172,7 +168,7 @@ internal unsafe struct EntityLocations
 /// <para>The EntityRecordHeader is identical to the legacy format (same BornTSN/DiedTSN/EnabledBits).</para>
 /// </remarks>
 [PublicAPI]
-public static unsafe class ClusterEntityRecordAccessor
+public static class ClusterEntityRecordAccessor
 {
     /// <summary>Size of the <see cref="EntityRecordHeader"/> in bytes (same as legacy).</summary>
     public const int HeaderSize = 14;
@@ -195,37 +191,38 @@ public static unsafe class ClusterEntityRecordAccessor
 
     /// <summary>Get a reference to the header at the start of the record.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static ref EntityRecordHeader GetHeader(byte* record) => ref Unsafe.AsRef<EntityRecordHeader>(record);
+    public static ref EntityRecordHeader GetHeader(ref byte record) => ref Unsafe.As<byte, EntityRecordHeader>(ref record);
 
     /// <summary>Read the cluster chunk ID (the cluster's chunkId in the ClusterSegment).</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static int GetClusterChunkId(byte* record) => *(int*)(record + ClusterChunkIdOffset);
+    public static int GetClusterChunkId(ref byte record) => Unsafe.As<byte, int>(ref Unsafe.Add(ref record, ClusterChunkIdOffset));
 
     /// <summary>Write the cluster chunk ID.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static void SetClusterChunkId(byte* record, int chunkId) => *(int*)(record + ClusterChunkIdOffset) = chunkId;
+    public static void SetClusterChunkId(ref byte record, int chunkId) => Unsafe.As<byte, int>(ref Unsafe.Add(ref record, ClusterChunkIdOffset)) = chunkId;
 
     /// <summary>Read the slot index within the cluster (0..63).</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static byte GetSlotIndex(byte* record) => *(record + SlotIndexOffset);
+    public static byte GetSlotIndex(ref byte record) => Unsafe.Add(ref record, SlotIndexOffset);
 
     /// <summary>Write the slot index within the cluster.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static void SetSlotIndex(byte* record, byte slotIndex) => *(record + SlotIndexOffset) = slotIndex;
+    public static void SetSlotIndex(ref byte record, byte slotIndex) => Unsafe.Add(ref record, SlotIndexOffset) = slotIndex;
 
     /// <summary>Read the compRevFirstChunkId for the given versioned index (0-based within Versioned slots only).</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static int GetCompRevFirstChunkId(byte* record, int versionedIndex) => *(int*)(record + CompRevOffset + versionedIndex * sizeof(int));
+    public static int GetCompRevFirstChunkId(ref byte record, int versionedIndex) =>
+        Unsafe.As<byte, int>(ref Unsafe.Add(ref record, CompRevOffset + versionedIndex * sizeof(int)));
 
     /// <summary>Write the compRevFirstChunkId for the given versioned index.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static void SetCompRevFirstChunkId(byte* record, int versionedIndex, int chunkId) =>
-        *(int*)(record + CompRevOffset + versionedIndex * sizeof(int)) = chunkId;
+    public static void SetCompRevFirstChunkId(ref byte record, int versionedIndex, int chunkId) =>
+        Unsafe.As<byte, int>(ref Unsafe.Add(ref record, CompRevOffset + versionedIndex * sizeof(int))) = chunkId;
 
     /// <summary>Zero-initialize an entire cluster entity record (base + versioned extensions).</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static void InitializeRecord(byte* record, int versionedSlotCount) =>
-        Unsafe.InitBlock(record, 0, (uint)RecordSize(versionedSlotCount));
+    public static void InitializeRecord(ref byte record, int versionedSlotCount) =>
+        Unsafe.InitBlock(ref record, 0, (uint)RecordSize(versionedSlotCount));
 
 }
 

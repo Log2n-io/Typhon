@@ -2,6 +2,7 @@ using System;
 using System.Buffers;
 using System.Collections.Generic;
 using System.Numerics;
+using System.Runtime.InteropServices;
 using Typhon.Protocol;
 
 namespace Typhon.Engine.Internals;
@@ -312,8 +313,7 @@ internal sealed class DeltaBuilder
                     continue;
                 }
 
-                var chunkPtr = accessor.GetChunkAddress(chunkId);
-                var entityPK = *(long*)chunkPtr;
+                var entityPK = MemoryMarshal.Read<long>(accessor.GetChunkAsReadOnlySpan(chunkId));
 
                 if (view.Contains(entityPK) && !delta.Added.Contains(entityPK))
                 {

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Internals;
@@ -62,9 +63,9 @@ internal static unsafe class TreeValidator
         HashSet<long> entityIds, ref int totalEntities, ref int totalNodes) where TStore : struct, IPageStore
     {
         totalNodes++;
-        byte* nodeBase = accessor.GetChunkAddress(chunkId);
-        int count = SpatialNodeHelper.GetCount(nodeBase);
-        bool isLeaf = SpatialNodeHelper.IsLeaf(nodeBase);
+        ref byte nodeBase = ref Unsafe.AsRef<byte>(accessor.GetChunkAddress(chunkId));
+        int count = SpatialNodeHelper.GetCount(ref nodeBase);
+        bool isLeaf = SpatialNodeHelper.IsLeaf(ref nodeBase);
 
         // R3: capacity bounds
         int capacity = isLeaf ? desc.LeafCapacity : desc.InternalCapacity;
@@ -74,7 +75,7 @@ internal static unsafe class TreeValidator
         }
 
         // R6: parent pointer matches
-        int storedParent = SpatialNodeHelper.GetParentChunkId(nodeBase);
+        int storedParent = SpatialNodeHelper.GetParentChunkId(ref nodeBase);
         if (storedParent != expectedParentChunkId)
         {
             throw new InvalidOperationException($"R6 violation: node {chunkId} parent={storedParent}, expected={expectedParentChunkId}");
@@ -85,26 +86,26 @@ internal static unsafe class TreeValidator
             // R4: EntityIds only in leaf nodes
             for (int i = 0; i < count; i++)
             {
-                long eid = SpatialNodeHelper.ReadLeafEntityId(nodeBase, i, desc);
+                long eid = SpatialNodeHelper.ReadLeafEntityId(ref nodeBase, i, desc);
                 entityIds.Add(eid);
                 totalEntities++;
             }
 
             // R1: MBR tightness
-            ValidateMBRTightness(nodeBase, count, true, desc, chunkId);
+            ValidateMBRTightness(ref nodeBase, count, true, desc, chunkId);
 
             // C2: UnionCategoryMask = OR of all leaf entries' CategoryMasks
-            ValidateLeafUnionMask(nodeBase, count, desc, chunkId);
+            ValidateLeafUnionMask(ref nodeBase, count, desc, chunkId);
         }
         else
         {
             // R1: MBR tightness
-            ValidateMBRTightness(nodeBase, count, false, desc, chunkId);
+            ValidateMBRTightness(ref nodeBase, count, false, desc, chunkId);
 
             // Recurse into children
             for (int i = 0; i < count; i++)
             {
-                int childId = SpatialNodeHelper.ReadInternalChildId(nodeBase, i, desc);
+                int childId = SpatialNodeHelper.ReadInternalChildId(ref nodeBase, i, desc);
                 if (childId <= 0)
                 {
                     throw new InvalidOperationException($"R6 violation: node {chunkId} child[{i}] has invalid chunkId={childId}");
@@ -114,11 +115,11 @@ internal static unsafe class TreeValidator
             }
 
             // C2: UnionCategoryMask = OR of all children's UnionCategoryMasks
-            ValidateInternalUnionMask(nodeBase, count, desc, chunkId, ref accessor);
+            ValidateInternalUnionMask(ref nodeBase, count, desc, chunkId, ref accessor);
         }
     }
 
-    private static void ValidateMBRTightness(byte* nodeBase, int count, bool isLeaf, in SpatialNodeDescriptor desc, int chunkId)
+    private static void ValidateMBRTightness(ref byte nodeBase, int count, bool isLeaf, in SpatialNodeDescriptor desc, int chunkId)
     {
         if (count == 0)
         {
@@ -131,11 +132,11 @@ internal static unsafe class TreeValidator
         // Initialize from first entry
         if (isLeaf)
         {
-            SpatialNodeHelper.ReadLeafEntryCoords(nodeBase, 0, recomputed, desc);
+            SpatialNodeHelper.ReadLeafEntryCoords(ref nodeBase, 0, recomputed, desc);
         }
         else
         {
-            SpatialNodeHelper.ReadInternalEntryCoords(nodeBase, 0, recomputed, desc);
+            SpatialNodeHelper.ReadInternalEntryCoords(ref nodeBase, 0, recomputed, desc);
         }
 
         // Expand with remaining entries
@@ -143,7 +144,9 @@ internal static unsafe class TreeValidator
         {
             for (int c = 0; c < halfCoord; c++)
             {
-                double v = isLeaf ? SpatialNodeHelper.ReadLeafCoord(nodeBase, i, c, desc) : SpatialNodeHelper.ReadInternalCoord(nodeBase, i, c, desc);
+                double v = isLeaf
+                    ? SpatialNodeHelper.ReadLeafCoord(ref nodeBase, i, c, desc)
+                    : SpatialNodeHelper.ReadInternalCoord(ref nodeBase, i, c, desc);
                 if (v < recomputed[c])
                 {
                     recomputed[c] = v;
@@ -151,7 +154,9 @@ internal static unsafe class TreeValidator
             }
             for (int c = halfCoord; c < desc.CoordCount; c++)
             {
-                double v = isLeaf ? SpatialNodeHelper.ReadLeafCoord(nodeBase, i, c, desc) : SpatialNodeHelper.ReadInternalCoord(nodeBase, i, c, desc);
+                double v = isLeaf
+                    ? SpatialNodeHelper.ReadLeafCoord(ref nodeBase, i, c, desc)
+                    : SpatialNodeHelper.ReadInternalCoord(ref nodeBase, i, c, desc);
                 if (v > recomputed[c])
                 {
                     recomputed[c] = v;
@@ -163,7 +168,7 @@ internal static unsafe class TreeValidator
         const double epsilon = 1e-6;
         for (int c = 0; c < desc.CoordCount; c++)
         {
-            double stored = SpatialNodeHelper.ReadNodeMBRCoord(nodeBase, c, desc);
+            double stored = SpatialNodeHelper.ReadNodeMBRCoord(ref nodeBase, c, desc);
             if (Math.Abs(stored - recomputed[c]) > epsilon)
             {
                 throw new InvalidOperationException($"R1 violation: node {chunkId} MBR coord[{c}] is {stored} but recomputed is {recomputed[c]}");
@@ -171,31 +176,31 @@ internal static unsafe class TreeValidator
         }
     }
 
-    private static void ValidateLeafUnionMask(byte* nodeBase, int count, in SpatialNodeDescriptor desc, int chunkId)
+    private static void ValidateLeafUnionMask(ref byte nodeBase, int count, in SpatialNodeDescriptor desc, int chunkId)
     {
         uint recomputed = 0;
         for (int i = 0; i < count; i++)
         {
-            recomputed |= SpatialNodeHelper.ReadLeafCategoryMask(nodeBase, i, desc);
+            recomputed |= SpatialNodeHelper.ReadLeafCategoryMask(ref nodeBase, i, desc);
         }
-        uint stored = SpatialNodeHelper.ReadUnionCategoryMask(nodeBase, desc);
+        uint stored = SpatialNodeHelper.ReadUnionCategoryMask(ref nodeBase, desc);
         if (stored != recomputed)
         {
             throw new InvalidOperationException($"C2 violation: leaf node {chunkId} UnionCategoryMask is 0x{stored:X8} but recomputed is 0x{recomputed:X8}");
         }
     }
 
-    private static void ValidateInternalUnionMask<TStore>(byte* nodeBase, int count, in SpatialNodeDescriptor desc, int chunkId,
+    private static void ValidateInternalUnionMask<TStore>(ref byte nodeBase, int count, in SpatialNodeDescriptor desc, int chunkId,
         ref ChunkAccessor<TStore> accessor) where TStore : struct, IPageStore
     {
         uint recomputed = 0;
         for (int i = 0; i < count; i++)
         {
-            int childId = SpatialNodeHelper.ReadInternalChildId(nodeBase, i, desc);
-            byte* childBase = accessor.GetChunkAddress(childId);
-            recomputed |= SpatialNodeHelper.ReadUnionCategoryMask(childBase, desc);
+            int childId = SpatialNodeHelper.ReadInternalChildId(ref nodeBase, i, desc);
+            ref byte childBase = ref Unsafe.AsRef<byte>(accessor.GetChunkAddress(childId));
+            recomputed |= SpatialNodeHelper.ReadUnionCategoryMask(ref childBase, desc);
         }
-        uint stored = SpatialNodeHelper.ReadUnionCategoryMask(nodeBase, desc);
+        uint stored = SpatialNodeHelper.ReadUnionCategoryMask(ref nodeBase, desc);
         if (stored != recomputed)
         {
             throw new InvalidOperationException($"C2 violation: internal node {chunkId} UnionCategoryMask is 0x{stored:X8} but recomputed is 0x{recomputed:X8}");
@@ -281,22 +286,22 @@ internal static unsafe class TreeValidator
     private static void CollectEntityIdsRecursive<TStore>(int chunkId, in SpatialNodeDescriptor desc, ref ChunkAccessor<TStore> accessor,
         HashSet<long> ids) where TStore : struct, IPageStore
     {
-        byte* nodeBase = accessor.GetChunkAddress(chunkId);
-        int count = SpatialNodeHelper.GetCount(nodeBase);
-        bool isLeaf = SpatialNodeHelper.IsLeaf(nodeBase);
+        ref byte nodeBase = ref Unsafe.AsRef<byte>(accessor.GetChunkAddress(chunkId));
+        int count = SpatialNodeHelper.GetCount(ref nodeBase);
+        bool isLeaf = SpatialNodeHelper.IsLeaf(ref nodeBase);
 
         if (isLeaf)
         {
             for (int i = 0; i < count; i++)
             {
-                ids.Add(SpatialNodeHelper.ReadLeafEntityId(nodeBase, i, desc));
+                ids.Add(SpatialNodeHelper.ReadLeafEntityId(ref nodeBase, i, desc));
             }
         }
         else
         {
             for (int i = 0; i < count; i++)
             {
-                int childId = SpatialNodeHelper.ReadInternalChildId(nodeBase, i, desc);
+                int childId = SpatialNodeHelper.ReadInternalChildId(ref nodeBase, i, desc);
                 CollectEntityIdsRecursive(childId, desc, ref accessor, ids);
             }
         }
@@ -335,15 +340,15 @@ internal static unsafe class TreeValidator
     private static void ValidateTreeSelectorsRecursive<TStore>(int chunkId, in SpatialNodeDescriptor desc, byte expectedSelector,
         ref ChunkAccessor<TStore> treeAccessor, ref ChunkAccessor<PersistentStore> bpAccessor) where TStore : struct, IPageStore
     {
-        byte* nodeBase = treeAccessor.GetChunkAddress(chunkId);
-        int count = SpatialNodeHelper.GetCount(nodeBase);
-        bool isLeaf = SpatialNodeHelper.IsLeaf(nodeBase);
+        ref byte nodeBase = ref Unsafe.AsRef<byte>(treeAccessor.GetChunkAddress(chunkId));
+        int count = SpatialNodeHelper.GetCount(ref nodeBase);
+        bool isLeaf = SpatialNodeHelper.IsLeaf(ref nodeBase);
 
         if (isLeaf)
         {
             for (int i = 0; i < count; i++)
             {
-                int compChunkId = SpatialNodeHelper.ReadLeafCompChunkId(nodeBase, i, desc);
+                int compChunkId = SpatialNodeHelper.ReadLeafCompChunkId(ref nodeBase, i, desc);
                 if (compChunkId == 0)
                 {
                     continue; // standalone test entry, no back-pointer
@@ -351,7 +356,7 @@ internal static unsafe class TreeValidator
                 var bp = SpatialBackPointerHelper.Read(ref bpAccessor, compChunkId);
                 if (bp.TreeSelector != expectedSelector)
                 {
-                    long entityId = SpatialNodeHelper.ReadLeafEntityId(nodeBase, i, desc);
+                    long entityId = SpatialNodeHelper.ReadLeafEntityId(ref nodeBase, i, desc);
                     throw new InvalidOperationException(
                         $"SD2 violation: entity {entityId} (compChunkId={compChunkId}) has TreeSelector={bp.TreeSelector} but is in tree with expected selector={expectedSelector}");
                 }
@@ -361,7 +366,7 @@ internal static unsafe class TreeValidator
         {
             for (int i = 0; i < count; i++)
             {
-                int childId = SpatialNodeHelper.ReadInternalChildId(nodeBase, i, desc);
+                int childId = SpatialNodeHelper.ReadInternalChildId(ref nodeBase, i, desc);
                 ValidateTreeSelectorsRecursive(childId, desc, expectedSelector, ref treeAccessor, ref bpAccessor);
             }
         }

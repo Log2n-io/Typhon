@@ -493,6 +493,7 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
 
         // Patch the entire batch's CRC chain in one pass before any byte reaches disk (see remarks). `data` aliases the pinned commit buffer, so a writable view over the
         // same memory is sound — the bytes are mutable; the ReadOnlySpan is only an access restriction on this seam.
+        // KEEP(ptr): fixed provides the readonly→writable view of the (mutable) pinned commit buffer; the safe equivalent needs Unsafe.AsRef and adds no safety.
         fixed (byte* dataPtr = data)
         {
             PatchChunkCrcs(new Span<byte>(dataPtr, data.Length), data.Length);

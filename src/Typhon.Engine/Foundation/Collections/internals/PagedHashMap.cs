@@ -22,6 +22,9 @@ namespace Typhon.Engine.Internals;
 /// </summary>
 unsafe class PagedHashMap<TKey, TValue, TStore> : PagedHashMapBase<TStore> where TKey : unmanaged, IEquatable<TKey> where TValue : unmanaged where TStore : struct, IPageStore
 {
+    // KEEP(ptr): raw paged-value core — buckets are raw chunk memory ([Header][Keys][Values]); keys/values are addressed
+    // via TKey*/TValue* casts at computed byte offsets from the page-store chunk base, so no typed array a Span could span.
+
     // ═══════════════════════════════════════════════════════════════════════
     // Layout fields (computed once at construction)
     // ═══════════════════════════════════════════════════════════════════════
@@ -711,8 +714,7 @@ unsafe class PagedHashMap<TKey, TValue, TStore> : PagedHashMapBase<TStore> where
                     break;
                 }
                 // Value not in this chunk — advance to next via chunk header
-                byte* walkAddr = accessor.GetChunkAddress(walkChunkId);
-                walkChunkId = Unsafe.AsRef<VariableSizedBufferChunkHeader>(walkAddr).NextChunkId;
+                walkChunkId = accessor.GetChunkReadOnly<VariableSizedBufferChunkHeader>(walkChunkId).NextChunkId;
             }
 
             if (remaining == -1)
@@ -1079,7 +1081,7 @@ unsafe class PagedHashMap<TKey, TValue, TStore> : PagedHashMapBase<TStore> where
         private readonly int _valuesOffset;
 
         // Collect-then-yield buffer: allocated once, reused per bucket
-        private readonly byte* _buffer;     // keys then values, sized for MaxBufferEntries
+        private readonly ref byte _buffer;     // keys then values, sized for MaxBufferEntries (ref into NativeMemory block; freed in Dispose)
         private int _collectedCount;
         private int _yieldIndex;
 
@@ -1100,7 +1102,7 @@ unsafe class PagedHashMap<TKey, TValue, TStore> : PagedHashMapBase<TStore> where
             Current = default;
 
             int bufferSize = MaxBufferEntries * (sizeof(TKey) + sizeof(TValue));
-            _buffer = (byte*)NativeMemory.AllocZeroed((nuint)bufferSize);
+            _buffer = ref Unsafe.AsRef<byte>(NativeMemory.AllocZeroed((nuint)bufferSize));
         }
 
         public bool MoveNext()
@@ -1110,9 +1112,9 @@ unsafe class PagedHashMap<TKey, TValue, TStore> : PagedHashMapBase<TStore> where
                 // Phase 1: yield from collected buffer
                 if (_yieldIndex < _collectedCount)
                 {
-                    TKey* keys = (TKey*)_buffer;
-                    TValue* values = (TValue*)(_buffer + MaxBufferEntries * sizeof(TKey));
-                    Current = (keys[_yieldIndex], values[_yieldIndex]);
+                    ref TKey keys = ref Unsafe.As<byte, TKey>(ref _buffer);
+                    ref TValue values = ref Unsafe.As<byte, TValue>(ref Unsafe.Add(ref _buffer, MaxBufferEntries * sizeof(TKey)));
+                    Current = (Unsafe.Add(ref keys, _yieldIndex), Unsafe.Add(ref values, _yieldIndex));
                     _yieldIndex++;
                     return true;
                 }
@@ -1158,8 +1160,8 @@ unsafe class PagedHashMap<TKey, TValue, TStore> : PagedHashMapBase<TStore> where
                 }
 
                 // Walk chain collecting entries into buffer
-                TKey* bufKeys = (TKey*)_buffer;
-                TValue* bufValues = (TValue*)(_buffer + MaxBufferEntries * sizeof(TKey));
+                ref TKey bufKeys = ref Unsafe.As<byte, TKey>(ref _buffer);
+                ref TValue bufValues = ref Unsafe.As<byte, TValue>(ref Unsafe.Add(ref _buffer, MaxBufferEntries * sizeof(TKey)));
                 int count = 0;
 
                 int walkId = chunkId;
@@ -1173,8 +1175,8 @@ unsafe class PagedHashMap<TKey, TValue, TStore> : PagedHashMapBase<TStore> where
 
                     for (int i = 0; i < entryCount && count < MaxBufferEntries; i++)
                     {
-                        bufKeys[count] = keys[i];
-                        bufValues[count] = values[i];
+                        Unsafe.Add(ref bufKeys, count) = keys[i];
+                        Unsafe.Add(ref bufValues, count) = values[i];
                         count++;
                     }
 
@@ -1198,9 +1200,10 @@ unsafe class PagedHashMap<TKey, TValue, TStore> : PagedHashMapBase<TStore> where
 
         public void Dispose()
         {
-            if (_buffer != null)
+            // TODO(cascade): leaf still byte* (NativeMemory.Free takes void*).
+            if (!Unsafe.IsNullRef(ref _buffer))
             {
-                NativeMemory.Free(_buffer);
+                NativeMemory.Free(Unsafe.AsPointer(ref _buffer));
             }
         }
     }

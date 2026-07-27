@@ -81,12 +81,12 @@ internal struct KeyBytes8  // 8 bytes
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public double AsDouble() => Unsafe.As<long, double>(ref _value);
 
-    // Unsafe factory
+    // Ref-based factory
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static unsafe KeyBytes8 FromPointer(byte* ptr, int size)
+    public static KeyBytes8 FromRef(ref byte src, int size)
     {
         var result = new KeyBytes8();
-        Unsafe.CopyBlockUnaligned(ref Unsafe.As<long, byte>(ref result._value), ref *ptr, (uint)size);
+        Unsafe.CopyBlockUnaligned(ref Unsafe.As<long, byte>(ref result._value), ref src, (uint)size);
         return result;
     }
 }

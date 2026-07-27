@@ -414,6 +414,7 @@ internal unsafe abstract class ChainedBlockAllocatorBase : BlockAllocatorBase
 
     private int GetNextBlockInternal(Span<byte> blockDataSpan)
     {
+        // KEEP(ptr): the header lives immediately BEFORE the data span (negative offset) — no span covers it, so pointer arithmetic is required.
         fixed (byte* blockPtr = blockDataSpan)
         {
             var blockHeader = (BlockHeader*)blockPtr - 1;

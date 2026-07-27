@@ -161,9 +161,9 @@ public unsafe class EcsNavigationQueryBuilder<TSourceArch, TSource, TTarget> whe
         public List<long> TargetPKs;
         public long TSN;
 
-        public bool Process(long key, byte* value)
+        public bool Process(long key, ref byte value)
         {
-            ref var header = ref EntityRecordAccessor.GetHeader(value);
+            ref var header = ref EntityRecordAccessor.GetHeader(ref value);
             bool visible = header.IsVisibleAt(TSN);
             if (visible)
             {

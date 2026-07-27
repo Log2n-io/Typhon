@@ -44,6 +44,8 @@ internal sealed unsafe class WalCommitBuffer : IDisposable
     // ═══════════════════════════════════════════════════════════════════════
 
     private readonly PinnedMemoryBlock _memoryBlock;
+    // KEEP(ptr): byte* commit-buffer roots into pinned WAL staging memory, held as class fields (a Span/ref cannot be a
+    // class field); claim/publish/drain advance offsets through them.
     private readonly byte* _buffer0;
     private readonly byte* _buffer1;
 

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Internals;
@@ -81,18 +82,20 @@ internal sealed unsafe class RecoveryApplier : IDisposable
 
         var key = EntityId.FromRaw(entityIdRaw).EntityKey;
 
+        // KEEP(ptr): recordPtr backs the locations int* write below (int*-cast pointer arithmetic); TryGet / InsertNew read it as a ref via recordRef.
         byte* recordPtr = stackalloc byte[EntityRecordAccessor.MaxRecordSize];
+        ref byte recordRef = ref Unsafe.AsRef<byte>(recordPtr);
 
         // Idempotent spawn (AP-12): re-running recovery — e.g. after a crash mid-seal that persisted this entity to the data file
         // but did not advance CheckpointLSN, so its records are replayed again — must NOT double-insert (EntityMap.InsertNew skips
         // the duplicate check, assuming a fresh key). Spawn-if-absent: probe the loaded map first, reusing recordPtr as the buffer.
-        if (_engineState.EntityMap.TryGet(key, recordPtr, ref _mapAccessor))
+        if (_engineState.EntityMap.TryGet(key, ref recordRef, ref _mapAccessor))
         {
             return;
         }
 
-        EntityRecordAccessor.InitializeRecord(recordPtr, _componentCount); // zeroes header (DiedTSN=0=alive) + all locations
-        ref var header = ref EntityRecordAccessor.GetHeader(recordPtr);
+        EntityRecordAccessor.InitializeRecord(ref recordRef, _componentCount); // zeroes header (DiedTSN=0=alive) + all locations
+        ref var header = ref EntityRecordAccessor.GetHeader(ref recordRef);
         header.BornTSN = bornTsn;
         header.EnabledBits = enabledBits;
 
@@ -122,7 +125,7 @@ internal sealed unsafe class RecoveryApplier : IDisposable
             }
         }
 
-        _engineState.EntityMap.InsertNew(key, recordPtr, ref _mapAccessor, _changeSet);
+        _engineState.EntityMap.InsertNew(key, ref recordRef, ref _mapAccessor, _changeSet);
     }
 
     /// <summary>
@@ -136,8 +139,9 @@ internal sealed unsafe class RecoveryApplier : IDisposable
     {
         var key = EntityId.FromRaw(entityIdRaw).EntityKey;
         byte* recordPtr = stackalloc byte[EntityRecordAccessor.MaxRecordSize];
+        ref byte recordRef = ref Unsafe.AsRef<byte>(recordPtr);
 
-        if (_engineState.EntityMap.TryGet(key, recordPtr, ref _mapAccessor))
+        if (_engineState.EntityMap.TryGet(key, ref recordRef, ref _mapAccessor))
         {
             return; // idempotent re-apply
         }
@@ -149,12 +153,12 @@ internal sealed unsafe class RecoveryApplier : IDisposable
         byte* clusterBase = _clusterAccessor.GetChunkAddress(clusterChunkId, true);
 
         // Build the ClusterEntityRecord (19 bytes base + 4 bytes per Versioned slot).
-        ClusterEntityRecordAccessor.InitializeRecord(recordPtr, _metadata.VersionedSlotCount);
-        ref var header = ref ClusterEntityRecordAccessor.GetHeader(recordPtr);
+        ClusterEntityRecordAccessor.InitializeRecord(ref recordRef, _metadata.VersionedSlotCount);
+        ref var header = ref ClusterEntityRecordAccessor.GetHeader(ref recordRef);
         header.BornTSN = bornTsn;
         header.EnabledBits = enabledBits;
-        ClusterEntityRecordAccessor.SetClusterChunkId(recordPtr, clusterChunkId);
-        ClusterEntityRecordAccessor.SetSlotIndex(recordPtr, (byte)slotIdx);
+        ClusterEntityRecordAccessor.SetClusterChunkId(ref recordRef, clusterChunkId);
+        ClusterEntityRecordAccessor.SetSlotIndex(ref recordRef, (byte)slotIdx);
 
         if (slots != null)
         {
@@ -184,7 +188,7 @@ internal sealed unsafe class RecoveryApplier : IDisposable
                     if (vi >= 0)
                     {
                         var chainRoot = CreateVersionedChainRoot(table, entityIdRaw, slot.Tsn, slot.Payload);
-                        ClusterEntityRecordAccessor.SetCompRevFirstChunkId(recordPtr, vi, chainRoot);
+                        ClusterEntityRecordAccessor.SetCompRevFirstChunkId(ref recordRef, vi, chainRoot);
                     }
                 }
             }
@@ -200,7 +204,7 @@ internal sealed unsafe class RecoveryApplier : IDisposable
             }
         }
 
-        _engineState.EntityMap.InsertNew(key, recordPtr, ref _mapAccessor, _changeSet);
+        _engineState.EntityMap.InsertNew(key, ref recordRef, ref _mapAccessor, _changeSet);
     }
 
     /// <summary>
@@ -217,13 +221,14 @@ internal sealed unsafe class RecoveryApplier : IDisposable
 
         var key = eid.EntityKey;
         byte* readBuf = stackalloc byte[EntityRecordAccessor.MaxRecordSize];
-        if (!_engineState.EntityMap.TryGet(key, readBuf, ref _mapAccessor))
+        ref byte readBufRef = ref Unsafe.AsRef<byte>(readBuf);
+        if (!_engineState.EntityMap.TryGet(key, ref readBufRef, ref _mapAccessor))
         {
             return; // not in the base map (already gone / never persisted) — nothing to tombstone
         }
 
-        EntityRecordAccessor.GetHeader(readBuf).DiedTSN = tsn;
-        _engineState.EntityMap.Upsert(key, readBuf, ref _mapAccessor, _changeSet);
+        EntityRecordAccessor.GetHeader(ref readBufRef).DiedTSN = tsn;
+        _engineState.EntityMap.Upsert(key, ref readBufRef, ref _mapAccessor, _changeSet);
     }
 
     /// <summary>
@@ -238,13 +243,14 @@ internal sealed unsafe class RecoveryApplier : IDisposable
 
         var key = eid.EntityKey;
         byte* readBuf = stackalloc byte[EntityRecordAccessor.MaxRecordSize];
-        if (!_engineState.EntityMap.TryGet(key, readBuf, ref _mapAccessor))
+        ref byte readBufRef = ref Unsafe.AsRef<byte>(readBuf);
+        if (!_engineState.EntityMap.TryGet(key, ref readBufRef, ref _mapAccessor))
         {
             return;
         }
 
-        EntityRecordAccessor.GetHeader(readBuf).EnabledBits = enabledBits;
-        _engineState.EntityMap.Upsert(key, readBuf, ref _mapAccessor, _changeSet);
+        EntityRecordAccessor.GetHeader(ref readBufRef).EnabledBits = enabledBits;
+        _engineState.EntityMap.Upsert(key, ref readBufRef, ref _mapAccessor, _changeSet);
     }
 
     // Allocates a content chunk holding the payload and a committed single-element revision chain pointing at it — exactly the

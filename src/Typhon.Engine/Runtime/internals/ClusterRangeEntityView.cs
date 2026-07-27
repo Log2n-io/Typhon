@@ -34,6 +34,7 @@ internal sealed unsafe class ClusterRangeEntityView : IReadOnlyCollection<Entity
     private int _endCluster;         // exclusive index into _clusterIds
     private int _currentCluster;     // current position in range (-1 = before first)
     private ulong _currentBits;      // remaining occupancy bits in current cluster
+    // KEEP(ptr): raw byte* held across MoveNext calls; a Span cannot be a field on this non-ref enumerator class.
     private byte* _currentBase;      // base pointer of current cluster page
     private int _approximateCount;
     private EntityId _current;

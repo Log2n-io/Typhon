@@ -61,85 +61,40 @@ unsafe public struct Index16Chunk
         }
     }
 
+    // Control byte/short layout (little-endian x64/ARM64): byte0-1 = StateFlags (low 16b), byte1 = ContentionHint,
+    // byte2 = Start, byte3 = Count. Formerly poked via `fixed(int* c=&Control); ((byte*)c)[n]` — now pure
+    // bit-arithmetic (same little-endian semantics the pointer form already assumed), no pin, no unsafe.
     public int Count
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
-        get
-        {
-            fixed (int* c = &Control)
-            {
-                return ((byte*)c)[3];
-            }
-        }
+        get => (Control >> 24) & 0xFF;
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
-        set
-        {
-            fixed (int* c = &Control)
-            {
-                ((byte*)c)[3] = (byte)value;
-            }
-        }
+        set => Control = (Control & 0x00FFFFFF) | ((value & 0xFF) << 24);
     }
 
     public int Start
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
-        get
-        {
-            fixed (int* c = &Control)
-            {
-                return ((byte*)c)[2];
-            }
-        }
+        get => (Control >> 16) & 0xFF;
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
-        set
-        {
-            fixed (int* c = &Control)
-            {
-                ((byte*)c)[2] = (byte)value;
-            }
-        }
+        set => Control = (Control & unchecked((int)0xFF00FFFF)) | ((value & 0xFF) << 16);
     }
 
     public int ContentionHint
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
-        get
-        {
-            fixed (int* c = &Control)
-            {
-                return ((byte*)c)[1];
-            }
-        }
+        get => (Control >> 8) & 0xFF;
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
-        set
-        {
-            fixed (int* c = &Control)
-            {
-                ((byte*)c)[1] = (byte)value;
-            }
-        }
+        set => Control = (Control & unchecked((int)0xFFFF00FF)) | ((value & 0xFF) << 8);
     }
 
     public int End => Adjust(Start + Count);
     public NodeStates StateFlags
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
-        get
-        {
-            fixed (int* c = &Control)
-            {
-                return (NodeStates)((short*)c)[0];
-            }
-        }
+        get => (NodeStates)(short)Control;
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
-        set
-        {
-            fixed (int* c = &Control)
-            {
-                ((short*)c)[0] = (short)value;
-            }
-        }
+        set => Control = (Control & unchecked((int)0xFFFF0000)) | (ushort)(short)value;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
@@ -263,7 +218,7 @@ internal abstract class L16BTree<TKey, TStore> : BTree<TKey, TStore> where TStor
             ref readonly var chunk = ref accessor.GetChunkReadOnly<Index16Chunk>(node.ChunkId);
             var i = adjust ? Index16Chunk.Adjust(chunk.Start + index) : index;
             var key = chunk.Keys[i];
-            return new KeyValueItem(*(TKey*)&key, chunk.Values[i]);
+            return new KeyValueItem(Unsafe.As<short, TKey>(ref key), chunk.Values[i]);
         }
 
         public override void SetItem(NodeWrapper node, int index, KeyValueItem value, bool adjust, ref ChunkAccessor<TStore> accessor)
@@ -324,13 +279,13 @@ internal abstract class L16BTree<TKey, TStore> : BTree<TKey, TStore> where TStor
         {
             ref readonly var chunk = ref accessor.GetChunkReadOnly<Index16Chunk>(node.ChunkId);
             short hk = chunk.HighKey;
-            return *(TKey*)&hk;
+            return Unsafe.As<short, TKey>(ref hk);
         }
 
         public override void SetHighKey(NodeWrapper node, TKey key, ref ChunkAccessor<TStore> accessor)
         {
             ref var chunk = ref accessor.GetChunk<Index16Chunk>(node.ChunkId, true);
-            chunk.HighKey = *(short*)&key;
+            chunk.HighKey = Unsafe.As<TKey, short>(ref key);
         }
 
         #endregion
@@ -344,7 +299,7 @@ internal abstract class L16BTree<TKey, TStore> : BTree<TKey, TStore> where TStor
             DecrementStart(ref chunk);
 
             var start = chunk.Start;
-            chunk.Keys[start] = *(short*)&item.Key;
+            chunk.Keys[start] = Unsafe.As<TKey, short>(ref item.Key);
             chunk.Values[start] = item.Value;
 
             ++chunk.Count;
@@ -402,6 +357,7 @@ internal abstract class L16BTree<TKey, TStore> : BTree<TKey, TStore> where TStor
         public override int BinarySearch(NodeWrapper node, TKey key, IComparer<TKey> comparer, ref ChunkAccessor<TStore> accessor)
         {
             ref readonly var chunk = ref accessor.GetChunkReadOnly<Index16Chunk>(node.ChunkId);
+            // KEEP(ptr): SIMD comparison core — fixed pin feeds Vector###.Load / CountLessThan / SimdSearch / BTreeExtensions.BinarySearch.
             fixed (short* keys = chunk.Keys)
             {
                 // SIMD fast path for short keys
@@ -734,7 +690,7 @@ internal abstract class L16BTree<TKey, TStore> : BTree<TKey, TStore> where TStor
         private static void Set(ref Index16Chunk chunk, int index, KeyValueItem item, bool adjust)
         {
             var i = adjust ? Index16Chunk.Adjust(chunk.Start + index) : index;
-            chunk.Keys[i] = *(short*)&item.Key;
+            chunk.Keys[i] = Unsafe.As<TKey, short>(ref item.Key);
             chunk.Values[i] = item.Value;
         }
 

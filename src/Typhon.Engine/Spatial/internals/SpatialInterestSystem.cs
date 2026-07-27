@@ -266,9 +266,9 @@ internal sealed unsafe class SpatialInterestSystem
                         }
 
                         // Read leaf entry: coords + category mask + entityId (all from same page)
-                        byte* leafBase = treeAccessor.GetChunkAddress(bp.LeafChunkId);
-                        SpatialNodeHelper.ReadLeafEntryCoords(leafBase, bp.SlotIndex, coords, desc);
-                        uint category = SpatialNodeHelper.ReadLeafCategoryMask(leafBase, bp.SlotIndex, desc);
+                        ref byte leafBase = ref Unsafe.AsRef<byte>(treeAccessor.GetChunkAddress(bp.LeafChunkId));
+                        SpatialNodeHelper.ReadLeafEntryCoords(ref leafBase, bp.SlotIndex, coords, desc);
+                        uint category = SpatialNodeHelper.ReadLeafCategoryMask(ref leafBase, bp.SlotIndex, desc);
 
                         // Category filter
                         if (config.CategoryMask != 0 && (category & config.CategoryMask) != config.CategoryMask)
@@ -283,7 +283,7 @@ internal sealed unsafe class SpatialInterestSystem
                         }
 
                         // Read EntityId directly from the leaf (stored alongside coords in SOA layout)
-                        long entityId = SpatialNodeHelper.ReadLeafEntityId(leafBase, bp.SlotIndex, desc);
+                        long entityId = SpatialNodeHelper.ReadLeafEntityId(ref leafBase, bp.SlotIndex, desc);
 
                         EnsureChangeBufferCapacity(state);
                         state.ChangeBuffer[state.ChangeCount++] = entityId;
@@ -379,8 +379,8 @@ internal sealed unsafe class SpatialInterestSystem
                                 }
 
                                 // Read entity's tight bounds from the cluster SoA storage.
-                                byte* fieldPtr = clusterBase + spatialCompOffset + slotIndex * spatialCompSize + spatialFieldOffset;
-                                if (!SpatialMaintainer.ReadAndValidateBoundsFromPtr(fieldPtr, fieldInfo, clCoords, descriptor))
+                                ref byte fieldPtr = ref Unsafe.AsRef<byte>(clusterBase + spatialCompOffset + slotIndex * spatialCompSize + spatialFieldOffset);
+                                if (!SpatialMaintainer.ReadAndValidateBoundsFromPtr(ref fieldPtr, fieldInfo, clCoords, descriptor))
                                 {
                                     continue;
                                 }
