@@ -458,22 +458,32 @@ public sealed partial class TyphonRuntime : IDisposable
 
                 _systemViews[i].IsSystemInput = true;
 
-                // Detect cluster-eligible archetype for parallel cluster dispatch.
-                // Checks if any entity already in the view belongs to a cluster-eligible archetype.
+                // Resolve the cluster state for parallel cluster dispatch from THIS system's own input view. It feeds ctx.ClusterIds /
+                // ctx.StartClusterIndex / ctx.EndClusterIndex, the tier index and the checkerboard split, so binding the wrong archetype hands a system
+                // another archetype's cluster ids — a page-index-out-of-range throw when the counts differ, or silent double/zero processing when they
+                // happen to match. This previously scanned the global ArchetypeRegistry and took the FIRST cluster-eligible archetype, which is correct
+                // only in a world with exactly one; every multi-archetype schema using parallel cluster-native systems was broken.
                 if (sys.IsParallelQuery && Engine != null)
                 {
+                    var viewArchetypeId = _systemViews[i].QueriedArchetypeId;
                     foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
                     {
-                        if (meta.IsClusterEligible && meta.ArchetypeId < Engine._archetypeStates.Length)
+                        // Same shape as before, with one difference that is the whole fix: match the view's archetype instead of taking the first
+                        // cluster-eligible one found. The ActiveClusterCount > 0 condition is retained deliberately — binding a cluster state switches the
+                        // system to cluster-RANGE dispatch, which walks ActiveClusterIds and ignores view-level filtering (tier, dormancy).
+                        if (meta.ArchetypeId != viewArchetypeId || !meta.IsClusterEligible || meta.ArchetypeId >= Engine._archetypeStates.Length)
                         {
-                            var es = Engine._archetypeStates[meta.ArchetypeId];
-                            if (es?.ClusterState is { ActiveClusterCount: > 0 })
-                            {
-                                _systemClusterStates[i] = es.ClusterState;
-                                _systemArchetypeIds[i] = meta.ArchetypeId;
-                                break;
-                            }
+                            continue;
                         }
+
+                        var es = Engine._archetypeStates[meta.ArchetypeId];
+                        if (es?.ClusterState is { ActiveClusterCount: > 0 })
+                        {
+                            _systemClusterStates[i] = es.ClusterState;
+                            _systemArchetypeIds[i] = meta.ArchetypeId;
+                        }
+
+                        break;
                     }
                 }
 

@@ -16,6 +16,9 @@ namespace Typhon.Engine;
 [PublicAPI]
 public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
 {
+    /// <summary>The archetype this view queries — see <see cref="ViewBase.QueriedArchetypeId"/> for why the runtime needs it.</summary>
+    internal override ushort QueriedArchetypeId => ArchetypeRegistry.GetMetadata<TArchetype>()?.ArchetypeId ?? ushort.MaxValue;
+
     private EcsQuery<TArchetype> _query;
     private readonly ComponentTable _componentTable;
     private readonly ViewRegistry _registry;
