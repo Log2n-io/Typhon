@@ -115,6 +115,31 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
         return new Span<T>(ResolveBase(slot) + _layout.ComponentOffset(slot), _layout.ClusterSize);
     }
 
+    /// <summary>
+    /// Mark every occupied slot in this cluster dirty for ONE component column — the columnar counterpart to what <c>EntityRef.Write</c> does per entity.
+    /// <para>
+    /// <b>Required after writing through <see cref="GetSpan{T}"/> for any durable (SingleVersion) component.</b> The direct cluster path sets no dirty bits,
+    /// so without this the tick fence never serialises the change and it is lost on reopen. Transient components need no call — they are never persisted.
+    /// </para>
+    /// <para>
+    /// Prefer this over <c>ClusterEnumerator.MarkCurrentDirty()</c>, which cannot name a component and therefore widens the archetype's written-slot union to
+    /// "all slots" — that union is what narrows the columns a FenceBlock emits (#559), so losing it inflates WAL volume for every entity in the archetype.
+    /// </para>
+    /// </summary>
+    /// <typeparam name="T">Component value type.</typeparam>
+    /// <param name="comp">Handle identifying the component column that was written.</param>
+    public void MarkDirty<T>(Comp<T> comp) where T : unmanaged
+    {
+        var componentSlot = _meta.GetSlot(comp._componentTypeId);
+        var bits = OccupancyBits;
+        while (bits != 0)
+        {
+            var slot = BitOperations.TrailingZeroCount(bits);
+            bits &= bits - 1;
+            _state.SetDirty(_chunkId, slot, componentSlot);
+        }
+    }
+
     /// <summary>Get a read-only span of component data for all N slots.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public ReadOnlySpan<T> GetReadOnlySpan<T>(Comp<T> comp) where T : unmanaged

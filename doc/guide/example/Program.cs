@@ -211,12 +211,13 @@ EntityId probe = default, mover = default;
             .Add(new RegenSystem(characters))
             .Add(new WanderSystem(characters))
             .Add(new TradeSystem());
-    }, new RuntimeOptions { BaseTickRate = 120 }))   // WorkerCount defaults to -1 → max(1, CPUs - 4): use the machine
+    }, new RuntimeOptions { BaseTickRate = 60 }))   // WorkerCount defaults to -1 → max(1, CPUs - 4): use the machine
     {
         runtime.Start();
         SpinWait.SpinUntil(() => runtime.CurrentTickNumber >= TickTarget, TimeSpan.FromSeconds(30));
         runtime.Shutdown();
         Console.WriteLine($"ran {runtime.CurrentTickNumber} ticks");
+        ReportThroughput(runtime);
     }
     characters.Dispose();
 
@@ -286,14 +287,24 @@ else
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────
-static DatabaseEngine OpenEngine() => DatabaseEngine.Open("world-shard.typhon", o => o
-    .Register<Transform>()
-    .Register<Bounds>()
-    .Register<Ham>()
-    .Register<Faction>()
-    .Register<Wallet>()
-    .Register<Intent>()
-    .ConfigureSpatialGrid(new SpatialGridConfig(Vector2.Zero, new Vector2(1000f, 1000f), cellSize: 50f)));
+static DatabaseEngine OpenEngine()
+{
+    var dbe = DatabaseEngine.Open("world-shard.typhon", o => o
+        .Register<Transform>()
+        .Register<Bounds>()
+        .Register<Ham>()
+        .Register<Faction>()
+        .Register<Wallet>()
+        .Register<Intent>()
+        .ConfigureSpatialGrid(new SpatialGridConfig(Vector2.Zero, new Vector2(1000f, 1000f), cellSize: 50f)));
+
+    // Every write to the spatial component goes through ClusterRef.WriteSpatial (BoundsSyncSystem is the only writer; spawns go through the spawn path).
+    // Declaring that lets the tick fence trust WriteSpatial's inline cell-crossing detector and skip its fall-back scan over every dirty slot — the scan
+    // exists only for archetypes whose spatial field can also be written via OpenMut + Write. TYPHON009 is what makes this assertion checkable: it flags
+    // any mutable span/ref access to a [SpatialIndex] component, and this project builds with zero.
+    dbe.SetSpatialBarrierOnly<Character>();
+    return dbe;
+}
 
 // Deterministic shard placement: a ~45-wide grid spread across the 1000x1000 world (varied positions → spatial density).
 static (float x, float y) Place(int i)
@@ -342,6 +353,44 @@ static long SumCredits(Transaction tx)
         sum += tx.Open(id).Read(Character.Wallet).Credits;
     }
     return sum;
+}
+
+// What the shard actually costs per tick. This reads TickTelemetry.ActualDurationMs — the tick's real execution time — NOT wall clock: BaseTickRate caps
+// the loop at 60 Hz, so the runtime sleeps out whatever budget the systems don't use and wall-clock reports 60 Hz no matter how fast they are. Headroom is
+// the number that matters: it says how much simulation you could still add before the shard stops keeping up.
+static void ReportThroughput(TyphonRuntime runtime)
+{
+    var ring = runtime.Telemetry;
+    long oldest = ring.OldestAvailableTick;
+    long newest = ring.NewestTick;
+    if (newest < oldest)
+    {
+        return;
+    }
+
+    int count = (int)(newest - oldest + 1);
+    var durations = new float[count];
+    float target = 0f;
+    int entities = 0;
+    for (int i = 0; i < count; i++)
+    {
+        ref readonly var t = ref ring.GetTick(oldest + i);
+        durations[i] = t.ActualDurationMs;
+        target = t.TargetDurationMs;
+        entities = Math.Max(entities, t.TotalEntitiesProcessed);
+    }
+
+    Array.Sort(durations);
+    float p50 = durations[count / 2];
+    float p99 = durations[Math.Min(count - 1, (int)(count * 0.99f))];
+    float worst = durations[count - 1];
+
+    Console.WriteLine($"tick cost over {count} ticks (execution time, not wall clock — the 60 Hz limiter sleeps out the remainder):");
+    Console.WriteLine($"   p50 {p50:F2} ms   p99 {p99:F2} ms   worst {worst:F2} ms   budget {target:F2} ms");
+    if (p50 > 0f)
+    {
+        Console.WriteLine($"   {entities / p50 * 1000f / 1_000_000f:F1}M entity-updates/sec   {target / p50:F1}x headroom at {1000f / target:F0} Hz");
+    }
 }
 
 static void Banner(string title)

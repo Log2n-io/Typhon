@@ -73,15 +73,34 @@ internal sealed class MoveSystem : QuerySystem
 
     protected override void Execute(TickContext ctx)
     {
-        foreach (EntityId id in ctx.Entities)
+        using var clusters = ctx.ClusterIds != null
+            ? ctx.Accessor.GetClusterEnumerator<Character>(ctx.ClusterIds, ctx.StartClusterIndex, ctx.EndClusterIndex)
+            : ctx.Accessor.GetClusterEnumerator<Character>(ctx.StartClusterIndex, ctx.EndClusterIndex);
+
+        float dt = ctx.DeltaTime;
+        foreach (var cluster in clusters)
         {
-            var e = ctx.Accessor.OpenMut(id);
-            ref var t = ref e.Write(Character.Transform);
-            t.Pos = new Point2F
+            var bits = cluster.OccupancyBits;
+            if (bits == 0)
             {
-                X = Wrap(t.Pos.X + t.Vel.X * ctx.DeltaTime),
-                Y = Wrap(t.Pos.Y + t.Vel.Y * ctx.DeltaTime),
-            };
+                continue;
+            }
+
+            // One pointer resolve for the whole column, then a sequential walk. The entity id is never needed: the loop index IS the storage location.
+            var transforms = cluster.GetSpan(Character.Transform);
+            while (bits != 0)
+            {
+                int i = BitOperations.TrailingZeroCount(bits);
+                bits &= bits - 1;
+                ref var t = ref transforms[i];
+                t.Pos = new Point2F
+                {
+                    X = Wrap(t.Pos.X + t.Vel.X * dt),
+                    Y = Wrap(t.Pos.Y + t.Vel.Y * dt),
+                };
+            }
+
+            cluster.MarkDirty(Character.Transform);   // the direct cluster path sets no dirty bits — without this the fence never persists the move
         }
     }
 
@@ -150,13 +169,30 @@ internal sealed class RegenSystem : QuerySystem
 
     protected override void Execute(TickContext ctx)
     {
-        foreach (EntityId id in ctx.Entities)
+        using var clusters = ctx.ClusterIds != null
+            ? ctx.Accessor.GetClusterEnumerator<Character>(ctx.ClusterIds, ctx.StartClusterIndex, ctx.EndClusterIndex)
+            : ctx.Accessor.GetClusterEnumerator<Character>(ctx.StartClusterIndex, ctx.EndClusterIndex);
+
+        foreach (var cluster in clusters)
         {
-            var e = ctx.Accessor.OpenMut(id);
-            ref var h = ref e.Write(Character.Ham);
-            h.Health = Math.Min(h.MaxHealth, h.Health + 1);
-            h.Action = Math.Min(h.MaxAction, h.Action + 2);   // Action recovers fastest
-            h.Mind = Math.Min(h.MaxMind, h.Mind + 1);
+            var bits = cluster.OccupancyBits;
+            if (bits == 0)
+            {
+                continue;
+            }
+
+            var hams = cluster.GetSpan(Character.Ham);
+            while (bits != 0)
+            {
+                int i = BitOperations.TrailingZeroCount(bits);
+                bits &= bits - 1;
+                ref var h = ref hams[i];
+                h.Health = Math.Min(h.MaxHealth, h.Health + 1);
+                h.Action = Math.Min(h.MaxAction, h.Action + 2);   // Action recovers fastest
+                h.Mind = Math.Min(h.MaxMind, h.Mind + 1);
+            }
+
+            cluster.MarkDirty(Character.Ham);
         }
     }
 }
@@ -181,29 +217,50 @@ internal sealed class WanderSystem : QuerySystem
 
     protected override void Execute(TickContext ctx)
     {
-        foreach (EntityId id in ctx.Entities)
+        using var clusters = ctx.ClusterIds != null
+            ? ctx.Accessor.GetClusterEnumerator<Character>(ctx.ClusterIds, ctx.StartClusterIndex, ctx.EndClusterIndex)
+            : ctx.Accessor.GetClusterEnumerator<Character>(ctx.StartClusterIndex, ctx.EndClusterIndex);
+
+        foreach (var cluster in clusters)
         {
-            var e = ctx.Accessor.OpenMut(id);
-            ref var intent = ref e.Write(Character.Intent);
-            ref var t = ref e.Write(Character.Transform);
-
-            // Transient Intent starts at (0,0) each run — seed a wander target derived from position.
-            if (intent.Target.X == 0f && intent.Target.Y == 0f)
+            var bits = cluster.OccupancyBits;
+            if (bits == 0)
             {
-                intent.Target = new Point2F { X = (t.Pos.X * 1.3f) % 1000f, Y = (t.Pos.Y * 0.7f + 250f) % 1000f };
+                continue;
             }
 
-            float dx = intent.Target.X - t.Pos.X;
-            float dy = intent.Target.Y - t.Pos.Y;
-            float len = MathF.Sqrt(dx * dx + dy * dy);
-            if (len > 2f)
+            // Two columns, two pointer resolves — then both are walked in lockstep by slot index. GetSpan handles the Transient column too: it selects the
+            // TransientStore base for slots in the archetype's Transient mask, so Intent and Transform come from different pages transparently.
+            var intents = cluster.GetSpan(Character.Intent);
+            var transforms = cluster.GetSpan(Character.Transform);
+            while (bits != 0)
             {
-                t.Vel = new Point2F { X = dx / len * 5f, Y = dy / len * 5f };
+                int i = BitOperations.TrailingZeroCount(bits);
+                bits &= bits - 1;
+                ref var intent = ref intents[i];
+                ref var t = ref transforms[i];
+
+                // Transient Intent starts at (0,0) each run — seed a wander target derived from position.
+                if (intent.Target.X == 0f && intent.Target.Y == 0f)
+                {
+                    intent.Target = new Point2F { X = (t.Pos.X * 1.3f) % 1000f, Y = (t.Pos.Y * 0.7f + 250f) % 1000f };
+                }
+
+                float dx = intent.Target.X - t.Pos.X;
+                float dy = intent.Target.Y - t.Pos.Y;
+                float len = MathF.Sqrt(dx * dx + dy * dy);
+                if (len > 2f)
+                {
+                    t.Vel = new Point2F { X = dx / len * 5f, Y = dy / len * 5f };
+                }
+                else
+                {
+                    intent.Target = default;   // reached → repick next tick
+                }
             }
-            else
-            {
-                intent.Target = default;   // reached → repick next tick
-            }
+
+            // Only Transform is durable; Intent is Transient and is never persisted, so it needs no dirty bit.
+            cluster.MarkDirty(Character.Transform);
         }
     }
 }
@@ -228,16 +285,25 @@ internal sealed class TradeSystem : CallbackSystem
             return;
         }
 
-        var set = ctx.Transaction.Query<Character>().Execute();
-        if (set.Count < 2)
+        // Refresh the trader roster rarely. Materialising the whole shard on every settle allocated a 20 000-entry HashSet plus a 20 000-entry array — to
+        // use eight ids. The roster only has to be big enough to pick pairs from, so a periodic refresh is both cheaper and sufficient.
+        if (_rosterTick < 0 || ctx.TickNumber - _rosterTick >= RosterRefreshTicks)
+        {
+            var set = ctx.Transaction.Query<Character>().Execute();
+            if (_roster.Length < set.Count)
+            {
+                _roster = new EntityId[set.Count];
+            }
+            set.CopyTo(_roster);
+            _rosterCount = set.Count;
+            _rosterTick = ctx.TickNumber;
+        }
+
+        int n = _rosterCount;
+        if (n < 2)
         {
             return;
         }
-
-        // Materialize the id set once so we can index pairs (Query().Execute() returns an unordered HashSet).
-        var characters = new EntityId[set.Count];
-        set.CopyTo(characters);
-        int n = characters.Length;
 
         int pairs = Math.Min(4, n / 2);
         for (int k = 0; k < pairs; k++)
@@ -245,7 +311,13 @@ internal sealed class TradeSystem : CallbackSystem
             int ai = (int)((ctx.TickNumber * 7 + k * 2) % n);
             int bi = (ai + 1) % n;
 
-            var from = ctx.Transaction.OpenMut(characters[ai]);
+            // The roster can name an entity destroyed since the last refresh, so open defensively rather than letting OpenMut throw.
+            if (!ctx.Transaction.TryOpen(_roster[ai], out _) || !ctx.Transaction.TryOpen(_roster[bi], out _))
+            {
+                continue;
+            }
+
+            var from = ctx.Transaction.OpenMut(_roster[ai]);
             ref var fromWallet = ref from.Write(Character.Wallet);
             long amount = Math.Min(10L, fromWallet.Credits);
             if (amount <= 0)
@@ -253,7 +325,14 @@ internal sealed class TradeSystem : CallbackSystem
                 continue;
             }
             fromWallet.Credits -= amount;
-            ctx.Transaction.OpenMut(characters[bi]).Write(Character.Wallet).Credits += amount;
+            ctx.Transaction.OpenMut(_roster[bi]).Write(Character.Wallet).Credits += amount;
         }
     }
+
+    /// <summary>How often the trader roster is rebuilt. Trades only need *some* characters to pick from, not this tick's exact census.</summary>
+    private const int RosterRefreshTicks = 300;
+
+    private EntityId[] _roster = [];
+    private int _rosterCount;
+    private long _rosterTick = -1;
 }
