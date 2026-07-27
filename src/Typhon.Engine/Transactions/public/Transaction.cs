@@ -56,6 +56,11 @@ public unsafe partial class Transaction : EntityAccessor
     // to flush in a single batch (one lock acquire instead of N). Never re-allocated after warmup.
     private List<DeferredCleanupManager.CleanupEntry> _deferredEnqueueBatch;
 
+    // Composed once per transaction (lazily), reused for every revision-chain lock acquisition on the read/resolve path
+    // so Stopwatch.GetTimestamp() is not re-armed per Versioned slot per entity. Reset in Init(). See ChainLockWaitContext().
+    private WaitContext _chainLockWc;
+    private bool _chainLockWcResolved;
+
     // Hoisted accessors for batch index maintenance (set per component type during Commit)
     private ChunkAccessor<PersistentStore>[] _batchIndexAccessors;
     private ChunkAccessor<PersistentStore> _batchTailAccessor;
@@ -175,6 +180,7 @@ public unsafe partial class Transaction : EntityAccessor
         _isDisposed = false;
         IsReadOnly = readOnly;
         OwningUnitOfWork = uow;
+        _chainLockWcResolved = false;   // recompute the composed chain-lock deadline for this logical transaction
         _owningThreadId = Environment.CurrentManagedThreadId;   // #422: affinity field promoted out of #if DEBUG (see EntityAccessor)
         _committedOperationCount = null;
         _deletedComponentCount = 0;
@@ -902,6 +908,25 @@ public unsafe partial class Transaction : EntityAccessor
         => WaitContext.FromDeadline(Deadline.Min(ctx.WaitContext.Deadline, Deadline.FromTimeout(subsystemTimeout)));
 
     /// <summary>
+    /// The <see cref="WaitContext"/> used to acquire a revision-chain lock while READING (resolve/walk), composed ONCE
+    /// per transaction as the tighter of the owning UoW deadline and <c>RevisionChainLockTimeout</c>. Caching it collapses
+    /// the per-walk <c>Stopwatch.GetTimestamp()</c> — previously paid for every Versioned slot of every entity opened — to
+    /// a single QPC per transaction. The deadline is only consulted under lock contention, so a transaction-scoped budget
+    /// is an adequate (and stricter) liveness backstop than a fresh per-acquisition one.
+    /// </summary>
+    internal WaitContext ChainLockWaitContext()
+    {
+        if (!_chainLockWcResolved)
+        {
+            _chainLockWc = OwningUnitOfWork != null
+                ? OwningUnitOfWork.CreateContext(TimeoutOptions.Current.RevisionChainLockTimeout).WaitContext
+                : WaitContext.FromTimeout(TimeoutOptions.Current.RevisionChainLockTimeout);
+            _chainLockWcResolved = true;
+        }
+        return _chainLockWc;
+    }
+
+    /// <summary>
     /// Rolls back a single component revision: frees content chunks, voids revision entries, and enqueues for deferred cleanup.
     /// </summary>
     /// <returns><c>true</c> if the component was created (rev table chunk freed — caller must remove from cache); <c>false</c> otherwise.</returns>
@@ -1519,6 +1544,13 @@ public unsafe partial class Transaction : EntityAccessor
     private void ReconcileClusterIndexAndViews(ArchetypeEngineState es, ArchetypeClusterState clusterState, int compSlot, int clusterChunkId,
         int clusterLocation, long entityKey, byte* oldComp, byte* newComp)
     {
+        var layout = clusterState.Layout;
+        int slotIndex = clusterLocation & 63;
+        // Cluster chunk base holding the per-entity index element-id tail slot for AllowMultiple fields. Resolved lazily on the first AllowMultiple field
+        // (fetching it forWrite marks the cluster chunk dirty — only wanted when we actually write an element id back). Both callers of this method have just
+        // (re)established _clusterCommitClusterAccessor for this archetype before calling.
+        byte* clusterBase = null;
+
         for (int ixs = 0; ixs < clusterState.IndexSlots.Length; ixs++)
         {
             ref var ixSlot = ref clusterState.IndexSlots[ixs];
@@ -1535,18 +1567,58 @@ public unsafe partial class Transaction : EntityAccessor
                 {
                     if (newComp != null && oldComp != null)
                     {
-                        // Update: move from old key to new key
-                        field.Index.Move(oldComp + field.FieldOffset, newComp + field.FieldOffset, clusterLocation, ref idxAccessor);
+                        // Update: move this entity's entry from the old key to the new key.
+                        if (field.AllowMultiple)
+                        {
+                            // The leaf value for an AllowMultiple index is a VSBS buffer-root id, NOT the clusterLocation — the entity's location lives
+                            // inside the buffer. Plain Move() is unique-only: it overwrites the leaf value with the raw clusterLocation, which the read path
+                            // then treats as a buffer id (finds nothing → the entity vanishes from every scan of that key). Use MoveValue with this entity's
+                            // element id (kept in the cluster tail slot exactly as spawn/destroy do) and write the returned new element id back so a later
+                            // update/destroy still targets the right buffer entry. Mirrors ReconcileFlatIndexAndViews / IndexMaintainer.UpdateIndices.
+                            if (clusterBase == null)
+                            {
+                                clusterBase = _clusterCommitClusterAccessor.GetChunkAddress(clusterChunkId, true);
+                            }
+                            int* elementIdPtr = (int*)(clusterBase + layout.IndexElementIdOffset(field.MultiFieldIndex, slotIndex));
+                            *elementIdPtr = field.Index.MoveValue(oldComp + field.FieldOffset, newComp + field.FieldOffset, *elementIdPtr, clusterLocation,
+                                ref idxAccessor, out _, out _);
+                        }
+                        else
+                        {
+                            field.Index.Move(oldComp + field.FieldOffset, newComp + field.FieldOffset, clusterLocation, ref idxAccessor);
+                        }
                     }
                     else if (newComp != null)
                     {
-                        // Insert (first commit after spawn)
-                        field.Index.Add(newComp + field.FieldOffset, clusterLocation, ref idxAccessor);
+                        // Insert (first commit after spawn): Add returns the per-entity element id for an AllowMultiple index, which must be recorded in the
+                        // cluster tail slot so destroy/update can target this entity's entry (mirrors FinalizeSpawns).
+                        int elementId = field.Index.Add(newComp + field.FieldOffset, clusterLocation, ref idxAccessor);
+                        if (field.AllowMultiple)
+                        {
+                            if (clusterBase == null)
+                            {
+                                clusterBase = _clusterCommitClusterAccessor.GetChunkAddress(clusterChunkId, true);
+                            }
+                            *(int*)(clusterBase + layout.IndexElementIdOffset(field.MultiFieldIndex, slotIndex)) = elementId;
+                        }
                     }
                     else if (oldComp != null)
                     {
-                        // Delete
-                        field.Index.Remove(oldComp + field.FieldOffset, out _, ref idxAccessor);
+                        // Delete: for an AllowMultiple index, RemoveValue removes only this entity's (key, clusterLocation) entry — Remove(key) would wipe the
+                        // whole buffer and drop siblings sharing the value (the same rule the cluster destroy path follows).
+                        if (field.AllowMultiple)
+                        {
+                            if (clusterBase == null)
+                            {
+                                clusterBase = _clusterCommitClusterAccessor.GetChunkAddress(clusterChunkId, true);
+                            }
+                            int elementId = *(int*)(clusterBase + layout.IndexElementIdOffset(field.MultiFieldIndex, slotIndex));
+                            field.Index.RemoveValue(oldComp + field.FieldOffset, elementId, clusterLocation, ref idxAccessor);
+                        }
+                        else
+                        {
+                            field.Index.Remove(oldComp + field.FieldOffset, out _, ref idxAccessor);
+                        }
                     }
 
                     // Widen zone map with new value

@@ -1,3 +1,5 @@
+using Microsoft.Extensions.Logging;
+
 namespace Typhon.Workbench.Hosting;
 
 /// <summary>
@@ -45,6 +47,14 @@ public sealed class WorkbenchHostOptions
     /// <c>typhon ui</c>; the standalone host leaves it false (in dev the browser is opened against the Vite server).
     /// </summary>
     public bool OpenBrowser { get; init; }
+
+    /// <summary>
+    /// Floor for host log verbosity. <see cref="LogLevel.Information"/> (the default) preserves the standalone
+    /// <c>dotnet run</c> dev experience; <c>typhon ui</c> raises it to <see cref="LogLevel.Warning"/> so ASP.NET's
+    /// per-request <c>Hosting.Diagnostics</c> and lifetime Info chatter doesn't spam the terminal. The tokenized
+    /// launch URL is written to the console directly (not via the logger), so it stays visible at any level.
+    /// </summary>
+    public LogLevel MinimumLogLevel { get; init; } = LogLevel.Information;
 
     /// <summary>The defaults for the standalone <c>dotnet run</c> entry point: loopback bind, no browser launch.</summary>
     public static WorkbenchHostOptions Default => new();

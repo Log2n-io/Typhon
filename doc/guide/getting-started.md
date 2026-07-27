@@ -24,28 +24,40 @@ Install the `typhon` command-line tool — a .NET global tool that also hosts th
 dotnet tool install --global Typhon.Cli --prerelease
 ```
 
-Scaffold a project. It emits a runnable starter that models a small world of roaming **harvester drones** (the SWG Light
-sample) with a tick loop and profiling already wired:
+Scaffold a project. It emits a runnable starter that models a small **world shard** — a planet of roaming characters
+(the SWG Light sample) — with a tick loop and profiling already wired:
 
 ```bash
 typhon new MyApp
 cd MyApp
 ```
 
-Run it. The first run restores the `Typhon` package from NuGet, spawns drones, ticks the runtime, and — because
+Run it. The first run restores the `Typhon` package from NuGet, deploys the shard, ticks the runtime, and — because
 `typhon.telemetry.json` turns the profiler on — writes a profiler trace to `./captures/`:
 
 ```bash
 dotnet run
 ```
 ```
-== ch.1 — spawn, read, query ==
-probe drone: cargo 250/1000 at (10, 20)
+== ch.1 — deploy a shard of 20,000 ==
+shard deployed: 20,001 characters
 ...
-after run: 8 drones (deployed 1), probe cargo 1000
+== ch.5 — the shard lives (200 ticks) ==
+ran 200 ticks
+...
+== ch.6 — durability: close & reopen ==
+REOPEN — 13,339 characters survived (the Imperial withdrawal persisted)
+probe came back:
+   Wallet    (Versioned)     durable → 150 credits
+   Transform (SingleVersion) durable → (10.1, 30.1)
+   Ham       (SingleVersion) durable → 100/100/100 (H/A/M)
+   Intent    (Transient)     RESET   → (0, 0)   (heap-only; dropped on reopen by design)
 
-OK — ran end to end; profiler trace written: ./captures/guide.typhon-trace (244,884 bytes)
+OK — ran end to end; profiler trace written: ./captures/guide.typhon-trace (6,497,101 bytes)
 ```
+
+That last block is the point of the whole sample: the database came back, and **each storage mode came back
+differently** — which is the modeling decision [ch.2](02-modeling.md) is about.
 
 Open that trace in the Workbench:
 
@@ -57,8 +69,8 @@ That's the whole loop — **scaffold → run → profile → inspect**. The gene
 
 | File | What it is |
 |------|------------|
-| `Harvester.cs` | The data model — the `Harvester` archetype and its components (one per storage mode + spatial + index). |
-| `Systems.cs` | The tick-loop systems: spawn drones, roam, keep the spatial index coherent, accumulate cargo. |
+| `Character.cs` | The data model — the `Character` archetype and its components, each in the storage mode its access pattern needs (SingleVersion hot state + spatial + index, one Versioned wallet, Transient scratch). |
+| `Systems.cs` | The tick-loop systems: spawn characters, move + regenerate them lock-free, keep the spatial index coherent, and settle credit trades as atomic Versioned transactions. |
 | `Program.cs` | Opens the engine, walks the API (spawn / read / transact / query / view), then runs the runtime. |
 | `typhon.telemetry.json` | Turns on config-driven profiling (the engine self-wires it — no code needed). |
 
@@ -97,40 +109,37 @@ spelling out. Add `[Index]` to a field to make it fast to filter on.
 ```csharp
 using Typhon.Schema.Definition; // [Component], [Field], [Index], [Archetype], Comp<T>
 
-namespace Swg;   // component + archetype types must live in a namespace, not the global one
+namespace Shard;   // component + archetype types must live in a namespace, not the global one
 
-[Component("Swg.Position", 1, StorageMode = StorageMode.Versioned)]
-public struct Position
+[Component("Shard.Faction", 1, StorageMode = StorageMode.SingleVersion)]
+public struct Faction
 {
-    public float X, Y;
-    public Position(float x, float y) { X = x; Y = y; }
+    [Index(AllowMultiple = true)] public int Value;   // indexed → fast to filter on
 }
 
-[Component("Swg.Cargo", 1, StorageMode = StorageMode.Versioned)]
-public struct Cargo
+[Component("Shard.Wallet", 1, StorageMode = StorageMode.Versioned)]
+public struct Wallet
 {
-    [Index] public int Amount;    // indexed → fast to query on
-    public int Capacity;
-    public Cargo(int amount, int capacity) { Amount = amount; Capacity = capacity; }
+    public long Credits;          // Versioned: the one component that earns full ACID
 }
 ```
 
 An **archetype** is the fixed shape of an entity — a `partial` class that names itself and registers its component
-slots. The static `Comp<T>` handles (`Harvester.Position`) are how you refer to each slot when spawning, reading, and
+slots. The static `Comp<T>` handles (`Character.Wallet`) are how you refer to each slot when spawning, reading, and
 querying.
 
 ```csharp
 [Archetype]
-public sealed partial class Harvester : Archetype<Harvester>
+public sealed partial class Character : Archetype<Character>
 {
-    public static readonly Comp<Position> Position = Register<Position>();
-    public static readonly Comp<Cargo>    Cargo    = Register<Cargo>();
+    public static readonly Comp<Faction> Faction = Register<Faction>();
+    public static readonly Comp<Wallet>  Wallet  = Register<Wallet>();
 }
 ```
 
 ### 2. Open the engine, spawn, and read
 
-`DatabaseEngine.Open` is the one-line setup: it names the on-disk database (a `swg.typhon` directory in the
+`DatabaseEngine.Open` is the one-line setup: it names the on-disk database (a `shard.typhon` directory in the
 working folder), registers your components (your archetype self-registers at assembly load), and hands back a
 ready-to-use engine. Do this **once at startup**; `using var` flushes and releases the file lock at scope end.
 
@@ -139,48 +148,48 @@ Writes go through a short-lived transaction; reads see a consistent point-in-tim
 ```csharp
 using Typhon.Engine;            // DatabaseEngine, EntityId, transactions, queries
 
-using var dbe = DatabaseEngine.Open("swg.typhon", o => o
-    .Register<Position>()
-    .Register<Cargo>());
+using var dbe = DatabaseEngine.Open("shard.typhon", o => o
+    .Register<Faction>()
+    .Register<Wallet>());
 
 // Spawn an entity (a write — needs a transaction)
-EntityId drone;
+EntityId scout;
 using (var tx = dbe.CreateQuickTransaction())
 {
-    drone = tx.Spawn<Harvester>(
-        Harvester.Position.Set(new Position(10, 20)),
-        Harvester.Cargo.Set(new Cargo(250, 1000)));
+    scout = tx.Spawn<Character>(
+        Character.Faction.Set(new Faction { Value = 1 }),
+        Character.Wallet.Set(new Wallet { Credits = 250 }));
     tx.Commit();
 }
 
 // Read it back (a read — sees a consistent snapshot)
 using (var tx = dbe.CreateQuickTransaction())
 {
-    var e     = tx.Open(drone);
-    var pos   = e.Read(Harvester.Position);
-    var cargo = e.Read(Harvester.Cargo);
-    Console.WriteLine($"cargo {cargo.Amount}/{cargo.Capacity} at ({pos.X}, {pos.Y})");
+    var e = tx.Open(scout);
+    var faction = e.Read(Character.Faction);
+    var wallet  = e.Read(Character.Wallet);
+    Console.WriteLine($"faction {faction.Value} with {wallet.Credits} credits");
 }
 ```
 
 > 💡 **Hosting in a DI app?** The same fluent options work through
-> `services.AddTyphon(o => o.DatabaseFile("swg.typhon").Register<Position>()…)`, which composes the engine into
+> `services.AddTyphon(o => o.DatabaseFile("shard.typhon").Register<Faction>()…)`, which composes the engine into
 > your service collection. `Open()` is the standalone equivalent that owns a private container for you.
 
 ### 3. Query
 
-`Query<Harvester>()` starts a query over all `Harvester` entities; `Where<Cargo>(...)` filters by a component predicate
-— `c.Amount < c.Capacity` compares two fields, so this is a broad scan; for index-backed filtering use `WhereField`
-(see [ch.4](04-querying.md)); `Count()` returns how many match (`Execute()` would instead hand back the matching
-`EntityId`s to iterate).
+`Query<Character>()` starts a query over all `Character` entities; `WhereField<Faction>(...)` filters on an **indexed**
+field, so the engine drives the scan from the index instead of walking the archetype (use `Where` for computed or
+unindexed conditions — see [ch.4](04-querying.md)); `Count()` returns how many match (`Execute()` would instead hand
+back the matching `EntityId`s to iterate).
 
 ```csharp
 using (var tx = dbe.CreateQuickTransaction())
 {
-    int filling = tx.Query<Harvester>()
-                    .Where<Cargo>(c => c.Amount < c.Capacity)
-                    .Count();
-    Console.WriteLine($"{filling} drone(s) still filling");
+    int rebels = tx.Query<Character>()
+                   .WhereField<Faction>(f => f.Value == 1)
+                   .Count();
+    Console.WriteLine($"{rebels} rebel(s)");
 }
 ```
 
@@ -193,9 +202,9 @@ of *Versioned* components (the default): transactional writes, snapshot-isolated
 ```csharp
 using (var tx = dbe.CreateQuickTransaction())
 {
-    var e = tx.OpenMut(drone);              // mutable handle (vs. read-only tx.Open)
-    e.Write(Harvester.Cargo).Amount = 1000; // fill to capacity — an in-place ref write
-    tx.Commit();                            // durable + visible here
+    var e = tx.OpenMut(scout);                 // mutable handle (vs. read-only tx.Open)
+    e.Write(Character.Wallet).Credits += 500;   // pay a reward — an in-place ref write
+    tx.Commit();                               // durable + visible here
     // No Commit() → the change is discarded at scope end.
 }
 ```

@@ -51,14 +51,17 @@ Read **chapter 1** to get productive. Come back for the rest when the moment arr
 | # | Chapter | Read it when you want to… |
 |---|---|---|
 | **1** | [Start here — your first app](01-first-app.md) | see Typhon working end-to-end and run something today |
-| **2** | [Modeling your world](02-modeling.md) | design components, archetypes, indexes, storage modes, spatial |
+| **2** | [Modeling your world](02-modeling.md) | design components, archetypes, indexes, storage modes, relationships, spatial |
 | **3** | [Changing data: transactions & durability](03-transactions.md) | write/read safely and decide what survives a crash |
 | **4** | [Querying & views](04-querying.md) | find entities, build reactive views, subscribe to changes |
 | **5** | [Systems & the tick loop](05-systems.md) | run logic over your data every tick, in parallel |
 | **6** | [Operating & going deeper](06-operating.md) | observe, set resource budgets, handle errors, find the deep docs |
 | **★** | [Isolation & durability cheat sheet](isolation-durability-cheatsheet.md) | reassure yourself about a guarantee — the one-page reference to keep open (not a chapter; visit any time) |
 
-> 📦 **Run it, don't just read it.** Every snippet in this guide is mirrored in a small runnable project — [`example/`](https://github.com/Log2n-io/Typhon/tree/main/doc/guide/example). `dotnet run --project doc/guide/example` walks the whole arc (spawn → read → transact → query → view → tick) and prints what each chapter describes.
+> 📦 **Run it, don't just read it.** The guide is backed by one maintained sample schema in two tiers, both of which compile in the repo ([`samples/Typhon.Samples.Swg`](https://github.com/Log2n-io/Typhon/tree/main/samples/Typhon.Samples.Swg)):
+>
+> - **Light — one `Character` archetype.** The seed you get from `typhon new`, and what chapters 1, 3 and 5 teach. It's driven end-to-end by the runnable [`example/`](https://github.com/Log2n-io/Typhon/tree/main/doc/guide/example) project: `dotnet run --project doc/guide/example` walks the whole arc (deploy → read → transact → query → tick → reopen) and prints what those chapters describe.
+> - **Full — a nine-archetype shard** (players, guilds, structures, deposits, recipes, items). Chapters 2 and 4 borrow from it whenever they need the relational surface a one-archetype seed doesn't have: archetype inheritance, foreign keys with cascade, component collections. Those snippets are real compiled types, but they aren't part of the runnable walkthrough.
 
 ## 🧩 The types you'll touch (whole guide)
 

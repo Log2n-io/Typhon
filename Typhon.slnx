@@ -32,6 +32,7 @@
     </Folder>
     <Folder Name="/samples/">
         <Project Path="samples/Typhon.Samples.Swg/Typhon.Samples.Swg.csproj" />
+        <Project Path="doc/guide/example/SwgGuide.csproj" />
     </Folder>
     <Folder Name="/demo/">
         <Project Path="demo/AntHill/AntHill.Core/AntHill.Core.csproj" />

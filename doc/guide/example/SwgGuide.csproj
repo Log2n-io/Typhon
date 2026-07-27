@@ -19,6 +19,10 @@
     <ProjectReference Include="..\..\..\samples\Typhon.Samples.Swg\Typhon.Samples.Swg.csproj" />
     <ProjectReference Include="..\..\..\src\Typhon.Generators.Consumer\Typhon.Generators.Consumer.csproj"
                       ReferenceOutputAssembly="false" OutputItemType="Analyzer" />
+    <!-- The engine's own analyzers. TYPHON009 in particular is what makes SetSpatialBarrierOnly<Character>() safe to assert: it flags any mutable span/ref
+         access to a [SpatialIndex] component, i.e. exactly the writes that would become invisible to spatial maintenance once the barrier is declared. -->
+    <ProjectReference Include="..\..\..\src\Typhon.Analyzers\Typhon.Analyzers.csproj"
+                      ReferenceOutputAssembly="false" OutputItemType="Analyzer" />
   </ItemGroup>
 
   <ItemGroup>

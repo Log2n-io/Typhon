@@ -26,6 +26,17 @@ public abstract class ViewBase : IView, IDisposable, IEnumerable<long>
     private bool _overflowDetected;
     private readonly ExecutionPlan[] _cachedPlans;
 
+    /// <summary>
+    /// The archetype this view queries, or <c>ushort.MaxValue</c> when the view is not bound to a single archetype (the default; overridden by
+    /// <see cref="EcsView{TArchetype}"/>).
+    /// <para>
+    /// Load-bearing for parallel cluster dispatch: the runtime must resolve a system's <c>ArchetypeClusterState</c> from the system's OWN input view. It
+    /// previously scanned the global <c>ArchetypeRegistry</c> and took the first cluster-eligible archetype, which is correct only when exactly one exists —
+    /// with several, every system received archetype 0's cluster ids.
+    /// </para>
+    /// </summary>
+    internal virtual ushort QueriedArchetypeId => ushort.MaxValue;
+
     private protected ViewBase(FieldEvaluator[] evaluators, int[] fieldDependencies, IMemoryAllocator allocator, IResource resourceParent, int bufferCapacity,
         long baseTSN, string sourceFile = null, int sourceLine = 0, string sourceMethod = null)
     {

@@ -1,4 +1,5 @@
-﻿using Microsoft.Extensions.DependencyInjection;
+﻿using System.Collections.Generic;
+using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 
 namespace Typhon.Engine.Tests;
@@ -456,6 +457,54 @@ class EcsQueryTests : TestBase<EcsQueryTests>
         Assert.That(
             qtx.Query<CompDArch>().WhereField<CompD>(d => d.B >= 0).OrderByField<CompD, int>(d => d.B).ExecuteOrdered(),
             Has.Count.EqualTo(2));
+    }
+
+    // Guards the NON-cluster ordered-after-update path (CompDArch is pure-Versioned → ExecuteOrderedNonCluster). This path
+    // was never affected by the cluster AllowMultiple bug fixed in ReconcileClusterIndexAndViews; the cluster analog is
+    // covered by OrderedVersionedClusterReproTests. Kept as a companion so the two ordered paths are both regression-guarded.
+    [Test]
+    public void ExecuteOrdered_AfterUpdatingIndexedField_ReturnsAllEntities()
+    {
+        using var dbe = SetupEngine();
+
+        var ids = new List<EntityId>();
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            for (int i = 0; i < 5; i++)
+            {
+                ids.Add(tx.Spawn<CompDArch>(CompDArch.D.Set(new CompD(i, 10 + i, i))));
+            }
+            tx.Commit();
+        }
+
+        // Baseline: ordered scans work right after create (unique index B and AllowMultiple index A).
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            Assert.That(tx.Query<CompDArch>().WhereField<CompD>(d => d.B >= 0).OrderByField<CompD, int>(d => d.B).ExecuteOrdered(),
+                Has.Count.EqualTo(5), "baseline ordered scan on unique index B after create");
+            Assert.That(tx.Query<CompDArch>().WhereField<CompD>(d => d.A >= 0f).OrderByField<CompD, float>(d => d.A).ExecuteOrdered(),
+                Has.Count.EqualTo(5), "baseline ordered scan on AllowMultiple index A after create");
+        }
+
+        // Update every entity's indexed fields — each entity leaves its old keys for new ones.
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            foreach (var id in ids)
+            {
+                ref var d = ref tx.OpenMut(id).Write(CompDArch.D);
+                d = new CompD(d.A + 100f, d.B + 100, d.C);
+            }
+            tx.Commit();
+        }
+
+        // BUG: after updating the indexed field, the ordered scan must still find all 5 entities under their new keys.
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            Assert.That(tx.Query<CompDArch>().WhereField<CompD>(d => d.B >= 0).OrderByField<CompD, int>(d => d.B).ExecuteOrdered(),
+                Has.Count.EqualTo(5), "ordered scan on unique index B after updating the indexed field");
+            Assert.That(tx.Query<CompDArch>().WhereField<CompD>(d => d.A >= 0f).OrderByField<CompD, float>(d => d.A).ExecuteOrdered(),
+                Has.Count.EqualTo(5), "ordered scan on AllowMultiple index A after updating the indexed field");
+        }
     }
 
     // ── WHERE predicates (T3) ──

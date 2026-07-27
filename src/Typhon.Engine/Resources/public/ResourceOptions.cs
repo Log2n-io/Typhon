@@ -50,7 +50,20 @@ public class ResourceOptions
     /// <summary>
     /// Size of the WAL ring buffer in bytes. When full, commit threads block until the WAL writer drains it.
     /// </summary>
-    public int WalRingBufferSizeBytes { get; set; } = 8 * 1024 * 1024;  // 8 MB
+    /// <remarks>
+    /// <para>
+    /// This is the <b>total</b> pinned allocation: <c>WalCommitBuffer</c> ping-pongs two halves of
+    /// <c>WalRingBufferSizeBytes / 2</c> each, so the default reserves 64 MB up front and each half is 32 MB. Lower it for
+    /// memory-constrained or low-write deployments — the engine is correct at any size, it just swaps buffers more often.
+    /// </para>
+    /// <para>
+    /// The default is sized for <b>tail latency, not throughput</b>. Measured on a 20 001-entity cluster archetype at 120 Hz
+    /// (#559): the median tick is flat across 8/16/32/64 MB at ~17.6 ms, but the worst tick falls from ~29 ms to ~18 ms at 64 MB.
+    /// A ring that fills makes producers block on the buffer swap, which shows up as an occasional tick blowing several times its
+    /// budget — the failure mode a real-time engine cares about most.
+    /// </para>
+    /// </remarks>
+    public int WalRingBufferSizeBytes { get; set; } = 64 * 1024 * 1024;  // 64 MB total pinned, 2 x 32 MB halves — see remarks
 
     // ═══════════════════════════════════════════════════════════════
     // CHECKPOINT

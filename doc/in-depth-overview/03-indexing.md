@@ -115,6 +115,8 @@ Two primitives, two regimes.
 
 The reader API performs zero writes to shared state. `ReadVersion()` returns the version or `0` if the node is locked or obsolete (signalling restart). The reader threads the version through its work and calls `ValidateVersion(expected)` afterwards — if the version changed, the read might have been torn and the reader restarts. On x64 (TSO), no memory barriers are needed — loads aren't reordered with other loads, and the write-lock CAS provides the acquire/release on the writer side.
 
+**On arm64 that is not sufficient**, and `ValidateVersion` issues an explicit `Interlocked.MemoryBarrier()` before the validating re-read. The reader's plain data loads (node scan, value copy) sit between `ReadVersion()` and that re-read, and an acquire load only stops *later* accesses from hoisting above it — it does not stop those *earlier* plain loads from sinking below it on a weakly-ordered CPU, which would void the validation. The barrier is emitted under `if (!X86Base.IsSupported)`, a JIT-time constant: it folds to nothing on x64 and becomes `dmb ish` on arm64. See `OlcLatch.ValidateVersion` and the memory-ordering discipline in the root `CLAUDE.md`.
+
 This is plain **Optimistic Lock Coupling** (Leis et al., 2016) — see [01-foundation](01-foundation.md) for how it composes with the broader synchronization story.
 
 A failed validation emits a `Concurrency:OlcLatch:ValidationFail` event ([12-observability](12-observability.md)). Lookup retries up to `MaxOptimisticRestarts = 3` times before falling back to a pessimistic loop that retries indefinitely.

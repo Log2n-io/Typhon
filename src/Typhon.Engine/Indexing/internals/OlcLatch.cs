@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using System.Runtime.Intrinsics.X86;
 using System.Threading;
 
 namespace Typhon.Engine.Internals;
@@ -36,6 +37,15 @@ internal readonly ref struct OlcLatch
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool ValidateVersion(int expected)
     {
+        // The caller's PLAIN data reads (node scan, value copy) sit between ReadVersion and this re-read. An acquire load only stops LATER accesses
+        // from hoisting above it — it does NOT stop those earlier plain loads from sinking below the validating load on a weakly-ordered CPU, which
+        // would void the validation. x64 (TSO) orders loads in program order, so the fence is needed only off-x86: X86Base.IsSupported is a JIT-time
+        // constant, so this folds to nothing on x64 and emits the required barrier (dmb ish) on arm64.
+        if (!X86Base.IsSupported)
+        {
+            Interlocked.MemoryBarrier();
+        }
+
         var actual = Volatile.Read(ref _version);  // acquire: pairs with the release in WriteUnlock
         if (actual == expected)
         {

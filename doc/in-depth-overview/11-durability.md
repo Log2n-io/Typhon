@@ -70,7 +70,9 @@ The transport — MPSC buffer, dedicated writer thread, segment management, FUA 
 
 ### Ring buffer sizing
 
-Default is **8 MB total** (`ResourceOptions.WalRingBufferSizeBytes = 8 * 1024 * 1024`). The buffer is split into two halves of 4 MB each — producers fill one half while the writer drains the other (Aeron-style ping-pong, per ADR). When the active half fills up, producers wait for the writer to swap.
+Default is **64 MB total** (`ResourceOptions.WalRingBufferSizeBytes = 64 * 1024 * 1024`). The buffer is split into two halves of 32 MB each — producers fill one half while the writer drains the other (Aeron-style ping-pong, per ADR). When the active half fills up, producers wait for the writer to swap.
+
+The default is sized for **tail latency, not throughput** (#559). Measured on a 20 001-entity cluster archetype at 120 Hz, the median tick is flat across 8/16/32/64 MB, but the worst tick falls from ~29 ms to ~18 ms at 64 MB: a ring that fills makes producers block on the buffer swap, which surfaces as an occasional tick blowing several times its budget. Lower it for memory-constrained or low-write deployments — the engine is correct at any size, it just swaps buffers more often.
 
 ### GroupCommit (default mode)
 

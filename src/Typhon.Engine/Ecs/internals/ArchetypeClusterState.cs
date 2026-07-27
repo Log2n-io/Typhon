@@ -87,6 +87,31 @@ internal sealed unsafe class ArchetypeClusterState
     /// <summary>Popcount of dirty entries after occupancy-masking. Drives WAL chunk sizing in Finalize. Path 1 leaves this at 0.</summary>
     internal int FenceEntryCount;
 
+    /// <summary>Sentinel meaning "assume every component slot was written" — the fail-safe value (#559 §4.5).</summary>
+    internal const int AllSlotsWritten = -1;
+
+    /// <summary>
+    /// Union over the whole archetype of the component slots written this tick. Bit <c>s</c> set =&gt; component slot <c>s</c> was
+    /// written somewhere; <see cref="AllSlotsWritten"/> means "unknown — emit everything".
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Deliberately ONE value for the archetype rather than one per cluster. All blocks in a fence batch share a single column
+    /// set, so the union is the only granularity the emitter can act on — a per-cluster array would be extra state that gets
+    /// collapsed to this anyway.
+    /// </para>
+    /// <para>
+    /// It also has to be one value for performance. A per-cluster array is written by every worker across ~27 cache lines and
+    /// false-shares badly (measured: +2 ms/tick median and a 10 ms spread on a 20k-entity archetype). A single field written with
+    /// test-then-<see cref="Interlocked.Or(ref int, int)"/> goes read-only after the first write of each component in the tick, so
+    /// the line is shared rather than ping-ponged.
+    /// </para>
+    /// </remarks>
+    internal int WrittenSlotUnion;
+
+    /// <summary>Prep-time snapshot of <see cref="WrittenSlotUnion"/> — the value Finalize reads when choosing which columns to emit.</summary>
+    internal int FenceWrittenSlots;
+
     /// <summary>Dirty cluster count (per-word non-zero count) at the end of Prep. Used for telemetry only.</summary>
     internal int FenceDirtyClusterCount;
 
@@ -603,9 +628,52 @@ internal sealed unsafe class ArchetypeClusterState
     /// <summary>Chunk capacity of the primary (non-null) segment.</summary>
     internal int PrimarySegmentCapacity => ClusterSegment?.ChunkCapacity ?? TransientSegment.ChunkCapacity;
 
-    /// <summary>Mark an entity slot as dirty for tick fence processing.</summary>
+    /// <summary>
+    /// Mark an entity slot dirty for tick-fence processing, recording WHICH component slot was written so the fence can emit only
+    /// the columns that actually changed (#559 §4.5).
+    /// </summary>
+    /// <param name="clusterChunkId">Cluster chunk holding the entity.</param>
+    /// <param name="slotIndex">The entity's slot within the cluster.</param>
+    /// <param name="componentSlot">Per-archetype component slot that was written.</param>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void SetDirty(int clusterChunkId, int slotIndex, int componentSlot)
+    {
+        // Test-then-OR: only the first write of this component in the tick pays the atomic; every later write is a load and a
+        // branch against a line no core is writing any more.
+        var bit = 1 << componentSlot;
+        if ((WrittenSlotUnion & bit) == 0)
+        {
+            Interlocked.Or(ref WrittenSlotUnion, bit);
+        }
+
+        // NOTE: must NOT delegate to the component-less overload — that one poisons the mask to AllSlotsWritten, which would
+        // undo the narrowing this overload exists to perform.
+        MarkEntityDirty(clusterChunkId, slotIndex);
+    }
+
+    /// <summary>
+    /// Mark an entity slot as dirty for tick fence processing, without identifying the component written.
+    /// </summary>
+    /// <remarks>
+    /// This is the FAIL-SAFE overload: it marks the cluster's written-slot mask as <see cref="AllSlotsWritten"/>, so the fence
+    /// emits every durable column for that cluster — exactly the behaviour before #559 §4.5. Callers that know which component
+    /// they wrote should use <see cref="SetDirty(int, int, int)"/> instead to narrow the emission. A caller that is added later
+    /// and forgets therefore over-emits (redundant bytes) rather than under-emits (lost data).
+    /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void SetDirty(int clusterChunkId, int slotIndex)
+    {
+        if (WrittenSlotUnion != AllSlotsWritten)
+        {
+            Interlocked.Exchange(ref WrittenSlotUnion, AllSlotsWritten);
+        }
+
+        MarkEntityDirty(clusterChunkId, slotIndex);
+    }
+
+    /// <summary>Dirty-bit + dormancy-wake half of <see cref="SetDirty(int, int)"/>, shared by both overloads.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void MarkEntityDirty(int clusterChunkId, int slotIndex)
     {
         int entityIndex = clusterChunkId * 64 + slotIndex;
         ClusterDirtyBitmap.Set(entityIndex);

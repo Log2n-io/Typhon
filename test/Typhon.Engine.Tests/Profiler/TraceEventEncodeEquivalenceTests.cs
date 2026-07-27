@@ -584,12 +584,14 @@ public class TraceEventEncodeEquivalenceTests
             },
             WaitUs = 1001u,
             ProducerThread = 202,
+            Retries = 7,
         };
 
         Span<byte> bufStruct = stackalloc byte[256];
         ev.EncodeTo(bufStruct, EndTs, out var lenStruct);
 
-        var golden = Convert.FromHexString("3D00DD0744443333222211111111000000000000DDDDCCCCBBBBAAAAF0DEBC9A78563412010F0F0F0F0F0F0F0FF0F0F0F0F0F0F0F0E9030000CA000000");
+        // Trailing 0700 = Retries (ushort, LE); length prefix 3F00 = 63 bytes (was 3D00 = 61 before the field was added).
+        var golden = Convert.FromHexString("3F00DD0744443333222211111111000000000000DDDDCCCCBBBBAAAAF0DEBC9A78563412010F0F0F0F0F0F0F0FF0F0F0F0F0F0F0F0E9030000CA0000000700");
         AssertSpanEqualsGolden(bufStruct, lenStruct, golden);
     }
 

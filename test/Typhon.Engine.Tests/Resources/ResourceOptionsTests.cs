@@ -17,7 +17,7 @@ public class ResourceOptionsTests
         var options = new ResourceOptions();
 
         Assert.That(options.MaxActiveTransactions, Is.EqualTo(1000));
-        Assert.That(options.WalRingBufferSizeBytes, Is.EqualTo(8 * 1024 * 1024), "Default WAL ring buffer should be 8 MB");
+        Assert.That(options.WalRingBufferSizeBytes, Is.EqualTo(64 * 1024 * 1024), "Default WAL ring buffer should be 64 MB (#559: sized for tail latency — see ResourceOptions remarks)");
         Assert.That(options.CheckpointIntervalMs, Is.EqualTo(30000), "Default checkpoint interval should be 30 seconds");
         Assert.That(options.CheckpointBarrierTimeoutMs, Is.EqualTo(30000), "Default checkpoint barrier timeout should be 30 seconds");
         Assert.That(options.PageChecksumVerification, Is.EqualTo(PageChecksumVerification.OnLoad));

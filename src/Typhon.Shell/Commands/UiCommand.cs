@@ -2,6 +2,7 @@ using System;
 using System.ComponentModel;
 using System.IO;
 using System.Threading;
+using Microsoft.Extensions.Logging;
 using Spectre.Console;
 using Spectre.Console.Cli;
 using Typhon.Workbench.Hosting;
@@ -110,6 +111,9 @@ internal sealed class UiCommand : Command<UiCommand.Settings>
             TracePath = tracePath,
             SchemaPath = schemaPath,
             OpenBrowser = !settings.NoBrowser,
+            // `typhon ui` is an end-user command, not a dev server: suppress ASP.NET's per-request + lifetime Info
+            // logging so the terminal stays clean. Warnings and errors still surface; the launch URL is printed too.
+            MinimumLogLevel = LogLevel.Warning,
         };
 
         AnsiConsole.MarkupLine($"[grey]Starting Typhon Workbench at {Markup.Escape(url)} — press Ctrl+C to stop.[/]");

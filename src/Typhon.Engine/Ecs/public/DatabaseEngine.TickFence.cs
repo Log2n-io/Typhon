@@ -88,6 +88,27 @@ public partial class DatabaseEngine
         return DurabilityLog.Append(ref batch, ref wc);
     }
 
+    /// <summary>Per-thread descriptor scratch for columnar fence emission — one entry per dirty cluster, payload-free (#559).</summary>
+    [ThreadStatic]
+    private static RecordCodec.FenceBlockDescriptor[] _fenceBlocks;
+
+    private long AppendFenceBlockBatch(
+        RecordCodec.FenceBlockDescriptor[] blocks,
+        int count,
+        ushort archetypeId,
+        long tickNumber,
+        int entityKeysOffset,
+        ReadOnlySpan<int> slotIndices,
+        ReadOnlySpan<int> componentSizes,
+        ReadOnlySpan<int> componentOffsets,
+        int totalComponentSize)
+    {
+        var wc = WaitContext.FromDeadline(Deadline.FromTimeout(TimeoutOptions.Current.DefaultCommitTimeout));
+        return DurabilityLog.AppendFenceBlocks(
+            blocks.AsSpan(0, count), archetypeId, tickNumber, entityKeysOffset,
+            slotIndices, componentSizes, componentOffsets, totalComponentSize, ref wc);
+    }
+
     /// <summary>
     /// Tick-fence body for a single <see cref="ComponentTable"/>. Encapsulates the per-table work historically inlined in <see cref="WriteTickFenceCore"/>'s
     /// loop: dirty-bitmap snapshot, WAL chunk serialization, shadow + spatial maintenance, dirty-ring archive. Returns the highest LSN published by this table
@@ -551,6 +572,10 @@ public partial class DatabaseEngine
         {
             var dirtyBits = clusterState.ClusterDirtyBitmap.Snapshot();
 
+            // Snapshot-and-clear the written-slot union in the same step as the dirty bitmap (#559 §4.5), so Finalize reads a
+            // stable value while writers for the NEXT tick start from zero.
+            clusterState.FenceWrittenSlots = Interlocked.Exchange(ref clusterState.WrittenSlotUnion, 0);
+
             // Mask dirty bits with live occupancy to skip destroyed entities whose dirty bit remained set.
             var accessor = clusterState.ClusterSegment.CreateChunkAccessor();
             try
@@ -777,69 +802,139 @@ public partial class DatabaseEngine
                 table.PreviousTickDirtyBitmap ??= Array.Empty<long>();
             }
 
+            // #568 — the declared durability window. Checkpoint archetypes emit NO fence WAL records; their SingleVersion values reach disk through the
+            // checkpoint, the same path cluster STRUCTURE has always used, so a crash costs up to one checkpoint interval of freshness (not existence).
+            //
+            // The gate sits HERE, after the dormancy sweep, the dirty-ring archive, PreviousTickDirtySnapshot and the ComponentTable flag propagation above,
+            // and NOT at the top of the method. The dirty bitmap has eleven consumers and WAL emit is one of them: zone-map recompute, migration detect and
+            // execute, AABB refresh, dormancy, the dirty ring, and both change-filtered dispatch surfaces all read it. Only the emission is optional.
+            //
+            // ClusterDurabilityTests pins both halves — the emission stops, and every other consumer keeps being fed.
+            //
+            // Versioned components are unaffected in either setting: their revision chain is logged at commit and is authoritative (see skipMask below), so
+            // no ClusterDurability value can lose a Versioned write.
+            if (meta.ClusterDurability == ClusterDurability.Checkpoint)
+            {
+                return highestLSN;
+            }
+
             var layout = clusterState.Layout;
-            var transientMask = meta.TransientSlotMask;
-            // Precompute the durable (non-transient) component slots' WAL identity once per archetype. Each becomes one Slot record
-            // per dirty entity (M4); the entity PK is read from the cluster's id array, so fence records are logical, never physical.
+            // Slots excluded from fence emission:
+            //   Transient — never persisted at all.
+            //   Versioned — the cluster slot holds only a HEAD *cache*; the revision chain is the truth and is logged at commit.
+            //     On reopen the HEAD is rebuilt from the chain (ArchetypeClusterState.RebuildVersionedHeadFromChain), so a fence
+            //     record for a Versioned slot is written, fsynced, retained and then ignored. Pure waste — do not emit it.
+            var skipMask = meta.TransientSlotMask | meta.VersionedSlotMask;
+            // Precompute the durable component slots' WAL identity once per archetype. Each becomes one Slot record per dirty
+            // entity (M4); the entity PK is read from the cluster's id array, so fence records are logical, never physical.
+            // Sizes and offsets are hoisted here too — they are per-archetype constants, and reading them inside the per-entity loop
+            // costs one bounds-checked array load per record (100k+ per tick on a large archetype) for a value that never changes.
             Span<int> durableSlots = stackalloc int[layout.ComponentCount];
-            Span<ushort> slotTypeIds = stackalloc ushort[layout.ComponentCount];
+            Span<int> durableSizes = stackalloc int[layout.ComponentCount];
+            Span<int> durableOffsets = stackalloc int[layout.ComponentCount];
             var durableCount = 0;
             for (var slot = 0; slot < layout.ComponentCount; slot++)
             {
-                if ((transientMask & (1 << slot)) != 0)
+                if ((skipMask & (1 << slot)) != 0)
                 {
                     continue;
                 }
 
                 durableSlots[durableCount] = slot;
-                slotTypeIds[durableCount] = (ushort)ArchetypeRegistry.GetComponentTypeId(engineState.SlotToComponentTable[slot].Definition.POCOType);
+                durableSizes[durableCount] = layout.ComponentSize(slot);
+                durableOffsets[durableCount] = layout.ComponentOffset(slot);
                 durableCount++;
             }
 
-            // One arena per thread — fence emission is concurrency-safe across distinct archetypes.
-            var fenceArena = _fenceArena ??= new CommitBatchArena();
-            fenceArena.Reset();
-            var batch = new CommitBatchBuilder(fenceArena, tickNumber, 0, fenceMode: true);
+            // Nothing durable to emit (every slot Transient and/or Versioned) — skip the whole walk rather than building empty batches.
+            if (durableCount == 0)
+            {
+                return highestLSN;
+            }
+
+            var entityIdsOffset = layout.EntityIdsOffset;
+
+            // #559 §4.5 — narrow the emitted columns to the component slots actually written this tick. The mask is a single union per ARCHETYPE, not one per
+            // cluster: per-cluster was implemented and measured first and is slower (+2.1 ms/tick median, ~10 ms spread) because the array is written by every
+            // worker on every dirty-marking write and false-shares. The emitter only ever consumes the union, so the finer granularity bought nothing it could
+            // use — hence one column set for all clusters of the archetype. The union is fail-safe: a writer that did not identify its component recorded
+            // AllSlotsWritten, so the archetype falls back to emitting everything.
+            var fenceWritten = clusterState.FenceWrittenSlots;
+            var durableMask = 0;
+            for (var d = 0; d < durableCount; d++)
+            {
+                durableMask |= 1 << durableSlots[d];
+            }
+
+            var activeMask = fenceWritten & durableMask;
+            if (activeMask == 0)
+            {
+                return highestLSN;   // dirty entities, but nothing durable was written to them
+            }
+
+            Span<int> slotIndices = stackalloc int[durableCount];
+            Span<int> compSizes = stackalloc int[durableCount];
+            Span<int> compOffsets = stackalloc int[durableCount];
+            var columnCount = 0;
+            var totalCompSize = 0;
+            for (var d = 0; d < durableCount; d++)
+            {
+                if ((activeMask & (1 << durableSlots[d])) == 0)
+                {
+                    continue;
+                }
+
+                slotIndices[columnCount] = durableSlots[d];
+                compSizes[columnCount] = durableSizes[d];
+                compOffsets[columnCount] = durableOffsets[d];
+                totalCompSize += durableSizes[d];
+                columnCount++;
+            }
+
+            slotIndices = slotIndices[..columnCount];
+            compSizes = compSizes[..columnCount];
+            compOffsets = compOffsets[..columnCount];
+
+            // Columnar emission (#559): one FenceBlock record per dirty cluster instead of one Slot record per (entity, component).
+            // A cluster's entity keys and each component's values are already contiguous in the SoA, so every part of the payload
+            // is a single bulk copy — the codec copies straight out of the page into the WAL claim, with no staging arena.
+            var blocks = _fenceBlocks ??= new RecordCodec.FenceBlockDescriptor[64];
+            var blockCount = 0;
             var batchBytes = 0;
-            var recOverhead = RecordHeader.SizeInBytes + SlotRecordBody.FixedSize;
 
             for (var wi = 0; wi < dirtyBits.Length; wi++)
             {
                 var word = dirtyBits[wi];
-                while (word != 0)
+                if (word == 0)
                 {
-                    var bit = BitOperations.TrailingZeroCount((ulong)word);
-                    word &= word - 1;
-                    var slotIndex = bit;
-
-                    var clusterBase = accessor.GetChunkAddress(wi);
-                    var entityPk = *(long*)(clusterBase + layout.EntityIdsOffset + slotIndex * 8);
-
-                    for (var d = 0; d < durableCount; d++)
-                    {
-                        var slot = durableSlots[d];
-                        var compSize = layout.ComponentSize(slot);
-
-                        // Flush before the frame would exceed the per-Append cap (fence records are individually committed).
-                        if (batchBytes > 0 && batchBytes + recOverhead + compSize > MaxFenceBatchBytes)
-                        {
-                            highestLSN = Math.Max(highestLSN, AppendFenceBatch(ref batch));
-                            fenceArena.Reset();
-                            batch = new CommitBatchBuilder(fenceArena, tickNumber, 0, fenceMode: true);
-                            batchBytes = 0;
-                        }
-
-                        var src = clusterBase + layout.ComponentOffset(slot) + slotIndex * compSize;
-                        // Wire identity is the per-archetype slot (LOG-06); `slot` is that index (durableSlots[d]).
-                        batch.AddSlot(entityPk, (ushort)slot, new ReadOnlySpan<byte>(src, compSize));
-                        batchBytes += recOverhead + compSize;
-                    }
+                    continue;
                 }
+
+                // Emit the contiguous slot RANGE that spans the dirty bits, not the whole cluster and not a gather: an all-dirty
+                // cluster degenerates to one copy per column, a single dirty entity to one entity. Clean entities inside the
+                // range ride along — redundant, never wrong — and DirtyMask records which ones actually changed.
+                var firstSlot = BitOperations.TrailingZeroCount((ulong)word);
+                var lastSlot = 63 - BitOperations.LeadingZeroCount((ulong)word);
+                var slotSpan = lastSlot - firstSlot + 1;
+                var recWire = RecordCodec.FenceBlockWireSize(columnCount, slotSpan, totalCompSize);
+
+                if (blockCount > 0 && (batchBytes + recWire > MaxFenceBatchBytes || blockCount == blocks.Length))
+                {
+                    highestLSN = Math.Max(highestLSN, AppendFenceBlockBatch(blocks, blockCount, meta.ArchetypeId, tickNumber,
+                        entityIdsOffset, slotIndices, compSizes, compOffsets, totalCompSize));
+                    blockCount = 0;
+                    batchBytes = 0;
+                }
+
+                blocks[blockCount++] = new RecordCodec.FenceBlockDescriptor(
+                    (nint)accessor.GetChunkAddress(wi), wi, (byte)firstSlot, (byte)slotSpan, (ulong)word >> firstSlot);
+                batchBytes += recWire;
             }
 
-            if (!batch.IsEmpty)
+            if (blockCount > 0)
             {
-                highestLSN = Math.Max(highestLSN, AppendFenceBatch(ref batch));
+                highestLSN = Math.Max(highestLSN, AppendFenceBlockBatch(blocks, blockCount, meta.ArchetypeId, tickNumber,
+                    entityIdsOffset, slotIndices, compSizes, compOffsets, totalCompSize));
             }
         }
         finally

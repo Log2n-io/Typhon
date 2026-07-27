@@ -91,8 +91,14 @@ gh issue edit <n> --repo log2n-io/Typhon --milestone "alpha-1"
 # Comment (post the drafted reply)
 gh issue comment <n> --repo log2n-io/Typhon --body "<reply>"
 ```
-- **Area / Product** are issue-level custom fields — set via the web UI or GraphQL (see `/create-issue`
-  Step 6); mirror the parent Epic if linked.
+- **Area / Product / Claude Code Discussion** are issue-level custom fields — set them in one
+  `setIssueFieldValue` mutation; **full recipe + field/option IDs in [`../_helpers.md` § "Issue-level custom
+  fields"](../_helpers.md)**. Mirror the parent Epic if linked.
+- **Always set `Claude Code Discussion`** (`IFT_kgDOAqrjLw`, text) to this session's
+  `https://claude.ai/code/session_…` URL when you triage — the analysis lives in the conversation, and the field is
+  how a reader gets back to it. Available on every Issue Type **except `Task`**.
+- **Area — don't just copy the filer's choice.** `Execution` is the Unit-of-Work / commit-path layer; the tick loop
+  and `DagScheduler` are `Runtime`. Reclassify when wrong and say so in the reply.
 - **Project board**: `gh project item-add 1 --owner Log2n-io --url <url>` then Status (see `/create-issue`
   Steps 4–5 for the item-id + field IDs).
 - **Closing**: `gh issue close <n> --repo log2n-io/Typhon --reason "not planned"` (or `completed`), after

@@ -26,6 +26,54 @@ internal sealed class DurabilityLog : IDurabilityLog
 
     public void WaitForDurable(long lsn, ref WaitContext ctx) => _wal.WaitForDurable(lsn, ref ctx);
 
+    /// <summary>
+    /// Appends a run of columnar tick-fence blocks (#559). Unlike <see cref="Append(ref CommitBatchBuilder, ref WaitContext)"/>
+    /// this path never stages payload: the size is a pure function of the descriptors, so it measures, claims, and has the codec
+    /// copy each cluster's SoA columns straight into the claim. Returns the highest LSN published, or 0 for an empty run.
+    /// </summary>
+    public long AppendFenceBlocks(
+        ReadOnlySpan<RecordCodec.FenceBlockDescriptor> blocks,
+        ushort archetypeId,
+        long tsn,
+        int entityKeysOffset,
+        ReadOnlySpan<int> slotIndices,
+        ReadOnlySpan<int> componentSizes,
+        ReadOnlySpan<int> componentOffsets,
+        int totalComponentSize,
+        ref WaitContext ctx)
+    {
+        if (blocks.Length == 0)
+        {
+            return 0;
+        }
+
+        var size = RecordCodec.MeasureFenceBlocks(blocks, slotIndices.Length, totalComponentSize, out _);
+
+        // TryClaim throws WalBackPressureTimeoutException / WalClaimTooLargeException on failure (LOG-01) — never a sentinel.
+        var claim = _wal.CommitBuffer.TryClaim(size, blocks.Length, ref ctx);
+        try
+        {
+            var written = RecordCodec.WriteFenceBlocks(
+                claim.DataSpan, blocks, archetypeId, claim.FirstLSN, tsn,
+                entityKeysOffset, slotIndices, componentSizes, componentOffsets, totalComponentSize);
+
+            // Zero the frame-alignment slack after the last chunk, as Append does: stale bytes from a prior claim would
+            // otherwise be misread as a chunk header during recovery.
+            if (written < claim.DataSpan.Length)
+            {
+                claim.DataSpan[written..].Clear();
+            }
+
+            _wal.CommitBuffer.Publish(ref claim);
+            return claim.FirstLSN + blocks.Length - 1;
+        }
+        catch
+        {
+            _wal.CommitBuffer.AbandonClaim(ref claim);
+            throw;
+        }
+    }
+
     public long Append(ref CommitBatchBuilder batch, ref WaitContext ctx)
     {
         if (batch.IsEmpty)

@@ -30,13 +30,13 @@
         <None Include="PACKAGE.md" Pack="true" PackagePath="" />
     </ItemGroup>
 
-    <!-- `typhon new` scaffold templates (#532/F2). Embedded from the LIVE in-repo source — the SWG Light sample
-         (Harvester.cs) + the guide's app template (Program.cs/Systems.cs/telemetry.json/.gitignore) — so the CLI's
+    <!-- `typhon new` scaffold templates (#532/F2). Embedded from the LIVE in-repo source — the world-shard Light
+         sample (Character.cs) + the guide's app template (Program.cs/Systems.cs/telemetry.json/.gitignore) — so the CLI's
          emitted starter can never drift from what the guide teaches and the samples compile. These files live OUTSIDE
          the project cone (`..\..\`), so the SDK's default `**/*.cs` glob does NOT compile them into typhon.dll; they
          are embedded only. Explicit LogicalName because MSBuild's default resource naming is unreliable out-of-cone. -->
     <ItemGroup>
-        <EmbeddedResource Include="..\..\samples\Typhon.Samples.Swg\Light\Harvester.cs" LogicalName="Typhon.Shell.Templates.Harvester.cs" />
+        <EmbeddedResource Include="..\..\samples\Typhon.Samples.Swg\Light\Character.cs" LogicalName="Typhon.Shell.Templates.Character.cs" />
         <EmbeddedResource Include="..\..\doc\guide\example\Program.cs" LogicalName="Typhon.Shell.Templates.Program.cs" />
         <EmbeddedResource Include="..\..\doc\guide\example\Systems.cs" LogicalName="Typhon.Shell.Templates.Systems.cs" />
         <EmbeddedResource Include="..\..\doc\guide\example\typhon.telemetry.json" LogicalName="Typhon.Shell.Templates.typhon.telemetry.json" />

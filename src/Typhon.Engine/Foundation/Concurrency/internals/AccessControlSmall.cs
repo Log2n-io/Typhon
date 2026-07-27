@@ -51,6 +51,15 @@ internal struct AccessControlSmall
     /// <summary>True if the current thread holds exclusive access.</summary>
     public bool IsLockedByCurrentThread => Environment.CurrentManagedThreadId == LockedByThreadId;
 
+    /// <summary>
+    /// True if ANY thread currently holds exclusive access. Probe for optimistic (seqlock-style) readers: check no-exclusive-holder before and after an
+    /// unlocked read, combined with a content re-read, to detect a concurrent locked mutation. The <see cref="Volatile"/>.Read acquire load is REQUIRED
+    /// by the protocol: it keeps the probe ordered with the caller's other volatile loads on arm64 (ldar) and stops JIT reorder/CSE everywhere; on x64
+    /// it compiles to a plain mov (TSO). The reader-side chain only works because every mutator enters/exits this lock via <see cref="Interlocked"/>
+    /// (full fences on both architectures).
+    /// </summary>
+    internal bool IsExclusivelyHeld => (Volatile.Read(ref _data) >> ThreadIdShift) != 0;
+
     /// <summary>Thread ID holding exclusive access, or 0 if not held.</summary>
     public int LockedByThreadId => _data >> ThreadIdShift;
 

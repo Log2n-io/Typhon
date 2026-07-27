@@ -6,9 +6,9 @@
 #   1. installs the `Typhon` package into a fresh console project,
 #   2. compiles the canonical SWG Light schema source (the same .cs the `typhon new` scaffold
 #      emits — samples/Typhon.Samples.Swg/Light/) STANDALONE against the package (#531),
-#   3. builds it — `Harvester.ReadAll(...)` compiles ONLY if the ArchetypeAccessorGenerator shipped
+#   3. builds it — `Character.ReadAll(...)` compiles ONLY if the ArchetypeAccessorGenerator shipped
 #      inside the package (analyzers/dotnet/cs) AND ran in the *consumer's* compilation,
-#   4. runs it — opening a real DB, spawning a Harvester, and reading it back two ways
+#   4. runs it — opening a real DB, spawning a Character, and reading it back two ways
 #      (runtime `Read` + generated `ReadAll`).
 #
 # The transitive dependencies (MemoryPack, K4os.LZ4, Microsoft.Extensions.*, diagnostics) are
@@ -76,43 +76,46 @@ using System;
 using System.Numerics;
 using Typhon.Engine;
 using Typhon.Schema.Definition;
-using Typhon.Samples.Swg;
+using Typhon.Samples.Swg.Shard;
 
-// Footprint carries a [SpatialIndex], so Harvester is cluster-eligible — a grid is required before the archetypes wire.
+// Bounds carries a [SpatialIndex], so Character is cluster-eligible - a grid is required before the archetypes wire.
 using var dbe = DatabaseEngine.Open("smoke.typhon", o => o
-    .Register<Position>().Register<Footprint>().Register<Cargo>().Register<Drift>().Register<Extractor>()
+    .Register<Transform>().Register<Bounds>().Register<Ham>().Register<Faction>().Register<Wallet>().Register<Intent>()
     .ConfigureSpatialGrid(new SpatialGridConfig(Vector2.Zero, new Vector2(1000f, 1000f), cellSize: 50f)));
-    // archetypes self-register at assembly load (#514) — no RegisterArchetype call
+    // archetypes self-register at assembly load (#514) - no RegisterArchetype call
 
-EntityId drone;
+EntityId hero;
 using (var tx = dbe.CreateQuickTransaction())
 {
-    drone = tx.Spawn<Harvester>(
-        Harvester.Position.Set(new Position { P = new Point2F { X = 10, Y = 20 } }),
-        Harvester.Footprint.Set(new Footprint { Box = new AABB2F { MinX = 10, MaxX = 10, MinY = 20, MaxY = 20 } }),
-        Harvester.Cargo.Set(new Cargo { Amount = 250, Capacity = 1000 }),
-        Harvester.Drift.Set(new Drift { Dx = 0, Dy = 0 }),
-        Harvester.Extractor.Set(new Extractor { ResourceKind = 1, Rate = 5 }));
+    hero = tx.Spawn<Character>(
+        Character.Transform.Set(new Transform { Pos = new Point2F { X = 10, Y = 20 }, Vel = new Point2F { X = 0, Y = 0 } }),
+        Character.Bounds.Set(new Bounds { Box = new AABB2F { MinX = 10, MaxX = 10, MinY = 20, MaxY = 20 } }),
+        Character.Ham.Set(new Ham { Health = 250, MaxHealth = 1000, Action = 100, MaxAction = 100, Mind = 100, MaxMind = 100 }),
+        Character.Faction.Set(new Faction { Value = Factions.Hutt }),
+        Character.Wallet.Set(new Wallet { Credits = 500 }),
+        Character.Intent.Set(new Intent()));
     tx.Commit();
 }
 
-// (a) Runtime read via the engine API.
+// (a) Runtime read via the engine API. Ham is SingleVersion (cluster column), Wallet is Versioned (revision chain) -
+//     reading both proves the package wires the two storage modes, not just the easy one.
 using (var tx = dbe.CreateQuickTransaction())
 {
-    var e = tx.Open(drone);
-    var pos = e.Read(Harvester.Position);
-    var cargo = e.Read(Harvester.Cargo);
-    if (cargo.Amount != 250 || cargo.Capacity != 1000 || pos.P.X != 10f || pos.P.Y != 20f)
-        throw new Exception($"runtime read mismatch: cargo {cargo.Amount}/{cargo.Capacity} at ({pos.P.X},{pos.P.Y})");
+    var e = tx.Open(hero);
+    var xform = e.Read(Character.Transform);
+    var ham = e.Read(Character.Ham);
+    var wallet = e.Read(Character.Wallet);
+    if (ham.Health != 250 || ham.MaxHealth != 1000 || xform.Pos.X != 10f || xform.Pos.Y != 20f || wallet.Credits != 500)
+        throw new Exception($"runtime read mismatch: ham {ham.Health}/{ham.MaxHealth} at ({xform.Pos.X},{xform.Pos.Y}) credits={wallet.Credits}");
 }
 
-// (b) GENERATED accessor. `Harvester.ReadAll` exists ONLY if the ArchetypeAccessorGenerator shipped in the
-//     package and ran in this consumer compilation — this line is the crux of the smoke test.
+// (b) GENERATED accessor. `Character.ReadAll` exists ONLY if the ArchetypeAccessorGenerator shipped in the
+//     package and ran in this consumer compilation - this line is the crux of the smoke test.
 using (var tx = dbe.CreateQuickTransaction())
 {
-    var h = Harvester.ReadAll(tx, drone);
-    if (h.Cargo.Amount != 250 || h.Position.P.X != 10f)
-        throw new Exception($"generated ReadAll mismatch: cargo={h.Cargo.Amount} pos.x={h.Position.P.X}");
+    var c = Character.ReadAll(tx, hero);
+    if (c.Ham.Health != 250 || c.Transform.Pos.X != 10f || c.Faction.Value != Factions.Hutt)
+        throw new Exception($"generated ReadAll mismatch: health={c.Ham.Health} pos.x={c.Transform.Pos.X} faction={c.Faction.Value}");
 }
 
 Console.WriteLine("SMOKE OK: package installed, generator fired, DB spawn+read verified.");

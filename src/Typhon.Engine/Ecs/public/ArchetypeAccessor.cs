@@ -94,7 +94,8 @@ public unsafe ref struct ArchetypeAccessor<TArch> where TArch : class
     private EntityRef Resolve(EntityId id, bool writable)
     {
         byte* readBuf = stackalloc byte[_recordSize];
-        if (!_engineState.EntityMap.TryGet(id.EntityKey, readBuf, ref _entityMapAccessor))
+        // Hinted lookup — see the note in EntityAccessor.ResolveEntity. Same map, same key shape, same reason.
+        if (!_engineState.EntityMap.TryGetWithHint(id.EntityKey, readBuf, ref _entityMapAccessor))
         {
             return default;
         }

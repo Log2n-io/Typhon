@@ -146,6 +146,13 @@ public sealed class ArchetypeAttribute : Attribute
     public string PreviousName { get; set; }
 
     /// <summary>
+    /// Durability window for this archetype's <see cref="StorageMode.SingleVersion"/> cluster values. Default is <see cref="ClusterDurability.FenceWal"/> (WAL
+    /// records at every tick fence). Set to <see cref="ClusterDurability.Checkpoint"/> to stop emitting them and accept checkpoint-interval loss for that data —
+    /// see <see cref="ClusterDurability"/> for what that trades. Ignored for archetypes that are not cluster-eligible.
+    /// </summary>
+    public ClusterDurability ClusterDurability { get; set; } = ClusterDurability.FenceWal;
+
+    /// <summary>
     /// Declares an archetype. Its durable identity is <see cref="Name"/> (defaulting to the declaring CLR type's simple name): the engine assigns the per-process
     /// catalog id and the per-DB routing id automatically, and re-matches persisted archetypes by <see cref="Name"/> then <see cref="PreviousName"/> on reopen.
     /// </summary>

@@ -4,8 +4,18 @@
       "Enabled": true,
       "Trace": "captures/guide.typhon-trace",
       "CpuSampling": { "Enabled": true },
+      "GcTracing":   { "Enabled": true },
       "Scheduler":   { "Enabled": true },
-      "Gauges":      { "Enabled": true }
+      "Gauges":      { "Enabled": true },
+
+      "Runtime": {
+        "Enabled": true,
+        "Phase":            { "Enabled": false },
+        "Transaction":      { "Enabled": false },
+        "Subscription":     { "Enabled": false },
+        "WriteTickFence":   { "Enabled": false },
+        "ThreadScheduling": { "Enabled": true }
+      }
     }
   }
 }

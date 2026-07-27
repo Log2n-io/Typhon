@@ -7,7 +7,7 @@ using System.Text.RegularExpressions;
 namespace Typhon.Shell.Commands;
 
 /// <summary>
-/// Materialises the <c>typhon new</c> starter project. The schema (<c>Harvester.cs</c>) and the app template
+/// Materialises the <c>typhon new</c> starter project. The schema (<c>Character.cs</c>) and the app template
 /// (<c>Program.cs</c>/<c>Systems.cs</c>/<c>typhon.telemetry.json</c>/<c>.gitignore</c>) are emitted <b>verbatim</b> from
 /// resources embedded in this assembly — single-sourced from the in-repo SWG Light sample and the guide example, so the
 /// scaffold can never drift from what the guide teaches (#532/F2). The <c>.csproj</c> and <c>README.md</c> are generated
@@ -16,13 +16,42 @@ namespace Typhon.Shell.Commands;
 /// </summary>
 internal static class ProjectScaffolder
 {
-    /// <summary>The published <c>Typhon</c> package version the scaffold pins. Bump on each engine release.</summary>
-    internal const string TyphonPackageVersion = "0.0.1-alpha.3";
+    /// <summary>
+    /// The <c>Typhon</c> package version the scaffold pins. Tracks the CLI's <b>own</b> version — the tool and the
+    /// engine package ship together from the same git tag (MinVer), so the CLI's version is exactly the matching
+    /// engine version. This removes the manual per-release bump that previously lagged: a stale pin scaffolds a
+    /// pre-#514 engine whose <c>[Archetype]</c> still requires an id, so <c>dotnet run</c> fails to compile.
+    /// </summary>
+    internal static readonly string TyphonPackageVersion = ResolveTyphonPackageVersion();
+
+    /// <summary>Known-good published fallback used only when the assembly carries no MinVer-stamped prerelease version.</summary>
+    private const string FallbackTyphonPackageVersion = "0.0.1-alpha.4";
+
+    /// <summary>
+    /// Reads the CLI's own package version from its MinVer-stamped <see cref="AssemblyInformationalVersionAttribute"/>
+    /// (format <c>&lt;version&gt;+&lt;sha&gt;</c>), returning the NuGet-valid <c>&lt;version&gt;</c>. Falls back to
+    /// <see cref="FallbackTyphonPackageVersion"/> when the attribute is absent or not a prerelease (e.g. a bare
+    /// <c>dotnet build</c> with the default <c>1.0.0</c>), since the engine is published prerelease-only.
+    /// </summary>
+    private static string ResolveTyphonPackageVersion()
+    {
+        var informational = typeof(ProjectScaffolder).Assembly
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+        if (string.IsNullOrWhiteSpace(informational))
+        {
+            return FallbackTyphonPackageVersion;
+        }
+
+        var plus = informational.IndexOf('+');
+        var version = plus >= 0 ? informational[..plus] : informational;
+
+        return version.Contains('-') ? version : FallbackTyphonPackageVersion;
+    }
 
     /// <summary>Embedded template resources (assembly-manifest logical name → emitted file name), copied byte-for-byte.</summary>
     internal static readonly IReadOnlyList<(string ResourceName, string OutputFile)> EmbeddedTemplates = new[]
     {
-        ("Typhon.Shell.Templates.Harvester.cs", "Harvester.cs"),
+        ("Typhon.Shell.Templates.Character.cs", "Character.cs"),
         ("Typhon.Shell.Templates.Program.cs", "Program.cs"),
         ("Typhon.Shell.Templates.Systems.cs", "Systems.cs"),
         ("Typhon.Shell.Templates.typhon.telemetry.json", "typhon.telemetry.json"),
@@ -88,9 +117,10 @@ internal static class ProjectScaffolder
         $"""
         # {projectName}
 
-        A Typhon starter app, scaffolded by `typhon new`. It models a small world of roaming **harvester drones** (the
-        SWG Light sample), runs the Typhon runtime for a few dozen ticks, and — because profiling is enabled in
-        `typhon.telemetry.json` — writes a profiler trace you can open in the Workbench.
+        A Typhon starter app, scaffolded by `typhon new`. It models a small **real-time world shard** — a planet full of
+        characters that roam, regenerate their HAM pools, and trade credits — runs the Typhon runtime for a few hundred
+        ticks, and — because profiling is enabled in `typhon.telemetry.json` — writes a profiler trace you can open in
+        the Workbench.
 
         ## Run it
 
@@ -98,7 +128,7 @@ internal static class ProjectScaffolder
         dotnet run
         ```
 
-        The first run restores the `Typhon` package from NuGet, spawns drones, ticks the runtime, and writes a
+        The first run restores the `Typhon` package from NuGet, deploys the shard, ticks the runtime, and writes a
         non-empty `./captures/guide.typhon-trace` — with zero edits.
 
         ## Explore the trace
@@ -111,8 +141,8 @@ internal static class ProjectScaffolder
 
         | File | What it is |
         |------|------------|
-        | `Harvester.cs` | The data model — the `Harvester` archetype and its components (one per storage mode + spatial + index). |
-        | `Systems.cs` | The tick-loop systems: spawn drones, roam, keep the spatial index coherent, accumulate cargo. |
+        | `Character.cs` | The data model — the `Character` archetype and its components, each in the storage mode its access pattern needs (SingleVersion hot state + spatial + index, one Versioned wallet, Transient scratch). |
+        | `Systems.cs` | The tick-loop systems: spawn characters, move + regenerate them lock-free, keep the spatial index coherent, and settle credit trades as atomic Versioned transactions. |
         | `Program.cs` | Opens the engine, walks the API (spawn / read / transact / query / view), then runs the runtime. |
         | `typhon.telemetry.json` | Turns on config-driven profiling (the engine self-wires it; no code needed). |
 

@@ -297,6 +297,133 @@ unsafe class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStore> where
         }
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // Hinted read path (per-key location cache)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Power-of-2 location-hint cache: low key bits → packed <c>((bucketChunkId &lt;&lt; 8) | indexInBucket) + 1</c> (0 = empty slot). Pure accelerator
+    /// for <see cref="TryGetWithHint"/>: a valid hint skips the hash + bucket-directory resolve + chain scan (one chunk-address translation + key compare
+    /// instead). Hints are stored only for entries found in a bucket ROOT chunk — roots are never freed while the map lives (only empty overflow chunks
+    /// are, see <see cref="RemoveFromChain"/>) — so a stale hint can never dereference a freed chunk. Staleness and slot collisions are caught by the
+    /// EntryCount/key compare + OLC validate (whose pre-validation barrier makes the plain data reads safe on arm64 — see
+    /// <see cref="OlcLatch.ValidateVersion"/>) and fall back to the full lookup, which refreshes the hint. Slots are aligned 8-byte longs (single-copy
+    /// atomic on x64 and arm64); a torn/stale slot is validated like any other hint. No correctness dependency — the cache can be dropped at any time.
+    /// </summary>
+    private long[] _locationHints;
+
+    /// <summary>Hint-cache slot count ceiling (2^20 slots = 8 MiB) — bounds per-map memory on huge maps; beyond it collisions just lower the hit rate.</summary>
+    private const int MaxHintSlots = 1 << 20;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static int HintSlot(TKey key, int length) =>
+        sizeof(TKey) == 8
+            ? (int)(Unsafe.As<TKey, long>(ref key) & (length - 1))
+            : (int)(ComputeHash(key) & (uint)(length - 1));
+
+    /// <summary>
+    /// <see cref="TryGet"/> with the location-hint cache in front: monotonic dense keys (e.g. EntityKey) hit the hint slot directly and resolve in a
+    /// single bucket-chunk visit. Identical semantics/result to <see cref="TryGet"/>.
+    /// </summary>
+    public bool TryGetWithHint(TKey key, byte* valueOut, ref ChunkAccessor<TStore> accessor)
+    {
+        var hints = _locationHints;
+        if (hints != null)
+        {
+            long packedLoc = hints[HintSlot(key, hints.Length)];
+            if (packedLoc != 0)
+            {
+                long loc = packedLoc - 1;
+                int hChunkId = (int)(loc >> 8);
+                int hIndex = (int)(loc & 0xFF);
+                byte* addr = accessor.GetChunkAddress(hChunkId);
+                ref var header = ref GetHeader(addr);
+                var latch = new OlcLatch(ref header.OlcVersion);
+                int version = latch.ReadVersion();
+                if (version != 0 && hIndex < header.EntryCount && KeysPtr(addr)[hIndex].Equals(key))
+                {
+                    Unsafe.CopyBlock(valueOut, ValueAt(addr, hIndex), (uint)_valueSize);
+                    if (latch.ValidateVersion(version))
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return TryGetFullAndRefreshHint(key, valueOut, ref accessor);
+    }
+
+    /// <summary>Full <see cref="TryGet"/> lookup that additionally stores/refreshes the location hint on a root-chunk hit.</summary>
+    private bool TryGetFullAndRefreshHint(TKey key, byte* valueOut, ref ChunkAccessor<TStore> accessor)
+    {
+        uint hash = ComputeHash(key);
+
+        while (true)
+        {
+            long packed = PackedMeta;
+            var (level, next, _) = UnpackMeta(packed);
+            int bucket = ResolveBucket(hash, level, next, N0);
+            int chunkId = GetBucketChunkId(bucket, ref accessor);
+
+            byte* addr = accessor.GetChunkAddress(chunkId);
+            ref var header = ref GetHeader(addr);
+
+            var latch = new OlcLatch(ref header.OlcVersion);
+            int version = latch.ReadVersion();
+            if (version == 0)
+            {
+                Interlocked.Increment(ref _olcRestarts);
+                continue;
+            }
+
+            bool found = ScanChain(chunkId, key, ref accessor, out int fChunkId, out int fIndex);
+            if (found)
+            {
+                byte* fAddr = accessor.GetChunkAddress(fChunkId);
+                Unsafe.CopyBlock(valueOut, ValueAt(fAddr, fIndex), (uint)_valueSize);
+            }
+
+            if (!latch.ValidateVersion(version))
+            {
+                Interlocked.Increment(ref _olcRestarts);
+                continue;
+            }
+
+            if (!found && PackedMeta != packed)
+            {
+                Interlocked.Increment(ref _olcRestarts);
+                continue;
+            }
+
+            // Root-chunk hits only (see _locationHints doc) — overflow chunks can be freed, roots cannot.
+            if (found && fChunkId == chunkId)
+            {
+                StoreHint(key, fChunkId, fIndex, level, next);
+            }
+
+            return found;
+        }
+    }
+
+    private void StoreHint(TKey key, int chunkId, int index, int level, int next)
+    {
+        var hints = _locationHints;
+
+        // Size the cache to the map: pow2 ≥ bucketCount × bucketCapacity, floor 4096, ceiling MaxHintSlots. Growing replaces the array (old hints
+        // re-warm lazily); readers always index with the local array's own length, so a concurrent swap is benign.
+        int totalBuckets = (N0 << level) + next;
+        long target = Math.Min((long)totalBuckets * _bucketCapacity, MaxHintSlots);
+        int desired = (int)BitOperations.RoundUpToPowerOf2((uint)Math.Max(4096, target));
+        if (hints == null || hints.Length < desired)
+        {
+            hints = new long[desired];
+            _locationHints = hints;
+        }
+
+        hints[HintSlot(key, hints.Length)] = (((long)chunkId << 8) | (uint)index) + 1;
+    }
+
     /// <summary>
     /// Look up a key and return a pointer to the value in-place. The pointer is valid only while
     /// the chunk stays pinned (before OLC validation). Use <see cref="TryGet"/> for safe access.

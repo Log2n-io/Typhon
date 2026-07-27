@@ -54,6 +54,11 @@ internal ref partial struct DurabilityWalBackpressureEvent
     public uint WaitUs;
     [BeginParam]
     public int ProducerThread;
+
+    /// <summary>Wait-loop iterations before the swap was observed. 1 = the signal arrived on the first block; higher means the
+    /// bounded backstop fired, i.e. a lost wake-up or a genuinely slow writer.</summary>
+    [BeginParam]
+    public ushort Retries;
 }
 
 // ── Checkpoint depth spans ──

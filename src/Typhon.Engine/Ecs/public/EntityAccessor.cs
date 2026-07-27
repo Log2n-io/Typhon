@@ -39,6 +39,13 @@ public partial class EntityAccessor : IDisposable
     // always-on. The check itself is gated by CheckConfig.Enabled, so this 4-byte field is the only unconditional cost.
     private protected int _owningThreadId;
 
+    /// <summary>
+    /// True when this accessor entered an epoch scope in <see cref="InitLightweight"/> that it never exits — the PointInTimeAccessor worker path. Lets
+    /// <c>ResolveEntity</c> skip <c>EpochManager.IsCurrentThreadInScope</c> (two <c>[ThreadStatic]</c> reads plus a padded-slot load) on every resolve.
+    /// False on every other path, where the original check still runs.
+    /// </summary>
+    private protected bool _ownsPersistentEpochScope;
+
     private protected Dictionary<Type, ComponentInfo> _componentInfos;
 
     /// <summary>Array-indexed ComponentInfo cache — O(1) lookup by componentTypeId. Avoids Dictionary hash + equality overhead on hot path.</summary>
@@ -107,6 +114,10 @@ public partial class EntityAccessor : IDisposable
         // The epoch scope is cleaned up when the EpochManager is disposed with the DatabaseEngine.
         // Runtime integration (#211) will add proper per-worker epoch cleanup hooks.
         _ = _epochManager.EnterScope();
+        // The scope entered above is never exited for this accessor's lifetime (see the note on Dispose omission), and the accessor is thread-affine
+        // (_owningThreadId below). So "is this thread in an epoch scope?" is provably true from here on, and ResolveEntity can skip asking — that question
+        // costs two [ThreadStatic] reads plus a padded-slot load on EVERY entity resolve.
+        _ownsPersistentEpochScope = true;
         _isDisposed = false;
         _owningThreadId = Environment.CurrentManagedThreadId;
         _entityOperationCount = 0;
@@ -349,6 +360,7 @@ public partial class EntityAccessor : IDisposable
         _dbe = null;
         _epochManager = null;
         _owningThreadId = 0;
+        _ownsPersistentEpochScope = false;
         if (_hasEntityMapCache)
         {
             _entityMapCacheAccessor.Dispose();

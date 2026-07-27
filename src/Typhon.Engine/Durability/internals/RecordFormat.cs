@@ -29,6 +29,13 @@ internal enum RecordKind : byte
 
     /// <summary>Bulk-load session manifest (<see cref="BulkManifestRecordBody"/>).</summary>
     BulkManifest = 4,
+
+    /// <summary>
+    /// Tick-fence columnar block for one cluster (<see cref="FenceBlockRecordBody"/>). Carries a contiguous RANGE of the
+    /// cluster's entity slots, with the entity-key array and each durable component's SoA column copied in bulk. Replaces
+    /// the per-(entity, component) <see cref="Slot"/> records the fence used to emit.
+    /// </summary>
+    FenceBlock = 5,
 }
 
 /// <summary>Record-header flag bits (02 §3.0, RecordHeader.Flags).</summary>
@@ -164,6 +171,51 @@ internal static class CollectionDeltaRecordBody
     public const int IndexOffset = 14;          // int
     public const int ElementLengthOffset = 18;  // ushort
     public const int FixedSize = 20;            // element bytes follow
+}
+
+/// <summary>
+/// FenceBlockRecord body layout (Kind=5) — 18-byte fixed prefix, then a slot-descriptor table, then columnar payload.
+/// </summary>
+/// <remarks>
+/// <para>
+/// One record per dirty cluster, replacing the (entities × durable components) <see cref="RecordKind.Slot"/> records the fence
+/// previously emitted. The cluster's storage is already Structure-of-Arrays — the entity keys are contiguous and so is each
+/// component — so every part of the payload is one bulk copy straight out of the cluster page.
+/// </para>
+/// <para>
+/// The record carries a contiguous RANGE of the cluster's entity slots, <c>[FirstSlot, FirstSlot + SlotSpan)</c>, rather than
+/// the whole cluster or a gathered subset. An all-dirty cluster degenerates to the whole cluster (one copy per column); a
+/// single dirty entity degenerates to one entity. <c>DirtyMask</c> (relative to <c>FirstSlot</c>) says which entities in the
+/// range actually changed — entities inside the range that were clean are carried along and are simply redundant, never wrong.
+/// </para>
+/// <para>Wire layout:</para>
+/// <code>
+/// 0    u16   ArchetypeId
+/// 2    i32   ClusterChunkId
+/// 6    u8    FirstSlot           first cluster entity-slot in the emitted range
+/// 7    u8    SlotSpan            number of consecutive entity slots emitted (1..64)
+/// 8    u8    ColumnCount         number of durable component columns, S
+/// 9    u8    Reserved            = 0
+/// 10   u64   DirtyMask           bit i set =&gt; entity slot (FirstSlot + i) was dirty
+/// 18   S x { u16 SlotIndex, u16 ComponentSize }        slot-descriptor table
+/// ...  8 x SlotSpan                                    entity-key column
+/// ...  ComponentSize_i x SlotSpan  (per descriptor)    component columns, in descriptor order
+/// </code>
+/// </remarks>
+[PublicAPI]
+internal static class FenceBlockRecordBody
+{
+    public const int ArchetypeIdOffset = 0;     // ushort
+    public const int ClusterChunkIdOffset = 2;  // int
+    public const int FirstSlotOffset = 6;       // byte
+    public const int SlotSpanOffset = 7;        // byte
+    public const int ColumnCountOffset = 8;     // byte
+    public const int ReservedOffset = 9;        // byte = 0
+    public const int DirtyMaskOffset = 10;      // ulong
+    public const int FixedSize = 18;            // slot-descriptor table follows, then the columns
+
+    /// <summary>Bytes per slot-descriptor table entry: <c>u16 SlotIndex</c> + <c>u16 ComponentSize</c>.</summary>
+    public const int DescriptorSize = 4;
 }
 
 /// <summary>BulkManifestRecord body layout (Kind=4) — 32 bytes (02 §3.4).</summary>

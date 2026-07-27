@@ -2,6 +2,7 @@
 
 using System;
 using System.Runtime.CompilerServices;
+using System.Threading;
 
 namespace Typhon.Engine.Internals;
 
@@ -66,6 +67,129 @@ internal static class RevisionChainReader
             }
         }
 
+        // PTA / no-caller-context path: infinite deadline when skipping the timeout, else a fresh per-call timeout.
+        var lockWc = skipTimeout
+            ? new WaitContext(Deadline.Infinite, default)
+            : WaitContext.FromTimeout(TimeoutOptions.Current.RevisionChainLockTimeout);
+        return WalkChainCore(ref compRevTableAccessor, compRevFirstChunkId, transactionTSN, lockWc);
+    }
+
+    /// <summary>
+    /// Overload for the transactional resolve path: the caller supplies the chain-lock <see cref="WaitContext"/> (composed
+    /// ONCE per transaction — see <c>Transaction.ChainLockWaitContext</c>), so <c>Stopwatch.GetTimestamp()</c> is not
+    /// re-armed for every Versioned slot of every entity opened. Tries the optimistic single-entry fast path first (the
+    /// steady-state shape: cleanup trims every chain to its head after commit); any concurrent locked mutation is detected
+    /// by the exclusive-holder probe + content re-validation and falls back to the locked walk.
+    /// </summary>
+    internal static Result<ComponentInfo.CompRevInfo, RevisionReadStatus> WalkChain(ref ChunkAccessor<PersistentStore> compRevTableAccessor, int compRevFirstChunkId,
+        long transactionTSN, WaitContext lockWc)
+    {
+        if (TryWalkSingleEntryOptimistic(ref compRevTableAccessor, compRevFirstChunkId, transactionTSN, out var fastResult))
+        {
+            return fastResult;
+        }
+
+        return WalkChainCore(ref compRevTableAccessor, compRevFirstChunkId, transactionTSN, lockWc);
+    }
+
+    /// <summary>
+    /// Optimistic (seqlock-style) resolve of a single-entry chain — the steady-state shape, since post-commit cleanup trims every chain to its head.
+    /// Reads ONLY the root chunk (stable while the entity is alive and the caller's epoch scope is held — no reclaimable overflow chunk is ever touched,
+    /// which is what makes this safe where a full optimistic chain walk is not), then validates:
+    /// <list type="bullet">
+    /// <item>No exclusive holder before AND after the data reads — every chain mutator that can produce a torn read (AddCompRev, cleanup compaction,
+    /// conflict-path prepare/publish) runs under the exclusive chain lock.</item>
+    /// <item>Header quad (FirstItemIndex/ItemCount/ChainLength/LCRI), CommitSequence and the 12 element bytes re-read unchanged — catches a locked
+    /// mutator session that ran entirely between the two probes, and the lock-FREE publish pass (AP-03: TSN re-stamp + IsolationFlag flip + CS/LCRI
+    /// bump). If every compared byte is unchanged, the value read IS the current consistent state, so returning it is correct even if transient
+    /// states existed in between.</item>
+    /// </list>
+    /// The lock-free publish can never mutate an entry this path ACCEPTS: publish targets its transaction's isolated entry, and an isolated (or torn
+    /// mid-flip) element is rejected here and falls back to the locked walk.
+    /// <para>Memory ordering: EVERY load in this method is a <see cref="Volatile"/>.Read — volatile loads are program-ordered among themselves, which is
+    /// exactly the seqlock requirement (probe → data → re-probe must execute in order). That makes the path correct on arm64 (each load is an ldar);
+    /// on x64 they compile to plain movs (TSO). Do not "optimize" any of them to plain loads: a single plain data read could sink below the
+    /// re-validation on arm64 and void it. The mutator side is ordered by <see cref="Internals.AccessControlSmall"/>'s Interlocked enter/exit (full
+    /// fences on both architectures). Single-shot: any validation failure falls back to the locked walk, no retry loop.</para>
+    /// </summary>
+    private static bool TryWalkSingleEntryOptimistic(ref ChunkAccessor<PersistentStore> compRevTableAccessor, int compRevFirstChunkId, long transactionTSN,
+        out Result<ComponentInfo.CompRevInfo, RevisionReadStatus> result)
+    {
+        result = default;
+
+        // Preserve chain-walk telemetry fidelity: when MVCC chain-walk tracing is on, always take the emitting slow path.
+        if (TelemetryConfig.DataMvccChainWalkActive)
+        {
+            return false;
+        }
+
+        ref var header = ref compRevTableAccessor.GetChunk<CompRevStorageHeader>(compRevFirstChunkId);
+        if (header.Control.IsExclusivelyHeld)
+        {
+            return false;
+        }
+
+        // Header quad at offset 8 (8-byte aligned): FirstItemIndex | ItemCount | ChainLength | LastCommitRevisionIndex — one atomic load.
+        ref long quadRef = ref Unsafe.As<short, long>(ref header.FirstItemIndex);
+        long quad1 = Volatile.Read(ref quadRef);
+        short firstItemIndex = (short)quad1;
+        short itemCount = (short)(quad1 >> 16);
+        if (itemCount != 1 || firstItemIndex < 0 || firstItemIndex >= ComponentRevisionManager.CompRevCountInRoot)
+        {
+            return false;
+        }
+
+        int commitSequence1 = Volatile.Read(ref header.CommitSequence);
+
+        // Element at root offset 28 + index*12 (4-byte aligned) — read as three ordered atomic int loads.
+        var chunkContent = compRevTableAccessor.GetChunkAsSpan(compRevFirstChunkId);
+        ref var element = ref chunkContent.Slice(Unsafe.SizeOf<CompRevStorageHeader>()).Cast<byte, CompRevStorageElement>()[firstItemIndex];
+        ref int elementWords = ref Unsafe.As<CompRevStorageElement, int>(ref element);
+        int w0 = Volatile.Read(ref elementWords);                         // ComponentChunkId
+        int w1 = Volatile.Read(ref Unsafe.Add(ref elementWords, 1));      // _packedTickHigh
+        int w2 = Volatile.Read(ref Unsafe.Add(ref elementWords, 2));      // _packedTickLow | _packedUowId << 16
+
+        long elementTsn = ((long)(uint)w1 << 16) | (ushort)w2;
+        bool isolation = (((uint)w2 >> 16) & 0x8000) != 0;
+        bool isVoid = w0 == 0 && w1 == 0 && w2 == 0;
+        if (isVoid || isolation || elementTsn == 0 || elementTsn > transactionTSN)
+        {
+            return false;
+        }
+
+        // Re-validate: element bytes, CommitSequence, header quad, then the exclusive probe last.
+        if (Volatile.Read(ref elementWords) != w0
+            || Volatile.Read(ref Unsafe.Add(ref elementWords, 1)) != w1
+            || Volatile.Read(ref Unsafe.Add(ref elementWords, 2)) != w2
+            || Volatile.Read(ref header.CommitSequence) != commitSequence1
+            || Volatile.Read(ref quadRef) != quad1
+            || header.Control.IsExclusivelyHeld)
+        {
+            return false;
+        }
+
+
+        var compRevInfo = new ComponentInfo.CompRevInfo
+        {
+            Operations = ComponentInfo.OperationType.Undefined,
+            CompRevTableFirstChunkId = compRevFirstChunkId,
+            CurCompContentChunkId = w0,
+            CurRevisionIndex = firstItemIndex,
+            PrevCompContentChunkId = 0,
+            PrevRevisionIndex = -1,
+            ReadCommitSequence = commitSequence1,
+            ReadRevisionIndex = firstItemIndex
+        };
+
+        result = w0 == 0
+            ? new Result<ComponentInfo.CompRevInfo, RevisionReadStatus>(compRevInfo, RevisionReadStatus.Deleted)
+            : new Result<ComponentInfo.CompRevInfo, RevisionReadStatus>(compRevInfo);
+        return true;
+    }
+
+    private static Result<ComponentInfo.CompRevInfo, RevisionReadStatus> WalkChainCore(ref ChunkAccessor<PersistentStore> compRevTableAccessor, int compRevFirstChunkId,
+        long transactionTSN, WaitContext lockWc)
+    {
         // ── Full walk: handles multi-entry chains, voided entries, non-monotonic TSN ordering ──
         short prevCompRevisionIndex = -1;
         short curCompRevisionIndex = -1;
@@ -77,8 +201,9 @@ internal static class RevisionChainReader
         // capture and the lock acquisition, leaving values consistent with a state the chain walk never sees.
         int readCommitSequence;
 
+
         {
-            using var enumerator = new RevisionEnumerator(ref compRevTableAccessor, compRevFirstChunkId, false, true, skipTimeout);
+            using var enumerator = new RevisionEnumerator(ref compRevTableAccessor, compRevFirstChunkId, false, true, lockWc);
             readCommitSequence = compRevTableAccessor.GetChunk<CompRevStorageHeader>(compRevFirstChunkId).CommitSequence;
             int totalCommitted = 0;
             int visibleOrdinal = 0;
@@ -115,6 +240,7 @@ internal static class RevisionChainReader
                     curCompChunkId = element.ComponentChunkId;
                     visibleOrdinal = totalCommitted;
                 }
+
             }
 
             // Compute snapshot-isolated revision number: CS tracks total commits, totalCommitted tracks how many committed entries remain in the
@@ -130,6 +256,7 @@ internal static class RevisionChainReader
         {
             chainLenForEvent = (byte)Math.Min(compRevTableAccessor.GetChunk<CompRevStorageHeader>(compRevFirstChunkId).ChainLength, byte.MaxValue);
         }
+
 
         if (curCompRevisionIndex == -1)
         {

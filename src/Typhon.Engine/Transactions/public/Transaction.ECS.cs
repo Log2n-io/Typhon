@@ -927,6 +927,7 @@ public unsafe partial class Transaction
     {
         AssertThreadAffinity();
 
+
         if (id.IsNull)
         {
             return default;
@@ -1009,7 +1010,7 @@ public unsafe partial class Transaction
             _entityMapCacheArchId = id.ArchetypeId;
             _hasEntityMapCache = true;
         }
-        bool found = es.EntityMap.TryGet(id.EntityKey, readBuf, ref _entityMapCacheAccessor);
+        bool found = es.EntityMap.TryGetWithHint(id.EntityKey, readBuf, ref _entityMapCacheAccessor);
 
         if (!found)
         {
@@ -1114,28 +1115,34 @@ public unsafe partial class Transaction
                             continue;
                         }
 
+
                         var compTypeId = meta._componentTypeIds[slot];
                         var info = GetComponentInfoByTypeId(compTypeId, meta._slotToComponentType[slot]);
                         long pk = (long)id.RawValue;
 
-                        // Check cache first (prior Open or Write in this transaction)
+                        // Record the chain root so a later first-write can re-resolve directly (deferred SingleCache insert).
+                        result.SetChainRoot(slot, compRevFirstChunkId);
+
+                        // Check cache first (prior Write or Spawn in this transaction — read-only resolves no longer populate the cache)
                         if (info.SingleCache.TryGetValue(pk, out var cached))
                         {
                             result.SetLocation(slot, cached.CurCompContentChunkId);
                             continue;
                         }
 
-                        // Walk revision chain
-                        var chainResult = RevisionChainReader.WalkChain(ref info.CompRevTableAccessor, compRevFirstChunkId, TSN);
+
+                        // Walk revision chain (chain-lock wc composed once per tx — no per-walk Stopwatch.GetTimestamp)
+                        var chainResult = RevisionChainReader.WalkChain(ref info.CompRevTableAccessor, compRevFirstChunkId, TSN, ChainLockWaitContext());
                         if (chainResult.IsFailure)
                         {
                             continue;
                         }
 
-                        var compRevInfo = chainResult.Value;
-                        compRevInfo.Operations = ComponentInfo.OperationType.Read;
-                        info.AddNew(pk, compRevInfo);
-                        result.SetLocation(slot, compRevInfo.CurCompContentChunkId);
+
+                        // Deferred-insert: do NOT cache the read (commit/rollback/WAL would iterate dead Read entries). First write re-resolves
+                        // via the chain root above and inserts then (EcsVersionedCopyOnWrite).
+                        result.SetLocation(slot, chainResult.Value.CurCompContentChunkId);
+
                     }
                 }
             }
@@ -1158,31 +1165,31 @@ public unsafe partial class Transaction
                     var info = GetComponentInfoByTypeId(compTypeId, meta._slotToComponentType[slot]);
                     long pk = (long)id.RawValue;
 
-                    // If already resolved in this transaction (prior Open or Write), reuse cached entry
+                    // Location[slot] from EntityMap is the chain root — record it before it is overwritten with the resolved content chunk,
+                    // so a later first-write can re-resolve directly (deferred SingleCache insert).
+                    int compRevFirstChunkId = result.GetLocation(slot);
+                    result.SetChainRoot(slot, compRevFirstChunkId);
+
+                    // If already written or spawned in this transaction, reuse the cached entry (read-only resolves no longer populate the cache)
                     if (info.SingleCache.TryGetValue(pk, out var cached))
                     {
                         result.SetLocation(slot, cached.CurCompContentChunkId);
                         continue;
                     }
 
-                    // Walk revision chain from EntityMap's compRevFirstChunkId
-                    int compRevFirstChunkId = result.GetLocation(slot);
                     if (compRevFirstChunkId == 0)
                     {
                         continue;
                     }
 
-                    var chainResult = RevisionChainReader.WalkChain(ref info.CompRevTableAccessor, compRevFirstChunkId, TSN);
+                    var chainResult = RevisionChainReader.WalkChain(ref info.CompRevTableAccessor, compRevFirstChunkId, TSN, ChainLockWaitContext());
                     if (chainResult.IsFailure)
                     {
                         continue;
                     }
 
-                    // Cache CompRevInfo for conflict detection
-                    var compRevInfo = chainResult.Value;
-                    compRevInfo.Operations = ComponentInfo.OperationType.Read;
-                    info.AddNew(pk, compRevInfo);
-                    result.SetLocation(slot, compRevInfo.CurCompContentChunkId);
+                    // Deferred-insert: do NOT cache the read — first write re-resolves via the chain root and inserts then (EcsVersionedCopyOnWrite).
+                    result.SetLocation(slot, chainResult.Value.CurCompContentChunkId);
                 }
             }
 
@@ -1199,23 +1206,42 @@ public unsafe partial class Transaction
     /// Called by EntityRef.Write for Versioned components. Returns (newChunkId, newChunkAddress).
     /// First write per entity allocates; subsequent writes reuse the same new chunk.
     /// </summary>
-    internal override (int chunkId, nint ptr) EcsVersionedCopyOnWrite(Type compType, EntityId entityId, ComponentTable table)
+    internal override (int chunkId, nint ptr) EcsVersionedCopyOnWrite(Type compType, EntityId entityId, ComponentTable table, int chainRootChunkId = 0)
     {
         var info = GetComponentInfo(compType);
         long pk = (long)entityId.RawValue;
 
-        // CompRevInfo should be in cache from Read (5.2 ResolveEntity) or Created (5.1 Spawn)
+        // First write per entity inserts into SingleCache here. Read-only resolves no longer populate the cache (deferred-insert — the cache holds only
+        // written/spawned entries, so commit/rollback/WAL iterate nothing for pure reads); the EntityRef carries the chain root captured at resolve time
+        // so the CompRevInfo is re-resolved with a direct chain walk (single-entry fast path in the steady state).
         ref var cri = ref System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault(info.SingleCache, pk, out var cached);
 
         if (!cached)
         {
-            // Fallback: Write without prior Open (edge case)
-            var result = GetCompRevInfoFromIndex(pk, info, TSN);
-            if (result.IsFailure)
+            if (chainRootChunkId != 0)
             {
-                throw new InvalidOperationException($"Entity {entityId} not found in PK index for {compType.Name}");
+                // Re-resolve from the chain root recorded by ResolveEntity. ReadCommitSequence stays snapshot-correct: the walk computes it
+                // position-based (CS - totalCommitted + visibleOrdinal), so a commit that landed between resolve and write still trips the
+                // first-committer-wins check at our commit.
+                var walk = RevisionChainReader.WalkChain(ref info.CompRevTableAccessor, chainRootChunkId, TSN, ChainLockWaitContext());
+                if (!walk.IsFailure)
+                {
+                    cri = walk.Value;
+                    cri.Operations = ComponentInfo.OperationType.Read;
+                }
             }
-            cri = result.Value;
+
+            if (cri.CompRevTableFirstChunkId == 0)
+            {
+                // Fallback: Write without prior Open (edge case), or the chain-root walk failed
+                var result = GetCompRevInfoFromIndex(pk, info, TSN);
+                if (result.IsFailure)
+                {
+                    info.SingleCache.Remove(pk);
+                    throw new InvalidOperationException($"Entity {entityId} not found in PK index for {compType.Name}");
+                }
+                cri = result.Value;
+            }
         }
 
         // Only allocate new revision on FIRST write. Created (from Spawn) already has a chunk.

@@ -109,6 +109,46 @@ internal sealed class RecoveryDriver
                             committed.Add(view.Tsn);
                         }
 
+                        // A columnar fence block (#559) carries one cluster's entity-key column plus each durable component's
+                        // column. Expand it here into the same per-(entity, slot) Rec shape the rest of the pipeline consumes,
+                        // so recovery semantics are identical to the per-entity Slot records this format replaced. Only the
+                        // entities the emitting tick marked dirty are expanded — clean entities inside the emitted range rode
+                        // along for the bulk copy and carry no new information.
+                        if (view.Kind == RecordKind.FenceBlock)
+                        {
+                            if (!RecordCodec.TryReadFenceBlock(view.Payload, out var block))
+                            {
+                                continue;
+                            }
+
+                            for (var i = 0; i < block.SlotSpan; i++)
+                            {
+                                if (!block.IsDirtyAt(i))
+                                {
+                                    continue;
+                                }
+
+                                var entityKey = block.EntityKeyAt(i);
+                                if (entityKey == 0)
+                                {
+                                    continue;   // unoccupied cluster slot — nothing to restore
+                                }
+
+                                for (var c = 0; c < block.ColumnCount; c++)
+                                {
+                                    records.Add(new Rec
+                                    {
+                                        Lsn = view.Lsn, Tsn = view.Tsn, Kind = RecordKind.Slot, Op = (byte)SlotOp.Upsert,
+                                        EntityId = entityKey, ArchetypeId = block.ArchetypeId,
+                                        SlotIndex = block.SlotIndexOf(c), EnabledBits = 0, IsFence = view.IsFence,
+                                        Payload = block.ValueAt(c, i).ToArray(),
+                                    });
+                                }
+                            }
+
+                            continue;
+                        }
+
                         records.Add(new Rec
                         {
                             Lsn = view.Lsn, Tsn = view.Tsn, Kind = view.Kind, Op = view.Op,

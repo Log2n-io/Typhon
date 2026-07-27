@@ -24,6 +24,24 @@ public unsafe ref struct EntityRef
     internal readonly bool _writable;
     private fixed int _locations[16];
 
+    /// <summary>
+    /// Per-slot revision-chain ROOT chunk ids for Versioned slots (0 = not resolved via point-open). Set by <c>Transaction.ResolveEntity</c> so the
+    /// first <see cref="Write{T}(Comp{T})"/> can re-resolve the <c>CompRevInfo</c> with a direct (fast-path) chain walk instead of a PK-index lookup —
+    /// read-only resolves no longer populate <c>ComponentInfo.SingleCache</c> (deferred-insert: the cache holds only written/spawned entries).
+    /// </summary>
+    private fixed int _chainRoots[16];
+
+    /// <summary>
+    /// Versioned slots whose <c>_locations</c> entry has NOT been resolved yet — bit <c>i</c> set means slot <c>i</c> currently carries only its revision-chain
+    /// root in <c>_chainRoots</c>, and the walk that turns it into an MVCC-visible content chunk is deferred to the first read of that slot.
+    /// <para>
+    /// Resolving eagerly costs a chain walk per Versioned slot on <i>every</i> open, whether or not the caller ever touches that component. Measured on the
+    /// SWG sample: <c>MoveSystem</c> writes only <c>Transform</c> (SingleVersion) yet walked <c>Wallet</c>'s chain 4,000,200 times over 200 ticks — 733 ms of
+    /// self-time plus the CompRev pages it faulted in, for data the system never reads.
+    /// </para>
+    /// </summary>
+    private ushort _versionedPending;
+
     // ── Cluster storage fields (non-null when entity uses cluster storage) ──
     internal byte* _clusterBase;                    // Pointer to primary cluster chunk data; null = legacy path
     internal byte* _transientClusterBase;           // Pointer to TransientStore cluster base; null = no Transient segment (or pure-T where _clusterBase is TS)
@@ -55,6 +73,36 @@ public unsafe ref struct EntityRef
 
     /// <summary>Override the chunkId at a specific slot. Used by ResolveEntity for MVCC revision chain resolution.</summary>
     internal void SetLocation(int slot, int chunkId) => _locations[slot] = chunkId;
+
+    /// <summary>Record the revision-chain root chunk id for a Versioned slot (see <c>_chainRoots</c>).</summary>
+    internal void SetChainRoot(int slot, int chainRootChunkId) => _chainRoots[slot] = chainRootChunkId;
+
+    /// <summary>
+    /// Mark a Versioned slot as carrying only its chain root, deferring the revision-chain walk to the first read (see <c>_versionedPending</c>).
+    /// The caller must have populated <see cref="SetChainRoot"/> for the same slot first.
+    /// </summary>
+    internal void MarkVersionedPending(int slot) => _versionedPending |= (ushort)(1 << slot);
+
+    /// <summary>
+    /// Resolve <paramref name="slot"/>'s deferred revision chain if it is still pending. Inlined so the common case (nothing pending, or already resolved)
+    /// is a single mask test; the walk itself lives in a non-inlined slow path.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void EnsureVersionedResolved(int slot)
+    {
+        if ((_versionedPending & (1 << slot)) != 0)
+        {
+            ResolveVersionedSlot(slot);
+        }
+    }
+
+    /// <summary>Walk the deferred chain for <paramref name="slot"/> and memoize the visible content chunk. Runs at most once per slot per EntityRef.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void ResolveVersionedSlot(int slot)
+    {
+        _versionedPending &= (ushort)~(1 << slot);
+        _locations[slot] = _accessor.ResolveVersionedContentChunk(_archetype, slot, _chainRoots[slot]);
+    }
 
     /// <summary>Copy locations from a managed byte array.</summary>
     internal void CopyLocationsFrom(byte[] recordBytes, int componentCount)
@@ -117,10 +165,11 @@ public unsafe ref struct EntityRef
             {
                 return ref Unsafe.AsRef<T>(_transientClusterBase + _clusterLayout.ComponentOffset(slot) + _clusterSlotIndex * _clusterLayout.ComponentSize(slot));
             }
-            // Versioned slots read from content chunk (_locations populated by chain walk), not cluster slot.
-            // Cluster slot is the HEAD cache — used by bulk iteration only. MVCC-correct reads use content chunk.
+            // Versioned slots read from the content chunk, not the cluster slot — the cluster slot is the HEAD cache, used by bulk iteration only, while
+            // MVCC-correct reads must see the revision visible at this TSN. The chain walk that finds it is deferred to here (see _versionedPending).
             if ((_archetype.VersionedSlotMask & (1 << slot)) != 0)
             {
+                EnsureVersionedResolved(slot);
                 int chunkId = _locations[slot];
                 var table = _engineState.SlotToComponentTable[slot];
                 return ref _accessor.ReadEcsComponentData<T>(table, chunkId);
@@ -171,8 +220,10 @@ public unsafe ref struct EntityRef
             if ((_archetype.VersionedSlotMask & (1 << slot)) != 0)
             {
                 var table = _engineState.SlotToComponentTable[slot];
-                var (newChunkId, rawPtr) = _accessor.EcsVersionedCopyOnWrite(typeof(T), _id, table);
+                var (newChunkId, rawPtr) = _accessor.EcsVersionedCopyOnWrite(typeof(T), _id, table, _chainRoots[slot]);
                 _locations[slot] = newChunkId;
+                _versionedPending &= (ushort)~(1 << slot);   // COW result supersedes any deferred walk — a later read must not re-resolve to the old revision
+
                 return ref Unsafe.AsRef<T>((byte*)rawPtr + table.ComponentOverhead);
             }
 
@@ -190,7 +241,7 @@ public unsafe ref struct EntityRef
                         ShadowClusterIndexedFields(clusterState);
                     }
                 }
-                clusterState.SetDirty(_clusterChunkId, _clusterSlotIndex);
+                clusterState.SetDirty(_clusterChunkId, _clusterSlotIndex, slot);
                 return ref Unsafe.AsRef<T>(_transientClusterBase + _clusterLayout.ComponentOffset(slot) + _clusterSlotIndex * _clusterLayout.ComponentSize(slot));
             }
 
@@ -224,7 +275,7 @@ public unsafe ref struct EntityRef
             }
 
             _accessor.NoteSvInPlaceWrite();   // CM-02: an in-place TickFence write happened — blocks late auto-escalation to Commit
-            clusterState.SetDirty(_clusterChunkId, _clusterSlotIndex);
+            clusterState.SetDirty(_clusterChunkId, _clusterSlotIndex, slot);
             return ref Unsafe.AsRef<T>(svHeadPtr);
         }
 
@@ -234,8 +285,10 @@ public unsafe ref struct EntityRef
 
             if (table.StorageMode == StorageMode.Versioned)
             {
-                var (newChunkId, rawPtr) = _accessor.EcsVersionedCopyOnWrite(typeof(T), _id, table);
+                var (newChunkId, rawPtr) = _accessor.EcsVersionedCopyOnWrite(typeof(T), _id, table, _chainRoots[slot]);
                 _locations[slot] = newChunkId;
+                _versionedPending &= (ushort)~(1 << slot);   // COW result supersedes any deferred walk — a later read must not re-resolve to the old revision
+
                 return ref Unsafe.AsRef<T>((byte*)rawPtr + table.ComponentOverhead);
             }
 
@@ -278,6 +331,7 @@ public unsafe ref struct EntityRef
             // Versioned slots read from content chunk for MVCC correctness
             if ((_archetype.VersionedSlotMask & (1 << slot)) != 0)
             {
+                EnsureVersionedResolved(slot);
                 int chunkId = _locations[slot];
                 var table = _engineState.SlotToComponentTable[slot];
                 return ref _accessor.ReadEcsComponentData<T>(table, chunkId);
@@ -326,8 +380,10 @@ public unsafe ref struct EntityRef
             if ((_archetype.VersionedSlotMask & (1 << slot)) != 0)
             {
                 var table = _engineState.SlotToComponentTable[slot];
-                var (newChunkId, rawPtr) = _accessor.EcsVersionedCopyOnWrite(typeof(T), _id, table);
+                var (newChunkId, rawPtr) = _accessor.EcsVersionedCopyOnWrite(typeof(T), _id, table, _chainRoots[slot]);
                 _locations[slot] = newChunkId;
+                _versionedPending &= (ushort)~(1 << slot);   // COW result supersedes any deferred walk — a later read must not re-resolve to the old revision
+
                 return ref Unsafe.AsRef<T>((byte*)rawPtr + table.ComponentOverhead);
             }
 
@@ -359,7 +415,7 @@ public unsafe ref struct EntityRef
             }
 
             _accessor.NoteSvInPlaceWrite();   // CM-02: an in-place TickFence write happened — blocks late auto-escalation to Commit
-            clusterState.SetDirty(_clusterChunkId, _clusterSlotIndex);
+            clusterState.SetDirty(_clusterChunkId, _clusterSlotIndex, slot);
             return ref Unsafe.AsRef<T>(svHeadPtr);
         }
 
@@ -369,8 +425,10 @@ public unsafe ref struct EntityRef
 
             if (table.StorageMode == StorageMode.Versioned)
             {
-                var (newChunkId, rawPtr) = _accessor.EcsVersionedCopyOnWrite(typeof(T), _id, table);
+                var (newChunkId, rawPtr) = _accessor.EcsVersionedCopyOnWrite(typeof(T), _id, table, _chainRoots[slot]);
                 _locations[slot] = newChunkId;
+                _versionedPending &= (ushort)~(1 << slot);   // COW result supersedes any deferred walk — a later read must not re-resolve to the old revision
+
                 return ref Unsafe.AsRef<T>((byte*)rawPtr + table.ComponentOverhead);
             }
 
@@ -473,6 +531,7 @@ public unsafe ref struct EntityRef
             // Versioned slots read from content chunk (_locations populated by chain walk), not cluster slot.
             if ((_archetype.VersionedSlotMask & (1 << slot)) != 0)
             {
+                EnsureVersionedResolved(slot);
                 int chunkId = _locations[slot];
                 var table = _engineState.SlotToComponentTable[slot];
                 value = _accessor.ReadEcsComponentData<T>(table, chunkId);
@@ -541,6 +600,7 @@ public unsafe ref struct EntityRef
             // Versioned slot: read from the content chunk resolved by the revision-chain walk (MVCC-correct), not the cluster HEAD cache.
             if ((_archetype.VersionedSlotMask & (1 << slot)) != 0)
             {
+                EnsureVersionedResolved(slot);
                 int vChunkId = _locations[slot];
                 if (vChunkId == 0)
                 {
