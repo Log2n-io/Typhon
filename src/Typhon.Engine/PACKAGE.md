@@ -10,7 +10,25 @@ in-process analytical/transactional (HTAP-shaped) data.
 > ⚠️ **Pre-alpha.** This package is published as a prerelease. APIs, on-disk formats, and defaults will
 > change without notice until the first stable release. Not for production use yet.
 
+## Fastest way to see it work
+
+Don't start from an empty project. The `typhon` CLI scaffolds a runnable, already-profiled app:
+
+```bash
+dotnet tool install --global Typhon.Cli --prerelease
+typhon new MyApp && cd MyApp
+dotnet run                  # deploys a world shard, ticks the runtime, writes a trace
+typhon ui --open-latest     # open that trace in the Workbench profiler
+typhon ui --open-db         # browse the database you just created
+```
+
+That gives you a working data model, tick systems, and config-driven profiling — with no code to write and
+nothing else to install. See the [`Typhon.Cli`](https://www.nuget.org/packages/Typhon.Cli) package for the
+scaffolder, the shell, and `typhon telemetry` (which tunes what gets traced without touching your code).
+
 ## Install
+
+To add the engine to an existing project:
 
 ```bash
 dotnet add package Typhon --prerelease
