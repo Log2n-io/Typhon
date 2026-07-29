@@ -567,7 +567,7 @@ Two independent, case-insensitive tokens can appear in a **PR head commit messag
 | Token | Skips | When to use |
 |-------|-------|-------------|
 | `[no-ut]` | the heavy `aws-gate` c6id unit-test suites (`merge-gate.yml`) | a genuine small fix you're confident needs no test run — docs, comments, CI/script tweaks. **This unblocks a real gate**, so use it deliberately. |
-| `[no-doc]` | the advisory Layer-2 doc-accuracy review (`doc-accuracy-review.yml`) | a commit that cannot affect doc accuracy — a comment/whitespace tweak, or a follow-up that already reconciled the drift the bot flagged. Only saves a billed Claude turn + a redundant comment (the review never blocks), so the bar is lower. |
+| `[no-doc]` | *(retired 2026-07-29)* the Layer-2 doc-accuracy review no longer runs per-PR, so there is nothing for this token to skip — it is now a **nightly** job over the previous day's merges that files `[doc-drift]` issues (`doc-accuracy-review.yml`). Harmless if you still write it. |
 
 They are **orthogonal**: a commit may carry either, both, or neither — one never implies the other, and there is deliberately no combined `[no-ci]` umbrella. Each skip prints a `::notice::` line in the run log, so an opt-out is always visible.
 
