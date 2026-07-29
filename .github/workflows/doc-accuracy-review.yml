@@ -21,8 +21,22 @@ name: Doc-Accuracy Review
 #   Worst case of a hijacked run: one stray advisory comment. Recoverable, bounded.
 
 on:
+  # ONCE PER PR, not once per push. `synchronize` was the expensive trigger: every push to an open PR
+  # re-ran a ~7-minute billed turn, so fixing the reviewer's own findings re-invoked the reviewer on the
+  # fix — the loop `[no-doc]` exists to break. `ready_for_review` covers the normal flow: open a draft,
+  # push freely, get one review when it is actually ready.
+  #
+  # Re-running on demand needs no extra machinery: `reopened` is in the list, so close+reopen re-reviews
+  # a PR that changed substantially since its review. (A `workflow_dispatch` hatch would have to plumb a
+  # PR number and head SHA through the fork check, the [no-doc] lookup and the affected-map step — three
+  # places to get wrong for something close+reopen already does.)
+  #
+  # What this gives up, deliberately: drift introduced by a LATER push to an already-reviewed PR is not
+  # re-reviewed. The Layer-3 weekly audit (doc-accuracy-audit.yml) is the floor for that, exactly as it
+  # already is for fork PRs — which this workflow has always skipped for the same reason. No recall is
+  # lost that Layer 3 does not already own; only latency, from minutes to at most a week.
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, ready_for_review, reopened]
     paths:
       - "src/**"
       - "doc/**"
@@ -34,7 +48,7 @@ permissions:
 
 concurrency:
   group: doc-accuracy-${{ github.event.pull_request.number }}
-  cancel-in-progress: true   # a new push supersedes the in-flight review
+  cancel-in-progress: true   # a re-trigger (reopen) supersedes an in-flight review of the same PR
 
 jobs:
   review:
