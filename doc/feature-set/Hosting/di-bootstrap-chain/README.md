@@ -78,10 +78,12 @@ var engine = serviceProvider.GetRequiredService<DatabaseEngine>();
 - Call order is irrelevant — the dependency graph is enforced at resolution time, not registration
   time. Omit a required `Add*` and `GetRequiredService<DatabaseEngine>()` throws at the first
   missing dependency, not at startup.
-- Options validation is wired but unimplemented (`Validate(_ => true)` stubs) — validate your own
-  option values before passing the `configure` delegate if correctness matters.
+- Options validation is real and fails fast at DI resolution time: `OptionsValidators` delegates to the
+  options type's own `Validate(bool silent, out string message)`, so a bad option value throws when the
+  engine is first resolved rather than surfacing later as corrupt behaviour.
 - `EnsureFileDeleted<TO>(provider)` is a test/tooling convenience that opens a scope, resolves
-  `IOptions<TO>`, and deletes the backing database file — not part of normal application startup.
+  `IOptions<TO>`, and deletes the **entire `.typhon` bundle directory** (data file, lock, and WAL) —
+  not just the data file, and not part of normal application startup. The database must be closed first.
 - One `IResourceRegistry` per process is the intended topology; multiple `DatabaseEngine`
   instances are siblings under the same registry, not separate trees.
 - See [Lifetime Variants](./lifetime-variants.md) for what's safe to mix when you move off the

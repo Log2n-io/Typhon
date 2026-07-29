@@ -27,18 +27,6 @@ public enum DurabilityMode : byte
     Immediate = 2,
 }
 
-/// <summary>
-/// Per-transaction override for durability. Can only escalate (never downgrade).
-/// </summary>
-[PublicAPI]
-public enum DurabilityOverride : byte
-{
-    /// <summary>Use the owning UoW's DurabilityMode.</summary>
-    Default = 0,
-
-    /// <summary>Force FUA for this specific commit (escalation only).</summary>
-    Immediate = 1,
-}
 
 /// <summary>
 /// State machine for UoW lifecycle. Transitions are one-way.

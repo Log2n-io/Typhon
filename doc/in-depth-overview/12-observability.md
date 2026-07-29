@@ -414,7 +414,7 @@ The resource-graph snapshot is built in [13-resources](13-resources.md). This se
 
 ## See also
 
-- [01-foundation](01-foundation.md) — `AccessControl.Telemetry.cs` (mid-migration partial still under `#if TELEMETRY`); the real `TyphonEvent.Emit*` pattern used by every other primitive.
+- [01-foundation](01-foundation.md) — the `TyphonEvent.Emit*` pattern used by every concurrency primitive.
 - [02-storage](02-storage.md) — page-cache and segment events (kinds 50-59, 165-171).
 - [03-indexing](03-indexing.md) — B+Tree mutation events (40-43, 180-186).
 - [06-ecs](06-ecs.md) — `EcsSpawn`/`EcsDestroy`/`EcsQuery*`/`EcsView*` event families.

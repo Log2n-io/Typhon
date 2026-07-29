@@ -66,7 +66,8 @@ tx2.Commit();                  // blocks ~15-85µs — durable on the data file'
 - `GroupCommitIntervalMs` is an engine-wide WAL writer setting (`DatabaseEngineOptions.Wal`), not a per-UoW
   property — every `GroupCommit` UoW in the engine shares the same interval.
 - Disposing a `Deferred` UoW does **not** flush — unflushed transactions stay volatile until something else
-  flushes the WAL (explicit `Flush()`/`FlushAsync()`, the GroupCommit timer, or 80%-buffer back-pressure).
+  flushes the WAL (explicit `Flush()`/`FlushAsync()`, the GroupCommit timer, or commit-buffer back-pressure —
+  which fires only when the active buffer is completely full and a claim no longer fits, forcing a swap + drain).
   Disposing a `GroupCommit` or `Immediate` UoW does flush.
 - `Immediate` raises `CommitDurabilityUncertainException` rather than rolling back if the post-append fsync
   wait doesn't confirm in time — the transaction is already committed and visible; this is "durability

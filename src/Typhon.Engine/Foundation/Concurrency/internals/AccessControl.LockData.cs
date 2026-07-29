@@ -178,20 +178,14 @@ internal partial struct AccessControl
             switch (waitFor)
             {
                 case WaitFor.Shared:
-                    // TOFIX
-                    // AddWaitOperation(OperationType.SharedStartWait);
                     overflow = SharedWaiters == byte.MaxValue;
                     waitIncValue = 1 << SharedWaitersShift;
                     break;
                 case WaitFor.Exclusive:
-                    // TOFIX
-                    // AddWaitOperation(OperationType.ExclusiveStartWait); 
                     overflow = ExclusiveWaiters == byte.MaxValue;
                     waitIncValue = 1 << ExclusiveWaitersShift;
                     break;
                 case WaitFor.Promote:
-                    // TOFIX
-                    // AddWaitOperation(OperationType.PromoteStartWait);
                     overflow = PromoterWaiters == byte.MaxValue;
                     waitIncValue = 1 << PromoterWaitersShift;
                     break;
