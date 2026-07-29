@@ -74,6 +74,9 @@ internal static class Program
             case "rsp":
                 Concurrent.ReadStressPinnedRunner.Run();
                 return 0;
+            case "verify":
+                Concurrent.ReadValidationProbe.Run();
+                return 0;
             case "smoke":
             default:
                 return Smoke();
