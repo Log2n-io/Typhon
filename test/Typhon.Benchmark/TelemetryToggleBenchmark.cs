@@ -8,9 +8,9 @@ namespace Typhon.Benchmark;
 /// <summary>
 /// Benchmark comparing different mechanisms for toggling telemetry at runtime.
 ///
-/// This helps decide whether to:
-/// 1. Keep compile-time #if TELEMETRY (zero overhead when disabled, but requires separate build)
-/// 2. Use runtime toggle (some overhead, but single build can enable/disable at runtime)
+/// This is the evidence behind ADR-019: a single build that toggles at runtime, rather than a separate
+/// build configuration. It stays useful as the reference measurement for the gate mechanisms still in use
+/// (see <c>CheckConfig</c>, which resolves its gates once at static init to keep them JIT-foldable).
 ///
 /// Toggle mechanisms tested:
 /// - No check at all (baseline)
@@ -98,7 +98,7 @@ public class TelemetryToggleBenchmark
 
     /// <summary>
     /// Baseline: No check at all - represents the ideal case where telemetry
-    /// code is completely absent (as with #if TELEMETRY when disabled).
+    /// code is completely absent.
     /// </summary>
     [Benchmark(Baseline = true, OperationsPerInvoke = Iterations)]
     public long NoCheck_Baseline()

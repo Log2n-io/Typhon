@@ -24,8 +24,10 @@ namespace Typhon.Engine;
 /// All dispatch decisions happen on workers (POC decision D2: any-worker dispatch, no scheduler thread).
 /// </para>
 /// <para>
-/// Between ticks, workers use a three-phase wait referencing <c>_nextTickTimestamp</c> (set by the timer thread). This saves CPU during the idle gap while
-/// maintaining sub-microsecond wake latency in the final spin phase.
+/// Between ticks, workers block on <c>_tickStartSignal</c> — a <see cref="ManualResetEventSlim"/> constructed with <c>spinCount: 0</c> — inside a loop that
+/// re-checks <c>_tickGeneration</c>, with a 50 ms timeout as a shutdown-liveness backstop. The three-phase wait (Sleep → Yield → Spin) belongs to the timer
+/// thread's metronome in <see cref="HighResolutionTimerServiceBase"/>, not to the workers; <c>_nextTickTimestamp</c> is likewise metronome state, read by
+/// <c>GetNextTick</c> and never by a worker.
 /// </para>
 /// </remarks>
 [PublicAPI]
