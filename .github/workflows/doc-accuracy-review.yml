@@ -65,7 +65,7 @@ concurrency:
 jobs:
   review:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -98,16 +98,21 @@ jobs:
 
           echo "----- merged in window -----"; cat prs.txt
 
-          # Bound a pathological night. One big PR can already resolve to ~230 pages (measured: #586),
-          # so ten of them would exhaust the turn budget and produce a shallow skim of everything instead
-          # of a real review of something. Cap at the 5 most recent and SAY SO — a silently truncated
-          # sweep reads exactly like a clean one, which is the failure mode this whole layer exists to
-          # avoid. Anything dropped is still covered by the Layer-3 weekly audit.
+          # Runaway guard, NOT a throttle. Measured over this repo's history: 109 PRs across 74 active
+          # days — mean 1.5/day, median 1, busiest day ever 5. A cap of 20 therefore sits ~4x above the
+          # observed maximum and is not expected to fire on any real day; it exists for a merge-train
+          # anomaly, and for `workflow_dispatch` with a wide since_hours (which can pull a month of PRs).
+          # Set it AT the observed max and it silently starts dropping work the first busier-than-usual
+          # day — which is why the first draft's cap of 5 was wrong.
+          #
+          # When it does fire it SAYS SO, loudly and in the prompt: a silently truncated sweep reads
+          # exactly like a clean one, which is the failure mode this whole layer exists to avoid.
+          # Anything dropped is still covered by the Layer-3 weekly audit.
+          CAP=20
           MERGED=$(wc -l < prs.txt)
-          if [ "$MERGED" -gt 5 ]; then
-            head -5 prs.txt > prs.capped.txt && mv prs.capped.txt prs.txt
-            echo "::warning::$MERGED PRs merged in the window; reviewing the 5 most recent. The remainder are left to the Layer-3 weekly audit."
-            echo "OVERFLOW=$((MERGED - 5))" >> "$GITHUB_ENV"
+          if [ "$MERGED" -gt "$CAP" ]; then
+            head -"$CAP" prs.txt > prs.capped.txt && mv prs.capped.txt prs.txt
+            echo "::warning::$MERGED PRs merged in the window; reviewing the $CAP most recent. The remaining $((MERGED - CAP)) are left to the Layer-3 weekly audit."
           fi
 
           # Resolve affected pages PER PR, never unioned. Measured on a real 3-PR night: the union
@@ -165,7 +170,7 @@ jobs:
             moved paths, dead links, stale anchors and the generated telemetry reference. Do NOT report
             anything those cover.
 
-            PRs merged in the window (capped at 5 most recent; any overflow is left to the weekly audit):
+            PRs merged in the window (capped at the 20 most recent; any overflow is left to the weekly audit):
             ${{ steps.scope.outputs.prs }}
 
             The docs-affected resolver already narrowed the review to the pages those changes could touch:
@@ -208,5 +213,5 @@ jobs:
             Do NOT edit any files. Only create the issues above.
           claude_args: |
             --allowedTools "Read,Grep,Glob,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh issue list:*),Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue create:*)"
-            --max-turns 100
+            --max-turns 200
             --model claude-sonnet-4-6
