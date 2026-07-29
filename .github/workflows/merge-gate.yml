@@ -197,6 +197,44 @@ jobs:
             echo "::endgroup::"
           done
 
+  # ---- Cheap source-invariant gate on a free runner (must NOT consume the c6id). ----
+  #
+  # LOG-02 "single codec". `overview/06-durability.md` and rule LOG-02 both claimed RecordCodec exclusivity
+  # was "grep-gated". Verified 2026-07-28: no such check existed in any of the 12 workflows — only §7.1 of
+  # the design (storage-layer identifier names) was ever built. The greppable proxy for "record bytes are
+  # written only by RecordCodec" is the byte-offset layout: anyone hand-rolling a record needs RecordFormat's
+  # offsets, so referencing that type outside Durability/internals/ is the tell. Green as of 2026-07-29 —
+  # this locks in a property that currently holds rather than announcing an aspiration.
+  #
+  # DELIBERATELY self-contained: no secret, no cross-repo checkout, nothing but this repo's own source.
+  # An earlier revision also ran the claude/ doc-drift lint here, which required checking out the PRIVATE
+  # Typhon-Claude repo with a PAT. That was wrong on two counts:
+  #   * GitHub withholds secrets from pull_request runs originating in a FORK, so the checkout 404s and the
+  #     gate reds out every outside contribution. This repo has 18 forks and has already taken one fork PR.
+  #   * A PAT in a public repo's CI is a capability, not a fence: anyone with push access here could print
+  #     the private knowledge base from a workflow step.
+  # The doc↔code comparison now runs the other way round — a nightly job in the PRIVATE claude repo pulling
+  # the PUBLIC code, needing no credential at all. See typhon-claude/.github/workflows/doc-drift.yml.
+  invariants:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: LOG-02 — record byte layout stays inside Durability/internals/
+        run: |
+          set -uo pipefail
+          # -P for a real word boundary; exclude the owning folder, which is the whole point of the rule.
+          hits=$(grep -rnP '\bRecordFormat\b' --include='*.cs' src/ tools/ 2>/dev/null \
+                   | grep -v 'Durability/internals/' || true)
+          if [ -n "$hits" ]; then
+            echo "::error::LOG-02 violated — RecordFormat's byte offsets are referenced outside Durability/internals/."
+            echo "$hits"
+            echo "WAL record bytes must be produced and consumed only by RecordCodec; reaching for the raw"
+            echo "offsets elsewhere is how producer/recovery format drift starts. See claude/rules/durability.md LOG-02."
+            exit 1
+          fi
+          echo "LOG-02: RecordFormat confined to Durability/internals/"
+
   # ---- Guard: a closing keyword that would auto-close a PULL REQUEST on merge. ----
   #
   # GitHub scans the PR description and every commit message for a bare `KEYWORD #N` adjacency
@@ -296,7 +334,7 @@ jobs:
 
   # ---- The ONLY required check. Aggregates: skipped → pass, failure/cancelled → fail. ----
   gate:
-    needs: [changes, aws-gate, aws-gate-selfhosted, tla, closing-keywords]
+    needs: [changes, aws-gate, aws-gate-selfhosted, tla, invariants, closing-keywords]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -306,8 +344,9 @@ jobs:
           aws='${{ needs.aws-gate.result }}'
           awssh='${{ needs.aws-gate-selfhosted.result }}'
           tla='${{ needs.tla.result }}'
+          inv='${{ needs.invariants.result }}'
           keywords='${{ needs.closing-keywords.result }}'
-          echo "changes=$changes  aws-gate=$aws  aws-gate-selfhosted=$awssh  tla=$tla  closing-keywords=$keywords"
+          echo "changes=$changes  aws-gate=$aws  aws-gate-selfhosted=$awssh  tla=$tla  invariants=$inv  closing-keywords=$keywords"
           fail=0
           # changes must succeed; the two aws-gate variants + tla may legitimately be 'skipped' (nothing relevant
           # changed, or the other runner variant is inactive), and closing-keywords is 'skipped' on push/dispatch.
@@ -315,6 +354,8 @@ jobs:
           case "$aws" in failure|cancelled) echo "aws-gate failed"; fail=1 ;; esac
           case "$awssh" in failure|cancelled) echo "aws-gate-selfhosted failed"; fail=1 ;; esac
           case "$tla" in failure|cancelled) echo "tla failed"; fail=1 ;; esac
+          # invariants has no `if:` guard — it runs on every event, so anything but success is a red gate.
+          [ "$inv" = "success" ] || { echo "invariants gate failed"; fail=1; }
           case "$keywords" in failure|cancelled) echo "closing-keywords guard failed"; fail=1 ;; esac
           if [ "$fail" -ne 0 ]; then echo "Merge gate: RED"; exit 1; fi
           echo "Merge gate: GREEN"
