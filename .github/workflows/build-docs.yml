@@ -27,6 +27,7 @@ on:
       - .github/workflows/build-docs.yml
       - coverage/docs-affected-map.json   # the map-integrity gate validates this
       - scripts/docs-affected.py
+      - scripts/check-doc-links.py        # the link/path lint runs as a gate step below
   pull_request:
     branches: [main]
     paths:
@@ -40,6 +41,7 @@ on:
       - .github/workflows/build-docs.yml
       - coverage/docs-affected-map.json
       - scripts/docs-affected.py
+      - scripts/check-doc-links.py
   workflow_dispatch:
 
 permissions:
@@ -78,6 +80,18 @@ jobs:
       # Issue #512. Design: claude/design/doc-accuracy-and-generated-artifacts.md
       - name: Verify docs-affected map integrity (no stale entries)
         run: python3 scripts/docs-affected.py --validate
+
+      # Mechanical doc drift: cited src/ paths resolve, cross-document links land, #anchors match a real
+      # heading. Deliberately BEFORE the .NET/DocFX setup below — it takes about a second, so a moved file
+      # or a stale anchor fails here rather than after several minutes of building an API reference.
+      #
+      # This is the cheap half of the doc-accuracy net. Until it existed both halves were the Layer-2 LLM
+      # reviewer's job, which meant a ~7-minute billed turn to answer questions os.path.exists answers in
+      # milliseconds. The reviewer is now spent only on the semantic class — prose that still links and still
+      # parses but no longer matches the code. Modelled on typhon-claude's check-doc-drift.py, which took the
+      # same split for the knowledge base. Issue #490 Layer 1.
+      - name: Verify doc links and cited source paths resolve
+        run: python3 scripts/check-doc-links.py
 
       - uses: actions/setup-dotnet@v4
         with:

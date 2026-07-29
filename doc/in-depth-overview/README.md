@@ -42,6 +42,7 @@ The series follows the engine's folder layout — every `src/Typhon.Engine/<Fold
 | **13** | [Resources](13-resources.md) | The resource graph — every long-lived engine object as `IResource`. Metrics (Memory/Capacity/DiskIO/Throughput/Duration), snapshots, alerts, configuration (`ResourceOptions`), exhaustion policies. |
 | **14** | [Errors](14-errors.md) | The exception hierarchy, error codes, the `Result<TValue,TStatus>` zero-cost pattern, status enums, the throw-don't-retry philosophy. |
 
+<!-- doc-links: ignore -->
 Each chapter is self-contained. Cross-references between chapters are marked `[NN-name](NN-name.md)` and only point where the next-step detail genuinely lives.
 
 ---
