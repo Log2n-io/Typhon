@@ -121,6 +121,12 @@ class Program
                 return;
             }
 
+            if (args.Contains("--bulk-load"))
+            {
+                BulkLoadProfile.Run(args);
+                return;
+            }
+
             if (args.Contains("--storage-modes"))
             {
                 using var bench = new StorageModeCompareBenchmarks();

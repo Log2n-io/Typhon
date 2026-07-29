@@ -1,4 +1,6 @@
+using System;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace Typhon.Benchmark;
 
@@ -17,4 +19,34 @@ internal static class BenchmarkEngine
               o.Wal = new WalWriterOptions { UseFUA = false };
               o.Resources.CheckpointIntervalMs = int.MaxValue;
           });
+
+    /// <summary>
+    /// Builds the standard ECS benchmark engine: the full DI stack (allocator, epoch, hi-res timer, deadline watchdog, paged MMF)
+    /// on top of <see cref="AddInMemoryWalEngine"/>, with the backing file pre-deleted. Every ECS benchmark class should use this
+    /// so the whole suite measures ONE engine configuration — several classes previously hand-rolled the same stack with the
+    /// default (disk-backed) WAL instead, which silently put two different configurations into the same tracked trend.
+    /// </summary>
+    /// <param name="cachePages">Page-cache size expressed in pages (e.g. <c>200 * 1024</c> for a 200K-page cache).</param>
+    /// <param name="name">Database name stem; the current process id is appended so parallel benchmark processes never collide.</param>
+    public static ServiceProvider BuildEcsEngine(int cachePages, string name)
+    {
+        var sc = new ServiceCollection();
+        sc.AddLogging(b => b.SetMinimumLevel(LogLevel.Critical))
+          .AddResourceRegistry()
+          .AddMemoryAllocator()
+          .AddEpochManager()
+          .AddHighResolutionSharedTimer()
+          .AddDeadlineWatchdog()
+          .AddScopedManagedPagedMemoryMappedFile(o =>
+          {
+              o.DatabaseName = $"{name}_{Environment.ProcessId}";
+              o.DatabaseCacheSize = (ulong)((long)cachePages * PagedMMF.PageSize);
+              o.PagesDebugPattern = false;
+          })
+          .AddInMemoryWalEngine();
+
+        var sp = sc.BuildServiceProvider();
+        sp.EnsureFileDeleted<ManagedPagedMMFOptions>();
+        return sp;
+    }
 }
