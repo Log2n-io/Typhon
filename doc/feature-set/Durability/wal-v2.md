@@ -32,7 +32,7 @@ services
     {
         o.Wal = new WalWriterOptions
         {
-            WalDirectory = "wal",
+            // WalDirectory left unset → {DatabaseDirectory}/{DatabaseName}.typhon/wal
             SegmentSize = 64 * 1024 * 1024,    // 64 MB segments
             GroupCommitIntervalMs = 5,
         };
@@ -48,7 +48,7 @@ tx.Commit();   // batch appended now; durable on the next GroupCommit flush
 
 | Option | Default | Effect |
 |---|---|---|
-| `WalDirectory` | `"wal"` | Directory holding WAL segment files |
+| `WalDirectory` | `null` → `{bundle}/wal` | Directory holding WAL segment files. Left `null`, the engine resolves it to a `wal/` folder **inside the database bundle** (`{DatabaseDirectory}/{DatabaseName}.typhon/wal`), keeping each database's WAL private. Set it explicitly only to place the WAL elsewhere. |
 | `SegmentSize` | 64 MB | Size of each pre-allocated segment file |
 | `PreAllocateSegments` | 4 | Segments kept pre-allocated ahead of the write position |
 | `GroupCommitIntervalMs` | 5 | Auto-flush interval consumed by `DurabilityMode.GroupCommit` |

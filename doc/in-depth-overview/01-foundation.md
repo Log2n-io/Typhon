@@ -94,7 +94,7 @@ Critically: **MODIFY is compatible with ACCESSING**. A writer that's appending t
 
 ### Telemetry
 
-All three primitives emit typed events via [`TyphonEvent.Emit*`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Engine/Observability) calls — the events are JIT-eliminated when gates are off (see [12-observability](12-observability.md)). The hand-rolled `Telemetry` partial of `AccessControl` ([`AccessControl.Telemetry.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Foundation/Concurrency/internals/AccessControl.Telemetry.cs)) still uses `#if TELEMETRY` and is mid-migration.
+All three primitives emit typed events via [`TyphonEvent.Emit*`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Engine/Observability) calls — the events are JIT-eliminated when gates are off (see [12-observability](12-observability.md)).
 
 ---
 

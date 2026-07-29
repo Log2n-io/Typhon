@@ -15,7 +15,7 @@ Typhon's hot paths hold raw pointers into engine-owned memory for microseconds a
 
 ## ⚙️ How it works (in brief)
 
-A `MemoryAllocator` hands out two flavors of block: unmanaged ones backed by `NativeMemory.AlignedAlloc` (no GC interaction at all, optional power-of-2 alignment) and managed ones backed by a POH byte array (GC-allocated but pinnable on demand via `GCHandle`). Every block is created with an explicit owning resource and is registered as that owner's child in the engine's resource tree, not the allocator's — so a leaked block shows up under the subsystem that requested it, not lost in a flat pool. Higher-level allocators (`BlockAllocator` for fixed-stride slots, `ChainedBlockAllocator` for linked chains, `StructAllocator<T>` for typed slots) all draw their backing storage from a `MemoryAllocator` and add their own allocation/free semantics on top.
+A `MemoryAllocator` hands out two flavors of block: unmanaged ones backed by `NativeMemory.AlignedAlloc` (no GC interaction at all, optional power-of-2 alignment) and managed ones backed by a regular managed byte array (GC-allocated on the normal movable heap — *not* the Pinned Object Heap — and pinned on demand via `GCHandle` when a raw pointer is needed). Every block is created with an explicit owning resource and is registered as that owner's child in the engine's resource tree, not the allocator's — so a leaked block shows up under the subsystem that requested it, not lost in a flat pool. Higher-level allocators (`BlockAllocator` for fixed-stride slots, `ChainedBlockAllocator` for linked chains, `StructAllocator<T>` for typed slots) all draw their backing storage from a `MemoryAllocator` and add their own allocation/free semantics on top.
 
 ## 💻 Usage
 

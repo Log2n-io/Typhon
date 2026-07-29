@@ -65,7 +65,7 @@ using (var tx = dbe.CreateQuickTransaction())
 
 | Mode | When the WAL is flushed | Commit latency | At risk on crash |
 |---|---|---|---|
-| `Deferred` | only on explicit flush / UoW dispose | ~1–2 µs | everything since the last flush |
+| `Deferred` | only on an explicit `Flush()`/`FlushAsync()` — dispose does **not** flush | ~1–2 µs | everything since the last flush |
 | `GroupCommit` (default tuning) | automatically, ~every 5 ms | ~1–2 µs | ≤ one flush interval |
 | `Immediate` | fsync on every `Commit` | ~15–85 µs | nothing |
 

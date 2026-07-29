@@ -57,7 +57,8 @@ if (_control.EnterSharedAccess(ref ctx))
 ## ⚠️ Guarantees & limits
 - 8 bytes per instance — reserve for low-instance-count, high-contention resources; use `AccessControlSmall` for per-node/per-page locks numbering in the thousands.
 - Writer-preferring fairness via three sticky waiter counters; priority order is Promoter > Exclusive > Shared.
-- Max 255 concurrent shared holders and max 255 waiters per class (8-bit counters); overflow is a `Debug.Assert` in this type (compare `AccessControlSmall`, which throws on overflow).
+- Max 255 concurrent shared holders (8-bit counter); overflow trips a `Debug.Assert` in the `SharedCounter` setter — Debug builds only; in Release the assert is compiled out and the write is not range-masked, so a 256th holder spills into the adjacent shared-waiters field (compare `AccessControlSmall`, which throws `InvalidOperationException` on the same overflow).
+- Max 255 waiters per class (8-bit counters, one each for shared/exclusive/promoter); overflow is **silently tolerated**, not asserted. `WaitForIdleState` pre-checks the counter and skips registration once it is saturated, so the 256th waiter still waits correctly but stays invisible to the writer-preference counters — fairness degrades, nothing fails. The property-setter assert is never reached on this path because registration writes the staging word directly.
 - `WasContended` is a sticky diagnostic bit, cleared only by `Reset()`.
 - `internal` type — engine plumbing, not callable from application code.
 
