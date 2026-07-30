@@ -154,6 +154,27 @@ public sealed partial class TyphonRuntime : IDisposable
     /// <summary>Fires when overload reaches <see cref="OverloadLevel.PlayerShedding"/>. Game code decides what to do (migrate, disconnect, split).</summary>
     public event Action<TyphonRuntime> OnCriticalOverload;
 
+    /// <summary>
+    /// Outcome of the most recently completed tick. Refreshed every tick under every
+    /// <see cref="RuntimeOptions.SystemExceptionPolicy"/>, so it is never stale.
+    /// </summary>
+    /// <remarks>
+    /// This is the primary surface for a host that gates its own publication on tick success: it is pull-checkable, so the host's next loop iteration can ask
+    /// "did that tick succeed?" without having subscribed to anything, and a host that wires up late does not silently miss the answer.
+    /// <see cref="OnTickAborted"/> is the push counterpart.
+    /// </remarks>
+    public TickOutcome LastTickOutcome { get; private set; }
+
+    /// <summary>
+    /// Fires once when a tick is aborted under <see cref="SystemExceptionPolicy.AbortTickAndStop"/>, on the tick thread, after the tick has fully drained.
+    /// Never fires for a successful tick, and never fires twice — the runtime is terminal after an abort. The handler should stop the runtime
+    /// (<see cref="FatalStop"/>) and let the host decide whether to exit or rebuild the engine.
+    /// </summary>
+    public event Action<TyphonRuntime, TickOutcome> OnTickAborted;
+
+    // Latches OnTickAborted to a single invocation. Only ever touched on the TickDriver thread inside OnTickEndInternal.
+    private bool _tickAbortedNotified;
+
     // ═══════════════════════════════════════════════════════════════
     // Factory
     // ═══════════════════════════════════════════════════════════════
@@ -318,7 +339,20 @@ public sealed partial class TyphonRuntime : IDisposable
     /// <summary>
     /// Gracefully shuts down the runtime. Stops the subscription server, fires <see cref="OnShutdown"/>, then stops the scheduler.
     /// </summary>
-    public void Shutdown()
+    public void Shutdown() => StopInternal(true);
+
+    /// <summary>
+    /// Stops the runtime **without** running the <see cref="OnShutdown"/> hook — the fatal path, for a host reacting to <see cref="OnTickAborted"/> (issue #567).
+    /// </summary>
+    /// <remarks>
+    /// <see cref="OnShutdown"/> deliberately runs its handlers inside an <see cref="DurabilityMode.Immediate"/> transaction, which is the right thing for an
+    /// orderly stop and the wrong thing after a fatal tick: the abort means the simulation is logically incomplete, so committing a final round of shutdown
+    /// writes on top of it would persist state derived from a tick that never finished. Everything else — subscription server, profiler, scheduler — is
+    /// torn down exactly as in <see cref="Shutdown"/>.
+    /// </remarks>
+    public void FatalStop() => StopInternal(false);
+
+    private void StopInternal(bool runOnShutdown)
     {
         // Begin the async CPU-sampler stop first so its (seconds-long) .nettrace transcode overlaps the rest of teardown.
         // No-op unless the profiler was self-wired by ProfilerBootstrap.TryStart.
@@ -328,7 +362,7 @@ public sealed partial class TyphonRuntime : IDisposable
         _tcpServer?.Shutdown();
 
         // Execute OnShutdown callback with a dedicated transaction
-        if (OnShutdown != null)
+        if (runOnShutdown && OnShutdown != null)
         {
             using var tx = Engine.CreateQuickTransaction(DurabilityMode.Immediate);
             var ctx = new TickContext
@@ -1961,18 +1995,38 @@ public sealed partial class TyphonRuntime : IDisposable
         // Issue #234: compute per-tier budget metrics from this tick's system telemetry, for the next tick's TickContext.
         ComputeTierBudgetMetrics();
 
+        // Publish this tick's outcome BEFORE the output phase, so a host reading LastTickOutcome from a subscription callback already sees the verdict.
+        // Written on EVERY tick under EVERY policy (#567 AC8b) — a stale outcome must never be mistaken for a fresh one. Under Isolate this is always Success:
+        // a tick in which a system threw and its branch was skipped completed exactly as that policy promises. Per-system detail stays in SkipReason.
+        var tickAborted = scheduler.IsTickAborted;
+        LastTickOutcome = tickAborted ? scheduler.AbortedOutcome : TickOutcome.ForSuccess(scheduler.CurrentTickNumber);
+
         // #199: Output phase — subscription deltas.
         // Runs AFTER WriteTickFence so that:
         //   1. Ring buffer has ALL entries (commit-time + shadow-time) for correct View membership
         //   2. PreviousTickDirtyBitmap has this tick's dirty chunks for Modified detection
         //   3. All state is quiescent (no concurrent writers)
-        InspectorPhase(TickPhase.OutputPhase, () =>
+        //
+        // Suppressed on an aborted tick (#567): publication is the ONE tick-end act carrying tick-wide "this was a good tick" semantics, so it is the only one
+        // of the three that may be skipped. The fence and the flush above ran unconditionally and must keep doing so — rule TP-01a.
+        if (!tickAborted)
         {
-            using var subSpan = TyphonEvent.BeginRuntimeSubscriptionOutputExecute(
-                scheduler.CurrentTickNumber, (byte)Scheduler.CurrentOverloadLevel);
-            _subscriptionOutputPhase?.Execute(scheduler.CurrentTickNumber, Scheduler.CurrentOverloadLevel);
-            // Stats fields (clientCount, viewsRefreshed, deltasPushed, overflowCount) populated when Phase 9 wires per-tick subscription metrics back from SubscriptionOutputPhase.
-        });
+            InspectorPhase(TickPhase.OutputPhase, () =>
+            {
+                using var subSpan = TyphonEvent.BeginRuntimeSubscriptionOutputExecute(
+                    scheduler.CurrentTickNumber, (byte)Scheduler.CurrentOverloadLevel);
+                _subscriptionOutputPhase?.Execute(scheduler.CurrentTickNumber, Scheduler.CurrentOverloadLevel);
+                // Stats fields (clientCount, viewsRefreshed, deltasPushed, overflowCount) populated when Phase 9 wires per-tick subscription metrics back from
+                // SubscriptionOutputPhase.
+            });
+        }
+        else if (!_tickAbortedNotified)
+        {
+            // Fires once, on the TickDriver, after the tick has fully drained — so every worker's stores are ordered ahead of the handler reading the outcome.
+            // Subsequent ticks never reach here: DagScheduler.ExecuteCallbacks returns early once the abort latch is set.
+            _tickAbortedNotified = true;
+            OnTickAborted?.Invoke(this, LastTickOutcome);
+        }
     }
 
     /// <summary>

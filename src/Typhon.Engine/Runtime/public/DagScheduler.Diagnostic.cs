@@ -15,14 +15,17 @@ public sealed partial class DagScheduler
     // Per-system "most recent exception" capture. Populated by the system-execution catch
     // blocks via <see cref="CaptureSystemException"/>; surfaced in <see cref="DumpHangDiagnostic"/>
     // so a hang caused by a runaway exception gives the user the actual stack trace, not just a
-    // "Skip=Exception" enum value. Lazy-allocated so DAG schedulers built without diagnostic
-    // need don't pay the per-system slot cost.
-    private Exception[] _lastSystemException;
+    // "Skip=Exception" enum value. Allocated eagerly alongside the other per-system arrays in the constructor. It used to be lazy (`??=`) to spare schedulers
+    // with no diagnostic need the per-system slot cost, but that races: several workers throwing in the same tick can each evaluate the `??=` and allocate,
+    // and every capture but the winner's is silently dropped. An array of null references is 8 bytes per system — not a cost worth a race.
+    private readonly Exception[] _lastSystemException;
 
     internal void CaptureSystemException(int sysIdx, Exception ex)
     {
-        var arr = _lastSystemException ??= new Exception[AllSystemCount];
-        if ((uint)sysIdx < (uint)arr.Length) arr[sysIdx] = ex;
+        if ((uint)sysIdx < (uint)_lastSystemException.Length)
+        {
+            _lastSystemException[sysIdx] = ex;
+        }
     }
 
     /// <summary>
@@ -101,23 +104,23 @@ public sealed partial class DagScheduler
         // Surface any captured exceptions so a hang caused by a system throwing surfaces the
         // stack trace inline — without this the user would have to check the logger output
         // (which may be filtered) to know what went wrong.
-        if (_lastSystemException != null)
+        sb.AppendLine();
+        sb.AppendLine("Captured exceptions (most recent per system):");
+        var anyEx = false;
+        for (var i = 0; i < AllSystemCount; i++)
         {
-            sb.AppendLine();
-            sb.AppendLine("Captured exceptions (most recent per system):");
-            var anyEx = false;
-            for (var i = 0; i < AllSystemCount; i++)
+            var ex = _lastSystemException[i];
+            if (ex == null)
             {
-                var ex = _lastSystemException[i];
-                if (ex == null) continue;
-                anyEx = true;
-                sb.Append("  System ").Append(i).Append(" '").Append(Systems[i].Name).Append("':").AppendLine();
-                sb.AppendLine(ex.ToString());
+                continue;
             }
-            if (!anyEx)
-            {
-                sb.AppendLine("  (no exceptions captured)");
-            }
+            anyEx = true;
+            sb.Append("  System ").Append(i).Append(" '").Append(Systems[i].Name).Append("':").AppendLine();
+            sb.AppendLine(ex.ToString());
+        }
+        if (!anyEx)
+        {
+            sb.AppendLine("  (no exceptions captured)");
         }
 
         return sb.ToString();

@@ -40,6 +40,15 @@ public class RuntimeOptions
     public OverloadOptions Overload { get; set; } = new();
 
     /// <summary>
+    /// What an unhandled system exception means for the rest of the tick. Default:
+    /// <see cref="Typhon.Engine.SystemExceptionPolicy.Isolate"/> — fault isolation, the behaviour Typhon has always had.
+    /// Set <see cref="Typhon.Engine.SystemExceptionPolicy.AbortTickAndStop"/> for hosts that treat one tick as the unit
+    /// of publication and must not publish a partially-executed tick (issue #567). That policy is <b>terminal</b>: the
+    /// runtime stops ticking after the first fatal system exception.
+    /// </summary>
+    public SystemExceptionPolicy SystemExceptionPolicy { get; set; } = SystemExceptionPolicy.Isolate;
+
+    /// <summary>
     /// Minimum number of entities per chunk for parallel QuerySystem dispatch.
     /// Controls granularity: fewer entities per chunk = more parallelism but more overhead (Transaction creation per chunk).
     /// Entity sets smaller than this value still use the parallel chunk path with <c>totalChunks=1</c>.
