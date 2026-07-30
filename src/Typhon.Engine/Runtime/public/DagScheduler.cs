@@ -1,4 +1,4 @@
-using JetBrains.Annotations;
+﻿using JetBrains.Annotations;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using System;
@@ -114,6 +114,129 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     // Reset templates (immutable after construction)
     private readonly int[] _templateDeps;
     private readonly int[] _templateChunks;
+
+    // ═══════════════════════════════════════════════════════════════
+    // Strict tick abort (#567) — RuntimeOptions.SystemExceptionPolicy = AbortTickAndStop
+    // ═══════════════════════════════════════════════════════════════
+
+    // Terminal abort latch. 0 = running, 1 = a fatal system exception cancelled a tick and this scheduler is dead.
+    //
+    // NOT per-tick state, despite living next to the arrays above: `AbortTickAndStop` is terminal by design, so this is deliberately excluded from
+    // ResetTickState / the `Array.Clear(_systemFailed)` sites. Clearing it would silently resume ticking on a simulation whose systems only partly ran.
+    //
+    // Padded because every worker reads it on the dispatch path. It is written exactly once in the scheduler's lifetime, so the read is a shared-clean hit in
+    // steady state; padding keeps that line from being invalidated by the hot counters either side of it.
+    private CacheLinePaddedInt _tickAborted;
+
+    // First-failure record, written by whichever thread wins the CAS on _tickAborted — see TryRecordTickAbort for why the latch is taken before these are
+    // written, and why that ordering is safe.
+    private int _abortedSystemIndex = -1;
+    private Exception _abortedException;
+    private long _abortedTickNumber;
+
+    private readonly SystemExceptionPolicy _exceptionPolicy;
+
+    /// <summary>
+    /// True once a fatal system exception has aborted a tick under <see cref="SystemExceptionPolicy.AbortTickAndStop"/>.
+    /// Terminal — never cleared. No further ticks execute.
+    /// </summary>
+    public bool IsTickAborted => Volatile.Read(ref _tickAborted.Value) != 0;
+
+    /// <summary>
+    /// Records the first fatal system failure of a tick and latches the terminal abort, exactly once across all workers.
+    /// No-op unless the policy is <see cref="SystemExceptionPolicy.AbortTickAndStop"/> and the system belongs to an application track — a throw on an engine
+    /// track is a different class (rule D3) and never aborts a tick.
+    /// </summary>
+    /// <returns>True if THIS call latched the abort (the caller is the first-failure recorder).</returns>
+    private bool TryRecordTickAbort(int sysIdx, Exception ex)
+    {
+        if (_exceptionPolicy != SystemExceptionPolicy.AbortTickAndStop)
+        {
+            return false;
+        }
+        if ((uint)sysIdx < (uint)_systemIsEngine.Length && _systemIsEngine[sysIdx])
+        {
+            return false;
+        }
+
+        // Latch FIRST, then record. The CAS elects exactly one winner (AC11); writing the detail before it would let racing losers stomp the winner's record.
+        // The inverse hazard — a reader seeing the latch before the detail is written — cannot bite: the dispatch gates only ever test the latch, never the
+        // detail, and the detail is read (via AbortedOutcome) at tick end, after `_systemsRemaining` has drained to zero. That drain is a barrier every
+        // worker passes through, so it orders the winner's stores ahead of any read of them.
+        if (Interlocked.CompareExchange(ref _tickAborted.Value, 1, 0) != 0)
+        {
+            return false;   // another worker got there first — its failure is THE first failure
+        }
+
+        _abortedSystemIndex = sysIdx;
+        _abortedException = ex;
+        _abortedTickNumber = _currentTickNumber;
+        return true;
+    }
+
+    /// <summary>
+    /// The single funnel for "a system failed with this exception": logs it, captures it for <see cref="DumpHangDiagnostic"/>, and —
+    /// under <see cref="SystemExceptionPolicy.AbortTickAndStop"/> — latches the terminal tick abort. Every catch site in the system-execution paths calls this
+    /// and nothing else, so a new catch site cannot accidentally opt out of one of the three.
+    /// </summary>
+    private void RecordSystemFailure(int sysIdx, string systemName, Exception ex)
+    {
+        LogSystemException(sysIdx, systemName, ex);
+        CaptureSystemException(sysIdx, ex);
+        TryRecordTickAbort(sysIdx, ex);
+    }
+
+    /// <summary>
+    /// Marks a system cancelled by a tick abort and drives its completion so the tick's countdown still drains.
+    /// Cancellation in Typhon is dispatch-and-skip, never halt-dispatch: whoever claims the system must complete it, or
+    /// <c>_systemsRemaining</c> never reaches zero and the tick hangs.
+    /// </summary>
+    private void SkipSystemForTickAbort(int sysIdx, int workerId, bool trackUtilization)
+    {
+        _currentTickSystemMetrics[sysIdx].SkipReason = SkipReason.TickAborted;
+        InspectorSystemSkipped(sysIdx, SkipReason.TickAborted, Stopwatch.GetTimestamp());
+        OnSystemComplete(sysIdx, workerId, trackUtilization);
+    }
+
+    /// <summary>
+    /// Cancels a parallel / pipeline system whose chunk 0 this worker just claimed as the tick aborted. Claiming chunk 0 is the "this system begins" decision
+    /// and it is atomic — the counter hands 0 to exactly one worker — so the abort is decided once per system (rule D1: granularity is the system, never the chunk).
+    /// </summary>
+    /// <remarks>
+    /// <c>_systemFailed</c> is set first so peers still ahead of their own top-of-loop check divert into the drain instead of claiming fresh chunks. A peer that
+    /// already claimed a chunk runs it — that is in-flight work, which finishes by design. The tick is partially applied by construction anyway (systems that
+    /// ran before the failure committed), so a stray chunk is inside the envelope the policy already accepts, not a new failure mode.
+    /// </remarks>
+    private void AbortSystemFromChunkZero(int sysIdx, int workerId, bool trackUtilization)
+    {
+        _systemFailed[sysIdx] = true;
+        _currentTickSystemMetrics[sysIdx].SkipReason = SkipReason.TickAborted;
+        InspectorSystemSkipped(sysIdx, SkipReason.TickAborted, Stopwatch.GetTimestamp());
+
+        // Account for the chunk 0 we claimed but will not run. If it was the only chunk this completes the system.
+        if (Interlocked.Decrement(ref _remainingChunks[sysIdx].Value) == 0)
+        {
+            RecordSystemDone(sysIdx, Stopwatch.GetTimestamp());
+            SystemEndCallback?.Invoke(sysIdx, false);
+            OnSystemComplete(sysIdx, workerId, trackUtilization);
+            return;
+        }
+
+        // Chunks 1..N-1 go through the same drain the per-system failure path uses (correction C2): a not-yet-started system must still drive its counter to
+        // zero, and the drain's claim/decrement protocol is already race-safe across the several workers that can enter it at once.
+        DrainFailedSystemChunks(sysIdx, workerId, trackUtilization);
+    }
+
+    /// <summary>The outcome describing the abort. Only meaningful once <see cref="IsTickAborted"/> is true.</summary>
+    internal TickOutcome AbortedOutcome
+    {
+        get
+        {
+            var idx = _abortedSystemIndex;
+            var name = (uint)idx < (uint)Systems.Length ? Systems[idx].Name : null;
+            return new TickOutcome(_abortedTickNumber, TickOutcomeReason.SystemException, idx, name, _abortedException);
+        }
+    }
 
     // ═══════════════════════════════════════════════════════════════
     // Workers
@@ -261,6 +384,14 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
             return;
         }
 
+        // Terminal tick-abort (#567). AbortTickAndStop leaves the simulation logically incomplete — some systems ran, some never did — so the runtime must
+        // not silently resume on top of it. The host is expected to have stopped us from its OnTickAborted handler; this is the backstop for the ticks that
+        // fire before it gets there.
+        if (IsTickAborted)
+        {
+            return;
+        }
+
         // Outer safety net — this runs on the timer thread (HighResolutionTimerServiceBase.TimerLoop), a RAW thread with no catch of its own. An
         // exception escaping a tick here would propagate unhandled and ABORT THE PROCESS (a "Test host process crashed" / production host crash) —
         // strictly worse than a dropped tick. The single-threaded path (ExecuteTickSingleThreaded) runs the whole tick inline on this thread, so it has
@@ -355,6 +486,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         _topologicalOrder = topologicalOrder;
         AllSystemCount = systems.Length;
         _options = options;
+        _exceptionPolicy = options.SystemExceptionPolicy;   // hoisted: read on the dispatch path, never changes after construction
         _eventQueues = eventQueues ?? [];
         // Assign stable queue IDs (#311) so the per-queue telemetry path can carry a small u16 instead of the queue's name on the wire.
         // QueueId == array index here; the cache builder writes a parallel `QueueNameTable` section so consumers can map index → name.
@@ -417,6 +549,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         _remainingDeps = new CacheLinePaddedInt[AllSystemCount];
         _isReady = new CacheLinePaddedInt[AllSystemCount];
         _systemFailed = new bool[AllSystemCount];
+        _lastSystemException = new Exception[AllSystemCount];   // eager: the lazy `??=` it replaced raced across workers — see DagScheduler.Diagnostic.cs
 
         // Build reset templates
         _templateDeps = new int[AllSystemCount];
@@ -756,6 +889,20 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
 
         InspectorSystemReady(sysIdx, readyTick);
 
+        // Strict tick-abort (#567) — single-threaded dispatch path. Same gate as the multi-worker paths; without it a WorkerCount == 1 runtime would keep
+        // executing systems after the abort.
+        if (IsTickAborted && !_systemIsEngine[sysIdx])
+        {
+            _currentTickSystemMetrics[sysIdx].SkipReason = SkipReason.TickAborted;
+            InspectorSystemSkipped(sysIdx, SkipReason.TickAborted, Stopwatch.GetTimestamp());
+            foreach (var succ in sys.Successors)
+            {
+                _systemFailed[succ] = true;
+            }
+
+            return;
+        }
+
         // Check if a predecessor failed
         if (_systemFailed[sysIdx])
         {
@@ -774,8 +921,17 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         bool shouldRunSingle = sys.ShouldRun?.Invoke() ?? true;
         if (shouldRunSingle && sys.Instance is ChunkedCallbackSystem ccsSingle)
         {
-            try { shouldRunSingle = ccsSingle.OnShouldRun(); }
-            catch { _systemFailed[sysIdx] = true; return; }
+            try
+            {
+                shouldRunSingle = ccsSingle.OnShouldRun();
+            }
+            catch (Exception ex)
+            {
+                _currentTickSystemMetrics[sysIdx].SkipReason = SkipReason.Exception;
+                _systemFailed[sysIdx] = true;
+                RecordSystemFailure(sysIdx, sys.Name, ex);
+                return;
+            }
         }
         if (!shouldRunSingle)
         {
@@ -788,8 +944,17 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         if (sys.Instance is ChunkedCallbackSystem ccsSingle2)
         {
             int chunks;
-            try { chunks = ccsSingle2.OnPrepare(); }
-            catch { _systemFailed[sysIdx] = true; return; }
+            try
+            {
+                chunks = ccsSingle2.OnPrepare();
+            }
+            catch (Exception ex)
+            {
+                _currentTickSystemMetrics[sysIdx].SkipReason = SkipReason.Exception;
+                _systemFailed[sysIdx] = true;
+                RecordSystemFailure(sysIdx, sys.Name, ex);
+                return;
+            }
 
             if (chunks == 0)
             {
@@ -858,7 +1023,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                             chunkFailed = true;
                             _currentTickSystemMetrics[sysIdx].SkipReason = SkipReason.Exception;
                             _systemFailed[sysIdx] = true;
-                            LogSystemException(sysIdx, sys.Name, ex); CaptureSystemException(sysIdx, ex);
+                            RecordSystemFailure(sysIdx, sys.Name, ex);
                             foreach (var succ in sys.Successors)
                             {
                                 _systemFailed[succ] = true;
@@ -890,7 +1055,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                     {
                         _currentTickSystemMetrics[sysIdx].SkipReason = SkipReason.Exception;
                         _systemFailed[sysIdx] = true;
-                        LogSystemException(sysIdx, sys.Name, ex); CaptureSystemException(sysIdx, ex);
+                        RecordSystemFailure(sysIdx, sys.Name, ex);
                         foreach (var succ in sys.Successors)
                         {
                             _systemFailed[succ] = true;
@@ -914,7 +1079,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                 {
                     _currentTickSystemMetrics[sysIdx].SkipReason = SkipReason.Exception;
                     _systemFailed[sysIdx] = true;
-                    LogSystemException(sysIdx, sys.Name, ex); CaptureSystemException(sysIdx, ex);
+                    RecordSystemFailure(sysIdx, sys.Name, ex);
                     // Propagate failure to successors
                     foreach (var succ in sys.Successors)
                     {
@@ -1048,8 +1213,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                             _currentTickSystemMetrics[sysIdx].SkipReason = SkipReason.Exception;
                         }
                         var sysName = (uint)sysIdx < (uint)Systems.Length ? Systems[sysIdx].Name : "<unknown>";
-                        LogSystemException(sysIdx, sysName, ex);
-                        CaptureSystemException(sysIdx, ex);
+                        RecordSystemFailure(sysIdx, sysName, ex);
                         try { UnhandledExceptionCallback?.Invoke(sysIdx, sysName, ex); }
                         catch { /* swallow — the callback itself threw; we're the last line of defense */ }
                     }
@@ -1172,6 +1336,17 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         {
             return;
         }
+
+        // Strict tick-abort gate (#567, correction C1). Deliberately AFTER the claim, never inside FindReadySystem:
+        // this worker now owns the system, so it is the one obliged to drive the countdown. Returning -1 at find time would leave _isReady set and
+        // _systemsRemaining unadvanced — the tick would hang, which is precisely the failure this gate exists to prevent. Engine tracks are exempt
+        // (rule D3) — the fence runs no matter what.
+        if (IsTickAborted && !_systemIsEngine[sysIdx])
+        {
+            SkipSystemForTickAbort(sysIdx, workerId, trackUtilization);
+            return;
+        }
+
         TyphonEvent.EmitSchedulerDispense((ushort)sysIdx, 0, (byte)workerId);
 
         // ShouldRun was already evaluated at dispatch time (OnSystemComplete or root marking).
@@ -1192,7 +1367,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
             success = false;
             _currentTickSystemMetrics[sysIdx].SkipReason = SkipReason.Exception;
             _systemFailed[sysIdx] = true;
-            LogSystemException(sysIdx, Systems[sysIdx].Name, ex); CaptureSystemException(sysIdx, ex);
+            RecordSystemFailure(sysIdx, Systems[sysIdx].Name, ex);
         }
         finally
         {
@@ -1244,6 +1419,12 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
 
             if (chunk == 0)
             {
+                // Strict tick-abort start gate — see the identical gate in ProcessParallelQuery.
+                if (IsTickAborted && !_systemIsEngine[sysIdx])
+                {
+                    AbortSystemFromChunkZero(sysIdx, workerId, trackUtilization);
+                    return;
+                }
                 RecordFirstChunkGrab(sysIdx, Stopwatch.GetTimestamp());
             }
 
@@ -1258,7 +1439,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
             {
                 _systemFailed[sysIdx] = true;
                 _currentTickSystemMetrics[sysIdx].SkipReason = SkipReason.Exception;
-                LogSystemException(sysIdx, sys.Name, ex); CaptureSystemException(sysIdx, ex);
+                RecordSystemFailure(sysIdx, sys.Name, ex);
             }
             finally
             {
@@ -1360,6 +1541,14 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
 
             if (chunk == 0)
             {
+                // Strict tick-abort start gate (#567, corrections C1/C2). The atomic counter hands chunk 0 to exactly one worker, so this is the system's
+                // single "does it begin?" decision — rule D1, granularity is the system, never the chunk. Folded into a branch that already existed, so it
+                // is free on the hot path.
+                if (IsTickAborted && !_systemIsEngine[sysIdx])
+                {
+                    AbortSystemFromChunkZero(sysIdx, workerId, trackUtilization);
+                    return;
+                }
                 RecordFirstChunkGrab(sysIdx, Stopwatch.GetTimestamp());
             }
 
@@ -1374,7 +1563,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
             {
                 _systemFailed[sysIdx] = true;
                 _currentTickSystemMetrics[sysIdx].SkipReason = SkipReason.Exception;
-                LogSystemException(sysIdx, sys.Name, ex); CaptureSystemException(sysIdx, ex);
+                RecordSystemFailure(sysIdx, sys.Name, ex);
             }
             finally
             {
@@ -1483,8 +1672,19 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                     TyphonEvent.EmitSchedulerDependencyReady((ushort)sysIdx, (ushort)succIdx, (ushort)successors.Length, 0);
                     var succ = Systems[succIdx];
 
+                    // Strict tick-abort (#567) — checked BEFORE the failed-predecessor branch and before EvaluateShouldRunAndPrepare, so no user
+                    // ShouldRun / Prepare body runs once the tick is cancelled.
+                    // Reported as TickAborted rather than DependencyFailed: this system has no failed predecessor, the tick was cancelled out from under it.
+                    // Engine tracks are exempt (rule D3).
+                    if (IsTickAborted && !_systemIsEngine[succIdx])
+                    {
+                        _currentTickSystemMetrics[succIdx].SkipReason = SkipReason.TickAborted;
+                        InspectorSystemSkipped(succIdx, SkipReason.TickAborted, Stopwatch.GetTimestamp());
+                        fanOutSkipped++;
+                        OnSystemComplete(succIdx, workerId, trackUtilization);
+                    }
                     // Check if any predecessor failed — skip this system entirely
-                    if (_systemFailed[succIdx])
+                    else if (_systemFailed[succIdx])
                     {
                         _currentTickSystemMetrics[succIdx].SkipReason = SkipReason.DependencyFailed;
                         InspectorSystemSkipped(succIdx, SkipReason.DependencyFailed, Stopwatch.GetTimestamp());
@@ -1563,9 +1763,11 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
             {
                 shouldRun = ccs.OnShouldRun();
             }
-            catch
+            catch (Exception ex)
             {
+                _currentTickSystemMetrics[succIdx].SkipReason = SkipReason.Exception;
                 _systemFailed[succIdx] = true;
+                RecordSystemFailure(succIdx, succ.Name, ex);
                 fanOutSkipped++;
                 OnSystemComplete(succIdx, workerId, trackUtilization);
                 return false;
@@ -1589,9 +1791,11 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
             {
                 chunks = ccs2.OnPrepare();
             }
-            catch
+            catch (Exception ex)
             {
+                _currentTickSystemMetrics[succIdx].SkipReason = SkipReason.Exception;
                 _systemFailed[succIdx] = true;
+                RecordSystemFailure(succIdx, succ.Name, ex);
                 fanOutSkipped++;
                 OnSystemComplete(succIdx, workerId, trackUtilization);
                 return false;
@@ -1637,7 +1841,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
             success = false;
             _currentTickSystemMetrics[sysIdx].SkipReason = SkipReason.Exception;
             _systemFailed[sysIdx] = true;
-            LogSystemException(sysIdx, Systems[sysIdx].Name, ex); CaptureSystemException(sysIdx, ex);
+            RecordSystemFailure(sysIdx, Systems[sysIdx].Name, ex);
         }
         finally
         {

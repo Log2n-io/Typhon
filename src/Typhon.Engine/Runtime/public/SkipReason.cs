@@ -30,5 +30,11 @@ public enum SkipReason : byte
     Exception = 6,
 
     /// <summary>System was skipped because a predecessor system failed with an exception.</summary>
-    DependencyFailed = 7
+    DependencyFailed = 7,
+
+    /// <summary>
+    /// System was cancelled because the tick was aborted by an earlier fatal system exception under <see cref="SystemExceptionPolicy.AbortTickAndStop"/>
+    /// (issue #567). Distinct from <see cref="DependencyFailed"/>: the system has no failed predecessor, the whole tick was cancelled out from under it.
+    /// </summary>
+    TickAborted = 8
 }
