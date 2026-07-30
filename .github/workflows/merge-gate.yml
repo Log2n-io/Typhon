@@ -32,7 +32,7 @@ jobs:
       # `[no-ut]` in the PR head commit message → skip the heavy aws-gate suites (self-declared small-fix bypass).
       skip_ut: ${{ steps.ut.outputs.skip_ut }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dorny/paths-filter@v3
         id: filter
         with:
@@ -77,7 +77,7 @@ jobs:
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
       AWS_DEFAULT_REGION: eu-west-1
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install SkyPilot
         run: python3 -m pip install --quiet "skypilot[aws]"
@@ -109,7 +109,7 @@ jobs:
 
       - name: Upload raw artifacts (.trx / coverage / logs)
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ci-reports
           path: ci-out/**
@@ -129,7 +129,7 @@ jobs:
       # clean:false keeps the warm bin/obj (untracked) for an incremental build; test DBs live on /nvme (TMPDIR),
       # not the worktree, so nothing accumulates there. git reset --hard reverts any tracked edits for isolation.
       - name: Checkout (keep warm bin/obj)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           clean: false
       - name: Run correctness gate on the persistent c6id
@@ -151,7 +151,7 @@ jobs:
           fi
       - name: Upload raw artifacts (.trx / coverage / logs)
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ci-reports
           path: ci-out/**
@@ -163,11 +163,11 @@ jobs:
     if: ${{ needs.changes.outputs.tla == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # The specs live in the separate typhon-claude repo (claude/ is gitignored here).
       - name: Checkout typhon-claude (TLA specs)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: Log2n-io/Typhon-Claude
           # Cross-repo private checkout: the default GITHUB_TOKEN is scoped to this repo only and 404s on Typhon-Claude.
@@ -176,7 +176,7 @@ jobs:
           token: ${{ secrets.TYPHON_CLAUDE_TOKEN }}
           path: typhon-claude
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '11'    # runs the pinned tla2tools v1.7.4
@@ -218,7 +218,7 @@ jobs:
   invariants:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: LOG-02 — record byte layout stays inside Durability/internals/
         run: |

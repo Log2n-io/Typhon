@@ -47,18 +47,18 @@ jobs:
   pack:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           # MinVer derives the version from git tags/height — it needs full history, not a shallow clone.
           fetch-depth: 0
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: '10.0.x'
 
       # Node is required only for the CLI pack: `dotnet pack` of Typhon.Cli builds the Workbench SPA (the
       # BuildClientApp MSBuild target shells out to npm) so `typhon ui` ships wwwroot. The engine pack needs no Node.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '22'
 
@@ -107,7 +107,7 @@ jobs:
         run: bash scripts/onboarding-smoke-test.sh artifacts
 
       - name: Upload packages
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: nupkgs
           path: |
@@ -124,12 +124,12 @@ jobs:
       contents: read
       id-token: write                 # lets GitHub mint the OIDC token NuGet/login exchanges for a short-lived key
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: nupkgs
           path: artifacts
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: '10.0.x'
 

@@ -67,7 +67,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Collect the PRs merged in the look-back window and resolve, FOR EACH, the doc pages that PR's own
       # file changes could invalidate. Emits:

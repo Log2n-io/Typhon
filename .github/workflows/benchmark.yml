@@ -35,7 +35,7 @@ jobs:
       AWS_DEFAULT_REGION: eu-west-1
       PROFILE: ${{ github.event.inputs.profile || 'regression' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           # Check out the PR head branch so we can commit the refreshed report back to it.
           ref: ${{ github.head_ref || github.ref_name }}

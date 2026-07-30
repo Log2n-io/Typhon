@@ -45,7 +45,7 @@ jobs:
       # The action needs a checked-out repo for its internal setup (without it the run
       # dies at setup with git exit 128 — "directory mismatch"). Shallow is enough; the
       # triage itself only uses `gh` over the API, not repo history.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: anthropics/claude-code-action@v1
         env:

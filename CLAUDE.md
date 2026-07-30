@@ -269,7 +269,7 @@ Work tracking is managed via the [Typhon dev GitHub Project](https://github.com/
 |-------|---------|
 | `/dev-status` | Show current development status from GitHub Project |
 | `/start-research #XX` | Start research on an issue (creates research doc, links ideas, updates status) |
-| `/start-design #XX` | Start design for an issue (creates design doc from research/ideas, updates status to Ready) |
+| `/start-design #XX` | Start design for an issue (creates design doc from research/ideas; Status stays Todo) |
 | `/start-task #XX` | Begin work on an issue (updates status, creates branch, verifies design) |
 | `/start-subtask #XX` | Start a sub-issue (updates status, validates dependencies, updates design doc) |
 | `/complete-subtask #XX` | Complete a sub-issue (close it, check parent checkbox, update design doc) |
@@ -280,28 +280,40 @@ Work tracking is managed via the [Typhon dev GitHub Project](https://github.com/
 
 ### Issue Lifecycle
 
+The board has exactly **three** Status values. This is the complete set — there is no Backlog, Ready or Review column:
+
 ```
-Backlog → Research → Ready → In Progress → Review → Done
+Todo → In Progress → Done
 ```
 
-1. **Backlog**: Captured but not yet prioritized
-2. **Research**: Needs exploration before design (use `/start-research #XX`, creates `claude/research/` doc)
-3. **Ready**: Design complete, ready to implement (use `/start-design #XX`, creates `claude/design/` doc)
-4. **In Progress**: Active development (use `/start-task #XX`)
-5. **Review**: PR open, awaiting merge
-6. **Done**: Complete (use `/complete-task #XX`)
+1. **Todo**: everything not yet under development — captured, being researched, or designed and ready to start.
+2. **In Progress**: active development (`/start-task #XX`). **An issue stays here while its PR is open** — there is no Review status.
+3. **Done**: work merged and the issue closed (`/complete-task #XX`).
+
+**Research and design are activities, not board columns.** `/start-research #XX` and `/start-design #XX` create their documents under `claude/research/` and `claude/design/` and leave Status at **Todo** — the document's own `Status:` header carries that detail, not the board.
 
 #### GitHub Issue Completion Checklist
 When closing a GitHub issue: 1) Check ALL checkboxes in the issue body, 2) Update the project board status, 3) Move any related design docs to the appropriate folder, 4) Verify with `gh issue view` that everything is properly updated.
 
 ### Project Fields
 
-- **Status**: Workflow stage (Backlog → Done)
-- **Priority**: P0-Critical, P1-High, P2-Medium, P3-Low
-- **Phase**: Telemetry, Query, WAL, Reliability, Infrastructure
-- **Area**: Database, MVCC, Transactions, Indexes, Schema, Storage, Memory, Concurrency, Primitives, Observability, Execution, Errors, Workbench
-- **Estimate**: XS, S, M, L, XL
-- **Target**: Target date for Roadmap view
+**Board field** (project-level, set with `gh project item-edit`):
+
+- **Status**: Todo · In Progress · Done
+
+**Issue fields** (organization-level, set with the `setIssueFieldValue` GraphQL mutation — *not* `gh project item-edit`; the board columns of the same name are derived from these). Recipe in [`.claude/skills/_helpers.md`](.claude/skills/_helpers.md):
+
+- **Priority**: P0-Critical · P1-High · P2-Medium · P3-Low
+- **Estimate**: XS · S · M · L · XL
+- **Area**: Concurrency · Execution · Storage · Durability · MVCC · Schema · Spatial · Query · Runtime · Observability · Resources · Errors · Utilities · Workbench · Indexes
+- **Product**: Engine · Workbench · CLI · CI · User adoption
+- **Bug status**: New · Confirmed · Fixing · Fixed · Verified · Duplicate · Won't fix · Can't reproduce
+- **Start date** / **Target date**: dates
+- **Claude Code Discussion**: the `https://claude.ai/code/session_…` URL
+
+> **`Area` — `Execution` vs `Runtime` is the one people get wrong.** `Execution` is the Unit-of-Work / transaction-commit layer ([`claude/overview/02-execution.md`](claude/overview/02-execution.md)). The tick loop, `DagScheduler` and system dispatch are **`Runtime`** ([`claude/overview/13-runtime.md`](claude/overview/13-runtime.md)). External filers routinely pick `Execution` for scheduler work — reclassify and say so in the reply.
+
+Issue **Type** (Task / Bug / Feature / Epic) and **Milestone** are separate again — see `_helpers.md`. Hierarchy is always **Epic → Feature → Task**, never Epic → Task directly.
 
 ## Working with Claude
 

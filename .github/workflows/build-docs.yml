@@ -59,7 +59,7 @@ jobs:
   build:
     runs-on: ubuntu-latest              # DocFX + Roslyn are cross-platform; the .sh scripts run natively here
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # The telemetry flag reference (doc/feature-set/Observability/telemetry-flags-reference.md +
       # typhon.telemetry.template.jsonc) is GENERATED from the catalog (src/Typhon.Engine/Observability/
@@ -93,7 +93,7 @@ jobs:
       - name: Verify doc links and cited source paths resolve
         run: python3 scripts/check-doc-links.py
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: 10.0.x
 
@@ -159,4 +159,4 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
