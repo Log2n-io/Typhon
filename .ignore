@@ -1,0 +1,2 @@
+# ripgrep-only: claude/ is gitignored (nested repo) but MUST remain searchable.
+!claude/
