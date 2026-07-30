@@ -10,12 +10,14 @@
 [![Docs](https://img.shields.io/badge/docs-doc.typhondb.io-1f6feb?logo=readthedocs&logoColor=white)](https://doc.typhondb.io)
 [![Status](https://img.shields.io/badge/status-pre--alpha-orange)](https://github.com/Log2n-io/Typhon)
 
-> ### 📣 New here? Read [**PITCH.md**](PITCH.md) first.
-> It makes the case for Typhon — the problem it solves, what's actually built and measured today, and where it's headed — before you dive into the technical docs below.
+### 📣 8 slides, 4 minutes to understand what it is about ➡️ [Typhon intro](https://www.typhondb.io/deck/typhon-intro).
+
+#### Want to learn mode, read the [**pitch**](PITCH.md).
+It makes the case for Typhon — the problem it solves, what's actually built and measured today, and where it's headed — before you dive into the technical docs below.
 
 ### ⚠️ The engine is in active development — pre-alpha, stabilizing fast, not yet production-hardened. ⚠️
 
-Early **[alpha NuGet packages](https://www.nuget.org/packages/Typhon)** and full **[reference documentation](https://doc.typhondb.io)** are now live. Most of the public API is now stable — and you can **[open an issue](https://github.com/Log2n-io/Typhon/issues)** or go to the **[discussions](https://github.com/Log2n-io/Typhon/discussions)** for help, questions, or feedback.
+Early **[alpha NuGet package](https://www.nuget.org/packages/Typhon) (and [CLI + Workbench](https://www.nuget.org/packages/Typhon.Cli))** and full **[reference documentation](https://doc.typhondb.io)** are now live. Most of the public API is now stable — and you can **[open an issue](https://github.com/Log2n-io/Typhon/issues)** or go to the **[discussions](https://github.com/Log2n-io/Typhon/discussions)** for help, questions, or feedback.
 
 
 **A microsecond-latency ACID data engine combining ECS archetype storage with tick-based parallel execution.**
@@ -26,8 +28,8 @@ The runtime doesn't sit on top of the database — it runs inside it.
 
 📖 **Start here:**
 - **[📚 doc.typhondb.io](https://doc.typhondb.io)** — the new documentation site: guide, in-depth overview, feature catalog, and full **API reference**, all in one browsable, searchable place.
-- **[User Guide](doc/guide/README.md)** — learn the key concepts hands-on, backed by a small **runnable sample project** ([`doc/guide/example`](doc/guide/example)).
-- **[In-Depth Overview](doc/in-depth-overview/README.md)** — dig into how every subsystem works, and the reasoning behind it.
+- **[User Guide](https://doc.typhondb.io/latest/guides/README.html)** — learn the key concepts hands-on, backed by a small **runnable sample project** ([`doc/guide/example`](doc/guide/example)).
+- **[In-Depth Overview](https://doc.typhondb.io/latest/overview/README.html)** — dig into how every subsystem works, and the reasoning behind it.
 
 🗺️ **Curious what's next?** Current priorities, in-progress work, and the roadmap are tracked live on the [GitHub Project](https://github.com/orgs/Log2n-io/projects/1/views/1).
 
@@ -35,7 +37,7 @@ The runtime doesn't sit on top of the database — it runs inside it.
 
 ## Key Features
 
-📚 This is a curated highlight reel — see the full **[Feature Catalog](doc/feature-set/README.md)** for every capability, categorized and cross-linked to source and tests.
+📚 This is a curated highlight reel — see the full **[Feature Catalog](https://doc.typhondb.io/latest/guides/feature-catalog/README.html)** for every capability, categorized and cross-linked to source and tests.
 
 - **Microsecond Operations** — Optimized for µs-level latency with pinned memory, SIMD, and lock-free reads
 - **ACID Transactions** — Full transactional semantics with optimistic concurrency control
@@ -59,7 +61,7 @@ The runtime doesn't sit on top of the database — it runs inside it.
 - **Subscription Server + Client SDK** — TCP delta streaming of published views with MemoryPack serialization, per-client incremental sync, backpressure-driven resync, and a zero-engine-dependency `Typhon.Client` assembly for game clients
 - **Observability** — Runtime telemetry, metrics, and diagnostics with zero-cost JIT-eliminated toggles
 - **Deep-Trace Profiler** — Per-tick Gantt and flame-graph visualization via a `.typhon-trace` binary format, live TCP streaming to a React/Vite viewer, and optional `dotnet-trace` CPU sampling correlation for full managed-stack profiles
-- **Interactive Shell (tsh)** — Database REPL for inspection and debugging
+- **Interactive Shell (typhon)** — Database REPL for inspection and debugging
 - **Public/Internal API split** — Two namespaces per assembly (`Typhon.Engine` / `Typhon.Engine.Internals`), each subsystem folder split into `public/` + `internals/`, enforced at compile time by the `TYPHON008` Roslyn analyzer
 - **Roslyn Analyzers** — Custom analyzers detecting undisposed engine resources at compile time + the `TYPHON008` internal-API leak detector
 
@@ -85,14 +87,16 @@ var hp = tx.Open(id).Read(Unit.Health);   // hp.Current == 100
 tx.Commit();
 ```
 
-> *Illustrative — engine build + schema registration are elided. The **[User Guide](doc/guide/README.md)** has the full, **runnable** version ([`doc/guide/example`](doc/guide/example)).*
+> *Illustrative — engine build + schema registration are elided. The **[User Guide](https://doc.typhondb.io/latest/guides/README.html)** has the full, **runnable** version ([`doc/guide/example`](doc/guide/example)).*
 
-## Architecture
+### A 5 minutes round-trip
+Install the [Typhon.Cli](https://www.nuget.org/packages/Typhon.cli) NuGet package and follow the [instructions](src/Typhon.Shell/PACKAGE.md) to create a sample app, run it, profile it, open the database and the profiled session in the workbench.
 
-<a href="doc/in-depth-overview/assets/typhon-architecture-layers.svg">
-  <img src="doc/in-depth-overview/assets/typhon-architecture-layers.svg" width="1165"
-       alt="Typhon Architecture Layers">
-</a>
+Workbench Database
+![workbench database](tools/workbench-db.png)
+
+Workbench Profile viewer
+![Workbench profiling](tools/workbench-profile.png)
 
 ## Development Status
 
@@ -123,63 +127,6 @@ Typhon is in **active development** targeting an alpha release. Current state:
 - [x] Crash recovery (WAL v2 replay, scrub + index/EntityMap rebuild, suspect-mode)
 - [ ] Backup and restore
 
-## Project Structure
-
-Each engine subsystem folder splits into `public/` (consumer surface, namespace `Typhon.Engine`) and `internals/` (implementation, namespace `Typhon.Engine.Internals`).
-
-```
-Typhon/
-├── src/
-│   ├── Typhon.Engine/              # Main database engine — 17-feature tree
-│   │   ├── Foundation/             # Cross-cutting primitives
-│   │   │   ├── Collections/        # HashMaps, bitmaps, lock-free arrays
-│   │   │   ├── Concurrency/        # Latches, AccessControl, epoch system, deadlines, timer service
-│   │   │   └── Memory/             # Memory allocator + block primitives
-│   │   ├── Ecs/                    # ECS engine, archetypes, entity clusters, accessors
-│   │   ├── Indexing/               # B+Tree variants (key-size specialized, OLC)
-│   │   ├── Querying/               # Query engine, views, navigation joins, predicates
-│   │   ├── Schema/                 # Component & archetype schema, validation, evolution
-│   │   ├── Spatial/                # R-Tree, spatial grid, tier dispatch, trigger zones
-│   │   ├── Storage/                # Pages, cache, segments, PagedMMF / IPageStore / PersistentStore / TransientStore
-│   │   ├── Transactions/           # MVCC transactions, UnitOfWork, change capture
-│   │   ├── Revision/               # Revision chains, deferred cleanup
-│   │   ├── Durability/             # WAL, checkpointing (A/B slot-pairing), crash recovery & rebuild
-│   │   ├── Runtime/                # DagScheduler, tick loop, systems, overload management, queues
-│   │   ├── Subscriptions/          # TCP delta streaming server, published views
-│   │   ├── Profiler/               # In-engine typed-event profiler (codecs in Typhon.Profiler/)
-│   │   ├── Observability/          # Telemetry config, metrics, diagnostics
-│   │   ├── Resources/              # Resource graph, lifecycle, options
-│   │   ├── Errors/                 # Exception hierarchy, deadline propagation
-│   │   └── Hosting/                # DI extensions, service collection helpers
-│   ├── Typhon.Analyzers/           # Roslyn analyzers (dispose detection + TYPHON008 internal-API leak)
-│   ├── Typhon.Client/              # External client SDK (TCP subscriptions, zero engine deps)
-│   ├── Typhon.Generators/          # Source generators (archetype accessors, traced-event encoders, source location)
-│   ├── Typhon.Profiler/            # Trace file format, readers/writers, sidecar cache, Chrome Trace exporter
-│   ├── Typhon.Protocol/            # MemoryPack wire-format types (TickDeltaMessage, etc.)
-│   ├── Typhon.Schema.Definition/   # Component & archetype attributes
-│   ├── Typhon.Shell/               # Interactive database shell (tsh)
-│   └── Typhon.Shell.Extensibility/ # Shell extension points
-├── test/
-│   ├── Typhon.Engine.Tests/         # NUnit test suite (3500+ tests)
-│   ├── Typhon.Analyzers.Tests/      # Roslyn analyzer tests
-│   ├── Typhon.Client.Tests/         # Client SDK tests
-│   ├── Typhon.Workbench.Tests/      # Workbench server-side tests
-│   ├── Typhon.Benchmark/            # BenchmarkDotNet performance tests
-│   ├── Typhon.CompetitiveBenchmark/ # Comparative benchmark vs SQLite/RocksDB/LMDB/FASTER
-│   ├── Typhon.MonitoringDemo/       # Observability demo
-│   ├── Typhon.Samples.Swg.Tests/    # Tests for the canonical SWG sample schema
-│   └── Typhon.IOProfileRunner/      # Storage I/O profiling sandbox
-├── samples/
-│   └── Typhon.Samples.Swg/          # Canonical SWG sample schema (Light + Full) — referenced in-repo, emitted as source by `typhon new`
-├── tools/
-│   ├── Typhon.Workbench/           # Local dev UI (ASP.NET Core 10 + React 19/Vite) — data browsing, schema, profiler, System DAG, Data Flow timeline, Access Matrix
-│   └── Typhon.Workbench.Fixtures/  # Dev-only test fixture generators consumed by the Workbench DEBUG tabs
-├── demo/
-│   └── AntHill/                    # Godot-based ant-colony demo (runtime + clusters + spatial tiers)
-├── claude/                         # Architecture docs, ADRs, design specs (separate nested git repo)
-└── benchmark/                      # Benchmark results
-```
-
 ## History
 
 This project has had quite a journey:
@@ -193,3 +140,4 @@ This project has had quite a journey:
 - **Q2 2026 API hardening** — Public/Internal namespace migration, accessibility flips, friend-list audit, and leak-tightening pass: ~430 internal types now in `Typhon.Engine.Internals` enforced by the `TYPHON008` analyzer (#329)
 - **Q2 2026 durability redesign** — Minimal WAL (WAL v2 format, `RecoveryDriver`, checkpoint v2 A/B slot-pairing), the **Committed** durability discipline (#392), cluster crash durability (#395), BulkLoad write path + storage hardening (#383), and retirement of full-page images in favor of a suspect-mode rebuild recovery net (#399, #401)
 - **Q2 2026 Workbench redesign** — shell rebuild (Stages 0–4), read-only Data Browser, zoomable Database File Map, off-CPU + integrated CPU-sample profiling, Track→DAG / Critical Path rework, the AntHill validation harness, and **Query Console** Phase 1 — write/execute/browse queries against a live store (#379, #390)
+- **Q3 2026 Durability hardening, better perfs, less bugs, more user content** — in progress...
