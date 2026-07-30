@@ -37,8 +37,8 @@ internal class TransactionChain : ResourceNode, IDebugPropertiesProvider
 
     /// <summary>
     /// Cumulative count of transactions successfully committed since engine start. Monotonic. Incremented from
-    /// <see cref="Transaction.Commit"/> via <see cref="IncrementCommitTotal"/>. The profiler emits this as a gauge; the viewer derives
-    /// per-tick throughput by subtracting consecutive snapshots.
+    /// <see cref="Transaction.Commit(ref UnitOfWorkContext, ConcurrencyConflictHandler)"/> via <see cref="IncrementCommitTotal"/>. The profiler emits
+    /// this as a gauge; the viewer derives per-tick throughput by subtracting consecutive snapshots.
     /// </summary>
     internal long CommitTotal => _commitTotal;
 
@@ -56,10 +56,16 @@ internal class TransactionChain : ResourceNode, IDebugPropertiesProvider
     private long _rollbackTotal;
     private long _createdTotal;
 
-    /// <summary>Called from <see cref="Transaction.Commit"/> to bump the cumulative commit counter. Lock-free, atomic.</summary>
+    /// <summary>
+    /// Called from <see cref="Transaction.Commit(ref UnitOfWorkContext, ConcurrencyConflictHandler)"/> to bump the cumulative commit counter.
+    /// Lock-free, atomic.
+    /// </summary>
     internal void IncrementCommitTotal() => Interlocked.Increment(ref _commitTotal);
 
-    /// <summary>Called from <see cref="Transaction.Rollback"/> to bump the cumulative rollback counter.</summary>
+    /// <summary>
+    /// Called from <see cref="Transaction.Rollback(ref UnitOfWorkContext, Typhon.Profiler.TransactionRollbackReason)"/> to bump the cumulative
+    /// rollback counter.
+    /// </summary>
     internal void IncrementRollbackTotal() => Interlocked.Increment(ref _rollbackTotal);
 
     private AccessControl _control;

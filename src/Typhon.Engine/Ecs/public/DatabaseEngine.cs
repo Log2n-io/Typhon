@@ -563,7 +563,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// Mark a single entity slot as dirty in the cluster dirty bitmap. Call from game systems that use the direct
     /// cluster iteration path (<see cref="ClusterRef{TArch}.GetSpan{T}"/>) and need migration detection or WAL
     /// tracking. The <paramref name="chunkId"/> comes from <see cref="ClusterRef{TArch}.ChunkId"/>.
-    /// Thread-safe (uses <see cref="System.Threading.Interlocked.Or"/> internally via <c>SetDirty</c>).
+    /// Thread-safe (uses <see cref="System.Threading.Interlocked.Or(ref int, int)"/> internally via <c>SetDirty</c>).
     /// </summary>
     [PublicAPI]
     public void MarkClusterSlotDirty(int archetypeId, int chunkId, int slotIndex)

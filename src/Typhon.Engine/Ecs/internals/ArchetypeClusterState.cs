@@ -394,8 +394,9 @@ internal sealed unsafe class ArchetypeClusterState
     /// grid <c>cellKey</c> the cluster is attached to, or <c>-1</c> if unmapped (cluster not yet allocated, or archetype is not opted into the grid).
     /// </summary>
     /// <remarks>
-    /// Lazily allocated by <see cref="ClaimSlotInCell"/> or <see cref="RebuildCellState"/>. Non-spatial archetypes and spatial archetypes running without a
-    /// configured <see cref="SpatialGrid"/> leave this field <c>null</c> — the existing <see cref="ClaimSlot"/> path is unchanged for them.
+    /// Lazily allocated by <see cref="ClaimSlotInCell(int, ref ChunkAccessor{PersistentStore}, ChangeSet, SpatialGrid)"/> or
+    /// <see cref="RebuildCellState"/>. Non-spatial archetypes and spatial archetypes running without a configured <see cref="SpatialGrid"/> leave this
+    /// field <c>null</c> — the existing <see cref="ClaimSlot(ref ChunkAccessor{PersistentStore}, ChangeSet)"/> path is unchanged for them.
     /// </remarks>
     public int[] ClusterCellMap;
 
@@ -597,7 +598,7 @@ internal sealed unsafe class ArchetypeClusterState
     public int SleepingClusterCount;
 
     /// <summary>Archetype ID for this cluster state. Set during <see cref="InitializeSpatial"/>. Used by
-    /// <see cref="SetDirty"/> to tag wake requests via <see cref="DormancyReporter"/>. Issue #233.</summary>
+    /// <see cref="MarkEntityDirty"/> to tag wake requests via <see cref="DormancyReporter"/>. Issue #233.</summary>
     internal int ArchetypeId;
 
     /// <summary>Back-reference to the engine's <see cref="SpatialGrid"/>. Set during <see cref="InitializeSpatial"/>. Used by <c>ClusterRef.WriteSpatial</c> to
@@ -1073,7 +1074,7 @@ internal sealed unsafe class ArchetypeClusterState
 
     /// <summary>
     /// Attempt to claim one free slot in <paramref name="clusterChunkId"/>. Returns the slot index, or <c>-1</c> if the cluster is full. Shared by both
-    /// scan phases of both <see cref="ClaimSlotInCell"/> overloads — collapses what would otherwise be four copies of the dirty-aware claim block.
+    /// scan phases of both <c>ClaimSlotInCell</c> overloads — collapses what would otherwise be four copies of the dirty-aware claim block.
     /// </summary>
     /// <remarks>
     /// The cluster is first read with <c>dirty:false</c> — the scan must not dirty full clusters it skips (that would inflate ActiveChunkWriters /
@@ -1122,9 +1123,10 @@ internal sealed unsafe class ArchetypeClusterState
     /// its existing clusters has a free slot.
     /// </summary>
     /// <remarks>
-    /// <para>This is the spatial-aware counterpart of <see cref="ClaimSlot"/>. Unlike <c>ClaimSlot</c> it ignores <see cref="FreeClusterHead"/> — that hint
-    /// is a global free-slot cache that cannot distinguish cells, so it's useless once spatial coherence is required. Instead, we scan this archetype's
-    /// own cluster list for the target cell (typically ≤80 entries for AntHill-scale density, ≤15-30 ns scan cost).</para>
+    /// <para>This is the spatial-aware counterpart of <see cref="ClaimSlot(ref ChunkAccessor{PersistentStore}, ChangeSet)"/>. Unlike <c>ClaimSlot</c> it
+    /// ignores <see cref="FreeClusterHead"/> — that hint is a global free-slot cache that cannot distinguish cells, so it's useless once spatial
+    /// coherence is required. Instead, we scan this archetype's own cluster list for the target cell (typically ≤80 entries for AntHill-scale
+    /// density, ≤15-30 ns scan cost).</para>
     /// <para>Under the Q10 resolution the scanned list is strictly this archetype's — other spatial archetypes sharing the grid have their own
     /// <see cref="CellClusterPool"/> instances, so no cross-archetype cluster chunk IDs ever appear in this scan.</para>
     /// <para>Every successful claim bumps the global <see cref="CellState.EntityCount"/>. Allocation of a new cluster additionally bumps the global
@@ -1229,7 +1231,8 @@ internal sealed unsafe class ArchetypeClusterState
     }
 
     /// <summary>
-    /// Pure-Transient overload of <see cref="ClaimSlotInCell"/>. Identical logic, different accessor type.
+    /// Pure-Transient overload of <see cref="ClaimSlotInCell(int, ref ChunkAccessor{PersistentStore}, ChangeSet, SpatialGrid)"/>. Identical logic,
+    /// different accessor type.
     /// </summary>
     public (int clusterChunkId, int slotIndex) ClaimSlotInCell(int cellKey, ref ChunkAccessor<TransientStore> accessor, SpatialGrid grid)
     {
@@ -1380,7 +1383,7 @@ internal sealed unsafe class ArchetypeClusterState
 
     /// <summary>
     /// Grow <see cref="ClusterCellMap"/> to hold at least <paramref name="requiredLength"/> entries, initializing new slots to <c>-1</c> (unmapped).
-    /// Called lazily by <see cref="ClaimSlotInCell"/> when a new cluster chunk ID lands beyond the current bounds.
+    /// Called lazily by <c>ClaimSlotInCell</c> when a new cluster chunk ID lands beyond the current bounds.
     /// </summary>
     internal void EnsureClusterCellMapCapacity(int requiredLength)
     {
@@ -2470,7 +2473,7 @@ internal sealed unsafe class ArchetypeClusterState
     /// <para>
     /// <b>Threading.</b> Caller owns the writer mutex for this <see cref="ArchetypeClusterState"/> when <paramref name="deferFinalize"/> = false. When deferred,
     /// the caller is the parallel fence path where workers operate on disjoint clusters; <see cref="RecordClusterDrain"/> uses
-    /// <see cref="System.Threading.Interlocked.Increment"/> to reserve a slot in the per-archetype drain list, so concurrent drain records are safe.
+    /// <see cref="System.Threading.Interlocked.Increment(ref int)"/> to reserve a slot in the per-archetype drain list, so concurrent drain records are safe.
     /// </para>
     /// </remarks>
     /// <param name="accessor">Chunk accessor bound to the <see cref="PersistentStore"/> segment — provides the in-memory address of the cluster chunk for
@@ -2634,8 +2637,9 @@ internal sealed unsafe class ArchetypeClusterState
     /// <para><paramref name="resetCursor"/> controls the scan-cursor reset: on the serial release path (<c>Transaction.Destroy</c>, <c>deferFinalize</c>
     /// false) we reset to 0 so the freed slot is immediately reusable by the next claim. On the parallel-fence migration path (<c>deferFinalize</c> true)
     /// the reset is SKIPPED — releases there touch arbitrary, non-worker-exclusive source cells, so resetting would zero the cursors of destination cells
-    /// other workers are actively claiming into (cursor thrash) and pound a shared array (false sharing). Phase-2 of <see cref="ClaimSlotInCell"/> recovers
-    /// any slot freed behind the cursor, so skipping the reset costs at most a redundant scan, never a missed free slot.</para>
+    /// other workers are actively claiming into (cursor thrash) and pound a shared array (false sharing). Phase-2 of
+    /// <see cref="ClaimSlotInCell(int, ref ChunkAccessor{PersistentStore}, ChangeSet, SpatialGrid)"/> recovers any slot freed behind the cursor, so
+    /// skipping the reset costs at most a redundant scan, never a missed free slot.</para>
     /// </summary>
     private void DecrementCellEntityCountOnRelease(SpatialGrid grid, int clusterChunkId, bool resetCursor)
     {

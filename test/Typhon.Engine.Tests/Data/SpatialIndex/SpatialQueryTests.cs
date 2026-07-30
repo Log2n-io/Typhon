@@ -89,10 +89,12 @@ public class SpatialQueryTests
         var accessor = segment.CreateChunkAccessor();
         try
         {
+            int halfCoord = coordCount / 2;
+            // Hoisted out of the loop: a stackalloc inside a loop is never released until the method returns (CA2014).
+            // Every element is rewritten each iteration, so reuse is behaviour-preserving.
+            Span<double> coords = stackalloc double[coordCount];
             for (int i = 0; i < entityCount; i++)
             {
-                int halfCoord = coordCount / 2;
-                Span<double> coords = stackalloc double[coordCount];
                 for (int d = 0; d < halfCoord; d++)
                 {
                     double v = rng.NextDouble() * 1000;
@@ -473,12 +475,14 @@ public class SpatialQueryTests
             uint maskA = 0x01;
             uint maskB = 0x02;
 
+            // Hoisted out of the loop: a stackalloc inside a loop is never released until the method returns (CA2014).
+            Span<double> coords = stackalloc double[4];
             for (int i = 0; i < 200; i++)
             {
                 double v = rng.NextDouble() * 1000;
                 double v2 = rng.NextDouble() * 1000;
                 double size = rng.NextDouble() * 10 + 1;
-                Span<double> coords = stackalloc double[] { v, v2, v + size, v2 + size };
+                coords[0] = v; coords[1] = v2; coords[2] = v + size; coords[3] = v2 + size;
 
                 // Alternate category masks: even = A, odd = B
                 uint mask = (i % 2 == 0) ? maskA : maskB;
@@ -587,11 +591,14 @@ public class SpatialQueryTests
         int entityCount = 200;
         try
         {
+            // Hoisted out of the loop: a stackalloc inside a loop is never released until the method returns (CA2014).
+            Span<double> box = stackalloc double[4];
             for (int i = 0; i < entityCount; i++)
             {
                 double x = rng.NextDouble() * 1000, y = rng.NextDouble() * 1000;
                 uint mask = (i % 3 == 0) ? 0x01u : 0x02u; // 1/3 enemies, 2/3 allies
-                tree.Insert(i + 1, i + 1, stackalloc double[] { x, y, x + 5, y + 5 }, ref accessor, categoryMask: mask);
+                box[0] = x; box[1] = y; box[2] = x + 5; box[3] = y + 5;
+                tree.Insert(i + 1, i + 1, box, ref accessor, categoryMask: mask);
             }
         }
         finally { accessor.Dispose(); }

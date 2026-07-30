@@ -58,10 +58,12 @@ public class SpatialPerfTests
         var accessor = segment.CreateChunkAccessor();
         try
         {
+            int halfCoord = desc.CoordCount / 2;
+            // Hoisted out of the loop: a stackalloc inside a loop is never released until the method returns (CA2014).
+            // Every element is rewritten each iteration, so reuse is behaviour-preserving.
+            Span<double> coords = stackalloc double[desc.CoordCount];
             for (int i = 0; i < entityCount; i++)
             {
-                int halfCoord = desc.CoordCount / 2;
-                Span<double> coords = stackalloc double[desc.CoordCount];
                 for (int d = 0; d < halfCoord; d++)
                 {
                     double v = rng.NextDouble() * 10000;
@@ -91,10 +93,12 @@ public class SpatialPerfTests
         var (tree, _) = CreatePopulatedTree(pmmf, 1000, SpatialVariant.R2Df32);
 
         // Warmup
+        // Hoisted out of the loop: a stackalloc inside a loop is never released until the method returns (CA2014).
+        Span<double> warmupBox = stackalloc double[] { 4000, 4000, 6000, 6000 };
         for (int w = 0; w < 100; w++)
         {
             int count = 0;
-            foreach (var _ in tree.QueryAABB(stackalloc double[] { 4000, 4000, 6000, 6000 }))
+            foreach (var _ in tree.QueryAABB(warmupBox))
             {
                 count++;
             }
@@ -102,13 +106,17 @@ public class SpatialPerfTests
 
         // Benchmark: 10000 queries
         const int iterations = 10000;
+        // Hoisted out of the loop: a stackalloc inside a loop is never released until the method returns (CA2014).
+        // It also keeps the allocation out of the timed region.
+        Span<double> queryBox = stackalloc double[4];
         var sw = Stopwatch.StartNew();
         int totalHits = 0;
         for (int i = 0; i < iterations; i++)
         {
             // Vary query position slightly to avoid branch prediction artifacts
             double offset = (i % 100) * 10.0;
-            foreach (var hit in tree.QueryAABB(stackalloc double[] { 4000 + offset, 4000, 5000 + offset, 5000 }))
+            queryBox[0] = 4000 + offset; queryBox[1] = 4000; queryBox[2] = 5000 + offset; queryBox[3] = 5000;
+            foreach (var hit in tree.QueryAABB(queryBox))
             {
                 totalHits++;
             }
@@ -130,18 +138,25 @@ public class SpatialPerfTests
 
         var (tree, _) = CreatePopulatedTree(pmmf, 1000, SpatialVariant.R3Df32);
 
+        // Hoisted out of the loop: a stackalloc inside a loop is never released until the method returns (CA2014).
+        Span<double> warmupBox = stackalloc double[] { 4000, 4000, 4000, 6000, 6000, 6000 };
         for (int w = 0; w < 100; w++)
         {
-            foreach (var _ in tree.QueryAABB(stackalloc double[] { 4000, 4000, 4000, 6000, 6000, 6000 })) { }
+            foreach (var _ in tree.QueryAABB(warmupBox)) { }
         }
 
         const int iterations = 10000;
+        // Hoisted out of the loop: a stackalloc inside a loop is never released until the method returns (CA2014).
+        // It also keeps the allocation out of the timed region.
+        Span<double> queryBox = stackalloc double[6];
         var sw = Stopwatch.StartNew();
         int totalHits = 0;
         for (int i = 0; i < iterations; i++)
         {
             double offset = (i % 100) * 10.0;
-            foreach (var hit in tree.QueryAABB(stackalloc double[] { 4000 + offset, 4000, 4000, 5000 + offset, 5000, 5000 }))
+            queryBox[0] = 4000 + offset; queryBox[1] = 4000; queryBox[2] = 4000;
+            queryBox[3] = 5000 + offset; queryBox[4] = 5000; queryBox[5] = 5000;
+            foreach (var hit in tree.QueryAABB(queryBox))
             {
                 totalHits++;
             }
@@ -170,11 +185,15 @@ public class SpatialPerfTests
 
         // Warmup: insert 1000
         var accessor = segment.CreateChunkAccessor();
+        // Hoisted out of the loop: a stackalloc inside a loop is never released until the method returns (CA2014).
+        // Shared by the warmup and benchmark loops below.
+        Span<double> insertBox = stackalloc double[4];
         for (int i = 0; i < 1000; i++)
         {
             double x = rng.NextDouble() * 10000;
             double y = rng.NextDouble() * 10000;
-            tree.Insert(i + 1, stackalloc double[] { x, y, x + 5, y + 5 }, ref accessor);
+            insertBox[0] = x; insertBox[1] = y; insertBox[2] = x + 5; insertBox[3] = y + 5;
+            tree.Insert(i + 1, insertBox, ref accessor);
         }
 
         // Benchmark: insert 10000 more
@@ -184,7 +203,8 @@ public class SpatialPerfTests
         {
             double x = rng.NextDouble() * 10000;
             double y = rng.NextDouble() * 10000;
-            tree.Insert(1001 + i, stackalloc double[] { x, y, x + 5, y + 5 }, ref accessor);
+            insertBox[0] = x; insertBox[1] = y; insertBox[2] = x + 5; insertBox[3] = y + 5;
+            tree.Insert(1001 + i, insertBox, ref accessor);
         }
         sw.Stop();
         accessor.Dispose();

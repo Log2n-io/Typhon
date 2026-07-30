@@ -26,7 +26,9 @@ namespace Typhon.Engine.Internals;
 /// </summary>
 internal static partial class SpatialRTreeDiagnostics
 {
-    /// <summary>Total number of DFS-stack overflows recorded since process start. Read via <see cref="Interlocked.Read"/> in tests.</summary>
+    /// <summary>
+    /// Total number of DFS-stack overflows recorded since process start. Read via <see cref="Interlocked.Read(ref readonly long)"/> in tests.
+    /// </summary>
     internal static long DfsStackOverflowCount;
 
     /// <summary>

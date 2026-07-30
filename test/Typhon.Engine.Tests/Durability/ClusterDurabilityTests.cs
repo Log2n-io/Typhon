@@ -146,7 +146,9 @@ class ClusterDurabilityTests : TestBase<ClusterDurabilityTests>
             using var tx = dbe.CreateQuickTransaction();
             using var view = tx.Query<ClusterDurCkpt>().ToView();
             probe = 0;
-            foreach (var e in view)
+            // GetEntityEnumerator(): ViewBase.GetEnumerator() is internal, so a bare foreach silently falls back to
+            // IEnumerable<long> — a boxed enumerator per loop (CS0279). This is the public, allocation-free path.
+            foreach (var _ in view.GetEntityEnumerator())
             {
                 probe++;
             }

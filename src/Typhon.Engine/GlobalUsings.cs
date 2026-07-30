@@ -8,9 +8,8 @@
 
 global using Typhon.Engine.Internals;
 
-// The TraceEventGenerator emits `[TraceEvent(...)]` and the matching attribute type into
-// `namespace Typhon.Engine.Profiler` (the generator's hard-coded output namespace). All event
-// payload structs in `Profiler/internals/` carry that attribute, and engine code that calls
-// the generated factories also lives across many files. The global using brings the generated
-// namespace in everywhere so engine code compiles without per-file usings.
+// `namespace Typhon.Engine.Profiler` holds the TraceEventGenerator's attribute surface
+// (Profiler/public/TraceEventAttributes.cs). All event payload structs in `Profiler/internals/` carry
+// `[TraceEvent(...)]`, and engine code that calls the generated factories lives across many files.
+// The global using brings the namespace in everywhere so engine code compiles without per-file usings.
 global using Typhon.Engine.Profiler;

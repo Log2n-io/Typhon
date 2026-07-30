@@ -22,11 +22,12 @@ namespace Typhon.Engine.Internals;
 /// ...     4 × N             IndexElementIds[1][N]
 /// ...     4 × N             IndexElementIds[M-1][N]
 /// </code>
-/// <para>The IndexElementIds tail section stores, per entity, the <c>elementId</c> returned by <see cref="BTreeBase{TStore}.Add"/> when a field value was
-/// inserted into the cluster's per-archetype B+Tree. It is used by the destroy and migration paths to call <see cref="BTreeBase{TStore}.RemoveValue"/>
-/// with the correct elementId, so removal only wipes the specific <c>(key, clusterLocation)</c> entry rather than the entire buffer at the key (which would
-/// corrupt siblings sharing the same key value on a non-unique index). Only fields marked <c>AllowMultiple = true</c> consume a section — archetypes
-/// without any multi-value indexed fields have a zero-byte tail.</para>
+/// <para>The IndexElementIds tail section stores, per entity, the <c>elementId</c> returned by
+/// <see cref="BTreeBase{TStore}.Add(void*, int, ref ChunkAccessor{TStore})"/> when a field value was inserted into the cluster's per-archetype
+/// B+Tree. It is used by the destroy and migration paths to call <see cref="BTreeBase{TStore}.RemoveValue"/> with the correct elementId, so removal
+/// only wipes the specific <c>(key, clusterLocation)</c> entry rather than the entire buffer at the key (which would corrupt siblings sharing the same
+/// key value on a non-unique index). Only fields marked <c>AllowMultiple = true</c> consume a section — archetypes without any multi-value indexed
+/// fields have a zero-byte tail.</para>
 /// </remarks>
 internal sealed class ArchetypeClusterInfo
 {

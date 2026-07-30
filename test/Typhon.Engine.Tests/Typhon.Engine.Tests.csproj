@@ -11,6 +11,10 @@
 
         <LangVersion>default</LangVersion>
         <RunSettingsFilePath>$(MSBuildProjectDirectory)\test.runsettings</RunSettingsFilePath>
+        <!-- Zero-warning policy (matches Typhon.Engine / Typhon.Profiler / Typhon.Workbench.Fixtures): the fixture suite
+             builds clean, so EVERY warning is promoted to an error. Test code is where dead locals, hidden base members
+             and stackalloc-in-a-loop hide most easily — a failing build is the cheapest place to catch them. -->
+        <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     </PropertyGroup>
 
     <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">

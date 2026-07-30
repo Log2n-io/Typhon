@@ -1,3 +1,8 @@
+// CS0649: these component payload fields are written by the engine through spans/pointers, never by C# assignment
+// in this fixture — the declarations exist to define the blittable layout the schema is derived from. Same
+// rationale (and same pragma) as src/Typhon.Engine/Profiler/internals/InstantEvents.cs.
+#pragma warning disable CS0649
+
 using NUnit.Framework;
 using Typhon.Schema.Definition;
 

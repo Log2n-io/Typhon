@@ -14,8 +14,11 @@ namespace Typhon.Engine.Tests.Runtime;
 [TestFixture]
 class DormancyTests : TestBase<DormancyTests>
 {
-    [TearDown]
-    public void TearDown() => DormancyReporter.Reset();
+    public override void TearDown()
+    {
+        DormancyReporter.Reset();
+        base.TearDown();
+    }
 
     private static TierPos PointAt(float x, float y) =>
         new() { Bounds = new AABB2F { MinX = x, MinY = y, MaxX = x, MaxY = y }, Data = 1.0f };

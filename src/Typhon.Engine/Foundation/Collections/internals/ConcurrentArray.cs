@@ -91,7 +91,7 @@ internal class ConcurrentArray<T> where T : class
 
     /// <summary>
     /// Pick and item from the collection for processing.
-    /// Any call to this method must be followed by either <see cref="PutBack"/> or <see cref="Remove"/>.
+    /// Any call to this method must be followed by either <see cref="PutBack"/> or <see cref="Remove(int)"/>.
     /// </summary>
     /// <param name="index">The index at which the item should be retrieved</param>
     /// <param name="result">The object or <c>null</c> if the entry is free or the object currently being processed by another thread</param>

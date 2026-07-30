@@ -162,14 +162,16 @@ class SpatialEcsIntegrationTests : TestBase<SpatialEcsIntegrationTests>
     {
         // Verify 2D lossless packing produces unique keys for distinct cell coords
         var keys = new HashSet<long>();
+        // coordCount=4 (2D): coords = [minX, minY, maxX, maxY], center = ((min+max)/2)
+        // Hoisted out of the loop: a stackalloc inside a loop is never released until the method returns (CA2014).
+        Span<double> coords = stackalloc double[4];
         for (int x = -10; x <= 10; x++)
         {
             for (int y = -10; y <= 10; y++)
             {
                 double cx = x * 100.0 + 50;
                 double cy = y * 100.0 + 50;
-                // coordCount=4 (2D): coords = [minX, minY, maxX, maxY], center = ((min+max)/2)
-                Span<double> coords = stackalloc double[] { cx - 1, cy - 1, cx + 1, cy + 1 };
+                coords[0] = cx - 1; coords[1] = cy - 1; coords[2] = cx + 1; coords[3] = cy + 1;
                 long key = SpatialMaintainer.ComputeCellKey(coords, 4, 1.0f / 100.0f);
                 Assert.That(keys.Add(key), Is.True, $"Duplicate key for cell ({x},{y})");
             }

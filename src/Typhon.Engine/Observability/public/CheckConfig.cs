@@ -48,7 +48,7 @@ public static class CheckConfig
 
     /// <summary>
     /// Number of <see cref="Record(bool, bool, ref CheckMessageHandler)"/> violations flagged this process (latch-safe checks
-    /// that record instead of throwing). Diagnostic counter; read via <see cref="Interlocked.Read"/>. Internal — not a public
+    /// that record instead of throwing). Diagnostic counter; read via <see cref="Interlocked.Read(ref readonly long)"/>. Internal — not a public
     /// API surface (mirrors <c>SpatialRTreeDiagnostics.DfsStackOverflowCount</c>).
     /// </summary>
     internal static long RecordedViolationCount;

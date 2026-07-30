@@ -6,7 +6,7 @@ namespace Typhon.Engine.Internals;
 
 /// <summary>
 /// Runtime safety net for declared system access (RFC 07 — Unit 4). The scheduler tags each worker thread with the currently-executing
-/// system's <see cref="SystemAccessDescriptor"/> via <see cref="EnterSystem"/>; <see cref="EntityRef.Write{T}"/> calls
+/// system's <see cref="SystemAccessDescriptor"/> via <see cref="EnterSystem"/>; <see cref="EntityRef.Write{T}(Comp{T})"/> calls
 /// <see cref="AssertWrite{T}"/> to verify the type was declared. All three methods are runtime-gated by
 /// <see cref="CheckConfig.DeclaredAccessActive"/> — strict mode's separate declared-access opt-in (#422), off by default. When off, each body is
 /// JIT dead-code-eliminated (the gate is a <c>static readonly bool</c>), so the dispatch path takes zero overhead in production and the descriptor

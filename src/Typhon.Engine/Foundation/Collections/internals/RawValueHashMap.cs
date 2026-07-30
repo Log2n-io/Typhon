@@ -11,7 +11,7 @@ namespace Typhon.Engine.Internals;
 /// <summary>
 /// Page-backed hash map with unmanaged key type and runtime-configured value size.
 /// Identical to <see cref="PagedHashMap{TKey,TValue,TStore}"/> except values are accessed as raw <c>byte*</c>
-/// pointers with <see cref="Unsafe.CopyBlock"/> instead of typed <c>ref TValue</c>.
+/// pointers with <see cref="Unsafe.CopyBlock(void*, void*, uint)"/> instead of typed <c>ref TValue</c>.
 /// <para>
 /// Designed for entity records whose size varies per archetype (14 + componentCount × 4 bytes).
 /// Bucket layout: [Header 12B] [Key₀..Key_{cap-1}] [Val₀..Val_{cap-1}].

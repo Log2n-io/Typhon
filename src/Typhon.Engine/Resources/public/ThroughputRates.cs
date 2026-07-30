@@ -8,7 +8,7 @@ namespace Typhon.Engine;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Rates are automatically computed by <see cref="IResourceGraph.GetSnapshot"/> by
+/// Rates are automatically computed by <see cref="IResourceGraph.GetSnapshot()"/> by
 /// comparing throughput counters between the current and previous snapshot.
 /// </para>
 /// <para>
