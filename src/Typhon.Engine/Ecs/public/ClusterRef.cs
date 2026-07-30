@@ -214,13 +214,13 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     /// V1 supports <see cref="SpatialFieldType.AABB2F"/> only (AntHill's <c>WorldBounds</c>). Other field types throw <see cref="NotSupportedException"/>.
     /// </para>
     /// <para>
-    /// <b>WriteSpatial does NOT mark the slot dirty</b> (via <see cref="ArchetypeClusterState.SetDirty"/>).
+    /// <b>WriteSpatial does NOT mark the slot dirty</b> (via <see cref="ArchetypeClusterState.SetDirty(int, int, int)"/>).
     /// The dirty bitmap drives WAL serialization and change-filtered dispatch — for high-frequency  simulation state (e.g., AntHill's ant positions), marking
     /// every slot dirty floods the WAL writer with one frame per entity per tick → backpressure that stalls TickDriver. The fence-time spatial maintenance does
     /// not need the dirty bit; it consumes <see cref="ArchetypeClusterState.ClusterMigrationPendingSlots"/> /
     /// <see cref="ArchetypeClusterState.ClusterProcessBitmap"/> directly. If your workload genuinely needs WAL persistence of the spatial field (e.g.,
     /// resumable autosave), either write through the MVCC <c>Transaction.OpenMut + Write</c> path (which marks dirty), or
-    /// call <see cref="ArchetypeClusterState.SetDirty"/> explicitly after <c>WriteSpatial</c>.
+    /// call <see cref="ArchetypeClusterState.SetDirty(int, int, int)"/> explicitly after <c>WriteSpatial</c>.
     /// </para>
     /// <para>
     /// Thread safety: safe to call concurrently from multiple workers operating on different slots of any cluster (including the same cluster). All

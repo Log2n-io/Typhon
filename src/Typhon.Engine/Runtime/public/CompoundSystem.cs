@@ -5,14 +5,14 @@ namespace Typhon.Engine;
 
 /// <summary>
 /// Groups related sub-systems into a single unit in the parent DAG. Completes when all sub-systems finish.
-/// Derive from this class, implement <see cref="Configure"/>, and call <see cref="Add"/> to register sub-systems.
+/// Derive from this class, implement <see cref="Configure"/>, and call <c>Add</c> to register sub-systems.
 /// </summary>
 [PublicAPI]
 public abstract class CompoundSystem
 {
     internal readonly List<ISystem> _systems = [];
 
-    /// <summary>Configure the compound by adding sub-systems via <see cref="Add"/>.</summary>
+    /// <summary>Configure the compound by adding sub-systems via <c>Add</c>.</summary>
     protected abstract void Configure();
 
     /// <summary>Add a CallbackSystem to this compound.</summary>

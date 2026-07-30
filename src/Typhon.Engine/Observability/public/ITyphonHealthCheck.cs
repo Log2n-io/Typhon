@@ -70,7 +70,7 @@ public interface ITyphonHealthCheck
     /// <remarks>
     /// <para>
     /// This is optimized for frequent polling (e.g., Kubernetes liveness probes).
-    /// Uses <see cref="ResourceSnapshot.FindMostUtilized"/> for O(n) complexity.
+    /// Uses <see cref="ResourceSnapshot.FindMostUtilized()"/> for O(n) complexity.
     /// </para>
     /// </remarks>
     HealthStatus CheckHealth();

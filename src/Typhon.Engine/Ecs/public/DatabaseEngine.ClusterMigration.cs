@@ -338,13 +338,15 @@ public partial class DatabaseEngine
     /// <para>Per-migration pipeline:</para>
     /// <list type="number">
     ///   <item>Read entity id from source slot</item>
-    ///   <item><see cref="ArchetypeClusterState.ClaimSlotInCell"/> on the destination cell (allocates a new cluster if needed)</item>
+    ///   <item><see cref="ArchetypeClusterState.ClaimSlotInCell(int, ref ChunkAccessor{PersistentStore}, ChangeSet, SpatialGrid)"/> on the
+    ///         destination cell (allocates a new cluster if needed)</item>
     ///   <item>Copy every component slot's bytes source → destination (Persistent + Transient; Q8)</item>
     ///   <item>Copy EntityId and EnabledBits</item>
     ///   <item>Remove the old per-archetype B+Tree index entries and insert new ones at the new <c>clusterLocation</c></item>
     ///   <item>Remove the old spatial R-Tree back-pointer and insert a new one at the new <c>clusterLocation</c></item>
     ///   <item>Upsert the EntityMap <see cref="ClusterEntityRecordAccessor"/> with the new (chunkId, slot)</item>
-    ///   <item><see cref="ArchetypeClusterState.ReleaseSlot"/> on the source (clears occupancy, decrements cell.EntityCount, detaches empty clusters)</item>
+    ///   <item><see cref="ArchetypeClusterState.ReleaseSlot(ref ChunkAccessor{PersistentStore}, int, int, ChangeSet, SpatialGrid, bool)"/> on the
+    ///         source (clears occupancy, decrements cell.EntityCount, detaches empty clusters)</item>
     ///   <item>Record the dirty-bit transition — clear the source bit (so WAL publish won't serialize a cleared source) and set the destination bit (so the
     ///         destination's new content IS serialized by the subsequent ClusterTickFence WAL publish loop). On the parallel path the transition is appended to
     ///         the worker-local <paramref name="dirtyBuffer"/> as a <see cref="DirtyBitDelta"/>; on the serial path (null buffer) it is applied directly to the

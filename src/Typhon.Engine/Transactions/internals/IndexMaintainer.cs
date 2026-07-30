@@ -174,8 +174,8 @@ internal static unsafe class IndexMaintainer
     }
 
     /// <summary>
-    /// Batched overload of <see cref="UpdateIndices"/>: uses pre-created accessors to eliminate per-entity accessor create/dispose overhead.
-    /// Caller owns accessor lifecycle.
+    /// Batched overload of <see cref="UpdateIndices(long, ComponentInfo, ComponentInfo.CompRevInfo, int, ChangeSet, long)"/>: uses pre-created
+    /// accessors to eliminate per-entity accessor create/dispose overhead. Caller owns accessor lifecycle.
     /// </summary>
     internal static void UpdateIndices(long pk, ComponentInfo info, ComponentInfo.CompRevInfo compRevInfo, int prevCompChunkId, ChangeSet changeSet, long tsn,
         ChunkAccessor<PersistentStore>[] indexAccessors, ref ChunkAccessor<PersistentStore> tailAccessor)
@@ -269,8 +269,8 @@ internal static unsafe class IndexMaintainer
     }
 
     /// <summary>
-    /// Batched overload of <see cref="RemoveSecondaryIndices"/>: uses pre-created accessors to eliminate per-entity accessor create/dispose overhead.
-    /// Caller owns accessor lifecycle.
+    /// Batched overload of <see cref="RemoveSecondaryIndices(long, ComponentInfo, int, int, ChangeSet, long)"/>: uses pre-created accessors to
+    /// eliminate per-entity accessor create/dispose overhead. Caller owns accessor lifecycle.
     /// </summary>
     internal static void RemoveSecondaryIndices(long pk, ComponentInfo info, int prevCompChunkId, int startChunkId, ChangeSet changeSet, long tsn,
         ChunkAccessor<PersistentStore>[] indexAccessors, ref ChunkAccessor<PersistentStore> tailAccessor)

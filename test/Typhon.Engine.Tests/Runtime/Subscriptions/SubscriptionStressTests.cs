@@ -281,7 +281,6 @@ class SubscriptionStressTests : TestBase<SubscriptionStressTests>
     [Explicit("Stress test — high entity churn, run manually")]
     public void HighEntityChurn_SpawnDestroy_DeltasConsistent()
     {
-        const int ticksToRun = 80;
         const int entitiesPerTick = 20;
         var port = StressPort + 20; // Unique port for this test
 

@@ -568,7 +568,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// Deletes a file and polls until the NTFS pending-delete completes.
     /// On Windows, <see cref="File.Delete"/> returns immediately but the directory entry removal is deferred — <see cref="File.Exists"/> can return true
     /// briefly after deletion.
-    /// Without polling, a subsequent <see cref="File.WriteAllText"/> to the same path can fail with <see cref="IOException"/>.
+    /// Without polling, a subsequent <see cref="File.WriteAllText(string, string)"/> to the same path can fail with <see cref="IOException"/>.
     /// </summary>
     private static void DeleteFileAndWait(string path, int maxWaitMs = 500)
     {

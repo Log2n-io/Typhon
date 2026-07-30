@@ -49,7 +49,7 @@ internal struct AdaptiveWaiter
     public void Wait() => SpinOnceWithEmit();
 
     /// <summary>
-    /// Run one <see cref="SpinWait.SpinOnce"/> and emit a Concurrency:AdaptiveWaiter:YieldOrSleep transition event
+    /// Run one <see cref="SpinWait.SpinOnce()"/> and emit a Concurrency:AdaptiveWaiter:YieldOrSleep transition event
     /// the FIRST time the spinner crosses into yield mode (NOT every spin). The Tier-2 gate inside
     /// <c>EmitConcurrencyAdaptiveWaiterYieldOrSleep</c> dead-code-eliminates the entire branch when off.
     /// </summary>

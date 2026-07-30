@@ -286,7 +286,7 @@ public static class ServiceCollectionExtensions
         Action<DatabaseEngineOptions> configure = null) =>
         AddDatabaseEngine(services, ServiceLifetime.Singleton, configure);
 
-    /// <summary>Scoped-lifetime variant of <see cref="AddDatabaseEngine"/>.</summary>
+    /// <summary>Scoped-lifetime variant of <see cref="AddDatabaseEngine(IServiceCollection, Action{DatabaseEngineOptions})"/>.</summary>
     /// <param name="services">The service collection to add to.</param>
     /// <param name="configure">Optional configuration of <see cref="DatabaseEngineOptions"/>. May be <see langword="null"/> to accept the defaults.</param>
     /// <returns>The same <see cref="IServiceCollection"/>, for chaining.</returns>
@@ -295,7 +295,7 @@ public static class ServiceCollectionExtensions
         Action<DatabaseEngineOptions> configure = null) =>
         AddDatabaseEngine(services, ServiceLifetime.Scoped, configure);
 
-    /// <summary>Transient-lifetime variant of <see cref="AddDatabaseEngine"/>.</summary>
+    /// <summary>Transient-lifetime variant of <see cref="AddDatabaseEngine(IServiceCollection, Action{DatabaseEngineOptions})"/>.</summary>
     /// <param name="services">The service collection to add to.</param>
     /// <param name="configure">Optional configuration of <see cref="DatabaseEngineOptions"/>. May be <see langword="null"/> to accept the defaults.</param>
     /// <returns>The same <see cref="IServiceCollection"/>, for chaining.</returns>

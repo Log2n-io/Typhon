@@ -740,9 +740,11 @@ class EcsIncrementalViewTests : TestBase<EcsIncrementalViewTests>
         using var view = txView.Query<CompDArch>().WhereField<CompD>(d => d.B >= 50).ToView();
 
         var pks = new HashSet<long>();
-        foreach (long pk in view)
+        // GetEntityEnumerator(): ViewBase.GetEnumerator() is internal, so a bare foreach silently falls back to
+        // IEnumerable<long> — a boxed enumerator per loop (CS0279). This is the public, allocation-free path.
+        foreach (var id in view.GetEntityEnumerator())
         {
-            pks.Add(pk);
+            pks.Add((long)id.RawValue);
         }
 
         Assert.That(pks, Has.Count.EqualTo(2));

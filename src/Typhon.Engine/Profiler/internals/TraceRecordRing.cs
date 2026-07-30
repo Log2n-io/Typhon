@@ -41,8 +41,8 @@ namespace Typhon.Engine.Internals;
 /// number of bytes, so padding content is irrelevant.
 /// </para>
 /// <para>
-/// <b>Drop-newest on full:</b> when the ring is full, <see cref="TryReserve"/> returns <c>false</c> and increments a per-ring drop counter. The
-/// producer hot path <b>never blocks</b> — losing a sample is always preferable to stalling the engine.
+/// <b>Drop-newest on full:</b> when the ring is full, <see cref="TryReserve(int, out Span{byte})"/> returns <c>false</c> and increments a per-ring
+/// drop counter. The producer hot path <b>never blocks</b> — losing a sample is always preferable to stalling the engine.
 /// </para>
 /// </remarks>
 internal sealed class TraceRecordRing
@@ -85,7 +85,7 @@ internal sealed class TraceRecordRing
     internal void SetNext(TraceRecordRing next) => _next = next;
 
     /// <summary>
-    /// Consumer-side reader for the forward link. <see cref="Volatile.Read"/> prevents the JIT from hoisting the read
+    /// Consumer-side reader for the forward link. <see cref="Volatile.Read{T}(ref readonly T)"/> prevents the JIT from hoisting the read
     /// out of the drain loop and forces an acquire-style fence on weakly-ordered architectures. On x64 TSO the
     /// hardware already gives us release-on-store + acquire-on-load for free, so this is purely about JIT
     /// reordering, but the volatile keeps the code portable.
@@ -257,7 +257,7 @@ internal sealed class TraceRecordRing
 
     /// <summary>
     /// Commit the pending reservation: advance <c>_head</c> so the consumer can see the new record. Call this exactly once after filling the
-    /// <see cref="TryReserve"/> destination.
+    /// <see cref="TryReserve(int, out Span{byte})"/> destination.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void Publish() =>
@@ -324,7 +324,7 @@ internal sealed class TraceRecordRing
     }
 
     /// <summary>
-    /// Reset head/tail/drop counters to zero. Must not be called concurrently with <see cref="TryReserve"/>, <see cref="Publish"/>, or
+    /// Reset head/tail/drop counters to zero. Must not be called concurrently with <see cref="TryReserve(int, out Span{byte})"/>, <see cref="Publish"/>, or
     /// <see cref="Drain"/> — the slot-registry protocol guarantees this by transitioning a slot through <c>SlotState.Free</c> before the new owner
     /// claims it. Also clears the chain forward link and per-kind drop counters so a ring returned to the spillover pool can be re-acquired without
     /// carrying stale state from its previous owner.

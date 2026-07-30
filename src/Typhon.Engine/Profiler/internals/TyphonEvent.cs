@@ -205,7 +205,7 @@ internal static partial class TyphonEvent
     /// </para>
     /// <para>
     /// <b>SPSC ordering on chain link.</b> The producer assigns <c>tail.SetNext(spill)</c> before <c>slot.ChainTail = spill</c>.
-    /// On x64 TSO both stores are release-ordered. The consumer reads <c>head.Next</c> with <see cref="Volatile.Read"/>
+    /// On x64 TSO both stores are release-ordered. The consumer reads <c>head.Next</c> with <see cref="Volatile.Read{T}(ref readonly T)"/>
     /// to defeat JIT hoisting. A consumer that observes <c>head.IsEmpty == true</c> with a stale-null <c>head.Next</c>
     /// simply doesn't advance this pass — next pass picks it up. Not a correctness bug, just a fraction of a millisecond
     /// of latency.

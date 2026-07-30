@@ -10,6 +10,9 @@
         <AssemblyName>Typhon.Workbench.Fixtures.schema</AssemblyName>
         <RootNamespace>Typhon.Workbench.Fixtures</RootNamespace>
         <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+        <!-- Zero-warning policy (matches Typhon.Engine / Typhon.Profiler): this project builds clean, so EVERY warning is
+             promoted to an error and no drift can land silently. -->
+        <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     </PropertyGroup>
 
     <ItemGroup>

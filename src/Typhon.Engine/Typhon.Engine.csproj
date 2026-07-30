@@ -5,10 +5,13 @@
         <Configurations>Debug;Release</Configurations>
         <Platforms>AnyCPU</Platforms>
         <LangVersion>default</LangVersion>
-        <!-- XML doc file: ships in the package for IntelliSense and feeds the published API reference.
-             Doc-comment warnings are promoted to errors so drift cannot land silently. -->
+        <!-- XML doc file: ships in the package for IntelliSense and feeds the published API reference. -->
         <GenerateDocumentationFile>true</GenerateDocumentationFile>
-        <WarningsAsErrors>$(WarningsAsErrors);CS1570;CS1571;CS1572;CS1573;CS1574;CS1580;CS1581;CS1584;CS1587;CS1589;CS1590;CS1591;CS1592;CS1710;CS1711;CS1712;CS1723;CS1734;CS1735</WarningsAsErrors>
+        <!-- Zero-warning policy: the engine builds clean, so EVERY warning is promoted to an error and no drift can land
+             silently. This supersedes the previous doc-comment-only CS15xx allow-list. Caveat: this also promotes NuGet
+             advisory warnings (NU1901-NU1904) — a newly published CVE against a referenced package will break the build
+             until it is bumped. That is deliberate; add them to <WarningsNotAsErrors> if it ever needs to be deferred. -->
+        <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
         <!--
             #302 — opt in the Typhon.Generators.Generated namespace for C# 14 [InterceptsLocation] attributes.
             SourceLocationGenerator emits per-call-site interceptor wrappers that redirect TyphonEvent.Begin*
@@ -100,8 +103,9 @@
         <!-- Consumer-facing source generator: ArchetypeAccessorGenerator emits the ref-struct accessors for a
              consumer's [Archetype] types, so it must run in the consumer's compilation → shipped under analyzers/.
              We ship the dedicated Typhon.Generators.Consumer assembly (that one generator ONLY), not the full
-             Typhon.Generators: TraceEventGenerator emits its attributes via post-initialization output, which
-             cannot be gated by assembly name and would leak engine-internal types into every consumer (CS0436). -->
+             Typhon.Generators: TraceEventGenerator is engine-only — it emits producer halves for the engine's own
+             [TraceEvent] payload structs against the attribute surface declared in Profiler/public/TraceEventAttributes.cs,
+             none of which a consumer can use. -->
         <None Include="..\Typhon.Generators.Consumer\bin\$(Configuration)\netstandard2.0\Typhon.Generators.Consumer.dll"
               Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
     </ItemGroup>

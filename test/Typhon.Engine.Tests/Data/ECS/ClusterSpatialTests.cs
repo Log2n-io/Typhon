@@ -370,7 +370,11 @@ class ClusterSpatialTests : TestBase<ClusterSpatialTests>
             var accessor = tx.For<ClSpatialUnit>();
             foreach (var cluster in accessor.GetClusterEnumerator())
             {
+                // TYPHON009 fires here by design: this is the un-barriered mutable span write that skips the
+                // migration / AABB bookkeeping WriteSpatial would perform. Suppressed deliberately, not accidentally.
+#pragma warning disable TYPHON009
                 var positions = cluster.GetSpan(ClSpatialUnit.Pos);
+#pragma warning restore TYPHON009
                 var bits = cluster.OccupancyBits;
                 while (bits != 0)
                 {

@@ -5,8 +5,8 @@ namespace Typhon.Engine;
 public sealed partial class TyphonRuntime
 {
     /// <summary>
-    /// Has the first gauge snapshot been emitted this session? Fixed-at-init capacity gauges are emitted only in the first snapshot
-    /// — the ref-bool flag flows through <see cref="GaugeSnapshotEmitter.EmitSnapshot"/> so the helper can decide whether to include them.
+    /// Has the first gauge snapshot been emitted this session? Fixed-at-init capacity gauges are emitted only in the first snapshot — the ref-bool
+    /// flag flows through the <see cref="GaugeSnapshotEmitter"/> <c>EmitSnapshot</c> overloads so the helper can decide whether to include them.
     /// </summary>
     private bool _firstGaugeSnapshotEmitted;
 

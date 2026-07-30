@@ -88,7 +88,7 @@ public class ChangeSet
     /// Register an additional IncrementDirty for a page already tracked by this ChangeSet — the CP-04 "re-dirty" pattern.
     /// Bumps the per-page mark count and calls <see cref="PagedMMF.IncrementDirty"/>, both as one logical step from the
     /// ChangeSet's accounting perspective. Used by <see cref="ChunkAccessor{T}.MarkSlotDirty"/> and
-    /// <see cref="ChunkBasedSegment{T}.AllocateChunk"/> when an already-tracked page is re-dirtied within the same UoW —
+    /// <see cref="ChunkBasedSegment{T}.AllocateChunk(ChangeSet, ref ChunkAccessor{T})"/> when an already-tracked page is re-dirtied within the same UoW —
     /// previously these sites called <c>_store.IncrementDirty</c> directly, which left the increment "untracked" and forced
     /// <see cref="ReleaseExcessDirtyMarks"/> to use a non-conservation cap-to-1 (the source of the #385 race).
     /// </summary>

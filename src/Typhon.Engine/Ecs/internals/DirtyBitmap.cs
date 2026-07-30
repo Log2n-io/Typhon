@@ -6,13 +6,13 @@ namespace Typhon.Engine.Internals;
 
 /// <summary>
 /// Lock-free per-ComponentTable dirty tracking for <see cref="Typhon.Schema.Definition.StorageMode.SingleVersion"/> components.
-/// Each bit represents one chunkId in the ComponentSegment. Set atomically via <see cref="Interlocked.Or"/>.
+/// Each bit represents one chunkId in the ComponentSegment. Set atomically via <see cref="Interlocked.Or(ref long, long)"/>.
 /// Tick fence (3.4) calls <see cref="Snapshot"/> to atomically swap the bitmap and serialize dirty entries to WAL.
 /// </summary>
 /// <remarks>
 /// <para>Size: 500K entities = 62.5 KB (500K / 64 bits per long × 8 bytes per long).</para>
-/// <para>Thread safety: <see cref="Set"/> uses <see cref="Interlocked.Or"/> (multiple concurrent writers).
-/// <see cref="Snapshot"/> uses <see cref="Interlocked.Exchange"/> (single reader at tick fence time).</para>
+/// <para>Thread safety: <see cref="Set"/> uses <see cref="Interlocked.Or(ref long, long)"/> (multiple concurrent writers).
+/// <see cref="Snapshot"/> uses <see cref="Interlocked.Exchange{T}(ref T, T)"/> (single reader at tick fence time).</para>
 /// </remarks>
 internal sealed class DirtyBitmap
 {

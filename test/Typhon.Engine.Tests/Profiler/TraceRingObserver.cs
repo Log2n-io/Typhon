@@ -50,9 +50,6 @@ public sealed class TraceRingObserver : ResourceNode, IProfilerExporter
     }
 
     /// <inheritdoc />
-    public string Name => "TraceRingObserver";
-
-    /// <inheritdoc />
     public ExporterQueue Queue { get; }
 
     /// <summary>Total batches received.</summary>

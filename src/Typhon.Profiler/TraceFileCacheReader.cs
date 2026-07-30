@@ -25,7 +25,8 @@ public sealed class TraceFileCacheReader : IDisposable
     private readonly Stream _stream;
     /// <summary>
     /// <see cref="Microsoft.Win32.SafeHandles.SafeFileHandle"/> extracted once at construction when the backing stream is a <see cref="FileStream"/>.
-    /// Lets <see cref="ReadChunkRaw"/> and <see cref="DecompressChunk"/> use <see cref="RandomAccess.Read"/> for thread-safe, stateless, offset-based reads —
+    /// Lets <see cref="ReadChunkRaw"/> and <see cref="DecompressChunk"/> use
+    /// <see cref="RandomAccess.Read(Microsoft.Win32.SafeHandles.SafeFileHandle, Span{byte}, long)"/> for thread-safe, stateless, offset-based reads —
     /// the shared-stream seek+read pattern they previously used was a classic race condition that corrupted compressed bytes when multiple chunk requests were
     /// in flight simultaneously (e.g., distant range-select triggering N parallel cache misses). Null when the stream isn't a <see cref="FileStream"/> — the
     /// lock-based fallback kicks in.
@@ -189,9 +190,10 @@ public sealed class TraceFileCacheReader : IDisposable
     }
 
     /// <summary>
-    /// Loop around <see cref="RandomAccess.Read"/> to guarantee the whole buffer is filled. A single call can return fewer bytes than
-    /// requested on some stream-like backings; mirroring <see cref="Stream.ReadExactly"/> here means callers always get a complete
-    /// compressed payload or an exception (never a silent short read that later fails LZ4 decode with a misleading error).
+    /// Loop around <see cref="RandomAccess.Read(Microsoft.Win32.SafeHandles.SafeFileHandle, Span{byte}, long)"/> to guarantee the whole buffer is
+    /// filled. A single call can return fewer bytes than requested on some stream-like backings; mirroring
+    /// <see cref="Stream.ReadExactly(Span{byte})"/> here means callers always get a complete compressed payload or an exception (never a silent short
+    /// read that later fails LZ4 decode with a misleading error).
     /// </summary>
     private static void ReadAtExact(Microsoft.Win32.SafeHandles.SafeFileHandle handle, Span<byte> destination, long offset)
     {

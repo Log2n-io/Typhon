@@ -402,9 +402,9 @@ internal static class ProfilerStaticDataBuilder
     /// The negative sentinel range starts at -2 (not -1) so a future legacy reader that interprets -1 as "missing" still
     /// works. Wire format is signed int32; -2..int.MinValue gives ample room.
     ///
-    /// Same instance is shared across <see cref="BuildComponentDefinitions"/>, <see cref="BuildArchetypeDefinitions"/>,
-    /// and <see cref="BuildIndexCatalog"/> within a single <see cref="BuildAll"/> call — guarantees an archetype's slot
-    /// map references the same synthetic ID as the matching component-definition record.
+    /// Same instance is shared across <see cref="BuildComponentDefinitions(DatabaseEngine, ComponentIdMap)"/>,
+    /// <see cref="BuildArchetypeDefinitions(ComponentIdMap)"/>, and <see cref="BuildIndexCatalog(DatabaseEngine, ComponentIdMap)"/> within a single
+    /// <see cref="BuildAll"/> call — guarantees an archetype's slot map references the same synthetic ID as the matching component-definition record.
     /// </summary>
     private sealed class ComponentIdMap
     {
