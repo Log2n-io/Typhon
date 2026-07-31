@@ -206,13 +206,96 @@ internal class PlanBuilder
 
         if (primaryFieldIndex < 0)
         {
-            // Fall back to PK scan — use full long range so the plan remains valid
-            // when reused after new entities are inserted (e.g., overflow recovery).
+            // Nothing could narrow a range (e.g. an NE-only predicate). This used to emit PrimaryFieldIndex = -1 and rely on a full PK index scan, but the PK
+            // B+Tree was removed — PipelineExecutor's non-secondary-index paths now no-op, so the query silently returned an empty set / Count 0 / Any false
+            // with no exception (#591). Since WhereField rejects non-indexed fields outright, some evaluator's field always HAS an index, so enumerate that
+            // one over its full type range and let the evaluators filter. Same semantics the docs promise ("full scan with filter evaluation"), sourced from a
+            // secondary index instead of the index that no longer exists.
+            (primaryFieldIndex, primaryKeyType, scanMin, scanMax) = SelectFullScanStream(orderedEvaluators, table, orderByFieldIndex);
+        }
+
+        if (primaryFieldIndex < 0)
+        {
+            // Still nothing enumerable (OrderBy PK, or no evaluator carries a usable index). Range kept at the full long span so the plan stays valid if
+            // reused after inserts; the executor's no-op behaviour for this case is the remaining half of #591.
             scanMin = long.MinValue;
             scanMax = long.MaxValue;
         }
 
         return new ExecutionPlan(primaryFieldIndex, primaryKeyType, scanMin, scanMax, descending, orderedEvaluators, estimates);
+    }
+
+    /// <summary>
+    /// Last-resort primary stream: picks any indexed field referenced by the predicate and scans its FULL type range, leaving every evaluator to filter.
+    /// </summary>
+    /// <remarks>
+    /// Only reached when <see cref="SelectPrimaryStream"/> found nothing that can narrow — in practice an NE-only predicate, since <c>NotEqual</c> is excluded
+    /// from range selection. This does not make the scan selective; it makes it <i>execute</i>. The alternative is the pre-#591 behaviour, where the plan named
+    /// a PK index that no longer exists and the query silently produced an empty result.
+    /// <para>
+    /// A populated index is preferred purely so the common case scans real data; every index on a component table carries one entry per entity, so the choice
+    /// does not affect the result set — only which B+Tree is walked.
+    /// </para>
+    /// <para>
+    /// Returns -1 when ordering forbids a substitution: <c>orderByFieldIndex == -1</c> is order-by-PK, and when an OrderBy field is set only that field's index
+    /// yields the required iteration order, so an OrderBy on a field absent from the predicate still has no enumerable stream here. That is the remaining half
+    /// of #591, deliberately left alone: serving it needs a full-range scan bound for the OrderBy field, and for <c>Float</c>/<c>Double</c> the raw IEEE-bit
+    /// endpoints that <c>TypeMinAsLong</c>/<c>TypeMaxAsLong</c> return do not bracket negative values — <c>-1.0f</c> encodes to <c>-1082130432</c>, outside
+    /// <c>[float.MinValue bits, float.MaxValue bits]</c> = <c>[-8388609, 2139095039]</c>. Substituting a stream there silently drops negative keys, so that
+    /// half is blocked on the float key-range question rather than on plumbing.
+    /// </para>
+    /// </remarks>
+    private static (int FieldIndex, KeyType KeyType, long ScanMin, long ScanMax) SelectFullScanStream(FieldEvaluator[] orderedEvaluators, ComponentTable table,
+        int orderByFieldIndex)
+    {
+        // OrderBy PK — a secondary index cannot reproduce PK order.
+        if (orderByFieldIndex == -1)
+        {
+            return (-1, default, 0, 0);
+        }
+
+        var indexedFieldInfos = table.IndexedFieldInfos;
+        var fallbackFieldIndex = -1;
+        KeyType fallbackKeyType = default;
+
+        for (var i = 0; i < orderedEvaluators.Length; i++)
+        {
+            ref var eval = ref orderedEvaluators[i];
+
+            if (eval.FieldIndex >= indexedFieldInfos.Length)
+            {
+                continue;
+            }
+
+            // With an OrderBy set, only that field's index preserves the required iteration order.
+            if (orderByFieldIndex != int.MinValue && orderByFieldIndex != eval.FieldIndex)
+            {
+                continue;
+            }
+
+            ref var ifi = ref indexedFieldInfos[eval.FieldIndex];
+
+            // Empty shared index → nothing to enumerate, and critically this is also how a CLUSTER archetype presents: its entries live in per-archetype
+            // B+Trees, so the shared one is always empty. SelectPrimaryStream guards on the same condition, and ExecuteOrderedClustered keys off the resulting
+            // PrimaryFieldIndex == -1 to run its own compensation. Substituting a stream here would divert it into the plan-bounds branch, whose float
+            // endpoints drop negative keys (see the remarks above).
+            if (ifi.Index == null || ifi.Index.EntryCount == 0)
+            {
+                continue;
+            }
+
+            fallbackFieldIndex = eval.FieldIndex;
+            fallbackKeyType = eval.KeyType;
+            break;
+        }
+
+        if (fallbackFieldIndex < 0)
+        {
+            return (-1, default, 0, 0);
+        }
+
+        // Full type range, not long.MinValue/MaxValue — LongToKey truncates to the target type, so (int)long.MaxValue = -1 would invert the range.
+        return (fallbackFieldIndex, fallbackKeyType, TypeMinAsLong(fallbackKeyType), TypeMaxAsLong(fallbackKeyType));
     }
 
     /// <summary>
