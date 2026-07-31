@@ -301,6 +301,31 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// <summary>Test hook: invoked at each <see cref="FlushToDisk"/> fsync barrier (records the durability boundary for crash simulation). Null in production.</summary>
     internal Action FlushToDiskInterceptor { get; set; }
 
+    /// <summary>
+    /// Count of protected pages (CK-05) persisted by the CHECKPOINT write pass (<see cref="WritePagesForCheckpoint"/>) since process start.
+    /// </summary>
+    /// <remarks>
+    /// Scoped to the checkpoint path on purpose. <see cref="SavePages"/> persists protected pages too and runs asynchronously, so a counter spanning both is
+    /// unattributable — a background save overlapping a pass inflates it with persists the pass never performed. Only one checkpoint write pass runs at a time.
+    /// </remarks>
+    internal long CheckpointProtectedPagePersistCount;
+
+    /// <summary>
+    /// CK-02 violation counter: times a protected page was persisted AFTER a plain data page had already been written within the same checkpoint write pass.
+    /// Must always be zero.
+    /// </summary>
+    /// <remarks>
+    /// A protected persist ends in a FILE-WIDE fsync. Occurring after a plain write in the same pass, it makes that page durable while the cycle's flush2 barrier
+    /// has not yet run — so a commit whose WAL record is still in the ring buffer can reach the data file (#585). The ordering is enforced by hoisting protected
+    /// pages to the front of the batch; this counts any escape.
+    /// <para>
+    /// Recorded here rather than reconstructed by a test, because ordering cannot be observed from outside: <see cref="PageWriteInterceptor"/> fires on the
+    /// direct and async structural write paths as well, so a concurrent <see cref="SavePages"/> is indistinguishable from this pass's own writes. Evaluating the
+    /// invariant where both events are already in scope is both exact and immune to that interference — one predictable branch per page, against a page write.
+    /// </para>
+    /// </remarks>
+    internal long CheckpointProtectedAfterPlainWriteCount;
+
     /// <summary>Stable identifier of the backing file path (hash of the path string), recorded on Storage:FileHandle events.</summary>
     private int _filePathId;
 
@@ -1799,6 +1824,30 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
         var memPageBaseAddr = _memPagesAddr;
 
+        // CK-02 ordering (#585). A protected segment-directory page (CK-05) persists itself inside TryPersistProtectedPage as write → fsync → slot flip, and that
+        // fsync is FILE-WIDE, not page-scoped. Reached at an arbitrary position in this array it therefore makes every PLAIN data page written earlier in the same
+        // pass durable — while the cycle's flush2 barrier has not run yet, because CheckpointManager issues RequestFlush + WaitForDurable only after this method
+        // returns. Any commit that appended and published between the step-1 barrier and that page's capture would then be sitting in the data file with its WAL
+        // record still in the ring buffer: "captured ⊆ durable" inverted, i.e. a phantom partial write of a never-durable transaction, and Typhon has no undo.
+        //
+        // Hoisting protected pages to the front makes their fsync always PRECEDE the plain writes of this pass instead of following them, so it can only ever
+        // flush bytes that a previous pass already barriered and fsynced. SavePages reaches the same guarantee by persisting protected pages in a dedicated
+        // pre-pass; expressing it here as an ordering keeps this method's in-place written-front/skipped-back partition (CK-03 retry contract) intact.
+        //
+        // Cheap in the common case: one FilePageIndex probe per page and zero swaps when the batch holds no directory page, which is the usual shape — they only
+        // go dirty on segment create/grow.
+        var plainWrittenThisPass = false;
+        var protectedCount = 0;
+        for (int i = 0; i < memPageIndices.Length; i++)
+        {
+            var probeFilePageIndex = _memPagesInfo[memPageIndices[i]].FilePageIndex;
+            if (probeFilePageIndex > 0 && IsProtectedPage(probeFilePageIndex))
+            {
+                (memPageIndices[protectedCount], memPageIndices[i]) = (memPageIndices[i], memPageIndices[protectedCount]);
+                protectedCount++;
+            }
+        }
+
         for (int i = 0; i < memPageIndices.Length; i++)
         {
             var memPageIndex = memPageIndices[i];
@@ -1850,7 +1899,15 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                 // on this staging copy, write, fsync, flip — all inside TryPersistProtectedPage). Non-directory pages fall
                 // through to the normal in-place CRC + write below.
                 redirected = TryPersistProtectedPage(filePageIndex, staging.Pointer);
-                if (!redirected)
+                if (redirected)
+                {
+                    CheckpointProtectedPagePersistCount++;
+                    if (plainWrittenThisPass)
+                    {
+                        CheckpointProtectedAfterPlainWriteCount++;   // CK-02 escape — see the field docs
+                    }
+                }
+                else
                 {
                     stagingHeader->PageChecksum = Crc32CUtil.ComputeSkipping(staging.Span, PageBaseHeader.PageChecksumOffset, PageBaseHeader.PageChecksumSize);
                 }
@@ -1861,6 +1918,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             if (!redirected)
             {
                 PageWriteInterceptor?.Invoke(filePageIndex);   // test-only crash injection; throws to abort the checkpoint mid-cycle
+                plainWrittenThisPass = true;
                 var pageOffset = filePageIndex * (long)PageSize;
                 RandomAccess.Write(_fileHandle, staging.Span, pageOffset);
                 TrackFileGrowth(pageOffset + PageSize);
