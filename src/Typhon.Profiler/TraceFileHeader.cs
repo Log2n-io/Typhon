@@ -1,6 +1,42 @@
+using System;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Text;
 
 namespace Typhon.Profiler;
+
+/// <summary>
+/// Bit flags carried in <see cref="TraceFileHeader.Flags"/>.
+/// </summary>
+[Flags]
+public enum TraceHeaderFlags : ushort
+{
+    /// <summary>No flags set.</summary>
+    None = 0,
+
+    /// <summary>
+    /// More than one <c>DatabaseEngine</c> was live at some point during this capture, so the capture interleaves events from two (or more) archetype
+    /// routing-id spaces and no single routing id is meaningful for the file. When this is set the archetype table's <see cref="ArchetypeRecord.RoutingId"/>
+    /// values have been overwritten with <see cref="ArchetypeRecord.UnknownRoutingId"/> at close — the trace carries less rather than carrying something
+    /// plausible and wrong. Correlation degrades to name-based joins, which still work. See design D-9.
+    /// </summary>
+    MultipleEnginesObserved = 1 << 0,
+}
+
+/// <summary>
+/// Fixed 64-byte UTF-8 buffer holding <see cref="TraceFileHeader.DatabaseName"/>. Inline (rather than a trailing string section) so the whole header stays a
+/// single blittable read — a profiles list must render from headers alone without building a sidecar cache per capture (design D-5).
+/// </summary>
+[InlineArray(Length)]
+public struct TraceDatabaseName
+{
+    /// <summary>Capacity in bytes. Longer names are truncated on a UTF-8 character boundary when written.</summary>
+    public const int Length = 64;
+
+#pragma warning disable IDE0044, CS0169 // the single field IS the inline array's storage; the runtime repeats it Length times
+    private byte _element0;
+#pragma warning restore IDE0044, CS0169
+}
 
 /// <summary>
 /// Version-stamped header at the start of a <c>.typhon-trace</c> file. Contains session-wide metadata that lets the viewer decode the record stream
@@ -93,6 +129,50 @@ public struct TraceFileHeader
     /// </summary>
     public long CpuSampleSectionOffset;
 
+    // ── Self-describing capture identity + listing fields (v12, #614) ────────────────────────────────────────────────────────────────────────────────────
+    // Everything below is written so a capture can name its own database and render a rich list row with nothing opened. All fixed-size and blittable on
+    // purpose: the profiles list reads one header per file and nothing else.
+
+    /// <summary>
+    /// Durable identity of the database this capture ran against (<c>DatabaseEngine.DatabaseId</c>), or <see cref="Guid.Empty"/> when the profiler ran with no
+    /// engine attached. Survives the bundle being moved, renamed or restored — co-location is not provenance, so the trace records what it saw rather than
+    /// relying on where it happens to sit (design D-2 / D-1).
+    /// </summary>
+    public Guid DatabaseId;
+
+    /// <summary>
+    /// The database's bundle name (<c>{name}.typhon</c> without the extension), UTF-8, zero-padded, truncated to <see cref="TraceDatabaseName.Length"/> bytes.
+    /// Empty when no engine was attached. Present so a trace opened outside its bundle still says something a human can act on — <see cref="DatabaseId"/> alone
+    /// is the identity, but a GUID is not a readable answer to "which database is this?".
+    /// </summary>
+    public TraceDatabaseName DatabaseName;
+
+    /// <summary>
+    /// The engine's next-free TSN sampled when the capture started. With <see cref="TsnMax"/> this bounds the transaction window the capture covers, and is
+    /// the left-hand side of the drift readout ("this profile is N transactions behind the database"). 0 when no engine was attached.
+    /// </summary>
+    /// <remarks>
+    /// This is the engine's global TSN counter, not a min over emitted events — a deliberate superset. It costs nothing on the hot path (two reads of an
+    /// existing counter) and it is the exact quantity the drift measure compares against the database's persisted <c>NextFreeTSN</c>.
+    /// </remarks>
+    public long TsnMin;
+
+    /// <summary>The engine's next-free TSN sampled when the capture closed. Patched in at close. 0 when no engine was attached. See <see cref="TsnMin"/>.</summary>
+    public long TsnMax;
+
+    /// <summary>Wall-clock length of the capture in <c>Stopwatch</c> ticks (divide by <see cref="TimestampFrequency"/> for seconds). Patched in at close.</summary>
+    public long DurationTicks;
+
+    /// <summary>Number of runtime ticks the capture spans. Patched in at close; 0 when the capture ran without a scheduler.</summary>
+    public uint TickCount;
+
+    /// <summary>
+    /// Order-independent 64-bit digest of the schema the capture ran against — FNV-1a over the ordinal-sorted <c>(name, revision)</c> pairs of every component
+    /// and archetype. Equal fingerprints mean the schemas match; unequal means consult the database's <c>SchemaHistoryR1</c> for what actually moved. 0 when no
+    /// engine was attached.
+    /// </summary>
+    public ulong SchemaFingerprint;
+
     /// <summary>Padding to keep on-disk layout future-extension-friendly. Zero-initialized; readers must ignore.</summary>
     public ushort Reserved0;
     /// <summary>Padding (aligning the next field to 4 bytes); zero-initialized.</summary>
@@ -145,6 +225,41 @@ public struct TraceFileHeader
     ///     field; the global PhasesTable is replaced by a TracksTable + DagsTable (each DAG carries its own
     ///     ordered phase names). RuntimeConfigRecord drops Phases/DefaultPhase. v10-and-older traces are
     ///     hard-rejected (layout-breaking SystemDefinitionTable change).
+    /// v12 (2026-07-31): Self-describing captures (#614) — one revision covering four decisions of
+    ///     claude/design/Apps/Workbench/10-database-and-profiles.md. <b>D-2</b>: the header gains <see cref="DatabaseId"/>,
+    ///     <see cref="DatabaseName"/> and the <see cref="TsnMin"/>/<see cref="TsnMax"/> window, so a capture names the database it ran against instead of
+    ///     leaving the pairing to inference. <b>D-3</b>: <see cref="ArchetypeRecord.RoutingId"/> is added to the archetype table, giving every event's
+    ///     per-process catalog id a path to the database's durable identity — see the §5.3 warning on <see cref="ArchetypeRecord"/>. <b>D-5</b>:
+    ///     <see cref="DurationTicks"/>, <see cref="TickCount"/> and <see cref="SchemaFingerprint"/> join the existing <see cref="CreatedUtcTicks"/> so a list
+    ///     of captures renders from headers alone, with no sidecar cache built per row. <b>D-9</b>: <see cref="Flags"/> gains
+    ///     <see cref="TraceHeaderFlags.MultipleEnginesObserved"/>. v11-and-older traces are hard-rejected — the ArchetypeTable layout change would otherwise
+    ///     mis-decode silently, which is precisely the class of bug this revision exists to close.
     /// </summary>
-    public const ushort CurrentVersion = 11;
+    public const ushort CurrentVersion = 12;
+
+    /// <summary>True when <see cref="TraceHeaderFlags.MultipleEnginesObserved"/> is set — routing ids in this trace are absent, not merely suspect.</summary>
+    public bool MultipleEnginesObserved => ((TraceHeaderFlags)Flags & TraceHeaderFlags.MultipleEnginesObserved) != 0;
+
+    /// <summary>Decodes <see cref="DatabaseName"/> to a string, stopping at the first NUL. Returns an empty string when no name was recorded.</summary>
+    public string GetDatabaseName()
+    {
+        ReadOnlySpan<byte> bytes = DatabaseName;
+        var end = bytes.IndexOf((byte)0);
+        return Encoding.UTF8.GetString(end < 0 ? bytes : bytes[..end]);
+    }
+
+    /// <summary>
+    /// Encodes <paramref name="name"/> into <see cref="DatabaseName"/>, truncating on a UTF-8 character boundary if it does not fit. Truncating a display name
+    /// is harmless; splitting a multi-byte sequence would produce a mojibake name in the profiles list, so the encoder is asked not to.
+    /// </summary>
+    public void SetDatabaseName(string name)
+    {
+        Span<byte> dest = DatabaseName;
+        dest.Clear();
+        if (string.IsNullOrEmpty(name))
+        {
+            return;
+        }
+        Encoding.UTF8.GetEncoder().Convert(name.AsSpan(), dest, flush: true, out _, out _, out _);
+    }
 }

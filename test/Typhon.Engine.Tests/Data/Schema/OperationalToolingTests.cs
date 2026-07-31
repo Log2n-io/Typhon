@@ -78,7 +78,9 @@ class OperationalToolingTests : TestBase<OperationalToolingTests>
 
         Assert.That(report, Is.Not.Null);
         Assert.That(report.DatabaseName, Is.Not.Null.And.Not.Empty);
-        Assert.That(report.SystemSchemaRevision, Is.EqualTo(1));
+        // Against the constant, not a literal: the point of the assertion is that Inspect surfaces what the engine wrote, and pinning a number here would
+        // simply have to be edited on every system-schema bump (#615 was the first).
+        Assert.That(report.SystemSchemaRevision, Is.EqualTo(DatabaseEngine.CurrentSystemSchemaRevision));
 
         // Find our user component (skip system components)
         var opsComp = report.Components.FirstOrDefault(c => c.Name == "Typhon.Schema.UnitTest.OpsComp");

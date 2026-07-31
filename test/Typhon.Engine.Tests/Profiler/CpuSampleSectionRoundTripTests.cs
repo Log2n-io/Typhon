@@ -136,15 +136,16 @@ public sealed class CpuSampleSectionRoundTripTests
     [Test]
     public void ReadHeader_V9OnDiskLayout_IsHardRejected()
     {
-        // v11 (#354) is a layout-breaking change: the v11 header struct grew (TrackCount + DagCount) and the
-        // SystemDefinitionTable / PhasesTable layout changed. The reader hard-rejects v10-and-older traces. Synthesize a
-        // genuine v9 on-disk header (79 bytes) and confirm ReadHeader throws rather than mis-decoding.
-        var v11 = NewHeader();
-        v11.QuerySourceStringTableOffset = 0;
-        v11.QueryDefinitionTableOffset = 0;
-        v11.CpuSampleSectionOffset = 12345;
-        var v11Bytes = MemoryMarshal.AsBytes(MemoryMarshal.CreateReadOnlySpan(in v11, 1)).ToArray();
-        Assert.That(v11Bytes.Length, Is.EqualTo(91), "v11 header struct must be 91 bytes");
+        // Each version listed in TraceFileHeader.CurrentVersion's log that grew the header is a layout-breaking change, and the reader hard-rejects everything
+        // older than MinSupportedVersion rather than mis-decoding it. Synthesize a genuine v9 on-disk header (79 bytes) and confirm ReadHeader throws.
+        var current = NewHeader();
+        current.QuerySourceStringTableOffset = 0;
+        current.QueryDefinitionTableOffset = 0;
+        current.CpuSampleSectionOffset = 12345;
+        var currentBytes = MemoryMarshal.AsBytes(MemoryMarshal.CreateReadOnlySpan(in current, 1)).ToArray();
+        Assert.That(currentBytes.Length, Is.EqualTo(207),
+            "v12 header struct must be 207 bytes — 91 (v11) + 116 for the capture-identity segment (#614). This must match "
+            + "TraceFileReader's HeaderIdentitySize accounting, or ReadHeader walks off the end of the on-disk header.");
 
         // A v9 on-disk header is 79 bytes — it predates both the v10 CpuSampleSectionOffset and the v11
         // TrackCount/DagCount. The exact byte layout no longer matters since the reader rejects on version.

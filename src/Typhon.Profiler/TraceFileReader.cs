@@ -86,20 +86,21 @@ public sealed class TraceFileReader : IDisposable
     }
 
     /// <summary>
-    /// Oldest format version this reader still accepts. Bumped to 11 (2026-05-17) for the Track→DAG partitioning hierarchy (#354): the SystemDefinitionTable
-    /// layout gained a trailing <c>DagId</c> field and the global PhasesTable was replaced by a TracksTable + DagsTable. That is a layout-breaking change —
-    /// v10-and-older traces would mis-decode, so the reader hard-rejects them. Re-record against a v11 build.
+    /// Oldest format version this reader still accepts. Bumped to 12 (2026-07-31) for self-describing captures (#614): the ArchetypeTable layout gained a
+    /// trailing <c>RoutingId</c> field. That is a layout-breaking change — a v11 table would mis-decode under a v12 walk, and mis-decoded archetype identity is
+    /// exactly the silent-wrong-answer failure this revision exists to prevent. Re-record against a v12 build.
     /// </summary>
-    public const ushort MinSupportedVersion = 11;
+    public const ushort MinSupportedVersion = 12;
 
     /// <summary>
-    /// On-disk header layout segments. v11 is the oldest supported version, so every segment is always present on disk.
-    /// The prefix runs Magic .. SourceLocationManifestOffset; the query-offset + CPU-offset segments follow, then the trailing reserved pad.
-    /// Total on-disk size: v11 = 91 bytes.
+    /// On-disk header layout segments. v12 is the oldest supported version, so every segment is always present on disk.
+    /// The prefix runs Magic .. SourceLocationManifestOffset; the query-offset, CPU-offset and capture-identity segments follow, then the trailing reserved pad.
+    /// Total on-disk size: v12 = 207 bytes.
     /// </summary>
     private const int HeaderCommonPrefixSize = 63; // Magic .. SourceLocationManifestOffset (incl. TrackCount + DagCount, v11)
     private const int HeaderQueryOffsetsSize = 16; // QuerySourceStringTableOffset + QueryDefinitionTableOffset
     private const int HeaderCpuOffsetSize = 8;     // CpuSampleSectionOffset
+    private const int HeaderIdentitySize = 116;    // DatabaseId(16) + DatabaseName(64) + TsnMin(8) + TsnMax(8) + DurationTicks(8) + TickCount(4) + SchemaFingerprint(8)
     private const int HeaderReservedSize = 4;      // Reserved0 + Reserved1
 
     /// <summary>Reads and validates the file header. Must be called first.</summary>
@@ -160,6 +161,17 @@ public sealed class TraceFileReader : IDisposable
             headerBytes.Slice(cursor, HeaderCpuOffsetSize).Clear();
         }
         cursor += HeaderCpuOffsetSize;
+
+        // Capture identity + listing fields (#614) — on disk for v12+, which is every supported version.
+        if (version >= 12)
+        {
+            _stream.ReadExactly(headerBytes.Slice(cursor, HeaderIdentitySize));
+        }
+        else
+        {
+            headerBytes.Slice(cursor, HeaderIdentitySize).Clear();
+        }
+        cursor += HeaderIdentitySize;
 
         // Reserved0 + Reserved1 trail every on-disk version.
         _stream.ReadExactly(headerBytes.Slice(cursor, HeaderReservedSize));
@@ -552,7 +564,8 @@ public sealed class TraceFileReader : IDisposable
         {
             var archetypeId = _binaryReader.ReadUInt16();
             var name = ReadShortString();
-            _archetypes.Add(new ArchetypeRecord { ArchetypeId = archetypeId, Name = name });
+            var routingId = _binaryReader.ReadUInt16();  // v12+ (#614) — ArchetypeRecord.UnknownRoutingId when absent or withheld under D-9
+            _archetypes.Add(new ArchetypeRecord { ArchetypeId = archetypeId, Name = name, RoutingId = routingId });
         }
         return _archetypes;
     }

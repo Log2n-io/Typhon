@@ -214,6 +214,52 @@ public class FileExporterIntegrationTests
             "FileExporter must persist ProfilerSessionMetadata.SamplingSessionStartQpc into the trace header.");
     }
 
+    // #614 (F1) AC5 + AC6 — the capture-identity fields. The two halves land at different times and for different reasons: identity and the TSN window's left
+    // edge are known at Initialize, while duration, tick count and the window's right edge only exist once the session ends and are patched into the header on
+    // the way out. Both halves have to survive for a profiles list to render a row without opening the capture (D-5).
+    [Test]
+    public void CaptureIdentity_IsWrittenAtStart_AndTheCloseTimeFieldsArePatchedIn()
+    {
+        var databaseId = Guid.NewGuid();
+        var metadata = new ProfilerSessionMetadata(
+            systems: [], archetypes: [], componentTypes: [],
+            workerCount: 0, baseTickRate: 60.0f,
+            startTimestamp: System.Diagnostics.Stopwatch.GetTimestamp(),
+            stopwatchFrequency: System.Diagnostics.Stopwatch.Frequency,
+            startedUtc: DateTime.UtcNow,
+            databaseId: databaseId, databaseName: "world", tsnAtStart: 41_022, schemaFingerprint: 0xABCD_1234_5678_9EF0UL, tickAtStart: 50);
+
+        // Deliberately goes through TyphonProfiler.Start rather than driving the exporter directly: Start is where the capture window and the live-engine
+        // high-water mark are rebased, and this fixture shares a process with thousands of other tests that have created engines. Skipping Start would both
+        // miss that rebase and let an unrelated fixture's engine count leak in as a false MultipleEnginesObserved.
+        var fileExporter = new FileExporter(_tempPath, _registry.Profiler);
+        TyphonProfiler.AttachExporter(fileExporter);
+        TyphonProfiler.Start(_registry.Profiler, metadata);
+
+        // Stand in for the engine + runtime, which publish these while alive because the header is patched after both are gone.
+        ProfilerCaptureCounters.RecordEngineTsn(58_110);
+        ProfilerCaptureCounters.RecordRuntimeTick(230);
+
+        TyphonProfiler.Stop();
+
+        using var stream = File.OpenRead(_tempPath);
+        using var reader = new TraceFileReader(stream);
+        var header = reader.ReadHeader();
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(header.DatabaseId, Is.EqualTo(databaseId), "written at Initialize from the session metadata");
+            Assert.That(header.GetDatabaseName(), Is.EqualTo("world"));
+            Assert.That(header.TsnMin, Is.EqualTo(41_022));
+            Assert.That(header.SchemaFingerprint, Is.EqualTo(0xABCD_1234_5678_9EF0UL));
+
+            Assert.That(header.TsnMax, Is.EqualTo(58_110), "patched at close from the engine's last published TSN");
+            Assert.That(header.TickCount, Is.EqualTo(180), "tick count is the delta over the capture window (230 - 50), not an absolute tick number");
+            Assert.That(header.DurationTicks, Is.GreaterThan(0), "the capture has a non-zero wall-clock length");
+            Assert.That(header.MultipleEnginesObserved, Is.False, "a single-engine capture keeps its routing ids");
+        });
+    }
+
     [Test]
     public void SetCpuSamples_EmbedsCpuSampleSection_SharingTheFileTable()
     {

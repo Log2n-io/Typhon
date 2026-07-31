@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Buffers.Binary;
+using System.Globalization;
 using Microsoft.Extensions.Logging;
 using Typhon.Engine.Profiler;
 using Typhon.Profiler;
@@ -459,6 +460,59 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
     // Workbench Data Flow module (#327): join slim ArchetypeRecord (id+name) with the v7 rich ArchetypeDefinitions
     // (carries Revision + ComponentTypeIds[]) and the ComponentType id→name table to produce the rich ArchetypeDto.
     // Trace sessions cannot recover [Archetype(Alias=...)] (the attribute is gone after recording), so Label = Name.
+    /// <summary>
+    /// Projects a <see cref="TraceFileHeader"/> to its wire shape. Shared by the trace and attach runtimes — a header field that reached one session kind but
+    /// not the other would show up as a panel that mysteriously works only for recorded captures, so there is exactly one mapping.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="TraceFileHeader.SchemaFingerprint"/> crosses as a decimal string: it is a <c>ulong</c>, whose upper range exceeds what JSON numbers
+    /// round-trip safely through JavaScript. It is an opaque equality token on the client, never arithmetic, so a string costs nothing.
+    /// </remarks>
+    internal static ProfilerHeaderDto ProjectHeaderDto(in TraceFileHeader h) => new(
+        Version: h.Version,
+        TimestampFrequency: h.TimestampFrequency,
+        BaseTickRate: h.BaseTickRate,
+        WorkerCount: h.WorkerCount,
+        SystemCount: h.SystemCount,
+        ArchetypeCount: h.ArchetypeCount,
+        ComponentTypeCount: h.ComponentTypeCount,
+        CreatedUtcTicks: h.CreatedUtcTicks,
+        SamplingSessionStartQpc: h.SamplingSessionStartQpc,
+        DatabaseId: h.DatabaseId == Guid.Empty ? string.Empty : h.DatabaseId.ToString("D"),
+        DatabaseName: h.GetDatabaseName(),
+        TsnMin: h.TsnMin,
+        TsnMax: h.TsnMax,
+        DurationTicks: h.DurationTicks,
+        TickCount: h.TickCount,
+        SchemaFingerprint: h.SchemaFingerprint.ToString(CultureInfo.InvariantCulture),
+        MultipleEnginesObserved: h.MultipleEnginesObserved);
+
+    /// <summary>
+    /// Projects the thin component-type table to its wire shape, joining the v7 rich definitions for each component's <c>Revision</c> (#614, D-2).
+    /// </summary>
+    /// <remarks>
+    /// The revision was already on the wire — <c>ComponentDefinitionRecord.Revision</c> has been written since v7 — it simply never reached the client, which
+    /// is why "which component moved?" was unanswerable from a trace. Components missing from the rich table (an engine-less capture) project revision 0.
+    /// </remarks>
+    internal static ComponentTypeDto[] ProjectComponentTypes(
+        IReadOnlyList<ComponentTypeRecord> componentRecords,
+        IReadOnlyList<ComponentDefinitionRecord> richDefs)
+    {
+        var revisionById = richDefs.Count > 0
+            ? richDefs.GroupBy(d => d.ComponentTypeId).ToDictionary(g => g.Key, g => g.First().Revision)
+            : null;
+
+        var arr = new ComponentTypeDto[componentRecords.Count];
+        for (var i = 0; i < componentRecords.Count; i++)
+        {
+            var record = componentRecords[i];
+            var revision = 0;
+            revisionById?.TryGetValue(record.ComponentTypeId, out revision);
+            arr[i] = new ComponentTypeDto(record.ComponentTypeId, record.Name, revision);
+        }
+        return arr;
+    }
+
     internal static ArchetypeDto[] ProjectArchetypes(
         IReadOnlyList<ArchetypeRecord> slimRecords,
         IReadOnlyList<ArchetypeDefinitionRecord> richDefs,
@@ -491,7 +545,9 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
                 }
             }
 
-            arr[i] = new ArchetypeDto(slim.ArchetypeId, slim.Name, label, revision, componentTypeNames);
+            // RoutingId comes from the slim record, never from the rich definition: the rich table is keyed by catalog id and knows nothing about the database's
+            // routing space. UnknownRoutingId propagates as-is so the client can tell "not recorded" from a real id (#614 D-3).
+            arr[i] = new ArchetypeDto(slim.ArchetypeId, slim.Name, label, revision, componentTypeNames, slim.RoutingId);
         }
 
         return arr;
@@ -580,16 +636,7 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
         Action<Schema.IStaticSchemaProvider> staticSchemaProviderSink = null)
     {
         var h = traceReader.ReadHeader();
-        var headerDto = new ProfilerHeaderDto(
-            Version: h.Version,
-            TimestampFrequency: h.TimestampFrequency,
-            BaseTickRate: h.BaseTickRate,
-            WorkerCount: h.WorkerCount,
-            SystemCount: h.SystemCount,
-            ArchetypeCount: h.ArchetypeCount,
-            ComponentTypeCount: h.ComponentTypeCount,
-            CreatedUtcTicks: h.CreatedUtcTicks,
-            SamplingSessionStartQpc: h.SamplingSessionStartQpc);
+        var headerDto = ProjectHeaderDto(in h);
 
         var systemRecords = traceReader.ReadSystemDefinitions();
         var systems = new SystemDefinitionDto[systemRecords.Count];
@@ -673,11 +720,7 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
             componentRecords = derived;
         }
 
-        var componentTypes = new ComponentTypeDto[componentRecords.Count];
-        for (var i = 0; i < componentRecords.Count; i++)
-        {
-            componentTypes[i] = new ComponentTypeDto(componentRecords[i].ComponentTypeId, componentRecords[i].Name);
-        }
+        var componentTypes = ProjectComponentTypes(componentRecords, traceReader.ComponentDefinitions);
 
         // Workbench Data Flow module (#327): project the slim ArchetypeRecord into the rich ArchetypeDto, joining the
         // v7 ArchetypeDefinitions table when present. v6 traces (no rich defs) fall back to Label = Name, Revision = 0,

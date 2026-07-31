@@ -362,6 +362,9 @@ public sealed partial class TyphonRuntime : IDisposable
 
     private void StopInternal(bool runOnShutdown)
     {
+        // Publish the final tick number to any in-flight capture before teardown starts (#614 D-5) — the trace header is patched after the scheduler is gone.
+        ProfilerCaptureCounters.RecordRuntimeTick(CurrentTickNumber);
+
         // Begin the async CPU-sampler stop first so its (seconds-long) .nettrace transcode overlaps the rest of teardown.
         // No-op unless the profiler was self-wired by ProfilerBootstrap.TryStart.
         ProfilerBootstrap.BeginStop();

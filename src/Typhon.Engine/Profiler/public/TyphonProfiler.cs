@@ -133,6 +133,13 @@ public static class TyphonProfiler
             options ??= new ProfilerOptions();
             options.Validate();
 
+            // #614: rebase everything that measures "this capture's window" — the live-engine high-water mark (D-9) and the TSN/tick window (D-5). This belongs
+            // here, at the one point every host passes through to begin a capture. Doing it in ProfilerSessionMetadataBuilder instead would silently skip every
+            // host that hand-builds its metadata (the exporter integration tests, Typhon.IOProfileRunner), and those captures would inherit an unrelated
+            // engine's counters — reporting a multi-engine trace, or a tick count, that has nothing to do with them.
+            ArchetypeRegistry.ResetLiveEngineHighWater();
+            ProfilerCaptureCounters.BeginCapture(metadata.TsnAtStart, metadata.TickAtStart);
+
             // Allocate the spillover ring pool if a host helper (ProfilerLauncher.EnableTelemetryGateIfActive)
             // didn't already do so. Idempotent on the IsInitialized check — if the pool is already up (because the
             // host opened it earlier so events emitted during bridge construction could chain into it), keep it.

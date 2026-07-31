@@ -288,6 +288,10 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
     /// <summary>The database bundle directory (<c>{name}.typhon</c>). The <c>data</c> file, <c>db.lock</c>, and <c>wal/</c> live inside it.</summary>
     internal string BundleDirectory => Options.BundleDirectory;
+
+    /// <summary>The database's name — the bundle directory's stem, without the <c>.typhon</c> suffix. Recorded in profiling captures so a trace can say which
+    /// database it ran against in terms a human recognises (#614, D-2).</summary>
+    internal string DatabaseName => Options.DatabaseName;
     
     private protected readonly PinnedMemoryBlock MemPages;
     private unsafe byte* _memPagesAddr;

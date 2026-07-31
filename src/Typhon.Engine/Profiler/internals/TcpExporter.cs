@@ -484,7 +484,13 @@ internal sealed class TcpExporter : ResourceNode, IProfilerExporter
             DagCount = (ushort)_metadata.Dags.Length,
             CreatedUtcTicks = _metadata.StartedUtc.Ticks,
             SamplingSessionStartQpc = _metadata.SamplingSessionStartQpc,
+            // Capture identity (v12, #614). A live-attach stream has no close, so the close-time fields (TsnMax / DurationTicks / TickCount) stay 0 — the
+            // client already knows the session is open-ended and reads duration from the live stream itself.
+            DatabaseId = _metadata.DatabaseId,
+            TsnMin = _metadata.TsnAtStart,
+            SchemaFingerprint = _metadata.SchemaFingerprint,
         };
+        header.SetDatabaseName(_metadata.DatabaseName);
         ms.Write(MemoryMarshal.AsBytes(MemoryMarshal.CreateReadOnlySpan(in header, 1)));
 
         using var bw = new BinaryWriter(ms, Encoding.UTF8, true);
@@ -537,6 +543,7 @@ internal sealed class TcpExporter : ResourceNode, IProfilerExporter
         {
             bw.Write(a.ArchetypeId);
             WriteShortString(bw, a.Name);
+            bw.Write(a.RoutingId);  // v12 (#614) — must match TraceFileWriter.WriteArchetypes; the client walks this table positionally
         }
 
         // Component type table

@@ -3771,6 +3771,15 @@
             "items": {
               "type": "string"
             }
+          },
+          "routingId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint16",
+            "default": 65535
           }
         }
       },
@@ -4349,6 +4358,15 @@
               "null",
               "string"
             ]
+          },
+          "revision": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32",
+            "default": 0
           }
         }
       },
@@ -6387,6 +6405,67 @@
               "string"
             ],
             "format": "int64"
+          },
+          "databaseId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "default": ""
+          },
+          "databaseName": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "default": ""
+          },
+          "tsnMin": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64",
+            "default": 0
+          },
+          "tsnMax": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64",
+            "default": 0
+          },
+          "durationTicks": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64",
+            "default": 0
+          },
+          "tickCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint32",
+            "default": 0
+          },
+          "schemaFingerprint": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "default": "0"
+          },
+          "multipleEnginesObserved": {
+            "type": "boolean",
+            "default": false
           }
         }
       },

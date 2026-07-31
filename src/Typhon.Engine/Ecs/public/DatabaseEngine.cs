@@ -229,6 +229,34 @@ public enum SchemaChangeKind
 
     /// <summary>Change originating from an engine/system-component upgrade.</summary>
     SystemUpgrade,
+
+    /// <summary>
+    /// A component or archetype was renamed. <see cref="SchemaHistoryR1.PreviousName"/> holds the former name and <see cref="SchemaHistoryR1.ComponentName"/>
+    /// the current one; <see cref="SchemaHistoryR1.Target"/> says which kind of object moved.
+    /// </summary>
+    /// <remarks>
+    /// Recorded at the single moment the rename is carried forward on disk — the only point at which the mapping still exists. The
+    /// <c>[Component(PreviousName=…)]</c> / <c>[Archetype(PreviousName=…)]</c> attribute that supplies it is explicitly intended to be deleted once the row has
+    /// been re-keyed, after which nothing in the source, the database or an old capture maps the two names to each other. See #615 and design D-4 / §5.6.
+    /// </remarks>
+    Rename,
+}
+
+/// <summary>
+/// What kind of schema object a <see cref="SchemaHistoryR1"/> row refers to.
+/// </summary>
+/// <remarks>
+/// A discriminator is required rather than optional: a component and an archetype may legitimately carry the same name, so
+/// <see cref="SchemaHistoryR1.ComponentName"/> alone cannot identify what changed.
+/// </remarks>
+[PublicAPI]
+public enum SchemaObjectKind
+{
+    /// <summary>The row describes a component schema.</summary>
+    Component,
+
+    /// <summary>The row describes an archetype.</summary>
+    Archetype,
 }
 
 /// <summary>
@@ -245,7 +273,8 @@ public struct SchemaHistoryR1
     /// <summary>When the change was recorded, as <see cref="System.DateTime.UtcNow"/> ticks.</summary>
     public long Timestamp;
 
-    /// <summary>Schema name of the component whose definition changed.</summary>
+    /// <summary>Schema name of the component whose definition changed.
+    /// For a <see cref="SchemaChangeKind.Rename"/> row this is the name <i>after</i> the rename.</summary>
     public String64 ComponentName;
 
     /// <summary>Component schema revision before the change.</summary>
@@ -271,6 +300,20 @@ public struct SchemaHistoryR1
 
     /// <summary>Classification of the change (see <see cref="SchemaChangeKind"/>).</summary>
     public SchemaChangeKind Kind;
+
+    /// <summary>
+    /// The name this object carried <i>before</i> the change. Populated only when <see cref="Kind"/> is <see cref="SchemaChangeKind.Rename"/>; empty for every
+    /// other row. Together with <see cref="ComponentName"/> this is the old-name → new-name edge, and repeated renames leave a chain of rows that a reader
+    /// walks forward to resolve a long-dead name to the current one.
+    /// </summary>
+    /// <remarks>
+    /// The revision at which the rename happened is <see cref="FromRevision"/> → <see cref="ToRevision"/>, which also captures the case where the rename
+    /// coincided with a field change.
+    /// </remarks>
+    public String64 PreviousName;
+
+    /// <summary>Whether this row describes a component or an archetype. See <see cref="SchemaObjectKind"/> for why the discriminator is necessary.</summary>
+    public SchemaObjectKind Target;
 }
 
 /// <summary>
@@ -362,7 +405,59 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     internal const string BK_LastTickFenceLSN       = "LastTickFenceLSN";
     internal const string BK_CleanShutdown          = "CleanShutdown";
     internal const string BK_SeedRevision           = "SeedRevision";
+    internal const string BK_DatabaseId             = "DatabaseId";
     // ReSharper restore InconsistentNaming
+
+    /// <summary>
+    /// Layout revision of the engine's own (system) components — <see cref="ComponentR1"/>, <see cref="SchemaHistoryR1"/>, <see cref="ArchetypeR1"/>,
+    /// <see cref="AssemblyR1"/>. Stored per database in <see cref="BK_SystemSchemaRevision"/> and checked on every open.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why this gate exists.</b> System components do not go through schema evolution: <see cref="LoadSystemSchemaR1"/> rebuilds their tables directly from
+    /// the CLR types, bypassing the <c>SchemaDiff</c> / migration machinery that user components get on registration. Their chunk stride is also fixed when the
+    /// table is created. So changing a system component's layout would reinterpret existing rows under a new stride <i>with no error at all</i> — a silent
+    /// wrong answer. This constant makes that break loud instead.
+    /// </para>
+    /// <para>
+    /// <b>Revision log.</b> 1 — original. 2 (2026-07-31, #615) — <see cref="SchemaHistoryR1"/> gained <see cref="SchemaHistoryR1.PreviousName"/> and
+    /// <see cref="SchemaHistoryR1.Target"/> so renames are journalled while the evidence still exists (design D-4).
+    /// </para>
+    /// <para>Bumping this requires no migration code, but it does require every existing database to be recreated. Pre-alpha, that is the accepted trade.</para>
+    /// </remarks>
+    internal const int CurrentSystemSchemaRevision = 2;
+
+    /// <summary>
+    /// Durable identity of this database — minted once when the database is created and never rewritten, so it survives reopen, move, rename and restore. A
+    /// bundle copied on disk keeps the same id: the value identifies a database *lineage*, not a file, which is exactly what pairing a profiling capture to
+    /// its database needs (see claude/design/Apps/Workbench/10-database-and-profiles.md, D-2).
+    /// </summary>
+    /// <remarks>
+    /// Persisted as <see cref="BK_DatabaseId"/> in the bootstrap dictionary, packed as four <c>int</c>s (a <see cref="Guid"/> is exactly 16 bytes). Databases
+    /// created before this key existed adopt an id on their first open by a build that knows about it — see <see cref="EnsureDatabaseIdentity"/>.
+    /// </remarks>
+    internal Guid DatabaseId { get; private set; }
+
+    /// <summary>Packs a <see cref="Guid"/> into the four-<c>int</c> bootstrap value shape. Round-trips exactly with <see cref="UnpackDatabaseId"/>.</summary>
+    private static BootstrapDictionary.Value PackDatabaseId(Guid id)
+    {
+        Span<byte> bytes = stackalloc byte[16];
+        id.TryWriteBytes(bytes);
+        var ints = MemoryMarshal.Cast<byte, int>(bytes);
+        return BootstrapDictionary.Value.FromInt4(ints[0], ints[1], ints[2], ints[3]);
+    }
+
+    /// <summary>Reverses <see cref="PackDatabaseId"/>.</summary>
+    private static Guid UnpackDatabaseId(BootstrapDictionary.Value value)
+    {
+        Span<byte> bytes = stackalloc byte[16];
+        var ints = MemoryMarshal.Cast<byte, int>(bytes);
+        ints[0] = value.GetInt(0);
+        ints[1] = value.GetInt(1);
+        ints[2] = value.GetInt(2);
+        ints[3] = value.GetInt(3);
+        return new Guid(bytes);
+    }
 
     // Transaction counters for observability
     private long _transactionsCreated;
@@ -391,6 +486,14 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     private readonly HashSet<Type> _registeredArchetypeTypes = [];
     private readonly HashSet<Type> _registeredComponentTypes = [];
     private bool _unregisteredFromRegistry;
+
+    /// <summary>
+    /// Guards <c>ArchetypeRegistry.RegisterEngineUse</c> against a repeat <see cref="InitializeArchetypes"/> call. The per-Type refcounts tolerate an extra
+    /// increment (the release-on-zero simply happens later), but the registry's live-ENGINE count does not: paired with the one-shot
+    /// <see cref="_unregisteredFromRegistry"/> on the way out, a double increment would never be undone and would leave the process permanently reporting a
+    /// phantom second engine — flagging every subsequent capture as multi-engine and withholding its routing ids (#614 D-9).
+    /// </summary>
+    private bool _registeredWithRegistry;
 
     /// <summary>Component schema names that underwent migration during this engine session. Used to invalidate stale EntityMaps.</summary>
     private Dictionary<string, MigrationResult> _migratedComponents;
@@ -928,7 +1031,20 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         InitializeWalManager();
         InitializeCheckpointManager();
         InitializeStatisticsWorker();
+
+        _constructed = true;
     }
+
+    /// <summary>
+    /// Set on the last line of the constructor. Guards the final-persistence steps in <see cref="DisposeCore"/>: a construction that threw leaves an engine
+    /// whose subsystems are half-built, and DI still disposes it. Attempting to persist from there faults on the incomplete state and replaces the real
+    /// exception with a confusing teardown error.
+    /// </summary>
+    /// <remarks>
+    /// A failed open has nothing worth persisting by definition — no transaction ran — so skipping is also the correct behaviour, not just the safe one. This
+    /// path became reachable by design with the system-schema revision gate (#615), which refuses an incompatible database from inside the constructor.
+    /// </remarks>
+    private readonly bool _constructed;
 
     /// <summary><c>true</c> once the engine has been disposed; further operations on it are invalid.</summary>
     public bool IsDisposed { get; private set; }
@@ -1008,7 +1124,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             // Hard-crash simulation (power cut): skip EVERY final-persistence step. PersistEngineState would flush uncheckpointed dirty pages to the data file and
             // PersistArchetypeState would persist EntityMap state — both would smuggle committed data onto disk that a real crash would have lost, masking the
             // dependency on WAL replay. The clean-shutdown marker is likewise never written. Only what is already fsynced (prior checkpoints + WAL) survives.
-            if (!_simulateHardCrash)
+            // `_constructed` short-circuits a failed open (see the field docs): there is nothing to persist, and trying would bury the construction exception
+            // under a teardown fault.
+            if (!_simulateHardCrash && _constructed)
             {
                 Logger?.LogInformation("Engine disposing: PersistArchetypeState");
                 // Persist EntityMap SPIs and NextEntityKey counters so reopen can load EntityMaps directly
@@ -1046,6 +1164,15 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             {
                 ArchetypeRegistry.UnregisterEngineUse(_registeredArchetypeTypes, _registeredComponentTypes);
                 _unregisteredFromRegistry = true;
+
+                // Paired one-for-one with the RegisterLiveEngine in InitializeArchetypes (#614 D-9). Conditional on having actually registered: an engine that
+                // was constructed and disposed without ever initializing its archetypes must not decrement a count it never incremented, or a *different*
+                // engine's presence would be cancelled out and its capture would write routing ids it should have withheld.
+                if (_registeredWithRegistry)
+                {
+                    ArchetypeRegistry.UnregisterLiveEngine();
+                    _registeredWithRegistry = false;
+                }
             }
         }
         base.Dispose(disposing);
@@ -1655,7 +1782,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         cs.AddByMemPageIndex(memPageIdx);
 
         var bootstrap = MMF.Bootstrap;
-        bootstrap.SetInt(BK_SystemSchemaRevision, 1);
+        bootstrap.SetInt(BK_SystemSchemaRevision, CurrentSystemSchemaRevision);
         // Two roots per system table, not four. The third and fourth used to be the per-ComponentTable index segments, which no longer exist (#629) — every
         // archetype indexes on itself. Pre-alpha, so this is a clean cutover with no migration owed.
         bootstrap.Set(BK_SysComponentR1, BootstrapDictionary.Value.FromInt2(
@@ -1668,6 +1795,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             _assembliesTable.ComponentSegment.RootPageIndex,
             _assembliesTable.CompRevTableSegment.RootPageIndex));
         bootstrap.SetLong(BK_NextFreeTSN, TransactionChain.NextFreeId);
+
+        // Durable database identity (D-2) — minted here, at creation, and never rewritten. This is the only place a *new* id is born on the create path.
+        DatabaseId = Guid.NewGuid();
+        bootstrap.Set(BK_DatabaseId, PackDatabaseId(DatabaseId));
 
         MMF.UnlatchPageExclusive(memPageIdx);
 
@@ -1881,13 +2012,57 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// Re-stamp a persisted component's <see cref="ComponentR1.Name"/> to <paramref name="newName"/> — the component rename carry-forward (#514 D4). Only the
     /// name changes; the Fields collection handle, segment SPIs, revision and sizes are preserved (read-modify-write of the single row).
     /// </summary>
-    private void PersistComponentName(int chunkId, string newName)
+    /// <param name="chunkId">Row to re-stamp.</param>
+    /// <param name="newName">The component's new schema name.</param>
+    /// <param name="changeSet">
+    /// The caller's change set. Not saved here: the caller commits it together with the <see cref="SchemaChangeKind.Rename"/> journal entry, so a crash can
+    /// never leave the row renamed on disk with no record of its former name (#615).
+    /// </param>
+    private void PersistComponentName(int chunkId, string newName, ChangeSet changeSet)
     {
-        var cs = MMF.CreateChangeSet();
         SystemCrud.Read(_componentsTable, chunkId, out ComponentR1 comp, EpochManager);
         comp.Name = (String64)newName;
-        SystemCrud.Update(_componentsTable, chunkId, ref comp, EpochManager, cs);
+        SystemCrud.Update(_componentsTable, chunkId, ref comp, EpochManager, changeSet);
+    }
+
+    /// <summary>
+    /// Reads <see cref="DatabaseId"/> from the bootstrap on reopen, or mints and persists one if the key is somehow absent.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// In practice the mint branch does not fire: <see cref="BK_DatabaseId"/> is written by <see cref="CreateSystemSchemaR1"/> alongside
+    /// <see cref="BK_SystemSchemaRevision"/>, and any database predating either is refused by the revision gate above. It is kept as a fallback because a live
+    /// engine must never report <see cref="Guid.Empty"/> as its identity — a capture would then claim to belong to "no database".
+    /// </para>
+    /// <para>
+    /// Adoption is eager (written and flushed here, not deferred to <see cref="PersistEngineState"/>) because the value's only job is to be stable: an id that
+    /// a crash before clean shutdown could lose, and that the next open would regenerate, would silently break the pairing it exists to guarantee.
+    /// </para>
+    /// </remarks>
+    private void EnsureDatabaseIdentity()
+    {
+        var bootstrap = MMF.Bootstrap;
+        if (bootstrap.TryGet(BK_DatabaseId, out var existing))
+        {
+            DatabaseId = UnpackDatabaseId(existing);
+            return;
+        }
+
+        DatabaseId = Guid.NewGuid();
+        bootstrap.Set(BK_DatabaseId, PackDatabaseId(DatabaseId));
+
+        using var guard = EpochGuard.Enter(EpochManager);
+        var epoch = guard.Epoch;
+        var cs = MMF.CreateChangeSet();
+        MMF.RequestPageEpoch(0, epoch, out var memPageIdx);
+        var latched = MMF.TryLatchPageExclusive(memPageIdx);
+        Debug.Assert(latched, "TryLatchPageExclusive failed on root page while adopting a database identity");
+        MMF.GetPage(memPageIdx);
+        cs.AddByMemPageIndex(memPageIdx);
+        MMF.SaveBootstrap(cs);
+        MMF.UnlatchPageExclusive(memPageIdx);
         cs.SaveChanges();
+        MMF.FlushToDisk();
     }
 
     /// <summary>
@@ -1912,10 +2087,29 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         _lastTickFenceLSN = bootstrap.GetLong(BK_LastTickFenceLSN);
 
-        if (bootstrap.GetInt(BK_SystemSchemaRevision) == 0)
+        var systemSchemaRevision = bootstrap.GetInt(BK_SystemSchemaRevision);
+        if (systemSchemaRevision == 0)
         {
+            // No system schema written yet — a brand-new or deliberately schemaless database. Nothing to load and nothing to gate.
             return;
         }
+
+        // Gate BEFORE the tables are constructed (#615). Everything below rebuilds them from the CLR types at the current layout; against a different on-disk
+        // layout that silently reinterprets rows under the wrong stride rather than failing, so the check has to come first.
+        //
+        // Both directions are rejected, and for the same reason — a mismatch is a mismatch, and the harm does not depend on which side is newer. Only the
+        // remedy differs, so only the remedy is branched on.
+        if (systemSchemaRevision != CurrentSystemSchemaRevision)
+        {
+            var remedy = systemSchemaRevision < CurrentSystemSchemaRevision ? 
+                "Recreate the database." : "This database was written by a newer build of Typhon — upgrade this one.";
+            throw new InvalidDataException(
+                $"This database uses system schema revision {systemSchemaRevision}, but this build works with {CurrentSystemSchemaRevision}. The engine's own "
+                + $"components changed layout and there is no migration path for them, so the existing rows cannot be read. {remedy}");
+        }
+
+        // Strictly AFTER the gate: this can write to the database, and a database we are refusing to open must not be modified on the way out.
+        EnsureDatabaseIdentity();
 
         // Register system type definitions in DBD
         DBD.CreateFromAccessor<ComponentR1>();
@@ -2082,6 +2276,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         // Update bootstrap with current TSN and tick fence LSN
         MMF.Bootstrap.SetLong(BK_NextFreeTSN, TransactionChain.NextFreeId);
+
+        // Publish the same value to any in-flight profiling capture (#614 D-5). This is the engine's own "this is the final TSN" moment; the trace header is
+        // patched later, from the storage DisposingEvent, by which time this engine is gone.
+        ProfilerCaptureCounters.RecordEngineTsn(TransactionChain.NextFreeId);
         if (_lastTickFenceLSN > 0)
         {
             MMF.Bootstrap.SetLong(BK_LastTickFenceLSN, _lastTickFenceLSN);
@@ -2298,6 +2496,56 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         var cs = MMF.CreateChangeSet();
         SystemCrud.Create(_schemaHistoryTable, ref entry, EpochManager, cs);
         cs.SaveChanges();
+    }
+
+    /// <summary>
+    /// Journals a rename into the <see cref="SchemaHistoryR1"/> audit trail (#615, design D-4).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Call this at the moment the rename is carried forward on disk, and nowhere else.</b> That is the only instant at which both names are known: the
+    /// runtime supplies the old one through <c>[Component(PreviousName=…)]</c> / <c>[Archetype(PreviousName=…)]</c>, the row is re-keyed to the new one, and the
+    /// attribute is then expected to be deleted from source in a later release. After that the old name exists nowhere — not in the source, not in the
+    /// database — while six-month-old profiling captures still refer to it. Recording here is what keeps every name-based bridge able to follow the rename
+    /// instead of silently failing to match (§5.6).
+    /// </para>
+    /// <para>
+    /// Emitted as a row of its own rather than folded into a field-change row, so a rename that coincides with a schema change produces one row of each and
+    /// neither <see cref="SchemaChangeKind"/> becomes ambiguous. Repeated renames leave a chain the reader walks forward.
+    /// </para>
+    /// </remarks>
+    /// <param name="previousName">The name the object carried before this open.</param>
+    /// <param name="currentName">The name it carries now.</param>
+    /// <param name="target">Whether a component or an archetype was renamed.</param>
+    /// <param name="fromRevision">Revision of the persisted definition.</param>
+    /// <param name="toRevision">Revision the runtime declares.</param>
+    /// <param name="changeSet">
+    /// The caller's change set, so the journal entry lands in the <b>same</b> save as the re-key it describes. Callers must pass one: a rename persisted
+    /// without its journal entry is precisely the loss this record exists to prevent, and two separate saves leave a window where a crash produces exactly
+    /// that — a row renamed on disk with nothing anywhere recording what it used to be called.
+    /// </param>
+    private void RecordSchemaRename(string previousName, string currentName, SchemaObjectKind target, int fromRevision, int toRevision, ChangeSet changeSet)
+    {
+        if (_schemaHistoryTable == null)
+        {
+            return;
+        }
+
+        var entry = new SchemaHistoryR1
+        {
+            Timestamp = DateTime.UtcNow.Ticks,
+            ComponentName = (String64)currentName,
+            PreviousName = (String64)previousName,
+            Target = target,
+            FromRevision = fromRevision,
+            ToRevision = toRevision,
+            Kind = SchemaChangeKind.Rename,
+            // Field counters stay 0: a rename moves no fields. When a rename and a field change land in the same open they are two separate rows, and the
+            // field counts belong to the other one.
+        };
+
+        // No SaveChanges here — the caller owns the change set and saves once, so the journal entry and the re-key commit together.
+        SystemCrud.Create(_schemaHistoryTable, ref entry, EpochManager, changeSet);
     }
 
     /// <summary>
@@ -2627,7 +2875,16 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             // SPIs and data untouched.
             if (persistedKey != schemaName)
             {
-                PersistComponentName(persisted.ChunkId, schemaName);
+                // The re-key and its journal entry share one change set and one save (#615): persisting the new name without the record of the old one is the
+                // exact loss this feature exists to prevent, so the two must not be separately durable.
+                var renameCs = MMF.CreateChangeSet();
+                PersistComponentName(persisted.ChunkId, schemaName, renameCs);
+
+                // This block runs exactly once per rename — the next reopen matches by Name and never reaches here — so the trail gets one row per hop with no
+                // extra bookkeeping.
+                RecordSchemaRename(persistedKey, schemaName, SchemaObjectKind.Component, persisted.Comp.SchemaRevision, definition.Revision, renameCs);
+                renameCs.SaveChanges();
+
                 if (_persistedComponents.Remove(persistedKey, out var movedComp))
                 {
                     movedComp.Comp.Name = (String64)schemaName;
@@ -3400,6 +3657,14 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             _registeredArchetypeTypes.Add(meta.ArchetypeType);
         }
         ArchetypeRegistry.RegisterEngineUse(_registeredArchetypeTypes, _registeredComponentTypes);
+
+        // Separately, count this engine as live (#614 D-9). One-shot, mirroring the `_unregisteredFromRegistry` guard on the dispose side — see the field docs
+        // for why the live-engine count, unlike the Type refcounts above, cannot tolerate an unpaired call in either direction.
+        if (!_registeredWithRegistry)
+        {
+            ArchetypeRegistry.RegisterLiveEngine();
+            _registeredWithRegistry = true;
+        }
 
         // WAL v2 crash recovery (P1.2): replay committed records that postdate the last checkpoint, now that archetypes,
         // EntityMaps, and the page cache are online — the correct place, unlike the never-wired in-ctor WalRecovery(dbe:null)
@@ -5018,10 +5283,17 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             if (meta.PreviousName != null && _persistedArchetypes.TryGetValue(meta.PreviousName, out var renamed))
             {
                 var renamedArch = renamed.Arch;
+                var previousRevision = renamedArch.Revision;
                 renamedArch.Name = meta.Name;
                 SystemCrud.Update(archetypesTable, renamed.ChunkId, ref renamedArch, EpochManager, cs);
                 _persistedArchetypes.Remove(meta.PreviousName);
                 _persistedArchetypes[meta.Name] = (renamed.ChunkId, renamedArch);
+
+                // Journal the rename before the evidence disappears (#615) — symmetric with the component hatch. Like that one, this block runs exactly once
+                // per rename: the next reopen finds the row under meta.Name and returns above. Shares this method's change set, so the re-keyed archetype row
+                // and the journal entry that explains it become durable together.
+                RecordSchemaRename(meta.PreviousName, meta.Name, SchemaObjectKind.Archetype, previousRevision, meta.Revision, cs);
+
                 anyNew = true;
                 continue;
             }

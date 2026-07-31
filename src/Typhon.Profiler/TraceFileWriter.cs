@@ -1,4 +1,5 @@
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -145,16 +146,71 @@ public sealed class TraceFileWriter : IDisposable
         _writer.Flush();
     }
 
-    /// <summary>Writes the archetype table. Must be called once after system definitions.</summary>
+    /// <summary>
+    /// Writes the archetype table (v12: each record carries a trailing <see cref="ArchetypeRecord.RoutingId"/>). Must be called once after system definitions.
+    /// </summary>
+    /// <remarks>
+    /// The file offset of every <c>RoutingId</c> field is remembered so <see cref="PatchArchetypeRoutingIdsToSentinel"/> can strip them at close. The table is
+    /// necessarily written here, at session start, but the multi-engine verdict D-9 depends on is only known at close — so the writer keeps the means to go
+    /// back rather than the reader keeping the obligation to distrust what it finds.
+    /// </remarks>
     public void WriteArchetypes(ReadOnlySpan<ArchetypeRecord> archetypes)
     {
+        // One flush to fix the table's base offset, then track the cursor arithmetically. Flushing per record to read Stream.Position would cost a syscall per
+        // archetype (up to 4095) and defeat the exporter's 64 KB buffer — for a table written once per capture, that is pure waste. WriteShortString returns
+        // its own byte count so the arithmetic is derived from the encoder rather than duplicating its truncation rule.
+        _writer.Flush();
+        var cursor = _stream.Position;
+        _archetypeRoutingIdOffsets = new long[archetypes.Length];
+
         _writer.Write((ushort)archetypes.Length);
-        foreach (var a in archetypes)
+        cursor += sizeof(ushort);
+
+        for (var i = 0; i < archetypes.Length; i++)
         {
+            var a = archetypes[i];
             _writer.Write(a.ArchetypeId);
-            WriteShortString(a.Name);
+            cursor += sizeof(ushort);
+            cursor += WriteShortString(a.Name);
+
+            _archetypeRoutingIdOffsets[i] = cursor;
+            _writer.Write(a.RoutingId);
+            cursor += sizeof(ushort);
         }
         _writer.Flush();
+    }
+
+    /// <summary>File offset of each archetype record's <c>RoutingId</c> field, captured by <see cref="WriteArchetypes"/>. Null until that call.</summary>
+    private long[] _archetypeRoutingIdOffsets;
+
+    /// <summary>
+    /// Overwrites every <see cref="ArchetypeRecord.RoutingId"/> already written to the archetype table with
+    /// <see cref="ArchetypeRecord.UnknownRoutingId"/>. Called at close when the capture observed more than one live engine, so the routing ids it recorded are
+    /// ambiguous (D-9): the trace ends up carrying <i>less</i>, never something plausible and wrong. No-op if the table was never written.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The stream is not seekable.</exception>
+    public void PatchArchetypeRoutingIdsToSentinel()
+    {
+        if (_archetypeRoutingIdOffsets == null || _archetypeRoutingIdOffsets.Length == 0)
+        {
+            return;
+        }
+        if (!_stream.CanSeek)
+        {
+            throw new InvalidOperationException("PatchArchetypeRoutingIdsToSentinel requires a seekable stream.");
+        }
+
+        _writer.Flush();
+        var savedPos = _stream.Position;
+        Span<byte> sentinel = stackalloc byte[sizeof(ushort)];
+        BinaryPrimitives.WriteUInt16LittleEndian(sentinel, ArchetypeRecord.UnknownRoutingId);
+        foreach (var offset in _archetypeRoutingIdOffsets)
+        {
+            _stream.Position = offset;
+            _stream.Write(sentinel);
+        }
+        _stream.Position = savedPos;
+        _stream.Flush();
     }
 
     /// <summary>Writes the component type table. Must be called once after the archetype table.</summary>
@@ -576,12 +632,14 @@ public sealed class TraceFileWriter : IDisposable
         _stream.Dispose();
     }
 
-    private void WriteShortString(string value)
+    /// <summary>Writes a byte-length-prefixed UTF-8 string (truncated at 255 bytes) and returns the total bytes written, prefix included.</summary>
+    private int WriteShortString(string value)
     {
         var bytes = Encoding.UTF8.GetBytes(value ?? string.Empty);
         var len = (byte)Math.Min(bytes.Length, 255);
         _writer.Write(len);
         _writer.Write(bytes, 0, len);
+        return sizeof(byte) + len;
     }
 
     /// <summary>u16 length prefix followed by that many <see cref="WriteShortString"/> entries.</summary>

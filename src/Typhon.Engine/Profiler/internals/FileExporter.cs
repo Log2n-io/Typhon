@@ -28,6 +28,9 @@ internal sealed class FileExporter : ResourceNode, IProfilerExporter
     private FileStream _stream;
     private TraceFileWriter _writer;
     private TraceFileHeader _header;  // stashed at Initialize so Dispose can patch the trailer offsets in
+
+    /// <summary><c>Stopwatch.GetTimestamp()</c> at <see cref="Initialize"/>, so the close path can compute the capture's wall-clock duration (#614 D-5).</summary>
+    private long _startTimestamp;
     private bool _disposed;
     private long _batchesProcessed;
     private long _recordsProcessed;
@@ -75,6 +78,7 @@ internal sealed class FileExporter : ResourceNode, IProfilerExporter
         // is needed for the seek-back; without it the rewrite throws "Stream does not support reading".
         _stream = new FileStream(_filePath, FileMode.Create, FileAccess.ReadWrite, FileShare.Read, 64 * 1024);
         _writer = new TraceFileWriter(_stream);
+        _startTimestamp = Stopwatch.GetTimestamp();
 
         _header = new TraceFileHeader
         {
@@ -91,8 +95,14 @@ internal sealed class FileExporter : ResourceNode, IProfilerExporter
             DagCount = (ushort)metadata.Dags.Length,
             CreatedUtcTicks = metadata.StartedUtc.Ticks,
             SamplingSessionStartQpc = metadata.SamplingSessionStartQpc,
+            // Capture identity (v12, #614). TsnMax / DurationTicks / TickCount are 0 here and patched in WriteTrailerSectionsAtClose — they are not knowable
+            // until the session ends.
+            DatabaseId = metadata.DatabaseId,
+            TsnMin = metadata.TsnAtStart,
+            SchemaFingerprint = metadata.SchemaFingerprint,
             // FileTableOffset + SourceLocationManifestOffset are 0 — patched in WriteSourceLocationManifestAtClose.
         };
+        _header.SetDatabaseName(metadata.DatabaseName);
         _writer.WriteHeader(in _header);
         _writer.WriteSystemDefinitions(metadata.Systems);
         _writer.WriteArchetypes(metadata.Archetypes);
@@ -184,12 +194,24 @@ internal sealed class FileExporter : ResourceNode, IProfilerExporter
             _header.QuerySourceStringTableOffset = offset;
         }
 
-        // Only rewrite the header if at least one trailer section landed.
-        if (hasFileContent || cpuData != null || queryStrings.Length > 1)
+        // ── Capture-window fields (v12, #614 D-5) — the numbers a profiles list needs without opening anything, none of which exist until now. ──
+        var (tsnMax, tickCount) = ProfilerCaptureCounters.SnapshotAtClose();
+        _header.TsnMax = tsnMax;
+        _header.TickCount = tickCount;
+        _header.DurationTicks = Stopwatch.GetTimestamp() - _startTimestamp;
+
+        // ── D-9 degradation. More than one engine was live at some point, so the routing ids written at Initialize came from colliding id spaces and no longer
+        //    identify anything. Strip them from the table rather than leaving them on disk behind a flag: a wrong id that merely *ought* not to be read is one
+        //    forgetful reader away from producing the §5.3 silent-wrong-answer this whole revision exists to prevent. ──
+        if (ArchetypeRegistry.MaxLiveEngineCount > 1)
         {
-            _writer.RewriteHeader(in _header);
-            _writer.Flush();
+            _header.Flags |= (ushort)TraceHeaderFlags.MultipleEnginesObserved;
+            _writer.PatchArchetypeRoutingIdsToSentinel();
         }
+
+        // v12 always has close-time values to write, so the rewrite is unconditional — it is no longer gated on a trailer section having landed.
+        _writer.RewriteHeader(in _header);
+        _writer.Flush();
     }
 
     /// <inheritdoc />
