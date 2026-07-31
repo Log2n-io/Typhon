@@ -39,8 +39,39 @@ name: Doc-Accuracy Review (nightly)
 # SECURITY: a merged diff is still author-controlled -> prompt-injection is expected. Mirrors the audit:
 #   1. permissions caps GITHUB_TOKEN at issues:write.
 #   2. GH_TOKEN pins all gh ops to that scoped token, not the Claude App's broader token.
-#   3. --allowedTools restricts Claude to read-only file/search tools + `gh pr diff/view` + `gh issue`.
-#   Worst case of a hijacked run: one stray issue. Recoverable, bounded.
+#   3. --allowedTools restricts Claude to read-only file/search tools + `gh pr diff/view` + `gh issue`,
+#      plus Edit/Write scoped BY CONVENTION to doc/ and enforced by the path guard in `patch` below.
+#   Worst case of a hijacked run: one stray issue, plus a doc/-only patch on a draft PR. Bounded.
+#
+# ── Why the fix lands as a draft PR, and why a second job opens it (added 2026-07-31) ─────────────────
+# Filing an issue throws the verification away. This job already read the source and confirmed file:line
+# on both sides; serialising that to prose means the next human re-derives all of it before they dare
+# trust it. A diff carries the verification in a form you can check by looking at it.
+#
+# The fix is therefore applied here and pushed to a long-lived `doc-drift/nightly` branch as a DRAFT PR.
+# Issues are still filed exactly as before — they are this layer's dedup ledger (Step 1 reads open
+# `documentation` issues so a finding is never refiled), and `Fixes #N` in the PR body means merging the
+# PR closes them and the ledger self-cleans.
+#
+# THE JOB SPLIT IS THE SECURITY BOUNDARY, and it is not decoration:
+#   * `review`   — sees author-controlled input, runs the LLM, holds contents:READ. It can scribble on the
+#                  runner's checkout; it cannot push anywhere. Its only output is a patch file.
+#   * `open-pr`  — holds contents:write + pull-requests:write, contains NO LLM and no attacker-controlled
+#                  input beyond a patch that already passed the doc/-only path allowlist.
+# This shape exists because Actions `permissions:` has NO path or branch scope — you cannot grant "may
+# commit to doc/ on a non-main branch". `contents: write` is all-or-nothing across the repo, and this
+# repo's `main` protection currently requires neither reviews nor status checks. Granting that token to
+# the step that reads hostile input would move the worst case from "one stray issue" to "arbitrary commit
+# on main". Narrowing a too-coarse token is done structurally or not at all.
+#
+# Claude EDITS FILES; it does not author diff text. Unified-diff hunk headers encode exact line numbers
+# and context counts, `git apply` rejects the whole patch on any mismatch, and models miscount context
+# lines. `git diff` derives the patch mechanically from edits the model is actually good at making.
+#
+# NEVER force-push and never auto-resolve. That constraint is what forces `git merge origin/main` rather
+# than a rebase in `open-pr`: a rebase rewrites the branch and can only be pushed with --force, which
+# would clobber whatever the maintainer committed there. When the merge conflicts the bot stops and says
+# so on the PR — silently resolving a conflict in prose a human wrote is worse than giving up.
 
 on:
   schedule:
@@ -66,6 +97,8 @@ jobs:
   review:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    outputs:
+      has_patch: ${{ steps.patch.outputs.has_patch }}
     steps:
       - uses: actions/checkout@v5
 
@@ -81,6 +114,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          # Captured BEFORE Claude runs so the `issues` step below can tell this run's filings from
+          # pre-existing ones. Cheap and monotonic; the concurrency group rules out a second nightly.
+          echo "run_start=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
           HOURS='${{ github.event.inputs.since_hours || 25 }}'
           SINCE=$(python3 -c "import datetime,sys;print((datetime.datetime.now(datetime.UTC)-datetime.timedelta(hours=int(sys.argv[1]))).isoformat())" "$HOURS")
           echo "Looking for PRs merged since $SINCE"
@@ -210,8 +246,192 @@ jobs:
             speculation — only verifiable inaccuracies, each citing file:line for BOTH sides.
 
             Do NOT set issue Type / assignees / milestone / project (org-level; the maintainer's job).
-            Do NOT edit any files. Only create the issues above.
+
+            Step 5 — apply the fix for each issue you filed, editing the doc page directly.
+
+              HARD CONSTRAINT: edit files under doc/ ONLY. Never touch src/, .github/, scripts/,
+              coverage/, or anything else — a later step diffs the tree and FAILS THE RUN if you did.
+              Do not run git. Do not commit. Do not push. Something else does that.
+
+              Fix ONLY what you are confident about. A finding you are sure is wrong but unsure how to
+              phrase should be filed as an issue and left unedited — an issue costs a read, a wrong
+              committed sentence costs a reviewer who believes it. Partial coverage is expected and fine.
+
+              QUALIFY, DO NOT REPLACE. When code gained an opt-in mode and the page describes the old
+              behaviour, that prose is still exactly right for the default — say so, then add what the new
+              mode does instead. Rewriting it makes the path 100% of users are on read as the exception.
+
+              State the exemptions, not just the headline. A rule with carve-outs documented as absolute
+              teaches readers to expect the wrong thing in precisely the cases that bite.
+
+            Your edits will be pushed to a long-lived `doc-drift/nightly` branch and opened as a DRAFT PR
+            for the maintainer to review, adjust or merge. The issues you filed are referenced from it and
+            close on merge.
           claude_args: |
-            --allowedTools "Read,Grep,Glob,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh issue list:*),Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue create:*)"
+            --allowedTools "Read,Grep,Glob,Edit,Write,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh issue list:*),Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue create:*)"
             --max-turns 200
             --model claude-sonnet-4-6
+
+      # ── The boundary. Everything above ran an LLM on author-controlled input with contents:READ. ──
+      # This step turns whatever it did to the checkout into a patch, and refuses to emit one if it
+      # strayed outside doc/. Failing loudly is deliberate: an LLM editing .github/ means something went
+      # wrong and you want to see it, not have it quietly filtered out of the diff.
+      - id: patch
+        if: ${{ steps.scope.outputs.has_work == '1' }}
+        run: |
+          set -euo pipefail
+          git add -A doc/                       # -A so a newly created page is captured, not just edits
+
+          # Two checks, on TRACKED paths only. Untracked scratch (merged.json, prs.txt, aff_*.json from
+          # the scope step above) is deliberately ignored: it is never staged, so it cannot reach the
+          # patch, and matching on `git status` here would fail the guard on every single run.
+          #   INPATCH  — anything staged that is not a doc page. Empty by construction; checked anyway.
+          #   OUTSIDE  — tracked files the reviewer edited elsewhere. THIS is the one that matters: it is
+          #              how an injected run trying to touch src/ or .github/ gets caught.
+          INPATCH=$(git diff --cached --name-only | grep -v '^doc/' || true)
+          OUTSIDE=$(git diff --name-only        | grep -v '^doc/' || true)
+          if [ -n "$INPATCH$OUTSIDE" ]; then
+            echo "::error::Doc reviewer touched tracked files outside doc/ — refusing to emit a patch."
+            printf '%s\n' $INPATCH $OUTSIDE
+            exit 1
+          fi
+          git diff --cached > doc-fix.patch
+          if [ -s doc-fix.patch ]; then
+            echo "has_patch=1" >> "$GITHUB_OUTPUT"
+            echo "----- patch -----"; cat doc-fix.patch
+          else
+            echo "has_patch=0" >> "$GITHUB_OUTPUT"
+            echo "::notice::Findings were filed but no doc edits were made — nothing to open a PR for."
+          fi
+
+      # Which issues did THIS run file? Resolved deterministically from the API rather than trusting the
+      # model to report them, and filtered on the [doc-drift] title prefix so a Monday overlap with the
+      # 06:00 Layer-3 audit cannot pull [doc-audit] issues into this PR's Fixes list.
+      - id: issues
+        if: ${{ steps.patch.outputs.has_patch == '1' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh issue list --repo "${{ github.repository }}" --state open --label documentation \
+              --limit 100 --json number,title,createdAt > issues.json
+          python3 - "${{ steps.scope.outputs.run_start }}" <<'PY' > fixes.txt
+          import json, sys
+          since = sys.argv[1]
+          for i in sorted(json.load(open("issues.json")), key=lambda x: x["number"]):
+              if i["createdAt"] >= since and i["title"].startswith("[doc-drift]"):
+                  print(f'Fixes #{i["number"]}')
+          PY
+          echo "----- fixes -----"; cat fixes.txt
+
+      - if: ${{ steps.patch.outputs.has_patch == '1' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: doc-fix-patch
+          path: |
+            doc-fix.patch
+            fixes.txt
+          retention-days: 7
+
+  # ── No LLM below this line. ────────────────────────────────────────────────────────────────────────
+  # Holds the write token. Its only input is a patch that already passed the doc/-only allowlist, so
+  # there is nothing here that attacker-controlled prose can talk into doing something else.
+  open-pr:
+    needs: review
+    if: ${{ needs.review.outputs.has_patch == '1' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      BRANCH: doc-drift/nightly
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0        # rebase needs real history
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: doc-fix-patch
+
+      - name: Apply onto the accumulating branch
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            git fetch origin "$BRANCH"
+            git switch -c "$BRANCH" --track "origin/$BRANCH"
+            # Bring yesterday's still-open PR up to date with main before adding to it.
+            #
+            # MERGE, not rebase, and this is load-bearing: rebasing rewrites the branch, so the push below
+            # would need --force. Force-pushing a branch the maintainer may have checked out and committed
+            # to is precisely the silent clobber this whole design refuses. Merge keeps every push a
+            # fast-forward, so `git push` with no flags is all that is ever needed.
+            # The messier history costs nothing — this repo squash-merges PRs, so the merge commits never
+            # reach main.
+            if ! git merge --no-edit origin/main; then
+              git merge --abort || true
+              PR=$(gh pr list --repo "${{ github.repository }}" --head "$BRANCH" --state open --json number --jq '.[0].number // empty')
+              if [ -n "$PR" ]; then
+                gh pr comment "$PR" --body "🤖 Tonight's doc-drift fixes could **not** be applied: merging \`main\` into this branch conflicts. The findings were still filed as issues. Resolve it here (or just merge this PR) and the next run picks up again — nothing was force-pushed and no conflict was auto-resolved."
+              fi
+              echo "::error::Merging main into $BRANCH conflicts — stopping rather than resolving. Commented on PR #$PR."
+              exit 1
+            fi
+          else
+            git switch -c "$BRANCH"
+          fi
+
+          # --3way so a hunk that already moved (because an earlier night touched the same page) merges
+          # instead of hard-failing on context mismatch.
+          if ! git apply --3way doc-fix.patch; then
+            git reset --hard || true          # --3way leaves conflict markers staged; drop them
+            echo "::error::Patch does not apply to $BRANCH even with --3way. Findings remain filed as issues."
+            exit 1
+          fi
+
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "::notice::Patch applied to a no-op — these fixes are already on the branch. Nothing to commit."
+            echo "committed=0" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          git add -A doc/
+          git commit -m "[doc-drift] nightly doc fixes $(date -u +%F) [no-ut] [no-doc]" \
+                     -m "$(cat fixes.txt)" \
+                     -m "Filed and fixed by doc-accuracy-review.yml. Review the diff — the model fixes only what it is confident about, so the referenced issues may cover more than this commit does."
+          git push -u origin "$BRANCH"
+          echo "committed=1" >> "$GITHUB_ENV"
+
+      - name: Open or update the draft PR
+        if: ${{ env.committed == '1' }}
+        run: |
+          set -euo pipefail
+          PR=$(gh pr list --repo "${{ github.repository }}" --head "$BRANCH" --state open --json number --jq '.[0].number // empty')
+
+          if [ -z "$PR" ]; then
+            {
+              echo "$(cat fixes.txt)"
+              echo
+              echo "Doc-drift fixes applied automatically by the nightly doc-accuracy review (\`.github/workflows/doc-accuracy-review.yml\`)."
+              echo
+              echo "**Draft on purpose — this wants a human read.** The model fixes only findings it is confident about, so the \`Fixes\` list above may be longer than the diff. Check the issues that have no corresponding change and either fix them here or drop the \`Fixes\` line."
+              echo
+              echo "To adjust: \`git fetch && git switch $BRANCH\`, edit, commit, push. Later runs merge \`main\` in and append on top — they never force-push, so your commits are safe, and a conflict stops the run instead of resolving it."
+            } > body.md
+            gh pr create --repo "${{ github.repository }}" --draft --base main --head "$BRANCH" \
+                --title "[doc-drift] Nightly documentation fixes" --body-file body.md
+          else
+            # Append only the Fixes lines not already present, so the closing keywords accumulate across
+            # nights without the body growing duplicates. -x -F: whole-line, literal — "Fixes #60" must
+            # not be considered already present just because the body contains "Fixes #601".
+            gh pr view "$PR" --repo "${{ github.repository }}" --json body --jq .body > old.md
+            grep -vxF -f old.md fixes.txt > new_fixes.txt || true
+            cat new_fixes.txt old.md > body.md
+            gh pr edit "$PR" --repo "${{ github.repository }}" --body-file body.md
+            gh pr comment "$PR" --body "🤖 Appended tonight's doc-drift fixes: $(tr '\n' ' ' < new_fixes.txt)"
+          fi
