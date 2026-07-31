@@ -1,4 +1,5 @@
-﻿using Microsoft.Extensions.DependencyInjection;
+﻿using System;
+using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 
 namespace Typhon.Engine.Tests;
@@ -217,5 +218,118 @@ class EcsOrViewTests : TestBase<EcsOrViewTests>
 
         Assert.That(view.Count, Is.EqualTo(0));
         Assert.That(view.Removed, Has.Count.EqualTo(1));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // One-shot terminals reject OR predicates (#590, #592)
+    // ═══════════════════════════════════════════════════════════════════════
+    //
+    // An OR predicate parses into N DNF branches whose UNION is the answer. Every one-shot terminal planned only branch 0 and silently discarded the rest:
+    // Count() under-reported, Any() could return false with matches in a later branch, Execute() returned a strict subset — and nothing threw (#590).
+    // ExecuteOrdered() additionally had no guard despite the overview documenting one (#592). Until the one-shot path unions per-branch plans, these throw:
+    // a loud failure beats a partial answer the caller has no reason to distrust. The view path is unaffected and stays the supported way to run an OR query.
+    //
+    // The dataset below is deliberately the same shape as OrView_InitialPopulation_UnionOfBranches: union = 3, branch 0 (Gold>=90) alone = 2. Pre-fix,
+    // Execute() returned 2 and Count() returned 2 while the correct answer was 3 — which is exactly what made the defect invisible.
+
+    private static void SpawnOrDataset(DatabaseEngine dbe)
+    {
+        using var tx = dbe.CreateQuickTransaction();
+        tx.Spawn<CompFArch>(CompFArch.F.Set(new CompF(100, 1)));  // branch 0 only  (Gold>=90)
+        tx.Spawn<CompFArch>(CompFArch.F.Set(new CompF(10, 5)));   // branch 1 only  (Rank>=5)
+        tx.Spawn<CompFArch>(CompFArch.F.Set(new CompF(50, 3)));   // neither
+        tx.Spawn<CompFArch>(CompFArch.F.Set(new CompF(95, 6)));   // both
+        tx.Commit();
+    }
+
+    [Test]
+    public void Execute_OrPredicate_ThrowsInsteadOfReturningBranchZeroOnly()
+    {
+        using var dbe = SetupEngine();
+        SpawnOrDataset(dbe);
+
+        using var tx = dbe.CreateQuickTransaction();
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            tx.Query<CompFArch>()
+                .WhereField<CompF>(f => f.Gold >= 90 || f.Rank >= 5)
+                .Execute());
+
+        Assert.That(ex.Message, Does.Contain("OR"), "the message must name the unsupported construct");
+        Assert.That(ex.Message, Does.Contain("ToView()"), "the message must point at the path that does support OR");
+    }
+
+    [Test]
+    public void Count_OrPredicate_ThrowsInsteadOfUnderReporting()
+    {
+        using var dbe = SetupEngine();
+        SpawnOrDataset(dbe);
+
+        using var tx = dbe.CreateQuickTransaction();
+        Assert.Throws<InvalidOperationException>(() =>
+            tx.Query<CompFArch>()
+                .WhereField<CompF>(f => f.Gold >= 90 || f.Rank >= 5)
+                .Count());
+    }
+
+    [Test]
+    public void Any_OrPredicate_ThrowsInsteadOfMissingLaterBranchMatches()
+    {
+        using var dbe = SetupEngine();
+
+        // Only a branch-1 match exists, so the pre-fix Any() answered false while an entity genuinely matched the predicate.
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.Spawn<CompFArch>(CompFArch.F.Set(new CompF(10, 5)));
+            tx.Commit();
+        }
+
+        using var tx2 = dbe.CreateQuickTransaction();
+        Assert.Throws<InvalidOperationException>(() =>
+            tx2.Query<CompFArch>()
+                .WhereField<CompF>(f => f.Gold >= 90 || f.Rank >= 5)
+                .Any());
+    }
+
+    [Test]
+    public void ExecuteOrdered_OrPredicate_Throws()
+    {
+        using var dbe = SetupEngine();
+        SpawnOrDataset(dbe);
+
+        using var tx = dbe.CreateQuickTransaction();
+        Assert.Throws<InvalidOperationException>(() =>
+            tx.Query<CompFArch>()
+                .WhereField<CompF>(f => f.Gold >= 90 || f.Rank >= 5)
+                .OrderByField<CompF, int>(f => f.Gold)
+                .ExecuteOrdered());
+    }
+
+    [Test]
+    public void ToView_OrPredicate_StillReturnsTheFullUnion()
+    {
+        using var dbe = SetupEngine();
+        SpawnOrDataset(dbe);
+
+        using var tx = dbe.CreateQuickTransaction();
+        using var view = tx.Query<CompFArch>()
+            .WhereField<CompF>(f => f.Gold >= 90 || f.Rank >= 5)
+            .ToView();
+
+        Assert.That(view.Count, Is.EqualTo(3), "the guard must not disturb the view path, which evaluates every branch");
+    }
+
+    [Test]
+    public void OneShotTerminals_SingleBranchPredicate_StillWork()
+    {
+        using var dbe = SetupEngine();
+        SpawnOrDataset(dbe);
+
+        using var tx = dbe.CreateQuickTransaction();
+        Assert.Multiple(() =>
+        {
+            Assert.That(tx.Query<CompFArch>().WhereField<CompF>(f => f.Gold >= 90).Execute(), Has.Count.EqualTo(2));
+            Assert.That(tx.Query<CompFArch>().WhereField<CompF>(f => f.Gold >= 90).Count(), Is.EqualTo(2));
+            Assert.That(tx.Query<CompFArch>().WhereField<CompF>(f => f.Gold >= 90).Any(), Is.True);
+        });
     }
 }
