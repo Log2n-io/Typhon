@@ -108,3 +108,162 @@ dotnet run tools/seqlock-litmus/seqlock-litmus.cs <mode> [seconds] [readerThread
 skip billions of times and complete almost no copies, so the window this harness exists to probe is never entered. The
 first version of this harness did exactly that — 16.6 *billion* skips against 8,883 validated copies. Tune until
 `validated` and `retries` are both large.
+
+## Results
+
+Test summary: total: 4189, failed: 0, succeeded: 4101, skipped: 54, duration: 114,6s
+Build succeeded with 5 warning(s) in 120,9s
+loic@Loics-MacBook-Air Typhon % dotnet run tools/seqlock-litmus/seqlock-litmus.cs bench 10 6    # run it THREE times
+seqlock litmus — Arm64, 10 logical cores, .NET 10.0.7
+mode=bench duration=10s readers=6 quietSpins=400 page=4096B
+
+              writer passes/s    reader copies/s
+unfenced               62 364          2 570 706
+fenced                 52 517          2 522 213
+
+writer cost (2x Interlocked.Increment per pass) :   15,8%
+reader cost (Volatile.Read x2 + LoadLoad fence) :    1,9%
+
+RUN THIS SEVERAL TIMES BEFORE BELIEVING EITHER NUMBER. Single-run variance is large: on a 32-core x64 box successive runs gave
+3.6%/16.8%, then 0.5%/-0.3%, then 0.2%/1.1%. A negative figure is the tell that you are reading noise. Only a delta that survives
+repetition is real — measured on x64, both settle at roughly zero, which is what theory predicts.
+
+The two columns are also coupled: a slower writer changes the duty cycle and therefore how many copies readers complete, so the
+reader column is indicative rather than an isolated measurement. On x64 the reader's conditional barrier folds away entirely and
+Volatile.Read emits a plain mov (it still constrains the JIT, which is not free in a loop this tight, but is unmeasurable against
+the engine's per-page memcpy + CRC + write). On arm64 both columns can carry real cost — that is what this mode is for.
+loic@Loics-MacBook-Air Typhon % dotnet run tools/seqlock-litmus/seqlock-litmus.cs bench 10 6    # run it THREE times
+seqlock litmus — Arm64, 10 logical cores, .NET 10.0.7
+mode=bench duration=10s readers=6 quietSpins=400 page=4096B
+
+              writer passes/s    reader copies/s
+unfenced               52 637          2 634 246
+fenced                 50 440          2 503 403
+
+writer cost (2x Interlocked.Increment per pass) :    4,2%
+reader cost (Volatile.Read x2 + LoadLoad fence) :    5,0%
+
+RUN THIS SEVERAL TIMES BEFORE BELIEVING EITHER NUMBER. Single-run variance is large: on a 32-core x64 box successive runs gave
+3.6%/16.8%, then 0.5%/-0.3%, then 0.2%/1.1%. A negative figure is the tell that you are reading noise. Only a delta that survives
+repetition is real — measured on x64, both settle at roughly zero, which is what theory predicts.
+
+The two columns are also coupled: a slower writer changes the duty cycle and therefore how many copies readers complete, so the
+reader column is indicative rather than an isolated measurement. On x64 the reader's conditional barrier folds away entirely and
+Volatile.Read emits a plain mov (it still constrains the JIT, which is not free in a loop this tight, but is unmeasurable against
+the engine's per-page memcpy + CRC + write). On arm64 both columns can carry real cost — that is what this mode is for.
+loic@Loics-MacBook-Air Typhon % dotnet run tools/seqlock-litmus/seqlock-litmus.cs bench 10 6    # run it THREE times
+seqlock litmus — Arm64, 10 logical cores, .NET 10.0.7
+mode=bench duration=10s readers=6 quietSpins=400 page=4096B
+
+              writer passes/s    reader copies/s
+unfenced               53 481          2 496 317
+fenced                 52 075          2 472 157
+
+writer cost (2x Interlocked.Increment per pass) :    2,6%
+reader cost (Volatile.Read x2 + LoadLoad fence) :    1,0%
+
+RUN THIS SEVERAL TIMES BEFORE BELIEVING EITHER NUMBER. Single-run variance is large: on a 32-core x64 box successive runs gave
+3.6%/16.8%, then 0.5%/-0.3%, then 0.2%/1.1%. A negative figure is the tell that you are reading noise. Only a delta that survives
+repetition is real — measured on x64, both settle at roughly zero, which is what theory predicts.
+
+The two columns are also coupled: a slower writer changes the duty cycle and therefore how many copies readers complete, so the
+reader column is indicative rather than an isolated measurement. On x64 the reader's conditional barrier folds away entirely and
+Volatile.Read emits a plain mov (it still constrains the JIT, which is not free in a loop this tight, but is unmeasurable against
+the engine's per-page memcpy + CRC + write). On arm64 both columns can carry real cost — that is what this mode is for.
+loic@Loics-MacBook-Air Typhon % dotnet run tools/seqlock-litmus/seqlock-litmus.cs bench 10 6    # run it THREE times
+seqlock litmus — Arm64, 10 logical cores, .NET 10.0.7
+mode=bench duration=10s readers=6 quietSpins=400 page=4096B
+
+              writer passes/s    reader copies/s
+unfenced               53 770          2 548 811
+fenced                 51 183          2 419 082
+
+writer cost (2x Interlocked.Increment per pass) :    4,8%
+reader cost (Volatile.Read x2 + LoadLoad fence) :    5,1%
+
+RUN THIS SEVERAL TIMES BEFORE BELIEVING EITHER NUMBER. Single-run variance is large: on a 32-core x64 box successive runs gave
+3.6%/16.8%, then 0.5%/-0.3%, then 0.2%/1.1%. A negative figure is the tell that you are reading noise. Only a delta that survives
+repetition is real — measured on x64, both settle at roughly zero, which is what theory predicts.
+
+The two columns are also coupled: a slower writer changes the duty cycle and therefore how many copies readers complete, so the
+reader column is indicative rather than an isolated measurement. On x64 the reader's conditional barrier folds away entirely and
+Volatile.Read emits a plain mov (it still constrains the JIT, which is not free in a loop this tight, but is unmeasurable against
+the engine's per-page memcpy + CRC + write). On arm64 both columns can carry real cost — that is what this mode is for.
+loic@Loics-MacBook-Air Typhon % dotnet run tools/seqlock-litmus/seqlock-litmus.cs bench 10 6    # run it THREE times
+seqlock litmus — Arm64, 10 logical cores, .NET 10.0.7
+mode=bench duration=10s readers=6 quietSpins=400 page=4096B
+
+              writer passes/s    reader copies/s
+unfenced               54 424          2 566 354
+fenced                 52 032          2 428 866
+
+writer cost (2x Interlocked.Increment per pass) :    4,4%
+reader cost (Volatile.Read x2 + LoadLoad fence) :    5,4%
+
+RUN THIS SEVERAL TIMES BEFORE BELIEVING EITHER NUMBER. Single-run variance is large: on a 32-core x64 box successive runs gave
+3.6%/16.8%, then 0.5%/-0.3%, then 0.2%/1.1%. A negative figure is the tell that you are reading noise. Only a delta that survives
+repetition is real — measured on x64, both settle at roughly zero, which is what theory predicts.
+
+The two columns are also coupled: a slower writer changes the duty cycle and therefore how many copies readers complete, so the
+reader column is indicative rather than an isolated measurement. On x64 the reader's conditional barrier folds away entirely and
+Volatile.Read emits a plain mov (it still constrains the JIT, which is not free in a loop this tight, but is unmeasurable against
+the engine's per-page memcpy + CRC + write). On arm64 both columns can carry real cost — that is what this mode is for.
+loic@Loics-MacBook-Air Typhon % dotnet run tools/seqlock-litmus/seqlock-litmus.cs selftest 10 6
+seqlock litmus — Arm64, 10 logical cores, .NET 10.0.7
+mode=selftest duration=10s readers=6 quietSpins=400 page=4096B
+
+validated copies : 31 130 641
+retries (counter changed) : 0
+skipped (counter odd)     : 0
+TORN COPIES ACCEPTED AS VALID : 5 327 884
+
+PASS — the harness detects tearing when the protocol is removed, so a clean 'unfenced' run below is meaningful.
+loic@Loics-MacBook-Air Typhon % 
+
+loic@Loics-MacBook-Air Typhon % dotnet run tools/seqlock-litmus/seqlock-litmus.cs unfenced 120 6
+seqlock litmus — Arm64, 10 logical cores, .NET 10.0.7
+mode=unfenced duration=120s readers=6 quietSpins=400 page=4096B
+
+validated copies : 290 237 164
+retries (counter changed) : 1 279 368
+skipped (counter odd)     : 17 015 042 412
+TORN COPIES ACCEPTED AS VALID : 0
+
+no tearing observed in this run — which is NOT proof of correctness (see the header note). On x64 this outcome is expected
+for both modes, because TSO supplies the ordering the unfenced protocol omits.
+loic@Loics-MacBook-Air Typhon % dotnet run tools/seqlock-litmus/seqlock-litmus.cs fenced 120 6
+seqlock litmus — Arm64, 10 logical cores, .NET 10.0.7
+mode=fenced duration=120s readers=6 quietSpins=400 page=4096B
+
+validated copies : 250 612 594
+retries (counter changed) : 897 023
+skipped (counter odd)     : 13 997 506 888
+TORN COPIES ACCEPTED AS VALID : 0
+
+no tearing observed in this run — which is NOT proof of correctness (see the header note). On x64 this outcome is expected
+for both modes, because TSO supplies the ordering the unfenced protocol omits.
+loic@Loics-MacBook-Air Typhon % 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
