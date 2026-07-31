@@ -1894,6 +1894,14 @@ internal sealed unsafe class ArchetypeClusterState
     /// cell, so SoA writes don't collide. The rare <see cref="FlagOutliersForMigration"/> path (extent-guard fire) serializes <see cref="EnqueueMigration"/>
     /// internally via <c>_finalizeLock</c>.
     /// </para>
+    /// <para>
+    /// <b>PRECONDITION — caller must hold the tick fence barrier (CA-01, issue #573).</b> The AABB write below is a <i>blind store</i>
+    /// (<c>stored = fresh</c>), not a union against the previous value. That is correct only because the current fence barrier guarantees no concurrent
+    /// <c>WriteSpatial</c> can be flagging new geometry into a cell while this runs. Under any concurrent or pipelined fence scheme
+    /// (<c>claude/design/Runtime/09-tick-pipelining.md</c>, <c>10-fence-parallelisation.md</c>) a racing <c>WriteSpatial</c> is silently dropped and the
+    /// resulting AABB is <b>too tight</b> — spatial queries then stop returning entities that are genuinely inside the query region, with no error and no
+    /// crash. Whoever relaxes this barrier must first convert the store to a grow-merge (union with <c>stored</c>, handling the shrink path explicitly).
+    /// </para>
     /// </summary>
     internal void RecomputeDirtyClusterAabbsSlice(int sliceStart, int sliceCount, ref ChunkAccessor<PersistentStore> accessor, SpatialGrid grid, 
         List<MigrationRequest> outlierBuffer, out int aabbsChanged, out int slotsScanned, out int outlierGuardFires)
@@ -2007,6 +2015,9 @@ internal sealed unsafe class ArchetypeClusterState
                         continue;
                     }
 
+                    // CA-01 PRECONDITION (see the method's remarks): `stored = fresh` is a BLIND STORE, not a grow-merge. Sound only under the tick fence
+                    // barrier, which guarantees no concurrent WriteSpatial is flagging new geometry into this cell. Relaxing that barrier without converting
+                    // this to a union against `stored` silently drops the racing write and leaves the AABB too tight — wrong query results, no error (#573).
                     fresh.CategoryMask = slot.DynamicIndex.CategoryMasks[indexSlot];
                     stored = fresh;
                     slot.DynamicIndex.UpdateAt(indexSlot, in fresh);

@@ -16,9 +16,23 @@ namespace Typhon.Engine.Internals;
 /// </para>
 ///
 /// <para>
-/// <b>Latch-safety (constraint #3):</b> the overflow site runs while holding an OLC read latch, so this path must
-/// <b>never throw</b> — an exception under a latch leaks it and deadlocks. The counter is a lock-free
+/// The ray query's priority queue reports here too, but only at its post-spill ceiling
+/// (<see cref="SpatialRTreeConstants.MaxRayHeapCapacity"/>). It is not a fixed buffer: it grows on demand, so reaching the ceiling likewise means a
+/// degenerate or cyclic tree rather than merely a dense scene. Ordinary growth is counted separately by <see cref="RayHeapSpillCount"/>, which is a
+/// performance signal, not a correctness one. Before #589 the ray path had neither — it dropped children silently.
+/// </para>
+///
+/// <para>
+/// <b>Latch-safety (constraint #3):</b> the overflow sites run inside an optimistic (OLC) read section, so this path must
+/// <b>never throw</b> — an escaping exception would abandon the traversal mid-protocol. The counter is a lock-free
 /// <see cref="Interlocked"/> increment and the optional log is wrapped defensively; neither can escape.
+/// </para>
+///
+/// <para>
+/// Precisely: an OLC reader holds nothing — <see cref="OlcLatch.ReadVersion"/> only snapshots a version — so there is no
+/// latch here to leak, and the earlier wording ("while holding an OLC read latch") overstated it. The non-throwing
+/// discipline is kept regardless: it costs nothing, and it is what lets the ray path rent pooled buffers on this same
+/// traversal without a throw stranding the enumeration.
 /// </para>
 ///
 /// This class is deliberately <b>non-generic</b> so the counter is a single process-wide value shared across every
@@ -32,6 +46,17 @@ internal static partial class SpatialRTreeDiagnostics
     internal static long DfsStackOverflowCount;
 
     /// <summary>
+    /// Number of times a ray query's priority queue outgrew its inline buffer and spilled to pooled arrays, since process start.
+    /// </summary>
+    /// <remarks>
+    /// <b>Not an error.</b> The spill is precisely what keeps results complete when the traversal frontier is large (#589), and it is the expected outcome for
+    /// a scene whose subtrees share an entry distance along the ray. Treat it as a performance signal: a workload that spills on every query is paying two
+    /// pool rentals and a copy each time, and would be better served by a larger
+    /// <see cref="SpatialRTreeConstants.RayHeapInlineCapacity"/>.
+    /// </remarks>
+    internal static long RayHeapSpillCount;
+
+    /// <summary>
     /// Optional sink for the one-shot overflow warning. Set once at engine construction (first non-null wins). When null the
     /// counter still records; only the human-readable warning is suppressed. Kept optional so the always-on record path needs
     /// no logger plumbed into the query enumerators.
@@ -43,7 +68,7 @@ internal static partial class SpatialRTreeDiagnostics
     private static int Warned;
 
     [LoggerMessage(Level = LogLevel.Warning,
-        Message = "Spatial {QueryKind} query DFS stack overflow (depth > 256) — the R-Tree is degenerate/corrupt and results " +
+        Message = "Spatial {QueryKind} query traversal buffer overflow — the R-Tree is degenerate/corrupt and results " +
                   "may be incomplete. Total overflows this process: {TotalCount}.")]
     private static partial void LogDfsStackOverflow(ILogger logger, string queryKind, long totalCount);
 

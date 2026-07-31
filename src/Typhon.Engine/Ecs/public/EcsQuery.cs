@@ -374,6 +374,37 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     /// <summary>True if this query has Expression-based field predicates (enabling incremental views).</summary>
     internal readonly bool HasFieldPredicates => _fieldPredicateBranches != null;
 
+    /// <summary>
+    /// Returns the sole DNF branch of the field predicate, or throws when the predicate is a multi-branch OR.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// An OR predicate is parsed into <c>N</c> disjunctive-normal-form branches, and the correct answer is the <b>union</b> of all of them. Every
+    /// <i>one-shot</i> terminal (<c>Execute</c> / <c>Count</c> / <c>Any</c> / <c>ExecuteOrdered</c>) plans only <c>_fieldPredicateBranches[0]</c> — there is no
+    /// union step — so branches <c>1..N</c> used to be discarded silently: <c>Count()</c> under-reported, <c>Any()</c> could return <c>false</c> while matches
+    /// existed in a later branch, and <c>Execute()</c> returned a strict subset. Nothing threw (#590). <c>ExecuteOrdered</c> additionally had no guard at all
+    /// despite the overview documenting one (#592).
+    /// </para>
+    /// <para>
+    /// Until the one-shot path unions per-branch plans, throwing is the sanctioned resolution: a loud failure beats a partial answer the caller has no reason
+    /// to distrust. The <b>view</b> path is unaffected and remains the supported way to run an OR query — <see cref="EcsView{TArchetype}"/> genuinely maintains
+    /// per-branch bitmaps.
+    /// </para>
+    /// </remarks>
+    /// <param name="terminal">Terminal name, for the exception message.</param>
+    private readonly FieldPredicate[] SingleBranchOrThrow(string terminal)
+    {
+        if (_fieldPredicateBranches.Length > 1)
+        {
+            throw new InvalidOperationException(
+                $"{terminal} does not support OR predicates — the predicate has {_fieldPredicateBranches.Length} DNF branches and the one-shot path evaluates "
+                + "only the first, which would return a partial result. Use ToView() (incremental views evaluate every branch), or split the query into one "
+                + "call per branch and union the results yourself.");
+        }
+
+        return _fieldPredicateBranches[0];
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // Spatial predicates
     // ═══════════════════════════════════════════════════════════════════════
@@ -434,6 +465,14 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     /// Start a navigation (FK join) query from the source archetype to a target component type.
     /// The FK field selector identifies the long FK field on the source component.
     /// </summary>
+    /// <remarks>
+    /// <b>The source component must be <see cref="StorageMode.Versioned"/>.</b> Navigation resolves the foreign-key index off the
+    /// component table, and a <see cref="StorageMode.SingleVersion"/> archetype keeps its field indexes on the archetype instead
+    /// (cluster-local, values are packed cluster locations), so there is no component-table index for the reverse lookup to scan.
+    /// A SingleVersion source therefore throws <see cref="NotSupportedException"/> rather than silently returning nothing.
+    /// Tracked by issue #623; <see cref="StorageMode.Transient"/> has no persistent index at all and is likewise rejected.
+    /// </remarks>
+    /// <exception cref="NotSupportedException">The source component is <see cref="StorageMode.SingleVersion"/> or <see cref="StorageMode.Transient"/>.</exception>
     public readonly EcsNavigationQueryBuilder<TArchetype, TSource, TTarget> NavigateField<TSource, TTarget>(Expression<Func<TSource, long>> fkSelector)
         where TSource : unmanaged where TTarget : unmanaged
     {
@@ -754,7 +793,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         }
 
         var ct = _whereComponentTable;
-        var evaluators = QueryResolverHelper.ResolveEvaluators(_fieldPredicateBranches[0], ct, 0);
+        var evaluators = QueryResolverHelper.ResolveEvaluators(SingleBranchOrThrow("ExecuteOrdered()"), ct, 0);
         var plan = PlanBuilder.Instance.BuildPlanAttributed(evaluators, ct, AdvancedSelectivityEstimator.Instance, _orderBy.Value,
             queryInstanceKind: 1, queryInstanceLocalId: (uint)EcsQueryId,
             definitionSourceFile: SourceFile, definitionSourceLine: SourceLine, definitionSourceMethod: SourceMethod,
@@ -1131,7 +1170,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     {
         var ct = _whereComponentTable;
 
-        var evaluators = QueryResolverHelper.ResolveEvaluators(_fieldPredicateBranches[0], ct, 0);
+        var evaluators = QueryResolverHelper.ResolveEvaluators(SingleBranchOrThrow("One-shot execution"), ct, 0);
         var plan = PlanBuilder.Instance.BuildPlanAttributed(evaluators, ct, AdvancedSelectivityEstimator.Instance, null,
             queryInstanceKind: 1, queryInstanceLocalId: (uint)EcsQueryId,
             definitionSourceFile: SourceFile, definitionSourceLine: SourceLine, definitionSourceMethod: SourceMethod,
@@ -2143,7 +2182,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 }
 
                 var ct = _whereComponentTable;
-                var evaluators = QueryResolverHelper.ResolveEvaluators(_fieldPredicateBranches[0], ct, 0);
+                var evaluators = QueryResolverHelper.ResolveEvaluators(SingleBranchOrThrow("Count()"), ct, 0);
                 var plan = PlanBuilder.Instance.BuildPlanAttributed(evaluators, ct, AdvancedSelectivityEstimator.Instance, null,
                     queryInstanceKind: 1, queryInstanceLocalId: (uint)EcsQueryId,
                     definitionSourceFile: SourceFile, definitionSourceLine: SourceLine, definitionSourceMethod: SourceMethod,
@@ -2211,7 +2250,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             if (HasFieldPredicates)
             {
                 var ct = _whereComponentTable;
-                var evaluators = QueryResolverHelper.ResolveEvaluators(_fieldPredicateBranches[0], ct, 0);
+                var evaluators = QueryResolverHelper.ResolveEvaluators(SingleBranchOrThrow("Any()"), ct, 0);
                 var plan = PlanBuilder.Instance.BuildPlanAttributed(evaluators, ct, AdvancedSelectivityEstimator.Instance, null,
                     queryInstanceKind: 1, queryInstanceLocalId: (uint)EcsQueryId,
                     definitionSourceFile: SourceFile, definitionSourceLine: SourceLine, definitionSourceMethod: SourceMethod,

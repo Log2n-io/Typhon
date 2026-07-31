@@ -310,4 +310,80 @@ public class WalWriterTests : AllocatorTestBase
     }
 
     #endregion
+
+    #region Shutdown drain (#580)
+
+    /// <summary>
+    /// WP-03 regression (#580): the shutdown drain must WRITE a final batch that exceeds <c>StagingBufferSize</c>, not silently discard it.
+    /// </summary>
+    /// <remarks>
+    /// <c>DrainRemaining</c> used to run the staging-buffer copy under an <c>if (bytesToWrite &lt;= _stagingBufferSize)</c> with no <c>else</c>, while
+    /// <c>CompleteDrain</c> + <c>AdvanceDurable</c> ran unconditionally underneath it. An oversized final batch — a large last commit, or a fat fence batch at
+    /// Dispose — therefore reached neither <c>WriteAligned</c> nor disk, yet the durable watermark advanced over it. Recovery then starts after the watermark
+    /// and never looks for the missing records: silent data loss on an *orderly* shutdown. Pre-fix this test sees <c>TotalBytesWritten == 0</c>.
+    /// </remarks>
+    [Test]
+    [CancelAfter(5000)]
+    public void DrainRemaining_BatchLargerThanStagingBuffer_IsWrittenNotDiscarded()
+    {
+        // StagingBufferSize is 8 KB here (see CreateWriterPipeline); claim comfortably past it while staying inside the commit-buffer half.
+        const int OversizedFrame = 16 * 1024;
+
+        var (buffer, writer, segMgr) = CreateWriterPipeline();
+        try
+        {
+            // Deliberately do NOT Start() — the shutdown drain is the path under test, and the writer thread would otherwise consume the batch in WriterLoop
+            // (which has always handled the oversized case correctly). This mirrors a frame published in the window before the loop's shutdown break.
+            var ctx = WaitContext.FromTimeout(TimeSpan.FromSeconds(2));
+            var claim = buffer.TryClaim(OversizedFrame, 1, ref ctx);
+            Assert.That(claim.IsValid, Is.True, "precondition: the oversized frame must fit the commit buffer");
+            claim.DataSpan.Fill(0xBE);
+            buffer.Publish(ref claim);
+
+            writer.DrainRemaining();
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(writer.TotalBytesWritten, Is.GreaterThanOrEqualTo(OversizedFrame),
+                    "the oversized final batch must reach WriteAligned — 0 here is the #580 silent drop");
+                Assert.That(writer.DurableLsn, Is.GreaterThanOrEqualTo(1),
+                    "the durable watermark may only advance over bytes that were actually written");
+            });
+        }
+        finally
+        {
+            writer.Dispose();
+            buffer.Dispose();
+            segMgr.Dispose();
+        }
+    }
+
+    /// <summary>Companion to the above: a final batch that FITS the staging buffer still drains through the original path.</summary>
+    [Test]
+    [CancelAfter(5000)]
+    public void DrainRemaining_BatchWithinStagingBuffer_IsWritten()
+    {
+        var (buffer, writer, segMgr) = CreateWriterPipeline();
+        try
+        {
+            var ctx = WaitContext.FromTimeout(TimeSpan.FromSeconds(2));
+            var claim = buffer.TryClaim(256, 1, ref ctx);
+            Assert.That(claim.IsValid, Is.True);
+            claim.DataSpan.Fill(0xAB);
+            buffer.Publish(ref claim);
+
+            writer.DrainRemaining();
+
+            Assert.That(writer.TotalBytesWritten, Is.GreaterThan(0));
+            Assert.That(writer.DurableLsn, Is.GreaterThanOrEqualTo(1));
+        }
+        finally
+        {
+            writer.Dispose();
+            buffer.Dispose();
+            segMgr.Dispose();
+        }
+    }
+
+    #endregion
 }

@@ -10,6 +10,10 @@ namespace Typhon.Engine.Internals;
 /// </summary>
 internal static unsafe class TreeValidator
 {
+    // MBR values move between nodes verbatim (a copy, never arithmetic), so a fresh pair compares exactly; the tolerance only absorbs the f32↔f64 conversion
+    // the SOA read helpers apply at the storage boundary.
+    private const double Epsilon = 1e-6;
+
     /// <summary>
     /// Validate all structural invariants of the R-Tree.
     /// Throws on any violation with a descriptive message.
@@ -98,7 +102,7 @@ internal static unsafe class TreeValidator
         }
         else
         {
-            // R1: MBR tightness
+            // R1, first half: this node's MBR is the union of its own stored entries.
             ValidateMBRTightness(nodeBase, count, false, desc, chunkId);
 
             // Recurse into children
@@ -109,6 +113,9 @@ internal static unsafe class TreeValidator
                 {
                     throw new InvalidOperationException($"R6 violation: node {chunkId} child[{i}] has invalid chunkId={childId}");
                 }
+
+                // R1, second half — without this the check above is self-referential and proves nothing.
+                ValidateInternalEntryFreshness(nodeBase, i, chunkId, childId, desc, ref accessor);
 
                 ValidateNode(childId, chunkId, desc, ref accessor, entityIds, ref totalEntities, ref totalNodes);
             }
@@ -160,13 +167,47 @@ internal static unsafe class TreeValidator
         }
 
         // Compare with stored NodeMBR
-        const double epsilon = 1e-6;
         for (int c = 0; c < desc.CoordCount; c++)
         {
             double stored = SpatialNodeHelper.ReadNodeMBRCoord(nodeBase, c, desc);
-            if (Math.Abs(stored - recomputed[c]) > epsilon)
+            if (Math.Abs(stored - recomputed[c]) > Epsilon)
             {
                 throw new InvalidOperationException($"R1 violation: node {chunkId} MBR coord[{c}] is {stored} but recomputed is {recomputed[c]}");
+            }
+        }
+    }
+
+    /// <summary>
+    /// R1, second half: an internal entry's stored coords must still equal the live <c>NodeMBR</c> of the child that entry describes.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <see cref="ValidateMBRTightness"/> recomputes an internal node's MBR from that node's <b>own</b> entry array, so a stale entry is arithmetically
+    /// invisible to it — the comparison reduces to a value against itself. This check supplies the missing half by reading each child's MBR at its source.
+    /// </para>
+    /// <para>
+    /// <b>Why per-entry rather than one union-from-children comparison.</b> The design states R1 as "recompute each node's MBR from children, compare"
+    /// (<c>claude/design/Spatial/SpatialIndex/07-testing.md</c>). Entry-freshness plus <see cref="ValidateMBRTightness"/>'s union-over-own-entries together
+    /// imply exactly that, and are strictly stronger: a single union-from-children comparison still passes when two stale entries cancel out. It also names the
+    /// offending entry and child instead of reporting a whole-node mismatch. Do not "simplify" this back toward the design's literal phrasing.
+    /// </para>
+    /// <para>
+    /// This gap is what let #588 through: <c>PropagateSplit</c> refit ancestors from pre-insert entries, and neither review nor a full suite could see it.
+    /// </para>
+    /// </remarks>
+    private static void ValidateInternalEntryFreshness<TStore>(byte* nodeBase, int entryIndex, int chunkId, int childChunkId,
+        in SpatialNodeDescriptor desc, ref ChunkAccessor<TStore> accessor) where TStore : struct, IPageStore
+    {
+        // Safe to hold nodeBase across this call: chunk pointers stay valid for the enclosing EpochGuard's lifetime regardless of accessor slot eviction.
+        byte* childBase = accessor.GetChunkAddress(childChunkId);
+        for (int c = 0; c < desc.CoordCount; c++)
+        {
+            double stored = SpatialNodeHelper.ReadInternalCoord(nodeBase, entryIndex, c, desc);
+            double live = SpatialNodeHelper.ReadNodeMBRCoord(childBase, c, desc);
+            if (Math.Abs(stored - live) > Epsilon)
+            {
+                throw new InvalidOperationException(
+                    $"R1 violation: node {chunkId} entry[{entryIndex}] (child {childChunkId}) coord[{c}] stale: stored {stored}, child NodeMBR {live}");
             }
         }
     }

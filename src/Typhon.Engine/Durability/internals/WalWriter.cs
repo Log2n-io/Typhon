@@ -541,14 +541,31 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
     /// <summary>
     /// Drains any remaining committed frames during shutdown.
     /// </summary>
-    private void DrainRemaining()
+    /// <remarks>
+    /// Runs on the writer thread once <see cref="WriterLoop"/> breaks, and catches frames published in the window between the loop's last failed
+    /// <c>TryDrain</c> and its shutdown <c>break</c>. <c>internal</c> rather than <c>private</c> so a test can drive this path deterministically — that window
+    /// is not externally schedulable — following the same seam as <see cref="DrainAndWriteSync"/>. Must not be called while the writer thread is running.
+    /// </remarks>
+    internal void DrainRemaining()
     {
         // One final drain attempt
         if (_commitBuffer.TryDrain(out var data, out var frameCount) && frameCount > 0)
         {
             var bytesToWrite = AlignUp(data.Length, PageSize);
 
-            if (bytesToWrite <= _stagingBufferSize)
+            // WP-03: every drained byte must reach WriteAligned BEFORE CompleteDrain discards the batch and AdvanceDurable moves the watermark over it. The
+            // staging path below can only carry a batch that fits in _stagingBufferSize (256 KB default); the commit-buffer half is megabytes, so a large last
+            // commit or a fat fence batch at Dispose overflows it. Without this branch that batch was silently dropped on an orderly shutdown while DurableLsn
+            // advanced past it — recovery then starts after the watermark and never looks for the missing records (#580). Mirrors WriterLoop.
+            if (bytesToWrite > _stagingBufferSize)
+            {
+                // Data exceeds staging buffer — write in chunks (patches the CRC chain and advances WriteOffset itself)
+                if (_segmentManager.ActiveSegment?.Handle != null)
+                {
+                    WriteInChunks(data);
+                }
+            }
+            else
             {
                 data.CopyTo(new Span<byte>(_stagingBuffer, _stagingBufferSize));
 
@@ -721,10 +738,17 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
 
     /// <summary>
     /// Monotonically advances the durable watermark to <paramref name="candidate"/> and wakes waiters. The single source of the advance invariant, shared by the
-    /// background drain loop, shutdown drain, and the synchronous crash-test drain. Monotonic: a batch's high LSN can fall below the current watermark when claim
-    /// order and buffer/drain order diverge (tail and LSN are claimed via two independent <c>Interlocked.Add</c>s); lowering the watermark would un-acknowledge an
-    /// already-durable record. Caller is the single consumer (writer thread or a stopped-thread sync drain), so no CAS loop is needed.
+    /// background drain loop, shutdown drain, and the synchronous crash-test drain. Caller is the single consumer (writer thread or a stopped-thread sync
+    /// drain), so no CAS loop is needed.
     /// </summary>
+    /// <remarks>
+    /// The monotonic guard is <b>defence in depth</b>, not a correctness mechanism. It previously justified itself by pointing at claim order and drain order
+    /// diverging — "tail and LSN are claimed via two independent <c>Interlocked.Add</c>s" — but that divergence was a bug, not a property to accommodate:
+    /// it let the watermark advance past a frame whose bytes were never written, so an <c>Immediate</c> commit could be acknowledged with its record still in
+    /// RAM (WP-06 → WP-02, #581). <see cref="WalCommitBuffer.TryClaim"/> now allocates position and LSN in one atomic, so a batch's high LSN can no longer
+    /// fall below the watermark for that reason. The guard stays because lowering the watermark would un-acknowledge an already-durable record, and no caller
+    /// should be able to cause that by accident.
+    /// </remarks>
     private void AdvanceDurable(long candidate)
     {
         if (candidate > Interlocked.Read(ref _durableLsn))

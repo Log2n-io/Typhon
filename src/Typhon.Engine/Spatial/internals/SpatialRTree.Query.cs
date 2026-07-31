@@ -1,5 +1,9 @@
 using System;
+using System.Buffers;
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Threading;
 
 namespace Typhon.Engine.Internals;
 
@@ -574,11 +578,11 @@ internal unsafe partial class SpatialRTree<TStore>
     internal RayEnumerator QueryRay(ReadOnlySpan<double> origin, ReadOnlySpan<double> direction, double maxDist, ChangeSet changeSet = null,
         uint categoryMask = 0) => new(this, origin, direction, maxDist, changeSet, categoryMask);
 
-    /// <summary>Inline min-heap buffer for ray query priority queue (64 entries).</summary>
-    [InlineArray(64)]
+    /// <summary>Inline min-heap buffer for the ray priority queue. Overflow spills to <see cref="ArrayPool{T}"/> — a fast path, not a limit.</summary>
+    [InlineArray(SpatialRTreeConstants.RayHeapInlineCapacity)]
     internal struct RayHeapChunkIds { private int _element0; }
 
-    [InlineArray(64)]
+    [InlineArray(SpatialRTreeConstants.RayHeapInlineCapacity)]
     internal struct RayHeapDistances { private double _element0; }
 
     internal ref struct RayEnumerator
@@ -594,9 +598,13 @@ internal unsafe partial class SpatialRTree<TStore>
         private fixed double _invDir[3];
         private readonly int _coordCount;
 
-        // Min-heap of (chunkId, tEntry)
+        // Min-heap of (chunkId, tEntry). The inline buffers are the zero-allocation fast path; once the traversal frontier outgrows them the heap spills to
+        // pooled arrays and _spillChunkIds becomes the active storage (see TryGrowHeap). _heapCapacity always describes the ACTIVE storage.
         private RayHeapChunkIds _heapChunkIds;
         private RayHeapDistances _heapDists;
+        private int[] _spillChunkIds;
+        private double[] _spillDists;
+        private int _heapCapacity;
         private int _heapSize;
 
         // Current leaf iteration
@@ -619,6 +627,9 @@ internal unsafe partial class SpatialRTree<TStore>
             _accessor = tree._segment.CreateChunkAccessor(changeSet);
             _maxDist = maxDist;
             _heapSize = 0;
+            _spillChunkIds = null;
+            _spillDists = null;
+            _heapCapacity = SpatialRTreeConstants.RayHeapInlineCapacity;
             _currentLeafChunkId = 0;
             _currentLeafIndex = -1;
             _currentLeafCount = 0;
@@ -639,7 +650,81 @@ internal unsafe partial class SpatialRTree<TStore>
 
             if (tree._rootChunkId != 0 && !degenerate)
             {
-                HeapPush(tree._rootChunkId, 0.0);
+                // A single element into an empty heap: sift-up is a no-op, so write slot 0 of the inline buffer directly. No spill can exist yet, which is
+                // what lets this skip the span plumbing the rest of the heap operations need.
+                _heapChunkIds[0] = tree._rootChunkId;
+                _heapDists[0] = 0.0;
+                _heapSize = 1;
+            }
+        }
+
+        /// <summary>
+        /// The heap's active storage: the inline buffer until a spill happens, the pooled arrays afterwards.
+        /// </summary>
+        /// <remarks>
+        /// Deliberately recomputed inside each live call rather than cached in a field. <see cref="GetEnumerator"/> returns <c>this</c> <b>by value</b>, so a
+        /// span captured at construction would survive into the copy while pointing at the original's inline buffer — a dead temporary. Creating it against
+        /// the live <c>this</c> and passing it down as a parameter (never storing, never returning it) keeps the copy correct.
+        /// </remarks>
+        [UnscopedRef]
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private Span<int> HeapIds() => _spillChunkIds != null ? _spillChunkIds.AsSpan(0, _heapCapacity)
+                : MemoryMarshal.CreateSpan(ref Unsafe.As<RayHeapChunkIds, int>(ref _heapChunkIds), SpatialRTreeConstants.RayHeapInlineCapacity);
+
+        [UnscopedRef]
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private Span<double> HeapDists()
+            => _spillDists != null ? _spillDists.AsSpan(0, _heapCapacity)
+                : MemoryMarshal.CreateSpan(ref Unsafe.As<RayHeapDistances, double>(ref _heapDists), SpatialRTreeConstants.RayHeapInlineCapacity);
+
+        /// <summary>
+        /// Double the heap into pooled arrays, copying the live entries across. Returns false only at <see cref="SpatialRTreeConstants.MaxRayHeapCapacity"/>,
+        /// having already recorded the overflow — the caller then drops the child, which is the pre-#589 behaviour kept as a last resort for corrupt trees.
+        /// </summary>
+        /// <remarks>
+        /// Renting here is safe under the traversal's optimistic-concurrency protocol: <see cref="OlcLatch.ReadVersion"/> only snapshots a version and holds
+        /// nothing, so an allocation (or a throw) on this path cannot leak a latch.
+        /// </remarks>
+        private bool TryGrowHeap()
+        {
+            if (_heapCapacity >= SpatialRTreeConstants.MaxRayHeapCapacity)
+            {
+                SpatialRTreeDiagnostics.RecordDfsStackOverflow("ray");
+                return false;
+            }
+
+            int requested = Math.Min(_heapCapacity * 2, SpatialRTreeConstants.MaxRayHeapCapacity);
+            var newIds = ArrayPool<int>.Shared.Rent(requested);
+            var newDists = ArrayPool<double>.Shared.Rent(requested);
+
+            // Counted only once both rentals succeeded, so the figure stays a count of growths rather than of attempts.
+            Interlocked.Increment(ref SpatialRTreeDiagnostics.RayHeapSpillCount);
+
+            HeapIds()[.._heapSize].CopyTo(newIds);
+            HeapDists()[.._heapSize].CopyTo(newDists);
+
+            ReturnSpillBuffers();
+
+            _spillChunkIds = newIds;
+            _spillDists = newDists;
+
+            // Rent may hand back a larger array than requested — take the capacity actually available, but never past the ceiling.
+            _heapCapacity = Math.Min(Math.Min(newIds.Length, newDists.Length), SpatialRTreeConstants.MaxRayHeapCapacity);
+            return true;
+        }
+
+        private void ReturnSpillBuffers()
+        {
+            if (_spillChunkIds != null)
+            {
+                ArrayPool<int>.Shared.Return(_spillChunkIds);
+                _spillChunkIds = null;
+            }
+
+            if (_spillDists != null)
+            {
+                ArrayPool<double>.Shared.Return(_spillDists);
+                _spillDists = null;
             }
         }
 
@@ -754,8 +839,16 @@ internal unsafe partial class SpatialRTree<TStore>
                     {
                         SpatialNodeHelper.ReadInternalEntryCoords(nodeBase, i, coords, _desc);
                         var (hit, t) = SpatialGeometry.RayAABBIntersect(origin, invDir, coords, _coordCount);
-                        if (hit && t <= _maxDist && _heapSize < 64)
+                        // The heap grows on demand (#589). Folding a fixed capacity into this condition — as the original `&& _heapSize < 64` did — drops a
+                        // child the ray genuinely hits, and with it the whole subtree beneath: a silently incomplete result, violating SQ-01. TryGrowHeap
+                        // returns false only at the corrupt-tree ceiling, and records the overflow before it does.
+                        if (hit && t <= _maxDist)
                         {
+                            if (_heapSize == _heapCapacity && !TryGrowHeap())
+                            {
+                                continue;
+                            }
+
                             int childId = SpatialNodeHelper.ReadInternalChildId(nodeBase, i, _desc);
                             HeapPush(childId, t);
                         }
@@ -777,6 +870,8 @@ internal unsafe partial class SpatialRTree<TStore>
 
         private void RestartFromRoot()
         {
+            // Any spill buffer is deliberately retained across a restart: the retraversal will need the same capacity, and returning it here would churn the
+            // pool once per OLC validation failure.
             _heapSize = 0;
             _currentLeafChunkId = 0;
             if (_tree._rootChunkId != 0)
@@ -785,33 +880,40 @@ internal unsafe partial class SpatialRTree<TStore>
             }
         }
 
+        /// <summary>Push a node. The caller must have ensured spare capacity (see the push site in <see cref="MoveNext"/>).</summary>
         private void HeapPush(int chunkId, double dist)
         {
+            var ids = HeapIds();
+            var dists = HeapDists();
+
             int i = _heapSize++;
-            _heapChunkIds[i] = chunkId;
-            _heapDists[i] = dist;
+            ids[i] = chunkId;
+            dists[i] = dist;
             // Sift up
             while (i > 0)
             {
                 int parent = (i - 1) / 2;
-                if (_heapDists[parent] <= _heapDists[i])
+                if (dists[parent] <= dists[i])
                 {
                     break;
                 }
-                (_heapChunkIds[parent], _heapChunkIds[i]) = (_heapChunkIds[i], _heapChunkIds[parent]);
-                (_heapDists[parent], _heapDists[i]) = (_heapDists[i], _heapDists[parent]);
+                (ids[parent], ids[i]) = (ids[i], ids[parent]);
+                (dists[parent], dists[i]) = (dists[i], dists[parent]);
                 i = parent;
             }
         }
 
         private int HeapPop()
         {
-            int result = _heapChunkIds[0];
+            var ids = HeapIds();
+            var dists = HeapDists();
+
+            int result = ids[0];
             _heapSize--;
             if (_heapSize > 0)
             {
-                _heapChunkIds[0] = _heapChunkIds[_heapSize];
-                _heapDists[0] = _heapDists[_heapSize];
+                ids[0] = ids[_heapSize];
+                dists[0] = dists[_heapSize];
                 // Sift down
                 int i = 0;
                 while (true)
@@ -819,11 +921,11 @@ internal unsafe partial class SpatialRTree<TStore>
                     int left = 2 * i + 1;
                     int right = 2 * i + 2;
                     int smallest = i;
-                    if (left < _heapSize && _heapDists[left] < _heapDists[smallest])
+                    if (left < _heapSize && dists[left] < dists[smallest])
                     {
                         smallest = left;
                     }
-                    if (right < _heapSize && _heapDists[right] < _heapDists[smallest])
+                    if (right < _heapSize && dists[right] < dists[smallest])
                     {
                         smallest = right;
                     }
@@ -831,8 +933,8 @@ internal unsafe partial class SpatialRTree<TStore>
                     {
                         break;
                     }
-                    (_heapChunkIds[i], _heapChunkIds[smallest]) = (_heapChunkIds[smallest], _heapChunkIds[i]);
-                    (_heapDists[i], _heapDists[smallest]) = (_heapDists[smallest], _heapDists[i]);
+                    (ids[i], ids[smallest]) = (ids[smallest], ids[i]);
+                    (dists[i], dists[smallest]) = (dists[smallest], dists[i]);
                     i = smallest;
                 }
             }
@@ -844,6 +946,8 @@ internal unsafe partial class SpatialRTree<TStore>
             if (!_disposed)
             {
                 _disposed = true;
+                // Runs even when the caller breaks out of the foreach or MoveNext throws — both go through foreach's finally.
+                ReturnSpillBuffers();
                 _span.Dispose();
                 _accessor.Dispose();
             }
@@ -1230,11 +1334,6 @@ internal unsafe partial class SpatialRTree<TStore>
 
     // ── Count Queries ────────────────────────────────────────────────────
 
-    // Containment classification constants for count query subtree shortcut
-    private const int ContainmentDisjoint = 0;
-    private const int ContainmentOverlapping = 1;
-    private const int ContainmentFullyContained = 2;
-
     /// <summary>
     /// Count entities whose fat AABB overlaps the given query box without materializing results.
     /// Uses a subtree counting shortcut: when a node's MBR is fully contained within the query region, its entries are counted without per-entry overlap
@@ -1254,7 +1353,6 @@ internal unsafe partial class SpatialRTree<TStore>
         {
             int count = 0;
             QueryStackBuffer stack = default;
-            int stackTop = 0;
             int coordCount = _desc.CoordCount;
 
             // Copy query coords to stackalloc buffer for pointer-based access in hot loops
@@ -1271,7 +1369,7 @@ internal unsafe partial class SpatialRTree<TStore>
             const int fullyContainedFlag = unchecked((int)0x80000000);
 
             stack[0] = _rootChunkId;
-            stackTop = 1;
+            var stackTop = 1;
 
             while (stackTop > 0)
             {
@@ -1286,7 +1384,6 @@ internal unsafe partial class SpatialRTree<TStore>
                 if (version == 0)
                 {
                     count = 0;
-                    stackTop = 0;
                     stack[0] = _rootChunkId;
                     stackTop = 1;
                     continue;
@@ -1298,7 +1395,6 @@ internal unsafe partial class SpatialRTree<TStore>
                 if (!latch.ValidateVersion(version))
                 {
                     count = 0;
-                    stackTop = 0;
                     stack[0] = _rootChunkId;
                     stackTop = 1;
                     continue;
@@ -1476,7 +1572,6 @@ internal unsafe partial class SpatialRTree<TStore>
                 if (!latch.ValidateVersion(version))
                 {
                     count = 0;
-                    stackTop = 0;
                     stack[0] = _rootChunkId;
                     stackTop = 1;
                 }

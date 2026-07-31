@@ -350,6 +350,13 @@ internal class PipelineExecutor
     /// Filters out evaluators whose FieldIndex matches the primary scan field — those conditions are already guaranteed by the B+Tree range scan.
     /// Returns the original array if no filtering needed.
     /// </summary>
+    /// <remarks>
+    /// <b>NotEqual is the exception and must be retained.</b> The cull is sound only for evaluators that actually shaped the scan range, and
+    /// <see cref="PlanBuilder"/> deliberately excludes <c>NotEqual</c> from range selection and range merging because a hole cannot be expressed as
+    /// <c>[min, max]</c>. Dropping it therefore discards a predicate nothing else enforces. Two ways that surfaced as silently wrong rows: an ordinary
+    /// compound predicate such as <c>B &gt;= 5 &amp;&amp; B != 7</c> returned the <c>B == 7</c> rows, and after #591 gave NE-only predicates a full-range
+    /// stream to scan, <c>B != 5</c> would have matched every row.
+    /// </remarks>
     private static FieldEvaluator[] ComputeNonPrimaryEvaluators(FieldEvaluator[] evaluators, int primaryFieldIndex)
     {
         if (primaryFieldIndex < 0 || evaluators.Length == 0)
@@ -360,7 +367,7 @@ internal class PipelineExecutor
         int nonPrimaryCount = 0;
         for (int i = 0; i < evaluators.Length; i++)
         {
-            if (evaluators[i].FieldIndex != primaryFieldIndex)
+            if (IsNotCoveredByRange(ref evaluators[i], primaryFieldIndex))
             {
                 nonPrimaryCount++;
             }
@@ -380,13 +387,21 @@ internal class PipelineExecutor
         int j = 0;
         for (int i = 0; i < evaluators.Length; i++)
         {
-            if (evaluators[i].FieldIndex != primaryFieldIndex)
+            if (IsNotCoveredByRange(ref evaluators[i], primaryFieldIndex))
             {
                 result[j++] = evaluators[i];
             }
         }
         return result;
     }
+
+    /// <summary>
+    /// True when <paramref name="evaluator"/> must still be applied per-entity: either it targets a field other than the scanned one, or it is a
+    /// <see cref="CompareOp.NotEqual"/> that the scan range provably does not enforce (see <see cref="ComputeNonPrimaryEvaluators"/>).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool IsNotCoveredByRange(ref FieldEvaluator evaluator, int primaryFieldIndex)
+        => evaluator.FieldIndex != primaryFieldIndex || evaluator.CompareOp == CompareOp.NotEqual;
 
     private void ExecuteCore(ExecutionPlan plan, FieldEvaluator[] evaluators, ComponentTable table, Transaction tx, HashMap<long> unorderedResult,
         List<long> orderedResult, int skip, int take)

@@ -10,6 +10,19 @@ namespace Typhon.Engine.Internals;
 internal static class SpatialRTreeConstants
 {
     internal const int MaxTreeDepth = 16;
+
+    /// <summary>Inline capacity of the ray query's priority queue — the allocation-free fast path before it spills to pooled arrays.</summary>
+    internal const int RayHeapInlineCapacity = 64;
+
+    /// <summary>
+    /// Hard ceiling on the ray priority queue after spilling (~192 KB of pooled backing at 12 B/entry).
+    /// </summary>
+    /// <remarks>
+    /// Not derived from <see cref="MaxTreeDepth"/>: unlike a descent path, the ray frontier is not depth-bounded — a ray that grazes many subtrees at the same
+    /// entry distance holds them all pending at once. This bound exists only so a degenerate or cyclic tree cannot grow the heap without limit; reaching it is
+    /// recorded through <see cref="SpatialRTreeDiagnostics.RecordDfsStackOverflow"/> rather than silently dropping children (#589).
+    /// </remarks>
+    internal const int MaxRayHeapCapacity = 1 << 14;
 }
 
 /// <summary>Stack-allocated buffer for path recording during descent.</summary>

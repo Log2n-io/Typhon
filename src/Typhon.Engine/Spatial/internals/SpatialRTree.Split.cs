@@ -80,8 +80,11 @@ internal unsafe partial class SpatialRTree<TStore>
             // Propagate split upward
             PropagateSplit(fullLeafChunkId, rightChunkId, ref path, ref accessor, changeSet);
 
-            _entityCount++;
-            _mutationVersion++;
+            // ST-04: atomics, not plain ++. Inserts are not globally serialized — they take per-node OLC write latches and release them before this bump, so two
+            // threads splitting different leaves reach here concurrently. A plain read-modify-write racing the Interlocked.Increment on the no-split path
+            // (Insert.cs) loses updates in both directions; the drifted count then reaches disk via SyncMetadata below and survives restart (#584).
+            Interlocked.Increment(ref _entityCount);
+            Interlocked.Increment(ref _mutationVersion);
             SyncMetadata(ref accessor);
             splitScope.LeftCount = (byte)Math.Min(splitPos, byte.MaxValue);
             splitScope.RightCount = (byte)Math.Min(rightCount, byte.MaxValue);
@@ -362,12 +365,29 @@ internal unsafe partial class SpatialRTree<TStore>
                 RefitInternalUnionMask(parentBase, ref accessor);
                 parentLatch.WriteUnlock();
 
-                // Refit remaining ancestors
+                // Refit remaining ancestors.
+                //
+                // The absorb above grew this level's node; every ancestor still holds PRE-INSERT coords in the entry describing its path child.
+                // RefitInternalMBR unions a node's OWN entry array, so it must be handed a refreshed entry or it refits the ancestor too TIGHT — and a
+                // too-tight internal MBR makes InternalEntryOverlapsQuery prune a subtree that genuinely overlaps the query, silently dropping entities
+                // (ST-01; SQ-01 and SQ-03 both declare requires: ST-01). Same refresh-then-refit shape as RefitAncestors — see #588 for the regression.
+                //
+                // Only the path child needs refreshing: it is the sole child whose MBR changed. Indices at levels above `level` are still valid because
+                // the absorb branch leaves everything above it structurally untouched.
                 for (int upper = level - 1; upper >= 0; upper--)
                 {
                     int ancestorChunkId = path.ChunkIds[upper];
+                    int childIdx = path.ChildIndices[upper];
                     byte* ancestorBase = accessor.GetChunkAddress(ancestorChunkId, true);
                     SpinWriteLock(ancestorBase, out var ancestorLatch);
+
+                    int refitChildChunkId = SpatialNodeHelper.ReadInternalChildId(ancestorBase, childIdx, _desc);
+                    byte* refitChildBase = accessor.GetChunkAddress(refitChildChunkId);
+                    for (int c = 0; c < _desc.CoordCount; c++)
+                    {
+                        SpatialNodeHelper.WriteInternalCoord(ancestorBase, childIdx, c, SpatialNodeHelper.ReadNodeMBRCoord(refitChildBase, c, _desc), _desc);
+                    }
+
                     SpatialNodeHelper.RefitInternalMBR(ancestorBase, _desc);
                     RefitInternalUnionMask(ancestorBase, ref accessor);
                     ancestorLatch.WriteUnlock();
