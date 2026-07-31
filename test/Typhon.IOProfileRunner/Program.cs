@@ -224,14 +224,10 @@ public static class Program
                         "config.Database.WalEnabled=false is no longer supported: the no-WAL engine mode was removed. Set WalEnabled=true to profile disk I/O.");
                 }
 
-                // PagesPerBlock bump is a DELIBERATE workaround for a latent engine bug around TransientStore's
-                // `_pageAddresses` array growth. The default 32 makes the initial `_pageAddresses` capacity = 32 × 4 = 128. Once
-                // the live page count crosses 128 (≈9K component chunks at 112-byte stride), the array must grow — but because
-                // TransientStore is a mutable struct and ChunkAccessor holds a COPY of the struct, the accessor's copy still
-                // points to the pre-growth array and subsequent chunk reads dereference a null / stale pointer (NullRef in Memmove).
-                // Bumping to 256 raises initial capacity to 1024 pages, which safely contains our ~12K-entity transient workload
-                // (≈170 pages) without ever triggering the array-reallocation path.
-                opt.Transient.PagesPerBlock = 256;
+                // NOTE: the PagesPerBlock = 256 workaround that used to sit here is gone. It existed to keep the transient workload below the
+                // `_pageAddresses` array-growth threshold, because ChunkAccessor held a by-value COPY of the mutable TransientStore struct and kept
+                // dereferencing the pre-growth array (NullRef in Memmove). ChunkAccessor now resolves page addresses through a live `_segment` back-reference,
+                // so growth is safe and the default block size exercises the real reallocation path — which is what we want a profiling run to cover (#244).
             });
 
         using var sp = services.BuildServiceProvider();
