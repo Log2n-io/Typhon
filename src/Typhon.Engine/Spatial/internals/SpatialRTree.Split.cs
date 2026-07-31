@@ -80,8 +80,11 @@ internal unsafe partial class SpatialRTree<TStore>
             // Propagate split upward
             PropagateSplit(fullLeafChunkId, rightChunkId, ref path, ref accessor, changeSet);
 
-            _entityCount++;
-            _mutationVersion++;
+            // ST-04: atomics, not plain ++. Inserts are not globally serialized — they take per-node OLC write latches and release them before this bump, so two
+            // threads splitting different leaves reach here concurrently. A plain read-modify-write racing the Interlocked.Increment on the no-split path
+            // (Insert.cs) loses updates in both directions; the drifted count then reaches disk via SyncMetadata below and survives restart (#584).
+            Interlocked.Increment(ref _entityCount);
+            Interlocked.Increment(ref _mutationVersion);
             SyncMetadata(ref accessor);
             splitScope.LeftCount = (byte)Math.Min(splitPos, byte.MaxValue);
             splitScope.RightCount = (byte)Math.Min(rightCount, byte.MaxValue);
