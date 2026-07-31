@@ -21,7 +21,17 @@ public static class ProfilerLauncher
     /// Holds the in-process CPU sampler for the current profiling session, or <c>null</c> when none is running. Managed by
     /// <see cref="StartCpuSampler"/> / <see cref="StopCpuSampler"/>.
     /// </summary>
-    private static CpuSamplerSession CpuSampler;
+    private static Typhon.Engine.Profiler.ICpuSamplerSession CpuSampler;
+
+    /// <summary>
+    /// Parses a <c>.nettrace</c> capture through the registered diagnostics provider, or returns <see cref="ParsedCpuSamples.Empty"/> when none is
+    /// registered. The parser needs TraceEvent's Etlx/EventPipe readers, which is why it lives in the optional Typhon.Diagnostics assembly (#409).
+    /// </summary>
+    private static ParsedCpuSamples ParseCpuSamples(string netTracePath)
+    {
+        var parse = DiagnosticsProviderHooks.CpuSampleParse;
+        return parse == null ? ParsedCpuSamples.Empty : parse(netTracePath);
+    }
 
     /// <summary>
     /// The <see cref="FileExporter"/>(s) built by the most recent <see cref="CreateExporters"/> call. <see cref="StopCpuSampler"/> hands them the parsed
@@ -130,7 +140,18 @@ public static class ProfilerLauncher
             return 0;
         }
 
-        CpuSampler = new CpuSamplerSession();
+        // #409: the EventPipe sampler lives in the optional Typhon.Diagnostics assembly (its diagnostics client is AOT-hostile). A host that has not
+        // referenced it and called TyphonDiagnostics.Enable() gets the same graceful skip as any other unavailable sampling precondition above.
+        var samplerFactory = Typhon.Engine.Profiler.TyphonDiagnosticsHooks.CpuSamplerFactory;
+        if (samplerFactory == null)
+        {
+            Console.Error.WriteLine(
+                "[Typhon] CpuSampler: CpuSampling is enabled but no CPU-sampling provider is registered; CPU sampling skipped. Reference the "
+                + "Typhon.Diagnostics assembly and call TyphonDiagnostics.Enable() at start-up to enable it (not available in Native AOT builds).");
+            return 0;
+        }
+
+        CpuSampler = samplerFactory();
         CpuSampler.Start(config.TraceFilePath);
         return CpuSampler.SamplingSessionStartQpc;
     }
@@ -159,7 +180,7 @@ public static class ProfilerLauncher
         {
             // Dispose stops the EventPipe session and finalizes the .nettrace on disk; the path stays readable afterwards.
             sampler.Dispose();
-            return string.IsNullOrEmpty(netTracePath) || !File.Exists(netTracePath) ? ParsedCpuSamples.Empty : CpuSampleParser.Parse(netTracePath);
+            return string.IsNullOrEmpty(netTracePath) || !File.Exists(netTracePath) ? ParsedCpuSamples.Empty : ParseCpuSamples(netTracePath);
         });
     }
 
@@ -215,7 +236,7 @@ public static class ProfilerLauncher
             {
                 if (!string.IsNullOrEmpty(netTracePath) && File.Exists(netTracePath))
                 {
-                    parsed = CpuSampleParser.Parse(netTracePath);
+                    parsed = ParseCpuSamples(netTracePath);
                 }
             }
             catch (Exception ex)

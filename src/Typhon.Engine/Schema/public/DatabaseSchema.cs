@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics.CodeAnalysis;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -155,6 +156,10 @@ public static class DatabaseSchema
     /// <param name="path">Path to the database file.</param>
     /// <param name="configure">Action that registers components and migrations on the registrar.</param>
     /// <returns>An <see cref="EvolutionValidationResult"/> with per-component diff results.</returns>
+    [RequiresUnreferencedCode(
+        "Reflects over component types collected at runtime through ISchemaRegistrar to preview a schema diff, so the trimmer cannot know which types' "
+        + "fields to preserve. This is an offline tooling/diagnostic API (the `typhon` CLI schema commands); it is not part of opening or running a "
+        + "database and is never reached by an embedded engine.")]
     public static EvolutionValidationResult ValidateEvolution(string path, Action<ISchemaRegistrar> configure)
     {
         var (databaseName, directory) = ResolvePath(path);

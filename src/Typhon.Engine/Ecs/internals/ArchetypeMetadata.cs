@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using Typhon.Schema.Definition;
 
@@ -69,6 +70,11 @@ internal class ArchetypeMetadata
     // ═══════════════════════════════════════════════════════════════════════
 
     /// <summary>[slotIndex] → CLR Type of the component at this slot. Length == ComponentCount.</summary>
+    /// <remarks>
+    /// <c>ArchetypeRegistry.BuildCascadeGraph</c> reflects over these types' fields to discover <c>EntityLink&lt;T&gt;</c> cascade edges.
+    /// <see cref="DynamicallyAccessedMembersAttribute"/> cannot be applied here — it is only valid on fields of type <see cref="Type"/> or
+    /// <see cref="string"/>, not <c>Type[]</c> (IL2097) — so the requirement is documented and suppressed at the reflection site instead. #409
+    /// </remarks>
     internal Type[] _slotToComponentType;
 
     /// <summary>Cached entity record size: 14 + ComponentCount * 4 bytes (legacy), or 19 bytes (cluster).</summary>

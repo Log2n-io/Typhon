@@ -43,6 +43,9 @@
 
     <ItemGroup>
         <ProjectReference Include="..\..\src\Typhon.Engine\Typhon.Engine.csproj" />
+        <!-- #409: the ETW / EventPipe profiling providers now live in their own assembly so the engine carries no AOT-hostile packages.
+             Their tests still exercise them directly, hence this reference. -->
+        <ProjectReference Include="..\..\src\Typhon.Diagnostics\Typhon.Diagnostics.csproj" />
         <ProjectReference Include="..\..\src\Typhon.Profiler\Typhon.Profiler.csproj" />
         <!-- Direct ref (#427): Protocol ships bundled inside the Typhon package (TickDeltaMessage), no longer transitive. -->
         <ProjectReference Include="..\..\src\Typhon.Protocol\Typhon.Protocol.csproj" />

@@ -16,6 +16,7 @@
         <Project Path="src/Typhon.Shell/Typhon.Shell.csproj" />
         <Project Path="src/Typhon.Shell.Extensibility/Typhon.Shell.Extensibility.csproj" />
         <Project Path="src/Typhon.Profiler/Typhon.Profiler.csproj" />
+        <Project Path="src/Typhon.Diagnostics/Typhon.Diagnostics.csproj" />
     </Folder>
     <Folder Name="/test/">
         <Project Path="test/Typhon.Analyzers.Tests/Typhon.Analyzers.Tests.csproj" />

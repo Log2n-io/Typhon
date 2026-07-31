@@ -1,0 +1,47 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+    <!--
+        Typhon.Diagnostics — the opt-in, reflection-heavy profiling providers, deliberately kept OUT of Typhon.Engine (#409).
+
+        The engine is Native-AOT-clean. Two profiling features are not, and never can be:
+          • EtwSchedulingPump   — Windows kernel context-switch tracing via Microsoft.Diagnostics.Tracing.TraceEvent (ETW manifest reflection).
+          • CpuSamplerSession   — in-process EventPipe CPU sampling via Microsoft.Diagnostics.NETCore.Client, plus the .nettrace transcode/symbolication
+            + CpuSampleParser     in TraceEvent's Etlx/EventPipe readers.
+
+        Neither package is annotated with Requires*/DAM, so the IL analyzers are BLIND to them — a green analyzer build on an engine that referenced them
+        would have been a false negative. Isolating them here is what makes the engine's AOT posture real rather than merely unwarned.
+
+        Wiring: an application that wants these features references this assembly and calls TyphonDiagnostics.Enable(). Everything else — including every
+        Native AOT build — never pulls the packages into its graph. The engine treats an unregistered provider exactly as it already treated "the OS said
+        no": a stderr note, and profiling continues without that data source.
+
+        Not packable: the `Typhon` NuGet package stays AOT-clean by construction. This ships (if ever) as its own package.
+    -->
+    <PropertyGroup>
+        <TargetFramework>net10.0</TargetFramework>
+        <LangVersion>default</LangVersion>
+        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+        <Nullable>disable</Nullable>
+        <GenerateDocumentationFile>true</GenerateDocumentationFile>
+        <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+        <!-- The types moved here keep their original `Typhon.Engine.Internals` namespace and internal accessibility; they reach engine internals through
+             the InternalsVisibleTo("Typhon.Diagnostics") friend declaration in the engine's AssemblyInfo.cs. CS1591 is off because none of this is public
+             API surface that the published reference documents. -->
+        <NoWarn>$(NoWarn);CS1591</NoWarn>
+        <IsPackable>false</IsPackable>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="..\Typhon.Engine\Typhon.Engine.csproj" />
+        <!-- Schema.Definition and Profiler are PrivateAssets="all" on the engine, so they do not flow transitively (#427) — reference directly. -->
+        <ProjectReference Include="..\Typhon.Profiler\Typhon.Profiler.csproj" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <!-- The two AOT-hostile packages. This project is the ONLY place in the solution that references them. -->
+        <PackageReference Include="Microsoft.Diagnostics.Tracing.TraceEvent" Version="3.2.4" />
+        <PackageReference Include="Microsoft.Diagnostics.NETCore.Client" Version="0.2.661903" />
+        <PackageReference Include="JetBrains.Annotations" Version="2026.2.0" PrivateAssets="all" />
+    </ItemGroup>
+
+</Project>

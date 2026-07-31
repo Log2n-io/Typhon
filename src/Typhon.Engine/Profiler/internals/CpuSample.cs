@@ -3,7 +3,7 @@ using Typhon.Profiler;
 namespace Typhon.Engine.Internals;
 
 /// <summary>
-/// One <i>interned</i> frame symbol produced by <see cref="CpuSampleParser"/>. The parser resolves and de-duplicates frames as it walks the
+/// One <i>interned</i> frame symbol produced by <c>CpuSampleParser</c> (Typhon.Diagnostics). The parser resolves and de-duplicates frames as it walks the
 /// <c>.nettrace</c>, so a frame appears once here regardless of how many sampled stacks reference it; stacks reference it by its index in
 /// <see cref="ParsedCpuSamples.Frames"/>. BCL / native / dynamically-generated frames have no local PDB and resolve name-only —
 /// <see cref="FilePath"/> is then null (the <c>siteId = 0</c> equivalent: the frame still renders, it just has no "Open in editor").
@@ -28,7 +28,7 @@ internal readonly struct ParsedCpuFrame
 }
 
 /// <summary>
-/// The <i>already-interned</i> CPU-sample batch produced by <see cref="CpuSampleParser"/> (#351 Phase 2). Parsing interns directly: each unique
+/// The <i>already-interned</i> CPU-sample batch produced by <c>CpuSampleParser</c> (Typhon.Diagnostics) (#351 Phase 2). Parsing interns directly: each unique
 /// call stack (keyed on the TraceLog <c>CallStackIndex</c>) and each unique frame (keyed on the TraceLog <c>CodeAddressIndex</c>) is resolved once,
 /// so memory is <c>O(uniqueStacks + uniqueFrames + samples)</c> — never the <c>O(samples × depth)</c> blow-up of materialising one resolved-frame
 /// array per sample. A real session is millions of samples but only thousands of unique stacks / hundreds of unique frames.

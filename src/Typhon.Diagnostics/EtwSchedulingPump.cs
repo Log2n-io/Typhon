@@ -44,7 +44,7 @@ namespace Typhon.Engine.Internals;
 /// returns on Windows via <c>GetTimestamp()</c>. Slice-start QPC values cross-walk directly into the trace's time space — no scaling, no offset.
 /// </para>
 /// </remarks>
-internal sealed class EtwSchedulingPump : IDisposable
+internal sealed class EtwSchedulingPump : Typhon.Engine.Profiler.ISchedulingPump
 {
     /// <summary>Per-OS-thread slice tracking state held by the pump callbacks. Mutated only from the single Process() pump thread, so no sync needed.
     /// <c>internal</c> rather than <c>private</c> so <see cref="IsStaleEntry"/> can be exercised by unit tests.</summary>

@@ -49,6 +49,22 @@ public abstract class ChunkedCallbackSystem : CallbackSystem
     /// fan out). Single-threaded by construction: exactly one worker decrements the last dependency to zero and runs Prepare.
     /// </summary>
     internal virtual int OnPrepare() => -1;
+
+    /// <summary>
+    /// Startup-validation hook: reports whether this system declares a typed ambient context that the runtime must bind before Start. Non-generic chunked
+    /// systems declare none, so validation is a no-op for them. Overridden by <see cref="ChunkedCallbackSystem{TContext}"/>.
+    ///
+    /// <para>This replaces a <c>GetProperty("Context", NonPublic)</c> + <c>GetValue</c> reflection probe in <c>DagScheduler.ValidateContextBindings</c>
+    /// (#409). Beyond being trim/AOT-safe, a virtual call is strictly cheaper than walking the base-type chain and doing a reflective member read per
+    /// registered system at startup.</para>
+    /// </summary>
+    /// <param name="contextType">The declared context type when <see langword="true"/> is returned; otherwise <see langword="null"/>.</param>
+    /// <returns><see langword="true"/> when a context is declared but not yet bound.</returns>
+    internal virtual bool HasUnboundContext(out Type contextType)
+    {
+        contextType = null;
+        return false;
+    }
 }
 
 /// <summary>
@@ -68,6 +84,13 @@ public abstract class ChunkedCallbackSystem<TContext> : ChunkedCallbackSystem wh
     protected TContext Context { get; private set; }
 
     internal void BindContext(TContext ctx) => Context = ctx;
+
+    /// <inheritdoc/>
+    internal override bool HasUnboundContext(out Type contextType)
+    {
+        contextType = typeof(TContext);
+        return Context == null;
+    }
     internal void SetShouldRunLambda(Func<TContext, bool> p) => _shouldRunLambda = p;
     internal void SetPrepareLambda(Func<TContext, int> p) => _prepareLambda = p;
 

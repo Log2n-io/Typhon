@@ -661,21 +661,13 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                 continue;
             }
 
-            var type = instance.GetType();
-            while (type != null && type != typeof(object))
+            // Virtual dispatch, not reflection: ChunkedCallbackSystem<TContext> overrides HasUnboundContext to report typeof(TContext) — statically known
+            // per instantiation, so the trimmer and ILC can see it. The previous base-type walk + GetProperty("Context", NonPublic) + GetValue was the
+            // engine's only private-member reflection probe and an IL2075 blocker (#409).
+            if (instance is ChunkedCallbackSystem chunked && chunked.HasUnboundContext(out var ctxType))
             {
-                if (type.IsGenericType && type.GetGenericTypeDefinition() == typeof(ChunkedCallbackSystem<>))
-                {
-                    var ctxProp = type.GetProperty("Context", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
-                    if (ctxProp != null && ctxProp.GetValue(instance) == null)
-                    {
-                        var ctxType = type.GetGenericArguments()[0];
-                        throw new InvalidOperationException(
-                            $"System '{Systems[i].Name}' derives from ChunkedCallbackSystem<{ctxType.Name}> but no RegisterContext<{ctxType.Name}>(...) call was made.");
-                    }
-                    break;
-                }
-                type = type.BaseType;
+                throw new InvalidOperationException(
+                    $"System '{Systems[i].Name}' derives from ChunkedCallbackSystem<{ctxType.Name}> but no RegisterContext<{ctxType.Name}>(...) call was made.");
             }
         }
     }

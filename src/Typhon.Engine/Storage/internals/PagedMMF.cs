@@ -7,6 +7,7 @@ using JetBrains.Annotations;
 using Microsoft.Extensions.Logging;
 using Microsoft.Win32.SafeHandles;
 using System;
+using System.Buffers;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -517,13 +518,19 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         // Write new lock file
         try
         {
-            var lockContent = JsonSerializer.Serialize(new
+            // Written with Utf8JsonWriter rather than JsonSerializer.Serialize(anonymous type): the reflection-based serializer is both
+            // RequiresUnreferencedCode and RequiresDynamicCode, which would make the whole engine non-AOT for a three-field advisory file (#409).
+            // Utf8JsonWriter is reflection-free, still escapes correctly (machine names may contain non-ASCII), and allocates less.
+            var buffer = new ArrayBufferWriter<byte>(128);
+            using (var writer = new Utf8JsonWriter(buffer))
             {
-                pid = Environment.ProcessId,
-                startedAt = DateTimeOffset.UtcNow.ToString("o"),
-                machineName = Environment.MachineName
-            });
-            File.WriteAllText(_lockFilePath, lockContent);
+                writer.WriteStartObject();
+                writer.WriteNumber("pid"u8, Environment.ProcessId);
+                writer.WriteString("startedAt"u8, DateTimeOffset.UtcNow.ToString("o"));
+                writer.WriteString("machineName"u8, Environment.MachineName);
+                writer.WriteEndObject();
+            }
+            File.WriteAllBytes(_lockFilePath, buffer.WrittenSpan);
         }
         catch (Exception ex)
         {

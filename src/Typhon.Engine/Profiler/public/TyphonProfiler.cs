@@ -38,7 +38,7 @@ public static class TyphonProfiler
     private static Thread[] ExporterThreads;
     private static CancellationTokenSource ExporterCts;
     private static GcTracingHost GcTracing;
-    private static EtwSchedulingPump EtwSchedulingPumpInstance;
+    private static Typhon.Engine.Profiler.ISchedulingPump EtwSchedulingPumpInstance;
     private static bool Running;
 
     // Process-exit safety net — fields are non-null while hooks are wired (Running == true). Both invoke Stop()
@@ -181,8 +181,20 @@ public static class TyphonProfiler
             // a stderr warning on non-Windows or when the NT Kernel Logger can't be opened (insufficient privileges or another tool owns it).
             if (TelemetryConfig.RuntimeThreadSchedulingActive)
             {
-                EtwSchedulingPumpInstance = new EtwSchedulingPump();
-                EtwSchedulingPumpInstance.Start();
+                // #409: the ETW pump lives in the optional Typhon.Diagnostics assembly (TraceEvent is AOT-hostile). An unregistered provider is
+                // reported and skipped, exactly as the pump itself already did on non-Windows or without the NT Kernel Logger privileges.
+                var pumpFactory = Typhon.Engine.Profiler.TyphonDiagnosticsHooks.SchedulingPumpFactory;
+                if (pumpFactory == null)
+                {
+                    Console.Error.WriteLine(
+                        "[Typhon] ThreadScheduling: no OS scheduling provider is registered; thread-scheduling tracing skipped. Reference the "
+                        + "Typhon.Diagnostics assembly and call TyphonDiagnostics.Enable() at start-up to enable it (not available in Native AOT builds).");
+                }
+                else
+                {
+                    EtwSchedulingPumpInstance = pumpFactory();
+                    EtwSchedulingPumpInstance.Start();
+                }
             }
 
             // Snapshot the host's bootstrap thread id so AssignClaim can tag its slot with ThreadKind.Main.
@@ -293,7 +305,7 @@ public static class TyphonProfiler
         CancellationTokenSource ctsToCancel;
         List<IProfilerExporter> exportersToFlush;
         GcTracingHost gcTracingToDispose;
-        EtwSchedulingPump etwPumpToDispose;
+        Typhon.Engine.Profiler.ISchedulingPump etwPumpToDispose;
 
         lock (LifecycleLock)
         {

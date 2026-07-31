@@ -1,4 +1,5 @@
 using System;
+using System.Runtime.CompilerServices;
 using System.Collections.Generic;
 using System.Linq.Expressions;
 
@@ -218,7 +219,18 @@ internal static class ExpressionParser
             }
         }
 
-        // Fallback: compile and invoke (handles complex nested expressions)
+        // Fallback: compile and invoke (handles complex nested expressions). Expression.Lambda(...).Compile() is RequiresDynamicCode; the
+        // RuntimeFeature.IsDynamicCodeSupported guard is a recognised FeatureGuard, so ILC silences IL3050 and drops the branch from native builds, while
+        // the JIT folds it to a constant on CoreCLR. The two fast paths above (literal constant, closure-captured field/property) already cover every
+        // predicate shape the engine's own tests and samples produce; this only catches arbitrary computed sub-expressions. #409
+        if (!RuntimeFeature.IsDynamicCodeSupported)
+        {
+            throw new NotSupportedException(
+                $"The query predicate contains a constant sub-expression of a shape this build cannot evaluate without runtime code generation: '{expr}'. "
+                + "Native AOT builds support literal constants and captured local variables/fields directly — hoist the computed value into a local "
+                + "before the predicate (e.g. `var limit = a + b;` then `x => x.Field > limit`).");
+        }
+
         return Expression.Lambda(expr).Compile().DynamicInvoke();
     }
 

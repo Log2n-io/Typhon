@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Reflection;
 using System.Reflection.Metadata;
@@ -67,6 +68,10 @@ internal static class SystemSourceResolver
     /// <c>Execute</c> override. Walking the type hierarchy starting at the runtime instance type lets the user click into the override body — e.g.
     /// <c>AntUpdateSystem.Execute</c> at line 53 — instead of the lambda created at the registration call site in <c>RuntimeSchedule</c>.
     /// </summary>
+    [UnconditionalSuppressMessage("Trimming", "IL2075:'this' argument does not satisfy 'DynamicallyAccessedMembersAttribute' in call to target method",
+        Justification = "A null MethodInfo is an expected, handled result. Annotating ISystem with DynamicallyAccessedMembers would force every user "
+            + "system type's full method table to be preserved in trimmed/AOT builds purely so the profiler can display a source line — a real size cost "
+            + "for a diagnostic nicety. When the trimmer removes the metadata, GetMethod returns null and the system simply has no Source row (#409).")]
     public static (string FilePath, int Line, string MethodName)? ResolveOverride(ISystem systemInstance, string methodName)
     {
         if (systemInstance == null || string.IsNullOrEmpty(methodName))
@@ -105,7 +110,24 @@ internal static class SystemSourceResolver
 
     private static (string FilePath, int Line, string MethodName)? ResolveMethod(MethodInfo method)
     {
-        var core = ResolveCore(method.Module, method.MetadataToken, -1);
+        int token;
+        try
+        {
+            token = method.MetadataToken;
+        }
+        catch (InvalidOperationException)
+        {
+            // Native AOT: "There is no metadata token available for the given member." The IL metadata tokens this resolver maps to PDB sequence points
+            // simply do not exist in a natively-compiled image — reflection returns a synthesized MethodInfo with no token. This is NOT a trim/AOT analyzer
+            // finding (MetadataToken carries no Requires*/DAM annotation, so the analyzers are silent about it); it surfaced only by running the published
+            // binary, and it was a hard crash on the MAINLINE TyphonRuntime.Create path, not a degraded profiler feature. #409
+            //
+            // Source attribution is best-effort by contract — an assembly with no PDB already lands here — so returning null restores the documented
+            // behaviour: the system has no Source row. Caught narrowly rather than with a blanket catch so a genuine PDB bug still surfaces.
+            return null;
+        }
+
+        var core = ResolveCore(method.Module, token, -1);
         if (!core.HasValue)
         {
             return null;
@@ -204,9 +226,17 @@ internal static class SystemSourceResolver
         }
     }
 
+    [UnconditionalSuppressMessage("SingleFile", "IL3000:Avoid accessing Assembly file path when publishing as a single file",
+        Justification = "Empty is an expected, handled result. Assembly.Location returns \"\" under single-file/Native AOT; the code then tries "
+            + "Module.FullyQualifiedName, then the filesystem search, and finally returns NoSequencePoints — the same graceful degradation as an "
+            + "assembly shipped without a PDB. Source attribution is a best-effort profiler nicety, never a correctness dependency (#409).")]
+    [UnconditionalSuppressMessage("SingleFile", "IL3002:Avoid calling members annotated with 'RequiresAssemblyFilesAttribute' when publishing as a single file",
+        Justification = "Module.FullyQualifiedName returns \"<Unknown>\" under single-file/Native AOT, which fails the File.Exists guard below and falls "
+            + "through to the graceful no-source path. See the IL3000 justification.")]
     private static MetadataReaderProvider OpenPdb(Module module)
     {
         // Fast path: standard dotnet hosts publish a real path via Assembly.Location or Module.FullyQualifiedName. Try those first.
+        // Under single-file / Native AOT both are unavailable by design — see the suppressions above; the resolver degrades to "no source row".
         var asmPath = module.Assembly.Location;
         if (string.IsNullOrEmpty(asmPath) || !File.Exists(asmPath))
         {

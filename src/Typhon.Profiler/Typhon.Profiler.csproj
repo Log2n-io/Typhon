@@ -11,7 +11,10 @@
         <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
         <!-- Ships bundled inside the `Typhon` package (#427); never packed standalone. -->
         <IsPackable>false</IsPackable>
-    </PropertyGroup>
+            <!-- #409: the AOT/trim/single-file analyzers run on every build and the zero-warning policy above promotes any regression to a build ERROR.
+             This is the lock-in for Native AOT compatibility: it cannot silently rot. -->
+        <IsAotCompatible>true</IsAotCompatible>
+</PropertyGroup>
 
     <ItemGroup>
         <PackageReference Include="K4os.Compression.LZ4" Version="1.3.8" />

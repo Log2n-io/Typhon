@@ -1,0 +1,55 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+    <!--
+        Typhon.Aot.Demo — the #409 Native AOT proof. ONE program, published two ways (JIT and native), running the SAME full-stack workload so the two can
+        be compared directly:
+
+            JIT   : dotnet run     -c Release (this project), passing a "json" argument to emit machine-readable results
+            NATIVE: dotnet publish -c Release -r win-x64 (this project), then run the produced Typhon.Aot.Demo.exe the same way
+
+        See scripts/aot-compare.ps1 for the exact command lines (MSBuild XML comments cannot contain a double hyphen).
+
+        It is deliberately shaped like a REAL consumer, not a smoke test: it references the canonical SWG sample schema as a compiled assembly plus the
+        consumer source generator, exactly as an application referencing the published `Typhon` package would. That shape is the whole claim — "the engine
+        is AOT-compatible for an app that references its schema types at compile time" — so the demo has to exercise it, not simulate it.
+
+        Covered: schema registration through the generated [ModuleInitializer] barrier, engine open, MVCC + SingleVersion writes, WAL group commit,
+        rollback, snapshot isolation, indexed queries (WhereField), scans, spatial queries, read-your-own-writes over pending spawns, a multi-system DAG
+        tick loop, entity destruction, and close/reopen durability verification.
+    -->
+    <PropertyGroup>
+        <OutputType>Exe</OutputType>
+        <TargetFramework>net10.0</TargetFramework>
+        <LangVersion>default</LangVersion>
+        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+        <Nullable>disable</Nullable>
+        <RootNamespace>Typhon.Aot.Demo</RootNamespace>
+        <AssemblyName>Typhon.Aot.Demo</AssemblyName>
+        <IsPackable>false</IsPackable>
+
+        <!-- PublishAot MUST be csproj-local. Passing -p:PublishAot=true globally leaks the property into the netstandard2.0 analyzer/generator project
+             references and fails the build with NETSDK1207 (see claude/research/AotReadiness.md §1). -->
+        <PublishAot>true</PublishAot>
+        <InvariantGlobalization>true</InvariantGlobalization>
+        <!-- Surface every trim/AOT warning from the whole closure at publish time, including the ones the per-project analyzers cannot see. -->
+        <TrimmerSingleWarn>false</TrimmerSingleWarn>
+        <SuppressTrimAnalysisWarnings>false</SuppressTrimAnalysisWarnings>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <!-- The consumer shape: schema assembly + engine (transitively) + the consumer generator that emits the archetype accessors and the registrar. -->
+        <ProjectReference Include="..\Typhon.Samples.Swg\Typhon.Samples.Swg.csproj" />
+        <ProjectReference Include="..\..\src\Typhon.Schema.Definition\Typhon.Schema.Definition.csproj" />
+        <ProjectReference Include="..\..\src\Typhon.Generators.Consumer\Typhon.Generators.Consumer.csproj"
+                          ReferenceOutputAssembly="false" OutputItemType="Analyzer" />
+        <ProjectReference Include="..\..\src\Typhon.Analyzers\Typhon.Analyzers.csproj"
+                          ReferenceOutputAssembly="false" OutputItemType="Analyzer" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <!-- The tick systems are the guide's REAL systems, compiled in by link rather than copied: if the engine's system API changes under AOT, this
+             demo breaks in the same way a user's code would. Duplicating them would have hidden exactly the kind of drift the demo exists to catch. -->
+        <Compile Include="..\..\doc\guide\example\Systems.cs" Link="Systems.cs" />
+    </ItemGroup>
+
+</Project>

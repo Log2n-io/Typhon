@@ -2,6 +2,7 @@
 
 using JetBrains.Annotations;
 using Microsoft.Extensions.Configuration;
+using System;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Runtime.CompilerServices;
@@ -123,19 +124,18 @@ public static partial class TelemetryConfig
             loadedPath = currentDirPath;
         }
 
-        // 2. Look for config file next to the assembly (fallback)
-        var assemblyLocation = typeof(TelemetryConfig).Assembly.Location;
-        if (!string.IsNullOrEmpty(assemblyLocation))
+        // 2. Look for config file next to the application binary (fallback).
+        // AppContext.BaseDirectory rather than Assembly.Location: the latter returns "" for a single-file or Native-AOT
+        // publish, silently disabling this fallback exactly where it matters most (#409). BaseDirectory is the app
+        // directory in every host shape, which is what "ship typhon.telemetry.json beside the app" has always meant.
+        var baseDir = AppContext.BaseDirectory;
+        if (!string.IsNullOrEmpty(baseDir))
         {
-            var assemblyDir = Path.GetDirectoryName(assemblyLocation);
-            if (!string.IsNullOrEmpty(assemblyDir))
+            var assemblyConfigPath = Path.Combine(baseDir, "typhon.telemetry.json");
+            if (File.Exists(assemblyConfigPath) && assemblyConfigPath != currentDirPath)
             {
-                var assemblyConfigPath = Path.Combine(assemblyDir, "typhon.telemetry.json");
-                if (File.Exists(assemblyConfigPath) && assemblyConfigPath != currentDirPath)
-                {
-                    builder.AddJsonFile(assemblyConfigPath, true, false);
-                    loadedPath ??= assemblyConfigPath;
-                }
+                builder.AddJsonFile(assemblyConfigPath, true, false);
+                loadedPath ??= assemblyConfigPath;
             }
         }
 

@@ -1,5 +1,6 @@
 ﻿using JetBrains.Annotations;
 using Microsoft.Extensions.Logging;
+using System.Diagnostics.CodeAnalysis;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -1472,7 +1473,19 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// because the generated registrar lives in the consumer's own assembly and cannot reach engine internals.
     /// </summary>
     /// <param name="archetypeType">The <c>[Archetype]</c> class type to finalize.</param>
+    [RequiresUnreferencedCode(
+        "Finalizes an archetype whose CLR type is known only at runtime; the trimmer cannot prove its static constructor survives (IL2059). Intended for "
+        + "hosts that load schema assemblies dynamically. Compile-time-known archetypes — which is what the generated [ModuleInitializer] barrier emits — "
+        + "use RegisterArchetype<TArchetype>() instead.")]
     public static void RegisterArchetype(Type archetypeType) => ArchetypeRegistry.EnsureFinalized(archetypeType, fromBarrier: true);
+
+    /// <summary>
+    /// Statically-typed archetype registration — the AOT-safe form emitted by the generated <c>[ModuleInitializer]</c> barrier. Identical semantics to
+    /// <see cref="RegisterArchetype(Type)"/>, but because <typeparamref name="TArchetype"/> is known at compile time the trimmer and ILC can prove the
+    /// archetype's static constructor (its <c>Comp&lt;T&gt;</c> declarations) is preserved. #409
+    /// </summary>
+    /// <typeparam name="TArchetype">The <c>[Archetype]</c> class type to finalize.</typeparam>
+    public static void RegisterArchetype<TArchetype>() => ArchetypeRegistry.EnsureFinalized<TArchetype>(fromBarrier: true);
 
     internal VariableSizedBufferSegment<T, PersistentStore> GetComponentCollectionVSBS<T>() where T : unmanaged => GetComponentCollectionVSBS<T>(null);
 
@@ -1489,12 +1502,27 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         }
 
         // Fallback for component types without a source-generated schema provider — constructs the closed generic reflectively (not AOT-safe; see attribute).
+        // The RuntimeFeature.IsDynamicCodeSupported guard is a recognised [FeatureGuard(typeof(RequiresDynamicCodeAttribute))], so ILC both silences IL3050
+        // here and drops the branch entirely from a native build; on CoreCLR the JIT folds the property to a constant, so the check costs nothing. #409
+        if (!RuntimeFeature.IsDynamicCodeSupported)
+        {
+            throw new NotSupportedException(
+                $"Component type '{itemType.FullName}' declares a ComponentCollection field but has no source-generated schema provider, and this build "
+                + "cannot construct one reflectively (Native AOT / dynamic code disabled). Ensure the component's assembly references the Typhon consumer "
+                + "source generator so its [ModuleInitializer] registers an AOT-safe collection factory.");
+        }
+
         return CreateComponentCollectionVsbsReflective(itemType, changeSet);
     }
 
     [System.Diagnostics.CodeAnalysis.RequiresDynamicCode(
         "Constructs VariableSizedBufferSegment<T, PersistentStore> via MakeGenericType for a runtime element type. Only reached for component types without a "
         + "source-generated schema provider; generated components register an AOT-safe factory via RegisterComponentCollectionFactory<T>().")]
+    [System.Diagnostics.CodeAnalysis.UnconditionalSuppressMessage("Trimming", "IL2071:Target generic argument does not satisfy DynamicallyAccessedMembers",
+        Justification = "Reachable only behind a RuntimeFeature.IsDynamicCodeSupported guard in the sole caller, i.e. never in a trimmed or Native-AOT "
+            + "application — in that configuration the caller throws before reaching here and ILC drops this branch. Annotating the GetOrAdd lambda's "
+            + "parameter is not expressible, and propagating DAM would push a PublicParameterlessConstructor requirement onto every component type for a "
+            + "path that AOT builds never take. #409")]
     private VariableSizedBufferSegmentBase<PersistentStore> CreateComponentCollectionVsbsReflective(Type itemType, ChangeSet changeSet) =>
         _componentCollectionVSBSByType.GetOrAdd(itemType,
             type =>
@@ -2255,12 +2283,26 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// <exception cref="ArgumentNullException"><paramref name="componentType"/> is null.</exception>
     /// <exception cref="ArgumentException"><paramref name="componentType"/> is not a closed value type.</exception>
     /// <seealso cref="RegisterComponentFromAccessor{T}"/>
+    [RequiresUnreferencedCode(
+        "Specializes RegisterComponentFromAccessor<T> over a runtime Type, so the trimmer cannot know which instantiation to keep. Compile-time-known "
+        + "components should call RegisterComponentFromAccessor<T>() directly; this overload exists for hosts that load schema assemblies dynamically.")]
     public bool RegisterComponentByType(Type componentType, ChangeSet changeSet = null, SchemaValidationMode schemaValidation = SchemaValidationMode.Enforce)
     {
         ArgumentNullException.ThrowIfNull(componentType);
         if (!componentType.IsValueType || componentType.IsGenericTypeDefinition)
         {
             throw new ArgumentException($"Component type must be a closed unmanaged value type: {componentType.FullName}", nameof(componentType));
+        }
+
+        // MakeGenericMethod over a value type throws under Native AOT unless that exact instantiation was statically rooted, which by construction it was
+        // not. Fail with an actionable message instead of a runtime MissingRuntimeArtifact deep inside reflection. The guard is a recognised FeatureGuard,
+        // so ILC also removes the reflective tail below from native builds. #409
+        if (!RuntimeFeature.IsDynamicCodeSupported)
+        {
+            throw new NotSupportedException(
+                $"RegisterComponentByType('{componentType.FullName}') requires runtime code generation and is unavailable in a Native AOT build. Call the "
+                + "generic RegisterComponentFromAccessor<T>() with a compile-time-known component type instead — the generated [ModuleInitializer] barrier "
+                + "does this for every [Component] in a referenced schema assembly.");
         }
 
         var method = typeof(DatabaseEngine).GetMethod(nameof(RegisterComponentFromAccessor), BindingFlags.Instance | BindingFlags.Public)
@@ -2292,7 +2334,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// <param name="schemaValidation">How a persisted schema is reconciled with the runtime type; default <see cref="SchemaValidationMode.Enforce"/>.</param>
     /// <returns><see langword="true"/> on success; <see langword="false"/> when the component definition could not be built.</returns>
     /// <exception cref="InvalidOperationException">A Transient component declares a <c>ComponentCollection</c> field.</exception>
-    public bool RegisterComponentFromAccessor<T>(ChangeSet changeSet = null, SchemaValidationMode schemaValidation = SchemaValidationMode.Enforce)
+    public bool RegisterComponentFromAccessor<
+        [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicFields | DynamicallyAccessedMemberTypes.NonPublicFields)] T>(
+        ChangeSet changeSet = null, SchemaValidationMode schemaValidation = SchemaValidationMode.Enforce)
         where T : unmanaged
     {
         // Track this component Type for the registry lifecycle pairing in Dispose. Adding even on early-return / failure branches below is safe:

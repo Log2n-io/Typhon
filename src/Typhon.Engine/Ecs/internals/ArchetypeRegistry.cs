@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Concurrent;
+using System.Diagnostics.CodeAnalysis;
 using System.Collections.Generic;
 using System.Reflection;
 using System.Runtime.CompilerServices;
@@ -176,7 +177,42 @@ internal static class ArchetypeRegistry
     }
 
     /// <summary>
+    /// Statically-typed entry point — the AOT-safe one, and the mainline. <c>typeof(TArchetype)</c> is known at compile time for every instantiation, so
+    /// <see cref="RuntimeHelpers.RunClassConstructor"/> is statically analysable and the trimmer/ILC can prove the static constructor is preserved. The
+    /// <see cref="Type"/>-based overload cannot make that proof (IL2059 — and per the DAM documentation, <b>no</b> <c>DynamicallyAccessedMemberTypes</c>
+    /// value preserves a static constructor, so annotation is not an option; making the type statically known is the only fix). #409
+    ///
+    /// <para>Used by the generated <c>[ModuleInitializer]</c> barrier and by <c>Archetype&lt;TSelf&gt;</c>; between them they cover every path an
+    /// AOT-published application takes.</para>
+    /// </summary>
+    /// <typeparam name="TArchetype">The archetype CLR type to finalize.</typeparam>
+    /// <param name="fromBarrier">See the <see cref="Type"/>-based overload.</param>
+    [UnconditionalSuppressMessage("Trimming", "IL2059:Unrecognized value passed to the parameter 'type' of method 'RuntimeHelpers.RunClassConstructor'",
+        Justification = "typeof(TArchetype) IS statically known at every instantiation — that is the entire point of this overload — but the Roslyn trim "
+            + "analyser evaluates the open generic method body once and cannot see through the instantiation, so it reports the type as unrecognised. ILC "
+            + "compiles the concrete instantiation and roots TArchetype, and a kept type's static constructor is never stripped. #409")]
+    internal static void EnsureFinalized<TArchetype>(bool fromBarrier = false)
+    {
+        // Serialise with concurrent registration/freeze. Reentrant: RunClassConstructor may re-enter via a static field initializer (DeclareComponent).
+        using var scopeLock = RegistrationLock.EnterScope();
+        RuntimeHelpers.RunClassConstructor(typeof(TArchetype).TypeHandle);
+        EnsureFinalizedCore(typeof(TArchetype), fromBarrier);
+    }
+
+    /// <summary>
+    /// Runs the static constructor of a <b>parent</b> archetype discovered by walking <see cref="Type.BaseType"/> from an already-preserved child.
+    /// </summary>
+    [UnconditionalSuppressMessage("Trimming", "IL2059:Unrecognized value passed to the parameter 'type' of method 'RuntimeHelpers.RunClassConstructor'",
+        Justification = "The type here is always the BASE TYPE of an archetype that is itself preserved (FindParentArchetypeType walks Type.BaseType). A "
+            + "kept type's base class is structurally required and therefore also kept, and the trimmer never strips the static constructor of a type it "
+            + "keeps — it only removes cctors together with the whole type. The warning reflects the analyser's inability to name the type, not a real "
+            + "possibility of the cctor being absent. #409")]
+    private static void RunParentClassConstructor(Type parentType) => RuntimeHelpers.RunClassConstructor(parentType.TypeHandle);
+
+    /// <summary>
     /// Ensure an archetype type is finalized. Triggers static initialization (field initializers) then calls FinalizeArchetypeInternal if not already done.
+    /// Runtime-<see cref="Type"/> form, for hosts that load schema assemblies dynamically; compile-time-known archetypes use
+    /// <see cref="EnsureFinalized{TArchetype}"/>.
     /// </summary>
     /// <param name="archetypeType">The archetype CLR type to finalize.</param>
     /// <param name="fromBarrier">
@@ -187,6 +223,10 @@ internal static class ArchetypeRegistry
     /// engine's on-demand path (EngineLifecycle / InitializeArchetypes) remains the authority. Genuine authoring errors (duplicate id, &gt;16 components) still
     /// throw. Non-barrier callers keep the original strict diagnostic (a real cross-ALC bug is surfaced clearly).
     /// </param>
+    [RequiresUnreferencedCode(
+        "Runs the static constructor of an archetype type known only at runtime, which the trimmer cannot prove is preserved (IL2059). This overload exists "
+        + "for hosts that load schema assemblies dynamically (the Workbench's collectible-ALC *.schema.dll path) — a model that is inherently incompatible "
+        + "with trimming and Native AOT. Compile-time-known archetypes must use EnsureFinalized<TArchetype>() instead.")]
     internal static void EnsureFinalized(Type archetypeType, bool fromBarrier = false)
     {
         // Serialise with concurrent registration/freeze. Reentrant: FinalizeArchetypeInternal recurses here for the parent chain, and RunClassConstructor
@@ -196,6 +236,15 @@ internal static class ArchetypeRegistry
         // First ensure static field initializers have run (DeclareComponent calls)
         RuntimeHelpers.RunClassConstructor(archetypeType.TypeHandle);
 
+        EnsureFinalizedCore(archetypeType, fromBarrier);
+    }
+
+    /// <summary>
+    /// The shared body of both <c>EnsureFinalized</c> overloads, minus the static-constructor run (which each overload performs in the way its own type
+    /// knowledge allows). Must be called with <see cref="RegistrationLock"/> held.
+    /// </summary>
+    private static void EnsureFinalizedCore(Type archetypeType, bool fromBarrier)
+    {
         var attr = archetypeType.GetCustomAttribute<ArchetypeAttribute>();
         if (attr == null)
         {
@@ -261,8 +310,9 @@ internal static class ArchetypeRegistry
         var parentType = FindParentArchetypeType(archetypeType);
         if (parentType != null)
         {
-            // Ensure parent is finalized first (recursive — handles multi-level chains)
-            EnsureFinalized(parentType);
+            // Ensure parent is finalized first (recursive — handles multi-level chains). Reached with RegistrationLock already held (reentrant).
+            RunParentClassConstructor(parentType);
+            EnsureFinalizedCore(parentType, fromBarrier: false);
 
             // Parent's catalog id comes from its finalized metadata (#514 D1 — no author-set id to read).
             if (!MetadataByType.TryGetValue(parentType, out var parentMeta))
@@ -695,6 +745,14 @@ internal static class ArchetypeRegistry
     /// </summary>
     private static void ClearArchetypeMetadataField(Type archetypeType)
     {
+        // Collectible AssemblyLoadContexts do not exist under Native AOT — there is no runtime assembly loading to unload — so this whole teardown is
+        // unreachable there. The guard makes that explicit to ILC (a recognised FeatureGuard for RequiresDynamicCode, so IL3050 goes away and the branch
+        // is dropped from native builds) and folds to a constant on CoreCLR. #409
+        if (!RuntimeFeature.IsDynamicCodeSupported)
+        {
+            return;
+        }
+
         if (!MetadataFieldCache.TryGetValue(archetypeType, out var fi))
         {
             // Walk the base-type chain to find the concrete `Archetype<TSelf>` declaration that carries the `_metadata` field. CRTP guarantees the field lives
@@ -794,46 +852,62 @@ internal static class ArchetypeRegistry
                     continue;
                 }
 
-                // Scan fields for EntityLink<T> with [Index(OnParentDelete = Delete)]
-                foreach (var field in compType.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
-                {
-                    var indexAttr = field.GetCustomAttribute<IndexAttribute>();
-                    if (indexAttr == null || indexAttr.OnParentDelete == CascadeAction.None)
-                    {
-                        continue;
-                    }
-
-                    // Check that field type is EntityLink<T>
-                    if (!field.FieldType.IsGenericType || field.FieldType.GetGenericTypeDefinition() != typeof(EntityLink<>))
-                    {
-                        continue;
-                    }
-
-                    // Extract target archetype type from EntityLink<T>
-                    var targetArchetypeType = field.FieldType.GetGenericArguments()[0];
-
-                    // Register the cascade target on the PARENT (target) archetype, resolved by IDENTITY (name) → the single authoritative catalog slot
-                    // (#514 D1). A type-keyed lookup is fragile across ALCs: when the EntityLink's type argument is a cross-ALC twin, its own finalization may
-                    // have been skipped by the cross-ALC guard, so it isn't in MetadataByType — yet the destroy path resolves the entity's archetype through the
-                    // name-assigned catalog slot. Registering here on that same Archetypes[catalogId] instance keeps the cascade edge and the destroy lookup on
-                    // one metadata object.
-                    var targetName = targetArchetypeType.FullName;
-                    if (targetName == null || !ArchetypeIdByName.TryGetValue(targetName, out var targetCatalogId) || Archetypes[targetCatalogId] == null)
-                    {
-                        continue;
-                    }
-                    var parentMeta = Archetypes[targetCatalogId];
-
-                    parentMeta._cascadeTargets ??= [];
-                    parentMeta._cascadeTargets.Add(new CascadeTarget
-                    {
-                        ChildArchetypeId = meta.ArchetypeId,
-                        ChildArchetypeType = meta.ArchetypeType,
-                        FkSlotIndex = slot,
-                        FkFieldOffset = (int)Marshal.OffsetOf(compType, field.Name),
-                    });
-                }
+                ScanCascadeFields(meta, compType, slot);
             }
+        }
+    }
+
+    /// <summary>
+    /// Scans one component type's fields for <c>EntityLink&lt;T&gt;</c> members carrying <c>[Index(OnParentDelete = Delete)]</c> and records the cascade
+    /// edge on the TARGET (parent) archetype.
+    /// </summary>
+    [UnconditionalSuppressMessage("Trimming", "IL2070:'this' argument does not satisfy 'DynamicallyAccessedMembers' in call to Type.GetFields",
+        Justification = "The types reaching here are component structs recorded in ArchetypeMetadata._slotToComponentType, every one of which was placed "
+            + "there by a compile-time-known Comp<T> declaration (ArchetypeRegistry.DeclareComponent<TArchetype, T>) or by the generated registrar — so the "
+            + "type and its fields are statically reachable. The annotation cannot be expressed on the array field itself (IL2097: DAM is valid only on "
+            + "Type/string fields), which is why the suppression lives here. Component structs are pure data whose fields the engine reads through computed "
+            + "offsets regardless, so nothing extra is preserved in practice. #409")]
+    private static void ScanCascadeFields(ArchetypeMetadata meta, Type compType, byte slot)
+    {
+
+        // Scan fields for EntityLink<T> with [Index(OnParentDelete = Delete)]
+        foreach (var field in compType.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+        {
+            var indexAttr = field.GetCustomAttribute<IndexAttribute>();
+            if (indexAttr == null || indexAttr.OnParentDelete == CascadeAction.None)
+            {
+                continue;
+            }
+
+            // Check that field type is EntityLink<T>
+            if (!field.FieldType.IsGenericType || field.FieldType.GetGenericTypeDefinition() != typeof(EntityLink<>))
+            {
+                continue;
+            }
+
+            // Extract target archetype type from EntityLink<T>
+            var targetArchetypeType = field.FieldType.GetGenericArguments()[0];
+
+            // Register the cascade target on the PARENT (target) archetype, resolved by IDENTITY (name) → the single authoritative catalog slot
+            // (#514 D1). A type-keyed lookup is fragile across ALCs: when the EntityLink's type argument is a cross-ALC twin, its own finalization may
+            // have been skipped by the cross-ALC guard, so it isn't in MetadataByType — yet the destroy path resolves the entity's archetype through the
+            // name-assigned catalog slot. Registering here on that same Archetypes[catalogId] instance keeps the cascade edge and the destroy lookup on
+            // one metadata object.
+            var targetName = targetArchetypeType.FullName;
+            if (targetName == null || !ArchetypeIdByName.TryGetValue(targetName, out var targetCatalogId) || Archetypes[targetCatalogId] == null)
+            {
+                continue;
+            }
+            var parentMeta = Archetypes[targetCatalogId];
+
+            parentMeta._cascadeTargets ??= [];
+            parentMeta._cascadeTargets.Add(new CascadeTarget
+            {
+                ChildArchetypeId = meta.ArchetypeId,
+                ChildArchetypeType = meta.ArchetypeType,
+                FkSlotIndex = slot,
+                FkFieldOffset = (int)Marshal.OffsetOf(compType, field.Name),
+            });
         }
     }
 

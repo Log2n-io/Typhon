@@ -10,6 +10,10 @@ using System.Runtime.CompilerServices;
 // Production friend assemblies
 [assembly: InternalsVisibleTo("typhon")]                    // Typhon.Shell / CLI (AssemblyName=typhon, #428)
 [assembly: InternalsVisibleTo("Typhon.Workbench")]
+// Added 2026-07-31 (#409): the opt-in ETW / EventPipe profiling providers were moved OUT of the engine so the engine assembly carries no
+// reflection-heavy (AOT-hostile) package references. They keep the Typhon.Engine.Internals namespace and reach ParsedCpuSamples / TyphonEvent /
+// ThreadSlotRegistry — genuine internal-implementation reuse; they ARE engine internals, just compiled into a separate, optional assembly.
+[assembly: InternalsVisibleTo("Typhon.Diagnostics")]
 
 // Test / sample friend assemblies
 [assembly: InternalsVisibleTo("AntHill.Core")]

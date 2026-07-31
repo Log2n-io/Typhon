@@ -767,7 +767,10 @@ public partial class ArchetypeAccessorGenerator : IIncrementalGenerator
         {
             foreach (var archFqn in sortedArchetypes)
             {
-                sb.Append("            global::Typhon.Engine.DatabaseEngine.RegisterArchetype(typeof(").Append(archFqn).AppendLine("));");
+                // Generic form, not RegisterArchetype(typeof(X)): the archetype is known at compile time here, so emitting it as a type ARGUMENT lets the
+                // trimmer and ILC prove the archetype's static constructor survives. The Type-based overload is [RequiresUnreferencedCode] because
+                // RunClassConstructor over a runtime Type is unprovable (IL2059) and no DAM annotation can preserve a cctor. #409
+                sb.Append("            global::Typhon.Engine.DatabaseEngine.RegisterArchetype<").Append(archFqn).AppendLine(">();");
             }
         }
 

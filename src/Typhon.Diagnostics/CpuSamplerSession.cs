@@ -27,7 +27,7 @@ namespace Typhon.Engine.Internals;
 /// profiling session still produces its <c>.typhon-trace</c>, just without a CPU-sample companion. It never throws into the host.
 /// </para>
 /// </remarks>
-internal sealed class CpuSamplerSession : IDisposable
+internal sealed class CpuSamplerSession : Typhon.Engine.Profiler.ICpuSamplerSession
 {
     /// <summary>The .NET runtime's CPU stack-sampling EventPipe provider — the runtime runs a ~1 kHz sampler thread while it is enabled.</summary>
     private const string SampleProfilerProvider = "Microsoft-DotNETCore-SampleProfiler";

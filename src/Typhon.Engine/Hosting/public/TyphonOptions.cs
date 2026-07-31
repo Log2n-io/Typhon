@@ -1,4 +1,5 @@
 using JetBrains.Annotations;
+using System.Diagnostics.CodeAnalysis;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -67,7 +68,9 @@ public sealed class TyphonOptions
     /// <see cref="DatabaseEngine.RegisterComponentFromAccessor{T}"/>, applied once the engine is built.
     /// </summary>
     /// <typeparam name="T">The blittable component type.</typeparam>
-    public TyphonOptions Register<T>() where T : unmanaged
+    public TyphonOptions Register<
+        [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicFields | DynamicallyAccessedMemberTypes.NonPublicFields)] T>()
+        where T : unmanaged
     {
         _componentRegistrations.Add(static engine => engine.RegisterComponentFromAccessor<T>());
         return this;

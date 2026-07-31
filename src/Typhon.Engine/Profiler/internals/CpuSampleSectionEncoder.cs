@@ -29,7 +29,7 @@ internal sealed class CpuSampleSectionData
 
 /// <summary>
 /// Projects a parser-interned <see cref="ParsedCpuSamples"/> batch into the wire-shaped <see cref="CpuSampleSectionData"/> the <c>.typhon-trace</c>
-/// CPU-sample trailer stores (#351, design §6.5). Stacks and frame symbols are <i>already interned</i> by <see cref="CpuSampleParser"/>; the only work
+/// CPU-sample trailer stores (#351, design §6.5). Stacks and frame symbols are <i>already interned</i> by <c>CpuSampleParser</c> (Typhon.Diagnostics); the only work
 /// left here is folding each frame's file path into the shared <c>FileTable</c> (the same table the source-location manifest uses) and assigning the
 /// resulting <c>fileId</c>. The sample records and stack table pass straight through — no copy, no re-interning.
 /// </summary>

@@ -30,7 +30,9 @@ public abstract class Archetype<TSelf> where TSelf : Archetype<TSelf>
 
     private static ArchetypeMetadata EnsureFinalized()
     {
-        ArchetypeRegistry.EnsureFinalized(typeof(TSelf));
+        // Generic overload, not the Type one: TSelf is statically known here, which is what lets the trimmer/ILC prove the archetype's static
+        // constructor is preserved (#409 — IL2059 cannot be annotated away, only made statically knowable).
+        ArchetypeRegistry.EnsureFinalized<TSelf>();
         _metadata = ArchetypeRegistry.GetMetadata<TSelf>();
         return _metadata;
     }

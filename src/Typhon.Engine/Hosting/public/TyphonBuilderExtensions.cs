@@ -3,6 +3,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using System;
+using System.Diagnostics.CodeAnalysis;
 using Typhon.Engine.internals;
 
 namespace Typhon.Engine;
@@ -446,7 +447,10 @@ public static class ServiceCollectionExtensions
         }
     }
 
-    private static IServiceCollection AddPagedMMF<TS, TO>(
+    // TO flows into IOptions<TO>, whose type parameter carries [DynamicallyAccessedMembers(PublicParameterlessConstructor)]. Propagating the
+    // annotation here (and on CreatePagedMemoryMappedFile / EnsureFileDeleted below) is what lets the trimmer prove the options type's ctor is
+    // preserved — IL2091 otherwise. Zero runtime cost: DAM is metadata consumed by the trimmer/ILC, never by the JIT. (#409)
+    private static IServiceCollection AddPagedMMF<TS, [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicParameterlessConstructor)] TO>(
         this IServiceCollection services,
         ServiceLifetime lifetime,
         Action<TO> configure = null) where TS : PagedMMF where TO : PagedMMFOptions
@@ -474,7 +478,8 @@ public static class ServiceCollectionExtensions
         return services;
     }
 
-    private static TS CreatePagedMemoryMappedFile<TS, TO>(IServiceProvider serviceProvider) where TS : PagedMMF where TO : PagedMMFOptions
+    private static TS CreatePagedMemoryMappedFile<TS, [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicParameterlessConstructor)] TO>(
+        IServiceProvider serviceProvider) where TS : PagedMMF where TO : PagedMMFOptions
     {
         var options = serviceProvider.GetRequiredService<IOptions<TO>>();
         var logger = serviceProvider.GetRequiredService<ILogger<PagedMMF>>();
@@ -496,8 +501,12 @@ public static class ServiceCollectionExtensions
             return (TS)new PagedMMF(memoryAllocator, epochManager, options.Value, resourceRegistry.Storage, options.Value.DatabaseName, logger);
         }
 
-        // Fallback to Activator for other derived types (if any)
-        return (TS)Activator.CreateInstance(typeof(TS), serviceProvider, options.Value, logger);
+        // No other storage type exists. The previous Activator.CreateInstance(typeof(TS), ...) fallback was unreachable dead code — PagedMMF has
+        // exactly one subclass in the entire solution (ManagedPagedMMF, handled above) — and its reflective construction was a trim/AOT blocker
+        // (#409). A closed set gets an explicit diagnostic instead of a reflective guess that could not have worked anyway: the fallback passed
+        // (serviceProvider, options, logger), which matches neither real constructor.
+        throw new NotSupportedException(
+            $"Unsupported storage type '{typeof(TS).FullName}'. AddPagedMemoryMappedFile supports {nameof(PagedMMF)} and {nameof(ManagedPagedMMF)} only.");
     }
 
     private static IServiceCollection AddDatabaseEngine(IServiceCollection services, ServiceLifetime lifetime, Action<DatabaseEngineOptions> configure)
@@ -562,7 +571,8 @@ public static class ServiceCollectionExtensions
     /// </summary>
     /// <typeparam name="TO">The storage options type (a <see cref="PagedMMFOptions"/> subtype) whose bundle location is deleted.</typeparam>
     /// <param name="provider">The service provider to resolve the options from; a scope is created internally.</param>
-    public static void EnsureFileDeleted<TO>(this IServiceProvider provider) where TO : PagedMMFOptions
+    public static void EnsureFileDeleted<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicParameterlessConstructor)] TO>(
+        this IServiceProvider provider) where TO : PagedMMFOptions
     {
         using var scope = provider.CreateScope();
         var options = scope.ServiceProvider.GetRequiredService<IOptions<TO>>().Value;

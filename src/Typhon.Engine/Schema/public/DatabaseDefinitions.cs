@@ -1,6 +1,7 @@
 ﻿// unset
 
 using JetBrains.Annotations;
+using System.Diagnostics.CodeAnalysis;
 using System;
 using System.Collections.Generic;
 using System.Reflection;
@@ -163,9 +164,9 @@ public class DatabaseDefinitions
     /// <typeparamref name="T"/> lacks <see cref="ComponentAttribute"/>, or an attribute constraint is violated (e.g. a non-<c>long</c> foreign key, an
     /// invalid spatial field, or more than one spatial index).
     /// </exception>
-    public DBComponentDefinition CreateFromAccessor<T>() where T : unmanaged => CreateFromAccessor<T>(null);
+    public DBComponentDefinition CreateFromAccessor<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicFields | DynamicallyAccessedMemberTypes.NonPublicFields)] T>() where T : unmanaged => CreateFromAccessor<T>(null);
 
-    internal DBComponentDefinition CreateFromAccessor<T>(FieldIdResolver resolver) where T : unmanaged
+    internal DBComponentDefinition CreateFromAccessor<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicFields | DynamicallyAccessedMemberTypes.NonPublicFields)] T>(FieldIdResolver resolver) where T : unmanaged
     {
         // Reflection-free fast path: a source-generated component registered its schema (pure data) via its assembly's [ModuleInitializer], into the
         // schema-contract-level GeneratedSchemaRegistry. We look it up by CLR type — the schema no longer lives on the struct as an interface impl, so components
@@ -183,13 +184,14 @@ public class DatabaseDefinitions
     /// Non-generic overload for dry-run validation where the component type is known only at runtime. Reflects the type's <c>[Component]</c>/<c>[Field]</c>/
     /// <c>[Index]</c>/<c>[SpatialIndex]</c>/<c>[ForeignKey]</c> metadata into a <see cref="ComponentSchemaSpec"/> and builds it through the shared core.
     /// </summary>
-    internal DBComponentDefinition CreateFromAccessor(Type t, FieldIdResolver resolver = null) => BuildFromSpec(ReflectComponentSpec(t), t, resolver);
+    internal DBComponentDefinition CreateFromAccessor([DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicFields | DynamicallyAccessedMemberTypes.NonPublicFields)] Type t, FieldIdResolver resolver = null) =>
+        BuildFromSpec(ReflectComponentSpec(t), t, resolver);
 
     /// <summary>
     /// Reflects a <c>[Component]</c>-annotated struct into a pure-data <see cref="ComponentSchemaSpec"/>. This is the ONLY place the schema-build path touches
     /// <c>GetFields</c>/<c>GetCustomAttribute</c>; source-generated components bypass it entirely by supplying their spec directly.
     /// </summary>
-    private static ComponentSchemaSpec ReflectComponentSpec(Type t)
+    private static ComponentSchemaSpec ReflectComponentSpec([DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicFields | DynamicallyAccessedMemberTypes.NonPublicFields)] Type t)
     {
         var ca = t.GetCustomAttribute<ComponentAttribute>();
         if (ca == null)
