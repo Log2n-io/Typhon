@@ -1385,6 +1385,16 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             // Clean-shutdown HEAD marker (see field docs): capture both LSNs now; InitializeArchetypes decides trust.
             _cleanShutdownAtOpen = DurabilityWatermarks.ReadCleanShutdown(MMF);
             _checkpointLsnAtOpen = checkpointLSN;
+
+            // CS-02: durably clear the on-disk flag HERE, before returning from the ctor — i.e. before ANY mutation this session. Registration runs schema
+            // migration and PersistSchemaChanges (see InitializeArchetypes), so clearing it later (as this used to, inside InitializeArchetypes) left a window
+            // where a crash mid-registration kept the flag set: the next open then saw cleanShutdown=1 with no migration of its own, trusted the half-migrated
+            // Versioned HEADs and skipped RebuildVersionedHeadFromChain — serving stale HEADs silently (#583). The trust decision is unaffected: it reads the
+            // captured _cleanShutdownAtOpen above, not the disk.
+            if (_cleanShutdownAtOpen)
+            {
+                DurabilityWatermarks.SetCleanShutdown(MMF, false);
+            }
             var segment = MMF.GetSegment(spi);
             UowRegistry = new UowRegistry(segment, MMF, EpochManager, MemoryAllocator, this);
 
@@ -2639,15 +2649,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // Clean-shutdown HEAD fast path (see _headsTrusted field docs): trust the persisted cluster-slot HEADs — and so
         // skip the O(entities) RebuildVersionedHeadFromChain below — iff the last close set the clean-shutdown flag AND no
         // component migrated this session (a migration changes cluster layout, so those HEADs must be rebuilt). The flag
-        // is independent of CheckpointLSN, so a bulk-generated DB (CheckpointLSN == 0) is trusted too. Then durably clear
-        // the flag, BEFORE any mutation, so a crash this session forces a rebuild on the next open — the real crash-safety.
+        // is independent of CheckpointLSN, so a bulk-generated DB (CheckpointLSN == 0) is trusted too. The on-disk flag was
+        // already cleared in the ctor, before registration could mutate anything (CS-02, #583); this reads the value captured there.
         LastOpenVersionedHeadRebuildCount = 0;
         _headsTrusted = _cleanShutdownAtOpen
             && (_migratedComponents == null || _migratedComponents.Count == 0);
-        if (DurabilityWatermarks.ReadCleanShutdown(MMF))
-        {
-            DurabilityWatermarks.SetCleanShutdown(MMF, false);
-        }
         LogVersionedHeadReopenDecision(_headsTrusted, _cleanShutdownAtOpen, _checkpointLsnAtOpen);
         LogWalWatermarksSnapshot("open", _checkpointLsnAtOpen);
 
