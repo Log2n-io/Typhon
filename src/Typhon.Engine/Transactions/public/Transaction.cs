@@ -702,19 +702,44 @@ public unsafe partial class Transaction : EntityAccessor
     }
 
     /// <summary>
-    /// Read a component by PK from the ComponentTable revision chain. Used by the query engine for predicate evaluation.
-    /// Performs MVCC-visible revision walk — more efficient than Open().Read() for single-component access because it doesn't resolve all archetype slots.
+    /// Query-engine read primitive. Reads a single component by primary key with MVCC visibility applied.
     /// </summary>
-    /// <summary>
-    /// Query-engine read primitive. Reads a single component by PK via MVCC revision chain walk.
-    /// More efficient than Open().Read() for query evaluation — resolves only the requested component, not all archetype slots.
-    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// For <see cref="StorageMode.Versioned"/> this walks the revision chain directly — cheaper than
+    /// <c>Open().Read()</c> because it resolves only the requested component instead of every archetype slot.
+    /// </para>
+    /// <para>
+    /// For <see cref="StorageMode.SingleVersion"/> there is no revision chain to walk (<c>ComponentTable</c> allocates
+    /// <c>CompRevTableSegment</c> only for Versioned), so the read goes through <see cref="EntityAccessor.TryOpen"/> +
+    /// <see cref="EntityRef.TryRead{T}"/>, which resolve the cluster-or-flat slot location and apply
+    /// BornTSN/DiedTSN visibility. Before issue #623 this method assumed the Versioned layout unconditionally and threw a
+    /// bare <see cref="NullReferenceException"/> from the chain walker on any SingleVersion component — which is what made
+    /// FK navigation unusable on the storage mode the engine steers hot ECS data toward.
+    /// </para>
+    /// <para>
+    /// The SingleVersion path pays the full slot resolution this method exists to avoid. That is a correctness-first
+    /// trade, not a settled design: a dedicated by-PK SingleVersion read would skip it. No benchmark covers this path
+    /// today (issue #623).
+    /// </para>
+    /// </remarks>
     [PublicAPI]
     public bool QueryRead<T>(long pk, out T t) where T : unmanaged
     {
         AssertThreadAffinity();
         var componentType = typeof(T);
         var info = GetComponentInfo(componentType);
+
+        if (info.ComponentTable.StorageMode == StorageMode.SingleVersion)
+        {
+            if (!TryOpen(EntityId.FromRaw(pk), out var entity))
+            {
+                t = default;
+                return false;
+            }
+
+            return entity.TryRead(out t);
+        }
 
         // Check if we already have this component in the cache
         ref var compRevInfo = ref CollectionsMarshal.GetValueRefOrAddDefault(info.SingleCache, pk, out var exists);

@@ -96,7 +96,9 @@ public unsafe class EcsNavigationQueryBuilder<TSourceArch, TSource, TTarget> whe
 
         // FK reverse lookup on collected target PKs
         using var guard = EpochGuard.Enter(_tx.DBE.EpochManager);
-        var compRevAccessor = sourceCT.CompRevTableSegment.CreateChunkAccessor();
+        // Issue #623: the FK index value addresses a CompRev chunk for Versioned sources and a component chunk for
+        // SingleVersion ones (which have no CompRev table at all). FkSourcePkResolver owns that distinction.
+        var pkResolver = FkSourcePkResolver.Create(sourceCT);
 
         try
         {
@@ -119,8 +121,7 @@ public unsafe class EcsNavigationQueryBuilder<TSourceArch, TSource, TTarget> whe
                             var values = enumerator.CurrentValues;
                             for (var j = 0; j < values.Length; j++)
                             {
-                                ref var header = ref compRevAccessor.GetChunk<CompRevStorageHeader>(values[j]);
-                                var sourcePK = header.EntityPK;
+                                var sourcePK = pkResolver.Resolve(values[j]);
                                 var sourceEntityId = EntityId.FromRaw(sourcePK);
 
                                 // Archetype mask filter (mask is catalog-space; translate the entity's routing id → catalog id)
@@ -148,7 +149,7 @@ public unsafe class EcsNavigationQueryBuilder<TSourceArch, TSource, TTarget> whe
         }
         finally
         {
-            compRevAccessor.Dispose();
+            pkResolver.Dispose();
         }
 
         return result;

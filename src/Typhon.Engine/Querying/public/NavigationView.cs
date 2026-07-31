@@ -437,7 +437,8 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
 
         var fkIndexInfo = PipelineExecutor.FindFKIndex(_sourceTable, _fkFieldOffset);
         var fkIndex = (BTree<long, PersistentStore>)fkIndexInfo.Index;
-        var compRevAccessor = _sourceTable.CompRevTableSegment.CreateChunkAccessor();
+        // Issue #623: SingleVersion sources have no CompRev table — FkSourcePkResolver picks the right segment per storage mode.
+        var pkResolver = FkSourcePkResolver.Create(_sourceTable);
 
         try
         {
@@ -451,8 +452,7 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
                         var values = enumerator.CurrentValues;
                         for (var j = 0; j < values.Length; j++)
                         {
-                            ref var header = ref compRevAccessor.GetChunk<CompRevStorageHeader>(values[j]);
-                            var sourcePK = header.EntityPK;
+                            var sourcePK = pkResolver.Resolve(values[j]);
 
                             var wasInView = _entityIds.Contains(sourcePK);
                             var shouldBeInView = targetPasses && EvaluateSourcePredicates(sourcePK, tx);
@@ -468,7 +468,7 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
         }
         finally
         {
-            compRevAccessor.Dispose();
+            pkResolver.Dispose();
         }
     }
 
@@ -479,7 +479,8 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
     {
         var fkIndexInfo = PipelineExecutor.FindFKIndex(_sourceTable, _fkFieldOffset);
         var fkIndex = (BTree<long, PersistentStore>)fkIndexInfo.Index;
-        var compRevAccessor = _sourceTable.CompRevTableSegment.CreateChunkAccessor();
+        // Issue #623: SingleVersion sources have no CompRev table — FkSourcePkResolver picks the right segment per storage mode.
+        var pkResolver = FkSourcePkResolver.Create(_sourceTable);
 
         try
         {
@@ -493,8 +494,7 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
                         var values = enumerator.CurrentValues;
                         for (var j = 0; j < values.Length; j++)
                         {
-                            ref var header = ref compRevAccessor.GetChunk<CompRevStorageHeader>(values[j]);
-                            var sourcePK = header.EntityPK;
+                            var sourcePK = pkResolver.Resolve(values[j]);
 
                             if (_entityIds.Contains(sourcePK))
                             {
@@ -511,7 +511,7 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
         }
         finally
         {
-            compRevAccessor.Dispose();
+            pkResolver.Dispose();
         }
     }
 

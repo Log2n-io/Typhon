@@ -465,6 +465,14 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     /// Start a navigation (FK join) query from the source archetype to a target component type.
     /// The FK field selector identifies the long FK field on the source component.
     /// </summary>
+    /// <remarks>
+    /// <b>The source component must be <see cref="StorageMode.Versioned"/>.</b> Navigation resolves the foreign-key index off the
+    /// component table, and a <see cref="StorageMode.SingleVersion"/> archetype keeps its field indexes on the archetype instead
+    /// (cluster-local, values are packed cluster locations), so there is no component-table index for the reverse lookup to scan.
+    /// A SingleVersion source therefore throws <see cref="NotSupportedException"/> rather than silently returning nothing.
+    /// Tracked by issue #623; <see cref="StorageMode.Transient"/> has no persistent index at all and is likewise rejected.
+    /// </remarks>
+    /// <exception cref="NotSupportedException">The source component is <see cref="StorageMode.SingleVersion"/> or <see cref="StorageMode.Transient"/>.</exception>
     public readonly EcsNavigationQueryBuilder<TArchetype, TSource, TTarget> NavigateField<TSource, TTarget>(Expression<Func<TSource, long>> fkSelector)
         where TSource : unmanaged where TTarget : unmanaged
     {
