@@ -62,7 +62,10 @@ dag.Add(new RenderPipeline());   // throws NotSupportedException — pending Pat
 - `b.Parallel()` is rejected for `PipelineSystem` — it has its own chunk-parallel model (`totalChunks`), not the
   `QuerySystem` parallel path.
 - A chunk action that throws fails the whole system: remaining chunks are drained without running, successors
-  are skipped (`SkipReason.DependencyFailed`); other DAG branches continue.
+  are skipped (`SkipReason.DependencyFailed`); other DAG branches continue. That is the default,
+  `RuntimeOptions.SystemExceptionPolicy = Isolate`; under the opt-in `AbortTickAndStop` the tick is cancelled
+  instead — a system that has not yet claimed its first chunk is skipped with `SkipReason.TickAborted`, while one
+  already running finishes every chunk, because abort granularity is the system, never the chunk.
 - Inside a `CompoundSystem`, a `PipelineSystem` child hits the same `NotSupportedException` as top-level
   registration — compounds cannot currently contain a working `PipelineSystem` member.
 

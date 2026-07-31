@@ -62,7 +62,11 @@ dag.CallbackSystem("Cleanup", ctx => ctx.FlushDestroys(), after: "Steering");
 - All members must have unique names across the *whole* schedule (not just within the compound) — `Build()`
   rejects duplicates the same way it does for any two systems.
 - A member that throws rolls back only its own Transaction and skips only its own successors; it does not abort
-  sibling members in the same compound unless they have a declared dependency on it.
+  sibling members in the same compound unless they have a declared dependency on it. That holds under the default
+  `RuntimeOptions.SystemExceptionPolicy = Isolate`. Under the opt-in `AbortTickAndStop` a member throw aborts the
+  whole tick, so siblings that have not started are skipped with `SkipReason.TickAborted` whether or not they
+  depend on it — members expand into ordinary DAG registrations, leaving no compound-level boundary to contain the
+  abort.
 
 ## 🧪 Tests
 

@@ -223,7 +223,9 @@ Once awake, each worker loops `FindReadySystem` → `ProcessSystem` until `_syst
 - `ProcessSystem` claims the system (CAS on `_isReady` for single-shot systems, `Interlocked.Increment(_nextChunk)` for multi-chunk).
 - Idle workers (no ready work) spin briefly with PAUSE for the first ~100 iterations, then `Thread.Yield` until work appears or the tick ends.
 
-Failure isolation: if a system throws, the worker marks `_systemFailed[sysIdx] = true`, propagates failure to all successors, and emits a `SkipReason.DependencyFailed` for them. An outer safety-net `try/catch` in `WorkerLoop` ensures even a bug inside a catch handler can't kill the worker — the simulation would otherwise freeze with `_systemsRemaining > 0` forever.
+Failure isolation (the default, `SystemExceptionPolicy.Isolate`): if a system throws, the worker marks `_systemFailed[sysIdx] = true`, propagates failure to its successors, and emits a `SkipReason.DependencyFailed` for them; independent DAG branches keep running. An outer safety-net `try/catch` in `WorkerLoop` ensures even a bug inside a catch handler can't kill the worker — the simulation would otherwise freeze with `_systemsRemaining > 0` forever.
+
+Strict tick-abort (`SystemExceptionPolicy.AbortTickAndStop`, opt-in): the first throw in a non-engine system latches a terminal tick-wide abort flag. Every user system that has not already started is then cancelled with `SkipReason.TickAborted` — not `DependencyFailed`, and not limited to the failing system's successors: the flag is also read at *claim* time, so a ready-but-unclaimed DAG root cannot slip through. Two exemptions: engine tracks ([§7](#7-parallel-fence)'s fence) never observe the flag, and a system already running drains all of its chunks — abort granularity is the system, never the chunk. Cancellation is dispatch-and-skip rather than halt-dispatch, because a system that is never dispatched never decrements `_systemsRemaining` and the tick would hang. The runtime is terminal afterwards; `TyphonRuntime.OnTickAborted` fires once the tick has drained ([§9](#9-lifecycle)).
 
 ---
 
@@ -304,12 +306,16 @@ The chain is sticky in both directions — `EscalationTicks` consecutive overrun
 ### Tick-level hooks (events)
 
 ```csharp
-runtime.OnFirstTick += ctx => { /* rebuild transient state after crash recovery */ };
-runtime.OnShutdown  += ctx => { /* save player state, cleanup */ };
+runtime.OnFirstTick   += ctx => { /* rebuild transient state after crash recovery */ };
+runtime.OnShutdown    += ctx => { /* save player state, cleanup */ };
+runtime.OnTickAborted += (rt, outcome) => { /* the tick was cancelled — the runtime is dead */ rt.FatalStop(); };
 ```
 
 - **`OnFirstTick`** — fires once on the first tick after engine open. The callback receives a valid `TickContext` with a fresh `Transaction` so it can spawn or repair entities. Used to restore transient state that doesn't survive a crash.
 - **`OnShutdown`** — fires during `Shutdown()`. The callback receives a dedicated `Transaction` with `Immediate` durability — its writes are durable on commit, independent of the regular per-tick UoW.
+- **`OnTickAborted`** — fires at most once, only under `SystemExceptionPolicy.AbortTickAndStop` ([§6](#6-workers)), on the TickDriver thread *after* the aborted tick has fully drained. The handler receives the `TickOutcome` naming the failing system and its exception.
+- **`LastTickOutcome`** — the pull-side counterpart, written on **every** tick so a host that subscribed late (or not at all) can still ask "did the last tick succeed?". It reports `Success` under `Isolate` even on a tick where a system threw — that tick completed exactly as the policy promises; per-system failure detail stays in `SkipReason.Exception` telemetry.
+- **`FatalStop()`** — stops the runtime **without** running `OnShutdown`. This is the path for a host reacting to `OnTickAborted`, where the `Immediate`-durability shutdown transaction is precisely what you don't want to run on a simulation whose systems only partly ran.
 
 ### Per-tick observability
 
@@ -325,6 +331,7 @@ Every tick, on advance, the driver emits a **`Scheduler.Overload.TickMultiplier`
 | **`ParallelQueryMinChunkSize`** | **64** | Floor on entities per chunk for parallel `QuerySystem` dispatch. Smaller entity sets still use the parallel path with `totalChunks = 1`. |
 | `EnableParallelFence` | `true` | Off switch for [§7](#7-parallel-fence) — falls back to serial `WriteTickFence`. |
 | `FenceChunkOversubscription` | 2 | Fence chunk cap = `factor × WorkerCount`. Smooths preemption jitter. |
+| `SystemExceptionPolicy` | `Isolate` | What an unhandled system exception costs. `Isolate` skips only the failing branch; `AbortTickAndStop` cancels the rest of the tick and makes the runtime terminal — see [§6](#6-workers). |
 | `Overload` | new() | The `OverloadOptions` from [§8](#8-overload-management). |
 
 ---
