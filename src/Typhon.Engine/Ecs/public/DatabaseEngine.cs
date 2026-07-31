@@ -3198,6 +3198,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         LastWalV2RecoveryResult = result;
         LastWalV2RecoveryCheckpointLsn = checkpointLsn;
 
+        if (result.StoppedAtCorruption)
+        {
+            LogWalRecoveryStoppedAtCorruption(result.SegmentsScanned, result.MaxLsn);
+        }
+
         // Phase 4 — SCRUB (03-recovery.md §6, D1): now that the WAL window is applied, collapse every Versioned revision chain
         // to its HEAD so the consolidated base carries no pre-crash MVCC history. Runs before the seal so its mutations are
         // consolidated into the data file by the same checkpoint.
@@ -4132,6 +4137,12 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
     [LoggerMessage(LogLevel.Information, "Open: WAL recovery {walMs:F0} ms over {walBytes} WAL bytes")]
     internal partial void LogWalRecoveryTiming(double walMs, long walBytes);
+
+    // LOG-03 / REC-01. Warning, not Information: the scan ending early is indistinguishable from a clean end in every other
+    // counter, and the difference is whether the log was cut short by corruption. Everything after the boundary was discarded.
+    [LoggerMessage(LogLevel.Warning,
+        "Open: WAL recovery STOPPED at a corruption boundary after {segmentsScanned} segment(s) — records beyond it were NOT applied (frontier LSN {maxLsn})")]
+    internal partial void LogWalRecoveryStoppedAtCorruption(int segmentsScanned, long maxLsn);
 
     [LoggerMessage(LogLevel.Information,
         "Open: total {totalMs:F0} ms — engineConstruct {engineConstructMs:F0} ms (incl. WAL recovery + system-schema load), schemaDllLoad {schemaDllMs:F0} ms, initializeArchetypes {initArchetypesMs:F0} ms")]

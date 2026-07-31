@@ -20,6 +20,15 @@ internal sealed class RecoveryDriver
         public int TxCommitted;
         public long MaxTsn;
         public long MaxLsn; // highest LSN seen in the recovery window — the frontier the post-recovery seal consolidates to
+
+        /// <summary>
+        /// True when the scan stopped at a corruption boundary (LOG-03 / REC-01) rather than running out of segments.
+        /// </summary>
+        /// <remarks>
+        /// Diagnostic only — the stop itself is unconditional. Surfaced so an operator can tell "the log ended" from "the log was
+        /// cut short", which are the same shape in every other field of this struct.
+        /// </remarks>
+        public bool StoppedAtCorruption;
     }
 
     // Materialized record. Copied during the scan because the reader's body span is invalidated by the next TryReadNext;
@@ -157,6 +166,20 @@ internal sealed class RecoveryDriver
                             Payload = view.Kind == RecordKind.Slot && view.Payload.Length > 0 ? view.Payload.ToArray() : null,
                         });
                     }
+                }
+
+                // LOG-03 / REC-01: stop at the FIRST corruption boundary, and stop for good. WalSegmentReader raises WasTruncated for a mid-log CRC break in a
+                // sealed segment exactly as it does for a torn tail on the last one, and the rule is deliberately unconditional about both — records past the
+                // boundary have no CRC-chain guarantee, so they may be partially flushed, from a transaction that never committed, or stale bytes left in a
+                // recycled segment. Applying them is the atomicity violation REC-01 exists to prevent.
+                //
+                // This must be tested HERE, per segment: OpenSegment resets WasTruncated (WalSegmentReader), so the next iteration erases the evidence before
+                // anything downstream could act on it. v1 has always done this (WalRecovery); v2 never read the flag at all, which meant the two paths computed
+                // disagreeing frontiers at the same open — v1 stopped at the boundary while v2 kept applying past it (#587).
+                if (reader.WasTruncated)
+                {
+                    result.StoppedAtCorruption = true;
+                    break;
                 }
             }
         }
