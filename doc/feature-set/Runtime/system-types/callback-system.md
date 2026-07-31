@@ -62,7 +62,10 @@ dag.CallbackSystem("ZoneRotation", ctx => RotateZone(ctx),
 - Gets its own `Transaction` per tick (`ctx.Transaction`), created and committed by the runtime — never call
   `Commit()`/`Dispose()` inside `Execute`.
 - A thrown exception rolls back the system's Transaction and skips its successors
-  (`SkipReason.DependencyFailed`); other DAG branches continue.
+  (`SkipReason.DependencyFailed`); other DAG branches continue. That is the default,
+  `RuntimeOptions.SystemExceptionPolicy = Isolate`; under the opt-in `AbortTickAndStop` the rest of the tick is
+  cancelled instead — every user system not already started is skipped with `SkipReason.TickAborted` and the
+  runtime stops permanently.
 - `b.Parallel()` is not valid on a plain `CallbackSystem` — use `ChunkedCallbackSystem` and `b.ChunkedParallel(N)`
   for chunk-parallel non-entity work.
 - Registered via `dag.Add(new MySystem())` (class-based) or `dag.CallbackSystem(name, ctx => ..., ...)` (lambda)

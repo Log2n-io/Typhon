@@ -50,6 +50,12 @@ same DAG and the same tick; class-based registration is required to use RFC-07 a
   `Commit()`/`Dispose()` themselves.
 - A thrown exception rolls back that system's own Transaction and skips its successors
   (`SkipReason.DependencyFailed`); independent DAG branches still execute — one failure doesn't abort the tick.
+  That is the default, `RuntimeOptions.SystemExceptionPolicy = Isolate`.
+- Under the opt-in `SystemExceptionPolicy.AbortTickAndStop` the first throw cancels the rest of the tick instead:
+  every user system not already started is skipped with `SkipReason.TickAborted`, the runtime becomes terminal
+  (no further ticks), and `TyphonRuntime.OnTickAborted` fires. Two exemptions — engine tracks (the parallel fence)
+  never observe the abort, and a system that has already started runs to completion, because abort granularity is
+  the system, never the chunk.
 - `CompoundSystem.Add(...)` expands each sub-system into its own DAG registration at `dag.Add(compound)` time —
   there is no aggregate group name; from outside the compound is atomic (all children complete before the
   compound's successors start), but other systems depend on individual sub-system names, not the group.
