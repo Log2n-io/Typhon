@@ -541,14 +541,31 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
     /// <summary>
     /// Drains any remaining committed frames during shutdown.
     /// </summary>
-    private void DrainRemaining()
+    /// <remarks>
+    /// Runs on the writer thread once <see cref="WriterLoop"/> breaks, and catches frames published in the window between the loop's last failed
+    /// <c>TryDrain</c> and its shutdown <c>break</c>. <c>internal</c> rather than <c>private</c> so a test can drive this path deterministically — that window
+    /// is not externally schedulable — following the same seam as <see cref="DrainAndWriteSync"/>. Must not be called while the writer thread is running.
+    /// </remarks>
+    internal void DrainRemaining()
     {
         // One final drain attempt
         if (_commitBuffer.TryDrain(out var data, out var frameCount) && frameCount > 0)
         {
             var bytesToWrite = AlignUp(data.Length, PageSize);
 
-            if (bytesToWrite <= _stagingBufferSize)
+            // WP-03: every drained byte must reach WriteAligned BEFORE CompleteDrain discards the batch and AdvanceDurable moves the watermark over it. The
+            // staging path below can only carry a batch that fits in _stagingBufferSize (256 KB default); the commit-buffer half is megabytes, so a large last
+            // commit or a fat fence batch at Dispose overflows it. Without this branch that batch was silently dropped on an orderly shutdown while DurableLsn
+            // advanced past it — recovery then starts after the watermark and never looks for the missing records (#580). Mirrors WriterLoop.
+            if (bytesToWrite > _stagingBufferSize)
+            {
+                // Data exceeds staging buffer — write in chunks (patches the CRC chain and advances WriteOffset itself)
+                if (_segmentManager.ActiveSegment?.Handle != null)
+                {
+                    WriteInChunks(data);
+                }
+            }
+            else
             {
                 data.CopyTo(new Span<byte>(_stagingBuffer, _stagingBufferSize));
 
