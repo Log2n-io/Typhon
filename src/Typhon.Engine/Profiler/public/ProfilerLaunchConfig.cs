@@ -1,3 +1,4 @@
+using System;
 using Microsoft.Extensions.Configuration;
 
 namespace Typhon.Engine;
@@ -29,8 +30,27 @@ public sealed record ProfilerLaunchConfig
     /// <summary>The default port used when <c>--live</c> is given without an explicit number.</summary>
     public const int DefaultLivePort = 9100;
 
-    /// <summary>Path to the .typhon-trace file the <see cref="FileExporter"/> writes to, or <c>null</c> for no file output.</summary>
+    /// <summary>
+    /// Path to the .typhon-trace file the <see cref="FileExporter"/> writes to. <c>null</c> means "not specified", which since #616 resolves to a capture in
+    /// the database's own <c>profilings/</c> directory — see <see cref="SuppressCapture"/> for how to ask for no file at all.
+    /// </summary>
     public string TraceFilePath { get; init; }
+
+    /// <summary>
+    /// Configuration value for <c>Typhon:Profiler:Trace</c> that means "collect, but write no capture file". Recognised case-insensitively.
+    /// </summary>
+    public const string NoCaptureValue = "none";
+
+    /// <summary>
+    /// True when the host explicitly asked for no capture file (<c>Typhon:Profiler:Trace=none</c>).
+    /// </summary>
+    /// <remarks>
+    /// Needed because since #616 an <i>absent</i> path no longer means "no file" — it means "a file, in the database's <c>profilings/</c> directory" (design
+    /// D-1). That is the right default for a host that turned profiling on, but it removed the previously-implicit way to run the producer without paying for
+    /// export. This flag restores that as an explicit choice, which is what the engine's own test suite uses: it wants the collection path exercised on every
+    /// test without writing thousands of capture files.
+    /// </remarks>
+    public bool SuppressCapture { get; init; }
 
     /// <summary>TCP port the <see cref="TcpExporter"/> listens on, or <c>-1</c> for no live exporter.</summary>
     public int LivePort { get; init; } = -1;
@@ -121,9 +141,16 @@ public sealed record ProfilerLaunchConfig
         }
 
         var traceFile = config["Typhon:Profiler:Trace"];
+        var suppressCapture = false;
         if (string.IsNullOrWhiteSpace(traceFile))
         {
             traceFile = null;
+        }
+        else if (string.Equals(traceFile.Trim(), NoCaptureValue, StringComparison.OrdinalIgnoreCase))
+        {
+            // Normalised at the parse boundary so nothing downstream ever sees "none" as a path and tries to write a file called that.
+            traceFile = null;
+            suppressCapture = true;
         }
 
         var livePort = -1;
@@ -145,6 +172,7 @@ public sealed record ProfilerLaunchConfig
             TraceFilePath = traceFile,
             LivePort = livePort,
             LiveWaitMs = liveWaitMs,
+            SuppressCapture = suppressCapture,
         };
     }
 
@@ -165,6 +193,8 @@ public sealed record ProfilerLaunchConfig
             TraceFilePath = overrideWith.TraceFilePath ?? TraceFilePath,
             LivePort = overrideWith.LivePort >= 0 ? overrideWith.LivePort : LivePort,
             LiveWaitMs = overrideWith.LiveWaitMs > 0 ? overrideWith.LiveWaitMs : LiveWaitMs,
+            // Suppression is sticky: `false` is this field's sentinel, so an override that does not mention it cannot silently re-enable capture writing.
+            SuppressCapture = overrideWith.SuppressCapture || SuppressCapture,
         };
     }
 }
