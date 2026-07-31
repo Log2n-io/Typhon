@@ -738,10 +738,17 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
 
     /// <summary>
     /// Monotonically advances the durable watermark to <paramref name="candidate"/> and wakes waiters. The single source of the advance invariant, shared by the
-    /// background drain loop, shutdown drain, and the synchronous crash-test drain. Monotonic: a batch's high LSN can fall below the current watermark when claim
-    /// order and buffer/drain order diverge (tail and LSN are claimed via two independent <c>Interlocked.Add</c>s); lowering the watermark would un-acknowledge an
-    /// already-durable record. Caller is the single consumer (writer thread or a stopped-thread sync drain), so no CAS loop is needed.
+    /// background drain loop, shutdown drain, and the synchronous crash-test drain. Caller is the single consumer (writer thread or a stopped-thread sync
+    /// drain), so no CAS loop is needed.
     /// </summary>
+    /// <remarks>
+    /// The monotonic guard is <b>defence in depth</b>, not a correctness mechanism. It previously justified itself by pointing at claim order and drain order
+    /// diverging — "tail and LSN are claimed via two independent <c>Interlocked.Add</c>s" — but that divergence was a bug, not a property to accommodate:
+    /// it let the watermark advance past a frame whose bytes were never written, so an <c>Immediate</c> commit could be acknowledged with its record still in
+    /// RAM (WP-06 → WP-02, #581). <see cref="WalCommitBuffer.TryClaim"/> now allocates position and LSN in one atomic, so a batch's high LSN can no longer
+    /// fall below the watermark for that reason. The guard stays because lowering the watermark would un-acknowledge an already-durable record, and no caller
+    /// should be able to cause that by accident.
+    /// </remarks>
     private void AdvanceDurable(long candidate)
     {
         if (candidate > Interlocked.Read(ref _durableLsn))

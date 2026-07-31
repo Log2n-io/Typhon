@@ -660,4 +660,196 @@ public class WalCommitBufferConcurrencyTests : AllocatorTestBase
     }
 
     #endregion
+
+    #region ClaimOrdering — WP-06 (buffer position order == LSN order)
+
+    /// <summary>
+    /// WP-06: a frame's buffer position and its LSN must be allocated so the two orders can never diverge (#581).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This is not a cosmetic ordering property. <c>TryDrain</c> walks frames in POSITION order and stops at the first unpublished one, so position order is
+    /// the durability order; the LSN watermark is only a valid proxy for it while the two agree. When they diverge, a position-earlier frame carrying a HIGHER
+    /// LSN lets the drain publish <c>DurableLsn</c> past a position-later frame whose bytes were never written — and a <c>DurabilityMode.Immediate</c> commit
+    /// waiting on that lower LSN returns success with its record still in volatile memory (WP-02).
+    /// </para>
+    /// <para>
+    /// The test deliberately stays inside ONE buffer generation: offsets restart at 0 on a swap, so a single offset-ordered comparison is only meaningful
+    /// without one. The payload and claim count are sized to fit, and the test asserts no swap occurred rather than assuming it.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [CancelAfter(30_000)]
+    public void Claim_PositionOrderAndLsnOrderAgree_UnderConcurrentProducers()
+    {
+        using var buffer = CreateBuffer();
+        const int threadCount = 8;
+        const int claimsPerThread = 1_000;
+        const int payloadSize = 8;   // frame = Align8(8 + 8) = 16 B, so 8 x 1000 x 16 = 128 KB fits inside the 256 KB buffer with no swap
+
+        var startIndex = buffer.ActiveBufferIndex;
+        var pairs = new (int Offset, long Lsn)[threadCount * claimsPerThread];
+        var barrier = new Barrier(threadCount);
+        var producerExceptions = new Exception[threadCount];
+        var threads = new Thread[threadCount];
+
+        for (var t = 0; t < threadCount; t++)
+        {
+            var threadId = t;
+            threads[t] = new Thread(() =>
+            {
+                try
+                {
+                    barrier.SignalAndWait();
+
+                    for (var i = 0; i < claimsPerThread; i++)
+                    {
+                        var ctx = WaitContext.FromTimeout(TimeSpan.FromSeconds(5));
+                        var claim = buffer.TryClaim(payloadSize, 1, ref ctx);
+                        pairs[(threadId * claimsPerThread) + i] = (claim.FrameOffset, claim.FirstLSN);
+                        claim.DataSpan.Fill((byte)(threadId + 1));
+                        buffer.Publish(ref claim);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    producerExceptions[threadId] = ex;
+                }
+            })
+            { IsBackground = true };
+            threads[t].Start();
+        }
+
+        foreach (var thread in threads)
+        {
+            thread.Join();
+        }
+
+        for (var t = 0; t < threadCount; t++)
+        {
+            Assert.That(producerExceptions[t], Is.Null, $"Producer {t} threw: {producerExceptions[t]}");
+        }
+
+        // Precondition: a swap would restart offsets at 0 and make the comparison below meaningless.
+        Assert.That(buffer.ActiveBufferIndex, Is.EqualTo(startIndex),
+            "precondition: the buffer swapped, so offsets are not from a single address space — shrink the workload");
+
+        Array.Sort(pairs, static (a, b) => a.Offset.CompareTo(b.Offset));
+
+        for (var i = 1; i < pairs.Length; i++)
+        {
+            if (pairs[i].Lsn <= pairs[i - 1].Lsn)
+            {
+                Assert.Fail(
+                    $"WP-06 violated: claim at offset {pairs[i].Offset} holds LSN {pairs[i].Lsn}, but the earlier claim at offset {pairs[i - 1].Offset} "
+                    + $"holds LSN {pairs[i - 1].Lsn}. Position order and LSN order have diverged, so DurableLsn can advance past an undrained frame (#581).");
+            }
+        }
+    }
+
+    /// <summary>
+    /// LSNs stay globally unique and monotonic across buffer swaps, where the generation's LSN span is folded into the base (#581).
+    /// </summary>
+    /// <remarks>
+    /// The packed claim word holds an LSN <i>offset within the current generation</i>, so every swap must carry that span into <c>_lsnBase</c> at its
+    /// quiescent point. Getting the fold wrong — or letting a producer claim across it — reissues LSNs that were already handed to a committed transaction,
+    /// which is worse than the ordering bug this change fixes. This drives many swaps under contention and checks the whole issued set.
+    /// </remarks>
+    [Test]
+    [CancelAfter(60_000)]
+    public void Claim_LsnsRemainUniqueAndMonotonic_AcrossManyBufferSwaps()
+    {
+        // Minimum capacity keeps the buffer small so the workload forces many swaps.
+        using var buffer = CreateBuffer(64 * 1024);
+        const int threadCount = 6;
+        const int claimsPerThread = 3_000;
+        const int payloadSize = 200;
+
+        var lsns = new long[threadCount * claimsPerThread];
+        var barrier = new Barrier(threadCount);
+        var producerExceptions = new Exception[threadCount];
+        var threads = new Thread[threadCount];
+        var consumerStop = 0;
+
+        // A consumer must run, or producers block forever once the buffer fills.
+        var consumer = new Thread(() =>
+        {
+            while (Volatile.Read(ref consumerStop) == 0)
+            {
+                if (buffer.TryDrain(out var data, out _))
+                {
+                    buffer.CompleteDrain(data.Length);
+                }
+            }
+
+            while (buffer.TryDrain(out var remaining, out _))
+            {
+                buffer.CompleteDrain(remaining.Length);
+            }
+        })
+        { IsBackground = true };
+        consumer.Start();
+
+        for (var t = 0; t < threadCount; t++)
+        {
+            var threadId = t;
+            threads[t] = new Thread(() =>
+            {
+                try
+                {
+                    barrier.SignalAndWait();
+
+                    for (var i = 0; i < claimsPerThread; i++)
+                    {
+                        var ctx = WaitContext.FromTimeout(TimeSpan.FromSeconds(20));
+                        var claim = buffer.TryClaim(payloadSize, 1, ref ctx);
+                        lsns[(threadId * claimsPerThread) + i] = claim.FirstLSN;
+                        claim.DataSpan.Fill((byte)(threadId + 1));
+                        buffer.Publish(ref claim);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    producerExceptions[threadId] = ex;
+                }
+            })
+            { IsBackground = true };
+            threads[t].Start();
+        }
+
+        foreach (var thread in threads)
+        {
+            thread.Join();
+        }
+
+        Volatile.Write(ref consumerStop, 1);
+        consumer.Join();
+
+        for (var t = 0; t < threadCount; t++)
+        {
+            Assert.That(producerExceptions[t], Is.Null, $"Producer {t} threw: {producerExceptions[t]}");
+        }
+
+        Array.Sort(lsns);
+        for (var i = 1; i < lsns.Length; i++)
+        {
+            if (lsns[i] == lsns[i - 1])
+            {
+                Assert.Fail($"LSN {lsns[i]} was issued to two different claims — the generation LSN base was folded incorrectly across a buffer swap (#581).");
+            }
+        }
+
+        Assert.That(lsns[0], Is.GreaterThanOrEqualTo(1), "LSNs start at the seeded initial value");
+    }
+
+    /// <summary>Capacity must fit the position half of the packed claim word (#581).</summary>
+    [Test]
+    public void Constructor_RejectsCapacityBeyondThePackedPositionField()
+    {
+        var tooBig = WalCommitBuffer.MaxBufferCapacity + 64;
+        var ex = Assert.Throws<ArgumentException>(() => _ = CreateBuffer(tooBig));
+        Assert.That(ex.Message, Does.Contain("at most"), "the rejection should name the ceiling");
+    }
+
+    #endregion
 }

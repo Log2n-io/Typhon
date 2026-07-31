@@ -40,6 +40,29 @@ internal sealed unsafe class WalCommitBuffer : IDisposable
     private const int SwapDraining = 2;
 
     // ═══════════════════════════════════════════════════════════════════════
+    // Packed claim word (#581) — one Interlocked.Add allocates position AND LSN
+    // ═══════════════════════════════════════════════════════════════════════
+
+    private const int LsnShift = 32;
+    private const long PositionMask = 0xFFFFFFFFL;
+
+    /// <summary>
+    /// Largest permitted buffer capacity — 1 GiB. Bounds the position half of the packed claim word, with the remaining headroom absorbing CASE B overshoot.
+    /// Also bounds LSN offsets per generation: a frame is at least <see cref="WalFrameHeader.SizeInBytes"/>, so a generation cannot hold enough frames for the
+    /// LSN half to approach 2^32.
+    /// </summary>
+    internal const int MaxBufferCapacity = 1 << 30;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static long PositionOf(long claim) => claim & PositionMask;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static long LsnOffsetOf(long claim) => claim >>> LsnShift;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static long ClaimDelta(int frameSize, int recordCount) => ((long)recordCount << LsnShift) | (uint)frameSize;
+
+    // ═══════════════════════════════════════════════════════════════════════
     // Buffers (single pinned allocation, split into two halves)
     // ═══════════════════════════════════════════════════════════════════════
 
@@ -54,11 +77,49 @@ internal sealed unsafe class WalCommitBuffer : IDisposable
     // Cache-line isolated state (prevents false sharing)
     // ═══════════════════════════════════════════════════════════════════════
 
-    // --- Cache line 1: Producer-hot (Interlocked.Add target) ---
-    private long _tailPosition;
-    // Padding to fill cache line: 64 - 8 = 56 bytes
+    // --- Cache line 1: Producer-hot (the single Interlocked.Add target) ---
+
+    /// <summary>
+    /// Packed claim word — bits 63..32 hold the LSN offset within the current buffer generation, bits 31..0 the byte position in the active buffer.
+    /// </summary>
+    /// <remarks>
+    /// Both halves are allocated by ONE <see cref="Interlocked.Add(ref long, long)"/>, so a producer cannot win the position race and lose the LSN race
+    /// (WP-06, #581). They were previously two independent counters with a preemptible gap between them, which let a position-earlier frame carry a HIGHER
+    /// LSN — and since <see cref="TryDrain"/> walks frames in POSITION order and stops at the first unpublished one, the drain could then advance
+    /// <c>DurableLsn</c> past a frame whose bytes were never written. A <c>DurabilityMode.Immediate</c> commit waiting on that lower LSN returned success
+    /// with its record still in volatile memory (WP-02).
+    /// </remarks>
+    private long _claim;
+
+    /// <summary>
+    /// LSN base for the current buffer generation — a claim's LSN is <c>_lsnBase + (claim &gt;&gt;&gt; 32)</c>.
+    /// </summary>
+    /// <remarks>
+    /// Read on every claim, written only at the swap's quiescent point, so it deliberately shares the producer-hot cache line with <see cref="_claim"/>:
+    /// a claim needs both values and that line is transferred anyway for the XADD.
+    /// </remarks>
+    private long _lsnBase;
+
+    /// <summary>
+    /// Number of producers currently inside the claim critical section — registered but not yet holding a slot (or backed out).
+    /// </summary>
+    /// <remarks>
+    /// The claim gate. A producer increments this BEFORE reading <see cref="_activeBufferIndex"/>; <see cref="PerformSwap"/> publishes
+    /// <see cref="SwapDraining"/> and then waits for it to drain. Both sides use a full fence, so this is the classic store-load (Dekker) pattern — either
+    /// the producer observes the swap and backs out, or the swap observes the producer and waits. At least one always holds, which is what makes the swap
+    /// point genuinely quiescent and therefore what makes carrying <see cref="_lsnBase"/> across a reset safe.
+    /// <para>
+    /// Distinct from <see cref="_inflightCount"/>, which counts producers that already hold a slot and have not yet published. Waiting on the inflight
+    /// counter alone is not sufficient: it is incremented AFTER the position claim, so a producer between "read the buffer index" and "claim a slot" is
+    /// invisible to it and could take a slot in a buffer the swap has already drained and is about to reset.
+    /// </para>
+    /// </remarks>
+    private int _claimsInProgress;
+
+    // Padding to fill cache line: 64 - (8 + 8 + 4) = 44 bytes
 #pragma warning disable CS0169 // Field is never used — intentional cache-line padding
-    private long _pad1A, _pad1B, _pad1C, _pad1d, _pad1E, _pad1F, _pad1G;
+    private int _pad1Pre;
+    private long _pad1A, _pad1B, _pad1C, _pad1d, _pad1E;
 #pragma warning restore CS0169
 
     // --- Cache line 2: Consumer-hot ---
@@ -68,8 +129,7 @@ internal sealed unsafe class WalCommitBuffer : IDisposable
     private long _pad2A, _pad2B, _pad2C, _pad2d, _pad2E, _pad2F, _pad2G;
 #pragma warning restore CS0169
 
-    // --- Cache line 3: LSN + swap coordination ---
-    private long _nextLsn;
+    // --- Cache line 3: swap coordination ---
     private int _activeBufferIndex;
     private int _swapState;
     private int _inflightCount;
@@ -149,8 +209,16 @@ internal sealed unsafe class WalCommitBuffer : IDisposable
             throw new ArgumentException($"Buffer capacity must be a multiple of {CacheLineSize}, got {bufferCapacity}.", nameof(bufferCapacity));
         }
 
+        // Position occupies the low 32 bits of the packed claim word (#581). The ceiling leaves the top bit of that half clear so the transient overshoot in
+        // CASE B — where every concurrent producer adds one more frame past capacity before parking — cannot carry into the LSN half.
+        if (bufferCapacity > MaxBufferCapacity)
+        {
+            throw new ArgumentException($"Buffer capacity must be at most {MaxBufferCapacity} bytes, got {bufferCapacity}.", nameof(bufferCapacity));
+        }
+
         BufferCapacity = bufferCapacity;
-        _nextLsn = initialLsn;
+        _lsnBase = initialLsn;
+        _claim = 0;
 
         // Single allocation for both buffers via IMemoryAllocator for resource tracking.
         // zeroed: true ensures all frame headers start as unpublished (FrameLength = 0).
@@ -170,13 +238,13 @@ internal sealed unsafe class WalCommitBuffer : IDisposable
     {
         get
         {
-            var tail = Interlocked.Read(ref _tailPosition);
+            var tail = PositionOf(Interlocked.Read(ref _claim));
             return (double)tail / BufferCapacity;
         }
     }
 
     /// <summary>Current Log Sequence Number (next to be assigned).</summary>
-    public long NextLsn => Interlocked.Read(ref _nextLsn);
+    public long NextLsn => _lsnBase + LsnOffsetOf(Interlocked.Read(ref _claim));
 
     /// <summary>
     /// Seeds the LSN allocator so the next record claimed gets LSN == <paramref name="lsn"/>. Called once from <see cref="WalManager.Initialize"/> BEFORE the
@@ -187,9 +255,12 @@ internal sealed unsafe class WalCommitBuffer : IDisposable
     /// </summary>
     internal void SeedNextLsn(long lsn)
     {
-        if (lsn > _nextLsn)
+        // Rebases the generation rather than writing a counter: the LSN a claim receives is _lsnBase + the claim word's LSN offset, so the floor is raised by
+        // shifting the base and leaving any offset already consumed in this generation intact.
+        var offset = LsnOffsetOf(Interlocked.Read(ref _claim));
+        if (lsn > _lsnBase + offset)
         {
-            _nextLsn = lsn;
+            _lsnBase = lsn - offset;
         }
     }
 
@@ -210,7 +281,7 @@ internal sealed unsafe class WalCommitBuffer : IDisposable
     internal long DrainPosition => _drainPosition;
 
     /// <summary>Current tail position (producer write head).</summary>
-    internal long TailPosition => Interlocked.Read(ref _tailPosition);
+    internal long TailPosition => PositionOf(Interlocked.Read(ref _claim));
 
     /// <summary>
     /// Bytes currently queued in the active buffer awaiting drain — the producer-visible fill level. Computed as <c>TailPosition - DrainPosition</c>, clamped
@@ -264,57 +335,91 @@ internal sealed unsafe class WalCommitBuffer : IDisposable
             ThrowHelper.ThrowWalClaimTooLarge(frameSize, BufferCapacity);
         }
 
+        var claimDelta = ClaimDelta(frameSize, recordCount);
+
         while (true)
         {
-            var bufferIndex = _activeBufferIndex;
-            var buffer = bufferIndex == 0 ? _buffer0 : _buffer1;
+            // ── Claim gate (#581) ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+            // Register BEFORE reading _activeBufferIndex. PerformSwap publishes SwapDraining and then waits for this counter to drain, and both sides use
+            // a full fence, so at least one observes the other: either we see the swap below and back out without having claimed anything, or the swap
+            // waits for us to finish. That is what makes the swap point genuinely quiescent — and without it, a producer preempted between reading the
+            // buffer index and claiming a slot could take a slot in a buffer the writer has already drained and reset (silent data loss), or read a stale
+            // _lsnBase and duplicate an LSN.
+            //
+            // The registration MUST be released before any parking below, or PerformSwap would wait on us while we wait on it.
+            Interlocked.Increment(ref _claimsInProgress);
 
-            // Atomic tail increment — each producer gets a unique, non-overlapping region.
-            // Interlocked.Add maps to LOCK XADD on x64: always succeeds in exactly one instruction.
-            var newTail = Interlocked.Add(ref _tailPosition, frameSize);
-            var offset = newTail - frameSize;
+            long offset;
+            long newTail;
+            int bufferIndex;
+            byte* buffer;
+            var gotSlot = false;
 
-            // CASE A: Fits within buffer
-            if (newTail <= BufferCapacity)
+            if (Volatile.Read(ref _swapState) != SwapDraining)
             {
-                Interlocked.Increment(ref _inflightCount);
+                bufferIndex = _activeBufferIndex;
+                buffer = bufferIndex == 0 ? _buffer0 : _buffer1;
 
-                // Zero the frame header (FrameLength = 0 = unpublished)
-                var frameHeader = (WalFrameHeader*)(buffer + offset);
-                frameHeader->FrameLength = 0;
-                frameHeader->RecordCount = 0;
-                frameHeader->LastLsn = 0;
+                // ONE atomic allocates the byte range AND the LSN range, so their orders cannot diverge (WP-06). Interlocked.Add maps to LOCK XADD on x64:
+                // always succeeds in exactly one instruction.
+                var prevClaim = Interlocked.Add(ref _claim, claimDelta) - claimDelta;
+                offset = PositionOf(prevClaim);
+                newTail = offset + frameSize;
 
-                // Assign LSNs atomically
-                var firstLsn = Interlocked.Add(ref _nextLsn, recordCount) - recordCount;
-
-                return new WalClaim
+                // CASE A: Fits within buffer
+                if (newTail <= BufferCapacity)
                 {
-                    DataSpan = new Span<byte>(buffer + offset + WalFrameHeader.SizeInBytes, frameSize - WalFrameHeader.SizeInBytes),
-                    FrameOffset = (int)offset,
-                    TotalFrameSize = frameSize,
-                    RecordCount = recordCount,
-                    FirstLSN = firstLsn,
-                    BufferIndex = bufferIndex,
-                    IsValid = true,
-                };
+                    // Incremented BEFORE the gate is released, so a swap can never observe both counters at zero while this slot is outstanding.
+                    Interlocked.Increment(ref _inflightCount);
+
+                    // Zero the frame header (FrameLength = 0 = unpublished)
+                    var frameHeader = (WalFrameHeader*)(buffer + offset);
+                    frameHeader->FrameLength = 0;
+                    frameHeader->RecordCount = 0;
+                    frameHeader->LastLsn = 0;
+
+                    var firstLsn = _lsnBase + LsnOffsetOf(prevClaim);
+                    Interlocked.Decrement(ref _claimsInProgress);
+
+                    return new WalClaim
+                    {
+                        DataSpan = new Span<byte>(buffer + offset + WalFrameHeader.SizeInBytes, frameSize - WalFrameHeader.SizeInBytes),
+                        FrameOffset = (int)offset,
+                        TotalFrameSize = frameSize,
+                        RecordCount = recordCount,
+                        FirstLSN = firstLsn,
+                        BufferIndex = bufferIndex,
+                        IsValid = true,
+                    };
+                }
+
+                gotSlot = true;   // an over-capacity claim was taken — CASE B/C applies
+            }
+            else
+            {
+                // Backed out: a swap is draining. Nothing was claimed, so there is no slot to abandon and no hole to leave.
+                offset = 0;
+                bufferIndex = _activeBufferIndex;
+                buffer = null;
             }
 
-            // CASE B: This producer straddles the boundary (overlap initiator).
-            // offset < BufferCapacity: the claim starts inside the buffer but extends past the end.
-            //   Write a padding sentinel at the claim offset so TryDrain/CompleteDrain knows to stop.
-            // offset == BufferCapacity: the previous claim filled the buffer exactly. No space for a
-            //   sentinel, but we still need to request a swap so the writer advances to a new buffer.
-            if (offset < BufferCapacity)
+            if (gotSlot)
             {
-                // Write padding sentinel at our offset
-                var frameHeader = (WalFrameHeader*)(buffer + offset);
-                frameHeader->RecordCount = 0;
-                Interlocked.Exchange(ref frameHeader->FrameLength, WalFrameHeader.PaddingSentinel);
-            }
+                // CASE B: This producer straddles the boundary (overlap initiator).
+                // offset < BufferCapacity: the claim starts inside the buffer but extends past the end.
+                //   Write a padding sentinel at the claim offset so TryDrain/CompleteDrain knows to stop.
+                // offset == BufferCapacity: the previous claim filled the buffer exactly. No space for a
+                //   sentinel, but we still need to request a swap so the writer advances to a new buffer.
+                //
+                // Both run while the claim gate is still held, so the writer cannot reset the buffer underneath the sentinel write.
+                if (offset < BufferCapacity)
+                {
+                    // Write padding sentinel at our offset
+                    var frameHeader = (WalFrameHeader*)(buffer + offset);
+                    frameHeader->RecordCount = 0;
+                    Interlocked.Exchange(ref frameHeader->FrameLength, WalFrameHeader.PaddingSentinel);
+                }
 
-            if (offset <= BufferCapacity)
-            {
                 // Request a buffer swap. Only the CAS winner arms the completion event — a loser resetting it after the winner's
                 // swap already finished would cost the losing producer one extra bounded wait, so keep that window as narrow as
                 // possible. Correctness never depends on it: the loop below re-reads _activeBufferIndex, which is the truth.
@@ -326,6 +431,10 @@ internal sealed unsafe class WalCommitBuffer : IDisposable
                 // Wake the consumer so it knows to drain and swap
                 _dataAvailableEvent.Set();
             }
+
+            // Release the gate before parking. A backed-out producer claimed nothing, which is exactly why the swap check sits BEFORE the XADD: abandoning a
+            // slot after claiming one would leave an unpublished frame header, and TryDrain stops at the first of those — a permanent drain stall.
+            Interlocked.Decrement(ref _claimsInProgress);
 
             // CASE B & C: Wait for the buffer swap to complete.// Poll _activeBufferIndex — when it changes, a swap happened and the fresh buffer is ready.
             // AdaptiveWaiter provides spin → yield → sleep(1) progression.
@@ -473,7 +582,7 @@ internal sealed unsafe class WalCommitBuffer : IDisposable
             }
         }
 
-        var tail = Interlocked.Read(ref _tailPosition);
+        var tail = PositionOf(Interlocked.Read(ref _claim));
         long maxLastLsn = 0;
 
         while (scanPos < tail && scanPos < BufferCapacity)
@@ -596,8 +705,18 @@ internal sealed unsafe class WalCommitBuffer : IDisposable
     /// <param name="oldBuffer">Pointer to the current (old) buffer being swapped out.</param>
     private void PerformSwap(byte* oldBuffer)
     {
-        // Transition to draining state
+        // Transition to draining state. This store is the swap half of the claim gate's store-load pair (#581): producers register in _claimsInProgress and
+        // then read this, we publish this and then read that counter, and both use a full fence — so no producer can slip between "read the buffer index" and
+        // "claim a slot" while we reset the buffer underneath it.
         Interlocked.Exchange(ref _swapState, SwapDraining);
+
+        // Wait for producers inside the claim critical section to leave it. MUST precede the inflight wait: _inflightCount is incremented AFTER the position
+        // claim, so a producer that has read the buffer index but not yet claimed is invisible to it.
+        var claimGateWait = new SpinWait();
+        while (Volatile.Read(ref _claimsInProgress) > 0)
+        {
+            claimGateWait.SpinOnce();
+        }
 
         // Wait for in-flight producers to finish publishing
         var spinWait = new SpinWait();
@@ -617,9 +736,15 @@ internal sealed unsafe class WalCommitBuffer : IDisposable
         // Interlocked.Add (advancing _tailPosition) and its header zero-write.
         new Span<byte>(newBuffer, BufferCapacity).Clear();
 
-        // Reset positions using Interlocked.Exchange to ensure full memory barrier ordering. Producers spin on _activeBufferIndex and immediately
-        // Interlocked.Add on _tailPosition — the tail MUST be 0 before they see the new buffer index. The Exchange barrier guarantees this ordering.
-        Interlocked.Exchange(ref _tailPosition, 0);
+        // Fold this generation's LSN span into the base, then reset the packed claim word. Safe only because both the claim gate and the inflight counter have
+        // drained above: no producer holds a slot, and none can take one until _swapState returns to SwapNormal. Without that quiescence a producer could XADD
+        // the reset word while still reading the pre-fold _lsnBase and receive a duplicate LSN (#581).
+        //
+        // Abandoned claims (CASE B retries, and producers that backed out at the gate) have already consumed LSN offsets in this generation. Folding the final
+        // offset carries them too, so the sequence simply skips those values — LSN gaps are harmless: no transaction ever waits on an LSN it did not receive
+        // from a successful claim, and recovery sorts by LSN rather than assuming contiguity.
+        var finalClaim = Interlocked.Exchange(ref _claim, 0);
+        _lsnBase += LsnOffsetOf(finalClaim);
         _drainPosition = 0;
 
         // This Exchange acts as a release fence: producers spinning on _activeBufferIndex will see _tailPosition = 0 before they see
