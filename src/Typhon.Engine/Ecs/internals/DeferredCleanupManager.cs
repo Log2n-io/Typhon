@@ -108,39 +108,46 @@ internal class DeferredCleanupManager
             ThrowHelper.ThrowLockTimeout("DeferredCleanup/EnqueueBatch", TimeoutOptions.Current.TransactionChainLockTimeout);
         }
 
-        // Get-or-create the TSN bucket once for the whole batch
-        if (!_pendingCleanups.TryGetValue(blockingTSN, out var list))
-        {
-            list = RentList();
-            _pendingCleanups[blockingTSN] = list;
-        }
-
         var added = 0;
-        var span = CollectionsMarshal.AsSpan(entries);
-        for (int i = 0; i < span.Length; i++)
+        int currentSize;
+        try
         {
-            ref var entry = ref span[i];
-            var key = (entry.Table, entry.PrimaryKey);
-
-            if (_entityToBlockingTSN.TryGetValue(key, out var existingTSN))
+            // Get-or-create the TSN bucket once for the whole batch
+            if (!_pendingCleanups.TryGetValue(blockingTSN, out var list))
             {
-                if (blockingTSN >= existingTSN)
-                {
-                    continue; // Already queued under an older (or same) TSN
-                }
-
-                // New blocking TSN is older — migrate to new bucket
-                RemoveFromList(existingTSN, entry.Table, entry.PrimaryKey);
+                list = RentList();
+                _pendingCleanups[blockingTSN] = list;
             }
 
-            list.Add(entry);
-            _entityToBlockingTSN[key] = blockingTSN;
-            added++;
-        }
+            var span = CollectionsMarshal.AsSpan(entries);
+            for (int i = 0; i < span.Length; i++)
+            {
+                ref var entry = ref span[i];
+                var key = (entry.Table, entry.PrimaryKey);
 
-        var currentSize = _entityToBlockingTSN.Count;
-        QueueSize = currentSize;
-        _lock.ExitExclusiveAccess();
+                if (_entityToBlockingTSN.TryGetValue(key, out var existingTSN))
+                {
+                    if (blockingTSN >= existingTSN)
+                    {
+                        continue; // Already queued under an older (or same) TSN
+                    }
+
+                    // New blocking TSN is older — migrate to new bucket
+                    RemoveFromList(existingTSN, entry.Table, entry.PrimaryKey);
+                }
+
+                list.Add(entry);
+                _entityToBlockingTSN[key] = blockingTSN;
+                added++;
+            }
+
+            currentSize = _entityToBlockingTSN.Count;
+            QueueSize = currentSize;
+        }
+        finally
+        {
+            _lock.ExitExclusiveAccess();
+        }
 
         EnqueuedTotal += added;
 
@@ -174,15 +181,21 @@ internal class DeferredCleanupManager
             ThrowHelper.ThrowLockTimeout("DeferredCleanup/EnqueueChunkFrees", TimeoutOptions.Current.TransactionChainLockTimeout);
         }
 
-        if (!_pendingChunkFrees.TryGetValue(safeAfterTSN, out var list))
+        try
         {
-            list = RentChunkFreeList();
-            _pendingChunkFrees[safeAfterTSN] = list;
-        }
+            if (!_pendingChunkFrees.TryGetValue(safeAfterTSN, out var list))
+            {
+                list = RentChunkFreeList();
+                _pendingChunkFrees[safeAfterTSN] = list;
+            }
 
-        list.AddRange(entries);
-        ChunkFreeQueueSize += entries.Count;
-        _lock.ExitExclusiveAccess();
+            list.AddRange(entries);
+            ChunkFreeQueueSize += entries.Count;
+        }
+        finally
+        {
+            _lock.ExitExclusiveAccess();
+        }
     }
 
     /// <summary>
@@ -210,64 +223,69 @@ internal class DeferredCleanupManager
 
         // ── Collect mature entity cleanup entries ──
         List<CleanupEntry> toCleanup = null;
-        var maxTsnCount = Math.Max(_pendingCleanups.Count, _pendingChunkFrees.Count);
-        Span<long> tsnsToRemove = maxTsnCount <= 32 ? stackalloc long[32] : new long[maxTsnCount];
-        var tsnsToRemoveCount = 0;
-
-        foreach (var kvp in _pendingCleanups)
-        {
-            if (kvp.Key > completedTSN)
-            {
-                break; // SortedDictionary — no more relevant entries
-            }
-
-            toCleanup ??= new List<CleanupEntry>();
-            toCleanup.AddRange(kvp.Value);
-            tsnsToRemove[tsnsToRemoveCount++] = kvp.Key;
-
-            // Remove from reverse lookup, then return the list to the pool
-            foreach (var entry in kvp.Value)
-            {
-                _entityToBlockingTSN.Remove((entry.Table, entry.PrimaryKey));
-            }
-            ReturnList(kvp.Value);
-        }
-
-        for (var i = 0; i < tsnsToRemoveCount; i++)
-        {
-            _pendingCleanups.Remove(tsnsToRemove[i]);
-        }
-
-        QueueSize = _entityToBlockingTSN.Count;
-
-        // ── Collect mature chunk free entries (keyed by safeAfterTSN, mature when nextMinTSN >= key) ──
         List<DeferredChunkFreeEntry> chunksToFree = null;
-        tsnsToRemoveCount = 0;
-
-        foreach (var kvp in _pendingChunkFrees)
+        try
         {
-            if (kvp.Key > nextMinTSN)
+            var maxTsnCount = Math.Max(_pendingCleanups.Count, _pendingChunkFrees.Count);
+            Span<long> tsnsToRemove = maxTsnCount <= 32 ? stackalloc long[32] : new long[maxTsnCount];
+            var tsnsToRemoveCount = 0;
+
+            foreach (var kvp in _pendingCleanups)
             {
-                break;
+                if (kvp.Key > completedTSN)
+                {
+                    break; // SortedDictionary — no more relevant entries
+                }
+
+                toCleanup ??= new List<CleanupEntry>();
+                toCleanup.AddRange(kvp.Value);
+                tsnsToRemove[tsnsToRemoveCount++] = kvp.Key;
+
+                // Remove from reverse lookup, then return the list to the pool
+                foreach (var entry in kvp.Value)
+                {
+                    _entityToBlockingTSN.Remove((entry.Table, entry.PrimaryKey));
+                }
+                ReturnList(kvp.Value);
             }
 
-            chunksToFree ??= new List<DeferredChunkFreeEntry>();
-            chunksToFree.AddRange(kvp.Value);
-            tsnsToRemove[tsnsToRemoveCount++] = kvp.Key;
-            ReturnChunkFreeList(kvp.Value);
-        }
+            for (var i = 0; i < tsnsToRemoveCount; i++)
+            {
+                _pendingCleanups.Remove(tsnsToRemove[i]);
+            }
 
-        for (var i = 0; i < tsnsToRemoveCount; i++)
+            QueueSize = _entityToBlockingTSN.Count;
+
+            // ── Collect mature chunk free entries (keyed by safeAfterTSN, mature when nextMinTSN >= key) ──
+            tsnsToRemoveCount = 0;
+
+            foreach (var kvp in _pendingChunkFrees)
+            {
+                if (kvp.Key > nextMinTSN)
+                {
+                    break;
+                }
+
+                chunksToFree ??= new List<DeferredChunkFreeEntry>();
+                chunksToFree.AddRange(kvp.Value);
+                tsnsToRemove[tsnsToRemoveCount++] = kvp.Key;
+                ReturnChunkFreeList(kvp.Value);
+            }
+
+            for (var i = 0; i < tsnsToRemoveCount; i++)
+            {
+                _pendingChunkFrees.Remove(tsnsToRemove[i]);
+            }
+
+            if (chunksToFree != null)
+            {
+                ChunkFreeQueueSize -= chunksToFree.Count;
+            }
+        }
+        finally
         {
-            _pendingChunkFrees.Remove(tsnsToRemove[i]);
+            _lock.ExitExclusiveAccess();
         }
-
-        if (chunksToFree != null)
-        {
-            ChunkFreeQueueSize -= chunksToFree.Count;
-        }
-
-        _lock.ExitExclusiveAccess();
 
         // ── Free mature content chunks OUTSIDE the lock (requires epoch scope for chunk accessors) ──
         if (chunksToFree != null)
@@ -381,14 +399,20 @@ internal class DeferredCleanupManager
         }
 
         var allEntries = new List<DeferredChunkFreeEntry>();
-        foreach (var kvp in _pendingChunkFrees)
+        try
         {
-            allEntries.AddRange(kvp.Value);
-            ReturnChunkFreeList(kvp.Value);
+            foreach (var kvp in _pendingChunkFrees)
+            {
+                allEntries.AddRange(kvp.Value);
+                ReturnChunkFreeList(kvp.Value);
+            }
+            _pendingChunkFrees.Clear();
+            ChunkFreeQueueSize = 0;
         }
-        _pendingChunkFrees.Clear();
-        ChunkFreeQueueSize = 0;
-        _lock.ExitExclusiveAccess();
+        finally
+        {
+            _lock.ExitExclusiveAccess();
+        }
 
         if (allEntries.Count > 0)
         {
