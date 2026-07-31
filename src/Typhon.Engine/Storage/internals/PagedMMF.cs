@@ -13,6 +13,7 @@ using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Runtime.CompilerServices;
+using System.Runtime.Intrinsics.X86;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -1369,11 +1370,26 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         pi.PageExclusiveLatch.EnterExclusiveAccess(ref WaitContext.Null);
         pi.ExclusiveLatchDepth = 0;
 
-        // Seqlock: signal modification in progress (even -> odd)
+        // Seqlock: signal modification in progress (even -> odd).
+        //
+        // NOT for atomicity. SL-05 guarantees a single writer — the counter is only ever touched under the exclusive latch, so there is no RMW race to
+        // protect against. Interlocked is used here purely as a FENCE.
+        //
+        // The ordering that matters is against the checkpoint reader, which runs the seqlock protocol with no latch at all (CopyPageWithSeqlock). SL-02
+        // requires the odd counter to be visible BEFORE any of the caller's page writes; otherwise the reader can load an even counter, memcpy a page that
+        // already contains new data, re-read the still-even counter and accept a torn snapshot as valid. A plain `++` does not establish that on either the
+        // hardware or the JIT: arm64 permits StoreStore reordering, and the .NET memory model permits ordinary writes to be reordered outright ("the effects
+        // of ordinary reads and writes can be reordered as long as that preserves single-thread consistency").
+        //
+        // A release store (Volatile.Write) does NOT work here — release keeps EARLIER accesses from sinking below the store, and what this site needs is to
+        // stop LATER stores rising above it. That is the opposite direction, and it is why this site and the closing one in UnlatchPageExclusive use
+        // different primitives despite looking symmetric. Only a full fence gives StoreStore-after, and Interlocked.Increment is one instruction of it.
+        //
+        // An `if (!X86Base.IsSupported)` barrier would also be wrong here: it folds away on x64 and leaves the JIT unconstrained (#579).
         unsafe
         {
             var headerAddr = (PageBaseHeader*)(_memPagesAddr + (memPageIndex * (long)PageSize));
-            ++headerAddr->ModificationCounter;
+            Interlocked.Increment(ref headerAddr->ModificationCounter);
         }
 
         return true;
@@ -1393,11 +1409,21 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             return;
         }
 
-        // Seqlock: signal modification complete (odd -> even)
+        // Seqlock: signal modification complete (odd -> even).
+        //
+        // SL-03: every page write must be visible BEFORE the counter goes even, or a reader can observe an even counter while the last data stores are still
+        // in flight and accept a torn snapshot. "Prior stores visible before this store" IS release semantics, so unlike the opening increment this site
+        // needs no full fence — Volatile.Write expresses exactly the requirement, and costs nothing on x64 (plain mov under TSO; stlr on arm64).
+        //
+        // As at the open site, atomicity is not the point: SL-05 gives us a single writer, so the read-increment-write below cannot race. The plain read is
+        // safe because we are reading back our own store from the matching TryLatchPageExclusive.
+        //
+        // The exclusive-latch release below is a fence too, but it happens AFTER the counter store, which is the wrong side — Linux's write_sequnlock places
+        // its smp_wmb() before the counter bump for exactly this reason (#579).
         unsafe
         {
             var headerAddr = (PageBaseHeader*)(_memPagesAddr + (memPageIndex * (long)PageSize));
-            ++headerAddr->ModificationCounter;
+            Volatile.Write(ref headerAddr->ModificationCounter, headerAddr->ModificationCounter + 1);
         }
 
         pi.PageExclusiveLatch.ExitExclusiveAccess();
@@ -1748,14 +1774,20 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         long oddSpinStart = 0;
         while (true)
         {
-            // Read the modification counter (must be even = quiescent)
-            var counter = ((PageBaseHeader*)pageAddr)->ModificationCounter;
+            // Read the modification counter (must be even = quiescent). Acquire load: the page-data loads below must not be hoisted above this snapshot
+            // (SL-06). Free on x64 (TSO — plain mov); emits ldar on arm64.
+            var counter = Volatile.Read(ref ((PageBaseHeader*)pageAddr)->ModificationCounter);
             if ((counter & 1) != 0)
             {
                 // A real writer sets PageState=Exclusive BEFORE making the counter odd (TryLatchPageExclusive) and makes it even BEFORE clearing Exclusive
-                // (UnlatchPageExclusive). So an odd counter on a page that is NOT Exclusive-latched is stale — there is no writer to wait for (x64 TSO preserves
-                // that store order, so seeing the odd counter implies the earlier PageState=Exclusive store is visible too). Skip at once instead of burning the
-                // full 100ms timeout. Defensive: TryAcquire resets the counter to even on slot reuse, so a quiescent page should never present odd here.
+                // (UnlatchPageExclusive). So an odd counter on a page that is NOT Exclusive-latched is stale — there is no writer to wait for. Skip at once
+                // instead of burning the full 100ms timeout. Defensive: TryAcquire resets the counter to even on slot reuse, so a quiescent page should never
+                // present odd here.
+                //
+                // That implication is only sound because BOTH sides are now ordered (#579): the writer's Interlocked increment keeps the PageState=Exclusive
+                // store from sinking past the odd-counter store, and the acquire load above keeps this PageState load from being hoisted above the counter
+                // snapshot. It previously rested on x64 TSO alone, so on arm64 a live writer could be misclassified as stale — bounded (the page stays dirty
+                // and is retried next cycle) but an explicit x64-only assumption in a protocol required to be arm64-correct.
                 if (_memPagesInfo[memPageIndex].PageState != PageState.Exclusive)
                 {
                     LogStaleSeqlockCounterSkip(Logger, memPageIndex, counter);
@@ -1790,8 +1822,20 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             // Copy the full page
             Buffer.MemoryCopy(pageAddr, destAddr, PageSize, PageSize);
 
+            // The memcpy's PLAIN loads sit between the counter snapshot and this validating re-read. An acquire load only stops LATER accesses from hoisting
+            // above it — it does NOT stop those earlier loads from sinking BELOW the validating load on a weakly-ordered CPU. If they sink, the validation
+            // checks a counter read that happened before the data it is meant to be validating, and the protocol degenerates to "read, copy, hope": the check
+            // cannot fail, and a torn copy is then CRC-stamped over the torn bytes and written, defeating ADR-015 checksum validation on reload.
+            //
+            // x64 (TSO) orders loads in program order, so the fence is needed only off-x86. X86Base.IsSupported is a JIT-time constant, so this folds to
+            // nothing on x64 and emits dmb ish on arm64 — the same shape as OlcLatch.ValidateVersion, which names this identical hazard (#579).
+            if (!X86Base.IsSupported)
+            {
+                Interlocked.MemoryBarrier();
+            }
+
             // Validate counter hasn't changed (no torn read)
-            if (((PageBaseHeader*)pageAddr)->ModificationCounter == counter)
+            if (Volatile.Read(ref ((PageBaseHeader*)pageAddr)->ModificationCounter) == counter)
             {
                 return true; // Consistent snapshot obtained
             }
