@@ -7,6 +7,10 @@ import {
   isViewVisible,
   viewSessionScope,
 } from '../viewRegistry';
+import type { SessionKind } from '@/stores/useSessionStore';
+
+/** Builds the session shape the scope predicates take, so each case reads as "this kind, with these capabilities". */
+const scope = (kind: SessionKind, ...capabilities: string[]) => ({ kind, capabilities });
 
 // The deep/workspace (zone-D) views still gated off. Kept here as the test's own copy so a regression
 // (a view silently flipped back on, or a new deep view added without gating) is caught.
@@ -94,28 +98,34 @@ describe('viewRegistry — session-kind scope (IA §5.1)', () => {
   });
 
   it('isViewAvailableInKind — open views run only in an open session', () => {
-    expect(isViewAvailableInKind('DbMap', 'open')).toBe(true);
-    expect(isViewAvailableInKind('DbMap', 'attach')).toBe(false);
-    expect(isViewAvailableInKind('DbMap', 'none')).toBe(false);
+    expect(isViewAvailableInKind('DbMap', scope('open', 'database'))).toBe(true);
+    expect(isViewAvailableInKind('DbMap', scope('attach', 'profiler'))).toBe(false);
+    expect(isViewAvailableInKind('DbMap', scope('none'))).toBe(false);
   });
 
-  it('isViewAvailableInKind — profiler views run in trace and attach', () => {
-    expect(isViewAvailableInKind('Profiler', 'trace')).toBe(true);
-    expect(isViewAvailableInKind('Profiler', 'attach')).toBe(true);
-    expect(isViewAvailableInKind('Profiler', 'open')).toBe(false);
+  it('isViewAvailableInKind — profiler views follow the capability, not the session kind', () => {
+    expect(isViewAvailableInKind('Profiler', scope('trace', 'profiler'))).toBe(true);
+    expect(isViewAvailableInKind('Profiler', scope('attach', 'profiler'))).toBe(true);
+    expect(isViewAvailableInKind('Profiler', scope('open', 'database'))).toBe(false);
+  });
+
+  // #617 — the case no session-kind check could express: an open database is still `kind === 'open'` after a capture is
+  // attached to it, and its profiler views must nonetheless be available.
+  it('isViewAvailableInKind — an open database with a profile attached can run profiler views', () => {
+    expect(isViewAvailableInKind('Profiler', scope('open', 'database', 'profiler'))).toBe(true);
   });
 
   it('isViewAvailableInKind — `any` views (and non-view commands) run in every kind', () => {
     for (const kind of ['open', 'attach', 'trace', 'none'] as const) {
-      expect(isViewAvailableInKind('DevFixture', kind)).toBe(true);
-      expect(isViewAvailableInKind(undefined, kind)).toBe(true);
+      expect(isViewAvailableInKind('DevFixture', scope(kind))).toBe(true);
+      expect(isViewAvailableInKind(undefined, scope(kind))).toBe(true);
     }
   });
 
   it('isViewVisible requires BOTH feature-active and in-scope for the session', () => {
-    expect(isViewVisible('DbMap', 'open')).toBe(true); // active + in scope
-    expect(isViewVisible('DbMap', 'attach')).toBe(false); // active but out of scope
-    expect(isViewVisible('Profiler', 'open')).toBe(false); // active but wrong kind
-    expect(isViewVisible('Profiler', 'attach')).toBe(true);
+    expect(isViewVisible('DbMap', scope('open', 'database'))).toBe(true); // active + in scope
+    expect(isViewVisible('DbMap', scope('attach', 'profiler'))).toBe(false); // active but out of scope
+    expect(isViewVisible('Profiler', scope('open', 'database'))).toBe(false); // active but no capture to show
+    expect(isViewVisible('Profiler', scope('attach', 'profiler'))).toBe(true);
   });
 });

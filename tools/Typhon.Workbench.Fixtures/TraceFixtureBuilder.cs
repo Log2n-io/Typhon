@@ -30,15 +30,28 @@ public static class TraceFixtureBuilder
     ///
     /// Returns the absolute path on disk. Caller is responsible for deletion.
     /// </summary>
-    public static string BuildMinimalTrace(string directory, int tickCount = 3, int instantsPerTick = 5)
+    /// <param name="directory">Where to write the capture.</param>
+    /// <param name="tickCount">How many ticks to synthesise.</param>
+    /// <param name="instantsPerTick">Instant events per tick.</param>
+    /// <param name="databaseId">
+    /// Database identity to stamp in the header (#614). Default <see cref="Guid.Empty"/> means "no engine was attached", which every consumer must accept —
+    /// pass a real value to build a capture that provably belongs to (or provably does not belong to) a particular database.
+    /// </param>
+    /// <param name="databaseName">Bundle name for the header, for display.</param>
+    /// <param name="fileName">Explicit file name, so a fixture can control ordering or collide deliberately. Defaults to a unique one.</param>
+    public static string BuildMinimalTrace(
+        string directory, int tickCount = 3, int instantsPerTick = 5, Guid databaseId = default, string databaseName = null, string fileName = null)
     {
         Directory.CreateDirectory(directory);
-        var path = Path.Combine(directory, $"fixture-{Guid.NewGuid():N}.typhon-trace");
+        var path = Path.Combine(directory, fileName ?? $"fixture-{Guid.NewGuid():N}.typhon-trace");
 
         using var fs = File.Create(path);
         using var writer = new TraceFileWriter(fs);
 
-        writer.WriteHeader(in DefaultHeader);
+        var header = DefaultHeader;
+        header.DatabaseId = databaseId;
+        header.SetDatabaseName(databaseName ?? string.Empty);
+        writer.WriteHeader(in header);
         writer.WriteSystemDefinitions([]);
         writer.WriteArchetypes([]);
         writer.WriteComponentTypes([]);

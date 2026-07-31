@@ -15,6 +15,10 @@ public record SessionDto(
     bool IsPaused = false,
     bool IsReattaching = false,
     string SchemaCompatibility = null,     // "Compatible" | "MigrationRequired" | "Incompatible"
-    string Reason = null);
+    string Reason = null,
+    // #617 — what the session can DO, so the client stops inferring it from Kind. An Open session gains and loses
+    // "profiler" as profiles are attached and detached, which no kind enum can express.
+    string[] Capabilities = null,
+    Guid? ActiveProfileId = null);
 
 public record SessionDiagnosticDto(string ComponentName, string Kind, string Detail);

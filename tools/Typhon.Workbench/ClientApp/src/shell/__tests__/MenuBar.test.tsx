@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import MenuBar from '@/shell/MenuBar';
+import { sessionCapabilitiesForKind } from '@/stores/sessionCapabilitiesForKind';
 import { useSessionStore, type SessionKind } from '@/stores/useSessionStore';
 
 // IA §5.1 regression: the View menu shows ONLY the panels the current session kind can actually open — a view that
@@ -39,7 +40,11 @@ const PROFILER_VIEWS = [
 const ALWAYS = ['Detail', 'Logs', 'Options'];
 
 function setKind(kind: SessionKind) {
-  useSessionStore.setState({ kind, sessionId: kind === 'none' ? null : 'sid' });
+  useSessionStore.setState({
+    kind,
+    sessionId: kind === 'none' ? null : 'sid',
+    capabilities: sessionCapabilitiesForKind(kind),
+  });
 }
 
 function mount() {

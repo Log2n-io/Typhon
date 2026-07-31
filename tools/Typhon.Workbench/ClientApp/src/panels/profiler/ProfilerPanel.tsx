@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button';
 import { usePanelHotkeys } from '@/hooks/usePanelHotkeys';
 import { usePostApiSessionsTrace } from '@/api/generated/sessions/sessions';
 import { logError, logInfo } from '@/stores/useLogStore';
-import { useSessionStore } from '@/stores/useSessionStore';
+import { useSessionStore, useTraceBackedSession } from '@/stores/useSessionStore';
 import { useNavHistoryStore } from '@/stores/useNavHistoryStore';
 import { useSelectionStore } from '@/stores/useSelectionStore';
 import { useProfilerSessionStore, type ConnectionStatus } from '@/stores/useProfilerSessionStore';
@@ -75,7 +75,7 @@ export default function ProfilerPanel(props: IDockviewPanelProps) {
   }, [sessionId, token, disconnecting]);
 
   const isAttach = kind === 'attach';
-  const isTrace = kind === 'trace';
+  const isTrace = useTraceBackedSession();
 
   const commitViewRange = useProfilerViewStore((s) => s.commitViewRange);
 

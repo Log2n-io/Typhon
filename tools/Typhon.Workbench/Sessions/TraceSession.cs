@@ -25,6 +25,10 @@ public sealed class TraceSession : ISession, IDisposable
     /// <inheritdoc />
     public bool IsSchemaBuilding => !Runtime.IsBuildComplete;
 
+    /// <inheritdoc />
+    /// <remarks>A trace session <i>is</i> the capture, so it can always profile and has no database behind it.</remarks>
+    public IReadOnlySet<string> Capabilities { get; } = System.Collections.Immutable.ImmutableHashSet.Create(SessionCapability.Profiler);
+
     public TraceSession(Guid id, string filePath, TraceSessionRuntime runtime)
     {
         Id = id;

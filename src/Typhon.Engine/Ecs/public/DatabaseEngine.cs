@@ -436,7 +436,17 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// Persisted as <see cref="BK_DatabaseId"/> in the bootstrap dictionary, packed as four <c>int</c>s (a <see cref="Guid"/> is exactly 16 bytes). Databases
     /// created before this key existed adopt an id on their first open by a build that knows about it — see <see cref="EnsureDatabaseIdentity"/>.
     /// </remarks>
-    internal Guid DatabaseId { get; private set; }
+    public Guid DatabaseId { get; private set; }
+
+    /// <summary>
+    /// The next transaction number this database will hand out — its position in a globally monotonic, restart-durable sequence.
+    /// </summary>
+    /// <remarks>
+    /// Public because it is the right-hand side of the drift measure: a profiling capture records the transaction window it covered (#614), and comparing its
+    /// upper bound against this says how far behind the database a capture has fallen — "this profile is 845,331 transactions behind" rather than a vague
+    /// "this is old". Cheap: a field read, no lock.
+    /// </remarks>
+    public long CurrentTsn => TransactionChain.NextFreeId;
 
     /// <summary>Packs a <see cref="Guid"/> into the four-<c>int</c> bootstrap value shape. Round-trips exactly with <see cref="UnpackDatabaseId"/>.</summary>
     private static BootstrapDictionary.Value PackDatabaseId(Guid id)

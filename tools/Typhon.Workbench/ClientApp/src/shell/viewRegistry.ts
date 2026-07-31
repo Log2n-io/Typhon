@@ -106,6 +106,9 @@ const VIEW_SESSION_SCOPE: Readonly<Record<string, ViewSessionScope>> = {
   StorageHealth: 'open',
   QueryConsole: 'open',
   ResourceTree: 'open',
+  // The profiles LIST is a property of the database, not of a capture: it is how you find a capture in the first
+  // place, so it must be reachable before any profile is attached (#617).
+  Profiles: 'open',
   // Profiler (trace/attach) views
   Profiler: 'profiler',
   TopSpans: 'profiler',
@@ -132,15 +135,27 @@ export function viewSessionScope(viewId: string | undefined): ViewSessionScope {
   return VIEW_SESSION_SCOPE[viewId] ?? 'any';
 }
 
-/** Whether a view's panel can run in the given session kind (by its scope). `none` opens no session-scoped view. */
-export function isViewAvailableInKind(viewId: string | undefined, kind: SessionKind): boolean {
+/**
+ * What a view needs to know about the current session to decide whether it can run.
+ *
+ * `kind` alone stopped being sufficient in #617: a profiler view runs against a *capture*, and a capture can now be
+ * attached to an open database. The session is still `kind === 'open'` and the view must nonetheless be available, so
+ * the profiler scope asks about the capability instead.
+ */
+export interface SessionScope {
+  kind: SessionKind;
+  capabilities: readonly string[];
+}
+
+/** Whether a view's panel can run in the given session (by its scope). `none` opens no session-scoped view. */
+export function isViewAvailableInKind(viewId: string | undefined, session: SessionScope): boolean {
   switch (viewSessionScope(viewId)) {
     case 'any':
       return true;
     case 'open':
-      return kind === 'open';
+      return session.kind === 'open';
     case 'profiler':
-      return kind === 'attach' || kind === 'trace';
+      return session.capabilities.includes('profiler');
   }
 }
 
@@ -149,6 +164,6 @@ export function isViewAvailableInKind(viewId: string | undefined, kind: SessionK
  * menu and the command palette so they stay in lockstep. A view shows iff it is BOTH feature-active
  * ({@link isViewActive}) AND in scope for the session ({@link isViewAvailableInKind}).
  */
-export function isViewVisible(viewId: string | undefined, kind: SessionKind): boolean {
-  return isViewActive(viewId) && isViewAvailableInKind(viewId, kind);
+export function isViewVisible(viewId: string | undefined, session: SessionScope): boolean {
+  return isViewActive(viewId) && isViewAvailableInKind(viewId, session);
 }

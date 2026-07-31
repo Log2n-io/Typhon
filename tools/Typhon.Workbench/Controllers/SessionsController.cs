@@ -178,7 +178,24 @@ public sealed partial class SessionsController : ControllerBase
         return Path.GetFullPath(requestPath);
     }
 
+    /// <summary>
+    /// Projects a session to its wire shape, then stamps the capability set on whatever the per-kind branches produced (#617).
+    /// </summary>
+    /// <remarks>
+    /// Applied once here rather than repeated in each branch: capabilities are read off <see cref="ISession"/> identically for every kind, and a branch that
+    /// forgot them would surface as a session whose panels silently never appear — a bug with no error attached to it.
+    /// </remarks>
     private static SessionDto ToDto(WbSession s)
+    {
+        var dto = ToDtoCore(s);
+        return dto with
+        {
+            Capabilities = [.. s.Capabilities],
+            ActiveProfileId = s.ActiveProfileId,
+        };
+    }
+
+    private static SessionDto ToDtoCore(WbSession s)
     {
         if (s is OpenSession os)
         {

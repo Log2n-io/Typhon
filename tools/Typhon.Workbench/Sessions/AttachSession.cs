@@ -27,6 +27,13 @@ public sealed class AttachSession : ISession, IDisposable
     /// </remarks>
     public IStaticSchemaProvider StaticSchemaProvider => null;
 
+    /// <inheritdoc />
+    /// <remarks>
+    /// An attach session streams a capture live, so it profiles. It advertises no database capability: the engine it watches has one, but the Workbench
+    /// reaches it over TCP and cannot browse it — see blocker B1, a running engine holds its database exclusively.
+    /// </remarks>
+    public IReadOnlySet<string> Capabilities { get; } = System.Collections.Immutable.ImmutableHashSet.Create(SessionCapability.Profiler);
+
     public AttachSession(Guid id, string endpointAddress, AttachSessionRuntime runtime)
     {
         Id = id;

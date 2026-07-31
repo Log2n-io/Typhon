@@ -3572,6 +3572,136 @@
           }
         ]
       }
+    },
+    "/api/sessions/{sessionId}/profiles": {
+      "get": {
+        "tags": [
+          "Profiles"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProfileListDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [],
+            "SessionToken": []
+          }
+        ]
+      }
+    },
+    "/api/sessions/{sessionId}/profile": {
+      "post": {
+        "tags": [
+          "Profiles"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AttachProfileRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AttachProfileRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/AttachProfileRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProfileDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [],
+            "SessionToken": []
+          }
+        ]
+      }
+    },
+    "/api/sessions/{sessionId}/profile/{profileId}": {
+      "delete": {
+        "tags": [
+          "Profiles"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "profileId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "Bearer": [],
+            "SessionToken": []
+          }
+        ]
+      }
     }
   },
   "components": {
@@ -8028,6 +8158,22 @@
               "null",
               "string"
             ]
+          },
+          "capabilities": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "activeProfileId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "uuid"
           }
         }
       },
@@ -31527,6 +31673,177 @@
             ]
           },
           "source": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "AttachProfileRequest": {
+        "type": "object",
+        "properties": {
+          "fileName": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "default": ""
+          }
+        }
+      },
+      "ProfileDto": {
+        "required": [
+          "fileName",
+          "profileId",
+          "isActive",
+          "createdUtcTicks",
+          "durationTicks",
+          "timestampFrequency",
+          "tickCount",
+          "tsnMin",
+          "tsnMax",
+          "schemaFingerprint",
+          "databaseId",
+          "databaseName",
+          "multipleEnginesObserved",
+          "sizeBytes",
+          "isPinned",
+          "isReadable",
+          "belongsToDatabase"
+        ],
+        "type": "object",
+        "properties": {
+          "fileName": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "profileId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "uuid"
+          },
+          "isActive": {
+            "type": "boolean"
+          },
+          "createdUtcTicks": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "durationTicks": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "timestampFrequency": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "tickCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint32"
+          },
+          "tsnMin": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "tsnMax": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "schemaFingerprint": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "databaseId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "databaseName": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "multipleEnginesObserved": {
+            "type": "boolean"
+          },
+          "sizeBytes": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "isPinned": {
+            "type": "boolean"
+          },
+          "isReadable": {
+            "type": "boolean"
+          },
+          "belongsToDatabase": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ProfileListDto": {
+        "required": [
+          "profiles",
+          "databaseTsn",
+          "profilingsDirectory"
+        ],
+        "type": "object",
+        "properties": {
+          "profiles": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/ProfileDto"
+            }
+          },
+          "databaseTsn": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "profilingsDirectory": {
             "type": [
               "null",
               "string"

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { ChevronRight, Link2, Unlink2 } from 'lucide-react';
-import { useSessionStore } from '@/stores/useSessionStore';
+import { useSessionStore, useSessionCapability } from '@/stores/useSessionStore';
 import { useHeartbeat } from '@/hooks/streams/useHeartbeat';
 import { useProfilerViewStore } from '@/stores/useProfilerViewStore';
 import { useSelectionStore } from '@/stores/useSelectionStore';
@@ -43,7 +43,7 @@ export default function ContextBar() {
 
   const connected = kind !== 'none';
   const fileLabel = filePath ? (filePath.split(/[\\/]/).pop() ?? filePath) : kind;
-  const isProfiler = kind === 'trace' || kind === 'attach';
+  const isProfiler = useSessionCapability('profiler');
   const dotColor = connected && status === 'green' ? 'bg-green-500' : 'bg-muted-foreground';
 
   // Breadcrumb = containment ancestors (root → parent) then the leaf itself, all clickable.

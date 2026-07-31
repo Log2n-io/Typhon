@@ -574,6 +574,16 @@ export function resetLayout(): void {
 }
 
 /**
+ * Open (or focus) the Profiles list — the captures recorded against the database this session has open (#617).
+ *
+ * An open-session view rather than a profiler one: it is how you *find* a capture, so it has to be reachable
+ * before any profile is attached.
+ */
+export function openProfiles(): void {
+  ensureDockPanel('profiles', 'Profiles', 'Profiles');
+}
+
+/**
  * Cross-link "ensure visible" semantics — opens a dock panel if absent, focuses it if already open, never
  * closes it. The counterpart to {@link toggleDockPanel} for reveal actions, which must always surface a panel.
  */

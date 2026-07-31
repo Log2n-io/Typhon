@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it } from 'vitest';
 import { buildBaseCommands } from '../commands/baseCommands';
+import { sessionCapabilitiesForKind } from '@/stores/sessionCapabilitiesForKind';
 import { useSessionStore, type SessionKind } from '@/stores/useSessionStore';
 
 // IA §5.1 — the command palette shows a view-toggle only in the session kind that can open it, mirroring the View
@@ -8,11 +9,11 @@ import { useSessionStore, type SessionKind } from '@/stores/useSessionStore';
 // (no broken affordance), not present-but-dead. Non-view (shell) commands have no bound view → always present.
 
 function idsFor(kind: SessionKind): Set<string> {
-  useSessionStore.setState({ kind, sessionId: kind === 'none' ? null : 'sid' });
+  useSessionStore.setState({ kind, sessionId: kind === 'none' ? null : 'sid', capabilities: sessionCapabilitiesForKind(kind) });
   return new Set(buildBaseCommands().map((c) => c.id));
 }
 
-afterEach(() => useSessionStore.setState({ kind: 'none', sessionId: null }));
+afterEach(() => useSessionStore.setState({ kind: 'none', sessionId: null, capabilities: [] }));
 
 // Open-session (.typhon) view-toggle command ids.
 const OPEN_VIEW_CMDS = [

@@ -18,6 +18,7 @@ import {
   toggleViewSourcePreview,
   toggleViewSystemDag,
   toggleViewSystemsQueriesNav,
+  openProfiles,
   openSourcePreviewForCurrentSpan,
   saveLayoutAsDefault,
   resetLayout,
@@ -54,7 +55,8 @@ export function openConnect(tab: ConnectTab): void {
 }
 
 export function buildBaseCommands(): CommandItem[] {
-  const { sessionId, clearSession, kind } = useSessionStore.getState();
+  const { sessionId, clearSession, kind, capabilities } = useSessionStore.getState();
+  const sessionScope = { kind, capabilities };
   const { toggle: toggleTheme } = useThemeStore.getState();
 
   const closeSession = () => {
@@ -77,6 +79,7 @@ export function buildBaseCommands(): CommandItem[] {
     { id: 'toggle-view-storage-health',       label: 'Open Storage Health',                 keywords: 'storage health dashboard segments occupancy dirty reclaimable fragmentation wal disk aggregate', action: toggleViewStorageHealth, viewId: 'StorageHealth' },
     { id: 'toggle-view-dev-fixture',          label: 'Create sample database',              keywords: 'sample playground dev fixture database generate preset advanced destination folder', action: toggleViewDevFixture, viewId: 'DevFixture' },
     { id: 'check-integrity',                  label: 'Check database integrity…',           keywords: 'integrity check scan repair corrupt damage checksum crc verify recover fix broken unopenable loss', action: () => openIntegrity(), viewId: 'Integrity' },
+    { id: 'profiles',                         label: 'Open Profiles',                       keywords: 'profiles profiling captures traces recordings database', action: openProfiles, viewId: 'Profiles' },
     { id: 'data-browser',                     label: 'Open Data Browser',                   keywords: 'data browser entities components values inspect crud rows', action: () => toggleViewDataBrowser(), viewId: 'DataBrowserEntities' },
     { id: 'open-query-console',               label: 'Open Query Console',                  keywords: 'query console author run dsl chip filter where archetype indexed', action: () => openQueryConsole(), viewId: 'QueryConsole' },
     { id: 'toggle-view-query-console',        label: 'Toggle View Query Console',           keywords: 'query console author run dsl chip filter where archetype indexed', action: toggleViewQueryConsole, viewId: 'QueryConsole' },
@@ -104,5 +107,5 @@ export function buildBaseCommands(): CommandItem[] {
   // (IA §5.1) — so a view-toggle the session can't actually open is absent from the palette, mirroring the View
   // menu. Non-view (shell) commands have no viewId → scope `any` → always kept. Single source of truth for the
   // session scope is `viewRegistry.VIEW_SESSION_SCOPE`, shared with the menu.
-  return commands.filter((c) => isViewVisible(c.viewId, kind));
+  return commands.filter((c) => isViewVisible(c.viewId, sessionScope));
 }

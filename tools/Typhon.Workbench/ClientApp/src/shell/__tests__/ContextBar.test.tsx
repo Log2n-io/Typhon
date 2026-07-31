@@ -23,7 +23,7 @@ function renderBar() {
 beforeEach(() => {
   useSelectionStore.getState().clear();
   useEnvTagStore.setState({ tags: {} });
-  useSessionStore.setState({ kind: 'open', filePath: 'C:/data/AntHill.typhon', sessionId: null });
+  useSessionStore.setState({ kind: 'open', filePath: 'C:/data/AntHill.typhon', sessionId: null, capabilities: ['database'] });
   useProfilerViewStore.setState({ scopeLinked: true, pinnedRange: null });
 });
 afterEach(cleanup);
@@ -37,14 +37,14 @@ describe('ContextBar (zone B)', () => {
   });
 
   it('shows the trace time-window scope from the profiler view range', () => {
-    useSessionStore.setState({ kind: 'trace' });
+    useSessionStore.setState({ kind: 'trace', capabilities: ['profiler'] });
     useProfilerViewStore.getState().commitViewRange({ startUs: 1000, endUs: 5000 });
     renderBar();
     expect(screen.getByText(/1\.0ms–5\.0ms/)).toBeTruthy();
   });
 
   it('shows a link/unlink scope toggle in trace sessions and flips it on click (3B)', () => {
-    useSessionStore.setState({ kind: 'trace' });
+    useSessionStore.setState({ kind: 'trace', capabilities: ['profiler'] });
     useProfilerViewStore.getState().commitViewRange({ startUs: 1000, endUs: 5000 });
     renderBar();
     const toggle = screen.getByRole('button', { name: /click to unlink/i });

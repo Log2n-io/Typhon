@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
+using Typhon.Workbench.Sessions;
 
 namespace Typhon.Workbench.Controllers;
 
@@ -43,4 +44,39 @@ public abstract class WorkbenchControllerBase : ControllerBase
             title: "trace_build_failed",
             detail: string.IsNullOrEmpty(buildError) ? "Trace cache build failed. See server logs for details." : buildError,
             statusCode: StatusCodes.Status500InternalServerError);
+
+    /// <summary>
+    /// Resolves the trace runtime a profiler endpoint should serve, whatever kind of session it is (#617, design D-10).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This replaces the <c>is TraceSession</c> test the profiler endpoints used to make individually. The question a profiler route needs answered is
+    /// <b>"does this session have a capture to serve?"</b>, not "what kind of session is this?" — and since a capture can now be attached to an open database,
+    /// those two questions have different answers. Asking it in one place means a route cannot be left behind when a third way of holding a capture appears.
+    /// </para>
+    /// <para>
+    /// <see cref="AttachSession"/> is deliberately not handled here: its runtime is a different type serving a live stream, and the endpoints that support it
+    /// branch to it explicitly. Collapsing the two runtimes behind one interface is a real simplification, but it is not this change's job.
+    /// </para>
+    /// </remarks>
+    /// <param name="session">The resolved session, from <c>HttpContext.Items["Session"]</c>.</param>
+    /// <param name="runtime">Receives the trace runtime, or <c>null</c>.</param>
+    protected static bool TryGetProfilerRuntime(object session, out TraceSessionRuntime runtime)
+    {
+        switch (session)
+        {
+            case TraceSession trace:
+                // The session IS the capture.
+                runtime = trace.Runtime;
+                return true;
+            case OpenSession { ActiveProfile: { } active }:
+                // A capture attached to an open database. Null ActiveProfile falls through — an Open session with no profile has nothing to profile, which is
+                // exactly what the capability set reports to the client.
+                runtime = active;
+                return true;
+            default:
+                runtime = null;
+                return false;
+        }
+    }
 }

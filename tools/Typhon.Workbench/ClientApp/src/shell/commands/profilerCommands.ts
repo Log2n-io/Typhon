@@ -2,7 +2,7 @@ import type { DockviewApi } from 'dockview-react';
 import { useProfilerSessionStore } from '@/stores/useProfilerSessionStore';
 import { useProfilerViewStore } from '@/stores/useProfilerViewStore';
 import { useUiPrefsStore } from '@/stores/useUiPrefsStore';
-import { useSessionStore } from '@/stores/useSessionStore';
+import { useSessionStore, sessionHasCapability } from '@/stores/useSessionStore';
 import { useSelectionStore } from '@/stores/useSelectionStore';
 import { useQueryAnalyzerStore } from '@/panels/QueryAnalyzer/useQueryAnalyzerStore';
 import type { TimeRange } from '@/libs/profiler/model/uiTypes';
@@ -110,8 +110,7 @@ function addQueryAnalyzerPanel(api: DockviewApi): void {
 
 /** The Query Analyzer can open only when its view is active AND we're in a profiler (trace/attach) session. */
 function canOpenQueryAnalyzer(): boolean {
-  const kind = useSessionStore.getState().kind;
-  return isViewActive('QueryAnalyzer') && (kind === 'trace' || kind === 'attach');
+  return isViewActive('QueryAnalyzer') && sessionHasCapability(useSessionStore.getState(), 'profiler');
 }
 
 /**
@@ -163,8 +162,7 @@ function addEngineLiveHealthPanel(api: DockviewApi): void {
  * palette gating mirrors the rest of the profiler surfaces: enabled when the session is trace or attach.
  */
 function canOpenEngineLiveHealth(): boolean {
-  const kind = useSessionStore.getState().kind;
-  return isViewActive('EngineLiveHealth') && (kind === 'trace' || kind === 'attach');
+  return isViewActive('EngineLiveHealth') && sessionHasCapability(useSessionStore.getState(), 'profiler');
 }
 
 /** Open (or focus) the Engine Live Health panel — focus-when-present so a reveal never flips it closed. */
