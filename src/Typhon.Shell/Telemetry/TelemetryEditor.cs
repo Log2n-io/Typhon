@@ -53,8 +53,12 @@ internal sealed class TelemetryEditor
     /// <summary>Run the editor; returns true if the user saved.</summary>
     public bool Run()
     {
-        Application.Init();
-        try
+        // Terminal.Gui 2.4 deprecated the static Application gateway ("the legacy static Application object is going away").
+        // Application.Create().Init() hands back the IApplication that replaces it, and disposing that instance does what
+        // Application.Shutdown() used to — release the driver and restore terminal settings — so the old try/finally is now
+        // the `using`. The library actively refuses to mix the two models (ApplicationImpl.ERROR_LEGACY_AFTER_MODERN), which
+        // is why every call in this file moves at once rather than one at a time.
+        using (var app = Application.Create().Init())
         {
             // Keep the editor transparent: Color.None resolves to the terminal's own (default) background, so the
             // TUI blends with the surrounding shell instead of painting a solid slab. On a One Dark terminal that
@@ -142,7 +146,7 @@ internal sealed class TelemetryEditor
                 (" cancel", _fgDefault),
             ]);
 
-            tree.Toggle = r =>
+            tree.ToggleFlag = r =>
             {
                 Cycle(r);
                 if (TelemetryFlagCatalog.Children(r.Index).Any())
@@ -155,9 +159,9 @@ internal sealed class TelemetryEditor
             tree.SaveQuit = () =>
             {
                 _save = true;
-                Application.RequestStop();
+                app.RequestStop();
             };
-            tree.Cancel = () => Application.RequestStop();
+            tree.Cancel = () => app.RequestStop();
             tree.ToggleTrace = () => ToggleTrace(traceLabel);
             tree.SelectionChanged += (_, e) =>
             {
@@ -183,12 +187,8 @@ internal sealed class TelemetryEditor
             {
                 win.Add(v);
             }
-            Application.Run(win);
-            win.Dispose();
-        }
-        finally
-        {
-            Application.Shutdown();
+            app.Run(win);
+            win.Dispose();   // Run(IRunnable) does not take ownership — only the generic Run<T>() disposes what it created
         }
 
         if (_save)
@@ -384,7 +384,9 @@ internal sealed class TelemetryEditor
     /// <summary>TreeView specialization that turns key presses into editor actions.</summary>
     private sealed class FlagTree : TreeView<FlagRef>
     {
-        public Action<FlagRef> Toggle;
+        // Not `Toggle`: TreeView<T> already declares Toggle(T?) for expand/collapse, and a field of the same name hides it
+        // (CS0108). Different concept anyway — this one flips the flag's VALUE, so the name should not have collided.
+        public Action<FlagRef> ToggleFlag;
         public Action SaveQuit;
         public Action Cancel;
         public Action ToggleTrace;
@@ -395,7 +397,7 @@ internal sealed class TelemetryEditor
             {
                 if (SelectedObject != null)
                 {
-                    Toggle?.Invoke(SelectedObject);
+                    ToggleFlag?.Invoke(SelectedObject);
                 }
                 return true;
             }

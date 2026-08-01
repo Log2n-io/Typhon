@@ -145,7 +145,11 @@ jobs:
           printf 'User-agent: *\nAllow: /\n\nSitemap: https://doc.typhondb.io/latest/sitemap.xml\n' > _publish/robots.txt
           touch _publish/.nojekyll
 
-      - uses: actions/upload-pages-artifact@v3
+      # v5, not v3: upload-pages-artifact is a composite that calls upload-artifact internally, and v3 still pins the
+      # Node-20 v4 of it — which is what the runner's "Node.js 20 is deprecated" annotation was pointing at, even though
+      # no workflow here references upload-artifact@v4 directly. v5 pins v7 (Node 24). Nothing else in the repo is on a
+      # Node-20 action; everything else is already checkout@v5 / setup-dotnet@v5 / upload-artifact@v6.
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: _publish
 
