@@ -341,7 +341,7 @@ During the crash path the engine stays in `RecoveryOnly` through apply (there is
 
 ### Recovery metrics
 
-The v2 driver returns a `RecoveryDriver.Result` (`SegmentsScanned`, `RecordsScanned`, `RecordsApplied`, `TxCommitted`, `MaxTsn`, `MaxLsn`) — every field is test-asserted. The surviving v1 pass returns [`WalRecoveryResult`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/public/WalRecoveryResult.cs) (`SegmentsScanned`, `UowsPromoted`, `UowsVoided`, `TickFenceChunksProcessed`, `BulkBeginCount`/`BulkEndCount`, `LastValidLSN`, `ElapsedMicroseconds`; its `FpiRecordsApplied` field remains for binary-compat but is never populated).
+The v2 driver returns a `RecoveryDriver.Result` (`SegmentsScanned`, `RecordsScanned`, `RecordsApplied`, `TxCommitted`, `MaxTsn`, `MaxLsn`, `StoppedAtCorruption`) — every field is test-asserted. `StoppedAtCorruption` is a diagnostic flag that distinguishes "scan ran out of segments" from "scan stopped at a LOG-03 / REC-01 corruption boundary"; the stop itself is unconditional regardless of which case fired. The surviving v1 pass returns [`WalRecoveryResult`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/public/WalRecoveryResult.cs) (`SegmentsScanned`, `UowsPromoted`, `UowsVoided`, `TickFenceChunksProcessed`, `BulkBeginCount`/`BulkEndCount`, `LastValidLSN`, `ElapsedMicroseconds`; its `FpiRecordsApplied` field remains for binary-compat but is never populated).
 
 ---
 

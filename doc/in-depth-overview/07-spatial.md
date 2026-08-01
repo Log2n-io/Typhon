@@ -165,7 +165,7 @@ Tree-level metadata writes (`SyncMetadata` on chunk 0) take a separate **plain `
 | **Remove** | Reads the back-pointer to get `(leafChunkId, slotIndex)` directly — O(1), no descent. Swap-with-last in the leaf, refit MBR, walk ancestors bottom-up via `ParentChunkId`. When the last entry leaves a non-root leaf, the leaf chunk is recycled (`RemoveEmptyLeaf`). |
 | **QueryAABB** | Stack-based DFS, OLC validate per node, leaf-level overlap test fully unrolled for 2D and 3D. Returns `AABBQueryEnumerator` (ref struct, zero allocation). |
 | **QueryRadius** | Coarse filter — converts radius to enclosing AABB. False positive rate ~21 % (2D) / ~48 % (3D). Caller post-filters by squared distance. |
-| **QueryRay** | Min-heap priority queue (64 entries), front-to-back order. Ray–AABB slab intersection (`SpatialGeometry.RayAABBIntersect`). |
+| **QueryRay** | Min-heap priority queue — 64-entry inline buffer (zero allocation); spills to `ArrayPool`-rented arrays on overflow, up to 16 384 entries. Front-to-back order. Ray–AABB slab intersection (`SpatialGeometry.RayAABBIntersect`). |
 | **QueryFrustum** | Half-space classification (`ClassifyAABBAgainstPlanes`). Inside / Outside / Intersecting — Inside subtrees skip per-entry plane tests entirely (the leaf scan still happens, just without geometry). |
 | **QueryKNN** | Iterative radius expansion (converges in 1–2 iterations for k < 20). Returns candidate `EntityId`s with `distSq = 0` — caller recomputes actual distance from component data. |
 | **CountInAABB / CountInRadius** | Subtree counting shortcut: fully-contained subtrees count their entries without per-entry overlap tests (~30× speedup for large fully-covered regions). |
